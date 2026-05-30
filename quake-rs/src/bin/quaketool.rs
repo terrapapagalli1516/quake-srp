@@ -24,7 +24,7 @@ use quake_rs::pak::Pak;
 use quake_rs::particles::{Lcg, ParticleSystem};
 use quake_rs::progs::{Progs, OFS_RETURN};
 use quake_rs::render::{self, Camera};
-use quake_rs::server::{Server, UserCmd};
+use quake_rs::server::{Server, TempEntityEvent, UserCmd};
 use quake_rs::spr::{Frame as SFrame, Sprite};
 use quake_rs::vm::Vm;
 use quake_rs::wad::{self, Wad2};
@@ -488,6 +488,62 @@ fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, String>
 
 // ------------------------------------------------------------- playtest -----
 
+/// The explosion sound a rocket/grenade/tarbaby temp entity plays (the C
+/// `cl_sfx_r_exp3` = `weapons/r_exp3.wav`).
+const TE_EXPLOSION_SOUND: &str = "weapons/r_exp3.wav";
+
+/// Realise one decoded [`TempEntityEvent`] into `particles`, porting the
+/// effect-mapping half of `CL_ParseTEnt`:
+///
+/// * explosion types (`TE_EXPLOSION`=3, `TE_TAREXPLOSION`=4, `TE_EXPLOSION2`=12)
+///   spawn a 1024-particle [`ParticleSystem::spawn_explosion`] and return the
+///   `weapons/r_exp3.wav` sound name to play;
+/// * impact types spawn a `R_RunParticleEffect`-style burst (the existing
+///   [`ParticleSystem::spawn_burst`]) with the matching colour/count:
+///   `TE_SPIKE`=0 -> (0,10), `TE_SUPERSPIKE`=1 / `TE_GUNSHOT`=2 -> (0,20),
+///   `TE_WIZSPIKE`=7 -> (20,30), `TE_KNIGHTSPIKE`=8 -> (226,20);
+/// * splashes (`TE_LAVASPLASH`=10, `TE_TELEPORT`=11) get a small upward burst;
+/// * beams (`TE_LIGHTNING1/2/3`=5/6/9, `TE_BEAM`=13) are skipped (consumed only).
+///
+/// Returns `Some(sound_name)` for the types that play a sound, else `None`.
+fn spawn_temp_entity(
+    particles: &mut ParticleSystem,
+    ev: &TempEntityEvent,
+    now: f32,
+    rng: &mut Lcg,
+) -> Option<&'static str> {
+    use quake_rs::server::te_consts::*;
+    match ev.te_type {
+        TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => {
+            particles.spawn_explosion(ev.pos, now, rng);
+            Some(TE_EXPLOSION_SOUND)
+        }
+        TE_SPIKE => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 0, 10, now, rng);
+            None
+        }
+        TE_SUPERSPIKE | TE_GUNSHOT => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 0, 20, now, rng);
+            None
+        }
+        TE_WIZSPIKE => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 20, 30, now, rng);
+            None
+        }
+        TE_KNIGHTSPIKE => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 226, 20, now, rng);
+            None
+        }
+        TE_LAVASPLASH | TE_TELEPORT => {
+            // Approximate the splash as a small upward burst (dir = +Z).
+            particles.spawn_burst(ev.pos, [0.0, 0.0, 1.0], 232, 20, now, rng);
+            None
+        }
+        // Beam/lightning types carry no effect here.
+        _ => None,
+    }
+}
+
 /// Spawn a real player on a map, report its loadout, walk it forward, and render
 /// its point of view — the first-person gameplay milestone (#3).
 fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out, String> {
@@ -683,6 +739,11 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let mut sounds: Vec<String> = Vec::new();
         let mut total_bursts = 0usize;
         let mut total_burst_particles = 0i64;
+        // Temp-entity tallies (rocket/grenade explosions, gunshots, spikes) the
+        // QuakeC fires via the Write* network builtins, decoded into events.
+        let mut te_total = 0usize;
+        let mut te_explosions = 0usize;
+        let mut te_gunshots = 0usize;
         for _ in 0..15 {
             server.client_frame(&fire, 0.1).map_err(|e| format!("fire frame: {e}"))?;
             for s in server.drain_sounds() {
@@ -697,6 +758,20 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 total_burst_particles += b.count.max(0) as i64;
                 particles.spawn_burst(b.org, b.dir, b.color, b.count, now, &mut prng);
             }
+            // Realise the temp entities (explosions, wall impacts) the QuakeC
+            // fired via the Write* builtins. Explosions also queue their sound.
+            for ev in server.drain_temp_entities() {
+                te_total += 1;
+                use quake_rs::server::te_consts::*;
+                match ev.te_type {
+                    TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => te_explosions += 1,
+                    TE_GUNSHOT => te_gunshots += 1,
+                    _ => {}
+                }
+                if let Some(snd) = spawn_temp_entity(&mut particles, &ev, now, &mut prng) {
+                    sounds.push(snd.to_string());
+                }
+            }
             particles.advance(0.1, now, PARTICLE_GRAVITY);
             if particles.len() > peak_parts.len() {
                 peak_parts =
@@ -707,6 +782,10 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             o,
             "    particle() bursts during combat: {total_bursts} ({total_burst_particles} points); live at end: {}",
             particles.len()
+        );
+        let _ = writeln!(
+            o,
+            "    temp entities: {te_total} ({te_explosions} explosions, {te_gunshots} gunshots)"
         );
         let hp_after = server.vm.ent_get_float(mon, "health");
         let alive = !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true);

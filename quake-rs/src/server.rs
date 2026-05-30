@@ -487,12 +487,12 @@ fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 }
 
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
-/// all the network / client-routing builtins that have no world effect in this
-/// headless server (`stuffcmd`, the `Write*` family, `makestatic`,
-/// `lightstyle`, `changelevel`, `setspawnparms`, the print routers,
-/// `cvar_set`). (`sound`/`ambientsound` are no longer no-ops: they queue a
-/// [`SoundEvent`] via [`bi_sound`]/[`bi_ambientsound`]; `particle` queues a
-/// [`ParticleBurst`] via [`bi_particle`].)
+/// the remaining network / client-routing builtins that have no world effect in
+/// this headless server (`stuffcmd`, `makestatic`, `lightstyle`, `changelevel`,
+/// `setspawnparms`, the print routers, `cvar_set`). (`sound`/`ambientsound`
+/// queue a [`SoundEvent`] via [`bi_sound`]/[`bi_ambientsound`]; `particle`
+/// queues a [`ParticleBurst`] via [`bi_particle`]; the `Write*` family
+/// (#52..#59) drives the temp-entity decoder via [`te_feed`].)
 fn bi_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
@@ -662,6 +662,390 @@ fn bi_particle(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Temp-entity decoder + queue (the network Write* family, #52..#59).
+//
+// The C produced a temp entity by writing a short ordered burst into the
+// broadcast datagram from QuakeC: WriteByte(MSG_BROADCAST, svc_temp_entity=23),
+// WriteByte(MSG_BROADCAST, TE_type), then the per-type payload (coords / bytes).
+// The client's `CL_ParseTEnt` (cl_tent.c) read that burst back and turned each
+// temp entity into a particle effect (R_ParticleExplosion / R_RunParticleEffect)
+// plus, for explosions, a dynamic light and the `weapons/r_exp3.wav` sound.
+//
+// This headless server has no client and no datagram, so the Write* builtins
+// instead feed a small decoder state machine that recognises a broadcast temp
+// entity and, when its payload is complete, emits a [`TempEntityEvent`] onto a
+// thread-local queue that [`Server::drain_temp_entities`] hands to a front-end
+// (which maps it to the same [`crate::particles::ParticleSystem`] effects).
+//
+// As with the sound/particle queues above, a `thread_local!` is the only place
+// the state can live: builtins are `fn(&mut Vm)` and cannot see the `Server`,
+// and `vm.rs` is off-limits. Server methods run on the same thread as the
+// builtins, so a frame's events are visible to `drain_temp_entities` right after.
+// ---------------------------------------------------------------------------
+
+/// `svc_temp_entity` (protocol.h): the server-command byte a broadcast temp
+/// entity begins with. A `WriteByte(MSG_BROADCAST, 23)` opens the burst.
+const SVC_TEMP_ENTITY: u8 = 23;
+
+/// `MSG_BROADCAST` (pr_cmds.c `WriteDest`): the only message destination this
+/// headless server realises (the unreliable broadcast datagram all temp
+/// entities use). Writes to `MSG_ONE`/`MSG_ALL`/`MSG_INIT` are ignored.
+const MSG_BROADCAST: i32 = 0;
+
+// TE_* type bytes (protocol.h), as written after the svc_temp_entity byte.
+const TE_SPIKE: u8 = 0;
+const TE_SUPERSPIKE: u8 = 1;
+const TE_GUNSHOT: u8 = 2;
+const TE_EXPLOSION: u8 = 3;
+const TE_TAREXPLOSION: u8 = 4;
+const TE_LIGHTNING1: u8 = 5;
+const TE_LIGHTNING2: u8 = 6;
+const TE_WIZSPIKE: u8 = 7;
+const TE_KNIGHTSPIKE: u8 = 8;
+const TE_LIGHTNING3: u8 = 9;
+const TE_LAVASPLASH: u8 = 10;
+const TE_TELEPORT: u8 = 11;
+const TE_EXPLOSION2: u8 = 12;
+const TE_BEAM: u8 = 13;
+
+/// The `TE_*` type bytes (protocol.h), re-exported for front-ends that map a
+/// [`TempEntityEvent::te_type`] to an effect (the playtest/wasm callers). These
+/// are the same byte values the QuakeC writes after `svc_temp_entity`.
+pub mod te_consts {
+    /// Spike hitting a wall (nail impact): a small `R_RunParticleEffect` burst.
+    pub const TE_SPIKE: u8 = super::TE_SPIKE;
+    /// Super-spike (super-nail) wall impact: a larger burst.
+    pub const TE_SUPERSPIKE: u8 = super::TE_SUPERSPIKE;
+    /// Bullet hitting a wall: a medium burst.
+    pub const TE_GUNSHOT: u8 = super::TE_GUNSHOT;
+    /// Rocket/grenade explosion: a 1024-particle fiery explosion + sound.
+    pub const TE_EXPLOSION: u8 = super::TE_EXPLOSION;
+    /// Tarbaby explosion: treated as an explosion + sound.
+    pub const TE_TAREXPLOSION: u8 = super::TE_TAREXPLOSION;
+    /// Lightning bolt beam (bolt.mdl).
+    pub const TE_LIGHTNING1: u8 = super::TE_LIGHTNING1;
+    /// Lightning bolt beam (bolt2.mdl).
+    pub const TE_LIGHTNING2: u8 = super::TE_LIGHTNING2;
+    /// Wizard spike wall impact: a green-ish burst.
+    pub const TE_WIZSPIKE: u8 = super::TE_WIZSPIKE;
+    /// Knight spike wall impact.
+    pub const TE_KNIGHTSPIKE: u8 = super::TE_KNIGHTSPIKE;
+    /// Lightning bolt beam (bolt3.mdl).
+    pub const TE_LIGHTNING3: u8 = super::TE_LIGHTNING3;
+    /// Lava splash (a Chthon attack): approximated as an upward burst.
+    pub const TE_LAVASPLASH: u8 = super::TE_LAVASPLASH;
+    /// Teleport splash: approximated as an upward burst.
+    pub const TE_TELEPORT: u8 = super::TE_TELEPORT;
+    /// Colour-mapped explosion: a 1024-particle explosion + sound.
+    pub const TE_EXPLOSION2: u8 = super::TE_EXPLOSION2;
+    /// Grappling-hook beam (beam.mdl).
+    pub const TE_BEAM: u8 = super::TE_BEAM;
+}
+
+/// One decoded broadcast temp entity (the `CL_ParseTEnt` payload), captured for
+/// a front-end instead of spawning a client-side particle effect directly.
+///
+/// `pos` is the effect origin (the three `WriteCoord`s). For [`TE_EXPLOSION2`]
+/// (`te_type == 12`) `color_start`/`color_length` carry the two trailing colour
+/// bytes; for every other type they are `0`. Beam types (`TE_LIGHTNING1/2/3`,
+/// `TE_BEAM`) carry the *start* point in `pos` (their entity-index short and end
+/// point are consumed to stay in sync but otherwise dropped — no beam rendering
+/// yet); a front-end may simply ignore those `te_type`s.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempEntityEvent {
+    /// The `TE_*` type byte (e.g. `3` = explosion, `2` = gunshot).
+    pub te_type: u8,
+    /// The effect origin (the three `WriteCoord` values).
+    pub pos: [f32; 3],
+    /// `TE_EXPLOSION2` colour-ramp start index; `0` for other types.
+    pub color_start: u8,
+    /// `TE_EXPLOSION2` colour-ramp length; `0` for other types.
+    pub color_length: u8,
+}
+
+/// What payload shape a recognised `TE_*` type expects, so the decoder consumes
+/// exactly the right fields and stays byte-synchronised with the writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TePayload {
+    /// Three `WriteCoord`s, then emit (spikes, gunshots, explosions, splashes).
+    Coords3,
+    /// Three `WriteCoord`s then two colour bytes, then emit (`TE_EXPLOSION2`).
+    Coords3ThenTwoBytes,
+    /// A `short` entity index then six `WriteCoord`s (start+end), then emit with
+    /// no effect mapping (the beam/lightning types — consumed to stay in sync).
+    Beam,
+}
+
+/// Map a `TE_*` type byte to its payload shape, or `None` for an unknown type
+/// (the decoder then resets to `Idle`, dropping the in-progress message rather
+/// than guessing a length and corrupting every later write).
+fn te_payload(te_type: u8) -> Option<TePayload> {
+    match te_type {
+        TE_SPIKE | TE_SUPERSPIKE | TE_GUNSHOT | TE_EXPLOSION | TE_TAREXPLOSION
+        | TE_WIZSPIKE | TE_KNIGHTSPIKE | TE_LAVASPLASH | TE_TELEPORT => Some(TePayload::Coords3),
+        TE_EXPLOSION2 => Some(TePayload::Coords3ThenTwoBytes),
+        TE_LIGHTNING1 | TE_LIGHTNING2 | TE_LIGHTNING3 | TE_BEAM => Some(TePayload::Beam),
+        _ => None,
+    }
+}
+
+/// The temp-entity decoder state. `Idle` between messages; `InMessage` while
+/// collecting a recognised temp entity's payload.
+#[derive(Debug, Clone, PartialEq)]
+enum TeState {
+    /// Not inside a temp-entity message. The next `WriteByte(MSG_BROADCAST, 23)`
+    /// opens one; any other broadcast write is ignored here.
+    Idle,
+    /// Inside a temp entity: the `svc_temp_entity` byte was seen.
+    InMessage {
+        /// The `TE_*` type byte once read (`None` while awaiting it), with its
+        /// resolved payload shape.
+        ty: Option<(u8, TePayload)>,
+        /// `WriteCoord` values collected so far (bounded — see the decoder).
+        coords: Vec<f32>,
+        /// Trailing colour bytes collected so far (`TE_EXPLOSION2`, bounded).
+        bytes: Vec<u8>,
+        /// For [`TePayload::Beam`], whether the leading `short` (entity index)
+        /// has been consumed yet.
+        short_consumed: bool,
+    },
+}
+
+thread_local! {
+    /// The temp-entity decoder state machine (per-thread). Driven by the Write*
+    /// builtins; reset to [`TeState::Idle`] whenever a message completes, an
+    /// unknown type is seen, or a new frame begins ([`Server::run_frame`] /
+    /// [`Server::client_frame`] reset it via [`reset_temp_entity_decoder`]).
+    static TE_STATE: std::cell::RefCell<TeState> =
+        const { std::cell::RefCell::new(TeState::Idle) };
+    /// Completed temp-entity events awaiting a [`Server::drain_temp_entities`].
+    /// Mirrors the [`SOUND_EVENTS`]/[`PARTICLE_BURSTS`] queues exactly.
+    static TEMP_ENTITIES: std::cell::RefCell<Vec<TempEntityEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The largest number of `WriteCoord`/colour-byte fields any modelled temp
+/// entity carries (the beam types: 6 coords). A hard cap on the collected vecs
+/// so a malformed stream can never grow them without bound.
+const TE_MAX_COORDS: usize = 6;
+
+/// Push a completed temp-entity event onto the thread-local queue.
+fn push_temp_entity(ev: TempEntityEvent) {
+    TEMP_ENTITIES.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued temp-entity event.
+fn take_temp_entities() -> Vec<TempEntityEvent> {
+    TEMP_ENTITIES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Reset the decoder to [`TeState::Idle`], dropping any half-collected message.
+/// Called at the start of each server frame so a partial temp entity left by an
+/// errored think never bleeds into the next frame's writes.
+fn reset_temp_entity_decoder() {
+    TE_STATE.with(|s| *s.borrow_mut() = TeState::Idle);
+}
+
+/// Feed one `WriteByte`/`WriteShort`/`WriteCoord`/… value to the decoder.
+///
+/// `dest` is the message destination (`PARM0`); only `MSG_BROADCAST` is decoded,
+/// every other destination is ignored (the C routed those to a specific client's
+/// reliable buffer, which this headless server has no client for). `field` says
+/// which kind of write this is so the decoder treats a coord as a coordinate, a
+/// byte/short as an integer payload field, etc.
+///
+/// The state machine is deliberately total: an unrecognised `TE_*` type, an
+/// over-long field run, or any unexpected write simply resets to `Idle` (drops
+/// the in-progress message) rather than panicking or guessing.
+fn te_feed(dest: i32, field: TeField, value: f32) {
+    if dest != MSG_BROADCAST {
+        return; // not a broadcast temp entity — ignore (no client buffers here).
+    }
+    TE_STATE.with(|cell| {
+        let mut st = cell.borrow_mut();
+        match &mut *st {
+            // --- between messages: only a WriteByte of svc_temp_entity opens one.
+            TeState::Idle => {
+                if matches!(field, TeField::Byte) && (value as i32) == SVC_TEMP_ENTITY as i32 {
+                    *st = TeState::InMessage {
+                        ty: None,
+                        coords: Vec::new(),
+                        bytes: Vec::new(),
+                        short_consumed: false,
+                    };
+                }
+                // Any other broadcast write outside a message is ignored.
+            }
+
+            // --- inside a temp entity.
+            TeState::InMessage {
+                ty,
+                coords,
+                bytes,
+                short_consumed,
+            } => {
+                // Awaiting the TE_* type byte (the second WriteByte).
+                if ty.is_none() {
+                    if matches!(field, TeField::Byte) {
+                        let tb = value as i32;
+                        // Out-of-byte-range or unknown type => drop the message.
+                        let te_type = if (0..=255).contains(&tb) { tb as u8 } else { 255 };
+                        match te_payload(te_type) {
+                            Some(shape) => *ty = Some((te_type, shape)),
+                            None => *st = TeState::Idle,
+                        }
+                    } else {
+                        // A non-byte write where the type was expected: desync; reset.
+                        *st = TeState::Idle;
+                    }
+                    return;
+                }
+
+                let (te_type, shape) = ty.expect("ty is Some here");
+                match shape {
+                    TePayload::Coords3 => {
+                        if matches!(field, TeField::Coord) && coords.len() < TE_MAX_COORDS {
+                            coords.push(value);
+                        }
+                        if coords.len() == 3 {
+                            let pos = [coords[0], coords[1], coords[2]];
+                            push_temp_entity(TempEntityEvent {
+                                te_type,
+                                pos,
+                                color_start: 0,
+                                color_length: 0,
+                            });
+                            *st = TeState::Idle;
+                        }
+                    }
+                    TePayload::Coords3ThenTwoBytes => {
+                        if coords.len() < 3 {
+                            if matches!(field, TeField::Coord) && coords.len() < TE_MAX_COORDS {
+                                coords.push(value);
+                            }
+                        } else if matches!(field, TeField::Byte) && bytes.len() < 2 {
+                            bytes.push((value as i32).clamp(0, 255) as u8);
+                        }
+                        if coords.len() == 3 && bytes.len() == 2 {
+                            let pos = [coords[0], coords[1], coords[2]];
+                            push_temp_entity(TempEntityEvent {
+                                te_type,
+                                pos,
+                                color_start: bytes[0],
+                                color_length: bytes[1],
+                            });
+                            *st = TeState::Idle;
+                        }
+                    }
+                    TePayload::Beam => {
+                        // short (entity index) first, then 6 coords (start+end).
+                        if !*short_consumed {
+                            if matches!(field, TeField::Short | TeField::Entity) {
+                                *short_consumed = true;
+                            }
+                            // (A stray coord before the short is ignored; the
+                            // writer always emits the short first.)
+                        } else if matches!(field, TeField::Coord) && coords.len() < TE_MAX_COORDS {
+                            coords.push(value);
+                        }
+                        if *short_consumed && coords.len() == 6 {
+                            // Carry the START point in pos; the end point is dropped
+                            // (no beam rendering yet). Emit so a caller can ignore it.
+                            let pos = [coords[0], coords[1], coords[2]];
+                            push_temp_entity(TempEntityEvent {
+                                te_type,
+                                pos,
+                                color_start: 0,
+                                color_length: 0,
+                            });
+                            *st = TeState::Idle;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Which `Write*` builtin produced a decoder field — lets [`te_feed`] tell a
+/// coordinate from an integer payload byte/short so it consumes the right shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeField {
+    /// `WriteByte`/`WriteChar` — an 8-bit integer field (svc byte, TE type byte,
+    /// or `TE_EXPLOSION2`'s two colour bytes).
+    Byte,
+    /// `WriteShort`/`WriteLong` — a 16/32-bit integer field (the beam entity index).
+    Short,
+    /// `WriteCoord`/`WriteAngle` — a world coordinate (captured as the raw float).
+    Coord,
+    /// `WriteEntity` — an entity index short (treated like [`TeField::Short`]).
+    Entity,
+}
+
+/// `PF_WriteByte` (#52): `void(float to, float value)`. Feeds the decoder an
+/// 8-bit field. The C did `MSG_WriteByte(WriteDest(), G_FLOAT(PARM1))`; here the
+/// destination is `PARM0` and the value `PARM1`.
+fn bi_writebyte(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteChar` (#53): like [`bi_writebyte`] (an 8-bit field). No temp entity
+/// uses a char field, but it is decoded as a byte so the stream stays in sync.
+fn bi_writechar(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteShort` (#54): a 16-bit integer field (the beam types' entity index).
+fn bi_writeshort(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Short, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteLong` (#55): a 32-bit integer field. Decoded like a short (no temp
+/// entity carries a long, but it keeps the stream synchronised if one appears).
+fn bi_writelong(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Short, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteCoord` (#56): a world coordinate. The C round-tripped through a lossy
+/// `*8` short; we capture the float value directly (the task notes this is fine).
+fn bi_writecoord(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Coord, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteAngle` (#57): an angle byte. No modelled temp entity carries one;
+/// decoded as a coordinate field would be wrong, so it is treated as a [`TeField::Coord`]
+/// only for the (unused-by-temp-entities) angle slot — in practice angles never
+/// appear inside a temp-entity burst, so this just stays benign.
+fn bi_writeangle(vm: &mut Vm) -> Result<()> {
+    // Angles are not part of any temp-entity payload; feed as a byte-like field
+    // so it cannot be mistaken for a coordinate (keeps Coords3 in sync if a
+    // writer ever interleaved one, which the stock game never does).
+    te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteString` (#58): a string field. Temp entities carry no strings; this
+/// is a no-op on the decoder (a string write inside a message is not a coord/byte,
+/// so feeding it would risk a false field — we simply ignore it). The C wrote it
+/// to the destination buffer; here there is nothing to do.
+fn bi_writestring(_vm: &mut Vm) -> Result<()> {
+    Ok(())
+}
+
+/// `PF_WriteEntity` (#59): an entity-index short. Decoded like the beam types'
+/// leading short so a future beam writer using `WriteEntity` for its index stays
+/// in sync.
+fn bi_writeentity(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Entity, vm.arg_float(1));
+    Ok(())
+}
+
 /// `PF_sound` (#8): `void(entity e, float chan, string sample, float vol,
 /// float atten) sound`. The arg layout mirrors `PF_sound`/`SV_StartSound`:
 /// `entity = PARM0`, `channel = PARM1`, `sample = PARM2`, `volume = PARM3`,
@@ -776,10 +1160,16 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 48, bi_particle); // particle (queues a ParticleBurst)
     put(t, 49, bi_changeyaw); // changeyaw
 
-    // #52..#59: the network Write* family — all no-ops here.
-    for n in 52..=59 {
-        put(t, n, bi_noop);
-    }
+    // #52..#59: the network Write* family. These drive the temp-entity decoder
+    // (broadcast Write* bursts -> TempEntityEvents); see te_feed.
+    put(t, 52, bi_writebyte); // WriteByte
+    put(t, 53, bi_writechar); // WriteChar
+    put(t, 54, bi_writeshort); // WriteShort
+    put(t, 55, bi_writelong); // WriteLong
+    put(t, 56, bi_writecoord); // WriteCoord
+    put(t, 57, bi_writeangle); // WriteAngle
+    put(t, 58, bi_writestring); // WriteString
+    put(t, 59, bi_writeentity); // WriteEntity
 
     put(t, 67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
     put(t, 68, bi_precache_file); // precache_file
@@ -1232,6 +1622,9 @@ impl Server {
         // think-time test compares against sv.time + host_frametime, so we set
         // frametime now and bump time after the loop.
         self.vm.gset_float("frametime", dt);
+        // Drop any half-collected temp-entity message from a prior (possibly
+        // faulted) frame so this frame's Write* bursts parse cleanly.
+        reset_temp_entity_decoder();
         let start_time = self.time();
 
         let mut thinks_fired = 0usize;
@@ -1892,6 +2285,9 @@ impl Server {
         // C, but the think-due test compares against sv.time + host_frametime, so
         // (as run_frame does) we set frametime now and bump time after the loop.
         self.vm.gset_float("frametime", dt);
+        // Drop any half-collected temp-entity message from a prior (possibly
+        // faulted) frame so this frame's Write* bursts parse cleanly.
+        reset_temp_entity_decoder();
         let start_time = self.time();
 
         // Let the progs know a new frame has started (self/other = world).
@@ -2087,6 +2483,18 @@ impl Server {
     /// frame (mirrors [`Server::drain_sounds`]).
     pub fn drain_particles(&mut self) -> Vec<ParticleBurst> {
         take_particle_bursts()
+    }
+
+    /// Take and clear the queued temp-entity events decoded from the QuakeC's
+    /// broadcast `Write*` bursts since the last drain (rocket/grenade explosions,
+    /// bullet wall-impacts, nail/spike impacts). A front-end calls this once per
+    /// frame and maps each [`TempEntityEvent`] to the matching
+    /// [`crate::particles::ParticleSystem`] effect (and an explosion sound); tests
+    /// use it to assert a temp entity actually fired. The queue is
+    /// process-/thread-local, so call this on the same thread that drove the frame
+    /// (mirrors [`Server::drain_sounds`]/[`Server::drain_particles`]).
+    pub fn drain_temp_entities(&mut self) -> Vec<TempEntityEvent> {
+        take_temp_entities()
     }
 
     /// The player's attack-relevant state for verification: `(button0, weapon,
@@ -5201,6 +5609,176 @@ mod tests {
         bi_particle(&mut server.vm).expect("bi_particle");
         let b = server.drain_particles();
         assert_eq!(b[0].color, 0, "negative color clamps to 0");
+    }
+
+    // ------------------------------------------------ temp-entity decoder
+
+    /// Drive a `WriteByte(dest, value)` builtin: dest in PARM0, value in PARM1.
+    fn write_byte(server: &mut Server, dest: i32, value: f32) {
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gf(OFS_PARM0 + 3, value);
+        bi_writebyte(&mut server.vm).expect("bi_writebyte");
+    }
+    /// Drive a `WriteCoord(dest, value)` builtin.
+    fn write_coord(server: &mut Server, dest: i32, value: f32) {
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gf(OFS_PARM0 + 3, value);
+        bi_writecoord(&mut server.vm).expect("bi_writecoord");
+    }
+    /// Drive a `WriteShort(dest, value)` builtin.
+    fn write_short(server: &mut Server, dest: i32, value: f32) {
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gf(OFS_PARM0 + 3, value);
+        bi_writeshort(&mut server.vm).expect("bi_writeshort");
+    }
+    /// A fresh server plus a cleared decoder/queue (the thread-locals persist
+    /// across tests on the same thread, so reset before each scenario).
+    fn te_server() -> Server {
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let server = Server::new(floor_bsp(), progs).expect("server");
+        reset_temp_entity_decoder();
+        let _ = take_temp_entities(); // clear any residue from a prior test
+        server
+    }
+
+    #[test]
+    fn te_explosion_burst_yields_one_event_with_pos() {
+        // WriteByte(0,23) WriteByte(0,3) WriteCoord(0,x/y/z) -> one TE_EXPLOSION.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32); // svc_temp_entity
+        write_byte(&mut server, 0, TE_EXPLOSION as f32); // type 3
+        write_coord(&mut server, 0, 16.0);
+        write_coord(&mut server, 0, -32.0);
+        write_coord(&mut server, 0, 48.5);
+
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1, "exactly one temp entity emitted");
+        assert_eq!(evs[0].te_type, TE_EXPLOSION);
+        assert_eq!(evs[0].pos, [16.0, -32.0, 48.5]);
+        assert_eq!(evs[0].color_start, 0);
+        assert_eq!(evs[0].color_length, 0);
+        // drain cleared the queue (mirrors drain_sounds).
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "drain_temp_entities cleared the queue"
+        );
+    }
+
+    #[test]
+    fn te_gunshot_burst_carries_its_type() {
+        // A TE_GUNSHOT (type 2) sequence yields te_type == 2.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_GUNSHOT as f32);
+        write_coord(&mut server, 0, 1.0);
+        write_coord(&mut server, 0, 2.0);
+        write_coord(&mut server, 0, 3.0);
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].te_type, TE_GUNSHOT);
+        assert_eq!(evs[0].pos, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn te_explosion2_consumes_three_coords_then_two_bytes() {
+        // EXPLOSION2 (type 12): 3 coords + colorStart + colorLength byte.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_EXPLOSION2 as f32);
+        write_coord(&mut server, 0, 10.0);
+        write_coord(&mut server, 0, 20.0);
+        write_coord(&mut server, 0, 30.0);
+        write_byte(&mut server, 0, 105.0); // colorStart
+        write_byte(&mut server, 0, 8.0); // colorLength
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].te_type, TE_EXPLOSION2);
+        assert_eq!(evs[0].pos, [10.0, 20.0, 30.0]);
+        assert_eq!(evs[0].color_start, 105);
+        assert_eq!(evs[0].color_length, 8);
+    }
+
+    #[test]
+    fn te_beam_consumes_short_and_six_coords() {
+        // A beam (TE_BEAM=13): short entity index + 6 coords (start+end). It is
+        // consumed to stay in sync and emitted with the start point as pos.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_BEAM as f32);
+        write_short(&mut server, 0, 7.0); // entity index
+        write_coord(&mut server, 0, 1.0); // start
+        write_coord(&mut server, 0, 2.0);
+        write_coord(&mut server, 0, 3.0);
+        write_coord(&mut server, 0, 4.0); // end
+        write_coord(&mut server, 0, 5.0);
+        write_coord(&mut server, 0, 6.0);
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1, "beam emits exactly one event");
+        assert_eq!(evs[0].te_type, TE_BEAM);
+        assert_eq!(evs[0].pos, [1.0, 2.0, 3.0], "beam pos = start point");
+    }
+
+    #[test]
+    fn te_non_broadcast_dest_produces_no_event() {
+        // Writes on MSG_ONE (dest 1) are ignored: no temp entity is decoded.
+        let mut server = te_server();
+        write_byte(&mut server, 1, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 1, TE_EXPLOSION as f32);
+        write_coord(&mut server, 1, 16.0);
+        write_coord(&mut server, 1, 32.0);
+        write_coord(&mut server, 1, 48.0);
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "MSG_ONE writes produce no broadcast temp entity"
+        );
+    }
+
+    #[test]
+    fn te_unknown_type_resets_and_next_message_still_parses() {
+        // An unknown type byte resets the decoder cleanly (no event), and a
+        // following valid message must still parse.
+        let mut server = te_server();
+        // Unknown type 200 -> reset, drop.
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, 200.0); // not a known TE_*
+        // These stray coords land in Idle and are ignored.
+        write_coord(&mut server, 0, 9.0);
+        write_coord(&mut server, 0, 9.0);
+        write_coord(&mut server, 0, 9.0);
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "unknown type emits nothing"
+        );
+
+        // A clean, valid message right after still decodes.
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_SPIKE as f32);
+        write_coord(&mut server, 0, 7.0);
+        write_coord(&mut server, 0, 8.0);
+        write_coord(&mut server, 0, 9.0);
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1, "the next valid message parses after a reset");
+        assert_eq!(evs[0].te_type, TE_SPIKE);
+        assert_eq!(evs[0].pos, [7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn te_decoder_reset_drops_partial_message() {
+        // A half-collected message (svc + type + one coord) is dropped by a
+        // frame reset; a fresh message after the reset parses cleanly.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_EXPLOSION as f32);
+        write_coord(&mut server, 0, 1.0); // only one of three coords
+        reset_temp_entity_decoder(); // frame boundary
+        // Continuing the old coords now must NOT complete a stale message.
+        write_coord(&mut server, 0, 2.0);
+        write_coord(&mut server, 0, 3.0);
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "reset dropped the partial temp entity"
+        );
     }
 
     #[test]

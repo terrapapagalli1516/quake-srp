@@ -34,6 +34,35 @@
 //! * All arithmetic is plain `f32`; there is no indexing that could be out of
 //!   bounds.
 
+/// How a particle is animated each frame (the C `particle_t::type`,
+/// `ptype_t`). Only the four kinds this port spawns are modelled; the C had a
+/// couple more (`pt_static`, `pt_blob`, `pt_blob2`, `pt_grav`) that no spawn
+/// path here produces.
+///
+/// * [`ParticleKind::SlowGrav`] — the `particle()` builtin's wall/blood burst
+///   ([`ParticleSystem::spawn_burst`]): drifts with a gentle downward pull, no
+///   colour cycling. The pre-existing default behaviour.
+/// * [`ParticleKind::Fire`] — `pt_fire`: rises (gravity *adds* to Z), cycles
+///   through `ramp3`, dies when `ramp >= 6`. (No spawn path emits this yet, but
+///   the per-frame update is faithful so a future trail/rocket emitter can use
+///   it.)
+/// * [`ParticleKind::Explode`] — `pt_explode`: the even half of a rocket
+///   explosion. Velocity *grows* `(1 + dvel)` per axis, falls under gravity, and
+///   cycles through `ramp1` (yellow -> dark), dying at `ramp >= 8`.
+/// * [`ParticleKind::Explode2`] — `pt_explode2`: the odd half. Velocity *shrinks*
+///   `(1 - dt)` per axis, falls under gravity, cycles `ramp2`, dies at `ramp >= 8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticleKind {
+    /// `pt_slowgrav`: gentle downward drift, no colour cycling (`spawn_burst`).
+    SlowGrav,
+    /// `pt_fire`: rises and cycles `ramp3`; dies at `ramp >= 6`.
+    Fire,
+    /// `pt_explode`: velocity grows, falls, cycles `ramp1`; dies at `ramp >= 8`.
+    Explode,
+    /// `pt_explode2`: velocity shrinks, falls, cycles `ramp2`; dies at `ramp >= 8`.
+    Explode2,
+}
+
 /// A live particle: a coloured point with a world position, a velocity, the
 /// palette index it draws with, and the absolute game time it expires at.
 ///
@@ -41,6 +70,10 @@
 /// the C `particle_t::color`. `die` is an *absolute* time (game seconds), so the
 /// per-frame [`ParticleSystem::advance`] can drop it with a single `die <= now`
 /// test (the C stored `p->die = cl.time + lifetime` the same way).
+///
+/// `kind` and `ramp` mirror the C `particle_t::type` / `particle_t::ramp`: the
+/// animation rule applied each frame, and the floating colour-ramp cursor the
+/// fire/explosion kinds advance and index into their ramp table.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Particle {
     /// World-space position (Quake units): `+X` east, `+Y` north, `+Z` up.
@@ -51,6 +84,43 @@ pub struct Particle {
     pub color: u8,
     /// Absolute game time (seconds) at which this particle expires.
     pub die: f32,
+    /// How this particle is animated each frame (the C `particle_t::type`).
+    pub kind: ParticleKind,
+    /// The colour-ramp cursor (the C `particle_t::ramp`): advanced by the
+    /// fire/explosion kinds and floored to index their ramp table.
+    pub ramp: f32,
+}
+
+/// `ramp1` (r_part.c): the `pt_explode` colour ramp — bright yellow fading to a
+/// dark red. Indexed by `floor(ramp)` while `ramp < 8`.
+const RAMP1: [u8; 8] = [0x6f, 0x6d, 0x6b, 0x69, 0x67, 0x65, 0x63, 0x61];
+/// `ramp2` (r_part.c): the `pt_explode2` colour ramp (a slightly different fade).
+const RAMP2: [u8; 8] = [0x6f, 0x6e, 0x6d, 0x6c, 0x6b, 0x6a, 0x68, 0x66];
+/// `ramp3` (r_part.c): the `pt_fire` colour ramp. Six entries; `pt_fire` dies
+/// once `ramp >= 6` so indices 6/7 are never read (the array is sized 8 in the C
+/// but only the first six are initialised — we keep six and bound-check anyway).
+const RAMP3: [u8; 6] = [0x6d, 0x6b, 0x06, 0x05, 0x04, 0x03];
+
+/// Resolve the colour for a ramp-cycling particle, or `None` when it should die.
+///
+/// Mirrors the C `if (p->ramp >= LIMIT) p->die = -1; else p->color = ramp[ramp]`:
+/// returns `None` (caller kills the particle) once `ramp >= limit`, otherwise the
+/// ramp entry at `floor(ramp)`. The index is additionally bounds-checked against
+/// the table length so a non-finite or pathological `ramp` can never panic — the
+/// `>= limit` guard already keeps it in range for every real `dt`, but the
+/// `ramp.get(idx)` is the belt-and-braces the `#![forbid(unsafe_code)]` crate
+/// promises.
+fn ramp_color(ramp: &[u8], cursor: f32, limit: f32) -> Option<u8> {
+    // Die once the cursor reaches the limit, or if it is NaN (a pathological
+    // `dt` could in principle produce one): only a value strictly in `[0, limit)`
+    // keeps the particle alive. Written as an explicit `is_nan` + `>=` rather
+    // than `!(cursor < limit)` so the NaN intent is obvious.
+    if cursor.is_nan() || cursor >= limit {
+        return None;
+    }
+    // cursor is in [0, limit) and finite here; floor to a table index.
+    let idx = cursor.max(0.0) as usize;
+    ramp.get(idx).copied()
 }
 
 /// The hard cap on simultaneously-live particles. Quake's `R_DrawParticles`
@@ -173,33 +243,144 @@ impl ParticleSystem {
                 velocity,
                 color,
                 die: now + life,
+                // The `particle()` builtin's burst is always the gentle-gravity
+                // kind with no colour cycling (the C set `p->type = pt_slowgrav`).
+                kind: ParticleKind::SlowGrav,
+                ramp: 0.0,
+            });
+        }
+    }
+
+    /// Spawn a rocket/grenade explosion, porting `R_ParticleExplosion`: up to
+    /// 1024 particles centred on `org`, alternating [`ParticleKind::Explode`]
+    /// (even index) and [`ParticleKind::Explode2`] (odd index). Each starts at
+    /// the bright `ramp1[0]` colour (`0x6f`), with a random ramp cursor `rand()&3`,
+    /// a per-axis position jitter in `[-16, 16)` (`(rand()%32)-16`), a per-axis
+    /// velocity in `[-256, 256)` (`(rand()%512)-256`), and a 5-second lifetime
+    /// (`die = now + 5`).
+    ///
+    /// `now` is the current absolute game time; `rng` is the caller's
+    /// deterministic [`Lcg`] (advanced here so the whole explosion is reproducible
+    /// and dependency-free).
+    ///
+    /// SAFETY/FAITHFULNESS: the spawn count is clamped against the remaining pool
+    /// capacity (`MAX_PARTICLES - len`), exactly as the C bailed once its
+    /// `free_particles` list was exhausted (`if (!free_particles) return;`), so an
+    /// explosion can never grow the pool past [`MAX_PARTICLES`].
+    pub fn spawn_explosion(&mut self, org: [f32; 3], now: f32, rng: &mut Lcg) {
+        let remaining = MAX_PARTICLES.saturating_sub(self.particles.len());
+        let to_spawn = 1024usize.min(remaining);
+        for i in 0..to_spawn {
+            // Per-axis position jitter in [-16, 16): the C `(rand()%32)-16`.
+            let jx = rng.next_range(32) as i32 - 16;
+            let jy = rng.next_range(32) as i32 - 16;
+            let jz = rng.next_range(32) as i32 - 16;
+            // Per-axis velocity in [-256, 256): the C `(rand()%512)-256`.
+            let vx = (rng.next_range(512) as i32 - 256) as f32;
+            let vy = (rng.next_range(512) as i32 - 256) as f32;
+            let vz = (rng.next_range(512) as i32 - 256) as f32;
+            // Random initial ramp cursor: the C `p->ramp = rand()&3`.
+            let ramp = (rng.next_u32() & 3) as f32;
+            // Even i -> pt_explode, odd i -> pt_explode2 (the C `if (i & 1)` set
+            // pt_explode; we keep the same even/odd split — exact assignment is
+            // cosmetic since both halves spawn the same way and only differ in
+            // their per-frame update).
+            let kind = if i & 1 == 0 {
+                ParticleKind::Explode
+            } else {
+                ParticleKind::Explode2
+            };
+            self.particles.push(Particle {
+                origin: [org[0] + jx as f32, org[1] + jy as f32, org[2] + jz as f32],
+                velocity: [vx, vy, vz],
+                color: RAMP1[0], // 0x6f
+                die: now + 5.0,
+                kind,
+                ramp,
             });
         }
     }
 
     /// Advance every particle one frame and retire the expired ones, porting the
-    /// `pt_slowgrav` case of `R_DrawParticles`:
+    /// per-`type` cases of `R_DrawParticles`.
     ///
-    /// * `origin += velocity * dt` (`p->org[j] += p->vel[j]*frametime`),
-    /// * `velocity.z -= gravity * dt` (`pt_slowgrav` only nudges the Z velocity),
-    /// * particles with `die <= now` are removed.
+    /// Every particle first integrates its position (`org += vel*dt`,
+    /// `p->org[j] += p->vel[j]*frametime`). Then, by kind:
+    ///
+    /// * [`ParticleKind::SlowGrav`]: `vel.z -= grav` (the gentle downward pull the
+    ///   `particle()` burst uses; the pre-existing behaviour).
+    /// * [`ParticleKind::Fire`]: `ramp += dt*5`; if `ramp >= 6` the particle dies,
+    ///   else `color = ramp3[ramp]`; `vel.z += grav` (rises).
+    /// * [`ParticleKind::Explode`]: `ramp += dt*10`; if `ramp >= 8` dies, else
+    ///   `color = ramp1[ramp]`; `vel *= (1 + 4*dt)` per axis; `vel.z -= grav`.
+    /// * [`ParticleKind::Explode2`]: `ramp += dt*15`; if `ramp >= 8` dies, else
+    ///   `color = ramp2[ramp]`; `vel *= (1 - dt)` per axis; `vel.z -= grav`.
     ///
     /// `gravity` is the per-second downward acceleration the caller supplies. The
     /// C used `grav = frametime * sv_gravity * 0.05` *as the per-frame delta*, so
     /// a caller wanting C-faithful behaviour passes `gravity = sv_gravity * 0.05`
     /// (≈ 40 units/s² for the default `sv_gravity = 800`); this method multiplies
-    /// by `dt` itself, so `gravity` is a proper acceleration.
+    /// by `dt` itself, so `gravity` is a proper acceleration. The C's `dvel`
+    /// (`4*frametime`) is derived here the same way.
     ///
     /// The C dropped expired particles at the *top* of the draw loop (before
     /// integrating); doing the integrate-then-retire here is equivalent for the
-    /// visible result and keeps `die <= now` the single retirement test.
+    /// visible result. A ramp-driven death sets `die = now - 1` (the C
+    /// `p->die = -1`) so the single `die <= now` test still retires it this frame.
+    ///
+    /// FAITHFULNESS/SAFETY: the ramp index is floored to a `usize` and
+    /// bounds-checked against the ramp table — a particle dies (per the C's
+    /// `ramp >= N` guard) before its cursor could ever index past the array end,
+    /// so no out-of-range access is possible even with a pathological `dt`.
     pub fn advance(&mut self, dt: f32, now: f32, gravity: f32) {
-        let dv = gravity * dt;
+        let grav = gravity * dt;
+        let time1 = dt * 5.0;
+        let time2 = dt * 10.0;
+        let time3 = dt * 15.0;
+        let dvel = 4.0 * dt;
         for p in &mut self.particles {
             p.origin[0] += p.velocity[0] * dt;
             p.origin[1] += p.velocity[1] * dt;
             p.origin[2] += p.velocity[2] * dt;
-            p.velocity[2] -= dv;
+            match p.kind {
+                ParticleKind::SlowGrav => {
+                    p.velocity[2] -= grav;
+                }
+                ParticleKind::Fire => {
+                    p.ramp += time1;
+                    match ramp_color(&RAMP3, p.ramp, 6.0) {
+                        Some(c) => p.color = c,
+                        None => p.die = now - 1.0, // C: p->die = -1
+                    }
+                    p.velocity[2] += grav;
+                }
+                ParticleKind::Explode => {
+                    p.ramp += time2;
+                    match ramp_color(&RAMP1, p.ramp, 8.0) {
+                        Some(c) => p.color = c,
+                        None => p.die = now - 1.0,
+                    }
+                    // vel[i] += vel[i]*dvel  =>  vel *= (1 + dvel).
+                    let s = 1.0 + dvel;
+                    p.velocity[0] *= s;
+                    p.velocity[1] *= s;
+                    p.velocity[2] *= s;
+                    p.velocity[2] -= grav;
+                }
+                ParticleKind::Explode2 => {
+                    p.ramp += time3;
+                    match ramp_color(&RAMP2, p.ramp, 8.0) {
+                        Some(c) => p.color = c,
+                        None => p.die = now - 1.0,
+                    }
+                    // vel[i] -= vel[i]*frametime  =>  vel *= (1 - dt).
+                    let s = 1.0 - dt;
+                    p.velocity[0] *= s;
+                    p.velocity[1] *= s;
+                    p.velocity[2] *= s;
+                    p.velocity[2] -= grav;
+                }
+            }
         }
         // Retire expired particles (die <= now). retain keeps the live ones.
         self.particles.retain(|p| p.die > now);
@@ -283,6 +464,9 @@ mod tests {
             }
             // die is now + a short lifetime in [0, 0.4].
             assert!(p.die >= 5.0 && p.die <= 5.4, "die {} out of [5.0, 5.4]", p.die);
+            // spawn_burst particles are always the gentle-gravity kind, no ramp.
+            assert_eq!(p.kind, ParticleKind::SlowGrav, "burst kind is SlowGrav");
+            assert_eq!(p.ramp, 0.0, "burst ramp starts at 0");
         }
     }
 
@@ -316,6 +500,8 @@ mod tests {
             velocity: [10.0, 0.0, 20.0],
             color: 5,
             die: 100.0,
+            kind: ParticleKind::SlowGrav,
+            ramp: 0.0,
         });
         // dt = 0.5, gravity = 40 units/s^2 => dv = 20.
         sys.advance(0.5, 1.0, 40.0);
@@ -334,16 +520,149 @@ mod tests {
             velocity: [0.0; 3],
             color: 1,
             die: 2.0, // expires at t=2.0
+            kind: ParticleKind::SlowGrav,
+            ramp: 0.0,
         });
         sys.particles.push(Particle {
             origin: [0.0; 3],
             velocity: [0.0; 3],
             color: 2,
             die: 10.0, // lives past t=3.0
+            kind: ParticleKind::SlowGrav,
+            ramp: 0.0,
         });
         // Advance to now = 3.0: the die=2.0 particle (die <= now) is removed.
         sys.advance(0.1, 3.0, 0.0);
         assert_eq!(sys.len(), 1, "expired particle (die <= now) removed");
         assert_eq!(sys.particles()[0].color, 2, "the live particle survives");
+    }
+
+    #[test]
+    fn spawn_explosion_adds_explode_particles_at_ramp1_zero() {
+        // R_ParticleExplosion spawns up to 1024 particles, alternating
+        // Explode/Explode2, all starting at color ramp1[0] = 0x6f, dying at now+5.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(42);
+        sys.spawn_explosion([100.0, 200.0, 300.0], 10.0, &mut rng);
+        assert_eq!(sys.len(), 1024, "explosion spawns 1024 particles");
+
+        let mut explode = 0;
+        let mut explode2 = 0;
+        for p in sys.particles() {
+            assert_eq!(p.color, 0x6f, "initial color is ramp1[0] = 0x6f");
+            assert_eq!(p.die, 15.0, "die = now + 5");
+            // Position within +/-16 of the origin per axis.
+            for axis in 0..3 {
+                let c = [100.0, 200.0, 300.0][axis];
+                assert!(
+                    p.origin[axis] >= c - 16.0 && p.origin[axis] < c + 16.0,
+                    "axis {axis} jitter {} out of [{}, {})",
+                    p.origin[axis],
+                    c - 16.0,
+                    c + 16.0
+                );
+                // Velocity per axis in [-256, 256).
+                assert!(
+                    p.velocity[axis] >= -256.0 && p.velocity[axis] < 256.0,
+                    "axis {axis} velocity {} out of [-256, 256)",
+                    p.velocity[axis]
+                );
+            }
+            // ramp cursor seeded with rand()&3 -> 0..=3.
+            assert!(p.ramp >= 0.0 && p.ramp <= 3.0, "ramp {} out of 0..=3", p.ramp);
+            match p.kind {
+                ParticleKind::Explode => explode += 1,
+                ParticleKind::Explode2 => explode2 += 1,
+                other => panic!("unexpected explosion kind {other:?}"),
+            }
+        }
+        // Even/odd split: 512 of each across 1024 particles.
+        assert_eq!(explode, 512, "half the particles are Explode");
+        assert_eq!(explode2, 512, "half the particles are Explode2");
+    }
+
+    #[test]
+    fn spawn_explosion_clamps_to_remaining_capacity() {
+        // With the pool already near full, an explosion only takes the slots left.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(1);
+        // Fill all but 10 slots with a burst.
+        sys.spawn_burst([0.0; 3], [0.0; 3], 0, (MAX_PARTICLES as i32) - 10, 0.0, &mut rng);
+        assert_eq!(sys.len(), MAX_PARTICLES - 10);
+        sys.spawn_explosion([0.0; 3], 0.0, &mut rng);
+        assert_eq!(sys.len(), MAX_PARTICLES, "explosion clamps to the cap");
+        // A second explosion on a full pool adds nothing.
+        sys.spawn_explosion([0.0; 3], 0.0, &mut rng);
+        assert_eq!(sys.len(), MAX_PARTICLES, "full pool drops the explosion");
+    }
+
+    #[test]
+    fn advance_cycles_explode_color_through_ramp1_then_retires() {
+        // An Explode particle's color must walk ramp1 (0x6f, 0x6d, ...) as its
+        // ramp cursor advances, and the particle must retire once ramp >= 8.
+        let mut sys = ParticleSystem::new();
+        sys.particles.push(Particle {
+            origin: [0.0; 3],
+            velocity: [0.0; 3],
+            color: 0x6f,
+            die: 1000.0, // far future: only a ramp-driven death can retire it
+            kind: ParticleKind::Explode,
+            ramp: 0.0,
+        });
+        // dt = 0.1 => time2 = dt*10 = 1.0, so ramp climbs by 1.0 each frame.
+        // Frame 1: ramp 0 -> 1.0, color = ramp1[1] = 0x6d.
+        sys.advance(0.1, 1.0, 0.0);
+        assert_eq!(sys.len(), 1, "still alive at ramp 1");
+        assert_eq!(sys.particles()[0].color, 0x6d, "color stepped to ramp1[1]");
+        // Frames 2..7 push ramp to 7.0 -> color ramp1[7] = 0x61 (last valid).
+        for _ in 0..6 {
+            sys.advance(0.1, 1.0, 0.0);
+        }
+        assert_eq!(sys.len(), 1, "alive at ramp 7 (last valid index)");
+        assert_eq!(sys.particles()[0].color, 0x61, "color at ramp1[7]");
+        // One more frame: ramp -> 8.0 >= 8 => particle dies (die set to now-1).
+        sys.advance(0.1, 1.0, 0.0);
+        assert!(sys.is_empty(), "Explode particle retires once ramp >= 8");
+    }
+
+    #[test]
+    fn advance_explode_velocity_grows_and_explode2_shrinks() {
+        // Explode velocity scales by (1+4*dt) per axis; Explode2 by (1-dt).
+        let mut sys = ParticleSystem::new();
+        sys.particles.push(Particle {
+            origin: [0.0; 3],
+            velocity: [100.0, 0.0, 0.0],
+            color: 0x6f,
+            die: 1000.0,
+            kind: ParticleKind::Explode,
+            ramp: 0.0,
+        });
+        sys.particles.push(Particle {
+            origin: [0.0; 3],
+            velocity: [100.0, 0.0, 0.0],
+            color: 0x6f,
+            die: 1000.0,
+            kind: ParticleKind::Explode2,
+            ramp: 0.0,
+        });
+        // dt = 0.1, gravity 0 so the Z nudge does not muddy the X scaling.
+        sys.advance(0.1, 1.0, 0.0);
+        // Explode: 100 * (1 + 4*0.1) = 140.
+        assert!((sys.particles()[0].velocity[0] - 140.0).abs() < 1e-3);
+        // Explode2: 100 * (1 - 0.1) = 90.
+        assert!((sys.particles()[1].velocity[0] - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn ramp_color_is_bounds_safe() {
+        // Below the limit returns the floored index; at/above the limit and NaN
+        // return None (the caller then kills the particle) — never a panic.
+        assert_eq!(ramp_color(&RAMP1, 0.0, 8.0), Some(0x6f));
+        assert_eq!(ramp_color(&RAMP1, 7.9, 8.0), Some(0x61));
+        assert_eq!(ramp_color(&RAMP1, 8.0, 8.0), None);
+        assert_eq!(ramp_color(&RAMP3, 5.5, 6.0), Some(0x03));
+        assert_eq!(ramp_color(&RAMP3, 6.0, 6.0), None);
+        assert_eq!(ramp_color(&RAMP1, f32::NAN, 8.0), None);
+        assert_eq!(ramp_color(&RAMP1, -1.0, 8.0), Some(0x6f)); // clamped to idx 0
     }
 }

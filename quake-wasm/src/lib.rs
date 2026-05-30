@@ -20,7 +20,7 @@ use quake_rs::pak::Pak;
 use quake_rs::particles::{Lcg, ParticleSystem};
 use quake_rs::progs::Progs;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
-use quake_rs::server::{Server, UserCmd};
+use quake_rs::server::{Server, TempEntityEvent, UserCmd};
 
 static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
 
@@ -508,6 +508,52 @@ pub extern "C" fn sound_ptr() -> *const u8 {
 // Per-mode rendering
 // ---------------------------------------------------------------------------
 
+/// The explosion sound a rocket/grenade/tarbaby temp entity plays
+/// (the C `cl_sfx_r_exp3` = `weapons/r_exp3.wav`).
+const TE_EXPLOSION_SOUND: &str = "weapons/r_exp3.wav";
+
+/// Realise one decoded [`TempEntityEvent`] into `particles`, porting the
+/// effect-mapping half of `CL_ParseTEnt`: explosion types spawn a
+/// 1024-particle [`ParticleSystem::spawn_explosion`] (and return the explosion
+/// sound to play), impact types a `R_RunParticleEffect`-style burst with the
+/// matching colour/count, splashes a small upward burst, and beams nothing.
+/// Returns `Some(sound_name)` for the explosion types, else `None`.
+fn spawn_temp_entity(
+    particles: &mut ParticleSystem,
+    ev: &TempEntityEvent,
+    now: f32,
+    rng: &mut Lcg,
+) -> Option<&'static str> {
+    use quake_rs::server::te_consts::*;
+    match ev.te_type {
+        TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => {
+            particles.spawn_explosion(ev.pos, now, rng);
+            Some(TE_EXPLOSION_SOUND)
+        }
+        TE_SPIKE => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 0, 10, now, rng);
+            None
+        }
+        TE_SUPERSPIKE | TE_GUNSHOT => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 0, 20, now, rng);
+            None
+        }
+        TE_WIZSPIKE => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 20, 30, now, rng);
+            None
+        }
+        TE_KNIGHTSPIKE => {
+            particles.spawn_burst(ev.pos, [0.0; 3], 226, 20, now, rng);
+            None
+        }
+        TE_LAVASPLASH | TE_TELEPORT => {
+            particles.spawn_burst(ev.pos, [0.0, 0.0, 1.0], 232, 20, now, rng);
+            None
+        }
+        _ => None, // beam/lightning types: no effect here.
+    }
+}
+
 fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // Advance the animation clock (used for liquid warp + sky scroll). Guard
     // against a non-finite/negative dt so the clock only ever moves forward.
@@ -547,6 +593,28 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     let now = w.clock;
     for b in w.server.drain_particles() {
         w.particles.spawn_burst(b.org, b.dir, b.color, b.count, now, &mut w.prng);
+    }
+    // 2c. Realise the temp entities (rocket/grenade explosions, bullet/spike wall
+    //     impacts) the world fired via the Write* builtins. Explosions also queue
+    //     their `weapons/r_exp3.wav` sound through the SAME spatial-audio path the
+    //     other sounds use, with the explosion's world position as its origin.
+    let tents = w.server.drain_temp_entities();
+    let mut te_sounds: Vec<quake_rs::server::SoundEvent> = Vec::new();
+    for ev in &tents {
+        if let Some(name) = spawn_temp_entity(&mut w.particles, ev, now, &mut w.prng) {
+            te_sounds.push(quake_rs::server::SoundEvent {
+                entity: 0,
+                channel: 0,
+                sound_index: -1,
+                sample: name.to_string(),
+                origin: ev.pos,
+                volume: 1.0,
+                attenuation: 1.0,
+            });
+        }
+    }
+    if !te_sounds.is_empty() {
+        queue_sounds(&w.pak, &te_sounds);
     }
     if dt.is_finite() && dt > 0.0 {
         w.particles.advance(dt, now, 800.0 * 0.05);
