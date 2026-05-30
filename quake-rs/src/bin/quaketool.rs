@@ -21,6 +21,7 @@ use std::process::exit;
 use quake_rs::bsp::{self, Bsp};
 use quake_rs::mdl::{Frame as MFrame, Mdl, Skin};
 use quake_rs::pak::Pak;
+use quake_rs::particles::{Lcg, ParticleSystem};
 use quake_rs::progs::{Progs, OFS_RETURN};
 use quake_rs::render::{self, Camera};
 use quake_rs::server::{Server, UserCmd};
@@ -503,6 +504,17 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
+    // Live engine particles (the `particle()` builtin's effect) for this
+    // playtest. Bursts fired by the QuakeC during the frame loops below are
+    // drained, spawned into this pool with a deterministic RNG + the current
+    // game time, aged under gravity, and finally drawn into the POV render so an
+    // explosion/gun-impact shows up as coloured points occluded by walls.
+    let mut particles = ParticleSystem::new();
+    let mut prng = Lcg::new(0x1234_5678);
+    // sv_gravity (800) * the R_DrawParticles particle factor (0.05) as an
+    // acceleration; ParticleSystem::advance multiplies by dt itself.
+    const PARTICLE_GRAVITY: f32 = 800.0 * 0.05;
+
     let mut o = String::new();
     let _ = writeln!(o, "playtest {map_name}: {} entities spawned; player = edict {player}", rep.spawned);
     let _ = writeln!(
@@ -611,6 +623,10 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             nearest = Some((ent, d2, mo));
         }
     }
+    // Snapshot of the particle pool at the frame where the most particles are
+    // alive during combat — used for the POV action shot below (declared out
+    // here so it outlives the combat block).
+    let mut peak_parts: Vec<([f32; 3], u8)> = Vec::new();
     if let Some((mon, d2, mo)) = nearest {
         let mname = server.vm.ent_get_string(mon, "classname");
         let hp_before = server.vm.ent_get_float(mon, "health");
@@ -665,12 +681,33 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         // Hold attack (buttons bit 0) for ~1.5s of game time; collect sounds.
         let fire = UserCmd { yaw, pitch, buttons: 1, ..Default::default() };
         let mut sounds: Vec<String> = Vec::new();
+        let mut total_bursts = 0usize;
+        let mut total_burst_particles = 0i64;
         for _ in 0..15 {
             server.client_frame(&fire, 0.1).map_err(|e| format!("fire frame: {e}"))?;
             for s in server.drain_sounds() {
                 sounds.push(s.sample);
             }
+            // Realise any particle() bursts the QuakeC fired (gun impacts, blood,
+            // gibs), age the pool, and retire the expired ones — exactly the
+            // per-frame cycle the renderer front-end runs.
+            let now = server.time();
+            for b in server.drain_particles() {
+                total_bursts += 1;
+                total_burst_particles += b.count.max(0) as i64;
+                particles.spawn_burst(b.org, b.dir, b.color, b.count, now, &mut prng);
+            }
+            particles.advance(0.1, now, PARTICLE_GRAVITY);
+            if particles.len() > peak_parts.len() {
+                peak_parts =
+                    particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+            }
         }
+        let _ = writeln!(
+            o,
+            "    particle() bursts during combat: {total_bursts} ({total_burst_particles} points); live at end: {}",
+            particles.len()
+        );
         let hp_after = server.vm.ent_get_float(mon, "health");
         let alive = !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true);
         let (b0, weapon, shells) = server.player_attack_state();
@@ -748,8 +785,17 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let viewmodel = weapon_mdl
             .as_ref()
             .map(|mdl| render::Viewmodel { mdl, frame: weapon_frame });
+        // The live particles as (world pos, palette index) for the renderer; they
+        // share the scene z-buffer so any behind a wall are hidden. Use the
+        // peak-combat snapshot so the action shot actually shows the blood burst
+        // (the end-of-combat pool is empty — the monster is dead by then).
+        let parts: Vec<([f32; 3], u8)> = if peak_parts.is_empty() {
+            particles.particles().iter().map(|p| (p.origin, p.color)).collect()
+        } else {
+            peak_parts.clone()
+        };
         // Pass the server clock so liquids warp and sky scrolls in the POV shot.
-        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time());
+        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time(), &parts);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the finished 3-D frame. If
@@ -1117,7 +1163,9 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     };
 
     // Pass the server clock so liquid/sky surfaces are animated for this frame.
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time());
+    // No live particles in this single-shot `scene` command (no per-frame loop),
+    // so the particle slice is empty.
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time(), &[]);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();

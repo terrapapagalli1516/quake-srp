@@ -17,6 +17,7 @@ use quake_rs::bsp::Bsp;
 use quake_rs::demo::{parse_demo, Demo};
 use quake_rs::mdl::Mdl;
 use quake_rs::pak::Pak;
+use quake_rs::particles::{Lcg, ParticleSystem};
 use quake_rs::progs::Progs;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::server::{Server, UserCmd};
@@ -55,6 +56,12 @@ struct Walk {
     /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
     /// the animated special surfaces: liquid warp + sky scroll in the renderer.
     clock: f32,
+    /// Live engine particles (the `particle()` builtin's effect). Bursts the
+    /// QuakeC fires each frame are drained into this pool, aged under gravity,
+    /// and drawn into the scene sharing its z-buffer.
+    particles: ParticleSystem,
+    /// Deterministic RNG for particle spawns (no `rand` crate; std-only).
+    prng: Lcg,
 }
 
 /// Recorded-demo playback state.
@@ -156,6 +163,8 @@ fn build_walk() -> Option<Walk> {
         in_side: 0.0,
         in_attack: false,
         clock: 0.0,
+        particles: ParticleSystem::new(),
+        prng: Lcg::new(0x9E37_79B9),
     })
 }
 
@@ -531,6 +540,18 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     let events = w.server.drain_sounds();
     queue_sounds(&w.pak, &events);
 
+    // 2b. Realise the particle() bursts the world fired this frame (explosions,
+    //     blood, gibs) into the live pool, then age it under gravity and retire
+    //     expired particles. Spawn uses the current game clock for absolute
+    //     lifetimes; advance uses sv_gravity*0.05 as the particle gravity factor.
+    let now = w.clock;
+    for b in w.server.drain_particles() {
+        w.particles.spawn_burst(b.org, b.dir, b.color, b.count, now, &mut w.prng);
+    }
+    if dt.is_finite() && dt > 0.0 {
+        w.particles.advance(dt, now, 800.0 * 0.05);
+    }
+
     // 3. Make sure every live entity's alias model is cached (runtime-spawned
     //    entities — gibs, projectiles — can appear after boot).
     let n = w.server.vm.num_edicts();
@@ -625,8 +646,12 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
         _ => None,
     };
+    // The live particles as (world pos, palette index); they share the scene
+    // z-buffer so any behind a wall are correctly hidden.
+    let parts: Vec<([f32; 3], u8)> =
+        w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
     let mut img =
-        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock);
+        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock, &parts);
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
@@ -679,6 +704,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
         pitch: -f.view_angles[0],
         fov_deg: 90.0,
     };
-    // The recorded server time animates the demo's liquids/sky too.
-    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time)
+    // The recorded server time animates the demo's liquids/sky too. Recorded
+    // demos carry no engine-particle stream here, so the particle slice is empty.
+    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time, &[])
 }

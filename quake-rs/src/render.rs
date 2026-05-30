@@ -2315,7 +2315,7 @@ pub fn render_scene(
     palette: &[[u8; 3]; 256],
     instances: &[ModelInstance],
 ) -> Image {
-    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None, 0.0)
+    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None, 0.0, &[])
 }
 
 /// Render the full scene: the textured world, then each brush submodel
@@ -2341,6 +2341,25 @@ pub fn render_scene(
 /// per call (a plain `[f32; 256]`, no global state) and shared with the world
 /// and brush-submodel passes. Walls, alias models, and the viewmodel ignore
 /// `time` entirely.
+///
+/// ## Particles
+/// `particles` is the live set of engine particles (Quake's `particle()`
+/// builtin effect: explosions, spawns, blood), each a `(world_pos, palette
+/// index)` pair. They are drawn **after** the world / submodels / alias models
+/// but **before** the camera-anchored viewmodel, sharing the same internal
+/// z-buffer — so a particle behind a wall is correctly hidden, while the gun
+/// still draws on top of everything (it has its own depth buffer). Passing an
+/// empty `particles` slice draws no particles and leaves the image identical to
+/// the pre-particle behaviour, which is why [`render_scene`] and every prior
+/// caller can pass `&[]`.
+///
+/// DESIGN NOTE: the particle slice is a trailing parameter on `render_scene_ext`
+/// (option (b) of the task) rather than a separate `draw_particles`-after-render
+/// entry point. `render_scene_ext` returns only the `Image`, not its z-buffer,
+/// so a standalone post-pass could not depth-test against the world; threading
+/// the slice through here lets the particles share the buffer that already
+/// exists. [`draw_particles`] is still exposed as a standalone `pub fn` for
+/// direct testing of the projection + z-test against a caller-owned buffer.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext(
     bsp: &Bsp,
@@ -2352,6 +2371,7 @@ pub fn render_scene_ext(
     bmodels: &[BModelInstance],
     viewmodel: Option<Viewmodel>,
     time: f32,
+    particles: &[(Vec3, u8)],
 ) -> Image {
     let mut image = Image::new(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
@@ -2368,11 +2388,110 @@ pub fn render_scene_ext(
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
     }
+    // Particles draw after the world/models, z-tested against the same buffer so
+    // walls occlude them, but before the viewmodel (which always draws on top).
+    draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h);
     // The weapon viewmodel draws last, on top of the world and every model.
     if let Some(vm) = viewmodel {
         draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, palette, w, h);
     }
     image
+}
+
+/// Draw a set of engine particles into `image`, z-tested and depth-written
+/// against the shared `zbuf`, porting the visible result of Quake's software
+/// `R_DrawParticles` (`d_*.c`).
+///
+/// Each particle is `(world_pos, palette index)`. The projection matches every
+/// other pass in this module (and [`render_scene_ext`], whose buffer this shares):
+/// `rel = p - cam.pos`; the forward depth `vz = dot(rel, forward)` is the z-test
+/// key; a particle at or behind the near plane (`vz <= NEAR`) is skipped; the
+/// screen position is `sx = cx + focal*dot(rel,right)/vz`,
+/// `sy = cy - focal*dot(rel,up)/vz`.
+///
+/// A particle is drawn as a small filled square whose half-size ramps with
+/// `1/vz` (1..=3 px), mirroring `R_DrawParticles`' pixel-size ramp that keeps a
+/// near particle from vanishing to a sub-pixel speck. For every covered pixel
+/// the existing z-buffer triangle test is reused: the pixel is written only when
+/// `vz < zbuf[idx]` (strictly nearer), and the depth is written so later, nearer
+/// geometry can still overdraw it. Off-screen pixels are clipped by the loop
+/// bounds; the colour is `palette[color]`.
+///
+/// SAFETY: `w`/`h` of `0`, non-finite projections, and out-of-range indices are
+/// all guarded; the only direct indexing is into the freshly-sized framebuffers,
+/// where the index is provably in bounds.
+pub fn draw_particles(
+    image: &mut Image,
+    zbuf: &mut [f32],
+    cam: &Camera,
+    particles: &[(Vec3, u8)],
+    palette: &[[u8; 3]; 256],
+    w: usize,
+    h: usize,
+) {
+    const NEAR: f32 = 1.0;
+    if w == 0 || h == 0 || particles.is_empty() {
+        return;
+    }
+
+    let (forward, right, up) = cam.basis();
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
+    let tan_half = half_fov.tan();
+    let focal = if tan_half.abs() < 1e-6 {
+        cx
+    } else {
+        (cx as f64 / tan_half) as f32
+    };
+
+    for &(p, color) in particles {
+        let rel = sub(p, cam.pos);
+        let vz = dot(rel, forward);
+        if vz <= NEAR {
+            // At/behind the near plane: skip (matches the world/model near clip).
+            continue;
+        }
+        let vx = dot(rel, right);
+        let vy = dot(rel, up);
+        let sx = cx + focal * vx / vz;
+        let sy = cy - focal * vy / vz;
+        if !(sx.is_finite() && sy.is_finite()) {
+            continue;
+        }
+
+        // Pixel-size ramp: closer particles get a bigger square so a near
+        // particle is not a single sub-pixel speck (R_DrawParticles ramped the
+        // on-screen size with 1/z). Two buckets:
+        //   vz <  512  -> half 1 (3x3 square)
+        //   else       -> half 0 (a single pixel for distant particles)
+        let half: i64 = if vz < 512.0 { 1 } else { 0 };
+
+        let rgb = palette[color as usize];
+
+        // Centre pixel + a (2*half+1) square around it, each pixel z-tested.
+        let cx_px = sx.floor() as i64;
+        let cy_px = sy.floor() as i64;
+        for py in (cy_px - half)..=(cy_px + half) {
+            if py < 0 || py >= h as i64 {
+                continue;
+            }
+            for px in (cx_px - half)..=(cx_px + half) {
+                if px < 0 || px >= w as i64 {
+                    continue;
+                }
+                let idx = (py as usize) * w + (px as usize);
+                if let Some(z) = zbuf.get_mut(idx) {
+                    if vz < *z {
+                        *z = vz;
+                        if let Some(dst) = image.rgb.get_mut(idx) {
+                            *dst = rgb;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3861,7 +3980,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
         let with = render_scene_ext(
             &bsp,
             &cam,
@@ -3873,6 +3992,7 @@ mod tests {
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
             0.0,
+            &[],
         );
 
         let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
@@ -3900,7 +4020,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
         let oob = render_scene_ext(
             &bsp,
             &cam,
@@ -3911,6 +4031,7 @@ mod tests {
             &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0] }],
             None,
             0.0,
+            &[],
         );
         assert_eq!(
             empty.rgb, oob.rgb,
@@ -3928,7 +4049,7 @@ mod tests {
 
         // No alias models, no bmodels.
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
         assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
 
         // Also holds with an alias instance present (the model path is shared).
@@ -3951,6 +4072,7 @@ mod tests {
             &[],
             None,
             0.0,
+            &[],
         );
         assert_eq!(
             a2.rgb, b2.rgb,
@@ -3977,6 +4099,7 @@ mod tests {
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
             0.0,
+            &[],
         );
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
         let shifted = render_scene_ext(
@@ -3989,6 +4112,7 @@ mod tests {
             &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0] }],
             None,
             0.0,
+            &[],
         );
         let changed = centered
             .rgb
@@ -4024,6 +4148,7 @@ mod tests {
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
             0.0,
+            &[],
         );
     }
 
@@ -4135,11 +4260,13 @@ mod tests {
             &bsp, &cam_a, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
+            &[],
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
+            &[],
         );
 
         // Isolate the gun pixels (its unique skin colour) in each frame.
@@ -4195,7 +4322,7 @@ mod tests {
         let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
-        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0);
+        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0, &[]);
         let bg = [10u8, 10, 14];
         let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
@@ -4210,6 +4337,7 @@ mod tests {
             &bsp, &cam, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
+            &[],
         );
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
@@ -4235,7 +4363,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
         assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
     }
 
@@ -4254,8 +4382,9 @@ mod tests {
             &bsp, &cam, 80, 60, &pal, &[], &[],
             Some(Viewmodel { mdl: &frameless, frame: 0 }),
             0.0,
+            &[],
         );
-        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0);
+        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0, &[]);
         assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
@@ -4266,6 +4395,7 @@ mod tests {
             &bsp, &cam, 80, 60, &pal, &[], &[],
             Some(Viewmodel { mdl: &bad, frame: 0 }),
             0.0,
+            &[],
         );
     }
 
@@ -4492,8 +4622,8 @@ mod tests {
         // enough for this assertion.)
         let cam = Camera::looking_at([0.0, 0.0, 100.0], [0.0, 0.0, -128.0], 90.0);
 
-        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6);
+        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6, &[]);
 
         let bg = [10u8, 10, 14];
         assert!(
@@ -4515,8 +4645,8 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
-        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5);
+        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5, &[]);
         assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
         // And it must equal the time-less render_scene wrapper.
         let rs = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
@@ -4832,5 +4962,139 @@ mod tests {
         let hud = Hud { wad: &wad, palette: &pal, health: 100, ammo: 50, armor: 25 };
         draw_hud_into(&mut img, &hud);
         assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
+    }
+
+    // -- Engine particles (draw_particles: projection + z-test) ---------------
+
+    #[test]
+    fn draw_particles_in_front_changes_a_pixel() {
+        // A camera at the origin looking down +X; a particle 100 units straight
+        // ahead must project near screen centre and paint its palette colour over
+        // a fresh (cleared) z-buffer.
+        let w = 80usize;
+        let h = 60usize;
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let bg = [9u8, 9, 9];
+        let mut img = Image::new(w, h, bg);
+        let mut zbuf = vec![f32::INFINITY; w * h];
+        let mut pal = [[0u8, 0, 0]; 256];
+        pal[42] = [200, 50, 30]; // the particle colour
+
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h);
+
+        // Some pixel changed to the particle colour, and the matching z-buffer
+        // slot now holds the particle's forward depth (~100), not +inf.
+        let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
+        assert!(painted > 0, "a particle in front must paint at least one pixel");
+        let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!((nearest - 100.0).abs() < 1.0, "z-buffer holds the particle depth, got {nearest}");
+    }
+
+    #[test]
+    fn draw_particles_behind_wall_is_z_tested_out() {
+        // Same view, but pre-fill the z-buffer with a NEARER depth (a wall at
+        // depth 10) everywhere. A particle at depth 100 is behind it and must NOT
+        // be drawn (the z-test rejects vz >= zbuf).
+        let w = 80usize;
+        let h = 60usize;
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let bg = [9u8, 9, 9];
+        let mut img = Image::new(w, h, bg);
+        let mut zbuf = vec![10.0f32; w * h]; // a wall closer than the particle
+        let mut pal = [[0u8, 0, 0]; 256];
+        pal[42] = [200, 50, 30];
+
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h);
+
+        // Nothing painted: the wall occludes the particle.
+        assert!(
+            img.rgb.iter().all(|&p| p == bg),
+            "a particle behind a nearer wall must be z-tested out (not drawn)"
+        );
+        // And the z-buffer is unchanged (still the wall depth).
+        assert!(zbuf.iter().all(|&z| z == 10.0), "occluded particle must not overwrite the z-buffer");
+    }
+
+    #[test]
+    fn draw_particles_in_front_overwrites_farther_wall() {
+        // A particle CLOSER than the existing z-buffer (a wall at depth 500) must
+        // win the z-test and paint, writing its own depth — the complement of the
+        // occlusion test above.
+        let w = 80usize;
+        let h = 60usize;
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let mut img = Image::new(w, h, [9, 9, 9]);
+        let mut zbuf = vec![500.0f32; w * h]; // a wall FARTHER than the particle
+        let mut pal = [[0u8, 0, 0]; 256];
+        pal[7] = [10, 220, 40];
+
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 7)], &pal, w, h);
+
+        let painted = img.rgb.iter().filter(|&&p| p == [10, 220, 40]).count();
+        assert!(painted > 0, "a particle nearer than the wall must paint");
+        let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!((nearest - 100.0).abs() < 1.0, "nearer particle writes its depth, got {nearest}");
+    }
+
+    #[test]
+    fn draw_particles_behind_camera_is_skipped() {
+        // A particle at/behind the near plane (here directly behind the camera)
+        // must be skipped entirely — no panic, no paint.
+        let w = 40usize;
+        let h = 30usize;
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let bg = [9u8, 9, 9];
+        let mut img = Image::new(w, h, bg);
+        let mut zbuf = vec![f32::INFINITY; w * h];
+        let pal = [[200u8, 200, 200]; 256];
+
+        // -X is behind a camera looking down +X.
+        draw_particles(&mut img, &mut zbuf, &cam, &[([-100.0, 0.0, 0.0], 0)], &pal, w, h);
+        assert!(img.rgb.iter().all(|&p| p == bg), "a particle behind the camera draws nothing");
+    }
+
+    #[test]
+    fn render_scene_empty_particles_matches_no_particles() {
+        // Passing an empty particle slice to render_scene_ext must reproduce the
+        // exact frame render_scene produces (no particles == no change).
+        let bsp = demo_room();
+        let cam = Camera::looking_at([0.0, 0.0, 0.0], [200.0, 0.0, 0.0], 90.0);
+        let pal = [[180u8, 180, 180]; 256];
+        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let baseline = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
+        assert_eq!(
+            with_empty.rgb, baseline.rgb,
+            "render_scene_ext with an empty particle slice must equal render_scene"
+        );
+    }
+
+    #[test]
+    fn render_scene_particles_paint_into_the_world_frame() {
+        // A bright particle placed in the empty centre of demo_room (in front of
+        // the camera, in clear air before the far wall) must change the rendered
+        // frame versus the same scene with no particles.
+        let bsp = demo_room();
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let mut pal = [[60u8, 60, 60]; 256];
+        pal[251] = [255, 0, 255]; // a vivid colour unlikely to match the walls
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        // A particle ~80 units in front of the camera (well before the +256 wall).
+        let with = render_scene_ext(
+            &bsp,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[],
+            None,
+            0.0,
+            &[([-120.0, 0.0, 0.0], 251)],
+        );
+        assert_ne!(without.rgb, with.rgb, "a visible particle must change the frame");
+        assert!(
+            with.rgb.iter().any(|&p| p == [255, 0, 255]),
+            "the particle's palette colour must appear in the frame"
+        );
     }
 }

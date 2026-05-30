@@ -489,9 +489,10 @@ fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
 /// all the network / client-routing builtins that have no world effect in this
 /// headless server (`stuffcmd`, the `Write*` family, `makestatic`,
-/// `lightstyle`, `particle`, `changelevel`, `setspawnparms`, the print routers,
+/// `lightstyle`, `changelevel`, `setspawnparms`, the print routers,
 /// `cvar_set`). (`sound`/`ambientsound` are no longer no-ops: they queue a
-/// [`SoundEvent`] via [`bi_sound`]/[`bi_ambientsound`].)
+/// [`SoundEvent`] via [`bi_sound`]/[`bi_ambientsound`]; `particle` queues a
+/// [`ParticleBurst`] via [`bi_particle`].)
 fn bi_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
@@ -576,6 +577,89 @@ fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
         origin[1] + 0.5 * (mins[1] + maxs[1]),
         origin[2] + 0.5 * (mins[2] + maxs[2]),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Particle-burst queue (PF_particle).
+//
+// The C `PF_particle` -> `SV_StartParticle` wrote an `svc_particle` message
+// into the per-client datagram; the client's `R_RunParticleEffect` then spawned
+// the actual particles into its `d_*` software renderer. This headless server
+// has no client, so — exactly like the sound queue above — each fired
+// `particle()` is captured as a [`ParticleBurst`] in a process-wide thread-local
+// queue that [`Server::drain_particles`] hands to a front-end. The front-end
+// (wasm/quaketool) owns the live [`crate::particles::ParticleSystem`] that turns
+// a drained burst into spawned points, ages them, and draws them into the scene.
+//
+// The reasoning for a `thread_local!` (rather than a field on `Server` or `Vm`)
+// is identical to the sound queue's: builtins are `fn(&mut Vm)` and cannot see
+// the `Server`, and `vm.rs` is off-limits, so the queue cannot hang off either.
+// ---------------------------------------------------------------------------
+
+/// One queued `particle()` burst — the engine `SV_StartParticle` payload,
+/// captured for a front-end instead of being serialised into a client datagram.
+///
+/// The fields mirror `PF_particle`'s arguments verbatim: `org` is the emission
+/// origin, `dir` the direction/speed the C scaled into the velocity, `color` the
+/// base palette index of the 8-entry colour ramp, and `count` the number of
+/// particles to spawn. A front-end replays this through
+/// [`crate::particles::ParticleSystem::spawn_burst`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParticleBurst {
+    /// Emission origin (world space).
+    pub org: [f32; 3],
+    /// Direction/speed the renderer scales into each particle's velocity.
+    pub dir: [f32; 3],
+    /// Base palette index of the colour ramp (`color & ~7` selects the ramp).
+    pub color: u8,
+    /// How many particles to spawn (clamped against the pool cap on spawn).
+    pub count: i32,
+}
+
+thread_local! {
+    /// Process-wide (per-thread) queue [`bi_particle`] pushes to and
+    /// [`Server::drain_particles`] takes. See the module note above; mirrors the
+    /// [`SOUND_EVENTS`] queue exactly.
+    static PARTICLE_BURSTS: std::cell::RefCell<Vec<ParticleBurst>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a fired particle burst onto the thread-local queue.
+fn push_particle_burst(ev: ParticleBurst) {
+    PARTICLE_BURSTS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued particle burst.
+fn take_particle_bursts() -> Vec<ParticleBurst> {
+    PARTICLE_BURSTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// `PF_particle` (#48): `void(vector org, vector dir, float color, float count)
+/// particle`. The C forwarded these straight to `SV_StartParticle`; here we
+/// queue a [`ParticleBurst`] for the front-end's [`crate::particles::ParticleSystem`]
+/// to realise. The base `color` and `count` are kept as the engine domain (a
+/// palette index and a particle count); the colour is cast into a `u8` palette
+/// index (the C `SV_StartParticle` itself wrote `color` as one packet byte).
+///
+/// FAITHFULNESS: the C `SV_StartParticle` early-returned when the network
+/// datagram was nearly full; we have no datagram, so every fired burst is
+/// queued. A negative/huge `count` is preserved as-is and clamped only when the
+/// `ParticleSystem` spawns it, so the engine never allocates on program data.
+fn bi_particle(vm: &mut Vm) -> Result<()> {
+    let org = vm.arg_vector(0);
+    let dir = vm.arg_vector(1);
+    // color is a float palette index; clamp into 0..=255 before the byte cast so
+    // an out-of-range value can never wrap unexpectedly.
+    let color = vm.arg_float(2).clamp(0.0, 255.0) as u8;
+    let count = vm.arg_float(3) as i32;
+
+    push_particle_burst(ParticleBurst {
+        org,
+        dir,
+        color,
+        count,
+    });
+    Ok(())
 }
 
 /// `PF_sound` (#8): `void(entity e, float chan, string sample, float vol,
@@ -689,7 +773,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 41, bi_pointcontents); // pointcontents
     put(t, 44, bi_aim); // aim
     put(t, 45, bi_cvar); // cvar
-    put(t, 48, bi_noop); // particle
+    put(t, 48, bi_particle); // particle (queues a ParticleBurst)
     put(t, 49, bi_changeyaw); // changeyaw
 
     // #52..#59: the network Write* family — all no-ops here.
@@ -1992,6 +2076,17 @@ impl Server {
     /// on the same thread that drove the frame.
     pub fn drain_sounds(&mut self) -> Vec<SoundEvent> {
         take_sound_events()
+    }
+
+    /// Take and clear the queued particle bursts fired by the QuakeC since the
+    /// last drain (`PF_particle` pushes; see [`ParticleBurst`]). A front-end
+    /// calls this once per frame and replays each burst into its
+    /// [`crate::particles::ParticleSystem`]; tests use it to assert an
+    /// explosion/spawn actually emitted particles. The queue is
+    /// process-/thread-local, so call this on the same thread that drove the
+    /// frame (mirrors [`Server::drain_sounds`]).
+    pub fn drain_particles(&mut self) -> Vec<ParticleBurst> {
+        take_particle_bursts()
     }
 
     /// The player's attack-relevant state for verification: `(button0, weapon,
@@ -5050,6 +5145,62 @@ mod tests {
             server.drain_sounds().is_empty(),
             "drain_sounds cleared the queue"
         );
+    }
+
+    #[test]
+    fn bi_particle_queues_burst_and_drain_clears() {
+        // bi_particle (PF_particle, #48) must push a ParticleBurst carrying its
+        // (org, dir, color, count) arguments verbatim, and drain_particles must
+        // return then clear it. Drive the builtin directly by placing its args in
+        // the PARM globals, mirroring bi_sound_queues_event_and_drain_clears.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        // particle(org, dir, color, count): PARM0=org(vec), PARM1=dir(vec),
+        // PARM2=color(float), PARM3=count(float).
+        server.vm.set_gv(OFS_PARM0, [10.0, 20.0, 30.0]);
+        server.vm.set_gv(OFS_PARM0 + 3, [0.0, 0.0, 1.0]);
+        server.vm.set_gf(OFS_PARM0 + 6, 73.0); // base palette index
+        server.vm.set_gf(OFS_PARM0 + 9, 12.0); // count
+
+        bi_particle(&mut server.vm).expect("bi_particle");
+
+        let bursts = server.drain_particles();
+        assert_eq!(bursts.len(), 1, "one burst queued");
+        let b = &bursts[0];
+        assert_eq!(b.org, [10.0, 20.0, 30.0]);
+        assert_eq!(b.dir, [0.0, 0.0, 1.0]);
+        assert_eq!(b.color, 73);
+        assert_eq!(b.count, 12);
+
+        // The queue is empty after draining.
+        assert!(
+            server.drain_particles().is_empty(),
+            "drain_particles cleared the queue"
+        );
+    }
+
+    #[test]
+    fn bi_particle_clamps_out_of_range_color_to_byte() {
+        // A float color outside 0..=255 must clamp into the palette-index byte
+        // range rather than wrapping unexpectedly when cast.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        server.vm.set_gv(OFS_PARM0, [0.0; 3]);
+        server.vm.set_gv(OFS_PARM0 + 3, [0.0; 3]);
+        server.vm.set_gf(OFS_PARM0 + 6, 99999.0); // absurd color -> clamps to 255
+        server.vm.set_gf(OFS_PARM0 + 9, 1.0);
+        bi_particle(&mut server.vm).expect("bi_particle");
+        let b = server.drain_particles();
+        assert_eq!(b[0].color, 255, "out-of-range color clamps to 255");
+
+        server.vm.set_gf(OFS_PARM0 + 6, -10.0); // negative -> clamps to 0
+        bi_particle(&mut server.vm).expect("bi_particle");
+        let b = server.drain_particles();
+        assert_eq!(b[0].color, 0, "negative color clamps to 0");
     }
 
     #[test]
