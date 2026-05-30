@@ -124,6 +124,58 @@ pub fn view_bob(vel_xy: f32, time: f32) -> f32 {
     bob.clamp(-7.0, 4.0)
 }
 
+/// The full-screen colour shift for a leaf content type (Quake's `cshift_water`
+/// / `cshift_slime` / `cshift_lava` from view.c), as `(rgb, percent)` where
+/// `percent` is 0..150. Empty / solid / sky return `None` (no tint).
+pub fn content_cshift(contents: i32) -> Option<([u8; 3], f32)> {
+    match contents {
+        crate::bsp::CONTENTS_WATER => Some(([130, 80, 50], 128.0)),
+        crate::bsp::CONTENTS_SLIME => Some(([0, 25, 5], 150.0)),
+        crate::bsp::CONTENTS_LAVA => Some(([255, 80, 0], 150.0)),
+        _ => None,
+    }
+}
+
+/// Combine colour shifts `(rgb, percent 0..255)` into a single blend colour and
+/// alpha (0..1), porting Quake's `V_CalcBlend` accumulation (each shift is
+/// alpha-over the running total). Empty list / all-zero percents give alpha 0.
+pub fn combine_cshifts(shifts: &[([u8; 3], f32)]) -> ([u8; 3], f32) {
+    let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for &(color, percent) in shifts {
+        if !(percent > 0.0) {
+            continue;
+        }
+        let a2 = (percent / 255.0).clamp(0.0, 1.0);
+        a += a2 * (1.0 - a);
+        if a <= 0.0 {
+            continue;
+        }
+        let an = (a2 / a).clamp(0.0, 1.0); // share of the new colour in the mix
+        r = r * (1.0 - an) + color[0] as f32 * an;
+        g = g * (1.0 - an) + color[1] as f32 * an;
+        b = b * (1.0 - an) + color[2] as f32 * an;
+    }
+    let to_u8 = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+    ([to_u8(r), to_u8(g), to_u8(b)], a.clamp(0.0, 1.0))
+}
+
+/// Blend `color` over every pixel of `image` at `alpha` (0..1) — the full-screen
+/// polyblend (damage flash, underwater/lava/slime tint). `alpha <= 0` is a no-op.
+/// Apply this to the 3-D frame *before* the status-bar HUD (Quake never tints
+/// the sbar).
+pub fn apply_blend(image: &mut Image, color: [u8; 3], alpha: f32) {
+    if !(alpha > 0.0) {
+        return;
+    }
+    let a = alpha.min(1.0);
+    let inv = 1.0 - a;
+    for px in image.rgb.iter_mut() {
+        for c in 0..3 {
+            px[c] = (px[c] as f32 * inv + color[c] as f32 * a).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
 /// A pinhole camera positioned in Quake world space. `yaw` rotates about `+Z`
 /// (0 = facing `+X`, increasing toward `+Y`); `pitch` tilts the forward vector
 /// up/down. Both are in degrees, as is the horizontal field of view `fov_deg`.
@@ -3399,6 +3451,31 @@ mod tests {
         // fixed phase where sin is positive).
         let t = 0.15; // within the bob-up half, sin(cycle) > 0
         assert!(view_bob(320.0, t) > view_bob(80.0, t));
+    }
+
+    #[test]
+    fn screen_blend_damage_tint_and_apply() {
+        // Content shifts: water/slime/lava tint, empty/solid none.
+        assert_eq!(content_cshift(crate::bsp::CONTENTS_WATER), Some(([130, 80, 50], 128.0)));
+        assert_eq!(content_cshift(crate::bsp::CONTENTS_LAVA), Some(([255, 80, 0], 150.0)));
+        assert_eq!(content_cshift(crate::bsp::CONTENTS_EMPTY), None);
+
+        // No shifts => fully transparent.
+        let (_c, a0) = combine_cshifts(&[]);
+        assert_eq!(a0, 0.0);
+
+        // A red damage shift gives a reddish blend with partial alpha.
+        let (c, a) = combine_cshifts(&[([255, 0, 0], 150.0)]);
+        assert!(a > 0.0 && a < 1.0, "alpha {a} should be partial");
+        assert!(c[0] > c[1] && c[0] > c[2], "blend should be reddish, got {c:?}");
+
+        // apply_blend with alpha 0 is a no-op; with alpha>0 it moves pixels toward
+        // the blend colour.
+        let mut img = Image { w: 2, h: 1, rgb: vec![[10, 10, 10], [10, 10, 10]] };
+        apply_blend(&mut img, [255, 0, 0], 0.0);
+        assert_eq!(img.rgb[0], [10, 10, 10], "alpha 0 must not change pixels");
+        apply_blend(&mut img, [255, 0, 0], 0.5);
+        assert!(img.rgb[0][0] > 100 && img.rgb[0][1] < 10, "red 0.5 blend: {:?}", img.rgb[0]);
     }
 
     #[test]

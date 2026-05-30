@@ -58,6 +58,12 @@ struct Walk {
     /// to the next `step_walk` UserCmd then cleared — matching how Quake's
     /// `impulse` console command fires once. 0 means "no impulse this frame".
     next_impulse: i32,
+    /// Full-screen damage-flash intensity (Quake's `CSHIFT_DAMAGE` percent,
+    /// 0..150): bumped when the player loses health/armour and faded each frame.
+    damage_blend: f32,
+    /// Player health+armour total last frame (NaN until known / after a level
+    /// change), used to detect the damage taken this frame for the flash.
+    last_total: f32,
     /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
     /// the animated special surfaces: liquid warp + sky scroll in the renderer.
     clock: f32,
@@ -172,6 +178,8 @@ fn build_walk() -> Option<Walk> {
         in_side: 0.0,
         in_attack: false,
         next_impulse: 0,
+        damage_blend: 0.0,
+        last_total: f32::NAN,
         clock: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
@@ -618,6 +626,9 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.clock = 0.0;
+    // Reset the screen-blend state so the level change does not flash red.
+    w.damage_blend = 0.0;
+    w.last_total = f32::NAN;
     // Drop any events the *outgoing* server queued (the new server starts fresh).
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
@@ -842,6 +853,32 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     let light_styles = w.server.lightstyle_scales(w.clock);
     let mut img =
         render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock, &parts, &active_dlights, &light_styles);
+
+    // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
+    //     player lost health/armour this frame, and tint the view when the eye is
+    //     under water / in lava or slime. Applied to the 3-D frame BEFORE the HUD
+    //     (Quake never tints the status bar).
+    w.damage_blend = (w.damage_blend - dt * 150.0).max(0.0);
+    let total = w.server.vm.ent_get_float(w.player, "health")
+        + w.server.vm.ent_get_float(w.player, "armorvalue");
+    if w.last_total.is_finite() {
+        let lost = (w.last_total - total).max(0.0);
+        if lost > 0.0 {
+            w.damage_blend = (w.damage_blend + 3.0 * lost).min(150.0);
+        }
+    }
+    w.last_total = total;
+    let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
+    if w.damage_blend > 0.0 {
+        shifts.push(([255, 0, 0], w.damage_blend));
+    }
+    if let Some(cs) = render::content_cshift(quake_rs::world::point_contents(&w.bsp, eye)) {
+        shifts.push(cs);
+    }
+    if !shifts.is_empty() {
+        let (bc, ba) = render::combine_cshifts(&shifts);
+        render::apply_blend(&mut img, bc, ba);
+    }
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
