@@ -49,6 +49,16 @@ struct Walk {
     pak: Pak,
     /// Parsed alias models keyed by in-pak name (`None` = absent/unparseable).
     model_cache: HashMap<String, Option<Mdl>>,
+    /// Parsed *external brush* models keyed by in-pak name (`None` =
+    /// absent/unparseable). These are Quake's standalone `maps/b_*.bsp` item
+    /// boxes (explosive box, ammo/health boxes) that items `setmodel()` to at
+    /// runtime. Cached like `model_cache` so a box parses once and backs every
+    /// instance of that item; rendered via [`render::ExternalBModel`].
+    bmodel_cache: HashMap<String, Option<Bsp>>,
+    /// The world map's in-pak path (e.g. `maps/e1m1.bsp`). An entity whose
+    /// `model` equals this is the worldspawn brush — never loaded as an external
+    /// box (it is already drawn as the world).
+    map_name: String,
     player: i32,
     yaw: f32,
     pitch: f32,
@@ -230,6 +240,8 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         gfx_wad,
         pak,
         model_cache: HashMap::new(),
+        bmodel_cache: HashMap::new(),
+        map_name: map.to_string(),
         player,
         yaw,
         pitch: 0.0,
@@ -1053,6 +1065,11 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         if m.ends_with(".mdl") && !w.model_cache.contains_key(&m) {
             let parsed = w.pak.read_file(&m).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
             w.model_cache.insert(m, parsed);
+        } else if m.ends_with(".bsp") && m != w.map_name && !w.bmodel_cache.contains_key(&m) {
+            // An external brush-model item box (maps/b_*.bsp). Parse once and cache;
+            // a missing/unparseable box stores `None` so we never re-read or panic.
+            let parsed = w.pak.read_file(&m).ok().flatten().and_then(|b| Bsp::parse(&b).ok());
+            w.bmodel_cache.insert(m, parsed);
         }
     }
 
@@ -1070,6 +1087,10 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     //    edict — its model would fill the screen in first person.
     let mut descs: Vec<(String, [f32; 3], f32, usize, [u8; 3])> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
+    // External brush-model items (maps/b_*.bsp) as owned (name, origin) pairs; the
+    // borrowing `ExternalBModel` list is built below, after the cache is final, so
+    // the immutable cache borrow does not clash with reading the server here.
+    let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
@@ -1082,6 +1103,15 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
             if let Ok(idx) = num.parse::<usize>() {
                 let origin = w.server.vm.ent_get_vector(ent, "origin");
                 bmodels.push(render::BModelInstance { model_index: idx, origin });
+            }
+            continue;
+        }
+        // External brush-model item boxes: a standalone b_*.bsp the item set as its
+        // model (explosive box, ammo/health boxes). Not the world map itself.
+        if m.ends_with(".bsp") {
+            if m != w.map_name {
+                let origin = w.server.vm.ent_get_vector(ent, "origin");
+                ext_descs.push((m, origin));
             }
             continue;
         }
@@ -1138,6 +1168,15 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
             _ => None,
         })
         .collect();
+    // External brush-model item boxes: resolve each (name, origin) against the
+    // bmodel cache, dropping any box whose bsp was missing/unparseable (`None`).
+    let external: Vec<render::ExternalBModel> = ext_descs
+        .iter()
+        .filter_map(|(name, origin)| match w.bmodel_cache.get(name) {
+            Some(Some(bsp)) => Some(render::ExternalBModel { bsp, origin: *origin }),
+            _ => None,
+        })
+        .collect();
     // Anchor the weapon viewmodel to the camera (drawn last, on top of the world).
     let viewmodel = match w.model_cache.get(&weapon_name) {
         Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
@@ -1153,7 +1192,7 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
     let mut img =
-        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock, &parts, &active_dlights, &light_styles);
+        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles);
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
     //     player lost health/armour this frame, and tint the view when the eye is
@@ -1256,7 +1295,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
     // demos carry no engine-particle stream or dynamic lights here, so those
     // slices are empty; and a demo has no live server to source light styles, so
     // pass the neutral (static) scales.
-    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time, &[], &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
+    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], &[], None, f.time, &[], &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
 }
 
 #[cfg(test)]

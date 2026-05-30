@@ -2627,6 +2627,87 @@ pub struct BModelInstance {
     pub origin: Vec3,
 }
 
+/// One *external* brush model placed in the world: an entire standalone BSP
+/// (e.g. `maps/b_explob.bsp`, `maps/b_shell0.bsp`) drawn as a single item,
+/// placed at `origin`.
+///
+/// In Quake many pickup/item entities (`misc_explobox`, `item_health`,
+/// `item_shells`, `item_rockets`, `item_spikes`, `item_cells`, the armor) are
+/// not alias models — their QuakeC `precache_model`/`setmodel` points at a tiny
+/// brush BSP that ships in the pak (`maps/b_*.bsp`). Each such BSP is a complete
+/// `version 29` map whose **MODEL 0** is the little box brush, defined around the
+/// bsp's own local origin. The item entity then stands that box at its world
+/// `origin`.
+///
+/// This differs from [`BModelInstance`], which references an *inline* submodel of
+/// the **world** bsp by index. An `ExternalBModel` borrows a *separate*, already
+/// parsed [`Bsp`] (so one cached parse can back many instances without cloning)
+/// and always renders that bsp's model-0 faces. It is drawn by [`draw_brush_bsp`]
+/// / [`render_scene_ext`], sharing the world z-buffer so the box occludes — and
+/// is occluded by — the world and every other model correctly.
+pub struct ExternalBModel<'a> {
+    /// The parsed standalone brush BSP (its MODEL 0 is the visible box).
+    pub bsp: &'a Bsp,
+    /// World position to stand the box at (the item entity's `origin`).
+    pub origin: Vec3,
+}
+
+/// Draw an **external** brush model's MODEL-0 faces into `image`, translated to
+/// `origin` and z-tested against the shared `zbuf` — the render path for Quake's
+/// `b_*.bsp` item boxes (explosive box, ammo/health boxes; see [`ExternalBModel`]).
+///
+/// This is the standalone-bsp counterpart to the world-submodel path. It reuses
+/// the exact same brush-face machinery as [`draw_submodel`] (texinfo (s,t) build,
+/// near-clip via [`clip_poly_near`], perspective projection, fan rasterise with
+/// the bsp's **own** miptextures, the static/multi-style lightmap via
+/// [`face_lightmap_dyn`], and the per-pixel z-test) — only the source bsp differs,
+/// so there is no duplicated rasteriser. Because these little boxes carry their
+/// own textures and a baked lightmap (and most are effectively fullbright), a
+/// face with a lightmap uses it and a face without one renders fullbright, exactly
+/// as [`draw_submodel`] already handles.
+///
+/// MODEL index 0 (the whole box brush) is always the one drawn; the function is a
+/// thin wrapper over the shared [`draw_submodel`] implementation with
+/// `model_index = 0`.
+///
+/// SAFETY: every bsp-array access in the shared path goes through `.get()`, so a
+/// malformed or empty external bsp (no models, an out-of-range face/edge/plane/
+/// texinfo) simply draws nothing rather than panicking.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_brush_bsp(
+    image: &mut Image,
+    zbuf: &mut [f32],
+    cam: &Camera,
+    bsp: &Bsp,
+    origin: Vec3,
+    palette: &[[u8; 3]; 256],
+    time: f32,
+    light_styles: &[f32; LIGHTSTYLES],
+) {
+    // The little box bsps are not dynamically lit in the original game; pass no
+    // dynamic lights (so the static/multi-style lightmap, or fullbright, is used).
+    // A fresh turbulent SIN table is built per call — these boxes have no liquid
+    // surfaces in practice, but the shared path needs a table to satisfy the type;
+    // it is cheap (a 256-entry `[f32]`, no global state). Callers that draw many
+    // boxes per frame go through `render_scene_ext`, which builds ONE table and
+    // calls the shared `draw_submodel` directly, so this per-call table only costs
+    // when `draw_brush_bsp` is used standalone (e.g. tests).
+    let turb = TurbTable::new();
+    draw_submodel(
+        image,
+        zbuf,
+        bsp,
+        cam,
+        palette,
+        0,
+        origin,
+        &turb,
+        time,
+        light_styles,
+        &[],
+    );
+}
+
 /// The player's first-person weapon viewmodel: the parsed weapon [`Mdl`]
 /// (`progs/v_shot.mdl` and friends) plus the animation `frame` to pose.
 ///
@@ -2881,6 +2962,7 @@ pub fn render_scene(
         palette,
         instances,
         &[],
+        &[],
         None,
         0.0,
         &[],
@@ -2897,7 +2979,19 @@ pub fn render_scene(
 /// Brush submodels are drawn *before* alias models, matching `render_scene`'s
 /// world-then-models ordering; correctness does not depend on the order because
 /// the shared depth buffer resolves visibility per pixel. Passing an empty
-/// `bmodels` slice and `None` `viewmodel` reproduces [`render_scene`] exactly.
+/// `bmodels`/`external` slice and `None` `viewmodel` reproduces [`render_scene`]
+/// exactly.
+///
+/// ## External brush models (item boxes)
+/// `external` is the set of standalone `b_*.bsp` item boxes — Quake's
+/// `misc_explobox` and the ammo/health pickup boxes (see [`ExternalBModel`]).
+/// Each entry borrows its own parsed [`Bsp`] and is drawn (MODEL 0, translated to
+/// the item origin) by the same brush-face path as the world submodels, **after**
+/// the world and inline submodels but before the alias models, sharing the one
+/// z-buffer so the box occludes / is occluded correctly. These boxes are not
+/// dynamically lit in the original game, so they take the static (or fullbright)
+/// lightmap. An empty `external` slice draws nothing — byte-identical to the
+/// pre-external renderer, which is why every prior caller passes `&[]`.
 ///
 /// The `viewmodel`, when present, is drawn **last and on top** of everything:
 /// it is anchored to the camera (Quake's `cl.viewent`) and uses its own depth
@@ -2963,6 +3057,7 @@ pub fn render_scene_ext(
     palette: &[[u8; 3]; 256],
     models: &[ModelInstance],
     bmodels: &[BModelInstance],
+    external: &[ExternalBModel],
     viewmodel: Option<Viewmodel>,
     time: f32,
     particles: &[(Vec3, u8)],
@@ -2980,6 +3075,18 @@ pub fn render_scene_ext(
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights);
     for bm in bmodels {
         draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights);
+    }
+    // External brush models (Quake's `b_*.bsp` item boxes: explosive box, ammo
+    // and health boxes). Each draws its OWN bsp's MODEL-0 faces, translated to the
+    // item origin, against the shared z-buffer so it occludes/ is occluded by the
+    // world correctly. These boxes are not dynamically lit in the original game,
+    // so the shared submodel path is called with no dlights (its static/multi-
+    // style lightmap, or fullbright, is used). The one `turb` table built above is
+    // reused, so drawing N boxes builds no extra tables. An empty `external` slice
+    // draws nothing, leaving the image identical to the pre-external behaviour —
+    // which is why `render_scene` and every prior caller can pass `&[]`.
+    for ext in external {
+        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[]);
     }
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
@@ -5058,13 +5165,13 @@ mod tests {
         let pal = [[180u8, 180, 180]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
 
-        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         // demo_room has no lighting lump, so faces are fullbright (no lightmap)
         // and dlights cannot attach; the frame must therefore be UNCHANGED even
         // with a light present -- proving dlights never touch non-lightmapped
         // faces and never panic.
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 600.0, 10.0, 0.0, 0.0, 0);
-        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES);
+        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(base.rgb, lit.rgb, "fullbright (lightmap-less) world must ignore dlights");
     }
 
@@ -5342,7 +5449,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let with = render_scene_ext(
             &bsp,
             &cam,
@@ -5352,6 +5459,7 @@ mod tests {
             &[],
             // Place the quad between the camera (-200) and the centre, facing it.
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            &[],
             None,
             0.0,
             &[],
@@ -5392,7 +5500,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let oob = render_scene_ext(
             &bsp,
             &cam,
@@ -5401,6 +5509,7 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0] }],
+            &[],
             None,
             0.0,
             &[],
@@ -5423,7 +5532,7 @@ mod tests {
 
         // No alias models, no bmodels.
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
 
         // Also holds with an alias instance present (the model path is shared).
@@ -5443,6 +5552,7 @@ mod tests {
             120,
             &pal,
             std::slice::from_ref(&inst),
+            &[],
             &[],
             None,
             0.0,
@@ -5473,6 +5583,7 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            &[],
             None,
             0.0,
             &[],
@@ -5488,6 +5599,7 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0] }],
+            &[],
             None,
             0.0,
             &[],
@@ -5526,11 +5638,318 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            &[],
             None,
             0.0,
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+    }
+
+    // -- External brush models (standalone b_*.bsp item boxes) -----------------
+
+    /// A standalone tiny brush BSP (version 29) whose **MODEL 0** is a single
+    /// 64x64 YZ quad at local x = 0, facing -X (outward normal -X) — the smallest
+    /// stand-in for Quake's `maps/b_*.bsp` item boxes. Built around the bsp's own
+    /// local origin so [`ExternalBModel`] / [`draw_brush_bsp`] place it at a world
+    /// origin via the same origin shift the submodel path uses. No inline textures
+    /// (so it takes the flat-colour fallback) and no lighting lump (fullbright).
+    fn tiny_brush_bsp() -> Bsp {
+        use crate::bsp::{DEdge, DFace, DModel, DPlane, DVertex, TexInfo, PLANE_X};
+
+        // Four corners of a 64x64 YZ quad at local x = 0, ordered CCW as seen from
+        // -X (so with the -X plane normal the face is visible from a -X camera).
+        let vertexes = vec![
+            DVertex { point: [0.0, -32.0, -32.0] },
+            DVertex { point: [0.0, 32.0, -32.0] },
+            DVertex { point: [0.0, 32.0, 32.0] },
+            DVertex { point: [0.0, -32.0, 32.0] },
+        ];
+        // Edge 0 is conventionally unused; reserve a dummy then four real edges.
+        let mut edges = vec![DEdge { v: [0, 0] }];
+        let mut surfedges: Vec<i32> = Vec::new();
+        for k in 0..4u16 {
+            let a = k;
+            let b = (k + 1) % 4;
+            let edge_index = edges.len() as i32;
+            edges.push(DEdge { v: [a, b] });
+            surfedges.push(edge_index);
+        }
+        let planes = vec![DPlane { normal: [-1.0, 0.0, 0.0], dist: 0.0, ptype: PLANE_X }];
+        let texinfo = vec![TexInfo {
+            vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            miptex: 0,
+            flags: 0,
+        }];
+        let faces = vec![DFace {
+            planenum: 0,
+            side: 0,
+            firstedge: 0,
+            numedges: 4,
+            texinfo: 0,
+            styles: [0, 0, 0, 0],
+            lightofs: -1,
+        }];
+        // MODEL 0 covers the single face — the whole little box brush.
+        let models = vec![DModel {
+            mins: [-1.0, -32.0, -32.0],
+            maxs: [1.0, 32.0, 32.0],
+            origin: [0.0, 0.0, 0.0],
+            headnode: [0, 0, 0, 0],
+            visleafs: 0,
+            firstface: 0,
+            numfaces: 1,
+        }];
+
+        Bsp {
+            version: 29,
+            entities: String::new(),
+            planes,
+            vertexes,
+            edges,
+            faces,
+            nodes: Vec::new(),
+            leafs: Vec::new(),
+            clipnodes: Vec::new(),
+            texinfo,
+            models,
+            marksurfaces: Vec::new(),
+            surfedges,
+            textures: Vec::new(),
+            visibility: Vec::new(),
+            lighting: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn render_scene_ext_draws_external_brush_bsp() {
+        // An external brush model placed in front of the camera must add /change
+        // pixels relative to an empty `external` list — proving its MODEL-0 faces
+        // are rasterised at the entity origin and depth-tested against the world.
+        let world = demo_room();
+        let box_bsp = tiny_brush_bsp();
+        let pal = [[200u8, 200, 200]; 256];
+        // Look down +X from near the west wall; stand the box at world x = -120,
+        // nearer than the +256 far wall, so it occludes geometry behind it.
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+
+        let without = render_scene_ext(
+            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        let with = render_scene_ext(
+            &world,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[],
+            &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }],
+            None,
+            0.0,
+            &[],
+            &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+
+        // The box is nearer than the far wall, so drawing it must CHANGE pixels.
+        let changed = without
+            .rgb
+            .iter()
+            .zip(with.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "external brush bsp changed no pixels (not drawn)");
+    }
+
+    #[test]
+    fn external_brush_bsp_origin_shifts_geometry() {
+        // The same external box at two different origins must land in different
+        // places: rendering it centred vs shifted +Y changes pixels.
+        let world = demo_room();
+        let box_bsp = tiny_brush_bsp();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+
+        let centered = render_scene_ext(
+            &world,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[],
+            &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }],
+            None,
+            0.0,
+            &[],
+            &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        let shifted = render_scene_ext(
+            &world,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[],
+            &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 120.0, 0.0] }],
+            None,
+            0.0,
+            &[],
+            &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        let changed = centered
+            .rgb
+            .iter()
+            .zip(shifted.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "moving the external box origin should move its pixels");
+    }
+
+    #[test]
+    fn empty_external_slice_matches_no_external() {
+        // Passing an empty `external` slice must be byte-identical to the prior
+        // behaviour (so render_scene and every legacy caller are unchanged).
+        let world = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let a = render_scene(&world, &cam, 160, 120, &pal, &[]);
+        let b = render_scene_ext(
+            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        assert_eq!(a.rgb, b.rgb, "empty external slice must equal render_scene");
+    }
+
+    #[test]
+    fn external_brush_bsp_empty_or_malformed_is_safe() {
+        // A missing box bsp (empty: no models/faces) and one with a corrupt face
+        // must both draw nothing and never panic. The empty-bsp render must equal
+        // the no-external render; the corrupt-face render must not panic.
+        let world = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+
+        // An empty bsp (no models, no faces) — like an unparseable box.
+        let empty = Bsp {
+            version: 29,
+            entities: String::new(),
+            planes: Vec::new(),
+            vertexes: Vec::new(),
+            edges: Vec::new(),
+            faces: Vec::new(),
+            nodes: Vec::new(),
+            leafs: Vec::new(),
+            clipnodes: Vec::new(),
+            texinfo: Vec::new(),
+            models: Vec::new(),
+            marksurfaces: Vec::new(),
+            surfedges: Vec::new(),
+            textures: Vec::new(),
+            visibility: Vec::new(),
+            lighting: Vec::new(),
+        };
+        let baseline = render_scene_ext(
+            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        let with_empty = render_scene_ext(
+            &world,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[],
+            &[ExternalBModel { bsp: &empty, origin: [-120.0, 0.0, 0.0] }],
+            None,
+            0.0,
+            &[],
+            &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        assert_eq!(
+            baseline.rgb, with_empty.rgb,
+            "an empty/missing external box must draw nothing"
+        );
+
+        // A box whose single face references out-of-range edges/planes/texinfo:
+        // the face is skipped, no panic.
+        let mut bad = tiny_brush_bsp();
+        if let Some(f) = bad.faces.last_mut() {
+            f.firstedge = 1_000_000;
+            f.planenum = 30_000;
+            f.texinfo = 30_000;
+        }
+        let _ = render_scene_ext(
+            &world,
+            &cam,
+            80,
+            60,
+            &pal,
+            &[],
+            &[],
+            &[ExternalBModel { bsp: &bad, origin: [-120.0, 0.0, 0.0] }],
+            None,
+            0.0,
+            &[],
+            &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+    }
+
+    #[test]
+    fn draw_brush_bsp_paints_at_projected_location() {
+        // The standalone `draw_brush_bsp` entry must paint into a caller-owned
+        // image + z-buffer at the box's projected location, and a missing/empty
+        // bsp must leave both untouched (no panic).
+        let box_bsp = tiny_brush_bsp();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let (w, h) = (160usize, 120usize);
+        let bg = [10u8, 10, 14];
+
+        let mut image = Image::new(w, h, bg);
+        let mut zbuf = vec![f32::INFINITY; w * h];
+        draw_brush_bsp(
+            &mut image,
+            &mut zbuf,
+            &cam,
+            &box_bsp,
+            [-120.0, 0.0, 0.0],
+            &pal,
+            0.0,
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        let painted = image.rgb.iter().filter(|&&p| p != bg).count();
+        assert!(painted > 0, "draw_brush_bsp painted nothing at the box location");
+        // Some z-buffer cells must now be finite (depth was written).
+        assert!(zbuf.iter().any(|z| z.is_finite()), "draw_brush_bsp wrote no depth");
+
+        // A missing/empty bsp leaves a fresh image untouched and does not panic.
+        let empty = {
+            let mut e = tiny_brush_bsp();
+            e.models.clear();
+            e
+        };
+        let mut image2 = Image::new(w, h, bg);
+        let mut zbuf2 = vec![f32::INFINITY; w * h];
+        draw_brush_bsp(
+            &mut image2,
+            &mut zbuf2,
+            &cam,
+            &empty,
+            [-120.0, 0.0, 0.0],
+            &pal,
+            0.0,
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+        assert!(
+            image2.rgb.iter().all(|&p| p == bg),
+            "an empty external box must leave the image untouched"
         );
     }
 
@@ -5650,7 +6069,7 @@ mod tests {
         let cam_b = Camera { pos: [0.0, 0.0, 0.0], yaw: 137.0, pitch: 0.0, fov_deg: 90.0 };
 
         let img_a = render_scene_ext(
-            &bsp, &cam_a, w, h, &pal, &[], &[],
+            &bsp, &cam_a, w, h, &pal, &[], &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
             &[],
@@ -5658,7 +6077,7 @@ mod tests {
             &NEUTRAL_LIGHTSTYLE_SCALES,
         );
         let img_b = render_scene_ext(
-            &bsp, &cam_b, w, h, &pal, &[], &[],
+            &bsp, &cam_b, w, h, &pal, &[], &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
             &[],
@@ -5719,7 +6138,7 @@ mod tests {
         let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
-        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let bg = [10u8, 10, 14];
         let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
@@ -5731,7 +6150,7 @@ mod tests {
         );
 
         let with_gun = render_scene_ext(
-            &bsp, &cam, w, h, &pal, &[], &[],
+            &bsp, &cam, w, h, &pal, &[], &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
             &[],
@@ -5762,7 +6181,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
     }
 
@@ -5778,14 +6197,14 @@ mod tests {
         let mut frameless = viewmodel_mdl();
         frameless.frames.clear();
         let img = render_scene_ext(
-            &bsp, &cam, 80, 60, &pal, &[], &[],
+            &bsp, &cam, 80, 60, &pal, &[], &[], &[],
             Some(Viewmodel { mdl: &frameless, frame: 0 }),
             0.0,
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
         );
-        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
@@ -5793,7 +6212,7 @@ mod tests {
         bad.triangles = vec![crate::mdl::Triangle { facesfront: 1, vertindex: [0, 1, 9999] }];
         // Must not panic.
         let _ = render_scene_ext(
-            &bsp, &cam, 80, 60, &pal, &[], &[],
+            &bsp, &cam, 80, 60, &pal, &[], &[], &[],
             Some(Viewmodel { mdl: &bad, frame: 0 }),
             0.0,
             &[],
@@ -6025,8 +6444,8 @@ mod tests {
         // enough for this assertion.)
         let cam = Camera::looking_at([0.0, 0.0, 100.0], [0.0, 0.0, -128.0], 90.0);
 
-        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.6, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
 
         let bg = [10u8, 10, 14];
         assert!(
@@ -6048,8 +6467,8 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
-        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 9.5, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
         // And it must equal the time-less render_scene wrapper.
         let rs = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
@@ -6463,7 +6882,7 @@ mod tests {
         let bsp = demo_room();
         let cam = Camera::looking_at([0.0, 0.0, 0.0], [200.0, 0.0, 0.0], 90.0);
         let pal = [[180u8, 180, 180]; 256];
-        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let baseline = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
         assert_eq!(
             with_empty.rgb, baseline.rgb,
@@ -6480,7 +6899,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let mut pal = [[60u8, 60, 60]; 256];
         pal[251] = [255, 0, 255]; // a vivid colour unlikely to match the walls
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         // A particle ~80 units in front of the camera (well before the +256 wall).
         let with = render_scene_ext(
             &bsp,
@@ -6488,6 +6907,7 @@ mod tests {
             160,
             120,
             &pal,
+            &[],
             &[],
             &[],
             None,

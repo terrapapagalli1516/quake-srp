@@ -858,6 +858,11 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let mut model_cache: std::collections::HashMap<String, Option<Mdl>> = std::collections::HashMap::new();
         let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
         let mut bmodels: Vec<render::BModelInstance> = Vec::new();
+        // External brush-model item boxes (maps/b_*.bsp): each item's box bsp is
+        // parsed once (cached by name) and stood at the entity origin. Owned here
+        // so the borrowing `ExternalBModel` list can be built after the loop.
+        let mut ext_cache: std::collections::HashMap<String, Option<Bsp>> = std::collections::HashMap::new();
+        let mut ext_owned: Vec<(Bsp, [f32; 3])> = Vec::new();
         for e in 0..server.vm.num_edicts() {
             if server.vm.edict_free.get(e).copied().unwrap_or(true) || e as i32 == player {
                 continue;
@@ -869,6 +874,20 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 if let Ok(idx) = num.parse::<usize>() {
                     let origin = server.vm.ent_get_vector(ent, "origin");
                     bmodels.push(render::BModelInstance { model_index: idx, origin });
+                }
+                continue;
+            }
+            // External brush-model item box: a standalone b_*.bsp the item set as
+            // its model (explosive box, ammo/health boxes), never the world map.
+            if m.ends_with(".bsp") {
+                if m != map_name {
+                    if !ext_cache.contains_key(&m) {
+                        ext_cache.insert(m.clone(), pak.read_file(&m).ok().flatten().and_then(|b| Bsp::parse(&b).ok()));
+                    }
+                    if let Some(Some(bsp)) = ext_cache.get(&m) {
+                        let origin = server.vm.ent_get_vector(ent, "origin");
+                        ext_owned.push((bsp.clone(), origin));
+                    }
                 }
                 continue;
             }
@@ -890,6 +909,10 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let inst: Vec<render::ModelInstance> = owned
             .iter()
             .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0 })
+            .collect();
+        let external: Vec<render::ExternalBModel> = ext_owned
+            .iter()
+            .map(|(bsp, origin)| render::ExternalBModel { bsp, origin: *origin })
             .collect();
 
         // The first-person weapon viewmodel: the player edict's `weaponmodel`
@@ -922,7 +945,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         // Pass the server clock so liquids warp and sky scrolls in the POV shot,
         // and the animated light-style scales so torches flicker and lights pulse.
         let light_styles = server.lightstyle_scales(server.time());
-        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time(), &parts, &peak_dlights, &light_styles);
+        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, &external, viewmodel, server.time(), &parts, &peak_dlights, &light_styles);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the finished 3-D frame. If
@@ -1468,6 +1491,11 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
     let mut monster_origins: Vec<[f32; 3]> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
+    // External brush-model item boxes (maps/b_*.bsp): parsed once per name and
+    // stood at the entity origin. Owned so the borrowing `ExternalBModel` list can
+    // be built after the loop (same pattern as `owned` for MDLs).
+    let mut ext_cache: HashMap<String, Option<Bsp>> = HashMap::new();
+    let mut ext_owned: Vec<(Bsp, [f32; 3])> = Vec::new();
     let mut skipped_load = 0usize;
 
     let n = server.vm.num_edicts();
@@ -1487,6 +1515,26 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             if let Ok(idx) = num.parse::<usize>() {
                 let origin = server.vm.ent_get_vector(ent, "origin");
                 bmodels.push(render::BModelInstance { model_index: idx, origin });
+            }
+            continue;
+        }
+        // External brush-model item box (maps/b_*.bsp): a standalone bsp the item
+        // set as its model (explosive box, ammo/health boxes). The world map path
+        // itself is never an entity model here (worldspawn is the `*0` branch), but
+        // guard against it explicitly so the world is never re-drawn as a box.
+        if model.ends_with(".bsp") {
+            if model != map_name {
+                if !ext_cache.contains_key(&model) {
+                    let parsed = match pak.read_file(&model) {
+                        Ok(Some(bytes)) => Bsp::parse(&bytes).ok(),
+                        _ => None,
+                    };
+                    ext_cache.insert(model.clone(), parsed);
+                }
+                if let Some(Some(bsp)) = ext_cache.get(&model) {
+                    let origin = server.vm.ent_get_vector(ent, "origin");
+                    ext_owned.push((bsp.clone(), origin));
+                }
             }
             continue;
         }
@@ -1529,6 +1577,10 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             color: *color,
             frame: 0,
         })
+        .collect();
+    let external: Vec<render::ExternalBModel> = ext_owned
+        .iter()
+        .map(|(bsp, origin)| render::ExternalBModel { bsp, origin: *origin })
         .collect();
 
     // Aim the camera from the spawn eye at the nearest model that is not almost
@@ -1586,7 +1638,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     // particles or dynamic lights in this single-shot `scene` command (no
     // per-frame loop), so those slices are empty.
     let light_styles = server.lightstyle_scales(server.time());
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time(), &[], &[], &light_styles);
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &[], &light_styles);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
