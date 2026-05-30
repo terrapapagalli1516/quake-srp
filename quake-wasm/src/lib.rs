@@ -48,6 +48,9 @@ struct Walk {
     in_fwd: f32,
     in_side: f32,
     in_attack: bool,
+    /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
+    /// the animated special surfaces: liquid warp + sky scroll in the renderer.
+    clock: f32,
 }
 
 /// Recorded-demo playback state.
@@ -145,6 +148,7 @@ fn build_walk() -> Option<Walk> {
         in_fwd: 0.0,
         in_side: 0.0,
         in_attack: false,
+        clock: 0.0,
     })
 }
 
@@ -489,6 +493,12 @@ pub extern "C" fn sound_ptr() -> *const u8 {
 // ---------------------------------------------------------------------------
 
 fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
+    // Advance the animation clock (used for liquid warp + sky scroll). Guard
+    // against a non-finite/negative dt so the clock only ever moves forward.
+    if dt.is_finite() && dt > 0.0 {
+        w.clock += dt;
+    }
+
     // 1. Tick the live server with this frame's input. forwardmove/sidemove are
     //    Quake run speeds; the server's SV_ClientThink turns them into motion and
     //    runs every entity's think (so monsters animate and move).
@@ -608,7 +618,7 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
         _ => None,
     };
-    render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel)
+    render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock)
 }
 
 fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
@@ -645,5 +655,6 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
         pitch: -f.view_angles[0],
         fov_deg: 90.0,
     };
-    render::render_scene(&d.bsp, &cam, W, H, &d.palette, &owned)
+    // The recorded server time animates the demo's liquids/sky too.
+    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time)
 }

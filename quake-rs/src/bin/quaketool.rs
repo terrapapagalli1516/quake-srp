@@ -748,7 +748,8 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let viewmodel = weapon_mdl
             .as_ref()
             .map(|mdl| render::Viewmodel { mdl, frame: weapon_frame });
-        let img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel);
+        // Pass the server clock so liquids warp and sky scrolls in the POV shot.
+        let img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time());
         img.write_ppm(path).map_err(|e| format!("write {path}: {e}"))?;
         let _ = writeln!(
             o,
@@ -1098,7 +1099,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         None => base_cam,
     };
 
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None);
+    // Pass the server clock so liquid/sky surfaces are animated for this frame.
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time());
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();

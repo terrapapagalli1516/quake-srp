@@ -737,6 +737,174 @@ fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> Option<([i3
     Some((texmins, extent))
 }
 
+// ---------------------------------------------------------------------------
+// Animated special surfaces: liquid turbulent warp + scrolling sky
+// ---------------------------------------------------------------------------
+//
+// Quake's `TEX_SPECIAL` faces (liquids and sky) are not lightmapped — they are
+// drawn fullbright and *animated* every frame. This port reproduces two of
+// those animations against the same perspective-correct `(s,t)` the textured
+// rasteriser already interpolates:
+//
+//  * **Liquids** (miptex name begins with `*`: `*water1`, `*lava1`, `*slime`,
+//    `*teleport`, …) get the SIN warp of `R_DrawTurbulent` / `EmitWaterPolys`
+//    (`gl_warp.c`): each axis of the sample is displaced by a sine of the OTHER
+//    axis plus time. See [`TurbTable`] / [`warp_st`].
+//  * **Sky** (miptex name begins with `sky`: `sky1`, `sky4`, …) gets the
+//    two-layer SCROLL of `EmitBothSkyLayers` (`gl_warp.c`) over the 256x128 sky
+//    miptexture (two side-by-side 128x128 layers). See [`sky_texel`].
+
+/// `gl_warp.c`'s `TURBSCALE = 256/(2*pi)`: scales a surface coordinate into the
+/// 256-entry sine table's index space.
+const TURBSCALE: f32 = 256.0 / (2.0 * std::f32::consts::PI);
+
+/// The warp amplitude in texels (`AMP` in `gl_warp_sin.h` — the WinQuake float
+/// `turbsin[]` table swings ±8 texels).
+const TURB_AMP: f32 = 8.0;
+
+/// The 256-entry `turbsin` table from `gl_warp.c`: `turbsin[i] = AMP*sin(i*2pi/256)`.
+///
+/// Built once per render (a plain `[f32; 256]`, no `lazy_static`) and borrowed
+/// by the rasteriser. Indexing is masked to `& 255`, so any input is in range.
+struct TurbTable {
+    sin: [f32; 256],
+}
+
+impl TurbTable {
+    /// Compute the table. `const`-friendly arithmetic, but `f32::sin` is not yet
+    /// `const`, so this runs once at render start.
+    fn new() -> TurbTable {
+        let mut sin = [0.0f32; 256];
+        let mut i = 0usize;
+        while i < 256 {
+            sin[i] = TURB_AMP * ((i as f32) * 2.0 * std::f32::consts::PI / 256.0).sin();
+            i += 1;
+        }
+        TurbTable { sin }
+    }
+
+    /// `turbsin[(int)(coord * TURBSCALE) & 255]` — the displacement (in texels)
+    /// applied to one axis as a function of the other axis + time.
+    #[inline]
+    fn at(&self, coord: f32) -> f32 {
+        // `& 255` on the truncated index keeps it in `[0,255]` for any finite
+        // input; non-finite inputs fall back to index 0.
+        let raw = coord * TURBSCALE;
+        let idx = if raw.is_finite() { (raw as i64) & 255 } else { 0 };
+        self.sin[idx as usize]
+    }
+}
+
+/// Apply the liquid SIN warp to a surface coordinate `(s,t)` at game `time`,
+/// returning the displaced `(s2,t2)` to sample, exactly as `EmitWaterPolys`:
+///
+/// ```text
+/// s2 = s + turbsin[(int)((t*0.125 + time) * TURBSCALE) & 255]
+/// t2 = t + turbsin[(int)((s*0.125 + time) * TURBSCALE) & 255]
+/// ```
+///
+/// Each axis is offset by a sine of the *other* axis plus time, so the surface
+/// appears to ripple. The caller still wraps `(s2,t2)` into the (tiling) texture
+/// via `rem_euclid`.
+#[inline]
+fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (f32, f32) {
+    let s2 = s + turb.at(t * 0.125 + time);
+    let t2 = t + turb.at(s * 0.125 + time);
+    (s2, t2)
+}
+
+/// Sample one texel of the two-layer scrolling sky from a 256x128 sky
+/// miptexture, porting `EmitBothSkyLayers` (`gl_warp.c`) / `R_InitSky`.
+///
+/// The sky miptexture is `tw=256` wide, `th=128` tall: two side-by-side
+/// 128x128 layers. Per `R_InitSky`, the **right** half (`[128,256)`) is the
+/// solid background layer, and the **left** half (`[0,128)`) is the alpha
+/// overlay whose palette index `0` is transparent (showing the background
+/// through it). `EmitBothSkyLayers` scrolls the background at `time*8` and the
+/// overlay at `time*16` (twice as fast). Here the perspective-correct surface
+/// `(s,t)` plays the role of the GL sky direction: it is scaled down and the
+/// per-layer scroll offset added, then wrapped into each 128x128 layer.
+///
+/// Returns a palette index. Every lookup is `.get()`-guarded and wrapped with
+/// `rem_euclid`, so a malformed (non-256x128) sky texture never panics: it
+/// simply samples whatever is in range, and a too-small texture yields index 0.
+#[inline]
+fn sky_texel(pixels: &[u8], tw: usize, th: usize, s: f32, t: f32, time: f32) -> u8 {
+    // Layer dimension: the texture is conceptually two `lh`-wide square layers.
+    // Use half the width (clamped to the height) so a real 256x128 sky gives
+    // 128x128 layers; degenerate sizes still stay in range via the wraps below.
+    let lw = (tw / 2).max(1);
+    let lh = th.max(1);
+
+    // The surface (s,t) stand in for the GL sky direction; scale them down so a
+    // wall's worth of texels maps across the layer rather than tiling violently.
+    // (1/8 keeps the cloud features a sensible on-screen size.)
+    let bs = s * 0.125;
+    let bt = t * 0.125;
+
+    // Background (solid) layer: right half, scroll = time*8.
+    let back = {
+        let sx = ((bs + time * 8.0) as i64).rem_euclid(lw as i64) as usize;
+        let sy = (bt as i64).rem_euclid(lh as i64) as usize;
+        // Right half starts at column `lw` (= 128 for a real sky).
+        pixels.get(sy * tw + (lw + sx)).copied().unwrap_or(0)
+    };
+
+    // Overlay (alpha) layer: left half, scroll = time*16. Palette index 0 is
+    // transparent — where transparent, the background shows through.
+    let front = {
+        let sx = ((bs + time * 16.0) as i64).rem_euclid(lw as i64) as usize;
+        let sy = (bt as i64).rem_euclid(lh as i64) as usize;
+        pixels.get(sy * tw + sx).copied().unwrap_or(0)
+    };
+
+    if front != 0 {
+        front
+    } else {
+        back
+    }
+}
+
+/// How the per-pixel `(s,t)` -> texel step of [`raster_triangle_tex`] behaves.
+///
+/// `Normal` is the existing wall path (optional lightmap). `Turb` and `Sky`
+/// drive the animated special-surface sampling above; both are drawn fullbright
+/// (Quake never lightmaps liquids or sky), so they ignore the `lightmap`/`shade`
+/// brightness inputs and the rasteriser applies a fixed unit brightness.
+#[derive(Clone, Copy)]
+enum SurfaceMode<'a> {
+    /// Ordinary wall: sample `pixels` at the interpolated `(s,t)`.
+    Normal,
+    /// Liquid: SIN-warp `(s,t)` by `time` before sampling (fullbright).
+    Turb { turb: &'a TurbTable, time: f32 },
+    /// Sky: two-layer scroll over the 256x128 sky texture by `time` (fullbright).
+    Sky { time: f32 },
+}
+
+/// Which animated kind a miptexture name selects: liquids begin with `*`
+/// (`*water1`, `*lava1`, `*slime`, `*teleport`), sky begins with `sky`
+/// (`sky1`, `sky4`); anything else is an ordinary lightmapped wall.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SurfKind {
+    Normal,
+    Turb,
+    Sky,
+}
+
+/// Classify a miptexture by its name, exactly as Quake's `Mod_LoadFaces`
+/// flags surfaces (`*`-prefixed -> `SURF_DRAWTURB`, `sky`-prefixed ->
+/// `SURF_DRAWSKY`). The match is ASCII case-insensitive on the `sky` prefix to
+/// tolerate `SKY1`-style names; the `*` check is exact.
+fn classify_surface(name: &str) -> SurfKind {
+    if name.starts_with('*') {
+        SurfKind::Turb
+    } else if name.len() >= 3 && name.as_bytes()[..3].eq_ignore_ascii_case(b"sky") {
+        SurfKind::Sky
+    } else {
+        SurfKind::Normal
+    }
+}
+
 /// A projected vertex carrying texture coordinates for perspective-correct
 /// sampling. `vz` is forward depth (used linearly for the z-buffer, to stay
 /// consistent with the flat path); `s`/`t` are Quake surface texel coordinates
@@ -766,6 +934,7 @@ fn raster_triangle_tex(
     palette: &[[u8; 3]; 256],
     shade: f32,
     lightmap: Option<&LightMap>,
+    mode: SurfaceMode,
 ) {
     let w = image.w;
     let h = image.h;
@@ -820,20 +989,44 @@ fn raster_triangle_tex(
             }
             let s = (w0 * soz0 + w1 * soz1 + w2 * soz2) / inv_z;
             let t = (w0 * toz0 + w1 * toz1 + w2 * toz2) / inv_z;
-            let tx = (s as i64).rem_euclid(tw as i64) as usize;
-            let ty = (t as i64).rem_euclid(th as i64) as usize;
-            let texel = match pixels.get(ty * tw + tx) {
-                Some(&p) => p as usize,
-                None => continue,
+
+            // Resolve the palette index and per-pixel brightness per surface
+            // mode. Liquids/sky are fullbright (brightness 1.0, no lightmap);
+            // walls keep the lightmap-or-`shade` brightness.
+            let (texel, brightness) = match mode {
+                SurfaceMode::Normal => {
+                    let tx = (s as i64).rem_euclid(tw as i64) as usize;
+                    let ty = (t as i64).rem_euclid(th as i64) as usize;
+                    let p = match pixels.get(ty * tw + tx) {
+                        Some(&p) => p as usize,
+                        None => continue,
+                    };
+                    // A baked lightmap (indexed by the same surface (s,t), which
+                    // shares the texinfo axes) replaces the flat Lambert `shade`.
+                    let b = match lightmap {
+                        Some(lm) => lm.factor_at(s, t),
+                        None => shade,
+                    };
+                    (p, b)
+                }
+                SurfaceMode::Turb { turb, time } => {
+                    // SIN-warp the (s,t) before the (tiling) wrap; fullbright.
+                    let (s2, t2) = warp_st(turb, s, t, time);
+                    let tx = (s2 as i64).rem_euclid(tw as i64) as usize;
+                    let ty = (t2 as i64).rem_euclid(th as i64) as usize;
+                    let p = match pixels.get(ty * tw + tx) {
+                        Some(&p) => p as usize,
+                        None => continue,
+                    };
+                    (p, 1.0)
+                }
+                SurfaceMode::Sky { time } => {
+                    // Two-layer scrolling sky; fullbright. `sky_texel` does its
+                    // own bounds-checked wrapping over the 256x128 layout.
+                    (sky_texel(pixels, tw, th, s, t, time) as usize, 1.0)
+                }
             };
             let rgb = palette[texel];
-            // Brightness: a baked lightmap replaces the flat Lambert `shade`.
-            // The lightmap is indexed by the same surface `(s,t)` (it shares the
-            // texinfo axes with the wall texture). Fullbright faces keep `shade`.
-            let brightness = match lightmap {
-                Some(lm) => lm.factor_at(s, t),
-                None => shade,
-            };
             *zc = depth;
             if let Some(p) = image.rgb.get_mut(idx) {
                 *p = [
@@ -863,7 +1056,9 @@ pub fn render_bsp_textured(
         return image;
     }
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette);
+    // Static (time 0) world: liquids/sky show their texture but do not advance.
+    let turb = TurbTable::new();
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0);
     image
 }
 
@@ -1105,6 +1300,8 @@ fn draw_world_textured(
     bsp: &Bsp,
     cam: &Camera,
     palette: &[[u8; 3]; 256],
+    turb: &TurbTable,
+    time: f32,
 ) {
     const NEAR: f32 = 1.0;
     let (w, h) = (image.w, image.h);
@@ -1192,9 +1389,21 @@ fn draw_world_textured(
             bsp.textures.get(mi).and_then(|o| o.as_ref())
         });
 
-        // Baked static lightmap for this face (None => fullbright). Computed once
-        // from the world polygon; passed down to every fan triangle.
-        let lightmap = face_lightmap(bsp, face, &world_poly);
+        // Classify the surface (liquid / sky / wall) by its miptex name so the
+        // animated special surfaces route to the warp/scroll sampler. Liquids
+        // and sky are fullbright and NOT lightmapped, so only walls compute a
+        // baked static lightmap.
+        let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
+        let lightmap = if kind == SurfKind::Normal {
+            face_lightmap(bsp, face, &world_poly)
+        } else {
+            None
+        };
+        let mode = match kind {
+            SurfKind::Normal => SurfaceMode::Normal,
+            SurfKind::Turb => SurfaceMode::Turb { turb, time },
+            SurfKind::Sky => SurfaceMode::Sky { time },
+        };
 
         // Project, computing texel coords from the texinfo axes.
         proj.clear();
@@ -1237,7 +1446,7 @@ fn draw_world_textured(
                 for i in 1..proj.len() - 1 {
                     raster_triangle_tex(
                         image, zbuf, v0, proj[i], proj[i + 1],
-                        &mt.pixels, tw, th, palette, shade, lightmap.as_ref(),
+                        &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
                     );
                 }
             }
@@ -1264,7 +1473,7 @@ fn draw_world_textured(
                         for i in 1..proj.len() - 1 {
                             raster_triangle_tex(
                                 image, zbuf, v0, proj[i], proj[i + 1],
-                                &one, 1, 1, &pal1, shade, Some(&lm),
+                                &one, 1, 1, &pal1, shade, Some(&lm), SurfaceMode::Normal,
                             );
                         }
                     }
@@ -1320,6 +1529,7 @@ fn draw_world_textured(
 ///
 /// Every index into BSP-derived data is bounds-checked; a malformed face (or an
 /// out-of-range `model_index`) is skipped, never panicked on.
+#[allow(clippy::too_many_arguments)]
 fn draw_submodel(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -1328,6 +1538,8 @@ fn draw_submodel(
     palette: &[[u8; 3]; 256],
     model_index: usize,
     origin: Vec3,
+    turb: &TurbTable,
+    time: f32,
 ) {
     const NEAR: f32 = 1.0;
     let (w, h) = (image.w, image.h);
@@ -1414,8 +1626,20 @@ fn draw_submodel(
             bsp.textures.get(mi).and_then(|o| o.as_ref())
         });
 
-        // Lightmap from the LOCAL polygon (texinfo extents are origin-independent).
-        let lightmap = face_lightmap(bsp, face, &local_poly);
+        // Classify the surface (liquid / sky / wall) by its miptex name. Liquids
+        // and sky are fullbright and NOT lightmapped; only walls compute a
+        // lightmap (from the LOCAL polygon — texinfo extents are origin-independent).
+        let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
+        let lightmap = if kind == SurfKind::Normal {
+            face_lightmap(bsp, face, &local_poly)
+        } else {
+            None
+        };
+        let mode = match kind {
+            SurfKind::Normal => SurfaceMode::Normal,
+            SurfKind::Turb => SurfaceMode::Turb { turb, time },
+            SurfKind::Sky => SurfaceMode::Sky { time },
+        };
 
         // Project the SHIFTED vertices, but compute (s,t) from the LOCAL vertices.
         proj.clear();
@@ -1466,7 +1690,7 @@ fn draw_submodel(
                 for i in 1..proj.len() - 1 {
                     raster_triangle_tex(
                         image, zbuf, v0, proj[i], proj[i + 1],
-                        &mt.pixels, tw, th, palette, shade, lightmap.as_ref(),
+                        &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
                     );
                 }
             }
@@ -1490,7 +1714,7 @@ fn draw_submodel(
                         for i in 1..proj.len() - 1 {
                             raster_triangle_tex(
                                 image, zbuf, v0, proj[i], proj[i + 1],
-                                &one, 1, 1, &pal1, shade, Some(&lm),
+                                &one, 1, 1, &pal1, shade, Some(&lm), SurfaceMode::Normal,
                             );
                         }
                     }
@@ -1831,6 +2055,7 @@ fn draw_alias_model(
                     palette,
                     shade,
                     None,
+                    SurfaceMode::Normal,
                 );
             }
             _ => {
@@ -2061,7 +2286,7 @@ fn draw_viewmodel(
                 };
                 raster_triangle_tex(
                     image, &mut local_z, mk(0), mk(1), mk(2),
-                    sk.pixels, sk.width, sk.height, palette, shade, None,
+                    sk.pixels, sk.width, sk.height, palette, shade, None, SurfaceMode::Normal,
                 );
             }
             _ => {
@@ -2076,8 +2301,12 @@ fn draw_viewmodel(
 /// draw each alias-model `instances` entry into the same image, sharing one
 /// z-buffer so models and world occlude one another correctly.
 ///
-/// A thin wrapper over [`render_scene_ext`] with no brush submodels and no
-/// viewmodel; kept as the stable entry point the binary and wasm front-ends call.
+/// A thin wrapper over [`render_scene_ext`] with no brush submodels, no
+/// viewmodel, and a static (time 0) world; kept as a stable entry point.
+///
+/// At `time == 0` the animated special surfaces (liquids / sky) show their
+/// texture but do not advance; pass an advancing game time through
+/// [`render_scene_ext`] to make water ripple and sky scroll.
 pub fn render_scene(
     bsp: &Bsp,
     cam: &Camera,
@@ -2086,7 +2315,7 @@ pub fn render_scene(
     palette: &[[u8; 3]; 256],
     instances: &[ModelInstance],
 ) -> Image {
-    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None)
+    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None, 0.0)
 }
 
 /// Render the full scene: the textured world, then each brush submodel
@@ -2103,6 +2332,15 @@ pub fn render_scene(
 /// it is anchored to the camera (Quake's `cl.viewent`) and uses its own depth
 /// buffer ([`draw_viewmodel`]), so a wall directly ahead can never hide the gun
 /// and the shared world depth buffer is left untouched.
+///
+/// `time` is the game/server time in seconds, used to animate the special
+/// surfaces: liquid faces (miptex name `*…`) get the Quake turbulent SIN warp
+/// and sky faces (miptex name `sky…`) get the two-layer scroll. An advancing
+/// `time` makes water ripple and sky drift; `time == 0` renders them static
+/// (still textured, just not animated). The turbulent sine table is built once
+/// per call (a plain `[f32; 256]`, no global state) and shared with the world
+/// and brush-submodel passes. Walls, alias models, and the viewmodel ignore
+/// `time` entirely.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext(
     bsp: &Bsp,
@@ -2113,15 +2351,19 @@ pub fn render_scene_ext(
     models: &[ModelInstance],
     bmodels: &[BModelInstance],
     viewmodel: Option<Viewmodel>,
+    time: f32,
 ) -> Image {
     let mut image = Image::new(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
         return image;
     }
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette);
+    // The turbulent SIN table for liquid warp, built once and shared by the
+    // world + brush-submodel passes (sky needs no table).
+    let turb = TurbTable::new();
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time);
     for bm in bmodels {
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin);
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time);
     }
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
@@ -3373,7 +3615,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
         let with = render_scene_ext(
             &bsp,
             &cam,
@@ -3384,6 +3626,7 @@ mod tests {
             // Place the quad between the camera (-200) and the centre, facing it.
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
+            0.0,
         );
 
         let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
@@ -3411,7 +3654,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
         let oob = render_scene_ext(
             &bsp,
             &cam,
@@ -3421,6 +3664,7 @@ mod tests {
             &[],
             &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0] }],
             None,
+            0.0,
         );
         assert_eq!(
             empty.rgb, oob.rgb,
@@ -3438,7 +3682,7 @@ mod tests {
 
         // No alias models, no bmodels.
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
         assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
 
         // Also holds with an alias instance present (the model path is shared).
@@ -3460,6 +3704,7 @@ mod tests {
             std::slice::from_ref(&inst),
             &[],
             None,
+            0.0,
         );
         assert_eq!(
             a2.rgb, b2.rgb,
@@ -3485,6 +3730,7 @@ mod tests {
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
+            0.0,
         );
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
         let shifted = render_scene_ext(
@@ -3496,6 +3742,7 @@ mod tests {
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0] }],
             None,
+            0.0,
         );
         let changed = centered
             .rgb
@@ -3530,6 +3777,7 @@ mod tests {
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
+            0.0,
         );
     }
 
@@ -3640,10 +3888,12 @@ mod tests {
         let img_a = render_scene_ext(
             &bsp, &cam_a, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
+            0.0,
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
+            0.0,
         );
 
         // Isolate the gun pixels (its unique skin colour) in each frame.
@@ -3699,7 +3949,7 @@ mod tests {
         let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
-        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None);
+        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0);
         let bg = [10u8, 10, 14];
         let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
@@ -3713,6 +3963,7 @@ mod tests {
         let with_gun = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
+            0.0,
         );
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
@@ -3738,7 +3989,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
         assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
     }
 
@@ -3756,8 +4007,9 @@ mod tests {
         let img = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[],
             Some(Viewmodel { mdl: &frameless, frame: 0 }),
+            0.0,
         );
-        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None);
+        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0);
         assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
@@ -3767,6 +4019,305 @@ mod tests {
         let _ = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[],
             Some(Viewmodel { mdl: &bad, frame: 0 }),
+            0.0,
         );
+    }
+
+    // -- Animated special surfaces: turbulent liquid warp + scrolling sky -----
+
+    #[test]
+    fn surface_classification_by_name() {
+        // Liquids begin with '*'; sky begins with 'sky' (case-insensitive);
+        // everything else is an ordinary wall.
+        assert_eq!(classify_surface("*water1"), SurfKind::Turb);
+        assert_eq!(classify_surface("*lava1"), SurfKind::Turb);
+        assert_eq!(classify_surface("*slime"), SurfKind::Turb);
+        assert_eq!(classify_surface("*teleport"), SurfKind::Turb);
+        assert_eq!(classify_surface("sky1"), SurfKind::Sky);
+        assert_eq!(classify_surface("sky4"), SurfKind::Sky);
+        assert_eq!(classify_surface("SKY1"), SurfKind::Sky);
+        assert_eq!(classify_surface("wall_brick"), SurfKind::Normal);
+        assert_eq!(classify_surface("city4_7"), SurfKind::Normal);
+        // Short / edge-case names never panic and default sensibly.
+        assert_eq!(classify_surface(""), SurfKind::Normal);
+        assert_eq!(classify_surface("sk"), SurfKind::Normal);
+        assert_eq!(classify_surface("*"), SurfKind::Turb);
+    }
+
+    #[test]
+    fn turb_table_amplitude_and_wrap() {
+        // The table swings ±AMP and indexing is masked, so any coord is in range.
+        let turb = TurbTable::new();
+        // sin(0) = 0 at index 0.
+        assert!(turb.sin[0].abs() < 1e-5);
+        // Peak magnitude is exactly the amplitude.
+        let max = turb.sin.iter().cloned().fold(f32::MIN, f32::max);
+        let min = turb.sin.iter().cloned().fold(f32::MAX, f32::min);
+        assert!((max - TURB_AMP).abs() < 1e-3, "peak should be +AMP, got {max}");
+        assert!((min + TURB_AMP).abs() < 1e-3, "trough should be -AMP, got {min}");
+        // `at` never panics for huge / negative / non-finite inputs, and the
+        // result stays within the table's range [-AMP, AMP].
+        for &c in &[0.0, 1e9, -1e9, f32::INFINITY, f32::NAN, 12345.6] {
+            let v = turb.at(c);
+            assert!(v.is_finite());
+            assert!(v.abs() <= TURB_AMP + 1e-3);
+        }
+    }
+
+    #[test]
+    fn warp_st_animates_and_stays_bounded() {
+        // The turbulent warp must MOVE the sampled (s,t) as time advances (so the
+        // surface visibly ripples), and the displacement is bounded by ±AMP on
+        // each axis (so a tiling texture's rem_euclid keeps it in range).
+        let turb = TurbTable::new();
+        let (s, t) = (20.0f32, 33.0f32);
+        let (s0, t0) = warp_st(&turb, s, t, 0.0);
+        let (s1, t1) = warp_st(&turb, s, t, 0.37);
+        // Animated: at least one axis differs between the two times.
+        assert!(
+            (s0 - s1).abs() > 1e-4 || (t0 - t1).abs() > 1e-4,
+            "warp should change the sample between two times: ({s0},{t0}) vs ({s1},{t1})"
+        );
+        // Bounded: the displacement off the base coordinate is at most ±AMP.
+        for (warped, base) in [(s1, s), (t1, t)] {
+            assert!((warped - base).abs() <= TURB_AMP + 1e-3);
+        }
+    }
+
+    /// Build a synthetic 64x64 "liquid" miptexture: a vivid gradient of palette
+    /// indices so a small change in the sampled (s,t) lands on a different index.
+    fn synthetic_liquid_pixels() -> Vec<u8> {
+        let mut px = vec![0u8; 64 * 64];
+        for y in 0..64usize {
+            for x in 0..64usize {
+                // A non-trivial pattern: index depends on both axes.
+                px[y * 64 + x] = ((x * 4 + y * 7) % 256) as u8;
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn turbulent_sampler_animates_at_fixed_st() {
+        // Drive `raster_triangle_tex` in Turb mode over a single screen-filling
+        // triangle and confirm that sampling the SAME geometry at two different
+        // `time` values produces a DIFFERENT framebuffer (it animates), while
+        // every sampled index stays in bounds (no panic, no garbage).
+        let turb = TurbTable::new();
+        let pixels = synthetic_liquid_pixels();
+        // A palette that maps each index to a distinct grey so different texels
+        // give different colours.
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, i as u8, i as u8];
+        }
+
+        // One large triangle covering the framebuffer, spanning a range of (s,t)
+        // so the warp samples many texels.
+        let (w, h) = (40usize, 40usize);
+        let render_at = |time: f32| {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut zb = vec![f32::INFINITY; w * h];
+            let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
+            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
+            raster_triangle_tex(
+                &mut img, &mut zb, v0, v1, v2,
+                &pixels, 64, 64, &pal, 1.0, None,
+                SurfaceMode::Turb { turb: &turb, time },
+            );
+            img
+        };
+        let a = render_at(0.0);
+        let b = render_at(0.5);
+
+        // Animated: the two frames must differ somewhere.
+        let changed = a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count();
+        assert!(changed > 0, "turbulent surface must animate between two times");
+
+        // Every drawn pixel is a real palette colour (grey: all channels equal),
+        // proving the sample stayed in bounds (out-of-range would have continued).
+        assert!(
+            a.rgb.iter().any(|p| *p != [0, 0, 0]),
+            "turbulent triangle drew nothing"
+        );
+        for p in a.rgb.iter().chain(b.rgb.iter()) {
+            assert!(p[0] == p[1] && p[1] == p[2], "sampled colour not a palette grey: {p:?}");
+        }
+    }
+
+    /// Build a synthetic 256x128 sky miptexture: the LEFT half (the alpha overlay)
+    /// is index 0 (transparent) in a band and a vivid index elsewhere; the RIGHT
+    /// half (the solid background) is a gradient. So compositing shows the
+    /// background through the transparent overlay band.
+    fn synthetic_sky_pixels() -> Vec<u8> {
+        let mut px = vec![0u8; 256 * 128];
+        for y in 0..128usize {
+            for x in 0..128usize {
+                // Left (overlay) half: transparent (0) in the left third, else 200.
+                px[y * 256 + x] = if x < 42 { 0 } else { 200 };
+                // Right (background) half: a non-zero gradient, never 0.
+                px[y * 256 + (128 + x)] = (1 + ((x + y) % 200)) as u8;
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn sky_sampler_renders_nonbackground_and_animates() {
+        // The sky sampler must (1) produce real (non-framebuffer-background)
+        // pixels — i.e. show the sky texture, not a flat fill — and (2) differ
+        // between two times (it scrolls).
+        let pixels = synthetic_sky_pixels();
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            // Map every index to a distinct, clearly non-zero colour so any
+            // sampled sky texel is visibly different from the [0,0,0] background.
+            *p = [(i as u8).max(1), 255u8.saturating_sub(i as u8), 128];
+        }
+
+        let (w, h) = (48usize, 48usize);
+        let render_at = |time: f32| {
+            let mut img = Image::new(w, h, [0, 0, 0]); // background = pure black
+            let mut zb = vec![f32::INFINITY; w * h];
+            // A triangle spanning a wide (s,t) so the scroll samples many texels.
+            let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 512.0, t: 0.0 };
+            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 512.0 };
+            raster_triangle_tex(
+                &mut img, &mut zb, v0, v1, v2,
+                &pixels, 256, 128, &pal, 1.0, None,
+                SurfaceMode::Sky { time },
+            );
+            img
+        };
+        let a = render_at(0.0);
+        let b = render_at(1.0);
+
+        // (1) Non-background: the sky drew real texels (not a flat empty frame).
+        let drawn = a.rgb.iter().filter(|&&p| p != [0, 0, 0]).count();
+        assert!(drawn > 0, "sky face rendered no pixels (should show the sky texture)");
+
+        // (2) Animated: scrolling shifts the texels, so the two frames differ.
+        let changed = a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count();
+        assert!(changed > 0, "sky must scroll (differ) between two times");
+    }
+
+    #[test]
+    fn sky_texel_composites_overlay_over_background() {
+        // Where the overlay (left half) is transparent (index 0), the background
+        // (right half) shows through; where the overlay is opaque, it wins. At
+        // time 0 there is no scroll, so the layout maps directly.
+        let pixels = synthetic_sky_pixels();
+        let tw = 256usize;
+        let th = 128usize;
+
+        // sky_texel scales (s,t) by 0.125 internally, so to land on overlay
+        // column `c` (in [0,128)) we pass s = c/0.125 = c*8.
+        // Column 0 of the overlay is transparent (x<42) -> shows the background's
+        // column 0 (= 1 + (0+0)%200 = 1).
+        let at0 = sky_texel(&pixels, tw, th, 0.0, 0.0, 0.0);
+        assert_eq!(at0, 1, "transparent overlay should reveal background texel");
+
+        // Column 64 of the overlay is opaque (x>=42) -> the overlay value 200.
+        let at64 = sky_texel(&pixels, tw, th, 64.0 * 8.0, 0.0, 0.0);
+        assert_eq!(at64, 200, "opaque overlay texel should win over background");
+
+        // A degenerate (too-small) sky texture never panics and returns index 0
+        // (everything out of range).
+        let tiny = vec![0u8; 4];
+        assert_eq!(sky_texel(&tiny, 2, 2, 1e6, -1e6, 5.0), 0);
+    }
+
+    #[test]
+    fn special_surfaces_animate_in_full_render() {
+        // End-to-end: a room whose floor is a liquid and whose ceiling is sky
+        // must render those faces (non-background) and the frame must DIFFER
+        // between two game times — water ripples and sky scrolls together.
+        let bsp = special_surface_room();
+        // A palette mapping each index to a distinct colour.
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [(i as u8).max(1), 255u8.saturating_sub(i as u8), (i as u8) ^ 0x55];
+        }
+        // Stand high near the centre looking down at the floor (the liquid),
+        // which fills the frame, so the turbulent warp has plenty of texels to
+        // ripple. (The ceiling sky is also a special face; either animating is
+        // enough for this assertion.)
+        let cam = Camera::looking_at([0.0, 0.0, 100.0], [0.0, 0.0, -128.0], 90.0);
+
+        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6);
+
+        let bg = [10u8, 10, 14];
+        assert!(
+            a.rgb.iter().any(|&p| p != bg),
+            "special-surface room rendered nothing"
+        );
+        let changed = a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count();
+        assert!(
+            changed > 0,
+            "liquid/sky faces must animate between two game times"
+        );
+    }
+
+    #[test]
+    fn demo_room_unaffected_by_time() {
+        // demo_room has no special textures (no inline miptex at all), so it must
+        // take the Normal path and render IDENTICALLY at any time — the animation
+        // never touches ordinary walls.
+        let bsp = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0);
+        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5);
+        assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
+        // And it must equal the time-less render_scene wrapper.
+        let rs = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
+        assert_eq!(t0.rgb, rs.rgb, "render_scene must equal render_scene_ext(.., 0.0)");
+    }
+
+    /// A [`demo_room`] whose FLOOR is a liquid (`*water1`) and CEILING is sky
+    /// (`sky1`), each backed by a synthetic inline miptexture, so the world pass
+    /// routes those two faces through the turbulent / sky animated samplers while
+    /// the four walls stay ordinary. Used to prove special surfaces animate.
+    fn special_surface_room() -> Bsp {
+        use crate::bsp::{MipTex, TexInfo, TEX_SPECIAL};
+        let mut bsp = demo_room();
+
+        // Two inline miptextures: index 0 = liquid (64x64), index 1 = sky (256x128).
+        let liquid = MipTex {
+            name: "*water1".into(),
+            width: 64,
+            height: 64,
+            offsets: [0, 0, 0, 0],
+            pixels: synthetic_liquid_pixels(),
+        };
+        let sky = MipTex {
+            name: "sky1".into(),
+            width: 256,
+            height: 128,
+            offsets: [0, 0, 0, 0],
+            pixels: synthetic_sky_pixels(),
+        };
+        bsp.textures = vec![Some(liquid), Some(sky)];
+
+        // Rebuild texinfo: an axis-aligned set where miptex 0 (liquid) and miptex
+        // 1 (sky) are both flagged TEX_SPECIAL; the rest reuse miptex 2 (absent ->
+        // flat fallback, unchanged Normal walls). The floor uses texinfo 0, the
+        // ceiling uses texinfo 1 (matching demo_room's add_quad ordering: floor is
+        // the first face with texinfo 0, ceiling the second with texinfo 1).
+        let axis = |miptex: i32, flags: i32| TexInfo {
+            vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            miptex,
+            flags,
+        };
+        // texinfo 0 -> liquid (special); texinfo 1 -> sky (special); 2.. -> normal.
+        let mut tex = vec![axis(0, TEX_SPECIAL), axis(1, TEX_SPECIAL)];
+        for _ in 2..9 {
+            tex.push(axis(2, 0));
+        }
+        bsp.texinfo = tex;
+        bsp
     }
 }
