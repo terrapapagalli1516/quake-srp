@@ -304,12 +304,18 @@ fn pf_vtos(vm: &mut Vm) -> Result<()> {
 /// `PF_rint` (#36): round to nearest integer. The C does `(int)(f + 0.5)` for
 /// `f > 0` and `(int)(f - 0.5)` for `f <= 0`; both truncate toward zero, which
 /// `as i32` reproduces. We replicate the sign split exactly.
+///
+/// The C's `f` is a `float`, but `f + 0.5` promotes `f` to `double` and adds the
+/// `double` literal `0.5` before the `(int)` truncation. Doing the add in `f32`
+/// can round to a different integer on the half-way boundary (e.g. a float that
+/// sits just under `x.5` rounds up in f32 but not in f64), so we promote to f64
+/// before adding 0.5 to match PF_rint bit-for-bit.
 fn pf_rint(vm: &mut Vm) -> Result<()> {
     let f = vm.arg_float(0);
     let r = if f > 0.0 {
-        (f + 0.5) as i32
+        (f as f64 + 0.5) as i32
     } else {
-        (f - 0.5) as i32
+        (f as f64 - 0.5) as i32
     };
     vm.ret_float(r as f32);
     Ok(())
@@ -745,6 +751,33 @@ mod tests {
         vm.set_gf(OFS_PARM0, -2.6);
         pf_rint(&mut vm).expect("rint");
         assert_eq!(vm.gf(OFS_RETURN), -3.0);
+    }
+
+    #[test]
+    fn rint_promotes_to_f64_at_the_half_boundary() {
+        // FIX-4: PF_rint does `(int)(f + 0.5)` with `f` (a C float) PROMOTED to
+        // double, so the +0.5 happens in double precision. f = 8388609 (an odd
+        // integer in [2^23, 2^24), where the f32 ulp is exactly 1.0) is the
+        // canonical divergence: in f32, `8388609 + 0.5` rounds half-to-even up
+        // to 8388610, so an f32 add would (wrongly) yield 8388610. In f64 the
+        // sum is exactly 8388609.5, truncating to 8388609 — what the C produces.
+        let mut vm = bare_vm();
+        let f = 8_388_609.0f32;
+        vm.set_gf(OFS_PARM0, f);
+        pf_rint(&mut vm).expect("rint");
+        assert_eq!(
+            vm.gf(OFS_RETURN),
+            8_388_609.0,
+            "rint must add 0.5 in f64 (got the f32-rounded 8388610 instead)"
+        );
+        // The symmetric negative case: (int)(f - 0.5) in double = -8388609.
+        vm.set_gf(OFS_PARM0, -f);
+        pf_rint(&mut vm).expect("rint");
+        assert_eq!(
+            vm.gf(OFS_RETURN),
+            -8_388_609.0,
+            "rint must subtract 0.5 in f64 for the negative boundary"
+        );
     }
 
     #[test]

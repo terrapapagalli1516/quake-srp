@@ -1956,7 +1956,7 @@ impl Server {
             }
             MOVETYPE_STEP => {
                 // SV_Physics_Step: freefall if not on ground/fly/swim, then think.
-                self.physics_step(ent, dt);
+                self.physics_step(ent, start_time, dt);
                 let (fired, _alive) = self.run_think(ent, start_time, dt)?;
                 Ok(fired)
             }
@@ -1964,7 +1964,7 @@ impl Server {
                 // SV_Physics_Toss: think first; if alive, gravity + clipped move.
                 let (fired, alive) = self.run_think(ent, start_time, dt)?;
                 if alive {
-                    self.physics_toss(ent, movetype, dt);
+                    self.physics_toss(ent, movetype, start_time, dt);
                 }
                 Ok(fired)
             }
@@ -2011,7 +2011,7 @@ impl Server {
 
         if movetime != 0.0 {
             // SV_PushMove advances ent.ltime if it is not blocked.
-            self.push_move(ent, movetime)?;
+            self.push_move(ent, movetime, start_time)?;
         }
 
         let ltime = self.vm.ent_get_float(ent, "ltime");
@@ -2041,7 +2041,7 @@ impl Server {
     /// entity are restored to their saved origins — and the pusher's `blocked`
     /// function is invoked (caught, never fatal). Otherwise the move stands and
     /// `ltime` is advanced.
-    fn push_move(&mut self, pusher: i32, movetime: f32) -> Result<()> {
+    fn push_move(&mut self, pusher: i32, movetime: f32, sv_time: f32) -> Result<()> {
         let velocity = self.vm.ent_get_vector(pusher, "velocity");
         if velocity[0] == 0.0 && velocity[1] == 0.0 && velocity[2] == 0.0 {
             let lt = self.vm.ent_get_float(pusher, "ltime");
@@ -2151,7 +2151,7 @@ impl Server {
 
             let pusher_solid = self.vm.ent_get_float(pusher, "solid");
             self.vm.ent_set_float(pusher, "solid", SOLID_NOT as f32);
-            self.push_entity(check, mov);
+            self.push_entity(check, mov, sv_time);
             self.vm.ent_set_float(pusher, "solid", pusher_solid);
             // push_entity already linked `check` (SV_PushEntity -> SV_LinkEdict).
 
@@ -2183,20 +2183,37 @@ impl Server {
         }
 
         if let Some(block) = blocker {
-            // Fail the move: restore the pusher.
+            // SV_PushMove (sv_phys.c:530-552) restores in a SPECIFIC order so the
+            // pusher's `blocked` function sees the right world state:
+            //   1. restore the BLOCKER (the stuck entity) and relink it,
+            //   2. restore the PUSHER (origin + ltime) and relink it,
+            //   3. run `blocked` (self=pusher, other=blocker),
+            //   4. ONLY THEN move back the other already-dragged riders.
+            // So when `blocked` runs, the OTHER riders are still at their pushed
+            // positions — restoring them all up-front (as the prior code did)
+            // changed what `blocked` observes.
+
+            // 1. Restore the blocker. `block` is also the last entry in `moved`
+            //    (pushed before its SV_PushEntity), so step 4's loop restores it
+            //    again harmlessly — exactly as the C re-restores moved_edict.
+            let block_saved = moved
+                .iter()
+                .rev()
+                .find(|&&(e, _)| e == block)
+                .map(|&(_, saved)| saved);
+            if let Some(saved) = block_saved {
+                self.vm.ent_set_vector(block, "origin", saved);
+                link_edict(&mut self.vm, block);
+            }
+
+            // 2. Restore the pusher (origin, relink, roll back ltime).
             self.vm.ent_set_vector(pusher, "origin", pushorig);
             link_edict(&mut self.vm, pusher);
             let lt = self.vm.ent_get_float(pusher, "ltime");
             self.vm.ent_set_float(pusher, "ltime", lt - movetime);
 
-            // Restore every entity we moved.
-            for &(e, saved) in &moved {
-                self.vm.ent_set_vector(e, "origin", saved);
-                link_edict(&mut self.vm, e);
-            }
-
-            // If the pusher has a "blocked" function, call it (self=pusher,
-            // other=blocker). Caught, never fatal.
+            // 3. If the pusher has a "blocked" function, call it (self=pusher,
+            //    other=blocker). Caught, never fatal.
             let blocked = self.vm.ent_get_int(pusher, "blocked");
             if blocked > 0 {
                 self.vm.gset_int("self", pusher);
@@ -2204,6 +2221,13 @@ impl Server {
                 if self.vm.execute(blocked as usize).is_err() {
                     self.vm.reset_execution();
                 }
+            }
+
+            // 4. Move back every entity we already dragged (including the blocker
+            //    again — harmless, matches the C loop).
+            for &(e, saved) in &moved {
+                self.vm.ent_set_vector(e, "origin", saved);
+                link_edict(&mut self.vm, e);
             }
         }
 
@@ -2275,7 +2299,7 @@ impl Server {
     /// [`sv_impact`]). An entity already on the ground / flying / swimming skips
     /// the whole branch, including the trigger relink (matching the C, where the
     /// link is inside the freefall branch).
-    fn physics_step(&mut self, ent: i32, dt: f32) {
+    fn physics_step(&mut self, ent: i32, sv_time: f32, dt: f32) {
         let flags = self.vm.ent_get_float(ent, "flags") as i32;
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
             // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
@@ -2286,7 +2310,7 @@ impl Server {
             self.add_gravity(ent, dt);
             self.check_velocity(ent);
             let mut steptrace: Option<MoveTrace> = None;
-            let _ = self.fly_move_core(ent, dt, &mut steptrace);
+            let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
 
             // SV_LinkEdict(ent, true) ends the freefall branch: trip triggers /
             // pickups for the moved entity. This is INSIDE the branch in the C
@@ -2294,7 +2318,7 @@ impl Server {
             // entity that skipped the move does not re-touch here. Skip if a
             // touch impact during the move already removed the entity.
             if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
-                touch_triggers(&mut self.vm, ent);
+                touch_triggers(&mut self.vm, ent, sv_time);
             }
         }
     }
@@ -2303,7 +2327,7 @@ impl Server {
     /// else add gravity (except FLY/FLYMISSILE), integrate angles, and move the
     /// origin via a clipped `PushEntity`. The bounce/stop fixups after an impact
     /// are applied via [`Self::clip_velocity`].
-    fn physics_toss(&mut self, ent: i32, movetype: i32, dt: f32) {
+    fn physics_toss(&mut self, ent: i32, movetype: i32, sv_time: f32, dt: f32) {
         let flags = self.vm.ent_get_float(ent, "flags") as i32;
         if flags & FL_ONGROUND != 0 {
             return; // resting on the ground
@@ -2324,12 +2348,12 @@ impl Server {
         // move origin
         let vel = self.vm.ent_get_vector(ent, "velocity");
         let move_ = crate::math::scale(vel, dt);
-        let tr = self.push_entity(ent, move_);
+        let tr = self.push_entity(ent, move_, sv_time);
 
         // SV_PushEntity ends with SV_LinkEdict(ent, true): trip triggers/pickups
         // for the moved entity (unless a touch impact already removed it).
         if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
-            touch_triggers(&mut self.vm, ent);
+            touch_triggers(&mut self.vm, ent, sv_time);
         }
 
         if tr.fraction == 1.0 {
@@ -2405,7 +2429,7 @@ impl Server {
     ///
     /// `sv_move` borrows the host internally and `sv_impact` executes QuakeC, so
     /// neither is called while the host is held out.
-    fn push_entity(&mut self, ent: i32, push: Vec3) -> HostTrace {
+    fn push_entity(&mut self, ent: i32, push: Vec3, sv_time: f32) -> HostTrace {
         let origin = self.vm.ent_get_vector(ent, "origin");
         let mins = self.vm.ent_get_vector(ent, "mins");
         let maxs = self.vm.ent_get_vector(ent, "maxs");
@@ -2436,7 +2460,7 @@ impl Server {
         // run both touch functions. The C checked `if (trace.ent)`; here a
         // positive index is a non-world edict.
         if mt.ent > 0 {
-            sv_impact(&mut self.vm, ent, mt.ent);
+            sv_impact(&mut self.vm, ent, mt.ent, sv_time);
         }
 
         // Reconstruct the trace_t the toss/step physics consume.
@@ -2800,7 +2824,7 @@ impl Server {
                 if flags & FL_WATERJUMP == 0 {
                     self.add_gravity(ent, dt);
                 }
-                self.walk_move(ent, dt);
+                self.walk_move(ent, start_time, dt);
             }
             MOVETYPE_FLY => {
                 let (f, alive) = self.run_think(ent, start_time, dt)?;
@@ -2809,7 +2833,7 @@ impl Server {
                     return Ok(fired);
                 }
                 self.client_think(ent, cmd, dt);
-                self.player_fly_move(ent, dt);
+                self.player_fly_move(ent, start_time, dt);
             }
             MOVETYPE_NOCLIP => {
                 let (f, alive) = self.run_think(ent, start_time, dt)?;
@@ -2838,13 +2862,18 @@ impl Server {
         // After moving, trip triggers so the player can pick up items / fire
         // trigger fields (the C does this inside SV_LinkEdict during the move;
         // here the move's link is bounds-only, so we touch triggers explicitly).
-        touch_triggers(&mut self.vm, ent);
+        touch_triggers(&mut self.vm, ent, start_time);
         if self.is_free(ent) {
             return Ok(fired);
         }
 
         // call standard player post-think (relink first, like SV_Physics_Client).
+        // SV_Physics_Client (sv_phys.c:1128) sets pr_global_struct->time = sv.time
+        // before PlayerPostThink; without this the global is left at the move's
+        // touch time (or a think's clamped thinktime), so PostThink would read a
+        // stale `time`. run_sys sets self/other but never time.
         link_edict(&mut self.vm, ent);
+        self.vm.gset_float("time", start_time);
         self.run_sys("PlayerPostThink", ent, 0)?;
 
         // The impulse is a one-shot: a usercmd carries it for a single frame.
@@ -3207,7 +3236,13 @@ impl Server {
     /// `FL_ONGROUND` on a floor contact, and runs the touch functions of any
     /// entity it bumps via [`sv_impact`]. `out_steptrace` receives the trace of
     /// the wall hit that triggers stair-stepping.
-    fn fly_move_core(&mut self, ent: i32, dt: f32, out_steptrace: &mut Option<MoveTrace>) -> i32 {
+    fn fly_move_core(
+        &mut self,
+        ent: i32,
+        dt: f32,
+        sv_time: f32,
+        out_steptrace: &mut Option<MoveTrace>,
+    ) -> i32 {
         let num_bumps = 4;
         let mut blocked = 0;
         let original_velocity = self.vm.ent_get_vector(ent, "velocity");
@@ -3272,7 +3307,7 @@ impl Server {
 
             // run the impact function (host present; not inside with_host).
             if trace.ent > 0 {
-                sv_impact(&mut self.vm, ent, trace.ent);
+                sv_impact(&mut self.vm, ent, trace.ent, sv_time);
                 if self.is_free(ent) {
                     break; // removed by the impact function
                 }
@@ -3337,9 +3372,9 @@ impl Server {
     }
 
     /// Plain fly move for `MOVETYPE_FLY` clients (no stair step-up), then relink.
-    fn player_fly_move(&mut self, ent: i32, dt: f32) {
+    fn player_fly_move(&mut self, ent: i32, sv_time: f32, dt: f32) {
         let mut steptrace = None;
-        let _ = self.fly_move_core(ent, dt, &mut steptrace);
+        let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
         link_edict(&mut self.vm, ent);
     }
 
@@ -3348,7 +3383,7 @@ impl Server {
     /// climbs small ledges. Faithful to id's algorithm over the entity-aware
     /// [`Self::fly_move_core`]. Updates `FL_ONGROUND` from the down move and
     /// relinks at the end.
-    fn walk_move(&mut self, ent: i32, dt: f32) {
+    fn walk_move(&mut self, ent: i32, sv_time: f32, dt: f32) {
         // do a regular slide move unless it looks like you ran into a step.
         let oldonground = (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND != 0;
         // Clear ONGROUND; fly_move / the down move below will re-set it.
@@ -3360,7 +3395,7 @@ impl Server {
         let oldvel = self.vm.ent_get_vector(ent, "velocity");
 
         let mut steptrace: Option<MoveTrace> = None;
-        let clip = self.fly_move_core(ent, dt, &mut steptrace);
+        let clip = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
 
         if clip & 2 == 0 {
             // move didn't block on a step.
@@ -3391,17 +3426,17 @@ impl Server {
 
         // move up
         let upmove = [0.0, 0.0, world::STEPSIZE];
-        self.push_entity(ent, upmove);
+        self.push_entity(ent, upmove, sv_time);
 
         // move forward (no vertical wish in velocity).
         self.vm
             .ent_set_vector(ent, "velocity", [oldvel[0], oldvel[1], 0.0]);
         let mut steptrace2 = None;
-        let _ = self.fly_move_core(ent, dt, &mut steptrace2);
+        let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace2);
 
         // move down by STEPSIZE - the vertical the original move would have done.
         let downmove = [0.0, 0.0, -world::STEPSIZE + oldvel[2] * dt];
-        let downtrace = self.push_entity(ent, downmove);
+        let downtrace = self.push_entity(ent, downmove, sv_time);
 
         if downtrace.plane_normal[2] > 0.7 {
             // landed on a walkable floor: keep the stepped result and set ground.
@@ -3676,11 +3711,15 @@ pub fn sv_move(
 /// one bad touch does not abort the caller, mirroring the per-entity
 /// robustness elsewhere in the server. The host must be PRESENT (this calls
 /// `execute`); never invoke it from inside `with_host`.
-pub fn sv_impact(vm: &mut Vm, e1: i32, e2: i32) {
+pub fn sv_impact(vm: &mut Vm, e1: i32, e2: i32, sv_time: f32) {
     let old_self = vm.gget_int("self");
     let old_other = vm.gget_int("other");
-    let time = vm.gget_float("time");
-    vm.gset_float("time", time);
+    // SV_Impact (sv_phys.c:160) sets pr_global_struct->time = sv.time before the
+    // touch functions run, so a touch sees the frame's start time — not a stale
+    // value left in the `time` global by the entity's own think (which
+    // SV_RunThink clamps to [sv.time, sv.time+frametime] and is usually past
+    // sv.time). The C does not restore `time` afterward, matching the order here.
+    vm.gset_float("time", sv_time);
 
     run_touch(vm, e1, e2);
     run_touch(vm, e2, e1);
@@ -3717,7 +3756,7 @@ fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
 /// builtins maintain. Triggers to run are gathered into a `Vec` first (so the
 /// borrow of the edict array ends before any `execute`), then each is run with
 /// `self = trigger`, `other = mover`. A faulting trigger is isolated.
-pub fn touch_triggers(vm: &mut Vm, mover: i32) {
+pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
     // Gather first: collect the trigger edicts to fire so we don't execute
     // QuakeC while iterating (the touch could spawn/free edicts).
     let mover_absmin = vm.ent_get_vector(mover, "absmin");
@@ -3758,7 +3797,6 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32) {
     // Now run each trigger's touch (host is present here).
     let old_self = vm.gget_int("self");
     let old_other = vm.gget_int("other");
-    let time = vm.gget_float("time");
     for t in to_fire {
         // Re-check the edict is still live and a trigger (a prior touch may have
         // freed or changed it).
@@ -3774,7 +3812,10 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32) {
         }
         vm.gset_int("self", t);
         vm.gset_int("other", mover);
-        vm.gset_float("time", time);
+        // SV_TouchLinks (world.c:304) sets pr_global_struct->time = sv.time
+        // before EACH trigger touch, so the touch sees the frame's start time
+        // rather than a stale think-time left in the `time` global.
+        vm.gset_float("time", sv_time);
         if vm.execute(touch as usize).is_err() {
             vm.reset_execution();
         }
@@ -3922,7 +3963,13 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                 vm.ent_set_vector(ent, "origin", tr.endpos);
                 if relink {
                     link_edict(vm, ent);
-                    touch_triggers(vm, ent);
+                    // Reached through movetogoal/walkmove DURING a monster's
+                    // think; sv.time is not threaded here, so preserve the
+                    // pre-fix behaviour (the prior NO-OP set `time` to its own
+                    // current value). See FIX-1 notes: the physics paths get the
+                    // true start-of-frame time; this monster path keeps `time`.
+                    let time = vm.gget_float("time");
+                    touch_triggers(vm, ent, time);
                 }
                 return true;
             }
@@ -3959,7 +4006,9 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             vm.ent_set_vector(ent, "origin", v_add(oldorg, mov));
             if relink {
                 link_edict(vm, ent);
-                touch_triggers(vm, ent);
+                // Monster think path: keep the live `time` global (see FIX-1).
+                let time = vm.gget_float("time");
+                touch_triggers(vm, ent, time);
             }
             let flags = vm.ent_get_float(ent, "flags") as i32;
             vm.ent_set_float(ent, "flags", (flags & !FL_ONGROUND) as f32);
@@ -3977,7 +4026,9 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             // Floor mostly pulled out: keep correcting (accept the move).
             if relink {
                 link_edict(vm, ent);
-                touch_triggers(vm, ent);
+                // Monster think path: keep the live `time` global (see FIX-1).
+                let time = vm.gget_float("time");
+                touch_triggers(vm, ent, time);
             }
             return true;
         }
@@ -3998,7 +4049,9 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
 
     if relink {
         link_edict(vm, ent);
-        touch_triggers(vm, ent);
+        // Monster think path: keep the live `time` global (see FIX-1).
+        let time = vm.gget_float("time");
+        touch_triggers(vm, ent, time);
     }
     true
 }
@@ -4034,11 +4087,15 @@ pub fn sv_step_direction(vm: &mut Vm, ent: i32, yaw: f32, dist: f32) -> bool {
             vm.ent_set_vector(ent, "origin", oldorigin);
         }
         link_edict(vm, ent);
-        touch_triggers(vm, ent);
+        // Monster think path: keep the live `time` global (see FIX-1).
+        let time = vm.gget_float("time");
+        touch_triggers(vm, ent, time);
         return true;
     }
     link_edict(vm, ent);
-    touch_triggers(vm, ent);
+    // Monster think path: keep the live `time` global (see FIX-1).
+    let time = vm.gget_float("time");
+    touch_triggers(vm, ent, time);
     false
 }
 
@@ -5238,6 +5295,109 @@ mod tests {
         (img, touch_fn, g_one as usize, g_flag as usize)
     }
 
+    /// Like [`touch_progs`], but the touch function copies the current `time`
+    /// global into `touched_flag`, so a test can observe exactly which `time`
+    /// value was live when the touch ran. Returns `(img, touch_fn, g_flag)`.
+    fn time_recording_touch_progs() -> (Vec<u8>, usize, usize) {
+        let mut b = Builder::new();
+        b.entityfields = 32;
+
+        let g_flag = 30u16;
+        b.add_global("touched_flag", EV_FLOAT, g_flag);
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        let g_time = 33u16;
+        b.add_global("time", EV_FLOAT, g_time);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("solid", EV_FLOAT, 2);
+        b.add_field("touch", EV_FUNCTION, 3);
+        b.add_field("origin", EV_VECTOR, 4);
+        b.add_field("mins", EV_VECTOR, 7);
+        b.add_field("maxs", EV_VECTOR, 10);
+        b.add_field("absmin", EV_VECTOR, 13);
+        b.add_field("absmax", EV_VECTOR, 16);
+        b.add_field("model", EV_STRING, 19);
+        b.add_field("movetype", EV_FLOAT, 20);
+        b.add_field("nextthink", EV_FLOAT, 21);
+        b.add_field("flags", EV_FLOAT, 22);
+        b.add_field("velocity", EV_VECTOR, 23);
+        b.add_field("size", EV_VECTOR, 26);
+        b.add_field("groundentity", EV_ENTITY, 29);
+        b.add_field("owner", EV_ENTITY, 30);
+
+        // touched_flag = time;  (record the live time global, then DONE)
+        let touch_fn = b.add_function(
+            "record_time",
+            vec![
+                Statement { op: Op::StoreF as u16, a: g_time as i16, b: g_flag as i16, c: 0 },
+                Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            ],
+        );
+
+        (b.build(), touch_fn, g_flag as usize)
+    }
+
+    #[test]
+    fn touch_triggers_resets_time_global_to_sv_time_before_each_touch() {
+        // FIX-1: SV_TouchLinks (world.c:304) sets pr_global_struct->time = sv.time
+        // before each trigger touch. Seed the `time` global with a STALE value (a
+        // prior entity's clamped thinktime) and confirm the touch sees the
+        // start-of-frame sv.time we pass, not the stale value.
+        let (img, touch_fn, g_flag) = time_recording_touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        // A stale time left in the global (e.g. a think clamped to time+frametime).
+        server.vm.gset_float("time", 99.0);
+
+        let mover = server.vm.spawn();
+        server.vm.ent_set_vector(mover, "absmin", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(mover, "absmax", [16.0, 16.0, 16.0]);
+
+        let trigger = server.vm.spawn();
+        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
+        server.vm.ent_set_vector(trigger, "absmin", [-8.0, -8.0, -8.0]);
+        server.vm.ent_set_vector(trigger, "absmax", [8.0, 8.0, 8.0]);
+
+        let sv_time = 5.0;
+        touch_triggers(&mut server.vm, mover, sv_time);
+        assert_eq!(
+            server.vm.gf(g_flag),
+            sv_time,
+            "the trigger touch ran with sv.time, not the stale 99.0"
+        );
+    }
+
+    #[test]
+    fn sv_impact_resets_time_global_to_sv_time_before_touch() {
+        // FIX-1: SV_Impact (sv_phys.c:160) sets pr_global_struct->time = sv.time
+        // before running the touch functions. With a stale `time` global, the
+        // impacted entities' touch must still observe the passed sv.time.
+        let (img, touch_fn, g_flag) = time_recording_touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        server.vm.gset_float("time", 42.0); // stale
+
+        let e1 = server.vm.spawn();
+        server.vm.ent_set_float(e1, "solid", SOLID_BBOX as f32);
+        let e2 = server.vm.spawn();
+        server.vm.ent_set_float(e2, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_int(e2, "touch", touch_fn as i32);
+
+        let sv_time = 7.25;
+        sv_impact(&mut server.vm, e1, e2, sv_time);
+        assert_eq!(
+            server.vm.gf(g_flag),
+            sv_time,
+            "sv_impact ran the touch with sv.time, not the stale 42.0"
+        );
+    }
+
     #[test]
     fn sv_move_stops_at_solid_bbox_entity() {
         // Place a SOLID_BBOX edict ahead at x=100 (a 32-cube) and trace a point
@@ -5455,7 +5615,7 @@ mod tests {
         server.vm.ent_set_vector(blocker, "origin", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(blocker, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(blocker, "maxs", [0.0, 0.0, 0.0]);
-        let tr_normal = server.push_entity(blocker, [200.0, 0.0, 0.0]);
+        let tr_normal = server.push_entity(blocker, [200.0, 0.0, 0.0], 0.0);
         assert!(
             tr_normal.fraction < 1.0,
             "a SOLID_BBOX mover (MOVE_NORMAL) is stopped by the monster"
@@ -5468,7 +5628,7 @@ mod tests {
         server.vm.ent_set_vector(gib, "origin", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(gib, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(gib, "maxs", [0.0, 0.0, 0.0]);
-        let tr_not = server.push_entity(gib, [200.0, 0.0, 0.0]);
+        let tr_not = server.push_entity(gib, [200.0, 0.0, 0.0], 0.0);
         assert_eq!(
             tr_not.fraction, 1.0,
             "a SOLID_NOT mover (MOVE_NOMONSTERS) passes through the monster"
@@ -5481,7 +5641,7 @@ mod tests {
         server.vm.ent_set_vector(trig, "origin", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(trig, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(trig, "maxs", [0.0, 0.0, 0.0]);
-        let tr_trig = server.push_entity(trig, [200.0, 0.0, 0.0]);
+        let tr_trig = server.push_entity(trig, [200.0, 0.0, 0.0], 0.0);
         assert_eq!(
             tr_trig.fraction, 1.0,
             "a SOLID_TRIGGER mover (MOVE_NOMONSTERS) passes through the monster"
@@ -5512,7 +5672,7 @@ mod tests {
         server.vm.ent_set_vector(rocket, "origin", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(rocket, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(rocket, "maxs", [0.0, 0.0, 0.0]);
-        let tr = server.push_entity(rocket, [200.0, 0.0, 0.0]);
+        let tr = server.push_entity(rocket, [200.0, 0.0, 0.0], 0.0);
         assert!(
             tr.fraction < 1.0,
             "a FLYMISSILE mover detonates NEAR the monster, got {}",
@@ -5689,7 +5849,7 @@ mod tests {
         server.vm.ent_set_vector(trigger, "absmax", [8.0, 8.0, 8.0]);
 
         assert_eq!(server.vm.gget_float("touched_flag"), 0.0, "not yet touched");
-        touch_triggers(&mut server.vm, mover);
+        touch_triggers(&mut server.vm, mover, 0.0);
         assert_eq!(
             server.vm.gget_float("touched_flag"),
             1.0,
@@ -5715,7 +5875,7 @@ mod tests {
         server.vm.ent_set_vector(trigger, "absmin", [500.0, 500.0, 500.0]);
         server.vm.ent_set_vector(trigger, "absmax", [532.0, 532.0, 532.0]);
 
-        touch_triggers(&mut server.vm, mover);
+        touch_triggers(&mut server.vm, mover, 0.0);
         assert_eq!(server.vm.gget_float("touched_flag"), 0.0, "far trigger did not fire");
     }
 

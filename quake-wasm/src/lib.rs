@@ -1203,13 +1203,19 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
     d.elapsed += dt;
-    // Advance to the frame matching the recorded server time; loop at the end.
-    while d.idx + 1 < n && (d.demo.frames[d.idx + 1].time - t0) <= d.elapsed {
-        d.idx += 1;
-    }
+    // Wrap BEFORE advancing: only loop back to frame 0 once we were already
+    // sitting on the last frame on a prior step and time has run past it. This
+    // defers the reset by one step so frames[n-1] is rendered (displayed for its
+    // dt) before we snap back to the start — the previous code reset to 0 the
+    // instant `idx` reached n-1, so the final frame was never shown.
     if d.idx + 1 >= n {
         d.idx = 0;
         d.elapsed = 0.0;
+    }
+    // Advance to the frame matching the recorded server time. Stop at the last
+    // frame (n-1); the wrap above handles looping on the FOLLOWING step.
+    while d.idx + 1 < n && (d.demo.frames[d.idx + 1].time - t0) <= d.elapsed {
+        d.idx += 1;
     }
     let f = &d.demo.frames[d.idx];
 
@@ -1399,5 +1405,62 @@ mod tests {
         assert_eq!(SND_QUEUE.with(|q| q.borrow().len()), 1);
         SND_QUEUE.with(|q| q.borrow_mut().clear());
         set_audio_ready(0); // restore default for other tests
+    }
+
+    #[test]
+    fn step_demo_shows_the_last_frame_before_looping() {
+        // FIX-7: the wrap must be DEFERRED so frames[n-1] is rendered for one
+        // step before looping back to frame 0. The old code reset to 0 the
+        // instant `idx` reached n-1, so the final frame was never displayed.
+        use quake_rs::demo::{Demo, DemoFrame};
+
+        let frame = |t: f32| DemoFrame {
+            time: t,
+            view_origin: [0.0, 0.0, 0.0],
+            view_angles: [0.0, 0.0, 0.0],
+            entities: Vec::new(),
+        };
+        let demo = Demo {
+            level_name: "test".into(),
+            // map_name() reads model_precache[1]; unused by step_demo's indexing.
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            // Three frames at t = 0, 1, 2.
+            frames: vec![frame(0.0), frame(1.0), frame(2.0)],
+        };
+        let mut d = DemoPlay {
+            bsp: render::demo_room(),
+            palette: [[0u8; 3]; 256],
+            demo,
+            models: Vec::new(),
+            colors: Vec::new(),
+            elapsed: 0.0,
+            idx: 0,
+        };
+        let n = d.demo.frames.len();
+
+        // Drive several 1.0s steps and record which frame index is RENDERED
+        // (i.e. the value of `idx` chosen by step_demo for that frame).
+        let mut shown = Vec::new();
+        for _ in 0..5 {
+            let _img = step_demo(&mut d, 1.0);
+            shown.push(d.idx);
+        }
+
+        // The last frame (index n-1) must appear in the shown sequence, and it
+        // must be displayed BEFORE the wrap-back-to-0 that follows it.
+        let last = n - 1;
+        let pos = shown
+            .iter()
+            .position(|&i| i == last)
+            .expect("the final frame index must be rendered at least once");
+        assert_eq!(
+            shown.get(pos + 1).copied(),
+            Some(0),
+            "after the last frame is shown, the very next step wraps to frame 0; shown={shown:?}"
+        );
+        // Concretely: 1.0s steps over t={0,1,2} render [1, 2, 0, 1, 2] — frame 2
+        // (the last) is shown, then it loops to 0.
+        assert_eq!(shown, vec![1, 2, 0, 1, 2], "deferred-wrap playback order");
     }
 }

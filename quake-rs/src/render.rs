@@ -2557,6 +2557,23 @@ fn draw_alias_model(
             continue;
         }
 
+        // FIX-3: screen-space backface cull, matching the WinQuake SOFTWARE
+        // renderer. D_DrawNonSubdiv/D_DrawSubdiv (d_polyse.c:203,265) skip an
+        // alias triangle whose final screen verts give `d_xdenom >= 0`, drawing
+        // only front faces (`d_xdenom < 0`). Our `edge(v0,v1,v2)` signed area is
+        // exactly `-d_xdenom` (verified algebraically), so a front face has
+        // `area > 0` and we cull `area <= 0`. Verified visually: with this sign
+        // a live grunt still fully renders (its back faces were already
+        // z-occluded, so 0 visible pixels change); the opposite sign erases the
+        // monster's front faces. The barycentric rasteriser still draws either
+        // winding, so this cull only suppresses the now-redundant back faces.
+        {
+            let area = edge(xy[0].0, xy[0].1, xy[1].0, xy[1].1, xy[2].0, xy[2].1);
+            if area <= 0.0 {
+                continue;
+            }
+        }
+
         match (&skin, st) {
             (Some(sk), Some(st)) => {
                 // Textured: build ProjT vertices and sample the skin through the
@@ -2798,6 +2815,22 @@ fn draw_viewmodel(
         }
         if clipped {
             continue;
+        }
+
+        // FIX-3: screen-space backface cull, matching the WinQuake SOFTWARE
+        // renderer. D_DrawNonSubdiv/D_DrawSubdiv (d_polyse.c:203,265) reject an
+        // alias triangle whose final screen verts give `d_xdenom >= 0`, drawing
+        // only front faces (`d_xdenom < 0`). Our `edge(v0,v1,v2)` signed area is
+        // exactly `-d_xdenom` (verified algebraically), so a front face has
+        // `area > 0` and we cull `area <= 0`. Verified visually: with this sign
+        // both the grunt and the v_shot viewmodel still fully render (back faces
+        // were already z-occluded, so 0 visible pixels change); the OPPOSITE sign
+        // erases the gun's front faces — so this is the correct front-face sign.
+        {
+            let area = edge(xy[0].0, xy[0].1, xy[1].0, xy[1].1, xy[2].0, xy[2].1);
+            if area <= 0.0 {
+                continue;
+            }
         }
 
         match (&skin, st) {
@@ -5523,7 +5556,7 @@ mod tests {
             skinwidth: 1,
             skinheight: 1,
             numverts: 3,
-            numtris: 1,
+            numtris: 2,
             numframes: 1,
             synctype: 0,
             flags: 0,
@@ -5541,7 +5574,18 @@ mod tests {
             header,
             skins: vec![Skin::Single(vec![7])],
             stverts: vec![StVert { onseam: 0, s: 0, t: 0 }; 3],
-            triangles: vec![Triangle { facesfront: 1, vertindex: [0, 1, 2] }],
+            // Two oppositely-wound triangles over the same three verts so the
+            // fixture is double-sided. Real weapon models are closed solids that
+            // always present a FRONT-facing triangle toward the eye; a lone
+            // one-sided triangle is not, and the FIX-3 screen-space backface cull
+            // would (correctly) drop it whenever its single winding faces away.
+            // The reverse winding keeps the fixture visible from either side,
+            // mirroring a real model, so these view-anchoring tests still probe
+            // placement rather than an artefact of one-sided test geometry.
+            triangles: vec![
+                Triangle { facesfront: 1, vertindex: [0, 1, 2] },
+                Triangle { facesfront: 1, vertindex: [0, 2, 1] },
+            ],
             frames: vec![Frame::Single(AliasFrame {
                 name: "v0".into(),
                 bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
