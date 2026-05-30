@@ -783,8 +783,12 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         descs.push((m, origin, yaw, frame, color));
     }
 
-    // 5. Render from the player's eye.
-    let (eye, ang) = w.server.player_view();
+    // 5. Render from the player's eye, with Quake's head-bob added to the eye
+    //    height (V_CalcBob) so the view rocks as the player moves.
+    let (mut eye, ang) = w.server.player_view();
+    let vel = w.server.vm.ent_get_vector(w.player, "velocity");
+    let speed_xy = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
+    let bob = render::view_bob(speed_xy, w.clock);
 
     // Record the listener pose so the page can spatialize this frame's queued
     // sounds. Forward/right are the level (no-pitch) yaw basis, matching the
@@ -800,6 +804,9 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         };
     });
 
+    // Bob the rendered eye only (the listener pose above stays steady so audio
+    // panning does not jitter with the head-bob).
+    eye[2] += bob;
     let cam = Camera {
         pos: eye,
         yaw: ang[1],

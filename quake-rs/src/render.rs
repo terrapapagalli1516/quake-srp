@@ -95,6 +95,35 @@ impl Image {
 // Camera
 // ---------------------------------------------------------------------------
 
+/// Quake's `V_CalcBob` (view.c): the sinusoidal head-bob amount (world units) to
+/// add to the eye height while moving, so the view rocks up and down with each
+/// step. `vel_xy` is the player's horizontal speed (units/sec) and `time` the
+/// game clock (seconds). Uses the stock cvar defaults `cl_bob = 0.02`,
+/// `cl_bobcycle = 0.6`, `cl_bobup = 0.5`; the result is clamped to `[-7, 4]`
+/// exactly as the C. At rest (`vel_xy == 0`) the bob is 0, so a standing view is
+/// unchanged. The first-person weapon, being anchored to the camera, stays
+/// screen-stable while the world bobs — the classic Quake look.
+pub fn view_bob(vel_xy: f32, time: f32) -> f32 {
+    use std::f32::consts::PI;
+    const CL_BOB: f32 = 0.02;
+    const CL_BOBCYCLE: f32 = 0.6;
+    const CL_BOBUP: f32 = 0.5;
+    if !time.is_finite() || !vel_xy.is_finite() {
+        return 0.0;
+    }
+    // Phase within the bob cycle, in [0, 1).
+    let mut cycle = (time - (time / CL_BOBCYCLE).floor() * CL_BOBCYCLE) / CL_BOBCYCLE;
+    cycle = if cycle < CL_BOBUP {
+        PI * cycle / CL_BOBUP
+    } else {
+        PI + PI * (cycle - CL_BOBUP) / (1.0 - CL_BOBUP)
+    };
+    // Bob is proportional to horizontal speed, mostly the sin term.
+    let base = vel_xy * CL_BOB;
+    let bob = base * 0.3 + base * 0.7 * cycle.sin();
+    bob.clamp(-7.0, 4.0)
+}
+
 /// A pinhole camera positioned in Quake world space. `yaw` rotates about `+Z`
 /// (0 = facing `+X`, increasing toward `+Y`); `pitch` tilts the forward vector
 /// up/down. Both are in degrees, as is the horizontal field of view `fov_deg`.
@@ -3345,6 +3374,32 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_bob_is_zero_at_rest_and_oscillates_when_moving() {
+        // Standing still: no bob, at any time.
+        for &t in &[0.0, 0.13, 0.5, 1.7, 42.0] {
+            assert_eq!(view_bob(0.0, t), 0.0, "rest bob must be 0 at t={t}");
+        }
+        // Moving: the bob is bounded to [-7, 4] and actually varies over a cycle
+        // (it is a sinusoid of the phase), so min and max across a cycle differ.
+        let speed = 320.0; // typical run speed
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for i in 0..120 {
+            let t = i as f32 * 0.01; // sweep ~2 bob cycles (cl_bobcycle = 0.6)
+            let b = view_bob(speed, t);
+            assert!(b.is_finite());
+            assert!((-7.0..=4.0).contains(&b), "bob {b} out of clamp range");
+            lo = lo.min(b);
+            hi = hi.max(b);
+        }
+        assert!(hi - lo > 0.5, "bob should oscillate over a cycle (got {lo}..{hi})");
+        // Faster movement bobs at least as hard as slower (monotone in speed at a
+        // fixed phase where sin is positive).
+        let t = 0.15; // within the bob-up half, sin(cycle) > 0
+        assert!(view_bob(320.0, t) > view_bob(80.0, t));
+    }
 
     #[test]
     fn palette_parsing() {
