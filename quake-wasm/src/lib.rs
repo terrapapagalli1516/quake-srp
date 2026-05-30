@@ -18,7 +18,7 @@ use quake_rs::demo::{parse_demo, Demo};
 use quake_rs::mdl::Mdl;
 use quake_rs::pak::Pak;
 use quake_rs::progs::Progs;
-use quake_rs::render::{self, Camera, ModelInstance};
+use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::server::{Server, UserCmd};
 
 static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
@@ -287,12 +287,50 @@ pub extern "C" fn framebuffer() -> *const u8 {
 
 // --- sound: hand real Quake .wav bytes out of the pak for the page to play ---
 
+/// Spatial parameters for one queued sound: its world emission point, volume
+/// (`0.0..=1.0`) and attenuation (`0.0..=4.0`, where 0 = audible everywhere).
+#[derive(Clone, Copy)]
+struct SndParams {
+    origin: [f32; 3],
+    volume: f32,
+    attenuation: f32,
+}
+
+impl SndParams {
+    const fn zero() -> Self {
+        SndParams { origin: [0.0; 3], volume: 0.0, attenuation: 0.0 }
+    }
+}
+
 thread_local! {
     /// Scratch buffer the page reads via `sound_ptr` (for both the demo button
     /// and the per-frame queue below).
     static SND: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// WAV byte payloads for sounds fired this frame, awaiting playback.
-    static SND_QUEUE: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    /// WAV byte payloads for sounds fired this frame, awaiting playback, each
+    /// paired with the spatial params the page reads to position it.
+    static SND_QUEUE: RefCell<Vec<(Vec<u8>, SndParams)>> = const { RefCell::new(Vec::new()) };
+    /// Spatial params of the entry the most recent `poll_sound` popped — the
+    /// page reads these via the `sound_origin_*`/`sound_volume`/`sound_attenuation`
+    /// exports after each non-zero `poll_sound`.
+    static SND_CUR: RefCell<SndParams> = const { RefCell::new(SndParams::zero()) };
+    /// The current listener pose, refreshed every walk `step`: eye position plus
+    /// the forward and right unit vectors derived from the player's yaw. The page
+    /// reads these via `listener_*` exports to spatialize each sound.
+    static LISTENER: RefCell<Listener> = const { RefCell::new(Listener::zero()) };
+}
+
+/// Listener pose the page reads to spatialize queued sounds.
+#[derive(Clone, Copy)]
+struct Listener {
+    pos: [f32; 3],
+    forward: [f32; 3],
+    right: [f32; 3],
+}
+
+impl Listener {
+    const fn zero() -> Self {
+        Listener { pos: [0.0; 3], forward: [0.0; 3], right: [0.0; 3] }
+    }
 }
 
 /// Load the WAV bytes for the distinct gameplay sounds in `events` and push them
@@ -318,7 +356,14 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent]) {
             }
             seen.push(name);
             if let Ok(Some(bytes)) = pak.read_file(name) {
-                q.push(bytes);
+                q.push((
+                    bytes,
+                    SndParams {
+                        origin: ev.origin,
+                        volume: ev.volume,
+                        attenuation: ev.attenuation,
+                    },
+                ));
             }
         }
     });
@@ -326,7 +371,9 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent]) {
 
 /// Pop the next queued sound into the scratch buffer and return its byte length
 /// (0 when the queue is empty). The page calls this in a loop each frame, reads
-/// `sound_ptr()` after each non-zero return, and plays it via Web Audio.
+/// `sound_ptr()` after each non-zero return, and plays it via Web Audio. The
+/// popped entry's spatial params are stashed for the `sound_origin_*` /
+/// `sound_volume` / `sound_attenuation` exports to read alongside the bytes.
 #[no_mangle]
 pub extern "C" fn poll_sound() -> i32 {
     let next = SND_QUEUE.with(|q| {
@@ -338,13 +385,79 @@ pub extern "C" fn poll_sound() -> i32 {
         }
     });
     match next {
-        Some(bytes) => {
+        Some((bytes, params)) => {
             let len = bytes.len() as i32;
             SND.with(|s| *s.borrow_mut() = bytes);
+            SND_CUR.with(|p| *p.borrow_mut() = params);
             len
         }
         None => 0,
     }
+}
+
+/// Spatial params of the entry the most recent `poll_sound` popped. `origin_*`
+/// are the world emission point; `volume` is `0.0..=1.0`; `attenuation` is
+/// `0.0..=4.0` (0 = no falloff, audible everywhere). The page reads these after
+/// each non-zero `poll_sound` to compute distance gain and stereo pan.
+#[no_mangle]
+pub extern "C" fn sound_origin_x() -> f32 {
+    SND_CUR.with(|p| p.borrow().origin[0])
+}
+#[no_mangle]
+pub extern "C" fn sound_origin_y() -> f32 {
+    SND_CUR.with(|p| p.borrow().origin[1])
+}
+#[no_mangle]
+pub extern "C" fn sound_origin_z() -> f32 {
+    SND_CUR.with(|p| p.borrow().origin[2])
+}
+#[no_mangle]
+pub extern "C" fn sound_volume() -> f32 {
+    SND_CUR.with(|p| p.borrow().volume)
+}
+#[no_mangle]
+pub extern "C" fn sound_attenuation() -> f32 {
+    SND_CUR.with(|p| p.borrow().attenuation)
+}
+
+/// The listener (player) pose as of the last walk `step`: eye position and the
+/// forward/right unit vectors derived from the player's yaw. The page reads
+/// these to spatialize each sound (distance from `pos`, pan via dot with right).
+#[no_mangle]
+pub extern "C" fn listener_x() -> f32 {
+    LISTENER.with(|l| l.borrow().pos[0])
+}
+#[no_mangle]
+pub extern "C" fn listener_y() -> f32 {
+    LISTENER.with(|l| l.borrow().pos[1])
+}
+#[no_mangle]
+pub extern "C" fn listener_z() -> f32 {
+    LISTENER.with(|l| l.borrow().pos[2])
+}
+#[no_mangle]
+pub extern "C" fn listener_fwd_x() -> f32 {
+    LISTENER.with(|l| l.borrow().forward[0])
+}
+#[no_mangle]
+pub extern "C" fn listener_fwd_y() -> f32 {
+    LISTENER.with(|l| l.borrow().forward[1])
+}
+#[no_mangle]
+pub extern "C" fn listener_fwd_z() -> f32 {
+    LISTENER.with(|l| l.borrow().forward[2])
+}
+#[no_mangle]
+pub extern "C" fn listener_right_x() -> f32 {
+    LISTENER.with(|l| l.borrow().right[0])
+}
+#[no_mangle]
+pub extern "C" fn listener_right_y() -> f32 {
+    LISTENER.with(|l| l.borrow().right[1])
+}
+#[no_mangle]
+pub extern "C" fn listener_right_z() -> f32 {
+    LISTENER.with(|l| l.borrow().right[2])
 }
 
 /// Load a recognisable Quake SFX (item pickup) from the pak into a buffer once,
@@ -415,6 +528,15 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         }
     }
 
+    // The player's first-person weapon viewmodel ("progs/v_shot.mdl" etc.) lives
+    // on the `weaponmodel` field (separate from `model`); cache it like any MDL.
+    let weapon_name = w.server.vm.ent_get_string(w.player, "weaponmodel");
+    if weapon_name.ends_with(".mdl") && !w.model_cache.contains_key(&weapon_name) {
+        let parsed = w.pak.read_file(&weapon_name).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
+        w.model_cache.insert(weapon_name.clone(), parsed);
+    }
+    let weapon_frame = w.server.vm.ent_get_float(w.player, "weaponframe").max(0.0) as usize;
+
     // 4. Gather the visible entities (owned descriptors, so the cache borrow for
     //    rendering doesn't clash with reading the server). Skip the player's own
     //    edict — its model would fill the screen in first person.
@@ -447,6 +569,21 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
 
     // 5. Render from the player's eye.
     let (eye, ang) = w.server.player_view();
+
+    // Record the listener pose so the page can spatialize this frame's queued
+    // sounds. Forward/right are the level (no-pitch) yaw basis, matching the
+    // renderer's `Camera::basis`: yaw rotates in XY about +Z, right is forward
+    // turned -90 deg. Panning only needs the horizontal plane.
+    let yaw_rad = (ang[1] as f64).to_radians();
+    let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
+    LISTENER.with(|l| {
+        *l.borrow_mut() = Listener {
+            pos: eye,
+            forward: [cy, sy, 0.0],
+            right: [sy, -cy, 0.0],
+        };
+    });
+
     let cam = Camera {
         pos: eye,
         yaw: ang[1],
@@ -466,7 +603,12 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
             _ => None,
         })
         .collect();
-    render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels)
+    // Anchor the weapon viewmodel to the camera (drawn last, on top of the world).
+    let viewmodel = match w.model_cache.get(&weapon_name) {
+        Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
+        _ => None,
+    };
+    render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel)
 }
 
 fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {

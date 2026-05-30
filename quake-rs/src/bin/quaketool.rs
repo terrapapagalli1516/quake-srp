@@ -731,11 +731,34 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             .iter()
             .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0 })
             .collect();
+
+        // The first-person weapon viewmodel: the player edict's `weaponmodel`
+        // (e.g. "progs/v_shot.mdl") posed at its `weaponframe`. Loaded from the
+        // pak like any other MDL and cached. Drawn anchored to the camera.
+        let weapon_name = server.vm.ent_get_string(player, "weaponmodel");
+        let weapon_frame = server.vm.ent_get_float(player, "weaponframe").max(0.0) as usize;
+        let weapon_mdl: Option<Mdl> = if weapon_name.ends_with(".mdl") {
+            pak.read_file(&weapon_name).ok().flatten().and_then(|b| Mdl::parse(&b).ok())
+        } else {
+            None
+        };
+
         let (eye, a) = server.player_view();
         let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], fov_deg: 90.0 };
-        let img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels);
+        let viewmodel = weapon_mdl
+            .as_ref()
+            .map(|mdl| render::Viewmodel { mdl, frame: weapon_frame });
+        let img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel);
         img.write_ppm(path).map_err(|e| format!("write {path}: {e}"))?;
-        let _ = writeln!(o, "  rendered player POV -> {path}");
+        let _ = writeln!(
+            o,
+            "  rendered player POV -> {path}{}",
+            if weapon_mdl.is_some() {
+                format!(" (weapon viewmodel {weapon_name} frame {weapon_frame})")
+            } else {
+                String::new()
+            }
+        );
     }
     Ok(Out::Text(o))
 }
@@ -1075,7 +1098,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         None => base_cam,
     };
 
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels);
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();

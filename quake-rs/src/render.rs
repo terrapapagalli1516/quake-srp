@@ -1860,12 +1860,224 @@ pub struct BModelInstance {
     pub origin: Vec3,
 }
 
+/// The player's first-person weapon viewmodel: the parsed weapon [`Mdl`]
+/// (`progs/v_shot.mdl` and friends) plus the animation `frame` to pose.
+///
+/// Unlike [`ModelInstance`], a viewmodel has **no world origin or yaw**: it is
+/// anchored to the camera (view space), always drawn in front of the player at
+/// the lower-centre of the frame and moving/rotating with the view — Quake's
+/// `cl.viewent`, drawn by `R_DrawViewModel`. See [`draw_viewmodel`].
+///
+/// `frame` selects the pose (clamped by [`mdl_frame_verts`], so any value is
+/// safe). The model is borrowed so a cached `Mdl` backs it without cloning.
+pub struct Viewmodel<'a> {
+    pub mdl: &'a crate::mdl::Mdl,
+    pub frame: usize,
+}
+
+/// Draw the first-person weapon viewmodel anchored to the camera, on top of all
+/// world geometry — a port of Quake's `R_DrawViewModel` (the `cl.viewent`, drawn
+/// last at the view origin with the view angles so it never clips into walls).
+///
+/// ## View anchoring
+/// Each model-space vertex `p` (decoded by [`mdl_vertex_model_space`]:
+/// `scale*v + scale_origin`) is mapped into the world *relative to the camera*
+/// rather than to a fixed world origin:
+/// `world_v = cam.pos + forward*(p[0] + FWD) + right*(-p[1] + RIGHT) + up*(p[2] + UP)`.
+/// The MDL forward axis (`+X`) maps to the camera's `forward`, the MDL `+Y` to
+/// the camera's *left* (hence the `-p[1]` on `right`), and `+Z` to `up`. The
+/// fixed `(FWD, RIGHT, UP)` offset nudges the gun forward, slightly right, and
+/// down so it sits at the lower-centre of the frame (Quake hangs the gun below
+/// and ahead of the eye). Because the basis is the *camera* basis, the gun turns
+/// and pitches with the view and never sits at a world position.
+///
+/// ## Always on top
+/// The viewmodel uses its **own** depth buffer (`vz` of its own triangles),
+/// cleared fresh here, instead of the shared world z-buffer. So its triangles
+/// depth-sort correctly against *each other* (near gun parts occlude far ones)
+/// yet always overwrite whatever world/model pixel was there — a wall directly
+/// ahead can never hide the gun. The shared world z-buffer is never written, so
+/// nothing leaks into the next frame's depth ordering.
+///
+/// ## Texturing / shading / safety
+/// Identical to [`draw_alias_model`]: the model's skin (resolved by [`mdl_skin`])
+/// is sampled perspective-correctly through `palette` with the onseam back-face
+/// `s`-shift ([`mdl_skin_st`]); a skinless model (or an out-of-range stvert)
+/// falls back to a flat shaded grey. Lambert shading uses the same light vector.
+/// Every index goes through `.get()`; malformed data is skipped, never panicked
+/// on. A triangle is skipped whole if any vertex falls at/behind the near plane.
+#[allow(clippy::too_many_arguments)]
+fn draw_viewmodel(
+    image: &mut Image,
+    zbuf: &mut [f32],
+    cam: &Camera,
+    mdl: &crate::mdl::Mdl,
+    frame: usize,
+    palette: &[[u8; 3]; 256],
+    w: usize,
+    h: usize,
+) {
+    const NEAR: f32 = 1.0;
+    // The view-space offset (in MDL/world units) that hangs the gun ahead of,
+    // slightly right of, and at the lower-centre of the frame, matching Quake's
+    // hand-held pose. These are added in the camera basis below (forward / right
+    // / up). `OFS_FORWARD` pushes the *whole* model clear of the near plane —
+    // the `v_*` weapon models span roughly model-X in [-15, +22], so a +30 push
+    // keeps every vertex in front (no triangle gets near-clipped away) while
+    // keeping the gun large; the small +up lifts the (already low, model-Z<0)
+    // barrel up into the lower-centre band; `-right` nudges it just right of
+    // centre, where Quake draws the player's gun.
+    //
+    // The placement is in *proportion* resolution-independent: focal length
+    // scales with the frame width and the screen centre with its size, so the
+    // gun keeps the same lower-centre fraction of the frame at any `w`/`h`.
+    const OFS_FORWARD: f32 = 30.0;
+    const OFS_RIGHT: f32 = -2.0;
+    const OFS_UP: f32 = 2.0;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let (forward, right, up) = cam.basis();
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
+    let tan_half = half_fov.tan();
+    let focal = if tan_half.abs() < 1e-6 {
+        cx
+    } else {
+        (cx as f64 / tan_half) as f32
+    };
+
+    let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
+
+    let verts = match mdl_frame_verts(mdl, frame) {
+        Some(v) => v,
+        None => return, // no frame -> nothing to draw
+    };
+    let header = &mdl.header;
+    let skin = mdl_skin(mdl);
+
+    // The viewmodel owns this depth buffer so it sorts against itself but always
+    // overwrites the world (never written here, so it never bleeds across frames).
+    let mut local_z = vec![f32::INFINITY; w.saturating_mul(h)];
+    let _ = zbuf; // the shared world z-buffer is intentionally left untouched
+
+    for tri in &mdl.triangles {
+        // Decode + view-anchor the three frame vertices, fully bounds-checked.
+        let mut world: [Vec3; 3] = [[0.0; 3]; 3];
+        let mut ok = true;
+        for (slot, &vi) in tri.vertindex.iter().enumerate() {
+            let idx: usize = match usize::try_from(vi) {
+                Ok(i) => i,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            };
+            let tv = match verts.get(idx) {
+                Some(tv) => tv,
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
+            let p = mdl_vertex_model_space(header, tv);
+            // Anchor to the camera basis: +X -> forward, +Y -> left (so -Y on
+            // `right`), +Z -> up; plus the fixed lower-centre offset.
+            let fx = p[0] + OFS_FORWARD;
+            let rx = -p[1] + OFS_RIGHT;
+            let ux = p[2] + OFS_UP;
+            if let Some(wv) = world.get_mut(slot) {
+                *wv = [
+                    cam.pos[0] + forward[0] * fx + right[0] * rx + up[0] * ux,
+                    cam.pos[1] + forward[1] * fx + right[1] * rx + up[1] * ux,
+                    cam.pos[2] + forward[2] * fx + right[2] * rx + up[2] * ux,
+                ];
+            }
+        }
+        if !ok {
+            continue;
+        }
+
+        let (a, b, c) = (world[0], world[1], world[2]);
+        let (normal, nlen) = normalize(cross(sub(b, a), sub(c, a)));
+        if nlen == 0.0 {
+            continue;
+        }
+        // The gun faces every which way; light it by |dot| so no facet goes black.
+        let shade = dot(normal, light_dir).abs().clamp(0.25, 1.0);
+        let flat = [
+            (180.0 * shade).clamp(0.0, 255.0) as u8,
+            (180.0 * shade).clamp(0.0, 255.0) as u8,
+            (180.0 * shade).clamp(0.0, 255.0) as u8,
+        ];
+
+        // Per-vertex skin coords (with the onseam back-face s-shift), clamped so
+        // a seam vertex never wraps into the opposite half of the skin.
+        let st: Option<[(f32, f32); 3]> = skin.as_ref().and_then(|sk| {
+            let facesfront = tri.facesfront != 0;
+            let max_s = sk.width.saturating_sub(1) as f32;
+            let max_t = sk.height.saturating_sub(1) as f32;
+            let mut out = [(0.0f32, 0.0f32); 3];
+            for (slot, &vi) in tri.vertindex.iter().enumerate() {
+                let idx: usize = usize::try_from(vi).ok()?;
+                let sv = mdl.stverts.get(idx)?;
+                let (s, t) = mdl_skin_st(sv, facesfront, sk.width);
+                let slot_st = out.get_mut(slot)?;
+                *slot_st = (s.clamp(0.0, max_s), t.clamp(0.0, max_t));
+            }
+            Some(out)
+        });
+
+        // Project all three; skip the whole triangle if any is at/behind near.
+        let mut xy: [(f32, f32, f32); 3] = [(0.0, 0.0, 0.0); 3];
+        let mut clipped = false;
+        for (slot, v) in world.iter().enumerate() {
+            let rel = sub(*v, cam.pos);
+            let vz = dot(rel, forward);
+            if vz <= NEAR {
+                clipped = true;
+                break;
+            }
+            let vx = dot(rel, right);
+            let vy = dot(rel, up);
+            if let Some(p) = xy.get_mut(slot) {
+                *p = (cx + focal * vx / vz, cy - focal * vy / vz, vz);
+            }
+        }
+        if clipped {
+            continue;
+        }
+
+        match (&skin, st) {
+            (Some(sk), Some(st)) => {
+                let mk = |i: usize| ProjT {
+                    x: xy[i].0,
+                    y: xy[i].1,
+                    vz: xy[i].2,
+                    s: st[i].0,
+                    t: st[i].1,
+                };
+                raster_triangle_tex(
+                    image, &mut local_z, mk(0), mk(1), mk(2),
+                    sk.pixels, sk.width, sk.height, palette, shade, None,
+                );
+            }
+            _ => {
+                let p = |i: usize| Projected { x: xy[i].0, y: xy[i].1, depth: xy[i].2 };
+                raster_triangle(image, &mut local_z, p(0), p(1), p(2), flat);
+            }
+        }
+    }
+}
+
 /// Render `bsp` with its real miptextures (as [`render_bsp_textured`]) and then
 /// draw each alias-model `instances` entry into the same image, sharing one
 /// z-buffer so models and world occlude one another correctly.
 ///
-/// A thin wrapper over [`render_scene_ext`] with no brush submodels; kept as the
-/// stable entry point the binary and wasm front-ends call.
+/// A thin wrapper over [`render_scene_ext`] with no brush submodels and no
+/// viewmodel; kept as the stable entry point the binary and wasm front-ends call.
 pub fn render_scene(
     bsp: &Bsp,
     cam: &Camera,
@@ -1874,17 +2086,24 @@ pub fn render_scene(
     palette: &[[u8; 3]; 256],
     instances: &[ModelInstance],
 ) -> Image {
-    render_scene_ext(bsp, cam, w, h, palette, instances, &[])
+    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None)
 }
 
 /// Render the full scene: the textured world, then each brush submodel
-/// (`bmodels`), then each alias model (`models`), all sharing one z-buffer so
-/// every piece occludes — and is occluded by — the others correctly.
+/// (`bmodels`), then each alias model (`models`), and finally the optional
+/// first-person `viewmodel` — all sharing one z-buffer so every world/model
+/// piece occludes (and is occluded by) the others correctly.
 ///
 /// Brush submodels are drawn *before* alias models, matching `render_scene`'s
 /// world-then-models ordering; correctness does not depend on the order because
 /// the shared depth buffer resolves visibility per pixel. Passing an empty
-/// `bmodels` slice reproduces [`render_scene`] exactly (the binary/wasm path).
+/// `bmodels` slice and `None` `viewmodel` reproduces [`render_scene`] exactly.
+///
+/// The `viewmodel`, when present, is drawn **last and on top** of everything:
+/// it is anchored to the camera (Quake's `cl.viewent`) and uses its own depth
+/// buffer ([`draw_viewmodel`]), so a wall directly ahead can never hide the gun
+/// and the shared world depth buffer is left untouched.
+#[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext(
     bsp: &Bsp,
     cam: &Camera,
@@ -1893,6 +2112,7 @@ pub fn render_scene_ext(
     palette: &[[u8; 3]; 256],
     models: &[ModelInstance],
     bmodels: &[BModelInstance],
+    viewmodel: Option<Viewmodel>,
 ) -> Image {
     let mut image = Image::new(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
@@ -1905,6 +2125,10 @@ pub fn render_scene_ext(
     }
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
+    }
+    // The weapon viewmodel draws last, on top of the world and every model.
+    if let Some(vm) = viewmodel {
+        draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, palette, w, h);
     }
     image
 }
@@ -3149,7 +3373,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[]);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
         let with = render_scene_ext(
             &bsp,
             &cam,
@@ -3159,6 +3383,7 @@ mod tests {
             &[],
             // Place the quad between the camera (-200) and the centre, facing it.
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            None,
         );
 
         let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
@@ -3186,7 +3411,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[]);
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
         let oob = render_scene_ext(
             &bsp,
             &cam,
@@ -3195,6 +3420,7 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0] }],
+            None,
         );
         assert_eq!(
             empty.rgb, oob.rgb,
@@ -3212,7 +3438,7 @@ mod tests {
 
         // No alias models, no bmodels.
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
         assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
 
         // Also holds with an alias instance present (the model path is shared).
@@ -3233,6 +3459,7 @@ mod tests {
             &pal,
             std::slice::from_ref(&inst),
             &[],
+            None,
         );
         assert_eq!(
             a2.rgb, b2.rgb,
@@ -3257,6 +3484,7 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            None,
         );
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
         let shifted = render_scene_ext(
@@ -3267,6 +3495,7 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0] }],
+            None,
         );
         let changed = centered
             .rgb
@@ -3300,6 +3529,244 @@ mod tests {
             &pal,
             &[],
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            None,
+        );
+    }
+
+    // -- First-person weapon viewmodel (camera-anchored, drawn on top) --------
+
+    /// A small single-skin, single-frame MDL whose one triangle sits *forward*
+    /// of the model origin (model `+X` is the gun's forward axis), so once the
+    /// viewmodel anchors it to the camera basis every vertex lands in front of
+    /// the near plane and the triangle actually rasterises. Coloured via a 1x1
+    /// skin so it takes the textured path through `palette[7]`.
+    fn viewmodel_mdl() -> crate::mdl::Mdl {
+        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
+        // Mirror the real `v_*` weapon layout: forward along model `+X`, thin in
+        // `+Y`, and sitting *below* the eye (model `Z < 0`, via `scale_origin`).
+        // So after the camera-anchor + lower-centre offset the gun lands in the
+        // lower half of the frame, like the shipping weapon models.
+        let header = MdlHeader {
+            ident: i32::from_le_bytes(*b"IDPO"),
+            version: 6,
+            scale: [1.0, 1.0, 1.0],
+            scale_origin: [10.0, 0.0, -10.0],
+            boundingradius: 64.0,
+            eyeposition: [0.0, 0.0, 0.0],
+            numskins: 1,
+            skinwidth: 1,
+            skinheight: 1,
+            numverts: 3,
+            numtris: 1,
+            numframes: 1,
+            synctype: 0,
+            flags: 0,
+            size: 1.0,
+        };
+        // Decoded model space: X in [10, 26] (forward), Z in [-10, -2] (below the
+        // eye). With OFS_FORWARD = 30 every vertex sits well in front of the near
+        // plane at any yaw, so the triangle always rasterises.
+        let verts = vec![
+            TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
+            TriVertex { v: [16, 0, 0], lightnormalindex: 0 },
+            TriVertex { v: [8, 0, 8], lightnormalindex: 0 },
+        ];
+        Mdl {
+            header,
+            skins: vec![Skin::Single(vec![7])],
+            stverts: vec![StVert { onseam: 0, s: 0, t: 0 }; 3],
+            triangles: vec![Triangle { facesfront: 1, vertindex: [0, 1, 2] }],
+            frames: vec![Frame::Single(AliasFrame {
+                name: "v0".into(),
+                bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
+                bboxmax: TriVertex { v: [16, 0, 8], lightnormalindex: 0 },
+                verts,
+            })],
+        }
+    }
+
+    /// True when a pixel looks like the viewmodel's skin: palette index 7 is set
+    /// to pure yellow `[255, 255, 0]` in these tests, and the only per-pixel
+    /// transform is a multiply by the (positive) Lambert `shade`. So a gun pixel
+    /// keeps `B == 0` with `R > 0` and `G > 0`, whereas `hash_color` walls (HSV
+    /// saturation 0.55) always have all three channels strictly positive and the
+    /// background `[10,10,14]` has `B != 0`.
+    fn is_gun_pixel(p: [u8; 3]) -> bool {
+        p[2] == 0 && p[0] > 0 && p[1] > 0
+    }
+
+    /// The bounding box (min_x, min_y, max_x, max_y) of the pixels that differ
+    /// from `bg`, plus their centroid. Returns `None` when nothing was drawn.
+    fn drawn_bbox(img: &Image, bg: [u8; 3]) -> Option<(usize, usize, usize, usize, f32, f32)> {
+        let (mut minx, mut miny, mut maxx, mut maxy) = (usize::MAX, usize::MAX, 0usize, 0usize);
+        let (mut sx, mut sy, mut n) = (0f64, 0f64, 0u64);
+        for y in 0..img.h {
+            for x in 0..img.w {
+                if img.rgb[y * img.w + x] != bg {
+                    minx = minx.min(x);
+                    miny = miny.min(y);
+                    maxx = maxx.max(x);
+                    maxy = maxy.max(y);
+                    sx += x as f64;
+                    sy += y as f64;
+                    n += 1;
+                }
+            }
+        }
+        if n == 0 {
+            None
+        } else {
+            Some((minx, miny, maxx, maxy, (sx / n as f64) as f32, (sy / n as f64) as f32))
+        }
+    }
+
+    #[test]
+    fn viewmodel_is_camera_anchored_not_world_anchored() {
+        // Drawing the viewmodel at two very different camera yaws must place the
+        // gun in roughly the SAME lower-centre screen region both times — proving
+        // it is anchored to the view, not to a world position (which would swing
+        // wildly across the frame, or vanish, as the camera turns).
+        let bsp = demo_room();
+        let mut pal = [[0u8; 3]; 256];
+        pal[7] = [255, 255, 0]; // the viewmodel's skin colour (index 7), pure yellow
+        let bg = [10u8, 10, 14];
+        let (w, h) = (160usize, 120usize);
+        let gun = viewmodel_mdl();
+
+        // Two cameras at the room centre, looking in very different directions.
+        let cam_a = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam_b = Camera { pos: [0.0, 0.0, 0.0], yaw: 137.0, pitch: 0.0, fov_deg: 90.0 };
+
+        let img_a = render_scene_ext(
+            &bsp, &cam_a, w, h, &pal, &[], &[],
+            Some(Viewmodel { mdl: &gun, frame: 0 }),
+        );
+        let img_b = render_scene_ext(
+            &bsp, &cam_b, w, h, &pal, &[], &[],
+            Some(Viewmodel { mdl: &gun, frame: 0 }),
+        );
+
+        // Isolate the gun pixels (its unique skin colour) in each frame.
+        let gun_only = |img: &Image| {
+            let mut g = Image::new(img.w, img.h, bg);
+            for i in 0..img.rgb.len() {
+                if is_gun_pixel(img.rgb[i]) {
+                    g.rgb[i] = [255, 255, 0];
+                }
+            }
+            g
+        };
+        let ga = gun_only(&img_a);
+        let gb = gun_only(&img_b);
+        let (_, _, _, _, cax, cay) = drawn_bbox(&ga, bg).expect("gun visible at yaw A");
+        let (_, _, _, _, cbx, cby) = drawn_bbox(&gb, bg).expect("gun visible at yaw B");
+
+        // The gun centroid must land in the lower-centre band in BOTH frames and
+        // move only a little between the two wildly different yaws.
+        let cxf = w as f32 / 2.0;
+        for (cx, cy) in [(cax, cay), (cbx, cby)] {
+            assert!(
+                (cx - cxf).abs() < w as f32 * 0.30,
+                "gun should be roughly horizontally centred (cx={cx}, centre={cxf})"
+            );
+            assert!(
+                cy > h as f32 * 0.5,
+                "gun should sit in the lower half of the frame (cy={cy}, h={h})"
+            );
+        }
+        assert!(
+            (cax - cbx).abs() < w as f32 * 0.15 && (cay - cby).abs() < h as f32 * 0.15,
+            "view-anchored gun should barely move between yaws: A=({cax},{cay}) B=({cbx},{cby})"
+        );
+    }
+
+    #[test]
+    fn viewmodel_draws_on_top_of_a_wall() {
+        // With a wall directly in front of the camera, the viewmodel must still
+        // be visible: its skin colour appears in the frame even though world
+        // geometry fills the same pixels. (A depth-tested-against-world gun would
+        // be hidden by the near wall.)
+        let bsp = demo_room();
+        let mut pal = [[80u8; 3]; 256]; // (walls use hash_color, not the palette)
+        pal[7] = [255, 255, 0]; // distinctive pure-yellow gun colour
+        let (w, h) = (160usize, 120usize);
+        let gun = viewmodel_mdl();
+
+        // Stand close to the east wall (x = 256) looking straight at it (+X), so
+        // a wall is right in front and would occlude a depth-tested viewmodel.
+        // The gun is anchored ~40-60 units ahead, i.e. world x ~240-260, AT the
+        // wall plane — depth-tested it would lose, but it must still show.
+        let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+
+        // Sanity: the wall actually fills the view (without the gun).
+        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None);
+        let bg = [10u8, 10, 14];
+        let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
+        assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
+        // The wall must NOT itself produce gun-coloured pixels (so the assert
+        // below truly measures the gun, not the wall).
+        assert!(
+            !world.rgb.iter().any(|&p| is_gun_pixel(p)),
+            "wall-only render must not contain gun-coloured pixels"
+        );
+
+        let with_gun = render_scene_ext(
+            &bsp, &cam, w, h, &pal, &[], &[],
+            Some(Viewmodel { mdl: &gun, frame: 0 }),
+        );
+
+        // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
+        // of the wall rather than being depth-occluded by it.
+        let shows_gun = with_gun.rgb.iter().any(|&p| is_gun_pixel(p));
+        assert!(shows_gun, "weapon viewmodel must draw on top of the wall directly ahead");
+
+        // And it changed pixels relative to the wall-only render.
+        let changed = world
+            .rgb
+            .iter()
+            .zip(with_gun.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "viewmodel changed no pixels over the wall");
+    }
+
+    #[test]
+    fn viewmodel_none_matches_no_viewmodel() {
+        // Passing `None` for the viewmodel must be byte-identical to the prior
+        // behaviour (render_scene_ext with the trailing arg absent in spirit).
+        let bsp = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None);
+        assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
+    }
+
+    #[test]
+    fn viewmodel_tolerates_malformed_model() {
+        // A weapon model with out-of-range triangle indices and no frames must be
+        // skipped without panicking and without altering the frame.
+        let bsp = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+
+        // Frameless model -> draw_viewmodel returns early.
+        let mut frameless = viewmodel_mdl();
+        frameless.frames.clear();
+        let img = render_scene_ext(
+            &bsp, &cam, 80, 60, &pal, &[], &[],
+            Some(Viewmodel { mdl: &frameless, frame: 0 }),
+        );
+        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None);
+        assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
+
+        // Out-of-range triangle vertex index -> that triangle is skipped.
+        let mut bad = viewmodel_mdl();
+        bad.triangles = vec![crate::mdl::Triangle { facesfront: 1, vertindex: [0, 1, 9999] }];
+        // Must not panic.
+        let _ = render_scene_ext(
+            &bsp, &cam, 80, 60, &pal, &[], &[],
+            Some(Viewmodel { mdl: &bad, frame: 0 }),
         );
     }
 }

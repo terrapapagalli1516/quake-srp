@@ -91,20 +91,98 @@ async function playSound() {
 }
 document.getElementById('sndBtn').addEventListener('click', playSound);
 
+// Spatialize a queued sound the way Quake's SND_Spatialize does: fall off with
+// distance, pan left/right by where the source sits relative to where the
+// listener faces. Returns {gain, pan} in [0,1] / [-1,1], or null if we lack the
+// exports to do it (caller then plays flat).
+//
+//   distance gain = max(0, 1 - dist * attenuation / 1000) * volume
+//   pan           = clamp(dot(normalize(source - listener), right), -1, 1)
+//
+// attenuation 0 => no falloff (full volume everywhere, e.g. some pickups). At
+// attenuation 1 a source ~1000 units away is silent; point-blank is full volume.
+const ATTEN_SCALE = 1000;
+function spatializeSound() {
+  // Need the full param + listener export set; otherwise signal "play flat".
+  const need = ['sound_origin_x','sound_origin_y','sound_origin_z','sound_volume',
+    'sound_attenuation','listener_x','listener_y','listener_z',
+    'listener_right_x','listener_right_y','listener_right_z'];
+  for (const fn of need) { if (typeof exp[fn] !== 'function') return null; }
+
+  const ox = exp.sound_origin_x(), oy = exp.sound_origin_y(), oz = exp.sound_origin_z();
+  let vol = exp.sound_volume();
+  const atten = exp.sound_attenuation();
+  const lx = exp.listener_x(), ly = exp.listener_y(), lz = exp.listener_z();
+  const rx = exp.listener_right_x(), ry = exp.listener_right_y(), rz = exp.listener_right_z();
+
+  // A zero/garbage volume means params weren't populated for this entry — play
+  // flat rather than silence a real sound by accident.
+  if (!(vol > 0)) vol = 1;
+
+  const dx = ox - lx, dy = oy - ly, dz = oz - lz;
+  const dist = Math.hypot(dx, dy, dz);
+
+  let gain = vol;
+  if (atten > 0) gain = Math.max(0, 1 - dist * atten / ATTEN_SCALE) * vol;
+  // attenuation 0 => audible everywhere at full `vol`.
+
+  let pan = 0;
+  if (dist > 1e-3) {
+    pan = (dx * rx + dy * ry + dz * rz) / dist;   // dot(normalize(d), right)
+    if (pan < -1) pan = -1; else if (pan > 1) pan = 1;
+  }
+  return { gain, pan };
+}
+
 // Play every gameplay sound the server queued this frame. poll_sound() pops one
 // WAV into shared memory and returns its length (0 when the queue is empty); we
-// copy the bytes out and decode/play each via Web Audio.
+// copy the bytes out, read its spatial params + the listener pose, and decode/
+// play each via Web Audio through a gain (distance) + stereo-pan node graph.
 function drainGameSounds() {
   if (!exp || !exp.poll_sound || !audioCtx || audioCtx.state !== 'running') return;
   for (let guard = 0; guard < 16; guard++) {
     const len = exp.poll_sound();
     if (len <= 0) break;
+    // Read spatial params right after the pop (poll_sound stashed them for the
+    // exports). null => fall back to flat full-volume centered playback.
+    const sp = spatializeSound();
+    if (sp && sp.gain <= 0.02) continue;          // inaudibly far — don't even decode
     const ptr = exp.sound_ptr();
     const bytes = new Uint8Array(exp.memory.buffer, ptr, len).slice();
     audioCtx.decodeAudioData(bytes.buffer).then(buf => {
       const s = audioCtx.createBufferSource();
-      s.buffer = buf; s.connect(audioCtx.destination); s.start();
+      s.buffer = buf;
+      playRouted(s, sp);
+      s.start();
     }).catch(() => {});
+  }
+}
+
+// Wire a decoded BufferSource to the destination. With spatial params: source ->
+// gain (distance attenuation) -> stereo panner -> destination. If StereoPanner
+// isn't available, fall back to an equal-power PannerNode; if neither, just gain.
+// With no params (sp == null), play flat (full volume, centered).
+function playRouted(src, sp) {
+  if (!sp) { src.connect(audioCtx.destination); return; }
+  const gainNode = audioCtx.createGain();
+  gainNode.gain.value = sp.gain;
+  src.connect(gainNode);
+  if (typeof audioCtx.createStereoPanner === 'function') {
+    const panner = audioCtx.createStereoPanner();
+    panner.pan.value = sp.pan;
+    gainNode.connect(panner);
+    panner.connect(audioCtx.destination);
+  } else if (typeof audioCtx.createPanner === 'function') {
+    // Older Safari/WebKit: an equal-power PannerNode positioned on the X axis
+    // approximates left/right panning (listener at origin facing -Z).
+    const panner = audioCtx.createPanner();
+    panner.panningModel = 'equalpower';
+    if (panner.positionX) { panner.positionX.value = sp.pan; panner.positionZ.value = -1; }
+    else if (panner.setPosition) { panner.setPosition(sp.pan, 0, -1); }
+    gainNode.connect(panner);
+    panner.connect(audioCtx.destination);
+  } else {
+    gainNode.connect(audioCtx.destination);       // no panner at all — gain only
   }
 }
 
