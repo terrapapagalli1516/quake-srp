@@ -483,10 +483,11 @@ fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 }
 
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
-/// all the network / sound / client-routing builtins that have no world effect
-/// in this headless server (`sound`, `stuffcmd`, the `Write*` family,
-/// `makestatic`, `lightstyle`, `ambientsound`, `particle`, `changelevel`,
-/// `setspawnparms`, the print routers, `cvar_set`).
+/// all the network / client-routing builtins that have no world effect in this
+/// headless server (`stuffcmd`, the `Write*` family, `makestatic`,
+/// `lightstyle`, `particle`, `changelevel`, `setspawnparms`, the print routers,
+/// `cvar_set`). (`sound`/`ambientsound` are no longer no-ops: they queue a
+/// [`SoundEvent`] via [`bi_sound`]/[`bi_ambientsound`].)
 fn bi_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
@@ -498,6 +499,155 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
     let fwd = vm.gget_vector("v_forward");
     vm.ret_vector(fwd);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sound-event queue (PF_sound / PF_ambientsound).
+//
+// The C `PF_sound` -> `SV_StartSound` wrote an `svc_sound` message into the
+// per-client datagram for the network layer to flush. This headless server has
+// no netcode, so instead each fired sound is captured as a [`SoundEvent`] in a
+// process-wide queue that [`Server::drain_sounds`] hands to whatever audio
+// front-end (or test) wants it.
+//
+// Builtins are `fn(&mut Vm)` and cannot see the `Server`, and the `Vm` type
+// lives in `vm.rs` (which this task may not edit), so the queue cannot hang off
+// either. A `thread_local!` `RefCell<Vec<SoundEvent>>` reached from `bi_sound`
+// is the cleanest spot that keeps the builtin signature intact. Server methods
+// run on the same thread as the builtins they invoke, so the events a frame's
+// QuakeC fires are visible to `drain_sounds` immediately afterward.
+// ---------------------------------------------------------------------------
+
+/// One queued sound emission — the engine `SV_StartSound` payload, captured for
+/// a front-end instead of being serialised into a client datagram.
+///
+/// `origin` is the entity's box centre (`origin + 0.5*(mins+maxs)`), matching
+/// the coordinate `SV_StartSound` wrote. `sample` keeps the raw sound name;
+/// `sound_index` is its precache slot (`>= 1`) or `-1` if it was never
+/// precached (the C `Con_Printf("not precacheed")`-and-drop case — we still
+/// queue the event so a caller can see what was attempted).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundEvent {
+    /// The emitting edict index.
+    pub entity: i32,
+    /// Sound channel (0 = auto-allocate; 1..=7 override that entity/channel).
+    pub channel: i32,
+    /// Precache index of `sample`, or `-1` when it was not precached.
+    pub sound_index: i32,
+    /// The raw sound name (e.g. `"weapons/guncock.wav"`).
+    pub sample: String,
+    /// World-space emission point: `origin + 0.5*(mins + maxs)`.
+    pub origin: [f32; 3],
+    /// Volume in `0.0..=1.0` (the C scaled this by 255 for the packet byte).
+    pub volume: f32,
+    /// Attenuation in `0.0..=4.0` (0 = audible everywhere).
+    pub attenuation: f32,
+}
+
+thread_local! {
+    /// Process-wide (per-thread) queue the sound builtins push to and
+    /// [`Server::drain_sounds`] takes. See the module note above.
+    static SOUND_EVENTS: std::cell::RefCell<Vec<SoundEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a fired sound onto the thread-local queue.
+fn push_sound_event(ev: SoundEvent) {
+    SOUND_EVENTS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued sound event.
+fn take_sound_events() -> Vec<SoundEvent> {
+    SOUND_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
+/// `SV_StartSound`/`PF_ambientsound` wrote for the emission coordinate.
+fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
+    let origin = vm.ent_get_vector(e, "origin");
+    let mins = vm.ent_get_vector(e, "mins");
+    let maxs = vm.ent_get_vector(e, "maxs");
+    [
+        origin[0] + 0.5 * (mins[0] + maxs[0]),
+        origin[1] + 0.5 * (mins[1] + maxs[1]),
+        origin[2] + 0.5 * (mins[2] + maxs[2]),
+    ]
+}
+
+/// `PF_sound` (#8): `void(entity e, float chan, string sample, float vol,
+/// float atten) sound`. The arg layout mirrors `PF_sound`/`SV_StartSound`:
+/// `entity = PARM0`, `channel = PARM1`, `sample = PARM2`, `volume = PARM3`,
+/// `attenuation = PARM4`; the emission point is the entity's box centre.
+///
+/// FAITHFULNESS: the C `Sys_Error`s on out-of-range volume/attenuation/channel
+/// and silently drops an un-precached sample. We never abort the host on
+/// program data, so instead we keep the values as given (a front-end can clamp)
+/// and still queue the event even when the sample was not precached, recording
+/// `sound_index = -1` so the caller can tell. The C scaled volume by 255 into a
+/// packet byte; we keep the QuakeC-domain `0.0..=1.0` float for the front-end.
+fn bi_sound(vm: &mut Vm) -> Result<()> {
+    let entity = vm.arg_entity(0);
+    let channel = vm.arg_float(1) as i32;
+    let sample = vm.arg_string(2);
+    let volume = vm.arg_float(3);
+    let attenuation = vm.arg_float(4);
+
+    let origin = entity_sound_origin(vm, entity);
+    // Resolve the precache slot without registering a new name: SV_StartSound
+    // only *looks up* an already-precached sample, dropping (here: marking -1)
+    // when absent.
+    let sound_index = lookup_sound_index(vm, &sample);
+
+    push_sound_event(SoundEvent {
+        entity,
+        channel,
+        sound_index,
+        sample,
+        origin,
+        volume,
+        attenuation,
+    });
+    Ok(())
+}
+
+/// `PF_ambientsound` (#74): `void(vector pos, string sample, float vol, float
+/// atten) ambientsound`. The C emitted an `svc_spawnstaticsound` into the level
+/// signon at an explicit world position (not an entity). We capture it as a
+/// [`SoundEvent`] with `entity = 0` (world) and `origin = pos`. Channel is 0
+/// (ambient sounds have no channel in the C packet).
+fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
+    let pos = vm.arg_vector(0);
+    let sample = vm.arg_string(1);
+    let volume = vm.arg_float(2);
+    let attenuation = vm.arg_float(3);
+
+    let sound_index = lookup_sound_index(vm, &sample);
+
+    push_sound_event(SoundEvent {
+        entity: 0,
+        channel: 0,
+        sound_index,
+        sample,
+        origin: pos,
+        volume,
+        attenuation,
+    });
+    Ok(())
+}
+
+/// Resolve `sample`'s precache slot. The C `SV_StartSound`/`PF_ambientsound`
+/// only *searched* `sv.sound_precache` and dropped an un-precached sample; the
+/// [`Host`] trait exposes `precache_sound` (append-or-find) but no read-only
+/// search. In practice QuakeC precaches every sound during `worldspawn` before
+/// any `sound()` fires, so `precache_sound` returns the existing stable slot
+/// (`>= 1`) without appending. Returns `-1` only when there is no host at all.
+///
+/// DEVIATION: an un-precached name is registered here (and so gets a real slot)
+/// rather than being dropped with a warning, since we cannot reach the table
+/// read-only without editing `vm.rs`. The captured [`SoundEvent`] still carries
+/// the raw `sample`, so a front-end is never misled about what played.
+fn lookup_sound_index(vm: &mut Vm, sample: &str) -> i32 {
+    vm.with_host(|_vm, h| h.precache_sound(sample)).unwrap_or(-1)
 }
 
 /// Install the engine builtins over the pure-builtin table from
@@ -521,7 +671,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 2, bi_setorigin); // setorigin
     put(t, 3, bi_setmodel); // setmodel
     put(t, 4, bi_setsize); // setsize
-    put(t, 8, bi_noop); // sound
+    put(t, 8, bi_sound); // sound (queues a SoundEvent)
     put(t, 16, bi_traceline); // traceline
     put(t, 17, bi_checkclient); // checkclient (line-of-sight to the player)
     put(t, 19, bi_precache_sound); // precache_sound
@@ -548,7 +698,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 69, bi_noop); // makestatic
     put(t, 70, bi_noop); // changelevel
     put(t, 72, bi_noop); // cvar_set
-    put(t, 74, bi_noop); // ambientsound
+    put(t, 74, bi_ambientsound); // ambientsound (queues a SoundEvent)
     put(t, 75, bi_precache_model); // precache_model (alias)
     put(t, 76, bi_precache_sound); // precache_sound (alias)
     put(t, 77, bi_precache_file); // precache_file (alias)
@@ -1477,6 +1627,15 @@ impl Server {
     /// Returns whether a think fired (for the frame report). A removed player
     /// (`free`) short-circuits the rest, like the C `SV_RunThink` guards.
     fn physics_client(&mut self, ent: i32, cmd: &UserCmd, start_time: f32, dt: f32) -> Result<bool> {
+        // SV_ReadClientMove (sv_user.c) copies the usercmd onto the client edict
+        // BEFORE the physics frame: v_angle from the look angles, then the button
+        // bits and impulse. We do it here, immediately before PlayerPreThink, so
+        // the weapon code that runs inside PreThink/PostThink (W_WeaponFrame ->
+        // W_Attack reads `self.button0` and aims off `self.v_angle`) sees the
+        // current frame's input. (client_think later re-derives v_angle/angles
+        // during the move, but PreThink runs first and must see it set.)
+        self.apply_usercmd_to_edict(ent, cmd);
+
         // call standard client pre-think (self = player)
         self.run_sys("PlayerPreThink", ent, 0)?;
         if self.is_free(ent) {
@@ -1560,7 +1719,64 @@ impl Server {
         link_edict(&mut self.vm, ent);
         self.run_sys("PlayerPostThink", ent, 0)?;
 
+        // The impulse is a one-shot: a usercmd carries it for a single frame.
+        // Stock QuakeC's ImpulseCommands() clears `self.impulse` after handling
+        // it; the engine likewise treats it as edge-triggered (SV_ReadClientMove
+        // only overwrites it when a fresh non-zero impulse arrives). Clear it
+        // here so a held impulse fires once even if the mod's QuakeC forgot to.
+        if !self.is_free(ent) {
+            self.vm.ent_set_float(ent, "impulse", 0.0);
+        }
+
         Ok(fired)
+    }
+
+    /// `SV_ReadClientMove` (sv_user.c): copy this frame's [`UserCmd`] onto the
+    /// player edict before pre-think. Faithfully:
+    /// * `v_angle = [pitch, yaw, 0]` (the look angles the netcode delivered);
+    /// * `button0 = buttons & 1` (attack);
+    /// * `button2 = (buttons & 2) >> 1` (jump);
+    /// * `impulse = cmd.impulse` (the C only overwrites on a non-zero impulse;
+    ///   with a single client and one cmd per frame, writing it unconditionally
+    ///   each frame and clearing it after post-think is equivalent and keeps the
+    ///   one-shot semantics).
+    fn apply_usercmd_to_edict(&mut self, ent: i32, cmd: &UserCmd) {
+        // v_angle before PreThink so weapon aim is correct (client_think later
+        // re-derives it from the same cmd during the move).
+        self.vm
+            .ent_set_vector(ent, "v_angle", [cmd.pitch, cmd.yaw, 0.0]);
+        self.vm
+            .ent_set_float(ent, "button0", (cmd.buttons & 1) as f32);
+        self.vm
+            .ent_set_float(ent, "button2", ((cmd.buttons & 2) >> 1) as f32);
+        // The C only assigns impulse when the byte is non-zero (a 0 impulse means
+        // "no command this frame"); a stale impulse is cleared after post-think.
+        if cmd.impulse != 0 {
+            self.vm.ent_set_float(ent, "impulse", cmd.impulse as f32);
+        }
+    }
+
+    /// Take and clear the queued sound events fired by the QuakeC since the last
+    /// drain (`PF_sound`/`PF_ambientsound` pushes; see [`SoundEvent`]). A
+    /// front-end calls this once per frame to play them; tests use it to assert
+    /// a weapon actually fired. The queue is process-/thread-local, so call this
+    /// on the same thread that drove the frame.
+    pub fn drain_sounds(&mut self) -> Vec<SoundEvent> {
+        take_sound_events()
+    }
+
+    /// The player's attack-relevant state for verification: `(button0, weapon,
+    /// ammo_shells)`. All zero when no client is connected. `button0` is the
+    /// attack bit copied from the last usercmd; `weapon`/`ammo_shells` are the
+    /// QuakeC inventory fields the shotgun path reads/decrements.
+    pub fn player_attack_state(&self) -> (f32, f32, f32) {
+        if self.player < 0 {
+            return (0.0, 0.0, 0.0);
+        }
+        let button0 = self.vm.ent_get_float(self.player, "button0");
+        let weapon = self.vm.ent_get_float(self.player, "weapon");
+        let ammo_shells = self.vm.ent_get_float(self.player, "ammo_shells");
+        (button0, weapon, ammo_shells)
     }
 
     /// True if edict `e` is free (removed) or out of range.
@@ -2912,7 +3128,7 @@ fn server_error(msg: impl Into<String>) -> QError {
 mod tests {
     use super::*;
     use crate::progs::{
-        Def, Function, Op, Statement, MAX_PARMS, OFS_RETURN, PROG_VERSION, RESERVED_OFS,
+        Def, Function, Op, Statement, MAX_PARMS, OFS_PARM0, OFS_RETURN, PROG_VERSION, RESERVED_OFS,
     };
 
     const HEADER_SIZE: usize = 60;
@@ -3013,6 +3229,23 @@ mod tests {
             self.statements.extend(stmts);
             self.functions.push(Function {
                 first_statement: first,
+                parm_start: RESERVED_OFS as i32,
+                locals: 0,
+                profile: 0,
+                s_name,
+                s_file: 0,
+                numparms: 0,
+                parm_size: [0; MAX_PARMS],
+            });
+            self.functions.len() - 1
+        }
+        /// Add a builtin function record (`first_statement = -builtin_num`) named
+        /// `name`, so QuakeC can `CALL` into the engine builtin table; returns its
+        /// function index.
+        fn add_builtin(&mut self, name: &str, builtin_num: i32) -> usize {
+            let s_name = self.intern(name);
+            self.functions.push(Function {
+                first_statement: -builtin_num,
                 parm_start: RESERVED_OFS as i32,
                 locals: 0,
                 profile: 0,
@@ -4069,6 +4302,456 @@ mod tests {
             "player advanced forward in +X: {} -> {}",
             before[0],
             after[0]
+        );
+    }
+
+    // ----------------------------------------------------- attack / sound wiring
+
+    /// Field/global offsets the attack progs uses (kept in one place so the test
+    /// can fill the constants after load).
+    mod attack_ofs {
+        // Globals.
+        pub const SELF: u16 = 31;
+        pub const G_FIRED: u16 = 40; // float flag PostThink sets when attacking
+        pub const G_BTN: u16 = 41; // temp: loaded self.button0
+        pub const G_FBUTTON0: u16 = 42; // holds the button0 field offset (for LOAD)
+        pub const G_ONE: u16 = 43; // const 1.0
+        pub const G_SNDFUNC: u16 = 44; // const: function index of the sound builtin
+        pub const G_CHAN: u16 = 45; // const channel
+        pub const G_VOL: u16 = 46; // const volume
+        pub const G_ATTEN: u16 = 47; // const attenuation
+        pub const G_SAMPLE: u16 = 48; // const string_t of the sample name
+        // Field offsets.
+        pub const F_BUTTON0: u16 = 48; // button0 field cell
+    }
+
+    /// Build a progs whose `PlayerPostThink` reads `self.button0` and, when it is
+    /// set, both sets a global flag (`g_fired = 1`) and fires `sound(self, CHAN,
+    /// SAMPLE, VOL, ATTEN)` through the engine `PF_sound` builtin (#8). When
+    /// `button0` is clear it does nothing. Returns `(image, sound_fn_index)`; the
+    /// caller fills the constant globals via [`prime_attack_globals`].
+    fn attack_progs() -> (Vec<u8>, usize) {
+        use attack_ofs::*;
+        let mut b = Builder::new();
+        b.entityfields = 56;
+
+        b.add_global("self", EV_ENTITY, SELF);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("viewentity", EV_FLOAT, 36);
+        b.add_global("v_forward", EV_VECTOR, 60);
+        b.add_global("v_right", EV_VECTOR, 63);
+        b.add_global("v_up", EV_VECTOR, 66);
+        // A named global for the flag so the test can read it by name.
+        b.add_global("fired_flag", EV_FLOAT, G_FIRED);
+
+        // Fields the client physics touches (mirrors player_progs' broad set so
+        // the movement path never faults), plus button0/weapon/ammo_shells.
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("origin", EV_VECTOR, 2); // 2,3,4
+        b.add_field("velocity", EV_VECTOR, 5); // 5,6,7
+        b.add_field("mins", EV_VECTOR, 8); // 8,9,10
+        b.add_field("maxs", EV_VECTOR, 11); // 11,12,13
+        b.add_field("absmin", EV_VECTOR, 14); // 14,15,16
+        b.add_field("absmax", EV_VECTOR, 17); // 17,18,19
+        b.add_field("angles", EV_VECTOR, 20); // 20,21,22
+        b.add_field("v_angle", EV_VECTOR, 23); // 23,24,25
+        b.add_field("punchangle", EV_VECTOR, 26); // 26,27,28
+        b.add_field("size", EV_VECTOR, 29); // 29,30,31
+        b.add_field("flags", EV_FLOAT, 32);
+        b.add_field("health", EV_FLOAT, 33);
+        b.add_field("movetype", EV_FLOAT, 34);
+        b.add_field("solid", EV_FLOAT, 35);
+        b.add_field("fixangle", EV_FLOAT, 36);
+        b.add_field("teleport_time", EV_FLOAT, 37);
+        b.add_field("groundentity", EV_ENTITY, 38);
+        b.add_field("view_ofs", EV_VECTOR, 39); // 39,40,41
+        b.add_field("think", EV_FUNCTION, 44);
+        b.add_field("nextthink", EV_FLOAT, 45);
+        b.add_field("touch", EV_FUNCTION, 46);
+        b.add_field("gravity", EV_FLOAT, 47);
+        b.add_field("button0", EV_FLOAT, F_BUTTON0);
+        b.add_field("button2", EV_FLOAT, 49);
+        b.add_field("impulse", EV_FLOAT, 50);
+        b.add_field("weapon", EV_FLOAT, 51);
+        b.add_field("ammo_shells", EV_FLOAT, 52);
+
+        // The sound builtin (PF_sound, #8) as a callable QuakeC function.
+        let sound_fn = b.add_builtin("sound", 8);
+
+        // Empty connect/frame system functions.
+        let done = || Statement {
+            op: Op::Done as u16,
+            a: 0,
+            b: 0,
+            c: 0,
+        };
+        b.add_function("SetNewParms", vec![done()]);
+        b.add_function("ClientConnect", vec![done()]);
+        b.add_function("PutClientInServer", vec![done()]);
+        b.add_function("StartFrame", vec![done()]);
+        b.add_function("PlayerPreThink", vec![done()]);
+
+        // PlayerPostThink: read self.button0; if set, fire the sound + set flag.
+        // Statement layout (relative indices used for the IFNOT branch offset):
+        //   0 LoadF  self.button0 -> G_BTN
+        //   1 IFNOT  G_BTN -> (skip to DONE at rel index 9)  => offset 8
+        //   2 StoreF G_ONE -> fired_flag
+        //   3 StoreEnt self -> PARM0
+        //   4 StoreF G_CHAN -> PARM1
+        //   5 StoreS G_SAMPLE -> PARM2
+        //   6 StoreF G_VOL -> PARM3
+        //   7 StoreF G_ATTEN -> PARM4
+        //   8 CALL5  G_SNDFUNC
+        //   9 DONE
+        let parm0 = OFS_PARM0 as i16; // 4
+        let parm1 = (OFS_PARM0 + 3) as i16; // 7
+        let parm2 = (OFS_PARM0 + 6) as i16; // 10
+        let parm3 = (OFS_PARM0 + 9) as i16; // 13
+        let parm4 = (OFS_PARM0 + 12) as i16; // 16
+        b.add_function(
+            "PlayerPostThink",
+            vec![
+                Statement {
+                    op: Op::LoadF as u16,
+                    a: SELF as i16,
+                    b: G_FBUTTON0 as i16,
+                    c: G_BTN as i16,
+                },
+                Statement {
+                    op: Op::Ifnot as u16,
+                    a: G_BTN as i16,
+                    b: 8,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: G_ONE as i16,
+                    b: G_FIRED as i16,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::StoreEnt as u16,
+                    a: SELF as i16,
+                    b: parm0,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: G_CHAN as i16,
+                    b: parm1,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::StoreS as u16,
+                    a: G_SAMPLE as i16,
+                    b: parm2,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: G_VOL as i16,
+                    b: parm3,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: G_ATTEN as i16,
+                    b: parm4,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::Call5 as u16,
+                    a: G_SNDFUNC as i16,
+                    b: 0,
+                    c: 0,
+                },
+                done(),
+            ],
+        );
+
+        (b.build(), sound_fn)
+    }
+
+    /// Fill the constant globals the attack progs reads (after the Server is
+    /// built so the sample string is interned into the live VM heap).
+    fn prime_attack_globals(server: &mut Server, sound_fn: usize, sample: &str) -> i32 {
+        use attack_ofs::*;
+        server.vm.set_gi(G_FBUTTON0 as usize, F_BUTTON0 as i32);
+        server.vm.set_gf(G_ONE as usize, 1.0);
+        server.vm.set_gi(G_SNDFUNC as usize, sound_fn as i32);
+        server.vm.set_gf(G_CHAN as usize, 1.0); // CHAN_WEAPON
+        server.vm.set_gf(G_VOL as usize, 1.0);
+        server.vm.set_gf(G_ATTEN as usize, 1.0); // ATTN_NORM
+        let s_t = server.vm.intern(sample);
+        server.vm.set_gi(G_SAMPLE as usize, s_t);
+        s_t
+    }
+
+    #[test]
+    fn attack_button_drives_quakec_and_fires_sound() {
+        // Pressing attack (buttons bit 0) must make PlayerPostThink see
+        // self.button0 != 0 and run its firing code (set the flag + emit a
+        // sound); releasing it must not.
+        let sample = "weapons/guncock.wav";
+        let (img, sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let s_t = prime_attack_globals(&mut server, sound_fn, sample);
+
+        let p = server.connect_client().expect("connect");
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
+        server.vm.ent_set_float(p, "health", 100.0);
+
+        // --- Frame 1: attack released (buttons = 0) ---
+        let release = UserCmd {
+            buttons: 0,
+            ..UserCmd::default()
+        };
+        server.client_frame(&release, 0.1).expect("frame");
+        assert_eq!(
+            server.vm.gget_float("fired_flag"),
+            0.0,
+            "no attack -> PostThink did not fire"
+        );
+        let (b0, _, _) = server.player_attack_state();
+        assert_eq!(b0, 0.0, "button0 cleared on the edict when not pressed");
+        assert!(
+            server.drain_sounds().is_empty(),
+            "no sound queued when not attacking"
+        );
+
+        // --- Frame 2: attack pressed (buttons = 1) ---
+        let attack = UserCmd {
+            buttons: 1,
+            ..UserCmd::default()
+        };
+        server.client_frame(&attack, 0.1).expect("frame");
+        assert_eq!(
+            server.vm.gget_float("fired_flag"),
+            1.0,
+            "attack -> button0 reached QuakeC PostThink and fired"
+        );
+        let (b0, _, _) = server.player_attack_state();
+        assert_eq!(b0, 1.0, "button0 set on the edict while attack held");
+
+        let sounds = server.drain_sounds();
+        assert_eq!(sounds.len(), 1, "exactly one sound fired");
+        let ev = &sounds[0];
+        assert_eq!(ev.entity, p, "sound emitted by the player edict");
+        assert_eq!(ev.channel, 1, "CHAN_WEAPON");
+        assert_eq!(ev.sample, sample);
+        assert_eq!(ev.volume, 1.0);
+        assert_eq!(ev.attenuation, 1.0);
+        // origin = player origin + 0.5*(mins+maxs) = (0,0,24)+0.5*((-16,-16,-24)+(16,16,32))
+        //        = (0,0,24)+(0,0,4) = (0,0,28).
+        assert_eq!(ev.origin, [0.0, 0.0, 28.0], "box-centre emission point");
+        assert!(ev.sound_index >= 1, "sample resolved to a precache slot");
+        // drain cleared the queue.
+        assert!(server.drain_sounds().is_empty(), "drain cleared the queue");
+
+        let _ = s_t; // (interned handle; asserted indirectly via ev.sample)
+    }
+
+    #[test]
+    fn bi_sound_queues_event_and_drain_clears() {
+        // bi_sound (PF_sound) must push a SoundEvent with the faithful fields and
+        // drain_sounds must return then clear it. Drive the builtin directly by
+        // placing its args in the PARM globals and calling it.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        // Give an entity a box so the centre offset is non-trivial.
+        let e = server.vm.spawn();
+        server.vm.ent_set_vector(e, "origin", [10.0, 20.0, 30.0]);
+        server.vm.ent_set_vector(e, "mins", [-2.0, -4.0, -6.0]);
+        server.vm.ent_set_vector(e, "maxs", [2.0, 4.0, 16.0]);
+
+        // Precache the sample so it resolves to a real slot, then set up PARMs.
+        let sample = "ambience/wind2.wav";
+        server.vm.with_host(|_vm, h| h.precache_sound(sample));
+        let s_t = server.vm.intern(sample);
+        // PARM0=entity, PARM1=channel(2), PARM2=sample, PARM3=vol(0.5), PARM4=atten(2)
+        server.vm.set_gi(OFS_PARM0, e);
+        server.vm.set_gf(OFS_PARM0 + 3, 2.0);
+        server.vm.set_gi(OFS_PARM0 + 6, s_t);
+        server.vm.set_gf(OFS_PARM0 + 9, 0.5);
+        server.vm.set_gf(OFS_PARM0 + 12, 2.0);
+
+        bi_sound(&mut server.vm).expect("bi_sound");
+
+        let sounds = server.drain_sounds();
+        assert_eq!(sounds.len(), 1);
+        let ev = &sounds[0];
+        assert_eq!(ev.entity, e);
+        assert_eq!(ev.channel, 2);
+        assert_eq!(ev.sample, sample);
+        assert_eq!(ev.volume, 0.5);
+        assert_eq!(ev.attenuation, 2.0);
+        // centre = (10,20,30) + 0.5*((-2,-4,-6)+(2,4,16)) = (10,20,30)+(0,0,5) = (10,20,35)
+        assert_eq!(ev.origin, [10.0, 20.0, 35.0]);
+        assert!(ev.sound_index >= 1, "precached sample resolved");
+
+        // The queue is empty after draining.
+        assert!(
+            server.drain_sounds().is_empty(),
+            "drain_sounds cleared the queue"
+        );
+    }
+
+    #[test]
+    fn impulse_delivered_then_cleared() {
+        // An impulse on the usercmd must be visible on the player edict during the
+        // frame (so ImpulseCommands could act on it) and cleared back to 0 after
+        // PlayerPostThink, so it fires exactly once.
+        let (img, sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_attack_globals(&mut server, sound_fn, "weapons/guncock.wav");
+
+        let p = server.connect_client().expect("connect");
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
+        server.vm.ent_set_float(p, "health", 100.0);
+
+        // Frame with impulse 7 (e.g. a weapon-switch command).
+        let cmd = UserCmd {
+            impulse: 7,
+            ..UserCmd::default()
+        };
+        server.client_frame(&cmd, 0.1).expect("frame");
+
+        // After the frame the engine has cleared it (the C clears the one-shot).
+        assert_eq!(
+            server.vm.ent_get_float(p, "impulse"),
+            0.0,
+            "impulse cleared after PlayerPostThink"
+        );
+
+        // A subsequent frame with no impulse leaves it at 0 (no stale repeat).
+        let none = UserCmd::default();
+        server.client_frame(&none, 0.1).expect("frame");
+        assert_eq!(
+            server.vm.ent_get_float(p, "impulse"),
+            0.0,
+            "impulse stays cleared with no new command"
+        );
+    }
+
+    /// Prove the impulse is actually *present on the edict* mid-frame, before the
+    /// post-think clear, by having PlayerPreThink copy `self.impulse` into a flag.
+    #[test]
+    fn impulse_visible_to_prethink_before_clear() {
+        use attack_ofs::*;
+        let mut b = Builder::new();
+        b.entityfields = 56;
+        b.add_global("self", EV_ENTITY, SELF);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("viewentity", EV_FLOAT, 36);
+        b.add_global("v_forward", EV_VECTOR, 60);
+        b.add_global("v_right", EV_VECTOR, 63);
+        b.add_global("v_up", EV_VECTOR, 66);
+        b.add_global("seen_impulse", EV_FLOAT, 40); // PreThink copies impulse here
+
+        // Minimal field set for the client physics, plus impulse.
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("origin", EV_VECTOR, 2);
+        b.add_field("velocity", EV_VECTOR, 5);
+        b.add_field("mins", EV_VECTOR, 8);
+        b.add_field("maxs", EV_VECTOR, 11);
+        b.add_field("absmin", EV_VECTOR, 14);
+        b.add_field("absmax", EV_VECTOR, 17);
+        b.add_field("angles", EV_VECTOR, 20);
+        b.add_field("v_angle", EV_VECTOR, 23);
+        b.add_field("punchangle", EV_VECTOR, 26);
+        b.add_field("size", EV_VECTOR, 29);
+        b.add_field("flags", EV_FLOAT, 32);
+        b.add_field("health", EV_FLOAT, 33);
+        b.add_field("movetype", EV_FLOAT, 34);
+        b.add_field("solid", EV_FLOAT, 35);
+        b.add_field("fixangle", EV_FLOAT, 36);
+        b.add_field("teleport_time", EV_FLOAT, 37);
+        b.add_field("groundentity", EV_ENTITY, 38);
+        b.add_field("view_ofs", EV_VECTOR, 39);
+        b.add_field("think", EV_FUNCTION, 44);
+        b.add_field("nextthink", EV_FLOAT, 45);
+        b.add_field("touch", EV_FUNCTION, 46);
+        b.add_field("gravity", EV_FLOAT, 47);
+        b.add_field("button0", EV_FLOAT, 48);
+        b.add_field("impulse", EV_FLOAT, 50);
+
+        let g_seen = 40u16;
+        let g_fimpulse = 41u16; // holds the impulse field offset for LOAD
+        let g_tmp = 42u16;
+
+        let done = || Statement {
+            op: Op::Done as u16,
+            a: 0,
+            b: 0,
+            c: 0,
+        };
+        b.add_function("SetNewParms", vec![done()]);
+        b.add_function("ClientConnect", vec![done()]);
+        b.add_function("PutClientInServer", vec![done()]);
+        b.add_function("StartFrame", vec![done()]);
+        // PreThink: seen_impulse = self.impulse.
+        b.add_function(
+            "PlayerPreThink",
+            vec![
+                Statement {
+                    op: Op::LoadF as u16,
+                    a: SELF as i16,
+                    b: g_fimpulse as i16,
+                    c: g_tmp as i16,
+                },
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: g_tmp as i16,
+                    b: g_seen as i16,
+                    c: 0,
+                },
+                done(),
+            ],
+        );
+        b.add_function("PlayerPostThink", vec![done()]);
+
+        let img = b.build();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        server.vm.set_gi(g_fimpulse as usize, 50); // impulse field ofs
+
+        let p = server.connect_client().expect("connect");
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
+        server.vm.ent_set_float(p, "health", 100.0);
+
+        let cmd = UserCmd {
+            impulse: 3,
+            ..UserCmd::default()
+        };
+        server.client_frame(&cmd, 0.1).expect("frame");
+
+        // PreThink saw the impulse the engine wrote on the edict this frame...
+        assert_eq!(
+            server.vm.gget_float("seen_impulse"),
+            3.0,
+            "impulse was on the edict before PreThink ran"
+        );
+        // ...and it was cleared afterward.
+        assert_eq!(
+            server.vm.ent_get_float(p, "impulse"),
+            0.0,
+            "impulse cleared after the frame"
         );
     }
 }

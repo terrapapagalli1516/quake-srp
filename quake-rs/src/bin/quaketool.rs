@@ -539,6 +539,85 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     );
     let _ = writeln!(o, "  {thinks} entity/monster thinks fired during play");
 
+    // --- combat: aim at the nearest monster and pull the trigger ---
+    let pe = server.player_view().0;
+    let mut nearest: Option<(i32, f32, [f32; 3])> = None;
+    for e in 0..server.vm.num_edicts() {
+        let ent = e as i32;
+        if server.vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        if !server.vm.ent_get_string(ent, "classname").starts_with("monster") {
+            continue;
+        }
+        let mo = server.vm.ent_get_vector(ent, "origin");
+        let d2 = (mo[0] - pe[0]).powi(2) + (mo[1] - pe[1]).powi(2) + (mo[2] - pe[2]).powi(2);
+        if nearest.map_or(true, |(_, bd, _)| d2 < bd) {
+            nearest = Some((ent, d2, mo));
+        }
+    }
+    if let Some((mon, d2, mo)) = nearest {
+        let mname = server.vm.ent_get_string(mon, "classname");
+        let hp_before = server.vm.ent_get_float(mon, "health");
+        // Teleport the player ~80 units in front of the monster with clear line
+        // of sight, so the shot demonstrably connects (the spawn-walk leaves the
+        // player far down the hall behind geometry). Point-blank, same height.
+        let approach = [mo[0] - 80.0, mo[1], mo[2] + 24.0];
+        server.vm.ent_set_vector(player, "origin", approach);
+        let pe = server.player_view().0;
+        // Aim the player at the monster (yaw + pitch toward its centre).
+        let dir = [mo[0] - pe[0], mo[1] - pe[1], mo[2] - pe[2]];
+        let yaw = dir[1].atan2(dir[0]).to_degrees();
+        let horiz = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+        let pitch = -dir[2].atan2(horiz).to_degrees(); // QuakeC pitch is +down
+        let _ = writeln!(
+            o,
+            "\n  nearest monster: {mname} (edict {mon}) at {:.0} units, health {hp_before}",
+            d2.sqrt()
+        );
+        // Diagnostic: trace a bullet from the eye toward the monster centre and
+        // report what the engine's own collision says it hits (the monster, the
+        // world, or nothing) — this distinguishes an aim/LOS miss from a damage bug.
+        {
+            let aim = [pe[0] + dir[0] * 4.0, pe[1] + dir[1] * 4.0, pe[2] + dir[2] * 4.0];
+            let tr = quake_rs::server::sv_move(&mut server.vm, pe, aim, [0.0; 3], [0.0; 3], player);
+            let hit = if tr.ent == mon { format!("the monster (edict {mon}) ✓") }
+                      else if tr.ent == 0 { "the world (wall) — no LOS".into() }
+                      else if tr.ent < 0 { "nothing (clear)".into() }
+                      else { format!("another edict {}", tr.ent) };
+            let _ = writeln!(o, "  eye {pe:?} -> bullet trace hits {hit} at fraction {:.2}", tr.fraction);
+        }
+        // Hold attack (buttons bit 0) for ~1.5s of game time; collect sounds.
+        let fire = UserCmd { yaw, pitch, buttons: 1, ..Default::default() };
+        let mut sounds: Vec<String> = Vec::new();
+        for _ in 0..15 {
+            server.client_frame(&fire, 0.1).map_err(|e| format!("fire frame: {e}"))?;
+            for s in server.drain_sounds() {
+                sounds.push(s.sample);
+            }
+        }
+        let hp_after = server.vm.ent_get_float(mon, "health");
+        let alive = !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true);
+        let (b0, weapon, shells) = server.player_attack_state();
+        let _ = writeln!(
+            o,
+            "  fired 15 frames (attack={b0}, weapon={weapon}, shells {} -> {}):",
+            25, shells as i64
+        );
+        let _ = writeln!(
+            o,
+            "    monster health {hp_before} -> {hp_after}{}",
+            if !alive { " (REMOVED — killed)" } else { "" }
+        );
+        if sounds.is_empty() {
+            let _ = writeln!(o, "    (no sound events)");
+        } else {
+            let _ = writeln!(o, "    sound events: {}", sounds.join(", "));
+        }
+    } else {
+        let _ = writeln!(o, "\n  (no monster in range to attack)");
+    }
+
     // Render the player's POV (world + spawned models).
     if let Some(path) = out {
         let mut model_cache: std::collections::HashMap<String, Option<Mdl>> = std::collections::HashMap::new();
@@ -566,7 +645,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         }
         let inst: Vec<render::ModelInstance> = owned
             .iter()
-            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color })
+            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0 })
             .collect();
         let (eye, a) = server.player_view();
         let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], fov_deg: 90.0 };
@@ -849,6 +928,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             origin: *origin,
             yaw: *yaw,
             color: *color,
+            frame: 0,
         })
         .collect();
 
@@ -965,6 +1045,7 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
             origin: *origin,
             yaw: *yaw,
             color: *color,
+            frame: 0,
         })
         .collect();
 
@@ -1063,6 +1144,7 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
                 origin: *origin,
                 yaw: *yaw,
                 color: *color,
+                frame: 0,
             })
             .collect();
 

@@ -867,6 +867,224 @@ pub fn render_bsp_textured(
     image
 }
 
+// ---------------------------------------------------------------------------
+// PVS culling (potentially-visible set)
+// ---------------------------------------------------------------------------
+//
+// Ports three pieces of Quake's visibility pipeline:
+//   * `Mod_DecompressVis` (model.c): run-length-decode the per-leaf PVS bitset.
+//   * `Mod_PointInLeaf` (model.c): walk the BSP node tree to the leaf a point
+//     falls in.
+//   * the leaf-marking core of `R_MarkLeaves` (r_main.c): expand the PVS into a
+//     per-face "visible" set via each visible leaf's marksurfaces.
+//
+// As everywhere in this module, every index into BSP-derived data is checked;
+// malformed data degrades to "draw everything" (the safe, non-culling default)
+// rather than panicking.
+
+/// Run-length-decode a leaf's compressed PVS, starting at byte `visofs` in
+/// `model_vis` (the raw `LUMP_VISIBILITY` bytes).
+///
+/// Quake's RLE: a non-zero byte carries eight leaf-visibility bits directly
+/// (LSB first); a `0` byte is followed by a second byte giving a run length of
+/// *zero* bytes to emit (i.e. that many leaves not visible). Decoding stops once
+/// `numleafs` leaves have been produced. Mirrors `Mod_DecompressVis`.
+///
+/// Returns a `Vec<bool>` of length `numleafs + 1` indexed by leaf number; leaf 0
+/// (the shared solid/outside leaf) has no meaningful bit and is left `false`.
+/// When `visofs < 0` (no vis info for this leaf) every leaf is reported visible,
+/// matching the C `decompressed = mod_novis` all-ones fallback.
+fn decompress_vis(model_vis: &[u8], visofs: i32, numleafs: usize) -> Vec<bool> {
+    // The PVS describes leaves 1..=numleafs; index 0 is the solid leaf. Size the
+    // bitset to numleafs+1 so callers can index by leaf number directly.
+    let out_len = numleafs.saturating_add(1);
+
+    // No vis info -> everything visible (Quake's `mod_novis`).
+    let start: usize = match usize::try_from(visofs) {
+        Ok(s) => s,
+        Err(_) => return vec![true; out_len],
+    };
+
+    let mut out = vec![false; out_len];
+    let mut pos = start;
+    // `row` counts how many leaf bits we have produced so far. The C writes the
+    // decompressed bits starting at out[0]; we offset by 1 so out[L] is leaf L
+    // (leaf 0 stays false). Quake decompresses `(numleafs+7)>>3` bytes worth.
+    let mut leaf: usize = 1;
+
+    while leaf <= numleafs {
+        let byte = match model_vis.get(pos) {
+            Some(&b) => b,
+            // Ran off the end of the vis lump: stop (remaining leaves stay
+            // not-visible). Never indexes out of range.
+            None => break,
+        };
+        pos += 1;
+
+        if byte != 0 {
+            // Eight visibility bits, LSB = lowest leaf number.
+            let mut bit = 1u8;
+            for _ in 0..8 {
+                if leaf > numleafs {
+                    break;
+                }
+                if byte & bit != 0 {
+                    if let Some(slot) = out.get_mut(leaf) {
+                        *slot = true;
+                    }
+                }
+                leaf += 1;
+                bit <<= 1;
+            }
+        } else {
+            // A zero byte: the next byte is a count of zero-bytes (8 leaves each)
+            // to skip. A truncated run (no count byte) simply stops decoding.
+            let count = match model_vis.get(pos) {
+                Some(&c) => c as usize,
+                None => break,
+            };
+            pos += 1;
+            // Advance over `count` zero bytes = 8*count not-visible leaves.
+            leaf = leaf.saturating_add(count.saturating_mul(8));
+        }
+    }
+
+    out
+}
+
+/// Walk the worldmodel's BSP node tree to find which leaf the world-space point
+/// `p` falls in, porting `Mod_PointInLeaf`.
+///
+/// Starts at `models[0].headnode[0]` (a node index). At each node the point is
+/// classified against the node's plane: `dot(normal, p) - dist >= 0` takes
+/// `children[0]` (front), otherwise `children[1]` (back). A *negative* child
+/// encodes a leaf as `-(child) - 1`; a non-negative child is the next node.
+///
+/// Returns the leaf index, or `None` if the model/headnode/plane/child indices
+/// are malformed or out of range (every access is bounds-checked, so this never
+/// panics on corrupt data). A bounded iteration guard prevents a cyclic/corrupt
+/// node graph from looping forever.
+fn point_in_leaf(bsp: &Bsp, p: Vec3) -> Option<usize> {
+    let model = bsp.models.first()?;
+    // headnode[0] is the rendering hull's root node index.
+    let mut node_index: i32 = *model.headnode.first()?;
+
+    // A valid descent visits at most `nodes.len()` nodes; cap iterations a bit
+    // above that to defend against a malformed (cyclic) node graph.
+    let max_steps = bsp.nodes.len().saturating_add(1);
+    for _ in 0..=max_steps {
+        if node_index < 0 {
+            // Leaf: leaf index = -(node_index) - 1.
+            let leaf = (-1 - node_index) as i64; // node_index < 0 => non-negative
+            let leaf_index: usize = leaf.try_into().ok()?;
+            // Confirm it is a real leaf so callers can index `bsp.leafs` safely.
+            if leaf_index < bsp.leafs.len() {
+                return Some(leaf_index);
+            }
+            return None;
+        }
+
+        let ni: usize = node_index.try_into().ok()?;
+        let node = bsp.nodes.get(ni)?;
+        let pi: usize = (node.planenum as i64).try_into().ok()?;
+        let plane = bsp.planes.get(pi)?;
+
+        let d = dot(plane.normal, p) - plane.dist;
+        // front (child[0]) when on/in front of the plane, else back (child[1]).
+        let child = if d >= 0.0 {
+            *node.children.first()?
+        } else {
+            *node.children.get(1)?
+        };
+        node_index = child as i32;
+    }
+
+    // Exceeded the step guard: treat as malformed.
+    None
+}
+
+/// Build a per-face visibility mask for the camera at `cam_pos`, porting the
+/// leaf-marking core of `R_MarkLeaves`.
+///
+/// Returns `None` (meaning "draw everything, no culling") when there is no
+/// usable PVS for the camera: an empty visibility lump, no leafs, the camera
+/// resolving to leaf 0 (the solid/outside leaf), or a malformed BSP. Otherwise
+/// returns a `Vec<bool>` of length `faces.len()` where `true` marks a face that
+/// must be drawn.
+///
+/// Faces reached through visible leaves' `marksurfaces` are marked visible. Any
+/// face *not* referenced by some leaf's marksurfaces (e.g. submodel faces, which
+/// belong to brush entities rather than the worldmodel's leaves) is left visible
+/// too, so submodels always draw. Out-of-range marksurface/leaf indices are
+/// skipped harmlessly (they simply fail to mark, never panic).
+fn compute_visible_faces(bsp: &Bsp, cam_pos: Vec3) -> Option<Vec<bool>> {
+    if bsp.visibility.is_empty() || bsp.leafs.is_empty() || bsp.faces.is_empty() {
+        return None;
+    }
+
+    let view_leaf = point_in_leaf(bsp, cam_pos)?;
+    // Leaf 0 is the solid/outside leaf (no PVS) — draw everything.
+    if view_leaf == 0 {
+        return None;
+    }
+    let leaf = bsp.leafs.get(view_leaf)?;
+    if leaf.visofs < 0 {
+        // This leaf carries no vis info — draw everything.
+        return None;
+    }
+
+    // numleafs for the PVS is the visible-leaf count (leaves 1..=numleafs).
+    let numleafs = bsp.leafs.len().saturating_sub(1);
+    let vis = decompress_vis(&bsp.visibility, leaf.visofs, numleafs);
+
+    // Start by marking every face that no leaf claims (submodels etc.) visible,
+    // and every leaf-owned face not-visible; then re-mark the PVS-visible ones.
+    // We discover "leaf-owned" faces in the same pass: a face becomes leaf-owned
+    // the first time any leaf's marksurfaces references it.
+    let nfaces = bsp.faces.len();
+    let mut leaf_owned = vec![false; nfaces];
+    let mut visible = vec![false; nfaces];
+
+    for (li, lf) in bsp.leafs.iter().enumerate() {
+        let first = lf.firstmarksurface as usize;
+        let count = lf.nummarksurfaces as usize;
+        let end = match first.checked_add(count) {
+            Some(e) => e,
+            None => continue,
+        };
+        // Slice the marksurfaces span for this leaf; out-of-range spans are
+        // skipped (the leaf simply contributes no marks).
+        let marks = match bsp.marksurfaces.get(first..end) {
+            Some(m) => m,
+            None => continue,
+        };
+        // Is this leaf in the PVS of the view leaf? (Leaf 0 / out-of-range -> no.)
+        let leaf_visible = vis.get(li).copied().unwrap_or(false);
+        for &ms in marks {
+            let fi = ms as usize;
+            if let Some(owned) = leaf_owned.get_mut(fi) {
+                *owned = true;
+            }
+            if leaf_visible {
+                if let Some(v) = visible.get_mut(fi) {
+                    *v = true;
+                }
+            }
+        }
+    }
+
+    // Any face never owned by a leaf (submodel faces) draws unconditionally.
+    for fi in 0..nfaces {
+        if !leaf_owned.get(fi).copied().unwrap_or(true) {
+            if let Some(v) = visible.get_mut(fi) {
+                *v = true;
+            }
+        }
+    }
+
+    Some(visible)
+}
+
 /// The textured world pass, factored out of [`render_bsp_textured`] so it can
 /// share an image + z-buffer with the alias-model pass (see [`render_scene`]).
 ///
@@ -875,6 +1093,12 @@ pub fn render_bsp_textured(
 /// near clip, backface cull, perspective-correct texturing, and flat fallback.
 /// The caller owns the framebuffers, so models drawn afterward occlude (and are
 /// occluded by) the world through the shared depth buffer.
+///
+/// Before the per-face loop it computes the camera's PVS via
+/// [`compute_visible_faces`]: when the map has visibility data and the camera is
+/// in a real (non-solid) leaf, faces outside the potentially-visible set are
+/// skipped. Maps with no visibility lump (e.g. [`demo_room`]) get the full draw,
+/// so existing behaviour is unchanged there.
 fn draw_world_textured(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -899,10 +1123,24 @@ fn draw_world_textured(
     };
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
+    // PVS culling: a per-face visibility mask for the camera's leaf, or `None`
+    // when there is no usable PVS (no vis lump, solid/outside leaf, malformed) —
+    // in which case every face is drawn (the pre-PVS behaviour).
+    let visible_face = compute_visible_faces(bsp, cam.pos);
+
     let mut world_poly: Vec<Vec3> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
 
-    for face in &bsp.faces {
+    for (face_index, face) in bsp.faces.iter().enumerate() {
+        // Skip faces outside the potentially-visible set. A missing mask entry
+        // (or no mask at all) means "draw" — culling never removes a face it is
+        // unsure about.
+        if let Some(mask) = &visible_face {
+            if !mask.get(face_index).copied().unwrap_or(true) {
+                continue;
+            }
+        }
+
         if !face_world_poly(bsp, face, &mut world_poly) {
             continue;
         }
@@ -1037,24 +1275,47 @@ fn draw_world_textured(
 // ---------------------------------------------------------------------------
 
 /// One alias model placed in the world: the parsed [`Mdl`] plus its world
-/// `origin`, `yaw` (degrees, rotation about `+Z`), and a flat base `color`.
+/// `origin`, `yaw` (degrees, rotation about `+Z`), the animation `frame` to
+/// pose, and a flat base `color`.
 ///
 /// Borrows the model so a single parsed `Mdl` (e.g. cached by name) can back
 /// many instances without cloning. Rendered by [`draw_alias_model`] /
 /// [`render_scene`] sharing the world's z-buffer, so models occlude — and are
 /// occluded by — BSP geometry correctly.
+///
+/// `frame` selects which pose to draw (see [`mdl_frame_verts`]); it is clamped
+/// to the model's frame list, so any value is safe and a model with one frame
+/// always shows that frame regardless.
 pub struct ModelInstance<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub origin: Vec3,
     pub yaw: f32,
+    pub frame: usize,
     pub color: [u8; 3],
 }
 
-/// Resolve frame 0's vertices for an [`Mdl`]: the single pose, or the first pose
-/// of an animated group. Returns `None` when the model has no frames.
-fn mdl_frame0_verts(mdl: &crate::mdl::Mdl) -> Option<&[crate::mdl::TriVertex]> {
+/// Resolve the vertices of the pose `frame` for an [`Mdl`], porting the
+/// frame-select clamp of Quake's `R_AliasSetupFrame` (`r_alias.c`).
+///
+/// `frame` is clamped to the model's frame list (`R_AliasSetupFrame` resets an
+/// out-of-range frame to 0; we clamp to the last valid index instead, which is
+/// equally safe and keeps the highest pose reachable). The selected [`Frame`]
+/// resolves to:
+///  * `Single(af)` — the single pose's vertices.
+///  * `Group { frames, .. }` — the group's *first* sub-pose. Quake cycles a
+///    group's poses on a wall-clock timer (`R_AliasSetupFrame` picks by
+///    `cl.time` against the group intervals); we have no clock here, so we pick
+///    the first sub-pose deterministically.
+///
+/// Returns `None` only when the model has no frames at all (or, for a group,
+/// the group is empty).
+fn mdl_frame_verts(mdl: &crate::mdl::Mdl, frame: usize) -> Option<&[crate::mdl::TriVertex]> {
     use crate::mdl::Frame;
-    match mdl.frames.first()? {
+    // Clamp `frame` into `[0, len-1]`. `len()` is 0 only for a frameless model,
+    // for which `.get()` below returns `None` anyway.
+    let last = mdl.frames.len().saturating_sub(1);
+    let idx = frame.min(last);
+    match mdl.frames.get(idx)? {
         Frame::Single(af) => Some(&af.verts),
         Frame::Group { frames, .. } => frames.first().map(|af| af.verts.as_slice()),
     }
@@ -1086,9 +1347,10 @@ fn mdl_model_to_world(p: Vec3, yaw_rad: f64, origin: Vec3) -> Vec3 {
 /// buffer so the model occludes and is occluded by BSP geometry.
 ///
 /// Uses the same camera basis, focal length, projection, and near clip as
-/// [`draw_world_textured`]. Each triangle's three frame-0 vertices are
-/// reconstructed in model space, transformed to world space (yaw about `+Z`,
-/// then translate), projected, and rasterised flat-shaded with `inst.color`
+/// [`draw_world_textured`]. Each triangle's three vertices (from the instance's
+/// posed frame, [`mdl_frame_verts`]) are reconstructed in model space,
+/// transformed to world space (yaw about `+Z`, then translate), projected, and
+/// rasterised flat-shaded with `inst.color`
 /// modulated by a Lambert term from the triangle's world-space normal against a
 /// fixed light. A triangle is skipped whole if any vertex is at/behind the near
 /// plane. Every model index goes through `.get()`; malformed data is skipped,
@@ -1121,7 +1383,7 @@ fn draw_alias_model(
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
     let yaw_rad = (inst.yaw as f64).to_radians();
 
-    let verts = match mdl_frame0_verts(inst.mdl) {
+    let verts = match mdl_frame_verts(inst.mdl, inst.frame) {
         Some(v) => v,
         None => return, // no frame -> nothing to draw
     };
@@ -1660,6 +1922,7 @@ mod tests {
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0], // between the camera and the centre
             yaw: 0.0,
+            frame: 0,
             color: [255, 32, 32],
         };
         let with_model = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
@@ -1671,6 +1934,156 @@ mod tests {
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "model in front of camera changed no pixels");
+    }
+
+    /// Build a synthetic two-frame single-skin MDL. Frame 0 and frame 1 carry
+    /// distinct vertex data so the selected pose is observable.
+    fn two_frame_mdl() -> crate::mdl::Mdl {
+        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
+        let header = MdlHeader {
+            ident: i32::from_le_bytes(*b"IDPO"),
+            version: 6,
+            // 1 unit of v -> 1 world unit; origin centres the box (matches the
+            // proven-visible geometry of `tiny_mdl`).
+            scale: [1.0, 1.0, 1.0],
+            scale_origin: [-16.0, -16.0, -16.0],
+            boundingradius: 32.0,
+            eyeposition: [0.0, 0.0, 0.0],
+            numskins: 1,
+            skinwidth: 1,
+            skinheight: 1,
+            numverts: 3,
+            numtris: 1,
+            numframes: 2,
+            synctype: 0,
+            flags: 0,
+            size: 1.0,
+        };
+        // Frame 0: the same triangle `tiny_mdl` uses (known to rasterise here).
+        let frame0 = AliasFrame {
+            name: "pose0".into(),
+            bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
+            bboxmax: TriVertex { v: [32, 0, 32], lightnormalindex: 0 },
+            verts: vec![
+                TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
+                TriVertex { v: [32, 0, 0], lightnormalindex: 0 },
+                TriVertex { v: [0, 0, 32], lightnormalindex: 0 },
+            ],
+        };
+        // Frame 1: a clearly different pose — the triangle spread along +Y so it
+        // faces the camera differently and covers a different screen region.
+        let frame1 = AliasFrame {
+            name: "pose1".into(),
+            bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
+            bboxmax: TriVertex { v: [255, 255, 255], lightnormalindex: 0 },
+            verts: vec![
+                TriVertex { v: [255, 0, 255], lightnormalindex: 0 },
+                TriVertex { v: [255, 255, 0], lightnormalindex: 0 },
+                TriVertex { v: [0, 255, 255], lightnormalindex: 0 },
+            ],
+        };
+        Mdl {
+            header,
+            skins: vec![Skin::Single(vec![0])],
+            stverts: vec![StVert { onseam: 0, s: 0, t: 0 }; 3],
+            triangles: vec![Triangle { facesfront: 1, vertindex: [0, 1, 2] }],
+            frames: vec![Frame::Single(frame0), Frame::Single(frame1)],
+        }
+    }
+
+    #[test]
+    fn mdl_frame_verts_selects_and_clamps() {
+        use crate::mdl::TriVertex;
+        let mdl = two_frame_mdl();
+
+        // Frame 0 -> first pose.
+        let f0 = mdl_frame_verts(&mdl, 0).expect("frame 0 present");
+        assert_eq!(f0.len(), 3);
+        assert_eq!(f0[0], TriVertex { v: [0, 0, 0], lightnormalindex: 0 });
+        assert_eq!(f0[1], TriVertex { v: [32, 0, 0], lightnormalindex: 0 });
+
+        // Frame 1 -> second, distinct pose.
+        let f1 = mdl_frame_verts(&mdl, 1).expect("frame 1 present");
+        assert_eq!(f1[0], TriVertex { v: [255, 0, 255], lightnormalindex: 0 });
+        assert_eq!(f1[2], TriVertex { v: [0, 255, 255], lightnormalindex: 0 });
+
+        // Out-of-range frame clamps to the last frame (index 1) rather than
+        // panicking or returning None.
+        let clamped = mdl_frame_verts(&mdl, 999).expect("clamped frame present");
+        assert_eq!(clamped, f1, "out-of-range frame should clamp to the last pose");
+
+        // A frameless model yields None (no pose to draw).
+        let mut empty = two_frame_mdl();
+        empty.frames.clear();
+        assert!(mdl_frame_verts(&empty, 0).is_none());
+
+        // A group frame resolves to its first sub-pose deterministically.
+        {
+            use crate::mdl::{AliasFrame, Frame, TriVertex as TV};
+            let mut grouped = two_frame_mdl();
+            let sub0 = AliasFrame {
+                name: "g0".into(),
+                bboxmin: TV { v: [0, 0, 0], lightnormalindex: 0 },
+                bboxmax: TV { v: [1, 1, 1], lightnormalindex: 0 },
+                verts: vec![
+                    TV { v: [7, 0, 0], lightnormalindex: 0 },
+                    TV { v: [8, 0, 0], lightnormalindex: 0 },
+                    TV { v: [9, 0, 0], lightnormalindex: 0 },
+                ],
+            };
+            let sub1 = AliasFrame {
+                name: "g1".into(),
+                bboxmin: TV { v: [0, 0, 0], lightnormalindex: 0 },
+                bboxmax: TV { v: [1, 1, 1], lightnormalindex: 0 },
+                verts: vec![
+                    TV { v: [50, 0, 0], lightnormalindex: 0 },
+                    TV { v: [51, 0, 0], lightnormalindex: 0 },
+                    TV { v: [52, 0, 0], lightnormalindex: 0 },
+                ],
+            };
+            grouped.frames = vec![Frame::Group {
+                bboxmin: TV { v: [0, 0, 0], lightnormalindex: 0 },
+                bboxmax: TV { v: [1, 1, 1], lightnormalindex: 0 },
+                intervals: vec![0.1, 0.2],
+                frames: vec![sub0, sub1],
+            }];
+            let g = mdl_frame_verts(&grouped, 0).expect("group first sub-pose");
+            assert_eq!(g[0], TriVertex { v: [7, 0, 0], lightnormalindex: 0 });
+        }
+    }
+
+    #[test]
+    fn render_scene_frame_selection_changes_pixels() {
+        // Two instances differing only in `frame` must render differently when
+        // the two frames carry distinct geometry.
+        let bsp = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let mdl = two_frame_mdl();
+
+        let inst0 = ModelInstance {
+            mdl: &mdl,
+            origin: [-80.0, 0.0, 0.0],
+            yaw: 0.0,
+            frame: 0,
+            color: [255, 32, 32],
+        };
+        let inst1 = ModelInstance {
+            mdl: &mdl,
+            origin: [-80.0, 0.0, 0.0],
+            yaw: 0.0,
+            frame: 1,
+            color: [255, 32, 32],
+        };
+        let img0 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst0));
+        let img1 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst1));
+        let changed = img0
+            .rgb
+            .iter()
+            .zip(img1.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "different frames should produce different images");
     }
 
     #[test]
@@ -1855,5 +2268,194 @@ mod tests {
         // lightofs near the end leaves too few bytes -> fullbright.
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], 5, 0);
         assert!(face_lightmap(&bsp, &face, &poly).is_none());
+    }
+
+    // -- PVS culling: decompress_vis / point_in_leaf -----------------------
+
+    #[test]
+    fn decompress_vis_rle_and_novis() {
+        // Hand-built RLE stream for a map with numleafs = 20 (leaves 1..=20).
+        //
+        // Byte sequence:
+        //   0xA5            -> leaves 1..8 from bits 1010_0101 (LSB=leaf1):
+        //                      leaf1=1, leaf2=0, leaf3=1, leaf4=0,
+        //                      leaf5=0, leaf6=1, leaf7=0, leaf8=1
+        //   0x00 0x01       -> zero-run of 1 byte = 8 not-visible leaves (9..16)
+        //   0xFF            -> leaves 17..20 all visible (only 4 consumed)
+        let stream = [0xA5u8, 0x00, 0x01, 0xFF];
+        let vis = decompress_vis(&stream, 0, 20);
+
+        // Length is numleafs + 1, indexable by leaf number; leaf 0 always false.
+        assert_eq!(vis.len(), 21);
+        assert!(!vis[0], "leaf 0 (solid) is never visible");
+
+        // First byte 0xA5 = 1010_0101.
+        assert!(vis[1]);
+        assert!(!vis[2]);
+        assert!(vis[3]);
+        assert!(!vis[4]);
+        assert!(!vis[5]);
+        assert!(vis[6]);
+        assert!(!vis[7]);
+        assert!(vis[8]);
+
+        // Zero-run skipped leaves 9..=16.
+        for l in 9..=16 {
+            assert!(!vis[l], "leaf {l} should be in the zero-run (not visible)");
+        }
+
+        // Final 0xFF marks leaves 17..=20 visible.
+        for l in 17..=20 {
+            assert!(vis[l], "leaf {l} should be visible from the trailing 0xFF");
+        }
+
+        // visofs < 0 -> all leaves visible (Quake's mod_novis fallback).
+        let all = decompress_vis(&stream, -1, 20);
+        assert_eq!(all.len(), 21);
+        assert!(all.iter().all(|&v| v), "no-vis fallback marks every leaf visible");
+    }
+
+    #[test]
+    fn decompress_vis_truncated_is_safe() {
+        // A zero byte with no following count byte must stop, not panic.
+        let stream = [0x00u8];
+        let vis = decompress_vis(&stream, 0, 16);
+        assert_eq!(vis.len(), 17);
+        // Nothing was marked visible; the decode simply stopped.
+        assert!(vis.iter().all(|&v| !v));
+
+        // An offset past the end of the lump also stops immediately (all false).
+        let vis2 = decompress_vis(&stream, 99, 16);
+        assert!(vis2.iter().all(|&v| !v));
+    }
+
+    /// Build a tiny BSP with exactly one splitting node and two leaves, so
+    /// `point_in_leaf` has a well-defined front/back to resolve.
+    ///
+    /// Plane: normal +X, dist 0 (the YZ plane through the origin). `node.children`
+    /// = `[-(leaf1)-1, -(leaf2)-1]` = `[-2, -3]`, so the front child (x >= 0) is
+    /// leaf 1 and the back child (x < 0) is leaf 2. `models[0].headnode[0] = 0`.
+    fn two_leaf_bsp() -> Bsp {
+        use crate::bsp::{DLeaf, DNode, DPlane};
+        let mut bsp = demo_room();
+        bsp.planes = vec![DPlane {
+            normal: [1.0, 0.0, 0.0],
+            dist: 0.0,
+            ptype: crate::bsp::PLANE_X,
+        }];
+        // children: front (x>=0) -> leaf index 1 => -(1)-1 = -2;
+        //           back  (x<0)  -> leaf index 2 => -(2)-1 = -3.
+        bsp.nodes = vec![DNode {
+            planenum: 0,
+            children: [-2, -3],
+            mins: [0, 0, 0],
+            maxs: [0, 0, 0],
+            firstface: 0,
+            numfaces: 0,
+        }];
+        // Three leaves: 0 = solid, 1 = front, 2 = back.
+        let mk_leaf = |contents: i32| DLeaf {
+            contents,
+            visofs: -1,
+            mins: [0, 0, 0],
+            maxs: [0, 0, 0],
+            firstmarksurface: 0,
+            nummarksurfaces: 0,
+            ambient_level: [0, 0, 0, 0],
+        };
+        bsp.leafs = vec![
+            mk_leaf(crate::bsp::CONTENTS_SOLID),
+            mk_leaf(crate::bsp::CONTENTS_EMPTY),
+            mk_leaf(crate::bsp::CONTENTS_EMPTY),
+        ];
+        if let Some(m) = bsp.models.first_mut() {
+            m.headnode = [0, 0, 0, 0];
+        }
+        bsp
+    }
+
+    #[test]
+    fn point_in_leaf_resolves_plane_sides() {
+        let bsp = two_leaf_bsp();
+
+        // A point with x > 0 is on the front side (normal +X, dist 0) -> leaf 1.
+        assert_eq!(point_in_leaf(&bsp, [10.0, 0.0, 0.0]), Some(1));
+        // A point with x < 0 is on the back side -> leaf 2.
+        assert_eq!(point_in_leaf(&bsp, [-10.0, 0.0, 0.0]), Some(2));
+        // Exactly on the plane (d == 0) counts as front (>= 0) -> leaf 1.
+        assert_eq!(point_in_leaf(&bsp, [0.0, 5.0, -3.0]), Some(1));
+    }
+
+    #[test]
+    fn point_in_leaf_malformed_is_none() {
+        // headnode pointing at a non-existent node yields None, not a panic.
+        let mut bsp = two_leaf_bsp();
+        if let Some(m) = bsp.models.first_mut() {
+            m.headnode = [999, 0, 0, 0];
+        }
+        assert!(point_in_leaf(&bsp, [10.0, 0.0, 0.0]).is_none());
+
+        // A node whose child points past the leaf array also yields None.
+        let mut bsp2 = two_leaf_bsp();
+        if let Some(n) = bsp2.nodes.first_mut() {
+            n.children = [-9999, -3]; // front child -> leaf 9998, out of range
+        }
+        assert!(point_in_leaf(&bsp2, [10.0, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn compute_visible_faces_culls_unmarked_leaves() {
+        // Build on the two-leaf BSP: give the worldmodel three faces, mark face 0
+        // to leaf 1 and face 1 to leaf 2, leave face 2 unowned (submodel). Vis
+        // for leaf 1 sees only itself, so face 1 (leaf 2 only) must be culled,
+        // while face 0 (visible leaf) and face 2 (submodel) draw.
+        use crate::bsp::DFace;
+        let mut bsp = two_leaf_bsp();
+
+        // Three trivial faces (their content is irrelevant to the masking test).
+        let mk_face = || DFace {
+            planenum: 0,
+            side: 0,
+            firstedge: 0,
+            numedges: 4,
+            texinfo: 0,
+            styles: [0, 0, 0, 0],
+            lightofs: -1,
+        };
+        bsp.faces = vec![mk_face(), mk_face(), mk_face()];
+        // marksurfaces: [face0, face1]; leaf1 -> {0}, leaf2 -> {1}; face2 unowned.
+        bsp.marksurfaces = vec![0, 1];
+        bsp.leafs[1].firstmarksurface = 0;
+        bsp.leafs[1].nummarksurfaces = 1; // leaf1 owns face 0
+        bsp.leafs[1].visofs = 0; // leaf1 has vis info at byte 0
+        bsp.leafs[2].firstmarksurface = 1;
+        bsp.leafs[2].nummarksurfaces = 1; // leaf2 owns face 1
+
+        // PVS for leaf 1 (numleafs = 2): a single byte with only leaf 1's bit set
+        // (bit 0 = leaf 1, bit 1 = leaf 2) -> 0b01 = 0x01: leaf1 visible, leaf2 not.
+        bsp.visibility = vec![0x01];
+
+        // Camera in the front half-space resolves to leaf 1.
+        let mask = compute_visible_faces(&bsp, [10.0, 0.0, 0.0])
+            .expect("a real leaf with vis should produce a culling mask");
+        assert_eq!(mask.len(), 3);
+        assert!(mask[0], "face 0 (in the visible view leaf) should draw");
+        assert!(!mask[1], "face 1 (only in the culled leaf 2) should be culled");
+        assert!(mask[2], "face 2 (unowned/submodel) should always draw");
+
+        // No visibility lump -> no culling (None means draw everything).
+        let mut novis = bsp.clone();
+        novis.visibility = Vec::new();
+        assert!(compute_visible_faces(&novis, [10.0, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn demo_room_pvs_is_noop() {
+        // demo_room has no visibility lump, so PVS must not cull anything: the
+        // textured render is identical with the culling code present.
+        let bsp = demo_room();
+        assert!(bsp.visibility.is_empty(), "demo_room has no vis lump");
+        // compute_visible_faces returns None (no culling) for such a map.
+        assert!(compute_visible_faces(&bsp, [0.0, 0.0, 0.0]).is_none());
     }
 }

@@ -326,7 +326,7 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     let instances: Vec<ModelInstance> = w
         .models
         .iter()
-        .map(|(mdl, origin, yaw, color)| ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color })
+        .map(|(mdl, origin, yaw, color)| ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0 })
         .collect();
     render::render_scene(&w.bsp, &cam, W, H, &w.palette, &instances)
 }
@@ -353,6 +353,9 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
                 origin: e.origin,
                 yaw: e.angles[1],
                 color: d.colors.get(e.modelindex).copied().unwrap_or([200, 200, 200]),
+                // Demo entities carry their current animation frame from the net
+                // stream — use it so monsters in the demo are actually posed.
+                frame: e.frame.max(0) as usize,
             });
         }
     }

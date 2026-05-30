@@ -17,3 +17,6 @@ web/quake_wasm.wasm
 *.wad
 quake-data/
 quake-c/
+
+# Local symlink to the (uncommitted) Quake data tree, for building quake-wasm
+/quake-data
