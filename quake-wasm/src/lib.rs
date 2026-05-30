@@ -28,9 +28,41 @@ static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
 const DEMO_FILE: &str = "demo1.dem";
-const W: usize = 320;
-const H: usize = 200;
+/// The default (boot) render resolution: Quake's fast 320x200. The engine boots
+/// here; the Options menu lets the player opt into a larger framebuffer at runtime
+/// (the menu + HUD auto-scale to whatever size they're drawn into).
+const DEFAULT_W: usize = 320;
+const DEFAULT_H: usize = 200;
+/// Sane bounds for [`set_resolution`] (and the menu presets): the framebuffer is
+/// clamped to this envelope and its total pixel count capped so a runaway value
+/// cannot allocate gigabytes. `1280*800*4` bytes ≈ 4 MB is the upper bound.
+const MIN_W: i32 = 320;
+const MAX_W: i32 = 1280;
+const MIN_H: i32 = 200;
+const MAX_H: i32 = 800;
+const MAX_PIXELS: i32 = 1280 * 800;
 const SPEED: f32 = 320.0;
+
+/// Clamp a requested `(w, h)` render resolution into the supported envelope:
+/// width `MIN_W..=MAX_W`, height `MIN_H..=MAX_H`, and the total pixel count capped
+/// at [`MAX_PIXELS`] (shrinking the height first if `w*h` would exceed it). Always
+/// returns a valid, non-zero size — never panics on absurd input.
+fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
+    let mut cw = w.clamp(MIN_W, MAX_W);
+    let mut ch = h.clamp(MIN_H, MAX_H);
+    // Cap the pixel budget so a wide AND tall request can't blow the cap even
+    // though each dimension is individually in range. Trim the height to fit,
+    // never below its minimum.
+    if cw.saturating_mul(ch) > MAX_PIXELS {
+        ch = (MAX_PIXELS / cw.max(1)).clamp(MIN_H, MAX_H);
+        // If even MIN_H * cw overflows the cap (it can't with these constants,
+        // but stay safe), trim the width too.
+        if cw.saturating_mul(ch) > MAX_PIXELS {
+            cw = (MAX_PIXELS / ch.max(1)).clamp(MIN_W, MAX_W);
+        }
+    }
+    (cw as usize, ch as usize)
+}
 
 /// Interactive walk state: a live server ticked every frame, rendered from the
 /// player edict. Monster thinks advance their animation frames and move them,
@@ -116,7 +148,28 @@ struct App {
     demo: Option<DemoPlay>,
     /// 0 = walk, 1 = demo.
     mode: u8,
-    fb: Vec<u8>, // RGBA, W*H*4
+    /// Current render resolution (runtime; defaults to [`DEFAULT_W`] x
+    /// [`DEFAULT_H`]). The scene renders at this size and the framebuffer is
+    /// `render_w * render_h * 4` RGBA bytes, reallocated whenever it changes.
+    render_w: usize,
+    render_h: usize,
+    fb: Vec<u8>, // RGBA, render_w*render_h*4
+}
+
+impl App {
+    /// Resize the framebuffer to the (already-clamped) `(w, h)`, reallocating only
+    /// when the size actually changes. The new buffer is zero-filled; the next
+    /// `step` paints it.
+    fn set_render_size(&mut self, w: usize, h: usize) {
+        if self.render_w == w && self.render_h == h {
+            return;
+        }
+        self.render_w = w;
+        self.render_h = h;
+        // `w*h*4` is bounded by MAX_PIXELS*4 (~4 MB) after clamping, so this can't
+        // OOM; saturating_mul keeps us safe even if a caller bypassed the clamp.
+        self.fb = vec![0u8; w.saturating_mul(h).saturating_mul(4)];
+    }
 }
 
 thread_local! {
@@ -188,6 +241,7 @@ fn load_menu_pics(
         mainmenu: lmp("gfx/mainmenu.lmp"),
         ttl_sgl: lmp("gfx/ttl_sgl.lmp"),
         sp_menu: lmp("gfx/sp_menu.lmp"),
+        p_option: lmp("gfx/p_option.lmp"),
         menudot,
     };
 
@@ -294,7 +348,14 @@ fn build_demo() -> Option<DemoPlay> {
 fn ensure_app(f: impl FnOnce(&mut App)) {
     APP.with(|c| {
         if c.borrow().is_none() {
-            *c.borrow_mut() = Some(App { walk: None, demo: None, mode: 0, fb: vec![0u8; W * H * 4] });
+            *c.borrow_mut() = Some(App {
+                walk: None,
+                demo: None,
+                mode: 0,
+                render_w: DEFAULT_W,
+                render_h: DEFAULT_H,
+                fb: vec![0u8; DEFAULT_W * DEFAULT_H * 4],
+            });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
             f(a);
@@ -321,6 +382,10 @@ pub extern "C" fn boot() -> i32 {
         if let Some(w) = w {
             a.walk = Some(w);
             a.mode = 0;
+            // The fresh Walk's menu starts at resolution preset 0 (DEFAULT);
+            // reset the App render size to match so the Options "Screen size"
+            // label and the actual framebuffer never desync after a re-boot.
+            a.set_render_size(DEFAULT_W, DEFAULT_H);
         }
     });
     ok as i32
@@ -337,18 +402,35 @@ pub extern "C" fn boot_demo() -> i32 {
         a.demo = d;
         if a.demo.is_some() {
             a.mode = 1;
+            a.set_render_size(DEFAULT_W, DEFAULT_H);
         }
     });
     ok as i32
 }
 
+/// The current render width in pixels (defaults to [`DEFAULT_W`] = 320). The page
+/// reads this each frame and resizes its canvas backing store + ImageData when it
+/// changes (e.g. after the Options menu picks a larger preset).
 #[no_mangle]
 pub extern "C" fn width() -> i32 {
-    W as i32
+    APP.with(|c| c.borrow().as_ref().map(|a| a.render_w as i32).unwrap_or(DEFAULT_W as i32))
 }
+/// The current render height in pixels (defaults to [`DEFAULT_H`] = 200).
 #[no_mangle]
 pub extern "C" fn height() -> i32 {
-    H as i32
+    APP.with(|c| c.borrow().as_ref().map(|a| a.render_h as i32).unwrap_or(DEFAULT_H as i32))
+}
+
+/// Set the render resolution at runtime, reallocating the framebuffer. The
+/// requested `(w, h)` is clamped to the supported envelope (width 320..=1280,
+/// height 200..=800, and total pixels <= 1_280*800 so a runaway can't OOM) via
+/// [`clamp_resolution`]; out-of-range input is clamped, never a panic. After this,
+/// `width()`/`height()` report the new (clamped) size and the next `step` renders
+/// the scene at it. The menu + HUD auto-scale to the new framebuffer size.
+#[no_mangle]
+pub extern "C" fn set_resolution(w: i32, h: i32) {
+    let (cw, ch) = clamp_resolution(w, h);
+    ensure_app(|a| a.set_render_size(cw, ch));
 }
 
 #[no_mangle]
@@ -442,6 +524,9 @@ pub extern "C" fn menu_select() {
             ensure_app(|a| {
                 a.walk = Some(nw);
                 a.mode = 0;
+                // Fresh menu = resolution preset 0; keep the App render size in
+                // sync so the Options label and framebuffer don't desync.
+                a.set_render_size(DEFAULT_W, DEFAULT_H);
             });
         }
     }
@@ -461,6 +546,71 @@ pub extern "C" fn menu_cancel() {
             }
         }
     });
+}
+
+/// Adjust the highlighted Options row leftward (decrement / cycle back), porting
+/// `K_LEFTARROW` on the options screen. A no-op unless the menu is visible AND on
+/// the Options screen ([`Menu::adjust`] itself enforces the latter). If the
+/// "Screen size" row changed, the framebuffer is reallocated to the menu's new
+/// [`Menu::resolution`] so `width()`/`height()` and the next `step` follow it.
+#[no_mangle]
+pub extern "C" fn menu_left() {
+    menu_adjust(-1);
+}
+
+/// Adjust the highlighted Options row rightward (increment / cycle forward),
+/// porting `K_RIGHTARROW`. See [`menu_left`] for the resolution-apply behaviour.
+#[no_mangle]
+pub extern "C" fn menu_right() {
+    menu_adjust(1);
+}
+
+/// Shared body of [`menu_left`]/[`menu_right`]: adjust the Options row under the
+/// borrow, and if the Screen-size row changed, capture the new size and resize the
+/// framebuffer afterward (so we don't hold a `&mut Walk` while touching the App's
+/// fb). No-op when the menu is hidden.
+fn menu_adjust(delta: i32) {
+    let mut new_size: Option<(usize, usize)> = None;
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            if w.menu.visible && w.menu.adjust(delta) {
+                // The Screen-size row changed: read the new (clamped) resolution.
+                let (rw, rh) = w.menu.resolution();
+                new_size = Some(clamp_resolution(rw, rh));
+            }
+        }
+    });
+    if let Some((w, h)) = new_size {
+        ensure_app(|a| a.set_render_size(w, h));
+    }
+}
+
+/// The Options "Mouse speed" as a sensitivity multiplier (default 1.0). The page
+/// multiplies its baseline look sensitivity by this. Reads from the live menu; 1.0
+/// when there is no walk yet.
+#[no_mangle]
+pub extern "C" fn mouse_sensitivity() -> f32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|a| a.walk.as_ref())
+            .map(|w| w.menu.mouse_sensitivity())
+            .unwrap_or(1.0)
+    })
+}
+
+/// The Options "Volume" as a `0.0..=1.0` master gain (default 0.7). The page
+/// scales its sound gains by this. Reads from the live menu; 1.0 when there is no
+/// walk yet (so audio is never accidentally silenced before the menu exists).
+#[no_mangle]
+pub extern "C" fn volume() -> f32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|a| a.walk.as_ref())
+            .map(|w| w.menu.volume())
+            .unwrap_or(1.0)
+    })
 }
 
 /// 1 when the menu is currently visible (capturing input), else 0. The page
@@ -504,10 +654,11 @@ pub extern "C" fn look(dyaw: f32, dpitch: f32) {
 #[no_mangle]
 pub extern "C" fn step(dt: f32) {
     ensure_app(|a| {
+        let (w, h) = (a.render_w, a.render_h);
         let img = if a.mode == 1 {
-            a.demo.as_mut().map(|d| step_demo(d, dt))
+            a.demo.as_mut().map(|d| step_demo(d, dt, w, h))
         } else {
-            a.walk.as_mut().map(|w| step_walk(w, dt))
+            a.walk.as_mut().map(|wk| step_walk(wk, dt, w, h))
         };
         if let Some(img) = img {
             let fb = &mut a.fb;
@@ -938,7 +1089,7 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let _ = w.server.drain_temp_entities();
 }
 
-fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
+fn step_walk(w: &mut Walk, dt: f32, render_w: usize, render_h: usize) -> render::Image {
     // Advance the animation clock (used for liquid warp + sky scroll). Guard
     // against a non-finite/negative dt so the clock only ever moves forward.
     if dt.is_finite() && dt > 0.0 {
@@ -1192,7 +1343,7 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
     let mut img =
-        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles);
+        render::render_scene_ext(&w.bsp, &cam, render_w, render_h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles);
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
     //     player lost health/armour this frame, and tint the view when the eye is
@@ -1251,7 +1402,7 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     img
 }
 
-fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
+fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> render::Image {
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
     d.elapsed += dt;
@@ -1295,7 +1446,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
     // demos carry no engine-particle stream or dynamic lights here, so those
     // slices are empty; and a demo has no live server to source light styles, so
     // pass the neutral (static) scales.
-    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], &[], None, f.time, &[], &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
+    render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &[], &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
 }
 
 #[cfg(test)]
@@ -1514,7 +1665,7 @@ mod tests {
         // (i.e. the value of `idx` chosen by step_demo for that frame).
         let mut shown = Vec::new();
         for _ in 0..5 {
-            let _img = step_demo(&mut d, 1.0);
+            let _img = step_demo(&mut d, 1.0, DEFAULT_W, DEFAULT_H);
             shown.push(d.idx);
         }
 
@@ -1533,5 +1684,126 @@ mod tests {
         // Concretely: 1.0s steps over t={0,1,2} render [1, 2, 0, 1, 2] — frame 2
         // (the last) is shown, then it loops to 0.
         assert_eq!(shown, vec![1, 2, 0, 1, 2], "deferred-wrap playback order");
+    }
+
+    // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
+
+    #[test]
+    fn clamp_resolution_clamps_into_envelope() {
+        // In-range values pass through unchanged.
+        assert_eq!(clamp_resolution(640, 400), (640, 400));
+        assert_eq!(clamp_resolution(DEFAULT_W as i32, DEFAULT_H as i32), (320, 200));
+        // Below the minimum clamps up; above the maximum clamps down.
+        assert_eq!(clamp_resolution(0, 0), (MIN_W as usize, MIN_H as usize));
+        assert_eq!(clamp_resolution(-100, -100), (320, 200));
+        assert_eq!(clamp_resolution(99999, 99999).0, MAX_W as usize);
+        // The pixel-budget cap: a max-width AND max-height request is trimmed so
+        // w*h never exceeds MAX_PIXELS, never panicking.
+        let (cw, ch) = clamp_resolution(MAX_W, MAX_H);
+        assert!(
+            (cw as i32).saturating_mul(ch as i32) <= MAX_PIXELS,
+            "clamped {cw}x{ch} must respect the pixel cap"
+        );
+        assert!(cw >= MIN_W as usize && ch >= MIN_H as usize, "still a valid non-zero size");
+        // i32::MAX in both dims must not overflow or panic.
+        let (mw, mh) = clamp_resolution(i32::MAX, i32::MAX);
+        assert!(mw <= MAX_W as usize && mh <= MAX_H as usize);
+        assert!((mw as i32).saturating_mul(mh as i32) <= MAX_PIXELS);
+    }
+
+    #[test]
+    fn set_resolution_reallocates_and_reports_new_size() {
+        // Default boot size.
+        assert_eq!(width(), DEFAULT_W as i32);
+        assert_eq!(height(), DEFAULT_H as i32);
+
+        // A valid in-range resolution is applied verbatim; width()/height() follow
+        // and the framebuffer is exactly w*h*4 bytes.
+        set_resolution(640, 400);
+        assert_eq!(width(), 640);
+        assert_eq!(height(), 400);
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().expect("app exists after set_resolution");
+            assert_eq!(a.render_w, 640);
+            assert_eq!(a.render_h, 400);
+            assert_eq!(a.fb.len(), 640 * 400 * 4, "framebuffer reallocated to 640*400*4");
+        });
+
+        // Out-of-range input is clamped, not panicked: a huge request lands within
+        // the envelope and the fb matches the clamped size.
+        set_resolution(100000, 100000);
+        let (w, h) = (width(), height());
+        assert!((MIN_W..=MAX_W).contains(&w) && (MIN_H..=MAX_H).contains(&h));
+        assert!(w.saturating_mul(h) <= MAX_PIXELS);
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            assert_eq!(a.fb.len(), (w as usize) * (h as usize) * 4);
+        });
+
+        // Back to the fast default.
+        set_resolution(DEFAULT_W as i32, DEFAULT_H as i32);
+        assert_eq!(width(), 320);
+        assert_eq!(height(), 200);
+    }
+
+    #[test]
+    fn boot_then_set_resolution_renders_larger_framebuffer() {
+        // Boot the real walk (embedded pak). If the pak is unavailable in this
+        // build the test would fail to boot; the workspace embeds a real PAK0.PAK.
+        assert_eq!(boot(), 1, "boot the embedded e1m1 walk");
+        // Boot keeps the fast default resolution.
+        assert_eq!(width(), DEFAULT_W as i32);
+        assert_eq!(height(), DEFAULT_H as i32);
+        step(0.016);
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            assert_eq!(a.fb.len(), DEFAULT_W * DEFAULT_H * 4, "default fb is 320*200*4");
+        });
+
+        // Pick a larger resolution, then render: the framebuffer is now 640*400*4
+        // and the scene rendered into all of it (the fb is fully written by step).
+        set_resolution(640, 400);
+        assert_eq!(width(), 640);
+        assert_eq!(height(), 400);
+        step(0.016);
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            assert_eq!(a.fb.len(), 640 * 400 * 4, "step renders into the 640*400 framebuffer");
+            // Every alpha byte is 255 (step pushes opaque RGBA), proving the whole
+            // larger buffer was painted, not just the old 320x200 region.
+            assert!(a.fb.chunks_exact(4).all(|px| px[3] == 255), "full fb painted opaque");
+        });
+    }
+
+    #[test]
+    fn menu_left_right_cycle_resolution_and_apply() {
+        // A fresh boot sits in the menu on Main. Navigate to Options and cycle the
+        // Screen size row with menu_right; the engine's resolution must follow.
+        assert_eq!(boot(), 1);
+        assert_eq!(menu_visible(), 1, "boot enters the menu");
+        // Default render size before touching anything.
+        assert_eq!(width(), 320);
+        assert_eq!(height(), 200);
+        // Main cursor 0 is Single Player; move down to Options (item 2) and Enter.
+        menu_down(); // -> 1 (Multiplayer)
+        menu_down(); // -> 2 (Options)
+        menu_select(); // enter Options
+        assert_eq!(menu_visible(), 1);
+        // menu_left/right off the resolution row shouldn't change the size; the
+        // top Options row IS Screen size, so menu_right cycles to the next preset.
+        menu_right();
+        assert_eq!((width(), height()), (480, 300), "right cycles to the 480x300 preset");
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            assert_eq!(a.fb.len(), 480 * 300 * 4, "fb reallocated to the new preset");
+        });
+        // menu_left cycles back to 320x200.
+        menu_left();
+        assert_eq!((width(), height()), (320, 200), "left cycles back to the default");
     }
 }

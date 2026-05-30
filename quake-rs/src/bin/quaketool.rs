@@ -1383,6 +1383,7 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
         mainmenu: lmp("gfx/mainmenu.lmp"),
         ttl_sgl: lmp("gfx/ttl_sgl.lmp"),
         sp_menu: lmp("gfx/sp_menu.lmp"),
+        p_option: lmp("gfx/p_option.lmp"),
         menudot,
     };
     let conchars = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok()).and_then(|w| {

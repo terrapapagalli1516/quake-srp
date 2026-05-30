@@ -33,7 +33,7 @@
     &nbsp; <button id="fs">⛶ fullscreen (F)</button> &nbsp; <button id="sndBtn">🔊 sound (Space)</button><br>
     <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn<br>
     <b>click</b> fire &nbsp;·&nbsp; <b>1–8</b> select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)<br>
-    <b>Esc</b> menu &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>Enter</b> select (Single Player → New Game starts e1m1)<br>
+    <b>Esc</b> menu &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>← →</b> adjust (Options: screen size · mouse · volume) · <b>Enter</b> select<br>
     dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM
   </div>
 <script>
@@ -62,6 +62,14 @@ addEventListener('keydown', e => {
   if (menuVisible()) {
     if (!e.repeat && (k === 'arrowup') && exp.menu_up)       { exp.menu_up();     e.preventDefault(); return; }
     if (!e.repeat && (k === 'arrowdown') && exp.menu_down)   { exp.menu_down();   e.preventDefault(); return; }
+    // Left/Right adjust the highlighted Options row (Screen size / Mouse speed /
+    // Volume) one step PER KEY PRESS (the !e.repeat guard matches up/down/enter
+    // and stops a held key from cycling — and reallocating the framebuffer — tens
+    // of times a second). menu_left/right are no-ops off the Options screen.
+    // Picking a new Screen size resizes the framebuffer engine-side; the render
+    // loop notices the new width()/height() and re-fits the canvas.
+    if (!e.repeat && (k === 'arrowleft')  && exp.menu_left)  { exp.menu_left();  e.preventDefault(); return; }
+    if (!e.repeat && (k === 'arrowright') && exp.menu_right) { exp.menu_right(); e.preventDefault(); return; }
     if (!e.repeat && (k === 'enter') && exp.menu_select)     { exp.menu_select(); e.preventDefault(); return; }
     // Swallow the other gameplay keys so the world stays idle behind the menu.
     if (MOVE_KEYS.includes(k) || (k >= '1' && k <= '8')) { e.preventDefault(); return; }
@@ -200,9 +208,19 @@ function drainGameSounds() {
 // isn't available, fall back to an equal-power PannerNode; if neither, just gain.
 // With no params (sp == null), play flat (full volume, centered).
 function playRouted(src, sp) {
-  if (!sp) { src.connect(audioCtx.destination); return; }
+  // Master volume from the Options "Volume" row scales every sound. With no
+  // spatial params, route through a lone master-gain node; with params, fold the
+  // master into the per-sound distance gain.
+  const master = masterVolume();
+  if (!sp) {
+    const g = audioCtx.createGain();
+    g.gain.value = master;
+    src.connect(g);
+    g.connect(audioCtx.destination);
+    return;
+  }
   const gainNode = audioCtx.createGain();
-  gainNode.gain.value = sp.gain;
+  gainNode.gain.value = sp.gain * master;
   src.connect(gainNode);
   if (typeof audioCtx.createStereoPanner === 'function') {
     const panner = audioCtx.createStereoPanner();
@@ -254,10 +272,24 @@ canvas.addEventListener('mousemove', e => {
   if (menuVisible()) return;
   if (locked() || dragging) {
     // movementX/Y is the per-event delta. Mouse-right turns right (yaw down);
-    // mouse-up looks up (non-inverted).
-    exp.look(-e.movementX * LOOK_SENS, e.movementY * LOOK_SENS);
+    // mouse-up looks up (non-inverted). The Options "Mouse speed" row scales the
+    // baseline LOOK_SENS via exp.mouse_sensitivity() (1.0 = unchanged default).
+    const sens = LOOK_SENS * mouseSensitivity();
+    exp.look(-e.movementX * sens, e.movementY * sens);
   }
 });
+
+// The look-sensitivity multiplier from the Options menu (default 1.0 if absent).
+function mouseSensitivity() {
+  return (exp && typeof exp.mouse_sensitivity === 'function') ? exp.mouse_sensitivity() : 1.0;
+}
+// The master volume gain from the Options menu (default 1.0 if absent), clamped
+// to [0,1] so a bad export can't blow up the gain graph.
+function masterVolume() {
+  if (!exp || typeof exp.volume !== 'function') return 1.0;
+  const v = exp.volume();
+  return (v >= 0 && v <= 1) ? v : 1.0;
+}
 
 async function main() {
   const resp = await fetch('quake_wasm.wasm');
@@ -270,23 +302,39 @@ async function main() {
   await new Promise(r => setTimeout(r, 30));
   if (!exp.boot()) { statusEl.textContent = 'boot() failed'; return; }
 
-  const W = exp.width(), H = exp.height();
-  canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(W, H);
+  // The render resolution is RUNTIME state: the Options menu can grow it. Track
+  // the current backing-store size + ImageData and re-create them whenever the
+  // engine reports a different width()/height(). The CSS display size (768x480)
+  // stays fixed, so a larger backing store just gives a crisper pixel-upscale.
+  let W = 0, H = 0, img = null;
+  function syncCanvasSize() {
+    const w = exp.width(), h = exp.height();
+    if (w === W && h === H && img) return;
+    W = w; H = h;
+    canvas.width = W; canvas.height = H;
+    img = ctx.createImageData(W, H);
+  }
+  syncCanvasSize();
   statusEl.textContent = 'ready — click to play';
 
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    // While the menu is up, Left/Right adjust Options rows (not gameplay turn);
+    // suppress arrow-turn so picking a Screen size doesn't also spin the view.
+    const inMenu = menuVisible();
     const fwd  = (keys['w']||keys['arrowup']   ? 1 : 0) - (keys['s']||keys['arrowdown'] ? 1 : 0);
     const side = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
-    const turn = (keys['arrowright'] ? 1 : 0) - (keys['arrowleft'] ? 1 : 0);
+    const turn = inMenu ? 0 : ((keys['arrowright'] ? 1 : 0) - (keys['arrowleft'] ? 1 : 0));
     exp.set_move(fwd, side);
     if (turn) exp.look(-turn * TURN_RATE * dt, 0);   // arrow turn (right = right)
     exp.step(dt);
     drainGameSounds();
 
+    // The render resolution may have changed this frame (Options menu): re-fit the
+    // canvas + ImageData to the new size before blitting.
+    syncCanvasSize();
     const ptr = exp.framebuffer();
     const mem = new Uint8Array(exp.memory.buffer, ptr, W * H * 4); // re-view (memory may grow)
     img.data.set(mem);
