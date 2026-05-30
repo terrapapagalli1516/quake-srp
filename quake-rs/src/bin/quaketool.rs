@@ -917,8 +917,10 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         };
         // The peak-combat dynamic lights so the action shot lights up the walls
         // near explosions / muzzle flashes (the end-of-combat pool is empty).
-        // Pass the server clock so liquids warp and sky scrolls in the POV shot.
-        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time(), &parts, &peak_dlights);
+        // Pass the server clock so liquids warp and sky scrolls in the POV shot,
+        // and the animated light-style scales so torches flicker and lights pulse.
+        let light_styles = server.lightstyle_scales(server.time());
+        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time(), &parts, &peak_dlights, &light_styles);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the finished 3-D frame. If
@@ -1500,10 +1502,12 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         None => base_cam,
     };
 
-    // Pass the server clock so liquid/sky surfaces are animated for this frame.
-    // No live particles or dynamic lights in this single-shot `scene` command
-    // (no per-frame loop), so those slices are empty.
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time(), &[], &[]);
+    // Pass the server clock so liquid/sky surfaces are animated for this frame,
+    // plus the animated light-style scales (torch flicker / light pulse). No live
+    // particles or dynamic lights in this single-shot `scene` command (no
+    // per-frame loop), so those slices are empty.
+    let light_styles = server.lightstyle_scales(server.time());
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time(), &[], &[], &light_styles);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();

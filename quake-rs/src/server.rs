@@ -576,6 +576,96 @@ fn bi_changelevel(vm: &mut Vm) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Animated light styles (PF_lightstyle / R_AnimateLight).
+//
+// `lightstyle(style, val)` (pr_cmds.c PF_lightstyle, #35) stores a pattern
+// string per style index into `sv.lightstyles[64]`. The QuakeC worldspawn calls
+// it for styles 0..11 with the classic patterns (steady "m", torch flicker
+// "mmnmmommommnonmmonqnmmo", slow pulse "abcdefghijklmnopqrstuvwxyz…", …), so the
+// table is populated automatically while `spawn_entities` runs worldspawn.
+//
+// This is *persistent map state* — the renderer reads it every frame to animate
+// lightmaps — so unlike the per-frame sound/particle/temp-entity queues it is
+// OWNED by the [`Server`] (the `lightstyles` field), not drained-and-discarded.
+// The thread-local below is only the *write transport*: builtins are
+// `fn(&mut Vm)` and cannot see the `Server`, and `vm.rs` (the `Host` trait) is
+// off-limits, so the builtin has no other place to write. The Server syncs the
+// transport into its owned table after each QuakeC execution window
+// (`spawn_entities` / `run_frame`) and the getter reads the owned table. The
+// transport is reset in [`Server::new`] so a changelevel re-populates cleanly.
+// ---------------------------------------------------------------------------
+
+/// `MAX_LIGHTSTYLES` (quakedef.h): the size of `sv.lightstyles[]`.
+pub const MAX_LIGHTSTYLES: usize = 64;
+
+thread_local! {
+    /// Write transport for [`bi_lightstyle`]: the latest pattern string per style
+    /// index. The [`Server`] owns the authoritative copy and syncs from here; this
+    /// is reset in [`Server::new`] so a fresh level starts empty. See the module
+    /// note above for why a thread-local transport (not a field) is unavoidable
+    /// for an engine builtin.
+    static LIGHTSTYLES: std::cell::RefCell<[String; MAX_LIGHTSTYLES]> =
+        std::cell::RefCell::new(std::array::from_fn(|_| String::new()));
+}
+
+/// Store `val` at style index `style` in the thread-local transport. An
+/// out-of-range index is ignored (no panic), matching the C's silent clamp
+/// (`if (style >= MAX_LIGHTSTYLES) ...`).
+fn push_lightstyle(style: usize, val: String) {
+    if style >= MAX_LIGHTSTYLES {
+        return;
+    }
+    LIGHTSTYLES.with(|t| {
+        if let Some(slot) = t.borrow_mut().get_mut(style) {
+            *slot = val;
+        }
+    });
+}
+
+/// Snapshot the current transport table (the latest pattern per style).
+fn snapshot_lightstyles() -> [String; MAX_LIGHTSTYLES] {
+    LIGHTSTYLES.with(|t| t.borrow().clone())
+}
+
+/// Clear the transport table (called from [`Server::new`] so a stale level's
+/// styles cannot leak into a fresh server before its worldspawn repopulates).
+fn reset_lightstyles() {
+    LIGHTSTYLES.with(|t| {
+        *t.borrow_mut() = std::array::from_fn(|_| String::new());
+    });
+}
+
+/// `PF_lightstyle` (#35): `void(float style, string value) lightstyle`. The C
+/// `PF_lightstyle` stored `value` into `sv.lightstyles[style]` and, for live
+/// clients, broadcast an `svc_lightstyle` update. This headless server has no
+/// netcode, so we only store the pattern (PARM0 = style index, PARM1 = the
+/// pattern string). An out-of-range style index is ignored without panicking.
+fn bi_lightstyle(vm: &mut Vm) -> Result<()> {
+    let style = vm.arg_float(0);
+    let val = vm.arg_string(1);
+    // The C truncates the float to an int index; negatives / NaN clamp out of
+    // range and are dropped by `push_lightstyle`.
+    let idx = if style.is_finite() && style >= 0.0 {
+        style as usize
+    } else {
+        usize::MAX
+    };
+    push_lightstyle(idx, val);
+    Ok(())
+}
+
+/// `R_AnimateLight` letter scale: map a pattern character to its
+/// `d_lightstylevalue` (the C `(c - 'a') * 22`). Non-letters fold modulo 26 onto
+/// the `a..z` range like the C's byte arithmetic, never reading out of bounds.
+fn lightstyle_letter_value(ch: u8) -> f32 {
+    // The C indexes `lightstyles[j].map[k]` (an ASCII byte) and computes
+    // `(map[k]-'a')*22`. Authored patterns are always `a..z`; for robustness we
+    // wrap any other byte into `0..=25` rather than producing a wild value.
+    let v = (ch.wrapping_sub(b'a')) % 26;
+    v as f32 * 22.0
+}
+
+// ---------------------------------------------------------------------------
 // Sound-event queue (PF_sound / PF_ambientsound).
 //
 // The C `PF_sound` -> `SV_StartSound` wrote an `svc_sound` message into the
@@ -1254,7 +1344,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 22, bi_findradius); // findradius (chain of edicts within rad)
     put(t, 32, bi_walkmove); // walkmove (SV_movestep)
     put(t, 34, bi_droptofloor); // droptofloor
-    put(t, 35, bi_noop); // lightstyle
+    put(t, 35, bi_lightstyle); // lightstyle (stores sv.lightstyles[style])
     put(t, 40, bi_checkbottom); // checkbottom (SV_CheckBottom)
     put(t, 41, bi_pointcontents); // pointcontents
     put(t, 44, bi_aim); // aim
@@ -1431,6 +1521,13 @@ pub struct Server {
     /// Single-player QuakeC keys off `self`, not a hardcoded edict number, so the
     /// game logic is unaffected. Single client only; no netcode.
     player: i32,
+    /// The map's animated light-style patterns (`sv.lightstyles[64]`), owned by
+    /// the server. The `lightstyle()` builtin writes a thread-local transport;
+    /// the server syncs that into this field after each QuakeC execution window
+    /// (`spawn_entities` / `run_frame`). `lightstyle_scales` reads it to produce
+    /// the per-style brightness scales the renderer applies each frame. Cleared in
+    /// [`Server::new`] so a changelevel re-populates it from the new worldspawn.
+    lightstyles: [String; MAX_LIGHTSTYLES],
 }
 
 /// The result of [`Server::spawn_entities`].
@@ -1498,6 +1595,11 @@ impl Server {
         // this fresh one (mirrors `svs.changelevel_issued = false` in
         // SV_SpawnServer).
         reset_changelevel();
+        // The light-style transport is also per-thread and outlives a server;
+        // clear it so a prior level's patterns cannot leak before this level's
+        // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of
+        // sv.lightstyles).
+        reset_lightstyles();
 
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.
@@ -1511,12 +1613,61 @@ impl Server {
             vm,
             entities,
             player: -1,
+            lightstyles: std::array::from_fn(|_| String::new()),
         })
     }
 
     /// The current `time` global.
     pub fn time(&self) -> f32 {
         self.vm.gget_float("time")
+    }
+
+    /// The raw light-style pattern string at index `style`, or `""` for an unset
+    /// or out-of-range index. (Mostly for inspection / tests; the renderer wants
+    /// [`Self::lightstyle_scales`].)
+    pub fn lightstyle(&self, style: usize) -> &str {
+        self.lightstyles.get(style).map(String::as_str).unwrap_or("")
+    }
+
+    /// `R_AnimateLight` (r_light.c): the per-style brightness scale at game `time`,
+    /// one entry per `MAX_LIGHTSTYLES` style index, ready to pass to
+    /// [`crate::render::render_scene_ext`].
+    ///
+    /// For style `j` with pattern string of length `L`:
+    /// * `L == 0` (unset) → scale `1.0` (the C `d_lightstylevalue = 256`, i.e.
+    ///   "normal"). Treating a missing style as normal keeps faces that reference
+    ///   an unset style at full brightness rather than going dark.
+    /// * else the string animates at 10 chars/sec: `k = floor(time*10) mod L`,
+    ///   `ch = string[k]`, and the C `d_lightstylevalue[j] = (ch - 'a') * 22`
+    ///   (so `'a'` → 0 = dark, `'m'` → 264 = normal, `'z'` → 550 ≈ double-bright).
+    ///
+    /// The C accumulates `luxel * d_lightstylevalue` then divides by 256. This
+    /// renderer instead stores luxels in `0..=255` and applies a multiplicative
+    /// factor, so we normalise the style value by the *normal* letter `'m'` (264),
+    /// not 256: `scale = (ch - 'a') * 22 / 264`. Then `'m'` → exactly `1.0`, which
+    /// keeps a steady single-style-0 face byte-identical to the static renderer.
+    pub fn lightstyle_scales(&self, time: f32) -> [f32; MAX_LIGHTSTYLES] {
+        // Normalise by the "normal" letter 'm' so a steady 'm' style is exactly
+        // 1.0 (no brightness regression vs the static lightmap).
+        const NORMAL: f32 = 12.0 * 22.0; // 'm' - 'a' == 12, times 22 == 264
+        // Animation phase in characters; floor(time*10), guarded against a
+        // non-finite/huge time so the modulo index never overflows or panics.
+        let phase: i64 = if time.is_finite() {
+            (time * 10.0).floor() as i64
+        } else {
+            0
+        };
+        std::array::from_fn(|j| {
+            let s = self.lightstyles[j].as_bytes();
+            if s.is_empty() {
+                return 1.0; // unset style -> normal (256/264 ~ never; treat as 1.0)
+            }
+            let len = s.len() as i64;
+            // Positive modulo: ((phase % len) + len) % len keeps k in 0..len even
+            // for a negative phase (a time before 0).
+            let k = (((phase % len) + len) % len) as usize;
+            lightstyle_letter_value(s[k]) / NORMAL
+        })
     }
 
     /// The number of live (not-free) edicts, including the world (edict 0).
@@ -1610,6 +1761,10 @@ impl Server {
                 }
             }
         }
+
+        // Worldspawn (and any other spawn function) may have called lightstyle();
+        // pull those patterns out of the write transport into the owned table.
+        self.lightstyles = snapshot_lightstyles();
 
         // classnames sorted by count desc, then name asc for determinism.
         classname_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1762,6 +1917,10 @@ impl Server {
 
         // sv.time += host_frametime (end of SV_Physics).
         self.vm.gset_float("time", start_time + dt);
+
+        // A think may have called lightstyle() (e.g. a trigger toggling a light);
+        // sync any updates from the write transport into the owned table.
+        self.lightstyles = snapshot_lightstyles();
 
         Ok(FrameReport {
             thinks_fired,
@@ -2509,6 +2668,10 @@ impl Server {
 
         // sv.time += host_frametime (end of SV_Physics).
         self.vm.gset_float("time", start_time + dt);
+
+        // A think may have called lightstyle() (e.g. a trigger toggling a light);
+        // sync any updates from the write transport into the owned table.
+        self.lightstyles = snapshot_lightstyles();
 
         Ok(FrameReport {
             thinks_fired,
@@ -6428,6 +6591,122 @@ mod tests {
             None,
             "new server starts with no pending changelevel"
         );
+    }
+
+    // ------------------------------------------------ animated light styles (#35)
+
+    /// Drive `bi_lightstyle(style, val)` directly: PARM0 = style float, PARM1 =
+    /// the interned pattern string. Returns nothing; the write lands in the
+    /// thread-local transport (`snapshot_lightstyles` / a frame sync reads it).
+    fn call_lightstyle(server: &mut Server, style: f32, val: &str) {
+        let s = server.vm.intern(val);
+        server.vm.set_gf(OFS_PARM0, style);
+        // PARM1 is a string_t (an int handle), at OFS_PARM0 + 3.
+        server.vm.set_gi(OFS_PARM0 + 3, s);
+        bi_lightstyle(&mut server.vm).expect("bi_lightstyle");
+    }
+
+    #[test]
+    fn bi_lightstyle_stores_pattern_and_getter_reflects_it() {
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        // Fresh server: all styles empty.
+        assert_eq!(server.lightstyle(0), "");
+        assert_eq!(server.lightstyle(3), "");
+
+        // Store a steady style 0 and a torch flicker at slot 3.
+        call_lightstyle(&mut server, 0.0, "m");
+        call_lightstyle(&mut server, 3.0, "mmnmmommommnonmmonqnmmo");
+        // A frame syncs the transport into the owned table (the production path).
+        server.run_frame(0.1).expect("frame");
+
+        assert_eq!(server.lightstyle(0), "m");
+        assert_eq!(server.lightstyle(3), "mmnmmommommnonmmonqnmmo");
+    }
+
+    #[test]
+    fn lightstyle_scales_maps_letters_to_brightness() {
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        // 'a' -> 0 (dark), 'm' -> ~1.0 (normal), 'z' -> ~2.08 (double bright),
+        // and an unset style -> 1.0 (treated as normal so faces don't go dark).
+        call_lightstyle(&mut server, 0.0, "a");
+        call_lightstyle(&mut server, 1.0, "m");
+        call_lightstyle(&mut server, 2.0, "z");
+        // style 4 left empty.
+        server.run_frame(0.1).expect("frame");
+
+        let sc = server.lightstyle_scales(0.0);
+        assert!((sc[0] - 0.0).abs() < 1e-6, "'a' -> 0.0, got {}", sc[0]);
+        assert!((sc[1] - 1.0).abs() < 1e-6, "'m' -> 1.0 (normal), got {}", sc[1]);
+        // 'z' = (25*22)/264 = 550/264 ~ 2.0833.
+        assert!((sc[2] - (550.0 / 264.0)).abs() < 1e-5, "'z' -> ~2.083, got {}", sc[2]);
+        assert!((sc[4] - 1.0).abs() < 1e-6, "unset style -> 1.0 (normal), got {}", sc[4]);
+    }
+
+    #[test]
+    fn lightstyle_scales_animate_at_ten_per_second_with_modulo() {
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        // A two-char flicker: 'a' (dark) then 'z' (bright). At 10 chars/sec it
+        // toggles every 0.1s.
+        call_lightstyle(&mut server, 1.0, "az");
+        server.run_frame(0.1).expect("frame");
+
+        let s_t0 = server.lightstyle_scales(0.00); // k = floor(0)=0 -> 'a' -> 0.0
+        let s_t1 = server.lightstyle_scales(0.10); // k = floor(1)=1 -> 'z' -> ~2.08
+        let s_t2 = server.lightstyle_scales(0.20); // k = floor(2)=0 (mod 2) -> 'a'
+        assert!((s_t0[1] - 0.0).abs() < 1e-6, "t=0 -> 'a' 0.0, got {}", s_t0[1]);
+        assert!(s_t1[1] > 2.0, "t=0.1 -> 'z' ~2.08, got {}", s_t1[1]);
+        // Cycling: the index wraps modulo the string length, so t=0.2 == t=0.0.
+        assert!((s_t2[1] - s_t0[1]).abs() < 1e-6, "modulo cycle: t=0.2 == t=0.0");
+        // Across time the same style yields DIFFERENT scales (animation).
+        assert!((s_t0[1] - s_t1[1]).abs() > 1e-3, "style must animate over time");
+    }
+
+    #[test]
+    fn bi_lightstyle_out_of_range_index_is_ignored_without_panic() {
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        // Index 64 (== MAX_LIGHTSTYLES) is out of range -> dropped, no panic.
+        call_lightstyle(&mut server, MAX_LIGHTSTYLES as f32, "z");
+        // A wild / negative / non-finite index is also clamped out, no panic.
+        call_lightstyle(&mut server, -5.0, "z");
+        call_lightstyle(&mut server, 1.0e30, "z");
+        call_lightstyle(&mut server, f32::NAN, "z");
+        server.run_frame(0.1).expect("frame");
+
+        // Nothing was stored; every scale is the unset normal 1.0.
+        let sc = server.lightstyle_scales(0.0);
+        assert!(sc.iter().all(|&s| (s - 1.0).abs() < 1e-6), "no style stored");
+        // The valid last in-range index (63) still works as a sanity anchor.
+        call_lightstyle(&mut server, 63.0, "a");
+        server.run_frame(0.1).expect("frame");
+        assert!((server.lightstyle_scales(0.0)[63] - 0.0).abs() < 1e-6, "index 63 valid");
+    }
+
+    #[test]
+    fn fresh_server_clears_stale_lightstyles() {
+        // A pattern left in the transport must not leak into a freshly built
+        // server (Server::new calls reset_lightstyles).
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut s1 = Server::new(empty_bsp(), progs).expect("server");
+        call_lightstyle(&mut s1, 1.0, "z"); // leaves "z" in the transport
+        // A new server resets the transport; its first frame syncs an empty table.
+        let progs2 = Progs::parse(&img).expect("parse");
+        let mut s2 = Server::new(empty_bsp(), progs2).expect("server");
+        s2.run_frame(0.1).expect("frame");
+        assert_eq!(s2.lightstyle(1), "", "stale style must not leak into a new server");
+        assert!((s2.lightstyle_scales(0.0)[1] - 1.0).abs() < 1e-6, "new server style 1 normal");
     }
 
     #[test]

@@ -632,8 +632,9 @@ impl Luxels<'_> {
     }
 }
 
-/// A face's baked static lightmap (style 0 only), borrowed from `Bsp::lighting`,
-/// optionally augmented with dynamic-light contributions.
+/// A face's baked lightmap, borrowed from `Bsp::lighting` for the common case of
+/// a single steady style-0 face, or an owned `f32` grid that is the multi-style
+/// combine (`R_BuildLightMap`) plus any dynamic-light contributions.
 ///
 /// `luxels` is a `lmw * lmh` grid (one value per luxel). `texmins` is the surface
 /// texture-coordinate origin (in texels) used to convert a face's surface `(s,t)`
@@ -655,6 +656,22 @@ struct LightMap<'a> {
 /// there, keeping a near light bright without letting a huge `(rad-dist)` blow
 /// out to NaN/Inf or wrap a palette index.
 const MAX_LIGHT_FACTOR: f32 = 4.0;
+
+/// Number of animated light styles (`MAX_LIGHTSTYLES`), matching
+/// [`crate::server::MAX_LIGHTSTYLES`]. The renderer takes a `[f32; LIGHTSTYLES]`
+/// per-style brightness scale (1.0 == normal) so it can combine a face's
+/// multiple lightmap layers (`R_BuildLightMap`).
+pub const LIGHTSTYLES: usize = 64;
+
+/// A no-op light-style scale table: every style at the "normal" `1.0`. Passing
+/// this to [`render_scene_ext`] leaves lightmaps exactly as the static (style-0)
+/// renderer produced them, which is what [`render_scene`] does — so all prior
+/// behaviour and tests are unchanged. The animated front-ends instead pass
+/// `server.lightstyle_scales(time)`.
+pub const NEUTRAL_LIGHTSTYLE_SCALES: [f32; LIGHTSTYLES] = [1.0; LIGHTSTYLES];
+
+/// `DFace.styles` slot value meaning "this lightmap layer is unused".
+const STYLE_NONE: u8 = 255;
 
 impl LightMap<'_> {
     /// Bilinearly sample the lightmap at surface texture coordinate `(s, t)`,
@@ -691,10 +708,17 @@ impl LightMap<'_> {
 }
 
 /// `R_AddDynamicLights` (`r_surf.c`): fold the dynamic lights in `dlights` that
-/// touch a face into an owned augmented luxel buffer, returning `Some(Vec)` of
-/// `lmw*lmh` `f32` luxels (static byte value + dynamic adds) when at least one
-/// light contributes, or `None` when no light reaches the face (so the caller
-/// keeps the byte-identical static borrow).
+/// touch a face into an owned augmented luxel buffer.
+///
+/// `base` is the face's pre-combined luxel buffer when it already differs from
+/// the plain static style-0 bytes — i.e. the multi-style combine from
+/// [`build_styled_luxels`] (animated light styles). When `base` is `Some`, that
+/// buffer is the starting point and any reaching dynamic light adds onto it, so
+/// the result is `Some` even if no light reaches (the animated combine must still
+/// be used). When `base` is `None`, the buffer is lazily materialised from
+/// `static_samples` and the function returns `None` if no light reaches — so a
+/// steady single-style face with an empty dlight slice keeps borrowing the static
+/// bytes (byte-identical to before).
 ///
 /// For each light: `dist = dot(origin, plane.normal) - plane.dist` (the RAW
 /// plane, as the C uses `surf->plane->normal` directly — `dist.abs()` covers
@@ -716,16 +740,29 @@ fn add_dynamic_lights(
     lmw: usize,
     lmh: usize,
     static_samples: &[u8],
+    base: Option<Vec<f32>>,
     dlights: &[crate::dlight::DynamicLight],
 ) -> Option<Vec<f32>> {
+    // No dlights: the animated combine (if any) is the final buffer; otherwise
+    // there is nothing to do and the caller keeps the static borrow.
     if dlights.is_empty() {
-        return None;
+        return base;
     }
-    let pi: usize = (face.planenum as i64).try_into().ok()?;
-    let plane = bsp.planes.get(pi)?;
+    // No usable plane: we can't project lights, but a pre-combined animated
+    // buffer must still be returned so styles still animate.
+    let plane = match (face.planenum as i64)
+        .try_into()
+        .ok()
+        .and_then(|pi: usize| bsp.planes.get(pi))
+    {
+        Some(p) => p,
+        None => return base,
+    };
     let normal = plane.normal;
 
-    let mut buf: Option<Vec<f32>> = None;
+    // Start from the pre-combined animated buffer when present; otherwise the
+    // buffer is lazily materialised from the static bytes on first contribution.
+    let mut buf: Option<Vec<f32>> = base;
 
     for dl in dlights {
         let dist = dot(dl.origin, normal) - plane.dist;
@@ -784,40 +821,146 @@ fn add_dynamic_lights(
     buf
 }
 
+/// `R_BuildLightMap` multi-style combine: read every active style block of a
+/// face's lightmap and combine them into an owned `lmw*lmh` `f32` luxel buffer,
+/// scaling each block by its style's brightness (`light_styles[style]`).
+///
+/// The LIGHTING lump stores one `lmw*lmh` luxel block PER ACTIVE style slot,
+/// CONCATENATED in slot order at `face.lightofs`: the block for `styles[0]`
+/// first, then `styles[1]`, etc. A slot value of `255` ([`STYLE_NONE`]) means the
+/// layer is unused (no block stored). For each active slot `k` the combine adds
+/// `block_k[i] * light_styles[styles[k]]` into luxel `i`.
+///
+/// Returns:
+/// * `None` when the face has a single style-0 layer whose scale is exactly the
+///   normal `1.0` — the common steady case. The caller then borrows the static
+///   bytes directly so the rendered pixels are BYTE-IDENTICAL to the pre-style
+///   renderer (`effective_luxel == block0`).
+/// * `Some(buf)` for every other case (a non-neutral scale, or 2+ active styles).
+///   `buf` is the combined `f32` grid, the base the dynamic-light step adds onto.
+///
+/// `light_styles` is the per-style brightness (`1.0` == normal). An out-of-range
+/// style index reads as `1.0` (treated as normal), matching the server's
+/// "missing style -> normal" rule so a face never goes dark referencing an unset
+/// style.
+///
+/// Bounds: the whole `n_active * block` range (`block == lmw*lmh` luxels) is
+/// checked against `lighting`. If it does not fit, returns [`StyleCombine::TooShort`]
+/// so the caller falls back to the single-block (style-0) read or fullbright —
+/// never reading out of bounds.
+fn build_styled_luxels(
+    face: &crate::bsp::DFace,
+    lighting: &[u8],
+    start: usize,
+    block: usize,
+    light_styles: &[f32; LIGHTSTYLES],
+) -> StyleCombine {
+    // Active style slots, in stored order. `255` marks an unused slot. The
+    // LIGHTING lump stores exactly one block per *leading* active slot, so we
+    // STOP at the first `255` (matching the C `R_BuildLightMap` loop). Reading
+    // past a 255 would pull adjacent faces' luxels into a phantom block.
+    let mut active: [(u8, f32); crate::bsp::MAXLIGHTMAPS] = [(STYLE_NONE, 1.0); crate::bsp::MAXLIGHTMAPS];
+    let mut n_active = 0usize;
+    for &style in face.styles.iter() {
+        if style == STYLE_NONE {
+            break;
+        }
+        let scale = light_styles.get(style as usize).copied().unwrap_or(1.0);
+        active[n_active] = (style, scale);
+        n_active += 1;
+    }
+
+    // No active style (lightofs >= 0 but styles all unused): nothing to combine;
+    // let the caller keep the single static block (its existing behaviour).
+    if n_active == 0 {
+        return StyleCombine::StaticBlock;
+    }
+
+    // The single steady style-0 (or any single style) case at the normal scale is
+    // byte-identical to reading the static block, so keep the borrow.
+    if n_active == 1 && (active[0].1 - 1.0).abs() < f32::EPSILON {
+        return StyleCombine::StaticBlock;
+    }
+
+    // The whole concatenated multi-block range must fit; otherwise fall back.
+    let total = match block.checked_mul(n_active).and_then(|t| start.checked_add(t)) {
+        Some(t) if t <= lighting.len() => t,
+        _ => return StyleCombine::TooShort,
+    };
+    let all = &lighting[start..total];
+
+    let mut buf = vec![0.0f32; block];
+    for (k, &(_style, scale)) in active.iter().take(n_active).enumerate() {
+        let off = k * block;
+        // `off..off+block` is in range by the `total` check above.
+        let blk = &all[off..off + block];
+        for (i, cell) in buf.iter_mut().enumerate() {
+            cell.add_assign_scaled(blk[i] as f32, scale);
+        }
+    }
+    StyleCombine::Combined(buf)
+}
+
+/// Outcome of [`build_styled_luxels`].
+enum StyleCombine {
+    /// Keep the borrowed single static block (steady style-0 at normal scale).
+    StaticBlock,
+    /// Use this owned combined `f32` buffer as the base.
+    Combined(Vec<f32>),
+    /// The multi-block range did not fit the lighting slice; fall back to the
+    /// single-block read (or fullbright) without panicking.
+    TooShort,
+}
+
+/// Tiny FMA helper so the combine reads clearly; no `unsafe`, no intrinsics.
+trait AddAssignScaled {
+    fn add_assign_scaled(&mut self, value: f32, scale: f32);
+}
+impl AddAssignScaled for f32 {
+    #[inline]
+    fn add_assign_scaled(&mut self, value: f32, scale: f32) {
+        *self += value * scale;
+    }
+}
+
 /// Compute a face's static lightmap, or `None` if the face is fullbright. A thin
-/// wrapper over [`face_lightmap_dyn`] with no dynamic lights, so its output is
-/// the borrowed static byte slice (byte-identical to the pre-dlight behaviour).
+/// wrapper over [`face_lightmap_dyn`] with no dynamic lights and neutral light
+/// styles, so its output is the borrowed static byte slice (byte-identical to the
+/// pre-dlight behaviour).
 ///
 /// The renderer always calls [`face_lightmap_dyn`] directly (threading its live
-/// `dlights`); this zero-dlight wrapper is retained for the lightmap unit tests,
-/// which assert the static-borrow path is unchanged.
+/// `dlights` and style scales); this wrapper is retained for the lightmap unit
+/// tests, which assert the static-borrow path is unchanged.
 #[cfg(test)]
 fn face_lightmap<'a>(
     bsp: &'a Bsp,
     face: &crate::bsp::DFace,
     world_poly: &[Vec3],
 ) -> Option<LightMap<'a>> {
-    face_lightmap_dyn(bsp, face, world_poly, &[])
+    face_lightmap_dyn(bsp, face, world_poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[])
 }
 
-/// Compute a face's lightmap, folding in any dynamic lights in `dlights` that
-/// reach the face (`R_AddDynamicLights`), or `None` if the face is fullbright.
+/// Compute a face's lightmap: the multi-style combine (`R_BuildLightMap`) scaled
+/// by `light_styles`, plus any dynamic lights in `dlights` that reach the face
+/// (`R_AddDynamicLights`). Returns `None` if the face is fullbright.
 ///
 /// A face is fullbright when there is no `lighting` lump, the face has no
 /// lightmap (`lightofs < 0`), the surface is special (sky/liquid — `TEX_SPECIAL`),
 /// or the computed luxel grid would not fit in the remaining `lighting` slice.
-/// Only the base lightmap (style 0) is applied; animated styles `[1..3]` are
-/// ignored.
 ///
-/// When no dynamic light reaches the face (including an empty `dlights` slice),
-/// the returned [`LightMap`] *borrows* the static `Bsp::lighting` bytes, so the
-/// sampled factor — and the rendered pixels — are byte-identical to before. When
-/// at least one light contributes, the [`LightMap`] owns an `f32` grid of
-/// `static + dynamic` luxels.
+/// `light_styles` is the per-style brightness scale (`1.0` == normal,
+/// [`NEUTRAL_LIGHTSTYLE_SCALES`] disables animation). A face's `styles[0..3]`
+/// (255 == unused) select which scales apply. For a single steady style-0 face at
+/// the neutral scale (and no reaching dynamic light) the returned [`LightMap`]
+/// *borrows* the static `Bsp::lighting` bytes, so the sampled factor — and the
+/// rendered pixels — are byte-identical to the pre-style renderer. Otherwise the
+/// [`LightMap`] owns an `f32` grid: `(sum of style blocks * style scale)` plus any
+/// dynamic-light contributions, clamped by `factor_at`.
 fn face_lightmap_dyn<'a>(
     bsp: &'a Bsp,
     face: &crate::bsp::DFace,
     world_poly: &[Vec3],
+    light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
 ) -> Option<LightMap<'a>> {
     use crate::bsp::TEX_SPECIAL;
@@ -841,13 +984,26 @@ fn face_lightmap_dyn<'a>(
     let count = lmw.checked_mul(lmh)?;
 
     let start: usize = face.lightofs.try_into().ok()?;
+    // The style-0 (first) block must always fit; this is the static-borrow slice
+    // and the fallback when the multi-style range does not fit.
     let samples = bsp.lighting.get(start..start.checked_add(count)?)?;
 
     let texmins_f = [texmins[0] as f32, texmins[1] as f32];
 
-    // Fold any reaching dynamic lights into an owned f32 buffer; if none reach
-    // (or the slice is empty), keep borrowing the static bytes unchanged.
-    let luxels = match add_dynamic_lights(bsp, face, ti, texmins_f, lmw, lmh, samples, dlights) {
+    // Combine the active style blocks (R_BuildLightMap). `StaticBlock` means the
+    // common steady style-0-at-normal case: keep borrowing the static bytes.
+    // `TooShort` means the multi-block range overran the lighting slice: fall back
+    // to the single static block rather than going fullbright or panicking.
+    let base: Option<Vec<f32>> =
+        match build_styled_luxels(face, &bsp.lighting, start, count, light_styles) {
+            StyleCombine::StaticBlock | StyleCombine::TooShort => None,
+            StyleCombine::Combined(buf) => Some(buf),
+        };
+
+    // Add any reaching dynamic lights on top of the (possibly style-combined)
+    // base. When `base` is None and no light reaches (or `dlights` is empty), the
+    // result is None and we keep the byte-identical static borrow.
+    let luxels = match add_dynamic_lights(bsp, face, ti, texmins_f, lmw, lmh, samples, base, dlights) {
         Some(owned) => Luxels::Owned(owned),
         None => Luxels::Static(samples),
     };
@@ -1223,7 +1379,7 @@ pub fn render_bsp_textured(
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     // Static (time 0) world: liquids/sky show their texture but do not advance.
     let turb = TurbTable::new();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &[]);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[]);
     image
 }
 
@@ -1468,6 +1624,7 @@ fn draw_world_textured(
     palette: &[[u8; 3]; 256],
     turb: &TurbTable,
     time: f32,
+    light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
 ) {
     const NEAR: f32 = 1.0;
@@ -1562,7 +1719,7 @@ fn draw_world_textured(
         // baked static lightmap.
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         let lightmap = if kind == SurfKind::Normal {
-            face_lightmap_dyn(bsp, face, &world_poly, dlights)
+            face_lightmap_dyn(bsp, face, &world_poly, light_styles, dlights)
         } else {
             None
         };
@@ -1707,6 +1864,7 @@ fn draw_submodel(
     origin: Vec3,
     turb: &TurbTable,
     time: f32,
+    light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
 ) {
     const NEAR: f32 = 1.0;
@@ -1817,7 +1975,7 @@ fn draw_submodel(
         // lightmap (from the LOCAL polygon — texinfo extents are origin-independent).
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         let lightmap = if kind == SurfKind::Normal {
-            face_lightmap_dyn(bsp, face, &local_poly, &local_dlights)
+            face_lightmap_dyn(bsp, face, &local_poly, light_styles, &local_dlights)
         } else {
             None
         };
@@ -2501,7 +2659,20 @@ pub fn render_scene(
     palette: &[[u8; 3]; 256],
     instances: &[ModelInstance],
 ) -> Image {
-    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None, 0.0, &[], &[])
+    render_scene_ext(
+        bsp,
+        cam,
+        w,
+        h,
+        palette,
+        instances,
+        &[],
+        None,
+        0.0,
+        &[],
+        &[],
+        &NEUTRAL_LIGHTSTYLE_SCALES,
+    )
 }
 
 /// Render the full scene: the textured world, then each brush submodel
@@ -2557,6 +2728,18 @@ pub fn render_scene(
 /// slice leaves every face borrowing its static lightmap bytes, so the output is
 /// byte-identical to the pre-dlight renderer — which is why [`render_scene`] and
 /// the demo tests pass `&[]`.
+///
+/// ## Animated light styles
+/// `light_styles` is the per-style brightness scale (`[f32; 64]`, `1.0` ==
+/// normal), produced by [`crate::server::Server::lightstyle_scales`] from the
+/// map's flickering/pulsing patterns (`R_AnimateLight`). Each lightmapped face
+/// selects up to four styles via its `styles[0..3]` slots; the lightmap is the
+/// sum of each style's baked luxel block scaled by its `light_styles` value
+/// (`R_BuildLightMap`), computed BEFORE dynamic lights are added. Passing the
+/// neutral [`NEUTRAL_LIGHTSTYLE_SCALES`] (all `1.0`) reproduces the static
+/// style-0 lightmap byte-for-byte, which is what [`render_scene`] does — so the
+/// demo tests are unchanged. The animated front-ends pass the live scales each
+/// frame to make torches flicker and lights pulse.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext(
     bsp: &Bsp,
@@ -2570,6 +2753,7 @@ pub fn render_scene_ext(
     time: f32,
     particles: &[(Vec3, u8)],
     dlights: &[crate::dlight::DynamicLight],
+    light_styles: &[f32; LIGHTSTYLES],
 ) -> Image {
     let mut image = Image::new(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
@@ -2579,9 +2763,9 @@ pub fn render_scene_ext(
     // The turbulent SIN table for liquid warp, built once and shared by the
     // world + brush-submodel passes (sky needs no table).
     let turb = TurbTable::new();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, dlights);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights);
     for bm in bmodels {
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, dlights);
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights);
     }
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
@@ -3934,7 +4118,7 @@ mod tests {
         // A bright light 16 units above luxel (0,0) (world [0,0,16]); small radius
         // so it lights the near corner but not the far one.
         let dl = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, std::slice::from_ref(&dl))
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl))
             .expect("lightmap present");
         // It must have switched to the owned augmented buffer.
         assert!(matches!(lm.luxels, Luxels::Owned(_)), "a reaching light must own the buffer");
@@ -3955,7 +4139,7 @@ mod tests {
         // With no dlights the lightmap must borrow the static bytes and sample
         // exactly the pre-dlight factor (byte-identical behaviour).
         let (bsp, face, poly) = one_face_bsp_zplane(150);
-        let with_none = face_lightmap_dyn(&bsp, &face, &poly, &[]).expect("present");
+        let with_none = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[]).expect("present");
         assert!(matches!(with_none.luxels, Luxels::Static(_)), "empty slice keeps static borrow");
 
         let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
@@ -3975,7 +4159,7 @@ mod tests {
         let (bsp, face, poly) = one_face_bsp_zplane(100);
         // dist 100000 >> radius 200, so rad < minlight -> no contribution.
         let dl = DynamicLight::new([0.0, 0.0, 100_000.0], 200.0, 10.0, 0.0, 0.0, 0);
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, std::slice::from_ref(&dl)).expect("present");
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl)).expect("present");
         assert!(matches!(lm.luxels, Luxels::Static(_)), "a non-reaching light keeps the static borrow");
         let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
         assert!((lm.factor_at(0.0, 0.0) - baseline.factor_at(0.0, 0.0)).abs() < 1e-7);
@@ -3987,10 +4171,119 @@ mod tests {
         // factor_at must clamp to MAX_LIGHT_FACTOR (finite, no overflow/NaN).
         let (bsp, face, poly) = one_face_bsp_zplane(255);
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 100_000.0, 10.0, 0.0, 0.0, 0);
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, std::slice::from_ref(&dl)).expect("present");
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl)).expect("present");
         let f = lm.factor_at(0.0, 0.0);
         assert!(f.is_finite());
         assert!((f - MAX_LIGHT_FACTOR).abs() < 1e-6, "huge add must clamp to {MAX_LIGHT_FACTOR}, got {f}");
+    }
+
+    // -- Animated light styles (R_BuildLightMap multi-style combine) -------
+
+    /// A z-plane one-face BSP whose face uses two light styles. The LIGHTING
+    /// lump concatenates the two `3x3` luxel blocks: block for `styles[0]` first
+    /// (all `b0`), then `styles[1]` (all `b1`). `styles` are the style indices.
+    fn two_style_face_bsp(
+        styles: [u8; 4],
+        b0: u8,
+        b1: u8,
+    ) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
+        // 9 luxels per block, two blocks concatenated.
+        let mut lighting = vec![b0; 9];
+        lighting.extend(std::iter::repeat(b1).take(9));
+        let (mut bsp, mut face, poly) = one_face_bsp_zplane(b0);
+        bsp.lighting = lighting;
+        face.styles = styles;
+        (bsp, face, poly)
+    }
+
+    #[test]
+    fn single_steady_style0_neutral_is_static_and_byte_identical() {
+        // A single steady style-0 face under neutral scales must keep the borrowed
+        // static slice and sample exactly the static factor (no regression).
+        let (bsp, face, poly) = one_face_bsp_zplane(200);
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[])
+            .expect("present");
+        assert!(
+            matches!(lm.luxels, Luxels::Static(_)),
+            "single steady style-0 at scale 1.0 keeps the static borrow"
+        );
+        let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
+        for &(s, t) in &[(0.0f32, 0.0f32), (8.0, 8.0), (16.0, 16.0), (32.0, 32.0)] {
+            assert!(
+                (lm.factor_at(s, t) - baseline.factor_at(s, t)).abs() < 1e-7,
+                "neutral style-0 factor must equal the static factor at ({s},{t})"
+            );
+        }
+    }
+
+    #[test]
+    fn second_flicker_style_changes_effective_luxel() {
+        // styles[0]=0 (steady), styles[1]=1 (flicker). block0 = 100, block1 = 200.
+        let (bsp, face, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
+
+        // Style 1 dark (scale 0): effective = block0*1 + block1*0 = 100.
+        let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
+        scales[1] = 0.0;
+        let dark = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[]).expect("present");
+        assert!(matches!(dark.luxels, Luxels::Owned(_)), "2-style face owns the combine");
+        // Effective luxel 100 -> factor 100/255*2.
+        assert!((dark.factor_at(0.0, 0.0) - (100.0 / 255.0 * 2.0)).abs() < 1e-5);
+
+        // Style 1 normal (scale 1): effective = 100 + 200 = 300 -> clamps in factor.
+        let mut scales_on = NEUTRAL_LIGHTSTYLE_SCALES;
+        scales_on[1] = 1.0;
+        let bright = face_lightmap_dyn(&bsp, &face, &poly, &scales_on, &[]).expect("present");
+        let f_dark = dark.factor_at(0.0, 0.0);
+        let f_bright = bright.factor_at(0.0, 0.0);
+        assert!(
+            f_bright > f_dark + 0.5,
+            "raising style-1 scale must brighten the effective luxel: {f_dark} -> {f_bright}"
+        );
+
+        // And a partial scale lands strictly between (proves it scales the block).
+        let mut scales_half = NEUTRAL_LIGHTSTYLE_SCALES;
+        scales_half[1] = 0.5; // effective = 100 + 100 = 200
+        let mid = face_lightmap_dyn(&bsp, &face, &poly, &scales_half, &[]).expect("present");
+        assert!((mid.factor_at(0.0, 0.0) - (200.0 / 255.0 * 2.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn multi_style_too_short_lighting_falls_back_without_panic() {
+        // The face declares two styles (needs 18 luxels) but only one block (9) is
+        // present. The combine must NOT read out of bounds: it falls back to the
+        // single static block (byte-identical to a steady style-0 face).
+        let (mut bsp, mut face, poly) = one_face_bsp_zplane(123);
+        face.styles = [0, 1, 255, 255]; // two active styles, but only 9 luxels stored
+        bsp.lighting = vec![123u8; 9]; // one block only -> second block overruns
+        let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
+        scales[1] = 2.0; // would matter if the (missing) block were read
+        // Must not panic; falls back to the single static block.
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[]).expect("present");
+        assert!(
+            matches!(lm.luxels, Luxels::Static(_)),
+            "a too-short multi-style lump falls back to the static block borrow"
+        );
+        let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
+        assert!((lm.factor_at(0.0, 0.0) - baseline.factor_at(0.0, 0.0)).abs() < 1e-7);
+    }
+
+    #[test]
+    fn unset_style_index_treated_as_normal() {
+        // A face whose only style references an index whose scale is left at the
+        // neutral 1.0 stays at full brightness (the "missing style -> normal"
+        // rule). Style index 7, scale 1.0 (neutral): a single-style-at-1.0 face is
+        // byte-identical to the static block.
+        let (bsp, face, poly) = {
+            let (mut bsp, mut face, poly) = one_face_bsp_zplane(180);
+            face.styles = [7, 255, 255, 255];
+            bsp.lighting = vec![180u8; 9];
+            (bsp, face, poly)
+        };
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[])
+            .expect("present");
+        // Single style at scale 1.0 -> static borrow, full brightness.
+        assert!(matches!(lm.luxels, Luxels::Static(_)));
+        assert!((lm.factor_at(0.0, 0.0) - (180.0 / 255.0 * 2.0)).abs() < 1e-6);
     }
 
     #[test]
@@ -4003,13 +4296,13 @@ mod tests {
         let pal = [[180u8, 180, 180]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
 
-        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         // demo_room has no lighting lump, so faces are fullbright (no lightmap)
         // and dlights cannot attach; the frame must therefore be UNCHANGED even
         // with a light present -- proving dlights never touch non-lightmapped
         // faces and never panic.
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 600.0, 10.0, 0.0, 0.0, 0);
-        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], std::slice::from_ref(&dl));
+        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(base.rgb, lit.rgb, "fullbright (lightmap-less) world must ignore dlights");
     }
 
@@ -4287,7 +4580,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let with = render_scene_ext(
             &bsp,
             &cam,
@@ -4301,6 +4594,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
 
         let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
@@ -4328,7 +4622,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let oob = render_scene_ext(
             &bsp,
             &cam,
@@ -4341,6 +4635,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
         assert_eq!(
             empty.rgb, oob.rgb,
@@ -4358,7 +4653,7 @@ mod tests {
 
         // No alias models, no bmodels.
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
 
         // Also holds with an alias instance present (the model path is shared).
@@ -4383,6 +4678,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
         assert_eq!(
             a2.rgb, b2.rgb,
@@ -4411,6 +4707,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
         let shifted = render_scene_ext(
@@ -4425,6 +4722,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
         let changed = centered
             .rgb
@@ -4462,6 +4760,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
     }
 
@@ -4575,6 +4874,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[],
@@ -4582,6 +4882,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
 
         // Isolate the gun pixels (its unique skin colour) in each frame.
@@ -4637,7 +4938,7 @@ mod tests {
         let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
-        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0, &[], &[]);
+        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let bg = [10u8, 10, 14];
         let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
@@ -4654,6 +4955,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
@@ -4679,7 +4981,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
     }
 
@@ -4700,8 +5002,9 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
-        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0, &[], &[]);
+        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
@@ -4714,6 +5017,7 @@ mod tests {
             0.0,
             &[],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
     }
 
@@ -4940,8 +5244,8 @@ mod tests {
         // enough for this assertion.)
         let cam = Camera::looking_at([0.0, 0.0, 100.0], [0.0, 0.0, -128.0], 90.0);
 
-        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6, &[], &[]);
+        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
 
         let bg = [10u8, 10, 14];
         assert!(
@@ -4963,8 +5267,8 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
-        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5, &[], &[]);
+        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
         // And it must equal the time-less render_scene wrapper.
         let rs = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
@@ -5378,7 +5682,7 @@ mod tests {
         let bsp = demo_room();
         let cam = Camera::looking_at([0.0, 0.0, 0.0], [200.0, 0.0, 0.0], 90.0);
         let pal = [[180u8, 180, 180]; 256];
-        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         let baseline = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
         assert_eq!(
             with_empty.rgb, baseline.rgb,
@@ -5395,7 +5699,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let mut pal = [[60u8, 60, 60]; 256];
         pal[251] = [255, 0, 255]; // a vivid colour unlikely to match the walls
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
         // A particle ~80 units in front of the camera (well before the +256 wall).
         let with = render_scene_ext(
             &bsp,
@@ -5409,6 +5713,7 @@ mod tests {
             0.0,
             &[([-120.0, 0.0, 0.0], 251)],
             &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
         );
         assert_ne!(without.rgb, with.rgb, "a visible particle must change the frame");
         assert!(

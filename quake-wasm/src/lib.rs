@@ -830,8 +830,11 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
     // The live dynamic lights (explosions / muzzle flashes) light up nearby walls.
     let active_dlights = w.dlights.active();
+    // The animated light-style scales (torch flicker, pulsing lights) at the
+    // current server clock; the worldspawn populated the styles at spawn time.
+    let light_styles = w.server.lightstyle_scales(w.clock);
     let mut img =
-        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock, &parts, &active_dlights);
+        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock, &parts, &active_dlights, &light_styles);
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
@@ -886,6 +889,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
     };
     // The recorded server time animates the demo's liquids/sky too. Recorded
     // demos carry no engine-particle stream or dynamic lights here, so those
-    // slices are empty.
-    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time, &[], &[])
+    // slices are empty; and a demo has no live server to source light styles, so
+    // pass the neutral (static) scales.
+    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time, &[], &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
 }
