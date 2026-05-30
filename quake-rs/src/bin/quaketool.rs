@@ -539,6 +539,61 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     );
     let _ = writeln!(o, "  {thinks} entity/monster thinks fired during play");
 
+    // --- doors: did any func_door (MOVETYPE_PUSH) physically move? ---
+    {
+        // Record every door's origin, then trigger each by calling its `use`
+        // function (the QuakeC door_use that buttons/triggers invoke), tick a
+        // couple seconds, and report which ones moved. This proves the pusher
+        // physics carry the bmodel, independent of whether the player reached
+        // the door's specific trigger field.
+        let mut doors: Vec<(i32, [f32; 3])> = Vec::new();
+        for e in 0..server.vm.num_edicts() {
+            let ent = e as i32;
+            if server.vm.edict_free.get(e).copied().unwrap_or(true) {
+                continue;
+            }
+            // func_door's spawn reassigns classname to "door"; movetype PUSH (7).
+            if server.vm.ent_get_string(ent, "classname") == "door" {
+                doors.push((ent, server.vm.ent_get_vector(ent, "origin")));
+            }
+        }
+        let _ = writeln!(o, "\n  {} doors (func_door, classname \"door\", MOVETYPE_PUSH)", doors.len());
+        // Fire each door's `use` (self=door, other=player) to open it.
+        for &(d, _) in &doors {
+            let usefn = server.vm.ent_get_int(d, "use");
+            if usefn > 0 {
+                server.vm.gset_int("self", d);
+                server.vm.gset_int("other", player);
+                let _ = server.vm.execute(usefn as usize);
+            }
+        }
+        // Tick ~2s so the doors slide and reach their open state.
+        let still = UserCmd { yaw: spawn_yaw, ..Default::default() };
+        for _ in 0..20 {
+            let _ = server.client_frame(&still, 0.1);
+        }
+        let mut moved = 0;
+        let mut max_disp = 0.0f32;
+        for &(d, o0) in &doors {
+            if server.vm.edict_free.get(d as usize).copied().unwrap_or(true) {
+                continue;
+            }
+            let o1 = server.vm.ent_get_vector(d, "origin");
+            let disp = ((o1[0]-o0[0]).powi(2) + (o1[1]-o0[1]).powi(2) + (o1[2]-o0[2]).powi(2)).sqrt();
+            if disp > 1.0 {
+                moved += 1;
+                max_disp = max_disp.max(disp);
+            }
+        }
+        let _ = writeln!(o, "  after `use` + 2s tick: {moved} doors moved (max displacement {max_disp:.0} units)");
+        for s in server.drain_sounds() {
+            if s.sample.contains("door") {
+                let _ = writeln!(o, "    door sound: {}", s.sample);
+                break;
+            }
+        }
+    }
+
     // --- combat: aim at the nearest monster and pull the trigger ---
     let pe = server.player_view().0;
     let mut nearest: Option<(i32, f32, [f32; 3])> = None;

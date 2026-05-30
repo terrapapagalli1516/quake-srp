@@ -1188,7 +1188,8 @@ impl Server {
     /// isolate a faulting entity.
     fn process_entity(&mut self, ent: i32, movetype: i32, start_time: f32, dt: f32) -> Result<bool> {
         match movetype {
-            MOVETYPE_PUSH | MOVETYPE_NONE => {
+            MOVETYPE_PUSH => self.physics_pusher(ent, start_time, dt),
+            MOVETYPE_NONE => {
                 let (fired, _alive) = self.run_think(ent, start_time, dt)?;
                 Ok(fired)
             }
@@ -1229,6 +1230,222 @@ impl Server {
     /// due it returns `(false, true)` — nothing ran, the entity lives on, and
     /// the caller still runs per-movetype physics. Errors from the think
     /// propagate (the caller decides whether to abort the frame).
+    /// `SV_Physics_Pusher` (sv_phys.c): advance a `MOVETYPE_PUSH` bmodel
+    /// (`func_door`, `func_plat`, `func_button`, trains) by its velocity over the
+    /// frame, carrying riders and respecting blockers, then fire its `think` when
+    /// the local time `ltime` reaches `nextthink`.
+    ///
+    /// Faithful to the C: the move time is clamped so the pusher never steps past
+    /// its scheduled think, [`Self::push_move`] advances `ltime` (unless blocked),
+    /// and the think runs with `self = ent`, `other = world`. A QuakeC error in
+    /// the think is caught via `reset_execution` rather than aborting the host.
+    /// Returns whether the think fired.
+    fn physics_pusher(&mut self, ent: i32, start_time: f32, dt: f32) -> Result<bool> {
+        let oldltime = self.vm.ent_get_float(ent, "ltime");
+        let thinktime = self.vm.ent_get_float(ent, "nextthink");
+
+        let movetime = if thinktime < oldltime + dt {
+            let m = thinktime - oldltime;
+            if m < 0.0 {
+                0.0
+            } else {
+                m
+            }
+        } else {
+            dt
+        };
+
+        if movetime != 0.0 {
+            // SV_PushMove advances ent.ltime if it is not blocked.
+            self.push_move(ent, movetime)?;
+        }
+
+        let ltime = self.vm.ent_get_float(ent, "ltime");
+        let mut fired = false;
+        if thinktime > oldltime && thinktime <= ltime {
+            self.vm.ent_set_float(ent, "nextthink", 0.0);
+            self.vm.gset_float("time", start_time);
+            self.vm.gset_int("self", ent);
+            self.vm.gset_int("other", 0); // world
+            let think = self.vm.ent_get_int(ent, "think");
+            if think > 0 {
+                fired = true;
+                if self.vm.execute(think as usize).is_err() {
+                    self.vm.reset_execution();
+                }
+            }
+        }
+        Ok(fired)
+    }
+
+    /// `SV_PushMove` (sv_phys.c): translate a pusher by `velocity * movetime`,
+    /// dragging every entity that is either riding it (`FL_ONGROUND` with
+    /// `groundentity == pusher`) or whose box intersects the pusher's swept AABB.
+    ///
+    /// If a dragged entity ends up stuck (its box overlaps solid geometry after
+    /// moving), the whole move is reverted — the pusher and every already-moved
+    /// entity are restored to their saved origins — and the pusher's `blocked`
+    /// function is invoked (caught, never fatal). Otherwise the move stands and
+    /// `ltime` is advanced.
+    fn push_move(&mut self, pusher: i32, movetime: f32) -> Result<()> {
+        let velocity = self.vm.ent_get_vector(pusher, "velocity");
+        if velocity[0] == 0.0 && velocity[1] == 0.0 && velocity[2] == 0.0 {
+            let lt = self.vm.ent_get_float(pusher, "ltime");
+            self.vm.ent_set_float(pusher, "ltime", lt + movetime);
+            return Ok(());
+        }
+
+        let mut mov = [0.0f32; 3];
+        for i in 0..3 {
+            mov[i] = velocity[i] * movetime;
+        }
+
+        // Swept AABB of the pusher's move: start from absmin/absmax, then for each
+        // axis extend the leading edge in the direction of travel.
+        let absmin = self.vm.ent_get_vector(pusher, "absmin");
+        let absmax = self.vm.ent_get_vector(pusher, "absmax");
+        let mut mins = absmin;
+        let mut maxs = absmax;
+        for i in 0..3 {
+            if mov[i] < 0.0 {
+                mins[i] += mov[i];
+            } else {
+                maxs[i] += mov[i];
+            }
+        }
+
+        // Save and apply the pusher move.
+        let pushorig = self.vm.ent_get_vector(pusher, "origin");
+        self.vm
+            .ent_set_vector(pusher, "origin", v_add(pushorig, mov));
+        let lt = self.vm.ent_get_float(pusher, "ltime");
+        self.vm.ent_set_float(pusher, "ltime", lt + movetime);
+        link_edict(&mut self.vm, pusher);
+
+        // Collect entities to drag, moving each as we go (origin, saved-origin).
+        let mut moved: Vec<(i32, Vec3)> = Vec::new();
+        let num = self.vm.num_edicts() as i32;
+        let mut blocker: Option<i32> = None;
+
+        let mut check: i32 = 1;
+        while check < num {
+            if self.vm.edict_free.get(check as usize).copied().unwrap_or(true) {
+                check += 1;
+                continue;
+            }
+            if check == pusher {
+                check += 1;
+                continue;
+            }
+            let ck_movetype = self.vm.ent_get_float(check, "movetype") as i32;
+            // SV_PushMove skips PUSH, NONE, and NOCLIP entities (sv_phys.c:478).
+            if ck_movetype == MOVETYPE_PUSH
+                || ck_movetype == MOVETYPE_NONE
+                || ck_movetype == MOVETYPE_NOCLIP
+            {
+                check += 1;
+                continue;
+            }
+
+            // The check entity must be standing on the pusher, or its box must
+            // intersect the pusher's swept box; otherwise it is unaffected.
+            let flags = self.vm.ent_get_float(check, "flags") as i32;
+            let ground = self.vm.ent_get_int(check, "groundentity");
+            let riding = (flags & FL_ONGROUND) != 0 && ground == pusher;
+            if !riding {
+                let ck_absmin = self.vm.ent_get_vector(check, "absmin");
+                let ck_absmax = self.vm.ent_get_vector(check, "absmax");
+                if ck_absmin[0] >= maxs[0]
+                    || ck_absmin[1] >= maxs[1]
+                    || ck_absmin[2] >= maxs[2]
+                    || ck_absmax[0] <= mins[0]
+                    || ck_absmax[1] <= mins[1]
+                    || ck_absmax[2] <= mins[2]
+                {
+                    check += 1;
+                    continue;
+                }
+            }
+
+            // Remove the onground flag for non-players (it is re-derived below).
+            if ck_movetype != MOVETYPE_WALK {
+                let f = self.vm.ent_get_float(check, "flags") as i32;
+                self.vm
+                    .ent_set_float(check, "flags", (f & !FL_ONGROUND) as f32);
+            }
+
+            // Drag the check along with the pusher and record it for rollback.
+            let entorig = self.vm.ent_get_vector(check, "origin");
+            self.vm.ent_set_vector(check, "origin", v_add(entorig, mov));
+            link_edict(&mut self.vm, check);
+            moved.push((check, entorig));
+
+            // If the check is now stuck in solid geometry, the move is blocked.
+            if self.push_test_position(check) {
+                // A zero-thickness box (e.g. a flattened corpse) cannot block.
+                let cmins = self.vm.ent_get_vector(check, "mins");
+                let cmaxs = self.vm.ent_get_vector(check, "maxs");
+                if cmins[0] == cmaxs[0] {
+                    check += 1;
+                    continue;
+                }
+                let csolid = self.vm.ent_get_float(check, "solid") as i32;
+                if csolid == SOLID_NOT || csolid == SOLID_TRIGGER {
+                    // Corpse: squish its box flat so it stops blocking.
+                    let mut m = self.vm.ent_get_vector(check, "mins");
+                    m[0] = 0.0;
+                    m[1] = 0.0;
+                    self.vm.ent_set_vector(check, "mins", m);
+                    self.vm.ent_set_vector(check, "maxs", m);
+                    check += 1;
+                    continue;
+                }
+                blocker = Some(check);
+                break;
+            }
+
+            check += 1;
+        }
+
+        if let Some(block) = blocker {
+            // Fail the move: restore the pusher.
+            self.vm.ent_set_vector(pusher, "origin", pushorig);
+            link_edict(&mut self.vm, pusher);
+            let lt = self.vm.ent_get_float(pusher, "ltime");
+            self.vm.ent_set_float(pusher, "ltime", lt - movetime);
+
+            // Restore every entity we moved.
+            for &(e, saved) in &moved {
+                self.vm.ent_set_vector(e, "origin", saved);
+                link_edict(&mut self.vm, e);
+            }
+
+            // If the pusher has a "blocked" function, call it (self=pusher,
+            // other=blocker). Caught, never fatal.
+            let blocked = self.vm.ent_get_int(pusher, "blocked");
+            if blocked > 0 {
+                self.vm.gset_int("self", pusher);
+                self.vm.gset_int("other", block);
+                if self.vm.execute(blocked as usize).is_err() {
+                    self.vm.reset_execution();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// `SV_TestEntityPosition` (sv_phys.c): true when `ent`'s box overlaps solid
+    /// geometry at its current origin. Implemented, as in the C, by tracing the
+    /// entity's own box from its origin to its origin and reporting `startsolid`.
+    fn push_test_position(&mut self, ent: i32) -> bool {
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let mins = self.vm.ent_get_vector(ent, "mins");
+        let maxs = self.vm.ent_get_vector(ent, "maxs");
+        let trace = sv_move(&mut self.vm, origin, origin, mins, maxs, ent);
+        trace.startsolid
+    }
+
     fn run_think(&mut self, ent: i32, sv_time: f32, dt: f32) -> Result<(bool, bool)> {
         let thinktime = self.vm.ent_get_float(ent, "nextthink");
         if thinktime <= 0.0 || thinktime > sv_time + dt {
@@ -3613,6 +3830,156 @@ mod tests {
         let vel = server.vm.ent_get_vector(e, "velocity");
         assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
         assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+    }
+
+    // -------------------------------------------------- MOVETYPE_PUSH physics
+
+    /// Field/global layout for the `MOVETYPE_PUSH` tests: everything the pusher
+    /// physics reads/writes by name, including `ltime` (the bmodel's local time)
+    /// and `groundentity` (so a rider can be tied to its pusher). `think`/
+    /// `blocked` are present so the engine can find them, but the tests leave them
+    /// null so no QuakeC runs.
+    fn pusher_progs() -> Vec<u8> {
+        let mut b = Builder::new();
+        b.entityfields = 40;
+
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("solid", EV_FLOAT, 2);
+        b.add_field("origin", EV_VECTOR, 4); // 4,5,6
+        b.add_field("mins", EV_VECTOR, 7); // 7,8,9
+        b.add_field("maxs", EV_VECTOR, 10); // 10,11,12
+        b.add_field("absmin", EV_VECTOR, 13); // 13,14,15
+        b.add_field("absmax", EV_VECTOR, 16); // 16,17,18
+        b.add_field("model", EV_STRING, 19);
+        b.add_field("movetype", EV_FLOAT, 20);
+        b.add_field("nextthink", EV_FLOAT, 21);
+        b.add_field("flags", EV_FLOAT, 22);
+        b.add_field("velocity", EV_VECTOR, 23); // 23,24,25
+        b.add_field("size", EV_VECTOR, 26); // 26,27,28
+        b.add_field("groundentity", EV_ENTITY, 29);
+        b.add_field("ltime", EV_FLOAT, 30);
+        b.add_field("think", EV_FUNCTION, 31);
+        b.add_field("blocked", EV_FUNCTION, 32);
+
+        b.build()
+    }
+
+    /// `SV_Physics_Pusher`/`SV_PushMove`: a `MOVETYPE_PUSH` bmodel given a
+    /// constant velocity and a future `nextthink` translates its origin by
+    /// `velocity * dt` over a frame, and its local time `ltime` advances by `dt`.
+    /// Uses the open world so `push_test_position` never reports the pusher stuck.
+    #[test]
+    fn run_frame_pusher_moves_by_velocity_and_advances_ltime() {
+        let progs = Progs::parse(&pusher_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let p = server.vm.spawn();
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_float(p, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(p, "velocity", [10.0, 0.0, 0.0]);
+        server.vm.ent_set_float(p, "ltime", 0.0);
+        // nextthink in the future so movetime = dt (not clamped) and no think fires.
+        server.vm.ent_set_float(p, "nextthink", 100.0);
+        link_edict(&mut server.vm, p);
+
+        let dt = 0.1;
+        let report = server.run_frame(dt).expect("frame");
+        assert_eq!(report.thinks_fired, 0, "future think must not fire");
+
+        let after = server.vm.ent_get_vector(p, "origin");
+        assert!(
+            (after[0] - 1.0).abs() < 1e-5,
+            "pusher origin x moved by velocity*dt (10*0.1=1.0), got {}",
+            after[0]
+        );
+        assert!(after[1].abs() < 1e-5 && after[2].abs() < 1e-5);
+        // ltime advanced by dt (SV_PushMove advances it when not blocked).
+        let ltime = server.vm.ent_get_float(p, "ltime");
+        assert!((ltime - dt).abs() < 1e-6, "ltime advanced by dt, got {ltime}");
+    }
+
+    /// A rider standing on the pusher (`FL_ONGROUND`, `groundentity == pusher`)
+    /// is carried by the same delta as the pusher.
+    #[test]
+    fn run_frame_pusher_carries_rider() {
+        let progs = Progs::parse(&pusher_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let p = server.vm.spawn();
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_float(p, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(p, "mins", [-64.0, -64.0, -16.0]);
+        server.vm.ent_set_vector(p, "maxs", [64.0, 64.0, 16.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 10.0]);
+        server.vm.ent_set_float(p, "ltime", 0.0);
+        server.vm.ent_set_float(p, "nextthink", 100.0);
+        link_edict(&mut server.vm, p);
+
+        // Rider resting on top of the pusher: a small bbox, onground, ground=pusher.
+        // Use MOVETYPE_WALK so the C keeps its FL_ONGROUND through the push (the
+        // `movetype != MOVETYPE_WALK` guard) and it runs no gravity of its own this
+        // frame, isolating the carry delta.
+        let r = server.vm.spawn();
+        server.vm.ent_set_float(r, "movetype", MOVETYPE_WALK as f32);
+        server.vm.ent_set_float(r, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(r, "origin", [0.0, 0.0, 32.0]);
+        server.vm.ent_set_vector(r, "mins", [-8.0, -8.0, -8.0]);
+        server.vm.ent_set_vector(r, "maxs", [8.0, 8.0, 8.0]);
+        server.vm.ent_set_float(r, "flags", FL_ONGROUND as f32);
+        server.vm.ent_set_int(r, "groundentity", p);
+        link_edict(&mut server.vm, r);
+
+        let dt = 0.1;
+        let _ = server.run_frame(dt).expect("frame");
+
+        // Both moved up by velocity*dt = 1.0.
+        let pafter = server.vm.ent_get_vector(p, "origin");
+        let rafter = server.vm.ent_get_vector(r, "origin");
+        assert!((pafter[2] - 1.0).abs() < 1e-5, "pusher z moved 1.0");
+        assert!(
+            (rafter[2] - 33.0).abs() < 1e-5,
+            "rider carried the same delta (32+1.0), got {}",
+            rafter[2]
+        );
+    }
+
+    /// A zero-velocity pusher only advances `ltime`; its origin does not change.
+    #[test]
+    fn run_frame_pusher_zero_velocity_only_advances_ltime() {
+        let progs = Progs::parse(&pusher_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let p = server.vm.spawn();
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_float(p, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_vector(p, "origin", [5.0, 6.0, 7.0]);
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(p, "ltime", 0.0);
+        server.vm.ent_set_float(p, "nextthink", 100.0);
+        link_edict(&mut server.vm, p);
+
+        let dt = 0.1;
+        let _ = server.run_frame(dt).expect("frame");
+
+        let after = server.vm.ent_get_vector(p, "origin");
+        assert_eq!(after, [5.0, 6.0, 7.0], "zero-velocity pusher did not move");
+        let ltime = server.vm.ent_get_float(p, "ltime");
+        assert!(
+            (ltime - dt).abs() < 1e-6,
+            "ltime still advances by dt for a zero-velocity pusher, got {ltime}"
+        );
     }
 
     // -------------------------------------------------------- world / builtins

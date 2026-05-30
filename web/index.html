@@ -135,8 +135,9 @@ overlay.addEventListener('click', () => canvas.requestPointerLock?.());
 canvas.addEventListener('mousemove', e => {
   if (!exp) return;
   if (locked() || dragging) {
-    // movementX/Y is the per-event delta. Mouse-right turns right (yaw down).
-    exp.look(-e.movementX * LOOK_SENS, -e.movementY * LOOK_SENS);
+    // movementX/Y is the per-event delta. Mouse-right turns right (yaw down);
+    // mouse-up looks up (non-inverted).
+    exp.look(-e.movementX * LOOK_SENS, e.movementY * LOOK_SENS);
   }
 });
 
