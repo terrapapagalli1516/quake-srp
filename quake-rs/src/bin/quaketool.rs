@@ -718,7 +718,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         // world, or nothing) — this distinguishes an aim/LOS miss from a damage bug.
         {
             let aim = [pe[0] + dir[0] * 4.0, pe[1] + dir[1] * 4.0, pe[2] + dir[2] * 4.0];
-            let tr = quake_rs::server::sv_move(&mut server.vm, pe, aim, [0.0; 3], [0.0; 3], player, false);
+            let tr = quake_rs::server::sv_move(&mut server.vm, pe, aim, [0.0; 3], [0.0; 3], player, false, false);
             let hit = if tr.ent == mon { format!("the monster (edict {mon}) ✓") }
                       else if tr.ent == 0 { "the world (wall) — no LOS".into() }
                       else if tr.ent < 0 { "nothing (clear)".into() }

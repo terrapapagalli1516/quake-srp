@@ -522,11 +522,22 @@ struct SndParams {
     origin: [f32; 3],
     volume: f32,
     attenuation: f32,
+    /// True when this sound came from the listener's own view entity (the
+    /// player edict). The C `SND_Spatialize` (snd_dma.c:407-412) forces such
+    /// sounds to full master volume on both channels with NO distance falloff
+    /// or pan; the page reads this via `sound_is_view_entity` to skip its
+    /// spatial attenuation for player-local sounds (weapon fire, pain, etc.).
+    is_view_entity: bool,
 }
 
 impl SndParams {
     const fn zero() -> Self {
-        SndParams { origin: [0.0; 3], volume: 0.0, attenuation: 0.0 }
+        SndParams {
+            origin: [0.0; 3],
+            volume: 0.0,
+            attenuation: 0.0,
+            is_view_entity: false,
+        }
     }
 }
 
@@ -545,6 +556,20 @@ thread_local! {
     /// the forward and right unit vectors derived from the player's yaw. The page
     /// reads these via `listener_*` exports to spatialize each sound.
     static LISTENER: RefCell<Listener> = const { RefCell::new(Listener::zero()) };
+    /// Whether the page's `AudioContext` is running yet. The page calls
+    /// `set_audio_ready(1)` once the context resumes (it starts suspended until a
+    /// user gesture). Until then `queue_sounds` drops sounds on the floor instead
+    /// of appending them every frame up to the 12-cap — otherwise a backlog of
+    /// stale sounds from before audio started would all play at once when it does.
+    static AUDIO_READY: RefCell<bool> = const { RefCell::new(false) };
+}
+
+/// Page hook (LOW-10): set once the browser `AudioContext` has resumed to the
+/// `running` state. While this is `0` the per-frame sound queue is not filled,
+/// so no pre-audio backlog accumulates to flush when playback finally starts.
+#[no_mangle]
+pub extern "C" fn set_audio_ready(ready: i32) {
+    AUDIO_READY.with(|r| *r.borrow_mut() = ready != 0);
 }
 
 /// Listener pose the page reads to spatialize queued sounds.
@@ -561,15 +586,41 @@ impl Listener {
     }
 }
 
-/// Load the WAV bytes for the distinct gameplay sounds in `events` and push them
-/// onto the playback queue. Constant ambient loops (`ambience/*`) and the silent
-/// `misc/null.wav` are skipped, duplicates within the frame are collapsed, and
-/// the queue is capped so a noisy frame can't grow it without bound.
-fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent]) {
+/// Load the WAV bytes for the gameplay sounds in `events` and push them onto the
+/// playback queue. Constant ambient loops (`ambience/*`) and the silent
+/// `misc/null.wav` are skipped, and the queue is capped at 12 so a noisy frame
+/// can't grow it without bound.
+///
+/// Mixing follows the C `SND_PickChannel` (snd_dma.c:354-390), keyed on the
+/// `(entity, channel)` pair carried by each `SoundEvent` — NOT on the sample
+/// name. A repeat `(entity, channel)` with a non-zero channel RESTARTS that
+/// channel (the later event overrides the earlier queued one for that key,
+/// matching "always override sound from same entity"); `channel == -1` matches
+/// any channel of that entity. Channel 0 NEVER overrides (the C comment:
+/// "channel 0 never overrides") so every channel-0 emitter queues separately.
+/// This keeps two distinct emitters of the SAME sample (e.g. two doors, or a
+/// gunshot and a footstep) from collapsing into one and losing the other's
+/// origin/volume.
+///
+/// `view_entity` is the listener's own edict (the player): a sound from it is
+/// flagged so the page plays it at full volume with no falloff (see
+/// `SndParams::is_view_entity`).
+fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity: i32) {
     if events.is_empty() {
         return;
     }
-    let mut seen: Vec<&str> = Vec::new();
+    // LOW-10: don't accumulate a backlog before audio starts. `drainGameSounds`
+    // early-returns while the AudioContext is suspended, but the queue would
+    // keep growing to its cap every frame and then dump stale sounds the moment
+    // audio resumes. Skip enqueuing entirely until the page reports the context
+    // running via `set_audio_ready(1)`.
+    if !AUDIO_READY.with(|r| *r.borrow()) {
+        return;
+    }
+    // Queue indices of entries already placed this call, keyed by their
+    // (entity, channel) — only for non-zero channels (channel 0 never
+    // overrides, so it is never recorded here and always appends).
+    let mut placed: Vec<((i32, i32), usize)> = Vec::new();
     SND_QUEUE.with(|q| {
         let mut q = q.borrow_mut();
         for ev in events {
@@ -577,21 +628,48 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent]) {
             if name.is_empty()
                 || name == "misc/null.wav"
                 || name.starts_with("ambience/")
-                || seen.contains(&name)
-                || q.len() >= 12
             {
                 continue;
             }
-            seen.push(name);
+
+            let params = SndParams {
+                origin: ev.origin,
+                volume: ev.volume,
+                attenuation: ev.attenuation,
+                is_view_entity: ev.entity == view_entity,
+            };
+
+            // Channel restart (SND_PickChannel): a non-zero channel from the
+            // same entity overrides that entity's prior queued entry on the same
+            // channel, so the channel plays the latest sound, not a stale one.
+            // The C wildcard is `entchannel == -1` on the NEW event only; QuakeC's
+            // SV_StartSound emit path always carries a concrete channel 0..7
+            // (the -1 "any" form is only used to STOP sounds, never emitted here),
+            // so we match the C's predicate exactly: new-channel -1 is a wildcard.
+            if ev.channel != 0 {
+                let hit = placed.iter().position(|&((e, c), _)| {
+                    e == ev.entity && (c == ev.channel || ev.channel == -1)
+                });
+                if let Some(pi) = hit {
+                    let qi = placed[pi].1;
+                    if let Ok(Some(bytes)) = pak.read_file(name) {
+                        q[qi] = (bytes, params);
+                        // Re-key to this channel so a following -1 still matches.
+                        placed[pi].0 = (ev.entity, ev.channel);
+                    }
+                    continue;
+                }
+            }
+
+            if q.len() >= 12 {
+                continue; // queue cap reached
+            }
             if let Ok(Some(bytes)) = pak.read_file(name) {
-                q.push((
-                    bytes,
-                    SndParams {
-                        origin: ev.origin,
-                        volume: ev.volume,
-                        attenuation: ev.attenuation,
-                    },
-                ));
+                let qi = q.len();
+                q.push((bytes, params));
+                if ev.channel != 0 {
+                    placed.push(((ev.entity, ev.channel), qi));
+                }
             }
         }
     });
@@ -646,6 +724,17 @@ pub extern "C" fn sound_volume() -> f32 {
 #[no_mangle]
 pub extern "C" fn sound_attenuation() -> f32 {
     SND_CUR.with(|p| p.borrow().attenuation)
+}
+
+/// `1` when the entry the most recent `poll_sound` popped came from the
+/// listener's own view entity (the player edict), else `0`. The C
+/// `SND_Spatialize` (snd_dma.c:407-412) forces view-entity sounds to full
+/// master volume on both channels with no distance falloff or pan; the page
+/// reads this to take the same full-volume / centred path for the player's own
+/// sounds (weapon fire, pain) instead of attenuating them with distance.
+#[no_mangle]
+pub extern "C" fn sound_is_view_entity() -> i32 {
+    SND_CUR.with(|p| p.borrow().is_view_entity as i32)
 }
 
 /// The listener (player) pose as of the last walk `step`: eye position and the
@@ -772,6 +861,11 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // Save the outgoing player's inventory into parm1..parm16 (SV_SaveSpawnparms
     // -> SetChangeParms). Done before we touch the old server's world.
     let parms = w.server.save_spawn_parms();
+    // Capture serverflags (the episode rune SERVERFLAG_* bits) from the OUTGOING
+    // server. The C keeps these alive across SV_SpawnServer (svs.serverflags);
+    // building a brand-new Server would reset the global to 0 and lose the
+    // collected runes, so we carry it forward onto the new level below.
+    let serverflags = w.server.serverflags();
 
     let read = |n: &str| w.pak.read_file(n).ok().flatten();
     // Two BSP copies (one for the sim/collision world the server owns, one for
@@ -784,6 +878,13 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let Ok(progs) = Progs::parse(&progs_bytes) else { return };
 
     let Ok(mut ns) = Server::new(sim_bsp, progs) else { return };
+    // Restore the carried serverflags onto the new server BEFORE spawning its
+    // entities, mirroring the C (SV_SpawnServer restores svs.serverflags before
+    // ED_LoadFromFile), so the new level's worldspawn — which reads serverflags
+    // to light up the runes the player already holds — and the reconnecting
+    // client both observe the carried bits. A no-op if the progs lacks the
+    // global.
+    ns.set_serverflags(serverflags);
     if ns.spawn_entities().is_err() {
         return;
     }
@@ -865,7 +966,7 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
     //    voices) to the page's audio queue.
     let events = w.server.drain_sounds();
-    queue_sounds(&w.pak, &events);
+    queue_sounds(&w.pak, &events, w.player);
 
     // 2b. Realise the particle() bursts the world fired this frame (explosions,
     //     blood, gibs) into the live pool, then age it under gravity and retire
@@ -903,7 +1004,10 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         }
     }
     if !te_sounds.is_empty() {
-        queue_sounds(&w.pak, &te_sounds);
+        // Temp-entity sounds (explosions, wall impacts) carry entity=0,
+        // channel=0 -> never the view entity, never channel-restarted, so each
+        // distinct explosion queues separately at its own origin.
+        queue_sounds(&w.pak, &te_sounds, w.player);
     }
     // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from the
     //     in-use edicts. The rand()&31 radius jitter is added here (entity_dlights
@@ -1156,5 +1260,144 @@ mod tests {
             clamp_pitch(75.0) > 70.0 && clamp_pitch(-75.0) == -70.0,
             "down range exceeds 70 while up range does not"
         );
+    }
+
+    use quake_rs::pak::{Pak, DIRENTRY_SIZE, HEADER_SIZE, NAME_SIZE};
+    use quake_rs::server::SoundEvent;
+
+    /// Build a synthetic PACK image holding the given (name, contents) files, so
+    /// `queue_sounds` can resolve real bytes for hand-crafted sound names without
+    /// depending on the embedded pak's contents.
+    fn build_test_pak(files: &[(&str, &[u8])]) -> Pak {
+        let mut contents = Vec::new();
+        let mut positions = Vec::new();
+        let mut cursor = HEADER_SIZE as i32;
+        for (_, data) in files {
+            positions.push((cursor, data.len() as i32));
+            contents.extend_from_slice(data);
+            cursor += data.len() as i32;
+        }
+        let dirofs = HEADER_SIZE + contents.len();
+        let dirlen = files.len() * DIRENTRY_SIZE;
+
+        let mut img = Vec::new();
+        img.extend_from_slice(b"PACK");
+        img.extend_from_slice(&(dirofs as i32).to_le_bytes());
+        img.extend_from_slice(&(dirlen as i32).to_le_bytes());
+        img.extend_from_slice(&contents);
+        for (i, (name, _)) in files.iter().enumerate() {
+            let mut name_field = [0u8; NAME_SIZE];
+            let b = name.as_bytes();
+            name_field[..b.len()].copy_from_slice(b);
+            img.extend_from_slice(&name_field);
+            img.extend_from_slice(&positions[i].0.to_le_bytes());
+            img.extend_from_slice(&positions[i].1.to_le_bytes());
+        }
+        Pak::from_bytes("test".into(), img).expect("synthetic pak")
+    }
+
+    fn ev(entity: i32, channel: i32, sample: &str, vol: f32) -> SoundEvent {
+        SoundEvent {
+            entity,
+            channel,
+            sound_index: -1,
+            sample: sample.to_string(),
+            origin: [vol, 0.0, 0.0], // stash a tag in origin.x so we can identify it
+            volume: vol,
+            attenuation: 1.0,
+        }
+    }
+
+    /// Drain the whole queue into a list of (volume, is_view_entity) via the same
+    /// poll path the page uses.
+    fn drain_queue() -> Vec<(f32, bool)> {
+        let mut out = Vec::new();
+        loop {
+            let len = poll_sound();
+            if len == 0 {
+                break;
+            }
+            out.push((sound_volume(), sound_is_view_entity() != 0));
+        }
+        out
+    }
+
+    fn reset_queue() {
+        SND_QUEUE.with(|q| q.borrow_mut().clear());
+        set_audio_ready(1); // audio running so queue_sounds enqueues
+    }
+
+    #[test]
+    fn queue_sounds_keys_by_entity_channel_not_sample_name() {
+        let pak = build_test_pak(&[("a.wav", b"AAAA"), ("b.wav", b"BBBB")]);
+
+        // Two DISTINCT emitters of the SAME sample (different entities, channel 0
+        // each) must BOTH queue — the old by-name dedup would have dropped one.
+        reset_queue();
+        queue_sounds(
+            &pak,
+            &[ev(2, 0, "a.wav", 0.3), ev(5, 0, "a.wav", 0.7)],
+            /*view_entity*/ -1,
+        );
+        let got = drain_queue();
+        assert_eq!(got.len(), 2, "distinct emitters of the same sample both queue");
+        assert_eq!(got[0].0, 0.3);
+        assert_eq!(got[1].0, 0.7);
+
+        // Same (entity, channel) with a NON-ZERO channel RESTARTS that channel:
+        // the later event overrides the earlier queued entry (one slot, latest
+        // params).
+        reset_queue();
+        queue_sounds(
+            &pak,
+            &[ev(2, 1, "a.wav", 0.2), ev(2, 1, "b.wav", 0.9)],
+            -1,
+        );
+        let got = drain_queue();
+        assert_eq!(got.len(), 1, "same (entity,channel>0) collapses to one slot");
+        assert_eq!(got[0].0, 0.9, "the restart keeps the LATER sound's params");
+
+        // Channel 0 NEVER overrides: the same entity firing twice on channel 0
+        // queues twice (Quake's auto-channel allocates fresh each time).
+        reset_queue();
+        queue_sounds(&pak, &[ev(2, 0, "a.wav", 0.1), ev(2, 0, "a.wav", 0.4)], -1);
+        let got = drain_queue();
+        assert_eq!(got.len(), 2, "channel 0 never overrides; both queue");
+
+        // Different non-zero channels of the SAME entity are independent.
+        reset_queue();
+        queue_sounds(&pak, &[ev(2, 1, "a.wav", 0.5), ev(2, 2, "b.wav", 0.6)], -1);
+        let got = drain_queue();
+        assert_eq!(got.len(), 2, "distinct channels of one entity stay separate");
+    }
+
+    #[test]
+    fn queue_sounds_flags_view_entity() {
+        let pak = build_test_pak(&[("a.wav", b"AAAA"), ("b.wav", b"BBBB")]);
+        reset_queue();
+        // entity 7 is the player (view entity); entity 3 is a monster.
+        queue_sounds(&pak, &[ev(7, 0, "a.wav", 0.5), ev(3, 0, "b.wav", 0.5)], 7);
+        let got = drain_queue();
+        assert_eq!(got.len(), 2);
+        assert!(got[0].1, "the view entity's sound is flagged");
+        assert!(!got[1].1, "the monster's sound is not flagged");
+    }
+
+    #[test]
+    fn queue_sounds_skips_until_audio_ready() {
+        let pak = build_test_pak(&[("a.wav", b"AAAA")]);
+        SND_QUEUE.with(|q| q.borrow_mut().clear());
+        set_audio_ready(0); // audio not running yet
+        queue_sounds(&pak, &[ev(2, 0, "a.wav", 0.5)], -1);
+        assert!(
+            SND_QUEUE.with(|q| q.borrow().is_empty()),
+            "no sounds accumulate before audio is ready"
+        );
+        // Once ready, the same call enqueues.
+        set_audio_ready(1);
+        queue_sounds(&pak, &[ev(2, 0, "a.wav", 0.5)], -1);
+        assert_eq!(SND_QUEUE.with(|q| q.borrow().len()), 1);
+        SND_QUEUE.with(|q| q.borrow_mut().clear());
+        set_audio_ready(0); // restore default for other tests
     }
 }

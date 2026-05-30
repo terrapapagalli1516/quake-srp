@@ -384,7 +384,7 @@ fn bi_traceline(vm: &mut Vm) -> Result<()> {
 
     // Entity-aware move. sv_move borrows the host internally; this builtin must
     // not be inside with_host.
-    let tr = sv_move(vm, v1, v2, [0.0; 3], [0.0; 3], ignore, nomonsters);
+    let tr = sv_move(vm, v1, v2, [0.0; 3], [0.0; 3], ignore, nomonsters, false);
 
     vm.gset_float("trace_allsolid", tr.allsolid as i32 as f32);
     vm.gset_float("trace_startsolid", tr.startsolid as i32 as f32);
@@ -424,7 +424,7 @@ fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
     // PF_droptofloor (pr_cmds.c) uses the ENTITY-AWARE SV_Move (not the
     // world-only host trace), so the entity can come to rest on a door/plat or
     // another solid edict, and sets groundentity to whatever it landed on.
-    let tr = sv_move(vm, origin, end, mins, maxs, ent, false);
+    let tr = sv_move(vm, origin, end, mins, maxs, ent, false, false);
 
     if tr.fraction == 1.0 || tr.allsolid {
         vm.ret_float(0.0);
@@ -2140,10 +2140,20 @@ impl Server {
             }
 
             // Drag the check along with the pusher and record it for rollback.
+            // SV_PushMove (sv_phys.c:509-512) moves the rider/pushed entity via
+            // SV_PushEntity (a CLIPPED move), temporarily making the pusher
+            // SOLID_NOT so the rider does not clip on the pusher itself, then
+            // restoring it. A clipped push lets a door push a rider against a
+            // wall (so the door later blocks/crushes) instead of teleporting the
+            // rider through solid geometry by an unclipped origin += mov.
             let entorig = self.vm.ent_get_vector(check, "origin");
-            self.vm.ent_set_vector(check, "origin", v_add(entorig, mov));
-            link_edict(&mut self.vm, check);
             moved.push((check, entorig));
+
+            let pusher_solid = self.vm.ent_get_float(pusher, "solid");
+            self.vm.ent_set_float(pusher, "solid", SOLID_NOT as f32);
+            self.push_entity(check, mov);
+            self.vm.ent_set_float(pusher, "solid", pusher_solid);
+            // push_entity already linked `check` (SV_PushEntity -> SV_LinkEdict).
 
             // If the check is now stuck in solid geometry, the move is blocked.
             if self.push_test_position(check) {
@@ -2207,7 +2217,7 @@ impl Server {
         let origin = self.vm.ent_get_vector(ent, "origin");
         let mins = self.vm.ent_get_vector(ent, "mins");
         let maxs = self.vm.ent_get_vector(ent, "maxs");
-        let trace = sv_move(&mut self.vm, origin, origin, mins, maxs, ent, false);
+        let trace = sv_move(&mut self.vm, origin, origin, mins, maxs, ent, false, false);
         trace.startsolid
     }
 
@@ -2401,9 +2411,23 @@ impl Server {
         let maxs = self.vm.ent_get_vector(ent, "maxs");
         let end = v_add(origin, push);
 
+        // SV_PushEntity (sv_phys.c:408-421) selects the move type from the
+        // MOVING entity:
+        //   * MOVETYPE_FLYMISSILE  -> MOVE_MISSILE   (FL_MONSTER touch entities
+        //     are clipped against a +-15 box so a rocket detonates NEAR a
+        //     monster, not only on a direct hit).
+        //   * SOLID_TRIGGER / SOLID_NOT -> MOVE_NOMONSTERS (dropped backpacks /
+        //     gibs / corpses pass THROUGH monster+player boxes instead of
+        //     hanging on them; only bmodels block).
+        //   * otherwise -> MOVE_NORMAL.
+        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        let solid = self.vm.ent_get_float(ent, "solid") as i32;
+        let missile = movetype == MOVETYPE_FLYMISSILE;
+        let nomonsters = !missile && (solid == SOLID_TRIGGER || solid == SOLID_NOT);
+
         // Entity-aware move: clips world + all solid edicts; `ent` ignores
         // itself (the C `passedict`).
-        let mt = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false);
+        let mt = sv_move(&mut self.vm, origin, end, mins, maxs, ent, nomonsters, missile);
 
         self.vm.ent_set_vector(ent, "origin", mt.endpos);
         link_edict(&mut self.vm, ent);
@@ -2631,6 +2655,23 @@ impl Server {
             *p = self.vm.gget_float(&parm_global_name(i));
         }
         parms
+    }
+
+    /// Read the `serverflags` QuakeC global (the episode rune `SERVERFLAG_*`
+    /// bits the player carries between levels). Returns `0.0` if the progs has
+    /// no such global. The C keeps `pr_global_struct->serverflags` alive across
+    /// `SV_SpawnServer`; a front-end driving a changelevel reads it from the
+    /// outgoing server and writes it into the incoming one with
+    /// [`Self::set_serverflags`] so the runes are not lost each level.
+    pub fn serverflags(&self) -> f32 {
+        self.vm.gget_float("serverflags")
+    }
+
+    /// Write the `serverflags` QuakeC global. A no-op if the progs lacks the
+    /// global (the loader guards the offset), so calling it on a progs without
+    /// runes is harmless. See [`Self::serverflags`].
+    pub fn set_serverflags(&mut self, flags: f32) {
+        self.vm.gset_float("serverflags", flags);
     }
 
     /// Take (and clear) the deferred level-change request a `changelevel()`
@@ -3078,7 +3119,7 @@ impl Server {
         // SV_UserFriction (sv_user.c) uses SV_Move(..., true, ent): the edge
         // dropoff probe is MOVE_NOMONSTERS, so a box entity below the leading
         // edge can't spuriously suppress edge friction (world geometry only).
-        let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent, true);
+        let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent, true, false);
         let friction = if trace.fraction == 1.0 {
             SV_FRICTION * SV_EDGEFRICTION
         } else {
@@ -3188,7 +3229,7 @@ impl Server {
             ];
             let mins = self.vm.ent_get_vector(ent, "mins");
             let maxs = self.vm.ent_get_vector(ent, "maxs");
-            let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false);
+            let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false, false);
 
             if trace.allsolid {
                 // entity is trapped in another solid: stop dead.
@@ -3464,6 +3505,17 @@ impl MoveTrace {
 /// must pass *through* the player's own box and reach `trace_fraction == 1.0`,
 /// otherwise FindTarget's `if (!visible(client)) return;` bails and the monster
 /// never latches `self.enemy`.
+///
+/// `missile` implements the C `MOVE_MISSILE` flag (world.c `SV_Move` sets
+/// `clip.mins2/maxs2 = +-15`, and `SV_ClipToLinks` clips `FL_MONSTER` touch
+/// entities against that expanded box: `trace = SV_ClipMoveToEntity(touch,
+/// clip->start, clip->mins2, clip->maxs2, clip->end)`). When set, any candidate
+/// carrying `FL_MONSTER` is clipped against a +-15 moving box instead of the
+/// move's own `mins`/`maxs`, so a rocket detonates when it lands *near* a
+/// monster (not only on a direct hit). Non-monster entities and the world keep
+/// the move's own box. When `missile == false` (every caller except the
+/// `MOVETYPE_FLYMISSILE` branch of `push_entity`), behaviour is identical to a
+/// plain `MOVE_NORMAL` clip.
 pub fn sv_move(
     vm: &mut Vm,
     start: Vec3,
@@ -3472,6 +3524,7 @@ pub fn sv_move(
     maxs: Vec3,
     ignore: i32,
     nomonsters: bool,
+    missile: bool,
 ) -> MoveTrace {
     vm.with_host(|vm, host| {
         let bsp = host.bsp();
@@ -3516,9 +3569,42 @@ pub fn sv_move(
                 if vm.ent_get_int(ignore, "owner") == ei {
                     continue; // don't clip against owner
                 }
+
+                // SV_ClipToLinks points-never-interact skip (world.c
+                // ~843-844): `if (clip->passedict && clip->passedict->v.size[0]
+                // && !touch->v.size[0]) continue;`. A box-sized passedict (the
+                // mover, `ignore`) must not clip against a point-sized
+                // (size[0]==0) touch entity (e.g. a player/monster vs a
+                // point trigger/item). size = maxs - mins, so size[0]==0 iff the
+                // box has zero extent on x. Only the world (edict 0) is never a
+                // passedict, so this is gated on `ignore > 0`.
+                let pass_size_x = {
+                    let pmins = vm.ent_get_vector(ignore, "mins");
+                    let pmaxs = vm.ent_get_vector(ignore, "maxs");
+                    pmaxs[0] - pmins[0]
+                };
+                if pass_size_x != 0.0 {
+                    let tmins = vm.ent_get_vector(ei, "mins");
+                    let tmaxs = vm.ent_get_vector(ei, "maxs");
+                    if tmaxs[0] - tmins[0] == 0.0 {
+                        continue; // points never interact
+                    }
+                }
             }
 
             let origin = vm.ent_get_vector(ei, "origin");
+
+            // MOVE_MISSILE FL_MONSTER expansion (world.c SV_ClipToLinks): a
+            // missile move clips FL_MONSTER touch entities against the +-15
+            // `mins2`/`maxs2` box instead of the move's own box, so rockets
+            // detonate when they land NEAR a monster. Non-monster entities and
+            // the world keep the move's own `mins`/`maxs`.
+            let (clip_mins, clip_maxs) =
+                if missile && (vm.ent_get_float(ei, "flags") as i32) & FL_MONSTER != 0 {
+                    ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0])
+                } else {
+                    (mins, maxs)
+                };
 
             let tr = match solid {
                 SOLID_BSP => {
@@ -3529,7 +3615,7 @@ pub fn sv_move(
                         .and_then(|d| d.parse::<usize>().ok());
                     match idx {
                         Some(idx) => crate::world::trace_submodel(
-                            bsp, idx, origin, start, end, mins, maxs,
+                            bsp, idx, origin, start, end, clip_mins, clip_maxs,
                         ),
                         None => continue, // SOLID_BSP without a valid "*N" model
                     }
@@ -3537,7 +3623,9 @@ pub fn sv_move(
                 SOLID_BBOX | SOLID_SLIDEBOX => {
                     let ent_mins = vm.ent_get_vector(ei, "mins");
                     let ent_maxs = vm.ent_get_vector(ei, "maxs");
-                    crate::world::clip_box(start, end, mins, maxs, ent_mins, ent_maxs, origin)
+                    crate::world::clip_box(
+                        start, end, clip_mins, clip_maxs, ent_mins, ent_maxs, origin,
+                    )
                 }
                 // SOLID_NOT and SOLID_TRIGGER do not block a move.
                 _ => continue,
@@ -3761,7 +3849,7 @@ pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
     // SV_Move(start, vec3_origin, vec3_origin, stop, true, ent): a *point* move
     // (mins=maxs=0) with MOVE_NOMONSTERS (the trailing `true`) so the floor
     // probe clips only against world geometry, not monster/item/player boxes.
-    let tr = sv_move(vm, mid_start, mid_stop, [0.0; 3], [0.0; 3], ent, true);
+    let tr = sv_move(vm, mid_start, mid_stop, [0.0; 3], [0.0; 3], ent, true, false);
     if tr.fraction == 1.0 {
         return false; // no floor under the midpoint
     }
@@ -3774,7 +3862,7 @@ pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
             let cstart: Vec3 = [x, y, start_z];
             let cstop: Vec3 = [x, y, stop_z];
             // MOVE_NOMONSTERS (trailing `true`): world geometry only.
-            let tr = sv_move(vm, cstart, cstop, [0.0; 3], [0.0; 3], ent, true);
+            let tr = sv_move(vm, cstart, cstop, [0.0; 3], [0.0; 3], ent, true, false);
             if tr.fraction != 1.0 && tr.endpos[2] > bottom {
                 bottom = tr.endpos[2];
             }
@@ -3820,7 +3908,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                     neworg[2] += 8.0;
                 }
             }
-            let tr = sv_move(vm, oldorg, neworg, ent_mins, ent_maxs, ent, false);
+            let tr = sv_move(vm, oldorg, neworg, ent_mins, ent_maxs, ent, false, false);
             if tr.fraction == 1.0 {
                 // A swim monster that would leave water cannot make this move.
                 if flags & FL_SWIM != 0 {
@@ -3851,7 +3939,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     let mut end = neworg;
     end[2] -= world::STEPSIZE * 2.0;
 
-    let mut tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent, false);
+    let mut tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent, false, false);
 
     if tr.allsolid {
         return false;
@@ -3859,7 +3947,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     if tr.startsolid {
         // Back the start down a step and retry (the C's startsolid retry).
         neworg[2] -= world::STEPSIZE;
-        tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent, false);
+        tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent, false, false);
         if tr.allsolid || tr.startsolid {
             return false;
         }
@@ -4219,7 +4307,7 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
     // ignore the monster itself and skip every box entity, so the trace clips
     // only the world + SOLID_BSP bmodels. A clear trace (fraction == 1) means
     // the player is visible.
-    let tr = sv_move(vm, view, target, [0.0; 3], [0.0; 3], self_e, true);
+    let tr = sv_move(vm, view, target, [0.0; 3], [0.0; 3], self_e, true, false);
     let visible = tr.fraction == 1.0 || tr.ent == player;
 
     vm.ret_entity(if visible { player } else { 0 });
@@ -5180,6 +5268,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             -1,    // ignore nothing
             false, // clip all solids
+            false, // not a missile move
         );
 
         assert!(tr.fraction < 1.0, "the move was clipped, got {}", tr.fraction);
@@ -5213,6 +5302,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             -1,   // ignore nothing
             true, // MOVE_NOMONSTERS: skip box entities
+            false, // not a missile move
         );
 
         assert_eq!(tr.fraction, 1.0, "nomonsters trace passed through the box");
@@ -5240,6 +5330,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             blocker, // ignore the blocker
             false,   // clip all solids
+            false,   // not a missile move
         );
         assert_eq!(tr.fraction, 1.0, "ignored edict did not block");
         assert_eq!(tr.ent, -1, "clear move hit nothing");
@@ -5277,6 +5368,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             missile, // passedict = the missile
             false,
+            false,
         );
         assert_eq!(tr.fraction, 1.0, "missile passed through its owner");
         assert_eq!(tr.ent, -1, "owner did not block the missile");
@@ -5303,6 +5395,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             shooter2, // passedict = the owner
             false,
+            false,
         );
         assert_eq!(tr2.fraction, 1.0, "owner passed through its own missile");
         assert_eq!(tr2.ent, -1, "own missile did not block the owner");
@@ -5327,9 +5420,248 @@ mod tests {
             [0.0, 0.0, 0.0],
             shooter3,
             false,
+            false,
         );
         assert!(tr3.fraction < 1.0, "an unrelated box still blocks the move");
         assert_eq!(tr3.ent, other, "the unrelated box was the blocker");
+    }
+
+    #[test]
+    fn push_entity_selects_nomonsters_for_trigger_and_not_solids() {
+        // SV_PushEntity (sv_phys.c:408-421) chooses the move type from the
+        // MOVING entity's solid: SOLID_TRIGGER / SOLID_NOT -> MOVE_NOMONSTERS
+        // (the dropped backpack / gib / corpse passes THROUGH monster boxes),
+        // anything else -> MOVE_NORMAL (it stops on the box).
+        //
+        // A monster box sits in the path. A SOLID_BBOX mover must stop short of
+        // it; a SOLID_NOT mover must pass through and reach its endpoint.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let monster = server.vm.spawn();
+        server.vm.ent_set_float(monster, "solid", SOLID_SLIDEBOX as f32);
+        server.vm.ent_set_float(monster, "flags", FL_MONSTER as f32);
+        server.vm.ent_set_vector(monster, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(monster, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(monster, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(monster, "absmin", [84.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(monster, "absmax", [116.0, 16.0, 16.0]);
+
+        // SOLID_BBOX mover (normal): stops on the monster box.
+        let blocker = server.vm.spawn();
+        server.vm.ent_set_float(blocker, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_float(blocker, "movetype", MOVETYPE_BOUNCE as f32);
+        server.vm.ent_set_vector(blocker, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(blocker, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(blocker, "maxs", [0.0, 0.0, 0.0]);
+        let tr_normal = server.push_entity(blocker, [200.0, 0.0, 0.0]);
+        assert!(
+            tr_normal.fraction < 1.0,
+            "a SOLID_BBOX mover (MOVE_NORMAL) is stopped by the monster"
+        );
+
+        // SOLID_NOT mover (e.g. a gib): MOVE_NOMONSTERS, passes through.
+        let gib = server.vm.spawn();
+        server.vm.ent_set_float(gib, "solid", SOLID_NOT as f32);
+        server.vm.ent_set_float(gib, "movetype", MOVETYPE_BOUNCE as f32);
+        server.vm.ent_set_vector(gib, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(gib, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(gib, "maxs", [0.0, 0.0, 0.0]);
+        let tr_not = server.push_entity(gib, [200.0, 0.0, 0.0]);
+        assert_eq!(
+            tr_not.fraction, 1.0,
+            "a SOLID_NOT mover (MOVE_NOMONSTERS) passes through the monster"
+        );
+
+        // SOLID_TRIGGER mover: also MOVE_NOMONSTERS, passes through.
+        let trig = server.vm.spawn();
+        server.vm.ent_set_float(trig, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_float(trig, "movetype", MOVETYPE_BOUNCE as f32);
+        server.vm.ent_set_vector(trig, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(trig, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(trig, "maxs", [0.0, 0.0, 0.0]);
+        let tr_trig = server.push_entity(trig, [200.0, 0.0, 0.0]);
+        assert_eq!(
+            tr_trig.fraction, 1.0,
+            "a SOLID_TRIGGER mover (MOVE_NOMONSTERS) passes through the monster"
+        );
+    }
+
+    #[test]
+    fn push_entity_flymissile_expands_against_monsters() {
+        // SV_PushEntity sends a MOVETYPE_FLYMISSILE mover through MOVE_MISSILE,
+        // so a rocket whose centre path passes 20 units to the side of a small
+        // monster still detonates (the +-15 expanded box reaches it). A
+        // non-missile mover on the same path passes by.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let monster = server.vm.spawn();
+        server.vm.ent_set_float(monster, "solid", SOLID_SLIDEBOX as f32);
+        server.vm.ent_set_float(monster, "flags", FL_MONSTER as f32);
+        server.vm.ent_set_vector(monster, "origin", [100.0, 20.0, 0.0]);
+        server.vm.ent_set_vector(monster, "mins", [-5.0, -5.0, -5.0]);
+        server.vm.ent_set_vector(monster, "maxs", [5.0, 5.0, 5.0]);
+
+        // The rocket: a point box, MOVETYPE_FLYMISSILE, path at y=0.
+        let rocket = server.vm.spawn();
+        server.vm.ent_set_float(rocket, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_float(rocket, "movetype", MOVETYPE_FLYMISSILE as f32);
+        server.vm.ent_set_vector(rocket, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(rocket, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(rocket, "maxs", [0.0, 0.0, 0.0]);
+        let tr = server.push_entity(rocket, [200.0, 0.0, 0.0]);
+        assert!(
+            tr.fraction < 1.0,
+            "a FLYMISSILE mover detonates NEAR the monster, got {}",
+            tr.fraction
+        );
+    }
+
+    #[test]
+    fn sv_move_missile_expands_box_for_monsters() {
+        // MOVE_MISSILE clips FL_MONSTER touch entities against a +-15 box
+        // (world.c SV_Move sets clip.mins2/maxs2 = +-15, SV_ClipToLinks uses it
+        // for the FL_MONSTER branch). A point missile traced 16 units to the
+        // side of a *point* monster would miss with the move's own zero box, but
+        // the +-15 expansion makes it clip — a rocket detonates NEAR a monster.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+
+        // The monster is a tiny box centred at y=+20; a point trace along x at
+        // y=0 stays 20 units away on y, outside the monster's own box but inside
+        // the +-15 expanded box (20 - 15 = 5 <= the monster's own +5 half-width).
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        let monster = server.vm.spawn();
+        server.vm.ent_set_float(monster, "solid", SOLID_SLIDEBOX as f32);
+        server.vm.ent_set_float(monster, "flags", FL_MONSTER as f32);
+        server.vm.ent_set_vector(monster, "origin", [100.0, 20.0, 0.0]);
+        server.vm.ent_set_vector(monster, "mins", [-5.0, -5.0, -5.0]);
+        server.vm.ent_set_vector(monster, "maxs", [5.0, 5.0, 5.0]);
+
+        // Non-missile point trace at y=0: misses the monster (gap is 15 on y;
+        // monster's own box only reaches y=15, the point path is at y=0... it is
+        // 5 units clear). Confirm a normal move passes through.
+        let normal = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            -1,
+            false,
+            false, // MOVE_NORMAL
+        );
+        assert_eq!(normal.fraction, 1.0, "normal point trace misses the monster");
+        assert_eq!(normal.ent, -1);
+
+        // Missile trace at the same y=0: the +-15 expansion reaches the monster
+        // box (expanded bmin y = origin.y + (-5) - 15 = 0, the path is at y=0),
+        // so it clips and stops short.
+        let missile = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            -1,
+            false,
+            true, // MOVE_MISSILE
+        );
+        assert!(
+            missile.fraction < 1.0,
+            "missile expanded box clips the nearby monster, got {}",
+            missile.fraction
+        );
+        assert_eq!(missile.ent, monster, "the monster was the blocker");
+    }
+
+    #[test]
+    fn sv_move_missile_does_not_expand_box_for_non_monsters() {
+        // A non-monster box (no FL_MONSTER flag) keeps the move's own box even
+        // in missile mode: a point trace that misses it without expansion still
+        // misses it, so we never over-detonate against items / gibs.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        let item = server.vm.spawn();
+        server.vm.ent_set_float(item, "solid", SOLID_BBOX as f32);
+        // No FL_MONSTER flag set.
+        server.vm.ent_set_vector(item, "origin", [100.0, 20.0, 0.0]);
+        server.vm.ent_set_vector(item, "mins", [-5.0, -5.0, -5.0]);
+        server.vm.ent_set_vector(item, "maxs", [5.0, 5.0, 5.0]);
+
+        let missile = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            -1,
+            false,
+            true, // MOVE_MISSILE
+        );
+        assert_eq!(
+            missile.fraction, 1.0,
+            "non-monster keeps its own box, missile passes by"
+        );
+        assert_eq!(missile.ent, -1);
+    }
+
+    #[test]
+    fn sv_move_box_passedict_skips_point_touch() {
+        // SV_ClipToLinks points-never-interact skip (world.c ~843-844): a
+        // box-sized passedict must not clip against a point-sized (size[0]==0)
+        // touch entity. We give the mover (passedict) a real box, place a
+        // zero-size SOLID_BBOX point in its path, and confirm the point is
+        // skipped. A *box*-sized blocker in the same spot still blocks (control).
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        // The passedict / mover: a real box (size[0] = 32 != 0).
+        let mover = server.vm.spawn();
+        server.vm.ent_set_float(mover, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(mover, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(mover, "maxs", [16.0, 16.0, 16.0]);
+
+        // A point-sized blocker (mins == maxs, so size[0] == 0) in the path.
+        let point = server.vm.spawn();
+        server.vm.ent_set_float(point, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(point, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(point, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(point, "maxs", [0.0, 0.0, 0.0]);
+
+        let tr = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [-16.0, -16.0, -16.0],
+            [16.0, 16.0, 16.0],
+            mover, // box-sized passedict
+            false,
+            false,
+        );
+        assert_eq!(tr.fraction, 1.0, "point touch is skipped by the box passedict");
+        assert_eq!(tr.ent, -1);
+
+        // Control: give the same blocker a real box -> it blocks again.
+        server.vm.ent_set_vector(point, "mins", [-8.0, -8.0, -8.0]);
+        server.vm.ent_set_vector(point, "maxs", [8.0, 8.0, 8.0]);
+        let tr2 = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [-16.0, -16.0, -16.0],
+            [16.0, 16.0, 16.0],
+            mover,
+            false,
+            false,
+        );
+        assert!(tr2.fraction < 1.0, "a box-sized blocker still blocks");
+        assert_eq!(tr2.ent, point);
     }
 
     #[test]

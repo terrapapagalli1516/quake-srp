@@ -139,14 +139,18 @@ function spatializeSound() {
   for (const fn of need) { if (typeof exp[fn] !== 'function') return null; }
 
   const ox = exp.sound_origin_x(), oy = exp.sound_origin_y(), oz = exp.sound_origin_z();
-  let vol = exp.sound_volume();
+  const vol = exp.sound_volume();
   const atten = exp.sound_attenuation();
   const lx = exp.listener_x(), ly = exp.listener_y(), lz = exp.listener_z();
   const rx = exp.listener_right_x(), ry = exp.listener_right_y(), rz = exp.listener_right_z();
 
-  // A zero/garbage volume means params weren't populated for this entry — play
-  // flat rather than silence a real sound by accident.
-  if (!(vol > 0)) vol = 1;
+  // SND_Spatialize (snd_dma.c:407-412): a sound from the listener's OWN view
+  // entity (the player) always plays at full master volume on both channels
+  // with no distance falloff or pan. The page learns this via the
+  // sound_is_view_entity export (defaults to "not view entity" if absent).
+  if (typeof exp.sound_is_view_entity === 'function' && exp.sound_is_view_entity()) {
+    return { gain: vol, pan: 0 };
+  }
 
   const dx = ox - lx, dy = oy - ly, dz = oz - lz;
   const dist = Math.hypot(dx, dy, dz);
@@ -169,6 +173,10 @@ function spatializeSound() {
 // play each via Web Audio through a gain (distance) + stereo-pan node graph.
 function drainGameSounds() {
   if (!exp || !exp.poll_sound || !audioCtx || audioCtx.state !== 'running') return;
+  // LOW-10: tell the WASM side audio is live so queue_sounds starts enqueuing.
+  // Until this fires, queue_sounds drops sounds instead of letting a pre-audio
+  // backlog pile up to its cap and dump all at once now. Idempotent.
+  if (exp.set_audio_ready) exp.set_audio_ready(1);
   for (let guard = 0; guard < 16; guard++) {
     const len = exp.poll_sound();
     if (len <= 0) break;

@@ -37,6 +37,19 @@ const DEF_SIZE: usize = 8; // u16 type + u16 ofs + i32 s_name
 const FUNCTION_SIZE: usize = 36; // 7 * i32 + 8 * u8
 const HEADER_SIZE: usize = 60; // 15 * i32
 
+/// In-bounds precheck span: `count * record_size` as a byte length, with the
+/// multiply done via [`usize::checked_mul`] so a hostile (untrusted) record
+/// count cannot overflow `usize` and wrap to a tiny span that would then pass
+/// `slice_at` while the real read runs off the buffer. Any overflow is a clean
+/// parse error — never a panic, never a wrapped (wrong) slice. This matters on
+/// 32-bit targets (e.g. `wasm32`, where `usize` is 32-bit): there an `i32`
+/// count near `i32::MAX` times an 8-byte record already overflows `u32`.
+fn table_span(count: usize, record_size: usize, what: &'static str) -> Result<usize> {
+    count.checked_mul(record_size).ok_or_else(|| {
+        QError::invalid(format!("progs.dat {what} table size overflows"))
+    })
+}
+
 /// QuakeC value type (`etype_t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EType {
@@ -316,10 +329,16 @@ impl Progs {
             }
         };
 
+        // A hostile progs can carry an enormous (untrusted) record count; the
+        // in-bounds precheck multiplies that count by the fixed record size via
+        // `table_span` (a checked_mul) so an overflow becomes a clean parse
+        // error instead of a tiny wrapped span that would slip past `slice_at`.
+        let span = table_span;
+
         // --- statements ---
         let n = count(numstatements, "statement")?;
         let mut r = Reader::at(bytes, off(ofs_statements, "statements")?);
-        let _ = r.slice_at(off(ofs_statements, "statements")?, n * STATEMENT_SIZE)?;
+        let _ = r.slice_at(off(ofs_statements, "statements")?, span(n, STATEMENT_SIZE, "statement")?)?;
         let mut statements = Vec::with_capacity(n.min(bytes.len() / STATEMENT_SIZE));
         for _ in 0..n {
             statements.push(Statement {
@@ -333,7 +352,7 @@ impl Progs {
         // --- global defs ---
         let n = count(numglobaldefs, "globaldef")?;
         let mut r = Reader::at(bytes, off(ofs_globaldefs, "globaldefs")?);
-        let _ = r.slice_at(off(ofs_globaldefs, "globaldefs")?, n * DEF_SIZE)?;
+        let _ = r.slice_at(off(ofs_globaldefs, "globaldefs")?, span(n, DEF_SIZE, "globaldef")?)?;
         let mut globaldefs = Vec::with_capacity(n.min(bytes.len() / DEF_SIZE));
         for _ in 0..n {
             globaldefs.push(Def {
@@ -346,7 +365,7 @@ impl Progs {
         // --- field defs ---
         let n = count(numfielddefs, "fielddef")?;
         let mut r = Reader::at(bytes, off(ofs_fielddefs, "fielddefs")?);
-        let _ = r.slice_at(off(ofs_fielddefs, "fielddefs")?, n * DEF_SIZE)?;
+        let _ = r.slice_at(off(ofs_fielddefs, "fielddefs")?, span(n, DEF_SIZE, "fielddef")?)?;
         let mut fielddefs = Vec::with_capacity(n.min(bytes.len() / DEF_SIZE));
         for _ in 0..n {
             fielddefs.push(Def {
@@ -359,7 +378,7 @@ impl Progs {
         // --- functions ---
         let n = count(numfunctions, "function")?;
         let mut r = Reader::at(bytes, off(ofs_functions, "functions")?);
-        let _ = r.slice_at(off(ofs_functions, "functions")?, n * FUNCTION_SIZE)?;
+        let _ = r.slice_at(off(ofs_functions, "functions")?, span(n, FUNCTION_SIZE, "function")?)?;
         let mut functions = Vec::with_capacity(n.min(bytes.len() / FUNCTION_SIZE));
         for _ in 0..n {
             functions.push(Function {
@@ -383,7 +402,7 @@ impl Progs {
         // --- globals (one 32-bit cell each) ---
         let ng = count(numglobals, "global")?;
         let mut r = Reader::at(bytes, off(ofs_globals, "globals")?);
-        let _ = r.slice_at(off(ofs_globals, "globals")?, ng * 4)?;
+        let _ = r.slice_at(off(ofs_globals, "globals")?, span(ng, 4, "global")?)?;
         let mut globals = Vec::with_capacity(ng.min(bytes.len() / 4));
         for _ in 0..ng {
             globals.push(r.u32()?);
@@ -493,6 +512,28 @@ pub fn string_in(heap: &[u8], s: i32) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_span_rejects_overflow_not_panics() {
+        // Normal counts multiply cleanly.
+        assert_eq!(table_span(2, STATEMENT_SIZE, "statement").unwrap(), 16);
+        assert_eq!(table_span(0, FUNCTION_SIZE, "function").unwrap(), 0);
+
+        // A count whose product with the record size overflows `usize` must be
+        // a clean parse error, never a panic and never a wrapped (tiny) span.
+        // Pick a count that overflows on any pointer width: usize::MAX itself
+        // times any record_size > 1 overflows.
+        let huge = usize::MAX;
+        let err = table_span(huge, STATEMENT_SIZE, "statement");
+        assert!(err.is_err(), "overflowing span must be rejected");
+
+        // And just under: half of MAX times 2 overflows (MAX is odd, so this is
+        // MAX-1, *2 wraps).
+        assert!(table_span(usize::MAX / 2 + 1, 2, "globaldef").is_err());
+
+        // The largest non-overflowing span is accepted (boundary check).
+        assert_eq!(table_span(usize::MAX, 1, "global").unwrap(), usize::MAX);
+    }
 
     #[test]
     fn opcode_table_is_consistent() {
