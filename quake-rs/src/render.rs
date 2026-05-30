@@ -1343,18 +1343,104 @@ fn mdl_model_to_world(p: Vec3, yaw_rad: f64, origin: Vec3) -> Vec3 {
     ]
 }
 
+/// `ALIAS_ONSEAM` flag (`modelgen.h`): the stvert lies on the texture seam that
+/// separates the model skin's front half from its back half.
+const ALIAS_ONSEAM: i32 = 0x0020;
+
+/// A usable model skin: its palette-index pixels plus dimensions, borrowed from
+/// the [`Mdl`]. Resolved by [`mdl_skin`].
+struct ModelSkin<'a> {
+    pixels: &'a [u8],
+    width: usize,
+    height: usize,
+}
+
+/// Resolve the texturing skin for an alias model: skin 0's pixels and the
+/// header's `skinwidth`/`skinheight`, ported from the `R_AliasDrawModel` skin
+/// selection (`r_alias.c`, which uses `pmdl->skinwidth`/`skinheight` and a skin
+/// chosen from `paliashdr`'s skin list).
+///
+/// Returns `None` — so the caller falls back to the flat-colour path for the
+/// whole model — when there is no skin, the dimensions are non-positive, the
+/// pixel/dimension product overflows, or the pixel buffer is shorter than
+/// `skinwidth * skinheight`. A [`Skin::Group`] uses its first frame (we have no
+/// wall-clock to cycle skin-group animation, matching how [`mdl_frame_verts`]
+/// picks a group's first pose).
+fn mdl_skin(mdl: &crate::mdl::Mdl) -> Option<ModelSkin<'_>> {
+    use crate::mdl::Skin;
+    let pixels: &[u8] = match mdl.skins.first()? {
+        Skin::Single(px) => px,
+        Skin::Group { frames, .. } => frames.first()?,
+    };
+    // Dimensions must be strictly positive to index a real grid.
+    let width: usize = (mdl.header.skinwidth as i64).try_into().ok()?;
+    let height: usize = (mdl.header.skinheight as i64).try_into().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let needed = width.checked_mul(height)?;
+    if pixels.len() < needed {
+        return None;
+    }
+    Some(ModelSkin {
+        pixels,
+        width,
+        height,
+    })
+}
+
+/// Compute the skin texel coordinate `(s, t)` for one triangle vertex, porting
+/// the onseam/back-face `s`-shift that `GL_MakeAliasModelDisplayLists` /
+/// `R_AliasPreparePoints` (and the software `aliastris` setup) apply.
+///
+/// Quake packs a model's front and back skin halves side by side in one image.
+/// A vertex whose stvert carries the `ALIAS_ONSEAM` flag belongs to the seam;
+/// when it is referenced by a *back-facing* triangle (`facesfront == 0`) its `s`
+/// must be shifted right by `skinwidth / 2` so it samples the back half. Front
+/// triangles, and any vertex not on the seam, use the raw `s`. `t` is never
+/// shifted.
+///
+/// Returns texel coordinates as `f32` for [`raster_triangle_tex`]'s
+/// perspective-correct interpolation. The result is *not* clamped here; the
+/// rasteriser bounds the per-pixel sample.
+fn mdl_skin_st(stvert: &crate::mdl::StVert, facesfront: bool, skinwidth: usize) -> (f32, f32) {
+    let mut s = stvert.s;
+    if (stvert.onseam & ALIAS_ONSEAM) != 0 && !facesfront {
+        // skinwidth/2 as i32; skinwidth came from a non-negative header field.
+        let half = (skinwidth / 2) as i32;
+        s = s.saturating_add(half);
+    }
+    (s as f32, stvert.t as f32)
+}
+
 /// Draw one alias-model instance into `image`/`zbuf`, sharing the world's depth
 /// buffer so the model occludes and is occluded by BSP geometry.
 ///
 /// Uses the same camera basis, focal length, projection, and near clip as
 /// [`draw_world_textured`]. Each triangle's three vertices (from the instance's
 /// posed frame, [`mdl_frame_verts`]) are reconstructed in model space,
-/// transformed to world space (yaw about `+Z`, then translate), projected, and
-/// rasterised flat-shaded with `inst.color`
-/// modulated by a Lambert term from the triangle's world-space normal against a
-/// fixed light. A triangle is skipped whole if any vertex is at/behind the near
-/// plane. Every model index goes through `.get()`; malformed data is skipped,
-/// never panicked on.
+/// transformed to world space (yaw about `+Z`, then translate), and projected.
+///
+/// ## Skin texturing
+/// When the model carries a usable skin (resolved by [`mdl_skin`]: skin 0's
+/// pixels with positive `skinwidth`/`skinheight` and enough bytes) each triangle
+/// is drawn through the perspective-correct textured rasteriser
+/// [`raster_triangle_tex`], sampling the palette-indexed skin via `palette`.
+/// Per-vertex skin coordinates come from the base ST vertices ([`mdl_skin_st`]),
+/// including the `ALIAS_ONSEAM` back-face `s`-shift, and are clamped into the
+/// skin so a vertex on the seam never wraps to bleed the opposite half.
+///
+/// ## Fallback
+/// If the model has no usable skin, or a triangle references an out-of-range
+/// stvert/vertex, that triangle (or the whole model) is drawn flat with
+/// `inst.color` exactly as before, so nothing regresses for un-skinned models.
+///
+/// Shading is the existing per-triangle Lambert term
+/// `max(0.25, dot(normal, light_dir))`, passed as the `shade` argument to the
+/// textured rasteriser (and folded into `inst.color` on the flat path). A
+/// triangle is skipped whole if any vertex is at/behind the near plane. Every
+/// model index goes through `.get()`; malformed data is skipped, never panicked
+/// on.
 fn draw_alias_model(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -1362,6 +1448,7 @@ fn draw_alias_model(
     inst: &ModelInstance,
     w: usize,
     h: usize,
+    palette: &[[u8; 3]; 256],
 ) {
     const NEAR: f32 = 1.0;
     if w == 0 || h == 0 {
@@ -1389,8 +1476,12 @@ fn draw_alias_model(
     };
     let header = &inst.mdl.header;
 
+    // Resolve the model's skin once. `None` => the whole model uses the flat
+    // colour path (items without skins, malformed dims, short pixel buffers).
+    let skin = mdl_skin(inst.mdl);
+
     for tri in &inst.mdl.triangles {
-        // Resolve the three frame-0 vertices, fully bounds-checked.
+        // Resolve the three frame vertices, fully bounds-checked.
         let mut world: [Vec3; 3] = [[0.0; 3]; 3];
         let mut ok = true;
         for (slot, &vi) in tri.vertindex.iter().enumerate() {
@@ -1425,15 +1516,36 @@ fn draw_alias_model(
         if nlen == 0.0 {
             continue;
         }
-        let lambert = dot(normal, light_dir).max(0.25).min(1.0);
+        let shade = dot(normal, light_dir).clamp(0.25, 1.0);
         let color = [
-            (inst.color[0] as f32 * lambert).clamp(0.0, 255.0) as u8,
-            (inst.color[1] as f32 * lambert).clamp(0.0, 255.0) as u8,
-            (inst.color[2] as f32 * lambert).clamp(0.0, 255.0) as u8,
+            (inst.color[0] as f32 * shade).clamp(0.0, 255.0) as u8,
+            (inst.color[1] as f32 * shade).clamp(0.0, 255.0) as u8,
+            (inst.color[2] as f32 * shade).clamp(0.0, 255.0) as u8,
         ];
 
+        // Per-vertex skin coordinates, if this model has a usable skin AND every
+        // vertex of this triangle resolves to a real stvert. The onseam/back-face
+        // s-shift is applied, then the coords are clamped into the skin so a seam
+        // vertex never wraps into the opposite half (the skin is not tiled).
+        let st: Option<[(f32, f32); 3]> = skin.as_ref().and_then(|sk| {
+            let facesfront = tri.facesfront != 0;
+            let max_s = sk.width.saturating_sub(1) as f32;
+            let max_t = sk.height.saturating_sub(1) as f32;
+            let mut out = [(0.0f32, 0.0f32); 3];
+            for (slot, &vi) in tri.vertindex.iter().enumerate() {
+                let idx: usize = usize::try_from(vi).ok()?;
+                let sv = inst.mdl.stverts.get(idx)?;
+                let (s, t) = mdl_skin_st(sv, facesfront, sk.width);
+                // Clamp to [0, w-1]/[0, h-1]: no tiling/wrap for skins.
+                let slot_st = out.get_mut(slot)?;
+                *slot_st = (s.clamp(0.0, max_s), t.clamp(0.0, max_t));
+            }
+            Some(out)
+        });
+
         // Project all three; skip the whole triangle if any is at/behind near.
-        let mut proj: [Projected; 3] = [Projected { x: 0.0, y: 0.0, depth: 0.0 }; 3];
+        // `xy[i]` holds (screen-x, screen-y, forward-depth) per vertex.
+        let mut xy: [(f32, f32, f32); 3] = [(0.0, 0.0, 0.0); 3];
         let mut clipped = false;
         for (slot, v) in world.iter().enumerate() {
             let rel = sub(*v, cam.pos);
@@ -1444,19 +1556,50 @@ fn draw_alias_model(
             }
             let vx = dot(rel, right);
             let vy = dot(rel, up);
-            if let Some(p) = proj.get_mut(slot) {
-                *p = Projected {
-                    x: cx + focal * vx / vz,
-                    y: cy - focal * vy / vz,
-                    depth: vz,
-                };
+            if let Some(p) = xy.get_mut(slot) {
+                *p = (cx + focal * vx / vz, cy - focal * vy / vz, vz);
             }
         }
         if clipped {
             continue;
         }
 
-        raster_triangle(image, zbuf, proj[0], proj[1], proj[2], color);
+        match (&skin, st) {
+            (Some(sk), Some(st)) => {
+                // Textured: build ProjT vertices and sample the skin through the
+                // palette. Models are never lightmapped -> `None` lightmap.
+                let mk = |i: usize| ProjT {
+                    x: xy[i].0,
+                    y: xy[i].1,
+                    vz: xy[i].2,
+                    s: st[i].0,
+                    t: st[i].1,
+                };
+                raster_triangle_tex(
+                    image,
+                    zbuf,
+                    mk(0),
+                    mk(1),
+                    mk(2),
+                    sk.pixels,
+                    sk.width,
+                    sk.height,
+                    palette,
+                    shade,
+                    None,
+                );
+            }
+            _ => {
+                // Flat fallback (no usable skin, or a triangle's stverts were
+                // out of range): draw with the shaded instance colour.
+                let p = |i: usize| Projected {
+                    x: xy[i].0,
+                    y: xy[i].1,
+                    depth: xy[i].2,
+                };
+                raster_triangle(image, zbuf, p(0), p(1), p(2), color);
+            }
+        }
     }
 }
 
@@ -1478,7 +1621,7 @@ pub fn render_scene(
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette);
     for inst in instances {
-        draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h);
+        draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
     }
     image
 }
@@ -2050,6 +2193,185 @@ mod tests {
             let g = mdl_frame_verts(&grouped, 0).expect("group first sub-pose");
             assert_eq!(g[0], TriVertex { v: [7, 0, 0], lightnormalindex: 0 });
         }
+    }
+
+    // -- Alias-model skin texturing: skin resolution + onseam texcoord math --
+
+    #[test]
+    fn mdl_skin_st_onseam_backface_shift() {
+        use crate::mdl::StVert;
+        const SKINWIDTH: usize = 100;
+
+        // A vertex NOT on the seam: s is the raw stvert.s on both front and back
+        // triangles, t is always the raw stvert.t.
+        let plain = StVert { onseam: 0, s: 10, t: 7 };
+        assert_eq!(mdl_skin_st(&plain, true, SKINWIDTH), (10.0, 7.0));
+        assert_eq!(mdl_skin_st(&plain, false, SKINWIDTH), (10.0, 7.0));
+
+        // A seam vertex (ALIAS_ONSEAM set): on a FRONT triangle s is unshifted;
+        // on a BACK triangle s is shifted right by skinwidth/2. The two cases
+        // must differ by exactly skinwidth/2; t is unchanged.
+        let seam = StVert { onseam: ALIAS_ONSEAM, s: 10, t: 7 };
+        let (front_s, front_t) = mdl_skin_st(&seam, true, SKINWIDTH);
+        let (back_s, back_t) = mdl_skin_st(&seam, false, SKINWIDTH);
+        assert_eq!((front_s, front_t), (10.0, 7.0), "front seam vertex unshifted");
+        assert_eq!((back_s, back_t), (60.0, 7.0), "back seam vertex shifted by w/2");
+        assert_eq!(back_s - front_s, (SKINWIDTH / 2) as f32);
+
+        // Other bits set in `onseam` but not ALIAS_ONSEAM -> treated as not-seam.
+        let other = StVert { onseam: 0x0001, s: 10, t: 7 };
+        assert_eq!(mdl_skin_st(&other, false, SKINWIDTH), (10.0, 7.0));
+    }
+
+    #[test]
+    fn mdl_skin_resolves_single_and_rejects_bad() {
+        use crate::mdl::Skin;
+
+        // tiny_mdl has skinwidth=1, skinheight=1 and a 1-byte single skin.
+        let mut mdl = tiny_mdl();
+        let sk = mdl_skin(&mdl).expect("1x1 single skin resolves");
+        assert_eq!((sk.width, sk.height), (1, 1));
+        assert_eq!(sk.pixels.len(), 1);
+
+        // A 2x2 single skin with the right number of pixels resolves.
+        mdl.header.skinwidth = 2;
+        mdl.header.skinheight = 2;
+        mdl.skins = vec![Skin::Single(vec![1, 2, 3, 4])];
+        let sk = mdl_skin(&mdl).expect("2x2 single skin resolves");
+        assert_eq!((sk.width, sk.height), (2, 2));
+        assert_eq!(sk.pixels, &[1, 2, 3, 4]);
+
+        // Too few pixels for the claimed dimensions -> None (flat fallback).
+        mdl.skins = vec![Skin::Single(vec![1, 2, 3])];
+        assert!(mdl_skin(&mdl).is_none(), "short pixel buffer must be rejected");
+
+        // Non-positive dimensions -> None.
+        let mut zero = tiny_mdl();
+        zero.header.skinwidth = 0;
+        assert!(mdl_skin(&zero).is_none(), "zero skinwidth must be rejected");
+
+        // No skins at all -> None.
+        let mut noskin = tiny_mdl();
+        noskin.skins.clear();
+        assert!(mdl_skin(&noskin).is_none(), "skinless model must be rejected");
+
+        // A skin GROUP resolves via its first frame.
+        let mut grouped = tiny_mdl();
+        grouped.header.skinwidth = 2;
+        grouped.header.skinheight = 1;
+        grouped.skins = vec![Skin::Group {
+            intervals: vec![0.1, 0.2],
+            frames: vec![vec![5, 6], vec![7, 8]],
+        }];
+        let sk = mdl_skin(&grouped).expect("skin group resolves via first frame");
+        assert_eq!((sk.width, sk.height), (2, 1));
+        assert_eq!(sk.pixels, &[5, 6], "group uses its first frame deterministically");
+    }
+
+    /// A `tiny_mdl` variant carrying a 2x2 skin whose four texels map to four
+    /// distinct, vivid palette colours, with stverts spread across the skin so
+    /// the rasteriser actually samples more than one texel.
+    fn skinned_mdl() -> crate::mdl::Mdl {
+        use crate::mdl::{Skin, StVert};
+        let mut mdl = tiny_mdl();
+        mdl.header.skinwidth = 2;
+        mdl.header.skinheight = 2;
+        // Texel indices 1,2,3 (palette entries set vividly in the test).
+        mdl.skins = vec![Skin::Single(vec![1, 2, 3, 1])];
+        // Spread the three triangle vertices to three corners of the 2x2 skin.
+        mdl.stverts = vec![
+            StVert { onseam: 0, s: 0, t: 0 },
+            StVert { onseam: 0, s: 1, t: 0 },
+            StVert { onseam: 0, s: 0, t: 1 },
+        ];
+        mdl
+    }
+
+    #[test]
+    fn render_scene_skinned_differs_from_flat() {
+        // A model with a real skin must render differently from the same model
+        // forced down the flat-colour path (skin removed), proving the skin is
+        // sampled rather than ignored.
+        let bsp = demo_room();
+
+        // A palette where the skin's texel indices map to vivid, distinct colours
+        // unlikely to coincide with the flat instance colour after shading.
+        let mut pal = [[0u8; 3]; 256];
+        pal[1] = [255, 0, 0];
+        pal[2] = [0, 255, 0];
+        pal[3] = [0, 0, 255];
+
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+
+        // Skinned model.
+        let skinned = skinned_mdl();
+        let inst_skin = ModelInstance {
+            mdl: &skinned,
+            origin: [-80.0, 0.0, 0.0],
+            yaw: 0.0,
+            frame: 0,
+            color: [255, 32, 32],
+        };
+        let img_skin = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst_skin));
+
+        // Same model/instance but with the skin stripped -> flat fallback path.
+        let mut flat = skinned_mdl();
+        flat.skins.clear();
+        let inst_flat = ModelInstance {
+            mdl: &flat,
+            origin: [-80.0, 0.0, 0.0],
+            yaw: 0.0,
+            frame: 0,
+            color: [255, 32, 32],
+        };
+        let img_flat = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst_flat));
+
+        let changed = img_skin
+            .rgb
+            .iter()
+            .zip(img_flat.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "skinned model should differ from flat-colour model");
+
+        // The skinned render must actually show one of the skin's palette colours
+        // somewhere (red/green/blue), confirming the skin pixels are sampled.
+        let shows_skin_color = img_skin.rgb.iter().any(|&p| {
+            // After Lambert shading the channel scales down, but a pure-channel
+            // skin colour stays a pure channel (the other two channels stay 0).
+            (p[0] > 0 && p[1] == 0 && p[2] == 0)
+                || (p[1] > 0 && p[0] == 0 && p[2] == 0)
+                || (p[2] > 0 && p[0] == 0 && p[1] == 0)
+        });
+        assert!(shows_skin_color, "expected a sampled skin colour in the skinned render");
+    }
+
+    #[test]
+    fn render_scene_skinless_model_still_draws() {
+        // A model without a skin must still draw (flat fallback), unchanged from
+        // the pre-skin behaviour: placing it in front of the camera alters pixels.
+        let bsp = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let world_only = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
+
+        let mut mdl = tiny_mdl();
+        mdl.skins.clear(); // no usable skin -> flat path
+        let inst = ModelInstance {
+            mdl: &mdl,
+            origin: [-80.0, 0.0, 0.0],
+            yaw: 0.0,
+            frame: 0,
+            color: [255, 32, 32],
+        };
+        let with_model = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
+        let changed = world_only
+            .rgb
+            .iter()
+            .zip(with_model.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "skinless model must still draw via the flat fallback");
     }
 
     #[test]
