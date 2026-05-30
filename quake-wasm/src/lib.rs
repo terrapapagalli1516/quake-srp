@@ -577,6 +577,53 @@ fn spawn_temp_entity(
     }
 }
 
+/// Perform a deferred level transition: save the current player's spawn parms,
+/// load `next_map` and a fresh `progs.dat` from the open pak, spawn the new
+/// level's entities, and reconnect the client carrying its inventory. On any
+/// parse/spawn/connect failure the current level is left untouched (the guards
+/// below all early-`return` rather than panic), so a missing or corrupt next map
+/// is non-fatal — the player keeps playing the level they are on.
+fn try_changelevel(w: &mut Walk, next_map: &str) {
+    // Save the outgoing player's inventory into parm1..parm16 (SV_SaveSpawnparms
+    // -> SetChangeParms). Done before we touch the old server's world.
+    let parms = w.server.save_spawn_parms();
+
+    let read = |n: &str| w.pak.read_file(n).ok().flatten();
+    // Two BSP copies (one for the sim/collision world the server owns, one for
+    // rendering) plus a fresh progs.dat for the new server. Any failure aborts
+    // the swap, leaving the live level running.
+    let Some(map_bytes) = read(next_map) else { return };
+    let Ok(sim_bsp) = Bsp::parse(&map_bytes) else { return };
+    let Ok(render_bsp) = Bsp::parse(&map_bytes) else { return };
+    let Some(progs_bytes) = read("progs.dat") else { return };
+    let Ok(progs) = Progs::parse(&progs_bytes) else { return };
+
+    let Ok(mut ns) = Server::new(sim_bsp, progs) else { return };
+    if ns.spawn_entities().is_err() {
+        return;
+    }
+    let Ok(player) = ns.connect_client_with_parms(parms) else { return };
+
+    // Commit the swap. From here nothing can fail.
+    let (_spawn, yaw) =
+        player_start(&render_bsp.entities).unwrap_or(([0.0, 0.0, 0.0], w.yaw));
+    w.server = ns;
+    w.bsp = render_bsp;
+    w.player = player;
+    w.yaw = yaw;
+    w.pitch = 0.0;
+
+    // New level, clean slate: drop the old level's particles / dynamic lights and
+    // reset the animation clock so liquids/sky restart from zero.
+    w.particles = ParticleSystem::new();
+    w.dlights = DynamicLights::new();
+    w.clock = 0.0;
+    // Drop any events the *outgoing* server queued (the new server starts fresh).
+    let _ = w.server.drain_sounds();
+    let _ = w.server.drain_particles();
+    let _ = w.server.drain_temp_entities();
+}
+
 fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // Advance the animation clock (used for liquid warp + sky scroll). Guard
     // against a non-finite/negative dt so the clock only ever moves forward.
@@ -607,6 +654,18 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // weapon switch rather than re-selecting every frame).
     w.next_impulse = 0;
     let _ = w.server.client_frame(&cmd, dt);
+
+    // 1b. Level transition: a trigger_changelevel the player crossed this frame
+    //     ran the QuakeC changelevel() builtin, which only *recorded* the next
+    //     map (it cannot swap mid-frame). Now that the frame has finished, save
+    //     the player's spawn parms (inventory) and swap to the new level,
+    //     reconnecting the client so DecodeLevelParms restores the carried
+    //     inventory. A missing/bad map leaves the current level running.
+    if let Some(next_map) = w.server.take_pending_changelevel() {
+        try_changelevel(w, &next_map);
+        // The swap reset the world; render this frame from the *new* level so the
+        // player never sees a frame straddling two maps.
+    }
 
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
     //    voices) to the page's audio queue.

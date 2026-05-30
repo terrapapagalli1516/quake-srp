@@ -117,8 +117,15 @@ const DEFAULT_VIEWHEIGHT: f32 = 22.0;
 
 /// `NUM_SPAWN_PARMS` (quakedef.h): how many `parm1..parm16` spawn parameters
 /// `SetNewParms` fills and `PutClientInServer` later consumes.
-#[allow(dead_code)]
 const NUM_SPAWN_PARMS: usize = 16;
+
+/// The QuakeC global name for spawn parm index `i` (`0..NUM_SPAWN_PARMS`):
+/// `parm1`..`parm16`. The C `pr_global_struct->parm1..16` are the 16 floats
+/// `SetChangeParms` writes and `DecodeLevelParms` reads back across a level
+/// change.
+fn parm_global_name(i: usize) -> String {
+    format!("parm{}", i + 1)
+}
 
 // ---------------------------------------------------------------------------
 // (A) The world model: crate::vm::Host backed by a parsed BSP.
@@ -503,6 +510,68 @@ fn bi_noop(_vm: &mut Vm) -> Result<()> {
 fn bi_aim(vm: &mut Vm) -> Result<()> {
     let fwd = vm.gget_vector("v_forward");
     vm.ret_vector(fwd);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Deferred level change (PF_changelevel).
+//
+// The C `PF_changelevel` (pr_cmds.c, non-`QUAKE2` build) does NOT swap the map
+// inline — the VM is mid-execution and the entity/global memory the builtin
+// would tear down is exactly what the rest of the calling frame is still using.
+// It guards against a double issue (`svs.changelevel_issued`) and merely defers:
+// `Cbuf_AddText("changelevel <map>")`, which `Host_Frame` processes AFTER the
+// current frame finishes. We mirror this precisely: the builtin only *records*
+// the requested map name in a thread-local; the front-end takes it after
+// `client_frame` returns (via [`Server::take_pending_changelevel`]) and performs
+// the swap itself, never inside the builtin call.
+//
+// The `thread_local!` choice is identical to the sound/particle/temp-entity
+// queues above: builtins are `fn(&mut Vm)` and cannot see the `Server`, and
+// `vm.rs` is off-limits, so the deferred request cannot hang off either. Server
+// methods run on the same thread as the builtins, so a request a frame's QuakeC
+// fired is visible to `take_pending_changelevel` right after the frame.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The map name requested by a deferred `changelevel()` this frame, or `None`.
+    /// First-writer-wins within a frame, mirroring the C `svs.changelevel_issued`
+    /// guard that drops a second `PF_changelevel` until the swap completes. Taken
+    /// (and cleared) by [`Server::take_pending_changelevel`]; reset in
+    /// [`Server::new`] so a stale request can never leak across servers.
+    static CHANGELEVEL_REQUEST: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record a deferred level change to `map` (first-writer-wins this frame).
+fn push_changelevel(map: String) {
+    CHANGELEVEL_REQUEST.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(map);
+        }
+    });
+}
+
+/// Take and clear the deferred level-change request, if any.
+fn take_changelevel() -> Option<String> {
+    CHANGELEVEL_REQUEST.with(|c| c.borrow_mut().take())
+}
+
+/// Clear any pending level-change request (called from [`Server::new`] so a
+/// stale request from a prior server cannot leak into a fresh one).
+fn reset_changelevel() {
+    CHANGELEVEL_REQUEST.with(|c| *c.borrow_mut() = None);
+}
+
+/// `PF_changelevel` (#70): `void(string s) changelevel`. The C looked up its
+/// string argument, guarded against a double issue, and deferred the actual swap
+/// via `Cbuf_AddText("changelevel <s>")`. We faithfully *only* record the map
+/// name here (PARM0, the `string_t` of the destination map, e.g. `"e1m2"`); the
+/// front-end performs the swap after the frame. Never swaps inline.
+fn bi_changelevel(vm: &mut Vm) -> Result<()> {
+    let map = vm.arg_string(0);
+    push_changelevel(map);
     Ok(())
 }
 
@@ -1207,7 +1276,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
     put(t, 68, bi_precache_file); // precache_file
     put(t, 69, bi_noop); // makestatic
-    put(t, 70, bi_noop); // changelevel
+    put(t, 70, bi_changelevel); // changelevel (records the deferred map swap)
     put(t, 72, bi_noop); // cvar_set
     put(t, 74, bi_ambientsound); // ambientsound (queues a SoundEvent)
     put(t, 75, bi_precache_model); // precache_model (alias)
@@ -1423,6 +1492,12 @@ impl Server {
         let mut vm = Vm::new(progs);
         install_engine_builtins(&mut vm);
         vm.set_host(Box::new(WorldModel::new(bsp)));
+
+        // A deferred changelevel() request is per-thread and outlives a server;
+        // clear it so a request issued against a prior level can never leak into
+        // this fresh one (mirrors `svs.changelevel_issued = false` in
+        // SV_SpawnServer).
+        reset_changelevel();
 
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.
@@ -2257,6 +2332,46 @@ impl Server {
     /// that copy is the identity, so we run `SetNewParms` immediately before the
     /// connect/spawn pair and let the parm globals carry straight through.
     pub fn connect_client(&mut self) -> Result<i32> {
+        // Fresh game: SetNewParms fills parm1..parm16 with the new-game loadout
+        // (shotgun + axe, 100 health), then they pass straight to
+        // PutClientInServer (single-client identity copy).
+        self.connect_client_inner(|s, ent| {
+            s.run_sys("SetNewParms", ent, 0)?;
+            Ok(())
+        })
+    }
+
+    /// Spawn the local player carrying *saved* spawn parameters across a level
+    /// change. Like [`Self::connect_client`] but, instead of `SetNewParms`
+    /// (which would reset the loadout to the fresh-game default), it writes the
+    /// 16 saved `parm1..parm16` values into the globals first, then runs
+    /// `ClientConnect` + `PutClientInServer` — whose QuakeC `DecodeLevelParms`
+    /// reads them back into the player's `items`/`health`/`ammo_*`/`weapon`/
+    /// `armorvalue` fields. NET EFFECT: the inventory carries to the new map.
+    ///
+    /// Mirrors `SV_SpawnServer`'s reconnect path: the engine copies the client's
+    /// saved `spawn_parms` back into `pr_global_struct->parm1..16` before calling
+    /// `PutClientInServer`. Returns the player edict index. QuakeC faults are
+    /// caught and surfaced, not panicked; a missing parm global is a silent
+    /// no-op (`gset_float`).
+    pub fn connect_client_with_parms(&mut self, parms: [f32; NUM_SPAWN_PARMS]) -> Result<i32> {
+        self.connect_client_inner(move |s, _ent| {
+            for (i, v) in parms.iter().enumerate() {
+                s.vm.gset_float(&parm_global_name(i), *v);
+            }
+            Ok(())
+        })
+    }
+
+    /// Shared body of [`Self::connect_client`] / [`Self::connect_client_with_parms`]:
+    /// reserve the player edict, default its physics fields, run `setup_parms`
+    /// (the only step that differs — fresh `SetNewParms` vs. restoring saved
+    /// parms), then `ClientConnect` + `PutClientInServer`, re-assert physics,
+    /// record the view entity, mark `FL_CLIENT`, and link into the world.
+    fn connect_client_inner(
+        &mut self,
+        setup_parms: impl FnOnce(&mut Self, i32) -> Result<()>,
+    ) -> Result<i32> {
         // Reserve a fresh edict (the first free slot after spawn_entities).
         let ent = self.vm.spawn();
         self.player = ent;
@@ -2270,10 +2385,8 @@ impl Server {
         self.vm
             .ent_set_float(ent, "solid", SOLID_SLIDEBOX as f32);
 
-        // SetNewParms: fill parm1..parm16 with the new-game loadout (self=ent).
-        self.run_sys("SetNewParms", ent, 0)?;
-        // (NUM_SPAWN_PARMS documents how many parm globals SetNewParms wrote;
-        // with a single client they pass straight to PutClientInServer.)
+        // Establish parm1..parm16 (fresh loadout, or restored saved parms).
+        setup_parms(self, ent)?;
 
         // ClientConnect then PutClientInServer (the C runs both with self=player).
         self.run_sys("ClientConnect", ent, 0)?;
@@ -2306,6 +2419,42 @@ impl Server {
         Ok(ent)
     }
 
+    /// `SV_SaveSpawnparms` for the local client: set the QuakeC `self` global to
+    /// the player edict, run the progs `SetChangeParms` (which writes the
+    /// player's persistent state — items/health/ammo/weapon/armor — into the 16
+    /// `parm1..parm16` globals), then read those globals back into an array the
+    /// caller can hand to a new server's [`Self::connect_client_with_parms`].
+    ///
+    /// Mirrors `SV_SaveSpawnparms` (host.c): `pr_global_struct->self = client`,
+    /// `PR_ExecuteProgram(SetChangeParms)`, then copy `parm1..16` into
+    /// `client->spawn_parms`. If the progs lacks `SetChangeParms` (a minimal mod)
+    /// the run is a no-op and the *current* parm globals are returned unchanged;
+    /// a missing individual parm global reads as `0.0` (`gget_float`), so this
+    /// never panics. Returns `[0.0; 16]` when no client has connected.
+    pub fn save_spawn_parms(&mut self) -> [f32; NUM_SPAWN_PARMS] {
+        let mut parms = [0.0f32; NUM_SPAWN_PARMS];
+        if self.player < 0 {
+            return parms;
+        }
+        // SetChangeParms writes parm1..parm16 from the player's live fields
+        // (self = the player edict, other = world). A fault is caught by run_sys.
+        let _ = self.run_sys("SetChangeParms", self.player, 0);
+        for (i, p) in parms.iter_mut().enumerate() {
+            *p = self.vm.gget_float(&parm_global_name(i));
+        }
+        parms
+    }
+
+    /// Take (and clear) the deferred level-change request a `changelevel()`
+    /// builtin recorded this frame, or `None` if none was issued. A front-end
+    /// calls this once after [`Self::client_frame`]: when it returns `Some(map)`,
+    /// the front-end saves the spawn parms, loads `map`, and reconnects the
+    /// client carrying its inventory. Mirrors the engine processing the deferred
+    /// `changelevel <map>` console command after the frame.
+    pub fn take_pending_changelevel(&mut self) -> Option<String> {
+        take_changelevel()
+    }
+
     /// One server frame driven by the local player's input.
     ///
     /// Mirrors `Host_Frame` -> `SV_Physics`: advance `time`/`frametime`, run the
@@ -2321,6 +2470,10 @@ impl Server {
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
         reset_temp_entity_decoder();
+        // Drop any changelevel() request a *prior* frame left unconsumed (a
+        // well-behaved front-end drains it immediately, but a stale request must
+        // never trigger a swap a frame late or against the wrong level).
+        reset_changelevel();
         let start_time = self.time();
 
         // Let the progs know a new frame has started (self/other = world).
@@ -6115,6 +6268,219 @@ mod tests {
             server.vm.ent_get_float(p, "impulse"),
             0.0,
             "impulse cleared after the frame"
+        );
+    }
+
+    // -------------------------------------------------------- level transitions
+
+    /// Build a minimal progs for the changelevel parm-marshaling tests. It
+    /// declares the engine globals plus `parm1..parm16`, a `classname`/`origin`
+    /// field set, and three system functions:
+    ///   * `SetChangeParms`: copies a test-filled constant into `parm1` (the
+    ///     QuakeC `SetChangeParms` marshals the player's state into the parm
+    ///     globals; here we just write a recognisable value so the test can prove
+    ///     `save_spawn_parms` ran it and read it back).
+    ///   * `ClientConnect`: empty (DONE).
+    ///   * `PutClientInServer`: copies `parm1` back into a global `decoded` so a
+    ///     test can prove the restored parm was visible to the spawn script
+    ///     (mirrors `DecodeLevelParms` reading parm1 into a player field).
+    /// Returns `(image, g_const_ofs, g_decoded_ofs)` so the test can place the
+    /// value `SetChangeParms` stores and read what `PutClientInServer` decoded.
+    fn changelevel_progs() -> (Vec<u8>, usize, usize) {
+        let mut b = Builder::new();
+        b.entityfields = 8;
+
+        // Engine globals + the 16 spawn parms. Globals 31..36 are the well-known
+        // self/other/time/world/frametime/viewentity (matching player_progs).
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("viewentity", EV_FLOAT, 36);
+        // parm1..parm16 at globals 70..85.
+        for i in 0..NUM_SPAWN_PARMS {
+            b.add_global(&parm_global_name(i), EV_FLOAT, 70 + i as u16);
+        }
+        // A constant SetChangeParms stores into parm1, and a global
+        // PutClientInServer decodes parm1 into. Filled by the test after load.
+        let g_const = 40u16;
+        let g_decoded = 41u16;
+
+        // Minimal field set so spawn()/link/connect work.
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("origin", EV_VECTOR, 2);
+        b.add_field("mins", EV_VECTOR, 5);
+        b.add_field("maxs", EV_VECTOR, 8);
+        b.add_field("absmin", EV_VECTOR, 11);
+        b.add_field("absmax", EV_VECTOR, 14);
+        b.add_field("flags", EV_FLOAT, 17);
+        b.add_field("movetype", EV_FLOAT, 18);
+        b.add_field("solid", EV_FLOAT, 19);
+        b.add_field("size", EV_VECTOR, 20);
+        b.add_field("health", EV_FLOAT, 23);
+
+        let done = || Statement {
+            op: Op::Done as u16,
+            a: 0,
+            b: 0,
+            c: 0,
+        };
+        // SetChangeParms: parm1 = g_const.
+        b.add_function(
+            "SetChangeParms",
+            vec![
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: g_const as i16,
+                    b: 70, // parm1 global ofs
+                    c: 0,
+                },
+                done(),
+            ],
+        );
+        b.add_function("ClientConnect", vec![done()]);
+        // PutClientInServer: g_decoded = parm1 (DecodeLevelParms stand-in).
+        b.add_function(
+            "PutClientInServer",
+            vec![
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: 70, // parm1 global ofs
+                    b: g_decoded as i16,
+                    c: 0,
+                },
+                done(),
+            ],
+        );
+
+        let img = b.build();
+        (img, g_const as usize, g_decoded as usize)
+    }
+
+    #[test]
+    fn bi_changelevel_records_map_and_drain_returns_once() {
+        // bi_changelevel (PF_changelevel, #70) must record its string argument and
+        // take_pending_changelevel must return it exactly once, then None.
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        // A fresh server has no pending request.
+        assert_eq!(
+            server.take_pending_changelevel(),
+            None,
+            "fresh server has no pending changelevel"
+        );
+
+        // Drive the builtin directly: place the map name's string_t in PARM0.
+        let map_t = server.vm.intern("e1m2");
+        server.vm.set_gi(OFS_PARM0, map_t);
+        bi_changelevel(&mut server.vm).expect("bi_changelevel");
+
+        // take_pending_changelevel returns it once, then drains to None.
+        assert_eq!(server.take_pending_changelevel().as_deref(), Some("e1m2"));
+        assert_eq!(
+            server.take_pending_changelevel(),
+            None,
+            "second take drains to None"
+        );
+    }
+
+    #[test]
+    fn bi_changelevel_first_writer_wins_within_a_frame() {
+        // Two changelevel() calls before a drain: the first wins (mirrors the C
+        // svs.changelevel_issued guard).
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        let a = server.vm.intern("e1m2");
+        server.vm.set_gi(OFS_PARM0, a);
+        bi_changelevel(&mut server.vm).expect("first");
+        let bm = server.vm.intern("e1m3");
+        server.vm.set_gi(OFS_PARM0, bm);
+        bi_changelevel(&mut server.vm).expect("second");
+
+        assert_eq!(
+            server.take_pending_changelevel().as_deref(),
+            Some("e1m2"),
+            "first writer wins"
+        );
+    }
+
+    #[test]
+    fn fresh_server_clears_stale_changelevel_request() {
+        // A request left in the thread-local must not leak into a freshly built
+        // server (Server::new calls reset_changelevel).
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        // Issue a request against one server...
+        let mut s1 = Server::new(empty_bsp(), progs).expect("server");
+        let t = s1.vm.intern("e1m9");
+        s1.vm.set_gi(OFS_PARM0, t);
+        bi_changelevel(&mut s1.vm).expect("bi");
+        // ...then a new server clears it before the old one ever drained.
+        let progs2 = Progs::parse(&img).expect("parse");
+        let mut s2 = Server::new(empty_bsp(), progs2).expect("server");
+        assert_eq!(
+            s2.take_pending_changelevel(),
+            None,
+            "new server starts with no pending changelevel"
+        );
+    }
+
+    #[test]
+    fn save_spawn_parms_returns_sixteen_floats_via_setchangeparms() {
+        // save_spawn_parms runs SetChangeParms (which writes parm1 = g_const) and
+        // returns the 16 parm globals. With no client connected it returns zeros
+        // and never panics.
+        let (img, g_const, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        // No client yet -> all zeros, no panic.
+        assert_eq!(server.save_spawn_parms(), [0.0; NUM_SPAWN_PARMS]);
+
+        // Connect the player, set the constant SetChangeParms marshals into parm1.
+        server.connect_client().expect("connect");
+        server.vm.set_gf(g_const, 42.0);
+        let parms = server.save_spawn_parms();
+        assert_eq!(parms.len(), NUM_SPAWN_PARMS);
+        assert_eq!(parms[0], 42.0, "SetChangeParms wrote parm1");
+        assert_eq!(&parms[1..], &[0.0; NUM_SPAWN_PARMS - 1]);
+    }
+
+    #[test]
+    fn connect_client_with_parms_writes_parm_globals_before_spawn() {
+        // connect_client_with_parms must write the supplied parms into the
+        // parm1..parm16 globals BEFORE running PutClientInServer (so
+        // DecodeLevelParms sees them). The progs' PutClientInServer copies parm1
+        // into `decoded`, proving the parm was live when the spawn script ran.
+        let (img, _gc, g_decoded) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        let mut parms = [0.0f32; NUM_SPAWN_PARMS];
+        parms[0] = 7.5; // parm1
+        parms[3] = 25.0; // parm4 (e.g. shells)
+        let p = server
+            .connect_client_with_parms(parms)
+            .expect("connect with parms");
+        assert_eq!(server.player_edict(), p);
+
+        // The parm1 global holds the value we passed in...
+        assert_eq!(
+            server.vm.gget_float("parm1"),
+            7.5,
+            "connect_client_with_parms wrote parm1"
+        );
+        assert_eq!(server.vm.gget_float("parm4"), 25.0, "and parm4");
+        // ...and PutClientInServer (the spawn script) saw it (decoded parm1).
+        assert_eq!(
+            server.vm.gf(g_decoded),
+            7.5,
+            "PutClientInServer ran AFTER the parm globals were set"
         );
     }
 }
