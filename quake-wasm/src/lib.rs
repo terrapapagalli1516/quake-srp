@@ -632,6 +632,12 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity:
                 continue;
             }
 
+            // QuakeC sample names are relative to the "sound/" directory (the C
+            // `S_LoadSound` does sprintf(buf, "sound/%s", name)); the pak stores
+            // them under that prefix. Without it every read_file misses and the
+            // sound is silently dropped — the long-standing "no in-game sound".
+            let path = format!("sound/{name}");
+
             let params = SndParams {
                 origin: ev.origin,
                 volume: ev.volume,
@@ -652,7 +658,7 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity:
                 });
                 if let Some(pi) = hit {
                     let qi = placed[pi].1;
-                    if let Ok(Some(bytes)) = pak.read_file(name) {
+                    if let Ok(Some(bytes)) = pak.read_file(&path) {
                         q[qi] = (bytes, params);
                         // Re-key to this channel so a following -1 still matches.
                         placed[pi].0 = (ev.entity, ev.channel);
@@ -664,7 +670,7 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity:
             if q.len() >= 12 {
                 continue; // queue cap reached
             }
-            if let Ok(Some(bytes)) = pak.read_file(name) {
+            if let Ok(Some(bytes)) = pak.read_file(&path) {
                 let qi = q.len();
                 q.push((bytes, params));
                 if ev.channel != 0 {
@@ -1335,7 +1341,7 @@ mod tests {
 
     #[test]
     fn queue_sounds_keys_by_entity_channel_not_sample_name() {
-        let pak = build_test_pak(&[("a.wav", b"AAAA"), ("b.wav", b"BBBB")]);
+        let pak = build_test_pak(&[("sound/a.wav", b"AAAA"), ("sound/b.wav", b"BBBB")]);
 
         // Two DISTINCT emitters of the SAME sample (different entities, channel 0
         // each) must BOTH queue — the old by-name dedup would have dropped one.
@@ -1379,7 +1385,7 @@ mod tests {
 
     #[test]
     fn queue_sounds_flags_view_entity() {
-        let pak = build_test_pak(&[("a.wav", b"AAAA"), ("b.wav", b"BBBB")]);
+        let pak = build_test_pak(&[("sound/a.wav", b"AAAA"), ("sound/b.wav", b"BBBB")]);
         reset_queue();
         // entity 7 is the player (view entity); entity 3 is a monster.
         queue_sounds(&pak, &[ev(7, 0, "a.wav", 0.5), ev(3, 0, "b.wav", 0.5)], 7);
@@ -1391,7 +1397,7 @@ mod tests {
 
     #[test]
     fn queue_sounds_skips_until_audio_ready() {
-        let pak = build_test_pak(&[("a.wav", b"AAAA")]);
+        let pak = build_test_pak(&[("sound/a.wav", b"AAAA")]);
         SND_QUEUE.with(|q| q.borrow_mut().clear());
         set_audio_ready(0); // audio not running yet
         queue_sounds(&pak, &[ev(2, 0, "a.wav", 0.5)], -1);
@@ -1405,6 +1411,25 @@ mod tests {
         assert_eq!(SND_QUEUE.with(|q| q.borrow().len()), 1);
         SND_QUEUE.with(|q| q.borrow_mut().clear());
         set_audio_ready(0); // restore default for other tests
+    }
+
+    #[test]
+    fn queue_sounds_resolves_bare_sample_to_sound_dir() {
+        // A QuakeC sample name is bare ("weapons/guncock.wav"); the pak stores it
+        // under "sound/". queue_sounds must prepend "sound/" or the lookup misses
+        // and the sound is dropped (the long-standing "no in-game sound" bug).
+        let pak = build_test_pak(&[("sound/weapons/guncock.wav", b"GUNC")]);
+        reset_queue();
+        queue_sounds(&pak, &[ev(7, 1, "weapons/guncock.wav", 0.8)], -1);
+        let got = drain_queue();
+        assert_eq!(got.len(), 1, "bare sample name must resolve under sound/");
+        assert_eq!(got[0].0, 0.8);
+        // A name with NO matching pak entry (even under sound/) queues nothing.
+        reset_queue();
+        queue_sounds(&pak, &[ev(7, 1, "weapons/nope.wav", 0.5)], -1);
+        assert!(drain_queue().is_empty(), "missing sample is dropped, no panic");
+        SND_QUEUE.with(|q| q.borrow_mut().clear());
+        set_audio_ready(0);
     }
 
     #[test]
