@@ -38,6 +38,10 @@ struct Walk {
     /// inside the world host).
     bsp: Bsp,
     palette: [[u8; 3]; 256],
+    /// The parsed `gfx.wad` (sbar + digit pics) for the status-bar HUD overlay,
+    /// or `None` if the archive lacked/could not parse it. Parsed once at boot so
+    /// the per-frame HUD draw is allocation-light.
+    gfx_wad: Option<quake_rs::wad::Wad2>,
     /// The archive, kept open so sound samples load on demand as events fire.
     pak: Pak,
     /// Parsed alias models keyed by in-pak name (`None` = absent/unparseable).
@@ -129,6 +133,8 @@ fn build_walk() -> Option<Walk> {
     let bsp_sim = Bsp::parse(&read(WALK_MAP)?).ok()?;
     let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
+    // The HUD pics live in gfx.wad; parse it once (None if absent/unparseable).
+    let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
     let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
@@ -140,6 +146,7 @@ fn build_walk() -> Option<Walk> {
         server,
         bsp,
         palette,
+        gfx_wad,
         pak,
         model_cache: HashMap::new(),
         player,
@@ -618,7 +625,24 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
         _ => None,
     };
-    render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock)
+    let mut img =
+        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock);
+
+    // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
+    //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
+    //    when gfx.wad was absent (the world still renders).
+    if let Some(wad) = w.gfx_wad.as_ref() {
+        let stat = |f: &str| w.server.vm.ent_get_float(w.player, f) as i32;
+        let hud = render::Hud {
+            wad,
+            palette: &w.palette,
+            health: stat("health"),
+            ammo: stat("ammo_shells"),
+            armor: stat("armorvalue"),
+        };
+        render::draw_hud_into(&mut img, &hud);
+    }
+    img
 }
 
 fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {

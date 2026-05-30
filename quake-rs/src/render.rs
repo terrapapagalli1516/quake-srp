@@ -2592,6 +2592,252 @@ pub fn demo_room() -> Bsp {
 }
 
 // ---------------------------------------------------------------------------
+// HUD / status bar (Quake's `sbar.c` `Sbar_Draw`)
+// ---------------------------------------------------------------------------
+//
+// Quake's status bar is a 2-D overlay blitted on top of the finished 3-D
+// framebuffer. `sbar.c` authored it for a fixed 320x200 virtual screen: the bar
+// occupies the bottom 24 rows, with the `sbar` background pic (320x24) drawn
+// across the bottom and the big white `num_*` digits stamped on top of it for
+// health, current ammo, and armour. The pics live in `gfx.wad` (a WAD2).
+//
+// This port keeps the same virtual coordinates Quake uses. The caller hands us a
+// [`Hud`] holding a borrow of the parsed `gfx.wad`, the palette, and the three
+// integer stats read off the player edict; [`draw_hud_into`] then blits the bar
+// scaled to the actual framebuffer width and bottom-anchored, so a 320, 480, or
+// 640-wide frame all get a full-width bar.
+//
+// Integration choice (lowest churn): the HUD is a *separate* `pub fn
+// draw_hud_into(image, hud)` the scene callers invoke on the returned `Image`,
+// rather than a new parameter on `render_scene_ext`. This leaves the renderer's
+// signature — and every existing call site and test — untouched, so
+// `render_scene`/`render_scene_ext` draw no HUD and all prior tests stay green.
+//
+// Faithfulness/safety: every WAD pic is fetched with `wad.qpic(name).ok()`, so a
+// missing or malformed pic simply doesn't draw (never panics, never errors out
+// the frame). Pixel writes go through bounds-checked `Image::put`-style logic,
+// and HUD-pic texels equal to palette index 255 are skipped (Quake's transparent
+// colour for the status-bar pics).
+
+/// The transparent palette index in Quake's HUD pics: texels equal to 255 are
+/// skipped when blitting (`sbar.c` / `draw.c` treat 255 as see-through).
+const HUD_TRANSPARENT: u8 = 255;
+
+/// The virtual screen width Quake's `sbar.c` was authored against. The whole bar
+/// is laid out in this 320-wide space, then scaled to the real framebuffer.
+const HUD_VIRT_W: f32 = 320.0;
+
+/// The status bar's height in virtual rows (`sbar.c` draws it as the bottom 24
+/// rows of the 320x200 virtual screen).
+const HUD_BAR_H: f32 = 24.0;
+
+/// The Quake HUD overlay: the parsed `gfx.wad`, the screen palette, and the
+/// player stats to display. Built by the caller each frame from the player edict
+/// and the loaded `gfx.wad`; consumed by [`draw_hud_into`].
+///
+/// The `wad`/`palette` borrows carry an explicit lifetime `'a` so the caller can
+/// keep one parsed [`Wad2`] alive and lend it per frame without cloning.
+pub struct Hud<'a> {
+    /// The parsed `gfx.wad`, which holds the `sbar`/`num_*`/`anum_*` pics.
+    pub wad: &'a crate::wad::Wad2,
+    /// The screen palette (`gfx/palette.lmp`), used to colour the pic texels.
+    pub palette: &'a [[u8; 3]; 256],
+    /// Current player health, drawn as a big number on the left of the bar.
+    pub health: i32,
+    /// Current ammo for the active weapon, drawn on the right of the bar.
+    pub ammo: i32,
+    /// Current armour value, drawn just right of the health number.
+    pub armor: i32,
+}
+
+/// Blit one `Qpic` at virtual position `(vx, vy)` in 320x200 space, scaled by
+/// `scale` to the framebuffer and bottom-anchored (so the 24-px bar sits flush
+/// at the bottom of any-height frame).
+///
+/// `vy_top` is the framebuffer y (in pixels) of virtual row 0 of the bar, i.e.
+/// `image.h - HUD_BAR_H * scale`; a pic at virtual `(vx, vy)` lands its top-left
+/// at `(vx*scale, vy_top + vy*scale)`. Each destination pixel samples its source
+/// texel nearest-neighbour; texels equal to [`HUD_TRANSPARENT`] (255) are left
+/// transparent, leaving the underlying 3-D pixel untouched. Every write is
+/// clipped to the framebuffer, so a pic that overhangs an edge never panics.
+fn blit_qpic(
+    image: &mut Image,
+    pic: &crate::wad::Qpic,
+    vx: f32,
+    vy: f32,
+    scale: f32,
+    vy_top: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if pic.width <= 0 || pic.height <= 0 || scale <= 0.0 {
+        return;
+    }
+    let pw = pic.width as usize;
+    let ph = pic.height as usize;
+    // Guard against a truncated/short pixel buffer (never index past it).
+    if pic.data.len() < pw.saturating_mul(ph) {
+        return;
+    }
+
+    // Destination top-left in framebuffer pixels, and the scaled pic extent.
+    let dst_x0 = (vx * scale).floor() as i64;
+    let dst_y0 = (vy_top + vy * scale).floor() as i64;
+    let dst_w = (pw as f32 * scale).round().max(1.0) as i64;
+    let dst_h = (ph as f32 * scale).round().max(1.0) as i64;
+    let inv_scale = 1.0 / scale;
+
+    for dy in 0..dst_h {
+        let py = dst_y0 + dy;
+        if py < 0 || py >= image.h as i64 {
+            continue;
+        }
+        // Map this destination row back to a source texel row (nearest).
+        let sy = (dy as f32 * inv_scale) as usize;
+        if sy >= ph {
+            continue;
+        }
+        for dx in 0..dst_w {
+            let px = dst_x0 + dx;
+            if px < 0 || px >= image.w as i64 {
+                continue;
+            }
+            let sx = (dx as f32 * inv_scale) as usize;
+            if sx >= pw {
+                continue;
+            }
+            let texel = match pic.data.get(sy * pw + sx) {
+                Some(&t) => t,
+                None => continue,
+            };
+            if texel == HUD_TRANSPARENT {
+                continue; // transparent: leave the 3-D pixel as-is
+            }
+            image.put(px as i32, py as i32, palette[texel as usize]);
+        }
+    }
+}
+
+/// Draw a right-justified non-negative integer using the big `num_*` digit pics
+/// (or the gold `anum_*` pics when `alt` is true), porting `Sbar_DrawNum`.
+///
+/// `(vx, vy)` is the virtual position of the number's **right edge** at its top;
+/// digits are laid out leaving-to-right after right-justifying, exactly like
+/// Quake (which walks the string from the right, stepping left by each pic's
+/// width). Each digit pic's own width drives the spacing, so proportional digit
+/// pics still align. A negative value clamps to 0 (the HUD never shows negative
+/// stats); any digit whose pic is missing is simply skipped (no panic).
+#[allow(clippy::too_many_arguments)]
+fn draw_num(
+    image: &mut Image,
+    value: i32,
+    vx: f32,
+    vy: f32,
+    scale: f32,
+    vy_top: f32,
+    wad: &crate::wad::Wad2,
+    palette: &[[u8; 3]; 256],
+    alt: bool,
+) {
+    // Render the magnitude; the HUD shows 0 for any negative stat.
+    let v = if value < 0 { 0 } else { value };
+    // Decompose into decimal digits, most-significant first.
+    let mut digits: Vec<u32> = Vec::new();
+    let mut n = v as u32;
+    if n == 0 {
+        digits.push(0);
+    } else {
+        while n > 0 {
+            digits.push(n % 10);
+            n /= 10;
+        }
+        digits.reverse();
+    }
+
+    // Walk from the rightmost digit leftward, advancing the pen left by each
+    // pic's VIRTUAL width — this right-justifies the number at virtual `vx`.
+    // `pen` stays in 320-virtual units the whole time; blit_qpic applies `scale`.
+    // (The earlier code mixed virtual `vx` with a pixel `w*scale` step, which
+    // mis-placed every digit at scale != 1 — i.e. at the real 640-wide frame.)
+    let mut pen = vx;
+    for &d in digits.iter().rev() {
+        let name = if alt {
+            ANUM_NAMES[d as usize]
+        } else {
+            NUM_NAMES[d as usize]
+        };
+        if let Ok(pic) = wad.qpic(name) {
+            let w = pic.width.max(0) as f32;
+            pen -= w;
+            blit_qpic(image, &pic, pen, vy, scale, vy_top, palette);
+        } else {
+            // Missing digit pic: still advance by a default 24-virtual slot so
+            // the remaining digits keep their right-justified positions.
+            pen -= 24.0;
+        }
+    }
+}
+
+/// The white big-number digit pic names (`num_0`..`num_9`).
+const NUM_NAMES: [&str; 10] = [
+    "num_0", "num_1", "num_2", "num_3", "num_4", "num_5", "num_6", "num_7", "num_8", "num_9",
+];
+
+/// The gold/alternate digit pic names (`anum_0`..`anum_9`), used for ammo.
+const ANUM_NAMES: [&str; 10] = [
+    "anum_0", "anum_1", "anum_2", "anum_3", "anum_4", "anum_5", "anum_6", "anum_7", "anum_8",
+    "anum_9",
+];
+
+/// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
+/// finished 3-D frame — a port of `sbar.c`'s `Sbar_Draw`.
+///
+/// The bar is laid out in Quake's 320x200 virtual space and scaled by
+/// `image.w / 320` (nearest-neighbour) so it spans the full framebuffer width,
+/// bottom-anchored so the 24-px bar sits flush at the bottom regardless of frame
+/// height. Drawing order matches Quake:
+///  1. the `sbar` background strip (320x24);
+///  2. the health number (big white digits, right-justified near virtual x≈154);
+///  3. the armour number (just right of health, near virtual x≈49 — Quake draws
+///     armour at the left, but we keep it readable beside health here);
+///  4. the current ammo (gold digits, right-justified near virtual x≈248).
+///
+/// All pics are fetched via `wad.qpic(name).ok()`, so a `gfx.wad` missing the
+/// `sbar`/digit pics degrades gracefully (those elements just don't draw) and
+/// never panics or errors the frame.
+pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    // Scale the 320-wide virtual layout to the real framebuffer width.
+    let scale = image.w as f32 / HUD_VIRT_W;
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    // Framebuffer y of virtual row 0 of the bar: the 24-px bar sits flush at the
+    // bottom (a fractional row is fine — blit_qpic clips at the edges).
+    let vy_top = image.h as f32 - HUD_BAR_H * scale;
+
+    // 1. Background strip (sbar, 320x24) at virtual (0,0) of the bar.
+    if let Ok(sbar) = hud.wad.qpic("sbar") {
+        blit_qpic(image, &sbar, 0.0, 0.0, scale, vy_top, hud.palette);
+    }
+
+    // The big digits are ~24 px tall; Quake stamps them at virtual y=0 of the bar
+    // (`Sbar_DrawNum(.., y, ..)` with y measured from the bar top). Health on the
+    // left, armour beside it, current ammo on the right — all right-justified.
+    //
+    // 2. Health: right edge near virtual x=154 (Sbar_Draw draws health at x~136
+    //    and the 3-digit field ends a little past it).
+    draw_num(image, hud.health, 154.0, 0.0, scale, vy_top, hud.wad, hud.palette, false);
+    // 3. Armour: far left. Right edge at virtual x=78 so a full 3-digit value
+    //    (200 from red armour = 72 virtual px wide) starts at x>=6 and stays on
+    //    screen rather than clipping off the left edge.
+    draw_num(image, hud.armor, 78.0, 0.0, scale, vy_top, hud.wad, hud.palette, false);
+    // 4. Current ammo: gold digits, right edge near virtual x=248.
+    draw_num(image, hud.ammo, 248.0, 0.0, scale, vy_top, hud.wad, hud.palette, true);
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4319,5 +4565,272 @@ mod tests {
         }
         bsp.texinfo = tex;
         bsp
+    }
+
+    // -- HUD / status bar -----------------------------------------------------
+
+    use crate::wad::{Qpic, Wad2, CMP_NONE, LUMPINFO_SIZE, NAME_LEN, TYP_QPIC, WADINFO_SIZE};
+
+    /// A test palette where index `i` maps to the RGB `[i, i, i]` (so a texel's
+    /// palette index is recoverable from any channel of the drawn pixel). Index
+    /// 255 stays the transparent colour and is never blitted.
+    fn ramp_palette() -> [[u8; 3]; 256] {
+        let mut p = [[0u8; 3]; 256];
+        for (i, px) in p.iter_mut().enumerate() {
+            *px = [i as u8, i as u8, i as u8];
+        }
+        p
+    }
+
+    /// One synthetic qpic payload: width i32, height i32, then `w*h` indices.
+    fn qpic_payload(w: i32, h: i32, fill: u8) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&w.to_le_bytes());
+        v.extend_from_slice(&h.to_le_bytes());
+        v.resize(8 + (w as usize) * (h as usize), fill);
+        v
+    }
+
+    /// Append a 32-byte `lumpinfo_t` entry (mirrors `wad.rs`'s test helper).
+    fn push_lump(dir: &mut Vec<u8>, filepos: i32, size: i32, name: &str) {
+        dir.extend_from_slice(&filepos.to_le_bytes());
+        dir.extend_from_slice(&size.to_le_bytes()); // disksize
+        dir.extend_from_slice(&size.to_le_bytes()); // size
+        dir.push(TYP_QPIC);
+        dir.push(CMP_NONE);
+        dir.push(0); // pad1
+        dir.push(0); // pad2
+        let mut field = [0u8; NAME_LEN];
+        let nb = name.as_bytes();
+        let n = nb.len().min(NAME_LEN);
+        field[..n].copy_from_slice(&nb[..n]);
+        dir.extend_from_slice(&field);
+    }
+
+    /// Build a synthetic `gfx.wad` containing `sbar` (320x24), `num_0..num_9`
+    /// (24x24, each filled with palette index `100+d` so digits are recognisable
+    /// and never transparent), and `anum_0..anum_9` (24x24, index `120+d`).
+    fn build_hud_wad() -> Wad2 {
+        // (name, payload) pairs.
+        let mut pics: Vec<(String, Vec<u8>)> = Vec::new();
+        pics.push(("sbar".to_string(), qpic_payload(320, 24, 1)));
+        for d in 0..10u8 {
+            pics.push((format!("num_{d}"), qpic_payload(24, 24, 100 + d)));
+        }
+        for d in 0..10u8 {
+            pics.push((format!("anum_{d}"), qpic_payload(24, 24, 120 + d)));
+        }
+
+        // Lay payloads right after the 12-byte header; build the directory after.
+        let mut payloads = Vec::new();
+        let mut offsets = Vec::new();
+        let mut pos = WADINFO_SIZE;
+        for (_, p) in &pics {
+            offsets.push(pos);
+            payloads.extend_from_slice(p);
+            pos += p.len();
+        }
+        let infotableofs = pos;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"WAD2");
+        bytes.extend_from_slice(&(pics.len() as i32).to_le_bytes());
+        bytes.extend_from_slice(&(infotableofs as i32).to_le_bytes());
+        bytes.extend_from_slice(&payloads);
+
+        let mut dir = Vec::new();
+        for ((name, p), &off) in pics.iter().zip(offsets.iter()) {
+            push_lump(&mut dir, off as i32, p.len() as i32, name);
+        }
+        bytes.extend_from_slice(&dir);
+        debug_assert_eq!(bytes.len(), infotableofs + pics.len() * LUMPINFO_SIZE);
+
+        Wad2::parse(bytes).expect("synthetic gfx.wad parses")
+    }
+
+    #[test]
+    fn blit_qpic_respects_transparency_and_clips() {
+        let pal = ramp_palette();
+        let mut img = Image::new(8, 8, [0, 0, 0]);
+
+        // A 3x3 pic: corners opaque (index 5), centre transparent (255), with a
+        // distinct opaque edge (index 9) we can detect after clipping.
+        let mut data = vec![5u8; 9];
+        data[3 + 1] = HUD_TRANSPARENT; // centre (row 1, col 1) transparent
+        data[2 * 3 + 2] = 9; // bottom-right (row 2, col 2) opaque, distinct
+        let pic = Qpic { width: 3, height: 3, data };
+
+        // scale 1, no vertical offset (vy_top = 0), placed at virtual (0,0).
+        blit_qpic(&mut img, &pic, 0.0, 0.0, 1.0, 0.0, &pal);
+
+        // The centre texel was transparent: the background pixel is untouched.
+        assert_eq!(img.rgb[8 + 1], [0, 0, 0], "index-255 texel left bg unchanged");
+        // An opaque corner drew palette index 5 -> [5,5,5].
+        assert_eq!(img.rgb[0], [5, 5, 5], "opaque corner blitted");
+        // The distinct bottom-right opaque texel drew index 9.
+        assert_eq!(img.rgb[2 * 8 + 2], [9, 9, 9], "distinct opaque texel blitted");
+
+        // Clipping: blit the same pic so it overhangs the right/bottom edges. The
+        // texels that fall off-screen must be silently dropped (no panic), and the
+        // on-screen part must still draw.
+        let mut img2 = Image::new(8, 8, [0, 0, 0]);
+        // Place top-left at virtual (7,7): only the (0,0) texel is on-screen.
+        blit_qpic(&mut img2, &pic, 7.0, 7.0, 1.0, 0.0, &pal);
+        assert_eq!(img2.rgb[7 * 8 + 7], [5, 5, 5], "on-screen overhang texel drew");
+        // Nothing wrapped to row 0 / col 0 from the off-screen part.
+        let drawn = img2.rgb.iter().filter(|p| **p != [0, 0, 0]).count();
+        assert_eq!(drawn, 1, "only the single on-screen overhang texel drew");
+    }
+
+    #[test]
+    fn draw_num_right_justifies() {
+        let wad = build_hud_wad();
+        let pal = ramp_palette();
+
+        // Right edge at virtual x=72 (3 * 24px digits), vy_top=0, scale=1.
+        // num pics are 24x24. A 3-digit value (e.g. 100) fills [0,72); the digit
+        // region (x in [0,72), y in [0,24)) must have changed.
+        let mut img3 = Image::new(80, 24, [0, 0, 0]);
+        draw_num(&mut img3, 100, 72.0, 0.0, 1.0, 0.0, &wad, &pal, false);
+        let changed_3: usize = (0..24)
+            .flat_map(|y| (0..72).map(move |x| (x, y)))
+            .filter(|&(x, y)| img3.rgb[y * 80 + x] != [0, 0, 0])
+            .count();
+        assert!(changed_3 > 0, "3-digit value changed pixels in the digit region");
+
+        // A 1-digit value at the same right edge must occupy only the rightmost
+        // 24px slot [48,72) and leave the left two slots [0,48) untouched, proving
+        // right-justification (the units digit lands at the same right edge).
+        let mut img1 = Image::new(80, 24, [0, 0, 0]);
+        draw_num(&mut img1, 7, 72.0, 0.0, 1.0, 0.0, &wad, &pal, false);
+        // Right slot [48,72) changed.
+        let right_changed: usize = (0..24)
+            .flat_map(|y| (48..72).map(move |x| (x, y)))
+            .filter(|&(x, y)| img1.rgb[y * 80 + x] != [0, 0, 0])
+            .count();
+        assert!(right_changed > 0, "1-digit value drew in the rightmost slot");
+        // Left two slots [0,48) untouched.
+        let left_changed: usize = (0..24)
+            .flat_map(|y| (0..48).map(move |x| (x, y)))
+            .filter(|&(x, y)| img1.rgb[y * 80 + x] != [0, 0, 0])
+            .count();
+        assert_eq!(left_changed, 0, "1-digit value left the left slots blank (right-justified)");
+
+        // Alignment at the right edge: the units digit of "7" and the units digit
+        // of "100" occupy the same column band [48,72). Both should have drawn
+        // there (num_7 = index 107, num_0 = index 100 — both non-transparent).
+        let units_7: usize = (0..24)
+            .flat_map(|y| (48..72).map(move |x| (x, y)))
+            .filter(|&(x, y)| img1.rgb[y * 80 + x] != [0, 0, 0])
+            .count();
+        let units_100: usize = (0..24)
+            .flat_map(|y| (48..72).map(move |x| (x, y)))
+            .filter(|&(x, y)| img3.rgb[y * 80 + x] != [0, 0, 0])
+            .count();
+        assert_eq!(units_7, units_100, "units digit of 1- and 3-digit values align at the right edge");
+    }
+
+    #[test]
+    fn draw_num_right_justifies_at_scale_2() {
+        // Regression for the virtual/pixel unit-mix bug: at scale != 1 the digit
+        // must land at PIXEL (vx*scale), not pixel vx. Right edge virtual x=72,
+        // scale=2 => the units digit must end at pixel 144 (its 24-virtual = 48-px
+        // cell spans px [96,144)), and nothing draws at/after px 144.
+        let wad = build_hud_wad();
+        let pal = ramp_palette();
+        let mut img = Image::new(200, 48, [0, 0, 0]);
+        draw_num(&mut img, 7, 72.0, 0.0, 2.0, 0.0, &wad, &pal, false);
+
+        // Pixels exist in the cell [96,144); none at or past 144.
+        let in_cell = (0..48)
+            .flat_map(|y| (96..144).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 200 + x] != [0, 0, 0])
+            .count();
+        assert!(in_cell > 0, "scale=2 digit drew in the px[96,144) cell ending at the scaled right edge");
+        let past_edge = (0..48)
+            .flat_map(|y| (144..200).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 200 + x] != [0, 0, 0])
+            .count();
+        assert_eq!(past_edge, 0, "nothing drew past the scaled right edge px=144");
+        // And it must NOT be jammed against px=72 (the old bug placed it there).
+        let at_virtual_edge = (0..48)
+            .flat_map(|y| (48..96).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 200 + x] != [0, 0, 0])
+            .count();
+        assert_eq!(at_virtual_edge, 0, "digit must not sit at the unscaled px=72 edge (the old unit-mix bug)");
+    }
+
+    #[test]
+    fn draw_hud_changes_bottom_strip_only() {
+        let wad = build_hud_wad();
+        let pal = ramp_palette();
+
+        // A solid-filled image; the HUD must change the bottom 24-virtual-row bar
+        // but leave the top of the frame untouched. Use a 320-wide frame so
+        // scale == 1 and the bar is exactly the bottom 24 rows.
+        let fill = [42u8, 42, 42];
+        let mut img = Image::new(320, 200, fill);
+        let hud = Hud { wad: &wad, palette: &pal, health: 100, ammo: 25, armor: 50 };
+        draw_hud_into(&mut img, &hud);
+
+        // The top of the frame (well above the 24-px bar) is untouched.
+        for y in 0..(200 - 24) {
+            for x in 0..320 {
+                assert_eq!(img.rgb[y * 320 + x], fill, "row {y} col {x} above the bar must be untouched");
+            }
+        }
+        // The bottom strip changed (the sbar background, index 1 -> [1,1,1],
+        // covers the whole 320x24 bar).
+        let changed_bottom: usize = (200 - 24..200)
+            .flat_map(|y| (0..320).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] != fill)
+            .count();
+        assert!(changed_bottom > 0, "the bottom strip changed under the HUD");
+
+        // The digits (index >= 100) drew on top of the sbar background somewhere
+        // in the bar — proving health/ammo/armour numbers actually rendered.
+        let has_digit = (200 - 24..200)
+            .flat_map(|y| (0..320).map(move |x| (x, y)))
+            .any(|(x, y)| img.rgb[y * 320 + x][0] >= 100);
+        assert!(has_digit, "at least one big-number digit drew over the bar");
+    }
+
+    #[test]
+    fn draw_hud_scales_to_wide_frame() {
+        // A 640-wide frame (scale 2): the bar must still bottom-anchor and span
+        // the full width without panicking, leaving the top untouched.
+        let wad = build_hud_wad();
+        let pal = ramp_palette();
+        let fill = [7u8, 7, 7];
+        let mut img = Image::new(640, 400, fill);
+        let hud = Hud { wad: &wad, palette: &pal, health: 99, ammo: 100, armor: 0 };
+        draw_hud_into(&mut img, &hud);
+
+        // Bar height in pixels = 24 * (640/320) = 48; the top must be untouched.
+        let bar_px = (24.0 * (640.0 / 320.0)) as usize; // 48
+        for y in 0..(400 - bar_px) {
+            assert_eq!(img.rgb[y * 640], fill, "row {y} above the scaled bar untouched");
+        }
+        // Bottom row changed across a wide span (the scaled sbar covers it).
+        let bottom = 399 * 640;
+        let bottom_changed = (0..640).filter(|&x| img.rgb[bottom + x] != fill).count();
+        assert!(bottom_changed > 320, "scaled sbar spans most of the 640-wide bottom row");
+    }
+
+    #[test]
+    fn draw_hud_missing_pics_is_noop_not_panic() {
+        // An empty WAD (no sbar/num pics) must degrade gracefully: the frame is
+        // returned unchanged, no panic.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"WAD2");
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // numlumps
+        bytes.extend_from_slice(&(WADINFO_SIZE as i32).to_le_bytes());
+        let wad = Wad2::parse(bytes).expect("empty wad parses");
+        let pal = ramp_palette();
+        let fill = [9u8, 9, 9];
+        let mut img = Image::new(320, 200, fill);
+        let hud = Hud { wad: &wad, palette: &pal, health: 100, ammo: 50, armor: 25 };
+        draw_hud_into(&mut img, &hud);
+        assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
     }
 }

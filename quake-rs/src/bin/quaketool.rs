@@ -749,7 +749,24 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             .as_ref()
             .map(|mdl| render::Viewmodel { mdl, frame: weapon_frame });
         // Pass the server clock so liquids warp and sky scrolls in the POV shot.
-        let img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time());
+        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time());
+
+        // Status bar (HUD) overlay: build a Hud from the player's stats and the
+        // game's gfx.wad, then blit it on top of the finished 3-D frame. If
+        // gfx.wad is missing or unparseable we just skip the overlay (the POV
+        // shot still renders) rather than failing the whole command.
+        if let Some(wad) = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok()) {
+            let stat = |f: &str| server.vm.ent_get_float(player, f) as i32;
+            let hud = render::Hud {
+                wad: &wad,
+                palette: &palette,
+                health: stat("health"),
+                ammo: stat("ammo_shells"),
+                armor: stat("armorvalue"),
+            };
+            render::draw_hud_into(&mut img, &hud);
+        }
+
         img.write_ppm(path).map_err(|e| format!("write {path}: {e}"))?;
         let _ = writeln!(
             o,
