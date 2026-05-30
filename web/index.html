@@ -91,17 +91,42 @@ async function playSound() {
 }
 document.getElementById('sndBtn').addEventListener('click', playSound);
 
+// Play every gameplay sound the server queued this frame. poll_sound() pops one
+// WAV into shared memory and returns its length (0 when the queue is empty); we
+// copy the bytes out and decode/play each via Web Audio.
+function drainGameSounds() {
+  if (!exp || !exp.poll_sound || !audioCtx || audioCtx.state !== 'running') return;
+  for (let guard = 0; guard < 16; guard++) {
+    const len = exp.poll_sound();
+    if (len <= 0) break;
+    const ptr = exp.sound_ptr();
+    const bytes = new Uint8Array(exp.memory.buffer, ptr, len).slice();
+    audioCtx.decodeAudioData(bytes.buffer).then(buf => {
+      const s = audioCtx.createBufferSource();
+      s.buffer = buf; s.connect(audioCtx.destination); s.start();
+    }).catch(() => {});
+  }
+}
+
 let started = false, exp = null, dragging = false;
 const LOOK_SENS = 0.16;   // degrees per mouse-count
 const TURN_RATE = 150;    // arrow-key turn deg/sec
 
 function locked() { return document.pointerLockElement === canvas; }
 
-canvas.addEventListener('mousedown', () => {
-  if (!locked()) canvas.requestPointerLock?.();
+canvas.addEventListener('mousedown', (e) => {
+  // First click captures the mouse and starts audio (a required user gesture);
+  // subsequent left-clicks while locked fire the weapon.
+  if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (!locked()) { canvas.requestPointerLock?.(); }
+  else if (e.button === 0 && exp && exp.set_attack) { exp.set_attack(1); }  // fire while locked
   dragging = true;
 });
-addEventListener('mouseup', () => { dragging = false; });
+addEventListener('mouseup', (e) => {
+  dragging = false;
+  if (e.button === 0 && exp && exp.set_attack) exp.set_attack(0);
+});
 document.addEventListener('pointerlockchange', () => {
   overlay.classList.toggle('hidden', locked());
 });
@@ -141,6 +166,7 @@ async function main() {
     exp.set_move(fwd, side);
     if (turn) exp.look(-turn * TURN_RATE * dt, 0);   // arrow turn (right = right)
     exp.step(dt);
+    drainGameSounds();
 
     const ptr = exp.framebuffer();
     const mem = new Uint8Array(exp.memory.buffer, ptr, W * H * 4); // re-view (memory may grow)

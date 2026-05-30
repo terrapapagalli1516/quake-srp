@@ -11,13 +11,15 @@
 //! the `Vec::as_ptr()` we hand back. No `wasm-bindgen`, no dependencies.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use quake_rs::bsp::Bsp;
 use quake_rs::demo::{parse_demo, Demo};
 use quake_rs::mdl::Mdl;
+use quake_rs::pak::Pak;
 use quake_rs::progs::Progs;
 use quake_rs::render::{self, Camera, ModelInstance};
-use quake_rs::server::Server;
+use quake_rs::server::{Server, UserCmd};
 
 static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
 
@@ -26,19 +28,26 @@ const DEMO_FILE: &str = "demo1.dem";
 const W: usize = 320;
 const H: usize = 200;
 const SPEED: f32 = 320.0;
-const PLAYER_MINS: [f32; 3] = [-16.0, -16.0, -24.0];
-const PLAYER_MAXS: [f32; 3] = [16.0, 16.0, 32.0];
 
-/// Interactive walk state.
+/// Interactive walk state: a live server ticked every frame, rendered from the
+/// player edict. Monster thinks advance their animation frames and move them,
+/// and the sound queue surfaces the events they fire.
 struct Walk {
+    server: Server,
+    /// A second copy of the map BSP for rendering (the server owns its own copy
+    /// inside the world host).
     bsp: Bsp,
     palette: [[u8; 3]; 256],
-    models: Vec<(Mdl, [f32; 3], f32, [u8; 3])>,
-    origin: [f32; 3],
+    /// The archive, kept open so sound samples load on demand as events fire.
+    pak: Pak,
+    /// Parsed alias models keyed by in-pak name (`None` = absent/unparseable).
+    model_cache: HashMap<String, Option<Mdl>>,
+    player: i32,
     yaw: f32,
     pitch: f32,
     in_fwd: f32,
     in_side: f32,
+    in_attack: bool,
 }
 
 /// Recorded-demo playback state.
@@ -117,31 +126,26 @@ fn build_walk() -> Option<Walk> {
     let bsp_sim = Bsp::parse(&read(WALK_MAP)?).ok()?;
     let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
-    let (spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
+    let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
+    // A live server: spawn the map's entities, then connect the local player.
     let mut server = Server::new(bsp_sim, progs).ok()?;
-    let _ = server.spawn_entities();
-    let mut cache: std::collections::HashMap<String, Option<Mdl>> = std::collections::HashMap::new();
-    let mut models = Vec::new();
-    for e in 0..server.vm.num_edicts() {
-        if server.vm.edict_free.get(e).copied().unwrap_or(true) {
-            continue;
-        }
-        let ent = e as i32;
-        let m = server.vm.ent_get_string(ent, "model");
-        if !m.ends_with(".mdl") {
-            continue;
-        }
-        if !cache.contains_key(&m) {
-            cache.insert(m.clone(), read(&m).and_then(|b| Mdl::parse(&b).ok()));
-        }
-        if let Some(Some(mdl)) = cache.get(&m) {
-            let origin = server.vm.ent_get_vector(ent, "origin");
-            let ya = server.vm.ent_get_vector(ent, "angles")[1];
-            models.push((mdl.clone(), origin, ya, color_for_name(&m)));
-        }
-    }
-    Some(Walk { bsp, palette, models, origin: spawn, yaw, pitch: 0.0, in_fwd: 0.0, in_side: 0.0 })
+    server.spawn_entities().ok()?;
+    let player = server.connect_client().ok()?;
+
+    Some(Walk {
+        server,
+        bsp,
+        palette,
+        pak,
+        model_cache: HashMap::new(),
+        player,
+        yaw,
+        pitch: 0.0,
+        in_fwd: 0.0,
+        in_side: 0.0,
+        in_attack: false,
+    })
 }
 
 fn build_demo() -> Option<DemoPlay> {
@@ -229,6 +233,16 @@ pub extern "C" fn set_move(fwd: f32, side: f32) {
     });
 }
 
+/// Set whether the attack button is held (drives the QuakeC weapon code).
+#[no_mangle]
+pub extern "C" fn set_attack(on: i32) {
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            w.in_attack = on != 0;
+        }
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn look(dyaw: f32, dpitch: f32) {
     ensure_app(|a| {
@@ -271,10 +285,66 @@ pub extern "C" fn framebuffer() -> *const u8 {
     })
 }
 
-// --- sound: hand a real Quake .wav out of the pak for the page to play -------
+// --- sound: hand real Quake .wav bytes out of the pak for the page to play ---
 
 thread_local! {
+    /// Scratch buffer the page reads via `sound_ptr` (for both the demo button
+    /// and the per-frame queue below).
     static SND: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// WAV byte payloads for sounds fired this frame, awaiting playback.
+    static SND_QUEUE: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Load the WAV bytes for the distinct gameplay sounds in `events` and push them
+/// onto the playback queue. Constant ambient loops (`ambience/*`) and the silent
+/// `misc/null.wav` are skipped, duplicates within the frame are collapsed, and
+/// the queue is capped so a noisy frame can't grow it without bound.
+fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent]) {
+    if events.is_empty() {
+        return;
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    SND_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        for ev in events {
+            let name = ev.sample.as_str();
+            if name.is_empty()
+                || name == "misc/null.wav"
+                || name.starts_with("ambience/")
+                || seen.contains(&name)
+                || q.len() >= 12
+            {
+                continue;
+            }
+            seen.push(name);
+            if let Ok(Some(bytes)) = pak.read_file(name) {
+                q.push(bytes);
+            }
+        }
+    });
+}
+
+/// Pop the next queued sound into the scratch buffer and return its byte length
+/// (0 when the queue is empty). The page calls this in a loop each frame, reads
+/// `sound_ptr()` after each non-zero return, and plays it via Web Audio.
+#[no_mangle]
+pub extern "C" fn poll_sound() -> i32 {
+    let next = SND_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
+    });
+    match next {
+        Some(bytes) => {
+            let len = bytes.len() as i32;
+            SND.with(|s| *s.borrow_mut() = bytes);
+            len
+        }
+        None => 0,
+    }
 }
 
 /// Load a recognisable Quake SFX (item pickup) from the pak into a buffer once,
@@ -306,27 +376,85 @@ pub extern "C" fn sound_ptr() -> *const u8 {
 // ---------------------------------------------------------------------------
 
 fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
-    let yr = w.yaw.to_radians();
-    let (cy, sy) = (yr.cos(), yr.sin());
+    // 1. Tick the live server with this frame's input. forwardmove/sidemove are
+    //    Quake run speeds; the server's SV_ClientThink turns them into motion and
+    //    runs every entity's think (so monsters animate and move).
     let (mut fwd, mut side) = (w.in_fwd, w.in_side);
     let mag = (fwd * fwd + side * side).sqrt();
     if mag > 1.0 {
         fwd /= mag;
         side /= mag;
     }
-    let wish = [(cy * fwd + sy * side) * SPEED, (sy * fwd - cy * side) * SPEED, 0.0];
-    w.origin = quake_rs::world::walk_move(&w.bsp, w.origin, PLAYER_MINS, PLAYER_MAXS, wish, dt);
-
-    let cam = Camera {
-        pos: [w.origin[0], w.origin[1], w.origin[2] + 22.0],
+    let cmd = UserCmd {
+        forwardmove: fwd * SPEED,
+        sidemove: side * SPEED,
+        upmove: 0.0,
         yaw: w.yaw,
         pitch: w.pitch,
+        buttons: if w.in_attack { 1 } else { 0 },
+        impulse: 0,
+    };
+    let _ = w.server.client_frame(&cmd, dt);
+
+    // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
+    //    voices) to the page's audio queue.
+    let events = w.server.drain_sounds();
+    queue_sounds(&w.pak, &events);
+
+    // 3. Make sure every live entity's alias model is cached (runtime-spawned
+    //    entities — gibs, projectiles — can appear after boot).
+    let n = w.server.vm.num_edicts();
+    for e in 0..n {
+        if w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        let m = w.server.vm.ent_get_string(e as i32, "model");
+        if m.ends_with(".mdl") && !w.model_cache.contains_key(&m) {
+            let parsed = w.pak.read_file(&m).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
+            w.model_cache.insert(m, parsed);
+        }
+    }
+
+    // 4. Gather the visible entities (owned descriptors, so the cache borrow for
+    //    rendering doesn't clash with reading the server). Skip the player's own
+    //    edict — its model would fill the screen in first person.
+    let mut descs: Vec<(String, [f32; 3], f32, usize, [u8; 3])> = Vec::new();
+    for e in 0..n {
+        let ent = e as i32;
+        if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        let m = w.server.vm.ent_get_string(ent, "model");
+        if !m.ends_with(".mdl") {
+            continue;
+        }
+        let origin = w.server.vm.ent_get_vector(ent, "origin");
+        let yaw = w.server.vm.ent_get_vector(ent, "angles")[1];
+        let frame = w.server.vm.ent_get_float(ent, "frame").max(0.0) as usize;
+        let color = color_for_name(&m);
+        descs.push((m, origin, yaw, frame, color));
+    }
+
+    // 5. Render from the player's eye.
+    let (eye, ang) = w.server.player_view();
+    let cam = Camera {
+        pos: eye,
+        yaw: ang[1],
+        pitch: -ang[0], // QuakeC pitch is +down; the renderer's is +up.
         fov_deg: 90.0,
     };
-    let instances: Vec<ModelInstance> = w
-        .models
+    let instances: Vec<ModelInstance> = descs
         .iter()
-        .map(|(mdl, origin, yaw, color)| ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0 })
+        .filter_map(|(name, origin, yaw, frame, color)| match w.model_cache.get(name) {
+            Some(Some(mdl)) => Some(ModelInstance {
+                mdl,
+                origin: *origin,
+                yaw: *yaw,
+                color: *color,
+                frame: *frame,
+            }),
+            _ => None,
+        })
         .collect();
     render::render_scene(&w.bsp, &cam, W, H, &w.palette, &instances)
 }
