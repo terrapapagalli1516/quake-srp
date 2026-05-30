@@ -1682,6 +1682,92 @@ fn compute_visible_faces(bsp: &Bsp, cam_pos: Vec3) -> Option<Vec<bool>> {
     Some(visible)
 }
 
+/// A brush face vertex in *view space* (`vx`/`vy`/`vz` along the camera's
+/// right/up/forward axes) carrying the per-vertex texture coordinates `(s, t)`.
+///
+/// All five fields are *affine* functions of the world-space position, so along
+/// a straight polygon edge they interpolate linearly with the *same* parameter.
+/// That is what makes near-plane clipping a plain componentwise lerp: the
+/// clipped vertex's `(vx, vy, vz, s, t)` is the lerp of the edge endpoints, and
+/// projecting it afterwards yields the perspective-correct screen point.
+#[derive(Clone, Copy)]
+struct VView {
+    vx: f32,
+    vy: f32,
+    vz: f32,
+    s: f32,
+    t: f32,
+}
+
+/// The near-clip plane, `vz == NEAR`; a vertex is *inside* iff `vz > NEAR`. Must
+/// match the `NEAR` used by the draw passes (1.0).
+const NEAR_PLANE: f32 = 1.0;
+
+/// Componentwise lerp of two view-space vertices by `alpha` in `[0, 1]`
+/// (`a` at 0, `b` at 1). Because every field is affine in world position, this
+/// is the exact value of the attribute at the lerped world point.
+fn vview_lerp(a: &VView, b: &VView, alpha: f32) -> VView {
+    VView {
+        vx: a.vx + (b.vx - a.vx) * alpha,
+        vy: a.vy + (b.vy - a.vy) * alpha,
+        vz: a.vz + (b.vz - a.vz) * alpha,
+        s: a.s + (b.s - a.s) * alpha,
+        t: a.t + (b.t - a.t) * alpha,
+    }
+}
+
+/// Sutherland–Hodgman clip of a single convex/planar polygon (given in view
+/// space) against the one near plane `vz >= NEAR_PLANE`.
+///
+/// A vertex is *inside* iff `vz > NEAR_PLANE`. Walking each edge `(cur, next)`
+/// (with `next` wrapping to the first vertex), the output keeps `cur` when it is
+/// inside and emits the near-plane crossing vertex whenever `cur` and `next` lie
+/// on opposite sides of `vz == NEAR_PLANE`. The crossing parameter for an edge
+/// `A -> B` is `alpha = (NEAR_PLANE - A.vz) / (B.vz - A.vz)`, and the new vertex
+/// is the [`vview_lerp`] of `A`/`B` by `alpha` — so its `vz` becomes exactly
+/// `NEAR_PLANE` and its `(vx, vy, s, t)` are the matching linear interpolations.
+///
+/// Behaviour at the extremes (important for *no* regression on the common case):
+///  * A polygon **fully inside** (every `vz > NEAR_PLANE`) is returned with its
+///    vertices **unchanged and in the same order** — no crossing is ever emitted,
+///    so the result is byte-identical to the unclipped input.
+///  * A polygon **fully behind** (every `vz <= NEAR_PLANE`) yields no inside
+///    vertices and no crossings, so an empty (`< 3`) result is returned and the
+///    caller skips the face.
+fn clip_poly_near(input: &[VView]) -> Vec<VView> {
+    let n = input.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Fast path: a polygon entirely in front of the near plane is returned
+    // unchanged (same vertices, same order). This keeps the overwhelmingly
+    // common case a verbatim copy, guaranteeing no rasteriser regression.
+    if input.iter().all(|v| v.vz > NEAR_PLANE) {
+        return input.to_vec();
+    }
+    let mut out: Vec<VView> = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        let cur = &input[i];
+        let next = &input[(i + 1) % n];
+        let cur_in = cur.vz > NEAR_PLANE;
+        let next_in = next.vz > NEAR_PLANE;
+        if cur_in {
+            out.push(*cur);
+        }
+        // Emit a crossing vertex whenever the edge straddles the plane. The
+        // denominator is non-zero precisely because the endpoints differ in
+        // inside-ness, hence differ in `vz`.
+        if cur_in != next_in {
+            let denom = next.vz - cur.vz;
+            if denom != 0.0 {
+                let alpha = (NEAR_PLANE - cur.vz) / denom;
+                out.push(vview_lerp(cur, next, alpha));
+            }
+        }
+    }
+    out
+}
+
 /// The textured world pass, factored out of [`render_bsp_textured`] so it can
 /// share an image + z-buffer with the alias-model pass (see [`render_scene`]).
 ///
@@ -1708,7 +1794,8 @@ fn draw_world_textured(
     light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
 ) {
-    const NEAR: f32 = 1.0;
+    // The near plane lives in `clip_poly_near` (`NEAR_PLANE`); this pass clips the
+    // polygon to it rather than dropping any face that touches it.
     let (w, h) = (image.w, image.h);
     if w == 0 || h == 0 {
         return;
@@ -1745,6 +1832,7 @@ fn draw_world_textured(
     };
 
     let mut world_poly: Vec<Vec3> = Vec::new();
+    let mut views: Vec<VView> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
 
     for face_index in world_first..world_end {
@@ -1810,16 +1898,14 @@ fn draw_world_textured(
             SurfKind::Sky => SurfaceMode::Sky { time },
         };
 
-        // Project, computing texel coords from the texinfo axes.
-        proj.clear();
-        let mut clipped = false;
+        // Build the view-space polygon (vx,vy,vz,s,t per world vertex), then clip
+        // it against the near plane. A face fully in front is returned unchanged
+        // (no regression); a face fully behind yields < 3 verts and is skipped;
+        // a straddling face is clipped to `vz == NEAR` and rasterised normally.
+        views.clear();
         for v in &world_poly {
             let rel = sub(*v, cam.pos);
             let vz = dot(rel, forward);
-            if vz <= NEAR {
-                clipped = true;
-                break;
-            }
             let vx = dot(rel, right);
             let vy = dot(rel, up);
             let (s, t) = match ti {
@@ -1829,16 +1915,21 @@ fn draw_world_textured(
                 ),
                 None => (0.0, 0.0),
             };
-            proj.push(ProjT {
-                x: cx + focal * vx / vz,
-                y: cy - focal * vy / vz,
-                vz,
-                s,
-                t,
-            });
+            views.push(VView { vx, vy, vz, s, t });
         }
-        if clipped || proj.len() < 3 {
+        let clipped = clip_poly_near(&views);
+        if clipped.len() < 3 {
             continue;
+        }
+        proj.clear();
+        for vv in &clipped {
+            proj.push(ProjT {
+                x: cx + focal * vv.vx / vv.vz,
+                y: cy - focal * vv.vy / vv.vz,
+                vz: vv.vz,
+                s: vv.s,
+                t: vv.t,
+            });
         }
 
         let lambert = dot(normal, light_dir).max(0.0);
@@ -1948,7 +2039,8 @@ fn draw_submodel(
     light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
 ) {
-    const NEAR: f32 = 1.0;
+    // The near plane lives in `clip_poly_near` (`NEAR_PLANE`); this pass clips the
+    // polygon to it rather than dropping any face that touches it.
     let (w, h) = (image.w, image.h);
     if w == 0 || h == 0 {
         return;
@@ -2003,6 +2095,7 @@ fn draw_submodel(
     // LOCAL vertices separately for (s,t) and the lightmap.
     let mut local_poly: Vec<Vec3> = Vec::new();
     let mut world_poly: Vec<Vec3> = Vec::new();
+    let mut views: Vec<VView> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
 
     for face_index in f0..end {
@@ -2066,23 +2159,22 @@ fn draw_submodel(
             SurfKind::Sky => SurfaceMode::Sky { time },
         };
 
-        // Project the SHIFTED vertices, but compute (s,t) from the LOCAL vertices.
-        proj.clear();
-        let mut clipped = false;
+        // Build the view-space polygon from the SHIFTED vertices (for vx/vy/vz)
+        // but with (s,t) from the LOCAL (pre-shift) vertex, then near-clip it.
+        // A length mismatch between the shifted and local polygons is treated as
+        // a malformed face and skips it (matching the old defensive break).
+        views.clear();
+        let mut bad = false;
         for (vi, vw) in world_poly.iter().enumerate() {
             let rel = sub(*vw, cam.pos);
             let vz = dot(rel, forward);
-            if vz <= NEAR {
-                clipped = true;
-                break;
-            }
             let vx = dot(rel, right);
             let vy = dot(rel, up);
             // (s,t) from the local (pre-shift) vertex coordinate.
             let vl = match local_poly.get(vi) {
                 Some(v) => *v,
                 None => {
-                    clipped = true;
+                    bad = true;
                     break;
                 }
             };
@@ -2093,16 +2185,24 @@ fn draw_submodel(
                 ),
                 None => (0.0, 0.0),
             };
-            proj.push(ProjT {
-                x: cx + focal * vx / vz,
-                y: cy - focal * vy / vz,
-                vz,
-                s,
-                t,
-            });
+            views.push(VView { vx, vy, vz, s, t });
         }
-        if clipped || proj.len() < 3 {
+        if bad {
             continue;
+        }
+        let clipped = clip_poly_near(&views);
+        if clipped.len() < 3 {
+            continue;
+        }
+        proj.clear();
+        for vv in &clipped {
+            proj.push(ProjT {
+                x: cx + focal * vv.vx / vv.vz,
+                y: cy - focal * vv.vy / vv.vz,
+                vz: vv.vz,
+                s: vv.s,
+                t: vv.t,
+            });
         }
 
         let lambert = dot(normal, light_dir).max(0.0);
@@ -5226,19 +5326,27 @@ mod tests {
 
         let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
         let drawn_with = with.rgb.iter().filter(|&&p| p != bg).count();
+        // The submodel quad sits at world x = -120, nearer than the world walls
+        // behind it, so it must paint at least as many non-background pixels as
+        // without it (it can only add coverage, never remove it). With near-plane
+        // clipping the surrounding world walls now also fill the frame, so this is
+        // an `>=` rather than a strict `>` — the strong check below is occlusion.
         assert!(
-            drawn_with > drawn_without,
-            "submodel should add visible pixels: {drawn_without} -> {drawn_with}"
+            drawn_with >= drawn_without,
+            "submodel must not reduce coverage: {drawn_without} -> {drawn_with}"
         );
 
-        // And it must actually change the framebuffer somewhere.
+        // The decisive check: the submodel is nearer than the geometry behind it,
+        // so adding it must CHANGE the framebuffer (it occludes the far wall). This
+        // proves the submodel is rasterised and depth-tested, independent of how
+        // much background the world fills.
         let changed = without
             .rgb
             .iter()
             .zip(with.rgb.iter())
             .filter(|(a, b)| a != b)
             .count();
-        assert!(changed > 0, "submodel changed no pixels");
+        assert!(changed > 0, "submodel changed no pixels (not drawn / fully occluded)");
     }
 
     #[test]
@@ -6549,5 +6657,122 @@ mod tests {
         // Space is skipped, 'B' starts at virtual x=8.
         assert_eq!(img2.rgb[8], pal[3], "the second glyph must land 8px right");
         assert_eq!(img2.rgb[0], [0, 0, 0], "a leading space must draw nothing");
+    }
+
+    // -----------------------------------------------------------------------
+    // Near-plane polygon clipping (clip_poly_near)
+    // -----------------------------------------------------------------------
+
+    fn vv(vx: f32, vy: f32, vz: f32, s: f32, t: f32) -> VView {
+        VView { vx, vy, vz, s, t }
+    }
+
+    /// (a) A polygon entirely in front of the near plane (every `vz > NEAR`) must
+    /// come back UNCHANGED: same vertices, same order, byte-identical. This is the
+    /// common case and any regression here would corrupt every visible wall.
+    #[test]
+    fn clip_poly_near_keeps_front_polygon_unchanged() {
+        let poly = vec![
+            vv(-2.0, -1.0, 5.0, 0.0, 0.0),
+            vv(3.0, -1.0, 8.0, 64.0, 0.0),
+            vv(3.0, 4.0, 8.0, 64.0, 64.0),
+            vv(-2.0, 4.0, 5.0, 0.0, 64.0),
+        ];
+        let out = clip_poly_near(&poly);
+        assert_eq!(out.len(), poly.len(), "front polygon must keep all vertices");
+        for (o, p) in out.iter().zip(poly.iter()) {
+            // Exact equality (no lerp should have run): bit-for-bit identical.
+            assert_eq!(o.vx, p.vx);
+            assert_eq!(o.vy, p.vy);
+            assert_eq!(o.vz, p.vz);
+            assert_eq!(o.s, p.s);
+            assert_eq!(o.t, p.t);
+        }
+        // A vertex sitting exactly on the plane (vz == NEAR) counts as OUTSIDE
+        // (inside is strictly vz > NEAR), so a polygon touching the plane is NOT
+        // the trivial fast-path; but with all others in front it still clips to a
+        // valid (>=3 vert) polygon.
+        let touching = vec![
+            vv(0.0, 0.0, NEAR_PLANE, 0.0, 0.0),
+            vv(1.0, 0.0, 5.0, 10.0, 0.0),
+            vv(1.0, 1.0, 5.0, 10.0, 10.0),
+        ];
+        let out = clip_poly_near(&touching);
+        assert!(out.len() >= 3, "touching-plane triangle still clips to a polygon");
+        for o in &out {
+            assert!(o.vz >= NEAR_PLANE - 1e-4, "every output vertex is on/in front of NEAR");
+        }
+    }
+
+    /// (b) A polygon entirely behind the near plane (every `vz <= NEAR`) yields
+    /// fewer than 3 vertices, so the caller drops the face.
+    #[test]
+    fn clip_poly_near_drops_fully_behind_polygon() {
+        let behind = vec![
+            vv(-1.0, -1.0, -3.0, 0.0, 0.0),
+            vv(1.0, -1.0, 0.0, 1.0, 0.0),
+            vv(0.0, 1.0, NEAR_PLANE, 1.0, 1.0), // exactly on the plane = outside
+        ];
+        let out = clip_poly_near(&behind);
+        assert!(out.len() < 3, "a fully-behind polygon must clip away (got {})", out.len());
+
+        // An empty input is also handled (no panic, empty out).
+        assert!(clip_poly_near(&[]).is_empty());
+    }
+
+    /// (c) A triangle straddling the near plane clips to a 4-vertex polygon: the
+    /// two front vertices are kept verbatim and the two edges crossing the plane
+    /// each contribute one new vertex with `vz == NEAR` and correctly-lerped
+    /// `(vx, vy, s, t)`.
+    #[test]
+    fn clip_poly_near_straddling_triangle_lerps_correctly() {
+        // Apex behind the plane, base in front. Numbers chosen so the crossings
+        // land at simple parameters.
+        //  A: behind   (vz = 0,  s=0,  t=0)
+        //  B: in front (vz = 3,  s=30, t=0)
+        //  C: in front (vz = 3,  s=30, t=30)
+        let a = vv(0.0, 0.0, 0.0, 0.0, 0.0);
+        let b = vv(6.0, 0.0, 3.0, 30.0, 0.0);
+        let c = vv(6.0, 6.0, 3.0, 30.0, 30.0);
+        let out = clip_poly_near(&[a, b, c]);
+        assert_eq!(out.len(), 4, "an apex-behind triangle clips to a quad");
+
+        // Sutherland–Hodgman walks edges A->B, B->C, C->A. With A outside and
+        // B,C inside, the emitted ring is:
+        //   edge A->B: A outside (skip A), crossing P (A->B), then keep B
+        //   edge B->C: keep C
+        //   edge C->A: crossing Q (C->A)
+        // => [P, B, C, Q].
+        //
+        // Crossing on A->B at alpha = (NEAR - 0)/(3 - 0) = 1/3:
+        //   vx = 0 + (6-0)*1/3 = 2, vz = NEAR = 1, s = 0 + 30/3 = 10, t = 0.
+        // Crossing on C->A at alpha = (NEAR - 3)/(0 - 3) = 2/3:
+        //   vx = 6 + (0-6)*2/3 = 2, vz = 1, s = 30 + (0-30)*2/3 = 10,
+        //   t = 30 + (0-30)*2/3 = 10.
+        let eps = 1e-5;
+        // out[0] = P (A->B crossing)
+        assert!((out[0].vz - NEAR_PLANE).abs() < eps, "P.vz must be NEAR");
+        assert!((out[0].vx - 2.0).abs() < eps, "P.vx lerp");
+        assert!((out[0].vy - 0.0).abs() < eps, "P.vy lerp");
+        assert!((out[0].s - 10.0).abs() < eps, "P.s lerp");
+        assert!((out[0].t - 0.0).abs() < eps, "P.t lerp");
+        // out[1] = B (kept verbatim)
+        assert_eq!(out[1].vx, b.vx);
+        assert_eq!(out[1].vz, b.vz);
+        assert_eq!(out[1].s, b.s);
+        // out[2] = C (kept verbatim)
+        assert_eq!(out[2].vx, c.vx);
+        assert_eq!(out[2].vz, c.vz);
+        assert_eq!(out[2].t, c.t);
+        // out[3] = Q (C->A crossing)
+        assert!((out[3].vz - NEAR_PLANE).abs() < eps, "Q.vz must be NEAR");
+        assert!((out[3].vx - 2.0).abs() < eps, "Q.vx lerp");
+        assert!((out[3].s - 10.0).abs() < eps, "Q.s lerp");
+        assert!((out[3].t - 10.0).abs() < eps, "Q.t lerp");
+
+        // Every output vertex is on or in front of the plane.
+        for o in &out {
+            assert!(o.vz >= NEAR_PLANE - eps, "clipped vertex behind NEAR: vz={}", o.vz);
+        }
     }
 }
