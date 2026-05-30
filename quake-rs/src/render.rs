@@ -1128,10 +1128,28 @@ fn draw_world_textured(
     // in which case every face is drawn (the pre-PVS behaviour).
     let visible_face = compute_visible_faces(bsp, cam.pos);
 
+    // The world pass draws ONLY model 0's faces. Brush submodels (doors, plats,
+    // buttons) own the remaining faces and are drawn by `draw_submodel` at their
+    // entity origin — otherwise they'd render here at their local (closed)
+    // position AND again, doubled, at the entity origin. Fall back to "all faces"
+    // when models[0] is absent (the pre-submodel behaviour / demo maps).
+    let (world_first, world_end) = match bsp.models.first() {
+        Some(m) => {
+            let f0 = m.firstface.max(0) as usize;
+            let n = m.numfaces.max(0) as usize;
+            (f0, f0.saturating_add(n).min(bsp.faces.len()))
+        }
+        None => (0, bsp.faces.len()),
+    };
+
     let mut world_poly: Vec<Vec3> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
 
-    for (face_index, face) in bsp.faces.iter().enumerate() {
+    for face_index in world_first..world_end {
+        let face = match bsp.faces.get(face_index) {
+            Some(f) => f,
+            None => continue,
+        };
         // Skip faces outside the potentially-visible set. A missing mask entry
         // (or no mask at all) means "draw" — culling never removes a face it is
         // unsure about.
@@ -1235,6 +1253,232 @@ fn draw_world_textured(
                         // A 1x1 texture whose single index maps to the hashed
                         // base colour (before any shade); brightness comes from
                         // the lightmap inside the rasteriser.
+                        let mut pal1 = [[0u8; 3]; 256];
+                        pal1[0] = [
+                            (base[0] * 255.0).clamp(0.0, 255.0) as u8,
+                            (base[1] * 255.0).clamp(0.0, 255.0) as u8,
+                            (base[2] * 255.0).clamp(0.0, 255.0) as u8,
+                        ];
+                        let one = [0u8];
+                        let v0 = proj[0];
+                        for i in 1..proj.len() - 1 {
+                            raster_triangle_tex(
+                                image, zbuf, v0, proj[i], proj[i + 1],
+                                &one, 1, 1, &pal1, shade, Some(&lm),
+                            );
+                        }
+                    }
+                    None => {
+                        let color = [
+                            (base[0] * shade * 255.0).clamp(0.0, 255.0) as u8,
+                            (base[1] * shade * 255.0).clamp(0.0, 255.0) as u8,
+                            (base[2] * shade * 255.0).clamp(0.0, 255.0) as u8,
+                        ];
+                        let p0 = Projected { x: proj[0].x, y: proj[0].y, depth: proj[0].vz };
+                        for i in 1..proj.len() - 1 {
+                            let p1 = Projected { x: proj[i].x, y: proj[i].y, depth: proj[i].vz };
+                            let p2 =
+                                Projected { x: proj[i + 1].x, y: proj[i + 1].y, depth: proj[i + 1].vz };
+                            raster_triangle(image, zbuf, p0, p1, p2, color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Brush submodels (doors, platforms, buttons — Quake's inline `*N` bmodels)
+// ---------------------------------------------------------------------------
+
+/// Draw one brush submodel (`bsp.models[model_index]`) at world `origin`, sharing
+/// `image`/`zbuf` so it occludes — and is occluded by — the world and other
+/// geometry through the one depth buffer.
+///
+/// Submodels (doors/plats/buttons referenced by brush entities whose `model`
+/// field is `"*N"`) live in the same vertex/edge/surfedge arrays as the
+/// worldmodel; [`face_world_poly`] therefore reconstructs each submodel face in
+/// the *same* model-local coordinate space as the world. To place the submodel
+/// we add `origin` to every reconstructed vertex.
+///
+/// This is a faithful variant of [`draw_world_textured`]'s per-face loop with
+/// three deliberate differences:
+///  * **No PVS cull.** Submodel faces are not referenced by any worldmodel
+///    leaf's marksurfaces, so they have no PVS bit; they always draw (matching
+///    `compute_visible_faces`, which leaves unowned faces visible).
+///  * **Origin shift.** Each vertex is projected from its *origin-shifted* world
+///    position, and the backface cull uses the *shifted* face center against
+///    `cam.pos`. The plane normal is a direction (origin-independent), so
+///    [`face_normal`] is used directly. Quake also backface-culls bmodel polys,
+///    so a door not visible from a side is faithful.
+///  * **Local ST / lightmap.** Quake computes a bmodel's surface `(s,t)` from the
+///    model-space vertex (i.e. *before* the origin shift), and lightmap extents
+///    come from the origin-independent texinfo `(s,t)` of the *local* polygon.
+///    So `(s,t)` and the lightmap are derived from the LOCAL vertices while only
+///    projection uses the shifted ones.
+///
+/// Every index into BSP-derived data is bounds-checked; a malformed face (or an
+/// out-of-range `model_index`) is skipped, never panicked on.
+fn draw_submodel(
+    image: &mut Image,
+    zbuf: &mut [f32],
+    bsp: &Bsp,
+    cam: &Camera,
+    palette: &[[u8; 3]; 256],
+    model_index: usize,
+    origin: Vec3,
+) {
+    const NEAR: f32 = 1.0;
+    let (w, h) = (image.w, image.h);
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Out-of-range submodel index is a silent no-op.
+    let m = match bsp.models.get(model_index) {
+        Some(m) => m,
+        None => return,
+    };
+
+    // Same camera basis / focal length / projection as the world pass.
+    let (forward, right, up) = cam.basis();
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
+    let tan_half = half_fov.tan();
+    let focal = if tan_half.abs() < 1e-6 {
+        cx
+    } else {
+        (cx as f64 / tan_half) as f32
+    };
+    let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
+
+    // Submodel face range: [firstface, firstface + numfaces). Negative counts
+    // clamp to 0 so the range is empty rather than wrapping.
+    let f0 = m.firstface.max(0) as usize;
+    let count = m.numfaces.max(0) as usize;
+    let end = match f0.checked_add(count) {
+        Some(e) => e,
+        None => return,
+    };
+
+    // `world_poly` holds origin-SHIFTED vertices (for projection); we keep the
+    // LOCAL vertices separately for (s,t) and the lightmap.
+    let mut local_poly: Vec<Vec3> = Vec::new();
+    let mut world_poly: Vec<Vec3> = Vec::new();
+    let mut proj: Vec<ProjT> = Vec::new();
+
+    for face_index in f0..end {
+        let face = match bsp.faces.get(face_index) {
+            Some(f) => f,
+            None => continue,
+        };
+
+        // Reconstruct the LOCAL polygon (same space as the worldmodel).
+        if !face_world_poly(bsp, face, &mut local_poly) {
+            continue;
+        }
+        // Origin-shifted copy used for the cull center and projection.
+        world_poly.clear();
+        for v in &local_poly {
+            world_poly.push([v[0] + origin[0], v[1] + origin[1], v[2] + origin[2]]);
+        }
+
+        let normal = match face_normal(bsp, face) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Backface cull against the SHIFTED face center.
+        let mut center = [0.0f32; 3];
+        for v in &world_poly {
+            for k in 0..3 {
+                center[k] += v[k];
+            }
+        }
+        let inv_n = 1.0 / world_poly.len() as f32;
+        for k in 0..3 {
+            center[k] *= inv_n;
+        }
+        if dot(normal, sub(center, cam.pos)) >= 0.0 {
+            continue;
+        }
+
+        // texinfo (s/t axes) and its miptexture.
+        let ti = (face.texinfo as i64)
+            .try_into()
+            .ok()
+            .and_then(|i: usize| bsp.texinfo.get(i));
+        let tex = ti.and_then(|t| {
+            let mi: usize = t.miptex.try_into().ok()?;
+            bsp.textures.get(mi).and_then(|o| o.as_ref())
+        });
+
+        // Lightmap from the LOCAL polygon (texinfo extents are origin-independent).
+        let lightmap = face_lightmap(bsp, face, &local_poly);
+
+        // Project the SHIFTED vertices, but compute (s,t) from the LOCAL vertices.
+        proj.clear();
+        let mut clipped = false;
+        for (vi, vw) in world_poly.iter().enumerate() {
+            let rel = sub(*vw, cam.pos);
+            let vz = dot(rel, forward);
+            if vz <= NEAR {
+                clipped = true;
+                break;
+            }
+            let vx = dot(rel, right);
+            let vy = dot(rel, up);
+            // (s,t) from the local (pre-shift) vertex coordinate.
+            let vl = match local_poly.get(vi) {
+                Some(v) => *v,
+                None => {
+                    clipped = true;
+                    break;
+                }
+            };
+            let (s, t) = match ti {
+                Some(ti) => (
+                    vl[0] * ti.vecs[0][0] + vl[1] * ti.vecs[0][1] + vl[2] * ti.vecs[0][2] + ti.vecs[0][3],
+                    vl[0] * ti.vecs[1][0] + vl[1] * ti.vecs[1][1] + vl[2] * ti.vecs[1][2] + ti.vecs[1][3],
+                ),
+                None => (0.0, 0.0),
+            };
+            proj.push(ProjT {
+                x: cx + focal * vx / vz,
+                y: cy - focal * vy / vz,
+                vz,
+                s,
+                t,
+            });
+        }
+        if clipped || proj.len() < 3 {
+            continue;
+        }
+
+        let lambert = dot(normal, light_dir).max(0.0);
+        let shade = (0.5 + 0.5 * lambert).min(1.0);
+
+        match tex {
+            Some(mt) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
+                let (tw, th) = (mt.width as usize, mt.height as usize);
+                let v0 = proj[0];
+                for i in 1..proj.len() - 1 {
+                    raster_triangle_tex(
+                        image, zbuf, v0, proj[i], proj[i + 1],
+                        &mt.pixels, tw, th, palette, shade, lightmap.as_ref(),
+                    );
+                }
+            }
+            _ => {
+                // Flat hashed colour for textureless faces; route through the
+                // textured path with a 1x1 colour when a lightmap is present so
+                // the per-pixel lightmap factor still applies (matching the world
+                // pass exactly).
+                let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
+                let base = hash_color(key);
+                match lightmap {
+                    Some(lm) => {
                         let mut pal1 = [[0u8; 3]; 256];
                         pal1[0] = [
                             (base[0] * 255.0).clamp(0.0, 255.0) as u8,
@@ -1603,9 +1847,25 @@ fn draw_alias_model(
     }
 }
 
+/// One brush submodel placed in the world: which inline model
+/// (`bsp.models[model_index]`) to draw and where (`origin`).
+///
+/// Brush entities (doors, platforms, buttons, triggers with visible brushes)
+/// reference an inline submodel through their `model` field `"*N"`, where `N`
+/// indexes `bsp.models`. Submodel 0 is the worldspawn (drawn by
+/// [`draw_world_textured`]); `N >= 1` are the brush entities, drawn by
+/// [`draw_submodel`] at this `origin`. See [`render_scene_ext`].
+pub struct BModelInstance {
+    pub model_index: usize,
+    pub origin: Vec3,
+}
+
 /// Render `bsp` with its real miptextures (as [`render_bsp_textured`]) and then
 /// draw each alias-model `instances` entry into the same image, sharing one
 /// z-buffer so models and world occlude one another correctly.
+///
+/// A thin wrapper over [`render_scene_ext`] with no brush submodels; kept as the
+/// stable entry point the binary and wasm front-ends call.
 pub fn render_scene(
     bsp: &Bsp,
     cam: &Camera,
@@ -1614,13 +1874,36 @@ pub fn render_scene(
     palette: &[[u8; 3]; 256],
     instances: &[ModelInstance],
 ) -> Image {
+    render_scene_ext(bsp, cam, w, h, palette, instances, &[])
+}
+
+/// Render the full scene: the textured world, then each brush submodel
+/// (`bmodels`), then each alias model (`models`), all sharing one z-buffer so
+/// every piece occludes — and is occluded by — the others correctly.
+///
+/// Brush submodels are drawn *before* alias models, matching `render_scene`'s
+/// world-then-models ordering; correctness does not depend on the order because
+/// the shared depth buffer resolves visibility per pixel. Passing an empty
+/// `bmodels` slice reproduces [`render_scene`] exactly (the binary/wasm path).
+pub fn render_scene_ext(
+    bsp: &Bsp,
+    cam: &Camera,
+    w: usize,
+    h: usize,
+    palette: &[[u8; 3]; 256],
+    models: &[ModelInstance],
+    bmodels: &[BModelInstance],
+) -> Image {
     let mut image = Image::new(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
         return image;
     }
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette);
-    for inst in instances {
+    for bm in bmodels {
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin);
+    }
+    for inst in models {
         draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
     }
     image
@@ -2779,5 +3062,244 @@ mod tests {
         assert!(bsp.visibility.is_empty(), "demo_room has no vis lump");
         // compute_visible_faces returns None (no culling) for such a map.
         assert!(compute_visible_faces(&bsp, [0.0, 0.0, 0.0]).is_none());
+    }
+
+    // -- Brush submodels (inline `*N` bmodels: doors / plats / buttons) -----
+
+    /// Extend [`demo_room`] with a second inline model (model index 1): a single
+    /// 64x64 quad whose face plane faces `-X`. The quad's vertices live in the
+    /// shared vertex array in MODEL-LOCAL space (a YZ square at local `x = 0`),
+    /// exactly as Quake stores bmodel geometry, so a caller places it by adding
+    /// an `origin`.
+    ///
+    /// `model 0` is left covering only the original world faces (its `numfaces`
+    /// is unchanged); the new quad is owned solely by `model 1`.
+    fn demo_room_with_submodel() -> Bsp {
+        use crate::bsp::{DEdge, DFace, DModel, DPlane};
+
+        let mut bsp = demo_room();
+
+        // Record where the world's faces end; the submodel face starts here.
+        let submodel_firstface = bsp.faces.len() as i32;
+
+        // Four corners of a 64x64 YZ quad at local x = 0, ordered CCW as seen
+        // from -X. Pushed as fresh vertexes in the SHARED vertex array.
+        let base_vtx = bsp.vertexes.len() as u16;
+        let corners: [[f32; 3]; 4] = [
+            [0.0, -32.0, -32.0],
+            [0.0, 32.0, -32.0],
+            [0.0, 32.0, 32.0],
+            [0.0, -32.0, 32.0],
+        ];
+        for c in corners {
+            bsp.vertexes.push(crate::bsp::DVertex { point: c });
+        }
+
+        // Four edges around the quad, referenced by four positive surfedges.
+        let first_edge = bsp.surfedges.len() as i32;
+        for k in 0..4u16 {
+            let a = base_vtx + k;
+            let b = base_vtx + ((k + 1) % 4);
+            let edge_index = bsp.edges.len() as i32;
+            bsp.edges.push(DEdge { v: [a, b] });
+            bsp.surfedges.push(edge_index);
+        }
+
+        // Plane: outward normal -X (faces toward a camera on the -X side).
+        let planenum = bsp.planes.len() as i16;
+        bsp.planes.push(DPlane {
+            normal: [-1.0, 0.0, 0.0],
+            dist: 0.0,
+            ptype: crate::bsp::PLANE_X,
+        });
+
+        // Reuse texinfo 0 (axis-aligned; demo_room has no inline textures so the
+        // submodel takes the flat-colour fallback, same as the world walls).
+        bsp.faces.push(DFace {
+            planenum,
+            side: 0,
+            firstedge: first_edge,
+            numedges: 4,
+            texinfo: 0,
+            styles: [0, 0, 0, 0],
+            lightofs: -1,
+        });
+
+        // Model 1: just the new quad face.
+        bsp.models.push(DModel {
+            mins: [-1.0, -32.0, -32.0],
+            maxs: [1.0, 32.0, 32.0],
+            origin: [0.0, 0.0, 0.0],
+            headnode: [0, 0, 0, 0],
+            visleafs: 0,
+            firstface: submodel_firstface,
+            numfaces: 1,
+        });
+
+        bsp
+    }
+
+    #[test]
+    fn render_scene_ext_draws_submodel() {
+        // A submodel placed in front of the camera must add non-background
+        // pixels relative to an empty bmodel list (the submodel becomes visible).
+        let bsp = demo_room_with_submodel();
+        let pal = [[200u8, 200, 200]; 256];
+        // Look down +X from near the west wall.
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let bg = [10u8, 10, 14];
+
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[]);
+        let with = render_scene_ext(
+            &bsp,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            // Place the quad between the camera (-200) and the centre, facing it.
+            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+        );
+
+        let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
+        let drawn_with = with.rgb.iter().filter(|&&p| p != bg).count();
+        assert!(
+            drawn_with > drawn_without,
+            "submodel should add visible pixels: {drawn_without} -> {drawn_with}"
+        );
+
+        // And it must actually change the framebuffer somewhere.
+        let changed = without
+            .rgb
+            .iter()
+            .zip(with.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "submodel changed no pixels");
+    }
+
+    #[test]
+    fn render_scene_ext_out_of_range_submodel_is_noop() {
+        // An out-of-range model_index must draw nothing and not panic: the image
+        // is byte-identical to passing an empty bmodel list.
+        let bsp = demo_room_with_submodel();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[]);
+        let oob = render_scene_ext(
+            &bsp,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0] }],
+        );
+        assert_eq!(
+            empty.rgb, oob.rgb,
+            "out-of-range submodel index must be a no-op"
+        );
+    }
+
+    #[test]
+    fn render_scene_matches_ext_empty_on_demo_room() {
+        // render_scene must equal render_scene_ext(.., &[]) on demo_room: the
+        // wrapper preserves the existing world+alias behaviour exactly.
+        let bsp = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+
+        // No alias models, no bmodels.
+        let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[]);
+        assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
+
+        // Also holds with an alias instance present (the model path is shared).
+        let mdl = tiny_mdl();
+        let inst = ModelInstance {
+            mdl: &mdl,
+            origin: [-80.0, 0.0, 0.0],
+            yaw: 0.0,
+            frame: 0,
+            color: [255, 32, 32],
+        };
+        let a2 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
+        let b2 = render_scene_ext(
+            &bsp,
+            &cam,
+            160,
+            120,
+            &pal,
+            std::slice::from_ref(&inst),
+            &[],
+        );
+        assert_eq!(
+            a2.rgb, b2.rgb,
+            "render_scene must equal render_scene_ext with the same alias models and no bmodels"
+        );
+    }
+
+    #[test]
+    fn submodel_origin_shifts_geometry() {
+        // The same submodel at two different origins must land in different
+        // places: rendering it at one origin vs another changes pixels. This
+        // proves the origin shift actually moves the geometry.
+        let bsp = demo_room_with_submodel();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+
+        let centered = render_scene_ext(
+            &bsp,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+        );
+        // Shift the quad well off to one side (+Y) so it projects elsewhere.
+        let shifted = render_scene_ext(
+            &bsp,
+            &cam,
+            160,
+            120,
+            &pal,
+            &[],
+            &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0] }],
+        );
+        let changed = centered
+            .rgb
+            .iter()
+            .zip(shifted.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "moving the submodel origin should move its pixels");
+    }
+
+    #[test]
+    fn submodel_tolerates_malformed_faces() {
+        // A submodel whose faces reference out-of-range edges/planes/texinfo must
+        // be skipped without panicking (mirrors render_tolerates_malformed_faces
+        // for the world path).
+        let mut bsp = demo_room_with_submodel();
+        // Corrupt the submodel's single face (the last face in the array).
+        if let Some(f) = bsp.faces.last_mut() {
+            f.firstedge = 1_000_000; // past surfedges
+            f.planenum = 30_000; // past planes
+            f.texinfo = 30_000; // past texinfo
+        }
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        // Must not panic; the corrupt face is simply skipped.
+        let _img = render_scene_ext(
+            &bsp,
+            &cam,
+            80,
+            60,
+            &pal,
+            &[],
+            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+        );
     }
 }

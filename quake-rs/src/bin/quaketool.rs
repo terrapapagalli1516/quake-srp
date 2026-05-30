@@ -677,12 +677,21 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     if let Some(path) = out {
         let mut model_cache: std::collections::HashMap<String, Option<Mdl>> = std::collections::HashMap::new();
         let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
+        let mut bmodels: Vec<render::BModelInstance> = Vec::new();
         for e in 0..server.vm.num_edicts() {
             if server.vm.edict_free.get(e).copied().unwrap_or(true) || e as i32 == player {
                 continue;
             }
             let ent = e as i32;
             let m = server.vm.ent_get_string(ent, "model");
+            // Brush submodels (doors/plats/buttons) draw at the entity origin.
+            if let Some(num) = m.strip_prefix('*') {
+                if let Ok(idx) = num.parse::<usize>() {
+                    let origin = server.vm.ent_get_vector(ent, "origin");
+                    bmodels.push(render::BModelInstance { model_index: idx, origin });
+                }
+                continue;
+            }
             if !m.ends_with(".mdl") {
                 continue;
             }
@@ -704,7 +713,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             .collect();
         let (eye, a) = server.player_view();
         let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], fov_deg: 90.0 };
-        let img = render::render_scene(&bsp_render, &cam, 640, 400, &palette, &inst);
+        let img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels);
         img.write_ppm(path).map_err(|e| format!("write {path}: {e}"))?;
         let _ = writeln!(o, "  rendered player POV -> {path}");
     }
@@ -932,6 +941,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     // Owned model data outlives the borrowing ModelInstances below.
     let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
     let mut monster_origins: Vec<[f32; 3]> = Vec::new();
+    let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     let mut skipped_load = 0usize;
 
     let n = server.vm.num_edicts();
@@ -945,8 +955,16 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         if model.is_empty() {
             continue;
         }
-        // Brush submodels ("*N") and bmodels ("maps/...") are not alias models.
-        if model.starts_with('*') || model.starts_with("maps/") {
+        // Brush submodels ("*N") — doors, platforms, buttons — draw as bmodels at
+        // the entity origin (the world pass only draws model 0).
+        if let Some(num) = model.strip_prefix('*') {
+            if let Ok(idx) = num.parse::<usize>() {
+                let origin = server.vm.ent_get_vector(ent, "origin");
+                bmodels.push(render::BModelInstance { model_index: idx, origin });
+            }
+            continue;
+        }
+        if model.starts_with("maps/") {
             continue;
         }
         if !model.ends_with(".mdl") {
@@ -1001,7 +1019,26 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             .min_by(|a, b| d2(*a, eye).total_cmp(&d2(*b, eye)))
     };
     let model_pts: Vec<[f32; 3]> = owned.iter().map(|(_, o, _, _)| *o).collect();
-    let target = pick(&monster_origins).or_else(|| pick(&model_pts));
+    // When QUAKE_AIM_DOOR is set, frame the nearest brush submodel (door/plat) so
+    // the bmodel render can be eyeballed; otherwise frame the nearest monster.
+    // A door's entity origin is usually [0,0,0] (the brush geometry carries the
+    // position), so aim at the centre of model N's bounds + the entity origin.
+    let door_pts: Vec<[f32; 3]> = bmodels
+        .iter()
+        .filter_map(|b| {
+            let m = bsp_for_render.models.get(b.model_index)?;
+            Some([
+                b.origin[0] + (m.mins[0] + m.maxs[0]) * 0.5,
+                b.origin[1] + (m.mins[1] + m.maxs[1]) * 0.5,
+                b.origin[2] + (m.mins[2] + m.maxs[2]) * 0.5,
+            ])
+        })
+        .collect();
+    let target = if std::env::var("QUAKE_AIM_DOOR").is_ok() {
+        pick(&door_pts).or_else(|| pick(&monster_origins)).or_else(|| pick(&model_pts))
+    } else {
+        pick(&monster_origins).or_else(|| pick(&model_pts))
+    };
     let cam = match target {
         Some(t) => {
             // Stand ~110 units in front of the target (between it and the eye),
@@ -1018,7 +1055,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         None => base_cam,
     };
 
-    let img = render::render_scene(&bsp_for_render, &cam, 640, 400, &palette, &instances);
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();

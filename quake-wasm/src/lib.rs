@@ -419,12 +419,22 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     //    rendering doesn't clash with reading the server). Skip the player's own
     //    edict — its model would fill the screen in first person.
     let mut descs: Vec<(String, [f32; 3], f32, usize, [u8; 3])> = Vec::new();
+    let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
             continue;
         }
         let m = w.server.vm.ent_get_string(ent, "model");
+        // Brush submodels (doors, platforms, buttons) draw at the entity origin —
+        // their origin tracks the door's open/close motion, so they animate live.
+        if let Some(num) = m.strip_prefix('*') {
+            if let Ok(idx) = num.parse::<usize>() {
+                let origin = w.server.vm.ent_get_vector(ent, "origin");
+                bmodels.push(render::BModelInstance { model_index: idx, origin });
+            }
+            continue;
+        }
         if !m.ends_with(".mdl") {
             continue;
         }
@@ -456,7 +466,7 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
             _ => None,
         })
         .collect();
-    render::render_scene(&w.bsp, &cam, W, H, &w.palette, &instances)
+    render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels)
 }
 
 fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
