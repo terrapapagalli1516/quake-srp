@@ -409,8 +409,10 @@ fn bi_pointcontents(vm: &mut Vm) -> Result<()> {
 }
 
 /// `PF_droptofloor` (#34): `float() droptofloor`. Box-traces `self` straight
-/// down 256 units; on a clean landing snaps `origin` to the floor, sets
-/// `FL_ONGROUND` and `groundentity = world`, and returns 1; otherwise returns 0.
+/// down 256 units (entity-aware `SV_Move`); on a clean landing snaps `origin` to
+/// the floor, sets `FL_ONGROUND` and `groundentity` to whatever edict it landed
+/// on (the world or a solid bmodel such as a platform), and returns 1; otherwise
+/// returns 0.
 fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
     let ent = vm.gget_int("self");
 
@@ -419,9 +421,10 @@ fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
     let maxs = vm.ent_get_vector(ent, "maxs");
     let end: Vec3 = [origin[0], origin[1], origin[2] - 256.0];
 
-    let tr = vm
-        .with_host(|_vm, h| h.trace(origin, end, mins, maxs))
-        .unwrap_or_default();
+    // PF_droptofloor (pr_cmds.c) uses the ENTITY-AWARE SV_Move (not the
+    // world-only host trace), so the entity can come to rest on a door/plat or
+    // another solid edict, and sets groundentity to whatever it landed on.
+    let tr = sv_move(vm, origin, end, mins, maxs, ent, false);
 
     if tr.fraction == 1.0 || tr.allsolid {
         vm.ret_float(0.0);
@@ -430,7 +433,10 @@ fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
         link_edict(vm, ent);
         let flags = vm.ent_get_float(ent, "flags") as i32;
         vm.ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
-        vm.ent_set_int(ent, "groundentity", 0); // world
+        // groundentity = EDICT_TO_PROG(trace.ent): the resolved edict it rests
+        // on (0 = world, >0 = that edict). The hit branch only runs when
+        // fraction < 1, so trace.ent is never the "nothing hit" sentinel (-1).
+        vm.ent_set_int(ent, "groundentity", tr.ent.max(0));
         vm.ret_float(1.0);
     }
     Ok(())
@@ -2113,6 +2119,17 @@ impl Server {
                     check += 1;
                     continue;
                 }
+                // SV_PushMove (sv_phys.c): after the swept-box overlap test, a
+                // non-rider is only dragged if its bbox is actually inside the
+                // pusher's FINAL position (`if (!SV_TestEntityPosition(check))
+                // continue;`). The pusher origin was already advanced above, so
+                // this tests the (un-moved) check against the moved pusher and
+                // skips entities that merely brush the swept box without
+                // penetrating — no spurious pushing.
+                if !self.push_test_position(check) {
+                    check += 1;
+                    continue;
+                }
             }
 
             // Remove the onground flag for non-players (it is re-derived below).
@@ -2239,24 +2256,36 @@ impl Server {
         link_edict(&mut self.vm, ent);
     }
 
-    /// `SV_Physics_Step` (non-`QUAKE2`): freefall (gravity + clipped move) when
-    /// the edict is not on ground / flying / swimming, then trip triggers. Touch
-    /// impacts are handled inside [`Self::push_entity`] (which calls
-    /// [`sv_impact`]); the FlyMove slide is reduced to a single `PushEntity`.
+    /// `SV_Physics_Step` (non-`QUAKE2`): freefall when the edict is not on
+    /// ground / flying / swimming — `SV_AddGravity`, `SV_CheckVelocity`,
+    /// `SV_FlyMove` (the full slide move via [`Self::fly_move_core`], which
+    /// latches `FL_ONGROUND` on a floor contact and clips/slides velocity), then
+    /// `SV_LinkEdict(ent, true)` to trip triggers. Touch impacts during the
+    /// slide are handled inside [`Self::fly_move_core`] (which calls
+    /// [`sv_impact`]). An entity already on the ground / flying / swimming skips
+    /// the whole branch, including the trigger relink (matching the C, where the
+    /// link is inside the freefall branch).
     fn physics_step(&mut self, ent: i32, dt: f32) {
         let flags = self.vm.ent_get_float(ent, "flags") as i32;
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+            // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
+            // SV_LinkEdict(ent, true). The C runs the full slide move (NOT a
+            // single PushEntity), so a freefalling MOVETYPE_STEP entity latches
+            // FL_ONGROUND on a floor contact and clips/slides its velocity
+            // instead of accumulating downward speed forever.
             self.add_gravity(ent, dt);
             self.check_velocity(ent);
-            let vel = self.vm.ent_get_vector(ent, "velocity");
-            let push = crate::math::scale(vel, dt);
-            self.push_entity(ent, push);
-        }
-        // SV_Physics_Step ends with SV_LinkEdict(ent, true): touch triggers
-        // (item pickups, trigger fields) whether or not it free-fell. Skip if a
-        // touch impact removed the entity.
-        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
-            touch_triggers(&mut self.vm, ent);
+            let mut steptrace: Option<MoveTrace> = None;
+            let _ = self.fly_move_core(ent, dt, &mut steptrace);
+
+            // SV_LinkEdict(ent, true) ends the freefall branch: trip triggers /
+            // pickups for the moved entity. This is INSIDE the branch in the C
+            // (the on-ground / flying / swimming path returns before it), so an
+            // entity that skipped the move does not re-touch here. Skip if a
+            // touch impact during the move already removed the entity.
+            if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+                touch_triggers(&mut self.vm, ent);
+            }
         }
     }
 
@@ -3046,7 +3075,10 @@ impl Server {
             origin[2] + pmins[2],
         ];
         let stop = [start[0], start[1], start[2] - 34.0];
-        let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent, false);
+        // SV_UserFriction (sv_user.c) uses SV_Move(..., true, ent): the edge
+        // dropoff probe is MOVE_NOMONSTERS, so a box entity below the leading
+        // edge can't spuriously suppress edge friction (world geometry only).
+        let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent, true);
         let friction = if trace.fraction == 1.0 {
             SV_FRICTION * SV_EDGEFRICTION
         } else {
@@ -3177,10 +3209,15 @@ impl Server {
 
             if trace.plane_normal[2] > 0.7 {
                 blocked |= 1; // floor
-                // The C only latches FL_ONGROUND when the floor is a BSP solid;
-                // here both world (ent==0) and brush submodels are SOLID_BSP-like
-                // floors. We set ONGROUND for the world and any positive edict.
-                if trace.ent >= 0 {
+                // SV_FlyMove only latches FL_ONGROUND when the contacted floor
+                // is a SOLID_BSP edict (`trace.ent->v.solid == SOLID_BSP`). The
+                // world (edict 0) is SOLID_BSP and must still count; a
+                // SOLID_BBOX/SOLID_SLIDEBOX box (monster/item/player) must NOT
+                // become "ground" even when its top faces up.
+                let on_bsp = trace.ent == 0
+                    || (trace.ent > 0
+                        && self.vm.ent_get_float(trace.ent, "solid") as i32 == SOLID_BSP);
+                if on_bsp {
                     let flags = self.vm.ent_get_float(ent, "flags") as i32;
                     self.vm
                         .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
@@ -3466,6 +3503,21 @@ pub fn sv_move(
                 continue;
             }
 
+            // SV_ClipToLinks owner skip (world.c ~849-855): when a real
+            // passedict is set, never clip a missile against its owner or an
+            // owner against its own missile. Without this a rocket/grenade/nail
+            // spawned inside the shooter's box traces against the shooter and
+            // detonates immediately. Only world (edict 0) is never a passedict,
+            // so the gate is for ignore > 0 (`clip->passedict` set).
+            if ignore > 0 {
+                if vm.ent_get_int(ei, "owner") == ignore {
+                    continue; // don't clip against own missiles
+                }
+                if vm.ent_get_int(ignore, "owner") == ei {
+                    continue; // don't clip against owner
+                }
+            }
+
             let origin = vm.ent_get_vector(ei, "origin");
 
             let tr = match solid {
@@ -3707,8 +3759,9 @@ pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
     let mid_start: Vec3 = [mid_x, mid_y, start_z];
     let mid_stop: Vec3 = [mid_x, mid_y, stop_z];
     // SV_Move(start, vec3_origin, vec3_origin, stop, true, ent): a *point* move
-    // (mins=maxs=0) that ignores the monster itself.
-    let tr = sv_move(vm, mid_start, mid_stop, [0.0; 3], [0.0; 3], ent, false);
+    // (mins=maxs=0) with MOVE_NOMONSTERS (the trailing `true`) so the floor
+    // probe clips only against world geometry, not monster/item/player boxes.
+    let tr = sv_move(vm, mid_start, mid_stop, [0.0; 3], [0.0; 3], ent, true);
     if tr.fraction == 1.0 {
         return false; // no floor under the midpoint
     }
@@ -3720,7 +3773,8 @@ pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
         for &y in &[mins[1], maxs[1]] {
             let cstart: Vec3 = [x, y, start_z];
             let cstop: Vec3 = [x, y, stop_z];
-            let tr = sv_move(vm, cstart, cstop, [0.0; 3], [0.0; 3], ent, false);
+            // MOVE_NOMONSTERS (trailing `true`): world geometry only.
+            let tr = sv_move(vm, cstart, cstop, [0.0; 3], [0.0; 3], ent, true);
             if tr.fraction != 1.0 && tr.endpos[2] > bottom {
                 bottom = tr.endpos[2];
             }
@@ -5072,6 +5126,7 @@ mod tests {
         b.add_field("velocity", EV_VECTOR, 23); // 23,24,25
         b.add_field("size", EV_VECTOR, 26); // 26,27,28
         b.add_field("groundentity", EV_ENTITY, 29);
+        b.add_field("owner", EV_ENTITY, 30); // SV_ClipToLinks owner-skip tests
 
         let touch_fn = b.add_function(
             "do_touch",
@@ -5188,6 +5243,93 @@ mod tests {
         );
         assert_eq!(tr.fraction, 1.0, "ignored edict did not block");
         assert_eq!(tr.ent, -1, "clear move hit nothing");
+    }
+
+    #[test]
+    fn sv_move_skips_owner_and_own_missile() {
+        // SV_ClipToLinks owner skip: a missile (passedict = shooter via owner)
+        // must not clip against its owner, and the owner must not clip against
+        // its own missile. We model the projectile trace as the missile moving
+        // forward with the shooter (a SOLID_BBOX box) sitting at the start.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+
+        // Case A: trace ignores the missile; the blocker IS the missile's owner.
+        // ent_get_int(blocker, "owner") == ignore (missile) is false here; the
+        // relevant predicate is ent_get_int(ignore, "owner") == blocker.
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        let shooter = server.vm.spawn();
+        server.vm.ent_set_float(shooter, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(shooter, "origin", [50.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(shooter, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(shooter, "maxs", [16.0, 16.0, 16.0]);
+
+        let missile = server.vm.spawn();
+        server.vm.ent_set_float(missile, "solid", SOLID_BBOX as f32);
+        // The missile's owner is the shooter: don't clip against the owner.
+        server.vm.ent_set_int(missile, "owner", shooter);
+
+        let tr = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            missile, // passedict = the missile
+            false,
+        );
+        assert_eq!(tr.fraction, 1.0, "missile passed through its owner");
+        assert_eq!(tr.ent, -1, "owner did not block the missile");
+
+        // Case B: the owner traces and the blocker is its OWN missile (the
+        // missile's owner == the passedict). The owner must not clip against it.
+        let (img2, _t2, _g2, _gf2) = touch_progs();
+        let progs2 = Progs::parse(&img2).expect("parse");
+        let mut server2 = Server::new(world_open_bsp(), progs2).expect("server");
+        let shooter2 = server2.vm.spawn();
+        let missile2 = server2.vm.spawn();
+        server2.vm.ent_set_float(missile2, "solid", SOLID_BBOX as f32);
+        server2.vm.ent_set_vector(missile2, "origin", [100.0, 0.0, 0.0]);
+        server2.vm.ent_set_vector(missile2, "mins", [-16.0, -16.0, -16.0]);
+        server2.vm.ent_set_vector(missile2, "maxs", [16.0, 16.0, 16.0]);
+        // missile2.owner == shooter2 (the passedict): skip own missile.
+        server2.vm.ent_set_int(missile2, "owner", shooter2);
+
+        let tr2 = sv_move(
+            &mut server2.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            shooter2, // passedict = the owner
+            false,
+        );
+        assert_eq!(tr2.fraction, 1.0, "owner passed through its own missile");
+        assert_eq!(tr2.ent, -1, "own missile did not block the owner");
+
+        // Control: an unrelated SOLID_BBOX (no owner relationship) DOES block.
+        let (img3, _t3, _g3, _gf3) = touch_progs();
+        let progs3 = Progs::parse(&img3).expect("parse");
+        let mut server3 = Server::new(world_open_bsp(), progs3).expect("server");
+        let shooter3 = server3.vm.spawn();
+        let other = server3.vm.spawn();
+        server3.vm.ent_set_float(other, "solid", SOLID_BBOX as f32);
+        server3.vm.ent_set_vector(other, "origin", [100.0, 0.0, 0.0]);
+        server3.vm.ent_set_vector(other, "mins", [-16.0, -16.0, -16.0]);
+        server3.vm.ent_set_vector(other, "maxs", [16.0, 16.0, 16.0]);
+        // No owner relationship between shooter3 and other.
+
+        let tr3 = sv_move(
+            &mut server3.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            shooter3,
+            false,
+        );
+        assert!(tr3.fraction < 1.0, "an unrelated box still blocks the move");
+        assert_eq!(tr3.ent, other, "the unrelated box was the blocker");
     }
 
     #[test]

@@ -291,11 +291,19 @@ fn ensure_app(f: impl FnOnce(&mut App)) {
 /// Start interactive walk mode (e1m1). Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn boot() -> i32 {
+    // Clean slate: drop any sounds still queued from a previous mode so stale
+    // samples can't play after the switch.
+    SND_QUEUE.with(|q| q.borrow_mut().clear());
     let w = build_walk();
     let ok = w.is_some();
     ensure_app(|a| {
-        a.walk = w;
-        a.mode = 0;
+        // Only enter walk mode when the level actually built; otherwise leave
+        // the current mode untouched (mirrors boot_demo's success gate) so a
+        // failed boot doesn't strand the app in walk mode with no Walk.
+        if let Some(w) = w {
+            a.walk = Some(w);
+            a.mode = 0;
+        }
     });
     ok as i32
 }
@@ -303,6 +311,8 @@ pub extern "C" fn boot() -> i32 {
 /// Start recorded-demo playback (demo1.dem / e1m3). Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn boot_demo() -> i32 {
+    // Clean slate: drop any sounds still queued from a previous mode.
+    SND_QUEUE.with(|q| q.borrow_mut().clear());
     let d = build_demo();
     let ok = d.is_some();
     ensure_app(|a| {
@@ -447,12 +457,26 @@ pub extern "C" fn menu_visible() -> i32 {
     })
 }
 
+/// Clamp the view pitch the way `CL_AdjustAngles` (cl_input.c) does: pitch is
+/// limited to `[-70, 80]`. In this codebase positive pitch = looking down
+/// (UserCmd pitch is QuakeC's +down convention), so +80 is the further-down
+/// bound and -70 the looking-up bound — an asymmetry matching Quake's feel.
+fn clamp_pitch(pitch: f32) -> f32 {
+    pitch.clamp(-70.0, 80.0)
+}
+
 #[no_mangle]
 pub extern "C" fn look(dyaw: f32, dpitch: f32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
+            // While the menu is up, Quake freezes the view (key_dest ==
+            // key_menu stops feeding mouse-look). Match that: ignore look input
+            // behind the menu so the idle world doesn't rotate underneath it.
+            if w.menu.visible {
+                return;
+            }
             w.yaw += dyaw;
-            w.pitch = (w.pitch + dpitch).clamp(-70.0, 70.0);
+            w.pitch = clamp_pitch(w.pitch + dpitch);
         }
     });
 }
@@ -1110,4 +1134,27 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
     // slices are empty; and a demo has no live server to source light styles, so
     // pass the neutral (static) scales.
     render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time, &[], &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pitch_clamp_is_asymmetric_like_cl_adjustangles() {
+        // CL_AdjustAngles clamps pitch to [-70, 80]; positive pitch = down.
+        assert_eq!(clamp_pitch(0.0), 0.0, "neutral pitch is unchanged");
+        // Looking far down is allowed up to +80, not +70.
+        assert_eq!(clamp_pitch(200.0), 80.0, "down clamps at +80");
+        assert_eq!(clamp_pitch(75.0), 75.0, "75 down is within the +80 bound");
+        assert_eq!(clamp_pitch(80.0), 80.0, "exactly +80 is allowed");
+        // Looking up is limited to -70.
+        assert_eq!(clamp_pitch(-200.0), -70.0, "up clamps at -70");
+        assert_eq!(clamp_pitch(-70.0), -70.0, "exactly -70 is allowed");
+        // The asymmetry: +75 survives but -75 is clamped to -70.
+        assert!(
+            clamp_pitch(75.0) > 70.0 && clamp_pitch(-75.0) == -70.0,
+            "down range exceeds 70 while up range does not"
+        );
+    }
 }

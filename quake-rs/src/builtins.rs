@@ -345,11 +345,11 @@ fn pf_fabs(vm: &mut Vm) -> Result<()> {
 /// returning that edict; returns the world (edict 0) if none matches. This is
 /// the non-`QUAKE2` `PF_Find`.
 ///
-/// The C reads `t = E_STRING(ed,f)` and skips entries where `t` is NULL. Our
+/// The C reads `t = E_STRING(ed,f)` and compares it with `strcmp(t, s)`. Our
 /// `field` value is a string field's cell offset (the QuakeC `.string` operand,
-/// which is the field's `ofs`); a 0 field value reads the empty string and is
-/// treated as a non-match (the C's `!t` skip), so an empty `match` never
-/// spuriously matches a zeroed field.
+/// which is the field's `ofs`); an unset field reads string offset 0, which is
+/// the empty string `""` — exactly the non-NULL `t` the C sees — so an empty
+/// `match` matches an empty stored field (`strcmp("", "") == 0`), matching id.
 fn pf_find(vm: &mut Vm) -> Result<()> {
     let start = vm.arg_entity(0);
     let field = vm.arg_int(1);
@@ -366,10 +366,11 @@ fn pf_find(vm: &mut Vm) -> Result<()> {
         if !free {
             let s_t = vm.ei(e, field);
             let s = vm.get_string(s_t);
-            // Match by contents; an empty stored field (NULL `t` in C) cannot
-            // match a non-empty search string, and we never match the empty
-            // string against an empty field.
-            if !s.is_empty() && s == m {
+            // Match by contents. In the C, `t = E_STRING(ed,f)` is the empty
+            // string "" (string offset 0), not NULL, so `strcmp(t, s)` matches
+            // an empty stored field against an empty search string. Compare
+            // contents directly — an empty `match` finds an empty field.
+            if s == m {
                 vm.ret_entity(e);
                 return Ok(());
             }
@@ -844,6 +845,38 @@ mod tests {
         vm.set_gi(OFS_PARM0 + 6, miss);
         pf_find(&mut vm).expect("find");
         assert_eq!(vm.gi(OFS_RETURN), 0, "no match -> world");
+    }
+
+    #[test]
+    fn find_matches_empty_field_with_empty_search() {
+        // PF_Find: an unset string field reads string offset 0 (the empty
+        // string ""), which the C compares with strcmp(t, "") == 0. So an empty
+        // search string must match an entity whose field is empty/unset.
+        let mut vm = {
+            let (img, _bi) = build_calling_builtin(18, Op::Call3);
+            Vm::load(&img).expect("load")
+        };
+        let e1 = vm.spawn();
+        let e2 = vm.spawn();
+        assert_eq!((e1, e2), (1, 2));
+
+        let field = 0usize;
+        // e1 has a non-empty field; e2 is left unset (empty).
+        let nonempty = vm.intern("monster");
+        vm.set_ei(e1, field, nonempty);
+
+        // find(start=world(0), field=0, match="") -> first entity with an empty
+        // field, i.e. e2 (e1's field is "monster", not "").
+        let empty = vm.intern(""); // string offset 0
+        vm.set_gi(OFS_PARM0, 0);
+        vm.set_gi(OFS_PARM0 + 3, field as i32);
+        vm.set_gi(OFS_PARM0 + 6, empty);
+        pf_find(&mut vm).expect("find");
+        assert_eq!(
+            vm.gi(OFS_RETURN),
+            e2,
+            "empty search matches the first empty field, not the non-empty one"
+        );
     }
 
     #[test]
