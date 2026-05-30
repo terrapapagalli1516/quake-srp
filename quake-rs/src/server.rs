@@ -368,13 +368,16 @@ fn bi_makevectors(vm: &mut Vm) -> Result<()> {
 fn bi_traceline(vm: &mut Vm) -> Result<()> {
     let v1 = vm.arg_vector(0);
     let v2 = vm.arg_vector(1);
-    // arg 2 = nomonsters (the C passed MOVE_NOMONSTERS; full monster filtering
-    // is out of scope here — we clip against all solids either way).
+    // arg 2 = nomonsters (MOVE_NOMONSTERS): when nonzero, the trace must skip
+    // every box entity (monsters/player) and clip only the world + SOLID_BSP
+    // bmodels. QC visible() passes TRUE here so its sight line reaches the
+    // player without stopping on the player's own SOLID_SLIDEBOX box.
+    let nomonsters = vm.arg_float(2) != 0.0;
     let ignore = vm.arg_entity(3); // the "ignore" passedict.
 
-    // Entity-aware move (clips world + all solid edicts). sv_move borrows the
-    // host internally; this builtin must not be inside with_host.
-    let tr = sv_move(vm, v1, v2, [0.0; 3], [0.0; 3], ignore);
+    // Entity-aware move. sv_move borrows the host internally; this builtin must
+    // not be inside with_host.
+    let tr = sv_move(vm, v1, v2, [0.0; 3], [0.0; 3], ignore, nomonsters);
 
     vm.gset_float("trace_allsolid", tr.allsolid as i32 as f32);
     vm.gset_float("trace_startsolid", tr.startsolid as i32 as f32);
@@ -1443,7 +1446,7 @@ impl Server {
         let origin = self.vm.ent_get_vector(ent, "origin");
         let mins = self.vm.ent_get_vector(ent, "mins");
         let maxs = self.vm.ent_get_vector(ent, "maxs");
-        let trace = sv_move(&mut self.vm, origin, origin, mins, maxs, ent);
+        let trace = sv_move(&mut self.vm, origin, origin, mins, maxs, ent, false);
         trace.startsolid
     }
 
@@ -1627,7 +1630,7 @@ impl Server {
 
         // Entity-aware move: clips world + all solid edicts; `ent` ignores
         // itself (the C `passedict`).
-        let mt = sv_move(&mut self.vm, origin, end, mins, maxs, ent);
+        let mt = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false);
 
         self.vm.ent_set_vector(ent, "origin", mt.endpos);
         link_edict(&mut self.vm, ent);
@@ -2114,7 +2117,7 @@ impl Server {
             origin[2] + pmins[2],
         ];
         let stop = [start[0], start[1], start[2] - 34.0];
-        let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent);
+        let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent, false);
         let friction = if trace.fraction == 1.0 {
             SV_FRICTION * SV_EDGEFRICTION
         } else {
@@ -2224,7 +2227,7 @@ impl Server {
             ];
             let mins = self.vm.ent_get_vector(ent, "mins");
             let maxs = self.vm.ent_get_vector(ent, "maxs");
-            let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent);
+            let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false);
 
             if trace.allsolid {
                 // entity is trapped in another solid: stop dead.
@@ -2485,7 +2488,25 @@ impl MoveTrace {
 /// The whole scan runs inside one [`Vm::with_host`] so the host is borrowed out
 /// exactly once; no QuakeC executes here (touch functions run later, with the
 /// host present).
-pub fn sv_move(vm: &mut Vm, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3, ignore: i32) -> MoveTrace {
+///
+/// `nomonsters` implements the C `MOVE_NOMONSTERS` flag (world.c
+/// `SV_ClipToLinks`: `if (type == MOVE_NOMONSTERS && touch->v.solid !=
+/// SOLID_BSP) continue;`). When set, the scan clips only against the world and
+/// `SOLID_BSP` brush submodels (doors/plats), skipping every `SOLID_BBOX` /
+/// `SOLID_SLIDEBOX` box (monsters, items, and the player). This is what the QC
+/// `visible()` helper relies on: its sight-line `traceline(..., TRUE, self)`
+/// must pass *through* the player's own box and reach `trace_fraction == 1.0`,
+/// otherwise FindTarget's `if (!visible(client)) return;` bails and the monster
+/// never latches `self.enemy`.
+pub fn sv_move(
+    vm: &mut Vm,
+    start: Vec3,
+    end: Vec3,
+    mins: Vec3,
+    maxs: Vec3,
+    ignore: i32,
+    nomonsters: bool,
+) -> MoveTrace {
     vm.with_host(|vm, host| {
         let bsp = host.bsp();
 
@@ -2509,6 +2530,13 @@ pub fn sv_move(vm: &mut Vm, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3, igno
             }
 
             let solid = vm.ent_get_float(ei, "solid") as i32;
+
+            // MOVE_NOMONSTERS: clip only against the world + SOLID_BSP bmodels;
+            // skip every box entity (monsters, items, and the player itself).
+            if nomonsters && solid != SOLID_BSP {
+                continue;
+            }
+
             let origin = vm.ent_get_vector(ei, "origin");
 
             let tr = match solid {
@@ -2751,7 +2779,7 @@ pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
     let mid_stop: Vec3 = [mid_x, mid_y, stop_z];
     // SV_Move(start, vec3_origin, vec3_origin, stop, true, ent): a *point* move
     // (mins=maxs=0) that ignores the monster itself.
-    let tr = sv_move(vm, mid_start, mid_stop, [0.0; 3], [0.0; 3], ent);
+    let tr = sv_move(vm, mid_start, mid_stop, [0.0; 3], [0.0; 3], ent, false);
     if tr.fraction == 1.0 {
         return false; // no floor under the midpoint
     }
@@ -2763,7 +2791,7 @@ pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
         for &y in &[mins[1], maxs[1]] {
             let cstart: Vec3 = [x, y, start_z];
             let cstop: Vec3 = [x, y, stop_z];
-            let tr = sv_move(vm, cstart, cstop, [0.0; 3], [0.0; 3], ent);
+            let tr = sv_move(vm, cstart, cstop, [0.0; 3], [0.0; 3], ent, false);
             if tr.fraction != 1.0 && tr.endpos[2] > bottom {
                 bottom = tr.endpos[2];
             }
@@ -2809,7 +2837,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                     neworg[2] += 8.0;
                 }
             }
-            let tr = sv_move(vm, oldorg, neworg, ent_mins, ent_maxs, ent);
+            let tr = sv_move(vm, oldorg, neworg, ent_mins, ent_maxs, ent, false);
             if tr.fraction == 1.0 {
                 // A swim monster that would leave water cannot make this move.
                 if flags & FL_SWIM != 0 {
@@ -2840,7 +2868,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     let mut end = neworg;
     end[2] -= world::STEPSIZE * 2.0;
 
-    let mut tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent);
+    let mut tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent, false);
 
     if tr.allsolid {
         return false;
@@ -2848,7 +2876,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     if tr.startsolid {
         // Back the start down a step and retry (the C's startsolid retry).
         neworg[2] -= world::STEPSIZE;
-        tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent);
+        tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent, false);
         if tr.allsolid || tr.startsolid {
             return false;
         }
@@ -3204,9 +3232,11 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
     let pl_ofs = vm.ent_get_vector(player, "view_ofs");
     let target = v_add(pl_org, pl_ofs);
 
-    // World-only line of sight: ignore the monster itself; a clear trace
-    // (fraction == 1) or one that stops on the player means it is visible.
-    let tr = sv_move(vm, view, target, [0.0; 3], [0.0; 3], self_e);
+    // World-only line of sight (MOVE_NOMONSTERS, matching C PF_checkclient):
+    // ignore the monster itself and skip every box entity, so the trace clips
+    // only the world + SOLID_BSP bmodels. A clear trace (fraction == 1) means
+    // the player is visible.
+    let tr = sv_move(vm, view, target, [0.0; 3], [0.0; 3], self_e, true);
     let visible = tr.fraction == 1.0 || tr.ent == player;
 
     vm.ret_entity(if visible { player } else { 0 });
@@ -4164,12 +4194,45 @@ mod tests {
             [200.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
-            -1, // ignore nothing
+            -1,    // ignore nothing
+            false, // clip all solids
         );
 
         assert!(tr.fraction < 1.0, "the move was clipped, got {}", tr.fraction);
         assert_eq!(tr.ent, blocker, "the SOLID_BBOX edict was the blocker");
         assert!(tr.endpos[0] < 84.0, "stopped before the box, got {}", tr.endpos[0]);
+    }
+
+    #[test]
+    fn sv_move_nomonsters_passes_through_box_entity() {
+        // MOVE_NOMONSTERS must skip SOLID_BBOX / SOLID_SLIDEBOX boxes: the same
+        // box that blocks an ordinary move is transparent to a nomonsters
+        // trace, so the move reaches the far end at fraction 1.0. This is the
+        // semantics QC visible() relies on for passive sight acquisition.
+        let (img, _touch, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let blocker = server.vm.spawn();
+        server.vm.ent_set_float(blocker, "solid", SOLID_SLIDEBOX as f32);
+        server.vm.ent_set_vector(blocker, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(blocker, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(blocker, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(blocker, "absmin", [84.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(blocker, "absmax", [116.0, 16.0, 16.0]);
+
+        let tr = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            -1,   // ignore nothing
+            true, // MOVE_NOMONSTERS: skip box entities
+        );
+
+        assert_eq!(tr.fraction, 1.0, "nomonsters trace passed through the box");
+        assert_eq!(tr.ent, -1, "clear move hit nothing");
     }
 
     #[test]
@@ -4192,6 +4255,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
             blocker, // ignore the blocker
+            false,   // clip all solids
         );
         assert_eq!(tr.fraction, 1.0, "ignored edict did not block");
         assert_eq!(tr.ent, -1, "clear move hit nothing");
