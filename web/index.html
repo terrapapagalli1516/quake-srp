@@ -32,6 +32,7 @@
     <button id="walkBtn">🚶 walk e1m1</button> &nbsp; <button id="demoBtn">▶ play demo1 (e1m3)</button>
     &nbsp; <button id="fs">⛶ fullscreen (F)</button> &nbsp; <button id="sndBtn">🔊 sound (Space)</button><br>
     <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn<br>
+    <b>click</b> fire &nbsp;·&nbsp; <b>1–8</b> select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)<br>
     dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM
   </div>
 <script>
@@ -48,6 +49,13 @@ addEventListener('keydown', e => {
   keys[k] = true;
   if (k === 'f') toggleFullscreen();
   if (k === ' ') playSound();
+  // Weapon select: number keys 1-8 queue the matching QuakeC impulse
+  // (1 axe, 2 shotgun, 3 super shotgun, 4 nailgun, 5 super nailgun,
+  // 6 grenade launcher, 7 rocket launcher, 8 lightning) on the next frame.
+  if (!e.repeat && k >= '1' && k <= '8' && exp && exp.set_impulse) {
+    exp.set_impulse(parseInt(k, 10));
+    e.preventDefault();
+  }
   if (MOVE_KEYS.includes(k)) e.preventDefault();
 });
 addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });

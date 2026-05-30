@@ -54,6 +54,10 @@ struct Walk {
     in_fwd: f32,
     in_side: f32,
     in_attack: bool,
+    /// A one-shot impulse (weapon switch etc.) queued by `set_impulse`, applied
+    /// to the next `step_walk` UserCmd then cleared — matching how Quake's
+    /// `impulse` console command fires once. 0 means "no impulse this frame".
+    next_impulse: i32,
     /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
     /// the animated special surfaces: liquid warp + sky scroll in the renderer.
     clock: f32,
@@ -167,6 +171,7 @@ fn build_walk() -> Option<Walk> {
         in_fwd: 0.0,
         in_side: 0.0,
         in_attack: false,
+        next_impulse: 0,
         clock: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
@@ -265,6 +270,18 @@ pub extern "C" fn set_attack(on: i32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.in_attack = on != 0;
+        }
+    });
+}
+
+/// Queue a one-shot impulse for the next frame (e.g. weapon select: 1 = axe,
+/// 2 = shotgun, 3 = super shotgun, 4 = nailgun, ... — exactly the QuakeC
+/// `impulse` numbers). Applied to the next `step_walk` UserCmd then cleared.
+#[no_mangle]
+pub extern "C" fn set_impulse(n: i32) {
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            w.next_impulse = n;
         }
     });
 }
@@ -583,8 +600,12 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         yaw: w.yaw,
         pitch: w.pitch,
         buttons: if w.in_attack { 1 } else { 0 },
-        impulse: 0,
+        impulse: w.next_impulse,
     };
+    // A queued impulse fires once (the server also clears the edict field after
+    // ImpulseCommands, but clearing here guarantees a held key fires a single
+    // weapon switch rather than re-selecting every frame).
+    w.next_impulse = 0;
     let _ = w.server.client_frame(&cmd, dt);
 
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
