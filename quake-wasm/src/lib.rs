@@ -20,8 +20,9 @@ use quake_rs::mdl::Mdl;
 use quake_rs::pak::Pak;
 use quake_rs::particles::{Lcg, ParticleSystem};
 use quake_rs::progs::Progs;
-use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
+use quake_rs::render::{self, Camera, Menu, MenuAction, MenuPics, ModelInstance, Viewmodel};
 use quake_rs::server::{Server, TempEntityEvent, UserCmd};
+use quake_rs::wad::Qpic;
 
 static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
 
@@ -77,6 +78,15 @@ struct Walk {
     /// each frame from the drained temp entities + the server's entity_dlights,
     /// decayed under `advance`, and passed to the renderer to light the walls.
     dlights: DynamicLights,
+    /// The main-menu engine + its pre-loaded pics. Quake boots INTO the menu over
+    /// the e1m1 frame; while `menu.visible`, gameplay input is gated (the world
+    /// still idles) and `draw_menu` overlays the frame.
+    menu: Menu,
+    /// The menu's plaque/title/list/cursor pics, loaded once at boot from the pak.
+    menu_pics: MenuPics,
+    /// The 128x128 `conchars` font atlas (wrapped as a Qpic) for `draw_string`,
+    /// or `None` if `gfx.wad`/conchars were absent.
+    conchars: Option<Qpic>,
 }
 
 /// Recorded-demo playback state.
@@ -148,6 +158,47 @@ fn pak() -> Option<quake_rs::pak::Pak> {
     quake_rs::pak::Pak::from_bytes("pak0.pak".into(), PAK.to_vec()).ok()
 }
 
+/// Load the main-menu pics from the pak's `.lmp` files (`Qpic::parse` on each)
+/// plus the `conchars` font atlas from `gfx.wad`. Every pic is optional: a pak
+/// missing any one leaves that slot `None` and the menu still draws the rest.
+fn load_menu_pics(
+    pak: &Pak,
+    gfx_wad: Option<&quake_rs::wad::Wad2>,
+) -> (MenuPics, Option<Qpic>) {
+    let lmp = |n: &str| -> Option<Qpic> {
+        pak.read_file(n).ok().flatten().and_then(|b| Qpic::parse(&b).ok())
+    };
+    let mut menudot: [Option<Qpic>; 6] = Default::default();
+    for (i, slot) in menudot.iter_mut().enumerate() {
+        *slot = lmp(&format!("gfx/menudot{}.lmp", i + 1));
+    }
+    let pics = MenuPics {
+        qplaque: lmp("gfx/qplaque.lmp"),
+        ttl_main: lmp("gfx/ttl_main.lmp"),
+        mainmenu: lmp("gfx/mainmenu.lmp"),
+        ttl_sgl: lmp("gfx/ttl_sgl.lmp"),
+        sp_menu: lmp("gfx/sp_menu.lmp"),
+        menudot,
+    };
+
+    // conchars is a raw 128x128 byte block (TYP_MIPTEX, no QPIC header) inside
+    // gfx.wad. Wrap the 16384 lump bytes as a 128x128 Qpic for draw_string.
+    let conchars = gfx_wad.and_then(|w| {
+        let lump = w.lump("conchars")?;
+        let data = w.lump_data(lump).ok()?;
+        if data.len() < 128 * 128 {
+            return None;
+        }
+        Some(Qpic {
+            width: 128,
+            height: 128,
+            data: data[..128 * 128].to_vec(),
+        })
+    });
+
+    (pics, conchars)
+}
+
 fn build_walk() -> Option<Walk> {
     let pak = pak()?;
     let read = |n: &str| pak.read_file(n).ok().flatten();
@@ -157,6 +208,8 @@ fn build_walk() -> Option<Walk> {
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
     // The HUD pics live in gfx.wad; parse it once (None if absent/unparseable).
     let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
+    // The menu pics (.lmp files) + conchars (from gfx.wad), loaded once.
+    let (menu_pics, conchars) = load_menu_pics(&pak, gfx_wad.as_ref());
     let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
@@ -184,6 +237,14 @@ fn build_walk() -> Option<Walk> {
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
         dlights: DynamicLights::new(),
+        // Quake boots INTO the menu over the e1m1 frame.
+        menu: {
+            let mut m = Menu::new();
+            m.open();
+            m
+        },
+        menu_pics,
+        conchars,
     })
 }
 
@@ -292,6 +353,98 @@ pub extern "C" fn set_impulse(n: i32) {
             w.next_impulse = n;
         }
     });
+}
+
+// --- main menu: keyboard navigation exports (ArrowUp/Down, Enter, Escape) ---
+
+/// Move the menu cursor up one item (wraps), porting `K_UPARROW`. No-op when the
+/// menu is hidden.
+#[no_mangle]
+pub extern "C" fn menu_up() {
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            if w.menu.visible {
+                w.menu.move_cursor(-1);
+            }
+        }
+    });
+}
+
+/// Move the menu cursor down one item (wraps), porting `K_DOWNARROW`. No-op when
+/// the menu is hidden.
+#[no_mangle]
+pub extern "C" fn menu_down() {
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            if w.menu.visible {
+                w.menu.move_cursor(1);
+            }
+        }
+    });
+}
+
+/// Activate the highlighted menu item (Enter / `K_ENTER`). On
+/// `MenuAction::NewGame` this rebuilds the walk on a fresh e1m1 (a new Server +
+/// connected client) and closes the menu — the one-button "Single Player > New
+/// Game". Other actions just update visibility/screen (handled inside `select`).
+/// No-op when the menu is hidden.
+#[no_mangle]
+pub extern "C" fn menu_select() {
+    // Decide the action under the borrow, then (if NewGame) rebuild the walk
+    // afterward so we don't hold a &mut Walk while replacing it.
+    let mut start_new_game = false;
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            if w.menu.visible {
+                match w.menu.select() {
+                    MenuAction::NewGame => start_new_game = true,
+                    // Closed/Back/None already applied to the menu state inside
+                    // select(); nothing else for the host to do.
+                    _ => {}
+                }
+            }
+        }
+    });
+    if start_new_game {
+        // Fresh single-player game on e1m1 (NEW_GAME_MAP). Rebuild the whole walk
+        // — new Server, new connected client — and leave the menu closed.
+        if let Some(mut nw) = build_walk() {
+            nw.menu.close();
+            ensure_app(|a| {
+                a.walk = Some(nw);
+                a.mode = 0;
+            });
+        }
+    }
+}
+
+/// Back out of the menu (Escape / `K_ESCAPE`): a submenu returns to the main
+/// screen; the main screen closes the menu. If the menu is hidden, OPEN it (so
+/// Escape always reaches the menu, like Quake's `M_ToggleMenu_f` for `key_game`).
+#[no_mangle]
+pub extern "C" fn menu_cancel() {
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            if w.menu.visible {
+                let _ = w.menu.cancel();
+            } else {
+                w.menu.open();
+            }
+        }
+    });
+}
+
+/// 1 when the menu is currently visible (capturing input), else 0. The page
+/// reads this to route Arrow/Enter keys to the menu vs. the game.
+#[no_mangle]
+pub extern "C" fn menu_visible() -> i32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|a| a.walk.as_ref())
+            .map(|w| w.menu.visible as i32)
+            .unwrap_or(0)
+    })
 }
 
 #[no_mangle]
@@ -645,7 +798,14 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // 1. Tick the live server with this frame's input. forwardmove/sidemove are
     //    Quake run speeds; the server's SV_ClientThink turns them into motion and
     //    runs every entity's think (so monsters animate and move).
-    let (mut fwd, mut side) = (w.in_fwd, w.in_side);
+    //
+    //    While the menu is up, gate gameplay input: the world still TICKS (so it
+    //    idles — monsters keep their think schedule, doors finish moving) but the
+    //    player neither moves, fires, nor switches weapons. We send a zeroed
+    //    UserCmd at the current view angles (Quake's `key_dest == key_menu` stops
+    //    feeding the movement/attack/impulse commands the same way).
+    let menu_up = w.menu.visible;
+    let (mut fwd, mut side) = if menu_up { (0.0, 0.0) } else { (w.in_fwd, w.in_side) };
     let mag = (fwd * fwd + side * side).sqrt();
     if mag > 1.0 {
         fwd /= mag;
@@ -657,8 +817,8 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
         upmove: 0.0,
         yaw: w.yaw,
         pitch: w.pitch,
-        buttons: if w.in_attack { 1 } else { 0 },
-        impulse: w.next_impulse,
+        buttons: if !menu_up && w.in_attack { 1 } else { 0 },
+        impulse: if menu_up { 0 } else { w.next_impulse },
     };
     // A queued impulse fires once (the server also clears the edict field after
     // ImpulseCommands, but clearing here guarantees a held key fires a single
@@ -893,6 +1053,20 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
             armor: stat("armorvalue"),
         };
         render::draw_hud_into(&mut img, &hud);
+    }
+
+    // 7. Main menu overlay: Quake boots into it and it stays on top of the game
+    //    frame (world + HUD) until dismissed. Drawn last so it sits above
+    //    everything. Skipped silently when not visible.
+    if w.menu.visible {
+        render::draw_menu(
+            &mut img,
+            &w.menu,
+            &w.menu_pics,
+            w.conchars.as_ref(),
+            w.clock,
+            &w.palette,
+        );
     }
     img
 }

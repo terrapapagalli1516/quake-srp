@@ -33,6 +33,7 @@
     &nbsp; <button id="fs">⛶ fullscreen (F)</button> &nbsp; <button id="sndBtn">🔊 sound (Space)</button><br>
     <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn<br>
     <b>click</b> fire &nbsp;·&nbsp; <b>1–8</b> select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)<br>
+    <b>Esc</b> menu &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>Enter</b> select (Single Player → New Game starts e1m1)<br>
     dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM
   </div>
 <script>
@@ -44,8 +45,28 @@ const fsBtn = document.getElementById('fs');
 const keys = {};
 const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' '];
 
+// Is the in-game menu currently up (capturing keyboard)?
+function menuVisible() { return !!(exp && exp.menu_visible && exp.menu_visible()); }
+
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
+  // --- Main menu navigation. Escape always reaches the menu (opens it from the
+  //     game, or backs out within it). When the menu is up, Arrow Up/Down move
+  //     the cursor, Enter selects — and we DON'T let those keys also drive the
+  //     game (no movement/turn while navigating the menu).
+  if (k === 'escape' && exp && exp.menu_cancel) {
+    exp.menu_cancel();
+    e.preventDefault();
+    return;
+  }
+  if (menuVisible()) {
+    if (!e.repeat && (k === 'arrowup') && exp.menu_up)       { exp.menu_up();     e.preventDefault(); return; }
+    if (!e.repeat && (k === 'arrowdown') && exp.menu_down)   { exp.menu_down();   e.preventDefault(); return; }
+    if (!e.repeat && (k === 'enter') && exp.menu_select)     { exp.menu_select(); e.preventDefault(); return; }
+    // Swallow the other gameplay keys so the world stays idle behind the menu.
+    if (MOVE_KEYS.includes(k) || (k >= '1' && k <= '8')) { e.preventDefault(); return; }
+  }
+
   keys[k] = true;
   if (k === 'f') toggleFullscreen();
   if (k === ' ') playSound();

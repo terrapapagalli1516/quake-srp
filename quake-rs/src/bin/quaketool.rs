@@ -58,6 +58,7 @@ fn main() {
         "run" => need(rest, 2, cmd).and_then(|a| cmd_run(&a[0], &a[1])),
         "render" => need(rest, 2, cmd).and_then(|a| cmd_render(&a[0], &a[1], a.get(2).map(|s| s.as_str()))),
         "render-demo" => need(rest, 1, cmd).and_then(|a| cmd_render_demo(&a[0])),
+        "menu" => need(rest, 2, cmd).and_then(|a| cmd_menu(&a[0], &a[1])),
         "scene" => need(rest, 3, cmd).and_then(|a| cmd_scene(&a[0], &a[1], &a[2])),
         "walk" => need(rest, 3, cmd).and_then(|a| {
             cmd_walk(&a[0], &a[1], &a[2], a.get(3).and_then(|s| s.parse().ok()).unwrap_or(40))
@@ -121,6 +122,7 @@ fn usage() {
          \tquaketool run  <progs.dat> <fn>  execute a QuakeC function, show output + return\n\
          \tquaketool render <bsp> <out.ppm>  software-render a BSP to a PPM image\n\
          \tquaketool render-demo <out.ppm>   render the built-in demo room\n\
+         \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
@@ -1312,6 +1314,83 @@ fn cmd_render_demo(out: &str) -> Result<Out, String> {
         img.w,
         img.h
     )))
+}
+
+/// `menu <pak> <out.ppm>`: boot e1m1 from the pak, software-render its POV, draw
+/// the iconic MAIN menu (a port of `M_Main_Draw`) over it, and write the PPM —
+/// the menu can then be eyeballed. A missing pak/map/palette is a clean error;
+/// any missing menu pic is skipped (the rest still draws), and if the POV cannot
+/// render the menu is drawn over a black frame instead so the command never fails
+/// just because the world didn't load.
+fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
+    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let read = |n: &str| -> Result<Vec<u8>, String> {
+        pak.read_file(n).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} not found"))
+    };
+
+    // Palette is required to colour both the world and the menu pics.
+    let palette = render::parse_palette(&read("gfx/palette.lmp")?)
+        .ok_or("bad palette (need >= 768 bytes)")?;
+
+    // The POV background: render e1m1 from the player spawn if we can; otherwise
+    // fall back to a black 320x200 frame (the menu is the point of this command).
+    const W: usize = 320;
+    const H: usize = 200;
+    let (mut img, bg) = match read("maps/e1m1.bsp").ok().and_then(|b| Bsp::parse(&b).ok()) {
+        Some(b) => {
+            let cam = camera_for_bsp(&b);
+            (render::render_bsp_textured(&b, &cam, W, H, &palette), "e1m1 POV")
+        }
+        None => (render::Image::new(W, H, [0, 0, 0]), "black frame"),
+    };
+
+    // Load the menu pics from the pak's .lmp files (each optional) + conchars
+    // (raw 128x128 block) from gfx.wad.
+    let lmp = |n: &str| -> Option<quake_rs::wad::Qpic> {
+        pak.read_file(n).ok().flatten().and_then(|b| quake_rs::wad::Qpic::parse(&b).ok())
+    };
+    let mut menudot: [Option<quake_rs::wad::Qpic>; 6] = Default::default();
+    for (i, slot) in menudot.iter_mut().enumerate() {
+        *slot = lmp(&format!("gfx/menudot{}.lmp", i + 1));
+    }
+    let present = |o: &Option<quake_rs::wad::Qpic>| o.is_some();
+    let pics = render::MenuPics {
+        qplaque: lmp("gfx/qplaque.lmp"),
+        ttl_main: lmp("gfx/ttl_main.lmp"),
+        mainmenu: lmp("gfx/mainmenu.lmp"),
+        ttl_sgl: lmp("gfx/ttl_sgl.lmp"),
+        sp_menu: lmp("gfx/sp_menu.lmp"),
+        menudot,
+    };
+    let conchars = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok()).and_then(|w| {
+        let lump = w.lump("conchars")?;
+        let data = w.lump_data(lump).ok()?;
+        if data.len() < 128 * 128 {
+            return None;
+        }
+        Some(quake_rs::wad::Qpic { width: 128, height: 128, data: data[..128 * 128].to_vec() })
+    });
+
+    // Open the MAIN menu and draw it over the POV (host_time fixed so the cursor
+    // frame is reproducible).
+    let mut menu = render::Menu::new();
+    menu.open();
+    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, &palette);
+
+    img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
+
+    let mut o = String::new();
+    let _ = writeln!(o, "drew the MAIN menu over the {bg} -> {out} ({}x{} PPM)", img.w, img.h);
+    let _ = writeln!(
+        o,
+        "  pics: qplaque={} ttl_main={} mainmenu={} menudot={}/6 conchars={}",
+        present(&pics.qplaque),
+        present(&pics.ttl_main),
+        present(&pics.mainmenu),
+        pics.menudot.iter().filter(|d| d.is_some()).count(),
+        conchars.is_some()
+    );
+    Ok(Out::Text(o))
 }
 
 /// A vivid, deterministic RGB colour derived from a model name. (We don't reuse

@@ -89,6 +89,42 @@ pub struct Qpic {
     pub data: Vec<u8>,
 }
 
+impl Qpic {
+    /// Parse a raw `qpic_t` / `.lmp` picture out of `bytes`.
+    ///
+    /// The stock menu/HUD art (`gfx/qplaque.lmp`, `gfx/mainmenu.lmp`,
+    /// `gfx/menudot1.lmp`, …) ships as standalone `.lmp` files inside the PAK,
+    /// each laid out exactly like a `TYP_QPIC` WAD lump: two little-endian `i32`
+    /// dimensions (`SwapPic` byte-swaps them) followed by `width * height` bytes
+    /// of 8-bit palette indices. This is the same decode [`Wad2::qpic`] does, but
+    /// on a borrowed buffer rather than a WAD directory entry.
+    ///
+    /// Every field is bounds-checked: negative dimensions, a `width * height`
+    /// overflow, or a buffer shorter than `8 + width * height` all return a
+    /// [`QError`] rather than reading out of bounds or panicking. (Trailing bytes
+    /// past the pixel payload are ignored, exactly as the C `Draw_CachePic` cast
+    /// only the header + the pixels it needed.)
+    pub fn parse(bytes: &[u8]) -> Result<Qpic> {
+        let mut r = Reader::new(bytes);
+        let width = r.i32()?;
+        let height = r.i32()?;
+        if width < 0 || height < 0 {
+            return Err(QError::invalid(format!(
+                "qpic: negative dimensions {width}x{height}"
+            )));
+        }
+        let pixels = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| QError::invalid("qpic: size overflow"))?;
+        let data = r.take(pixels)?.to_vec();
+        Ok(Qpic {
+            width,
+            height,
+            data,
+        })
+    }
+}
+
 /// A parsed WAD2 archive that owns its backing bytes.
 ///
 /// Mirrors the C globals `wad_base` / `wad_numlumps` / `wad_lumps`, but scoped
@@ -508,6 +544,43 @@ mod tests {
         bytes.extend_from_slice(&5i32.to_le_bytes());
         bytes.extend_from_slice(&(WADINFO_SIZE as i32).to_le_bytes());
         assert!(Wad2::parse(bytes).is_err());
+    }
+
+    #[test]
+    fn qpic_parse_reads_raw_lmp() {
+        // A 3x2 raw QPIC: width i32, height i32, then 6 palette indices.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&3i32.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        let pixels = [1u8, 2, 3, 4, 5, 6];
+        bytes.extend_from_slice(&pixels);
+        // A few trailing bytes are ignored (the cast only needed the payload).
+        bytes.extend_from_slice(&[0xAA, 0xBB]);
+
+        let pic = Qpic::parse(&bytes).expect("parse raw lmp");
+        assert_eq!(pic.width, 3);
+        assert_eq!(pic.height, 2);
+        assert_eq!(pic.data, pixels.to_vec());
+    }
+
+    #[test]
+    fn qpic_parse_rejects_short_and_bad_buffers_without_panic() {
+        // Too short for even the 8-byte header.
+        assert!(Qpic::parse(&[]).is_err());
+        assert!(Qpic::parse(&[0, 0, 0]).is_err());
+
+        // Header says 4x4 = 16 pixels but only 2 bytes of data follow.
+        let mut short = Vec::new();
+        short.extend_from_slice(&4i32.to_le_bytes());
+        short.extend_from_slice(&4i32.to_le_bytes());
+        short.extend_from_slice(&[7u8, 8]);
+        assert!(Qpic::parse(&short).is_err());
+
+        // Negative dimensions are rejected.
+        let mut neg = Vec::new();
+        neg.extend_from_slice(&(-1i32).to_le_bytes());
+        neg.extend_from_slice(&2i32.to_le_bytes());
+        assert!(Qpic::parse(&neg).is_err());
     }
 
     #[test]

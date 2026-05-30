@@ -3420,6 +3420,501 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 }
 
 // ---------------------------------------------------------------------------
+// Main menu (a port of menu.c: M_Main_Draw/_Key, M_SinglePlayer_Draw/_Key)
+// ---------------------------------------------------------------------------
+//
+// Quake boots INTO this menu (the id logo over the demo loop). It is drawn in the
+// SAME 320x200 virtual space `menu.c` uses, on top of the finished game frame,
+// with index-255 transparent blits. Navigation is keyboard-only: up/down move a
+// 6-frame animated cursor, Enter selects, Escape backs out (or, on the main
+// screen, closes the menu).
+//
+// Faithfulness: the coordinates here are lifted verbatim from `M_Main_Draw` /
+// `M_SinglePlayer_Draw` — qplaque at (16,4), the centered title at y=4, the item
+// list at (72,32), the cursor at (54, 32 + cursor*20), cursor frame
+// `(int)(host_time*10) % 6`. The item *counts* (`MAIN_ITEMS = 5`,
+// `SINGLEPLAYER_ITEMS = 3`) and the cursor wrap come straight from `M_Main_Key` /
+// `M_SinglePlayer_Key`. Selecting Single Player -> New Game maps to the C's
+// `map start` (here we start `e1m1`, the shareware first level).
+//
+// Safety: every pic is an `Option<Qpic>` in [`MenuPics`]; a missing pic is simply
+// skipped (no panic). All blits clip at the framebuffer edges.
+
+/// The virtual screen width/height the menu is authored against (Quake's fixed
+/// 320x200 layout). `M_DrawPic`/`M_DrawTransPic` center this in the real screen
+/// via `(vid.width - 320) >> 1`; here [`draw_menu`] scales/centers instead.
+const MENU_VIRT_W: f32 = 320.0;
+const MENU_VIRT_H: f32 = 200.0;
+
+/// `MAIN_ITEMS` (menu.c): the main menu has 5 entries.
+const MAIN_ITEMS: usize = 5;
+/// `SINGLEPLAYER_ITEMS` (menu.c): the single-player menu has 3 entries.
+const SINGLEPLAYER_ITEMS: usize = 3;
+
+/// The shareware first level New Game starts. The C ran `map start`; `start.bsp`
+/// is the hub that drops the player into `e1m1`, but for a one-button New Game we
+/// jump straight to `e1m1` (the playable first map present in the shareware pak).
+pub const NEW_GAME_MAP: &str = "maps/e1m1.bsp";
+
+/// Which menu screen is showing. Mirrors the relevant `m_state` values from
+/// menu.c (`m_main`, `m_singleplayer`); the other states (load/save/options/…)
+/// are out of scope for this port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuScreen {
+    /// The top-level menu (`m_main`): Single Player / Multiplayer / Options /
+    /// Help / Quit.
+    Main,
+    /// The single-player submenu (`m_singleplayer`): New Game / Load / Save.
+    SinglePlayer,
+}
+
+impl MenuScreen {
+    /// The number of selectable items on this screen (the cursor wraps within it).
+    fn item_count(self) -> usize {
+        match self {
+            MenuScreen::Main => MAIN_ITEMS,
+            MenuScreen::SinglePlayer => SINGLEPLAYER_ITEMS,
+        }
+    }
+}
+
+/// What pressing Enter (or the menu closing) asks the host to do. The wasm/tool
+/// front-end turns these into engine actions (e.g. [`MenuAction::NewGame`]
+/// rebuilds the walk on [`NEW_GAME_MAP`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    /// Nothing to do (the selection only changed the screen, or the item is not
+    /// implemented in this port — Multiplayer/Options/Help/Load/Save).
+    None,
+    /// Start a fresh single-player game on [`NEW_GAME_MAP`] and close the menu.
+    NewGame,
+    /// Backed out of a submenu to the main screen (Escape on a submenu).
+    Back,
+    /// The menu just closed (Escape on the main screen, or Quit).
+    Closed,
+}
+
+/// The keyboard-driven main-menu engine: the visible flag, the current screen,
+/// and the cursor index within it. A port of menu.c's `m_state` + the
+/// `m_*_cursor` globals, scoped to an instance rather than file-statics.
+///
+/// The host calls [`open`](Menu::open)/[`close`](Menu::close)/[`toggle`](Menu::toggle)
+/// to show/hide it, [`move_cursor`](Menu::move_cursor) on up/down, and
+/// [`select`](Menu::select)/[`cancel`](Menu::cancel) on Enter/Escape; the returned
+/// [`MenuAction`] tells the host what to do. [`draw_menu`] renders the current
+/// state.
+#[derive(Debug, Clone)]
+pub struct Menu {
+    /// Whether the menu is showing (drawn + capturing input). Quake's `key_dest ==
+    /// key_menu`.
+    pub visible: bool,
+    /// The screen currently displayed.
+    screen: MenuScreen,
+    /// The highlighted item index on the current screen (`0..item_count`).
+    cursor: usize,
+}
+
+impl Default for Menu {
+    fn default() -> Self {
+        Menu::new()
+    }
+}
+
+impl Menu {
+    /// A closed menu sitting on the main screen with the cursor on the first item.
+    pub fn new() -> Menu {
+        Menu {
+            visible: false,
+            screen: MenuScreen::Main,
+            cursor: 0,
+        }
+    }
+
+    /// The screen currently displayed.
+    pub fn screen(&self) -> MenuScreen {
+        self.screen
+    }
+
+    /// The highlighted item index on the current screen.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Open the menu on the main screen (`M_Menu_Main_f`): show it and reset to the
+    /// top-level screen with the cursor on the first item.
+    pub fn open(&mut self) {
+        self.visible = true;
+        self.screen = MenuScreen::Main;
+        self.cursor = 0;
+    }
+
+    /// Close the menu (`key_dest = key_game`). Leaves the screen/cursor as they
+    /// were so a later `open` resets them.
+    pub fn close(&mut self) {
+        self.visible = false;
+    }
+
+    /// Toggle the menu (`M_ToggleMenu_f`): if hidden, open on the main screen; if
+    /// showing a submenu, go back to main; if already on the main screen, close.
+    /// Returns the resulting [`MenuAction`] (`Closed` when it closed, else `None`).
+    pub fn toggle(&mut self) -> MenuAction {
+        if !self.visible {
+            self.open();
+            MenuAction::None
+        } else if self.screen != MenuScreen::Main {
+            self.screen = MenuScreen::Main;
+            self.cursor = 0;
+            MenuAction::Back
+        } else {
+            self.close();
+            MenuAction::Closed
+        }
+    }
+
+    /// Move the cursor by `delta` (down = +1, up = -1), wrapping within the current
+    /// screen's item count — exactly the `++/--` wrap in `M_Main_Key` /
+    /// `M_SinglePlayer_Key`. `delta` may be any magnitude; it wraps modulo the
+    /// item count.
+    pub fn move_cursor(&mut self, delta: i32) {
+        let n = self.screen.item_count();
+        if n == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let n_i = n as i32;
+        // Wrap into 0..n even for large / negative deltas.
+        let next = (self.cursor as i32 + delta).rem_euclid(n_i);
+        self.cursor = next as usize;
+    }
+
+    /// Activate the highlighted item (Enter / `K_ENTER`).
+    ///
+    /// * Main > Single Player: switch to the single-player screen, cursor reset
+    ///   ([`MenuAction::None`]).
+    /// * Main > Multiplayer/Options/Help: unimplemented here ([`MenuAction::None`]).
+    /// * Main > Quit: close the menu ([`MenuAction::Closed`]).
+    /// * SinglePlayer > New Game: [`MenuAction::NewGame`] and close the menu (the
+    ///   host starts [`NEW_GAME_MAP`]).
+    /// * SinglePlayer > Load/Save: unimplemented here ([`MenuAction::None`]).
+    pub fn select(&mut self) -> MenuAction {
+        match self.screen {
+            MenuScreen::Main => match self.cursor {
+                0 => {
+                    // M_Menu_SinglePlayer_f
+                    self.screen = MenuScreen::SinglePlayer;
+                    self.cursor = 0;
+                    MenuAction::None
+                }
+                // Multiplayer / Options / Help: not ported. Quit closes the menu
+                // (the C pops a confirm screen; here Quit just dismisses the menu).
+                4 => {
+                    self.close();
+                    MenuAction::Closed
+                }
+                _ => MenuAction::None,
+            },
+            MenuScreen::SinglePlayer => match self.cursor {
+                0 => {
+                    // New Game: the C runs `map start`; we start e1m1 and close.
+                    self.close();
+                    self.screen = MenuScreen::Main;
+                    self.cursor = 0;
+                    MenuAction::NewGame
+                }
+                // Load / Save: not ported.
+                _ => MenuAction::None,
+            },
+        }
+    }
+
+    /// Back out (Escape / `K_ESCAPE`): on a submenu return to the main screen
+    /// ([`MenuAction::Back`]); on the main screen close the menu
+    /// ([`MenuAction::Closed`]). Calling on a hidden menu is a no-op
+    /// ([`MenuAction::None`]).
+    pub fn cancel(&mut self) -> MenuAction {
+        if !self.visible {
+            return MenuAction::None;
+        }
+        match self.screen {
+            MenuScreen::SinglePlayer => {
+                // M_SinglePlayer_Key K_ESCAPE -> M_Menu_Main_f
+                self.screen = MenuScreen::Main;
+                self.cursor = 0;
+                MenuAction::Back
+            }
+            MenuScreen::Main => {
+                // M_Main_Key K_ESCAPE -> key_dest = key_game
+                self.close();
+                MenuAction::Closed
+            }
+        }
+    }
+}
+
+/// The menu's pre-loaded picture bundle: the plaque, both titles, both item-list
+/// graphics, and the 6-frame animated cursor. Each is an `Option` so a pak
+/// missing any one degrades gracefully — [`draw_menu`] skips a `None` pic rather
+/// than panicking.
+///
+/// Built once at boot from the PAK's `.lmp` files via [`crate::wad::Qpic::parse`].
+#[derive(Debug, Clone, Default)]
+pub struct MenuPics {
+    /// `gfx/qplaque.lmp` — the decorative left plaque (drawn at (16,4)).
+    pub qplaque: Option<crate::wad::Qpic>,
+    /// `gfx/ttl_main.lmp` — the "MAIN" title (centered at y=4 on the main screen).
+    pub ttl_main: Option<crate::wad::Qpic>,
+    /// `gfx/mainmenu.lmp` — the 5-item main menu list graphic (drawn at (72,32)).
+    pub mainmenu: Option<crate::wad::Qpic>,
+    /// `gfx/ttl_sgl.lmp` — the single-player title (centered at y=4).
+    pub ttl_sgl: Option<crate::wad::Qpic>,
+    /// `gfx/sp_menu.lmp` — the 3-item single-player list graphic (drawn at (72,32)).
+    pub sp_menu: Option<crate::wad::Qpic>,
+    /// `gfx/menudot1.lmp`..`menudot6.lmp` — the 6-frame animated cursor.
+    pub menudot: [Option<crate::wad::Qpic>; 6],
+}
+
+/// Blit one `Qpic` with its top-left at virtual `(vx, vy)` in [`MENU_VIRT_W`] x
+/// [`MENU_VIRT_H`] space, scaled by `scale` and offset by `(ox, oy)` framebuffer
+/// pixels (so the virtual canvas can be centered in a wider/taller frame).
+/// Index-255 texels are transparent; every write clips at the framebuffer edge.
+///
+/// This is the top-left-anchored sibling of [`blit_qpic`] (which bottom-anchors
+/// the HUD). At `scale = 1.0`, `ox = oy = 0` a virtual `(vx, vy)` lands at the
+/// framebuffer pixel `(vx, vy)` — the case the 320x200 wasm framebuffer uses, so
+/// the menu coordinates from menu.c are used directly with no transform.
+fn blit_qpic_at(
+    image: &mut Image,
+    pic: &crate::wad::Qpic,
+    vx: f32,
+    vy: f32,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if pic.width <= 0 || pic.height <= 0 || scale <= 0.0 {
+        return;
+    }
+    let pw = pic.width as usize;
+    let ph = pic.height as usize;
+    if pic.data.len() < pw.saturating_mul(ph) {
+        return;
+    }
+
+    let dst_x0 = (ox + vx * scale).floor() as i64;
+    let dst_y0 = (oy + vy * scale).floor() as i64;
+    let dst_w = (pw as f32 * scale).round().max(1.0) as i64;
+    let dst_h = (ph as f32 * scale).round().max(1.0) as i64;
+    let inv_scale = 1.0 / scale;
+
+    for dy in 0..dst_h {
+        let py = dst_y0 + dy;
+        if py < 0 || py >= image.h as i64 {
+            continue;
+        }
+        let sy = (dy as f32 * inv_scale) as usize;
+        if sy >= ph {
+            continue;
+        }
+        for dx in 0..dst_w {
+            let px = dst_x0 + dx;
+            if px < 0 || px >= image.w as i64 {
+                continue;
+            }
+            let sx = (dx as f32 * inv_scale) as usize;
+            if sx >= pw {
+                continue;
+            }
+            let texel = match pic.data.get(sy * pw + sx) {
+                Some(&t) => t,
+                None => continue,
+            };
+            if texel == HUD_TRANSPARENT {
+                continue;
+            }
+            image.put(px as i32, py as i32, palette[texel as usize]);
+        }
+    }
+}
+
+/// Draw a string of console characters using the 128x128 `conchars` font atlas, a
+/// port of Quake's `Draw_String`/`Draw_Character` (`draw.c`).
+///
+/// `conchars` is the 16x16 grid of 8x8 glyphs (so byte `c`'s glyph sits at cell
+/// `(c % 16, c / 16)`, i.e. source pixel `(8*(c%16), 8*(c/16))`). Each character of
+/// `text` is stamped 8 virtual pixels apart starting at virtual `(x, y)` in
+/// 320x200 space, scaled by `scale` and offset by `(ox, oy)` framebuffer pixels —
+/// the same transform [`blit_qpic_at`] uses, so font text lines up with the menu
+/// pics.
+///
+/// Glyph index 0 (the transparent "space" cell whose texels are palette index 0)
+/// and the ASCII space are skipped without drawing. Glyph texels equal to palette
+/// index 0 are treated as transparent (the conchars atlas uses 0 for the glyph
+/// background). The atlas being too small / a glyph cell falling outside it is a
+/// silent skip — never a panic.
+///
+/// The conchars lump in `gfx.wad` is a raw 128x128 byte block (no QPIC header);
+/// callers wrap it as a [`crate::wad::Qpic`] with `width = height = 128` and the
+/// 16384 lump bytes as `data`.
+pub fn draw_string(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    x: i32,
+    y: i32,
+    text: &str,
+    palette: &[[u8; 3]; 256],
+) {
+    draw_string_scaled(image, conchars, x as f32, y as f32, text, 1.0, 0.0, 0.0, palette);
+}
+
+/// The scaled/offset core of [`draw_string`]; the menu draw uses this to place
+/// labels in the same scaled+centered virtual space as the pics.
+#[allow(clippy::too_many_arguments)]
+fn draw_string_scaled(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    vx: f32,
+    vy: f32,
+    text: &str,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if conchars.width <= 0 || conchars.height <= 0 || scale <= 0.0 {
+        return;
+    }
+    let cw = conchars.width as usize;
+    if conchars.data.len() < cw.saturating_mul(conchars.height as usize) {
+        return;
+    }
+    // The atlas is a 16x16 grid; each glyph is (width/16)x(height/16) source px.
+    let cell_w = (conchars.width / 16).max(1) as usize;
+    let cell_h = (conchars.height / 16).max(1) as usize;
+
+    let mut pen_vx = vx;
+    for ch in text.bytes() {
+        // Skip the transparent "space" glyphs (byte 0 and ASCII space): they only
+        // hold palette-0 texels, so drawing them is a no-op anyway — but skipping
+        // is cheaper and matches the menu's M_Print spacing.
+        if ch != 0 && ch != b' ' {
+            let cell_x = (ch as usize % 16) * cell_w;
+            let cell_y = (ch as usize / 16) * cell_h;
+            for gy in 0..cell_h {
+                let sy = cell_y + gy;
+                if sy >= conchars.height as usize {
+                    break;
+                }
+                let py = (oy + (vy + gy as f32) * scale).floor() as i64;
+                for gx in 0..cell_w {
+                    let sx = cell_x + gx;
+                    if sx >= cw {
+                        break;
+                    }
+                    let texel = match conchars.data.get(sy * cw + sx) {
+                        Some(&t) => t,
+                        None => continue,
+                    };
+                    // The conchars atlas uses palette index 0 as the glyph's
+                    // transparent background; only stamp the lit texels.
+                    if texel == 0 {
+                        continue;
+                    }
+                    let px = (ox + (pen_vx + gx as f32) * scale).floor() as i64;
+                    // Stamp a scale x scale block so the glyph is solid when
+                    // upscaled (nearest-neighbour); at scale 1 this is one pixel.
+                    let block = scale.ceil().max(1.0) as i64;
+                    for by in 0..block {
+                        for bx in 0..block {
+                            image.put((px + bx) as i32, (py + by) as i32, palette[texel as usize]);
+                        }
+                    }
+                }
+            }
+        }
+        pen_vx += 8.0; // M_Print advances the pen 8 virtual px per character.
+    }
+}
+
+/// Draw the main menu (or single-player submenu) over `image`, a port of
+/// `M_Main_Draw` / `M_SinglePlayer_Draw`.
+///
+/// The layout is Quake's fixed 320x200 virtual canvas, scaled to fit `image`
+/// (`scale = min(w/320, h/200)`) and centered, so it looks identical on the
+/// 320x200 wasm framebuffer (scale 1, no offset) and on the 640x400 PPM the tool
+/// writes (scale 2, centered). `time` is the game clock in seconds; the cursor
+/// frame is `(time * 10) as usize % 6` (`(int)(host_time*10) % 6`).
+///
+/// Each pic is fetched from `pics` and skipped if absent (`None`) — a pak missing
+/// the menu art still renders the rest without panicking. `conchars`, when
+/// present, draws the small version label at the bottom (purely cosmetic; the
+/// menu items themselves come from the `mainmenu`/`sp_menu` graphics, exactly as
+/// in Quake).
+pub fn draw_menu(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    time: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if !menu.visible || image.w == 0 || image.h == 0 {
+        return;
+    }
+    // Fit the 320x200 canvas into the frame, centered (integer-ish scale keeps
+    // the pixel art crisp; we allow any positive scale and center the remainder).
+    let sx = image.w as f32 / MENU_VIRT_W;
+    let sy = image.h as f32 / MENU_VIRT_H;
+    let scale = sx.min(sy);
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
+    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+
+    // The animated cursor frame: (int)(host_time*10) % 6. Guard a non-finite /
+    // negative clock so the index stays 0..6.
+    let frame = if time.is_finite() && time > 0.0 {
+        ((time * 10.0) as usize) % 6
+    } else {
+        0
+    };
+
+    // The plaque is shared by both screens (M_DrawTransPic (16,4)).
+    if let Some(p) = &pics.qplaque {
+        blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy, palette);
+    }
+
+    // The centered title + the item-list graphic differ per screen.
+    let (title, list) = match menu.screen {
+        MenuScreen::Main => (&pics.ttl_main, &pics.mainmenu),
+        MenuScreen::SinglePlayer => (&pics.ttl_sgl, &pics.sp_menu),
+    };
+    if let Some(t) = title {
+        // M_DrawPic ((320 - p->width)/2, 4, p).
+        let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+    }
+    if let Some(l) = list {
+        // M_DrawTransPic (72, 32, ...).
+        blit_qpic_at(image, l, 72.0, 32.0, scale, ox, oy, palette);
+    }
+
+    // The animated cursor at (54, 32 + cursor*20).
+    if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
+        let cy = 32.0 + menu.cursor as f32 * 20.0;
+        blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
+    }
+
+    // A small version label along the bottom (cosmetic; uses draw_string so the
+    // conchars font path is exercised faithfully). Quake stamps the version with
+    // the +128 "brown" character range; here we draw plain ASCII.
+    if let Some(cc) = conchars {
+        draw_string_scaled(image, cc, 4.0, MENU_VIRT_H - 12.0, "quake-rs", scale, ox, oy, palette);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -5852,5 +6347,207 @@ mod tests {
             with.rgb.iter().any(|&p| p == [255, 0, 255]),
             "the particle's palette colour must appear in the frame"
         );
+    }
+
+    // -- main menu (Menu engine + draw_menu + draw_string) ------------------
+
+    /// A solid `w*h` Qpic filled with palette index `idx`.
+    fn solid_pic(w: i32, h: i32, idx: u8) -> crate::wad::Qpic {
+        crate::wad::Qpic {
+            width: w,
+            height: h,
+            data: vec![idx; (w * h) as usize],
+        }
+    }
+
+    #[test]
+    fn menu_move_cursor_wraps_within_each_screen() {
+        let mut m = Menu::new();
+        m.open(); // Main: 5 items.
+        assert_eq!(m.screen(), MenuScreen::Main);
+        assert_eq!(m.cursor(), 0);
+        // Down past the end wraps to 0.
+        for expect in [1, 2, 3, 4, 0, 1] {
+            m.move_cursor(1);
+            assert_eq!(m.cursor(), expect);
+        }
+        // Up below 0 wraps to the last item (4).
+        m.move_cursor(-1);
+        assert_eq!(m.cursor(), 0);
+        m.move_cursor(-1);
+        assert_eq!(m.cursor(), 4);
+
+        // On the single-player screen the wrap is modulo 3.
+        m.cursor = 0;
+        let action = m.select(); // Main>Single Player
+        assert_eq!(action, MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::SinglePlayer);
+        for expect in [1, 2, 0, 1] {
+            m.move_cursor(1);
+            assert_eq!(m.cursor(), expect);
+        }
+        // A large delta still wraps correctly.
+        m.cursor = 0;
+        m.move_cursor(7); // 7 % 3 = 1
+        assert_eq!(m.cursor(), 1);
+        m.move_cursor(-7); // back to 0
+        assert_eq!(m.cursor(), 0);
+    }
+
+    #[test]
+    fn menu_select_and_cancel_transitions() {
+        let mut m = Menu::new();
+        m.open();
+
+        // Main > Single Player goes to the submenu, no host action.
+        m.cursor = 0;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::SinglePlayer);
+        assert!(m.visible);
+
+        // SinglePlayer > New Game returns NewGame and closes the menu.
+        m.cursor = 0;
+        assert_eq!(m.select(), MenuAction::NewGame);
+        assert!(!m.visible);
+
+        // Re-open: Escape on a submenu goes Back to Main (still visible).
+        m.open();
+        m.select(); // -> SinglePlayer
+        assert_eq!(m.screen(), MenuScreen::SinglePlayer);
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Main);
+        assert!(m.visible);
+
+        // Escape on Main closes the menu.
+        assert_eq!(m.cancel(), MenuAction::Closed);
+        assert!(!m.visible);
+
+        // Cancel on a hidden menu is a no-op.
+        assert_eq!(m.cancel(), MenuAction::None);
+
+        // Quit (item 4 on Main) closes the menu.
+        m.open();
+        m.cursor = 4;
+        assert_eq!(m.select(), MenuAction::Closed);
+        assert!(!m.visible);
+
+        // Unimplemented Main items (Multiplayer/Options/Help) do nothing.
+        m.open();
+        for c in [1usize, 2, 3] {
+            m.cursor = c;
+            assert_eq!(m.select(), MenuAction::None);
+            assert_eq!(m.screen(), MenuScreen::Main, "item {c} must not change screen");
+            assert!(m.visible);
+        }
+    }
+
+    #[test]
+    fn menu_toggle_open_back_close() {
+        let mut m = Menu::new();
+        // Hidden -> open on Main.
+        assert_eq!(m.toggle(), MenuAction::None);
+        assert!(m.visible);
+        assert_eq!(m.screen(), MenuScreen::Main);
+        // On a submenu, toggle backs out to Main.
+        m.select(); // Main>SinglePlayer
+        assert_eq!(m.toggle(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Main);
+        assert!(m.visible);
+        // On Main, toggle closes.
+        assert_eq!(m.toggle(), MenuAction::Closed);
+        assert!(!m.visible);
+    }
+
+    #[test]
+    fn draw_menu_skips_missing_pics_without_panic() {
+        let pal = ramp_palette();
+        let mut img = Image::new(320, 200, [9, 9, 9]);
+        let before = img.rgb.clone();
+        let mut m = Menu::new();
+        m.open();
+        // All pics absent: nothing should draw, and it must not panic.
+        let pics = MenuPics::default();
+        draw_menu(&mut img, &m, &pics, None, 0.3, &pal);
+        assert_eq!(img.rgb, before, "an all-empty MenuPics must leave the frame untouched");
+
+        // A hidden menu never draws.
+        m.close();
+        let solid = solid_pic(64, 16, 7);
+        let pics2 = MenuPics { mainmenu: Some(solid), ..Default::default() };
+        draw_menu(&mut img, &m, &pics2, None, 0.3, &pal);
+        assert_eq!(img.rgb, before, "a hidden menu must not draw");
+    }
+
+    #[test]
+    fn draw_menu_draws_present_pics_over_background() {
+        let pal = ramp_palette();
+        let mut img = Image::new(320, 200, [9, 9, 9]);
+        let mut m = Menu::new();
+        m.open();
+        // A present mainmenu graphic (opaque index 7 -> a non-background colour)
+        // at (72,32) must change pixels there.
+        let pics = MenuPics {
+            mainmenu: Some(solid_pic(120, 80, 7)),
+            ..Default::default()
+        };
+        draw_menu(&mut img, &m, &pics, None, 0.0, &pal);
+        // At scale 1 on the 320x200 frame, virtual (72,32) maps to pixel (72,32).
+        let idx = 32 * img.w + 72;
+        assert_eq!(img.rgb[idx], pal[7], "the mainmenu pic must paint at (72,32)");
+        assert_ne!(img.rgb[idx], [9, 9, 9], "the pixel must differ from the background");
+        // A corner well outside the pic stays background.
+        assert_eq!(img.rgb[0], [9, 9, 9]);
+    }
+
+    #[test]
+    fn draw_menu_cursor_frame_animates_with_time() {
+        let pal = ramp_palette();
+        let mut m = Menu::new();
+        m.open();
+        // Distinct colours per cursor frame so we can detect which frame drew.
+        let mut menudot: [Option<crate::wad::Qpic>; 6] = Default::default();
+        for (i, slot) in menudot.iter_mut().enumerate() {
+            *slot = Some(solid_pic(20, 20, 10 + i as u8));
+        }
+        let pics = MenuPics { menudot, ..Default::default() };
+
+        // The cursor sits at (54, 32). frame = (time*10) % 6.
+        let cursor_idx = 32 * 320 + 54;
+        let mut img0 = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img0, &m, &pics, None, 0.0, &pal); // frame 0 -> index 10
+        assert_eq!(img0.rgb[cursor_idx], pal[10]);
+
+        let mut img1 = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img1, &m, &pics, None, 0.35, &pal); // (3.5)->3 -> index 13
+        assert_eq!(img1.rgb[cursor_idx], pal[13]);
+    }
+
+    #[test]
+    fn draw_string_writes_glyph_pixels() {
+        let pal = ramp_palette();
+        // A 128x128 conchars where every texel is the lit index 3 EXCEPT the
+        // space cell (byte 32 -> cell (0,2)) which stays at the transparent 0.
+        // With an all-lit atlas, any non-space character stamps index-3 pixels.
+        let mut data = vec![3u8; 128 * 128];
+        // Zero out the byte-0 cell (top-left 8x8) so it's transparent.
+        for y in 0..8 {
+            for x in 0..8 {
+                data[y * 128 + x] = 0;
+            }
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+
+        let mut img = Image::new(64, 16, [0, 0, 0]);
+        draw_string(&mut img, &conchars, 0, 0, "A", &pal);
+        // 'A' = byte 65 = cell (1, 4): source (8, 32). Its texels are lit (index 3),
+        // stamped at the destination starting (0,0). So pixel (0,0) is index 3.
+        assert_eq!(img.rgb[0], pal[3], "the glyph's lit texel must paint");
+        // A space draws nothing past the first char; draw a string and confirm the
+        // second char ('B') lands 8 px to the right.
+        let mut img2 = Image::new(64, 16, [0, 0, 0]);
+        draw_string(&mut img2, &conchars, 0, 0, " B", &pal);
+        // Space is skipped, 'B' starts at virtual x=8.
+        assert_eq!(img2.rgb[8], pal[3], "the second glyph must land 8px right");
+        assert_eq!(img2.rgb[0], [0, 0, 0], "a leading space must draw nothing");
     }
 }
