@@ -200,10 +200,16 @@ fn load_menu_pics(
 }
 
 fn build_walk() -> Option<Walk> {
+    build_walk_map(WALK_MAP)
+}
+
+/// Build a live walk on `map` (a `maps/*.bsp` pak path): boot uses [`WALK_MAP`];
+/// New Game uses [`render::NEW_GAME_MAP`] (the `start` hub).
+fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
     let read = |n: &str| pak.read_file(n).ok().flatten();
-    let bsp = Bsp::parse(&read(WALK_MAP)?).ok()?;
-    let bsp_sim = Bsp::parse(&read(WALK_MAP)?).ok()?;
+    let bsp = Bsp::parse(&read(map)?).ok()?;
+    let bsp_sim = Bsp::parse(&read(map)?).ok()?;
     let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
     // The HUD pics live in gfx.wad; parse it once (None if absent/unparseable).
@@ -416,9 +422,10 @@ pub extern "C" fn menu_select() {
         }
     });
     if start_new_game {
-        // Fresh single-player game on e1m1 (NEW_GAME_MAP). Rebuild the whole walk
-        // — new Server, new connected client — and leave the menu closed.
-        if let Some(mut nw) = build_walk() {
+        // Fresh single-player game on the start hub (NEW_GAME_MAP). Rebuild the
+        // whole walk — new Server, new connected client — and leave the menu
+        // closed. From the hub the player picks skill + episode (changelevel).
+        if let Some(mut nw) = build_walk_map(render::NEW_GAME_MAP) {
             nw.menu.close();
             ensure_app(|a| {
                 a.walk = Some(nw);

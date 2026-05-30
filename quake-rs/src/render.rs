@@ -3584,10 +3584,12 @@ const MAIN_ITEMS: usize = 5;
 /// `SINGLEPLAYER_ITEMS` (menu.c): the single-player menu has 3 entries.
 const SINGLEPLAYER_ITEMS: usize = 3;
 
-/// The shareware first level New Game starts. The C ran `map start`; `start.bsp`
-/// is the hub that drops the player into `e1m1`, but for a one-button New Game we
-/// jump straight to `e1m1` (the playable first map present in the shareware pak).
-pub const NEW_GAME_MAP: &str = "maps/e1m1.bsp";
+/// The map New Game starts on. Matches the C `map start`: `start.bsp` is the
+/// skill-select hub — the player walks into the Easy/Normal/Hard/Nightmare halls
+/// (`trigger_setskill`) and an episode slipgate (`trigger_changelevel`) that
+/// changelevels into `e1m1` (or e2m1/e3m1/e4m1). Changelevel is implemented, so
+/// the full hub flow works.
+pub const NEW_GAME_MAP: &str = "maps/start.bsp";
 
 /// Which menu screen is showing. Mirrors the relevant `m_state` values from
 /// menu.c (`m_main`, `m_singleplayer`); the other states (load/save/options/…)
