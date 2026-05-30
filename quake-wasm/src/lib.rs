@@ -141,6 +141,18 @@ struct DemoPlay {
     colors: Vec<[u8; 3]>,
     elapsed: f32,
     idx: usize,
+    /// Live particles replayed from the recorded `svc_particle` / temp-entity
+    /// stream: each frame's effects are spawned ONCE when playback advances onto
+    /// it, then the pool is aged under gravity and drawn into the scene (sharing
+    /// its z-buffer) — so the demo shows blood, gunshot puffs and explosions just
+    /// like [`step_walk`] does for live play.
+    particles: ParticleSystem,
+    /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
+    prng: Lcg,
+    /// The frame index whose effects were last spawned, so a frame rendered for
+    /// several steps spawns its bursts only on the step that ADVANCES onto it
+    /// (never re-spawning while it lingers). `usize::MAX` = "none spawned yet".
+    last_spawned_idx: usize,
 }
 
 struct App {
@@ -342,7 +354,18 @@ fn build_demo() -> Option<DemoPlay> {
     if demo.frames.is_empty() {
         return None;
     }
-    Some(DemoPlay { bsp, palette, demo, models, colors, elapsed: 0.0, idx: 0 })
+    Some(DemoPlay {
+        bsp,
+        palette,
+        demo,
+        models,
+        colors,
+        elapsed: 0.0,
+        idx: 0,
+        particles: ParticleSystem::new(),
+        prng: Lcg::new(0x9E37_79B9),
+        last_spawned_idx: usize::MAX,
+    })
 }
 
 fn ensure_app(f: impl FnOnce(&mut App)) {
@@ -1402,6 +1425,47 @@ fn step_walk(w: &mut Walk, dt: f32, render_w: usize, render_h: usize) -> render:
     img
 }
 
+/// Spawn the recorded effects of demo frame `idx` into the live particle pool
+/// exactly ONCE: a frame rendered across several steps (small `dt`) must not
+/// re-spawn its bursts each step. `d.last_spawned_idx` records the most recently
+/// spawned frame; this is a no-op when it already equals `idx`.
+///
+/// Each `svc_particle` burst replays through [`ParticleSystem::spawn_burst`],
+/// except the explosion sentinel (`count >= 1024`, the demo parser's mapping of
+/// the net `count == 255`) which routes to [`ParticleSystem::spawn_explosion`]
+/// for the 1024-particle fiery burst. Each temp entity replays through the same
+/// [`spawn_temp_entity`] mapping the live walk uses (explosion / impact / splash).
+/// The frame's recorded server `time` is the absolute clock for particle
+/// lifetimes (`spawn_*` set `die = now + life`).
+fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
+    if d.last_spawned_idx == idx {
+        return; // already spawned this frame's effects; don't double-spawn
+    }
+    d.last_spawned_idx = idx;
+    let Some(frame) = d.demo.frames.get(idx) else { return };
+    let now = frame.time;
+    // The frame borrows `d.demo`; copy the small effect records out so we can
+    // call &mut self spawn methods on `d.particles` without aliasing `d`.
+    let bursts = frame.particles.clone();
+    let tents = frame.temp_entities.clone();
+    for b in &bursts {
+        // The demo parser already mapped the net `count == 255` sentinel to
+        // 1024; treat any such (>=1024) burst as the fiery explosion.
+        if b.count >= 1024 {
+            d.particles.spawn_explosion(b.org, now, &mut d.prng);
+        } else {
+            d.particles
+                .spawn_burst(b.org, b.dir, b.color, b.count, now, &mut d.prng);
+        }
+    }
+    for ev in &tents {
+        // Reuse the live-walk mapping (explosion/impact/splash). The returned
+        // sound is the explosion SFX; demo playback drives audio through its own
+        // svc_sound stream, so we ignore it here (the visual effect is the point).
+        let _ = spawn_temp_entity(&mut d.particles, ev, now, &mut d.prng);
+    }
+}
+
 fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> render::Image {
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
@@ -1414,12 +1478,34 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> ren
     if d.idx + 1 >= n {
         d.idx = 0;
         d.elapsed = 0.0;
+        // Looping restarts the recorded effect stream: drop every live particle
+        // and forget what was spawned so the replay from frame 0 is identical to
+        // the first pass (no stale explosions carried across the wrap).
+        d.particles = ParticleSystem::new();
+        d.last_spawned_idx = usize::MAX;
     }
     // Advance to the frame matching the recorded server time. Stop at the last
-    // frame (n-1); the wrap above handles looping on the FOLLOWING step.
+    // frame (n-1); the wrap above handles looping on the FOLLOWING step. Spawn
+    // the recorded effects of EACH frame we newly advance onto (a large dt can
+    // step over several frames at once; missing one would drop its explosion).
     while d.idx + 1 < n && (d.demo.frames[d.idx + 1].time - t0) <= d.elapsed {
         d.idx += 1;
+        spawn_demo_frame_effects(d, d.idx);
     }
+    // Also spawn the landing frame's effects when we first arrive on it without
+    // the while-loop running (e.g. the very first step lands on frame 0, or a
+    // tiny dt holds us on the same frame the wrap reset us to). `last_spawned_idx`
+    // guards against re-spawning while a frame lingers across several steps.
+    spawn_demo_frame_effects(d, d.idx);
+
+    // Age the live particle pool one frame under the same gentle gravity the
+    // live walk uses (sv_gravity * 0.05 with the default sv_gravity = 800), then
+    // retire the expired ones. Guarded against a non-finite/negative dt.
+    if dt.is_finite() && dt > 0.0 {
+        let now = d.demo.frames[d.idx].time;
+        d.particles.advance(dt, now, 800.0 * 0.05);
+    }
+
     let f = &d.demo.frames[d.idx];
 
     let mut owned: Vec<ModelInstance> = Vec::new();
@@ -1442,11 +1528,14 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> ren
         pitch: -f.view_angles[0],
         fov_deg: 90.0,
     };
-    // The recorded server time animates the demo's liquids/sky too. Recorded
-    // demos carry no engine-particle stream or dynamic lights here, so those
-    // slices are empty; and a demo has no live server to source light styles, so
-    // pass the neutral (static) scales.
-    render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &[], &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
+    // The recorded server time animates the demo's liquids/sky too. The live
+    // particle pool (replayed from the recorded svc_particle / temp-entity
+    // stream) is passed as (world pos, palette index) so blood/puffs/explosions
+    // draw into the scene sharing its z-buffer. Demos carry no dynamic lights
+    // here (empty) and no live server for light styles (neutral static scales).
+    let parts: Vec<([f32; 3], u8)> =
+        d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
 }
 
 #[cfg(test)]
@@ -1641,6 +1730,8 @@ mod tests {
             view_origin: [0.0, 0.0, 0.0],
             view_angles: [0.0, 0.0, 0.0],
             entities: Vec::new(),
+            particles: Vec::new(),
+            temp_entities: Vec::new(),
         };
         let demo = Demo {
             level_name: "test".into(),
@@ -1658,6 +1749,9 @@ mod tests {
             colors: Vec::new(),
             elapsed: 0.0,
             idx: 0,
+            particles: ParticleSystem::new(),
+            prng: Lcg::new(1),
+            last_spawned_idx: usize::MAX,
         };
         let n = d.demo.frames.len();
 
@@ -1684,6 +1778,103 @@ mod tests {
         // Concretely: 1.0s steps over t={0,1,2} render [1, 2, 0, 1, 2] — frame 2
         // (the last) is shown, then it loops to 0.
         assert_eq!(shown, vec![1, 2, 0, 1, 2], "deferred-wrap playback order");
+    }
+
+    #[test]
+    fn step_demo_spawns_recorded_effects_into_the_particle_pool() {
+        // A frame carrying an svc_particle burst + a TE_EXPLOSION temp entity
+        // must fill the live particle pool when playback advances onto it, and
+        // must NOT re-spawn while the same frame lingers, and must reset on wrap.
+        use quake_rs::demo::{Demo, DemoFrame};
+        use quake_rs::server::{te_consts, ParticleBurst, TempEntityEvent};
+
+        let plain = |t: f32| DemoFrame {
+            time: t,
+            view_origin: [0.0, 0.0, 0.0],
+            view_angles: [0.0, 0.0, 0.0],
+            entities: Vec::new(),
+            particles: Vec::new(),
+            temp_entities: Vec::new(),
+        };
+        // Frame 1 (t=0.05) carries the effects; frames 0 and 2 are empty. Frame
+        // times are one ~Quake tick apart so a 0.05s step advances exactly one
+        // frame and the explosion's ramp ages by a realistic amount (not all the
+        // way through its 8-frame life in a single huge step).
+        let effect_frame = DemoFrame {
+            time: 0.05,
+            view_origin: [0.0, 0.0, 0.0],
+            view_angles: [0.0, 0.0, 0.0],
+            entities: Vec::new(),
+            particles: vec![ParticleBurst {
+                org: [0.0, 0.0, 0.0],
+                dir: [0.0, 0.0, 0.0],
+                color: 73,
+                count: 20,
+            }],
+            temp_entities: vec![TempEntityEvent {
+                te_type: te_consts::TE_EXPLOSION,
+                pos: [10.0, 0.0, 0.0],
+                color_start: 0,
+                color_length: 0,
+            }],
+        };
+        let demo = Demo {
+            level_name: "test".into(),
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            frames: vec![plain(0.0), effect_frame, plain(0.10)],
+        };
+        let mut d = DemoPlay {
+            bsp: render::demo_room(),
+            palette: [[0u8; 3]; 256],
+            demo,
+            models: Vec::new(),
+            colors: Vec::new(),
+            elapsed: 0.0,
+            idx: 0,
+            particles: ParticleSystem::new(),
+            prng: Lcg::new(1),
+            last_spawned_idx: usize::MAX,
+        };
+
+        // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
+        // explosion (1024) particles populate the pool; after one tick of aging
+        // the bulk of the 1024-particle explosion is still alive.
+        let _ = step_demo(&mut d, 0.05, DEFAULT_W, DEFAULT_H);
+        assert_eq!(d.idx, 1, "advanced onto the effect frame");
+        let after_first = d.particles.len();
+        assert!(
+            after_first > 500,
+            "the burst + 1024-particle explosion populate the pool (got {after_first})"
+        );
+
+        // A tiny step that holds us on frame 1 must NOT re-spawn the explosion
+        // (the pool only shrinks as particles age — it never jumps back up).
+        let _ = step_demo(&mut d, 0.001, DEFAULT_W, DEFAULT_H);
+        assert_eq!(d.idx, 1, "still on the effect frame");
+        assert!(
+            d.particles.len() <= after_first,
+            "no double-spawn: pool did not grow while the frame lingered"
+        );
+
+        // Drive 0.05s steps until playback wraps back to frame 0. After landing
+        // on the last frame the very NEXT step wraps (deferred-wrap, as the
+        // dedicated test above verifies); the wrap resets the pool, and frame 0
+        // carries no effects, so the pool is empty afterwards.
+        let mut wrapped = false;
+        for _ in 0..6 {
+            let _ = step_demo(&mut d, 0.05, DEFAULT_W, DEFAULT_H);
+            if d.idx == 0 {
+                wrapped = true;
+                break;
+            }
+        }
+        assert!(wrapped, "playback looped back to the first frame within a cycle");
+        assert_eq!(d.idx, 0, "looped back to the first frame");
+        assert!(
+            d.particles.is_empty(),
+            "wrap reset the particle pool (no stale explosion across the loop)"
+        );
     }
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----

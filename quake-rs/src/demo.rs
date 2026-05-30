@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 use crate::error::{QError, Result};
+use crate::server::{ParticleBurst, TempEntityEvent};
 
 // ---------------------------------------------------------------------------
 // protocol.h constants
@@ -277,12 +278,29 @@ pub struct EntSnapshot {
     pub angles: [f32; 3],
 }
 
-/// One playback frame: the camera plus every visible entity.
+/// One playback frame: the camera, every visible entity, and the one-shot
+/// effect events the server multiplexed into this block.
+///
+/// `particles` are the `svc_particle` ([`SVC_PARTICLE`]) bursts decoded from
+/// `R_ParseParticleEffect` (one per message); `temp_entities` are the
+/// `svc_temp_entity` ([`SVC_TEMP_ENTITY`]) effects (gunshot/explosion/spike
+/// impacts) decoded from `CL_ParseTEnt`. A front-end replays each ONCE, on the
+/// step that advances playback onto this frame, through the same
+/// [`crate::particles::ParticleSystem`] the live walk uses — so the recorded
+/// demo shows blood, gunshot puffs and explosions exactly like live play.
+///
+/// Beam temp entities (`TE_LIGHTNING1/2/3`, `TE_BEAM`) are recorded with their
+/// start point in `pos` but carry no renderable effect downstream; the
+/// front-end simply ignores those `te_type`s (see [`TempEntityEvent`]).
 pub struct DemoFrame {
     pub time: f32,
     pub view_origin: [f32; 3],
     pub view_angles: [f32; 3],
     pub entities: Vec<EntSnapshot>,
+    /// `svc_particle` bursts fired during this frame's message block.
+    pub particles: Vec<ParticleBurst>,
+    /// `svc_temp_entity` effects fired during this frame's message block.
+    pub temp_entities: Vec<TempEntityEvent>,
 }
 
 /// A fully parsed demo: level metadata, precache tables, and all frames.
@@ -333,6 +351,12 @@ struct ClientState {
     viewheight: f32,
     view_angles: [f32; 3],
     time: f32,
+    /// `svc_particle` bursts decoded since the last [`snapshot`], drained into
+    /// the [`DemoFrame`] for the block they arrived in and then cleared.
+    pending_particles: Vec<ParticleBurst>,
+    /// `svc_temp_entity` effects decoded since the last [`snapshot`], drained
+    /// into the [`DemoFrame`] and then cleared (one block == one frame).
+    pending_tents: Vec<TempEntityEvent>,
 }
 
 impl ClientState {
@@ -349,6 +373,8 @@ impl ClientState {
             viewheight: DEFAULT_VIEWHEIGHT,
             view_angles: [0.0; 3],
             time: 0.0,
+            pending_particles: Vec::new(),
+            pending_tents: Vec::new(),
         }
     }
 
@@ -360,6 +386,10 @@ impl ClientState {
         self.statics.clear();
         self.viewentity = 0;
         self.viewheight = DEFAULT_VIEWHEIGHT;
+        // A fresh server clears any effects half-collected for the previous
+        // level (CL_ClearState wipes the client-side effect pools too).
+        self.pending_particles.clear();
+        self.pending_tents.clear();
         // view_angles and time are not reset by CL_ClearState in a way that
         // matters before serverinfo; leave them.
     }
@@ -473,9 +503,18 @@ pub fn parse_demo(bytes: &[u8]) -> Result<Demo> {
         // Parse the message, updating client state.
         let flow = parse_server_message(&mut cl, msg)?;
 
-        // Snapshot AFTER the block (only once we have a world).
+        // Snapshot AFTER the block (only once we have a world). `snapshot`
+        // drains this block's pending effect events into the frame and clears
+        // them, so the next block starts collecting from empty.
         if cl.have_serverinfo {
-            frames.push(snapshot(&cl));
+            frames.push(snapshot(&mut cl));
+        } else {
+            // Before the world exists no frame is emitted, so any stray effect
+            // events parsed in a pre-serverinfo block would otherwise leak into
+            // the first real frame. Drop them to keep frame N's lists == the
+            // events of block N.
+            cl.pending_particles.clear();
+            cl.pending_tents.clear();
         }
 
         if let ParseFlow::Stop = flow {
@@ -495,7 +534,12 @@ pub fn parse_demo(bytes: &[u8]) -> Result<Demo> {
 ///
 /// `view_origin = entities[viewentity].origin` with `+viewheight` on Z; the
 /// entity list is every regular entity with `modelindex > 0` plus every static.
-fn snapshot(cl: &ClientState) -> DemoFrame {
+///
+/// The per-frame effect events (`svc_particle` / `svc_temp_entity`) collected
+/// since the last snapshot are *moved* out of the client state into the frame
+/// (leaving the pending lists empty), so each [`DemoFrame`] owns exactly the
+/// effects of its own message block and the next block starts fresh.
+fn snapshot(cl: &mut ClientState) -> DemoFrame {
     let mut view_origin = [0.0f32; 3];
     if let Some(ve) = cl.entities.get(cl.viewentity) {
         view_origin = ve.origin;
@@ -528,11 +572,19 @@ fn snapshot(cl: &ClientState) -> DemoFrame {
         });
     }
 
+    // Move this block's accumulated effect events into the frame and leave the
+    // client's pending lists empty for the next block (std::mem::take swaps in
+    // a fresh empty Vec without cloning).
+    let particles = std::mem::take(&mut cl.pending_particles);
+    let temp_entities = std::mem::take(&mut cl.pending_tents);
+
     DemoFrame {
         time: cl.time,
         view_origin,
         view_angles: cl.view_angles,
         entities,
+        particles,
+        temp_entities,
     }
 }
 
@@ -649,16 +701,7 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_PARTICLE => {
-                // R_ParseParticleEffect: 3 coords, 3 chars (dir), byte count,
-                // byte color.
-                let _ = r.read_coord();
-                let _ = r.read_coord();
-                let _ = r.read_coord();
-                let _ = r.read_char();
-                let _ = r.read_char();
-                let _ = r.read_char();
-                let _ = r.read_byte();
-                let _ = r.read_byte();
+                parse_particle(cl, &mut r);
             }
 
             SVC_SPAWNBASELINE => {
@@ -682,7 +725,7 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_TEMP_ENTITY => {
-                parse_temp_entity(&mut r)?;
+                parse_temp_entity(cl, &mut r)?;
             }
 
             SVC_SETPAUSE => {
@@ -927,32 +970,88 @@ fn parse_start_sound(r: &mut NetReader) -> Result<()> {
 // CL_ParseTEnt — per-type byte sizes, ported from cl_tent.c EXACTLY.
 // ---------------------------------------------------------------------------
 
-fn parse_temp_entity(r: &mut NetReader) -> Result<()> {
+/// `R_ParseParticleEffect` (`cl_parse.c`): the `svc_particle` payload — 3
+/// coords (origin), 3 chars (the direction, each `char / 16.0` per axis), one
+/// byte count and one byte colour. Records a [`ParticleBurst`] onto the client's
+/// pending list for the current block's [`DemoFrame`].
+///
+/// The C `R_ParseParticleEffect` special-cases `count == 255` as the sentinel
+/// for `R_ParticleExplosion` (the 1024-particle fiery burst); we record that as
+/// `count = 1024` so the front-end routes it through `spawn_explosion`. Any
+/// other count is the `R_RunParticleEffect(org, dir, color, count)` path.
+///
+/// Reads the SAME 8 fields the original discarded so the byte stream stays in
+/// sync; never panics (a short read flags `r.bad`, which the demux's top-of-loop
+/// `bad` check turns into a clean desync `Err` on the next command).
+fn parse_particle(cl: &mut ClientState, r: &mut NetReader) {
+    let org = [r.read_coord(), r.read_coord(), r.read_coord()];
+    // Net dir is a signed byte per axis, scaled by 1/16 (the C `dir[i] =
+    // MSG_ReadChar()*(1.0/16)`).
+    let dir = [
+        r.read_char() as f32 * (1.0 / 16.0),
+        r.read_char() as f32 * (1.0 / 16.0),
+        r.read_char() as f32 * (1.0 / 16.0),
+    ];
+    let msg_count = r.read_byte();
+    let color = r.read_byte();
+
+    // 255 is the explosion sentinel -> 1024 particles (R_ParticleExplosion).
+    let count = if msg_count == 255 { 1024 } else { msg_count };
+    // A short read leaves `r.bad` set; the demux refuses the next command, so
+    // we still record (with sentinel values) without desyncing silently.
+    cl.pending_particles.push(ParticleBurst {
+        org,
+        dir,
+        // color is a byte 0..=255 here; a bad read returns -1, clamp to a u8.
+        color: color.clamp(0, 255) as u8,
+        count,
+    });
+}
+
+fn parse_temp_entity(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
     let te = r.read_byte();
     match te {
         // Beams: short entity + start coord3 + end coord3 (CL_ParseBeam).
+        // Recorded with the START point in `pos`; the front-end ignores beams,
+        // but we still consume every byte to keep the stream aligned.
         TE_LIGHTNING1 | TE_LIGHTNING2 | TE_LIGHTNING3 | TE_BEAM => {
-            let _ = r.read_short();
-            for _ in 0..6 {
-                let _ = r.read_coord();
-            }
+            let _ent = r.read_short();
+            let pos = [r.read_coord(), r.read_coord(), r.read_coord()];
+            // The 3 end coords are consumed for alignment but dropped.
+            let _ = r.read_coord();
+            let _ = r.read_coord();
+            let _ = r.read_coord();
+            cl.pending_tents.push(TempEntityEvent {
+                te_type: te as u8,
+                pos,
+                color_start: 0,
+                color_length: 0,
+            });
         }
 
         // Color-mapped explosion: coord3 + 2 bytes (colorStart, colorLength).
         TE_EXPLOSION2 => {
-            let _ = r.read_coord();
-            let _ = r.read_coord();
-            let _ = r.read_coord();
-            let _ = r.read_byte();
-            let _ = r.read_byte();
+            let pos = [r.read_coord(), r.read_coord(), r.read_coord()];
+            let color_start = r.read_byte();
+            let color_length = r.read_byte();
+            cl.pending_tents.push(TempEntityEvent {
+                te_type: te as u8,
+                pos,
+                color_start: color_start.clamp(0, 255) as u8,
+                color_length: color_length.clamp(0, 255) as u8,
+            });
         }
 
         // Everything else: a single coord3 position.
         TE_SPIKE | TE_SUPERSPIKE | TE_GUNSHOT | TE_EXPLOSION | TE_TAREXPLOSION
         | TE_WIZSPIKE | TE_KNIGHTSPIKE | TE_LAVASPLASH | TE_TELEPORT => {
-            let _ = r.read_coord();
-            let _ = r.read_coord();
-            let _ = r.read_coord();
+            let pos = [r.read_coord(), r.read_coord(), r.read_coord()];
+            cl.pending_tents.push(TempEntityEvent {
+                te_type: te as u8,
+                pos,
+                color_start: 0,
+                color_length: 0,
+            });
         }
 
         // Sys_Error ("CL_ParseTEnt: bad type") — illegible, desyncs the stream.
@@ -1283,5 +1382,182 @@ mod tests {
             .entities
             .iter()
             .any(|e| e.modelindex == 3 && e.origin == [1.0, 2.0, 3.0]));
+    }
+
+    // -----------------------------------------------------------------------
+    // (4) svc_particle + svc_temp_entity are surfaced onto the frame, decoded.
+    // -----------------------------------------------------------------------
+
+    /// Append a minimal serverinfo so a world exists and frames are snapshotted.
+    fn write_serverinfo(msg: &mut Vec<u8>) {
+        w_byte(msg, SVC_SERVERINFO);
+        w_long(msg, PROTOCOL_VERSION);
+        w_byte(msg, 1); // maxclients
+        w_byte(msg, 0); // gametype
+        w_string(msg, "lvl"); // level name
+        w_string(msg, "maps/z.bsp"); // model_precache[1]
+        w_string(msg, ""); // end of models
+        w_string(msg, ""); // end of sounds
+    }
+
+    #[test]
+    fn particle_and_temp_entity_are_surfaced_on_the_frame() {
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+
+        // svc_particle: org (4, -8, 16), dir bytes (16, -32, 0) -> /16 ==
+        // (1, -2, 0), count 12, color 73.
+        w_byte(&mut msg, SVC_PARTICLE);
+        w_coord(&mut msg, 4.0);
+        w_coord(&mut msg, -8.0);
+        w_coord(&mut msg, 16.0);
+        w_char(&mut msg, 16); // dir.x raw -> 1.0
+        w_char(&mut msg, -32); // dir.y raw -> -2.0
+        w_char(&mut msg, 0); // dir.z raw -> 0.0
+        w_byte(&mut msg, 12); // count
+        w_byte(&mut msg, 73); // color
+
+        // svc_temp_entity: TE_EXPLOSION at (32, 64, -16).
+        w_byte(&mut msg, SVC_TEMP_ENTITY);
+        w_byte(&mut msg, TE_EXPLOSION);
+        w_coord(&mut msg, 32.0);
+        w_coord(&mut msg, 64.0);
+        w_coord(&mut msg, -16.0);
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+
+        assert_eq!(frame.particles.len(), 1, "one particle burst recorded");
+        let p = &frame.particles[0];
+        assert_eq!(p.org, [4.0, -8.0, 16.0]);
+        assert_eq!(p.dir, [1.0, -2.0, 0.0], "net dir is char/16 per axis");
+        assert_eq!(p.count, 12);
+        assert_eq!(p.color, 73);
+
+        assert_eq!(frame.temp_entities.len(), 1, "one temp entity recorded");
+        let te = &frame.temp_entities[0];
+        assert_eq!(te.te_type, TE_EXPLOSION as u8);
+        assert_eq!(te.pos, [32.0, 64.0, -16.0]);
+    }
+
+    #[test]
+    fn particle_count_255_is_the_explosion_sentinel() {
+        // R_ParseParticleEffect: count == 255 is R_ParticleExplosion (1024).
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        w_byte(&mut msg, SVC_PARTICLE);
+        w_coord(&mut msg, 0.0);
+        w_coord(&mut msg, 0.0);
+        w_coord(&mut msg, 0.0);
+        w_char(&mut msg, 0);
+        w_char(&mut msg, 0);
+        w_char(&mut msg, 0);
+        w_byte(&mut msg, 255); // sentinel
+        w_byte(&mut msg, 0);
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        assert_eq!(frame.particles.len(), 1);
+        assert_eq!(
+            frame.particles[0].count, 1024,
+            "count 255 maps to the 1024-particle explosion"
+        );
+    }
+
+    #[test]
+    fn explosion2_records_its_two_colour_bytes() {
+        // TE_EXPLOSION2 carries coord3 + colorStart + colorLength.
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        w_byte(&mut msg, SVC_TEMP_ENTITY);
+        w_byte(&mut msg, TE_EXPLOSION2);
+        w_coord(&mut msg, 1.0);
+        w_coord(&mut msg, 2.0);
+        w_coord(&mut msg, 3.0);
+        w_byte(&mut msg, 100); // colorStart
+        w_byte(&mut msg, 8); // colorLength
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let te = &demo.frames.last().expect("a frame").temp_entities[0];
+        assert_eq!(te.te_type, TE_EXPLOSION2 as u8);
+        assert_eq!(te.pos, [1.0, 2.0, 3.0]);
+        assert_eq!(te.color_start, 100);
+        assert_eq!(te.color_length, 8);
+    }
+
+    #[test]
+    fn effect_lists_are_cleared_between_frames() {
+        // Block 1 carries an svc_particle; block 2 (after serverinfo) is empty.
+        // The frame for block 1 has the burst; the frame for block 2 is empty —
+        // proving snapshot drained-and-cleared the pending lists.
+        let mut file = Vec::new();
+        file.extend_from_slice(b"-1\n");
+
+        // Block 1: serverinfo + one particle.
+        let mut b1 = Vec::new();
+        write_serverinfo(&mut b1);
+        w_byte(&mut b1, SVC_PARTICLE);
+        w_coord(&mut b1, 1.0);
+        w_coord(&mut b1, 1.0);
+        w_coord(&mut b1, 1.0);
+        w_char(&mut b1, 0);
+        w_char(&mut b1, 0);
+        w_char(&mut b1, 0);
+        w_byte(&mut b1, 5);
+        w_byte(&mut b1, 0);
+        file.extend_from_slice(&(b1.len() as i32).to_le_bytes());
+        w_float(&mut file, 0.0);
+        w_float(&mut file, 0.0);
+        w_float(&mut file, 0.0);
+        file.extend_from_slice(&b1);
+
+        // Block 2: a single svc_nop (no effects) -> an empty effect frame.
+        let mut b2 = Vec::new();
+        w_byte(&mut b2, SVC_NOP);
+        file.extend_from_slice(&(b2.len() as i32).to_le_bytes());
+        w_float(&mut file, 0.0);
+        w_float(&mut file, 0.0);
+        w_float(&mut file, 0.0);
+        file.extend_from_slice(&b2);
+
+        let demo = parse_demo(&file).expect("parse");
+        assert_eq!(demo.frames.len(), 2, "one frame per block");
+        assert_eq!(demo.frames[0].particles.len(), 1, "block 1 frame has the burst");
+        assert!(
+            demo.frames[1].particles.is_empty() && demo.frames[1].temp_entities.is_empty(),
+            "block 2 frame starts empty — pending lists were cleared after block 1"
+        );
+    }
+
+    #[test]
+    fn malformed_effect_errs_without_panic() {
+        // A truncated svc_particle (origin coords promised, bytes missing) must
+        // Err on the desync check, never panic. The reader flags `bad`; the
+        // demux's top-of-loop guard turns it into an illegible-message Err.
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        w_byte(&mut msg, SVC_PARTICLE);
+        msg.push(0x01); // 1 byte where 8 fields (origin..color) were promised
+        let file = demo_with_message(&msg);
+        assert!(parse_demo(&file).is_err(), "truncated particle errs, not panics");
+
+        // A truncated svc_temp_entity (type byte then nothing) likewise Errs.
+        let mut msg2 = Vec::new();
+        write_serverinfo(&mut msg2);
+        w_byte(&mut msg2, SVC_TEMP_ENTITY);
+        w_byte(&mut msg2, TE_GUNSHOT); // promises coord3, none follow
+        let file2 = demo_with_message(&msg2);
+        assert!(parse_demo(&file2).is_err(), "truncated temp entity errs, not panics");
+
+        // A bad TE type is illegible (Sys_Error in the C) -> Err, no panic.
+        let mut msg3 = Vec::new();
+        write_serverinfo(&mut msg3);
+        w_byte(&mut msg3, SVC_TEMP_ENTITY);
+        w_byte(&mut msg3, 99); // not a valid TE_*
+        let file3 = demo_with_message(&msg3);
+        assert!(parse_demo(&file3).is_err(), "bad TE type errs, not panics");
     }
 }
