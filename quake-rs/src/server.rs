@@ -59,6 +59,7 @@ const MOVETYPE_BOUNCE: i32 = 10;
 // Entity flags (server.h).
 const FL_ONGROUND: i32 = 512;
 const FL_ITEM: i32 = 256;
+const FL_CLIENT: i32 = 8;
 const FL_FLY: i32 = 1;
 const FL_SWIM: i32 = 2;
 /// `FL_WATERJUMP` — set on a player climbing out of water (server.h). The
@@ -1775,8 +1776,16 @@ impl Server {
                 .ent_set_float(ent, "solid", SOLID_SLIDEBOX as f32);
         }
 
-        // Record the view entity (what the client looks through).
+        // Record the view entity (what the client looks through). NOTE: real
+        // progs.dat has no `viewentity` global, so this write is a no-op there;
+        // client identity is carried by the FL_CLIENT flag below instead.
         self.vm.gset_float("viewentity", ent as f32);
+
+        // Mark the edict a client (FL_CLIENT). The C engine sets this when a
+        // client connects; monster AI's FindTarget / checkclient look for it.
+        let flags = self.vm.ent_get_float(ent, "flags") as i32;
+        self.vm
+            .ent_set_float(ent, "flags", (flags | FL_CLIENT) as f32);
 
         // Link into the collision world so absmin/absmax are valid.
         link_edict(&mut self.vm, ent);
@@ -3165,15 +3174,23 @@ fn bi_checkbottom(vm: &mut Vm) -> Result<()> {
 fn bi_checkclient(vm: &mut Vm) -> Result<()> {
     let self_e = vm.gget_int("self");
 
-    // Find the single player edict (the connected client). The server records
-    // it in `viewentity`; fall back to the world when there is no client.
-    let player = vm.gget_float("viewentity") as i32;
-    if player <= 0 || vm.edict_free.get(player as usize).copied().unwrap_or(true) {
-        vm.ret_entity(0);
-        return Ok(());
+    // Find a live client edict by its FL_CLIENT flag (the C scanned svs.clients;
+    // real progs.dat has no `viewentity` global, so we can't rely on that). A
+    // dead client (health <= 0) is not a valid target, matching the C.
+    let mut player = 0i32;
+    for e in 1..vm.num_edicts() {
+        let ent = e as i32;
+        if vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        if (vm.ent_get_float(ent, "flags") as i32) & FL_CLIENT != 0
+            && vm.ent_get_float(ent, "health") > 0.0
+        {
+            player = ent;
+            break;
+        }
     }
-    // A dead client is not a valid target (the C `ent->v.health <= 0`).
-    if vm.ent_get_float(player, "health") <= 0.0 {
+    if player <= 0 {
         vm.ret_entity(0);
         return Ok(());
     }

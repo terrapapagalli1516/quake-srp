@@ -642,6 +642,26 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                       else { format!("another edict {}", tr.ent) };
             let _ = writeln!(o, "  eye {pe:?} -> bullet trace hits {hit} at fraction {:.2}", tr.fraction);
         }
+        // AI PROBE: stand still in front of the monster (no firing) and watch
+        // whether it acquires the player as its enemy and changes think frames —
+        // i.e. whether FindTarget + ai_stand->ai_run transitions fire.
+        {
+            let still = UserCmd { yaw, pitch, ..Default::default() };
+            let _ = writeln!(o, "  AI probe (10 frames, player standing in view):");
+            for f in 0..10 {
+                server.client_frame(&still, 0.1).map_err(|e| format!("probe: {e}"))?;
+                if !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true) {
+                    let enemy = server.vm.ent_get_int(mon, "enemy");
+                    let frame = server.vm.ent_get_float(mon, "frame");
+                    let nextthink = server.vm.ent_get_float(mon, "nextthink");
+                    let estate = server.vm.ent_get_float(mon, "enemy"); // raw
+                    let _ = estate;
+                    if f == 0 || f == 4 || f == 9 {
+                        let _ = writeln!(o, "    f{f}: enemy={enemy} frame={frame} nextthink={nextthink:.2}");
+                    }
+                }
+            }
+        }
         // Hold attack (buttons bit 0) for ~1.5s of game time; collect sounds.
         let fire = UserCmd { yaw, pitch, buttons: 1, ..Default::default() };
         let mut sounds: Vec<String> = Vec::new();
