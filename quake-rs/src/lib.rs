@@ -52,6 +52,7 @@ pub mod server;
 pub mod particles;
 
 pub mod render;
+pub mod dlight;
 pub mod demo;
 
 pub use error::{QError, Result};

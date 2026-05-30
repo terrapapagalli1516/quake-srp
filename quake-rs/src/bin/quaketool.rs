@@ -19,6 +19,7 @@ use std::io::Write as _;
 use std::process::exit;
 
 use quake_rs::bsp::{self, Bsp};
+use quake_rs::dlight::DynamicLights;
 use quake_rs::mdl::{Frame as MFrame, Mdl, Skin};
 use quake_rs::pak::Pak;
 use quake_rs::particles::{Lcg, ParticleSystem};
@@ -683,6 +684,12 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     // alive during combat — used for the POV action shot below (declared out
     // here so it outlives the combat block).
     let mut peak_parts: Vec<([f32; 3], u8)> = Vec::new();
+    // Dynamic lights (explosions, muzzle flashes, EF_* lights). Driven each
+    // combat frame from the drained temp entities + entity_dlights, decayed, and
+    // snapshotted at peak so the POV render below lights up the walls.
+    let mut dlights = DynamicLights::new();
+    let mut peak_dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
+    let mut max_active_dlights = 0usize;
     if let Some((mon, d2, mo)) = nearest {
         let mname = server.vm.ent_get_string(mon, "classname");
         let hp_before = server.vm.ent_get_float(mon, "health");
@@ -759,12 +766,17 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 particles.spawn_burst(b.org, b.dir, b.color, b.count, now, &mut prng);
             }
             // Realise the temp entities (explosions, wall impacts) the QuakeC
-            // fired via the Write* builtins. Explosions also queue their sound.
+            // fired via the Write* builtins. Explosions also queue their sound
+            // AND spawn a decaying dynamic light (CL_ParseTEnt: radius 350, die
+            // now+0.5, decay 300, minlight 0, key 0 -> a fresh slot each one).
             for ev in server.drain_temp_entities() {
                 te_total += 1;
                 use quake_rs::server::te_consts::*;
                 match ev.te_type {
-                    TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => te_explosions += 1,
+                    TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => {
+                        te_explosions += 1;
+                        dlights.alloc(0, ev.pos, 350.0, now + 0.5, 300.0, 0.0, now);
+                    }
                     TE_GUNSHOT => te_gunshots += 1,
                     _ => {}
                 }
@@ -772,7 +784,31 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                     sounds.push(snd.to_string());
                 }
             }
+            // Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from
+            // the in-use edicts; add the deterministic rand()&31 radius jitter
+            // here (entity_dlights keeps the base radius so the query is pure).
+            for ed in server.entity_dlights() {
+                let jitter = (prng.next_range(32)) as f32;
+                dlights.alloc(
+                    ed.key,
+                    ed.origin,
+                    ed.radius_base + jitter,
+                    now + ed.life,
+                    0.0,
+                    ed.minlight,
+                    now,
+                );
+            }
             particles.advance(0.1, now, PARTICLE_GRAVITY);
+            // Decay + retire dynamic lights, then track the peak set for the POV.
+            dlights.advance(0.1, now);
+            let active = dlights.active();
+            if active.len() > max_active_dlights {
+                max_active_dlights = active.len();
+            }
+            if !active.is_empty() && active.len() >= peak_dlights.len() {
+                peak_dlights = active;
+            }
             if particles.len() > peak_parts.len() {
                 peak_parts =
                     particles.particles().iter().map(|p| (p.origin, p.color)).collect();
@@ -786,6 +822,10 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let _ = writeln!(
             o,
             "    temp entities: {te_total} ({te_explosions} explosions, {te_gunshots} gunshots)"
+        );
+        let _ = writeln!(
+            o,
+            "    dynamic lights: peak {max_active_dlights} active during combat (explosions + EF_* muzzle/bright/dim lights)"
         );
         let hp_after = server.vm.ent_get_float(mon, "health");
         let alive = !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true);
@@ -873,8 +913,10 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         } else {
             peak_parts.clone()
         };
+        // The peak-combat dynamic lights so the action shot lights up the walls
+        // near explosions / muzzle flashes (the end-of-combat pool is empty).
         // Pass the server clock so liquids warp and sky scrolls in the POV shot.
-        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time(), &parts);
+        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, viewmodel, server.time(), &parts, &peak_dlights);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the finished 3-D frame. If
@@ -1242,9 +1284,9 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     };
 
     // Pass the server clock so liquid/sky surfaces are animated for this frame.
-    // No live particles in this single-shot `scene` command (no per-frame loop),
-    // so the particle slice is empty.
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time(), &[]);
+    // No live particles or dynamic lights in this single-shot `scene` command
+    // (no per-frame loop), so those slices are empty.
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, None, server.time(), &[], &[]);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();

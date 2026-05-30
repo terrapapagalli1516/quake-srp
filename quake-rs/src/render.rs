@@ -604,27 +604,66 @@ fn face_normal(bsp: &Bsp, face: &crate::bsp::DFace) -> Option<Vec3> {
 // BSP lightmaps (Quake's baked static lighting from the LIGHTING lump)
 // ---------------------------------------------------------------------------
 
-/// A face's baked static lightmap (style 0 only), borrowed from `Bsp::lighting`.
+/// The luxel store behind a [`LightMap`]: either the face's static one-byte
+/// luxels borrowed straight from `Bsp::lighting` (the common case, with no
+/// dynamic light touching the face), or an owned `f32` grid that is the static
+/// luxels plus the per-luxel dynamic-light contributions (`R_AddDynamicLights`).
 ///
-/// `samples` is a `lmw * lmh` grid of one-byte luxels. `texmins` is the surface
+/// Keeping a borrowed variant means a face with no dynamic light reads the exact
+/// same bytes the pre-dlight code did, so its rendered output is byte-identical:
+/// passing an empty dlight slice changes nothing.
+enum Luxels<'a> {
+    /// Borrowed static luxels, one byte each (`0..=255`).
+    Static(&'a [u8]),
+    /// Owned augmented luxels (`static + dynamic`), already in `0..=255`-luxel
+    /// units but stored as `f32` so overbright (dynamic) values exceed 255.
+    Owned(Vec<f32>),
+}
+
+impl Luxels<'_> {
+    /// The luxel value at flat index `idx`, or `255.0` (fullbright) for any
+    /// out-of-range index — so a malformed lightmap never reads garbage / panics.
+    #[inline]
+    fn at(&self, idx: usize) -> f32 {
+        match self {
+            Luxels::Static(s) => s.get(idx).copied().unwrap_or(255) as f32,
+            Luxels::Owned(v) => v.get(idx).copied().unwrap_or(255.0),
+        }
+    }
+}
+
+/// A face's baked static lightmap (style 0 only), borrowed from `Bsp::lighting`,
+/// optionally augmented with dynamic-light contributions.
+///
+/// `luxels` is a `lmw * lmh` grid (one value per luxel). `texmins` is the surface
 /// texture-coordinate origin (in texels) used to convert a face's surface `(s,t)`
 /// into luxel coordinates. The lightmap shares the face's `texinfo.vecs` with the
 /// wall texture, so the same surface `(s,t)` the rasteriser already interpolates
 /// indexes both.
 struct LightMap<'a> {
-    samples: &'a [u8],
+    luxels: Luxels<'a>,
     lmw: usize,
     lmh: usize,
     texmins: [f32; 2],
 }
 
+/// Upper bound on the lightmap brightness factor. Quake's software renderer
+/// clamped `blocklights` (the static+dynamic luxel sum, in 8.8 units) to a max
+/// before the final shift; here we clamp the *factor* instead. The static path
+/// tops out at `(255/255)*2 = 2.0`; dynamic lights add on top, so we allow up to
+/// `4.0` (the rough WinQuake overbright ceiling of ~`4*255` luxels) and clamp
+/// there, keeping a near light bright without letting a huge `(rad-dist)` blow
+/// out to NaN/Inf or wrap a palette index.
+const MAX_LIGHT_FACTOR: f32 = 4.0;
+
 impl LightMap<'_> {
     /// Bilinearly sample the lightmap at surface texture coordinate `(s, t)`,
-    /// returning a brightness factor (1.0 == neutral, up to ~2.0 overbright).
+    /// returning a brightness factor (1.0 == neutral, up to ~2.0 overbright for
+    /// the static lightmap, up to [`MAX_LIGHT_FACTOR`] with dynamic lights).
     ///
     /// Luxel indices are clamped into `[0, lm-1]`. Any index that somehow falls
-    /// outside the sample slice is treated as the fullbright luxel value 255, so
-    /// a malformed lightmap never reads garbage and never panics.
+    /// outside the luxel store is treated as the fullbright value 255, so a
+    /// malformed lightmap never reads garbage and never panics.
     fn factor_at(&self, s: f32, t: f32) -> f32 {
         // lmw/lmh are >= 1 by construction in `face_lightmap`.
         let max_x = self.lmw.saturating_sub(1) as f32;
@@ -639,30 +678,147 @@ impl LightMap<'_> {
         let fx = lxf - x0 as f32;
         let fy = lyf - y0 as f32;
 
-        // Treat any out-of-slice luxel as fullbright (255).
-        let at = |x: usize, y: usize| -> f32 {
-            self.samples.get(y * self.lmw + x).copied().unwrap_or(255) as f32
-        };
+        let at = |x: usize, y: usize| -> f32 { self.luxels.at(y * self.lmw + x) };
 
         let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
         let bot = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
         let light = top * (1.0 - fy) + bot * fy;
 
-        (light / 255.0) * 2.0
+        // The static byte path is byte-identical to before; the clamp only ever
+        // bites when dynamic lights push a luxel above ~510.
+        ((light / 255.0) * 2.0).min(MAX_LIGHT_FACTOR)
     }
 }
 
-/// Compute a face's static lightmap, or `None` if the face is fullbright.
+/// `R_AddDynamicLights` (`r_surf.c`): fold the dynamic lights in `dlights` that
+/// touch a face into an owned augmented luxel buffer, returning `Some(Vec)` of
+/// `lmw*lmh` `f32` luxels (static byte value + dynamic adds) when at least one
+/// light contributes, or `None` when no light reaches the face (so the caller
+/// keeps the byte-identical static borrow).
+///
+/// For each light: `dist = dot(origin, plane.normal) - plane.dist` (the RAW
+/// plane, as the C uses `surf->plane->normal` directly — `dist.abs()` covers
+/// both sides), `rad = radius - dist.abs()`. Skip if `rad < minlight`. Project
+/// the light onto the surface plane (`impact = origin - normal*dist`), map it to
+/// luxel space through the same `texinfo.vecs`/`texmins` the static lightmap
+/// uses, and for each luxel add `rad - dist2` where
+/// `dist2 = max(sd,td) + min(sd,td)/2` is Quake's cheap distance estimate.
+///
+/// The add is in `0..255` luxel units (the C `(rad-dist)*256` matches `luxel*256`
+/// scaling; here both sides are kept in raw luxel units, so no `*256`). The
+/// `factor_at` clamp bounds the result.
+#[allow(clippy::too_many_arguments)]
+fn add_dynamic_lights(
+    bsp: &Bsp,
+    face: &crate::bsp::DFace,
+    ti: &crate::bsp::TexInfo,
+    texmins: [f32; 2],
+    lmw: usize,
+    lmh: usize,
+    static_samples: &[u8],
+    dlights: &[crate::dlight::DynamicLight],
+) -> Option<Vec<f32>> {
+    if dlights.is_empty() {
+        return None;
+    }
+    let pi: usize = (face.planenum as i64).try_into().ok()?;
+    let plane = bsp.planes.get(pi)?;
+    let normal = plane.normal;
+
+    let mut buf: Option<Vec<f32>> = None;
+
+    for dl in dlights {
+        let dist = dot(dl.origin, normal) - plane.dist;
+        let rad = dl.radius - dist.abs();
+        let minlight = dl.minlight;
+        if rad < minlight {
+            continue; // this light does not reach the face
+        }
+        let reach = rad - minlight; // C `minlight = rad - minlight`
+
+        let impact = [
+            dl.origin[0] - normal[0] * dist,
+            dl.origin[1] - normal[1] * dist,
+            dl.origin[2] - normal[2] * dist,
+        ];
+
+        // Project the impact point into luxel space via the texinfo axes (the
+        // same vecs the static lightmap / surface extents use).
+        let local0 = impact[0] * ti.vecs[0][0]
+            + impact[1] * ti.vecs[0][1]
+            + impact[2] * ti.vecs[0][2]
+            + ti.vecs[0][3]
+            - texmins[0];
+        let local1 = impact[0] * ti.vecs[1][0]
+            + impact[1] * ti.vecs[1][1]
+            + impact[2] * ti.vecs[1][2]
+            + ti.vecs[1][3]
+            - texmins[1];
+
+        // Lazily materialise the owned buffer from the static bytes the first
+        // time a light actually contributes, so a non-reaching light slice still
+        // returns None (borrow stays static, output unchanged).
+        let buffer = buf.get_or_insert_with(|| {
+            let mut v = vec![0.0f32; lmw * lmh];
+            for (i, cell) in v.iter_mut().enumerate() {
+                *cell = static_samples.get(i).copied().unwrap_or(0) as f32;
+            }
+            v
+        });
+
+        for t in 0..lmh {
+            let td = (local1 - t as f32 * 16.0).abs();
+            for s in 0..lmw {
+                let sd = (local0 - s as f32 * 16.0).abs();
+                let dist2 = if sd > td { sd + td * 0.5 } else { td + sd * 0.5 };
+                if dist2 < reach {
+                    let idx = t * lmw + s;
+                    if let Some(cell) = buffer.get_mut(idx) {
+                        *cell += rad - dist2;
+                    }
+                }
+            }
+        }
+    }
+
+    buf
+}
+
+/// Compute a face's static lightmap, or `None` if the face is fullbright. A thin
+/// wrapper over [`face_lightmap_dyn`] with no dynamic lights, so its output is
+/// the borrowed static byte slice (byte-identical to the pre-dlight behaviour).
+///
+/// The renderer always calls [`face_lightmap_dyn`] directly (threading its live
+/// `dlights`); this zero-dlight wrapper is retained for the lightmap unit tests,
+/// which assert the static-borrow path is unchanged.
+#[cfg(test)]
+fn face_lightmap<'a>(
+    bsp: &'a Bsp,
+    face: &crate::bsp::DFace,
+    world_poly: &[Vec3],
+) -> Option<LightMap<'a>> {
+    face_lightmap_dyn(bsp, face, world_poly, &[])
+}
+
+/// Compute a face's lightmap, folding in any dynamic lights in `dlights` that
+/// reach the face (`R_AddDynamicLights`), or `None` if the face is fullbright.
 ///
 /// A face is fullbright when there is no `lighting` lump, the face has no
 /// lightmap (`lightofs < 0`), the surface is special (sky/liquid — `TEX_SPECIAL`),
 /// or the computed luxel grid would not fit in the remaining `lighting` slice.
 /// Only the base lightmap (style 0) is applied; animated styles `[1..3]` are
 /// ignored.
-fn face_lightmap<'a>(
+///
+/// When no dynamic light reaches the face (including an empty `dlights` slice),
+/// the returned [`LightMap`] *borrows* the static `Bsp::lighting` bytes, so the
+/// sampled factor — and the rendered pixels — are byte-identical to before. When
+/// at least one light contributes, the [`LightMap`] owns an `f32` grid of
+/// `static + dynamic` luxels.
+fn face_lightmap_dyn<'a>(
     bsp: &'a Bsp,
     face: &crate::bsp::DFace,
     world_poly: &[Vec3],
+    dlights: &[crate::dlight::DynamicLight],
 ) -> Option<LightMap<'a>> {
     use crate::bsp::TEX_SPECIAL;
 
@@ -687,11 +843,20 @@ fn face_lightmap<'a>(
     let start: usize = face.lightofs.try_into().ok()?;
     let samples = bsp.lighting.get(start..start.checked_add(count)?)?;
 
+    let texmins_f = [texmins[0] as f32, texmins[1] as f32];
+
+    // Fold any reaching dynamic lights into an owned f32 buffer; if none reach
+    // (or the slice is empty), keep borrowing the static bytes unchanged.
+    let luxels = match add_dynamic_lights(bsp, face, ti, texmins_f, lmw, lmh, samples, dlights) {
+        Some(owned) => Luxels::Owned(owned),
+        None => Luxels::Static(samples),
+    };
+
     Some(LightMap {
-        samples,
+        luxels,
         lmw,
         lmh,
-        texmins: [texmins[0] as f32, texmins[1] as f32],
+        texmins: texmins_f,
     })
 }
 
@@ -1058,7 +1223,7 @@ pub fn render_bsp_textured(
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     // Static (time 0) world: liquids/sky show their texture but do not advance.
     let turb = TurbTable::new();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &[]);
     image
 }
 
@@ -1294,6 +1459,7 @@ fn compute_visible_faces(bsp: &Bsp, cam_pos: Vec3) -> Option<Vec<bool>> {
 /// in a real (non-solid) leaf, faces outside the potentially-visible set are
 /// skipped. Maps with no visibility lump (e.g. [`demo_room`]) get the full draw,
 /// so existing behaviour is unchanged there.
+#[allow(clippy::too_many_arguments)]
 fn draw_world_textured(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -1302,6 +1468,7 @@ fn draw_world_textured(
     palette: &[[u8; 3]; 256],
     turb: &TurbTable,
     time: f32,
+    dlights: &[crate::dlight::DynamicLight],
 ) {
     const NEAR: f32 = 1.0;
     let (w, h) = (image.w, image.h);
@@ -1395,7 +1562,7 @@ fn draw_world_textured(
         // baked static lightmap.
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         let lightmap = if kind == SurfKind::Normal {
-            face_lightmap(bsp, face, &world_poly)
+            face_lightmap_dyn(bsp, face, &world_poly, dlights)
         } else {
             None
         };
@@ -1540,6 +1707,7 @@ fn draw_submodel(
     origin: Vec3,
     turb: &TurbTable,
     time: f32,
+    dlights: &[crate::dlight::DynamicLight],
 ) {
     const NEAR: f32 = 1.0;
     let (w, h) = (image.w, image.h);
@@ -1551,6 +1719,24 @@ fn draw_submodel(
         Some(m) => m,
         None => return,
     };
+
+    // The submodel's lightmap is built from the LOCAL (pre-shift) polygon, so the
+    // dynamic lights — which live in world space — are translated into the
+    // submodel's local frame by subtracting `origin` (Quake's `R_DrawBrushModel`
+    // does the same `VectorSubtract(dlight.origin, ent->origin, lightorigin)`).
+    // An empty input stays empty, so a submodel with no dlights is unchanged.
+    let local_dlights: Vec<crate::dlight::DynamicLight> = dlights
+        .iter()
+        .map(|dl| {
+            let mut d = *dl;
+            d.origin = [
+                dl.origin[0] - origin[0],
+                dl.origin[1] - origin[1],
+                dl.origin[2] - origin[2],
+            ];
+            d
+        })
+        .collect();
 
     // Same camera basis / focal length / projection as the world pass.
     let (forward, right, up) = cam.basis();
@@ -1631,7 +1817,7 @@ fn draw_submodel(
         // lightmap (from the LOCAL polygon — texinfo extents are origin-independent).
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         let lightmap = if kind == SurfKind::Normal {
-            face_lightmap(bsp, face, &local_poly)
+            face_lightmap_dyn(bsp, face, &local_poly, &local_dlights)
         } else {
             None
         };
@@ -2315,7 +2501,7 @@ pub fn render_scene(
     palette: &[[u8; 3]; 256],
     instances: &[ModelInstance],
 ) -> Image {
-    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None, 0.0, &[])
+    render_scene_ext(bsp, cam, w, h, palette, instances, &[], None, 0.0, &[], &[])
 }
 
 /// Render the full scene: the textured world, then each brush submodel
@@ -2360,6 +2546,17 @@ pub fn render_scene(
 /// the slice through here lets the particles share the buffer that already
 /// exists. [`draw_particles`] is still exposed as a standalone `pub fn` for
 /// direct testing of the projection + z-test against a caller-owned buffer.
+///
+/// ## Dynamic lights
+/// `dlights` is the live set of [`crate::dlight::DynamicLight`]s (explosions,
+/// muzzle flashes, `EF_*` light effects). They are folded into each lightmapped
+/// world (and brush-submodel) face per `R_AddDynamicLights`: a light that
+/// reaches a face brightens its luxels, raising the per-pixel lightmap factor
+/// near the impact point. Sky and liquid faces are `TEX_SPECIAL` (fullbright, no
+/// lightmap) and are never dlit, matching the C. Passing an **empty** `dlights`
+/// slice leaves every face borrowing its static lightmap bytes, so the output is
+/// byte-identical to the pre-dlight renderer — which is why [`render_scene`] and
+/// the demo tests pass `&[]`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext(
     bsp: &Bsp,
@@ -2372,6 +2569,7 @@ pub fn render_scene_ext(
     viewmodel: Option<Viewmodel>,
     time: f32,
     particles: &[(Vec3, u8)],
+    dlights: &[crate::dlight::DynamicLight],
 ) -> Image {
     let mut image = Image::new(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
@@ -2381,9 +2579,9 @@ pub fn render_scene_ext(
     // The turbulent SIN table for liquid warp, built once and shared by the
     // world + brush-submodel passes (sky needs no table).
     let turb = TurbTable::new();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, dlights);
     for bm in bmodels {
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time);
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, dlights);
     }
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
@@ -3605,7 +3803,7 @@ mod tests {
         // 2x2 luxel grid, texmins at origin so luxel coord = s/16.
         let samples = [0u8, 255u8, 255u8, 0u8]; // checker
         let lm = LightMap {
-            samples: &samples,
+            luxels: Luxels::Static(&samples),
             lmw: 2,
             lmh: 2,
             texmins: [0.0, 0.0],
@@ -3629,7 +3827,7 @@ mod tests {
         // fullbright (255 -> factor 2.0) rather than panicking.
         let samples = [0u8];
         let lm = LightMap {
-            samples: &samples,
+            luxels: Luxels::Static(&samples),
             lmw: 2,
             lmh: 2,
             texmins: [0.0, 0.0],
@@ -3677,7 +3875,10 @@ mod tests {
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], 0, 0);
         let lm = face_lightmap(&bsp, &face, &poly).expect("lightmap should be present");
         assert_eq!((lm.lmw, lm.lmh), (3, 3));
-        assert_eq!(lm.samples.len(), 9);
+        match &lm.luxels {
+            Luxels::Static(s) => assert_eq!(s.len(), 9),
+            Luxels::Owned(_) => panic!("no dlights -> static borrow expected"),
+        }
         assert_eq!(lm.texmins, [0.0, 0.0]);
         // Every luxel 200 -> factor 200/255*2 ~= 1.568.
         assert!((lm.factor_at(0.0, 0.0) - (200.0 / 255.0 * 2.0)).abs() < 1e-6);
@@ -3704,6 +3905,112 @@ mod tests {
         // lightofs near the end leaves too few bytes -> fullbright.
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], 5, 0);
         assert!(face_lightmap(&bsp, &face, &poly).is_none());
+    }
+
+    // -- Dynamic lights (R_AddDynamicLights) -------------------------------
+
+    use crate::dlight::DynamicLight;
+
+    /// `one_face_bsp` with plane 0 forced to the z=0 surface plane (`normal
+    /// [0,0,1]`, `dist 0`) so a light's distance/impact math is predictable: the
+    /// 3x3-luxel face spans surface `(s,t)` in `0..=32` (texmins 0, axis-aligned
+    /// vecs), so luxel `(i,j)` lives at world `(16i, 16j, 0)`.
+    fn one_face_bsp_zplane(luxel: u8) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
+        let (mut bsp, face, poly) = one_face_bsp(vec![luxel; 9], 0, 0);
+        bsp.planes[0] = crate::bsp::DPlane {
+            normal: [0.0, 0.0, 1.0],
+            dist: 0.0,
+            ptype: 0,
+        };
+        (bsp, face, poly)
+    }
+
+    #[test]
+    fn dynamic_light_brightens_near_luxel_only() {
+        // Static luxels all 100; factor there is 100/255*2 ~= 0.784.
+        let (bsp, face, poly) = one_face_bsp_zplane(100);
+        let static_factor = 100.0 / 255.0 * 2.0;
+
+        // A bright light 16 units above luxel (0,0) (world [0,0,16]); small radius
+        // so it lights the near corner but not the far one.
+        let dl = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, std::slice::from_ref(&dl))
+            .expect("lightmap present");
+        // It must have switched to the owned augmented buffer.
+        assert!(matches!(lm.luxels, Luxels::Owned(_)), "a reaching light must own the buffer");
+
+        // Near luxel (s=0,t=0): dist=16, rad=60-16=44, dist2=0 -> +44 -> 144.
+        // factor 144/255*2 ~= 1.13, brighter than the static 0.784.
+        let near = lm.factor_at(0.0, 0.0);
+        assert!(near > static_factor + 0.2, "near luxel should brighten: {near} vs {static_factor}");
+
+        // Far luxel (s=32,t=32) = world (32,32,0): sd=td=32, dist2=48 >= rad(44)
+        // -> no add, stays at the static value.
+        let far = lm.factor_at(32.0, 32.0);
+        assert!((far - static_factor).abs() < 1e-4, "far luxel must be unchanged: {far} vs {static_factor}");
+    }
+
+    #[test]
+    fn empty_dlights_keeps_static_borrow_and_factor() {
+        // With no dlights the lightmap must borrow the static bytes and sample
+        // exactly the pre-dlight factor (byte-identical behaviour).
+        let (bsp, face, poly) = one_face_bsp_zplane(150);
+        let with_none = face_lightmap_dyn(&bsp, &face, &poly, &[]).expect("present");
+        assert!(matches!(with_none.luxels, Luxels::Static(_)), "empty slice keeps static borrow");
+
+        let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
+        // Same sampled factor at several points.
+        for &(s, t) in &[(0.0f32, 0.0f32), (8.0, 8.0), (16.0, 16.0), (32.0, 32.0)] {
+            assert!(
+                (with_none.factor_at(s, t) - baseline.factor_at(s, t)).abs() < 1e-7,
+                "empty-dlight factor must equal the static factor at ({s},{t})"
+            );
+        }
+    }
+
+    #[test]
+    fn distant_light_below_minlight_does_not_contribute() {
+        // A light far outside its radius range contributes nothing: rad < minlight
+        // -> the face keeps its static borrow, no panic, no change.
+        let (bsp, face, poly) = one_face_bsp_zplane(100);
+        // dist 100000 >> radius 200, so rad < minlight -> no contribution.
+        let dl = DynamicLight::new([0.0, 0.0, 100_000.0], 200.0, 10.0, 0.0, 0.0, 0);
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, std::slice::from_ref(&dl)).expect("present");
+        assert!(matches!(lm.luxels, Luxels::Static(_)), "a non-reaching light keeps the static borrow");
+        let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
+        assert!((lm.factor_at(0.0, 0.0) - baseline.factor_at(0.0, 0.0)).abs() < 1e-7);
+    }
+
+    #[test]
+    fn dynamic_light_factor_is_clamped() {
+        // A huge-radius light right on the surface drives the luxel far past 255;
+        // factor_at must clamp to MAX_LIGHT_FACTOR (finite, no overflow/NaN).
+        let (bsp, face, poly) = one_face_bsp_zplane(255);
+        let dl = DynamicLight::new([0.0, 0.0, 0.0], 100_000.0, 10.0, 0.0, 0.0, 0);
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, std::slice::from_ref(&dl)).expect("present");
+        let f = lm.factor_at(0.0, 0.0);
+        assert!(f.is_finite());
+        assert!((f - MAX_LIGHT_FACTOR).abs() < 1e-6, "huge add must clamp to {MAX_LIGHT_FACTOR}, got {f}");
+    }
+
+    #[test]
+    fn render_scene_ext_dlight_noop_on_fullbright_world() {
+        // demo_room has no lighting lump, so its faces are fullbright (no
+        // lightmap) and dlights cannot attach: the frame must be UNCHANGED even
+        // with a bright light present. (The actual brightening of a lightmapped
+        // surface is exercised by `dynamic_light_brightens_near_luxel_only`.)
+        let bsp = demo_room();
+        let pal = [[180u8, 180, 180]; 256];
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+
+        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        // demo_room has no lighting lump, so faces are fullbright (no lightmap)
+        // and dlights cannot attach; the frame must therefore be UNCHANGED even
+        // with a light present -- proving dlights never touch non-lightmapped
+        // faces and never panic.
+        let dl = DynamicLight::new([0.0, 0.0, 0.0], 600.0, 10.0, 0.0, 0.0, 0);
+        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], std::slice::from_ref(&dl));
+        assert_eq!(base.rgb, lit.rgb, "fullbright (lightmap-less) world must ignore dlights");
     }
 
     // -- PVS culling: decompress_vis / point_in_leaf -----------------------
@@ -3980,7 +4287,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
         let with = render_scene_ext(
             &bsp,
             &cam,
@@ -3992,6 +4299,7 @@ mod tests {
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
             0.0,
+            &[],
             &[],
         );
 
@@ -4020,7 +4328,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
         let oob = render_scene_ext(
             &bsp,
             &cam,
@@ -4031,6 +4339,7 @@ mod tests {
             &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0] }],
             None,
             0.0,
+            &[],
             &[],
         );
         assert_eq!(
@@ -4049,7 +4358,7 @@ mod tests {
 
         // No alias models, no bmodels.
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
         assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
 
         // Also holds with an alias instance present (the model path is shared).
@@ -4072,6 +4381,7 @@ mod tests {
             &[],
             None,
             0.0,
+            &[],
             &[],
         );
         assert_eq!(
@@ -4100,6 +4410,7 @@ mod tests {
             None,
             0.0,
             &[],
+            &[],
         );
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
         let shifted = render_scene_ext(
@@ -4112,6 +4423,7 @@ mod tests {
             &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0] }],
             None,
             0.0,
+            &[],
             &[],
         );
         let changed = centered
@@ -4148,6 +4460,7 @@ mod tests {
             &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
             None,
             0.0,
+            &[],
             &[],
         );
     }
@@ -4261,11 +4574,13 @@ mod tests {
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
             &[],
+            &[],
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
+            &[],
             &[],
         );
 
@@ -4322,7 +4637,7 @@ mod tests {
         let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
-        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0, &[]);
+        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], None, 0.0, &[], &[]);
         let bg = [10u8, 10, 14];
         let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
@@ -4337,6 +4652,7 @@ mod tests {
             &bsp, &cam, w, h, &pal, &[], &[],
             Some(Viewmodel { mdl: &gun, frame: 0 }),
             0.0,
+            &[],
             &[],
         );
 
@@ -4363,7 +4679,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
         assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
     }
 
@@ -4383,8 +4699,9 @@ mod tests {
             Some(Viewmodel { mdl: &frameless, frame: 0 }),
             0.0,
             &[],
+            &[],
         );
-        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0, &[]);
+        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], None, 0.0, &[], &[]);
         assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
@@ -4395,6 +4712,7 @@ mod tests {
             &bsp, &cam, 80, 60, &pal, &[], &[],
             Some(Viewmodel { mdl: &bad, frame: 0 }),
             0.0,
+            &[],
             &[],
         );
     }
@@ -4622,8 +4940,8 @@ mod tests {
         // enough for this assertion.)
         let cam = Camera::looking_at([0.0, 0.0, 100.0], [0.0, 0.0, -128.0], 90.0);
 
-        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6, &[]);
+        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.6, &[], &[]);
 
         let bg = [10u8, 10, 14];
         assert!(
@@ -4645,8 +4963,8 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
-        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5, &[]);
+        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
+        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 9.5, &[], &[]);
         assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
         // And it must equal the time-less render_scene wrapper.
         let rs = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
@@ -5060,7 +5378,7 @@ mod tests {
         let bsp = demo_room();
         let cam = Camera::looking_at([0.0, 0.0, 0.0], [200.0, 0.0, 0.0], 90.0);
         let pal = [[180u8, 180, 180]; 256];
-        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
         let baseline = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
         assert_eq!(
             with_empty.rgb, baseline.rgb,
@@ -5077,7 +5395,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let mut pal = [[60u8, 60, 60]; 256];
         pal[251] = [255, 0, 255]; // a vivid colour unlikely to match the walls
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[]);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], None, 0.0, &[], &[]);
         // A particle ~80 units in front of the camera (well before the +256 wall).
         let with = render_scene_ext(
             &bsp,
@@ -5090,6 +5408,7 @@ mod tests {
             None,
             0.0,
             &[([-120.0, 0.0, 0.0], 251)],
+            &[],
         );
         assert_ne!(without.rgb, with.rgb, "a visible particle must change the frame");
         assert!(

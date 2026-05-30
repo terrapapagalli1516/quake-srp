@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use quake_rs::bsp::Bsp;
 use quake_rs::demo::{parse_demo, Demo};
+use quake_rs::dlight::DynamicLights;
 use quake_rs::mdl::Mdl;
 use quake_rs::pak::Pak;
 use quake_rs::particles::{Lcg, ParticleSystem};
@@ -62,6 +63,10 @@ struct Walk {
     particles: ParticleSystem,
     /// Deterministic RNG for particle spawns (no `rand` crate; std-only).
     prng: Lcg,
+    /// Live dynamic lights (explosions, muzzle flashes, EF_* lights). Allocated
+    /// each frame from the drained temp entities + the server's entity_dlights,
+    /// decayed under `advance`, and passed to the renderer to light the walls.
+    dlights: DynamicLights,
 }
 
 /// Recorded-demo playback state.
@@ -165,6 +170,7 @@ fn build_walk() -> Option<Walk> {
         clock: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
+        dlights: DynamicLights::new(),
     })
 }
 
@@ -601,6 +607,14 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     let tents = w.server.drain_temp_entities();
     let mut te_sounds: Vec<quake_rs::server::SoundEvent> = Vec::new();
     for ev in &tents {
+        // Explosions spawn a decaying dynamic light (CL_ParseTEnt): radius 350,
+        // die now+0.5, decay 300, minlight 0, key 0 -> a fresh slot each one.
+        {
+            use quake_rs::server::te_consts::*;
+            if matches!(ev.te_type, TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2) {
+                w.dlights.alloc(0, ev.pos, 350.0, now + 0.5, 300.0, 0.0, now);
+            }
+        }
         if let Some(name) = spawn_temp_entity(&mut w.particles, ev, now, &mut w.prng) {
             te_sounds.push(quake_rs::server::SoundEvent {
                 entity: 0,
@@ -616,8 +630,24 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     if !te_sounds.is_empty() {
         queue_sounds(&w.pak, &te_sounds);
     }
+    // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from the
+    //     in-use edicts. The rand()&31 radius jitter is added here (entity_dlights
+    //     stays a pure query). Then decay + retire the whole pool for this frame.
+    for ed in w.server.entity_dlights() {
+        let jitter = w.prng.next_range(32) as f32;
+        w.dlights.alloc(
+            ed.key,
+            ed.origin,
+            ed.radius_base + jitter,
+            now + ed.life,
+            0.0,
+            ed.minlight,
+            now,
+        );
+    }
     if dt.is_finite() && dt > 0.0 {
         w.particles.advance(dt, now, 800.0 * 0.05);
+        w.dlights.advance(dt, now);
     }
 
     // 3. Make sure every live entity's alias model is cached (runtime-spawned
@@ -718,8 +748,10 @@ fn step_walk(w: &mut Walk, dt: f32) -> render::Image {
     // z-buffer so any behind a wall are correctly hidden.
     let parts: Vec<([f32; 3], u8)> =
         w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    // The live dynamic lights (explosions / muzzle flashes) light up nearby walls.
+    let active_dlights = w.dlights.active();
     let mut img =
-        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock, &parts);
+        render::render_scene_ext(&w.bsp, &cam, W, H, &w.palette, &instances, &bmodels, viewmodel, w.clock, &parts, &active_dlights);
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
@@ -773,6 +805,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32) -> render::Image {
         fov_deg: 90.0,
     };
     // The recorded server time animates the demo's liquids/sky too. Recorded
-    // demos carry no engine-particle stream here, so the particle slice is empty.
-    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time, &[])
+    // demos carry no engine-particle stream or dynamic lights here, so those
+    // slices are empty.
+    render::render_scene_ext(&d.bsp, &cam, W, H, &d.palette, &owned, &[], None, f.time, &[], &[])
 }

@@ -709,6 +709,15 @@ const TE_TELEPORT: u8 = 11;
 const TE_EXPLOSION2: u8 = 12;
 const TE_BEAM: u8 = 13;
 
+/// `EF_MUZZLEFLASH` (`quakedef.h`): the firing entity emits a brief, bright
+/// forward-offset light (`CL_RelinkEntities`).
+pub const EF_MUZZLEFLASH: i32 = 2;
+/// `EF_BRIGHTLIGHT`: a large light at the entity (+16 z).
+pub const EF_BRIGHTLIGHT: i32 = 4;
+/// `EF_DIMLIGHT`: a medium light at the entity origin (e.g. the player while
+/// quad-damage or with the lightning gun warming).
+pub const EF_DIMLIGHT: i32 = 8;
+
 /// The `TE_*` type bytes (protocol.h), re-exported for front-ends that map a
 /// [`TempEntityEvent::te_type`] to an effect (the playtest/wasm callers). These
 /// are the same byte values the QuakeC writes after `svc_temp_entity`.
@@ -762,6 +771,30 @@ pub struct TempEntityEvent {
     pub color_start: u8,
     /// `TE_EXPLOSION2` colour-ramp length; `0` for other types.
     pub color_length: u8,
+}
+
+/// One entity dynamic-light contribution for a frame, as enumerated by
+/// [`Server::entity_dlights`] (the `EF_*` dlight spawns of `CL_RelinkEntities`).
+///
+/// A front-end turns each into a [`crate::dlight::DynamicLights::alloc`] call:
+/// `alloc(key, origin, radius_base + (rng & 31), now + life, decay=0, minlight,
+/// now)`. The `radius_base` excludes the `rand()&31` jitter so this struct stays
+/// deterministic; the caller adds the jitter with its own RNG. `decay` is 0 for
+/// these lights — they simply expire at `die` (Quake set no decay for the `EF_*`
+/// lights; only explosions decay).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityDlight {
+    /// Owning entity number; used as the `CL_AllocDlight` reuse key so the light
+    /// tracks the entity instead of filling the pool.
+    pub key: i32,
+    /// World-space light position (already offset for the muzzle / bright cases).
+    pub origin: [f32; 3],
+    /// Radius in light units *before* the `rand()&31` jitter the caller adds.
+    pub radius_base: f32,
+    /// Ambient floor (32 for the muzzle flash, 0 otherwise).
+    pub minlight: f32,
+    /// Seconds until the light dies (`die = now + life`).
+    pub life: f32,
 }
 
 /// What payload shape a recognised `TE_*` type expects, so the decoder consumes
@@ -2495,6 +2528,83 @@ impl Server {
     /// (mirrors [`Server::drain_sounds`]/[`Server::drain_particles`]).
     pub fn drain_temp_entities(&mut self) -> Vec<TempEntityEvent> {
         take_temp_entities()
+    }
+
+    /// Enumerate the per-frame entity dynamic-light contributions, porting the
+    /// `EF_*` dlight spawns of `CL_RelinkEntities` (`cl_main.c`).
+    ///
+    /// Scans every in-use edict whose `effects` float field is non-zero and, for
+    /// each `EF_MUZZLEFLASH` / `EF_BRIGHTLIGHT` / `EF_DIMLIGHT` bit set, yields an
+    /// [`EntityDlight`] describing the light to allocate:
+    ///  * `key` = the entity number (so the flash reuses one slot per entity via
+    ///    `CL_AllocDlight`),
+    ///  * `origin` = the light position (muzzle: `origin.z += 16` then `+ 18 *
+    ///    forward(angles)`; brightlight: `origin.z += 16`; dimlight: `origin`),
+    ///  * `radius_base` = the radius *before* the `rand()&31` jitter (the caller
+    ///    adds it deterministically, keeping this query side-effect-free),
+    ///  * `minlight` = the ambient floor (32 for the muzzle flash, else 0),
+    ///  * `life` = seconds until the light dies (`die = now + life`).
+    ///
+    /// The forward vector for the muzzle offset is [`crate::math::angle_vectors`]
+    /// (Quake's `AngleVectors`), reusing the same helper the VM `makevectors`
+    /// builtin uses. This is a pure query: it never mutates the server, and the
+    /// `rand()&31` radius jitter is deliberately left to the caller so the result
+    /// is reproducible.
+    ///
+    /// If one entity has several light bits set, it yields several entries — but
+    /// they share the entity's `key`, so `CL_AllocDlight` collapses them into one
+    /// slot (the last wins), exactly as the C overwrote the same slot in sequence.
+    pub fn entity_dlights(&self) -> Vec<EntityDlight> {
+        let mut out = Vec::new();
+        let n = self.vm.num_edicts();
+        for e in 1..n {
+            // edict 0 is the world; skip free edicts.
+            if self.vm.edict_free.get(e).copied().unwrap_or(true) {
+                continue;
+            }
+            let ent = e as i32;
+            let effects = self.vm.ent_get_float(ent, "effects") as i32;
+            if effects == 0 {
+                continue;
+            }
+            let origin = self.vm.ent_get_vector(ent, "origin");
+            let angles = self.vm.ent_get_vector(ent, "angles");
+
+            if effects & EF_MUZZLEFLASH != 0 {
+                let (forward, _r, _u) = angle_vectors(angles);
+                let muzzle = [
+                    origin[0] + forward[0] * 18.0,
+                    origin[1] + forward[1] * 18.0,
+                    origin[2] + 16.0 + forward[2] * 18.0,
+                ];
+                out.push(EntityDlight {
+                    key: ent,
+                    origin: muzzle,
+                    radius_base: 200.0,
+                    minlight: 32.0,
+                    life: 0.1,
+                });
+            }
+            if effects & EF_BRIGHTLIGHT != 0 {
+                out.push(EntityDlight {
+                    key: ent,
+                    origin: [origin[0], origin[1], origin[2] + 16.0],
+                    radius_base: 400.0,
+                    minlight: 0.0,
+                    life: 0.001,
+                });
+            }
+            if effects & EF_DIMLIGHT != 0 {
+                out.push(EntityDlight {
+                    key: ent,
+                    origin,
+                    radius_base: 200.0,
+                    minlight: 0.0,
+                    life: 0.001,
+                });
+            }
+        }
+        out
     }
 
     /// The player's attack-relevant state for verification: `(button0, weapon,
@@ -5328,6 +5438,7 @@ mod tests {
         b.add_field("impulse", EV_FLOAT, 50);
         b.add_field("weapon", EV_FLOAT, 51);
         b.add_field("ammo_shells", EV_FLOAT, 52);
+        b.add_field("effects", EV_FLOAT, 53);
 
         // The sound builtin (PF_sound, #8) as a callable QuakeC function.
         let sound_fn = b.add_builtin("sound", 8);
@@ -5663,6 +5774,81 @@ mod tests {
             server.drain_temp_entities().is_empty(),
             "drain_temp_entities cleared the queue"
         );
+    }
+
+    #[test]
+    fn entity_dlights_muzzleflash_offsets_forward_and_up() {
+        // An entity with EF_MUZZLEFLASH set yields one dlight keyed to the entity,
+        // offset +16 z then +18 along its forward (angle) vector, minlight 32.
+        let (img, _f) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        let e = server.vm.spawn();
+        server.vm.ent_set_vector(e, "origin", [100.0, 200.0, 50.0]);
+        // Facing +x (yaw 0, pitch 0): forward = [1,0,0].
+        server.vm.ent_set_vector(e, "angles", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(e, "effects", EF_MUZZLEFLASH as f32);
+
+        let dls = server.entity_dlights();
+        assert_eq!(dls.len(), 1, "one muzzleflash dlight");
+        let d = dls[0];
+        assert_eq!(d.key, e, "keyed to the firing entity");
+        assert_eq!(d.minlight, 32.0);
+        assert!((d.radius_base - 200.0).abs() < 1e-4, "base radius excludes jitter");
+        assert!((d.life - 0.1).abs() < 1e-6);
+        // origin + [18,0,0] + [0,0,16] = [118, 200, 66].
+        assert!((d.origin[0] - 118.0).abs() < 1e-3, "forward x offset: {:?}", d.origin);
+        assert!((d.origin[1] - 200.0).abs() < 1e-3);
+        assert!((d.origin[2] - 66.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn entity_dlights_brightlight_and_dimlight() {
+        let (img, _f) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        let bright = server.vm.spawn();
+        server.vm.ent_set_vector(bright, "origin", [10.0, 20.0, 30.0]);
+        server.vm.ent_set_float(bright, "effects", EF_BRIGHTLIGHT as f32);
+
+        let dim = server.vm.spawn();
+        server.vm.ent_set_vector(dim, "origin", [40.0, 50.0, 60.0]);
+        server.vm.ent_set_float(dim, "effects", EF_DIMLIGHT as f32);
+
+        let dls = server.entity_dlights();
+        assert_eq!(dls.len(), 2);
+
+        let b = dls.iter().find(|d| d.key == bright).expect("brightlight");
+        assert!((b.radius_base - 400.0).abs() < 1e-4);
+        assert_eq!(b.minlight, 0.0);
+        assert_eq!(b.origin, [10.0, 20.0, 46.0]); // +16 z
+        assert!((b.life - 0.001).abs() < 1e-7);
+
+        let d = dls.iter().find(|d| d.key == dim).expect("dimlight");
+        assert!((d.radius_base - 200.0).abs() < 1e-4);
+        assert_eq!(d.minlight, 0.0);
+        assert_eq!(d.origin, [40.0, 50.0, 60.0]); // origin unchanged
+    }
+
+    #[test]
+    fn entity_dlights_skips_zero_effects_and_free_edicts() {
+        let (img, _f) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        // No effects -> no dlight.
+        let plain = server.vm.spawn();
+        server.vm.ent_set_vector(plain, "origin", [1.0, 2.0, 3.0]);
+        server.vm.ent_set_float(plain, "effects", 0.0);
+
+        // A freed edict with effects set must be ignored.
+        let gone = server.vm.spawn();
+        server.vm.ent_set_float(gone, "effects", EF_DIMLIGHT as f32);
+        server.vm.free_edict(gone);
+
+        assert!(server.entity_dlights().is_empty(), "no live lit entities");
     }
 
     #[test]
