@@ -1,0 +1,4074 @@
+//! The Quake server: the world model, the engine builtins, entity spawning, and
+//! a minimal physics frame.
+//!
+//! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
+//! Sources:
+//! * `WinQuake/pr_cmds.c` — the `PF_*` engine builtins (`PF_setorigin`,
+//!   `PF_setmodel`, `PF_setsize`, `PF_precache_model`/`_sound`/`_file`,
+//!   `PF_droptofloor`, `PF_traceline`, `PF_pointcontents`, `PF_makevectors`,
+//!   `PF_cvar`, `PF_walkmove`, `PF_aim`, `PF_changeyaw`, …) and the
+//!   `pr_builtin[]` dispatch table (the non-`QUAKE2` build).
+//! * `WinQuake/pr_edict.c` — `ED_LoadFromFile`, `ED_ParseEdict`,
+//!   `ED_ParseEpair`, `ED_NewString`, and the `SetMinMaxSize` helper.
+//! * `WinQuake/common.c` — `COM_Parse` (the tokenizer).
+//! * `WinQuake/sv_phys.c` — `SV_RunThink`, `SV_Physics`, `SV_Physics_Toss`,
+//!   `SV_Physics_None`/`_Noclip`/`_Step`, `SV_AddGravity`, `SV_PushEntity`,
+//!   `SV_CheckVelocity`.
+//!
+//! ## Faithfulness and safety
+//!
+//! This module is `#![forbid(unsafe_code)]` (crate-wide) and never panics on
+//! data derived from the BSP, the entity text, or the QuakeC program:
+//!
+//! * The C `PF_*` builtins read/write the global block and edict array through
+//!   raw pointers and `longjmp`ed out of `PR_RunError` on a fault. Here every
+//!   builtin reaches the world via [`Vm::with_host`] and accesses fields/globals
+//!   *by name* through the bounds-checked [`Vm`] helpers; missing definitions are
+//!   no-ops rather than crashes, and a bad entity index simply does nothing.
+//! * The tokenizer ([`Tokenizer`]) is a faithful transcription of `COM_Parse`
+//!   working over `&str` byte positions, so a malformed entity blob yields fewer
+//!   tokens rather than reading out of bounds.
+//! * Spawning catches a per-entity spawn-function error and continues, exactly
+//!   as the spec requires (the C aborted the host on the first `Host_Error`).
+//! * The borrow discipline from `vm.rs` is respected: the host is only held out
+//!   of the VM for the duration of a single trace / contents query, never across
+//!   an [`Vm::execute`] call (which itself reaches the host via `with_host`).
+
+use crate::bsp::Bsp;
+use crate::math::{add as v_add, angle_vectors, sub as v_sub, Vec3};
+use crate::progs::{EType, Progs};
+use crate::vm::{Builtin, Host, HostTrace, Vm};
+use crate::world;
+use crate::{QError, Result};
+
+// ---------------------------------------------------------------------------
+// Quake constants used by the server (server.h / sv_phys.c / pr_cmds.c).
+// ---------------------------------------------------------------------------
+
+// Movetypes (server.h).
+const MOVETYPE_NONE: i32 = 0;
+const MOVETYPE_WALK: i32 = 3;
+const MOVETYPE_STEP: i32 = 4;
+const MOVETYPE_FLY: i32 = 5;
+const MOVETYPE_TOSS: i32 = 6;
+const MOVETYPE_PUSH: i32 = 7;
+const MOVETYPE_NOCLIP: i32 = 8;
+const MOVETYPE_FLYMISSILE: i32 = 9;
+const MOVETYPE_BOUNCE: i32 = 10;
+
+// Entity flags (server.h).
+const FL_ONGROUND: i32 = 512;
+const FL_ITEM: i32 = 256;
+const FL_FLY: i32 = 1;
+const FL_SWIM: i32 = 2;
+/// `FL_WATERJUMP` — set on a player climbing out of water (server.h). The
+/// water-jump/water-move paths are out of scope here, but we honour the flag by
+/// keeping the player out of the normal walk path (matching the C order).
+const FL_WATERJUMP: i32 = 2048;
+/// `FL_MONSTER` (server.h): set on AI-driven entities (grunts, dogs, …). Read by
+/// the monster-movement builtins so non-monster callers are unaffected.
+#[allow(dead_code)]
+const FL_MONSTER: i32 = 32;
+/// `FL_PARTIALGROUND` (server.h): set by `SV_FixCheckBottom` when a monster has
+/// no clean standing position (e.g. a bridge pulled out underneath it). It lets
+/// [`sv_movestep`] keep moving / fall instead of refusing every step.
+const FL_PARTIALGROUND: i32 = 1024;
+/// `FL_INWATER` (server.h): set while a monster's box is in water. Unused by the
+/// walking path but defined for completeness with the C flag set.
+#[allow(dead_code)]
+const FL_INWATER: i32 = 16;
+
+/// `DI_NODIR` (sv_move.c): the "no preferred direction" sentinel used by
+/// [`sv_new_chase_dir`]'s axis-direction picks.
+const DI_NODIR: f32 = -1.0;
+
+/// `CONTENTS_SOLID` / `CONTENTS_EMPTY` (bsp.h): the two point-contents values
+/// [`sv_check_bottom`] and [`sv_movestep`] test against (re-stated here so the
+/// movement code reads naturally without importing the whole bsp contents set).
+const CONTENTS_SOLID: i32 = -2;
+const CONTENTS_EMPTY: i32 = -1;
+
+// Skill spawnflags (server.h). We assume single-player skill 1 (medium).
+const SPAWNFLAG_NOT_MEDIUM: i32 = 512;
+
+/// `sv_gravity` default ("800"), from `sv_phys.c`.
+const SV_GRAVITY: f32 = 800.0;
+/// `sv_maxvelocity` default ("2000"), from `sv_phys.c` (`SV_CheckVelocity`).
+const SV_MAXVELOCITY: f32 = 2000.0;
+
+// Player-movement cvars (sv_user.c defaults). This engine has no console-cvar
+// subsystem, so the values are faithful constants instead of a registry.
+/// `sv_friction` default ("4").
+const SV_FRICTION: f32 = 4.0;
+/// `sv_stopspeed` default ("100").
+const SV_STOPSPEED: f32 = 100.0;
+/// `sv_accelerate` default ("10").
+const SV_ACCELERATE: f32 = 10.0;
+/// `sv_maxspeed` default ("320").
+const SV_MAXSPEED: f32 = 320.0;
+/// `edgefriction` default ("2"): friction multiplier when the leading edge of
+/// the player box hangs over a dropoff (`SV_UserFriction`).
+const SV_EDGEFRICTION: f32 = 2.0;
+
+/// `DEFAULT_VIEWHEIGHT` (quakedef.h): the eye sits 22 units above the origin
+/// when the QuakeC has not set an explicit `view_ofs`.
+const DEFAULT_VIEWHEIGHT: f32 = 22.0;
+
+/// `NUM_SPAWN_PARMS` (quakedef.h): how many `parm1..parm16` spawn parameters
+/// `SetNewParms` fills and `PutClientInServer` later consumes.
+#[allow(dead_code)]
+const NUM_SPAWN_PARMS: usize = 16;
+
+// ---------------------------------------------------------------------------
+// (A) The world model: crate::vm::Host backed by a parsed BSP.
+// ---------------------------------------------------------------------------
+
+/// The server's view of the loaded map: the parsed BSP plus the precache name
+/// tables the QuakeC builtins populate. Implements [`Host`] so the engine
+/// builtins can trace, query point contents, precache, and look up submodel
+/// bounds.
+///
+/// Index 0 of each precache table is the empty string `""` (the C reserved slot
+/// 0 of `sv.model_precache` / `sv.sound_precache` for `NULL`); real names start
+/// at index 1.
+pub struct WorldModel {
+    bsp: Bsp,
+    precache_models: Vec<String>,
+    precache_sounds: Vec<String>,
+}
+
+impl WorldModel {
+    /// Build a world model for `bsp`, reserving precache slot 0 for the empty
+    /// string and precaching the world model name `"*0"` at index 1 (the C
+    /// `SV_SpawnServer` precached `sv.worldmodel` as model 1).
+    pub fn new(bsp: Bsp) -> WorldModel {
+        let mut w = WorldModel {
+            bsp,
+            precache_models: vec![String::new()],
+            precache_sounds: vec![String::new()],
+        };
+        // Slot 1 is the world brush model. id used the map name; "*0" is the
+        // submodel-0 (worldspawn) reference and is what setmodel resolves.
+        let _ = w.precache_model("*0");
+        w
+    }
+
+    /// The borrowed BSP (read-only).
+    pub fn bsp(&self) -> &Bsp {
+        &self.bsp
+    }
+
+    /// The precached model names (index 0 is `""`).
+    pub fn model_names(&self) -> &[String] {
+        &self.precache_models
+    }
+
+    /// The precached sound names (index 0 is `""`).
+    pub fn sound_names(&self) -> &[String] {
+        &self.precache_sounds
+    }
+
+    /// Resolve a `"*N"` brush-submodel reference to its model index `N`.
+    fn submodel_index(name: &str) -> Option<usize> {
+        let digits = name.strip_prefix('*')?;
+        digits.parse::<usize>().ok()
+    }
+}
+
+/// Push `name` onto `table` if absent, returning its index; if present, return
+/// the existing index. (The C `PF_precache_*` linear-scanned `sv.*_precache`,
+/// stopping at the first empty slot to append or the first matching slot to
+/// reuse.)
+fn precache_push(table: &mut Vec<String>, name: &str) -> i32 {
+    if let Some(i) = table.iter().position(|s| s == name) {
+        return i as i32;
+    }
+    let i = table.len() as i32;
+    table.push(name.to_string());
+    i
+}
+
+impl Host for WorldModel {
+    fn precache_model(&mut self, name: &str) -> i32 {
+        precache_push(&mut self.precache_models, name)
+    }
+
+    fn precache_sound(&mut self, name: &str) -> i32 {
+        precache_push(&mut self.precache_sounds, name)
+    }
+
+    fn model_bbox(&self, name: &str) -> Option<(Vec3, Vec3)> {
+        // Only brush submodels ("*N") have bounds available from the BSP; real
+        // ".mdl" alias models would need the MDL header, which we don't load
+        // here (PF_setmodel falls back to a zero box for those).
+        let n = Self::submodel_index(name)?;
+        let m = self.bsp.models.get(n)?;
+        Some((m.mins, m.maxs))
+    }
+
+    fn trace(&self, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) -> HostTrace {
+        crate::world::trace_world(&self.bsp, start, end, mins, maxs)
+    }
+
+    fn point_contents(&self, p: Vec3) -> i32 {
+        crate::world::point_contents(&self.bsp, p)
+    }
+
+    fn bsp(&self) -> &Bsp {
+        &self.bsp
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (B) Engine builtins. Each is an `fn(&mut Vm) -> Result<()>`.
+//
+// Field/global access is by name through the Vm helpers. World services are
+// reached via `vm.with_host(...)`, which must NOT be held across `vm.execute`.
+// ---------------------------------------------------------------------------
+
+/// `PF_setorigin` (#2): `void(entity e, vector o) setorigin`. Sets the origin
+/// and recomputes `absmin`/`absmax` from `origin + mins` / `origin + maxs`
+/// (the part of `SV_LinkEdict` that matters without the area grid).
+fn bi_setorigin(vm: &mut Vm) -> Result<()> {
+    let e = vm.arg_entity(0);
+    let o = vm.arg_vector(1);
+    vm.ent_set_vector(e, "origin", o);
+    link_edict(vm, e);
+    Ok(())
+}
+
+/// `PF_setsize` (#4): `void(entity e, vector min, vector max) setsize`. Mirrors
+/// `SetMinMaxSize`: stores `mins`, `maxs`, and `size = max - min`. The C
+/// `PR_RunError("backwards mins/maxs")` is downgraded to a clean early return so
+/// a malformed map can't abort the load.
+fn bi_setsize(vm: &mut Vm) -> Result<()> {
+    let e = vm.arg_entity(0);
+    let min = vm.arg_vector(1);
+    let max = vm.arg_vector(2);
+    set_min_max_size(vm, e, min, max);
+    Ok(())
+}
+
+/// `SetMinMaxSize` (pr_cmds.c): set `mins`/`maxs`/`size` then relink. Rotation
+/// is disabled in the C (`rotate = false; // FIXME`), so we copy directly.
+fn set_min_max_size(vm: &mut Vm, e: i32, min: Vec3, max: Vec3) {
+    vm.ent_set_vector(e, "mins", min);
+    vm.ent_set_vector(e, "maxs", max);
+    vm.ent_set_vector(e, "size", v_sub(max, min));
+    link_edict(vm, e);
+}
+
+/// The bounds half of `SV_LinkEdict`: `absmin = origin + mins`,
+/// `absmax = origin + maxs`. (The C also inserted the edict into the area grid
+/// and touched triggers; neither is modelled here.)
+fn link_edict(vm: &mut Vm, e: i32) {
+    let origin = vm.ent_get_vector(e, "origin");
+    let mins = vm.ent_get_vector(e, "mins");
+    let maxs = vm.ent_get_vector(e, "maxs");
+    let mut absmin = v_add(origin, mins);
+    let mut absmax = v_add(origin, maxs);
+    // SV_LinkEdict expands the abs box so tangent boxes still register as
+    // touching: items get a generous ±15 on X/Y (easier pickups), everything
+    // else ±1 on all axes (movement is clipped an epsilon shy of the surface).
+    let flags = vm.ent_get_float(e, "flags") as i32;
+    if flags & FL_ITEM != 0 {
+        absmin[0] -= 15.0;
+        absmin[1] -= 15.0;
+        absmax[0] += 15.0;
+        absmax[1] += 15.0;
+    } else {
+        for i in 0..3 {
+            absmin[i] -= 1.0;
+            absmax[i] += 1.0;
+        }
+    }
+    vm.ent_set_vector(e, "absmin", absmin);
+    vm.ent_set_vector(e, "absmax", absmax);
+}
+
+/// `PF_setmodel` (#3): `void(entity e, string m) setmodel`. Sets `model`,
+/// resolves `modelindex` via the host precache, and — for a `"*N"` brush
+/// submodel — copies the BSP submodel bounds into `mins`/`maxs`/`size`.
+fn bi_setmodel(vm: &mut Vm) -> Result<()> {
+    let e = vm.arg_entity(0);
+    let m = vm.arg_string(1);
+
+    // model field = the string_t of the argument (the C did `m - pr_strings`,
+    // i.e. it kept the same string_t). Re-intern to be safe across heaps.
+    vm.ent_set_string(e, "model", &m);
+
+    // modelindex = host.precache_model(m); also fetch its bounds if it's a
+    // brush submodel. Take the host only briefly (no execute() inside).
+    let (idx, bbox) = vm
+        .with_host(|_vm, h| {
+            let idx = h.precache_model(&m);
+            let bbox = h.model_bbox(&m);
+            (idx, bbox)
+        })
+        .unwrap_or((0, None));
+
+    vm.ent_set_float(e, "modelindex", idx as f32);
+
+    // SetMinMaxSize(e, mod->mins, mod->maxs) for a brush model; the C used a
+    // zero box when the model had no bounds (mod == NULL or a non-brush model).
+    let (min, max) = bbox.unwrap_or(([0.0; 3], [0.0; 3]));
+    set_min_max_size(vm, e, min, max);
+    Ok(())
+}
+
+/// `PF_precache_sound` (#19): registers the sound and returns the argument's
+/// `string_t` unchanged (QuakeC assigns it back to a field). The C
+/// `ss_loading`-state and overflow `PR_RunError`s are not modelled.
+fn bi_precache_sound(vm: &mut Vm) -> Result<()> {
+    let s = vm.arg_string(0);
+    vm.with_host(|_vm, h| h.precache_sound(&s));
+    // Return the argument's string_t unchanged: G_INT(OFS_RETURN)=G_INT(OFS_PARM0).
+    let s_t = vm.arg_int(0);
+    vm.ret_string(s_t);
+    Ok(())
+}
+
+/// `PF_precache_model` (#20): registers the model and returns the argument's
+/// `string_t` unchanged.
+fn bi_precache_model(vm: &mut Vm) -> Result<()> {
+    let s = vm.arg_string(0);
+    vm.with_host(|_vm, h| h.precache_model(&s));
+    let s_t = vm.arg_int(0);
+    vm.ret_string(s_t);
+    Ok(())
+}
+
+/// `PF_precache_file` (#68/#77): a qcc-only copy hint — does nothing but return
+/// its argument (`G_INT(OFS_RETURN) = G_INT(OFS_PARM0)`).
+fn bi_precache_file(vm: &mut Vm) -> Result<()> {
+    let s_t = vm.arg_int(0);
+    vm.ret_string(s_t);
+    Ok(())
+}
+
+/// `PF_makevectors` (#1): set the `v_forward`/`v_right`/`v_up` globals from the
+/// argument angles. Identical to the pure builtin, restated here so installing
+/// the engine table is self-contained.
+fn bi_makevectors(vm: &mut Vm) -> Result<()> {
+    let angles = vm.arg_vector(0);
+    let (forward, right, up) = angle_vectors(angles);
+    vm.gset_vector("v_forward", forward);
+    vm.gset_vector("v_right", right);
+    vm.gset_vector("v_up", up);
+    Ok(())
+}
+
+/// `PF_traceline` (#16): `float(vector v1, vector v2, float nomonsters, entity
+/// ignore) traceline`. Traces a *point* (`mins=maxs=0`) through the world AND
+/// every solid entity via [`sv_move`], writes the `trace_*` globals, and sets
+/// `trace_ent` to the edict that was hit (world = 0, nothing = the world too,
+/// matching the C which left `trace.ent` as `sv.edicts` for a clear move only
+/// implicitly — here a clear move leaves `trace_ent = 0`).
+fn bi_traceline(vm: &mut Vm) -> Result<()> {
+    let v1 = vm.arg_vector(0);
+    let v2 = vm.arg_vector(1);
+    // arg 2 = nomonsters (the C passed MOVE_NOMONSTERS; full monster filtering
+    // is out of scope here — we clip against all solids either way).
+    let ignore = vm.arg_entity(3); // the "ignore" passedict.
+
+    // Entity-aware move (clips world + all solid edicts). sv_move borrows the
+    // host internally; this builtin must not be inside with_host.
+    let tr = sv_move(vm, v1, v2, [0.0; 3], [0.0; 3], ignore);
+
+    vm.gset_float("trace_allsolid", tr.allsolid as i32 as f32);
+    vm.gset_float("trace_startsolid", tr.startsolid as i32 as f32);
+    vm.gset_float("trace_fraction", tr.fraction);
+    vm.gset_float("trace_inwater", tr.inwater as i32 as f32);
+    vm.gset_float("trace_inopen", tr.inopen as i32 as f32);
+    vm.gset_vector("trace_endpos", tr.endpos);
+    vm.gset_vector("trace_plane_normal", tr.plane_normal);
+    vm.gset_float("trace_plane_dist", tr.plane_dist);
+    // trace_ent = the hit edict; a clear move (ent == -1) resolves to the world.
+    vm.gset_int("trace_ent", if tr.ent < 0 { 0 } else { tr.ent });
+    Ok(())
+}
+
+/// `PF_pointcontents` (#41): `float(vector v) pointcontents`. Returns the
+/// `CONTENTS_*` value at the point.
+fn bi_pointcontents(vm: &mut Vm) -> Result<()> {
+    let p = vm.arg_vector(0);
+    let c = vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(-2); // CONTENTS_SOLID
+    vm.ret_float(c as f32);
+    Ok(())
+}
+
+/// `PF_droptofloor` (#34): `float() droptofloor`. Box-traces `self` straight
+/// down 256 units; on a clean landing snaps `origin` to the floor, sets
+/// `FL_ONGROUND` and `groundentity = world`, and returns 1; otherwise returns 0.
+fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
+    let ent = vm.gget_int("self");
+
+    let origin = vm.ent_get_vector(ent, "origin");
+    let mins = vm.ent_get_vector(ent, "mins");
+    let maxs = vm.ent_get_vector(ent, "maxs");
+    let end: Vec3 = [origin[0], origin[1], origin[2] - 256.0];
+
+    let tr = vm
+        .with_host(|_vm, h| h.trace(origin, end, mins, maxs))
+        .unwrap_or_default();
+
+    if tr.fraction == 1.0 || tr.allsolid {
+        vm.ret_float(0.0);
+    } else {
+        vm.ent_set_vector(ent, "origin", tr.endpos);
+        link_edict(vm, ent);
+        let flags = vm.ent_get_float(ent, "flags") as i32;
+        vm.ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+        vm.ent_set_int(ent, "groundentity", 0); // world
+        vm.ret_float(1.0);
+    }
+    Ok(())
+}
+
+/// `PF_cvar` (#45): `float(string name) cvar`. Returns the known server-cvar
+/// defaults; everything else is 0 (the C looked these up in the cvar registry).
+fn bi_cvar(vm: &mut Vm) -> Result<()> {
+    let name = vm.arg_string(0);
+    let v = cvar_value(&name);
+    vm.ret_float(v);
+    Ok(())
+}
+
+/// The handful of cvar defaults the spawn/think code reads. Values match the
+/// stock `*.c` declarations (`sv_gravity` "800", `deathmatch` "0",
+/// `skill` 1 single-player).
+fn cvar_value(name: &str) -> f32 {
+    match name {
+        "sv_gravity" => SV_GRAVITY,
+        "sv_maxvelocity" => SV_MAXVELOCITY,
+        "deathmatch" | "coop" | "teamplay" => 0.0,
+        "skill" => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// `PF_changeyaw` (#49): turn `self.angles[1]` toward `ideal_yaw` by at most
+/// `yaw_speed`. A faithful port of the C (which converted this from QuakeC for
+/// speed); harmless for non-monster entities (`yaw_speed == 0` => no turn).
+fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
+    let ent = vm.gget_int("self");
+    let angles = vm.ent_get_vector(ent, "angles");
+    let current = crate::math::anglemod(angles[1]);
+    let ideal = vm.ent_get_float(ent, "ideal_yaw");
+    let speed = vm.ent_get_float(ent, "yaw_speed");
+
+    if current == ideal {
+        return Ok(());
+    }
+    let mut move_ = ideal - current;
+    if ideal > current {
+        if move_ >= 180.0 {
+            move_ -= 360.0;
+        }
+    } else if move_ <= -180.0 {
+        move_ += 360.0;
+    }
+    if move_ > 0.0 {
+        if move_ > speed {
+            move_ = speed;
+        }
+    } else if move_ < -speed {
+        move_ = -speed;
+    }
+
+    let new_yaw = crate::math::anglemod(current + move_);
+    let new_angles = [angles[0], new_yaw, angles[2]];
+    vm.ent_set_vector(ent, "angles", new_angles);
+    Ok(())
+}
+
+/// A benign no-op builtin: consumes its arguments and returns nothing. Used for
+/// all the network / sound / client-routing builtins that have no world effect
+/// in this headless server (`sound`, `stuffcmd`, the `Write*` family,
+/// `makestatic`, `lightstyle`, `ambientsound`, `particle`, `changelevel`,
+/// `setspawnparms`, the print routers, `cvar_set`).
+fn bi_noop(_vm: &mut Vm) -> Result<()> {
+    Ok(())
+}
+
+/// `PF_aim` (#44) stub: returns `v_forward` (shoot straight ahead). The full
+/// auto-aim scan over takedamage entities is out of scope; returning the
+/// forward vector is the C's own "try sending a trace straight" fallback.
+fn bi_aim(vm: &mut Vm) -> Result<()> {
+    let fwd = vm.gget_vector("v_forward");
+    vm.ret_vector(fwd);
+    Ok(())
+}
+
+/// Install the engine builtins over the pure-builtin table from
+/// [`crate::builtins::default_builtins`], keeping the self-contained ones
+/// (`ftos`/`vtos`/`vlen`/`normalize`/`rint`/`floor`/`ceil`/`fabs`/`random`/
+/// `spawn`/`remove`/`find`/`nextent`/`error`/`objerror`/`print`/`dprint`/
+/// `vectoyaw`/`vectoangles`) intact.
+///
+/// Numbers are the `pr_builtin[]` indices from `pr_cmds.c` (non-`QUAKE2` build).
+pub fn install_engine_builtins(vm: &mut Vm) {
+    // A small helper that only writes if the index is in range, so a short
+    // table can never panic here.
+    fn put(table: &mut [Builtin], n: usize, f: Builtin) {
+        if let Some(slot) = table.get_mut(n) {
+            *slot = f;
+        }
+    }
+    let t = &mut vm.builtins;
+
+    put(t, 1, bi_makevectors); // makevectors
+    put(t, 2, bi_setorigin); // setorigin
+    put(t, 3, bi_setmodel); // setmodel
+    put(t, 4, bi_setsize); // setsize
+    put(t, 8, bi_noop); // sound
+    put(t, 16, bi_traceline); // traceline
+    put(t, 17, bi_checkclient); // checkclient (line-of-sight to the player)
+    put(t, 19, bi_precache_sound); // precache_sound
+    put(t, 20, bi_precache_model); // precache_model
+    put(t, 21, bi_noop); // stuffcmd
+    put(t, 22, bi_findradius); // findradius (chain of edicts within rad)
+    put(t, 32, bi_walkmove); // walkmove (SV_movestep)
+    put(t, 34, bi_droptofloor); // droptofloor
+    put(t, 35, bi_noop); // lightstyle
+    put(t, 40, bi_checkbottom); // checkbottom (SV_CheckBottom)
+    put(t, 41, bi_pointcontents); // pointcontents
+    put(t, 44, bi_aim); // aim
+    put(t, 45, bi_cvar); // cvar
+    put(t, 48, bi_noop); // particle
+    put(t, 49, bi_changeyaw); // changeyaw
+
+    // #52..#59: the network Write* family — all no-ops here.
+    for n in 52..=59 {
+        put(t, n, bi_noop);
+    }
+
+    put(t, 67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
+    put(t, 68, bi_precache_file); // precache_file
+    put(t, 69, bi_noop); // makestatic
+    put(t, 70, bi_noop); // changelevel
+    put(t, 72, bi_noop); // cvar_set
+    put(t, 74, bi_noop); // ambientsound
+    put(t, 75, bi_precache_model); // precache_model (alias)
+    put(t, 76, bi_precache_sound); // precache_sound (alias)
+    put(t, 77, bi_precache_file); // precache_file (alias)
+    put(t, 78, bi_noop); // setspawnparms
+}
+
+// ---------------------------------------------------------------------------
+// COM_Parse tokenizer.
+// ---------------------------------------------------------------------------
+
+/// A faithful port of `COM_Parse` (common.c) over `&str` bytes: skips
+/// whitespace and `//` line comments, returns `"quoted strings"`, the single
+/// characters `{ } ( ) ' :`, or a run of non-whitespace as one token.
+struct Tokenizer<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Tokenizer<'a> {
+    fn new(s: &'a str) -> Tokenizer<'a> {
+        Tokenizer {
+            data: s.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    /// Return the next token, or `None` at end of input. Mirrors `COM_Parse`,
+    /// including the `c <= ' '` whitespace test and the special single chars.
+    fn next_token(&mut self) -> Option<String> {
+        let mut token = Vec::new();
+
+        // skip whitespace (and // comments), looping like the C `goto skipwhite`.
+        loop {
+            // skip whitespace
+            loop {
+                let c = *self.data.get(self.pos)?;
+                if c > b' ' {
+                    break;
+                }
+                self.pos += 1;
+            }
+            // skip // comments
+            if self.data.get(self.pos) == Some(&b'/')
+                && self.data.get(self.pos + 1) == Some(&b'/')
+            {
+                while let Some(&c) = self.data.get(self.pos) {
+                    if c == b'\n' {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                continue;
+            }
+            break;
+        }
+
+        let c = *self.data.get(self.pos)?;
+
+        // quoted string
+        if c == b'"' {
+            self.pos += 1;
+            loop {
+                match self.data.get(self.pos) {
+                    None => break,            // EOF inside a quote: stop cleanly
+                    Some(&b'"') => {
+                        self.pos += 1; // consume closing quote
+                        break;
+                    }
+                    Some(&ch) => {
+                        token.push(ch);
+                        self.pos += 1;
+                    }
+                }
+            }
+            return Some(String::from_utf8_lossy(&token).into_owned());
+        }
+
+        // single-character tokens
+        if is_single(c) {
+            self.pos += 1;
+            return Some(String::from_utf8_lossy(&[c]).into_owned());
+        }
+
+        // a regular word: run of chars > 32 that aren't a single-char token.
+        loop {
+            let ch = match self.data.get(self.pos) {
+                Some(&ch) => ch,
+                None => break,
+            };
+            token.push(ch);
+            self.pos += 1;
+            match self.data.get(self.pos) {
+                Some(&nc) if is_single(nc) => break,
+                Some(&nc) if nc > 32 => continue,
+                _ => break,
+            }
+        }
+        Some(String::from_utf8_lossy(&token).into_owned())
+    }
+}
+
+/// The C `COM_Parse` single-character set: `{ } ( ) ' :`.
+fn is_single(c: u8) -> bool {
+    matches!(c, b'{' | b'}' | b')' | b'(' | b'\'' | b':')
+}
+
+/// `ED_NewString` (pr_edict.c): copy the raw value, translating `\n` to a
+/// newline and any other `\x` escape to a literal backslash.
+fn ed_new_string(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' && i < bytes.len() - 1 {
+            i += 1;
+            if bytes[i] == b'n' {
+                out.push('\n');
+            } else {
+                out.push('\\');
+            }
+        } else {
+            out.push(c as char);
+        }
+        i += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// (C) The Server.
+// ---------------------------------------------------------------------------
+
+/// The headless Quake server: a QuakeC VM with the engine builtins installed and
+/// a [`WorldModel`] host. Drives entity spawning and a minimal physics frame.
+pub struct Server {
+    pub vm: Vm,
+    /// The map's entity description text (`bsp.entities`), captured before the
+    /// BSP is moved into the host. `spawn_entities` tokenizes this. (The
+    /// [`Host`] trait has no entity-text accessor and we never `unsafe`-downcast,
+    /// so the server keeps its own copy.)
+    entities: String,
+    /// The local client's edict index, or `-1` if no client has connected.
+    ///
+    /// SIMPLIFICATION (documented): canonical Quake reserves edict 1 for the
+    /// first client in `SV_SpawnServer` (`sv.num_edicts = maxclients+1`) and
+    /// keys `SV_Physics_Client` off the slot index `i <= svs.maxclients`. Here we
+    /// instead reserve the *first free edict after `spawn_entities`* and remember
+    /// it in this field (our stand-in for the single-element `svs.clients` table).
+    /// Single-player QuakeC keys off `self`, not a hardcoded edict number, so the
+    /// game logic is unaffected. Single client only; no netcode.
+    player: i32,
+}
+
+/// The result of [`Server::spawn_entities`].
+#[derive(Debug, Clone, Default)]
+pub struct SpawnReport {
+    /// Total `{ ... }` entity blocks parsed.
+    pub total: usize,
+    /// Entities whose spawn function ran without error.
+    pub spawned: usize,
+    /// Entities skipped by skill/deathmatch filtering.
+    pub inhibited: usize,
+    /// Entities with a classname but no matching spawn function.
+    pub no_spawn_function: usize,
+    /// Entities whose spawn function returned an error (caught, not fatal).
+    pub spawn_errors: usize,
+    /// `(classname, count)` pairs, sorted by count descending then name.
+    pub classnames: Vec<(String, usize)>,
+}
+
+/// The result of [`Server::run_frame`].
+#[derive(Debug, Clone, Copy)]
+pub struct FrameReport {
+    /// Number of think functions that fired this frame.
+    pub thinks_fired: usize,
+    /// Thinks that faulted (e.g. hit an unimplemented engine builtin). The
+    /// offending entity is isolated and the frame continues, mirroring the
+    /// per-entity robustness of the spawn loop.
+    pub think_errors: usize,
+    /// The `time` global after the frame.
+    pub time: f32,
+}
+
+/// One frame of player input — the engine's `usercmd_t` (`forwardmove`,
+/// `sidemove`, `upmove`, `buttons`, `impulse`) plus the look angles the engine
+/// derives from the client's mouse/keyboard and copies into `v_angle`.
+///
+/// Units match id's: the move axes are intended speeds in pixels/sec; `yaw` and
+/// `pitch` are absolute view angles in degrees (pitch positive = looking down,
+/// as the network protocol delivers them).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserCmd {
+    pub forwardmove: f32,
+    pub sidemove: f32,
+    pub upmove: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub buttons: i32,
+    pub impulse: i32,
+}
+
+impl Server {
+    /// Build a server from a parsed map and program: create the VM, install the
+    /// engine builtins, attach the [`WorldModel`] host, and initialise the
+    /// well-known globals (`time = 1.0`).
+    pub fn new(bsp: Bsp, progs: Progs) -> Result<Server> {
+        // Capture the entity text before the BSP moves into the host.
+        let entities = bsp.entities.clone();
+
+        let mut vm = Vm::new(progs);
+        install_engine_builtins(&mut vm);
+        vm.set_host(Box::new(WorldModel::new(bsp)));
+
+        // Init globals available in this program. The C `SV_SpawnServer` set
+        // sv.time = 1.0 before loading entities.
+        vm.gset_float("time", 1.0);
+        // mapname / world entity defaults are best-effort: only set if present.
+        vm.gset_int("world", 0);
+        vm.gset_int("self", 0);
+        vm.gset_int("other", 0);
+
+        Ok(Server {
+            vm,
+            entities,
+            player: -1,
+        })
+    }
+
+    /// The current `time` global.
+    pub fn time(&self) -> f32 {
+        self.vm.gget_float("time")
+    }
+
+    /// The number of live (not-free) edicts, including the world (edict 0).
+    pub fn live_entities(&self) -> usize {
+        self.vm
+            .edict_free
+            .iter()
+            .filter(|&&free| !free)
+            .count()
+    }
+
+    /// `ED_LoadFromFile` (pr_edict.c): tokenize `bsp.entities`, spawn each
+    /// entity, set its fields by name, and call its spawn function (named by
+    /// `classname`). Faithful to the C control flow, but a per-entity spawn
+    /// error is caught and counted rather than aborting the whole load.
+    pub fn spawn_entities(&mut self) -> Result<SpawnReport> {
+        // The entity text was captured at construction (the host has no accessor
+        // and we never downcast). Clone it so the tokenizer borrow does not pin
+        // `&self`, leaving the VM free to mutate during spawning.
+        let entities = self.entities.clone();
+
+        let mut report = SpawnReport::default();
+        let mut classname_counts: Vec<(String, usize)> = Vec::new();
+        let time = self.time();
+
+        let mut tok = Tokenizer::new(&entities);
+        let mut first = true;
+
+        loop {
+            // opening brace (or EOF)
+            let open = match tok.next_token() {
+                Some(t) => t,
+                None => break,
+            };
+            if open != "{" {
+                // C: Sys_Error("found %s when expecting {"). Stay total: stop.
+                break;
+            }
+
+            report.total += 1;
+
+            // First entity is the world (edict 0); subsequent are ED_Alloc'd.
+            let ent = if first {
+                first = false;
+                0
+            } else {
+                self.vm.spawn()
+            };
+
+            // Parse the key/value pairs into this edict.
+            self.parse_edict(&mut tok, ent)?;
+
+            // Skill filtering (single-player skill 1 -> drop NOT_MEDIUM).
+            let spawnflags = self.vm.ent_get_float(ent, "spawnflags") as i32;
+            if spawnflags & SPAWNFLAG_NOT_MEDIUM != 0 {
+                self.vm.free_edict(ent);
+                report.inhibited += 1;
+                continue;
+            }
+
+            // classname -> spawn function.
+            let classname = self.vm.ent_get_string(ent, "classname");
+            if classname.is_empty() {
+                // C: "No classname" -> free and continue.
+                self.vm.free_edict(ent);
+                continue;
+            }
+            bump_classname(&mut classname_counts, &classname);
+
+            let func = self.vm.progs.find_function(&classname);
+            let Some(func) = func else {
+                report.no_spawn_function += 1;
+                self.vm.free_edict(ent);
+                continue;
+            };
+
+            // self = ent, other = world, time = current; then execute. The host
+            // is PRESENT here (we are not inside with_host).
+            self.vm.gset_int("self", ent);
+            self.vm.gset_int("other", 0);
+            self.vm.gset_float("time", time);
+
+            match self.vm.execute(func) {
+                Ok(()) => report.spawned += 1,
+                Err(_) => {
+                    // C aborted via Host_Error; we keep loading the rest, but
+                    // must reset the interpreter so the faulted call chain does
+                    // not corrupt the next spawn.
+                    report.spawn_errors += 1;
+                    self.vm.reset_execution();
+                }
+            }
+        }
+
+        // classnames sorted by count desc, then name asc for determinism.
+        classname_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        report.classnames = classname_counts;
+        Ok(report)
+    }
+
+    /// `ED_ParseEdict` (pr_edict.c): read key/value pairs until `}`, applying the
+    /// `angle`/`light`/leading-`_` key hacks, and set each field by its def type.
+    fn parse_edict(&mut self, tok: &mut Tokenizer, ent: i32) -> Result<()> {
+        loop {
+            // parse key (or closing brace / EOF)
+            let key = match tok.next_token() {
+                Some(t) => t,
+                None => break, // C: Sys_Error EOF; stay total.
+            };
+            if key == "}" {
+                break;
+            }
+
+            // anglehack: "angle" -> key "angles", value rewritten "0 <v> 0".
+            let anglehack = key == "angle";
+            // "light" -> "light_lev"; trailing-space trim on the key name.
+            let mut keyname = if key == "angle" {
+                "angles".to_string()
+            } else if key == "light" {
+                "light_lev".to_string()
+            } else {
+                key
+            };
+            while keyname.ends_with(' ') {
+                keyname.pop();
+            }
+
+            // parse value
+            let value = match tok.next_token() {
+                Some(t) => t,
+                None => break,
+            };
+            if value == "}" {
+                // C: Sys_Error("closing brace without data"). Stay total.
+                break;
+            }
+
+            // leading underscore keys are utility comments, discarded.
+            if keyname.starts_with('_') {
+                continue;
+            }
+
+            let value = if anglehack {
+                format!("0 {value} 0")
+            } else {
+                value
+            };
+
+            // Set the field by name using its def TYPE; unknown keys are skipped
+            // (the C printed "'%s' is not a field" and continued).
+            self.set_field(ent, &keyname, &value);
+        }
+        Ok(())
+    }
+
+    /// `ED_ParseEpair` (pr_edict.c): write `value` into entity `ent`'s field
+    /// `keyname` according to the field def's type. Unknown fields are silently
+    /// skipped (the C continued past them).
+    fn set_field(&mut self, ent: i32, keyname: &str, value: &str) {
+        // Copy the def's ofs/type out so the immutable `progs` borrow ends before
+        // we mutate the VM (intern / set_e*). A missing field is skipped.
+        let (ofs, etype) = match self.vm.progs.find_field(keyname) {
+            Some(def) => (def.ofs as usize, def.etype()),
+            None => return, // not a field — skip (C: "is not a field")
+        };
+        match etype {
+            EType::String => {
+                let interned = ed_new_string(value);
+                let s_t = self.vm.intern(&interned);
+                self.vm.set_ei(ent, ofs, s_t);
+            }
+            EType::Float => {
+                let f = parse_float(value);
+                self.vm.set_ef(ent, ofs, f);
+            }
+            EType::Vector => {
+                let v = parse_vector(value);
+                self.vm.set_ev(ent, ofs, v);
+            }
+            EType::Entity => {
+                let n = parse_int(value);
+                self.vm.set_ei(ent, ofs, n);
+            }
+            EType::Field => {
+                // ev_field: store the ofs of the named field (G_INT(def->ofs)).
+                let target_ofs = self.vm.progs.find_field(value).map(|d| d.ofs as i32);
+                if let Some(target_ofs) = target_ofs {
+                    self.vm.set_ei(ent, ofs, target_ofs);
+                }
+            }
+            EType::Function => {
+                // ev_function: store the function index found by name.
+                let fnum = self.vm.progs.find_function(value);
+                if let Some(fnum) = fnum {
+                    self.vm.set_ei(ent, ofs, fnum as i32);
+                }
+            }
+            // ev_void / ev_pointer: nothing to store.
+            EType::Void | EType::Pointer => {}
+        }
+    }
+
+    /// One server frame (a stripped `SV_Physics`): advance `time` by `dt`, set
+    /// `frametime`, then for each non-free edict run `SV_RunThink` and apply the
+    /// minimal per-movetype physics. Returns how many thinks fired.
+    ///
+    /// The host is PRESENT throughout the loop (think functions reach it via
+    /// `with_host`); only the brief `PushEntity` trace borrows it out.
+    pub fn run_frame(&mut self, dt: f32) -> Result<FrameReport> {
+        // host_frametime = dt; sv.time advances at the END in the C, but the
+        // think-time test compares against sv.time + host_frametime, so we set
+        // frametime now and bump time after the loop.
+        self.vm.gset_float("frametime", dt);
+        let start_time = self.time();
+
+        let mut thinks_fired = 0usize;
+        let mut think_errors = 0usize;
+        let n = self.vm.num_edicts();
+
+        for e in 0..n {
+            // edict 0 is the world; process every non-free edict, as the C does.
+            let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
+            if free {
+                continue;
+            }
+            let ent = e as i32;
+            let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+
+            // Isolate per-entity faults (e.g. a think hitting an unimplemented
+            // builtin): count it, reset the interpreter, and carry on — one bad
+            // entity must not abort the whole frame.
+            match self.process_entity(ent, movetype, start_time, dt) {
+                Ok(fired) => thinks_fired += fired as usize,
+                Err(_) => {
+                    think_errors += 1;
+                    self.vm.reset_execution();
+                }
+            }
+        }
+
+        // sv.time += host_frametime (end of SV_Physics).
+        self.vm.gset_float("time", start_time + dt);
+
+        Ok(FrameReport {
+            thinks_fired,
+            think_errors,
+            time: self.time(),
+        })
+    }
+
+    /// Process one live edict for a frame: per-movetype physics plus
+    /// `SV_RunThink`. Returns whether a think fired. `run_think` returns
+    /// `(fired, alive)`; physics runs whenever the entity is still alive,
+    /// independent of whether a think fired. Errors propagate so the caller can
+    /// isolate a faulting entity.
+    fn process_entity(&mut self, ent: i32, movetype: i32, start_time: f32, dt: f32) -> Result<bool> {
+        match movetype {
+            MOVETYPE_PUSH | MOVETYPE_NONE => {
+                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                Ok(fired)
+            }
+            MOVETYPE_NOCLIP => {
+                let (fired, alive) = self.run_think(ent, start_time, dt)?;
+                if alive {
+                    self.integrate_noclip(ent, dt);
+                }
+                Ok(fired)
+            }
+            MOVETYPE_STEP => {
+                // SV_Physics_Step: freefall if not on ground/fly/swim, then think.
+                self.physics_step(ent, dt);
+                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                Ok(fired)
+            }
+            MOVETYPE_TOSS | MOVETYPE_BOUNCE | MOVETYPE_FLY | MOVETYPE_FLYMISSILE => {
+                // SV_Physics_Toss: think first; if alive, gravity + clipped move.
+                let (fired, alive) = self.run_think(ent, start_time, dt)?;
+                if alive {
+                    self.physics_toss(ent, movetype, dt);
+                }
+                Ok(fired)
+            }
+            _ => {
+                // MOVETYPE_WALK and any others: think only (no client AI).
+                let _ = MOVETYPE_WALK;
+                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                Ok(fired)
+            }
+        }
+    }
+
+    /// `SV_RunThink` (sv_phys.c): if the edict's `nextthink` is in `(0, time+dt]`,
+    /// clear it, set the `time`/`self`/`other` globals, and execute its `think`.
+    /// Returns `(fired, alive)`: `fired` = a think executed this frame; `alive`
+    /// is `SV_RunThink`'s own bool (the edict was not removed). When no think is
+    /// due it returns `(false, true)` — nothing ran, the entity lives on, and
+    /// the caller still runs per-movetype physics. Errors from the think
+    /// propagate (the caller decides whether to abort the frame).
+    fn run_think(&mut self, ent: i32, sv_time: f32, dt: f32) -> Result<(bool, bool)> {
+        let thinktime = self.vm.ent_get_float(ent, "nextthink");
+        if thinktime <= 0.0 || thinktime > sv_time + dt {
+            // Not due: SV_RunThink returns true (alive); nothing fired.
+            return Ok((false, true));
+        }
+        // Don't let things stay in the past.
+        let thinktime = if thinktime < sv_time { sv_time } else { thinktime };
+
+        self.vm.ent_set_float(ent, "nextthink", 0.0);
+        self.vm.gset_float("time", thinktime);
+        self.vm.gset_int("self", ent);
+        self.vm.gset_int("other", 0);
+
+        let think = self.vm.ent_get_int(ent, "think");
+        let fnum = think as usize;
+        if think <= 0 || fnum >= self.vm.progs.functions.len() {
+            // nextthink consumed (as the C did), but no valid think to run;
+            // the entity is still alive.
+            return Ok((false, true));
+        }
+        // The C leaves pr_global_struct->time at thinktime afterward; we mirror that.
+        self.vm.execute(fnum)?;
+
+        // alive = !ent->free.
+        let free = self.vm.edict_free.get(ent as usize).copied().unwrap_or(true);
+        Ok((true, !free))
+    }
+
+    /// `SV_Physics_Noclip` integration: `angles += dt*avelocity`,
+    /// `origin += dt*velocity` (no clipping), then relink bounds.
+    fn integrate_noclip(&mut self, ent: i32, dt: f32) {
+        let angles = self.vm.ent_get_vector(ent, "angles");
+        let avel = self.vm.ent_get_vector(ent, "avelocity");
+        self.vm
+            .ent_set_vector(ent, "angles", crate::math::mul_add(angles, dt, avel));
+
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        self.vm
+            .ent_set_vector(ent, "origin", crate::math::mul_add(origin, dt, vel));
+
+        link_edict(&mut self.vm, ent);
+    }
+
+    /// `SV_Physics_Step` (non-`QUAKE2`): freefall (gravity + clipped move) when
+    /// the edict is not on ground / flying / swimming, then trip triggers. Touch
+    /// impacts are handled inside [`Self::push_entity`] (which calls
+    /// [`sv_impact`]); the FlyMove slide is reduced to a single `PushEntity`.
+    fn physics_step(&mut self, ent: i32, dt: f32) {
+        let flags = self.vm.ent_get_float(ent, "flags") as i32;
+        if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+            self.add_gravity(ent, dt);
+            self.check_velocity(ent);
+            let vel = self.vm.ent_get_vector(ent, "velocity");
+            let push = crate::math::scale(vel, dt);
+            self.push_entity(ent, push);
+        }
+        // SV_Physics_Step ends with SV_LinkEdict(ent, true): touch triggers
+        // (item pickups, trigger fields) whether or not it free-fell. Skip if a
+        // touch impact removed the entity.
+        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+            touch_triggers(&mut self.vm, ent);
+        }
+    }
+
+    /// `SV_Physics_Toss` (sv_phys.c, non-`QUAKE2`): if on ground, do nothing;
+    /// else add gravity (except FLY/FLYMISSILE), integrate angles, and move the
+    /// origin via a clipped `PushEntity`. The bounce/stop fixups after an impact
+    /// are applied via [`Self::clip_velocity`].
+    fn physics_toss(&mut self, ent: i32, movetype: i32, dt: f32) {
+        let flags = self.vm.ent_get_float(ent, "flags") as i32;
+        if flags & FL_ONGROUND != 0 {
+            return; // resting on the ground
+        }
+        self.check_velocity(ent);
+
+        // add gravity (not for FLY / FLYMISSILE)
+        if movetype != MOVETYPE_FLY && movetype != MOVETYPE_FLYMISSILE {
+            self.add_gravity(ent, dt);
+        }
+
+        // move angles
+        let angles = self.vm.ent_get_vector(ent, "angles");
+        let avel = self.vm.ent_get_vector(ent, "avelocity");
+        self.vm
+            .ent_set_vector(ent, "angles", crate::math::mul_add(angles, dt, avel));
+
+        // move origin
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        let move_ = crate::math::scale(vel, dt);
+        let tr = self.push_entity(ent, move_);
+
+        // SV_PushEntity ends with SV_LinkEdict(ent, true): trip triggers/pickups
+        // for the moved entity (unless a touch impact already removed it).
+        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+            touch_triggers(&mut self.vm, ent);
+        }
+
+        if tr.fraction == 1.0 {
+            return; // clear move
+        }
+        let free = self.vm.edict_free.get(ent as usize).copied().unwrap_or(true);
+        if free {
+            return;
+        }
+
+        let backoff = if movetype == MOVETYPE_BOUNCE { 1.5 } else { 1.0 };
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        let new_vel = clip_velocity(vel, tr.plane_normal, backoff);
+        self.vm.ent_set_vector(ent, "velocity", new_vel);
+
+        // stop if on ground
+        if tr.plane_normal[2] > 0.7 {
+            if new_vel[2] < 60.0 || movetype != MOVETYPE_BOUNCE {
+                let flags = self.vm.ent_get_float(ent, "flags") as i32;
+                self.vm
+                    .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+                self.vm.ent_set_int(ent, "groundentity", 0);
+                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                self.vm.ent_set_vector(ent, "avelocity", [0.0; 3]);
+            }
+        }
+    }
+
+    /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
+    /// where the per-entity `gravity` field defaults to 1.0 when unset/zero.
+    fn add_gravity(&mut self, ent: i32, dt: f32) {
+        let ent_gravity = {
+            let g = self.vm.ent_get_float(ent, "gravity");
+            if g != 0.0 {
+                g
+            } else {
+                1.0
+            }
+        };
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        vel[2] -= ent_gravity * SV_GRAVITY * dt;
+        self.vm.ent_set_vector(ent, "velocity", vel);
+    }
+
+    /// `SV_CheckVelocity` (sv_phys.c): clamp each velocity component to
+    /// `±sv_maxvelocity` and scrub NaNs from velocity/origin.
+    fn check_velocity(&mut self, ent: i32) {
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let mut origin = self.vm.ent_get_vector(ent, "origin");
+        for i in 0..3 {
+            if vel[i].is_nan() {
+                vel[i] = 0.0;
+            }
+            if origin[i].is_nan() {
+                origin[i] = 0.0;
+            }
+            if vel[i] > SV_MAXVELOCITY {
+                vel[i] = SV_MAXVELOCITY;
+            } else if vel[i] < -SV_MAXVELOCITY {
+                vel[i] = -SV_MAXVELOCITY;
+            }
+        }
+        self.vm.ent_set_vector(ent, "velocity", vel);
+        self.vm.ent_set_vector(ent, "origin", origin);
+    }
+
+    /// `SV_PushEntity` (sv_phys.c ~408): move `ent` by `push` via the
+    /// entity-aware [`sv_move`] (clipping against the world AND every solid
+    /// edict), set `origin = trace.endpos`, relink, and — when the move hit
+    /// another entity — run [`sv_impact`] so both touch functions fire. The
+    /// returned [`HostTrace`] carries the `fraction`/`plane_normal` the toss/step
+    /// physics need for their bounce/stop fixups.
+    ///
+    /// `sv_move` borrows the host internally and `sv_impact` executes QuakeC, so
+    /// neither is called while the host is held out.
+    fn push_entity(&mut self, ent: i32, push: Vec3) -> HostTrace {
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let mins = self.vm.ent_get_vector(ent, "mins");
+        let maxs = self.vm.ent_get_vector(ent, "maxs");
+        let end = v_add(origin, push);
+
+        // Entity-aware move: clips world + all solid edicts; `ent` ignores
+        // itself (the C `passedict`).
+        let mt = sv_move(&mut self.vm, origin, end, mins, maxs, ent);
+
+        self.vm.ent_set_vector(ent, "origin", mt.endpos);
+        link_edict(&mut self.vm, ent);
+
+        // SV_Impact: when the move hit a real entity (not the world / nothing),
+        // run both touch functions. The C checked `if (trace.ent)`; here a
+        // positive index is a non-world edict.
+        if mt.ent > 0 {
+            sv_impact(&mut self.vm, ent, mt.ent);
+        }
+
+        // Reconstruct the trace_t the toss/step physics consume.
+        HostTrace {
+            allsolid: mt.allsolid,
+            startsolid: mt.startsolid,
+            inopen: mt.inopen,
+            inwater: mt.inwater,
+            fraction: mt.fraction,
+            endpos: mt.endpos,
+            plane_normal: mt.plane_normal,
+            plane_dist: mt.plane_dist,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (C2) The local player / client.
+//
+// Ported from sv_user.c (`SV_ClientThink`, `SV_AirMove`, `SV_UserFriction`,
+// `SV_Accelerate`, `SV_AirAccelerate`, `DropPunchAngle`), sv_phys.c
+// (`SV_Physics_Client`, `SV_WalkMove`, `SV_FlyMove`, `SV_Physics`), host_cmd.c
+// (`Host_Spawn_f`) and sv_main.c (`SV_ConnectClient`). The player is a real
+// edict the QuakeC game logic owns (health/items/weapons); the engine drives
+// its per-frame physics with friction, acceleration and ENTITY-AWARE collision
+// (via [`sv_move`]) so it collides with monsters, doors and items.
+// ---------------------------------------------------------------------------
+
+impl Server {
+    /// The local player's edict index, or `-1` if no client has connected.
+    pub fn player_edict(&self) -> i32 {
+        self.player
+    }
+
+    /// Convenience: the player's `health` field (for a HUD / verification). 0.0
+    /// when no client is connected.
+    pub fn player_health(&self) -> f32 {
+        if self.player < 0 {
+            0.0
+        } else {
+            self.vm.ent_get_float(self.player, "health")
+        }
+    }
+
+    /// The player's view: `(eye, v_angle)` where `eye = origin + view_ofs`
+    /// (defaulting `view_ofs` to `(0,0,22)` when the QuakeC left it unset) and
+    /// `v_angle` is `[pitch, yaw, roll]`. Both are zero when no client exists.
+    pub fn player_view(&self) -> ([f32; 3], [f32; 3]) {
+        if self.player < 0 {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        let origin = self.vm.ent_get_vector(self.player, "origin");
+        let mut ofs = self.vm.ent_get_vector(self.player, "view_ofs");
+        if ofs == [0.0, 0.0, 0.0] {
+            ofs = [0.0, 0.0, DEFAULT_VIEWHEIGHT];
+        }
+        let eye = [origin[0] + ofs[0], origin[1] + ofs[1], origin[2] + ofs[2]];
+        let v_angle = self.vm.ent_get_vector(self.player, "v_angle");
+        (eye, v_angle)
+    }
+
+    /// Resolve a named *system* QuakeC function (`StartFrame`, `PlayerPreThink`,
+    /// …). These are stored in like-named globals (`pr_global_struct->X`); prefer
+    /// the function index in that global, fall back to a by-name lookup. Returns
+    /// `None` when the program defines neither.
+    fn sys_function(&self, name: &str) -> Option<usize> {
+        let g = self.vm.gget_int(name);
+        if g > 0 && (g as usize) < self.vm.progs.functions.len() {
+            return Some(g as usize);
+        }
+        self.vm.progs.find_function(name)
+    }
+
+    /// Execute a system QuakeC function with `self = self_e`, `other = other_e`.
+    /// Returns `Ok(true)` if it existed and ran, `Ok(false)` if absent. A program
+    /// fault is caught (`reset_execution`) and surfaced as `Err`, never panicked.
+    fn run_sys(&mut self, name: &str, self_e: i32, other_e: i32) -> Result<bool> {
+        let Some(f) = self.sys_function(name) else {
+            return Ok(false);
+        };
+        self.vm.gset_int("self", self_e);
+        self.vm.gset_int("other", other_e);
+        if let Err(e) = self.vm.execute(f) {
+            self.vm.reset_execution();
+            return Err(crate::QError::invalid(format!(
+                "QuakeC error in {name}(): {e}"
+            )));
+        }
+        Ok(true)
+    }
+
+    /// Spawn the local player and run the connect/spawn entrance script.
+    ///
+    /// Mirrors `SV_ConnectClient` + `Host_Spawn_f`: reserve a fresh edict, make
+    /// it `self`, run `SetNewParms` (fills `parm1..parm16` — the fresh-game
+    /// loadout), then `ClientConnect`, then `PutClientInServer` (the QuakeC sets
+    /// `origin` from `info_player_start`, plus `health`/`model`/`items`/
+    /// `view_ofs`). Marks the edict a walking client (`MOVETYPE_WALK`,
+    /// `SOLID_SLIDEBOX`), records the view entity, links it into the world, and
+    /// returns its index. QuakeC faults are caught and surfaced, not panicked.
+    ///
+    /// SINGLE-CLIENT SIMPLIFICATION: the C copies the parm globals into the
+    /// `client_t.spawn_parms` after `SetNewParms` and copies them back before
+    /// `PutClientInServer`. With exactly one client and no save/load round-trip
+    /// that copy is the identity, so we run `SetNewParms` immediately before the
+    /// connect/spawn pair and let the parm globals carry straight through.
+    pub fn connect_client(&mut self) -> Result<i32> {
+        // Reserve a fresh edict (the first free slot after spawn_entities).
+        let ent = self.vm.spawn();
+        self.player = ent;
+
+        // Default the engine-managed physics fields before the script runs, so a
+        // minimal mod that only sets health/origin still yields a walking client
+        // (the C `SV_SpawnServer` set up the client slot likewise). The QuakeC
+        // PutClientInServer normally sets these too.
+        self.vm
+            .ent_set_float(ent, "movetype", MOVETYPE_WALK as f32);
+        self.vm
+            .ent_set_float(ent, "solid", SOLID_SLIDEBOX as f32);
+
+        // SetNewParms: fill parm1..parm16 with the new-game loadout (self=ent).
+        self.run_sys("SetNewParms", ent, 0)?;
+        // (NUM_SPAWN_PARMS documents how many parm globals SetNewParms wrote;
+        // with a single client they pass straight to PutClientInServer.)
+
+        // ClientConnect then PutClientInServer (the C runs both with self=player).
+        self.run_sys("ClientConnect", ent, 0)?;
+        self.run_sys("PutClientInServer", ent, 0)?;
+
+        // Re-assert the engine-managed physics fields if the mod cleared them.
+        if self.vm.ent_get_float(ent, "movetype") as i32 == MOVETYPE_NONE {
+            self.vm
+                .ent_set_float(ent, "movetype", MOVETYPE_WALK as f32);
+        }
+        if self.vm.ent_get_float(ent, "solid") as i32 == SOLID_NOT {
+            self.vm
+                .ent_set_float(ent, "solid", SOLID_SLIDEBOX as f32);
+        }
+
+        // Record the view entity (what the client looks through).
+        self.vm.gset_float("viewentity", ent as f32);
+
+        // Link into the collision world so absmin/absmax are valid.
+        link_edict(&mut self.vm, ent);
+
+        Ok(ent)
+    }
+
+    /// One server frame driven by the local player's input.
+    ///
+    /// Mirrors `Host_Frame` -> `SV_Physics`: advance `time`/`frametime`, run the
+    /// `StartFrame` system function (self/other = world), then `SV_Physics` over
+    /// every live edict — the player edict via `SV_Physics_Client`
+    /// (`PlayerPreThink` -> movement -> `PlayerPostThink`), all others via the
+    /// generic [`Self::process_entity`] path. `dt` is the frame time.
+    pub fn client_frame(&mut self, cmd: &UserCmd, dt: f32) -> Result<FrameReport> {
+        // host_frametime = dt; sv.time advances at the END of SV_Physics in the
+        // C, but the think-due test compares against sv.time + host_frametime, so
+        // (as run_frame does) we set frametime now and bump time after the loop.
+        self.vm.gset_float("frametime", dt);
+        let start_time = self.time();
+
+        // Let the progs know a new frame has started (self/other = world).
+        let mut thinks_fired = 0usize;
+        let mut think_errors = 0usize;
+        match self.run_sys("StartFrame", 0, 0) {
+            Ok(_) => {}
+            Err(_) => think_errors += 1, // isolated; the interpreter was reset
+        }
+
+        let n = self.vm.num_edicts();
+        for e in 0..n {
+            let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
+            if free {
+                continue;
+            }
+            let ent = e as i32;
+
+            let result = if ent == self.player {
+                self.physics_client(ent, cmd, start_time, dt)
+            } else {
+                let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+                self.process_entity(ent, movetype, start_time, dt)
+            };
+            match result {
+                Ok(fired) => thinks_fired += fired as usize,
+                Err(_) => {
+                    think_errors += 1;
+                    self.vm.reset_execution();
+                }
+            }
+        }
+
+        // sv.time += host_frametime (end of SV_Physics).
+        self.vm.gset_float("time", start_time + dt);
+
+        Ok(FrameReport {
+            thinks_fired,
+            think_errors,
+            time: self.time(),
+        })
+    }
+
+    /// `SV_Physics_Client` (sv_phys.c ~1059): `PlayerPreThink` -> the movement
+    /// path chosen by movetype -> `touch_triggers` -> relink -> `PlayerPostThink`.
+    /// Returns whether a think fired (for the frame report). A removed player
+    /// (`free`) short-circuits the rest, like the C `SV_RunThink` guards.
+    fn physics_client(&mut self, ent: i32, cmd: &UserCmd, start_time: f32, dt: f32) -> Result<bool> {
+        // call standard client pre-think (self = player)
+        self.run_sys("PlayerPreThink", ent, 0)?;
+        if self.is_free(ent) {
+            return Ok(false);
+        }
+
+        // SV_CheckVelocity clamps before the move (the slide clamps implicitly,
+        // but mirror the NaN/maxvelocity scrub the C does first).
+        self.check_velocity(ent);
+
+        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        // Each arm assigns `fired`; the initial value is just to satisfy the
+        // borrow checker on the early-return paths.
+        #[allow(unused_assignments)]
+        let mut fired = false;
+        match movetype {
+            MOVETYPE_NONE => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+            }
+            MOVETYPE_WALK => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                // SV_ClientThink does friction/acceleration toward wishdir; then
+                // gravity (unless water-jumping) and the step-up walk move.
+                self.client_think(ent, cmd, dt);
+                let flags = self.vm.ent_get_float(ent, "flags") as i32;
+                if flags & FL_WATERJUMP == 0 {
+                    self.add_gravity(ent, dt);
+                }
+                self.walk_move(ent, dt);
+            }
+            MOVETYPE_FLY => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                self.client_think(ent, cmd, dt);
+                self.player_fly_move(ent, dt);
+            }
+            MOVETYPE_NOCLIP => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                self.client_think(ent, cmd, dt);
+                // origin += frametime * velocity (no clipping).
+                let origin = self.vm.ent_get_vector(ent, "origin");
+                let vel = self.vm.ent_get_vector(ent, "velocity");
+                self.vm
+                    .ent_set_vector(ent, "origin", crate::math::mul_add(origin, dt, vel));
+            }
+            _ => {
+                // Any other movetype on a client: think only (no movement).
+                let (f, _alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+            }
+        }
+
+        if self.is_free(ent) {
+            return Ok(fired);
+        }
+
+        // After moving, trip triggers so the player can pick up items / fire
+        // trigger fields (the C does this inside SV_LinkEdict during the move;
+        // here the move's link is bounds-only, so we touch triggers explicitly).
+        touch_triggers(&mut self.vm, ent);
+        if self.is_free(ent) {
+            return Ok(fired);
+        }
+
+        // call standard player post-think (relink first, like SV_Physics_Client).
+        link_edict(&mut self.vm, ent);
+        self.run_sys("PlayerPostThink", ent, 0)?;
+
+        Ok(fired)
+    }
+
+    /// True if edict `e` is free (removed) or out of range.
+    fn is_free(&self, e: i32) -> bool {
+        if e < 0 {
+            return true;
+        }
+        self.vm.edict_free.get(e as usize).copied().unwrap_or(true)
+    }
+
+    /// `SV_ClientThink` + `SV_AirMove` (sv_user.c): apply the usercmd angles to
+    /// `v_angle`/`angles`, build the wish velocity from the move axes and angle
+    /// vectors, then friction + acceleration toward `wishdir` (ground) or air
+    /// acceleration (airborne). This sets `velocity`; the actual position move
+    /// happens afterward in [`Self::walk_move`] / [`Self::player_fly_move`].
+    fn client_think(&mut self, ent: i32, cmd: &UserCmd, dt: f32) {
+        if self.vm.ent_get_float(ent, "movetype") as i32 == MOVETYPE_NONE {
+            return;
+        }
+
+        let on_ground = (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND != 0;
+
+        // DropPunchAngle: decay the view kick toward zero.
+        self.drop_punch_angle(ent, dt);
+
+        // if dead, behave differently (no movement)
+        if self.vm.ent_get_float(ent, "health") <= 0.0 {
+            return;
+        }
+
+        // Angles: the engine sets v_angle from the usercmd; angles show 1/3 the
+        // pitch and all the yaw (the C `angles[PITCH] = -v_angle[PITCH]/3`). A
+        // QuakeC-forced `fixangle` (e.g. after a teleport) overrides the look.
+        let fixangle = self.vm.ent_get_float(ent, "fixangle");
+        // v_angle = [pitch, yaw, roll] from the incoming command.
+        self.vm
+            .ent_set_vector(ent, "v_angle", [cmd.pitch, cmd.yaw, 0.0]);
+        if fixangle == 0.0 {
+            self.vm
+                .ent_set_vector(ent, "angles", [-cmd.pitch / 3.0, cmd.yaw, 0.0]);
+        } else {
+            // Honour the forced angles, then clear the flag (SV_WriteClientdata).
+            self.vm.ent_set_float(ent, "fixangle", 0.0);
+        }
+
+        // SV_AirMove: wishvel from forward/side and the look angles.
+        let angles = self.vm.ent_get_vector(ent, "angles");
+        let (forward, right, _up) = crate::math::angle_vectors(angles);
+        let mut fmove = cmd.forwardmove;
+        let smove = cmd.sidemove;
+
+        // hack to not let you back into the teleporter you just left.
+        let teleport_time = self.vm.ent_get_float(ent, "teleport_time");
+        let time = self.time();
+        if time < teleport_time && fmove < 0.0 {
+            fmove = 0.0;
+        }
+
+        let mut wishvel = [
+            forward[0] * fmove + right[0] * smove,
+            forward[1] * fmove + right[1] * smove,
+            forward[2] * fmove + right[2] * smove,
+        ];
+
+        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        if movetype != MOVETYPE_WALK {
+            wishvel[2] = cmd.upmove;
+        } else {
+            wishvel[2] = 0.0;
+        }
+
+        // wishdir / wishspeed = normalize(wishvel), clamped to sv_maxspeed.
+        let (wishdir, mut wishspeed) = crate::math::normalize(wishvel);
+        if wishspeed > SV_MAXSPEED {
+            let scale = SV_MAXSPEED / wishspeed;
+            wishvel = crate::math::scale(wishvel, scale);
+            wishspeed = SV_MAXSPEED;
+        }
+
+        if movetype == MOVETYPE_NOCLIP {
+            // noclip: velocity follows the wish directly.
+            self.vm.ent_set_vector(ent, "velocity", wishvel);
+        } else if on_ground {
+            self.user_friction(ent, dt);
+            self.accelerate(ent, wishdir, wishspeed, dt);
+        } else {
+            // not on ground, so little effect on velocity (air control).
+            self.air_accelerate(ent, wishvel, dt);
+        }
+    }
+
+    /// `SV_UserFriction` (sv_user.c): bleed off horizontal speed, with extra
+    /// friction (`edgefriction`) when the leading edge hangs over a dropoff.
+    fn user_friction(&mut self, ent: i32, dt: f32) {
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let speed = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
+        if speed == 0.0 {
+            return;
+        }
+
+        // If the leading edge is over a dropoff, increase friction. The C traces
+        // a *point* (mins=maxs=0) 34 units down, 16 units ahead, from the bottom
+        // of the player box, ignoring the player.
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let pmins = self.vm.ent_get_vector(ent, "mins");
+        let start = [
+            origin[0] + vel[0] / speed * 16.0,
+            origin[1] + vel[1] / speed * 16.0,
+            origin[2] + pmins[2],
+        ];
+        let stop = [start[0], start[1], start[2] - 34.0];
+        let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent);
+        let friction = if trace.fraction == 1.0 {
+            SV_FRICTION * SV_EDGEFRICTION
+        } else {
+            SV_FRICTION
+        };
+
+        // apply friction
+        let control = if speed < SV_STOPSPEED {
+            SV_STOPSPEED
+        } else {
+            speed
+        };
+        let mut newspeed = speed - dt * control * friction;
+        if newspeed < 0.0 {
+            newspeed = 0.0;
+        }
+        newspeed /= speed;
+
+        vel = crate::math::scale(vel, newspeed);
+        self.vm.ent_set_vector(ent, "velocity", vel);
+    }
+
+    /// `SV_Accelerate` (sv_user.c): push velocity toward `wishdir` up to
+    /// `wishspeed` by at most `sv_accelerate * dt * wishspeed` this tick.
+    fn accelerate(&mut self, ent: i32, wishdir: Vec3, wishspeed: f32, dt: f32) {
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let currentspeed = crate::math::dot(vel, wishdir);
+        let addspeed = wishspeed - currentspeed;
+        if addspeed <= 0.0 {
+            return;
+        }
+        let mut accelspeed = SV_ACCELERATE * dt * wishspeed;
+        if accelspeed > addspeed {
+            accelspeed = addspeed;
+        }
+        for i in 0..3 {
+            vel[i] += accelspeed * wishdir[i];
+        }
+        self.vm.ent_set_vector(ent, "velocity", vel);
+    }
+
+    /// `SV_AirAccelerate` (sv_user.c): like `SV_Accelerate` but the *target*
+    /// speed is capped at 30, while the acceleration is scaled by the original
+    /// (un-capped) `wishspeed` — a faithful transcription of id's exact code,
+    /// `wishvel` normalized in place to give both `wishspeed` and the direction.
+    fn air_accelerate(&mut self, ent: i32, wishveloc: Vec3, dt: f32) {
+        let (dir, wishspeed) = crate::math::normalize(wishveloc);
+        let wishspd = if wishspeed > 30.0 { 30.0 } else { wishspeed };
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        // The C uses `wishveloc` (the normalized vector, since VectorNormalize
+        // wrote it in place) for the dot and the add.
+        let currentspeed = crate::math::dot(vel, dir);
+        let addspeed = wishspd - currentspeed;
+        if addspeed <= 0.0 {
+            return;
+        }
+        // NOTE: id scales by the ORIGINAL wishspeed, not the capped wishspd.
+        let mut accelspeed = SV_ACCELERATE * wishspeed * dt;
+        if accelspeed > addspeed {
+            accelspeed = addspeed;
+        }
+        for i in 0..3 {
+            vel[i] += accelspeed * dir[i];
+        }
+        self.vm.ent_set_vector(ent, "velocity", vel);
+    }
+
+    /// `DropPunchAngle` (sv_user.c): decay the view-kick vector by `10*dt` units
+    /// of length toward zero.
+    fn drop_punch_angle(&mut self, ent: i32, dt: f32) {
+        let punch = self.vm.ent_get_vector(ent, "punchangle");
+        let (dir, mut len) = crate::math::normalize(punch);
+        len -= 10.0 * dt;
+        if len < 0.0 {
+            len = 0.0;
+        }
+        self.vm
+            .ent_set_vector(ent, "punchangle", crate::math::scale(dir, len));
+    }
+
+    /// `SV_FlyMove` (sv_phys.c ~229) against the ENTITY-AWARE [`sv_move`]: slide
+    /// the player box along the surfaces it hits over `dt`, sliding along walls
+    /// and creases instead of stopping dead. Returns the blocked bitmask
+    /// (1 = floor, 2 = wall/step, plus 4-ish dead-stop returns), sets
+    /// `FL_ONGROUND` on a floor contact, and runs the touch functions of any
+    /// entity it bumps via [`sv_impact`]. `out_steptrace` receives the trace of
+    /// the wall hit that triggers stair-stepping.
+    fn fly_move_core(&mut self, ent: i32, dt: f32, out_steptrace: &mut Option<MoveTrace>) -> i32 {
+        let num_bumps = 4;
+        let mut blocked = 0;
+        let original_velocity = self.vm.ent_get_vector(ent, "velocity");
+        let primal_velocity = original_velocity;
+        let mut original = original_velocity;
+        let mut planes: Vec<Vec3> = Vec::with_capacity(5);
+        let mut time_left = dt;
+
+        for _bump in 0..num_bumps {
+            let velocity = self.vm.ent_get_vector(ent, "velocity");
+            if velocity == [0.0, 0.0, 0.0] {
+                break;
+            }
+            let origin = self.vm.ent_get_vector(ent, "origin");
+            let end = [
+                origin[0] + time_left * velocity[0],
+                origin[1] + time_left * velocity[1],
+                origin[2] + time_left * velocity[2],
+            ];
+            let mins = self.vm.ent_get_vector(ent, "mins");
+            let maxs = self.vm.ent_get_vector(ent, "maxs");
+            let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent);
+
+            if trace.allsolid {
+                // entity is trapped in another solid: stop dead.
+                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                return 3;
+            }
+
+            if trace.fraction > 0.0 {
+                // actually covered some distance
+                self.vm.ent_set_vector(ent, "origin", trace.endpos);
+                original = self.vm.ent_get_vector(ent, "velocity");
+                planes.clear();
+            }
+
+            if trace.fraction == 1.0 {
+                break; // moved the entire distance
+            }
+
+            if trace.plane_normal[2] > 0.7 {
+                blocked |= 1; // floor
+                // The C only latches FL_ONGROUND when the floor is a BSP solid;
+                // here both world (ent==0) and brush submodels are SOLID_BSP-like
+                // floors. We set ONGROUND for the world and any positive edict.
+                if trace.ent >= 0 {
+                    let flags = self.vm.ent_get_float(ent, "flags") as i32;
+                    self.vm
+                        .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+                    self.vm.ent_set_int(ent, "groundentity", trace.ent.max(0));
+                }
+            }
+            if trace.plane_normal[2] == 0.0 {
+                blocked |= 2; // step / wall
+                *out_steptrace = Some(trace.clone());
+            }
+
+            // run the impact function (host present; not inside with_host).
+            if trace.ent > 0 {
+                sv_impact(&mut self.vm, ent, trace.ent);
+                if self.is_free(ent) {
+                    break; // removed by the impact function
+                }
+            }
+
+            time_left -= time_left * trace.fraction;
+
+            // clipped to another plane
+            if planes.len() >= 5 {
+                // this shouldn't really happen
+                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                return 3;
+            }
+            planes.push(trace.plane_normal);
+
+            // modify original_velocity so it parallels all of the clip planes.
+            let mut new_velocity = [0.0f32; 3];
+            let mut i = 0usize;
+            while i < planes.len() {
+                new_velocity = clip_velocity(original, planes[i], 1.0);
+                let mut ok = true;
+                let mut j = 0usize;
+                while j < planes.len() {
+                    if j != i && crate::math::dot(new_velocity, planes[j]) < 0.0 {
+                        ok = false;
+                        break;
+                    }
+                    j += 1;
+                }
+                if ok {
+                    break;
+                }
+                i += 1;
+            }
+
+            if i != planes.len() {
+                // go along this plane
+                self.vm.ent_set_vector(ent, "velocity", new_velocity);
+            } else {
+                // go along the crease (two planes)
+                if planes.len() != 2 {
+                    self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                    return 7;
+                }
+                let dir = crate::math::cross(planes[0], planes[1]);
+                let cur = self.vm.ent_get_vector(ent, "velocity");
+                let d = crate::math::dot(dir, cur);
+                self.vm
+                    .ent_set_vector(ent, "velocity", crate::math::scale(dir, d));
+            }
+
+            // if velocity is against the original velocity, stop dead to avoid
+            // tiny oscillations in sloping corners.
+            let cur = self.vm.ent_get_vector(ent, "velocity");
+            if crate::math::dot(cur, primal_velocity) <= 0.0 {
+                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                return blocked;
+            }
+        }
+
+        blocked
+    }
+
+    /// Plain fly move for `MOVETYPE_FLY` clients (no stair step-up), then relink.
+    fn player_fly_move(&mut self, ent: i32, dt: f32) {
+        let mut steptrace = None;
+        let _ = self.fly_move_core(ent, dt, &mut steptrace);
+        link_edict(&mut self.vm, ent);
+    }
+
+    /// `SV_WalkMove` (sv_phys.c ~958): a slide move with a stair step-up of up to
+    /// [`world::STEPSIZE`] when the flat move is blocked by a wall, so the player
+    /// climbs small ledges. Faithful to id's algorithm over the entity-aware
+    /// [`Self::fly_move_core`]. Updates `FL_ONGROUND` from the down move and
+    /// relinks at the end.
+    fn walk_move(&mut self, ent: i32, dt: f32) {
+        // do a regular slide move unless it looks like you ran into a step.
+        let oldonground = (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND != 0;
+        // Clear ONGROUND; fly_move / the down move below will re-set it.
+        let flags0 = self.vm.ent_get_float(ent, "flags") as i32;
+        self.vm
+            .ent_set_float(ent, "flags", (flags0 & !FL_ONGROUND) as f32);
+
+        let oldorg = self.vm.ent_get_vector(ent, "origin");
+        let oldvel = self.vm.ent_get_vector(ent, "velocity");
+
+        let mut steptrace: Option<MoveTrace> = None;
+        let clip = self.fly_move_core(ent, dt, &mut steptrace);
+
+        if clip & 2 == 0 {
+            // move didn't block on a step.
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+        if !oldonground {
+            // don't stair up while jumping (waterlevel is out of scope -> treated
+            // as 0, so jumping airborne players never step).
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+        if self.vm.ent_get_float(ent, "movetype") as i32 != MOVETYPE_WALK {
+            link_edict(&mut self.vm, ent); // gibbed by a trigger
+            return;
+        }
+        if (self.vm.ent_get_float(ent, "flags") as i32) & FL_WATERJUMP != 0 {
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+
+        // remember the no-step result.
+        let nosteporg = self.vm.ent_get_vector(ent, "origin");
+        let nostepvel = self.vm.ent_get_vector(ent, "velocity");
+
+        // try moving up and forward to go up a step.
+        self.vm.ent_set_vector(ent, "origin", oldorg); // back to start pos
+
+        // move up
+        let upmove = [0.0, 0.0, world::STEPSIZE];
+        self.push_entity(ent, upmove);
+
+        // move forward (no vertical wish in velocity).
+        self.vm
+            .ent_set_vector(ent, "velocity", [oldvel[0], oldvel[1], 0.0]);
+        let mut steptrace2 = None;
+        let _ = self.fly_move_core(ent, dt, &mut steptrace2);
+
+        // move down by STEPSIZE - the vertical the original move would have done.
+        let downmove = [0.0, 0.0, -world::STEPSIZE + oldvel[2] * dt];
+        let downtrace = self.push_entity(ent, downmove);
+
+        if downtrace.plane_normal[2] > 0.7 {
+            // landed on a walkable floor: keep the stepped result and set ground.
+            let flags = self.vm.ent_get_float(ent, "flags") as i32;
+            self.vm
+                .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+            self.vm.ent_set_int(ent, "groundentity", 0);
+        } else {
+            // the push down didn't reach good ground: use the no-step move.
+            self.vm.ent_set_vector(ent, "origin", nosteporg);
+            self.vm.ent_set_vector(ent, "velocity", nostepvel);
+        }
+
+        link_edict(&mut self.vm, ent);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (D) Entity-aware move, impact, and trigger touching.
+//
+// Ported from world.c (`SV_Move` ~923, `SV_ClipMoveToEntity` ~722,
+// `SV_TouchLinks` ~258) and sv_phys.c (`SV_Impact` ~153, `SV_PushEntity`
+// ~408). SIMPLIFICATION: the C walked an areanode tree (SV_ClipToLinks /
+// SV_TouchLinks recursing children) for O(log n) culling; here we LINEAR-SCAN
+// every edict. e1m1 has ~150 edicts, so the scan is cheap and the result is
+// identical (the tree was only an acceleration structure). Brush-model
+// rotation (the `QUAKE2` branch) is out of scope.
+// ---------------------------------------------------------------------------
+
+// Solid types (server.h). SOLID_NOT/SOLID_TRIGGER do not block a move.
+const SOLID_NOT: i32 = 0;
+const SOLID_TRIGGER: i32 = 1;
+const SOLID_BBOX: i32 = 2;
+const SOLID_SLIDEBOX: i32 = 3;
+const SOLID_BSP: i32 = 4;
+
+/// The result of [`sv_move`]: a world-collision trace plus the edict that was
+/// hit (`SV_Move`'s `clip.trace` with `trace.ent` resolved to an edict index).
+///
+/// `ent` semantics: `0` = the world model (a world impact, like the C
+/// `clip.trace.ent = sv.edicts`), a positive index = that edict, and `-1` =
+/// nothing was hit (a fully clear move). This mirrors `trace_t.ent`, which the
+/// C set to `sv.edicts` (edict 0) for a world hit, the touched edict for an
+/// entity hit, and left `NULL` for a clear move (here `-1`, since `0` is the
+/// valid world edict).
+#[derive(Debug, Clone, Copy)]
+pub struct MoveTrace {
+    pub allsolid: bool,
+    pub startsolid: bool,
+    pub inopen: bool,
+    pub inwater: bool,
+    pub fraction: f32,
+    pub endpos: Vec3,
+    pub plane_normal: Vec3,
+    pub plane_dist: f32,
+    /// Edict hit: `0` = world, `>0` = that edict, `-1` = nothing.
+    pub ent: i32,
+}
+
+impl MoveTrace {
+    /// Build a `MoveTrace` from a world [`HostTrace`], resolving `ent` to `0`
+    /// (the world) when the move was clipped and `-1` when it ran clear.
+    fn from_world(tr: HostTrace) -> MoveTrace {
+        let hit = tr.fraction < 1.0 || tr.startsolid;
+        MoveTrace {
+            allsolid: tr.allsolid,
+            startsolid: tr.startsolid,
+            inopen: tr.inopen,
+            inwater: tr.inwater,
+            fraction: tr.fraction,
+            endpos: tr.endpos,
+            plane_normal: tr.plane_normal,
+            plane_dist: tr.plane_dist,
+            ent: if hit { 0 } else { -1 },
+        }
+    }
+}
+
+/// `SV_Move` (world.c ~923): box-trace `mins`/`maxs` from `start` to `end`
+/// against the world **and** every solid entity, returning the closest impact.
+///
+/// This is the linear-scan replacement for `SV_ClipToLinks`: after clipping to
+/// the world (via [`crate::world::trace_world`]), it walks every live edict,
+/// clips against each blocking solid (`SOLID_BSP` brush submodels via
+/// [`crate::world::trace_submodel`], `SOLID_BBOX`/`SOLID_SLIDEBOX` boxes via
+/// [`crate::world::clip_box`]), and keeps whichever trace stops earliest.
+/// `SOLID_NOT` and `SOLID_TRIGGER` entities never block (triggers fire via
+/// [`touch_triggers`], not here). The `ignore` edict (the mover itself) is
+/// skipped, exactly as the C skipped `clip->passedict`.
+///
+/// The whole scan runs inside one [`Vm::with_host`] so the host is borrowed out
+/// exactly once; no QuakeC executes here (touch functions run later, with the
+/// host present).
+pub fn sv_move(vm: &mut Vm, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3, ignore: i32) -> MoveTrace {
+    vm.with_host(|vm, host| {
+        let bsp = host.bsp();
+
+        // 1) Clip to the world (edict 0).
+        let world = crate::world::trace_world(bsp, start, end, mins, maxs);
+        let mut best = MoveTrace::from_world(world);
+
+        // 2) Clip to every solid entity (linear scan; the C used the areanode
+        //    tree purely as an acceleration structure).
+        let n = vm.num_edicts();
+        for e in 0..n {
+            let ei = e as i32;
+            if ei == 0 {
+                continue; // world already clipped
+            }
+            if ei == ignore {
+                continue; // don't clip against the mover itself (passedict)
+            }
+            if vm.edict_free.get(e).copied().unwrap_or(true) {
+                continue; // free slot
+            }
+
+            let solid = vm.ent_get_float(ei, "solid") as i32;
+            let origin = vm.ent_get_vector(ei, "origin");
+
+            let tr = match solid {
+                SOLID_BSP => {
+                    // model "*N" -> submodel index N.
+                    let model = vm.ent_get_string(ei, "model");
+                    let idx = model
+                        .strip_prefix('*')
+                        .and_then(|d| d.parse::<usize>().ok());
+                    match idx {
+                        Some(idx) => crate::world::trace_submodel(
+                            bsp, idx, origin, start, end, mins, maxs,
+                        ),
+                        None => continue, // SOLID_BSP without a valid "*N" model
+                    }
+                }
+                SOLID_BBOX | SOLID_SLIDEBOX => {
+                    let ent_mins = vm.ent_get_vector(ei, "mins");
+                    let ent_maxs = vm.ent_get_vector(ei, "maxs");
+                    crate::world::clip_box(start, end, mins, maxs, ent_mins, ent_maxs, origin)
+                }
+                // SOLID_NOT and SOLID_TRIGGER do not block a move.
+                _ => continue,
+            };
+
+            // Adopt this entity's trace when it stops earlier, is all-solid, or
+            // started solid (the C's `trace.allsolid || trace.startsolid ||
+            // trace.fraction < clip->trace.fraction` test).
+            if tr.allsolid || tr.startsolid || tr.fraction < best.fraction {
+                let was_startsolid = best.startsolid;
+                best.allsolid = tr.allsolid;
+                best.startsolid = tr.startsolid || was_startsolid;
+                best.inopen = tr.inopen;
+                best.inwater = tr.inwater;
+                best.fraction = tr.fraction;
+                best.endpos = tr.endpos;
+                best.plane_normal = tr.plane_normal;
+                best.plane_dist = tr.plane_dist;
+                best.ent = ei;
+            } else if tr.startsolid {
+                best.startsolid = true;
+            }
+        }
+
+        best
+    })
+    .unwrap_or(MoveTrace {
+        // No host: a clear move (the engine builtins fault cleanly anyway).
+        allsolid: false,
+        startsolid: false,
+        inopen: false,
+        inwater: false,
+        fraction: 1.0,
+        endpos: end,
+        plane_normal: [0.0; 3],
+        plane_dist: 0.0,
+        ent: -1,
+    })
+}
+
+/// `SV_Impact` (sv_phys.c ~153): two entities have touched, so run each one's
+/// `touch` function with `self`/`other` set appropriately.
+///
+/// Saves the `self`/`other` globals, sets `time = current`, runs `e1.touch`
+/// (self=e1, other=e2) then `e2.touch` (self=e2, other=e1) — each only if that
+/// edict has a non-null `touch` and is not `SOLID_NOT` — then restores
+/// `self`/`other`. A faulting touch is isolated (the interpreter is reset) so
+/// one bad touch does not abort the caller, mirroring the per-entity
+/// robustness elsewhere in the server. The host must be PRESENT (this calls
+/// `execute`); never invoke it from inside `with_host`.
+pub fn sv_impact(vm: &mut Vm, e1: i32, e2: i32) {
+    let old_self = vm.gget_int("self");
+    let old_other = vm.gget_int("other");
+    let time = vm.gget_float("time");
+    vm.gset_float("time", time);
+
+    run_touch(vm, e1, e2);
+    run_touch(vm, e2, e1);
+
+    vm.gset_int("self", old_self);
+    vm.gset_int("other", old_other);
+}
+
+/// Run `toucher`'s `touch` function with `self = toucher`, `other = with`, when
+/// `toucher` has a valid `touch` function and is not `SOLID_NOT`. A fault is
+/// caught and the interpreter reset (the entity's bad touch is isolated).
+fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
+    let touch = vm.ent_get_int(toucher, "touch");
+    if touch <= 0 || (touch as usize) >= vm.progs.functions.len() {
+        return; // no touch function (the C `if (e->v.touch ...)`)
+    }
+    if vm.ent_get_float(toucher, "solid") as i32 == SOLID_NOT {
+        return;
+    }
+    vm.gset_int("self", toucher);
+    vm.gset_int("other", with);
+    if vm.execute(touch as usize).is_err() {
+        vm.reset_execution();
+    }
+}
+
+/// `SV_TouchLinks` for trigger fields (world.c ~258, the trigger half of
+/// `SV_LinkEdict`'s relink): after `mover` moves, fire every `SOLID_TRIGGER`
+/// edict whose `touch` function exists and whose `absmin`/`absmax` box overlaps
+/// the mover's. This is how items get picked up and trigger fields fire.
+///
+/// SIMPLIFICATION: linear scan instead of the areanode `trigger_edicts` lists.
+/// The overlap test reads the `absmin`/`absmax` fields the `setorigin`/`setsize`
+/// builtins maintain. Triggers to run are gathered into a `Vec` first (so the
+/// borrow of the edict array ends before any `execute`), then each is run with
+/// `self = trigger`, `other = mover`. A faulting trigger is isolated.
+pub fn touch_triggers(vm: &mut Vm, mover: i32) {
+    // Gather first: collect the trigger edicts to fire so we don't execute
+    // QuakeC while iterating (the touch could spawn/free edicts).
+    let mover_absmin = vm.ent_get_vector(mover, "absmin");
+    let mover_absmax = vm.ent_get_vector(mover, "absmax");
+
+    let mut to_fire: Vec<i32> = Vec::new();
+    let n = vm.num_edicts();
+    for e in 0..n {
+        let ei = e as i32;
+        if ei == mover {
+            continue; // the C `if (touch == ent) continue;`
+        }
+        if vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        if vm.ent_get_float(ei, "solid") as i32 != SOLID_TRIGGER {
+            continue;
+        }
+        let touch = vm.ent_get_int(ei, "touch");
+        if touch <= 0 || (touch as usize) >= vm.progs.functions.len() {
+            continue; // no touch function
+        }
+        let t_absmin = vm.ent_get_vector(ei, "absmin");
+        let t_absmax = vm.ent_get_vector(ei, "absmax");
+        // AABB overlap (the C's six-way reject test, inverted).
+        if mover_absmin[0] > t_absmax[0]
+            || mover_absmin[1] > t_absmax[1]
+            || mover_absmin[2] > t_absmax[2]
+            || mover_absmax[0] < t_absmin[0]
+            || mover_absmax[1] < t_absmin[1]
+            || mover_absmax[2] < t_absmin[2]
+        {
+            continue;
+        }
+        to_fire.push(ei);
+    }
+
+    // Now run each trigger's touch (host is present here).
+    let old_self = vm.gget_int("self");
+    let old_other = vm.gget_int("other");
+    let time = vm.gget_float("time");
+    for t in to_fire {
+        // Re-check the edict is still live and a trigger (a prior touch may have
+        // freed or changed it).
+        if vm.edict_free.get(t as usize).copied().unwrap_or(true) {
+            continue;
+        }
+        if vm.ent_get_float(t, "solid") as i32 != SOLID_TRIGGER {
+            continue;
+        }
+        let touch = vm.ent_get_int(t, "touch");
+        if touch <= 0 || (touch as usize) >= vm.progs.functions.len() {
+            continue;
+        }
+        vm.gset_int("self", t);
+        vm.gset_int("other", mover);
+        vm.gset_float("time", time);
+        if vm.execute(touch as usize).is_err() {
+            vm.reset_execution();
+        }
+    }
+    vm.gset_int("self", old_self);
+    vm.gset_int("other", old_other);
+}
+
+// ---------------------------------------------------------------------------
+// (D2) Monster movement: the AI walk/chase steps.
+//
+// Ported from sv_move.c (`SV_CheckBottom` ~36, `SV_movestep` ~110,
+// `SV_StepDirection` ~232, `SV_FixCheckBottom` ~267, `SV_NewChaseDir` ~283,
+// `SV_CloseEnough` ~371, `SV_MoveToGoal` ~391) and pr_cmds.c (`PF_walkmove`
+// ~541, `PF_checkbottom`, `PF_checkclient` ~714, `PF_findradius` ~788).
+//
+// These drive ai.qc / fight.qc so grunts and dogs walk, chase and target the
+// player. Every collision query is the ENTITY-AWARE [`sv_move`] (so monsters
+// collide with the world, the player, and each other), exactly as the C's
+// `SV_Move(..., ent)` passed the monster as the ignored passedict.
+//
+// QUAKE2-branch omissions: id's `QUAKE2` build added water-current handling and
+// an alternate `SV_movestep` fly/swim path; that branch is not compiled here
+// (this is the stock WinQuake non-`QUAKE2` build). `SV_CheckBottom`'s `c_yes`/
+// `c_no` debug counters are dropped (diagnostics only).
+// ---------------------------------------------------------------------------
+
+/// `SV_CheckBottom` (sv_move.c ~36): is there floor under the whole box?
+///
+/// Returns `false` if any part of the bottom of `ent`'s box hangs over an edge
+/// that is not a staircase (so [`sv_movestep`] refuses to walk off a ledge).
+///
+/// Fast path: if all four bottom corners sit directly over solid world, accept
+/// immediately. Otherwise the slow path traces a point straight down from the
+/// midpoint and each corner (using the world-only trace — the C passed
+/// `vec3_origin` mins/maxs, i.e. a point move), and rejects if the midpoint
+/// found no floor or any corner is more than `STEPSIZE` below the midpoint.
+pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
+    let origin = vm.ent_get_vector(ent, "origin");
+    let ent_mins = vm.ent_get_vector(ent, "mins");
+    let ent_maxs = vm.ent_get_vector(ent, "maxs");
+    let mins = v_add(origin, ent_mins);
+    let maxs = v_add(origin, ent_maxs);
+
+    // Fast path: if all four corners under the box are solid world, accept.
+    // (The corners are sampled 1 unit below the box bottom.)
+    let mut easy = true;
+    let z = mins[2] - 1.0;
+    'corners: for &x in &[mins[0], maxs[0]] {
+        for &y in &[mins[1], maxs[1]] {
+            let p: Vec3 = [x, y, z];
+            let c = vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID);
+            if c != CONTENTS_SOLID {
+                easy = false;
+                break 'corners;
+            }
+        }
+    }
+    if easy {
+        return true; // we got out easy
+    }
+
+    // Slow path: trace point moves straight down from the box bottom.
+    let start_z = mins[2];
+    let stop_z = start_z - 2.0 * world::STEPSIZE;
+
+    // The midpoint must find a floor within 2*STEPSIZE.
+    let mid_x = (mins[0] + maxs[0]) * 0.5;
+    let mid_y = (mins[1] + maxs[1]) * 0.5;
+    let mid_start: Vec3 = [mid_x, mid_y, start_z];
+    let mid_stop: Vec3 = [mid_x, mid_y, stop_z];
+    // SV_Move(start, vec3_origin, vec3_origin, stop, true, ent): a *point* move
+    // (mins=maxs=0) that ignores the monster itself.
+    let tr = sv_move(vm, mid_start, mid_stop, [0.0; 3], [0.0; 3], ent);
+    if tr.fraction == 1.0 {
+        return false; // no floor under the midpoint
+    }
+    let mid = tr.endpos[2];
+    let mut bottom = mid;
+
+    // Each corner must be within STEPSIZE of the midpoint floor height.
+    for &x in &[mins[0], maxs[0]] {
+        for &y in &[mins[1], maxs[1]] {
+            let cstart: Vec3 = [x, y, start_z];
+            let cstop: Vec3 = [x, y, stop_z];
+            let tr = sv_move(vm, cstart, cstop, [0.0; 3], [0.0; 3], ent);
+            if tr.fraction != 1.0 && tr.endpos[2] > bottom {
+                bottom = tr.endpos[2];
+            }
+            if tr.fraction == 1.0 || mid - tr.endpos[2] > world::STEPSIZE {
+                return false; // corner dangles over an edge
+            }
+        }
+    }
+    true
+}
+
+/// `SV_movestep` (sv_move.c ~110): try to move `ent` by `move`, adjusting for
+/// slopes and stairs. Returns `true` and commits the new origin on success;
+/// returns `false` and leaves the origin untouched if the move isn't possible.
+///
+/// Walking monsters: trace from `origin + STEPSIZE` down to
+/// `origin + move - STEPSIZE` (the step-up/step-down envelope) via the
+/// entity-aware [`sv_move`], requiring solid ground and [`sv_check_bottom`].
+/// Flying/swimming monsters (`FL_FLY`/`FL_SWIM`) use the direct two-try path
+/// (with the enemy-height nudge) and never step up. `FL_PARTIALGROUND` monsters
+/// fall through / keep correcting instead of refusing. When `relink` is set the
+/// box is re-linked and its triggers fired, exactly as the C `SV_LinkEdict(ent,
+/// true)`.
+pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
+    let oldorg = vm.ent_get_vector(ent, "origin");
+    let ent_mins = vm.ent_get_vector(ent, "mins");
+    let ent_maxs = vm.ent_get_vector(ent, "maxs");
+    let flags = vm.ent_get_float(ent, "flags") as i32;
+
+    // Flying / swimming monsters don't step up.
+    if flags & (FL_SWIM | FL_FLY) != 0 {
+        let enemy = vm.ent_get_int(ent, "enemy");
+        // Try one move with vertical motion, then one without.
+        for i in 0..2 {
+            let mut neworg = v_add(oldorg, mov);
+            if i == 0 && enemy > 0 {
+                let enemy_org = vm.ent_get_vector(enemy, "origin");
+                let dz = oldorg[2] - enemy_org[2];
+                if dz > 40.0 {
+                    neworg[2] -= 8.0;
+                }
+                if dz < 30.0 {
+                    neworg[2] += 8.0;
+                }
+            }
+            let tr = sv_move(vm, oldorg, neworg, ent_mins, ent_maxs, ent);
+            if tr.fraction == 1.0 {
+                // A swim monster that would leave water cannot make this move.
+                if flags & FL_SWIM != 0 {
+                    let c = vm
+                        .with_host(|_vm, h| h.point_contents(tr.endpos))
+                        .unwrap_or(CONTENTS_SOLID);
+                    if c == CONTENTS_EMPTY {
+                        return false; // swim monster left water
+                    }
+                }
+                vm.ent_set_vector(ent, "origin", tr.endpos);
+                if relink {
+                    link_edict(vm, ent);
+                    touch_triggers(vm, ent);
+                }
+                return true;
+            }
+            if enemy <= 0 {
+                break; // no enemy: only one try
+            }
+        }
+        return false;
+    }
+
+    // Walking monster: push down from a step height above the wished position.
+    let mut neworg = v_add(oldorg, mov);
+    neworg[2] += world::STEPSIZE;
+    let mut end = neworg;
+    end[2] -= world::STEPSIZE * 2.0;
+
+    let mut tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent);
+
+    if tr.allsolid {
+        return false;
+    }
+    if tr.startsolid {
+        // Back the start down a step and retry (the C's startsolid retry).
+        neworg[2] -= world::STEPSIZE;
+        tr = sv_move(vm, neworg, end, ent_mins, ent_maxs, ent);
+        if tr.allsolid || tr.startsolid {
+            return false;
+        }
+    }
+    if tr.fraction == 1.0 {
+        // No floor in the step envelope.
+        if flags & FL_PARTIALGROUND != 0 {
+            // The monster had the ground pulled out; let it fall.
+            vm.ent_set_vector(ent, "origin", v_add(oldorg, mov));
+            if relink {
+                link_edict(vm, ent);
+                touch_triggers(vm, ent);
+            }
+            let flags = vm.ent_get_float(ent, "flags") as i32;
+            vm.ent_set_float(ent, "flags", (flags & !FL_ONGROUND) as f32);
+            return true;
+        }
+        return false; // walked off an edge
+    }
+
+    // Landed on something: provisionally take the new origin, then verify the
+    // whole box has floor under it (dangling-corner check).
+    vm.ent_set_vector(ent, "origin", tr.endpos);
+
+    if !sv_check_bottom(vm, ent) {
+        if flags & FL_PARTIALGROUND != 0 {
+            // Floor mostly pulled out: keep correcting (accept the move).
+            if relink {
+                link_edict(vm, ent);
+                touch_triggers(vm, ent);
+            }
+            return true;
+        }
+        // Revert: no clean standing position.
+        vm.ent_set_vector(ent, "origin", oldorg);
+        return false;
+    }
+
+    if flags & FL_PARTIALGROUND != 0 {
+        // Back on solid ground: clear the partial-ground flag.
+        let flags = vm.ent_get_float(ent, "flags") as i32;
+        vm.ent_set_float(ent, "flags", (flags & !FL_PARTIALGROUND) as f32);
+    }
+    // groundentity = the edict we landed on (world = 0, an entity = its index;
+    // a clear-but-landed trace resolves ent to 0/the world via MoveTrace).
+    let ground = if tr.ent < 0 { 0 } else { tr.ent };
+    vm.ent_set_int(ent, "groundentity", ground);
+
+    if relink {
+        link_edict(vm, ent);
+        touch_triggers(vm, ent);
+    }
+    true
+}
+
+/// `SV_StepDirection` (sv_move.c ~232): turn `ent` toward `yaw` and walk `dist`
+/// in that direction if now roughly facing it.
+///
+/// Sets `ideal_yaw`, turns via the real `changeyaw` builtin logic, builds the
+/// horizontal move `(cos,sin,0)*dist`, and calls [`sv_movestep`]. On success,
+/// if the monster has not yet turned within 45 degrees of the move it reverts
+/// the origin (it still counts as a successful "step" so the caller stops
+/// hunting for a direction — matching the C). Always relinks at the end.
+pub fn sv_step_direction(vm: &mut Vm, ent: i32, yaw: f32, dist: f32) -> bool {
+    vm.ent_set_float(ent, "ideal_yaw", yaw);
+    // PF_changeyaw() turns angles[1] toward ideal_yaw by at most yaw_speed. It
+    // reads `self` (as the C does), so point `self` at `ent` for the turn and
+    // restore it afterwards (the C's chase chain runs with self == the monster,
+    // but restoring keeps us robust if a caller drives a non-self actor).
+    let oldself = vm.gget_int("self");
+    vm.gset_int("self", ent);
+    let _ = bi_changeyaw(vm);
+    vm.gset_int("self", oldself);
+
+    let rad = yaw * std::f32::consts::PI / 180.0;
+    let mov: Vec3 = [rad.cos() * dist, rad.sin() * dist, 0.0];
+
+    let oldorigin = vm.ent_get_vector(ent, "origin");
+    if sv_movestep(vm, ent, mov, false) {
+        let angles = vm.ent_get_vector(ent, "angles");
+        let delta = angles[1] - vm.ent_get_float(ent, "ideal_yaw");
+        if delta > 45.0 && delta < 315.0 {
+            // Not turned far enough: don't take the step (but report success).
+            vm.ent_set_vector(ent, "origin", oldorigin);
+        }
+        link_edict(vm, ent);
+        touch_triggers(vm, ent);
+        return true;
+    }
+    link_edict(vm, ent);
+    touch_triggers(vm, ent);
+    false
+}
+
+/// `SV_FixCheckBottom` (sv_move.c ~267): mark `ent` `FL_PARTIALGROUND` so the
+/// next [`sv_movestep`] tolerates a missing standing position.
+fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
+    let flags = vm.ent_get_float(ent, "flags") as i32;
+    vm.ent_set_float(ent, "flags", (flags | FL_PARTIALGROUND) as f32);
+}
+
+/// `SV_NewChaseDir` (sv_move.c ~283): pick a new movement direction for `actor`
+/// toward `enemy` and step that way.
+///
+/// Faithful to id's heuristic: derive the preferred X (`d[1]`) and Y (`d[2]`)
+/// directions from the signed deltas to the enemy, try the diagonal when both
+/// axes have a preference, then the individual axes (optionally swapped at
+/// random or when the Y delta dominates), then the old direction, then a full
+/// 45-degree sweep (forward or backward at random), and finally the turnaround.
+/// If nothing works the actor keeps its old yaw and `FL_PARTIALGROUND` is set
+/// when it has no floor (via [`sv_fix_check_bottom`]). `rand()&n` is the VM's
+/// deterministic LCG so tests are reproducible.
+/// A small deterministic LCG for the AI's `rand()&n` symmetry-breaking in
+/// chase-direction selection. The C used libc `rand()`; here a process-global
+/// LCG keeps chase behaviour varied yet reproducible across runs/tests.
+fn ai_rand() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEED: AtomicU32 = AtomicU32::new(0x1234_5678);
+    let next = SEED
+        .load(Ordering::Relaxed)
+        .wrapping_mul(1_103_515_245)
+        .wrapping_add(12_345);
+    SEED.store(next, Ordering::Relaxed);
+    (next >> 16) & 0x7fff
+}
+
+pub fn sv_new_chase_dir(vm: &mut Vm, actor: i32, enemy: i32, dist: f32) {
+    let ideal_yaw = vm.ent_get_float(actor, "ideal_yaw");
+    let olddir = crate::math::anglemod(((ideal_yaw / 45.0) as i32 as f32) * 45.0);
+    let turnaround = crate::math::anglemod(olddir - 180.0);
+
+    let actor_org = vm.ent_get_vector(actor, "origin");
+    let enemy_org = vm.ent_get_vector(enemy, "origin");
+    let deltax = enemy_org[0] - actor_org[0];
+    let deltay = enemy_org[1] - actor_org[1];
+
+    // d[1] = preferred X-axis yaw, d[2] = preferred Y-axis yaw (DI_NODIR = none).
+    let mut d1 = if deltax > 10.0 {
+        0.0
+    } else if deltax < -10.0 {
+        180.0
+    } else {
+        DI_NODIR
+    };
+    let mut d2 = if deltay < -10.0 {
+        270.0
+    } else if deltay > 10.0 {
+        90.0
+    } else {
+        DI_NODIR
+    };
+
+    // Try the direct diagonal route when both axes have a preference.
+    if d1 != DI_NODIR && d2 != DI_NODIR {
+        let tdir = if d1 == 0.0 {
+            if d2 == 90.0 { 45.0 } else { 315.0 }
+        } else if d2 == 90.0 {
+            135.0
+        } else {
+            215.0
+        };
+        if tdir != turnaround && sv_step_direction(vm, actor, tdir, dist) {
+            return;
+        }
+    }
+
+    // Try the other directions; randomly (or when Y dominates) swap the axes.
+    if (ai_rand() & 3) & 1 != 0 || deltay.abs() > deltax.abs() {
+        std::mem::swap(&mut d1, &mut d2);
+    }
+
+    if d1 != DI_NODIR && d1 != turnaround && sv_step_direction(vm, actor, d1, dist) {
+        return;
+    }
+    if d2 != DI_NODIR && d2 != turnaround && sv_step_direction(vm, actor, d2, dist) {
+        return;
+    }
+
+    // No direct path: try the old direction.
+    if olddir != DI_NODIR && sv_step_direction(vm, actor, olddir, dist) {
+        return;
+    }
+
+    // Sweep every 45 degrees, in a randomly chosen order.
+    if ai_rand() & 1 != 0 {
+        let mut tdir = 0.0;
+        while tdir <= 315.0 {
+            if tdir != turnaround && sv_step_direction(vm, actor, tdir, dist) {
+                return;
+            }
+            tdir += 45.0;
+        }
+    } else {
+        let mut tdir = 315.0;
+        while tdir >= 0.0 {
+            if tdir != turnaround && sv_step_direction(vm, actor, tdir, dist) {
+                return;
+            }
+            tdir -= 45.0;
+        }
+    }
+
+    if turnaround != DI_NODIR && sv_step_direction(vm, actor, turnaround, dist) {
+        return;
+    }
+
+    // Can't move: keep the old yaw and, if no floor, mark partial ground.
+    vm.ent_set_float(actor, "ideal_yaw", olddir);
+    if !sv_check_bottom(vm, actor) {
+        sv_fix_check_bottom(vm, actor);
+    }
+}
+
+/// `SV_CloseEnough` (sv_move.c ~371): is `goal`'s box within `dist` of `ent`'s
+/// box on every axis? (Used by [`sv_move_to_goal`] to stop when adjacent.)
+fn sv_close_enough(vm: &mut Vm, ent: i32, goal: i32, dist: f32) -> bool {
+    let ent_absmin = vm.ent_get_vector(ent, "absmin");
+    let ent_absmax = vm.ent_get_vector(ent, "absmax");
+    let goal_absmin = vm.ent_get_vector(goal, "absmin");
+    let goal_absmax = vm.ent_get_vector(goal, "absmax");
+    for i in 0..3 {
+        if goal_absmin[i] > ent_absmax[i] + dist {
+            return false;
+        }
+        if goal_absmax[i] < ent_absmin[i] - dist {
+            return false;
+        }
+    }
+    true
+}
+
+/// `SV_MoveToGoal` (sv_move.c ~391): the QuakeC `movetogoal(dist)` builtin body.
+///
+/// For the `self` monster: do nothing (return 0) unless it is on ground / flying
+/// / swimming. If it has an enemy and is already close enough to its goal, stop.
+/// Otherwise step toward `ideal_yaw` (occasionally bumping to a fresh direction
+/// at random), and on failure pick a [`sv_new_chase_dir`] toward the goal.
+pub fn sv_move_to_goal(vm: &mut Vm, dist: f32) {
+    let ent = vm.gget_int("self");
+    let goal = vm.ent_get_int(ent, "goalentity");
+
+    let flags = vm.ent_get_float(ent, "flags") as i32;
+    if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+        vm.ret_float(0.0);
+        return;
+    }
+
+    // If the next step would reach the enemy goal, stop here.
+    let enemy = vm.ent_get_int(ent, "enemy");
+    if enemy > 0 && sv_close_enough(vm, ent, goal, dist) {
+        return;
+    }
+
+    // Bump around: occasionally force a fresh chase direction.
+    let ideal_yaw = vm.ent_get_float(ent, "ideal_yaw");
+    if (ai_rand() & 3) == 1 || !sv_step_direction(vm, ent, ideal_yaw, dist) {
+        sv_new_chase_dir(vm, ent, goal, dist);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (D3) The monster-movement engine builtins (pr_cmds.c).
+// ---------------------------------------------------------------------------
+
+/// `PF_walkmove` (#32): `float(float yaw, float dist) walkmove`. Steps `self`
+/// `dist` units along `yaw` via [`sv_movestep`] (with relink), returning 1 on a
+/// successful move and 0 otherwise. Like the C, it only moves a monster that is
+/// on ground / flying / swimming and saves/restores `self` around the step
+/// (`sv_movestep` may run touch progs that change `self`).
+fn bi_walkmove(vm: &mut Vm) -> Result<()> {
+    let ent = vm.gget_int("self");
+    let yaw = vm.arg_float(0);
+    let dist = vm.arg_float(1);
+
+    let flags = vm.ent_get_float(ent, "flags") as i32;
+    if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+        vm.ret_float(0.0);
+        return Ok(());
+    }
+
+    let rad = yaw * std::f32::consts::PI / 180.0;
+    let mov: Vec3 = [rad.cos() * dist, rad.sin() * dist, 0.0];
+
+    // Save program state (self), because sv_movestep may run other progs.
+    let oldself = vm.gget_int("self");
+    let ok = sv_movestep(vm, ent, mov, true);
+    vm.gset_int("self", oldself);
+
+    vm.ret_float(if ok { 1.0 } else { 0.0 });
+    Ok(())
+}
+
+/// `PF_movetogoal` (#67): `void(float step) movetogoal` — calls
+/// [`sv_move_to_goal`] with the step distance. Wired over the old `bi_ret_zero`
+/// stub.
+fn bi_movetogoal(vm: &mut Vm) -> Result<()> {
+    let dist = vm.arg_float(0);
+    sv_move_to_goal(vm, dist);
+    Ok(())
+}
+
+/// `PF_checkbottom` (#40): `float(entity e) checkbottom` — returns 1 when `e`
+/// has floor under its whole box ([`sv_check_bottom`]), else 0.
+fn bi_checkbottom(vm: &mut Vm) -> Result<()> {
+    let ent = vm.arg_entity(0);
+    let ok = sv_check_bottom(vm, ent);
+    vm.ret_float(if ok { 1.0 } else { 0.0 });
+    Ok(())
+}
+
+/// `PF_checkclient` (#17): `entity() checkclient` — return a client visible to
+/// `self`, used by `FindTarget` to wake monsters.
+///
+/// SIMPLIFICATION (documented): the C `PF_checkclient` cached `sv.lastcheck`,
+/// re-picked the candidate client only every 0.1s (`PF_newcheckclient`), and
+/// tested PVS bits before tracing. With a single, always-present player and no
+/// PVS subsystem, we test line of sight directly: a world-only traceline from
+/// `self`'s eyes (`origin + view_ofs`) to the player's eyes. If it is
+/// unobstructed (`fraction == 1`, or it hit only the player), return the player
+/// edict; otherwise return the world (0), matching the C's "can't see -> world".
+/// The per-frame caching is dropped (it was a CPU optimization, not a behaviour
+/// change); the visibility result is identical for one client.
+fn bi_checkclient(vm: &mut Vm) -> Result<()> {
+    let self_e = vm.gget_int("self");
+
+    // Find the single player edict (the connected client). The server records
+    // it in `viewentity`; fall back to the world when there is no client.
+    let player = vm.gget_float("viewentity") as i32;
+    if player <= 0 || vm.edict_free.get(player as usize).copied().unwrap_or(true) {
+        vm.ret_entity(0);
+        return Ok(());
+    }
+    // A dead client is not a valid target (the C `ent->v.health <= 0`).
+    if vm.ent_get_float(player, "health") <= 0.0 {
+        vm.ret_entity(0);
+        return Ok(());
+    }
+
+    // Eyes: origin + view_ofs for both ends of the sight line.
+    let self_org = vm.ent_get_vector(self_e, "origin");
+    let self_ofs = vm.ent_get_vector(self_e, "view_ofs");
+    let view = v_add(self_org, self_ofs);
+
+    let pl_org = vm.ent_get_vector(player, "origin");
+    let pl_ofs = vm.ent_get_vector(player, "view_ofs");
+    let target = v_add(pl_org, pl_ofs);
+
+    // World-only line of sight: ignore the monster itself; a clear trace
+    // (fraction == 1) or one that stops on the player means it is visible.
+    let tr = sv_move(vm, view, target, [0.0; 3], [0.0; 3], self_e);
+    let visible = tr.fraction == 1.0 || tr.ent == player;
+
+    vm.ret_entity(if visible { player } else { 0 });
+    Ok(())
+}
+
+/// `PF_findradius` (#22): `entity(vector org, float rad) findradius` — return a
+/// `chain` of every non-free, blocking (`solid != SOLID_NOT`) edict whose box
+/// centre is within `rad` of `org`.
+///
+/// Each found edict's `chain` field points at the previous one (the head is
+/// returned, the tail terminated by the world edict 0), exactly as the C built
+/// the linked list. Used by explosion radius damage and some triggers. The
+/// distance is measured from `org` to the entity's box centre
+/// (`origin + (mins+maxs)/2`), matching the C.
+fn bi_findradius(vm: &mut Vm) -> Result<()> {
+    let org = vm.arg_vector(0);
+    let rad = vm.arg_float(1);
+
+    // chain starts at the world (0): the terminator of the list.
+    let mut chain = 0i32;
+    let n = vm.num_edicts();
+    // Scan edicts 1..num_edicts (the C started at NEXT_EDICT(sv.edicts)).
+    for e in 1..n {
+        let ei = e as i32;
+        if vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        if vm.ent_get_float(ei, "solid") as i32 == SOLID_NOT {
+            continue;
+        }
+        let origin = vm.ent_get_vector(ei, "origin");
+        let mins = vm.ent_get_vector(ei, "mins");
+        let maxs = vm.ent_get_vector(ei, "maxs");
+        // eorg = org - (origin + (mins+maxs)/2): distance from the box centre.
+        let eorg: Vec3 = [
+            org[0] - (origin[0] + (mins[0] + maxs[0]) * 0.5),
+            org[1] - (origin[1] + (mins[1] + maxs[1]) * 0.5),
+            org[2] - (origin[2] + (mins[2] + maxs[2]) * 0.5),
+        ];
+        if crate::math::length(eorg) > rad {
+            continue;
+        }
+        // Link: this edict's chain points at the previous head; it becomes head.
+        vm.ent_set_int(ei, "chain", chain);
+        chain = ei;
+    }
+
+    vm.ret_entity(chain);
+    Ok(())
+}
+
+/// Standalone `ClipVelocity` (so the physics methods can call it without
+/// borrowing `self`). `STOP_EPSILON = 0.1` matches the C.
+fn clip_velocity(vel: Vec3, normal: Vec3, overbounce: f32) -> Vec3 {
+    const STOP_EPSILON: f32 = 0.1;
+    let backoff = crate::math::dot(vel, normal) * overbounce;
+    let mut out = [0.0f32; 3];
+    for i in 0..3 {
+        let change = normal[i] * backoff;
+        out[i] = vel[i] - change;
+        if out[i] > -STOP_EPSILON && out[i] < STOP_EPSILON {
+            out[i] = 0.0;
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// value parsers (atof / atoi semantics).
+// ---------------------------------------------------------------------------
+
+/// `atof`-like float parse: take the leading numeric prefix, default 0.0. C's
+/// `atof` stops at the first non-numeric char and never errors.
+fn parse_float(s: &str) -> f32 {
+    let t = s.trim_start();
+    // Find the longest leading prefix that parses; fall back to 0.0.
+    let bytes = t.as_bytes();
+    let mut end = 0;
+    let mut seen_dot = false;
+    let mut seen_e = false;
+    while end < bytes.len() {
+        let c = bytes[end];
+        let ok = match c {
+            b'0'..=b'9' => true,
+            b'+' | b'-' => end == 0 || bytes[end - 1] == b'e' || bytes[end - 1] == b'E',
+            b'.' if !seen_dot && !seen_e => {
+                seen_dot = true;
+                true
+            }
+            b'e' | b'E' if !seen_e && end > 0 => {
+                seen_e = true;
+                true
+            }
+            _ => false,
+        };
+        if !ok {
+            break;
+        }
+        end += 1;
+    }
+    t.get(..end).and_then(|p| p.parse::<f32>().ok()).unwrap_or(0.0)
+}
+
+/// `atoi`-like int parse: leading optional sign then digits, default 0.
+fn parse_int(s: &str) -> i32 {
+    let t = s.trim_start();
+    let bytes = t.as_bytes();
+    let mut end = 0;
+    while end < bytes.len() {
+        let c = bytes[end];
+        let ok = matches!(c, b'0'..=b'9') || ((c == b'+' || c == b'-') && end == 0);
+        if !ok {
+            break;
+        }
+        end += 1;
+    }
+    t.get(..end).and_then(|p| p.parse::<i32>().ok()).unwrap_or(0)
+}
+
+/// Parse a "x y z" vector, `atof`-style on each of the first three
+/// space-separated fields (missing fields are 0.0), matching `ED_ParseEpair`'s
+/// `ev_vector` loop.
+fn parse_vector(s: &str) -> Vec3 {
+    let mut out = [0.0f32; 3];
+    for (i, field) in s.split_whitespace().take(3).enumerate() {
+        out[i] = parse_float(field);
+    }
+    out
+}
+
+/// Increment the running count for `classname`.
+fn bump_classname(counts: &mut Vec<(String, usize)>, classname: &str) {
+    if let Some(entry) = counts.iter_mut().find(|(c, _)| c == classname) {
+        entry.1 += 1;
+    } else {
+        counts.push((classname.to_string(), 1));
+    }
+}
+
+/// Build a [`QError`] for an unexpected server condition. (Currently unused on
+/// the happy path; kept so callers can surface a structured error if needed.)
+#[allow(dead_code)]
+fn server_error(msg: impl Into<String>) -> QError {
+    QError::invalid(msg.into())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progs::{
+        Def, Function, Op, Statement, MAX_PARMS, OFS_RETURN, PROG_VERSION, RESERVED_OFS,
+    };
+
+    const HEADER_SIZE: usize = 60;
+
+    // ---- synthetic progs.dat builder (mirrors vm.rs's test serializer) ----
+
+    fn ser_stmt(s: &Statement) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&s.op.to_le_bytes());
+        v.extend_from_slice(&s.a.to_le_bytes());
+        v.extend_from_slice(&s.b.to_le_bytes());
+        v.extend_from_slice(&s.c.to_le_bytes());
+        v
+    }
+    fn ser_def(d: &Def) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&d.type_.to_le_bytes());
+        v.extend_from_slice(&d.ofs.to_le_bytes());
+        v.extend_from_slice(&d.s_name.to_le_bytes());
+        v
+    }
+    fn ser_func(f: &Function) -> Vec<u8> {
+        let mut v = Vec::new();
+        for x in [
+            f.first_statement,
+            f.parm_start,
+            f.locals,
+            f.profile,
+            f.s_name,
+            f.s_file,
+            f.numparms,
+        ] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.extend_from_slice(&f.parm_size);
+        v
+    }
+
+    struct Builder {
+        strings: Vec<u8>,
+        statements: Vec<Statement>,
+        globaldefs: Vec<Def>,
+        fielddefs: Vec<Def>,
+        functions: Vec<Function>,
+        nglobals: usize,
+        entityfields: i32,
+    }
+
+    impl Builder {
+        fn new() -> Builder {
+            Builder {
+                strings: vec![0u8],
+                statements: Vec::new(),
+                globaldefs: Vec::new(),
+                fielddefs: Vec::new(),
+                functions: vec![Function {
+                    first_statement: 0,
+                    parm_start: 0,
+                    locals: 0,
+                    profile: 0,
+                    s_name: 0,
+                    s_file: 0,
+                    numparms: 0,
+                    parm_size: [0; MAX_PARMS],
+                }],
+                nglobals: 128,
+                entityfields: 0,
+            }
+        }
+        fn intern(&mut self, s: &str) -> i32 {
+            let ofs = self.strings.len() as i32;
+            self.strings.extend_from_slice(s.as_bytes());
+            self.strings.push(0);
+            ofs
+        }
+        /// Add a global def of `type_` at `ofs` named `name`.
+        fn add_global(&mut self, name: &str, type_: u16, ofs: u16) {
+            let s = self.intern(name);
+            self.globaldefs.push(Def {
+                type_,
+                ofs,
+                s_name: s,
+            });
+        }
+        /// Add a field def of `type_` at `ofs` named `name`.
+        fn add_field(&mut self, name: &str, type_: u16, ofs: u16) {
+            let s = self.intern(name);
+            self.fielddefs.push(Def {
+                type_,
+                ofs,
+                s_name: s,
+            });
+        }
+        /// Add a bytecode function `name` with `stmts`; returns its index.
+        fn add_function(&mut self, name: &str, stmts: Vec<Statement>) -> usize {
+            let first = self.statements.len() as i32;
+            let s_name = self.intern(name);
+            self.statements.extend(stmts);
+            self.functions.push(Function {
+                first_statement: first,
+                parm_start: RESERVED_OFS as i32,
+                locals: 0,
+                profile: 0,
+                s_name,
+                s_file: 0,
+                numparms: 0,
+                parm_size: [0; MAX_PARMS],
+            });
+            self.functions.len() - 1
+        }
+        fn build(&self) -> Vec<u8> {
+            let globals: Vec<u32> = vec![0u32; self.nglobals];
+            let mut body = Vec::new();
+            let ofs_statements = HEADER_SIZE + body.len();
+            for s in &self.statements {
+                body.extend_from_slice(&ser_stmt(s));
+            }
+            let ofs_globaldefs = HEADER_SIZE + body.len();
+            for d in &self.globaldefs {
+                body.extend_from_slice(&ser_def(d));
+            }
+            let ofs_fielddefs = HEADER_SIZE + body.len();
+            for d in &self.fielddefs {
+                body.extend_from_slice(&ser_def(d));
+            }
+            let ofs_functions = HEADER_SIZE + body.len();
+            for f in &self.functions {
+                body.extend_from_slice(&ser_func(f));
+            }
+            let ofs_strings = HEADER_SIZE + body.len();
+            body.extend_from_slice(&self.strings);
+            let ofs_globals = HEADER_SIZE + body.len();
+            for g in &globals {
+                body.extend_from_slice(&g.to_le_bytes());
+            }
+            let header: [i32; 15] = [
+                PROG_VERSION,
+                0,
+                ofs_statements as i32,
+                self.statements.len() as i32,
+                ofs_globaldefs as i32,
+                self.globaldefs.len() as i32,
+                ofs_fielddefs as i32,
+                self.fielddefs.len() as i32,
+                ofs_functions as i32,
+                self.functions.len() as i32,
+                ofs_strings as i32,
+                self.strings.len() as i32,
+                ofs_globals as i32,
+                globals.len() as i32,
+                self.entityfields,
+            ];
+            let mut out = Vec::new();
+            for x in header {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+            out.extend_from_slice(&body);
+            out
+        }
+    }
+
+    /// An empty BSP (no geometry); world queries are total and report SOLID.
+    fn empty_bsp() -> Bsp {
+        Bsp {
+            version: crate::bsp::BSPVERSION,
+            entities: String::new(),
+            planes: Vec::new(),
+            vertexes: Vec::new(),
+            edges: Vec::new(),
+            faces: Vec::new(),
+            nodes: Vec::new(),
+            leafs: Vec::new(),
+            clipnodes: Vec::new(),
+            texinfo: Vec::new(),
+            models: Vec::new(),
+            marksurfaces: Vec::new(),
+            surfedges: Vec::new(),
+            textures: Vec::new(),
+            visibility: Vec::new(),
+            lighting: Vec::new(),
+        }
+    }
+
+    /// A BSP carrying a specific entity text blob.
+    fn bsp_with_entities(text: &str) -> Bsp {
+        let mut b = empty_bsp();
+        b.entities = text.to_string();
+        b
+    }
+
+    // ev_* type codes (etype_t ordinals; see progs::EType).
+    const EV_STRING: u16 = 1;
+    const EV_FLOAT: u16 = 2;
+    const EV_FUNCTION: u16 = 6;
+
+    // -------------------------------------------------------------- tokenizer
+
+    #[test]
+    fn tokenizer_basic_pairs_and_braces() {
+        let mut t = Tokenizer::new("{ \"classname\" \"worldspawn\" }");
+        assert_eq!(t.next_token().as_deref(), Some("{"));
+        assert_eq!(t.next_token().as_deref(), Some("classname"));
+        assert_eq!(t.next_token().as_deref(), Some("worldspawn"));
+        assert_eq!(t.next_token().as_deref(), Some("}"));
+        assert_eq!(t.next_token(), None);
+    }
+
+    #[test]
+    fn tokenizer_skips_line_comments_and_words() {
+        let mut t = Tokenizer::new("// a comment\nword1   word2\n{ }");
+        assert_eq!(t.next_token().as_deref(), Some("word1"));
+        assert_eq!(t.next_token().as_deref(), Some("word2"));
+        assert_eq!(t.next_token().as_deref(), Some("{"));
+        assert_eq!(t.next_token().as_deref(), Some("}"));
+        assert_eq!(t.next_token(), None);
+    }
+
+    #[test]
+    fn tokenizer_unterminated_quote_is_total() {
+        // A quote with no closing " must end the token at EOF, not loop/panic.
+        let mut t = Tokenizer::new("\"unterminated");
+        assert_eq!(t.next_token().as_deref(), Some("unterminated"));
+        assert_eq!(t.next_token(), None);
+    }
+
+    #[test]
+    fn ed_new_string_handles_escapes() {
+        assert_eq!(ed_new_string("a\\nb"), "a\nb");
+        assert_eq!(ed_new_string("a\\tb"), "a\\b"); // non-n escape -> backslash
+        assert_eq!(ed_new_string("plain"), "plain");
+    }
+
+    #[test]
+    fn parse_helpers() {
+        assert_eq!(parse_float("3.5 abc"), 3.5);
+        assert_eq!(parse_float("notanumber"), 0.0);
+        assert_eq!(parse_int("-42 x"), -42);
+        assert_eq!(parse_vector("1 2 3"), [1.0, 2.0, 3.0]);
+        assert_eq!(parse_vector("1 2"), [1.0, 2.0, 0.0]);
+    }
+
+    // ------------------------------------------------------------ spawn flow
+
+    /// Build a progs whose "marker" classname spawn function sets a global float
+    /// `spawned_flag` to 1.0, so we can prove the spawner executed it. Also adds
+    /// a "classname" string field and "spawnflags"/"think"/"nextthink" fields.
+    fn marker_progs() -> (Vec<u8>, usize, usize) {
+        let mut b = Builder::new();
+        b.entityfields = 8;
+
+        // Globals: a float "spawned_flag" at offset 30, plus the well-known
+        // self/other/time/world globals the server sets.
+        let g_flag = 30u16;
+        b.add_global("spawned_flag", EV_FLOAT, g_flag);
+        b.add_global("self", 4 /*ev_entity*/, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", 4, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+
+        // Fields: classname(string)@1, spawnflags(float)@2, think(function)@3,
+        // nextthink(float)@4, frame(float)@5, origin(vector)@5? keep simple.
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("spawnflags", EV_FLOAT, 2);
+        b.add_field("think", EV_FUNCTION, 3);
+        b.add_field("nextthink", EV_FLOAT, 4);
+
+        // Spawn function "marker": STORE_F const(1.0) -> spawned_flag; DONE.
+        // We need a global holding 1.0; put it at offset 40 and set it after load.
+        let g_one = 40u16;
+        let marker = b.add_function(
+            "marker",
+            vec![
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: g_one as i16,
+                    b: g_flag as i16,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::Done as u16,
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                },
+            ],
+        );
+
+        let img = b.build();
+        (img, marker, g_one as usize)
+    }
+
+    #[test]
+    fn spawn_entities_runs_spawn_function() {
+        let (img, _marker, g_one) = marker_progs();
+        let progs = Progs::parse(&img).expect("parse progs");
+        let ents = "{ \"classname\" \"worldspawn\" }\n{ \"classname\" \"marker\" }\n";
+        let bsp = bsp_with_entities(ents);
+
+        let mut server = Server::new(bsp, progs).expect("server");
+        // Set the constant 1.0 the marker spawn stores into spawned_flag.
+        server.vm.set_gf(g_one as usize, 1.0);
+
+        let report = server.spawn_entities().expect("spawn");
+
+        // Two entity blocks; "marker" has a spawn function, "worldspawn" does
+        // not (no function named worldspawn) -> no_spawn_function = 1, but it is
+        // edict 0 (world) and freeing it is a no-op.
+        assert_eq!(report.total, 2);
+        assert_eq!(report.spawned, 1, "marker spawn function ran");
+        assert_eq!(report.no_spawn_function, 1, "worldspawn has no spawn fn");
+
+        // The spawn function set the global flag to 1.0.
+        assert_eq!(
+            server.vm.gget_float("spawned_flag"),
+            1.0,
+            "marker's spawn function executed and set the global"
+        );
+
+        // classnames report contains both, sorted by count desc then name.
+        assert!(report
+            .classnames
+            .iter()
+            .any(|(c, n)| c == "marker" && *n == 1));
+    }
+
+    #[test]
+    fn spawn_entities_inhibits_not_medium() {
+        let (img, _marker, g_one) = marker_progs();
+        let progs = Progs::parse(&img).expect("parse progs");
+        // Entity with spawnflags NOT_MEDIUM (512) must be inhibited at skill 1.
+        let ents = "{ \"classname\" \"marker\" \"spawnflags\" \"512\" }\n";
+        let bsp = bsp_with_entities(ents);
+
+        let mut server = Server::new(bsp, progs).expect("server");
+        server.vm.set_gf(g_one as usize, 1.0);
+
+        let report = server.spawn_entities().expect("spawn");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.inhibited, 1, "NOT_MEDIUM entity inhibited at skill 1");
+        assert_eq!(report.spawned, 0);
+        // The spawn function must NOT have run.
+        assert_eq!(server.vm.gget_float("spawned_flag"), 0.0);
+    }
+
+    #[test]
+    fn spawn_entities_bad_entity_does_not_abort() {
+        // An entity whose classname has no spawn function is counted, not fatal,
+        // and the following good entity still spawns.
+        let (img, _marker, g_one) = marker_progs();
+        let progs = Progs::parse(&img).expect("parse progs");
+        let ents = "{ \"classname\" \"unknown_thing\" }\n{ \"classname\" \"marker\" }\n";
+        let bsp = bsp_with_entities(ents);
+
+        let mut server = Server::new(bsp, progs).expect("server");
+        server.vm.set_gf(g_one as usize, 1.0);
+
+        let report = server.spawn_entities().expect("spawn");
+        assert_eq!(report.total, 2);
+        assert_eq!(report.no_spawn_function, 1);
+        assert_eq!(report.spawned, 1);
+    }
+
+    // ------------------------------------------------------------- run_frame
+
+    #[test]
+    fn run_frame_fires_due_thinks() {
+        // Build a progs with a think function that sets a flag, and an entity
+        // (movetype NONE) whose nextthink is due.
+        let mut b = Builder::new();
+        b.entityfields = 8;
+        let g_flag = 30u16;
+        b.add_global("spawned_flag", EV_FLOAT, g_flag);
+        b.add_global("self", 4, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("frametime", EV_FLOAT, 35);
+        let g_one = 40u16;
+
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("spawnflags", EV_FLOAT, 2);
+        b.add_field("think", EV_FUNCTION, 3);
+        b.add_field("nextthink", EV_FLOAT, 4);
+        b.add_field("movetype", EV_FLOAT, 5);
+
+        let think_fn = b.add_function(
+            "do_think",
+            vec![
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: g_one as i16,
+                    b: g_flag as i16,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::Done as u16,
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                },
+            ],
+        );
+
+        let img = b.build();
+        let progs = Progs::parse(&img).expect("parse");
+        let bsp = empty_bsp();
+        let mut server = Server::new(bsp, progs).expect("server");
+        server.vm.set_gf(g_one as usize, 1.0);
+
+        // Spawn an entity, set movetype NONE, think=do_think, nextthink in past.
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_NONE as f32);
+        server.vm.ent_set_int(e, "think", think_fn as i32);
+        server.vm.ent_set_float(e, "nextthink", 0.5); // <= time(1.0)+dt
+
+        let before = server.time();
+        let report = server.run_frame(0.1).expect("frame");
+
+        assert_eq!(report.thinks_fired, 1, "the due think fired");
+        assert_eq!(server.vm.gget_float("spawned_flag"), 1.0);
+        // time advanced by dt.
+        assert!((report.time - (before + 0.1)).abs() < 1e-6);
+        // nextthink was consumed (set to 0).
+        assert_eq!(server.vm.ent_get_float(e, "nextthink"), 0.0);
+    }
+
+    #[test]
+    fn run_frame_toss_adds_gravity_and_moves() {
+        // A MOVETYPE_TOSS entity with no due think falls under gravity. The empty
+        // world traces as blocked at fraction 0 (headnode out of range -> solid),
+        // so origin won't move, but velocity must gain downward speed.
+        let mut b = Builder::new();
+        b.entityfields = 16;
+        b.add_global("self", 4, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("movetype", EV_FLOAT, 2);
+        b.add_field("nextthink", EV_FLOAT, 3);
+        b.add_field("flags", EV_FLOAT, 4);
+        b.add_field("velocity", 3 /*vector*/, 5); // 5,6,7
+        b.add_field("origin", 3, 8); // 8,9,10
+        b.add_field("mins", 3, 11);
+        b.add_field("maxs", 3, 14);
+
+        let img = b.build();
+        let progs = Progs::parse(&img).expect("parse");
+        let bsp = empty_bsp();
+        let mut server = Server::new(bsp, progs).expect("server");
+
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_TOSS as f32);
+        server.vm.ent_set_float(e, "nextthink", 0.0); // no think
+        server.vm.ent_set_float(e, "flags", 0.0); // not on ground
+        server.vm.ent_set_vector(e, "velocity", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "origin", [0.0, 0.0, 100.0]);
+        // tiny point box so trace uses hull 0.
+        server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+
+        server.run_frame(0.1).expect("frame");
+
+        // velocity.z should be negative (gravity pulled it down): -1*800*0.1 = -80.
+        let vel = server.vm.ent_get_vector(e, "velocity");
+        assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
+        assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+    }
+
+    // -------------------------------------------------------- world / builtins
+
+    #[test]
+    fn worldmodel_precache_dedup_and_index() {
+        let mut w = WorldModel::new(empty_bsp());
+        // index 0 is "", index 1 is "*0" (world model from new()).
+        assert_eq!(w.model_names()[0], "");
+        assert_eq!(w.model_names()[1], "*0");
+
+        let a = w.precache_model("progs/player.mdl");
+        let b = w.precache_model("progs/player.mdl"); // dedup
+        assert_eq!(a, b, "same name returns same index");
+        assert_eq!(a, 2, "first new model after world is index 2");
+
+        let s1 = w.precache_sound("weapons/rocket.wav");
+        assert_eq!(s1, 1, "first sound is index 1 (slot 0 is empty)");
+    }
+
+    #[test]
+    fn install_engine_builtins_overwrites_world_keeps_pure() {
+        // Build a trivial progs just to get a Vm.
+        let mut b = Builder::new();
+        let _ = b.add_function(
+            "main",
+            vec![Statement {
+                op: Op::Done as u16,
+                a: 0,
+                b: 0,
+                c: 0,
+            }],
+        );
+        let img = b.build();
+        let mut vm = Vm::load(&img).expect("load");
+        let len_before = vm.builtins.len();
+        install_engine_builtins(&mut vm);
+        // Table length is unchanged (we only overwrite slots).
+        assert_eq!(vm.builtins.len(), len_before);
+        // #45 (cvar) now returns sv_gravity default for "sv_gravity".
+        vm.set_host(Box::new(WorldModel::new(empty_bsp())));
+        let s = vm.intern("sv_gravity");
+        vm.set_gi(crate::progs::OFS_PARM0, s);
+        (vm.builtins[45])(&mut vm).expect("cvar");
+        assert_eq!(vm.gf(OFS_RETURN), SV_GRAVITY);
+    }
+
+    #[test]
+    fn traceline_writes_globals_without_host_panic() {
+        // traceline against the empty world should write the trace_* globals and
+        // never panic, even with the headnode-out-of-range "everything solid".
+        let mut b = Builder::new();
+        b.add_global("trace_fraction", EV_FLOAT, 50);
+        b.add_global("trace_allsolid", EV_FLOAT, 51);
+        b.add_global("trace_endpos", 3, 52);
+        let _ = b.add_function(
+            "main",
+            vec![Statement {
+                op: Op::Done as u16,
+                a: 0,
+                b: 0,
+                c: 0,
+            }],
+        );
+        let img = b.build();
+        let mut vm = Vm::load(&img).expect("load");
+        install_engine_builtins(&mut vm);
+        vm.set_host(Box::new(WorldModel::new(empty_bsp())));
+        vm.set_gv(crate::progs::OFS_PARM0, [0.0, 0.0, 0.0]);
+        vm.set_gv(crate::progs::OFS_PARM0 + 3, [100.0, 0.0, 0.0]);
+        (vm.builtins[16])(&mut vm).expect("traceline");
+        // fraction in [0,1].
+        let frac = vm.gget_float("trace_fraction");
+        assert!((0.0..=1.0).contains(&frac));
+    }
+
+    // ----------------------------------------------- entity-aware move / touch
+
+    const EV_VECTOR: u16 = 3;
+    const EV_ENTITY: u16 = 4;
+
+    /// Build a progs whose "do_touch" function stores the constant at `g_one`
+    /// into the global `touched_flag` (offset `g_flag`). Field/global layout is
+    /// shared by the sv_move and touch_triggers tests so a synthetic Server can
+    /// place SOLID_BBOX / SOLID_TRIGGER edicts and run them. Returns
+    /// `(image, touch_fn_index, g_one_offset, g_flag_offset)`.
+    fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
+        let mut b = Builder::new();
+        b.entityfields = 32;
+
+        // Globals.
+        let g_flag = 30u16;
+        b.add_global("touched_flag", EV_FLOAT, g_flag);
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+        let g_one = 40u16;
+
+        // Fields the move/touch code reads.
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("solid", EV_FLOAT, 2);
+        b.add_field("touch", EV_FUNCTION, 3);
+        b.add_field("origin", EV_VECTOR, 4); // 4,5,6
+        b.add_field("mins", EV_VECTOR, 7); // 7,8,9
+        b.add_field("maxs", EV_VECTOR, 10); // 10,11,12
+        b.add_field("absmin", EV_VECTOR, 13); // 13,14,15
+        b.add_field("absmax", EV_VECTOR, 16); // 16,17,18
+        b.add_field("model", EV_STRING, 19);
+        b.add_field("movetype", EV_FLOAT, 20);
+        b.add_field("nextthink", EV_FLOAT, 21);
+        b.add_field("flags", EV_FLOAT, 22);
+        b.add_field("velocity", EV_VECTOR, 23); // 23,24,25
+        b.add_field("size", EV_VECTOR, 26); // 26,27,28
+        b.add_field("groundentity", EV_ENTITY, 29);
+
+        let touch_fn = b.add_function(
+            "do_touch",
+            vec![
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: g_one as i16,
+                    b: g_flag as i16,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::Done as u16,
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                },
+            ],
+        );
+
+        let img = b.build();
+        (img, touch_fn, g_one as usize, g_flag as usize)
+    }
+
+    #[test]
+    fn sv_move_stops_at_solid_bbox_entity() {
+        // Place a SOLID_BBOX edict ahead at x=100 (a 32-cube) and trace a point
+        // through it from the origin to x=200. The move must stop on the box,
+        // and the trace's ent must be that edict.
+        let (img, _touch, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        // An *empty* BSP has headnode 0 out of range -> trace_world reports the
+        // whole world solid at fraction 0, which would mask the entity. Use a
+        // world with a real empty leaf so the world trace runs clear, letting
+        // the entity collision show through.
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        // The blocker entity.
+        let blocker = server.vm.spawn();
+        server.vm.ent_set_float(blocker, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(blocker, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(blocker, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(blocker, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(blocker, "absmin", [84.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(blocker, "absmax", [116.0, 16.0, 16.0]);
+
+        let tr = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            -1, // ignore nothing
+        );
+
+        assert!(tr.fraction < 1.0, "the move was clipped, got {}", tr.fraction);
+        assert_eq!(tr.ent, blocker, "the SOLID_BBOX edict was the blocker");
+        assert!(tr.endpos[0] < 84.0, "stopped before the box, got {}", tr.endpos[0]);
+    }
+
+    #[test]
+    fn sv_move_ignores_passedict() {
+        // The blocker is the same edict we pass as `ignore` -> not clipped.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let blocker = server.vm.spawn();
+        server.vm.ent_set_float(blocker, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(blocker, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(blocker, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(blocker, "maxs", [16.0, 16.0, 16.0]);
+
+        let tr = sv_move(
+            &mut server.vm,
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            blocker, // ignore the blocker
+        );
+        assert_eq!(tr.fraction, 1.0, "ignored edict did not block");
+        assert_eq!(tr.ent, -1, "clear move hit nothing");
+    }
+
+    #[test]
+    fn touch_triggers_fires_overlapping_trigger() {
+        // A SOLID_TRIGGER edict with a touch function, overlapping the mover's
+        // abs box, must have its touch run by touch_triggers.
+        let (img, touch_fn, g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        server.vm.set_gf(g_one, 1.0);
+
+        // The mover (e.g. the player) at the origin, abs box [-16,16]^3.
+        let mover = server.vm.spawn();
+        server.vm.ent_set_vector(mover, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(mover, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(mover, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(mover, "absmin", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(mover, "absmax", [16.0, 16.0, 16.0]);
+
+        // The trigger, overlapping the mover.
+        let trigger = server.vm.spawn();
+        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
+        server.vm.ent_set_vector(trigger, "absmin", [-8.0, -8.0, -8.0]);
+        server.vm.ent_set_vector(trigger, "absmax", [8.0, 8.0, 8.0]);
+
+        assert_eq!(server.vm.gget_float("touched_flag"), 0.0, "not yet touched");
+        touch_triggers(&mut server.vm, mover);
+        assert_eq!(
+            server.vm.gget_float("touched_flag"),
+            1.0,
+            "the overlapping trigger's touch function ran"
+        );
+    }
+
+    #[test]
+    fn touch_triggers_skips_non_overlapping() {
+        // A trigger far away must NOT fire.
+        let (img, touch_fn, g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        server.vm.set_gf(g_one, 1.0);
+
+        let mover = server.vm.spawn();
+        server.vm.ent_set_vector(mover, "absmin", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(mover, "absmax", [16.0, 16.0, 16.0]);
+
+        let trigger = server.vm.spawn();
+        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
+        server.vm.ent_set_vector(trigger, "absmin", [500.0, 500.0, 500.0]);
+        server.vm.ent_set_vector(trigger, "absmax", [532.0, 532.0, 532.0]);
+
+        touch_triggers(&mut server.vm, mover);
+        assert_eq!(server.vm.gget_float("touched_flag"), 0.0, "far trigger did not fire");
+    }
+
+    /// A BSP whose world model is a single empty leaf, so a world box-trace runs
+    /// clear (fraction 1) instead of the empty-BSP "everything solid". Hull 0's
+    /// headnode (0) names node 0, whose children are the empty leaf -> CONTENTS
+    /// EMPTY. This lets the entity-clip tests see entity collisions instead of a
+    /// world block at fraction 0.
+    fn world_open_bsp() -> Bsp {
+        use crate::bsp::{DClipNode, DLeaf, DModel, DNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+        let mut b = empty_bsp();
+        // One axial plane at x = -100000 (far away), so every test point is on
+        // its front side -> child 0 -> the empty leaf.
+        b.planes = vec![DPlane {
+            normal: [1.0, 0.0, 0.0],
+            dist: -100000.0,
+            ptype: 0,
+        }];
+        // node 0: both children name leaf 1 (index -(- ( -2)) ...). Children are
+        // i16: a negative child -(leaf)-1. Leaf 1 -> child = -(1)-1 = -2.
+        b.nodes = vec![DNode {
+            planenum: 0,
+            children: [-2, -2], // both sides -> leaf 1 (CONTENTS_EMPTY)
+            mins: [0; 3],
+            maxs: [0; 3],
+            firstface: 0,
+            numfaces: 0,
+        }];
+        // leaf 0 is the solid leaf; leaf 1 is empty open space.
+        b.leafs = vec![
+            DLeaf {
+                contents: CONTENTS_SOLID,
+                visofs: -1,
+                mins: [0; 3],
+                maxs: [0; 3],
+                firstmarksurface: 0,
+                nummarksurfaces: 0,
+                ambient_level: [0; 4],
+            },
+            DLeaf {
+                contents: CONTENTS_EMPTY,
+                visofs: -1,
+                mins: [0; 3],
+                maxs: [0; 3],
+                firstmarksurface: 0,
+                nummarksurfaces: 0,
+                ambient_level: [0; 4],
+            },
+        ];
+        // Clip hulls 1/2: a single clipnode that is empty on both sides.
+        b.clipnodes = vec![DClipNode {
+            planenum: 0,
+            children: [CONTENTS_EMPTY as i16, CONTENTS_EMPTY as i16],
+        }];
+        b.models = vec![DModel {
+            mins: [-4096.0; 3],
+            maxs: [4096.0; 3],
+            origin: [0.0; 3],
+            headnode: [0, 0, 0, 0],
+            visleafs: 1,
+            firstface: 0,
+            numfaces: 0,
+        }];
+        b
+    }
+
+    // -------------------------------------------------------------- the player
+
+    /// A BSP with a flat floor at `z = 0`: the half-space `z >= 0` is open
+    /// (`CONTENTS_EMPTY`) and `z < 0` is solid (`CONTENTS_SOLID`), in every hull.
+    /// A player box dropped onto it lands on `z = 0` and cannot tunnel through.
+    /// The split plane is the axial +Z plane at `dist = 0` (`ptype = 2`).
+    fn floor_bsp() -> Bsp {
+        use crate::bsp::{DClipNode, DLeaf, DModel, DNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+        let mut b = empty_bsp();
+        // plane 0: +Z at z = 0 (the point hull, hull 0). plane 1: +Z at z = 24,
+        // which models how the BSP compiler bakes the player box (mins.z = -24)
+        // into hull 1 — so a *point* traced against hull 1 stops with the box
+        // bottom resting on the real floor at z = 0 (origin.z = 24).
+        b.planes = vec![
+            DPlane { normal: [0.0, 0.0, 1.0], dist: 0.0, ptype: 2 },
+            DPlane { normal: [0.0, 0.0, 1.0], dist: 24.0, ptype: 2 },
+        ];
+        // Hull-0 node: front side (z >= 0, child 0) -> empty leaf 1;
+        // back side (z < 0, child 1) -> solid leaf 0. Negative child -(leaf)-1:
+        // leaf 1 -> -2 (empty), leaf 0 -> -1 (solid).
+        b.nodes = vec![DNode {
+            planenum: 0,
+            children: [-2, -1],
+            mins: [0; 3],
+            maxs: [0; 3],
+            firstface: 0,
+            numfaces: 0,
+        }];
+        b.leafs = vec![
+            DLeaf {
+                contents: CONTENTS_SOLID,
+                visofs: -1,
+                mins: [0; 3],
+                maxs: [0; 3],
+                firstmarksurface: 0,
+                nummarksurfaces: 0,
+                ambient_level: [0; 4],
+            },
+            DLeaf {
+                contents: CONTENTS_EMPTY,
+                visofs: -1,
+                mins: [0; 3],
+                maxs: [0; 3],
+                firstmarksurface: 0,
+                nummarksurfaces: 0,
+                ambient_level: [0; 4],
+            },
+        ];
+        // Clip hulls 1/2 split on plane 1 (z = 24): above empty, below solid —
+        // the player-expanded floor.
+        b.clipnodes = vec![DClipNode {
+            planenum: 1,
+            children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+        }];
+        b.models = vec![DModel {
+            mins: [-4096.0; 3],
+            maxs: [4096.0; 3],
+            origin: [0.0; 3],
+            headnode: [0, 0, 0, 0],
+            visleafs: 1,
+            firstface: 0,
+            numfaces: 0,
+        }];
+        b
+    }
+
+    /// Build a progs for the player-physics tests. It declares every field the
+    /// client movement code reads/writes and the engine globals it sets, plus a
+    /// `PutClientInServer` function that sets `health = 100` and `origin =
+    /// (0, 0, 40)` (above the floor) by storing two prepared global constants.
+    /// `SetNewParms` / `ClientConnect` / `PlayerPreThink` / `PlayerPostThink` /
+    /// `StartFrame` are empty (just `DONE`) so the connect/frame paths run. The
+    /// system functions are resolved by NAME (no need to wire the like-named
+    /// globals — `connect_client`'s `sys_function` falls back to `find_function`).
+    ///
+    /// Returns `(image, g_const100_ofs, g_origin_vec_ofs)` so the test can place
+    /// the `100.0` float and the `(0,0,40)` vector the spawn function stores.
+    fn player_progs() -> (Vec<u8>, usize, usize) {
+        let mut b = Builder::new();
+        b.entityfields = 48;
+
+        // Engine globals the server sets/reads.
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("viewentity", EV_FLOAT, 36);
+        b.add_global("v_forward", EV_VECTOR, 60);
+        b.add_global("v_right", EV_VECTOR, 63);
+        b.add_global("v_up", EV_VECTOR, 66);
+
+        // Constants the spawn function stores: 100.0 (health) and (0,0,40)
+        // (origin). Placed in free global cells; the test fills them after load.
+        let g_const100 = 40u16;
+        let g_origin = 44u16; // 44,45,46
+
+        // Fields the client physics touches.
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("origin", EV_VECTOR, 2); // 2,3,4
+        b.add_field("velocity", EV_VECTOR, 5); // 5,6,7
+        b.add_field("mins", EV_VECTOR, 8); // 8,9,10
+        b.add_field("maxs", EV_VECTOR, 11); // 11,12,13
+        b.add_field("absmin", EV_VECTOR, 14); // 14,15,16
+        b.add_field("absmax", EV_VECTOR, 17); // 17,18,19
+        b.add_field("angles", EV_VECTOR, 20); // 20,21,22
+        b.add_field("v_angle", EV_VECTOR, 23); // 23,24,25
+        b.add_field("punchangle", EV_VECTOR, 26); // 26,27,28
+        b.add_field("size", EV_VECTOR, 29); // 29,30,31
+        b.add_field("flags", EV_FLOAT, 32);
+        b.add_field("health", EV_FLOAT, 33);
+        b.add_field("movetype", EV_FLOAT, 34);
+        b.add_field("solid", EV_FLOAT, 35);
+        b.add_field("fixangle", EV_FLOAT, 36);
+        b.add_field("teleport_time", EV_FLOAT, 37);
+        b.add_field("groundentity", EV_ENTITY, 38);
+        b.add_field("view_ofs", EV_VECTOR, 39); // 39,40,41
+        b.add_field("model", EV_STRING, 42);
+        b.add_field("modelindex", EV_FLOAT, 43);
+        b.add_field("think", EV_FUNCTION, 44);
+        b.add_field("nextthink", EV_FLOAT, 45);
+        b.add_field("touch", EV_FUNCTION, 46);
+        b.add_field("gravity", EV_FLOAT, 47);
+
+        // Field offsets for the spawn function's stores (health=33, origin=2..4).
+        let f_health = 33u16;
+        let f_origin = 2u16;
+
+        // Empty system functions (DONE only).
+        let done = || Statement {
+            op: Op::Done as u16,
+            a: 0,
+            b: 0,
+            c: 0,
+        };
+        b.add_function("SetNewParms", vec![done()]);
+        b.add_function("ClientConnect", vec![done()]);
+        b.add_function("StartFrame", vec![done()]);
+        b.add_function("PlayerPreThink", vec![done()]);
+        b.add_function("PlayerPostThink", vec![done()]);
+
+        // PutClientInServer: STOREP_F const100 -> self.health;
+        //                    STOREP_V origin_const -> self.origin; DONE.
+        // We compute the field pointer with ADDRESS(self, field) -> a temp global,
+        // then STOREP into it. Use temp globals 48 (ptr) and the self entity in
+        // global 31. Field-number globals: we need a global holding the field ofs.
+        // Simpler: ADDRESS takes (entity, field) where both are globals; place the
+        // field numbers in globals 50 (health) and 51 (origin).
+        let g_fhealth = 50u16;
+        let g_forigin = 51u16;
+        let g_ptr = 52u16;
+        let put = b.add_function(
+            "PutClientInServer",
+            vec![
+                // ptr = ADDRESS(self, f_health)
+                Statement {
+                    op: Op::Address as u16,
+                    a: 31, // self entity global
+                    b: g_fhealth as i16,
+                    c: g_ptr as i16,
+                },
+                // *ptr = const100
+                Statement {
+                    op: Op::StorepF as u16,
+                    a: g_const100 as i16,
+                    b: g_ptr as i16,
+                    c: 0,
+                },
+                // ptr = ADDRESS(self, f_origin)
+                Statement {
+                    op: Op::Address as u16,
+                    a: 31,
+                    b: g_forigin as i16,
+                    c: g_ptr as i16,
+                },
+                // *ptr = origin_const (vector)
+                Statement {
+                    op: Op::StorepV as u16,
+                    a: g_origin as i16,
+                    b: g_ptr as i16,
+                    c: 0,
+                },
+                done(),
+            ],
+        );
+        let _ = put;
+        // The ADDRESS field-number globals (g_fhealth=50, g_forigin=51) and the
+        // value constants are filled by `prime_player_globals` after the test
+        // builds its Server, keeping these offsets in one documented place.
+        let _ = (g_fhealth, g_forigin, g_ptr, f_health, f_origin);
+
+        let img = b.build();
+        (img, g_const100 as usize, g_origin as usize)
+    }
+
+    /// Set up the field-number constants a freshly-loaded player progs needs for
+    /// its `PutClientInServer` ADDRESS ops, plus the value constants. Mirrors the
+    /// offsets chosen in [`player_progs`].
+    fn prime_player_globals(server: &mut Server, g_const100: usize, g_origin: usize) {
+        // Field numbers for ADDRESS (health field ofs 33, origin field ofs 2).
+        server.vm.set_gi(50, 33);
+        server.vm.set_gi(51, 2);
+        // Value constants: health 100, origin (0,0,40).
+        server.vm.set_gf(g_const100, 100.0);
+        server.vm.set_gv(g_origin, [0.0, 0.0, 40.0]);
+    }
+
+    #[test]
+    fn user_friction_reduces_player_speed() {
+        // A player gliding on the ground with no input must lose horizontal
+        // speed each tick (SV_UserFriction), trending toward zero.
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+
+        let p = server.connect_client().expect("connect");
+        // Stand the player on the floor with a player-sized box and give it a
+        // forward velocity, on the ground.
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
+        server.vm.ent_set_vector(p, "velocity", [200.0, 0.0, 0.0]);
+        let flags = server.vm.ent_get_float(p, "flags") as i32;
+        server
+            .vm
+            .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+
+        // No movement input -> friction only.
+        let cmd = UserCmd::default();
+        let speed0 = {
+            let v = server.vm.ent_get_vector(p, "velocity");
+            (v[0] * v[0] + v[1] * v[1]).sqrt()
+        };
+        server.client_frame(&cmd, 0.1).expect("frame1");
+        let speed1 = {
+            let v = server.vm.ent_get_vector(p, "velocity");
+            (v[0] * v[0] + v[1] * v[1]).sqrt()
+        };
+        // Re-plant on the ground (the move may clear ONGROUND) and tick again.
+        let flags = server.vm.ent_get_float(p, "flags") as i32;
+        server
+            .vm
+            .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+        server.client_frame(&cmd, 0.1).expect("frame2");
+        let speed2 = {
+            let v = server.vm.ent_get_vector(p, "velocity");
+            (v[0] * v[0] + v[1] * v[1]).sqrt()
+        };
+
+        assert!(
+            speed1 < speed0,
+            "friction reduced speed: {speed0} -> {speed1}"
+        );
+        assert!(
+            speed2 < speed1,
+            "friction kept reducing speed: {speed1} -> {speed2}"
+        );
+    }
+
+    #[test]
+    fn accelerate_moves_toward_wishdir_clamped_at_maxspeed() {
+        // A stationary on-ground player given a sustained forward command must
+        // build up forward velocity, capped at sv_maxspeed (320).
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+
+        let p = server.connect_client().expect("connect");
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0; 3]);
+
+        // Look straight along +X (yaw 0) and push full forward.
+        let cmd = UserCmd {
+            forwardmove: 800.0, // exceeds maxspeed so the clamp is exercised
+            yaw: 0.0,
+            ..UserCmd::default()
+        };
+
+        // First tick: velocity gains a +X component (accelerate toward wishdir).
+        let flags = server.vm.ent_get_float(p, "flags") as i32;
+        server
+            .vm
+            .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+        server.client_frame(&cmd, 0.1).expect("frame");
+        let v1 = server.vm.ent_get_vector(p, "velocity");
+        assert!(
+            v1[0] > 0.0,
+            "velocity moved toward +X wishdir, got {v1:?}"
+        );
+
+        // Many ticks: horizontal speed never exceeds sv_maxspeed.
+        for _ in 0..40 {
+            let flags = server.vm.ent_get_float(p, "flags") as i32;
+            server
+                .vm
+                .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+            server.client_frame(&cmd, 0.1).expect("frame");
+            let v = server.vm.ent_get_vector(p, "velocity");
+            let hspeed = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            assert!(
+                hspeed <= SV_MAXSPEED + 1.0,
+                "horizontal speed clamped at maxspeed, got {hspeed}"
+            );
+        }
+    }
+
+    #[test]
+    fn connect_client_spawns_player_and_walks_without_tunnelling() {
+        // The minimal progs sets health=100 and origin=(0,0,40) in
+        // PutClientInServer. After connect the player has health 100 and a sane
+        // origin; a forward usercmd advances it in XY and never sinks through the
+        // floor at z = 0.
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+
+        let p = server.connect_client().expect("connect");
+        assert_eq!(server.player_edict(), p);
+        assert_eq!(server.player_health(), 100.0, "PutClientInServer set health");
+
+        // The QuakeC spawn set origin to (0,0,40); give it a player box.
+        let origin0 = server.vm.ent_get_vector(p, "origin");
+        assert_eq!(origin0, [0.0, 0.0, 40.0], "spawn origin applied");
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        // Settle onto the floor: a few empty frames let gravity + walk_move drop
+        // it until the box bottom rests on z = 0 (origin.z ~ 24).
+        let still = UserCmd::default();
+        for _ in 0..20 {
+            server.client_frame(&still, 0.1).expect("settle");
+        }
+        let settled = server.vm.ent_get_vector(p, "origin");
+        assert!(
+            settled[2] >= 24.0 - 1.0,
+            "player rests on the floor (origin.z ~ 24), got {}",
+            settled[2]
+        );
+        assert!(
+            settled[2] <= 40.0 + 0.1,
+            "player did not rise above spawn, got {}",
+            settled[2]
+        );
+
+        // Drive forward (yaw 0 = +X) and confirm XY advance + no tunnelling.
+        let cmd = UserCmd {
+            forwardmove: 320.0,
+            yaw: 0.0,
+            ..UserCmd::default()
+        };
+        let before = server.vm.ent_get_vector(p, "origin");
+        for _ in 0..10 {
+            server.client_frame(&cmd, 0.1).expect("walk");
+            let o = server.vm.ent_get_vector(p, "origin");
+            // The box bottom is origin.z - 24; it must stay at/above the floor.
+            assert!(
+                o[2] - 24.0 >= -1.0,
+                "player did not tunnel through the floor, origin.z = {}",
+                o[2]
+            );
+        }
+        let after = server.vm.ent_get_vector(p, "origin");
+        assert!(
+            after[0] > before[0] + 1.0,
+            "player advanced forward in +X: {} -> {}",
+            before[0],
+            after[0]
+        );
+    }
+}

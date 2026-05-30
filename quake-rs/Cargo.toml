@@ -1,0 +1,25 @@
+[package]
+name = "quake-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A faithful, memory-safe Rust port of id Software's Quake — math library and asset-format loaders"
+license = "GPL-2.0-or-later"
+repository = "local"
+authors = ["Ported from id Software's Quake (GPLv2) by Claude"]
+
+# Zero external dependencies: everything is built on std so `cargo build`
+# works fully offline and there is no version drift. Little-endian decoding
+# uses the built-in `*::from_le_bytes`.
+
+[[bin]]
+name = "quaketool"
+path = "src/bin/quaketool.rs"
+
+[lib]
+name = "quake_rs"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

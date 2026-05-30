@@ -1,0 +1,19 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Built WASM (regenerated from quake-wasm; also embeds copyrighted pak data)
+web/quake_wasm.wasm
+
+# Copyrighted Quake game data — NEVER commit (shareware pak is freely
+# *redistributable* but we keep the repo data-free; fetch it separately).
+*.pak
+*.PAK
+*.dem
+*.bsp
+*.mdl
+*.spr
+*.lmp
+*.wad
+quake-data/
+quake-c/

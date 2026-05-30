@@ -1,0 +1,21 @@
+[package]
+name = "quake-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Browser (WASM) shell for quake-rs: interactive walk rendered to a canvas"
+license = "GPL-2.0-or-later"
+
+[lib]
+crate-type = ["cdylib"]
+
+# The engine, unchanged. quake-wasm adds only a thin extern-C boundary; it is
+# itself `#![forbid(unsafe_code)]` — the only raw pointer is `Vec::as_ptr()`,
+# which is safe to *create*; JS does the linear-memory read.
+[dependencies]
+quake-rs = { path = "../quake-rs" }
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+codegen-units = 1
