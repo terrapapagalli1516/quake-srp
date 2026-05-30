@@ -7,9 +7,12 @@ BSP worlds, spawns maps by executing the real game logic, moves a player through
 physics, plays back recorded demos, renders the world with **baked lightmaps + textures + models**, and runs
 **interactively in a web browser** via WebAssembly.
 
-> **Honest framing.** This is the verifiable *engine core*, not a finished shippable game. Combat, animated
-> models, moving doors, and a sound mixer are not done yet (see the roadmap). What *is* done is real and tested:
-> 185 tests, zero dependencies, no `unsafe`, every layer checked against id's shareware `pak0.pak`.
+> **Honest framing.** This is a genuinely playable single-player port: you can walk e1m1, fight monsters that
+> wake/chase/attack, take damage and die, switch weapons, pick up items, open doors, ride elevators, see blood
+> /explosions/dynamic lights/flickering torches, hear spatialized sound, and reach the exit to load the next map
+> with your inventory intact — the whole shareware episode. What it is *not*: multiplayer/netcode, save/load, the
+> in-game console/menu, or the intermission stats screen (see the roadmap). Everything claimed below is real and
+> tested: 286 tests, zero dependencies, no `unsafe`, every layer checked against id's shareware `pak0.pak`.
 
 ## Layout
 
@@ -25,14 +28,24 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 
 - **Asset formats** — PAK (+ CRC-16/CCITT, exact-match against stock `pak0.pak`), WAD2, BSP v29, MDL, SPR, palette.
 - **QuakeC VM** — the full bytecode interpreter (all 66 opcodes), edict/string/global runtime, builtins.
-- **Server** — `ED_LoadFromFile` spawns a map by running id's real spawn functions; `SV_Physics` tick; entity-vs-entity
-  collision (`SV_Move`), touch/impact, item pickups; a real **player client** (`PutClientInServer` + `SV_ClientThink`
-  movement); monster-movement builtins (`walkmove`/`movetogoal`/chase-dir/`checkclient`/`findradius`).
-- **Renderer** — a from-scratch software rasteriser (z-buffer, backface cull, perspective-correct textures,
-  **baked BSP lightmaps**, alias models in-scene). Not a port of Quake's asm `d_*.c` pipeline.
+- **Server** — `ED_LoadFromFile` spawns a map by running id's real spawn functions; `SV_Physics` tick (walk, toss,
+  bounce, fly, **`SV_Physics_Pusher`** for doors/platforms); entity-vs-entity collision (`SV_Move`), touch/impact,
+  **item pickups**; a real **player client** (`PutClientInServer` + `SV_ClientThink` movement, **impulse weapon
+  switching**); **monster AI** (sight/`FindTarget`/`checkclient`, chase, attack) and the movement builtins
+  (`walkmove`/`movetogoal`/chase-dir/`findradius`); **combat** (`traceline`→QuakeC `T_Damage`, player damage + death);
+  **`changelevel`** with inventory carried across maps (`SetChangeParms`/`DecodeLevelParms`).
+- **Renderer** — a from-scratch software rasteriser (z-buffer, backface cull, perspective-correct textures, PVS
+  culling): **the full Quake lighting model** — baked BSP lightmaps + **dynamic lights** (`R_AddDynamicLights`:
+  muzzle flashes, explosions) + **animated light styles** (`R_AnimateLight`: flickering torches); **alias-model
+  frame animation** + skins; brush submodels; turbulent **water/lava/slime warp** + scrolling sky; first-person
+  **weapon viewmodel**; **particles** (blood) + **temp-entity effects** (fiery explosions, impacts); **head-bob**
+  (`V_CalcBob`); **screen blends** (`V_CalcBlend`: damage flash, underwater tint); a **status-bar HUD**.
+- **Sound** — the QuakeC `sound`/`ambientsound` + temp-entity sounds drive a queue the browser plays through Web
+  Audio with **distance/stereo spatialization** relative to the player.
 - **Demo playback** — parses the `.dem` net-protocol stream into per-frame entity snapshots and renders id's
   recorded attract demo.
-- **Browser** — the engine compiles to `wasm32-unknown-unknown` unchanged; WASD + mouse-look + fullscreen, lit.
+- **Browser** — the engine compiles to `wasm32-unknown-unknown` unchanged; WASD + mouse-look + fullscreen, fire
+  (click), weapon select (1–8), lit, with HUD + sound.
 
 See `quake-rs/README.md` for the full subsystem table, the C-source provenance of each module, and the verified
 `quaketool` command transcripts.
@@ -41,11 +54,11 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 185 tests, no game data required (uses synthetic fixtures)
+cargo test          # 286 tests, no game data required (uses synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
-`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo scene sim playtest demo walk`.
+`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo scene sim playtest changelevel demo walk`.
 
 ### Getting the game data (not committed)
 
@@ -62,14 +75,19 @@ cargo run --release --bin quaketool -- render ID1/PAK0.PAK ... # etc.
 The browser build (`quake-wasm`) `include_bytes!`s a pak at build time, so it needs the data present to compile;
 the engine lib and all tests do **not**.
 
-## Roadmap (remaining work)
+## Roadmap (remaining polish)
 
-- **Combat** (#4) — weapon fire `traceline`→`T_Damage`, projectiles, so the shotgun hits a grunt. Mostly emergent
-  from the QuakeC once the plumbing connects.
-- **Pusher physics** (#7) — `SV_Physics_Pusher` so doors/platforms move and carry/block entities.
-- **MDL animation** (#8) — frame interpolation so monsters move instead of standing in frame 0.
-- **Sound mixer** (#9) — channel mixing + attenuation (the decode-to-Web-Audio path is proven; the mixer isn't built).
-- **PVS culling** — use the visibility lump to stop drawing the whole map (perf + correctness).
+The core single-player loop is complete (combat, pusher physics, MDL animation, sound, PVS culling, level
+transitions — all done). What's left is presentation/scope polish:
+
+- **Intermission / finale screen** — the level-complete stats screen (secrets/kills/time) before the next map;
+  changelevel currently swaps directly.
+- **HUD detail** — the weapon strip with current-weapon highlight, per-ammo-type icons, and the animated face
+  (the bar shows health/ammo/armour numbers today).
+- **Powerup effects** — quad/pentagram/ring/biosuit view tints (the `V_CalcBlend` infrastructure is in place; the
+  per-powerup cshifts just need wiring) and item glow.
+- **Console / menu** — Quake's in-game console and menu system.
+- **Multiplayer & save/load** — out of scope for this single-player, headless-server port.
 
 ## Licensing
 
