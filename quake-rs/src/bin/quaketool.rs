@@ -1394,6 +1394,10 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
     for (i, slot) in menudot.iter_mut().enumerate() {
         *slot = lmp(&format!("gfx/menudot{}.lmp", i + 1));
     }
+    let mut help: [Option<quake_rs::wad::Qpic>; render::NUM_HELP_PAGES] = Default::default();
+    for (i, slot) in help.iter_mut().enumerate() {
+        *slot = lmp(&format!("gfx/help{i}.lmp"));
+    }
     let present = |o: &Option<quake_rs::wad::Qpic>| o.is_some();
     let pics = render::MenuPics {
         qplaque: lmp("gfx/qplaque.lmp"),
@@ -1403,6 +1407,7 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
         sp_menu: lmp("gfx/sp_menu.lmp"),
         p_option: lmp("gfx/p_option.lmp"),
         menudot,
+        help,
     };
     let conchars = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok()).and_then(|w| {
         let lump = w.lump("conchars")?;

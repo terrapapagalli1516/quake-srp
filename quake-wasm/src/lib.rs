@@ -337,6 +337,11 @@ fn load_menu_pics(
     for (i, slot) in menudot.iter_mut().enumerate() {
         *slot = lmp(&format!("gfx/menudot{}.lmp", i + 1));
     }
+    // The 6 Help/Ordering pages (gfx/help0.lmp..help5.lmp). Each optional.
+    let mut help: [Option<Qpic>; render::NUM_HELP_PAGES] = Default::default();
+    for (i, slot) in help.iter_mut().enumerate() {
+        *slot = lmp(&format!("gfx/help{i}.lmp"));
+    }
     let pics = MenuPics {
         qplaque: lmp("gfx/qplaque.lmp"),
         ttl_main: lmp("gfx/ttl_main.lmp"),
@@ -345,6 +350,7 @@ fn load_menu_pics(
         sp_menu: lmp("gfx/sp_menu.lmp"),
         p_option: lmp("gfx/p_option.lmp"),
         menudot,
+        help,
     };
 
     // conchars is a raw 128x128 byte block (TYP_MIPTEX, no QPIC header) inside
@@ -711,6 +717,18 @@ pub extern "C" fn menu_select() {
         if a.menu.visible {
             match a.menu.select() {
                 MenuAction::NewGame => start_new_game = true,
+                MenuAction::OpenConsole => {
+                    // Options "Go to console": select() already closed the menu;
+                    // open the drop-down console (Con_ToggleConsole_f).
+                    a.console.open = true;
+                }
+                MenuAction::ResetDefaults => {
+                    // Options "Reset to defaults": select() reset the in-menu
+                    // cvars; re-read the render-size preset (unchanged here) so the
+                    // Screen-size row stays in sync. Sensitivity/volume are read
+                    // live by the host each frame, so nothing else to do.
+                    a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+                }
                 // Closed/Back/None already applied to the menu state inside
                 // select(); nothing else for the host to do.
                 _ => {}
@@ -749,6 +767,31 @@ pub extern "C" fn menu_cancel() {
             let _ = a.menu.cancel();
         } else {
             a.menu.open();
+        }
+    });
+}
+
+/// Answer the Quit confirmation prompt "Yes" (the literal `Y` key, `M_Quit_Key`
+/// 'y'/'Y'): close the menu (quit to the attract loop). A no-op off the Quit
+/// screen, so the page can route a `Y` press here unconditionally while the menu
+/// is up. Enter (`menu_select`) on the Quit screen does the same thing.
+#[no_mangle]
+pub extern "C" fn menu_quit_yes() {
+    ensure_app(|a| {
+        if a.menu.visible {
+            let _ = a.menu.quit_yes();
+        }
+    });
+}
+
+/// Answer the Quit confirmation prompt "No" (the literal `N` key, `M_Quit_Key`
+/// 'n'/'N'): back out to the screen the prompt rose from. A no-op off the Quit
+/// screen. Escape (`menu_cancel`) on the Quit screen does the same thing.
+#[no_mangle]
+pub extern "C" fn menu_quit_no() {
+    ensure_app(|a| {
+        if a.menu.visible {
+            let _ = a.menu.quit_no();
         }
     });
 }
@@ -2682,10 +2725,15 @@ mod tests {
         // Main cursor 0 is Single Player; move down to Options (item 2) and Enter.
         menu_down(); // -> 1 (Multiplayer)
         menu_down(); // -> 2 (Options)
-        menu_select(); // enter Options
+        menu_select(); // enter Options (cursor on row 0 = Customize controls)
         assert_eq!(menu_visible(), 1);
-        // menu_left/right off the resolution row shouldn't change the size; the
-        // top Options row IS Screen size, so menu_right cycles to the next preset.
+        // The Screen size row is row 3 (after Customize controls / Go to console /
+        // Reset to defaults), so step down 3 rows, then menu_right cycles the preset.
+        menu_down(); // -> 1 (Go to console)
+        menu_down(); // -> 2 (Reset to defaults)
+        menu_down(); // -> 3 (Screen size)
+        // menu_right on a non-resolution row wouldn't change the size; on Screen
+        // size it cycles to the next preset and reallocates the framebuffer.
         menu_right();
         assert_eq!((width(), height()), (480, 300), "right cycles to the 480x300 preset");
         APP.with(|c| {

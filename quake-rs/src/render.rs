@@ -5139,28 +5139,74 @@ const MENU_VIRT_H: f32 = 200.0;
 const MAIN_ITEMS: usize = 5;
 /// `SINGLEPLAYER_ITEMS` (menu.c): the single-player menu has 3 entries.
 const SINGLEPLAYER_ITEMS: usize = 3;
-/// The Options screen rows ported here: Screen size, Mouse speed, Volume.
-const OPTIONS_ITEMS: usize = 3;
+/// `OPTIONS_ITEMS` (menu.c, the non-Win32 layout = 13 rows). The cursor wraps over
+/// all 13; the row indices match `M_AdjustSliders` / `M_Options_Key`:
+/// 0 Customize controls, 1 Go to console, 2 Reset to defaults, 3 Screen size,
+/// 4 Brightness, 5 Mouse Speed, 6 CD Music Volume, 7 Sound Volume, 8 Always Run,
+/// 9 Invert Mouse, 10 Lookspring, 11 Lookstrafe, 12 Video Options.
+const OPTIONS_ITEMS: usize = 13;
+
+/// `OptionRow` — the stable index for each Options row (matches the C's
+/// `options_cursor` cases in `M_AdjustSliders` / `M_Options_Key`).
+const ROW_CONTROLS: usize = 0;
+const ROW_CONSOLE: usize = 1;
+const ROW_DEFAULTS: usize = 2;
+const ROW_SCREENSIZE: usize = 3;
+const ROW_BRIGHTNESS: usize = 4;
+const ROW_MOUSESPEED: usize = 5;
+const ROW_CDVOLUME: usize = 6;
+const ROW_SNDVOLUME: usize = 7;
+const ROW_ALWAYSRUN: usize = 8;
+const ROW_INVERTMOUSE: usize = 9;
+const ROW_LOOKSPRING: usize = 10;
+const ROW_LOOKSTRAFE: usize = 11;
+const ROW_VIDEO: usize = 12;
 
 /// The selectable render-resolution presets the Options "Screen size" row cycles
 /// through, as `(width, height)` pairs. Index 0 (`320x200`) is the fast default
 /// the engine boots at; higher presets render the 3-D scene at the larger size
 /// (the menu + HUD auto-scale to whatever framebuffer they're drawn into). Kept
 /// within the host's clamp envelope (<= 1280x800, <= 1_280*800 pixels).
+///
+/// NOTE: this differs from id's `scr_viewsize` (30..120, which shrinks the 3-D
+/// viewport inside a fixed screen). Here the "Screen size" row instead cycles the
+/// engine's actual render resolution — the behaviour the host can really apply —
+/// while drawing a faithful slider whose knob tracks the preset's [0,1] fraction.
 pub const RESOLUTION_PRESETS: [(i32, i32); 5] =
     [(320, 200), (480, 300), (640, 400), (800, 500), (960, 600)];
 
-/// Inclusive bounds for the Options "Mouse speed" row (a 1..=10 integer level;
-/// the host maps it to a sensitivity multiplier). Default is [`MOUSE_LEVEL_DEFAULT`].
-const MOUSE_LEVEL_MIN: i32 = 1;
-const MOUSE_LEVEL_MAX: i32 = 10;
-const MOUSE_LEVEL_DEFAULT: i32 = 3;
+// --- analog cvar ranges (M_AdjustSliders) + their slider fraction mapping ------
 
-/// Inclusive bounds for the Options "Volume" row (a 0..=10 integer level; the host
-/// maps it to a 0.0..=1.0 master gain). Default is [`VOLUME_LEVEL_DEFAULT`].
-const VOLUME_LEVEL_MIN: i32 = 0;
-const VOLUME_LEVEL_MAX: i32 = 10;
-const VOLUME_LEVEL_DEFAULT: i32 = 7;
+/// `sensitivity` (Mouse Speed): 1..=11, step 0.5; slider r = (v-1)/10. Default 3.
+const SENS_MIN: f32 = 1.0;
+const SENS_MAX: f32 = 11.0;
+const SENS_STEP: f32 = 0.5;
+const SENS_DEFAULT: f32 = 3.0;
+
+/// `volume` (Sound Volume): 0..=1, step 0.1; slider r = v. Default 0.7.
+const VOLUME_MIN: f32 = 0.0;
+const VOLUME_MAX: f32 = 1.0;
+const VOLUME_STEP: f32 = 0.1;
+const VOLUME_DEFAULT: f32 = 0.7;
+
+/// `v_gamma` (Brightness): 0.5..=1, step 0.05 (LEFT brightens); slider
+/// r = (1 - v)/0.5. Default 1.0. COSMETIC: stored + drawn but the renderer does
+/// not yet apply gamma.
+const GAMMA_MIN: f32 = 0.5;
+const GAMMA_MAX: f32 = 1.0;
+const GAMMA_STEP: f32 = 0.05;
+const GAMMA_DEFAULT: f32 = 1.0;
+
+/// `bgmvolume` (CD Music Volume): 0..=1, step 0.1; slider r = v. Default 1.0.
+/// COSMETIC: there is no CD/BGM track in this port, so it only stores + draws.
+const BGM_MIN: f32 = 0.0;
+const BGM_MAX: f32 = 1.0;
+const BGM_STEP: f32 = 0.1;
+const BGM_DEFAULT: f32 = 1.0;
+
+/// `NUM_HELP_PAGES` (menu.c): the Help/Ordering screen pages through
+/// `gfx/help0.lmp`..`help5.lmp`.
+pub const NUM_HELP_PAGES: usize = 6;
 
 /// The map New Game starts on. Matches the C `map start`: `start.bsp` is the
 /// skill-select hub — the player walks into the Easy/Normal/Hard/Nightmare halls
@@ -5169,9 +5215,26 @@ const VOLUME_LEVEL_DEFAULT: i32 = 7;
 /// the full hub flow works.
 pub const NEW_GAME_MAP: &str = "maps/start.bsp";
 
+// --- conchars glyph indices used by the Options widgets (M_DrawSlider /
+//     M_DrawCheckbox) and the cursor (M_Options_Draw). ----------------------------
+
+/// `M_DrawSlider`: the slider trough is glyph 128 (left cap), 129 (the middle
+/// segment, repeated [`SLIDER_RANGE`] times), then 130 (right cap); the knob is
+/// glyph 131. The whole widget is drawn at virtual x=220.
+const SLIDER_LEFT_CHAR: u8 = 128;
+const SLIDER_MID_CHAR: u8 = 129;
+const SLIDER_RIGHT_CHAR: u8 = 130;
+const SLIDER_KNOB_CHAR: u8 = 131;
+/// `SLIDER_RANGE` (menu.c): the slider trough is 10 middle segments wide.
+const SLIDER_RANGE: usize = 10;
+
+/// The Options cursor: glyph `12 + ((realtime*4)&1)` (12/13 flash) drawn at
+/// virtual x=200 (`M_DrawCharacter(200, 32 + cursor*8, 12 + ...)`).
+const OPTIONS_CURSOR_BASE: u8 = 12;
+const OPTIONS_CURSOR_X: f32 = 200.0;
+
 /// Which menu screen is showing. Mirrors the relevant `m_state` values from
-/// menu.c (`m_main`, `m_singleplayer`); the other states (load/save/options/…)
-/// are out of scope for this port.
+/// menu.c (`m_main`, `m_singleplayer`, `m_options`, `m_help`, `m_quit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuScreen {
     /// The top-level menu (`m_main`): Single Player / Multiplayer / Options /
@@ -5179,19 +5242,26 @@ pub enum MenuScreen {
     Main,
     /// The single-player submenu (`m_singleplayer`): New Game / Load / Save.
     SinglePlayer,
-    /// The options submenu (`m_options`), scoped here to Screen size / Mouse
-    /// speed / Volume — the rows the host can actually apply (render resolution,
-    /// look sensitivity, master gain).
+    /// The options submenu (`m_options`): the full 13-row layout
+    /// ([`OPTIONS_ITEMS`]). Sliders + checkboxes are adjusted with left/right.
     Options,
+    /// The Help/Ordering screen (`m_help`): pages through
+    /// `gfx/help0.lmp`..`help5.lmp` with left/right ([`NUM_HELP_PAGES`] pages).
+    Help,
+    /// The Quit confirmation prompt (`m_quit`): "Are you sure you want to quit?".
+    Quit,
 }
 
 impl MenuScreen {
     /// The number of selectable items on this screen (the cursor wraps within it).
+    /// Help/Quit have no cursor list (1 item — the screen itself) so up/down are
+    /// inert there; Help pages with left/right, Quit answers Y/N.
     fn item_count(self) -> usize {
         match self {
             MenuScreen::Main => MAIN_ITEMS,
             MenuScreen::SinglePlayer => SINGLEPLAYER_ITEMS,
             MenuScreen::Options => OPTIONS_ITEMS,
+            MenuScreen::Help | MenuScreen::Quit => 1,
         }
     }
 }
@@ -5202,14 +5272,21 @@ impl MenuScreen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     /// Nothing to do (the selection only changed the screen, or the item is not
-    /// implemented in this port — Multiplayer/Options/Help/Load/Save).
+    /// implemented in this port — Multiplayer/Load/Save/Customize/Video).
     None,
     /// Start a fresh single-player game on [`NEW_GAME_MAP`] and close the menu.
     NewGame,
     /// Backed out of a submenu to the main screen (Escape on a submenu).
     Back,
-    /// The menu just closed (Escape on the main screen, or Quit).
+    /// The menu just closed (Escape on the main screen, or confirmed Quit).
     Closed,
+    /// Options "Go to console": the host should close the menu and open the
+    /// drop-down console (`m_state = m_none; Con_ToggleConsole_f()`).
+    OpenConsole,
+    /// Options "Reset to defaults": the host should reset the option cvars
+    /// (`exec default.cfg`). [`Menu::select`] already reset the in-menu values; the
+    /// host re-reads [`Menu::resolution`]/sensitivity/volume afterward.
+    ResetDefaults,
 }
 
 /// The keyboard-driven main-menu engine: the visible flag, the current screen,
@@ -5233,12 +5310,32 @@ pub struct Menu {
     /// Index into [`RESOLUTION_PRESETS`] for the Options "Screen size" row
     /// (0 = the fast 320x200 default). [`adjust`](Menu::adjust) cycles it.
     res_preset: usize,
-    /// The Options "Mouse speed" level, [`MOUSE_LEVEL_MIN`]..=[`MOUSE_LEVEL_MAX`]
-    /// (clamped, no wrap). The host turns it into a look-sensitivity multiplier.
-    mouse_level: i32,
-    /// The Options "Volume" level, [`VOLUME_LEVEL_MIN`]..=[`VOLUME_LEVEL_MAX`]
-    /// (clamped, no wrap). The host turns it into a 0.0..=1.0 master gain.
-    volume_level: i32,
+    /// `sensitivity` cvar (Mouse Speed), [`SENS_MIN`]..=[`SENS_MAX`].
+    sensitivity: f32,
+    /// `volume` cvar (Sound Volume), [`VOLUME_MIN`]..=[`VOLUME_MAX`]. The host maps
+    /// it to a 0.0..=1.0 master gain.
+    volume: f32,
+    /// `v_gamma` cvar (Brightness), [`GAMMA_MIN`]..=[`GAMMA_MAX`]. COSMETIC: stored
+    /// + drawn, not yet applied by the renderer.
+    gamma: f32,
+    /// `bgmvolume` cvar (CD Music Volume), [`BGM_MIN`]..=[`BGM_MAX`]. COSMETIC: no
+    /// CD/BGM playback in this port.
+    bgm_volume: f32,
+    /// `cl_forwardspeed > 200` (Always Run). COSMETIC: stored + drawn, the host
+    /// does not yet swap forward/back speed.
+    always_run: bool,
+    /// `m_pitch < 0` (Invert Mouse). COSMETIC: stored + drawn, look pitch not yet
+    /// inverted by the host.
+    invert_mouse: bool,
+    /// `lookspring` cvar. COSMETIC.
+    lookspring: bool,
+    /// `lookstrafe` cvar. COSMETIC.
+    lookstrafe: bool,
+    /// The current Help page (`help_page`, `0..NUM_HELP_PAGES`).
+    help_page: usize,
+    /// Which screen the Quit prompt was raised from, restored on "No"
+    /// (`m_quit_prevstate` / `wasInMenus`).
+    quit_prev: MenuScreen,
 }
 
 impl Default for Menu {
@@ -5249,15 +5346,23 @@ impl Default for Menu {
 
 impl Menu {
     /// A closed menu sitting on the main screen with the cursor on the first item,
-    /// with the Options rows at their defaults (320x200, mouse 3, volume 7).
+    /// with the Options cvars at their id defaults.
     pub fn new() -> Menu {
         Menu {
             visible: false,
             screen: MenuScreen::Main,
             cursor: 0,
             res_preset: 0,
-            mouse_level: MOUSE_LEVEL_DEFAULT,
-            volume_level: VOLUME_LEVEL_DEFAULT,
+            sensitivity: SENS_DEFAULT,
+            volume: VOLUME_DEFAULT,
+            gamma: GAMMA_DEFAULT,
+            bgm_volume: BGM_DEFAULT,
+            always_run: false,
+            invert_mouse: false,
+            lookspring: false,
+            lookstrafe: false,
+            help_page: 0,
+            quit_prev: MenuScreen::Main,
         }
     }
 
@@ -5269,6 +5374,11 @@ impl Menu {
     /// The highlighted item index on the current screen.
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// The current Help page index (`0..NUM_HELP_PAGES`).
+    pub fn help_page(&self) -> usize {
+        self.help_page
     }
 
     /// Open the menu on the main screen (`M_Menu_Main_f`): show it and reset to the
@@ -5304,9 +5414,15 @@ impl Menu {
 
     /// Move the cursor by `delta` (down = +1, up = -1), wrapping within the current
     /// screen's item count — exactly the `++/--` wrap in `M_Main_Key` /
-    /// `M_SinglePlayer_Key`. `delta` may be any magnitude; it wraps modulo the
-    /// item count.
+    /// `M_Options_Key`. `delta` may be any magnitude; it wraps modulo the item
+    /// count. On the Help screen up/down also page (the C maps `K_UPARROW`/
+    /// `K_DOWNARROW` to page +/-); see [`page`](Menu::page).
     pub fn move_cursor(&mut self, delta: i32) {
+        if self.screen == MenuScreen::Help {
+            // M_Help_Key: up = next page, down = previous page.
+            self.page(delta.signum());
+            return;
+        }
         let n = self.screen.item_count();
         if n == 0 {
             self.cursor = 0;
@@ -5320,17 +5436,20 @@ impl Menu {
 
     /// Activate the highlighted item (Enter / `K_ENTER`).
     ///
-    /// * Main > Single Player: switch to the single-player screen, cursor reset
+    /// * Main > Single Player / Options / Help: switch screen, cursor reset
     ///   ([`MenuAction::None`]).
-    /// * Main > Options: switch to the options screen, cursor reset
-    ///   ([`MenuAction::None`]).
-    /// * Main > Multiplayer/Help: unimplemented here ([`MenuAction::None`]).
-    /// * Main > Quit: close the menu ([`MenuAction::Closed`]).
-    /// * SinglePlayer > New Game: [`MenuAction::NewGame`] and close the menu (the
-    ///   host starts [`NEW_GAME_MAP`]).
-    /// * SinglePlayer > Load/Save: unimplemented here ([`MenuAction::None`]).
-    /// * Options rows: Enter is a no-op — the rows are adjusted left/right via
-    ///   [`adjust`](Menu::adjust) ([`MenuAction::None`]).
+    /// * Main > Multiplayer: unimplemented ([`MenuAction::None`]).
+    /// * Main > Quit: raise the Quit confirm prompt ([`MenuAction::None`]).
+    /// * SinglePlayer > New Game: [`MenuAction::NewGame`] and close the menu.
+    /// * SinglePlayer > Load/Save: unimplemented ([`MenuAction::None`]).
+    /// * Options > Customize controls / Video Options: stubs ([`MenuAction::None`]).
+    /// * Options > Go to console: [`MenuAction::OpenConsole`].
+    /// * Options > Reset to defaults: reset the in-menu cvars, return
+    ///   [`MenuAction::ResetDefaults`].
+    /// * Options analog/checkbox rows: Enter nudges them right (the C falls through
+    ///   to `M_AdjustSliders(1)`).
+    /// * Quit > Enter == "Yes": close the menu ([`MenuAction::Closed`]).
+    /// * Help: Enter is inert ([`MenuAction::None`]).
     pub fn select(&mut self) -> MenuAction {
         match self.screen {
             MenuScreen::Main => match self.cursor {
@@ -5346,17 +5465,24 @@ impl Menu {
                     self.cursor = 0;
                     MenuAction::None
                 }
-                // Multiplayer / Help: not ported. Quit closes the menu
-                // (the C pops a confirm screen; here Quit just dismisses the menu).
-                4 => {
-                    self.close();
-                    MenuAction::Closed
+                3 => {
+                    // M_Menu_Help_f
+                    self.screen = MenuScreen::Help;
+                    self.cursor = 0;
+                    self.help_page = 0;
+                    MenuAction::None
                 }
+                4 => {
+                    // M_Menu_Quit_f: pop the confirm prompt (does NOT quit yet).
+                    self.open_quit();
+                    MenuAction::None
+                }
+                // Multiplayer (item 1): not ported.
                 _ => MenuAction::None,
             },
             MenuScreen::SinglePlayer => match self.cursor {
                 0 => {
-                    // New Game: the C runs `map start`; we start e1m1 and close.
+                    // New Game: the C runs `map start`; we start the hub and close.
                     self.close();
                     self.screen = MenuScreen::Main;
                     self.cursor = 0;
@@ -5365,24 +5491,57 @@ impl Menu {
                 // Load / Save: not ported.
                 _ => MenuAction::None,
             },
-            // Options rows are adjusted with left/right (adjust), not Enter.
-            MenuScreen::Options => MenuAction::None,
+            MenuScreen::Options => match self.cursor {
+                // Customize controls / Video Options: target screens not ported.
+                ROW_CONTROLS | ROW_VIDEO => MenuAction::None,
+                ROW_CONSOLE => {
+                    // m_state = m_none; Con_ToggleConsole_f().
+                    self.close();
+                    MenuAction::OpenConsole
+                }
+                ROW_DEFAULTS => {
+                    // Cbuf_AddText("exec default.cfg"): reset every option cvar.
+                    self.reset_defaults();
+                    MenuAction::ResetDefaults
+                }
+                // Every other row: Enter falls through to M_AdjustSliders(1).
+                _ => {
+                    self.adjust(1);
+                    MenuAction::None
+                }
+            },
+            MenuScreen::Help => MenuAction::None,
+            MenuScreen::Quit => {
+                // Enter == "Yes": Host_Quit_f. Here that closes the menu (quit to
+                // the attract loop).
+                self.close();
+                self.screen = MenuScreen::Main;
+                self.cursor = 0;
+                MenuAction::Closed
+            }
         }
     }
 
-    /// Back out (Escape / `K_ESCAPE`): on a submenu return to the main screen
-    /// ([`MenuAction::Back`]); on the main screen close the menu
-    /// ([`MenuAction::Closed`]). Calling on a hidden menu is a no-op
-    /// ([`MenuAction::None`]).
+    /// Back out (Escape / `K_ESCAPE`). A hidden menu is a no-op
+    /// ([`MenuAction::None`]). Otherwise:
+    /// * a submenu (SinglePlayer/Options/Help) returns to Main ([`MenuAction::Back`]);
+    /// * the Quit prompt answers "No" → restores the previous screen
+    ///   ([`MenuAction::Back`]);
+    /// * the Main screen closes the menu ([`MenuAction::Closed`]).
     pub fn cancel(&mut self) -> MenuAction {
         if !self.visible {
             return MenuAction::None;
         }
         match self.screen {
-            MenuScreen::SinglePlayer | MenuScreen::Options => {
-                // M_SinglePlayer_Key / M_Options_Key K_ESCAPE -> M_Menu_Main_f
+            MenuScreen::SinglePlayer | MenuScreen::Options | MenuScreen::Help => {
+                // M_*_Key K_ESCAPE -> M_Menu_Main_f
                 self.screen = MenuScreen::Main;
                 self.cursor = 0;
+                MenuAction::Back
+            }
+            MenuScreen::Quit => {
+                // M_Quit_Key 'n'/Escape: restore the screen the prompt rose from.
+                self.screen = self.quit_prev;
                 MenuAction::Back
             }
             MenuScreen::Main => {
@@ -5393,12 +5552,53 @@ impl Menu {
         }
     }
 
-    /// Adjust the highlighted Options row by `delta` (left = -1, right = +1).
-    /// A no-op unless the current screen is [`MenuScreen::Options`].
-    ///
-    /// * Row 0 (Screen size): cycles [`RESOLUTION_PRESETS`] (wraps both ways).
-    /// * Row 1 (Mouse speed): clamps within [`MOUSE_LEVEL_MIN`]..=[`MOUSE_LEVEL_MAX`].
-    /// * Row 2 (Volume): clamps within [`VOLUME_LEVEL_MIN`]..=[`VOLUME_LEVEL_MAX`].
+    /// Raise the Quit confirmation prompt (`M_Menu_Quit_f`): remember the screen we
+    /// came from (so "No" restores it) and switch to [`MenuScreen::Quit`]. Visible
+    /// either way (the prompt is reachable from the game via `menu_cancel`-open too).
+    pub fn open_quit(&mut self) {
+        if self.screen == MenuScreen::Quit {
+            return;
+        }
+        self.quit_prev = self.screen;
+        self.visible = true;
+        self.screen = MenuScreen::Quit;
+    }
+
+    /// Answer the Quit prompt "Yes" (the literal `Y` key) — quit: close the menu.
+    /// A no-op off the Quit screen. Returns [`MenuAction::Closed`] when it quit,
+    /// else [`MenuAction::None`].
+    pub fn quit_yes(&mut self) -> MenuAction {
+        if self.screen != MenuScreen::Quit {
+            return MenuAction::None;
+        }
+        self.close();
+        self.screen = MenuScreen::Main;
+        self.cursor = 0;
+        MenuAction::Closed
+    }
+
+    /// Answer the Quit prompt "No" (the literal `N` key) — back out, same as
+    /// [`cancel`](Menu::cancel) on the Quit screen. A no-op off the Quit screen.
+    pub fn quit_no(&mut self) -> MenuAction {
+        if self.screen != MenuScreen::Quit {
+            return MenuAction::None;
+        }
+        self.screen = self.quit_prev;
+        MenuAction::Back
+    }
+
+    /// Page the Help screen by `dir` (right/up = +1 next, left/down = -1 previous),
+    /// wrapping over [`NUM_HELP_PAGES`] (`M_Help_Key`). A no-op off the Help screen.
+    pub fn page(&mut self, dir: i32) {
+        if self.screen != MenuScreen::Help {
+            return;
+        }
+        self.help_page = help_page_wrap(self.help_page as i32 + dir.signum());
+    }
+
+    /// Adjust the highlighted Options row by `delta` (left = -1, right = +1),
+    /// porting `M_AdjustSliders`. A no-op unless on [`MenuScreen::Options`] and the
+    /// row is an analog/checkbox row (the action rows 0/1/2/12 ignore it).
     ///
     /// Returns `true` when the Screen-size row changed (so the host knows to
     /// reallocate the framebuffer to [`resolution`](Menu::resolution)); `false`
@@ -5411,27 +5611,70 @@ impl Menu {
         if step == 0 {
             return false;
         }
+        let d = step as f32;
         match self.cursor {
-            0 => {
-                // Cycle the resolution preset, wrapping both directions.
+            ROW_SCREENSIZE => {
+                // Cycle the resolution preset, wrapping both directions. (id's
+                // scr_viewsize is replaced by the engine's real render resolution.)
                 let n = RESOLUTION_PRESETS.len() as i32;
                 let next = (self.res_preset as i32 + step).rem_euclid(n);
                 let changed = next as usize != self.res_preset;
                 self.res_preset = next as usize;
                 changed
             }
-            1 => {
-                self.mouse_level =
-                    (self.mouse_level + step).clamp(MOUSE_LEVEL_MIN, MOUSE_LEVEL_MAX);
+            ROW_BRIGHTNESS => {
+                // v_gamma.value -= dir * 0.05 (LEFT brightens), clamp 0.5..=1.
+                self.gamma = (self.gamma - d * GAMMA_STEP).clamp(GAMMA_MIN, GAMMA_MAX);
                 false
             }
-            2 => {
-                self.volume_level =
-                    (self.volume_level + step).clamp(VOLUME_LEVEL_MIN, VOLUME_LEVEL_MAX);
+            ROW_MOUSESPEED => {
+                self.sensitivity =
+                    (self.sensitivity + d * SENS_STEP).clamp(SENS_MIN, SENS_MAX);
                 false
             }
+            ROW_CDVOLUME => {
+                self.bgm_volume = (self.bgm_volume + d * BGM_STEP).clamp(BGM_MIN, BGM_MAX);
+                false
+            }
+            ROW_SNDVOLUME => {
+                self.volume = (self.volume + d * VOLUME_STEP).clamp(VOLUME_MIN, VOLUME_MAX);
+                false
+            }
+            // Checkboxes ignore the direction and simply toggle (matches the C,
+            // which flips the bool regardless of `dir`).
+            ROW_ALWAYSRUN => {
+                self.always_run = !self.always_run;
+                false
+            }
+            ROW_INVERTMOUSE => {
+                self.invert_mouse = !self.invert_mouse;
+                false
+            }
+            ROW_LOOKSPRING => {
+                self.lookspring = !self.lookspring;
+                false
+            }
+            ROW_LOOKSTRAFE => {
+                self.lookstrafe = !self.lookstrafe;
+                false
+            }
+            // Action rows (Customize / Console / Defaults / Video): not adjustable.
             _ => false,
         }
+    }
+
+    /// Reset every Options cvar to its id default (`exec default.cfg`). The render
+    /// resolution preset is left to the host (the framebuffer is its own source of
+    /// truth), matching how a `default.cfg` would not change the live mode here.
+    pub fn reset_defaults(&mut self) {
+        self.sensitivity = SENS_DEFAULT;
+        self.volume = VOLUME_DEFAULT;
+        self.gamma = GAMMA_DEFAULT;
+        self.bgm_volume = BGM_DEFAULT;
+        self.always_run = false;
+        self.invert_mouse = false;
+        self.lookspring = false;
+        self.lookstrafe = false;
     }
 
     /// The currently-selected render resolution `(width, height)` from the Options
@@ -5455,29 +5698,83 @@ impl Menu {
         }
     }
 
-    /// The Options "Mouse speed" as a sensitivity multiplier the host applies to
-    /// its baseline look sensitivity. The default level (3) maps to `1.0`, so the
-    /// out-of-the-box feel is unchanged; each level is `0.25` apart, giving a
-    /// `0.5..=2.75` range across levels 1..=10.
+    /// The Options "Mouse Speed" as a sensitivity multiplier the host applies to
+    /// its baseline look sensitivity. id's `sensitivity` defaults to 3, so we
+    /// normalise by [`SENS_DEFAULT`]: the out-of-the-box feel is unchanged (1.0x),
+    /// and the 1..=11 range maps to a `0.33..=3.67` multiplier.
     pub fn mouse_sensitivity(&self) -> f32 {
-        1.0 + (self.mouse_level - MOUSE_LEVEL_DEFAULT) as f32 * 0.25
+        self.sensitivity / SENS_DEFAULT
     }
 
-    /// The Options "Volume" as a `0.0..=1.0` master gain (level / 10). The default
-    /// level (7) maps to `0.7`.
+    /// The Options "Sound Volume" as a `0.0..=1.0` master gain (the `volume` cvar
+    /// directly). Default 0.7.
     pub fn volume(&self) -> f32 {
-        self.volume_level as f32 / VOLUME_LEVEL_MAX as f32
+        self.volume
     }
 
-    /// The Options "Mouse speed" level (`1..=10`), for display.
-    pub fn mouse_level(&self) -> i32 {
-        self.mouse_level
+    /// The raw `sensitivity` cvar value (1..=11), for display/tests.
+    pub fn sensitivity(&self) -> f32 {
+        self.sensitivity
     }
 
-    /// The Options "Volume" level (`0..=10`), for display.
-    pub fn volume_level(&self) -> i32 {
-        self.volume_level
+    /// The `v_gamma` cvar (Brightness, 0.5..=1). COSMETIC.
+    pub fn gamma(&self) -> f32 {
+        self.gamma
     }
+
+    /// The `bgmvolume` cvar (CD Music Volume, 0..=1). COSMETIC.
+    pub fn bgm_volume(&self) -> f32 {
+        self.bgm_volume
+    }
+
+    /// Whether the "Always Run" checkbox is on. COSMETIC.
+    pub fn always_run(&self) -> bool {
+        self.always_run
+    }
+
+    /// Whether the "Invert Mouse" checkbox is on. COSMETIC.
+    pub fn invert_mouse(&self) -> bool {
+        self.invert_mouse
+    }
+
+    /// Whether the "Lookspring" checkbox is on. COSMETIC.
+    pub fn lookspring(&self) -> bool {
+        self.lookspring
+    }
+
+    /// Whether the "Lookstrafe" checkbox is on. COSMETIC.
+    pub fn lookstrafe(&self) -> bool {
+        self.lookstrafe
+    }
+}
+
+/// The slider knob's virtual-x offset, in pixels, from the trough's drawing
+/// origin `x` (`M_DrawSlider`): the knob (glyph 131) sits at
+/// `(SLIDER_RANGE-1)*8 * range`, with `range` clamped to `[0,1]`. So fraction 0
+/// puts the knob on the left segment and fraction 1 on the rightmost of the
+/// [`SLIDER_RANGE`] middle segments. A non-finite fraction is treated as 0.
+fn slider_knob_offset(range: f32) -> f32 {
+    let r = if range.is_finite() {
+        range.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (SLIDER_RANGE - 1) as f32 * 8.0 * r
+}
+
+/// The checkbox label text (`M_DrawCheckbox`): "on" / "off".
+fn checkbox_text(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+/// Wrap a Help page index into `0..NUM_HELP_PAGES` (`M_Help_Key`: past the last
+/// page wraps to 0, below 0 wraps to the last). Accepts any `i32`.
+fn help_page_wrap(p: i32) -> usize {
+    (p.rem_euclid(NUM_HELP_PAGES as i32)) as usize
 }
 
 /// The menu's pre-loaded picture bundle: the plaque, both titles, both item-list
@@ -5503,6 +5800,9 @@ pub struct MenuPics {
     pub p_option: Option<crate::wad::Qpic>,
     /// `gfx/menudot1.lmp`..`menudot6.lmp` — the 6-frame animated cursor.
     pub menudot: [Option<crate::wad::Qpic>; 6],
+    /// `gfx/help0.lmp`..`help5.lmp` — the 6 full-screen Help/Ordering pages
+    /// (`M_Help_Draw` blits the current one at (0,0)).
+    pub help: [Option<crate::wad::Qpic>; NUM_HELP_PAGES],
 }
 
 /// Blit one `Qpic` with its top-left at virtual `(vx, vy)` in [`MENU_VIRT_W`] x
@@ -5714,6 +6014,92 @@ fn draw_string_scaled(
     }
 }
 
+/// Draw ONE conchars glyph by its raw byte index (`M_DrawCharacter`), at virtual
+/// `(vx, vy)` in 320x200 space, scaled+offset like [`draw_string_scaled`]. Unlike
+/// `draw_string_scaled` (which speaks ASCII and skips byte 0 / space) this stamps
+/// the exact cell `num`, so it can draw the slider strip (glyphs 128/129/130/131)
+/// and the flashing cursor (glyphs 12/13). Palette-0 texels stay transparent; the
+/// glyph cell falling outside the atlas is a silent skip.
+#[allow(clippy::too_many_arguments)]
+fn draw_char_scaled(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    vx: f32,
+    vy: f32,
+    num: u8,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if conchars.width <= 0 || conchars.height <= 0 || scale <= 0.0 {
+        return;
+    }
+    let cw = conchars.width as usize;
+    if conchars.data.len() < cw.saturating_mul(conchars.height as usize) {
+        return;
+    }
+    let cell_w = (conchars.width / 16).max(1) as usize;
+    let cell_h = (conchars.height / 16).max(1) as usize;
+    let cell_x = (num as usize % 16) * cell_w;
+    let cell_y = (num as usize / 16) * cell_h;
+    let block = scale.ceil().max(1.0) as i64;
+    for gy in 0..cell_h {
+        let sy = cell_y + gy;
+        if sy >= conchars.height as usize {
+            break;
+        }
+        let py = (oy + (vy + gy as f32) * scale).floor() as i64;
+        for gx in 0..cell_w {
+            let sx = cell_x + gx;
+            if sx >= cw {
+                break;
+            }
+            let texel = match conchars.data.get(sy * cw + sx) {
+                Some(&t) => t,
+                None => continue,
+            };
+            if texel == 0 {
+                continue;
+            }
+            let px = (ox + (vx + gx as f32) * scale).floor() as i64;
+            for by in 0..block {
+                for bx in 0..block {
+                    image.put((px + bx) as i32, (py + by) as i32, palette[texel as usize]);
+                }
+            }
+        }
+    }
+}
+
+/// Draw a slider widget (`M_DrawSlider`) with its trough origin at virtual
+/// `(x, y)`: glyph 128 (left cap) at `x-8`, [`SLIDER_RANGE`] copies of glyph 129
+/// (middle) starting at `x`, glyph 130 (right cap) just past them, and the knob
+/// (glyph 131) at `x + slider_knob_offset(range)`. `range` is the cvar's [0,1]
+/// fraction (clamped inside [`slider_knob_offset`]).
+#[allow(clippy::too_many_arguments)]
+fn draw_slider(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    x: f32,
+    y: f32,
+    range: f32,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    draw_char_scaled(image, conchars, x - 8.0, y, SLIDER_LEFT_CHAR, scale, ox, oy, palette);
+    for i in 0..SLIDER_RANGE {
+        let cx = x + i as f32 * 8.0;
+        draw_char_scaled(image, conchars, cx, y, SLIDER_MID_CHAR, scale, ox, oy, palette);
+    }
+    let right_x = x + SLIDER_RANGE as f32 * 8.0;
+    draw_char_scaled(image, conchars, right_x, y, SLIDER_RIGHT_CHAR, scale, ox, oy, palette);
+    let knob_x = x + slider_knob_offset(range);
+    draw_char_scaled(image, conchars, knob_x, y, SLIDER_KNOB_CHAR, scale, ox, oy, palette);
+}
+
 /// Draw the main menu (or single-player submenu) over `image`, a port of
 /// `M_Main_Draw` / `M_SinglePlayer_Draw`.
 ///
@@ -5758,7 +6144,22 @@ pub fn draw_menu(
         0
     };
 
-    // The plaque is shared by both screens (M_DrawTransPic (16,4)).
+    // The Help screen is a full-screen pic at (0,0); the Quit prompt is a small
+    // text box. Neither uses the qplaque, so dispatch them before drawing it.
+    match menu.screen {
+        MenuScreen::Help => {
+            draw_help_screen(image, menu, pics, scale, ox, oy, palette);
+            return;
+        }
+        MenuScreen::Quit => {
+            draw_quit_screen(image, conchars, scale, ox, oy, palette);
+            return;
+        }
+        _ => {}
+    }
+
+    // The plaque is shared by the Main / SinglePlayer / Options screens
+    // (M_DrawTransPic (16,4)).
     if let Some(p) = &pics.qplaque {
         blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy, palette);
     }
@@ -5775,9 +6176,9 @@ pub fn draw_menu(
     let (title, list) = match menu.screen {
         MenuScreen::Main => (&pics.ttl_main, &pics.mainmenu),
         MenuScreen::SinglePlayer => (&pics.ttl_sgl, &pics.sp_menu),
-        // Options is handled above (early return); the catch-all keeps the match
-        // exhaustive without a second Options layout here.
-        MenuScreen::Options => (&pics.p_option, &None),
+        // Options/Help/Quit are handled above (early return); the catch-all keeps
+        // the match exhaustive without a second layout here.
+        _ => (&pics.p_option, &None),
     };
     if let Some(t) = title {
         // M_DrawPic ((320 - p->width)/2, 4, p).
@@ -5803,16 +6204,46 @@ pub fn draw_menu(
     }
 }
 
-/// Draw the Options submenu (a port of the relevant rows of `M_Options_Draw`):
-/// the `p_option` title plaque centered at the top, then one labelled row per
-/// setting — "Screen size" (the current `WxH`), "Mouse speed" and "Volume" (a
-/// simple `n/max` number) — each value drawn to the right of its label, with the
-/// animated cursor on the highlighted row.
+/// The Options rows' vertical origin and step (`M_Options_Draw`: first label at
+/// y=32, 8 px per row; the flashing cursor at `32 + cursor*8`).
+const OPTIONS_ROW_Y0: f32 = 32.0;
+const OPTIONS_ROW_STEP: f32 = 8.0;
+/// The right-justified label column origin (`M_Print(16, ...)`). The labels are
+/// pre-padded to a fixed width so their right edges line up at ~x=184, exactly as
+/// id ships them (e.g. `"    Customize controls"`).
+const OPTIONS_LABEL_X: f32 = 16.0;
+/// Sliders + checkboxes draw at virtual x=220 (`M_DrawSlider(220,…)` /
+/// `M_DrawCheckbox(220,…)`).
+const OPTIONS_WIDGET_X: f32 = 220.0;
+
+/// The 13 Options labels, pre-padded to right-justify at x≈184 — copied verbatim
+/// from `M_Options_Draw` so the column lines up with the widgets at x=220.
+const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
+    "    Customize controls",
+    "         Go to console",
+    "     Reset to defaults",
+    "           Screen size",
+    "            Brightness",
+    "           Mouse Speed",
+    "       CD Music Volume",
+    "          Sound Volume",
+    "            Always Run",
+    "          Invert Mouse",
+    "            Lookspring",
+    "            Lookstrafe",
+    "         Video Options",
+];
+
+/// Draw the Options submenu, a faithful port of `M_Options_Draw`: the `p_option`
+/// title plaque centered at the top, the 13 right-justified labels at x=16 (8 px
+/// apart from y=32), a [`draw_slider`] at x=220 for the analog rows (Screen size /
+/// Brightness / Mouse Speed / CD Music Volume / Sound Volume), a [`checkbox_text`]
+/// at x=220 for the boolean rows (Always Run / Invert Mouse / Lookspring /
+/// Lookstrafe), and the flashing cursor glyph (12/13) at x=200 on the focused row.
 ///
-/// Rows are stamped with [`draw_string_scaled`] so they share the menu's
-/// scaled+centered virtual space (identical at 320x200 scale 1 and any larger
-/// framebuffer). A missing `conchars` leaves the rows blank but still draws the
-/// title + cursor; nothing here panics.
+/// A missing `conchars` leaves the labels/widgets blank but still draws the title;
+/// nothing here panics. `frame` (the menudot animation frame) drives the cursor
+/// blink (glyph 12 vs 13) via its parity, so it animates with the same clock.
 #[allow(clippy::too_many_arguments)]
 fn draw_options_screen(
     image: &mut Image,
@@ -5831,38 +6262,120 @@ fn draw_options_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
 
-    // One text row per option. The label sits at virtual x=64; the value is drawn
-    // to its right at x=184, leaving room for the cursor at x=48. Rows start at
-    // y=32 and step 16px apart (3 rows fit comfortably in the 320x200 canvas).
-    const ROW_X_LABEL: f32 = 64.0;
-    const ROW_X_VALUE: f32 = 184.0;
-    const ROW_Y0: f32 = 32.0;
-    const ROW_STEP: f32 = 16.0;
-
     if let Some(cc) = conchars {
-        let (rw, rh) = menu.resolution();
-        // Per-row (label, value) strings. The value strings are short and ASCII so
-        // they round-trip through the conchars atlas cleanly.
-        let res_str = format!("{rw}x{rh}");
-        let mouse_str = format!("{}/{}", menu.mouse_level(), MOUSE_LEVEL_MAX);
-        let vol_str = format!("{}/{}", menu.volume_level(), VOLUME_LEVEL_MAX);
-        let rows: [(&str, &str); OPTIONS_ITEMS] = [
-            ("Screen size", res_str.as_str()),
-            ("Mouse speed", mouse_str.as_str()),
-            ("Volume", vol_str.as_str()),
+        // The labels.
+        for (i, label) in OPTIONS_LABELS.iter().enumerate() {
+            let ry = OPTIONS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
+            draw_string_scaled(image, cc, OPTIONS_LABEL_X, ry, label, scale, ox, oy, palette);
+        }
+
+        // The analog widgets (M_DrawSlider) on the slider rows, each with its
+        // cvar's [0,1] fraction.
+        let slider_row = |row: usize| OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
+        // Screen size: the preset's fraction across RESOLUTION_PRESETS (the id
+        // engine uses (viewsize-30)/90; here we map the preset index instead).
+        let res_frac = if RESOLUTION_PRESETS.len() > 1 {
+            menu_res_fraction(menu)
+        } else {
+            0.0
+        };
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SCREENSIZE), res_frac, scale, ox, oy, palette);
+        // Brightness: r = (1 - gamma)/0.5.
+        let bright_frac = (1.0 - menu.gamma()) / (GAMMA_MAX - GAMMA_MIN);
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_BRIGHTNESS), bright_frac, scale, ox, oy, palette);
+        // Mouse Speed: r = (sensitivity - 1)/10.
+        let mouse_frac = (menu.sensitivity() - SENS_MIN) / (SENS_MAX - SENS_MIN);
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_MOUSESPEED), mouse_frac, scale, ox, oy, palette);
+        // CD Music Volume: r = bgmvolume.
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_CDVOLUME), menu.bgm_volume(), scale, ox, oy, palette);
+        // Sound Volume: r = volume.
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SNDVOLUME), menu.volume(), scale, ox, oy, palette);
+
+        // The checkbox rows (M_DrawCheckbox -> "on"/"off").
+        let checks = [
+            (ROW_ALWAYSRUN, menu.always_run()),
+            (ROW_INVERTMOUSE, menu.invert_mouse()),
+            (ROW_LOOKSPRING, menu.lookspring()),
+            (ROW_LOOKSTRAFE, menu.lookstrafe()),
         ];
-        for (i, (label, value)) in rows.iter().enumerate() {
-            let ry = ROW_Y0 + i as f32 * ROW_STEP;
-            draw_string_scaled(image, cc, ROW_X_LABEL, ry, label, scale, ox, oy, palette);
-            draw_string_scaled(image, cc, ROW_X_VALUE, ry, value, scale, ox, oy, palette);
+        for (row, on) in checks {
+            let ry = OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
+            draw_string_scaled(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy, palette);
+        }
+
+        // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
+        let cy = OPTIONS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
+        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
+        draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_char, scale, ox, oy, palette);
+    }
+}
+
+/// The Screen-size slider's [0,1] fraction: the current preset index divided by
+/// the last index (so the first preset is 0.0 and the last is 1.0). This stands in
+/// for id's `(scr_viewsize - 30)/90`, since the row drives the render resolution.
+fn menu_res_fraction(menu: &Menu) -> f32 {
+    let last = (RESOLUTION_PRESETS.len() - 1).max(1) as f32;
+    let idx = RESOLUTION_PRESETS
+        .iter()
+        .position(|&p| p == menu.resolution())
+        .unwrap_or(0) as f32;
+    idx / last
+}
+
+/// Draw the Help/Ordering screen (`M_Help_Draw`): blit the current page pic
+/// (`gfx/help{page}.lmp`) full-screen at virtual (0,0). A missing page pic draws
+/// nothing (graceful degrade); no panic.
+fn draw_help_screen(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if let Some(p) = pics.help.get(menu.help_page()).and_then(|p| p.as_ref()) {
+        blit_qpic_at(image, p, 0.0, 0.0, scale, ox, oy, palette);
+    }
+}
+
+/// Draw the Quit confirmation prompt (`M_Quit_Draw`, non-Win32 path). The real
+/// engine draws `M_DrawTextBox(56,76,24,4)` with one of eight random taunts; here
+/// we draw a faithful-enough centered prompt — a dark box plus a plain
+/// "Are you sure you want to quit? (Y/N)" using conchars — so it works without the
+/// box pics or the message table. A missing `conchars` still paints the box.
+fn draw_quit_screen(
+    image: &mut Image,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    // A dark box behind the prompt (stand-in for M_DrawTextBox). Virtual box
+    // 56,76 24x4 -> roughly x[56..264], y[76..116] in 320x200 space.
+    const BOX_X0: f32 = 56.0;
+    const BOX_Y0: f32 = 76.0;
+    const BOX_W: f32 = 208.0;
+    const BOX_H: f32 = 40.0;
+    let x0 = (ox + BOX_X0 * scale).floor() as i32;
+    let y0 = (oy + BOX_Y0 * scale).floor() as i32;
+    let x1 = (ox + (BOX_X0 + BOX_W) * scale).ceil() as i32;
+    let y1 = (oy + (BOX_Y0 + BOX_H) * scale).ceil() as i32;
+    for py in y0..y1 {
+        for px in x0..x1 {
+            image.put(px, py, [0, 0, 0]);
         }
     }
 
-    // The animated cursor to the left of the highlighted row (same dot art the
-    // other screens use), vertically tracking the row spacing above.
-    if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
-        let cy = ROW_Y0 + menu.cursor as f32 * ROW_STEP;
-        blit_qpic_at(image, dot, 48.0, cy, scale, ox, oy, palette);
+    if let Some(cc) = conchars {
+        // Two centered lines, like the C's four-line quitMessage box.
+        let line1 = "Are you sure you want";
+        let line2 = "to quit?  (Y / N)";
+        let cx1 = (MENU_VIRT_W - line1.len() as f32 * 8.0) * 0.5;
+        let cx2 = (MENU_VIRT_W - line2.len() as f32 * 8.0) * 0.5;
+        draw_string_scaled(image, cc, cx1, 88.0, line1, scale, ox, oy, palette);
+        draw_string_scaled(image, cc, cx2, 100.0, line2, scale, ox, oy, palette);
     }
 }
 
@@ -9670,23 +10183,41 @@ mod tests {
         // Cancel on a hidden menu is a no-op.
         assert_eq!(m.cancel(), MenuAction::None);
 
-        // Quit (item 4 on Main) closes the menu.
+        // Quit (item 4 on Main) raises the confirm prompt (does NOT close yet).
         m.open();
         m.cursor = 4;
-        assert_eq!(m.select(), MenuAction::Closed);
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Quit, "Quit raises the confirm prompt");
+        assert!(m.visible);
+        // Escape ("No") backs out to the screen the prompt rose from (Main here).
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Main);
+        assert!(m.visible);
+        // Re-raise it and answer "Yes" via select (Enter): closes the menu.
+        m.cursor = 4;
+        m.select();
+        assert_eq!(m.screen(), MenuScreen::Quit);
+        assert_eq!(m.select(), MenuAction::Closed, "Enter on the Quit prompt quits");
         assert!(!m.visible);
 
-        // Unimplemented Main items (Multiplayer item 1, Help item 3) do nothing.
+        // Unimplemented Main item Multiplayer (item 1) does nothing.
         m.open();
-        for c in [1usize, 3] {
-            m.cursor = c;
-            assert_eq!(m.select(), MenuAction::None);
-            assert_eq!(m.screen(), MenuScreen::Main, "item {c} must not change screen");
-            assert!(m.visible);
-        }
+        m.cursor = 1;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Main, "Multiplayer must not change screen");
+        assert!(m.visible);
 
-        // Main item 2 (Options) now switches to the Options screen (it returns
-        // None like the SinglePlayer transition, but changes the screen).
+        // Help (item 3) now opens the Help screen.
+        m.cursor = 3;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Help, "item 3 enters Help");
+        assert_eq!(m.help_page(), 0, "Help opens on page 0");
+        assert!(m.visible);
+        // Escape backs out of Help to Main.
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Main);
+
+        // Main item 2 (Options) switches to the Options screen.
         m.open();
         m.cursor = 2;
         assert_eq!(m.select(), MenuAction::None);
@@ -9816,14 +10347,19 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Options);
         assert_eq!(m.cursor(), 0, "entering Options resets the cursor to the top row");
         assert!(m.visible);
-        // Up/down move between the 3 option rows (wrapping mod 3).
-        for expect in [1, 2, 0] {
+        // Up wraps from row 0 to the last row (12), down wraps 12 -> 0: the cursor
+        // covers all OPTIONS_ITEMS (13) rows.
+        m.move_cursor(-1);
+        assert_eq!(m.cursor(), OPTIONS_ITEMS - 1, "up from row 0 wraps to the last row");
+        m.move_cursor(1);
+        assert_eq!(m.cursor(), 0, "down from the last row wraps to 0");
+        // Walk down through every row once.
+        for expect in 1..OPTIONS_ITEMS {
             m.move_cursor(1);
             assert_eq!(m.cursor(), expect);
         }
-        // Enter on an Options row is a no-op (rows are adjusted with left/right).
-        assert_eq!(m.select(), MenuAction::None);
-        assert_eq!(m.screen(), MenuScreen::Options);
+        m.move_cursor(1);
+        assert_eq!(m.cursor(), 0, "past the last row wraps to 0");
         // Escape backs out of Options to Main (still visible).
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
@@ -9835,7 +10371,8 @@ mod tests {
         let mut m = Menu::new();
         m.open();
         m.cursor = 2;
-        m.select(); // -> Options, cursor row 0 (Screen size)
+        m.select(); // -> Options
+        m.cursor = ROW_SCREENSIZE; // the Screen size row (3) holds the resolution.
         assert_eq!(m.screen(), MenuScreen::Options);
         // Default is the fast 320x200 (preset index 0).
         assert_eq!(m.resolution(), (320, 200));
@@ -9867,41 +10404,34 @@ mod tests {
         m.cursor = 2;
         m.select(); // -> Options
 
-        // Row 1: Mouse speed. Default level 3 -> sensitivity 1.0.
-        m.cursor = 1;
-        assert_eq!(m.mouse_level(), 3);
+        // Mouse Speed row: default sensitivity 3 -> 1.0x multiplier.
+        m.cursor = ROW_MOUSESPEED;
+        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6);
         assert!((m.mouse_sensitivity() - 1.0).abs() < 1e-6, "default mouse is 1.0x");
-        // Decreasing clamps at the minimum (1), never below — and the Screen-size
+        // Decreasing clamps at SENS_MIN (1), never below — and the Screen-size
         // change flag is false for non-resolution rows.
-        for _ in 0..20 {
+        for _ in 0..40 {
             assert!(!m.adjust(-1), "mouse-row adjust never reports a resolution change");
         }
-        assert_eq!(m.mouse_level(), MOUSE_LEVEL_MIN);
-        assert_eq!(m.mouse_level(), 1);
-        // Increasing clamps at the maximum (10).
+        assert!((m.sensitivity() - SENS_MIN).abs() < 1e-6);
+        // Increasing clamps at SENS_MAX (11).
+        for _ in 0..60 {
+            m.adjust(1);
+        }
+        assert!((m.sensitivity() - SENS_MAX).abs() < 1e-6);
+        assert!(m.mouse_sensitivity() > 1.0, "max sensitivity is more than default");
+
+        // Sound Volume row: default 0.7.
+        m.cursor = ROW_SNDVOLUME;
+        assert!((m.volume() - VOLUME_DEFAULT).abs() < 1e-6, "default volume is 0.7");
+        for _ in 0..40 {
+            m.adjust(-1);
+        }
+        assert!((m.volume() - VOLUME_MIN).abs() < 1e-6, "min volume is silent");
         for _ in 0..40 {
             m.adjust(1);
         }
-        assert_eq!(m.mouse_level(), MOUSE_LEVEL_MAX);
-        assert_eq!(m.mouse_level(), 10);
-        assert!(m.mouse_sensitivity() > 1.0, "max level is more sensitive than default");
-
-        // Row 2: Volume. Default level 7 -> gain 0.7.
-        m.cursor = 2;
-        assert_eq!(m.volume_level(), 7);
-        assert!((m.volume() - 0.7).abs() < 1e-6, "default volume is 0.7");
-        for _ in 0..20 {
-            m.adjust(-1);
-        }
-        assert_eq!(m.volume_level(), VOLUME_LEVEL_MIN);
-        assert_eq!(m.volume_level(), 0);
-        assert_eq!(m.volume(), 0.0, "min volume is silent");
-        for _ in 0..20 {
-            m.adjust(1);
-        }
-        assert_eq!(m.volume_level(), VOLUME_LEVEL_MAX);
-        assert_eq!(m.volume_level(), 10);
-        assert_eq!(m.volume(), 1.0, "max volume is full gain");
+        assert!((m.volume() - VOLUME_MAX).abs() < 1e-6, "max volume is full gain");
     }
 
     #[test]
@@ -9923,16 +10453,10 @@ mod tests {
         m.select(); // -> Options
         assert_eq!(m.screen(), MenuScreen::Options);
 
-        // A present p_option title pic + the cursor dots so both paint. The dot
-        // is kept narrow (12px) so it ends at x=48+12=60, clear of the label at
-        // x=64 — that way the label/value pixel checks below aren't masked by it.
-        let mut menudot: [Option<crate::wad::Qpic>; 6] = Default::default();
-        for slot in menudot.iter_mut() {
-            *slot = Some(solid_pic(12, 12, 7));
-        }
+        // Only the title pic is present (the cursor is a conchars glyph now, drawn
+        // at x=200, not a menudot).
         let pics = MenuPics {
             p_option: Some(solid_pic(120, 24, 5)),
-            menudot,
             ..Default::default()
         };
 
@@ -9946,12 +10470,19 @@ mod tests {
         // (100, 4) with a 120-wide pic centered ((320-120)/2 = 100).
         let title_idx = 4 * img.w + 100;
         assert_eq!(img.rgb[title_idx], pal[5], "the OPTIONS title must paint at the top");
-        // The cursor (index 7) sits at virtual (48, 32) on the top row.
-        let cursor_idx = 32 * img.w + 48;
-        assert_eq!(img.rgb[cursor_idx], pal[7], "the cursor must paint on the top row");
-        // A label glyph (index 3) paints somewhere on the first row at x>=64.
-        let label_idx = 32 * img.w + 64;
-        assert_eq!(img.rgb[label_idx], pal[3], "the 'Screen size' label must paint");
+        // The flashing cursor (conchars glyph 12/13, all-lit in this atlas -> index
+        // 3) sits at virtual (200, 32) on the top row.
+        let cursor_idx = 32 * img.w + 200;
+        assert_eq!(img.rgb[cursor_idx], pal[3], "the cursor glyph must paint at x=200 on the top row");
+        // A label glyph (index 3) paints on the first row at the label column x=16
+        // (the "Customize controls" row is right-justified, so its first non-space
+        // glyph lands a few cells in; check at x=48 which is inside the text).
+        let label_idx = 32 * img.w + 48;
+        assert_eq!(img.rgb[label_idx], pal[3], "the first Options label must paint");
+        // A slider on the Screen-size row (row 3, y=32+3*8=56): glyphs at x>=212
+        // (the left cap is at 220-8=212). Check the left cap pixel.
+        let slider_idx = 56 * img.w + 212;
+        assert_eq!(img.rgb[slider_idx], pal[3], "the Screen-size slider must paint at y=56");
 
         // The SAME screen also renders correctly at a LARGER framebuffer (640x400,
         // scale 2): it must not panic and must draw the title + cursor scaled.
@@ -9959,15 +10490,285 @@ mod tests {
         let big_before = big.rgb.clone();
         draw_menu(&mut big, &m, &pics, Some(&conchars), 0.0, &pal);
         assert_ne!(big.rgb, big_before, "the Options screen draws at 640x400 too");
-        // At scale 2 the cursor's virtual (48,32) maps to pixel (96,64).
-        let big_cursor_idx = 64 * big.w + 96;
-        assert_eq!(big.rgb[big_cursor_idx], pal[7], "cursor scales to (96,64) at 640x400");
+        // At scale 2 the cursor's virtual (200,32) maps to pixel (400,64).
+        let big_cursor_idx = 64 * big.w + 400;
+        assert_eq!(big.rgb[big_cursor_idx], pal[3], "cursor scales to (400,64) at 640x400");
 
-        // Missing conchars leaves rows blank but still draws title + cursor; no panic.
+        // Missing conchars leaves labels/widgets/cursor blank but still draws the
+        // title; no panic.
         let mut img2 = Image::new(320, 200, bg);
         draw_menu(&mut img2, &m, &pics, None, 0.0, &pal);
         assert_eq!(img2.rgb[title_idx], pal[5], "title still draws without conchars");
-        assert_eq!(img2.rgb[cursor_idx], pal[7], "cursor still draws without conchars");
+        assert_eq!(img2.rgb[cursor_idx], bg, "cursor needs conchars (blank without it)");
+    }
+
+    // -- new Options widgets / Help / Quit pure helpers ----------------------
+
+    #[test]
+    fn slider_knob_offset_maps_fraction_to_position() {
+        // The knob travels from 0 (fraction 0) to (SLIDER_RANGE-1)*8 (fraction 1).
+        let span = (SLIDER_RANGE - 1) as f32 * 8.0; // 9*8 = 72.
+        assert_eq!(slider_knob_offset(0.0), 0.0, "fraction 0 -> left of the trough");
+        assert_eq!(slider_knob_offset(1.0), span, "fraction 1 -> right end of the segments");
+        assert!((slider_knob_offset(0.5) - span * 0.5).abs() < 1e-6, "midpoint is halfway");
+        // Out-of-range fractions clamp to [0,1]; non-finite is treated as 0.
+        assert_eq!(slider_knob_offset(-3.0), 0.0, "below 0 clamps to the left");
+        assert_eq!(slider_knob_offset(7.0), span, "above 1 clamps to the right");
+        assert_eq!(slider_knob_offset(f32::NAN), 0.0, "NaN is treated as 0");
+        assert_eq!(slider_knob_offset(f32::INFINITY), 0.0, "infinity is treated as 0");
+        // Monotone increasing across the range.
+        let mut prev = -1.0;
+        for i in 0..=10 {
+            let v = slider_knob_offset(i as f32 / 10.0);
+            assert!(v >= prev, "knob position must be non-decreasing in the fraction");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn checkbox_text_is_on_or_off() {
+        assert_eq!(checkbox_text(true), "on");
+        assert_eq!(checkbox_text(false), "off");
+    }
+
+    #[test]
+    fn help_page_wrap_clamps_into_range() {
+        // In-range stays put.
+        for p in 0..NUM_HELP_PAGES {
+            assert_eq!(help_page_wrap(p as i32), p);
+        }
+        // Past the last page wraps to 0; below 0 wraps to the last page.
+        assert_eq!(help_page_wrap(NUM_HELP_PAGES as i32), 0, "one past the end wraps to 0");
+        assert_eq!(help_page_wrap(-1), NUM_HELP_PAGES - 1, "below 0 wraps to the last page");
+        // Large magnitudes wrap modulo the page count, never panic / out-of-range.
+        assert_eq!(help_page_wrap(13), (13 % NUM_HELP_PAGES as i32) as usize);
+        assert!(help_page_wrap(i32::MAX) < NUM_HELP_PAGES);
+        assert!(help_page_wrap(i32::MIN) < NUM_HELP_PAGES);
+    }
+
+    #[test]
+    fn options_cursor_wraps_over_all_thirteen_rows() {
+        // The cursor must visit every one of the 13 OPTIONS_ITEMS rows and wrap.
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        assert_eq!(MenuScreen::Options.item_count(), 13);
+        assert_eq!(m.cursor(), 0);
+        let mut seen = [false; OPTIONS_ITEMS];
+        for _ in 0..OPTIONS_ITEMS {
+            seen[m.cursor()] = true;
+            m.move_cursor(1);
+        }
+        assert!(seen.iter().all(|&v| v), "every Options row must be reachable");
+        assert_eq!(m.cursor(), 0, "a full lap returns to row 0");
+        // A big positive delta wraps modulo 13.
+        m.cursor = 0;
+        m.move_cursor(40); // 40 % 13 = 1
+        assert_eq!(m.cursor(), 1);
+    }
+
+    #[test]
+    fn options_sliders_and_checkboxes_adjust_per_row() {
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+
+        // Brightness (gamma) row: matching the C `v_gamma -= dir*0.05`, RIGHT
+        // brightens (gamma DOWN toward 0.5), LEFT dims (gamma UP toward 1.0).
+        m.cursor = ROW_BRIGHTNESS;
+        assert!((m.gamma() - GAMMA_DEFAULT).abs() < 1e-6);
+        for _ in 0..40 {
+            m.adjust(1);
+        }
+        assert!((m.gamma() - GAMMA_MIN).abs() < 1e-6, "right clamps gamma at 0.5 (brightest)");
+        for _ in 0..40 {
+            m.adjust(-1);
+        }
+        assert!((m.gamma() - GAMMA_MAX).abs() < 1e-6, "left clamps gamma at 1.0 (dimmest)");
+
+        // CD Music Volume row: 0..=1.
+        m.cursor = ROW_CDVOLUME;
+        for _ in 0..40 {
+            m.adjust(-1);
+        }
+        assert!((m.bgm_volume() - BGM_MIN).abs() < 1e-6);
+        for _ in 0..40 {
+            m.adjust(1);
+        }
+        assert!((m.bgm_volume() - BGM_MAX).abs() < 1e-6);
+
+        // Checkboxes toggle regardless of direction (matches the C).
+        for (row, getter) in [
+            (ROW_ALWAYSRUN, Menu::always_run as fn(&Menu) -> bool),
+            (ROW_INVERTMOUSE, Menu::invert_mouse),
+            (ROW_LOOKSPRING, Menu::lookspring),
+            (ROW_LOOKSTRAFE, Menu::lookstrafe),
+        ] {
+            m.cursor = row;
+            assert!(!getter(&m), "checkbox row {row} starts off");
+            assert!(!m.adjust(1), "a checkbox never reports a resolution change");
+            assert!(getter(&m), "right toggles it on");
+            m.adjust(-1);
+            assert!(!getter(&m), "left toggles it back off");
+        }
+    }
+
+    #[test]
+    fn options_enter_actions_console_defaults_and_stubs() {
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+
+        // Go to console: closes the menu, returns OpenConsole.
+        m.cursor = ROW_CONSOLE;
+        assert_eq!(m.select(), MenuAction::OpenConsole);
+        assert!(!m.visible, "Go to console closes the menu");
+
+        // Reset to defaults: from non-default values, Enter restores them.
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        m.cursor = ROW_MOUSESPEED;
+        m.adjust(1);
+        m.adjust(1);
+        m.cursor = ROW_ALWAYSRUN;
+        m.adjust(1);
+        assert!(m.sensitivity() != SENS_DEFAULT && m.always_run());
+        m.cursor = ROW_DEFAULTS;
+        assert_eq!(m.select(), MenuAction::ResetDefaults);
+        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "defaults restored");
+        assert!(!m.always_run(), "checkboxes reset to off");
+
+        // Customize controls / Video Options: stubs that don't change screen.
+        for row in [ROW_CONTROLS, ROW_VIDEO] {
+            m.cursor = row;
+            assert_eq!(m.select(), MenuAction::None);
+            assert_eq!(m.screen(), MenuScreen::Options, "stub row {row} stays on Options");
+        }
+
+        // Enter on an analog row nudges it right (the C falls through to
+        // M_AdjustSliders(1)).
+        m.cursor = ROW_SNDVOLUME;
+        let before = m.volume();
+        m.select();
+        assert!(m.volume() > before, "Enter on Sound Volume nudges it up");
+    }
+
+    #[test]
+    fn help_screen_pages_and_backs_out() {
+        let mut m = Menu::new();
+        m.open();
+        // Main > Help.
+        m.cursor = 3;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Help);
+        assert_eq!(m.help_page(), 0);
+        // Right/down advance the page, wrapping at NUM_HELP_PAGES.
+        for expect in 1..NUM_HELP_PAGES {
+            m.page(1);
+            assert_eq!(m.help_page(), expect);
+        }
+        m.page(1);
+        assert_eq!(m.help_page(), 0, "past the last page wraps to 0");
+        // Left/down go back, wrapping below 0.
+        m.page(-1);
+        assert_eq!(m.help_page(), NUM_HELP_PAGES - 1, "below 0 wraps to the last page");
+        // Up/down on the Help screen also page (M_Help_Key maps them).
+        m.help_page = 0;
+        m.move_cursor(1);
+        assert_eq!(m.help_page(), 1, "down pages forward on Help");
+        m.move_cursor(-1);
+        assert_eq!(m.help_page(), 0, "up pages back on Help");
+        // page() is a no-op off the Help screen.
+        m.cancel(); // -> Main
+        assert_eq!(m.screen(), MenuScreen::Main);
+        m.page(1);
+        assert_eq!(m.help_page(), 0, "page() does nothing off the Help screen");
+    }
+
+    #[test]
+    fn quit_confirm_yes_no_flow() {
+        let mut m = Menu::new();
+        m.open();
+        // Raise from Main via select.
+        m.cursor = 4;
+        m.select();
+        assert_eq!(m.screen(), MenuScreen::Quit);
+        // No (escape) restores Main.
+        assert_eq!(m.quit_no(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Main);
+        assert!(m.visible);
+        // Raise again, Yes closes the menu.
+        m.cursor = 4;
+        m.select();
+        assert_eq!(m.quit_yes(), MenuAction::Closed);
+        assert!(!m.visible);
+
+        // The prompt remembers a NON-Main origin (open_quit from Options -> No
+        // restores Options).
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        m.open_quit();
+        assert_eq!(m.screen(), MenuScreen::Quit);
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Options, "No restores the prompt's origin screen");
+
+        // quit_yes / quit_no are no-ops off the Quit screen.
+        assert_eq!(m.quit_yes(), MenuAction::None);
+        assert_eq!(m.quit_no(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Options, "no-op leaves the screen unchanged");
+    }
+
+    #[test]
+    fn draw_help_and_quit_screens_without_panic() {
+        let pal = ramp_palette();
+        let mut data = vec![3u8; 128 * 128];
+        for y in 0..8 {
+            for x in 0..8 {
+                data[y * 128 + x] = 0;
+            }
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let bg = [9u8, 9, 9];
+
+        // Help: a present page pic (index 6) at (0,0) must paint the top-left.
+        let mut help: [Option<crate::wad::Qpic>; NUM_HELP_PAGES] = Default::default();
+        help[2] = Some(solid_pic(320, 200, 6));
+        let pics = MenuPics { help, ..Default::default() };
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 3;
+        m.select(); // -> Help, page 0
+        m.help_page = 2; // the page that has art
+        let mut img = Image::new(320, 200, bg);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, &pal);
+        assert_eq!(img.rgb[0], pal[6], "the help page pic must paint at (0,0)");
+        // A missing page (page 0 here is None) draws nothing and never panics.
+        m.help_page = 0;
+        let mut img0 = Image::new(320, 200, bg);
+        draw_menu(&mut img0, &m, &pics, Some(&conchars), 0.0, &pal);
+        assert_eq!(img0.rgb[0], bg, "a missing help page leaves the frame untouched");
+
+        // Quit: the confirm box must paint (the dark box + the prompt text).
+        m.open();
+        m.cursor = 4;
+        m.select(); // -> Quit
+        assert_eq!(m.screen(), MenuScreen::Quit);
+        let mut imgq = Image::new(320, 200, bg);
+        let before = imgq.rgb.clone();
+        draw_menu(&mut imgq, &m, &MenuPics::default(), Some(&conchars), 0.0, &pal);
+        assert_ne!(imgq.rgb, before, "the Quit prompt must draw something");
+        // The dark box paints black inside its region (e.g. virtual (60,80)).
+        let box_idx = 80 * imgq.w + 60;
+        assert_eq!(imgq.rgb[box_idx], [0, 0, 0], "the Quit box is a dark fill");
+        // Without conchars the box still paints (no panic).
+        let mut imgq2 = Image::new(320, 200, bg);
+        draw_menu(&mut imgq2, &m, &MenuPics::default(), None, 0.0, &pal);
+        assert_eq!(imgq2.rgb[box_idx], [0, 0, 0], "the Quit box paints without conchars");
     }
 
     // -----------------------------------------------------------------------
