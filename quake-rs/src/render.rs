@@ -1908,9 +1908,19 @@ fn raster_triangle_cached(
     // Local written-pixel tally (overdraw metric), folded into the profiler ONCE at
     // the end so the hot loop never touches a thread-local.
     let mut drawn = 0u64;
+    // min_x/max_x are clamped to 0..w and min_y/max_y to 0..h above, so every row's
+    // [xa, xb] slice of the framebuffer and z-buffer is provably in bounds. Taking a
+    // per-row &mut slice and indexing it with the LOCAL offset `px - xa` lets the
+    // compiler drop the per-pixel bounds checks the old `get_mut(idx)` paid on every
+    // covered pixel — the span-oriented access Quake's D_DrawSpans used. The texel
+    // read still clamps (block extent is independent of the screen rect). Output is
+    // identical: same pixels, same values, same z-writes.
+    let xa = min_x as usize;
+    let xb = max_x as usize;
+    let span = xb - xa + 1;
     for py in min_y..=max_y {
         let sy = py as f32 + 0.5;
-        let sx0 = min_x as f32 + 0.5;
+        let sx0 = xa as f32 + 0.5;
         let mut w0 = edge(v1.x, v1.y, v2.x, v2.y, sx0, sy) * inv_area;
         let mut w1 = edge(v2.x, v2.y, v0.x, v0.y, sx0, sy) * inv_area;
         let mut w2 = edge(v0.x, v0.y, v1.x, v1.y, sx0, sy) * inv_area;
@@ -1919,7 +1929,10 @@ fn raster_triangle_cached(
         let mut inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
         let mut soz = w0 * soz0 + w1 * soz1 + w2 * soz2;
         let mut toz = w0 * toz0 + w1 * toz1 + w2 * toz2;
-        for px in min_x..=max_x {
+        let row = (py as usize) * w;
+        let zrow = &mut zbuf[row + xa..row + xa + span];
+        let crow = &mut image.rgb[row + xa..row + xa + span];
+        for k in 0..span {
             'pixel: {
                 if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                     break 'pixel;
@@ -1928,11 +1941,7 @@ fn raster_triangle_cached(
                     break 'pixel;
                 }
                 let depth = 1.0 / inv_z;
-                let idx = (py as usize) * w + (px as usize);
-                let zc = match zbuf.get_mut(idx) {
-                    Some(z) => z,
-                    None => break 'pixel,
-                };
+                let zc = &mut zrow[k];
                 if depth >= *zc {
                     break 'pixel;
                 }
@@ -1944,10 +1953,8 @@ fn raster_triangle_cached(
                 let by = ((t - texmins[1]) as i64).clamp(0, bh_i - 1) as usize;
                 let pal_idx = block[by * bw + bx] as usize;
                 *zc = depth;
-                if let Some(p) = image.rgb.get_mut(idx) {
-                    *p = palette[pal_idx];
-                    drawn += 1;
-                }
+                crow[k] = palette[pal_idx];
+                drawn += 1;
             }
             w0 += dw0dx;
             w1 += dw1dx;
