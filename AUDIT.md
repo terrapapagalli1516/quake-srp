@@ -20,7 +20,7 @@ essentially clean — most of their "findings" were rejected as faithful.)
 |---|---------|--------|
 | H1 | `aim` (#44) never auto-targets — returned `v_forward` unconditionally | ✅ fixed `1146148` (full PF_aim port) |
 | H2 | `SV_WaterMove` entirely missing — no swimming physics underwater | ✅ fixed `114ba66` |
-| H3 | `SV_WaterJump` (auto climb-out-of-water push) missing | ⬜ TODO |
+| H3 | `SV_WaterJump` (auto climb-out-of-water push) missing | ✅ fixed `1b29e97` |
 | H4 | Animated `+texture` sequencing (`Mod_LoadTextures`) + per-frame `R_TextureAnimation` missing — water/teleporters/switches/lights don't animate | ⬜ TODO (bsp.rs + render.rs) |
 | H5 | ALIAS_GROUP frames never animate — only the first sub-pose is drawn (e.g. flames) | ⬜ TODO (mdl.rs + render.rs) |
 | H6 | `pixelAspect` — frame presented 16:10 square-pixel instead of authored 4:3 | ✅ fixed `9876cb4` (present at 4:3) |
@@ -32,7 +32,7 @@ essentially clean — most of their "findings" were rejected as faithful.)
 | H12 | Inventory bar (ibar) with weapon icons + current-weapon flash missing | ⬜ TODO (render.rs HUD) |
 | H13 | Animated player face (health frames, pain, invuln/quad/invis) missing | ⬜ TODO (render.rs HUD) |
 | H14 | Item, key, and sigil icons missing | ⬜ TODO (render.rs HUD) |
-| H15 | Ammo number always shows shells instead of the active weapon's ammo | ⬜ TODO (render.rs HUD) — **a real bug, not just a gap** |
+| H15 | Ammo number always shows shells instead of the active weapon's ammo | ✅ fixed `10ec5bc` (use currentammo) |
 
 Also fixed this session (was a separate reported bug, not in the audit): the
 **explosive box** is now shootable — external `b_*.bsp` collision bounds (`ef2c7b5`).
