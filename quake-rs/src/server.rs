@@ -1005,6 +1005,62 @@ fn take_particle_bursts() -> Vec<ParticleBurst> {
     PARTICLE_BURSTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
+/// A text message QuakeC asked to show the player: a `centerprint` (drawn
+/// centered for a couple of seconds — level intros, "you need the silver key")
+/// or a `bprint`/`sprint` notify line (item pickups, etc.). Drained each frame by
+/// the front-end, which renders + times them out.
+pub struct GameMessage {
+    /// True for `centerprint` (centered, transient); false for a notify line.
+    pub center: bool,
+    /// The message text (may contain '\n').
+    pub text: String,
+}
+
+thread_local! {
+    // QuakeC print routing the front-end displays. Same single-threaded-VM
+    // rationale as the sound/particle/temp-entity queues above.
+    static MESSAGES: std::cell::RefCell<Vec<GameMessage>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn push_message(center: bool, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    MESSAGES.with(|q| q.borrow_mut().push(GameMessage { center, text }));
+}
+
+fn take_messages() -> Vec<GameMessage> {
+    MESSAGES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// `PF_centerprint` (#73): show the (var-arg concatenated) message centered on
+/// screen for a few seconds. The client arg (index 0) is ignored (single-player);
+/// the message is args from index 1. Also mirrored into the dev `output` log.
+fn bi_centerprint(vm: &mut Vm) -> Result<()> {
+    let s = crate::builtins::var_string(vm, 1);
+    vm.output.push_str(&s);
+    push_message(true, s);
+    Ok(())
+}
+
+/// `PF_bprint` (#23): broadcast print — shown as a notify line.
+fn bi_bprint(vm: &mut Vm) -> Result<()> {
+    let s = crate::builtins::var_string(vm, 0);
+    vm.output.push_str(&s);
+    push_message(false, s);
+    Ok(())
+}
+
+/// `PF_sprint` (#24): single-client print — a notify line (client arg at index 0
+/// ignored; message is args from index 1).
+fn bi_sprint(vm: &mut Vm) -> Result<()> {
+    let s = crate::builtins::var_string(vm, 1);
+    vm.output.push_str(&s);
+    push_message(false, s);
+    Ok(())
+}
+
 /// `PF_particle` (#48): `void(vector org, vector dir, float color, float count)
 /// particle`. The C forwarded these straight to `SV_StartParticle`; here we
 /// queue a [`ParticleBurst`] for the front-end's [`crate::particles::ParticleSystem`]
@@ -1554,6 +1610,9 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 20, bi_precache_model); // precache_model
     put(t, 21, bi_noop); // stuffcmd
     put(t, 22, bi_findradius); // findradius (chain of edicts within rad)
+    put(t, 23, bi_bprint); // bprint -> on-screen notify line
+    put(t, 24, bi_sprint); // sprint -> on-screen notify line
+    put(t, 73, bi_centerprint); // centerprint -> centered transient message
     put(t, 32, bi_walkmove); // walkmove (SV_movestep)
     put(t, 34, bi_droptofloor); // droptofloor
     put(t, 35, bi_lightstyle); // lightstyle (stores sv.lightstyles[style])
@@ -3472,6 +3531,13 @@ impl Server {
     /// on the same thread that drove the frame.
     pub fn drain_sounds(&mut self) -> Vec<SoundEvent> {
         take_sound_events()
+    }
+
+    /// Take and clear the queued on-screen messages (`centerprint`/`sprint`/
+    /// `bprint`) the QuakeC emitted since the last drain. The front-end shows
+    /// centered ones transiently and notify lines fading at the top.
+    pub fn drain_messages(&mut self) -> Vec<GameMessage> {
+        take_messages()
     }
 
     /// Take and clear the queued particle bursts fired by the QuakeC since the

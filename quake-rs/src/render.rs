@@ -2993,6 +2993,7 @@ fn draw_submodel(
     light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
     colormap: Option<&[u8]>,
+    ent_frame: i32,
 ) {
     // The near plane lives in `clip_poly_near` (`NEAR_PLANE`); this pass clips the
     // polygon to it rather than dropping any face that touches it.
@@ -3091,16 +3092,16 @@ fn draw_submodel(
 
         // texinfo (s/t axes) and its miptexture. Animated (`+`-prefixed) textures
         // on a brush submodel cycle by time exactly as the world does
-        // (`R_TextureAnimation`); we pass `ent_frame = 0` (the inline-bmodel
-        // instances carry no frame field here, so the alternate/switch cycle is
-        // not selected — see wiring notes).
+        // (`R_TextureAnimation`); `ent_frame` selects the `+a..+j` alternate
+        // (switch) cycle when the brush entity is activated (e.g. a pressed button
+        // turning green), else the primary `+0..+9` cycle.
         let ti = (face.texinfo as i64)
             .try_into()
             .ok()
             .and_then(|i: usize| bsp.texinfo.get(i));
         let tex = ti.and_then(|t| {
             let mi: usize = t.miptex.try_into().ok()?;
-            let anim_mi = texture_animation(bsp, mi, 0, time);
+            let anim_mi = texture_animation(bsp, mi, ent_frame, time);
             bsp.textures.get(anim_mi).and_then(|o| o.as_ref())
         });
 
@@ -3672,6 +3673,11 @@ fn draw_alias_model(
 pub struct BModelInstance {
     pub model_index: usize,
     pub origin: Vec3,
+    /// The brush entity's `frame` field. func_button / func_door / func_plat set
+    /// `self.frame = 1` when activated; a non-zero frame selects the `+a..+j`
+    /// ALTERNATE animated-texture cycle (`R_TextureAnimation`), so e.g. a pressed
+    /// button shows its lit/green face. 0 = the primary `+0..+9` cycle.
+    pub frame: i32,
 }
 
 /// One *external* brush model placed in the world: an entire standalone BSP
@@ -3755,6 +3761,7 @@ pub fn draw_brush_bsp(
         // Standalone box draw keeps the legacy linear shade (no colormap),
         // byte-identical to before; the colormap is a render_scene_ext concern.
         None,
+        0, // ent_frame: standalone box has no activated/alternate state
     );
 }
 
@@ -4172,7 +4179,7 @@ pub fn render_scene_ext(
     let turb = TurbTable::new();
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights, colormap);
     for bm in bmodels {
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap);
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame);
     }
     // External brush models (Quake's `b_*.bsp` item boxes: explosive box, ammo
     // and health boxes). Each draws its OWN bsp's MODEL-0 faces, translated to the
@@ -4184,7 +4191,7 @@ pub fn render_scene_ext(
     // draws nothing, leaving the image identical to the pre-external behaviour —
     // which is why `render_scene` and every prior caller can pass `&[]`.
     for ext in external {
-        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap);
+        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0);
     }
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, w, h, palette, dlights, light_styles, time);
@@ -4935,7 +4942,7 @@ fn draw_sbar_char(
 /// `lump`/`lump_data` and wrapped with `width = height = 128` — exactly how
 /// `quaketool`'s menu path builds it. A missing/short lump yields `None` and the
 /// ammo-count text simply doesn't draw (graceful degrade).
-fn conchars_pic(wad: &crate::wad::Wad2) -> Option<crate::wad::Qpic> {
+pub fn conchars_pic(wad: &crate::wad::Wad2) -> Option<crate::wad::Qpic> {
     let lump = wad.lump("conchars")?;
     let data = wad.lump_data(lump).ok()?;
     if data.len() < 128 * 128 {
@@ -5587,6 +5594,52 @@ pub fn draw_string(
     palette: &[[u8; 3]; 256],
 ) {
     draw_string_scaled(image, conchars, x as f32, y as f32, text, 1.0, 0.0, 0.0, palette);
+}
+
+/// Draw a `centerprint` message (SCR_DrawCenterString): each '\n'-split line is
+/// centered horizontally in the 320x200 virtual screen and the block is centered
+/// vertically, scaled to the framebuffer (`image.w/320`, the HUD/menu scale).
+/// No-op without conchars or on an empty frame.
+pub fn draw_centerprint(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    palette: &[[u8; 3]; 256],
+    text: &str,
+) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let scale = image.w as f32 / HUD_VIRT_W;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let total_h = (lines.len().max(1) as f32) * 8.0;
+    // Centre vertically, but keep it below the very top (matches Quake biasing
+    // short messages toward the upper-middle rather than dead centre).
+    let mut vy = ((200.0 - total_h) * 0.5).max(16.0);
+    for line in lines {
+        let w = line.len() as f32 * 8.0;
+        let vx = ((HUD_VIRT_W - w) * 0.5).max(0.0);
+        draw_string_scaled(image, conchars, vx, vy, line, scale, 0.0, 0.0, palette);
+        vy += 8.0;
+    }
+}
+
+/// Draw the notify lines (`bprint`/`sprint`, Con_DrawNotify): stacked at the
+/// top-left of the 320x200 virtual screen, scaled to the framebuffer.
+pub fn draw_notify(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    palette: &[[u8; 3]; 256],
+    lines: &[&str],
+) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let scale = image.w as f32 / HUD_VIRT_W;
+    let mut vy = 8.0;
+    for line in lines {
+        draw_string_scaled(image, conchars, 8.0, vy, line, scale, 0.0, 0.0, palette);
+        vy += 8.0;
+    }
 }
 
 /// The scaled/offset core of [`draw_string`]; the menu draw uses this to place
@@ -7505,7 +7558,7 @@ mod tests {
             &pal,
             &[],
             // Place the quad between the camera (-200) and the centre, facing it.
-            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }],
             &[],
             None,
             0.0,
@@ -7556,7 +7609,7 @@ mod tests {
             120,
             &pal,
             &[],
-            &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0] }],
+            &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0 }],
             &[],
             None,
             0.0,
@@ -7633,7 +7686,7 @@ mod tests {
             120,
             &pal,
             &[],
-            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }],
             &[],
             None,
             0.0,
@@ -7650,7 +7703,7 @@ mod tests {
             120,
             &pal,
             &[],
-            &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0] }],
+            &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0 }],
             &[],
             None,
             0.0,
@@ -7690,7 +7743,7 @@ mod tests {
             60,
             &pal,
             &[],
-            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0] }],
+            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }],
             &[],
             None,
             0.0,

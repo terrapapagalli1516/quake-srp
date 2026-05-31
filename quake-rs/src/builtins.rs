@@ -54,7 +54,7 @@ fn pf_debug_noop(_vm: &mut Vm) -> Result<()> {
 
 /// `PF_VarString(first)`: concatenate the string arguments from `first` to
 /// `pr_argc`. The C version uses a fixed 256-byte buffer; we build a `String`.
-fn var_string(vm: &Vm, first: usize) -> String {
+pub(crate) fn var_string(vm: &Vm, first: usize) -> String {
     let mut out = String::new();
     for i in first..vm.argc {
         out.push_str(&vm.arg_string(i));

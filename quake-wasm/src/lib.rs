@@ -83,6 +83,9 @@ struct Walk {
     /// wall lighting (Quake never overbrights). `None` falls back to the linear
     /// brightness multiply. Loaded once at boot.
     colormap: Option<Vec<u8>>,
+    /// The `conchars` font (extracted once from `gfx_wad`) for the on-screen
+    /// message overlay — centerprint (centered) + notify lines (top-left).
+    conchars: Option<Qpic>,
     /// The archive, kept open so sound samples load on demand as events fire.
     pak: Pak,
     /// Parsed alias models keyed by in-pak name (`None` = absent/unparseable).
@@ -129,6 +132,13 @@ struct Walk {
     /// Player health+armour total last frame (NaN until known / after a level
     /// change), used to detect the damage taken this frame for the flash.
     last_total: f32,
+    /// Current centered message (`centerprint`) + the clock time it expires at
+    /// (Quake's `scr_centertime` ~2s); replaced by the next centerprint. Drawn
+    /// centered over the view.
+    centerprint: Option<(String, f32)>,
+    /// The fading top-left notify lines (`bprint`/`sprint`): text + expiry clock
+    /// (Quake's `con_notifytime` ~3s), capped to the last few.
+    notify: Vec<(String, f32)>,
     /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
     /// the animated special surfaces: liquid warp + sky scroll in the renderer.
     clock: f32,
@@ -371,6 +381,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     // The HUD pics live in gfx.wad; parse it once (None if absent/unparseable).
     let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
     let colormap = read("gfx/colormap.lmp");
+    let conchars = gfx_wad.as_ref().and_then(render::conchars_pic);
     let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
@@ -386,6 +397,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         palette,
         gfx_wad,
         colormap,
+        conchars,
         pak,
         model_cache: HashMap::new(),
         bmodel_cache: HashMap::new(),
@@ -403,6 +415,8 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         next_impulse: 0,
         damage_blend: 0.0,
         last_total: f32::NAN,
+        centerprint: None,
+        notify: Vec::new(),
         clock: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
@@ -1776,6 +1790,28 @@ fn step_walk(
     let events = w.server.drain_sounds();
     queue_sounds(&w.pak, &events, w.player);
 
+    // 2a. Drain QuakeC's on-screen messages (centerprint / sprint / bprint) into
+    //     the timed display state, and expire old ones (clock = w.clock).
+    for m in w.server.drain_messages() {
+        if m.center {
+            w.centerprint = Some((m.text, w.clock + 2.0));
+        } else {
+            for line in m.text.split('\n').filter(|l| !l.trim().is_empty()) {
+                w.notify.push((line.to_string(), w.clock + 3.0));
+            }
+            while w.notify.len() > 4 {
+                w.notify.remove(0);
+            }
+        }
+    }
+    if let Some((_, exp)) = &w.centerprint {
+        if w.clock >= *exp {
+            w.centerprint = None;
+        }
+    }
+    let clock = w.clock;
+    w.notify.retain(|(_, exp)| clock < *exp);
+
     // 2b. Realise the particle() bursts the world fired this frame (explosions,
     //     blood, gibs) into the live pool, then age it under gravity and retire
     //     expired particles. Spawn uses the current game clock for absolute
@@ -1901,7 +1937,10 @@ fn step_walk(
         if let Some(num) = m.strip_prefix('*') {
             if let Ok(idx) = num.parse::<usize>() {
                 let origin = w.server.vm.ent_get_vector(ent, "origin");
-                bmodels.push(render::BModelInstance { model_index: idx, origin });
+                // The entity's `frame` selects the alternate (+a..+j) texture cycle
+                // for activated buttons/doors (a pressed button shows its lit face).
+                let frame = w.server.vm.ent_get_float(ent, "frame") as i32;
+                bmodels.push(render::BModelInstance { model_index: idx, origin, frame });
             }
             continue;
         }
@@ -2066,6 +2105,19 @@ fn step_walk(
             time: w.clock,
         };
         render::draw_hud_into(&mut img, &hud);
+    }
+
+    // On-screen messages the QuakeC printed (drained above): the current
+    // centerprint drawn centered, the notify lines stacked top-left. Both time
+    // out via their stored expiry; drawn over the HUD.
+    if let Some(cc) = w.conchars.as_ref() {
+        if let Some((text, _)) = &w.centerprint {
+            render::draw_centerprint(&mut img, cc, &w.palette, text);
+        }
+        if !w.notify.is_empty() {
+            let lines: Vec<&str> = w.notify.iter().map(|(t, _)| t.as_str()).collect();
+            render::draw_notify(&mut img, cc, &w.palette, &lines);
+        }
     }
 
     // The main-menu overlay is drawn by the `step` dispatcher (the menu lives at
