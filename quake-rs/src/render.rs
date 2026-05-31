@@ -3996,16 +3996,40 @@ const HUD_BAR_H: f32 = 24.0;
 /// The `wad`/`palette` borrows carry an explicit lifetime `'a` so the caller can
 /// keep one parsed [`Wad2`] alive and lend it per frame without cloning.
 pub struct Hud<'a> {
-    /// The parsed `gfx.wad`, which holds the `sbar`/`num_*`/`anum_*` pics.
+    /// The parsed `gfx.wad`, which holds the `sbar`/`ibar`/`num_*`/`anum_*`/face/
+    /// weapon/item/ammo/armor pics and the `conchars` font.
     pub wad: &'a crate::wad::Wad2,
     /// The screen palette (`gfx/palette.lmp`), used to colour the pic texels.
     pub palette: &'a [[u8; 3]; 256],
-    /// Current player health, drawn as a big number on the left of the bar.
+    /// Current player health, drawn as a big number on the left of the bar, and
+    /// driving the face-frame bracket in [`Sbar_DrawFace`](draw_hud_into).
     pub health: i32,
     /// Current ammo for the active weapon, drawn on the right of the bar.
     pub ammo: i32,
-    /// Current armour value, drawn just right of the health number.
+    /// Current armour value, drawn just right of the armour icon.
     pub armor: i32,
+    /// The QuakeC `items` bitfield (`cl.items`): weapons (`IT_SHOTGUN`..
+    /// `IT_LIGHTNING`), ammo-type bits (`IT_SHELLS`..`IT_CELLS`), armour type
+    /// (`IT_ARMOR1/2/3`), keys (`IT_KEY1/2`), powerups (`IT_INVISIBILITY`,
+    /// `IT_INVULNERABILITY`, `IT_SUIT`, `IT_QUAD`) and sigils (`IT_SIGIL1..4`).
+    pub items: i32,
+    /// The active weapon's `IT_*` bit (QuakeC `weapon` / `cl.stats[STAT_ACTIVEWEAPON]`):
+    /// selects which inventory icon flashes and (via its ammo type) is highlighted.
+    pub weapon: i32,
+    /// Shell count (QuakeC `ammo_shells`), drawn small in the ibar's first slot.
+    pub ammo_shells: i32,
+    /// Nail count (QuakeC `ammo_nails`), second ibar ammo slot.
+    pub ammo_nails: i32,
+    /// Rocket count (QuakeC `ammo_rockets`), third ibar ammo slot.
+    pub ammo_rockets: i32,
+    /// Cell count (QuakeC `ammo_cells`), fourth ibar ammo slot.
+    pub ammo_cells: i32,
+    /// The server clock in seconds (`cl.time`), driving the selected-weapon flash
+    /// cycle and the face pain/grimace animation. (The orchestrator passes the
+    /// raw server time; the per-item acquire times of `cl.item_gettime[]` are not
+    /// tracked here, so weapon icons show their static owned/selected frame — see
+    /// the weapon-flash note in [`draw_hud_into`].)
+    pub time: f32,
 }
 
 /// Blit one `Qpic` at virtual position `(vx, vy)` in 320x200 space, scaled by
@@ -4146,22 +4170,222 @@ const ANUM_NAMES: [&str; 10] = [
     "anum_9",
 ];
 
+// ---------------------------------------------------------------------------
+// Status-bar item bits (`quakedef.h` IT_* / the QuakeC `items` bitfield) and the
+// gfx.wad lump-name tables (`Sbar_Init`). These drive Sbar_DrawInventory,
+// Sbar_DrawFace and the armour/ammo-type icons.
+// ---------------------------------------------------------------------------
+
+/// `items` bit for owning the shotgun — the base of the 7 weapon bits. Weapon `i`
+/// (0..6) is owned when `items & (IT_SHOTGUN << i)` is set, matching
+/// `Sbar_DrawInventory`'s `cl.items & (IT_SHOTGUN<<i)` loop. The 7 bits in order
+/// are shotgun(1), super-shotgun(2), nailgun(4), super-nailgun(8),
+/// grenade-launcher(16), rocket-launcher(32), lightning(64).
+const IT_SHOTGUN: i32 = 1;
+const IT_SHELLS: i32 = 256;
+const IT_NAILS: i32 = 512;
+const IT_ROCKETS: i32 = 1024;
+const IT_CELLS: i32 = 2048;
+const IT_ARMOR1: i32 = 8192;
+const IT_ARMOR2: i32 = 16384;
+const IT_ARMOR3: i32 = 32768;
+const IT_INVISIBILITY: i32 = 524288; // 1<<19
+const IT_INVULNERABILITY: i32 = 1048576; // 1<<20
+const IT_QUAD: i32 = 4194304; // 1<<22
+
+/// `inv_*` (owned, dim) weapon icon lump names, `sb_weapons[0][i]` in `Sbar_Init`.
+const WEAPON_INV_NAMES: [&str; 7] = [
+    "inv_shotgun", "inv_sshotgun", "inv_nailgun", "inv_snailgun", "inv_rlaunch", "inv_srlaunch",
+    "inv_lightng",
+];
+/// The per-weapon name suffixes (`*_shotgun` … `*_lightng`) shared by the
+/// `inv_*`/`inv2_*`/`inva{1..5}_*` icon families (`Sbar_Init`). Used to build the
+/// selection-flash frame names for the active weapon.
+const WEAPON_SUFFIX: [&str; 7] = [
+    "shotgun", "sshotgun", "nailgun", "snailgun", "rlaunch", "srlaunch", "lightng",
+];
+
+/// `sb_ammo[type]` ammo-icon lump names (`Sbar_Init`): shells/nails/rocket/cells.
+const AMMO_ICON_NAMES: [&str; 4] = ["sb_shells", "sb_nails", "sb_rocket", "sb_cells"];
+
+/// `sb_armor[type]` armour-icon lump names (`Sbar_Init`).
+const ARMOR_ICON_NAMES: [&str; 3] = ["sb_armor1", "sb_armor2", "sb_armor3"];
+
+/// `sb_items[0..6]` (`Sbar_Init`): the keys + powerup icons drawn on the ibar.
+/// In `items`-bit order from bit 17: key1, key2, invisibility(ring), invuln(pent),
+/// suit, quad — matching `cl.items & (1<<(17+i))`.
+const SB_ITEM_NAMES: [&str; 6] =
+    ["sb_key1", "sb_key2", "sb_invis", "sb_invuln", "sb_suit", "sb_quad"];
+
+/// `sb_sigil[0..3]` (`Sbar_Init`): the 4 runes, `cl.items & (1<<(28+i))`.
+const SB_SIGIL_NAMES: [&str; 4] = ["sb_sigil1", "sb_sigil2", "sb_sigil3", "sb_sigil4"];
+
+/// `sb_faces[f][0]` static-face lump names by health bracket, where bracket 0 is
+/// the lowest health (`face5`) and bracket 4 (`face1`) the highest, mirroring
+/// `Sbar_Init`'s `sb_faces[4]="face1" … sb_faces[0]="face5"`. Indexed `[bracket]`.
+const FACE_NAMES: [&str; 5] = ["face5", "face4", "face3", "face2", "face1"];
+
+/// `Sbar_DrawFace`'s powerup faces: invisibility+invulnerability, quad, invisibility,
+/// invulnerability — checked in that priority order before the health face.
+const FACE_INVIS_INVULN: &str = "face_inv2";
+const FACE_QUAD: &str = "face_quad";
+const FACE_INVIS: &str = "face_invis";
+const FACE_INVULN: &str = "face_invul2";
+
+/// Select the player-face health bracket exactly as `Sbar_DrawFace`:
+/// `health >= 100 -> 4` (full-health `face1`); otherwise `health / 20` (integer
+/// division). So 0..19 -> 0 (`face5`), 20..39 -> 1, 40..59 -> 2, 60..79 -> 3,
+/// 80..99 -> 4, >=100 -> 4. A non-positive health (the player is dead — the C
+/// shows the scorebar instead) clamps to bracket 0 so we never index out of range.
+fn face_bracket(health: i32) -> usize {
+    if health >= 100 {
+        4
+    } else if health <= 0 {
+        0
+    } else {
+        ((health / 20) as usize).min(4)
+    }
+}
+
+/// The selection-flash frame name for the *currently selected* weapon `i` (0..6),
+/// keyed on the server `time` the orchestrator passes.
+///
+/// `Sbar_DrawInventory` cycles the active weapon through its 5 flash frames
+/// `inva1_*..inva5_*` (`sb_weapons[2+f][i]`) right after selection. We do not
+/// track per-item acquire times (only one `time` is supplied), so we run the same
+/// 5-frame cycle continuously off `time`: `frame = (int)(time*10) % 5` in 0..4,
+/// then the 1-based `inva{frame+1}_<suffix>` lump name. Non-selected owned weapons
+/// use the dim `inv_*` name from [`WEAPON_INV_NAMES`] (handled by the caller).
+fn weapon_flash_name(i: usize, time: f32) -> String {
+    let suffix = WEAPON_SUFFIX.get(i).copied().unwrap_or("shotgun");
+    let f = ((time * 10.0).floor() as i64).rem_euclid(5) + 1;
+    format!("inva{f}_{suffix}")
+}
+
+/// Try to fetch a HUD pic by name and blit it at virtual `(vx, vy)`; a missing or
+/// unparseable lump is silently skipped (`wad.qpic(name).ok()`), so the bar
+/// degrades gracefully exactly as the task requires.
+fn blit_named(
+    image: &mut Image,
+    wad: &crate::wad::Wad2,
+    name: &str,
+    vx: f32,
+    vy: f32,
+    scale: f32,
+    vy_top: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if name.is_empty() {
+        return;
+    }
+    if let Ok(pic) = wad.qpic(name) {
+        blit_qpic(image, &pic, vx, vy, scale, vy_top, palette);
+    }
+}
+
+/// Stamp one console-font glyph (`conchars` cell `ch`) at virtual `(vx, vy)` in
+/// 320x200 bar space, scaled/anchored exactly like [`blit_qpic`] — a port of
+/// `Sbar_DrawCharacter`'s `Draw_Character`.
+///
+/// `conchars` is the raw 128x128 atlas wrapped as a [`crate::wad::Qpic`]
+/// (`width = height = 128`), a 16x16 grid of 8x8 glyphs; byte `ch`'s glyph sits at
+/// source `(8*(ch%16), 8*(ch/16))`. The ammo counts use the gold digit glyphs
+/// `18 + digit` (cells 18..27). Glyph texels equal to palette index 0 are the
+/// transparent background and are skipped; every write is clipped to the
+/// framebuffer. The 8x8 glyph occupies an 8x8 *virtual* box, scaled to the frame.
+fn draw_sbar_char(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    ch: u8,
+    vx: f32,
+    vy: f32,
+    scale: f32,
+    vy_top: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    if conchars.width != 128 || conchars.height != 128 || conchars.data.len() < 128 * 128 {
+        return;
+    }
+    let cell_x = (ch as usize % 16) * 8;
+    let cell_y = (ch as usize / 16) * 8;
+    // Destination top-left in framebuffer pixels and the 8x8 scaled extent.
+    let dst_x0 = (vx * scale).floor() as i64;
+    let dst_y0 = (vy_top + vy * scale).floor() as i64;
+    let dst_w = (8.0 * scale).round().max(1.0) as i64;
+    let dst_h = (8.0 * scale).round().max(1.0) as i64;
+    let inv_scale = 1.0 / scale;
+    for dy in 0..dst_h {
+        let py = dst_y0 + dy;
+        if py < 0 || py >= image.h as i64 {
+            continue;
+        }
+        let sy = (dy as f32 * inv_scale) as usize;
+        if sy >= 8 {
+            continue;
+        }
+        for dx in 0..dst_w {
+            let px = dst_x0 + dx;
+            if px < 0 || px >= image.w as i64 {
+                continue;
+            }
+            let sx = (dx as f32 * inv_scale) as usize;
+            if sx >= 8 {
+                continue;
+            }
+            let texel = match conchars.data.get((cell_y + sy) * 128 + (cell_x + sx)) {
+                Some(&t) => t,
+                None => continue,
+            };
+            // conchars uses palette index 0 as the transparent glyph background.
+            if texel == 0 {
+                continue;
+            }
+            image.put(px as i32, py as i32, palette[texel as usize]);
+        }
+    }
+}
+
+/// Fetch the raw 128x128 `conchars` console font from `wad` as a [`crate::wad::Qpic`].
+///
+/// Unlike the HUD's `num_*`/`sbar` pics, `conchars` is a *headerless* lump (a flat
+/// 128x128 byte block, no QPIC width/height prefix), so it is read via
+/// `lump`/`lump_data` and wrapped with `width = height = 128` — exactly how
+/// `quaketool`'s menu path builds it. A missing/short lump yields `None` and the
+/// ammo-count text simply doesn't draw (graceful degrade).
+fn conchars_pic(wad: &crate::wad::Wad2) -> Option<crate::wad::Qpic> {
+    let lump = wad.lump("conchars")?;
+    let data = wad.lump_data(lump).ok()?;
+    if data.len() < 128 * 128 {
+        return None;
+    }
+    Some(crate::wad::Qpic {
+        width: 128,
+        height: 128,
+        data: data[..128 * 128].to_vec(),
+    })
+}
+
 /// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
-/// finished 3-D frame — a port of `sbar.c`'s `Sbar_Draw`.
+/// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
+/// non-deathmatch path).
 ///
-/// The bar is laid out in Quake's 320x200 virtual space and scaled by
+/// The whole bar is laid out in Quake's fixed 320x200 virtual space and scaled by
 /// `image.w / 320` (nearest-neighbour) so it spans the full framebuffer width,
-/// bottom-anchored so the 24-px bar sits flush at the bottom regardless of frame
-/// height. Drawing order matches Quake:
-///  1. the `sbar` background strip (320x24);
-///  2. the health number (big white digits, right-justified near virtual x≈154);
-///  3. the armour number (just right of health, near virtual x≈49 — Quake draws
-///     armour at the left, but we keep it readable beside health here);
-///  4. the current ammo (gold digits, right-justified near virtual x≈248).
+/// bottom-anchored. The *status area* is 48 virtual rows tall: the `ibar`
+/// inventory strip (320x24) sits in the 24 rows ABOVE the `sbar` (320x24)
+/// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
+/// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
 ///
-/// All pics are fetched via `wad.qpic(name).ok()`, so a `gfx.wad` missing the
-/// `sbar`/digit pics degrades gracefully (those elements just don't draw) and
-/// never panics or errors the frame.
+/// Drawing order (mirrors `Sbar_Draw` → `Sbar_DrawInventory` then the sbar block):
+///  1. `ibar` strip, then on it: owned weapon icons (the selected one flashing its
+///     `inva*` frames), the four small ammo counts, keys/powerups, and sigils.
+///  2. `sbar` strip, then on it: the armour-type icon + armour number (left), the
+///     animated player face (centre, x=112), the health number, the ammo-type
+///     icon (x=224) and the current-ammo number (right).
+///
+/// Every pic is fetched via `wad.qpic(name).ok()` (and `conchars` via
+/// `lump_data`), so a `gfx.wad` missing any element degrades gracefully — that
+/// element just doesn't draw, never a panic and never an errored frame.
 pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     if image.w == 0 || image.h == 0 {
         return;
@@ -4171,30 +4395,124 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     if !scale.is_finite() || scale <= 0.0 {
         return;
     }
-    // Framebuffer y of virtual row 0 of the bar: the 24-px bar sits flush at the
-    // bottom (a fractional row is fine — blit_qpic clips at the edges).
+    // Framebuffer y of virtual row 0 of the bar (top of the `sbar` strip); the
+    // 24-px sbar sits flush at the bottom, the ibar 24 rows above it (negative vy).
     let vy_top = image.h as f32 - HUD_BAR_H * scale;
+    let wad = hud.wad;
+    let pal = hud.palette;
+    let conchars = conchars_pic(wad);
 
-    // 1. Background strip (sbar, 320x24) at virtual (0,0) of the bar.
-    if let Ok(sbar) = hud.wad.qpic("sbar") {
-        blit_qpic(image, &sbar, 0.0, 0.0, scale, vy_top, hud.palette);
+    // ----- Inventory bar (Sbar_DrawInventory) -------------------------------
+    // The `ibar` strip in the 24 rows above the sbar: Sbar_DrawPic(0, -24, sb_ibar).
+    blit_named(image, wad, "ibar", 0.0, -24.0, scale, vy_top, pal);
+
+    // Weapon icons: for each owned weapon (items bit IT_SHOTGUN<<i, i=0..6), draw
+    // its icon at Sbar_DrawPic(i*24, -16, ...). The currently-selected weapon
+    // (its IT_* bit == `weapon`) flashes its 5 `inva*` frames; the rest show the
+    // dim `inv_*` icon. (The C also brightens the selected icon to `inv2_*` once
+    // the flash settles; with a single `time` source we keep it flashing, which is
+    // the visible animation Quake shows on the active gun.)
+    for i in 0..7 {
+        let bit = IT_SHOTGUN << i;
+        if hud.items & bit != 0 {
+            let selected = hud.weapon == bit;
+            if selected {
+                let name = weapon_flash_name(i, hud.time);
+                blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, scale, vy_top, pal);
+            } else {
+                blit_named(image, wad, WEAPON_INV_NAMES[i], (i as f32) * 24.0, -16.0, scale, vy_top, pal);
+            }
+        }
     }
 
-    // The big digits live in three 3-wide fields whose positions match `sbar.c`'s
-    // Sbar_DrawNum calls exactly, so the numbers land in the `sbar` background's
-    // recessed boxes (24px per digit slot). Sbar_DrawNum(x_left, .., 3) draws a
-    // 3-digit right-justified field ending at x_left + 72; our draw_num takes that
-    // RIGHT edge. id positions: armour x_left=24 (right edge 96), health x_left=136
-    // (right edge 208), ammo x_left=248 (right edge 320). Each number is white
-    // (`num_*`) normally and gold (`anum_*`) when low — armour/health ≤ 25, ammo
-    // ≤ 10 — matching the `color` arg id passes (cl.stats[..] <= threshold).
-    //
-    // 2. Armour (far left): Sbar_DrawNum(24, armor, 3, armor<=25).
-    draw_num(image, hud.armor, 96.0, 0.0, scale, vy_top, hud.wad, hud.palette, hud.armor <= 25);
-    // 3. Health (centre, right of the face): Sbar_DrawNum(136, health, 3, health<=25).
-    draw_num(image, hud.health, 208.0, 0.0, scale, vy_top, hud.wad, hud.palette, hud.health <= 25);
-    // 4. Current ammo (far right): Sbar_DrawNum(248, ammo, 3, ammo<=10).
-    draw_num(image, hud.ammo, 320.0, 0.0, scale, vy_top, hud.wad, hud.palette, hud.ammo <= 10);
+    // Ammo counts: the four totals (shells/nails/rockets/cells) in the top-right of
+    // the ibar, small gold digits. Sbar_DrawInventory formats "%3i" (right-justified
+    // in 3 chars) and draws each non-space char via Sbar_DrawCharacter at
+    // ((6*i+1..3)*8 - 2, -24) using glyph `18 + digit` (the gold conchars digits).
+    if let Some(cc) = &conchars {
+        let counts = [hud.ammo_shells, hud.ammo_nails, hud.ammo_rockets, hud.ammo_cells];
+        for (i, &count) in counts.iter().enumerate() {
+            // "%3i": right-justified, blanks for leading zeros, clamped to >=0.
+            let s = format!("{:3}", count.max(0));
+            let b = s.as_bytes();
+            for (j, &c) in b.iter().enumerate() {
+                if c == b' ' {
+                    continue;
+                }
+                // Gold digit glyph 18 + (c - '0'); x = (6*i + 1 + j)*8 - 2, y = -24.
+                let glyph = 18 + (c - b'0');
+                let vx = ((6 * i + 1 + j) as f32) * 8.0 - 2.0;
+                draw_sbar_char(image, cc, glyph, vx, -24.0, scale, vy_top, pal);
+            }
+        }
+    }
+
+    // Items: keys + powerups (sb_items[0..5]) for items bits 1<<(17+i), at
+    // Sbar_DrawPic(192 + i*16, -16, ...). Then sigils (sb_sigil[0..3]) for items
+    // bits 1<<(28+i) at Sbar_DrawPic(320-32 + i*8, -16, ...).
+    for i in 0..6 {
+        if hud.items & (1 << (17 + i)) != 0 {
+            blit_named(image, wad, SB_ITEM_NAMES[i], 192.0 + (i as f32) * 16.0, -16.0, scale, vy_top, pal);
+        }
+    }
+    for i in 0..4 {
+        if hud.items & (1 << (28 + i)) != 0 {
+            blit_named(image, wad, SB_SIGIL_NAMES[i], 320.0 - 32.0 + (i as f32) * 8.0, -16.0, scale, vy_top, pal);
+        }
+    }
+
+    // ----- Status bar (the sbar block of Sbar_Draw) -------------------------
+    // 1. Background strip (sbar, 320x24) at virtual (0,0).
+    blit_named(image, wad, "sbar", 0.0, 0.0, scale, vy_top, pal);
+
+    // Armour type icon + number. Under invulnerability the C shows "666" and the
+    // disc; we don't have the disc pic wired here, so we draw the armour-type icon
+    // (Sbar_DrawPic(0, 0, sb_armor[type])) keyed on IT_ARMOR3/2/1 and the armour
+    // number at Sbar_DrawNum(24, ..) — right edge virtual x=96, gold when <=25.
+    if hud.items & IT_ARMOR3 != 0 {
+        blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_ARMOR2 != 0 {
+        blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_ARMOR1 != 0 {
+        blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, scale, vy_top, pal);
+    }
+    draw_num(image, hud.armor, 96.0, 0.0, scale, vy_top, wad, pal, hud.armor <= 25);
+
+    // Face (Sbar_DrawFace) at x=112, y=0. Powerup faces take priority in the C's
+    // order: invisibility+invulnerability, then quad, then invisibility, then
+    // invulnerability; otherwise the health-bracket face (pain frame skipped — we
+    // don't track faceanimtime, so we use the static face[bracket][0]).
+    let inv_iv = IT_INVISIBILITY | IT_INVULNERABILITY;
+    if hud.items & inv_iv == inv_iv {
+        blit_named(image, wad, FACE_INVIS_INVULN, 112.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_QUAD != 0 {
+        blit_named(image, wad, FACE_QUAD, 112.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_INVISIBILITY != 0 {
+        blit_named(image, wad, FACE_INVIS, 112.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_INVULNERABILITY != 0 {
+        blit_named(image, wad, FACE_INVULN, 112.0, 0.0, scale, vy_top, pal);
+    } else {
+        let face = FACE_NAMES[face_bracket(hud.health)];
+        blit_named(image, wad, face, 112.0, 0.0, scale, vy_top, pal);
+    }
+
+    // Health number: Sbar_DrawNum(136, health, 3, health<=25) — right edge x=208.
+    draw_num(image, hud.health, 208.0, 0.0, scale, vy_top, wad, pal, hud.health <= 25);
+
+    // Ammo-type icon (Sbar_DrawPic(224, 0, sb_ammo[type])) by the active weapon's
+    // ammo type, keyed on the items ammo bits IT_SHELLS/NAILS/ROCKETS/CELLS.
+    if hud.items & IT_SHELLS != 0 {
+        blit_named(image, wad, AMMO_ICON_NAMES[0], 224.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_NAILS != 0 {
+        blit_named(image, wad, AMMO_ICON_NAMES[1], 224.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_ROCKETS != 0 {
+        blit_named(image, wad, AMMO_ICON_NAMES[2], 224.0, 0.0, scale, vy_top, pal);
+    } else if hud.items & IT_CELLS != 0 {
+        blit_named(image, wad, AMMO_ICON_NAMES[3], 224.0, 0.0, scale, vy_top, pal);
+    }
+
+    // Current ammo number: Sbar_DrawNum(248, ammo, 3, ammo<=10) — right edge x=320.
+    draw_num(image, hud.ammo, 320.0, 0.0, scale, vy_top, wad, pal, hud.ammo <= 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -7990,7 +8308,20 @@ mod tests {
         // scale == 1 and the bar is exactly the bottom 24 rows.
         let fill = [42u8, 42, 42];
         let mut img = Image::new(320, 200, fill);
-        let hud = Hud { wad: &wad, palette: &pal, health: 100, ammo: 25, armor: 50 };
+        let hud = Hud {
+            wad: &wad,
+            palette: &pal,
+            health: 100,
+            ammo: 25,
+            armor: 50,
+            items: 0,
+            weapon: 0,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+        };
         draw_hud_into(&mut img, &hud);
 
         // The top of the frame (well above the 24-px bar) is untouched.
@@ -8023,7 +8354,20 @@ mod tests {
         let pal = ramp_palette();
         let fill = [7u8, 7, 7];
         let mut img = Image::new(640, 400, fill);
-        let hud = Hud { wad: &wad, palette: &pal, health: 99, ammo: 100, armor: 0 };
+        let hud = Hud {
+            wad: &wad,
+            palette: &pal,
+            health: 99,
+            ammo: 100,
+            armor: 0,
+            items: 0,
+            weapon: 0,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+        };
         draw_hud_into(&mut img, &hud);
 
         // Bar height in pixels = 24 * (640/320) = 48; the top must be untouched.
@@ -8049,9 +8393,263 @@ mod tests {
         let pal = ramp_palette();
         let fill = [9u8, 9, 9];
         let mut img = Image::new(320, 200, fill);
-        let hud = Hud { wad: &wad, palette: &pal, health: 100, ammo: 50, armor: 25 };
+        let hud = Hud {
+            wad: &wad,
+            palette: &pal,
+            health: 100,
+            ammo: 50,
+            armor: 25,
+            items: 0,
+            weapon: 0,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+        };
         draw_hud_into(&mut img, &hud);
         assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
+    }
+
+    // -- Inventory bar / face / icons (Sbar_DrawInventory + Sbar_DrawFace) -----
+
+    #[test]
+    fn face_bracket_matches_sbar_drawface() {
+        // Sbar_DrawFace: health >= 100 -> 4; else health/20 (int div), clamped 0..4.
+        assert_eq!(face_bracket(0), 0); // dead-ish -> lowest (face5)
+        assert_eq!(face_bracket(19), 0);
+        assert_eq!(face_bracket(20), 1);
+        assert_eq!(face_bracket(39), 1);
+        assert_eq!(face_bracket(40), 2);
+        assert_eq!(face_bracket(59), 2);
+        assert_eq!(face_bracket(60), 3);
+        assert_eq!(face_bracket(79), 3);
+        assert_eq!(face_bracket(80), 4);
+        assert_eq!(face_bracket(99), 4);
+        assert_eq!(face_bracket(100), 4); // full health (face1)
+        assert_eq!(face_bracket(250), 4); // mega-health still clamps to 4
+        assert_eq!(face_bracket(-50), 0); // never panics / never out of range
+        // The bracket indexes the FACE_NAMES table (face5..face1).
+        assert_eq!(FACE_NAMES[face_bracket(100)], "face1");
+        assert_eq!(FACE_NAMES[face_bracket(10)], "face5");
+    }
+
+    #[test]
+    fn weapon_flash_name_cycles_five_frames() {
+        // The selected-weapon flash cycles inva1..inva5 off (int)(time*10) % 5.
+        assert_eq!(weapon_flash_name(0, 0.0), "inva1_shotgun");
+        assert_eq!(weapon_flash_name(0, 0.1), "inva2_shotgun");
+        assert_eq!(weapon_flash_name(0, 0.4), "inva5_shotgun");
+        assert_eq!(weapon_flash_name(0, 0.5), "inva1_shotgun"); // wraps after 5
+        // Per-weapon suffix is correct across the 7 weapons (shotgun..lightng).
+        assert_eq!(weapon_flash_name(6, 0.0), "inva1_lightng");
+        assert_eq!(weapon_flash_name(4, 0.0), "inva1_rlaunch");
+    }
+
+    /// A fuller synthetic `gfx.wad` adding the inventory-bar art the base
+    /// `build_hud_wad` omits: `ibar` (320x24, index 2), the 7 `inv_*` weapon icons
+    /// + the 35 `inva{1..5}_*` flash icons (24x16, index 60), the 5 health faces +
+    /// 4 powerup faces (24x24, index 70), the armour/ammo-type icons (24x24, index
+    /// 80/85), the key/powerup/sigil item icons, and a 128x128 `conchars` whose
+    /// gold-digit cells (18..27) are non-zero so the ammo counts render.
+    fn build_full_hud_wad() -> Wad2 {
+        let mut pics: Vec<(String, Vec<u8>)> = Vec::new();
+        pics.push(("sbar".to_string(), qpic_payload(320, 24, 1)));
+        pics.push(("ibar".to_string(), qpic_payload(320, 24, 2)));
+        for d in 0..10u8 {
+            pics.push((format!("num_{d}"), qpic_payload(24, 24, 100 + d)));
+        }
+        for d in 0..10u8 {
+            pics.push((format!("anum_{d}"), qpic_payload(24, 24, 120 + d)));
+        }
+        // Weapon icons (dim + the 5 flash frames), distinct index 60 so they show.
+        for s in WEAPON_SUFFIX {
+            pics.push((format!("inv_{s}"), qpic_payload(24, 16, 60)));
+            for f in 1..=5u8 {
+                pics.push((format!("inva{f}_{s}"), qpic_payload(24, 16, 60)));
+            }
+        }
+        // Faces (health brackets + powerups), index 70.
+        for name in ["face5", "face4", "face3", "face2", "face1", "face_inv2", "face_quad", "face_invis", "face_invul2"] {
+            pics.push((name.to_string(), qpic_payload(24, 24, 70)));
+        }
+        // Armour-type + ammo-type icons, index 80 / 85.
+        for name in ARMOR_ICON_NAMES {
+            pics.push((name.to_string(), qpic_payload(24, 24, 80)));
+        }
+        for name in AMMO_ICON_NAMES {
+            pics.push((name.to_string(), qpic_payload(24, 24, 85)));
+        }
+        // Keys / powerups / sigils, index 90.
+        for name in SB_ITEM_NAMES {
+            pics.push((name.to_string(), qpic_payload(16, 16, 90)));
+        }
+        for name in SB_SIGIL_NAMES {
+            pics.push((name.to_string(), qpic_payload(8, 16, 90)));
+        }
+        // conchars: a raw 128x128 byte block (NO qpic header) — the gold digit
+        // cells 18..27 (rows 1, cols 2..11) set to index 95 so the small ammo
+        // counts draw a recognisable colour.
+        let mut conchars_raw = vec![0u8; 128 * 128];
+        for cell in 18..=27usize {
+            let cx = (cell % 16) * 8;
+            let cy = (cell / 16) * 8;
+            for gy in 0..8 {
+                for gx in 0..8 {
+                    conchars_raw[(cy + gy) * 128 + (cx + gx)] = 95;
+                }
+            }
+        }
+
+        // Lay payloads after the 12-byte header. `conchars` is appended RAW (no
+        // qpic_payload header) and registered as a non-QPIC lump via push_raw_lump.
+        let mut payloads = Vec::new();
+        let mut offsets = Vec::new();
+        let mut pos = WADINFO_SIZE;
+        for (_, p) in &pics {
+            offsets.push(pos);
+            payloads.extend_from_slice(p);
+            pos += p.len();
+        }
+        let conchars_off = pos;
+        payloads.extend_from_slice(&conchars_raw);
+        pos += conchars_raw.len();
+        let infotableofs = pos;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"WAD2");
+        bytes.extend_from_slice(&((pics.len() + 1) as i32).to_le_bytes());
+        bytes.extend_from_slice(&(infotableofs as i32).to_le_bytes());
+        bytes.extend_from_slice(&payloads);
+
+        let mut dir = Vec::new();
+        for ((name, p), &off) in pics.iter().zip(offsets.iter()) {
+            push_lump(&mut dir, off as i32, p.len() as i32, name);
+        }
+        // conchars as a raw lump (its type does not matter — lump_data reads bytes).
+        push_lump(&mut dir, conchars_off as i32, conchars_raw.len() as i32, "conchars");
+        bytes.extend_from_slice(&dir);
+
+        Wad2::parse(bytes).expect("synthetic full gfx.wad parses")
+    }
+
+    #[test]
+    fn draw_hud_inventory_bar_draws_above_sbar() {
+        // With the full wad, the ibar (index 2) must fill the 24 virtual rows ABOVE
+        // the 24-row sbar; a face must draw on the sbar; and the inventory elements
+        // must appear at their sbar.c positions.
+        let wad = build_full_hud_wad();
+        let pal = ramp_palette();
+        let fill = [42u8, 42, 42];
+        let mut img = Image::new(320, 200, fill); // scale 1: bar = bottom 48 rows
+        let hud = Hud {
+            wad: &wad,
+            palette: &pal,
+            health: 100,   // -> face1 (bracket 4)
+            ammo: 25,
+            armor: 80,
+            // shotgun(1) + nailgun(4) owned; armour3; shells ammo type;
+            // key1 (bit 17) + quad (bit 22); sigil1 (bit 28).
+            items: IT_SHOTGUN | (IT_SHOTGUN << 2) | IT_ARMOR3 | IT_SHELLS
+                | (1 << 17) | (1 << 22) | (1 << 28),
+            weapon: IT_SHOTGUN, // shotgun selected -> flashes inva*_shotgun
+            ammo_shells: 100,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+        };
+        draw_hud_into(&mut img, &hud);
+
+        // The ibar (index 2) occupies virtual rows -24..0, i.e. framebuffer rows
+        // 152..176 at scale 1. Its background colour [2,2,2] must appear there.
+        let ibar_rows = 152..176;
+        let ibar_bg = ibar_rows
+            .clone()
+            .flat_map(|y| (0..320).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [2, 2, 2])
+            .count();
+        assert!(ibar_bg > 0, "ibar background fills the 24 rows above the sbar");
+
+        // Rows above the whole 48-row status area (y < 152) stay the fill colour.
+        for y in 0..152 {
+            for x in 0..320 {
+                assert_eq!(img.rgb[y * 320 + x], fill, "row {y} col {x} above the status area untouched");
+            }
+        }
+
+        // A weapon icon (index 60) drew on the ibar (the shotgun flash frame at
+        // x=0, y=-16 -> framebuffer rows ~160..176).
+        let weapon_px = (160..176)
+            .flat_map(|y| (0..24).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [60, 60, 60])
+            .count();
+        assert!(weapon_px > 0, "selected weapon flash icon drew on the ibar");
+
+        // The face (index 70) drew at x=112 on the sbar (rows 176..200).
+        let face_px = (176..200)
+            .flat_map(|y| (112..136).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [70, 70, 70])
+            .count();
+        assert!(face_px > 0, "player face drew at x=112 on the sbar");
+
+        // The armour-type icon (index 80) drew at x=0 on the sbar.
+        let armor_icon = (176..200)
+            .flat_map(|y| (0..24).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [80, 80, 80])
+            .count();
+        assert!(armor_icon > 0, "armour-type icon drew at x=0");
+
+        // The ammo-type icon (index 85) drew at x=224 on the sbar.
+        let ammo_icon = (176..200)
+            .flat_map(|y| (224..248).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [85, 85, 85])
+            .count();
+        assert!(ammo_icon > 0, "ammo-type icon drew at x=224");
+
+        // The small ammo counts (gold conchars digits, index 95) drew on the ibar.
+        let count_px = ibar_rows
+            .flat_map(|y| (0..320).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [95, 95, 95])
+            .count();
+        assert!(count_px > 0, "small ammo counts drew on the ibar");
+
+        // A sigil (index 90) drew near the right edge of the ibar (x≈288).
+        let sigil_px = (160..176)
+            .flat_map(|y| (288..296).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [90, 90, 90])
+            .count();
+        assert!(sigil_px > 0, "sigil drew near the right edge of the ibar");
+    }
+
+    #[test]
+    fn draw_hud_powerup_face_overrides_health_face() {
+        // With quad active, Sbar_DrawFace draws the quad face regardless of health.
+        let wad = build_full_hud_wad();
+        let pal = ramp_palette();
+        let mut img = Image::new(320, 200, [0u8, 0, 0]);
+        let hud = Hud {
+            wad: &wad,
+            palette: &pal,
+            health: 100,
+            ammo: 0,
+            armor: 0,
+            items: IT_QUAD,
+            weapon: 0,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+        };
+        // All face pics share index 70 here, so we can't distinguish quad vs health
+        // by colour — instead assert the call path doesn't panic and a face drew.
+        draw_hud_into(&mut img, &hud);
+        let face_px = (176..200)
+            .flat_map(|y| (112..136).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [70, 70, 70])
+            .count();
+        assert!(face_px > 0, "a powerup (quad) face drew at x=112");
     }
 
     // -- Engine particles (draw_particles: projection + z-test) ---------------

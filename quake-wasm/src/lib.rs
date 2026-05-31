@@ -2033,6 +2033,13 @@ fn step_walk(
             // sync with the weapon), not always shells — sbar.c draws currentammo.
             ammo: stat("currentammo"),
             armor: stat("armorvalue"),
+            items: stat("items"),
+            weapon: stat("weapon"),
+            ammo_shells: stat("ammo_shells"),
+            ammo_nails: stat("ammo_nails"),
+            ammo_rockets: stat("ammo_rockets"),
+            ammo_cells: stat("ammo_cells"),
+            time: w.clock,
         };
         render::draw_hud_into(&mut img, &hud);
     }

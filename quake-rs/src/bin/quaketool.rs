@@ -965,6 +965,13 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 health: stat("health"),
                 ammo: stat("currentammo"),
                 armor: stat("armorvalue"),
+                items: stat("items"),
+                weapon: stat("weapon"),
+                ammo_shells: stat("ammo_shells"),
+                ammo_nails: stat("ammo_nails"),
+                ammo_rockets: stat("ammo_rockets"),
+                ammo_cells: stat("ammo_cells"),
+                time: server.time(),
             };
             render::draw_hud_into(&mut img, &hud);
         }
