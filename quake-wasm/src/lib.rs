@@ -96,6 +96,9 @@ struct Walk {
     /// runtime. Cached like `model_cache` so a box parses once and backs every
     /// instance of that item; rendered via [`render::ExternalBModel`].
     bmodel_cache: HashMap<String, Option<Bsp>>,
+    /// Parsed sprite models (`.spr`) keyed by name, cached like `model_cache` so a
+    /// sprite (the explosion flash, bubbles) parses once and backs every instance.
+    sprite_cache: HashMap<String, Option<quake_rs::spr::Sprite>>,
     /// Per-entity previous render origin, keyed by edict index — the source point
     /// for R_RocketTrail (rockets/grenades/gibs trail from their old origin to the
     /// new one each frame). Defaults to the current origin the first time an
@@ -175,6 +178,9 @@ struct DemoPlay {
     demo: Demo,
     /// Parsed model per precache index (None for non-`.mdl` / missing).
     models: Vec<Option<Mdl>>,
+    /// Parsed sprite per precache index (None for non-`.spr` / missing); the boot
+    /// demo's explosion flashes (s_explod.spr) render from these.
+    sprites: Vec<Option<quake_rs::spr::Sprite>>,
     colors: Vec<[u8; 3]>,
     elapsed: f32,
     idx: usize,
@@ -421,6 +427,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         pak,
         model_cache: HashMap::new(),
         bmodel_cache: HashMap::new(),
+        sprite_cache: HashMap::new(),
         trail_org: HashMap::new(),
         tracercount: 0,
         map_name: map.to_string(),
@@ -457,14 +464,21 @@ fn build_demo() -> Option<DemoPlay> {
     let bsp = Bsp::parse(&read(&map)?).ok()?;
     let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
 
-    // Load a model + colour per precache index.
+    // Load a model (alias or sprite) + colour per precache index.
     let mut models = Vec::with_capacity(demo.model_precache.len());
+    let mut sprites: Vec<Option<quake_rs::spr::Sprite>> =
+        Vec::with_capacity(demo.model_precache.len());
     let mut colors = Vec::with_capacity(demo.model_precache.len());
     for name in &demo.model_precache {
         if name.ends_with(".mdl") {
             models.push(read(name).and_then(|b| Mdl::parse(&b).ok()));
+            sprites.push(None);
+        } else if name.ends_with(".spr") {
+            models.push(None);
+            sprites.push(read(name).and_then(|b| quake_rs::spr::Sprite::parse(&b).ok()));
         } else {
             models.push(None);
+            sprites.push(None);
         }
         colors.push(color_for_name(name));
     }
@@ -493,6 +507,7 @@ fn build_demo() -> Option<DemoPlay> {
         palette,
         demo,
         models,
+        sprites,
         colors,
         elapsed: 0.0,
         idx: 0,
@@ -2023,6 +2038,12 @@ fn step_walk(
             // a missing/unparseable box stores `None` so we never re-read or panic.
             let parsed = w.pak.read_file(&m).ok().flatten().and_then(|b| Bsp::parse(&b).ok());
             w.bmodel_cache.insert(m, parsed);
+        } else if m.ends_with(".spr") && !w.sprite_cache.contains_key(&m) {
+            // A sprite-model entity (progs/s_explod.spr explosion flash, bubbles).
+            // Parse once and cache; None on missing/unparseable.
+            let parsed =
+                w.pak.read_file(&m).ok().flatten().and_then(|b| quake_rs::spr::Sprite::parse(&b).ok());
+            w.sprite_cache.insert(m, parsed);
         }
     }
 
@@ -2048,6 +2069,9 @@ fn step_walk(
     // borrowing `ExternalBModel` list is built below, after the cache is final, so
     // the immutable cache borrow does not clash with reading the server here.
     let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
+    // Sprite-model entities (name, origin, frame): the explosion flash, bubbles.
+    // Resolved against the sprite cache after the loop (disjoint borrows).
+    let mut sprite_descs: Vec<(String, [f32; 3], usize)> = Vec::new();
     // Drop trail history for any edict that is currently free. When `ED_Free`
     // recycles a slot for a new trailed entity (rocket/grenade/gib), a stale
     // `trail_org[ent]` from the previous occupant would make R_RocketTrail draw a
@@ -2094,6 +2118,14 @@ fn step_walk(
                 let origin = w.server.vm.ent_get_vector(ent, "origin");
                 ext_descs.push((m, origin));
             }
+            continue;
+        }
+        // Sprite-model entities (s_explod.spr explosion flash, bubbles): a camera-
+        // facing billboard at the entity origin, current `frame` for the animation.
+        if m.ends_with(".spr") {
+            let origin = w.server.vm.ent_get_vector(ent, "origin");
+            let frame = w.server.vm.ent_get_float(ent, "frame").max(0.0) as usize;
+            sprite_descs.push((m, origin, frame));
             continue;
         }
         if !m.ends_with(".mdl") {
@@ -2236,6 +2268,15 @@ fn step_walk(
             _ => None,
         })
         .collect();
+    // Sprite-model entities: resolve each (name, origin, frame) against the sprite
+    // cache, dropping any whose .spr was missing/unparseable.
+    let sprites: Vec<render::SpriteInstance> = sprite_descs
+        .iter()
+        .filter_map(|(name, origin, frame)| match w.sprite_cache.get(name) {
+            Some(Some(spr)) => Some(render::SpriteInstance { sprite: spr, origin: *origin, frame: *frame }),
+            _ => None,
+        })
+        .collect();
     // Anchor the weapon viewmodel to the camera (drawn last, on top of the world).
     // R_DrawViewModel (r_main.c ~622) returns early — drawing NO gun — when the
     // player is dead (STAT_HEALTH <= 0) or carrying the Ring of Shadows
@@ -2261,7 +2302,7 @@ fn step_walk(
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
     let mut img =
-        render::render_scene_ext(&w.bsp, &cam, render_w, render_h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref());
+        render::render_scene_ext_sprited(&w.bsp, &cam, render_w, render_h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
     //     player lost health/armour this frame, and tint the view when the eye is
@@ -2469,6 +2510,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
 
     let mut owned: Vec<ModelInstance> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
+    let mut sprite_insts: Vec<render::SpriteInstance> = Vec::new();
     for e in &f.entities {
         if let Some(Some(mdl)) = d.models.get(e.modelindex) {
             owned.push(ModelInstance {
@@ -2502,6 +2544,13 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
                 origin: e.origin,
                 frame: e.frame.max(0),
             });
+        } else if let Some(Some(spr)) = d.sprites.get(e.modelindex) {
+            // Sprite-model entity (the boot demo's s_explod.spr explosion flashes).
+            sprite_insts.push(render::SpriteInstance {
+                sprite: spr,
+                origin: e.origin,
+                frame: e.frame.max(0) as usize,
+            });
         }
     }
     let cam = Camera {
@@ -2520,7 +2569,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
     // here (empty) and no live server for light styles (neutral static scales).
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    let img = render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None);
+    let img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None, &sprite_insts);
     // The demo path applies no screen blend (it carries no live damage/powerup
     // state); return a zero blend so its signature matches step_walk's deferred one.
     (img, [0, 0, 0], 0.0)
@@ -2734,6 +2783,7 @@ mod tests {
             palette: [[0u8; 3]; 256],
             demo,
             models: Vec::new(),
+            sprites: Vec::new(),
             colors: Vec::new(),
             elapsed: 0.0,
             idx: 0,
@@ -2817,6 +2867,7 @@ mod tests {
             palette: [[0u8; 3]; 256],
             demo,
             models: Vec::new(),
+            sprites: Vec::new(),
             colors: Vec::new(),
             elapsed: 0.0,
             idx: 0,
