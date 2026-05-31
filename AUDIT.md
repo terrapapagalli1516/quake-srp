@@ -186,6 +186,43 @@ Deferred (confirmed, with concrete plans, lower frequency / higher effort):
   walls onto PVS-visible coplanar faces; needs the per-surface dlightbits recursion.
 - ⬜ **Demo explosion dlight** (LOW) — the demo path emits no dynamic lights.
 
+### Render-perf pass + Rounds 5-6
+
+**Render perf (commit ff4b6ab).** User: higher resolution slows a lot even in simple
+maps. Added a render benchmark (`QUAKE_BENCH`/`QUAKE_RES`); render is per-pixel bound
+(e1m1 18.4ms@640x400 -> 129ms@1080p). Optimised the textured-triangle inner loop like
+Quake's D_DrawSpans: incremental barycentric stepping (3 edge() -> 3 adds) + s/t reuse
+the depth reciprocal. ~13-18% faster; near-identical (32-66 of 256k px differ, sub-pixel
+edge picks). Bigger remaining lever = `factor_at` bilinear lightmap (~32%) -> a Quake
+surface cache (documented follow-up). Golden re-baselined.
+
+**Round 5 (14 agents, 5 confirmed).** Fixed:
+- ✅ **World ~1 colormap row too dark** (MED) — lightstyle_scales normalised by 'm'
+  (264); id's worldspawn lightstyle(0,"m") -> style 0 = 264 vs the 255*256 white point
+  = 1.03125x. Normalise by 256 instead. (commit 12e0550)
+- ✅ **Demo bypassed the colormap LUT** (MED) — overbright boot demo; thread gfx/colormap.
+- ✅ **R_LightPoint integer truncation** (LOW) — match C RecursiveLightPoint int math.
+- Deferred (LOW, documented): push_entity trigger order vs SV_Impact; sprite group syncbase.
+
+**Round 6 — final (13 agents, 5 confirmed).** Fixed (commit d6bb3f1):
+- ✅ **physics_step relink** (MED, regression in the sim-perf broadphase) — the freefall
+  branch never recomputed absmin/absmax, so a fast-falling MOVETYPE_STEP monster's stale
+  abs box could be wrongly broadphase-rejected (missed collision). Relink (SV_LinkEdict)
+  before the trigger pass, as the C does.
+- ✅ **Demo world too dark** (MED) — seed the demo style 0 = 264/256 (the Round-5 fix
+  hadn't reached the demo path).
+- ✅ **point_in_leaf strict `d > 0`** (LOW); **megahealth-rot damage flash** suppressed
+  (LOW); stale lightstyle doc comment (LOW).
+- Refuted: centerprint/notify-after-HUD ordering (verified faithful).
+
+**Golden baseline (current):** e1m1 `81bca4da`, e1m2 `b93d088a`, e1m3 `df856aeb`
+(perf + lightstyle + colormap fidelity applied). 399 lib + 25 wasm tests pass.
+
+**Six codebase-wide reviews complete** (3 + 3). Outstanding deferred work, all documented
+above with plans: lightning/beam temp entities (HIGH), R_MarkLights dlight gating (MED),
+intermission view (MED), no-lightmap-face shading (MED), the render surface cache (perf),
+animated demo lightstyles, + assorted cosmetic LOWs.
+
 ## HIGH (15)
 
 | # | Finding | Status |
