@@ -560,12 +560,88 @@ fn bi_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-/// `PF_aim` (#44) stub: returns `v_forward` (shoot straight ahead). The full
-/// auto-aim scan over takedamage entities is out of scope; returning the
-/// forward vector is the C's own "try sending a trace straight" fallback.
+/// `PF_aim` (#44): `vector(entity e, float speed) aim`. Quake's auto-aim, ON by
+/// default in single-player (`sv_aim` 0.93). Faithful port of pr_cmds.c PF_aim:
+/// first trace straight along `v_forward`; if that doesn't immediately hit a
+/// DAMAGE_AIM target, scan every damageable entity and snap toward the best one
+/// whose direction is within the `sv_aim` cone AND that a clear `SV_Move` can
+/// actually reach — preserving the vertical component so off-pitch targets
+/// (above/below) get hit. This is what lets keyboard / imperfect-pitch aiming
+/// connect; the old stub returned `v_forward` unconditionally (no assist).
+/// (The teamplay exclusions are dropped — this is a single-player server.)
 fn bi_aim(vm: &mut Vm) -> Result<()> {
-    let fwd = vm.gget_vector("v_forward");
-    vm.ret_vector(fwd);
+    // takedamage flags (defs.qc): DAMAGE_NO 0, DAMAGE_YES 1, DAMAGE_AIM 2.
+    const DAMAGE_AIM: f32 = 2.0;
+    // `sv_aim` cvar default ("0.93"): the minimum forward-dot to assist toward.
+    const SV_AIM: f32 = 0.93;
+
+    let ent = vm.arg_entity(0);
+    // arg 1 (speed) is read but unused by PF_aim — the QC applies it to the shot.
+
+    let v_forward = vm.gget_vector("v_forward");
+    let origin = vm.ent_get_vector(ent, "origin");
+    let mut start = origin;
+    start[2] += 20.0;
+
+    // Try a straight trace first; a direct DAMAGE_AIM hit needs no assist.
+    let end = [
+        start[0] + 2048.0 * v_forward[0],
+        start[1] + 2048.0 * v_forward[1],
+        start[2] + 2048.0 * v_forward[2],
+    ];
+    let tr = sv_move(vm, start, end, [0.0; 3], [0.0; 3], ent, false, false);
+    if tr.ent > 0 && vm.ent_get_float(tr.ent, "takedamage") == DAMAGE_AIM {
+        vm.ret_vector(v_forward);
+        return Ok(());
+    }
+
+    // Otherwise scan all damageable entities for the best in-cone, reachable one.
+    let bestdir = v_forward;
+    let mut bestdist = SV_AIM;
+    let mut bestent: i32 = -1;
+
+    let n = vm.num_edicts() as i32;
+    for check in 1..n {
+        if check == ent {
+            continue;
+        }
+        if vm.ent_get_float(check, "takedamage") != DAMAGE_AIM {
+            continue;
+        }
+        let c_org = vm.ent_get_vector(check, "origin");
+        let c_min = vm.ent_get_vector(check, "mins");
+        let c_max = vm.ent_get_vector(check, "maxs");
+        // Aim at the centre of the target's bounding box.
+        let target = [
+            c_org[0] + 0.5 * (c_min[0] + c_max[0]),
+            c_org[1] + 0.5 * (c_min[1] + c_max[1]),
+            c_org[2] + 0.5 * (c_min[2] + c_max[2]),
+        ];
+        let dir = [target[0] - start[0], target[1] - start[1], target[2] - start[2]];
+        let (dirn, _) = crate::math::normalize(dir);
+        let dist = dirn[0] * v_forward[0] + dirn[1] * v_forward[1] + dirn[2] * v_forward[2];
+        if dist < bestdist {
+            continue; // outside the cone — too far to turn
+        }
+        let tr = sv_move(vm, start, target, [0.0; 3], [0.0; 3], ent, false, false);
+        if tr.ent == check {
+            // Clear line to this target — it's the new best.
+            bestdist = dist;
+            bestent = check;
+        }
+    }
+
+    if bestent >= 0 {
+        let b_org = vm.ent_get_vector(bestent, "origin");
+        let dir = [b_org[0] - origin[0], b_org[1] - origin[1], b_org[2] - origin[2]];
+        let dist = dir[0] * v_forward[0] + dir[1] * v_forward[1] + dir[2] * v_forward[2];
+        // Snap horizontally to v_forward*dist but keep the true vertical (dir.z).
+        let endv = [v_forward[0] * dist, v_forward[1] * dist, dir[2]];
+        let (endn, _) = crate::math::normalize(endv);
+        vm.ret_vector(endn);
+    } else {
+        vm.ret_vector(bestdir);
+    }
     Ok(())
 }
 
