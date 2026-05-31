@@ -1253,62 +1253,65 @@ fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> Option<([i3
 //    two-layer SCROLL of `EmitBothSkyLayers` (`gl_warp.c`) over the 256x128 sky
 //    miptexture (two side-by-side 128x128 layers). See [`sky_texel`].
 
-/// `gl_warp.c`'s `TURBSCALE = 256/(2*pi)`: scales a surface coordinate into the
-/// 256-entry sine table's index space.
-const TURBSCALE: f32 = 256.0 / (2.0 * std::f32::consts::PI);
-
-/// The warp amplitude in texels (`AMP` in `gl_warp_sin.h` — the WinQuake float
-/// `turbsin[]` table swings ±8 texels).
+/// WinQuake `R_InitTurb` constants (r_main.c / r_local.h): the software liquid
+/// warp drives a 128-entry sine table by the INTEGER texel coordinate (not a
+/// scaled float coord like GLQuake's `EmitWaterPolys`), scrolled by `time*SPEED`.
+const TURB_CYCLE: usize = 128;
+/// `AMP` — the table swings `8 + 8*sin` texels (0..16; the +8 DC bias is wrapped
+/// off by the 64-texel liquid texture downstream, exactly as `&63` in `d_scan.c`).
 const TURB_AMP: f32 = 8.0;
+/// `SPEED` — the table phase advances by `time*20` per second.
+const TURB_SPEED: f32 = 20.0;
 
-/// The 256-entry `turbsin` table from `gl_warp.c`: `turbsin[i] = AMP*sin(i*2pi/256)`.
-///
-/// Built once per render (a plain `[f32; 256]`, no `lazy_static`) and borrowed
-/// by the rasteriser. Indexing is masked to `& 255`, so any input is in range.
+/// WinQuake's `sintable` (`R_InitTurb`): `sintable[i] = 8 + 8*sin(i*2pi/128)` in
+/// texel units, 128-periodic. Indexed by an integer texel coordinate (the other
+/// axis) plus the time phase — this is the SOFTWARE `Turbulent8` warp, which has a
+/// different ripple wavelength and ~20x the scroll speed of the GL water warp.
 struct TurbTable {
-    sin: [f32; 256],
+    tab: [i32; TURB_CYCLE],
 }
 
 impl TurbTable {
-    /// Compute the table. `const`-friendly arithmetic, but `f32::sin` is not yet
-    /// `const`, so this runs once at render start.
+    /// Build the table once at render start (`f32::sin` is not yet `const`).
     fn new() -> TurbTable {
-        let mut sin = [0.0f32; 256];
+        let mut tab = [0i32; TURB_CYCLE];
         let mut i = 0usize;
-        while i < 256 {
-            sin[i] = TURB_AMP * ((i as f32) * 2.0 * std::f32::consts::PI / 256.0).sin();
+        while i < TURB_CYCLE {
+            tab[i] = (TURB_AMP
+                + TURB_AMP * ((i as f32) * 2.0 * std::f32::consts::PI / (TURB_CYCLE as f32)).sin())
+            .round() as i32;
             i += 1;
         }
-        TurbTable { sin }
+        TurbTable { tab }
     }
 
-    /// `turbsin[(int)(coord * TURBSCALE) & 255]` — the displacement (in texels)
-    /// applied to one axis as a function of the other axis + time.
+    /// The texel displacement for integer index `k` (the OTHER axis' texel coord
+    /// plus the time phase), masked to the 128 cycle exactly as the C `&(CYCLE-1)`.
     #[inline]
-    fn at(&self, coord: f32) -> f32 {
-        // `& 255` on the truncated index keeps it in `[0,255]` for any finite
-        // input; non-finite inputs fall back to index 0.
-        let raw = coord * TURBSCALE;
-        let idx = if raw.is_finite() { (raw as i64) & 255 } else { 0 };
-        self.sin[idx as usize]
+    fn at_int(&self, k: i32) -> i32 {
+        self.tab[(k & (TURB_CYCLE as i32 - 1)) as usize]
     }
 }
 
-/// Apply the liquid SIN warp to a surface coordinate `(s,t)` at game `time`,
-/// returning the displaced `(s2,t2)` to sample, exactly as `EmitWaterPolys`:
+/// Apply the SOFTWARE liquid warp (`d_scan.c` `Turbulent8`) to a surface texel
+/// `(s,t)` at game `time`, returning the displaced integer-texel `(s2,t2)`:
 ///
 /// ```text
-/// s2 = s + turbsin[(int)((t*0.125 + time) * TURBSCALE) & 255]
-/// t2 = t + turbsin[(int)((s*0.125 + time) * TURBSCALE) & 255]
+/// phase = (int)(time * SPEED)               // SPEED = 20
+/// s2 = s + sintable[(t + phase) & 127]      // sintable in texels
+/// t2 = t + sintable[(s + phase) & 127]
 /// ```
 ///
-/// Each axis is offset by a sine of the *other* axis plus time, so the surface
-/// appears to ripple. The caller still wraps `(s2,t2)` into the (tiling) texture
-/// via `rem_euclid`.
+/// Each axis is offset by the sine of the *other* axis' integer texel coordinate
+/// plus the time phase, so the surface ripples. The caller wraps `(s2,t2)` into
+/// the 64-texel liquid texture via `rem_euclid` (matching the C's final `&63`).
 #[inline]
 fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (f32, f32) {
-    let s2 = s + turb.at(t * 0.125 + time);
-    let t2 = t + turb.at(s * 0.125 + time);
+    let phase = (time * TURB_SPEED) as i32;
+    let si = s.floor() as i32;
+    let ti = t.floor() as i32;
+    let s2 = (si + turb.at_int(ti + phase)) as f32;
+    let t2 = (ti + turb.at_int(si + phase)) as f32;
     (s2, t2)
 }
 
@@ -8454,21 +8457,17 @@ mod tests {
 
     #[test]
     fn turb_table_amplitude_and_wrap() {
-        // The table swings ±AMP and indexing is masked, so any coord is in range.
+        // R_InitTurb: tab[i] = round(8 + 8*sin(i*2pi/128)) in texels — DC-biased,
+        // so the range is [0, 2*AMP]; index masking keeps any integer in range.
         let turb = TurbTable::new();
-        // sin(0) = 0 at index 0.
-        assert!(turb.sin[0].abs() < 1e-5);
-        // Peak magnitude is exactly the amplitude.
-        let max = turb.sin.iter().cloned().fold(f32::MIN, f32::max);
-        let min = turb.sin.iter().cloned().fold(f32::MAX, f32::min);
-        assert!((max - TURB_AMP).abs() < 1e-3, "peak should be +AMP, got {max}");
-        assert!((min + TURB_AMP).abs() < 1e-3, "trough should be -AMP, got {min}");
-        // `at` never panics for huge / negative / non-finite inputs, and the
-        // result stays within the table's range [-AMP, AMP].
-        for &c in &[0.0, 1e9, -1e9, f32::INFINITY, f32::NAN, 12345.6] {
-            let v = turb.at(c);
-            assert!(v.is_finite());
-            assert!(v.abs() <= TURB_AMP + 1e-3);
+        let max = *turb.tab.iter().max().unwrap();
+        let min = *turb.tab.iter().min().unwrap();
+        assert_eq!(max, (2.0 * TURB_AMP) as i32, "peak should be 2*AMP, got {max}");
+        assert_eq!(min, 0, "trough should be 0 (DC-biased), got {min}");
+        // `at_int` never panics for huge/negative indices and stays in [0,2*AMP].
+        for &k in &[0, 127, 128, -1, 1_000_000, -1_000_000] {
+            let v = turb.at_int(k);
+            assert!((0..=(2.0 * TURB_AMP) as i32).contains(&v), "at_int({k}) = {v} out of range");
         }
     }
 
@@ -8481,14 +8480,17 @@ mod tests {
         let (s, t) = (20.0f32, 33.0f32);
         let (s0, t0) = warp_st(&turb, s, t, 0.0);
         let (s1, t1) = warp_st(&turb, s, t, 0.37);
-        // Animated: at least one axis differs between the two times.
+        // Animated: the time phase (time*SPEED) shifts the table index, so the
+        // sampled texel moves between two times.
         assert!(
-            (s0 - s1).abs() > 1e-4 || (t0 - t1).abs() > 1e-4,
+            (s0 - s1).abs() > 0.5 || (t0 - t1).abs() > 0.5,
             "warp should change the sample between two times: ({s0},{t0}) vs ({s1},{t1})"
         );
-        // Bounded: the displacement off the base coordinate is at most ±AMP.
-        for (warped, base) in [(s1, s), (t1, t)] {
-            assert!((warped - base).abs() <= TURB_AMP + 1e-3);
+        // Bounded: displacement off the floored base texel is the DC-biased table
+        // value in [0, 2*AMP] (then rem_euclid wraps it into the 64-texel liquid).
+        for (warped, base) in [(s1, s.floor()), (t1, t.floor())] {
+            let d = warped - base;
+            assert!((0.0..=2.0 * TURB_AMP + 1e-3).contains(&d), "displacement {d} out of range");
         }
     }
 
