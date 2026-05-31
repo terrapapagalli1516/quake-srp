@@ -561,7 +561,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     let palette = render::parse_palette(&read("gfx/palette.lmp")?).ok_or("bad palette")?;
     let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
 
-    let mut server = Server::new(bsp_sim, progs).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
@@ -999,7 +999,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
     let bsp_sim = Bsp::parse(&read(map_name)?).map_err(|e| e.to_string())?;
     let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
 
-    let mut server = Server::new(bsp_sim, progs).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
@@ -1137,7 +1137,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         .map_err(|e| format!("loading next map {next_bsp_path}: {e}"))?;
     let next_bsp = Bsp::parse(&next_bytes).map_err(|e| e.to_string())?;
     let next_progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
-    let mut next_server = Server::new(next_bsp, next_progs).map_err(|e| e.to_string())?;
+    let mut next_server = Server::with_pak(next_bsp, next_progs, Some(pak.clone())).map_err(|e| e.to_string())?;
     let next_rep = next_server.spawn_entities().map_err(|e| e.to_string())?;
     let next_player = next_server
         .connect_client_with_parms(parms)
@@ -1488,7 +1488,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     let eye = base_cam.pos;
 
     // --- spawn the map's entities ---
-    let mut server = Server::new(bsp_for_sim, progs).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_for_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
     let report = server.spawn_entities().map_err(|e| e.to_string())?;
 
     // --- gather MDL instances from live edicts ---
@@ -1695,7 +1695,7 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
         player_start(&bsp.entities).ok_or_else(|| "map has no info_player_start".to_string())?;
 
     // Spawn entities and gather their MDL models (drawn at fixed positions).
-    let mut server = Server::new(bsp_sim, progs).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
     server.spawn_entities().map_err(|e| e.to_string())?;
     let mut model_cache: std::collections::HashMap<String, Option<Mdl>> =
         std::collections::HashMap::new();

@@ -143,6 +143,14 @@ pub struct WorldModel {
     bsp: Bsp,
     precache_models: Vec<String>,
     precache_sounds: Vec<String>,
+    /// Optional pak, used to resolve the collision bounds of external brush
+    /// models (the `maps/b_*.bsp` item boxes — explosive/ammo/health boxes).
+    /// `None` (e.g. in unit tests) just falls back to the historical zero box.
+    pak: Option<crate::pak::Pak>,
+    /// Cache of external brush-model MODEL-0 bounds, keyed by precache name
+    /// (e.g. `"maps/b_explob.bsp"` -> `(0,0,0)..(32,32,64)`). Populated lazily
+    /// by [`precache_model`] so `setmodel` can give the box a real bbox.
+    external_bounds: std::collections::HashMap<String, (Vec3, Vec3)>,
 }
 
 impl WorldModel {
@@ -150,10 +158,20 @@ impl WorldModel {
     /// string and precaching the world model name `"*0"` at index 1 (the C
     /// `SV_SpawnServer` precached `sv.worldmodel` as model 1).
     pub fn new(bsp: Bsp) -> WorldModel {
+        WorldModel::with_pak(bsp, None)
+    }
+
+    /// Like [`new`], but with a pak so external brush-model (`b_*.bsp`) bounds
+    /// can be resolved for collision/damage. The interactive engines (wasm,
+    /// quaketool) pass `Some(pak)`; tests pass `None` and keep the zero-box
+    /// fallback.
+    pub fn with_pak(bsp: Bsp, pak: Option<crate::pak::Pak>) -> WorldModel {
         let mut w = WorldModel {
             bsp,
             precache_models: vec![String::new()],
             precache_sounds: vec![String::new()],
+            pak,
+            external_bounds: std::collections::HashMap::new(),
         };
         // Slot 1 is the world brush model. id used the map name; "*0" is the
         // submodel-0 (worldspawn) reference and is what setmodel resolves.
@@ -198,6 +216,33 @@ fn precache_push(table: &mut Vec<String>, name: &str) -> i32 {
 
 impl Host for WorldModel {
     fn precache_model(&mut self, name: &str) -> i32 {
+        // External brush models — the `maps/b_*.bsp` item boxes (explosive box,
+        // ammo/health boxes) — carry their real collision bounds in their own
+        // BSP's MODEL-0. The C `PF_precache_model` loads every precached model
+        // via `Mod_ForName`, so `setmodel` later finds `mod->mins/maxs`; without
+        // it the box gets a zero bbox and hitscans/movement pass straight
+        // through (visible but unshootable). Resolve the bounds once from the
+        // pak and cache them. Any failure (no pak / missing file / parse error /
+        // no models) silently leaves them unset -> the historical zero box.
+        if name.ends_with(".bsp")
+            && Self::submodel_index(name).is_none()
+            && !self.external_bounds.contains_key(name)
+        {
+            if let Some(pak) = &self.pak {
+                if let Ok(Some(bytes)) = pak.read_file(name) {
+                    if let Ok(bsp) = crate::bsp::Bsp::parse(&bytes) {
+                        if let Some(m) = bsp.models.first() {
+                            // `Mod_LoadSubmodels` spreads the raw bounds out by a
+                            // pixel (mins-1, maxs+1); b_explob.bsp's raw
+                            // (1,1,1)..(31,31,63) becomes (0,0,0)..(32,32,64).
+                            let mins = [m.mins[0] - 1.0, m.mins[1] - 1.0, m.mins[2] - 1.0];
+                            let maxs = [m.maxs[0] + 1.0, m.maxs[1] + 1.0, m.maxs[2] + 1.0];
+                            self.external_bounds.insert(name.to_string(), (mins, maxs));
+                        }
+                    }
+                }
+            }
+        }
         precache_push(&mut self.precache_models, name)
     }
 
@@ -206,12 +251,17 @@ impl Host for WorldModel {
     }
 
     fn model_bbox(&self, name: &str) -> Option<(Vec3, Vec3)> {
-        // Only brush submodels ("*N") have bounds available from the BSP; real
-        // ".mdl" alias models would need the MDL header, which we don't load
-        // here (PF_setmodel falls back to a zero box for those).
-        let n = Self::submodel_index(name)?;
-        let m = self.bsp.models.get(n)?;
-        Some((m.mins, m.maxs))
+        // Brush submodels ("*N") read bounds straight from the world BSP.
+        if let Some(n) = Self::submodel_index(name) {
+            let m = self.bsp.models.get(n)?;
+            return Some((m.mins, m.maxs));
+        }
+        // External brush models (the b_*.bsp item boxes) get the bounds we
+        // resolved + cached at precache time. Real ".mdl" alias models are not
+        // in the cache, so they still fall back to a zero box (faithful: the C
+        // `setmodel` also set a zero box for non-brush models, which the QuakeC
+        // then `setsize`s).
+        self.external_bounds.get(name).copied()
     }
 
     fn trace(&self, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) -> HostTrace {
@@ -1589,12 +1639,20 @@ impl Server {
     /// engine builtins, attach the [`WorldModel`] host, and initialise the
     /// well-known globals (`time = 1.0`).
     pub fn new(bsp: Bsp, progs: Progs) -> Result<Server> {
+        Server::with_pak(bsp, progs, None)
+    }
+
+    /// Like [`new`], but threads a `pak` through to the [`WorldModel`] host so
+    /// external brush-model item boxes (`maps/b_*.bsp`) collide and take damage.
+    /// The interactive engines (wasm shell, quaketool) pass `Some(pak)`; the
+    /// test suite uses [`new`] (`None`) and keeps the prior zero-box behaviour.
+    pub fn with_pak(bsp: Bsp, progs: Progs, pak: Option<crate::pak::Pak>) -> Result<Server> {
         // Capture the entity text before the BSP moves into the host.
         let entities = bsp.entities.clone();
 
         let mut vm = Vm::new(progs);
         install_engine_builtins(&mut vm);
-        vm.set_host(Box::new(WorldModel::new(bsp)));
+        vm.set_host(Box::new(WorldModel::with_pak(bsp, pak)));
 
         // A deferred changelevel() request is per-thread and outlives a server;
         // clear it so a request issued against a prior level can never leak into
@@ -4776,6 +4834,47 @@ mod tests {
         let mut b = empty_bsp();
         b.entities = text.to_string();
         b
+    }
+
+    // The explosive-box fix: external brush models (the `maps/b_*.bsp` item
+    // boxes) must resolve real collision bounds at setmodel time, or a hitscan
+    // passes straight through the box — it renders but can't be shot. The bug
+    // was `model_bbox` returning `None` for external models (zero box). This
+    // locks the lookup `setmodel` depends on.
+    #[test]
+    fn external_brush_model_bounds_feed_setmodel() {
+        use crate::bsp::DModel;
+
+        // No pak -> external b_*.bsp keeps the historical zero-box fallback
+        // (None). Data-free tests and the pure-disk paths behave as before.
+        let wm = WorldModel::with_pak(empty_bsp(), None);
+        assert_eq!(wm.model_bbox("maps/b_explob.bsp"), None);
+
+        // The "*N" world-submodel path is unchanged (reads the BSP model bounds).
+        let mut bsp = empty_bsp();
+        bsp.models.push(DModel {
+            mins: [-16.0, -16.0, -24.0],
+            maxs: [16.0, 16.0, 32.0],
+            origin: [0.0; 3],
+            headnode: [0; crate::bsp::MAX_MAP_HULLS],
+            visleafs: 0,
+            firstface: 0,
+            numfaces: 0,
+        });
+        let wm2 = WorldModel::with_pak(bsp, None);
+        assert_eq!(wm2.model_bbox("*0"), Some(([-16.0, -16.0, -24.0], [16.0, 16.0, 32.0])));
+
+        // Once `precache_model` has resolved the box's MODEL-0 bounds from the
+        // pak (populated directly here, since this unit test is data-free),
+        // `setmodel`'s `model_bbox` returns them — the box gets a real bbox
+        // (e.g. b_explob.bsp -> (0,0,0)..(32,32,64)) instead of (0,0,0).
+        let mut wm3 = WorldModel::with_pak(empty_bsp(), None);
+        wm3.external_bounds
+            .insert("maps/b_explob.bsp".into(), ([0.0, 0.0, 0.0], [32.0, 32.0, 64.0]));
+        assert_eq!(
+            wm3.model_bbox("maps/b_explob.bsp"),
+            Some(([0.0, 0.0, 0.0], [32.0, 32.0, 64.0]))
+        );
     }
 
     // ev_* type codes (etype_t ordinals; see progs::EType).

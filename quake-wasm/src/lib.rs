@@ -356,7 +356,9 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
-    let mut server = Server::new(bsp_sim, progs).ok()?;
+    // Pass the pak so external brush-model item boxes (b_*.bsp) collide + take
+    // damage (the explosive box becomes shootable).
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).ok()?;
     server.spawn_entities().ok()?;
     let player = server.connect_client().ok()?;
 
@@ -1548,7 +1550,7 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let Some(progs_bytes) = read("progs.dat") else { return };
     let Ok(progs) = Progs::parse(&progs_bytes) else { return };
 
-    let Ok(mut ns) = Server::new(sim_bsp, progs) else { return };
+    let Ok(mut ns) = Server::with_pak(sim_bsp, progs, Some(w.pak.clone())) else { return };
     // Restore the carried serverflags onto the new server BEFORE spawning its
     // entities, mirroring the C (SV_SpawnServer restores svs.serverflags before
     // ED_LoadFromFile), so the new level's worldspawn — which reads serverflags
