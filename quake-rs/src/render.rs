@@ -1894,6 +1894,11 @@ fn raster_triangle_cached(
     let dw2dx = -(v1.y - v0.y) * inv_area;
     let (bw_i, bh_i) = (bw as i64, bh as i64);
 
+    // Local written-pixel tally (overdraw metric), folded into the profiler ONCE at
+    // the end so the hot loop never touches a thread-local. `drawn` is a register
+    // increment overlapping the framebuffer write — ~free, and the whole function is
+    // only on the slow path anyway when stats are on.
+    let mut drawn = 0u64;
     for py in min_y..=max_y {
         let sy = py as f32 + 0.5;
         let sx0 = min_x as f32 + 0.5;
@@ -1928,6 +1933,7 @@ fn raster_triangle_cached(
                 *zc = depth;
                 if let Some(p) = image.rgb.get_mut(idx) {
                     *p = palette[pal_idx];
+                    drawn += 1;
                 }
             }
             w0 += dw0dx;
@@ -1935,6 +1941,7 @@ fn raster_triangle_cached(
             w2 += dw2dx;
         }
     }
+    stat(|s| s.world_pixels += drawn);
 }
 
 /// Render `bsp` with its real miptextures sampled through `palette` (Quake's
