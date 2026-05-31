@@ -1529,10 +1529,20 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let serverflags = w.server.serverflags();
 
     let read = |n: &str| w.pak.read_file(n).ok().flatten();
+    // The QuakeC `changelevel(map)` carries the BARE map name (e.g. "e1m1", from
+    // the trigger's `map` key), but the pak stores it as "maps/e1m1.bsp". Build
+    // the pak path (tolerating an already-qualified name). Without this the read
+    // missed and the swap silently aborted — the start-hub episode-1 slipgate
+    // (and every in-game changelevel) "did nothing".
+    let map_file = if next_map.ends_with(".bsp") {
+        next_map.to_string()
+    } else {
+        format!("maps/{next_map}.bsp")
+    };
     // Two BSP copies (one for the sim/collision world the server owns, one for
     // rendering) plus a fresh progs.dat for the new server. Any failure aborts
     // the swap, leaving the live level running.
-    let Some(map_bytes) = read(next_map) else { return };
+    let Some(map_bytes) = read(&map_file) else { return };
     let Ok(sim_bsp) = Bsp::parse(&map_bytes) else { return };
     let Ok(render_bsp) = Bsp::parse(&map_bytes) else { return };
     let Some(progs_bytes) = read("progs.dat") else { return };
@@ -1739,6 +1749,16 @@ fn step_walk(
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        // Render an entity only when it has a real modelindex — i.e. its QuakeC
+        // spawn actually called setmodel. An edict that early-returns before
+        // setmodel (e.g. func_episodegate in shareware: serverflags=0 so the gate
+        // stays passable) keeps its raw map `model` key like "*41" but never gets
+        // a modelindex, and Quake leaves it invisible. Without this guard those
+        // gates draw as phantom walls the player walks through — and mask the real
+        // slipgate behind them, so episode/level selection *looks* broken.
+        if w.server.vm.ent_get_float(ent, "modelindex") == 0.0 {
             continue;
         }
         let m = w.server.vm.ent_get_string(ent, "model");

@@ -868,6 +868,12 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 continue;
             }
             let ent = e as i32;
+            // Only render entities with a real modelindex (setmodel ran). An edict
+            // that early-returns before setmodel (e.g. a passable func_episodegate)
+            // keeps its raw "*N" map key but no modelindex -> invisible in Quake.
+            if server.vm.ent_get_float(ent, "modelindex") == 0.0 {
+                continue;
+            }
             let m = server.vm.ent_get_string(ent, "model");
             // Brush submodels (doors/plats/buttons) draw at the entity origin.
             if let Some(num) = m.strip_prefix('*') {
@@ -1506,6 +1512,12 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             continue;
         }
         let ent = e as i32;
+        // Only render entities whose QuakeC spawn actually setmodel'd (modelindex
+        // != 0); a passable func_episodegate keeps its "*N" map key but no
+        // modelindex and is invisible in Quake.
+        if server.vm.ent_get_float(ent, "modelindex") == 0.0 {
+            continue;
+        }
         let model = server.vm.ent_get_string(ent, "model");
         if model.is_empty() {
             continue;
