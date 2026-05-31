@@ -115,6 +115,36 @@ Deferred (documented, lower priority / higher risk):
   on-screen size ramp; ST_RAND syncbase; alias triangle near-clip; tracer parity;
   lightstyle /264-vs-/256 (golden-sensitive); sky-name case sensitivity.
 
+### Round 3 — verify-the-fixes + fresh passes (12 dims) + adversarial verify
+
+23 agents, 12 findings, **6 confirmed** (1 MED, 5 LOW), 6 refuted. Crucially the
+skeptics REFUTED several "regression-in-new-fix" alarms — re-deriving the math
+confirmed the Round-2 view-roll/punchangle, listener pose, and select_interval
+truncation were already correct. All 6 confirmed fixed; golden held byte-identical.
+
+- ✅ **Polyblend whole-screen tint** (MED) — software V_UpdatePalette shifts the whole
+  palette LAST in SCR_UpdateScreen, so damage/water/powerup tints now cover the HUD,
+  centerprint, menu and console too (was 3-D-viewport-only = the GL look). The blend
+  is deferred out of step_walk/step_demo and applied to the composited frame.
+- ✅ **Monster relink trigger time** (LOW, regression vs an earlier fix's invariant) —
+  sv_movestep/sv_step_direction relink touches now use `vm.sv_time` (frame-start
+  sv.time) like world.c SV_TouchLinks, not the clamped per-think `time` global.
+- ✅ **apply_warp sine table** (LOW) — use id's truncated `3.14159` literal (table tops
+  at 5, not 6) for bit-identical D_WarpScreen.
+- ✅ **spawn_explosion even/odd** (LOW) — odd→pt_explode / even→pt_explode2, matching
+  R_RunParticleEffect/R_ParticleExplosion.
+- ✅ **Console/menu mutual exclusion** (LOW) — the menu is suppressed while the console
+  is down (Quake key_dest), so the console no longer renders under the menu.
+- ✅ **select_interval doc** (LOW) — corrected the false "C loads intervals as a running
+  sum" claim (the loader stores them verbatim).
+
+Refuted (no change — verified faithful): dead-view punchangle roll, centerprint-over-
+HUD order, listener-pose bob exclusion, PF_makestatic ED_Free, select_interval floor().
+
+**3 codebase-wide reviews complete.** Remaining deferred items (R_MarkLights dlight
+gating, no-lightmap shading, intermission view, + the cosmetic LOWs listed under
+Round 2) are tracked above for a future pass.
+
 ## HIGH (15)
 
 | # | Finding | Status |

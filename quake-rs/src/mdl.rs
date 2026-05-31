@@ -507,10 +507,13 @@ impl Mdl {
 /// per-sub-frame `intervals`, porting the shared `R_AliasSetupFrame` /
 /// `R_AliasSetupSkin` selection in `r_alias.c`.
 ///
-/// `intervals[i]` is the *cumulative* time at which sub-frame `i` ends (the C
-/// loads them as a running sum). `fullinterval = intervals[n-1]` is the cycle
-/// length; `targettime = time - floor(time/fullinterval)*fullinterval` wraps
-/// `time` into `[0, fullinterval)`. The chosen sub-frame is the first `i` with
+/// `intervals[i]` is the cumulative time at which sub-frame `i` ends. The loader
+/// stores the on-disk intervals VERBATIM (`Mod_LoadAliasGroup` copies each
+/// `LittleFloat` value with no accumulation, as `read_frame`/`read_skin` do here);
+/// the model tools author them as cumulative end-times, which is why the selection
+/// below works. `fullinterval = intervals[n-1]` is the cycle length; `targettime =
+/// time - floor(time/fullinterval)*fullinterval` wraps `time` into
+/// `[0, fullinterval)`. The chosen sub-frame is the first `i` with
 /// `intervals[i] > targettime` (else the last, `n-1`).
 ///
 /// SAFETY: a non-finite or non-positive `fullinterval`, an empty group, or a

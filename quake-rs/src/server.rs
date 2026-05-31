@@ -2209,6 +2209,9 @@ impl Server {
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
         self.cleanup_ents();
         let start_time = self.time();
+        // Record sv.time for the monster-locomotion relink touches (SV_TouchLinks
+        // uses sv.time, not the clamped per-think `time` global).
+        self.vm.sv_time = start_time;
 
         let mut thinks_fired = 0usize;
         let mut think_errors = 0usize;
@@ -3250,6 +3253,9 @@ impl Server {
         // frame's thinks (the host already consumed it via entity_dlights()).
         self.cleanup_ents();
         let start_time = self.time();
+        // Record sv.time for the monster-locomotion relink touches (SV_TouchLinks
+        // uses sv.time, not the clamped per-think `time` global).
+        self.vm.sv_time = start_time;
 
         // Let the progs know a new frame has started (self/other = world).
         let mut thinks_fired = 0usize;
@@ -4863,7 +4869,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                     // pre-fix behaviour (the prior NO-OP set `time` to its own
                     // current value). See FIX-1 notes: the physics paths get the
                     // true start-of-frame time; this monster path keeps `time`.
-                    let time = vm.gget_float("time");
+                    let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
                     touch_triggers(vm, ent, time);
                 }
                 return true;
@@ -4902,7 +4908,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             if relink {
                 link_edict(vm, ent);
                 // Monster think path: keep the live `time` global (see FIX-1).
-                let time = vm.gget_float("time");
+                let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
                 touch_triggers(vm, ent, time);
             }
             let flags = vm.ent_get_float(ent, "flags") as i32;
@@ -4922,7 +4928,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             if relink {
                 link_edict(vm, ent);
                 // Monster think path: keep the live `time` global (see FIX-1).
-                let time = vm.gget_float("time");
+                let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
                 touch_triggers(vm, ent, time);
             }
             return true;
@@ -4945,7 +4951,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     if relink {
         link_edict(vm, ent);
         // Monster think path: keep the live `time` global (see FIX-1).
-        let time = vm.gget_float("time");
+        let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
         touch_triggers(vm, ent, time);
     }
     true
@@ -4983,13 +4989,13 @@ pub fn sv_step_direction(vm: &mut Vm, ent: i32, yaw: f32, dist: f32) -> bool {
         }
         link_edict(vm, ent);
         // Monster think path: keep the live `time` global (see FIX-1).
-        let time = vm.gget_float("time");
+        let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
         touch_triggers(vm, ent, time);
         return true;
     }
     link_edict(vm, ent);
     // Monster think path: keep the live `time` global (see FIX-1).
-    let time = vm.gget_float("time");
+    let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
     touch_triggers(vm, ent, time);
     false
 }

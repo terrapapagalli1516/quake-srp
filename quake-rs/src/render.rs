@@ -180,8 +180,10 @@ pub fn combine_cshifts(shifts: &[([u8; 3], f32)]) -> ([u8; 3], f32) {
 
 /// Blend `color` over every pixel of `image` at `alpha` (0..1) — the full-screen
 /// polyblend (damage flash, underwater/lava/slime tint). `alpha <= 0` is a no-op.
-/// Apply this to the 3-D frame *before* the status-bar HUD (Quake never tints
-/// the sbar).
+/// Software Quake's `V_UpdatePalette` runs LAST in `SCR_UpdateScreen` and shifts the
+/// whole VGA palette, so the tint covers the ENTIRE composited screen — 3-D view,
+/// status bar, centerprint, menu and console alike. Apply this to the FINISHED frame
+/// after every overlay, not just the 3-D viewport (which would be the GL look).
 pub fn apply_blend(image: &mut Image, color: [u8; 3], alpha: f32) {
     if !(alpha > 0.0) {
         return;
@@ -212,10 +214,14 @@ pub fn apply_warp(image: &mut Image, clock: f32) {
     if w <= 0 || h <= 0 {
         return;
     }
-    // intsintable[i] = (int)(AMP2 + AMP2*sin(i*2pi/128)) — truncated, range 0..2*AMP2.
+    // intsintable[i] = (int)(AMP2 + AMP2*sin(i*3.14159*2/128)) — truncated, 0..2*AMP2.
+    // id's R_InitTurb uses the truncated literal 3.14159 (NOT exact pi), so the table
+    // tops out at 5 (a broad plateau), never 6: at i=32 the argument falls just short
+    // of pi/2 so sin<1 and (int)5.999..=5. Using exact 2*pi would give 6 at i=32 — a
+    // one-index divergence. Match the C literal for bit-identical warp.
     let mut sintable = [0i32; 128];
     for (i, s) in sintable.iter_mut().enumerate() {
-        let f = AMP2 as f64 + AMP2 as f64 * ((i as f64) * std::f64::consts::TAU / 128.0).sin();
+        let f = AMP2 as f64 + AMP2 as f64 * ((i as f64) * 3.14159 * 2.0 / 128.0).sin();
         *s = f as i32; // (int) truncation, matching the C table build
     }
     // rowptr[i] = compressed source row for stretched index i in 0..h+2*AMP2.

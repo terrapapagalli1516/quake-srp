@@ -336,11 +336,11 @@ impl ParticleSystem {
             let vz = (rng.next_range(512) as i32 - 256) as f32;
             // Random initial ramp cursor: the C `p->ramp = rand()&3`.
             let ramp = (rng.next_u32() & 3) as f32;
-            // Even i -> pt_explode, odd i -> pt_explode2 (the C `if (i & 1)` set
-            // pt_explode; we keep the same even/odd split — exact assignment is
-            // cosmetic since both halves spawn the same way and only differ in
-            // their per-frame update).
-            let kind = if i & 1 == 0 {
+            // ODD i -> pt_explode, EVEN i -> pt_explode2, matching the C
+            // `if (i & 1) { type = pt_explode } else { type = pt_explode2 }`. (Both
+            // halves spawn from the same rand() sequence, so this only changes which
+            // 512-particle subset fades via ramp1 vs ramp2 — but match id exactly.)
+            let kind = if i & 1 != 0 {
                 ParticleKind::Explode
             } else {
                 ParticleKind::Explode2

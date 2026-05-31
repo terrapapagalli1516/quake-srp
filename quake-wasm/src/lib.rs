@@ -1231,17 +1231,28 @@ pub extern "C" fn step(dt: f32) {
         // gameplay input regardless. The console takes priority over the menu.
         let menu_visible = a.menu.visible;
         let gate_gameplay = menu_visible || a.console.open;
-        let mut img = if a.mode == 1 {
+        // Each mode returns its frame plus a DEFERRED screen blend (color, alpha):
+        // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it
+        // after the HUD/menu/console have composited, not just over the 3D view.
+        let frame = if a.mode == 1 {
             a.demo.as_mut().map(|d| step_demo(d, dt, w, h))
         } else {
             a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
         };
+        let (mut img, blend) = match frame {
+            Some((image, bc, ba)) => (Some(image), (bc, ba)),
+            None => (None, ([0u8, 0, 0], 0.0f32)),
+        };
 
         // The main menu overlays WHATEVER is playing (walk OR the attract demo).
         // Drawn here in the dispatcher, after the active mode rendered its frame
-        // and BEFORE packing to the framebuffer, so it sits on top of everything.
+        // and BEFORE packing to the framebuffer. Mirroring Quake's key_dest model
+        // (M_Draw is a no-op when key_dest == key_console), the menu is suppressed
+        // while the console is down — the console owns the screen+keyboard — so the
+        // two never both show (and the console sits on top, matching SCR_UpdateScreen
+        // drawing SCR_DrawConsole then M_Draw under mutual exclusion).
         // Uses the active mode's palette and the App clock for the cursor frame.
-        if menu_visible {
+        if menu_visible && !a.console.open {
             // Keep the Options "Screen size" label tracking the actual render
             // resolution (the framebuffer is the source of truth), so a boot /
             // New Game / `map` that changed the render size can't leave the label
@@ -1261,10 +1272,11 @@ pub extern "C" fn step(dt: f32) {
             }
         }
 
-        // The console overlays EVERYTHING — drawn last (after the menu), so the
-        // dropped-down panel sits on top of the menu too. It owns the keyboard
-        // while open. Uses the active mode's palette and the App clock for the
-        // input cursor blink. A closed console draws nothing.
+        // The console overlays everything and (per the gate above) replaces the menu
+        // while open — matching Quake, where the menu and the drop-down console are
+        // mutually exclusive via key_dest. It owns the keyboard while open. Uses the
+        // active mode's palette and the App clock for the input cursor blink. A
+        // closed console draws nothing.
         if a.console.open {
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
@@ -1278,6 +1290,14 @@ pub extern "C" fn step(dt: f32) {
                     );
                 }
             }
+        }
+
+        // V_UpdatePalette runs LAST in SCR_UpdateScreen: tint the fully composited
+        // frame (3D + HUD + centerprint/notify + menu + console) with the deferred
+        // damage/water/powerup blend, matching software Quake's whole-screen palette
+        // shift. A zero alpha (no active shift, or the demo path) is a no-op.
+        if let Some(img) = img.as_mut() {
+            render::apply_blend(img, blend.0, blend.1);
         }
 
         if let Some(img) = img {
@@ -1795,7 +1815,7 @@ fn step_walk(
     menu_up: bool,
     render_w: usize,
     render_h: usize,
-) -> render::Image {
+) -> (render::Image, [u8; 3], f32) {
     // Advance the animation clock (used for liquid warp + sky scroll). Guard
     // against a non-finite/negative dt so the clock only ever moves forward.
     if dt.is_finite() && dt > 0.0 {
@@ -2193,8 +2213,10 @@ fn step_walk(
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
     //     player lost health/armour this frame, and tint the view when the eye is
-    //     under water / in lava or slime. Applied to the 3-D frame BEFORE the HUD
-    //     (Quake never tints the status bar).
+    //     under water / in lava or slime. The blend is DEFERRED (returned to the
+    //     dispatcher) and applied to the whole composited frame last, matching
+    //     software V_UpdatePalette's whole-screen palette shift (it tints the HUD,
+    //     menu and console too — not the GL 3D-viewport-only behaviour).
     w.damage_blend = (w.damage_blend - dt * 150.0).max(0.0);
     let health = w.server.vm.ent_get_float(w.player, "health");
     let armorv = w.server.vm.ent_get_float(w.player, "armorvalue");
@@ -2240,10 +2262,17 @@ fn step_walk(
     if let Some(cs) = render::powerup_cshift(w.server.vm.ent_get_float(w.player, "items") as i32) {
         shifts.push(cs);
     }
-    if !shifts.is_empty() {
-        let (bc, ba) = render::combine_cshifts(&shifts);
-        render::apply_blend(&mut img, bc, ba);
-    }
+    // V_UpdatePalette (software view.c): the cshift is a whole-PALETTE shift run
+    // LAST in SCR_UpdateScreen, so it tints the ENTIRE screen — 3D view, status bar,
+    // centerprint, menu, console — not just the 3D viewport (that 3D-only scope is
+    // the GLQuake R_PolyBlend look). We DEFER the blend: draw the HUD/messages on the
+    // untinted frame and return (color, alpha) so the dispatcher tints the fully
+    // composited frame (after the menu/console overlay too).
+    let blend = if shifts.is_empty() {
+        ([0u8, 0, 0], 0.0f32)
+    } else {
+        render::combine_cshifts(&shifts)
+    };
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
@@ -2296,8 +2325,9 @@ fn step_walk(
 
     // The main-menu overlay is drawn by the `step` dispatcher (the menu lives at
     // the App level now so it can overlay walk OR the attract demo); step_walk no
-    // longer draws it.
-    img
+    // longer draws it. The deferred screen blend rides out with the frame so the
+    // dispatcher tints the whole composited image (HUD + menu + console included).
+    (img, blend.0, blend.1)
 }
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
@@ -2339,7 +2369,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     }
 }
 
-fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> render::Image {
+fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (render::Image, [u8; 3], f32) {
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
     d.elapsed += dt;
@@ -2416,7 +2446,10 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> ren
     // here (empty) and no live server for light styles (neutral static scales).
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None)
+    let img = render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None);
+    // The demo path applies no screen blend (it carries no live damage/powerup
+    // state); return a zero blend so its signature matches step_walk's deferred one.
+    (img, [0, 0, 0], 0.0)
 }
 
 #[cfg(test)]
@@ -2971,8 +3004,8 @@ mod tests {
             let d = a.demo.as_mut().unwrap();
             // Render the current demo frame with a tiny dt twice; with the menu
             // OFF and ON. (A tiny dt keeps both renders on the same frame.)
-            let plain = step_demo(d, 0.0001, w, h);
-            let mut withm = step_demo(d, 0.0001, w, h);
+            let (plain, _, _) = step_demo(d, 0.0001, w, h);
+            let (mut withm, _, _) = step_demo(d, 0.0001, w, h);
             let pal = a.active_palette().expect("demo palette");
             render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, pal);
             // The two frames are the same scene; only the menu overlay differs.

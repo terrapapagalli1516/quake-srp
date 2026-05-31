@@ -146,6 +146,13 @@ pub struct Vm {
     /// Taken out and restored around each use via [`Vm::with_host`] so a builtin
     /// can mutate both the host and the rest of the VM without a borrow clash.
     pub host: Option<Box<dyn Host>>,
+    /// Frame-start server time (`sv.time`), set once per frame by the Server. The
+    /// monster-locomotion builtins (`walkmove`/`movetogoal` -> `sv_movestep` /
+    /// `sv_step_direction`) need it for the relink trigger touches: world.c
+    /// SV_TouchLinks sets `time = sv.time` before each touch, but during a monster
+    /// think the `time` global holds the clamped thinktime, so reading it here
+    /// would skew touch timers up to one frame. This field carries the true sv.time.
+    pub sv_time: f32,
 
     // --- private execution state ---
     /// Call stack of saved caller frames (`pr_stack` / `pr_depth`).
@@ -196,6 +203,7 @@ impl Vm {
             argc: 0,
             trace: false,
             host: None,
+            sv_time: 0.0,
             stack: Vec::new(),
             localstack: Vec::new(),
             xfunction: 0,
