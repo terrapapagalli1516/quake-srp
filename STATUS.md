@@ -18,21 +18,21 @@ stand" note — read it before continuing, especially the **Caveats** and **WIP*
 
 ## Performance — current state & honest scorecard
 
-Warm-frame render cost @1920×1080 (release; varies with machine load — one run mid-session
-read 91 ms purely from host load, settling back to ~33 ms when idle, so treat absolute
-numbers as approximate and always compare A/B on the same machine state):
+Warm-frame render cost @1920×1080, measured on an IDLE machine earlier this session
+(absolute ms is unreliable under load — see Caveat 3 — so these are the idle readings;
+the *relative* steps are the trustworthy part):
 
 | stage | e1m1 @1080p | note |
 |-------|-------------|------|
 | start of this perf goal (surface-cache era) | ~49.5 ms | baseline |
-| + front-to-back ordering (`fb4725d`) | ~39.8 ms | **byte-identical** |
-| + linear-step perspective (`ae3ba68`) | ~38.0 ms | +57 px drift (not byte-identical) |
-| + submodel surface cache (`d2fc0d6`) | ~33 ms | +1247 px drift |
+| + front-to-back ordering (`fb4725d`) | ~39.8 ms | byte-identical (0 px) |
+| + linear-step perspective (`ae3ba68`) | ~38.0 ms | +57 px sub-pixel drift |
+| + submodel surface cache (`d2fc0d6`) | ~35 ms | byte-identical (0 px) |
 
-So **~1.5× this session**, ~3.9× vs the original per-pixel rasteriser. **The 2× goal
-(≤24.75 ms) was NOT reached.** Phase breakdown now: world ~22.6 ms, submodel ~7.7 ms,
+So **~1.4× this session**, ~3.9× vs the original per-pixel rasteriser. **The 2× goal
+(≤24.75 ms) was NOT reached.** Phase split: world dominates (~25 ms), submodel ~8 ms,
 alias ~1.8 ms. The world pass is the remaining lever and is pure per-pixel cost
-(overdraw is ~1.0× after front-to-back, so culling is optimal).
+(overdraw is ~1.0× after front-to-back, so culling is already optimal).
 
 ### Next perf ideas (not yet done)
 - **wasm SIMD (`simd128`)** — confirmed available in this toolchain
@@ -51,20 +51,22 @@ counters), zero-cost when off, surfaced by the `QUAKE_BENCH` harness in `quaketo
 
 ---
 
-## ⚠️ Caveats / debt (please fix the record when convenient)
+## ⚠️ Caveats / debt
 
-1. **`d2fc0d6` commit message is WRONG** — it claims the submodel surface cache is
-   "BYTE-IDENTICAL on all three maps". It is **not**: it shifts ~1247 px (0.49%, avg
-   Δ2) on e1m1 — the same texel-baked-vs-bilinear class as the world cache, faithful
-   but not identical. The golden hashes legitimately moved to
-   e1m1 `fb14bd65` / e1m2 `a6f98d8a` / e1m3 `0211e6d4`. (`ae3ba68` had the same
-   mislabel for linear-step; corrected by `3fce66c`.)
-2. **Golden baseline is now `fb14bd65` / `a6f98d8a` / `0211e6d4`** (post submodel
-   cache). Earlier ledgers reference older hashes; that's expected — each faithful
-   texel-baking step re-baselines.
-3. The `quaketool` bench's submodel profiler line prints the older
-   "… (no cache)" format without the hit/miss columns — a cosmetic format edit didn't
-   make it into a commit. The numbers are correct; only the label lags.
+1. **Golden baseline is `fb14bd65` / `a6f98d8a` / `0211e6d4`** (e1m1/e1m2/e1m3, post
+   submodel cache). The submodel surface cache (`d2fc0d6`) was re-verified
+   **byte-identical** to its parent (0 px diff on e1m1), so its "byte-identical"
+   message is correct. (Note: each *world*-cache texel-baking step earlier in the
+   history legitimately re-baselined the golden; that's expected and faithful —
+   texel-resolution lighting is what Quake's software renderer actually does.)
+2. **`ae3ba68` (linear-step perspective) really is NOT byte-identical** — it shifts
+   ~57 px (sub-pixel edge ULP drift); corrected by `3fce66c`. That one stands.
+3. **Benchmark absolute numbers are unreliable when the host is loaded.** During the
+   wrap-up the CPU was throttled (~3–10× slower across ALL resolutions
+   uniformly — a dead giveaway it's host load, not code). Re-measure on an idle
+   machine before trusting any ms figure; compare A/B in one sitting.
+4. The `quaketool` bench's submodel profiler line label may lag the actual counters
+   (cosmetic only; the numbers are right).
 
 ---
 
