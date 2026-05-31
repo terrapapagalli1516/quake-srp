@@ -3671,19 +3671,21 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
         blit_qpic(image, &sbar, 0.0, 0.0, scale, vy_top, hud.palette);
     }
 
-    // The big digits are ~24 px tall; Quake stamps them at virtual y=0 of the bar
-    // (`Sbar_DrawNum(.., y, ..)` with y measured from the bar top). Health on the
-    // left, armour beside it, current ammo on the right — all right-justified.
+    // The big digits live in three 3-wide fields whose positions match `sbar.c`'s
+    // Sbar_DrawNum calls exactly, so the numbers land in the `sbar` background's
+    // recessed boxes (24px per digit slot). Sbar_DrawNum(x_left, .., 3) draws a
+    // 3-digit right-justified field ending at x_left + 72; our draw_num takes that
+    // RIGHT edge. id positions: armour x_left=24 (right edge 96), health x_left=136
+    // (right edge 208), ammo x_left=248 (right edge 320). Each number is white
+    // (`num_*`) normally and gold (`anum_*`) when low — armour/health ≤ 25, ammo
+    // ≤ 10 — matching the `color` arg id passes (cl.stats[..] <= threshold).
     //
-    // 2. Health: right edge near virtual x=154 (Sbar_Draw draws health at x~136
-    //    and the 3-digit field ends a little past it).
-    draw_num(image, hud.health, 154.0, 0.0, scale, vy_top, hud.wad, hud.palette, false);
-    // 3. Armour: far left. Right edge at virtual x=78 so a full 3-digit value
-    //    (200 from red armour = 72 virtual px wide) starts at x>=6 and stays on
-    //    screen rather than clipping off the left edge.
-    draw_num(image, hud.armor, 78.0, 0.0, scale, vy_top, hud.wad, hud.palette, false);
-    // 4. Current ammo: gold digits, right edge near virtual x=248.
-    draw_num(image, hud.ammo, 248.0, 0.0, scale, vy_top, hud.wad, hud.palette, true);
+    // 2. Armour (far left): Sbar_DrawNum(24, armor, 3, armor<=25).
+    draw_num(image, hud.armor, 96.0, 0.0, scale, vy_top, hud.wad, hud.palette, hud.armor <= 25);
+    // 3. Health (centre, right of the face): Sbar_DrawNum(136, health, 3, health<=25).
+    draw_num(image, hud.health, 208.0, 0.0, scale, vy_top, hud.wad, hud.palette, hud.health <= 25);
+    // 4. Current ammo (far right): Sbar_DrawNum(248, ammo, 3, ammo<=10).
+    draw_num(image, hud.ammo, 320.0, 0.0, scale, vy_top, hud.wad, hud.palette, hud.ammo <= 10);
 }
 
 // ---------------------------------------------------------------------------
