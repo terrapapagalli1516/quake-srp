@@ -3179,6 +3179,18 @@ impl Server {
             self.vm.ent_set_float(ent, "fixangle", 0.0);
         }
 
+        // SV_ClientThink: waist-deep in water (and not noclip) -> swim, then
+        // return — mirrors sv_user.c dispatching SV_WaterMove ahead of SV_AirMove.
+        // `waterlevel` is the prior frame's check_water value (the WALK arm runs
+        // check_water AFTER client_think), matching id's two-pass phasing where
+        // SV_RunClients precedes SV_Physics.
+        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
+        if movetype != MOVETYPE_NOCLIP && waterlevel >= 2 {
+            self.water_move(ent, cmd, dt);
+            return;
+        }
+
         // SV_AirMove: wishvel from forward/side and the look angles.
         let angles = self.vm.ent_get_vector(ent, "angles");
         let (forward, right, _up) = crate::math::angle_vectors(angles);
@@ -3198,7 +3210,7 @@ impl Server {
             forward[2] * fmove + right[2] * smove,
         ];
 
-        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        // (movetype was read above for the water-move dispatch.)
         if movetype != MOVETYPE_WALK {
             wishvel[2] = cmd.upmove;
         } else {
@@ -3223,6 +3235,70 @@ impl Server {
             // not on ground, so little effect on velocity (air control).
             self.air_accelerate(ent, wishvel, dt);
         }
+    }
+
+    /// `SV_WaterMove` (sv_user.c:247): swimming. Faithful transcription —
+    ///  * wishvel is built from the FULL view angles (`v_angle`, includes pitch)
+    ///    so you swim along your look; the air path uses `angles` (1/3 pitch).
+    ///  * when fully idle (no forward/side/up) the player drifts down at 60 u/s,
+    ///    otherwise `cmd.upmove` adds vertical intent.
+    ///  * wishspeed clamps to `sv_maxspeed`, then scales 0.7 (water is slower).
+    ///  * water friction bleeds the full 3-D speed (`sv_friction`, NO edgefriction
+    ///    dropoff trace — unlike `user_friction`).
+    ///  * water-acceleration nudges velocity toward the normalised wish.
+    /// Gravity is suppressed by the WALK arm while waist-deep (waterlevel > 1),
+    /// so this buoyant motion survives the frame.
+    fn water_move(&mut self, ent: i32, cmd: &UserCmd, dt: f32) {
+        // AngleVectors(v_angle) — NOTE v_angle, not the AirMove `angles`.
+        let v_angle = self.vm.ent_get_vector(ent, "v_angle");
+        let (forward, right, _up) = angle_vectors(v_angle);
+        let mut wishvel = [
+            forward[0] * cmd.forwardmove + right[0] * cmd.sidemove,
+            forward[1] * cmd.forwardmove + right[1] * cmd.sidemove,
+            forward[2] * cmd.forwardmove + right[2] * cmd.sidemove,
+        ];
+        if cmd.forwardmove == 0.0 && cmd.sidemove == 0.0 && cmd.upmove == 0.0 {
+            wishvel[2] -= 60.0; // drift towards the bottom
+        } else {
+            wishvel[2] += cmd.upmove;
+        }
+
+        let mut wishspeed = crate::math::length(wishvel);
+        if wishspeed > SV_MAXSPEED {
+            wishvel = crate::math::scale(wishvel, SV_MAXSPEED / wishspeed);
+            wishspeed = SV_MAXSPEED;
+        }
+        wishspeed *= 0.7;
+
+        // Water friction: full 3-D speed, sv_friction, no edgefriction trace.
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let speed = crate::math::length(vel);
+        let newspeed = if speed != 0.0 {
+            let ns = (speed - dt * speed * SV_FRICTION).max(0.0);
+            vel = crate::math::scale(vel, ns / speed);
+            self.vm.ent_set_vector(ent, "velocity", vel);
+            ns
+        } else {
+            0.0
+        };
+
+        // Water acceleration toward normalize(wishvel).
+        if wishspeed == 0.0 {
+            return;
+        }
+        let addspeed = wishspeed - newspeed;
+        if addspeed <= 0.0 {
+            return;
+        }
+        let (wishdir, _) = crate::math::normalize(wishvel);
+        let mut accelspeed = SV_ACCELERATE * wishspeed * dt;
+        if accelspeed > addspeed {
+            accelspeed = addspeed;
+        }
+        for i in 0..3 {
+            vel[i] += accelspeed * wishdir[i];
+        }
+        self.vm.ent_set_vector(ent, "velocity", vel);
     }
 
     /// `SV_UserFriction` (sv_user.c): bleed off horizontal speed, with extra
@@ -6349,6 +6425,56 @@ mod tests {
             speed2 < speed1,
             "friction kept reducing speed: {speed1} -> {speed2}"
         );
+    }
+
+    // SV_WaterMove: waist-deep the player swims instead of walking. Idle, you
+    // drift down ~60 u/s; pressing the swim-down key (upmove < 0) descends
+    // faster. (Tests water_move directly — the synthetic test progs don't define
+    // a `waterlevel` field for the client_think dispatch, but the swim math is
+    // what matters; the real progs.dat has waterlevel and exercises the branch.)
+    #[test]
+    fn water_move_sinks_when_idle_and_descends_faster_with_movedown() {
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+        let p = server.connect_client().expect("connect");
+
+        // Idle, at rest: SV_WaterMove drifts down (wishvel.z -= 60).
+        server.vm.ent_set_vector(p, "v_angle", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+        server.water_move(p, &UserCmd::default(), 0.1);
+        let idle_z = server.vm.ent_get_vector(p, "velocity")[2];
+        assert!(idle_z < 0.0, "idle swimmer drifts down: vel.z = {idle_z}");
+
+        // Pressing swim-down (the `c` key -> upmove < 0) sinks faster.
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+        let down = UserCmd { upmove: -320.0, ..UserCmd::default() };
+        server.water_move(p, &down, 0.1);
+        let down_z = server.vm.ent_get_vector(p, "velocity")[2];
+        assert!(down_z < idle_z, "swim-down descends faster: {down_z} < {idle_z}");
+    }
+
+    // SV_WaterMove builds its wish from the FULL view angles (v_angle), so you
+    // swim along your look pitch — unlike the air move (which uses the 1/3-pitch
+    // `angles`). Looking up (pitch < 0) and swimming forward must rise. This is
+    // the regression guard for the v_angle-vs-angles faithfulness point.
+    #[test]
+    fn water_move_swims_up_when_looking_up_and_pressing_forward() {
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+        let p = server.connect_client().expect("connect");
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+        // v_angle pitch = -45 (look up in Quake's convention): forward.z =
+        // -sin(-45) > 0, so swimming forward rises.
+        server.vm.ent_set_vector(p, "v_angle", [-45.0, 0.0, 0.0]);
+
+        let fwd = UserCmd { forwardmove: 320.0, ..UserCmd::default() };
+        server.water_move(p, &fwd, 0.1);
+        let z = server.vm.ent_get_vector(p, "velocity")[2];
+        assert!(z > 0.0, "swimming forward while looking up rises: vel.z = {z}");
     }
 
     #[test]

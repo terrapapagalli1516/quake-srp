@@ -102,6 +102,11 @@ struct Walk {
     /// Whether the jump key is held (UserCmd button bit 1 -> the player's
     /// `button2`, which the QuakeC PlayerJump reads to leap when on the ground).
     in_jump: bool,
+    /// Whether the swim-down key (`c`) is held: drives `UserCmd.upmove` negative,
+    /// which `SV_WaterMove` reads to sink. Ignored out of water (the WALK air
+    /// move zeroes the vertical wish). Swim-UP reuses `in_jump` (Space) the same
+    /// way — in water it pushes up, on land it just jumps.
+    in_down: bool,
     /// A one-shot impulse (weapon switch etc.) queued by `set_impulse`, applied
     /// to the next `step_walk` UserCmd then cleared — matching how Quake's
     /// `impulse` console command fires once. 0 means "no impulse this frame".
@@ -378,6 +383,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         in_side: 0.0,
         in_attack: false,
         in_jump: false,
+        in_down: false,
         next_impulse: 0,
         damage_blend: 0.0,
         last_total: f32::NAN,
@@ -591,6 +597,18 @@ pub extern "C" fn set_jump(on: i32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.in_jump = on != 0;
+        }
+    });
+}
+
+/// Set whether the swim-DOWN key (`c`, the `+movedown` key) is held. Maps to a
+/// negative `UserCmd.upmove`, which `SV_WaterMove` reads to sink while waist-deep
+/// in water. Out of water it has no effect (the walk move ignores upmove).
+#[no_mangle]
+pub extern "C" fn set_movedown(on: i32) {
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            w.in_down = on != 0;
         }
     });
 }
@@ -1617,7 +1635,14 @@ fn step_walk(
     let cmd = UserCmd {
         forwardmove: fwd * SPEED,
         sidemove: side * SPEED,
-        upmove: 0.0,
+        // Vertical swim intent: Space (jump) = up, c (movedown) = down. Quake's
+        // SV_WaterMove consumes upmove while waist-deep; the ground/air move
+        // ignores it, so on land Space still just jumps and c does nothing.
+        upmove: if menu_up {
+            0.0
+        } else {
+            ((if w.in_jump { 1.0 } else { 0.0 }) - (if w.in_down { 1.0 } else { 0.0 })) * SPEED
+        },
         yaw: w.yaw,
         pitch: w.pitch,
         buttons: if menu_up {
