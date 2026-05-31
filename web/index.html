@@ -9,16 +9,23 @@
   h3 { margin:10px 0 4px; font-weight:600; }
   #status { min-height:1.1em; color:#8a8; font-size:13px; }
   #wrap { position:relative; display:inline-block; margin-top:8px; }
-  canvas { image-rendering:pixelated; width:768px; height:480px; background:#000;
+  /* Quake's art + 3-D were authored for a 320x200 framebuffer shown on a 4:3
+     monitor (non-square pixels, ~1.2x taller than wide). The render target is
+     16:10 square-pixel, so we present it in a 4:3 box — the framebuffer is
+     stretched vertically 1.2x exactly like a 1996 CRT. Without this the HUD
+     digits/menu/world look horizontally over-wide ("squat"). */
+  canvas { image-rendering:pixelated; width:640px; height:480px; background:#000;
     border:1px solid #333; display:block; cursor:crosshair; }
   #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     background:rgba(0,0,0,.55); color:#eee; font-size:18px; cursor:pointer; user-select:none; }
   #overlay.hidden { display:none; }
   .hint { margin:10px; color:#777; font-size:13px; }
   button { font:inherit; background:#222; color:#ccc; border:1px solid #444; padding:4px 10px; cursor:pointer; }
-  /* In fullscreen, let the canvas fill the screen (pixel-upscaled). */
+  /* In fullscreen, fill the height and keep the authentic 4:3 aspect (pillarboxed
+     on a wide monitor). aspect-ratio:4/3 overrides the 16:10 backing store so the
+     frame is presented exactly as Quake was meant to be seen. */
   #wrap:fullscreen { width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; background:#000; }
-  #wrap:fullscreen canvas { width:auto; height:100vh; }
+  #wrap:fullscreen canvas { height:100vh; width:auto; aspect-ratio:4 / 3; }
 </style>
 </head>
 <body>
@@ -31,7 +38,7 @@
   <div class="hint">
     <button id="walkBtn">🚶 walk e1m1</button> &nbsp; <button id="demoBtn">▶ play demo1 (e1m3)</button>
     &nbsp; <button id="fs">⛶ fullscreen (F)</button> &nbsp; <button id="sndBtn">🔊 sound (Space)</button><br>
-    <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn &nbsp;·&nbsp; <b>Space</b> jump<br>
+    <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn &nbsp;·&nbsp; <b>Space</b> jump / swim up &nbsp;·&nbsp; <b>c</b> swim down<br>
     <b>click</b> fire &nbsp;·&nbsp; <b>1–8</b> select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)<br>
     <b>Esc</b> / <b>Tab</b> menu (Tab works in fullscreen) &nbsp;·&nbsp; <b>~</b> console (try <code>god</code>, <code>give a</code>, <code>impulse 9</code>, <code>noclip</code>, <code>map e1m2</code>) &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>← →</b> adjust · <b>Enter</b> select<br>
     dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM
@@ -43,7 +50,7 @@ const wrap = document.getElementById('wrap');
 const overlay = document.getElementById('overlay');
 const fsBtn = document.getElementById('fs');
 const keys = {};
-const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' '];
+const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
 
 // Is the in-game menu currently up (capturing keyboard)?
 function menuVisible() { return !!(exp && exp.menu_visible && exp.menu_visible()); }
@@ -109,6 +116,9 @@ addEventListener('keydown', e => {
   // Space = jump (button bit 1 -> the player's button2 -> QuakeC PlayerJump).
   // (The 🔊 button still plays the manual test sound; in-game sound is automatic.)
   if (k === ' ' && exp && exp.set_jump) exp.set_jump(1);
+  // c = swim DOWN in water (the +movedown key -> UserCmd.upmove<0 -> SV_WaterMove
+  // sinks). Out of water it does nothing. Swim UP reuses Space (jump) in water.
+  if (k === 'c' && exp && exp.set_movedown) exp.set_movedown(1);
   // Weapon select: number keys 1-8 queue the matching QuakeC impulse
   // (1 axe, 2 shotgun, 3 super shotgun, 4 nailgun, 5 super nailgun,
   // 6 grenade launcher, 7 rocket launcher, 8 lightning) on the next frame.
@@ -122,6 +132,7 @@ addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
   keys[k] = false;
   if (k === ' ' && exp && exp.set_jump) exp.set_jump(0);
+  if (k === 'c' && exp && exp.set_movedown) exp.set_movedown(0);
 });
 
 function toggleFullscreen() {
