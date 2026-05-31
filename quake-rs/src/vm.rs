@@ -245,13 +245,14 @@ impl Vm {
 
     // --- name-resolved access (for the engine builtins and the spawner) ------
 
-    /// Entity-field cell offset for `name`, from `progs.fielddefs`.
+    /// Entity-field cell offset for `name`. O(1) via the progs' cached name->ofs
+    /// map (this is on the hot path of every `ent_get_*`/`ent_set_*`).
     pub fn field_ofs(&self, name: &str) -> Option<usize> {
-        self.progs.find_field(name).map(|d| d.ofs as usize)
+        self.progs.field_offset(name).map(|o| o as usize)
     }
-    /// Global cell offset for `name`, from `progs.globaldefs`.
+    /// Global cell offset for `name`, O(1) via the progs' cached map.
     pub fn global_ofs(&self, name: &str) -> Option<usize> {
-        self.progs.find_global(name).map(|d| d.ofs as usize)
+        self.progs.global_offset(name).map(|o| o as usize)
     }
 
     /// Read entity field `name` as a float (0.0 if the field is unknown).

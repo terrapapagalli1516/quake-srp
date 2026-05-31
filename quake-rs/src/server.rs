@@ -4352,9 +4352,10 @@ impl Server {
 // `SV_TouchLinks` ~258) and sv_phys.c (`SV_Impact` ~153, `SV_PushEntity`
 // ~408). SIMPLIFICATION: the C walked an areanode tree (SV_ClipToLinks /
 // SV_TouchLinks recursing children) for O(log n) culling; here we LINEAR-SCAN
-// every edict. e1m1 has ~150 edicts, so the scan is cheap and the result is
-// identical (the tree was only an acceleration structure). Brush-model
-// rotation (the `QUAKE2` branch) is out of scope.
+// every edict but apply the C's per-entity abs-box broadphase reject first (see
+// `sv_move`), so a dense map's far entities are dismissed in O(1) without a hull
+// trace — result-identical to the tree (which was only an acceleration
+// structure). Brush-model rotation (the `QUAKE2` branch) is out of scope.
 // ---------------------------------------------------------------------------
 
 // Solid types (server.h). SOLID_NOT/SOLID_TRIGGER do not block a move.
@@ -4467,8 +4468,33 @@ pub fn sv_move(
         let world = crate::world::trace_world(bsp, start, end, mins, maxs);
         let mut best = MoveTrace::from_world(world);
 
-        // 2) Clip to every solid entity (linear scan; the C used the areanode
-        //    tree purely as an acceleration structure).
+        // Broadphase bounds of the whole move (SV_MoveBounds, world.c ~1004): the
+        // C's SV_ClipToLinks rejects any touch entity whose linked abs box can't
+        // overlap this box BEFORE the expensive per-entity hull trace. We still scan
+        // linearly (no areanode tree), but this O(1) reject is what makes dense maps
+        // (e1m3: many monsters/items, so the old all-pairs clip was O(moves*edicts))
+        // tractable — and it's RESULT-IDENTICAL, since a non-overlapping box can
+        // never be hit. For a missile the box uses the +-15 `mins2/maxs2` expansion
+        // so nearby FL_MONSTER touches are still considered.
+        let (m2_mins, m2_maxs) = if missile {
+            ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0])
+        } else {
+            (mins, maxs)
+        };
+        let mut box_mins = [0.0f32; 3];
+        let mut box_maxs = [0.0f32; 3];
+        for i in 0..3 {
+            if end[i] > start[i] {
+                box_mins[i] = start[i] + m2_mins[i] - 1.0;
+                box_maxs[i] = end[i] + m2_maxs[i] + 1.0;
+            } else {
+                box_mins[i] = end[i] + m2_mins[i] - 1.0;
+                box_maxs[i] = start[i] + m2_maxs[i] + 1.0;
+            }
+        }
+
+        // 2) Clip to every solid entity (linear scan + the broadphase reject above;
+        //    the C used the areanode tree purely as an acceleration structure).
         let n = vm.num_edicts();
         for e in 0..n {
             let ei = e as i32;
@@ -4532,6 +4558,24 @@ pub fn sv_move(
                         continue; // points never interact
                     }
                 }
+            }
+
+            // SV_ClipToLinks broadphase reject (world.c ~857): skip any entity whose
+            // linked abs box does not overlap the move box. `absmin`/`absmax` are kept
+            // current by link_edict (origin+mins-exp .. origin+maxs-exp) on every
+            // setorigin/setsize/move, exactly as SV_LinkEdict maintains them, so this
+            // is the same test the C runs — and result-identical (a box that can't
+            // overlap the move can't be hit by the precise clip below).
+            let absmin = vm.ent_get_vector(ei, "absmin");
+            let absmax = vm.ent_get_vector(ei, "absmax");
+            if absmin[0] > box_maxs[0]
+                || absmin[1] > box_maxs[1]
+                || absmin[2] > box_maxs[2]
+                || absmax[0] < box_mins[0]
+                || absmax[1] < box_mins[1]
+                || absmax[2] < box_mins[2]
+            {
+                continue;
             }
 
             let origin = vm.ent_get_vector(ei, "origin");

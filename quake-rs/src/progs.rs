@@ -278,6 +278,13 @@ pub struct Progs {
     pub globals: Vec<u32>,
     /// Number of 32-bit fields per entity.
     pub entityfields: i32,
+    /// Field name -> entity-field cell offset, built once from `fielddefs` (first
+    /// occurrence wins, matching the old linear `find_field`). Resolving a field by
+    /// name is on the hot path of every `ent_get_*`/`ent_set_*` call (thousands per
+    /// frame); the map makes it O(1) instead of an O(numfielddefs) string scan.
+    field_ofs_map: std::collections::HashMap<String, u16>,
+    /// Global name -> global cell offset, same rationale for `gget_*`/`gset_*`.
+    global_ofs_map: std::collections::HashMap<String, u16>,
 }
 
 impl Progs {
@@ -414,6 +421,21 @@ impl Progs {
             )));
         }
 
+        // Build the name->offset caches once (first occurrence wins, matching the
+        // old linear scans). Done here so every later lookup is O(1).
+        let mut field_ofs_map = std::collections::HashMap::with_capacity(fielddefs.len());
+        for d in &fielddefs {
+            field_ofs_map
+                .entry(string_in(&strings, d.s_name).to_string())
+                .or_insert(d.ofs);
+        }
+        let mut global_ofs_map = std::collections::HashMap::with_capacity(globaldefs.len());
+        for d in &globaldefs {
+            global_ofs_map
+                .entry(string_in(&strings, d.s_name).to_string())
+                .or_insert(d.ofs);
+        }
+
         Ok(Progs {
             version,
             crc,
@@ -424,7 +446,20 @@ impl Progs {
             strings,
             globals,
             entityfields,
+            field_ofs_map,
+            global_ofs_map,
         })
+    }
+
+    /// Entity-field cell offset for `name`, O(1) via the cached map (mirrors the
+    /// first-match semantics of [`find_field`](Self::find_field)).
+    pub fn field_offset(&self, name: &str) -> Option<u16> {
+        self.field_ofs_map.get(name).copied()
+    }
+
+    /// Global cell offset for `name`, O(1) via the cached map.
+    pub fn global_offset(&self, name: &str) -> Option<u16> {
+        self.global_ofs_map.get(name).copied()
     }
 
     /// Resolve a `string_t` (byte offset into the heap) to a `&str`, trimmed at
