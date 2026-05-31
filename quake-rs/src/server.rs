@@ -1078,7 +1078,13 @@ fn bi_particle(vm: &mut Vm) -> Result<()> {
     // color is a float palette index; clamp into 0..=255 before the byte cast so
     // an out-of-range value can never wrap unexpectedly.
     let color = vm.arg_float(2).clamp(0.0, 255.0) as u8;
-    let count = vm.arg_float(3) as i32;
+    // SV_StartParticle writes `count` as ONE byte (clamped to 255), and the client's
+    // CL_ParseParticleEffect maps the 255 byte back to 1024 — the explosion sentinel
+    // (R_RunParticleEffect's fiery pt_explode burst). So `count >= 255` means "1024".
+    // The misc_explobox death does `particle(origin, '0 0 0', 75, 255)`, so without
+    // this the barrel's explosion rendered as faint SlowGrav dust instead of a burst.
+    let raw = vm.arg_float(3) as i32;
+    let count = if raw >= 255 { 1024 } else { raw };
 
     push_particle_burst(ParticleBurst {
         org,

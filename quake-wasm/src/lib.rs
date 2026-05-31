@@ -148,6 +148,11 @@ struct Walk {
     /// The fading top-left notify lines (`bprint`/`sprint`): text + expiry clock
     /// (Quake's `con_notifytime` ~3s), capped to the last few.
     notify: Vec<(String, f32)>,
+    /// The in-progress notify line (Con_Print model): bprint/sprint text accumulates
+    /// here and only breaks into a notify line on '\n'. Quake item pickups print via
+    /// several `sprint` calls ("You receive ", "25", " health\n"); the C console
+    /// joins them into ONE line, so we must not emit one notify line per call.
+    notify_pending: String,
     /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
     /// the animated special surfaces: liquid warp + sky scroll in the renderer.
     clock: f32,
@@ -435,6 +440,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         oldz: f32::NAN,
         centerprint: None,
         notify: Vec::new(),
+        notify_pending: String::new(),
         clock: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
@@ -1796,6 +1802,8 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
+    // Drop any half-built notify line so it can't leak into the next level.
+    w.notify_pending.clear();
     w.clock = 0.0;
     // Reset the screen-blend state so the level change does not flash red.
     w.damage_blend = 0.0;
@@ -1886,9 +1894,20 @@ fn step_walk(
         if m.center {
             w.centerprint = Some((m.text, w.clock + 2.0));
         } else {
-            for line in m.text.split('\n').filter(|l| !l.trim().is_empty()) {
-                w.notify.push((line.to_string(), w.clock + 3.0));
-            }
+            // Con_Print model: accumulate notify text and only break into a line on
+            // '\n'. Quake pickups print via several sprint() calls ("You receive ",
+            // "25", " health\n") that the C console joins into ONE line; emitting one
+            // notify line per call would wrongly split a single message across lines.
+            w.notify_pending.push_str(&m.text);
+        }
+    }
+    // Flush every complete ('\n'-terminated) line from the pending buffer; the
+    // trailing partial (no newline yet) stays buffered until more text arrives.
+    while let Some(nl) = w.notify_pending.find('\n') {
+        let line: String = w.notify_pending.drain(..=nl).collect();
+        let line = line.trim_end_matches(['\n', '\r']).to_string();
+        if !line.trim().is_empty() {
+            w.notify.push((line, w.clock + 3.0));
             while w.notify.len() > 4 {
                 w.notify.remove(0);
             }
@@ -2412,6 +2431,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
     let f = &d.demo.frames[d.idx];
 
     let mut owned: Vec<ModelInstance> = Vec::new();
+    let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     for e in &f.entities {
         if let Some(Some(mdl)) = d.models.get(e.modelindex) {
             owned.push(ModelInstance {
@@ -2427,6 +2447,23 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
                 // stream — use it so monsters in the demo are actually posed.
                 frame: e.frame.max(0) as usize,
                 skinnum: 0,
+            });
+        } else if let Some(num) = d
+            .demo
+            .model_precache
+            .get(e.modelindex)
+            .and_then(|name| name.strip_prefix('*'))
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            // Brush submodels (doors, platforms, ELEVATORS, buttons) are "*N"
+            // precache names with no alias Mdl; they render at the entity origin
+            // from world submodel N. The live walk passes these; the demo path used
+            // to drop them entirely, so moving level geometry vanished behind the
+            // boot-demo menu. `frame` picks the activated (+a..+j) texture cycle.
+            bmodels.push(render::BModelInstance {
+                model_index: num,
+                origin: e.origin,
+                frame: e.frame.max(0),
             });
         }
     }
@@ -2446,7 +2483,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
     // here (empty) and no live server for light styles (neutral static scales).
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    let img = render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None);
+    let img = render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None);
     // The demo path applies no screen blend (it carries no live damage/powerup
     // state); return a zero blend so its signature matches step_walk's deferred one.
     (img, [0, 0, 0], 0.0)
