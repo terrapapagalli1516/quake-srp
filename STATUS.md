@@ -28,11 +28,19 @@ the *relative* steps are the trustworthy part):
 | + front-to-back ordering (`fb4725d`) | ~39.8 ms | byte-identical (0 px) |
 | + linear-step perspective (`ae3ba68`) | ~38.0 ms | +57 px sub-pixel drift |
 | + submodel surface cache (`d2fc0d6`) | ~35 ms | byte-identical (0 px) |
+| + per-row buffer slices (`00da175`) | ~34 ms | byte-identical; ~2% (within noise) |
 
-So **~1.4× this session**, ~3.9× vs the original per-pixel rasteriser. **The 2× goal
-(≤24.75 ms) was NOT reached.** Phase split: world dominates (~25 ms), submodel ~8 ms,
-alias ~1.8 ms. The world pass is the remaining lever and is pure per-pixel cost
-(overdraw is ~1.0× after front-to-back, so culling is already optimal).
+So **~1.45× this session**, ~3.9× vs the original per-pixel rasteriser. **The 2× goal
+(≤24.75 ms) was NOT reached, and scalar micro-opts have run out** — the per-row slice
+A/B'd at only ~2% (LLVM was already hoisting the bounds checks). Phase split: world
+dominates (~25 ms), submodel ~8 ms, alias ~1.8 ms. The world pass is ~25 ms of
+IRREDUCIBLE scalar per-pixel work (2M px × texel-read + palette-lookup + z-test);
+overdraw is already ~1.0× after front-to-back, so culling is optimal.
+
+**The only remaining path to 2× is SIMD** (process 4–8 px/instruction — see below). It
+is a substantial, genuinely-different implementation AND it cannot be measured honestly
+until the host is idle (this session the CPU was throttled ~3× the whole time, so
+absolute ms and small deltas were untrustworthy). That's the right next-session task.
 
 ### Next perf ideas (not yet done)
 - **wasm SIMD (`simd128`)** — confirmed available in this toolchain
