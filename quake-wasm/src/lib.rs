@@ -99,6 +99,9 @@ struct Walk {
     in_fwd: f32,
     in_side: f32,
     in_attack: bool,
+    /// Whether the jump key is held (UserCmd button bit 1 -> the player's
+    /// `button2`, which the QuakeC PlayerJump reads to leap when on the ground).
+    in_jump: bool,
     /// A one-shot impulse (weapon switch etc.) queued by `set_impulse`, applied
     /// to the next `step_walk` UserCmd then cleared — matching how Quake's
     /// `impulse` console command fires once. 0 means "no impulse this frame".
@@ -372,6 +375,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         in_fwd: 0.0,
         in_side: 0.0,
         in_attack: false,
+        in_jump: false,
         next_impulse: 0,
         damage_blend: 0.0,
         last_total: f32::NAN,
@@ -573,6 +577,18 @@ pub extern "C" fn set_attack(on: i32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.in_attack = on != 0;
+        }
+    });
+}
+
+/// Set whether the jump key is held. Maps to UserCmd button bit 1 -> the
+/// player's `button2`, which the QuakeC PlayerJump reads to jump when on the
+/// ground (velocity_z = 270).
+#[no_mangle]
+pub extern "C" fn set_jump(on: i32) {
+    ensure_app(|a| {
+        if let Some(w) = a.walk.as_mut() {
+            w.in_jump = on != 0;
         }
     });
 }
@@ -1592,7 +1608,11 @@ fn step_walk(
         upmove: 0.0,
         yaw: w.yaw,
         pitch: w.pitch,
-        buttons: if !menu_up && w.in_attack { 1 } else { 0 },
+        buttons: if menu_up {
+            0
+        } else {
+            (if w.in_attack { 1 } else { 0 }) | (if w.in_jump { 2 } else { 0 })
+        },
         impulse: if menu_up { 0 } else { w.next_impulse },
     };
     // A queued impulse fires once (the server also clears the edict field after

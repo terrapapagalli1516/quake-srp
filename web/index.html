@@ -31,9 +31,9 @@
   <div class="hint">
     <button id="walkBtn">🚶 walk e1m1</button> &nbsp; <button id="demoBtn">▶ play demo1 (e1m3)</button>
     &nbsp; <button id="fs">⛶ fullscreen (F)</button> &nbsp; <button id="sndBtn">🔊 sound (Space)</button><br>
-    <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn<br>
+    <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn &nbsp;·&nbsp; <b>Space</b> jump<br>
     <b>click</b> fire &nbsp;·&nbsp; <b>1–8</b> select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)<br>
-    <b>Esc</b> menu &nbsp;·&nbsp; <b>~</b> console (try <code>god</code>, <code>give a</code>, <code>impulse 9</code>, <code>noclip</code>, <code>map e1m2</code>) &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>← →</b> adjust · <b>Enter</b> select<br>
+    <b>Esc</b> / <b>Tab</b> menu (Tab works in fullscreen) &nbsp;·&nbsp; <b>~</b> console (try <code>god</code>, <code>give a</code>, <code>impulse 9</code>, <code>noclip</code>, <code>map e1m2</code>) &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>← →</b> adjust · <b>Enter</b> select<br>
     dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM
   </div>
 <script>
@@ -77,11 +77,13 @@ addEventListener('keydown', e => {
     return;
   }
 
-  // --- Main menu navigation. Escape always reaches the menu (opens it from the
-  //     game, or backs out within it). When the menu is up, Arrow Up/Down move
-  //     the cursor, Enter selects — and we DON'T let those keys also drive the
-  //     game (no movement/turn while navigating the menu).
-  if (k === 'escape' && exp && exp.menu_cancel) {
+  // --- Main menu navigation. Escape OR Tab reaches the menu (opens it from the
+  //     game, or backs out within it). Tab is the fullscreen-safe alternative:
+  //     in fullscreen the browser eats Escape to exit fullscreen, so Tab lets you
+  //     still reach the menu without leaving fullscreen. When the menu is up,
+  //     Arrow Up/Down move the cursor, Enter selects — and we DON'T let those
+  //     keys also drive the game (no movement/turn while navigating the menu).
+  if ((k === 'escape' || k === 'tab') && exp && exp.menu_cancel) {
     exp.menu_cancel();
     e.preventDefault();
     return;
@@ -104,7 +106,9 @@ addEventListener('keydown', e => {
 
   keys[k] = true;
   if (k === 'f') toggleFullscreen();
-  if (k === ' ') playSound();
+  // Space = jump (button bit 1 -> the player's button2 -> QuakeC PlayerJump).
+  // (The 🔊 button still plays the manual test sound; in-game sound is automatic.)
+  if (k === ' ' && exp && exp.set_jump) exp.set_jump(1);
   // Weapon select: number keys 1-8 queue the matching QuakeC impulse
   // (1 axe, 2 shotgun, 3 super shotgun, 4 nailgun, 5 super nailgun,
   // 6 grenade launcher, 7 rocket launcher, 8 lightning) on the next frame.
@@ -114,7 +118,11 @@ addEventListener('keydown', e => {
   }
   if (MOVE_KEYS.includes(k)) e.preventDefault();
 });
-addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+addEventListener('keyup', e => {
+  const k = e.key.toLowerCase();
+  keys[k] = false;
+  if (k === ' ' && exp && exp.set_jump) exp.set_jump(0);
+});
 
 function toggleFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
