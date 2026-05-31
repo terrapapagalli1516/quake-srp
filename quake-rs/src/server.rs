@@ -2382,6 +2382,44 @@ impl Server {
         }
     }
 
+    /// `SV_CheckWater` (sv_phys.c:808): sample the world contents at the entity's
+    /// feet, waist and eyes and set its `waterlevel` (0..3) + `watertype`
+    /// (`CONTENTS_WATER`/`SLIME`/`LAVA`). Without this the QuakeC `WaterMove`
+    /// (run from `PlayerPostThink`) sees `waterlevel == 0` forever and never deals
+    /// lava/slime drowning damage. Returns `true` when at least waist-deep
+    /// (`waterlevel > 1`), which the caller uses to suppress gravity. A content
+    /// `<= CONTENTS_WATER` (-3) is liquid (LAVA -5 < SLIME -4 < WATER -3).
+    fn check_water(&mut self, ent: i32) -> bool {
+        const CONTENTS_WATER: i32 = -3;
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let mins = self.vm.ent_get_vector(ent, "mins");
+        let maxs = self.vm.ent_get_vector(ent, "maxs");
+        let view_ofs = self.vm.ent_get_vector(ent, "view_ofs");
+        let contents_at = |s: &mut Self, z: f32| -> i32 {
+            let p = [origin[0], origin[1], z];
+            s.vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID)
+        };
+
+        let mut waterlevel = 0i32;
+        let mut watertype = CONTENTS_EMPTY;
+        // Feet: origin.z + mins.z + 1.
+        if contents_at(self, origin[2] + mins[2] + 1.0) <= CONTENTS_WATER {
+            watertype = contents_at(self, origin[2] + mins[2] + 1.0);
+            waterlevel = 1;
+            // Waist: midpoint of the box.
+            if contents_at(self, origin[2] + (mins[2] + maxs[2]) * 0.5) <= CONTENTS_WATER {
+                waterlevel = 2;
+                // Eyes: origin.z + view_ofs.z.
+                if contents_at(self, origin[2] + view_ofs[2]) <= CONTENTS_WATER {
+                    waterlevel = 3;
+                }
+            }
+        }
+        self.vm.ent_set_float(ent, "waterlevel", waterlevel as f32);
+        self.vm.ent_set_float(ent, "watertype", watertype as f32);
+        waterlevel > 1
+    }
+
     /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
     /// where the per-entity `gravity` field defaults to 1.0 when unset/zero.
     fn add_gravity(&mut self, ent: i32, dt: f32) {
@@ -2818,10 +2856,13 @@ impl Server {
                     return Ok(fired);
                 }
                 // SV_ClientThink does friction/acceleration toward wishdir; then
-                // gravity (unless water-jumping) and the step-up walk move.
+                // gravity (unless in water or water-jumping) and the step-up walk
+                // move. check_water sets waterlevel/watertype so the QuakeC
+                // WaterMove (PlayerPostThink) can deal lava/slime damage.
                 self.client_think(ent, cmd, dt);
+                let in_water = self.check_water(ent);
                 let flags = self.vm.ent_get_float(ent, "flags") as i32;
-                if flags & FL_WATERJUMP == 0 {
+                if !in_water && flags & FL_WATERJUMP == 0 {
                     self.add_gravity(ent, dt);
                 }
                 self.walk_move(ent, start_time, dt);
@@ -2833,6 +2874,7 @@ impl Server {
                     return Ok(fired);
                 }
                 self.client_think(ent, cmd, dt);
+                self.check_water(ent); // keep waterlevel/watertype live while flying
                 self.player_fly_move(ent, start_time, dt);
             }
             MOVETYPE_NOCLIP => {
@@ -3551,6 +3593,14 @@ impl MoveTrace {
 /// the move's own box. When `missile == false` (every caller except the
 /// `MOVETYPE_FLYMISSILE` branch of `push_entity`), behaviour is identical to a
 /// plain `MOVE_NORMAL` clip.
+/// Sample the world point-contents at `p` (the [`Host`]-backed `SV_PointContents`
+/// the builtins use): `CONTENTS_EMPTY` (-1), `SOLID` (-2), `WATER` (-3),
+/// `SLIME` (-4), `LAVA` (-5), etc. Exposed for tooling/tests (e.g. probing where
+/// a liquid is); `CONTENTS_SOLID` if there is no host.
+pub fn probe_point_contents(vm: &mut Vm, p: Vec3) -> i32 {
+    vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID)
+}
+
 pub fn sv_move(
     vm: &mut Vm,
     start: Vec3,
