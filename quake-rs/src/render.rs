@@ -1842,6 +1842,101 @@ fn raster_triangle_tex(
     }
 }
 
+/// Fast rasteriser for a wall whose lit+colormapped surface block is already baked
+/// (see [`face_surf_block`]) — Quake's `D_DrawSpans` over a cached surface. Same
+/// perspective-correct projection, incremental-edge stepping, near-clip handling
+/// and z-test as [`raster_triangle_tex`], but the inner pixel is ONE block read
+/// (the texture, lightmap and colormap are already folded into the block) plus a
+/// palette lookup, instead of a texture sample + bilinear lightmap + colormap row
+/// + colormap index per pixel. This is the warm-frame hot path for static walls.
+#[allow(clippy::too_many_arguments)]
+fn raster_triangle_cached(
+    image: &mut Image,
+    zbuf: &mut [f32],
+    v0: ProjT,
+    v1: ProjT,
+    v2: ProjT,
+    block: &[u8],
+    bw: usize,
+    bh: usize,
+    texmins: [f32; 2],
+    palette: &[[u8; 3]; 256],
+) {
+    let w = image.w;
+    let h = image.h;
+    if w == 0 || h == 0 || bw == 0 || bh == 0 || block.len() < bw.saturating_mul(bh) {
+        return;
+    }
+    let min_xf = v0.x.min(v1.x).min(v2.x);
+    let max_xf = v0.x.max(v1.x).max(v2.x);
+    let min_yf = v0.y.min(v1.y).min(v2.y);
+    let max_yf = v0.y.max(v1.y).max(v2.y);
+    if !(min_xf.is_finite() && max_xf.is_finite() && min_yf.is_finite() && max_yf.is_finite()) {
+        return;
+    }
+    let min_x = min_xf.floor().max(0.0) as i64;
+    let max_x = max_xf.ceil().min((w as i64 - 1) as f32) as i64;
+    let min_y = min_yf.floor().max(0.0) as i64;
+    let max_y = max_yf.ceil().min((h as i64 - 1) as f32) as i64;
+    if min_x > max_x || min_y > max_y {
+        return;
+    }
+    let area = edge(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    let inv_area = 1.0 / area;
+    let (iz0, iz1, iz2) = (1.0 / v0.vz, 1.0 / v1.vz, 1.0 / v2.vz);
+    let (soz0, soz1, soz2) = (v0.s * iz0, v1.s * iz1, v2.s * iz2);
+    let (toz0, toz1, toz2) = (v0.t * iz0, v1.t * iz1, v2.t * iz2);
+    let dw0dx = -(v2.y - v1.y) * inv_area;
+    let dw1dx = -(v0.y - v2.y) * inv_area;
+    let dw2dx = -(v1.y - v0.y) * inv_area;
+    let (bw_i, bh_i) = (bw as i64, bh as i64);
+
+    for py in min_y..=max_y {
+        let sy = py as f32 + 0.5;
+        let sx0 = min_x as f32 + 0.5;
+        let mut w0 = edge(v1.x, v1.y, v2.x, v2.y, sx0, sy) * inv_area;
+        let mut w1 = edge(v2.x, v2.y, v0.x, v0.y, sx0, sy) * inv_area;
+        let mut w2 = edge(v0.x, v0.y, v1.x, v1.y, sx0, sy) * inv_area;
+        for px in min_x..=max_x {
+            'pixel: {
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    break 'pixel;
+                }
+                let inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
+                if inv_z <= 0.0 {
+                    break 'pixel;
+                }
+                let depth = 1.0 / inv_z;
+                let idx = (py as usize) * w + (px as usize);
+                let zc = match zbuf.get_mut(idx) {
+                    Some(z) => z,
+                    None => break 'pixel,
+                };
+                if depth >= *zc {
+                    break 'pixel;
+                }
+                let s = (w0 * soz0 + w1 * soz1 + w2 * soz2) * depth;
+                let t = (w0 * toz0 + w1 * toz1 + w2 * toz2) * depth;
+                // Nearest surface texel within the block extent (the block is 1:1
+                // with surface texels at mip 0).
+                let bx = ((s - texmins[0]) as i64).clamp(0, bw_i - 1) as usize;
+                let by = ((t - texmins[1]) as i64).clamp(0, bh_i - 1) as usize;
+                let pal_idx = block[by * bw + bx] as usize;
+                *zc = depth;
+                if let Some(p) = image.rgb.get_mut(idx) {
+                    *p = palette[pal_idx];
+                }
+            }
+            w0 += dw0dx;
+            w1 += dw1dx;
+            w2 += dw2dx;
+        }
+    }
+}
+
 /// Render `bsp` with its real miptextures sampled through `palette` (Quake's
 /// `gfx/palette.lmp`). Texture coordinates come from each face's `texinfo` axes;
 /// sampling is perspective-correct. Faces whose texture has no inline pixels
@@ -2580,11 +2675,151 @@ struct LightCache {
     entries: Vec<Option<LightCacheEntry>>,
 }
 
+/// One cached lit SURFACE block (Quake's `d_surf.c` surface cache entry, mip 0):
+/// the face's texture with the lightmap shaded in AND resolved through the colormap
+/// to a final palette index, one byte per surface texel. The rasteriser then reads
+/// a single byte per screen pixel (then one palette lookup) instead of sampling the
+/// texture, bilinear-interpolating the lightmap, and indexing the colormap per
+/// pixel — moving all of that to a per-texel bake done ONCE and reused every frame.
+#[derive(Clone)]
+struct SurfCacheEntry {
+    /// Active styles' resolved scale values at bake time (the cache key, same as the
+    /// lightmap cache — a torch tick rebuilds the block).
+    style_scales: [f32; crate::bsp::MAXLIGHTMAPS],
+    n_styles: usize,
+    /// Baked palette indices, `bw * bh`, row-major. `Rc` so a frame's draw clones
+    /// the handle (a refcount bump), not the (possibly large) buffer.
+    block: std::rc::Rc<Vec<u8>>,
+    bw: usize,
+    bh: usize,
+    /// Surface-space origin of the block (`s = texmins[0] + i`, `t = texmins[1] + j`).
+    texmins: [f32; 2],
+}
+
+/// The lit-surface cache, keyed by world fingerprint (cleared on a changelevel) +
+/// per-face style scales (rebuilt when an animated style ticks).
+struct SurfCache {
+    fingerprint: WorldFingerprint,
+    entries: Vec<Option<SurfCacheEntry>>,
+}
+
 thread_local! {
     /// Per-thread world static-geometry cache (one world at a time).
     static GEOM_CACHE: std::cell::RefCell<Option<GeomCache>> = const { std::cell::RefCell::new(None) };
     /// Per-thread lightmap surface cache.
     static LIGHT_CACHE: std::cell::RefCell<Option<LightCache>> = const { std::cell::RefCell::new(None) };
+    /// Per-thread lit-surface (texel) cache.
+    static SURF_CACHE: std::cell::RefCell<Option<SurfCache>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Maximum baked surface-cache block, in texels. A face larger than this stays on
+/// the per-pixel lighting path, so one pathological giant surface can't allocate a
+/// multi-MB block; virtually every real id1 face is far smaller.
+const SURF_BLOCK_MAX: usize = 1 << 20;
+
+/// Build (and cache) a world face's lit+colormapped surface block (mip 0). Returns
+/// the `Rc` handle + dimensions + surface origin, or `None` (caller keeps the
+/// per-pixel path) when there is no usable colormap, the face is dynamically lit
+/// (`dlit` — the moving dlight can't be baked), the texture is missing, or the
+/// block would exceed [`SURF_BLOCK_MAX`].
+///
+/// FIDELITY: at mip 0 the block is 1:1 with surface texels, so the sampled texture
+/// texel is identical to the per-pixel path; only the lighting is sampled at texel
+/// centres (then nearest-read per pixel) rather than per screen pixel — which is
+/// exactly what Quake's surface cache does (`R_BuildLightMap` + `D_DrawSurfaceBlock8`).
+#[allow(clippy::too_many_arguments)]
+fn face_surf_block(
+    idx: usize,
+    face: &crate::bsp::DFace,
+    mt: &crate::bsp::MipTex,
+    lm: &LightMap,
+    colormap: &[u8],
+    fp: WorldFingerprint,
+    n_faces: usize,
+    light_styles: &[f32; LIGHTSTYLES],
+    dlit: bool,
+) -> Option<(std::rc::Rc<Vec<u8>>, usize, usize, [f32; 2])> {
+    if dlit || colormap.len() < COLORMAP_LEN {
+        return None;
+    }
+    let (tw, th) = (mt.width as usize, mt.height as usize);
+    if tw == 0 || th == 0 || mt.pixels.len() < tw.saturating_mul(th) {
+        return None;
+    }
+    // The block spans the surface's texture-space extent at full resolution. lmw/lmh
+    // are extent/16 + 1 luxels, so the texel extent is (lmw-1)*16 + 1.
+    let bw = lm.lmw.saturating_sub(1).saturating_mul(16).saturating_add(1);
+    let bh = lm.lmh.saturating_sub(1).saturating_mul(16).saturating_add(1);
+    let total = bw.checked_mul(bh)?;
+    if bw == 0 || bh == 0 || total > SURF_BLOCK_MAX {
+        return None;
+    }
+    // Cache key: the active styles' resolved scales (matching the lightmap cache).
+    let mut scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
+    let mut n_styles = 0usize;
+    for &style in face.styles.iter() {
+        if style == STYLE_NONE {
+            break;
+        }
+        if n_styles < scales.len() {
+            scales[n_styles] = light_styles.get(style as usize).copied().unwrap_or(1.0);
+        }
+        n_styles += 1;
+    }
+
+    SURF_CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        let needs_reset = match slot.as_ref() {
+            Some(sc) => sc.fingerprint != fp || sc.entries.len() != n_faces,
+            None => true,
+        };
+        if needs_reset {
+            *slot = Some(SurfCache {
+                fingerprint: fp,
+                entries: vec![None; n_faces],
+            });
+        }
+        let sc = slot.as_mut().expect("just initialised");
+        // HIT: same face, same resolved style scales -> reuse the baked block.
+        if let Some(e) = sc.entries.get(idx).and_then(|e| e.as_ref()) {
+            if e.n_styles == n_styles
+                && e.bw == bw
+                && e.bh == bh
+                && e.style_scales[..n_styles] == scales[..n_styles]
+            {
+                return Some((e.block.clone(), e.bw, e.bh, e.texmins));
+            }
+        }
+        // MISS: bake the block once. For each surface texel (i,j): take the tiled
+        // base texel, shade by the lightmap factor at the texel centre, pick the
+        // colormap row, and store the final palette index.
+        let texmins = lm.texmins;
+        let (tmi0, tmi1) = (texmins[0] as i64, texmins[1] as i64);
+        let mut block = vec![0u8; total];
+        for j in 0..bh {
+            let ty = ((tmi1 + j as i64).rem_euclid(th as i64)) as usize;
+            let tf = texmins[1] + j as f32;
+            for i in 0..bw {
+                let tx = ((tmi0 + i as i64).rem_euclid(tw as i64)) as usize;
+                let texel = mt.pixels[ty * tw + tx] as usize;
+                let bri = lm.factor_at(texmins[0] + i as f32, tf);
+                let row = colormap_row(bri);
+                block[j * bw + i] = colormap[row * 256 + texel];
+            }
+        }
+        let block = std::rc::Rc::new(block);
+        if let Some(e) = sc.entries.get_mut(idx) {
+            *e = Some(SurfCacheEntry {
+                style_scales: scales,
+                n_styles,
+                block: block.clone(),
+                bw,
+                bh,
+                texmins,
+            });
+        }
+        Some((block, bw, bh, texmins))
+    })
 }
 
 /// Compute (and cache) a world-model face's static geometry. Returns a clone of
@@ -2901,6 +3136,10 @@ fn draw_world_textured(
     let mut views: Vec<VView> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
 
+    // World fingerprint + face count for the lit-surface cache (keyed per face).
+    let fp = WorldFingerprint::of(bsp);
+    let n_faces = bsp.faces.len();
+
     for face_index in world_first..world_end {
         let face = match bsp.faces.get(face_index) {
             Some(f) => f,
@@ -3029,12 +3268,42 @@ fn draw_world_textured(
             Some(mt) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 let (tw, th) = (mt.width as usize, mt.height as usize);
                 let v0 = proj[0];
-                for i in 1..proj.len() - 1 {
-                    raster_triangle_tex(
-                        image, zbuf, v0, proj[i], proj[i + 1],
-                        &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
-                        colormap,
-                    );
+                // Lit SURFACE CACHE (Quake d_surf.c): a lightmapped wall with a
+                // colormap and no reaching dynamic light bakes texture*lightmap*
+                // colormap into a per-surface block ONCE, then reads one byte per
+                // pixel. Turb/sky/dynamically-lit/colormap-less surfaces keep the
+                // per-pixel path (raster_triangle_tex).
+                let surf = if matches!(mode, SurfaceMode::Normal) {
+                    match (lightmap.as_ref(), colormap) {
+                        (Some(lm), Some(cm)) => {
+                            let dlit = any_dlight_reaches(bsp, face, dlights);
+                            face_surf_block(
+                                face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit,
+                            )
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                match surf {
+                    Some((block, bw, bh, tmins)) => {
+                        for i in 1..proj.len() - 1 {
+                            raster_triangle_cached(
+                                image, zbuf, v0, proj[i], proj[i + 1], &block, bw, bh, tmins,
+                                palette,
+                            );
+                        }
+                    }
+                    None => {
+                        for i in 1..proj.len() - 1 {
+                            raster_triangle_tex(
+                                image, zbuf, v0, proj[i], proj[i + 1],
+                                &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
+                                colormap,
+                            );
+                        }
+                    }
                 }
             }
             _ => {

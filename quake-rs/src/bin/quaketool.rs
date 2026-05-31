@@ -1675,7 +1675,10 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     // particles or dynamic lights in this single-shot `scene` command (no
     // per-frame loop), so those slices are empty.
     let light_styles = server.lightstyle_scales(server.time());
-    let colormap = read("gfx/colormap.lmp").ok();
+    // Read the colormap from the PAK (not the filesystem), matching the live game,
+    // so this single-shot render uses id's 64-row colormap-LUT shading (and the lit
+    // surface cache) exactly like step_walk does.
+    let colormap = pak.read_file("gfx/colormap.lmp").ok().flatten();
 
     // Optional render benchmark, reusing this command's full scene setup:
     //   QUAKE_BENCH=<iters> [QUAKE_RES=<WxH>] quaketool scene <pak> <map> <out>
