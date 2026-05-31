@@ -136,6 +136,28 @@ pub fn content_cshift(contents: i32) -> Option<([u8; 3], f32)> {
     }
 }
 
+/// `V_CalcPowerupCshift` (view.c): the full-screen tint while a powerup is held —
+/// Quad=blue, Biosuit=green, Ring(invisibility)=gray, Pentagram(invulnerability)=
+/// yellow — as `(rgb, percent)`, or `None` with no powerup. id checks all four and
+/// the last-set wins, so a combined Pentagram+Quad shows the Pentagram tint; we
+/// mirror that precedence (the later branch overwrites).
+pub fn powerup_cshift(items: i32) -> Option<([u8; 3], f32)> {
+    let mut cs = None;
+    if items & IT_QUAD != 0 {
+        cs = Some(([0, 0, 255], 30.0));
+    }
+    if items & IT_SUIT != 0 {
+        cs = Some(([0, 255, 0], 20.0));
+    }
+    if items & IT_INVISIBILITY != 0 {
+        cs = Some(([100, 100, 100], 100.0));
+    }
+    if items & IT_INVULNERABILITY != 0 {
+        cs = Some(([255, 255, 0], 30.0));
+    }
+    cs
+}
+
 /// Combine colour shifts `(rgb, percent 0..255)` into a single blend colour and
 /// alpha (0..1), porting Quake's `V_CalcBlend` accumulation (each shift is
 /// alpha-over the running total). Empty list / all-zero percents give alpha 0.
@@ -4784,6 +4806,7 @@ const IT_ARMOR2: i32 = 16384;
 const IT_ARMOR3: i32 = 32768;
 const IT_INVISIBILITY: i32 = 524288; // 1<<19
 const IT_INVULNERABILITY: i32 = 1048576; // 1<<20
+const IT_SUIT: i32 = 2097152; // 1<<21 (Biosuit)
 const IT_QUAD: i32 = 4194304; // 1<<22
 
 /// `inv_*` (owned, dim) weapon icon lump names, `sb_weapons[0][i]` in `Sbar_Init`.

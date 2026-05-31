@@ -2054,10 +2054,13 @@ fn step_walk(
     // Bob the rendered eye only (the listener pose above stays steady so audio
     // panning does not jitter with the head-bob).
     eye[2] += bob;
+    // Add the weapon-fire view kick (cl.punchangle, view.c:957); the engine's
+    // drop_punch_angle already decays it back to zero each frame.
+    let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
     let cam = Camera {
         pos: eye,
-        yaw: ang[1],
-        pitch: -ang[0], // QuakeC pitch is +down; the renderer's is +up.
+        yaw: ang[1] + punch[1],
+        pitch: -(ang[0] + punch[0]), // QuakeC pitch is +down; the renderer's is +up.
         fov_deg: 90.0,
     };
     let instances: Vec<ModelInstance> = descs
@@ -2114,11 +2117,17 @@ fn step_walk(
         }
     }
     w.last_total = total;
+    // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> POWERUP (top). (Bonus
+    // pickup flash needs the QuakeC "bf" stuffcmd, not yet wired.)
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
+    if let Some(cs) = render::content_cshift(quake_rs::world::point_contents(&w.bsp, eye)) {
+        shifts.push(cs);
+    }
     if w.damage_blend > 0.0 {
         shifts.push(([255, 0, 0], w.damage_blend));
     }
-    if let Some(cs) = render::content_cshift(quake_rs::world::point_contents(&w.bsp, eye)) {
+    // Powerup tint (Quad=blue, Biosuit=green, Ring=gray, Pentagram=yellow).
+    if let Some(cs) = render::powerup_cshift(w.server.vm.ent_get_float(w.player, "items") as i32) {
         shifts.push(cs);
     }
     if !shifts.is_empty() {
