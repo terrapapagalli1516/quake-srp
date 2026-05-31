@@ -2231,6 +2231,464 @@ fn clip_poly_near(input: &[VView]) -> Vec<VView> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// View-frustum culling (Quake's R_CullBox) + per-face static caches
+// ---------------------------------------------------------------------------
+//
+// Big maps (e1m3) spend most of their time in the per-face world loop:
+// reconstructing each visible face's polygon, projecting it, and *rebuilding*
+// its combined lightmap every frame. Two caches below cut that without changing
+// a single output pixel:
+//
+//  * A **view frustum** (4 side planes + near) derived from the camera, used to
+//    reject — *before* any polygon/projection/raster work — faces whose static
+//    world-space AABB lies entirely outside the view. This is purely a SKIP
+//    decision placed ahead of the existing PVS/backface/near-clip pipeline; a
+//    culled face contributes zero drawn pixels, so the image is unchanged.
+//  * A **per-face static-geometry cache** (world polygon, normal, centroid,
+//    surface extents, AABB) computed once for the world model, plus a
+//    **lightmap surface cache** (Quake's `R_BuildLightMap` cache) that reuses a
+//    face's combined luxel buffer while its resolved style scales are unchanged.
+
+/// A view frustum: four side planes (left/right/bottom/top) plus the near
+/// plane, all with inward-pointing normals. A point `p` is inside the frustum
+/// iff `dot(plane.normal, p) >= plane.dist` for every plane. A box is culled iff
+/// it lies entirely on the *outside* (`< dist`) of some plane — i.e.
+/// `box_on_plane_side(...) == 2` (the same predicate as Quake's `R_CullBox`).
+struct Frustum {
+    planes: [crate::math::Plane; 5],
+}
+
+impl Frustum {
+    /// Derive the frustum from the camera and the framebuffer aspect.
+    ///
+    /// The side planes are built to EXACTLY match the screen rectangle the
+    /// rasteriser draws into. The rasteriser projects a view-space vertex
+    /// `(vx, vy, vz)` (along `right`/`up`/`forward`) to
+    /// `x = cx + focal*vx/vz`, `y = cy - focal*vy/vz` with `cx = w/2`,
+    /// `cy = h/2`, `focal = cx / tan(fov/2)`. On-screen means `0 <= x < w` and
+    /// `0 <= y < h`, i.e. `|vx/vz| <= cx/focal = tx` and `|vy/vz| <= cy/focal =
+    /// ty`. So the horizontal half-extent is `tx = tan(fov/2)` and the vertical
+    /// is `ty = (cy/cx)*tx = (h/w)*tan(fov/2)`. The inward side-plane normals in
+    /// VIEW coordinates are therefore:
+    ///   left   `( 1, 0, tx)`  (inside: `vx + tx*vz >= 0`)
+    ///   right  `(-1, 0, tx)`
+    ///   bottom `( 0, 1, ty)`
+    ///   top    `( 0,-1, ty)`
+    /// each transformed to world space via `n = nx*right + ny*up + nz*forward`.
+    /// Every plane passes through the camera origin, so `dist = dot(pos, n)`.
+    /// The near plane has normal `forward`, `dist = dot(pos + forward*NEAR,
+    /// forward)`, matching `clip_poly_near`'s `vz >= NEAR_PLANE` test.
+    ///
+    /// CONSERVATIVENESS: these planes bound precisely the angular region the
+    /// rasteriser can draw to (the screen rectangle), so a face that produces
+    /// any on-screen pixel has at least one vertex inside all five planes — its
+    /// AABB then straddles or is inside every plane and is never culled. The
+    /// normals are NOT normalised: the side/cull test only uses the SIGN of
+    /// `dot(n, corner) - dist`, which a positive scale leaves unchanged, so
+    /// skipping the normalise costs nothing and avoids a sqrt rounding step.
+    fn from_camera(cam: &Camera, w: usize, h: usize) -> Frustum {
+        let (forward, right, up) = cam.basis();
+        let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
+        let tan_half = half_fov.tan();
+        let cxf = w as f32 / 2.0;
+        let cyf = h as f32 / 2.0;
+        // tx matches the rasteriser's cx/focal == tan(fov/2); guard the
+        // degenerate focal (tan ~ 0) the draw path falls back on (focal = cx,
+        // i.e. tx = 1.0) so the frustum stays consistent with what is drawn.
+        let tx = if tan_half.abs() < 1e-6 { 1.0f32 } else { tan_half as f32 };
+        // ty = (cy/cx)*tx; with cx==0 (zero-width) fall back to tx (the loop
+        // never runs for w==0 anyway).
+        let ty = if cxf != 0.0 { (cyf / cxf) * tx } else { tx };
+
+        // View-space inward normals (see doc comment), in (right, up, forward)
+        // components.
+        let view_normals: [[f32; 3]; 4] = [
+            [1.0, 0.0, tx],  // left
+            [-1.0, 0.0, tx], // right
+            [0.0, 1.0, ty],  // bottom
+            [0.0, -1.0, ty], // top
+        ];
+
+        let to_world = |n: [f32; 3]| -> Vec3 {
+            [
+                n[0] * right[0] + n[1] * up[0] + n[2] * forward[0],
+                n[0] * right[1] + n[1] * up[1] + n[2] * forward[1],
+                n[0] * right[2] + n[1] * up[2] + n[2] * forward[2],
+            ]
+        };
+
+        // mplane_t-style planes (carry signbits so box_on_plane_side picks the
+        // right corners). Each side plane passes through cam.pos.
+        let mut planes: [crate::math::Plane; 5] = [
+            crate::math::Plane::new([1.0, 0.0, 0.0], 0.0),
+            crate::math::Plane::new([1.0, 0.0, 0.0], 0.0),
+            crate::math::Plane::new([1.0, 0.0, 0.0], 0.0),
+            crate::math::Plane::new([1.0, 0.0, 0.0], 0.0),
+            crate::math::Plane::new([1.0, 0.0, 0.0], 0.0),
+        ];
+        for (i, vn) in view_normals.iter().enumerate() {
+            let nw = to_world(*vn);
+            planes[i] = crate::math::Plane::new(nw, dot(cam.pos, nw));
+        }
+        // Near plane: inward normal = forward, through `pos + forward*NEAR`.
+        let near_dist = dot(cam.pos, forward) + NEAR_PLANE;
+        planes[4] = crate::math::Plane::new(forward, near_dist);
+
+        Frustum { planes }
+    }
+
+    /// `R_CullBox`: true (cull) iff the AABB `[mins, maxs]` is entirely on the
+    /// outside of some frustum plane (`box_on_plane_side == 2`). Conservative:
+    /// a box that straddles or is inside every plane is kept.
+    #[inline]
+    fn culls(&self, mins: Vec3, maxs: Vec3) -> bool {
+        for p in &self.planes {
+            if crate::math::box_on_plane_side(mins, maxs, p) == 2 {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Per-face STATIC geometry for the world model, computed once and reused every
+/// frame (the world model never moves, so its faces' polygons, normals,
+/// centroids, surface extents and AABBs are frame-invariant). Caching this skips
+/// the surfedge/edge/vertex walk, the centroid loop, and `surface_extents` for
+/// every visible face on every frame.
+#[derive(Clone)]
+struct FaceGeom {
+    /// Reconstructed world-space polygon (same vertices/order `face_world_poly`
+    /// produces — so downstream projection/texturing is byte-identical).
+    poly: Vec<Vec3>,
+    /// Outward face normal (`face_normal`), or `None` if the plane was bad.
+    normal: Option<Vec3>,
+    /// Polygon centroid (the exact same accumulate-then-`*1/n` the loop used).
+    center: Vec3,
+    /// World-space AABB of `poly` (for the frustum cull).
+    mins: Vec3,
+    maxs: Vec3,
+    /// `true` when `face_world_poly` failed (degenerate/out-of-range face); the
+    /// loop then skips it exactly as before.
+    bad: bool,
+}
+
+/// The world-model static-geometry cache. Keyed by a cheap world fingerprint so
+/// it self-invalidates on a changelevel (face indices are meaningless after the
+/// BSP is swapped). `geoms[i]` is lazily filled the first time face `i` is
+/// reached; `Frustum` AABBs read from it.
+struct GeomCache {
+    fingerprint: WorldFingerprint,
+    geoms: Vec<Option<FaceGeom>>,
+}
+
+/// A cheap identity for the loaded world. A changelevel always re-parses the BSP
+/// (new `faces`/`lighting`/… lengths AND a fresh `&Bsp` address), so a mismatch
+/// reliably means "different world -> the face-index-keyed caches are stale and
+/// must be cleared". We combine the `&Bsp` pointer with several lump lengths so
+/// the key changes if EITHER the address differs (the common case: a new map)
+/// OR the lengths differ (guards against an allocator reusing a freed address
+/// for a different-but-same-pointer Bsp). A face index is meaningless across a
+/// world swap, so any mismatch forces a full cache rebuild.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WorldFingerprint {
+    ptr: usize,
+    faces_len: usize,
+    lighting_len: usize,
+    planes_len: usize,
+    vertexes_len: usize,
+}
+
+impl WorldFingerprint {
+    fn of(bsp: &Bsp) -> WorldFingerprint {
+        WorldFingerprint {
+            ptr: bsp as *const Bsp as usize,
+            faces_len: bsp.faces.len(),
+            lighting_len: bsp.lighting.len(),
+            planes_len: bsp.planes.len(),
+            vertexes_len: bsp.vertexes.len(),
+        }
+    }
+}
+
+/// One cached face lightmap (Quake's `R_BuildLightMap` surface cache entry).
+///
+/// We cache ONLY the owned, combined-`f32` case (multi-style / non-neutral
+/// scale, and NOT touched by a dynamic light): a single steady style-0 face at
+/// neutral scale keeps borrowing the static bytes (no cache needed, already
+/// byte-identical). The stored `luxels` are the exact buffer
+/// `face_lightmap_dyn` produced, so reusing them is bit-for-bit identical to
+/// rebuilding.
+#[derive(Clone)]
+struct LightCacheEntry {
+    /// The resolved per-active-style SCALE values at build time (in stored slot
+    /// order). The cache is valid only while these are bit-identical — torches
+    /// animate at 10 Hz, so at 60 fps the scales are unchanged ~5/6 frames.
+    style_scales: [f32; crate::bsp::MAXLIGHTMAPS],
+    n_styles: usize,
+    /// The cached combined luxel grid (no dynamic light folded in — see the
+    /// "dlight_touched" gating in the wrapper).
+    luxels: Vec<f32>,
+    lmw: usize,
+    lmh: usize,
+    texmins: [f32; 2],
+}
+
+/// The lightmap surface cache, keyed by world fingerprint (so it clears on a
+/// changelevel) + per-face style scales (so it rebuilds when a torch ticks).
+struct LightCache {
+    fingerprint: WorldFingerprint,
+    entries: Vec<Option<LightCacheEntry>>,
+}
+
+thread_local! {
+    /// Per-thread world static-geometry cache (one world at a time).
+    static GEOM_CACHE: std::cell::RefCell<Option<GeomCache>> = const { std::cell::RefCell::new(None) };
+    /// Per-thread lightmap surface cache.
+    static LIGHT_CACHE: std::cell::RefCell<Option<LightCache>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Compute (and cache) a world-model face's static geometry. Returns a clone of
+/// the cached [`FaceGeom`]. The cache is reset whenever the world fingerprint
+/// changes (changelevel). `face` must be the corresponding `bsp.faces[idx]`.
+fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> FaceGeom {
+    let fp = WorldFingerprint::of(bsp);
+    GEOM_CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        // (Re)initialise the cache on first use or a world change.
+        let needs_reset = match slot.as_ref() {
+            Some(gc) => gc.fingerprint != fp || gc.geoms.len() != bsp.faces.len(),
+            None => true,
+        };
+        if needs_reset {
+            *slot = Some(GeomCache {
+                fingerprint: fp,
+                geoms: vec![None; bsp.faces.len()],
+            });
+        }
+        let gc = slot.as_mut().expect("just initialised");
+        if let Some(existing) = gc.geoms.get(idx).and_then(|g| g.clone()) {
+            return existing;
+        }
+        // Build it once.
+        let mut poly: Vec<Vec3> = Vec::new();
+        let ok = face_world_poly(bsp, face, &mut poly);
+        let geom = if !ok {
+            FaceGeom {
+                poly: Vec::new(),
+                normal: None,
+                center: [0.0; 3],
+                mins: [0.0; 3],
+                maxs: [0.0; 3],
+                bad: true,
+            }
+        } else {
+            let normal = face_normal(bsp, face);
+            // Centroid: identical accumulate-then-scale to the inline loop.
+            let mut center = [0.0f32; 3];
+            for v in &poly {
+                for k in 0..3 {
+                    center[k] += v[k];
+                }
+            }
+            let inv_n = 1.0 / poly.len() as f32;
+            for k in 0..3 {
+                center[k] *= inv_n;
+            }
+            // World AABB for the frustum cull.
+            let mut mins = [f32::INFINITY; 3];
+            let mut maxs = [f32::NEG_INFINITY; 3];
+            for v in &poly {
+                for k in 0..3 {
+                    if v[k] < mins[k] {
+                        mins[k] = v[k];
+                    }
+                    if v[k] > maxs[k] {
+                        maxs[k] = v[k];
+                    }
+                }
+            }
+            FaceGeom {
+                poly,
+                normal,
+                center,
+                mins,
+                maxs,
+                bad: false,
+            }
+        };
+        if let Some(g) = gc.geoms.get_mut(idx) {
+            *g = Some(geom.clone());
+        }
+        geom
+    })
+}
+
+/// Does any dynamic light in `dlights` actually REACH this face? Mirrors the
+/// reach test inside [`add_dynamic_lights`] (`rad = radius - |dist|`, skip if
+/// `rad < minlight`) WITHOUT touching luxels, so the lightmap cache can decide
+/// whether the static/style buffer is safe to reuse (dlights move every frame,
+/// so a touched face must rebuild). Conservative: if the plane is missing we
+/// answer `true` (treat as touched) only when there ARE dlights, matching the
+/// fact that `add_dynamic_lights` would still fold a pre-combined base — but a
+/// missing plane means no light is folded, so we answer `false` there to allow
+/// caching the pure style combine.
+fn any_dlight_reaches(
+    bsp: &Bsp,
+    face: &crate::bsp::DFace,
+    dlights: &[crate::dlight::DynamicLight],
+) -> bool {
+    if dlights.is_empty() {
+        return false;
+    }
+    let plane = match (face.planenum as i64)
+        .try_into()
+        .ok()
+        .and_then(|pi: usize| bsp.planes.get(pi))
+    {
+        Some(p) => p,
+        None => return false,
+    };
+    let normal = plane.normal;
+    for dl in dlights {
+        let dist = dot(dl.origin, normal) - plane.dist;
+        let rad = dl.radius - dist.abs();
+        if rad >= dl.minlight {
+            return true;
+        }
+    }
+    false
+}
+
+/// The lightmap for a world-model face, going through the surface cache.
+///
+/// Behaviour, by case:
+///  * **Static borrow** (`face_lightmap_dyn` returns `Luxels::Static`, the
+///    common steady style-0-at-neutral case) — returned as-is, no caching: it
+///    already borrows the BSP bytes and is byte-identical to before.
+///  * **Dynamic light reaches the face** — rebuilt EVERY frame via
+///    `face_lightmap_dyn` (dlights move). The result is NOT stored, and any
+///    previously cached entry for this face is dropped, so the dlight is never
+///    silently lost on a later frame.
+///  * **Owned combine, no dlight** (animated styles) — keyed by the resolved
+///    style scale values. On a hit with matching scales the cached `Vec<f32>` is
+///    cloned into a fresh `LightMap` (bit-identical to a rebuild — the combine
+///    is deterministic). On a miss it is rebuilt and stored.
+///
+/// The cache is reset on a world fingerprint change (changelevel), since it is
+/// keyed by face index.
+fn face_lightmap_world_cached<'a>(
+    bsp: &'a Bsp,
+    idx: usize,
+    face: &crate::bsp::DFace,
+    world_poly: &[Vec3],
+    light_styles: &[f32; LIGHTSTYLES],
+    dlights: &[crate::dlight::DynamicLight],
+) -> Option<LightMap<'a>> {
+    // Resolve the active styles' SCALE values (cache key) once.
+    let mut scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
+    let mut n_styles = 0usize;
+    for &style in face.styles.iter() {
+        if style == STYLE_NONE {
+            break;
+        }
+        scales[n_styles] = light_styles.get(style as usize).copied().unwrap_or(1.0);
+        n_styles += 1;
+    }
+
+    let dlit = any_dlight_reaches(bsp, face, dlights);
+
+    let fp = WorldFingerprint::of(bsp);
+
+    if dlit {
+        // A dlight touches this face: rebuild every frame and DROP any cached
+        // entry (so we never reuse a stale, dlight-free buffer next frame, and
+        // never bake a moving dlight into the cache).
+        LIGHT_CACHE.with(|c| {
+            let mut slot = c.borrow_mut();
+            if let Some(lc) = slot.as_mut() {
+                if lc.fingerprint == fp {
+                    if let Some(e) = lc.entries.get_mut(idx) {
+                        *e = None;
+                    }
+                }
+            }
+        });
+        return face_lightmap_dyn(bsp, face, world_poly, light_styles, dlights);
+    }
+
+    // No dlight: try the cache.
+    let cached = LIGHT_CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        let needs_reset = match slot.as_ref() {
+            Some(lc) => lc.fingerprint != fp || lc.entries.len() != bsp.faces.len(),
+            None => true,
+        };
+        if needs_reset {
+            *slot = Some(LightCache {
+                fingerprint: fp,
+                entries: vec![None; bsp.faces.len()],
+            });
+        }
+        let lc = slot.as_mut().expect("just initialised");
+        match lc.entries.get(idx).and_then(|e| e.as_ref()) {
+            Some(e)
+                if e.n_styles == n_styles
+                    && e.style_scales[..n_styles] == scales[..n_styles] =>
+            {
+                // HIT: clone the stored combined luxels (deterministic build ->
+                // bit-identical to rebuilding).
+                Some(LightCacheEntry {
+                    style_scales: e.style_scales,
+                    n_styles: e.n_styles,
+                    luxels: e.luxels.clone(),
+                    lmw: e.lmw,
+                    lmh: e.lmh,
+                    texmins: e.texmins,
+                })
+            }
+            _ => None,
+        }
+    });
+
+    if let Some(e) = cached {
+        return Some(LightMap {
+            luxels: Luxels::Owned(e.luxels),
+            lmw: e.lmw,
+            lmh: e.lmh,
+            texmins: e.texmins,
+        });
+    }
+
+    // MISS: build fresh (no dlights -> the result is the pure static/style
+    // combine), then cache it if it is the owned combine.
+    let built = face_lightmap_dyn(bsp, face, world_poly, light_styles, &[])?;
+    if let Luxels::Owned(ref v) = built.luxels {
+        let mut style_scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
+        style_scales[..n_styles].copy_from_slice(&scales[..n_styles]);
+        let entry = LightCacheEntry {
+            style_scales,
+            n_styles,
+            luxels: v.clone(),
+            lmw: built.lmw,
+            lmh: built.lmh,
+            texmins: built.texmins,
+        };
+        LIGHT_CACHE.with(|c| {
+            let mut slot = c.borrow_mut();
+            if let Some(lc) = slot.as_mut() {
+                if lc.fingerprint == fp {
+                    if let Some(e) = lc.entries.get_mut(idx) {
+                        *e = Some(entry);
+                    }
+                }
+            }
+        });
+    }
+    Some(built)
+}
+
 /// The textured world pass, factored out of [`render_bsp_textured`] so it can
 /// share an image + z-buffer with the alias-model pass (see [`render_scene`]).
 ///
@@ -2282,6 +2740,12 @@ fn draw_world_textured(
     // in which case every face is drawn (the pre-PVS behaviour).
     let visible_face = compute_visible_faces(bsp, cam.pos);
 
+    // View frustum (4 sides + near) for `R_CullBox`-style AABB rejection. Built
+    // once per frame from the camera + aspect; see [`Frustum::from_camera`] for
+    // the exact match to the rasteriser's screen rectangle (so it never culls a
+    // face that could draw a pixel).
+    let frustum = Frustum::from_camera(cam, w, h);
+
     // The world pass draws ONLY model 0's faces. Brush submodels (doors, plats,
     // buttons) own the remaining faces and are drawn by `draw_submodel` at their
     // entity origin — otherwise they'd render here at their local (closed)
@@ -2296,7 +2760,6 @@ fn draw_world_textured(
         None => (0, bsp.faces.len()),
     };
 
-    let mut world_poly: Vec<Vec3> = Vec::new();
     let mut views: Vec<VView> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
 
@@ -2314,25 +2777,30 @@ fn draw_world_textured(
             }
         }
 
-        if !face_world_poly(bsp, face, &mut world_poly) {
+        // Static per-face geometry (poly / normal / centroid / AABB), built once
+        // for the world model and reused every frame. `bad` reproduces the
+        // original `face_world_poly` early-out exactly.
+        let geom = face_geom_cached(bsp, face_index, face);
+        if geom.bad {
             continue;
         }
-        let normal = match face_normal(bsp, face) {
+
+        // FRUSTUM CULL (R_CullBox): reject faces whose static world AABB is fully
+        // outside the view, BEFORE projection / lightmap / raster. Conservative —
+        // a face touching the view survives. This precedes the normal/backface
+        // checks; a culled face draws nothing, so the output is unchanged.
+        if frustum.culls(geom.mins, geom.maxs) {
+            continue;
+        }
+
+        let world_poly = &geom.poly;
+        let normal = match geom.normal {
             Some(n) => n,
             None => continue,
         };
 
-        // Face center for the cull test.
-        let mut center = [0.0f32; 3];
-        for v in &world_poly {
-            for k in 0..3 {
-                center[k] += v[k];
-            }
-        }
-        let inv_n = 1.0 / world_poly.len() as f32;
-        for k in 0..3 {
-            center[k] *= inv_n;
-        }
+        // Face center for the backface cull (cached centroid).
+        let center = geom.center;
         if dot(normal, sub(center, cam.pos)) >= 0.0 {
             continue;
         }
@@ -2358,7 +2826,11 @@ fn draw_world_textured(
         // baked static lightmap.
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         let lightmap = if kind == SurfKind::Normal {
-            face_lightmap_dyn(bsp, face, &world_poly, light_styles, dlights)
+            // Goes through the lightmap SURFACE CACHE (R_BuildLightMap cache):
+            // reuses the combined luxel buffer while the resolved style scales
+            // are unchanged and no dynamic light touches the face. The cached
+            // buffer is bit-identical to a fresh build.
+            face_lightmap_world_cached(bsp, face_index, face, world_poly, light_styles, dlights)
         } else {
             None
         };
@@ -2383,7 +2855,7 @@ fn draw_world_textured(
         // (no regression); a face fully behind yields < 3 verts and is skipped;
         // a straddling face is clipped to `vz == NEAR` and rasterised normally.
         views.clear();
-        for v in &world_poly {
+        for v in world_poly {
             let rel = sub(*v, cam.pos);
             let vz = dot(rel, forward);
             let vx = dot(rel, right);
@@ -9718,5 +10190,366 @@ mod tests {
         draw_console(&mut tiny, &c, Some(&conback), Some(&cc), &pal, 0.0);
         let mut zero = Image::new(0, 0, bg);
         draw_console(&mut zero, &c, Some(&conback), Some(&cc), &pal, 0.0);
+    }
+
+    // -- Frustum culling (R_CullBox) ---------------------------------------
+
+    #[test]
+    fn frustum_culls_box_behind_camera_keeps_box_in_front() {
+        // Camera at the origin looking down +X (yaw 0, pitch 0), 90-deg fov.
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let frustum = Frustum::from_camera(&cam, 320, 200);
+
+        // A box entirely BEHIND the camera (negative X): fully outside the near
+        // plane -> culled.
+        assert!(
+            frustum.culls([-200.0, -10.0, -10.0], [-100.0, 10.0, 10.0]),
+            "a box wholly behind the camera must be culled"
+        );
+
+        // A box straddling the near plane (spanning x = -10..50 around the eye):
+        // touches the view -> NOT culled (conservative).
+        assert!(
+            !frustum.culls([-10.0, -10.0, -10.0], [50.0, 10.0, 10.0]),
+            "a box straddling the near plane must NOT be culled"
+        );
+
+        // A box well in FRONT and centred on the view axis -> NOT culled.
+        assert!(
+            !frustum.culls([90.0, -10.0, -10.0], [110.0, 10.0, 10.0]),
+            "a box in front of the camera must NOT be culled"
+        );
+
+        // A box far off to the LEFT (large +Y, beyond the 90-deg side at this
+        // depth) is fully outside the left side plane -> culled. At x=100 the
+        // left frustum edge is y=100 (tan45); a box at y in [500,600] is outside.
+        assert!(
+            frustum.culls([100.0, 500.0, -10.0], [110.0, 600.0, 10.0]),
+            "a box outside the side frustum plane must be culled"
+        );
+    }
+
+    #[test]
+    fn frustum_never_culls_a_box_that_encloses_the_eye() {
+        // A huge box around the camera straddles every plane -> never culled,
+        // guaranteeing we never punch a hole when geometry surrounds the view.
+        let cam = Camera { pos: [10.0, 20.0, 30.0], yaw: 35.0, pitch: -12.0, fov_deg: 90.0 };
+        let frustum = Frustum::from_camera(&cam, 640, 480);
+        assert!(
+            !frustum.culls([-1000.0, -1000.0, -1000.0], [1000.0, 1000.0, 1000.0]),
+            "a box enclosing the eye must never be culled"
+        );
+    }
+
+    // -- Lightmap surface cache --------------------------------------------
+
+    /// Clear both thread-local caches so a test starts from a known state
+    /// (tests share a thread, and a prior test may have populated them).
+    fn reset_render_caches() {
+        GEOM_CACHE.with(|c| *c.borrow_mut() = None);
+        LIGHT_CACHE.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn lightmap_cache_returns_bit_identical_luxels_for_same_style_key() {
+        reset_render_caches();
+        // A 2-style face: styles[0]=0 (steady), styles[1]=1 (animated). The owned
+        // combine is cacheable (not a static borrow).
+        let (bsp, face, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
+        let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
+        scales[1] = 0.5;
+
+        // First call: MISS -> builds + caches. Second call (same key): HIT.
+        let first =
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[]).expect("present");
+        let second =
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[]).expect("present");
+
+        // The cached luxels must be BIT-identical to a fresh, cache-free build.
+        let fresh = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[]).expect("present");
+        let (lf, ls, lfresh) = match (&first.luxels, &second.luxels, &fresh.luxels) {
+            (Luxels::Owned(a), Luxels::Owned(b), Luxels::Owned(c)) => (a, b, c),
+            _ => panic!("a 2-style face must own the combined buffer"),
+        };
+        assert_eq!(lf.len(), lfresh.len());
+        for i in 0..lf.len() {
+            assert_eq!(lf[i].to_bits(), lfresh[i].to_bits(), "first build vs fresh luxel {i}");
+            assert_eq!(ls[i].to_bits(), lfresh[i].to_bits(), "cached HIT vs fresh luxel {i}");
+        }
+        assert_eq!((second.lmw, second.lmh), (fresh.lmw, fresh.lmh));
+        assert_eq!(second.texmins, fresh.texmins);
+    }
+
+    #[test]
+    fn lightmap_cache_rebuilds_when_style_key_changes() {
+        reset_render_caches();
+        let (bsp, face, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
+
+        // Build at scale 0.5, then again at scale 1.0 (a torch ticking). The
+        // second result must reflect the NEW scale, not the stale cached one.
+        let mut s_half = NEUTRAL_LIGHTSTYLE_SCALES;
+        s_half[1] = 0.5;
+        let half =
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_half, &[]).expect("present");
+
+        let mut s_full = NEUTRAL_LIGHTSTYLE_SCALES;
+        s_full[1] = 1.0;
+        let full =
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_full, &[]).expect("present");
+
+        // Compare against fresh builds at each scale.
+        let fresh_full = face_lightmap_dyn(&bsp, &face, &poly, &s_full, &[]).expect("present");
+        match (&half.luxels, &full.luxels, &fresh_full.luxels) {
+            (Luxels::Owned(h), Luxels::Owned(f), Luxels::Owned(ff)) => {
+                // block0=100, block1=200: half -> 100+0.5*200=200; full ->
+                // 100+1.0*200=300. They must differ, and `full` must match a
+                // fresh full build bit-for-bit.
+                assert_ne!(h[0].to_bits(), f[0].to_bits(), "changed style key must rebuild");
+                assert!((h[0] - 200.0).abs() < 1e-4, "half-scale luxel = 200, got {}", h[0]);
+                assert!((f[0] - 300.0).abs() < 1e-4, "full-scale luxel = 300, got {}", f[0]);
+                for i in 0..f.len() {
+                    assert_eq!(f[i].to_bits(), ff[i].to_bits(), "rebuilt full vs fresh luxel {i}");
+                }
+            }
+            _ => panic!("2-style face must own the combine"),
+        }
+    }
+
+    #[test]
+    fn lightmap_cache_invalidates_when_faces_len_changes() {
+        reset_render_caches();
+        // World A: a 2-style face, populate the cache for face 0.
+        let (bsp_a, face_a, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
+        let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
+        scales[1] = 0.5;
+        let _ = face_lightmap_world_cached(&bsp_a, 0, &face_a, &poly, &scales, &[]).expect("present");
+
+        // World B: a DIFFERENT world with a different faces.len() and different
+        // lightmap bytes at face 0. The fingerprint mismatch must clear the
+        // (face-index-keyed) cache so face 0 is rebuilt from B's data, NOT served
+        // from A's stale entry.
+        let (mut bsp_b, face_b, poly_b) = two_style_face_bsp([0, 1, 255, 255], 40, 240);
+        // Make faces.len() differ from A (A had 1 face) so the fingerprint flips
+        // via the faces_len field as well as the &Bsp pointer.
+        bsp_b.faces.push(face_b.clone());
+        bsp_b.faces.push(face_b.clone());
+        assert_ne!(bsp_a.faces.len(), bsp_b.faces.len());
+
+        let got =
+            face_lightmap_world_cached(&bsp_b, 0, &face_b, &poly_b, &scales, &[]).expect("present");
+        let fresh_b = face_lightmap_dyn(&bsp_b, &face_b, &poly_b, &scales, &[]).expect("present");
+        match (&got.luxels, &fresh_b.luxels) {
+            (Luxels::Owned(g), Luxels::Owned(fb)) => {
+                // B's block0=40, block1=240, scale 0.5 -> 40+120=160 (NOT A's 200).
+                assert!((g[0] - 160.0).abs() < 1e-4, "world B luxel = 160, got {} (stale A?)", g[0]);
+                for i in 0..g.len() {
+                    assert_eq!(g[i].to_bits(), fb[i].to_bits(), "world B rebuilt vs fresh luxel {i}");
+                }
+            }
+            _ => panic!("2-style face must own the combine"),
+        }
+    }
+
+    #[test]
+    fn lightmap_cache_dlit_face_rebuilds_each_frame_and_keeps_dlight() {
+        reset_render_caches();
+        // A single steady style-0 face at neutral scale -> normally a static
+        // borrow (uncached). A reaching dlight must still produce the owned,
+        // dlit buffer (NOT a cached static-only buffer) every call.
+        let (bsp, face, poly) = one_face_bsp_zplane(100);
+        let dl = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
+
+        // First, populate any cache via a dlight-free neutral call (static borrow,
+        // not cached). Then a reaching dlight: must own the buffer and brighten.
+        let _ = face_lightmap_world_cached(&bsp, 0, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[]);
+        let lit = face_lightmap_world_cached(
+            &bsp, 0, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl),
+        )
+        .expect("present");
+        assert!(matches!(lit.luxels, Luxels::Owned(_)), "a dlit face must own the dlit buffer");
+        // Must match the direct (cache-free) dlit build exactly.
+        let fresh = face_lightmap_dyn(
+            &bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl),
+        )
+        .expect("present");
+        match (&lit.luxels, &fresh.luxels) {
+            (Luxels::Owned(a), Luxels::Owned(b)) => {
+                for i in 0..a.len() {
+                    assert_eq!(a[i].to_bits(), b[i].to_bits(), "dlit cached-path vs fresh luxel {i}");
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// A `demo_room` whose every face is a 2-style lightmapped wall (styles
+    /// `[0, 1]`) pointing into a uniform lighting lump. Rendering this with a
+    /// non-neutral style-1 scale forces the OWNED multi-style combine on every
+    /// face -> exercises the lightmap surface cache end-to-end.
+    fn lightmapped_demo_room(block0: u8, block1: u8) -> Bsp {
+        let mut bsp = demo_room();
+        // Two concatenated blocks per face, uniform so any face's grid (whatever
+        // its extents) reads well-defined bytes. Lump is large enough for the
+        // biggest face's 2*lmw*lmh.
+        let mut lighting = vec![block0; 200_000];
+        for b in lighting.iter_mut().skip(100_000) {
+            *b = block1;
+        }
+        bsp.lighting = lighting;
+        for f in bsp.faces.iter_mut() {
+            f.lightofs = 0;
+            f.styles = [0, 1, 255, 255];
+        }
+        bsp
+    }
+
+    #[test]
+    fn world_render_is_pixel_identical_across_frames_with_lightmap_cache() {
+        // This mirrors what the orchestrator diffs: render the SAME lightmapped,
+        // style-animated world repeatedly and require byte-identical pixels. The
+        // first render populates the geom + lightmap caches; the second hits
+        // them. The cached combine must be bit-identical, so the images match.
+        reset_render_caches();
+        let bsp = lightmapped_demo_room(100, 200);
+        let pal = [[180u8, 150, 90]; 256];
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[1] = 0.5; // non-neutral -> owned combine -> cache used
+
+        let render = |b: &Bsp| {
+            render_scene_ext(
+                b, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &styles, None,
+            )
+        };
+
+        let frame1 = render(&bsp); // populates caches
+        let frame2 = render(&bsp); // cache hits
+        assert_eq!(frame1.rgb, frame2.rgb, "cached frame must be pixel-identical to the first");
+
+        // A change in the style scale must change the cache key AND the pixels
+        // (proving the cache is keyed on the scale, not stale).
+        let mut styles_b = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles_b[1] = 1.0;
+        let frame_b = render_scene_ext(
+            &bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &styles_b, None,
+        );
+        assert_ne!(
+            frame1.rgb, frame_b.rgb,
+            "a different style scale must rebuild and produce different pixels"
+        );
+
+        // Re-render at the ORIGINAL scale: must again equal frame1 (the cache
+        // correctly rebuilt back to the 0.5 key).
+        let frame3 = render(&bsp);
+        assert_eq!(frame1.rgb, frame3.rgb, "returning to the original key reproduces frame1");
+    }
+
+    #[test]
+    fn world_render_unaffected_by_intervening_different_world() {
+        // Render world A, then a DIFFERENT world B (different geometry + lighting,
+        // which resets the face-index-keyed caches), then world A again. The two
+        // renders of A must be byte-identical — proving the changelevel
+        // invalidation never serves B's cached data for A's faces.
+        reset_render_caches();
+        let a = lightmapped_demo_room(100, 200);
+        let b = lightmapped_demo_room(60, 240); // different lighting bytes
+        let pal = [[180u8, 150, 90]; 256];
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[1] = 0.5;
+        let render = |bsp: &Bsp| {
+            render_scene_ext(
+                bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &styles, None,
+            )
+        };
+
+        let a1 = render(&a);
+        let _b = render(&b); // resets caches to world B
+        let a2 = render(&a); // must rebuild A's caches, not reuse B's
+        assert_eq!(a1.rgb, a2.rgb, "world A renders identically before and after world B");
+    }
+
+    #[test]
+    fn frustum_culled_faces_draw_no_onscreen_pixel() {
+        // CONSERVATIVENESS on a concrete scene: for every world-model face the
+        // frustum CULLS, confirm it could not have contributed any on-screen
+        // pixel — i.e. all its (in-front-of-near) projected vertices fall outside
+        // the framebuffer rectangle. This is the property that guarantees the
+        // cull never punches a hole (removes a visible pixel) vs. the pre-cull
+        // renderer.
+        reset_render_caches();
+        let bsp = lightmapped_demo_room(100, 200);
+        let (w, h) = (160usize, 120usize);
+        // A camera tucked in a corner looking along an axis so a good chunk of
+        // the room's faces fall outside the view (some get culled).
+        let cam = Camera { pos: [-240.0, -240.0, 20.0], yaw: 10.0, pitch: 0.0, fov_deg: 90.0 };
+        let frustum = Frustum::from_camera(&cam, w, h);
+
+        let (forward, right, up) = cam.basis();
+        let cx = w as f32 / 2.0;
+        let cy = h as f32 / 2.0;
+        let tan_half = (cam.fov_deg as f64 * 0.5).to_radians().tan();
+        let focal = if tan_half.abs() < 1e-6 { cx } else { (cx as f64 / tan_half) as f32 };
+
+        let mut culled = 0usize;
+        for (idx, face) in bsp.faces.iter().enumerate() {
+            let geom = face_geom_cached(&bsp, idx, face);
+            if geom.bad {
+                continue;
+            }
+            if !frustum.culls(geom.mins, geom.maxs) {
+                continue;
+            }
+            culled += 1;
+            // A culled face must not project any vertex into the screen rect.
+            // (Vertices behind the near plane never draw; the near plane is one of
+            // the cull planes, and a face culled by a SIDE plane lies wholly to
+            // that side, so every in-front vertex is off-screen on that side.)
+            for v in &geom.poly {
+                let rel = sub(*v, cam.pos);
+                let vz = dot(rel, forward);
+                if vz <= NEAR_PLANE {
+                    continue; // behind near -> never rasterised
+                }
+                let sx = cx + focal * dot(rel, right) / vz;
+                let sy = cy - focal * dot(rel, up) / vz;
+                let onscreen = sx >= 0.0 && sx < w as f32 && sy >= 0.0 && sy < h as f32;
+                assert!(
+                    !onscreen,
+                    "culled face {idx} projects vertex on-screen at ({sx},{sy}) — would punch a hole"
+                );
+            }
+        }
+        assert!(culled > 0, "the test camera should cull at least one face to be meaningful");
+    }
+
+    #[test]
+    fn face_geom_cache_matches_uncached_build_and_invalidates() {
+        reset_render_caches();
+        let (bsp, face, _poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
+        // First call builds + caches; second returns the cached clone.
+        let g1 = face_geom_cached(&bsp, 0, &face);
+        let g2 = face_geom_cached(&bsp, 0, &face);
+        assert!(!g1.bad);
+        // The cached poly must equal a direct face_world_poly reconstruction
+        // (face_world_poly walks the BSP edge tables, so this — not the helper's
+        // literal `poly` used for lightmap math — is the geometry the loop sees).
+        let mut direct = Vec::new();
+        assert!(face_world_poly(&bsp, &face, &mut direct));
+        assert_eq!(g1.poly, direct);
+        assert_eq!(g2.poly, direct);
+        // Normal + centroid match a direct compute.
+        assert_eq!(g1.normal, face_normal(&bsp, &face));
+        // AABB encloses every vertex.
+        for v in &direct {
+            for k in 0..3 {
+                assert!(g1.mins[k] <= v[k] && v[k] <= g1.maxs[k]);
+            }
+        }
+        // A different world (more faces) invalidates: still a correct rebuild.
+        let (mut bsp_b, face_b, _polyb) = two_style_face_bsp([0, 255, 255, 255], 50, 50);
+        bsp_b.faces.push(face_b.clone());
+        let gb = face_geom_cached(&bsp_b, 0, &face_b);
+        assert!(!gb.bad);
     }
 }
