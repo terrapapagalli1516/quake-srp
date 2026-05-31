@@ -1706,10 +1706,32 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             std::hint::black_box(render_once());
         }
         let per = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
-        return Ok(Out::Text(format!(
-            "bench {map_name} {bw}x{bh}: {iters} warm frames -> {per:.2} ms/frame ({:.1} fps)\n",
+
+        // One profiled frame (caches already warm) for the per-phase breakdown.
+        render::render_stats_begin();
+        let _ = std::hint::black_box(render_once());
+        let st = render::render_stats_end();
+        let ms = |ns: u64| ns as f64 / 1_000_000.0;
+        let mut o = String::new();
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            o,
+            "bench {map_name} {bw}x{bh}: {iters} warm frames -> {per:.2} ms/frame ({:.1} fps)",
             1000.0 / per
-        )));
+        );
+        let _ = writeln!(
+            o,
+            "  phases (ms): world {:.2}  submodel {:.2}  external {:.2}  alias {:.2}  particle {:.2}  sprite {:.2}  viewmodel {:.2}",
+            ms(st.world_ns), ms(st.submodel_ns), ms(st.external_ns), ms(st.alias_ns),
+            ms(st.particle_ns), ms(st.sprite_ns), ms(st.viewmodel_ns),
+        );
+        let _ = writeln!(
+            o,
+            "  world: {} faces ({} pvs-cull, {} frustum-cull, {} drawn), {} tris, {} px, surf {}/{} hit/miss",
+            st.faces_total, st.faces_pvs_culled, st.faces_frustum_culled, st.faces_drawn,
+            st.world_tris, st.world_pixels, st.surf_hits, st.surf_misses,
+        );
+        return Ok(Out::Text(o));
     }
 
     let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &[], &light_styles, colormap.as_deref());

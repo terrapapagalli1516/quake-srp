@@ -2710,6 +2710,82 @@ thread_local! {
     static LIGHT_CACHE: std::cell::RefCell<Option<LightCache>> = const { std::cell::RefCell::new(None) };
     /// Per-thread lit-surface (texel) cache.
     static SURF_CACHE: std::cell::RefCell<Option<SurfCache>> = const { std::cell::RefCell::new(None) };
+    /// Granular render profiler (opt-in; see [`RenderStats`]). Off by default so the
+    /// shared render path pays nothing in the live game / wasm.
+    static RENDER_STATS: std::cell::RefCell<RenderStats> =
+        const { std::cell::RefCell::new(RenderStats::ZERO) };
+    static STATS_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Granular per-phase render profiler — phase wall-times (ns) plus face/triangle/
+/// pixel/cache counts for one [`render_scene_ext_sprited`] call. Populated only
+/// while profiling is enabled via [`render_stats_begin`]; every counter site is
+/// gated on the `STATS_ON` flag, so a normal (game/wasm) render touches none of it.
+/// Use this to see WHERE a frame's time goes (which phase, overdraw, cache hit rate)
+/// when tuning performance.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderStats {
+    /// Per-phase wall time in nanoseconds.
+    pub world_ns: u64,
+    pub submodel_ns: u64,
+    pub external_ns: u64,
+    pub alias_ns: u64,
+    pub particle_ns: u64,
+    pub sprite_ns: u64,
+    pub viewmodel_ns: u64,
+    /// World-model faces in the model-0 range.
+    pub faces_total: u64,
+    /// Faces skipped by the PVS visibility mask.
+    pub faces_pvs_culled: u64,
+    /// Faces skipped by the view-frustum AABB cull.
+    pub faces_frustum_culled: u64,
+    /// Faces that reached the rasteriser (world pass).
+    pub faces_drawn: u64,
+    /// Triangles submitted by the world pass.
+    pub world_tris: u64,
+    /// Pixels actually written by the world pass (overdraw proxy: a pixel covered by
+    /// N drawn surfaces counts N times).
+    pub world_pixels: u64,
+    /// Lit-surface-cache hits / misses (world pass).
+    pub surf_hits: u64,
+    pub surf_misses: u64,
+}
+
+impl RenderStats {
+    const ZERO: RenderStats = RenderStats {
+        world_ns: 0, submodel_ns: 0, external_ns: 0, alias_ns: 0, particle_ns: 0,
+        sprite_ns: 0, viewmodel_ns: 0, faces_total: 0, faces_pvs_culled: 0,
+        faces_frustum_culled: 0, faces_drawn: 0, world_tris: 0, world_pixels: 0,
+        surf_hits: 0, surf_misses: 0,
+    };
+}
+
+/// Enable the render profiler and clear its counters. The NEXT
+/// [`render_scene_ext_sprited`] accumulates into [`RenderStats`]; read + disable
+/// with [`render_stats_end`]. Intended for the `quaketool` benchmark, not the game.
+pub fn render_stats_begin() {
+    RENDER_STATS.with(|s| *s.borrow_mut() = RenderStats::ZERO);
+    STATS_ON.with(|c| c.set(true));
+}
+
+/// Read the accumulated [`RenderStats`] and disable the profiler.
+pub fn render_stats_end() -> RenderStats {
+    STATS_ON.with(|c| c.set(false));
+    RENDER_STATS.with(|s| *s.borrow())
+}
+
+/// Whether the render profiler is currently accumulating (cheap `Cell` read).
+#[inline]
+fn stats_on() -> bool {
+    STATS_ON.with(|c| c.get())
+}
+
+/// Apply `f` to the live [`RenderStats`] iff profiling is on (no-op otherwise).
+#[inline]
+fn stat(f: impl FnOnce(&mut RenderStats)) {
+    if stats_on() {
+        RENDER_STATS.with(|s| f(&mut s.borrow_mut()));
+    }
 }
 
 /// Maximum baked surface-cache block, in texels. A face larger than this stays on
@@ -3145,11 +3221,13 @@ fn draw_world_textured(
             Some(f) => f,
             None => continue,
         };
+        stat(|s| s.faces_total += 1);
         // Skip faces outside the potentially-visible set. A missing mask entry
         // (or no mask at all) means "draw" — culling never removes a face it is
         // unsure about.
         if let Some(mask) = &visible_face {
             if !mask.get(face_index).copied().unwrap_or(true) {
+                stat(|s| s.faces_pvs_culled += 1);
                 continue;
             }
         }
@@ -3167,6 +3245,7 @@ fn draw_world_textured(
         // a face touching the view survives. This precedes the normal/backface
         // checks; a culled face draws nothing, so the output is unchanged.
         if frustum.culls(geom.mins, geom.maxs) {
+            stat(|s| s.faces_frustum_culled += 1);
             continue;
         }
 
@@ -3273,6 +3352,7 @@ fn draw_world_textured(
                 // colormap into a per-surface block ONCE, then reads one byte per
                 // pixel. Turb/sky/dynamically-lit/colormap-less surfaces keep the
                 // per-pixel path (raster_triangle_tex).
+                stat(|s| { s.faces_drawn += 1; s.world_tris += (proj.len() - 2) as u64; });
                 let surf = if matches!(mode, SurfaceMode::Normal) {
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
@@ -3288,6 +3368,7 @@ fn draw_world_textured(
                 };
                 match surf {
                     Some((block, bw, bh, tmins)) => {
+                        stat(|s| s.surf_hits += 1);
                         for i in 1..proj.len() - 1 {
                             raster_triangle_cached(
                                 image, zbuf, v0, proj[i], proj[i + 1], &block, bw, bh, tmins,
@@ -3296,6 +3377,7 @@ fn draw_world_textured(
                         }
                     }
                     None => {
+                        stat(|s| s.surf_misses += 1);
                         for i in 1..proj.len() - 1 {
                             raster_triangle_tex(
                                 image, zbuf, v0, proj[i], proj[i + 1],
@@ -4649,10 +4731,18 @@ pub fn render_scene_ext_sprited(
     // The turbulent SIN table for liquid warp, built once and shared by the
     // world + brush-submodel passes (sky needs no table).
     let turb = TurbTable::new();
+    // Phase wall-timers: `Instant::now()` is only evaluated when the profiler is on
+    // (via `.then(..)`), so the shared render path — and wasm, where the profiler is
+    // never enabled and `Instant` is unavailable — never constructs one.
+    let tw = stats_on().then(std::time::Instant::now);
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights, colormap);
+    if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
+    let ts = stats_on().then(std::time::Instant::now);
     for bm in bmodels {
         draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame);
     }
+    if let Some(t) = ts { stat(|s| s.submodel_ns += t.elapsed().as_nanos() as u64); }
+    let te = stats_on().then(std::time::Instant::now);
     // External brush models (Quake's `b_*.bsp` item boxes: explosive box, ammo
     // and health boxes). Each draws its OWN bsp's MODEL-0 faces, translated to the
     // item origin, against the shared z-buffer so it occludes/ is occluded by the
@@ -4665,19 +4755,28 @@ pub fn render_scene_ext_sprited(
     for ext in external {
         draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0);
     }
+    if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
+    let ta = stats_on().then(std::time::Instant::now);
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, w, h, palette, dlights, light_styles, time);
     }
+    if let Some(t) = ta { stat(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
     // Particles draw after the world/models, z-tested against the same buffer so
     // walls occlude them, but before the viewmodel (which always draws on top).
+    let tp = stats_on().then(std::time::Instant::now);
     draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h);
+    if let Some(t) = tp { stat(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
     // Sprite-model entities (explosion flash, bubbles) — camera-facing billboards,
     // z-tested against the same buffer, drawn after models and before the viewmodel.
+    let tsp = stats_on().then(std::time::Instant::now);
     draw_sprites(&mut image, &mut zbuf, cam, sprites, palette, time, w, h);
+    if let Some(t) = tsp { stat(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
     // The weapon viewmodel draws last, on top of the world and every model.
+    let tv = stats_on().then(std::time::Instant::now);
     if let Some(vm) = viewmodel {
         draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, palette, w, h);
     }
+    if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     image
 }
 
