@@ -1921,7 +1921,9 @@ fn step_walk(
             wad,
             palette: &w.palette,
             health: stat("health"),
-            ammo: stat("ammo_shells"),
+            // The active weapon's ammo (W_SetCurrentAmmo keeps `currentammo` in
+            // sync with the weapon), not always shells — sbar.c draws currentammo.
+            ammo: stat("currentammo"),
             armor: stat("armorvalue"),
         };
         render::draw_hud_into(&mut img, &hud);

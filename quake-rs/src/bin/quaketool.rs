@@ -963,7 +963,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 wad: &wad,
                 palette: &palette,
                 health: stat("health"),
-                ammo: stat("ammo_shells"),
+                ammo: stat("currentammo"),
                 armor: stat("armorvalue"),
             };
             render::draw_hud_into(&mut img, &hud);
