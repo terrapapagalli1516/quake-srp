@@ -1976,7 +1976,7 @@ fn step_walk(
     // 4. Gather the visible entities (owned descriptors, so the cache borrow for
     //    rendering doesn't clash with reading the server). Skip the player's own
     //    edict — its model would fill the screen in first person.
-    let mut descs: Vec<(String, [f32; 3], f32, usize, [u8; 3], i32)> = Vec::new();
+    let mut descs: Vec<(String, [f32; 3], [f32; 3], usize, [u8; 3], i32)> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     // Projectile/gib trails to spawn this frame, collected here and emitted after
     // the loop (so we don't borrow w.particles/dlights while reading the server):
@@ -2051,11 +2051,16 @@ fn step_walk(
         // pickups — ammo/health/armour boxes, weapons, keys, runes, powerups) has
         // its yaw overwritten with `anglemod(100*cl.time)` every frame so it spins.
         // Otherwise use the entity's own yaw. Without this every pickup sat frozen.
+        let ent_angles = w.server.vm.ent_get_vector(ent, "angles");
         let yaw = if mflags & quake_rs::demo::EF_ROTATE != 0 {
             quake_rs::demo::rotate_yaw(w.clock)
         } else {
-            w.server.vm.ent_get_vector(ent, "angles")[1]
+            ent_angles[1]
         };
+        // [pitch, yaw, roll]: EF_ROTATE overrides yaw only; pitch/roll come straight
+        // from the entity so flying projectiles point along their flight path
+        // (r_alias.c R_AliasSetUpTransform), not just spin about Z.
+        let angles = [ent_angles[0], yaw, ent_angles[2]];
         // Per-entity skin index (R_AliasSetupSkin: `skinnum = currententity->skinnum`).
         // Drives e.g. armor.mdl's 3 skins (green/yellow/red); was hardcoded to 0.
         let skin = w.server.vm.ent_get_float(ent, "skin").max(0.0) as i32;
@@ -2066,7 +2071,7 @@ fn step_walk(
             trail_spawns.push((ent, oldorg, origin, ttype));
             w.trail_org.insert(ent, origin);
         }
-        descs.push((m, origin, yaw, frame, color, skin));
+        descs.push((m, origin, angles, frame, color, skin));
     }
 
     // Emit the collected trails (after the entity loop to keep the borrows
@@ -2146,11 +2151,13 @@ fn step_walk(
     };
     let instances: Vec<ModelInstance> = descs
         .iter()
-        .filter_map(|(name, origin, yaw, frame, color, skin)| match w.model_cache.get(name) {
+        .filter_map(|(name, origin, angles, frame, color, skin)| match w.model_cache.get(name) {
             Some(Some(mdl)) => Some(ModelInstance {
                 mdl,
                 origin: *origin,
-                yaw: *yaw,
+                yaw: angles[1],
+                pitch: angles[0],
+                roll: angles[2],
                 color: *color,
                 frame: *frame,
                 skinnum: *skin,
@@ -2362,6 +2369,10 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> ren
                 mdl,
                 origin: e.origin,
                 yaw: e.angles[1],
+                // Demo entities carry full angles; orient projectiles (pitch/roll)
+                // as the recorded stream did (R_AliasSetUpTransform).
+                pitch: e.angles[0],
+                roll: e.angles[2],
                 color: d.colors.get(e.modelindex).copied().unwrap_or([200, 200, 200]),
                 // Demo entities carry their current animation frame from the net
                 // stream — use it so monsters in the demo are actually posed.

@@ -1311,10 +1311,12 @@ fn parse_start_sound(r: &mut NetReader) -> Result<()> {
 /// byte count and one byte colour. Records a [`ParticleBurst`] onto the client's
 /// pending list for the current block's [`DemoFrame`].
 ///
-/// The C `R_ParseParticleEffect` special-cases `count == 255` as the sentinel
-/// for `R_ParticleExplosion` (the 1024-particle fiery burst); we record that as
-/// `count = 1024` so the front-end routes it through `spawn_explosion`. Any
-/// other count is the `R_RunParticleEffect(org, dir, color, count)` path.
+/// The C `R_ParseParticleEffect` maps the net `count == 255` sentinel to `1024`
+/// and then calls `R_RunParticleEffect(org, dir, color, 1024)`. Every count
+/// (including 1024) flows through `R_RunParticleEffect`; its internal
+/// `count == 1024` branch happens to spawn the same particles as
+/// `R_ParticleExplosion` (which the `spawn_burst` 1024 fast-path delegates to). We
+/// record the mapped count so the front-end routes the burst through `spawn_burst`.
 ///
 /// Reads the SAME 8 fields the original discarded so the byte stream stays in
 /// sync; never panics (a short read flags `r.bad`, which the demux's top-of-loop
@@ -1331,7 +1333,8 @@ fn parse_particle(cl: &mut ClientState, r: &mut NetReader) {
     let msg_count = r.read_byte();
     let color = r.read_byte();
 
-    // 255 is the explosion sentinel -> 1024 particles (R_ParticleExplosion).
+    // 255 is the sentinel -> 1024 particles (R_RunParticleEffect's count==1024
+    // branch, which matches R_ParticleExplosion).
     let count = if msg_count == 255 { 1024 } else { msg_count };
     // A short read leaves `r.bad` set; the demux refuses the next command, so
     // we still record (with sentinel values) without desyncing silently.

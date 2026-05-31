@@ -660,13 +660,17 @@ pub fn clip_box(
         return tr;
     }
 
-    // Pull the entry back by DIST_EPSILON along the move so the mover stops
-    // just shy of the surface (mirrors SV_RecursiveHullCheck's near-side bias).
-    let move_len2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    // Pull the entry back by DIST_EPSILON on the ENTRY PLANE so the mover stops
+    // just shy of the surface. SV_RecursiveHullCheck biases per-plane:
+    // `frac = (t1 - DIST_EPSILON) / (t1 - t2)`, i.e. in fraction terms the shift is
+    // DIST_EPSILON / |t1 - t2| = DIST_EPSILON / |d[entry_axis]| (the entry plane is
+    // axis-aligned, so the distance changes by |d[ax]| per unit fraction). The
+    // earlier 3D-length pullback (DIST_EPSILON / |d|) under-shifted diagonal moves,
+    // letting box-vs-box stops land up to a few units too deep.
+    let ax = enter_axis as usize;
     let mut frac = tenter;
-    if move_len2 > 0.0 {
-        let len = move_len2.sqrt();
-        frac = tenter - DIST_EPSILON / len;
+    if d[ax] != 0.0 {
+        frac = tenter - DIST_EPSILON / d[ax].abs();
     }
     if frac < 0.0 {
         frac = 0.0;

@@ -3315,6 +3315,12 @@ pub struct ModelInstance<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub origin: Vec3,
     pub yaw: f32,
+    /// Entity pitch (`angles[PITCH]`, degrees, +down as QuakeC stores it). Drives
+    /// flying projectiles (rockets/grenades/spikes point along their flight path).
+    /// `0.0` keeps the model upright and renders bit-identically to yaw-only.
+    pub pitch: f32,
+    /// Entity roll (`angles[ROLL]`, degrees). `0.0` for upright models.
+    pub roll: f32,
     pub frame: usize,
     pub color: [u8; 3],
     /// Per-entity skin index (`currententity->skinnum`); out-of-range -> 0.
@@ -3327,9 +3333,8 @@ pub struct ModelInstance<'a> {
 }
 
 impl<'a> ModelInstance<'a> {
-    /// Build a [`ModelInstance`] with `skinnum` defaulted to 0 — the common case
-    /// for callers that do not yet track per-entity skins. Equivalent to the old
-    /// 5-field literal.
+    /// Build a [`ModelInstance`] with `skinnum`/`pitch`/`roll` defaulted to 0 — the
+    /// common case for callers that only track yaw. Equivalent to the old literal.
     pub fn with_frame(
         mdl: &'a crate::mdl::Mdl,
         origin: Vec3,
@@ -3337,10 +3342,10 @@ impl<'a> ModelInstance<'a> {
         frame: usize,
         color: [u8; 3],
     ) -> ModelInstance<'a> {
-        ModelInstance { mdl, origin, yaw, frame, color, skinnum: 0 }
+        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, color, skinnum: 0 }
     }
 
-    /// Build a [`ModelInstance`] specifying the per-entity `skinnum`.
+    /// Build a [`ModelInstance`] specifying the per-entity `skinnum` (pitch/roll 0).
     pub fn new(
         mdl: &'a crate::mdl::Mdl,
         origin: Vec3,
@@ -3349,7 +3354,7 @@ impl<'a> ModelInstance<'a> {
         color: [u8; 3],
         skinnum: i32,
     ) -> ModelInstance<'a> {
-        ModelInstance { mdl, origin, yaw, frame, color, skinnum }
+        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, color, skinnum }
     }
 }
 
@@ -3547,7 +3552,19 @@ fn draw_alias_model(
     let ambient = ambient.min(255.0);
     let model_light = (0.25 + ambient / 200.0).clamp(0.25, 1.2);
 
+    // Model orientation (r_alias.c R_AliasSetUpTransform). With pitch=roll=0 this is
+    // exactly the +Z yaw rotation, so zero-orientation models take the original fast
+    // path and render bit-identically. With a pitch or roll (flying projectiles,
+    // banking flyers) we build the full basis from AngleVectors and transform each
+    // point as `p[0]*forward - p[1]*right + p[2]*up + origin` (the C t2matrix whose
+    // columns are forward / -right / up over angles [PITCH=-pitch, YAW, ROLL]).
     let yaw_rad = (inst.yaw as f64).to_radians();
+    let oriented = inst.pitch != 0.0 || inst.roll != 0.0;
+    let (m_fwd, m_right, m_up) = if oriented {
+        crate::math::angle_vectors([-inst.pitch, inst.yaw, inst.roll])
+    } else {
+        ([0.0; 3], [0.0; 3], [0.0; 3]) // unused on the fast path
+    };
 
     let verts = match mdl_frame_verts(inst.mdl, inst.frame, time) {
         Some(v) => v,
@@ -3582,7 +3599,15 @@ fn draw_alias_model(
             let p = mdl_vertex_model_space(header, tv);
             // `slot` is 0..3 by the array length; in-range by construction.
             if let Some(w) = world.get_mut(slot) {
-                *w = mdl_model_to_world(p, yaw_rad, inst.origin);
+                *w = if oriented {
+                    [
+                        p[0] * m_fwd[0] - p[1] * m_right[0] + p[2] * m_up[0] + inst.origin[0],
+                        p[0] * m_fwd[1] - p[1] * m_right[1] + p[2] * m_up[1] + inst.origin[1],
+                        p[0] * m_fwd[2] - p[1] * m_right[2] + p[2] * m_up[2] + inst.origin[2],
+                    ]
+                } else {
+                    mdl_model_to_world(p, yaw_rad, inst.origin)
+                };
             }
         }
         if !ok {
@@ -7002,6 +7027,8 @@ mod tests {
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0], // between the camera and the centre
             yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             frame: 0,
             color: [255, 32, 32],
             skinnum: 0,
@@ -7256,6 +7283,8 @@ mod tests {
             mdl: &skinned,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             frame: 0,
             color: [255, 32, 32],
             skinnum: 0,
@@ -7269,6 +7298,8 @@ mod tests {
             mdl: &flat,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             frame: 0,
             color: [255, 32, 32],
             skinnum: 0,
@@ -7310,6 +7341,8 @@ mod tests {
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             frame: 0,
             color: [255, 32, 32],
             skinnum: 0,
@@ -7337,6 +7370,8 @@ mod tests {
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             frame: 0,
             color: [255, 32, 32],
             skinnum: 0,
@@ -7345,6 +7380,8 @@ mod tests {
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             frame: 1,
             color: [255, 32, 32],
             skinnum: 0,
@@ -8234,6 +8271,8 @@ mod tests {
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             frame: 0,
             color: [255, 32, 32],
             skinnum: 0,

@@ -4186,9 +4186,11 @@ impl Server {
             link_edict(&mut self.vm, ent);
             return;
         }
-        if !oldonground {
-            // don't stair up while jumping (waterlevel is out of scope -> treated
-            // as 0, so jumping airborne players never step).
+        // don't stair up while jumping — UNLESS swimming. The C gate is
+        // `if (!oldonground && ent->v.waterlevel == 0) return;`, so a player in
+        // water (waterlevel > 0) can still step up onto a ledge even mid-air.
+        let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
+        if !oldonground && waterlevel == 0 {
             link_edict(&mut self.vm, ent);
             return;
         }
@@ -4216,7 +4218,28 @@ impl Server {
         self.vm
             .ent_set_vector(ent, "velocity", [oldvel[0], oldvel[1], 0.0]);
         let mut steptrace2 = None;
-        let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace2);
+        let mut clip2 = self.fly_move_core(ent, dt, sv_time, &mut steptrace2);
+
+        // Stuck check (sv_phys.c SV_WalkMove ~1015): if the step-up forward move
+        // made essentially no horizontal progress (< 1/32 unit on BOTH axes) but
+        // still blocked, the player is wedged at a BSP hull angle-join — try the
+        // SV_TryUnstick nudge dance to free them, adopting its resulting clip.
+        if clip2 != 0 {
+            let neworg = self.vm.ent_get_vector(ent, "origin");
+            if (oldorg[0] - neworg[0]).abs() < 0.03125 && (oldorg[1] - neworg[1]).abs() < 0.03125 {
+                clip2 = self.sv_try_unstick(ent, oldvel, sv_time);
+            }
+        }
+
+        // Extra friction based on view angle (sv_phys.c ~1027): when the (possibly
+        // unstick-updated) forward move blocked on a wall, SV_WallFriction bleeds the
+        // tangential velocity using the wall normal from the forward move's trace.
+        if clip2 & 2 != 0 {
+            if let Some(tr) = &steptrace2 {
+                let normal = tr.plane_normal;
+                self.sv_wall_friction(ent, normal);
+            }
+        }
 
         // move down by STEPSIZE - the vertical the original move would have done.
         let downmove = [0.0, 0.0, -world::STEPSIZE + oldvel[2] * dt];
@@ -4249,6 +4272,64 @@ impl Server {
         }
 
         link_edict(&mut self.vm, ent);
+    }
+
+    /// `SV_WallFriction` (sv_phys.c ~867): when the player walks into a wall while
+    /// facing toward it, bleed off the tangential velocity. `d = dot(normal,
+    /// forward(v_angle)) + 0.5`; if `d < 0` the into-wall component is removed and
+    /// the side component is scaled by `(1+d)`, so head-on contact loses the most
+    /// speed. Only X/Y are scaled (Z is left to gravity/step logic). Uses the
+    /// player's VIEW angles (`v_angle`), not the body `angles`.
+    fn sv_wall_friction(&mut self, ent: i32, normal: Vec3) {
+        let v_angle = self.vm.ent_get_vector(ent, "v_angle");
+        let (forward, _right, _up) = angle_vectors(v_angle);
+        let d = crate::math::dot(normal, forward) + 0.5;
+        if d >= 0.0 {
+            return;
+        }
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        let i = crate::math::dot(normal, vel);
+        let into = [normal[0] * i, normal[1] * i, normal[2] * i];
+        let side = [vel[0] - into[0], vel[1] - into[1], vel[2] - into[2]];
+        self.vm
+            .ent_set_vector(ent, "velocity", [side[0] * (1.0 + d), side[1] * (1.0 + d), vel[2]]);
+    }
+
+    /// `SV_TryUnstick` (sv_phys.c ~901): the player is wedged at a BSP hull
+    /// angle-join where float precision pins the step-up move. Nudge the player 2
+    /// units in each of 8 axial/diagonal directions, retry the original horizontal
+    /// move, and accept the first direction that frees > 4 units of progress on X or
+    /// Y; otherwise restore the position and try the next. If none work, zero the
+    /// velocity ("don't stick") and report a full block (7).
+    fn sv_try_unstick(&mut self, ent: i32, oldvel: Vec3, sv_time: f32) -> i32 {
+        let oldorg = self.vm.ent_get_vector(ent, "origin");
+        const DIRS: [[f32; 3]; 8] = [
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [-2.0, 0.0, 0.0],
+            [0.0, -2.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [-2.0, 2.0, 0.0],
+            [2.0, -2.0, 0.0],
+            [-2.0, -2.0, 0.0],
+        ];
+        for dir in DIRS {
+            // try pushing a little in an axial direction (from the stuck origin).
+            self.push_entity(ent, dir, sv_time);
+            // retry the original move (horizontal only).
+            self.vm
+                .ent_set_vector(ent, "velocity", [oldvel[0], oldvel[1], 0.0]);
+            let mut steptrace = None;
+            let clip = self.fly_move_core(ent, 0.1, sv_time, &mut steptrace);
+            let neworg = self.vm.ent_get_vector(ent, "origin");
+            if (oldorg[1] - neworg[1]).abs() > 4.0 || (oldorg[0] - neworg[0]).abs() > 4.0 {
+                return clip; // freed
+            }
+            // go back to the original (stuck) pos and try the next direction.
+            self.vm.ent_set_vector(ent, "origin", oldorg);
+        }
+        self.vm.ent_set_vector(ent, "velocity", [0.0, 0.0, 0.0]); // don't stick
+        7 // still not moving
     }
 }
 

@@ -914,7 +914,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         }
         let inst: Vec<render::ModelInstance> = owned
             .iter()
-            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0, skinnum: 0 })
+            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, pitch: 0.0, roll: 0.0, color: *color, frame: 0, skinnum: 0 })
             .collect();
         let external: Vec<render::ExternalBModel> = ext_owned
             .iter()
@@ -1603,7 +1603,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         .map(|(mdl, origin, yaw, color)| render::ModelInstance {
             mdl,
             origin: *origin,
-            yaw: *yaw,
+            yaw: *yaw, pitch: 0.0, roll: 0.0,
             color: *color,
             frame: 0,
             skinnum: 0,
@@ -1750,7 +1750,7 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
         .map(|(mdl, origin, yaw, color)| render::ModelInstance {
             mdl,
             origin: *origin,
-            yaw: *yaw,
+            yaw: *yaw, pitch: 0.0, roll: 0.0,
             color: *color,
             frame: 0,
             skinnum: 0,
@@ -1850,7 +1850,7 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
             .map(|(mdl, origin, yaw, color)| render::ModelInstance {
                 mdl,
                 origin: *origin,
-                yaw: *yaw,
+                yaw: *yaw, pitch: 0.0, roll: 0.0,
                 color: *color,
                 frame: 0,
                 skinnum: 0,

@@ -261,6 +261,15 @@ impl ParticleSystem {
         if count <= 0 {
             return;
         }
+        // R_RunParticleEffect's `count == 1024` branch (r_part.c) is identical to
+        // R_ParticleExplosion (pt_explode/pt_explode2 alternating, colour ramp1[0],
+        // die + 5, the wide org/vel jitter) — the `dir`/`color` are ignored. svc_
+        // particle's net `count == 255` sentinel maps to 1024, so a burst of 1024
+        // must render as the fiery explosion, not the gentle SlowGrav dust.
+        if count == 1024 {
+            self.spawn_explosion(org, now, rng);
+            return;
+        }
         // Clamp the requested count to the remaining pool capacity so we never
         // exceed MAX_PARTICLES (the C's free-list-exhausted bail).
         let remaining = MAX_PARTICLES.saturating_sub(self.particles.len());
