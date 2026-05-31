@@ -2206,6 +2206,8 @@ impl Server {
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
         reset_temp_entity_decoder();
+        // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
+        self.cleanup_ents();
         let start_time = self.time();
 
         let mut thinks_fired = 0usize;
@@ -3244,6 +3246,9 @@ impl Server {
         // well-behaved front-end drains it immediately, but a stale request must
         // never trigger a swap a frame late or against the wrong level).
         reset_changelevel();
+        // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before this
+        // frame's thinks (the host already consumed it via entity_dlights()).
+        self.cleanup_ents();
         let start_time = self.time();
 
         // Let the progs know a new frame has started (self/other = world).
@@ -3587,6 +3592,29 @@ impl Server {
     /// If one entity has several light bits set, it yields several entries — but
     /// they share the entity's `key`, so `CL_AllocDlight` collapses them into one
     /// slot (the last wins), exactly as the C overwrote the same slot in sequence.
+    /// `SV_CleanupEnts` (sv_main.c:557): clear the one-frame `EF_MUZZLEFLASH` bit on
+    /// every edict. QuakeC's `W_Attack` sets `self.effects |= EF_MUZZLEFLASH` on each
+    /// discharge and relies on the engine clearing it the same frame, so the muzzle
+    /// dynamic light lasts exactly one frame. The C clears at the END of the frame
+    /// (after the client read the bit); this single-process port clears at the START
+    /// of the next frame instead — equivalent, since nothing reads `effects` between
+    /// the host's `entity_dlights()` (end of this frame) and the next frame's thinks.
+    /// Without this the muzzle light, once lit, tracked the shooter forever.
+    fn cleanup_ents(&mut self) {
+        let n = self.vm.num_edicts();
+        for e in 1..n {
+            if self.vm.edict_free.get(e).copied().unwrap_or(true) {
+                continue;
+            }
+            let ei = e as i32;
+            let eff = self.vm.ent_get_float(ei, "effects") as i32;
+            if eff & EF_MUZZLEFLASH != 0 {
+                self.vm
+                    .ent_set_float(ei, "effects", (eff & !EF_MUZZLEFLASH) as f32);
+            }
+        }
+    }
+
     pub fn entity_dlights(&self) -> Vec<EntityDlight> {
         let mut out = Vec::new();
         let n = self.vm.num_edicts();
@@ -5221,7 +5249,7 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
 /// side = side < rollspeed ? side*rollangle/rollspeed : rollangle
 /// return side * sign
 /// ```
-fn v_calc_roll(angles: Vec3, velocity: Vec3) -> f32 {
+pub fn v_calc_roll(angles: Vec3, velocity: Vec3) -> f32 {
     /// `cl_rollangle` default ("2.0").
     const CL_ROLLANGLE: f32 = 2.0;
     /// `cl_rollspeed` default ("200").

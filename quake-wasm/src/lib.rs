@@ -129,9 +129,18 @@ struct Walk {
     /// Full-screen damage-flash intensity (Quake's `CSHIFT_DAMAGE` percent,
     /// 0..150): bumped when the player loses health/armour and faded each frame.
     damage_blend: f32,
-    /// Player health+armour total last frame (NaN until known / after a level
-    /// change), used to detect the damage taken this frame for the flash.
-    last_total: f32,
+    /// The damage-flash tint colour (`V_ParseDamage` picks (200,100,100) when armour
+    /// absorbs most, (220,50,50) for armour-only, (255,0,0) for pure blood).
+    damage_color: [u8; 3],
+    /// Player health last frame (NaN until known / after a level change), used with
+    /// `last_armor` to split this frame's damage into blood vs armour for the flash.
+    last_health: f32,
+    /// Player armour last frame (NaN until known / after a level change).
+    last_armor: f32,
+    /// Stair-step view smoothing accumulator (`view.c` V_CalcRefdef `oldz`): the eye
+    /// Z lags the player Z by up to 12 units while climbing so stairs glide instead
+    /// of jolting. NaN until the first frame establishes it.
+    oldz: f32,
     /// Current centered message (`centerprint`) + the clock time it expires at
     /// (Quake's `scr_centertime` ~2s); replaced by the next centerprint. Drawn
     /// centered over the view.
@@ -420,7 +429,10 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         in_down: false,
         next_impulse: 0,
         damage_blend: 0.0,
-        last_total: f32::NAN,
+        damage_color: [255, 0, 0],
+        last_health: f32::NAN,
+        last_armor: f32::NAN,
+        oldz: f32::NAN,
         centerprint: None,
         notify: Vec::new(),
         clock: 0.0,
@@ -965,6 +977,7 @@ const MAX_CELLS: f32 = 100.0;
 const IT_SHOTGUN: i32 = 1; // bit for weapon 2 base; weapon d>=2 is IT_SHOTGUN<<(d-2)
 const IT_AXE: i32 = 4096;
 const FL_GODMODE: i32 = 64;
+const FL_ONGROUND: i32 = 512;
 const MOVETYPE_WALK: f32 = 3.0;
 const MOVETYPE_FLY: f32 = 5.0;
 const MOVETYPE_NOCLIP: f32 = 8.0;
@@ -1766,7 +1779,10 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.clock = 0.0;
     // Reset the screen-blend state so the level change does not flash red.
     w.damage_blend = 0.0;
-    w.last_total = f32::NAN;
+    w.last_health = f32::NAN;
+    w.last_armor = f32::NAN;
+    // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
+    w.oldz = f32::NAN;
     // Drop any events the *outgoing* server queued (the new server starts fresh).
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
@@ -1960,7 +1976,7 @@ fn step_walk(
     // 4. Gather the visible entities (owned descriptors, so the cache borrow for
     //    rendering doesn't clash with reading the server). Skip the player's own
     //    edict — its model would fill the screen in first person.
-    let mut descs: Vec<(String, [f32; 3], f32, usize, [u8; 3])> = Vec::new();
+    let mut descs: Vec<(String, [f32; 3], f32, usize, [u8; 3], i32)> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     // Projectile/gib trails to spawn this frame, collected here and emitted after
     // the loop (so we don't borrow w.particles/dlights while reading the server):
@@ -2022,23 +2038,35 @@ fn step_walk(
             continue;
         }
         let origin = w.server.vm.ent_get_vector(ent, "origin");
-        let yaw = w.server.vm.ent_get_vector(ent, "angles")[1];
         let frame = w.server.vm.ent_get_float(ent, "frame").max(0.0) as usize;
         let color = color_for_name(&m);
-        // R_RocketTrail: a model with a rocket/grenade/gib/tracer header flag
-        // trails particles from its previous origin to here (CL_RelinkEntities).
+        // The model header flags (rocket/grenade/gib/tracer trails + EF_ROTATE).
         let mflags = w
             .model_cache
             .get(&m)
             .and_then(|o| o.as_ref())
             .map(|md| md.header.flags)
             .unwrap_or(0);
+        // CL_RelinkEntities (cl_main.c:531): a model carrying EF_ROTATE (bonus
+        // pickups — ammo/health/armour boxes, weapons, keys, runes, powerups) has
+        // its yaw overwritten with `anglemod(100*cl.time)` every frame so it spins.
+        // Otherwise use the entity's own yaw. Without this every pickup sat frozen.
+        let yaw = if mflags & quake_rs::demo::EF_ROTATE != 0 {
+            quake_rs::demo::rotate_yaw(w.clock)
+        } else {
+            w.server.vm.ent_get_vector(ent, "angles")[1]
+        };
+        // Per-entity skin index (R_AliasSetupSkin: `skinnum = currententity->skinnum`).
+        // Drives e.g. armor.mdl's 3 skins (green/yellow/red); was hardcoded to 0.
+        let skin = w.server.vm.ent_get_float(ent, "skin").max(0.0) as i32;
+        // R_RocketTrail: a model with a rocket/grenade/gib/tracer header flag
+        // trails particles from its previous origin to here (CL_RelinkEntities).
         if let Some(ttype) = rocket_trail_type(mflags) {
             let oldorg = *w.trail_org.get(&ent).unwrap_or(&origin);
             trail_spawns.push((ent, oldorg, origin, ttype));
             w.trail_org.insert(ent, origin);
         }
-        descs.push((m, origin, yaw, frame, color));
+        descs.push((m, origin, yaw, frame, color, skin));
     }
 
     // Emit the collected trails (after the entity loop to keep the borrows
@@ -2076,25 +2104,56 @@ fn step_walk(
     // Bob the rendered eye only (the listener pose above stays steady so audio
     // panning does not jitter with the head-bob).
     eye[2] += bob;
+    // Stair-step view smoothing (view.c V_CalcRefdef ~960): while on the ground and
+    // the player's origin Z rose this frame, lag the eye Z behind by up to 12 units
+    // and catch up at 80 u/s, so climbing stairs glides instead of jolting up each
+    // 16/18-unit step. The delta is relative to the raw origin Z (bob layered on
+    // top); on first frame / not-climbing, oldz tracks origin exactly (no offset).
+    {
+        let origin_z = w.server.vm.ent_get_vector(w.player, "origin")[2];
+        let onground = (w.server.vm.ent_get_float(w.player, "flags") as i32) & FL_ONGROUND != 0;
+        if w.oldz.is_finite() && onground && origin_z - w.oldz > 0.0 {
+            w.oldz += dt.max(0.0) * 80.0;
+            if w.oldz > origin_z {
+                w.oldz = origin_z;
+            }
+            if origin_z - w.oldz > 12.0 {
+                w.oldz = origin_z - 12.0;
+            }
+            eye[2] += w.oldz - origin_z;
+        } else {
+            w.oldz = origin_z;
+        }
+    }
     // Add the weapon-fire view kick (cl.punchangle, view.c:957); the engine's
     // drop_punch_angle already decays it back to zero each frame.
     let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
+    // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity, plus
+    // the punchangle's roll component; the dead-view tilt (80°) overrides when the
+    // player is dead. (The damage-kick roll needs svc_damage state, not yet wired.)
+    let body_angles = w.server.vm.ent_get_vector(w.player, "angles");
+    let mut roll =
+        quake_rs::server::v_calc_roll(body_angles, vel) + punch[2];
+    if w.server.vm.ent_get_float(w.player, "health") <= 0.0 {
+        roll = 80.0; // dead view angle (replaces, per V_CalcViewRoll)
+    }
     let cam = Camera {
         pos: eye,
         yaw: ang[1] + punch[1],
         pitch: -(ang[0] + punch[0]), // QuakeC pitch is +down; the renderer's is +up.
+        roll,
         fov_deg: 90.0,
     };
     let instances: Vec<ModelInstance> = descs
         .iter()
-        .filter_map(|(name, origin, yaw, frame, color)| match w.model_cache.get(name) {
+        .filter_map(|(name, origin, yaw, frame, color, skin)| match w.model_cache.get(name) {
             Some(Some(mdl)) => Some(ModelInstance {
                 mdl,
                 origin: *origin,
                 yaw: *yaw,
                 color: *color,
                 frame: *frame,
-                skinnum: 0,
+                skinnum: *skin,
             }),
             _ => None,
         })
@@ -2130,15 +2189,30 @@ fn step_walk(
     //     under water / in lava or slime. Applied to the 3-D frame BEFORE the HUD
     //     (Quake never tints the status bar).
     w.damage_blend = (w.damage_blend - dt * 150.0).max(0.0);
-    let total = w.server.vm.ent_get_float(w.player, "health")
-        + w.server.vm.ent_get_float(w.player, "armorvalue");
-    if w.last_total.is_finite() {
-        let lost = (w.last_total - total).max(0.0);
-        if lost > 0.0 {
-            w.damage_blend = (w.damage_blend + 3.0 * lost).min(150.0);
+    let health = w.server.vm.ent_get_float(w.player, "health");
+    let armorv = w.server.vm.ent_get_float(w.player, "armorvalue");
+    if w.last_health.is_finite() {
+        // V_ParseDamage (view.c:316-379): blood = health lost, armor = armour lost.
+        // count = (blood+armor)/2 with a min-10 floor, and the flash adds 3*count.
+        // (The C reads the server's dmg_take/dmg_save bytes; we infer them from the
+        // per-frame stat deltas, which equal blood/armor in single-player.)
+        let blood = (w.last_health - health).max(0.0);
+        let armor = (w.last_armor - armorv).max(0.0);
+        if blood + armor > 0.0 {
+            let count = (0.5 * (blood + armor)).max(10.0);
+            w.damage_blend = (w.damage_blend + 3.0 * count).min(150.0);
+            // Tint: armour-dominant -> pinkish, armour-only -> orange-red, else red.
+            w.damage_color = if armor > blood {
+                [200, 100, 100]
+            } else if armor > 0.0 {
+                [220, 50, 50]
+            } else {
+                [255, 0, 0]
+            };
         }
     }
-    w.last_total = total;
+    w.last_health = health;
+    w.last_armor = armorv;
     // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> POWERUP (top). (Bonus
     // pickup flash needs the QuakeC "bf" stuffcmd, not yet wired.)
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
@@ -2146,7 +2220,7 @@ fn step_walk(
         shifts.push(cs);
     }
     if w.damage_blend > 0.0 {
-        shifts.push(([255, 0, 0], w.damage_blend));
+        shifts.push((w.damage_color, w.damage_blend));
     }
     // Powerup tint (Quad=blue, Biosuit=green, Ring=gray, Pentagram=yellow).
     if let Some(cs) = render::powerup_cshift(w.server.vm.ent_get_float(w.player, "items") as i32) {
@@ -2300,6 +2374,9 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> ren
         pos: f.view_origin,
         yaw: f.view_angles[1],
         pitch: -f.view_angles[0],
+        // Demos record viewangles[ROLL]; replay the recorded bank so the attract
+        // demo leans into strafes exactly as the original engine rendered it.
+        roll: f.view_angles[2],
         fov_deg: 90.0,
     };
     // The recorded server time animates the demo's liquids/sky too. The live

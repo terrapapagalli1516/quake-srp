@@ -202,6 +202,10 @@ pub struct Camera {
     pub pos: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// View bank in degrees about the forward axis (Quake's `viewangles[ROLL]` from
+    /// V_CalcViewRoll: strafe lean, damage kick, and the 80° dead-view tilt). `0.0`
+    /// keeps the horizon level and reproduces the pre-roll basis bit-for-bit.
+    pub roll: f32,
     pub fov_deg: f32,
 }
 
@@ -231,6 +235,7 @@ impl Camera {
             pos,
             yaw,
             pitch,
+            roll: 0.0,
             fov_deg,
         }
     }
@@ -259,7 +264,28 @@ impl Camera {
         let right: Vec3 = [sin_y as f32, -cos_y as f32, 0.0];
         // up = right x forward completes a right-handed (right, up, forward) set.
         let up = cross(right, forward);
-        (forward, right, up)
+        if self.roll == 0.0 {
+            // No bank: exact pre-roll basis (keeps level-view renders bit-identical).
+            return (forward, right, up);
+        }
+        // Bank the (right, up) pair about the forward axis by `roll` degrees. Derived
+        // from id's AngleVectors at pitch=0: with sr=sin(roll), cr=cos(roll),
+        //   right' = cr*right - sr*up,  up' = sr*right + cr*up.
+        // Rotating the already-pitch-correct level basis about forward reproduces
+        // V_CalcViewRoll's bank at any pitch.
+        let rr = (self.roll as f64).to_radians();
+        let (sr, cr) = (rr.sin(), rr.cos());
+        let right2: Vec3 = [
+            (right[0] as f64 * cr - up[0] as f64 * sr) as f32,
+            (right[1] as f64 * cr - up[1] as f64 * sr) as f32,
+            (right[2] as f64 * cr - up[2] as f64 * sr) as f32,
+        ];
+        let up2: Vec3 = [
+            (right[0] as f64 * sr + up[0] as f64 * cr) as f32,
+            (right[1] as f64 * sr + up[1] as f64 * cr) as f32,
+            (right[2] as f64 * sr + up[2] as f64 * cr) as f32,
+        ];
+        (forward, right2, up2)
     }
 }
 
@@ -4869,6 +4895,9 @@ fn face_bracket(health: i32) -> usize {
 /// 5-frame cycle continuously off `time`: `frame = (int)(time*10) % 5` in 0..4,
 /// then the 1-based `inva{frame+1}_<suffix>` lump name. Non-selected owned weapons
 /// use the dim `inv_*` name from [`WEAPON_INV_NAMES`] (handled by the caller).
+// Retained for the future per-item `cl.item_gettime`-driven 1-second pickup flash;
+// the steady-state HUD now draws the settled `inv2_*` icon for the active weapon.
+#[allow(dead_code)]
 fn weapon_flash_name(i: usize, time: f32) -> String {
     let suffix = WEAPON_SUFFIX.get(i).copied().unwrap_or("shotgun");
     let f = ((time * 10.0).floor() as i64).rem_euclid(5) + 1;
@@ -5020,17 +5049,18 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     blit_named(image, wad, "ibar", 0.0, -24.0, scale, vy_top, pal);
 
     // Weapon icons: for each owned weapon (items bit IT_SHOTGUN<<i, i=0..6), draw
-    // its icon at Sbar_DrawPic(i*24, -16, ...). The currently-selected weapon
-    // (its IT_* bit == `weapon`) flashes its 5 `inva*` frames; the rest show the
-    // dim `inv_*` icon. (The C also brightens the selected icon to `inv2_*` once
-    // the flash settles; with a single `time` source we keep it flashing, which is
-    // the visible animation Quake shows on the active gun.)
+    // its icon at Sbar_DrawPic(i*24, -16, ...). The currently-selected weapon shows
+    // the bright `inv2_*` icon, the rest the dim `inv_*` icon (Sbar_DrawInventory:
+    // for `flashon >= 10` — i.e. >1s after pickup, the steady state — the active
+    // weapon draws `sb_weapons[1][i]` = `inv2_*`). The 1-second post-pickup
+    // `inva1..5` flash needs per-item `cl.item_gettime`, which we don't track, so we
+    // render the settled bright icon the player sees the rest of the time.
     for i in 0..7 {
         let bit = IT_SHOTGUN << i;
         if hud.items & bit != 0 {
             let selected = hud.weapon == bit;
             if selected {
-                let name = weapon_flash_name(i, hud.time);
+                let name = format!("inv2_{}", WEAPON_SUFFIX[i]);
                 blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, scale, vy_top, pal);
             } else {
                 blit_named(image, wad, WEAPON_INV_NAMES[i], (i as f32) * 24.0, -16.0, scale, vy_top, pal);
@@ -5078,18 +5108,24 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // 1. Background strip (sbar, 320x24) at virtual (0,0).
     blit_named(image, wad, "sbar", 0.0, 0.0, scale, vy_top, pal);
 
-    // Armour type icon + number. Under invulnerability the C shows "666" and the
-    // disc; we don't have the disc pic wired here, so we draw the armour-type icon
-    // (Sbar_DrawPic(0, 0, sb_armor[type])) keyed on IT_ARMOR3/2/1 and the armour
-    // number at Sbar_DrawNum(24, ..) — right edge virtual x=96, gold when <=25.
-    if hud.items & IT_ARMOR3 != 0 {
-        blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, scale, vy_top, pal);
-    } else if hud.items & IT_ARMOR2 != 0 {
-        blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, scale, vy_top, pal);
-    } else if hud.items & IT_ARMOR1 != 0 {
-        blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, scale, vy_top, pal);
+    // Armour field (Sbar_Draw, sbar.c:968-997). Under invulnerability the C draws a
+    // gold "666" and the Pentagram-of-Protection disc over the armour slot and shows
+    // NO real armour icon/number; otherwise the armour-type icon (Sbar_DrawPic(0, 0,
+    // sb_armor[type])) keyed on IT_ARMOR3/2/1 plus the armour number at
+    // Sbar_DrawNum(24, ..) — right edge virtual x=96, gold when <=25.
+    if hud.items & IT_INVULNERABILITY != 0 {
+        draw_num(image, 666, 96.0, 0.0, scale, vy_top, wad, pal, true);
+        blit_named(image, wad, "disc", 0.0, 0.0, scale, vy_top, pal);
+    } else {
+        if hud.items & IT_ARMOR3 != 0 {
+            blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, scale, vy_top, pal);
+        } else if hud.items & IT_ARMOR2 != 0 {
+            blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, scale, vy_top, pal);
+        } else if hud.items & IT_ARMOR1 != 0 {
+            blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, scale, vy_top, pal);
+        }
+        draw_num(image, hud.armor, 96.0, 0.0, scale, vy_top, wad, pal, hud.armor <= 25);
     }
-    draw_num(image, hud.armor, 96.0, 0.0, scale, vy_top, wad, pal, hud.armor <= 25);
 
     // Face (Sbar_DrawFace) at x=112, y=0. Powerup faces take priority in the C's
     // order: invisibility+invulnerability, then quad, then invisibility, then
@@ -8732,8 +8768,8 @@ mod tests {
         let gun = viewmodel_mdl();
 
         // Two cameras at the room centre, looking in very different directions.
-        let cam_a = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
-        let cam_b = Camera { pos: [0.0, 0.0, 0.0], yaw: 137.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam_a = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let cam_b = Camera { pos: [0.0, 0.0, 0.0], yaw: 137.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
         let img_a = render_scene_ext(
             &bsp, &cam_a, w, h, &pal, &[], &[], &[],
@@ -8804,7 +8840,7 @@ mod tests {
         // a wall is right in front and would occlude a depth-tested viewmodel.
         // The gun is anchored ~40-60 units ahead, i.e. world x ~240-260, AT the
         // wall plane — depth-tested it would lose, but it must still show.
-        let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
         let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
@@ -8861,7 +8897,7 @@ mod tests {
         // skipped without panicking and without altering the frame.
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
-        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
         // Frameless model -> draw_viewmodel returns early.
         let mut frameless = viewmodel_mdl();
@@ -8958,7 +8994,7 @@ mod tests {
         let bg = [10u8, 10, 14];
         let (w, h) = (160usize, 120usize);
         let gun = straddling_viewmodel_mdl();
-        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
         let img = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
@@ -9818,9 +9854,11 @@ mod tests {
         for d in 0..10u8 {
             pics.push((format!("anum_{d}"), qpic_payload(24, 24, 120 + d)));
         }
-        // Weapon icons (dim + the 5 flash frames), distinct index 60 so they show.
+        // Weapon icons (dim inv_*, bright active inv2_*, and the 5 flash frames),
+        // distinct index 60 so they show.
         for s in WEAPON_SUFFIX {
             pics.push((format!("inv_{s}"), qpic_payload(24, 16, 60)));
+            pics.push((format!("inv2_{s}"), qpic_payload(24, 16, 60)));
             for f in 1..=5u8 {
                 pics.push((format!("inva{f}_{s}"), qpic_payload(24, 16, 60)));
             }
@@ -9934,13 +9972,13 @@ mod tests {
             }
         }
 
-        // A weapon icon (index 60) drew on the ibar (the shotgun flash frame at
-        // x=0, y=-16 -> framebuffer rows ~160..176).
+        // A weapon icon (index 60) drew on the ibar (the active shotgun's bright
+        // inv2_shotgun icon at x=0, y=-16 -> framebuffer rows ~160..176).
         let weapon_px = (160..176)
             .flat_map(|y| (0..24).map(move |x| (x, y)))
             .filter(|&(x, y)| img.rgb[y * 320 + x] == [60, 60, 60])
             .count();
-        assert!(weapon_px > 0, "selected weapon flash icon drew on the ibar");
+        assert!(weapon_px > 0, "active weapon (inv2_*) icon drew on the ibar");
 
         // The face (index 70) drew at x=112 on the sbar (rows 176..200).
         let face_px = (176..200)
@@ -10017,7 +10055,7 @@ mod tests {
         // a fresh (cleared) z-buffer.
         let w = 80usize;
         let h = 60usize;
-        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![f32::INFINITY; w * h];
@@ -10041,7 +10079,7 @@ mod tests {
         // be drawn (the z-test rejects vz >= zbuf).
         let w = 80usize;
         let h = 60usize;
-        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![10.0f32; w * h]; // a wall closer than the particle
@@ -10066,7 +10104,7 @@ mod tests {
         // occlusion test above.
         let w = 80usize;
         let h = 60usize;
-        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let mut img = Image::new(w, h, [9, 9, 9]);
         let mut zbuf = vec![500.0f32; w * h]; // a wall FARTHER than the particle
         let mut pal = [[0u8, 0, 0]; 256];
@@ -10086,7 +10124,7 @@ mod tests {
         // must be skipped entirely — no panic, no paint.
         let w = 40usize;
         let h = 30usize;
-        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![f32::INFINITY; w * h];
@@ -11098,7 +11136,7 @@ mod tests {
     #[test]
     fn frustum_culls_box_behind_camera_keeps_box_in_front() {
         // Camera at the origin looking down +X (yaw 0, pitch 0), 90-deg fov.
-        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let frustum = Frustum::from_camera(&cam, 320, 200);
 
         // A box entirely BEHIND the camera (negative X): fully outside the near
@@ -11134,7 +11172,7 @@ mod tests {
     fn frustum_never_culls_a_box_that_encloses_the_eye() {
         // A huge box around the camera straddles every plane -> never culled,
         // guaranteeing we never punch a hole when geometry surrounds the view.
-        let cam = Camera { pos: [10.0, 20.0, 30.0], yaw: 35.0, pitch: -12.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [10.0, 20.0, 30.0], yaw: 35.0, pitch: -12.0, roll: 0.0, fov_deg: 90.0 };
         let frustum = Frustum::from_camera(&cam, 640, 480);
         assert!(
             !frustum.culls([-1000.0, -1000.0, -1000.0], [1000.0, 1000.0, 1000.0]),
@@ -11383,7 +11421,7 @@ mod tests {
         let (w, h) = (160usize, 120usize);
         // A camera tucked in a corner looking along an axis so a good chunk of
         // the room's faces fall outside the view (some get culled).
-        let cam = Camera { pos: [-240.0, -240.0, 20.0], yaw: 10.0, pitch: 0.0, fov_deg: 90.0 };
+        let cam = Camera { pos: [-240.0, -240.0, 20.0], yaw: 10.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let frustum = Frustum::from_camera(&cam, w, h);
 
         let (forward, right, up) = cam.basis();

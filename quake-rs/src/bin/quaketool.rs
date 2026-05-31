@@ -933,7 +933,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         };
 
         let (eye, a) = server.player_view();
-        let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], fov_deg: 90.0 };
+        let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], roll: 0.0, fov_deg: 90.0 };
         let viewmodel = weapon_mdl
             .as_ref()
             .map(|mdl| render::Viewmodel { mdl, frame: weapon_frame });
@@ -1864,6 +1864,9 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
             pos: f.view_origin,
             yaw: f.view_angles[1],
             pitch: -f.view_angles[0],
+            // Demos record viewangles[ROLL] (the engine's V_CalcViewRoll bank); use
+            // it so demo playback leans/tilts exactly as the original did.
+            roll: f.view_angles[2],
             fov_deg: 90.0,
         };
         let img = render::render_scene(&bsp, &cam, w, h, &palette, &instances);
