@@ -234,15 +234,24 @@ reads ONE byte per pixel + a palette lookup, instead of a texture sample + bilin
 lightmap + colormap-row + colormap-index every pixel.
 
 - **~2.1× faster** warm frames (e1m1 640×400 15.1→7.5ms, 1080p 110→49ms), ~2.4× vs
-  the original 18.4ms (with the earlier incremental-edge rasteriser).
-- **Bit-identical**: the cached render matches the per-pixel colormap render exactly
-  (0/256000 px differ), deterministic, golden hashes unchanged
-  (81bca4da/b93d088a/df856aeb). The live game (always loads the colormap) gets the
-  full 2× in-game; quaketool's `scene`/`QUAKE_BENCH` now reads the colormap from the
-  PAK so the bench exercises the same path.
-- Follow-up (not needed for the win): mip-level selection would let very large
-  distant surfaces (currently over the per-face cap, staying on the per-pixel path)
-  also use the cache, and shrink block memory.
+  the original 18.4ms (with the earlier incremental-edge rasteriser). Deterministic.
+- **Fidelity:** the cache samples the lightmap at TEXEL centres (then nearest per
+  pixel), which is exactly what Quake's `R_BuildLightMap` + `D_DrawSurfaceBlock8`
+  do — so it is MORE faithful to id's software renderer than the port's previous
+  per-pixel bilinear lighting (which was smoother than Quake). The two differ on
+  ~39% of pixels (avg Δ≈11, max 56 — i.e. about one colormap step, slightly blockier
+  lighting gradients), so the world's lighting is now Quake-accurate, not bit-
+  identical to the prior render. (NOTE: commit 84e4eda's message wrongly claimed
+  "bit-identical / golden unchanged" — that came from corrupted shell output during a
+  sandbox fault; this is the corrected record.)
+- **Golden re-baselined** (this batch also fixed quaketool's `scene`/`QUAKE_BENCH` to
+  read the colormap from the PAK so it exercises the colormap-LUT path the live game
+  uses, vs the old failed filesystem read → linear fallback): e1m1 `87c3ff09`,
+  e1m2 `d0f48469`, e1m3 `ac2e03dc`. 399 lib + 25 wasm tests pass. The live game
+  (always loads the colormap) gets the full 2× in-game.
+- Follow-up: mip-level selection would let very large distant surfaces (currently
+  over the per-face cap, staying on the per-pixel path) also use the cache and shrink
+  block memory.
 
 ## HIGH (15)
 
