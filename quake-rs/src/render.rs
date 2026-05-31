@@ -2772,6 +2772,16 @@ pub struct RenderStats {
     /// Lit-surface-cache hits / misses (world pass).
     pub surf_hits: u64,
     pub surf_misses: u64,
+    /// Submodel pass: faces drawn, triangles, and pixels written. The submodel
+    /// pass currently has NO surface cache and NO front-to-back ordering, so these
+    /// reveal how much of the (often surprisingly large) submodel time is overdraw
+    /// vs per-pixel lightmap+colormap cost — the next optimization target.
+    pub sub_faces_visited: u64,
+    pub sub_faces_drawn: u64,
+    pub sub_tris: u64,
+    /// Submodel lightmap rebuilds (every submodel face rebuilds via
+    /// `face_lightmap_dyn` each frame — no cache).
+    pub sub_lm_builds: u64,
 }
 
 impl RenderStats {
@@ -2780,6 +2790,7 @@ impl RenderStats {
         sprite_ns: 0, viewmodel_ns: 0, faces_total: 0, faces_pvs_culled: 0,
         faces_frustum_culled: 0, faces_drawn: 0, world_tris: 0, world_pixels: 0,
         surf_hits: 0, surf_misses: 0,
+        sub_faces_visited: 0, sub_faces_drawn: 0, sub_tris: 0, sub_lm_builds: 0,
     };
 }
 
@@ -3599,6 +3610,10 @@ fn draw_submodel(
             Some(f) => f,
             None => continue,
         };
+        // Every submodel face VISITED this frame (before backface/near cull). The
+        // gap between this and `sub_faces_drawn` is the per-frame setup cost
+        // (face_world_poly reconstruction etc.) paid on faces that never draw.
+        stat(|s| s.sub_faces_visited += 1);
 
         // Reconstruct the LOCAL polygon (same space as the worldmodel).
         if !face_world_poly(bsp, face, &mut local_poly) {
@@ -3650,6 +3665,7 @@ fn draw_submodel(
         // lightmap (from the LOCAL polygon — texinfo extents are origin-independent).
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         let lightmap = if kind == SurfKind::Normal {
+            stat(|s| s.sub_lm_builds += 1);
             face_lightmap_dyn(bsp, face, &local_poly, light_styles, &local_dlights)
         } else {
             None
@@ -3723,6 +3739,7 @@ fn draw_submodel(
             Some(mt) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 let (tw, th) = (mt.width as usize, mt.height as usize);
                 let v0 = proj[0];
+                stat(|s| { s.sub_faces_drawn += 1; s.sub_tris += (proj.len() - 2) as u64; });
                 for i in 1..proj.len() - 1 {
                     raster_triangle_tex(
                         image, zbuf, v0, proj[i], proj[i + 1],
