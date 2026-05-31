@@ -2778,6 +2778,8 @@ pub struct RenderStats {
     /// vs per-pixel lightmap+colormap cost — the next optimization target.
     pub sub_faces_visited: u64,
     pub sub_faces_drawn: u64,
+    pub sub_surf_hits: u64,
+    pub sub_surf_misses: u64,
     pub sub_tris: u64,
     /// Submodel lightmap rebuilds (every submodel face rebuilds via
     /// `face_lightmap_dyn` each frame — no cache).
@@ -2790,7 +2792,8 @@ impl RenderStats {
         sprite_ns: 0, viewmodel_ns: 0, faces_total: 0, faces_pvs_culled: 0,
         faces_frustum_culled: 0, faces_drawn: 0, world_tris: 0, world_pixels: 0,
         surf_hits: 0, surf_misses: 0,
-        sub_faces_visited: 0, sub_faces_drawn: 0, sub_tris: 0, sub_lm_builds: 0,
+        sub_faces_visited: 0, sub_faces_drawn: 0, sub_surf_hits: 0, sub_surf_misses: 0,
+        sub_tris: 0, sub_lm_builds: 0,
     };
 }
 
@@ -3598,6 +3601,14 @@ fn draw_submodel(
         None => return,
     };
 
+    // World fingerprint + face count for the lit-surface cache. A submodel's (s,t)
+    // and lightmap come from its LOCAL (origin-independent) polygon, so the baked
+    // texture*lightmap*colormap block is identical wherever the door/plat sits —
+    // cacheable by GLOBAL face index just like the world pass (the world's and the
+    // submodels' face ranges are disjoint, so there is no key collision).
+    let fp = WorldFingerprint::of(bsp);
+    let n_faces = bsp.faces.len();
+
     // `world_poly` holds origin-SHIFTED vertices (for projection); we keep the
     // LOCAL vertices separately for (s,t) and the lightmap.
     let mut local_poly: Vec<Vec3> = Vec::new();
@@ -3740,12 +3751,42 @@ fn draw_submodel(
                 let (tw, th) = (mt.width as usize, mt.height as usize);
                 let v0 = proj[0];
                 stat(|s| { s.sub_faces_drawn += 1; s.sub_tris += (proj.len() - 2) as u64; });
-                for i in 1..proj.len() - 1 {
-                    raster_triangle_tex(
-                        image, zbuf, v0, proj[i], proj[i + 1],
-                        &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
-                        colormap,
-                    );
+                // Lit SURFACE CACHE for submodels (doors/plats/buttons) — same as the
+                // world pass. Gated on `ent_frame == 0`: an ACTIVATED brush entity
+                // (frame != 0) samples the alternate (+a..+j) texture cycle — a
+                // different miptex than the baked block — so it falls back to the
+                // per-pixel path. Turb/sky/dlit/colormap-less faces also fall back.
+                let surf = if ent_frame == 0 && matches!(mode, SurfaceMode::Normal) {
+                    match (lightmap.as_ref(), colormap) {
+                        (Some(lm), Some(cm)) => {
+                            let dlit = any_dlight_reaches(bsp, face, &local_dlights);
+                            face_surf_block(face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                match surf {
+                    Some((block, bw, bh, tmins)) => {
+                        stat(|s| s.sub_surf_hits += 1);
+                        for i in 1..proj.len() - 1 {
+                            raster_triangle_cached(
+                                image, zbuf, v0, proj[i], proj[i + 1], &block, bw, bh, tmins,
+                                palette,
+                            );
+                        }
+                    }
+                    None => {
+                        stat(|s| s.sub_surf_misses += 1);
+                        for i in 1..proj.len() - 1 {
+                            raster_triangle_tex(
+                                image, zbuf, v0, proj[i], proj[i + 1],
+                                &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
+                                colormap,
+                            );
+                        }
+                    }
                 }
             }
             _ => {

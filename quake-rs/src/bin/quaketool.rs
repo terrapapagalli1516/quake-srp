@@ -1733,8 +1733,9 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         );
         let _ = writeln!(
             o,
-            "  submodel: {} faces visited, {} drawn, {} tris, {} lightmap rebuilds (no cache)",
-            st.sub_faces_visited, st.sub_faces_drawn, st.sub_tris, st.sub_lm_builds,
+            "  submodel: {} faces visited, {} drawn ({}/{} surf hit/miss), {} tris, {} lightmap rebuilds",
+            st.sub_faces_visited, st.sub_faces_drawn, st.sub_surf_hits, st.sub_surf_misses,
+            st.sub_tris, st.sub_lm_builds,
         );
         return Ok(Out::Text(o));
     }
