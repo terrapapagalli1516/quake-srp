@@ -89,6 +89,14 @@ struct Walk {
     /// runtime. Cached like `model_cache` so a box parses once and backs every
     /// instance of that item; rendered via [`render::ExternalBModel`].
     bmodel_cache: HashMap<String, Option<Bsp>>,
+    /// Per-entity previous render origin, keyed by edict index — the source point
+    /// for R_RocketTrail (rockets/grenades/gibs trail from their old origin to the
+    /// new one each frame). Defaults to the current origin the first time an
+    /// entity is seen, so there's no spurious trail on spawn.
+    trail_org: HashMap<i32, [f32; 3]>,
+    /// Quake's `tracercount` (CL_RelinkEntities `static int`): alternates the
+    /// tracer-trail offset direction; threaded across `spawn_rocket_trail` calls.
+    tracercount: u32,
     /// The world map's in-pak path (e.g. `maps/e1m1.bsp`). An entity whose
     /// `model` equals this is the worldspawn brush — never loaded as an external
     /// box (it is already drawn as the world).
@@ -375,6 +383,8 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         pak,
         model_cache: HashMap::new(),
         bmodel_cache: HashMap::new(),
+        trail_org: HashMap::new(),
+        tracercount: 0,
         map_name: map.to_string(),
         player,
         yaw,
@@ -1490,6 +1500,40 @@ pub extern "C" fn sound_ptr() -> *const u8 {
 /// (the C `cl_sfx_r_exp3` = `weapons/r_exp3.wav`).
 const TE_EXPLOSION_SOUND: &str = "weapons/r_exp3.wav";
 
+/// Quake alias-model header flags (the mdl `flags` field, distinct from an
+/// entity's `effects`): the projectile/gib trail bits CL_RelinkEntities reads to
+/// spawn R_RocketTrail behind a moving model.
+const MF_ROCKET: i32 = 1;
+const MF_GRENADE: i32 = 2;
+const MF_GIB: i32 = 4;
+const MF_TRACER: i32 = 16;
+const MF_ZOMGIB: i32 = 32;
+const MF_TRACER2: i32 = 64;
+const MF_TRACER3: i32 = 128;
+
+/// Map a model's header flags to its R_RocketTrail type (0 rocket, 1 grenade,
+/// 2 gib-blood, 3 tracer, 4 zombie-gib, 5 tracer2, 6 voor), or `None` if the
+/// model leaves no trail. Order matches CL_RelinkEntities' if/else chain.
+fn rocket_trail_type(model_flags: i32) -> Option<i32> {
+    if model_flags & MF_ROCKET != 0 {
+        Some(0)
+    } else if model_flags & MF_GRENADE != 0 {
+        Some(1)
+    } else if model_flags & MF_GIB != 0 {
+        Some(2)
+    } else if model_flags & MF_ZOMGIB != 0 {
+        Some(4)
+    } else if model_flags & MF_TRACER != 0 {
+        Some(3)
+    } else if model_flags & MF_TRACER2 != 0 {
+        Some(5)
+    } else if model_flags & MF_TRACER3 != 0 {
+        Some(6)
+    } else {
+        None
+    }
+}
+
 /// Realise one decoded [`TempEntityEvent`] into `particles`, porting the
 /// effect-mapping half of `CL_ParseTEnt`: explosion types spawn a
 /// 1024-particle [`ParticleSystem::spawn_explosion`] (and return the explosion
@@ -1504,8 +1548,27 @@ fn spawn_temp_entity(
 ) -> Option<&'static str> {
     use quake_rs::server::te_consts::*;
     match ev.te_type {
-        TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => {
+        // Rocket explosion: R_ParticleExplosion + r_exp3 (CL_ParseTEnt).
+        TE_EXPLOSION => {
             particles.spawn_explosion(ev.pos, now, rng);
+            Some(TE_EXPLOSION_SOUND)
+        }
+        // Tar/blob explosion (Scrag/Vore): R_BlobExplosion — distinct two-ramp
+        // effect, NOT the rocket explosion (the dlight is also dropped below).
+        TE_TAREXPLOSION => {
+            particles.spawn_blob_explosion(ev.pos, now, rng);
+            Some(TE_EXPLOSION_SOUND)
+        }
+        // Coloured explosion: R_ParticleExplosion2 honouring the colour ramp
+        // (color_start/color_length carried on the temp-entity event).
+        TE_EXPLOSION2 => {
+            particles.spawn_explosion2(
+                ev.pos,
+                ev.color_start as i32,
+                ev.color_length as i32,
+                now,
+                rng,
+            );
             Some(TE_EXPLOSION_SOUND)
         }
         TE_SPIKE => {
@@ -1524,8 +1587,14 @@ fn spawn_temp_entity(
             particles.spawn_burst(ev.pos, [0.0; 3], 226, 20, now, rng);
             None
         }
-        TE_LAVASPLASH | TE_TELEPORT => {
-            particles.spawn_burst(ev.pos, [0.0, 0.0, 1.0], 232, 20, now, rng);
+        // The real lava-burst spiral (R_LavaSplash), not a 20-particle puff.
+        TE_LAVASPLASH => {
+            particles.spawn_lava_splash(ev.pos, now, rng);
+            None
+        }
+        // The teleport-fog column (R_TeleportSplash).
+        TE_TELEPORT => {
+            particles.spawn_teleport_splash(ev.pos, now, rng);
             None
         }
         _ => None, // beam/lightning types: no effect here.
@@ -1601,6 +1670,7 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // reset the animation clock so liquids/sky restart from zero.
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
+    w.trail_org.clear();
     w.clock = 0.0;
     // Reset the screen-blend state so the level change does not flash red.
     w.damage_blend = 0.0;
@@ -1701,7 +1771,9 @@ fn step_walk(
         // die now+0.5, decay 300, minlight 0, key 0 -> a fresh slot each one.
         {
             use quake_rs::server::te_consts::*;
-            if matches!(ev.te_type, TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2) {
+            // Only TE_EXPLOSION and TE_EXPLOSION2 flash a dynamic light in id's
+            // CL_ParseTEnt; TE_TAREXPLOSION (blob) does NOT.
+            if matches!(ev.te_type, TE_EXPLOSION | TE_EXPLOSION2) {
                 w.dlights.alloc(0, ev.pos, 350.0, now + 0.5, 300.0, 0.0, now);
             }
         }
@@ -1776,6 +1848,10 @@ fn step_walk(
     //    edict — its model would fill the screen in first person.
     let mut descs: Vec<(String, [f32; 3], f32, usize, [u8; 3])> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
+    // Projectile/gib trails to spawn this frame, collected here and emitted after
+    // the loop (so we don't borrow w.particles/dlights while reading the server):
+    // (entity, old origin, new origin, R_RocketTrail type).
+    let mut trail_spawns: Vec<(i32, [f32; 3], [f32; 3], i32)> = Vec::new();
     // External brush-model items (maps/b_*.bsp) as owned (name, origin) pairs; the
     // borrowing `ExternalBModel` list is built below, after the cache is final, so
     // the immutable cache borrow does not clash with reading the server here.
@@ -1821,7 +1897,31 @@ fn step_walk(
         let yaw = w.server.vm.ent_get_vector(ent, "angles")[1];
         let frame = w.server.vm.ent_get_float(ent, "frame").max(0.0) as usize;
         let color = color_for_name(&m);
+        // R_RocketTrail: a model with a rocket/grenade/gib/tracer header flag
+        // trails particles from its previous origin to here (CL_RelinkEntities).
+        let mflags = w
+            .model_cache
+            .get(&m)
+            .and_then(|o| o.as_ref())
+            .map(|md| md.header.flags)
+            .unwrap_or(0);
+        if let Some(ttype) = rocket_trail_type(mflags) {
+            let oldorg = *w.trail_org.get(&ent).unwrap_or(&origin);
+            trail_spawns.push((ent, oldorg, origin, ttype));
+            w.trail_org.insert(ent, origin);
+        }
         descs.push((m, origin, yaw, frame, color));
+    }
+
+    // Emit the collected trails (after the entity loop to keep the borrows
+    // disjoint). spawn_rocket_trail steps from old->new origin; EF_ROCKET also
+    // flashes a small dynamic light at the rocket head.
+    for (ent, oldorg, neworg, ttype) in trail_spawns.drain(..) {
+        w.particles
+            .spawn_rocket_trail(oldorg, neworg, ttype, &mut w.tracercount, now, &mut w.prng);
+        if ttype == 0 {
+            w.dlights.alloc(ent, neworg, 200.0, now + 0.01, 0.0, 0.0, now);
+        }
     }
 
     // 5. Render from the player's eye, with Quake's head-bob added to the eye
