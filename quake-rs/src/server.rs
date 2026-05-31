@@ -3261,6 +3261,14 @@ impl Server {
         // check_water AFTER client_think), matching id's two-pass phasing where
         // SV_RunClients precedes SV_Physics.
         let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        // SV_WaterJump (sv_user.c:414): a QuakeC-set climb-out (FL_WATERJUMP, from
+        // CheckWaterJump) forces a horizontal launch toward movedir until the
+        // timer expires or you leave the water — checked before the swim/air move.
+        let flags = self.vm.ent_get_float(ent, "flags") as i32;
+        if flags & FL_WATERJUMP != 0 {
+            self.water_jump(ent);
+            return;
+        }
         let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
         if movetype != MOVETYPE_NOCLIP && waterlevel >= 2 {
             self.water_move(ent, cmd, dt);
@@ -3374,6 +3382,25 @@ impl Server {
         for i in 0..3 {
             vel[i] += accelspeed * wishdir[i];
         }
+        self.vm.ent_set_vector(ent, "velocity", vel);
+    }
+
+    /// `SV_WaterJump` (sv_user.c:307): while FL_WATERJUMP is set (QuakeC's
+    /// CheckWaterJump flagged a ledge climb-out), force horizontal velocity to
+    /// `movedir` so the player is thrown up onto the ledge; clear the flag once
+    /// the timer expires (`sv.time > teleport_time`) or the player left the water.
+    fn water_jump(&mut self, ent: i32) {
+        let teleport_time = self.vm.ent_get_float(ent, "teleport_time");
+        let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
+        if self.time() > teleport_time || waterlevel == 0 {
+            let flags = self.vm.ent_get_float(ent, "flags") as i32;
+            self.vm.ent_set_float(ent, "flags", (flags & !FL_WATERJUMP) as f32);
+            self.vm.ent_set_float(ent, "teleport_time", 0.0);
+        }
+        let movedir = self.vm.ent_get_vector(ent, "movedir");
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        vel[0] = movedir[0];
+        vel[1] = movedir[1];
         self.vm.ent_set_vector(ent, "velocity", vel);
     }
 
