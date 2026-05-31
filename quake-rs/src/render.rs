@@ -2766,22 +2766,30 @@ fn draw_viewmodel(
     h: usize,
 ) {
     const NEAR: f32 = 1.0;
-    // The view-space offset (in MDL/world units) that hangs the gun ahead of,
-    // slightly right of, and at the lower-centre of the frame, matching Quake's
-    // hand-held pose. These are added in the camera basis below (forward / right
-    // / up). `OFS_FORWARD` pushes the *whole* model clear of the near plane —
-    // the `v_*` weapon models span roughly model-X in [-15, +22], so a +30 push
-    // keeps every vertex in front (no triangle gets near-clipped away) while
-    // keeping the gun large; the small +up lifts the (already low, model-Z<0)
-    // barrel up into the lower-centre band; `-right` nudges it just right of
-    // centre, where Quake draws the player's gun.
+    // The view-space offset (in MDL/world units) that hangs the gun at the eye,
+    // slightly right of and below centre, matching Quake's hand-held pose. These
+    // are added in the camera basis below (forward / right / up). Quake draws the
+    // viewmodel essentially AT the eye and lets the near plane CLIP the grip: the
+    // `v_*` weapon models span roughly model-X (forward) in [-14, +28] and
+    // model-Z (up) in [-12, 0] (below the eye). With the near-plane CLIPPING now
+    // in place (`clip_poly_near` below), the grip (model-X < 0, behind the eye)
+    // is trimmed at the plane while the barrel (0..28) extends forward — so the
+    // gun sits large at the lower-centre/right of the frame instead of being
+    // shoved 16..58 units ahead (the old +30 push made it look distant + tiny).
+    //
+    // `OFS_FORWARD` is a tiny positive nudge: it only keeps the grip from landing
+    // exactly on the near plane (a degenerate edge) — it does NOT push the gun
+    // away. `OFS_RIGHT` (negative -> camera right, since the gun is anchored with
+    // `-p[1]` on `right`) nudges it just right of centre; `OFS_UP` lifts the
+    // already-low (model-Z < 0) barrel up so the grip is clipped at the bottom
+    // edge rather than the whole gun falling off-screen.
     //
     // The placement is in *proportion* resolution-independent: focal length
     // scales with the frame width and the screen centre with its size, so the
     // gun keeps the same lower-centre fraction of the frame at any `w`/`h`.
-    const OFS_FORWARD: f32 = 30.0;
-    const OFS_RIGHT: f32 = -2.0;
-    const OFS_UP: f32 = 2.0;
+    const OFS_FORWARD: f32 = 7.0;
+    const OFS_RIGHT: f32 = 1.5;
+    const OFS_UP: f32 = 3.5;
     if w == 0 || h == 0 {
         return;
     }
@@ -2878,59 +2886,78 @@ fn draw_viewmodel(
             Some(out)
         });
 
-        // Project all three; skip the whole triangle if any is at/behind near.
-        let mut xy: [(f32, f32, f32); 3] = [(0.0, 0.0, 0.0); 3];
-        let mut clipped = false;
+        // Build the three view-space verts (vx/vy/vz on the right/up/forward
+        // axes) carrying the per-vertex skin (s, t) already computed above, then
+        // CLIP against the near plane instead of dropping the whole triangle the
+        // moment one vertex falls at/behind it. This is the same Sutherland–
+        // Hodgman path the world / submodel passes use (`clip_poly_near`), so the
+        // grip (model-X < 0, behind the eye) is trimmed at the plane while the
+        // barrel ahead of the eye still draws — the authentic held-gun pose.
+        let in_st = st.unwrap_or([(0.0, 0.0); 3]);
+        let mut vviews: [VView; 3] = [VView { vx: 0.0, vy: 0.0, vz: 0.0, s: 0.0, t: 0.0 }; 3];
         for (slot, v) in world.iter().enumerate() {
             let rel = sub(*v, cam.pos);
-            let vz = dot(rel, forward);
-            if vz <= NEAR {
-                clipped = true;
-                break;
-            }
-            let vx = dot(rel, right);
-            let vy = dot(rel, up);
-            if let Some(p) = xy.get_mut(slot) {
-                *p = (cx + focal * vx / vz, cy - focal * vy / vz, vz);
+            if let (Some(slot_v), Some(&(s, t))) = (vviews.get_mut(slot), in_st.get(slot)) {
+                *slot_v = VView {
+                    vx: dot(rel, right),
+                    vy: dot(rel, up),
+                    vz: dot(rel, forward),
+                    s,
+                    t,
+                };
             }
         }
-        if clipped {
-            continue;
+        let _ = NEAR; // the plane lives in `clip_poly_near` (`NEAR_PLANE`, == NEAR)
+        let poly = clip_poly_near(&vviews);
+        if poly.len() < 3 {
+            continue; // wholly behind the eye -> nothing to draw
         }
 
-        // FIX-3: screen-space backface cull, matching the WinQuake SOFTWARE
-        // renderer. D_DrawNonSubdiv/D_DrawSubdiv (d_polyse.c:203,265) reject an
-        // alias triangle whose final screen verts give `d_xdenom >= 0`, drawing
-        // only front faces (`d_xdenom < 0`). Our `edge(v0,v1,v2)` signed area is
-        // exactly `-d_xdenom` (verified algebraically), so a front face has
-        // `area > 0` and we cull `area <= 0`. Verified visually: with this sign
-        // both the grunt and the v_shot viewmodel still fully render (back faces
-        // were already z-occluded, so 0 visible pixels change); the OPPOSITE sign
-        // erases the gun's front faces — so this is the correct front-face sign.
+        // Project the clipped polygon to screen (every `vz >= NEAR` now).
+        let proj: Vec<ProjT> = poly
+            .iter()
+            .map(|v| ProjT {
+                x: cx + focal * v.vx / v.vz,
+                y: cy - focal * v.vy / v.vz,
+                vz: v.vz,
+                s: v.s,
+                t: v.t,
+            })
+            .collect();
+
+        // FIX-3: screen-space backface cull on the PROJECTED polygon, matching
+        // the WinQuake SOFTWARE renderer (D_DrawNonSubdiv/D_DrawSubdiv reject a
+        // triangle whose final screen verts give `d_xdenom >= 0`). Our
+        // `edge(v0,v1,v2)` signed area is exactly `-d_xdenom`, so a front face
+        // has `area > 0`; we cull `area <= 0`. Using the first three clipped
+        // verts is the same winding test as the unclipped path (clipping is a
+        // convex truncation, so it preserves orientation).
         {
-            let area = edge(xy[0].0, xy[0].1, xy[1].0, xy[1].1, xy[2].0, xy[2].1);
+            let area = edge(
+                proj[0].x, proj[0].y, proj[1].x, proj[1].y, proj[2].x, proj[2].y,
+            );
             if area <= 0.0 {
                 continue;
             }
         }
 
-        match (&skin, st) {
-            (Some(sk), Some(st)) => {
-                let mk = |i: usize| ProjT {
-                    x: xy[i].0,
-                    y: xy[i].1,
-                    vz: xy[i].2,
-                    s: st[i].0,
-                    t: st[i].1,
-                };
-                raster_triangle_tex(
-                    image, &mut local_z, mk(0), mk(1), mk(2),
-                    sk.pixels, sk.width, sk.height, palette, shade, None, SurfaceMode::Normal,
-                );
-            }
-            _ => {
-                let p = |i: usize| Projected { x: xy[i].0, y: xy[i].1, depth: xy[i].2 };
-                raster_triangle(image, &mut local_z, p(0), p(1), p(2), flat);
+        // Fan-rasterise the clipped polygon (verts 0, i, i+1) into the PRIVATE
+        // z-buffer. `(s, t)` interpolate correctly through `clip_poly_near` +
+        // the perspective-correct raster, exactly as the world path; the flat
+        // fallback (no usable skin) draws the shaded grey through the same fan.
+        for i in 1..proj.len() - 1 {
+            let (v0, v1, v2) = (proj[0], proj[i], proj[i + 1]);
+            match &skin {
+                Some(sk) if st.is_some() => {
+                    raster_triangle_tex(
+                        image, &mut local_z, v0, v1, v2,
+                        sk.pixels, sk.width, sk.height, palette, shade, None, SurfaceMode::Normal,
+                    );
+                }
+                _ => {
+                    let p = |v: &ProjT| Projected { x: v.x, y: v.y, depth: v.vz };
+                    raster_triangle(image, &mut local_z, p(&v0), p(&v1), p(&v2), flat);
+                }
             }
         }
     }
@@ -6707,6 +6734,98 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+    }
+
+    /// A viewmodel whose geometry deliberately *straddles* the near plane: in
+    /// model space its forward axis (`+X`) runs from well behind the eye to well
+    /// in front of it, so after the camera anchor + the small `OFS_FORWARD` the
+    /// grip end is behind `vz == NEAR` and the barrel end is in front — exactly
+    /// the authentic held-gun layout that the near-plane CLIP must handle.
+    fn straddling_viewmodel_mdl() -> crate::mdl::Mdl {
+        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
+        let header = MdlHeader {
+            ident: i32::from_le_bytes(*b"IDPO"),
+            version: 6,
+            scale: [1.0, 1.0, 1.0],
+            // Model-X (forward) runs from -20 (grip, behind the eye after the
+            // small forward offset) to +20 (barrel, in front). Model-Z < 0 keeps
+            // it below the eye, like a real weapon.
+            scale_origin: [-20.0, 0.0, -8.0],
+            boundingradius: 64.0,
+            eyeposition: [0.0, 0.0, 0.0],
+            numskins: 1,
+            skinwidth: 1,
+            skinheight: 1,
+            numverts: 3,
+            numtris: 2,
+            numframes: 1,
+            synctype: 0,
+            flags: 0,
+            size: 1.0,
+        };
+        // Decoded model space: X in [-20, +20] (straddles the eye), Z in [-8, 0].
+        let verts = vec![
+            TriVertex { v: [0, 0, 0], lightnormalindex: 0 },   // X=-20 (behind)
+            TriVertex { v: [40, 0, 0], lightnormalindex: 0 },   // X=+20 (in front)
+            TriVertex { v: [20, 0, 8], lightnormalindex: 0 },   // X=0 (on the eye)
+        ];
+        Mdl {
+            header,
+            skins: vec![Skin::Single(vec![7])],
+            stverts: vec![StVert { onseam: 0, s: 0, t: 0 }; 3],
+            // Double-sided (both windings) so a FRONT face always greets the eye,
+            // exactly as `viewmodel_mdl`.
+            triangles: vec![
+                Triangle { facesfront: 1, vertindex: [0, 1, 2] },
+                Triangle { facesfront: 1, vertindex: [0, 2, 1] },
+            ],
+            frames: vec![Frame::Single(AliasFrame {
+                name: "v0".into(),
+                bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
+                bboxmax: TriVertex { v: [40, 0, 8], lightnormalindex: 0 },
+                verts,
+            })],
+        }
+    }
+
+    #[test]
+    fn viewmodel_straddling_near_plane_is_clipped_not_dropped() {
+        // A viewmodel that crosses the near plane (part behind the eye, part in
+        // front) must be CLIPPED — its front part still draws SOME pixels — rather
+        // than having every crossing triangle dropped whole (the old behaviour,
+        // which is exactly why `OFS_FORWARD` used to shove the gun far away). The
+        // render must not panic.
+        let bsp = demo_room();
+        let mut pal = [[0u8; 3]; 256];
+        pal[7] = [255, 255, 0]; // the viewmodel's pure-yellow skin (B == 0)
+        let bg = [10u8, 10, 14];
+        let (w, h) = (160usize, 120usize);
+        let gun = straddling_viewmodel_mdl();
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
+
+        let img = render_scene_ext(
+            &bsp, &cam, w, h, &pal, &[], &[], &[],
+            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            0.0,
+            &[],
+            &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+        );
+
+        // (a) it drew SOME gun pixels (not all-dropped). With the old whole-tri
+        // drop, every straddling triangle vanished and this would be zero.
+        let gun_pixels = img.rgb.iter().filter(|&&p| is_gun_pixel(p)).count();
+        assert!(
+            gun_pixels > 0,
+            "straddling viewmodel must be clipped and still draw pixels (got {gun_pixels})"
+        );
+
+        // (b) the drawn pixels stay on-screen within the frame (the rasteriser
+        // clamps to the framebuffer; this just confirms a non-empty drawn bbox).
+        assert!(
+            drawn_bbox(&img, bg).is_some(),
+            "straddling viewmodel produced a visible bounding box"
         );
     }
 
