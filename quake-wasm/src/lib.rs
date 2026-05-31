@@ -79,6 +79,10 @@ struct Walk {
     /// or `None` if the archive lacked/could not parse it. Parsed once at boot so
     /// the per-frame HUD draw is allocation-light.
     gfx_wad: Option<quake_rs::wad::Wad2>,
+    /// `gfx/colormap.lmp` — the 64x256 shade LUT for faithful colormap-indexed
+    /// wall lighting (Quake never overbrights). `None` falls back to the linear
+    /// brightness multiply. Loaded once at boot.
+    colormap: Option<Vec<u8>>,
     /// The archive, kept open so sound samples load on demand as events fire.
     pak: Pak,
     /// Parsed alias models keyed by in-pak name (`None` = absent/unparseable).
@@ -366,6 +370,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
     // The HUD pics live in gfx.wad; parse it once (None if absent/unparseable).
     let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
+    let colormap = read("gfx/colormap.lmp");
     let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
@@ -380,6 +385,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         bsp,
         palette,
         gfx_wad,
+        colormap,
         pak,
         model_cache: HashMap::new(),
         bmodel_cache: HashMap::new(),
@@ -1992,7 +1998,7 @@ fn step_walk(
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
     let mut img =
-        render::render_scene_ext(&w.bsp, &cam, render_w, render_h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles);
+        render::render_scene_ext(&w.bsp, &cam, render_w, render_h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref());
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
     //     player lost health/armour this frame, and tint the view when the eye is
@@ -2159,7 +2165,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> ren
     // here (empty) and no live server for light styles (neutral static scales).
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES)
+    render::render_scene_ext(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &[], &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None)
 }
 
 #[cfg(test)]

@@ -801,6 +801,57 @@ impl LightMap<'_> {
     }
 }
 
+/// Quake's `gfx/colormap.lmp` is `COLORMAP_ROWS * 256` bytes: `COLORMAP_ROWS`
+/// successive light rows of 256 palette indices each. Row 0 is the brightest
+/// (the base palette colour), the last row is the darkest. `VID_CBITS == 6`, so
+/// `VID_GRADES == 64` rows.
+const COLORMAP_ROWS: usize = 64; // 1 << VID_CBITS, VID_CBITS == 6
+/// A correctly-sized colormap is exactly this many bytes.
+const COLORMAP_LEN: usize = COLORMAP_ROWS * 256;
+
+/// Map a per-pixel lightmap `brightness` factor (as produced by
+/// [`LightMap::factor_at`]: `1.0` neutral, `2.0` the static fullbright ceiling,
+/// up to [`MAX_LIGHT_FACTOR`] with dynamic lights) to a Quake colormap ROW in
+/// `0..COLORMAP_ROWS`.
+///
+/// C basis — `R_BuildLightMap` (`r_surf.c`) then the `D_DrawSurfaceBlock8` inner
+/// loop (`r_surf.c` / `d_scan.c`):
+///
+/// ```c
+/// // r_surf.c, R_BuildLightMap, "bound, invert, and shift":
+/// t = (255*256 - (int)blocklights[i]) >> (8 - VID_CBITS);   // VID_CBITS == 6
+/// if (t < (1 << 6)) t = (1 << 6);                            // clamp t >= 64
+/// blocklights[i] = t;
+/// // d_scan.c inner loop:
+/// prowdest[b] = ((unsigned char *)vid.colormap)[(light & 0xFF00) + pix];
+/// //                                              ^ row = light >> 8
+/// ```
+///
+/// `blocklights[i]` is the combined light in 8.8 units. For the canonical static
+/// single-style surface Quake scales the luxel by `d_lightstylevalue == 256`
+/// (1.0 in 8.8), so `blocklights == luxel * 256`. This renderer's `brightness`
+/// is `(luxel/255)*2`, hence `luxel == brightness*127.5` and
+/// `blocklights == brightness * 32640` (`= 127.5 * 256`). Substituting into the
+/// C: `t = (65280 - brightness*32640) >> 2`, clamped to `>= 64`, and the
+/// colormap row is `t >> 8`. brightness `2.0` (and anything brighter — dynamic
+/// lights) collapses to row 0 via the `t >= 64` clamp, reproducing Quake's
+/// no-overbright ceiling; brightness `0.0` maps to the darkest row.
+#[inline]
+fn colormap_row(brightness: f32) -> usize {
+    // blocklights in 8.8 units; round to match the integer `(int)blocklights`.
+    let bl = (brightness * 32640.0 + 0.5).floor() as i32;
+    // C: (255*256 - blocklights) >> (8 - VID_CBITS) == ... >> 2
+    let mut t = (65280 - bl) >> 2;
+    // C: if (t < (1<<6)) t = (1<<6);  -- the no-overbright clamp.
+    if t < (1 << 6) {
+        t = 1 << 6;
+    }
+    // C: light & 0xFF00, i.e. row = t >> 8. Clamp the row into the table; a
+    // fully dark luxel (bl == 0) gives t == 16320 -> row 63, already the last
+    // row, but guard against any future widening.
+    ((t >> 8) as usize).min(COLORMAP_ROWS - 1)
+}
+
 /// `R_AddDynamicLights` (`r_surf.c`): fold the dynamic lights in `dlights` that
 /// touch a face into an owned augmented luxel buffer.
 ///
@@ -1525,12 +1576,16 @@ fn raster_triangle_tex(
     shade: f32,
     lightmap: Option<&LightMap>,
     mode: SurfaceMode,
+    colormap: Option<&[u8]>,
 ) {
     let w = image.w;
     let h = image.h;
     if w == 0 || h == 0 || tw == 0 || th == 0 || pixels.len() < tw * th {
         return;
     }
+    // Only use a correctly-sized colormap; a malformed one falls back to the
+    // linear multiply (never reads out of bounds).
+    let colormap = colormap.filter(|cm| cm.len() >= COLORMAP_LEN);
     let min_xf = v0.x.min(v1.x).min(v2.x);
     let max_xf = v0.x.max(v1.x).max(v2.x);
     let min_yf = v0.y.min(v1.y).min(v2.y);
@@ -1620,14 +1675,39 @@ fn raster_triangle_tex(
                     (sky_texel_view(pixels, tw, th, sx, sy, &view, time) as usize, 1.0)
                 }
             };
-            let rgb = palette[texel];
             *zc = depth;
             if let Some(p) = image.rgb.get_mut(idx) {
-                *p = [
-                    (rgb[0] as f32 * brightness).clamp(0.0, 255.0) as u8,
-                    (rgb[1] as f32 * brightness).clamp(0.0, 255.0) as u8,
-                    (rgb[2] as f32 * brightness).clamp(0.0, 255.0) as u8,
-                ];
+                match colormap {
+                    // Quake's exact software shading: pick a colormap ROW from
+                    // the brightness, then index the colormap to get a PALETTE
+                    // INDEX, which is finally looked up in the palette. This is
+                    // an INDEX lookup (no RGB multiply) and so can never
+                    // overbright past the base colour. Liquids/sky are
+                    // fullbright (brightness 1.0) but route through the brightest
+                    // row 0 (`colormap[texel]`) — `colormap_row(1.0)` is *not*
+                    // row 0, so fullbright surfaces force the row explicitly.
+                    Some(cm) => {
+                        let row = match mode {
+                            SurfaceMode::Normal => colormap_row(brightness),
+                            // Turb/Sky are fullbright: the brightest row.
+                            SurfaceMode::Turb { .. } | SurfaceMode::Sky { .. } => 0,
+                        };
+                        // row < COLORMAP_ROWS and texel < 256, so this index is
+                        // < COLORMAP_LEN <= cm.len() (checked above).
+                        let pal_index = cm[row * 256 + texel] as usize;
+                        *p = palette[pal_index];
+                    }
+                    // Fallback: the original linear `palette[texel] * brightness`
+                    // (byte-for-byte unchanged when no colormap is supplied).
+                    None => {
+                        let rgb = palette[texel];
+                        *p = [
+                            (rgb[0] as f32 * brightness).clamp(0.0, 255.0) as u8,
+                            (rgb[1] as f32 * brightness).clamp(0.0, 255.0) as u8,
+                            (rgb[2] as f32 * brightness).clamp(0.0, 255.0) as u8,
+                        ];
+                    }
+                }
             }
         }
     }
@@ -1652,7 +1732,7 @@ pub fn render_bsp_textured(
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     // Static (time 0) world: liquids/sky show their texture but do not advance.
     let turb = TurbTable::new();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[]);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None);
     image
 }
 
@@ -2166,6 +2246,7 @@ fn clip_poly_near(input: &[VView]) -> Vec<VView> {
 /// skipped. Maps with no visibility lump (e.g. [`demo_room`]) get the full draw,
 /// so existing behaviour is unchanged there.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn draw_world_textured(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -2176,6 +2257,7 @@ fn draw_world_textured(
     time: f32,
     light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
+    colormap: Option<&[u8]>,
 ) {
     // The near plane lives in `clip_poly_near` (`NEAR_PLANE`); this pass clips the
     // polygon to it rather than dropping any face that touches it.
@@ -2341,6 +2423,7 @@ fn draw_world_textured(
                     raster_triangle_tex(
                         image, zbuf, v0, proj[i], proj[i + 1],
                         &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
+                        colormap,
                     );
                 }
             }
@@ -2368,6 +2451,7 @@ fn draw_world_textured(
                             raster_triangle_tex(
                                 image, zbuf, v0, proj[i], proj[i + 1],
                                 &one, 1, 1, &pal1, shade, Some(&lm), SurfaceMode::Normal,
+                                colormap,
                             );
                         }
                     }
@@ -2436,6 +2520,7 @@ fn draw_submodel(
     time: f32,
     light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
+    colormap: Option<&[u8]>,
 ) {
     // The near plane lives in `clip_poly_near` (`NEAR_PLANE`); this pass clips the
     // polygon to it rather than dropping any face that touches it.
@@ -2629,6 +2714,7 @@ fn draw_submodel(
                     raster_triangle_tex(
                         image, zbuf, v0, proj[i], proj[i + 1],
                         &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
+                        colormap,
                     );
                 }
             }
@@ -2653,6 +2739,7 @@ fn draw_submodel(
                             raster_triangle_tex(
                                 image, zbuf, v0, proj[i], proj[i + 1],
                                 &one, 1, 1, &pal1, shade, Some(&lm), SurfaceMode::Normal,
+                                colormap,
                             );
                         }
                     }
@@ -3083,6 +3170,9 @@ fn draw_alias_model(
                     shade,
                     None,
                     SurfaceMode::Normal,
+                    // Alias models are not colormapped (they keep the linear
+                    // shade multiply, matching the C's separate alias path).
+                    None,
                 );
             }
             _ => {
@@ -3190,6 +3280,9 @@ pub fn draw_brush_bsp(
         time,
         light_styles,
         &[],
+        // Standalone box draw keeps the legacy linear shade (no colormap),
+        // byte-identical to before; the colormap is a render_scene_ext concern.
+        None,
     );
 }
 
@@ -3440,6 +3533,8 @@ fn draw_viewmodel(
                     raster_triangle_tex(
                         image, &mut local_z, v0, v1, v2,
                         sk.pixels, sk.width, sk.height, palette, shade, None, SurfaceMode::Normal,
+                        // Viewmodel is not colormapped (linear shade multiply).
+                        None,
                     );
                 }
                 _ => {
@@ -3483,6 +3578,7 @@ pub fn render_scene(
         &[],
         &[],
         &NEUTRAL_LIGHTSTYLE_SCALES,
+        None,
     )
 }
 
@@ -3563,6 +3659,20 @@ pub fn render_scene(
 /// style-0 lightmap byte-for-byte, which is what [`render_scene`] does — so the
 /// demo tests are unchanged. The animated front-ends pass the live scales each
 /// frame to make torches flicker and lights pulse.
+///
+/// ## Colormap (exact Quake shading)
+/// `colormap` is Quake's `gfx/colormap.lmp`: `64 * 256` bytes — 64 light rows of
+/// 256 palette indices each, row 0 brightest, row 63 darkest. When `Some`, a lit
+/// wall pixel is shaded the way the software renderer does: the per-pixel
+/// lightmap brightness selects a colormap ROW (`colormap_row`, ported from
+/// `R_BuildLightMap`'s bound/invert/shift), `colormap[row*256 + texel]` yields a
+/// PALETTE INDEX, and the final colour is `palette[that index]` — an index
+/// lookup that bakes Quake's non-linear darkening and CANNOT overbright past the
+/// base colour. Liquids and sky stay fullbright at row 0 (`colormap[texel]`).
+/// When `None`, the renderer keeps the legacy linear `palette[texel] *
+/// brightness` multiply byte-for-byte, so [`render_scene`] and every existing
+/// caller/test are unchanged. A colormap shorter than `64*256` bytes is ignored
+/// (treated as `None`) rather than read out of bounds.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext(
     bsp: &Bsp,
@@ -3578,6 +3688,7 @@ pub fn render_scene_ext(
     particles: &[(Vec3, u8)],
     dlights: &[crate::dlight::DynamicLight],
     light_styles: &[f32; LIGHTSTYLES],
+    colormap: Option<&[u8]>,
 ) -> Image {
     let mut image = Image::new(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
@@ -3587,9 +3698,9 @@ pub fn render_scene_ext(
     // The turbulent SIN table for liquid warp, built once and shared by the
     // world + brush-submodel passes (sky needs no table).
     let turb = TurbTable::new();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights, colormap);
     for bm in bmodels {
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights);
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap);
     }
     // External brush models (Quake's `b_*.bsp` item boxes: explosive box, ammo
     // and health boxes). Each draws its OWN bsp's MODEL-0 faces, translated to the
@@ -3601,7 +3712,7 @@ pub fn render_scene_ext(
     // draws nothing, leaving the image identical to the pre-external behaviour —
     // which is why `render_scene` and every prior caller can pass `&[]`.
     for ext in external {
-        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[]);
+        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap);
     }
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, w, h, palette, dlights, light_styles, time);
@@ -6629,13 +6740,13 @@ mod tests {
         let pal = [[180u8, 180, 180]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
 
-        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         // demo_room has no lighting lump, so faces are fullbright (no lightmap)
         // and dlights cannot attach; the frame must therefore be UNCHANGED even
         // with a light present -- proving dlights never touch non-lightmapped
         // faces and never panic.
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 600.0, 10.0, 0.0, 0.0, 0);
-        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES);
+        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES, None);
         assert_eq!(base.rgb, lit.rgb, "fullbright (lightmap-less) world must ignore dlights");
     }
 
@@ -6913,7 +7024,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         let with = render_scene_ext(
             &bsp,
             &cam,
@@ -6929,6 +7040,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
 
         let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
@@ -6964,7 +7076,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         let oob = render_scene_ext(
             &bsp,
             &cam,
@@ -6979,6 +7091,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         assert_eq!(
             empty.rgb, oob.rgb,
@@ -6996,7 +7109,7 @@ mod tests {
 
         // No alias models, no bmodels.
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
 
         // Also holds with an alias instance present (the model path is shared).
@@ -7024,6 +7137,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         assert_eq!(
             a2.rgb, b2.rgb,
@@ -7054,6 +7168,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
         let shifted = render_scene_ext(
@@ -7070,6 +7185,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         let changed = centered
             .rgb
@@ -7109,6 +7225,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
     }
 
@@ -7200,7 +7317,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         let without = render_scene_ext(
-            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
+            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
         );
         let with = render_scene_ext(
             &world,
@@ -7216,6 +7333,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
 
         // The box is nearer than the far wall, so drawing it must CHANGE pixels.
@@ -7251,6 +7369,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         let shifted = render_scene_ext(
             &world,
@@ -7266,6 +7385,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         let changed = centered
             .rgb
@@ -7285,7 +7405,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let a = render_scene(&world, &cam, 160, 120, &pal, &[]);
         let b = render_scene_ext(
-            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
+            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
         );
         assert_eq!(a.rgb, b.rgb, "empty external slice must equal render_scene");
     }
@@ -7319,7 +7439,7 @@ mod tests {
             lighting: Vec::new(),
         };
         let baseline = render_scene_ext(
-            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
+            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
         );
         let with_empty = render_scene_ext(
             &world,
@@ -7335,6 +7455,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         assert_eq!(
             baseline.rgb, with_empty.rgb,
@@ -7363,6 +7484,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
     }
 
@@ -7540,6 +7662,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[], &[],
@@ -7548,6 +7671,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
 
         // Isolate the gun pixels (its unique skin colour) in each frame.
@@ -7603,7 +7727,7 @@ mod tests {
         let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
-        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         let bg = [10u8, 10, 14];
         let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
@@ -7621,6 +7745,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
@@ -7646,7 +7771,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
     }
 
@@ -7668,8 +7793,9 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
-        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
@@ -7683,6 +7809,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
     }
 
@@ -7760,6 +7887,7 @@ mod tests {
             &[],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
 
         // (a) it drew SOME gun pixels (not all-dropped). With the old whole-tri
@@ -7880,6 +8008,7 @@ mod tests {
                 &mut img, &mut zb, v0, v1, v2,
                 &pixels, 64, 64, &pal, 1.0, None,
                 SurfaceMode::Turb { turb: &turb, time },
+                None,
             );
             img
         };
@@ -7898,6 +8027,153 @@ mod tests {
         );
         for p in a.rgb.iter().chain(b.rgb.iter()) {
             assert!(p[0] == p[1] && p[1] == p[2], "sampled colour not a palette grey: {p:?}");
+        }
+    }
+
+    /// The brightness -> colormap-row curve must reproduce `R_BuildLightMap`'s
+    /// bound/invert/shift exactly (the no-overbright clamp at the top, the
+    /// darkest row at the bottom, and the monotone ramp in between).
+    #[test]
+    fn colormap_row_matches_quake_curve() {
+        // brightness 2.0 (the static fullbright ceiling) and anything brighter
+        // collapse to the BRIGHTEST row 0 — Quake's `t >= 64` no-overbright clamp.
+        assert_eq!(colormap_row(2.0), 0, "fullbright must be row 0 (no overbright)");
+        assert_eq!(colormap_row(3.0), 0, "overbright must clamp to row 0");
+        assert_eq!(colormap_row(MAX_LIGHT_FACTOR), 0, "max dynamic light clamps to row 0");
+
+        // brightness 0.0 (fully dark) -> the DARKEST row.
+        assert_eq!(colormap_row(0.0), COLORMAP_ROWS - 1, "fully dark must be the last row");
+
+        // The middle: brightness 1.0 -> bl = 32640, t = (65280-32640)>>2 = 8160,
+        // row = 8160 >> 8 = 31. This is the exact integer C result.
+        assert_eq!(colormap_row(1.0), 31, "neutral brightness must hit row 31");
+
+        // Monotonic: brighter never maps to a darker (larger-index) row, and the
+        // row stays inside the table for every factor in the legal range.
+        let mut prev = COLORMAP_ROWS; // sentinel above the max row
+        let mut b = 0.0f32;
+        while b <= MAX_LIGHT_FACTOR + 1e-3 {
+            let row = colormap_row(b);
+            assert!(row < COLORMAP_ROWS, "row {row} out of table at brightness {b}");
+            assert!(row <= prev, "brightness {b} -> row {row} not monotone (prev {prev})");
+            prev = row;
+            b += 0.05;
+        }
+    }
+
+    /// A mid-shade Normal-surface pixel must route through
+    /// `palette[colormap[row*256 + texel]]` (an INDEX lookup) when a colormap is
+    /// supplied, and fall back to the linear `palette[texel]*brightness` multiply
+    /// when it is `None`.
+    #[test]
+    fn colormap_routes_normal_pixel_through_index_lookup() {
+        // Palette: index i -> grey (i,i,i), so a palette index is recoverable
+        // from the written pixel's red channel.
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, i as u8, i as u8];
+        }
+
+        // A 1x1 texture whose only texel is index 200.
+        const TEXEL: u8 = 200;
+        let pixels = [TEXEL];
+
+        // Synthetic colormap (64 rows x 256): a known ramp where
+        // colormap[row*256 + col] = (col + row) mod 256. Picking row R and
+        // col=TEXEL therefore yields palette index (TEXEL + R) mod 256.
+        let mut cm = vec![0u8; COLORMAP_LEN];
+        for row in 0..COLORMAP_ROWS {
+            for col in 0..256usize {
+                cm[row * 256 + col] = ((col + row) % 256) as u8;
+            }
+        }
+
+        // A full-framebuffer triangle at constant (s,t)=(0,0) so every covered
+        // pixel samples texel 200. No LightMap -> brightness == `shade`.
+        let (w, h) = (8usize, 8usize);
+        let shade = 1.0f32; // -> colormap_row(1.0) == 31
+        let expected_row = colormap_row(shade);
+
+        let render = |colormap: Option<&[u8]>| {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut zb = vec![f32::INFINITY; w * h];
+            let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
+            raster_triangle_tex(
+                &mut img, &mut zb, v0, v1, v2,
+                &pixels, 1, 1, &pal, shade, None, SurfaceMode::Normal,
+                colormap,
+            );
+            img
+        };
+
+        // With the colormap: pixel = palette[colormap[row*256 + 200]] where the
+        // ramp gives index (200 + row) mod 256, so red channel == that index.
+        let with_cm = render(Some(&cm));
+        let drawn: Vec<[u8; 3]> = with_cm.rgb.iter().copied().filter(|p| *p != [0, 0, 0]).collect();
+        assert!(!drawn.is_empty(), "colormapped triangle drew nothing");
+        let want_index = ((TEXEL as usize + expected_row) % 256) as u8;
+        for p in &drawn {
+            assert_eq!(
+                p[0], want_index,
+                "colormap path must yield palette index {want_index} (row {expected_row}, texel {TEXEL})"
+            );
+        }
+
+        // Without the colormap: the legacy linear multiply. shade==1.0 so the
+        // pixel is exactly palette[200] = (200,200,200) (no darkening).
+        let without_cm = render(None);
+        let drawn2: Vec<[u8; 3]> = without_cm.rgb.iter().copied().filter(|p| *p != [0, 0, 0]).collect();
+        assert!(!drawn2.is_empty(), "fallback triangle drew nothing");
+        for p in &drawn2 {
+            assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "None path must be the linear palette[texel]*brightness");
+        }
+
+        // Sanity: the two paths actually differ (the colormap is doing work).
+        assert_ne!(want_index, TEXEL, "test ramp should remap the index at row 31");
+    }
+
+    /// Liquids/sky stay fullbright = the brightest row 0 (`colormap[texel]`) even
+    /// when their `brightness` is the neutral 1.0 — the row is forced to 0 by the
+    /// surface mode, not derived from the brightness.
+    #[test]
+    fn colormap_fullbright_surfaces_use_row_zero() {
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, i as u8, i as u8];
+        }
+        const TEXEL: u8 = 77;
+        // 64x64 so the Turb warp's index wrap is well-defined; fill with TEXEL.
+        let pixels = vec![TEXEL; 64 * 64];
+
+        // Colormap ramp: colormap[row*256+col] = (col + row) mod 256. Row 0 keeps
+        // the index unchanged, so a fullbright (row-0) pixel == palette[TEXEL].
+        let mut cm = vec![0u8; COLORMAP_LEN];
+        for row in 0..COLORMAP_ROWS {
+            for col in 0..256usize {
+                cm[row * 256 + col] = ((col + row) % 256) as u8;
+            }
+        }
+
+        let turb = TurbTable::new();
+        let (w, h) = (16usize, 16usize);
+        let mut img = Image::new(w, h, [0, 0, 0]);
+        let mut zb = vec![f32::INFINITY; w * h];
+        let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+        let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+        let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
+        raster_triangle_tex(
+            &mut img, &mut zb, v0, v1, v2,
+            &pixels, 64, 64, &pal, 1.0, None,
+            SurfaceMode::Turb { turb: &turb, time: 0.0 },
+            Some(&cm),
+        );
+        let drawn: Vec<[u8; 3]> = img.rgb.iter().copied().filter(|p| *p != [0, 0, 0]).collect();
+        assert!(!drawn.is_empty(), "fullbright triangle drew nothing");
+        for p in &drawn {
+            // Row 0: index unchanged -> palette[TEXEL] grey.
+            assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "fullbright surface must use colormap row 0");
         }
     }
 
@@ -7962,6 +8238,7 @@ mod tests {
                 &mut img, &mut zb, v0, v1, v2,
                 &pixels, 256, 128, &pal, 1.0, None,
                 SurfaceMode::Sky { time, view },
+                None,
             );
             img
         };
@@ -8028,8 +8305,8 @@ mod tests {
         // enough for this assertion.)
         let cam = Camera::looking_at([0.0, 0.0, 100.0], [0.0, 0.0, -128.0], 90.0);
 
-        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.6, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.6, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
 
         let bg = [10u8, 10, 14];
         assert!(
@@ -8051,8 +8328,8 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
-        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 9.5, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 9.5, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
         // And it must equal the time-less render_scene wrapper.
         let rs = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
@@ -8748,7 +9025,7 @@ mod tests {
         let bsp = demo_room();
         let cam = Camera::looking_at([0.0, 0.0, 0.0], [200.0, 0.0, 0.0], 90.0);
         let pal = [[180u8, 180, 180]; 256];
-        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         let baseline = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
         assert_eq!(
             with_empty.rgb, baseline.rgb,
@@ -8765,7 +9042,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let mut pal = [[60u8, 60, 60]; 256];
         pal[251] = [255, 0, 255]; // a vivid colour unlikely to match the walls
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES);
+        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
         // A particle ~80 units in front of the camera (well before the +256 wall).
         let with = render_scene_ext(
             &bsp,
@@ -8781,6 +9058,7 @@ mod tests {
             &[([-120.0, 0.0, 0.0], 251)],
             &[],
             &NEUTRAL_LIGHTSTYLE_SCALES,
+            None,
         );
         assert_ne!(without.rgb, with.rgb, "a visible particle must change the frame");
         assert!(

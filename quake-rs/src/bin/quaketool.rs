@@ -951,7 +951,8 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         // Pass the server clock so liquids warp and sky scrolls in the POV shot,
         // and the animated light-style scales so torches flicker and lights pulse.
         let light_styles = server.lightstyle_scales(server.time());
-        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, &external, viewmodel, server.time(), &parts, &peak_dlights, &light_styles);
+        let colormap = read("gfx/colormap.lmp").ok();
+        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, &external, viewmodel, server.time(), &parts, &peak_dlights, &light_styles, colormap.as_deref());
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the finished 3-D frame. If
@@ -1663,7 +1664,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     // particles or dynamic lights in this single-shot `scene` command (no
     // per-frame loop), so those slices are empty.
     let light_styles = server.lightstyle_scales(server.time());
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &[], &light_styles);
+    let colormap = read("gfx/colormap.lmp").ok();
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &[], &light_styles, colormap.as_deref());
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
