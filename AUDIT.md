@@ -65,13 +65,22 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 - sbar: health/armor/ammo big-number x positions diverge from sbar.c
 - sbar: scorebar / solo scoreboard on death + intermission/finale overlays not drawn
 
-## Wave 2 (next)
+## Wave 2 — DONE
 
-1. **Particle/TE spawn-wiring** — the wave-1 particle functions are ported but unused; wire them: per-frame R_RocketTrail on rocket/grenade/gib/tracer entities (by model flags), and route TE_LAVASPLASH/TE_TELEPORT/TE_TAREXPLOSION/TE_EXPLOSION2 + the `svc_particle` 255 sentinel to the right functions (split TAREXPLOSION out of the dlight group). Touches lib.rs/quaketool.rs/demo.rs.
-2. **HUD completeness (H12–H14 + sbar mediums)** — inventory bar + weapon icons + current-weapon flash, animated face (health/pain/powerup), item/key/sigil icons, active-weapon ammo-type icon, armor-type icon, per-ammo small counts, scorebar/intermission.
-3. **Sound** — ambient sounds (placed `ambientsound()` + the 4 leaf ambients), stereo pan law (linear vs equal-power), channel override.
-4. **Demo interpolation activation** — switch lib.rs `boot_demo` / quaketool `cmd_demo` to `parse_demo_interpolated` + feed EF_ROTATE model indices (needs `Mdl` flags getter).
-5. **Colormap-LUT lighting** (medium) — load `gfx/colormap.lmp`, thread it through `render_scene_ext`.
+1. ✅ **Particle/TE spawn-wiring** (`8bda8cb`) — rocket/grenade/gib/tracer trails per model flags; TE_LAVASPLASH/TELEPORT/TAREXPLOSION/EXPLOSION2 routed (TAREXPLOSION split out of the dlight group).
+2. ✅ **HUD completeness** (`7cbc202`) — ibar + weapon strip + active flash + ammo counts/icons + keys/sigils + face + armor/ammo-type icons (pain-frame face anim + invuln 666/disc are minor TODOs).
+3. ✅ **Colormap-LUT lighting** (`604b2ce`) — `gfx/colormap.lmp` threaded through `render_scene_ext`; no more overbright; visually verified e1m1/e1m3.
+4. ✅ **Stereo pan law** (`web`) — linear 1±dot with full near-side gain.
+5. ✅ **`svc_particle`** → R_RunParticleEffect (not the rocket explosion).
+
+## Still open
+
+- **H11 ambient sounds** — the LAST remaining HIGH: placed `ambientsound()` loops + the 4 automatic leaf ambients (needs looping audio on the web side + leaf `ambient_level` exposed). Audio, not pixels.
+- **Intermission / finale screen** — the level-complete stats + episode finale (currently changelevel swaps directly). Visible at level transitions.
+- **Demo interpolation activation** — the lerp code exists; switch `boot_demo`/`cmd_demo` to `parse_demo_interpolated` + feed EF_ROTATE model indices.
+- Minor sbar polish (pain-frame face, invuln 666/disc); sound channel override; the LOW list (sky case-sensitivity, SV_TryUnstick, affine subdivision [= the paused perf item], etc.).
+
+**Performance** stays paused per the user.
 
 **Performance** is paused per the user (perf acceptable now); the ranked plan (style-value-keyed lightmap cache, frustum cull, persist framebuffer/zbuf — must stay pixel-identical) stays here for if/when it resumes.
 
