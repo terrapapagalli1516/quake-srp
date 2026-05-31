@@ -914,7 +914,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         }
         let inst: Vec<render::ModelInstance> = owned
             .iter()
-            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0 })
+            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, color: *color, frame: 0, skinnum: 0 })
             .collect();
         let external: Vec<render::ExternalBModel> = ext_owned
             .iter()
@@ -1137,7 +1137,11 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         .map_err(|e| format!("loading next map {next_bsp_path}: {e}"))?;
     let next_bsp = Bsp::parse(&next_bytes).map_err(|e| e.to_string())?;
     let next_progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
+    // Carry the chosen difficulty across (skill is a thread-local that with_pak
+    // resets to 1) — captured before building next_server, restored after.
+    let carry_skill = server.skill();
     let mut next_server = Server::with_pak(next_bsp, next_progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    next_server.set_skill(carry_skill as f32);
     let next_rep = next_server.spawn_entities().map_err(|e| e.to_string())?;
     let next_player = next_server
         .connect_client_with_parms(parms)
@@ -1589,6 +1593,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             yaw: *yaw,
             color: *color,
             frame: 0,
+            skinnum: 0,
         })
         .collect();
     let external: Vec<render::ExternalBModel> = ext_owned
@@ -1734,6 +1739,7 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
             yaw: *yaw,
             color: *color,
             frame: 0,
+            skinnum: 0,
         })
         .collect();
 
@@ -1833,6 +1839,7 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
                 yaw: *yaw,
                 color: *color,
                 frame: 0,
+                skinnum: 0,
             })
             .collect();
 

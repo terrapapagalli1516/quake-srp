@@ -448,6 +448,94 @@ fn read_frame(r: &mut Reader, numverts: usize) -> Result<Frame> {
     }
 }
 
+impl Mdl {
+    /// Resolve which pose to draw for animation `frame` at game `time`, porting
+    /// `R_AliasSetupFrame` (`r_alias.c`).
+    ///
+    /// First the requested `frame` is range-checked: the C resets an out-of-range
+    /// frame (`frame >= numframes || frame < 0`) to **0** (it does NOT clamp to the
+    /// last frame), so we do the same. Then:
+    ///  * a [`Frame::Single`] returns its one pose's vertices;
+    ///  * a [`Frame::Group`] selects the sub-pose whose interval window contains
+    ///    `time` — the C computes `fullinterval = intervals[n-1]`,
+    ///    `targettime = time - floor(time/fullinterval)*fullinterval`, then picks
+    ///    the first `i` in `0..n-1` with `intervals[i] > targettime` (else the last
+    ///    sub-frame). `syncbase` (a per-entity random phase) is folded into `time`
+    ///    by the caller.
+    ///
+    /// Returns `None` only for a frameless model (or an empty group).
+    pub fn frame_pose(&self, frame: i32, time: f32) -> Option<&[TriVertex]> {
+        let idx = if frame < 0 || (frame as usize) >= self.frames.len() {
+            0
+        } else {
+            frame as usize
+        };
+        match self.frames.get(idx)? {
+            Frame::Single(af) => Some(&af.verts),
+            Frame::Group { intervals, frames, .. } => {
+                let sub = select_interval(intervals, frames.len(), time)?;
+                frames.get(sub).map(|af| af.verts.as_slice())
+            }
+        }
+    }
+
+    /// Resolve which skin image to use for skin `skinnum` at game `time`, porting
+    /// `R_AliasSetupSkin` (`r_alias.c`).
+    ///
+    /// `skinnum` is range-checked the same way as a frame (out of range -> 0). A
+    /// single skin returns its pixels; a skin group selects the image whose
+    /// interval window contains `time` (same rule as [`Self::frame_pose`]).
+    ///
+    /// Returns `None` only for a model with no skins (or an empty skin group).
+    pub fn skin_image(&self, skinnum: i32, time: f32) -> Option<&[u8]> {
+        let idx = if skinnum < 0 || (skinnum as usize) >= self.skins.len() {
+            0
+        } else {
+            skinnum as usize
+        };
+        match self.skins.get(idx)? {
+            Skin::Single(px) => Some(px),
+            Skin::Group { intervals, frames } => {
+                let sub = select_interval(intervals, frames.len(), time)?;
+                frames.get(sub).map(|v| v.as_slice())
+            }
+        }
+    }
+}
+
+/// Select the sub-index of a group (frame or skin) for game `time` from its
+/// per-sub-frame `intervals`, porting the shared `R_AliasSetupFrame` /
+/// `R_AliasSetupSkin` selection in `r_alias.c`.
+///
+/// `intervals[i]` is the *cumulative* time at which sub-frame `i` ends (the C
+/// loads them as a running sum). `fullinterval = intervals[n-1]` is the cycle
+/// length; `targettime = time - floor(time/fullinterval)*fullinterval` wraps
+/// `time` into `[0, fullinterval)`. The chosen sub-frame is the first `i` with
+/// `intervals[i] > targettime` (else the last, `n-1`).
+///
+/// SAFETY: a non-finite or non-positive `fullinterval`, an empty group, or a
+/// `len`/`intervals` mismatch all fall back to sub-frame 0, so a malformed model
+/// never panics or divides by zero.
+fn select_interval(intervals: &[f32], len: usize, time: f32) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    // Need a usable interval table; otherwise hold on the first sub-frame.
+    let full = match intervals.last() {
+        Some(&f) if f > 0.0 && f.is_finite() => f,
+        _ => return Some(0),
+    };
+    let t = if time.is_finite() { time } else { 0.0 };
+    let target = t - (t / full).floor() * full;
+    let upper = len.saturating_sub(1).min(intervals.len());
+    for i in 0..upper {
+        if intervals[i] > target {
+            return Some(i);
+        }
+    }
+    Some(len - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,5 +820,104 @@ mod tests {
     #[test]
     fn empty_buffer_is_an_error() {
         assert!(Mdl::parse(&[]).is_err());
+    }
+
+    // --- animation selection (frame_pose / skin_image) -------------------
+
+    #[test]
+    fn select_interval_picks_by_cumulative_time() {
+        // Cumulative intervals [0.1, 0.2, 0.3]: sub 0 for t<0.1, sub 1 for
+        // 0.1<=t<0.2, sub 2 for 0.2<=t<0.3, wrapping at 0.3.
+        let iv = [0.1f32, 0.2, 0.3];
+        assert_eq!(select_interval(&iv, 3, 0.05), Some(0));
+        assert_eq!(select_interval(&iv, 3, 0.15), Some(1));
+        assert_eq!(select_interval(&iv, 3, 0.25), Some(2));
+        // Wraps: 0.35 -> 0.05 -> sub 0.
+        assert_eq!(select_interval(&iv, 3, 0.35), Some(0));
+    }
+
+    #[test]
+    fn select_interval_tolerates_bad_table() {
+        // Empty group -> None; non-positive/NaN fullinterval -> sub 0.
+        assert_eq!(select_interval(&[], 0, 1.0), None);
+        assert_eq!(select_interval(&[0.0f32], 1, 1.0), Some(0));
+        assert_eq!(select_interval(&[f32::NAN], 1, 1.0), Some(0));
+        assert_eq!(select_interval(&[0.5f32], 1, f32::INFINITY), Some(0));
+    }
+
+    /// A model with one ALIAS_GROUP frame of two sub-poses and two distinct
+    /// vertex sets, plus a one-skin model — to exercise group animation.
+    fn build_grouped() -> Vec<u8> {
+        // numskins=1, numverts=1, numtris=1, numframes=1 (a group of 2),
+        // skinwidth=1, skinheight=1 -> skinsize=1.
+        let mut buf = Vec::new();
+        let (sw, sh, nv, nt) = (1i32, 1i32, 1i32, 1i32);
+        buf.extend_from_slice(IDPOLYHEADER);
+        push_i32(&mut buf, ALIAS_VERSION);
+        push_vec3(&mut buf, [1.0, 1.0, 1.0]);
+        push_vec3(&mut buf, [0.0, 0.0, 0.0]);
+        push_f32(&mut buf, 0.0);
+        push_vec3(&mut buf, [0.0, 0.0, 0.0]);
+        push_i32(&mut buf, 1); // numskins
+        push_i32(&mut buf, sw);
+        push_i32(&mut buf, sh);
+        push_i32(&mut buf, nv);
+        push_i32(&mut buf, nt);
+        push_i32(&mut buf, 1); // numframes
+        push_i32(&mut buf, 0); // synctype
+        push_i32(&mut buf, 0); // flags
+        push_f32(&mut buf, 1.0); // size
+        // skin (single, 1 byte)
+        push_i32(&mut buf, ALIAS_SKIN_SINGLE);
+        buf.push(7);
+        // stvert (1)
+        push_i32(&mut buf, 0);
+        push_i32(&mut buf, 0);
+        push_i32(&mut buf, 0);
+        // triangle (1)
+        push_i32(&mut buf, 1);
+        push_i32(&mut buf, 0);
+        push_i32(&mut buf, 0);
+        push_i32(&mut buf, 0);
+        // frame group: type=1, count=2, group bbox, cumulative intervals 0.1/0.2,
+        // 2 sub-poses (one vert each) with distinct v[0].
+        push_i32(&mut buf, ALIAS_GROUP);
+        push_i32(&mut buf, 2);
+        push_trivertex(&mut buf, [0, 0, 0], 0);
+        push_trivertex(&mut buf, [9, 9, 9], 0);
+        push_f32(&mut buf, 0.1);
+        push_f32(&mut buf, 0.2);
+        for v0 in [10u8, 20] {
+            push_trivertex(&mut buf, [0, 0, 0], 0); // sub bboxmin
+            push_trivertex(&mut buf, [9, 9, 9], 0); // sub bboxmax
+            push_name16(&mut buf, "sub");
+            push_trivertex(&mut buf, [v0, 0, 0], 0);
+        }
+        buf
+    }
+
+    #[test]
+    fn frame_pose_animates_group_by_time() {
+        let mdl = Mdl::parse(&build_grouped()).expect("parse grouped");
+        // t in [0,0.1) -> sub 0 (v=10); t in [0.1,0.2) -> sub 1 (v=20).
+        let a = mdl.frame_pose(0, 0.05).expect("pose");
+        assert_eq!(a[0].v[0], 10);
+        let b = mdl.frame_pose(0, 0.15).expect("pose");
+        assert_eq!(b[0].v[0], 20);
+        // Out-of-range frame resets to 0 (NOT clamped to last), so still group 0.
+        let c = mdl.frame_pose(99, 0.15).expect("pose");
+        assert_eq!(c[0].v[0], 20);
+        let d = mdl.frame_pose(-3, 0.05).expect("pose");
+        assert_eq!(d[0].v[0], 10);
+    }
+
+    #[test]
+    fn skin_image_resolves_and_resets_out_of_range() {
+        let mdl = Mdl::parse(&build_grouped()).expect("parse grouped");
+        // Single skin -> its one byte regardless of time.
+        assert_eq!(mdl.skin_image(0, 0.0), Some(&[7u8][..]));
+        // Out-of-range skinnum resets to 0 (not an error).
+        assert_eq!(mdl.skin_image(5, 0.0), Some(&[7u8][..]));
+        assert_eq!(mdl.skin_image(-1, 0.0), Some(&[7u8][..]));
     }
 }

@@ -339,6 +339,15 @@ fn raster_triangle(
         return;
     }
     let inv_area = 1.0 / area;
+    // FAITHFULNESS (perspective-correct depth): Quake's span renderer keyed the
+    // z-buffer on `1/z` (`d_scan.c`/`d_edge.c` interpolate `zi`), because `1/z`
+    // is linear in screen space while view-`z` is NOT — so a linear `vz`
+    // interpolation mis-sorts intersecting polys. We interpolate `1/z` (exact in
+    // screen space) and recover the true per-pixel depth `z = 1/(Σ wᵢ/zᵢ)`. That
+    // keeps the existing "smaller depth = nearer" convention (and the `INFINITY`
+    // init / `<` tests everywhere) intact while making the test perspective
+    // correct. A vertex with non-positive depth is guarded below.
+    let (iz0, iz1, iz2) = (1.0 / v0.depth, 1.0 / v1.depth, 1.0 / v2.depth);
 
     for py in min_y..=max_y {
         for px in min_x..=max_x {
@@ -357,9 +366,13 @@ fn raster_triangle(
                 continue;
             }
 
-            // Interpolate camera-space depth (linear in screen space is an
-            // approximation, but adequate for hidden-surface ordering here).
-            let depth = w0 * v0.depth + w1 * v1.depth + w2 * v2.depth;
+            // Perspective-correct depth: interpolate 1/z (linear in screen space)
+            // and invert. `inv_z <= 0` means a vertex was at/behind the eye; skip.
+            let inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
+            if inv_z <= 0.0 {
+                continue;
+            }
+            let depth = 1.0 / inv_z;
 
             // Indices are provably in range: px in [0, w-1], py in [0, h-1].
             let idx = (py as usize) * w + (px as usize);
@@ -1046,7 +1059,7 @@ fn face_lightmap_dyn<'a>(
 ) -> Option<LightMap<'a>> {
     use crate::bsp::TEX_SPECIAL;
 
-    if bsp.lighting.is_empty() || face.lightofs < 0 {
+    if bsp.lighting.is_empty() {
         return None;
     }
     let ti = (face.texinfo as i64)
@@ -1054,7 +1067,40 @@ fn face_lightmap_dyn<'a>(
         .ok()
         .and_then(|i: usize| bsp.texinfo.get(i))?;
     if ti.flags & TEX_SPECIAL != 0 {
+        // Sky / liquid: never lightmapped, never dlit (C `SURF_DRAWTILED`).
         return None;
+    }
+
+    // FAITHFULNESS (dlight on an unlit face): a NORMAL wall with no baked lightmap
+    // (`lightofs < 0`) is NOT fullbright when a dynamic light reaches it — Quake's
+    // `R_BuildLightMap` clears the block to ambient and `R_AddDynamicLights` adds
+    // onto it (the surface still gets a `blocklights` array). We mirror that: when
+    // such a face has reaching dlights we build a ZERO base and add the lights;
+    // when there are no dlights we keep returning `None` (fullbright), so the
+    // common case is byte-identical to before.
+    if face.lightofs < 0 {
+        if dlights.is_empty() {
+            return None;
+        }
+        let (texmins, extent) = surface_extents(ti, world_poly)?;
+        let lmw = (extent[0] / 16 + 1) as usize;
+        let lmh = (extent[1] / 16 + 1) as usize;
+        let count = lmw.checked_mul(lmh)?;
+        let texmins_f = [texmins[0] as f32, texmins[1] as f32];
+        // Pass an EMPTY `static_samples` and a `None` base: `add_dynamic_lights`
+        // lazily materialises a zero-filled buffer (the C "clear to ambient", with
+        // ambient 0) ONLY when a light actually reaches this face, and returns
+        // `None` otherwise. So a far-away dlight leaves the unlit face fullbright
+        // (unchanged), while a reaching one dims/brightens it like the C.
+        let _ = count; // the grid size is implicit in lmw*lmh inside the helper
+        let no_samples: &[u8] = &[];
+        let luxels = match add_dynamic_lights(
+            bsp, face, ti, texmins_f, lmw, lmh, no_samples, None, dlights,
+        ) {
+            Some(owned) => Luxels::Owned(owned),
+            None => return None,
+        };
+        return Some(LightMap { luxels, lmw, lmh, texmins: texmins_f });
     }
 
     let (texmins, extent) = surface_extents(ti, world_poly)?;
@@ -1267,6 +1313,82 @@ fn sky_texel(pixels: &[u8], tw: usize, th: usize, s: f32, t: f32, time: f32) -> 
     }
 }
 
+/// The camera projection a sky pixel needs to recover its world view direction,
+/// porting `D_Sky_uv_To_st`'s use of `vpn`/`vright`/`vup` and the screen centre.
+///
+/// The sky is an infinite dome: what a screen pixel shows depends on the view
+/// DIRECTION through that pixel, NOT on the wall polygon's `(s,t)`. This carries
+/// the camera basis and the projection parameters so [`sky_texel_view`] can
+/// rebuild the ray for each covered pixel.
+#[derive(Clone, Copy)]
+struct SkyView {
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    /// Screen centre (`w/2`, `h/2`).
+    cx: f32,
+    cy: f32,
+    /// `max(width, height)` — the `temp` normaliser in `D_Sky_uv_To_st`. The C
+    /// derives the ray from this fixed `8192/longest` scaling (a fixed dome angle,
+    /// independent of the render FOV), so the camera focal length is not used.
+    longest: f32,
+}
+
+/// Sample the sky for screen pixel `(u, v)` by projecting the **view direction**
+/// onto the scrolling sky, porting `D_Sky_uv_To_st` (`d_sky.c`).
+///
+/// `D_Sky_uv_To_st` builds the world ray for the pixel —
+/// `end = 4096*vpn + wu*vright + wv*vup` with `wu`/`wv` the screen offsets scaled
+/// by `8192/longest`, then `end[2] *= 3` (vertical squash) and normalise — and
+/// derives the sky coords `s = scroll + 6*(SKYSIZE/2-1)*end[0]`,
+/// `t = scroll + 6*(SKYSIZE/2-1)*end[1]`. The `scroll = skytime*skyspeed` drifts
+/// the whole sky over time (`skyspeed = 8`). We feed those `(s,t)` to the same
+/// two-layer overlay/background lookup [`sky_texel`] already implements, so the
+/// front cloud layer scrolls over the solid background. The result depends only
+/// on where the camera looks, so the sky no longer smears with wall coords and
+/// scrolls as the player turns.
+///
+/// SAFETY: `focal`/`longest` are guarded against 0 by the caller; the lookup is
+/// `sky_texel`, which bounds-checks and wraps, so a malformed sky never panics.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn sky_texel_view(pixels: &[u8], tw: usize, th: usize, u: f32, v: f32, sky: &SkyView, time: f32) -> u8 {
+    // `SKYSIZE` (128) -> 6*(SKYSIZE/2 - 1) = 6*63 = 378, the C dome scale.
+    const SKY_DOME_SCALE: f32 = 6.0 * (128.0 / 2.0 - 1.0);
+    const SKY_SPEED: f32 = 8.0;
+
+    // Screen offsets, scaled exactly as D_Sky_uv_To_st (8192/longest), but we work
+    // in our projection: a pixel `(u,v)` corresponds to camera-space direction
+    // proportional to `right*(u-cx)/focal + up*-(v-cy)/focal + forward`. Scaling
+    // by 4096 forward (the C uses `4096*vpn` with `8192*offset`) keeps the same
+    // ratio; the subsequent normalise removes the absolute scale.
+    let longest = if sky.longest > 0.0 { sky.longest } else { 1.0 };
+    let wu = 8192.0 * (u - sky.cx) / longest;
+    let wv = 8192.0 * (sky.cy - v) / longest;
+
+    let mut end = [
+        4096.0 * sky.forward[0] + wu * sky.right[0] + wv * sky.up[0],
+        4096.0 * sky.forward[1] + wu * sky.right[1] + wv * sky.up[1],
+        4096.0 * sky.forward[2] + wu * sky.right[2] + wv * sky.up[2],
+    ];
+    end[2] *= 3.0; // vertical squash so the dome is shallow
+    let (dir, len) = normalize(end);
+    if len == 0.0 {
+        return 0;
+    }
+
+    let scroll = time * SKY_SPEED;
+    // s/t in texels: the dome scale projects the direction onto the layer. We feed
+    // these to `sky_texel` with time=0 (the scroll is folded into s/t here), but
+    // `sky_texel` adds its own per-layer scroll — so pass the raw projected coords
+    // and let the two-layer overlay/background lookup add the front/back drift.
+    let s = scroll + SKY_DOME_SCALE * dir[0];
+    let t = scroll + SKY_DOME_SCALE * dir[1];
+    // `sky_texel` expects (s,t) that it scales by 0.125; pre-multiply by 8 so the
+    // dome projection lands at a sensible cloud scale after its internal *0.125.
+    sky_texel(pixels, tw, th, s * 8.0, t * 8.0, 0.0)
+}
+
 /// How the per-pixel `(s,t)` -> texel step of [`raster_triangle_tex`] behaves.
 ///
 /// `Normal` is the existing wall path (optional lightmap). `Turb` and `Sky`
@@ -1279,8 +1401,9 @@ enum SurfaceMode<'a> {
     Normal,
     /// Liquid: SIN-warp `(s,t)` by `time` before sampling (fullbright).
     Turb { turb: &'a TurbTable, time: f32 },
-    /// Sky: two-layer scroll over the 256x128 sky texture by `time` (fullbright).
-    Sky { time: f32 },
+    /// Sky: project the per-pixel VIEW DIRECTION onto the scrolling sky dome
+    /// (`D_Sky_uv_To_st`) rather than mapping wall `(s,t)`. Fullbright.
+    Sky { time: f32, view: SkyView },
 }
 
 /// Which animated kind a miptexture name selects: liquids begin with `*`
@@ -1305,6 +1428,71 @@ fn classify_surface(name: &str) -> SurfKind {
     } else {
         SurfKind::Normal
     }
+}
+
+/// `R_TextureAnimation` (`r_surf.c`): pick the texture index to draw for an
+/// animated (`+`-prefixed) base texture at game `time`, given the drawing
+/// entity's `frame` field.
+///
+/// Returns the index into `bsp.textures` of the frame to render:
+///  * If `ent_frame != 0` and the base has an `alternate_anims` cycle, switch to
+///    that cycle's first frame as the new base (the `+a..+j` set).
+///  * If the (possibly switched) base is not animated (`anim == None`), return it
+///    unchanged.
+///  * Otherwise walk `anim_next` from the base until the frame whose
+///    `[anim_min, anim_max)` window contains `relative = (int)(time*10) %
+///    anim_total`, exactly like the C `while (anim_min > rel || anim_max <= rel)`.
+///
+/// SAFETY: the walk is bounded (the C bounds it at 100 hops; we bound it at the
+/// texture count) and every lookup is `.get()`-checked, so a broken cycle in
+/// malformed map data returns the last reachable frame instead of looping or
+/// panicking (the C `Sys_Error`s).
+fn texture_animation(bsp: &Bsp, base_index: usize, ent_frame: i32, time: f32) -> usize {
+    // Resolve the entity-frame alternate switch first (C: `if (currententity->
+    // frame) { if (base->alternate_anims) base = base->alternate_anims; }`).
+    let mut idx = base_index;
+    if ent_frame != 0 {
+        if let Some(Some(tx)) = bsp.textures.get(idx) {
+            if let Some(anim) = tx.anim {
+                if let Some(alt) = anim.alternate {
+                    idx = alt;
+                }
+            }
+        }
+    }
+
+    // If not animated, return as-is.
+    let anim = match bsp.textures.get(idx) {
+        Some(Some(tx)) => match tx.anim {
+            Some(a) if a.total > 0 => a,
+            _ => return idx,
+        },
+        _ => return idx,
+    };
+
+    // relative = (int)(cl.time*10) % anim_total, in tenths of a second.
+    let rel = ((time * 10.0) as i64).rem_euclid(anim.total as i64) as i32;
+
+    // Walk anim_next until rel is inside [anim_min, anim_max).
+    let mut cur = idx;
+    let mut cur_anim = anim;
+    let limit = bsp.textures.len().max(1) + 1;
+    let mut count = 0usize;
+    while cur_anim.min > rel || cur_anim.max <= rel {
+        count += 1;
+        if count > limit {
+            break; // broken cycle: stop rather than loop (C: Sys_Error).
+        }
+        cur = cur_anim.next;
+        match bsp.textures.get(cur) {
+            Some(Some(tx)) => match tx.anim {
+                Some(a) => cur_anim = a,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    cur
 }
 
 /// A projected vertex carrying texture coordinates for perspective-correct
@@ -1376,17 +1564,20 @@ fn raster_triangle_tex(
             if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                 continue;
             }
-            let depth = w0 * v0.vz + w1 * v1.vz + w2 * v2.vz; // linear, like the flat path
+            // Perspective-correct depth (1/z interpolation, then invert), matching
+            // Quake's `zi`-keyed z-buffer and the flat path. `inv_z` is reused for
+            // the s/t perspective divide below, so this costs nothing extra.
+            let inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
+            if inv_z <= 0.0 {
+                continue;
+            }
+            let depth = 1.0 / inv_z;
             let idx = (py as usize) * w + (px as usize);
             let zc = match zbuf.get_mut(idx) {
                 Some(z) => z,
                 None => continue,
             };
             if depth >= *zc {
-                continue;
-            }
-            let inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
-            if inv_z <= 0.0 {
                 continue;
             }
             let s = (w0 * soz0 + w1 * soz1 + w2 * soz2) / inv_z;
@@ -1422,10 +1613,11 @@ fn raster_triangle_tex(
                     };
                     (p, 1.0)
                 }
-                SurfaceMode::Sky { time } => {
-                    // Two-layer scrolling sky; fullbright. `sky_texel` does its
-                    // own bounds-checked wrapping over the 256x128 layout.
-                    (sky_texel(pixels, tw, th, s, t, time) as usize, 1.0)
+                SurfaceMode::Sky { time, view } => {
+                    // Project the per-pixel VIEW DIRECTION onto the scrolling sky
+                    // dome (`D_Sky_uv_To_st`) — the sky no longer uses wall (s,t).
+                    // `sx`/`sy` are the pixel centre in screen space; fullbright.
+                    (sky_texel_view(pixels, tw, th, sx, sy, &view, time) as usize, 1.0)
                 }
             };
             let rgb = palette[texel];
@@ -1597,6 +1789,197 @@ fn point_in_leaf(bsp: &Bsp, p: Vec3) -> Option<usize> {
     }
 
     // Exceeded the step guard: treat as malformed.
+    None
+}
+
+/// `R_LightPoint` (`r_light.c`): sample the baked world light at world-space
+/// point `p`, returning a 0..255 brightness (the average of the active light
+/// styles at the surface directly below `p`).
+///
+/// Casts a ray straight down (`p` -> `p - 2048z`) through the worldmodel's BSP
+/// and, at the first lightmapped surface the segment crosses, reads that
+/// surface's lightmap luxel (summing each active style's value scaled by
+/// `light_styles`, like `RecursiveLightPoint`). Returns:
+///  * the sampled brightness (`0..=255`) when a lightmapped surface is hit;
+///  * `0` when the ray hits a tiled (sky/liquid) surface or a surface with no
+///    samples (the C returns 0 there);
+///  * `255` (fullbright) when the map has no lighting data at all
+///    (`!cl.worldmodel->lightdata`), matching the C early-out.
+///
+/// `light_styles` scales each style's luxel (1.0 == the C's `d_lightstylevalue`
+/// of 256 mapped to neutral). SAFETY: the recursion is depth-bounded and every
+/// index is `.get()`-checked, so corrupt node/plane/face data yields a default
+/// (no light) rather than a panic or unbounded recursion.
+fn r_light_point(bsp: &Bsp, p: Vec3, light_styles: &[f32; LIGHTSTYLES]) -> f32 {
+    if bsp.lighting.is_empty() {
+        return 255.0; // C: `if (!worldmodel->lightdata) return 255;`
+    }
+    let headnode = match bsp.models.first().and_then(|m| m.headnode.first().copied()) {
+        Some(h) => h,
+        None => return 0.0,
+    };
+    let end = [p[0], p[1], p[2] - 2048.0];
+    let depth = bsp.nodes.len().saturating_add(2);
+    match recursive_light_point(bsp, headnode, p, end, light_styles, depth) {
+        Some(r) => r.max(0.0),
+        None => 0.0, // C: `if (r == -1) r = 0;`
+    }
+}
+
+/// One step of `RecursiveLightPoint`. `node` is a child reference (negative =>
+/// leaf, "didn't hit anything"). Returns `Some(brightness)` on a hit,
+/// `None` for "didn't hit anything" (the C `-1`). `depth` bounds the recursion.
+fn recursive_light_point(
+    bsp: &Bsp,
+    node: i32,
+    start: Vec3,
+    end: Vec3,
+    light_styles: &[f32; LIGHTSTYLES],
+    depth: usize,
+) -> Option<f32> {
+    if depth == 0 {
+        return None;
+    }
+    if node < 0 {
+        return None; // leaf: didn't hit anything (C `node->contents < 0`).
+    }
+    let ni: usize = node.try_into().ok()?;
+    let node_rec = bsp.nodes.get(ni)?;
+    let pi: usize = (node_rec.planenum as i64).try_into().ok()?;
+    let plane = bsp.planes.get(pi)?;
+
+    let front = dot(start, plane.normal) - plane.dist;
+    let back = dot(end, plane.normal) - plane.dist;
+    let side = front < 0.0; // C `side = front < 0`
+    let side_child = |s: bool| -> Option<i32> {
+        if s {
+            node_rec.children.get(1).copied().map(|c| c as i32)
+        } else {
+            node_rec.children.first().copied().map(|c| c as i32)
+        }
+    };
+
+    // If both endpoints are on the same side, recurse into that side only.
+    if (back < 0.0) == side {
+        return recursive_light_point(bsp, side_child(side)?, start, end, light_styles, depth - 1);
+    }
+
+    // Split: compute the midpoint on the plane.
+    let denom = front - back;
+    if denom == 0.0 {
+        return recursive_light_point(bsp, side_child(side)?, start, end, light_styles, depth - 1);
+    }
+    let frac = front / denom;
+    let mid = [
+        start[0] + (end[0] - start[0]) * frac,
+        start[1] + (end[1] - start[1]) * frac,
+        start[2] + (end[2] - start[2]) * frac,
+    ];
+
+    // Go down the front side first.
+    if let Some(r) = recursive_light_point(bsp, side_child(side)?, start, mid, light_styles, depth - 1)
+    {
+        return Some(r); // hit something
+    }
+    // (back<0)==side already handled above; here the sides differ, so check this
+    // node's surfaces for an impact, then go down the back side.
+    if let Some(r) = light_point_check_node(bsp, node_rec, mid, light_styles) {
+        return Some(r);
+    }
+    recursive_light_point(bsp, side_child(!side)?, mid, end, light_styles, depth - 1)
+}
+
+/// Check this node's surfaces for the impact point `mid`, porting the surface
+/// loop in `RecursiveLightPoint`. Returns `Some(brightness)` if `mid` lands on a
+/// lightmapped surface (including `Some(0.0)` for a surface with no samples),
+/// else `None` (the segment did not land on any of this node's surfaces).
+fn light_point_check_node(
+    bsp: &Bsp,
+    node: &crate::bsp::DNode,
+    mid: Vec3,
+    light_styles: &[f32; LIGHTSTYLES],
+) -> Option<f32> {
+    use crate::bsp::TEX_SPECIAL;
+    let first = node.firstface as usize;
+    let count = node.numfaces as usize;
+    let mut world_poly: Vec<Vec3> = Vec::new();
+    for face_index in first..first.saturating_add(count) {
+        let face = match bsp.faces.get(face_index) {
+            Some(f) => f,
+            None => continue,
+        };
+        let ti = match (face.texinfo as i64)
+            .try_into()
+            .ok()
+            .and_then(|i: usize| bsp.texinfo.get(i))
+        {
+            Some(t) => t,
+            None => continue,
+        };
+        // Tiled surfaces (sky/liquid) have no lightmaps (C `SURF_DRAWTILED`).
+        if ti.flags & TEX_SPECIAL != 0 {
+            continue;
+        }
+
+        // Surface coordinate of `mid`.
+        let s = mid[0] * ti.vecs[0][0] + mid[1] * ti.vecs[0][1] + mid[2] * ti.vecs[0][2] + ti.vecs[0][3];
+        let t = mid[0] * ti.vecs[1][0] + mid[1] * ti.vecs[1][1] + mid[2] * ti.vecs[1][2] + ti.vecs[1][3];
+
+        // Need the surface extents (texmins/extent) to test the bounds, exactly
+        // as `RecursiveLightPoint` uses surf->texturemins / surf->extents.
+        if !face_world_poly(bsp, face, &mut world_poly) {
+            continue;
+        }
+        let (texmins, extent) = match surface_extents(ti, &world_poly) {
+            Some(v) => v,
+            None => continue,
+        };
+        let ds = s - texmins[0] as f32;
+        let dt = t - texmins[1] as f32;
+        if ds < 0.0 || dt < 0.0 || ds > extent[0] as f32 || dt > extent[1] as f32 {
+            continue;
+        }
+
+        // The point is on this surface. With no samples the C returns 0.
+        if face.lightofs < 0 {
+            return Some(0.0);
+        }
+        let lmw = (extent[0] / 16 + 1) as usize;
+        let lmh = (extent[1] / 16 + 1) as usize;
+        let block = match lmw.checked_mul(lmh) {
+            Some(b) => b,
+            None => return Some(0.0),
+        };
+        let start: usize = match face.lightofs.try_into() {
+            Ok(s) => s,
+            Err(_) => return Some(0.0),
+        };
+        // Luxel coordinate within the block (C `ds>>4`, `dt>>4`).
+        let lx = (ds as i64 / 16).clamp(0, lmw as i64 - 1) as usize;
+        let ly = (dt as i64 / 16).clamp(0, lmh as i64 - 1) as usize;
+        let luxel = ly * lmw + lx;
+
+        // Sum each active style's luxel, scaled by its light-style value. The C
+        // multiplies by `d_lightstylevalue` (256 == neutral) then `>>8`; here the
+        // neutral scale is 1.0, so we sum `luxel_byte * scale`.
+        let mut r = 0.0f32;
+        for (k, &style) in face.styles.iter().enumerate() {
+            if style == STYLE_NONE {
+                break;
+            }
+            let off = match start.checked_add(k * block).and_then(|o| o.checked_add(luxel)) {
+                Some(o) => o,
+                None => break,
+            };
+            let sample = match bsp.lighting.get(off) {
+                Some(&b) => b as f32,
+                None => break,
+            };
+            let scale = light_styles.get(style as usize).copied().unwrap_or(1.0);
+            r += sample * scale;
+        }
+        return Some(r);
+    }
     None
 }
 
@@ -1872,14 +2255,19 @@ fn draw_world_textured(
             continue;
         }
 
-        // texinfo (s/t axes) and its miptexture.
+        // texinfo (s/t axes) and its miptexture. For a `+`-prefixed animated
+        // texture, the miptex actually sampled is chosen by time via
+        // `R_TextureAnimation` (the world entity's frame is 0, so it never takes
+        // the alternate cycle). The (s,t) axes still come from the texinfo, which
+        // are shared by every frame of the animation.
         let ti = (face.texinfo as i64)
             .try_into()
             .ok()
             .and_then(|i: usize| bsp.texinfo.get(i));
         let tex = ti.and_then(|t| {
             let mi: usize = t.miptex.try_into().ok()?;
-            bsp.textures.get(mi).and_then(|o| o.as_ref())
+            let anim_mi = texture_animation(bsp, mi, 0, time);
+            bsp.textures.get(anim_mi).and_then(|o| o.as_ref())
         });
 
         // Classify the surface (liquid / sky / wall) by its miptex name so the
@@ -1895,7 +2283,17 @@ fn draw_world_textured(
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
             SurfKind::Turb => SurfaceMode::Turb { turb, time },
-            SurfKind::Sky => SurfaceMode::Sky { time },
+            SurfKind::Sky => SurfaceMode::Sky {
+                time,
+                view: SkyView {
+                    forward,
+                    right,
+                    up,
+                    cx,
+                    cy,
+                    longest: (w.max(h)) as f32,
+                },
+            },
         };
 
         // Build the view-space polygon (vx,vy,vz,s,t per world vertex), then clip
@@ -2134,14 +2532,19 @@ fn draw_submodel(
             continue;
         }
 
-        // texinfo (s/t axes) and its miptexture.
+        // texinfo (s/t axes) and its miptexture. Animated (`+`-prefixed) textures
+        // on a brush submodel cycle by time exactly as the world does
+        // (`R_TextureAnimation`); we pass `ent_frame = 0` (the inline-bmodel
+        // instances carry no frame field here, so the alternate/switch cycle is
+        // not selected — see wiring notes).
         let ti = (face.texinfo as i64)
             .try_into()
             .ok()
             .and_then(|i: usize| bsp.texinfo.get(i));
         let tex = ti.and_then(|t| {
             let mi: usize = t.miptex.try_into().ok()?;
-            bsp.textures.get(mi).and_then(|o| o.as_ref())
+            let anim_mi = texture_animation(bsp, mi, 0, time);
+            bsp.textures.get(anim_mi).and_then(|o| o.as_ref())
         });
 
         // Classify the surface (liquid / sky / wall) by its miptex name. Liquids
@@ -2156,7 +2559,17 @@ fn draw_submodel(
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
             SurfKind::Turb => SurfaceMode::Turb { turb, time },
-            SurfKind::Sky => SurfaceMode::Sky { time },
+            SurfKind::Sky => SurfaceMode::Sky {
+                time,
+                view: SkyView {
+                    forward,
+                    right,
+                    up,
+                    cx,
+                    cy,
+                    longest: (w.max(h)) as f32,
+                },
+            },
         };
 
         // Build the view-space polygon from the SHIFTED vertices (for vx/vy/vz)
@@ -2276,42 +2689,81 @@ fn draw_submodel(
 /// [`render_scene`] sharing the world's z-buffer, so models occlude — and are
 /// occluded by — BSP geometry correctly.
 ///
-/// `frame` selects which pose to draw (see [`mdl_frame_verts`]); it is clamped
-/// to the model's frame list, so any value is safe and a model with one frame
-/// always shows that frame regardless.
+/// `frame` selects which pose to draw (see [`mdl_frame_verts`]); an out-of-range
+/// frame resets to 0 (matching `R_AliasSetupFrame`), so any value is safe.
+///
+/// `skinnum` is the per-entity skin index (`currententity->skinnum`): a model
+/// with multiple skins (or a skin group) uses it to pick / animate its skin, so
+/// e.g. a damaged or team-coloured variant renders. Out-of-range resets to 0.
+/// Defaults to `0` via [`ModelInstance::with_frame`] for callers that do not yet
+/// track per-entity skins.
+///
+/// Group-frame (`ALIAS_GROUP`) and group-skin (`ALIAS_SKIN_GROUP`) animation is
+/// driven by the **scene `time`** passed to [`render_scene_ext`] (not a
+/// per-instance field), so existing callers animate for free as game time
+/// advances. `R_AliasSetupFrame` / `R_AliasSetupSkin` select the sub-frame /
+/// sub-skin whose interval window contains that time.
 pub struct ModelInstance<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub origin: Vec3,
     pub yaw: f32,
     pub frame: usize,
     pub color: [u8; 3],
+    /// Per-entity skin index (`currententity->skinnum`); out-of-range -> 0.
+    ///
+    /// NOTE: this is a `Default`-able field; callers that build a [`ModelInstance`]
+    /// with a struct literal must set it (use `skinnum: 0` when the entity's skin
+    /// is not tracked). The [`ModelInstance::with_frame`] / [`ModelInstance::new`]
+    /// constructors default it to 0.
+    pub skinnum: i32,
 }
 
-/// Resolve the vertices of the pose `frame` for an [`Mdl`], porting the
-/// frame-select clamp of Quake's `R_AliasSetupFrame` (`r_alias.c`).
-///
-/// `frame` is clamped to the model's frame list (`R_AliasSetupFrame` resets an
-/// out-of-range frame to 0; we clamp to the last valid index instead, which is
-/// equally safe and keeps the highest pose reachable). The selected [`Frame`]
-/// resolves to:
-///  * `Single(af)` — the single pose's vertices.
-///  * `Group { frames, .. }` — the group's *first* sub-pose. Quake cycles a
-///    group's poses on a wall-clock timer (`R_AliasSetupFrame` picks by
-///    `cl.time` against the group intervals); we have no clock here, so we pick
-///    the first sub-pose deterministically.
-///
-/// Returns `None` only when the model has no frames at all (or, for a group,
-/// the group is empty).
-fn mdl_frame_verts(mdl: &crate::mdl::Mdl, frame: usize) -> Option<&[crate::mdl::TriVertex]> {
-    use crate::mdl::Frame;
-    // Clamp `frame` into `[0, len-1]`. `len()` is 0 only for a frameless model,
-    // for which `.get()` below returns `None` anyway.
-    let last = mdl.frames.len().saturating_sub(1);
-    let idx = frame.min(last);
-    match mdl.frames.get(idx)? {
-        Frame::Single(af) => Some(&af.verts),
-        Frame::Group { frames, .. } => frames.first().map(|af| af.verts.as_slice()),
+impl<'a> ModelInstance<'a> {
+    /// Build a [`ModelInstance`] with `skinnum` defaulted to 0 — the common case
+    /// for callers that do not yet track per-entity skins. Equivalent to the old
+    /// 5-field literal.
+    pub fn with_frame(
+        mdl: &'a crate::mdl::Mdl,
+        origin: Vec3,
+        yaw: f32,
+        frame: usize,
+        color: [u8; 3],
+    ) -> ModelInstance<'a> {
+        ModelInstance { mdl, origin, yaw, frame, color, skinnum: 0 }
     }
+
+    /// Build a [`ModelInstance`] specifying the per-entity `skinnum`.
+    pub fn new(
+        mdl: &'a crate::mdl::Mdl,
+        origin: Vec3,
+        yaw: f32,
+        frame: usize,
+        color: [u8; 3],
+        skinnum: i32,
+    ) -> ModelInstance<'a> {
+        ModelInstance { mdl, origin, yaw, frame, color, skinnum }
+    }
+}
+
+/// Resolve the vertices of pose `frame` at game `time` for an [`Mdl`], delegating
+/// to [`crate::mdl::Mdl::frame_pose`] (the `R_AliasSetupFrame` port).
+///
+/// `frame` (a `usize` here) is range-checked there: an out-of-range frame **resets
+/// to 0** (matching the C, which does NOT clamp to the last frame). A
+/// [`crate::mdl::Frame::Group`] now ANIMATES — its sub-pose is selected by `time`
+/// against the group's intervals — so monster/torch group-frame models cycle
+/// instead of freezing on the first sub-pose.
+///
+/// Returns `None` only when the model has no frames at all (or a group is empty).
+fn mdl_frame_verts(
+    mdl: &crate::mdl::Mdl,
+    frame: usize,
+    time: f32,
+) -> Option<&[crate::mdl::TriVertex]> {
+    // `usize -> i32`: a frame beyond `i32::MAX` is treated as out of range (-> 0),
+    // exactly as `frame_pose` would do for any out-of-range index.
+    let f = i32::try_from(frame).unwrap_or(-1);
+    mdl.frame_pose(f, time)
 }
 
 /// Decode one MDL vertex into model space:
@@ -2348,23 +2800,19 @@ struct ModelSkin<'a> {
     height: usize,
 }
 
-/// Resolve the texturing skin for an alias model: skin 0's pixels and the
-/// header's `skinwidth`/`skinheight`, ported from the `R_AliasDrawModel` skin
-/// selection (`r_alias.c`, which uses `pmdl->skinwidth`/`skinheight` and a skin
-/// chosen from `paliashdr`'s skin list).
+/// Resolve the texturing skin for an alias model at entity skin index `skinnum`
+/// and game `time`, ported from `R_AliasSetupSkin` (`r_alias.c`): the skin is
+/// chosen by the entity's `skinnum` (out of range -> 0), and an
+/// `ALIAS_SKIN_GROUP` skin ANIMATES — the image is selected by `time` against
+/// the group's intervals (via [`crate::mdl::Mdl::skin_image`]). The dimensions
+/// are always the header's `skinwidth`/`skinheight`.
 ///
 /// Returns `None` — so the caller falls back to the flat-colour path for the
 /// whole model — when there is no skin, the dimensions are non-positive, the
 /// pixel/dimension product overflows, or the pixel buffer is shorter than
-/// `skinwidth * skinheight`. A [`Skin::Group`] uses its first frame (we have no
-/// wall-clock to cycle skin-group animation, matching how [`mdl_frame_verts`]
-/// picks a group's first pose).
-fn mdl_skin(mdl: &crate::mdl::Mdl) -> Option<ModelSkin<'_>> {
-    use crate::mdl::Skin;
-    let pixels: &[u8] = match mdl.skins.first()? {
-        Skin::Single(px) => px,
-        Skin::Group { frames, .. } => frames.first()?,
-    };
+/// `skinwidth * skinheight`.
+fn mdl_skin(mdl: &crate::mdl::Mdl, skinnum: i32, time: f32) -> Option<ModelSkin<'_>> {
+    let pixels: &[u8] = mdl.skin_image(skinnum, time)?;
     // Dimensions must be strictly positive to index a real grid.
     let width: usize = (mdl.header.skinwidth as i64).try_into().ok()?;
     let height: usize = (mdl.header.skinheight as i64).try_into().ok()?;
@@ -2434,14 +2882,19 @@ fn mdl_skin_st(stvert: &crate::mdl::StVert, facesfront: bool, skinwidth: usize) 
 /// triangle is skipped whole if any vertex is at/behind the near plane. Every
 /// model index goes through `.get()`; malformed data is skipped, never panicked
 /// on.
+#[allow(clippy::too_many_arguments)]
 fn draw_alias_model(
     image: &mut Image,
     zbuf: &mut [f32],
+    bsp: &Bsp,
     cam: &Camera,
     inst: &ModelInstance,
     w: usize,
     h: usize,
     palette: &[[u8; 3]; 256],
+    dlights: &[crate::dlight::DynamicLight],
+    light_styles: &[f32; LIGHTSTYLES],
+    time: f32,
 ) {
     const NEAR: f32 = 1.0;
     if w == 0 || h == 0 {
@@ -2459,19 +2912,45 @@ fn draw_alias_model(
         (cx as f64 / tan_half) as f32
     };
 
-    // Fixed light direction (same source vector as the world pass).
-    let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
+    // FAITHFULNESS (alias lighting): instead of a fixed directional Lambert, the C
+    // (`R_DrawEntitiesOnList`) lights an alias model from the WORLD: it samples
+    // `R_LightPoint(origin)` for the baked light at the model's feet, then adds
+    // any dynamic light whose radius reaches the origin (`add = radius - dist`).
+    // We compute the same scalar here, once per model. The sampled world light is
+    // 0..255; a `+`-prefixed style flicker is folded in via `light_styles`. We map
+    // that scalar to a per-model brightness `model_light` and modulate it by a mild
+    // per-triangle Lambert so silhouettes still read.
+    let world_light = r_light_point(bsp, inst.origin, light_styles);
+    let mut ambient = world_light;
+    for dl in dlights {
+        let dx = inst.origin[0] - dl.origin[0];
+        let dy = inst.origin[1] - dl.origin[1];
+        let dz = inst.origin[2] - dl.origin[2];
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let add = dl.radius - dist;
+        if add > 0.0 {
+            ambient += add; // C: `lighting.ambientlight += add`
+        }
+    }
+    // C clamps ambient to 128 (so it never fully whites out) before the lighting
+    // table; here we normalise to a 0..~1.2 brightness. A pitch-black sample
+    // (`ambient` near 0) still leaves the model dimly visible (floor ~0.25), and a
+    // fully-lit/dlit sample saturates near 1.2 (a little overbright for dlights).
+    let ambient = ambient.min(255.0);
+    let model_light = (0.25 + ambient / 200.0).clamp(0.25, 1.2);
+
     let yaw_rad = (inst.yaw as f64).to_radians();
 
-    let verts = match mdl_frame_verts(inst.mdl, inst.frame) {
+    let verts = match mdl_frame_verts(inst.mdl, inst.frame, time) {
         Some(v) => v,
         None => return, // no frame -> nothing to draw
     };
     let header = &inst.mdl.header;
 
-    // Resolve the model's skin once. `None` => the whole model uses the flat
-    // colour path (items without skins, malformed dims, short pixel buffers).
-    let skin = mdl_skin(inst.mdl);
+    // Resolve the model's skin once, by the entity's skinnum and the scene time
+    // (group skins animate). `None` => the whole model uses the flat colour path
+    // (items without skins, malformed dims, short pixel buffers).
+    let skin = mdl_skin(inst.mdl, inst.skinnum, time);
 
     for tri in &inst.mdl.triangles {
         // Resolve the three frame vertices, fully bounds-checked.
@@ -2509,7 +2988,13 @@ fn draw_alias_model(
         if nlen == 0.0 {
             continue;
         }
-        let shade = dot(normal, light_dir).clamp(0.25, 1.0);
+        // Brightness = world-sampled model light, modulated by a gentle Lambert so
+        // the silhouette still reads (the C's `r_shadelight*lightcos` term). The
+        // directional term only varies brightness within [0.7, 1.0]*model_light,
+        // so the model never goes black on a back face — the world light dominates.
+        let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
+        let lambert = 0.7 + 0.3 * dot(normal, light_dir).max(0.0);
+        let shade = (model_light * lambert).clamp(0.0, MAX_LIGHT_FACTOR);
         let color = [
             (inst.color[0] as f32 * shade).clamp(0.0, 255.0) as u8,
             (inst.color[1] as f32 * shade).clamp(0.0, 255.0) as u8,
@@ -2807,12 +3292,15 @@ fn draw_viewmodel(
 
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
-    let verts = match mdl_frame_verts(mdl, frame) {
+    // The viewmodel carries only a `frame` (no group-anim time / skinnum), so it
+    // poses at `time = 0` (first sub-pose of any group) with skin 0 — its prior
+    // behaviour. An out-of-range frame still resets to 0 inside `mdl_frame_verts`.
+    let verts = match mdl_frame_verts(mdl, frame, 0.0) {
         Some(v) => v,
         None => return, // no frame -> nothing to draw
     };
     let header = &mdl.header;
-    let skin = mdl_skin(mdl);
+    let skin = mdl_skin(mdl, 0, 0.0);
 
     // The viewmodel owns this depth buffer so it sorts against itself but always
     // overwrites the world (never written here, so it never bleeds across frames).
@@ -3116,7 +3604,7 @@ pub fn render_scene_ext(
         draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[]);
     }
     for inst in models {
-        draw_alias_model(&mut image, &mut zbuf, cam, inst, w, h, palette);
+        draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, w, h, palette, dlights, light_styles, time);
     }
     // Particles draw after the world/models, z-tested against the same buffer so
     // walls occlude them, but before the viewmodel (which always draws on top).
@@ -3139,13 +3627,19 @@ pub fn render_scene_ext(
 /// screen position is `sx = cx + focal*dot(rel,right)/vz`,
 /// `sy = cy - focal*dot(rel,up)/vz`.
 ///
-/// A particle is drawn as a small filled square whose half-size ramps with
-/// `1/vz` (1..=3 px), mirroring `R_DrawParticles`' pixel-size ramp that keeps a
-/// near particle from vanishing to a sub-pixel speck. For every covered pixel
-/// the existing z-buffer triangle test is reused: the pixel is written only when
-/// `vz < zbuf[idx]` (strictly nearer), and the depth is written so later, nearer
-/// geometry can still overdraw it. Off-screen pixels are clipped by the loop
-/// bounds; the colour is `palette[color]`.
+/// A particle is drawn as a `pix`x`pix` filled square whose side scales
+/// **continuously** with `1/z`, porting `R_DrawParticles`/`D_DrawParticle`
+/// (`d_part.c`): the C computes `izi = zi*0x8000` (`zi = 1/z`),
+/// `pix = izi >> d_pix_shift`, then clamps to `[d_pix_min, d_pix_max]`. The
+/// resolution-derived constants are `d_pix_min = max(1, width/320)`,
+/// `d_pix_max = round(width/80)`, `d_pix_shift = 8 - round(width/320)`
+/// (`d_modech.c`). We reproduce that same continuous ramp (rather than a
+/// 2-bucket step) so a particle grows smoothly as it nears the eye and shrinks to
+/// the minimum size far away. For every covered pixel the existing z-buffer test
+/// is reused: the pixel is written only when `vz < zbuf[idx]` (strictly nearer),
+/// and the depth is written so later, nearer geometry can still overdraw it.
+/// Off-screen pixels are clipped by the loop bounds; the colour is
+/// `palette[color]`.
 ///
 /// SAFETY: `w`/`h` of `0`, non-finite projections, and out-of-range indices are
 /// all guarded; the only direct indexing is into the freshly-sized framebuffers,
@@ -3175,6 +3669,16 @@ pub fn draw_particles(
         (cx as f64 / tan_half) as f32
     };
 
+    // Resolution-scaled particle-size clamp, ported from `D_DrawParticle` /
+    // `d_modech.c`. Quake authored its `0x8000`/`d_pix_shift` ramp against a
+    // 320-wide virtual screen; at a render width `w` the bounds scale the same
+    // way: `d_pix_min = max(1, w/320)`, `d_pix_max = round(w/80)`. We size the
+    // continuous ramp from the projected world extent (`focal/vz`) — exactly the
+    // `zi`-proportional growth the C produced — and clamp to those bounds.
+    let d_pix_min: i64 = ((w as f32 / 320.0) as i64).max(1);
+    let d_pix_max: i64 = (w as f32 / 80.0 + 0.5).floor() as i64;
+    let d_pix_max = d_pix_max.max(d_pix_min);
+
     for &(p, color) in particles {
         let rel = sub(p, cam.pos);
         let vz = dot(rel, forward);
@@ -3190,16 +3694,21 @@ pub fn draw_particles(
             continue;
         }
 
-        // Pixel-size ramp: closer particles get a bigger square so a near
-        // particle is not a single sub-pixel speck (R_DrawParticles ramped the
-        // on-screen size with 1/z). Two buckets:
-        //   vz <  512  -> half 1 (3x3 square)
-        //   else       -> half 0 (a single pixel for distant particles)
-        let half: i64 = if vz < 512.0 { 1 } else { 0 };
+        // Continuous 1/z size ramp (D_DrawParticle): the projected on-screen size
+        // of a ~1-unit particle is `focal/vz`; this grows smoothly as the particle
+        // nears the eye. Clamp to the resolution-scaled `[d_pix_min, d_pix_max]`.
+        let pix = (focal / vz).round() as i64;
+        let pix = pix.clamp(d_pix_min, d_pix_max);
 
         let rgb = palette[color as usize];
 
-        // Centre pixel + a (2*half+1) square around it, each pixel z-tested.
+        // Draw a `pix`x`pix` square. The C anchors the square at `(u,v)` and
+        // extends right/down; we centre it on the projected point (`half` each
+        // way) so growth stays symmetric about the particle. `half = (pix-1)/2`
+        // gives a `pix`-wide span (pix=1 -> single pixel, pix=3 -> 3x3, …).
+        let half: i64 = (pix - 1) / 2;
+
+        // Centre pixel + a square around it, each pixel z-tested.
         let cx_px = sx.floor() as i64;
         let cy_px = sy.floor() as i64;
         for py in (cy_px - half)..=(cy_px + half) {
@@ -4950,6 +5459,7 @@ mod tests {
             yaw: 0.0,
             frame: 0,
             color: [255, 32, 32],
+            skinnum: 0,
         };
         let with_model = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
 
@@ -5018,32 +5528,33 @@ mod tests {
     }
 
     #[test]
-    fn mdl_frame_verts_selects_and_clamps() {
+    fn mdl_frame_verts_selects_and_resets_out_of_range() {
         use crate::mdl::TriVertex;
         let mdl = two_frame_mdl();
 
         // Frame 0 -> first pose.
-        let f0 = mdl_frame_verts(&mdl, 0).expect("frame 0 present");
+        let f0 = mdl_frame_verts(&mdl, 0, 0.0).expect("frame 0 present");
         assert_eq!(f0.len(), 3);
         assert_eq!(f0[0], TriVertex { v: [0, 0, 0], lightnormalindex: 0 });
         assert_eq!(f0[1], TriVertex { v: [32, 0, 0], lightnormalindex: 0 });
 
         // Frame 1 -> second, distinct pose.
-        let f1 = mdl_frame_verts(&mdl, 1).expect("frame 1 present");
+        let f1 = mdl_frame_verts(&mdl, 1, 0.0).expect("frame 1 present");
         assert_eq!(f1[0], TriVertex { v: [255, 0, 255], lightnormalindex: 0 });
         assert_eq!(f1[2], TriVertex { v: [0, 255, 255], lightnormalindex: 0 });
 
-        // Out-of-range frame clamps to the last frame (index 1) rather than
-        // panicking or returning None.
-        let clamped = mdl_frame_verts(&mdl, 999).expect("clamped frame present");
-        assert_eq!(clamped, f1, "out-of-range frame should clamp to the last pose");
+        // FAITHFULNESS: an out-of-range frame RESETS to 0 (R_AliasSetupFrame), it
+        // does NOT clamp to the last frame.
+        let reset = mdl_frame_verts(&mdl, 999, 0.0).expect("reset frame present");
+        assert_eq!(reset, f0, "out-of-range frame should reset to frame 0");
 
         // A frameless model yields None (no pose to draw).
         let mut empty = two_frame_mdl();
         empty.frames.clear();
-        assert!(mdl_frame_verts(&empty, 0).is_none());
+        assert!(mdl_frame_verts(&empty, 0, 0.0).is_none());
 
-        // A group frame resolves to its first sub-pose deterministically.
+        // A group frame resolves to its first sub-pose at time 0 and to the next
+        // sub-pose as time advances past the first interval.
         {
             use crate::mdl::{AliasFrame, Frame, TriVertex as TV};
             let mut grouped = two_frame_mdl();
@@ -5073,8 +5584,11 @@ mod tests {
                 intervals: vec![0.1, 0.2],
                 frames: vec![sub0, sub1],
             }];
-            let g = mdl_frame_verts(&grouped, 0).expect("group first sub-pose");
-            assert_eq!(g[0], TriVertex { v: [7, 0, 0], lightnormalindex: 0 });
+            // time in [0,0.1) -> sub-pose 0; time in [0.1,0.2) -> sub-pose 1.
+            let g0 = mdl_frame_verts(&grouped, 0, 0.05).expect("group sub-pose 0");
+            assert_eq!(g0[0], TriVertex { v: [7, 0, 0], lightnormalindex: 0 });
+            let g1 = mdl_frame_verts(&grouped, 0, 0.15).expect("group sub-pose 1");
+            assert_eq!(g1[0], TriVertex { v: [50, 0, 0], lightnormalindex: 0 });
         }
     }
 
@@ -5112,7 +5626,7 @@ mod tests {
 
         // tiny_mdl has skinwidth=1, skinheight=1 and a 1-byte single skin.
         let mut mdl = tiny_mdl();
-        let sk = mdl_skin(&mdl).expect("1x1 single skin resolves");
+        let sk = mdl_skin(&mdl, 0, 0.0).expect("1x1 single skin resolves");
         assert_eq!((sk.width, sk.height), (1, 1));
         assert_eq!(sk.pixels.len(), 1);
 
@@ -5120,25 +5634,28 @@ mod tests {
         mdl.header.skinwidth = 2;
         mdl.header.skinheight = 2;
         mdl.skins = vec![Skin::Single(vec![1, 2, 3, 4])];
-        let sk = mdl_skin(&mdl).expect("2x2 single skin resolves");
+        let sk = mdl_skin(&mdl, 0, 0.0).expect("2x2 single skin resolves");
         assert_eq!((sk.width, sk.height), (2, 2));
         assert_eq!(sk.pixels, &[1, 2, 3, 4]);
+        // An out-of-range skinnum resets to 0 (it does not reject the model).
+        let sk_oob = mdl_skin(&mdl, 99, 0.0).expect("out-of-range skinnum resets to 0");
+        assert_eq!(sk_oob.pixels, &[1, 2, 3, 4]);
 
         // Too few pixels for the claimed dimensions -> None (flat fallback).
         mdl.skins = vec![Skin::Single(vec![1, 2, 3])];
-        assert!(mdl_skin(&mdl).is_none(), "short pixel buffer must be rejected");
+        assert!(mdl_skin(&mdl, 0, 0.0).is_none(), "short pixel buffer must be rejected");
 
         // Non-positive dimensions -> None.
         let mut zero = tiny_mdl();
         zero.header.skinwidth = 0;
-        assert!(mdl_skin(&zero).is_none(), "zero skinwidth must be rejected");
+        assert!(mdl_skin(&zero, 0, 0.0).is_none(), "zero skinwidth must be rejected");
 
         // No skins at all -> None.
         let mut noskin = tiny_mdl();
         noskin.skins.clear();
-        assert!(mdl_skin(&noskin).is_none(), "skinless model must be rejected");
+        assert!(mdl_skin(&noskin, 0, 0.0).is_none(), "skinless model must be rejected");
 
-        // A skin GROUP resolves via its first frame.
+        // A skin GROUP animates by time: sub-skin 0 for t<0.1, sub-skin 1 after.
         let mut grouped = tiny_mdl();
         grouped.header.skinwidth = 2;
         grouped.header.skinheight = 1;
@@ -5146,9 +5663,11 @@ mod tests {
             intervals: vec![0.1, 0.2],
             frames: vec![vec![5, 6], vec![7, 8]],
         }];
-        let sk = mdl_skin(&grouped).expect("skin group resolves via first frame");
+        let sk = mdl_skin(&grouped, 0, 0.05).expect("skin group resolves at t=0.05");
         assert_eq!((sk.width, sk.height), (2, 1));
-        assert_eq!(sk.pixels, &[5, 6], "group uses its first frame deterministically");
+        assert_eq!(sk.pixels, &[5, 6], "group sub-skin 0 at t=0.05");
+        let sk2 = mdl_skin(&grouped, 0, 0.15).expect("skin group resolves at t=0.15");
+        assert_eq!(sk2.pixels, &[7, 8], "group sub-skin 1 at t=0.15 (animates)");
     }
 
     /// A `tiny_mdl` variant carrying a 2x2 skin whose four texels map to four
@@ -5194,6 +5713,7 @@ mod tests {
             yaw: 0.0,
             frame: 0,
             color: [255, 32, 32],
+            skinnum: 0,
         };
         let img_skin = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst_skin));
 
@@ -5206,6 +5726,7 @@ mod tests {
             yaw: 0.0,
             frame: 0,
             color: [255, 32, 32],
+            skinnum: 0,
         };
         let img_flat = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst_flat));
 
@@ -5246,6 +5767,7 @@ mod tests {
             yaw: 0.0,
             frame: 0,
             color: [255, 32, 32],
+            skinnum: 0,
         };
         let with_model = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
         let changed = world_only
@@ -5272,6 +5794,7 @@ mod tests {
             yaw: 0.0,
             frame: 0,
             color: [255, 32, 32],
+            skinnum: 0,
         };
         let inst1 = ModelInstance {
             mdl: &mdl,
@@ -5279,6 +5802,7 @@ mod tests {
             yaw: 0.0,
             frame: 1,
             color: [255, 32, 32],
+            skinnum: 0,
         };
         let img0 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst0));
         let img1 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst1));
@@ -5519,6 +6043,110 @@ mod tests {
         // -> no add, stays at the static value.
         let far = lm.factor_at(32.0, 32.0);
         assert!((far - static_factor).abs() < 1e-4, "far luxel must be unchanged: {far} vs {static_factor}");
+    }
+
+    #[test]
+    fn unlit_face_hit_by_dlight_is_not_fullbright() {
+        // FIX 6: a NORMAL wall with no baked lightmap (lightofs < 0) is fullbright
+        // with no dlights, but a reaching dynamic light must build a lightmap (zero
+        // base + the light) instead of staying fullbright.
+        let (bsp, face, poly) = one_face_bsp_zplane(0);
+        // Force lightofs < 0 (no baked samples) but keep the face NORMAL (flags 0).
+        let mut unlit = face.clone();
+        unlit.lightofs = -1;
+
+        // With no dlights: fullbright (None).
+        assert!(
+            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[]).is_none(),
+            "an unlit face with no dlights stays fullbright"
+        );
+
+        // A bright light 16 units above luxel (0,0): the face is now lightmapped,
+        // owning a buffer, bright near the impact and dark (not fullbright) away.
+        let dl = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
+        let lm = face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl))
+            .expect("a reaching dlight must build a lightmap for the unlit face");
+        assert!(matches!(lm.luxels, Luxels::Owned(_)), "reaching dlight owns the buffer");
+        // Near luxel brightens above the zero base; far luxel stays at ~0 (dark,
+        // NOT fullbright — which is the whole point of the fix).
+        let near = lm.factor_at(0.0, 0.0);
+        let far = lm.factor_at(32.0, 32.0);
+        assert!(near > 0.1, "near the dlight the unlit face lights up: {near}");
+        assert!(far < 0.05, "away from the dlight the unlit face is dark, not fullbright: {far}");
+
+        // A far-away dlight that never reaches leaves the face fullbright (None),
+        // so the common case (dlights elsewhere in the level) is unchanged.
+        let far_dl = DynamicLight::new([0.0, 0.0, 100_000.0], 200.0, 10.0, 0.0, 0.0, 0);
+        assert!(
+            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl)).is_none(),
+            "a non-reaching dlight leaves the unlit face fullbright"
+        );
+    }
+
+    #[test]
+    fn texture_animation_selects_frame_by_time() {
+        // FIX 1: a parsed BSP with a 2-frame `+`-animated cycle selects the frame
+        // by (int)(time*10) % anim_total via R_TextureAnimation.
+        use crate::bsp::{MipTex, TexAnim};
+        let mut bsp = demo_room();
+        let mk = |name: &str, anim: Option<TexAnim>| MipTex {
+            name: name.into(),
+            width: 16,
+            height: 16,
+            offsets: [0, 0, 0, 0],
+            pixels: vec![0u8; 16 * 16],
+            anim,
+        };
+        // Two-frame primary cycle: frame 0 (idx 0) and frame 1 (idx 1), ANIM_CYCLE=2.
+        // anim_total = 2*2 = 4 tenths. Frame 0 covers rel in [0,2), frame 1 [2,4).
+        bsp.textures = vec![
+            Some(mk("+0wat", Some(TexAnim { total: 4, min: 0, max: 2, next: 1, alternate: None }))),
+            Some(mk("+1wat", Some(TexAnim { total: 4, min: 2, max: 4, next: 0, alternate: None }))),
+        ];
+
+        // time=0.0 -> rel=0 -> frame 0 (index 0).
+        assert_eq!(texture_animation(&bsp, 0, 0, 0.0), 0);
+        // time=0.1 -> rel=1 -> still frame 0.
+        assert_eq!(texture_animation(&bsp, 0, 0, 0.1), 0);
+        // time=0.2 -> rel=2 -> frame 1 (index 1).
+        assert_eq!(texture_animation(&bsp, 0, 0, 0.2), 1);
+        // time=0.4 -> rel=0 (wraps) -> frame 0.
+        assert_eq!(texture_animation(&bsp, 0, 0, 0.4), 0);
+        // Starting the walk from frame 1's index resolves the same frame for a
+        // given time (R_TextureAnimation walks anim_next from any base).
+        assert_eq!(texture_animation(&bsp, 1, 0, 0.0), 0);
+        assert_eq!(texture_animation(&bsp, 1, 0, 0.2), 1);
+
+        // A non-animated texture returns its own index unchanged.
+        bsp.textures.push(Some(mk("brick", None)));
+        assert_eq!(texture_animation(&bsp, 2, 0, 5.0), 2);
+        // An out-of-range base index returns it unchanged (no panic).
+        assert_eq!(texture_animation(&bsp, 99, 0, 1.0), 99);
+    }
+
+    #[test]
+    fn texture_animation_entity_frame_selects_alternate() {
+        // FIX 1: with the drawing entity's frame != 0, switch to the alternate
+        // cycle (R_TextureAnimation `if (currententity->frame) base = alternate`).
+        use crate::bsp::{MipTex, TexAnim};
+        let mut bsp = demo_room();
+        let mk = |name: &str, anim: TexAnim| MipTex {
+            name: name.into(),
+            width: 16,
+            height: 16,
+            offsets: [0, 0, 0, 0],
+            pixels: vec![0u8; 16 * 16],
+            anim: Some(anim),
+        };
+        // Primary frame at index 0 with alternate -> index 1 (a single-frame alt).
+        bsp.textures = vec![
+            Some(mk("+0sw", TexAnim { total: 2, min: 0, max: 2, next: 0, alternate: Some(1) })),
+            Some(mk("+asw", TexAnim { total: 2, min: 0, max: 2, next: 1, alternate: Some(0) })),
+        ];
+        // ent_frame 0 -> primary (index 0).
+        assert_eq!(texture_animation(&bsp, 0, 0, 0.0), 0);
+        // ent_frame != 0 -> alternate cycle's first frame (index 1).
+        assert_eq!(texture_animation(&bsp, 0, 1, 0.0), 1);
     }
 
     #[test]
@@ -6061,6 +6689,7 @@ mod tests {
             yaw: 0.0,
             frame: 0,
             color: [255, 32, 32],
+            skinnum: 0,
         };
         let a2 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
         let b2 = render_scene_ext(
@@ -6974,8 +7603,10 @@ mod tests {
     #[test]
     fn sky_sampler_renders_nonbackground_and_animates() {
         // The sky sampler must (1) produce real (non-framebuffer-background)
-        // pixels — i.e. show the sky texture, not a flat fill — and (2) differ
-        // between two times (it scrolls).
+        // pixels — i.e. show the sky texture, not a flat fill — (2) differ between
+        // two times (it scrolls), and (3) differ when the VIEW DIRECTION changes
+        // (the sky is projected from the view ray, D_Sky_uv_To_st — not the wall
+        // (s,t)).
         let pixels = synthetic_sky_pixels();
         let mut pal = [[0u8; 3]; 256];
         for (i, p) in pal.iter_mut().enumerate() {
@@ -6985,22 +7616,40 @@ mod tests {
         }
 
         let (w, h) = (48usize, 48usize);
-        let render_at = |time: f32| {
+        // Build a SkyView for a given look direction (forward), with an orthonormal
+        // right/up basis. This stands in for the camera the world pass passes in.
+        let make_view = |forward: Vec3| {
+            let (f, _) = normalize(forward);
+            // right = forward x worldup, up = right x forward (orthonormal-ish).
+            let (right, _) = normalize(cross(f, [0.0, 0.0, 1.0]));
+            let (up, _) = normalize(cross(right, f));
+            SkyView {
+                forward: f,
+                right,
+                up,
+                cx: w as f32 / 2.0,
+                cy: h as f32 / 2.0,
+                longest: w.max(h) as f32,
+            }
+        };
+        let render_at = |time: f32, view: SkyView| {
             let mut img = Image::new(w, h, [0, 0, 0]); // background = pure black
             let mut zb = vec![f32::INFINITY; w * h];
-            // A triangle spanning a wide (s,t) so the scroll samples many texels.
+            // The (s,t) here are IGNORED by the sky path (it uses the view ray),
+            // but a covering triangle is still needed to rasterise the screen area.
             let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 512.0, t: 0.0 };
-            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 512.0 };
+            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
             raster_triangle_tex(
                 &mut img, &mut zb, v0, v1, v2,
                 &pixels, 256, 128, &pal, 1.0, None,
-                SurfaceMode::Sky { time },
+                SurfaceMode::Sky { time, view },
             );
             img
         };
-        let a = render_at(0.0);
-        let b = render_at(1.0);
+        let view_n = make_view([1.0, 0.0, 0.0]); // looking +X
+        let a = render_at(0.0, view_n);
+        let b = render_at(1.0, view_n);
 
         // (1) Non-background: the sky drew real texels (not a flat empty frame).
         let drawn = a.rgb.iter().filter(|&&p| p != [0, 0, 0]).count();
@@ -7009,6 +7658,13 @@ mod tests {
         // (2) Animated: scrolling shifts the texels, so the two frames differ.
         let changed = a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count();
         assert!(changed > 0, "sky must scroll (differ) between two times");
+
+        // (3) View-dependent: looking a different direction shows a different patch
+        // of sky (the whole point of projecting the view ray).
+        let view_e = make_view([0.0, 1.0, 0.0]); // looking +Y
+        let c = render_at(0.0, view_e);
+        let view_diff = a.rgb.iter().zip(c.rgb.iter()).filter(|(x, y)| x != y).count();
+        assert!(view_diff > 0, "sky must change with the view direction (dome projection)");
     }
 
     #[test]
@@ -7100,6 +7756,7 @@ mod tests {
             height: 64,
             offsets: [0, 0, 0, 0],
             pixels: synthetic_liquid_pixels(),
+            anim: None,
         };
         let sky = MipTex {
             name: "sky1".into(),
@@ -7107,6 +7764,7 @@ mod tests {
             height: 128,
             offsets: [0, 0, 0, 0],
             pixels: synthetic_sky_pixels(),
+            anim: None,
         };
         bsp.textures = vec![Some(liquid), Some(sky)];
 

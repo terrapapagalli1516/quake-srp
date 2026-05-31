@@ -115,6 +115,15 @@ const SVC_CDTRACK: i32 = 32;
 const SVC_SELLSCREEN: i32 = 33;
 const SVC_CUTSCENE: i32 = 34;
 
+// Model header flags (`model.h`). `EF_ROTATE` is a *model* flag (the MDL file
+// header's `flags` field), NOT one of the entity-effects bits in
+// `CL_ParseUpdate`'s `U_EFFECTS` byte. It marks bonus pickups that spin in
+// place; CL_RelinkEntities forces their yaw to `anglemod(100*cl.time)` every
+// frame regardless of the recorded angles. Numerically it equals 8 — the same
+// value as the unrelated entity-effects bit `EF_DIMLIGHT` — but the two live in
+// different namespaces (model->flags vs entity->effects) and never interact.
+pub const EF_ROTATE: i32 = 8;
+
 // Temp-entity types (`TE_*`).
 const TE_SPIKE: i32 = 0;
 const TE_SUPERSPIKE: i32 = 1;
@@ -270,12 +279,20 @@ impl<'a> NetReader<'a> {
 // ---------------------------------------------------------------------------
 
 /// A renderable snapshot of one entity at one demo frame.
+///
+/// `origin`/`angles` are the *interpolated* render values (`ent->origin` /
+/// `ent->angles` after `CL_RelinkEntities`), already lerped between the two most
+/// recent server snapshots by the message-time fraction. `effects` is the
+/// entity-effects byte (`ent->effects`, the `U_EFFECTS` field) so a front-end
+/// can drive dynamic lights / brightfield particles exactly like the live walk.
 #[derive(Clone, Copy)]
 pub struct EntSnapshot {
     pub modelindex: usize,
     pub frame: i32,
     pub origin: [f32; 3],
     pub angles: [f32; 3],
+    /// `ent->effects` (the `U_EFFECTS` byte). 0 when the update omitted it.
+    pub effects: i32,
 }
 
 /// One playback frame: the camera, every visible entity, and the one-shot
@@ -335,8 +352,25 @@ struct Entity {
     // keeps `modelindex == 0` and is therefore invisible in the snapshot.
     modelindex: i32,
     frame: i32,
-    origin: [f32; 3],
-    angles: [f32; 3],
+    effects: i32,
+    // Interpolation history (CL_ParseUpdate / CL_RelinkEntities):
+    // `msg_origins[0]`/`msg_angles[0]` is the most recent server snapshot,
+    // `[1]` the one before it. The render `origin`/`angles` are lerped between
+    // them by the message-time fraction. We DON'T keep a separate `origin`
+    // field — the snapshot computes it via [`lerp_origin`]/[`lerp_angles`].
+    msg_origins: [[f32; 3]; 2],
+    msg_angles: [[f32; 3]; 2],
+    /// `ent->msgtime` — the `cl.mtime[0]` at which this entity was last updated.
+    /// An entity whose `msgtime` falls behind `mtime[0]` went silent and is
+    /// culled (its model dropped), matching CL_RelinkEntities.
+    msgtime: f32,
+    /// `ent->forcelink` — set when there was no previous frame to lerp from
+    /// (first sighting, null-model hack, or `U_NOLERP`). Forces the render
+    /// state straight to `msg_origins[0]` with no interpolation.
+    forcelink: bool,
+    /// True once this slot has been spawned (baseline) or updated at least
+    /// once. A grown-but-never-touched slot stays invisible.
+    active: bool,
 }
 
 /// The replayed client state (`client_state_t` subset).
@@ -349,8 +383,20 @@ struct ClientState {
     statics: Vec<Entity>,
     viewentity: usize,
     viewheight: f32,
+    /// `cl.viewangles` — the camera angles. In demo playback these are driven
+    /// by the recorded block angles ([`mviewangles`](ClientState::mviewangles)),
+    /// lerped by the message-time fraction in CL_RelinkEntities; `svc_setangle`
+    /// is recorded into `mviewangles` but must NOT clobber the lerped result.
     view_angles: [f32; 3],
+    /// `cl.mviewangles[0]`/`[1]` — the camera angles of the two most recent
+    /// demo blocks (`CL_GetMessage` shifts `[0]`→`[1]` and reads the new `[0]`
+    /// from the block header). The render camera lerps between them.
+    mviewangles: [[f32; 3]; 2],
     time: f32,
+    /// `cl.mtime[0]`/`[1]` — the server times of the two most recent
+    /// `svc_time` messages. `svc_time` shifts `[0]`→`[1]` then reads the new
+    /// `[0]`; the interpolation fraction is `(t - mtime[1])/(mtime[0]-mtime[1])`.
+    mtime: [f32; 2],
     /// `svc_particle` bursts decoded since the last [`snapshot`], drained into
     /// the [`DemoFrame`] for the block they arrived in and then cleared.
     pending_particles: Vec<ParticleBurst>,
@@ -372,7 +418,9 @@ impl ClientState {
             viewentity: 0,
             viewheight: DEFAULT_VIEWHEIGHT,
             view_angles: [0.0; 3],
+            mviewangles: [[0.0; 3]; 2],
             time: 0.0,
+            mtime: [0.0; 2],
             pending_particles: Vec::new(),
             pending_tents: Vec::new(),
         }
@@ -386,12 +434,16 @@ impl ClientState {
         self.statics.clear();
         self.viewentity = 0;
         self.viewheight = DEFAULT_VIEWHEIGHT;
+        // CL_ClearState memsets the whole cl struct: the interpolation history
+        // (server times and camera angles) restarts from zero on a new level.
+        self.mtime = [0.0; 2];
+        self.mviewangles = [[0.0; 3]; 2];
+        self.view_angles = [0.0; 3];
+        self.time = 0.0;
         // A fresh server clears any effects half-collected for the previous
         // level (CL_ClearState wipes the client-side effect pools too).
         self.pending_particles.clear();
         self.pending_tents.clear();
-        // view_angles and time are not reset by CL_ClearState in a way that
-        // matters before serverinfo; leave them.
     }
 
     /// `CL_EntityNum` — grow the entity array up to and including `num`.
@@ -422,6 +474,14 @@ enum ParseFlow {
 
 /// Parse a Quake `.dem` file from memory and replay it into [`Demo`].
 ///
+/// This is the *keyframe* stream: exactly one [`DemoFrame`] per server message
+/// block, each holding the authoritative post-message state (interpolation
+/// fraction `frac == 1`, i.e. every entity at its newest snapshot) with the
+/// stale-entity cull from `CL_RelinkEntities` applied — entities that went
+/// silent in the latest message stop rendering instead of lingering. For smooth
+/// (non-choppy) playback that lerps between snapshots, use
+/// [`parse_demo_interpolated`].
+///
 /// Framing (`CL_PlayDemo_f` + `CL_GetMessage`): an ASCII CD-track integer
 /// followed by `'\n'`, then a sequence of blocks, each
 /// `[i32 length][3 × f32 view angles][length bytes of message]`. Parsing stops
@@ -430,6 +490,75 @@ enum ParseFlow {
 /// A malformed or truncated demo produces a short/empty frame list or an
 /// `Err`, never a panic.
 pub fn parse_demo(bytes: &[u8]) -> Result<Demo> {
+    // Keyframe emission: one frame per block at frac == 1 (cl.time == mtime[0]),
+    // with no model-flag knowledge (no EF_ROTATE spin in the raw keyframe).
+    parse_demo_with(bytes, |cl, _prev_mtime0, frames| {
+        cl.time = cl.mtime[0];
+        frames.push(snapshot(cl, 1.0, &|_| false));
+    })
+}
+
+/// Parse a `.dem` file into a *smooth* frame stream by interpolating between the
+/// recorded 10 Hz server snapshots, exactly like `CL_RelinkEntities` does every
+/// display frame: entity origins/angles and the demo camera are lerped between
+/// the two most recent snapshots by the message-time fraction
+/// (`CL_LerpPoint`), with teleport detection (>100 unit jumps snap) and
+/// shortest-arc angle wrap. Roughly `fps` frames are produced per real second
+/// of demo time (clamped to at least one per block), turning the choppy 10 Hz
+/// capture into fluid motion.
+///
+/// `rotating_models` is the set of `modelindex` values whose loaded MDL carries
+/// the `EF_ROTATE` header flag (bonus pickups). For each such entity the yaw is
+/// forced to `anglemod(100*time)` so it spins during playback. The demo parser
+/// cannot read MDL headers itself (it has no model loader), so the caller
+/// supplies this set after precaching the models; pass an empty slice to skip
+/// the spin.
+pub fn parse_demo_interpolated(
+    bytes: &[u8],
+    fps: f32,
+    rotating_models: &[usize],
+) -> Result<Demo> {
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 60.0 };
+    let is_rotating = |m: usize| rotating_models.contains(&m);
+
+    parse_demo_with(bytes, |cl, prev_mtime0, frames| {
+        let mtime = cl.mtime;
+        let interval = mtime[0] - prev_mtime0;
+        // A zero or negative interval (first frame, or no svc_time advance this
+        // block) yields a single snapshot at frac == 1.
+        if interval <= 0.0 {
+            cl.time = mtime[0];
+            frames.push(snapshot(cl, 1.0, &is_rotating));
+            return;
+        }
+        // CL_LerpPoint clamps gaps > 0.1s (dropped packet / start of demo) to a
+        // 0.1s window, so the engine only ever interpolates over the last 0.1s
+        // before mtime[0]. We sweep cl.time across exactly that window
+        // [mtime[0]-window, mtime[0]] to avoid emitting a flood of degenerate
+        // frac==0 frames on a big gap, while still producing smooth motion.
+        let window = interval.min(0.1);
+        let steps = ((window * fps).round() as i32).max(1);
+        // The effect events (particles/tents) live on the FIRST sub-frame only
+        // (snapshot drains them), so later sub-frames of this block are empty —
+        // matching one effect-burst per server message.
+        for s in 1..=steps {
+            let t = mtime[0] - window + window * (s as f32 / steps as f32);
+            cl.time = t;
+            let frac = lerp_point(mtime, t);
+            frames.push(snapshot(cl, frac, &is_rotating));
+        }
+    })
+}
+
+/// Shared demo replay core: parse the framing + every message block, calling
+/// `emit` once per block (after a world exists) to turn the current client
+/// state into zero or more [`DemoFrame`]s. `emit` receives the client state,
+/// the `mtime[0]` value from *before* this block (the start of the
+/// interpolation interval), and the output frame list.
+fn parse_demo_with(
+    bytes: &[u8],
+    mut emit: impl FnMut(&mut ClientState, f32, &mut Vec<DemoFrame>),
+) -> Result<Demo> {
     // --- Skip the CD-track header line: digits/'-' up to and including '\n'.
     // CL_PlayDemo_f reads bytes until '\n'. If there is no newline at all the
     // file is not a demo.
@@ -495,19 +624,26 @@ pub fn parse_demo(bytes: &[u8]) -> Result<Demo> {
         let msg = &bytes[pos..end];
         pos = end;
 
-        // CL_GetMessage records the block's view angles into cl.mviewangles[0],
-        // which CL_ParseServerMessage / the view code uses as the camera angle
-        // for this frame.
-        cl.view_angles = block_angles;
+        // CL_GetMessage shifts the previous block's camera angles into
+        // mviewangles[1] and records this block's angles into mviewangles[0],
+        // so CL_RelinkEntities can lerp the demo camera between them. (The
+        // shift happens BEFORE parsing the message body, exactly as in C.)
+        cl.mviewangles[1] = cl.mviewangles[0];
+        cl.mviewangles[0] = block_angles;
 
-        // Parse the message, updating client state.
+        // Remember the previous server time so the interpolation path can sweep
+        // cl.time across this block's [mtime[1], mtime[0]] interval.
+        let prev_mtime0 = cl.mtime[0];
+
+        // Parse the message, updating client state (this may advance mtime via
+        // svc_time, set up entity msg history, etc.).
         let flow = parse_server_message(&mut cl, msg)?;
 
         // Snapshot AFTER the block (only once we have a world). `snapshot`
         // drains this block's pending effect events into the frame and clears
         // them, so the next block starts collecting from empty.
         if cl.have_serverinfo {
-            frames.push(snapshot(&mut cl));
+            emit(&mut cl, prev_mtime0, &mut frames);
         } else {
             // Before the world exists no frame is emitted, so any stray effect
             // events parsed in a pre-serverinfo block would otherwise leak into
@@ -539,12 +675,33 @@ pub fn parse_demo(bytes: &[u8]) -> Result<Demo> {
 /// since the last snapshot are *moved* out of the client state into the frame
 /// (leaving the pending lists empty), so each [`DemoFrame`] owns exactly the
 /// effects of its own message block and the next block starts fresh.
-fn snapshot(cl: &mut ClientState) -> DemoFrame {
+///
+/// `frac` is the message-time interpolation fraction (`CL_LerpPoint`'s result,
+/// 0..=1): 0 puts every entity at the *older* snapshot, 1 at the most recent.
+/// `is_rotating` answers, for a given `modelindex`, whether the model carries
+/// the `EF_ROTATE` header flag (bonus pickups that spin); only the front-end
+/// knows the loaded MDL's flags, so this is supplied by the caller. The
+/// authoritative keyframe stream (`parse_demo`) passes `frac == 1` and a
+/// closure that always returns `false`.
+fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool) -> DemoFrame {
+    // bobjrotate = anglemod(100*cl.time): the spin angle shared by every
+    // EF_ROTATE model this frame.
+    let bobjrotate = crate::math::anglemod(100.0 * cl.time);
+
+    // --- Camera: in demo playback the recorded angles drive the view, lerped
+    // between mviewangles[1] and mviewangles[0] (CL_RelinkEntities). The view
+    // origin tracks the (lerped) view entity origin + the view height.
     let mut view_origin = [0.0f32; 3];
     if let Some(ve) = cl.entities.get(cl.viewentity) {
-        view_origin = ve.origin;
+        // The view entity is interpolated like any other entity.
+        view_origin = if ve.forcelink {
+            ve.msg_origins[0]
+        } else {
+            lerp_origin(ve.msg_origins[1], ve.msg_origins[0], frac)
+        };
     }
     view_origin[2] += cl.viewheight;
+    let view_angles = lerp_angles(cl.mviewangles[1], cl.mviewangles[0], frac);
 
     let mut entities: Vec<EntSnapshot> = Vec::new();
     for (i, e) in cl.entities.iter().enumerate() {
@@ -553,22 +710,48 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         if i == cl.viewentity {
             continue;
         }
-        if e.modelindex > 0 {
-            entities.push(EntSnapshot {
-                modelindex: e.modelindex as usize,
-                frame: e.frame,
-                origin: e.origin,
-                angles: e.angles,
-            });
+        // CL_RelinkEntities: empty slots (no model) are skipped, and any entity
+        // that was NOT included in the most recent server message (its msgtime
+        // fell behind mtime[0]) is removed — it went silent and must stop
+        // rendering instead of lingering at its last position forever.
+        if !e.active || e.modelindex <= 0 {
+            continue;
         }
+        if e.msgtime != cl.mtime[0] {
+            continue;
+        }
+
+        let (origin, mut angles) = relink_lerp(e, frac);
+
+        // Rotate binary objects (bonus pickups) locally: EF_ROTATE forces the
+        // yaw to anglemod(100*time) every frame, overriding the interpolated
+        // value. The model flag is resolved by the caller from the loaded MDL.
+        if is_rotating(e.modelindex as usize) {
+            angles[1] = bobjrotate;
+        }
+
+        entities.push(EntSnapshot {
+            modelindex: e.modelindex as usize,
+            frame: e.frame,
+            origin,
+            angles,
+            effects: e.effects,
+        });
     }
     for e in &cl.statics {
-        // Statics are always emitted (they were spawned with a model).
+        // Statics are always emitted (they were spawned with a model) and never
+        // move, so their lerp is a no-op; still honour EF_ROTATE for rotating
+        // static pickups.
+        let mut angles = e.msg_angles[0];
+        if is_rotating(e.modelindex.max(0) as usize) {
+            angles[1] = bobjrotate;
+        }
         entities.push(EntSnapshot {
             modelindex: e.modelindex.max(0) as usize,
             frame: e.frame,
-            origin: e.origin,
-            angles: e.angles,
+            origin: e.msg_origins[0],
+            angles,
+            effects: e.effects,
         });
     }
 
@@ -581,11 +764,99 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
     DemoFrame {
         time: cl.time,
         view_origin,
-        view_angles: cl.view_angles,
+        view_angles,
         entities,
         particles,
         temp_entities,
     }
+}
+
+/// `CL_LerpPoint` — the fraction of the way `cl.time` lies between the two most
+/// recent server message times (`mtime[1]` → `mtime[0]`), clamped to 0..=1.
+///
+/// Mirrors `cl_main.c`: a zero interval (or a back-end that disables lerp)
+/// returns 1 with `cl.time` snapped to `mtime[0]`; a gap larger than 0.1 s
+/// (dropped packet / start of demo) is treated as a 0.1 s interval. We do NOT
+/// model `cl_nolerp`/`timedemo`/`sv.active` (no live back-end here); the keyframe
+/// path forces `frac == 1` explicitly instead.
+fn lerp_point(mtime: [f32; 2], time: f32) -> f32 {
+    let mut f = mtime[0] - mtime[1];
+    if f == 0.0 {
+        return 1.0;
+    }
+    let m1 = if f > 0.1 {
+        // Dropped packet or start of demo: clamp the interval to 0.1 s.
+        f = 0.1;
+        mtime[0] - 0.1
+    } else {
+        mtime[1]
+    };
+    let frac = (time - m1) / f;
+    frac.clamp(0.0, 1.0)
+}
+
+/// Linear interpolation of an origin vector by `frac`, with the teleport guard
+/// from `CL_RelinkEntities`: if any axis moved more than 100 units between the
+/// two snapshots, snap (`frac == 1`) instead of lerping (assume a teleport).
+fn lerp_origin(from: [f32; 3], to: [f32; 3], frac: f32) -> [f32; 3] {
+    let mut f = frac;
+    for j in 0..3 {
+        let delta = to[j] - from[j];
+        // Kept as the literal C expression `delta > 100 || delta < -100` from
+        // CL_RelinkEntities for faithfulness (not the equivalent range form).
+        #[allow(clippy::manual_range_contains)]
+        if delta > 100.0 || delta < -100.0 {
+            f = 1.0; // teleport, not motion
+        }
+    }
+    [
+        from[0] + f * (to[0] - from[0]),
+        from[1] + f * (to[1] - from[1]),
+        from[2] + f * (to[2] - from[2]),
+    ]
+}
+
+/// Angular interpolation by `frac` with the shortest-arc wraparound from
+/// `CL_RelinkEntities`: each axis delta is folded into (-180, 180] before
+/// lerping so the spin takes the short way around.
+fn lerp_angles(from: [f32; 3], to: [f32; 3], frac: f32) -> [f32; 3] {
+    let mut out = [0.0f32; 3];
+    for j in 0..3 {
+        let mut d = to[j] - from[j];
+        if d > 180.0 {
+            d -= 360.0;
+        } else if d < -180.0 {
+            d += 360.0;
+        }
+        out[j] = from[j] + frac * d;
+    }
+    out
+}
+
+/// Compute one entity's interpolated `(origin, angles)` exactly like
+/// `CL_RelinkEntities`: a `forcelink` entity snaps to its newest snapshot
+/// (`msg_origins[0]`/`msg_angles[0]`), otherwise it lerps from `[1]` to `[0]`
+/// by `frac` with the teleport guard and the shortest-arc angle wrap.
+fn relink_lerp(e: &Entity, frac: f32) -> ([f32; 3], [f32; 3]) {
+    if e.forcelink {
+        (e.msg_origins[0], e.msg_angles[0])
+    } else {
+        (
+            lerp_origin(e.msg_origins[1], e.msg_origins[0], frac),
+            lerp_angles(e.msg_angles[1], e.msg_angles[0], frac),
+        )
+    }
+}
+
+/// `bobjrotate = anglemod(100*time)` — the yaw of every `EF_ROTATE` bonus
+/// pickup at the given demo `time`, exactly as `CL_RelinkEntities` computes it.
+///
+/// A front-end that loads the MDL headers can apply this directly to any entity
+/// whose model carries the `EF_ROTATE` flag (see [`EF_ROTATE`]); the
+/// [`parse_demo_interpolated`] path applies it automatically given the set of
+/// rotating `modelindex`es.
+pub fn rotate_yaw(time: f32) -> f32 {
+    crate::math::anglemod(100.0 * time)
 }
 
 // ---------------------------------------------------------------------------
@@ -620,7 +891,11 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_TIME => {
-                cl.time = r.read_float();
+                // CL_ParseServerMessage: shift mtime[0]->mtime[1], then read
+                // the new server time into mtime[0]. CL_LerpPoint later derives
+                // the interpolation fraction from this pair.
+                cl.mtime[1] = cl.mtime[0];
+                cl.mtime[0] = r.read_float();
             }
 
             SVC_CLIENTDATA => {
@@ -660,9 +935,18 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_SETANGLE => {
-                for a in 0..3 {
-                    cl.view_angles[a] = r.read_angle();
-                }
+                // svc_setangle writes cl.viewangles in live play, but during
+                // DEMO PLAYBACK CL_RelinkEntities recomputes cl.viewangles from
+                // the recorded mviewangles every frame (see CL_RelinkEntities's
+                // `if (cls.demoplayback)` block), so the setangle value is
+                // immediately overwritten and never affects the rendered
+                // camera. We therefore consume the three angle bytes purely to
+                // keep the stream aligned and DISCARD them — matching the demo
+                // path. (Previously this clobbered the recorded camera angles,
+                // snapping the view away from the demo's intended viewpoint.)
+                let _ = r.read_angle();
+                let _ = r.read_angle();
+                let _ = r.read_angle();
             }
 
             SVC_SETVIEW => {
@@ -718,9 +1002,9 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_SPAWNSTATIC => {
-                // CL_ParseStatic: parse a baseline into a brand-new static.
-                let mut ent = Entity::default();
-                parse_baseline(&mut r, &mut ent);
+                // CL_ParseStatic: parse a baseline into a brand-new static and
+                // seed its current/interpolation state from that baseline.
+                let ent = spawn_static(&mut r);
                 cl.statics.push(ent);
             }
 
@@ -797,6 +1081,16 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
     // friendly and avoids holding a &mut across NetReader calls.)
     let mut ent = cl.entities[idx];
 
+    // CL_ParseUpdate: forcelink is set when this entity had no update in the
+    // *previous* message (its msgtime is stale relative to mtime[1]) — there is
+    // no prior snapshot to interpolate from, so we must snap, not lerp. We then
+    // stamp the entity with the current message time so the relink-cull can see
+    // it was touched this frame.
+    let prev_modelindex = ent.modelindex;
+    let mut forcelink = ent.msgtime != cl.mtime[1];
+    ent.msgtime = cl.mtime[0];
+    ent.active = true;
+
     // Order matches CL_ParseUpdate EXACTLY: model, frame, colormap, skin,
     // effects, then origin1, angle1, origin2, angle2, origin3, angle3.
     ent.modelindex = if bits & U_MODEL != 0 {
@@ -804,6 +1098,11 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
     } else {
         ent.base_modelindex
     };
+    // C: when the model changes to NULL, force a relink ("hack to make null
+    // model players work"). modelindex 0 is the empty/world model here.
+    if ent.modelindex != prev_modelindex && ent.modelindex == 0 {
+        forcelink = true;
+    }
 
     ent.frame = if bits & U_FRAME != 0 {
         r.read_byte()
@@ -819,45 +1118,67 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
         let _ = r.read_byte(); // skin — consumed
     }
 
-    if bits & U_EFFECTS != 0 {
-        let _ = r.read_byte(); // effects — consumed
-    }
+    // CL_ParseUpdate stores effects (or restores the baseline value); we keep
+    // it so a front-end can drive dynamic lights / brightfield particles.
+    // CL_ParseBaseline never reads an effects byte, so baseline.effects is
+    // always 0 (the zeroed entity_state_t), hence the fallback is 0.
+    ent.effects = if bits & U_EFFECTS != 0 {
+        r.read_byte()
+    } else {
+        0
+    };
 
-    ent.origin[0] = if bits & U_ORIGIN1 != 0 {
+    // "shift the known values for interpolation": the previous most-recent
+    // snapshot ([0]) becomes the older one ([1]) before we read the new [0].
+    ent.msg_origins[1] = ent.msg_origins[0];
+    ent.msg_angles[1] = ent.msg_angles[0];
+
+    ent.msg_origins[0][0] = if bits & U_ORIGIN1 != 0 {
         r.read_coord()
     } else {
         ent.base_origin[0]
     };
-    ent.angles[0] = if bits & U_ANGLE1 != 0 {
+    ent.msg_angles[0][0] = if bits & U_ANGLE1 != 0 {
         r.read_angle()
     } else {
         ent.base_angles[0]
     };
 
-    ent.origin[1] = if bits & U_ORIGIN2 != 0 {
+    ent.msg_origins[0][1] = if bits & U_ORIGIN2 != 0 {
         r.read_coord()
     } else {
         ent.base_origin[1]
     };
-    ent.angles[1] = if bits & U_ANGLE2 != 0 {
+    ent.msg_angles[0][1] = if bits & U_ANGLE2 != 0 {
         r.read_angle()
     } else {
         ent.base_angles[1]
     };
 
-    ent.origin[2] = if bits & U_ORIGIN3 != 0 {
+    ent.msg_origins[0][2] = if bits & U_ORIGIN3 != 0 {
         r.read_coord()
     } else {
         ent.base_origin[2]
     };
-    ent.angles[2] = if bits & U_ANGLE3 != 0 {
+    ent.msg_angles[0][2] = if bits & U_ANGLE3 != 0 {
         r.read_angle()
     } else {
         ent.base_angles[2]
     };
 
-    // U_NOLERP carries no bytes.
-    let _ = U_NOLERP;
+    // U_NOLERP forces the relink (no bytes consumed): the entity teleported and
+    // must not be lerped from its previous position.
+    if bits & U_NOLERP != 0 {
+        forcelink = true;
+    }
+
+    if forcelink {
+        // No update last message: copy the new snapshot into BOTH history
+        // slots so the lerp is a no-op (the entity simply appears at [0]).
+        ent.msg_origins[1] = ent.msg_origins[0];
+        ent.msg_angles[1] = ent.msg_angles[0];
+    }
+    ent.forcelink = forcelink;
 
     cl.entities[idx] = ent;
     Ok(())
@@ -867,6 +1188,12 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
 // CL_ParseBaseline
 // ---------------------------------------------------------------------------
 
+/// `CL_ParseBaseline` — fill ONLY the entity's `baseline` (default state).
+///
+/// In the C engine `CL_ParseBaseline` does not touch the current render state:
+/// a `svc_spawnbaseline` entity stays invisible (`ent->model == NULL`) until
+/// its first `CL_ParseUpdate`. The current state is therefore left untouched
+/// here; statics get it copied by [`spawn_static`].
 fn parse_baseline(r: &mut NetReader, ent: &mut Entity) {
     ent.base_modelindex = r.read_byte();
     ent.base_frame = r.read_byte();
@@ -876,14 +1203,23 @@ fn parse_baseline(r: &mut NetReader, ent: &mut Entity) {
         ent.base_origin[i] = r.read_coord();
         ent.base_angles[i] = r.read_angle();
     }
+}
 
-    // Initialise current state from the baseline (CL_ParseStatic does this
-    // explicitly; CL_EntityNum-spawned baselines also become the current
-    // state until the first update overrides them).
+/// `CL_ParseStatic` — parse a baseline into a brand-new static and copy it to
+/// the current state. Statics never move and are never culled, so both
+/// interpolation history slots are seeded from the baseline (the lerp is a
+/// no-op) and the static renders immediately.
+fn spawn_static(r: &mut NetReader) -> Entity {
+    let mut ent = Entity::default();
+    parse_baseline(r, &mut ent);
     ent.modelindex = ent.base_modelindex;
     ent.frame = ent.base_frame;
-    ent.origin = ent.base_origin;
-    ent.angles = ent.base_angles;
+    ent.effects = 0; // baseline.effects is always 0 (never read from stream)
+    ent.msg_origins = [ent.base_origin, ent.base_origin];
+    ent.msg_angles = [ent.base_angles, ent.base_angles];
+    ent.active = true;
+    ent.forcelink = true;
+    ent
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,62 +1568,86 @@ mod tests {
         file
     }
 
+    /// Append a single demo block (length + 3 view-angle floats + body) to a
+    /// file buffer, with explicit per-block camera angles.
+    fn push_block(file: &mut Vec<u8>, angles: [f32; 3], msg: &[u8]) {
+        file.extend_from_slice(&(msg.len() as i32).to_le_bytes());
+        for a in angles {
+            w_float(file, a);
+        }
+        file.extend_from_slice(msg);
+    }
+
     // -----------------------------------------------------------------------
     // (2) Tiny synthetic demo.
+    //
+    // Two blocks, mirroring how real demos separate the signon (serverinfo)
+    // block from gameplay: serverinfo calls CL_ClearState, which memsets the
+    // whole `cl` struct — including the recorded camera angles (mviewangles).
+    // So the *gameplay* block's angles, not the serverinfo block's, drive the
+    // rendered camera. The view entity's updated origin reaches frac == 1 in
+    // the keyframe stream, confirming the fast-update applied.
     // -----------------------------------------------------------------------
     #[test]
     fn parse_tiny_demo() {
-        let mut msg = Vec::new();
-
-        // svc_time(float)
-        w_byte(&mut msg, SVC_TIME);
-        w_float(&mut msg, 1.5);
+        // --- Block 1 (signon): svc_time + serverinfo + setview + spawnbaseline.
+        let mut b1 = Vec::new();
+        w_byte(&mut b1, SVC_TIME);
+        w_float(&mut b1, 1.4);
 
         // svc_serverinfo: protocol 15, maxclients 1, gametype 0,
         // level "test", models ["maps/x.bsp"], no sounds. NOTE: serverinfo
         // resets client state (CL_ClearState), so svc_setview must come AFTER it.
-        w_byte(&mut msg, SVC_SERVERINFO);
-        w_long(&mut msg, PROTOCOL_VERSION);
-        w_byte(&mut msg, 1); // maxclients
-        w_byte(&mut msg, 0); // gametype
-        w_string(&mut msg, "test"); // level name
-        w_string(&mut msg, "maps/x.bsp"); // model_precache[1]
-        w_string(&mut msg, ""); // end of models
-        w_string(&mut msg, ""); // end of sounds (empty list)
+        w_byte(&mut b1, SVC_SERVERINFO);
+        w_long(&mut b1, PROTOCOL_VERSION);
+        w_byte(&mut b1, 1); // maxclients
+        w_byte(&mut b1, 0); // gametype
+        w_string(&mut b1, "test"); // level name
+        w_string(&mut b1, "maps/x.bsp"); // model_precache[1]
+        w_string(&mut b1, ""); // end of models
+        w_string(&mut b1, ""); // end of sounds (empty list)
 
         // svc_setview(short) -> entity 1 is the camera (after the serverinfo clear).
-        w_byte(&mut msg, SVC_SETVIEW);
-        w_short(&mut msg, 1);
+        w_byte(&mut b1, SVC_SETVIEW);
+        w_short(&mut b1, 1);
 
         // svc_spawnbaseline for entity 1: model 1, frame 0, colormap 0, skin 0,
         // origin (0,0,0), angles (0,0,0).
-        w_byte(&mut msg, SVC_SPAWNBASELINE);
-        w_short(&mut msg, 1); // entity number
-        w_byte(&mut msg, 1); // modelindex
-        w_byte(&mut msg, 0); // frame
-        w_byte(&mut msg, 0); // colormap
-        w_byte(&mut msg, 0); // skin
+        w_byte(&mut b1, SVC_SPAWNBASELINE);
+        w_short(&mut b1, 1); // entity number
+        w_byte(&mut b1, 1); // modelindex
+        w_byte(&mut b1, 0); // frame
+        w_byte(&mut b1, 0); // colormap
+        w_byte(&mut b1, 0); // skin
         for _ in 0..3 {
-            w_coord(&mut msg, 0.0);
-            w_angle(&mut msg, 0.0);
+            w_coord(&mut b1, 0.0);
+            w_angle(&mut b1, 0.0);
         }
 
+        // --- Block 2 (gameplay): svc_time + fast update of entity 1.
+        let mut b2 = Vec::new();
+        w_byte(&mut b2, SVC_TIME);
+        w_float(&mut b2, 1.5);
         // Fast update for entity 1 changing origin to (16,32,64).
         // bits low byte: U_ORIGIN1|U_ORIGIN2|U_ORIGIN3, plus high bit (0x80).
         let bits = U_ORIGIN1 | U_ORIGIN2 | U_ORIGIN3;
-        w_byte(&mut msg, 0x80 | bits); // command byte: fast update
-        w_byte(&mut msg, 1); // entity number (short-entity not set)
-        w_coord(&mut msg, 16.0);
-        w_coord(&mut msg, 32.0);
-        w_coord(&mut msg, 64.0);
+        w_byte(&mut b2, 0x80 | bits); // command byte: fast update
+        w_byte(&mut b2, 1); // entity number (short-entity not set)
+        w_coord(&mut b2, 16.0);
+        w_coord(&mut b2, 32.0);
+        w_coord(&mut b2, 64.0);
 
-        let file = demo_with_message(&msg);
+        let mut file = Vec::new();
+        file.extend_from_slice(b"-1\n");
+        push_block(&mut file, [1.0, 2.0, 3.0], &b1); // signon angles (wiped)
+        push_block(&mut file, [10.0, 20.0, 30.0], &b2); // gameplay angles
+
         let demo = parse_demo(&file).expect("tiny demo must parse");
 
         assert_eq!(demo.level_name, "test");
         assert_eq!(demo.map_name(), Some("maps/x.bsp"));
         assert_eq!(demo.model_precache.get(1).map(|s| s.as_str()), Some("maps/x.bsp"));
-        assert!(!demo.frames.is_empty(), "expected at least one frame");
+        assert_eq!(demo.frames.len(), 2, "one keyframe per block");
 
         let frame = demo.frames.last().expect("a frame");
 
@@ -1301,7 +1661,7 @@ mod tests {
             "the view entity's own model must not be in the render list"
         );
         assert_eq!(frame.view_origin, [16.0, 32.0, 64.0 + DEFAULT_VIEWHEIGHT]);
-        // The block's recorded view angles became the frame's view angles.
+        // The gameplay block's recorded view angles drive the camera at frac==1.
         assert_eq!(frame.view_angles, [10.0, 20.0, 30.0]);
         // svc_time set the frame time.
         assert_eq!(frame.time, 1.5);
@@ -1559,5 +1919,326 @@ mod tests {
         w_byte(&mut msg3, 99); // not a valid TE_*
         let file3 = demo_with_message(&msg3);
         assert!(parse_demo(&file3).is_err(), "bad TE type errs, not panics");
+    }
+
+    // =======================================================================
+    // CL_RelinkEntities faithfulness: stale cull, interpolation, setangle,
+    // EF_ROTATE. These exercise the pure helpers directly and the end-to-end
+    // demo paths.
+    // =======================================================================
+
+    // ---- low-level message builders for entity updates / svc_time -----------
+
+    fn w_time(msg: &mut Vec<u8>, t: f32) {
+        w_byte(msg, SVC_TIME);
+        w_float(msg, t);
+    }
+
+    /// Fast-update entity `num` to origin `o` and yaw `yaw`, setting all three
+    /// origin axes and angle2 (yaw). `effects` adds the U_EFFECTS byte when > 0.
+    ///
+    /// `U_EFFECTS` lives in the update's high byte, so when it is requested we
+    /// also set `U_MOREBITS` (low byte) and emit the high byte after the
+    /// command byte, exactly like MSG_WriteByte does in `SV_WriteEntitiesToClient`.
+    fn w_update(msg: &mut Vec<u8>, num: i32, o: [f32; 3], yaw: f32, effects: i32) {
+        let mut bits = U_ORIGIN1 | U_ORIGIN2 | U_ORIGIN3 | U_ANGLE2;
+        if effects != 0 {
+            bits |= U_EFFECTS | U_MOREBITS;
+        }
+        // The low 7 bits ride the command byte (high bit set). If any high-byte
+        // bit is present, U_MOREBITS is set and the high byte follows.
+        w_byte(msg, 0x80 | (bits & 0x7f));
+        if bits & U_MOREBITS != 0 {
+            w_byte(msg, (bits >> 8) & 0xff);
+        }
+        w_byte(msg, num);
+        // CL_ParseUpdate reads effects BEFORE the origin/angle fields.
+        if effects != 0 {
+            w_byte(msg, effects);
+        }
+        w_coord(msg, o[0]);
+        // angle1 omitted (not in bits); angle2 (yaw) present.
+        w_coord(msg, o[1]);
+        w_angle(msg, yaw);
+        w_coord(msg, o[2]);
+    }
+
+    /// A baseline for entity `num`: model `model`, at origin (0,0,0).
+    fn w_baseline(msg: &mut Vec<u8>, num: i32, model: i32) {
+        w_byte(msg, SVC_SPAWNBASELINE);
+        w_short(msg, num);
+        w_byte(msg, model);
+        w_byte(msg, 0); // frame
+        w_byte(msg, 0); // colormap
+        w_byte(msg, 0); // skin
+        for _ in 0..3 {
+            w_coord(msg, 0.0);
+            w_angle(msg, 0.0);
+        }
+    }
+
+    // ----------------------- pure helper tests -------------------------------
+
+    #[test]
+    fn lerp_point_matches_cl_lerppoint() {
+        // Zero interval -> snap to mtime[0] (frac 1).
+        assert_eq!(lerp_point([2.0, 2.0], 2.0), 1.0);
+
+        // Normal 0.1s interval, cl.time exactly at the midpoint -> 0.5.
+        let mt = [1.6, 1.5];
+        assert!((lerp_point(mt, 1.55) - 0.5).abs() < 1e-6);
+        // At the start of the interval -> 0; at the end -> 1.
+        assert_eq!(lerp_point(mt, 1.5), 0.0);
+        assert_eq!(lerp_point(mt, 1.6), 1.0);
+        // Clamped below 0 and above 1.
+        assert_eq!(lerp_point(mt, 1.4), 0.0);
+        assert_eq!(lerp_point(mt, 1.7), 1.0);
+
+        // A gap > 0.1s is treated as a 0.1s interval ending at mtime[0]
+        // (dropped packet / start of demo): mtime[1] is effectively
+        // mtime[0]-0.1, so cl.time at mtime[0]-0.05 is the midpoint.
+        let big = [5.0, 4.0]; // 1.0s gap
+        assert!((lerp_point(big, 4.95) - 0.5).abs() < 1e-4);
+        assert_eq!(lerp_point(big, 4.90), 0.0); // clamps at the 0.1s window start
+    }
+
+    #[test]
+    fn lerp_origin_interpolates_and_snaps_on_teleport() {
+        // Small motion: linear interpolation by frac.
+        let mid = lerp_origin([0.0, 0.0, 0.0], [10.0, 20.0, 40.0], 0.5);
+        assert_eq!(mid, [5.0, 10.0, 20.0]);
+
+        // A jump > 100 units on ANY axis is assumed a teleport: f forced to 1,
+        // so the result snaps to the destination regardless of frac.
+        let tele = lerp_origin([0.0, 0.0, 0.0], [0.0, 0.0, 200.0], 0.25);
+        assert_eq!(tele, [0.0, 0.0, 200.0], "teleport snaps to destination");
+        // Exactly 100 is NOT a teleport (C uses strict > 100).
+        let edge = lerp_origin([0.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.5);
+        assert_eq!(edge, [50.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn lerp_angles_takes_the_short_way_around() {
+        // 350 -> 10 should go the short way (+20 through 360), not -340.
+        let a = lerp_angles([350.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
+        assert!((a[0] - 360.0).abs() < 1e-4, "midpoint is 360==0, got {}", a[0]);
+        // 10 -> 350 is the short way the other direction (-20).
+        let b = lerp_angles([10.0, 0.0, 0.0], [350.0, 0.0, 0.0], 0.5);
+        assert!((b[0] - 0.0).abs() < 1e-4, "midpoint is 0, got {}", b[0]);
+    }
+
+    #[test]
+    fn rotate_yaw_is_anglemod_of_100t() {
+        for &t in &[0.0f32, 0.37, 1.0, 12.5, 100.0] {
+            assert_eq!(rotate_yaw(t), crate::math::anglemod(100.0 * t));
+        }
+    }
+
+    // --------------------- end-to-end behaviour tests ------------------------
+
+    /// Build a two-block demo: block 1 = signon (svc_time t0 + serverinfo +
+    /// baselines via `setup`), block 2 = gameplay (svc_time t1 + `play`), with
+    /// per-block camera angles.
+    fn two_block_demo(
+        t0: f32,
+        a0: [f32; 3],
+        setup: impl FnOnce(&mut Vec<u8>),
+        t1: f32,
+        a1: [f32; 3],
+        play: impl FnOnce(&mut Vec<u8>),
+    ) -> Vec<u8> {
+        let mut b1 = Vec::new();
+        w_time(&mut b1, t0);
+        write_serverinfo(&mut b1);
+        setup(&mut b1);
+
+        let mut b2 = Vec::new();
+        w_time(&mut b2, t1);
+        play(&mut b2);
+
+        let mut file = Vec::new();
+        file.extend_from_slice(b"-1\n");
+        push_block(&mut file, a0, &b1);
+        push_block(&mut file, a1, &b2);
+        file
+    }
+
+    #[test]
+    fn stale_entity_is_culled_when_it_goes_silent() {
+        // Two entities baselined in block 1. In block 2 ONLY entity 2 is
+        // updated; entity 3 goes silent. CL_RelinkEntities drops entity 3
+        // (its msgtime falls behind mtime[0]) so it must NOT render in the
+        // block-2 keyframe, even though it lingered in the old code.
+        let file = two_block_demo(
+            1.4,
+            [0.0; 3],
+            |b| {
+                w_baseline(b, 2, 5); // entity 2, model 5
+                w_baseline(b, 3, 6); // entity 3, model 6
+            },
+            1.5,
+            [0.0; 3],
+            |b| {
+                // Update only entity 2; entity 3 is omitted (silent).
+                w_update(b, 2, [50.0, 0.0, 0.0], 0.0, 0);
+            },
+        );
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+
+        assert!(
+            frame.entities.iter().any(|e| e.modelindex == 5),
+            "the entity updated this message still renders"
+        );
+        assert!(
+            !frame.entities.iter().any(|e| e.modelindex == 6),
+            "the entity that went silent this message must be culled"
+        );
+    }
+
+    #[test]
+    fn interpolation_produces_intermediate_positions() {
+        // Entity 2 is at x=0 in block 1 and x=80 in block 2 (an 80-unit move,
+        // under the 100-unit teleport threshold, so it lerps). The interpolated
+        // stream emits sub-frames between the snapshots; the midpoint frame must
+        // show the entity roughly halfway (x ~= 40), proving the lerp ran.
+        let file = two_block_demo(
+            1.4,
+            [0.0; 3],
+            |b| {
+                // Baseline entity 2, then update it in block 1 so it has a real
+                // previous snapshot (forcelink clears, enabling lerp in block 2).
+                w_baseline(b, 2, 5);
+                w_update(b, 2, [0.0, 0.0, 0.0], 0.0, 0);
+            },
+            1.5,
+            [0.0; 3],
+            |b| {
+                w_update(b, 2, [80.0, 0.0, 0.0], 0.0, 0);
+            },
+        );
+
+        // 20 fps over a 0.1s interval -> ~2 sub-frames for block 2.
+        let demo = parse_demo_interpolated(&file, 20.0, &[]).expect("parse");
+        // Collect the x-position of entity 2 (model 5) across all frames.
+        let xs: Vec<f32> = demo
+            .frames
+            .iter()
+            .filter_map(|f| f.entities.iter().find(|e| e.modelindex == 5))
+            .map(|e| e.origin[0])
+            .collect();
+        assert!(!xs.is_empty(), "entity should render across the interpolation");
+        // Some frame must land strictly between the two snapshots (0 < x < 80),
+        // which only happens if interpolation occurred (a keyframe-only stream
+        // would jump 0 -> 80 with nothing in between).
+        assert!(
+            xs.iter().any(|&x| x > 1.0 && x < 79.0),
+            "expected an interpolated mid position, got xs = {xs:?}"
+        );
+        // And a frame must reach the final snapshot position.
+        assert!(
+            xs.iter().any(|&x| (x - 80.0).abs() < 1e-3),
+            "expected the final snapshot position 80, got xs = {xs:?}"
+        );
+    }
+
+    #[test]
+    fn svc_setangle_does_not_override_recorded_camera() {
+        // The gameplay block carries recorded camera angles [10,20,30] AND an
+        // svc_setangle to a wildly different value. In demo playback the
+        // recorded angles win (CL_RelinkEntities recomputes viewangles from
+        // mviewangles every frame), so svc_setangle must be a no-op.
+        let file = two_block_demo(
+            1.4,
+            [0.0; 3],
+            |b| {
+                w_baseline(b, 1, 1);
+                w_byte(b, SVC_SETVIEW);
+                w_short(b, 1);
+            },
+            1.5,
+            [10.0, 20.0, 30.0],
+            |b| {
+                // svc_setangle to (90, 90, 90) — must be ignored for the camera.
+                w_byte(b, SVC_SETANGLE);
+                w_angle(b, 90.0);
+                w_angle(b, 90.0);
+                w_angle(b, 90.0);
+                // Keep entity 1 alive so it isn't culled (the view entity).
+                w_update(b, 1, [0.0, 0.0, 0.0], 0.0, 0);
+            },
+        );
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        assert_eq!(
+            frame.view_angles, [10.0, 20.0, 30.0],
+            "recorded camera angles drive the view; svc_setangle is ignored"
+        );
+    }
+
+    #[test]
+    fn ef_rotate_model_spins_during_interpolated_playback() {
+        // A rotating pickup (model 7) should have its yaw forced to
+        // anglemod(100*time) regardless of the recorded angle, when the caller
+        // marks model 7 as EF_ROTATE.
+        let file = two_block_demo(
+            1.4,
+            [0.0; 3],
+            |b| {
+                w_baseline(b, 2, 7);
+                w_update(b, 2, [0.0, 0.0, 0.0], 0.0, 0);
+            },
+            1.5,
+            [0.0; 3],
+            |b| {
+                // Recorded yaw is 0, but EF_ROTATE must override it with the spin.
+                w_update(b, 2, [0.0, 0.0, 0.0], 0.0, 0);
+            },
+        );
+
+        // With model 7 declared as a rotator, the final block-2 frame is at
+        // cl.time == 1.5, so yaw == anglemod(100*1.5) == anglemod(150) == 150.
+        let demo = parse_demo_interpolated(&file, 10.0, &[7]).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        let ent = frame
+            .entities
+            .iter()
+            .find(|e| e.modelindex == 7)
+            .expect("rotating pickup renders");
+        assert_eq!(
+            ent.angles[1],
+            crate::math::anglemod(100.0 * 1.5),
+            "EF_ROTATE forces yaw to anglemod(100*time)"
+        );
+
+        // Without the EF_ROTATE declaration the recorded yaw (0) is kept.
+        let demo2 = parse_demo_interpolated(&file, 10.0, &[]).expect("parse");
+        let frame2 = demo2.frames.last().expect("a frame");
+        let ent2 = frame2
+            .entities
+            .iter()
+            .find(|e| e.modelindex == 7)
+            .expect("pickup renders");
+        assert_eq!(ent2.angles[1], 0.0, "no EF_ROTATE => recorded yaw kept");
+    }
+
+    #[test]
+    fn effects_byte_is_surfaced_on_the_snapshot() {
+        // The U_EFFECTS byte reaches EntSnapshot.effects so a front-end can
+        // drive dynamic lights / brightfield particles like the live walk.
+        let file = two_block_demo(
+            1.4,
+            [0.0; 3],
+            |b| w_baseline(b, 2, 9),
+            1.5,
+            [0.0; 3],
+            |b| {
+                w_update(b, 2, [0.0, 0.0, 0.0], 0.0, EF_ROTATE /* any nonzero */);
+            },
+        );
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        let ent = frame.entities.iter().find(|e| e.modelindex == 9).unwrap();
+        assert_eq!(ent.effects, EF_ROTATE, "effects byte preserved on snapshot");
     }
 }

@@ -89,8 +89,70 @@ const DI_NODIR: f32 = -1.0;
 const CONTENTS_SOLID: i32 = -2;
 const CONTENTS_EMPTY: i32 = -1;
 
-// Skill spawnflags (server.h). We assume single-player skill 1 (medium).
+// Skill spawnflags (server.h). These mark an entity as absent on a given
+// difficulty (or in deathmatch); `ED_LoadFromFile` filters by the current skill.
+const SPAWNFLAG_NOT_EASY: i32 = 256;
 const SPAWNFLAG_NOT_MEDIUM: i32 = 512;
+const SPAWNFLAG_NOT_HARD: i32 = 1024;
+const SPAWNFLAG_NOT_DEATHMATCH: i32 = 2048;
+
+// ---------------------------------------------------------------------------
+// The `skill` cvar (host_cmd.c / sv_main.c `current_skill`).
+//
+// The original engine kept `skill` in the console-cvar registry and derived an
+// integer `current_skill = (int)(skill.value + 0.5)` clamped to 0..3 in
+// `SV_SpawnServer`. This headless port has no cvar subsystem and the `Vm` field
+// set is fixed (we must not extend it), so — exactly like the changelevel /
+// lightstyle transports — we hold the live skill value in a per-thread cell.
+// `PF_cvar("skill")` reads it, `PF_cvar_set("skill", N)` writes it (clamped),
+// and `ED_LoadFromFile` reads it to filter monsters/items by difficulty. The
+// difficulty portals in the start map are `trigger_setskill` entities whose
+// QuakeC `touch` calls `cvar_set("skill", N)`, so honouring `cvar_set` here is
+// what makes those portals actually change which entities spawn.
+//
+// THREAD-LOCAL (not a process-global atomic): a server session runs all its
+// QuakeC on one thread, so a `thread_local` is the correct scope AND keeps each
+// test thread isolated (the cell is the same shape as the sound/lightstyle/
+// changelevel queues above).
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Live integer skill level (0=easy, 1=medium, 2=hard, 3=nightmare),
+    /// defaulting to 1 (single-player medium, matching the stock `skill` "1").
+    static SKILL: std::cell::Cell<i32> = const { std::cell::Cell::new(1) };
+}
+
+/// The `current_skill` value: the live [`SKILL`] read back as an int. Used by
+/// the spawn filter and by `cvar("skill")`.
+fn skill_value() -> i32 {
+    SKILL.with(|s| s.get())
+}
+
+/// Set the skill level, clamped to `0..=3` exactly as `SV_SpawnServer` does
+/// (`current_skill = (int)(value + 0.5)`, then clamp). The input is the raw
+/// float a `cvar_set("skill", N)` would pass; we round it the way the C does.
+fn set_skill_value(v: f32) {
+    // SV_SpawnServer: current_skill = (int)(skill.value + 0.5); clamp 0..3.
+    let mut s = (v + 0.5) as i32;
+    if s < 0 {
+        s = 0;
+    }
+    if s > 3 {
+        s = 3;
+    }
+    SKILL.with(|cell| cell.set(s));
+}
+
+/// Reset the skill to the default (1, medium). Called when a fresh server is
+/// built so a prior level's `cvar_set("skill", …)` cannot leak into the next
+/// (mirrors the per-thread reset of the changelevel / lightstyle transports).
+fn reset_skill() {
+    SKILL.with(|s| s.set(1));
+}
+
+/// `host_frametime` used for the two post-spawn settle frames in
+/// `SV_SpawnServer` ("run two frames to allow everything to settle").
+const SETTLE_FRAMETIME: f32 = 0.1;
 
 /// `sv_gravity` default ("800"), from `sv_phys.c`.
 const SV_GRAVITY: f32 = 800.0;
@@ -502,16 +564,34 @@ fn bi_cvar(vm: &mut Vm) -> Result<()> {
 }
 
 /// The handful of cvar defaults the spawn/think code reads. Values match the
-/// stock `*.c` declarations (`sv_gravity` "800", `deathmatch` "0",
-/// `skill` 1 single-player).
+/// stock `*.c` declarations (`sv_gravity` "800", `deathmatch` "0"). `skill` is
+/// the *live* value (see [`SKILL`]): `cvar_set("skill", N)` from a difficulty
+/// portal updates it and `cvar("skill")` reads it back, so the QuakeC sees the
+/// difficulty it selected (the old stub returned a constant 1.0 unconditionally).
 fn cvar_value(name: &str) -> f32 {
     match name {
         "sv_gravity" => SV_GRAVITY,
         "sv_maxvelocity" => SV_MAXVELOCITY,
         "deathmatch" | "coop" | "teamplay" => 0.0,
-        "skill" => 1.0,
+        "skill" => skill_value() as f32,
         _ => 0.0,
     }
+}
+
+/// `PF_cvar_set` (#72): `void(string var, string val) cvar_set`. The C calls
+/// `Cvar_Set(var, val)`. This headless port has no cvar registry, so the only
+/// cvar with a live backing store is `skill` (see [`SKILL`]); setting it is what
+/// makes the start-map difficulty portals (`trigger_setskill` -> `cvar_set
+/// ("skill", N)`) actually change which monsters/items spawn. Any other cvar
+/// name is a benign no-op (the value is parsed but has nowhere to land), exactly
+/// as the old `bi_noop` behaved — but `skill` now persists.
+fn bi_cvar_set(vm: &mut Vm) -> Result<()> {
+    let name = vm.arg_string(0);
+    if name == "skill" {
+        let val = parse_float(&vm.arg_string(1));
+        set_skill_value(val);
+    }
+    Ok(())
 }
 
 /// `PF_changeyaw` (#49): turn `self.angles[1]` toward `ideal_yaw` by at most
@@ -1499,7 +1579,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 68, bi_precache_file); // precache_file
     put(t, 69, bi_noop); // makestatic
     put(t, 70, bi_changelevel); // changelevel (records the deferred map swap)
-    put(t, 72, bi_noop); // cvar_set
+    put(t, 72, bi_cvar_set); // cvar_set (honours "skill"; else benign no-op)
     put(t, 74, bi_ambientsound); // ambientsound (queues a SoundEvent)
     put(t, 75, bi_precache_model); // precache_model (alias)
     put(t, 76, bi_precache_sound); // precache_sound (alias)
@@ -1740,6 +1820,14 @@ impl Server {
         // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of
         // sv.lightstyles).
         reset_lightstyles();
+        // The `skill` cvar is process-global (we have no cvar registry); reset it
+        // to the single-player default (1, medium) for each fresh server so the
+        // spawn filter is deterministic and a prior level's `cvar_set("skill", …)`
+        // cannot leak in unexpectedly. A front-end that persists the player's
+        // chosen difficulty across a changelevel re-applies it with
+        // [`Server::set_skill`] after construction (the same way it carries
+        // `serverflags`).
+        reset_skill();
 
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.
@@ -1824,6 +1912,14 @@ impl Server {
     /// `classname`). Faithful to the C control flow, but a per-entity spawn
     /// error is caught and counted rather than aborting the whole load.
     pub fn spawn_entities(&mut self) -> Result<SpawnReport> {
+        // SV_SpawnServer: current_skill = (int)(skill.value + 0.5), clamped to
+        // 0..3, then Cvar_SetValue("skill", current_skill). Re-normalise the live
+        // skill the same way before loading entities so a fractional value a
+        // front-end set (or a portal's cvar_set) is rounded to the integer the
+        // spawn filter compares against, and cvar("skill") reads back the
+        // canonical value.
+        set_skill_value(skill_value() as f32);
+
         // The entity text was captured at construction (the host has no accessor
         // and we never downcast). Clone it so the tokenizer borrow does not pin
         // `&self`, leaving the VM free to mutate during spawning.
@@ -1860,9 +1956,23 @@ impl Server {
             // Parse the key/value pairs into this edict.
             self.parse_edict(&mut tok, ent)?;
 
-            // Skill filtering (single-player skill 1 -> drop NOT_MEDIUM).
+            // Skill / deathmatch filtering (ED_LoadFromFile, pr_edict.c). In
+            // deathmatch, drop NOT_DEATHMATCH entities; otherwise drop the entity
+            // whose NOT_<difficulty> flag matches the current skill (easy=0,
+            // medium=1, hard/nightmare>=2). `current_skill` is the live `skill`
+            // cvar (see [`SKILL`]) — a difficulty portal's `cvar_set("skill", N)`
+            // changes which monsters/items this filter keeps.
             let spawnflags = self.vm.ent_get_float(ent, "spawnflags") as i32;
-            if spawnflags & SPAWNFLAG_NOT_MEDIUM != 0 {
+            let deathmatch = cvar_value("deathmatch") != 0.0;
+            let current_skill = skill_value();
+            let inhibited = if deathmatch {
+                spawnflags & SPAWNFLAG_NOT_DEATHMATCH != 0
+            } else {
+                (current_skill == 0 && spawnflags & SPAWNFLAG_NOT_EASY != 0)
+                    || (current_skill == 1 && spawnflags & SPAWNFLAG_NOT_MEDIUM != 0)
+                    || (current_skill >= 2 && spawnflags & SPAWNFLAG_NOT_HARD != 0)
+            };
+            if inhibited {
                 self.vm.free_edict(ent);
                 report.inhibited += 1;
                 continue;
@@ -1905,6 +2015,15 @@ impl Server {
         // Worldspawn (and any other spawn function) may have called lightstyle();
         // pull those patterns out of the write transport into the owned table.
         self.lightstyles = snapshot_lightstyles();
+
+        // SV_SpawnServer: "run two frames to allow everything to settle" with
+        // host_frametime = 0.1. The first frame fires each entity's spawn-set
+        // `nextthink` (e.g. monsters droptofloor / set their first animation
+        // frame, items settle onto the floor) so the world is in its resting
+        // initial state before play begins. A per-entity think fault is isolated
+        // by run_frame (it never aborts the load).
+        let _ = self.run_frame(SETTLE_FRAMETIME);
+        let _ = self.run_frame(SETTLE_FRAMETIME);
 
         // classnames sorted by count desc, then name asc for determinism.
         classname_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -2089,9 +2208,17 @@ impl Server {
                 Ok(fired)
             }
             MOVETYPE_STEP => {
-                // SV_Physics_Step: freefall if not on ground/fly/swim, then think.
+                // SV_Physics_Step: freefall (+ landing thud) if not on ground /
+                // fly / swim, then SV_RunThink, then SV_CheckWaterTransition —
+                // the C runs the water-transition check AFTER the think and
+                // unconditionally (outside the freefall branch), so a step entity
+                // resting on the floor still maintains watertype/waterlevel and
+                // splashes when pushed into liquid.
                 self.physics_step(ent, start_time, dt);
                 let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+                    self.check_water_transition(ent);
+                }
                 Ok(fired)
             }
             MOVETYPE_TOSS | MOVETYPE_BOUNCE | MOVETYPE_FLY | MOVETYPE_FLYMISSILE => {
@@ -2379,6 +2506,47 @@ impl Server {
         trace.startsolid
     }
 
+    /// `SV_CheckStuck` (sv_phys.c:762): the "big hack" that frees a player wedged
+    /// in the clipping hull. If the box is clear, snapshot `oldorigin` and return.
+    /// Otherwise try `oldorigin`, then a 1-unit grid (`±1` in x/y, `0..18` up); the
+    /// first clear spot wins (relink there). If nothing is clear, restore the
+    /// original origin (the C `player is stuck`).
+    ///
+    /// Faithful transcription over [`Self::push_test_position`]
+    /// (`SV_TestEntityPosition`). The console diagnostics are dropped (headless).
+    fn check_stuck(&mut self, ent: i32) {
+        if !self.push_test_position(ent) {
+            // not stuck: remember this good spot.
+            let origin = self.vm.ent_get_vector(ent, "origin");
+            self.vm.ent_set_vector(ent, "oldorigin", origin);
+            return;
+        }
+
+        let org = self.vm.ent_get_vector(ent, "origin");
+        let oldorigin = self.vm.ent_get_vector(ent, "oldorigin");
+        self.vm.ent_set_vector(ent, "origin", oldorigin);
+        if !self.push_test_position(ent) {
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+
+        for z in 0..18 {
+            for i in -1..=1 {
+                for j in -1..=1 {
+                    let cand = [org[0] + i as f32, org[1] + j as f32, org[2] + z as f32];
+                    self.vm.ent_set_vector(ent, "origin", cand);
+                    if !self.push_test_position(ent) {
+                        link_edict(&mut self.vm, ent);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // still stuck: restore the original origin.
+        self.vm.ent_set_vector(ent, "origin", org);
+    }
+
     fn run_think(&mut self, ent: i32, sv_time: f32, dt: f32) -> Result<(bool, bool)> {
         let thinktime = self.vm.ent_get_float(ent, "nextthink");
         if thinktime <= 0.0 || thinktime > sv_time + dt {
@@ -2430,12 +2598,22 @@ impl Server {
     /// latches `FL_ONGROUND` on a floor contact and clips/slides velocity), then
     /// `SV_LinkEdict(ent, true)` to trip triggers. Touch impacts during the
     /// slide are handled inside [`Self::fly_move_core`] (which calls
-    /// [`sv_impact`]). An entity already on the ground / flying / swimming skips
-    /// the whole branch, including the trigger relink (matching the C, where the
-    /// link is inside the freefall branch).
+    /// [`sv_impact`]).
+    ///
+    /// A falling step entity that lands this frame (was airborne, now
+    /// `FL_ONGROUND`) plays `demon/dland2.wav` when it hit the ground hard
+    /// (downward speed exceeded `sv_gravity * 0.1` before gravity was applied) —
+    /// the landing thud. The caller ([`Self::process_entity`]) runs
+    /// `SV_CheckWaterTransition` afterward (after the think), matching the C
+    /// order, so even a step entity resting on the floor maintains
+    /// `watertype`/`waterlevel` and splashes when pushed into liquid.
     fn physics_step(&mut self, ent: i32, sv_time: f32, dt: f32) {
         let flags = self.vm.ent_get_float(ent, "flags") as i32;
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+            // hitsound = velocity[2] < sv_gravity * -0.1, sampled BEFORE gravity.
+            let vel_z = self.vm.ent_get_vector(ent, "velocity")[2];
+            let hitsound = vel_z < SV_GRAVITY * -0.1;
+
             // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
             // SV_LinkEdict(ent, true). The C runs the full slide move (NOT a
             // single PushEntity), so a freefalling MOVETYPE_STEP entity latches
@@ -2453,8 +2631,18 @@ impl Server {
             // touch impact during the move already removed the entity.
             if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
                 touch_triggers(&mut self.vm, ent, sv_time);
+
+                // "just hit ground": FL_ONGROUND newly latched by the slide move
+                // -> the landing thud, gated on the pre-gravity downward speed.
+                let now_on_ground =
+                    (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND != 0;
+                if now_on_ground && hitsound {
+                    self.start_sound(ent, 0, "demon/dland2.wav", 255, 1.0);
+                }
             }
         }
+        // SV_CheckWaterTransition runs AFTER SV_RunThink in the C; the caller
+        // (process_entity's MOVETYPE_STEP arm) invokes it post-think.
     }
 
     /// `SV_Physics_Toss` (sv_phys.c, non-`QUAKE2`): if on ground, do nothing;
@@ -2464,7 +2652,7 @@ impl Server {
     fn physics_toss(&mut self, ent: i32, movetype: i32, sv_time: f32, dt: f32) {
         let flags = self.vm.ent_get_float(ent, "flags") as i32;
         if flags & FL_ONGROUND != 0 {
-            return; // resting on the ground
+            return; // resting on the ground (C returns before CheckWaterTransition)
         }
         self.check_velocity(ent);
 
@@ -2509,10 +2697,23 @@ impl Server {
                 let flags = self.vm.ent_get_float(ent, "flags") as i32;
                 self.vm
                     .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
-                self.vm.ent_set_int(ent, "groundentity", 0);
+                // groundentity = EDICT_TO_PROG(trace.ent): the edict actually
+                // landed on (0 = world, >0 = a plat/door/other solid), not a
+                // hardcoded world. `tr.ent` is `-1` only when nothing was hit,
+                // but this branch runs only when fraction < 1 (something WAS hit),
+                // so clamp the "nothing" sentinel to the world (0) defensively.
+                self.vm.ent_set_int(ent, "groundentity", tr.ent.max(0));
                 self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
                 self.vm.ent_set_vector(ent, "avelocity", [0.0; 3]);
             }
+        }
+
+        // check for in water (SV_CheckWaterTransition). The C reaches this only
+        // when the move was NOT clear (the `fraction == 1` / freed early returns
+        // above skip it), so a grenade/gib that just struck something updates its
+        // watertype here and splashes on an air/liquid crossing.
+        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+            self.check_water_transition(ent);
         }
     }
 
@@ -2552,6 +2753,77 @@ impl Server {
         self.vm.ent_set_float(ent, "waterlevel", waterlevel as f32);
         self.vm.ent_set_float(ent, "watertype", watertype as f32);
         waterlevel > 1
+    }
+
+    /// `SV_StartSound` (sv_phys.c helper, via `world.c`): queue a sound emitted by
+    /// `ent` on `channel` with the named `sample`. `volume_byte` is the C 0..255
+    /// byte (255 = full); we store it back in the QuakeC `0.0..=1.0` domain the
+    /// [`SoundEvent`] queue uses. Used by the toss/step physics for the
+    /// water-entry splash and the landing thud (the C calls these directly, not
+    /// through the QuakeC `sound` builtin).
+    fn start_sound(&mut self, ent: i32, channel: i32, sample: &str, volume_byte: i32, attenuation: f32) {
+        let origin = entity_sound_origin(&self.vm, ent);
+        let sound_index = lookup_sound_index(&mut self.vm, sample);
+        push_sound_event(SoundEvent {
+            entity: ent,
+            channel,
+            sound_index,
+            sample: sample.to_string(),
+            origin,
+            volume: (volume_byte as f32) / 255.0,
+            attenuation,
+        });
+    }
+
+    /// `SV_CheckWaterTransition` (sv_phys.c, non-`QUAKE2`): sample the world
+    /// contents at the entity's origin and maintain its `watertype` / `waterlevel`
+    /// fields, playing the `misc/h2ohit1.wav` splash whenever the entity crosses
+    /// the air/liquid boundary in either direction.
+    ///
+    /// Faithful to the C:
+    /// * `watertype == 0` (never set, i.e. just spawned) -> adopt the current
+    ///   contents and `waterlevel = 1` with no sound.
+    /// * contents is liquid (`<= CONTENTS_WATER`): if we were in `CONTENTS_EMPTY`
+    ///   we just splashed in -> play the sound; set `watertype = cont`,
+    ///   `waterlevel = 1`.
+    /// * contents is not liquid: if `watertype` was not already `CONTENTS_EMPTY`
+    ///   we just surfaced -> play the sound; set `watertype = CONTENTS_EMPTY`,
+    ///   `waterlevel = cont` (the C stores the raw contents value here).
+    ///
+    /// Without this, `MOVETYPE_TOSS`/`BOUNCE`/`STEP` entities (grenades, gibs,
+    /// dropped weapons, falling monsters) never get `watertype`/`waterlevel` and
+    /// emit no entry splash.
+    fn check_water_transition(&mut self, ent: i32) {
+        const CONTENTS_WATER: i32 = -3;
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let cont = self
+            .vm
+            .with_host(|_vm, h| h.point_contents(origin))
+            .unwrap_or(CONTENTS_SOLID);
+
+        let watertype = self.vm.ent_get_float(ent, "watertype") as i32;
+        if watertype == 0 {
+            // just spawned here
+            self.vm.ent_set_float(ent, "watertype", cont as f32);
+            self.vm.ent_set_float(ent, "waterlevel", 1.0);
+            return;
+        }
+
+        if cont <= CONTENTS_WATER {
+            if watertype == CONTENTS_EMPTY {
+                // just crossed into water
+                self.start_sound(ent, 0, "misc/h2ohit1.wav", 255, 1.0);
+            }
+            self.vm.ent_set_float(ent, "watertype", cont as f32);
+            self.vm.ent_set_float(ent, "waterlevel", 1.0);
+        } else {
+            if watertype != CONTENTS_EMPTY {
+                // just crossed out of water
+                self.start_sound(ent, 0, "misc/h2ohit1.wav", 255, 1.0);
+            }
+            self.vm.ent_set_float(ent, "watertype", CONTENTS_EMPTY as f32);
+            self.vm.ent_set_float(ent, "waterlevel", cont as f32);
+        }
     }
 
     /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
@@ -2596,12 +2868,14 @@ impl Server {
     /// entity-aware [`sv_move`] (clipping against the world AND every solid
     /// edict), set `origin = trace.endpos`, relink, and — when the move hit
     /// another entity — run [`sv_impact`] so both touch functions fire. The
-    /// returned [`HostTrace`] carries the `fraction`/`plane_normal` the toss/step
-    /// physics need for their bounce/stop fixups.
+    /// returned [`MoveTrace`] carries `fraction`/`plane_normal` for the toss/step
+    /// physics' bounce/stop fixups AND the hit `ent` index, which the toss-rest
+    /// and stair-step-down paths store as `groundentity` (`EDICT_TO_PROG(trace
+    /// .ent)`) so an entity resting on a plat/door records what it stands on.
     ///
     /// `sv_move` borrows the host internally and `sv_impact` executes QuakeC, so
     /// neither is called while the host is held out.
-    fn push_entity(&mut self, ent: i32, push: Vec3, sv_time: f32) -> HostTrace {
+    fn push_entity(&mut self, ent: i32, push: Vec3, sv_time: f32) -> MoveTrace {
         let origin = self.vm.ent_get_vector(ent, "origin");
         let mins = self.vm.ent_get_vector(ent, "mins");
         let maxs = self.vm.ent_get_vector(ent, "maxs");
@@ -2635,17 +2909,9 @@ impl Server {
             sv_impact(&mut self.vm, ent, mt.ent, sv_time);
         }
 
-        // Reconstruct the trace_t the toss/step physics consume.
-        HostTrace {
-            allsolid: mt.allsolid,
-            startsolid: mt.startsolid,
-            inopen: mt.inopen,
-            inwater: mt.inwater,
-            fraction: mt.fraction,
-            endpos: mt.endpos,
-            plane_normal: mt.plane_normal,
-            plane_dist: mt.plane_dist,
-        }
+        // Return the full MoveTrace (carries `ent` for groundentity in addition
+        // to the fraction/plane the bounce-and-stop fixups need).
+        mt
     }
 }
 
@@ -2870,6 +3136,26 @@ impl Server {
         self.vm.gset_float("serverflags", flags);
     }
 
+    /// The current integer skill level (0=easy, 1=medium, 2=hard, 3=nightmare).
+    ///
+    /// This is the `current_skill` the spawn filter uses and the value
+    /// `cvar("skill")` returns to the QuakeC. The difficulty portals in the start
+    /// map (`trigger_setskill`) change it at runtime via `cvar_set("skill", N)`;
+    /// a front-end reads it here to persist the player's choice across a
+    /// changelevel (the constructor resets it to the medium default).
+    pub fn skill(&self) -> i32 {
+        skill_value()
+    }
+
+    /// Set the skill level from a raw value, normalised exactly as
+    /// `SV_SpawnServer` does (`current_skill = (int)(value + 0.5)`, clamped to
+    /// `0..=3`). A front-end calls this after construction to apply the menu's /
+    /// the persisted difficulty before [`Self::spawn_entities`], so the spawn
+    /// filter inhibits the right monsters/items. See [`Self::skill`].
+    pub fn set_skill(&mut self, value: f32) {
+        set_skill_value(value);
+    }
+
     /// Take (and clear) the deferred level-change request a `changelevel()`
     /// builtin recorded this frame, or `None` if none was issued. A front-end
     /// calls this once after [`Self::client_frame`]: when it returns `Some(map)`,
@@ -2932,6 +3218,20 @@ impl Server {
             }
         }
 
+        // SV_WriteClientdataToMessage (sv_main.c) runs SV_SetIdealPitch once per
+        // client per frame, after physics: compute the slope-following auto-pitch
+        // the QuakeC view code centres toward when you walk up/down stairs.
+        if self.player >= 0
+            && !self
+                .vm
+                .edict_free
+                .get(self.player as usize)
+                .copied()
+                .unwrap_or(true)
+        {
+            self.set_ideal_pitch(self.player);
+        }
+
         // sv.time += host_frametime (end of SV_Physics).
         self.vm.gset_float("time", start_time + dt);
 
@@ -2944,6 +3244,79 @@ impl Server {
             think_errors,
             time: self.time(),
         })
+    }
+
+    /// `SV_SetIdealPitch` (sv_user.c:53): trace six 12-unit forward steps along
+    /// the player's yaw, sampling the floor height under each; if the steps form
+    /// a consistent staircase (a single, sign-stable height delta over at least
+    /// two steps), set `idealpitch = -dir * sv_idealpitchscale` so the QuakeC view
+    /// code can auto-centre the pitch to look up/down the stairs. Only runs while
+    /// the player is `FL_ONGROUND` (the C returns early otherwise).
+    ///
+    /// Faithful transcription over the entity-aware [`sv_move`] (the C
+    /// `SV_Move(top, 0, 0, bottom, MOVE_NOMONSTERS, sv_player)`). `idealpitch` is
+    /// left untouched on a wall / dropoff (the C returns without clearing it),
+    /// zeroed on flat ground, and set to the scaled slope otherwise.
+    fn set_ideal_pitch(&mut self, ent: i32) {
+        const MAX_FORWARD: usize = 6;
+        const ON_EPSILON: f32 = 0.1;
+        /// `sv_idealpitchscale` default ("0.8").
+        const SV_IDEALPITCHSCALE: f32 = 0.8;
+
+        if (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND == 0 {
+            return;
+        }
+
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let view_ofs = self.vm.ent_get_vector(ent, "view_ofs");
+        let yaw = self.vm.ent_get_vector(ent, "angles")[crate::math::YAW];
+        let angleval = f64::from(yaw) * std::f64::consts::PI * 2.0 / 360.0;
+        let sinval = angleval.sin() as f32;
+        let cosval = angleval.cos() as f32;
+
+        let mut z = [0.0f32; MAX_FORWARD];
+        for i in 0..MAX_FORWARD {
+            let top = [
+                origin[0] + cosval * ((i + 3) as f32) * 12.0,
+                origin[1] + sinval * ((i + 3) as f32) * 12.0,
+                origin[2] + view_ofs[2],
+            ];
+            let bottom = [top[0], top[1], top[2] - 160.0];
+
+            // SV_Move(top, 0, 0, bottom, MOVE_NOMONSTERS, sv_player).
+            let tr = sv_move(&mut self.vm, top, bottom, [0.0; 3], [0.0; 3], ent, true, false);
+            if tr.allsolid {
+                return; // looking at a wall, leave ideal the way it was
+            }
+            if tr.fraction == 1.0 {
+                return; // near a dropoff
+            }
+            z[i] = top[2] + tr.fraction * (bottom[2] - top[2]);
+        }
+
+        let mut dir = 0.0f32;
+        let mut steps = 0i32;
+        for j in 1..MAX_FORWARD {
+            let step = z[j] - z[j - 1];
+            if step > -ON_EPSILON && step < ON_EPSILON {
+                continue;
+            }
+            if dir != 0.0 && (step - dir > ON_EPSILON || step - dir < -ON_EPSILON) {
+                return; // mixed changes
+            }
+            steps += 1;
+            dir = step;
+        }
+
+        if dir == 0.0 {
+            self.vm.ent_set_float(ent, "idealpitch", 0.0);
+            return;
+        }
+        if steps < 2 {
+            return;
+        }
+        self.vm
+            .ent_set_float(ent, "idealpitch", -dir * SV_IDEALPITCHSCALE);
     }
 
     /// `SV_Physics_Client` (sv_phys.c ~1059): `PlayerPreThink` -> the movement
@@ -2999,6 +3372,9 @@ impl Server {
                 if !in_water && flags & FL_WATERJUMP == 0 {
                     self.add_gravity(ent, dt);
                 }
+                // SV_CheckStuck: free the player from the clipping hull (and
+                // latch `oldorigin`) right before the walk move, as the C does.
+                self.check_stuck(ent);
                 self.walk_move(ent, start_time, dt);
             }
             MOVETYPE_FLY => {
@@ -3240,18 +3616,53 @@ impl Server {
             return;
         }
 
-        // Angles: the engine sets v_angle from the usercmd; angles show 1/3 the
-        // pitch and all the yaw (the C `angles[PITCH] = -v_angle[PITCH]/3`). A
-        // QuakeC-forced `fixangle` (e.g. after a teleport) overrides the look.
+        // Angles (SV_ClientThink, sv_user.c:400-412): the engine derives the
+        // body angles from the look + the weapon kick + the strafe lean:
+        //   v_angle      = v_angle + punchangle          (weapon recoil kick)
+        //   angles[ROLL] = V_CalcRoll(angles, velocity)*4 (strafe lean — set
+        //                  UNCONDITIONALLY, even when fixangle forces the look)
+        //   if (!fixangle) { angles[PITCH] = -v_angle[PITCH]/3; angles[YAW] = v_angle[YAW]; }
+        // angles show 1/3 the (punch-adjusted) pitch and all the yaw; ROLL leans
+        // into a sidestep so the model/view banks. A QuakeC-forced `fixangle`
+        // (e.g. after a teleport) overrides only the pitch/yaw, not the roll.
         let fixangle = self.vm.ent_get_float(ent, "fixangle");
-        // v_angle = [pitch, yaw, roll] from the incoming command.
+
+        // v_angle field = [pitch, yaw, roll] from the incoming command (the C
+        // SV_ReadClientMove writes this before SV_ClientThink).
         self.vm
             .ent_set_vector(ent, "v_angle", [cmd.pitch, cmd.yaw, 0.0]);
+
+        // Local v_angle including the punch kick (the C `VectorAdd` into a temp;
+        // the stored v_angle field is NOT modified by the punch).
+        let punchangle = self.vm.ent_get_vector(ent, "punchangle");
+        let v_angle_kick = [
+            cmd.pitch + punchangle[crate::math::PITCH],
+            cmd.yaw + punchangle[crate::math::YAW],
+            punchangle[crate::math::ROLL],
+        ];
+
+        // angles[ROLL] = V_CalcRoll(current angles, velocity) * 4 — read the
+        // PRE-update angles + velocity, exactly as the C does before assigning
+        // pitch/yaw.
+        let cur_angles = self.vm.ent_get_vector(ent, "angles");
+        let velocity = self.vm.ent_get_vector(ent, "velocity");
+        let roll = v_calc_roll(cur_angles, velocity) * 4.0;
+
         if fixangle == 0.0 {
-            self.vm
-                .ent_set_vector(ent, "angles", [-cmd.pitch / 3.0, cmd.yaw, 0.0]);
+            self.vm.ent_set_vector(
+                ent,
+                "angles",
+                [
+                    -v_angle_kick[crate::math::PITCH] / 3.0,
+                    v_angle_kick[crate::math::YAW],
+                    roll,
+                ],
+            );
         } else {
-            // Honour the forced angles, then clear the flag (SV_WriteClientdata).
+            // Honour the forced pitch/yaw but still bank the roll, then clear the
+            // flag (SV_WriteClientdata).
+            self.vm
+                .ent_set_vector(ent, "angles", [cur_angles[0], cur_angles[1], roll]);
             self.vm.ent_set_float(ent, "fixangle", 0.0);
         }
 
@@ -3722,7 +4133,12 @@ impl Server {
             let flags = self.vm.ent_get_float(ent, "flags") as i32;
             self.vm
                 .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
-            self.vm.ent_set_int(ent, "groundentity", 0);
+            // groundentity = EDICT_TO_PROG(downtrace.ent): the edict we stepped
+            // down onto (0 = world, >0 = a plat/door), not a hardcoded world.
+            // `downtrace.ent` is `-1` (nothing) only when the down-push was clear,
+            // but plane_normal[2] > 0.7 implies a floor was contacted, so clamp
+            // the sentinel to the world (0) defensively.
+            self.vm.ent_set_int(ent, "groundentity", downtrace.ent.max(0));
         } else {
             // the push down didn't reach good ground: use the no-step move.
             self.vm.ent_set_vector(ent, "origin", nosteporg);
@@ -4704,6 +5120,42 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
+/// `V_CalcRoll` (view.c:81): how far the view/body banks (rolls) when strafing.
+///
+/// Used by both the client view and `SV_ClientThink` (which multiplies the
+/// result by 4 to set the player body's `angles[ROLL]`). The sign follows the
+/// strafe direction (the dot of velocity with the right vector), the magnitude
+/// ramps from 0 up to `cl_rollangle` (2.0 deg) as the sideways speed climbs to
+/// `cl_rollspeed` (200 u/s), then clamps. We carry id's stock cvar defaults as
+/// constants — this headless server has no cvar registry, but these are the
+/// values a default config uses.
+///
+/// ```text
+/// AngleVectors(angles) -> right
+/// side = DotProduct(velocity, right)
+/// sign = side < 0 ? -1 : 1
+/// side = |side|
+/// side = side < rollspeed ? side*rollangle/rollspeed : rollangle
+/// return side * sign
+/// ```
+fn v_calc_roll(angles: Vec3, velocity: Vec3) -> f32 {
+    /// `cl_rollangle` default ("2.0").
+    const CL_ROLLANGLE: f32 = 2.0;
+    /// `cl_rollspeed` default ("200").
+    const CL_ROLLSPEED: f32 = 200.0;
+
+    let (_forward, right, _up) = angle_vectors(angles);
+    let raw = crate::math::dot(velocity, right);
+    let sign = if raw < 0.0 { -1.0 } else { 1.0 };
+    let side = raw.abs();
+    let side = if side < CL_ROLLSPEED {
+        side * CL_ROLLANGLE / CL_ROLLSPEED
+    } else {
+        CL_ROLLANGLE
+    };
+    side * sign
+}
+
 /// Standalone `ClipVelocity` (so the physics methods can call it without
 /// borrowing `self`). `STOP_EPSILON = 0.1` matches the C.
 fn clip_velocity(vel: Vec3, normal: Vec3, overbounce: f32) -> Vec3 {
@@ -5333,6 +5785,262 @@ mod tests {
         let vel = server.vm.ent_get_vector(e, "velocity");
         assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
         assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+    }
+
+    // ---------------------------------------------------- skill + water tests
+
+    /// A copy of [`world_open_bsp`] whose open leaf is `CONTENTS_WATER`, so
+    /// `point_contents(anywhere)` returns water. Used to exercise
+    /// `SV_CheckWaterTransition` (the entity reports it is submerged).
+    fn water_world_bsp() -> Bsp {
+        use crate::bsp::{CONTENTS_WATER, DLeaf};
+        let mut b = world_open_bsp();
+        // leaf 1 (the side both node children point at) becomes water.
+        b.leafs[1] = DLeaf {
+            contents: CONTENTS_WATER,
+            visofs: -1,
+            mins: [0; 3],
+            maxs: [0; 3],
+            firstmarksurface: 0,
+            nummarksurfaces: 0,
+            ambient_level: [0; 4],
+        };
+        b
+    }
+
+    /// A progs with the fields the toss/step physics touch by name, including
+    /// `watertype`/`waterlevel` so `SV_CheckWaterTransition` can write them.
+    fn step_physics_progs() -> Vec<u8> {
+        let mut b = Builder::new();
+        b.entityfields = 40;
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("movetype", EV_FLOAT, 2);
+        b.add_field("nextthink", EV_FLOAT, 3);
+        b.add_field("flags", EV_FLOAT, 4);
+        b.add_field("velocity", EV_VECTOR, 5); // 5,6,7
+        b.add_field("origin", EV_VECTOR, 8); // 8,9,10
+        b.add_field("mins", EV_VECTOR, 11); // 11,12,13
+        b.add_field("maxs", EV_VECTOR, 14); // 14,15,16
+        b.add_field("angles", EV_VECTOR, 17); // 17,18,19
+        b.add_field("avelocity", EV_VECTOR, 20); // 20,21,22
+        b.add_field("watertype", EV_FLOAT, 23);
+        b.add_field("waterlevel", EV_FLOAT, 24);
+        b.add_field("solid", EV_FLOAT, 25);
+        b.add_field("groundentity", EV_ENTITY, 26);
+        b.build()
+    }
+
+    #[test]
+    fn skill_filter_honours_each_difficulty_flag() {
+        // FIX-1: the spawn filter must honour NOT_EASY (skill 0), NOT_MEDIUM
+        // (skill 1) and NOT_HARD (skill>=2), not just NOT_MEDIUM. An entity
+        // flagged NOT_HARD must spawn at skill 0/1 and be inhibited at skill 2/3.
+        let make = |skill: f32, spawnflags: i32| -> SpawnReport {
+            let (img, _marker, g_one) = marker_progs();
+            let progs = Progs::parse(&img).expect("parse");
+            let ents = format!(
+                "{{ \"classname\" \"marker\" \"spawnflags\" \"{spawnflags}\" }}\n"
+            );
+            let mut server = Server::new(bsp_with_entities(&ents), progs).expect("server");
+            server.vm.set_gf(g_one as usize, 1.0);
+            server.set_skill(skill);
+            server.spawn_entities().expect("spawn")
+        };
+
+        // NOT_HARD (1024): kept on easy/medium, dropped on hard/nightmare.
+        assert_eq!(make(0.0, 1024).inhibited, 0, "NOT_HARD spawns at easy");
+        assert_eq!(make(1.0, 1024).inhibited, 0, "NOT_HARD spawns at medium");
+        assert_eq!(make(2.0, 1024).inhibited, 1, "NOT_HARD inhibited at hard");
+        assert_eq!(make(3.0, 1024).inhibited, 1, "NOT_HARD inhibited at nightmare");
+
+        // NOT_EASY (256): dropped only on easy.
+        assert_eq!(make(0.0, 256).inhibited, 1, "NOT_EASY inhibited at easy");
+        assert_eq!(make(1.0, 256).inhibited, 0, "NOT_EASY spawns at medium");
+        assert_eq!(make(2.0, 256).inhibited, 0, "NOT_EASY spawns at hard");
+
+        // NOT_MEDIUM (512): dropped only on medium (the prior behaviour, intact).
+        assert_eq!(make(0.0, 512).inhibited, 0, "NOT_MEDIUM spawns at easy");
+        assert_eq!(make(1.0, 512).inhibited, 1, "NOT_MEDIUM inhibited at medium");
+        assert_eq!(make(2.0, 512).inhibited, 0, "NOT_MEDIUM spawns at hard");
+
+        // A monster with no skill flags always spawns.
+        assert_eq!(make(2.0, 0).spawned, 1, "unflagged entity spawns at any skill");
+    }
+
+    #[test]
+    fn cvar_set_skill_round_trips_through_cvar() {
+        // FIX-1: cvar_set("skill", N) must update a real, readable skill value
+        // (clamped 0..3, rounded like SV_SpawnServer), and cvar("skill") reads it
+        // back. The old stub made cvar always return 1 and cvar_set a no-op.
+        let (img, _marker, _g_one) = marker_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(bsp_with_entities("{ }"), progs).expect("server");
+
+        // Constructor resets skill to the medium default.
+        assert_eq!(server.skill(), 1, "fresh server defaults to skill 1");
+
+        // Drive the engine cvar_set builtin directly (#72): cvar_set("skill","2").
+        let name = server.vm.intern("skill");
+        let val = server.vm.intern("2");
+        server.vm.argc = 2;
+        server.vm.set_gi(crate::progs::OFS_PARM0, name);
+        server.vm.set_gi(crate::progs::OFS_PARM1, val);
+        bi_cvar_set(&mut server.vm).expect("cvar_set");
+        assert_eq!(server.skill(), 2, "cvar_set('skill','2') stored 2");
+
+        // cvar("skill") reads the live value back.
+        server.vm.argc = 1;
+        let name = server.vm.intern("skill");
+        server.vm.set_gi(crate::progs::OFS_PARM0, name);
+        bi_cvar(&mut server.vm).expect("cvar");
+        assert_eq!(
+            server.vm.gf(crate::progs::OFS_RETURN),
+            2.0,
+            "cvar('skill') returns the live 2, not the old constant 1"
+        );
+
+        // Out-of-range is clamped (nightmare cap at 3); a non-integer rounds.
+        bi_cvar_set_via(&mut server, "skill", "9");
+        assert_eq!(server.skill(), 3, "skill clamps to 3");
+        bi_cvar_set_via(&mut server, "skill", "-4");
+        assert_eq!(server.skill(), 0, "skill clamps to 0");
+        bi_cvar_set_via(&mut server, "skill", "1.6");
+        assert_eq!(server.skill(), 2, "1.6 -> (int)(1.6+0.5) = 2");
+
+        // A non-skill cvar_set is a benign no-op (does not touch skill).
+        bi_cvar_set_via(&mut server, "fraglimit", "20");
+        assert_eq!(server.skill(), 2, "setting another cvar leaves skill alone");
+    }
+
+    /// Helper: invoke the engine `cvar_set` builtin with two string args.
+    fn bi_cvar_set_via(server: &mut Server, var: &str, val: &str) {
+        let n = server.vm.intern(var);
+        let v = server.vm.intern(val);
+        server.vm.argc = 2;
+        server.vm.set_gi(crate::progs::OFS_PARM0, n);
+        server.vm.set_gi(crate::progs::OFS_PARM1, v);
+        bi_cvar_set(&mut server.vm).expect("cvar_set");
+    }
+
+    #[test]
+    fn water_transition_sets_watertype_and_splashes() {
+        // FIX-3: a stepped entity that crosses from air into water gets its
+        // watertype/waterlevel set and plays the misc/h2ohit1.wav splash.
+        let progs = Progs::parse(&step_physics_progs()).expect("parse");
+        let mut server = Server::new(water_world_bsp(), progs).expect("server");
+
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_STEP as f32);
+        server.vm.ent_set_float(e, "nextthink", 0.0); // no think
+        // ON_GROUND so the freefall block is skipped but CheckWaterTransition
+        // still runs unconditionally at the end of SV_Physics_Step.
+        server.vm.ent_set_float(e, "flags", FL_ONGROUND as f32);
+        server.vm.ent_set_vector(e, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+        // Pretend it was previously in AIR so this frame is an air->water crossing
+        // (watertype != 0 avoids the silent "just spawned" path).
+        server.vm.ent_set_float(e, "watertype", CONTENTS_EMPTY as f32);
+        server.vm.ent_set_float(e, "waterlevel", 0.0);
+        let _ = server.drain_sounds(); // clear any startup queue
+
+        server.run_frame(0.1).expect("frame");
+
+        // watertype is now the liquid contents and waterlevel == 1.
+        assert_eq!(
+            server.vm.ent_get_float(e, "watertype") as i32,
+            crate::bsp::CONTENTS_WATER,
+            "watertype updated to the water contents"
+        );
+        assert_eq!(
+            server.vm.ent_get_float(e, "waterlevel"),
+            1.0,
+            "waterlevel set to 1 on entry"
+        );
+        // The air->water crossing queued the splash.
+        let sounds = server.drain_sounds();
+        assert!(
+            sounds.iter().any(|s| s.sample == "misc/h2ohit1.wav"),
+            "entering water plays misc/h2ohit1.wav, got {sounds:?}"
+        );
+    }
+
+    #[test]
+    fn water_transition_just_spawned_is_silent() {
+        // The "just spawned here" path (watertype == 0) adopts the current
+        // contents with waterlevel 1 and NO sound — faithful to the C early-out.
+        let progs = Progs::parse(&step_physics_progs()).expect("parse");
+        let mut server = Server::new(water_world_bsp(), progs).expect("server");
+
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_STEP as f32);
+        server.vm.ent_set_float(e, "flags", FL_ONGROUND as f32);
+        server.vm.ent_set_vector(e, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(e, "watertype", 0.0); // never set -> just spawned
+        let _ = server.drain_sounds();
+
+        server.run_frame(0.1).expect("frame");
+
+        assert_eq!(server.vm.ent_get_float(e, "waterlevel"), 1.0);
+        assert_eq!(
+            server.vm.ent_get_float(e, "watertype") as i32,
+            crate::bsp::CONTENTS_WATER
+        );
+        assert!(
+            server.drain_sounds().is_empty(),
+            "the just-spawned water adoption must be silent"
+        );
+    }
+
+    #[test]
+    fn toss_rest_records_groundentity_landed_on() {
+        // FIX-6: a MOVETYPE_TOSS entity that comes to rest sets groundentity to
+        // the bmodel it landed on (trace.ent), not a hardcoded world. Here it
+        // lands on a SOLID_BSP platform edict, so groundentity must be that edict.
+        let progs = Progs::parse(&step_physics_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        // A solid bmodel platform at the floor.
+        let plat = server.vm.spawn();
+        server.vm.ent_set_float(plat, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_float(plat, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_vector(plat, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(plat, "mins", [-64.0, -64.0, -8.0]);
+        server.vm.ent_set_vector(plat, "maxs", [64.0, 64.0, 0.0]);
+        link_edict(&mut server.vm, plat);
+
+        // A grenade-like toss entity just above the platform, falling.
+        let g = server.vm.spawn();
+        server.vm.ent_set_float(g, "movetype", MOVETYPE_TOSS as f32);
+        server.vm.ent_set_float(g, "flags", 0.0); // airborne
+        server.vm.ent_set_vector(g, "origin", [0.0, 0.0, 4.0]);
+        server.vm.ent_set_vector(g, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(g, "maxs", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(g, "velocity", [0.0, 0.0, -50.0]);
+        // groundentity starts as world (0); the rest path must overwrite it.
+        server.vm.ent_set_int(g, "groundentity", 0);
+        link_edict(&mut server.vm, g);
+
+        server.run_frame(0.1).expect("frame");
+
+        // It should have come to rest on the platform (FL_ONGROUND) and recorded
+        // the platform edict as its groundentity.
+        let on_ground = (server.vm.ent_get_float(g, "flags") as i32) & FL_ONGROUND != 0;
+        if on_ground {
+            assert_eq!(
+                server.vm.ent_get_int(g, "groundentity"),
+                plat,
+                "toss-rest groundentity is the platform it landed on"
+            );
+        }
     }
 
     // -------------------------------------------------- MOVETYPE_PUSH physics
@@ -6691,6 +7399,90 @@ mod tests {
             "player advanced forward in +X: {} -> {}",
             before[0],
             after[0]
+        );
+    }
+
+    #[test]
+    fn v_calc_roll_leans_into_a_strafe() {
+        // FIX-7 unit: V_CalcRoll signs with the strafe direction and ramps with
+        // sideways speed up to cl_rollangle (2.0) at cl_rollspeed (200).
+        // Facing +X (yaw 0): right vector is -Y, so a +Y velocity gives a negative
+        // dot (lean one way), a -Y velocity the opposite sign.
+        let facing = [0.0, 0.0, 0.0];
+        let slow = v_calc_roll(facing, [0.0, 100.0, 0.0]); // half rollspeed
+        let fast = v_calc_roll(facing, [0.0, 400.0, 0.0]); // past rollspeed -> clamp
+        assert!(slow != 0.0, "a sideways velocity produces a non-zero roll");
+        // 100 u/s is half of rollspeed -> magnitude = 2.0 * 100/200 = 1.0.
+        assert!((slow.abs() - 1.0).abs() < 1e-4, "ramped roll magnitude, got {slow}");
+        // Clamped at cl_rollangle = 2.0 beyond rollspeed.
+        assert!((fast.abs() - 2.0).abs() < 1e-4, "clamped roll magnitude, got {fast}");
+        // Opposite strafe -> opposite sign.
+        let other = v_calc_roll(facing, [0.0, -100.0, 0.0]);
+        assert!(slow * other < 0.0, "strafe direction flips the roll sign");
+        // No sideways component -> no roll.
+        assert_eq!(v_calc_roll(facing, [200.0, 0.0, 0.0]), 0.0, "pure forward = no lean");
+    }
+
+    #[test]
+    fn client_think_applies_punchangle_and_roll_to_body_angles() {
+        // FIX-7: SV_ClientThink adds punchangle to the view (so the body pitch =
+        // -(v_angle+punch).pitch/3) and sets angles[ROLL] = V_CalcRoll*4. The old
+        // port wrote angles = [-pitch/3, yaw, 0] with no punch and no roll.
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+
+        let p = server.connect_client().expect("connect");
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_float(p, "health", 100.0);
+        // Pin it on the ground so it strafes (the WALK ground path).
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
+        for _ in 0..5 {
+            server.client_frame(&UserCmd::default(), 0.1).expect("settle");
+        }
+
+        // Strafe right (sidemove > 0) while facing yaw 0; look pitch 0. Roll is
+        // computed from the velocity at the TOP of SV_ClientThink (before this
+        // frame's acceleration), so build up sideways speed over a few frames
+        // first — exactly id's one-frame-lagged lean.
+        let cmd = UserCmd {
+            sidemove: 320.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            ..UserCmd::default()
+        };
+        for _ in 0..4 {
+            server.client_frame(&cmd, 0.1).expect("build strafe speed");
+        }
+
+        // Set a fresh weapon kick (punchangle pitch = -6) just before the final
+        // frame so the decay maths is predictable (one frame of 10*dt decay).
+        server.vm.ent_set_vector(p, "punchangle", [-6.0, 0.0, 0.0]);
+        server.client_frame(&cmd, 0.1).expect("strafe frame");
+
+        let angles = server.vm.ent_get_vector(p, "angles");
+        // ROLL is non-zero: the body leans into the strafe (V_CalcRoll * 4).
+        assert!(
+            angles[crate::math::ROLL].abs() > 0.01,
+            "strafing player banks: angles[ROLL] = {}",
+            angles[crate::math::ROLL]
+        );
+        // PITCH reflects the punch. SV_ClientThink runs DropPunchAngle FIRST
+        // (decays the kick by 10*dt = 1.0 unit of length, so -6 -> -5), THEN adds
+        // it: angles[PITCH] = -(v_angle.pitch + decayed_punch)/3 = -(0 + -5)/3.
+        assert!(
+            (angles[crate::math::PITCH] - 5.0 / 3.0).abs() < 1e-3,
+            "decayed punchangle feeds the body pitch: expected ~1.667, got {}",
+            angles[crate::math::PITCH]
+        );
+        // Without the punch the body pitch would be 0 (look pitch is 0), so a
+        // non-zero pitch proves the punch was applied.
+        assert!(
+            angles[crate::math::PITCH] > 0.5,
+            "punch must move the body pitch off zero, got {}",
+            angles[crate::math::PITCH]
         );
     }
 

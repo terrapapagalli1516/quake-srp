@@ -51,6 +51,20 @@
 ///   cycles through `ramp1` (yellow -> dark), dying at `ramp >= 8`.
 /// * [`ParticleKind::Explode2`] — `pt_explode2`: the odd half. Velocity *shrinks*
 ///   `(1 - dt)` per axis, falls under gravity, cycles `ramp2`, dies at `ramp >= 8`.
+/// * [`ParticleKind::Grav`] — `pt_grav`: in software WinQuake (no `QUAKE2`) this
+///   is identical to `pt_slowgrav` (`vel.z -= grav`); the blood/slight-blood
+///   rocket-trail types spawn it. No colour cycling.
+/// * [`ParticleKind::Static`] — `pt_static`: never moves or decays on its own
+///   (`R_DrawParticles` has an empty `case pt_static`); only its `die` time and
+///   the per-frame `org += vel*dt` apply. The tracer and voor rocket-trail types
+///   spawn it (with a constant velocity, no gravity).
+/// * [`ParticleKind::Blob`] — `pt_blob`: velocity *grows* `(1 + dvel)` on all
+///   three axes and falls under gravity, but does **not** cycle colour (its colour
+///   is fixed at spawn). The tar/blob explosion's even half and the whole of
+///   `R_ParticleExplosion2` spawn it.
+/// * [`ParticleKind::Blob2`] — `pt_blob2`: velocity *shrinks* `(1 - dvel)` on the
+///   X/Y axes only (Z is untouched by the shrink) and falls under gravity; no
+///   colour cycling. The tar/blob explosion's odd half spawns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParticleKind {
     /// `pt_slowgrav`: gentle downward drift, no colour cycling (`spawn_burst`).
@@ -61,6 +75,19 @@ pub enum ParticleKind {
     Explode,
     /// `pt_explode2`: velocity shrinks, falls, cycles `ramp2`; dies at `ramp >= 8`.
     Explode2,
+    /// `pt_grav`: gentle downward drift (`vel.z -= grav`), no colour cycling.
+    /// Identical to `SlowGrav` in software WinQuake; kept distinct to match the C
+    /// `ptype_t` exactly.
+    Grav,
+    /// `pt_static`: never decays or accelerates on its own — only `org += vel*dt`
+    /// and the absolute `die` apply. Used by the tracer/voor trail particles.
+    Static,
+    /// `pt_blob`: velocity grows `(1 + dvel)` on all axes, falls under gravity, no
+    /// colour cycling. Tar-explosion even half + `R_ParticleExplosion2`.
+    Blob,
+    /// `pt_blob2`: velocity shrinks `(1 - dvel)` on X/Y only, falls under gravity,
+    /// no colour cycling. Tar-explosion odd half.
+    Blob2,
 }
 
 /// A live particle: a coloured point with a world position, a velocity, the
@@ -121,6 +148,25 @@ fn ramp_color(ramp: &[u8], cursor: f32, limit: f32) -> Option<u8> {
     // cursor is in [0, limit) and finite here; floor to a table index.
     let idx = cursor.max(0.0) as usize;
     ramp.get(idx).copied()
+}
+
+/// Normalise a 3-vector, porting the C `VectorNormalize`.
+///
+/// The C divided each component by the length (computing `1/length` and
+/// multiplying), and for a zero-length input the divide produced `inf`/`nan` that
+/// then got multiplied to leave the vector at its (zero) input. To keep the
+/// `#![forbid(unsafe_code)]` crate panic- and NaN-free, a zero (or non-finite)
+/// length returns the zero vector — the only zero-`dir` cell is the teleport
+/// splash's `(i,j)=(0,0)`, where the C velocity was effectively `(0,0,0)` too, so
+/// this matches the visible behaviour.
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len > 0.0 && len.is_finite() {
+        let inv = 1.0 / len;
+        [v[0] * inv, v[1] * inv, v[2] * inv]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
 }
 
 /// The hard cap on simultaneously-live particles. Quake's `R_DrawParticles`
@@ -301,6 +347,380 @@ impl ParticleSystem {
         }
     }
 
+    /// Spawn a colour-mapped explosion, porting `R_ParticleExplosion2(org,
+    /// colorStart, colorLength)` (the `TE_EXPLOSION2` temp entity).
+    ///
+    /// Spawns up to 512 [`ParticleKind::Blob`] particles centred on `org`. The
+    /// colour walks `colorStart + (colorMod % colorLength)` as `colorMod`
+    /// increments each particle (the C `p->color = colorStart + (colorMod %
+    /// colorLength); colorMod++`). Each has a per-axis position jitter in
+    /// `[-16, 16)` (`(rand()%32)-16`), a per-axis velocity in `[-256, 256)`
+    /// (`(rand()%512)-256`), and a 0.3-second lifetime (`die = now + 0.3`).
+    ///
+    /// `color_length` of 0 would divide by zero in the C; here it is treated as 1
+    /// (every particle gets `colorStart`) so the `#![forbid(unsafe_code)]` crate
+    /// cannot panic on a hostile server message. The palette index wraps modulo
+    /// 256 (`as u8`) exactly as the C `int -> byte` store did.
+    ///
+    /// SAFETY/FAITHFULNESS: the spawn count is clamped against the remaining pool
+    /// capacity, exactly as the C bailed once `free_particles` was exhausted.
+    pub fn spawn_explosion2(
+        &mut self,
+        org: [f32; 3],
+        color_start: i32,
+        color_length: i32,
+        now: f32,
+        rng: &mut Lcg,
+    ) {
+        let remaining = MAX_PARTICLES.saturating_sub(self.particles.len());
+        let to_spawn = 512usize.min(remaining);
+        // The C divides by colorLength; guard a 0/negative length to avoid a
+        // panic (treat as a single-colour ramp).
+        let len = if color_length <= 0 { 1 } else { color_length };
+        for color_mod in 0..to_spawn {
+            let jx = rng.next_range(32) as i32 - 16;
+            let jy = rng.next_range(32) as i32 - 16;
+            let jz = rng.next_range(32) as i32 - 16;
+            let vx = (rng.next_range(512) as i32 - 256) as f32;
+            let vy = (rng.next_range(512) as i32 - 256) as f32;
+            let vz = (rng.next_range(512) as i32 - 256) as f32;
+            // color = colorStart + (colorMod % colorLength), stored as a byte.
+            let color = (color_start + (color_mod as i32 % len)) as u8;
+            self.particles.push(Particle {
+                origin: [org[0] + jx as f32, org[1] + jy as f32, org[2] + jz as f32],
+                velocity: [vx, vy, vz],
+                color,
+                die: now + 0.3,
+                kind: ParticleKind::Blob,
+                ramp: 0.0,
+            });
+        }
+    }
+
+    /// Spawn a tar/blob explosion, porting `R_BlobExplosion(org)` (the
+    /// `TE_TAREXPLOSION` temp entity — the tarbaby/spawn monster's death blast).
+    ///
+    /// Spawns up to 1024 particles centred on `org`, alternating by index:
+    /// * even `i` -> [`ParticleKind::Blob2`], colour `150 + rand()%6` (a purple
+    ///   ramp);
+    /// * odd `i`  -> [`ParticleKind::Blob`], colour `66 + rand()%6` (a blue ramp).
+    ///
+    /// Each has a per-axis position jitter in `[-16, 16)`, a per-axis velocity in
+    /// `[-256, 256)`, and a lifetime of `1 + (rand()&8)*0.05` seconds — note the C
+    /// uses `rand()&8` (a *bit mask*, yielding only 0 or 8), so the lifetime is
+    /// either `1.0` or `1.4` seconds, not a uniform spread.
+    ///
+    /// This is distinct from [`ParticleSystem::spawn_explosion`] (the rocket
+    /// `R_ParticleExplosion`, which uses the `ramp1`/`ramp2` fire ramps and a
+    /// 5-second life). The tar explosion does **not** cycle colour and does **not**
+    /// allocate a dynamic light — the C `TE_TAREXPLOSION` case calls only
+    /// `R_BlobExplosion` + a sound, no `CL_AllocDlight` (unlike `TE_EXPLOSION`).
+    ///
+    /// SAFETY/FAITHFULNESS: clamped against the remaining pool capacity.
+    pub fn spawn_blob_explosion(&mut self, org: [f32; 3], now: f32, rng: &mut Lcg) {
+        let remaining = MAX_PARTICLES.saturating_sub(self.particles.len());
+        let to_spawn = 1024usize.min(remaining);
+        for i in 0..to_spawn {
+            // Lifetime: 1 + (rand()&8)*0.05 -> 1.0 (bit clear) or 1.4 (bit set).
+            let life = 1.0 + (rng.next_u32() & 8) as f32 * 0.05;
+            let (kind, color) = if i & 1 != 0 {
+                // odd: pt_blob, color 66 + rand()%6
+                (ParticleKind::Blob, (66 + rng.next_range(6)) as u8)
+            } else {
+                // even: pt_blob2, color 150 + rand()%6
+                (ParticleKind::Blob2, (150 + rng.next_range(6)) as u8)
+            };
+            let jx = rng.next_range(32) as i32 - 16;
+            let jy = rng.next_range(32) as i32 - 16;
+            let jz = rng.next_range(32) as i32 - 16;
+            let vx = (rng.next_range(512) as i32 - 256) as f32;
+            let vy = (rng.next_range(512) as i32 - 256) as f32;
+            let vz = (rng.next_range(512) as i32 - 256) as f32;
+            self.particles.push(Particle {
+                origin: [org[0] + jx as f32, org[1] + jy as f32, org[2] + jz as f32],
+                velocity: [vx, vy, vz],
+                color,
+                die: now + life,
+                kind,
+                ramp: 0.0,
+            });
+        }
+    }
+
+    /// Spawn a lava splash, porting `R_LavaSplash(org)` (the `TE_LAVASPLASH` temp
+    /// entity — Chthon rising, the lava-pool ambient burst).
+    ///
+    /// Iterates a 32x32 grid (`i`,`j` each from -16..16, the C's `for (i=-16;
+    /// i<16; i++)` double loop with a degenerate `k<1` inner loop), spawning **one**
+    /// [`ParticleKind::SlowGrav`] particle per cell — up to 1024 total. Each:
+    ///
+    /// * lifetime `2 + (rand()&31)*0.02` s (so `now + 2.0..=2.62`);
+    /// * colour `224 + (rand()&7)` (a red/orange ramp);
+    /// * a direction `dir = (j*8 + rand()&7, i*8 + rand()&7, 256)` that is
+    ///   *normalised* and scaled by `vel = 50 + (rand()&63)` for the velocity;
+    /// * an origin offset by the **un-normalised** `dir` X/Y and `rand()&63` in Z.
+    ///
+    /// The result is the characteristic upward-fanning spiral, not a 20-particle
+    /// burst. Because each cell consumes several RNG draws *before* the early
+    /// pool-cap bail, the draw order matches the C exactly.
+    ///
+    /// SAFETY/FAITHFULNESS: clamped against the remaining pool capacity (the C
+    /// `if (!free_particles) return;` mid-loop).
+    pub fn spawn_lava_splash(&mut self, org: [f32; 3], now: f32, rng: &mut Lcg) {
+        for i in -16..16 {
+            for j in -16..16 {
+                if self.particles.len() >= MAX_PARTICLES {
+                    return;
+                }
+                // Lifetime: 2 + (rand()&31)*0.02.
+                let life = 2.0 + (rng.next_u32() & 31) as f32 * 0.02;
+                // Color: 224 + (rand()&7).
+                let color = (224 + (rng.next_u32() & 7)) as u8;
+                // dir = (j*8 + rand()&7, i*8 + rand()&7, 256).
+                let dir = [
+                    (j * 8) as f32 + (rng.next_u32() & 7) as f32,
+                    (i * 8) as f32 + (rng.next_u32() & 7) as f32,
+                    256.0,
+                ];
+                // Origin offset by the (un-normalised) dir X/Y; Z by rand()&63.
+                let origin = [
+                    org[0] + dir[0],
+                    org[1] + dir[1],
+                    org[2] + (rng.next_u32() & 63) as f32,
+                ];
+                // VectorNormalize(dir); vel = 50 + (rand()&63); vel = dir*vel.
+                let n = normalize(dir);
+                let speed = 50.0 + (rng.next_u32() & 63) as f32;
+                let velocity = [n[0] * speed, n[1] * speed, n[2] * speed];
+                self.particles.push(Particle {
+                    origin,
+                    velocity,
+                    color,
+                    die: now + life,
+                    kind: ParticleKind::SlowGrav,
+                    ramp: 0.0,
+                });
+            }
+        }
+    }
+
+    /// Spawn a teleport splash, porting `R_TeleportSplash(org)` (the `TE_TELEPORT`
+    /// temp entity).
+    ///
+    /// Iterates a 3-D grid (`i`,`j` from -16..16 step 4; `k` from -24..32 step 4 —
+    /// the C `for(i=-16;i<16;i+=4) for(j...) for(k=-24;k<32;k+=4)`), spawning one
+    /// [`ParticleKind::SlowGrav`] particle per cell (8*8*14 = 896 cells, up to
+    /// 1024). Each:
+    ///
+    /// * lifetime `0.2 + (rand()&7)*0.02` s (so `now + 0.2..=0.34`);
+    /// * colour `7 + (rand()&7)` (a white/grey ramp);
+    /// * a direction `dir = (j*8, i*8, k*8)` that is *normalised* and scaled by
+    ///   `vel = 50 + (rand()&63)` for the velocity;
+    /// * an origin at `org + (i,j,k)` plus a small `rand()&3` per-axis jitter.
+    ///
+    /// The result is the upward-and-outward column, not a generic burst.
+    ///
+    /// SAFETY/FAITHFULNESS: clamped against the remaining pool capacity. Note the
+    /// degenerate cell at `(i,j)=(0,0)` produces a zero `dir` whose normalisation
+    /// is the zero vector (the C `VectorNormalize` returns 0 length and leaves the
+    /// vector at 0,0,0 after the divide-by-`1/length`); [`normalize`] returns the
+    /// zero vector for a zero input, matching that velocity of 0.
+    pub fn spawn_teleport_splash(&mut self, org: [f32; 3], now: f32, rng: &mut Lcg) {
+        let mut i = -16;
+        while i < 16 {
+            let mut j = -16;
+            while j < 16 {
+                let mut k = -24;
+                while k < 32 {
+                    if self.particles.len() >= MAX_PARTICLES {
+                        return;
+                    }
+                    // Lifetime: 0.2 + (rand()&7)*0.02.
+                    let life = 0.2 + (rng.next_u32() & 7) as f32 * 0.02;
+                    // Color: 7 + (rand()&7).
+                    let color = (7 + (rng.next_u32() & 7)) as u8;
+                    // dir = (j*8, i*8, k*8).
+                    let dir = [(j * 8) as f32, (i * 8) as f32, (k * 8) as f32];
+                    // Origin: org + (i,j,k) + rand()&3 per axis.
+                    let origin = [
+                        org[0] + i as f32 + (rng.next_u32() & 3) as f32,
+                        org[1] + j as f32 + (rng.next_u32() & 3) as f32,
+                        org[2] + k as f32 + (rng.next_u32() & 3) as f32,
+                    ];
+                    // VectorNormalize(dir); vel = 50 + (rand()&63); vel = dir*vel.
+                    let n = normalize(dir);
+                    let speed = 50.0 + (rng.next_u32() & 63) as f32;
+                    let velocity = [n[0] * speed, n[1] * speed, n[2] * speed];
+                    self.particles.push(Particle {
+                        origin,
+                        velocity,
+                        color,
+                        die: now + life,
+                        kind: ParticleKind::SlowGrav,
+                        ramp: 0.0,
+                    });
+                    k += 4;
+                }
+                j += 4;
+            }
+            i += 4;
+        }
+    }
+
+    /// Spawn a rocket/projectile trail, porting `R_RocketTrail(start, end, type)`.
+    ///
+    /// Walks from `start` toward `end` in steps along the unit direction, spawning
+    /// one particle per step. The step size `dec` is 3 units for `type < 128`; a
+    /// `type >= 128` (the `0+128` the `TE_RAILTRAIL`/demo "explosion-trail" path
+    /// uses) steps 1 unit at a time after subtracting 128 from `type`.
+    ///
+    /// The six trail types (after the `-128` adjust):
+    /// * `0` rocket trail: [`ParticleKind::Fire`], `ramp = rand()&3`,
+    ///   `color = ramp3[ramp]`, `org = start + (rand()%6 - 3)` per axis, `die +2 s`,
+    ///   zero velocity.
+    /// * `1` smoke: [`ParticleKind::Fire`], `ramp = (rand()&3) + 2`, otherwise as
+    ///   type 0.
+    /// * `2` blood: [`ParticleKind::Grav`], `color = 67 + (rand()&3)`, `org` jitter
+    ///   `rand()%6 - 3`, `die +2 s`, zero velocity.
+    /// * `3` tracer1: [`ParticleKind::Static`], `die +0.5 s`,
+    ///   `color = 52 + ((tracercount&4)<<1)`, velocity perpendicular to the trail
+    ///   (`±30*vec` swapped X/Y) alternating by `tracercount` parity. `org = start`.
+    /// * `4` slight blood: like type 2 but advances an **extra** 3 units per step
+    ///   (`len -= 3`), so half as dense.
+    /// * `5` tracer2: like type 3 but `color = 230 + ((tracercount&4)<<1)`.
+    /// * `6` voor trail: [`ParticleKind::Static`], `color = 9*16 + 8 + (rand()&3)`,
+    ///   `die +0.3 s`, `org = start + (rand()&15 - 8)` per axis, zero velocity.
+    ///
+    /// `tracercount` is the C's `static int` shared across calls — it must persist
+    /// between trail spawns to alternate the tracer velocity direction, so the
+    /// caller passes a `&mut u32` they keep on the particle system / client.
+    ///
+    /// SAFETY/FAITHFULNESS: each step checks the pool cap before spawning (the C
+    /// `if (!free_particles) return;`), so a long trail can never exceed
+    /// [`MAX_PARTICLES`]. A `start == end` (zero-length) trail spawns nothing
+    /// (`len <= 0`), matching the C `while (len > 0)`.
+    pub fn spawn_rocket_trail(
+        &mut self,
+        start: [f32; 3],
+        end: [f32; 3],
+        ttype: i32,
+        tracercount: &mut u32,
+        now: f32,
+        rng: &mut Lcg,
+    ) {
+        // vec = end - start; len = |vec|; vec normalised.
+        let mut vec = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+        let mut len = (vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]).sqrt();
+        if len > 0.0 {
+            vec = [vec[0] / len, vec[1] / len, vec[2] / len];
+        }
+        // The C `R_RocketTrail` walks `start` itself forward by `vec` each step;
+        // we keep a local copy so the caller's `start` is untouched.
+        let mut cur = start;
+
+        let (dec, ttype) = if ttype < 128 {
+            (3.0f32, ttype)
+        } else {
+            (1.0f32, ttype - 128)
+        };
+
+        while len > 0.0 {
+            len -= dec;
+
+            if self.particles.len() >= MAX_PARTICLES {
+                return;
+            }
+
+            // Defaults shared by most cases: zero velocity, die = now + 2.
+            let mut velocity = [0.0f32, 0.0, 0.0];
+            let mut die = now + 2.0;
+            let color;
+            let kind;
+            let mut ramp = 0.0f32;
+
+            // Per-axis jitter helpers matching the C rand() expressions.
+            let jit6 = |rng: &mut Lcg| (rng.next_range(6) as i32 - 3) as f32; // rand()%6 - 3
+            let jit16 = |rng: &mut Lcg| ((rng.next_u32() & 15) as i32 - 8) as f32; // rand()&15 - 8
+
+            let mut origin = cur;
+
+            match ttype {
+                0 => {
+                    // rocket trail
+                    ramp = (rng.next_u32() & 3) as f32;
+                    color = RAMP3[(ramp as usize).min(RAMP3.len() - 1)];
+                    kind = ParticleKind::Fire;
+                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
+                }
+                1 => {
+                    // smoke
+                    ramp = ((rng.next_u32() & 3) + 2) as f32;
+                    color = RAMP3[(ramp as usize).min(RAMP3.len() - 1)];
+                    kind = ParticleKind::Fire;
+                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
+                }
+                2 => {
+                    // blood
+                    kind = ParticleKind::Grav;
+                    color = (67 + (rng.next_u32() & 3)) as u8;
+                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
+                }
+                3 | 5 => {
+                    // tracer1 / tracer2
+                    die = now + 0.5;
+                    kind = ParticleKind::Static;
+                    color = if ttype == 3 {
+                        (52 + ((*tracercount & 4) << 1)) as u8
+                    } else {
+                        (230 + ((*tracercount & 4) << 1)) as u8
+                    };
+                    let odd = *tracercount & 1;
+                    *tracercount = tracercount.wrapping_add(1);
+                    origin = cur;
+                    if odd != 0 {
+                        velocity = [30.0 * vec[1], 30.0 * -vec[0], 0.0];
+                    } else {
+                        velocity = [30.0 * -vec[1], 30.0 * vec[0], 0.0];
+                    }
+                }
+                4 => {
+                    // slight blood: like type 2 but advance an extra 3 units.
+                    kind = ParticleKind::Grav;
+                    color = (67 + (rng.next_u32() & 3)) as u8;
+                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
+                    len -= 3.0;
+                }
+                6 => {
+                    // voor trail
+                    color = (9 * 16 + 8 + (rng.next_u32() & 3)) as u8;
+                    kind = ParticleKind::Static;
+                    die = now + 0.3;
+                    origin = [cur[0] + jit16(rng), cur[1] + jit16(rng), cur[2] + jit16(rng)];
+                }
+                _ => {
+                    // Unknown type: the C `switch` would fall through with the
+                    // particle left at its defaults (vel 0, die +2) and color 0.
+                    // We mirror that as a harmless static particle so the pool
+                    // accounting (and RNG draw count) is unchanged.
+                    color = 0;
+                    kind = ParticleKind::Static;
+                }
+            }
+
+            self.particles.push(Particle {
+                origin,
+                velocity,
+                color,
+                die,
+                kind,
+                ramp,
+            });
+
+            // VectorAdd(start, vec, start): step the walk position forward.
+            cur = [cur[0] + vec[0], cur[1] + vec[1], cur[2] + vec[2]];
+        }
+    }
+
     /// Advance every particle one frame and retire the expired ones, porting the
     /// per-`type` cases of `R_DrawParticles`.
     ///
@@ -378,6 +798,32 @@ impl ParticleSystem {
                     p.velocity[0] *= s;
                     p.velocity[1] *= s;
                     p.velocity[2] *= s;
+                    p.velocity[2] -= grav;
+                }
+                ParticleKind::Grav => {
+                    // C `case pt_grav` (non-QUAKE2 falls through to pt_slowgrav):
+                    // vel[2] -= grav. No colour cycling.
+                    p.velocity[2] -= grav;
+                }
+                ParticleKind::Static => {
+                    // C `case pt_static: break;` — no acceleration, no decay; only
+                    // the org += vel*dt above and the absolute `die` apply.
+                }
+                ParticleKind::Blob => {
+                    // C `case pt_blob`: vel[i] += vel[i]*dvel for all 3 axes,
+                    // then vel[2] -= grav. No colour cycling.
+                    let s = 1.0 + dvel;
+                    p.velocity[0] *= s;
+                    p.velocity[1] *= s;
+                    p.velocity[2] *= s;
+                    p.velocity[2] -= grav;
+                }
+                ParticleKind::Blob2 => {
+                    // C `case pt_blob2`: vel[i] -= vel[i]*dvel for i<2 (X/Y ONLY;
+                    // Z is NOT scaled), then vel[2] -= grav. No colour cycling.
+                    let s = 1.0 - dvel;
+                    p.velocity[0] *= s;
+                    p.velocity[1] *= s;
                     p.velocity[2] -= grav;
                 }
             }
@@ -651,6 +1097,352 @@ mod tests {
         assert!((sys.particles()[0].velocity[0] - 140.0).abs() < 1e-3);
         // Explode2: 100 * (1 - 0.1) = 90.
         assert!((sys.particles()[1].velocity[0] - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn spawn_explosion2_honors_color_ramp_args() {
+        // R_ParticleExplosion2: up to 512 pt_blob particles; color walks
+        // colorStart + (colorMod % colorLength); die = now + 0.3.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(7);
+        let color_start = 100;
+        let color_length = 4;
+        sys.spawn_explosion2([0.0, 0.0, 0.0], color_start, color_length, 2.0, &mut rng);
+        assert_eq!(sys.len(), 512, "R_ParticleExplosion2 spawns 512 particles");
+        for (idx, p) in sys.particles().iter().enumerate() {
+            // Color cycles colorStart + (colorMod % colorLength).
+            let expected = (color_start + (idx as i32 % color_length)) as u8;
+            assert_eq!(p.color, expected, "particle {idx} color follows the ramp");
+            assert_eq!(p.die, 2.3, "die = now + 0.3");
+            assert_eq!(p.kind, ParticleKind::Blob, "explosion2 spawns pt_blob");
+            assert_eq!(p.ramp, 0.0, "no ramp cycling for blob");
+            // Position jitter [-16, 16), velocity [-256, 256).
+            for axis in 0..3 {
+                assert!(p.origin[axis] >= -16.0 && p.origin[axis] < 16.0);
+                assert!(p.velocity[axis] >= -256.0 && p.velocity[axis] < 256.0);
+            }
+        }
+        // The colour really does cycle: first four are 100,101,102,103 then wraps.
+        assert_eq!(sys.particles()[0].color, 100);
+        assert_eq!(sys.particles()[3].color, 103);
+        assert_eq!(sys.particles()[4].color, 100, "ramp wraps modulo colorLength");
+    }
+
+    #[test]
+    fn spawn_explosion2_zero_color_length_is_safe() {
+        // colorLength == 0 would be a div-by-zero in the C; here every particle
+        // takes colorStart and nothing panics.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(1);
+        sys.spawn_explosion2([0.0; 3], 200, 0, 0.0, &mut rng);
+        assert_eq!(sys.len(), 512);
+        for p in sys.particles() {
+            assert_eq!(p.color, 200, "zero length -> single colour");
+        }
+    }
+
+    #[test]
+    fn spawn_blob_explosion_two_ramps_and_no_dlight() {
+        // R_BlobExplosion: 1024 particles, even -> pt_blob2 (color 150..=155),
+        // odd -> pt_blob (color 66..=71); die = now + (1.0 or 1.4).
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(99);
+        sys.spawn_blob_explosion([10.0, 20.0, 30.0], 5.0, &mut rng);
+        assert_eq!(sys.len(), 1024, "R_BlobExplosion spawns 1024 particles");
+
+        let mut blob = 0; // odd index, blue ramp
+        let mut blob2 = 0; // even index, purple ramp
+        for (idx, p) in sys.particles().iter().enumerate() {
+            // Lifetime is exactly 1.0 or 1.4 (the C `(rand()&8)*0.05` bit mask).
+            assert!(
+                (p.die - 6.0).abs() < 1e-4 || (p.die - 6.4).abs() < 1e-4,
+                "blob die {} must be now+1.0 or now+1.4",
+                p.die
+            );
+            match p.kind {
+                ParticleKind::Blob => {
+                    // odd index, color 66 + rand()%6 -> 66..=71
+                    assert_eq!(idx & 1, 1, "pt_blob is the odd half");
+                    assert!(p.color >= 66 && p.color <= 71, "blue ramp 66..=71, got {}", p.color);
+                    blob += 1;
+                }
+                ParticleKind::Blob2 => {
+                    // even index, color 150 + rand()%6 -> 150..=155
+                    assert_eq!(idx & 1, 0, "pt_blob2 is the even half");
+                    assert!(p.color >= 150 && p.color <= 155, "purple ramp 150..=155, got {}", p.color);
+                    blob2 += 1;
+                }
+                other => panic!("unexpected blob kind {other:?}"),
+            }
+            assert_eq!(p.ramp, 0.0, "blob explosion does not cycle colour");
+        }
+        assert_eq!(blob, 512, "half are pt_blob");
+        assert_eq!(blob2, 512, "half are pt_blob2");
+        // The blob explosion is purely particles — it never allocates a dlight
+        // (the ParticleSystem has no dlight pool at all), matching the C
+        // TE_TAREXPLOSION case which omits CL_AllocDlight.
+    }
+
+    #[test]
+    fn spawn_lava_splash_is_the_full_grid() {
+        // R_LavaSplash: a 32x32 grid -> 1024 slowgrav particles; color 224..=231,
+        // die = now + 2.0..=2.62, velocity = normalize(dir)*speed (so |vel| is the
+        // speed 50..=113).
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(123);
+        sys.spawn_lava_splash([0.0, 0.0, 0.0], 1.0, &mut rng);
+        assert_eq!(sys.len(), 1024, "lava splash is the full 32x32 grid, not a burst");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::SlowGrav);
+            assert!(p.color >= 224 && p.color <= 231, "lava color 224..=231, got {}", p.color);
+            assert!(p.die >= 3.0 && p.die <= 3.62, "lava die {} out of [3.0, 3.62]", p.die);
+            // Velocity magnitude is the scaled speed in [50, 113] (dir is non-zero
+            // because dir[2]=256 always).
+            let speed = (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt();
+            assert!(speed >= 49.9 && speed <= 113.1, "lava speed {speed} out of [50, 113]");
+            // dir[2] = 256 dominates, so velocity Z is always positive (upward fan).
+            assert!(p.velocity[2] > 0.0, "lava particles fan upward");
+        }
+    }
+
+    #[test]
+    fn spawn_teleport_splash_is_the_column() {
+        // R_TeleportSplash: 8 * 8 * 14 = 896 slowgrav particles; color 7..=14,
+        // die = now + 0.2..=0.34.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(55);
+        sys.spawn_teleport_splash([0.0, 0.0, 0.0], 1.0, &mut rng);
+        // i: -16..16 step 4 = 8; j: same = 8; k: -24..32 step 4 = 14.
+        assert_eq!(sys.len(), 8 * 8 * 14, "teleport splash is the full 3-D grid");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::SlowGrav);
+            assert!(p.color >= 7 && p.color <= 14, "teleport color 7..=14, got {}", p.color);
+            assert!(p.die >= 1.2 && p.die <= 1.34, "teleport die {} out of [1.2, 1.34]", p.die);
+        }
+    }
+
+    #[test]
+    fn spawn_rocket_trail_type0_fire_steps_every_3_units() {
+        // type 0 rocket trail: pt_fire, color from ramp3, ramp = rand()&3,
+        // die = now + 2, zero velocity. Steps every 3 units along a 30-unit trail
+        // => 10 particles.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(2);
+        let mut tc = 0u32;
+        sys.spawn_rocket_trail([0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0, &mut tc, 5.0, &mut rng);
+        assert_eq!(sys.len(), 10, "30-unit trail / 3-unit step = 10 particles");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::Fire);
+            assert_eq!(p.die, 7.0, "die = now + 2");
+            assert_eq!(p.velocity, [0.0, 0.0, 0.0], "fire trail has zero velocity");
+            // ramp in 0..=3, color is the matching ramp3 entry.
+            assert!(p.ramp >= 0.0 && p.ramp <= 3.0);
+            assert_eq!(p.color, RAMP3[p.ramp as usize], "color = ramp3[ramp]");
+            // Position jitter rand()%6 - 3 -> [-3, 3) around the step point on X.
+            assert!(p.origin[1] >= -3.0 && p.origin[1] < 3.0);
+        }
+    }
+
+    #[test]
+    fn spawn_rocket_trail_type1_smoke_ramp_offset() {
+        // type 1 smoke: pt_fire, ramp = (rand()&3) + 2 -> 2..=5.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(3);
+        let mut tc = 0u32;
+        sys.spawn_rocket_trail([0.0; 3], [9.0, 0.0, 0.0], 1, &mut tc, 1.0, &mut rng);
+        assert_eq!(sys.len(), 3, "9-unit trail / 3 = 3 particles");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::Fire);
+            assert!(p.ramp >= 2.0 && p.ramp <= 5.0, "smoke ramp 2..=5, got {}", p.ramp);
+            assert_eq!(p.color, RAMP3[p.ramp as usize]);
+        }
+    }
+
+    #[test]
+    fn spawn_rocket_trail_type2_blood() {
+        // type 2 blood: pt_grav, color 67..=70, die = now + 2.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(4);
+        let mut tc = 0u32;
+        sys.spawn_rocket_trail([0.0; 3], [12.0, 0.0, 0.0], 2, &mut tc, 0.0, &mut rng);
+        assert_eq!(sys.len(), 4, "12-unit trail / 3 = 4 particles");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::Grav);
+            assert!(p.color >= 67 && p.color <= 70, "blood color 67..=70, got {}", p.color);
+            assert_eq!(p.die, 2.0);
+            assert_eq!(p.velocity, [0.0, 0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn spawn_rocket_trail_type4_slight_blood_is_half_density() {
+        // type 4 slight blood: like type 2 but an extra `len -= 3` per step, so a
+        // 12-unit trail makes only 2 particles (each step consumes 6 units).
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(5);
+        let mut tc = 0u32;
+        sys.spawn_rocket_trail([0.0; 3], [12.0, 0.0, 0.0], 4, &mut tc, 0.0, &mut rng);
+        assert_eq!(sys.len(), 2, "slight blood advances 6 units/step -> half density");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::Grav);
+            assert!(p.color >= 67 && p.color <= 70);
+        }
+    }
+
+    #[test]
+    fn spawn_rocket_trail_type3_tracer_alternates_velocity_and_color() {
+        // type 3 tracer1: pt_static, die = now + 0.5, perpendicular velocity that
+        // alternates direction by tracercount parity; color 52 + ((tracercount&4)<<1).
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(6);
+        let mut tc = 0u32;
+        // Trail along +X; the perpendicular velocity is in the X/Y plane.
+        sys.spawn_rocket_trail([0.0; 3], [9.0, 0.0, 0.0], 3, &mut tc, 1.0, &mut rng);
+        assert_eq!(sys.len(), 3, "9-unit trail / 3 = 3 tracer particles");
+        // tracercount advanced once per spawned particle.
+        assert_eq!(tc, 3, "tracercount incremented per particle");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::Static);
+            assert_eq!(p.die, 1.5, "tracer die = now + 0.5");
+            // vec = (1,0,0): velocity is +/- (0, 30, 0) alternating; |vel| = 30.
+            assert_eq!(p.velocity[2], 0.0);
+            let speed = (p.velocity[0].powi(2) + p.velocity[1].powi(2)).sqrt();
+            assert!((speed - 30.0).abs() < 1e-4, "tracer speed 30, got {speed}");
+            // color = 52 + ((tracercount&4)<<1): with tc 0,1,2 the &4 bit is 0 so
+            // all three are color 52.
+            assert_eq!(p.color, 52, "tracer1 color base 52 while tracercount&4 == 0");
+        }
+        // tracer2 (type 5) uses base 230.
+        let mut sys2 = ParticleSystem::new();
+        let mut rng2 = Lcg::new(6);
+        let mut tc2 = 0u32;
+        sys2.spawn_rocket_trail([0.0; 3], [3.0, 0.0, 0.0], 5, &mut tc2, 1.0, &mut rng2);
+        assert_eq!(sys2.len(), 1);
+        assert_eq!(sys2.particles()[0].color, 230, "tracer2 color base 230");
+    }
+
+    #[test]
+    fn spawn_rocket_trail_type6_voor() {
+        // type 6 voor: pt_static, color 9*16+8 + (rand()&3) = 152..=155, die = now+0.3,
+        // origin jitter rand()&15 - 8 -> [-8, 8).
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(8);
+        let mut tc = 0u32;
+        sys.spawn_rocket_trail([0.0; 3], [6.0, 0.0, 0.0], 6, &mut tc, 2.0, &mut rng);
+        assert_eq!(sys.len(), 2, "6-unit trail / 3 = 2 particles");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::Static);
+            assert!(p.color >= 152 && p.color <= 155, "voor color 152..=155, got {}", p.color);
+            assert_eq!(p.die, 2.3, "voor die = now + 0.3");
+            assert_eq!(p.velocity, [0.0, 0.0, 0.0]);
+            assert!(p.origin[1] >= -8.0 && p.origin[1] < 8.0, "voor jitter [-8, 8)");
+        }
+    }
+
+    #[test]
+    fn spawn_rocket_trail_high_type_steps_every_unit() {
+        // type >= 128 steps 1 unit at a time (dec = 1) after subtracting 128. The
+        // 0+128 the rail/demo path uses is therefore a dense type-0 fire trail.
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(9);
+        let mut tc = 0u32;
+        sys.spawn_rocket_trail([0.0; 3], [5.0, 0.0, 0.0], 0 + 128, &mut tc, 0.0, &mut rng);
+        assert_eq!(sys.len(), 5, "5-unit trail / 1-unit step = 5 particles");
+        for p in sys.particles() {
+            assert_eq!(p.kind, ParticleKind::Fire, "0+128 is still a type-0 fire trail");
+        }
+    }
+
+    #[test]
+    fn spawn_rocket_trail_zero_length_spawns_nothing() {
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(10);
+        let mut tc = 0u32;
+        sys.spawn_rocket_trail([4.0, 5.0, 6.0], [4.0, 5.0, 6.0], 0, &mut tc, 0.0, &mut rng);
+        assert!(sys.is_empty(), "a zero-length trail (start == end) spawns nothing");
+    }
+
+    #[test]
+    fn blob_velocity_grows_blob2_shrinks_xy_only() {
+        // pt_blob: all 3 axes scale by (1 + dvel). pt_blob2: X/Y by (1 - dvel),
+        // Z untouched by the scale (then both subtract grav from Z).
+        let mut sys = ParticleSystem::new();
+        sys.particles.push(Particle {
+            origin: [0.0; 3],
+            velocity: [100.0, 100.0, 100.0],
+            color: 66,
+            die: 1000.0,
+            kind: ParticleKind::Blob,
+            ramp: 0.0,
+        });
+        sys.particles.push(Particle {
+            origin: [0.0; 3],
+            velocity: [100.0, 100.0, 100.0],
+            color: 150,
+            die: 1000.0,
+            kind: ParticleKind::Blob2,
+            ramp: 0.0,
+        });
+        // dt = 0.1 => dvel = 0.4; gravity 0 to isolate the scaling on Z.
+        sys.advance(0.1, 1.0, 0.0);
+        let blob = sys.particles()[0];
+        let blob2 = sys.particles()[1];
+        // Blob: every axis 100 * 1.4 = 140.
+        for a in 0..3 {
+            assert!((blob.velocity[a] - 140.0).abs() < 1e-3, "blob axis {a}");
+        }
+        // Blob2: X/Y 100 * 0.6 = 60; Z UNCHANGED (the C scales only i<2).
+        assert!((blob2.velocity[0] - 60.0).abs() < 1e-3);
+        assert!((blob2.velocity[1] - 60.0).abs() < 1e-3);
+        assert!((blob2.velocity[2] - 100.0).abs() < 1e-3, "blob2 Z is not scaled");
+        // Colours do not cycle for blobs.
+        assert_eq!(blob.color, 66);
+        assert_eq!(blob2.color, 150);
+    }
+
+    #[test]
+    fn static_particle_does_not_move_or_decay() {
+        // pt_static integrates org += vel*dt but never accelerates/cycles, and only
+        // its absolute `die` retires it.
+        let mut sys = ParticleSystem::new();
+        sys.particles.push(Particle {
+            origin: [0.0, 0.0, 0.0],
+            velocity: [10.0, 0.0, 0.0],
+            color: 52,
+            die: 1000.0,
+            kind: ParticleKind::Static,
+            ramp: 0.0,
+        });
+        sys.advance(0.5, 1.0, 40.0);
+        let p = sys.particles()[0];
+        assert_eq!(p.origin, [5.0, 0.0, 0.0], "static moves by velocity");
+        assert_eq!(p.velocity, [10.0, 0.0, 0.0], "static velocity is constant (no gravity)");
+        assert_eq!(p.color, 52, "static colour never changes");
+    }
+
+    #[test]
+    fn grav_particle_matches_slowgrav() {
+        // pt_grav is identical to pt_slowgrav in software WinQuake: vel.z -= grav.
+        let mut sys = ParticleSystem::new();
+        sys.particles.push(Particle {
+            origin: [0.0, 0.0, 0.0],
+            velocity: [10.0, 0.0, 20.0],
+            color: 67,
+            die: 1000.0,
+            kind: ParticleKind::Grav,
+            ramp: 0.0,
+        });
+        sys.advance(0.5, 1.0, 40.0);
+        let p = sys.particles()[0];
+        assert_eq!(p.origin, [5.0, 0.0, 10.0]);
+        assert_eq!(p.velocity, [10.0, 0.0, 0.0], "grav pulls Z down by grav*dt");
+    }
+
+    #[test]
+    fn normalize_zero_vector_is_zero() {
+        assert_eq!(normalize([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        let n = normalize([3.0, 4.0, 0.0]);
+        assert!((n[0] - 0.6).abs() < 1e-6 && (n[1] - 0.8).abs() < 1e-6);
     }
 
     #[test]

@@ -31,6 +31,27 @@ pub fn pf_fixme(vm: &mut Vm) -> Result<()> {
     Err(vm.run_error("unimplemented builtin"))
 }
 
+/// A benign no-op builtin that consumes its arguments and returns nothing.
+///
+/// Used for the *debug / developer* builtins whose only effect in the original
+/// engine is console diagnostics or a host-side command-buffer push — things a
+/// headless server has no business aborting over:
+///
+/// * `PF_coredump` (#28) — `ED_PrintEdicts()` (dumps every edict to the console)
+/// * `PF_traceon`  (#29) — sets the `pr_trace` per-statement trace flag
+/// * `PF_traceoff` (#30) — clears it
+/// * `PF_eprint`   (#31) — `ED_PrintNum()` (dumps one edict)
+/// * `PF_localcmd` (#46) — `Cbuf_AddText()` (queues console text)
+///
+/// The stock progs call these for diagnostics (e.g. an `eprint(self)` in a
+/// debugging spawn path); the C runs them and continues, so they must NOT fault
+/// out of the interpreter the way [`pf_fixme`] does. They have no world effect,
+/// so a no-op is faithful — matching how `stuffcmd`/`cvar_set` are handled in
+/// the server's engine builtin table.
+fn pf_debug_noop(_vm: &mut Vm) -> Result<()> {
+    Ok(())
+}
+
 /// `PF_VarString(first)`: concatenate the string arguments from `first` to
 /// `pr_argc`. The C version uses a fixed 256-byte buffer; we build a `String`.
 fn var_string(vm: &Vm, first: usize) -> String {
@@ -437,10 +458,10 @@ pub fn default_builtins() -> Vec<Builtin> {
         pf_dprint,      // 25  dprint
         pf_ftos,        // 26  ftos
         pf_vtos,        // 27  vtos
-        pf_fixme,       // 28  coredump
-        pf_fixme,       // 29  traceon
-        pf_fixme,       // 30  traceoff
-        pf_fixme,       // 31  eprint
+        pf_debug_noop,  // 28  coredump  (ED_PrintEdicts -> benign no-op)
+        pf_debug_noop,  // 29  traceon   (pr_trace = true -> benign no-op)
+        pf_debug_noop,  // 30  traceoff  (pr_trace = false -> benign no-op)
+        pf_debug_noop,  // 31  eprint    (ED_PrintNum -> benign no-op)
         pf_fixme,       // 32  walkmove      (server world)
         pf_fixme,       // 33  (PF_Fixme in C)
         pf_fixme,       // 34  droptofloor   (server world)
@@ -455,7 +476,7 @@ pub fn default_builtins() -> Vec<Builtin> {
         pf_fabs,        // 43  fabs
         pf_fixme,       // 44  aim           (server world)
         pf_fixme,       // 45  cvar
-        pf_fixme,       // 46  localcmd      (command buffer)
+        pf_debug_noop,  // 46  localcmd  (Cbuf_AddText -> benign no-op)
         pf_nextent,     // 47  nextent
         pf_fixme,       // 48  particle      (server/network)
         pf_fixme,       // 49  changeyaw     (server world)
@@ -964,6 +985,41 @@ mod tests {
         let mut vm = Vm::load(&img).expect("load");
         vm.set_gi(60, bi_idx as i32);
         assert!(vm.call_by_name("main").is_err());
+    }
+
+    #[test]
+    fn debug_builtins_are_inert_not_faulting() {
+        // FIX-2: coredump(#28)/traceon(#29)/traceoff(#30)/eprint(#31) and
+        // localcmd(#46) are diagnostic/host-side builtins. The C runs them and
+        // continues; here they must be benign no-ops, NOT faults like pf_fixme.
+        let table = default_builtins();
+        let mut vm = bare_vm();
+        vm.argc = 1; // give them an arg slot to consume
+        for n in [28usize, 29, 30, 31, 46] {
+            assert!(
+                (table[n])(&mut vm).is_ok(),
+                "debug builtin #{n} must be an inert no-op, not a fault"
+            );
+        }
+        // Sanity: a true engine-world stub (#16 traceline) is still a fixme fault
+        // in the bare default table (only the engine server installs the real one).
+        assert!(
+            (table[16])(&mut vm).is_err(),
+            "#16 traceline stays a fault in the default table"
+        );
+    }
+
+    #[test]
+    fn debug_builtins_run_through_bytecode_without_aborting() {
+        // A progs that CALLs coredump (#28) must complete, not abort the program
+        // (the old behaviour faulted via PF_Fixme).
+        let (img, bi_idx) = build_calling_builtin(28, Op::Call0);
+        let mut vm = Vm::load(&img).expect("load");
+        vm.set_gi(60, bi_idx as i32);
+        assert!(
+            vm.call_by_name("main").is_ok(),
+            "coredump() called from bytecode must not abort"
+        );
     }
 
     #[test]

@@ -1547,6 +1547,12 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // building a brand-new Server would reset the global to 0 and lose the
     // collected runes, so we carry it forward onto the new level below.
     let serverflags = w.server.serverflags();
+    // Carry the chosen difficulty across the level change. `skill` is a
+    // thread-local that Server::with_pak resets to 1, so capture it from the
+    // OUTGOING server now and restore it on the new one below (the start hub's
+    // skill portal set it via cvar_set; without this the jump to e1m1 would
+    // silently revert to Normal). Mirrors how serverflags is carried.
+    let skill = w.server.skill();
 
     let read = |n: &str| w.pak.read_file(n).ok().flatten();
     // The QuakeC `changelevel(map)` carries the BARE map name (e.g. "e1m1", from
@@ -1576,6 +1582,7 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // client both observe the carried bits. A no-op if the progs lacks the
     // global.
     ns.set_serverflags(serverflags);
+    ns.set_skill(skill as f32);
     if ns.spawn_entities().is_err() {
         return;
     }
@@ -1856,6 +1863,7 @@ fn step_walk(
                 yaw: *yaw,
                 color: *color,
                 frame: *frame,
+                skinnum: 0,
             }),
             _ => None,
         })
@@ -2029,6 +2037,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> ren
                 // Demo entities carry their current animation frame from the net
                 // stream — use it so monsters in the demo are actually posed.
                 frame: e.frame.max(0) as usize,
+                skinnum: 0,
             });
         }
     }
