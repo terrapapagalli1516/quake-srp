@@ -973,6 +973,12 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 ammo_rockets: stat("ammo_rockets"),
                 ammo_cells: stat("ammo_cells"),
                 time: server.time(),
+                monsters: 0,
+                total_monsters: 0,
+                secrets: 0,
+                total_secrets: 0,
+                level_name: "",
+                show_scores: false,
             };
             render::draw_hud_into(&mut img, &hud);
         }

@@ -2222,8 +2222,15 @@ fn step_walk(
     w.last_armor = armorv;
     // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> POWERUP (top). (Bonus
     // pickup flash needs the QuakeC "bf" stuffcmd, not yet wired.)
+    let eye_contents = quake_rs::world::point_contents(&w.bsp, eye);
+    // Underwater sine wobble (D_WarpScreen): when the eye is in water/slime/lava
+    // (contents <= CONTENTS_WATER, r_waterwarp default on), warp the 3-D frame
+    // BEFORE the content tint so the screen ripples, not just darkens.
+    if eye_contents <= quake_rs::bsp::CONTENTS_WATER {
+        render::apply_warp(&mut img, w.clock);
+    }
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
-    if let Some(cs) = render::content_cshift(quake_rs::world::point_contents(&w.bsp, eye)) {
+    if let Some(cs) = render::content_cshift(eye_contents) {
         shifts.push(cs);
     }
     if w.damage_blend > 0.0 {
@@ -2243,6 +2250,10 @@ fn step_walk(
     //    when gfx.wad was absent (the world still renders).
     if let Some(wad) = w.gfx_wad.as_ref() {
         let stat = |f: &str| w.server.vm.ent_get_float(w.player, f) as i32;
+        // Solo-scoreboard counts come from the QuakeC globals the engine's
+        // SV_UpdateStats reads; the level name is worldspawn's `message` (edict 0).
+        let gcount = |g: &str| w.server.vm.gget_float(g) as i32;
+        let level_name = w.server.vm.ent_get_string(0, "message");
         let hud = render::Hud {
             wad,
             palette: &w.palette,
@@ -2258,6 +2269,14 @@ fn step_walk(
             ammo_rockets: stat("ammo_rockets"),
             ammo_cells: stat("ammo_cells"),
             time: w.clock,
+            monsters: gcount("killed_monsters"),
+            total_monsters: gcount("total_monsters"),
+            secrets: gcount("found_secrets"),
+            total_secrets: gcount("total_secrets"),
+            level_name: &level_name,
+            // Tab "show scores" isn't wired as a key yet; the dead-player branch
+            // (health <= 0) inside draw_hud_into handles the death scoreboard.
+            show_scores: false,
         };
         render::draw_hud_into(&mut img, &hud);
     }

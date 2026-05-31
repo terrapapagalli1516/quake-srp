@@ -195,6 +195,57 @@ pub fn apply_blend(image: &mut Image, color: [u8; 3], alpha: f32) {
     }
 }
 
+/// `D_WarpScreen` (d_scan.c): the underwater full-screen sine wobble applied when
+/// the view leaf is in water/slime/lava (`r_waterwarp`, default on). Each output
+/// pixel samples a source pixel displaced by a per-row/per-column sine offset
+/// (`AMP2 = 3`, `SPEED = 20`, 128-cycle `intsintable`), with a slight edge
+/// compression (`dim/(dim + 2*AMP2)`) so the warp never reads outside the frame.
+/// The row displacement is driven by the column's sine and vice-versa (the classic
+/// cross-coupled warp). Operates on a snapshot of the frame; `clock` drives the
+/// phase. Applied to the 3-D frame BEFORE the content tint (V_SetContentsColor),
+/// so wobble and tint compose exactly as in stock software Quake.
+pub fn apply_warp(image: &mut Image, clock: f32) {
+    const AMP2: i32 = 3;
+    const SPEED: f64 = 20.0;
+    let w = image.w as i32;
+    let h = image.h as i32;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    // intsintable[i] = (int)(AMP2 + AMP2*sin(i*2pi/128)) — truncated, range 0..2*AMP2.
+    let mut sintable = [0i32; 128];
+    for (i, s) in sintable.iter_mut().enumerate() {
+        let f = AMP2 as f64 + AMP2 as f64 * ((i as f64) * std::f64::consts::TAU / 128.0).sin();
+        *s = f as i32; // (int) truncation, matching the C table build
+    }
+    // rowptr[i] = compressed source row for stretched index i in 0..h+2*AMP2.
+    let rspan = (h + 2 * AMP2) as usize;
+    let mut rowptr = vec![0usize; rspan];
+    for (i, r) in rowptr.iter_mut().enumerate() {
+        let v = (i as i64 * h as i64 / (h + 2 * AMP2) as i64) as i32;
+        *r = v.clamp(0, h - 1) as usize;
+    }
+    // column[j] = compressed source column for stretched index j in 0..w+2*AMP2.
+    let cspan = (w + 2 * AMP2) as usize;
+    let mut column = vec![0usize; cspan];
+    for (j, c) in column.iter_mut().enumerate() {
+        let u = (j as i64 * w as i64 / (w + 2 * AMP2) as i64) as i32;
+        *c = u.clamp(0, w - 1) as usize;
+    }
+    let phase = ((clock as f64 * SPEED) as i64 & 127) as usize;
+    let src = image.rgb.clone(); // pre-warp snapshot
+    let (wu, hu) = (w as usize, h as usize);
+    for v in 0..hu {
+        let tv = sintable[(phase + v) & 127] as usize; // 0..2*AMP2
+        for u in 0..wu {
+            let tu = sintable[(phase + u) & 127] as usize; // 0..2*AMP2
+            let src_row = rowptr[v + tu];
+            let src_col = column[tv + u];
+            image.rgb[v * wu + u] = src[src_row * wu + src_col];
+        }
+    }
+}
+
 /// A pinhole camera positioned in Quake world space. `yaw` rotates about `+Z`
 /// (0 = facing `+X`, increasing toward `+Y`); `pitch` tilts the forward vector
 /// up/down. Both are in degrees, as is the horizontal field of view `fov_deg`.
@@ -4693,6 +4744,18 @@ pub struct Hud<'a> {
     /// tracked here, so weapon icons show their static owned/selected frame — see
     /// the weapon-flash note in [`draw_hud_into`].)
     pub time: f32,
+    /// Killed monsters / total (`cl.stats[STAT_MONSTERS/STAT_TOTALMONSTERS]`) for the
+    /// solo scoreboard shown on death or Tab.
+    pub monsters: i32,
+    pub total_monsters: i32,
+    /// Found secrets / total (`cl.stats[STAT_SECRETS/STAT_TOTALSECRETS]`).
+    pub secrets: i32,
+    pub total_secrets: i32,
+    /// The level name (worldspawn `message`), right-justified on the scoreboard.
+    pub level_name: &'a str,
+    /// Force the scorebar + solo scoreboard (Tab "show scores"); the C also shows it
+    /// whenever `cl.stats[STAT_HEALTH] <= 0`, which [`draw_hud_into`] handles directly.
+    pub show_scores: bool,
 }
 
 /// Blit one `Qpic` at virtual position `(vx, vy)` in 320x200 space, scaled by
@@ -5130,6 +5193,17 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     }
 
     // ----- Status bar (the sbar block of Sbar_Draw) -------------------------
+    // When the player is dead (health <= 0) or holding Tab, the C replaces the whole
+    // status strip with the dark `scorebar` pic + the solo scoreboard
+    // (Monsters/Secrets/Time/level), keeping the ibar above. (sbar.c:948-953.)
+    if hud.health <= 0 || hud.show_scores {
+        blit_named(image, wad, "scorebar", 0.0, 0.0, scale, vy_top, pal);
+        if let Some(cc) = &conchars {
+            draw_solo_scoreboard(image, cc, hud, scale, vy_top, pal);
+        }
+        return;
+    }
+
     // 1. Background strip (sbar, 320x24) at virtual (0,0).
     blit_named(image, wad, "sbar", 0.0, 0.0, scale, vy_top, pal);
 
@@ -5187,6 +5261,49 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 
     // Current ammo number: Sbar_DrawNum(248, ammo, 3, ammo<=10) — right edge x=320.
     draw_num(image, hud.ammo, 320.0, 0.0, scale, vy_top, wad, pal, hud.ammo <= 10);
+}
+
+/// `Sbar_SoloScoreboard` (sbar.c:457): the single-player stats drawn over the
+/// `scorebar` strip on death / Tab — kills, secrets, elapsed time, and the level
+/// name. Positions are verbatim from the C (virtual sbar-space, y in 0..24): the
+/// "Monsters" / "Secrets" lines at x=8 (rows 4, 12), "Time" at x=184 row 4, and the
+/// level name right-justified ending at virtual x≈232 on row 12 (`232 - len*4`).
+fn draw_solo_scoreboard(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    hud: &Hud,
+    scale: f32,
+    vy_top: f32,
+    pal: &[[u8; 3]; 256],
+) {
+    let draw = |image: &mut Image, vx: f32, vy: f32, s: &str| {
+        for (i, &c) in s.as_bytes().iter().enumerate() {
+            // Sbar_DrawString blits the raw ASCII glyph (space included, harmless).
+            draw_sbar_char(image, conchars, c, vx + (i as f32) * 8.0, vy, scale, vy_top, pal);
+        }
+    };
+    draw(
+        image,
+        8.0,
+        4.0,
+        &format!("Monsters:{:3} /{:3}", hud.monsters, hud.total_monsters),
+    );
+    draw(
+        image,
+        8.0,
+        12.0,
+        &format!("Secrets :{:3} /{:3}", hud.secrets, hud.total_secrets),
+    );
+    // Time: minutes:tens-units from the server clock (sbar.c uses integer seconds).
+    let t = hud.time.max(0.0) as i32;
+    let minutes = t / 60;
+    let seconds = t - 60 * minutes;
+    let tens = seconds / 10;
+    let units = seconds - 10 * tens;
+    draw(image, 184.0, 4.0, &format!("Time :{minutes:3}:{tens}{units}"));
+    // Level name, right-justified to end at virtual x≈232 (232 - len*4 start).
+    let l = hud.level_name.len() as f32;
+    draw(image, 232.0 - l * 4.0, 12.0, hud.level_name);
 }
 
 // ---------------------------------------------------------------------------
@@ -9752,6 +9869,12 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -9798,6 +9921,12 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -9837,6 +9966,12 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
         };
         draw_hud_into(&mut img, &hud);
         assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
@@ -9991,6 +10126,12 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -10074,6 +10215,12 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
         };
         // All face pics share index 70 here, so we can't distinguish quad vs health
         // by colour — instead assert the call path doesn't panic and a face drew.
