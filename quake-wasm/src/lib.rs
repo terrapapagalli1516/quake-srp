@@ -111,6 +111,10 @@ struct Walk {
     /// `model` equals this is the worldspawn brush — never loaded as an external
     /// box (it is already drawn as the world).
     map_name: String,
+    /// The spawn parms captured when this level was ENTERED (the alive player's
+    /// inventory at level start). A single-player respawn (`localcmd("restart")`)
+    /// reloads the current level with THESE, since a dead player's state is empty.
+    entry_parms: [f32; quake_rs::server::NUM_SPAWN_PARMS],
     player: i32,
     yaw: f32,
     pitch: f32,
@@ -420,6 +424,9 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).ok()?;
     server.spawn_entities().ok()?;
     let player = server.connect_client().ok()?;
+    // Capture the level-entry spawn parms (the just-connected, full-state player) so
+    // a single-player respawn can reload THIS level with them.
+    let entry_parms = server.save_spawn_parms();
 
     Some(Walk {
         server,
@@ -435,6 +442,7 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         trail_org: HashMap::new(),
         tracercount: 0,
         map_name: map.to_string(),
+        entry_parms,
         player,
         yaw,
         pitch: 0.0,
@@ -1824,6 +1832,9 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
         return;
     }
     let Ok(player) = ns.connect_client_with_parms(parms) else { return };
+    // The carried inventory at the start of the NEW level becomes its entry parms,
+    // so a respawn on this level restores the state the player arrived with.
+    let entry_parms = ns.save_spawn_parms();
 
     // Commit the swap. From here nothing can fail.
     let (_spawn, yaw) =
@@ -1831,6 +1842,8 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.server = ns;
     w.bsp = render_bsp;
     w.player = player;
+    w.entry_parms = entry_parms;
+    w.map_name = map_file;
     w.yaw = yaw;
     w.pitch = 0.0;
 
@@ -1855,6 +1868,56 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
     // Drop any events the *outgoing* server queued (the new server starts fresh).
+    let _ = w.server.drain_sounds();
+    let _ = w.server.drain_particles();
+    let _ = w.server.drain_temp_entities();
+}
+
+/// Single-player respawn: reload the CURRENT level fresh and reconnect the player
+/// with the level-ENTRY spawn parms (the state they arrived with). Ported from the
+/// engine running QuakeC's `localcmd("restart\n")` — a dead player who presses a
+/// button restarts the map. A dead player's own state is useless (health 0, dropped
+/// inventory), so `entry_parms` (captured at level entry) is what's restored,
+/// matching how `restart` works in id's single-player. A read/parse failure leaves
+/// the (dead) level running rather than crashing.
+fn try_restart(w: &mut Walk) {
+    let serverflags = w.server.serverflags();
+    let skill = w.server.skill();
+    let read = |n: &str| w.pak.read_file(n).ok().flatten();
+    let Some(map_bytes) = read(&w.map_name) else { return };
+    let Ok(sim_bsp) = Bsp::parse(&map_bytes) else { return };
+    let Ok(render_bsp) = Bsp::parse(&map_bytes) else { return };
+    let Some(progs_bytes) = read("progs.dat") else { return };
+    let Ok(progs) = Progs::parse(&progs_bytes) else { return };
+
+    let Ok(mut ns) = Server::with_pak(sim_bsp, progs, Some(w.pak.clone())) else { return };
+    ns.set_serverflags(serverflags);
+    ns.set_skill(skill as f32);
+    if ns.spawn_entities().is_err() {
+        return;
+    }
+    let Ok(player) = ns.connect_client_with_parms(w.entry_parms) else { return };
+
+    // Commit the reload (nothing below can fail).
+    let (_spawn, yaw) =
+        player_start(&render_bsp.entities).unwrap_or(([0.0, 0.0, 0.0], w.yaw));
+    w.server = ns;
+    w.bsp = render_bsp;
+    w.player = player;
+    w.yaw = yaw;
+    w.pitch = 0.0;
+    // Same clean-slate reset as a changelevel (the map restarted from scratch).
+    w.particles = ParticleSystem::new();
+    w.dlights = DynamicLights::new();
+    w.trail_org.clear();
+    w.notify_pending.clear();
+    w.notify.clear();
+    w.centerprint = None;
+    w.clock = 0.0;
+    w.damage_blend = 0.0;
+    w.last_health = f32::NAN;
+    w.last_armor = f32::NAN;
+    w.oldz = f32::NAN;
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();
@@ -1924,6 +1987,11 @@ fn step_walk(
         try_changelevel(w, &next_map);
         // The swap reset the world; render this frame from the *new* level so the
         // player never sees a frame straddling two maps.
+    } else if w.server.take_pending_restart() {
+        // Single-player respawn: QuakeC ran localcmd("restart") (a dead player who
+        // pressed a button). Reload the current level with the entry inventory.
+        // `else if` so a changelevel this frame takes precedence over a restart.
+        try_restart(w);
     }
 
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster

@@ -179,7 +179,7 @@ const DEFAULT_VIEWHEIGHT: f32 = 22.0;
 
 /// `NUM_SPAWN_PARMS` (quakedef.h): how many `parm1..parm16` spawn parameters
 /// `SetNewParms` fills and `PutClientInServer` later consumes.
-const NUM_SPAWN_PARMS: usize = 16;
+pub const NUM_SPAWN_PARMS: usize = 16;
 
 /// The QuakeC global name for spawn parm index `i` (`0..NUM_SPAWN_PARMS`):
 /// `parm1`..`parm16`. The C `pr_global_struct->parm1..16` are the 16 floats
@@ -784,6 +784,42 @@ fn reset_changelevel() {
 fn bi_changelevel(vm: &mut Vm) -> Result<()> {
     let map = vm.arg_string(0);
     push_changelevel(map);
+    Ok(())
+}
+
+thread_local! {
+    /// Set when QuakeC issues `localcmd("restart\n")` — the single-player respawn
+    /// path (a dead player who presses a button runs `client.qc`'s
+    /// `localcmd("restart\n")` to reload the current level with fresh entry parms).
+    /// Drained by [`Server::take_pending_restart`]; reset in [`Server::new`].
+    static RESTART_REQUEST: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+}
+
+fn reset_restart() {
+    RESTART_REQUEST.with(|c| *c.borrow_mut() = false);
+}
+
+/// `PF_localcmd` (#46): `void(string s) localcmd` — `Cbuf_AddText(s)`, i.e. QuakeC
+/// pushing a console command. Most are host/diagnostic and irrelevant to this port,
+/// but single-player gameplay issues a few level-control commands we MUST honour:
+///   * `restart` — reload the current level (the death-respawn path, `client.qc`).
+///   * `changelevel <map>` / `map <map>` — defer a level swap (same as PF_changelevel).
+/// Everything else is a benign no-op (matching the old behaviour). The token parse
+/// is whitespace-split and case-insensitive on the command word.
+fn bi_localcmd(vm: &mut Vm) -> Result<()> {
+    let cmd = vm.arg_string(0);
+    let mut it = cmd.split_whitespace();
+    match it.next().map(|w| w.to_ascii_lowercase()).as_deref() {
+        Some("restart") => {
+            RESTART_REQUEST.with(|c| *c.borrow_mut() = true);
+        }
+        Some("changelevel") | Some("map") => {
+            if let Some(map) = it.next() {
+                push_changelevel(map.to_string());
+            }
+        }
+        _ => {} // other console text: benign no-op, as before.
+    }
     Ok(())
 }
 
@@ -1642,6 +1678,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 58, bi_writestring); // WriteString
     put(t, 59, bi_writeentity); // WriteEntity
 
+    put(t, 46, bi_localcmd); // localcmd (honours restart / changelevel / map; else no-op)
     put(t, 67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
     put(t, 68, bi_precache_file); // precache_file
     put(t, 69, bi_noop); // makestatic
@@ -1882,6 +1919,9 @@ impl Server {
         // this fresh one (mirrors `svs.changelevel_issued = false` in
         // SV_SpawnServer).
         reset_changelevel();
+        // Likewise a pending localcmd("restart") respawn must not survive into a
+        // freshly spawned server.
+        reset_restart();
         // The light-style transport is also per-thread and outlives a server;
         // clear it so a prior level's patterns cannot leak before this level's
         // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of
@@ -3258,6 +3298,15 @@ impl Server {
         take_changelevel()
     }
 
+    /// Take and clear a pending single-player respawn (`localcmd("restart")`). The
+    /// front-end calls this once after [`Self::client_frame`]: when it returns
+    /// `true`, it reloads the CURRENT level (carrying the level-entry spawn parms,
+    /// not the dead player's state). Mirrors the engine running the deferred
+    /// `restart` console command after the frame.
+    pub fn take_pending_restart(&mut self) -> bool {
+        RESTART_REQUEST.with(|c| std::mem::replace(&mut *c.borrow_mut(), false))
+    }
+
     /// One server frame driven by the local player's input.
     ///
     /// Mirrors `Host_Frame` -> `SV_Physics`: advance `time`/`frametime`, run the
@@ -3273,10 +3322,11 @@ impl Server {
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
         reset_temp_entity_decoder();
-        // Drop any changelevel() request a *prior* frame left unconsumed (a
-        // well-behaved front-end drains it immediately, but a stale request must
-        // never trigger a swap a frame late or against the wrong level).
+        // Drop any changelevel() / restart request a *prior* frame left unconsumed
+        // (a well-behaved front-end drains it immediately, but a stale request must
+        // never trigger a swap/respawn a frame late or against the wrong level).
         reset_changelevel();
+        reset_restart();
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before this
         // frame's thinks (the host already consumed it via entity_dlights()).
         self.cleanup_ents();
@@ -8627,6 +8677,39 @@ mod tests {
             None,
             "second take drains to None"
         );
+    }
+
+    #[test]
+    fn bi_localcmd_restart_sets_pending_respawn() {
+        // localcmd("restart\n") (PF_localcmd #46) is the single-player death-respawn
+        // path: it must set the pending-restart flag, which take_pending_restart
+        // returns exactly once. Other console text is a benign no-op, and a
+        // `changelevel <map>` localcmd routes to the changelevel queue.
+        let (img, _gc, _gd) = changelevel_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        assert!(!server.take_pending_restart(), "fresh server: no pending restart");
+
+        // "restart\n" -> pending restart (trailing newline + case-insensitive word).
+        let t = server.vm.intern("restart\n");
+        server.vm.set_gi(OFS_PARM0, t);
+        bi_localcmd(&mut server.vm).expect("bi_localcmd restart");
+        assert!(server.take_pending_restart(), "restart sets the pending flag");
+        assert!(!server.take_pending_restart(), "second take drains to false");
+
+        // An unrelated console command does nothing.
+        let t2 = server.vm.intern("echo hi");
+        server.vm.set_gi(OFS_PARM0, t2);
+        bi_localcmd(&mut server.vm).expect("bi_localcmd echo");
+        assert!(!server.take_pending_restart(), "unrelated localcmd is a no-op");
+
+        // A `changelevel e1m2` localcmd routes to the changelevel queue, not restart.
+        let t3 = server.vm.intern("changelevel e1m2");
+        server.vm.set_gi(OFS_PARM0, t3);
+        bi_localcmd(&mut server.vm).expect("bi_localcmd changelevel");
+        assert!(!server.take_pending_restart(), "changelevel localcmd is not a restart");
+        assert_eq!(server.take_pending_changelevel().as_deref(), Some("e1m2"));
     }
 
     #[test]
