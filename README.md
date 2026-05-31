@@ -84,6 +84,33 @@ cargo run --release --bin quaketool -- render ID1/PAK0.PAK ... # etc.
 The browser build (`quake-wasm`) `include_bytes!`s a pak at build time, so it needs the data present to compile;
 the engine lib and all tests do **not**.
 
+## Performance
+
+The software renderer is per-pixel bound, so frame time scales with resolution. A
+built-in benchmark renders a map repeatedly and reports the warm per-frame cost plus a
+per-phase breakdown (world / submodel / alias / particle / …) and counters (faces drawn,
+overdraw pixels, surface-cache hit rate):
+
+```sh
+QUAKE_BENCH=30 QUAKE_RES=1920x1080 \
+  cargo run --release --bin quaketool -- scene pak0.pak maps/e1m1.bsp out.ppm
+```
+
+**Relative cost is the meaningful part — absolute ms swings several-fold with host
+load** (an idle machine measured e1m1 @1080p ~33 ms; under load the same binary measured
+~91 ms). Always A/B two builds in one sitting. The shape: the **world (BSP wall) pass
+dominates** (~75–85% of the frame) and scales ~linearly with pixel count; after
+front-to-back ordering the **overdraw is ~1.0×** (culling is optimal — the world pass is
+purely per-pixel-shading bound).
+
+Key optimisations (all in `render.rs` / `vm.rs` / `server.rs`): a **lit surface cache**
+(Quake's `d_surf.c` — bake texture × lightmap × colormap per surface once, then one
+byte/pixel), **front-to-back** face ordering (kills overdraw via the z-test),
+incremental-edge + linear-stepped perspective in the rasteriser, an **O(1) field-offset
+cache** in the VM, and an **abs-box broadphase** in `sv_move` (the ~25× sim speedup on
+dense maps). See `AUDIT.md` for the per-change ledger and `STATUS.md` for current WIP +
+the honest perf scorecard.
+
 ## Roadmap (remaining polish)
 
 The core single-player loop, the UI (menu / options / console), in-game + demo sound and particles, selectable
