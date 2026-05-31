@@ -21,13 +21,13 @@ essentially clean — most of their "findings" were rejected as faithful.)
 | H1 | `aim` (#44) never auto-targets — returned `v_forward` unconditionally | ✅ fixed `1146148` (full PF_aim port) |
 | H2 | `SV_WaterMove` entirely missing — no swimming physics underwater | ✅ fixed `114ba66` |
 | H3 | `SV_WaterJump` (auto climb-out-of-water push) missing | ✅ fixed `1b29e97` |
-| H4 | Animated `+texture` sequencing (`Mod_LoadTextures`) + per-frame `R_TextureAnimation` missing — water/teleporters/switches/lights don't animate | ⬜ TODO (bsp.rs + render.rs) |
-| H5 | ALIAS_GROUP frames never animate — only the first sub-pose is drawn (e.g. flames) | ⬜ TODO (mdl.rs + render.rs) |
+| H4 | Animated `+texture` sequencing (`Mod_LoadTextures`) + per-frame `R_TextureAnimation` missing — water/teleporters/switches/lights don't animate | ✅ fixed `8f13cb1` (R_TextureAnimation 10 Hz cycles) |
+| H5 | ALIAS_GROUP frames never animate — only the first sub-pose is drawn (e.g. flames) | ✅ fixed `8f13cb1` (group-frame + skin-group anim by time) |
 | H6 | `pixelAspect` — frame presented 16:10 square-pixel instead of authored 4:3 | ✅ fixed `9876cb4` (present at 4:3) |
-| H7 | `R_LavaSplash` not implemented — TE_LAVASPLASH faked as a 20-particle burst | ⬜ TODO (particles.rs) |
-| H8 | `R_TeleportSplash` not implemented — TE_TELEPORT faked, wrong color | ⬜ TODO (particles.rs) |
-| H9 | `R_RocketTrail` entirely missing — no rocket/grenade/gib/tracer/voor trails | ⬜ TODO (particles.rs + server/demo) |
-| H10 | Stale entities never removed — missing the per-message msgtime/relink cull (demo) | ⬜ TODO (demo.rs) |
+| H7 | `R_LavaSplash` not implemented — TE_LAVASPLASH faked as a 20-particle burst | 🔶 functions ported `8f13cb1`; TE spawn-wiring in wave 2 |
+| H8 | `R_TeleportSplash` not implemented — TE_TELEPORT faked, wrong color | 🔶 functions ported `8f13cb1`; TE spawn-wiring in wave 2 |
+| H9 | `R_RocketTrail` entirely missing — no rocket/grenade/gib/tracer/voor trails | 🔶 R_RocketTrail ported `8f13cb1`; spawn-wiring in wave 2 |
+| H10 | Stale entities never removed — missing the per-message msgtime/relink cull (demo) | ✅ fixed `8f13cb1` (msgtime cull) |
 | H11 | Ambient sounds missing — placed `ambientsound()` loops + the 4 automatic leaf ambients | ⬜ TODO |
 | H12 | Inventory bar (ibar) with weapon icons + current-weapon flash missing | ⬜ TODO (render.rs HUD) |
 | H13 | Animated player face (health frames, pain, invuln/quad/invis) missing | ⬜ TODO (render.rs HUD) |
@@ -38,6 +38,8 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 **explosive box** is now shootable — external `b_*.bsp` collision bounds (`ef2c7b5`).
 
 ## MEDIUM (24)
+
+**Fixed in wave 1 (`8f13cb1`)** unless noted: skill selection now applies (cvar/cvar_set + spawn filter + carried across changelevel) · `localcmd` inert · `SV_CheckWaterTransition` (splash + watertype/waterlevel) · `SV_Physics_Step` landing thud · `SV_SpawnServer` settle frames · brush-submodel pixel-spread · per-entity `skinnum` · sky dome · alias world-light + dlights · `svc_setangle` no-override · demo inter-frame interpolation (implemented; lib/quaketool still call `parse_demo` — *activation* pending) · EF_ROTATE spin (mechanism; needs model-flag feed) · `R_BlobExplosion` distinct (function ported; TE-wiring pending). HUD big-number x-positions + gold-when-low color fixed earlier (`9876cb4` era). **Still open:** colormap-LUT lighting (needs colormap.lmp input), sound pan law + channel override, and the remaining sbar elements (below).
 
 - builtins: difficulty hard-locked to skill 1 (`cvar("skill")==1`, `cvar_set` no-op, spawn filter only checks NOT_MEDIUM) — **skill selection portals set difficulty but it never takes effect**
 - builtins: `localcmd` (#46) faults instead of being a benign no-op
@@ -63,13 +65,16 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 - sbar: health/armor/ammo big-number x positions diverge from sbar.c
 - sbar: scorebar / solo scoreboard on death + intermission/finale overlays not drawn
 
-## Notable near-term priorities
+## Wave 2 (next)
 
-1. **H15 ammo (real bug) + H12–H14 HUD completeness** — finishes the status bar.
-2. **Skill selection actually applying** (medium) — the difficulty portals are cosmetic today.
-3. **Performance** (separate from this audit; user-reported e1m3 slowness) — software
-   renderer hot path: cache the combined per-surface lightmap keyed by the resolved
-   style values (torches flicker at 10 Hz, so a value-keyed cache hits ~5/6 frames),
-   + frustum-cull faces outside the view, + persist the framebuffer/z-buffer.
-   Must stay pixel-identical (verify against the deterministic `scene` render hashes).
-4. **H4 animated textures + H9 rocket trails + H7/H8 splashes** — high visual payoff.
+1. **Particle/TE spawn-wiring** — the wave-1 particle functions are ported but unused; wire them: per-frame R_RocketTrail on rocket/grenade/gib/tracer entities (by model flags), and route TE_LAVASPLASH/TE_TELEPORT/TE_TAREXPLOSION/TE_EXPLOSION2 + the `svc_particle` 255 sentinel to the right functions (split TAREXPLOSION out of the dlight group). Touches lib.rs/quaketool.rs/demo.rs.
+2. **HUD completeness (H12–H14 + sbar mediums)** — inventory bar + weapon icons + current-weapon flash, animated face (health/pain/powerup), item/key/sigil icons, active-weapon ammo-type icon, armor-type icon, per-ammo small counts, scorebar/intermission.
+3. **Sound** — ambient sounds (placed `ambientsound()` + the 4 leaf ambients), stereo pan law (linear vs equal-power), channel override.
+4. **Demo interpolation activation** — switch lib.rs `boot_demo` / quaketool `cmd_demo` to `parse_demo_interpolated` + feed EF_ROTATE model indices (needs `Mdl` flags getter).
+5. **Colormap-LUT lighting** (medium) — load `gfx/colormap.lmp`, thread it through `render_scene_ext`.
+
+**Performance** is paused per the user (perf acceptable now); the ranked plan (style-value-keyed lightmap cache, frustum cull, persist framebuffer/zbuf — must stay pixel-identical) stays here for if/when it resumes.
+
+## LOW (27)
+
+Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.
