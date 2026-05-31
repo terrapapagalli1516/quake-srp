@@ -3223,7 +3223,35 @@ fn draw_world_textured(
     let fp = WorldFingerprint::of(bsp);
     let n_faces = bsp.faces.len();
 
-    for face_index in world_first..world_end {
+    // FRONT-TO-BACK ORDER. With a z-buffer the final image is identical for ANY draw
+    // order (the nearest surface always wins the depth test), but drawing near faces
+    // FIRST lets the z-test reject occluded pixels BEFORE the per-pixel shading
+    // (block read + framebuffer write) — cutting the ~1.9x world overdraw the
+    // profiler measured. Sort visible faces by squared centroid distance (ascending);
+    // bad-geom faces sort last (they draw nothing). This reuses the per-face geom
+    // cache, so the ordering pass also warms it for the draw loop below. (A true BSP
+    // back-to-front/front-to-back walk would be marginally better, but centroid sort
+    // captures the bulk of the win for walls and is far simpler / output-identical.)
+    let mut world_order: Vec<(f32, usize)> =
+        Vec::with_capacity(world_end.saturating_sub(world_first));
+    for fi in world_first..world_end {
+        let key = match bsp.faces.get(fi) {
+            Some(face) => {
+                let g = face_geom_cached(bsp, fi, face);
+                if g.bad {
+                    f32::MAX
+                } else {
+                    let d = sub(g.center, cam.pos);
+                    dot(d, d)
+                }
+            }
+            None => f32::MAX,
+        };
+        world_order.push((key, fi));
+    }
+    world_order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    for &(_, face_index) in &world_order {
         let face = match bsp.faces.get(face_index) {
             Some(f) => f,
             None => continue,
