@@ -16,6 +16,49 @@ stand" note — read it before continuing, especially the **Caveats** and **WIP*
 
 ---
 
+## ⭐ PERFORMANCE — THE KEY LEAD FOR NEXT SESSION (read this first)
+
+Late in the session, a resolution-sweep revealed the real bottleneck — **and it is NOT
+the per-pixel loop I spent the session optimizing, and NOT machine throttling.**
+
+Measured (same machine, back-to-back):
+
+| resolution | pixels | frame ms | world ms | world pixels drawn |
+|-----------|--------|----------|----------|--------------------|
+| 64×48     | 3,072  | **65.2** | 59.6     | 3,843              |
+| 320×200   | 64k    | 65.0     | —        | —                  |
+| 640×400   | 256k   | 68.4     | —        | —                  |
+| 1920×1080 | 2.07M  | 89.7     | 82.8     | 2.07M              |
+
+**At 64×48 the world pass burns ~60 ms to shade ~3.8k pixels.** Pixel count barely
+moves the frame time (3k px and 2M px are both ~60–83 ms world). So the dominant cost
+is a **FIXED PER-FRAME / PER-FACE cost, independent of resolution** — the per-pixel
+rasteriser (what I optimized: front-to-back, linear-step, surface cache, per-row
+slices) was largely the WRONG target for the headline number.
+
+**Prime suspects (per-face, ×5059 faces every frame, in `draw_world_textured`):**
+- `WorldFingerprint::of(bsp)` and/or the surface-cache / lightmap-cache / geom-cache
+  **HashMap lookups run per face per frame** — likely hashing something large
+  (whole-bsp fingerprint?) on every call. Check `face_surf_block` /
+  `face_lightmap_world_cached` / `face_geom_cached` and `WorldFingerprint::of`.
+- The front-to-back **sort allocates + sorts 5059 entries every frame**.
+- `any_dlight_reaches` / per-face poly rebuilds.
+
+**Why this is the 2× (and probably more):** ~60 ms of resolution-independent work vs
+~25 ms of genuine pixel work means cutting the per-frame overhead could roughly halve
+the frame at any resolution. And crucially it is **measurable even under heavy
+load** because it dominates. START HERE next session: profile WHERE the ~60 ms goes
+inside the world pass (wrap `WorldFingerprint::of`, the cache lookups, and the sort in
+their own `RenderStats` timers), then attack the biggest. This likely beats SIMD and
+is far less risky.
+
+> NB: this also explains the session's confusing "throttling" — the CPU may NOT
+> have been throttled at all; the fixed per-frame cost just makes every resolution look
+> uniformly slow, which mimics load. Re-evaluate the "host throttled" claims below with
+> that in mind.
+
+---
+
 ## Performance — current state & honest scorecard
 
 Warm-frame render cost @1920×1080, measured on an IDLE machine earlier this session
