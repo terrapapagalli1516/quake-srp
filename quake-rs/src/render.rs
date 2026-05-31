@@ -1892,12 +1892,21 @@ fn raster_triangle_cached(
     let dw0dx = -(v2.y - v1.y) * inv_area;
     let dw1dx = -(v0.y - v2.y) * inv_area;
     let dw2dx = -(v1.y - v0.y) * inv_area;
+    // Per-pixel-x derivatives of the perspective accumulators. `inv_z`, `s/z` and
+    // `t/z` are each EXACTLY linear in screen x (they are linear combinations of the
+    // barycentric weights, which themselves step by `dw*dx` per pixel), so they can
+    // be advanced with a single add per pixel instead of re-dotting the three weights
+    // every pixel — removing ~9 multiplies/pixel. We still step w0/w1/w2 for the
+    // edge inside-test. (Additive accumulation differs from the per-pixel re-dot by
+    // a few ULPs across a span — the same negligible drift class as the incremental
+    // edge stepping; verified to leave the world render essentially unchanged.)
+    let dinvz = iz0 * dw0dx + iz1 * dw1dx + iz2 * dw2dx;
+    let dsoz = soz0 * dw0dx + soz1 * dw1dx + soz2 * dw2dx;
+    let dtoz = toz0 * dw0dx + toz1 * dw1dx + toz2 * dw2dx;
     let (bw_i, bh_i) = (bw as i64, bh as i64);
 
     // Local written-pixel tally (overdraw metric), folded into the profiler ONCE at
-    // the end so the hot loop never touches a thread-local. `drawn` is a register
-    // increment overlapping the framebuffer write — ~free, and the whole function is
-    // only on the slow path anyway when stats are on.
+    // the end so the hot loop never touches a thread-local.
     let mut drawn = 0u64;
     for py in min_y..=max_y {
         let sy = py as f32 + 0.5;
@@ -1905,12 +1914,16 @@ fn raster_triangle_cached(
         let mut w0 = edge(v1.x, v1.y, v2.x, v2.y, sx0, sy) * inv_area;
         let mut w1 = edge(v2.x, v2.y, v0.x, v0.y, sx0, sy) * inv_area;
         let mut w2 = edge(v0.x, v0.y, v1.x, v1.y, sx0, sy) * inv_area;
+        // Row-start perspective accumulators (exact dot at the first pixel of the
+        // row; stepped by the derivatives after each pixel).
+        let mut inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
+        let mut soz = w0 * soz0 + w1 * soz1 + w2 * soz2;
+        let mut toz = w0 * toz0 + w1 * toz1 + w2 * toz2;
         for px in min_x..=max_x {
             'pixel: {
                 if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                     break 'pixel;
                 }
-                let inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
                 if inv_z <= 0.0 {
                     break 'pixel;
                 }
@@ -1923,8 +1936,8 @@ fn raster_triangle_cached(
                 if depth >= *zc {
                     break 'pixel;
                 }
-                let s = (w0 * soz0 + w1 * soz1 + w2 * soz2) * depth;
-                let t = (w0 * toz0 + w1 * toz1 + w2 * toz2) * depth;
+                let s = soz * depth;
+                let t = toz * depth;
                 // Nearest surface texel within the block extent (the block is 1:1
                 // with surface texels at mip 0).
                 let bx = ((s - texmins[0]) as i64).clamp(0, bw_i - 1) as usize;
@@ -1939,6 +1952,9 @@ fn raster_triangle_cached(
             w0 += dw0dx;
             w1 += dw1dx;
             w2 += dw2dx;
+            inv_z += dinvz;
+            soz += dsoz;
+            toz += dtoz;
         }
     }
     stat(|s| s.world_pixels += drawn);
