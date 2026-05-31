@@ -2074,14 +2074,12 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     let bursts = frame.particles.clone();
     let tents = frame.temp_entities.clone();
     for b in &bursts {
-        // The demo parser already mapped the net `count == 255` sentinel to
-        // 1024; treat any such (>=1024) burst as the fiery explosion.
-        if b.count >= 1024 {
-            d.particles.spawn_explosion(b.org, now, &mut d.prng);
-        } else {
-            d.particles
-                .spawn_burst(b.org, b.dir, b.color, b.count, now, &mut d.prng);
-        }
+        // svc_particle is always R_RunParticleEffect (spawn_burst) in id's
+        // CL_ParseParticleEffect — the net count==255 sentinel just means 1024
+        // particles (the demo parser already maps it), NOT the rocket
+        // R_ParticleExplosion. Route every burst through spawn_burst.
+        d.particles
+            .spawn_burst(b.org, b.dir, b.color, b.count, now, &mut d.prng);
     }
     for ev in &tents {
         // Reuse the live-walk mapping (explosion/impact/splash). The returned
