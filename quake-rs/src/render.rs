@@ -1713,35 +1713,53 @@ fn raster_triangle_tex(
     let (iz0, iz1, iz2) = (1.0 / v0.vz, 1.0 / v1.vz, 1.0 / v2.vz);
     let (soz0, soz1, soz2) = (v0.s * iz0, v1.s * iz1, v2.s * iz2);
     let (toz0, toz1, toz2) = (v0.t * iz0, v1.t * iz1, v2.t * iz2);
+    // The barycentric weights are LINEAR in the pixel position, so step them
+    // incrementally (3 adds/pixel) instead of three full `edge()` cross-products
+    // per pixel — the classic span-rasteriser speedup Quake's D_DrawSpans used.
+    // `w_i` is recomputed exactly via `edge()` at each ROW START (so drift never
+    // accumulates across rows), then advanced by `dw_i_dx` across the row. The
+    // accumulation differs from a per-pixel recompute by at most a few ULPs over a
+    // row, which can only flip the inside-test on a sub-pixel sliver at a triangle
+    // edge — visually identical.
+    let dw0dx = -(v2.y - v1.y) * inv_area;
+    let dw1dx = -(v0.y - v2.y) * inv_area;
+    let dw2dx = -(v1.y - v0.y) * inv_area;
 
     for py in min_y..=max_y {
+        let sy = py as f32 + 0.5;
+        let sx0 = min_x as f32 + 0.5;
+        let mut w0 = edge(v1.x, v1.y, v2.x, v2.y, sx0, sy) * inv_area;
+        let mut w1 = edge(v2.x, v2.y, v0.x, v0.y, sx0, sy) * inv_area;
+        let mut w2 = edge(v0.x, v0.y, v1.x, v1.y, sx0, sy) * inv_area;
         for px in min_x..=max_x {
-            let sx = px as f32 + 0.5;
-            let sy = py as f32 + 0.5;
-            let w0 = edge(v1.x, v1.y, v2.x, v2.y, sx, sy) * inv_area;
-            let w1 = edge(v2.x, v2.y, v0.x, v0.y, sx, sy) * inv_area;
-            let w2 = edge(v0.x, v0.y, v1.x, v1.y, sx, sy) * inv_area;
+            // A labelled block so the early-outs can `break 'pixel` to the per-pixel
+            // weight step below (a `continue` would skip the increment and desync).
+            'pixel: {
             if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                continue;
+                break 'pixel;
             }
             // Perspective-correct depth (1/z interpolation, then invert), matching
             // Quake's `zi`-keyed z-buffer and the flat path. `inv_z` is reused for
             // the s/t perspective divide below, so this costs nothing extra.
             let inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
             if inv_z <= 0.0 {
-                continue;
+                break 'pixel;
             }
             let depth = 1.0 / inv_z;
             let idx = (py as usize) * w + (px as usize);
             let zc = match zbuf.get_mut(idx) {
                 Some(z) => z,
-                None => continue,
+                None => break 'pixel,
             };
             if depth >= *zc {
-                continue;
+                break 'pixel;
             }
-            let s = (w0 * soz0 + w1 * soz1 + w2 * soz2) / inv_z;
-            let t = (w0 * toz0 + w1 * toz1 + w2 * toz2) / inv_z;
+            let sx = px as f32 + 0.5;
+            // Perspective divide reuses `depth` (= 1/inv_z) as a multiply instead of
+            // two more reciprocals — the affine numerators times 1/z. (Differs from
+            // `/inv_z` by at most a ULP, which never crosses a texel boundary.)
+            let s = (w0 * soz0 + w1 * soz1 + w2 * soz2) * depth;
+            let t = (w0 * toz0 + w1 * toz1 + w2 * toz2) * depth;
 
             // Resolve the palette index and per-pixel brightness per surface
             // mode. Liquids/sky are fullbright (brightness 1.0, no lightmap);
@@ -1752,7 +1770,7 @@ fn raster_triangle_tex(
                     let ty = (t as i64).rem_euclid(th as i64) as usize;
                     let p = match pixels.get(ty * tw + tx) {
                         Some(&p) => p as usize,
-                        None => continue,
+                        None => break 'pixel,
                     };
                     // A baked lightmap (indexed by the same surface (s,t), which
                     // shares the texinfo axes) replaces the flat Lambert `shade`.
@@ -1769,7 +1787,7 @@ fn raster_triangle_tex(
                     let ty = (t2 as i64).rem_euclid(th as i64) as usize;
                     let p = match pixels.get(ty * tw + tx) {
                         Some(&p) => p as usize,
-                        None => continue,
+                        None => break 'pixel,
                     };
                     (p, 1.0)
                 }
@@ -1814,6 +1832,12 @@ fn raster_triangle_tex(
                     }
                 }
             }
+            } // 'pixel
+            // Step the barycentric weights one pixel across the row (always, even on
+            // an early-out, so the running values stay in sync with `px`).
+            w0 += dw0dx;
+            w1 += dw1dx;
+            w2 += dw2dx;
         }
     }
 }

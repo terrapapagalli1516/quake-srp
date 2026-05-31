@@ -1676,6 +1676,39 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     // per-frame loop), so those slices are empty.
     let light_styles = server.lightstyle_scales(server.time());
     let colormap = read("gfx/colormap.lmp").ok();
+
+    // Optional render benchmark, reusing this command's full scene setup:
+    //   QUAKE_BENCH=<iters> [QUAKE_RES=<WxH>] quaketool scene <pak> <map> <out>
+    // Renders the scene `iters` times at the given resolution and reports the WARM
+    // per-frame cost (the first, cache-cold frame is excluded). This exercises the
+    // exact rasteriser the live game uses, so it measures the real render cost.
+    if let Ok(iters) = std::env::var("QUAKE_BENCH") {
+        let iters: u32 = iters.parse().unwrap_or(60).max(1);
+        let (bw, bh) = std::env::var("QUAKE_RES")
+            .ok()
+            .and_then(|s| {
+                let mut it = s.split(['x', 'X']);
+                Some((it.next()?.trim().parse().ok()?, it.next()?.trim().parse().ok()?))
+            })
+            .unwrap_or((640usize, 400usize));
+        let render_once = || {
+            render::render_scene_ext(
+                &bsp_for_render, &cam, bw, bh, &palette, &instances, &bmodels, &external, None,
+                server.time(), &[], &[], &light_styles, colormap.as_deref(),
+            )
+        };
+        let _ = std::hint::black_box(render_once()); // warm the per-face caches
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(render_once());
+        }
+        let per = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+        return Ok(Out::Text(format!(
+            "bench {map_name} {bw}x{bh}: {iters} warm frames -> {per:.2} ms/frame ({:.1} fps)\n",
+            1000.0 / per
+        )));
+    }
+
     let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &[], &light_styles, colormap.as_deref());
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
