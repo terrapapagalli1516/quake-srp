@@ -24,14 +24,14 @@ essentially clean — most of their "findings" were rejected as faithful.)
 | H4 | Animated `+texture` sequencing (`Mod_LoadTextures`) + per-frame `R_TextureAnimation` missing — water/teleporters/switches/lights don't animate | ✅ fixed `8f13cb1` (R_TextureAnimation 10 Hz cycles) |
 | H5 | ALIAS_GROUP frames never animate — only the first sub-pose is drawn (e.g. flames) | ✅ fixed `8f13cb1` (group-frame + skin-group anim by time) |
 | H6 | `pixelAspect` — frame presented 16:10 square-pixel instead of authored 4:3 | ✅ fixed `9876cb4` (present at 4:3) |
-| H7 | `R_LavaSplash` not implemented — TE_LAVASPLASH faked as a 20-particle burst | 🔶 functions ported `8f13cb1`; TE spawn-wiring in wave 2 |
-| H8 | `R_TeleportSplash` not implemented — TE_TELEPORT faked, wrong color | 🔶 functions ported `8f13cb1`; TE spawn-wiring in wave 2 |
-| H9 | `R_RocketTrail` entirely missing — no rocket/grenade/gib/tracer/voor trails | 🔶 R_RocketTrail ported `8f13cb1`; spawn-wiring in wave 2 |
+| H7 | `R_LavaSplash` not implemented — TE_LAVASPLASH faked as a 20-particle burst | ✅ fixed `8bda8cb` (TE→R_LavaSplash/R_TeleportSplash) |
+| H8 | `R_TeleportSplash` not implemented — TE_TELEPORT faked, wrong color | ✅ fixed `8bda8cb` (TE→R_LavaSplash/R_TeleportSplash) |
+| H9 | `R_RocketTrail` entirely missing — no rocket/grenade/gib/tracer/voor trails | ✅ fixed `8bda8cb` (trails wired per model flags) |
 | H10 | Stale entities never removed — missing the per-message msgtime/relink cull (demo) | ✅ fixed `8f13cb1` (msgtime cull) |
 | H11 | Ambient sounds missing — placed `ambientsound()` loops + the 4 automatic leaf ambients | ⬜ TODO |
-| H12 | Inventory bar (ibar) with weapon icons + current-weapon flash missing | ⬜ TODO (render.rs HUD) |
-| H13 | Animated player face (health frames, pain, invuln/quad/invis) missing | ⬜ TODO (render.rs HUD) |
-| H14 | Item, key, and sigil icons missing | ⬜ TODO (render.rs HUD) |
+| H12 | Inventory bar (ibar) with weapon icons + current-weapon flash | ✅ fixed `7cbc202` |
+| H13 | Animated player face (health/powerup frames; pain-anim is minor TODO) | ✅ fixed `7cbc202` |
+| H14 | Item, key, and sigil icons + ammo/armor-type icons | ✅ fixed `7cbc202` |
 | H15 | Ammo number always shows shells instead of the active weapon's ammo | ✅ fixed `10ec5bc` (use currentammo) |
 
 Also fixed this session (was a separate reported bug, not in the audit): the
