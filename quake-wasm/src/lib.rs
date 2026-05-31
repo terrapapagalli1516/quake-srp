@@ -2325,7 +2325,14 @@ fn step_walk(
         // per-frame stat deltas, which equal blood/armor in single-player.)
         let blood = (w.last_health - health).max(0.0);
         let armor = (w.last_armor - armorv).max(0.0);
-        if blood + armor > 0.0 {
+        // Suppress the inferred flash during megahealth rot: above max_health the
+        // QuakeC ticks health down 1/sec, which is NOT damage and never flashes in
+        // id (the real CSHIFT_DAMAGE comes only from svc_damage / T_Damage). Gate on
+        // post-tick health still exceeding max_health so the rot can't masquerade as
+        // a hit. (A genuine hit while overhealed is rare and self-corrects next hit.)
+        let max_health = w.server.vm.ent_get_float(w.player, "max_health");
+        let is_rot = max_health > 0.0 && health > max_health;
+        if blood + armor > 0.0 && !is_rot {
             let count = (0.5 * (blood + armor)).max(10.0);
             w.damage_blend = (w.damage_blend + 3.0 * count).min(150.0);
             // Tint: armour-dominant -> pinkish, armour-only -> orange-red, else red.
@@ -2574,7 +2581,15 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
     // here (empty) and no live server for light styles (neutral static scales).
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    let img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, d.colormap.as_deref(), &sprite_insts);
+    // Demo maps are static-lit and worldspawn always sets style 0 = 'm', which id's
+    // demo playback applies (the recorded svc_lightstyle in the .dem signon). The
+    // demo parser doesn't yet replay those, so seed style 0 with id's steady-world
+    // brightness (264/256, matching the live walk's lightstyle_scales) instead of a
+    // flat 1.0 — otherwise the boot demo's world renders ~1 colormap row too dark.
+    // (Animating the recorded styles — torch flicker — is a minor follow-up.)
+    let mut demo_styles = render::NEUTRAL_LIGHTSTYLE_SCALES;
+    demo_styles[0] = 264.0 / 256.0;
+    let img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
     // The demo path applies no screen blend (it carries no live damage/powerup
     // state); return a zero blend so its signature matches step_walk's deferred one.
     (img, [0, 0, 0], 0.0)

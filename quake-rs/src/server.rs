@@ -1936,11 +1936,13 @@ impl Server {
     ///   `ch = string[k]`, and the C `d_lightstylevalue[j] = (ch - 'a') * 22`
     ///   (so `'a'` → 0 = dark, `'m'` → 264 = normal, `'z'` → 550 ≈ double-bright).
     ///
-    /// The C accumulates `luxel * d_lightstylevalue` then divides by 256. This
-    /// renderer instead stores luxels in `0..=255` and applies a multiplicative
-    /// factor, so we normalise the style value by the *normal* letter `'m'` (264),
-    /// not 256: `scale = (ch - 'a') * 22 / 264`. Then `'m'` → exactly `1.0`, which
-    /// keeps a steady single-style-0 face byte-identical to the static renderer.
+    /// The C renders `luxel * d_lightstylevalue` against a constant `255 * 256`
+    /// white point. This renderer stores luxels in `0..=255` and applies a
+    /// multiplicative factor, so we normalise the style value by id's `256` white
+    /// point: `scale = (ch - 'a') * 22 / 256`. Then `'m'` → `264/256 = 1.03125`
+    /// (exactly id's steady-world brightness — normalising by `'m'` itself made the
+    /// whole static-lit world ~1 colormap row too dark). An UNSET style still maps
+    /// to `1.0` (R_AnimateLight's `length == 0` default of 256).
     pub fn lightstyle_scales(&self, time: f32) -> [f32; MAX_LIGHTSTYLES] {
         // Normalise by 256 — id's white point — NOT by 'm' (264). R_AnimateLight
         // sets d_lightstylevalue[j] = (letter-'a')*22 (so worldspawn's lightstyle
@@ -2702,12 +2704,19 @@ impl Server {
             let mut steptrace: Option<MoveTrace> = None;
             let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
 
-            // SV_LinkEdict(ent, true) ends the freefall branch: trip triggers /
-            // pickups for the moved entity. This is INSIDE the branch in the C
-            // (the on-ground / flying / swimming path returns before it), so an
-            // entity that skipped the move does not re-touch here. Skip if a
-            // touch impact during the move already removed the entity.
+            // SV_LinkEdict(ent, true) ends the freefall branch: it recomputes
+            // absmin/absmax from the NEW origin AND trips triggers/pickups for the
+            // moved entity. This is INSIDE the branch in the C (the on-ground /
+            // flying / swimming path returns before it), so an entity that skipped
+            // the move does not re-link here. Skip if a touch impact during the move
+            // already removed the entity.
             if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+                // Recompute absmin/absmax FIRST (C SV_LinkEdict order), so the
+                // trigger overlap test — and, crucially, the sv_move abs-box
+                // broadphase on later moves — see the fresh box. Without this a
+                // fast-falling MOVETYPE_STEP monster kept a stale box and could be
+                // wrongly broadphase-rejected (a missed collision).
+                link_edict(&mut self.vm, ent);
                 touch_triggers(&mut self.vm, ent, sv_time);
 
                 // "just hit ground": FL_ONGROUND newly latched by the slide move

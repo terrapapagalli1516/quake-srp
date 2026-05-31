@@ -1954,8 +1954,9 @@ fn decompress_vis(model_vis: &[u8], visofs: i32, numleafs: usize) -> Vec<bool> {
 /// `p` falls in, porting `Mod_PointInLeaf`.
 ///
 /// Starts at `models[0].headnode[0]` (a node index). At each node the point is
-/// classified against the node's plane: `dot(normal, p) - dist >= 0` takes
-/// `children[0]` (front), otherwise `children[1]` (back). A *negative* child
+/// classified against the node's plane: `dot(normal, p) - dist > 0` takes
+/// `children[0]` (front), otherwise `children[1]` (back; on-plane goes back, per
+/// C `Mod_PointInLeaf`). A *negative* child
 /// encodes a leaf as `-(child) - 1`; a non-negative child is the next node.
 ///
 /// Returns the leaf index, or `None` if the model/headnode/plane/child indices
@@ -1988,8 +1989,10 @@ fn point_in_leaf(bsp: &Bsp, p: Vec3) -> Option<usize> {
         let plane = bsp.planes.get(pi)?;
 
         let d = dot(plane.normal, p) - plane.dist;
-        // front (child[0]) when on/in front of the plane, else back (child[1]).
-        let child = if d >= 0.0 {
+        // front (child[0]) only when strictly in front; the exactly-on-plane case
+        // (d == 0) goes to the back child, matching C `Mod_PointInLeaf` (`if (d > 0)`)
+        // and the sibling recursive_light_point descent.
+        let child = if d > 0.0 {
             *node.children.first()?
         } else {
             *node.children.get(1)?
@@ -8328,8 +8331,9 @@ mod tests {
         assert_eq!(point_in_leaf(&bsp, [10.0, 0.0, 0.0]), Some(1));
         // A point with x < 0 is on the back side -> leaf 2.
         assert_eq!(point_in_leaf(&bsp, [-10.0, 0.0, 0.0]), Some(2));
-        // Exactly on the plane (d == 0) counts as front (>= 0) -> leaf 1.
-        assert_eq!(point_in_leaf(&bsp, [0.0, 5.0, -3.0]), Some(1));
+        // Exactly on the plane (d == 0) goes to the BACK child (strict `d > 0`,
+        // matching C Mod_PointInLeaf) -> leaf 2.
+        assert_eq!(point_in_leaf(&bsp, [0.0, 5.0, -3.0]), Some(2));
     }
 
     #[test]
