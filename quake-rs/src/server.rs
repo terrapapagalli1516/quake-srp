@@ -1942,9 +1942,15 @@ impl Server {
     /// not 256: `scale = (ch - 'a') * 22 / 264`. Then `'m'` → exactly `1.0`, which
     /// keeps a steady single-style-0 face byte-identical to the static renderer.
     pub fn lightstyle_scales(&self, time: f32) -> [f32; MAX_LIGHTSTYLES] {
-        // Normalise by the "normal" letter 'm' so a steady 'm' style is exactly
-        // 1.0 (no brightness regression vs the static lightmap).
-        const NORMAL: f32 = 12.0 * 22.0; // 'm' - 'a' == 12, times 22 == 264
+        // Normalise by 256 — id's white point — NOT by 'm' (264). R_AnimateLight
+        // sets d_lightstylevalue[j] = (letter-'a')*22 (so worldspawn's lightstyle
+        // (0,"m") gives style 0 = 264), and R_BuildLightMap renders luxel*scale
+        // against the constant 255*256 white point. So a steady 'm' world is
+        // luxel*264/256 = 1.03125x — slightly brighter than a literal luxel*256.
+        // Normalising by 'm' (264) made style 0 exactly 1.0, rendering the entire
+        // static-lit world ~1 colormap row too dark; /256 matches id. An UNSET style
+        // still maps to 1.0 below (R_AnimateLight's length==0 default of 256).
+        const NORMAL: f32 = 256.0;
         // Animation phase in characters; floor(time*10), guarded against a
         // non-finite/huge time so the modulo index never overflows or panics.
         let phase: i64 = if time.is_finite() {
@@ -8696,8 +8702,10 @@ mod tests {
         let progs = Progs::parse(&img).expect("parse");
         let mut server = Server::new(empty_bsp(), progs).expect("server");
 
-        // 'a' -> 0 (dark), 'm' -> ~1.0 (normal), 'z' -> ~2.08 (double bright),
-        // and an unset style -> 1.0 (treated as normal so faces don't go dark).
+        // Letter value is (c-'a')*22, normalised by id's 256 white point (NOT 'm'):
+        // 'a' -> 0 (dark), 'm' -> 264/256 = 1.03125 (id's steady-world brightness),
+        // 'z' -> 550/256 ~ 2.148, and an UNSET style -> 1.0 (R_AnimateLight's 256
+        // default, so untouched faces stay neutral).
         call_lightstyle(&mut server, 0.0, "a");
         call_lightstyle(&mut server, 1.0, "m");
         call_lightstyle(&mut server, 2.0, "z");
@@ -8706,9 +8714,10 @@ mod tests {
 
         let sc = server.lightstyle_scales(0.0);
         assert!((sc[0] - 0.0).abs() < 1e-6, "'a' -> 0.0, got {}", sc[0]);
-        assert!((sc[1] - 1.0).abs() < 1e-6, "'m' -> 1.0 (normal), got {}", sc[1]);
-        // 'z' = (25*22)/264 = 550/264 ~ 2.0833.
-        assert!((sc[2] - (550.0 / 264.0)).abs() < 1e-5, "'z' -> ~2.083, got {}", sc[2]);
+        // 'm' = (12*22)/256 = 264/256 = 1.03125 (id renders the steady world here).
+        assert!((sc[1] - (264.0 / 256.0)).abs() < 1e-6, "'m' -> 1.03125, got {}", sc[1]);
+        // 'z' = (25*22)/256 = 550/256 ~ 2.1484.
+        assert!((sc[2] - (550.0 / 256.0)).abs() < 1e-5, "'z' -> ~2.148, got {}", sc[2]);
         assert!((sc[4] - 1.0).abs() < 1e-6, "unset style -> 1.0 (normal), got {}", sc[4]);
     }
 

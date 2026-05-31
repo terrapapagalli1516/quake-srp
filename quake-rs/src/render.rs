@@ -2143,9 +2143,15 @@ fn light_point_check_node(
             Some(v) => v,
             None => continue,
         };
-        let ds = s - texmins[0] as f32;
-        let dt = t - texmins[1] as f32;
-        if ds < 0.0 || dt < 0.0 || ds > extent[0] as f32 || dt > extent[1] as f32 {
+        // C RecursiveLightPoint declares s,t,ds,dt as int: the surface coordinate is
+        // TRUNCATED to int before the texmins subtract and the >>4 luxel select. Do
+        // the same integer arithmetic so the chosen luxel matches the C exactly
+        // (the float path could drift one luxel near integer boundaries).
+        let s_i = s as i32; // (int) truncation toward zero, as the C cast
+        let t_i = t as i32;
+        let ds = s_i - texmins[0];
+        let dt = t_i - texmins[1];
+        if ds < 0 || dt < 0 || ds > extent[0] || dt > extent[1] {
             continue;
         }
 
@@ -2163,9 +2169,9 @@ fn light_point_check_node(
             Ok(s) => s,
             Err(_) => return Some(0.0),
         };
-        // Luxel coordinate within the block (C `ds>>4`, `dt>>4`).
-        let lx = (ds as i64 / 16).clamp(0, lmw as i64 - 1) as usize;
-        let ly = (dt as i64 / 16).clamp(0, lmh as i64 - 1) as usize;
+        // Luxel coordinate within the block (C `ds>>4`, `dt>>4`; ds,dt >= 0 here).
+        let lx = ((ds >> 4) as i64).clamp(0, lmw as i64 - 1) as usize;
+        let ly = ((dt >> 4) as i64).clamp(0, lmh as i64 - 1) as usize;
         let luxel = ly * lmw + lx;
 
         // Sum each active style's luxel, scaled by its light-style value. The C

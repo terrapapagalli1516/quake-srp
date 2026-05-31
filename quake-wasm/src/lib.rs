@@ -181,6 +181,10 @@ struct DemoPlay {
     /// Parsed sprite per precache index (None for non-`.spr` / missing); the boot
     /// demo's explosion flashes (s_explod.spr) render from these.
     sprites: Vec<Option<quake_rs::spr::Sprite>>,
+    /// `gfx/colormap.lmp` — the 64-row shade LUT. The demo path must thread it like
+    /// the live walk does, else world surfaces render overbright (linear fallback)
+    /// instead of through id's no-overbright colormap shading.
+    colormap: Option<Vec<u8>>,
     colors: Vec<[u8; 3]>,
     elapsed: f32,
     idx: usize,
@@ -508,6 +512,7 @@ fn build_demo() -> Option<DemoPlay> {
         demo,
         models,
         sprites,
+        colormap: read("gfx/colormap.lmp"),
         colors,
         elapsed: 0.0,
         idx: 0,
@@ -2569,7 +2574,7 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
     // here (empty) and no live server for light styles (neutral static scales).
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    let img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, None, &sprite_insts);
+    let img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &render::NEUTRAL_LIGHTSTYLE_SCALES, d.colormap.as_deref(), &sprite_insts);
     // The demo path applies no screen blend (it carries no live damage/powerup
     // state); return a zero blend so its signature matches step_walk's deferred one.
     (img, [0, 0, 0], 0.0)
@@ -2784,6 +2789,7 @@ mod tests {
             demo,
             models: Vec::new(),
             sprites: Vec::new(),
+            colormap: None,
             colors: Vec::new(),
             elapsed: 0.0,
             idx: 0,
@@ -2868,6 +2874,7 @@ mod tests {
             demo,
             models: Vec::new(),
             sprites: Vec::new(),
+            colormap: None,
             colors: Vec::new(),
             elapsed: 0.0,
             idx: 0,
