@@ -106,6 +106,11 @@ const MAX_STACK_DEPTH: usize = 32;
 const LOCALSTACK_SIZE: usize = 2048;
 /// Statement budget before declaring a runaway loop (matches the C constant).
 const RUNAWAY: u32 = 100_000;
+/// Hard edict ceiling (`quakedef.h MAX_EDICTS`): the C `ED_Alloc` calls
+/// `Sys_Error("ED_Alloc: no free edicts")` when this is exceeded. We surface it as
+/// a `run_error` from the QuakeC-reachable `PF_Spawn` (via [`Vm::spawn_checked`])
+/// so a runaway `spawn()` loop fails cleanly instead of growing memory unbounded.
+pub const MAX_EDICTS: usize = 600;
 
 /// One saved interpreter frame (`prstack_t`): where to resume and in which
 /// function, so `PR_LeaveFunction` can restore them.
@@ -471,6 +476,30 @@ impl Vm {
         self.edict_free.push(false);
         // Newly grown fields are already zero; mark not-free (already false).
         i as i32
+    }
+
+    /// `ED_Alloc` with id's hard [`MAX_EDICTS`] ceiling (the C
+    /// `Sys_Error("ED_Alloc: no free edicts")`). Reuses a free slot, else grows —
+    /// but returns `None` once every slot is in use AND the array is already at the
+    /// ceiling, so the QuakeC-reachable `PF_Spawn` surfaces a `run_error` instead of
+    /// growing memory without bound on a runaway `spawn()` loop. Engine-internal
+    /// spawns (the player, temp entities, the explosive box) use the infallible
+    /// [`spawn`](Self::spawn).
+    pub fn spawn_checked(&mut self) -> Option<i32> {
+        for i in 1..self.edict_free.len() {
+            if self.edict_free[i] {
+                self.clear_edict(i);
+                return Some(i as i32);
+            }
+        }
+        if self.edict_free.len() >= MAX_EDICTS {
+            return None;
+        }
+        let i = self.edict_free.len();
+        let ef = self.entityfields();
+        self.edict_fields.resize(self.edict_fields.len() + ef, 0);
+        self.edict_free.push(false);
+        Some(i as i32)
     }
 
     /// `ED_Free`: zero the edict's fields and mark it free. The world (edict 0)

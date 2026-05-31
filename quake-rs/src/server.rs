@@ -4195,16 +4195,25 @@ impl Server {
         let downtrace = self.push_entity(ent, downmove, sv_time);
 
         if downtrace.plane_normal[2] > 0.7 {
-            // landed on a walkable floor: keep the stepped result and set ground.
-            let flags = self.vm.ent_get_float(ent, "flags") as i32;
-            self.vm
-                .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
-            // groundentity = EDICT_TO_PROG(downtrace.ent): the edict we stepped
-            // down onto (0 = world, >0 = a plat/door), not a hardcoded world.
-            // `downtrace.ent` is `-1` (nothing) only when the down-push was clear,
-            // but plane_normal[2] > 0.7 implies a floor was contacted, so clamp
-            // the sentinel to the world (0) defensively.
-            self.vm.ent_set_int(ent, "groundentity", downtrace.ent.max(0));
+            // Landed on a walkable floor: keep the stepped result. The C
+            // (sv_phys.c SV_WalkMove ~390) only latches FL_ONGROUND /
+            // groundentity HERE when the mover is a brush model
+            // (`ent->v.solid == SOLID_BSP`). A player (SOLID_SLIDEBOX) keeps the
+            // stepped origin but does NOT latch ground in the step-down branch —
+            // it already got FL_ONGROUND from the regular slide move
+            // (`fly_move_core` / SV_FlyMove, which gates on the contacted floor
+            // being SOLID_BSP). Unconditionally setting it here let players latch
+            // ground onto a step they only grazed; the gate restores the C.
+            if self.vm.ent_get_float(ent, "solid") as i32 == SOLID_BSP {
+                let flags = self.vm.ent_get_float(ent, "flags") as i32;
+                self.vm
+                    .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+                // groundentity = EDICT_TO_PROG(downtrace.ent): the edict we
+                // stepped down onto (0 = world, >0 = a plat/door). `downtrace.ent`
+                // is `-1` only when the down-push was clear, but plane_normal[2] >
+                // 0.7 implies a floor contact, so clamp the sentinel to world (0).
+                self.vm.ent_set_int(ent, "groundentity", downtrace.ent.max(0));
+            }
         } else {
             // the push down didn't reach good ground: use the no-step move.
             self.vm.ent_set_vector(ent, "origin", nosteporg);
@@ -4350,6 +4359,14 @@ pub fn sv_move(
             }
             if vm.edict_free.get(e).copied().unwrap_or(true) {
                 continue; // free slot
+            }
+
+            // SV_ClipToLinks allsolid early-out (world.c ~847): once the move is
+            // wholly trapped in solid there is nothing further to clip, and a later
+            // entity's trace must not clobber `allsolid` back to false. The C does
+            // `if (clip->trace.allsolid) return;` at the top of the touch loop.
+            if best.allsolid {
+                break;
             }
 
             let solid = vm.ent_get_float(ei, "solid") as i32;

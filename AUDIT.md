@@ -37,6 +37,45 @@ A second review agent hunted rendering diffs vs WinQuake; fixed:
 
 **Remaining polish (subtle / diminishing returns):** view-roll (strafe lean + damage kick — needs a Camera.roll field across all call sites), weapon viewmodel bob/sway/world-lighting, `.spr` sprite entities (glowing light orbs / bubbles — rare in shareware), the bonus-pickup gold flash (`bf` stuffcmd), invuln "666"/disc, EF_BRIGHTFIELD halo, alias-model colormap LUT. **Ambient sounds** (last HIGH) remains — looping web audio + per-leaf ambient_level; audio, not pixels.
 
+## Session 3 — codebase-wide code reviews (≥3 rounds)
+
+Goal (the user's): a faithful port of Quake I to Rust, with at least 3
+codebase-wide code reviews, fixing issues as they are found. Each round
+spawns parallel review agents over the whole tree, then the findings are fixed,
+tested (396 lib tests), golden-verified (e1m1/e1m2/e1m3 scene sha256 unchanged at
+`8eea4f9c`/`1edb0642`/`2009e041`), and committed.
+
+### Round 1 — fixed
+- ✅ **clip_box freeze (HIGH)** — `world.rs`: a move that merely *starts* inside a
+  box hull returned `fraction=0/allsolid` and froze the mover; now matches the C
+  box hull (startsolid set, but allsolid only when the move never exits the box,
+  fraction=1, endpos=end) so movers slide out instead of locking when AABBs touch.
+- ✅ **sv_move allsolid early-out (MED)** — `server.rs SV_ClipToLinks`: once the
+  move is wholly trapped, break the per-edict loop (C `if (trace.allsolid) return;`)
+  so a later entity's clip can't clobber `allsolid` back to false.
+- ✅ **SV_WalkMove ground gate (MED)** — `server.rs`: the step-down only latches
+  FL_ONGROUND/groundentity when `ent.solid == SOLID_BSP` (the player gets ground
+  from the regular SV_FlyMove slide), matching sv_phys.c; previously unconditional.
+- ✅ **powerup_cshift priority (MED)** — `render.rs`: first-match `else if` chain
+  QUAD > SUIT > INVISIBILITY > INVULNERABILITY (was last-wins, so Quad+Pent showed
+  the wrong tint).
+- ✅ **Options "Screen size" Enter resize (MED)** — `render.rs`/`lib.rs`: Enter on
+  the resolution row now propagates a `MenuAction::ResolutionChanged` so the host
+  reallocates the framebuffer (was cycling the preset but snapping back).
+- ✅ **Help nav (MED)** — `render.rs`: up=next/down=prev (M_Help_Key) and
+  left/right also page the Help screen (were inverted / inert).
+- ✅ **Rocket-trail stale origin (MED)** — `lib.rs`: prune `trail_org` of freed
+  edicts each frame so a recycled slot doesn't draw a spurious streak.
+- ✅ **PF_random range (LOW)** — `builtins.rs`: divide by `0x7fff` (closed [0,1],
+  matches id) not `0x8000`.
+- ✅ **ED_Alloc ceiling (LOW)** — `vm.rs`: `MAX_EDICTS=600`; PF_Spawn surfaces a
+  `run_error` instead of growing memory unbounded on a runaway spawn loop.
+- ✅ **`+A..+J` anim slot (LOW)** — `bsp.rs`: uppercase animated-texture frames map
+  to the ALTERNATE cycle (the C upper-cases first, so `+a..+j` and `+A..+J` are the
+  same alternate branch); was mapped to primary.
+- ✅ **centerprint position (LOW)** — `render.rs`: y = 200·0.35 (≤4 lines) else 48,
+  per SCR_DrawCenterString (was dead-centre).
+
 ## HIGH (15)
 
 | # | Finding | Status |

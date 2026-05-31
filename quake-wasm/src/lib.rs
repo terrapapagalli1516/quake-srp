@@ -713,10 +713,18 @@ pub extern "C" fn menu_select() {
     // Decide the action under the borrow, then (if NewGame) rebuild the walk
     // afterward so we don't hold a &mut Walk while replacing it.
     let mut start_new_game = false;
+    let mut new_size: Option<(usize, usize)> = None;
     ensure_app(|a| {
         if a.menu.visible {
             match a.menu.select() {
                 MenuAction::NewGame => start_new_game = true,
+                MenuAction::ResolutionChanged => {
+                    // Enter on the Options "Screen size" row cycled the preset;
+                    // capture the new (clamped) size and resize the framebuffer
+                    // after the borrow, exactly like the left/right-arrow path.
+                    let (rw, rh) = a.menu.resolution();
+                    new_size = Some(clamp_resolution(rw, rh));
+                }
                 MenuAction::OpenConsole => {
                     // Options "Go to console": select() already closed the menu;
                     // open the drop-down console (Con_ToggleConsole_f).
@@ -735,6 +743,9 @@ pub extern "C" fn menu_select() {
             }
         }
     });
+    if let Some((w, h)) = new_size {
+        ensure_app(|a| a.set_render_size(w, h));
+    }
     if start_new_game {
         // Fresh single-player game on the start hub (NEW_GAME_MAP). Rebuild the
         // whole walk — new Server, new connected client — switch to walk mode and
@@ -1959,6 +1970,17 @@ fn step_walk(
     // borrowing `ExternalBModel` list is built below, after the cache is final, so
     // the immutable cache borrow does not clash with reading the server here.
     let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
+    // Drop trail history for any edict that is currently free. When `ED_Free`
+    // recycles a slot for a new trailed entity (rocket/grenade/gib), a stale
+    // `trail_org[ent]` from the previous occupant would make R_RocketTrail draw a
+    // spurious streak from the old entity's last origin to the new spawn point.
+    // Pruning here lets a reused slot start fresh (oldorg defaults to its own
+    // origin below, so no trail on the first frame). Disjoint field borrows.
+    {
+        let vm = &w.server.vm;
+        w.trail_org
+            .retain(|&e, _| !vm.edict_free.get(e as usize).copied().unwrap_or(true));
+    }
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {

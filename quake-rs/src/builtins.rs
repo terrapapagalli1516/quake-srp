@@ -121,15 +121,16 @@ fn lcg_next() -> u32 {
     }
 }
 
-/// `PF_random` (#7): `float() random`, a value in `[0, 1)`.
+/// `PF_random` (#7): `float() random`, a value in `[0, 1]`.
 ///
-/// The C computes `(rand() & 0x7fff) / (float)0x7fff` (which can hit exactly
-/// `1.0`). We mirror the `& 0x7fff` masking but divide by `0x8000` so the result
-/// stays in the half-open `[0, 1)` range the QuakeC docs promise, driven by the
-/// deterministic [`RNG_STATE`] LCG so tests are reproducible.
+/// The C computes `(rand() & 0x7fff) / (float)0x7fff`, so the range is CLOSED
+/// `[0, 1]` — it returns exactly `1.0` when the masked bits are `0x7fff`. We match
+/// id exactly (divide by `0x7fff`, not `0x8000`) so endpoint-sensitive QuakeC
+/// behaves identically. Backed by the deterministic [`RNG_STATE`] LCG (in place of
+/// process-global `rand()`) so tests reproduce.
 fn pf_random(vm: &mut Vm) -> Result<()> {
     let bits = lcg_next() & 0x7fff;
-    let num = (bits as f32) / 32768.0; // 0x8000 -> half-open [0,1)
+    let num = (bits as f32) / 32767.0; // 0x7fff -> closed [0,1], matching PF_random
     vm.ret_float(num);
     Ok(())
 }
@@ -237,11 +238,17 @@ fn pf_vectoangles(vm: &mut Vm) -> Result<()> {
 
 // ------------------------------------------------------------- #14/#15 spawn/remove
 
-/// `PF_Spawn` (#14): `entity() spawn` — allocate (or reuse) an edict.
+/// `PF_Spawn` (#14): `entity() spawn` — allocate (or reuse) an edict. Enforces
+/// id's `MAX_EDICTS` ceiling (the C `ED_Alloc` `Sys_Error`s when full); here a
+/// runaway QuakeC spawn loop fails with a `run_error` rather than exhausting memory.
 fn pf_spawn(vm: &mut Vm) -> Result<()> {
-    let e = vm.spawn();
-    vm.ret_entity(e);
-    Ok(())
+    match vm.spawn_checked() {
+        Some(e) => {
+            vm.ret_entity(e);
+            Ok(())
+        }
+        None => Err(vm.run_error("ED_Alloc: no free edicts")),
+    }
 }
 
 /// `PF_Remove` (#15): `void(entity e) remove` — free the edict.
@@ -849,14 +856,15 @@ mod tests {
     #[test]
     fn random_is_in_unit_interval_and_deterministic() {
         let mut vm = bare_vm();
-        // Many draws all land in [0,1); the sequence is reproducible within a
-        // run because the LCG is process-global and stepped deterministically.
+        // Many draws all land in the CLOSED [0,1] (PF_random divides by 0x7fff, so
+        // 1.0 is attainable); the sequence is reproducible within a run because the
+        // LCG is process-global and stepped deterministically.
         let mut seen_distinct = false;
         let mut last = -1.0f32;
         for _ in 0..1000 {
             pf_random(&mut vm).expect("random");
             let r = vm.gf(OFS_RETURN);
-            assert!((0.0..1.0).contains(&r), "random() = {r} out of [0,1)");
+            assert!((0.0..=1.0).contains(&r), "random() = {r} out of [0,1]");
             if r != last && last >= 0.0 {
                 seen_distinct = true;
             }

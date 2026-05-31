@@ -638,11 +638,19 @@ pub fn clip_box(
     }
 
     if inside {
-        // The mover began inside the (expanded) target box.
+        // The mover began inside the (expanded) target box. Mirror the C
+        // SV_RecursiveHullCheck box hull: the trace keeps fraction=1.0 / endpos=end
+        // (the move COMPLETES — exiting a box is not an impact, SV_FlyMove breaks on
+        // fraction==1). `allsolid` is set only when the segment never leaves the box
+        // (texit stays >= 1.0, so the end is inside too) — that is the only case the
+        // C treats as trapped (SV_FlyMove zeroes velocity). When the move exits
+        // (texit < 1.0), allsolid stays false so a mover that merely brushes into a
+        // box slides out instead of freezing. (Previously this returned allsolid +
+        // fraction=0, locking any two entities whose AABBs overlapped.)
         tr.startsolid = true;
-        tr.allsolid = true;
-        tr.fraction = 0.0;
-        tr.endpos = start;
+        tr.allsolid = texit >= 1.0;
+        tr.fraction = 1.0;
+        tr.endpos = end;
         return tr;
     }
 
@@ -1280,8 +1288,11 @@ mod tests {
     }
 
     #[test]
-    fn clip_box_start_inside_is_startsolid() {
-        // Mover starts at the box centre -> inside the expanded box -> startsolid.
+    fn clip_box_start_inside_slides_out_or_traps() {
+        // Mover (a point) starts at the box centre and moves OUT the +X face. Per the
+        // C box hull, EXITING a box is not an impact: startsolid is set, but
+        // allsolid=false and the move completes (fraction 1.0, endpos=end) so the
+        // mover slides out instead of freezing.
         let tr = clip_box(
             [100.0, 0.0, 0.0],
             [200.0, 0.0, 0.0],
@@ -1292,8 +1303,21 @@ mod tests {
             [100.0, 0.0, 0.0],
         );
         assert!(tr.startsolid, "started inside the box");
-        assert!(tr.allsolid);
-        assert_eq!(tr.fraction, 0.0);
+        assert!(!tr.allsolid, "exits the box -> not trapped (the freeze bug)");
+        assert_eq!(tr.fraction, 1.0, "exiting completes the move");
+        assert_eq!(tr.endpos, [200.0, 0.0, 0.0]);
+
+        // A move that stays WHOLLY inside (start and end inside) is trapped: allsolid.
+        let tr2 = clip_box(
+            [100.0, 0.0, 0.0],
+            [105.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [-16.0, -16.0, -16.0],
+            [16.0, 16.0, 16.0],
+            [100.0, 0.0, 0.0],
+        );
+        assert!(tr2.startsolid && tr2.allsolid, "stays inside -> trapped (allsolid)");
     }
 
     #[test]

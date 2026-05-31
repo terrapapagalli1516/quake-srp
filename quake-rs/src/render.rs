@@ -138,24 +138,21 @@ pub fn content_cshift(contents: i32) -> Option<([u8; 3], f32)> {
 
 /// `V_CalcPowerupCshift` (view.c): the full-screen tint while a powerup is held —
 /// Quad=blue, Biosuit=green, Ring(invisibility)=gray, Pentagram(invulnerability)=
-/// yellow — as `(rgb, percent)`, or `None` with no powerup. id checks all four and
-/// the last-set wins, so a combined Pentagram+Quad shows the Pentagram tint; we
-/// mirror that precedence (the later branch overwrites).
+/// yellow — as `(rgb, percent)`, or `None` with no powerup. id uses an `else if`
+/// chain, so the FIRST match wins with priority QUAD > SUIT > INVISIBILITY >
+/// INVULNERABILITY (a combined Quad+Pentagram shows the Quad's blue tint).
 pub fn powerup_cshift(items: i32) -> Option<([u8; 3], f32)> {
-    let mut cs = None;
     if items & IT_QUAD != 0 {
-        cs = Some(([0, 0, 255], 30.0));
+        Some(([0, 0, 255], 30.0))
+    } else if items & IT_SUIT != 0 {
+        Some(([0, 255, 0], 20.0))
+    } else if items & IT_INVISIBILITY != 0 {
+        Some(([100, 100, 100], 100.0))
+    } else if items & IT_INVULNERABILITY != 0 {
+        Some(([255, 255, 0], 30.0))
+    } else {
+        None
     }
-    if items & IT_SUIT != 0 {
-        cs = Some(([0, 255, 0], 20.0));
-    }
-    if items & IT_INVISIBILITY != 0 {
-        cs = Some(([100, 100, 100], 100.0));
-    }
-    if items & IT_INVULNERABILITY != 0 {
-        cs = Some(([255, 255, 0], 30.0));
-    }
-    cs
 }
 
 /// Combine colour shifts `(rgb, percent 0..255)` into a single blend colour and
@@ -5310,6 +5307,12 @@ pub enum MenuAction {
     /// (`exec default.cfg`). [`Menu::select`] already reset the in-menu values; the
     /// host re-reads [`Menu::resolution`]/sensitivity/volume afterward.
     ResetDefaults,
+    /// The render resolution changed (Enter on the Options "Screen size" row falls
+    /// through to `M_AdjustSliders(1)`, which cycles the preset). The host must
+    /// reallocate its framebuffer to [`Menu::resolution`] — same as the
+    /// left/right-arrow path. Without this, Enter cycled the preset internally but
+    /// the host never resized, so the displayed size snapped back next frame.
+    ResolutionChanged,
 }
 
 /// The keyboard-driven main-menu engine: the visible flag, the current screen,
@@ -5442,8 +5445,10 @@ impl Menu {
     /// `K_DOWNARROW` to page +/-); see [`page`](Menu::page).
     pub fn move_cursor(&mut self, delta: i32) {
         if self.screen == MenuScreen::Help {
-            // M_Help_Key: up = next page, down = previous page.
-            self.page(delta.signum());
+            // M_Help_Key: UP = next page (m_help_page++), DOWN = previous. The host
+            // passes up = -1 / down = +1 (cursor convention), so negate to map up
+            // onto +1 (next). Previously up went backwards.
+            self.page(-delta.signum());
             return;
         }
         let n = self.screen.item_count();
@@ -5527,10 +5532,15 @@ impl Menu {
                     self.reset_defaults();
                     MenuAction::ResetDefaults
                 }
-                // Every other row: Enter falls through to M_AdjustSliders(1).
+                // Every other row: Enter falls through to M_AdjustSliders(1). The
+                // Screen-size row resizes the framebuffer, so propagate that out to
+                // the host (the analog/checkbox rows return false -> None).
                 _ => {
-                    self.adjust(1);
-                    MenuAction::None
+                    if self.adjust(1) {
+                        MenuAction::ResolutionChanged
+                    } else {
+                        MenuAction::None
+                    }
                 }
             },
             MenuScreen::Help => MenuAction::None,
@@ -5627,11 +5637,17 @@ impl Menu {
     /// reallocate the framebuffer to [`resolution`](Menu::resolution)); `false`
     /// otherwise.
     pub fn adjust(&mut self, delta: i32) -> bool {
-        if self.screen != MenuScreen::Options {
-            return false;
-        }
         let step = delta.signum();
         if step == 0 {
+            return false;
+        }
+        // M_Help_Key: RIGHT = next page, LEFT = previous page (the C handles
+        // left/right on Help identically to up/down). Not a resolution change.
+        if self.screen == MenuScreen::Help {
+            self.page(step);
+            return false;
+        }
+        if self.screen != MenuScreen::Options {
             return false;
         }
         let d = step as f32;
@@ -5937,10 +5953,10 @@ pub fn draw_centerprint(
     }
     let scale = image.w as f32 / HUD_VIRT_W;
     let lines: Vec<&str> = text.split('\n').collect();
-    let total_h = (lines.len().max(1) as f32) * 8.0;
-    // Centre vertically, but keep it below the very top (matches Quake biasing
-    // short messages toward the upper-middle rather than dead centre).
-    let mut vy = ((200.0 - total_h) * 0.5).max(16.0);
+    // SCR_DrawCenterString: short messages (<= 4 lines) sit in the upper third at
+    // y = vid.height*0.35 (200*0.35 = 70 in the virtual screen); taller blocks
+    // start at y = 48 so they don't run off the bottom. NOT dead-centre.
+    let mut vy = if lines.len() <= 4 { 200.0 * 0.35 } else { 48.0 };
     for line in lines {
         let w = line.len() as f32 * 8.0;
         let vx = ((HUD_VIRT_W - w) * 0.5).max(0.0);
@@ -10689,22 +10705,28 @@ mod tests {
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Help);
         assert_eq!(m.help_page(), 0);
-        // Right/down advance the page, wrapping at NUM_HELP_PAGES.
+        // Right/up advance the page (page(+1) = next), wrapping at NUM_HELP_PAGES.
         for expect in 1..NUM_HELP_PAGES {
             m.page(1);
             assert_eq!(m.help_page(), expect);
         }
         m.page(1);
         assert_eq!(m.help_page(), 0, "past the last page wraps to 0");
-        // Left/down go back, wrapping below 0.
+        // Left/down go back (page(-1) = prev), wrapping below 0.
         m.page(-1);
         assert_eq!(m.help_page(), NUM_HELP_PAGES - 1, "below 0 wraps to the last page");
-        // Up/down on the Help screen also page (M_Help_Key maps them).
+        // Up/down on the Help screen also page (M_Help_Key): the host passes
+        // up = move_cursor(-1) / down = move_cursor(+1), and per the C UP advances
+        // (m_help_page++) while DOWN goes back (m_help_page--).
         m.help_page = 0;
-        m.move_cursor(1);
-        assert_eq!(m.help_page(), 1, "down pages forward on Help");
-        m.move_cursor(-1);
-        assert_eq!(m.help_page(), 0, "up pages back on Help");
+        m.move_cursor(1); // down -> previous page (wraps below 0)
+        assert_eq!(
+            m.help_page(),
+            NUM_HELP_PAGES - 1,
+            "down pages backward on Help (wraps to the last page)"
+        );
+        m.move_cursor(-1); // up -> next page (wraps back to 0)
+        assert_eq!(m.help_page(), 0, "up pages forward on Help");
         // page() is a no-op off the Help screen.
         m.cancel(); // -> Main
         assert_eq!(m.screen(), MenuScreen::Main);

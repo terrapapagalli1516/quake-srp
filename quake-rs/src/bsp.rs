@@ -867,25 +867,28 @@ fn sequence_anims(textures: &mut [Option<MipTex>]) {
 
 /// Which cycle and frame a `+`-prefixed animated texture name selects.
 enum AnimSlot {
-    /// Primary cycle (`+0`..`+9`, or `+A`..`+J` uppercased), frame index 0..9.
+    /// Primary cycle (`+0`..`+9`), frame index 0..9.
     Primary(usize),
-    /// Alternate cycle (`+a`..`+j`), frame index 0..9.
+    /// Alternate cycle (`+a`..`+j` and `+A`..`+J`), frame index 0..9.
     Alternate(usize),
 }
 
-/// Classify the char after `+`. Mirrors `Mod_LoadTextures`:
-///  * `0..9` -> primary frame `c-'0'`
-///  * `a..j` -> alternate frame `c-'a'`
-///  * `A..J` -> primary frame `c-'A'` (the C upper-cases `a..z` first, so an
-///    uppercase letter beyond `J` falls through to a Sys_Error -> `None` here).
+/// Classify the char after `+`. Mirrors `Mod_LoadTextures`, which UPPER-CASES the
+/// character first (`if (max >= 'a' && max <= 'z') max -= 'a'-'A';`) and only then
+/// branches:
+///  * `0..9` -> primary (`anims`) frame `c-'0'`
+///  * `A..J` -> ALTERNATE (`altanims`) frame `c-'A'`
 ///
-/// `None` for anything else (the C `Sys_Error("Bad animating texture")`).
+/// Because lowercase is folded to uppercase before that test, BOTH `+a..+j` and
+/// `+A..+J` select the alternate cycle (the port previously mapped uppercase to
+/// the primary cycle, which was backwards). `None` otherwise (the C
+/// `Sys_Error("Bad animating texture")`).
 fn anim_frame_slot(name: &str) -> Option<AnimSlot> {
     let c = *name.as_bytes().get(1)?;
     match c {
         b'0'..=b'9' => Some(AnimSlot::Primary((c - b'0') as usize)),
         b'a'..=b'j' => Some(AnimSlot::Alternate((c - b'a') as usize)),
-        b'A'..=b'J' => Some(AnimSlot::Primary((c - b'A') as usize)),
+        b'A'..=b'J' => Some(AnimSlot::Alternate((c - b'A') as usize)),
         _ => None,
     }
 }
