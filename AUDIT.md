@@ -223,6 +223,27 @@ above with plans: lightning/beam temp entities (HIGH), R_MarkLights dlight gatin
 intermission view (MED), no-lightmap-face shading (MED), the render surface cache (perf),
 animated demo lightstyles, + assorted cosmetic LOWs.
 
+### Texture lighting cache (lit surface cache, commit 6e95f8a)
+
+Implemented Quake's `d_surf.c` surface cache (mip 0): each lightmapped world surface
+is baked ONCE into a per-surface block of final palette indices (texture × lightmap
+× colormap), keyed by world + style scales like the lightmap cache (`Rc` blocks,
+persistent, rebuilt when a style ticks; gated off dynamically-lit and colormap-less
+faces, and blocks over 1<<20 texels). The rasteriser (`raster_triangle_cached`) then
+reads ONE byte per pixel + a palette lookup, instead of a texture sample + bilinear
+lightmap + colormap-row + colormap-index every pixel.
+
+- **~2.1× faster** warm frames (e1m1 640×400 15.1→7.5ms, 1080p 110→49ms), ~2.4× vs
+  the original 18.4ms (with the earlier incremental-edge rasteriser).
+- **Bit-identical**: the cached render matches the per-pixel colormap render exactly
+  (0/256000 px differ), deterministic, golden hashes unchanged
+  (81bca4da/b93d088a/df856aeb). The live game (always loads the colormap) gets the
+  full 2× in-game; quaketool's `scene`/`QUAKE_BENCH` now reads the colormap from the
+  PAK so the bench exercises the same path.
+- Follow-up (not needed for the win): mip-level selection would let very large
+  distant surfaces (currently over the per-face cap, staying on the per-pixel path)
+  also use the cache, and shrink block memory.
+
 ## HIGH (15)
 
 | # | Finding | Status |
