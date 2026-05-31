@@ -1737,6 +1737,17 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             st.sub_faces_visited, st.sub_faces_drawn, st.sub_surf_hits, st.sub_surf_misses,
             st.sub_tris, st.sub_lm_builds,
         );
+        let _ = writeln!(
+            o,
+            "  world sub-phases (ms): pvs {:.2}  sort {:.2}  setup+raster {:.2}  lightmap {:.2}  surf {:.2}",
+            ms(st.world_pvs_ns), ms(st.world_sort_ns), ms(st.world_setup_ns),
+            ms(st.world_light_ns), ms(st.world_surf_ns),
+        );
+        let _ = writeln!(
+            o,
+            "  surf cache: {} true-hits, {} REBAKES (warm frame should be ~all hits)",
+            st.surf_cache_hits, st.surf_baked,
+        );
         return Ok(Out::Text(o));
     }
 
