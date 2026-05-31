@@ -249,14 +249,13 @@ function drainGameSounds() {
   }
 }
 
-// Wire a decoded BufferSource to the destination. With spatial params: source ->
-// gain (distance attenuation) -> stereo panner -> destination. If StereoPanner
-// isn't available, fall back to an equal-power PannerNode; if neither, just gain.
-// With no params (sp == null), play flat (full volume, centered).
+// Wire a decoded BufferSource to the destination. With spatial params we
+// reproduce Quake's SND_Spatialize pan law (snd_dma.c) exactly: LINEAR left/right
+// volumes leftvol = mono*(1-dot), rightvol = mono*(1+dot), each clamped to full —
+// so the near side reaches FULL gain (not the equal-power -3 dB centre a
+// StereoPanner gives). The mono source feeds two gains into a stereo merger.
+// With no params (sp == null), play flat (full volume, centred).
 function playRouted(src, sp) {
-  // Master volume from the Options "Volume" row scales every sound. With no
-  // spatial params, route through a lone master-gain node; with params, fold the
-  // master into the per-sound distance gain.
   const master = masterVolume();
   if (!sp) {
     const g = audioCtx.createGain();
@@ -265,25 +264,23 @@ function playRouted(src, sp) {
     g.connect(audioCtx.destination);
     return;
   }
-  const gainNode = audioCtx.createGain();
-  gainNode.gain.value = sp.gain * master;
-  src.connect(gainNode);
-  if (typeof audioCtx.createStereoPanner === 'function') {
-    const panner = audioCtx.createStereoPanner();
-    panner.pan.value = sp.pan;
-    gainNode.connect(panner);
-    panner.connect(audioCtx.destination);
-  } else if (typeof audioCtx.createPanner === 'function') {
-    // Older Safari/WebKit: an equal-power PannerNode positioned on the X axis
-    // approximates left/right panning (listener at origin facing -Z).
-    const panner = audioCtx.createPanner();
-    panner.panningModel = 'equalpower';
-    if (panner.positionX) { panner.positionX.value = sp.pan; panner.positionZ.value = -1; }
-    else if (panner.setPosition) { panner.setPosition(sp.pan, 0, -1); }
-    gainNode.connect(panner);
-    panner.connect(audioCtx.destination);
+  // mono = distance-attenuated, master-scaled volume; pan = dot(dir, listener
+  // right) in [-1,1] (left = -1). leftvol/rightvol are linear in the dot, like id.
+  const mono = sp.gain * master;
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  if (typeof audioCtx.createChannelMerger === 'function') {
+    const lg = audioCtx.createGain(); lg.gain.value = clamp01(mono * (1 - sp.pan));
+    const rg = audioCtx.createGain(); rg.gain.value = clamp01(mono * (1 + sp.pan));
+    const merger = audioCtx.createChannelMerger(2);
+    src.connect(lg); lg.connect(merger, 0, 0);   // left channel
+    src.connect(rg); rg.connect(merger, 0, 1);   // right channel
+    merger.connect(audioCtx.destination);
   } else {
-    gainNode.connect(audioCtx.destination);       // no panner at all — gain only
+    // No channel merger available: fall back to a centred mono gain.
+    const g = audioCtx.createGain();
+    g.gain.value = mono;
+    src.connect(g);
+    g.connect(audioCtx.destination);
   }
 }
 
