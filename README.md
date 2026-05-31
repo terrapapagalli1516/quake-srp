@@ -7,12 +7,16 @@ BSP worlds, spawns maps by executing the real game logic, moves a player through
 physics, plays back recorded demos, renders the world with **baked lightmaps + textures + models**, and runs
 **interactively in a web browser** via WebAssembly.
 
-> **Honest framing.** This is a genuinely playable single-player port: you can walk e1m1, fight monsters that
-> wake/chase/attack, take damage and die, switch weapons, pick up items, open doors, ride elevators, see blood
-> /explosions/dynamic lights/flickering torches, hear spatialized sound, and reach the exit to load the next map
-> with your inventory intact — the whole shareware episode. What it is *not*: multiplayer/netcode, save/load, the
-> in-game console/menu, or the intermission stats screen (see the roadmap). Everything claimed below is real and
-> tested: 286 tests, zero dependencies, no `unsafe`, every layer checked against id's shareware `pak0.pak`.
+> **Honest framing.** This is a genuinely playable single-player port. It boots into the **Quake main menu drawn
+> over the attract demo**, New Game drops you in the **`start` skill/episode hub**, and you can walk, fight monsters
+> that wake/chase/attack, take damage (with the red flash) and die, switch weapons, pick up items + ammo/health
+> /explosive boxes, open doors, ride elevators, see blood/explosions/dynamic lights/flickering torches, hear
+> **spatialized in-game sound**, and reach the exit to load the next map with your inventory intact — the whole
+> shareware episode. There's a working **Options menu** (selectable resolution, mouse, volume) and a **drop-down
+> console** (`~`) with `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`. What it is *not*: multiplayer/netcode,
+> save/load, or the intermission stats screen (see the roadmap). Everything claimed below is real and tested:
+> **329 engine + 25 wasm tests**, zero dependencies, no `unsafe` in the engine, every layer checked against id's
+> shareware `pak0.pak`.
 
 ## Layout
 
@@ -20,7 +24,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 |------|------|
 | `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`. |
 | `quake-wasm/` | a ~120-line `cdylib` shell that compiles the engine to `wasm32` and exposes it to a `<canvas>`. |
-| `web/` | the browser page (`index.html`) + a headless-verify script (`shoot.py`). |
+| `web/` | the browser page (`index.html`) + a headless-verify script (`verify_walk.py`). |
 | `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |
 | `screenshots/` | rendered output from real e1m1 / start (the lit shots, the walkthrough GIF). |
 
@@ -35,17 +39,22 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   (`walkmove`/`movetogoal`/chase-dir/`findradius`); **combat** (`traceline`→QuakeC `T_Damage`, player damage + death);
   **`changelevel`** with inventory carried across maps (`SetChangeParms`/`DecodeLevelParms`).
 - **Renderer** — a from-scratch software rasteriser (z-buffer, backface cull, perspective-correct textures, PVS
-  culling): **the full Quake lighting model** — baked BSP lightmaps + **dynamic lights** (`R_AddDynamicLights`:
-  muzzle flashes, explosions) + **animated light styles** (`R_AnimateLight`: flickering torches); **alias-model
-  frame animation** + skins; brush submodels; turbulent **water/lava/slime warp** + scrolling sky; first-person
+  culling, **near-plane polygon clipping**): **the full Quake lighting model** — baked BSP lightmaps + **dynamic
+  lights** (`R_AddDynamicLights`: muzzle flashes, explosions) + **animated light styles** (`R_AnimateLight`:
+  flickering torches); **alias-model frame animation** + skins; brush submodels + **external `b_*.bsp` brush-model
+  items** (explosive boxes, ammo/health boxes); turbulent **water/lava/slime warp** + scrolling sky; first-person
   **weapon viewmodel**; **particles** (blood) + **temp-entity effects** (fiery explosions, impacts); **head-bob**
   (`V_CalcBob`); **screen blends** (`V_CalcBlend`: damage flash, underwater tint); a **status-bar HUD**.
+- **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
+  with **Single Player → `start` hub**, a working **Options** screen (selectable render **resolution** + mouse +
+  volume), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
+  `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
 - **Sound** — the QuakeC `sound`/`ambientsound` + temp-entity sounds drive a queue the browser plays through Web
-  Audio with **distance/stereo spatialization** relative to the player.
-- **Demo playback** — parses the `.dem` net-protocol stream into per-frame entity snapshots and renders id's
-  recorded attract demo.
+  Audio with **distance/stereo spatialization** relative to the player (samples resolved under the `sound/` pak dir).
+- **Demo playback** — parses the `.dem` net-protocol stream into per-frame entity snapshots **+ svc_particle /
+  svc_temp_entity effects**, rendering id's recorded attract demo with blood + explosions.
 - **Browser** — the engine compiles to `wasm32-unknown-unknown` unchanged; WASD + mouse-look + fullscreen, fire
-  (click), weapon select (1–8), lit, with HUD + sound.
+  (click), weapon select (1–8), `~` console, Esc menu, selectable resolution, lit, with HUD + sound.
 
 See `quake-rs/README.md` for the full subsystem table, the C-source provenance of each module, and the verified
 `quaketool` command transcripts.
@@ -54,11 +63,11 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 286 tests, no game data required (uses synthetic fixtures)
+cargo test          # 329 engine tests, no game data required (uses synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
-`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo scene sim playtest changelevel demo walk`.
+`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo scene sim playtest changelevel menu demo walk`.
 
 ### Getting the game data (not committed)
 
@@ -77,8 +86,9 @@ the engine lib and all tests do **not**.
 
 ## Roadmap (remaining polish)
 
-The core single-player loop is complete (combat, pusher physics, MDL animation, sound, PVS culling, level
-transitions — all done). What's left is presentation/scope polish:
+The core single-player loop, the UI (menu / options / console), in-game + demo sound and particles, selectable
+resolution, the `start` hub, the attract loop, and the external brush-model items are all done. What's left is
+presentation/scope polish:
 
 - **Intermission / finale screen** — the level-complete stats screen (secrets/kills/time) before the next map;
   changelevel currently swaps directly.
@@ -86,7 +96,8 @@ transitions — all done). What's left is presentation/scope polish:
   (the bar shows health/ammo/armour numbers today).
 - **Powerup effects** — quad/pentagram/ring/biosuit view tints (the `V_CalcBlend` infrastructure is in place; the
   per-powerup cshifts just need wiring) and item glow.
-- **Console / menu** — Quake's in-game console and menu system.
+- **`.spr` entity sprites** — sprite-model entities (e.g. some effects) aren't routed to a sprite draw in the
+  scene path yet (only the `spr` dump tool exists).
 - **Multiplayer & save/load** — out of scope for this single-player, headless-server port.
 
 ## Licensing
