@@ -42,6 +42,29 @@ pub use crate::vm::HostTrace as Trace;
 /// `DIST_EPSILON` — "1/32 epsilon to keep floating point happy" (world.c).
 const DIST_EPSILON: f32 = 0.03125;
 
+thread_local! {
+    /// Monotonic count of BSP box/line traces ([`trace_world`] + [`trace_submodel`]).
+    /// A free-running diagnostic the sim benchmark samples to report collision
+    /// workload per frame; not used by gameplay. Single-threaded `Cell`.
+    static TRACE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Current total BSP traces performed (since process start or the last
+/// [`reset_trace_count`]). Used by the sim benchmark; not gameplay state.
+pub fn trace_count() -> u64 {
+    TRACE_COUNT.with(|c| c.get())
+}
+
+/// Reset the [`trace_count`] running total to zero.
+pub fn reset_trace_count() {
+    TRACE_COUNT.with(|c| c.set(0));
+}
+
+#[inline]
+fn bump_trace_count() {
+    TRACE_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
 /// Recursion-depth ceiling for [`recursive_hull_check`]. The C recursion is
 /// bounded by the BSP depth; a malformed (cyclic) hull could otherwise recurse
 /// without end. This generously exceeds any real Quake BSP depth.
@@ -487,6 +510,7 @@ fn hull_index_for_size(mins: Vec3, maxs: Vec3) -> usize {
 /// `endpos` is shifted back by `offset` (only when the move was clipped, exactly
 /// as the C's `if (trace.fraction != 1)`).
 pub fn trace_world(bsp: &Bsp, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) -> HostTrace {
+    bump_trace_count();
     let which = hull_index_for_size(mins, maxs);
     let hull = build_hull(bsp, which);
 
@@ -724,6 +748,7 @@ pub fn trace_submodel(
     move_mins: Vec3,
     move_maxs: Vec3,
 ) -> HostTrace {
+    bump_trace_count();
     // A clear (unclipped) trace, used when this submodel has no usable hull.
     let clear = HostTrace {
         allsolid: false,

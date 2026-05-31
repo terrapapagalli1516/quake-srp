@@ -154,6 +154,11 @@ pub struct Vm {
     /// would skew touch timers up to one frame. This field carries the true sv.time.
     pub sv_time: f32,
 
+    /// Monotonic count of QuakeC statements executed across this VM's lifetime
+    /// (one per `execute` loop iteration). A free running total used by the sim
+    /// benchmark to report VM workload per frame; not gameplay state.
+    pub stmt_count: u64,
+
     // --- private execution state ---
     /// Call stack of saved caller frames (`pr_stack` / `pr_depth`).
     stack: Vec<Frame>,
@@ -204,6 +209,7 @@ impl Vm {
             trace: false,
             host: None,
             sv_time: 0.0,
+            stmt_count: 0,
             stack: Vec::new(),
             localstack: Vec::new(),
             xfunction: 0,
@@ -826,6 +832,7 @@ impl Vm {
             if runaway == 0 {
                 return Err(self.run_error("runaway loop error"));
             }
+            self.stmt_count = self.stmt_count.wrapping_add(1);
 
             // Profile + current statement (for error messages / STATE).
             if let Some(f) = self.progs.functions.get_mut(self.xfunction) {

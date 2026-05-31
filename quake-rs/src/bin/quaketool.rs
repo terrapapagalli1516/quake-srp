@@ -67,6 +67,9 @@ fn main() {
             cmd_demo(&a[0], &a[1], &a[2], a.get(3).and_then(|s| s.parse().ok()).unwrap_or(0))
         }),
         "playtest" => need(rest, 2, cmd).and_then(|a| cmd_playtest(&a[0], &a[1], a.get(2).map(|s| s.as_str()))),
+        "simbench" => need(rest, 2, cmd).and_then(|a| {
+            cmd_simbench(&a[0], &a[1], a.get(2).and_then(|s| s.parse().ok()).unwrap_or(600))
+        }),
         "changelevel" => need(rest, 2, cmd).and_then(|a| cmd_changelevel(&a[0], &a[1])),
         "sim" => need(rest, 2, cmd).and_then(|a| {
             cmd_sim(&a[0], &a[1], a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5))
@@ -128,6 +131,7 @@ fn usage() {
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
          \tquaketool playtest <pak> <map.bsp> [out.ppm]  spawn a player, walk forward, report state + render POV\n\
+         \tquaketool simbench <pak> <map.bsp> [frames]  benchmark the game-logic tick (physics/VM/AI/collision), no rendering\n\
          \tquaketool changelevel <pak> <map.bsp>  drive a player into the map's exit, swap to the next level, prove inventory carries\n"
     );
 }
@@ -994,6 +998,101 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             }
         );
     }
+    Ok(Out::Text(o))
+}
+
+/// `simbench <pak> <map.bsp> [frames]` — benchmark the GAME-LOGIC tick (no
+/// rendering). Spawns the real map, connects a player, then runs `frames` server
+/// frames of deterministic forward-walking input and reports the steady-state
+/// per-frame cost of the simulation: `SV_Physics` (walk/push/toss), the QuakeC VM
+/// (monster AI, item/door/trigger thinks), and BSP collision (`SV_Move`). This is
+/// the sim counterpart to the `QUAKE_BENCH` render benchmark — together they cover
+/// "not just rendering but the logic the game runs".
+///
+/// The first frames (cold field-offset cache, first monster sightings) are a
+/// warm-up and excluded; the reported figure is the average over the timed window.
+/// VM-statement and BSP-trace counts come from free-running counters
+/// ([`Vm::stmt_count`], [`quake_rs::world::trace_count`]) so the breakdown is
+/// exact, not sampled.
+fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, String> {
+    use std::time::Instant;
+    let frames = frames.max(1);
+    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let read = |n: &str| -> Result<Vec<u8>, String> {
+        pak.read_file(n).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} not found"))
+    };
+    let bsp_sim = Bsp::parse(&read(map_name)?).map_err(|e| e.to_string())?;
+    let entities = bsp_sim.entities.clone();
+    let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
+
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let rep = server.spawn_entities().map_err(|e| e.to_string())?;
+    let _player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
+
+    // Deterministic input: walk forward along the spawn yaw at full speed, the
+    // same as a player holding W. dt = 0.1s is Quake's canonical server frame (the
+    // monster think interval), so every frame fully exercises the AI tick — the
+    // heaviest realistic per-frame logic load.
+    let spawn_yaw = player_start(&entities).map(|(_, a)| a).unwrap_or(0.0);
+    let cmd = UserCmd { forwardmove: 400.0, yaw: spawn_yaw, ..Default::default() };
+    const DT: f32 = 0.1;
+
+    // Warm-up: a handful of frames to populate the VM field-offset cache and let
+    // the player settle onto the ground / nearby monsters notice it, so the timed
+    // window measures steady state, not first-touch costs.
+    let warmup = 20u32.min(frames);
+    for _ in 0..warmup {
+        let _ = server.client_frame(&cmd, DT).map_err(|e| format!("client_frame: {e}"))?;
+    }
+
+    // Timed window.
+    let stmt0 = server.vm.stmt_count;
+    quake_rs::world::reset_trace_count();
+    let mut thinks = 0usize;
+    let mut think_errors = 0usize;
+    let start = Instant::now();
+    for _ in 0..frames {
+        let fr = server.client_frame(&cmd, DT).map_err(|e| format!("client_frame: {e}"))?;
+        thinks += fr.thinks_fired;
+        think_errors += fr.think_errors;
+    }
+    let elapsed = start.elapsed();
+    let stmts = server.vm.stmt_count.wrapping_sub(stmt0);
+    let traces = quake_rs::world::trace_count();
+
+    // Live (non-free) edicts as a load proxy.
+    let mut alive = 0usize;
+    for e in 0..server.vm.num_edicts() {
+        if !server.vm.edict_free.get(e).copied().unwrap_or(true) {
+            alive += 1;
+        }
+    }
+
+    let per_ms = elapsed.as_secs_f64() * 1000.0 / frames as f64;
+    let game_secs = frames as f64 * DT as f64;
+    let mut o = String::new();
+    let _ = writeln!(
+        o,
+        "simbench {map_name}: {frames} frames @ dt={DT}s ({game_secs:.1}s game time), {} edicts spawned, {alive} alive",
+        rep.spawned
+    );
+    let _ = writeln!(
+        o,
+        "  -> {per_ms:.4} ms/frame  ({:.0} sim-frames/sec)  | walked from info_player_start (yaw {spawn_yaw:.0})",
+        1000.0 / per_ms
+    );
+    let _ = writeln!(
+        o,
+        "  per frame: {:.0} VM statements, {:.1} BSP traces, {:.1} thinks{}",
+        stmts as f64 / frames as f64,
+        traces as f64 / frames as f64,
+        thinks as f64 / frames as f64,
+        if think_errors > 0 { format!(" ({think_errors} think errors)") } else { String::new() },
+    );
+    let _ = writeln!(
+        o,
+        "  totals: {stmts} VM statements, {traces} traces, {thinks} thinks over the window",
+    );
     Ok(Out::Text(o))
 }
 
