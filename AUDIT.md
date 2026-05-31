@@ -145,6 +145,47 @@ HUD order, listener-pose bob exclusion, PF_makestatic ED_Free, select_interval f
 gating, no-lightmap shading, intermission view, + the cosmetic LOWs listed under
 Round 2) are tracked above for a future pass.
 
+### Session 4 — user playtest fixes + perf + rounds 4-6
+
+User reported: (1) demo brush models not rendering, (2) multi-line pickup messages,
+(3) invisible barrel explosion, (4) e1m3 live-play perf terrible (demo fine).
+
+Fixed (commits 6de1c65, 2904090):
+- ✅ **Demo brush submodels** — step_demo passed empty bmodels; now resolves "*N"
+  precache names to world submodels (doors/elevators render behind the boot demo).
+- ✅ **Multi-line pickups** — notify text now accumulates and breaks only on '\n'
+  (Con_Print model); "You receive 25 health" was 3 sprint() calls = 3 lines.
+- ✅ **Invisible barrel explosion** — `particle(...,255)` is the explosion sentinel
+  the C maps to 1024; the live bi_particle recorded it raw. Now mapped (byte-exact).
+- ✅ **e1m3 live-play perf (~25×)** — root cause was `find_field`/`find_global`
+  LINEAR-SCANNING every def with a strcmp on every ent_get/set (thousands/frame).
+  Cached name->offset in Progs (O(1)); + SV_ClipToLinks abs-box broadphase reject.
+  600-frame sim: e1m3 22380ms->898ms, e1m1 5708->301ms. PROVEN result-identical
+  (sim output byte-identical before/after; golden scene renders unchanged).
+
+### Round 4 — 27 agents, 16 confirmed of 17 (verify-bugfix + fresh passes)
+
+Fixed (commits 6bd546a, 03d91b7):
+- ✅ **SV_Impact on world hits** (HIGH) — `if (trace.ent)` includes the world edict;
+  the port's `ent > 0` SKIPPED world hits, so rockets/nails never detonated on walls
+  and grenades bounced silently. push_entity + fly_move_core now use `>= 0`.
+- ✅ **Sprite-model rendering** (HIGH) — facing-sprite pass (draw_sprites) so the
+  barrel's s_explod.spr flash + other .spr effects render (live + demo).
+- ✅ **TE impact sounds** (MED) — tink/ric (spike/super-spike), wizard/hit, hknight/hit.
+- ✅ **Clear notify/centerprint on changelevel** (MED) — stale text no longer lingers.
+- ✅ **Viewmodel hidden when dead / invisible** (MED/LOW) — R_DrawViewModel guard.
+- ✅ **bi_particle byte-exact** (LOW) — (count & 0xFF)==255 -> 1024, matches MSG_WriteByte.
+- ✅ **Centerprint/notify gated on menu/console** (LOW) — key_dest suppression.
+
+Deferred (confirmed, with concrete plans, lower frequency / higher effort):
+- ⬜ **Lightning/beam temp entities** (HIGH) — TE_LIGHTNING1/2/3 + TE_BEAM decode but
+  don't render (shambler/Chthon bolts, thunderbolt). Plan: add `end` to
+  TempEntityEvent, a beam store (model bolt/bolt2/bolt3, endtime=now+0.2), and a
+  per-frame CL_UpdateTEnts port emitting a bolt-model alias instance every 30 units.
+- ⬜ **R_MarkLights dlight BSP gating** (MED) — dynamic light can bleed through thin
+  walls onto PVS-visible coplanar faces; needs the per-surface dlightbits recursion.
+- ⬜ **Demo explosion dlight** (LOW) — the demo path emits no dynamic lights.
+
 ## HIGH (15)
 
 | # | Finding | Status |
