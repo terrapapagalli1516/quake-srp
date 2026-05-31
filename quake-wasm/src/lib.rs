@@ -982,6 +982,7 @@ const MAX_CELLS: f32 = 100.0;
 // IT_SHOTGUN << (d-1), and IT_AXE is a separate high bit.
 const IT_SHOTGUN: i32 = 1; // bit for weapon 2 base; weapon d>=2 is IT_SHOTGUN<<(d-2)
 const IT_AXE: i32 = 4096;
+const IT_INVISIBILITY: i32 = 1 << 19; // Ring of Shadows (524288)
 const FL_GODMODE: i32 = 64;
 const FL_ONGROUND: i32 = 512;
 const MOVETYPE_WALK: f32 = 3.0;
@@ -1667,10 +1668,11 @@ fn rocket_trail_type(model_flags: i32) -> Option<i32> {
 
 /// Realise one decoded [`TempEntityEvent`] into `particles`, porting the
 /// effect-mapping half of `CL_ParseTEnt`: explosion types spawn a
-/// 1024-particle [`ParticleSystem::spawn_explosion`] (and return the explosion
-/// sound to play), impact types a `R_RunParticleEffect`-style burst with the
-/// matching colour/count, splashes a small upward burst, and beams nothing.
-/// Returns `Some(sound_name)` for the explosion types, else `None`.
+/// 1024-particle [`ParticleSystem::spawn_explosion`], impact types a
+/// `R_RunParticleEffect`-style burst with the matching colour/count, splashes a
+/// small upward burst, and beams nothing. Returns `Some(sound_name)` for the types
+/// that play a sound (explosions -> r_exp3; spike/super-spike -> tink1/ric*; wizard
+/// -> wizard/hit; knight -> hknight/hit), else `None` (gunshot/splashes/beams).
 fn spawn_temp_entity(
     particles: &mut ParticleSystem,
     ev: &TempEntityEvent,
@@ -1702,21 +1704,36 @@ fn spawn_temp_entity(
             );
             Some(TE_EXPLOSION_SOUND)
         }
-        TE_SPIKE => {
-            particles.spawn_burst(ev.pos, [0.0; 3], 0, 10, now, rng);
-            None
+        // Spike/super-spike (nailgun, Ogre/Knight nails) wall impact: the dust burst
+        // then a ricochet sound — tink1 4/5 of the time, else ric1/ric2/ric3
+        // (CL_ParseTEnt). The rng draw follows spawn_burst to keep C's ordering.
+        TE_SPIKE | TE_SUPERSPIKE => {
+            let count = if ev.te_type == TE_SPIKE { 10 } else { 20 };
+            particles.spawn_burst(ev.pos, [0.0; 3], 0, count, now, rng);
+            Some(if rng.next_range(5) != 0 {
+                "weapons/tink1.wav"
+            } else {
+                match rng.next_range(4) {
+                    1 => "weapons/ric1.wav",
+                    2 => "weapons/ric2.wav",
+                    _ => "weapons/ric3.wav",
+                }
+            })
         }
-        TE_SUPERSPIKE | TE_GUNSHOT => {
+        // Bullet impact: dust only, NO sound (CL_ParseTEnt plays nothing for TE_GUNSHOT).
+        TE_GUNSHOT => {
             particles.spawn_burst(ev.pos, [0.0; 3], 0, 20, now, rng);
             None
         }
+        // Scrag (wizard) spike impact -> wizard/hit.wav.
         TE_WIZSPIKE => {
             particles.spawn_burst(ev.pos, [0.0; 3], 20, 30, now, rng);
-            None
+            Some("wizard/hit.wav")
         }
+        // Hell-knight spike impact -> hknight/hit.wav.
         TE_KNIGHTSPIKE => {
             particles.spawn_burst(ev.pos, [0.0; 3], 226, 20, now, rng);
-            None
+            Some("hknight/hit.wav")
         }
         // The real lava-burst spiral (R_LavaSplash), not a 20-particle puff.
         TE_LAVASPLASH => {
@@ -1802,8 +1819,14 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
-    // Drop any half-built notify line so it can't leak into the next level.
+    // Clear the on-screen text overlay on level load (SCR_BeginLoadingPlaque calls
+    // Con_ClearNotify + scr_centertime_off=0): drop the half-built line AND the
+    // already-flushed notify lines + the centerprint. Their expiry is an ABSOLUTE
+    // clock value, and the clock resets to 0 below, so a stale "You got the Quad!"
+    // would otherwise linger over the new level for old-clock seconds.
     w.notify_pending.clear();
+    w.notify.clear();
+    w.centerprint = None;
     w.clock = 0.0;
     // Reset the screen-blend state so the level change does not flash red.
     w.damage_blend = 0.0;
@@ -2214,9 +2237,19 @@ fn step_walk(
         })
         .collect();
     // Anchor the weapon viewmodel to the camera (drawn last, on top of the world).
-    let viewmodel = match w.model_cache.get(&weapon_name) {
-        Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
-        _ => None,
+    // R_DrawViewModel (r_main.c ~622) returns early — drawing NO gun — when the
+    // player is dead (STAT_HEALTH <= 0) or carrying the Ring of Shadows
+    // (IT_INVISIBILITY). Without this the gun hovers, frozen, on the rolled
+    // death-cam, and stays visible while invisible.
+    let hide_gun = w.server.vm.ent_get_float(w.player, "health") <= 0.0
+        || (w.server.vm.ent_get_float(w.player, "items") as i32) & IT_INVISIBILITY != 0;
+    let viewmodel = if hide_gun {
+        None
+    } else {
+        match w.model_cache.get(&weapon_name) {
+            Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
+            _ => None,
+        }
     };
     // The live particles as (world pos, palette index); they share the scene
     // z-buffer so any behind a wall are correctly hidden.
@@ -2331,14 +2364,18 @@ fn step_walk(
 
     // On-screen messages the QuakeC printed (drained above): the current
     // centerprint drawn centered, the notify lines stacked top-left. Both time
-    // out via their stored expiry; drawn over the HUD.
-    if let Some(cc) = w.conchars.as_ref() {
-        if let Some((text, _)) = &w.centerprint {
-            render::draw_centerprint(&mut img, cc, &w.palette, text);
-        }
-        if !w.notify.is_empty() {
-            let lines: Vec<&str> = w.notify.iter().map(|(t, _)| t.as_str()).collect();
-            render::draw_notify(&mut img, cc, &w.palette, &lines);
+    // out via their stored expiry; drawn over the HUD. Suppressed while the menu or
+    // console owns the screen (Quake draws the notify/centerprint only for
+    // key_dest == key_game), so they don't paint through the menu/console overlay.
+    if !menu_up {
+        if let Some(cc) = w.conchars.as_ref() {
+            if let Some((text, _)) = &w.centerprint {
+                render::draw_centerprint(&mut img, cc, &w.palette, text);
+            }
+            if !w.notify.is_empty() {
+                let lines: Vec<&str> = w.notify.iter().map(|(t, _)| t.as_str()).collect();
+                render::draw_notify(&mut img, cc, &w.palette, &lines);
+            }
         }
     }
 

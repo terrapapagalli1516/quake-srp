@@ -1078,13 +1078,15 @@ fn bi_particle(vm: &mut Vm) -> Result<()> {
     // color is a float palette index; clamp into 0..=255 before the byte cast so
     // an out-of-range value can never wrap unexpectedly.
     let color = vm.arg_float(2).clamp(0.0, 255.0) as u8;
-    // SV_StartParticle writes `count` as ONE byte (clamped to 255), and the client's
-    // CL_ParseParticleEffect maps the 255 byte back to 1024 — the explosion sentinel
-    // (R_RunParticleEffect's fiery pt_explode burst). So `count >= 255` means "1024".
-    // The misc_explobox death does `particle(origin, '0 0 0', 75, 255)`, so without
-    // this the barrel's explosion rendered as faint SlowGrav dust instead of a burst.
-    let raw = vm.arg_float(3) as i32;
-    let count = if raw >= 255 { 1024 } else { raw };
+    // SV_StartParticle writes `count` through MSG_WriteByte, which TRUNCATES mod 256
+    // (`buf[0] = c`), and the client's CL_ParseParticleEffect maps the byte value
+    // EXACTLY 255 back to 1024 — the explosion sentinel (R_RunParticleEffect's fiery
+    // pt_explode burst). So the trigger is `(count & 0xFF) == 255`, not `count >=
+    // 255`: a stray count like 256 truncates to 0 (no explosion), and -1 wraps to
+    // 255 -> 1024, exactly as the C and the demo parser (demo.rs) do. The
+    // misc_explobox death does `particle(origin, '0 0 0', 75, 255)` -> 1024 -> burst.
+    let sent = (vm.arg_float(3) as i32 & 0xFF) as u8;
+    let count = if sent == 255 { 1024 } else { sent as i32 };
 
     push_particle_burst(ParticleBurst {
         org,
@@ -2972,10 +2974,15 @@ impl Server {
         self.vm.ent_set_vector(ent, "origin", mt.endpos);
         link_edict(&mut self.vm, ent);
 
-        // SV_Impact: when the move hit a real entity (not the world / nothing),
-        // run both touch functions. The C checked `if (trace.ent)`; here a
-        // positive index is a non-world edict.
-        if mt.ent > 0 {
+        // SV_Impact (sv_phys.c SV_PushEntity ~426): `if (trace.ent) SV_Impact(...)`.
+        // trace.ent is the WORLD edict (index 0, a non-NULL pointer) on any world
+        // clip, so the mover's touch fires on world contact too — that is what makes
+        // a rocket fired into a wall DETONATE and a grenade clang (GrenadeTouch plays
+        // bounce.wav vs world). MoveTrace yields ent==-1 only for a clear move, ==0
+        // for a world hit, >0 for an entity, so `>= 0` includes the world and
+        // excludes only the no-hit case. (Previously `> 0` skipped every world hit,
+        // so wall-struck rockets/nails never exploded.)
+        if mt.ent >= 0 {
             sv_impact(&mut self.vm, ent, mt.ent, sv_time);
         }
 
@@ -4101,8 +4108,13 @@ impl Server {
                 *out_steptrace = Some(trace.clone());
             }
 
-            // run the impact function (host present; not inside with_host).
-            if trace.ent > 0 {
+            // run the impact function (host present; not inside with_host). C
+            // SV_FlyMove calls SV_Impact(ent, trace.ent) for EVERY clipped bump,
+            // world or entity — trace.ent is the world edict on a world hit. The
+            // loop already broke on fraction==1.0, so here trace.ent is 0 (world) or
+            // >0 (entity), never the -1 no-hit sentinel; `>= 0` fires the mover's
+            // touch on world contact too (mover with no touch is a no-op).
+            if trace.ent >= 0 {
                 sv_impact(&mut self.vm, ent, trace.ent, sv_time);
                 if self.is_free(ent) {
                     break; // removed by the impact function
