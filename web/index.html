@@ -221,10 +221,31 @@ function spatializeSound() {
   return { gain, pan };
 }
 
+// Decoded-WAV cache: the same SFX (gunshots, footsteps, door hums…) fires over
+// and over, and decodeAudioData is async + costs real time, so re-decoding every
+// play added latency and choppiness. Decode each distinct clip ONCE and replay the
+// cached AudioBuffer with zero decode hitch. Keyed by a 32-bit FNV-1a of the WAV
+// bytes plus its length (content hash — no collisions for Quake's ~50 SFX).
+const decodedSounds = new Map();
+function wavKey(bytes) {
+  let h = 0x811c9dc5 | 0;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i];
+    h = Math.imul(h, 0x01000193);   // 32-bit FNV-1a
+  }
+  return (h >>> 0) + ':' + bytes.length;
+}
+function playBuffer(buf, sp) {
+  const s = audioCtx.createBufferSource();
+  s.buffer = buf;
+  playRouted(s, sp);
+  s.start();
+}
+
 // Play every gameplay sound the server queued this frame. poll_sound() pops one
 // WAV into shared memory and returns its length (0 when the queue is empty); we
-// copy the bytes out, read its spatial params + the listener pose, and decode/
-// play each via Web Audio through a gain (distance) + stereo-pan node graph.
+// hash it, decode (or reuse the cached buffer), read its spatial params, and play
+// via Web Audio through the distance gain + linear stereo-pan node graph.
 function drainGameSounds() {
   if (!exp || !exp.poll_sound || !audioCtx || audioCtx.state !== 'running') return;
   // LOW-10: tell the WASM side audio is live so queue_sounds starts enqueuing.
@@ -239,12 +260,18 @@ function drainGameSounds() {
     const sp = spatializeSound();
     if (sp && sp.gain <= 0.02) continue;          // inaudibly far — don't even decode
     const ptr = exp.sound_ptr();
-    const bytes = new Uint8Array(exp.memory.buffer, ptr, len).slice();
-    audioCtx.decodeAudioData(bytes.buffer).then(buf => {
-      const s = audioCtx.createBufferSource();
-      s.buffer = buf;
-      playRouted(s, sp);
-      s.start();
+    const view = new Uint8Array(exp.memory.buffer, ptr, len);
+    const key = wavKey(view);
+    const cached = decodedSounds.get(key);
+    if (cached) {
+      playBuffer(cached, sp);                      // already decoded — instant, no hitch
+      continue;
+    }
+    // First time for this clip: copy out of wasm memory, decode, cache, play.
+    const copy = view.slice();
+    audioCtx.decodeAudioData(copy.buffer).then(buf => {
+      decodedSounds.set(key, buf);
+      playBuffer(buf, sp);
     }).catch(() => {});
   }
 }
