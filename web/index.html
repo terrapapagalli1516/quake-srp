@@ -33,7 +33,7 @@
     &nbsp; <button id="fs">⛶ fullscreen (F)</button> &nbsp; <button id="sndBtn">🔊 sound (Space)</button><br>
     <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn<br>
     <b>click</b> fire &nbsp;·&nbsp; <b>1–8</b> select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)<br>
-    <b>Esc</b> menu &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>← →</b> adjust (Options: screen size · mouse · volume) · <b>Enter</b> select<br>
+    <b>Esc</b> menu &nbsp;·&nbsp; <b>~</b> console (try <code>god</code>, <code>give a</code>, <code>impulse 9</code>, <code>noclip</code>, <code>map e1m2</code>) &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>← →</b> adjust · <b>Enter</b> select<br>
     dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM
   </div>
 <script>
@@ -47,9 +47,36 @@ const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright
 
 // Is the in-game menu currently up (capturing keyboard)?
 function menuVisible() { return !!(exp && exp.menu_visible && exp.menu_visible()); }
+// Is the drop-down console currently open (top-priority keyboard owner)?
+function consoleVisible() { return !!(exp && exp.console_visible && exp.console_visible()); }
 
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
+
+  // --- Drop-down console. The ~ / backtick key TOGGLES it (and never types the
+  //     ~ into the line). The console has TOP priority over the menu: while it's
+  //     open it owns the whole keyboard — printable keys type into the input
+  //     line, Backspace edits, Enter executes, and Escape/~ close it. Every key
+  //     here is swallowed so it can't also drive gameplay OR the menu.
+  if ((e.code === 'Backquote' || k === '`' || k === '~') && exp && exp.console_toggle) {
+    exp.console_toggle();
+    e.preventDefault();
+    return;
+  }
+  if (consoleVisible()) {
+    if (k === 'escape')    { exp.console_toggle();   e.preventDefault(); return; }
+    if (k === 'backspace') { exp.console_backspace?.(); e.preventDefault(); return; }
+    if (k === 'enter')     { exp.console_enter?.();   e.preventDefault(); return; }
+    // A printable key is a single-character e.key (letters, digits, space,
+    // punctuation). Send its code point to the console; multi-char keys
+    // (Arrow*, Shift, Tab, …) are swallowed without typing anything.
+    if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && exp.console_char) {
+      exp.console_char(e.key.codePointAt(0));
+    }
+    e.preventDefault();
+    return;
+  }
+
   // --- Main menu navigation. Escape always reaches the menu (opens it from the
   //     game, or backs out within it). When the menu is up, Arrow Up/Down move
   //     the cursor, Enter selects — and we DON'T let those keys also drive the
@@ -267,9 +294,10 @@ overlay.addEventListener('click', () => canvas.requestPointerLock?.());
 
 canvas.addEventListener('mousemove', e => {
   if (!exp) return;
-  // Freeze the view while the menu is up (Quake stops feeding mouse-look in
-  // key_menu). look() also enforces this engine-side; this just avoids the call.
-  if (menuVisible()) return;
+  // Freeze the view while the menu OR console is up (Quake stops feeding
+  // mouse-look outside key_game). look() also enforces this engine-side; this
+  // just avoids the call.
+  if (menuVisible() || consoleVisible()) return;
   if (locked() || dragging) {
     // movementX/Y is the per-event delta. Mouse-right turns right (yaw down);
     // mouse-up looks up (non-inverted). The Options "Mouse speed" row scales the
@@ -325,12 +353,14 @@ async function main() {
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
-    // While the menu is up, Left/Right adjust Options rows (not gameplay turn);
-    // suppress arrow-turn so picking a Screen size doesn't also spin the view.
-    const inMenu = menuVisible();
-    const fwd  = (keys['w']||keys['arrowup']   ? 1 : 0) - (keys['s']||keys['arrowdown'] ? 1 : 0);
-    const side = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
-    const turn = inMenu ? 0 : ((keys['arrowright'] ? 1 : 0) - (keys['arrowleft'] ? 1 : 0));
+    // While the menu OR console is up, gameplay input is gated. The menu's
+    // Left/Right adjust Options rows (not gameplay turn); the console owns the
+    // keyboard entirely. Suppress movement + arrow-turn behind either overlay
+    // (the engine also gates this, but skipping the calls keeps the world idle).
+    const gated = menuVisible() || consoleVisible();
+    const fwd  = gated ? 0 : ((keys['w']||keys['arrowup']   ? 1 : 0) - (keys['s']||keys['arrowdown'] ? 1 : 0));
+    const side = gated ? 0 : ((keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0));
+    const turn = gated ? 0 : ((keys['arrowright'] ? 1 : 0) - (keys['arrowleft'] ? 1 : 0));
     exp.set_move(fwd, side);
     if (turn) exp.look(-turn * TURN_RATE * dt, 0);   // arrow turn (right = right)
     exp.step(dt);

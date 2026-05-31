@@ -20,7 +20,9 @@ use quake_rs::mdl::Mdl;
 use quake_rs::pak::Pak;
 use quake_rs::particles::{Lcg, ParticleSystem};
 use quake_rs::progs::Progs;
-use quake_rs::render::{self, Camera, Menu, MenuAction, MenuPics, ModelInstance, Viewmodel};
+use quake_rs::render::{
+    self, Camera, Console, Menu, MenuAction, MenuPics, ModelInstance, Viewmodel,
+};
 use quake_rs::server::{Server, TempEntityEvent, UserCmd};
 use quake_rs::wad::Qpic;
 
@@ -168,6 +170,14 @@ struct App {
     /// `ensure_menu_assets` loads them once on first boot; subsequent boots reuse
     /// them (they never change).
     menu_loaded: bool,
+    /// The drop-down console (toggled with `~`). Mode-independent like the menu:
+    /// it overlays whatever is playing and, while open, owns the keyboard. Its
+    /// commands act on the live [`Walk`].
+    console: Console,
+    /// The `gfx/conback.lmp` console background (a 320x200 QPIC), loaded once
+    /// alongside the menu assets. `None` if the pak lacked it — `draw_console`
+    /// then falls back to a dark fill.
+    conback: Option<Qpic>,
     /// Accumulated wall-clock time (seconds), advanced by `dt` each `step`
     /// regardless of mode. Drives the menu cursor animation (Quake's `host_time`
     /// in `M_DrawCursor`), which must keep blinking over a frozen frame too.
@@ -212,6 +222,13 @@ impl App {
             let (pics, conchars) = load_menu_pics(&pak, gfx_wad.as_ref());
             self.menu_pics = pics;
             self.conchars = conchars;
+            // The console background (gfx/conback.lmp): a raw 320x200 QPIC.
+            // Optional — a pak missing it leaves draw_console's dark-fill fallback.
+            self.conback = pak
+                .read_file("gfx/conback.lmp")
+                .ok()
+                .flatten()
+                .and_then(|b| Qpic::parse(&b).ok());
         }
     }
 
@@ -412,6 +429,8 @@ fn ensure_app(f: impl FnOnce(&mut App)) {
                 menu_pics: MenuPics::default(),
                 conchars: None,
                 menu_loaded: false,
+                console: Console::new(),
+                conback: None,
                 clock: 0.0,
                 render_w: DEFAULT_W,
                 render_h: DEFAULT_H,
@@ -723,6 +742,304 @@ pub extern "C" fn menu_visible() -> i32 {
     })
 }
 
+// --- drop-down console: toggle / typing / execution exports (the `~` key) ---
+
+/// Toggle the drop-down console (the `~` / backtick key, Quake's
+/// `Con_ToggleConsole_f`). Opening slides the panel down over whatever is
+/// playing; closing slides it back. While open the console owns the keyboard.
+#[no_mangle]
+pub extern "C" fn console_toggle() {
+    ensure_app(|a| a.console.toggle());
+}
+
+/// `1` when the console is open (capturing the keyboard), else `0`. The page
+/// reads this to route keys to the console instead of the game / menu.
+#[no_mangle]
+pub extern "C" fn console_visible() -> i32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|a| a.console.open as i32)
+            .unwrap_or(0)
+    })
+}
+
+/// Append one typed character to the console input line. `code` is a Unicode
+/// scalar value (the page passes `key.charCodeAt(0)` / `key.codePointAt(0)`).
+/// Non-printable codes, the backtick/tilde (the toggle key), and anything while
+/// the console is closed are ignored. A no-op once the input line is full.
+#[no_mangle]
+pub extern "C" fn console_char(code: u32) {
+    ensure_app(|a| {
+        if !a.console.open {
+            return;
+        }
+        // Reject invalid scalar values; `putchar` further filters control chars
+        // and the backtick/tilde toggle key.
+        if let Some(ch) = char::from_u32(code) {
+            a.console.putchar(ch);
+        }
+    });
+}
+
+/// Delete the last character of the console input line (Backspace). A no-op when
+/// the console is closed or the line is empty.
+#[no_mangle]
+pub extern "C" fn console_backspace() {
+    ensure_app(|a| {
+        if a.console.open {
+            a.console.backspace();
+        }
+    });
+}
+
+/// Submit the console input line (Enter): echo it into the scrollback and
+/// execute it against the live game. A no-op when the console is closed or the
+/// line is blank. The command may swap the level (`map`) and close the console.
+#[no_mangle]
+pub extern "C" fn console_enter() {
+    // Take the line under the borrow, then execute it (execute_console_command
+    // borrows the App again to touch the walk / open-state).
+    let line = APP.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .filter(|a| a.console.open)
+            .and_then(|a| a.console.take_input())
+    });
+    if let Some(line) = line {
+        execute_console_command(&line);
+    }
+}
+
+// --- console command execution -------------------------------------------
+
+/// Sane upper bounds the `give` command clamps to, mirroring Quake's pickup
+/// caps (the player can't carry more than these).
+const MAX_HEALTH: f32 = 250.0;
+const MAX_ARMOR: f32 = 200.0;
+const MAX_SHELLS: f32 = 100.0;
+const MAX_NAILS: f32 = 200.0;
+const MAX_ROCKETS: f32 = 100.0;
+const MAX_CELLS: f32 = 100.0;
+
+// QuakeC `items` weapon bits (quakedef.h): the weapon for digit `d` (1..8) is
+// IT_SHOTGUN << (d-1), and IT_AXE is a separate high bit.
+const IT_SHOTGUN: i32 = 1; // bit for weapon 2 base; weapon d>=2 is IT_SHOTGUN<<(d-2)
+const IT_AXE: i32 = 4096;
+const FL_GODMODE: i32 = 64;
+const MOVETYPE_WALK: f32 = 3.0;
+const MOVETYPE_FLY: f32 = 5.0;
+const MOVETYPE_NOCLIP: f32 = 8.0;
+
+/// Parse `line` into whitespace argv and run the matching console command
+/// against the live [`Walk`], appending any output to the console scrollback.
+/// An empty line does nothing; an unknown command prints
+/// `"unknown command: <cmd>"`. Commands that touch the player edict guard on a
+/// live walk and print `"no active game"` when there is none. Nothing here
+/// panics on a bad/missing argument (all parsing uses `.ok()`/defaults).
+fn execute_console_command(line: &str) {
+    let argv: Vec<&str> = line.split_whitespace().collect();
+    let Some(&cmd) = argv.first() else { return };
+    let cmd_lower = cmd.to_ascii_lowercase();
+
+    // Commands that don't need the walk: echo / clear / help / cmdlist.
+    match cmd_lower.as_str() {
+        "clear" => {
+            ensure_app(|a| a.console.clear());
+            return;
+        }
+        "echo" => {
+            let text = if argv.len() > 1 {
+                argv[1..].join(" ")
+            } else {
+                String::new()
+            };
+            ensure_app(|a| a.console.println(text));
+            return;
+        }
+        "help" | "cmdlist" => {
+            ensure_app(|a| {
+                a.console.println("commands:");
+                a.console.println("  god noclip fly kill");
+                a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
+                a.console.println("  impulse <n>   map <name>");
+                a.console.println("  echo <text>   clear   help");
+            });
+            return;
+        }
+        _ => {}
+    }
+
+    // `map <name>` rebuilds the walk on a new level; handle it specially because
+    // it replaces the whole Walk (can't be done while holding a &mut to it).
+    if cmd_lower == "map" {
+        run_map_command(argv.get(1).copied());
+        return;
+    }
+
+    // The remaining commands act on the live player edict. Run them under a
+    // single borrow; guard a missing walk with "no active game".
+    ensure_app(|a| {
+        let has_walk = a.walk.is_some();
+        if !has_walk {
+            a.console.println("no active game");
+            return;
+        }
+        // Split the borrow: the walk (player edict + vm) and the console output.
+        // Take the player index + a raw pointer-free reference via the App.
+        let mut out: Vec<String> = Vec::new();
+        if let Some(w) = a.walk.as_mut() {
+            run_game_command(w, &cmd_lower, &argv, &mut out);
+        }
+        for line in out {
+            a.console.println(line);
+        }
+    });
+
+    // An unrecognised command: report it. (Handled here so the borrow above can
+    // finish first; run_game_command pushes nothing for an unknown verb.)
+    let known = matches!(
+        cmd_lower.as_str(),
+        "god" | "noclip" | "fly" | "kill" | "give" | "impulse"
+    );
+    if !known {
+        ensure_app(|a| a.console.println(format!("unknown command: {cmd}")));
+    }
+}
+
+/// Run a command that acts on the live player edict, pushing any output lines
+/// into `out`. `cmd` is already lowercased; `argv[0]` is the command itself.
+/// Unknown verbs push nothing (the caller reports them).
+fn run_game_command(w: &mut Walk, cmd: &str, argv: &[&str], out: &mut Vec<String>) {
+    let player = w.player;
+    match cmd {
+        // Host_God_f: flags ^= FL_GODMODE.
+        "god" => {
+            let flags = w.server.vm.ent_get_float(player, "flags") as i32 ^ FL_GODMODE;
+            w.server.vm.ent_set_float(player, "flags", flags as f32);
+            out.push(if flags & FL_GODMODE != 0 {
+                "godmode ON".into()
+            } else {
+                "godmode OFF".into()
+            });
+        }
+        // Host_Noclip_f: movetype toggles WALK <-> NOCLIP.
+        "noclip" => {
+            let mt = w.server.vm.ent_get_float(player, "movetype");
+            if mt != MOVETYPE_NOCLIP {
+                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_NOCLIP);
+                out.push("noclip ON".into());
+            } else {
+                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_WALK);
+                out.push("noclip OFF".into());
+            }
+        }
+        // Host_Fly_f: movetype toggles WALK <-> FLY.
+        "fly" => {
+            let mt = w.server.vm.ent_get_float(player, "movetype");
+            if mt != MOVETYPE_FLY {
+                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_FLY);
+                out.push("flymode ON".into());
+            } else {
+                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_WALK);
+                out.push("flymode OFF".into());
+            }
+        }
+        // Set health to 0 — the player dies on its next think.
+        "kill" => {
+            w.server.vm.ent_set_float(player, "health", 0.0);
+            out.push("ouch!".into());
+        }
+        // Queue a one-shot impulse (impulse 9 = the QuakeC give-all cheat).
+        "impulse" => {
+            let n = argv.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            w.next_impulse = n;
+            out.push(format!("impulse {n}"));
+        }
+        // Host_Give_f (faithful-ish): a letter/digit selects what to give.
+        "give" => run_give_command(w, argv, out),
+        _ => {}
+    }
+}
+
+/// Port of `Host_Give_f` for the single-player items we support: a letter
+/// argument grants ammo/health/armour; a digit 1..8 grants that weapon (setting
+/// the `items` bit and selecting it). `n` (argv[2]) is the amount; ammo/health
+/// default to a full amount when omitted. All values clamp to sane caps.
+fn run_give_command(w: &mut Walk, argv: &[&str], out: &mut Vec<String>) {
+    let what = match argv.get(1) {
+        Some(s) if !s.is_empty() => *s,
+        _ => {
+            out.push("give what? (h a s n r c 1-8)".into());
+            return;
+        }
+    };
+    let c0 = what.as_bytes()[0] as char;
+    let player = w.player;
+    // The amount (argv[2]); None => use the per-field default below.
+    let amount = argv.get(2).and_then(|s| s.parse::<f32>().ok());
+
+    let mut set = |field: &str, val: f32, cap: f32, label: &str, out: &mut Vec<String>| {
+        let v = val.clamp(0.0, cap);
+        w.server.vm.ent_set_float(player, field, v);
+        out.push(format!("gave {label} {v:.0}"));
+    };
+
+    match c0 {
+        'h' => set("health", amount.unwrap_or(MAX_HEALTH), MAX_HEALTH, "health", out),
+        'a' => set("armorvalue", amount.unwrap_or(MAX_ARMOR), MAX_ARMOR, "armor", out),
+        's' => set("ammo_shells", amount.unwrap_or(MAX_SHELLS), MAX_SHELLS, "shells", out),
+        'n' => set("ammo_nails", amount.unwrap_or(MAX_NAILS), MAX_NAILS, "nails", out),
+        'r' => set("ammo_rockets", amount.unwrap_or(MAX_ROCKETS), MAX_ROCKETS, "rockets", out),
+        'c' => set("ammo_cells", amount.unwrap_or(MAX_CELLS), MAX_CELLS, "cells", out),
+        '1'..='8' => {
+            // Weapon select/grant. Weapon 1 = axe (its own high bit); weapons
+            // 2..8 are IT_SHOTGUN << (d-2), exactly as Host_Give_f does
+            // (sv_player->v.items |= IT_SHOTGUN << (t[0]-'2')).
+            let d = (c0 as u8 - b'0') as i32; // 1..8
+            let bit = if d == 1 {
+                IT_AXE
+            } else {
+                IT_SHOTGUN << (d - 2)
+            };
+            let items = w.server.vm.ent_get_float(player, "items") as i32 | bit;
+            w.server.vm.ent_set_float(player, "items", items as f32);
+            // Select it: the QuakeC `weapon` field is the active weapon bit.
+            w.server.vm.ent_set_float(player, "weapon", bit as f32);
+            out.push(format!("gave weapon {d}"));
+        }
+        _ => out.push(format!("give: unknown item '{what}'")),
+    }
+}
+
+/// Run `map <name>`: build a fresh walk on `maps/<name>.bsp`. On success swap the
+/// walk, close the console, and print `"loading <name>"`; on failure print
+/// `"map not found: <name>"` and keep the current level.
+fn run_map_command(name: Option<&str>) {
+    let Some(name) = name.filter(|s| !s.is_empty()) else {
+        ensure_app(|a| a.console.println("usage: map <name>"));
+        return;
+    };
+    let path = format!("maps/{name}.bsp");
+    // Build the new walk OUTSIDE the borrow (it reads the pak + parses a BSP).
+    let new_walk = build_walk_map(&path);
+    ensure_app(|a| match new_walk {
+        Some(nw) => {
+            a.walk = Some(nw);
+            a.mode = 0;
+            a.console.println(format!("loading {name}"));
+            // The level loaded: close the console so the player sees the new map.
+            a.console.open = false;
+            // Keep the menu closed too (a `map` from the console starts play).
+            a.menu = Menu::new();
+            // Preserve the player's chosen render resolution across a `map` (the
+            // C keeps the video mode); the dispatcher re-syncs the Options label
+            // to the live render size, so the fresh menu's preset can't desync.
+        }
+        None => a.console.println(format!("map not found: {name}")),
+    });
+}
+
 /// Clamp the view pitch the way `CL_AdjustAngles` (cl_input.c) does: pitch is
 /// limited to `[-70, 80]`. In this codebase positive pitch = looking down
 /// (UserCmd pitch is QuakeC's +down convention), so +80 is the further-down
@@ -734,10 +1051,10 @@ fn clamp_pitch(pitch: f32) -> f32 {
 #[no_mangle]
 pub extern "C" fn look(dyaw: f32, dpitch: f32) {
     ensure_app(|a| {
-        // While the menu is up, Quake freezes the view (key_dest == key_menu
-        // stops feeding mouse-look). Match that: ignore look input behind the
-        // menu so the idle world doesn't rotate underneath it.
-        if a.menu.visible {
+        // While the menu OR console is up, Quake freezes the view (key_dest !=
+        // key_game stops feeding mouse-look). Match that: ignore look input
+        // behind either overlay so the idle world doesn't rotate underneath it.
+        if a.menu.visible || a.console.open {
             return;
         }
         if let Some(w) = a.walk.as_mut() {
@@ -758,14 +1075,15 @@ pub extern "C" fn step(dt: f32) {
             a.clock += dt;
         }
         let (w, h) = (a.render_w, a.render_h);
-        // While the menu is up, gameplay input is gated; the dispatcher owns the
-        // menu state, so it tells step_walk whether to gate. step_demo ignores
-        // gameplay input regardless.
+        // While the menu OR console is up, gameplay input is gated; the dispatcher
+        // owns that state, so it tells step_walk whether to gate. step_demo ignores
+        // gameplay input regardless. The console takes priority over the menu.
         let menu_visible = a.menu.visible;
+        let gate_gameplay = menu_visible || a.console.open;
         let mut img = if a.mode == 1 {
             a.demo.as_mut().map(|d| step_demo(d, dt, w, h))
         } else {
-            a.walk.as_mut().map(|wk| step_walk(wk, dt, menu_visible, w, h))
+            a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
         };
 
         // The main menu overlays WHATEVER is playing (walk OR the attract demo).
@@ -773,6 +1091,11 @@ pub extern "C" fn step(dt: f32) {
         // and BEFORE packing to the framebuffer, so it sits on top of everything.
         // Uses the active mode's palette and the App clock for the cursor frame.
         if menu_visible {
+            // Keep the Options "Screen size" label tracking the actual render
+            // resolution (the framebuffer is the source of truth), so a boot /
+            // New Game / `map` that changed the render size can't leave the label
+            // stale.
+            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
                     render::draw_menu(
@@ -782,6 +1105,25 @@ pub extern "C" fn step(dt: f32) {
                         a.conchars.as_ref(),
                         a.clock,
                         palette,
+                    );
+                }
+            }
+        }
+
+        // The console overlays EVERYTHING — drawn last (after the menu), so the
+        // dropped-down panel sits on top of the menu too. It owns the keyboard
+        // while open. Uses the active mode's palette and the App clock for the
+        // input cursor blink. A closed console draws nothing.
+        if a.console.open {
+            if let Some(img) = img.as_mut() {
+                if let Some(palette) = a.active_palette() {
+                    render::draw_console(
+                        img,
+                        &a.console,
+                        a.conback.as_ref(),
+                        a.conchars.as_ref(),
+                        palette,
+                        a.clock,
                     );
                 }
             }
@@ -2204,5 +2546,211 @@ mod tests {
         assert!(has_demo);
         assert!(!vis, "boot_demo leaves the menu closed");
         assert_eq!(menu_visible(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Drop-down console
+    // -----------------------------------------------------------------------
+
+    /// Read the player edict's `flags` field from the live walk (0.0 if no walk).
+    fn player_flags() -> i32 {
+        APP.with(|c| {
+            c.borrow()
+                .as_ref()
+                .and_then(|a| a.walk.as_ref())
+                .map(|w| w.server.vm.ent_get_float(w.player, "flags") as i32)
+                .unwrap_or(0)
+        })
+    }
+
+    /// Read a player-edict float field from the live walk (0.0 if no walk).
+    fn player_field(name: &str) -> f32 {
+        APP.with(|c| {
+            c.borrow()
+                .as_ref()
+                .and_then(|a| a.walk.as_ref())
+                .map(|w| w.server.vm.ent_get_float(w.player, name))
+                .unwrap_or(0.0)
+        })
+    }
+
+    fn console_scrollback() -> usize {
+        APP.with(|c| {
+            c.borrow().as_ref().map(|a| a.console.line_count()).unwrap_or(0)
+        })
+    }
+
+    /// Type a whole line into the (open) console and submit it.
+    fn run_console_line(line: &str) {
+        for ch in line.chars() {
+            console_char(ch as u32);
+        }
+        console_enter();
+    }
+
+    #[test]
+    fn console_toggle_flips_visibility_and_gates_typing() {
+        // ensure_app exists; start closed.
+        ensure_app(|_| {});
+        assert_eq!(console_visible(), 0, "console starts closed");
+        // Typing while closed is ignored.
+        console_char('x' as u32);
+        APP.with(|c| assert_eq!(c.borrow().as_ref().unwrap().console.input(), ""));
+        console_toggle();
+        assert_eq!(console_visible(), 1, "toggle opens the console");
+        // The backtick toggle char is never typed even while open.
+        console_char('`' as u32);
+        console_char('a' as u32);
+        APP.with(|c| assert_eq!(c.borrow().as_ref().unwrap().console.input(), "a"));
+        console_toggle();
+        assert_eq!(console_visible(), 0, "toggle closes the console");
+    }
+
+    #[test]
+    fn console_god_toggles_the_player_flags_bit() {
+        assert_eq!(boot(), 1, "boot builds a walk from the embedded pak");
+        console_toggle(); // open
+        assert_eq!(console_visible(), 1);
+
+        let before = player_flags();
+        assert_eq!(before & FL_GODMODE, 0, "godmode starts off");
+        run_console_line("god");
+        let after = player_flags();
+        assert_ne!(after & FL_GODMODE, 0, "the god command set FL_GODMODE on the player");
+        // The command echoed the input line + its result into the scrollback.
+        assert!(console_scrollback() >= 2, "god echoed the line and a result");
+
+        // A second `god` toggles it back off.
+        run_console_line("god");
+        assert_eq!(player_flags() & FL_GODMODE, 0, "a second god clears FL_GODMODE");
+    }
+
+    #[test]
+    fn console_unknown_command_prints_an_error() {
+        assert_eq!(boot(), 1);
+        console_toggle();
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().console.clear());
+        run_console_line("frobnicate now");
+        // Exactly two lines: the echoed "]frobnicate now" and the error message.
+        // (A known command would echo the line + its own variable output; an
+        // unknown one always produces precisely the echo + one error line.)
+        let lines = console_scrollback();
+        assert_eq!(lines, 2, "unknown command echoes the line and one error line");
+    }
+
+    #[test]
+    fn console_give_changes_the_field() {
+        assert_eq!(boot(), 1);
+        console_toggle();
+        // give h 100 sets the player's health field.
+        run_console_line("give h 100");
+        assert_eq!(player_field("health"), 100.0, "give h set health");
+        // give s 50 sets ammo_shells.
+        run_console_line("give s 50");
+        assert_eq!(player_field("ammo_shells"), 50.0, "give s set ammo_shells");
+        // give 2 grants + selects the shotgun (items bit 1, weapon bit 1).
+        run_console_line("give 2");
+        let items = player_field("items") as i32;
+        assert_ne!(items & IT_SHOTGUN, 0, "give 2 set the shotgun items bit");
+        assert_eq!(player_field("weapon") as i32, IT_SHOTGUN, "give 2 selected the shotgun");
+    }
+
+    #[test]
+    fn console_impulse_queues_next_impulse() {
+        assert_eq!(boot(), 1);
+        console_toggle();
+        run_console_line("impulse 9");
+        let n = APP.with(|c| {
+            c.borrow().as_ref().unwrap().walk.as_ref().unwrap().next_impulse
+        });
+        assert_eq!(n, 9, "impulse 9 queued the give-all cheat impulse");
+    }
+
+    #[test]
+    fn console_clear_and_echo_and_noclip_fly_kill() {
+        assert_eq!(boot(), 1);
+        console_toggle();
+        run_console_line("echo hello world");
+        assert!(console_scrollback() >= 2, "echo printed text");
+        run_console_line("clear");
+        // After clear, only the echoed "]clear" line (pushed before exec) remains
+        // — clear empties everything that came before it.
+        assert_eq!(console_scrollback(), 0, "clear empties the scrollback");
+
+        // noclip toggles movetype WALK <-> NOCLIP.
+        run_console_line("noclip");
+        assert_eq!(player_field("movetype"), MOVETYPE_NOCLIP, "noclip set NOCLIP");
+        run_console_line("noclip");
+        assert_eq!(player_field("movetype"), MOVETYPE_WALK, "noclip toggled back to WALK");
+        // fly toggles WALK <-> FLY.
+        run_console_line("fly");
+        assert_eq!(player_field("movetype"), MOVETYPE_FLY, "fly set FLY");
+        // kill zeroes health.
+        run_console_line("kill");
+        assert_eq!(player_field("health"), 0.0, "kill zeroed health");
+    }
+
+    #[test]
+    fn console_map_failure_keeps_level_and_prints_not_found() {
+        assert_eq!(boot(), 1);
+        console_toggle();
+        let had_walk = APP.with(|c| c.borrow().as_ref().unwrap().walk.is_some());
+        assert!(had_walk);
+        run_console_line("map nosuchmap");
+        // The walk is unchanged and the console stays OPEN (failure path).
+        let still = APP.with(|c| c.borrow().as_ref().unwrap().walk.is_some());
+        assert!(still, "a missing map leaves the current walk in place");
+        assert_eq!(console_visible(), 1, "a failed map keeps the console open");
+    }
+
+    #[test]
+    fn console_command_guards_missing_walk() {
+        // A fresh app with NO walk: a game command prints "no active game", no panic.
+        ensure_app(|a| {
+            a.walk = None;
+            a.console.open = true;
+            a.console.clear();
+        });
+        run_console_line("god");
+        // Echoed line + "no active game".
+        assert!(console_scrollback() >= 2, "god with no walk prints a guard message");
+    }
+
+    #[test]
+    fn boot_loads_the_conback_from_the_pak() {
+        // The console background (gfx/conback.lmp) loads once alongside the menu
+        // assets on first boot. The embedded pak ships it, so after boot the App
+        // holds a parsed 320x200 conback — what draw_console paints across the top.
+        assert_eq!(boot(), 1);
+        APP.with(|c| {
+            let b = c.borrow();
+            let cb = b.as_ref().unwrap().conback.as_ref();
+            assert!(cb.is_some(), "gfx/conback.lmp loaded from the embedded pak");
+            let cb = cb.unwrap();
+            assert!(cb.width > 0 && cb.height > 0, "conback has real dimensions");
+        });
+    }
+
+    #[test]
+    fn step_draws_console_over_everything_when_open() {
+        assert_eq!(boot(), 1);
+        // Render one frame with the console CLOSED, then OPEN; the open frame must
+        // differ (the panel paints over the top of the scene + menu).
+        let (w, h) = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.render_w, a.render_h)
+        });
+        step(0.016);
+        let closed: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        console_toggle();
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().console.println("test line"));
+        step(0.016);
+        let open: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        assert_eq!(closed.len(), w * h * 4);
+        assert_ne!(closed, open, "the open console changes the rendered frame");
+        // Pixels in the very top row (the panel) are present (non-uniform / drawn).
+        let top_changed = closed[..w * 4] != open[..w * 4];
+        assert!(top_changed, "the console panel paints the top region of the frame");
     }
 }
