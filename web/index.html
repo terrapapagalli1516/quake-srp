@@ -298,9 +298,13 @@ async function main() {
   const { instance } = await WebAssembly.instantiate(bytes, {});
   exp = instance.exports;
 
-  statusEl.textContent = 'booting: parsing pak0.pak, loading e1m1, spawning entities…';
+  statusEl.textContent = 'booting: parsing pak0.pak, loading the attract demo…';
   await new Promise(r => setTimeout(r, 30));
-  if (!exp.boot()) { statusEl.textContent = 'boot() failed'; return; }
+  // Quake boots into the ATTRACT loop: the main menu drawn over a PLAYING demo.
+  // boot_attract starts demo playback with the menu open; if the demo can't be
+  // built it falls back to boot() (menu over e1m1), so this is always non-zero
+  // when the pak loaded. The walk/demo buttons below still call boot()/boot_demo().
+  if (!exp.boot_attract()) { statusEl.textContent = 'boot_attract() failed'; return; }
 
   const ctx = canvas.getContext('2d');
   // The render resolution is RUNTIME state: the Options menu can grow it. Track

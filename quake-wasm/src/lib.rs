@@ -120,15 +120,6 @@ struct Walk {
     /// each frame from the drained temp entities + the server's entity_dlights,
     /// decayed under `advance`, and passed to the renderer to light the walls.
     dlights: DynamicLights,
-    /// The main-menu engine + its pre-loaded pics. Quake boots INTO the menu over
-    /// the e1m1 frame; while `menu.visible`, gameplay input is gated (the world
-    /// still idles) and `draw_menu` overlays the frame.
-    menu: Menu,
-    /// The menu's plaque/title/list/cursor pics, loaded once at boot from the pak.
-    menu_pics: MenuPics,
-    /// The 128x128 `conchars` font atlas (wrapped as a Qpic) for `draw_string`,
-    /// or `None` if `gfx.wad`/conchars were absent.
-    conchars: Option<Qpic>,
 }
 
 /// Recorded-demo playback state.
@@ -160,6 +151,27 @@ struct App {
     demo: Option<DemoPlay>,
     /// 0 = walk, 1 = demo.
     mode: u8,
+    /// The main-menu engine. Lives at the App level (mode-independent) so it can
+    /// overlay WHATEVER is playing — the walk OR the attract demo. Quake boots
+    /// INTO the menu over the playing attract demo; while `menu.visible`,
+    /// gameplay input is gated (the world still idles) and the `step` dispatcher
+    /// overlays `draw_menu` on the finished frame.
+    menu: Menu,
+    /// The menu's plaque/title/list/cursor pics, loaded once on first boot from
+    /// the pak (they are mode-independent). `None` until `ensure_menu_assets`
+    /// runs once.
+    menu_pics: MenuPics,
+    /// The 128x128 `conchars` font atlas (wrapped as a Qpic) for `draw_string`,
+    /// or `None` if `gfx.wad`/conchars were absent. Loaded alongside `menu_pics`.
+    conchars: Option<Qpic>,
+    /// Whether the menu assets (`menu_pics` + `conchars`) have been loaded yet.
+    /// `ensure_menu_assets` loads them once on first boot; subsequent boots reuse
+    /// them (they never change).
+    menu_loaded: bool,
+    /// Accumulated wall-clock time (seconds), advanced by `dt` each `step`
+    /// regardless of mode. Drives the menu cursor animation (Quake's `host_time`
+    /// in `M_DrawCursor`), which must keep blinking over a frozen frame too.
+    clock: f32,
     /// Current render resolution (runtime; defaults to [`DEFAULT_W`] x
     /// [`DEFAULT_H`]). The scene renders at this size and the framebuffer is
     /// `render_w * render_h * 4` RGBA bytes, reallocated whenever it changes.
@@ -181,6 +193,37 @@ impl App {
         // `w*h*4` is bounded by MAX_PIXELS*4 (~4 MB) after clamping, so this can't
         // OOM; saturating_mul keeps us safe even if a caller bypassed the clamp.
         self.fb = vec![0u8; w.saturating_mul(h).saturating_mul(4)];
+    }
+
+    /// Load the menu pics + conchars from the pak ONCE (they are mode-independent
+    /// and never change), the first time any boot needs them. A missing/bad pak
+    /// leaves the slots empty — `draw_menu` then simply skips the absent pics.
+    fn ensure_menu_assets(&mut self) {
+        if self.menu_loaded {
+            return;
+        }
+        self.menu_loaded = true;
+        if let Some(pak) = pak() {
+            let gfx_wad = pak
+                .read_file("gfx.wad")
+                .ok()
+                .flatten()
+                .and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
+            let (pics, conchars) = load_menu_pics(&pak, gfx_wad.as_ref());
+            self.menu_pics = pics;
+            self.conchars = conchars;
+        }
+    }
+
+    /// The palette of the active mode (the walk's, or the demo's), for the menu
+    /// overlay. `None` when no mode has a scene yet (then there is nothing to
+    /// overlay the menu onto anyway).
+    fn active_palette(&self) -> Option<&[[u8; 3]; 256]> {
+        if self.mode == 1 {
+            self.demo.as_ref().map(|d| &d.palette)
+        } else {
+            self.walk.as_ref().map(|w| &w.palette)
+        }
     }
 }
 
@@ -290,8 +333,6 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
     // The HUD pics live in gfx.wad; parse it once (None if absent/unparseable).
     let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
-    // The menu pics (.lmp files) + conchars (from gfx.wad), loaded once.
-    let (menu_pics, conchars) = load_menu_pics(&pak, gfx_wad.as_ref());
     let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
@@ -321,14 +362,6 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
         dlights: DynamicLights::new(),
-        // Quake boots INTO the menu over the e1m1 frame.
-        menu: {
-            let mut m = Menu::new();
-            m.open();
-            m
-        },
-        menu_pics,
-        conchars,
     })
 }
 
@@ -375,6 +408,11 @@ fn ensure_app(f: impl FnOnce(&mut App)) {
                 walk: None,
                 demo: None,
                 mode: 0,
+                menu: Menu::new(),
+                menu_pics: MenuPics::default(),
+                conchars: None,
+                menu_loaded: false,
+                clock: 0.0,
                 render_w: DEFAULT_W,
                 render_h: DEFAULT_H,
                 fb: vec![0u8; DEFAULT_W * DEFAULT_H * 4],
@@ -399,15 +437,21 @@ pub extern "C" fn boot() -> i32 {
     let w = build_walk();
     let ok = w.is_some();
     ensure_app(|a| {
+        a.ensure_menu_assets();
         // Only enter walk mode when the level actually built; otherwise leave
         // the current mode untouched (mirrors boot_demo's success gate) so a
         // failed boot doesn't strand the app in walk mode with no Walk.
         if let Some(w) = w {
             a.walk = Some(w);
             a.mode = 0;
-            // The fresh Walk's menu starts at resolution preset 0 (DEFAULT);
-            // reset the App render size to match so the Options "Screen size"
-            // label and the actual framebuffer never desync after a re-boot.
+            // Quake boots INTO the menu over the e1m1 frame. Reset the App-level
+            // menu to fresh defaults (preset 0) and open it over the walk, the
+            // same clean slate the old fresh-Walk-with-fresh-Menu boot gave.
+            a.menu = Menu::new();
+            a.menu.open();
+            // The fresh menu is at resolution preset 0 (DEFAULT); reset the App
+            // render size to match so the Options "Screen size" label and the
+            // actual framebuffer never desync after a re-boot.
             a.set_render_size(DEFAULT_W, DEFAULT_H);
         }
     });
@@ -422,13 +466,51 @@ pub extern "C" fn boot_demo() -> i32 {
     let d = build_demo();
     let ok = d.is_some();
     ensure_app(|a| {
+        a.ensure_menu_assets();
         a.demo = d;
         if a.demo.is_some() {
             a.mode = 1;
+            // The demo button plays the demo with the menu CLOSED (clean
+            // playback). `boot_attract` is the variant that opens the menu over it.
+            // Reset to fresh defaults so the menu's Options preset matches the
+            // DEFAULT framebuffer we set below.
+            a.menu = Menu::new();
             a.set_render_size(DEFAULT_W, DEFAULT_H);
         }
     });
     ok as i32
+}
+
+/// Boot into the ATTRACT loop: start recorded-demo playback (demo1.dem) with the
+/// main menu OPEN over it — exactly how Quake boots (the menu draws on top of the
+/// playing demo, the "attract" screen). The page calls this on load instead of
+/// [`boot`]. Returns 1 when the demo built (menu over the playing demo), or 0 when
+/// it could not — in which case we fall back to [`boot`] so the user still lands
+/// on a menu over *something* (e1m1) rather than a blank screen.
+#[no_mangle]
+pub extern "C" fn boot_attract() -> i32 {
+    // Clean slate: drop any sounds still queued from a previous mode.
+    SND_QUEUE.with(|q| q.borrow_mut().clear());
+    let d = build_demo();
+    let built = d.is_some();
+    ensure_app(|a| {
+        a.ensure_menu_assets();
+        if let Some(d) = d {
+            a.demo = Some(d);
+            a.mode = 1;
+            // The menu overlays the PLAYING attract demo. Fresh defaults (preset 0)
+            // keep the Options "Screen size" label in sync with the DEFAULT fb.
+            a.menu = Menu::new();
+            a.menu.open();
+            a.set_render_size(DEFAULT_W, DEFAULT_H);
+        }
+    });
+    if built {
+        1
+    } else {
+        // No demo (missing/bad pak): still give the player a menu over a frame.
+        boot()
+    }
 }
 
 /// The current render width in pixels (defaults to [`DEFAULT_W`] = 320). The page
@@ -495,10 +577,8 @@ pub extern "C" fn set_impulse(n: i32) {
 #[no_mangle]
 pub extern "C" fn menu_up() {
     ensure_app(|a| {
-        if let Some(w) = a.walk.as_mut() {
-            if w.menu.visible {
-                w.menu.move_cursor(-1);
-            }
+        if a.menu.visible {
+            a.menu.move_cursor(-1);
         }
     });
 }
@@ -508,10 +588,8 @@ pub extern "C" fn menu_up() {
 #[no_mangle]
 pub extern "C" fn menu_down() {
     ensure_app(|a| {
-        if let Some(w) = a.walk.as_mut() {
-            if w.menu.visible {
-                w.menu.move_cursor(1);
-            }
+        if a.menu.visible {
+            a.menu.move_cursor(1);
         }
     });
 }
@@ -527,26 +605,29 @@ pub extern "C" fn menu_select() {
     // afterward so we don't hold a &mut Walk while replacing it.
     let mut start_new_game = false;
     ensure_app(|a| {
-        if let Some(w) = a.walk.as_mut() {
-            if w.menu.visible {
-                match w.menu.select() {
-                    MenuAction::NewGame => start_new_game = true,
-                    // Closed/Back/None already applied to the menu state inside
-                    // select(); nothing else for the host to do.
-                    _ => {}
-                }
+        if a.menu.visible {
+            match a.menu.select() {
+                MenuAction::NewGame => start_new_game = true,
+                // Closed/Back/None already applied to the menu state inside
+                // select(); nothing else for the host to do.
+                _ => {}
             }
         }
     });
     if start_new_game {
         // Fresh single-player game on the start hub (NEW_GAME_MAP). Rebuild the
-        // whole walk — new Server, new connected client — and leave the menu
-        // closed. From the hub the player picks skill + episode (changelevel).
-        if let Some(mut nw) = build_walk_map(render::NEW_GAME_MAP) {
-            nw.menu.close();
+        // whole walk — new Server, new connected client — switch to walk mode and
+        // leave the menu closed. From the hub the player picks skill + episode
+        // (changelevel).
+        if let Some(nw) = build_walk_map(render::NEW_GAME_MAP) {
             ensure_app(|a| {
                 a.walk = Some(nw);
                 a.mode = 0;
+                // Reset the menu to fresh defaults and leave it closed — exactly
+                // what the old fresh-Walk-with-fresh-Menu rebuild did. This also
+                // returns the Options "Screen size" preset to 0, so the
+                // render-size reset to DEFAULT below stays in sync with the label.
+                a.menu = Menu::new();
                 // Fresh menu = resolution preset 0; keep the App render size in
                 // sync so the Options label and framebuffer don't desync.
                 a.set_render_size(DEFAULT_W, DEFAULT_H);
@@ -561,12 +642,10 @@ pub extern "C" fn menu_select() {
 #[no_mangle]
 pub extern "C" fn menu_cancel() {
     ensure_app(|a| {
-        if let Some(w) = a.walk.as_mut() {
-            if w.menu.visible {
-                let _ = w.menu.cancel();
-            } else {
-                w.menu.open();
-            }
+        if a.menu.visible {
+            let _ = a.menu.cancel();
+        } else {
+            a.menu.open();
         }
     });
 }
@@ -590,17 +669,15 @@ pub extern "C" fn menu_right() {
 
 /// Shared body of [`menu_left`]/[`menu_right`]: adjust the Options row under the
 /// borrow, and if the Screen-size row changed, capture the new size and resize the
-/// framebuffer afterward (so we don't hold a `&mut Walk` while touching the App's
+/// framebuffer afterward (so we don't hold the borrow while touching the App's
 /// fb). No-op when the menu is hidden.
 fn menu_adjust(delta: i32) {
     let mut new_size: Option<(usize, usize)> = None;
     ensure_app(|a| {
-        if let Some(w) = a.walk.as_mut() {
-            if w.menu.visible && w.menu.adjust(delta) {
-                // The Screen-size row changed: read the new (clamped) resolution.
-                let (rw, rh) = w.menu.resolution();
-                new_size = Some(clamp_resolution(rw, rh));
-            }
+        if a.menu.visible && a.menu.adjust(delta) {
+            // The Screen-size row changed: read the new (clamped) resolution.
+            let (rw, rh) = a.menu.resolution();
+            new_size = Some(clamp_resolution(rw, rh));
         }
     });
     if let Some((w, h)) = new_size {
@@ -609,29 +686,27 @@ fn menu_adjust(delta: i32) {
 }
 
 /// The Options "Mouse speed" as a sensitivity multiplier (default 1.0). The page
-/// multiplies its baseline look sensitivity by this. Reads from the live menu; 1.0
-/// when there is no walk yet.
+/// multiplies its baseline look sensitivity by this. Reads from the App-level menu;
+/// 1.0 when the app has not been created yet.
 #[no_mangle]
 pub extern "C" fn mouse_sensitivity() -> f32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
-            .and_then(|a| a.walk.as_ref())
-            .map(|w| w.menu.mouse_sensitivity())
+            .map(|a| a.menu.mouse_sensitivity())
             .unwrap_or(1.0)
     })
 }
 
 /// The Options "Volume" as a `0.0..=1.0` master gain (default 0.7). The page
-/// scales its sound gains by this. Reads from the live menu; 1.0 when there is no
-/// walk yet (so audio is never accidentally silenced before the menu exists).
+/// scales its sound gains by this. Reads from the App-level menu; 1.0 when the app
+/// has not been created yet (so audio is never accidentally silenced before then).
 #[no_mangle]
 pub extern "C" fn volume() -> f32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
-            .and_then(|a| a.walk.as_ref())
-            .map(|w| w.menu.volume())
+            .map(|a| a.menu.volume())
             .unwrap_or(1.0)
     })
 }
@@ -643,8 +718,7 @@ pub extern "C" fn menu_visible() -> i32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
-            .and_then(|a| a.walk.as_ref())
-            .map(|w| w.menu.visible as i32)
+            .map(|a| a.menu.visible as i32)
             .unwrap_or(0)
     })
 }
@@ -660,13 +734,13 @@ fn clamp_pitch(pitch: f32) -> f32 {
 #[no_mangle]
 pub extern "C" fn look(dyaw: f32, dpitch: f32) {
     ensure_app(|a| {
+        // While the menu is up, Quake freezes the view (key_dest == key_menu
+        // stops feeding mouse-look). Match that: ignore look input behind the
+        // menu so the idle world doesn't rotate underneath it.
+        if a.menu.visible {
+            return;
+        }
         if let Some(w) = a.walk.as_mut() {
-            // While the menu is up, Quake freezes the view (key_dest ==
-            // key_menu stops feeding mouse-look). Match that: ignore look input
-            // behind the menu so the idle world doesn't rotate underneath it.
-            if w.menu.visible {
-                return;
-            }
             w.yaw += dyaw;
             w.pitch = clamp_pitch(w.pitch + dpitch);
         }
@@ -677,12 +751,42 @@ pub extern "C" fn look(dyaw: f32, dpitch: f32) {
 #[no_mangle]
 pub extern "C" fn step(dt: f32) {
     ensure_app(|a| {
+        // Advance the App clock (drives the menu cursor animation; mode-independent
+        // so the cursor keeps blinking over a frozen frame). Guard a non-finite /
+        // negative dt so it only moves forward.
+        if dt.is_finite() && dt > 0.0 {
+            a.clock += dt;
+        }
         let (w, h) = (a.render_w, a.render_h);
-        let img = if a.mode == 1 {
+        // While the menu is up, gameplay input is gated; the dispatcher owns the
+        // menu state, so it tells step_walk whether to gate. step_demo ignores
+        // gameplay input regardless.
+        let menu_visible = a.menu.visible;
+        let mut img = if a.mode == 1 {
             a.demo.as_mut().map(|d| step_demo(d, dt, w, h))
         } else {
-            a.walk.as_mut().map(|wk| step_walk(wk, dt, w, h))
+            a.walk.as_mut().map(|wk| step_walk(wk, dt, menu_visible, w, h))
         };
+
+        // The main menu overlays WHATEVER is playing (walk OR the attract demo).
+        // Drawn here in the dispatcher, after the active mode rendered its frame
+        // and BEFORE packing to the framebuffer, so it sits on top of everything.
+        // Uses the active mode's palette and the App clock for the cursor frame.
+        if menu_visible {
+            if let Some(img) = img.as_mut() {
+                if let Some(palette) = a.active_palette() {
+                    render::draw_menu(
+                        img,
+                        &a.menu,
+                        &a.menu_pics,
+                        a.conchars.as_ref(),
+                        a.clock,
+                        palette,
+                    );
+                }
+            }
+        }
+
         if let Some(img) = img {
             let fb = &mut a.fb;
             fb.clear();
@@ -1112,7 +1216,13 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let _ = w.server.drain_temp_entities();
 }
 
-fn step_walk(w: &mut Walk, dt: f32, render_w: usize, render_h: usize) -> render::Image {
+fn step_walk(
+    w: &mut Walk,
+    dt: f32,
+    menu_up: bool,
+    render_w: usize,
+    render_h: usize,
+) -> render::Image {
     // Advance the animation clock (used for liquid warp + sky scroll). Guard
     // against a non-finite/negative dt so the clock only ever moves forward.
     if dt.is_finite() && dt > 0.0 {
@@ -1128,7 +1238,6 @@ fn step_walk(w: &mut Walk, dt: f32, render_w: usize, render_h: usize) -> render:
     //    player neither moves, fires, nor switches weapons. We send a zeroed
     //    UserCmd at the current view angles (Quake's `key_dest == key_menu` stops
     //    feeding the movement/attack/impulse commands the same way).
-    let menu_up = w.menu.visible;
     let (mut fwd, mut side) = if menu_up { (0.0, 0.0) } else { (w.in_fwd, w.in_side) };
     let mag = (fwd * fwd + side * side).sqrt();
     if mag > 1.0 {
@@ -1409,19 +1518,9 @@ fn step_walk(w: &mut Walk, dt: f32, render_w: usize, render_h: usize) -> render:
         render::draw_hud_into(&mut img, &hud);
     }
 
-    // 7. Main menu overlay: Quake boots into it and it stays on top of the game
-    //    frame (world + HUD) until dismissed. Drawn last so it sits above
-    //    everything. Skipped silently when not visible.
-    if w.menu.visible {
-        render::draw_menu(
-            &mut img,
-            &w.menu,
-            &w.menu_pics,
-            w.conchars.as_ref(),
-            w.clock,
-            &w.palette,
-        );
-    }
+    // The main-menu overlay is drawn by the `step` dispatcher (the menu lives at
+    // the App level now so it can overlay walk OR the attract demo); step_walk no
+    // longer draws it.
     img
 }
 
@@ -1996,5 +2095,114 @@ mod tests {
         // menu_left cycles back to 320x200.
         menu_left();
         assert_eq!((width(), height()), (320, 200), "left cycles back to the default");
+    }
+
+    // -- attract boot: menu over the playing demo (App-level menu) --------------
+
+    /// Read `(mode, has_walk, has_demo, menu_visible)` from the live App.
+    fn app_state() -> (u8, bool, bool, bool) {
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().expect("app exists");
+            (a.mode, a.walk.is_some(), a.demo.is_some(), a.menu.visible)
+        })
+    }
+
+    #[test]
+    fn boot_attract_starts_demo_with_menu_open() {
+        // boot_attract is how the page boots: the recorded demo plays with the
+        // main menu OPEN over it (Quake's attract loop). The embedded pak ships
+        // demo1.dem, so this builds the demo (returns 1) and lands in demo mode
+        // with the menu visible.
+        assert_eq!(boot_attract(), 1, "attract built the demo from the embedded pak");
+        let (mode, has_walk, has_demo, vis) = app_state();
+        assert_eq!(mode, 1, "attract boots into demo mode");
+        assert!(has_demo, "the demo was built");
+        assert!(!has_walk, "no walk is built for the attract demo");
+        assert!(vis, "the menu is open over the playing demo");
+        assert_eq!(menu_visible(), 1, "menu_visible reflects the App-level menu");
+
+        // Stepping advances the demo (its frame index moves) WHILE the menu stays
+        // open over it — the menu does not freeze the demo behind it.
+        let idx_before = APP.with(|c| c.borrow().as_ref().unwrap().demo.as_ref().unwrap().idx);
+        for _ in 0..40 {
+            step(0.05);
+        }
+        let idx_after = APP.with(|c| c.borrow().as_ref().unwrap().demo.as_ref().unwrap().idx);
+        assert_ne!(idx_before, idx_after, "the attract demo keeps playing behind the menu");
+        assert_eq!(menu_visible(), 1, "the menu remains open over the demo");
+    }
+
+    #[test]
+    fn boot_attract_new_game_switches_to_walk_with_menu_closed() {
+        // From the attract loop, Single Player > New Game starts a fresh walk on
+        // the start hub and closes the menu. Drive the same key path the page uses.
+        assert_eq!(boot_attract(), 1);
+        assert_eq!(app_state(), (1, false, true, true), "attract: demo mode, menu open");
+
+        // Main screen cursor 0 = Single Player. Enter the SP submenu, then New Game
+        // (its first item) is the default cursor 0 -> select.
+        menu_select(); // Main > Single Player -> SinglePlayer screen
+        assert_eq!(menu_visible(), 1, "still in the menu on the SinglePlayer screen");
+        menu_select(); // SinglePlayer > New Game -> builds the walk, closes the menu
+
+        let (mode, has_walk, _has_demo, vis) = app_state();
+        assert_eq!(mode, 0, "New Game switches to walk mode");
+        assert!(has_walk, "a fresh walk was built on the start hub");
+        assert!(!vis, "the menu closed when the game started");
+        assert_eq!(menu_visible(), 0, "menu_visible reflects the closed menu");
+
+        // The walk renders a scene with the menu gone: step paints an opaque fb.
+        step(0.016);
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            assert!(a.fb.chunks_exact(4).all(|px| px[3] == 255), "the walk scene renders");
+        });
+
+        // Esc reopens the menu over the running walk (menu_cancel from key_game).
+        menu_cancel();
+        assert_eq!(menu_visible(), 1, "Esc reopens the menu over the walk");
+    }
+
+    #[test]
+    fn attract_menu_paints_pixels_over_the_demo_frame() {
+        // The dispatcher overlays the menu on the demo frame. Prove the overlay
+        // is non-empty (real menu pics from the embedded pak land on the frame):
+        // render the SAME demo frame twice into identical Images, draw the menu
+        // onto only one, and assert the two framebuffers differ.
+        assert_eq!(boot_attract(), 1);
+        // Step a little so the demo is on a populated frame (not the empty preroll).
+        for _ in 0..10 {
+            step(0.05);
+        }
+        let differ = APP.with(|c| {
+            let mut b = c.borrow_mut();
+            let a = b.as_mut().unwrap();
+            assert!(a.menu.visible, "the attract menu is open");
+            let (w, h) = (a.render_w, a.render_h);
+            let d = a.demo.as_mut().unwrap();
+            // Render the current demo frame with a tiny dt twice; with the menu
+            // OFF and ON. (A tiny dt keeps both renders on the same frame.)
+            let plain = step_demo(d, 0.0001, w, h);
+            let mut withm = step_demo(d, 0.0001, w, h);
+            let pal = a.active_palette().expect("demo palette");
+            render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, pal);
+            // The two frames are the same scene; only the menu overlay differs.
+            plain.rgb != withm.rgb
+        });
+        assert!(differ, "the menu overlay changes pixels on the demo frame");
+    }
+
+    #[test]
+    fn boot_demo_keeps_menu_closed() {
+        // The demo BUTTON (boot_demo) plays the demo with the menu CLOSED — the
+        // clean-playback variant, distinct from the attract boot.
+        assert_eq!(boot_demo(), 1, "the embedded demo builds");
+        let (mode, _has_walk, has_demo, vis) = app_state();
+        assert_eq!(mode, 1, "demo mode");
+        assert!(has_demo);
+        assert!(!vis, "boot_demo leaves the menu closed");
+        assert_eq!(menu_visible(), 0);
     }
 }
