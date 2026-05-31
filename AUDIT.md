@@ -76,6 +76,45 @@ tested (396 lib tests), golden-verified (e1m1/e1m2/e1m3 scene sha256 unchanged a
 - ✅ **centerprint position (LOW)** — `render.rs`: y = 200·0.35 (≤4 lines) else 48,
   per SCR_DrawCenterString (was dead-centre).
 
+### Round 2 — 15-subsystem workflow (Rust vs WinQuake C) + adversarial verify
+
+60 agents, 45 findings, **37 confirmed** (4 HIGH, 14 MED, 19 LOW), 8 refuted. Fixed
+across commits `081beda` (2a), `6d39591` (2b), `c4b4751` (2c). Golden hashes held
+byte-identical throughout (`8eea4f9c`/`1edb0642`/`2009e041`).
+
+Fixed:
+- ✅ **EF_ROTATE spin** (HIGH) — bonus pickups spin (`anglemod(100*t)`); was frozen.
+- ✅ **View roll** (HIGH) — Camera.roll: strafe lean + 80° dead-view + punch roll;
+  demo cams replay recorded `viewangles[ROLL]`. (Damage-kick roll needs svc_damage.)
+- ✅ **EF_MUZZLEFLASH clear** (HIGH) — SV_CleanupEnts at frame top; muzzle light was
+  latching forever after the first shot.
+- ✅ **Dead/Tab scoreboard** (HIGH) — scorebar + Monsters/Secrets/Time/level on death.
+- ✅ **Per-entity skin** (MED) — armor.mdl now green/yellow/red, not always green.
+- ✅ **Alias pitch/roll** (MED) — projectiles point along flight path (R_AliasSetUp-
+  Transform); zero-orientation fast path keeps golden bit-identical.
+- ✅ **SV_TryUnstick + SV_WallFriction** (MED) — wedge escape at BSP seams + into-wall
+  tangential friction.
+- ✅ **clip_box entry-axis pullback** (MED) — diagonal box-vs-box stops at correct depth.
+- ✅ **Damage flash** (MED) — blood/armour split, min-10 floor, 3*count (was 2×), tint.
+- ✅ **Stair-step oldz smoothing** (MED) — stairs glide instead of jolting.
+- ✅ **Underwater warp** (MED) — D_WarpScreen sine wobble when the eye is submerged.
+- ✅ **Weapon icon inv2_*** (MED) — active weapon settles to the bright icon.
+- ✅ **Invuln 666 + disc** (MED) — Pentagram-of-Protection armour field.
+- ✅ **spawn_burst count==1024** (LOW) — fiery explosion, not SlowGrav dust.
+- ✅ **SV_WalkMove waterlevel jump gate** (LOW) — swimmers can step up.
+
+Deferred (documented, lower priority / higher risk):
+- ⬜ **R_MarkLights BSP dlight gating** (MED) — dynamic light can bleed through walls
+  onto coplanar faces in other BSP regions; needs the per-surface dlightbits recursion.
+- ⬜ **No-lightmap face fullbright/black** (MED) — sample-less faces render Lambert
+  instead of row 0 / row 63; narrow (lightless/test maps), golden-sensitive.
+- ⬜ **Intermission view** (MED) — V_CalcIntermissionRefdef + svc_intermission flow.
+- ⬜ LOWs: client_think pre/post-think order; PF_particle byte count/dir quantize;
+  clip_box inopen/plane_dist coords; SV_NewChaseDir integer abs; OP_ADDRESS world
+  guard; AngleVectors f64-vs-float (golden-sensitive); sky foreground drift; particle
+  on-screen size ramp; ST_RAND syncbase; alias triangle near-clip; tracer parity;
+  lightstyle /264-vs-/256 (golden-sensitive); sky-name case sensitivity.
+
 ## HIGH (15)
 
 | # | Finding | Status |
