@@ -413,7 +413,8 @@ fn build_walk_map(map: &str) -> Option<Walk> {
 fn build_demo() -> Option<DemoPlay> {
     let pak = pak()?;
     let read = |n: &str| pak.read_file(n).ok().flatten();
-    let demo = parse_demo(&read(DEMO_FILE)?).ok()?;
+    let demo_bytes = read(DEMO_FILE)?;
+    let demo = parse_demo(&demo_bytes).ok()?;
     let map = demo.map_name()?.to_string();
     let bsp = Bsp::parse(&read(&map)?).ok()?;
     let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
@@ -429,6 +430,23 @@ fn build_demo() -> Option<DemoPlay> {
         }
         colors.push(color_for_name(name));
     }
+    if demo.frames.is_empty() {
+        return None;
+    }
+    // Re-parse with inter-frame interpolation — smooth 60 fps playback instead of
+    // the choppy 10 Hz keyframes (CL_LerpPoint), plus EF_ROTATE spin for any model
+    // whose header flags it (rotating pickups). The set of rotating model indices
+    // is derived from the just-loaded MDL headers.
+    let rotating: Vec<usize> = models
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            m.as_ref()
+                .filter(|md| md.header.flags & quake_rs::demo::EF_ROTATE != 0)
+                .map(|_| i)
+        })
+        .collect();
+    let demo = quake_rs::demo::parse_demo_interpolated(&demo_bytes, 60.0, &rotating).ok()?;
     if demo.frames.is_empty() {
         return None;
     }
