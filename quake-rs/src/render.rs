@@ -2464,18 +2464,33 @@ fn vview_lerp(a: &VView, b: &VView, alpha: f32) -> VView {
 ///  * A polygon **fully behind** (every `vz <= NEAR_PLANE`) yields no inside
 ///    vertices and no crossings, so an empty (`< 3`) result is returned and the
 ///    caller skips the face.
+/// Convenience wrapper: clip against the near plane into a fresh `Vec` (for cold
+/// paths and tests). The per-face hot paths call [`clip_poly_near_into`] with a
+/// reused scratch buffer instead.
 fn clip_poly_near(input: &[VView]) -> Vec<VView> {
+    let mut out = Vec::new();
+    clip_poly_near_into(input, &mut out);
+    out
+}
+
+/// Clip `input` against the near plane, writing the result into `out` (cleared
+/// first). `out` is a caller-owned scratch buffer reused across faces so the
+/// overwhelmingly common per-face call allocates nothing. The vertices written
+/// are byte-identical to the previous return-a-fresh-`Vec` version.
+fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
+    out.clear();
     let n = input.len();
     if n == 0 {
-        return Vec::new();
+        return;
     }
-    // Fast path: a polygon entirely in front of the near plane is returned
+    // Fast path: a polygon entirely in front of the near plane is copied
     // unchanged (same vertices, same order). This keeps the overwhelmingly
     // common case a verbatim copy, guaranteeing no rasteriser regression.
     if input.iter().all(|v| v.vz > NEAR_PLANE) {
-        return input.to_vec();
+        out.extend_from_slice(input);
+        return;
     }
-    let mut out: Vec<VView> = Vec::with_capacity(n + 1);
+    out.reserve(n + 1);
     for i in 0..n {
         let cur = &input[i];
         let next = &input[(i + 1) % n];
@@ -2495,7 +2510,6 @@ fn clip_poly_near(input: &[VView]) -> Vec<VView> {
             }
         }
     }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -3329,6 +3343,9 @@ fn draw_world_textured(
 
     let mut views: Vec<VView> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
+    // Reused near-clip output buffer (cleared per face) so the per-face clip
+    // allocates nothing on the common in-front-of-near fast path.
+    let mut clipped: Vec<VView> = Vec::new();
 
     // World fingerprint + face count for the lit-surface cache (keyed per face).
     let fp = WorldFingerprint::of(bsp);
@@ -3476,7 +3493,7 @@ fn draw_world_textured(
             };
             views.push(VView { vx, vy, vz, s, t });
         }
-        let clipped = clip_poly_near(&views);
+        clip_poly_near_into(&views, &mut clipped);
         if clipped.len() < 3 {
             continue;
         }
@@ -3725,6 +3742,8 @@ fn draw_submodel(
     let mut world_poly: Vec<Vec3> = Vec::new();
     let mut views: Vec<VView> = Vec::new();
     let mut proj: Vec<ProjT> = Vec::new();
+    // Reused near-clip output buffer (cleared per face); zero per-face alloc.
+    let mut clipped: Vec<VView> = Vec::new();
 
     for face_index in f0..end {
         let face = match bsp.faces.get(face_index) {
@@ -3838,7 +3857,7 @@ fn draw_submodel(
         if bad {
             continue;
         }
-        let clipped = clip_poly_near(&views);
+        clip_poly_near_into(&views, &mut clipped);
         if clipped.len() < 3 {
             continue;
         }

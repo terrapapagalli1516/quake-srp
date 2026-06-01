@@ -296,6 +296,13 @@ impl Vm {
         let s = self.ent_get_int(e, name);
         self.get_string(s)
     }
+    /// Borrow entity field `name` as a `&str` (no owned-String allocation). For
+    /// hot paths that only read the value (e.g. parsing a `"*N"` submodel name in
+    /// the per-tick collision loop). Returns `""` for a null/out-of-range string.
+    pub fn ent_string_ref(&self, e: i32, name: &str) -> &str {
+        let s = self.ent_get_int(e, name);
+        string_in(&self.strings, s)
+    }
     /// Intern `value` and store its `string_t` in entity field `name`.
     pub fn ent_set_string(&mut self, e: i32, name: &str, value: &str) {
         let s = self.intern(value);
@@ -944,8 +951,10 @@ impl Vm {
                 }
                 Op::NotS => {
                     // !a->string || !pr_strings[a->string]: empty string_t.
+                    // Borrow the string (string_in returns "" for 0/out-of-range)
+                    // instead of allocating an owned String just to test emptiness.
                     let s_t = self.cell_i(a)?;
-                    let empty = s_t == 0 || self.get_string(s_t).is_empty();
+                    let empty = string_in(&self.strings, s_t).is_empty();
                     self.set_cell_f(c, empty as i32 as f32)?;
                 }
                 Op::NotFnc => {
@@ -969,9 +978,10 @@ impl Vm {
                     self.set_cell_f(c, v)?;
                 }
                 Op::EqS => {
-                    let sa = self.get_string(self.cell_i(a)?);
-                    let sb = self.get_string(self.cell_i(b)?);
-                    self.set_cell_f(c, (sa == sb) as i32 as f32)?;
+                    // Compare borrowed &str (no owned-String allocation per op).
+                    let (ai, bi) = (self.cell_i(a)?, self.cell_i(b)?);
+                    let eq = string_in(&self.strings, ai) == string_in(&self.strings, bi);
+                    self.set_cell_f(c, eq as i32 as f32)?;
                 }
                 Op::EqE => {
                     let v = (self.cell_i(a)? == self.cell_i(b)?) as i32 as f32;
@@ -993,9 +1003,9 @@ impl Vm {
                     self.set_cell_f(c, v)?;
                 }
                 Op::NeS => {
-                    let sa = self.get_string(self.cell_i(a)?);
-                    let sb = self.get_string(self.cell_i(b)?);
-                    self.set_cell_f(c, (sa != sb) as i32 as f32)?;
+                    let (ai, bi) = (self.cell_i(a)?, self.cell_i(b)?);
+                    let ne = string_in(&self.strings, ai) != string_in(&self.strings, bi);
+                    self.set_cell_f(c, ne as i32 as f32)?;
                 }
                 Op::NeE => {
                     let v = (self.cell_i(a)? != self.cell_i(b)?) as i32 as f32;

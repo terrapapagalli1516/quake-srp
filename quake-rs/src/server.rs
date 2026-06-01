@@ -4116,7 +4116,10 @@ impl Server {
         let original_velocity = self.vm.ent_get_vector(ent, "velocity");
         let primal_velocity = original_velocity;
         let mut original = original_velocity;
-        let mut planes: Vec<Vec3> = Vec::with_capacity(5);
+        // Clip planes are capped at 5 (the `>= 5` guard below), so a fixed array
+        // + count avoids a per-call heap Vec — identical plane set, same order.
+        let mut planes: [Vec3; 5] = [[0.0; 3]; 5];
+        let mut nplanes = 0usize;
         let mut time_left = dt;
 
         for _bump in 0..num_bumps {
@@ -4144,7 +4147,7 @@ impl Server {
                 // actually covered some distance
                 self.vm.ent_set_vector(ent, "origin", trace.endpos);
                 original = self.vm.ent_get_vector(ent, "velocity");
-                planes.clear();
+                nplanes = 0;
             }
 
             if trace.fraction == 1.0 {
@@ -4189,21 +4192,22 @@ impl Server {
             time_left -= time_left * trace.fraction;
 
             // clipped to another plane
-            if planes.len() >= 5 {
+            if nplanes >= 5 {
                 // this shouldn't really happen
                 self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
                 return 3;
             }
-            planes.push(trace.plane_normal);
+            planes[nplanes] = trace.plane_normal;
+            nplanes += 1;
 
             // modify original_velocity so it parallels all of the clip planes.
             let mut new_velocity = [0.0f32; 3];
             let mut i = 0usize;
-            while i < planes.len() {
+            while i < nplanes {
                 new_velocity = clip_velocity(original, planes[i], 1.0);
                 let mut ok = true;
                 let mut j = 0usize;
-                while j < planes.len() {
+                while j < nplanes {
                     if j != i && crate::math::dot(new_velocity, planes[j]) < 0.0 {
                         ok = false;
                         break;
@@ -4216,12 +4220,12 @@ impl Server {
                 i += 1;
             }
 
-            if i != planes.len() {
+            if i != nplanes {
                 // go along this plane
                 self.vm.ent_set_vector(ent, "velocity", new_velocity);
             } else {
                 // go along the crease (two planes)
-                if planes.len() != 2 {
+                if nplanes != 2 {
                     self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
                     return 7;
                 }
@@ -4671,9 +4675,10 @@ pub fn sv_move(
 
             let tr = match solid {
                 SOLID_BSP => {
-                    // model "*N" -> submodel index N.
-                    let model = vm.ent_get_string(ei, "model");
-                    let idx = model
+                    // model "*N" -> submodel index N. Borrow the name (no per-clip
+                    // String allocation); the &str borrow ends with this expression.
+                    let idx = vm
+                        .ent_string_ref(ei, "model")
                         .strip_prefix('*')
                         .and_then(|d| d.parse::<usize>().ok());
                     match idx {
