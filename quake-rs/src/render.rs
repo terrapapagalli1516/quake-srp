@@ -2627,8 +2627,11 @@ impl Frustum {
 #[derive(Clone)]
 struct FaceGeom {
     /// Reconstructed world-space polygon (same vertices/order `face_world_poly`
-    /// produces — so downstream projection/texturing is byte-identical).
-    poly: Vec<Vec3>,
+    /// produces — so downstream projection/texturing is byte-identical). Behind an
+    /// `Rc` so the per-frame cache fetch (`face_geom_cached`, twice per face) is an
+    /// O(1) refcount bump, not a deep `Vec` copy — the vertices are immutable once
+    /// built.
+    poly: std::rc::Rc<Vec<Vec3>>,
     /// Outward face normal (`face_normal`), or `None` if the plane was bad.
     normal: Option<Vec3>,
     /// Polygon centroid (the exact same accumulate-then-`*1/n` the loop used).
@@ -3031,7 +3034,7 @@ fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> FaceGeom
         let ok = face_world_poly(bsp, face, &mut poly);
         let geom = if !ok {
             FaceGeom {
-                poly: Vec::new(),
+                poly: std::rc::Rc::new(Vec::new()),
                 normal: None,
                 center: [0.0; 3],
                 mins: [0.0; 3],
@@ -3065,7 +3068,7 @@ fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> FaceGeom
                 }
             }
             FaceGeom {
-                poly,
+                poly: std::rc::Rc::new(poly),
                 normal,
                 center,
                 mins,
@@ -3395,7 +3398,7 @@ fn draw_world_textured(
             continue;
         }
 
-        let world_poly = &geom.poly;
+        let world_poly: &[Vec3] = &geom.poly;
         let normal = match geom.normal {
             Some(n) => n,
             None => continue,
@@ -12592,7 +12595,7 @@ mod tests {
             // (Vertices behind the near plane never draw; the near plane is one of
             // the cull planes, and a face culled by a SIDE plane lies wholly to
             // that side, so every in-front vertex is off-screen on that side.)
-            for v in &geom.poly {
+            for v in geom.poly.iter() {
                 let rel = sub(*v, cam.pos);
                 let vz = dot(rel, forward);
                 if vz <= NEAR_PLANE {
@@ -12623,8 +12626,8 @@ mod tests {
         // literal `poly` used for lightmap math — is the geometry the loop sees).
         let mut direct = Vec::new();
         assert!(face_world_poly(&bsp, &face, &mut direct));
-        assert_eq!(g1.poly, direct);
-        assert_eq!(g2.poly, direct);
+        assert_eq!(*g1.poly, direct);
+        assert_eq!(*g2.poly, direct);
         // Normal + centroid match a direct compute.
         assert_eq!(g1.normal, face_normal(&bsp, &face));
         // AABB encloses every vertex.

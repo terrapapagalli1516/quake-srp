@@ -88,7 +88,13 @@ struct ClipNode {
 /// clip box (the size of the object this hull models, used to offset box
 /// traces into point traces).
 pub struct Hull<'a> {
-    clipnodes: Vec<ClipNode>,
+    /// The synthesized clip-node table (hull 0 from `bsp.nodes`, hulls 1/2 from
+    /// `bsp.clipnodes`). Behind an `Rc` and served from a per-world cache
+    /// ([`HULL_CACHE`]) so the (potentially thousands-of-entry) table is built
+    /// ONCE per loaded map instead of rebuilt on every trace — the sim does
+    /// hundreds of traces per tick. The table is a pure, immutable function of the
+    /// `Bsp`, so sharing it is byte-identical.
+    clipnodes: std::rc::Rc<Vec<ClipNode>>,
     planes: &'a [DPlane],
     headnode: i32,
     clip_mins: Vec3,
@@ -125,6 +131,77 @@ impl<'a> Hull<'a> {
             dot(plane.normal, p) - plane.dist
         }
     }
+}
+
+/// A cheap identity for a loaded world's collision tables: the `&Bsp` address
+/// plus the lengths of the lumps the hull node tables derive from. A changelevel
+/// reparses the BSP (fresh address + lengths), so a mismatch reliably means the
+/// cached tables are stale and must be rebuilt — the same scheme the renderer's
+/// face caches use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HullFingerprint {
+    ptr: usize,
+    nodes_len: usize,
+    clipnodes_len: usize,
+    leafs_len: usize,
+    planes_len: usize,
+}
+
+impl HullFingerprint {
+    fn of(bsp: &Bsp) -> HullFingerprint {
+        HullFingerprint {
+            ptr: bsp as *const Bsp as usize,
+            nodes_len: bsp.nodes.len(),
+            clipnodes_len: bsp.clipnodes.len(),
+            leafs_len: bsp.leafs.len(),
+            planes_len: bsp.planes.len(),
+        }
+    }
+}
+
+/// The cached clip-node tables for one loaded world: hull 0 (synthesized from
+/// `bsp.nodes`) and the brush hull (from `bsp.clipnodes`, shared by hulls 1/2 and
+/// every SOLID_BSP submodel — only the head node differs per trace).
+struct HullTables {
+    fp: HullFingerprint,
+    hull0: std::rc::Rc<Vec<ClipNode>>,
+    brush: std::rc::Rc<Vec<ClipNode>>,
+}
+
+thread_local! {
+    /// Per-world cached clip-node tables, rebuilt only on a world change
+    /// (changelevel). Without this, every trace rebuilt the full (thousands of
+    /// entries) table from scratch — and the sim does hundreds of traces per tick.
+    static HULL_CACHE: std::cell::RefCell<Option<HullTables>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Get the cached `Rc` to the clip-node table for size class `which` (0 = hull-0
+/// world nodes; 1/2 = brush clipnodes), building + caching BOTH tables on the
+/// first call after a world change. The tables are pure, deterministic functions
+/// of `bsp`, so the shared `Rc` is byte-identical to a fresh per-call build.
+fn cached_clipnodes(bsp: &Bsp, which: usize) -> std::rc::Rc<Vec<ClipNode>> {
+    HULL_CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        let fp = HullFingerprint::of(bsp);
+        let stale = match slot.as_ref() {
+            Some(t) => t.fp != fp,
+            None => true,
+        };
+        if stale {
+            *slot = Some(HullTables {
+                fp,
+                hull0: std::rc::Rc::new(build_hull0_clipnodes(bsp)),
+                brush: std::rc::Rc::new(build_brush_clipnodes(bsp)),
+            });
+        }
+        let t = slot.as_ref().expect("just initialised");
+        if which == 0 {
+            t.hull0.clone()
+        } else {
+            t.brush.clone()
+        }
+    })
 }
 
 /// Build one of the three world hulls (`which` in `0..=2`; any other value is
@@ -174,11 +251,9 @@ fn build_hull_for_model<'a>(bsp: &'a Bsp, which: usize, headnode: i32) -> Hull<'
         _ => ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
     };
 
-    let clipnodes = if which == 0 {
-        build_hull0_clipnodes(bsp)
-    } else {
-        build_brush_clipnodes(bsp)
-    };
+    // The (large) node table is cached per-world and shared by every trace; this
+    // is an O(1) refcount bump after the first build, not a full rebuild.
+    let clipnodes = cached_clipnodes(bsp, which);
 
     Hull {
         clipnodes,
@@ -1013,10 +1088,10 @@ mod tests {
     /// by the caller (so the borrow outlives the hull).
     fn one_plane_hull(planes: &[DPlane]) -> Hull<'_> {
         Hull {
-            clipnodes: vec![ClipNode {
+            clipnodes: std::rc::Rc::new(vec![ClipNode {
                 planenum: 0,
                 children: [CONTENTS_EMPTY, CONTENTS_SOLID],
-            }],
+            }]),
             planes,
             headnode: 0,
             clip_mins: [0.0, 0.0, 0.0],
@@ -1134,10 +1209,10 @@ mod tests {
         let planes = x_plane(0.0);
         // Clipnode 0 points at a non-existent node index 5 on its front side.
         let hull = Hull {
-            clipnodes: vec![ClipNode {
+            clipnodes: std::rc::Rc::new(vec![ClipNode {
                 planenum: 0,
                 children: [5, CONTENTS_SOLID],
-            }],
+            }]),
             planes: &planes,
             headnode: 0,
             clip_mins: [0.0, 0.0, 0.0],
