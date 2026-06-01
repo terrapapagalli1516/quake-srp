@@ -1355,7 +1355,7 @@ mod tests {
         let mut sys = ParticleSystem::new();
         let mut rng = Lcg::new(9);
         let mut tc = 0u32;
-        sys.spawn_rocket_trail([0.0; 3], [5.0, 0.0, 0.0], 0 + 128, &mut tc, 0.0, &mut rng);
+        sys.spawn_rocket_trail([0.0; 3], [5.0, 0.0, 0.0], 128, &mut tc, 0.0, &mut rng);
         assert_eq!(sys.len(), 5, "5-unit trail / 1-unit step = 5 particles");
         for p in sys.particles() {
             assert_eq!(p.kind, ParticleKind::Fire, "0+128 is still a type-0 fire trail");

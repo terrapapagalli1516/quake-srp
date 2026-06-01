@@ -206,6 +206,10 @@ pub fn apply_blend(image: &mut Image, color: [u8; 3], alpha: f32) {
 /// cross-coupled warp). Operates on a snapshot of the frame; `clock` drives the
 /// phase. Applied to the 3-D frame BEFORE the content tint (V_SetContentsColor),
 /// so wobble and tint compose exactly as in stock software Quake.
+// The `3.14159` below is id's truncated literal (see the in-body comment): using
+// `std::f64::consts::PI` would shift the table by one index and break the warp's
+// byte-identity, so the clippy::approx_constant lint is deliberately allowed here.
+#[allow(clippy::approx_constant)]
 pub fn apply_warp(image: &mut Image, clock: f32) {
     const AMP2: i32 = 3;
     const SPEED: f64 = 20.0;
@@ -3255,7 +3259,6 @@ fn face_lightmap_world_cached<'a>(
 /// skipped. Maps with no visibility lump (e.g. [`demo_room`]) get the full draw,
 /// so existing behaviour is unchanged there.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn draw_world_textured(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -4893,7 +4896,6 @@ pub fn render_scene(
 /// brightness` multiply byte-for-byte, so [`render_scene`] and every existing
 /// caller/test are unchanged. A colormap shorter than `64*256` bytes is ignored
 /// (treated as `None`) rather than read out of bounds.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext(
     bsp: &Bsp,
