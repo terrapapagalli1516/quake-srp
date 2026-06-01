@@ -85,16 +85,39 @@ The 2× target is **beaten** (3.2× @1080p, much more at low res). The frame is 
 **per-pixel bound** — the remaining ~23.6 ms @1080p world is real shading work (2.5M px ×
 texel-read + lightmap + palette/colormap + z-test), and overdraw is ~1.0× (culling optimal).
 
+### ⭐ Clone/alloc hunt (byte-identical wins) — the SIM nearly DOUBLED
+
+An adversarial per-frame/per-tick clone+alloc hunt (15 confirmed findings) landed the
+following byte-identical removals (render goldens unchanged; sim VM-stmt/trace/think counts
+IDENTICAL run-to-run, proving behaviour is unchanged):
+
+| sim ms/frame | before | after |
+|--------------|--------|-------|
+| e1m1 | 1.42 | **0.82** (1.7×) |
+| e1m3 | 5.00 | **2.44** (2.05×) |
+| start | 0.44 | **0.29** |
+
+- **🔥 `build_hull` rebuilt the ENTIRE clip-node table on every trace** (`world.rs`) — thousands
+  of entries, hundreds of times per tick. Now cached per-world (`HULL_CACHE`, fingerprint-keyed
+  like the render caches); `Hull.clipnodes` is an `Rc<Vec<ClipNode>>`. This is the bulk of the
+  sim win. (`commit 321eff7`)
+- `FaceGeom.poly` → `Rc<Vec<Vec3>>` (was deep-cloned ~2× per face/frame; ~5% at browser res).
+- `clip_poly_near` writes a reused scratch buffer (no per-face `Vec`); VM `EqS/NeS/NotS` compare
+  borrowed `&str` (no per-op `String`); `sv_move` borrows the `*N` model name; `fly_move` uses a
+  fixed `[Vec3;5]`. (`commit 2216cc2`)
+
+Render @ browser res now: 320×200 **2.81 ms (355 fps)**, 640×400 **5.49 ms (182 fps)**,
+1280×800 (the wasm cap) **15.5 ms (65 fps)**.
+
 ### Next perf ideas (now genuinely optional — diminishing returns)
+- **Remaining LOW clone-hunt findings (deferred, marginal):** lightmap luxel `Vec<f32>` clone on
+  cache hit → `Rc` (only ~0.04 ms — needs a `Luxels` enum variant); `compute_visible_faces`
+  allocates two `Vec<bool>` per frame (cache by view-leaf); `touch_triggers`/`draw_submodel`
+  `local_dlights` scratch Vecs; pre-`with_capacity` the per-frame scratch Vecs. All byte-identical
+  but small.
 - **Inline submodels rebuild their lightmap every frame (no cache)** — `draw_submodel`
-  calls `face_lightmap_dyn` directly (the bench's "180 lightmap rebuilds"). An adversarial
-  review flagged this (low sev): inline submodels share the world `Bsp`, so routing their
-  Normal faces through `face_lightmap_world_cached` (gated by the new `cache_surf` flag, so
-  externals still bypass) would cache them for free. ~1 ms of the 2.1 ms submodel phase.
-  Deferred (small, and the lightmap path is fidelity-sensitive — verify byte-identical).
-- **Sim side is the more interesting lead now.** `simbench` shows **e1m3 at ~5.0 ms/frame
-  / 522 BSP traces per frame** (vs e1m1's 108, e1m2's 26) — a dense-collision map. The
-  `SV_Move` broadphase is the place to look if the sim tick matters.
+  calls `face_lightmap_dyn` directly. Routing inline (cache_surf=true) Normal faces through
+  `face_lightmap_world_cached` would cache them. ~1 ms of the 2.1 ms submodel phase. Deferred.
 - **wasm/native SIMD (`simd128`)** — the per-pixel inner loop (palette/colormap byte reads,
   z-test) could process 4–8 px/instruction for a further ~2× on the *remaining* per-pixel
   cost. Substantial, genuinely-different work; only worth it if 36 fps @1080p isn't enough.
@@ -111,7 +134,8 @@ texel-read + lightmap + palette/colormap + z-test), and overdraw is ~1.0× (cull
   rebakes** — wrap any new per-face work in these to keep the cost honest.
 - **Sim:** `quaketool simbench <pak> <map> [frames]` benchmarks the game-logic tick (no
   rendering): per-frame ms + VM statements + BSP traces + thinks. Deterministic
-  (same counts run-to-run). e1m1 ≈ 1.4 ms/frame; e1m3 ≈ 5.0 ms/frame (522 traces/frame).
+  (same counts run-to-run). After the hull-cache fix: e1m1 ≈ 0.82 ms/frame; e1m3 ≈ 2.44 ms/frame
+  (522 traces/frame — still the dense-collision map, now ~2× faster).
 
 ---
 
