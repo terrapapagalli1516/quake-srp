@@ -2726,10 +2726,11 @@ struct SurfCacheEntry {
     texmins: [f32; 2],
 }
 
-/// One model's lit-surface cache: its [`WorldFingerprint`] identity plus a
-/// per-face slot (rebuilt when an animated style ticks). A set of these — one per
-/// model (world + each external brush model) — is held LRU in [`SURF_CACHE`] so
-/// distinct models never evict each other; see [`face_surf_block`].
+/// The world model's lit-surface cache: its [`WorldFingerprint`] identity plus a
+/// per-face slot (rebuilt when an animated style ticks). Held as a single
+/// [`SURF_CACHE`] slot — only the world `Bsp` is ever cached (external brush
+/// models bypass it), so it self-invalidates on a changelevel via the
+/// fingerprint/`n_faces` check; see [`face_surf_block`].
 struct SurfCache {
     fingerprint: WorldFingerprint,
     entries: Vec<Option<SurfCacheEntry>>,
@@ -2740,9 +2741,10 @@ thread_local! {
     static GEOM_CACHE: std::cell::RefCell<Option<GeomCache>> = const { std::cell::RefCell::new(None) };
     /// Per-thread lightmap surface cache.
     static LIGHT_CACHE: std::cell::RefCell<Option<LightCache>> = const { std::cell::RefCell::new(None) };
-    /// Per-thread lit-surface (texel) caches — one per model (world + each
-    /// external brush model), most-recently-used first. See [`face_surf_block`].
-    static SURF_CACHE: std::cell::RefCell<Vec<SurfCache>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Per-thread lit-surface (texel) cache for the world model (+ its inline
+    /// submodels, which share the world `Bsp`). External brush models bypass it
+    /// (they re-clone their `Bsp` every frame). See [`face_surf_block`].
+    static SURF_CACHE: std::cell::RefCell<Option<SurfCache>> = const { std::cell::RefCell::new(None) };
     /// Granular render profiler (opt-in; see [`RenderStats`]). Off by default so the
     /// shared render path pays nothing in the live game / wasm.
     static RENDER_STATS: std::cell::RefCell<RenderStats> =
@@ -2797,20 +2799,27 @@ pub struct RenderStats {
     /// World-pass sub-phase timers (ns), for finding the FIXED per-face cost that
     /// dominates the frame independent of resolution. Only populated while
     /// profiling. `world_pvs_ns` is the once-per-frame PVS+frustum build; the rest
-    /// accumulate across the per-face loop.
+    /// accumulate across the per-face loop. `world_setup_ns` is the loop-body
+    /// remainder (geom fetch + culls + projection + the per-pixel raster, since
+    /// raster is not separately metered) and so also absorbs the `Instant` overhead
+    /// of the nested light/surf timers — read it as "everything that isn't lightmap
+    /// or surf-block lookup", not a precise figure.
     pub world_pvs_ns: u64,
     pub world_sort_ns: u64,
     pub world_setup_ns: u64,
     pub world_light_ns: u64,
     pub world_surf_ns: u64,
-    pub world_raster_ns: u64,
-    /// Lit-surface-cache true cache hits vs full block rebakes inside
-    /// `face_surf_block` (distinct from `surf_hits`, which only counts
-    /// "returned a block"). A warm frame should be ~all cache hits; a high
-    /// `surf_baked` means the cache key is mismatching and the block is being
-    /// re-baked every frame (the dominant fixed per-face cost).
+    /// Lit-surface-cache accounting inside `face_surf_block` (distinct from
+    /// `surf_hits`, which only counts "returned a block"):
+    ///  * `surf_cache_hits` — served from the world cache (the warm-frame norm).
+    ///  * `surf_baked` — CACHED-path misses that re-baked a block. On a warm frame
+    ///    this should be ~0; a high value means the world cache is mismatching/being
+    ///    evicted (the dominant fixed per-face cost — a bug).
+    ///  * `surf_bypass_baked` — external brush models, which intentionally bypass
+    ///    the cache and bake fresh each frame (cheap; one per visible item-box face).
     pub surf_cache_hits: u64,
     pub surf_baked: u64,
+    pub surf_bypass_baked: u64,
 }
 
 impl RenderStats {
@@ -2822,8 +2831,8 @@ impl RenderStats {
         sub_faces_visited: 0, sub_faces_drawn: 0, sub_surf_hits: 0, sub_surf_misses: 0,
         sub_tris: 0, sub_lm_builds: 0,
         world_pvs_ns: 0, world_sort_ns: 0, world_setup_ns: 0, world_light_ns: 0,
-        world_surf_ns: 0, world_raster_ns: 0,
-        surf_cache_hits: 0, surf_baked: 0,
+        world_surf_ns: 0,
+        surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0,
     };
 }
 
@@ -2860,12 +2869,6 @@ fn stat(f: impl FnOnce(&mut RenderStats)) {
 /// multi-MB block; virtually every real id1 face is far smaller.
 const SURF_BLOCK_MAX: usize = 1 << 20;
 
-/// Maximum number of distinct per-model surface caches kept resident (LRU). A
-/// level uses one for the world model plus one per external brush-model type
-/// (~12 b_*.bsp item boxes), so this comfortably holds a full level while
-/// bounding memory across changelevels (a stale world cache ages out the back).
-const SURF_CACHE_MAX_MODELS: usize = 24;
-
 /// Build (and cache) a world face's lit+colormapped surface block (mip 0). Returns
 /// the `Rc` handle + dimensions + surface origin, or `None` (caller keeps the
 /// per-pixel path) when there is no usable colormap, the face is dynamically lit
@@ -2887,6 +2890,7 @@ fn face_surf_block(
     n_faces: usize,
     light_styles: &[f32; LIGHTSTYLES],
     dlit: bool,
+    cache_surf: bool,
 ) -> Option<(std::rc::Rc<Vec<u8>>, usize, usize, [f32; 2])> {
     if dlit || colormap.len() < COLORMAP_LEN {
         return None;
@@ -2916,56 +2920,12 @@ fn face_surf_block(
         n_styles += 1;
     }
 
-    SURF_CACHE.with(|c| {
-        let mut caches = c.borrow_mut();
-        // PER-MODEL surface cache. The world model and each external brush-model
-        // bsp (the b_*.bsp ammo/health/explosive boxes) have DISTINCT fingerprints
-        // AND face counts, so a single shared slot was reset on every pass — every
-        // external box wiped the 5000-entry world cache, and the next frame's world
-        // pass wiped it back, forcing a full re-bake of every face every frame (the
-        // dominant fixed per-frame cost). Keying a small set of caches by
-        // fingerprint lets each model keep its own resident cache. Bounded LRU
-        // (move-to-front on use; evict from the back) reclaims a changelevel's stale
-        // world cache — faithful to Quake's fixed-size surface-cache pool.
-        let pos = caches
-            .iter()
-            .position(|sc| sc.fingerprint == fp && sc.entries.len() == n_faces);
-        match pos {
-            Some(0) => {}
-            Some(p) => {
-                let sc = caches.remove(p);
-                caches.insert(0, sc);
-            }
-            None => {
-                if caches.len() >= SURF_CACHE_MAX_MODELS {
-                    caches.pop();
-                }
-                caches.insert(
-                    0,
-                    SurfCache {
-                        fingerprint: fp,
-                        entries: vec![None; n_faces],
-                    },
-                );
-            }
-        }
-        let sc = &mut caches[0];
-        // HIT: same face, same resolved style scales -> reuse the baked block.
-        if let Some(e) = sc.entries.get(idx).and_then(|e| e.as_ref()) {
-            if e.n_styles == n_styles
-                && e.bw == bw
-                && e.bh == bh
-                && e.style_scales[..n_styles] == scales[..n_styles]
-            {
-                stat(|s| s.surf_cache_hits += 1);
-                return Some((e.block.clone(), e.bw, e.bh, e.texmins));
-            }
-        }
-        stat(|s| s.surf_baked += 1);
-        // MISS: bake the block once. For each surface texel (i,j): take the tiled
-        // base texel, shade by the lightmap factor at the texel centre, pick the
-        // colormap row, and store the final palette index.
-        let texmins = lm.texmins;
+    // The deterministic bake: for each surface texel (i,j) take the tiled base
+    // texel, shade it by the lightmap factor at the texel centre, pick the colormap
+    // row, and store the final palette index. Identical inputs -> identical bytes,
+    // so a cached block is bit-for-bit equal to a fresh one.
+    let texmins = lm.texmins;
+    let bake = || -> std::rc::Rc<Vec<u8>> {
         let (tmi0, tmi1) = (texmins[0] as i64, texmins[1] as i64);
         let mut block = vec![0u8; total];
         for j in 0..bh {
@@ -2979,7 +2939,53 @@ fn face_surf_block(
                 block[j * bw + i] = colormap[row * 256 + texel];
             }
         }
-        let block = std::rc::Rc::new(block);
+        std::rc::Rc::new(block)
+    };
+
+    // EXTERNAL brush models (the b_*.bsp ammo/health/explosive boxes) bypass the
+    // cache. The game clones each item's `Bsp` per visible instance every frame, so
+    // its `WorldFingerprint` (keyed on the `&Bsp` pointer) is different every frame
+    // and every instance — it could never produce a cache hit, and routing it
+    // through the shared slot would only evict the world's resident cache (the bug
+    // this guard prevents). They are tiny (a 6-face box) so an unconditional bake is
+    // cheap; bake fresh and return without touching SURF_CACHE.
+    if !cache_surf {
+        stat(|s| s.surf_bypass_baked += 1);
+        return Some((bake(), bw, bh, texmins));
+    }
+
+    // CACHED path — the world model and its inline submodels (doors/plats/buttons)
+    // all share the one world `Bsp`, so exactly one fingerprint is ever cached at a
+    // time. A single slot therefore suffices: it self-invalidates on a changelevel
+    // (the new world's `fp` / `n_faces` differ) and holds at most one world's worth
+    // of baked blocks, so memory never accumulates across levels.
+    SURF_CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        let needs_reset = match slot.as_ref() {
+            Some(sc) => sc.fingerprint != fp || sc.entries.len() != n_faces,
+            None => true,
+        };
+        if needs_reset {
+            *slot = Some(SurfCache {
+                fingerprint: fp,
+                entries: vec![None; n_faces],
+            });
+        }
+        let sc = slot.as_mut().expect("just initialised");
+        // HIT: same face, same resolved style scales -> reuse the baked block.
+        if let Some(e) = sc.entries.get(idx).and_then(|e| e.as_ref()) {
+            if e.n_styles == n_styles
+                && e.bw == bw
+                && e.bh == bh
+                && e.style_scales[..n_styles] == scales[..n_styles]
+            {
+                stat(|s| s.surf_cache_hits += 1);
+                return Some((e.block.clone(), e.bw, e.bh, e.texmins));
+            }
+        }
+        // MISS: bake once and store.
+        stat(|s| s.surf_baked += 1);
+        let block = bake();
         if let Some(e) = sc.entries.get_mut(idx) {
             *e = Some(SurfCacheEntry {
                 style_scales: scales,
@@ -3287,10 +3293,6 @@ fn draw_world_textured(
     let mut t_sort: u64 = 0;
     let mut t_light: u64 = 0;
     let mut t_surf: u64 = 0;
-    // Raster time is not separately metered; it folds into `setup` (the loop-body
-    // remainder). At low res it is ~0; the high-vs-low-res world_ns delta is the
-    // true per-pixel cost. Kept as a named 0 so the flush reads uniformly.
-    let t_raster: u64 = 0;
     let _t_pvs = prof.then(std::time::Instant::now);
 
     // PVS culling: a per-face visibility mask for the camera's leaf, or `None`
@@ -3501,8 +3503,9 @@ fn draw_world_textured(
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
                             let dlit = any_dlight_reaches(bsp, face, dlights);
+                            // World model: cacheable (stable `Bsp` across frames).
                             face_surf_block(
-                                face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit,
+                                face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit, true,
                             )
                         }
                         _ => None,
@@ -3585,14 +3588,13 @@ fn draw_world_textured(
     // texinfo/classify, near-clip + projection, and — at high res — the raster).
     if prof {
         let body = _t_body.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
-        let t_setup = body.saturating_sub(t_light).saturating_sub(t_surf).saturating_sub(t_raster);
+        let t_setup = body.saturating_sub(t_light).saturating_sub(t_surf);
         stat(|s| {
             s.world_pvs_ns += t_pvs;
             s.world_sort_ns += t_sort;
             s.world_setup_ns += t_setup;
             s.world_light_ns += t_light;
             s.world_surf_ns += t_surf;
-            s.world_raster_ns += t_raster;
         });
     }
 }
@@ -3644,6 +3646,12 @@ fn draw_submodel(
     dlights: &[crate::dlight::DynamicLight],
     colormap: Option<&[u8]>,
     ent_frame: i32,
+    // Whether this submodel's `bsp` is the stable world `Bsp` (inline submodels —
+    // doors/plats/buttons — share it, so their baked surface blocks are worth
+    // caching) or an ephemeral per-instance clone (external b_*.bsp item boxes,
+    // which re-clone every frame and must bypass the surface cache; see
+    // [`face_surf_block`]).
+    cache_surf: bool,
 ) {
     // The near plane lives in `clip_poly_near` (`NEAR_PLANE`); this pass clips the
     // polygon to it rather than dropping any face that touches it.
@@ -3856,7 +3864,10 @@ fn draw_submodel(
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
                             let dlit = any_dlight_reaches(bsp, face, &local_dlights);
-                            face_surf_block(face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit)
+                            face_surf_block(
+                                face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit,
+                                cache_surf,
+                            )
                         }
                         _ => None,
                     }
@@ -4480,7 +4491,8 @@ pub fn draw_brush_bsp(
         // Standalone box draw keeps the legacy linear shade (no colormap),
         // byte-identical to before; the colormap is a render_scene_ext concern.
         None,
-        0, // ent_frame: standalone box has no activated/alternate state
+        0,     // ent_frame: standalone box has no activated/alternate state
+        false, // external box bsp -> bypass the surface cache (no colormap anyway)
     );
 }
 
@@ -4944,7 +4956,8 @@ pub fn render_scene_ext_sprited(
     if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
     let ts = stats_on().then(std::time::Instant::now);
     for bm in bmodels {
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame);
+        // Inline submodels share the world `bsp`, so their surface blocks ARE cached.
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame, true);
     }
     if let Some(t) = ts { stat(|s| s.submodel_ns += t.elapsed().as_nanos() as u64); }
     let te = stats_on().then(std::time::Instant::now);
@@ -4958,7 +4971,10 @@ pub fn render_scene_ext_sprited(
     // draws nothing, leaving the image identical to the pre-external behaviour —
     // which is why `render_scene` and every prior caller can pass `&[]`.
     for ext in external {
-        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0);
+        // External item boxes re-clone their bsp per instance every frame, so they
+        // BYPASS the surface cache (cache_surf = false) — caching them would only
+        // evict the world's resident cache. See [`face_surf_block`].
+        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
     }
     if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
     let ta = stats_on().then(std::time::Instant::now);
@@ -12215,7 +12231,7 @@ mod tests {
     fn reset_render_caches() {
         GEOM_CACHE.with(|c| *c.borrow_mut() = None);
         LIGHT_CACHE.with(|c| *c.borrow_mut() = None);
-        SURF_CACHE.with(|c| c.borrow_mut().clear());
+        SURF_CACHE.with(|c| *c.borrow_mut() = None);
     }
 
     #[test]
@@ -12412,79 +12428,105 @@ mod tests {
         assert_eq!(frame1.rgb, frame3.rgb, "returning to the original key reproduces frame1");
     }
 
-    #[test]
-    fn surf_cache_survives_intervening_different_model() {
-        // REGRESSION (performance): the lit-surface cache is keyed PER MODEL.
-        // Rendering a different-fingerprint model (e.g. an external b_*.bsp item
-        // box) between two renders of the world must NOT evict the world's baked
-        // surface blocks. The previous single-slot cache reset on every
-        // fingerprint change, so each external box wiped the whole world cache and
-        // the world re-baked every face every frame (a ~60ms-per-frame fixed cost,
-        // independent of resolution). Here we render A, an intervening DIFFERENT
-        // model B, then A again, and assert A is served entirely from its resident
-        // cache (zero re-bakes).
-        reset_render_caches();
-        // Give every face a plain (non-special) wall texture so the lit-surface
-        // cache (which needs a real miptex + colormap) is actually exercised.
-        let with_walls = |mut bsp: Bsp| -> Bsp {
-            let n_tex = bsp.texinfo.len().max(1);
-            bsp.textures = (0..n_tex)
-                .map(|i| {
-                    Some(crate::bsp::MipTex {
-                        name: format!("wall{i}"),
-                        width: 16,
-                        height: 16,
-                        offsets: [0, 0, 0, 0],
-                        pixels: vec![(i * 7) as u8; 16 * 16],
-                        anim: None,
-                    })
+    /// Give every face a plain (non-special) wall texture so the lit-surface cache
+    /// (which needs a real miptex + colormap) is actually exercised.
+    fn demo_room_with_walls(mut bsp: Bsp) -> Bsp {
+        let n_tex = bsp.texinfo.len().max(1);
+        bsp.textures = (0..n_tex)
+            .map(|i| {
+                Some(crate::bsp::MipTex {
+                    name: format!("wall{i}"),
+                    width: 16,
+                    height: 16,
+                    offsets: [0, 0, 0, 0],
+                    pixels: vec![(i * 7) as u8; 16 * 16],
+                    anim: None,
                 })
-                .collect();
-            bsp
-        };
-        let a = with_walls(lightmapped_demo_room(100, 200));
-        let b = with_walls(lightmapped_demo_room(60, 240)); // different lighting bytes -> different fp
+            })
+            .collect();
+        bsp
+    }
+
+    #[test]
+    fn external_models_bypass_and_dont_evict_world_surf_cache() {
+        // REGRESSION (performance): external brush models (the b_*.bsp item boxes)
+        // re-clone their Bsp every frame, so each has a different WorldFingerprint
+        // every frame and every instance — they can NEVER hit the surface cache.
+        // They must therefore BYPASS it: routing them through the shared world slot
+        // would evict the world's resident cache and reintroduce the ~60ms/frame
+        // re-bake-everything cost. Here we warm the world cache, then render a frame
+        // containing MANY (26 > the old broken 24-slot LRU) distinct external models,
+        // and assert (a) the externals baked (went through the bypass, not the cache)
+        // and (b) the world cache is completely untouched afterwards.
+        reset_render_caches();
+        let world = demo_room_with_walls(lightmapped_demo_room(100, 200));
+        // 26 distinct external "boxes" (each a separate Bsp -> distinct fingerprint),
+        // standing at the world origin so their inward walls are in view and drawn.
+        let ext_bsps: Vec<Bsp> = (0..26)
+            .map(|k| demo_room_with_walls(lightmapped_demo_room(40 + k as u8, 220)))
+            .collect();
+        let externals: Vec<ExternalBModel> =
+            ext_bsps.iter().map(|b| ExternalBModel { bsp: b, origin: [0.0, 0.0, 0.0] }).collect();
+
         let pal = [[180u8, 150, 90]; 256];
         let colormap = vec![0u8; COLORMAP_LEN]; // present -> the surf-cache path is active
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[1] = 0.5;
-        let render = |bsp: &Bsp| {
+        let render = |ext: &[ExternalBModel]| {
             render_scene_ext(
-                bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &styles,
+                &world, &cam, 160, 120, &pal, &[], &[], ext, None, 0.0, &[], &[], &styles,
                 Some(&colormap),
             )
         };
 
-        let _ = render(&a); // bake A's surface blocks into A's cache
+        let _ = render(&[]); // bake the world's surface blocks into the cache
 
-        // Sanity: this scene actually exercises the surf cache (else the test below
-        // would pass vacuously).
+        // Sanity: the world scene hits its warm cache (else the asserts below are vacuous).
         render_stats_begin();
-        let _ = render(&a);
+        let _ = render(&[]);
         let warm = render_stats_end();
         assert!(
             warm.surf_cache_hits > 0 && warm.surf_baked == 0,
-            "scene must hit the warm surf cache (got {} hits, {} bakes)",
-            warm.surf_cache_hits,
-            warm.surf_baked
+            "world scene must hit the warm surf cache (got {} hits, {} bakes)",
+            warm.surf_cache_hits, warm.surf_baked
         );
+        let world_hits = warm.surf_cache_hits;
 
-        let _ = render(&b); // intervening DIFFERENT model — must not evict A's cache
-
+        // A frame with 26 distinct external models: the world still fully hits, and
+        // the externals BAKE (proving they took the bypass path, not the cache).
         render_stats_begin();
-        let _ = render(&a); // A again
-        let st = render_stats_end();
+        let _ = render(&externals);
+        let with_ext = render_stats_end();
         assert_eq!(
-            st.surf_baked, 0,
-            "world A re-baked {} faces after an intervening different model — its \
-             per-model surf cache was evicted (the ~60ms/frame regression)",
-            st.surf_baked
+            with_ext.surf_cache_hits, world_hits,
+            "the world's faces must all still hit while externals draw (got {} vs {})",
+            with_ext.surf_cache_hits, world_hits
+        );
+        assert_eq!(
+            with_ext.surf_baked, 0,
+            "the world must NOT re-bake while externals draw — got {} cached-path bakes",
+            with_ext.surf_baked
         );
         assert!(
-            st.surf_cache_hits > 0,
-            "A's faces should be served from its resident per-model cache"
+            with_ext.surf_bypass_baked > 0,
+            "external models must bake via the bypass path — got {} bypass bakes",
+            with_ext.surf_bypass_baked
         );
+
+        // THE GUARD: after that external-laden frame, the world cache is untouched —
+        // a subsequent world-only frame still hits everything, zero re-bakes. (With
+        // the old shared/LRU cache the externals would have evicted it -> re-bakes.)
+        render_stats_begin();
+        let _ = render(&[]);
+        let after = render_stats_end();
+        assert_eq!(
+            after.surf_baked, 0,
+            "world cache was polluted/evicted by external models — {} faces re-baked \
+             (the ~60ms/frame regression)",
+            after.surf_baked
+        );
+        assert_eq!(after.surf_cache_hits, world_hits, "world cache must be fully intact");
     }
 
     #[test]

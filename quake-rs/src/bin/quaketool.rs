@@ -1844,8 +1844,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         );
         let _ = writeln!(
             o,
-            "  surf cache: {} true-hits, {} REBAKES (warm frame should be ~all hits)",
-            st.surf_cache_hits, st.surf_baked,
+            "  surf cache: {} true-hits, {} cached-rebakes (warm: should be ~0), {} external-bypass-bakes (expected, cheap)",
+            st.surf_cache_hits, st.surf_baked, st.surf_bypass_baked,
         );
         return Ok(Out::Text(o));
     }

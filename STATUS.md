@@ -1,104 +1,117 @@
 # Quake-RS — working status / hand-off
 
-Last updated end of the 2026-05-31 session. This file is the honest "where things
-stand" note — read it before continuing, especially the **Caveats** and **WIP**.
+Last updated 2026-05-31 (late session). This file is the honest "where things
+stand" note — read it before continuing.
 
 ---
 
 ## TL;DR
 
-- The shareware episode (E1) is playable in the browser; 400 lib tests + 25 wasm tests pass.
-- This session: **6 codebase-wide code-review rounds** (committed), **4 user-reported
-  playtest bugs fixed**, a **sim-perf ~25× fix**, and a **render-perf pass** that took
-  e1m1 @1080p from ~49.5 ms → ~33 ms/frame (**~1.5×** — see the perf note, this is
-  **short of the 2× target**).
-- The deployed `web/quake_wasm.wasm` is current as of the last commit.
+- The shareware episode (E1) is playable in the browser; **401 lib + 25 wasm tests pass**.
+- **⭐ THE render bottleneck is FOUND AND FIXED.** The prior session's "fixed ~60 ms
+  per-face cost, NOT per-pixel" lead was exactly right. Root cause: the lit-surface
+  cache was a single thread-local slot **shared between the world pass and the external
+  brush-model pass** (each `b_*.bsp` item box is a distinct `Bsp` with its own
+  fingerprint + face count), so every external box reset the 5000-entry world cache and
+  the world **re-baked every face every frame**. Fixed by making external models
+  **bypass** the surface cache (they re-clone their `Bsp` every frame, so they could never
+  hit it) and keeping a **single world-model slot** for the world + its inline submodels
+  (commit `30c6866` + adversarial-review follow-up). Result on an **idle** host, e1m1:
+
+  | res | before | after | speedup |
+  |-----|--------|-------|---------|
+  | 64×48 | 65.3 ms | **1.14 ms** | 57× |
+  | 320×200 | 65.2 ms | **2.28 ms** | 29× |
+  | 640×400 | ~68 ms | **4.97 ms** | ~14× |
+  | 1920×1080 | 89.5 ms (11 fps) | **27.97 ms (36 fps)** | **3.2×** |
+
+  **Byte-identical** output (e1m1/e1m2/e1m3 golden sha256 unchanged at
+  `fb14bd65`/`a6f98d8a`/`0211e6d4`). The frame now scales with resolution (per-pixel
+  bound) as a software renderer should. A regression test
+  (`external_models_bypass_and_dont_evict_world_surf_cache`, which renders 26 distinct
+  external models — past where the first-attempt LRU broke) guards it.
+- **New benchmarks** cover both halves of the engine: the render `QUAKE_BENCH` harness
+  gained world-pass **sub-phase timers** (pvs/sort/setup/lightmap/surf + cache hit/rebake
+  counters — these localised the bug), and a new **`quaketool simbench`** measures the
+  **game-logic** tick (physics/VM/AI/collision) with VM-statement + BSP-trace counts
+  (commit `0591b70`).
+- The deployed `web/quake_wasm.wasm` is **rebuilt + current** (headless-verified booting
+  e1m1, no errors).
 
 ---
 
-## ⭐ PERFORMANCE — THE KEY LEAD FOR NEXT SESSION (read this first)
+## ⭐ PERFORMANCE — render bottleneck RESOLVED (was the "key lead")
 
-Late in the session, a resolution-sweep revealed the real bottleneck — **and it is NOT
-the per-pixel loop I spent the session optimizing, and NOT machine throttling.**
+The prior session's lead was correct: **a FIXED per-face cost independent of resolution**
+dominated the frame. With the host **idle** (load 0.4/16 — the prior session's "throttling"
+was likely partly this same fixed cost making all resolutions look uniformly slow), a
+resolution sweep + new world-pass **sub-phase timers** pinned it exactly:
 
-Measured (same machine, back-to-back):
+```
+e1m1 @ 64×48, BEFORE:  world 61.1 ms  (surf phase 59.4 ms!)  — 0 cache true-hits, 942 REBAKES/frame
+e1m1 @ 64×48, AFTER:   world  0.76 ms (surf phase  0.03 ms)  — 942 true-hits, 0 rebakes
+```
 
-| resolution | pixels | frame ms | world ms | world pixels drawn |
-|-----------|--------|----------|----------|--------------------|
-| 64×48     | 3,072  | **65.2** | 59.6     | 3,843              |
-| 320×200   | 64k    | 65.0     | —        | —                  |
-| 640×400   | 256k   | 68.4     | —        | —                  |
-| 1920×1080 | 2.07M  | 89.7     | 82.8     | 2.07M              |
+**Root cause:** `face_surf_block`'s `SURF_CACHE` was a single thread-local slot keyed by
+one `WorldFingerprint`. It is shared by the world pass **and** the external brush-model
+pass — and every external `b_*.bsp` item box is a *separate* `Bsp` (distinct pointer
+**and** `faces.len()=6` vs the world's `5516`). So each box `needs_reset` wiped the whole
+world cache to a 6-entry one, the next frame's world pass wiped it back, and **every world
+face re-baked its texture×lightmap×colormap block every frame** — the entire ~60 ms.
+(The geom + lightmap caches were spared only because the world pass alone touches them.)
 
-**At 64×48 the world pass burns ~60 ms to shade ~3.8k pixels.** Pixel count barely
-moves the frame time (3k px and 2M px are both ~60–83 ms world). So the dominant cost
-is a **FIXED PER-FRAME / PER-FACE cost, independent of resolution** — the per-pixel
-rasteriser (what I optimized: front-to-back, linear-step, surface cache, per-row
-slices) was largely the WRONG target for the headline number.
+**Fix (`30c6866` + review follow-up):** A first attempt keyed a small per-model LRU set by
+fingerprint; an adversarial review then found that the game **re-clones each external item
+box's `Bsp` every frame**, so externals get a fresh fingerprint every frame and instance —
+they can *never* hit the cache and, 24+ at once, would still evict the world cache (the
+regression returns). The shipped fix: external models **bypass** the surface cache (bake
+fresh each frame — a 6-face box is ~free), and the world + its inline submodels (which
+share the one world `Bsp`) use a **single slot** that self-invalidates on a changelevel.
+So exactly one model is ever cached and it can never be evicted. Byte-identical (goldens
+unchanged). Regression test: `external_models_bypass_and_dont_evict_world_surf_cache`. The
+bench's surf line now splits `cached-rebakes` (should be ~0 warm) from `external-bypass-bakes`
+(expected, one per visible item-box face).
 
-**Prime suspects (per-face, ×5059 faces every frame, in `draw_world_textured`):**
-- `WorldFingerprint::of(bsp)` and/or the surface-cache / lightmap-cache / geom-cache
-  **HashMap lookups run per face per frame** — likely hashing something large
-  (whole-bsp fingerprint?) on every call. Check `face_surf_block` /
-  `face_lightmap_world_cached` / `face_geom_cached` and `WorldFingerprint::of`.
-- The front-to-back **sort allocates + sorts 5059 entries every frame**.
-- `any_dlight_reaches` / per-face poly rebuilds.
+## Performance — current scorecard (idle host, e1m1)
 
-**Why this is the 2× (and probably more):** ~60 ms of resolution-independent work vs
-~25 ms of genuine pixel work means cutting the per-frame overhead could roughly halve
-the frame at any resolution. And crucially it is **measurable even under heavy
-load** because it dominates. START HERE next session: profile WHERE the ~60 ms goes
-inside the world pass (wrap `WorldFingerprint::of`, the cache lookups, and the sort in
-their own `RenderStats` timers), then attack the biggest. This likely beats SIMD and
-is far less risky.
+| res | before | after | speedup | phase split (after) |
+|-----|--------|-------|---------|---------------------|
+| 64×48 | 65.3 ms | **1.14 ms** | 57× | world 0.76 (sort .15, setup .46, surf .03) |
+| 320×200 | 65.2 ms | **2.28 ms** | 29× | world 1.65 |
+| 640×400 | ~68 ms | **4.97 ms** | ~14× | world 3.90 |
+| 1920×1080 | 89.5 ms (11 fps) | **27.97 ms (36 fps)** | **3.2×** | world 23.6, submodel 2.1, alias 1.8 |
 
-> NB: this also explains the session's confusing "throttling" — the CPU may NOT
-> have been throttled at all; the fixed per-frame cost just makes every resolution look
-> uniformly slow, which mimics load. Re-evaluate the "host throttled" claims below with
-> that in mind.
+The 2× target is **beaten** (3.2× @1080p, much more at low res). The frame is now genuinely
+**per-pixel bound** — the remaining ~23.6 ms @1080p world is real shading work (2.5M px ×
+texel-read + lightmap + palette/colormap + z-test), and overdraw is ~1.0× (culling optimal).
 
----
-
-## Performance — current state & honest scorecard
-
-Warm-frame render cost @1920×1080, measured on an IDLE machine earlier this session
-(absolute ms is unreliable under load — see Caveat 3 — so these are the idle readings;
-the *relative* steps are the trustworthy part):
-
-| stage | e1m1 @1080p | note |
-|-------|-------------|------|
-| start of this perf goal (surface-cache era) | ~49.5 ms | baseline |
-| + front-to-back ordering (`fb4725d`) | ~39.8 ms | byte-identical (0 px) |
-| + linear-step perspective (`ae3ba68`) | ~38.0 ms | +57 px sub-pixel drift |
-| + submodel surface cache (`d2fc0d6`) | ~35 ms | byte-identical (0 px) |
-| + per-row buffer slices (`00da175`) | ~34 ms | byte-identical; ~2% (within noise) |
-
-So **~1.45× this session**, ~3.9× vs the original per-pixel rasteriser. **The 2× goal
-(≤24.75 ms) was NOT reached, and scalar micro-opts have run out** — the per-row slice
-A/B'd at only ~2% (LLVM was already hoisting the bounds checks). Phase split: world
-dominates (~25 ms), submodel ~8 ms, alias ~1.8 ms. The world pass is ~25 ms of
-IRREDUCIBLE scalar per-pixel work (2M px × texel-read + palette-lookup + z-test);
-overdraw is already ~1.0× after front-to-back, so culling is optimal.
-
-**The only remaining path to 2× is SIMD** (process 4–8 px/instruction — see below). It
-is a substantial, genuinely-different implementation AND it cannot be measured honestly
-until the host is idle (this session the CPU was throttled ~3× the whole time, so
-absolute ms and small deltas were untrustworthy). That's the right next-session task.
-
-### Next perf ideas (not yet done)
-- **wasm SIMD (`simd128`)** — confirmed available in this toolchain
-  (`rustc --print target-features --target wasm32-unknown-unknown` lists `simd128`).
-  No `.cargo/config.toml` exists yet; the rasteriser inner loop (palette/colormap byte
-  reads, the z-test) is a candidate. Untried.
-- **16-pixel affine spans** — Quake's actual `D_DrawSpans` does the perspective divide
-  every 16 px and lerps between; would cut the per-pixel `1/z` but introduces sub-pixel
-  drift (a fidelity trade like linear-step).
+### Next perf ideas (now genuinely optional — diminishing returns)
+- **Inline submodels rebuild their lightmap every frame (no cache)** — `draw_submodel`
+  calls `face_lightmap_dyn` directly (the bench's "180 lightmap rebuilds"). An adversarial
+  review flagged this (low sev): inline submodels share the world `Bsp`, so routing their
+  Normal faces through `face_lightmap_world_cached` (gated by the new `cache_surf` flag, so
+  externals still bypass) would cache them for free. ~1 ms of the 2.1 ms submodel phase.
+  Deferred (small, and the lightmap path is fidelity-sensitive — verify byte-identical).
+- **Sim side is the more interesting lead now.** `simbench` shows **e1m3 at ~5.0 ms/frame
+  / 522 BSP traces per frame** (vs e1m1's 108, e1m2's 26) — a dense-collision map. The
+  `SV_Move` broadphase is the place to look if the sim tick matters.
+- **wasm/native SIMD (`simd128`)** — the per-pixel inner loop (palette/colormap byte reads,
+  z-test) could process 4–8 px/instruction for a further ~2× on the *remaining* per-pixel
+  cost. Substantial, genuinely-different work; only worth it if 36 fps @1080p isn't enough.
+- **16-pixel affine spans** (Quake's `D_DrawSpans`) — perspective divide every 16 px;
+  introduces sub-pixel drift (a fidelity trade).
 - **Mip selection** — large distant surfaces over the per-face cache cap stay on the
   per-pixel path; mip-LOD would let them use the cache and shrink block memory.
 
-### Profiler
-`render.rs` has an opt-in `RenderStats` (per-phase ns timers + face/tri/pixel/cache
-counters), zero-cost when off, surfaced by the `QUAKE_BENCH` harness in `quaketool`.
+### Profiler / benchmarks
+- **Render:** `render.rs` has an opt-in `RenderStats` (per-phase ns timers + face/tri/
+  pixel/cache counters), zero-cost when off, surfaced by `QUAKE_BENCH=<iters>
+  QUAKE_RES=WxH quaketool scene <pak> <map> <out>`. It now also reports **world-pass
+  sub-phases** (`pvs/sort/setup+raster/lightmap/surf`) and **surf-cache true-hits vs
+  rebakes** — wrap any new per-face work in these to keep the cost honest.
+- **Sim:** `quaketool simbench <pak> <map> [frames]` benchmarks the game-logic tick (no
+  rendering): per-frame ms + VM statements + BSP traces + thinks. Deterministic
+  (same counts run-to-run). e1m1 ≈ 1.4 ms/frame; e1m3 ≈ 5.0 ms/frame (522 traces/frame).
 
 ---
 
@@ -112,12 +125,16 @@ counters), zero-cost when off, surfaced by the `QUAKE_BENCH` harness in `quaketo
    texel-resolution lighting is what Quake's software renderer actually does.)
 2. **`ae3ba68` (linear-step perspective) really is NOT byte-identical** — it shifts
    ~57 px (sub-pixel edge ULP drift); corrected by `3fce66c`. That one stands.
-3. **Benchmark absolute numbers are unreliable when the host is loaded.** During the
-   wrap-up the CPU was throttled (~3–10× slower across ALL resolutions
-   uniformly — a dead giveaway it's host load, not code). Re-measure on an idle
-   machine before trusting any ms figure; compare A/B in one sitting.
+3. **Benchmark absolute numbers swing with host load.** This session's numbers were
+   taken on an **idle** host (load ~0.4/16) and are trustworthy; the prior session's
+   "throttling" was likely partly the fixed surf-rebake cost (now fixed) making every
+   resolution look uniformly slow. Still: re-check `uptime` before trusting ms, and A/B
+   in one sitting.
 4. The `quaketool` bench's submodel profiler line label may lag the actual counters
    (cosmetic only; the numbers are right).
+5. **Texture "pop" on first frames** (deferred item below): now has a likely cause — the
+   surf cache is cold on frame 0 and warms over the first 1–2 frames as faces come into
+   view. Worth re-checking now that the cache is per-model and actually persists.
 
 ---
 
