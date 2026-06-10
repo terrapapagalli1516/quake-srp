@@ -1141,10 +1141,12 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
 
             SVC_UPDATESTAT => {
                 // CL_ParseServerMessage: cl.stats[i] = value. The C Sys_Errors on
-                // i >= MAX_CL_STATS; a hostile index here just drops the value.
+                // i >= MAX_CL_STATS; a hostile index here just drops the value —
+                // as does a short read (`read_byte` returns -1 at end-of-message),
+                // which must NOT alias onto stats[0].
                 let i = r.read_byte();
                 let v = r.read_long();
-                if let Some(slot) = cl.stats.get_mut(i.max(0) as usize) {
+                if let Some(slot) = usize::try_from(i).ok().and_then(|i| cl.stats.get_mut(i)) {
                     *slot = v;
                 }
             }
@@ -2499,5 +2501,27 @@ mod tests {
         assert_eq!(f3.completed_time, 9.0);
         assert_eq!(f3.finale_text, "the end");
         assert_eq!(f3.finale_start, 9.0);
+    }
+
+    #[test]
+    fn updatestat_short_read_and_hostile_index_drop_the_value() {
+        // svc_updatestat truncated to the bare command byte: `read_byte` returns
+        // -1 for the index (and `read_long` -1 for the value). The write must be
+        // DROPPED — an `i.max(0)` here would alias it onto stats[0] (STAT_HEALTH).
+        let mut cl = ClientState::new();
+        let _ = parse_server_message(&mut cl, &[SVC_UPDATESTAT as u8]);
+        assert_eq!(cl.stats, [0; MAX_CL_STATS], "short read must write no stat");
+
+        // A hostile index >= MAX_CL_STATS (the C Sys_Errors) likewise drops it.
+        let mut msg = vec![SVC_UPDATESTAT as u8, 200];
+        msg.extend_from_slice(&7i32.to_le_bytes());
+        let _ = parse_server_message(&mut cl, &msg);
+        assert_eq!(cl.stats, [0; MAX_CL_STATS], "hostile index must write no stat");
+
+        // An in-range index still lands (cl.stats[i] = value).
+        let mut msg = vec![SVC_UPDATESTAT as u8, STAT_TOTALMONSTERS as u8];
+        msg.extend_from_slice(&31i32.to_le_bytes());
+        let _ = parse_server_message(&mut cl, &msg);
+        assert_eq!(cl.stats[STAT_TOTALMONSTERS], 31);
     }
 }

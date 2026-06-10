@@ -2424,21 +2424,28 @@ fn step_walk(
     for ev in w.server.drain_svc_events() {
         match ev {
             quake_rs::server::SvcEvent::Intermission => {
-                // cl.intermission = 1; cl.completed_time = cl.time.
+                // cl.intermission = 1; cl.completed_time = cl.time (cl_parse.c:939).
+                // On a local server cl.time tracks sv.time, which SV_SpawnServer
+                // starts at 1.0 — NOT this walk's clock (which starts at 0), so the
+                // overlay's minutes:seconds shows exactly what vanilla shows. (The
+                // demo parser latches mtime[0], also server time — the paths agree.)
                 w.intermission = 1;
-                w.completed_time = w.clock;
+                w.completed_time = w.server.time();
             }
             quake_rs::server::SvcEvent::Finale(text) => {
                 // cl.intermission = 2 + SCR_CenterPrint (scr_centertime_start).
+                // completed_time = cl.time = sv.time, as above; finale_start stays
+                // in the walk clock — the reveal only uses the DIFFERENCE
+                // w.clock - finale_start (cl.time - scr_centertime_start in the C).
                 w.intermission = 2;
-                w.completed_time = w.clock;
+                w.completed_time = w.server.time();
                 w.finale_text = text;
                 w.finale_start = w.clock;
             }
             quake_rs::server::SvcEvent::Cutscene(text) => {
-                // cl.intermission = 3 (text only, no plaque).
+                // cl.intermission = 3 (text only, no plaque); times as per Finale.
                 w.intermission = 3;
-                w.completed_time = w.clock;
+                w.completed_time = w.server.time();
                 w.finale_text = text;
                 w.finale_start = w.clock;
             }
@@ -3072,7 +3079,10 @@ fn step_walk(
             ammo_nails: stat("ammo_nails"),
             ammo_rockets: stat("ammo_rockets"),
             ammo_cells: stat("ammo_cells"),
-            time: w.clock,
+            // Sbar_SoloScoreboard shows cl.time — the SERVER clock (epoch 1.0,
+            // SV_SpawnServer), not this walk's 0-based clock, matching what the
+            // intermission overlay's completed_time latches.
+            time: w.server.time(),
             monsters: gcount("killed_monsters"),
             total_monsters: gcount("total_monsters"),
             secrets: gcount("found_secrets"),
@@ -5099,7 +5109,17 @@ mod tests {
         // player, stats overlay up, status bar hidden.
         walk_mut(|w| {
             assert_eq!(w.intermission, 1, "svc_intermission set cl.intermission = 1");
-            assert!(w.completed_time >= 0.0);
+            // cl.completed_time = cl.time = sv.time (cl_parse.c:939), and
+            // SV_SpawnServer starts sv.time at 1.0 — the walk clock (starting at
+            // 0) would read at least 1 second LOW here. drive_into_exit returned
+            // the moment the latch happened, so the latched value IS the server's
+            // current clock.
+            assert!(w.completed_time >= 1.0, "completed_time latches sv.time (epoch 1.0)");
+            assert_eq!(
+                w.completed_time,
+                w.server.time(),
+                "completed_time = sv.time at the latch (no steps ran since)"
+            );
             // execute_changelevel froze the player: MOVETYPE_NONE, modelindex 0,
             // view_ofs zeroed, moved to the info_intermission spot.
             assert_eq!(

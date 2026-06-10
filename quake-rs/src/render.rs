@@ -6341,15 +6341,16 @@ fn intermission_number(
     ox: f32,
     oy: f32,
 ) {
-    // Sbar_itoa renders the (possibly negative) value; the overlay stats are
-    // never negative in practice, so render the magnitude like draw_num does.
-    let s = if num < 0 { 0 } else { num }.to_string();
+    // Sbar_itoa renders the (possibly negative) value: a leading '-' draws as
+    // the STAT_MINUS glyph — sb_nums[0][10], the `num_minus` wad pic (Sbar_Init).
+    // Rust's `to_string` yields exactly the C's sign-then-digits form.
+    let s = num.to_string();
     let b = s.as_bytes();
     let shown = if b.len() > digits { &b[b.len() - digits..] } else { b };
     let mut x = vx + (digits.saturating_sub(shown.len())) as f32 * 24.0;
     for &c in shown {
-        let d = (c - b'0') as usize;
-        if let Ok(pic) = wad.qpic(NUM_NAMES[d]) {
+        let name = if c == b'-' { "num_minus" } else { NUM_NAMES[(c - b'0') as usize] };
+        if let Ok(pic) = wad.qpic(name) {
             blit_qpic_at(image, &pic, x, vy, scale, ox, oy, palette);
         }
         x += 24.0; // the C steps a fixed 24 per digit slot
@@ -6397,6 +6398,9 @@ pub fn draw_intermission_overlay(
 
     // Time: minutes right-justified at (160,64) over 3 slots, then num_colon at
     // 234 and the two second digits at 246/266 (verbatim sbar.c coordinates).
+    // DEVIATION: clamped at 0 — a negative time would make the C's direct
+    // `sb_nums[0][num/10]` second-digit lookups index negatively (UB); the
+    // signed stats rows below go through intermission_number's minus glyph.
     let t = stats.completed_time.max(0);
     let minutes = t / 60;
     let seconds = t - 60 * minutes;
@@ -6431,9 +6435,12 @@ pub fn draw_intermission_overlay(
 /// `scr_printspeed.value * (cl.time - scr_centertime_start)` budget — note the
 /// `if (!remaining--) return;` runs AFTER each `Draw_Character`, so a budget of
 /// `n` paints `n + 1` characters (one appears the instant the finale starts).
-/// Each line is scanned at most 40 characters (longer lines truncate and skip to
-/// the next `\n`), the block starts at `vid.height*0.35` for <= 4 lines else 48,
-/// and every line centers independently — all verbatim from the C.
+/// A NEGATIVE budget paints the whole string: `!remaining--` only fires when
+/// `remaining` is exactly 0 at the check, and a below-zero value just keeps
+/// decrementing past it. Each line is scanned at most 40 characters (longer
+/// lines truncate and skip to the next `\n`), the block starts at
+/// `vid.height*0.35` for <= 4 lines else 48, and every line centers
+/// independently — all verbatim from the C.
 pub fn draw_center_string_revealed(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
@@ -6441,7 +6448,7 @@ pub fn draw_center_string_revealed(
     text: &str,
     remaining: i32,
 ) {
-    if image.w == 0 || image.h == 0 || remaining < 0 {
+    if image.w == 0 || image.h == 0 {
         return;
     }
     let sx = image.w as f32 / MENU_VIRT_W;
@@ -6467,7 +6474,10 @@ pub fn draw_center_string_revealed(
             if budget == 0 {
                 return; // `if (!remaining--) return;` — this char was the last.
             }
-            budget -= 1;
+            // Post-decrement: a budget already below zero just keeps falling
+            // (never re-hits the `== 0` gate), painting the whole string like
+            // the C. `wrapping_sub` keeps even an `i32::MIN` caller total.
+            budget = budget.wrapping_sub(1);
         }
         vy += 8.0;
     }
@@ -11209,7 +11219,7 @@ mod tests {
     /// Build a synthetic `gfx.wad` containing `sbar` (320x24), `num_0..num_9`
     /// (24x24, each filled with palette index `100+d` so digits are recognisable
     /// and never transparent), `anum_0..anum_9` (24x24, index `120+d`), and the
-    /// intermission `num_colon`/`num_slash` (index 140/141).
+    /// intermission `num_colon`/`num_slash`/`num_minus` (index 140/141/142).
     fn build_hud_wad() -> Wad2 {
         // (name, payload) pairs.
         let mut pics: Vec<(String, Vec<u8>)> = Vec::new();
@@ -11222,6 +11232,7 @@ mod tests {
         }
         pics.push(("num_colon".to_string(), qpic_payload(16, 24, 140)));
         pics.push(("num_slash".to_string(), qpic_payload(16, 24, 141)));
+        pics.push(("num_minus".to_string(), qpic_payload(16, 24, 142)));
 
         // Lay payloads right after the 12-byte header; build the directory after.
         let mut payloads = Vec::new();
@@ -11612,6 +11623,43 @@ mod tests {
         draw_finale_overlay(&mut img, Some(&cc), &pal, Some(&plaque), "", 0.0);
         assert_eq!(px(&img, 110 + 1, 16 + 1), [52, 52, 52], "finale.lmp centered at y=16");
         assert_eq!(px(&img, 100, 16 + 1), [0, 0, 0], "left of the centered plaque is clear");
+    }
+
+    #[test]
+    fn negative_reveal_budget_paints_the_whole_string() {
+        // SCR_DrawCenterString: `if (!remaining--) return;` only fires when
+        // `remaining` is exactly 0 at the check — a budget that STARTS below
+        // zero keeps decrementing past it and paints the WHOLE string. (An
+        // early `remaining < 0 => return` would paint nothing.)
+        let pal = ramp_palette();
+        let cc = solid_conchars();
+        let px = |img: &Image, x: usize, y: usize| img.rgb[y * 320 + x];
+
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_center_string_revealed(&mut img, &cc, &pal, "AB\nCD", -1);
+        assert_eq!(px(&img, 160 + 1, 70 + 1), [95, 95, 95], "line 1 fully painted");
+        assert_eq!(px(&img, 160 + 1, 78 + 1), [95, 95, 95], "line 2 fully painted");
+
+        // i32::MIN paints everything too (and the decrement must not panic).
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_center_string_revealed(&mut img, &cc, &pal, "AB\nCD", i32::MIN);
+        assert_eq!(px(&img, 160 + 1, 78 + 1), [95, 95, 95], "i32::MIN = unlimited");
+    }
+
+    #[test]
+    fn intermission_number_draws_leading_minus_glyph() {
+        // Sbar_IntermissionNumber: Sbar_itoa keeps the sign, and a '-' draws
+        // sb_nums[0][STAT_MINUS] — "num_minus" (index 142 in the test wad). -7
+        // over 3 slots right-justifies like any 2-character number: the minus
+        // lands at x = 160 + 24 = 184 and the digit at 208.
+        let pal = ramp_palette();
+        let wad = build_hud_wad();
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        intermission_number(&mut img, &wad, &pal, -7, 160.0, 64.0, 3, 1.0, 0.0, 0.0);
+        let px = |x: usize, y: usize| img.rgb[y * 320 + x];
+        assert_eq!(px(160 + 2, 64 + 2), [0, 0, 0], "first slot empty (2-char number)");
+        assert_eq!(px(184 + 2, 64 + 2), [142, 142, 142], "minus glyph at x=184");
+        assert_eq!(px(208 + 2, 64 + 2), [107, 107, 107], "digit 7 at x=208");
     }
 
     /// 80/85), the key/powerup/sigil item icons, and a 128x128 `conchars` whose
