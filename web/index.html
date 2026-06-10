@@ -17,7 +17,7 @@
     --bg: #0b0907;
     --ink: #cfc6b6;        /* body text */
     --dim: #8a7d68;        /* secondary text */
-    --faint: #6b6052;      /* footer / asides */
+    --faint: #8d8071;      /* footer / asides (>=4.5:1 on --bg for the 11.5px text) */
     --bronze: #b5832f;
     --bronze-hi: #d9a546;
     --line: #2a2118;       /* hairlines */
@@ -757,7 +757,7 @@ function setProgress(received, total) {
 async function fetchWasmBytes() {
   const resp = await fetch('quake_wasm.wasm');
   if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching quake_wasm.wasm');
-  const total = parseInt(resp.headers.get('Content-Length') || '0', 10) || 0;
+  let total = parseInt(resp.headers.get('Content-Length') || '0', 10) || 0;
   if (!resp.body || !resp.body.getReader) return await resp.arrayBuffer();
   const reader = resp.body.getReader();
   const chunks = [];
@@ -767,6 +767,10 @@ async function fetchWasmBytes() {
     if (done) break;
     chunks.push(value);
     received += value.byteLength;
+    // A compressing server reports the COMPRESSED size in Content-Length while
+    // the stream yields decompressed bytes — if the counter passes the claimed
+    // total, the total was a lie: fall back to the indeterminate display.
+    if (total > 0 && received > total) total = 0;
     setProgress(received, total);
   }
   const buf = new Uint8Array(received);
