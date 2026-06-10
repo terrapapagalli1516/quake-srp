@@ -104,11 +104,10 @@ Fixed:
 - ✅ **SV_WalkMove waterlevel jump gate** (LOW) — swimmers can step up.
 
 Deferred (documented, lower priority / higher risk):
-- ⬜ **R_MarkLights BSP dlight gating** (MED) — dynamic light can bleed through walls
-  onto coplanar faces in other BSP regions; needs the per-surface dlightbits recursion.
+- ✅ **R_MarkLights BSP dlight gating** (MED) — fixed in the ship push (2026-06-10).
 - ⬜ **No-lightmap face fullbright/black** (MED) — sample-less faces render Lambert
   instead of row 0 / row 63; narrow (lightless/test maps), golden-sensitive.
-- ⬜ **Intermission view** (MED) — V_CalcIntermissionRefdef + svc_intermission flow.
+- ✅ **Intermission view** (MED) — fixed in the ship push (2026-06-10).
 - ⬜ LOWs: client_think pre/post-think order; PF_particle byte count/dir quantize;
   clip_box inopen/plane_dist coords; SV_NewChaseDir integer abs; OP_ADDRESS world
   guard; AngleVectors f64-vs-float (golden-sensitive); sky foreground drift; particle
@@ -178,12 +177,11 @@ Fixed (commits 6bd546a, 03d91b7):
 - ✅ **Centerprint/notify gated on menu/console** (LOW) — key_dest suppression.
 
 Deferred (confirmed, with concrete plans, lower frequency / higher effort):
-- ⬜ **Lightning/beam temp entities** (HIGH) — TE_LIGHTNING1/2/3 + TE_BEAM decode but
-  don't render (shambler/Chthon bolts, thunderbolt). Plan: add `end` to
-  TempEntityEvent, a beam store (model bolt/bolt2/bolt3, endtime=now+0.2), and a
-  per-frame CL_UpdateTEnts port emitting a bolt-model alias instance every 30 units.
-- ⬜ **R_MarkLights dlight BSP gating** (MED) — dynamic light can bleed through thin
-  walls onto PVS-visible coplanar faces; needs the per-surface dlightbits recursion.
+- ✅ **Lightning/beam temp entities** (HIGH) — fixed in the ship push (2026-06-10):
+  `tent.rs` ports cl_tent.c (slot store + CL_UpdateTEnts), live + demo paths.
+- ✅ **R_MarkLights dlight BSP gating** (MED) — fixed in the ship push: per-face
+  dlightbits via the faithful node recursion (+ a port-specific luxel-extent
+  cache-path gate; see the session entry).
 - ⬜ **Demo explosion dlight** (LOW) — the demo path emits no dynamic lights.
 
 ### Render-perf pass + Rounds 5-6
@@ -267,7 +265,7 @@ lightmap + colormap-row + colormap-index every pixel.
 | H8 | `R_TeleportSplash` not implemented — TE_TELEPORT faked, wrong color | ✅ fixed `8bda8cb` (TE→R_LavaSplash/R_TeleportSplash) |
 | H9 | `R_RocketTrail` entirely missing — no rocket/grenade/gib/tracer/voor trails | ✅ fixed `8bda8cb` (trails wired per model flags) |
 | H10 | Stale entities never removed — missing the per-message msgtime/relink cull (demo) | ✅ fixed `8f13cb1` (msgtime cull) |
-| H11 | Ambient sounds missing — placed `ambientsound()` loops + the 4 automatic leaf ambients | ⬜ TODO |
+| H11 | Ambient sounds missing — placed `ambientsound()` loops + the 4 automatic leaf ambients | ✅ fixed (ship push 2026-06-10) |
 | H12 | Inventory bar (ibar) with weapon icons + current-weapon flash | ✅ fixed `7cbc202` |
 | H13 | Animated player face (health/powerup frames; pain-anim is minor TODO) | ✅ fixed `7cbc202` |
 | H14 | Item, key, and sigil icons + ammo/armor-type icons | ✅ fixed `7cbc202` |
@@ -314,10 +312,64 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 
 ## Still open
 
-- **H11 ambient sounds** — the LAST remaining HIGH: placed `ambientsound()` loops + the 4 automatic leaf ambients (needs looping audio on the web side + leaf `ambient_level` exposed). Audio, not pixels.
-- **Intermission / finale screen** — the level-complete stats + episode finale (currently changelevel swaps directly). Visible at level transitions.
-- **Demo interpolation activation** — the lerp code exists; switch `boot_demo`/`cmd_demo` to `parse_demo_interpolated` + feed EF_ROTATE model indices.
-- Minor sbar polish (pain-frame face, invuln 666/disc); sound channel override; the LOW list (sky case-sensitivity, SV_TryUnstick, affine subdivision [= the paused perf item], etc.).
+All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
+(see the session entry below). The remaining tail, all LOW / niche:
+
+- **No-lightmap face fullbright/black** (MED but narrow — lightless/test maps
+  only, golden-sensitive).
+- Demo explosion dlight; sound channel override (only dedups within a frame);
+- Minor sbar polish (pain-frame face anim); the Round-2 LOW list (sky
+  case-sensitivity, AngleVectors f64, lightstyle /264, etc. — all cosmetic).
+
+## Session 5 — the ship push (2026-06-10)
+
+Six parallel implementation branches (one agent each, isolated worktrees),
+every branch adversarially reviewed by 2–3 independent lenses (faithfulness
+vs the C, engineering, integration), blocking findings fixed on-branch, then
+merged serially with the full suite + golden renders verified after every
+merge. **449 lib + 42 wasm tests; goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`
+byte-identical throughout.** Full narrative in STATUS.md; the faithfulness
+ledger:
+
+- ✅ **Death→respawn e2e** — `Server::client_kill` (Host_Kill_f port; console
+  `kill` was a health hack bypassing QC), physics_client TOSS/BOUNCE arm
+  (SV_Physics_Client; dead corpse froze mid-air). The QC death chain proven
+  on real progs.dat with a per-frame deadflag trace, incl. environment kills.
+- ✅ **Intermission/finale (MED ×2)** — MSG_ALL svc recognizer (WriteByte/
+  WriteString dropped everything before), `Server::set_map_name`
+  (SV_SpawnServer's world-edict setup was missing entirely — `mapname` and
+  `world.model` were empty for ALL QC consumers: samelevel/noexit/runes/
+  episode-end), V_CalcIntermissionRefdef, Sbar_Intermission/FinaleOverlay,
+  8-chars/sec finale reveal, svc_sellscreen→Help. Review fix: completed_time
+  latches the QC `time` global (cl.time epoch 1.0), not the render clock.
+- ✅ **TE_LIGHTNING1/2/3 + TE_BEAM (HIGH)** — `tent.rs` (cl_tent.c port:
+  24-slot store, same-entity replacement, 30-unit pieces, integer
+  vectoangles, rand()%360 roll, view-entity re-anchor), live + demo. Bonus:
+  PF_WriteEntity read its parm as float, not an int global (G_EDICTNUM).
+  Documented deviations: missing beam.mdl skips pieces (no Sys_Error); the
+  C's MAX_VISEDICTS half-cap and outer-loop index clobber (UB) not modeled.
+- ✅ **Ambient sounds (H11, last HIGH)** — PF_ambientsound → StaticSound
+  registry (wire-byte-exact vol/atten), `snd.rs` (S_UpdateAmbientSounds +
+  GetWavinfo cue-loop gate; water1/wind2 only, like the C), demo
+  static_sounds, Web Audio looping with the one-shot spatialGain law +
+  sound_generation lifecycle. Documented deviations: Web Audio mixing
+  internals (scope note); the ramp runs the C's integer master_vol math on a
+  fixed 1/72 s accumulator (Host_FilterTime's cap) so the faithful asymmetric
+  fade holds at any display Hz (literal per-frame trunc would stall >100fps);
+  one looping source per static (no same-sfx combine pass).
+- ✅ **First-frames "pop"** — `Server::run_signon_frames` (the C's two signon
+  SV_Physics ticks; frame 0 previously rendered the spawn-settle fall), and
+  the `any_dlight_reaches` luxel-extent gate (below). Headless A/B: 17.8% +
+  13.3% px pops → max 0.86%.
+- ✅ **R_MarkLights BSP dlight gating (MED)** — faithful per-face dlightbits
+  node recursion (R_PushDlights/R_MarkLights); submodels marked via their own
+  headnode with entity-local origins (R_DrawBEntitiesOnList). e1m1 A/B with an
+  injected light: 90,525 affected px → 10,411 (strict subset). Merge
+  composition: mask (C-faithful "may contribute") → plane test → luxel-extent
+  test — the extent test is a PORT-SPECIFIC tightening of the cache-path
+  decision only (the C keys rebuilds on marking alone but always renders
+  through its surface cache; this port would flip baked→per-pixel and shimmer
+  for zero pixel change). `QUAKE_DLIGHT` knob on quaketool scene for A/B.
 
 **Performance** stays paused per the user.
 

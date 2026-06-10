@@ -1,11 +1,87 @@
 # Quake-RS — working status / hand-off
 
-Last updated 2026-05-31 (late session). This file is the honest "where things
-stand" note — read it before continuing.
+Last updated 2026-06-10 (ship-push session). This file is the honest "where
+things stand" note — read it before continuing.
 
 ---
 
-## TL;DR
+## ⭐ SHIP PUSH (2026-06-10) — six features landed in one coordinated push
+
+A 6-branch parallel implementation (each adversarially reviewed by 2–3
+independent lenses, blocking findings fixed on-branch, then merged serially
+with tests + goldens verified after every merge). **449 lib + 42 wasm tests
+pass; goldens byte-identical throughout (`fb14bd65`/`a6f98d8a`/`0211e6d4`).**
+
+1. **Death→respawn CLOSED and PROVEN** (was the one gameplay-breaking gap).
+   The full QuakeC chain runs on the real progs.dat: T_Damage → Killed →
+   PlayerDie (deadflag=DYING, movetype=TOSS) → death-anim thinks while dead →
+   DEAD_DEAD → PlayerDeathThink (DEAD_RESPAWNABLE on button release) → +attack
+   → respawn() → localcmd("restart") → try_restart reloads with level-ENTRY
+   parms. e2e wasm tests cover a self-rocket kill AND an environment (slime)
+   kill. Two fidelity fixes en route: console `kill` was a health hack → now
+   ports Host_Kill_f via `Server::client_kill` (runs QC ClientKill); and
+   SV_Physics_Client's TOSS/BOUNCE arm was missing (dead corpse froze mid-air)
+   → routes to physics_toss per sv_phys.c.
+2. **Intermission + finale screens** (QC-driven, faithful svc flow). Root
+   causes: WriteByte/WriteString builtins dropped every MSG_ALL write (engine
+   never saw svc_intermission/svc_finale), AND the port never did
+   SV_SpawnServer's world-edict setup — `world.model`/`mapname` were empty so
+   QC's episode-end check could never match (new `Server::set_map_name`).
+   V_CalcIntermissionRefdef camera, Sbar_IntermissionOverlay (complete/inter
+   plaques + big numbers: Time min:sec, Secrets, Kills), e1m7 finale text at
+   8 chars/sec + CONGRATULATIONS plaque, svc_sellscreen → Help menu. Demo path
+   carries cl.stats + intermission state. Review fix: completed_time latches
+   the QC `time` global (epoch 1.0, = cl.time) not w.clock (epoch 0) — the
+   displayed Time was 1s low; co-fixed the death-scoreboard clock.
+3. **Lightning/beam temp entities render** (TE_LIGHTNING1/2/3 + TE_BEAM; was
+   the deferred HIGH). New `quake-rs/src/tent.rs` ports cl_tent.c: CL_ParseBeam
+   slot store (24 slots, same-entity replacement so a held thunderbolt is ONE
+   refreshing beam), CL_UpdateTEnts expansion (bolt piece per 30 units, exact
+   integer vectoangles, rand()%360 roll), view-entity re-anchoring. Live +
+   demo paths. Bonus fix: PF_WriteEntity read its parm as float instead of an
+   int global (would have collapsed all beams onto one slot).
+4. **Ambient sounds (H11 — the LAST audit HIGH) closed.** PF_ambientsound →
+   StaticSound registry (vol/atten byte-quantized exactly like
+   svc_spawnstaticsound) + `Demo::static_sounds`; new `quake-rs/src/snd.rs`
+   ports S_UpdateAmbientSounds (water1/wind2 only, like the C) + GetWavinfo
+   (cue-chunk loop gate). Web: per-static looping sources through the same
+   spatialGain law as one-shots; `sound_generation()` lifecycle stops every
+   loop on boot/New Game/map/changelevel/restart/demo↔walk. Review fix: the
+   ambient ramp runs the C's literal INTEGER master_vol math on a fixed 1/72s
+   accumulator (Host_FilterTime's cap) — faithful asymmetric fade at any
+   display refresh rate, no high-Hz stall. Also: ambience/* one-shots
+   un-silenced (E1M6 wind tunnels), PF_ambientsound precache gate per the C.
+   Ground truth: e1m1 = 14-loop base soundscape (fl_hum1/comp1 — no torches),
+   e1m2 = 24 fire1.wav torches.
+5. **First-frames texture/lighting "pop" root-caused and fixed** — caveat 5's
+   cold-cache guess was WRONG (the surf cache bakes synchronously; can't pop).
+   Two real causes: (a) frame 0 rendered with ZERO physics after spawn, so the
+   player's ~5u spawn-settle fall played on camera — `Server::run_signon_frames`
+   ports the C's two signon SV_Physics ticks (0.1s each), called by every wasm
+   walk-building path (boot/New Game/map/changelevel/restart; quaketool CLI
+   deliberately unchanged); (b) `any_dlight_reaches` was plane-distance-only,
+   so ANY dlight anywhere kicked all near-coplanar in-view faces off the baked
+   surface cache onto the per-pixel path (13.3% whole-view shimmer ~0.55s
+   after New Game from a distant lavaball trail). Headless before/after:
+   17.8% + 13.3% pops → max 0.86% (sky scroll + flicker only).
+6. **R_MarkLights BSP dlight gating** (deferred-twice MED): per-face u32
+   dlightbits via faithful sphere-vs-plane node recursion (world: headnode[0];
+   inline submodels: own headnode, entity-local origins per
+   R_DrawBEntitiesOnList). A/B on e1m1 with an injected light: 90,525 affected
+   px → 10,411 (80,114 bleed px removed, 0 added — strict subset). Composed
+   at merge with (5): mask (C-faithful "may contribute") → plane test → luxel-
+   extent test (port-specific CACHE-PATH tightening only — the C keys rebuilds
+   on marking alone but always renders through its surface cache; we'd flip
+   baked→per-pixel and shimmer for zero pixel change). New debug knob:
+   `QUAKE_DLIGHT=x,y,z,r|eye[:r]` on quaketool scene injects a light for A/B.
+
+**Still in flight this session:** idiomatic-Rust pass (clippy-clean, byte-
+identical) + HTML shell polish (loading progress, product presentation) +
+wasm rebuild/deploy + final whole-diff review.
+
+---
+
+## TL;DR (pre-push state, 2026-05-31)
 
 - The shareware episode (E1) is playable in the browser; **401 lib + 25 wasm tests pass**.
 - **⭐ THE render bottleneck is FOUND AND FIXED.** The prior session's "fixed ~60 ms
@@ -195,39 +271,39 @@ Render @ browser res now: 320×200 **2.81 ms (355 fps)**, 640×400 **5.49 ms (18
    in one sitting.
 4. The `quaketool` bench's submodel profiler line label may lag the actual counters
    (cosmetic only; the numbers are right).
-5. **Texture "pop" on first frames** (deferred item below): now has a likely cause — the
-   surf cache is cold on frame 0 and warms over the first 1–2 frames as faces come into
-   view. Worth re-checking now that the cache is per-model and actually persists.
+5. ~~**Texture "pop" on first frames**~~ — RESOLVED in the ship push (see top).
+   The cold-cache guess was wrong; the real causes were the unsettled spawn
+   rendering on camera + plane-only dlight gating. Lesson: the surf cache
+   bakes synchronously on first visibility — it cannot pop by itself.
 
 ---
 
-## WIP — single-player respawn (`c5d3df9`, INCOMPLETE)
+## ~~WIP — single-player respawn~~ — ✅ CLOSED AND PROVEN (ship push, see top)
 
-User reported: dying in-game doesn't respawn. Root cause found: `PF_localcmd` (#46) was
-a no-op, so QuakeC's `localcmd("restart\n")` (the death→respawn path) was ignored.
-
-**Done:** `bi_localcmd` now recognises `restart`/`changelevel`/`map`; added
-`RESTART_REQUEST` + `Server::take_pending_restart` + host `try_restart()` (reloads the
-current level with the level-entry spawn parms) + `Walk.entry_parms`. The
-localcmd→flag→drain path is **unit-tested and passing**.
-
-**NOT done / the gap:** the end-to-end death→respawn was never verified. An integration
-harness that just set `health = 0` did **not** fire the restart, because that doesn't
-drive the real QuakeC chain (`T_Damage` → `PlayerDie` → `deadflag = DEAD_RESPAWNABLE`
-→ `PlayerDeathThink` → `respawn()` → `localcmd`). **Next step:** drive a real death
-(apply damage through the proper path, or call the death-think functions) and confirm
-`take_pending_restart()` returns true, then that the level reloads with inventory.
+The plumbing (`bi_localcmd` → `RESTART_REQUEST` → `take_pending_restart` →
+`try_restart`) was sound; the e2e chain is now driven and asserted by wasm
+tests (`real_death_chain_respawns_via_restart`,
+`environment_slime_kill_enters_the_same_death_chain`) with a per-frame
+deadflag trace. The two real gaps were the `kill` health-hack and the missing
+client TOSS physics arm — both fixed (details in the ship-push section).
 
 ---
 
-## Other known-deferred items (from the audit, documented in AUDIT.md)
+## Known-deferred items (LOW severity, documented in AUDIT.md)
 
-- Lightning/beam temp entities (TE_LIGHTNING1/2/3, TE_BEAM) decode but don't render
-  (shambler/Chthon bolts, thunderbolt). Plan in AUDIT.md.
-- R_MarkLights BSP dlight gating (dynamic light can bleed through thin walls).
-- Intermission/finale camera.
-- A reported **one-time texture "pop"/shift** on the first frames — likely the surface
-  cache populating (cold→warm); not yet root-caused or fixed.
+All previous HIGH/MED deferred items (lightning beams, R_MarkLights gating,
+intermission/finale, ambient sounds, texture pop) shipped in the 2026-06-10
+push. What remains is the LOW tail, all reviewer-vetted as non-blocking:
+
+- Demo explosion dlight (demo path emits no dynamic lights).
+- quaketool CLI walk paths skip the signon settle (deliberate — keeps CLI
+  artifacts byte-stable; unify later with a walk-golden re-baseline).
+- Console `kill` drains only a pending restart, not a same-frame changelevel
+  (unreachable conflict with vanilla progs).
+- The C's CL_UpdateTEnts MAX_VISEDICTS half-cap and its outer-loop index
+  clobber (UB in the C) are deliberately not modeled.
+- Sound-channel override only dedups within a frame; per-ammo sbar nits;
+  pain-frame face anim; assorted Round-2 LOW list items.
 
 ---
 
@@ -251,7 +327,8 @@ drive the real QuakeC chain (`T_Damage` → `PlayerDie` → `deadflag = DEAD_RES
 
 ```bash
 # tests
-cd quake-rs && cargo test --lib            # 400 tests
+cd quake-rs && cargo test --lib            # 449 tests (data-free)
+cd quake-wasm && cargo test                # 42 tests (real embedded pak)
 
 # render a map to PPM (needs a real pak0.pak)
 cargo run --release --bin quaketool -- scene <pak> maps/e1m1.bsp out.ppm

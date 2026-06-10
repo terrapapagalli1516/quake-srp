@@ -9,14 +9,18 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 
 > **Honest framing.** This is a genuinely playable single-player port. It boots into the **Quake main menu drawn
 > over the attract demo**, New Game drops you in the **`start` skill/episode hub**, and you can walk, fight monsters
-> that wake/chase/attack, take damage (with the red flash) and die, switch weapons, pick up items + ammo/health
-> /explosive boxes, open doors, ride elevators, see blood/explosions/dynamic lights/flickering torches, hear
-> **spatialized in-game sound**, and reach the exit to load the next map with your inventory intact — the whole
-> shareware episode. There's a working **Options menu** (selectable resolution, mouse, volume) and a **drop-down
-> console** (`~`) with `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`. What it is *not*: multiplayer/netcode,
-> save/load, or the intermission stats screen (see the roadmap). Everything claimed below is real and tested:
-> **329 engine + 25 wasm tests**, zero dependencies, no `unsafe` in the engine, every layer checked against id's
-> shareware `pak0.pak`.
+> that wake/chase/attack, take damage (with the red flash), **die and respawn** (the full QuakeC death chain,
+> proven end-to-end), switch weapons — **including the thunderbolt's rendered lightning** — pick up items +
+> ammo/health/explosive boxes, open doors, ride elevators, see blood/explosions/dynamic lights (gated by the real
+> `R_MarkLights` BSP recursion, so light can't bleed through walls)/flickering torches, hear **spatialized in-game
+> sound + the placed ambient loops and leaf ambients** (torch crackle, machine hums, wind and water), and reach the
+> exit to the **intermission stats screen** (Time / Secrets / Kills from the QC-placed camera) — through to the
+> **episode-end finale text** — with your inventory carried to the next map: the whole shareware episode. There's a
+> working **Options menu** (selectable resolution, mouse, volume) and a **drop-down console** (`~`) with
+> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`. What it is *not*: multiplayer/netcode or save/load (out of
+> scope). Everything claimed below is real and tested: **449 engine + 42 wasm tests**, zero dependencies, no
+> `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and every renderer change verified
+> byte-identical against golden scene renders.
 
 ## Layout
 
@@ -35,24 +39,33 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 - **Server** — `ED_LoadFromFile` spawns a map by running id's real spawn functions; `SV_Physics` tick (walk, toss,
   bounce, fly, **`SV_Physics_Pusher`** for doors/platforms); entity-vs-entity collision (`SV_Move`), touch/impact,
   **item pickups**; a real **player client** (`PutClientInServer` + `SV_ClientThink` movement, **impulse weapon
-  switching**); **monster AI** (sight/`FindTarget`/`checkclient`, chase, attack) and the movement builtins
-  (`walkmove`/`movetogoal`/chase-dir/`findradius`); **combat** (`traceline`→QuakeC `T_Damage`, player damage + death);
-  **`changelevel`** with inventory carried across maps (`SetChangeParms`/`DecodeLevelParms`).
+  switching**, the C's **signon settle frames** before frame 0); **monster AI** (sight/`FindTarget`/`checkclient`,
+  chase, attack) and the movement builtins (`walkmove`/`movetogoal`/chase-dir/`findradius`); **combat**
+  (`traceline`→QuakeC `T_Damage`, player damage + **death → corpse physics → respawn**, proven through the real
+  QuakeC chain); **`changelevel`** with inventory carried across maps (`SetChangeParms`/`DecodeLevelParms`) and the
+  **intermission/finale flow** (the MSG_ALL `svc_intermission`/`svc_finale` stream from QC's `execute_changelevel`).
 - **Renderer** — a from-scratch software rasteriser (z-buffer, backface cull, perspective-correct textures, PVS
   culling, **near-plane polygon clipping**): **the full Quake lighting model** — baked BSP lightmaps + **dynamic
-  lights** (`R_AddDynamicLights`: muzzle flashes, explosions) + **animated light styles** (`R_AnimateLight`:
-  flickering torches); **alias-model frame animation** + skins; brush submodels + **external `b_*.bsp` brush-model
-  items** (explosive boxes, ammo/health boxes); turbulent **water/lava/slime warp** + scrolling sky; first-person
-  **weapon viewmodel**; **particles** (blood) + **temp-entity effects** (fiery explosions, impacts); **head-bob**
-  (`V_CalcBob`); **screen blends** (`V_CalcBlend`: damage flash, underwater tint); a **status-bar HUD**.
+  lights** (`R_AddDynamicLights`, gated by the **`R_MarkLights` BSP recursion** so light never crosses solid
+  planes) + **animated light styles** (`R_AnimateLight`: flickering torches); **alias-model frame animation** +
+  skins; brush submodels + **external `b_*.bsp` brush-model items** (explosive boxes, ammo/health boxes); turbulent
+  **water/lava/slime warp** + scrolling sky; first-person **weapon viewmodel**; **particles** (blood) +
+  **temp-entity effects** (fiery explosions, impacts, **lightning bolts** — `cl_tent.c`'s beam store expanding into
+  bolt models for the shambler/thunderbolt/Chthon trap); **head-bob** (`V_CalcBob`); **screen blends**
+  (`V_CalcBlend`: damage flash, underwater tint); a **status-bar HUD** and the **intermission/finale overlays**
+  (`Sbar_IntermissionOverlay`, the 8-chars/sec finale text reveal).
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
   with **Single Player → `start` hub**, a working **Options** screen (selectable render **resolution** + mouse +
   volume), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
   `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
-- **Sound** — the QuakeC `sound`/`ambientsound` + temp-entity sounds drive a queue the browser plays through Web
-  Audio with **distance/stereo spatialization** relative to the player (samples resolved under the `sound/` pak dir).
+- **Sound** — the QuakeC `sound` + temp-entity sounds drive a queue the browser plays through Web Audio with
+  **distance/stereo spatialization** relative to the player (samples resolved under the `sound/` pak dir); **placed
+  `ambientsound()` loops** (torch crackle, machine hums — `svc_spawnstaticsound` semantics, wire-byte-exact
+  volume/attenuation) and the **automatic leaf ambients** (water/wind, ramped per `S_UpdateAmbientSounds` with the
+  C's integer math at its 72 fps frame cap).
 - **Demo playback** — parses the `.dem` net-protocol stream into per-frame entity snapshots **+ svc_particle /
-  svc_temp_entity effects**, rendering id's recorded attract demo with blood + explosions.
+  svc_temp_entity effects + static sounds + intermission state**, rendering id's recorded attract demo with blood +
+  explosions.
 - **Browser** — the engine compiles to `wasm32-unknown-unknown` unchanged; WASD + mouse-look + fullscreen, fire
   (click), weapon select (1–8), `~` console, Esc menu, selectable resolution, lit, with HUD + sound.
 
@@ -111,20 +124,16 @@ cache** in the VM, and an **abs-box broadphase** in `sv_move` (the ~25× sim spe
 dense maps). See `AUDIT.md` for the per-change ledger and `STATUS.md` for current WIP +
 the honest perf scorecard.
 
-## Roadmap (remaining polish)
+## Roadmap
 
-The core single-player loop, the UI (menu / options / console), in-game + demo sound and particles, selectable
-resolution, the `start` hub, the attract loop, and the external brush-model items are all done. What's left is
-presentation/scope polish:
+The single-player shareware experience is **feature-complete**: the core loop (fight, die, respawn, exit), the UI
+(menu / options / help / console), intermission + finale screens, in-game + demo sound with ambient loops,
+particles + lightning, selectable + persistent resolution, the `start` hub, the attract loop, and the external
+brush-model items are all done — every subsystem audited against id's C across seven review rounds (66-finding
+ledger in `AUDIT.md`, all HIGHs closed). What remains:
 
-- **Intermission / finale screen** — the level-complete stats screen (secrets/kills/time) before the next map;
-  changelevel currently swaps directly.
-- **HUD detail** — the weapon strip with current-weapon highlight, per-ammo-type icons, and the animated face
-  (the bar shows health/ammo/armour numbers today).
-- **Powerup effects** — quad/pentagram/ring/biosuit view tints (the `V_CalcBlend` infrastructure is in place; the
-  per-powerup cshifts just need wiring) and item glow.
-- **`.spr` entity sprites** — sprite-model entities (e.g. some effects) aren't routed to a sprite draw in the
-  scene path yet (only the `spr` dump tool exists).
+- **Low-severity divergences** — a documented cosmetic tail (e.g. no-lightmap-face shading on lightless test maps,
+  the demo path's missing explosion dlight, pain-frame face animation). Tracked with plans in `AUDIT.md`.
 - **Multiplayer & save/load** — out of scope for this single-player, headless-server port.
 
 ## Licensing
