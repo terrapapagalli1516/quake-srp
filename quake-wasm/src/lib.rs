@@ -2389,6 +2389,10 @@ fn try_restart(w: &mut Walk) {
     let _ = w.server.drain_svc_events();
 }
 
+/// Owned visible-entity descriptor gathered from the server before rendering:
+/// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
+type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32);
+
 fn step_walk(
     w: &mut Walk,
     dt: f32,
@@ -2653,7 +2657,8 @@ fn step_walk(
     // 4. Gather the visible entities (owned descriptors, so the cache borrow for
     //    rendering doesn't clash with reading the server). Skip the player's own
     //    edict — its model would fill the screen in first person.
-    let mut descs: Vec<(String, [f32; 3], [f32; 3], usize, [u8; 3], i32)> = Vec::new();
+    // (model name, origin, angles, frame, shirt/pants colour, skin) per entity.
+    let mut descs: Vec<EntityDesc> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     // Projectile/gib trails to spawn this frame, collected here and emitted after
     // the loop (so we don't borrow w.particles/dlights while reading the server):
@@ -4866,7 +4871,7 @@ mod tests {
         }
         b.extend(b"data");
         b.extend(data_samples.to_le_bytes());
-        b.extend(std::iter::repeat(0x80u8).take(data_samples as usize));
+        b.extend(std::iter::repeat_n(0x80u8, data_samples as usize));
         b
     }
 

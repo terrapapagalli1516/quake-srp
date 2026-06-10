@@ -133,13 +133,7 @@ fn skill_value() -> i32 {
 /// float a `cvar_set("skill", N)` would pass; we round it the way the C does.
 fn set_skill_value(v: f32) {
     // SV_SpawnServer: current_skill = (int)(skill.value + 0.5); clamp 0..3.
-    let mut s = (v + 0.5) as i32;
-    if s < 0 {
-        s = 0;
-    }
-    if s > 3 {
-        s = 3;
-    }
+    let s = ((v + 0.5) as i32).clamp(0, 3);
     SKILL.with(|cell| cell.set(s));
 }
 
@@ -812,6 +806,7 @@ fn reset_restart() {
 /// but single-player gameplay issues a few level-control commands we MUST honour:
 ///   * `restart` — reload the current level (the death-respawn path, `client.qc`).
 ///   * `changelevel <map>` / `map <map>` — defer a level swap (same as PF_changelevel).
+///
 /// Everything else is a benign no-op (matching the old behaviour). The token parse
 /// is whitespace-split and case-insensitive on the command word.
 fn bi_localcmd(vm: &mut Vm) -> Result<()> {
@@ -2043,11 +2038,7 @@ impl<'a> Tokenizer<'a> {
         }
 
         // a regular word: run of chars > 32 that aren't a single-char token.
-        loop {
-            let ch = match self.data.get(self.pos) {
-                Some(&ch) => ch,
-                None => break,
-            };
+        while let Some(&ch) = self.data.get(self.pos) {
             token.push(ch);
             self.pos += 1;
             match self.data.get(self.pos) {
@@ -2347,12 +2338,8 @@ impl Server {
         let mut tok = Tokenizer::new(&entities);
         let mut first = true;
 
-        loop {
-            // opening brace (or EOF)
-            let open = match tok.next_token() {
-                Some(t) => t,
-                None => break,
-            };
+        // Loop over entity blocks until EOF (next_token() returns None).
+        while let Some(open) = tok.next_token() {
             if open != "{" {
                 // C: Sys_Error("found %s when expecting {"). Stay total: stop.
                 break;
@@ -2449,12 +2436,8 @@ impl Server {
     /// `ED_ParseEdict` (pr_edict.c): read key/value pairs until `}`, applying the
     /// `angle`/`light`/leading-`_` key hacks, and set each field by its def type.
     fn parse_edict(&mut self, tok: &mut Tokenizer, ent: i32) -> Result<()> {
-        loop {
-            // parse key (or closing brace / EOF)
-            let key = match tok.next_token() {
-                Some(t) => t,
-                None => break, // C: Sys_Error EOF; stay total.
-            };
+        // Parse key (or closing brace); EOF here is C's Sys_Error, we stay total.
+        while let Some(key) = tok.next_token() {
             if key == "}" {
                 break;
             }
@@ -3119,21 +3102,19 @@ impl Server {
         let new_vel = clip_velocity(vel, tr.plane_normal, backoff);
         self.vm.ent_set_vector(ent, "velocity", new_vel);
 
-        // stop if on ground
-        if tr.plane_normal[2] > 0.7 {
-            if new_vel[2] < 60.0 || movetype != MOVETYPE_BOUNCE {
-                let flags = self.vm.ent_get_float(ent, "flags") as i32;
-                self.vm
-                    .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
-                // groundentity = EDICT_TO_PROG(trace.ent): the edict actually
-                // landed on (0 = world, >0 = a plat/door/other solid), not a
-                // hardcoded world. `tr.ent` is `-1` only when nothing was hit,
-                // but this branch runs only when fraction < 1 (something WAS hit),
-                // so clamp the "nothing" sentinel to the world (0) defensively.
-                self.vm.ent_set_int(ent, "groundentity", tr.ent.max(0));
-                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
-                self.vm.ent_set_vector(ent, "avelocity", [0.0; 3]);
-            }
+        // stop if on ground (nested ifs in the C, collapsed here — no elses)
+        if tr.plane_normal[2] > 0.7 && (new_vel[2] < 60.0 || movetype != MOVETYPE_BOUNCE) {
+            let flags = self.vm.ent_get_float(ent, "flags") as i32;
+            self.vm
+                .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+            // groundentity = EDICT_TO_PROG(trace.ent): the edict actually
+            // landed on (0 = world, >0 = a plat/door/other solid), not a
+            // hardcoded world. `tr.ent` is `-1` only when nothing was hit,
+            // but this branch runs only when fraction < 1 (something WAS hit),
+            // so clamp the "nothing" sentinel to the world (0) defensively.
+            self.vm.ent_set_int(ent, "groundentity", tr.ent.max(0));
+            self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+            self.vm.ent_set_vector(ent, "avelocity", [0.0; 3]);
         }
 
         // check for in water (SV_CheckWaterTransition). The C reaches this only
@@ -3282,11 +3263,8 @@ impl Server {
             if origin[i].is_nan() {
                 origin[i] = 0.0;
             }
-            if vel[i] > SV_MAXVELOCITY {
-                vel[i] = SV_MAXVELOCITY;
-            } else if vel[i] < -SV_MAXVELOCITY {
-                vel[i] = -SV_MAXVELOCITY;
-            }
+            // vel[i] is NaN-scrubbed above, so .clamp matches the C's if/else if.
+            vel[i] = vel[i].clamp(-SV_MAXVELOCITY, SV_MAXVELOCITY);
         }
         self.vm.ent_set_vector(ent, "velocity", vel);
         self.vm.ent_set_vector(ent, "origin", origin);
@@ -3807,7 +3785,7 @@ impl Server {
         let cosval = angleval.cos() as f32;
 
         let mut z = [0.0f32; MAX_FORWARD];
-        for i in 0..MAX_FORWARD {
+        for (i, zi) in z.iter_mut().enumerate() {
             let top = [
                 origin[0] + cosval * ((i + 3) as f32) * 12.0,
                 origin[1] + sinval * ((i + 3) as f32) * 12.0,
@@ -3823,7 +3801,7 @@ impl Server {
             if tr.fraction == 1.0 {
                 return; // near a dropoff
             }
-            z[i] = top[2] + tr.fraction * (bottom[2] - top[2]);
+            *zi = top[2] + tr.fraction * (bottom[2] - top[2]);
         }
 
         let mut dir = 0.0f32;
@@ -4340,6 +4318,7 @@ impl Server {
     ///  * water friction bleeds the full 3-D speed (`sv_friction`, NO edgefriction
     ///    dropoff trace — unlike `user_friction`).
     ///  * water-acceleration nudges velocity toward the normalised wish.
+    ///
     /// Gravity is suppressed by the WALK arm while waist-deep (waterlevel > 1),
     /// so this buoyant motion survives the frame.
     fn water_move(&mut self, ent: i32, cmd: &UserCmd, dt: f32) {
@@ -4594,7 +4573,7 @@ impl Server {
             }
             if trace.plane_normal[2] == 0.0 {
                 blocked |= 2; // step / wall
-                *out_steptrace = Some(trace.clone());
+                *out_steptrace = Some(trace);
             }
 
             // run the impact function (host present; not inside with_host). C
@@ -4953,6 +4932,8 @@ pub fn probe_point_contents(vm: &mut Vm, p: Vec3) -> i32 {
     vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID)
 }
 
+// Mirrors the C `SV_Move(start, mins, maxs, end, type, passedict)` signature (world.c).
+#[allow(clippy::too_many_arguments)]
 pub fn sv_move(
     vm: &mut Vm,
     start: Vec3,
@@ -5966,7 +5947,7 @@ fn parse_int(s: &str) -> i32 {
     let mut end = 0;
     while end < bytes.len() {
         let c = bytes[end];
-        let ok = matches!(c, b'0'..=b'9') || ((c == b'+' || c == b'-') && end == 0);
+        let ok = c.is_ascii_digit() || ((c == b'+' || c == b'-') && end == 0);
         if !ok {
             break;
         }
@@ -6370,7 +6351,7 @@ mod tests {
 
         let mut server = Server::new(bsp, progs).expect("server");
         // Set the constant 1.0 the marker spawn stores into spawned_flag.
-        server.vm.set_gf(g_one as usize, 1.0);
+        server.vm.set_gf(g_one, 1.0);
 
         let report = server.spawn_entities().expect("spawn");
 
@@ -6404,7 +6385,7 @@ mod tests {
         let bsp = bsp_with_entities(ents);
 
         let mut server = Server::new(bsp, progs).expect("server");
-        server.vm.set_gf(g_one as usize, 1.0);
+        server.vm.set_gf(g_one, 1.0);
 
         let report = server.spawn_entities().expect("spawn");
         assert_eq!(report.total, 1);
@@ -6424,7 +6405,7 @@ mod tests {
         let bsp = bsp_with_entities(ents);
 
         let mut server = Server::new(bsp, progs).expect("server");
-        server.vm.set_gf(g_one as usize, 1.0);
+        server.vm.set_gf(g_one, 1.0);
 
         let report = server.spawn_entities().expect("spawn");
         assert_eq!(report.total, 2);
@@ -6476,7 +6457,7 @@ mod tests {
         let progs = Progs::parse(&img).expect("parse");
         let bsp = empty_bsp();
         let mut server = Server::new(bsp, progs).expect("server");
-        server.vm.set_gf(g_one as usize, 1.0);
+        server.vm.set_gf(usize::from(g_one), 1.0);
 
         // Spawn an entity, set movetype NONE, think=do_think, nextthink in past.
         let e = server.vm.spawn();
@@ -6599,7 +6580,7 @@ mod tests {
                 "{{ \"classname\" \"marker\" \"spawnflags\" \"{spawnflags}\" }}\n"
             );
             let mut server = Server::new(bsp_with_entities(&ents), progs).expect("server");
-            server.vm.set_gf(g_one as usize, 1.0);
+            server.vm.set_gf(g_one, 1.0);
             server.set_skill(skill);
             server.spawn_entities().expect("spawn")
         };
@@ -9299,6 +9280,7 @@ mod tests {
     ///   * `PutClientInServer`: copies `parm1` back into a global `decoded` so a
     ///     test can prove the restored parm was visible to the spawn script
     ///     (mirrors `DecodeLevelParms` reading parm1 into a player field).
+    ///
     /// Returns `(image, g_const_ofs, g_decoded_ofs)` so the test can place the
     /// value `SetChangeParms` stores and read what `PutClientInServer` decoded.
     fn changelevel_progs() -> (Vec<u8>, usize, usize) {

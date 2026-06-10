@@ -1208,7 +1208,7 @@ mod tests {
             // Velocity magnitude is the scaled speed in [50, 113] (dir is non-zero
             // because dir[2]=256 always).
             let speed = (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt();
-            assert!(speed >= 49.9 && speed <= 113.1, "lava speed {speed} out of [50, 113]");
+            assert!((49.9..=113.1).contains(&speed), "lava speed {speed} out of [50, 113]");
             // dir[2] = 256 dominates, so velocity Z is always positive (upward fan).
             assert!(p.velocity[2] > 0.0, "lava particles fan upward");
         }

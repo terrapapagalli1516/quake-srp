@@ -759,6 +759,8 @@ fn read_textures(bytes: &[u8], lump: &Lump) -> Result<Vec<Option<MipTex>>> {
 /// animating texture (bad leading char) or a missing frame, we instead skip
 /// sequencing that group (leaving its `anim` as `None`, so the texture renders
 /// statically) rather than aborting — the engine never panics on map data.
+// Index loops mirror Mod_LoadTextures (model.c): `for (j=i+1 ; j<nummiptex ; j++)`.
+#[allow(clippy::needless_range_loop)]
 fn sequence_anims(textures: &mut [Option<MipTex>]) {
     let n = textures.len();
     for i in 0..n {
@@ -1071,7 +1073,7 @@ mod tests {
         // Build a TEXTURES lump: nummiptex=2, offsets [hdr_a, -1].
         // Layout: [i32 count][i32 ofs0][i32 ofs1][MipTex A]
         let table = 4 + 2 * 4; // count + two offsets
-        let ofs_a = table as i32;
+        let ofs_a: i32 = table;
 
         let mut lump = Vec::new();
         lump.extend_from_slice(&2i32.to_le_bytes()); // nummiptex

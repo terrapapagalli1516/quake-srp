@@ -72,8 +72,8 @@ impl Plane {
         // Axial detection: a plane is axial (type 0/1/2) when its normal lies on
         // a coordinate axis, i.e. one component is +/-1 and the others are 0.
         let mut ptype: u8 = 3; // PLANE_ANYX
-        for i in 0..3 {
-            if normal[i] == 1.0 || normal[i] == -1.0 {
+        for (i, &n) in normal.iter().enumerate() {
+            if n == 1.0 || n == -1.0 {
                 ptype = i as u8;
                 break;
             }
@@ -81,8 +81,8 @@ impl Plane {
 
         // signbits, exactly as Mod_LoadPlanes: bits |= 1<<j when normal[j] < 0.
         let mut signbits: u8 = 0;
-        for j in 0..3 {
-            signbits |= ((normal[j] < 0.0) as u8) << j;
+        for (j, &n) in normal.iter().enumerate() {
+            signbits |= u8::from(n < 0.0) << j;
         }
 
         Plane {
@@ -162,8 +162,8 @@ pub fn compare(a: Vec3, b: Vec3) -> bool {
 #[inline]
 pub fn length(v: Vec3) -> f32 {
     let mut len: f32 = 0.0;
-    for i in 0..3 {
-        len += v[i] * v[i];
+    for &c in &v {
+        len += c * c;
     }
     (f64::from(len)).sqrt() as f32
 }
@@ -220,10 +220,11 @@ pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     let cr = angle.cos();
 
     let forward: Vec3 = [(cp * cy) as f32, (cp * sy) as f32, (-sp) as f32];
+    // The C spells these `-1*sr*...`; unary negation is bit-identical for floats.
     let right: Vec3 = [
-        (-1.0 * sr * sp * cy + -1.0 * cr * -sy) as f32,
-        (-1.0 * sr * sp * sy + -1.0 * cr * cy) as f32,
-        (-1.0 * sr * cp) as f32,
+        (-sr * sp * cy + -cr * -sy) as f32,
+        (-sr * sp * sy + -cr * cy) as f32,
+        (-sr * cp) as f32,
     ];
     let up: Vec3 = [
         (cr * sp * cy + -sr * -sy) as f32,
@@ -357,10 +358,10 @@ pub fn perpendicular_vector(src: Vec3) -> Vec3 {
     // Find the smallest-magnitude axially aligned vector.
     let mut pos = 0usize;
     let mut minelem: f32 = 1.0;
-    for i in 0..3 {
-        if src[i].abs() < minelem {
+    for (i, &c) in src.iter().enumerate() {
+        if c.abs() < minelem {
             pos = i;
-            minelem = src[i].abs();
+            minelem = c.abs();
         }
     }
     let mut tempvec: Vec3 = [0.0, 0.0, 0.0];

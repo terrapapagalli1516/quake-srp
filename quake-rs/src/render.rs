@@ -158,6 +158,9 @@ pub fn powerup_cshift(items: i32) -> Option<([u8; 3], f32)> {
 /// Combine colour shifts `(rgb, percent 0..255)` into a single blend colour and
 /// alpha (0..1), porting Quake's `V_CalcBlend` accumulation (each shift is
 /// alpha-over the running total). Empty list / all-zero percents give alpha 0.
+// `!(percent > 0.0)` is deliberate (a hardened V_CalcBlend skip): it also skips a
+// NaN percent, which the clippy-suggested `percent <= 0.0` would let through.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn combine_cshifts(shifts: &[([u8; 3], f32)]) -> ([u8; 3], f32) {
     let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     for &(color, percent) in shifts {
@@ -184,6 +187,9 @@ pub fn combine_cshifts(shifts: &[([u8; 3], f32)]) -> ([u8; 3], f32) {
 /// whole VGA palette, so the tint covers the ENTIRE composited screen — 3-D view,
 /// status bar, centerprint, menu and console alike. Apply this to the FINISHED frame
 /// after every overlay, not just the 3-D viewport (which would be the GL look).
+// `!(alpha > 0.0)` is deliberate: a NaN alpha must also be a no-op, which the
+// clippy-suggested `alpha <= 0.0` would not guarantee.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn apply_blend(image: &mut Image, color: [u8; 3], alpha: f32) {
     if !(alpha > 0.0) {
         return;
@@ -2494,6 +2500,7 @@ fn vview_lerp(a: &VView, b: &VView, alpha: f32) -> VView {
 ///  * A polygon **fully behind** (every `vz <= NEAR_PLANE`) yields no inside
 ///    vertices and no crossings, so an empty (`< 3`) result is returned and the
 ///    caller skips the face.
+///
 /// Convenience wrapper: clip against the near plane into a fresh `Vec` (for cold
 /// paths and tests). The per-face hot paths call [`clip_poly_near_into`] with a
 /// reused scratch buffer instead.
@@ -2926,6 +2933,9 @@ fn stat(f: impl FnOnce(&mut RenderStats)) {
 /// multi-MB block; virtually every real id1 face is far smaller.
 const SURF_BLOCK_MAX: usize = 1 << 20;
 
+/// A baked surface block handle: `(texels, width, height, surface origin)`.
+type SurfBlockRef = (std::rc::Rc<Vec<u8>>, usize, usize, [f32; 2]);
+
 /// Build (and cache) a world face's lit+colormapped surface block (mip 0). Returns
 /// the `Rc` handle + dimensions + surface origin, or `None` (caller keeps the
 /// per-pixel path) when there is no usable colormap, the face is dynamically lit
@@ -2948,7 +2958,7 @@ fn face_surf_block(
     light_styles: &[f32; LIGHTSTYLES],
     dlit: bool,
     cache_surf: bool,
-) -> Option<(std::rc::Rc<Vec<u8>>, usize, usize, [f32; 2])> {
+) -> Option<SurfBlockRef> {
     if dlit || colormap.len() < COLORMAP_LEN {
         return None;
     }
@@ -3101,8 +3111,8 @@ fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> FaceGeom
                 }
             }
             let inv_n = 1.0 / poly.len() as f32;
-            for k in 0..3 {
-                center[k] *= inv_n;
+            for c in &mut center {
+                *c *= inv_n;
             }
             // World AABB for the frustum cull.
             let mut mins = [f32::INFINITY; 3];
@@ -4045,8 +4055,8 @@ fn draw_submodel(
             }
         }
         let inv_n = 1.0 / world_poly.len() as f32;
-        for k in 0..3 {
-            center[k] *= inv_n;
+        for c in &mut center {
+            *c *= inv_n;
         }
         if dot(normal, sub(center, cam.pos)) >= 0.0 {
             continue;
@@ -5306,6 +5316,9 @@ pub fn render_scene_ext_sprited(
 /// is transparent (`d_sprite.c`). Nearest-neighbour sampled; behind-wall pixels are
 /// hidden by the depth test (`vz < zbuf`) and write depth so nearer geometry wins.
 /// Oriented sprites fall back to the facing billboard (good enough for shareware).
+// Mirrors R_DrawSprite (r_sprite.c); the C reads globals (vid, r_refdef, cl.time)
+// that this port passes explicitly.
+#[allow(clippy::too_many_arguments)]
 fn draw_sprites(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -5571,6 +5584,8 @@ pub fn demo_room() -> Bsp {
     /// Append one quad given its 4 corners (already in the order that, with the
     /// face plane's `inward` normal, makes the face visible from inside) and the
     /// inward face normal + plane distance. Returns nothing; mutates buffers.
+    // One call appends to all five BSP lump buffers (vertex/edge/surfedge/face/plane).
+    #[allow(clippy::too_many_arguments)]
     fn add_quad(
         vertexes: &mut Vec<DVertex>,
         edges: &mut Vec<DEdge>,
@@ -6079,6 +6094,8 @@ fn weapon_flash_name(i: usize, time: f32) -> String {
 /// Try to fetch a HUD pic by name and blit it at virtual `(vx, vy)`; a missing or
 /// unparseable lump is silently skipped (`wad.qpic(name).ok()`), so the bar
 /// degrades gracefully exactly as the task requires.
+// Mirrors Sbar_DrawPic (sbar.c); the C reads vid/draw globals passed explicitly here.
+#[allow(clippy::too_many_arguments)]
 fn blit_named(
     image: &mut Image,
     wad: &crate::wad::Wad2,
@@ -6107,6 +6124,9 @@ fn blit_named(
 /// `18 + digit` (cells 18..27). Glyph texels equal to palette index 0 are the
 /// transparent background and are skipped; every write is clipped to the
 /// framebuffer. The 8x8 glyph occupies an 8x8 *virtual* box, scaled to the frame.
+// Mirrors Sbar_DrawCharacter/Draw_Character (sbar.c/draw.c); the C reads vid/draw
+// globals passed explicitly here.
+#[allow(clippy::too_many_arguments)]
 fn draw_sbar_char(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
@@ -6265,14 +6285,14 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // Items: keys + powerups (sb_items[0..5]) for items bits 1<<(17+i), at
     // Sbar_DrawPic(192 + i*16, -16, ...). Then sigils (sb_sigil[0..3]) for items
     // bits 1<<(28+i) at Sbar_DrawPic(320-32 + i*8, -16, ...).
-    for i in 0..6 {
+    for (i, name) in SB_ITEM_NAMES.iter().enumerate() {
         if hud.items & (1 << (17 + i)) != 0 {
-            blit_named(image, wad, SB_ITEM_NAMES[i], 192.0 + (i as f32) * 16.0, -16.0, scale, vy_top, pal);
+            blit_named(image, wad, name, 192.0 + (i as f32) * 16.0, -16.0, scale, vy_top, pal);
         }
     }
-    for i in 0..4 {
+    for (i, name) in SB_SIGIL_NAMES.iter().enumerate() {
         if hud.items & (1 << (28 + i)) != 0 {
-            blit_named(image, wad, SB_SIGIL_NAMES[i], 320.0 - 32.0 + (i as f32) * 8.0, -16.0, scale, vy_top, pal);
+            blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, scale, vy_top, pal);
         }
     }
 
@@ -7356,6 +7376,8 @@ pub struct MenuPics {
 /// the HUD). At `scale = 1.0`, `ox = oy = 0` a virtual `(vx, vy)` lands at the
 /// framebuffer pixel `(vx, vy)` — the case the 320x200 wasm framebuffer uses, so
 /// the menu coordinates from menu.c are used directly with no transform.
+// Mirrors Draw_Pic (draw.c); the C reads vid/draw globals passed explicitly here.
+#[allow(clippy::too_many_arguments)]
 fn blit_qpic_at(
     image: &mut Image,
     pic: &crate::wad::Qpic,
@@ -9727,6 +9749,8 @@ mod tests {
     // -- PVS culling: decompress_vis / point_in_leaf -----------------------
 
     #[test]
+    // The literal leaf-index ranges ARE the assertion; iterators would obscure them.
+    #[allow(clippy::needless_range_loop)]
     fn decompress_vis_rle_and_novis() {
         // Hand-built RLE stream for a map with numleafs = 20 (leaves 1..=20).
         //
@@ -11721,10 +11745,6 @@ mod tests {
         assert_eq!(weapon_flash_name(4, 0.0), "inva1_rlaunch");
     }
 
-    /// A fuller synthetic `gfx.wad` adding the inventory-bar art the base
-    /// `build_hud_wad` omits: `ibar` (320x24, index 2), the 7 `inv_*` weapon icons
-    /// + the 35 `inva{1..5}_*` flash icons (24x16, index 60), the 5 health faces +
-    /// 4 powerup faces (24x24, index 70), the armour/ammo-type icons (24x24, index
     /// A 128x128 conchars atlas with EVERY glyph cell solidly filled (index 95),
     /// so any drawn character paints recognisable pixels.
     fn solid_conchars() -> Qpic {
@@ -11844,6 +11864,10 @@ mod tests {
         assert_eq!(px(208 + 2, 64 + 2), [107, 107, 107], "digit 7 at x=208");
     }
 
+    /// A fuller synthetic `gfx.wad` adding the inventory-bar art the base
+    /// `build_hud_wad` omits: `ibar` (320x24, index 2), the 7 `inv_*` weapon icons +
+    /// the 35 `inva{1..5}_*` flash icons (24x16, index 60), the 5 health faces +
+    /// 4 powerup faces (24x24, index 70), the armour/ammo-type icons (24x24, index
     /// 80/85), the key/powerup/sigil item icons, and a 128x128 `conchars` whose
     /// gold-digit cells (18..27) are non-zero so the ammo counts render.
     fn build_full_hud_wad() -> Wad2 {
@@ -12262,7 +12286,7 @@ mod tests {
         );
         assert_ne!(without.rgb, with.rgb, "a visible particle must change the frame");
         assert!(
-            with.rgb.iter().any(|&p| p == [255, 0, 255]),
+            with.rgb.contains(&[255, 0, 255]),
             "the particle's palette colour must appear in the frame"
         );
     }
@@ -13668,8 +13692,8 @@ mod tests {
         assert_eq!(g1.normal, face_normal(&bsp, &face));
         // AABB encloses every vertex.
         for v in &direct {
-            for k in 0..3 {
-                assert!(g1.mins[k] <= v[k] && v[k] <= g1.maxs[k]);
+            for (k, &c) in v.iter().enumerate() {
+                assert!(g1.mins[k] <= c && c <= g1.maxs[k]);
             }
         }
         // A different world (more faces) invalidates: still a correct rebuild.

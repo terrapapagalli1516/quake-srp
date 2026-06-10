@@ -138,6 +138,9 @@ fn read_sprite_frame(r: &mut Reader) -> Result<SpriteFrame> {
 /// Read a `SPR_GROUP`: `dspritegroup_t { int numframes }`, then `numframes`
 /// `dspriteinterval_t { float interval }`, then `numframes` sprite frames.
 /// Mirrors `Mod_LoadSpriteGroup` in `model.c`.
+// `!(interval > 0.0)` is deliberate: unlike the C's `<= 0.0` (Mod_LoadSpriteGroup),
+// it also rejects a NaN interval; rewriting per clippy would re-admit NaN.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn read_sprite_group(r: &mut Reader) -> Result<Frame> {
     let numframes = r.i32()?;
     if numframes < 0 {

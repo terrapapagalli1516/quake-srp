@@ -465,12 +465,9 @@ fn recursive_hull_check_depth(
         // t1 == t2 cannot reach here (signs would match), but stay total.
         0.0
     };
-    if frac < 0.0 {
-        frac = 0.0;
-    }
-    if frac > 1.0 {
-        frac = 1.0;
-    }
+    // C: `if (frac < 0) frac = 0; if (frac > 1) frac = 1;` — clamp is identical
+    // (NaN passes through both forms unchanged).
+    frac = frac.clamp(0.0, 1.0);
 
     let mut midf = p1f + (p2f - p1f) * frac;
     let mut mid: Vec3 = [
@@ -539,7 +536,7 @@ fn recursive_hull_check_depth(
 pub fn point_contents(bsp: &Bsp, p: Vec3) -> i32 {
     let hull = build_hull(bsp, 0);
     let cont = hull_point_contents(&hull, hull.headnode, p);
-    if cont <= CONTENTS_CURRENT_0 && cont >= CONTENTS_CURRENT_DOWN {
+    if (CONTENTS_CURRENT_DOWN..=CONTENTS_CURRENT_0).contains(&cont) {
         CONTENTS_WATER
     } else {
         cont
@@ -718,9 +715,7 @@ pub fn clip_box(
         // +face; moving in -d it is the reverse.
         let mut sign = -1.0f32;
         if t1 > t2 {
-            let tmp = t1;
-            t1 = t2;
-            t2 = tmp;
+            std::mem::swap(&mut t1, &mut t2);
             sign = 1.0;
         }
         if t1 > tenter {
@@ -771,12 +766,8 @@ pub fn clip_box(
     if d[ax] != 0.0 {
         frac = tenter - DIST_EPSILON / d[ax].abs();
     }
-    if frac < 0.0 {
-        frac = 0.0;
-    }
-    if frac > 1.0 {
-        frac = 1.0;
-    }
+    // Two-if clamp in the C; .clamp is identical (NaN passes through both forms).
+    frac = frac.clamp(0.0, 1.0);
 
     tr.fraction = frac;
     tr.endpos = [

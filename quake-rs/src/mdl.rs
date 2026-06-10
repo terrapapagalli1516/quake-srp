@@ -531,8 +531,8 @@ fn select_interval(intervals: &[f32], len: usize, time: f32) -> Option<usize> {
     let t = if time.is_finite() { time } else { 0.0 };
     let target = t - (t / full).floor() * full;
     let upper = len.saturating_sub(1).min(intervals.len());
-    for i in 0..upper {
-        if intervals[i] > target {
+    for (i, &iv) in intervals.iter().enumerate().take(upper) {
+        if iv > target {
             return Some(i);
         }
     }

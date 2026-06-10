@@ -65,8 +65,8 @@ impl Asm {
         }
         let mut func_b = Vec::new();
         for f in &self.functions {
-            for k in 0..7 {
-                func_b.extend_from_slice(&(f[k] as i32).to_le_bytes());
+            for &v in f.iter().take(7) {
+                func_b.extend_from_slice(&(v as i32).to_le_bytes());
             }
             func_b.push(f[7] as u8);
             func_b.extend_from_slice(&[0u8; 7]); // remaining parm_size
