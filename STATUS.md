@@ -75,9 +75,17 @@ pass; goldens byte-identical throughout (`fb14bd65`/`a6f98d8a`/`0211e6d4`).**
    baked→per-pixel and shimmer for zero pixel change). New debug knob:
    `QUAKE_DLIGHT=x,y,z,r|eye[:r]` on quaketool scene injects a light for A/B.
 
-**Still in flight this session:** idiomatic-Rust pass (clippy-clean, byte-
-identical) + HTML shell polish (loading progress, product presentation) +
-wasm rebuild/deploy + final whole-diff review.
+**Also landed the same session:** an idiomatic-Rust pass (cargo clippy
+--all-targets = **0 warnings in both crates**, proven byte-identical: goldens
++ simbench VM-stmt counts unchanged), the **HTML shell redesign** (product
+presentation, streaming download progress, structured help, favicon,
+touch-screen notice, audio-state button — single dependency-free file), the
+**deployed `web/quake_wasm.wasm` rebuilt at HEAD**, and a 5-lens final
+whole-diff review (integration / faithfulness / regression+determinism /
+docs / real-browser playtest — the playtest proved all six features live in
+headless Chromium with zero console errors, including flying to e1m1's real
+exit trigger for a genuine intermission). Verdicts: ship. Remaining LOWs
+recorded below.
 
 ---
 
