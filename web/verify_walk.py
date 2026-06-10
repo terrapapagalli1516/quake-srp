@@ -1,9 +1,13 @@
 #!/usr/bin/env -S uv run --with playwright --script
-"""Boot walk mode (live server), tick frames, confirm no crash + a drawn view."""
-import functools, http.server, os, socketserver, threading, time
+"""Boot walk mode (live server), tick frames, confirm no crash + a drawn view.
+
+Usage: verify_walk.py [webdir]   (defaults to this script's directory; pass a
+temp dir holding index.html + a freshly built quake_wasm.wasm to test changes
+without touching the deployed wasm)."""
+import functools, http.server, os, socketserver, sys, threading, time
 from playwright.sync_api import sync_playwright
 
-WEB = "web"
+WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
 PORT = 8161
 Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
 socketserver.ThreadingTCPServer.allow_reuse_address = True
@@ -18,8 +22,11 @@ with sync_playwright() as p:
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
+    # NB: `exp` is a top-level `let` (a global *binding*, not a window
+    # property), so probe it as a bare identifier — `window.exp` never resolves
+    # and used to burn this whole timeout before continuing.
     try:
-        pg.wait_for_function("window.exp && exp.boot", timeout=40000)
+        pg.wait_for_function("typeof exp !== 'undefined' && exp && exp.boot", timeout=40000)
     except Exception as e:
         print("no exports:", e)
     # Boot walk + let the live server tick ~3s of frames while walking forward.

@@ -1,14 +1,53 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Quake (1996), faithfully ported to dependency-free safe Rust and compiled to WebAssembly — play the shareware episode in your browser.">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0907">
 <title>quake-rs · Quake in safe-Rust WebAssembly</title>
+<!-- Favicon: the Quake 'Q' — a bronze ring, open at the bottom, with the
+     hanging nail through the gap. 16x16 PNG, generated offline, inlined as a
+     data: URI so the page stays a single dependency-free file. -->
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAgElEQVR42mNgAAIRAZ7/2PDJyXZgjEueAZtmmCZ0vKJEB4wxDMGnGSYO04zNEAZsmnE5GZshDLj8e2NDFgpGN4SgAciGYHMFigG4nI7NAHRDqGMAzBD0ECbaC9gkyDYAWRJXDGA1AJvphKIQwwCYInwG4E3KxMYCdQ3Al52J0QwAuN2fliv1Rl0AAAAASUVORK5CYII=">
 <style>
-  html,body { margin:0; height:100%; background:#0c0c10; color:#cfcfd6;
-    font-family:ui-monospace,Menlo,monospace; text-align:center; }
-  h3 { margin:10px 0 4px; font-weight:600; }
-  #status { min-height:1.1em; color:#8a8; font-size:13px; }
-  #wrap { position:relative; display:inline-block; margin-top:8px; }
+  /* Palette: Quake's bronze/rust on near-black — restrained, no kitsch. */
+  :root {
+    --bg: #0b0907;
+    --ink: #cfc6b6;        /* body text */
+    --dim: #8a7d68;        /* secondary text */
+    --faint: #6b6052;      /* footer / asides */
+    --bronze: #b5832f;
+    --bronze-hi: #d9a546;
+    --line: #2a2118;       /* hairlines */
+    --edge: #3a2d1c;       /* button/bar borders */
+  }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font-family:ui-monospace,'Cascadia Mono','SF Mono',Menlo,Consolas,monospace;
+    text-align:center; }
+  ::selection { background:#7d5a1e; color:#0b0907; }
+  .hidden { display:none !important; }
+  code, kbd { font-family:inherit; }
+  code { color:var(--bronze-hi); }
+  kbd { display:inline-block; min-width:1.1em; padding:1px 5px; margin:0 1px;
+    border:1px solid var(--edge); border-bottom-width:2px; border-radius:3px;
+    background:#1a1510; color:#d6c9ae; font-size:11px; text-align:center; }
+
+  header { margin:26px 12px 14px; }
+  h1 { margin:0; font-size:21px; font-weight:600; letter-spacing:.45em; text-indent:.45em;
+    color:var(--bronze-hi); text-shadow:0 0 24px rgba(217,165,70,.28); }
+  h1 .sep { color:#7d5a1e; }
+  #tagline { margin:7px 0 0; color:var(--dim); font-size:13px; }
+
+  /* The bezel framing the game view (presentation only — #wrap inside it is the
+     fullscreen target and overlay anchor, untouched). */
+  #stage { display:inline-block; padding:10px; margin-top:6px;
+    background:linear-gradient(180deg,#17120b,#0f0c08);
+    border:1px solid #2e2417; border-radius:6px;
+    box-shadow:0 0 0 1px #000, 0 14px 44px rgba(0,0,0,.65), inset 0 1px 0 rgba(217,165,70,.06); }
+  #status { min-height:1.2em; margin:10px 0 2px; color:#a08c5a; font-size:13px; }
+  #wrap { position:relative; display:inline-block; }
   /* Quake's art + 3-D were authored for a 320x200 framebuffer shown on a 4:3
      monitor (non-square pixels, ~1.2x taller than wide). The render target is
      16:10 square-pixel, so we present it in a 4:3 box — the framebuffer is
@@ -16,39 +55,160 @@
      digits/menu/world look horizontally over-wide ("squat"). */
   canvas { image-rendering:pixelated; width:640px; height:480px; background:#000;
     border:1px solid #333; display:block; cursor:crosshair; }
-  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  #overlay { position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
     background:rgba(0,0,0,.55); color:#eee; font-size:18px; cursor:pointer; user-select:none; }
   #overlay.hidden { display:none; }
-  .hint { margin:10px; color:#777; font-size:13px; }
-  button { font:inherit; background:#222; color:#ccc; border:1px solid #444; padding:4px 10px; cursor:pointer; }
   /* In fullscreen, fill the height and keep the authentic 4:3 aspect (pillarboxed
      on a wide monitor). aspect-ratio:4/3 overrides the 16:10 backing store so the
      frame is presented exactly as Quake was meant to be seen. */
   #wrap:fullscreen { width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; background:#000; }
   #wrap:fullscreen canvas { height:100vh; width:auto; aspect-ratio:4 / 3; }
+
+  /* Boot panel (inside the overlay): download progress -> instantiate -> boot. */
+  #boot { width:min(420px, 82%); }
+  #bootTitle { font-size:14px; letter-spacing:.45em; text-indent:.45em; color:var(--bronze-hi);
+    margin-bottom:14px; }
+  #bootMsg { color:#bfb39c; font-size:13px; margin-bottom:10px; min-height:1.2em; }
+  #bootBar { height:10px; border:1px solid var(--edge); background:#0a0805;
+    border-radius:2px; overflow:hidden; }
+  #bootFill { height:100%; width:0%; background:linear-gradient(90deg,#7d5a1e,#c9933e);
+    transition:width .12s linear; }
+  /* Unknown total (no Content-Length): a sweeping indeterminate bar. */
+  #bootFill.indet { width:40%; animation:sweep 1.1s linear infinite; }
+  @keyframes sweep { from { margin-left:-40%; } to { margin-left:100%; } }
+  #bootFill.fail { background:#6e1f14; width:100%; animation:none; }
+  #play { font-size:17px; color:#e6dcc6; text-shadow:0 1px 6px #000; }
+
+  #actions { margin:12px auto 2px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+  button { font:inherit; font-size:12.5px; background:#191309; color:#cdbd9c;
+    border:1px solid #3c2f1d; border-radius:3px; padding:6px 14px; cursor:pointer;
+    transition:border-color .15s, color .15s, background .15s; }
+  button:hover { border-color:#7d5a1e; color:#e8d3a0; background:#211910; }
+  button:focus-visible { outline:2px solid var(--bronze); outline-offset:2px; }
+  #sndBtn.on { color:var(--bronze-hi); border-color:#7d5a1e; }
+
+  /* Controls reference: three compact key columns + a console drawer. */
+  #help { display:flex; gap:30px; justify-content:center; flex-wrap:wrap;
+    margin:20px auto 4px; max-width:920px; padding:0 14px; text-align:left; }
+  #help .col { flex:1 1 0; min-width:240px; max-width:330px; }
+  #help h2 { font-size:11px; font-weight:600; letter-spacing:.25em; text-transform:uppercase;
+    color:var(--bronze); margin:0 0 8px; padding-bottom:5px; border-bottom:1px solid var(--line); }
+  .keys { display:grid; grid-template-columns:max-content 1fr; gap:6px 12px;
+    font-size:12.5px; color:var(--dim); align-items:baseline; }
+  .keys .k { text-align:right; color:var(--ink); white-space:nowrap; }
+  #conHelp { max-width:640px; margin:14px auto 0; padding:0 14px; text-align:left;
+    font-size:12.5px; color:var(--dim); }
+  #conHelp summary { cursor:pointer; color:var(--ink); }
+  #conHelp summary:hover { color:var(--bronze-hi); }
+  .congrid { display:grid; grid-template-columns:max-content 1fr; gap:5px 16px;
+    margin:10px 0 4px 8px; }
+
+  #touchNote { display:none; margin:14px auto 0; max-width:520px; padding:8px 14px;
+    border:1px solid #4a2317; border-radius:3px; background:#180e09; color:#c98f6f;
+    font-size:12.5px; }
+  footer { margin:28px 12px 32px; color:var(--faint); font-size:11.5px; line-height:1.8; }
+  footer code { color:#9a7d45; }
+
+  /* Small/touch screens: the game needs a keyboard + mouse — say so, and shrink
+     the 4:3 box (same aspect math as above) so the page never breaks. */
+  @media (pointer:coarse), (max-width:699px) { #touchNote { display:block; } }
+  @media (max-width:699px) {
+    canvas { width:min(94vw, 640px); height:auto; aspect-ratio:4 / 3; }
+    .keys .k { text-align:left; }
+  }
 </style>
 </head>
 <body>
-  <h3>quake-rs — Quake <code>e1m1</code> in WebAssembly</h3>
+  <header>
+    <h1>QUAKE<span class="sep">·</span>RS</h1>
+    <p id="tagline">id Software's 1996 classic, ported to safe Rust — no GPU, no dependencies, software-rendered in your browser.</p>
+  </header>
+
+  <div id="stage">
+    <div id="wrap">
+      <canvas id="c"></canvas>
+      <div id="overlay">
+        <div id="boot">
+          <div id="bootTitle">QUAKE·RS</div>
+          <div id="bootMsg">fetching engine…</div>
+          <div id="bootBar"><div id="bootFill"></div></div>
+        </div>
+        <div id="play" class="hidden">click to play &nbsp;·&nbsp; mouse = look, WASD = move</div>
+      </div>
+    </div>
+  </div>
+
   <div id="status">loading…</div>
-  <div id="wrap">
-    <canvas id="c"></canvas>
-    <div id="overlay">click to play &nbsp;·&nbsp; mouse = look, WASD = move</div>
+
+  <div id="actions">
+    <button id="walkBtn">🚶 walk e1m1</button>
+    <button id="demoBtn">▶ play demo1 (e1m3)</button>
+    <button id="fs">⛶ fullscreen (F)</button>
+    <button id="sndBtn" title="play a test SFX — in-game audio unlocks on your first click">🔇 sound: off</button>
   </div>
-  <div class="hint">
-    <button id="walkBtn">🚶 walk e1m1</button> &nbsp; <button id="demoBtn">▶ play demo1 (e1m3)</button>
-    &nbsp; <button id="fs">⛶ fullscreen (F)</button> &nbsp; <button id="sndBtn">🔊 sound (Space)</button><br>
-    <b>W A S D</b> move/strafe &nbsp;·&nbsp; <b>mouse</b> look (click to lock; or click-drag) &nbsp;·&nbsp; <b>← →</b> turn &nbsp;·&nbsp; <b>Space</b> jump / swim up &nbsp;·&nbsp; <b>c</b> swim down<br>
-    <b>click</b> fire &nbsp;·&nbsp; <b>1–8</b> select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)<br>
-    <b>Esc</b> / <b>Tab</b> menu (Tab works in fullscreen) &nbsp;·&nbsp; <b>~</b> console (try <code>god</code>, <code>give a</code>, <code>impulse 9</code>, <code>noclip</code>, <code>map e1m2</code>) &nbsp;·&nbsp; <b>↑ ↓</b> navigate · <b>← →</b> adjust · <b>Enter</b> select<br>
-    dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM
-  </div>
+
+  <div id="touchNote">quake-rs needs a keyboard and a mouse — open it on a desktop to play.
+    (▶ demo playback works fine on this device.)</div>
+
+  <section id="help">
+    <div class="col">
+      <h2>Move</h2>
+      <div class="keys">
+        <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>move / strafe</span>
+        <span class="k">mouse</span><span>look (click to lock; or click-drag)</span>
+        <span class="k"><kbd>←</kbd><kbd>→</kbd></span><span>turn</span>
+        <span class="k"><kbd>Space</kbd></span><span>jump / swim up</span>
+        <span class="k"><kbd>C</kbd></span><span>swim down</span>
+      </div>
+    </div>
+    <div class="col">
+      <h2>Fight</h2>
+      <div class="keys">
+        <span class="k">click</span><span>fire</span>
+        <span class="k"><kbd>1</kbd>–<kbd>8</kbd></span><span>select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)</span>
+      </div>
+    </div>
+    <div class="col">
+      <h2>Interface</h2>
+      <div class="keys">
+        <span class="k"><kbd>Esc</kbd> / <kbd>Tab</kbd></span><span>menu (Tab works in fullscreen)</span>
+        <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
+        <span class="k"><kbd>F</kbd></span><span>fullscreen</span>
+        <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
+      </div>
+    </div>
+  </section>
+
+  <details id="conHelp">
+    <summary>console commands — cheats &amp; level select (press <kbd>~</kbd>)</summary>
+    <div class="congrid">
+      <code>god</code><span>invulnerability</span>
+      <code>noclip</code><span>walk through walls</span>
+      <code>fly</code><span>fly mode</span>
+      <code>give a</code><span>full armor — also <code>h s n r c</code> for health/ammo, or <code>1</code>–<code>8</code> for a weapon (e.g. <code>give r 50</code>)</span>
+      <code>impulse 9</code><span>all weapons + ammo</span>
+      <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
+      <code>kill</code><span>respawn</span>
+      <code>help</code><span>everything else (<code>echo</code>, <code>clear</code>, …)</span>
+    </div>
+  </details>
+
+  <footer>
+    <p>dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM — the original software renderer, faithfully ported</p>
+    <p>GPLv2 heritage: built from id Software's released Quake source · shareware episode data embedded</p>
+  </footer>
 <script>
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('c');
 const wrap = document.getElementById('wrap');
 const overlay = document.getElementById('overlay');
 const fsBtn = document.getElementById('fs');
+const sndBtn = document.getElementById('sndBtn');
+const bootEl = document.getElementById('boot');
+const bootMsg = document.getElementById('bootMsg');
+const bootFill = document.getElementById('bootFill');
+const playEl = document.getElementById('play');
 const keys = {};
 const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
 
@@ -171,8 +331,25 @@ async function playSound() {
     src.buffer = buf; src.connect(audioCtx.destination); src.start();
     statusEl.textContent = `played Quake SFX — ${buf.duration.toFixed(2)}s @ ${buf.sampleRate}Hz`;
   } catch (e) { statusEl.textContent = 'sound decode failed: ' + e; }
+  updateSndUI();
 }
-document.getElementById('sndBtn').addEventListener('click', playSound);
+sndBtn.addEventListener('click', playSound);
+
+// --- Audio-unlock state. Browsers gate audio behind a user gesture: the
+// AudioContext is created/resumed on the first canvas or overlay click (and on
+// the 🔊 button itself). The button doubles as the visible state — 🔇 until the
+// context actually reports 'running', 🔊 after. Cheap (touches the DOM only on
+// a state flip) so the render loop can poll it every frame, which also catches
+// resume paths outside our handlers (e.g. headless test harnesses).
+let sndShown = null;
+function updateSndUI() {
+  const on = !!(audioCtx && audioCtx.state === 'running');
+  if (on === sndShown) return;
+  sndShown = on;
+  sndBtn.textContent = on ? '🔊 sound: on' : '🔇 sound: off';
+  sndBtn.classList.toggle('on', on);
+}
+updateSndUI();
 
 // Spatialize a queued sound the way Quake's SND_Spatialize does: fall off with
 // distance, pan left/right by where the source sits relative to where the
@@ -482,7 +659,16 @@ addEventListener('mouseup', (e) => {
 document.addEventListener('pointerlockchange', () => {
   overlay.classList.toggle('hidden', locked());
 });
-overlay.addEventListener('click', () => canvas.requestPointerLock?.());
+overlay.addEventListener('click', () => {
+  // The overlay click IS the user's first gesture: unlock audio with it (same
+  // as the canvas mousedown path — browsers require a gesture to start an
+  // AudioContext), then capture the mouse. Without this, the first
+  // click-to-play locked the pointer but left audio suspended until a second
+  // click reached the canvas.
+  if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  canvas.requestPointerLock?.();
+});
 
 canvas.addEventListener('mousemove', e => {
   if (!exp) return;
@@ -533,20 +719,66 @@ function restoreResolution() {
   if (w > 0 && h > 0) exp.set_resolution(w, h);
 }
 
-async function main() {
+// --- Loading ---------------------------------------------------------------
+// The .wasm embeds the shareware pak, so it's a ~19 MB download: stream it and
+// show real progress instead of a silent stall. Content-Length (when the server
+// sends it) drives a determinate bar; without it the bar goes indeterminate and
+// the MB counter still ticks. The boot panel and #status always agree.
+const MB = (n) => (n / 1048576).toFixed(1);
+function setStatus(text) {
+  statusEl.textContent = text;
+  if (bootMsg) bootMsg.textContent = text;
+}
+function setProgress(received, total) {
+  if (total > 0) {
+    bootFill.classList.remove('indet');
+    bootFill.style.width = Math.min(100, received / total * 100) + '%';
+    setStatus(`downloading engine… ${MB(received)} / ${MB(total)} MB`);
+  } else {
+    bootFill.classList.add('indet');   // size unknown: sweeping bar
+    setStatus(`downloading engine… ${MB(received)} MB`);
+  }
+}
+
+// Fetch the wasm as a streamed byte buffer, reporting progress per chunk. Falls
+// back to a one-shot arrayBuffer() when the body isn't streamable (old engines).
+async function fetchWasmBytes() {
   const resp = await fetch('quake_wasm.wasm');
-  const bytes = await resp.arrayBuffer();
-  statusEl.textContent = 'instantiating ' + (bytes.byteLength/1048576|0) + ' MB WebAssembly…';
+  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching quake_wasm.wasm');
+  const total = parseInt(resp.headers.get('Content-Length') || '0', 10) || 0;
+  if (!resp.body || !resp.body.getReader) return await resp.arrayBuffer();
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    setProgress(received, total);
+  }
+  const buf = new Uint8Array(received);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
+  return buf.buffer;
+}
+
+async function main() {
+  const bytes = await fetchWasmBytes();
+  bootFill.classList.remove('indet');
+  bootFill.style.width = '100%';
+  setStatus('instantiating ' + (bytes.byteLength/1048576|0) + ' MB WebAssembly…');
+  await new Promise(r => setTimeout(r, 30));   // let the full bar paint before the compile
   const { instance } = await WebAssembly.instantiate(bytes, {});
   exp = instance.exports;
 
-  statusEl.textContent = 'booting: parsing pak0.pak, loading the attract demo…';
+  setStatus('booting: parsing pak0.pak, loading the attract demo…');
   await new Promise(r => setTimeout(r, 30));
   // Quake boots into the ATTRACT loop: the main menu drawn over a PLAYING demo.
   // boot_attract starts demo playback with the menu open; if the demo can't be
   // built it falls back to boot() (menu over e1m1), so this is always non-zero
   // when the pak loaded. The walk/demo buttons below still call boot()/boot_demo().
-  if (!exp.boot_attract()) { statusEl.textContent = 'boot_attract() failed'; return; }
+  if (!exp.boot_attract()) { setStatus('boot_attract() failed'); return; }
   // Restore a previously-chosen resolution (if any) over the boot default, BEFORE
   // the first canvas sync so it's created at the right backing-store size.
   restoreResolution();
@@ -569,6 +801,9 @@ async function main() {
     saveResolution(W, H);
   }
   syncCanvasSize();
+  // Ready: swap the overlay's boot panel for the click-to-play prompt.
+  bootEl.classList.add('hidden');
+  playEl.classList.remove('hidden');
   statusEl.textContent = 'ready — click to play';
 
   let last = performance.now();
@@ -587,6 +822,7 @@ async function main() {
     exp.step(dt);
     drainGameSounds();
     updateLoopingAudio();
+    updateSndUI();
 
     // The render resolution may have changed this frame (Options menu): re-fit the
     // canvas + ImageData to the new size before blitting.
@@ -599,7 +835,16 @@ async function main() {
   }
   requestAnimationFrame(frame);
 }
-main().catch(e => { statusEl.textContent = 'error: ' + e; console.error(e); });
+main().catch(e => {
+  // file:// can't fetch() the wasm in most browsers — say how to fix it rather
+  // than failing blank. Any other error lands here too, in red on the boot bar.
+  const hint = location.protocol === 'file:'
+    ? ' — file:// pages can\'t fetch the engine; serve this folder over HTTP (e.g. `python3 -m http.server`) and reload'
+    : '';
+  setStatus('error: ' + e + hint);
+  if (bootFill) bootFill.classList.add('fail');
+  console.error(e);
+});
 </script>
 </body>
 </html>
