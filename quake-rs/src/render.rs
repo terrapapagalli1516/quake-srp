@@ -6173,17 +6173,27 @@ const ROW_LOOKSTRAFE: usize = 11;
 const ROW_VIDEO: usize = 12;
 
 /// The selectable render-resolution presets the Options "Screen size" row cycles
-/// through, as `(width, height)` pairs. Index 0 (`320x200`) is the fast default
-/// the engine boots at; higher presets render the 3-D scene at the larger size
-/// (the menu + HUD auto-scale to whatever framebuffer they're drawn into). Kept
-/// within the host's clamp envelope (<= 1280x800, <= 1_280*800 pixels).
+/// through, as `(width, height)` pairs. A consistent 16:10 ladder (each step
+/// +160w/+100h) from the fast `320x200` up to the host's `1280x800` clamp cap
+/// (`1_280*800` = the exact pixel budget). The engine *boots* at the host's chosen
+/// default (see wasm `DEFAULT_W`/`DEFAULT_H`), which must be one of these so the
+/// menu's Screen-size label can sync to it; higher presets render the 3-D scene at
+/// the larger size (the menu + HUD auto-scale to whatever framebuffer they're drawn
+/// into).
 ///
 /// NOTE: this differs from id's `scr_viewsize` (30..120, which shrinks the 3-D
 /// viewport inside a fixed screen). Here the "Screen size" row instead cycles the
 /// engine's actual render resolution — the behaviour the host can really apply —
 /// while drawing a faithful slider whose knob tracks the preset's [0,1] fraction.
-pub const RESOLUTION_PRESETS: [(i32, i32); 5] =
-    [(320, 200), (480, 300), (640, 400), (800, 500), (960, 600)];
+pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
+    (320, 200),
+    (480, 300),
+    (640, 400),
+    (800, 500),
+    (960, 600),
+    (1120, 700),
+    (1280, 800),
+];
 
 // --- analog cvar ranges (M_AdjustSliders) + their slider fraction mapping ------
 
@@ -11527,16 +11537,16 @@ mod tests {
         assert_eq!(m.resolution(), RESOLUTION_PRESETS[1]);
         assert_eq!(m.resolution(), (480, 300));
         // Walk through all presets and confirm it wraps back to 320x200.
-        for expect in [(640, 400), (800, 500), (960, 600), (320, 200)] {
+        for expect in [(640, 400), (800, 500), (960, 600), (1120, 700), (1280, 800), (320, 200)] {
             assert!(m.adjust(1));
             assert_eq!(m.resolution(), expect);
         }
         // adjust(-1) cycles backward (wraps to the last preset from index 0).
         assert!(m.adjust(-1));
-        assert_eq!(m.resolution(), (960, 600));
+        assert_eq!(m.resolution(), (1280, 800));
         // A zero delta is a no-op and reports no change.
         assert!(!m.adjust(0));
-        assert_eq!(m.resolution(), (960, 600));
+        assert_eq!(m.resolution(), (1280, 800));
         // adjust only acts on the Options screen.
         m.cancel(); // -> Main
         assert!(!m.adjust(1), "adjust is a no-op off the Options screen");

@@ -30,11 +30,14 @@ static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
 const DEMO_FILE: &str = "demo1.dem";
-/// The default (boot) render resolution: Quake's fast 320x200. The engine boots
-/// here; the Options menu lets the player opt into a larger framebuffer at runtime
-/// (the menu + HUD auto-scale to whatever size they're drawn into).
-const DEFAULT_W: usize = 320;
-const DEFAULT_H: usize = 200;
+/// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
+/// stay a member of [`render::RESOLUTION_PRESETS`] so the Options "Screen size"
+/// label can sync to it). The page restores the player's *saved* resolution from
+/// `localStorage` over this on load, and the Options menu lets them change it at
+/// runtime; the chosen size now persists across boots / New Game / reloads. The
+/// menu + HUD auto-scale to whatever size they're drawn into.
+const DEFAULT_W: usize = 960;
+const DEFAULT_H: usize = 600;
 /// Sane bounds for [`set_resolution`] (and the menu presets): the framebuffer is
 /// clamped to this envelope and its total pixel count capped so a runaway value
 /// cannot allocate gigabytes. `1280*800*4` bytes ≈ 4 MB is the upper bound.
@@ -580,10 +583,11 @@ pub extern "C" fn boot() -> i32 {
             // same clean slate the old fresh-Walk-with-fresh-Menu boot gave.
             a.menu = Menu::new();
             a.menu.open();
-            // The fresh menu is at resolution preset 0 (DEFAULT); reset the App
-            // render size to match so the Options "Screen size" label and the
-            // actual framebuffer never desync after a re-boot.
-            a.set_render_size(DEFAULT_W, DEFAULT_H);
+            // PRESERVE the player's chosen resolution across the re-boot: keep the
+            // current framebuffer size (the source of truth) and point the fresh
+            // menu's Screen-size preset at it, instead of snapping back to DEFAULT.
+            // (Re-booting used to revert a menu-picked resolution; it no longer does.)
+            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
     });
     ok as i32
@@ -603,10 +607,11 @@ pub extern "C" fn boot_demo() -> i32 {
             a.mode = 1;
             // The demo button plays the demo with the menu CLOSED (clean
             // playback). `boot_attract` is the variant that opens the menu over it.
-            // Reset to fresh defaults so the menu's Options preset matches the
-            // DEFAULT framebuffer we set below.
+            // PRESERVE the chosen resolution (keep the live framebuffer) and point
+            // the fresh menu's Screen-size preset at it so it's correct when the
+            // player next opens Options.
             a.menu = Menu::new();
-            a.set_render_size(DEFAULT_W, DEFAULT_H);
+            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
     });
     ok as i32
@@ -629,11 +634,13 @@ pub extern "C" fn boot_attract() -> i32 {
         if let Some(d) = d {
             a.demo = Some(d);
             a.mode = 1;
-            // The menu overlays the PLAYING attract demo. Fresh defaults (preset 0)
-            // keep the Options "Screen size" label in sync with the DEFAULT fb.
+            // The menu overlays the PLAYING attract demo. PRESERVE the chosen
+            // resolution (keep the live framebuffer) and sync the fresh menu's
+            // Screen-size label to it. On the very first load the framebuffer is at
+            // DEFAULT; the page then restores any saved resolution over it.
             a.menu = Menu::new();
             a.menu.open();
-            a.set_render_size(DEFAULT_W, DEFAULT_H);
+            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
     });
     if built {
@@ -644,14 +651,15 @@ pub extern "C" fn boot_attract() -> i32 {
     }
 }
 
-/// The current render width in pixels (defaults to [`DEFAULT_W`] = 320). The page
+/// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). The page
 /// reads this each frame and resizes its canvas backing store + ImageData when it
-/// changes (e.g. after the Options menu picks a larger preset).
+/// changes (e.g. after the Options menu picks a different preset), and persists it
+/// to `localStorage` so the choice survives a reload.
 #[no_mangle]
 pub extern "C" fn width() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_w as i32).unwrap_or(DEFAULT_W as i32))
 }
-/// The current render height in pixels (defaults to [`DEFAULT_H`] = 200).
+/// The current render height in pixels (defaults to [`DEFAULT_H`] = 600).
 #[no_mangle]
 pub extern "C" fn height() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_h as i32).unwrap_or(DEFAULT_H as i32))
@@ -666,7 +674,13 @@ pub extern "C" fn height() -> i32 {
 #[no_mangle]
 pub extern "C" fn set_resolution(w: i32, h: i32) {
     let (cw, ch) = clamp_resolution(w, h);
-    ensure_app(|a| a.set_render_size(cw, ch));
+    ensure_app(|a| {
+        a.set_render_size(cw, ch);
+        // Keep the Options "Screen size" label pointing at the new size too, so a
+        // programmatic set (e.g. the page restoring a saved resolution on load)
+        // doesn't leave the menu showing a stale preset.
+        a.menu.sync_resolution(cw as i32, ch as i32);
+    });
 }
 
 #[no_mangle]
@@ -801,14 +815,14 @@ pub extern "C" fn menu_select() {
             ensure_app(|a| {
                 a.walk = Some(nw);
                 a.mode = 0;
-                // Reset the menu to fresh defaults and leave it closed — exactly
-                // what the old fresh-Walk-with-fresh-Menu rebuild did. This also
-                // returns the Options "Screen size" preset to 0, so the
-                // render-size reset to DEFAULT below stays in sync with the label.
+                // Reset the menu's navigation to fresh defaults and leave it closed
+                // — exactly what the old fresh-Walk-with-fresh-Menu rebuild did.
                 a.menu = Menu::new();
-                // Fresh menu = resolution preset 0; keep the App render size in
-                // sync so the Options label and framebuffer don't desync.
-                a.set_render_size(DEFAULT_W, DEFAULT_H);
+                // PRESERVE the chosen resolution across New Game (keep the live
+                // framebuffer) and point the fresh menu's Screen-size preset at it,
+                // instead of snapping back to DEFAULT — starting a game no longer
+                // throws away a menu-picked resolution.
+                a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             });
         }
     }
@@ -1218,9 +1232,12 @@ fn run_map_command(name: Option<&str>) {
             a.console.open = false;
             // Keep the menu closed too (a `map` from the console starts play).
             a.menu = Menu::new();
-            // Preserve the player's chosen render resolution across a `map` (the
-            // C keeps the video mode); the dispatcher re-syncs the Options label
-            // to the live render size, so the fresh menu's preset can't desync.
+            // Preserve the player's chosen render resolution across a `map` (the C
+            // keeps the video mode): the framebuffer is untouched, and we eagerly
+            // point the fresh menu's Screen-size preset at it — same as every other
+            // Menu::new() site — so the Options label is correct the instant the
+            // player opens it (not relying on the per-frame sync in step()).
+            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
         None => a.console.println(format!("map not found: {name}")),
     });
@@ -3012,7 +3029,7 @@ mod tests {
     fn clamp_resolution_clamps_into_envelope() {
         // In-range values pass through unchanged.
         assert_eq!(clamp_resolution(640, 400), (640, 400));
-        assert_eq!(clamp_resolution(DEFAULT_W as i32, DEFAULT_H as i32), (320, 200));
+        assert_eq!(clamp_resolution(DEFAULT_W as i32, DEFAULT_H as i32), (DEFAULT_W, DEFAULT_H));
         // Below the minimum clamps up; above the maximum clamps down.
         assert_eq!(clamp_resolution(0, 0), (MIN_W as usize, MIN_H as usize));
         assert_eq!(clamp_resolution(-100, -100), (320, 200));
@@ -3062,10 +3079,10 @@ mod tests {
             assert_eq!(a.fb.len(), (w as usize) * (h as usize) * 4);
         });
 
-        // Back to the fast default.
+        // Back to the boot default.
         set_resolution(DEFAULT_W as i32, DEFAULT_H as i32);
-        assert_eq!(width(), 320);
-        assert_eq!(height(), 200);
+        assert_eq!(width(), DEFAULT_W as i32);
+        assert_eq!(height(), DEFAULT_H as i32);
     }
 
     #[test]
@@ -3073,28 +3090,29 @@ mod tests {
         // Boot the real walk (embedded pak). If the pak is unavailable in this
         // build the test would fail to boot; the workspace embeds a real PAK0.PAK.
         assert_eq!(boot(), 1, "boot the embedded e1m1 walk");
-        // Boot keeps the fast default resolution.
+        // Boot keeps the boot default resolution.
         assert_eq!(width(), DEFAULT_W as i32);
         assert_eq!(height(), DEFAULT_H as i32);
         step(0.016);
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), DEFAULT_W * DEFAULT_H * 4, "default fb is 320*200*4");
+            assert_eq!(a.fb.len(), DEFAULT_W * DEFAULT_H * 4, "default fb is DEFAULT_W*DEFAULT_H*4");
         });
 
-        // Pick a larger resolution, then render: the framebuffer is now 640*400*4
-        // and the scene rendered into all of it (the fb is fully written by step).
-        set_resolution(640, 400);
-        assert_eq!(width(), 640);
-        assert_eq!(height(), 400);
+        // Pick the largest preset (1280x800, > the 960x600 default), then render:
+        // the framebuffer is now 1280*800*4 and the scene rendered into all of it
+        // (the fb is fully written by step).
+        set_resolution(1280, 800);
+        assert_eq!(width(), 1280);
+        assert_eq!(height(), 800);
         step(0.016);
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), 640 * 400 * 4, "step renders into the 640*400 framebuffer");
+            assert_eq!(a.fb.len(), 1280 * 800 * 4, "step renders into the 1280*800 framebuffer");
             // Every alpha byte is 255 (step pushes opaque RGBA), proving the whole
-            // larger buffer was painted, not just the old 320x200 region.
+            // larger buffer was painted, not just the smaller default region.
             assert!(a.fb.chunks_exact(4).all(|px| px[3] == 255), "full fb painted opaque");
         });
     }
@@ -3105,9 +3123,10 @@ mod tests {
         // Screen size row with menu_right; the engine's resolution must follow.
         assert_eq!(boot(), 1);
         assert_eq!(menu_visible(), 1, "boot enters the menu");
-        // Default render size before touching anything.
-        assert_eq!(width(), 320);
-        assert_eq!(height(), 200);
+        // Default render size before touching anything (boot preserves it; a fresh
+        // app boots at DEFAULT = 960x600, which is preset index 4).
+        assert_eq!(width(), DEFAULT_W as i32);
+        assert_eq!(height(), DEFAULT_H as i32);
         // Main cursor 0 is Single Player; move down to Options (item 2) and Enter.
         menu_down(); // -> 1 (Multiplayer)
         menu_down(); // -> 2 (Options)
@@ -3119,17 +3138,50 @@ mod tests {
         menu_down(); // -> 2 (Reset to defaults)
         menu_down(); // -> 3 (Screen size)
         // menu_right on a non-resolution row wouldn't change the size; on Screen
-        // size it cycles to the next preset and reallocates the framebuffer.
+        // size it cycles to the next preset (960x600 -> 1120x700) and reallocates
+        // the framebuffer.
         menu_right();
-        assert_eq!((width(), height()), (480, 300), "right cycles to the 480x300 preset");
+        assert_eq!((width(), height()), (1120, 700), "right cycles to the 1120x700 preset");
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), 480 * 300 * 4, "fb reallocated to the new preset");
+            assert_eq!(a.fb.len(), 1120 * 700 * 4, "fb reallocated to the new preset");
         });
-        // menu_left cycles back to 320x200.
+        // menu_left cycles back to the 960x600 default.
         menu_left();
-        assert_eq!((width(), height()), (320, 200), "left cycles back to the default");
+        assert_eq!((width(), height()), (DEFAULT_W as i32, DEFAULT_H as i32), "left cycles back to the default");
+    }
+
+    #[test]
+    fn chosen_resolution_persists_across_reboot() {
+        // The reported bug: pick a resolution in Options, start the game, and it
+        // snapped back to the default. The chosen size must now carry across a
+        // re-boot (the 🚶 walk button / New Game), not reset to DEFAULT.
+        assert_eq!(boot(), 1);
+        // The engine boots at DEFAULT (960x600); pick a different, smaller preset.
+        set_resolution(640, 400);
+        assert_eq!((width(), height()), (640, 400), "menu/host set the resolution");
+
+        // Re-boot the walk: the resolution MUST be preserved, not reset to DEFAULT.
+        assert_eq!(boot(), 1);
+        assert_eq!(
+            (width(), height()),
+            (640, 400),
+            "re-boot preserves the chosen resolution (was the reported bug)"
+        );
+        // ...and the fresh menu's Screen-size preset tracks the live framebuffer,
+        // so opening Options shows the real value (no label/fb desync).
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            assert_eq!(a.render_w, 640);
+            assert_eq!(a.render_h, 400);
+            assert_eq!(
+                a.menu.resolution(),
+                (640, 400),
+                "Options Screen-size label follows the preserved framebuffer"
+            );
+        });
     }
 
     // -- attract boot: menu over the playing demo (App-level menu) --------------

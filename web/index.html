@@ -362,6 +362,28 @@ function masterVolume() {
   return (v >= 0 && v <= 1) ? v : 1.0;
 }
 
+// --- Render resolution persistence ----------------------------------------
+// The engine boots at its own default and clamps any request to its envelope
+// (320..1280 x 200..800). The in-game Options "Screen size" row changes it live
+// and it now sticks within a session (boots/New Game preserve it); here we ALSO
+// persist the choice to localStorage so it survives a page reload. Saved as a
+// "WxH" string; restored over the boot default on load.
+const RES_KEY = 'quake-rs.resolution';
+function saveResolution(w, h) {
+  try { localStorage.setItem(RES_KEY, w + 'x' + h); } catch (e) { /* private mode / blocked: ignore */ }
+}
+function restoreResolution() {
+  if (!exp || typeof exp.set_resolution !== 'function') return;
+  let saved = null;
+  try { saved = localStorage.getItem(RES_KEY); } catch (e) { return; }
+  const m = saved && /^(\d+)x(\d+)$/.exec(saved);
+  if (!m) return;
+  const w = parseInt(m[1], 10), h = parseInt(m[2], 10);
+  // Hand the raw size to the engine; it clamps to its supported envelope and
+  // syncs the Options label, so a stale/out-of-range value can never break boot.
+  if (w > 0 && h > 0) exp.set_resolution(w, h);
+}
+
 async function main() {
   const resp = await fetch('quake_wasm.wasm');
   const bytes = await resp.arrayBuffer();
@@ -376,6 +398,9 @@ async function main() {
   // built it falls back to boot() (menu over e1m1), so this is always non-zero
   // when the pak loaded. The walk/demo buttons below still call boot()/boot_demo().
   if (!exp.boot_attract()) { statusEl.textContent = 'boot_attract() failed'; return; }
+  // Restore a previously-chosen resolution (if any) over the boot default, BEFORE
+  // the first canvas sync so it's created at the right backing-store size.
+  restoreResolution();
 
   const ctx = canvas.getContext('2d');
   // The render resolution is RUNTIME state: the Options menu can grow it. Track
@@ -389,6 +414,10 @@ async function main() {
     W = w; H = h;
     canvas.width = W; canvas.height = H;
     img = ctx.createImageData(W, H);
+    // The resolution just changed (boot, or the Options "Screen size" row): persist
+    // it so a reload comes back at the same size. This is the single choke point
+    // for every resolution change, so it captures menu picks and restores alike.
+    saveResolution(W, H);
   }
   syncCanvasSize();
   statusEl.textContent = 'ready — click to play';

@@ -40,6 +40,45 @@ stand" note — read it before continuing.
 
 ---
 
+## Resolution: higher default + it now PERSISTS (2026-06-09)
+
+User report: picking a resolution in Options and then starting the game reverted it
+to the default. Root cause: `boot()` / `boot_demo()` / `boot_attract()` and the
+**New Game** branch of `menu_select()` each force-called
+`set_render_size(DEFAULT_W, DEFAULT_H)` (and `Menu::new()`), throwing away the
+menu-picked size every mode transition. (The framebuffer is the documented source of
+truth and `step()` already syncs the menu label to it each frame — so the *only*
+thing reverting the size was those four explicit resets.)
+
+**Fix:**
+- Those four resets now **preserve** the live framebuffer and instead call
+  `a.menu.sync_resolution(render_w, render_h)` so the fresh menu's "Screen size"
+  preset tracks the preserved size. `set_resolution` (export) also syncs the label
+  now, so a programmatic set can't leave it stale.
+- **Default bumped 320×200 → 960×600** (`DEFAULT_W/DEFAULT_H`; must stay a
+  `RESOLUTION_PRESETS` member so the label can sync). Per the user's pick.
+- `RESOLUTION_PRESETS` extended to a consistent 16:10 ladder up to the **1280×800**
+  clamp cap: `320×200 … 960×600, 1120×700, 1280×800` (7 presets).
+- **Cross-reload persistence** (`web/index.html`): the chosen size is saved to
+  `localStorage['quake-rs.resolution']` as `"WxH"` in `syncCanvasSize()` (the single
+  choke point for size changes) and restored after `boot_attract()` via
+  `restoreResolution()` (hands the raw value to `set_resolution`, which clamps — a
+  stale/garbage value can never break boot).
+- The `map <name>` console path (`run_map_command`) already preserved the framebuffer;
+  it now also eagerly `sync_resolution`s the fresh menu's label (was the one
+  `Menu::new()` site relying on `step()`'s per-frame sync — surfaced by an adversarial
+  multi-lens review of the diff; the other 3 lenses found nothing).
+
+**Verified:** 401 lib + 26 wasm tests pass (added
+`chosen_resolution_persists_across_reboot`; updated the preset-cycle + clamp tests).
+End-to-end headless Chromium check (in a work directory, `
+verify_resolution.py`, 9/9 pass): fresh boot = 960×600, persists to localStorage,
+reload restores a picked 640×400, **walk/boot + New Game both preserve it** (the bug),
+oversized saved value clamps to 1280×800, garbage falls back to default, no console
+errors. `web/quake_wasm.wasm` rebuilt + deployed.
+
+---
+
 ## ⭐ PERFORMANCE — render bottleneck RESOLVED (was the "key lead")
 
 The prior session's lead was correct: **a FIXED per-face cost independent of resolution**
