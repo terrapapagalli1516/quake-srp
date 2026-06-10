@@ -465,6 +465,11 @@ fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, String>
 
     // --- spawn the map's QuakeC entities ---
     let mut server = Server::new(bsp, progs).map_err(|e| e.to_string())?;
+    // SV_SpawnServer set sv.modelname/world.model/mapname before loading
+    // entities; derive the bare name from the bsp file stem.
+    if let Some(stem) = std::path::Path::new(bsp_path).file_stem().and_then(|s| s.to_str()) {
+        server.set_map_name(stem);
+    }
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let _ = writeln!(
         o,
@@ -566,6 +571,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
 
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
@@ -1026,6 +1032,7 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
     let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
 
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let _player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
@@ -1113,6 +1120,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
     let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
 
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
@@ -1254,6 +1262,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
     // resets to 1) — captured before building next_server, restored after.
     let carry_skill = server.skill();
     let mut next_server = Server::with_pak(next_bsp, next_progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    next_server.set_map_name(&next_map_name); // SV_SpawnServer for the swapped-to level
     next_server.set_skill(carry_skill as f32);
     let next_rep = next_server.spawn_entities().map_err(|e| e.to_string())?;
     let next_player = next_server
@@ -1611,6 +1620,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 
     // --- spawn the map's entities ---
     let mut server = Server::with_pak(bsp_for_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
     let report = server.spawn_entities().map_err(|e| e.to_string())?;
 
     // --- gather MDL instances from live edicts ---
@@ -1931,6 +1941,7 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
 
     // Spawn entities and gather their MDL models (drawn at fixed positions).
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
     server.spawn_entities().map_err(|e| e.to_string())?;
     let mut model_cache: std::collections::HashMap<String, Option<Mdl>> =
         std::collections::HashMap::new();

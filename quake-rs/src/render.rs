@@ -6301,6 +6301,216 @@ fn draw_solo_scoreboard(
 }
 
 // ---------------------------------------------------------------------------
+// Intermission + finale overlays (sbar.c Sbar_IntermissionOverlay /
+// Sbar_FinaleOverlay + screen.c SCR_DrawCenterString's finale char reveal)
+// ---------------------------------------------------------------------------
+
+/// The level-complete numbers `Sbar_IntermissionOverlay` (sbar.c) draws over the
+/// `gfx/inter.lmp` plaque: the completion time and the secrets/monsters counts
+/// (`cl.completed_time`, `cl.stats[STAT_SECRETS/TOTALSECRETS/MONSTERS/
+/// TOTALMONSTERS]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntermissionStats {
+    /// `cl.completed_time` in whole seconds (latched when svc_intermission arrived).
+    pub completed_time: i32,
+    /// Found secrets (`found_secrets` QuakeC global / STAT_SECRETS).
+    pub secrets: i32,
+    /// Total secrets in the level (`total_secrets` / STAT_TOTALSECRETS).
+    pub total_secrets: i32,
+    /// Killed monsters (`killed_monsters` / STAT_MONSTERS).
+    pub monsters: i32,
+    /// Total monsters in the level (`total_monsters` / STAT_TOTALMONSTERS).
+    pub total_monsters: i32,
+}
+
+/// `Sbar_IntermissionNumber` (sbar.c): draw `num` with the big white `num_*`
+/// digit pics, right-justified into `digits` 24-px slots whose LEFT edge is at
+/// virtual `vx` (a number shorter than `digits` starts `(digits-l)*24` further
+/// right; a longer one keeps only its trailing `digits` digits). Virtual
+/// coordinates in the 320x200 space, mapped by `scale`/`ox`/`oy` like the menu.
+#[allow(clippy::too_many_arguments)]
+fn intermission_number(
+    image: &mut Image,
+    wad: &crate::wad::Wad2,
+    palette: &[[u8; 3]; 256],
+    num: i32,
+    vx: f32,
+    vy: f32,
+    digits: usize,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+) {
+    // Sbar_itoa renders the (possibly negative) value; the overlay stats are
+    // never negative in practice, so render the magnitude like draw_num does.
+    let s = if num < 0 { 0 } else { num }.to_string();
+    let b = s.as_bytes();
+    let shown = if b.len() > digits { &b[b.len() - digits..] } else { b };
+    let mut x = vx + (digits.saturating_sub(shown.len())) as f32 * 24.0;
+    for &c in shown {
+        let d = (c - b'0') as usize;
+        if let Ok(pic) = wad.qpic(NUM_NAMES[d]) {
+            blit_qpic_at(image, &pic, x, vy, scale, ox, oy, palette);
+        }
+        x += 24.0; // the C steps a fixed 24 per digit slot
+    }
+}
+
+/// `Sbar_IntermissionOverlay` (sbar.c): the single-player level-complete screen —
+/// the `gfx/complete.lmp` banner at (64,24), the `gfx/inter.lmp` plaque at (0,56),
+/// and the big-number time (minutes:seconds), secrets found/total and monsters
+/// killed/total beside the plaque's labels. Drawn in the 320x200 virtual space,
+/// uniformly scaled and centered like the menu (`min(w/320, h/200)`); on the
+/// engine's 16:10 presets that equals the HUD's `w/320` with zero offset.
+///
+/// `complete`/`inter` are the two pak pics (`Draw_CachePic` in the C); either
+/// being absent just skips that blit — the numbers still draw, never a panic.
+/// The big digits and the colon/slash come from `gfx.wad` like the HUD's.
+pub fn draw_intermission_overlay(
+    image: &mut Image,
+    wad: &crate::wad::Wad2,
+    palette: &[[u8; 3]; 256],
+    complete: Option<&crate::wad::Qpic>,
+    inter: Option<&crate::wad::Qpic>,
+    stats: &IntermissionStats,
+) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let sx = image.w as f32 / MENU_VIRT_W;
+    let sy = image.h as f32 / MENU_VIRT_H;
+    let scale = sx.min(sy);
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
+    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+
+    // Draw_Pic(64, 24, "gfx/complete.lmp") — the "Level Complete" banner.
+    if let Some(pic) = complete {
+        blit_qpic_at(image, pic, 64.0, 24.0, scale, ox, oy, palette);
+    }
+    // Draw_TransPic(0, 56, "gfx/inter.lmp") — the Time/Secrets/Kills plaque.
+    if let Some(pic) = inter {
+        blit_qpic_at(image, pic, 0.0, 56.0, scale, ox, oy, palette);
+    }
+
+    // Time: minutes right-justified at (160,64) over 3 slots, then num_colon at
+    // 234 and the two second digits at 246/266 (verbatim sbar.c coordinates).
+    let t = stats.completed_time.max(0);
+    let minutes = t / 60;
+    let seconds = t - 60 * minutes;
+    intermission_number(image, wad, palette, minutes, 160.0, 64.0, 3, scale, ox, oy);
+    if let Ok(pic) = wad.qpic("num_colon") {
+        blit_qpic_at(image, &pic, 234.0, 64.0, scale, ox, oy, palette);
+    }
+    if let Ok(pic) = wad.qpic(NUM_NAMES[(seconds / 10) as usize]) {
+        blit_qpic_at(image, &pic, 246.0, 64.0, scale, ox, oy, palette);
+    }
+    if let Ok(pic) = wad.qpic(NUM_NAMES[(seconds % 10) as usize]) {
+        blit_qpic_at(image, &pic, 266.0, 64.0, scale, ox, oy, palette);
+    }
+
+    // Secrets: found at (160,104), num_slash at 232, total at 240.
+    intermission_number(image, wad, palette, stats.secrets, 160.0, 104.0, 3, scale, ox, oy);
+    if let Ok(pic) = wad.qpic("num_slash") {
+        blit_qpic_at(image, &pic, 232.0, 104.0, scale, ox, oy, palette);
+    }
+    intermission_number(image, wad, palette, stats.total_secrets, 240.0, 104.0, 3, scale, ox, oy);
+
+    // Monsters: killed at (160,144), num_slash at 232, total at 240.
+    intermission_number(image, wad, palette, stats.monsters, 160.0, 144.0, 3, scale, ox, oy);
+    if let Ok(pic) = wad.qpic("num_slash") {
+        blit_qpic_at(image, &pic, 232.0, 144.0, scale, ox, oy, palette);
+    }
+    intermission_number(image, wad, palette, stats.total_monsters, 240.0, 144.0, 3, scale, ox, oy);
+}
+
+/// `SCR_DrawCenterString` (screen.c) in its finale mode: the centered text block
+/// revealed one character at a time. `remaining` is the C's
+/// `scr_printspeed.value * (cl.time - scr_centertime_start)` budget — note the
+/// `if (!remaining--) return;` runs AFTER each `Draw_Character`, so a budget of
+/// `n` paints `n + 1` characters (one appears the instant the finale starts).
+/// Each line is scanned at most 40 characters (longer lines truncate and skip to
+/// the next `\n`), the block starts at `vid.height*0.35` for <= 4 lines else 48,
+/// and every line centers independently — all verbatim from the C.
+pub fn draw_center_string_revealed(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    palette: &[[u8; 3]; 256],
+    text: &str,
+    remaining: i32,
+) {
+    if image.w == 0 || image.h == 0 || remaining < 0 {
+        return;
+    }
+    let sx = image.w as f32 / MENU_VIRT_W;
+    let sy = image.h as f32 / MENU_VIRT_H;
+    let scale = sx.min(sy);
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
+    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+
+    let lines: Vec<&str> = text.split('\n').collect();
+    // scr_center_lines <= 4 => y = vid.height*0.35 (virtual 70); taller => 48.
+    let mut vy = if lines.len() <= 4 { 200.0 * 0.35 } else { 48.0 };
+    let mut budget = remaining;
+    for line in lines {
+        // The C scans the line width up to 40 characters.
+        let bytes = line.as_bytes();
+        let l = bytes.len().min(40);
+        let vx = (MENU_VIRT_W - l as f32 * 8.0) * 0.5;
+        for (j, &c) in bytes[..l].iter().enumerate() {
+            draw_char_scaled(image, conchars, vx + j as f32 * 8.0, vy, c, scale, ox, oy, palette);
+            if budget == 0 {
+                return; // `if (!remaining--) return;` — this char was the last.
+            }
+            budget -= 1;
+        }
+        vy += 8.0;
+    }
+}
+
+/// `Sbar_FinaleOverlay` (sbar.c) + the finale half of `SCR_DrawCenterString`
+/// (screen.c): the horizontally-centered `gfx/finale.lmp` plaque at y=16 and the
+/// episode-end text revealed at `scr_printspeed` (8) characters per second of
+/// `elapsed` (`cl.time - scr_centertime_start`). Pass `finale_pic = None` for
+/// `svc_cutscene` (`cl.intermission == 3`), which draws the text alone.
+pub fn draw_finale_overlay(
+    image: &mut Image,
+    conchars: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+    finale_pic: Option<&crate::wad::Qpic>,
+    text: &str,
+    elapsed: f32,
+) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let sx = image.w as f32 / MENU_VIRT_W;
+    let sy = image.h as f32 / MENU_VIRT_H;
+    let scale = sx.min(sy);
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
+    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+
+    // Draw_TransPic((vid.width - pic->width)/2, 16, "gfx/finale.lmp").
+    if let Some(pic) = finale_pic {
+        let vx = (MENU_VIRT_W - pic.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, pic, vx, 16.0, scale, ox, oy, palette);
+    }
+    // scr_printspeed defaults to "8" (screen.c): 8 characters per second.
+    if let Some(cc) = conchars {
+        let remaining = (8.0 * elapsed.max(0.0)).min(9999.0) as i32;
+        draw_center_string_revealed(image, cc, palette, text, remaining);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main menu (a port of menu.c: M_Main_Draw/_Key, M_SinglePlayer_Draw/_Key)
 // ---------------------------------------------------------------------------
 //
@@ -6601,6 +6811,17 @@ impl Menu {
     /// were so a later `open` resets them.
     pub fn close(&mut self) {
         self.visible = false;
+    }
+
+    /// Open the menu directly on the Help/Ordering screen (`M_Menu_Help_f`,
+    /// menu.c): what the `help` console command — and therefore the shareware
+    /// `svc_sellscreen` at episode end — runs. Resets to the first page
+    /// (`help_page = 0`) like the C.
+    pub fn open_help(&mut self) {
+        self.visible = true;
+        self.screen = MenuScreen::Help;
+        self.help_page = 0;
+        self.cursor = 0;
     }
 
     /// Toggle the menu (`M_ToggleMenu_f`): if hidden, open on the main screen; if
@@ -10987,7 +11208,8 @@ mod tests {
 
     /// Build a synthetic `gfx.wad` containing `sbar` (320x24), `num_0..num_9`
     /// (24x24, each filled with palette index `100+d` so digits are recognisable
-    /// and never transparent), and `anum_0..anum_9` (24x24, index `120+d`).
+    /// and never transparent), `anum_0..anum_9` (24x24, index `120+d`), and the
+    /// intermission `num_colon`/`num_slash` (index 140/141).
     fn build_hud_wad() -> Wad2 {
         // (name, payload) pairs.
         let mut pics: Vec<(String, Vec<u8>)> = Vec::new();
@@ -10998,6 +11220,8 @@ mod tests {
         for d in 0..10u8 {
             pics.push((format!("anum_{d}"), qpic_payload(24, 24, 120 + d)));
         }
+        pics.push(("num_colon".to_string(), qpic_payload(16, 24, 140)));
+        pics.push(("num_slash".to_string(), qpic_payload(16, 24, 141)));
 
         // Lay payloads right after the 12-byte header; build the directory after.
         let mut payloads = Vec::new();
@@ -11308,6 +11532,88 @@ mod tests {
     /// `build_hud_wad` omits: `ibar` (320x24, index 2), the 7 `inv_*` weapon icons
     /// + the 35 `inva{1..5}_*` flash icons (24x16, index 60), the 5 health faces +
     /// 4 powerup faces (24x24, index 70), the armour/ammo-type icons (24x24, index
+    /// A 128x128 conchars atlas with EVERY glyph cell solidly filled (index 95),
+    /// so any drawn character paints recognisable pixels.
+    fn solid_conchars() -> Qpic {
+        Qpic { width: 128, height: 128, data: vec![95u8; 128 * 128] }
+    }
+
+    #[test]
+    fn intermission_overlay_draws_banner_plaque_and_numbers() {
+        // Sbar_IntermissionOverlay on a 320x200 frame (scale 1, no offsets): the
+        // banner at (64,24), the plaque at (0,56), and the verbatim sbar.c number
+        // positions — minutes right-justified into 3 slots from x=160, colon at
+        // 234, second digits at 246/266; secrets/monsters rows at y=104/144 with
+        // num_slash at 232 and the totals from x=240.
+        let pal = ramp_palette();
+        let wad = build_hud_wad();
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        let complete = Qpic { width: 192, height: 24, data: vec![50u8; 192 * 24] };
+        let inter = Qpic { width: 160, height: 144, data: vec![51u8; 160 * 144] };
+        let stats = IntermissionStats {
+            completed_time: 205, // 3:25
+            secrets: 3,
+            total_secrets: 7,
+            monsters: 12,
+            total_monsters: 45,
+        };
+        draw_intermission_overlay(&mut img, &wad, &pal, Some(&complete), Some(&inter), &stats);
+
+        let px = |x: usize, y: usize| img.rgb[y * 320 + x];
+        assert_eq!(px(64 + 5, 24 + 5), [50, 50, 50], "complete.lmp banner at (64,24)");
+        assert_eq!(px(5, 56 + 100), [51, 51, 51], "inter.lmp plaque at (0,56)");
+        // Time 3:25 — "3" right-justified: x = 160 + 2*24 = 208 (num_3 = idx 103).
+        assert_eq!(px(208 + 2, 64 + 2), [103, 103, 103], "minutes digit 3 at x=208");
+        assert_eq!(px(234 + 2, 64 + 2), [140, 140, 140], "num_colon at x=234");
+        assert_eq!(px(246 + 2, 64 + 2), [102, 102, 102], "seconds tens 2 at x=246");
+        assert_eq!(px(266 + 2, 64 + 2), [105, 105, 105], "seconds units 5 at x=266");
+        // Secrets 3/7: found at x=208 (right-justified), slash 232, total at 288.
+        assert_eq!(px(208 + 2, 104 + 2), [103, 103, 103], "secrets found 3");
+        assert_eq!(px(232 + 2, 104 + 2), [141, 141, 141], "num_slash at x=232");
+        assert_eq!(px(240 + 2 * 24 + 2, 104 + 2), [107, 107, 107], "secrets total 7");
+        // Monsters 12/45: two digits start at x = 160 + 24 = 184.
+        assert_eq!(px(184 + 2, 144 + 2), [101, 101, 101], "monsters tens 1 at x=184");
+        assert_eq!(px(208 + 2, 144 + 2), [102, 102, 102], "monsters units 2 at x=208");
+        assert_eq!(px(264 + 2, 144 + 2), [104, 104, 104], "total tens 4 at x=264");
+        assert_eq!(px(288 + 2, 144 + 2), [105, 105, 105], "total units 5 at x=288");
+        // The (missing-pic) graceful path: no panic with both pics absent.
+        let mut img2 = Image::new(320, 200, [0, 0, 0]);
+        draw_intermission_overlay(&mut img2, &wad, &pal, None, None, &stats);
+        assert_eq!(px(208 + 2, 64 + 2), [103, 103, 103], "numbers still draw without pics");
+    }
+
+    #[test]
+    fn finale_center_string_reveals_at_printspeed() {
+        // SCR_DrawCenterString's finale reveal: remaining = 8 * elapsed, and the
+        // post-decrement `if (!remaining--) return;` paints remaining+1 chars.
+        let pal = ramp_palette();
+        let cc = solid_conchars();
+        // "AB\nCD": 2 lines (<= 4) so the block starts at y = 200*0.35 = 70; each
+        // 2-char line centers at vx = (320 - 16)/2 = 152.
+        let text = "AB\nCD";
+
+        // elapsed 0 -> remaining 0 -> exactly ONE char ('A') is painted.
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_finale_overlay(&mut img, Some(&cc), &pal, None, text, 0.0);
+        let px = |img: &Image, x: usize, y: usize| img.rgb[y * 320 + x];
+        assert_eq!(px(&img, 152 + 1, 70 + 1), [95, 95, 95], "first char visible at once");
+        assert_eq!(px(&img, 160 + 1, 70 + 1), [0, 0, 0], "second char not yet revealed");
+        assert_eq!(px(&img, 152 + 1, 78 + 1), [0, 0, 0], "second line not yet revealed");
+
+        // elapsed 1s -> remaining 8 -> all four chars painted (budget exceeds text).
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_finale_overlay(&mut img, Some(&cc), &pal, None, text, 1.0);
+        assert_eq!(px(&img, 160 + 1, 70 + 1), [95, 95, 95], "line 1 fully revealed");
+        assert_eq!(px(&img, 160 + 1, 78 + 1), [95, 95, 95], "line 2 fully revealed");
+
+        // The finale plaque centers horizontally at y=16 (Sbar_FinaleOverlay).
+        let plaque = Qpic { width: 100, height: 20, data: vec![52u8; 100 * 20] };
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_finale_overlay(&mut img, Some(&cc), &pal, Some(&plaque), "", 0.0);
+        assert_eq!(px(&img, 110 + 1, 16 + 1), [52, 52, 52], "finale.lmp centered at y=16");
+        assert_eq!(px(&img, 100, 16 + 1), [0, 0, 0], "left of the centered plaque is clear");
+    }
+
     /// 80/85), the key/powerup/sigil item icons, and a 128x128 `conchars` whose
     /// gold-digit cells (18..27) are non-zero so the ammo counts render.
     fn build_full_hud_wad() -> Wad2 {

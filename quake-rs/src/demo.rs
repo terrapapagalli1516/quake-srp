@@ -115,6 +115,13 @@ const SVC_CDTRACK: i32 = 32;
 const SVC_SELLSCREEN: i32 = 33;
 const SVC_CUTSCENE: i32 = 34;
 
+// The `cl.stats[]` slots (quakedef.h `STAT_*`) the intermission overlay reads.
+const MAX_CL_STATS: usize = 32;
+const STAT_TOTALSECRETS: usize = 11;
+const STAT_TOTALMONSTERS: usize = 12;
+const STAT_SECRETS: usize = 13;
+const STAT_MONSTERS: usize = 14;
+
 // Model header flags (`model.h`). `EF_ROTATE` is a *model* flag (the MDL file
 // header's `flags` field), NOT one of the entity-effects bits in
 // `CL_ParseUpdate`'s `U_EFFECTS` byte. It marks bonus pickups that spin in
@@ -311,6 +318,7 @@ pub struct EntSnapshot {
 /// them into a [`crate::tent::Beams`] store (the `CL_ParseBeam` slot list) and
 /// expands the live beams into bolt-model instances each frame
 /// (`CL_UpdateTEnts`).
+#[derive(Default)]
 pub struct DemoFrame {
     pub time: f32,
     pub view_origin: [f32; 3],
@@ -325,6 +333,37 @@ pub struct DemoFrame {
     pub particles: Vec<ParticleBurst>,
     /// `svc_temp_entity` effects fired during this frame's message block.
     pub temp_entities: Vec<TempEntityEvent>,
+    /// `cl.intermission` as of this frame (CL_ParseServerMessage): 0 = playing,
+    /// 1 = `svc_intermission` (stats overlay), 2 = `svc_finale` (plaque + text),
+    /// 3 = `svc_cutscene` (text only). A front-end draws the matching overlay.
+    pub intermission: u8,
+    /// `cl.completed_time` — the `cl.time` latched when intermission started
+    /// (drives the overlay's minutes:seconds display). 0 until then.
+    pub completed_time: f32,
+    /// The `svc_finale`/`svc_cutscene` text (`SCR_CenterPrint`), revealed at
+    /// `scr_printspeed` chars/sec from [`DemoFrame::finale_start`]. Empty until
+    /// a finale/cutscene arrives.
+    pub finale_text: String,
+    /// `scr_centertime_start` — the `cl.time` the finale text began revealing.
+    pub finale_start: f32,
+    /// The `cl.stats[]` slots the intermission overlay shows.
+    pub stats: DemoStats,
+}
+
+/// The `cl.stats[]` subset `Sbar_IntermissionOverlay` (and the solo scoreboard)
+/// reads: kills and secrets, current/total. Updated by `svc_updatestat` (the
+/// totals, sent at level start) and the `svc_killedmonster`/`svc_foundsecret`
+/// ticks (`CL_ParseServerMessage`, cl_parse.c).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DemoStats {
+    /// `cl.stats[STAT_MONSTERS]` — killed monsters.
+    pub monsters: i32,
+    /// `cl.stats[STAT_TOTALMONSTERS]`.
+    pub total_monsters: i32,
+    /// `cl.stats[STAT_SECRETS]` — found secrets.
+    pub secrets: i32,
+    /// `cl.stats[STAT_TOTALSECRETS]`.
+    pub total_secrets: i32,
 }
 
 /// A fully parsed demo: level metadata, precache tables, and all frames.
@@ -424,6 +463,15 @@ struct ClientState {
     /// `svc_spawnstaticsound` registrations (`CL_ParseStaticSound` ->
     /// `S_StaticSound` persistent loops), accumulated for [`Demo::static_sounds`].
     static_sounds: Vec<StaticSound>,
+    /// `cl.stats[]` — updated by `svc_updatestat` and the killed/secret ticks.
+    stats: [i32; MAX_CL_STATS],
+    /// `cl.intermission` — 0/1/2/3 (play / stats / finale / cutscene).
+    intermission: u8,
+    /// `cl.completed_time` — latched at `svc_intermission`/`svc_finale`/`svc_cutscene`.
+    completed_time: f32,
+    /// The finale/cutscene text (`SCR_CenterPrint`) and its reveal start time.
+    finale_text: String,
+    finale_start: f32,
 }
 
 impl ClientState {
@@ -445,6 +493,11 @@ impl ClientState {
             pending_particles: Vec::new(),
             pending_tents: Vec::new(),
             static_sounds: Vec::new(),
+            stats: [0; MAX_CL_STATS],
+            intermission: 0,
+            completed_time: 0.0,
+            finale_text: String::new(),
+            finale_start: 0.0,
         }
     }
 
@@ -469,6 +522,12 @@ impl ClientState {
         // S_StopAllSounds on the new serverinfo drops the old level's static
         // loop channels; the new signon re-registers its own.
         self.static_sounds.clear();
+        // CL_ClearState memsets cl: stats and the intermission/finale state reset.
+        self.stats = [0; MAX_CL_STATS];
+        self.intermission = 0;
+        self.completed_time = 0.0;
+        self.finale_text.clear();
+        self.finale_start = 0.0;
     }
 
     /// `CL_EntityNum` — grow the entity array up to and including `num`.
@@ -799,6 +858,16 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
         entities,
         particles,
         temp_entities,
+        intermission: cl.intermission,
+        completed_time: cl.completed_time,
+        finale_text: cl.finale_text.clone(),
+        finale_start: cl.finale_start,
+        stats: DemoStats {
+            monsters: cl.stats[STAT_MONSTERS],
+            total_monsters: cl.stats[STAT_TOTALMONSTERS],
+            secrets: cl.stats[STAT_SECRETS],
+            total_secrets: cl.stats[STAT_TOTALSECRETS],
+        },
     }
 }
 
@@ -916,9 +985,28 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
         }
 
         match cmd {
-            SVC_NOP | SVC_KILLEDMONSTER | SVC_FOUNDSECRET | SVC_INTERMISSION
-            | SVC_SELLSCREEN => {
-                // No payload bytes.
+            SVC_NOP | SVC_SELLSCREEN => {
+                // No payload bytes (svc_sellscreen just popped the Help menu).
+            }
+
+            SVC_KILLEDMONSTER => {
+                // CL_ParseServerMessage: cl.stats[STAT_MONSTERS]++.
+                cl.stats[STAT_MONSTERS] += 1;
+            }
+
+            SVC_FOUNDSECRET => {
+                // CL_ParseServerMessage: cl.stats[STAT_SECRETS]++.
+                cl.stats[STAT_SECRETS] += 1;
+            }
+
+            SVC_INTERMISSION => {
+                // cl.intermission = 1; cl.completed_time = cl.time — the level
+                // ended; frames from here on draw the stats overlay. This parser
+                // only snaps `cl.time` when a block is EMITTED, so the live value
+                // here is a block stale; the block's own svc_time (`mtime[0]`,
+                // always written first) is what cl.time would have lerped to.
+                cl.intermission = 1;
+                cl.completed_time = cl.mtime[0];
             }
 
             SVC_TIME => {
@@ -1052,8 +1140,13 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_UPDATESTAT => {
-                let _ = r.read_byte();
-                let _ = r.read_long();
+                // CL_ParseServerMessage: cl.stats[i] = value. The C Sys_Errors on
+                // i >= MAX_CL_STATS; a hostile index here just drops the value.
+                let i = r.read_byte();
+                let v = r.read_long();
+                if let Some(slot) = cl.stats.get_mut(i.max(0) as usize) {
+                    *slot = v;
+                }
             }
 
             SVC_SPAWNSTATICSOUND => {
@@ -1087,7 +1180,14 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_FINALE | SVC_CUTSCENE => {
-                let _ = r.read_string();
+                // cl.intermission = 2 (finale) / 3 (cutscene), latch the completed
+                // time, and SCR_CenterPrint the text (scr_centertime_start = cl.time
+                // drives the slow character reveal). As with svc_intermission, the
+                // block's svc_time stands in for the lerped cl.time.
+                cl.intermission = if cmd == SVC_FINALE { 2 } else { 3 };
+                cl.completed_time = cl.mtime[0];
+                cl.finale_text = r.read_string();
+                cl.finale_start = cl.mtime[0];
             }
 
             // svc_bad (0), OBSOLETE svc_spawnbinary (21), and anything else
@@ -2331,5 +2431,73 @@ mod tests {
         let frame = demo.frames.last().expect("a frame");
         let ent = frame.entities.iter().find(|e| e.modelindex == 9).unwrap();
         assert_eq!(ent.effects, EF_ROTATE, "effects byte preserved on snapshot");
+    }
+
+    #[test]
+    fn stats_and_intermission_surface_on_the_snapshot() {
+        // Block 1 (signon): serverinfo + the level's stat totals (svc_updatestat)
+        // + one monster kill + one secret. Block 2: svc_intermission. Block 3:
+        // svc_finale with its text.
+        let mut b1 = Vec::new();
+        w_byte(&mut b1, SVC_TIME);
+        w_float(&mut b1, 1.0);
+        w_byte(&mut b1, SVC_SERVERINFO);
+        w_long(&mut b1, PROTOCOL_VERSION);
+        w_byte(&mut b1, 1);
+        w_byte(&mut b1, 0);
+        w_string(&mut b1, "test");
+        w_string(&mut b1, "maps/x.bsp");
+        w_string(&mut b1, "");
+        w_string(&mut b1, "");
+        w_byte(&mut b1, SVC_UPDATESTAT);
+        w_byte(&mut b1, STAT_TOTALMONSTERS as i32);
+        w_long(&mut b1, 31);
+        w_byte(&mut b1, SVC_UPDATESTAT);
+        w_byte(&mut b1, STAT_TOTALSECRETS as i32);
+        w_long(&mut b1, 5);
+        w_byte(&mut b1, SVC_KILLEDMONSTER);
+        w_byte(&mut b1, SVC_FOUNDSECRET);
+        w_byte(&mut b1, SVC_KILLEDMONSTER);
+
+        let mut b2 = Vec::new();
+        w_byte(&mut b2, SVC_TIME);
+        w_float(&mut b2, 7.5);
+        w_byte(&mut b2, SVC_INTERMISSION);
+
+        let mut b3 = Vec::new();
+        w_byte(&mut b3, SVC_TIME);
+        w_float(&mut b3, 9.0);
+        w_byte(&mut b3, SVC_FINALE);
+        w_string(&mut b3, "the end");
+
+        let mut file = Vec::new();
+        file.extend_from_slice(b"-1\n");
+        push_block(&mut file, [0.0; 3], &b1);
+        push_block(&mut file, [0.0; 3], &b2);
+        push_block(&mut file, [0.0; 3], &b3);
+
+        let demo = parse_demo(&file).expect("parse");
+        assert_eq!(demo.frames.len(), 3);
+
+        // Frame 1: stats accumulated, no intermission yet.
+        let f1 = &demo.frames[0];
+        assert_eq!(f1.intermission, 0);
+        assert_eq!(
+            f1.stats,
+            DemoStats { monsters: 2, total_monsters: 31, secrets: 1, total_secrets: 5 }
+        );
+
+        // Frame 2: svc_intermission latched cl.completed_time = cl.time.
+        let f2 = &demo.frames[1];
+        assert_eq!(f2.intermission, 1);
+        assert_eq!(f2.completed_time, 7.5);
+        assert_eq!(f2.stats.monsters, 2, "stats persist into the intermission");
+
+        // Frame 3: svc_finale carries the text and the reveal start time.
+        let f3 = &demo.frames[2];
+        assert_eq!(f3.intermission, 2);
+        assert_eq!(f3.completed_time, 9.0);
+        assert_eq!(f3.finale_text, "the end");
+        assert_eq!(f3.finale_start, 9.0);
     }
 }

@@ -1564,11 +1564,170 @@ enum TeField {
     Entity,
 }
 
+// ---------------------------------------------------------------------------
+// MSG_ALL server-command recognizer (svc_intermission / svc_finale / ...).
+//
+// The C `PF_WriteByte`/`PF_WriteString` route a `MSG_ALL` destination into
+// `sv.reliable_datagram`, which every client's `CL_ParseServerMessage`
+// (cl_parse.c) later reads back as `svc_*` commands. The vanilla progs writes
+// exactly these commands to MSG_ALL: `svc_killedmonster`/`svc_foundsecret`
+// (one byte, no payload — the engine reads the kill/secret counts from the
+// QuakeC globals directly, so these are recognised but not surfaced),
+// `svc_intermission` (no payload), `svc_finale` (+ one `WriteString`),
+// `svc_cdtrack` (+ two payload bytes: track, looptrack) and `svc_sellscreen`
+// (no payload); mission packs add `svc_cutscene` (+ string). This headless
+// server has no datagram, so — exactly like the temp-entity decoder above —
+// the Write* builtins feed a tiny recognizer whose completed commands queue as
+// [`SvcEvent`]s until [`Server::drain_svc_events`] hands them to the front-end
+// (which plays the client role: intermission camera, finale text, stats overlay).
+// ---------------------------------------------------------------------------
+
+/// `MSG_ALL` (pr_cmds.c `WriteDest`): the reliable broadcast message every
+/// client receives — the destination of the intermission/finale/stat commands.
+const MSG_ALL: i32 = 2;
+
+// The `svc_*` command bytes (protocol.h) the vanilla progs writes to MSG_ALL.
+const SVC_KILLEDMONSTER: u8 = 27;
+const SVC_FOUNDSECRET: u8 = 28;
+const SVC_INTERMISSION: u8 = 30;
+const SVC_FINALE: u8 = 31;
+const SVC_CDTRACK: u8 = 32;
+const SVC_SELLSCREEN: u8 = 33;
+const SVC_CUTSCENE: u8 = 34;
+
+/// One recognised MSG_ALL server command, surfaced to the front-end the way the
+/// client's `CL_ParseServerMessage` (cl_parse.c) would have acted on it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SvcEvent {
+    /// `svc_intermission` (30): the level ended — the C set `cl.intermission = 1`,
+    /// latched `cl.completed_time = cl.time` and went full-screen for the
+    /// intermission camera + `Sbar_IntermissionOverlay` stats.
+    Intermission,
+    /// `svc_finale` (31) + its `WriteString` payload: episode-end text — the C set
+    /// `cl.intermission = 2` and `SCR_CenterPrint`ed the string (slow char reveal).
+    Finale(String),
+    /// `svc_cutscene` (34) + its string: `cl.intermission = 3` (text only, no
+    /// plaque). Unused by the vanilla progs (mission packs use it).
+    Cutscene(String),
+    /// `svc_sellscreen` (33): the shareware "order the full game" pitch — the C ran
+    /// `Cmd_ExecuteString("help")`, i.e. opened the Help/Ordering pages.
+    SellScreen,
+}
+
+/// The MSG_ALL recognizer state. Like [`TeState`], deliberately total: any
+/// unexpected write resets to `Idle` rather than guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SvcAllState {
+    /// Between commands: the next `WriteByte` is an `svc_*` command byte.
+    Idle,
+    /// `svc_finale`/`svc_cutscene` seen; awaiting the `WriteString` payload.
+    /// `cutscene` distinguishes which event to emit.
+    AwaitString { cutscene: bool },
+    /// `svc_cdtrack` seen; the next N `WriteByte`s (track, looptrack) are payload
+    /// and must be consumed so they are not mistaken for command bytes.
+    SkipBytes(u8),
+}
+
+thread_local! {
+    /// The MSG_ALL recognizer state (per-thread, like [`TE_STATE`]). Reset at the
+    /// top of each server frame and in [`Server::with_pak`].
+    static SVC_ALL_STATE: std::cell::RefCell<SvcAllState> =
+        const { std::cell::RefCell::new(SvcAllState::Idle) };
+    /// Completed MSG_ALL commands awaiting a [`Server::drain_svc_events`].
+    static SVC_EVENTS: std::cell::RefCell<Vec<SvcEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a completed MSG_ALL command onto the thread-local queue.
+fn push_svc_event(ev: SvcEvent) {
+    SVC_EVENTS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued MSG_ALL command.
+fn take_svc_events() -> Vec<SvcEvent> {
+    SVC_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Reset the recognizer to `Idle`, dropping any half-collected command. Called
+/// at the start of each server frame (next to [`reset_temp_entity_decoder`]) so
+/// a partial command left by an errored think never bleeds into the next frame.
+fn reset_svc_recognizer() {
+    SVC_ALL_STATE.with(|s| *s.borrow_mut() = SvcAllState::Idle);
+}
+
+/// Feed one `WriteByte`/`WriteChar` value to the MSG_ALL recognizer (a no-op for
+/// any other destination). Unknown command bytes are ignored where the real
+/// stream would carry their payload too — the vanilla progs only ever writes the
+/// commands modelled here, so anything else is simply dropped, never panicking.
+fn svc_all_feed_byte(dest: i32, value: f32) {
+    if dest != MSG_ALL {
+        return;
+    }
+    SVC_ALL_STATE.with(|cell| {
+        let mut st = cell.borrow_mut();
+        match *st {
+            SvcAllState::Idle => {
+                let b = value as i32;
+                match if (0..=255).contains(&b) { b as u8 } else { 0 } {
+                    SVC_INTERMISSION => push_svc_event(SvcEvent::Intermission),
+                    SVC_FINALE => *st = SvcAllState::AwaitString { cutscene: false },
+                    SVC_CUTSCENE => *st = SvcAllState::AwaitString { cutscene: true },
+                    SVC_CDTRACK => *st = SvcAllState::SkipBytes(2),
+                    SVC_SELLSCREEN => push_svc_event(SvcEvent::SellScreen),
+                    // Stat ticks: the front-end reads killed_monsters /
+                    // found_secrets from the QuakeC globals (like the Tab
+                    // scoreboard), so these single-byte commands need no event.
+                    SVC_KILLEDMONSTER | SVC_FOUNDSECRET => {}
+                    _ => {} // unknown command byte: ignore (stay Idle).
+                }
+            }
+            SvcAllState::AwaitString { .. } => {
+                // A byte where the string was expected: desync; drop the command.
+                *st = SvcAllState::Idle;
+            }
+            SvcAllState::SkipBytes(n) => {
+                *st = if n <= 1 { SvcAllState::Idle } else { SvcAllState::SkipBytes(n - 1) };
+            }
+        }
+    });
+}
+
+/// Feed one `WriteString` value to the MSG_ALL recognizer (a no-op for any other
+/// destination): completes a pending `svc_finale`/`svc_cutscene`.
+fn svc_all_feed_string(dest: i32, text: String) {
+    if dest != MSG_ALL {
+        return;
+    }
+    SVC_ALL_STATE.with(|cell| {
+        let mut st = cell.borrow_mut();
+        if let SvcAllState::AwaitString { cutscene } = *st {
+            push_svc_event(if cutscene {
+                SvcEvent::Cutscene(text)
+            } else {
+                SvcEvent::Finale(text)
+            });
+        }
+        // A string outside AwaitString is not part of any modelled command; either
+        // way the recognizer returns to Idle.
+        *st = SvcAllState::Idle;
+    });
+}
+
+/// Feed a non-byte, non-string write to the recognizer: no modelled MSG_ALL
+/// command carries one, so it can only mean desync — reset to `Idle`.
+fn svc_all_feed_other(dest: i32) {
+    if dest != MSG_ALL {
+        return;
+    }
+    reset_svc_recognizer();
+}
+
 /// `PF_WriteByte` (#52): `void(float to, float value)`. Feeds the decoder an
 /// 8-bit field. The C did `MSG_WriteByte(WriteDest(), G_FLOAT(PARM1))`; here the
 /// destination is `PARM0` and the value `PARM1`.
 fn bi_writebyte(vm: &mut Vm) -> Result<()> {
     te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    svc_all_feed_byte(vm.arg_float(0) as i32, vm.arg_float(1));
     Ok(())
 }
 
@@ -1576,12 +1735,14 @@ fn bi_writebyte(vm: &mut Vm) -> Result<()> {
 /// uses a char field, but it is decoded as a byte so the stream stays in sync.
 fn bi_writechar(vm: &mut Vm) -> Result<()> {
     te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    svc_all_feed_byte(vm.arg_float(0) as i32, vm.arg_float(1));
     Ok(())
 }
 
 /// `PF_WriteShort` (#54): a 16-bit integer field (the beam types' entity index).
 fn bi_writeshort(vm: &mut Vm) -> Result<()> {
     te_feed(vm.arg_float(0) as i32, TeField::Short, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
     Ok(())
 }
 
@@ -1589,6 +1750,7 @@ fn bi_writeshort(vm: &mut Vm) -> Result<()> {
 /// entity carries a long, but it keeps the stream synchronised if one appears).
 fn bi_writelong(vm: &mut Vm) -> Result<()> {
     te_feed(vm.arg_float(0) as i32, TeField::Short, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
     Ok(())
 }
 
@@ -1596,6 +1758,7 @@ fn bi_writelong(vm: &mut Vm) -> Result<()> {
 /// `*8` short; we capture the float value directly (the task notes this is fine).
 fn bi_writecoord(vm: &mut Vm) -> Result<()> {
     te_feed(vm.arg_float(0) as i32, TeField::Coord, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
     Ok(())
 }
 
@@ -1608,14 +1771,19 @@ fn bi_writeangle(vm: &mut Vm) -> Result<()> {
     // so it cannot be mistaken for a coordinate (keeps Coords3 in sync if a
     // writer ever interleaved one, which the stock game never does).
     te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
     Ok(())
 }
 
-/// `PF_WriteString` (#58): a string field. Temp entities carry no strings; this
-/// is a no-op on the decoder (a string write inside a message is not a coord/byte,
-/// so feeding it would risk a false field — we simply ignore it). The C wrote it
-/// to the destination buffer; here there is nothing to do.
-fn bi_writestring(_vm: &mut Vm) -> Result<()> {
+/// `PF_WriteString` (#58): a string field. Temp entities carry no strings (the
+/// broadcast decoder ignores it), but a MSG_ALL string completes a pending
+/// `svc_finale`/`svc_cutscene` — the episode-end text the client's
+/// `CL_ParseServerMessage` read with `MSG_ReadString` and `SCR_CenterPrint`ed.
+fn bi_writestring(vm: &mut Vm) -> Result<()> {
+    let dest = vm.arg_float(0) as i32;
+    if dest == MSG_ALL {
+        svc_all_feed_string(dest, vm.arg_string(1));
+    }
     Ok(())
 }
 
@@ -1631,6 +1799,7 @@ fn bi_writeentity(vm: &mut Vm) -> Result<()> {
         TeField::Entity,
         vm.arg_entity(1) as f32,
     );
+    svc_all_feed_other(vm.arg_float(0) as i32);
     Ok(())
 }
 
@@ -2027,6 +2196,10 @@ impl Server {
         // Likewise a pending localcmd("restart") respawn must not survive into a
         // freshly spawned server.
         reset_restart();
+        // And a half-recognised / queued MSG_ALL command (an intermission fired on
+        // the OLD level must never start one on this fresh server).
+        reset_svc_recognizer();
+        let _ = take_svc_events();
         // The light-style transport is also per-thread and outlives a server;
         // clear it so a prior level's patterns cannot leak before this level's
         // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of
@@ -2060,6 +2233,28 @@ impl Server {
     /// The current `time` global.
     pub fn time(&self) -> f32 {
         self.vm.gget_float("time")
+    }
+
+    /// `SV_SpawnServer` (sv_main.c): the parts of the world-edict/globals setup
+    /// that need the MAP NAME, which the constructor never sees — the world
+    /// edict's `model` field (`"maps/<name>.bsp"`; the QuakeC episode-end check
+    /// `world.model == "maps/e1m7.bsp"` in `ExitIntermission` reads it) and the
+    /// `mapname` global (the bare name; `samelevel`/`noexit`/`NextLevel` read
+    /// it). Call after construction and BEFORE [`Server::spawn_entities`],
+    /// exactly where the C set them (worldspawn's entity-lump keys never include
+    /// `model`, so the value survives the parse). `name` may be bare (`"e1m7"`)
+    /// or a pak path (`"maps/e1m7.bsp"`); both derive the same pair.
+    ///
+    /// DEVIATION: the C also set the world edict's `modelindex`/`solid`/
+    /// `movetype` here; this port's collision and physics special-case edict 0
+    /// everywhere instead, and the stock QuakeC never reads those world fields,
+    /// so they stay unset to keep the world edict out of the mover paths.
+    pub fn set_map_name(&mut self, name: &str) {
+        let bare = name.trim_start_matches("maps/").trim_end_matches(".bsp").to_string();
+        let full = format!("maps/{bare}.bsp");
+        self.vm.ent_set_string(0, "model", &full);
+        let s = self.vm.intern(&bare);
+        self.vm.gset_int("mapname", s);
     }
 
     /// The raw light-style pattern string at index `style`, or `""` for an unset
@@ -2367,6 +2562,7 @@ impl Server {
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
         reset_temp_entity_decoder();
+        reset_svc_recognizer();
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
         self.cleanup_ents();
         let start_time = self.time();
@@ -3455,6 +3651,7 @@ impl Server {
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
         reset_temp_entity_decoder();
+        reset_svc_recognizer();
         // Drop any changelevel() / restart request a *prior* frame left unconsumed
         // (a well-behaved front-end drains it immediately, but a stale request must
         // never trigger a swap/respawn a frame late or against the wrong level).
@@ -3809,6 +4006,17 @@ impl Server {
     /// (mirrors [`Server::drain_sounds`]/[`Server::drain_particles`]).
     pub fn drain_temp_entities(&mut self) -> Vec<TempEntityEvent> {
         take_temp_entities()
+    }
+
+    /// Take and clear the queued MSG_ALL server commands recognised from the
+    /// QuakeC's `WriteByte(MSG_ALL, ...)` bursts since the last drain
+    /// (`svc_intermission` / `svc_finale` / `svc_cutscene` / `svc_sellscreen`).
+    /// A front-end calls this once per frame and plays the client role of
+    /// `CL_ParseServerMessage` (cl_parse.c): enter intermission mode, latch the
+    /// completed time, start the finale text reveal. Thread-local like
+    /// [`Server::drain_temp_entities`] — call it on the thread that drove the frame.
+    pub fn drain_svc_events(&mut self) -> Vec<SvcEvent> {
+        take_svc_events()
     }
 
     /// Enumerate the per-frame entity dynamic-light contributions, porting the
@@ -8491,6 +8699,109 @@ mod tests {
         assert!(
             server.drain_temp_entities().is_empty(),
             "drain_temp_entities cleared the queue"
+        );
+    }
+
+    /// Drive a `WriteString(dest, text)` builtin (interning the text first, as
+    /// the progs loader would have).
+    fn write_string(server: &mut Server, dest: i32, text: &str) {
+        let ofs = server.vm.intern(text);
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gi(OFS_PARM0 + 3, ofs);
+        bi_writestring(&mut server.vm).expect("bi_writestring");
+    }
+    /// A fresh server plus a cleared MSG_ALL recognizer/queue (thread-locals
+    /// persist across tests on one thread, so reset before each scenario).
+    fn svc_server() -> Server {
+        let server = te_server();
+        reset_svc_recognizer();
+        let _ = take_svc_events();
+        server
+    }
+
+    #[test]
+    fn svc_intermission_byte_on_msg_all_yields_event() {
+        // execute_changelevel (client.qc): WriteByte(MSG_ALL, SVC_INTERMISSION).
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
+        assert!(server.drain_svc_events().is_empty(), "drain cleared the queue");
+    }
+
+    #[test]
+    fn svc_finale_byte_plus_string_yields_finale_text() {
+        // ExitIntermission (client.qc): WriteByte(MSG_ALL, SVC_FINALE) then
+        // WriteString(MSG_ALL, <episode text>).
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_FINALE as f32);
+        assert!(server.drain_svc_events().is_empty(), "no event until the string lands");
+        write_string(&mut server, MSG_ALL, "the Rune of Earth Magic");
+        assert_eq!(
+            server.drain_svc_events(),
+            vec![SvcEvent::Finale("the Rune of Earth Magic".into())]
+        );
+    }
+
+    #[test]
+    fn svc_cdtrack_payload_bytes_do_not_desync_the_stream() {
+        // ExitIntermission writes cdtrack THEN the finale: WriteByte(MSG_ALL, 32),
+        // WriteByte(MSG_ALL, 2), WriteByte(MSG_ALL, 3) — the two payload bytes must
+        // be consumed, not read as commands — then the intermission/finale follows.
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_CDTRACK as f32);
+        write_byte(&mut server, MSG_ALL, 2.0);
+        write_byte(&mut server, MSG_ALL, 3.0);
+        write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
+    }
+
+    #[test]
+    fn svc_stat_ticks_and_other_destinations_yield_no_events() {
+        let mut server = svc_server();
+        // killed_monsters/found_secrets arrive as bare MSG_ALL bytes; the engine
+        // reads the counts from the QuakeC globals, so no event surfaces.
+        write_byte(&mut server, MSG_ALL, SVC_KILLEDMONSTER as f32);
+        write_byte(&mut server, MSG_ALL, SVC_FOUNDSECRET as f32);
+        // A broadcast (MSG_BROADCAST=0) temp-entity burst must not feed the
+        // MSG_ALL recognizer even though 30 is svc_intermission.
+        write_byte(&mut server, 0, SVC_INTERMISSION as f32);
+        // MSG_ONE / MSG_INIT are likewise ignored.
+        write_byte(&mut server, 1, SVC_INTERMISSION as f32);
+        write_byte(&mut server, 3, SVC_INTERMISSION as f32);
+        assert!(server.drain_svc_events().is_empty());
+    }
+
+    #[test]
+    fn svc_sellscreen_and_cutscene_recognised() {
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_SELLSCREEN as f32);
+        write_byte(&mut server, MSG_ALL, SVC_CUTSCENE as f32);
+        write_string(&mut server, MSG_ALL, "cut");
+        assert_eq!(
+            server.drain_svc_events(),
+            vec![SvcEvent::SellScreen, SvcEvent::Cutscene("cut".into())]
+        );
+    }
+
+    #[test]
+    fn svc_recognizer_resets_on_unexpected_write_and_new_server() {
+        let mut server = svc_server();
+        // A non-byte/string MSG_ALL write mid-command means desync: drop it.
+        write_byte(&mut server, MSG_ALL, SVC_FINALE as f32);
+        write_short(&mut server, MSG_ALL, 7.0);
+        write_string(&mut server, MSG_ALL, "late text");
+        assert!(
+            server.drain_svc_events().is_empty(),
+            "desynced finale dropped, stray string ignored"
+        );
+        // A queued event from the OLD level must not leak across a new server
+        // (with_pak clears state + queue, mirroring reset_changelevel).
+        write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
+        let fresh = svc_server();
+        drop(fresh);
+        assert!(
+            take_svc_events().is_empty(),
+            "a fresh server cleared the queued events"
         );
     }
 

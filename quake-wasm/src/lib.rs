@@ -188,6 +188,30 @@ struct Walk {
     /// Reused per-frame scratch for the expanded beam pieces (no per-frame
     /// allocation on the common no-beam frames; `Beams::update` clears it).
     beam_scratch: Vec<BeamSegment>,
+    /// `cl.intermission` (client.h): 0 = playing, 1 = the level-complete stats
+    /// overlay (svc_intermission), 2 = the episode finale text + plaque
+    /// (svc_finale), 3 = cutscene text only (svc_cutscene). While non-zero the
+    /// view is the QC-placed intermission camera (V_CalcIntermissionRefdef): no
+    /// bob/roll/punch, no viewmodel, no status bar.
+    intermission: u8,
+    /// `cl.completed_time` — the clock latched when the intermission started
+    /// (the overlay's minutes:seconds completion time).
+    completed_time: f32,
+    /// The `svc_finale`/`svc_cutscene` text (`SCR_CenterPrint`'d in the C),
+    /// revealed at `scr_printspeed` (8) chars/sec from `finale_start`.
+    finale_text: String,
+    /// `scr_centertime_start` — the clock when the finale text began revealing.
+    finale_start: f32,
+    /// `svc_sellscreen` arrived this frame: the C ran `Cmd_ExecuteString("help")`,
+    /// i.e. popped the Help/Ordering menu — the `step` dispatcher (which owns the
+    /// menu) takes this flag and opens it.
+    pending_sellscreen: bool,
+    /// `gfx/complete.lmp` — the "Level Complete" banner (Sbar_IntermissionOverlay).
+    pic_complete: Option<Qpic>,
+    /// `gfx/inter.lmp` — the Time/Secrets/Kills intermission plaque.
+    pic_inter: Option<Qpic>,
+    /// `gfx/finale.lmp` — the finale plaque (Sbar_FinaleOverlay).
+    pic_finale: Option<Qpic>,
 }
 
 /// Recorded-demo playback state.
@@ -225,6 +249,16 @@ struct DemoPlay {
     beams: Beams,
     /// Reused per-frame scratch for the expanded beam pieces.
     beam_scratch: Vec<BeamSegment>,
+    /// `gfx.wad` (the big digit pics) for a recorded intermission's stats
+    /// overlay; `None` degrades to no overlay, never a panic.
+    gfx_wad: Option<quake_rs::wad::Wad2>,
+    /// The conchars font for a recorded finale's revealed center string.
+    conchars: Option<Qpic>,
+    /// `gfx/complete.lmp` / `gfx/inter.lmp` / `gfx/finale.lmp` — the plaques a
+    /// recorded intermission/finale frame draws (Sbar_Intermission/FinaleOverlay).
+    pic_complete: Option<Qpic>,
+    pic_inter: Option<Qpic>,
+    pic_finale: Option<Qpic>,
 }
 
 struct App {
@@ -437,6 +471,14 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
     let colormap = read("gfx/colormap.lmp");
     let conchars = gfx_wad.as_ref().and_then(render::conchars_pic);
+    // The intermission/finale plaques are pak `.lmp` pics (Draw_CachePic in the
+    // C), loaded once like the menu pics; any absent one just doesn't draw.
+    let lmp = |n: &str| -> Option<Qpic> {
+        pak.read_file(n).ok().flatten().and_then(|b| Qpic::parse(&b).ok())
+    };
+    let pic_complete = lmp("gfx/complete.lmp");
+    let pic_inter = lmp("gfx/inter.lmp");
+    let pic_finale = lmp("gfx/finale.lmp");
     let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
@@ -446,6 +488,9 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     // Discard any static-sound registrations a previously FAILED spawn left in
     // the thread-local registry, so this level's drain below is exactly its own.
     let _ = server.drain_static_sounds();
+    // SV_SpawnServer set world.model + the mapname global before loading the
+    // entities (the QuakeC episode-end finale check reads world.model).
+    server.set_map_name(map);
     server.spawn_entities().ok()?;
     let player = server.connect_client().ok()?;
     // Capture the level-entry spawn parms (the just-connected, full-state player) so
@@ -499,6 +544,14 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         dlights: DynamicLights::new(),
         beams: Beams::new(),
         beam_scratch: Vec::new(),
+        intermission: 0,
+        completed_time: 0.0,
+        finale_text: String::new(),
+        finale_start: 0.0,
+        pending_sellscreen: false,
+        pic_complete,
+        pic_inter,
+        pic_finale,
     })
 }
 
@@ -555,6 +608,11 @@ fn build_demo() -> Option<DemoPlay> {
     // too — the e1m3 demo has its own torches).
     bump_sound_generation();
     queue_static_sounds(&pak, &demo.static_sounds);
+    // The overlay assets for a recorded intermission/finale (each optional —
+    // a demo without one never touches them).
+    let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
+    let conchars = gfx_wad.as_ref().and_then(render::conchars_pic);
+    let lmp = |n: &str| -> Option<Qpic> { read(n).and_then(|b| Qpic::parse(&b).ok()) };
     Some(DemoPlay {
         bsp,
         palette,
@@ -570,6 +628,11 @@ fn build_demo() -> Option<DemoPlay> {
         last_spawned_idx: usize::MAX,
         beams: Beams::new(),
         beam_scratch: Vec::new(),
+        pic_complete: lmp("gfx/complete.lmp"),
+        pic_inter: lmp("gfx/inter.lmp"),
+        pic_finale: lmp("gfx/finale.lmp"),
+        gfx_wad,
+        conchars,
     })
 }
 
@@ -1340,7 +1403,7 @@ pub extern "C" fn step(dt: f32) {
         // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it
         // after the HUD/menu/console have composited, not just over the 3D view.
         let frame = if a.mode == 1 {
-            a.demo.as_mut().map(|d| step_demo(d, dt, w, h))
+            a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
         } else {
             a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
         };
@@ -1348,6 +1411,17 @@ pub extern "C" fn step(dt: f32) {
             Some((image, bc, ba)) => (Some(image), (bc, ba)),
             None => (None, ([0u8, 0, 0], 0.0f32)),
         };
+
+        // svc_sellscreen (cl_parse.c): the C ran `Cmd_ExecuteString("help")` —
+        // pop the Help/Ordering menu (the shareware episode-end "order Quake"
+        // pitch). The walk raised the flag during its step; the menu (owned
+        // here, at the App level) opens on the Help screen for the next frame.
+        if let Some(wk) = a.walk.as_mut() {
+            if wk.pending_sellscreen {
+                wk.pending_sellscreen = false;
+                a.menu.open_help();
+            }
+        }
 
         // The main menu overlays WHATEVER is playing (walk OR the attract demo).
         // Drawn here in the dispatcher, after the active mode rendered its frame
@@ -2146,6 +2220,8 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let Ok(progs) = Progs::parse(&progs_bytes) else { return };
 
     let Ok(mut ns) = Server::with_pak(sim_bsp, progs, Some(w.pak.clone())) else { return };
+    // SV_SpawnServer: world.model + the mapname global, before the entities load.
+    ns.set_map_name(&map_file);
     // Restore the carried serverflags onto the new server BEFORE spawning its
     // entities, mirroring the C (SV_SpawnServer restores svs.serverflags before
     // ED_LoadFromFile), so the new level's worldspawn — which reads serverflags
@@ -2201,6 +2277,13 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.last_armor = f32::NAN;
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
+    // CL_ClearState: the new level starts OUT of intermission (cl.intermission=0)
+    // with no stale finale text or sellscreen request.
+    w.intermission = 0;
+    w.completed_time = 0.0;
+    w.finale_text.clear();
+    w.finale_start = 0.0;
+    w.pending_sellscreen = false;
     // Drop any events the *outgoing* server queued (the new server starts fresh).
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
@@ -2210,6 +2293,7 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // ramp, captured above right after spawn_entities.
     bump_sound_generation();
     queue_static_sounds(&w.pak, &statics);
+    let _ = w.server.drain_svc_events();
 }
 
 /// Single-player respawn: reload the CURRENT level fresh and reconnect the player
@@ -2230,6 +2314,8 @@ fn try_restart(w: &mut Walk) {
     let Ok(progs) = Progs::parse(&progs_bytes) else { return };
 
     let Ok(mut ns) = Server::with_pak(sim_bsp, progs, Some(w.pak.clone())) else { return };
+    // SV_SpawnServer: world.model + the mapname global, before the entities load.
+    ns.set_map_name(&w.map_name);
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
     // Static-loop bookkeeping mirrors try_changelevel: discard stale
@@ -2262,12 +2348,19 @@ fn try_restart(w: &mut Walk) {
     w.last_health = f32::NAN;
     w.last_armor = f32::NAN;
     w.oldz = f32::NAN;
+    // Same intermission/finale reset as a changelevel (CL_ClearState).
+    w.intermission = 0;
+    w.completed_time = 0.0;
+    w.finale_text.clear();
+    w.finale_start = 0.0;
+    w.pending_sellscreen = false;
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();
     // Stop the dead run's loops; restart the fresh level's (see try_changelevel).
     bump_sound_generation();
     queue_static_sounds(&w.pak, &statics);
+    let _ = w.server.drain_svc_events();
 }
 
 fn step_walk(
@@ -2323,6 +2416,38 @@ fn step_walk(
     // weapon switch rather than re-selecting every frame).
     w.next_impulse = 0;
     let _ = w.server.client_frame(&cmd, dt);
+
+    // 1a. MSG_ALL server commands (CL_ParseServerMessage, cl_parse.c): the QuakeC
+    //     end-of-level chain WriteBytes svc_intermission / svc_finale (+ text) /
+    //     svc_sellscreen to every client; play the client role here — enter
+    //     intermission mode, latch cl.completed_time, start the finale reveal.
+    for ev in w.server.drain_svc_events() {
+        match ev {
+            quake_rs::server::SvcEvent::Intermission => {
+                // cl.intermission = 1; cl.completed_time = cl.time.
+                w.intermission = 1;
+                w.completed_time = w.clock;
+            }
+            quake_rs::server::SvcEvent::Finale(text) => {
+                // cl.intermission = 2 + SCR_CenterPrint (scr_centertime_start).
+                w.intermission = 2;
+                w.completed_time = w.clock;
+                w.finale_text = text;
+                w.finale_start = w.clock;
+            }
+            quake_rs::server::SvcEvent::Cutscene(text) => {
+                // cl.intermission = 3 (text only, no plaque).
+                w.intermission = 3;
+                w.completed_time = w.clock;
+                w.finale_text = text;
+                w.finale_start = w.clock;
+            }
+            quake_rs::server::SvcEvent::SellScreen => {
+                // Cmd_ExecuteString("help"): the dispatcher opens the Help menu.
+                w.pending_sellscreen = true;
+            }
+        }
+    }
 
     // 1b. Level transition: a trigger_changelevel the player crossed this frame
     //     ran the QuakeC changelevel() builtin, which only *recorded* the next
@@ -2616,8 +2741,24 @@ fn step_walk(
     }
 
     // 5. Render from the player's eye, with Quake's head-bob added to the eye
-    //    height (V_CalcBob) so the view rocks as the player moves.
-    let (mut eye, ang) = w.server.player_view();
+    //    height (V_CalcBob) so the view rocks as the player moves. During an
+    //    intermission the refdef is V_CalcIntermissionRefdef (view.c) instead:
+    //    the QuakeC moved the player entity to the info_intermission spot, so
+    //    the camera is the RAW entity origin + angles — no view_ofs, no bob, no
+    //    punch, no strafe/death roll — plus the forced v_idlescale=1 sway of
+    //    V_AddIdle (the gentle drift id's intermission camera has).
+    let intermission = w.intermission != 0;
+    let (mut eye, ang) = if intermission {
+        // ent->origin / ent->angles: the QC set `angles = pos.mangle` (fixangle)
+        // and froze the player MOVETYPE_NONE, which SV_ClientThink early-outs on,
+        // so the spot's angles survive the per-frame mouse v_angle updates.
+        (
+            w.server.vm.ent_get_vector(w.player, "origin"),
+            w.server.vm.ent_get_vector(w.player, "angles"),
+        )
+    } else {
+        w.server.player_view()
+    };
     let vel = w.server.vm.ent_get_vector(w.player, "velocity");
     let speed_xy = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
     let bob = render::view_bob(speed_xy, w.clock);
@@ -2642,14 +2783,15 @@ fn step_walk(
     update_ambient_channels(&w.bsp, eye, dt);
 
     // Bob the rendered eye only (the listener pose above stays steady so audio
-    // panning does not jitter with the head-bob).
-    eye[2] += bob;
-    // Stair-step view smoothing (view.c V_CalcRefdef ~960): while on the ground and
-    // the player's origin Z rose this frame, lag the eye Z behind by up to 12 units
-    // and catch up at 80 u/s, so climbing stairs glides instead of jolting up each
-    // 16/18-unit step. The delta is relative to the raw origin Z (bob layered on
-    // top); on first frame / not-climbing, oldz tracks origin exactly (no offset).
-    {
+    // panning does not jitter with the head-bob). Skipped during intermission
+    // (V_CalcIntermissionRefdef has no bob and no stair smoothing).
+    if !intermission {
+        eye[2] += bob;
+        // Stair-step view smoothing (view.c V_CalcRefdef ~960): while on the ground
+        // and the player's origin Z rose this frame, lag the eye Z behind by up to 12
+        // units and catch up at 80 u/s, so climbing stairs glides instead of jolting
+        // up each 16/18-unit step. The delta is relative to the raw origin Z (bob
+        // layered on top); on first frame / not-climbing, oldz tracks origin exactly.
         let origin_z = w.server.vm.ent_get_vector(w.player, "origin")[2];
         let onground = (w.server.vm.ent_get_float(w.player, "flags") as i32) & FL_ONGROUND != 0;
         if w.oldz.is_finite() && onground && origin_z - w.oldz > 0.0 {
@@ -2665,24 +2807,37 @@ fn step_walk(
             w.oldz = origin_z;
         }
     }
-    // Add the weapon-fire view kick (cl.punchangle, view.c:957); the engine's
-    // drop_punch_angle already decays it back to zero each frame.
-    let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
-    // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity, plus
-    // the punchangle's roll component; the dead-view tilt (80°) overrides when the
-    // player is dead. (The damage-kick roll needs svc_damage state, not yet wired.)
-    let body_angles = w.server.vm.ent_get_vector(w.player, "angles");
-    let mut roll =
-        quake_rs::server::v_calc_roll(body_angles, vel) + punch[2];
-    if w.server.vm.ent_get_float(w.player, "health") <= 0.0 {
-        roll = 80.0; // dead view angle (replaces, per V_CalcViewRoll)
-    }
-    let cam = Camera {
-        pos: eye,
-        yaw: ang[1] + punch[1],
-        pitch: -(ang[0] + punch[0]), // QuakeC pitch is +down; the renderer's is +up.
-        roll,
-        fov_deg: 90.0,
+    let cam = if intermission {
+        // V_AddIdle with v_idlescale forced to 1 (view.c V_CalcIntermissionRefdef):
+        // angle += sin(cl.time * v_i*_cycle) * v_i*_level, with the stock cvar
+        // defaults — roll 0.5/0.1, pitch 1/0.3, yaw 2/0.3.
+        Camera {
+            pos: eye,
+            yaw: ang[1] + (w.clock * 2.0).sin() * 0.3,
+            // QuakeC pitch is +down; the renderer's is +up.
+            pitch: -(ang[0] + (w.clock * 1.0).sin() * 0.3),
+            roll: ang[2] + (w.clock * 0.5).sin() * 0.1,
+            fov_deg: 90.0,
+        }
+    } else {
+        // Add the weapon-fire view kick (cl.punchangle, view.c:957); the engine's
+        // drop_punch_angle already decays it back to zero each frame.
+        let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
+        // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity,
+        // plus the punchangle's roll component; the dead-view tilt (80°) overrides
+        // when the player is dead. (Damage-kick roll needs svc_damage, not wired.)
+        let body_angles = w.server.vm.ent_get_vector(w.player, "angles");
+        let mut roll = quake_rs::server::v_calc_roll(body_angles, vel) + punch[2];
+        if w.server.vm.ent_get_float(w.player, "health") <= 0.0 {
+            roll = 80.0; // dead view angle (replaces, per V_CalcViewRoll)
+        }
+        Camera {
+            pos: eye,
+            yaw: ang[1] + punch[1],
+            pitch: -(ang[0] + punch[0]), // QuakeC pitch is +down; the renderer's is +up.
+            roll,
+            fov_deg: 90.0,
+        }
     };
     let mut instances: Vec<ModelInstance> = descs
         .iter()
@@ -2747,8 +2902,10 @@ fn step_walk(
     // R_DrawViewModel (r_main.c ~622) returns early — drawing NO gun — when the
     // player is dead (STAT_HEALTH <= 0) or carrying the Ring of Shadows
     // (IT_INVISIBILITY). Without this the gun hovers, frozen, on the rolled
-    // death-cam, and stays visible while invisible.
-    let hide_gun = w.server.vm.ent_get_float(w.player, "health") <= 0.0
+    // death-cam, and stays visible while invisible. The intermission camera also
+    // hides it (V_CalcIntermissionRefdef: `view->model = NULL`).
+    let hide_gun = intermission
+        || w.server.vm.ent_get_float(w.player, "health") <= 0.0
         || (w.server.vm.ent_get_float(w.player, "items") as i32) & IT_INVISIBILITY != 0;
     let viewmodel = if hide_gun {
         None
@@ -2843,7 +3000,59 @@ fn step_walk(
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
     //    when gfx.wad was absent (the world still renders).
-    if let Some(wad) = w.gfx_wad.as_ref() {
+    //
+    //    During an intermission SCR_UpdateScreen (screen.c) draws the matching
+    //    overlay INSTEAD of the status bar — Sbar_IntermissionOverlay for
+    //    cl.intermission == 1, Sbar_FinaleOverlay + the revealed center string
+    //    for == 2, the center string alone for == 3 — and only while the game
+    //    owns the screen (`key_dest == key_game`; with the menu/console up
+    //    neither the bar nor the overlay paints, the view is full-screen).
+    if w.intermission != 0 {
+        if !menu_up {
+            match w.intermission {
+                1 => {
+                    if let Some(wad) = w.gfx_wad.as_ref() {
+                        // Counts from the QuakeC globals the engine's
+                        // SV_UpdateStats reads (same source as the Tab scoreboard).
+                        let gcount = |g: &str| w.server.vm.gget_float(g) as i32;
+                        let stats = render::IntermissionStats {
+                            // cl.completed_time is an int in the C: whole seconds.
+                            completed_time: w.completed_time as i32,
+                            secrets: gcount("found_secrets"),
+                            total_secrets: gcount("total_secrets"),
+                            monsters: gcount("killed_monsters"),
+                            total_monsters: gcount("total_monsters"),
+                        };
+                        render::draw_intermission_overlay(
+                            &mut img,
+                            wad,
+                            &w.palette,
+                            w.pic_complete.as_ref(),
+                            w.pic_inter.as_ref(),
+                            &stats,
+                        );
+                    }
+                }
+                2 => render::draw_finale_overlay(
+                    &mut img,
+                    w.conchars.as_ref(),
+                    &w.palette,
+                    w.pic_finale.as_ref(),
+                    &w.finale_text,
+                    w.clock - w.finale_start,
+                ),
+                // svc_cutscene: the centered text alone, no plaque.
+                _ => render::draw_finale_overlay(
+                    &mut img,
+                    w.conchars.as_ref(),
+                    &w.palette,
+                    None,
+                    &w.finale_text,
+                    w.clock - w.finale_start,
+                ),
+            }
+        }
+    } else if let Some(wad) = w.gfx_wad.as_ref() {
         let stat = |f: &str| w.server.vm.ent_get_float(w.player, f) as i32;
         // Solo-scoreboard counts come from the QuakeC globals the engine's
         // SV_UpdateStats reads; the level name is worldspawn's `message` (edict 0).
@@ -2881,7 +3090,10 @@ fn step_walk(
     // out via their stored expiry; drawn over the HUD. Suppressed while the menu or
     // console owns the screen (Quake draws the notify/centerprint only for
     // key_dest == key_game), so they don't paint through the menu/console overlay.
-    if !menu_up {
+    // Also suppressed during intermission: SCR_UpdateScreen's intermission
+    // branches draw neither SCR_CheckDrawCenterString (the finale text above is
+    // its own path) nor the console notify lines.
+    if !menu_up && w.intermission == 0 {
         if let Some(cc) = w.conchars.as_ref() {
             if let Some((text, _)) = &w.centerprint {
                 render::draw_centerprint(&mut img, cc, &w.palette, text);
@@ -2947,7 +3159,13 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     }
 }
 
-fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (render::Image, [u8; 3], f32) {
+fn step_demo(
+    d: &mut DemoPlay,
+    dt: f32,
+    menu_up: bool,
+    render_w: usize,
+    render_h: usize,
+) -> (render::Image, [u8; 3], f32) {
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
     d.elapsed += dt;
@@ -3067,13 +3285,25 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
             }
         }
     }
+    // V_CalcIntermissionRefdef (view.c): a recorded intermission renders with
+    // the forced v_idlescale=1 idle sway (V_AddIdle, stock cycle/level cvars)
+    // applied LIVE on top of the recorded (QC-placed) camera angles.
+    let (iyaw, ipitch, iroll) = if f.intermission != 0 {
+        (
+            (f.time * 2.0).sin() * 0.3,
+            (f.time * 1.0).sin() * 0.3,
+            (f.time * 0.5).sin() * 0.1,
+        )
+    } else {
+        (0.0, 0.0, 0.0)
+    };
     let cam = Camera {
         pos: f.view_origin,
-        yaw: f.view_angles[1],
-        pitch: -f.view_angles[0],
+        yaw: f.view_angles[1] + iyaw,
+        pitch: -(f.view_angles[0] + ipitch),
         // Demos record viewangles[ROLL]; replay the recorded bank so the attract
         // demo leans into strafes exactly as the original engine rendered it.
-        roll: f.view_angles[2],
+        roll: f.view_angles[2] + iroll,
         fov_deg: 90.0,
     };
     // Sound listener pose + the per-leaf ambient channels follow the demo
@@ -3107,7 +3337,49 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
     // (Animating the recorded styles — torch flicker — is a minor follow-up.)
     let mut demo_styles = render::NEUTRAL_LIGHTSTYLE_SCALES;
     demo_styles[0] = 264.0 / 256.0;
-    let img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    let mut img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    // A recorded intermission/finale frame draws its overlay exactly like the
+    // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
+    // owning the screen (`key_dest == key_game` — i.e. no menu/console up).
+    if f.intermission != 0 && !menu_up {
+        match f.intermission {
+            1 => {
+                if let Some(wad) = d.gfx_wad.as_ref() {
+                    let stats = render::IntermissionStats {
+                        completed_time: f.completed_time as i32,
+                        secrets: f.stats.secrets,
+                        total_secrets: f.stats.total_secrets,
+                        monsters: f.stats.monsters,
+                        total_monsters: f.stats.total_monsters,
+                    };
+                    render::draw_intermission_overlay(
+                        &mut img,
+                        wad,
+                        &d.palette,
+                        d.pic_complete.as_ref(),
+                        d.pic_inter.as_ref(),
+                        &stats,
+                    );
+                }
+            }
+            2 => render::draw_finale_overlay(
+                &mut img,
+                d.conchars.as_ref(),
+                &d.palette,
+                d.pic_finale.as_ref(),
+                &f.finale_text,
+                f.time - f.finale_start,
+            ),
+            _ => render::draw_finale_overlay(
+                &mut img,
+                d.conchars.as_ref(),
+                &d.palette,
+                None,
+                &f.finale_text,
+                f.time - f.finale_start,
+            ),
+        }
+    }
     // The demo path applies no screen blend (it carries no live damage/powerup
     // state); return a zero blend so its signature matches step_walk's deferred one.
     (img, [0, 0, 0], 0.0)
@@ -3322,15 +3594,7 @@ mod tests {
         // instant `idx` reached n-1, so the final frame was never displayed.
         use quake_rs::demo::{Demo, DemoFrame};
 
-        let frame = |t: f32| DemoFrame {
-            time: t,
-            view_origin: [0.0, 0.0, 0.0],
-            view_entity_origin: [0.0, 0.0, 0.0],
-            view_angles: [0.0, 0.0, 0.0],
-            entities: Vec::new(),
-            particles: Vec::new(),
-            temp_entities: Vec::new(),
-        };
+        let frame = |t: f32| DemoFrame { time: t, ..Default::default() };
         let demo = Demo {
             level_name: "test".into(),
             static_sounds: Vec::new(),
@@ -3356,6 +3620,11 @@ mod tests {
             last_spawned_idx: usize::MAX,
             beams: Beams::new(),
             beam_scratch: Vec::new(),
+            gfx_wad: None,
+            conchars: None,
+            pic_complete: None,
+            pic_inter: None,
+            pic_finale: None,
         };
         let n = d.demo.frames.len();
 
@@ -3363,7 +3632,7 @@ mod tests {
         // (i.e. the value of `idx` chosen by step_demo for that frame).
         let mut shown = Vec::new();
         for _ in 0..5 {
-            let _img = step_demo(&mut d, 1.0, DEFAULT_W, DEFAULT_H);
+            let _img = step_demo(&mut d, 1.0, false, DEFAULT_W, DEFAULT_H);
             shown.push(d.idx);
         }
 
@@ -3392,15 +3661,7 @@ mod tests {
         use quake_rs::demo::{Demo, DemoFrame};
         use quake_rs::server::{te_consts, ParticleBurst, TempEntityEvent};
 
-        let plain = |t: f32| DemoFrame {
-            time: t,
-            view_origin: [0.0, 0.0, 0.0],
-            view_entity_origin: [0.0, 0.0, 0.0],
-            view_angles: [0.0, 0.0, 0.0],
-            entities: Vec::new(),
-            particles: Vec::new(),
-            temp_entities: Vec::new(),
-        };
+        let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
         // Frame 1 (t=0.05) carries the effects; frames 0 and 2 are empty. Frame
         // times are one ~Quake tick apart so a 0.05s step advances exactly one
         // frame and the explosion's ramp ages by a realistic amount (not all the
@@ -3425,6 +3686,7 @@ mod tests {
                 color_start: 0,
                 color_length: 0,
             }],
+            ..Default::default()
         };
         let demo = Demo {
             level_name: "test".into(),
@@ -3449,12 +3711,17 @@ mod tests {
             last_spawned_idx: usize::MAX,
             beams: Beams::new(),
             beam_scratch: Vec::new(),
+            gfx_wad: None,
+            conchars: None,
+            pic_complete: None,
+            pic_inter: None,
+            pic_finale: None,
         };
 
         // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
         // explosion (1024) particles populate the pool; after one tick of aging
         // the bulk of the 1024-particle explosion is still alive.
-        let _ = step_demo(&mut d, 0.05, DEFAULT_W, DEFAULT_H);
+        let _ = step_demo(&mut d, 0.05, false, DEFAULT_W, DEFAULT_H);
         assert_eq!(d.idx, 1, "advanced onto the effect frame");
         let after_first = d.particles.len();
         assert!(
@@ -3464,7 +3731,7 @@ mod tests {
 
         // A tiny step that holds us on frame 1 must NOT re-spawn the explosion
         // (the pool only shrinks as particles age — it never jumps back up).
-        let _ = step_demo(&mut d, 0.001, DEFAULT_W, DEFAULT_H);
+        let _ = step_demo(&mut d, 0.001, false, DEFAULT_W, DEFAULT_H);
         assert_eq!(d.idx, 1, "still on the effect frame");
         assert!(
             d.particles.len() <= after_first,
@@ -3477,7 +3744,7 @@ mod tests {
         // carries no effects, so the pool is empty afterwards.
         let mut wrapped = false;
         for _ in 0..6 {
-            let _ = step_demo(&mut d, 0.05, DEFAULT_W, DEFAULT_H);
+            let _ = step_demo(&mut d, 0.05, false, DEFAULT_W, DEFAULT_H);
             if d.idx == 0 {
                 wrapped = true;
                 break;
@@ -3739,8 +4006,8 @@ mod tests {
             let d = a.demo.as_mut().unwrap();
             // Render the current demo frame with a tiny dt twice; with the menu
             // OFF and ON. (A tiny dt keeps both renders on the same frame.)
-            let (plain, _, _) = step_demo(d, 0.0001, w, h);
-            let (mut withm, _, _) = step_demo(d, 0.0001, w, h);
+            let (plain, _, _) = step_demo(d, 0.0001, false, w, h);
+            let (mut withm, _, _) = step_demo(d, 0.0001, false, w, h);
             let pal = a.active_palette().expect("demo palette");
             render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, pal);
             // The two frames are the same scene; only the menu overlay differs.
@@ -4366,6 +4633,7 @@ mod tests {
             entities: Vec::new(),
             particles: Vec::new(),
             temp_entities: Vec::new(),
+            ..Default::default()
         };
         let mut bolt_frame = plain(0.05);
         bolt_frame.temp_entities = vec![TempEntityEvent {
@@ -4409,11 +4677,16 @@ mod tests {
             last_spawned_idx: usize::MAX,
             beams: Beams::new(),
             beam_scratch: Vec::new(),
+            gfx_wad: None,
+            conchars: None,
+            pic_complete: None,
+            pic_inter: None,
+            pic_finale: None,
         };
 
         // Advance onto the bolt frame: the recorded beam lands in the store and
         // the render expands it (75 units => 3 pieces at 0/30/60 along +x).
-        let _ = step_demo(&mut d, 0.05, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
         assert_eq!(d.idx, 1, "advanced onto the bolt frame");
         assert!(d.beams.any_live(0.05), "recorded TE_LIGHTNING1 refreshed a beam");
         assert_eq!(d.beam_scratch.len(), 3, "75 units expand to 3 pieces");
@@ -4421,14 +4694,14 @@ mod tests {
 
         // A lingering step does NOT re-parse (last_spawned_idx guard) but the
         // beam stays live until its 0.2 s endtime.
-        let _ = step_demo(&mut d, 0.001, 160, 100);
+        let _ = step_demo(&mut d, 0.001, false, 160, 100);
         assert!(d.beams.any_live(0.05));
 
         // Advance to the LAST frame: at t=0.10 the beam (endtime 0.25) still
         // rides across frames — it is a client effect, not a per-frame one.
         let mut guard = 0;
         while d.idx != 2 {
-            let _ = step_demo(&mut d, 0.05, 160, 100);
+            let _ = step_demo(&mut d, 0.05, false, 160, 100);
             guard += 1;
             assert!(guard < 10, "playback reaches the last frame");
         }
@@ -4439,7 +4712,7 @@ mod tests {
         // The NEXT (tiny) step triggers the deferred loop wrap: back to frame 0
         // with the beam store cleared (no stale bolts carried into the replay;
         // the tiny dt keeps playback ON frame 0, before the bolt re-spawns).
-        let _ = step_demo(&mut d, 0.001, 160, 100);
+        let _ = step_demo(&mut d, 0.001, false, 160, 100);
         assert_eq!(d.idx, 0, "playback wrapped");
         assert!(!d.beams.any_live(0.0), "the wrap cleared the beam store");
     }
@@ -4731,5 +5004,240 @@ mod tests {
             MAX_STATIC_SOUNDS - 4,
             "4 burned slots leave 112 of the 116 for real loops"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Intermission + finale (end-to-end against the real progs.dat)
+    // -------------------------------------------------------------------
+
+    /// Borrow the live walk mutably (panics if no walk — these tests boot first).
+    fn walk_mut<R>(f: impl FnOnce(&mut Walk) -> R) -> R {
+        APP.with(|c| f(c.borrow_mut().as_mut().unwrap().walk.as_mut().unwrap()))
+    }
+
+    /// Close the App-level menu: `boot()` opens it over the walk, and while it is
+    /// up (`key_dest != key_game`) the gameplay buttons IntermissionThink polls
+    /// are gated to 0 — the player must dismiss it, and so must these tests.
+    fn close_menu() {
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.close());
+    }
+
+    /// The centre of the live map's `trigger_changelevel` brush volume (from the
+    /// absmin/absmax its setmodel+link produced), to pin the player onto.
+    fn changelevel_trigger_center() -> [f32; 3] {
+        walk_mut(|w| {
+            for e in 0..w.server.vm.num_edicts() {
+                let ent = e as i32;
+                if w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+                    continue;
+                }
+                if w.server.vm.ent_get_string(ent, "classname") == "trigger_changelevel" {
+                    let amin = w.server.vm.ent_get_vector(ent, "absmin");
+                    let amax = w.server.vm.ent_get_vector(ent, "absmax");
+                    return [
+                        0.5 * (amin[0] + amax[0]),
+                        0.5 * (amin[1] + amax[1]),
+                        0.5 * (amin[2] + amax[2]),
+                    ];
+                }
+            }
+            panic!("no trigger_changelevel in the live map");
+        })
+    }
+
+    /// Pin the player onto the exit trigger and step until the QuakeC's
+    /// `execute_changelevel` think fires `svc_intermission` (touch at frame N,
+    /// the scheduled think 0.1s later). Panics if it never arrives.
+    fn drive_into_exit() {
+        let centre = changelevel_trigger_center();
+        for _ in 0..40 {
+            walk_mut(|w| {
+                let p = w.player;
+                w.server.vm.ent_set_vector(p, "origin", centre);
+                w.server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+            });
+            step(0.1);
+            if walk_mut(|w| w.intermission) != 0 {
+                return;
+            }
+        }
+        panic!("svc_intermission never arrived after 40 frames on the exit trigger");
+    }
+
+    /// Write the current RGBA framebuffer as a binary PPM into `$QUAKE_DUMP_DIR`
+    /// (the feature-evidence dumps); a no-op when the variable is unset.
+    fn dump_frame(name: &str) {
+        let Ok(dir) = std::env::var("QUAKE_DUMP_DIR") else { return };
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            let (w, h) = (a.render_w, a.render_h);
+            let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+            for px in a.fb.chunks(4).take(w * h) {
+                out.extend_from_slice(&px[..3]);
+            }
+            let _ = std::fs::write(format!("{dir}/{name}.ppm"), out);
+        });
+    }
+
+    #[test]
+    fn level_exit_runs_the_intermission_then_changelevel() {
+        // The faithful end-of-level flow, driven end-to-end through the REAL
+        // progs.dat: touching trigger_changelevel runs execute_changelevel (the
+        // QC freezes the player on the info_intermission spot and WriteBytes
+        // svc_intermission to MSG_ALL), the engine enters intermission mode and
+        // draws the stats overlay, and only a button press AFTER
+        // intermission_exittime (time+2) runs GotoNextMap -> changelevel(e1m2).
+        assert_eq!(boot(), 1);
+        set_resolution(320, 200); // debug-build render speed; clamps to the min preset
+        close_menu(); // boot opens the menu; buttons are gated while it is up
+        let before_shells = player_field("ammo_shells") as i32;
+
+        drive_into_exit();
+
+        // --- The engine is in intermission: camera frozen on the QC-moved
+        // player, stats overlay up, status bar hidden.
+        walk_mut(|w| {
+            assert_eq!(w.intermission, 1, "svc_intermission set cl.intermission = 1");
+            assert!(w.completed_time >= 0.0);
+            // execute_changelevel froze the player: MOVETYPE_NONE, modelindex 0,
+            // view_ofs zeroed, moved to the info_intermission spot.
+            assert_eq!(
+                w.server.vm.ent_get_float(w.player, "movetype") as i32,
+                0,
+                "player frozen MOVETYPE_NONE"
+            );
+            assert_eq!(
+                w.server.vm.ent_get_vector(w.player, "view_ofs"),
+                [0.0, 0.0, 0.0],
+                "view_ofs zeroed for the intermission camera"
+            );
+            // The stats the overlay shows come from the QC globals and are sane.
+            assert!(
+                w.server.vm.gget_float("total_monsters") > 0.0,
+                "e1m1 reports a monster total"
+            );
+        });
+        // The QC moved the player to the info_intermission spot (e1m1 has one);
+        // its angles came from the spot's mangle via fixangle.
+        let pinned = changelevel_trigger_center();
+        walk_mut(|w| {
+            let org = w.server.vm.ent_get_vector(w.player, "origin");
+            assert_ne!(org, pinned, "player moved OFF the exit to the intermission spot");
+        });
+
+        // --- Overlay pixels: render the same frozen frame with and without the
+        // intermission flag; the plaque/number region (virtual x>=160, y 56..160)
+        // is 3-D view in one and Sbar_IntermissionOverlay in the other.
+        let (with_overlay, without_overlay) = walk_mut(|w| {
+            let a = step_walk(w, 0.0, false, 320, 200).0;
+            w.intermission = 0;
+            let b = step_walk(w, 0.0, false, 320, 200).0;
+            w.intermission = 1;
+            (a, b)
+        });
+        let region_differs = (56..160).any(|y| {
+            (160..320).any(|x| with_overlay.rgb[y * 320 + x] != without_overlay.rgb[y * 320 + x])
+        });
+        assert!(region_differs, "the intermission overlay painted the stats region");
+        dump_frame("intermission-e1m1");
+
+        // --- No button: the intermission HOLDS even long past exittime.
+        for _ in 0..25 {
+            step(0.1);
+        }
+        walk_mut(|w| {
+            assert_eq!(w.intermission, 1, "no button => still at the intermission");
+            assert_eq!(w.map_name, "maps/e1m1.bsp", "no level change without a button");
+        });
+
+        // --- Attack pressed: IntermissionThink (time >= exittime, button down)
+        // runs ExitIntermission -> GotoNextMap -> changelevel("e1m2"); the host
+        // drains the pending request and swaps, carrying the inventory parms.
+        walk_mut(|w| w.in_attack = true);
+        for _ in 0..5 {
+            step(0.1);
+            if walk_mut(|w| w.map_name.clone()) != "maps/e1m1.bsp" {
+                break;
+            }
+        }
+        walk_mut(|w| {
+            assert_eq!(w.map_name, "maps/e1m2.bsp", "the exit leads to e1m2");
+            assert_eq!(w.intermission, 0, "the new level starts out of intermission");
+            w.in_attack = false;
+        });
+        assert_eq!(
+            player_field("ammo_shells") as i32,
+            before_shells,
+            "spawn parms carried the inventory across the swap"
+        );
+    }
+
+    #[test]
+    fn e1m7_exit_reaches_the_shareware_finale_and_sellscreen() {
+        // Episode end: e1m7's exit runs the same intermission, but the SECOND
+        // button press (ExitIntermission with intermission_running == 2 and
+        // world.model == "maps/e1m7.bsp", cvar("registered") == 0) emits
+        // svc_finale + the shareware episode text, and the THIRD press
+        // (running == 3, shareware) emits svc_sellscreen — which pops the
+        // Help/Ordering menu exactly like Cmd_ExecuteString("help").
+        assert_eq!(boot(), 1);
+        set_resolution(320, 200);
+        close_menu();
+        console_toggle();
+        run_console_line("map e1m7");
+        walk_mut(|w| assert_eq!(w.map_name, "maps/e1m7.bsp", "console map swap"));
+        assert_eq!(console_visible(), 0, "a successful map command closed the console");
+        close_menu(); // the fresh-walk path must not leave the menu gating input
+
+        drive_into_exit();
+        walk_mut(|w| assert_eq!(w.intermission, 1));
+
+        // Hold attack: IntermissionThink exits as soon as time passes exittime
+        // (time+2), then svc_finale arrives with the episode-end text.
+        walk_mut(|w| w.in_attack = true);
+        for _ in 0..30 {
+            step(0.1);
+            if walk_mut(|w| w.intermission) == 2 {
+                break;
+            }
+        }
+        walk_mut(|w| {
+            assert_eq!(w.intermission, 2, "svc_finale set cl.intermission = 2");
+            assert!(
+                w.finale_text.starts_with("As the corpse of the monstrous entity"),
+                "the shareware episode-1 finale text arrived; got {:?}",
+                &w.finale_text[..w.finale_text.len().min(60)]
+            );
+            assert_eq!(w.map_name, "maps/e1m7.bsp", "the finale shows BEFORE any map change");
+        });
+        // Let ~1.5s of the slow text reveal pass, then dump the evidence frame.
+        walk_mut(|w| w.in_attack = false);
+        for _ in 0..15 {
+            step(0.1);
+        }
+        dump_frame("finale-e1m7");
+
+        // Third press (after the finale's exittime = time+1): shareware emits
+        // svc_sellscreen; the dispatcher opens the menu on the Help screen.
+        walk_mut(|w| w.in_attack = true);
+        for _ in 0..30 {
+            step(0.1);
+            let open = APP.with(|c| c.borrow().as_ref().unwrap().menu.visible);
+            if open {
+                break;
+            }
+        }
+        APP.with(|c| {
+            let b = c.borrow();
+            let menu = &b.as_ref().unwrap().menu;
+            assert!(menu.visible, "svc_sellscreen popped the menu");
+            assert_eq!(
+                menu.screen(),
+                render::MenuScreen::Help,
+                "the sell screen is the Help/Ordering pages"
+            );
+        });
+        walk_mut(|w| w.in_attack = false);
     }
 }
