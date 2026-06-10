@@ -1145,11 +1145,24 @@ fn run_game_command(w: &mut Walk, cmd: &str, argv: &[&str], out: &mut Vec<String
                 out.push("flymode OFF".into());
             }
         }
-        // Set health to 0 — the player dies on its next think.
-        "kill" => {
-            w.server.vm.ent_set_float(player, "health", 0.0);
-            out.push("ouch!".into());
-        }
+        // Host_Kill_f: suicide through the QuakeC `ClientKill` entry point (the
+        // REAL chain: suicide frame, frag penalty, respawn() — which in single
+        // player issues localcmd("restart\n")). NOT a health hack: the QuakeC
+        // owns the death. The pending restart is honoured HERE, not left for
+        // step_walk, because client_frame clears stale requests at the top of
+        // each frame — and it matches the C, where the queued "restart" Cbuf
+        // text executes right after the kill command itself.
+        "kill" => match w.server.client_kill() {
+            Ok(true) => {
+                if w.server.take_pending_restart() {
+                    try_restart(w);
+                }
+                // No success line of its own: the QuakeC bprints
+                // "<netname> suicides" (drained into notify next frame).
+            }
+            Ok(false) => out.push("Can't suicide -- allready dead!".into()),
+            Err(e) => out.push(format!("kill failed: {e}")),
+        },
         // Queue a one-shot impulse (impulse 9 = the QuakeC give-all cheat).
         "impulse" => {
             let n = argv.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
@@ -3430,9 +3443,51 @@ mod tests {
         // fly toggles WALK <-> FLY.
         run_console_line("fly");
         assert_eq!(player_field("movetype"), MOVETYPE_FLY, "fly set FLY");
-        // kill zeroes health.
+
+        // `kill` routes through the QuakeC ClientKill (Host_Kill_f), whose
+        // respawn() issues localcmd("restart\n") in single player: the level
+        // reloads and the player comes back ALIVE with the level-ENTRY loadout
+        // — wiping the cheats above and the marker rockets we set here.
+        run_console_line("give r 5"); // marker: not part of the entry parms
+        assert_eq!(player_field("ammo_rockets"), 5.0);
+
+        // An already-dead player is refused (Host_Kill_f's guard): no QuakeC
+        // runs, no restart — the live state is untouched.
+        APP.with(|c| {
+            let mut b = c.borrow_mut();
+            let w = b.as_mut().unwrap().walk.as_mut().unwrap();
+            let p = w.player;
+            w.server.vm.ent_set_float(p, "health", 0.0);
+        });
         run_console_line("kill");
-        assert_eq!(player_field("health"), 0.0, "kill zeroed health");
+        assert_eq!(
+            player_field("ammo_rockets"),
+            5.0,
+            "a refused kill must not reload the level"
+        );
+        assert_eq!(player_field("health"), 0.0, "a refused kill leaves the player as-is");
+
+        // Alive again: kill -> ClientKill -> respawn() -> localcmd("restart")
+        // -> the level restarts. Fresh player: alive, walking, marker wiped.
+        APP.with(|c| {
+            let mut b = c.borrow_mut();
+            let w = b.as_mut().unwrap().walk.as_mut().unwrap();
+            let p = w.player;
+            w.server.vm.ent_set_float(p, "health", 70.0);
+        });
+        run_console_line("kill");
+        assert_eq!(player_field("health"), 100.0, "suicide restarted the level: alive");
+        assert_eq!(player_field("deadflag"), 0.0, "fresh player is not dead");
+        assert_eq!(
+            player_field("movetype"),
+            MOVETYPE_WALK,
+            "fresh player walks (the fly cheat did not survive the restart)"
+        );
+        assert_eq!(
+            player_field("ammo_rockets"),
+            0.0,
+            "restart restored the level-ENTRY parms (the marker is gone)"
+        );
     }
 
     #[test]
@@ -3497,5 +3552,249 @@ mod tests {
         // Pixels in the very top row (the panel) are present (non-uniform / drawn).
         let top_changed = closed[..w * 4] != open[..w * 4];
         assert!(top_changed, "the console panel paints the top region of the frame");
+    }
+
+    /// QuakeC deadflag values (client.qc / defs.qc).
+    const DEAD_DYING: f32 = 1.0;
+    const DEAD_DEAD: f32 = 2.0;
+    const DEAD_RESPAWNABLE: f32 = 3.0;
+    /// IT_ROCKET_LAUNCHER (defs.qc).
+    const IT_RL: i32 = 32;
+
+    /// End-to-end proof of the single-player death -> respawn chain on the REAL
+    /// embedded e1m1 + progs.dat, through the exact path the browser uses
+    /// (`boot()` / `step()`):
+    ///
+    ///   self-fired rocket -> T_RadiusDamage -> T_Damage -> Killed -> PlayerDie
+    ///   (deadflag = DEAD_DYING, movetype = TOSS: corpse physics) -> the
+    ///   death-anim THINKS play out while health < 0 (PlayerDead -> deadflag =
+    ///   DEAD_DEAD) -> PlayerDeathThink (run from PlayerPreThink while dead)
+    ///   sees all buttons released (deadflag = DEAD_RESPAWNABLE) -> a +attack
+    ///   press reaches the QuakeC `button0` field while dead -> respawn() ->
+    ///   localcmd("restart\n") -> take_pending_restart -> try_restart reloads
+    ///   the level with the level-ENTRY parms: the player is alive at the spawn
+    ///   point in a reset world.
+    #[test]
+    fn real_death_chain_respawns_via_restart() {
+        assert_eq!(boot(), 1, "boot builds a walk from the embedded pak");
+        set_resolution(320, 200); // keep the per-step debug render cheap
+        // boot() opens the main menu, which gates gameplay input; close it.
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
+
+        // Arm the rocket launcher and aim straight down (test SETUP only — the
+        // kill itself travels the real QuakeC damage chain). Health 30: one
+        // self-rocket deals ~55 (radius 120 minus distance falloff, halved for
+        // attacker == target), leaving ~-25 — dead, but above the -40 gib line,
+        // so the longer death-ANIM think chain runs.
+        let spawn_org = APP.with(|c| {
+            let mut b = c.borrow_mut();
+            let w = b.as_mut().unwrap().walk.as_mut().unwrap();
+            let p = w.player;
+            w.pitch = 80.0; // straight down (the +80 clamp)
+            w.server.vm.ent_set_float(p, "health", 30.0);
+            let items = w.server.vm.ent_get_float(p, "items") as i32 | IT_RL;
+            w.server.vm.ent_set_float(p, "items", items as f32);
+            w.server.vm.ent_set_float(p, "ammo_rockets", 5.0);
+            player_start(&w.bsp.entities).expect("e1m1 has info_player_start").0
+        });
+
+        // Select the RL through the REAL impulse path (PlayerPostThink ->
+        // W_WeaponFrame -> ImpulseCommands -> W_ChangeWeapon -> W_SetCurrentAmmo).
+        APP.with(|c| {
+            c.borrow_mut().as_mut().unwrap().walk.as_mut().unwrap().next_impulse = 7
+        });
+        step(0.05);
+        assert_eq!(
+            player_field("weapon") as i32,
+            IT_RL,
+            "impulse 7 selected the rocket launcher"
+        );
+
+        // Settle on the floor, then FIRE for one frame and release.
+        for _ in 0..4 {
+            step(0.05);
+        }
+        let mut trace: Vec<(usize, f32, f32)> = Vec::new(); // (frame, health, deadflag)
+        trace.push((0, player_field("health"), player_field("deadflag")));
+        set_attack(1);
+        step(0.05);
+        set_attack(0);
+
+        // Ride the death out with all buttons released, tracing deadflag per
+        // frame. Once DYING, hold +attack for ONE frame to prove UserCmd buttons
+        // reach the QuakeC button0 field while dead (nothing consumes it during
+        // DEAD_DYING: PlayerPreThink returns early and W_WeaponFrame is
+        // deadflag-gated), then release well before the DEAD_DEAD button-free
+        // wait.
+        let mut probed_button_while_dead = false;
+        for i in 1..=120 {
+            step(0.05);
+            let (h, df) = (player_field("health"), player_field("deadflag"));
+            trace.push((i, h, df));
+            if df == DEAD_DYING && !probed_button_while_dead {
+                set_attack(1);
+                step(0.05);
+                assert_eq!(
+                    player_field("button0"),
+                    1.0,
+                    "the attack button reaches QuakeC button0 while dead"
+                );
+                assert!(player_field("health") < 0.0, "the probe ran while dead");
+                set_attack(0);
+                step(0.05); // settle the release
+                probed_button_while_dead = true;
+            }
+            if df == DEAD_RESPAWNABLE {
+                break;
+            }
+        }
+        assert!(probed_button_while_dead, "the DEAD_DYING phase was observed");
+
+        // The chain, in order: alive -> DYING (PlayerDie, via the real
+        // T_Damage) -> DEAD (the death-anim thinks ran out while health < 0 —
+        // client thinks RUN while dead) -> RESPAWNABLE (PlayerDeathThink, run
+        // from PlayerPreThink while dead, saw every button released).
+        let mut seq: Vec<f32> = Vec::new();
+        for &(i, h, df) in &trace {
+            if seq.last() != Some(&df) {
+                seq.push(df);
+                // Evidence of the chain as it executed (visible with --nocapture).
+                eprintln!("deadflag -> {df} at frame {i} (health {h})");
+            }
+        }
+        assert_eq!(
+            seq,
+            vec![0.0, DEAD_DYING, DEAD_DEAD, DEAD_RESPAWNABLE],
+            "deadflag progression; full trace: {trace:?}"
+        );
+
+        // DEAD_RESPAWNABLE: the dead player waits for a button. Press +attack:
+        // PlayerDeathThink consumes it and calls respawn() ->
+        // localcmd("restart\n"); step_walk drains take_pending_restart() and
+        // try_restart() reloads the level inside this same step.
+        let t_before = APP.with(|c| {
+            c.borrow().as_ref().unwrap().walk.as_ref().unwrap().server.time()
+        });
+        set_attack(1);
+        step(0.05);
+        set_attack(0);
+
+        assert_eq!(player_field("health"), 100.0, "respawned alive (entry health)");
+        assert_eq!(player_field("deadflag"), 0.0, "fresh player is not dead");
+        assert_eq!(player_field("movetype"), MOVETYPE_WALK, "fresh player walks");
+        let items = player_field("items") as i32;
+        assert_eq!(
+            items & IT_RL,
+            0,
+            "the cheat rocket launcher did NOT survive (level-ENTRY parms restored)"
+        );
+        assert_ne!(items & IT_SHOTGUN, 0, "the entry loadout (shotgun) is back");
+        assert_eq!(player_field("ammo_rockets"), 0.0, "cheat rockets wiped");
+        assert_eq!(player_field("ammo_shells"), 25.0, "entry shells restored");
+
+        // Back at the spawn point, in a rebuilt world (server time restarted).
+        let (org, t_after) = APP.with(|c| {
+            let b = c.borrow();
+            let w = b.as_ref().unwrap().walk.as_ref().unwrap();
+            (w.server.vm.ent_get_vector(w.player, "origin"), w.server.time())
+        });
+        assert!(
+            (org[0] - spawn_org[0]).abs() < 16.0
+                && (org[1] - spawn_org[1]).abs() < 16.0
+                && (org[2] - spawn_org[2]).abs() < 64.0,
+            "respawned at the spawn point: {org:?} vs {spawn_org:?}"
+        );
+        assert!(
+            t_after < t_before,
+            "the world was rebuilt: server time restarted ({t_after} < {t_before})"
+        );
+    }
+
+    /// An ENVIRONMENT kill reaches the same chain: slime damage is dealt by
+    /// client.qc `WaterMove` (run from PlayerPreThink) -> `T_Damage(self, world,
+    /// world, 4*waterlevel)` -> Killed -> PlayerDie — the attacker==world branch
+    /// (no knockback), unlike the rocket. Teleporting the player into e1m1's
+    /// slime pool is test setup; the damage itself travels the real QuakeC path,
+    /// and the death rides the same anim -> DEAD_RESPAWNABLE -> button ->
+    /// restart tail.
+    #[test]
+    fn environment_slime_kill_enters_the_same_death_chain() {
+        assert_eq!(boot(), 1);
+        set_resolution(320, 200);
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
+
+        // Find a submerged spot: scan the world bounds on a coarse grid for
+        // CONTENTS_SLIME that is still slime 48 units higher, so a player with
+        // origin 24 above the probe has the eye (origin + 22) under the surface
+        // (waterlevel 3 -> 12 damage per slime tick).
+        let slime: Option<[f32; 3]> = APP.with(|c| {
+            let b = c.borrow();
+            let w = b.as_ref().unwrap().walk.as_ref().unwrap();
+            let world = &w.bsp.models[0];
+            let (mins, maxs) = (world.mins, world.maxs);
+            let mut z = mins[2] + 16.0;
+            while z < maxs[2] {
+                let mut x = mins[0] + 16.0;
+                while x < maxs[0] {
+                    let mut y = mins[1] + 16.0;
+                    while y < maxs[1] {
+                        if quake_rs::world::point_contents(&w.bsp, [x, y, z])
+                            == quake_rs::bsp::CONTENTS_SLIME
+                            && quake_rs::world::point_contents(&w.bsp, [x, y, z + 48.0])
+                                == quake_rs::bsp::CONTENTS_SLIME
+                        {
+                            return Some([x, y, z]);
+                        }
+                        y += 64.0;
+                    }
+                    x += 64.0;
+                }
+                z += 64.0;
+            }
+            None
+        });
+        let p = slime.expect("e1m1 has a slime pool deep enough to submerge in");
+
+        // Drop the player in with 5 health: the first WaterMove slime tick
+        // (4 * waterlevel) kills through the real chain. waterlevel is sensed
+        // during the move phase, so the kill lands a couple of frames in.
+        APP.with(|c| {
+            let mut b = c.borrow_mut();
+            let w = b.as_mut().unwrap().walk.as_mut().unwrap();
+            let pl = w.player;
+            w.server.vm.ent_set_vector(pl, "origin", [p[0], p[1], p[2] + 24.0]);
+            w.server.vm.ent_set_vector(pl, "velocity", [0.0, 0.0, 0.0]);
+            w.server.vm.ent_set_float(pl, "health", 5.0);
+        });
+        let mut died = false;
+        for _ in 0..20 {
+            step(0.05);
+            if player_field("deadflag") >= DEAD_DYING {
+                died = true;
+                break;
+            }
+        }
+        assert!(died, "slime damage killed through PlayerDie (deadflag set)");
+        assert!(player_field("health") < 0.0, "the slime tick took health below zero");
+
+        // Same tail as the rocket death: anim out, button, restart, alive.
+        let mut respawnable = false;
+        for _ in 0..120 {
+            step(0.05);
+            if player_field("deadflag") == DEAD_RESPAWNABLE {
+                respawnable = true;
+                break;
+            }
+        }
+        assert!(respawnable, "the death anim ran out to DEAD_RESPAWNABLE");
+        set_attack(1);
+        step(0.05);
+        set_attack(0);
+        assert_eq!(
+            player_field("health"),
+            100.0,
+            "respawned alive after the environment kill"
+        );
+        assert_eq!(player_field("deadflag"), 0.0);
     }
 }

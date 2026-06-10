@@ -3307,6 +3307,34 @@ impl Server {
         RESTART_REQUEST.with(|c| std::mem::replace(&mut *c.borrow_mut(), false))
     }
 
+    /// `Host_Kill_f` (host_cmd.c): the `kill` console command — suicide via the
+    /// QuakeC `ClientKill` entry point, NOT a health hack. Faithfully:
+    /// * an already-dead player is refused (the C prints `"Can't suicide --
+    ///   allready dead!\n"`; we return `Ok(false)` and the front-end prints it);
+    /// * otherwise set `pr_global_struct->time = sv.time`, `self = sv_player`,
+    ///   and execute `ClientKill` — whose QuakeC (client.qc) plays the suicide
+    ///   frame, docks two frags, and calls `respawn()`, which in single player
+    ///   issues `localcmd("restart\n")`, surfaced via
+    ///   [`Server::take_pending_restart`] for the front-end to reload the level.
+    ///
+    /// Returns `Ok(true)` when `ClientKill` ran, `Ok(false)` when refused (dead,
+    /// or no connected client). A QuakeC fault surfaces as `Err` (interpreter
+    /// already reset), matching the other system entry points.
+    pub fn client_kill(&mut self) -> Result<bool> {
+        let player = self.player;
+        if player < 0 || self.is_free(player) {
+            return Ok(false);
+        }
+        if self.vm.ent_get_float(player, "health") <= 0.0 {
+            return Ok(false); // "Can't suicide -- allready dead!"
+        }
+        // pr_global_struct->time = sv.time; self = sv_player; run ClientKill.
+        let t = self.time();
+        self.vm.gset_float("time", t);
+        self.run_sys("ClientKill", player, 0)?;
+        Ok(true)
+    }
+
     /// One server frame driven by the local player's input.
     ///
     /// Mirrors `Host_Frame` -> `SV_Physics`: advance `time`/`frametime`, run the
@@ -3547,6 +3575,21 @@ impl Server {
                 let vel = self.vm.ent_get_vector(ent, "velocity");
                 self.vm
                     .ent_set_vector(ent, "origin", crate::math::mul_add(origin, dt, vel));
+            }
+            MOVETYPE_TOSS | MOVETYPE_BOUNCE => {
+                // SV_Physics_Client `case MOVETYPE_TOSS/BOUNCE: SV_Physics_Toss`:
+                // think first; if still alive, gravity + the clipped toss move. A
+                // client is MOVETYPE_TOSS exactly while DEAD (client.qc PlayerDie),
+                // so this is the corpse physics — the death pop (PlayerDie's
+                // `velocity_z += random()*300`) and the fall back to the floor.
+                // Previously this fell into the think-only fallback arm and a
+                // corpse killed mid-air froze in place.
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                self.physics_toss(ent, movetype, start_time, dt);
             }
             _ => {
                 // Any other movetype on a client: think only (no movement).
@@ -8715,6 +8758,159 @@ mod tests {
         bi_localcmd(&mut server.vm).expect("bi_localcmd changelevel");
         assert!(!server.take_pending_restart(), "changelevel localcmd is not a restart");
         assert_eq!(server.take_pending_changelevel().as_deref(), Some("e1m2"));
+    }
+
+    /// Synthetic progs for [`Server::client_kill`] (`Host_Kill_f`): a `ClientKill`
+    /// QuakeC function that calls the `localcmd` builtin (#46) with a
+    /// `"restart\n"` string — the single-player suicide chain (`ClientKill` ->
+    /// `respawn()` -> `localcmd("restart\n")`, client.qc) compressed to its
+    /// engine-visible effect. Returns `(image, g_str, g_fn, localcmd_index)`;
+    /// the test fills global `g_str` with the interned string and `g_fn` with
+    /// the localcmd function value after load.
+    fn client_kill_progs() -> (Vec<u8>, usize, usize, usize) {
+        let mut b = Builder::new();
+        b.entityfields = 24;
+
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("viewentity", EV_FLOAT, 36);
+
+        // Minimal field set so spawn()/link/connect work.
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("origin", EV_VECTOR, 2);
+        b.add_field("mins", EV_VECTOR, 5);
+        b.add_field("maxs", EV_VECTOR, 8);
+        b.add_field("absmin", EV_VECTOR, 11);
+        b.add_field("absmax", EV_VECTOR, 14);
+        b.add_field("flags", EV_FLOAT, 17);
+        b.add_field("movetype", EV_FLOAT, 18);
+        b.add_field("solid", EV_FLOAT, 19);
+        b.add_field("size", EV_VECTOR, 20);
+        b.add_field("health", EV_FLOAT, 23);
+
+        let done = || Statement {
+            op: Op::Done as u16,
+            a: 0,
+            b: 0,
+            c: 0,
+        };
+        b.add_function("ClientConnect", vec![done()]);
+        b.add_function("PutClientInServer", vec![done()]);
+
+        let localcmd = b.add_builtin("localcmd", 46);
+
+        // Cells the test fills after load: the "restart\n" string_t and the
+        // localcmd function value the CALL1 dereferences.
+        let g_str = 40u16;
+        let g_fn = 41u16;
+        // ClientKill: localcmd("restart\n");
+        b.add_function(
+            "ClientKill",
+            vec![
+                Statement {
+                    op: Op::StoreS as u16,
+                    a: g_str as i16,
+                    b: OFS_PARM0 as i16,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::Call1 as u16,
+                    a: g_fn as i16,
+                    b: 0,
+                    c: 0,
+                },
+                done(),
+            ],
+        );
+
+        (b.build(), g_str as usize, g_fn as usize, localcmd)
+    }
+
+    #[test]
+    fn client_kill_runs_clientkill_and_refuses_when_dead() {
+        // Host_Kill_f (host_cmd.c): `kill` must route through the QuakeC
+        // ClientKill entry point (the REAL suicide chain, ending in respawn() ->
+        // localcmd("restart\n") in single player), and must refuse an
+        // already-dead player WITHOUT running ClientKill.
+        let (img, g_str, g_fn, localcmd) = client_kill_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        // No client connected yet: refused, no QuakeC runs.
+        assert!(
+            !server.client_kill().expect("kill w/o client"),
+            "no connected client -> refused"
+        );
+
+        let player = server.connect_client().expect("connect");
+        // Fill ClientKill's constants: the "restart\n" string + localcmd fn value.
+        let s = server.vm.intern("restart\n");
+        server.vm.set_gi(g_str, s);
+        server.vm.set_gi(g_fn, localcmd as i32);
+
+        // Alive player: ClientKill runs; its localcmd("restart\n") queues the
+        // single-player respawn exactly once.
+        server.vm.ent_set_float(player, "health", 100.0);
+        assert!(
+            server.client_kill().expect("kill alive"),
+            "alive player -> ClientKill ran"
+        );
+        assert!(
+            server.take_pending_restart(),
+            "ClientKill -> localcmd(restart) -> pending respawn"
+        );
+        assert!(!server.take_pending_restart(), "second take drains to false");
+
+        // Dead player: refused (the C prints "Can't suicide -- allready dead!"),
+        // and ClientKill must NOT have run — nothing queued.
+        server.vm.ent_set_float(player, "health", 0.0);
+        assert!(!server.client_kill().expect("kill dead"), "dead -> refused");
+        assert!(
+            !server.take_pending_restart(),
+            "a refused kill queues no respawn"
+        );
+    }
+
+    #[test]
+    fn dead_client_movetype_toss_gets_corpse_physics() {
+        // SV_Physics_Client (sv_phys.c) routes a MOVETYPE_TOSS/BOUNCE client
+        // through SV_Physics_Toss — the dead player's corpse physics (client.qc
+        // PlayerDie sets movetype TOSS + a velocity pop). The old fallback arm
+        // ran the think only, freezing a mid-air corpse in place. The corpse
+        // must gain downward velocity (gravity) and fall.
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+
+        let p = server.connect_client().expect("connect");
+        // A dead player hovering above the floor: TOSS, not on ground, no velocity.
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 120.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(p, "health", 0.0);
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_TOSS as f32);
+        let flags = server.vm.ent_get_float(p, "flags") as i32 & !FL_ONGROUND;
+        server.vm.ent_set_float(p, "flags", flags as f32);
+
+        server.client_frame(&UserCmd::default(), 0.1).expect("frame");
+
+        let vel = server.vm.ent_get_vector(p, "velocity");
+        let org = server.vm.ent_get_vector(p, "origin");
+        assert!(
+            vel[2] < 0.0,
+            "toss corpse gains downward velocity (gravity): vz = {}",
+            vel[2]
+        );
+        assert!(
+            org[2] < 120.0,
+            "toss corpse falls instead of freezing mid-air: z = {}",
+            org[2]
+        );
     }
 
     #[test]
