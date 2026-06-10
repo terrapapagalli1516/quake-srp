@@ -88,6 +88,11 @@ pub trait Host {
     fn precache_model(&mut self, name: &str) -> i32;
     /// Register a sound name, returning its sound index (≥ 1).
     fn precache_sound(&mut self, name: &str) -> i32;
+    /// Read-only scan of the sound precache table for `name`'s slot — the C
+    /// `PF_ambientsound`'s "check to see if samp was properly precached" walk
+    /// over `sv.sound_precache` (pr_cmds.c). `None` = not precached; never
+    /// registers.
+    fn find_sound(&self, name: &str) -> Option<i32>;
     /// Bounding box `(mins, maxs)` for a model name. Brush submodels (`"*N"`)
     /// return the BSP submodel bounds; unknown models return `None`.
     fn model_bbox(&self, name: &str) -> Option<(Vec3, Vec3)>;

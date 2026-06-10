@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use quake_rs::bsp::Bsp;
+use quake_rs::bsp::{Bsp, NUM_AMBIENTS};
 use quake_rs::demo::{parse_demo, Demo};
 use quake_rs::dlight::DynamicLights;
 use quake_rs::mdl::Mdl;
@@ -1502,9 +1502,16 @@ impl Listener {
 }
 
 /// Load the WAV bytes for the gameplay sounds in `events` and push them onto the
-/// playback queue. Constant ambient loops (`ambience/*`) and the silent
-/// `misc/null.wav` are skipped, and the queue is capped at 12 so a noisy frame
-/// can't grow it without bound.
+/// playback queue. The silent `misc/null.wav` is skipped, and the queue is
+/// capped at 12 so a noisy frame can't grow it without bound.
+///
+/// `ambience/*` one-shots are real gameplay content and queue like any other
+/// sample: trigger_push wind tunnels fire `sound (other, CHAN_AUTO,
+/// "ambience/windfly.wav", 1, ATTN_NORM)` (QuakeC `trigger_push_touch`, heard
+/// on E1M6). DEVIATION (Web Audio scope): such samples carry a `cue ` loop
+/// chunk, which the C mixer would LOOP on the dynamic channel until overridden
+/// (`SND_PaintChannels` wraps at `sc->loopstart`); our one-shot source plays
+/// it through once.
 ///
 /// Mixing follows the C `SND_PickChannel` (snd_dma.c:354-390), keyed on the
 /// `(entity, channel)` pair carried by each `SoundEvent` — NOT on the sample
@@ -1540,10 +1547,7 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity:
         let mut q = q.borrow_mut();
         for ev in events {
             let name = ev.sample.as_str();
-            if name.is_empty()
-                || name == "misc/null.wav"
-                || name.starts_with("ambience/")
-            {
+            if name.is_empty() || name == "misc/null.wav" {
                 continue;
             }
 
@@ -1678,9 +1682,13 @@ struct StaticLoop {
     loop_end: f32,
 }
 
-/// `MAX_CHANNELS` (snd_dma.c): the C refused static sounds past the channel
-/// table; the same cap keeps a hostile/buggy level from growing the queue.
-const MAX_STATIC_SOUNDS: usize = 128;
+/// The C's effective static-sound budget. `S_StaticSound` (snd_dma.c) refuses
+/// at `total_channels == MAX_CHANNELS` (128), but `total_channels` starts at
+/// `MAX_DYNAMIC_CHANNELS + NUM_AMBIENTS` = 8 + 4 = 12 (`S_Init`), so at most
+/// 116 statics ever fit — and `total_channels++` happens BEFORE the
+/// load/loop checks, so a registration that then FAILS (missing or unlooped
+/// sample) still burns its slot (see [`queue_static_sounds`]).
+const MAX_STATIC_SOUNDS: usize = 128 - (8 + 4);
 
 thread_local! {
     /// Static sounds registered by the CURRENT level, awaiting page pickup via
@@ -1699,6 +1707,14 @@ thread_local! {
     static SOUND_GENERATION: RefCell<i32> = const { RefCell::new(0) };
     /// The four automatic ambient channels' ramp state (S_UpdateAmbientSounds).
     static AMBIENT: RefCell<AmbientChannels> = const { RefCell::new(AmbientChannels::new()) };
+    /// The four channels' CURRENT frame volumes (0..=255) as returned by the
+    /// last [`AmbientChannels::update`] — the C's per-frame `chan->leftvol =
+    /// chan->rightvol = chan->master_vol` (or the silenced `!l` /
+    /// ambient-off frames' nothing-at-all). [`ambient_gain`] serves THESE,
+    /// not the raw ramp state, so an out-of-world listener actually goes
+    /// quiet on the page while `master_vol` is preserved for re-entry.
+    static AMBIENT_VOLS: RefCell<[f32; NUM_AMBIENTS]> =
+        const { RefCell::new([0.0; NUM_AMBIENTS]) };
 }
 
 /// A level/mode transition happened: invalidate every looping source. Mirrors
@@ -1714,6 +1730,7 @@ fn bump_sound_generation() {
     });
     STATIC_QUEUE.with(|q| q.borrow_mut().clear());
     AMBIENT.with(|a| *a.borrow_mut() = AmbientChannels::new());
+    AMBIENT_VOLS.with(|v| *v.borrow_mut() = [0.0; NUM_AMBIENTS]);
 }
 
 /// Load the WAV bytes for each placed static sound and queue them for the
@@ -1724,13 +1741,21 @@ fn bump_sound_generation() {
 fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
     STATIC_QUEUE.with(|q| {
         let mut q = q.borrow_mut();
+        // The statics' share of the C channel table (`total_channels - 12`).
+        // Local to the call: `S_StopAllSounds` resets `total_channels` on
+        // every level change, and a level registers its statics exactly once
+        // (one drain -> one call, right after the generation bump).
+        let mut slots = 0usize;
         for s in statics {
-            if q.len() >= MAX_STATIC_SOUNDS {
-                break; // the C's "total_channels == MAX_CHANNELS" drop
+            if slots >= MAX_STATIC_SOUNDS {
+                break; // the C's "total_channels == MAX_CHANNELS" refusal
             }
             if s.sample.is_empty() {
-                continue;
+                continue; // the C's `if (!sfx) return` — before the slot grab
             }
+            // `total_channels++` precedes S_LoadSound and the loop check in
+            // the C, so each of the drops below still burns its slot.
+            slots += 1;
             // Sample names are relative to "sound/" (S_LoadSound's sprintf),
             // exactly like the one-shot path in `queue_sounds`.
             let path = format!("sound/{}", s.sample);
@@ -1846,15 +1871,33 @@ pub extern "C" fn load_ambient_sound(ch: i32) -> i32 {
     len
 }
 
-/// Ambient channel `ch`'s CURRENT volume in `0.0..=1.0` (the ramped
-/// `master_vol` over the C's 255 scale). The page multiplies by its master
-/// volume and writes it to the channel's gain node every frame — both sides of
-/// the C's `chan->leftvol = chan->rightvol = chan->master_vol` (ambients are
-/// centred, never panned or distance-attenuated).
+/// Ambient channel `ch`'s volume THIS frame in `0.0..=1.0` (the value
+/// [`AmbientChannels::update`] returned, over the C's 255 scale — see
+/// [`AMBIENT_VOLS`]). The page multiplies by its master volume and writes it
+/// to the channel's gain node every frame — both sides of the C's
+/// `chan->leftvol = chan->rightvol = chan->master_vol` (ambients are centred,
+/// never panned or distance-attenuated). 0.0 on the frames the C silenced
+/// outright (listener outside the world, `ambient_level` 0).
 #[no_mangle]
 pub extern "C" fn ambient_gain(ch: i32) -> f32 {
     let Ok(c) = usize::try_from(ch) else { return 0.0 };
-    AMBIENT.with(|a| a.borrow().master_vol(c)) / 255.0
+    AMBIENT_VOLS.with(|v| v.borrow().get(c).copied().unwrap_or(0.0)) / 255.0
+}
+
+/// Ramp the four ambient channels toward `leaf_levels` and publish the frame's
+/// returned volumes for [`ambient_gain`] — `update`'s return is the ONLY place
+/// the C's silenced `!l`/ambient-off frames differ from the ramp state, so it
+/// must be what the page hears.
+fn ramp_ambient_channels(leaf_levels: Option<&[u8; NUM_AMBIENTS]>, frametime: f32) {
+    let vols = AMBIENT.with(|a| {
+        a.borrow_mut().update(
+            leaf_levels,
+            frametime,
+            AMBIENT_LEVEL_DEFAULT,
+            AMBIENT_FADE_DEFAULT,
+        )
+    });
+    AMBIENT_VOLS.with(|v| *v.borrow_mut() = vols);
 }
 
 /// One frame of `S_UpdateAmbientSounds` for the listener standing at `eye` in
@@ -1868,14 +1911,7 @@ fn update_ambient_channels(bsp: &Bsp, eye: [f32; 3], dt: f32) {
     let leaf_levels = render::point_in_leaf(bsp, eye)
         .and_then(|li| bsp.leafs.get(li))
         .map(|l| l.ambient_level);
-    AMBIENT.with(|a| {
-        a.borrow_mut().update(
-            leaf_levels.as_ref(),
-            frametime,
-            AMBIENT_LEVEL_DEFAULT,
-            AMBIENT_FADE_DEFAULT,
-        );
-    });
+    ramp_ambient_channels(leaf_levels.as_ref(), frametime);
 }
 
 /// The listener (player) pose as of the last walk `step`: eye position and the
@@ -3218,6 +3254,28 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(got[0].1, "the view entity's sound is flagged");
         assert!(!got[1].1, "the monster's sound is not flagged");
+    }
+
+    #[test]
+    fn queue_sounds_plays_ambience_one_shots() {
+        // `ambience/*` is NOT a loop marker on the one-shot path: E1M6's
+        // trigger_push wind tunnels fire `sound (other, CHAN_AUTO,
+        // "ambience/windfly.wav", 1, ATTN_NORM)` (QuakeC trigger_push_touch)
+        // as genuine gameplay one-shots the C plays like any other sample.
+        // Only the silent misc/null.wav is skipped.
+        let pak = build_test_pak(&[
+            ("sound/ambience/windfly.wav", b"WIND"),
+            ("sound/misc/null.wav", b"NULL"),
+        ]);
+        reset_queue();
+        queue_sounds(
+            &pak,
+            &[ev(2, 0, "ambience/windfly.wav", 0.8), ev(3, 0, "misc/null.wav", 0.5)],
+            -1,
+        );
+        let got = drain_queue();
+        assert_eq!(got.len(), 1, "windfly queued; null.wav skipped");
+        assert_eq!(got[0].0, 0.8, "the ambience one-shot's own params");
     }
 
     #[test]
@@ -4573,22 +4631,26 @@ mod tests {
     }
 
     #[test]
-    fn ambient_gain_ramps_and_resets_on_generation_bump() {
+    fn ambient_gain_serves_frame_volumes_and_resets_on_generation_bump() {
         AMBIENT.with(|a| *a.borrow_mut() = AmbientChannels::new());
-        // Half a second toward a full-water leaf: master_vol = 0.5*100 = 50.
-        AMBIENT.with(|a| {
-            a.borrow_mut().update(
-                Some(&[255, 0, 0, 0]),
-                0.5,
-                AMBIENT_LEVEL_DEFAULT,
-                AMBIENT_FADE_DEFAULT,
-            );
-        });
-        assert!((ambient_gain(0) - 50.0 / 255.0).abs() < 1e-6, "ramped gain");
+        // 36 host frames (1/72 s each) toward a full-water leaf: the C's
+        // integer ramp climbs +1 per step -> master_vol 36.
+        for _ in 0..36 {
+            ramp_ambient_channels(Some(&[255, 0, 0, 0]), 1.0 / 72.0);
+        }
+        assert!((ambient_gain(0) - 36.0 / 255.0).abs() < 1e-6, "ramped gain");
         assert_eq!(ambient_gain(1), 0.0, "silent channel");
         assert_eq!(ambient_gain(99), 0.0, "out of range");
         assert_eq!(ambient_gain(-1), 0.0, "negative channel");
-        // A level change (S_StopAllSounds) resets the ramp to silence.
+        // Outside the world (the C's `!l` branch): this frame is SILENT on the
+        // page even though master_vol is preserved — ambient_gain must serve
+        // update()'s returned frame volumes, not the raw ramp state.
+        ramp_ambient_channels(None, 1.0 / 72.0);
+        assert_eq!(ambient_gain(0), 0.0, "no leaf = silence NOW");
+        // Re-entering the world resumes the ramp from the preserved value.
+        ramp_ambient_channels(Some(&[255, 0, 0, 0]), 1.0 / 72.0);
+        assert!((ambient_gain(0) - 37.0 / 255.0).abs() < 1e-6, "ramp resumed");
+        // A level change (S_StopAllSounds) resets ramp AND frame volumes.
         bump_sound_generation();
         assert_eq!(ambient_gain(0), 0.0, "generation bump resets the ramp");
     }
@@ -4630,6 +4692,44 @@ mod tests {
             poll_static_sound(),
             0,
             "unlooped / missing / empty-name samples all dropped"
+        );
+    }
+
+    #[test]
+    fn queue_static_sounds_cap_and_slot_burning_match_the_c() {
+        // S_StaticSound's budget is 116 (MAX_CHANNELS 128 minus the 12
+        // channels total_channels starts at), and `total_channels++` happens
+        // BEFORE the load/loop checks — a registration that then fails burns
+        // its slot. The C's `if (!sfx) return` (empty name) precedes the slot
+        // grab and burns nothing.
+        let looped = test_wav(Some(8), 64);
+        let oneshot = test_wav(None, 64);
+        let pak = build_test_pak(&[
+            ("sound/amb/loopy.wav", looped.as_slice()),
+            ("sound/amb/shot.wav", oneshot.as_slice()),
+        ]);
+        let mk = |sample: &str| StaticSound {
+            origin: [0.0; 3],
+            sound_index: 1,
+            sample: sample.to_string(),
+            volume: 0.5,
+            attenuation: 3.0,
+        };
+        // 3 empty names (no slot), 4 unlooped (slot burned, dropped), then 116
+        // looped: only 112 slots remain for them.
+        let mut statics = vec![mk(""), mk(""), mk("")];
+        statics.extend(std::iter::repeat_with(|| mk("amb/shot.wav")).take(4));
+        statics.extend(std::iter::repeat_with(|| mk("amb/loopy.wav")).take(116));
+        STATIC_QUEUE.with(|q| q.borrow_mut().clear());
+        queue_static_sounds(&pak, &statics);
+        let mut queued = 0;
+        while poll_static_sound() > 0 {
+            queued += 1;
+        }
+        assert_eq!(
+            queued,
+            MAX_STATIC_SOUNDS - 4,
+            "4 burned slots leave 112 of the 116 for real loops"
         );
     }
 }

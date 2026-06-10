@@ -37,6 +37,19 @@ pub const AMBIENT_LEVEL_DEFAULT: f32 = 0.3;
 /// (0..255 scale) per second the channel may move toward its target.
 pub const AMBIENT_FADE_DEFAULT: f32 = 100.0;
 
+/// One WinQuake host frame at the engine's frame cap. `Host_FilterTime`
+/// (host.c:505) refuses to run a frame until at least 1/72 s of real time has
+/// passed, so `S_UpdateAmbientSounds` never saw a shorter `host_frametime`;
+/// the ambient ramp integrates in these fixed steps (see [`AmbientChannels`]).
+const HOST_FRAME_STEP: f32 = 1.0 / 72.0;
+
+/// `Host_FilterTime`'s "don't allow really long [...] frames" clamp
+/// (host.c:515): one C frame never integrated more than 0.1 s of ambient fade
+/// no matter how long the real stall was. Applied to the step accumulator for
+/// the same reason (a backgrounded tab must not fast-forward the ramp on
+/// return).
+const HOST_FRAME_MAX: f32 = 0.1;
+
 /// The state of the four automatic ambient channels — the `master_vol` of
 /// `channels[0..NUM_AMBIENTS]` that `S_UpdateAmbientSounds` (snd_dma.c:664)
 /// ramps every frame. A front-end keeps one of these alive, calls
@@ -45,10 +58,25 @@ pub const AMBIENT_FADE_DEFAULT: f32 = 100.0;
 /// returned volumes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientChannels {
-    /// `channels[ch].master_vol`, 0..=255 (the C mixes channel volumes on a
-    /// byte scale; stored as f32 because the ramp moves in fractional
-    /// `host_frametime * ambient_fade` steps).
-    master_vol: [f32; NUM_AMBIENTS],
+    /// `channels[ch].master_vol`, 0..=255 — an `int` in the C (sound.h:79:
+    /// `int master_vol; // 0-255 master volume`), so every ramp assignment in
+    /// `S_UpdateAmbientSounds` truncates toward zero. That integer math is
+    /// load-bearing: at the default `ambient_fade` 100 a 72fps step is
+    /// 100/72 ≈ 1.39, so the up-ramp moves `trunc(mv + 1.39) = mv + 1` per
+    /// step (~72 units/s) while the down-ramp moves `trunc(mv - 1.39) =
+    /// mv - 2` (~144 units/s — fade-out twice as fast as fade-in), and the
+    /// clamp-onto-target stores `trunc(vol)` (76 for a full-level water
+    /// leaf's 0.3*255 = 76.5).
+    master_vol: [i32; NUM_AMBIENTS],
+    /// Real seconds not yet consumed by whole [`HOST_FRAME_STEP`] ramp steps.
+    /// WinQuake only ever ran the ramp at `host_frametime >= 1/72` (the
+    /// `Host_FilterTime` frame cap), where the integer up-step above is >= 1;
+    /// a rAF-driven front-end can hand us shorter frames (144 Hz: step 0.69)
+    /// where the C's literal `trunc(mv + 0.69) = mv` would stall the up-ramp
+    /// FOREVER — a regime the original could never enter. So the ramp runs on
+    /// a fixed 1/72 s timestep fed by this accumulator: "WinQuake as
+    /// compiled, at its frame cap" at any display refresh rate.
+    accum: f32,
 }
 
 impl Default for AmbientChannels {
@@ -62,26 +90,33 @@ impl AmbientChannels {
     /// channel, ambients included, on level change).
     pub const fn new() -> Self {
         AmbientChannels {
-            master_vol: [0.0; NUM_AMBIENTS],
+            master_vol: [0; NUM_AMBIENTS],
+            accum: 0.0,
         }
     }
 
-    /// One frame of `S_UpdateAmbientSounds` (snd_dma.c:664-711).
+    /// One frame of `S_UpdateAmbientSounds` (snd_dma.c:664-711), run on a
+    /// fixed 1/72 s timestep (see [`AmbientChannels::accum`]): `frametime` is
+    /// the frame's REAL seconds, banked and consumed in whole
+    /// [`HOST_FRAME_STEP`] steps, each applying the C's literal
+    /// integer-`master_vol` math with `host_frametime = 1/72` — WinQuake at
+    /// its `Host_FilterTime` frame cap.
     ///
     /// `leaf_levels` is the view leaf's `ambient_level[]` (None when the
-    /// listener is outside the world — the C's `!l` case). `frametime` is the
-    /// frame's seconds (`host_frametime`); `ambient_level` / `ambient_fade`
-    /// are the cvar values ([`AMBIENT_LEVEL_DEFAULT`]/[`AMBIENT_FADE_DEFAULT`]).
+    /// listener is outside the world — the C's `!l` case); `ambient_level` /
+    /// `ambient_fade` are the cvar values
+    /// ([`AMBIENT_LEVEL_DEFAULT`]/[`AMBIENT_FADE_DEFAULT`]).
     ///
     /// Returns each channel's volume for this frame on the C's 0..=255 scale
     /// (`chan->leftvol = chan->rightvol = chan->master_vol` — ambients are
-    /// centred, never panned). Per the C:
+    /// centred, never panned), whether or not a step fired this call. Per the
+    /// C, each step:
     ///
-    /// * target `vol = ambient_level * leaf_levels[ch]`, floored to 0 when
+    /// * targets `vol = ambient_level * leaf_levels[ch]`, floored to 0 when
     ///   below 8;
-    /// * `master_vol` moves toward the target by at most
-    ///   `frametime * ambient_fade` ("don't adjust volume too fast"), clamping
-    ///   exactly onto it;
+    /// * moves `master_vol` toward the target by `(1/72) * ambient_fade`
+    ///   ("don't adjust volume too fast"), truncating into the int channel on
+    ///   every store, and clamps onto `trunc(vol)`;
     /// * with no leaf (or `ambient_level` 0) every channel's sfx is unhooked —
     ///   silence NOW — but `master_vol` is NOT reset (the C leaves it; a
     ///   re-entered world resumes ramping from the old value).
@@ -93,7 +128,8 @@ impl AmbientChannels {
         ambient_fade: f32,
     ) -> [f32; NUM_AMBIENTS] {
         // `if (!l || !ambient_level.value)`: kill the channels' sfx (silent
-        // this frame) without touching master_vol.
+        // this frame) without touching master_vol (or the accumulator — these
+        // C frames ramped nothing).
         let Some(levels) = leaf_levels else {
             return [0.0; NUM_AMBIENTS];
         };
@@ -101,35 +137,50 @@ impl AmbientChannels {
             return [0.0; NUM_AMBIENTS];
         }
 
+        // Bank this frame's real time, bounded by Host_FilterTime's 0.1 s
+        // frame clamp, then ramp once per whole 1/72 s step. At WinQuake's own
+        // frame cap this fires exactly once per frame; at 144 Hz every other
+        // frame; never more than 7 steps (0.1 s) at once.
+        self.accum = (self.accum + frametime.max(0.0)).min(HOST_FRAME_MAX);
+        while self.accum >= HOST_FRAME_STEP {
+            self.accum -= HOST_FRAME_STEP;
+            for (ch, mv) in self.master_vol.iter_mut().enumerate() {
+                let mut vol = ambient_level * levels[ch] as f32;
+                if vol < 8.0 {
+                    vol = 0.0;
+                }
+
+                // don't adjust volume too fast
+                //
+                // The C's literal int math: `master_vol` is an int, so
+                // `chan->master_vol += host_frametime * ambient_fade.value`
+                // (and the clamp store `= vol`) truncate toward zero on every
+                // assignment — `as i32` is exactly that truncation.
+                if (*mv as f32) < vol {
+                    *mv = (*mv as f32 + HOST_FRAME_STEP * ambient_fade) as i32;
+                    if *mv as f32 > vol {
+                        *mv = vol as i32;
+                    }
+                } else if *mv as f32 > vol {
+                    *mv = (*mv as f32 - HOST_FRAME_STEP * ambient_fade) as i32;
+                    if (*mv as f32) < vol {
+                        *mv = vol as i32;
+                    }
+                }
+            }
+        }
+
         let mut out = [0.0; NUM_AMBIENTS];
-        for (ch, mv) in self.master_vol.iter_mut().enumerate() {
-            let mut vol = ambient_level * levels[ch] as f32;
-            if vol < 8.0 {
-                vol = 0.0;
-            }
-
-            // don't adjust volume too fast
-            if *mv < vol {
-                *mv += frametime * ambient_fade;
-                if *mv > vol {
-                    *mv = vol;
-                }
-            } else if *mv > vol {
-                *mv -= frametime * ambient_fade;
-                if *mv < vol {
-                    *mv = vol;
-                }
-            }
-
-            out[ch] = *mv;
+        for (ch, mv) in self.master_vol.iter().enumerate() {
+            out[ch] = *mv as f32;
         }
         out
     }
 
-    /// A channel's current `master_vol` (0..=255 scale); 0.0 for an
-    /// out-of-range channel.
+    /// A channel's current `master_vol` (0..=255, integral like the C's int
+    /// field); 0.0 for an out-of-range channel.
     pub fn master_vol(&self, ch: usize) -> f32 {
-        self.master_vol.get(ch).copied().unwrap_or(0.0)
+        self.master_vol.get(ch).copied().unwrap_or(0) as f32
     }
 }
 
@@ -285,38 +336,71 @@ mod tests {
 
     // ------------------------------------------------ ambient channel ramp
 
-    #[test]
-    fn ambient_ramps_up_at_fade_rate_and_clamps_at_target() {
-        let mut amb = AmbientChannels::new();
-        // Leaf says full water ambience: target = 0.3 * 255 = 76.5.
-        let levels = [255u8, 0, 0, 0];
-        // One 0.1 s frame moves at most 0.1 * 100 = 10 units.
-        let v = amb.update(Some(&levels), 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
-        assert_eq!(v[AMBIENT_WATER], 10.0, "one frame of ramp = dt*fade");
-        assert_eq!(v[AMBIENT_SKY], 0.0, "sky leaf level 0 stays silent");
-        // Keep stepping; it must clamp exactly onto 76.5, never overshoot.
-        for _ in 0..20 {
-            amb.update(Some(&levels), 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
+    /// Step `amb` by `n` whole 72fps host frames toward `levels` with the
+    /// default cvars, returning the last frame's volumes.
+    fn step_n(
+        amb: &mut AmbientChannels,
+        levels: &[u8; NUM_AMBIENTS],
+        n: usize,
+    ) -> [f32; NUM_AMBIENTS] {
+        let mut v = [0.0; NUM_AMBIENTS];
+        for _ in 0..n {
+            v = amb.update(
+                Some(levels),
+                HOST_FRAME_STEP,
+                AMBIENT_LEVEL_DEFAULT,
+                AMBIENT_FADE_DEFAULT,
+            );
         }
-        assert_eq!(amb.master_vol(AMBIENT_WATER), 76.5, "clamped onto target");
+        v
     }
 
     #[test]
-    fn ambient_ramps_down_and_floors_below_8_to_zero() {
+    fn ambient_ramp_is_integer_and_asymmetric_like_the_c() {
+        // The C's master_vol is an int (sound.h:79), so at the 72fps host cap
+        // the default fade's per-frame step 100/72 ≈ 1.39 truncates: up-ramp
+        // trunc(mv + 1.39) = mv + 1 (72 u/s), down-ramp trunc(mv - 1.39) =
+        // mv - 2 (144 u/s) — fade-out twice as fast as fade-in.
+        let mut amb = AmbientChannels::new();
+        let levels = [255u8, 0, 0, 0];
+        let v = step_n(&mut amb, &levels, 1);
+        assert_eq!(v[AMBIENT_WATER], 1.0, "up: trunc(0 + 1.39) = 1, not 1.39");
+        assert_eq!(v[AMBIENT_SKY], 0.0, "sky leaf level 0 stays silent");
+        step_n(&mut amb, &levels, 49);
+        assert_eq!(amb.master_vol(AMBIENT_WATER), 50.0, "+1/step = 72 u/s up");
+        // Empty leaf -> target 0: the down-ramp drops 2 per step.
+        let quiet = [0u8; NUM_AMBIENTS];
+        let v = step_n(&mut amb, &quiet, 1);
+        assert_eq!(v[AMBIENT_WATER], 48.0, "down: trunc(50 - 1.39) = 48");
+        step_n(&mut amb, &quiet, 24);
+        assert_eq!(amb.master_vol(AMBIENT_WATER), 0.0, "reaches 0 exactly");
+    }
+
+    #[test]
+    fn ambient_clamp_lands_on_truncated_target() {
+        // A full-level water leaf targets 0.3*255 = 76.5, but the C stores the
+        // clamp into the int channel: trunc(76.5) = 76. The ramp settles on
+        // that whole int — never the fractional target — and holds it.
+        let mut amb = AmbientChannels::new();
+        let levels = [255u8, 0, 0, 0];
+        step_n(&mut amb, &levels, 200);
+        assert_eq!(amb.master_vol(AMBIENT_WATER), 76.0, "trunc(76.5), an int");
+        let v = step_n(&mut amb, &levels, 1);
+        assert_eq!(v[AMBIENT_WATER], 76.0, "steady state holds");
+    }
+
+    #[test]
+    fn ambient_floors_target_below_8_to_zero() {
         let mut amb = AmbientChannels::new();
         let loud = [0u8, 255, 0, 0];
-        for _ in 0..30 {
-            amb.update(Some(&loud), 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
-        }
-        assert_eq!(amb.master_vol(AMBIENT_SKY), 76.5);
+        step_n(&mut amb, &loud, 200);
+        assert_eq!(amb.master_vol(AMBIENT_SKY), 76.0);
         // Leaf level 20 -> 0.3*20 = 6 < 8 -> target 0 (the C's "if (vol < 8)
         // vol = 0"), so the channel ramps DOWN even though the leaf is nonzero.
         let faint = [0u8, 20, 0, 0];
-        let v = amb.update(Some(&faint), 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
-        assert_eq!(v[AMBIENT_SKY], 66.5, "ramping down by dt*fade toward 0");
-        for _ in 0..30 {
-            amb.update(Some(&faint), 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
-        }
+        let v = step_n(&mut amb, &faint, 1);
+        assert_eq!(v[AMBIENT_SKY], 74.0, "ramping down toward the 0 floor");
+        step_n(&mut amb, &faint, 50);
         assert_eq!(amb.master_vol(AMBIENT_SKY), 0.0, "clamped onto the 0 floor");
     }
 
@@ -324,26 +408,52 @@ mod tests {
     fn ambient_no_leaf_silences_now_but_preserves_master_vol() {
         let mut amb = AmbientChannels::new();
         let levels = [255u8, 0, 0, 0];
-        for _ in 0..5 {
-            amb.update(Some(&levels), 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
-        }
-        assert_eq!(amb.master_vol(AMBIENT_WATER), 50.0);
+        step_n(&mut amb, &levels, 10);
+        assert_eq!(amb.master_vol(AMBIENT_WATER), 10.0);
         // The C's `!l` case NULLs the sfx (silent this frame) without touching
-        // master_vol — so re-entering the world resumes from 50, not 0.
-        let v = amb.update(None, 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
+        // master_vol — so re-entering the world resumes from 10, not 0.
+        let v = amb.update(None, HOST_FRAME_STEP, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
         assert_eq!(v, [0.0; NUM_AMBIENTS], "outside the world = silent");
-        assert_eq!(amb.master_vol(AMBIENT_WATER), 50.0, "master_vol preserved");
-        let v = amb.update(Some(&levels), 0.1, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
-        assert_eq!(v[AMBIENT_WATER], 60.0, "resumes ramping from the old value");
+        assert_eq!(amb.master_vol(AMBIENT_WATER), 10.0, "master_vol preserved");
+        let v = step_n(&mut amb, &levels, 1);
+        assert_eq!(v[AMBIENT_WATER], 11.0, "resumes ramping from the old value");
     }
 
     #[test]
     fn ambient_level_zero_cvar_silences_all() {
         let mut amb = AmbientChannels::new();
         let levels = [255u8, 255, 255, 255];
-        amb.update(Some(&levels), 1.0, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
-        let v = amb.update(Some(&levels), 0.1, 0.0, AMBIENT_FADE_DEFAULT);
+        step_n(&mut amb, &levels, 10);
+        let v = amb.update(Some(&levels), HOST_FRAME_STEP, 0.0, AMBIENT_FADE_DEFAULT);
         assert_eq!(v, [0.0; NUM_AMBIENTS], "ambient_level 0 = ambients off");
+    }
+
+    #[test]
+    fn ambient_ramp_does_not_stall_at_144hz() {
+        // At 144 Hz the C's literal int math would stall the up-ramp forever:
+        // trunc(mv + (1/144)*100) = trunc(mv + 0.69) = mv. WinQuake never saw
+        // such a frametime (Host_FilterTime's 72fps cap); the fixed-timestep
+        // accumulator banks the half-steps so one whole 1/72 s step fires
+        // every other frame — the same 72 ramp-steps/second as WinQuake.
+        let mut amb = AmbientChannels::new();
+        let levels = [255u8, 0, 0, 0];
+        for _ in 0..144 {
+            amb.update(Some(&levels), 1.0 / 144.0, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
+        }
+        // One real second = 72 steps = +72 units (not stalled at 0).
+        assert_eq!(amb.master_vol(AMBIENT_WATER), 72.0);
+    }
+
+    #[test]
+    fn ambient_long_stall_integrates_at_most_the_host_frame_clamp() {
+        // Host_FilterTime clamps a long frame to 0.1 s ("don't allow really
+        // long frames", host.c:515), so the C never integrated more than
+        // 0.1 s of fade per frame. A 5 s stall (backgrounded tab) banks only
+        // 0.1 s = 7 whole steps -> +7 units, no fast-forward.
+        let mut amb = AmbientChannels::new();
+        let levels = [255u8, 0, 0, 0];
+        let v = amb.update(Some(&levels), 5.0, AMBIENT_LEVEL_DEFAULT, AMBIENT_FADE_DEFAULT);
+        assert_eq!(v[AMBIENT_WATER], 7.0, "trunc(0.1 / (1/72)) = 7 steps");
     }
 
     // ------------------------------------------------ GetWavinfo port

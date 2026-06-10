@@ -312,6 +312,13 @@ impl Host for WorldModel {
         precache_push(&mut self.precache_sounds, name)
     }
 
+    fn find_sound(&self, name: &str) -> Option<i32> {
+        // The C's scan starts at slot 0, which holds "" exactly like ours
+        // (`sv.sound_precache[0] = pr_strings`), so an empty name "matches"
+        // slot 0 there too — kept as-is; QuakeC never passes one.
+        self.precache_sounds.iter().position(|s| s == name).map(|i| i as i32)
+    }
+
     fn model_bbox(&self, name: &str) -> Option<(Vec3, Vec3)> {
         // Brush submodels ("*N") read bounds straight from the world BSP.
         if let Some(n) = Self::submodel_index(name) {
@@ -1670,6 +1677,12 @@ fn bi_sound(vm: &mut Vm) -> Result<()> {
 /// a [`StaticSound`] for [`Server::drain_static_sounds`] — NOT as a one-shot
 /// [`SoundEvent`] (a loop is state, not an event).
 ///
+/// Unlike `SV_StartSound`'s path (see [`lookup_sound_index`]'s DEVIATION),
+/// the precache gate here matches the C exactly: `PF_ambientsound` scans
+/// `sv.sound_precache` read-only and REFUSES an un-precached sample —
+/// `Con_Printf ("no precache: %s\n", samp); return;` — registering nothing.
+/// The message routes to [`Vm::output`] like the `print`/`dprint` builtins.
+///
 /// The wire format quantized volume and attenuation into bytes
 /// (`MSG_WriteByte(vol*255)` / `MSG_WriteByte(attenuation*64)`, C float→int
 /// truncation); `CL_ParseStaticSound` handed those bytes to `S_StaticSound`,
@@ -1682,7 +1695,13 @@ fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
     let volume = vm.arg_float(2);
     let attenuation = vm.arg_float(3);
 
-    let sound_index = lookup_sound_index(vm, &sample);
+    // "check to see if samp was properly precached" (pr_cmds.c:519-528).
+    let Some(sound_index) = vm.with_host(|_vm, h| h.find_sound(&sample)).flatten() else {
+        vm.output.push_str("no precache: ");
+        vm.output.push_str(&sample);
+        vm.output.push('\n');
+        return Ok(());
+    };
 
     let vol_byte = (volume * 255.0).clamp(0.0, 255.0) as u8;
     let atten_byte = (attenuation * 64.0).clamp(0.0, 255.0) as u8;
@@ -1696,17 +1715,18 @@ fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-/// Resolve `sample`'s precache slot. The C `SV_StartSound`/`PF_ambientsound`
-/// only *searched* `sv.sound_precache` and dropped an un-precached sample; the
-/// [`Host`] trait exposes `precache_sound` (append-or-find) but no read-only
-/// search. In practice QuakeC precaches every sound during `worldspawn` before
-/// any `sound()` fires, so `precache_sound` returns the existing stable slot
+/// Resolve `sample`'s precache slot for the one-shot [`SoundEvent`] paths
+/// (`bi_sound` / the physics `start_sound`). The C `SV_StartSound` only
+/// *searched* `sv.sound_precache` and dropped an un-precached sample. In
+/// practice QuakeC precaches every sound during `worldspawn` before any
+/// `sound()` fires, so `precache_sound` returns the existing stable slot
 /// (`>= 1`) without appending. Returns `-1` only when there is no host at all.
 ///
-/// DEVIATION: an un-precached name is registered here (and so gets a real slot)
-/// rather than being dropped with a warning, since we cannot reach the table
-/// read-only without editing `vm.rs`. The captured [`SoundEvent`] still carries
-/// the raw `sample`, so a front-end is never misled about what played.
+/// DEVIATION: an un-precached name is registered here (and so gets a real
+/// slot) rather than being dropped with a warning. The captured
+/// [`SoundEvent`] still carries the raw `sample`, so a front-end is never
+/// misled about what played. (`bi_ambientsound` does NOT use this: it matches
+/// the C's read-only check via [`Host::find_sound`] and drops.)
 fn lookup_sound_index(vm: &mut Vm, sample: &str) -> i32 {
     vm.with_host(|_vm, h| h.precache_sound(sample)).unwrap_or(-1)
 }
@@ -8312,7 +8332,9 @@ mod tests {
         let mut server = Server::new(floor_bsp(), progs).expect("server");
         let _ = server.drain_static_sounds();
 
-        let s_t = server.vm.intern("ambience/wind2.wav");
+        let sample = "ambience/wind2.wav";
+        server.vm.with_host(|_vm, h| h.precache_sound(sample));
+        let s_t = server.vm.intern(sample);
         server.vm.set_gv(OFS_PARM0, [0.0; 3]);
         server.vm.set_gi(OFS_PARM0 + 3, s_t);
         server.vm.set_gf(OFS_PARM0 + 6, 9.0); // vol byte clamps to 255
@@ -8325,6 +8347,40 @@ mod tests {
             statics[0].attenuation,
             255.0 / 64.0,
             "attenuation byte clamps to 255"
+        );
+    }
+
+    #[test]
+    fn bi_ambientsound_drops_unprecached_sample_like_the_c() {
+        // PF_ambientsound scans sv.sound_precache READ-ONLY: an un-precached
+        // sample is refused with `Con_Printf ("no precache: %s\n", samp)` and
+        // nothing is registered — and the check must not grow the precache
+        // table either (unlike the one-shot path's lookup_sound_index).
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let _ = server.drain_static_sounds();
+
+        let s_t = server.vm.intern("ambience/notthere.wav");
+        server.vm.set_gv(OFS_PARM0, [0.0; 3]);
+        server.vm.set_gi(OFS_PARM0 + 3, s_t);
+        server.vm.set_gf(OFS_PARM0 + 6, 0.5);
+        server.vm.set_gf(OFS_PARM0 + 9, 3.0);
+        bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
+
+        assert!(
+            server.drain_static_sounds().is_empty(),
+            "un-precached ambientsound registers nothing"
+        );
+        assert!(
+            server.vm.output.contains("no precache: ambience/notthere.wav\n"),
+            "the C's console message, routed to vm.output: {:?}",
+            server.vm.output
+        );
+        assert_eq!(
+            server.vm.with_host(|_vm, h| h.find_sound("ambience/notthere.wav")),
+            Some(None),
+            "the read-only check must not register the name as a side effect"
         );
     }
 
