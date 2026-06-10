@@ -1824,7 +1824,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         let render_once = || {
             render::render_scene_ext(
                 &bsp_for_render, &cam, bw, bh, &palette, &instances, &bmodels, &external, None,
-                server.time(), &[], &[], &light_styles, colormap.as_deref(),
+                server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(),
             )
         };
         let _ = std::hint::black_box(render_once()); // warm the per-face caches
