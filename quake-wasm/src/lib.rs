@@ -496,6 +496,14 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     // Capture the level-entry spawn parms (the just-connected, full-state player) so
     // a single-player respawn can reload THIS level with them.
     let entry_parms = server.save_spawn_parms();
+    // The signon-sequence physics frames the C runs between PutClientInServer and
+    // the first rendered frame (Host_Spawn_f/Host_Begin_f each precede an
+    // SV_Physics tick before signon 4 re-enables drawing). Without them the
+    // just-spawned player — placed at spot.origin + '0 0 1', ~5 units up on the
+    // start map — falls to the floor ON SCREEN over the first frames: the
+    // reported one-time texture/lighting "pop" (every surface resamples as the
+    // eye drops). Frame 0 must render the settled WinQuake pose.
+    server.run_signon_frames();
 
     // The level is committed past this point (nothing below fails). Tear down
     // the previous level/mode's looping audio and register this level's placed
@@ -505,6 +513,14 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     bump_sound_generation();
     let statics = server.drain_static_sounds();
     queue_static_sounds(&pak, &statics);
+    // Drop one-shot events the spawn + settle ticks queued, like the
+    // changelevel/restart paths do (in the C the client misses signon-era
+    // datagram sounds while not yet `spawned`; tick 2's are technically
+    // deliverable there — dropping both is a deliberate, inaudible-on-id-maps
+    // simplification, kept identical across all three walk-building paths).
+    let _ = server.drain_sounds();
+    let _ = server.drain_particles();
+    let _ = server.drain_temp_entities();
 
     Some(Walk {
         server,
@@ -2243,6 +2259,13 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // The carried inventory at the start of the NEW level becomes its entry parms,
     // so a respawn on this level restores the state the player arrived with.
     let entry_parms = ns.save_spawn_parms();
+    // The C's signon physics frames (see build_walk_map): settle the arriving
+    // player onto the floor before the new level's frame 0 renders. Any events
+    // these ticks queue are dropped by the post-swap drains below (the C's
+    // client misses tick 1's datagram sounds while not yet `spawned`; tick 2's
+    // are technically deliverable there — dropping both is a deliberate,
+    // inaudible-on-id-maps simplification, identical across all three paths).
+    ns.run_signon_frames();
 
     // Commit the swap. From here nothing can fail.
     let (_spawn, yaw) =
@@ -2326,6 +2349,9 @@ fn try_restart(w: &mut Walk) {
     }
     let statics = ns.drain_static_sounds();
     let Ok(player) = ns.connect_client_with_parms(w.entry_parms) else { return };
+    // The C's signon physics frames (see build_walk_map): settle the respawned
+    // player onto the floor before the restarted level's frame 0 renders.
+    ns.run_signon_frames();
 
     // Commit the reload (nothing below can fail).
     let (_spawn, yaw) =
@@ -4261,6 +4287,91 @@ mod tests {
             let cb = cb.unwrap();
             assert!(cb.width > 0 && cb.height > 0, "conback has real dimensions");
         });
+    }
+
+    /// Regression for the one-time texture/lighting "pops" in the first second of
+    /// live play (two distinct root causes, both whole-view shimmers):
+    ///
+    /// 1. **Spawn settle on screen.** QuakeC `PutClientInServer` places the player
+    ///    at `spot.origin + '0 0 1'` (the start map's spawn floats ~5 units up),
+    ///    and the port used to render frame 0 with ZERO physics frames after the
+    ///    spawn — the player fell to the floor ON SCREEN over the first 2-3 frames
+    ///    and every textured surface resampled (17.8-45.9% of pixels/frame).
+    ///    WinQuake runs two SV_Physics ticks during the signon (the Host_Spawn_f
+    ///    and Host_Begin_f frames) before SCR_EndLoadingPlaque re-enables drawing;
+    ///    `Server::run_signon_frames` ports those, and every walk-building path
+    ///    (boot / New Game / changelevel / restart) must call it.
+    /// 2. **Plane-only dlight gating.** ~0.55s in (sv.time ~1.98 with the current
+    ///    deterministic PRNG), the start map's distant `misc_fireball` lavaball
+    ///    spawns with a rocket-trail dynamic light ~2000 units away behind walls;
+    ///    `any_dlight_reaches`' old plane-distance-only test marked every
+    ///    near-coplanar face in the VIEW as dynamically lit, kicking them off the
+    ///    baked surface cache onto the per-pixel path (13.3% of pixels shifted in
+    ///    one frame, then back when the light died). The gate now also tests the
+    ///    face's texture-space extent (WinQuake's R_MarkLights is spatially
+    ///    bounded by the BSP recursion).
+    ///
+    /// The 45-frame window covers both: settle would hit frames 0-2, the fireball
+    /// ~frame 34.
+    #[test]
+    fn new_game_first_frames_render_a_settled_player_no_pop() {
+        // The browser path: attract demo + menu, then Single Player > New Game.
+        assert_eq!(boot_attract(), 1);
+        step(1.0 / 60.0); // an attract-demo frame, like the live page
+        menu_select(); // Main: Single Player
+        menu_select(); // SP: New Game -> builds the start-map walk, closes menu
+
+        // BEFORE the first frame renders the player must already be settled:
+        // on the ground, no residual fall velocity (it spawns ~5 units up).
+        let eye0 = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            let w = a.walk.as_ref().unwrap();
+            let flags = w.server.vm.ent_get_float(w.player, "flags") as i32;
+            let vel = w.server.vm.ent_get_vector(w.player, "velocity");
+            assert!(flags & FL_ONGROUND != 0, "player on the ground at frame 0");
+            assert_eq!(vel[2], 0.0, "no residual fall velocity at frame 0");
+            w.server.player_view().0
+        });
+
+        // Frame 0, then 44 more static zero-input frames: the eye must stay
+        // bit-identical (the settle pop was exactly this eye motion leaking into
+        // the first rendered frames)...
+        step(1.0 / 60.0);
+        let mut prev: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let (w, h) = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.render_w, a.render_h)
+        });
+        for i in 1..45 {
+            step(1.0 / 60.0);
+            let eye = APP.with(|c| {
+                let b = c.borrow();
+                let a = b.as_ref().unwrap();
+                a.walk.as_ref().unwrap().server.player_view().0
+            });
+            assert_eq!(eye, eye0, "static eye is bit-identical on frame {i}");
+            // ...and consecutive frames stay near-identical. Faithful animation
+            // in the static spawn view (scrolling sky, flame group-frames, the
+            // 10 Hz lightstyle flicker) touches <= ~0.4% of pixels per frame;
+            // the settle pop touched 17.8%-45.9% and the fireball-dlight pop
+            // 13.3%. A 2% ceiling separates bug from animation with a wide
+            // margin in both directions.
+            let fb: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+            let nd = prev
+                .chunks_exact(4)
+                .zip(fb.chunks_exact(4))
+                .filter(|(a4, b4)| a4[..3] != b4[..3])
+                .count();
+            assert!(
+                nd <= w * h / 50,
+                "frame {i} vs {}: {nd} px differ ({:.2}%) — a one-time view shift leaked into the first frames",
+                i - 1,
+                100.0 * nd as f64 / (w * h) as f64
+            );
+            prev = fb;
+        }
     }
 
     #[test]

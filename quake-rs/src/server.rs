@@ -3526,6 +3526,60 @@ impl Server {
         Ok(ent)
     }
 
+    /// The signon-sequence physics frames between `PutClientInServer` and the
+    /// first rendered frame. Call once after [`Self::connect_client`] /
+    /// [`Self::connect_client_with_parms`], BEFORE rendering frame 0.
+    ///
+    /// In WinQuake a connecting client's signon spans several host frames: the
+    /// "spawn" client command (`Host_Spawn_f`, host_cmd.c — runs QuakeC
+    /// `PutClientInServer`) and the "begin" command (`Host_Begin_f`) execute in
+    /// `SV_RunClients` on consecutive frames, and each of those frames then runs
+    /// `SV_Physics` (host.c `Host_ServerFrame`) before the client reaches
+    /// signon 4 and `SCR_EndLoadingPlaque` re-enables drawing (cl_parse.c
+    /// `CL_ParseUpdate`: "first update is the final signon stage"). During those
+    /// ticks `SV_Physics_Client` runs full player physics — the client is
+    /// `active`, just not yet `spawned`, so its movement cmd stays zeroed
+    /// (sv_user.c `SV_RunClients`: `if (!host_client->spawned) memset(&cmd...)`)
+    /// — which matters because QuakeC `PutClientInServer` places the player at
+    /// `spot.origin + '0 0 1'` and some spawn spots float well above the floor
+    /// (the start map's `info_player_start` is ~5 units up): the player falls to
+    /// the ground DURING the signon, before the first visible frame.
+    ///
+    /// This port's `connect_client` compresses the whole signon round-trip into
+    /// one call, so a front-end that rendered immediately after it would show
+    /// the settle on screen — a one-time whole-view shift over the first frames
+    /// (the reported texture/lighting "pop"). The C ticks run at
+    /// `Host_FilterTime`'s real frame duration, clamped to at most 0.1 s — and
+    /// 0.1 is also exactly the `host_frametime` id hard-codes for
+    /// `SV_SpawnServer`'s own two "let everything settle" frames — so we run the
+    /// two ticks at [`SETTLE_FRAMETIME`], which settles any spawn drop up to
+    /// ~24 units deterministically. The cmd carries the player's current view
+    /// angles (the C never touches `v_angle` during signon) with zero
+    /// moves/buttons. Think faults are isolated by `client_frame`; a hard fault
+    /// is swallowed (a boot must not fail over a settle tick), matching
+    /// `spawn_entities`' own settle-frame handling. The golden `scene` tool
+    /// never connects a client, so this does not affect golden renders.
+    pub fn run_signon_frames(&mut self) {
+        let (yaw, pitch) = if self.player >= 0 {
+            let ang = self.vm.ent_get_vector(self.player, "angles");
+            let vang = self.vm.ent_get_vector(self.player, "v_angle");
+            (ang[1], vang[0])
+        } else {
+            (0.0, 0.0)
+        };
+        let cmd = UserCmd {
+            forwardmove: 0.0,
+            sidemove: 0.0,
+            upmove: 0.0,
+            yaw,
+            pitch,
+            buttons: 0,
+            impulse: 0,
+        };
+        let _ = self.client_frame(&cmd, SETTLE_FRAMETIME);
+        let _ = self.client_frame(&cmd, SETTLE_FRAMETIME);
+    }
+
     /// `SV_SaveSpawnparms` for the local client: set the QuakeC `self` global to
     /// the player edict, run the progs `SetChangeParms` (which writes the
     /// player's persistent state — items/health/ammo/weapon/armor — into the 16
@@ -8097,6 +8151,60 @@ mod tests {
             before[0],
             after[0]
         );
+    }
+
+    #[test]
+    fn run_signon_frames_settles_the_spawned_player_before_frame_zero() {
+        // Regression: the first frames of live play showed a one-time whole-view
+        // texture/lighting "pop" — the just-connected player (QuakeC
+        // PutClientInServer places it at spot.origin + '0 0 1'; the start map's
+        // spawn floats ~5 units up) fell to the floor ON SCREEN because the port
+        // rendered frame 0 with zero physics frames after PutClientInServer. The
+        // C runs two SV_Physics ticks during the signon (Host_Spawn_f /
+        // Host_Begin_f frames) before SCR_EndLoadingPlaque re-enables drawing,
+        // so WinQuake's first visible frame shows a settled player.
+        // `run_signon_frames` ports those ticks.
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+
+        let p = server.connect_client().expect("connect");
+        // The synthetic PutClientInServer sets origin=(0,0,40) but no size; give
+        // it the player box (the real progs calls setsize inside the spawn).
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        assert_eq!(
+            server.vm.ent_get_vector(p, "origin")[2],
+            40.0,
+            "spawn floats above the floor (box bottom at z=16, floor at z=0)"
+        );
+
+        server.run_signon_frames();
+
+        // Settled BEFORE the front-end's frame 0: on the ground, no residual
+        // fall velocity, box bottom resting on the floor (origin.z ~ 24).
+        let org = server.vm.ent_get_vector(p, "origin");
+        let vel = server.vm.ent_get_vector(p, "velocity");
+        let flags = server.vm.ent_get_float(p, "flags") as i32;
+        assert!(flags & FL_ONGROUND != 0, "player is on the ground at frame 0");
+        assert_eq!(vel[2], 0.0, "no residual fall velocity at frame 0");
+        assert!(
+            (23.0..=25.0).contains(&org[2]),
+            "box bottom rests on the z=0 floor (origin.z ~ 24), got {}",
+            org[2]
+        );
+
+        // ...and frame 0 == frame N for a static, zero-input camera: subsequent
+        // frames must not move the player AT ALL (the pop was exactly this
+        // motion leaking into the first rendered frames).
+        for i in 0..10 {
+            server
+                .client_frame(&UserCmd::default(), 1.0 / 60.0)
+                .expect("static frame");
+            let now = server.vm.ent_get_vector(p, "origin");
+            assert_eq!(now, org, "origin is bit-identical on static frame {i}");
+        }
     }
 
     #[test]

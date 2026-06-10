@@ -3135,19 +3135,38 @@ fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> FaceGeom
 
 /// Does any dynamic light in `dlights` actually REACH this face? Mirrors the
 /// reach test inside [`add_dynamic_lights`] (`rad = radius - |dist|`, skip if
-/// `rad < minlight`) WITHOUT touching luxels, so the lightmap cache can decide
-/// whether the static/style buffer is safe to reuse (dlights move every frame,
-/// so a touched face must rebuild). Conservative: if the plane is missing we
-/// answer `true` (treat as touched) only when there ARE dlights, matching the
-/// fact that `add_dynamic_lights` would still fold a pre-combined base — but a
-/// missing plane means no light is folded, so we answer `false` there to allow
-/// caching the pure style combine.
+/// `rad < minlight`) WITHOUT touching luxels, so the lightmap/surface caches
+/// can decide whether the static/style buffer is safe to reuse (dlights move
+/// every frame, so a touched face must rebuild).
 ///
 /// `dlightbits` is the face's `R_MarkLights` mask (see [`mark_dlights`]): only
 /// marked lights are considered, so a light the BSP recursion never carried to
 /// this face — e.g. one entirely on the far side of a wall — cannot flag the
 /// face as touched, exactly as the C only dlights faces whose
 /// `dlightframe == r_dlightframecount`.
+///
+/// Beyond the mask + plane tests, the light's impact point is tested against
+/// the face's texture-space extent with the same `max(sd,td) + min(sd,td)/2`
+/// distance estimate `add_dynamic_lights` uses per luxel — i.e. "would this
+/// light add light to at least one luxel of this face". This extent test is a
+/// PORT-SPECIFIC tightening of the CACHE-PATH decision only: the C keys its
+/// surface-cache rebuild on the marking alone (`d_surf.c` checks
+/// `surf->dlightframe`) and over-marking there costs only a redundant rebuild,
+/// because the C always renders through the surface cache. This port instead
+/// flips a "dlit" face from the baked block onto the per-pixel path (which
+/// shades visibly differently — the documented texel-center-bake vs bilinear
+/// divergence), and `R_MarkLights` marks EVERY face stored on a straddled node
+/// regardless of lateral distance (e.g. the whole length of a long floor plane
+/// while a rocket flies past one end) — so without the extent test such
+/// zero-contribution faces would shimmer for no pixel change (the visible
+/// first-frames "pop" this fixed: the start map's distant lava fireballs).
+/// Skipping them is sound: a face receiving no luxel light renders identically
+/// on the baked path. Conservative at the rim: the extent is the luxel grid's
+/// quantized bounds and the distance is the continuous minimum (the port-wide
+/// f32 convention; the C truncates `sd`/`td` to int), so a light is never
+/// declared "not reaching" when `add_dynamic_lights` would contribute; a
+/// missing plane or texinfo falls back to `false`/plane-only (no light is
+/// folded without a plane; without texinfo stay conservative).
 fn any_dlight_reaches(
     bsp: &Bsp,
     face: &crate::bsp::DFace,
@@ -3166,6 +3185,58 @@ fn any_dlight_reaches(
         None => return false,
     };
     let normal = plane.normal;
+    let texinfo = (face.texinfo as i64)
+        .try_into()
+        .ok()
+        .and_then(|i: usize| bsp.texinfo.get(i));
+
+    // The face's texture-space bounds (the projection CalcSurfaceExtents uses),
+    // quantized outward to the 16-unit luxel grid the lightmap actually spans.
+    // Inner `None` when the texinfo/vertex walk fails — then plane-only
+    // (conservative). Computed LAZILY, only when the first masked light passes
+    // the plane test: the common "a light is live somewhere, none near this
+    // face's node" frame pays only the mask check, no edge walk.
+    let compute_bounds = || -> Option<[f32; 4]> {
+        let ti = texinfo?;
+        let mut smin = f32::MAX;
+        let mut smax = f32::MIN;
+        let mut tmin = f32::MAX;
+        let mut tmax = f32::MIN;
+        let firstedge = face.firstedge as i64;
+        if firstedge < 0 || face.numedges < 3 {
+            return None;
+        }
+        for i in 0..face.numedges as i64 {
+            let se_index: usize = (firstedge + i).try_into().ok()?;
+            let &se = bsp.surfedges.get(se_index)?;
+            let (edge_index, slot): (usize, usize) = if se >= 0 {
+                (se as usize, 0)
+            } else {
+                ((se as i64).checked_neg()? as usize, 1)
+            };
+            let vid = *bsp.edges.get(edge_index)?.v.get(slot)? as usize;
+            let p = bsp.vertexes.get(vid)?.point;
+            let s = p[0] * ti.vecs[0][0] + p[1] * ti.vecs[0][1] + p[2] * ti.vecs[0][2]
+                + ti.vecs[0][3];
+            let t = p[0] * ti.vecs[1][0] + p[1] * ti.vecs[1][1] + p[2] * ti.vecs[1][2]
+                + ti.vecs[1][3];
+            smin = smin.min(s);
+            smax = smax.max(s);
+            tmin = tmin.min(t);
+            tmax = tmax.max(t);
+        }
+        Some([
+            (smin / 16.0).floor() * 16.0,
+            (smax / 16.0).ceil() * 16.0,
+            (tmin / 16.0).floor() * 16.0,
+            (tmax / 16.0).ceil() * 16.0,
+        ])
+    };
+    let mut bounds: Option<Option<[f32; 4]>> = None;
+
+    // The same projection helper for the light's impact point.
+    let project = |p: [f32; 3], v: &[f32; 4]| p[0] * v[0] + p[1] * v[1] + p[2] * v[2] + v[3];
+
     for (lnum, dl) in dlights.iter().enumerate() {
         // Same mask skip as `add_dynamic_lights` (C `surf->dlightbits & (1<<lnum)`).
         if lnum >= u32::BITS as usize || dlightbits & (1u32 << lnum) == 0 {
@@ -3173,7 +3244,26 @@ fn any_dlight_reaches(
         }
         let dist = dot(dl.origin, normal) - plane.dist;
         let rad = dl.radius - dist.abs();
-        if rad >= dl.minlight {
+        if rad < dl.minlight {
+            continue;
+        }
+        let b = *bounds.get_or_insert_with(compute_bounds);
+        let (Some([smin, smax, tmin, tmax]), Some(ti)) = (b, texinfo) else {
+            return true; // plane reached; no extent info -> conservative
+        };
+        // Project the light onto the plane and into texture space, then measure
+        // the dist2 estimate to the nearest point of the face's luxel extent.
+        let impact = [
+            dl.origin[0] - normal[0] * dist,
+            dl.origin[1] - normal[1] * dist,
+            dl.origin[2] - normal[2] * dist,
+        ];
+        let ls = project(impact, &ti.vecs[0]);
+        let lt = project(impact, &ti.vecs[1]);
+        let sd = (smin - ls).max(ls - smax).max(0.0);
+        let td = (tmin - lt).max(lt - tmax).max(0.0);
+        let dist2 = if sd > td { sd + td * 0.5 } else { td + sd * 0.5 };
+        if dist2 < rad - dl.minlight {
             return true;
         }
     }
@@ -9015,6 +9105,98 @@ mod tests {
             face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl), ALL_DLIGHT_BITS).is_none(),
             "a non-reaching dlight leaves the unlit face fullbright"
         );
+    }
+
+    /// `one_face_bsp_zplane` with the face's surfedge/edge/vertex walk wired to
+    /// the SAME 0..32 square as the hand-made poly, so [`any_dlight_reaches`]'s
+    /// internal extent walk sees the real face bounds.
+    fn one_face_bsp_zplane_with_edges(luxel: u8) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
+        let (mut bsp, face, poly) = one_face_bsp_zplane(luxel);
+        bsp.vertexes = poly
+            .iter()
+            .map(|&point| crate::bsp::DVertex { point })
+            .collect();
+        bsp.edges = (0..4)
+            .map(|i| crate::bsp::DEdge {
+                v: [i as u16, ((i + 1) % 4) as u16],
+            })
+            .collect();
+        bsp.surfedges = vec![0, 1, 2, 3];
+        (bsp, face, poly)
+    }
+
+    #[test]
+    fn dlight_reach_is_spatial_not_just_planar() {
+        // Regression for the live-play "pop": `any_dlight_reaches` used ONLY the
+        // plane-distance test, so a dlight anywhere near-coplanar with a face —
+        // even 2000+ units away laterally (the start map's lava fireballs vs the
+        // spawn hall's floors) — kicked the face off the baked surface cache
+        // onto the per-pixel path and the WHOLE view's shading visibly shifted
+        // whenever any dlight existed. WinQuake's R_MarkLights recurses the BSP
+        // from the light, bounded to ±radius at every split, so distant faces
+        // are never marked. The gate now also tests the face's texture-space
+        // extent with R_AddDynamicLights' own distance estimate.
+        let (bsp, face, _poly) = one_face_bsp_zplane_with_edges(100);
+
+        // Near light above the face: reaches (and genuinely lights luxels).
+        let near = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
+        assert!(
+            any_dlight_reaches(&bsp, &face, std::slice::from_ref(&near), ALL_DLIGHT_BITS),
+            "a light directly above the face reaches it"
+        );
+
+        // Coplanar-but-distant light (the fireball case): 16 above the z=0
+        // plane like `near`, but 5000 units away laterally. The old plane-only
+        // gate said REACHES (rad = 200-16 = 184 >= 0); it must not.
+        let coplanar_far = DynamicLight::new([5000.0, 0.0, 16.0], 200.0, 10.0, 0.0, 0.0, 0);
+        assert!(
+            !any_dlight_reaches(&bsp, &face, std::slice::from_ref(&coplanar_far), ALL_DLIGHT_BITS),
+            "a laterally distant coplanar light must NOT mark the face"
+        );
+        // ...and add_dynamic_lights agrees it contributes nothing: every luxel
+        // keeps its static value (the gate is exactly "would at least one luxel
+        // receive light"; the owned-vs-borrowed buffer kind is an implementation
+        // detail of the lazy materialisation).
+        let lm = face_lightmap_dyn(
+            &bsp,
+            &face,
+            &_poly,
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+            std::slice::from_ref(&coplanar_far),
+            ALL_DLIGHT_BITS,
+        )
+        .expect("lightmap present");
+        let static_factor = 100.0 / 255.0 * 2.0;
+        for &(s, t) in &[(0.0, 0.0), (16.0, 16.0), (32.0, 32.0)] {
+            assert!(
+                (lm.factor_at(s, t) - static_factor).abs() < 1e-6,
+                "the distant light adds nothing at ({s},{t})"
+            );
+        }
+
+        // Far along the normal: fails the plane test as before.
+        let above = DynamicLight::new([0.0, 0.0, 300.0], 200.0, 10.0, 0.0, 0.0, 0);
+        assert!(
+            !any_dlight_reaches(&bsp, &face, std::slice::from_ref(&above), ALL_DLIGHT_BITS),
+            "a light beyond its radius along the normal does not reach"
+        );
+
+        // Rim case just inside: impact at s=32+40=72 -> sd=40 (extent quantizes
+        // to 0..32), td=0, dist2=40 < reach (60-16=44): reaches.
+        let rim = DynamicLight::new([72.0, 16.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
+        assert!(
+            any_dlight_reaches(&bsp, &face, std::slice::from_ref(&rim), ALL_DLIGHT_BITS),
+            "a light just within the dist2 estimate of the extent reaches"
+        );
+        // ...and just outside: sd=48 > 44: does not reach.
+        let rim_out = DynamicLight::new([80.0, 16.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
+        assert!(
+            !any_dlight_reaches(&bsp, &face, std::slice::from_ref(&rim_out), ALL_DLIGHT_BITS),
+            "a light just outside the dist2 estimate does not reach"
+        );
+
+        // Empty slice: never reaches (the no-dlight fast path).
+        assert!(!any_dlight_reaches(&bsp, &face, &[], ALL_DLIGHT_BITS));
     }
 
     #[test]
