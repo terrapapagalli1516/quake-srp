@@ -1771,9 +1771,37 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 
     // Pass the server clock so liquid/sky surfaces are animated for this frame,
     // plus the animated light-style scales (torch flicker / light pulse). No live
-    // particles or dynamic lights in this single-shot `scene` command (no
-    // per-frame loop), so those slices are empty.
+    // particles in this single-shot `scene` command (no per-frame loop), so that
+    // slice is empty; dynamic lights are empty too unless explicitly injected
+    // below for A/B debugging.
     let light_styles = server.lightstyle_scales(server.time());
+
+    // Optional injected dynamic light, for eyeballing / A-B-diffing the dlight
+    // path (e.g. the R_MarkLights BSP gating) on a real map:
+    //   QUAKE_DLIGHT="x,y,z,radius" quaketool scene <pak> <map> <out>
+    //   QUAKE_DLIGHT="eye"          (at the camera, radius 350 — explosion-sized)
+    //   QUAKE_DLIGHT="eye:250"      (at the camera, radius 250)
+    // Unset (the normal case, and all golden renders) leaves the dlight slice
+    // empty — byte-identical to before this knob existed.
+    let injected_dlights: Vec<quake_rs::dlight::DynamicLight> = std::env::var("QUAKE_DLIGHT")
+        .ok()
+        .and_then(|s| {
+            let s = s.trim().to_string();
+            let (origin, radius) = if let Some(rest) = s.strip_prefix("eye") {
+                let r = rest.strip_prefix(':').and_then(|r| r.parse().ok()).unwrap_or(350.0);
+                (cam.pos, r)
+            } else {
+                let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                if v.len() != 4 {
+                    return None;
+                }
+                ([v[0], v[1], v[2]], v[3])
+            };
+            // die far in the future / no decay: the light is fully live for this
+            // single frame. key 0 = unowned (explosion-style).
+            Some(vec![quake_rs::dlight::DynamicLight::new(origin, radius, f32::MAX, 0.0, 0.0, 0)])
+        })
+        .unwrap_or_default();
     // Read the colormap from the PAK (not the filesystem), matching the live game,
     // so this single-shot render uses id's 64-row colormap-LUT shading (and the lit
     // surface cache) exactly like step_walk does.
@@ -1850,7 +1878,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         return Ok(Out::Text(o));
     }
 
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &[], &light_styles, colormap.as_deref());
+    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref());
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
@@ -1860,6 +1888,14 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         bsp_for_render.faces.len(),
         report.spawned
     );
+    if let Some(dl) = injected_dlights.first() {
+        let _ = writeln!(
+            o,
+            "  injected dlight at [{:.0} {:.0} {:.0}] radius {:.0} (camera at [{:.0} {:.0} {:.0}])",
+            dl.origin[0], dl.origin[1], dl.origin[2], dl.radius,
+            cam.pos[0], cam.pos[1], cam.pos[2]
+        );
+    }
     let _ = writeln!(
         o,
         "  {} MDL instances drawn ({} unique models, {} failed to load)",

@@ -958,8 +958,23 @@ fn colormap_row(brightness: f32) -> usize {
     ((t >> 8) as usize).min(COLORMAP_ROWS - 1)
 }
 
+/// A `surf->dlightbits` mask with every slot set: "marked by every light".
+/// Used where the `R_MarkLights` recursion does not apply — direct unit calls
+/// on a bare face, and the no-node-tree fallback in [`mark_dlights`] — so the
+/// per-light distance test in [`add_dynamic_lights`] is the only gate (the
+/// pre-gating behaviour).
+const ALL_DLIGHT_BITS: u32 = u32::MAX;
+
 /// `R_AddDynamicLights` (`r_surf.c`): fold the dynamic lights in `dlights` that
 /// touch a face into an owned augmented luxel buffer.
+///
+/// `dlightbits` is the face's `surf->dlightbits` mask from the `R_MarkLights`
+/// BSP recursion ([`mark_dlights`]): bit `i` set means `dlights[i]` reached this
+/// face through the node tree. A light whose bit is clear is skipped exactly as
+/// the C `if (!(surf->dlightbits & (1<<lnum))) continue;` — so a light cannot
+/// brighten a face the BSP says it never reaches (e.g. through a wall). Callers
+/// outside the marked render passes (unit tests on a bare face) pass
+/// [`ALL_DLIGHT_BITS`] to apply the pure distance test.
 ///
 /// `base` is the face's pre-combined luxel buffer when it already differs from
 /// the plain static style-0 bytes — i.e. the multi-style combine from
@@ -993,10 +1008,12 @@ fn add_dynamic_lights(
     static_samples: &[u8],
     base: Option<Vec<f32>>,
     dlights: &[crate::dlight::DynamicLight],
+    dlightbits: u32,
 ) -> Option<Vec<f32>> {
-    // No dlights: the animated combine (if any) is the final buffer; otherwise
-    // there is nothing to do and the caller keeps the static borrow.
-    if dlights.is_empty() {
+    // No dlights — or none marked for this face by the BSP recursion: the
+    // animated combine (if any) is the final buffer; otherwise there is nothing
+    // to do and the caller keeps the static borrow.
+    if dlights.is_empty() || dlightbits == 0 {
         return base;
     }
     // No usable plane: we can't project lights, but a pre-combined animated
@@ -1015,7 +1032,13 @@ fn add_dynamic_lights(
     // buffer is lazily materialised from the static bytes on first contribution.
     let mut buf: Option<Vec<f32>> = base;
 
-    for dl in dlights {
+    for (lnum, dl) in dlights.iter().enumerate() {
+        // C: `if (!(surf->dlightbits & (1<<lnum))) continue;` — only lights the
+        // R_MarkLights recursion marked onto this face apply. Lights past bit 31
+        // cannot be expressed in the mask (C MAX_DLIGHTS is 32) and are skipped.
+        if lnum >= u32::BITS as usize || dlightbits & (1u32 << lnum) == 0 {
+            continue;
+        }
         let dist = dot(dl.origin, normal) - plane.dist;
         let rad = dl.radius - dist.abs();
         let minlight = dl.minlight;
@@ -1188,7 +1211,7 @@ fn face_lightmap<'a>(
     face: &crate::bsp::DFace,
     world_poly: &[Vec3],
 ) -> Option<LightMap<'a>> {
-    face_lightmap_dyn(bsp, face, world_poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[])
+    face_lightmap_dyn(bsp, face, world_poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0)
 }
 
 /// Compute a face's lightmap: the multi-style combine (`R_BuildLightMap`) scaled
@@ -1213,6 +1236,9 @@ fn face_lightmap_dyn<'a>(
     world_poly: &[Vec3],
     light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
+    // The face's `surf->dlightbits` mask from the `R_MarkLights` BSP recursion
+    // (see [`mark_dlights`]); [`ALL_DLIGHT_BITS`] where marking does not apply.
+    dlightbits: u32,
 ) -> Option<LightMap<'a>> {
     use crate::bsp::TEX_SPECIAL;
 
@@ -1236,7 +1262,7 @@ fn face_lightmap_dyn<'a>(
     // when there are no dlights we keep returning `None` (fullbright), so the
     // common case is byte-identical to before.
     if face.lightofs < 0 {
-        if dlights.is_empty() {
+        if dlights.is_empty() || dlightbits == 0 {
             return None;
         }
         let (texmins, extent) = surface_extents(ti, world_poly)?;
@@ -1252,7 +1278,7 @@ fn face_lightmap_dyn<'a>(
         let _ = count; // the grid size is implicit in lmw*lmh inside the helper
         let no_samples: &[u8] = &[];
         let luxels = match add_dynamic_lights(
-            bsp, face, ti, texmins_f, lmw, lmh, no_samples, None, dlights,
+            bsp, face, ti, texmins_f, lmw, lmh, no_samples, None, dlights, dlightbits,
         ) {
             Some(owned) => Luxels::Owned(owned),
             None => return None,
@@ -1287,7 +1313,7 @@ fn face_lightmap_dyn<'a>(
     // Add any reaching dynamic lights on top of the (possibly style-combined)
     // base. When `base` is None and no light reaches (or `dlights` is empty), the
     // result is None and we keep the byte-identical static borrow.
-    let luxels = match add_dynamic_lights(bsp, face, ti, texmins_f, lmw, lmh, samples, base, dlights) {
+    let luxels = match add_dynamic_lights(bsp, face, ti, texmins_f, lmw, lmh, samples, base, dlights, dlightbits) {
         Some(owned) => Luxels::Owned(owned),
         None => Luxels::Static(samples),
     };
@@ -2771,6 +2797,12 @@ thread_local! {
     static RENDER_STATS: std::cell::RefCell<RenderStats> =
         const { std::cell::RefCell::new(RenderStats::ZERO) };
     static STATS_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Per-thread scratch for the per-face `R_MarkLights` dlight bit masks
+    /// (`surf->dlightbits`). The world/submodel passes `mem::take` it for the
+    /// duration of their face loop (they never nest) and put it back when done,
+    /// so per-frame marking allocates nothing once the buffer has grown to the
+    /// map's face count. See [`mark_dlights`].
+    static DLIGHT_BITS_SCRATCH: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Granular per-phase render profiler — phase wall-times (ns) plus face/triangle/
@@ -3106,12 +3138,19 @@ fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> FaceGeom
 /// fact that `add_dynamic_lights` would still fold a pre-combined base — but a
 /// missing plane means no light is folded, so we answer `false` there to allow
 /// caching the pure style combine.
+///
+/// `dlightbits` is the face's `R_MarkLights` mask (see [`mark_dlights`]): only
+/// marked lights are considered, so a light the BSP recursion never carried to
+/// this face — e.g. one entirely on the far side of a wall — cannot flag the
+/// face as touched, exactly as the C only dlights faces whose
+/// `dlightframe == r_dlightframecount`.
 fn any_dlight_reaches(
     bsp: &Bsp,
     face: &crate::bsp::DFace,
     dlights: &[crate::dlight::DynamicLight],
+    dlightbits: u32,
 ) -> bool {
-    if dlights.is_empty() {
+    if dlights.is_empty() || dlightbits == 0 {
         return false;
     }
     let plane = match (face.planenum as i64)
@@ -3123,7 +3162,11 @@ fn any_dlight_reaches(
         None => return false,
     };
     let normal = plane.normal;
-    for dl in dlights {
+    for (lnum, dl) in dlights.iter().enumerate() {
+        // Same mask skip as `add_dynamic_lights` (C `surf->dlightbits & (1<<lnum)`).
+        if lnum >= u32::BITS as usize || dlightbits & (1u32 << lnum) == 0 {
+            continue;
+        }
         let dist = dot(dl.origin, normal) - plane.dist;
         let rad = dl.radius - dist.abs();
         if rad >= dl.minlight {
@@ -3131,6 +3174,105 @@ fn any_dlight_reaches(
         }
     }
     false
+}
+
+/// `R_PushDlights` (`r_light.c`): compute every face's `surf->dlightbits` mask
+/// for this frame by running the `R_MarkLights` BSP recursion from `headnode`
+/// once per live light (`dlights[i]` marks bit `1 << i`).
+///
+/// `bits` is a caller-owned scratch vector, cleared and resized to
+/// `bsp.faces.len()` (so once it has grown to the map's face count the per-frame
+/// marking allocates nothing). With no live lights it is left EMPTY — every
+/// lookup then reads 0 ("no light marked"), and the zero-fill is skipped.
+///
+/// The C resets stale masks with the `dlightframe != r_dlightframecount` check;
+/// zero-filling the scratch each frame is the equivalent here.
+///
+/// FALLBACK: a `Bsp` with no node tree (synthetic fixtures like [`demo_room`])
+/// has nothing to recurse, so every face is marked with [`ALL_DLIGHT_BITS`] and
+/// the per-light distance test in [`add_dynamic_lights`] remains the only gate —
+/// the pre-gating behaviour. Real maps always carry a node tree.
+fn mark_dlights(
+    bsp: &Bsp,
+    headnode: i32,
+    dlights: &[crate::dlight::DynamicLight],
+    bits: &mut Vec<u32>,
+) {
+    bits.clear();
+    if dlights.is_empty() {
+        return;
+    }
+    if bsp.nodes.is_empty() {
+        bits.resize(bsp.faces.len(), ALL_DLIGHT_BITS);
+        return;
+    }
+    bits.resize(bsp.faces.len(), 0);
+    for (i, dl) in dlights.iter().take(u32::BITS as usize).enumerate() {
+        // In a well-formed tree each node is visited at most once per light, so
+        // a budget of `nodes.len()` visits never truncates a legitimate walk; it
+        // only stops a malformed (cyclic) node graph from recursing forever.
+        let mut budget = bsp.nodes.len();
+        mark_lights_r(bsp, dl, 1u32 << i, headnode, &mut budget, bits);
+    }
+}
+
+/// `R_MarkLights` (`r_light.c`): descend the BSP from `node`, OR-ing `bit` into
+/// `bits[face]` for every surface the light's sphere reaches through the tree.
+///
+/// At each node: `dist = dot(light.origin, plane.normal) - plane.dist`. When the
+/// whole sphere is on one side (`dist > radius` / `dist < -radius`) only that
+/// child subtree is descended — nothing behind a plane the light does not reach
+/// can be marked, which is what stops a dynamic light lighting faces through a
+/// wall. When the sphere straddles the plane, the surfaces stored on this node
+/// (which lie on that plane) are marked and both children are descended.
+///
+/// A negative `node` is a leaf reference (`-(leaf+1)`) and ends the descent,
+/// matching the C `if (node->contents < 0) return;`. Out-of-range node/plane
+/// indices return harmlessly; `budget` bounds total node visits (see
+/// [`mark_dlights`]).
+fn mark_lights_r(
+    bsp: &Bsp,
+    light: &crate::dlight::DynamicLight,
+    bit: u32,
+    node: i32,
+    budget: &mut usize,
+    bits: &mut [u32],
+) {
+    if node < 0 || *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    let node_rec = match usize::try_from(node).ok().and_then(|ni| bsp.nodes.get(ni)) {
+        Some(n) => n,
+        None => return,
+    };
+    let plane = match usize::try_from(node_rec.planenum)
+        .ok()
+        .and_then(|pi| bsp.planes.get(pi))
+    {
+        Some(p) => p,
+        None => return,
+    };
+
+    let dist = dot(light.origin, plane.normal) - plane.dist;
+
+    if dist > light.radius {
+        mark_lights_r(bsp, light, bit, node_rec.children[0] as i32, budget, bits);
+        return;
+    }
+    if dist < -light.radius {
+        mark_lights_r(bsp, light, bit, node_rec.children[1] as i32, budget, bits);
+        return;
+    }
+
+    // Mark the polygons stored on this node (they lie on the straddled plane).
+    let first = node_rec.firstface as usize;
+    for entry in bits.iter_mut().skip(first).take(node_rec.numfaces as usize) {
+        *entry |= bit;
+    }
+
+    mark_lights_r(bsp, light, bit, node_rec.children[0] as i32, budget, bits);
+    mark_lights_r(bsp, light, bit, node_rec.children[1] as i32, budget, bits);
 }
 
 /// The lightmap for a world-model face, going through the surface cache.
@@ -3157,6 +3299,8 @@ fn face_lightmap_world_cached<'a>(
     world_poly: &[Vec3],
     light_styles: &[f32; LIGHTSTYLES],
     dlights: &[crate::dlight::DynamicLight],
+    // The face's `R_MarkLights` mask for this frame (see [`mark_dlights`]).
+    dlightbits: u32,
 ) -> Option<LightMap<'a>> {
     // Resolve the active styles' SCALE values (cache key) once.
     let mut scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
@@ -3169,7 +3313,7 @@ fn face_lightmap_world_cached<'a>(
         n_styles += 1;
     }
 
-    let dlit = any_dlight_reaches(bsp, face, dlights);
+    let dlit = any_dlight_reaches(bsp, face, dlights, dlightbits);
 
     let fp = WorldFingerprint::of(bsp);
 
@@ -3187,7 +3331,7 @@ fn face_lightmap_world_cached<'a>(
                 }
             }
         });
-        return face_lightmap_dyn(bsp, face, world_poly, light_styles, dlights);
+        return face_lightmap_dyn(bsp, face, world_poly, light_styles, dlights, dlightbits);
     }
 
     // No dlight: try the cache.
@@ -3235,7 +3379,7 @@ fn face_lightmap_world_cached<'a>(
 
     // MISS: build fresh (no dlights -> the result is the pure static/style
     // combine), then cache it if it is the owned combine.
-    let built = face_lightmap_dyn(bsp, face, world_poly, light_styles, &[])?;
+    let built = face_lightmap_dyn(bsp, face, world_poly, light_styles, &[], 0)?;
     if let Luxels::Owned(ref v) = built.luxels {
         let mut style_scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
         style_scales[..n_styles].copy_from_slice(&scales[..n_styles]);
@@ -3351,6 +3495,20 @@ fn draw_world_textured(
     let fp = WorldFingerprint::of(bsp);
     let n_faces = bsp.faces.len();
 
+    // `R_PushDlights` (`r_light.c`): mark every face each live dynamic light
+    // reaches by recursing the BSP from the world model's root node. A face's
+    // mask gates which lights `add_dynamic_lights` may fold into it, so a light
+    // whose sphere never crosses into a region (e.g. the far side of a wall)
+    // cannot brighten faces there. The scratch is thread-local and reused; with
+    // no live dlights it stays empty and every face reads mask 0.
+    let mut dlight_bits = DLIGHT_BITS_SCRATCH.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    let world_headnode = bsp
+        .models
+        .first()
+        .and_then(|m| m.headnode.first().copied())
+        .unwrap_or(0);
+    mark_dlights(bsp, world_headnode, dlights, &mut dlight_bits);
+
     // FRONT-TO-BACK ORDER. With a z-buffer the final image is identical for ANY draw
     // order (the nearest surface always wins the depth test), but drawing near faces
     // FIRST lets the z-test reject occluded pixels BEFORE the per-pixel shading
@@ -3447,13 +3605,15 @@ fn draw_world_textured(
         // and sky are fullbright and NOT lightmapped, so only walls compute a
         // baked static lightmap.
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
+        // This face's `R_MarkLights` mask (0 = no dynamic light reaches it).
+        let face_dlightbits = dlight_bits.get(face_index).copied().unwrap_or(0);
         let _t_l = prof.then(std::time::Instant::now);
         let lightmap = if kind == SurfKind::Normal {
             // Goes through the lightmap SURFACE CACHE (R_BuildLightMap cache):
             // reuses the combined luxel buffer while the resolved style scales
             // are unchanged and no dynamic light touches the face. The cached
             // buffer is bit-identical to a fresh build.
-            face_lightmap_world_cached(bsp, face_index, face, world_poly, light_styles, dlights)
+            face_lightmap_world_cached(bsp, face_index, face, world_poly, light_styles, dlights, face_dlightbits)
         } else {
             None
         };
@@ -3525,7 +3685,7 @@ fn draw_world_textured(
                 let surf = if matches!(mode, SurfaceMode::Normal) {
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
-                            let dlit = any_dlight_reaches(bsp, face, dlights);
+                            let dlit = any_dlight_reaches(bsp, face, dlights, face_dlightbits);
                             // World model: cacheable (stable `Bsp` across frames).
                             face_surf_block(
                                 face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit, true,
@@ -3605,6 +3765,9 @@ fn draw_world_textured(
             }
         }
     }
+
+    // Return the marking scratch for the next pass/frame (keeps its capacity).
+    DLIGHT_BITS_SCRATCH.with(|b| *b.borrow_mut() = dlight_bits);
 
     // Flush sub-phase timers. `setup` = whole draw-loop body minus the measured
     // lightmap + surf-block calls (so it captures geom-cache fetch, the culls,
@@ -3736,6 +3899,16 @@ fn draw_submodel(
     let fp = WorldFingerprint::of(bsp);
     let n_faces = bsp.faces.len();
 
+    // `R_MarkLights` over the submodel's OWN subtree, as the C marks bmodels from
+    // `clmodel->nodes + clmodel->hulls[0].firstclipnode` (`R_DrawBEntitiesOnList`,
+    // `r_main.c`) — the submodel's `headnode[0]`. The subtree's node face lists
+    // only reference this submodel's faces, so the mask is per-face like the world
+    // pass. Marked with the entity-LOCAL light origins, consistent with the local
+    // per-luxel lighting above (the subtree planes are in model-local space).
+    let mut dlight_bits = DLIGHT_BITS_SCRATCH.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    let sub_headnode = m.headnode.first().copied().unwrap_or(0);
+    mark_dlights(bsp, sub_headnode, &local_dlights, &mut dlight_bits);
+
     // `world_poly` holds origin-SHIFTED vertices (for projection); we keep the
     // LOCAL vertices separately for (s,t) and the lightmap.
     let mut local_poly: Vec<Vec3> = Vec::new();
@@ -3804,9 +3977,11 @@ fn draw_submodel(
         // and sky are fullbright and NOT lightmapped; only walls compute a
         // lightmap (from the LOCAL polygon — texinfo extents are origin-independent).
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
+        // This face's `R_MarkLights` mask (0 = no dynamic light reaches it).
+        let face_dlightbits = dlight_bits.get(face_index).copied().unwrap_or(0);
         let lightmap = if kind == SurfKind::Normal {
             stat(|s| s.sub_lm_builds += 1);
-            face_lightmap_dyn(bsp, face, &local_poly, light_styles, &local_dlights)
+            face_lightmap_dyn(bsp, face, &local_poly, light_styles, &local_dlights, face_dlightbits)
         } else {
             None
         };
@@ -3888,7 +4063,7 @@ fn draw_submodel(
                 let surf = if ent_frame == 0 && matches!(mode, SurfaceMode::Normal) {
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
-                            let dlit = any_dlight_reaches(bsp, face, &local_dlights);
+                            let dlit = any_dlight_reaches(bsp, face, &local_dlights, face_dlightbits);
                             face_surf_block(
                                 face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit,
                                 cache_surf,
@@ -3964,6 +4139,9 @@ fn draw_submodel(
             }
         }
     }
+
+    // Return the marking scratch for the next pass/frame (keeps its capacity).
+    DLIGHT_BITS_SCRATCH.with(|b| *b.borrow_mut() = dlight_bits);
 }
 
 // ---------------------------------------------------------------------------
@@ -8550,7 +8728,7 @@ mod tests {
         // A bright light 16 units above luxel (0,0) (world [0,0,16]); small radius
         // so it lights the near corner but not the far one.
         let dl = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl))
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), ALL_DLIGHT_BITS)
             .expect("lightmap present");
         // It must have switched to the owned augmented buffer.
         assert!(matches!(lm.luxels, Luxels::Owned(_)), "a reaching light must own the buffer");
@@ -8578,14 +8756,14 @@ mod tests {
 
         // With no dlights: fullbright (None).
         assert!(
-            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[]).is_none(),
+            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0).is_none(),
             "an unlit face with no dlights stays fullbright"
         );
 
         // A bright light 16 units above luxel (0,0): the face is now lightmapped,
         // owning a buffer, bright near the impact and dark (not fullbright) away.
         let dl = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
-        let lm = face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl))
+        let lm = face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), ALL_DLIGHT_BITS)
             .expect("a reaching dlight must build a lightmap for the unlit face");
         assert!(matches!(lm.luxels, Luxels::Owned(_)), "reaching dlight owns the buffer");
         // Near luxel brightens above the zero base; far luxel stays at ~0 (dark,
@@ -8599,7 +8777,7 @@ mod tests {
         // so the common case (dlights elsewhere in the level) is unchanged.
         let far_dl = DynamicLight::new([0.0, 0.0, 100_000.0], 200.0, 10.0, 0.0, 0.0, 0);
         assert!(
-            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl)).is_none(),
+            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl), ALL_DLIGHT_BITS).is_none(),
             "a non-reaching dlight leaves the unlit face fullbright"
         );
     }
@@ -8675,7 +8853,7 @@ mod tests {
         // With no dlights the lightmap must borrow the static bytes and sample
         // exactly the pre-dlight factor (byte-identical behaviour).
         let (bsp, face, poly) = one_face_bsp_zplane(150);
-        let with_none = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[]).expect("present");
+        let with_none = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0).expect("present");
         assert!(matches!(with_none.luxels, Luxels::Static(_)), "empty slice keeps static borrow");
 
         let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
@@ -8695,7 +8873,7 @@ mod tests {
         let (bsp, face, poly) = one_face_bsp_zplane(100);
         // dist 100000 >> radius 200, so rad < minlight -> no contribution.
         let dl = DynamicLight::new([0.0, 0.0, 100_000.0], 200.0, 10.0, 0.0, 0.0, 0);
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl)).expect("present");
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), ALL_DLIGHT_BITS).expect("present");
         assert!(matches!(lm.luxels, Luxels::Static(_)), "a non-reaching light keeps the static borrow");
         let baseline = face_lightmap(&bsp, &face, &poly).expect("present");
         assert!((lm.factor_at(0.0, 0.0) - baseline.factor_at(0.0, 0.0)).abs() < 1e-7);
@@ -8707,7 +8885,7 @@ mod tests {
         // factor_at must clamp to MAX_LIGHT_FACTOR (finite, no overflow/NaN).
         let (bsp, face, poly) = one_face_bsp_zplane(255);
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 100_000.0, 10.0, 0.0, 0.0, 0);
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl)).expect("present");
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), ALL_DLIGHT_BITS).expect("present");
         let f = lm.factor_at(0.0, 0.0);
         assert!(f.is_finite());
         assert!((f - MAX_LIGHT_FACTOR).abs() < 1e-6, "huge add must clamp to {MAX_LIGHT_FACTOR}, got {f}");
@@ -8737,7 +8915,7 @@ mod tests {
         // A single steady style-0 face under neutral scales must keep the borrowed
         // static slice and sample exactly the static factor (no regression).
         let (bsp, face, poly) = one_face_bsp_zplane(200);
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[])
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0)
             .expect("present");
         assert!(
             matches!(lm.luxels, Luxels::Static(_)),
@@ -8760,7 +8938,7 @@ mod tests {
         // Style 1 dark (scale 0): effective = block0*1 + block1*0 = 100.
         let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
         scales[1] = 0.0;
-        let dark = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[]).expect("present");
+        let dark = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[], 0).expect("present");
         assert!(matches!(dark.luxels, Luxels::Owned(_)), "2-style face owns the combine");
         // Effective luxel 100 -> factor 100/255*2.
         assert!((dark.factor_at(0.0, 0.0) - (100.0 / 255.0 * 2.0)).abs() < 1e-5);
@@ -8768,7 +8946,7 @@ mod tests {
         // Style 1 normal (scale 1): effective = 100 + 200 = 300 -> clamps in factor.
         let mut scales_on = NEUTRAL_LIGHTSTYLE_SCALES;
         scales_on[1] = 1.0;
-        let bright = face_lightmap_dyn(&bsp, &face, &poly, &scales_on, &[]).expect("present");
+        let bright = face_lightmap_dyn(&bsp, &face, &poly, &scales_on, &[], 0).expect("present");
         let f_dark = dark.factor_at(0.0, 0.0);
         let f_bright = bright.factor_at(0.0, 0.0);
         assert!(
@@ -8779,7 +8957,7 @@ mod tests {
         // And a partial scale lands strictly between (proves it scales the block).
         let mut scales_half = NEUTRAL_LIGHTSTYLE_SCALES;
         scales_half[1] = 0.5; // effective = 100 + 100 = 200
-        let mid = face_lightmap_dyn(&bsp, &face, &poly, &scales_half, &[]).expect("present");
+        let mid = face_lightmap_dyn(&bsp, &face, &poly, &scales_half, &[], 0).expect("present");
         assert!((mid.factor_at(0.0, 0.0) - (200.0 / 255.0 * 2.0)).abs() < 1e-5);
     }
 
@@ -8794,7 +8972,7 @@ mod tests {
         let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
         scales[1] = 2.0; // would matter if the (missing) block were read
         // Must not panic; falls back to the single static block.
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[]).expect("present");
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[], 0).expect("present");
         assert!(
             matches!(lm.luxels, Luxels::Static(_)),
             "a too-short multi-style lump falls back to the static block borrow"
@@ -8815,7 +8993,7 @@ mod tests {
             bsp.lighting = vec![180u8; 9];
             (bsp, face, poly)
         };
-        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[])
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0)
             .expect("present");
         // Single style at scale 1.0 -> static borrow, full brightness.
         assert!(matches!(lm.luxels, Luxels::Static(_)));
@@ -8840,6 +9018,293 @@ mod tests {
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 600.0, 10.0, 0.0, 0.0, 0);
         let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES, None);
         assert_eq!(base.rgb, lit.rgb, "fullbright (lightmap-less) world must ignore dlights");
+    }
+
+    // -- R_MarkLights BSP dlight gating (r_light.c) -------------------------
+
+    /// Two rooms separated by a solid wall split at `x=0`, floored at `z=0` by
+    /// two COPLANAR faces — face 0 (near room, `x>0`) and face 1 (far room,
+    /// `x<0`) — with a real `R_MarkLights` node tree:
+    ///
+    /// ```text
+    ///   node 0 (root): plane 0 (wall x=0), no faces, children [node 1, node 2]
+    ///   node 1 (x>0):  plane 1 (floor z=0), owns face 0, children = leaves
+    ///   node 2 (x<0):  plane 1 (floor z=0), owns face 1, children = leaves
+    /// ```
+    ///
+    /// Both floors are lightmapped (uniform luxels = 100) and the shared texinfo
+    /// S/T axes are scaled by 1/4 (a 4x texture scale, legal in Quake), so
+    /// lightmap-space distances are a quarter of world distances. That is
+    /// exactly the configuration where the old proximity-only dlight gating
+    /// visibly lit the far room's wall-adjacent floor luxels through the wall
+    /// (the two floors share one plane, and the lit luxels sit within the
+    /// light's lightmap-space reach) while the C's BSP recursion never descends
+    /// past a split the light's sphere does not touch.
+    fn two_rooms_bsp() -> Bsp {
+        use crate::bsp::{DEdge, DFace, DModel, DNode, DPlane, DVertex, TexInfo};
+
+        let mut vertexes: Vec<DVertex> = Vec::new();
+        let mut edges: Vec<DEdge> = vec![DEdge { v: [0, 0] }]; // edge 0 unused
+        let mut surfedges: Vec<i32> = Vec::new();
+        let mut faces: Vec<DFace> = Vec::new();
+
+        // plane 0: the solid wall split at x=0; plane 1: the shared floor z=0.
+        let planes = vec![
+            DPlane { normal: [1.0, 0.0, 0.0], dist: 0.0, ptype: 0 },
+            DPlane { normal: [0.0, 0.0, 1.0], dist: 0.0, ptype: 2 },
+        ];
+
+        // One floor quad per room (z=0, +Z normal, CCW seen from above so a
+        // camera above passes the backface cull).
+        let mut add_floor = |x0: f32, x1: f32| {
+            let base = vertexes.len() as u16;
+            for c in [[x0, -128.0, 0.0], [x1, -128.0, 0.0], [x1, 128.0, 0.0], [x0, 128.0, 0.0]] {
+                vertexes.push(DVertex { point: c });
+            }
+            let first_edge = surfedges.len() as i32;
+            for k in 0..4u16 {
+                let e = edges.len() as i32;
+                edges.push(DEdge { v: [base + k, base + (k + 1) % 4] });
+                surfedges.push(e);
+            }
+            faces.push(DFace {
+                planenum: 1,
+                side: 0,
+                firstedge: first_edge,
+                numedges: 4,
+                texinfo: 0,
+                styles: [0, 255, 255, 255],
+                lightofs: 0,
+            });
+        };
+        add_floor(0.0, 256.0); // face 0: near room
+        add_floor(-256.0, 0.0); // face 1: far room
+
+        // The marking tree (children < 0 are leaf references and end a descent).
+        let nodes = vec![
+            DNode { planenum: 0, children: [1, 2], mins: [-256, -128, -16], maxs: [256, 128, 16], firstface: 0, numfaces: 0 },
+            DNode { planenum: 1, children: [-1, -2], mins: [0, -128, -16], maxs: [256, 128, 16], firstface: 0, numfaces: 1 },
+            DNode { planenum: 1, children: [-3, -4], mins: [-256, -128, -16], maxs: [0, 128, 16], firstface: 1, numfaces: 1 },
+        ];
+
+        // 1/4-scale S/T axes (4x texture scale): face extents s,t in [-64..64],
+        // so each floor is a 5x5 luxel grid (25 bytes per face; lightofs 0).
+        let texinfo = vec![TexInfo {
+            vecs: [[0.25, 0.0, 0.0, 0.0], [0.0, 0.25, 0.0, 0.0]],
+            miptex: 0,
+            flags: 0,
+        }];
+
+        let models = vec![DModel {
+            mins: [-256.0, -128.0, -16.0],
+            maxs: [256.0, 128.0, 16.0],
+            origin: [0.0, 0.0, 0.0],
+            headnode: [0, 0, 0, 0],
+            visleafs: 0,
+            firstface: 0,
+            numfaces: faces.len() as i32,
+        }];
+
+        Bsp {
+            version: 29,
+            entities: String::new(),
+            planes,
+            vertexes,
+            edges,
+            faces,
+            nodes,
+            leafs: Vec::new(),
+            clipnodes: Vec::new(),
+            texinfo,
+            models,
+            marksurfaces: Vec::new(),
+            surfedges,
+            textures: Vec::new(),
+            visibility: Vec::new(),
+            lighting: vec![100u8; 64],
+        }
+    }
+
+    #[test]
+    fn mark_lights_prunes_subtree_beyond_solid_split() {
+        let bsp = two_rooms_bsp();
+        // Light in the NEAR room, 40 units from the wall, radius 36: the sphere
+        // never crosses the x=0 split, so the far room's subtree is never
+        // descended (C `if (dist > light->radius)` recurses children[0] only).
+        let dl = DynamicLight::new([40.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
+        let mut bits = Vec::new();
+        mark_dlights(&bsp, 0, std::slice::from_ref(&dl), &mut bits);
+        assert_eq!(bits.len(), 2);
+        assert_eq!(bits[0], 1, "near-room floor must carry light 0's bit");
+        assert_eq!(bits[1], 0, "far-room floor must NOT be marked across the solid split");
+
+        // The pure proximity test (the pre-R_MarkLights gating) WOULD have
+        // flagged the far face as touched — the floors are coplanar, so the
+        // plane distance (8) is well inside the radius (36). This is exactly
+        // the divergence the BSP recursion fixes.
+        assert!(
+            any_dlight_reaches(&bsp, &bsp.faces[1], std::slice::from_ref(&dl), ALL_DLIGHT_BITS),
+            "sanity: by plane distance alone the far floor is in reach"
+        );
+        assert!(
+            !any_dlight_reaches(&bsp, &bsp.faces[1], std::slice::from_ref(&dl), bits[1]),
+            "with the real mask the far floor reports untouched"
+        );
+    }
+
+    #[test]
+    fn mark_lights_straddling_split_marks_both_sides() {
+        let bsp = two_rooms_bsp();
+        // The same light moved to 10 units from the wall: its sphere straddles
+        // the split, so BOTH children are descended and both floors are marked
+        // (the C marks the node's own faces and recurses both sides).
+        let dl = DynamicLight::new([10.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
+        let mut bits = Vec::new();
+        mark_dlights(&bsp, 0, std::slice::from_ref(&dl), &mut bits);
+        assert_eq!(bits[0], 1, "near-room floor marked");
+        assert_eq!(bits[1], 1, "far-room floor marked: the sphere reaches across the split");
+    }
+
+    #[test]
+    fn mark_lights_per_light_bits_accumulate() {
+        let bsp = two_rooms_bsp();
+        // Light 0 stays in the near room; light 1 straddles the split. Face 0
+        // accumulates both bits, face 1 only light 1's (1 << 1) — per-light
+        // masks exactly like the C `surf->dlightbits |= bit`.
+        let dls = [
+            DynamicLight::new([40.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0),
+            DynamicLight::new([10.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0),
+        ];
+        let mut bits = Vec::new();
+        mark_dlights(&bsp, 0, &dls, &mut bits);
+        assert_eq!(bits[0], 0b11);
+        assert_eq!(bits[1], 0b10);
+    }
+
+    #[test]
+    fn mark_lights_no_node_tree_falls_back_to_all_marked() {
+        // A synthetic map with no node tree (demo_room) cannot recurse: every
+        // face falls back to "marked by every light" so the per-light distance
+        // test in add_dynamic_lights remains the only gate (pre-gating
+        // behaviour). With no live lights the scratch stays empty (mask 0).
+        let bsp = demo_room();
+        assert!(bsp.nodes.is_empty(), "fixture: demo_room must have no nodes");
+        let dl = DynamicLight::new([0.0, 0.0, 0.0], 200.0, 10.0, 0.0, 0.0, 0);
+        let mut bits = Vec::new();
+        mark_dlights(&bsp, 0, std::slice::from_ref(&dl), &mut bits);
+        assert_eq!(bits.len(), bsp.faces.len());
+        assert!(bits.iter().all(|&b| b == ALL_DLIGHT_BITS));
+        mark_dlights(&bsp, 0, &[], &mut bits);
+        assert!(bits.is_empty(), "no live lights -> empty scratch (reads as mask 0)");
+    }
+
+    #[test]
+    fn mark_lights_terminates_on_malformed_cyclic_tree() {
+        // A node whose children point back at itself must terminate via the
+        // visit budget (never hang or overflow the stack) — real trees visit
+        // each node at most once per light.
+        let mut bsp = two_rooms_bsp();
+        bsp.nodes[0].children = [0, 0];
+        let dl = DynamicLight::new([10.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
+        let mut bits = Vec::new();
+        mark_dlights(&bsp, 0, std::slice::from_ref(&dl), &mut bits); // must return
+        // Out-of-range headnode is harmless too.
+        mark_dlights(&bsp, 999, std::slice::from_ref(&dl), &mut bits);
+        assert!(bits.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn unmarked_face_ignores_geometrically_reaching_dlight() {
+        // A light that reaches the face by pure distance must still be ignored
+        // when its R_MarkLights bit is clear — the C only folds lights present
+        // in `surf->dlightbits` (`R_AddDynamicLights`).
+        let (bsp, face, poly) = one_face_bsp_zplane(100);
+        let dl = DynamicLight::new([0.0, 0.0, 16.0], 60.0, 10.0, 0.0, 0.0, 0);
+
+        // Mask 0: the buffer stays the static borrow, as if the light were absent.
+        let lm = face_lightmap_dyn(
+            &bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), 0,
+        )
+        .expect("lightmap present");
+        assert!(
+            matches!(lm.luxels, Luxels::Static(_)),
+            "an unmarked light must not touch the lightmap"
+        );
+
+        // Bit 0 set: the very same light brightens (owned buffer).
+        let lit = face_lightmap_dyn(
+            &bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), 1,
+        )
+        .expect("lightmap present");
+        assert!(matches!(lit.luxels, Luxels::Owned(_)), "a marked reaching light applies");
+    }
+
+    /// Project a world point through the same camera basis / focal math the
+    /// world pass uses, returning the (clamped) target pixel.
+    fn project_px(cam: &Camera, w: usize, h: usize, p: Vec3) -> (usize, usize) {
+        let (forward, right, up) = cam.basis();
+        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let tan_half = (cam.fov_deg as f64 * 0.5).to_radians().tan();
+        let focal = (cx as f64 / tan_half) as f32;
+        let rel = sub(p, cam.pos);
+        let vz = dot(rel, forward).max(1e-3);
+        let x = cx + focal * dot(rel, right) / vz;
+        let y = cy - focal * dot(rel, up) / vz;
+        (
+            (x as usize).min(w.saturating_sub(1)),
+            (y as usize).min(h.saturating_sub(1)),
+        )
+    }
+
+    #[test]
+    fn dlight_does_not_bleed_into_bsp_region_it_cannot_reach() {
+        // End-to-end: render the two-room map with a dlight whose sphere stays
+        // inside the near room. The near floor must brighten; the far floor —
+        // coplanar, with wall-adjacent luxels inside the light's lightmap-space
+        // reach, i.e. visibly lit by the OLD proximity-only gating — must be
+        // byte-identical to the unlit frame.
+        reset_render_caches();
+        let bsp = two_rooms_bsp();
+        let pal = [[128u8, 128, 128]; 256];
+        // Above and behind the origin, looking down across both rooms.
+        let cam = Camera::looking_at([0.0, -220.0, 260.0], [0.0, 0.0, 0.0], 90.0);
+        let (w, h) = (200usize, 150usize);
+
+        let base = render_scene_ext(
+            &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES, None,
+        );
+        let dl = DynamicLight::new([40.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
+        let lit = render_scene_ext(
+            &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[],
+            std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES, None,
+        );
+
+        let px = |img: &Image, p: Vec3| -> [u8; 3] {
+            let (x, y) = project_px(&cam, w, h, p);
+            img.rgb[y * w + x]
+        };
+
+        // Near floor under the light brightens.
+        assert_ne!(
+            px(&base, [40.0, 0.0, 0.0]),
+            px(&lit, [40.0, 0.0, 0.0]),
+            "near-room floor must brighten under the dlight"
+        );
+        // Far floor: every sample byte-identical (no light through the wall).
+        for sample in [
+            [-8.0, 0.0, 0.0],
+            [-40.0, 0.0, 0.0],
+            [-72.0, 0.0, 0.0],
+            [-40.0, 64.0, 0.0],
+            [-40.0, -64.0, 0.0],
+        ] {
+            assert_eq!(
+                px(&base, sample),
+                px(&lit, sample),
+                "far-room floor lit through the wall at {sample:?}"
+            );
+        }
     }
 
     // -- PVS culling: decompress_vis / point_in_leaf -----------------------
@@ -12279,12 +12744,12 @@ mod tests {
 
         // First call: MISS -> builds + caches. Second call (same key): HIT.
         let first =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[]).expect("present");
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[], 0).expect("present");
         let second =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[]).expect("present");
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[], 0).expect("present");
 
         // The cached luxels must be BIT-identical to a fresh, cache-free build.
-        let fresh = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[]).expect("present");
+        let fresh = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[], 0).expect("present");
         let (lf, ls, lfresh) = match (&first.luxels, &second.luxels, &fresh.luxels) {
             (Luxels::Owned(a), Luxels::Owned(b), Luxels::Owned(c)) => (a, b, c),
             _ => panic!("a 2-style face must own the combined buffer"),
@@ -12308,15 +12773,15 @@ mod tests {
         let mut s_half = NEUTRAL_LIGHTSTYLE_SCALES;
         s_half[1] = 0.5;
         let half =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_half, &[]).expect("present");
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_half, &[], 0).expect("present");
 
         let mut s_full = NEUTRAL_LIGHTSTYLE_SCALES;
         s_full[1] = 1.0;
         let full =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_full, &[]).expect("present");
+            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_full, &[], 0).expect("present");
 
         // Compare against fresh builds at each scale.
-        let fresh_full = face_lightmap_dyn(&bsp, &face, &poly, &s_full, &[]).expect("present");
+        let fresh_full = face_lightmap_dyn(&bsp, &face, &poly, &s_full, &[], 0).expect("present");
         match (&half.luxels, &full.luxels, &fresh_full.luxels) {
             (Luxels::Owned(h), Luxels::Owned(f), Luxels::Owned(ff)) => {
                 // block0=100, block1=200: half -> 100+0.5*200=200; full ->
@@ -12340,7 +12805,7 @@ mod tests {
         let (bsp_a, face_a, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
         let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
         scales[1] = 0.5;
-        let _ = face_lightmap_world_cached(&bsp_a, 0, &face_a, &poly, &scales, &[]).expect("present");
+        let _ = face_lightmap_world_cached(&bsp_a, 0, &face_a, &poly, &scales, &[], 0).expect("present");
 
         // World B: a DIFFERENT world with a different faces.len() and different
         // lightmap bytes at face 0. The fingerprint mismatch must clear the
@@ -12354,8 +12819,8 @@ mod tests {
         assert_ne!(bsp_a.faces.len(), bsp_b.faces.len());
 
         let got =
-            face_lightmap_world_cached(&bsp_b, 0, &face_b, &poly_b, &scales, &[]).expect("present");
-        let fresh_b = face_lightmap_dyn(&bsp_b, &face_b, &poly_b, &scales, &[]).expect("present");
+            face_lightmap_world_cached(&bsp_b, 0, &face_b, &poly_b, &scales, &[], 0).expect("present");
+        let fresh_b = face_lightmap_dyn(&bsp_b, &face_b, &poly_b, &scales, &[], 0).expect("present");
         match (&got.luxels, &fresh_b.luxels) {
             (Luxels::Owned(g), Luxels::Owned(fb)) => {
                 // B's block0=40, block1=240, scale 0.5 -> 40+120=160 (NOT A's 200).
@@ -12379,15 +12844,17 @@ mod tests {
 
         // First, populate any cache via a dlight-free neutral call (static borrow,
         // not cached). Then a reaching dlight: must own the buffer and brighten.
-        let _ = face_lightmap_world_cached(&bsp, 0, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[]);
+        let _ = face_lightmap_world_cached(&bsp, 0, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0);
         let lit = face_lightmap_world_cached(
             &bsp, 0, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl),
+            ALL_DLIGHT_BITS,
         )
         .expect("present");
         assert!(matches!(lit.luxels, Luxels::Owned(_)), "a dlit face must own the dlit buffer");
         // Must match the direct (cache-free) dlit build exactly.
         let fresh = face_lightmap_dyn(
             &bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl),
+            ALL_DLIGHT_BITS,
         )
         .expect("present");
         match (&lit.luxels, &fresh.luxels) {
