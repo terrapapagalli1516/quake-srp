@@ -78,7 +78,10 @@
   #bootFill.indet { width:40%; animation:sweep 1.1s linear infinite; }
   @keyframes sweep { from { margin-left:-40%; } to { margin-left:100%; } }
   #bootFill.fail { background:#6e1f14; width:100%; animation:none; }
-  #play { font-size:17px; color:#e6dcc6; text-shadow:0 1px 6px #000; }
+  /* max-width + padding keep the prompt inside the bezel when the media query
+     below shrinks the canvas under 640px (it must wrap, never spill). */
+  #play { font-size:17px; color:#e6dcc6; text-shadow:0 1px 6px #000;
+    max-width:100%; box-sizing:border-box; padding:0 16px; text-align:center; }
 
   #actions { margin:12px auto 2px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
   button { font:inherit; font-size:12.5px; background:#191309; color:#cdbd9c;
@@ -115,6 +118,7 @@
   @media (pointer:coarse), (max-width:699px) { #touchNote { display:block; } }
   @media (max-width:699px) {
     canvas { width:min(94vw, 640px); height:auto; aspect-ratio:4 / 3; }
+    #play { font-size:13px; }
     .keys .k { text-align:left; }
   }
 </style>
@@ -301,14 +305,22 @@ function toggleFullscreen() {
 }
 fsBtn.addEventListener('click', toggleFullscreen);
 
+// Starting a session from a button drops the click-to-play scrim: the view is
+// watchable immediately (on touch devices requestPointerLock fails silently, so
+// the overlay would otherwise sit over the demo forever — the touchNote promises
+// demo playback works there). Desktop loses nothing: clicking the bare canvas
+// still locks the mouse + unlocks audio (canvas mousedown), and Esc re-shows the
+// overlay via pointerlockchange exactly as before.
 document.getElementById('walkBtn').addEventListener('click', () => {
   if (!exp) return;
   exp.boot();
+  overlay.classList.add('hidden');
   statusEl.textContent = 'walking e1m1 — click to lock the mouse, WASD to move';
 });
 document.getElementById('demoBtn').addEventListener('click', () => {
   if (!exp) return;
   statusEl.textContent = 'loading demo1 (e1m3)…';
+  overlay.classList.add('hidden');
   setTimeout(() => {
     exp.boot_demo();
     statusEl.textContent = "playing demo1 — id's recorded e1m3 run";
