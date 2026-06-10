@@ -68,6 +68,7 @@ impl Plane {
     /// `ptype` is `i` when the normal is axial along axis `i` (i.e. `normal[i]`
     /// is exactly `1.0` or `-1.0`), otherwise `3` (`PLANE_ANYX`). `signbits` is
     /// computed exactly as `Mod_LoadPlanes`: bit `j` is set iff `normal[j] < 0`.
+    #[must_use]
     pub fn new(normal: Vec3, dist: f32) -> Plane {
         // Axial detection: a plane is axial (type 0/1/2) when its normal lies on
         // a coordinate axis, i.e. one component is +/-1 and the others are 0.
@@ -96,12 +97,14 @@ impl Plane {
 
 /// `DotProduct(x,y)` macro: `x[0]*y[0]+x[1]*y[1]+x[2]*y[2]`.
 #[inline]
+#[must_use]
 pub fn dot(a: Vec3, b: Vec3) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// `CrossProduct`.
 #[inline]
+#[must_use]
 pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -112,24 +115,28 @@ pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
 
 /// `VectorAdd(a,b,c)`.
 #[inline]
+#[must_use]
 pub fn add(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
 /// `VectorSubtract(a,b,c)`.
 #[inline]
+#[must_use]
 pub fn sub(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 /// `VectorScale(in, scale, out)`.
 #[inline]
+#[must_use]
 pub fn scale(v: Vec3, s: f32) -> Vec3 {
     [v[0] * s, v[1] * s, v[2] * s]
 }
 
 /// `VectorMA(veca, scale, vecb, vecc)`: `a + scale*b`.
 #[inline]
+#[must_use]
 pub fn mul_add(a: Vec3, scale: f32, b: Vec3) -> Vec3 {
     [
         a[0] + scale * b[0],
@@ -140,12 +147,14 @@ pub fn mul_add(a: Vec3, scale: f32, b: Vec3) -> Vec3 {
 
 /// Alias for [`mul_add`], matching the C name `VectorMA`.
 #[inline]
+#[must_use]
 pub fn vector_ma(a: Vec3, scale: f32, b: Vec3) -> Vec3 {
     mul_add(a, scale, b)
 }
 
 /// `VectorInverse(v)`: negate each component.
 #[inline]
+#[must_use]
 pub fn inverse(v: Vec3) -> Vec3 {
     [-v[0], -v[1], -v[2]]
 }
@@ -153,6 +162,7 @@ pub fn inverse(v: Vec3) -> Vec3 {
 /// `VectorCompare(v1,v2)`: exact (bit-for-bit `==`) equality of all three
 /// components, returning a bool (`1`/`0` in C).
 #[inline]
+#[must_use]
 pub fn compare(a: Vec3, b: Vec3) -> bool {
     a[0] == b[0] && a[1] == b[1] && a[2] == b[2]
 }
@@ -160,6 +170,7 @@ pub fn compare(a: Vec3, b: Vec3) -> bool {
 /// `Length(v)`. C accumulates the squared length as `float`, then `sqrt`s in
 /// `double` (libm) and stores back to `float`.
 #[inline]
+#[must_use]
 pub fn length(v: Vec3) -> f32 {
     let mut len: f32 = 0.0;
     for &c in &v {
@@ -175,6 +186,7 @@ pub fn length(v: Vec3) -> f32 {
 /// is returned unchanged with length `0.0` (the C code leaves `v` untouched
 /// when `length` is falsy).
 #[inline]
+#[must_use]
 pub fn normalize(v: Vec3) -> (Vec3, f32) {
     let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     let length = (f64::from(len_sq)).sqrt() as f32;
@@ -192,6 +204,7 @@ pub fn normalize(v: Vec3) -> (Vec3, f32) {
 ///
 /// `65536/360.0` is a `double` constant; the multiply is `double`; the `(int)`
 /// cast truncates toward zero (and is masked with `& 65535` as a 32-bit int).
+#[must_use]
 pub fn anglemod(a: f32) -> f32 {
     // C: a = (360.0/65536) * ((int)(a*(65536/360.0)) & 65535);
     let scaled = f64::from(a) * (65536.0 / 360.0);
@@ -205,6 +218,7 @@ pub fn anglemod(a: f32) -> f32 {
 /// Returns `(forward, right, up)`. Trig is done in `double` (libm `sin`/`cos`)
 /// then cast back to `float`, matching the C. The deg→rad factor is
 /// `M_PI*2 / 360` exactly as written.
+#[must_use]
 pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     // angle = angles[..] * (M_PI*2 / 360);  with M_PI the double 3.14159...
     let factor = std::f64::consts::PI * 2.0 / 360.0;
@@ -236,6 +250,7 @@ pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
 }
 
 /// `R_ConcatRotations(in1, in2, out)`: 3x3 * 3x3 matrix product.
+#[must_use]
 pub fn concat_rotations(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     let mut out = [[0.0f32; 3]; 3];
     out[0][0] = a[0][0] * b[0][0] + a[0][1] * b[1][0] + a[0][2] * b[2][0];
@@ -254,6 +269,7 @@ pub fn concat_rotations(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
 ///
 /// The fourth column is the translation; row `i`'s translation accumulates the
 /// `in1[i][3]` term (`... + in1[i][3]`), exactly as the C does.
+#[must_use]
 pub fn concat_transforms(a: &[[f32; 4]; 3], b: &[[f32; 4]; 3]) -> [[f32; 4]; 3] {
     let mut out = [[0.0f32; 4]; 3];
     out[0][0] = a[0][0] * b[0][0] + a[0][1] * b[1][0] + a[0][2] * b[2][0];
@@ -278,6 +294,7 @@ pub fn concat_transforms(a: &[[f32; 4]; 3], b: &[[f32; 4]; 3]) -> [[f32; 4]; 3] 
 /// we instead use the general corner formula (the `#if 0` block): pick
 /// `mins`/`maxs` per the sign of each normal component. (signbits is a `u8`, so
 /// reaching the fallback requires bits >= 8, which `Plane::new` never produces.)
+#[must_use]
 pub fn box_on_plane_side(emins: Vec3, emaxs: Vec3, p: &Plane) -> u8 {
     let n = p.normal;
     let (dist1, dist2): (f32, f32) = match p.signbits {
@@ -342,6 +359,7 @@ pub fn box_on_plane_side(emins: Vec3, emaxs: Vec3, p: &Plane) -> u8 {
 }
 
 /// `ProjectPointOnPlane(dst, p, normal)`.
+#[must_use]
 pub fn project_point_on_plane(p: Vec3, normal: Vec3) -> Vec3 {
     let inv_denom = 1.0 / dot(normal, normal);
     let d = dot(normal, p) * inv_denom;
@@ -354,6 +372,7 @@ pub fn project_point_on_plane(p: Vec3, normal: Vec3) -> Vec3 {
 }
 
 /// `PerpendicularVector(dst, src)`. Assumes `src` is normalized (as the C does).
+#[must_use]
 pub fn perpendicular_vector(src: Vec3) -> Vec3 {
     // Find the smallest-magnitude axially aligned vector.
     let mut pos = 0usize;
@@ -378,6 +397,7 @@ pub fn perpendicular_vector(src: Vec3) -> Vec3 {
 /// Builds the change-of-basis matrix `m` (and its transpose `im`), a Z-rotation
 /// by `degrees`, composes `m * zrot * im`, and applies it to `point`. Trig is
 /// done in `double` and the rotation entries are stored as `float`, matching C.
+#[must_use]
 pub fn rotate_point_around_vector(dir: Vec3, point: Vec3, degrees: f32) -> Vec3 {
     let vf = dir;
     let vr = perpendicular_vector(dir);
@@ -430,6 +450,7 @@ pub fn rotate_point_around_vector(dir: Vec3, point: Vec3, degrees: f32) -> Vec3 
 ///
 /// Returns `(quotient, remainder)` with floor-based semantics. The C calls
 /// `Sys_Error` when `denom <= 0.0`; to stay total we return `(0, 0)` instead.
+#[must_use]
 pub fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
     if denom <= 0.0 {
         // C: Sys_Error("FloorDivMod: bad denominator ...") — we stay total.
@@ -458,6 +479,7 @@ pub fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
 }
 
 /// `GreatestCommonDivisor(i1, i2)`. Faithful recursive Euclid as in C.
+#[must_use]
 pub fn gcd(a: i32, b: i32) -> i32 {
     if a > b {
         if b == 0 {
@@ -475,6 +497,7 @@ pub fn gcd(a: i32, b: i32) -> i32 {
 /// `Q_log2(val)`: integer log2 via `while (val >>= 1) answer++`.
 ///
 /// The C uses arithmetic right shift on a signed `int`; we mirror that.
+#[must_use]
 pub fn q_log2(v: i32) -> i32 {
     let mut val = v;
     let mut answer = 0;
@@ -496,6 +519,7 @@ pub fn q_log2(v: i32) -> i32 {
 /// The contract types this `u32 -> u32`. We interpret the input bit pattern as
 /// the C `int` (so the `< 256` test is signed) and compute the conversion in
 /// `f64`, returning the result's bit pattern as `u32`.
+#[must_use]
 pub fn invert_24_to_16(val: u32) -> u32 {
     let signed = val as i32;
     if signed < 256 {
