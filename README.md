@@ -19,16 +19,17 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 > working **Options menu** (selectable resolution, mouse, volume) and a **drop-down console** (`~`) with
 > `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`. What it is *not*: multiplayer/netcode or save/load (out of
 > scope). Everything claimed below is real and tested: **449 engine + 42 wasm tests**, zero dependencies, no
-> `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and every renderer change verified
-> byte-identical against golden scene renders.
+> `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
+> against golden scene renders (byte-identical unless a fidelity fix deliberately re-baselines — each such
+> re-baseline is recorded in `AUDIT.md`).
 
 ## Layout
 
 | Path | What |
 |------|------|
 | `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`. |
-| `quake-wasm/` | a ~120-line `cdylib` shell that compiles the engine to `wasm32` and exposes it to a `<canvas>`. |
-| `web/` | the browser page (`index.html`) + a headless-verify script (`verify_walk.py`). |
+| `quake-wasm/` | the `cdylib` browser shell (~5.4k lines incl. its e2e tests): compiles the engine to `wasm32`, owns the walk/demo/menu/console front-end state, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. |
+| `web/` | the browser page (`index.html`) + headless-verify scripts (`verify_walk.py`, `verify_ambient.py`). |
 | `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |
 | `screenshots/` | rendered output from real e1m1 / start (the lit shots, the walkthrough GIF). |
 
@@ -76,11 +77,11 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 329 engine tests, no game data required (uses synthetic fixtures)
+cargo test          # 449 lib + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
-`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo scene sim playtest changelevel menu demo walk`.
+`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene walk demo playtest simbench changelevel`.
 
 ### Getting the game data (not committed)
 
@@ -113,8 +114,8 @@ QUAKE_BENCH=30 QUAKE_RES=1920x1080 \
 load** (an idle machine measured e1m1 @1080p ~33 ms; under load the same binary measured
 ~91 ms). Always A/B two builds in one sitting. The shape: the **world (BSP wall) pass
 dominates** (~75–85% of the frame) and scales ~linearly with pixel count; after
-front-to-back ordering the **overdraw is ~1.0×** (culling is optimal — the world pass is
-purely per-pixel-shading bound).
+front-to-back ordering the **overdraw is ~1.2×** (culling near-optimal — the world pass is
+essentially per-pixel-shading bound).
 
 Key optimisations (all in `render.rs` / `vm.rs` / `server.rs`): a **lit surface cache**
 (Quake's `d_surf.c` — bake texture × lightmap × colormap per surface once, then one
@@ -132,8 +133,9 @@ particles + lightning, selectable + persistent resolution, the `start` hub, the 
 brush-model items are all done — every subsystem audited against id's C across seven review rounds (66-finding
 ledger in `AUDIT.md`, all HIGHs closed). What remains:
 
-- **Low-severity divergences** — a documented cosmetic tail (e.g. no-lightmap-face shading on lightless test maps,
-  the demo path's missing explosion dlight, pain-frame face animation). Tracked with plans in `AUDIT.md`.
+- **A documented divergence tail** — one narrow MEDIUM (no-lightmap-face shading, reachable only on
+  lightless/test maps, golden-sensitive) and assorted cosmetic LOWs (the demo path's missing explosion dlight,
+  pain-frame face animation, sound-channel override granularity). Tracked with plans in `AUDIT.md`.
 - **Multiplayer & save/load** — out of scope for this single-player, headless-server port.
 
 ## Licensing

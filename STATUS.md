@@ -304,6 +304,14 @@ push. What remains is the LOW tail, all reviewer-vetted as non-blocking:
   clobber (UB in the C) are deliberately not modeled.
 - Sound-channel override only dedups within a frame; per-ammo sbar nits;
   pain-frame face anim; assorted Round-2 LOW list items.
+- From the final whole-diff review (all vetted non-blocking): the demo loop
+  wrap keeps the ambient ramp warm (deliberate seamless loop; the C's restart
+  re-ramps from 0); the intermission idle-sway phase uses w.clock (constant,
+  invisible phase offset vs cl.time); demo1 playback shows ~1.2 s of
+  void-camera frames at start/loop-wrap (pre-existing, recorded-stream
+  artifact); submodel dlight marking uses entity-local light origins where the
+  C used world-space (deliberate — consistent with the port's local per-luxel
+  submodel lighting; arguably fixes a C quirk that mis-lights moved doors).
 
 ---
 

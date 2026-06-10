@@ -213,7 +213,8 @@ surface cache (documented follow-up). Golden re-baselined.
   (LOW); stale lightstyle doc comment (LOW).
 - Refuted: centerprint/notify-after-HUD ordering (verified faithful).
 
-**Golden baseline (current):** e1m1 `81bca4da`, e1m2 `b93d088a`, e1m3 `df856aeb`
+**Golden baseline (as of Round 6; later superseded — see STATUS.md for the
+current `fb14bd65`/`a6f98d8a`/`0211e6d4` baseline):** e1m1 `81bca4da`, e1m2 `b93d088a`, e1m3 `df856aeb`
 (perf + lightstyle + colormap fidelity applied). 399 lib + 25 wasm tests pass.
 
 **Six codebase-wide reviews complete** (3 + 3). Outstanding deferred work, all documented
@@ -371,9 +372,9 @@ ledger:
   through its surface cache; this port would flip baked→per-pixel and shimmer
   for zero pixel change). `QUAKE_DLIGHT` knob on quaketool scene for A/B.
 
-**Performance** stays paused per the user.
-
-**Performance** is paused per the user (perf acceptable now); the ranked plan (style-value-keyed lightmap cache, frustum cull, persist framebuffer/zbuf — must stay pixel-identical) stays here for if/when it resumes.
+**Performance:** resolved — see STATUS.md's scorecard (the surface-cache fix +
+clone/alloc hunt landed; 36 fps @1080p idle, per-pixel bound; SIMD remains the
+only further ~2× lever and is unscheduled).
 
 ## LOW (27)
 

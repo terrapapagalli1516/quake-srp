@@ -1,14 +1,16 @@
 # quake-rs
 
-A **faithful, memory-safe Rust port of the self-contained subsystems of id Software's _Quake_** (1996),
+A **faithful, memory-safe Rust port of id Software's _Quake_** (1996) engine for single-player,
 ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.com/id-Software/Quake).
 
-> **Honest scope.** The full Quake engine is ~100,000 lines of C (software + GL renderers, client,
-> server, netcode, sound, the QuakeC virtual machine, physics). Nobody ports all of that, correctly and
-> idiomatically, in one sitting. This crate ports the layers that are **tractable and verifiable in
-> isolation** — the math library and every on-disk asset format — with unit tests against the exact byte
-> layouts, and documents the rest as a concrete roadmap. These are the foundation the rest of the engine
-> reads through, so they are the right place to start a real port.
+> **Honest scope.** This began as a port of the tractable, verifiable-in-isolation layers (math + every
+> on-disk format) and grew, subsystem by audited subsystem, into the complete single-player engine: the
+> QuakeC VM and builtins, the server (spawn, physics, collision, AI, combat, changelevel + intermission),
+> a faithful software renderer (lightmaps, the lit-surface cache, dynamic lights with `R_MarkLights`
+> gating, warp/sky, particles, beams, viewmodel, HUD/menus/console), demo playback, and sound event/
+> ambient-loop plumbing (mixing itself is the host's job — the browser uses Web Audio). What it does NOT
+> do: multiplayer/netcode, save/load, CD audio. Every subsystem was audited against the original C
+> (66-finding ledger + seven review rounds in `../AUDIT.md`).
 
 ## Status
 
@@ -27,11 +29,14 @@ ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.
 | BSP collision hull trace | `world.c` | `world` | ✅ `SV_RecursiveHullCheck` + `SV_HullPointContents` (hulls 0/1/2), box trace |
 | Player movement (slide + walk) | `sv_phys.c` | `world` | ✅ `ClipVelocity` + `SV_FlyMove` slide, stair step-up, ground-snap |
 | Demo + net protocol playback | `cl_demo.c`, `cl_parse.c`, `protocol.h` | `demo` | ✅ `.dem` framing + `svc_*` demux + bit-packed entity deltas → per-frame snapshots |
-| Server: map spawn + physics | `pr_edict.c`, `sv_phys.c` | `server` | ✅ `ED_LoadFromFile` spawn + minimal `SV_Physics` tick |
-| Software renderer (from-data BSP rasteriser) | new (not a port of `d_*.c`) | `render` | ✅ z-buffer, backface cull, **perspective-correct textured** world, **baked BSP lightmaps**, **alias models in-scene** |
+| Server: spawn, physics, AI, combat, client | `pr_edict.c`, `sv_phys.c`, `sv_move.c`, `sv_user.c`, `sv_main.c`, `host_cmd.c` | `server` | ✅ full single-player tick: spawn + settle, walk/toss/bounce/fly/pusher physics, entity collision + touch, monster AI, combat, player client (incl. death→respawn), changelevel + intermission svc flow, signon settle frames |
+| Software renderer | `r_*.c`, `d_*.c` (semantics; rasteriser is from-scratch) | `render` | ✅ perspective-correct textured world, baked lightmaps + lit-surface cache (`d_surf.c`), dynamic lights w/ `R_MarkLights` BSP gating, animated styles, liquid/sky warp, alias/sprite/brush models, viewmodel, HUD + menus + console + intermission overlays |
+| Particles + temp entities | `r_part.c`, `cl_tent.c` | `particles`, `tent`, `dlight` | ✅ trails/explosions/splashes + lightning-beam store and expansion |
+| Ambient sound | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server` | ✅ `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap) + `PF_ambientsound` static loops + `GetWavinfo` cue-loop gate |
 | Little-endian byte reader, error type | (replaces `LittleLong`/`Sys_Error`) | `read`, `error` | ✅ scaffold |
 
-The crate is **~11,000 lines of zero-dependency, `unsafe`-free Rust with 150+ tests**.
+The crate is **~39,000 lines of zero-dependency, `unsafe`-free Rust with 449 lib + 8 integration tests**
+(all data-free; the sibling `quake-wasm` crate adds 42 e2e tests against the real embedded shareware pak).
 
 ### Validated against the real Quake shareware
 
@@ -68,13 +73,14 @@ Run against id's freely-redistributable shareware `pak0.pak` (`quake106.zip` →
 
 The engine lib compiles to `wasm32-unknown-unknown` **unchanged** (`cargo build --lib --target wasm32-unknown-unknown`)
 — the payoff of zero dependencies + an all-in-memory API (`Pak::from_bytes`, loaders over `&[u8]`, the renderer's
-`Vec<[u8;3]>` framebuffer). The sibling `quake-wasm` crate is a ~120-line `cdylib` shell that `include_bytes!`s the
-pak and exports `boot`/`step`/`width`/`height`/`framebuffer`/`set_input` via plain `extern "C"` — **no `wasm-bindgen`,
-no dependencies, and not a single `unsafe {}` block** (the only "unsafe" is the `#[no_mangle]` export attribute; the
-page reads the framebuffer out of linear memory itself, Rust only hands out `Vec::as_ptr()`). `web/index.html` boots
-it, runs a `requestAnimationFrame` loop blitting the framebuffer to a `<canvas>`, and maps WASD/arrows to the
-slide-move player. Verified running interactively in headless chromium (`web/shoot.py`): **Quake e1m1, walkable, in
-a browser, in safe Rust.**
+`Vec<[u8;3]>` framebuffer). The sibling `quake-wasm` crate is the `cdylib` shell (~5.4k lines incl. its e2e tests)
+that `include_bytes!`s the pak, owns the walk/demo/menu/console front-end state, and exports plain `extern "C"`
+functions — **no `wasm-bindgen`, no dependencies, and not a single `unsafe {}` block** (the only "unsafe" is the
+`#[no_mangle]` export attribute; the page reads the framebuffer out of linear memory itself, Rust only hands out
+`Vec::as_ptr()`). `web/index.html` boots it, runs a `requestAnimationFrame` loop blitting the framebuffer to a
+`<canvas>`, and maps the full control set (mouse-look, WASD, weapons, menu, console). Verified continuously in
+headless Chromium (`web/verify_walk.py`, `web/verify_ambient.py`): **Quake e1m1, playable, in a browser, in safe
+Rust.**
 
 ### Gameplay (entity collision, touch, player client)
 
@@ -148,46 +154,42 @@ quaketool dis    <progs.dat>     # disassemble QuakeC bytecode
 quaketool run    <progs.dat> <fn> # execute a QuakeC function; show console output + return value
 quaketool render <bsp> <out.ppm> # software-render a BSP to a PPM image
 quaketool render-demo <out.ppm>  # render the built-in demo room (no map data needed)
+quaketool menu <pak> <out.ppm>   # draw the MAIN menu over the e1m1 POV
+quaketool sim <progs.dat> <bsp> [frames]   # spawn a map's QuakeC entities + tick physics
+quaketool scene <pak> <map> <out.ppm>      # render a map + its spawned MDL entities (golden-render tool)
+quaketool walk <pak> <map> <out> [steps]   # collision-driven walkthrough, one PPM per step
+quaketool demo <pak> <dem> <out> [stride]  # replay + render a recorded demo
+quaketool playtest <pak> <map> [out.ppm]   # spawn a player client, walk, report state
+quaketool simbench <pak> <map> [frames]    # benchmark the game-logic tick (no rendering)
+quaketool changelevel <pak> <map>          # drive a player through the exit; prove inventory carries
 ```
+
+`scene` doubles as the **golden-render harness** (`QUAKE_BENCH=<iters>` / `QUAKE_RES=WxH` /
+`QUAKE_DLIGHT=x,y,z,r|eye[:r]` env knobs) — see `../STATUS.md` for the current golden hashes and
+performance scorecard.
 
 The repo includes `gen_samples.py` / `gen_progs.py` — independent Python assemblers that emit synthetic
 assets and a `progs.dat`, so the loaders, VM, and renderer can be exercised without owning a copy of Quake.
 
-## What is *not* here yet — the engine roadmap
+## What is *not* here — deliberate scope
 
-The remaining ~90k lines fall into clear layers. A realistic port order, each layer building on the last:
+Of the original phase roadmap (formats → model → server/client → renderer/sound → host), **every layer the
+single-player game needs is now ported and audited**. The deliberate omissions:
 
-**Phase 1 — platform & core services** (mostly done here)
-- `read`/`error` ✅, file formats ✅, math ✅
-- *next:* `zone.c` (hunk/zone/cache allocator → a Rust arena or just `Vec`/`Box`), `cmd.c` + `cvar.c`
-  (console command + variable system → a registry), `common.c` filesystem search-path / `COM_*`.
+- **Multiplayer / netcode** (`net_*.c`) — this is an in-process single-player engine; the server→client path
+  is the local short-circuit, no serialization layer.
+- **Save / load** (`host_cmd.c`'s `Host_Savegame_f`/`Host_Loadgame_f`) — out of scope; `changelevel` carries
+  inventory via the real `SetChangeParms`/`DecodeLevelParms` and death restarts the level like the C.
+- **Audio mixing internals** (`snd_mix.c`) — the engine computes *which* sounds play where, at what
+  volume/attenuation (including static loops and leaf ambients); the host mixes (the browser uses Web Audio).
+  A documented scope note in `../AUDIT.md`.
+- **CD audio** (`cd_*.c`) — `svc_cdtrack` is recognised and ignored; there is no CD.
+- **`zone.c`/`cmd.c`/`cvar.c` as literal ports** — Rust ownership replaces the allocator; the console/cvar
+  surface is implemented where game-visible (skill, the console commands, Options sliders) rather than as a
+  general registry.
 
-**Phase 2 — the data model in memory**
-- `model.c` `Mod_LoadBrushModel` → turn the `bsp` structs into a renderable `model_t` (surfaces, the
-  node/leaf tree, PVS decompression `Mod_DecompressVis`), plus alias/sprite model setup.
-
-**Phase 3 — server & game logic**
-- `pr_*.c` — the **QuakeC virtual machine** ✅ *done* (`progs` + `vm` + `builtins`): `progs.dat` loader,
-  bytecode interpreter (all 66 opcodes), edict/string/global runtime, and the builtin table. Pure builtins
-  (`ftos`, `vtos`, `normalize`, `vlen`, `vectoyaw`/`vectoangles`, `rint`/`floor`/`ceil`/`fabs`, `random`,
-  `spawn`/`remove`, `find`/`nextent`, `print`/`dprint`/`bprint`, `makevectors`, …) are implemented; engine
-  builtins (world, sound, network, cvars) are stubbed to fault cleanly.
-  - *next:* `sv_main.c`, `sv_phys.c`, `world.c` — server entity management and the BSP collision/physics
-    hull trace, which is what the stubbed world builtins (`setorigin`, `traceline`, `setmodel`) need.
-
-**Phase 4 — client & presentation**
-- **Renderer.** A from-scratch software rasteriser (`render`) ✅ *working* — driven by the parsed BSP/palette
-  data, with a z-buffer, backface culling, and flat per-face shading; renders the world to a PPM. This is a
-  reimplementation, **not** a port of Quake's asm-heavy `d_*.c` span/surface-cache renderer (`r_*.c`/`d_*.c`)
-  or `gl_*.c`. A production path would more likely target `wgpu`, fed by the same parsed data.
-- `cl_*.c` — client state, prediction, entity interpolation.
-- `snd_*.c` — sound mixing; `in_*.c`/`vid_*.c` — input and video (would map to `winit` + `cpal`).
-
-**Phase 5 — the host loop**
-- `host.c`, `host_cmd.c`, `sys_*.c` — frame timing, save/load, the glue that owns everything.
-
-The dependency arrow runs **formats → model → {server, client} → renderer/sound → host**. This crate
-delivers the root of that graph with tests, so each later phase has a verified foundation to read through.
+The remaining *fidelity* gaps are a documented LOW tail (plus one narrow no-lightmap-face MED) — see
+"Still open" in `../AUDIT.md`.
 
 ## Licensing
 

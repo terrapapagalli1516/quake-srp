@@ -521,6 +521,8 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     let _ = server.drain_sounds();
     let _ = server.drain_particles();
     let _ = server.drain_temp_entities();
+    let _ = server.drain_messages();
+    let _ = server.drain_svc_events();
 
     Some(Walk {
         server,
@@ -2311,6 +2313,7 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();
+    let _ = w.server.drain_messages();
     // Looping audio: stop the OLD level's loops (S_StopAllSounds on changelevel)
     // and hand the page the NEW level's placed ambient loops + a fresh ambient
     // ramp, captured above right after spawn_entities.
@@ -2383,6 +2386,7 @@ fn try_restart(w: &mut Walk) {
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();
+    let _ = w.server.drain_messages();
     // Stop the dead run's loops; restart the fresh level's (see try_changelevel).
     bump_sound_generation();
     queue_static_sounds(&w.pak, &statics);
