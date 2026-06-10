@@ -50,6 +50,7 @@ pub mod builtins;
 pub mod world;
 pub mod server;
 pub mod particles;
+pub mod tent;
 
 pub mod render;
 pub mod dlight;

@@ -306,13 +306,20 @@ pub struct EntSnapshot {
 /// [`crate::particles::ParticleSystem`] the live walk uses — so the recorded
 /// demo shows blood, gunshot puffs and explosions exactly like live play.
 ///
-/// Beam temp entities (`TE_LIGHTNING1/2/3`, `TE_BEAM`) are recorded with their
-/// start point in `pos` but carry no renderable effect downstream; the
-/// front-end simply ignores those `te_type`s (see [`TempEntityEvent`]).
+/// Beam temp entities (`TE_LIGHTNING1/2/3`, `TE_BEAM`) carry their owning
+/// entity + start/end points on the [`TempEntityEvent`]; a front-end routes
+/// them into a [`crate::tent::Beams`] store (the `CL_ParseBeam` slot list) and
+/// expands the live beams into bolt-model instances each frame
+/// (`CL_UpdateTEnts`).
 pub struct DemoFrame {
     pub time: f32,
     pub view_origin: [f32; 3],
     pub view_angles: [f32; 3],
+    /// The view entity's raw origin (`cl_entities[cl.viewentity].origin` — the
+    /// pre-`viewheight` base of `view_origin`). `CL_UpdateTEnts` re-anchors a
+    /// beam owned by the view entity to THIS each frame, so the recorded
+    /// player's thunderbolt tracks them between beam refreshes.
+    pub view_entity_origin: [f32; 3],
     pub entities: Vec<EntSnapshot>,
     /// `svc_particle` bursts fired during this frame's message block.
     pub particles: Vec<ParticleBurst>,
@@ -325,6 +332,10 @@ pub struct Demo {
     pub level_name: String,
     pub model_precache: Vec<String>,
     pub sound_precache: Vec<String>,
+    /// `cl.viewentity` (the `svc_setview` entity number, the recording
+    /// player): the beam store's view-entity key for `CL_UpdateTEnts`'s
+    /// start-position tracking. `0` if the demo never set a view.
+    pub viewentity: usize,
     pub frames: Vec<DemoFrame>,
 }
 
@@ -659,6 +670,7 @@ fn parse_demo_with(
     }
 
     Ok(Demo {
+        viewentity: cl.viewentity,
         level_name: cl.level_name,
         model_precache: cl.model_precache,
         sound_precache: cl.sound_precache,
@@ -700,6 +712,9 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
             lerp_origin(ve.msg_origins[1], ve.msg_origins[0], frac)
         };
     }
+    // The raw (pre-viewheight) view entity origin — what CL_UpdateTEnts
+    // re-anchors the view entity's own beam start to each frame.
+    let view_entity_origin = view_origin;
     view_origin[2] += cl.viewheight;
     let view_angles = lerp_angles(cl.mviewangles[1], cl.mviewangles[0], frac);
 
@@ -764,6 +779,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
     DemoFrame {
         time: cl.time,
         view_origin,
+        view_entity_origin,
         view_angles,
         entities,
         particles,
@@ -1350,19 +1366,18 @@ fn parse_particle(cl: &mut ClientState, r: &mut NetReader) {
 fn parse_temp_entity(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
     let te = r.read_byte();
     match te {
-        // Beams: short entity + start coord3 + end coord3 (CL_ParseBeam).
-        // Recorded with the START point in `pos`; the front-end ignores beams,
-        // but we still consume every byte to keep the stream aligned.
+        // Beams: short entity + start coord3 + end coord3 (CL_ParseBeam). The
+        // entity is the beam slot-reuse key, pos/end the segment endpoints —
+        // the front-end feeds all three to `crate::tent::Beams::parse_beam`.
         TE_LIGHTNING1 | TE_LIGHTNING2 | TE_LIGHTNING3 | TE_BEAM => {
-            let _ent = r.read_short();
+            let entity = r.read_short();
             let pos = [r.read_coord(), r.read_coord(), r.read_coord()];
-            // The 3 end coords are consumed for alignment but dropped.
-            let _ = r.read_coord();
-            let _ = r.read_coord();
-            let _ = r.read_coord();
+            let end = [r.read_coord(), r.read_coord(), r.read_coord()];
             cl.pending_tents.push(TempEntityEvent {
                 te_type: te as u8,
                 pos,
+                end,
+                entity,
                 color_start: 0,
                 color_length: 0,
             });
@@ -1376,6 +1391,8 @@ fn parse_temp_entity(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
             cl.pending_tents.push(TempEntityEvent {
                 te_type: te as u8,
                 pos,
+                end: pos,
+                entity: 0,
                 color_start: color_start.clamp(0, 255) as u8,
                 color_length: color_length.clamp(0, 255) as u8,
             });
@@ -1388,6 +1405,8 @@ fn parse_temp_entity(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
             cl.pending_tents.push(TempEntityEvent {
                 te_type: te as u8,
                 pos,
+                end: pos,
+                entity: 0,
                 color_start: 0,
                 color_length: 0,
             });

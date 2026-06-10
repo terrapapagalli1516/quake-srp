@@ -24,6 +24,7 @@ use quake_rs::render::{
     self, Camera, Console, Menu, MenuAction, MenuPics, ModelInstance, Viewmodel,
 };
 use quake_rs::server::{Server, TempEntityEvent, UserCmd};
+use quake_rs::tent::{BeamModel, BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 
 static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
@@ -176,6 +177,14 @@ struct Walk {
     /// each frame from the drained temp entities + the server's entity_dlights,
     /// decayed under `advance`, and passed to the renderer to light the walls.
     dlights: DynamicLights,
+    /// The beam temp-entity slots (`cl_beams`): lightning bolts the drained
+    /// `TE_LIGHTNING1/2/3` / `TE_BEAM` events refresh ([`Beams::parse_beam`])
+    /// and [`step_walk`] expands into bolt-model instances each frame
+    /// (`CL_UpdateTEnts`). Cleared on changelevel/restart (`CL_ClearState`).
+    beams: Beams,
+    /// Reused per-frame scratch for the expanded beam pieces (no per-frame
+    /// allocation on the common no-beam frames; `Beams::update` clears it).
+    beam_scratch: Vec<BeamSegment>,
 }
 
 /// Recorded-demo playback state.
@@ -207,6 +216,12 @@ struct DemoPlay {
     /// several steps spawns its bursts only on the step that ADVANCES onto it
     /// (never re-spawning while it lingers). `usize::MAX` = "none spawned yet".
     last_spawned_idx: usize,
+    /// The beam temp-entity slots (`cl_beams`) replayed from the recorded
+    /// `TE_LIGHTNING1/2/3` / `TE_BEAM` stream; expanded into bolt-model
+    /// instances each frame like the live walk. Cleared on the demo loop wrap.
+    beams: Beams,
+    /// Reused per-frame scratch for the expanded beam pieces.
+    beam_scratch: Vec<BeamSegment>,
 }
 
 struct App {
@@ -467,6 +482,8 @@ fn build_walk_map(map: &str) -> Option<Walk> {
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
         dlights: DynamicLights::new(),
+        beams: Beams::new(),
+        beam_scratch: Vec::new(),
     })
 }
 
@@ -530,6 +547,8 @@ fn build_demo() -> Option<DemoPlay> {
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
         last_spawned_idx: usize::MAX,
+        beams: Beams::new(),
+        beam_scratch: Vec::new(),
     })
 }
 
@@ -1877,11 +1896,13 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.yaw = yaw;
     w.pitch = 0.0;
 
-    // New level, clean slate: drop the old level's particles / dynamic lights and
-    // reset the animation clock so liquids/sky restart from zero.
+    // New level, clean slate: drop the old level's particles / dynamic lights /
+    // beams (CL_ClearState memsets cl_beams) and reset the animation clock so
+    // liquids/sky restart from zero.
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
+    w.beams.clear();
     // Clear the on-screen text overlay on level load (SCR_BeginLoadingPlaque calls
     // Con_ClearNotify + scr_centertime_off=0): drop the half-built line AND the
     // already-flushed notify lines + the centerprint. Their expiry is an ABSOLUTE
@@ -1940,6 +1961,7 @@ fn try_restart(w: &mut Walk) {
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
+    w.beams.clear();
     w.notify_pending.clear();
     w.notify.clear();
     w.centerprint = None;
@@ -2077,6 +2099,22 @@ fn step_walk(
     let tents = w.server.drain_temp_entities();
     let mut te_sounds: Vec<quake_rs::server::SoundEvent> = Vec::new();
     for ev in &tents {
+        // Beam types (CL_ParseTEnt's TE_LIGHTNING1/2/3 + TE_BEAM cases): refresh
+        // the entity's beam slot (CL_ParseBeam) and load its bolt model now —
+        // the C's `CL_ParseBeam(Mod_ForName("progs/bolt*.mdl", true))` loads at
+        // parse time too. A missing model (shareware lacks beam.mdl) caches
+        // `None` and the expansion below skips its pieces (the C Sys_Error'd;
+        // vanilla progs never emits TE_BEAM, so the path was never live).
+        if let Some(bm) = BeamModel::from_te_type(ev.te_type) {
+            w.beams.parse_beam(ev.entity, bm, ev.pos, ev.end, now);
+            let name = bm.model_name();
+            if !w.model_cache.contains_key(name) {
+                let parsed =
+                    w.pak.read_file(name).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
+                w.model_cache.insert(name.to_string(), parsed);
+            }
+            continue; // beams spawn no particles / sounds / dlights here
+        }
         // Explosions spawn a decaying dynamic light (CL_ParseTEnt): radius 350,
         // die now+0.5, decay 300, minlight 0, key 0 -> a fresh slot each one.
         {
@@ -2346,7 +2384,7 @@ fn step_walk(
         roll,
         fov_deg: 90.0,
     };
-    let instances: Vec<ModelInstance> = descs
+    let mut instances: Vec<ModelInstance> = descs
         .iter()
         .filter_map(|(name, origin, angles, frame, color, skin)| match w.model_cache.get(name) {
             Some(Some(mdl)) => Some(ModelInstance {
@@ -2362,6 +2400,31 @@ fn step_walk(
             _ => None,
         })
         .collect();
+    // CL_UpdateTEnts (cl_tent.c): expand every live lightning beam into one
+    // bolt-model piece every 30 units (shared integer pitch/yaw, random roll
+    // per piece per frame). A beam owned by the view entity (the player's
+    // thunderbolt) is re-anchored to the player's CURRENT origin first. Gated
+    // on any_live so the common no-beam frame pays one boolean scan.
+    if w.beams.any_live(now) {
+        let player_org = w.server.vm.ent_get_vector(w.player, "origin");
+        w.beams.update(now, w.player, player_org, &mut w.prng, &mut w.beam_scratch);
+        for seg in &w.beam_scratch {
+            // CL_NewTempEntity memsets the entity: frame 0, skin 0. A `None`
+            // cache entry (model absent from the pak) skips the piece.
+            if let Some(Some(mdl)) = w.model_cache.get(seg.model.model_name()) {
+                instances.push(ModelInstance {
+                    mdl,
+                    origin: seg.origin,
+                    yaw: seg.yaw,
+                    pitch: seg.pitch,
+                    roll: seg.roll,
+                    color: color_for_name(seg.model.model_name()),
+                    frame: 0,
+                    skinnum: 0,
+                });
+            }
+        }
+    }
     // External brush-model item boxes: resolve each (name, origin) against the
     // bmodel cache, dropping any box whose bsp was missing/unparseable (`None`).
     let external: Vec<render::ExternalBModel> = ext_descs
@@ -2569,6 +2632,14 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
             .spawn_burst(b.org, b.dir, b.color, b.count, now, &mut d.prng);
     }
     for ev in &tents {
+        // Beam types refresh the entity's beam slot (CL_ParseBeam) with the
+        // frame's recorded server time; step_demo expands the live beams into
+        // bolt-model instances every render (CL_UpdateTEnts), exactly like the
+        // live walk.
+        if let Some(bm) = BeamModel::from_te_type(ev.te_type) {
+            d.beams.parse_beam(ev.entity, bm, ev.pos, ev.end, now);
+            continue;
+        }
         // Reuse the live-walk mapping (explosion/impact/splash). The returned
         // sound is the explosion SFX; demo playback drives audio through its own
         // svc_sound stream, so we ignore it here (the visual effect is the point).
@@ -2589,9 +2660,11 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
         d.idx = 0;
         d.elapsed = 0.0;
         // Looping restarts the recorded effect stream: drop every live particle
-        // and forget what was spawned so the replay from frame 0 is identical to
-        // the first pass (no stale explosions carried across the wrap).
+        // and beam and forget what was spawned so the replay from frame 0 is
+        // identical to the first pass (no stale explosions/bolts carried across
+        // the wrap).
         d.particles = ParticleSystem::new();
+        d.beams.clear();
         d.last_spawned_idx = usize::MAX;
     }
     // Advance to the frame matching the recorded server time. Stop at the last
@@ -2661,6 +2734,37 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
                 origin: e.origin,
                 frame: e.frame.max(0) as usize,
             });
+        }
+    }
+    // CL_UpdateTEnts: expand the recorded lightning beams into bolt-model
+    // pieces, exactly like the live walk. The bolt models resolve through the
+    // demo's PRECACHE table (the .dem signon lists progs/bolt*.mdl); a beam
+    // owned by the recorded view entity tracks its per-frame origin.
+    if d.beams.any_live(f.time) {
+        d.beams.update(
+            f.time,
+            d.demo.viewentity as i32,
+            f.view_entity_origin,
+            &mut d.prng,
+            &mut d.beam_scratch,
+        );
+        for seg in &d.beam_scratch {
+            let name = seg.model.model_name();
+            let Some(idx) = d.demo.model_precache.iter().position(|n| n == name) else {
+                continue; // model not precached (e.g. beam.mdl in shareware)
+            };
+            if let Some(Some(mdl)) = d.models.get(idx) {
+                owned.push(ModelInstance {
+                    mdl,
+                    origin: seg.origin,
+                    yaw: seg.yaw,
+                    pitch: seg.pitch,
+                    roll: seg.roll,
+                    color: d.colors.get(idx).copied().unwrap_or([200, 200, 200]),
+                    frame: 0,
+                    skinnum: 0,
+                });
+            }
         }
     }
     let cam = Camera {
@@ -2883,6 +2987,7 @@ mod tests {
         let frame = |t: f32| DemoFrame {
             time: t,
             view_origin: [0.0, 0.0, 0.0],
+            view_entity_origin: [0.0, 0.0, 0.0],
             view_angles: [0.0, 0.0, 0.0],
             entities: Vec::new(),
             particles: Vec::new(),
@@ -2893,6 +2998,7 @@ mod tests {
             // map_name() reads model_precache[1]; unused by step_demo's indexing.
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
+            viewentity: 0,
             // Three frames at t = 0, 1, 2.
             frames: vec![frame(0.0), frame(1.0), frame(2.0)],
         };
@@ -2909,6 +3015,8 @@ mod tests {
             particles: ParticleSystem::new(),
             prng: Lcg::new(1),
             last_spawned_idx: usize::MAX,
+            beams: Beams::new(),
+            beam_scratch: Vec::new(),
         };
         let n = d.demo.frames.len();
 
@@ -2948,6 +3056,7 @@ mod tests {
         let plain = |t: f32| DemoFrame {
             time: t,
             view_origin: [0.0, 0.0, 0.0],
+            view_entity_origin: [0.0, 0.0, 0.0],
             view_angles: [0.0, 0.0, 0.0],
             entities: Vec::new(),
             particles: Vec::new(),
@@ -2960,6 +3069,7 @@ mod tests {
         let effect_frame = DemoFrame {
             time: 0.05,
             view_origin: [0.0, 0.0, 0.0],
+            view_entity_origin: [0.0, 0.0, 0.0],
             view_angles: [0.0, 0.0, 0.0],
             entities: Vec::new(),
             particles: vec![ParticleBurst {
@@ -2971,6 +3081,8 @@ mod tests {
             temp_entities: vec![TempEntityEvent {
                 te_type: te_consts::TE_EXPLOSION,
                 pos: [10.0, 0.0, 0.0],
+                end: [10.0, 0.0, 0.0],
+                entity: 0,
                 color_start: 0,
                 color_length: 0,
             }],
@@ -2979,6 +3091,7 @@ mod tests {
             level_name: "test".into(),
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
+            viewentity: 0,
             frames: vec![plain(0.0), effect_frame, plain(0.10)],
         };
         let mut d = DemoPlay {
@@ -2994,6 +3107,8 @@ mod tests {
             particles: ParticleSystem::new(),
             prng: Lcg::new(1),
             last_spawned_idx: usize::MAX,
+            beams: Beams::new(),
+            beam_scratch: Vec::new(),
         };
 
         // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
@@ -3796,5 +3911,195 @@ mod tests {
             "respawned alive after the environment kill"
         );
         assert_eq!(player_field("deadflag"), 0.0);
+    }
+
+    #[test]
+    fn thunderbolt_beam_renders_bolt_pixels_on_e1m1() {
+        // End-to-end through the LIVE path: boot the e1m1 walk, cheat in the
+        // thunderbolt (impulse 9 = all weapons + ammo, impulse 8 = lightning
+        // gun), hold fire, and verify (a) the QuakeC's TE_LIGHTNING2 broadcast
+        // landed in the beam store, (b) bolt2.mdl was loaded on demand at parse
+        // time (Mod_ForName in CL_ParseTEnt), (c) the per-frame CL_UpdateTEnts
+        // expansion produced pieces anchored at the muzzle (origin + '0 0 16',
+        // W_FireLightning), and (d) the bolt actually changes rendered pixels —
+        // an identical re-render (same rng, dt=0) with the beams cleared differs.
+        let mut w = build_walk().expect("e1m1 walk boots from the embedded pak");
+        // Let the spawn settle (telefrag effects, initial thinks).
+        for _ in 0..10 {
+            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        }
+        w.next_impulse = 9; // CheatCommand: all weapons + full cells
+        let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        w.next_impulse = 8; // select the thunderbolt
+        let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        // Hold fire across several frames (W_FireLightning re-broadcasts the
+        // beam each weapon frame, exercising the same-entity slot REPLACEMENT).
+        w.in_attack = true;
+        for _ in 0..6 {
+            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        }
+        assert!(
+            w.beams.any_live(w.clock),
+            "firing the thunderbolt put a live beam in the store"
+        );
+        assert!(
+            matches!(w.model_cache.get("progs/bolt2.mdl"), Some(Some(_))),
+            "TE_LIGHTNING2 loaded progs/bolt2.mdl on demand"
+        );
+        // The last frame's expansion is retained in the scratch buffer: the
+        // thunderbolt is ONE beam (slot replacement, never stacked). The QuakeC
+        // fires from origin + '0 0 16' with a 600-unit traceline, but
+        // CL_UpdateTEnts re-anchors the VIEW entity's beam to the player's raw
+        // ORIGIN every frame (the C quirk — the visible bolt hangs 16 units
+        // below the muzzle), so the segment can run a hair over 600 units:
+        // 1..=21 Bolt2 pieces.
+        assert!(
+            !w.beam_scratch.is_empty() && w.beam_scratch.len() <= 21,
+            "one ~600-unit beam expands to 1..=21 pieces (got {})",
+            w.beam_scratch.len()
+        );
+        assert!(
+            w.beam_scratch.iter().all(|s| s.model == BeamModel::Bolt2),
+            "thunderbolt pieces use bolt2.mdl"
+        );
+        // The first piece sits at the player ORIGIN: the WriteEntity short
+        // carried the player edict number through the decoder (an int global —
+        // a float read would have yielded ~0 and never matched w.player), and
+        // the view-entity re-anchor replaced the broadcast start (origin+16).
+        let player_origin = w.server.vm.ent_get_vector(w.player, "origin");
+        let first = w.beam_scratch[0].origin;
+        for i in 0..3 {
+            assert!(
+                (first[i] - player_origin[i]).abs() < 1.0,
+                "first piece re-anchored to the player origin (axis {i}: {} vs {})",
+                first[i],
+                player_origin[i]
+            );
+        }
+
+        // Pixel evidence: render the SAME state twice (dt = 0 -> no time passes,
+        // restored rng -> identical dlight jitter draws), once with the live
+        // beam and once with the store cleared. The ONLY difference is the bolt
+        // model pieces, so differing pixels prove the bolt drew into the scene.
+        let rng = w.prng;
+        let (with_bolt, _, _) = step_walk(&mut w, 0.0, false, 320, 200);
+        w.prng = rng;
+        w.beams.clear();
+        let (without_bolt, _, _) = step_walk(&mut w, 0.0, false, 320, 200);
+        let diff = with_bolt
+            .rgb
+            .iter()
+            .zip(without_bolt.rgb.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            diff > 0,
+            "the rendered thunderbolt changes pixels vs the beam-less frame"
+        );
+        // Optional visual evidence: QUAKE_DUMP_BEAM=/some/dir dumps the two
+        // frames as PPMs for eyeballing (never set in CI; the asserts above are
+        // the real check).
+        if let Ok(dir) = std::env::var("QUAKE_DUMP_BEAM") {
+            for (img, name) in [(&with_bolt, "with-bolt"), (&without_bolt, "without-bolt")] {
+                let mut buf = format!("P6\n{} {}\n255\n", img.w, img.h).into_bytes();
+                for px in &img.rgb {
+                    buf.extend_from_slice(px);
+                }
+                let _ = std::fs::write(format!("{dir}/beam-{name}.ppm"), buf);
+            }
+        }
+    }
+
+    #[test]
+    fn demo_playback_replays_recorded_lightning_beams() {
+        // The DEMO path: a synthetic frame carrying a recorded TE_LIGHTNING1
+        // must refresh the beam store when playback advances onto it, expand
+        // into bolt.mdl pieces on render, and clear on the loop wrap.
+        use quake_rs::demo::{Demo, DemoFrame};
+        use quake_rs::server::te_consts;
+
+        let plain = |t: f32| DemoFrame {
+            time: t,
+            view_origin: [0.0, 0.0, 0.0],
+            view_entity_origin: [0.0, 0.0, 0.0],
+            view_angles: [0.0, 0.0, 0.0],
+            entities: Vec::new(),
+            particles: Vec::new(),
+            temp_entities: Vec::new(),
+        };
+        let mut bolt_frame = plain(0.05);
+        bolt_frame.temp_entities = vec![TempEntityEvent {
+            te_type: te_consts::TE_LIGHTNING1,
+            pos: [0.0, 0.0, 0.0],
+            end: [75.0, 0.0, 0.0],
+            entity: 9,
+            color_start: 0,
+            color_length: 0,
+        }];
+        // The real bolt model from the embedded pak, at precache index 2 (the
+        // .dem signon precaches progs/bolt.mdl; index 1 is the world).
+        let bolt_mdl = pak()
+            .and_then(|p| p.read_file("progs/bolt.mdl").ok().flatten())
+            .and_then(|b| Mdl::parse(&b).ok())
+            .expect("progs/bolt.mdl parses from the embedded pak");
+        let demo = Demo {
+            level_name: "test".into(),
+            model_precache: vec![
+                String::new(),
+                "maps/test.bsp".into(),
+                "progs/bolt.mdl".into(),
+            ],
+            sound_precache: Vec::new(),
+            viewentity: 1,
+            frames: vec![plain(0.0), bolt_frame, plain(0.10)],
+        };
+        let mut d = DemoPlay {
+            bsp: render::demo_room(),
+            palette: [[0u8; 3]; 256],
+            demo,
+            models: vec![None, None, Some(bolt_mdl)],
+            sprites: vec![None, None, None],
+            colormap: None,
+            colors: vec![[200; 3]; 3],
+            elapsed: 0.0,
+            idx: 0,
+            particles: ParticleSystem::new(),
+            prng: Lcg::new(1),
+            last_spawned_idx: usize::MAX,
+            beams: Beams::new(),
+            beam_scratch: Vec::new(),
+        };
+
+        // Advance onto the bolt frame: the recorded beam lands in the store and
+        // the render expands it (75 units => 3 pieces at 0/30/60 along +x).
+        let _ = step_demo(&mut d, 0.05, 160, 100);
+        assert_eq!(d.idx, 1, "advanced onto the bolt frame");
+        assert!(d.beams.any_live(0.05), "recorded TE_LIGHTNING1 refreshed a beam");
+        assert_eq!(d.beam_scratch.len(), 3, "75 units expand to 3 pieces");
+        assert!(d.beam_scratch.iter().all(|s| s.model == BeamModel::Bolt));
+
+        // A lingering step does NOT re-parse (last_spawned_idx guard) but the
+        // beam stays live until its 0.2 s endtime.
+        let _ = step_demo(&mut d, 0.001, 160, 100);
+        assert!(d.beams.any_live(0.05));
+
+        // Advance to the LAST frame: at t=0.10 the beam (endtime 0.25) still
+        // rides across frames — it is a client effect, not a per-frame one.
+        let mut guard = 0;
+        while d.idx != 2 {
+            let _ = step_demo(&mut d, 0.05, 160, 100);
+            guard += 1;
+            assert!(guard < 10, "playback reaches the last frame");
+        }
+        assert!(
+            d.beams.any_live(d.demo.frames[2].time),
+            "beam still live on the last frame (t=0.10 < endtime 0.25)"
+        );
+        // The NEXT (tiny) step triggers the deferred loop wrap: back to frame 0
+        // with the beam store cleared (no stale bolts carried into the replay;
+        // the tiny dt keeps playback ON frame 0, before the bolt re-spawns).
+        let _ = step_demo(&mut d, 0.001, 160, 100);
+        assert_eq!(d.idx, 0, "playback wrapped");
+        assert!(!d.beams.any_live(0.0), "the wrap cleared the beam store");
     }
 }

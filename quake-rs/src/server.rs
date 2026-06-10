@@ -1229,15 +1229,22 @@ pub mod te_consts {
 /// `pos` is the effect origin (the three `WriteCoord`s). For [`TE_EXPLOSION2`]
 /// (`te_type == 12`) `color_start`/`color_length` carry the two trailing colour
 /// bytes; for every other type they are `0`. Beam types (`TE_LIGHTNING1/2/3`,
-/// `TE_BEAM`) carry the *start* point in `pos` (their entity-index short and end
-/// point are consumed to stay in sync but otherwise dropped — no beam rendering
-/// yet); a front-end may simply ignore those `te_type`s.
+/// `TE_BEAM`) carry the owning entity number in `entity`, the *start* point in
+/// `pos` and the *end* point in `end` — a front-end feeds those three to
+/// [`crate::tent::Beams::parse_beam`] (the `CL_ParseBeam` slot store) to render
+/// the bolt; for every non-beam type `entity` is `0` and `end` equals `pos`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TempEntityEvent {
     /// The `TE_*` type byte (e.g. `3` = explosion, `2` = gunshot).
     pub te_type: u8,
-    /// The effect origin (the three `WriteCoord` values).
+    /// The effect origin (the three `WriteCoord` values; the beam START point).
     pub pos: [f32; 3],
+    /// Beam types: the END point (the trailing three `WriteCoord`s). Non-beam
+    /// types carry no end point — set equal to `pos`.
+    pub end: [f32; 3],
+    /// Beam types: the owning entity number (the `WriteEntity` short before the
+    /// coords) — `CL_ParseBeam`'s slot-reuse key. `0` for non-beam types.
+    pub entity: i32,
     /// `TE_EXPLOSION2` colour-ramp start index; `0` for other types.
     pub color_start: u8,
     /// `TE_EXPLOSION2` colour-ramp length; `0` for other types.
@@ -1310,9 +1317,9 @@ enum TeState {
         coords: Vec<f32>,
         /// Trailing colour bytes collected so far (`TE_EXPLOSION2`, bounded).
         bytes: Vec<u8>,
-        /// For [`TePayload::Beam`], whether the leading `short` (entity index)
-        /// has been consumed yet.
-        short_consumed: bool,
+        /// For [`TePayload::Beam`], the leading `short` (the beam's owning
+        /// entity index) once consumed (`None` while awaiting it).
+        beam_entity: Option<i32>,
     },
 }
 
@@ -1376,7 +1383,7 @@ fn te_feed(dest: i32, field: TeField, value: f32) {
                         ty: None,
                         coords: Vec::new(),
                         bytes: Vec::new(),
-                        short_consumed: false,
+                        beam_entity: None,
                     };
                 }
                 // Any other broadcast write outside a message is ignored.
@@ -1387,7 +1394,7 @@ fn te_feed(dest: i32, field: TeField, value: f32) {
                 ty,
                 coords,
                 bytes,
-                short_consumed,
+                beam_entity,
             } => {
                 // Awaiting the TE_* type byte (the second WriteByte).
                 if ty.is_none() {
@@ -1417,6 +1424,8 @@ fn te_feed(dest: i32, field: TeField, value: f32) {
                             push_temp_entity(TempEntityEvent {
                                 te_type,
                                 pos,
+                                end: pos,
+                                entity: 0,
                                 color_start: 0,
                                 color_length: 0,
                             });
@@ -1436,6 +1445,8 @@ fn te_feed(dest: i32, field: TeField, value: f32) {
                             push_temp_entity(TempEntityEvent {
                                 te_type,
                                 pos,
+                                end: pos,
+                                entity: 0,
                                 color_start: bytes[0],
                                 color_length: bytes[1],
                             });
@@ -1444,22 +1455,24 @@ fn te_feed(dest: i32, field: TeField, value: f32) {
                     }
                     TePayload::Beam => {
                         // short (entity index) first, then 6 coords (start+end).
-                        if !*short_consumed {
+                        if beam_entity.is_none() {
                             if matches!(field, TeField::Short | TeField::Entity) {
-                                *short_consumed = true;
+                                *beam_entity = Some(value as i32);
                             }
                             // (A stray coord before the short is ignored; the
                             // writer always emits the short first.)
                         } else if matches!(field, TeField::Coord) && coords.len() < TE_MAX_COORDS {
                             coords.push(value);
                         }
-                        if *short_consumed && coords.len() == 6 {
-                            // Carry the START point in pos; the end point is dropped
-                            // (no beam rendering yet). Emit so a caller can ignore it.
-                            let pos = [coords[0], coords[1], coords[2]];
+                        if let (Some(entity), true) = (*beam_entity, coords.len() == 6) {
+                            // START point in pos, END point in end, plus the owning
+                            // entity — everything CL_ParseBeam needs for its slot
+                            // store (crate::tent::Beams).
                             push_temp_entity(TempEntityEvent {
                                 te_type,
-                                pos,
+                                pos: [coords[0], coords[1], coords[2]],
+                                end: [coords[3], coords[4], coords[5]],
+                                entity,
                                 color_start: 0,
                                 color_length: 0,
                             });
@@ -1542,11 +1555,18 @@ fn bi_writestring(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-/// `PF_WriteEntity` (#59): an entity-index short. Decoded like the beam types'
-/// leading short so a future beam writer using `WriteEntity` for its index stays
-/// in sync.
+/// `PF_WriteEntity` (#59): an entity-index short — the C wrote
+/// `G_EDICTNUM(OFS_PARM1)`. The beam types' leading field: their owning
+/// entity number (the `Beams` slot-reuse / view-entity key). NOTE the arg is
+/// an entity reference (an INT global, `arg_entity`), not a float — reading it
+/// as a float would yield the f32 bit-reinterpretation of the edict index
+/// (~0.0 for every real entity), collapsing all beams onto one slot.
 fn bi_writeentity(vm: &mut Vm) -> Result<()> {
-    te_feed(vm.arg_float(0) as i32, TeField::Entity, vm.arg_float(1));
+    te_feed(
+        vm.arg_float(0) as i32,
+        TeField::Entity,
+        vm.arg_entity(1) as f32,
+    );
     Ok(())
 }
 
@@ -8380,8 +8400,9 @@ mod tests {
 
     #[test]
     fn te_beam_consumes_short_and_six_coords() {
-        // A beam (TE_BEAM=13): short entity index + 6 coords (start+end). It is
-        // consumed to stay in sync and emitted with the start point as pos.
+        // A beam (TE_BEAM=13): short entity index + 6 coords (start+end), all
+        // captured for CL_ParseBeam (crate::tent): entity = slot key, pos =
+        // start point, end = end point.
         let mut server = te_server();
         write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
         write_byte(&mut server, 0, TE_BEAM as f32);
@@ -8395,7 +8416,37 @@ mod tests {
         let evs = server.drain_temp_entities();
         assert_eq!(evs.len(), 1, "beam emits exactly one event");
         assert_eq!(evs[0].te_type, TE_BEAM);
+        assert_eq!(evs[0].entity, 7, "beam entity = the WriteShort slot key");
         assert_eq!(evs[0].pos, [1.0, 2.0, 3.0], "beam pos = start point");
+        assert_eq!(evs[0].end, [4.0, 5.0, 6.0], "beam end = end point");
+    }
+
+    #[test]
+    fn te_lightning_write_entity_captures_the_edict_number() {
+        // The REAL beam writers (W_FireLightning etc.) pass the owner through
+        // WriteEntity, whose parm is an entity reference — an INT global
+        // (G_EDICTNUM), not a float. Reading it as a float yields the f32
+        // bit-reinterpretation of the index (~0.0 for every edict), which would
+        // collapse all beams onto one slot and break the view-entity tracking.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_LIGHTNING2 as f32);
+        // WriteEntity(MSG_BROADCAST, self): an int edict number in PARM1.
+        server.vm.set_gf(OFS_PARM0, 0.0);
+        server.vm.set_gi(OFS_PARM0 + 3, 1); // the player edict
+        bi_writeentity(&mut server.vm).expect("bi_writeentity");
+        for v in [10.0, 20.0, 30.0, 40.0, 50.0, 60.0] {
+            write_coord(&mut server, 0, v);
+        }
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].te_type, TE_LIGHTNING2);
+        assert_eq!(
+            evs[0].entity, 1,
+            "WriteEntity's int edict number survives the decode"
+        );
+        assert_eq!(evs[0].pos, [10.0, 20.0, 30.0]);
+        assert_eq!(evs[0].end, [40.0, 50.0, 60.0]);
     }
 
     #[test]
