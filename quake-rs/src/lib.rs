@@ -55,6 +55,7 @@ pub mod tent;
 pub mod render;
 pub mod dlight;
 pub mod demo;
+pub mod snd;
 
 pub use error::{QError, Result};
 pub use math::Vec3;

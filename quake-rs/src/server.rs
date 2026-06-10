@@ -632,10 +632,11 @@ fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
 /// the remaining network / client-routing builtins that have no world effect in
 /// this headless server (`stuffcmd`, `makestatic`, `lightstyle`, `changelevel`,
-/// `setspawnparms`, the print routers, `cvar_set`). (`sound`/`ambientsound`
-/// queue a [`SoundEvent`] via [`bi_sound`]/[`bi_ambientsound`]; `particle`
-/// queues a [`ParticleBurst`] via [`bi_particle`]; the `Write*` family
-/// (#52..#59) drives the temp-entity decoder via [`te_feed`].)
+/// `setspawnparms`, the print routers, `cvar_set`). (`sound` queues a
+/// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
+/// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
+/// [`bi_particle`]; the `Write*` family (#52..#59) drives the temp-entity
+/// decoder via [`te_feed`].)
 fn bi_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
@@ -971,6 +972,62 @@ fn push_sound_event(ev: SoundEvent) {
 /// Take and clear every queued sound event.
 fn take_sound_events() -> Vec<SoundEvent> {
     SOUND_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+// ---------------------------------------------------------------------------
+// Static (looping ambient) sound registry (PF_ambientsound).
+//
+// The C `PF_ambientsound` (pr_cmds.c) wrote an `svc_spawnstaticsound` into the
+// level signon packet; the client's `CL_ParseStaticSound` -> `S_StaticSound`
+// (snd_dma.c) then allocated a PERSISTENT looping channel re-spatialized every
+// frame. These are the torch crackles / wind / hums placed by the QuakeC at
+// level spawn. Like the one-shot queue above, this headless server has no
+// netcode, so each `ambientsound()` is recorded as a [`StaticSound`] in a
+// process-wide thread-local list that [`Server::drain_static_sounds`] hands to
+// the front-end ONCE (the front-end keeps the loops alive itself, mirroring how
+// the signon packet was sent once at connect).
+// ---------------------------------------------------------------------------
+
+/// One placed looping ambient sound — the `svc_spawnstaticsound` payload the C
+/// `PF_ambientsound` wrote into the signon, captured for a front-end.
+///
+/// `volume`/`attenuation` are kept in the QuakeC domain (`0.0..=1.0` /
+/// `0.0..=4.0`) but quantized through the same bytes the wire format used
+/// (`vol*255` and `atten*64`, truncated), so a front-end hears exactly what the
+/// original client was told. `sound_index` mirrors [`SoundEvent::sound_index`]:
+/// the precache slot, or `-1` when no host resolved it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticSound {
+    /// World-space emission point (`PF_ambientsound`'s literal `pos` argument —
+    /// static sounds are placed at a point, not on an entity).
+    pub origin: [f32; 3],
+    /// Precache index of `sample`, or `-1` when it was not resolved.
+    pub sound_index: i32,
+    /// The raw sound name (e.g. `"ambience/fire1.wav"`).
+    pub sample: String,
+    /// Volume in `0.0..=1.0`, quantized through the wire byte (`trunc(vol*255)/255`).
+    pub volume: f32,
+    /// Attenuation in `0.0..=4.0`, quantized through the wire byte
+    /// (`trunc(atten*64)/64`; `ATTN_STATIC` = 3 survives exactly).
+    pub attenuation: f32,
+}
+
+thread_local! {
+    /// Process-wide (per-thread) registry [`bi_ambientsound`] pushes to and
+    /// [`Server::drain_static_sounds`] takes. See the module note above; the
+    /// thread-local reasoning mirrors [`SOUND_EVENTS`] exactly.
+    static STATIC_SOUNDS: std::cell::RefCell<Vec<StaticSound>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a placed static sound onto the thread-local registry.
+fn push_static_sound(ev: StaticSound) {
+    STATIC_SOUNDS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every registered static sound.
+fn take_static_sounds() -> Vec<StaticSound> {
+    STATIC_SOUNDS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
@@ -1606,11 +1663,19 @@ fn bi_sound(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-/// `PF_ambientsound` (#74): `void(vector pos, string sample, float vol, float
-/// atten) ambientsound`. The C emitted an `svc_spawnstaticsound` into the level
-/// signon at an explicit world position (not an entity). We capture it as a
-/// [`SoundEvent`] with `entity = 0` (world) and `origin = pos`. Channel is 0
-/// (ambient sounds have no channel in the C packet).
+/// `PF_ambientsound` (#74, pr_cmds.c): `void(vector pos, string sample, float
+/// vol, float atten) ambientsound`. The C emitted an `svc_spawnstaticsound`
+/// into the level signon at an explicit world position; the client's
+/// `S_StaticSound` then ran it as a PERSISTENT looping channel. We record it as
+/// a [`StaticSound`] for [`Server::drain_static_sounds`] — NOT as a one-shot
+/// [`SoundEvent`] (a loop is state, not an event).
+///
+/// The wire format quantized volume and attenuation into bytes
+/// (`MSG_WriteByte(vol*255)` / `MSG_WriteByte(attenuation*64)`, C float→int
+/// truncation); `CL_ParseStaticSound` handed those bytes to `S_StaticSound`,
+/// which divided the attenuation byte back by 64. We apply the same round-trip
+/// (clamped to the byte range instead of wrapping, defensively) so a front-end
+/// hears exactly what the original client was told.
 fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
     let pos = vm.arg_vector(0);
     let sample = vm.arg_string(1);
@@ -1619,14 +1684,14 @@ fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
 
     let sound_index = lookup_sound_index(vm, &sample);
 
-    push_sound_event(SoundEvent {
-        entity: 0,
-        channel: 0,
+    let vol_byte = (volume * 255.0).clamp(0.0, 255.0) as u8;
+    let atten_byte = (attenuation * 64.0).clamp(0.0, 255.0) as u8;
+    push_static_sound(StaticSound {
+        origin: pos,
         sound_index,
         sample,
-        origin: pos,
-        volume,
-        attenuation,
+        volume: vol_byte as f32 / 255.0,
+        attenuation: atten_byte as f32 / 64.0,
     });
     Ok(())
 }
@@ -1704,7 +1769,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 69, bi_noop); // makestatic
     put(t, 70, bi_changelevel); // changelevel (records the deferred map swap)
     put(t, 72, bi_cvar_set); // cvar_set (honours "skill"; else benign no-op)
-    put(t, 74, bi_ambientsound); // ambientsound (queues a SoundEvent)
+    put(t, 74, bi_ambientsound); // ambientsound (records a StaticSound loop)
     put(t, 75, bi_precache_model); // precache_model (alias)
     put(t, 76, bi_precache_sound); // precache_sound (alias)
     put(t, 77, bi_precache_file); // precache_file (alias)
@@ -3683,6 +3748,17 @@ impl Server {
     /// on the same thread that drove the frame.
     pub fn drain_sounds(&mut self) -> Vec<SoundEvent> {
         take_sound_events()
+    }
+
+    /// Take and clear the placed looping ambient sounds the QuakeC registered
+    /// via `ambientsound()` since the last drain (see [`StaticSound`]). The
+    /// level's worldspawn registers them all during `spawn_entities`, so a
+    /// front-end drains ONCE after the level builds and keeps the loops alive
+    /// itself — mirroring how the C wrote them once into the signon packet and
+    /// `S_StaticSound` kept a persistent channel. Thread-local like
+    /// [`Server::drain_sounds`]: call on the thread that spawned the level.
+    pub fn drain_static_sounds(&mut self) -> Vec<StaticSound> {
+        take_static_sounds()
     }
 
     /// Take and clear the queued on-screen messages (`centerprint`/`sprint`/
@@ -8176,6 +8252,79 @@ mod tests {
         assert!(
             server.drain_sounds().is_empty(),
             "drain_sounds cleared the queue"
+        );
+    }
+
+    #[test]
+    fn bi_ambientsound_records_static_sound_and_drain_clears() {
+        // bi_ambientsound (PF_ambientsound, #74) must record a StaticSound (a
+        // persistent loop, NOT a one-shot SoundEvent) carrying the placed
+        // position and the byte-quantized volume/attenuation the wire format
+        // (`svc_spawnstaticsound`) carried, and drain_static_sounds must return
+        // then clear it. Drive the builtin directly via the PARM globals.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let _ = server.drain_static_sounds(); // clear any startup registrations
+
+        // Precache the sample so it resolves to a real slot, then set up PARMs:
+        // PARM0=pos(vec), PARM1=sample, PARM2=vol(0.5), PARM3=atten(3=ATTN_STATIC)
+        // — FireAmbient's exact call for the e1m1 torches.
+        let sample = "ambience/fire1.wav";
+        server.vm.with_host(|_vm, h| h.precache_sound(sample));
+        let s_t = server.vm.intern(sample);
+        server.vm.set_gv(OFS_PARM0, [100.0, -50.0, 24.0]);
+        server.vm.set_gi(OFS_PARM0 + 3, s_t);
+        server.vm.set_gf(OFS_PARM0 + 6, 0.5);
+        server.vm.set_gf(OFS_PARM0 + 9, 3.0);
+
+        bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
+
+        let statics = server.drain_static_sounds();
+        assert_eq!(statics.len(), 1, "one static sound recorded");
+        let s = &statics[0];
+        assert_eq!(s.origin, [100.0, -50.0, 24.0], "placed at the literal pos");
+        assert_eq!(s.sample, sample);
+        // vol 0.5 -> byte trunc(127.5)=127 -> 127/255 (the wire round-trip).
+        assert_eq!(s.volume, 127.0 / 255.0);
+        // atten 3 -> byte 192 -> 192/64 = 3.0 exactly (ATTN_STATIC survives).
+        assert_eq!(s.attenuation, 3.0);
+        assert!(s.sound_index >= 1, "precached sample resolved");
+
+        // It is a loop registration, not a one-shot: the SoundEvent queue is
+        // untouched, and the static registry is empty after draining.
+        assert!(
+            server.drain_sounds().is_empty(),
+            "no one-shot SoundEvent queued by ambientsound"
+        );
+        assert!(
+            server.drain_static_sounds().is_empty(),
+            "drain_static_sounds cleared the registry"
+        );
+    }
+
+    #[test]
+    fn bi_ambientsound_clamps_out_of_range_bytes() {
+        // The C MSG_WriteByte would wrap out-of-range values; we clamp
+        // defensively (QuakeC only ever passes sane 0..1 / 0..4 values).
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let _ = server.drain_static_sounds();
+
+        let s_t = server.vm.intern("ambience/wind2.wav");
+        server.vm.set_gv(OFS_PARM0, [0.0; 3]);
+        server.vm.set_gi(OFS_PARM0 + 3, s_t);
+        server.vm.set_gf(OFS_PARM0 + 6, 9.0); // vol byte clamps to 255
+        server.vm.set_gf(OFS_PARM0 + 9, 9.0); // atten byte clamps to 255
+        bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
+
+        let statics = server.drain_static_sounds();
+        assert_eq!(statics[0].volume, 1.0, "volume byte clamps to 255");
+        assert_eq!(
+            statics[0].attenuation,
+            255.0 / 64.0,
+            "attenuation byte clamps to 255"
         );
     }
 

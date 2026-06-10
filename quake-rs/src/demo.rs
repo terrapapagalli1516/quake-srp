@@ -28,7 +28,7 @@
 #![forbid(unsafe_code)]
 
 use crate::error::{QError, Result};
-use crate::server::{ParticleBurst, TempEntityEvent};
+use crate::server::{ParticleBurst, StaticSound, TempEntityEvent};
 
 // ---------------------------------------------------------------------------
 // protocol.h constants
@@ -336,6 +336,13 @@ pub struct Demo {
     /// player): the beam store's view-entity key for `CL_UpdateTEnts`'s
     /// start-position tracking. `0` if the demo never set a view.
     pub viewentity: usize,
+    /// The placed looping ambient sounds (`svc_spawnstaticsound`,
+    /// `CL_ParseStaticSound`) recorded in the demo's signon — torch crackles,
+    /// wind, hums. These are persistent loops, not per-frame events: a
+    /// front-end starts them once at playback start, exactly as the live
+    /// client did on connect. Volume/attenuation are decoded back to the
+    /// QuakeC domain (`byte/255`, `byte/64`) like `S_StaticSound` does.
+    pub static_sounds: Vec<StaticSound>,
     pub frames: Vec<DemoFrame>,
 }
 
@@ -414,6 +421,9 @@ struct ClientState {
     /// `svc_temp_entity` effects decoded since the last [`snapshot`], drained
     /// into the [`DemoFrame`] and then cleared (one block == one frame).
     pending_tents: Vec<TempEntityEvent>,
+    /// `svc_spawnstaticsound` registrations (`CL_ParseStaticSound` ->
+    /// `S_StaticSound` persistent loops), accumulated for [`Demo::static_sounds`].
+    static_sounds: Vec<StaticSound>,
 }
 
 impl ClientState {
@@ -434,6 +444,7 @@ impl ClientState {
             mtime: [0.0; 2],
             pending_particles: Vec::new(),
             pending_tents: Vec::new(),
+            static_sounds: Vec::new(),
         }
     }
 
@@ -455,6 +466,9 @@ impl ClientState {
         // level (CL_ClearState wipes the client-side effect pools too).
         self.pending_particles.clear();
         self.pending_tents.clear();
+        // S_StopAllSounds on the new serverinfo drops the old level's static
+        // loop channels; the new signon re-registers its own.
+        self.static_sounds.clear();
     }
 
     /// `CL_EntityNum` — grow the entity array up to and including `num`.
@@ -674,6 +688,7 @@ fn parse_demo_with(
         level_name: cl.level_name,
         model_precache: cl.model_precache,
         sound_precache: cl.sound_precache,
+        static_sounds: cl.static_sounds,
         frames,
     })
 }
@@ -1042,13 +1057,28 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_SPAWNSTATICSOUND => {
-                // CL_ParseStaticSound: 3 coords, 3 bytes (sample, vol, atten).
-                let _ = r.read_coord();
-                let _ = r.read_coord();
-                let _ = r.read_coord();
-                let _ = r.read_byte();
-                let _ = r.read_byte();
-                let _ = r.read_byte();
+                // CL_ParseStaticSound: 3 coords, 3 bytes (sample, vol, atten);
+                // hands them to S_StaticSound, which keeps a PERSISTENT looping
+                // channel at that point. Recorded into Demo::static_sounds for
+                // the front-end to loop. Volume/attenuation come back from the
+                // wire bytes to the QuakeC domain the same way S_StaticSound
+                // consumed them (master_vol = byte; dist_mult = byte/64/1000).
+                let origin = [r.read_coord(), r.read_coord(), r.read_coord()];
+                let sound_num = r.read_byte();
+                let vol = r.read_byte();
+                let atten = r.read_byte();
+                let sample = cl
+                    .sound_precache
+                    .get(sound_num as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                cl.static_sounds.push(StaticSound {
+                    origin,
+                    sound_index: sound_num,
+                    sample,
+                    volume: vol as f32 / 255.0,
+                    attenuation: atten as f32 / 64.0,
+                });
             }
 
             SVC_CDTRACK => {
@@ -1764,6 +1794,45 @@ mod tests {
             .entities
             .iter()
             .any(|e| e.modelindex == 3 && e.origin == [1.0, 2.0, 3.0]));
+    }
+
+    /// `svc_spawnstaticsound` registrations are collected into
+    /// `Demo::static_sounds` with the sample name resolved from the sound
+    /// precache and volume/attenuation decoded from their wire bytes
+    /// (CL_ParseStaticSound -> S_StaticSound).
+    #[test]
+    fn spawnstaticsound_is_collected() {
+        let mut msg = Vec::new();
+        // Serverinfo with one precached sound (slot 1; slot 0 is "").
+        w_byte(&mut msg, SVC_SERVERINFO);
+        w_long(&mut msg, PROTOCOL_VERSION);
+        w_byte(&mut msg, 1);
+        w_byte(&mut msg, 0);
+        w_string(&mut msg, "lvl");
+        w_string(&mut msg, "maps/y.bsp");
+        w_string(&mut msg, ""); // end of models
+        w_string(&mut msg, "ambience/fire1.wav");
+        w_string(&mut msg, ""); // end of sounds
+
+        // svc_spawnstaticsound: 3 coords, sound_num, vol byte, atten byte —
+        // the exact PF_ambientsound signon payload (vol*255, atten*64).
+        w_byte(&mut msg, SVC_SPAWNSTATICSOUND);
+        w_coord(&mut msg, 100.0);
+        w_coord(&mut msg, -50.0);
+        w_coord(&mut msg, 24.0);
+        w_byte(&mut msg, 1); // sound_precache[1]
+        w_byte(&mut msg, 127); // trunc(0.5 * 255)
+        w_byte(&mut msg, 192); // 3 (ATTN_STATIC) * 64
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        assert_eq!(demo.static_sounds.len(), 1);
+        let s = &demo.static_sounds[0];
+        assert_eq!(s.origin, [100.0, -50.0, 24.0]);
+        assert_eq!(s.sample, "ambience/fire1.wav");
+        assert_eq!(s.sound_index, 1);
+        assert_eq!(s.volume, 127.0 / 255.0, "vol byte / 255");
+        assert_eq!(s.attenuation, 3.0, "atten byte / 64 (ATTN_STATIC)");
     }
 
     // -----------------------------------------------------------------------

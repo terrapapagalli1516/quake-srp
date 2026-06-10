@@ -2118,7 +2118,11 @@ fn decompress_vis(model_vis: &[u8], visofs: i32, numleafs: usize) -> Vec<bool> {
 /// are malformed or out of range (every access is bounds-checked, so this never
 /// panics on corrupt data). A bounded iteration guard prevents a cyclic/corrupt
 /// node graph from looping forever.
-fn point_in_leaf(bsp: &Bsp, p: Vec3) -> Option<usize> {
+///
+/// `pub` because the sound front-end also needs the VIEW leaf each frame: the
+/// four automatic ambient channels read `leaf.ambient_level[]` at the listener
+/// position (`S_UpdateAmbientSounds` -> `Mod_PointInLeaf`); see [`crate::snd`].
+pub fn point_in_leaf(bsp: &Bsp, p: Vec3) -> Option<usize> {
     let model = bsp.models.first()?;
     // headnode[0] is the rendering hull's root node index.
     let mut node_index: i32 = *model.headnode.first()?;

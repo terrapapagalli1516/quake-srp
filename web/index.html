@@ -185,26 +185,12 @@ document.getElementById('sndBtn').addEventListener('click', playSound);
 // attenuation 0 => no falloff (full volume everywhere, e.g. some pickups). At
 // attenuation 1 a source ~1000 units away is silent; point-blank is full volume.
 const ATTEN_SCALE = 1000;
-function spatializeSound() {
-  // Need the full param + listener export set; otherwise signal "play flat".
-  const need = ['sound_origin_x','sound_origin_y','sound_origin_z','sound_volume',
-    'sound_attenuation','listener_x','listener_y','listener_z',
-    'listener_right_x','listener_right_y','listener_right_z'];
-  for (const fn of need) { if (typeof exp[fn] !== 'function') return null; }
 
-  const ox = exp.sound_origin_x(), oy = exp.sound_origin_y(), oz = exp.sound_origin_z();
-  const vol = exp.sound_volume();
-  const atten = exp.sound_attenuation();
+// The shared distance/pan law, applied to one-shots AND (every frame) to the
+// looping static sounds so both stay on exactly the same SND_Spatialize math.
+function spatialGain(ox, oy, oz, vol, atten) {
   const lx = exp.listener_x(), ly = exp.listener_y(), lz = exp.listener_z();
   const rx = exp.listener_right_x(), ry = exp.listener_right_y(), rz = exp.listener_right_z();
-
-  // SND_Spatialize (snd_dma.c:407-412): a sound from the listener's OWN view
-  // entity (the player) always plays at full master volume on both channels
-  // with no distance falloff or pan. The page learns this via the
-  // sound_is_view_entity export (defaults to "not view entity" if absent).
-  if (typeof exp.sound_is_view_entity === 'function' && exp.sound_is_view_entity()) {
-    return { gain: vol, pan: 0 };
-  }
 
   const dx = ox - lx, dy = oy - ly, dz = oz - lz;
   const dist = Math.hypot(dx, dy, dz);
@@ -219,6 +205,28 @@ function spatializeSound() {
     if (pan < -1) pan = -1; else if (pan > 1) pan = 1;
   }
   return { gain, pan };
+}
+
+function spatializeSound() {
+  // Need the full param + listener export set; otherwise signal "play flat".
+  const need = ['sound_origin_x','sound_origin_y','sound_origin_z','sound_volume',
+    'sound_attenuation','listener_x','listener_y','listener_z',
+    'listener_right_x','listener_right_y','listener_right_z'];
+  for (const fn of need) { if (typeof exp[fn] !== 'function') return null; }
+
+  const ox = exp.sound_origin_x(), oy = exp.sound_origin_y(), oz = exp.sound_origin_z();
+  const vol = exp.sound_volume();
+  const atten = exp.sound_attenuation();
+
+  // SND_Spatialize (snd_dma.c:407-412): a sound from the listener's OWN view
+  // entity (the player) always plays at full master volume on both channels
+  // with no distance falloff or pan. The page learns this via the
+  // sound_is_view_entity export (defaults to "not view entity" if absent).
+  if (typeof exp.sound_is_view_entity === 'function' && exp.sound_is_view_entity()) {
+    return { gain: vol, pan: 0 };
+  }
+
+  return spatialGain(ox, oy, oz, vol, atten);
 }
 
 // Decoded-WAV cache: the same SFX (gunshots, footsteps, door hums…) fires over
@@ -308,6 +316,147 @@ function playRouted(src, sp) {
     g.gain.value = mono;
     src.connect(g);
     g.connect(audioCtx.destination);
+  }
+}
+
+// --- Looping ambient audio --------------------------------------------------
+// Two kinds of persistent loops, both engine-driven:
+//  * PLACED static sounds (QuakeC ambientsound(): torch crackle, machine hum) —
+//    registered once per level via poll_static_sound; each gets a looping
+//    source whose L/R gains are recomputed EVERY frame from the live listener
+//    pose through the same spatialGain law the one-shots use (SND_Spatialize
+//    runs every frame on static channels in the C).
+//  * The 4 automatic LEAF ambients (water wash / sky wind) — the engine ramps
+//    their volumes from the view leaf's ambient_level bytes
+//    (S_UpdateAmbientSounds); we just copy ambient_gain(ch) into a centred
+//    gain node each frame (the C sets leftvol = rightvol, no pan).
+// sound_generation() bumps on every level/mode change (changelevel, restart,
+// walk<->demo): stop + drop every loop, then the new level's registrations
+// rebuild them. All loop exports are feature-checked so this page still works
+// against an older wasm without them.
+let staticLoops = [];    // {src, lg, rg, ox, oy, oz, vol, atten}
+let ambientLoops = [];   // {src, g, ch}
+let loopGen = null;      // last seen sound_generation()
+let ambientStarted = false;
+
+function haveLoopExports() {
+  const need = ['sound_generation','poll_static_sound','sound_loop_start',
+    'sound_loop_end','load_ambient_sound','ambient_gain','sound_ptr',
+    'sound_origin_x','sound_origin_y','sound_origin_z','sound_volume',
+    'sound_attenuation','listener_x','listener_y','listener_z',
+    'listener_right_x','listener_right_y','listener_right_z'];
+  for (const fn of need) { if (typeof exp[fn] !== 'function') return false; }
+  return true;
+}
+
+function stopAllLoops() {
+  for (const l of staticLoops)  { try { l.src.stop(); } catch (e) {} }
+  for (const l of ambientLoops) { try { l.src.stop(); } catch (e) {} }
+  staticLoops = []; ambientLoops = [];
+  ambientStarted = false;
+}
+
+// Decode WAV bytes through the shared content-hash cache, then cb(buffer).
+function decodeCached(view, cb) {
+  const key = wavKey(view);
+  const cached = decodedSounds.get(key);
+  if (cached) { cb(cached); return; }
+  const copy = view.slice();
+  audioCtx.decodeAudioData(copy.buffer).then(buf => {
+    decodedSounds.set(key, buf);
+    cb(buf);
+  }).catch(() => {});
+}
+
+// A looping source restarting at the WAV's cue-chunk loop window (seconds,
+// engine-parsed — sample-rate independent, so decodeAudioData resampling is
+// harmless). loopEnd 0 / past-the-end = loop to the buffer's end.
+function makeLoopSource(buf, ls, le) {
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.loop = true;
+  if (ls > 0) src.loopStart = ls;
+  if (le > 0 && le < buf.duration) src.loopEnd = le;
+  return src;
+}
+
+// Register this level's placed static loops (queued engine-side at level
+// spawn). Decode is async: a loop only starts if the level generation it was
+// polled under is still current (no stale loop can start over a new level).
+function drainStaticLoops() {
+  for (let guard = 0; guard < 128; guard++) {
+    const len = exp.poll_static_sound();
+    if (len <= 0) break;
+    const ox = exp.sound_origin_x(), oy = exp.sound_origin_y(), oz = exp.sound_origin_z();
+    const vol = exp.sound_volume(), atten = exp.sound_attenuation();
+    const ls = exp.sound_loop_start(), le = exp.sound_loop_end();
+    const view = new Uint8Array(exp.memory.buffer, exp.sound_ptr(), len);
+    const myGen = loopGen;
+    decodeCached(view, buf => {
+      if (loopGen !== myGen) return;     // level changed while decoding
+      const src = makeLoopSource(buf, ls, le);
+      const lg = audioCtx.createGain(); lg.gain.value = 0;
+      const rg = audioCtx.createGain(); rg.gain.value = 0;
+      if (typeof audioCtx.createChannelMerger === 'function') {
+        const m = audioCtx.createChannelMerger(2);
+        src.connect(lg); lg.connect(m, 0, 0);
+        src.connect(rg); rg.connect(m, 0, 1);
+        m.connect(audioCtx.destination);
+      } else {
+        src.connect(lg); lg.connect(audioCtx.destination); // mono fallback
+      }
+      staticLoops.push({ src, lg, rg, ox, oy, oz, vol, atten });
+      src.start();
+    });
+  }
+}
+
+// Start the automatic ambient channel loops (S_Init loads water1 + wind2;
+// channels the engine reports empty — slime/lava — return length 0). They run
+// at gain 0 until the player's view leaf says otherwise.
+function startAmbientLoops() {
+  for (let ch = 0; ch < 4; ch++) {
+    const len = exp.load_ambient_sound(ch);
+    if (len <= 0) continue;
+    const ls = exp.sound_loop_start(), le = exp.sound_loop_end();
+    const view = new Uint8Array(exp.memory.buffer, exp.sound_ptr(), len);
+    const myGen = loopGen;
+    decodeCached(view, buf => {
+      if (loopGen !== myGen) return;
+      const src = makeLoopSource(buf, ls, le);
+      const g = audioCtx.createGain(); g.gain.value = 0;
+      src.connect(g); g.connect(audioCtx.destination);   // centred, no pan
+      ambientLoops.push({ src, g, ch });
+      src.start();
+    });
+  }
+}
+
+// Per-frame loop upkeep: react to a level change, pick up newly registered
+// statics, and recompute every loop's gain from the live listener/leaf state.
+function updateLoopingAudio() {
+  if (!exp || !audioCtx || audioCtx.state !== 'running' || !haveLoopExports()) return;
+
+  const gen = exp.sound_generation();
+  if (gen !== loopGen) {       // level/mode changed: silence the old world
+    stopAllLoops();
+    loopGen = gen;
+  }
+  drainStaticLoops();
+  if (!ambientStarted) { ambientStarted = true; startAmbientLoops(); }
+
+  const master = masterVolume();
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  // Statics: id's linear pan law, same as playRouted's one-shot path.
+  for (const l of staticLoops) {
+    const sp = spatialGain(l.ox, l.oy, l.oz, l.vol, l.atten);
+    const mono = sp.gain * master;
+    l.lg.gain.value = clamp01(mono * (1 - sp.pan));
+    l.rg.gain.value = clamp01(mono * (1 + sp.pan));
+  }
+  // Leaf ambients: engine-ramped volume, both channels equal.
+  for (const l of ambientLoops) {
+    l.g.gain.value = clamp01(exp.ambient_gain(l.ch) * master);
   }
 }
 
@@ -437,6 +586,7 @@ async function main() {
     if (turn) exp.look(-turn * TURN_RATE * dt, 0);   // arrow turn (right = right)
     exp.step(dt);
     drainGameSounds();
+    updateLoopingAudio();
 
     // The render resolution may have changed this frame (Options menu): re-fit the
     // canvas + ImageData to the new size before blitting.

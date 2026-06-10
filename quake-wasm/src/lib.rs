@@ -23,7 +23,10 @@ use quake_rs::progs::Progs;
 use quake_rs::render::{
     self, Camera, Console, Menu, MenuAction, MenuPics, ModelInstance, Viewmodel,
 };
-use quake_rs::server::{Server, TempEntityEvent, UserCmd};
+use quake_rs::server::{Server, StaticSound, TempEntityEvent, UserCmd};
+use quake_rs::snd::{
+    wav_info, AmbientChannels, AMBIENT_FADE_DEFAULT, AMBIENT_LEVEL_DEFAULT, AMBIENT_SAMPLES,
+};
 use quake_rs::tent::{BeamModel, BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 
@@ -440,11 +443,23 @@ fn build_walk_map(map: &str) -> Option<Walk> {
     // Pass the pak so external brush-model item boxes (b_*.bsp) collide + take
     // damage (the explosive box becomes shootable).
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).ok()?;
+    // Discard any static-sound registrations a previously FAILED spawn left in
+    // the thread-local registry, so this level's drain below is exactly its own.
+    let _ = server.drain_static_sounds();
     server.spawn_entities().ok()?;
     let player = server.connect_client().ok()?;
     // Capture the level-entry spawn parms (the just-connected, full-state player) so
     // a single-player respawn can reload THIS level with them.
     let entry_parms = server.save_spawn_parms();
+
+    // The level is committed past this point (nothing below fails). Tear down
+    // the previous level/mode's looping audio and register this level's placed
+    // `ambientsound()` loops (torches, wind, hums) for the page to start —
+    // PF_ambientsound wrote these into the signon ONCE; the QuakeC registered
+    // them all during spawn_entities, so one drain captures them all.
+    bump_sound_generation();
+    let statics = server.drain_static_sounds();
+    queue_static_sounds(&pak, &statics);
 
     Some(Walk {
         server,
@@ -534,6 +549,12 @@ fn build_demo() -> Option<DemoPlay> {
     if demo.frames.is_empty() {
         return None;
     }
+    // Demo committed (nothing below fails): tear down the previous level/mode's
+    // looping audio and register the demo signon's `svc_spawnstaticsound` loops
+    // (CL_ParseStaticSound ran these on the live client during demo playback
+    // too — the e1m3 demo has its own torches).
+    bump_sound_generation();
+    queue_static_sounds(&pak, &demo.static_sounds);
     Some(DemoPlay {
         bsp,
         palette,
@@ -1637,6 +1658,226 @@ pub extern "C" fn sound_is_view_entity() -> i32 {
     SND_CUR.with(|p| p.borrow().is_view_entity as i32)
 }
 
+// ---------------------------------------------------------------------------
+// Looping ambient audio: placed static sounds (PF_ambientsound ->
+// S_StaticSound) + the four automatic per-leaf ambient channels
+// (S_UpdateAmbientSounds). The page keeps a looping Web Audio source per
+// static sound (re-spatialized every frame from the listener pose, same
+// distance/pan law as the one-shots) and one looping source per audible
+// ambient channel (gain driven by `ambient_gain`, centred — the C sets
+// leftvol = rightvol). See quake_rs::snd for the faithful control logic.
+// ---------------------------------------------------------------------------
+
+/// One registered static (looping) sound awaiting pickup by the page: the WAV
+/// bytes, its spatial params, and the loop window `GetWavinfo` found (seconds;
+/// `loop_end` 0.0 = loop to the buffer's end, Web Audio's `loopEnd` default).
+struct StaticLoop {
+    bytes: Vec<u8>,
+    params: SndParams,
+    loop_start: f32,
+    loop_end: f32,
+}
+
+/// `MAX_CHANNELS` (snd_dma.c): the C refused static sounds past the channel
+/// table; the same cap keeps a hostile/buggy level from growing the queue.
+const MAX_STATIC_SOUNDS: usize = 128;
+
+thread_local! {
+    /// Static sounds registered by the CURRENT level, awaiting page pickup via
+    /// `poll_static_sound`. NOT gated on `AUDIO_READY` (unlike the one-shot
+    /// queue): these are persistent registrations, not a backlog — the page
+    /// starts the loops whenever its AudioContext comes up.
+    static STATIC_QUEUE: RefCell<Vec<StaticLoop>> = const { RefCell::new(Vec::new()) };
+    /// Loop window of the entry the most recent `poll_static_sound` popped (or
+    /// `load_ambient_sound` loaded), for the `sound_loop_start`/`sound_loop_end`
+    /// exports. `(0, 0)` = loop the whole buffer.
+    static SND_LOOP: RefCell<(f32, f32)> = const { RefCell::new((0.0, 0.0)) };
+    /// Bumped on every level/mode transition (boot, demo boot, New Game, `map`,
+    /// changelevel, restart). The page compares it each frame and, on a change,
+    /// stops + drops every looping source — the S_StopAllSounds half of a level
+    /// change; the new level's registrations then restart them.
+    static SOUND_GENERATION: RefCell<i32> = const { RefCell::new(0) };
+    /// The four automatic ambient channels' ramp state (S_UpdateAmbientSounds).
+    static AMBIENT: RefCell<AmbientChannels> = const { RefCell::new(AmbientChannels::new()) };
+}
+
+/// A level/mode transition happened: invalidate every looping source. Mirrors
+/// `S_StopAllSounds` (snd_dma.c), which memsets ALL channels — statics and the
+/// ambient ramps included — on every server (re)connect. The page notices the
+/// new generation and tears its loop nodes down; the engine-side static queue
+/// is dropped (a not-yet-picked-up loop from the old level must never start
+/// over the new one) and the ambient master_vols restart from silence.
+fn bump_sound_generation() {
+    SOUND_GENERATION.with(|g| {
+        let mut g = g.borrow_mut();
+        *g = g.wrapping_add(1);
+    });
+    STATIC_QUEUE.with(|q| q.borrow_mut().clear());
+    AMBIENT.with(|a| *a.borrow_mut() = AmbientChannels::new());
+}
+
+/// Load the WAV bytes for each placed static sound and queue them for the
+/// page's loop pickup — the `S_StaticSound` (snd_dma.c:620) gate: a sample the
+/// pak lacks is dropped, and so is one with no loop point (`sc->loopstart ==
+/// -1` -> "Sound %s not looped"). Quake's ambient samples all carry a `cue `
+/// loop chunk; one-shots don't, and the C refuses to static-loop them.
+fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
+    STATIC_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        for s in statics {
+            if q.len() >= MAX_STATIC_SOUNDS {
+                break; // the C's "total_channels == MAX_CHANNELS" drop
+            }
+            if s.sample.is_empty() {
+                continue;
+            }
+            // Sample names are relative to "sound/" (S_LoadSound's sprintf),
+            // exactly like the one-shot path in `queue_sounds`.
+            let path = format!("sound/{}", s.sample);
+            let Ok(Some(bytes)) = pak.read_file(&path) else {
+                continue;
+            };
+            let Some(info) = wav_info(&bytes) else {
+                continue;
+            };
+            let Some(loop_start) = info.loop_start else {
+                continue; // "Sound %s not looped" — never static-loop a one-shot
+            };
+            let rate = info.rate.max(1) as f32;
+            q.push(StaticLoop {
+                bytes,
+                params: SndParams {
+                    origin: s.origin,
+                    volume: s.volume,
+                    attenuation: s.attenuation,
+                    is_view_entity: false, // statics are placed in the world
+                },
+                loop_start: loop_start as f32 / rate,
+                loop_end: info.samples as f32 / rate,
+            });
+        }
+    });
+}
+
+/// The current sound generation. The page reads this every frame; when it
+/// changes, every looping source (static + ambient) is stopped and rebuilt
+/// from the new level's registrations (see [`bump_sound_generation`]).
+#[no_mangle]
+pub extern "C" fn sound_generation() -> i32 {
+    SOUND_GENERATION.with(|g| *g.borrow())
+}
+
+/// Pop the next registered static (looping) sound into the scratch buffer and
+/// return its byte length (0 when none are pending). Mirrors `poll_sound`: the
+/// page reads the bytes via `sound_ptr()` and the spatial params via
+/// `sound_origin_*`/`sound_volume`/`sound_attenuation` (stashed exactly like a
+/// one-shot pop), plus the loop window via `sound_loop_start`/`sound_loop_end`
+/// — then starts a LOOPING source it re-spatializes every frame.
+#[no_mangle]
+pub extern "C" fn poll_static_sound() -> i32 {
+    let next = STATIC_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
+    });
+    match next {
+        Some(sl) => {
+            let len = sl.bytes.len() as i32;
+            SND.with(|s| *s.borrow_mut() = sl.bytes);
+            SND_CUR.with(|p| *p.borrow_mut() = sl.params);
+            SND_LOOP.with(|l| *l.borrow_mut() = (sl.loop_start, sl.loop_end));
+            len
+        }
+        None => 0,
+    }
+}
+
+/// Loop start of the most recent `poll_static_sound`/`load_ambient_sound`, in
+/// SECONDS (the `cue ` chunk's sample offset over the WAV rate — sample-rate
+/// independent, so the page can hand it straight to `AudioBufferSourceNode.
+/// loopStart` no matter what rate `decodeAudioData` resampled to).
+#[no_mangle]
+pub extern "C" fn sound_loop_start() -> f32 {
+    SND_LOOP.with(|l| l.borrow().0)
+}
+
+/// Loop end in seconds of the most recent `poll_static_sound`/
+/// `load_ambient_sound` (`GetWavinfo`'s `info.samples` over the rate; this is
+/// the full data length unless a `LIST`/`mark` chunk declared a shorter loop).
+/// 0.0 means "to the buffer's end" — Web Audio's `loopEnd` default.
+#[no_mangle]
+pub extern "C" fn sound_loop_end() -> f32 {
+    SND_LOOP.with(|l| l.borrow().1)
+}
+
+/// Load ambient channel `ch`'s sample (`S_Init`: 0 = `ambience/water1.wav`,
+/// 1 = `ambience/wind2.wav`) into the scratch buffer, returning its byte
+/// length; the loop window lands in `sound_loop_start`/`sound_loop_end` like a
+/// static pop. Returns 0 for channels the C never loaded (2 = slime, 3 = lava
+/// have a NULL `ambient_sfx`) and for out-of-range/missing samples. The page
+/// calls this once per audible channel, starts a centred looping source at
+/// gain 0, and drives the gain from `ambient_gain` every frame.
+#[no_mangle]
+pub extern "C" fn load_ambient_sound(ch: i32) -> i32 {
+    let Some(Some(name)) = usize::try_from(ch)
+        .ok()
+        .and_then(|c| AMBIENT_SAMPLES.get(c).copied().map(Some))
+    else {
+        return 0;
+    };
+    let Some(name) = name else { return 0 };
+    let Some(p) = pak() else { return 0 };
+    let Ok(Some(bytes)) = p.read_file(&format!("sound/{name}")) else {
+        return 0;
+    };
+    let Some(info) = wav_info(&bytes) else { return 0 };
+    let rate = info.rate.max(1) as f32;
+    SND_LOOP.with(|l| {
+        *l.borrow_mut() = (
+            info.loop_start.unwrap_or(0) as f32 / rate,
+            info.samples as f32 / rate,
+        )
+    });
+    let len = bytes.len() as i32;
+    SND.with(|s| *s.borrow_mut() = bytes);
+    len
+}
+
+/// Ambient channel `ch`'s CURRENT volume in `0.0..=1.0` (the ramped
+/// `master_vol` over the C's 255 scale). The page multiplies by its master
+/// volume and writes it to the channel's gain node every frame — both sides of
+/// the C's `chan->leftvol = chan->rightvol = chan->master_vol` (ambients are
+/// centred, never panned or distance-attenuated).
+#[no_mangle]
+pub extern "C" fn ambient_gain(ch: i32) -> f32 {
+    let Ok(c) = usize::try_from(ch) else { return 0.0 };
+    AMBIENT.with(|a| a.borrow().master_vol(c)) / 255.0
+}
+
+/// One frame of `S_UpdateAmbientSounds` for the listener standing at `eye` in
+/// `bsp`: look up the view leaf and ramp the four ambient channels toward its
+/// `ambient_level[]` targets. Called from both `step_walk` and `step_demo`
+/// (the C runs it from `S_Update` regardless of game/demo mode). A listener
+/// outside the world (no leaf) silences the channels without resetting the
+/// ramp, exactly like the C's `!l` branch.
+fn update_ambient_channels(bsp: &Bsp, eye: [f32; 3], dt: f32) {
+    let frametime = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
+    let leaf_levels = render::point_in_leaf(bsp, eye)
+        .and_then(|li| bsp.leafs.get(li))
+        .map(|l| l.ambient_level);
+    AMBIENT.with(|a| {
+        a.borrow_mut().update(
+            leaf_levels.as_ref(),
+            frametime,
+            AMBIENT_LEVEL_DEFAULT,
+            AMBIENT_FADE_DEFAULT,
+        );
+    });
+}
+
 /// The listener (player) pose as of the last walk `step`: eye position and the
 /// forward/right unit vectors derived from the player's yaw. The page reads
 /// these to spatialize each sound (distance from `pos`, pan via dot with right).
@@ -1877,9 +2118,15 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     // global.
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
+    // Discard stale static-sound registrations (a previously failed spawn's)
+    // so the drain after spawn_entities is exactly this level's.
+    let _ = ns.drain_static_sounds();
     if ns.spawn_entities().is_err() {
         return;
     }
+    // Capture the new level's placed ambient loops now (registered during
+    // spawn_entities); committed to the page only once the swap succeeds below.
+    let statics = ns.drain_static_sounds();
     let Ok(player) = ns.connect_client_with_parms(parms) else { return };
     // The carried inventory at the start of the NEW level becomes its entry parms,
     // so a respawn on this level restores the state the player arrived with.
@@ -1922,6 +2169,11 @@ fn try_changelevel(w: &mut Walk, next_map: &str) {
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();
+    // Looping audio: stop the OLD level's loops (S_StopAllSounds on changelevel)
+    // and hand the page the NEW level's placed ambient loops + a fresh ambient
+    // ramp, captured above right after spawn_entities.
+    bump_sound_generation();
+    queue_static_sounds(&w.pak, &statics);
 }
 
 /// Single-player respawn: reload the CURRENT level fresh and reconnect the player
@@ -1944,9 +2196,13 @@ fn try_restart(w: &mut Walk) {
     let Ok(mut ns) = Server::with_pak(sim_bsp, progs, Some(w.pak.clone())) else { return };
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
+    // Static-loop bookkeeping mirrors try_changelevel: discard stale
+    // registrations, spawn, capture this (re)load's own.
+    let _ = ns.drain_static_sounds();
     if ns.spawn_entities().is_err() {
         return;
     }
+    let statics = ns.drain_static_sounds();
     let Ok(player) = ns.connect_client_with_parms(w.entry_parms) else { return };
 
     // Commit the reload (nothing below can fail).
@@ -1973,6 +2229,9 @@ fn try_restart(w: &mut Walk) {
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();
+    // Stop the dead run's loops; restart the fresh level's (see try_changelevel).
+    bump_sound_generation();
+    queue_static_sounds(&w.pak, &statics);
 }
 
 fn step_walk(
@@ -2340,6 +2599,11 @@ fn step_walk(
             right: [sy, -cy, 0.0],
         };
     });
+
+    // S_UpdateAmbientSounds: ramp the four automatic ambient channels toward
+    // the VIEW leaf's ambient_level[] targets (water wash / sky wind). Uses the
+    // same steady (un-bobbed) eye as the listener pose above.
+    update_ambient_channels(&w.bsp, eye, dt);
 
     // Bob the rendered eye only (the listener pose above stays steady so audio
     // panning does not jitter with the head-bob).
@@ -2776,6 +3040,22 @@ fn step_demo(d: &mut DemoPlay, dt: f32, render_w: usize, render_h: usize) -> (re
         roll: f.view_angles[2],
         fov_deg: 90.0,
     };
+    // Sound listener pose + the per-leaf ambient channels follow the demo
+    // camera (the C's S_Update runs in demo playback too — the recorded e1m3
+    // run drifts past water and open sky, and its placed torch loops pan with
+    // the recorded view). Forward/right are the level yaw basis like step_walk.
+    {
+        let yaw_rad = (f.view_angles[1] as f64).to_radians();
+        let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
+        LISTENER.with(|l| {
+            *l.borrow_mut() = Listener {
+                pos: f.view_origin,
+                forward: [cy, sy, 0.0],
+                right: [sy, -cy, 0.0],
+            };
+        });
+        update_ambient_channels(&d.bsp, f.view_origin, dt);
+    }
     // The recorded server time animates the demo's liquids/sky too. The live
     // particle pool (replayed from the recorded svc_particle / temp-entity
     // stream) is passed as (world pos, palette index) so blood/puffs/explosions
@@ -2995,6 +3275,7 @@ mod tests {
         };
         let demo = Demo {
             level_name: "test".into(),
+            static_sounds: Vec::new(),
             // map_name() reads model_precache[1]; unused by step_demo's indexing.
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
@@ -3089,6 +3370,7 @@ mod tests {
         };
         let demo = Demo {
             level_name: "test".into(),
+            static_sounds: Vec::new(),
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
@@ -4051,6 +4333,7 @@ mod tests {
             ],
             sound_precache: Vec::new(),
             viewentity: 1,
+            static_sounds: Vec::new(),
             frames: vec![plain(0.0), bolt_frame, plain(0.10)],
         };
         let mut d = DemoPlay {
@@ -4101,5 +4384,252 @@ mod tests {
         let _ = step_demo(&mut d, 0.001, 160, 100);
         assert_eq!(d.idx, 0, "playback wrapped");
         assert!(!d.beams.any_live(0.0), "the wrap cleared the beam store");
+    }
+
+    // ------------------------------------------------ ambient sounds (H11)
+
+    /// A minimal PCM mono 11025 Hz 8-bit WAV; `loop_start = Some(n)` adds the
+    /// `cue ` chunk the ambience samples carry (the loop gate `S_StaticSound`
+    /// checks before agreeing to static-loop a sound).
+    fn test_wav(loop_start: Option<u32>, data_samples: u32) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend(b"RIFF");
+        b.extend(0u32.to_le_bytes());
+        b.extend(b"WAVE");
+        b.extend(b"fmt ");
+        b.extend(16u32.to_le_bytes());
+        b.extend(1u16.to_le_bytes()); // PCM
+        b.extend(1u16.to_le_bytes()); // mono
+        b.extend(11025u32.to_le_bytes()); // rate
+        b.extend(11025u32.to_le_bytes()); // byte rate
+        b.extend(1u16.to_le_bytes()); // block align
+        b.extend(8u16.to_le_bytes()); // bits
+        if let Some(ls) = loop_start {
+            b.extend(b"cue ");
+            b.extend(28u32.to_le_bytes());
+            b.extend(1u32.to_le_bytes()); // one cue point
+            b.extend([0u8; 16]); // id/position/chunkid/chunkstart
+            b.extend(0u32.to_le_bytes()); // block start
+            b.extend(ls.to_le_bytes()); // sample offset = loop start
+        }
+        b.extend(b"data");
+        b.extend(data_samples.to_le_bytes());
+        b.extend(std::iter::repeat(0x80u8).take(data_samples as usize));
+        b
+    }
+
+    /// Spawn a real map's entities on a live server and return the static
+    /// sounds its QuakeC registered (ambientsound() during spawn).
+    fn spawn_map_statics(map: &str) -> Vec<StaticSound> {
+        let pak = pak().expect("embedded pak");
+        let read = |n: &str| pak.read_file(n).ok().flatten();
+        let bsp = Bsp::parse(&read(map).expect("bsp")).expect("parse");
+        let progs = Progs::parse(&read("progs.dat").expect("progs")).expect("parse");
+        let mut server = Server::with_pak(bsp, progs, Some(pak.clone())).expect("server");
+        let _ = server.drain_static_sounds();
+        server.spawn_entities().expect("spawn");
+        let statics = server.drain_static_sounds();
+        // The registry drains once: a second drain is empty.
+        assert!(server.drain_static_sounds().is_empty());
+        statics
+    }
+
+    #[test]
+    fn e1m2_spawn_registers_fire_torch_static_sounds() {
+        // Ground truth: the medieval maps' wall torches run QuakeC's
+        // FireAmbient — `ambientsound(self.origin, "ambience/fire1.wav", 0.5,
+        // ATTN_STATIC)` — during spawn. e1m2 places 24 of them.
+        let statics = spawn_map_statics("maps/e1m2.bsp");
+        let fires: Vec<&StaticSound> = statics
+            .iter()
+            .filter(|s| s.sample == "ambience/fire1.wav")
+            .collect();
+        assert!(
+            fires.len() >= 20,
+            "e1m2's torches register ambience/fire1.wav loops (got {})",
+            fires.len()
+        );
+        for f in &fires {
+            // FireAmbient's exact arguments through the wire bytes:
+            // vol 0.5 -> 127/255, ATTN_STATIC 3 -> 192/64 = 3.0.
+            assert_eq!(f.volume, 127.0 / 255.0, "torch volume 0.5 (quantized)");
+            assert_eq!(f.attenuation, 3.0, "ATTN_STATIC");
+            assert!(
+                f.origin.iter().all(|c| c.abs() < 10000.0),
+                "plausible world position {:?}",
+                f.origin
+            );
+            assert!(f.sound_index >= 1, "fire1.wav resolved to a precache slot");
+        }
+        // The torches sit at DISTINCT places (each wall torch registers its own).
+        let mut pts: Vec<[i32; 3]> = fires
+            .iter()
+            .map(|f| [f.origin[0] as i32, f.origin[1] as i32, f.origin[2] as i32])
+            .collect();
+        pts.sort_unstable();
+        pts.dedup();
+        assert!(
+            pts.len() >= 20,
+            "torch loops are at distinct world positions (got {})",
+            pts.len()
+        );
+    }
+
+    #[test]
+    fn e1m1_spawn_registers_base_ambience_static_sounds() {
+        // e1m1 is a BASE map: no torches, but its light_fluoro fixtures hum
+        // (ambience/fl_hum1.wav) and its computers drone (ambience/comp1.wav),
+        // all at ATTN_STATIC — the level's actual placed soundscape.
+        let statics = spawn_map_statics("maps/e1m1.bsp");
+        assert!(
+            statics.iter().any(|s| s.sample == "ambience/fl_hum1.wav"),
+            "fluorescent hum registered"
+        );
+        assert!(
+            statics.iter().any(|s| s.sample == "ambience/comp1.wav"),
+            "computer drone registered"
+        );
+        assert!(statics.len() >= 10, "a full soundscape (got {})", statics.len());
+        for s in &statics {
+            assert_eq!(s.attenuation, 3.0, "every e1m1 ambient is ATTN_STATIC");
+            assert!(s.volume > 0.0 && s.volume <= 1.0);
+        }
+    }
+
+    #[test]
+    fn e1m1_leafs_carry_ambient_levels() {
+        // The dleaf_t ambient_level[NUM_AMBIENTS] bytes must survive the real
+        // map's parse: e1m1 has both water (slime pools) and open-sky areas, so
+        // SOME leafs carry non-zero water and sky levels for
+        // S_UpdateAmbientSounds to ramp toward.
+        let pak = pak().expect("embedded pak");
+        let bsp = Bsp::parse(
+            &pak.read_file("maps/e1m1.bsp").ok().flatten().expect("bsp"),
+        )
+        .expect("parse");
+        let water = bsp
+            .leafs
+            .iter()
+            .filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_WATER] > 0)
+            .count();
+        let sky = bsp
+            .leafs
+            .iter()
+            .filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_SKY] > 0)
+            .count();
+        assert!(water > 0, "some e1m1 leafs hear water ambience");
+        assert!(sky > 0, "some e1m1 leafs hear sky/wind ambience");
+    }
+
+    #[test]
+    fn boot_walk_queues_static_loops_and_demo_boot_bumps_generation() {
+        // boot() (live e1m1) must hand the page the level's static loops via
+        // poll_static_sound, each with sane spatial params + loop window; then
+        // boot_demo() must bump the generation (the page's stop-all signal) and
+        // replace the queue with the DEMO's own signon statics.
+        assert_eq!(boot(), 1);
+        let g0 = sound_generation();
+        let mut n = 0;
+        loop {
+            let len = poll_static_sound();
+            if len == 0 {
+                break;
+            }
+            n += 1;
+            let (ls, le) = (sound_loop_start(), sound_loop_end());
+            assert!(ls >= 0.0, "loop start is a real offset");
+            assert!(le > ls, "loop end past loop start");
+            assert!(sound_volume() > 0.0 && sound_volume() <= 1.0);
+            assert!(sound_attenuation() > 0.0 && sound_attenuation() <= 4.0);
+            assert_eq!(sound_is_view_entity(), 0, "statics are world-placed");
+        }
+        assert!(n >= 5, "e1m1 queues its torch/ambience loops (got {n})");
+
+        // Switching to the attract demo stops the walk's loops (generation
+        // bump) and registers the demo signon's own statics.
+        assert_eq!(boot_demo(), 1);
+        assert_ne!(sound_generation(), g0, "mode transition bumps generation");
+        assert!(
+            poll_static_sound() > 0,
+            "the demo's svc_spawnstaticsound loops are queued"
+        );
+    }
+
+    #[test]
+    fn load_ambient_sound_loads_only_water_and_wind() {
+        // S_Init loads exactly ambience/water1.wav (ch 0) + ambience/wind2.wav
+        // (ch 1); slime/lava keep a NULL sfx. Both real samples carry cue loop
+        // chunks, so the loop window must come back usable.
+        let l0 = load_ambient_sound(0);
+        assert!(l0 > 0, "water1.wav loaded from the pak");
+        assert!(sound_loop_end() > 0.0, "water1 loop window parsed");
+        let l1 = load_ambient_sound(1);
+        assert!(l1 > 0, "wind2.wav loaded from the pak");
+        assert!(sound_loop_end() > 0.0, "wind2 loop window parsed");
+        assert_eq!(load_ambient_sound(2), 0, "slime: WinQuake never loads one");
+        assert_eq!(load_ambient_sound(3), 0, "lava: WinQuake never loads one");
+        assert_eq!(load_ambient_sound(4), 0, "out of range");
+        assert_eq!(load_ambient_sound(-1), 0, "negative channel");
+    }
+
+    #[test]
+    fn ambient_gain_ramps_and_resets_on_generation_bump() {
+        AMBIENT.with(|a| *a.borrow_mut() = AmbientChannels::new());
+        // Half a second toward a full-water leaf: master_vol = 0.5*100 = 50.
+        AMBIENT.with(|a| {
+            a.borrow_mut().update(
+                Some(&[255, 0, 0, 0]),
+                0.5,
+                AMBIENT_LEVEL_DEFAULT,
+                AMBIENT_FADE_DEFAULT,
+            );
+        });
+        assert!((ambient_gain(0) - 50.0 / 255.0).abs() < 1e-6, "ramped gain");
+        assert_eq!(ambient_gain(1), 0.0, "silent channel");
+        assert_eq!(ambient_gain(99), 0.0, "out of range");
+        assert_eq!(ambient_gain(-1), 0.0, "negative channel");
+        // A level change (S_StopAllSounds) resets the ramp to silence.
+        bump_sound_generation();
+        assert_eq!(ambient_gain(0), 0.0, "generation bump resets the ramp");
+    }
+
+    #[test]
+    fn queue_static_sounds_drops_unlooped_and_missing_samples() {
+        // S_StaticSound's gates: a sample with no cue loop point is REFUSED
+        // ("Sound %s not looped"), a missing file is dropped, and names resolve
+        // under the pak's "sound/" directory. Only the looped one queues.
+        let looped = test_wav(Some(8), 64);
+        let oneshot = test_wav(None, 64);
+        let pak = build_test_pak(&[
+            ("sound/amb/loopy.wav", looped.as_slice()),
+            ("sound/amb/shot.wav", oneshot.as_slice()),
+        ]);
+        STATIC_QUEUE.with(|q| q.borrow_mut().clear());
+        let mk = |sample: &str| StaticSound {
+            origin: [1.0, 2.0, 3.0],
+            sound_index: 1,
+            sample: sample.to_string(),
+            volume: 0.5,
+            attenuation: 3.0,
+        };
+        queue_static_sounds(
+            &pak,
+            &[mk("amb/loopy.wav"), mk("amb/shot.wav"), mk("amb/missing.wav"), mk("")],
+        );
+        let len = poll_static_sound();
+        assert_eq!(len, looped.len() as i32, "the looped sample queued");
+        assert_eq!(sound_origin_x(), 1.0);
+        assert_eq!(sound_origin_y(), 2.0);
+        assert_eq!(sound_origin_z(), 3.0);
+        assert_eq!(sound_volume(), 0.5);
+        assert_eq!(sound_attenuation(), 3.0);
+        // Loop window in seconds: start 8/11025, end 64/11025.
+        assert!((sound_loop_start() - 8.0 / 11025.0).abs() < 1e-7);
+        assert!((sound_loop_end() - 64.0 / 11025.0).abs() < 1e-7);
+        assert_eq!(
+            poll_static_sound(),
+            0,
+            "unlooped / missing / empty-name samples all dropped"
+        );
     }
 }
