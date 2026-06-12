@@ -18,7 +18,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 > **episode-end finale text** — with your inventory carried to the next map: the whole shareware episode. There's a
 > working **Options menu** (selectable resolution, mouse, volume) and a **drop-down console** (`~`) with
 > `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`. What it is *not*: multiplayer/netcode or save/load (out of
-> scope). Everything claimed below is real and tested: **449 engine + 42 wasm tests**, zero dependencies, no
+> scope). Everything claimed below is real and tested: **458 engine + 48 wasm tests**, zero dependencies, no
 > `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
 > against golden scene renders (byte-identical unless a fidelity fix deliberately re-baselines — each such
 > re-baseline is recorded in `AUDIT.md`).
@@ -65,8 +65,12 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   volume/attenuation) and the **automatic leaf ambients** (water/wind, ramped per `S_UpdateAmbientSounds` with the
   C's integer math at its 72 fps frame cap).
 - **Demo playback** — parses the `.dem` net-protocol stream into per-frame entity snapshots **+ svc_particle /
-  svc_temp_entity effects + static sounds + intermission state**, rendering id's recorded attract demo with blood +
-  explosions.
+  svc_temp_entity effects + static sounds + intermission state**, and (demo-parity pass, 2026-06-11) the full
+  client-visible stream the C replays: **recorded svc_sound one-shots** (spatialized like live), **recorded
+  lightstyles**, **svc_clientdata stats driving the live status bar + weapon viewmodel**, **svc_damage flash +
+  view kick**, **svc_print/centerprint overlays**, and **V_CalcRefdef head-bob/lean** — frame emission gated on
+  signon completion so the attract loop starts (and wraps) in-world. The demo IS the game rendering a recorded
+  stream, as in WinQuake.
 - **Browser** — the engine compiles to `wasm32-unknown-unknown` unchanged; WASD + mouse-look + fullscreen, fire
   (click), weapon select (1–8), `~` console, Esc menu, selectable resolution, lit, with HUD + sound.
 
@@ -77,7 +81,7 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 449 lib + 8 integration tests, no game data required (synthetic fixtures)
+cargo test          # 458 lib + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
@@ -135,7 +139,7 @@ ledger in `AUDIT.md`, all HIGHs closed). What remains:
 
 - **A documented divergence tail** — one narrow MEDIUM (no-lightmap-face shading, reachable only on
   lightless/test maps, golden-sensitive) and assorted cosmetic LOWs (the demo path's missing explosion dlight,
-  pain-frame face animation, sound-channel override granularity). Tracked with plans in `AUDIT.md`.
+  pain-frame face animation, live-play damage-kick roll). Tracked with plans in `AUDIT.md`.
 - **Multiplayer & save/load** — out of scope for this single-player, headless-server port.
 
 ## Licensing

@@ -85,7 +85,10 @@ byte-identical throughout (`8eea4f9c`/`1edb0642`/`2009e041`).
 Fixed:
 - ✅ **EF_ROTATE spin** (HIGH) — bonus pickups spin (`anglemod(100*t)`); was frozen.
 - ✅ **View roll** (HIGH) — Camera.roll: strafe lean + 80° dead-view + punch roll;
-  demo cams replay recorded `viewangles[ROLL]`. (Damage-kick roll needs svc_damage.)
+  demo cams replay recorded `viewangles[ROLL]`. (Damage-kick roll needs svc_damage
+  — since landed for demo playback, Session 6 2026-06-11: V_ParseDamage's
+  directional v_dmg kick from the recorded svc_damage. Live play infers the damage
+  *flash* from stat deltas and has no `from` direction, so the live kick stays open.)
 - ✅ **EF_MUZZLEFLASH clear** (HIGH) — SV_CleanupEnts at frame top; muzzle light was
   latching forever after the first shot.
 - ✅ **Dead/Tab scoreboard** (HIGH) — scorebar + Monsters/Secrets/Time/level on death.
@@ -220,7 +223,10 @@ current `fb14bd65`/`a6f98d8a`/`0211e6d4` baseline):** e1m1 `81bca4da`, e1m2 `b93
 **Six codebase-wide reviews complete** (3 + 3). Outstanding deferred work, all documented
 above with plans: lightning/beam temp entities (HIGH), R_MarkLights dlight gating (MED),
 intermission view (MED), no-lightmap-face shading (MED), the render surface cache (perf),
-animated demo lightstyles, + assorted cosmetic LOWs.
+animated demo lightstyles, + assorted cosmetic LOWs. *(Historical list — since closed:
+beams/MarkLights/intermission in the Session-5 ship push, the surface cache in the
+render-perf pass, animated demo lightstyles in Session 6's demo-parity work. Of these
+only no-lightmap-face shading remains, tracked under "Still open".)*
 
 ### Texture lighting cache (lit surface cache, commit 6e95f8a)
 
@@ -318,9 +324,14 @@ All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 
 - **No-lightmap face fullbright/black** (MED but narrow — lightless/test maps
   only, golden-sensitive).
-- Demo explosion dlight; sound channel override (only dedups within a frame);
+- Demo explosion dlight. (~~Sound channel override only dedups within a
+  frame~~ — ✅ closed in Session 6: cross-frame (entity,channel) override +
+  S_StopSound in the page registry, live + demo.)
 - Minor sbar polish (pain-frame face anim); the Round-2 LOW list (sky
   case-sensitivity, AngleVectors f64, lightstyle /264, etc. — all cosmetic).
+- Live-play damage-kick roll (the demo path replays it from recorded
+  svc_damage as of Session 6; live infers the flash from stat deltas and has
+  no `from` direction).
 
 ## Session 5 — the ship push (2026-06-10)
 
@@ -375,6 +386,53 @@ ledger:
 **Performance:** resolved — see STATUS.md's scorecard (the surface-cache fix +
 clone/alloc hunt landed; 36 fps @1080p idle, per-pixel bound; SIMD remains the
 only further ~2× lever and is unscheduled).
+
+## Session 6 — demo playback parity (2026-06-11, branch `ship/demo-parity`)
+
+User: the attract demo must match the real game. In the C the demo IS the
+client rendering a recorded stream (full sound, sbar, viewmodel, flashes,
+text, recorded lightstyles); the port's demo path discarded most of it.
+Faithfulness ledger (ground truth cl_parse.c / view.c / sbar.c / snd_dma.c;
+full narrative in STATUS.md):
+
+- ✅ **svc_sound** — CL_ParseStartSoundPacket decode (SND_VOLUME default 255,
+  atten byte/64 default 1.0, ent=ch>>3/chan=ch&7, precache-resolved); queued
+  through the SAME spatialized path as live, listener = recorded camera. id's
+  demo1 carried 595 silently-discarded one-shots.
+- ✅ **svc_stopsound + channel override** — S_StopSound + SND_PickChannel's
+  cross-frame "always override sound from same entity" via a page-side
+  (entity,channel) source registry (closes the audit MED's remaining half;
+  channel 0 never keyed). demo1/2/3 send zero stops (engine-asserted census).
+- ✅ **svc_lightstyle** — recorded style strings drive demo lighting through
+  the shared literal R_AnimateLight math (`server::lightstyle_scales_at`,
+  delegation proven byte-identical); the seeded style-0='m' default remains
+  only as the synthetic-demo fallback.
+- ✅ **svc_clientdata** — CL_ParseClientdata's EXACT bit order (viewheight/
+  idealpitch chars, punch char + velocity char*16 interleaved per axis, items
+  long, SU_ONGROUND/INWATER, weaponframe/armor/weapon, fixed health/ammo/
+  active-weapon trailer); mvelocity shift + CL_RelinkEntities velocity lerp.
+- ✅ **Sbar during demos** — the same `render::Hud` as live, fed from recorded
+  cl.stats (Sbar_Draw runs during playback in the C).
+- ✅ **Weapon viewmodel during demos** — SU_WEAPON via the demo precache +
+  SU_WEAPONFRAME, R_DrawViewModel hide gates (dead/invisible/intermission).
+- ✅ **svc_damage** — V_ParseDamage: count=(blood+armor)/2 min 10, percent
+  += 3*count clamp 150 fading dt*150, blood/armour tint, directional
+  v_dmg_roll/pitch kick (v_kickroll/v_kickpitch 0.6, v_kicktime 0.5) decayed
+  in V_CalcViewRoll.
+- ✅ **svc_print/centerprint** — the live notify (Con_Print '\n' accumulation)
+  + centerprint overlays, same gating; svc_stufftext consumed-inert with the
+  C's would-exec documented.
+- ✅ **Void-camera start/wrap** — frame emission gates on signon completion
+  (first entity fast-update = "the final signon stage", cl_parse.c:340 /
+  SCR_EndLoadingPlaque); wrap resets the POV state.
+- ✅ **V_CalcRefdef parity** — V_CalcBob from recorded velocity, oldz stair
+  smoothing on recorded onground, strafe lean, dead-view roll=80 assignment
+  semantics, punchangle added LAST; underwater warp + blends deferred to the
+  dispatcher like live.
+
+Evidence: `web/verify_demo.py` (new permanent harness) 9/9 + verify_walk/
+verify_ambient green; 458 lib + 48 wasm tests; clippy 0/0; goldens
+byte-identical (scene renders no demos).
 
 ## LOW (27)
 

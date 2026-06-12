@@ -1,7 +1,59 @@
 # Quake-RS — working status / hand-off
 
-Last updated 2026-06-10 (ship-push session). This file is the honest "where
+Last updated 2026-06-11 (demo-parity branch). This file is the honest "where
 things stand" note — read it before continuing.
+
+---
+
+## Demo playback parity (2026-06-11, branch `ship/demo-parity`)
+
+User (twice): the attract demo must match the real game — sound, status bar,
+everything. In the C the demo IS the game client rendering a recorded stream;
+this port's demo path decoded the stream but discarded most of it. Closed in
+4 commits (`6b4417c`/`bd806d1`/`e58997a`/`8306aed`):
+
+- **Decode side** (`quake-rs/src/demo.rs`, vs cl_parse.c/view.c): svc_sound per
+  CL_ParseStartSoundPacket (SND_VOLUME default 255, atten byte/64 default 1.0,
+  ent=ch>>3 / chan=ch&7, precache-resolved sample — id's demo1 carried **595
+  recorded one-shots that were silently discarded**); svc_stopsound;
+  svc_lightstyle into a per-demo copy-on-write `cl_lightstyle` table;
+  svc_clientdata per CL_ParseClientdata's EXACT bit order (viewheight/
+  idealpitch, punch char + velocity char*16 interleaved, items, ONGROUND/
+  INWATER, weaponframe/armor/weapon + the fixed health/ammo/active-weapon
+  trailer); svc_damage (V_ParseDamage); svc_print/centerprint; svc_stufftext
+  consumed-inert with the C's would-exec documented.
+- **Frame emission gates on signon completion** (the first entity fast-update
+  is "the final signon stage", cl_parse.c:340) — the ~1.2 s of void-camera
+  frames at demo start AND loop wrap are gone at the source; the wrap also
+  resets the damage/kick/notify/oldz POV state.
+- **Playback side** (`quake-wasm` step_demo): recorded one-shots +
+  CL_ParseTEnt impact sounds queue through the SAME `queue_sounds` spatialized
+  path as live (listener = recorded camera); recorded-stats `render::Hud`
+  sbar; SU_WEAPON/SU_WEAPONFRAME weapon viewmodel with the R_DrawViewModel
+  hide gates; recorded lightstyle flicker via the shared
+  `server::lightstyle_scales_at` (literal R_AnimateLight math, proven
+  byte-identical to the live path); V_ParseDamage flash + directional kick
+  (v_kickroll/v_kickpitch 0.6, v_kicktime 0.5) decayed in V_CalcViewRoll;
+  notify/centerprint overlays (Con_Print '\n' accumulation, same gating as
+  live); full V_CalcRefdef camera (V_CalcBob from recorded SU_VELOCITY, oldz
+  stair smoothing on recorded SU_ONGROUND, strafe lean, dead-view roll=80
+  assignment semantics, punchangle added LAST); underwater D_WarpScreen +
+  content/damage/powerup blends deferred to the dispatcher like live.
+- **Sound-channel override CLOSED for live + demo** (was a known-deferred
+  LOW): the page-side (entity,channel) playing-source registry in
+  `web/index.html` implements SND_PickChannel's cross-frame "always override
+  sound from same entity" + S_StopSound, fed by new `sound_entity`/
+  `sound_channel`/`poll_stop_sound` exports. id's demo1/2/3 send **zero**
+  svc_stopsound (engine-asserted census) — the stop path is protocol
+  completeness; the override fix is live behaviour.
+- **Evidence:** `web/verify_demo.py` (new permanent headless-Chromium harness,
+  9/9: first rendered frame in-world, one-shots actually play via the page's
+  `__sndStats` counter, sbar band drawn + lit, stop/override drain clean, zero
+  console errors) + verify_walk/verify_ambient green on the same assembly;
+  **458 lib + 48 wasm tests** (real-demo1 decode census, zero-stopsound
+  census, loop-wrap seam, damage math, sbar A/B pixel diff); clippy 0/0;
+  goldens byte-identical `fb14bd65`/`a6f98d8a`/`0211e6d4` (scene renders no
+  demos).
 
 ---
 
@@ -310,16 +362,20 @@ push. What remains is the LOW tail, all reviewer-vetted as non-blocking:
   (unreachable conflict with vanilla progs).
 - The C's CL_UpdateTEnts MAX_VISEDICTS half-cap and its outer-loop index
   clobber (UB in the C) are deliberately not modeled.
-- Sound-channel override only dedups within a frame; per-ammo sbar nits;
-  pain-frame face anim; assorted Round-2 LOW list items.
+- ~~Sound-channel override only dedups within a frame~~ — ✅ CLOSED
+  (demo-parity branch, 2026-06-11): the page-side (entity,channel) registry
+  implements SND_PickChannel's cross-frame override + S_StopSound, live + demo.
+- Per-ammo sbar nits; pain-frame face anim; assorted Round-2 LOW list items.
 - From the final whole-diff review (all vetted non-blocking): the demo loop
   wrap keeps the ambient ramp warm (deliberate seamless loop; the C's restart
   re-ramps from 0); the intermission idle-sway phase uses w.clock (constant,
-  invisible phase offset vs cl.time); demo1 playback shows ~1.2 s of
-  void-camera frames at start/loop-wrap (pre-existing, recorded-stream
-  artifact); submodel dlight marking uses entity-local light origins where the
-  C used world-space (deliberate — consistent with the port's local per-luxel
-  submodel lighting; arguably fixes a C quirk that mis-lights moved doors).
+  invisible phase offset vs cl.time); ~~demo1 playback shows ~1.2 s of
+  void-camera frames at start/loop-wrap~~ — ✅ CLOSED (demo-parity branch:
+  frame emission now gates on signon completion, so the void frames are never
+  emitted; loop wrap equally clean, seam-tested); submodel dlight marking uses
+  entity-local light origins where the C used world-space (deliberate —
+  consistent with the port's local per-luxel submodel lighting; arguably fixes
+  a C quirk that mis-lights moved doors).
 
 ---
 
@@ -343,8 +399,8 @@ push. What remains is the LOW tail, all reviewer-vetted as non-blocking:
 
 ```bash
 # tests
-cd quake-rs && cargo test --lib            # 449 tests (data-free)
-cd quake-wasm && cargo test                # 42 tests (real embedded pak)
+cd quake-rs && cargo test --lib            # 458 tests (data-free)
+cd quake-wasm && cargo test                # 48 tests (real embedded pak)
 
 # render a map to PPM (needs a real pak0.pak)
 cargo run --release --bin quaketool -- scene <pak> maps/e1m1.bsp out.ppm

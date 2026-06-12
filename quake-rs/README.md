@@ -35,8 +35,8 @@ ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.
 | Ambient sound | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server` | ✅ `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap) + `PF_ambientsound` static loops + `GetWavinfo` cue-loop gate |
 | Little-endian byte reader, error type | (replaces `LittleLong`/`Sys_Error`) | `read`, `error` | ✅ scaffold |
 
-The crate is **~39,000 lines of zero-dependency, `unsafe`-free Rust with 449 lib + 8 integration tests**
-(all data-free; the sibling `quake-wasm` crate adds 42 e2e tests against the real embedded shareware pak).
+The crate is **~39,000 lines of zero-dependency, `unsafe`-free Rust with 458 lib + 8 integration tests**
+(all data-free; the sibling `quake-wasm` crate adds 48 e2e tests against the real embedded shareware pak).
 
 ### Validated against the real Quake shareware
 
