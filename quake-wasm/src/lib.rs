@@ -772,6 +772,22 @@ pub extern "C" fn boot_attract() -> i32 {
     }
 }
 
+/// `1` while the live, player-controlled WALK is the active mode; `0` during
+/// demo playback / the attract loop (and before any boot). The page gates its
+/// pointer-lock requests and the "click to capture mouse" chip on this — the
+/// mouse only drives the camera in walk mode, so that is the only mode where a
+/// canvas click should capture it. Covers every walk-building path (boot /
+/// New Game / `map` console command), since each sets `mode = 0` with the walk.
+#[no_mangle]
+pub extern "C" fn in_walk_mode() -> i32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|a| (a.mode == 0 && a.walk.is_some()) as i32)
+            .unwrap_or(0)
+    })
+}
+
 /// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). The page
 /// reads this each frame and resizes its canvas backing store + ImageData when it
 /// changes (e.g. after the Options menu picks a different preset), and persists it
@@ -4030,6 +4046,28 @@ mod tests {
         // Esc reopens the menu over the running walk (menu_cancel from key_game).
         menu_cancel();
         assert_eq!(menu_visible(), 1, "Esc reopens the menu over the walk");
+    }
+
+    #[test]
+    fn in_walk_mode_tracks_every_mode_transition() {
+        // The page's pointer-lock gating + "click to capture mouse" chip key off
+        // this export: only the live walk wants the mouse captured. It must track
+        // every mode transition, including the engine-internal New Game path the
+        // page cannot otherwise observe.
+        assert_eq!(boot_attract(), 1);
+        assert_eq!(in_walk_mode(), 0, "attract loop = demo playback, not a walk");
+
+        // Menu-driven New Game (Main > Single Player > New Game), the path the
+        // page only sees as two opaque menu_select() calls.
+        menu_select();
+        menu_select();
+        assert_eq!(in_walk_mode(), 1, "New Game from the attract menu enters walk mode");
+
+        assert_eq!(boot_demo(), 1);
+        assert_eq!(in_walk_mode(), 0, "demo playback leaves walk mode");
+
+        assert_eq!(boot(), 1);
+        assert_eq!(in_walk_mode(), 1, "the walk button re-enters walk mode");
     }
 
     #[test]

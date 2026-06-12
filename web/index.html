@@ -83,6 +83,20 @@
   #play { font-size:17px; color:#e6dcc6; text-shadow:0 1px 6px #000;
     max-width:100%; box-sizing:border-box; padding:0 16px; text-align:center; }
 
+  /* Small non-blocking chips anchored inside #wrap (so they ride along into
+     fullscreen). pointer-events:none — clicks pass straight through to the
+     canvas (the capture chip INVITES the very click that locks the mouse). */
+  .chip { position:absolute;
+    padding:4px 12px; border:1px solid var(--edge); border-radius:3px;
+    background:rgba(11,9,7,.85); color:#d6c9ae; font-size:12px;
+    pointer-events:none; white-space:nowrap; opacity:0; transition:opacity .25s; }
+  .chip.show { opacity:1; }
+  /* "click to capture mouse" — unlocked walk only. A CORNER, so a keyboard-only
+     player who never captures keeps the HUD (health/ammo) fully readable. */
+  #lockChip { top:10px; right:10px; }
+  /* transient key hint on entering fullscreen */
+  #fsHint { top:10px; left:50%; transform:translateX(-50%); }
+
   #actions { margin:12px auto 2px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
   button { font:inherit; font-size:12.5px; background:#191309; color:#cdbd9c;
     border:1px solid #3c2f1d; border-radius:3px; padding:6px 14px; cursor:pointer;
@@ -138,8 +152,10 @@
           <div id="bootMsg">fetching engine…</div>
           <div id="bootBar"><div id="bootFill"></div></div>
         </div>
-        <div id="play" class="hidden">click to play &nbsp;·&nbsp; mouse = look, WASD = move</div>
+        <div id="play" class="hidden">click (or press Enter) to play &nbsp;·&nbsp; mouse = look, WASD = move</div>
       </div>
+      <div id="lockChip" class="chip">click to capture mouse</div>
+      <div id="fsHint" class="chip">Esc = menu &nbsp;·&nbsp; F = leave fullscreen</div>
     </div>
   </div>
 
@@ -170,13 +186,14 @@
       <h2>Fight</h2>
       <div class="keys">
         <span class="k">click</span><span>fire</span>
+        <span class="k"><kbd>Ctrl</kbd></span><span>fire (DOS-style — arrows + <kbd>Ctrl</kbd> play fine without capturing the mouse)</span>
         <span class="k"><kbd>1</kbd>–<kbd>8</kbd></span><span>select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)</span>
       </div>
     </div>
     <div class="col">
       <h2>Interface</h2>
       <div class="keys">
-        <span class="k"><kbd>Esc</kbd> / <kbd>Tab</kbd></span><span>menu (Tab works in fullscreen)</span>
+        <span class="k"><kbd>Esc</kbd> / <kbd>Tab</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule — use <kbd>Tab</kbd> to stay)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
         <span class="k"><kbd>F</kbd></span><span>fullscreen</span>
         <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
@@ -213,6 +230,8 @@ const bootEl = document.getElementById('boot');
 const bootMsg = document.getElementById('bootMsg');
 const bootFill = document.getElementById('bootFill');
 const playEl = document.getElementById('play');
+const lockChip = document.getElementById('lockChip');
+const fsHint = document.getElementById('fsHint');
 const keys = {};
 const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
 
@@ -220,9 +239,56 @@ const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright
 function menuVisible() { return !!(exp && exp.menu_visible && exp.menu_visible()); }
 // Is the drop-down console currently open (top-priority keyboard owner)?
 function consoleVisible() { return !!(exp && exp.console_visible && exp.console_visible()); }
+// Is the live player-controlled walk the active mode (vs demo/attract playback)?
+// Feature-checked: an older wasm without the export reports mode "unknown" —
+// inWalkMode() then assumes walk so canvas clicks still capture the mouse (the
+// old behaviour), while the capture chip (which needs certainty) stays off.
+function walkModeKnown() { return !!(exp && typeof exp.in_walk_mode === 'function'); }
+function inWalkMode() { return walkModeKnown() ? !!exp.in_walk_mode() : true; }
+
+// --- First-gesture / overlay state. The full-canvas scrim exists for exactly
+// one job: capture the user's FIRST gesture ever (browsers gate audio behind
+// one) — that click/Enter unlocks audio and reveals the already-running attract
+// loop. After it, the scrim NEVER covers the canvas again; the only re-capture
+// prompt is the small non-blocking #lockChip during unlocked walk play.
+let firstGestureDone = false;   // a gesture happened; the scrim is gone for good
+let readyToPlay = false;        // main() finished booting (the prompt is up)
+
+function unlockAudio() {
+  // Create/resume the AudioContext inside a user-gesture handler (required by
+  // autoplay policy). Idempotent — every gesture path routes through here so
+  // whichever comes first (overlay, button, canvas, F key) unlocks sound. The
+  // catch() absorbs a policy rejection (e.g. a programmatic click): the next
+  // real gesture simply tries again.
+  if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+}
+function hideOverlayForever() {
+  firstGestureDone = true;
+  overlay.classList.add('hidden');
+}
+function startFromOverlay() {
+  // The first gesture: unlock audio with it and reveal the attract loop (demo +
+  // menu) that boot_attract() already has running under the scrim. No pointer
+  // lock here — the attract menu is keyboard-driven; the mouse is captured
+  // later, by a canvas click in walk mode.
+  unlockAudio();
+  hideOverlayForever();
+  statusEl.textContent = 'attract loop — ↑/↓ + Enter drive the menu · New Game to play';
+}
 
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
+
+  // --- First-gesture overlay. While the click-to-play prompt is up, Enter or
+  //     Space starts exactly like a click (one gesture: unlock audio + reveal
+  //     the attract loop). Routed FIRST so Enter can't also drive the attract
+  //     menu underneath. Only the ready prompt accepts it, not the boot panel.
+  if (!firstGestureDone && readyToPlay && (k === 'enter' || k === ' ')) {
+    startFromOverlay();
+    e.preventDefault();
+    return;
+  }
 
   // --- Drop-down console. The ~ / backtick key TOGGLES it (and never types the
   //     ~ into the line). The console has TOP priority over the menu: while it's
@@ -280,6 +346,11 @@ addEventListener('keydown', e => {
   // Space = jump (button bit 1 -> the player's button2 -> QuakeC PlayerJump).
   // (The 🔊 button still plays the manual test sound; in-game sound is automatic.)
   if (k === ' ' && exp && exp.set_jump) exp.set_jump(1);
+  // Ctrl = fire (id's DOS-era default binding, +attack). With the arrows for
+  // move/turn this gives full keyboard-only play — no pointer capture needed.
+  // No preventDefault: Ctrl is a modifier, and combos (Ctrl+R, Ctrl+C…) must
+  // keep their browser meaning.
+  if (k === 'control' && !e.repeat && exp && exp.set_attack) exp.set_attack(1);
   // c = swim DOWN in water (the +movedown key -> UserCmd.upmove<0 -> SV_WaterMove
   // sinks). Out of water it does nothing. Swim UP reuses Space (jump) in water.
   if (k === 'c' && exp && exp.set_movedown) exp.set_movedown(1);
@@ -297,30 +368,83 @@ addEventListener('keyup', e => {
   keys[k] = false;
   if (k === ' ' && exp && exp.set_jump) exp.set_jump(0);
   if (k === 'c' && exp && exp.set_movedown) exp.set_movedown(0);
+  if (k === 'control' && exp && exp.set_attack) exp.set_attack(0);
+  // A focused <button>/<summary> fires its click on the Space KEYUP — swallow
+  // the game keys' keyup so jumping can never re-trigger the last clicked
+  // control (the click handlers also blur(); this is the backstop), and a
+  // held-then-released arrow can't scroll either.
+  if (MOVE_KEYS.includes(k)) e.preventDefault();
 });
 
+// No UI control may KEEP focus after a click: a focused button re-triggers on
+// Space/Enter (the 🔊 sound toggle was the known offender — every jump replayed
+// the test SFX). Blur in the bubble phase right after the control acted; the
+// help drawer's <summary> holds focus the same way, so it's covered too. (Tab
+// never moves focus here — it's bound to the menu — so a click is the only way
+// any control gains focus.)
+document.addEventListener('click', e => {
+  const f = e.target.closest && e.target.closest('button, summary');
+  if (f) f.blur();
+});
+
+// Set when the page itself is about to perform an action the browser answers
+// by releasing the pointer lock (fullscreen transitions via F/⛶). The
+// pointerlockchange handler consumes it to tell "we asked for this" apart from
+// "the player pressed Esc" — only the latter opens the in-game menu. The
+// timeout self-clears in case the browser kept the lock (then the flag must
+// not swallow a later real Esc).
+let expectUnlock = false, expectUnlockTimer = 0;
+function pageWillDropLock() {
+  if (!locked()) return;
+  expectUnlock = true;
+  clearTimeout(expectUnlockTimer);
+  expectUnlockTimer = setTimeout(() => { expectUnlock = false; }, 1000);
+}
+
 function toggleFullscreen() {
+  // The F key / ⛶ button is a user gesture — take it for audio too.
+  unlockAudio();
+  // Browsers drop an active pointer lock on fullscreen transitions (both
+  // directions); that loss is OUR doing here, not an Esc — don't open the menu.
+  pageWillDropLock();
   if (document.fullscreenElement) document.exitFullscreen();
   else wrap.requestFullscreen?.();
 }
 fsBtn.addEventListener('click', toggleFullscreen);
 
-// Starting a session from a button drops the click-to-play scrim: the view is
-// watchable immediately (on touch devices requestPointerLock fails silently, so
-// the overlay would otherwise sit over the demo forever — the touchNote promises
-// demo playback works there). Desktop loses nothing: clicking the bare canvas
-// still locks the mouse + unlocks audio (canvas mousedown), and Esc re-shows the
-// overlay via pointerlockchange exactly as before.
+// Entering fullscreen: surface the two-key contract for a moment. The browser
+// RESERVES Esc here and we cannot intercept it: with the mouse captured the
+// first Esc only releases the capture (our pointerlockchange handler then opens
+// the menu — native muscle memory still works), but a SECOND Esc — pointer
+// free — exits fullscreen itself. That second step is the browser's, not ours;
+// F toggles fullscreen deliberately and Tab reaches the menu without ever
+// touching Esc.
+let fsHintTimer = 0;
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) { fsHint.classList.remove('show'); return; }
+  fsHint.classList.add('show');
+  clearTimeout(fsHintTimer);
+  fsHintTimer = setTimeout(() => fsHint.classList.remove('show'), 3000);
+});
+
+// Starting a session from a button is a real gesture: unlock audio with it and
+// retire the click-to-play scrim in the same go — ONE gesture does everything
+// (on touch devices requestPointerLock fails silently, so a scrim that waited
+// for a lock would sit over the demo forever; the touchNote promises demo
+// playback works there). Capturing the mouse stays a plain canvas click away,
+// invited by the #lockChip whenever unlocked walk mode would use it.
 document.getElementById('walkBtn').addEventListener('click', () => {
   if (!exp) return;
+  unlockAudio();
+  hideOverlayForever();
   exp.boot();
-  overlay.classList.add('hidden');
-  statusEl.textContent = 'walking e1m1 — Esc closes the menu · click to lock the mouse · WASD to move';
+  statusEl.textContent = 'walking e1m1 — Esc closes the menu · click the view to capture the mouse · WASD to move';
 });
 document.getElementById('demoBtn').addEventListener('click', () => {
   if (!exp) return;
+  unlockAudio();
+  hideOverlayForever();
   statusEl.textContent = 'loading demo1 (e1m3)…';
-  overlay.classList.add('hidden');
   setTimeout(() => {
     exp.boot_demo();
     statusEl.textContent = "playing demo1 — id's recorded e1m3 run";
@@ -649,18 +773,25 @@ function updateLoopingAudio() {
   }
 }
 
-let started = false, exp = null, dragging = false;
+let exp = null, dragging = false;
 const LOOK_SENS = 0.16;   // degrees per mouse-count
 const TURN_RATE = 150;    // arrow-key turn deg/sec
 
 function locked() { return document.pointerLockElement === canvas; }
 
 canvas.addEventListener('mousedown', (e) => {
-  // First click captures the mouse and starts audio (a required user gesture);
-  // subsequent left-clicks while locked fire the weapon.
-  if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  if (!locked()) { canvas.requestPointerLock?.(); }
+  // Every canvas click is a gesture — keep audio unlocked (the overlay/button
+  // that started the session normally already did).
+  unlockAudio();
+  if (!locked()) {
+    // Capture the mouse only where mouse-look matters: the live walk with no
+    // menu/console up. Demo/attract playback leaves the pointer free (nothing
+    // to aim — and the page's buttons stay one click away); closing the menu
+    // re-captures on the next click, never automatically (browsers require the
+    // gesture). An old wasm without in_walk_mode keeps the lock-anywhere
+    // behaviour (inWalkMode() defaults true).
+    if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
+  }
   else if (e.button === 0 && exp && exp.set_attack) { exp.set_attack(1); }  // fire while locked
   dragging = true;
 });
@@ -668,19 +799,48 @@ addEventListener('mouseup', (e) => {
   dragging = false;
   if (e.button === 0 && exp && exp.set_attack) exp.set_attack(0);
 });
+// The standard web-port Esc pattern. The browser RESERVES Esc while the
+// pointer is locked — the keydown never reaches the page; Esc's only effect is
+// releasing the lock. So when the lock is LOST without the page asking (this
+// page never calls exitPointerLock, so an unexpected loss = the player's Esc,
+// or an equivalent like alt-tab), we supply the native half of the muscle
+// memory: open the in-game menu. From there the pointer is free, so further
+// plain Esc KEYDOWNS are deliverable again and navigate BACK in the menu as
+// the engine expects; closing the menu re-locks on the next canvas click. In
+// fullscreen the same flow holds, because Esc with the lock held releases ONLY
+// the lock — a second Esc (unlocked) then exits fullscreen, the browser's call.
 document.addEventListener('pointerlockchange', () => {
-  overlay.classList.toggle('hidden', locked());
+  if (!locked()) {
+    const pageInitiated = expectUnlock;
+    expectUnlock = false;
+    if (!pageInitiated && inWalkMode() && !menuVisible() && !consoleVisible()
+        && exp && exp.menu_cancel) {
+      exp.menu_cancel();    // menu_cancel OPENS the menu when it is hidden
+    }
+  }
+  syncLockChip();
 });
 overlay.addEventListener('click', () => {
-  // The overlay click IS the user's first gesture: unlock audio with it (same
-  // as the canvas mousedown path — browsers require a gesture to start an
-  // AudioContext), then capture the mouse. Without this, the first
-  // click-to-play locked the pointer but left audio suspended until a second
-  // click reached the canvas.
-  if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  canvas.requestPointerLock?.();
+  // The scrim's only job: the first gesture. (Clicks during the boot/download
+  // panel do nothing — there is no session to reveal yet.)
+  if (!readyToPlay) return;
+  startFromOverlay();
 });
+
+// The non-blocking capture chip: visible only in UNLOCKED walk mode with no
+// menu/console up — exactly the one state where a canvas click would lock the
+// mouse. DOM is touched only on a state flip, so the render loop can sync it
+// every frame (the page can't otherwise observe menu-driven mode changes like
+// New Game). Needs in_walk_mode (certainty, not the inWalkMode() fallback):
+// with an older wasm the chip simply never shows.
+let chipShown = null;
+function syncLockChip() {
+  const show = firstGestureDone && !locked() && walkModeKnown() && !!exp.in_walk_mode()
+    && !menuVisible() && !consoleVisible();
+  if (show === chipShown) return;
+  chipShown = show;
+  lockChip.classList.toggle('show', show);
+}
 
 canvas.addEventListener('mousemove', e => {
   if (!exp) return;
@@ -817,9 +977,11 @@ async function main() {
     saveResolution(W, H);
   }
   syncCanvasSize();
-  // Ready: swap the overlay's boot panel for the click-to-play prompt.
+  // Ready: swap the overlay's boot panel for the click-to-play prompt — the
+  // page's ONE scrim appearance, retired forever by the first gesture.
   bootEl.classList.add('hidden');
   playEl.classList.remove('hidden');
+  readyToPlay = true;
   statusEl.textContent = 'ready — click to play';
 
   let last = performance.now();
@@ -839,6 +1001,7 @@ async function main() {
     drainGameSounds();
     updateLoopingAudio();
     updateSndUI();
+    syncLockChip();
 
     // The render resolution may have changed this frame (Options menu): re-fit the
     // canvas + ImageData to the new size before blitting.
