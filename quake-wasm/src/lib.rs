@@ -731,8 +731,9 @@ fn ensure_app(f: impl FnOnce(&mut App)) {
 #[no_mangle]
 pub extern "C" fn boot() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode so stale
-    // samples can't play after the switch.
+    // samples can't play after the switch (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
+    STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     let w = build_walk();
     let ok = w.is_some();
     ensure_app(|a| {
@@ -761,8 +762,10 @@ pub extern "C" fn boot() -> i32 {
 /// Start recorded-demo playback (demo1.dem / e1m3). Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn boot_demo() -> i32 {
-    // Clean slate: drop any sounds still queued from a previous mode.
+    // Clean slate: drop any sounds still queued from a previous mode
+    // (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
+    STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     let d = build_demo();
     let ok = d.is_some();
     ensure_app(|a| {
@@ -790,8 +793,10 @@ pub extern "C" fn boot_demo() -> i32 {
 /// on a menu over *something* (e1m1) rather than a blank screen.
 #[no_mangle]
 pub extern "C" fn boot_attract() -> i32 {
-    // Clean slate: drop any sounds still queued from a previous mode.
+    // Clean slate: drop any sounds still queued from a previous mode
+    // (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
+    STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     let d = build_demo();
     let built = d.is_some();
     ensure_app(|a| {
