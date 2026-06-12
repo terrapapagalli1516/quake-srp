@@ -21,7 +21,10 @@ use quake_rs::pak::Pak;
 use quake_rs::particles::{Lcg, ParticleSystem};
 use quake_rs::progs::Progs;
 use quake_rs::render::{
-    self, Camera, Console, Menu, MenuAction, MenuPics, ModelInstance, Viewmodel,
+    self, build_gamma_table, Camera, Console, Menu, MenuAction, MenuPics, MenuSound,
+    ModelInstance, Viewmodel, BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON,
+    BIND_FORWARD, BIND_JUMP, BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN,
+    BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP, BIND_RIGHT, BIND_SPEED, BIND_STRAFE,
 };
 use quake_rs::server::{Server, StaticSound, TempEntityEvent, UserCmd};
 use quake_rs::snd::{
@@ -50,7 +53,55 @@ const MAX_W: i32 = 1280;
 const MIN_H: i32 = 200;
 const MAX_H: i32 = 800;
 const MAX_PIXELS: i32 = 1280 * 800;
+/// The legacy analog [`set_move`]/[`set_jump`]/[`set_movedown`] scale (`sv_maxspeed`):
+/// those exports predate the bindings-driven key path and feed tests/automation;
+/// the page's keyboard input goes through [`key_down`]/[`key_up`] and the
+/// faithful `cl_*` move cvars below instead.
 const SPEED: f32 = 320.0;
+
+// --- client move cvars (cl_input.c registrations + CL_BaseMove/CL_AdjustAngles) ---
+// The server clamps wishspeed to sv_maxspeed (320, ported in server.rs), so a
+// 400 run is 320 effective on the ground — exactly WinQuake (walk 200, run 320).
+
+/// `cl_forwardspeed`/`cl_backspeed` ("200"): the walking forward/back rate. The
+/// Options "Always Run" toggle swaps them 200 <-> 400 (menu.c M_AdjustSliders
+/// case 8); the C sets both cvars to the same value there, so one pair suffices.
+const CL_FORWARDSPEED_WALK: f32 = 200.0;
+const CL_FORWARDSPEED_RUN: f32 = 400.0;
+/// `cl_sidespeed` ("350"): the strafe rate — NOT changed by Always Run.
+const CL_SIDESPEED: f32 = 350.0;
+/// `cl_upspeed` ("200"): the swim up/down rate — NOT changed by Always Run.
+const CL_UPSPEED: f32 = 200.0;
+/// `cl_movespeedkey` ("2.0"): the `+speed` modifier multiplies every move.
+const CL_MOVESPEEDKEY: f32 = 2.0;
+/// `cl_yawspeed` ("140") / `cl_pitchspeed` ("150"): keyboard turn/look rates in
+/// deg/sec (CL_AdjustAngles).
+const CL_YAWSPEED: f32 = 140.0;
+const CL_PITCHSPEED: f32 = 150.0;
+/// `cl_anglespeedkey` ("1.5"): `+speed` multiplies the keyboard turn rate.
+const CL_ANGLESPEEDKEY: f32 = 1.5;
+/// `v_centerspeed` ("500", view.c): the pitch-drift rate centerview/lookspring
+/// re-level the view at (V_StartPitchDrift seeds cl.pitchvel with it).
+const V_CENTERSPEED: f32 = 500.0;
+
+// --- mouse cvars (in_win.c IN_MouseMove) -----------------------------------
+
+/// The port's `m_yaw`/`m_pitch` magnitude: degrees of turn per (browser mouse
+/// count x `sensitivity`). DEVIATION (calibration only): the C's m_yaw/m_pitch
+/// are 0.022 deg per Windows mickey; browser `movementX` counts aren't mickeys,
+/// and this port has always shipped a 0.16 deg/count feel at the default
+/// sensitivity 3 — so the constant is 0.16/3. The multiplicative STRUCTURE is
+/// the C's exactly: counts x sensitivity x m_yaw — and the m_pitch SIGN is the
+/// Invert Mouse toggle (`m_pitch.value < 0`).
+const M_YAW_PORT: f32 = 0.16 / 3.0;
+const M_PITCH_PORT: f32 = 0.16 / 3.0;
+/// `m_side` ("0.8"): sidemove units per (count x sensitivity) when mouse X is
+/// routed to strafe (lookstrafe / +strafe). The C's literal value — the result
+/// feeds wishspeed, which sv_maxspeed clamps, so calibration is forgiving.
+const M_SIDE: f32 = 0.8;
+/// `m_forward` ("1.0"): forwardmove units per count while `+strafe` holds mouse
+/// Y out of the pitch path (IN_MouseMove's else branch).
+const M_FORWARD: f32 = 1.0;
 
 /// Clamp a requested `(w, h)` render resolution into the supported envelope:
 /// width `MIN_W..=MAX_W`, height `MIN_H..=MAX_H`, and the total pixel count capped
@@ -71,6 +122,85 @@ fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
         }
     }
     (cw as usize, ch as usize)
+}
+
+/// One frame of bindings-derived keyboard input, computed in `step` from the
+/// held-key table + the menu's binding table and consumed by `step_walk` — a
+/// port of `CL_BaseMove`/`CL_AdjustAngles` (cl_input.c) over this port's
+/// permanently-held key states (`CL_KeyState`'s fractional first-frame impulse
+/// timing needs sub-frame key timestamps the page doesn't deliver; held = 1.0).
+#[derive(Clone, Copy, Default)]
+struct KeyMove {
+    /// `cmd->forwardmove` contribution (cl_forwardspeed/cl_backspeed applied,
+    /// including the Always-Run swap and `cl_movespeedkey`).
+    fwd: f32,
+    /// `cmd->sidemove` contribution (cl_sidespeed; +strafe folds the turn keys in).
+    side: f32,
+    /// `cmd->upmove` contribution (cl_upspeed).
+    up: f32,
+    /// `+attack` held.
+    attack: bool,
+    /// `+jump` held.
+    jump: bool,
+    /// Keyboard turn direction (+1 = `+left`, -1 = `+right`; 0 with `+strafe`
+    /// held — CL_AdjustAngles skips the yaw turn then).
+    turn: f32,
+    /// Keyboard look direction (+1 = `+lookup`, -1 = `+lookdown`).
+    look: f32,
+    /// `+speed` held (cl_movespeedkey / cl_anglespeedkey modifiers).
+    speed: bool,
+}
+
+/// Derive this frame's [`KeyMove`] from the page-held keys through the menu's
+/// binding table (keys.c `keybindings` consulted by `Key_Event`; move math per
+/// `CL_BaseMove` + `CL_AdjustAngles`).
+fn derive_key_move(menu: &Menu, held: &[bool; 256]) -> KeyMove {
+    // CL_KeyState: 1.0 while any key bound to `cmd` is held.
+    let st = |cmd: usize| -> f32 {
+        for (k, &h) in held.iter().enumerate() {
+            if h && menu.action_for_key(k as u8) == Some(cmd) {
+                return 1.0;
+            }
+        }
+        0.0
+    };
+    let speed = st(BIND_SPEED) > 0.0;
+    let strafe = st(BIND_STRAFE) > 0.0;
+    // M_AdjustSliders case 8 ("always run") sets cl_forwardspeed AND
+    // cl_backspeed together, so one value serves both directions.
+    let fwdspeed = if menu.always_run() {
+        CL_FORWARDSPEED_RUN
+    } else {
+        CL_FORWARDSPEED_WALK
+    };
+    let mut fwd = fwdspeed * st(BIND_FORWARD) - fwdspeed * st(BIND_BACK);
+    let mut side = CL_SIDESPEED * (st(BIND_MOVERIGHT) - st(BIND_MOVELEFT));
+    if strafe {
+        // CL_BaseMove: with +strafe held the turn keys strafe instead.
+        side += CL_SIDESPEED * (st(BIND_RIGHT) - st(BIND_LEFT));
+    }
+    // +moveup or +jump push up (the port has always let Space double as swim-up
+    // in water; on land the ground move ignores upmove and +jump still jumps
+    // via button2), +movedown sinks — at cl_upspeed, NOT the run speed.
+    let jump = st(BIND_JUMP) > 0.0;
+    let mut up = CL_UPSPEED * (st(BIND_MOVEUP).max(st(BIND_JUMP)) - st(BIND_MOVEDOWN));
+    if speed {
+        // CL_BaseMove: the speed key multiplies forward/side/up by
+        // cl_movespeedkey.
+        fwd *= CL_MOVESPEEDKEY;
+        side *= CL_MOVESPEEDKEY;
+        up *= CL_MOVESPEEDKEY;
+    }
+    KeyMove {
+        fwd,
+        side,
+        up,
+        attack: st(BIND_ATTACK) > 0.0,
+        jump,
+        turn: if strafe { 0.0 } else { st(BIND_LEFT) - st(BIND_RIGHT) },
+        look: st(BIND_LOOKUP) - st(BIND_LOOKDOWN),
+        speed,
+    }
 }
 
 /// Interactive walk state: a live server ticked every frame, rendered from the
@@ -140,6 +270,24 @@ struct Walk {
     /// to the next `step_walk` UserCmd then cleared — matching how Quake's
     /// `impulse` console command fires once. 0 means "no impulse this frame".
     next_impulse: i32,
+    /// This frame's bindings-derived keyboard input (CL_BaseMove/CL_AdjustAngles
+    /// over the page-held keys), refreshed by `step` before `step_walk` runs.
+    key_move: KeyMove,
+    /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
+    /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
+    /// mouse X away from yaw). Drained into the next UserCmd then cleared.
+    mouse_side: f32,
+    /// Accumulated mouse forwardmove units (IN_MouseMove's else branch:
+    /// `cmd->forwardmove -= m_forward.value * mouse_y` while +strafe holds mouse
+    /// Y out of the pitch path). Drained like `mouse_side`.
+    mouse_fwd: f32,
+    /// Pitch drift active (view.c `!cl.nodrift`): centerview or a lookspring
+    /// pointer-unlock started it; the view re-levels at `pitch_vel` deg/sec until
+    /// it reaches 0 or mouse/keyboard look stops it (V_StopPitchDrift).
+    pitch_drift: bool,
+    /// `cl.pitchvel` — the drift rate, seeded with [`V_CENTERSPEED`] and
+    /// accelerated by it each second while drifting (V_DriftPitch).
+    pitch_vel: f32,
     /// Full-screen damage-flash intensity (Quake's `CSHIFT_DAMAGE` percent,
     /// 0..150): bumped when the player loses health/armour and faded each frame.
     damage_blend: f32,
@@ -329,6 +477,19 @@ struct App {
     render_w: usize,
     render_h: usize,
     fb: Vec<u8>, // RGBA, render_w*render_h*4
+    /// The page-held key states by Quake keynum (keys.c `keydown[256]`), fed by
+    /// [`key_down`]/[`key_up`]. Mode-independent (held keys survive a level
+    /// change) and consulted through the menu's binding table each `step`.
+    keys_held: [bool; 256],
+    /// The gamma the current [`App::gamma_table`] was built for (V_CheckGamma's
+    /// `oldgammavalue`): the table rebuilds only when the menu's `v_gamma`
+    /// actually changes.
+    gamma_value: f32,
+    /// The 256-entry gamma LUT (view.c `gammatable`), applied where the finished
+    /// frame is packed into the presented RGBA framebuffer — the port's
+    /// hardware-palette boundary (`VID_ShiftPalette`). Identity at gamma 1.0,
+    /// where the pack skips it entirely (byte-exact default).
+    gamma_table: [u8; 256],
 }
 
 impl App {
@@ -460,6 +621,12 @@ fn load_menu_pics(
         ttl_sgl: lmp("gfx/ttl_sgl.lmp"),
         sp_menu: lmp("gfx/sp_menu.lmp"),
         p_option: lmp("gfx/p_option.lmp"),
+        p_load: lmp("gfx/p_load.lmp"),
+        p_save: lmp("gfx/p_save.lmp"),
+        p_multi: lmp("gfx/p_multi.lmp"),
+        mp_menu: lmp("gfx/mp_menu.lmp"),
+        ttl_cstm: lmp("gfx/ttl_cstm.lmp"),
+        vidmodes: lmp("gfx/vidmodes.lmp"),
         menudot,
         help,
     };
@@ -539,6 +706,12 @@ fn assemble_walk(
         in_jump: false,
         in_down: false,
         next_impulse: 0,
+        // Bindings-driven input state (CL_BaseMove derivation; ship/options-menu).
+        key_move: KeyMove::default(),
+        mouse_side: 0.0,
+        mouse_fwd: 0.0,
+        pitch_drift: false,
+        pitch_vel: 0.0,
         damage_blend: 0.0,
         damage_color: [255, 0, 0],
         last_health: f32::NAN,
@@ -734,6 +907,9 @@ fn ensure_app(f: impl FnOnce(&mut App)) {
                 render_w: DEFAULT_W,
                 render_h: DEFAULT_H,
                 fb: vec![0u8; DEFAULT_W * DEFAULT_H * 4],
+                keys_held: [false; 256],
+                gamma_value: 1.0,
+                gamma_table: build_gamma_table(1.0),
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
@@ -979,6 +1155,7 @@ pub extern "C" fn menu_select() {
     // afterward so we don't hold a &mut Walk while replacing it.
     let mut start_new_game = false;
     let mut new_size: Option<(usize, usize)> = None;
+    let mut slot_action: Option<(bool, usize)> = None; // (is_save, slot)
     ensure_app(|a| {
         if a.menu.visible {
             match a.menu.select() {
@@ -1002,19 +1179,12 @@ pub extern "C" fn menu_select() {
                     // live by the host each frame, so nothing else to do.
                     a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
                 }
-                // ============== SAVE/LOAD MENU SEAM (do not remove) ==========
-                // A sibling branch adds the M_Load/M_Save menu screens, which
-                // dispatch MenuAction::SaveSlot(i) / MenuAction::LoadSlot(i)
-                // (slot i in 0..12, the C's "s%i.sav" naming). The HOST side is
-                // already live behind the console commands; wiring is one call
-                // each — they must run OUTSIDE this borrow (load swaps the
-                // Walk), so route them like start_new_game:
-                //   MenuAction::SaveSlot(i) => do_save_command(Some(&format!("s{i}")))
-                //   MenuAction::LoadSlot(i) => do_load_command(Some(&format!("s{i}")))
-                // Slot comments for the listings come from the page (it owns
-                // localStorage): sav_alloc() + extract_save_comment() /
-                // save_comment_ptr() per stored slot.
-                // =============================================================
+                // Save/Load menu slots -> the Host_Savegame_f/Host_Loadgame_f
+                // port, via the same console-command path (`save sN`/`load sN`,
+                // the C's "s%i.sav" naming). Executed OUTSIDE this borrow:
+                // a load swaps the whole Walk (like start_new_game).
+                MenuAction::SaveSlot(i) => slot_action = Some((true, i)),
+                MenuAction::LoadSlot(i) => slot_action = Some((false, i)),
                 // Closed/Back/None already applied to the menu state inside
                 // select(); nothing else for the host to do.
                 _ => {}
@@ -1023,6 +1193,17 @@ pub extern "C" fn menu_select() {
     });
     if let Some((w, h)) = new_size {
         ensure_app(|a| a.set_render_size(w, h));
+    }
+    if let Some((is_save, i)) = slot_action {
+        // Menu slot -> the same path as the console `save sN` / `load sN`
+        // (Host_Savegame_f/Host_Loadgame_f port). Runs outside the borrow:
+        // a successful load replaces the Walk.
+        let name = format!("s{i}");
+        if is_save {
+            do_save_command(Some(&name));
+        } else {
+            do_load_command(Some(&name));
+        }
     }
     if start_new_game {
         // Fresh single-player game on the start hub (NEW_GAME_MAP). Rebuild the
@@ -1120,6 +1301,185 @@ fn menu_adjust(delta: i32) {
     }
 }
 
+/// Backspace/Del while the menu is up: on the Customize-controls screen this
+/// unbinds the highlighted command (`M_Keys_Key` K_BACKSPACE/K_DEL); on every
+/// other screen it is a no-op (the engine gates it).
+#[no_mangle]
+pub extern "C" fn menu_backspace() {
+    ensure_app(|a| {
+        if a.menu.visible {
+            a.menu.keys_backspace();
+        }
+    });
+}
+
+/// 1 while the Keys screen is waiting for the next key to bind (`bind_grab`,
+/// menu.c). The page reads this to route the NEXT raw keypress to
+/// [`menu_bind_key`] instead of menu navigation.
+#[no_mangle]
+pub extern "C" fn menu_bind_grabbing() -> i32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|a| (a.menu.visible && a.menu.bind_grabbing()) as i32)
+            .unwrap_or(0)
+    })
+}
+
+/// Deliver the grabbed key to the Keys screen (`M_Keys_Key`, the `bind_grab`
+/// branch): Quake keynum in `0..256`. Escape cancels, backtick is refused, any
+/// other key binds to the highlighted command; the grab ends either way. A
+/// no-op when nothing is grabbing.
+#[no_mangle]
+pub extern "C" fn menu_bind_key(keynum: i32) {
+    if !(0..256).contains(&keynum) {
+        return;
+    }
+    ensure_app(|a| {
+        if a.menu.visible {
+            a.menu.bind_key(keynum as u8);
+        }
+    });
+}
+
+// --- bindings-driven game keys (keys.c Key_Event -> keybindings consult) -----
+
+/// A game key went down, by Quake keynum (keys.h: printable ASCII is itself
+/// lowercase; arrows/modifiers take the 128+ block; mouse buttons 200+). The
+/// held state feeds the per-frame `CL_BaseMove` derivation through the menu's
+/// binding table; the non-`+` commands (`impulse 10`, `centerview`) fire their
+/// one-shot here like `Key_Event`'s command dispatch. The page must not route
+/// keys here while the menu/console own the keyboard (`key_dest != key_game`) —
+/// and the engine gates the one-shots regardless.
+#[no_mangle]
+pub extern "C" fn key_down(keynum: i32) {
+    if !(0..256).contains(&keynum) {
+        return;
+    }
+    ensure_app(|a| {
+        a.keys_held[keynum as usize] = true;
+        if a.menu.visible || a.console.open {
+            return; // key_dest != key_game: no command dispatch.
+        }
+        match a.menu.action_for_key(keynum as u8) {
+            Some(BIND_CHANGEWEAPON) => {
+                // "impulse 10": queue the next-weapon impulse once, like the
+                // console command (Cbuf -> IN_Impulse).
+                if let Some(w) = a.walk.as_mut() {
+                    w.next_impulse = 10;
+                }
+            }
+            Some(BIND_CENTERVIEW) => {
+                // "centerview" -> V_StartPitchDrift (view.c): seed the drift.
+                if let Some(w) = a.walk.as_mut() {
+                    if !w.pitch_drift || w.pitch_vel == 0.0 {
+                        w.pitch_vel = V_CENTERSPEED;
+                        w.pitch_drift = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+/// A game key went up, by Quake keynum. Always honoured — even while the
+/// menu/console are up — so a key released behind an overlay can never stick
+/// held (Key_Event delivers key-ups to `+` commands regardless of key_dest).
+#[no_mangle]
+pub extern "C" fn key_up(keynum: i32) {
+    if !(0..256).contains(&keynum) {
+        return;
+    }
+    ensure_app(|a| {
+        a.keys_held[keynum as usize] = false;
+    });
+}
+
+/// Raw mouse deltas (browser `movementX`/`movementY` counts) — a port of
+/// IN_MouseMove (in_win.c): counts scale by the `sensitivity` cvar; mouse X
+/// turns yaw, OR strafes (`m_side`) while `lookstrafe` is on or `+strafe` is
+/// held; mouse Y drives pitch (sign = Invert Mouse, `m_pitch.value < 0`),
+/// clamped 80/-70, OR feeds forwardmove (`m_forward`) while `+strafe` holds it
+/// out of the pitch path. Mouse-look is permanent under pointer lock (`+mlook`
+/// held), so any motion stops an active pitch drift (V_StopPitchDrift). Gated
+/// behind the menu/console like `look`.
+#[no_mangle]
+pub extern "C" fn mouse_move(dx: f32, dy: f32) {
+    ensure_app(|a| {
+        if a.menu.visible || a.console.open {
+            return;
+        }
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
+        }
+        // mouse_x *= sensitivity.value (the raw 1..11 cvar, like the C — the
+        // 0.16/3 port calibration lives in M_YAW_PORT/M_PITCH_PORT).
+        let mx = dx * a.menu.sensitivity();
+        let my = dy * a.menu.sensitivity();
+        let strafe_held = a
+            .keys_held
+            .iter()
+            .enumerate()
+            .any(|(k, &h)| h && a.menu.action_for_key(k as u8) == Some(BIND_STRAFE));
+        let lookstrafe = a.menu.lookstrafe();
+        let invert = a.menu.invert_mouse();
+        if let Some(w) = a.walk.as_mut() {
+            // if (in_strafe || (lookstrafe && in_mlook)) sidemove += m_side*mx
+            // else viewangles[YAW] -= m_yaw*mx. (+mlook is always held here.)
+            if strafe_held || lookstrafe {
+                w.mouse_side += M_SIDE * mx;
+            } else {
+                w.yaw -= M_YAW_PORT * mx;
+            }
+            // if (in_mlook) V_StopPitchDrift() — every mlook mouse move.
+            w.pitch_drift = false;
+            w.pitch_vel = 0.0;
+            // if (in_mlook && !in_strafe) pitch += m_pitch*my (clamped 80/-70)
+            // else forwardmove -= m_forward*my.
+            if !strafe_held {
+                let m_pitch = if invert { -M_PITCH_PORT } else { M_PITCH_PORT };
+                w.pitch = clamp_pitch(w.pitch + m_pitch * my);
+            } else {
+                w.mouse_fwd -= M_FORWARD * my;
+            }
+        }
+    });
+}
+
+/// The pointer lock was released. This port's `+mlook` is permanently held
+/// while the pointer is locked, so unlock IS the mlook release — the faithful
+/// `lookspring` trigger (`IN_MLookUp`, cl_input.c: when `+mlook` releases and
+/// `lookspring.value` is set, `V_StartPitchDrift()` re-centres the view).
+#[no_mangle]
+pub extern "C" fn pointer_unlocked() {
+    ensure_app(|a| {
+        if !a.menu.lookspring() {
+            return;
+        }
+        if let Some(w) = a.walk.as_mut() {
+            // V_StartPitchDrift (view.c): seed pitchvel, clear nodrift.
+            if !w.pitch_drift || w.pitch_vel == 0.0 {
+                w.pitch_vel = V_CENTERSPEED;
+                w.pitch_drift = true;
+            }
+        }
+    });
+}
+
+/// The player's current look pitch in degrees (+down, Quake convention) — a
+/// read-only verification/debug export (the browser checks Invert Mouse and
+/// lookspring flip/centre the pitch through it). 0 when no walk is live.
+#[no_mangle]
+pub extern "C" fn player_pitch() -> f32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|a| a.walk.as_ref().map(|w| w.pitch))
+            .unwrap_or(0.0)
+    })
+}
+
 /// The Options "Mouse speed" as a sensitivity multiplier (default 1.0). The page
 /// multiplies its baseline look sensitivity by this. Reads from the App-level menu;
 /// 1.0 when the app has not been created yet.
@@ -1143,6 +1503,31 @@ pub extern "C" fn volume() -> f32 {
             .as_ref()
             .map(|a| a.menu.volume())
             .unwrap_or(1.0)
+    })
+}
+
+/// The menu screen currently showing, as a stable id — a read-only
+/// verification/debug export (the browser checks the screen transitions:
+/// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
+/// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit.
+#[no_mangle]
+pub extern "C" fn menu_screen_id() -> i32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|a| match a.menu.screen() {
+                render::MenuScreen::Main => 0,
+                render::MenuScreen::SinglePlayer => 1,
+                render::MenuScreen::Load => 2,
+                render::MenuScreen::Save => 3,
+                render::MenuScreen::Multiplayer => 4,
+                render::MenuScreen::Options => 5,
+                render::MenuScreen::Keys => 6,
+                render::MenuScreen::Video => 7,
+                render::MenuScreen::Help => 8,
+                render::MenuScreen::Quit => 9,
+            })
+            .unwrap_or(0)
     })
 }
 
@@ -1528,6 +1913,19 @@ pub extern "C" fn step(dt: f32) {
         // gameplay input regardless. The console takes priority over the menu.
         let menu_visible = a.menu.visible;
         let gate_gameplay = menu_visible || a.console.open;
+        // Keep the menu's M_Menu_Save_f gate current: a local single-player game
+        // is running when walk mode is live and not in intermission (`sv.active
+        // && !cl.intermission && svs.maxclients == 1` — always 1 client here).
+        let game_active =
+            a.mode == 0 && a.walk.as_ref().map(|wk| wk.intermission == 0).unwrap_or(false);
+        a.menu.set_game_active(game_active);
+        // Derive this frame's bindings-driven keyboard input (CL_BaseMove over
+        // keys.c's keybindings) and hand it to the walk; step_walk zeroes it
+        // while gameplay is gated.
+        let km = derive_key_move(&a.menu, &a.keys_held);
+        if let Some(wk) = a.walk.as_mut() {
+            wk.key_move = km;
+        }
         // Each mode returns its frame plus a DEFERRED screen blend (color, alpha):
         // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it
         // after the HUD/menu/console have composited, not just over the 3D view.
@@ -1609,13 +2007,37 @@ pub extern "C" fn step(dt: f32) {
         }
 
         if let Some(img) = img {
+            // V_CheckGamma (view.c): rebuild the gamma LUT only when the cvar
+            // actually changed since the last frame.
+            let g = a.menu.gamma();
+            if g != a.gamma_value {
+                a.gamma_value = g;
+                a.gamma_table = build_gamma_table(g);
+            }
             let fb = &mut a.fb;
             fb.clear();
-            for px in &img.rgb {
-                fb.push(px[0]);
-                fb.push(px[1]);
-                fb.push(px[2]);
-                fb.push(255);
+            if a.gamma_value == 1.0 {
+                // BuildGammaTable's g == 1.0 identity: skip the LUT entirely so
+                // the default presentation stays byte-exact.
+                for px in &img.rgb {
+                    fb.push(px[0]);
+                    fb.push(px[1]);
+                    fb.push(px[2]);
+                    fb.push(255);
+                }
+            } else {
+                // The port's hardware-palette boundary (VID_ShiftPalette): the
+                // finished, cshift-blended frame maps through gammatable as it
+                // becomes the presented RGBA — the same order as the C, where
+                // V_UpdatePalette blends the cshifts into the palette FIRST and
+                // gamma is applied to the result.
+                let t = &a.gamma_table;
+                for px in &img.rgb {
+                    fb.push(t[px[0] as usize]);
+                    fb.push(t[px[1] as usize]);
+                    fb.push(t[px[2] as usize]);
+                    fb.push(255);
+                }
             }
         }
     });
@@ -1690,6 +2112,13 @@ thread_local! {
     /// of appending them every frame up to the 12-cap — otherwise a backlog of
     /// stale sounds from before audio started would all play at once when it does.
     static AUDIO_READY: RefCell<bool> = const { RefCell::new(false) };
+    /// Pending menu `S_LocalSound`s (menu1/menu2/menu3), drained from the menu
+    /// by [`poll_menu_sound`]. Only fills while audio is ready (same
+    /// no-backlog rule as `queue_sounds`).
+    static MENU_SND_QUEUE: RefCell<Vec<MenuSound>> = const { RefCell::new(Vec::new()) };
+    /// The three menu WAV payloads, loaded from the pak once on first use and
+    /// cached (keyed [menu1, menu2, menu3]); `None` = not yet tried.
+    static MENU_WAVS: RefCell<[Option<Vec<u8>>; 3]> = const { RefCell::new([None, None, None]) };
 }
 
 /// Page hook (LOW-10): set once the browser `AudioContext` has resumed to the
@@ -1835,6 +2264,70 @@ pub extern "C" fn poll_sound() -> i32 {
             let len = bytes.len() as i32;
             SND.with(|s| *s.borrow_mut() = bytes);
             SND_CUR.with(|p| *p.borrow_mut() = params);
+            len
+        }
+        None => 0,
+    }
+}
+
+/// Pop the next queued MENU sound (menu.c's `S_LocalSound` triggers: menu1 on
+/// cursor moves, menu2 on enter/select, menu3 on slider adjusts) into the
+/// shared sound scratch and return its WAV byte length (0 when none). The page
+/// polls this each frame alongside [`poll_sound`] and plays the bytes per
+/// `S_LocalSound` semantics (snd_dma.c: `S_StartSound(cl.viewentity, -1, sfx,
+/// vec3_origin, 1, 1)` — full volume, centred, no distance falloff; the page's
+/// master volume still scales it, like the C mixer's `volume.value`). Works in
+/// EVERY mode (the menu overlays the attract demo too). While the page hasn't
+/// reported audio running ([`set_audio_ready`]), queued menu sounds are
+/// discarded instead — the same no-backlog rule as `queue_sounds`.
+#[no_mangle]
+pub extern "C" fn poll_menu_sound() -> i32 {
+    // Drain the menu's queue into the local one (or the bin, pre-audio).
+    let ready = AUDIO_READY.with(|r| *r.borrow());
+    ensure_app(|a| {
+        let queued = a.menu.take_sounds();
+        if ready && !queued.is_empty() {
+            MENU_SND_QUEUE.with(|q| {
+                let mut q = q.borrow_mut();
+                for s in queued {
+                    if q.len() < 16 {
+                        q.push(s);
+                    }
+                }
+            });
+        }
+    });
+    if !ready {
+        return 0;
+    }
+    let next = MENU_SND_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
+    });
+    let Some(snd) = next else { return 0 };
+    let slot = match snd {
+        MenuSound::Menu1 => 0,
+        MenuSound::Menu2 => 1,
+        MenuSound::Menu3 => 2,
+    };
+    // Load-once cache: the C's S_PrecacheSound holds these three resident.
+    let bytes = MENU_WAVS.with(|w| {
+        let mut w = w.borrow_mut();
+        if w[slot].is_none() {
+            // S_LoadSound: sprintf(namebuffer, "sound/%s", s->name).
+            w[slot] = pak()
+                .and_then(|p| p.read_file(&format!("sound/{}", snd.sample())).ok().flatten());
+        }
+        w[slot].clone()
+    });
+    match bytes {
+        Some(b) => {
+            let len = b.len() as i32;
+            SND.with(|s| *s.borrow_mut() = b);
             len
         }
         None => 0,
@@ -2939,29 +3432,89 @@ fn step_walk(
     //    player neither moves, fires, nor switches weapons. We send a zeroed
     //    UserCmd at the current view angles (Quake's `key_dest == key_menu` stops
     //    feeding the movement/attack/impulse commands the same way).
+    // The bindings-driven keyboard input `step` derived this frame; zeroed while
+    // the menu/console gate gameplay (key_dest != key_game).
+    let km = if menu_up { KeyMove::default() } else { w.key_move };
+
+    // CL_AdjustAngles (cl_input.c), run before CL_BaseMove builds the cmd like
+    // CL_SendMove does: the keyboard turn/look keys move the view angles at
+    // cl_yawspeed/cl_pitchspeed deg/sec (x cl_anglespeedkey with +speed held).
+    if dt.is_finite() && dt > 0.0 {
+        let aspeed = dt * if km.speed { CL_ANGLESPEEDKEY } else { 1.0 };
+        w.yaw += aspeed * CL_YAWSPEED * km.turn;
+        if km.look != 0.0 {
+            // PITCH -= speed*cl_pitchspeed*up (look up = pitch down numerically);
+            // "if (up || down) V_StopPitchDrift()"; clamp 80/-70 (clamp_pitch).
+            w.pitch = clamp_pitch(w.pitch - aspeed * CL_PITCHSPEED * km.look);
+            w.pitch_drift = false;
+            w.pitch_vel = 0.0;
+        }
+        // V_DriftPitch (view.c), the active-drift arm: centerview / a lookspring
+        // pointer-unlock seeded pitch_vel and the view re-levels toward the
+        // ideal pitch. SIMPLIFICATION: cl.idealpitch is fixed at 0 here (the C
+        // computes a walking idealpitch from ground slope; this port never
+        // does, so level is the only ideal) and the C's nodrift/driftmove
+        // re-arm bookkeeping is unneeded — drifting starts only at the two
+        // explicit triggers. The velocity integration matches the C: move =
+        // frametime*pitchvel, pitchvel += frametime*v_centerspeed, overshoot
+        // clamps to the target and stops.
+        if w.pitch_drift && !menu_up {
+            let delta = -w.pitch; // idealpitch (0) - viewangles[PITCH]
+            if delta == 0.0 {
+                w.pitch_vel = 0.0;
+                w.pitch_drift = false;
+            } else {
+                let mut mv = dt * w.pitch_vel;
+                w.pitch_vel += dt * V_CENTERSPEED;
+                if mv > delta.abs() {
+                    mv = delta.abs();
+                    w.pitch_vel = 0.0;
+                    w.pitch_drift = false;
+                }
+                w.pitch += mv * delta.signum();
+            }
+        }
+    }
+
+    // The legacy analog set_move fractions (tests/automation), normalised so a
+    // diagonal can't exceed 1, at the old fixed 320 scale.
     let (mut fwd, mut side) = if menu_up { (0.0, 0.0) } else { (w.in_fwd, w.in_side) };
     let mag = (fwd * fwd + side * side).sqrt();
     if mag > 1.0 {
         fwd /= mag;
         side /= mag;
     }
+    // IN_MouseMove's accumulated sidemove/forwardmove contributions (lookstrafe
+    // / +strafe routing). Take them even when gated so a stale accumulation
+    // can't fire after the menu closes (mouse_move is gated too, so these are
+    // zero behind an overlay anyway).
+    let mouse_side = std::mem::take(&mut w.mouse_side);
+    let mouse_fwd = std::mem::take(&mut w.mouse_fwd);
     let cmd = UserCmd {
-        forwardmove: fwd * SPEED,
-        sidemove: side * SPEED,
+        // CL_BaseMove composition: keyboard (km, real cl_* cvar speeds) +
+        // mouse strafe units + the legacy analog path. The server's
+        // SV_AirMove clamps wishspeed to sv_maxspeed exactly like the C.
+        forwardmove: fwd * SPEED + km.fwd + if menu_up { 0.0 } else { mouse_fwd },
+        sidemove: side * SPEED + km.side + if menu_up { 0.0 } else { mouse_side },
         // Vertical swim intent: Space (jump) = up, c (movedown) = down. Quake's
         // SV_WaterMove consumes upmove while waist-deep; the ground/air move
         // ignores it, so on land Space still just jumps and c does nothing.
-        upmove: if menu_up {
-            0.0
-        } else {
-            ((if w.in_jump { 1.0 } else { 0.0 }) - (if w.in_down { 1.0 } else { 0.0 })) * SPEED
-        },
+        // The legacy set_jump/set_movedown booleans keep their old 320 scale;
+        // the key path contributes at cl_upspeed via km.up.
+        upmove: km.up
+            + if menu_up {
+                0.0
+            } else {
+                ((if w.in_jump { 1.0 } else { 0.0 }) - (if w.in_down { 1.0 } else { 0.0 }))
+                    * SPEED
+            },
         yaw: w.yaw,
         pitch: w.pitch,
         buttons: if menu_up {
             0
         } else {
-            (if w.in_attack { 1 } else { 0 }) | (if w.in_jump { 2 } else { 0 })
+            (if w.in_attack || km.attack { 1 } else { 0 })
+                | (if w.in_jump || km.jump { 2 } else { 0 })
         },
         impulse: if menu_up { 0 } else { w.next_impulse },
     };
@@ -6921,6 +7474,361 @@ mod tests {
         // Garbage in the scratch -> 0, no panic.
         SAV_BUF.with(|b| *b.borrow_mut() = b"not a save".to_vec());
         assert_eq!(extract_save_comment(), 0);
+    }
+
+    // --- Options-menu liveness: sounds, keys, video, load/save, gamma --------
+
+    /// The menu screen currently showing (test-side peek at the App menu).
+    fn menu_screen() -> render::MenuScreen {
+        APP.with(|c| c.borrow().as_ref().unwrap().menu.screen())
+    }
+
+    /// Drain the engine-side menu-sound queue completely (returns the drained
+    /// WAV payload lengths, in order).
+    fn drain_menu_sounds() -> Vec<i32> {
+        let mut out = Vec::new();
+        loop {
+            let len = poll_menu_sound();
+            if len <= 0 {
+                break;
+            }
+            out.push(len);
+        }
+        out
+    }
+
+    #[test]
+    fn poll_menu_sound_serves_the_real_wavs_and_respects_audio_gate() {
+        assert_eq!(boot_attract(), 1);
+        set_audio_ready(1);
+        MENU_SND_QUEUE.with(|q| q.borrow_mut().clear());
+        drain_menu_sounds(); // flush whatever boot queued (the open's menu2)
+
+        // A cursor move queues misc/menu1.wav — the exact pak bytes.
+        menu_down();
+        let len = poll_menu_sound();
+        assert!(len > 0, "menu navigation queues a local sound");
+        let served = SND.with(|s| s.borrow().clone());
+        let pak = pak().unwrap();
+        let menu1 = pak.read_file("sound/misc/menu1.wav").unwrap().unwrap();
+        assert_eq!(served, menu1, "cursor move serves misc/menu1.wav byte-for-byte");
+        assert_eq!(poll_menu_sound(), 0, "queue drained");
+
+        // Entering a submenu queues misc/menu2.wav (m_entersound).
+        menu_up(); // back onto item 0
+        drain_menu_sounds();
+        menu_select(); // -> SinglePlayer
+        let len = poll_menu_sound();
+        assert!(len > 0);
+        let served = SND.with(|s| s.borrow().clone());
+        let menu2 = pak.read_file("sound/misc/menu2.wav").unwrap().unwrap();
+        assert_eq!(served, menu2, "Enter serves misc/menu2.wav");
+        drain_menu_sounds();
+
+        // While audio isn't ready, queued menu sounds are DISCARDED (the
+        // queue_sounds no-backlog rule), not saved up.
+        set_audio_ready(0);
+        menu_down();
+        assert_eq!(poll_menu_sound(), 0, "no sound while audio is down");
+        set_audio_ready(1);
+        assert_eq!(poll_menu_sound(), 0, "pre-audio sounds were dropped, not queued");
+    }
+
+    #[test]
+    fn key_down_drives_movement_through_bindings_and_always_run_swaps_speeds() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+
+        // Default binding: w = +forward at cl_forwardspeed 200.
+        key_down(i32::from(b'w'));
+        step(0.05);
+        let fwd_walk = walk_mut(|w| w.key_move.fwd);
+        assert_eq!(fwd_walk, 200.0, "+forward walks at cl_forwardspeed 200");
+
+        // Hold +speed (Shift, default.cfg): cl_movespeedkey doubles it.
+        key_down(134); // K_SHIFT
+        step(0.05);
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 400.0, "+speed doubles via cl_movespeedkey");
+        key_up(134);
+
+        // Always Run (Options row 8) swaps cl_forwardspeed to 400.
+        menu_cancel(); // open the menu
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options (Main cursor 2)
+        for _ in 0..8 {
+            menu_down(); // ROW_ALWAYSRUN (M_AdjustSliders case 8)
+        }
+        menu_right(); // toggle on
+        menu_cancel(); // Options -> Main
+        menu_cancel(); // Main -> closed
+        assert_eq!(menu_visible(), 0);
+        step(0.05);
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 400.0, "Always Run raises the walk to 400");
+        // The player really moves (the server clamps wishspeed to sv_maxspeed
+        // 320, so 400 is 320 effective — exactly WinQuake's run).
+        let (x0, y0) = (listener_x(), listener_y());
+        for _ in 0..20 {
+            step(0.05);
+        }
+        let dist = ((listener_x() - x0).powi(2) + (listener_y() - y0).powi(2)).sqrt();
+        assert!(dist > 100.0, "held +forward displaces the player (moved {dist:.1}u)");
+
+        // Releasing the key stops the contribution.
+        key_up(i32::from(b'w'));
+        step(0.05);
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 0.0, "key_up ends +forward");
+    }
+
+    #[test]
+    fn invert_mouse_flips_pitch_and_lookspring_recentres_on_unlock() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+
+        // Mouse pulled down (positive movementY) looks DOWN (positive pitch).
+        walk_mut(|w| w.pitch = 0.0);
+        mouse_move(0.0, 100.0);
+        let p = player_pitch();
+        assert!(p > 0.0, "non-inverted mouse-down looks down (pitch {p})");
+
+        // Toggle Invert Mouse (Options row 9): the m_pitch sign flips.
+        menu_cancel();
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options
+        for _ in 0..9 {
+            menu_down(); // ROW_INVERTMOUSE (M_AdjustSliders case 9)
+        }
+        menu_right();
+        menu_cancel();
+        menu_cancel();
+        walk_mut(|w| w.pitch = 0.0);
+        mouse_move(0.0, 100.0);
+        let p = player_pitch();
+        assert!(p < 0.0, "inverted mouse-down looks up (pitch {p})");
+
+        // Lookspring OFF: pointer unlock leaves the pitch alone.
+        walk_mut(|w| w.pitch = -40.0);
+        pointer_unlocked();
+        for _ in 0..10 {
+            step(0.05);
+        }
+        assert_eq!(player_pitch(), -40.0, "no lookspring, no recentre");
+
+        // Lookspring ON (row 10): unlock starts the V_StartPitchDrift recentre.
+        menu_cancel();
+        menu_down();
+        menu_down();
+        menu_select();
+        for _ in 0..10 {
+            menu_down(); // ROW_LOOKSPRING (M_AdjustSliders case 10)
+        }
+        menu_right();
+        menu_cancel();
+        menu_cancel();
+        walk_mut(|w| w.pitch = -40.0);
+        pointer_unlocked();
+        for _ in 0..30 {
+            step(0.05);
+        }
+        let p = player_pitch();
+        assert!(p.abs() < 0.5, "lookspring recentred the view (pitch {p})");
+        // ...and a mouse move stops an in-flight drift (V_StopPitchDrift).
+        walk_mut(|w| w.pitch = -40.0);
+        pointer_unlocked();
+        mouse_move(0.0, 1.0);
+        for _ in 0..10 {
+            step(0.05);
+        }
+        assert!(player_pitch() < -30.0, "mlook motion stops the drift");
+    }
+
+    #[test]
+    fn lookstrafe_routes_mouse_x_to_sidemove() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+
+        // Default: mouse X turns (yaw changes, no sidemove accumulates).
+        let yaw0 = walk_mut(|w| w.yaw);
+        mouse_move(100.0, 0.0);
+        assert!(walk_mut(|w| w.yaw) < yaw0, "mouse-right turns right (yaw -= m_yaw*mx)");
+        assert_eq!(walk_mut(|w| w.mouse_side), 0.0);
+
+        // Lookstrafe ON (Options row 11): mouse X strafes instead.
+        menu_cancel();
+        menu_down();
+        menu_down();
+        menu_select();
+        for _ in 0..11 {
+            menu_down(); // ROW_LOOKSTRAFE (M_AdjustSliders case 11)
+        }
+        menu_right();
+        menu_cancel();
+        menu_cancel();
+        let yaw1 = walk_mut(|w| w.yaw);
+        mouse_move(100.0, 0.0);
+        assert_eq!(walk_mut(|w| w.yaw), yaw1, "lookstrafe holds the yaw still");
+        // sidemove += m_side * (mx * sensitivity 3) = 0.8 * 300 = 240.
+        assert_eq!(walk_mut(|w| w.mouse_side), 240.0, "mouse X became sidemove units");
+        // The accumulator drains into the next frame's cmd.
+        step(0.05);
+        assert_eq!(walk_mut(|w| w.mouse_side), 0.0, "step drained the strafe units");
+    }
+
+    #[test]
+    fn video_menu_applies_a_preset_through_the_resolution_plumbing() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        set_resolution(320, 200); // preset 0
+        // boot() opened the menu on Main. Navigate: Options (cursor 2) ->
+        // Video Options (row 12) -> down one mode -> Enter applies it.
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options
+        for _ in 0..12 {
+            menu_down(); // ROW_VIDEO
+        }
+        menu_select(); // -> Video mode list (cursor on the current preset, 0)
+        assert_eq!(menu_screen(), render::MenuScreen::Video);
+        menu_down(); // preset 1 = 480x300
+        menu_select(); // VID_MenuKey K_ENTER -> VID_SetMode
+        assert_eq!((width(), height()), (480, 300), "Enter applied the highlighted mode");
+        assert_eq!(menu_screen(), render::MenuScreen::Video, "the list stays up");
+        // Esc returns to Options (VID_MenuKey K_ESCAPE -> M_Menu_Options_f).
+        menu_cancel();
+        assert_eq!(menu_screen(), render::MenuScreen::Options);
+    }
+
+    #[test]
+    fn load_save_screens_gate_and_emit_actions_via_exports() {
+        reset_queue();
+        // ATTRACT (demo) mode: no game running -> Save refuses to open.
+        assert_eq!(boot_attract(), 1);
+        step(0.05); // sync game_active (mode 1 -> false)
+        menu_select(); // Main item 0 -> SinglePlayer
+        menu_down();
+        menu_down(); // cursor 2 = Save
+        menu_select();
+        assert_eq!(
+            menu_screen(),
+            render::MenuScreen::SinglePlayer,
+            "Save refuses without a running game (M_Menu_Save_f's sv.active gate)"
+        );
+        // Load always opens; every slot is unused, so Enter does nothing.
+        menu_up(); // cursor 1 = Load
+        menu_select();
+        assert_eq!(menu_screen(), render::MenuScreen::Load);
+        menu_select(); // unused slot: M_Load_Key's !loadable return
+        assert_eq!(menu_screen(), render::MenuScreen::Load, "unused slot stays put");
+        assert_eq!(menu_visible(), 1);
+        // Esc backs out to SinglePlayer.
+        menu_cancel();
+        assert_eq!(menu_screen(), render::MenuScreen::SinglePlayer);
+
+        // WALK mode: the game runs -> Save opens; Enter emits SaveSlot (a
+        // host no-op until the savegame engine lands) and closes the menu.
+        assert_eq!(boot(), 1);
+        step(0.05); // sync game_active (walk, no intermission -> true)
+        menu_select(); // -> SinglePlayer
+        menu_down();
+        menu_down();
+        menu_select(); // -> Save
+        assert_eq!(menu_screen(), render::MenuScreen::Save);
+        menu_down(); // slot 1
+        menu_select(); // SaveSlot(1): menu closes like the C, host no-ops
+        assert_eq!(menu_visible(), 0, "Save Enter closes the menu");
+        // The world is untouched by the no-op (player still alive on e1m1).
+        assert!(player_field("health") > 0.0);
+    }
+
+    #[test]
+    fn keys_screen_rebinds_forward_through_the_exports() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        // Navigate: Options -> Customize controls (row 0).
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options
+        menu_select(); // ROW_CONTROLS -> Keys screen
+        assert_eq!(menu_screen(), render::MenuScreen::Keys);
+        // Move to the "+forward" row (BIND_FORWARD = 3) and grab.
+        for _ in 0..3 {
+            menu_down();
+        }
+        assert_eq!(menu_bind_grabbing(), 0);
+        menu_select();
+        assert_eq!(menu_bind_grabbing(), 1, "Enter starts the bind grab");
+        // +forward had two keys (w + UPARROW): the C unbinds them, then binds
+        // the grabbed key.
+        menu_bind_key(i32::from(b'o'));
+        assert_eq!(menu_bind_grabbing(), 0);
+        // Close the menu (Keys -> Options -> Main -> closed).
+        menu_cancel();
+        menu_cancel();
+        menu_cancel();
+        assert_eq!(menu_visible(), 0);
+        // The new key drives +forward; the old one no longer does.
+        key_down(i32::from(b'o'));
+        step(0.05);
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 200.0, "rebound key walks forward");
+        key_up(i32::from(b'o'));
+        key_down(i32::from(b'w'));
+        step(0.05);
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 0.0, "the old key was unbound");
+        key_up(i32::from(b'w'));
+    }
+
+    #[test]
+    fn gamma_changes_the_presented_frame_and_one_is_byte_identity() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        // dt=0 keeps the world/clock frozen, so back-to-back frames are
+        // byte-identical and the ONLY variable below is the gamma LUT.
+        step(0.0);
+        let base = grab();
+        step(0.0);
+        assert_eq!(base, grab(), "dt=0 frames are deterministic");
+
+        // Brightness right one notch (Options row 4): gamma 1.0 -> 0.95
+        // (v_gamma.value -= dir * 0.05) — the presented bytes must change.
+        menu_cancel();
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options
+        for _ in 0..4 {
+            menu_down(); // ROW_BRIGHTNESS
+        }
+        menu_right();
+        menu_cancel();
+        menu_cancel();
+        assert_eq!(menu_visible(), 0);
+        step(0.0);
+        let bright = grab();
+        assert_ne!(base, bright, "gamma 0.95 changes the presented frame");
+        // No pixel got darker (the curve brightens everything below white).
+        assert!(
+            base.iter().zip(bright.iter()).all(|(a, b)| b >= a),
+            "gamma < 1 must only brighten"
+        );
+
+        // Back to 1.0: the identity special case restores the EXACT bytes.
+        menu_cancel(); // reopen (lands on Main)
+        menu_down();
+        menu_down();
+        menu_select();
+        for _ in 0..4 {
+            menu_down();
+        }
+        menu_left(); // gamma 0.95 -> 1.0 (clamped at GAMMA_MAX)
+        menu_cancel();
+        menu_cancel();
+        step(0.0);
+        assert_eq!(base, grab(), "gamma 1.0 is a byte-exact identity");
     }
 }
 

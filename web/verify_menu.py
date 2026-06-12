@@ -1,0 +1,306 @@
+#!/usr/bin/env -S uv run --with playwright --script
+"""Verify the full menu is LIVE end-to-end in headless Chromium:
+
+  1. boot lands in the attract menu; arrow navigation queues real menu sounds
+     (the window.__menuSounds counter increments);
+  2. every Main row responds: Single Player (Load list + the Save no-game
+     gate), Multiplayer (screen opens, Esc returns), Options, Help, Quit (N
+     backs out);
+  3. Options rows act: sliders move real cvars (mouse_sensitivity / volume /
+     screen size), Go-to-console opens the console, Reset-to-defaults
+     restores, Customize controls opens the Keys screen (bind grab works),
+     Video Options applies a resolution preset;
+  4. walk-mode behaviors: BRIGHTNESS visibly brightens the canvas (gamma LUT)
+     and restores byte-fair at 1.0; ALWAYS RUN raises measured displacement;
+     INVERT MOUSE flips the pitch sign; LOOKSPRING recentres on pointer
+     unlock; a REBOUND key drives +forward and the old key stops; Save opens
+     in-game and Enter closes (SaveSlot host no-op);
+  5. no console errors anywhere.
+
+Usage: verify_menu.py [webdir]   (defaults to the repo's web/; pass a temp dir
+holding index.html + a freshly built quake_wasm.wasm to test new exports
+without touching the deployed wasm).
+"""
+import functools, http.server, os, socketserver, sys, threading, time
+from playwright.sync_api import sync_playwright
+
+WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+PORT = 8173
+Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
+socketserver.ThreadingTCPServer.allow_reuse_address = True
+httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
+httpd.daemon_threads = True
+threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+# menu_screen_id values (the wasm export's mapping).
+MAIN, SP, LOAD, SAVE, MULTI, OPTIONS, KEYS, VIDEO, HELP, QUIT = range(10)
+
+passed, failed = 0, 0
+def check(name, ok, detail=""):
+    global passed, failed
+    print(("PASS" if ok else "FAIL"), name, detail)
+    if ok: passed += 1
+    else: failed += 1
+
+with sync_playwright() as p:
+    br = p.chromium.launch(headless=True, args=[
+        "--no-sandbox",
+        # Let audioCtx.resume() succeed without a user gesture so the menu
+        # sound drain actually runs under headless.
+        "--autoplay-policy=no-user-gesture-required",
+    ])
+    pg = br.new_page(viewport={"width": 820, "height": 540})
+    errs = []
+    pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
+    pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
+    pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
+    pg.wait_for_function("typeof exp !== 'undefined' && exp && exp.boot", timeout=120000)
+    pg.wait_for_function(
+        "document.getElementById('status').textContent.includes('ready')", timeout=30000)
+
+    scr = lambda: pg.evaluate("exp.menu_screen_id()")
+    vis = lambda: pg.evaluate("exp.menu_visible()")
+    key = lambda k, n=1: [pg.keyboard.press(k) or time.sleep(0.06) for _ in range(n)]
+
+    # Resume audio (the autoplay flag lets it run without a gesture) so the
+    # page's menu-sound drain counts pops.
+    pg.evaluate("""() => {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        return audioCtx.resume();
+    }""")
+    time.sleep(0.4)
+
+    # 1. Attract boot: the menu is open over the demo; arrows queue menu1.
+    check("attract boot lands in the menu", vis() == 1 and scr() == MAIN)
+    snd0 = pg.evaluate("window.__menuSounds")
+    key("ArrowDown"); key("ArrowUp")
+    time.sleep(0.4)
+    snd1 = pg.evaluate("window.__menuSounds")
+    check("menu navigation queues local sounds", snd1 > snd0, f"{snd0} -> {snd1}")
+
+    # 2a. Single Player > Save is GATED in attract (no local game running);
+    #     Load opens its 12-slot list and an unused slot refuses Enter.
+    key("Enter")            # Main item 0 -> SinglePlayer
+    check("Single Player opens", scr() == SP)
+    key("ArrowDown", 2); key("Enter")
+    check("Save refuses without a running game", scr() == SP)
+    key("ArrowUp"); key("Enter")
+    check("Load opens its slot list", scr() == LOAD)
+    key("ArrowDown", 3); key("Enter")
+    check("Enter on an unused slot stays put", scr() == LOAD and vis() == 1)
+    key("Escape")
+    check("Esc on Load returns to Single Player", scr() == SP)
+    key("Escape")
+
+    # 2b. Multiplayer: the screen opens (mp_menu art + the no-comms line),
+    #     Enter responds without going anywhere, Esc returns.
+    key("ArrowDown"); key("Enter")
+    check("Multiplayer opens its screen", scr() == MULTI)
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_multi.png"))
+    key("ArrowDown"); key("Enter")
+    check("Multiplayer Enter responds in place (no net)", scr() == MULTI)
+    key("Escape")
+    check("Esc on Multiplayer returns to Main", scr() == MAIN)
+
+    # 2c. Help pages; Quit prompt answers N.
+    key("ArrowDown", 3); key("Enter")
+    check("Help opens", scr() == HELP)
+    key("ArrowRight", 2); key("Escape")
+    key("ArrowDown", 4); key("Enter")
+    check("Quit raises the confirm prompt", scr() == QUIT)
+    key("n")
+    check("N answers the Quit prompt", scr() == MAIN and vis() == 1)
+
+    # 3. Options rows. (Answering "No" restored the screen with the cursor
+    # still on Quit — the C keeps m_main_cursor — so go UP two to Options.)
+    key("ArrowUp", 2); key("Enter")
+    check("Options opens", scr() == OPTIONS)
+
+    # Mouse Speed (row 5) moves the sensitivity cvar.
+    sens0 = pg.evaluate("exp.mouse_sensitivity()")
+    key("ArrowDown", 5); key("ArrowRight", 2)
+    sens1 = pg.evaluate("exp.mouse_sensitivity()")
+    check("Mouse Speed slider moves the cvar", sens1 > sens0, f"{sens0:.2f} -> {sens1:.2f}")
+    # Sound Volume (row 7).
+    key("ArrowDown", 2)
+    vol0 = pg.evaluate("exp.volume()")
+    key("ArrowLeft", 2)
+    vol1 = pg.evaluate("exp.volume()")
+    check("Sound Volume slider moves the cvar", vol1 < vol0, f"{vol0:.2f} -> {vol1:.2f}")
+    # CD Music Volume (row 6) + the four checkboxes (rows 8-11) all respond
+    # (each adjust queues menu3 — count the sounds).
+    sndA = pg.evaluate("window.__menuSounds")
+    key("ArrowUp")          # row 6 (CD volume)
+    key("ArrowLeft")
+    key("ArrowDown", 2)     # row 8 always run
+    key("ArrowRight")
+    key("ArrowDown"); key("ArrowRight")   # row 9 invert
+    key("ArrowDown"); key("ArrowRight")   # row 10 lookspring
+    key("ArrowDown"); key("ArrowRight")   # row 11 lookstrafe
+    # ...and toggle the four back off for a clean slate.
+    key("ArrowRight"); key("ArrowUp"); key("ArrowRight")
+    key("ArrowUp"); key("ArrowRight"); key("ArrowUp"); key("ArrowRight")
+    time.sleep(0.4)
+    sndB = pg.evaluate("window.__menuSounds")
+    check("every slider/checkbox row responds audibly", sndB - sndA >= 12, f"+{sndB - sndA}")
+
+    # Screen size (row 3): right cycles the render resolution.
+    w0 = pg.evaluate("exp.width()")
+    key("ArrowUp", 5)       # from row 8 back to row 3
+    key("ArrowRight")
+    w1 = pg.evaluate("exp.width()")
+    check("Screen size row resizes the framebuffer", w1 != w0, f"{w0} -> {w1}")
+    key("ArrowLeft")
+    check("...and back", pg.evaluate("exp.width()") == w0)
+
+    # Reset to defaults (row 2) restores the cvars.
+    key("ArrowUp"); key("Enter")
+    check("Reset to defaults restores sensitivity",
+          abs(pg.evaluate("exp.mouse_sensitivity()") - 1.0) < 1e-5)
+
+    # Customize controls (row 0): the Keys screen + a bind grab that Escape
+    # cancels (full rebinding is proven in walk mode below).
+    key("ArrowUp", 2); key("Enter")
+    check("Customize controls opens the Keys screen", scr() == KEYS)
+    key("ArrowDown", 2)
+    check("not grabbing before Enter", pg.evaluate("exp.menu_bind_grabbing()") == 0)
+    key("Enter")
+    check("Enter starts the bind grab", pg.evaluate("exp.menu_bind_grabbing()") == 1)
+    key("Escape")
+    check("Escape cancels the grab on the Keys screen",
+          pg.evaluate("exp.menu_bind_grabbing()") == 0 and scr() == KEYS)
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_keys.png"))
+    key("Escape")
+    check("Esc on Keys returns to Options", scr() == OPTIONS)
+
+    # Video Options (row 12): the mode list applies a preset on Enter.
+    key("ArrowDown", 12); key("Enter")
+    check("Video Options opens the mode list", scr() == VIDEO)
+    key("ArrowDown"); key("Enter")
+    wv = pg.evaluate("exp.width()")
+    check("Enter applies the highlighted mode", wv != w0, f"{w0} -> {wv}")
+    pg.evaluate(f"exp.set_resolution({w0}, {pg.evaluate('exp.height()') * w0 // wv})")
+    key("Escape")
+    check("Esc on Video returns to Options", scr() == OPTIONS)
+
+    # Go to console (row 1) opens the drop-down console. (Esc from Video put
+    # the Options cursor back on row 0.)
+    key("ArrowDown", 1)
+    key("Enter")
+    check("Go to console opens the console",
+          pg.evaluate("exp.console_visible()") == 1 and vis() == 0)
+    key("Backquote")        # close the console
+
+    # 4. Walk mode behaviors.
+    pg.evaluate("document.getElementById('walkBtn').click()")
+    time.sleep(1.0)
+    key("Escape")           # close the boot menu
+    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    time.sleep(0.3)
+
+    grab_lum = """() => {
+        const c = document.getElementById('c');
+        const d = c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+        let s = 0, n = 0;
+        for (let i = 0; i < d.length; i += 16) { s += d[i] + d[i+1] + d[i+2]; n += 3; }
+        return s / n;
+    }"""
+
+    # BRIGHTNESS: gamma 0.6 visibly brightens the canvas; 1.0 restores.
+    lum1 = pg.evaluate(grab_lum)
+    key("Escape")           # open menu
+    key("ArrowDown", 2); key("Enter")     # Options
+    key("ArrowDown", 4)                   # Brightness row
+    key("ArrowRight", 8)                  # gamma 1.0 -> 0.6
+    key("Escape"); key("Escape")          # close
+    time.sleep(0.3)
+    lum2 = pg.evaluate(grab_lum)
+    check("gamma 0.6 visibly brightens the frame", lum2 > lum1 * 1.10,
+          f"mean {lum1:.1f} -> {lum2:.1f}")
+    key("Escape"); key("ArrowDown", 2); key("Enter")
+    key("ArrowDown", 4); key("ArrowLeft", 8)
+    key("Escape"); key("Escape")
+    time.sleep(0.3)
+    lum3 = pg.evaluate(grab_lum)
+    check("gamma 1.0 restores the brightness", abs(lum3 - lum1) < lum1 * 0.05,
+          f"mean back to {lum3:.1f}")
+
+    # ALWAYS RUN: displacement per second rises (200 -> 400, server-clamped 320).
+    # Turn the player 180 between runs (1125 counts * 0.16 deg) so each run
+    # retraces the same free corridor instead of piling into a wall.
+    turn_around = lambda: pg.evaluate("exp.mouse_move(1125, 0)")
+    def walk_dist(secs, keyname="w"):
+        x0, y0 = pg.evaluate("[exp.listener_x(), exp.listener_y()]")
+        pg.keyboard.down(keyname); time.sleep(secs); pg.keyboard.up(keyname)
+        time.sleep(0.2)
+        x1, y1 = pg.evaluate("[exp.listener_x(), exp.listener_y()]")
+        return ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+    d_walk = walk_dist(1.0)
+    key("Escape"); key("ArrowDown", 2); key("Enter")
+    key("ArrowDown", 8); key("ArrowRight")        # Always Run on
+    key("Escape"); key("Escape")
+    turn_around()
+    d_run = walk_dist(1.0)
+    check("Always Run raises the measured speed", d_run > d_walk * 1.25,
+          f"{d_walk:.0f}u -> {d_run:.0f}u per 1.0s")
+
+    # INVERT MOUSE: the same mouse-down delta flips the pitch sign.
+    p0 = pg.evaluate("exp.player_pitch()")
+    pg.evaluate("exp.mouse_move(0, 300)")
+    p1 = pg.evaluate("exp.player_pitch()")
+    check("mouse-down looks down by default", p1 > p0, f"{p0:.1f} -> {p1:.1f}")
+    key("Escape"); key("ArrowDown", 2); key("Enter")
+    key("ArrowDown", 9); key("ArrowRight")        # Invert Mouse on
+    key("Escape"); key("Escape")
+    pg.evaluate("exp.mouse_move(0, 300)")
+    p2 = pg.evaluate("exp.player_pitch()")
+    check("Invert Mouse flips the pitch direction", p2 < p1, f"{p1:.1f} -> {p2:.1f}")
+
+    # LOOKSPRING: pointer unlock recentres the pitch (the page calls
+    # pointer_unlocked from pointerlockchange; headless can't lock, so drive
+    # the same hook directly).
+    key("Escape"); key("ArrowDown", 2); key("Enter")
+    key("ArrowDown", 10); key("ArrowRight")       # Lookspring on
+    key("Escape"); key("Escape")
+    pg.evaluate("exp.mouse_move(0, -400)")        # look well off-centre
+    # (Invert Mouse is still ON from the previous check, so the sign is
+    # flipped — only the magnitude matters here.)
+    pp = pg.evaluate("exp.player_pitch()")
+    pg.evaluate("exp.pointer_unlocked()")
+    time.sleep(1.0)
+    pr = pg.evaluate("exp.player_pitch()")
+    check("Lookspring recentres on pointer unlock", abs(pr) < 1.0 and abs(pp) > 20,
+          f"{pp:.1f} -> {pr:.1f}")
+
+    # REBIND: Customize controls really rebinds +forward (row 3) to 'o'.
+    key("Escape"); key("ArrowDown", 2); key("Enter")
+    key("Enter")                                  # Customize controls
+    key("ArrowDown", 3); key("Enter")             # grab on +forward
+    pg.keyboard.press("o"); time.sleep(0.1)
+    check("the grab bound the new key", pg.evaluate("exp.menu_bind_grabbing()") == 0)
+    key("Escape"); key("Escape"); key("Escape")   # Keys -> Options -> Main -> closed
+    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    turn_around()                                 # retrace the free corridor
+    d_new = walk_dist(0.7, "o")
+    time.sleep(0.9)                               # let friction stop the coast
+    d_old = walk_dist(0.7, "w")
+    check("the rebound key walks forward", d_new > 80, f"{d_new:.0f}u")
+    check("the old key was unbound by the two-key rule", d_old < 20, f"{d_old:.0f}u")
+
+    # SAVE opens in-game; Enter emits SaveSlot (host no-op) and closes.
+    key("Escape"); key("Enter")                   # menu -> SinglePlayer
+    key("ArrowDown", 2); key("Enter")
+    check("Save opens with a game running", scr() == SAVE)
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_save.png"))
+    key("Enter")
+    check("Save Enter closes the menu (SaveSlot no-op for now)", vis() == 0)
+
+    # 5. Console must be clean.
+    print("errors:", errs[-5:])
+    check("no console errors", not errs)
+    br.close()
+httpd.shutdown()
+
+print(f"done: {passed} passed, {failed} failed")
+if failed:
+    raise SystemExit(1)

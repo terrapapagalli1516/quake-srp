@@ -1520,6 +1520,12 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
         ttl_sgl: lmp("gfx/ttl_sgl.lmp"),
         sp_menu: lmp("gfx/sp_menu.lmp"),
         p_option: lmp("gfx/p_option.lmp"),
+        p_load: lmp("gfx/p_load.lmp"),
+        p_save: lmp("gfx/p_save.lmp"),
+        p_multi: lmp("gfx/p_multi.lmp"),
+        mp_menu: lmp("gfx/mp_menu.lmp"),
+        ttl_cstm: lmp("gfx/ttl_cstm.lmp"),
+        vidmodes: lmp("gfx/vidmodes.lmp"),
         menudot,
         help,
     };

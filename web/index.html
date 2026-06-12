@@ -195,6 +195,7 @@
       <div class="keys">
         <span class="k"><kbd>Esc</kbd> / <kbd>Tab</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule — use <kbd>Tab</kbd> to stay)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
+        <span class="k">Options</span><span>brightness, mouse, always run — and Customize controls to rebind keys</span>
         <span class="k"><kbd>F</kbd></span><span>fullscreen</span>
         <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
       </div>
@@ -232,7 +233,6 @@ const bootFill = document.getElementById('bootFill');
 const playEl = document.getElementById('play');
 const lockChip = document.getElementById('lockChip');
 const fsHint = document.getElementById('fsHint');
-const keys = {};
 const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
 
 // Is the in-game menu currently up (capturing keyboard)?
@@ -277,6 +277,28 @@ function startFromOverlay() {
   statusEl.textContent = 'attract loop — ↑/↓ + Enter drive the menu · New Game to play';
 }
 
+// Map a browser KeyboardEvent to a Quake keynum (keys.h): printable ASCII is
+// itself (lowercase, like Key_Event delivers it); the named specials take the
+// 128+ block. Returns null for keys Quake has no number for.
+function quakeKey(e) {
+  const k = e.key;
+  if (k.length === 1) {
+    const c = k.toLowerCase().charCodeAt(0);
+    return (c >= 32 && c < 127) ? c : null;
+  }
+  switch (k) {
+    case 'ArrowUp': return 128;  case 'ArrowDown': return 129;
+    case 'ArrowLeft': return 130; case 'ArrowRight': return 131;
+    case 'Alt': return 132; case 'Control': return 133; case 'Shift': return 134;
+    case 'Tab': return 9; case 'Enter': return 13; case 'Escape': return 27;
+    case 'Backspace': return 127; case 'Insert': return 147; case 'Delete': return 148;
+    case 'PageDown': return 149; case 'PageUp': return 150;
+    case 'Home': return 151; case 'End': return 152;
+  }
+  if (/^F([1-9]|1[0-2])$/.test(k)) return 135 + parseInt(k.slice(1), 10) - 1;
+  return null;
+}
+
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
@@ -314,6 +336,18 @@ addEventListener('keydown', e => {
     return;
   }
 
+  // --- Customize-controls bind grab: while the Keys screen waits for a key
+  //     (menu.c bind_grab), EVERY key — including Escape (cancel), Tab, arrows,
+  //     Enter — is the key being defined, so route it raw to the engine before
+  //     the Esc/Tab menu handling below can steal it (M_Keys_Key's grab branch
+  //     runs before the normal switch in the C too).
+  if (menuVisible() && exp && exp.menu_bind_grabbing && exp.menu_bind_grabbing()) {
+    const bq = quakeKey(e);
+    if (bq !== null && exp.menu_bind_key) exp.menu_bind_key(bq);
+    e.preventDefault();
+    return;
+  }
+
   // --- Main menu navigation. Escape OR Tab reaches the menu (opens it from the
   //     game, or backs out within it). Tab is the fullscreen-safe alternative:
   //     in fullscreen the browser eats Escape to exit fullscreen, so Tab lets you
@@ -331,44 +365,51 @@ addEventListener('keydown', e => {
     // Left/Right adjust the highlighted Options row (Screen size / Mouse speed /
     // Volume) one step PER KEY PRESS (the !e.repeat guard matches up/down/enter
     // and stops a held key from cycling — and reallocating the framebuffer — tens
-    // of times a second). menu_left/right are no-ops off the Options screen.
+    // of times a second). menu_left/right move the cursor on the Load/Save/Keys/
+    // Video screens (the C pairs LEFT with UP there) and are no-ops elsewhere.
     // Picking a new Screen size resizes the framebuffer engine-side; the render
     // loop notices the new width()/height() and re-fits the canvas.
     if (!e.repeat && (k === 'arrowleft')  && exp.menu_left)  { exp.menu_left();  e.preventDefault(); return; }
     if (!e.repeat && (k === 'arrowright') && exp.menu_right) { exp.menu_right(); e.preventDefault(); return; }
     if (!e.repeat && (k === 'enter') && exp.menu_select)     { exp.menu_select(); e.preventDefault(); return; }
+    // Backspace/Del clear the highlighted binding on the Customize-controls
+    // screen (M_Keys_Key K_BACKSPACE/K_DEL; engine-gated no-op elsewhere).
+    if (!e.repeat && (k === 'backspace' || k === 'delete') && exp.menu_backspace) {
+      exp.menu_backspace(); e.preventDefault(); return;
+    }
+    // Y/N answer the Quit confirm prompt (M_Quit_Key; no-ops off that screen).
+    if (!e.repeat && k === 'y' && exp.menu_quit_yes) { exp.menu_quit_yes(); e.preventDefault(); return; }
+    if (!e.repeat && k === 'n' && exp.menu_quit_no)  { exp.menu_quit_no();  e.preventDefault(); return; }
     // Swallow the other gameplay keys so the world stays idle behind the menu.
     if (MOVE_KEYS.includes(k) || (k >= '1' && k <= '8')) { e.preventDefault(); return; }
   }
 
-  keys[k] = true;
   if (k === 'f') toggleFullscreen();
-  // Space = jump (button bit 1 -> the player's button2 -> QuakeC PlayerJump).
-  // (The 🔊 button still plays the manual test sound; in-game sound is automatic.)
-  if (k === ' ' && exp && exp.set_jump) exp.set_jump(1);
-  // Ctrl = fire (id's DOS-era default binding, +attack). With the arrows for
-  // move/turn this gives full keyboard-only play — no pointer capture needed.
-  // No preventDefault: Ctrl is a modifier, and combos (Ctrl+R, Ctrl+C…) must
-  // keep their browser meaning.
-  if (k === 'control' && !e.repeat && exp && exp.set_attack) exp.set_attack(1);
-  // c = swim DOWN in water (the +movedown key -> UserCmd.upmove<0 -> SV_WaterMove
-  // sinks). Out of water it does nothing. Swim UP reuses Space (jump) in water.
-  if (k === 'c' && exp && exp.set_movedown) exp.set_movedown(1);
   // Weapon select: number keys 1-8 queue the matching QuakeC impulse
   // (1 axe, 2 shotgun, 3 super shotgun, 4 nailgun, 5 super nailgun,
   // 6 grenade launcher, 7 rocket launcher, 8 lightning) on the next frame.
   if (!e.repeat && k >= '1' && k <= '8' && exp && exp.set_impulse) {
     exp.set_impulse(parseInt(k, 10));
     e.preventDefault();
+    return;
   }
+  // Every other game key goes to the engine by Quake keynum: the bindings
+  // table (keys.c keybindings, editable in Options > Customize controls) turns
+  // held keys into +forward/+back/+moveleft/+moveright/+jump/+attack/+speed/
+  // +lookup/+lookdown/turns each frame (CL_BaseMove/CL_AdjustAngles port).
+  // The !e.repeat gate mirrors Key_Event's autorepeat ignore; held-state
+  // movement needs only the first down (keyup clears it).
+  const qk = quakeKey(e);
+  if (!e.repeat && qk !== null && exp && exp.key_down) exp.key_down(qk);
+  // Stop the browser's own use of the movement keys (Space/arrows scroll).
   if (MOVE_KEYS.includes(k)) e.preventDefault();
 });
 addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
-  keys[k] = false;
-  if (k === ' ' && exp && exp.set_jump) exp.set_jump(0);
-  if (k === 'c' && exp && exp.set_movedown) exp.set_movedown(0);
-  if (k === 'control' && exp && exp.set_attack) exp.set_attack(0);
+  // Key-ups are delivered unconditionally (even while the menu/console own the
+  // keyboard) so a key released behind an overlay can never stick held.
+  const qk = quakeKey(e);
+  if (qk !== null && exp && exp.key_up) exp.key_up(qk);
   // A focused <button>/<summary> fires its click on the Space KEYUP — swallow
   // the game keys' keyup so jumping can never re-trigger the last clicked
   // control (the click handlers also blur(); this is the backstop), and a
@@ -642,6 +683,29 @@ function drainGameSounds() {
   }
 }
 
+// Play the menu's queued local sounds (menu.c S_LocalSound: misc/menu1.wav on
+// cursor moves, menu2 on enter/select, menu3 on slider adjusts). S_LocalSound
+// is a view-entity sound — full volume, centred, no distance falloff
+// (snd_dma.c) — so each plays through playRouted at gain 1 / pan 0, which the
+// master volume still scales. window.__menuSounds counts pops (verification).
+window.__menuSounds = 0;
+function drainMenuSounds() {
+  if (!exp || !exp.poll_menu_sound || !audioCtx || audioCtx.state !== 'running') return;
+  if (exp.set_audio_ready) exp.set_audio_ready(1);
+  for (let guard = 0; guard < 8; guard++) {
+    const len = exp.poll_menu_sound();
+    if (len <= 0) break;
+    window.__menuSounds++;
+    const view = new Uint8Array(exp.memory.buffer, exp.sound_ptr(), len);
+    decodeCached(view, buf => {
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      playRouted(src, { gain: 1, pan: 0 });
+      src.start();
+    });
+  }
+}
+
 // Wire a decoded BufferSource to the destination. With spatial params we
 // reproduce Quake's SND_Spatialize pan law (snd_dma.c) exactly: LINEAR left/right
 // volumes leftvol = mono*(1-dot), rightvol = mono*(1+dot), each clamped to full —
@@ -818,9 +882,7 @@ function updateLoopingAudio() {
   }
 }
 
-let exp = null, dragging = false;
-const LOOK_SENS = 0.16;   // degrees per mouse-count
-const TURN_RATE = 150;    // arrow-key turn deg/sec
+let started = false, exp = null, dragging = false;
 
 function locked() { return document.pointerLockElement === canvas; }
 
@@ -837,12 +899,14 @@ canvas.addEventListener('mousedown', (e) => {
     // behaviour (inWalkMode() defaults true).
     if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
   }
-  else if (e.button === 0 && exp && exp.set_attack) { exp.set_attack(1); }  // fire while locked
+  // Left-click while locked is K_MOUSE1 (bound to +attack by default;
+  // rebindable in Options > Customize controls).
+  else if (e.button === 0 && exp && exp.key_down) { exp.key_down(200); }
   dragging = true;
 });
 addEventListener('mouseup', (e) => {
   dragging = false;
-  if (e.button === 0 && exp && exp.set_attack) exp.set_attack(0);
+  if (e.button === 0 && exp && exp.key_up) exp.key_up(200);   // K_MOUSE1 release
 });
 // The standard web-port Esc pattern. The browser RESERVES Esc while the
 // pointer is locked — the keydown never reaches the page; Esc's only effect is
@@ -862,6 +926,10 @@ document.addEventListener('pointerlockchange', () => {
         && exp && exp.menu_cancel) {
       exp.menu_cancel();    // menu_cancel OPENS the menu when it is hidden
     }
+    // Leaving pointer lock is this port's "+mlook released": the engine applies
+    // lookspring there (IN_MLookUp -> V_StartPitchDrift when the Options toggle
+    // is on), re-centring the view pitch.
+    if (exp && exp.pointer_unlocked) exp.pointer_unlocked();
   }
   syncLockChip();
 });
@@ -890,22 +958,19 @@ function syncLockChip() {
 canvas.addEventListener('mousemove', e => {
   if (!exp) return;
   // Freeze the view while the menu OR console is up (Quake stops feeding
-  // mouse-look outside key_game). look() also enforces this engine-side; this
-  // just avoids the call.
+  // mouse-look outside key_game). The engine enforces this too; this just
+  // avoids the call.
   if (menuVisible() || consoleVisible()) return;
   if (locked() || dragging) {
-    // movementX/Y is the per-event delta. Mouse-right turns right (yaw down);
-    // mouse-up looks up (non-inverted). The Options "Mouse speed" row scales the
-    // baseline LOOK_SENS via exp.mouse_sensitivity() (1.0 = unchanged default).
-    const sens = LOOK_SENS * mouseSensitivity();
-    exp.look(-e.movementX * sens, e.movementY * sens);
+    // Raw movementX/Y counts: the engine's IN_MouseMove port applies the
+    // sensitivity cvar, the Invert Mouse sign (m_pitch < 0), and the
+    // lookstrafe/+strafe routing. (Fallback: an older wasm without
+    // mouse_move gets the previous fixed-sensitivity look call.)
+    if (exp.mouse_move) exp.mouse_move(e.movementX, e.movementY);
+    else if (exp.look) exp.look(-e.movementX * 0.16, e.movementY * 0.16);
   }
 });
 
-// The look-sensitivity multiplier from the Options menu (default 1.0 if absent).
-function mouseSensitivity() {
-  return (exp && typeof exp.mouse_sensitivity === 'function') ? exp.mouse_sensitivity() : 1.0;
-}
 // The master volume gain from the Options menu (default 1.0 if absent), clamped
 // to [0,1] so a bad export can't blow up the gain graph.
 function masterVolume() {
@@ -1086,19 +1151,15 @@ async function main() {
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
-    // While the menu OR console is up, gameplay input is gated. The menu's
-    // Left/Right adjust Options rows (not gameplay turn); the console owns the
-    // keyboard entirely. Suppress movement + arrow-turn behind either overlay
-    // (the engine also gates this, but skipping the calls keeps the world idle).
-    const gated = menuVisible() || consoleVisible();
-    const fwd  = gated ? 0 : ((keys['w']||keys['arrowup']   ? 1 : 0) - (keys['s']||keys['arrowdown'] ? 1 : 0));
-    const side = gated ? 0 : ((keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0));
-    const turn = gated ? 0 : ((keys['arrowright'] ? 1 : 0) - (keys['arrowleft'] ? 1 : 0));
-    exp.set_move(fwd, side);
-    if (turn) exp.look(-turn * TURN_RATE * dt, 0);   // arrow turn (right = right)
+    // Movement/turn/attack all flow from the held-key states the keydown/keyup
+    // handlers fed the engine (key_down/key_up by Quake keynum): each step
+    // derives the move from the BINDINGS table (CL_BaseMove/CL_AdjustAngles),
+    // so Options > Customize controls really rebinds, Always Run really swaps
+    // cl_forwardspeed, and the menu/console gate gameplay engine-side.
     exp.step(dt);
     drainGameSounds();
     drainStopSounds();
+    drainMenuSounds();
     updateLoopingAudio();
     updateSndUI();
     syncLockChip();

@@ -6684,6 +6684,163 @@ const ROW_LOOKSPRING: usize = 10;
 const ROW_LOOKSTRAFE: usize = 11;
 const ROW_VIDEO: usize = 12;
 
+/// `MULTIPLAYER_ITEMS` (menu.c): the multiplayer menu has 3 entries (Join /
+/// New Game / Setup). Netcode is out of scope for this port, so like the C with
+/// no net drivers, Enter on Join/New Game does nothing and the screen shows the
+/// "No Communications Available" line (`M_MultiPlayer_Draw`).
+const MULTIPLAYER_ITEMS: usize = 3;
+
+/// `MAX_SAVEGAMES` (quakedef.h): the Load/Save menus list 12 slots.
+pub const MAX_SAVEGAMES: usize = 12;
+/// The text `M_ScanSaves` (menu.c) puts in every slot without an `sN.sav` file.
+/// A slot whose host-set comment is empty shows exactly this.
+pub const UNUSED_SLOT: &str = "--- UNUSED SLOT ---";
+
+// --- key bindings (menu.c M_Keys_*, keys.h/keys.c) -----------------------------
+
+/// `bindnames` (menu.c): the (command, label) rows `M_Keys_Draw` lists, verbatim.
+pub const BINDNAMES: [(&str, &str); NUM_BINDNAMES] = [
+    ("+attack", "attack"),
+    ("impulse 10", "change weapon"),
+    ("+jump", "jump / swim up"),
+    ("+forward", "walk forward"),
+    ("+back", "backpedal"),
+    ("+left", "turn left"),
+    ("+right", "turn right"),
+    ("+speed", "run"),
+    ("+moveleft", "step left"),
+    ("+moveright", "step right"),
+    ("+strafe", "sidestep"),
+    ("+lookup", "look up"),
+    ("+lookdown", "look down"),
+    ("centerview", "center view"),
+    ("+mlook", "mouse look"),
+    ("+klook", "keyboard look"),
+    ("+moveup", "swim up"),
+    ("+movedown", "swim down"),
+];
+/// `NUMCOMMANDS` (menu.c): the bindnames row count.
+pub const NUM_BINDNAMES: usize = 18;
+
+/// Indices into [`BINDNAMES`] for the commands the host actually drives (the
+/// rest are list-only: `+mlook` is permanent under pointer lock and `+klook`
+/// has no effect without keyboard-look pitch — both still draw + rebind
+/// faithfully).
+pub const BIND_ATTACK: usize = 0;
+pub const BIND_CHANGEWEAPON: usize = 1;
+pub const BIND_JUMP: usize = 2;
+pub const BIND_FORWARD: usize = 3;
+pub const BIND_BACK: usize = 4;
+pub const BIND_LEFT: usize = 5;
+pub const BIND_RIGHT: usize = 6;
+pub const BIND_SPEED: usize = 7;
+pub const BIND_MOVELEFT: usize = 8;
+pub const BIND_MOVERIGHT: usize = 9;
+pub const BIND_STRAFE: usize = 10;
+pub const BIND_LOOKUP: usize = 11;
+pub const BIND_LOOKDOWN: usize = 12;
+pub const BIND_CENTERVIEW: usize = 13;
+pub const BIND_MOVEUP: usize = 16;
+pub const BIND_MOVEDOWN: usize = 17;
+
+/// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
+/// the 128+ block. Only the keys a browser page can sensibly deliver are named
+/// here; the bindings table spans the full `0..256` like the C `keybindings`.
+pub const K_TAB: u8 = 9;
+pub const K_ENTER: u8 = 13;
+pub const K_ESCAPE: u8 = 27;
+pub const K_SPACE: u8 = 32;
+pub const K_BACKSPACE: u8 = 127;
+pub const K_UPARROW: u8 = 128;
+pub const K_DOWNARROW: u8 = 129;
+pub const K_LEFTARROW: u8 = 130;
+pub const K_RIGHTARROW: u8 = 131;
+pub const K_ALT: u8 = 132;
+pub const K_CTRL: u8 = 133;
+pub const K_SHIFT: u8 = 134;
+pub const K_F1: u8 = 135;
+pub const K_F12: u8 = 146;
+pub const K_INS: u8 = 147;
+pub const K_DEL: u8 = 148;
+pub const K_PGDN: u8 = 149;
+pub const K_PGUP: u8 = 150;
+pub const K_HOME: u8 = 151;
+pub const K_END: u8 = 152;
+pub const K_MOUSE1: u8 = 200;
+pub const K_MOUSE2: u8 = 201;
+pub const K_MOUSE3: u8 = 202;
+
+/// `Key_KeynumToString` (keys.c): printable ASCII (33..=126) is the character
+/// itself (lowercase, as `Key_Event` delivers it); the named specials come from
+/// the `keynames` table; anything else is the C's `<UNKNOWN KEYNUM>` (shortened
+/// to fit the 320-wide menu column).
+pub fn keynum_to_string(keynum: u8) -> String {
+    if keynum > 32 && keynum < 127 {
+        return (keynum as char).to_string();
+    }
+    match keynum {
+        K_TAB => "TAB",
+        K_ENTER => "ENTER",
+        K_ESCAPE => "ESCAPE",
+        K_SPACE => "SPACE",
+        K_BACKSPACE => "BACKSPACE",
+        K_UPARROW => "UPARROW",
+        K_DOWNARROW => "DOWNARROW",
+        K_LEFTARROW => "LEFTARROW",
+        K_RIGHTARROW => "RIGHTARROW",
+        K_ALT => "ALT",
+        K_CTRL => "CTRL",
+        K_SHIFT => "SHIFT",
+        K_INS => "INS",
+        K_DEL => "DEL",
+        K_PGDN => "PGDN",
+        K_PGUP => "PGUP",
+        K_HOME => "HOME",
+        K_END => "END",
+        K_MOUSE1 => "MOUSE1",
+        K_MOUSE2 => "MOUSE2",
+        K_MOUSE3 => "MOUSE3",
+        f @ K_F1..=K_F12 => return format!("F{}", f - K_F1 + 1),
+        _ => "UNKNOWN",
+    }
+    .to_string()
+}
+
+/// The boot key bindings: id's `default.cfg` (from the pak) for every key the
+/// page delivers, PLUS this port's established WASD layout (the shareware
+/// `default.cfg` predates WASD — it binds `a` to `+lookup` and `d` to `+moveup`;
+/// this port has always shipped WASD movement, so WASD overrides those four,
+/// exactly as a player's `config.cfg` would).
+fn default_bindings() -> [Option<u8>; 256] {
+    let mut b: [Option<u8>; 256] = [None; 256];
+    let mut bind = |key: u8, cmd: usize| b[key as usize] = Some(cmd as u8);
+    // default.cfg (id, verbatim — the keys the page can deliver):
+    bind(K_ALT, BIND_STRAFE);
+    bind(b',', BIND_MOVELEFT);
+    bind(b'.', BIND_MOVERIGHT);
+    bind(K_DEL, BIND_LOOKDOWN);
+    bind(K_PGDN, BIND_LOOKUP);
+    bind(K_END, BIND_CENTERVIEW);
+    bind(b'z', BIND_LOOKDOWN);
+    bind(K_SHIFT, BIND_SPEED);
+    bind(K_CTRL, BIND_ATTACK);
+    bind(K_UPARROW, BIND_FORWARD);
+    bind(K_DOWNARROW, BIND_BACK);
+    bind(K_LEFTARROW, BIND_LEFT);
+    bind(K_RIGHTARROW, BIND_RIGHT);
+    bind(K_SPACE, BIND_JUMP);
+    bind(b'/', BIND_CHANGEWEAPON);
+    bind(K_MOUSE1, BIND_ATTACK);
+    // This port's established layout (overrides default.cfg's a=+lookup,
+    // d=+moveup; w/s were unbound there):
+    bind(b'w', BIND_FORWARD);
+    bind(b's', BIND_BACK);
+    bind(b'a', BIND_MOVELEFT);
+    bind(b'd', BIND_MOVERIGHT);
+    bind(b'c', BIND_MOVEDOWN);
+    b
+}
+
 /// The selectable render-resolution presets the Options "Screen size" row cycles
 /// through, as `(width, height)` pairs. A consistent 16:10 ladder (each step
 /// +160w/+100h) from the fast `320x200` up to the host's `1280x800` clamp cap
@@ -6721,20 +6878,51 @@ const VOLUME_MAX: f32 = 1.0;
 const VOLUME_STEP: f32 = 0.1;
 const VOLUME_DEFAULT: f32 = 0.7;
 
-/// `v_gamma` (Brightness): 0.5..=1, step 0.05 (LEFT brightens); slider
-/// r = (1 - v)/0.5. Default 1.0. COSMETIC: stored + drawn but the renderer does
-/// not yet apply gamma.
+/// `v_gamma` (Brightness): 0.5..=1, step 0.05 (RIGHT brightens: the C does
+/// `v_gamma.value -= dir * 0.05`); slider r = (1 - v)/0.5. Default 1.0. LIVE:
+/// the host runs the presented frame through [`build_gamma_table`] (the C
+/// applies `gammatable` at the hardware-palette boundary,
+/// `V_UpdatePalette` -> `VID_ShiftPalette`); 1.0 is a byte-exact identity.
 const GAMMA_MIN: f32 = 0.5;
 const GAMMA_MAX: f32 = 1.0;
 const GAMMA_STEP: f32 = 0.05;
 const GAMMA_DEFAULT: f32 = 1.0;
 
 /// `bgmvolume` (CD Music Volume): 0..=1, step 0.1; slider r = v. Default 1.0.
-/// COSMETIC: there is no CD/BGM track in this port, so it only stores + draws.
+/// The slider is live (stores the cvar, exposed via [`Menu::bgm_volume`]).
+/// DEVIATION (scope): there is no CD audio device in this port, so no track
+/// ever plays at this volume — exactly like the C run without a CD, where the
+/// cvar still adjusts (cd_null.c).
 const BGM_MIN: f32 = 0.0;
 const BGM_MAX: f32 = 1.0;
 const BGM_STEP: f32 = 0.1;
 const BGM_DEFAULT: f32 = 1.0;
+
+/// Build the 256-entry gamma LUT, a port of `BuildGammaTable` (view.c):
+/// `gammatable[i] = 255 * pow((i+0.5)/255.5, g) + 0.5`, clamped to `0..=255` —
+/// and the C's exact `g == 1.0` special case, a literal identity table (so the
+/// default gamma is BYTE-EXACT, not merely close). The host applies this where
+/// the finished frame becomes presented RGB, the same boundary as the C's
+/// `V_UpdatePalette` -> `VID_ShiftPalette` hardware-palette write (gamma there
+/// runs AFTER the cshift blend; the host matches that order). quaketool's PPM
+/// scene path never applies it (the C's default boot state), so the golden
+/// renders are untouched.
+pub fn build_gamma_table(g: f32) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    if g == 1.0 {
+        for (i, t) in table.iter_mut().enumerate() {
+            *t = i as u8;
+        }
+        return table;
+    }
+    for (i, t) in table.iter_mut().enumerate() {
+        // The C computes pow in double and truncates the +0.5-rounded value to
+        // int, then clamps; mirror that exactly.
+        let inf = (255.0 * ((i as f64 + 0.5) / 255.5).powf(g as f64) + 0.5) as i32;
+        *t = inf.clamp(0, 255) as u8;
+    }
+    table
+}
 
 /// `NUM_HELP_PAGES` (menu.c): the Help/Ordering screen pages through
 /// `gfx/help0.lmp`..`help5.lmp`.
@@ -6766,7 +6954,8 @@ const OPTIONS_CURSOR_BASE: u8 = 12;
 const OPTIONS_CURSOR_X: f32 = 200.0;
 
 /// Which menu screen is showing. Mirrors the relevant `m_state` values from
-/// menu.c (`m_main`, `m_singleplayer`, `m_options`, `m_help`, `m_quit`).
+/// menu.c (`m_main`, `m_singleplayer`, `m_load`, `m_save`, `m_multiplayer`,
+/// `m_options`, `m_keys`, `m_video`, `m_help`, `m_quit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuScreen {
     /// The top-level menu (`m_main`): Single Player / Multiplayer / Options /
@@ -6774,9 +6963,33 @@ pub enum MenuScreen {
     Main,
     /// The single-player submenu (`m_singleplayer`): New Game / Load / Save.
     SinglePlayer,
+    /// The load-game slot list (`m_load`): [`MAX_SAVEGAMES`] rows showing the
+    /// host-set slot comments (empty = [`UNUSED_SLOT`]). Enter on a loadable
+    /// slot emits [`MenuAction::LoadSlot`]; on an unused slot it does nothing —
+    /// the C's `M_Load_Key` returns when `!loadable[cursor]`.
+    Load,
+    /// The save-game slot list (`m_save`): Enter emits [`MenuAction::SaveSlot`]
+    /// for the highlighted slot (`M_Save_Key`). Opening it is refused while no
+    /// local game is running (`M_Menu_Save_f`'s `!sv.active` check, mapped to
+    /// [`Menu::set_game_active`]).
+    Save,
+    /// The multiplayer submenu (`m_multiplayer`): Join / New Game / Setup over
+    /// the `mp_menu` art. Netcode is out of scope, so — like the C with zero
+    /// net drivers — Join/New Game don't respond and the screen shows
+    /// "No Communications Available" (plus a port-scope note line).
+    Multiplayer,
     /// The options submenu (`m_options`): the full 13-row layout
     /// ([`OPTIONS_ITEMS`]). Sliders + checkboxes are adjusted with left/right.
     Options,
+    /// The Customize-controls screen (`m_keys`): the [`BINDNAMES`] list with a
+    /// cursor; Enter grabs the next key to rebind (`bind_grab`), Backspace/Del
+    /// unbind (`M_Keys_Key`).
+    Keys,
+    /// The video-modes screen (`m_video`): this port's mode list is
+    /// [`RESOLUTION_PRESETS`]; cursor + Enter applies a mode
+    /// ([`MenuAction::ResolutionChanged`]), like `VID_MenuKey`'s K_ENTER
+    /// `VID_SetMode` (vid_win.c).
+    Video,
     /// The Help/Ordering screen (`m_help`): pages through
     /// `gfx/help0.lmp`..`help5.lmp` with left/right ([`NUM_HELP_PAGES`] pages).
     Help,
@@ -6792,20 +7005,69 @@ impl MenuScreen {
         match self {
             MenuScreen::Main => MAIN_ITEMS,
             MenuScreen::SinglePlayer => SINGLEPLAYER_ITEMS,
+            MenuScreen::Load | MenuScreen::Save => MAX_SAVEGAMES,
+            MenuScreen::Multiplayer => MULTIPLAYER_ITEMS,
             MenuScreen::Options => OPTIONS_ITEMS,
+            MenuScreen::Keys => NUM_BINDNAMES,
+            MenuScreen::Video => RESOLUTION_PRESETS.len(),
             MenuScreen::Help | MenuScreen::Quit => 1,
         }
     }
 }
+
+/// One queued `S_LocalSound` from the menu (menu.c). The host drains these via
+/// [`Menu::take_sounds`] and plays each like the C's `S_LocalSound` — a
+/// view-entity sound at full volume, centred, no distance falloff
+/// (`S_StartSound(cl.viewentity, -1, sfx, vec3_origin, 1, 1)`, snd_dma.c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuSound {
+    /// `misc/menu1.wav` — cursor movement (and the keys-menu bind grab,
+    /// `M_Keys_Key`; and every `VID_MenuKey` press).
+    Menu1,
+    /// `misc/menu2.wav` — `m_entersound`: entering a screen / Enter select.
+    /// (The C latches the flag and plays it on the next `M_Draw` so pic caching
+    /// can't stutter the sample; with pre-decoded Web Audio buffers that delay
+    /// is unnecessary, so this port queues it at the trigger — EXCEPT where the
+    /// menu closes before the next draw, where the C's latch never fires and we
+    /// queue nothing.)
+    Menu2,
+    /// `misc/menu3.wav` — `M_AdjustSliders` (any Options left/right/Enter-adjust).
+    Menu3,
+}
+
+impl MenuSound {
+    /// The sample path relative to `sound/` (the form QuakeC sample names take;
+    /// `S_LocalSound` passes exactly these strings).
+    pub fn sample(self) -> &'static str {
+        match self {
+            MenuSound::Menu1 => "misc/menu1.wav",
+            MenuSound::Menu2 => "misc/menu2.wav",
+            MenuSound::Menu3 => "misc/menu3.wav",
+        }
+    }
+}
+
+/// The most local-sounds the menu queues between host drains: a bound on
+/// [`Menu::take_sounds`]'s backlog so spamming menu keys without a running
+/// `step` loop can't grow the queue without bound.
+const MENU_SOUND_CAP: usize = 16;
 
 /// What pressing Enter (or the menu closing) asks the host to do. The wasm/tool
 /// front-end turns these into engine actions (e.g. [`MenuAction::NewGame`]
 /// rebuilds the walk on [`NEW_GAME_MAP`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
-    /// Nothing to do (the selection only changed the screen, or the item is not
-    /// implemented in this port — Multiplayer/Load/Save/Customize/Video).
+    /// Nothing to do (the selection only changed the screen, or — like the C —
+    /// the item doesn't respond: Load on an unused slot, Multiplayer Join with
+    /// no net drivers).
     None,
+    /// Enter on a loadable Load slot (`M_Load_Key` K_ENTER: `load sN`). The
+    /// menu already closed (`m_state = m_none; key_dest = key_game`); the host
+    /// dispatches the actual load.
+    LoadSlot(usize),
+    /// Enter on a Save slot (`M_Save_Key` K_ENTER: `save sN`). The menu already
+    /// closed; the host dispatches the actual save.
+    SaveSlot(usize),
     /// Start a fresh single-player game on [`NEW_GAME_MAP`] and close the menu.
     NewGame,
     /// Backed out of a submenu to the main screen (Escape on a submenu).
@@ -6853,27 +7115,51 @@ pub struct Menu {
     /// `volume` cvar (Sound Volume), [`VOLUME_MIN`]..=[`VOLUME_MAX`]. The host maps
     /// it to a 0.0..=1.0 master gain.
     volume: f32,
-    /// `v_gamma` cvar (Brightness), [`GAMMA_MIN`]..=[`GAMMA_MAX`]. COSMETIC: stored
-    /// + drawn, not yet applied by the renderer.
+    /// `v_gamma` cvar (Brightness), [`GAMMA_MIN`]..=[`GAMMA_MAX`]. LIVE: the
+    /// host runs the presented frame through [`build_gamma_table`] with this
+    /// (a byte-exact identity at the default 1.0).
     gamma: f32,
-    /// `bgmvolume` cvar (CD Music Volume), [`BGM_MIN`]..=[`BGM_MAX`]. COSMETIC: no
-    /// CD/BGM playback in this port.
+    /// `bgmvolume` cvar (CD Music Volume), [`BGM_MIN`]..=[`BGM_MAX`]. Live cvar;
+    /// no CD audio exists to play at it (see the [`BGM_DEFAULT`] DEVIATION note).
     bgm_volume: f32,
-    /// `cl_forwardspeed > 200` (Always Run). COSMETIC: stored + drawn, the host
-    /// does not yet swap forward/back speed.
+    /// `cl_forwardspeed > 200` (Always Run). LIVE: the host swaps
+    /// cl_forwardspeed/cl_backspeed 200 <-> 400 on it (M_AdjustSliders case 8).
     always_run: bool,
-    /// `m_pitch < 0` (Invert Mouse). COSMETIC: stored + drawn, look pitch not yet
-    /// inverted by the host.
+    /// `m_pitch < 0` (Invert Mouse). LIVE: the host flips the mouse-pitch sign
+    /// (in_win.c IN_MouseMove: `cl.viewangles[PITCH] += m_pitch.value * mouse_y`).
     invert_mouse: bool,
-    /// `lookspring` cvar. COSMETIC.
+    /// `lookspring` cvar. LIVE: the C re-centres pitch when `+mlook` releases
+    /// (`IN_MLookUp` -> `V_StartPitchDrift`, cl_input.c); this port's mouse-look
+    /// is permanent while the pointer is locked, so the host maps the mlook
+    /// RELEASE onto pointer-unlock (leaving pointer lock re-centres pitch).
     lookspring: bool,
-    /// `lookstrafe` cvar. COSMETIC.
+    /// `lookstrafe` cvar. LIVE: while mouse-looking (always, under pointer
+    /// lock), mouse X becomes strafe instead of yaw (in_win.c IN_MouseMove).
     lookstrafe: bool,
     /// The current Help page (`help_page`, `0..NUM_HELP_PAGES`).
     help_page: usize,
     /// Which screen the Quit prompt was raised from, restored on "No"
     /// (`m_quit_prevstate` / `wasInMenus`).
     quit_prev: MenuScreen,
+    /// The Keys screen is waiting for the next key to bind (`bind_grab`,
+    /// `M_Keys_Key`). The host routes raw keys to [`Menu::bind_key`] while set.
+    bind_grab: bool,
+    /// `keybindings[256]` (keys.c), as keynum -> [`BINDNAMES`] index. The menu
+    /// owns the table; the host queries [`Menu::action_for_key`] to drive input.
+    bindings: [Option<u8>; 256],
+    /// Queued `S_LocalSound`s (menu1/menu2/menu3), drained by
+    /// [`Menu::take_sounds`]. Capped at [`MENU_SOUND_CAP`].
+    sounds: Vec<MenuSound>,
+    /// The Load/Save slot comments (`m_filenames` from `M_ScanSaves`), host-set
+    /// via [`Menu::set_save_comments`]. An empty string = unused slot (draws
+    /// [`UNUSED_SLOT`], not loadable). All empty until a savegame engine fills
+    /// them.
+    save_comments: [String; MAX_SAVEGAMES],
+    /// Whether a local single-player game is running (`sv.active &&
+    /// !cl.intermission && svs.maxclients == 1`, the `M_Menu_Save_f` gate). The
+    /// host keeps it current via [`Menu::set_game_active`]; while false the
+    /// Save screen refuses to open.
+    game_active: bool,
 }
 
 impl Default for Menu {
@@ -6901,7 +7187,54 @@ impl Menu {
             lookstrafe: false,
             help_page: 0,
             quit_prev: MenuScreen::Main,
+            bind_grab: false,
+            bindings: default_bindings(),
+            sounds: Vec::new(),
+            save_comments: Default::default(),
+            game_active: false,
         }
+    }
+
+    /// Queue one `S_LocalSound` for the host to drain (bounded; a host that
+    /// never drains can't leak).
+    fn snd(&mut self, s: MenuSound) {
+        if self.sounds.len() < MENU_SOUND_CAP {
+            self.sounds.push(s);
+        }
+    }
+
+    /// Drain the queued menu local-sounds (menu1/menu2/menu3), in fire order.
+    /// The host plays each per `S_LocalSound` semantics (full volume, centred,
+    /// no attenuation — see [`MenuSound`]).
+    pub fn take_sounds(&mut self) -> Vec<MenuSound> {
+        std::mem::take(&mut self.sounds)
+    }
+
+    /// Tell the menu whether a local single-player game is running — the
+    /// `M_Menu_Save_f` gate (`!sv.active || cl.intermission || svs.maxclients
+    /// != 1` all refuse). The host refreshes this every frame; Save refuses to
+    /// open while false.
+    pub fn set_game_active(&mut self, active: bool) {
+        self.game_active = active;
+    }
+
+    /// Set the 12 Load/Save slot comments (`M_ScanSaves`' `m_filenames`): the
+    /// host's savegame engine fills these from the `sN.sav` headers; an empty
+    /// string marks the slot unused ([`UNUSED_SLOT`] is drawn, Enter on Load
+    /// refuses it).
+    pub fn set_save_comments(&mut self, comments: [String; MAX_SAVEGAMES]) {
+        self.save_comments = comments;
+    }
+
+    /// The comment for save slot `i` (empty = unused). Out-of-range is empty.
+    pub fn save_comment(&self, i: usize) -> &str {
+        self.save_comments.get(i).map(String::as_str).unwrap_or("")
+    }
+
+    /// Whether Load may act on slot `i` (`loadable[i]` in `M_ScanSaves`): a
+    /// non-empty host-set comment means a real save exists there.
+    pub fn slot_loadable(&self, i: usize) -> bool {
+        !self.save_comment(i).is_empty()
     }
 
     /// The screen currently displayed.
@@ -6920,11 +7253,14 @@ impl Menu {
     }
 
     /// Open the menu on the main screen (`M_Menu_Main_f`): show it and reset to the
-    /// top-level screen with the cursor on the first item.
+    /// top-level screen with the cursor on the first item. Plays the enter sound
+    /// (`m_entersound = true` in the C).
     pub fn open(&mut self) {
         self.visible = true;
         self.screen = MenuScreen::Main;
         self.cursor = 0;
+        self.bind_grab = false;
+        self.snd(MenuSound::Menu2);
     }
 
     /// Close the menu (`key_dest = key_game`). Leaves the screen/cursor as they
@@ -6936,24 +7272,32 @@ impl Menu {
     /// Open the menu directly on the Help/Ordering screen (`M_Menu_Help_f`,
     /// menu.c): what the `help` console command — and therefore the shareware
     /// `svc_sellscreen` at episode end — runs. Resets to the first page
-    /// (`help_page = 0`) like the C.
+    /// (`help_page = 0`) like the C, and plays the enter sound (`m_entersound`).
     pub fn open_help(&mut self) {
         self.visible = true;
         self.screen = MenuScreen::Help;
         self.help_page = 0;
         self.cursor = 0;
+        self.bind_grab = false;
+        self.snd(MenuSound::Menu2);
     }
 
     /// Toggle the menu (`M_ToggleMenu_f`): if hidden, open on the main screen; if
     /// showing a submenu, go back to main; if already on the main screen, close.
     /// Returns the resulting [`MenuAction`] (`Closed` when it closed, else `None`).
+    /// Opening / backing to main plays `m_entersound` (menu2); closing queues
+    /// nothing audible (the C latches the flag but `M_Draw` never runs to fire
+    /// it, and the next open re-latches it anyway).
     pub fn toggle(&mut self) -> MenuAction {
         if !self.visible {
             self.open();
             MenuAction::None
         } else if self.screen != MenuScreen::Main {
+            // M_ToggleMenu_f -> M_Menu_Main_f (m_entersound = true).
             self.screen = MenuScreen::Main;
             self.cursor = 0;
+            self.bind_grab = false;
+            self.snd(MenuSound::Menu2);
             MenuAction::Back
         } else {
             self.close();
@@ -6970,15 +7314,21 @@ impl Menu {
         if self.screen == MenuScreen::Help {
             // M_Help_Key: UP = next page (m_help_page++), DOWN = previous. The host
             // passes up = -1 / down = +1 (cursor convention), so negate to map up
-            // onto +1 (next). Previously up went backwards.
+            // onto +1 (next). Previously up went backwards. (Paging latches
+            // m_entersound in the C; `page` queues the menu2.)
             self.page(-delta.signum());
             return;
+        }
+        if self.screen == MenuScreen::Quit {
+            return; // M_Quit_Key: up/down fall through to `default: break`.
         }
         let n = self.screen.item_count();
         if n == 0 {
             self.cursor = 0;
             return;
         }
+        // Every M_*_Key cursor move plays misc/menu1.wav.
+        self.snd(MenuSound::Menu1);
         let n_i = n as i32;
         // Wrap into 0..n even for large / negative deltas.
         let next = (self.cursor as i32 + delta).rem_euclid(n_i);
@@ -6987,78 +7337,168 @@ impl Menu {
 
     /// Activate the highlighted item (Enter / `K_ENTER`).
     ///
-    /// * Main > Single Player / Options / Help: switch screen, cursor reset
-    ///   ([`MenuAction::None`]).
-    /// * Main > Multiplayer: unimplemented ([`MenuAction::None`]).
+    /// * Main > Single Player / Multiplayer / Options / Help: switch screen,
+    ///   cursor reset ([`MenuAction::None`]).
     /// * Main > Quit: raise the Quit confirm prompt ([`MenuAction::None`]).
     /// * SinglePlayer > New Game: [`MenuAction::NewGame`] and close the menu.
-    /// * SinglePlayer > Load/Save: unimplemented ([`MenuAction::None`]).
-    /// * Options > Customize controls / Video Options: stubs ([`MenuAction::None`]).
+    /// * SinglePlayer > Load / Save: open the slot lists (`M_Menu_Load_f` /
+    ///   `M_Menu_Save_f`; Save refuses while no game runs).
+    /// * Load > slot: [`MenuAction::LoadSlot`] + close when loadable, else
+    ///   nothing (`M_Load_Key`'s `!loadable` return).
+    /// * Save > slot: [`MenuAction::SaveSlot`] + close (`M_Save_Key`).
+    /// * Multiplayer > Join/New Game: no net drivers, nothing (like the C);
+    ///   Setup: not ported ([`MenuAction::None`]).
+    /// * Options > Customize controls: the Keys screen; Video Options: the
+    ///   video-mode list.
     /// * Options > Go to console: [`MenuAction::OpenConsole`].
     /// * Options > Reset to defaults: reset the in-menu cvars, return
     ///   [`MenuAction::ResetDefaults`].
     /// * Options analog/checkbox rows: Enter nudges them right (the C falls through
     ///   to `M_AdjustSliders(1)`).
+    /// * Keys > row: start the bind grab (`bind_grab`), unbinding first when the
+    ///   row already shows two keys (`M_Keys_Key` K_ENTER).
+    /// * Video > row: apply the highlighted preset ([`MenuAction::ResolutionChanged`]).
     /// * Quit > Enter == "Yes": close the menu ([`MenuAction::Closed`]).
     /// * Help: Enter is inert ([`MenuAction::None`]).
     pub fn select(&mut self) -> MenuAction {
         match self.screen {
-            MenuScreen::Main => match self.cursor {
-                0 => {
-                    // M_Menu_SinglePlayer_f
-                    self.screen = MenuScreen::SinglePlayer;
-                    self.cursor = 0;
-                    MenuAction::None
+            MenuScreen::Main => {
+                // M_Main_Key K_ENTER: m_entersound = true for every item.
+                self.snd(MenuSound::Menu2);
+                match self.cursor {
+                    0 => {
+                        // M_Menu_SinglePlayer_f
+                        self.screen = MenuScreen::SinglePlayer;
+                        self.cursor = 0;
+                        MenuAction::None
+                    }
+                    1 => {
+                        // M_Menu_MultiPlayer_f
+                        self.screen = MenuScreen::Multiplayer;
+                        self.cursor = 0;
+                        MenuAction::None
+                    }
+                    2 => {
+                        // M_Menu_Options_f
+                        self.screen = MenuScreen::Options;
+                        self.cursor = 0;
+                        MenuAction::None
+                    }
+                    3 => {
+                        // M_Menu_Help_f
+                        self.screen = MenuScreen::Help;
+                        self.cursor = 0;
+                        self.help_page = 0;
+                        MenuAction::None
+                    }
+                    4 => {
+                        // M_Menu_Quit_f: pop the confirm prompt (does NOT quit yet).
+                        self.open_quit();
+                        MenuAction::None
+                    }
+                    _ => MenuAction::None,
                 }
-                2 => {
-                    // M_Menu_Options_f
-                    self.screen = MenuScreen::Options;
-                    self.cursor = 0;
-                    MenuAction::None
-                }
-                3 => {
-                    // M_Menu_Help_f
-                    self.screen = MenuScreen::Help;
-                    self.cursor = 0;
-                    self.help_page = 0;
-                    MenuAction::None
-                }
-                4 => {
-                    // M_Menu_Quit_f: pop the confirm prompt (does NOT quit yet).
-                    self.open_quit();
-                    MenuAction::None
-                }
-                // Multiplayer (item 1): not ported.
-                _ => MenuAction::None,
-            },
+            }
             MenuScreen::SinglePlayer => match self.cursor {
                 0 => {
-                    // New Game: the C runs `map start`; we start the hub and close.
+                    // New Game: the C runs `map start`; we start the hub and
+                    // close. (M_SinglePlayer_Key latches m_entersound, but the
+                    // menu closes before M_Draw can fire it — silent.)
                     self.close();
                     self.screen = MenuScreen::Main;
                     self.cursor = 0;
                     MenuAction::NewGame
                 }
-                // Load / Save: not ported.
+                1 => {
+                    // M_Menu_Load_f (M_ScanSaves already ran host-side: the
+                    // slot comments are whatever set_save_comments put there).
+                    self.snd(MenuSound::Menu2);
+                    self.screen = MenuScreen::Load;
+                    self.cursor = 0;
+                    MenuAction::None
+                }
+                2 => {
+                    // M_Menu_Save_f: refuse without an active local game
+                    // (!sv.active / cl.intermission / maxclients != 1 — the
+                    // host folds those into game_active). The C latches
+                    // m_entersound BEFORE the early return and the menu keeps
+                    // drawing, so the menu2 still plays either way.
+                    self.snd(MenuSound::Menu2);
+                    if self.game_active {
+                        self.screen = MenuScreen::Save;
+                        self.cursor = 0;
+                    }
+                    MenuAction::None
+                }
                 _ => MenuAction::None,
             },
+            MenuScreen::Load => {
+                // M_Load_Key K_ENTER: menu2 first, then return unless loadable.
+                self.snd(MenuSound::Menu2);
+                if !self.slot_loadable(self.cursor) {
+                    return MenuAction::None;
+                }
+                // m_state = m_none; key_dest = key_game; Cbuf "load sN".
+                let slot = self.cursor;
+                self.close();
+                self.screen = MenuScreen::Main;
+                self.cursor = 0;
+                MenuAction::LoadSlot(slot)
+            }
+            MenuScreen::Save => {
+                // M_Save_Key K_ENTER (no sound in the C): m_state = m_none;
+                // key_dest = key_game; Cbuf "save sN".
+                let slot = self.cursor;
+                self.close();
+                self.screen = MenuScreen::Main;
+                self.cursor = 0;
+                MenuAction::SaveSlot(slot)
+            }
+            MenuScreen::Multiplayer => {
+                // M_MultiPlayer_Key K_ENTER: m_entersound = true; items 0/1
+                // only open the net menu when a driver is available (none here,
+                // like a C build with no network) and item 2 (Setup) is not
+                // ported — so every item responds with the sound alone.
+                self.snd(MenuSound::Menu2);
+                MenuAction::None
+            }
             MenuScreen::Options => match self.cursor {
-                // Customize controls / Video Options: target screens not ported.
-                ROW_CONTROLS | ROW_VIDEO => MenuAction::None,
+                ROW_CONTROLS => {
+                    // M_Menu_Keys_f
+                    self.snd(MenuSound::Menu2);
+                    self.screen = MenuScreen::Keys;
+                    self.cursor = 0;
+                    self.bind_grab = false;
+                    MenuAction::None
+                }
+                ROW_VIDEO => {
+                    // M_Menu_Video_f: open the mode list with the cursor on the
+                    // current mode (vid_win.c keeps vid_line on the live mode).
+                    self.snd(MenuSound::Menu2);
+                    self.screen = MenuScreen::Video;
+                    self.cursor = self.res_preset.min(RESOLUTION_PRESETS.len() - 1);
+                    MenuAction::None
+                }
                 ROW_CONSOLE => {
-                    // m_state = m_none; Con_ToggleConsole_f().
+                    // m_state = m_none; Con_ToggleConsole_f(). The latched
+                    // m_entersound never fires (the menu closed) — silent.
                     self.close();
                     MenuAction::OpenConsole
                 }
                 ROW_DEFAULTS => {
-                    // Cbuf_AddText("exec default.cfg"): reset every option cvar.
+                    // Cbuf_AddText("exec default.cfg"): reset every option cvar
+                    // (m_entersound plays — the menu stays up).
+                    self.snd(MenuSound::Menu2);
                     self.reset_defaults();
                     MenuAction::ResetDefaults
                 }
-                // Every other row: Enter falls through to M_AdjustSliders(1). The
-                // Screen-size row resizes the framebuffer, so propagate that out to
-                // the host (the analog/checkbox rows return false -> None).
+                // Every other row: Enter latches m_entersound AND falls through
+                // to M_AdjustSliders(1) (its own menu3) — the C audibly plays
+                // BOTH. The Screen-size row resizes the framebuffer, so
+                // propagate that out to the host (the analog/checkbox rows
+                // return false -> None).
                 _ => {
+                    self.snd(MenuSound::Menu2);
                     if self.adjust(1) {
                         MenuAction::ResolutionChanged
                     } else {
@@ -7066,10 +7506,29 @@ impl Menu {
                     }
                 }
             },
+            MenuScreen::Keys => {
+                // M_Keys_Key K_ENTER: menu2; unbind first when the row already
+                // shows two keys, then grab the next key.
+                self.snd(MenuSound::Menu2);
+                let keys = self.find_keys_for_command(self.cursor);
+                if keys[1].is_some() {
+                    self.unbind_command(self.cursor);
+                }
+                self.bind_grab = true;
+                MenuAction::None
+            }
+            MenuScreen::Video => {
+                // VID_MenuKey K_ENTER: menu1 (NOT menu2) + VID_SetMode on the
+                // highlighted mode line.
+                self.snd(MenuSound::Menu1);
+                self.res_preset = self.cursor.min(RESOLUTION_PRESETS.len() - 1);
+                MenuAction::ResolutionChanged
+            }
             MenuScreen::Help => MenuAction::None,
             MenuScreen::Quit => {
                 // Enter == "Yes": Host_Quit_f. Here that closes the menu (quit to
-                // the attract loop).
+                // the attract loop). (The C's M_Quit_Key ignores Enter — only
+                // y/Y quits — but this port has always accepted Enter as Yes.)
                 self.close();
                 self.screen = MenuScreen::Main;
                 self.cursor = 0;
@@ -7080,7 +7539,11 @@ impl Menu {
 
     /// Back out (Escape / `K_ESCAPE`). A hidden menu is a no-op
     /// ([`MenuAction::None`]). Otherwise:
-    /// * a submenu (SinglePlayer/Options/Help) returns to Main ([`MenuAction::Back`]);
+    /// * a Keys bind-grab in progress is cancelled (`M_Keys_Key`, the grab
+    ///   branch's `K_ESCAPE`) — the screen stays;
+    /// * SinglePlayer/Multiplayer/Options/Help return to Main; Load/Save return
+    ///   to SinglePlayer; Keys/Video return to Options (each `M_Menu_*_f` plays
+    ///   `m_entersound`) — all [`MenuAction::Back`];
     /// * the Quit prompt answers "No" → restores the previous screen
     ///   ([`MenuAction::Back`]);
     /// * the Main screen closes the menu ([`MenuAction::Closed`]).
@@ -7088,16 +7551,50 @@ impl Menu {
         if !self.visible {
             return MenuAction::None;
         }
+        if self.bind_grab {
+            // M_Keys_Key while defining a key: menu1; Escape just ends the grab.
+            self.snd(MenuSound::Menu1);
+            self.bind_grab = false;
+            return MenuAction::None;
+        }
         match self.screen {
-            MenuScreen::SinglePlayer | MenuScreen::Options | MenuScreen::Help => {
-                // M_*_Key K_ESCAPE -> M_Menu_Main_f
+            MenuScreen::SinglePlayer
+            | MenuScreen::Multiplayer
+            | MenuScreen::Options
+            | MenuScreen::Help => {
+                // M_*_Key K_ESCAPE -> M_Menu_Main_f (m_entersound = true).
                 self.screen = MenuScreen::Main;
                 self.cursor = 0;
+                self.snd(MenuSound::Menu2);
+                MenuAction::Back
+            }
+            MenuScreen::Load | MenuScreen::Save => {
+                // M_Load_Key / M_Save_Key K_ESCAPE -> M_Menu_SinglePlayer_f.
+                self.screen = MenuScreen::SinglePlayer;
+                self.cursor = 0;
+                self.snd(MenuSound::Menu2);
+                MenuAction::Back
+            }
+            MenuScreen::Keys => {
+                // M_Keys_Key K_ESCAPE -> M_Menu_Options_f (m_entersound).
+                self.screen = MenuScreen::Options;
+                self.cursor = 0;
+                self.snd(MenuSound::Menu2);
+                MenuAction::Back
+            }
+            MenuScreen::Video => {
+                // VID_MenuKey K_ESCAPE: menu1, then M_Menu_Options_f (menu2).
+                self.snd(MenuSound::Menu1);
+                self.screen = MenuScreen::Options;
+                self.cursor = 0;
+                self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
             MenuScreen::Quit => {
-                // M_Quit_Key 'n'/Escape: restore the screen the prompt rose from.
+                // M_Quit_Key 'n'/Escape: restore the screen the prompt rose from
+                // (wasInMenus -> m_entersound = true).
                 self.screen = self.quit_prev;
+                self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
             MenuScreen::Main => {
@@ -7139,22 +7636,28 @@ impl Menu {
         if self.screen != MenuScreen::Quit {
             return MenuAction::None;
         }
+        // M_Quit_Key 'n': wasInMenus -> m_entersound = true.
         self.screen = self.quit_prev;
+        self.snd(MenuSound::Menu2);
         MenuAction::Back
     }
 
     /// Page the Help screen by `dir` (right/up = +1 next, left/down = -1 previous),
-    /// wrapping over [`NUM_HELP_PAGES`] (`M_Help_Key`). A no-op off the Help screen.
+    /// wrapping over [`NUM_HELP_PAGES`] (`M_Help_Key`, which latches
+    /// `m_entersound` — menu2 — on every page turn). A no-op off the Help screen.
     pub fn page(&mut self, dir: i32) {
         if self.screen != MenuScreen::Help {
             return;
         }
+        self.snd(MenuSound::Menu2);
         self.help_page = help_page_wrap(self.help_page as i32 + dir.signum());
     }
 
     /// Adjust the highlighted Options row by `delta` (left = -1, right = +1),
-    /// porting `M_AdjustSliders`. A no-op unless on [`MenuScreen::Options`] and the
-    /// row is an analog/checkbox row (the action rows 0/1/2/12 ignore it).
+    /// porting `M_AdjustSliders` — plus the screens whose `M_*_Key` maps
+    /// left/right onto cursor movement (`M_Load_Key`/`M_Save_Key`/`M_Keys_Key`
+    /// pair LEFT with UP and RIGHT with DOWN; `VID_MenuKey` steps the mode line)
+    /// and Help paging.
     ///
     /// Returns `true` when the Screen-size row changed (so the host knows to
     /// reallocate the framebuffer to [`resolution`](Menu::resolution)); `false`
@@ -7170,9 +7673,22 @@ impl Menu {
             self.page(step);
             return false;
         }
+        // M_Load_Key / M_Save_Key / M_Keys_Key: LEFT pairs with UP and RIGHT
+        // with DOWN (cursor movement, menu1 inside move_cursor). VID_MenuKey
+        // also moves the mode line on left/right (single-column here).
+        if matches!(
+            self.screen,
+            MenuScreen::Load | MenuScreen::Save | MenuScreen::Keys | MenuScreen::Video
+        ) {
+            self.move_cursor(step);
+            return false;
+        }
         if self.screen != MenuScreen::Options {
             return false;
         }
+        // M_AdjustSliders plays misc/menu3.wav unconditionally — even when the
+        // cursor sits on an action row the switch below ignores.
+        self.snd(MenuSound::Menu3);
         let d = step as f32;
         match self.cursor {
             ROW_SCREENSIZE => {
@@ -7228,6 +7744,8 @@ impl Menu {
     /// Reset every Options cvar to its id default (`exec default.cfg`). The render
     /// resolution preset is left to the host (the framebuffer is its own source of
     /// truth), matching how a `default.cfg` would not change the live mode here.
+    /// The key bindings reset too — the C's `default.cfg` is mostly `bind` lines,
+    /// re-executed wholesale by this row.
     pub fn reset_defaults(&mut self) {
         self.sensitivity = SENS_DEFAULT;
         self.volume = VOLUME_DEFAULT;
@@ -7237,6 +7755,7 @@ impl Menu {
         self.invert_mouse = false;
         self.lookspring = false;
         self.lookstrafe = false;
+        self.bindings = default_bindings();
     }
 
     /// The currently-selected render resolution `(width, height)` from the Options
@@ -7279,34 +7798,110 @@ impl Menu {
         self.sensitivity
     }
 
-    /// The `v_gamma` cvar (Brightness, 0.5..=1). COSMETIC.
+    /// The `v_gamma` cvar (Brightness, 0.5..=1). The host runs the presented
+    /// frame through [`build_gamma_table`] with this (identity at 1.0).
     pub fn gamma(&self) -> f32 {
         self.gamma
     }
 
-    /// The `bgmvolume` cvar (CD Music Volume, 0..=1). COSMETIC.
+    /// The `bgmvolume` cvar (CD Music Volume, 0..=1). Live cvar; no CD audio
+    /// exists to play at it (see the [`BGM_DEFAULT`] DEVIATION note).
     pub fn bgm_volume(&self) -> f32 {
         self.bgm_volume
     }
 
-    /// Whether the "Always Run" checkbox is on. COSMETIC.
+    /// Whether the "Always Run" checkbox is on (`cl_forwardspeed > 200`): the
+    /// host swaps cl_forwardspeed/cl_backspeed 200 <-> 400 on it.
     pub fn always_run(&self) -> bool {
         self.always_run
     }
 
-    /// Whether the "Invert Mouse" checkbox is on. COSMETIC.
+    /// Whether the "Invert Mouse" checkbox is on (`m_pitch < 0`): the host
+    /// flips the mouse-pitch sign.
     pub fn invert_mouse(&self) -> bool {
         self.invert_mouse
     }
 
-    /// Whether the "Lookspring" checkbox is on. COSMETIC.
+    /// Whether the "Lookspring" checkbox is on: pitch re-centres when mouse-look
+    /// disengages (pointer unlock in this port — see the field note).
     pub fn lookspring(&self) -> bool {
         self.lookspring
     }
 
-    /// Whether the "Lookstrafe" checkbox is on. COSMETIC.
+    /// Whether the "Lookstrafe" checkbox is on: mouse X strafes instead of
+    /// turning while mouse-looking.
     pub fn lookstrafe(&self) -> bool {
         self.lookstrafe
+    }
+
+    // --- key bindings (M_Keys_*, keys.c) -----------------------------------
+
+    /// Whether the Keys screen is waiting for the next key to bind
+    /// (`bind_grab`). While set the host routes RAW keys to
+    /// [`bind_key`](Menu::bind_key) instead of menu navigation.
+    pub fn bind_grabbing(&self) -> bool {
+        self.bind_grab
+    }
+
+    /// Deliver the grabbed key (`M_Keys_Key`, the `bind_grab` branch): plays
+    /// menu1; Escape cancels and the console key (backtick) is refused; any
+    /// other key binds to the highlighted command. Either way the grab ends.
+    /// A no-op when not grabbing.
+    pub fn bind_key(&mut self, keynum: u8) {
+        if !self.bind_grab {
+            return;
+        }
+        self.snd(MenuSound::Menu1);
+        if keynum != K_ESCAPE && keynum != b'`' {
+            let cmd = self.cursor.min(NUM_BINDNAMES - 1);
+            self.bindings[keynum as usize] = Some(cmd as u8);
+        }
+        self.bind_grab = false;
+    }
+
+    /// Backspace/Del on the Keys screen (`M_Keys_Key` K_BACKSPACE/K_DEL): plays
+    /// menu2 and unbinds every key bound to the highlighted command. A no-op on
+    /// any other screen (and while grabbing — the C's grab branch consumes the
+    /// key as a BINDING first; the host routes it to [`bind_key`](Menu::bind_key)).
+    pub fn keys_backspace(&mut self) {
+        if self.screen != MenuScreen::Keys || self.bind_grab {
+            return;
+        }
+        self.snd(MenuSound::Menu2);
+        self.unbind_command(self.cursor.min(NUM_BINDNAMES - 1));
+    }
+
+    /// The [`BINDNAMES`] command index bound to `keynum`, if any — the host's
+    /// per-keypress lookup (the inverse of the C consulting `keybindings[key]`
+    /// in `Key_Event`).
+    pub fn action_for_key(&self, keynum: u8) -> Option<usize> {
+        self.bindings[keynum as usize].map(|c| c as usize)
+    }
+
+    /// `M_FindKeysForCommand` (menu.c): the first two keys bound to `cmd`, in
+    /// keynum order (the C scans 0..256 ascending).
+    pub fn find_keys_for_command(&self, cmd: usize) -> [Option<u8>; 2] {
+        let mut out = [None; 2];
+        let mut n = 0;
+        for (k, b) in self.bindings.iter().enumerate() {
+            if *b == Some(cmd as u8) {
+                out[n] = Some(k as u8);
+                n += 1;
+                if n == 2 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// `M_UnbindCommand` (menu.c): clear every key bound to `cmd`.
+    pub fn unbind_command(&mut self, cmd: usize) {
+        for b in self.bindings.iter_mut() {
+            if *b == Some(cmd as u8) {
+                *b = None;
+            }
+        }
     }
 }
 
@@ -7360,6 +7955,18 @@ pub struct MenuPics {
     /// `gfx/p_option.lmp` — the "OPTIONS" title plaque (centered at y=4 on the
     /// options screen, like the other titles).
     pub p_option: Option<crate::wad::Qpic>,
+    /// `gfx/p_load.lmp` — the "LOAD GAME" title (`M_Load_Draw`).
+    pub p_load: Option<crate::wad::Qpic>,
+    /// `gfx/p_save.lmp` — the "SAVE GAME" title (`M_Save_Draw`).
+    pub p_save: Option<crate::wad::Qpic>,
+    /// `gfx/p_multi.lmp` — the MULTIPLAYER title (`M_MultiPlayer_Draw`).
+    pub p_multi: Option<crate::wad::Qpic>,
+    /// `gfx/mp_menu.lmp` — the 3-item multiplayer list graphic (drawn at (72,32)).
+    pub mp_menu: Option<crate::wad::Qpic>,
+    /// `gfx/ttl_cstm.lmp` — the CUSTOMIZE CONTROLS title (`M_Keys_Draw`).
+    pub ttl_cstm: Option<crate::wad::Qpic>,
+    /// `gfx/vidmodes.lmp` — the VIDEO MODES title (vid_win.c `VID_MenuDraw`).
+    pub vidmodes: Option<crate::wad::Qpic>,
     /// `gfx/menudot1.lmp`..`menudot6.lmp` — the 6-frame animated cursor.
     pub menudot: [Option<crate::wad::Qpic>; 6],
     /// `gfx/help0.lmp`..`help5.lmp` — the 6 full-screen Help/Ordering pages
@@ -7709,7 +8316,9 @@ pub fn draw_menu(
     };
 
     // The Help screen is a full-screen pic at (0,0); the Quit prompt is a small
-    // text box. Neither uses the qplaque, so dispatch them before drawing it.
+    // text box; Load/Save/Keys/Video are a centered title + text rows with no
+    // qplaque (M_Load_Draw etc. draw only the title pic). Dispatch them all
+    // before drawing the plaque.
     match menu.screen {
         MenuScreen::Help => {
             draw_help_screen(image, menu, pics, scale, ox, oy, palette);
@@ -7719,11 +8328,23 @@ pub fn draw_menu(
             draw_quit_screen(image, conchars, scale, ox, oy, palette);
             return;
         }
+        MenuScreen::Load | MenuScreen::Save => {
+            draw_load_save_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            return;
+        }
+        MenuScreen::Keys => {
+            draw_keys_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            return;
+        }
+        MenuScreen::Video => {
+            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            return;
+        }
         _ => {}
     }
 
-    // The plaque is shared by the Main / SinglePlayer / Options screens
-    // (M_DrawTransPic (16,4)).
+    // The plaque is shared by the Main / SinglePlayer / Multiplayer / Options
+    // screens (M_DrawTransPic (16,4)).
     if let Some(p) = &pics.qplaque {
         blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy, palette);
     }
@@ -7736,11 +8357,18 @@ pub fn draw_menu(
         return;
     }
 
+    // M_MultiPlayer_Draw: the C's exact layout, plus the line a netless build
+    // shows.
+    if menu.screen == MenuScreen::Multiplayer {
+        draw_multiplayer_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+        return;
+    }
+
     // The centered title + the item-list graphic differ per screen.
     let (title, list) = match menu.screen {
         MenuScreen::Main => (&pics.ttl_main, &pics.mainmenu),
         MenuScreen::SinglePlayer => (&pics.ttl_sgl, &pics.sp_menu),
-        // Options/Help/Quit are handled above (early return); the catch-all keeps
+        // Every other screen is handled above (early return); the catch-all keeps
         // the match exhaustive without a second layout here.
         _ => (&pics.p_option, &None),
     };
@@ -7884,6 +8512,196 @@ fn menu_res_fraction(menu: &Menu) -> f32 {
         .position(|&p| p == menu.resolution())
         .unwrap_or(0) as f32;
     idx / last
+}
+
+/// Draw the Load or Save slot list, a port of `M_Load_Draw` / `M_Save_Draw`:
+/// the `p_load`/`p_save` title centered at y=4 (no qplaque on these screens),
+/// [`MAX_SAVEGAMES`] rows of `M_Print(16, 32 + 8*i, m_filenames[i])` — each row
+/// is the host-set slot comment, or [`UNUSED_SLOT`] when empty, exactly what
+/// `M_ScanSaves` leaves for a missing `sN.sav` — and the flashing cursor at
+/// `M_DrawCharacter(8, 32 + cursor*8, 12 + blink)`.
+#[allow(clippy::too_many_arguments)]
+fn draw_load_save_screen(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    frame: usize,
+    palette: &[[u8; 3]; 256],
+) {
+    let title = if menu.screen == MenuScreen::Save {
+        &pics.p_save
+    } else {
+        &pics.p_load
+    };
+    if let Some(t) = title {
+        let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+    }
+    if let Some(cc) = conchars {
+        for i in 0..MAX_SAVEGAMES {
+            let ry = 32.0 + i as f32 * 8.0;
+            let text = menu.save_comment(i);
+            let row = if text.is_empty() { UNUSED_SLOT } else { text };
+            draw_string_scaled(image, cc, 16.0, ry, row, scale, ox, oy, palette);
+        }
+        let cy = 32.0 + menu.cursor as f32 * 8.0;
+        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
+        draw_char_scaled(image, cc, 8.0, cy, cursor_char, scale, ox, oy, palette);
+    }
+}
+
+/// Draw the multiplayer submenu, a port of `M_MultiPlayer_Draw`: qplaque at
+/// (16,4) (drawn by the caller), the `p_multi` title centered, the `mp_menu`
+/// 3-item list at (72,32), the animated menudot cursor at (54, 32 + cursor*20)
+/// — and, since no net driver exists (netcode is out of scope), the C's exact
+/// "No Communications Available" line at y=148, plus one port-scope note line.
+#[allow(clippy::too_many_arguments)]
+fn draw_multiplayer_screen(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    frame: usize,
+    palette: &[[u8; 3]; 256],
+) {
+    if let Some(t) = &pics.p_multi {
+        let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+    }
+    if let Some(l) = &pics.mp_menu {
+        blit_qpic_at(image, l, 72.0, 32.0, scale, ox, oy, palette);
+    }
+    if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
+        let cy = 32.0 + menu.cursor as f32 * 20.0;
+        blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
+    }
+    if let Some(cc) = conchars {
+        // M_PrintWhite ((320/2) - ((27*8)/2), 148, "No Communications Available").
+        let line = "No Communications Available";
+        let cx = MENU_VIRT_W * 0.5 - (line.len() as f32 * 8.0) * 0.5;
+        draw_string_scaled(image, cc, cx, 148.0, line, scale, ox, oy, palette);
+        // PORT NOTE (not in the C): say *why* — multiplayer is out of scope.
+        let note = "(multiplayer is not part of this port)";
+        let nx = (MENU_VIRT_W - note.len() as f32 * 8.0) * 0.5;
+        draw_string_scaled(image, cc, nx, 156.0, note, scale, ox, oy, palette);
+    }
+}
+
+/// Draw the Customize-controls screen, a port of `M_Keys_Draw`: the `ttl_cstm`
+/// title centered at y=4, the instruction line at y=32 ("Press a key..." while
+/// grabbing, else "Enter to change..."), one row per [`BINDNAMES`] entry from
+/// y=48 (label at x=16, bound key name(s) at x=140 — "???" when unbound, "or"
+/// between two), and the cursor at x=130 — `=` while grabbing, else the
+/// flashing 12/13 glyph.
+#[allow(clippy::too_many_arguments)]
+fn draw_keys_screen(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    frame: usize,
+    palette: &[[u8; 3]; 256],
+) {
+    if let Some(t) = &pics.ttl_cstm {
+        let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+    }
+    let Some(cc) = conchars else { return };
+    if menu.bind_grabbing() {
+        draw_string_scaled(
+            image, cc, 12.0, 32.0, "Press a key or button for this action", scale, ox, oy,
+            palette,
+        );
+    } else {
+        draw_string_scaled(
+            image, cc, 18.0, 32.0, "Enter to change, backspace to clear", scale, ox, oy, palette,
+        );
+    }
+    for (i, (_, label)) in BINDNAMES.iter().enumerate() {
+        let y = 48.0 + 8.0 * i as f32;
+        draw_string_scaled(image, cc, 16.0, y, label, scale, ox, oy, palette);
+        let keys = menu.find_keys_for_command(i);
+        match keys[0] {
+            None => draw_string_scaled(image, cc, 140.0, y, "???", scale, ox, oy, palette),
+            Some(k0) => {
+                let name = keynum_to_string(k0);
+                draw_string_scaled(image, cc, 140.0, y, &name, scale, ox, oy, palette);
+                if let Some(k1) = keys[1] {
+                    // M_Print (140 + x + 8, y, "or"); M_Print (140 + x + 32, ...).
+                    let x = name.len() as f32 * 8.0;
+                    draw_string_scaled(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy, palette);
+                    draw_string_scaled(
+                        image, cc, 140.0 + x + 32.0, y, &keynum_to_string(k1), scale, ox, oy,
+                        palette,
+                    );
+                }
+            }
+        }
+    }
+    let cy = 48.0 + menu.cursor as f32 * 8.0;
+    if menu.bind_grabbing() {
+        // M_DrawCharacter (130, 48 + keys_cursor*8, '=').
+        draw_char_scaled(image, cc, 130.0, cy, b'=', scale, ox, oy, palette);
+    } else {
+        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
+        draw_char_scaled(image, cc, 130.0, cy, cursor_char, scale, ox, oy, palette);
+    }
+}
+
+/// Draw the video-modes screen — this port's `VID_MenuDraw` (vid_win.c): the
+/// `vidmodes` title centered at y=4, one row per [`RESOLUTION_PRESETS`] entry
+/// from y=36 (the C lists `WIDTHxHEIGHT` mode descriptions and marks the
+/// current mode), the flashing cursor on the highlighted row, and hint lines.
+/// Single column — the C's 3-wide grid exists to fit 15+ DOS modes; 7 presets
+/// fit one column.
+#[allow(clippy::too_many_arguments)]
+fn draw_video_screen(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    frame: usize,
+    palette: &[[u8; 3]; 256],
+) {
+    if let Some(t) = &pics.vidmodes {
+        let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+    }
+    let Some(cc) = conchars else { return };
+    let current = menu.resolution();
+    for (i, &(w, h)) in RESOLUTION_PRESETS.iter().enumerate() {
+        let y = 36.0 + 8.0 * i as f32;
+        let mut row = format!("{w}x{h}");
+        if (w, h) == current {
+            row.push_str("  (current)");
+        }
+        draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
+    }
+    let cy = 36.0 + menu.cursor as f32 * 8.0;
+    let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
+    draw_char_scaled(image, cc, 8.0, cy, cursor_char, scale, ox, oy, palette);
+    // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
+    // single column's foot.
+    let hints_y = 36.0 + RESOLUTION_PRESETS.len() as f32 * 8.0 + 16.0;
+    draw_string_scaled(
+        image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy, palette,
+    );
+    draw_string_scaled(
+        image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy, palette,
+    );
 }
 
 /// Draw the Help/Ordering screen (`M_Help_Draw`): blit the current page pic
@@ -11404,6 +12222,19 @@ mod tests {
         p
     }
 
+    /// A test conchars atlas where every glyph texel is the lit index 3 (except
+    /// the byte-0 cell, which stays the transparent index 0), so any drawn
+    /// label/value paints index-3 pixels.
+    fn test_conchars() -> Qpic {
+        let mut data = vec![3u8; 128 * 128];
+        for y in 0..8 {
+            for x in 0..8 {
+                data[y * 128 + x] = 0;
+            }
+        }
+        Qpic { width: 128, height: 128, data }
+    }
+
     /// One synthetic qpic payload: width i32, height i32, then `w*h` indices.
     fn qpic_payload(w: i32, h: i32, fill: u8) -> Vec<u8> {
         let mut v = Vec::new();
@@ -12391,12 +13222,18 @@ mod tests {
         assert_eq!(m.select(), MenuAction::Closed, "Enter on the Quit prompt quits");
         assert!(!m.visible);
 
-        // Unimplemented Main item Multiplayer (item 1) does nothing.
+        // Main item Multiplayer (item 1) opens the multiplayer screen
+        // (M_Menu_MultiPlayer_f); Enter there does nothing (no net drivers,
+        // like the C), and Escape returns to Main.
         m.open();
         m.cursor = 1;
         assert_eq!(m.select(), MenuAction::None);
-        assert_eq!(m.screen(), MenuScreen::Main, "Multiplayer must not change screen");
+        assert_eq!(m.screen(), MenuScreen::Multiplayer, "item 1 enters Multiplayer");
         assert!(m.visible);
+        assert_eq!(m.select(), MenuAction::None, "Join responds with no action (no net)");
+        assert_eq!(m.screen(), MenuScreen::Multiplayer);
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Main);
 
         // Help (item 3) now opens the Help screen.
         m.cursor = 3;
@@ -12833,12 +13670,22 @@ mod tests {
         assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "defaults restored");
         assert!(!m.always_run(), "checkboxes reset to off");
 
-        // Customize controls / Video Options: stubs that don't change screen.
-        for row in [ROW_CONTROLS, ROW_VIDEO] {
-            m.cursor = row;
-            assert_eq!(m.select(), MenuAction::None);
-            assert_eq!(m.screen(), MenuScreen::Options, "stub row {row} stays on Options");
-        }
+        // Customize controls opens the Keys screen (M_Menu_Keys_f); Escape
+        // returns to Options (M_Keys_Key K_ESCAPE -> M_Menu_Options_f).
+        m.cursor = ROW_CONTROLS;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Keys, "Customize controls enters Keys");
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Options, "Esc on Keys returns to Options");
+
+        // Video Options opens the mode list (M_Menu_Video_f) with the cursor on
+        // the current preset; Escape returns to Options (VID_MenuKey K_ESCAPE).
+        m.cursor = ROW_VIDEO;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Video, "Video Options enters the mode list");
+        assert_eq!(m.cursor(), m.res_preset, "video cursor starts on the current mode");
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Options, "Esc on Video returns to Options");
 
         // Enter on an analog row nudges it right (the C falls through to
         // M_AdjustSliders(1)).
@@ -12884,6 +13731,319 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Main);
         m.page(1);
         assert_eq!(m.help_page(), 0, "page() does nothing off the Help screen");
+    }
+
+    #[test]
+    fn gamma_table_identity_at_one_and_curve_below() {
+        // BuildGammaTable's g == 1.0 special case is a literal identity — the
+        // host skips the LUT entirely there, so default gamma is byte-exact.
+        let id = build_gamma_table(1.0);
+        for (i, &v) in id.iter().enumerate() {
+            assert_eq!(v as usize, i, "gamma 1.0 must be the identity at {i}");
+        }
+        // Below 1.0 the curve BRIGHTENS (x^g > x for x in (0,1), g < 1) and is
+        // monotonic; the top end stays pinned by the clamp.
+        let g = build_gamma_table(0.5);
+        assert_eq!(g[255], 255);
+        for i in 1..255usize {
+            assert!(g[i] >= id[i], "gamma 0.5 must brighten every level ({i})");
+            assert!(g[i] >= g[i - 1], "gamma table must be monotonic ({i})");
+        }
+        // The C's exact formula spot-check: i=64, g=0.5 ->
+        // 255*sqrt(64.5/255.5)+0.5 = 128.6... -> truncates to 128.
+        assert_eq!(g[64], 128);
+        // ...and the bottom level: 255*sqrt(0.5/255.5)+0.5 = 11.78 -> 11.
+        assert_eq!(g[0], 11);
+    }
+
+    #[test]
+    fn menu_sounds_follow_the_c_triggers() {
+        let mut m = Menu::new();
+        // Opening latches m_entersound -> menu2.
+        m.open();
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+        // Cursor moves play menu1 per press (M_Main_Key K_UP/DOWNARROW).
+        m.move_cursor(1);
+        m.move_cursor(-1);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu1, MenuSound::Menu1]);
+        // Entering a submenu plays menu2 (M_Main_Key K_ENTER latches it).
+        m.cursor = 2;
+        m.select(); // -> Options
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+        // Left/right adjust plays menu3 (M_AdjustSliders' unconditional
+        // S_LocalSound) — even when the cursor sits on an action row.
+        m.cursor = ROW_SNDVOLUME;
+        m.adjust(-1);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu3]);
+        m.cursor = ROW_CONTROLS;
+        m.adjust(1);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu3], "menu3 plays on action rows too");
+        // Enter on a slider row: m_entersound (menu2) AND M_AdjustSliders' menu3.
+        m.cursor = ROW_BRIGHTNESS;
+        m.select();
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
+        // Escape back to Main: M_Menu_Main_f latches menu2.
+        m.cancel();
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+        // Going to the console CLOSES the menu — the C's latched entersound
+        // never fires (M_Draw stops running): silent.
+        m.cursor = 2;
+        m.select(); // -> Options (menu2)
+        m.take_sounds();
+        m.cursor = ROW_CONSOLE;
+        assert_eq!(m.select(), MenuAction::OpenConsole);
+        assert_eq!(m.take_sounds(), vec![], "closing into the console is silent");
+        // The sample names match S_LocalSound's literals.
+        assert_eq!(MenuSound::Menu1.sample(), "misc/menu1.wav");
+        assert_eq!(MenuSound::Menu2.sample(), "misc/menu2.wav");
+        assert_eq!(MenuSound::Menu3.sample(), "misc/menu3.wav");
+        // The queue is bounded even when the host never drains.
+        m.open();
+        for _ in 0..100 {
+            m.move_cursor(1);
+        }
+        assert!(m.take_sounds().len() <= MENU_SOUND_CAP);
+    }
+
+    #[test]
+    fn load_save_screens_slots_gate_and_actions() {
+        let mut m = Menu::new();
+        m.open();
+        m.select(); // -> SinglePlayer
+
+        // Item 2 = Save: REFUSED while no game is running (M_Menu_Save_f's
+        // `if (!sv.active) return`). The entersound was latched before the
+        // early return, so menu2 still plays.
+        m.cursor = 2;
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::SinglePlayer, "Save refuses without a game");
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+
+        // Item 1 = Load (M_Menu_Load_f) opens with all slots unused.
+        m.cursor = 1;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Load);
+        for i in 0..MAX_SAVEGAMES {
+            assert!(!m.slot_loadable(i), "slot {i} must start unused");
+            assert_eq!(m.save_comment(i), "");
+        }
+        // 12 slots; the cursor wraps over them, and left/right pair with
+        // up/down (M_Load_Key K_LEFTARROW == K_UPARROW).
+        for expect in [1, 2, 3] {
+            m.move_cursor(1);
+            assert_eq!(m.cursor(), expect);
+        }
+        m.adjust(-1);
+        assert_eq!(m.cursor(), 2);
+        m.cursor = MAX_SAVEGAMES - 1;
+        m.move_cursor(1);
+        assert_eq!(m.cursor(), 0, "load cursor wraps over MAX_SAVEGAMES");
+        // Enter on an unused slot: menu2 plays but nothing happens — the C's
+        // `if (!loadable[load_cursor]) return`.
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Load, "unused slot doesn't leave the screen");
+        assert!(m.visible);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2], "Load Enter still plays menu2");
+
+        // Host fills slot 2 (a savegame engine ran M_ScanSaves): it becomes
+        // loadable and Enter emits LoadSlot(2) + closes the menu.
+        let mut comments: [String; MAX_SAVEGAMES] = Default::default();
+        comments[2] = "e1m1: Slipgate Complex".to_string();
+        m.set_save_comments(comments);
+        assert!(m.slot_loadable(2));
+        assert!(!m.slot_loadable(3));
+        m.cursor = 2;
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::LoadSlot(2));
+        assert!(!m.visible, "a real load closes the menu (m_state = m_none)");
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+
+        // Escape on Load returns to SinglePlayer (M_Load_Key K_ESCAPE).
+        m.open();
+        m.select(); // -> SinglePlayer (cursor 0)
+        m.cursor = 1;
+        m.select(); // -> Load
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::SinglePlayer);
+
+        // With a game running, Save opens; Enter emits SaveSlot for the
+        // highlighted slot, closes the menu, and is SILENT (M_Save_Key K_ENTER
+        // plays nothing).
+        m.set_game_active(true);
+        m.cursor = 2;
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Save);
+        m.cursor = 5;
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::SaveSlot(5));
+        assert!(!m.visible, "Save Enter closes the menu like the C");
+        assert_eq!(m.take_sounds(), vec![], "Save Enter is silent in the C");
+
+        // save_comment is total (out-of-range = empty).
+        assert_eq!(m.save_comment(MAX_SAVEGAMES + 3), "");
+    }
+
+    #[test]
+    fn video_screen_lists_and_applies_presets() {
+        let mut m = Menu::new();
+        m.sync_resolution(RESOLUTION_PRESETS[2].0, RESOLUTION_PRESETS[2].1);
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        m.cursor = ROW_VIDEO;
+        m.select(); // -> Video
+        assert_eq!(m.screen(), MenuScreen::Video);
+        assert_eq!(m.cursor(), 2, "cursor opens on the current mode");
+        // Move to another mode and apply it: VID_MenuKey K_ENTER -> VID_SetMode.
+        m.move_cursor(1);
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::ResolutionChanged);
+        assert_eq!(m.resolution(), RESOLUTION_PRESETS[3]);
+        assert_eq!(
+            m.take_sounds(),
+            vec![MenuSound::Menu1],
+            "VID_MenuKey K_ENTER plays menu1 (not menu2)"
+        );
+        assert_eq!(m.screen(), MenuScreen::Video, "the mode list stays up after applying");
+        // The cursor wraps over the preset list; left/right also step it.
+        m.cursor = RESOLUTION_PRESETS.len() - 1;
+        m.move_cursor(1);
+        assert_eq!(m.cursor(), 0);
+        assert!(!m.adjust(1), "video left/right move the line, not the framebuffer");
+        assert_eq!(m.cursor(), 1);
+    }
+
+    #[test]
+    fn keys_screen_lists_rebinds_and_unbinds() {
+        let mut m = Menu::new();
+        // The defaults include id's default.cfg keys and the port's WASD layout.
+        assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD));
+        assert_eq!(m.action_for_key(K_UPARROW), Some(BIND_FORWARD));
+        assert_eq!(m.action_for_key(K_MOUSE1), Some(BIND_ATTACK));
+        assert_eq!(m.action_for_key(K_CTRL), Some(BIND_ATTACK));
+        assert_eq!(m.action_for_key(K_SPACE), Some(BIND_JUMP));
+        assert_eq!(m.action_for_key(b'/'), Some(BIND_CHANGEWEAPON));
+        assert_eq!(m.action_for_key(b'c'), Some(BIND_MOVEDOWN));
+        assert_eq!(m.action_for_key(K_SHIFT), Some(BIND_SPEED));
+        // find_keys_for_command returns up to two keys in keynum order
+        // (M_FindKeysForCommand scans 0..256 ascending: 'w' = 119 < 128).
+        assert_eq!(m.find_keys_for_command(BIND_FORWARD), [Some(b'w'), Some(K_UPARROW)]);
+
+        // Navigate Main > Options > Customize controls.
+        m.open();
+        m.cursor = 2;
+        m.select();
+        m.cursor = ROW_CONTROLS;
+        m.select();
+        assert_eq!(m.screen(), MenuScreen::Keys);
+        assert!(!m.bind_grabbing());
+
+        // Enter on "+attack" (row 0, already two keys: CTRL + MOUSE1): the C
+        // unbinds first, then grabs.
+        m.cursor = BIND_ATTACK;
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::None);
+        assert!(m.bind_grabbing(), "Enter starts the bind grab");
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+        assert_eq!(
+            m.find_keys_for_command(BIND_ATTACK),
+            [None, None],
+            "two-key rows unbind before grabbing"
+        );
+        // Deliver the grabbed key: 'x' binds to +attack, menu1 plays.
+        m.bind_key(b'x');
+        assert!(!m.bind_grabbing());
+        assert_eq!(m.action_for_key(b'x'), Some(BIND_ATTACK));
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu1]);
+
+        // Escape during a grab cancels without binding.
+        m.select();
+        assert!(m.bind_grabbing());
+        m.bind_key(K_ESCAPE);
+        assert!(!m.bind_grabbing());
+        assert_eq!(m.action_for_key(K_ESCAPE), None, "Escape never binds");
+        // The console key is refused too (the C's `k != '`'` check).
+        m.select();
+        m.bind_key(b'`');
+        assert_eq!(m.action_for_key(b'`'), None, "backtick never binds");
+
+        // cancel() during a grab also just ends the grab (screen stays).
+        m.select();
+        assert!(m.bind_grabbing());
+        assert_eq!(m.cancel(), MenuAction::None);
+        assert!(!m.bind_grabbing());
+        assert_eq!(m.screen(), MenuScreen::Keys, "Esc in grab stays on Keys");
+
+        // Backspace unbinds the highlighted command (menu2).
+        m.cursor = BIND_FORWARD;
+        m.take_sounds();
+        m.keys_backspace();
+        assert_eq!(m.find_keys_for_command(BIND_FORWARD), [None, None]);
+        assert_eq!(m.action_for_key(b'w'), None);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+        // ...and left/right move the keys cursor like up/down (M_Keys_Key).
+        m.adjust(1);
+        assert_eq!(m.cursor(), BIND_FORWARD + 1);
+
+        // Reset to defaults re-execs default.cfg: the bindings come back.
+        m.reset_defaults();
+        assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD));
+        assert_eq!(m.action_for_key(b'x'), None, "custom binds reset too");
+    }
+
+    #[test]
+    fn keynum_names_match_key_keynum_to_string() {
+        assert_eq!(keynum_to_string(b'a'), "a");
+        assert_eq!(keynum_to_string(b'/'), "/");
+        assert_eq!(keynum_to_string(K_SPACE), "SPACE");
+        assert_eq!(keynum_to_string(K_UPARROW), "UPARROW");
+        assert_eq!(keynum_to_string(K_MOUSE1), "MOUSE1");
+        assert_eq!(keynum_to_string(K_F1), "F1");
+        assert_eq!(keynum_to_string(K_F12), "F12");
+        assert_eq!(keynum_to_string(K_DEL), "DEL");
+        assert_eq!(keynum_to_string(0), "UNKNOWN");
+    }
+
+    #[test]
+    fn draw_new_menu_screens_without_pics_dont_panic() {
+        // Every new screen draws with NO pics and no conchars (worst case), and
+        // with conchars only (the text paths) — nothing may panic, and the text
+        // screens must put ink on the frame.
+        let pal = ramp_palette();
+        let pics = MenuPics::default();
+        let conchars = test_conchars();
+        let mut m = Menu::new();
+        m.open();
+        for (screen, cursor) in [
+            (MenuScreen::Multiplayer, 0),
+            (MenuScreen::Load, 3),
+            (MenuScreen::Save, 11),
+            (MenuScreen::Keys, 5),
+            (MenuScreen::Video, 2),
+        ] {
+            m.screen = screen;
+            m.cursor = cursor;
+            let mut img = Image::new(320, 200, [9, 9, 9]);
+            draw_menu(&mut img, &m, &pics, None, 0.4, &pal); // no pics, no font
+            let mut img2 = Image::new(320, 200, [9, 9, 9]);
+            draw_menu(&mut img2, &m, &pics, Some(&conchars), 0.4, &pal);
+            let inked = img2.rgb.iter().any(|&p| p != [9, 9, 9]);
+            assert!(inked, "{screen:?} must draw its text rows with conchars present");
+        }
+        // A host-set slot comment replaces the UNUSED text without panicking,
+        // and the bind-grab prompt variant draws too.
+        let mut comments: [String; MAX_SAVEGAMES] = Default::default();
+        comments[0] = "a comment longer than the unused-slot text fits fine".into();
+        m.set_save_comments(comments);
+        m.screen = MenuScreen::Load;
+        let mut img = Image::new(320, 200, [9, 9, 9]);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, &pal);
+        m.screen = MenuScreen::Keys;
+        m.bind_grab = true;
+        let mut img = Image::new(320, 200, [9, 9, 9]);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, &pal);
     }
 
     #[test]
