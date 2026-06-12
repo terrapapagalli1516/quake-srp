@@ -6117,4 +6117,32 @@ mod tests {
             .count();
         assert!(diff > 500, "the drawn sbar changes the bar region ({diff} px)");
     }
+
+    /// The loop wrap is seam-clean on the REAL demo: fast-forward to the last
+    /// frame, take one more step, and the playback lands back on frame 0 —
+    /// which, thanks to the parser's signon gate, is an IN-WORLD frame (the
+    /// old stream emitted ~1.2 s of void-camera signon frames here).
+    #[test]
+    fn demo_loop_wrap_lands_on_the_in_world_first_frame() {
+        let mut d = build_demo().expect("the embedded demo boots");
+        let n = d.demo.frames.len();
+        let _ = step_demo(&mut d, 1.0e6, false, 160, 100);
+        assert_eq!(d.idx, n - 1, "fast-forwarded to the last frame");
+        let (img, _, _) = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 0, "the wrap landed back on frame 0");
+        assert!(
+            !d.demo.frames[0].entities.is_empty(),
+            "frame 0 is the post-signon in-world frame"
+        );
+        let lit = img
+            .rgb
+            .iter()
+            .filter(|p| p[0] != 0 || p[1] != 0 || p[2] != 0)
+            .count();
+        assert!(
+            lit * 2 > img.rgb.len(),
+            "the post-wrap frame renders a real scene ({lit}/{} lit)",
+            img.rgb.len()
+        );
+    }
 }
