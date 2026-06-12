@@ -556,11 +556,52 @@ function wavKey(bytes) {
   }
   return (h >>> 0) + ':' + bytes.length;
 }
-function playBuffer(buf, sp) {
+// Playing one-shot sources keyed by their (entity, channel) pair —
+// SND_PickChannel's override key (snd_dma.c:354-390). A NEW sound on the same
+// entity + non-zero channel STOPS the source it replaces ("always override
+// sound from same entity"; channel 0 = CHAN_AUTO never overrides and is never
+// keyed), and an svc_stopsound (S_StopSound) stops the keyed source. id's own
+// demo1/2/3 never send svc_stopsound (engine-asserted), but the registry also
+// covers the channel-restart case across frames.
+const playingByKey = new Map();
+// Evidence/debug counters (read by the verify scripts; no UI).
+window.__sndStats = { plays: 0, stops: 0 };
+
+function registerSource(src, ent, chan) {
+  if (typeof ent !== 'number' || !(chan > 0)) return; // channel 0 never keyed
+  const key = ent + ':' + chan;
+  const prev = playingByKey.get(key);
+  if (prev) { try { prev.stop(); } catch (e) {} window.__sndStats.stops++; }
+  playingByKey.set(key, src);
+  src.onended = () => { if (playingByKey.get(key) === src) playingByKey.delete(key); };
+}
+
+function playBuffer(buf, sp, ent, chan) {
   const s = audioCtx.createBufferSource();
   s.buffer = buf;
   playRouted(s, sp);
+  registerSource(s, ent, chan);
   s.start();
+  window.__sndStats.plays++;
+}
+
+// Drain pending svc_stopsound stops (demo playback): poll_stop_sound() returns
+// the packed wire short (entity<<3 | channel), or -1 when empty; stop() the
+// registered source for that key — the Web Audio equivalent of S_StopSound
+// zeroing the channel's sfx.
+function drainStopSounds() {
+  if (!exp || typeof exp.poll_stop_sound !== 'function') return;
+  for (let guard = 0; guard < 16; guard++) {
+    const v = exp.poll_stop_sound();
+    if (v < 0) break;
+    const key = (v >> 3) + ':' + (v & 7);
+    const src = playingByKey.get(key);
+    if (src) {
+      try { src.stop(); } catch (e) {}
+      playingByKey.delete(key);
+      window.__sndStats.stops++;
+    }
+  }
 }
 
 // Play every gameplay sound the server queued this frame. poll_sound() pops one
@@ -579,20 +620,24 @@ function drainGameSounds() {
     // Read spatial params right after the pop (poll_sound stashed them for the
     // exports). null => fall back to flat full-volume centered playback.
     const sp = spatializeSound();
+    // The (entity, channel) override key rides the same pop (0:0 when the
+    // exports are absent — never keyed).
+    const ent = typeof exp.sound_entity === 'function' ? exp.sound_entity() : 0;
+    const chan = typeof exp.sound_channel === 'function' ? exp.sound_channel() : 0;
     if (sp && sp.gain <= 0.02) continue;          // inaudibly far — don't even decode
     const ptr = exp.sound_ptr();
     const view = new Uint8Array(exp.memory.buffer, ptr, len);
     const key = wavKey(view);
     const cached = decodedSounds.get(key);
     if (cached) {
-      playBuffer(cached, sp);                      // already decoded — instant, no hitch
+      playBuffer(cached, sp, ent, chan);           // already decoded — instant, no hitch
       continue;
     }
     // First time for this clip: copy out of wasm memory, decode, cache, play.
     const copy = view.slice();
     audioCtx.decodeAudioData(copy.buffer).then(buf => {
       decodedSounds.set(key, buf);
-      playBuffer(buf, sp);
+      playBuffer(buf, sp, ent, chan);
     }).catch(() => {});
   }
 }
@@ -999,6 +1044,7 @@ async function main() {
     if (turn) exp.look(-turn * TURN_RATE * dt, 0);   // arrow turn (right = right)
     exp.step(dt);
     drainGameSounds();
+    drainStopSounds();
     updateLoopingAudio();
     updateSndUI();
     syncLockChip();

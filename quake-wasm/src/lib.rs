@@ -219,6 +219,10 @@ struct DemoPlay {
     bsp: Bsp,
     palette: [[u8; 3]; 256],
     demo: Demo,
+    /// The archive, kept open so the recorded `svc_sound` one-shots can load
+    /// their WAV bytes on demand — the demo's audio runs through the SAME
+    /// `queue_sounds` path live play uses.
+    pak: Pak,
     /// Parsed model per precache index (None for non-`.mdl` / missing).
     models: Vec<Option<Mdl>>,
     /// Parsed sprite per precache index (None for non-`.spr` / missing); the boot
@@ -259,6 +263,30 @@ struct DemoPlay {
     pic_complete: Option<Qpic>,
     pic_inter: Option<Qpic>,
     pic_finale: Option<Qpic>,
+    /// `cl.cshifts[CSHIFT_DAMAGE].percent` for the recorded POV: bumped by each
+    /// recorded `svc_damage` (V_ParseDamage: `+= 3*count`, clamped 0..150) and
+    /// faded `dt*150` per rendered frame (V_UpdatePalette), exactly like the
+    /// live walk's damage flash.
+    damage_blend: f32,
+    /// The damage tint V_ParseDamage picked (armour-dominant pink / armour
+    /// orange-red / pure-blood red).
+    damage_color: [u8; 3],
+    /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
+    /// view kick a recorded svc_damage applies, decaying over `v_kicktime`.
+    v_dmg_time: f32,
+    v_dmg_roll: f32,
+    v_dmg_pitch: f32,
+    /// Stair-step smoothing accumulator (V_CalcRefdef `oldz`) for the recorded
+    /// view entity; NaN until the first frame establishes it.
+    oldz: f32,
+    /// Current centerprint + expiry (recorded `svc_centerprint`, scr_centertime
+    /// ~2 s on the demo's recorded frame clock).
+    centerprint: Option<(String, f32)>,
+    /// Notify lines + expiries (recorded `svc_print`, con_notifytime ~3 s).
+    notify: Vec<(String, f32)>,
+    /// The in-progress notify line (Con_Print model: break only on '\n') —
+    /// recorded pickups print as several svc_print fragments.
+    notify_pending: String,
 }
 
 struct App {
@@ -631,13 +659,20 @@ fn build_demo() -> Option<DemoPlay> {
     let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
     let conchars = gfx_wad.as_ref().and_then(render::conchars_pic);
     let lmp = |n: &str| -> Option<Qpic> { read(n).and_then(|b| Qpic::parse(&b).ok()) };
+    // Resolve everything that reads the pak BEFORE the struct literal so the
+    // `read`/`lmp` closure borrows end and `pak` can move into the DemoPlay.
+    let colormap = read("gfx/colormap.lmp");
+    let pic_complete = lmp("gfx/complete.lmp");
+    let pic_inter = lmp("gfx/inter.lmp");
+    let pic_finale = lmp("gfx/finale.lmp");
     Some(DemoPlay {
         bsp,
         palette,
         demo,
+        pak,
         models,
         sprites,
-        colormap: read("gfx/colormap.lmp"),
+        colormap,
         colors,
         elapsed: 0.0,
         idx: 0,
@@ -646,11 +681,20 @@ fn build_demo() -> Option<DemoPlay> {
         last_spawned_idx: usize::MAX,
         beams: Beams::new(),
         beam_scratch: Vec::new(),
-        pic_complete: lmp("gfx/complete.lmp"),
-        pic_inter: lmp("gfx/inter.lmp"),
-        pic_finale: lmp("gfx/finale.lmp"),
+        pic_complete,
+        pic_inter,
+        pic_finale,
         gfx_wad,
         conchars,
+        damage_blend: 0.0,
+        damage_color: [255, 0, 0],
+        v_dmg_time: 0.0,
+        v_dmg_roll: 0.0,
+        v_dmg_pitch: 0.0,
+        oldz: f32::NAN,
+        centerprint: None,
+        notify: Vec::new(),
+        notify_pending: String::new(),
     })
 }
 
@@ -1551,6 +1595,14 @@ struct SndParams {
     /// or pan; the page reads this via `sound_is_view_entity` to skip its
     /// spatial attenuation for player-local sounds (weapon fire, pain, etc.).
     is_view_entity: bool,
+    /// The emitting entity + channel (`SND_PickChannel`'s override key). The
+    /// page reads these via `sound_entity`/`sound_channel` to keep a registry
+    /// of PLAYING sources per `(entity, channel)`, so a NEW sound on a
+    /// non-zero channel STOPS the source it overrides (the C "always override
+    /// sound from same entity" — channel 0 never overrides), and an
+    /// `svc_stopsound` can stop the keyed source (S_StopSound).
+    entity: i32,
+    channel: i32,
 }
 
 impl SndParams {
@@ -1560,6 +1612,8 @@ impl SndParams {
             volume: 0.0,
             attenuation: 0.0,
             is_view_entity: false,
+            entity: 0,
+            channel: 0,
         }
     }
 }
@@ -1670,6 +1724,8 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity:
                 volume: ev.volume,
                 attenuation: ev.attenuation,
                 is_view_entity: ev.entity == view_entity,
+                entity: ev.entity,
+                channel: ev.channel,
             };
 
             // Channel restart (SND_PickChannel): a non-zero channel from the
@@ -1768,6 +1824,65 @@ pub extern "C" fn sound_attenuation() -> f32 {
 #[no_mangle]
 pub extern "C" fn sound_is_view_entity() -> i32 {
     SND_CUR.with(|p| p.borrow().is_view_entity as i32)
+}
+
+/// The emitting entity of the most recent `poll_sound` pop. With
+/// [`sound_channel`] this is the `SND_PickChannel` override key: the page
+/// keeps its playing one-shot sources in a registry keyed `(entity, channel)`
+/// so a later sound on the same non-zero channel STOPS the source it replaces
+/// (snd_dma.c: "always override sound from same entity"), and an
+/// `svc_stopsound` can stop it (S_StopSound).
+#[no_mangle]
+pub extern "C" fn sound_entity() -> i32 {
+    SND_CUR.with(|p| p.borrow().entity)
+}
+/// The channel (0..=7) of the most recent `poll_sound` pop; 0 = CHAN_AUTO,
+/// which never overrides and is never stopped by key.
+#[no_mangle]
+pub extern "C" fn sound_channel() -> i32 {
+    SND_CUR.with(|p| p.borrow().channel)
+}
+
+thread_local! {
+    /// Pending `svc_stopsound` stops, packed as the wire short `(entity << 3)
+    /// | channel` (S_StopSound's arguments). Pushed by demo playback (the only
+    /// current producer — live play's QuakeC stops loops by playing
+    /// `misc/null.wav` on the same channel, which the override path handles);
+    /// drained by the page via [`poll_stop_sound`] each frame. NOTE: id's own
+    /// demo1/2/3 never send svc_stopsound (asserted by a wasm test), so for
+    /// the shipped attract loop this stays empty — the plumbing exists for
+    /// protocol completeness.
+    static STOP_SND_QUEUE: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Queue `(entity, channel)` stops for the page (see [`STOP_SND_QUEUE`]).
+fn push_stop_sounds(stops: &[(i32, i32)]) {
+    if stops.is_empty() {
+        return;
+    }
+    STOP_SND_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        for &(ent, chan) in stops {
+            q.push((ent << 3) | (chan & 7));
+        }
+    });
+}
+
+/// Pop the next pending sound STOP as the packed `(entity << 3) | channel`
+/// short (`S_StopSound(i >> 3, i & 7)`), or `-1` when none are pending. The
+/// page calls this in a loop each frame and `stop()`s the registered source
+/// for that `(entity, channel)` key — the Web Audio equivalent of the C
+/// zeroing the channel's sfx.
+#[no_mangle]
+pub extern "C" fn poll_stop_sound() -> i32 {
+    STOP_SND_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.is_empty() {
+            -1
+        } else {
+            q.remove(0)
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1884,6 +1999,8 @@ fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
                     volume: s.volume,
                     attenuation: s.attenuation,
                     is_view_entity: false, // statics are placed in the world
+                    entity: 0,             // statics carry no override key
+                    channel: 0,
                 },
                 loop_start: loop_start as f32 / rate,
                 loop_end: info.samples as f32 / rate,
@@ -3196,6 +3313,13 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     // call &mut self spawn methods on `d.particles` without aliasing `d`.
     let bursts = frame.particles.clone();
     let tents = frame.temp_entities.clone();
+    let sounds = frame.sounds.clone();
+    let stops = frame.stop_sounds.clone();
+    let damage = frame.damage.clone();
+    let prints = frame.prints.clone();
+    let centerprints = frame.centerprints.clone();
+    let view_entity_origin = frame.view_entity_origin;
+    let view_angles = frame.view_angles;
     for b in &bursts {
         // svc_particle is always R_RunParticleEffect (spawn_burst) in id's
         // CL_ParseParticleEffect — the net count==255 sentinel just means 1024
@@ -3204,6 +3328,12 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
         d.particles
             .spawn_burst(b.org, b.dir, b.color, b.count, now, &mut d.prng);
     }
+    // CLIENT-SIDE temp-entity impact sounds (CL_ParseTEnt: tink/ric for
+    // spikes, wizard/hit, hknight/hit, r_exp3 for explosions) — the C plays
+    // these during demo playback too; they are NOT in the recorded svc_sound
+    // stream. Collected here and queued through the same path as the recorded
+    // sounds below.
+    let mut te_sounds: Vec<quake_rs::server::SoundEvent> = Vec::new();
     for ev in &tents {
         // Beam types refresh the entity's beam slot (CL_ParseBeam) with the
         // frame's recorded server time; step_demo expands the live beams into
@@ -3213,12 +3343,93 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
             d.beams.parse_beam(ev.entity, bm, ev.pos, ev.end, now);
             continue;
         }
-        // Reuse the live-walk mapping (explosion/impact/splash). The returned
-        // sound is the explosion SFX; demo playback drives audio through its own
-        // svc_sound stream, so we ignore it here (the visual effect is the point).
-        let _ = spawn_temp_entity(&mut d.particles, ev, now, &mut d.prng);
+        // Reuse the live-walk mapping (explosion/impact/splash) — including
+        // its client-side impact sound, exactly like step_walk's te_sounds.
+        if let Some(name) = spawn_temp_entity(&mut d.particles, ev, now, &mut d.prng) {
+            te_sounds.push(quake_rs::server::SoundEvent {
+                entity: 0,
+                channel: 0,
+                sound_index: -1,
+                sample: name.to_string(),
+                origin: ev.pos,
+                volume: 1.0,
+                attenuation: 1.0,
+            });
+        }
+    }
+    // The RECORDED svc_sound one-shots (CL_ParseStartSoundPacket ->
+    // S_StartSound): queue through the SAME spatialized path live play uses.
+    // The listener is the recorded camera pose, which step_demo refreshes
+    // every frame; the recorded view entity's own sounds (weapon fire, pain
+    // grunts) get the full-volume centred treatment via the view_entity key.
+    if !sounds.is_empty() {
+        queue_sounds(&d.pak, &sounds, d.demo.viewentity as i32);
+    }
+    if !te_sounds.is_empty() {
+        queue_sounds(&d.pak, &te_sounds, d.demo.viewentity as i32);
+    }
+    // svc_stopsound: hand the (entity, channel) stops to the page, which
+    // stop()s its registered source for that key (S_StopSound).
+    push_stop_sounds(&stops);
+    // svc_damage (V_ParseDamage, view.c): bump the damage cshift and compute
+    // the directional view kick from the recorded attack origin.
+    for dmg in &damage {
+        // count = blood*0.5 + armor*0.5, floored at 10; percent += 3*count,
+        // clamped 0..150.
+        let count = (dmg.blood as f32 * 0.5 + dmg.armor as f32 * 0.5).max(10.0);
+        d.damage_blend = (d.damage_blend + 3.0 * count).clamp(0.0, 150.0);
+        d.damage_color = if dmg.armor > dmg.blood {
+            [200, 100, 100] // armour absorbed most -> pinkish
+        } else if dmg.armor > 0 {
+            [220, 50, 50] // some armour -> orange-red
+        } else {
+            [255, 0, 0] // pure blood -> red
+        };
+        // from = normalize(from - ent->origin); AngleVectors(ent->angles) with
+        // the angles V_CalcRefdef maintains on the view entity: YAW =
+        // cl.viewangles[YAW], PITCH = -cl.viewangles[PITCH], ROLL untouched
+        // (~0 for the player).
+        let delta = [
+            dmg.from[0] - view_entity_origin[0],
+            dmg.from[1] - view_entity_origin[1],
+            dmg.from[2] - view_entity_origin[2],
+        ];
+        let (from_dir, _len) = quake_rs::math::normalize(delta);
+        let (forward, right, _up) =
+            quake_rs::math::angle_vectors([-view_angles[0], view_angles[1], 0.0]);
+        // v_kickroll 0.6 / v_kickpitch 0.6 / v_kicktime 0.5 (stock cvars).
+        d.v_dmg_roll = count * quake_rs::math::dot(from_dir, right) * V_KICKROLL;
+        d.v_dmg_pitch = count * quake_rs::math::dot(from_dir, forward) * V_KICKPITCH;
+        d.v_dmg_time = V_KICKTIME;
+    }
+    // svc_print fragments accumulate Con_Print-style (a notify line breaks
+    // only on '\n' — pickups arrive as several fragments) with Quake's
+    // con_notifytime expiry on the demo's recorded clock; svc_centerprint
+    // replaces the current centered message (SCR_CenterPrint, ~2 s).
+    for p in &prints {
+        d.notify_pending.push_str(p);
+    }
+    while let Some(nl) = d.notify_pending.find('\n') {
+        let line: String = d.notify_pending.drain(..=nl).collect();
+        let line = line.trim_end_matches(['\n', '\r']).to_string();
+        if !line.trim().is_empty() {
+            d.notify.push((line, now + 3.0));
+            while d.notify.len() > 4 {
+                d.notify.remove(0);
+            }
+        }
+    }
+    if let Some(text) = centerprints.into_iter().next_back() {
+        d.centerprint = Some((text, now + 2.0));
     }
 }
+
+/// `v_kicktime` (view.c, default "0.5"): how long an svc_damage view kick lasts.
+const V_KICKTIME: f32 = 0.5;
+/// `v_kickroll` (view.c, default "0.6"): roll degrees per damage count*side.
+const V_KICKROLL: f32 = 0.6;
+/// `v_kickpitch` (view.c, default "0.6"): pitch degrees per damage count*side.
+const V_KICKPITCH: f32 = 0.6;
 
 fn step_demo(
     d: &mut DemoPlay,
@@ -3241,10 +3452,18 @@ fn step_demo(
         // Looping restarts the recorded effect stream: drop every live particle
         // and beam and forget what was spawned so the replay from frame 0 is
         // identical to the first pass (no stale explosions/bolts carried across
-        // the wrap).
+        // the wrap). The per-POV view state resets too: damage flash/kick,
+        // notify + centerprint text, and the stair-smoothing accumulator (their
+        // expiries live on the recorded clock, which just jumped back to t0).
         d.particles = ParticleSystem::new();
         d.beams.clear();
         d.last_spawned_idx = usize::MAX;
+        d.damage_blend = 0.0;
+        d.v_dmg_time = 0.0;
+        d.centerprint = None;
+        d.notify.clear();
+        d.notify_pending.clear();
+        d.oldz = f32::NAN;
     }
     // Advance to the frame matching the recorded server time. Stop at the last
     // frame (n-1); the wrap above handles looping on the FOLLOWING step. Spawn
@@ -3346,26 +3565,79 @@ fn step_demo(
             }
         }
     }
-    // V_CalcIntermissionRefdef (view.c): a recorded intermission renders with
-    // the forced v_idlescale=1 idle sway (V_AddIdle, stock cycle/level cvars)
-    // applied LIVE on top of the recorded (QC-placed) camera angles.
-    let (iyaw, ipitch, iroll) = if f.intermission != 0 {
-        (
-            (f.time * 2.0).sin() * 0.3,
-            (f.time * 1.0).sin() * 0.3,
-            (f.time * 0.5).sin() * 0.1,
-        )
+    // The recorded per-client state (svc_clientdata) drives V_CalcRefdef.
+    let client = f.client;
+    let cam = if f.intermission != 0 {
+        // V_CalcIntermissionRefdef (view.c): a recorded intermission renders
+        // with the forced v_idlescale=1 idle sway (V_AddIdle, stock
+        // cycle/level cvars) applied LIVE on top of the recorded (QC-placed)
+        // camera angles — no bob, no punch, no kick, no stair smoothing.
+        Camera {
+            pos: f.view_origin,
+            yaw: f.view_angles[1] + (f.time * 2.0).sin() * 0.3,
+            pitch: -(f.view_angles[0] + (f.time * 1.0).sin() * 0.3),
+            roll: f.view_angles[2] + (f.time * 0.5).sin() * 0.1,
+            fov_deg: 90.0,
+        }
     } else {
-        (0.0, 0.0, 0.0)
-    };
-    let cam = Camera {
-        pos: f.view_origin,
-        yaw: f.view_angles[1] + iyaw,
-        pitch: -(f.view_angles[0] + ipitch),
-        // Demos record viewangles[ROLL]; replay the recorded bank so the attract
-        // demo leans into strafes exactly as the original engine rendered it.
-        roll: f.view_angles[2] + iroll,
-        fov_deg: 90.0,
+        // V_CalcRefdef (view.c) on the RECORDED stream, exactly like the C's
+        // demo playback: head-bob from the recorded SU_VELOCITY (visible in
+        // id's demo1 — the player runs), stair-step smoothing from the
+        // recorded SU_ONGROUND, the strafe/damage/dead view roll
+        // (V_CalcViewRoll) and the recorded punchangle added LAST. V_AddIdle
+        // is a no-op here (v_idlescale defaults to 0 outside intermission);
+        // the 1/32 anti-node-line epsilon is omitted, matching this port's
+        // live walk. The listener pose below deliberately stays UNbobbed
+        // (audio panning must not jitter with the head-bob), like step_walk.
+        let vel = client.velocity;
+        let speed_xy = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
+        let bob = render::view_bob(speed_xy, f.time);
+        let mut eye = f.view_origin; // view entity origin + recorded viewheight
+        eye[2] += bob;
+        // Stair-step smoothing (V_CalcRefdef ~960): the same port as
+        // step_walk's, driven by the recorded onground flag + the raw view
+        // entity origin z.
+        let origin_z = f.view_entity_origin[2];
+        let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        if d.oldz.is_finite() && client.onground && origin_z - d.oldz > 0.0 {
+            d.oldz += sdt * 80.0;
+            if d.oldz > origin_z {
+                d.oldz = origin_z;
+            }
+            if origin_z - d.oldz > 12.0 {
+                d.oldz = origin_z - 12.0;
+            }
+            eye[2] += d.oldz - origin_z;
+        } else {
+            d.oldz = origin_z;
+        }
+        // V_CalcViewRoll: strafe lean from the recorded velocity (the C reads
+        // the view entity's angles, which V_CalcRefdef keeps at YAW =
+        // viewangles[YAW], PITCH = -viewangles[PITCH]), plus the decaying
+        // svc_damage kick; a dead POV (health <= 0) REPLACES the whole roll
+        // with the 80-degree dead view (the recorded viewangles[ROLL] and the
+        // lean/kick are wiped — the C assigns viewangles[ROLL] = 80). The
+        // punchangle adds AFTER, per the C's VectorAdd ordering.
+        let basis = [-f.view_angles[0], f.view_angles[1], 0.0];
+        let mut roll_angle =
+            f.view_angles[2] + quake_rs::server::v_calc_roll(basis, vel);
+        let mut dmg_pitch = 0.0;
+        if d.v_dmg_time > 0.0 {
+            roll_angle += d.v_dmg_time / V_KICKTIME * d.v_dmg_roll;
+            dmg_pitch = d.v_dmg_time / V_KICKTIME * d.v_dmg_pitch;
+            d.v_dmg_time -= sdt; // v_dmg_time -= host_frametime
+        }
+        if client.health <= 0 {
+            roll_angle = 80.0; // dead view angle (replaces lean + kick + bank)
+        }
+        Camera {
+            pos: eye,
+            yaw: f.view_angles[1] + client.punchangle[1],
+            // QuakeC pitch is +down; the renderer's is +up.
+            pitch: -(f.view_angles[0] + dmg_pitch + client.punchangle[0]),
+            roll: roll_angle + client.punchangle[2],
+            fov_deg: 90.0,
+        }
     };
     // Sound listener pose + the per-leaf ambient channels follow the demo
     // camera (the C's S_Update runs in demo playback too — the recorded e1m3
@@ -3387,18 +3659,47 @@ fn step_demo(
     // particle pool (replayed from the recorded svc_particle / temp-entity
     // stream) is passed as (world pos, palette index) so blood/puffs/explosions
     // draw into the scene sharing its z-buffer. Demos carry no dynamic lights
-    // here (empty) and no live server for light styles (neutral static scales).
+    // here (empty; a deferred LOW).
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    // Demo maps are static-lit and worldspawn always sets style 0 = 'm', which id's
-    // demo playback applies (the recorded svc_lightstyle in the .dem signon). The
-    // demo parser doesn't yet replay those, so seed style 0 with id's steady-world
-    // brightness (264/256, matching the live walk's lightstyle_scales) instead of a
-    // flat 1.0 — otherwise the boot demo's world renders ~1 colormap row too dark.
-    // (Animating the recorded styles — torch flicker — is a minor follow-up.)
-    let mut demo_styles = render::NEUTRAL_LIGHTSTYLE_SCALES;
-    demo_styles[0] = 264.0 / 256.0;
-    let mut img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], None, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    // The RECORDED svc_lightstyle table drives the world lighting through the
+    // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
+    // — the demo's torch flicker matches the recording exactly. A synthetic
+    // demo without a table (tests) falls back to the previous seeded default:
+    // style 0 = 'm' (264/256, id's steady-world brightness), the rest neutral.
+    let demo_styles = if f.lightstyles.is_empty() {
+        let mut s = render::NEUTRAL_LIGHTSTYLE_SCALES;
+        s[0] = 264.0 / 256.0;
+        s
+    } else {
+        quake_rs::server::lightstyle_scales_at(&f.lightstyles, f.time)
+    };
+    // The first-person weapon viewmodel: SU_WEAPON is the model PRECACHE index
+    // (`view->model = cl.model_precache[cl.stats[STAT_WEAPON]]`, V_CalcRefdef),
+    // SU_WEAPONFRAME its animation frame. Hidden exactly like R_DrawViewModel
+    // (r_main.c ~606): invisible POV (Ring of Shadows), dead POV, or an
+    // intermission (V_CalcIntermissionRefdef sets `view->model = NULL`).
+    let hide_gun = f.intermission != 0
+        || client.health <= 0
+        || client.items & IT_INVISIBILITY != 0;
+    let viewmodel = if hide_gun {
+        None
+    } else {
+        match d.models.get(client.weapon_model.max(0) as usize) {
+            Some(Some(mdl)) => {
+                Some(Viewmodel { mdl, frame: client.weaponframe.max(0) as usize })
+            }
+            _ => None,
+        }
+    };
+    let mut img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    // D_WarpScreen: a submerged recorded POV ripples exactly like live play —
+    // the warp applies to the 3-D frame FIRST; the content tint joins the
+    // deferred whole-screen blend below (V_CalcBlend order).
+    let eye_contents = quake_rs::world::point_contents(&d.bsp, cam.pos);
+    if eye_contents <= quake_rs::bsp::CONTENTS_WATER {
+        render::apply_warp(&mut img, f.time);
+    }
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
     // owning the screen (`key_dest == key_game` — i.e. no menu/console up).
@@ -3440,10 +3741,86 @@ fn step_demo(
                 f.time - f.finale_start,
             ),
         }
+    } else if let Some(wad) = d.gfx_wad.as_ref() {
+        // Status bar from the RECORDED cl.stats (svc_clientdata) — the C's
+        // Sbar_Draw runs identically during demo playback, so the attract loop
+        // shows the recorded player's health/ammo/armour/items exactly like
+        // live play. Drawn under the menu/console like step_walk's HUD (the C
+        // draws the sbar regardless of key_dest; overlays paint on top).
+        // draw_hud_into's dead-player branch shows the solo scoreboard when
+        // the recorded health hits 0, like Sbar_Draw's scoreboard flip.
+        let hud = render::Hud {
+            wad,
+            palette: &d.palette,
+            health: client.health,
+            ammo: client.ammo,
+            armor: client.armor,
+            items: client.items,
+            weapon: client.active_weapon,
+            ammo_shells: client.shells,
+            ammo_nails: client.nails,
+            ammo_rockets: client.rockets,
+            ammo_cells: client.cells,
+            // The recorded server clock (cl.time) drives the weapon-flash
+            // cycle + face animation, exactly what sbar.c reads.
+            time: f.time,
+            monsters: f.stats.monsters,
+            total_monsters: f.stats.total_monsters,
+            secrets: f.stats.secrets,
+            total_secrets: f.stats.total_secrets,
+            level_name: &d.demo.level_name,
+            show_scores: false,
+        };
+        render::draw_hud_into(&mut img, &hud);
     }
-    // The demo path applies no screen blend (it carries no live damage/powerup
-    // state); return a zero blend so its signature matches step_walk's deferred one.
-    (img, [0, 0, 0], 0.0)
+
+    // On-screen messages from the recorded svc_print / svc_centerprint stream,
+    // drawn through the same overlays live play uses, with the same key_dest +
+    // intermission gating as step_walk. Expiries live on the recorded clock.
+    if let Some((_, exp)) = &d.centerprint {
+        if f.time >= *exp {
+            d.centerprint = None;
+        }
+    }
+    let ftime = f.time;
+    d.notify.retain(|(_, exp)| ftime < *exp);
+    if !menu_up && f.intermission == 0 {
+        if let Some(cc) = d.conchars.as_ref() {
+            if let Some((text, _)) = &d.centerprint {
+                render::draw_centerprint(&mut img, cc, &d.palette, text);
+            }
+            if !d.notify.is_empty() {
+                let lines: Vec<&str> = d.notify.iter().map(|(t, _)| t.as_str()).collect();
+                render::draw_notify(&mut img, cc, &d.palette, &lines);
+            }
+        }
+    }
+
+    // Screen blends (V_CalcBlend order: CONTENTS -> DAMAGE -> POWERUP), all
+    // from the RECORDED stream: the eye-contents tint, the svc_damage flash
+    // (faded dt*150 per frame like V_UpdatePalette), and the powerup tint from
+    // the recorded cl.items. DEFERRED to the dispatcher so it tints the whole
+    // composited frame (HUD + menu + console), like the live walk.
+    {
+        let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        d.damage_blend = (d.damage_blend - sdt * 150.0).max(0.0);
+    }
+    let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
+    if let Some(cs) = render::content_cshift(eye_contents) {
+        shifts.push(cs);
+    }
+    if d.damage_blend > 0.0 {
+        shifts.push((d.damage_color, d.damage_blend));
+    }
+    if let Some(cs) = render::powerup_cshift(client.items) {
+        shifts.push(cs);
+    }
+    let blend = if shifts.is_empty() {
+        ([0u8, 0, 0], 0.0f32)
+    } else {
+        render::combine_cshifts(&shifts)
+    };
+    (img, blend.0, blend.1)
 }
 
 #[cfg(test)]
@@ -3686,6 +4063,16 @@ mod tests {
             pic_complete: None,
             pic_inter: None,
             pic_finale: None,
+            pak: build_test_pak(&[]),
+            damage_blend: 0.0,
+            damage_color: [255, 0, 0],
+            v_dmg_time: 0.0,
+            v_dmg_roll: 0.0,
+            v_dmg_pitch: 0.0,
+            oldz: f32::NAN,
+            centerprint: None,
+            notify: Vec::new(),
+            notify_pending: String::new(),
         };
         let n = d.demo.frames.len();
 
@@ -3777,6 +4164,16 @@ mod tests {
             pic_complete: None,
             pic_inter: None,
             pic_finale: None,
+            pak: build_test_pak(&[]),
+            damage_blend: 0.0,
+            damage_color: [255, 0, 0],
+            v_dmg_time: 0.0,
+            v_dmg_roll: 0.0,
+            v_dmg_pitch: 0.0,
+            oldz: f32::NAN,
+            centerprint: None,
+            notify: Vec::new(),
+            notify_pending: String::new(),
         };
 
         // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
@@ -4850,6 +5247,16 @@ mod tests {
             pic_complete: None,
             pic_inter: None,
             pic_finale: None,
+            pak: build_test_pak(&[]),
+            damage_blend: 0.0,
+            damage_color: [255, 0, 0],
+            v_dmg_time: 0.0,
+            v_dmg_roll: 0.0,
+            v_dmg_pitch: 0.0,
+            oldz: f32::NAN,
+            centerprint: None,
+            notify: Vec::new(),
+            notify_pending: String::new(),
         };
 
         // Advance onto the bolt frame: the recorded beam lands in the store and
@@ -5417,5 +5824,297 @@ mod tests {
             );
         });
         walk_mut(|w| w.in_attack = false);
+    }
+
+    // =======================================================================
+    // Demo parity: the recorded stream drives sound / sbar / viewmodel /
+    // lightstyles / damage exactly like live play.
+    // =======================================================================
+
+    /// The REAL embedded demo1.dem decodes the full recorded stream the demo
+    /// path previously discarded: hundreds of svc_sound one-shots, the
+    /// clientdata stats (sbar source), the SU_WEAPON viewmodel index, the
+    /// signon lightstyle table, and — via the signon gate — an in-world first
+    /// frame (no void-camera intro).
+    #[test]
+    fn demo1_recorded_stream_carries_sounds_stats_styles_and_viewmodel() {
+        let pak = pak().expect("embedded pak");
+        let bytes = pak.read_file("demo1.dem").unwrap().expect("demo1.dem in pak");
+        let demo = parse_demo(&bytes).expect("demo1 parses");
+
+        // (a) recorded svc_sound events decoded: id's demo1 carries ~595
+        // one-shots (gunshots, doors, monster barks). Assert a robust floor.
+        let sounds: usize = demo.frames.iter().map(|f| f.sounds.len()).sum();
+        assert!(sounds >= 500, "demo1 carries ~595 svc_sound events, got {sounds}");
+        // Every event resolved its precache name (S_StartSound's sfx lookup).
+        assert!(
+            demo.frames.iter().flat_map(|f| &f.sounds).all(|s| !s.sample.is_empty()),
+            "every recorded sound resolves a precache name"
+        );
+
+        // (d/e) clientdata: the sbar stats are present from the FIRST frame.
+        let f0 = &demo.frames[0];
+        assert_eq!(f0.client.health, 100, "fresh recorded player");
+        assert_eq!(f0.client.ammo, 25);
+        assert_eq!(f0.client.shells, 25);
+        assert_eq!(f0.client.active_weapon, 1, "IT_SHOTGUN");
+        assert_ne!(f0.client.items, 0, "recorded cl.items bits present");
+
+        // (f) viewmodel: STAT_WEAPON resolves through the demo's precache to
+        // the shotgun viewmodel.
+        assert_eq!(
+            demo.model_precache
+                .get(f0.client.weapon_model.max(0) as usize)
+                .map(|s| s.as_str()),
+            Some("progs/v_shot.mdl"),
+            "SU_WEAPON -> model_precache -> v_shot.mdl"
+        );
+
+        // (c) the recorded lightstyle table: style 0 = 'm' (the steady world)
+        // plus the torch-flicker set from the signon.
+        assert_eq!(f0.lightstyles.first().map(|s| s.as_str()), Some("m"));
+        let nonempty = f0.lightstyles.iter().filter(|s| !s.is_empty()).count();
+        assert!(nonempty >= 10, "signon carries the style table, got {nonempty}");
+
+        // (i) no void-camera intro: the signon gate makes frame 0 in-world.
+        assert!(f0.entities.len() > 10, "frame 0 renders the level's entities");
+        assert_ne!(f0.view_origin, [0.0; 3], "frame 0 camera is in-world");
+
+        // (j) the recorded SU_VELOCITY drives V_CalcBob: the run reaches real
+        // ground speed (id's demo1 visibly bobs).
+        let maxv = demo
+            .frames
+            .iter()
+            .map(|f| (f.client.velocity[0].powi(2) + f.client.velocity[1].powi(2)).sqrt())
+            .fold(0.0f32, f32::max);
+        assert!(maxv > 200.0, "recorded velocity shows the player running ({maxv})");
+    }
+
+    /// (b) svc_stopsound census: id's shipped demos never send it — the
+    /// (entity, channel) stop registry is protocol completeness, exercised by
+    /// the synthetic decode test in quake-rs. If a future demo carries stops,
+    /// the page's keyed-source registry honours them.
+    #[test]
+    fn id_demos_never_send_stopsound() {
+        let pak = pak().expect("embedded pak");
+        for name in ["demo1.dem", "demo2.dem", "demo3.dem"] {
+            let bytes = pak.read_file(name).unwrap().expect("demo in pak");
+            let demo = parse_demo(&bytes).expect("demo parses");
+            let stops: usize = demo.frames.iter().map(|f| f.stop_sounds.len()).sum();
+            assert_eq!(stops, 0, "{name} sends no svc_stopsound");
+        }
+    }
+
+    /// A recorded svc_sound event queues through the SAME `queue_sounds` path
+    /// live play uses — once per frame advance (the spawn guard), carrying its
+    /// (entity, channel) override key for the page registry.
+    #[test]
+    fn step_demo_queues_recorded_sounds_through_the_live_path() {
+        use quake_rs::demo::{Demo, DemoFrame};
+
+        let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
+        let sound_frame = DemoFrame {
+            time: 0.05,
+            sounds: vec![SoundEvent {
+                entity: 5,
+                channel: 2,
+                sound_index: 1,
+                sample: "doors/x.wav".to_string(),
+                origin: [64.0, 0.0, 0.0],
+                volume: 0.5,
+                attenuation: 1.0,
+            }],
+            ..Default::default()
+        };
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            viewentity: 1,
+            frames: vec![plain(0.0), sound_frame, plain(0.10)],
+        };
+        let mut d = DemoPlay {
+            bsp: render::demo_room(),
+            palette: [[0u8; 3]; 256],
+            demo,
+            models: Vec::new(),
+            sprites: Vec::new(),
+            colormap: None,
+            colors: Vec::new(),
+            elapsed: 0.0,
+            idx: 0,
+            particles: ParticleSystem::new(),
+            prng: Lcg::new(1),
+            last_spawned_idx: usize::MAX,
+            beams: Beams::new(),
+            beam_scratch: Vec::new(),
+            gfx_wad: None,
+            conchars: None,
+            pic_complete: None,
+            pic_inter: None,
+            pic_finale: None,
+            pak: build_test_pak(&[("sound/doors/x.wav", b"WAVE")]),
+            damage_blend: 0.0,
+            damage_color: [255, 0, 0],
+            v_dmg_time: 0.0,
+            v_dmg_roll: 0.0,
+            v_dmg_pitch: 0.0,
+            oldz: f32::NAN,
+            centerprint: None,
+            notify: Vec::new(),
+            notify_pending: String::new(),
+        };
+
+        reset_queue(); // clears SND_QUEUE + marks audio ready
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 1, "advanced onto the sound frame");
+        assert_eq!(
+            SND_QUEUE.with(|q| q.borrow().len()),
+            1,
+            "the recorded svc_sound queued exactly once"
+        );
+        // Lingering on the same frame must not re-queue it.
+        let _ = step_demo(&mut d, 0.0001, false, 160, 100);
+        assert_eq!(SND_QUEUE.with(|q| q.borrow().len()), 1, "no re-queue while lingering");
+
+        // The pop carries the spatial params + the (entity, channel) key.
+        let len = poll_sound();
+        assert!(len > 0, "WAV bytes loaded from the pak");
+        assert_eq!(sound_volume(), 0.5);
+        assert_eq!(sound_entity(), 5, "override key entity");
+        assert_eq!(sound_channel(), 2, "override key channel");
+        assert_eq!(
+            sound_is_view_entity(),
+            0,
+            "entity 5 is not the recorded view entity (1)"
+        );
+        SND_QUEUE.with(|q| q.borrow_mut().clear());
+        set_audio_ready(0);
+    }
+
+    /// A recorded svc_damage drives the SAME flash + view-kick math live play
+    /// uses (V_ParseDamage): the deferred blend returned by step_demo carries
+    /// the red cshift, and the kick state arms + decays.
+    #[test]
+    fn step_demo_damage_event_drives_flash_and_kick() {
+        use quake_rs::demo::{DamageEvent, Demo, DemoFrame};
+
+        let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
+        let dmg_frame = DemoFrame {
+            time: 0.05,
+            // Attack from straight ahead (+x of a yaw-0 view at the origin).
+            damage: vec![DamageEvent { armor: 0, blood: 20, from: [128.0, 0.0, 0.0] }],
+            ..Default::default()
+        };
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            viewentity: 0,
+            // Trailing frames keep the fade-out steps below from wrapping the
+            // loop (a wrap re-spawns the damage frame's events).
+            frames: vec![plain(0.0), dmg_frame, plain(0.10), plain(1.0), plain(2.0)],
+        };
+        let mut d = DemoPlay {
+            bsp: render::demo_room(),
+            palette: [[0u8; 3]; 256],
+            demo,
+            models: Vec::new(),
+            sprites: Vec::new(),
+            colormap: None,
+            colors: Vec::new(),
+            elapsed: 0.0,
+            idx: 0,
+            particles: ParticleSystem::new(),
+            prng: Lcg::new(1),
+            last_spawned_idx: usize::MAX,
+            beams: Beams::new(),
+            beam_scratch: Vec::new(),
+            gfx_wad: None,
+            conchars: None,
+            pic_complete: None,
+            pic_inter: None,
+            pic_finale: None,
+            pak: build_test_pak(&[]),
+            damage_blend: 0.0,
+            damage_color: [0, 0, 0],
+            v_dmg_time: 0.0,
+            v_dmg_roll: 0.0,
+            v_dmg_pitch: 0.0,
+            oldz: f32::NAN,
+            centerprint: None,
+            notify: Vec::new(),
+            notify_pending: String::new(),
+        };
+
+        let (_img, color, alpha) = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 1, "advanced onto the damage frame");
+        // count = max(10, blood*0.5) = 10 -> percent 30, faded by 0.05*150 =
+        // 7.5 within the same step (V_UpdatePalette) -> 22.5.
+        assert!(
+            (d.damage_blend - 22.5).abs() < 1e-3,
+            "V_ParseDamage percent 3*count then dt*150 fade, got {}",
+            d.damage_blend
+        );
+        assert_eq!(d.damage_color, [255, 0, 0], "pure-blood red tint");
+        assert_eq!(color, [255, 0, 0], "the deferred blend carries the flash");
+        assert!(alpha > 0.0, "non-zero blend returned to the dispatcher");
+        // The directional kick armed (forward hit -> pitch kick, no roll) and
+        // already decayed one step (v_dmg_time -= host_frametime).
+        assert!(
+            (d.v_dmg_time - (V_KICKTIME - 0.05)).abs() < 1e-3,
+            "kick timer armed then decayed by dt"
+        );
+        assert!(d.v_dmg_roll.abs() < 1e-3, "head-on hit has no roll component");
+        assert!(
+            (d.v_dmg_pitch - 10.0 * V_KICKPITCH).abs() < 1e-3,
+            "pitch kick = count * dot(from, forward) * v_kickpitch"
+        );
+
+        // The flash fades out over the following steps and the blend clears.
+        for _ in 0..4 {
+            let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        }
+        assert_eq!(d.damage_blend, 0.0, "flash fully faded");
+    }
+
+    /// The real boot demo draws the recorded status bar (sbar pixels differ
+    /// from the bare scene) and resolves the recorded viewmodel + lightstyles.
+    #[test]
+    fn build_demo_resolves_viewmodel_hud_and_recorded_styles() {
+        let mut d = build_demo().expect("the embedded demo boots");
+
+        // The recorded SU_WEAPON viewmodel parsed (v_shot.mdl).
+        let f0 = &d.demo.frames[0];
+        let wm = f0.client.weapon_model.max(0) as usize;
+        assert!(
+            matches!(d.models.get(wm), Some(Some(_))),
+            "the recorded viewmodel's Mdl parsed from the pak"
+        );
+        // The recorded style table reaches the renderer's scale law: style 0
+        // is the steady 'm' world (264/256, what the seeded default used to
+        // hardcode) and the flicker styles are present.
+        let scales = quake_rs::server::lightstyle_scales_at(&f0.lightstyles, f0.time);
+        assert!((scales[0] - 264.0 / 256.0).abs() < 1e-6, "style 0 'm'");
+        assert!(d.gfx_wad.is_some(), "sbar pics available for the demo HUD");
+
+        // Status bar A/B: one step with the wad, then re-render the SAME frame
+        // without it (dt == 0 holds the frame) — the sbar region must differ.
+        let (with_hud, _, _) = step_demo(&mut d, 0.016, false, 320, 200);
+        d.gfx_wad = None;
+        let (without, _, _) = step_demo(&mut d, 0.0, false, 320, 200);
+        assert_eq!(with_hud.rgb.len(), without.rgb.len());
+        // Quake's sbar is the bottom 24 rows of the 320x200 virtual screen.
+        let bar_rows = 24usize;
+        let diff = (0..320 * bar_rows)
+            .filter(|i| {
+                let a = with_hud.rgb[(200 - bar_rows) * 320 + i];
+                let b = without.rgb[(200 - bar_rows) * 320 + i];
+                a != b
+            })
+            .count();
+        assert!(diff > 500, "the drawn sbar changes the bar region ({diff} px)");
     }
 }
