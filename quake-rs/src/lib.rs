@@ -49,6 +49,7 @@ pub mod builtins;
 
 pub mod world;
 pub mod server;
+pub mod save;
 pub mod particles;
 pub mod tent;
 

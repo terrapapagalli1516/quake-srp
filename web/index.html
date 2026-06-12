@@ -936,6 +936,56 @@ function restoreResolution() {
   if (w > 0 && h > 0) exp.set_resolution(w, h);
 }
 
+// --- Savegame persistence (page-owned localStorage) -------------------------
+// The engine's console `save <name>` / `load <name>` commands speak .sav TEXT
+// (WinQuake's Host_Savegame_f format) through the wasm exports; the PAGE owns
+// where it persists. Each save lives under its own key
+// ('quake-rs.sav.' + filename, e.g. 'quake-rs.sav.fred.sav'); a mid-game save
+// is ~110 KB (measured on e1m2), so even 12 menu slots ≈ 1.3 MB of text
+// (≈2.7 MB as localStorage's UTF-16) — comfortably inside the ~5 MB quota.
+// All exports are feature-checked so the page still works with an older wasm.
+const SAVE_PREFIX = 'quake-rs.sav.';
+const savDecoder = new TextDecoder();
+const savEncoder = new TextEncoder();
+
+// Persist every save the engine queued this frame. poll_save() pops one into
+// linear memory and returns its text length (0 = none); a localStorage failure
+// (quota/private mode) is reported back so the console shows an error.
+function drainSaves() {
+  if (!exp || typeof exp.poll_save !== 'function') return;
+  for (let guard = 0; guard < 4; guard++) {
+    const len = exp.poll_save();
+    if (len <= 0) break;
+    const name = savDecoder.decode(
+      new Uint8Array(exp.memory.buffer, exp.save_name_ptr(), exp.save_name_len()));
+    const text = savDecoder.decode(
+      new Uint8Array(exp.memory.buffer, exp.save_text_ptr(), len));
+    try {
+      localStorage.setItem(SAVE_PREFIX + name, text);
+    } catch (e) {
+      if (typeof exp.save_store_failed === 'function') exp.save_store_failed();
+    }
+  }
+}
+
+// Hand a stored .sav back to the engine when it asks: write the text into the
+// wasm scratch (sav_alloc) and call load_game(); a missing key reports the C's
+// fopen failure via load_failed().
+function serviceLoadRequest() {
+  if (!exp || typeof exp.poll_load_request !== 'function') return;
+  const nameLen = exp.poll_load_request();
+  if (nameLen <= 0) return;
+  const name = savDecoder.decode(
+    new Uint8Array(exp.memory.buffer, exp.load_request_ptr(), nameLen));
+  let text = null;
+  try { text = localStorage.getItem(SAVE_PREFIX + name); } catch (e) { /* blocked */ }
+  if (text === null) { exp.load_failed(); return; }
+  const bytes = savEncoder.encode(text);
+  const ptr = exp.sav_alloc(bytes.length);
+  new Uint8Array(exp.memory.buffer, ptr, bytes.length).set(bytes);
+  exp.load_game();
+}
+
 // --- Loading ---------------------------------------------------------------
 // The .wasm embeds the shareware pak, so it's a ~19 MB download: stream it and
 // show real progress instead of a silent stall. Content-Length (when the server
@@ -1048,6 +1098,8 @@ async function main() {
     updateLoopingAudio();
     updateSndUI();
     syncLockChip();
+    drainSaves();          // persist any `save <name>` the console issued
+    serviceLoadRequest();  // answer any `load <name>` with the stored text
 
     // The render resolution may have changed this frame (Options menu): re-fit the
     // canvas + ImageData to the new size before blitting.

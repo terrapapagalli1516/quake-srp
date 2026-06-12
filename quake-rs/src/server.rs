@@ -381,8 +381,10 @@ fn set_min_max_size(vm: &mut Vm, e: i32, min: Vec3, max: Vec3) {
 
 /// The bounds half of `SV_LinkEdict`: `absmin = origin + mins`,
 /// `absmax = origin + maxs`. (The C also inserted the edict into the area grid
-/// and touched triggers; neither is modelled here.)
-fn link_edict(vm: &mut Vm, e: i32) {
+/// and touched triggers; neither is modelled here.) `pub(crate)` so the
+/// savegame loader (`save.rs`) can relink loaded edicts exactly as
+/// `Host_Loadgame_f` does (`SV_LinkEdict(ent, false)`).
+pub(crate) fn link_edict(vm: &mut Vm, e: i32) {
     let origin = vm.ent_get_vector(e, "origin");
     let mins = vm.ent_get_vector(e, "mins");
     let maxs = vm.ent_get_vector(e, "maxs");
@@ -861,8 +863,10 @@ thread_local! {
 
 /// Store `val` at style index `style` in the thread-local transport. An
 /// out-of-range index is ignored (no panic), matching the C's silent clamp
-/// (`if (style >= MAX_LIGHTSTYLES) ...`).
-fn push_lightstyle(style: usize, val: String) {
+/// (`if (style >= MAX_LIGHTSTYLES) ...`). `pub(crate)` so the savegame loader
+/// can restore the saved styles into the transport (a later frame's
+/// `snapshot_lightstyles` sync must not revert them to the fresh-spawn set).
+pub(crate) fn push_lightstyle(style: usize, val: String) {
     if style >= MAX_LIGHTSTYLES {
         return;
     }
@@ -874,7 +878,7 @@ fn push_lightstyle(style: usize, val: String) {
 }
 
 /// Snapshot the current transport table (the latest pattern per style).
-fn snapshot_lightstyles() -> [String; MAX_LIGHTSTYLES] {
+pub(crate) fn snapshot_lightstyles() -> [String; MAX_LIGHTSTYLES] {
     LIGHTSTYLES.with(|t| t.borrow().clone())
 }
 
@@ -2013,13 +2017,15 @@ pub fn install_engine_builtins(vm: &mut Vm) {
 /// A faithful port of `COM_Parse` (common.c) over `&str` bytes: skips
 /// whitespace and `//` line comments, returns `"quoted strings"`, the single
 /// characters `{ } ( ) ' :`, or a run of non-whitespace as one token.
-struct Tokenizer<'a> {
+/// `pub(crate)`: the savegame loader (`save.rs`) parses the `.sav` brace blocks
+/// with the same tokenizer, exactly as the C shares `COM_Parse`.
+pub(crate) struct Tokenizer<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Tokenizer<'a> {
-    fn new(s: &'a str) -> Tokenizer<'a> {
+    pub(crate) fn new(s: &'a str) -> Tokenizer<'a> {
         Tokenizer {
             data: s.as_bytes(),
             pos: 0,
@@ -2028,7 +2034,7 @@ impl<'a> Tokenizer<'a> {
 
     /// Return the next token, or `None` at end of input. Mirrors `COM_Parse`,
     /// including the `c <= ' '` whitespace test and the special single chars.
-    fn next_token(&mut self) -> Option<String> {
+    pub(crate) fn next_token(&mut self) -> Option<String> {
         let mut token = Vec::new();
 
         // skip whitespace (and // comments), looping like the C `goto skipwhite`.
@@ -2103,8 +2109,9 @@ fn is_single(c: u8) -> bool {
 }
 
 /// `ED_NewString` (pr_edict.c): copy the raw value, translating `\n` to a
-/// newline and any other `\x` escape to a literal backslash.
-fn ed_new_string(s: &str) -> String {
+/// newline and any other `\x` escape to a literal backslash. `pub(crate)` for
+/// the savegame loader's `ED_ParseEpair` (the C shares this helper too).
+pub(crate) fn ed_new_string(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -2147,14 +2154,27 @@ pub struct Server {
     /// it in this field (our stand-in for the single-element `svs.clients` table).
     /// Single-player QuakeC keys off `self`, not a hardcoded edict number, so the
     /// game logic is unaffected. Single client only; no netcode.
-    player: i32,
+    /// (`pub(crate)`: the savegame loader re-identifies the player edict.)
+    pub(crate) player: i32,
     /// The map's animated light-style patterns (`sv.lightstyles[64]`), owned by
     /// the server. The `lightstyle()` builtin writes a thread-local transport;
     /// the server syncs that into this field after each QuakeC execution window
     /// (`spawn_entities` / `run_frame`). `lightstyle_scales` reads it to produce
     /// the per-style brightness scales the renderer applies each frame. Cleared in
     /// [`Server::new`] so a changelevel re-populates it from the new worldspawn.
-    lightstyles: [String; MAX_LIGHTSTYLES],
+    /// (`pub(crate)`: `Host_Loadgame_f` overwrites all 64 from the savegame.)
+    pub(crate) lightstyles: [String; MAX_LIGHTSTYLES],
+    /// `sv.name` (server.h): the bare map name (`"e1m1"`), recorded by
+    /// [`Server::set_map_name`]. `Host_Savegame_f` writes it into the `.sav`
+    /// header so a load knows which map to spawn.
+    pub(crate) map_name: String,
+    /// `svs.clients[0].spawn_parms` (server.h `client_t`): the 16 spawn
+    /// parameters captured when the local client connected — the level-ENTRY
+    /// inventory, NOT the live one. `SV_ConnectClient` copies them out of the
+    /// parm globals right after `SetNewParms` (fresh game) or restores the
+    /// carried/saved set; `Host_Savegame_f` writes exactly these into the
+    /// `.sav` header, and `Host_Loadgame_f` restores them from it.
+    pub(crate) client_spawn_parms: [f32; NUM_SPAWN_PARMS],
 }
 
 /// The result of [`Server::spawn_entities`].
@@ -2264,6 +2284,8 @@ impl Server {
             entities,
             player: -1,
             lightstyles: std::array::from_fn(|_| String::new()),
+            map_name: String::new(),
+            client_spawn_parms: [0.0; NUM_SPAWN_PARMS],
         })
     }
 
@@ -2292,6 +2314,9 @@ impl Server {
         self.vm.ent_set_string(0, "model", &full);
         let s = self.vm.intern(&bare);
         self.vm.gset_int("mapname", s);
+        // sv.name (strcpy(sv.name, server) in SV_SpawnServer): kept for the
+        // savegame header's mapname line (Host_Savegame_f writes sv.name).
+        self.map_name = bare;
     }
 
     /// The raw light-style pattern string at index `style`, or `""` for an unset
@@ -3494,6 +3519,13 @@ impl Server {
 
         // Establish parm1..parm16 (fresh loadout, or restored saved parms).
         setup_parms(self, ent)?;
+
+        // SV_ConnectClient (sv_main.c): copy the parm globals into the client's
+        // spawn_parms right after SetNewParms (or the restored carried set).
+        // These are the level-ENTRY parms `Host_Savegame_f` writes into a save.
+        for (i, p) in self.client_spawn_parms.iter_mut().enumerate() {
+            *p = self.vm.gget_float(&parm_global_name(i));
+        }
 
         // ClientConnect then PutClientInServer (the C runs both with self=player).
         self.run_sys("ClientConnect", ent, 0)?;
@@ -5931,8 +5963,9 @@ fn clip_velocity(vel: Vec3, normal: Vec3, overbounce: f32) -> Vec3 {
 // ---------------------------------------------------------------------------
 
 /// `atof`-like float parse: take the leading numeric prefix, default 0.0. C's
-/// `atof` stops at the first non-numeric char and never errors.
-fn parse_float(s: &str) -> f32 {
+/// `atof` stops at the first non-numeric char and never errors. `pub(crate)`
+/// for the savegame loader's `ED_ParseEpair` / header floats.
+pub(crate) fn parse_float(s: &str) -> f32 {
     let t = s.trim_start();
     // Find the longest leading prefix that parses; fall back to 0.0.
     let bytes = t.as_bytes();
@@ -5963,7 +5996,8 @@ fn parse_float(s: &str) -> f32 {
 }
 
 /// `atoi`-like int parse: leading optional sign then digits, default 0.
-fn parse_int(s: &str) -> i32 {
+/// `pub(crate)` for the savegame loader's `ev_entity` epair.
+pub(crate) fn parse_int(s: &str) -> i32 {
     let t = s.trim_start();
     let bytes = t.as_bytes();
     let mut end = 0;
@@ -5980,8 +6014,8 @@ fn parse_int(s: &str) -> i32 {
 
 /// Parse a "x y z" vector, `atof`-style on each of the first three
 /// space-separated fields (missing fields are 0.0), matching `ED_ParseEpair`'s
-/// `ev_vector` loop.
-fn parse_vector(s: &str) -> Vec3 {
+/// `ev_vector` loop. `pub(crate)` for the savegame loader's `ev_vector` epair.
+pub(crate) fn parse_vector(s: &str) -> Vec3 {
     let mut out = [0.0f32; 3];
     for (i, field) in s.split_whitespace().take(3).enumerate() {
         out[i] = parse_float(field);

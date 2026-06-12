@@ -8068,6 +8068,13 @@ impl Console {
         self.lines.len()
     }
 
+    /// Iterate the scrollback lines, oldest first (for tests / host
+    /// inspection — e.g. asserting the savegame commands print the C's
+    /// exact messages).
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().map(String::as_str)
+    }
+
     /// Clear the scrollback history (Quake's `Con_Clear_f`). Leaves the input
     /// line untouched.
     pub fn clear(&mut self) {
