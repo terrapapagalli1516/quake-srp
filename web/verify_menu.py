@@ -15,7 +15,11 @@
      INVERT MOUSE flips the pitch sign; LOOKSPRING recentres on pointer
      unlock; a REBOUND key drives +forward and the old key stops; Save opens
      in-game and Enter closes (SaveSlot host no-op);
-  5. no console errors anywhere.
+  5. review-fix regressions: shift-variant punctuation resolves by e.code
+     (Shift+',' still strafes — keynum 44 — and a shifted release can't stick
+     the key), and a re-boot / New Game keeps the live options + key rebinds
+     (Menu::reset_nav resets navigation only);
+  6. no console errors anywhere.
 
 Usage: verify_menu.py [webdir]   (defaults to the repo's web/; pass a temp dir
 holding index.html + a freshly built quake_wasm.wasm to test new exports
@@ -295,7 +299,60 @@ with sync_playwright() as p:
     key("Enter")
     check("Save Enter closes the menu (SaveSlot no-op for now)", vis() == 0)
 
-    # 5. Console must be clean.
+    # 5. Review-fix regressions.
+    # 5a. SHIFT-VARIANT PUNCTUATION: the page resolves punctuation keynums from
+    #     e.code (the C's scancode semantics, in_win.c scantokey), so the seeded
+    #     default.cfg layout works while RUNNING (+speed is Shift): Shift+','
+    #     still delivers keynum 44 (+moveleft), and a release whose e.key
+    #     reports '<' still clears it (no stuck strafe).
+    kb = pg.keyboard
+    kb.down("Shift"); time.sleep(0.05)
+    kb.down("Comma"); time.sleep(0.1)          # e.key is '<' here; e.code Comma
+    check("Shift+',' delivers keynum 44 (strafe works while running)",
+          pg.evaluate("exp.key_is_down(44)") == 1)
+    kb.up("Comma"); time.sleep(0.05)
+    check("...and its release clears it", pg.evaluate("exp.key_is_down(44)") == 0)
+    kb.up("Shift"); time.sleep(0.05)
+    # The stuck-key order: ',' down, ADD Shift, release ',' (keyup says '<').
+    kb.down("Comma"); time.sleep(0.05)
+    kb.down("Shift"); time.sleep(0.05)
+    kb.up("Comma"); time.sleep(0.05)
+    check("a shifted release can't stick the comma strafe",
+          pg.evaluate("exp.key_is_down(44)") == 0)
+    kb.up("Shift"); time.sleep(0.05)
+    check("Shift (+speed) itself releases clean",
+          pg.evaluate("exp.key_is_down(134)") == 0)
+
+    # 5b. RE-BOOT KEEPS USER CHOICES (Menu::reset_nav): set Mouse speed
+    #     off-default, then re-boot via the walk button — the flow that used to
+    #     rebuild the Menu wholesale — and then New Game; the cvar, the 'o'
+    #     rebind, and the unbinding of 'w' must all survive (WinQuake's
+    #     `map start` never resets cvars or keybindings).
+    key("Escape"); key("ArrowDown", 2); key("Enter")   # Options
+    key("ArrowDown", 5); key("ArrowRight", 2)          # Mouse speed +2 steps
+    sens_set = pg.evaluate("exp.mouse_sensitivity()")
+    key("Escape"); key("Escape")
+    pg.evaluate("document.getElementById('walkBtn').click()")  # re-boot e1m1
+    time.sleep(1.2)
+    check("re-boot reopens the menu at Main", vis() == 1 and scr() == MAIN)
+    check("Mouse speed survives the re-boot", sens_set > 1.0 and
+          abs(pg.evaluate("exp.mouse_sensitivity()") - sens_set) < 1e-5,
+          f"{sens_set:.2f}")
+    key("Enter")            # Single Player
+    key("Enter")            # New Game -> start.bsp, menu closes
+    pg.wait_for_function("!exp.menu_visible()", timeout=15000)
+    check("New Game keeps the Mouse speed cvar",
+          abs(pg.evaluate("exp.mouse_sensitivity()") - sens_set) < 1e-5)
+    time.sleep(0.5)
+    d_reb = walk_dist(0.7, "o")
+    check("the rebound +forward key survives re-boot + New Game", d_reb > 80,
+          f"{d_reb:.0f}u")
+    time.sleep(0.9)                               # let friction stop the coast
+    d_w2 = walk_dist(0.7, "w")
+    check("'w' stays unbound (bindings aren't reseeded)", d_w2 < 20,
+          f"{d_w2:.0f}u")
+
+    # 6. Console must be clean.
     print("errors:", errs[-5:])
     check("no console errors", not errs)
     br.close()

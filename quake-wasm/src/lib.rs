@@ -939,10 +939,12 @@ pub extern "C" fn boot() -> i32 {
         if let Some(w) = w {
             a.walk = Some(w);
             a.mode = 0;
-            // Quake boots INTO the menu over the e1m1 frame. Reset the App-level
-            // menu to fresh defaults (preset 0) and open it over the walk, the
-            // same clean slate the old fresh-Walk-with-fresh-Menu boot gave.
-            a.menu = Menu::new();
+            // Quake boots INTO the menu over the e1m1 frame. Reset the menu's
+            // NAVIGATION (closed, main screen, cursor 0) and open it over the
+            // walk — but KEEP the player's options, key rebinds, and slot
+            // comments: in the C a map start never touches cvars/keybindings
+            // (they're host state), so re-booting must not wipe them.
+            a.menu.reset_nav();
             a.menu.open();
             // PRESERVE the player's chosen resolution across the re-boot: keep the
             // current framebuffer size (the source of truth) and point the fresh
@@ -970,10 +972,12 @@ pub extern "C" fn boot_demo() -> i32 {
             a.mode = 1;
             // The demo button plays the demo with the menu CLOSED (clean
             // playback). `boot_attract` is the variant that opens the menu over it.
-            // PRESERVE the chosen resolution (keep the live framebuffer) and point
-            // the fresh menu's Screen-size preset at it so it's correct when the
-            // player next opens Options.
-            a.menu = Menu::new();
+            // Navigation-only reset: options/bindings/slot comments survive (the
+            // C never resets cvars or keybindings on a mode change). PRESERVE the
+            // chosen resolution too (keep the live framebuffer) and point the
+            // menu's Screen-size preset at it so it's correct when the player
+            // next opens Options.
+            a.menu.reset_nav();
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
     });
@@ -999,11 +1003,13 @@ pub extern "C" fn boot_attract() -> i32 {
         if let Some(d) = d {
             a.demo = Some(d);
             a.mode = 1;
-            // The menu overlays the PLAYING attract demo. PRESERVE the chosen
-            // resolution (keep the live framebuffer) and sync the fresh menu's
-            // Screen-size label to it. On the very first load the framebuffer is at
-            // DEFAULT; the page then restores any saved resolution over it.
-            a.menu = Menu::new();
+            // The menu overlays the PLAYING attract demo. Navigation-only reset
+            // (options/bindings survive a re-entry to the attract loop). PRESERVE
+            // the chosen resolution (keep the live framebuffer) and sync the
+            // menu's Screen-size label to it. On the very first load the
+            // framebuffer is at DEFAULT; the page then restores any saved
+            // resolution over it.
+            a.menu.reset_nav();
             a.menu.open();
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
@@ -1214,11 +1220,14 @@ pub extern "C" fn menu_select() {
             ensure_app(|a| {
                 a.walk = Some(nw);
                 a.mode = 0;
-                // Reset the menu's navigation to fresh defaults and leave it closed
-                // — exactly what the old fresh-Walk-with-fresh-Menu rebuild did.
-                a.menu = Menu::new();
+                // Reset the menu's NAVIGATION and leave it closed. The player's
+                // options and key rebinds SURVIVE New Game: WinQuake's
+                // M_SinglePlayer "New Game" just runs `map start` — cvars and
+                // keybindings persist (the flagship "rebind keys / set Always
+                // Run, then New Game" flow must not lose them).
+                a.menu.reset_nav();
                 // PRESERVE the chosen resolution across New Game (keep the live
-                // framebuffer) and point the fresh menu's Screen-size preset at it,
+                // framebuffer) and point the menu's Screen-size preset at it,
                 // instead of snapping back to DEFAULT — starting a game no longer
                 // throws away a menu-picked resolution.
                 a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
@@ -1394,6 +1403,25 @@ pub extern "C" fn key_up(keynum: i32) {
     ensure_app(|a| {
         a.keys_held[keynum as usize] = false;
     });
+}
+
+/// 1 when the engine currently believes Quake keynum `keynum` is held — a
+/// read-only verification/debug export (like [`menu_screen_id`]). The browser
+/// harness uses it to prove the page's `e.code` punctuation mapping keeps
+/// key-down/key-up SYMMETRIC under Shift (press ',', add Shift, release ','
+/// must clear keynum 44, even though the release reports `key == '<'` —
+/// the C's scancode semantics, in_win.c `scantokey`).
+#[no_mangle]
+pub extern "C" fn key_is_down(keynum: i32) -> i32 {
+    if !(0..256).contains(&keynum) {
+        return 0;
+    }
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|a| a.keys_held[keynum as usize] as i32)
+            .unwrap_or(0)
+    })
 }
 
 /// Raw mouse deltas (browser `movementX`/`movementY` counts) — a port of
@@ -1861,11 +1889,13 @@ fn run_map_command(name: Option<&str>) {
             // The level loaded: close the console so the player sees the new map.
             a.console.open = false;
             // Keep the menu closed too (a `map` from the console starts play).
-            a.menu = Menu::new();
+            // Navigation-only reset: the C's `map` command never resets cvars or
+            // keybindings, so the player's options and rebinds survive here too.
+            a.menu.reset_nav();
             // Preserve the player's chosen render resolution across a `map` (the C
             // keeps the video mode): the framebuffer is untouched, and we eagerly
-            // point the fresh menu's Screen-size preset at it — same as every other
-            // Menu::new() site — so the Options label is correct the instant the
+            // point the menu's Screen-size preset at it — same as every other
+            // re-boot site — so the Options label is correct the instant the
             // player opens it (not relying on the per-frame sync in step()).
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
@@ -5315,6 +5345,86 @@ mod tests {
                 "Options Screen-size label follows the preserved framebuffer"
             );
         });
+    }
+
+    #[test]
+    fn options_and_rebinds_survive_reboot_and_new_game() {
+        // The promotion of the menu to the authoritative store for bindings +
+        // live cvars means a re-boot must NOT wipe them (WinQuake's `map start`
+        // never resets cvars or keybindings — they're host state). Drive the
+        // real export paths the page uses.
+        reset_queue();
+        assert_eq!(boot(), 1); // opens the menu on Main, cursor 0
+        menu_down();
+        menu_down();
+        menu_select(); // Main row 2 -> Options (cursor 0 = Customize controls)
+        for _ in 0..4 {
+            menu_down();
+        }
+        menu_right(); // Brightness row: v_gamma 1.0 -> 0.95
+        for _ in 0..4 {
+            menu_down();
+        }
+        menu_right(); // Always Run row: toggle on
+        for _ in 0..8 {
+            menu_up();
+        }
+        menu_select(); // Customize controls -> Keys screen
+        menu_down();
+        menu_down(); // "jump / swim up" row
+        menu_select(); // starts the bind grab
+        menu_bind_key(i32::from(b'j'));
+        APP.with(|c| {
+            let b = c.borrow();
+            let m = &b.as_ref().unwrap().menu;
+            assert!((m.gamma() - 0.95).abs() < 1e-6, "gamma set through the menu");
+            assert!(m.always_run(), "Always Run set through the menu");
+            assert_eq!(m.action_for_key(b'j'), Some(render::BIND_JUMP), "rebound");
+        });
+
+        // Re-boot the walk (the page's walk button): navigation comes back
+        // fresh (open, Main, cursor 0) but every user choice survives.
+        assert_eq!(boot(), 1);
+        APP.with(|c| {
+            let b = c.borrow();
+            let m = &b.as_ref().unwrap().menu;
+            assert!(m.visible, "boot reopens the menu");
+            assert_eq!(m.screen(), render::MenuScreen::Main, "navigation reset");
+            assert_eq!(m.cursor(), 0, "cursor reset");
+            assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives re-boot");
+            assert!(m.always_run(), "Always Run survives re-boot");
+            assert_eq!(
+                m.action_for_key(b'j'),
+                Some(render::BIND_JUMP),
+                "key rebind survives re-boot"
+            );
+        });
+
+        // The flagship flow: Single Player > New Game keeps them too.
+        menu_select(); // Main > Single Player
+        menu_select(); // New Game -> fresh walk on the start hub, menu closed
+        assert_eq!(menu_visible(), 0, "New Game closes the menu");
+        APP.with(|c| {
+            let b = c.borrow();
+            let m = &b.as_ref().unwrap().menu;
+            assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives New Game");
+            assert!(m.always_run(), "Always Run survives New Game");
+            assert_eq!(
+                m.action_for_key(b'j'),
+                Some(render::BIND_JUMP),
+                "key rebind survives New Game"
+            );
+        });
+        // And the surviving choice is LIVE in the fresh walk: Always Run runs
+        // +forward at cl_forwardspeed 400 (the 200<->400 swap), not 200.
+        key_down(i32::from(b'w'));
+        step(0.05);
+        assert_eq!(
+            walk_mut(|w| w.key_move.fwd),
+            400.0,
+            "Always Run drives the new walk at 400"
+        );
+        key_up(i32::from(b'w'));
     }
 
     // -- attract boot: menu over the playing demo (App-level menu) --------------

@@ -7269,6 +7269,30 @@ impl Menu {
         self.visible = false;
     }
 
+    /// Reset the menu's NAVIGATION to boot state — closed, on the Main screen,
+    /// cursor on the first item, no Help page / Quit return / bind grab, queued
+    /// sounds dropped — while KEEPING every user choice: the Options cvars
+    /// (Screen size, gamma, sensitivity, volume, CD volume, Always Run, Invert
+    /// Mouse, lookspring, lookstrafe) and the whole key-bindings table. In
+    /// WinQuake a map start / New Game only restarts the server: cvars and
+    /// `keybindings[]` live in host state (persisted by
+    /// `Host_WriteConfiguration`) and are never reset by `map start`
+    /// (`M_SinglePlayer_Key`). The host calls this at every re-boot site that
+    /// used to rebuild the Menu wholesale, so "rebind keys, set Always Run,
+    /// then New Game" keeps the player's setup. The host-mirrored externals —
+    /// Load/Save slot comments (`set_save_comments`) and the game-active gate
+    /// (refreshed every `step`) — survive too: they reflect engine state, not
+    /// navigation.
+    pub fn reset_nav(&mut self) {
+        self.visible = false;
+        self.screen = MenuScreen::Main;
+        self.cursor = 0;
+        self.help_page = 0;
+        self.quit_prev = MenuScreen::Main;
+        self.bind_grab = false;
+        self.sounds.clear();
+    }
+
     /// Open the menu directly on the Help/Ordering screen (`M_Menu_Help_f`,
     /// menu.c): what the `help` console command — and therefore the shareware
     /// `svc_sellscreen` at episode end — runs. Resets to the first page
@@ -13991,6 +14015,81 @@ mod tests {
         m.reset_defaults();
         assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD));
         assert_eq!(m.action_for_key(b'x'), None, "custom binds reset too");
+    }
+
+    /// The host's re-boot sites (boot / boot_demo / boot_attract / New Game /
+    /// `map`) reset the menu with [`Menu::reset_nav`]: navigation goes back to
+    /// boot state but EVERY user choice survives — WinQuake's `map start`
+    /// (M_SinglePlayer "New Game") never resets cvars or `keybindings[]` (they
+    /// are host state, persisted by Host_WriteConfiguration). This locks the
+    /// "rebind keys, set Always Run, then New Game" flow as a contract.
+    #[test]
+    fn reset_nav_keeps_user_choices_and_resets_navigation() {
+        let mut m = Menu::new();
+        m.open();
+        // Change every class of user choice through the real menu paths.
+        m.cursor = 2;
+        m.select(); // Main > Options
+        m.cursor = ROW_SCREENSIZE;
+        assert!(m.adjust(1)); // 320x200 -> 480x300
+        m.cursor = ROW_BRIGHTNESS;
+        m.adjust(1); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
+        m.cursor = ROW_MOUSESPEED;
+        m.adjust(1); // sensitivity 3 -> 3.5
+        m.cursor = ROW_SNDVOLUME;
+        m.adjust(-1); // volume 0.7 -> 0.6
+        m.cursor = ROW_CDVOLUME;
+        m.adjust(-1); // bgmvolume 1.0 -> 0.9
+        for row in [ROW_ALWAYSRUN, ROW_INVERTMOUSE, ROW_LOOKSPRING, ROW_LOOKSTRAFE] {
+            m.cursor = row;
+            m.adjust(1); // toggles flip regardless of direction
+        }
+        // Rebind through the real grab path: Options > Customize controls,
+        // Enter on "jump / swim up" (one key bound — no unbind-first), 'j'.
+        m.cursor = ROW_CONTROLS;
+        m.select(); // -> Keys
+        m.cursor = BIND_JUMP;
+        m.select(); // starts the grab
+        m.bind_key(b'j');
+        assert_eq!(m.action_for_key(b'j'), Some(BIND_JUMP));
+        // Host-mirrored externals: slot comments + the Save gate.
+        let mut comments: [String; MAX_SAVEGAMES] = Default::default();
+        comments[3] = "e1m1 quick".to_string();
+        m.set_save_comments(comments);
+        m.set_game_active(true);
+
+        // The re-boot reset.
+        m.reset_nav();
+
+        // Navigation is back at boot state...
+        assert!(!m.visible, "reset_nav leaves the menu closed");
+        assert_eq!(m.screen(), MenuScreen::Main);
+        assert_eq!(m.cursor(), 0);
+        assert_eq!(m.help_page(), 0);
+        assert!(!m.bind_grabbing(), "a pending bind grab is cancelled");
+        assert!(m.take_sounds().is_empty(), "queued menu sounds are dropped");
+        // ...but EVERY user choice survives.
+        assert_eq!(m.resolution(), (480, 300), "Screen size survives");
+        assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives");
+        assert!((m.sensitivity() - 3.5).abs() < 1e-6, "Mouse speed survives");
+        assert!((m.volume() - 0.6).abs() < 1e-6, "Sound volume survives");
+        assert!((m.bgm_volume() - 0.9).abs() < 1e-6, "CD volume survives");
+        assert!(m.always_run(), "Always Run survives");
+        assert!(m.invert_mouse(), "Invert Mouse survives");
+        assert!(m.lookspring(), "Lookspring survives");
+        assert!(m.lookstrafe(), "Lookstrafe survives");
+        assert_eq!(m.action_for_key(b'j'), Some(BIND_JUMP), "rebinds survive");
+        assert_eq!(m.action_for_key(K_SPACE), Some(BIND_JUMP), "seeded binds survive");
+        assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD), "seeded binds survive");
+        assert_eq!(m.save_comment(3), "e1m1 quick", "host-set slot comments survive");
+        assert!(m.slot_loadable(3));
+        assert!(m.game_active, "the Save gate is host state, not navigation");
+
+        // And the menu still opens normally afterwards.
+        m.open();
+        assert!(m.visible);
+        assert_eq!(m.screen(), MenuScreen::Main);
+        assert_eq!(m.cursor(), 0);
     }
 
     #[test]

@@ -277,10 +277,30 @@ function startFromOverlay() {
   statusEl.textContent = 'attract loop — ↑/↓ + Enter drive the menu · New Game to play';
 }
 
+// Physical punctuation/digit keys, KeyboardEvent.code -> unshifted US-ASCII
+// keynum. WinQuake's Key_Event works on SCANCODES (in_win.c scantokey): the
+// ',' key is keynum ',' whether or not Shift is down, and a key's release
+// always matches its press. e.key instead shifts for punctuation ('<' for
+// Shift+','), which (a) made the seeded default.cfg layout unable to strafe
+// while running (+speed is Shift, so Shift+',' delivered unbound keynum 60)
+// and (b) could STICK a held key (press ',', add Shift, release ',' -> keyup
+// said '<', leaving keynum 44 held forever). Resolving these keys from
+// e.code restores the C's scancode semantics; letters are already
+// shift-stable via toLowerCase below.
+const CODE_KEYNUMS = {
+  Comma: 44, Period: 46, Slash: 47, Semicolon: 59, Quote: 39,
+  BracketLeft: 91, BracketRight: 93, Backslash: 92, Backquote: 96,
+  Minus: 45, Equal: 61,
+  Digit0: 48, Digit1: 49, Digit2: 50, Digit3: 51, Digit4: 52,
+  Digit5: 53, Digit6: 54, Digit7: 55, Digit8: 56, Digit9: 57,
+};
+
 // Map a browser KeyboardEvent to a Quake keynum (keys.h): printable ASCII is
 // itself (lowercase, like Key_Event delivers it); the named specials take the
 // 128+ block. Returns null for keys Quake has no number for.
 function quakeKey(e) {
+  const pc = CODE_KEYNUMS[e.code];
+  if (pc !== undefined) return pc;
   const k = e.key;
   if (k.length === 1) {
     const c = k.toLowerCase().charCodeAt(0);
