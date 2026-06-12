@@ -48,8 +48,9 @@ use crate::bsp::Bsp;
 use crate::error::{QError, Result};
 use crate::progs::{EType, Progs};
 use crate::server::{
-    ed_new_string, link_edict, parse_float, parse_int, parse_vector, push_lightstyle,
-    snapshot_lightstyles, Server, Tokenizer, MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
+    capture_transports, ed_new_string, link_edict, parse_float, parse_int, parse_vector,
+    push_lightstyle, restore_transports, snapshot_lightstyles, Server, Tokenizer,
+    MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
 };
 use crate::vm::{Vm, MAX_EDICTS};
 
@@ -542,6 +543,34 @@ impl Server {
             )));
         }
 
+        // The build below resets/repopulates the per-thread transports the
+        // CALLER's still-running server also syncs from (the lightstyle table
+        // its next `run_frame` snapshots, the skill cell `cvar("skill")`
+        // reads). Capture them now and hand them back on ANY failure past
+        // this point: "the running game is left intact" (the module-doc
+        // deviation) must cover the shared transports, not just the caller's
+        // `Server` struct — without this, a rejected save's lightstyles and
+        // skill would bleed into the game that survived it.
+        let snapshot = capture_transports();
+        match Self::load_savegame_body(bsp, progs, pak, text, &sg) {
+            Ok(server) => Ok(server),
+            Err(e) => {
+                restore_transports(snapshot);
+                Err(e)
+            }
+        }
+    }
+
+    /// The fallible body of [`Server::load_savegame`] (the C sequence, steps
+    /// 2–5, plus the player re-identification), split out so every error path
+    /// restores the caller's per-thread transports in exactly one place.
+    fn load_savegame_body(
+        bsp: Bsp,
+        progs: Progs,
+        pak: Option<crate::pak::Pak>,
+        text: &str,
+        sg: &SaveGame,
+    ) -> Result<Server> {
         // SV_SpawnServer (see the module doc: the map spawn functions DO run;
         // the save text then overwrites the world state they produced).
         let mut server = Server::with_pak(bsp, progs, pak)?;
@@ -1066,6 +1095,50 @@ mod tests {
         assert!(err.to_string().contains("no player edict"), "{err}");
         // Empty text.
         assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, "").is_err());
+    }
+
+    /// A REJECTED load must leave the caller's per-thread transports alone:
+    /// `load_savegame` resets/overwrites the shared lightstyle table and skill
+    /// cell (via `with_pak` + the header styles) before the blocks can fail to
+    /// parse, and the surviving game's next `run_frame` re-syncs its
+    /// `lightstyles` from that table while `skill()` reads that cell — so
+    /// without the restore, a hostile save's styles/skill would bleed into
+    /// the game it failed to replace (review finding).
+    #[test]
+    fn failed_load_restores_the_callers_thread_state() {
+        // A save whose header carries DIFFERENT styles (style 0 "zzz") and a
+        // DIFFERENT skill (0) than the running game below, but whose blocks
+        // are garbage so the load fails after the header is applied.
+        let mut donor = server_with(rich_progs());
+        donor.set_map_name("e1m2");
+        donor.set_skill(0.0);
+        push_lightstyle(0, "zzz".into());
+        donor.lightstyles = snapshot_lightstyles();
+        let dp = donor.vm.spawn();
+        donor.vm.ent_set_string(dp, "classname", "player");
+        let donor_text = donor.write_savegame();
+        let donor_sg = parse_savegame(&donor_text).unwrap();
+        let hostile = format!("{}not-a-brace", &donor_text[..donor_sg.blocks_ofs]);
+
+        // The "running game": skill 2, an animated style 0.
+        let mut running = server_with(rich_progs());
+        running.set_map_name("e1m1");
+        running.set_skill(2.0);
+        push_lightstyle(0, "abcdefg".into());
+        running.lightstyles = snapshot_lightstyles();
+
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &hostile)
+            .err()
+            .expect("garbage blocks rejected");
+        assert!(err.to_string().contains("First token isn't a brace"), "{err}");
+
+        // The shared transports still hold the RUNNING game's state…
+        assert_eq!(snapshot_lightstyles()[0], "abcdefg");
+        assert_eq!(running.skill(), 2);
+        // …so the per-frame sync cannot revert its owned table to the failed
+        // load's set (this assignment is what run_frame does each tick).
+        running.lightstyles = snapshot_lightstyles();
+        assert_eq!(running.lightstyle(0), "abcdefg");
     }
 
     #[test]

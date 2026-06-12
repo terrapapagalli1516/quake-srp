@@ -981,7 +981,11 @@ function serviceLoadRequest() {
   try { text = localStorage.getItem(SAVE_PREFIX + name); } catch (e) { /* blocked */ }
   if (text === null) { exp.load_failed(); return; }
   const bytes = savEncoder.encode(text);
+  // sav_alloc fails closed (NULL) on a hostile length — a stored value far
+  // larger than any save the engine writes. Honour the rejection: copying
+  // bytes anyway would write through a pointer the engine never allocated.
   const ptr = exp.sav_alloc(bytes.length);
+  if (!ptr) { exp.load_failed(); return; }
   new Uint8Array(exp.memory.buffer, ptr, bytes.length).set(bytes);
   exp.load_game();
 }

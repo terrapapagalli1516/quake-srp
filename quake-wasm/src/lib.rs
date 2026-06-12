@@ -2270,8 +2270,9 @@ pub extern "C" fn sound_ptr() -> *const u8 {
 //  * `load <name>` (console) prints the C's "Loading game from ..." line and
 //    queues a request; the page polls `poll_load_request()`, fetches the
 //    stored text, writes it into the wasm scratch via `sav_alloc()` +
-//    linear-memory copy, then calls `load_game()` (or `load_failed()` when
-//    the key does not exist -> the C's "ERROR: couldn't open.").
+//    linear-memory copy, then calls `load_game()`. `load_failed()` reports
+//    the C's "ERROR: couldn't open." when the key does not exist OR when
+//    `sav_alloc` rejects an oversized value (NULL: the page must not copy).
 //  * `extract_save_comment()` parses a stored .sav from the same scratch and
 //    returns its comment (underscores back to spaces, M_ScanSaves) for the
 //    Load/Save menu slot listings.
@@ -2370,19 +2371,21 @@ const SAV_BUF_MAX: i32 = 8 * 1024 * 1024;
 
 /// Resize the inbound .sav scratch to `len` bytes and return its pointer; the
 /// page copies the stored text in, then calls `load_game()` /
-/// `extract_save_comment()`. A out-of-range `len` yields an empty buffer
-/// (whose parse then fails cleanly).
+/// `extract_save_comment()`. An out-of-range `len` (negative, or past the
+/// 8 MB cap) FAILS CLOSED: the scratch is emptied and NULL comes back, and
+/// the page must honour the rejection (skip the copy, report `load_failed`).
+/// Returning any real pointer for a length we did not allocate would invite
+/// the caller to write `len` bytes through it — the exact wild write into
+/// linear memory the cap exists to prevent.
 #[no_mangle]
 pub extern "C" fn sav_alloc(len: i32) -> *mut u8 {
     SAV_BUF.with(|b| {
         let mut b = b.borrow_mut();
-        let n = if (0..=SAV_BUF_MAX).contains(&len) {
-            len as usize
-        } else {
-            0
-        };
         b.clear();
-        b.resize(n, 0);
+        if !(0..=SAV_BUF_MAX).contains(&len) {
+            return std::ptr::null_mut();
+        }
+        b.resize(len as usize, 0);
         b.as_mut_ptr()
     })
 }
@@ -6839,11 +6842,57 @@ mod tests {
         assert_eq!(load_game(), 0, "a truncated save is rejected");
         assert_eq!(world_digest(), digest, "still untouched");
 
+        // A rejected save must not leak its HEADER into the shared per-thread
+        // transports the surviving game syncs from each frame: doctor the
+        // header to a hostile skill (line 18) and style-0 pattern (line 21),
+        // truncate the blocks so the load fails AFTER those were applied, and
+        // confirm the running game's skill/lightstyle survive the next frame
+        // (review finding: the failed-load restore in load_savegame).
+        let style0 = walk_mut(|w| w.server.lightstyle(0).to_string());
+        let skill = walk_mut(|w| w.server.skill());
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        lines[18] = "3".into(); // hostile current_skill
+        lines[21] = "hostilepattern".into(); // hostile lightstyle 0
+        let doctored = lines.join("\n");
+        let cut = doctored.rfind("\"classname\"").expect("blocks survive doctoring") + 5;
+        SAV_BUF.with(|b| *b.borrow_mut() = doctored.as_bytes()[..cut].to_vec());
+        assert_eq!(load_game(), 0, "the doctored save is still rejected");
+        assert_eq!(world_digest(), digest, "world (incl. skill) untouched");
+        step(0.05); // run_frame re-syncs lightstyles from the shared transport
+        assert_eq!(
+            walk_mut(|w| w.server.lightstyle(0).to_string()),
+            style0,
+            "the failed load's lightstyles must not bleed into the survivor"
+        );
+        assert_eq!(walk_mut(|w| w.server.skill()), skill, "skill restored");
+
         // And the (never-replaced) game keeps stepping fine.
         for _ in 0..20 {
             step(0.05);
         }
         assert!(player_field("health") > 0.0);
+    }
+
+    /// `sav_alloc` fails CLOSED on a hostile length: NULL back (the page then
+    /// skips the copy and reports `load_failed`) — never a pointer that
+    /// invites a `len`-byte write the engine did not allocate (review
+    /// finding: the old clamp-to-empty returned a dangling pointer the page
+    /// would copy a >8 MB localStorage value through, smashing linear memory).
+    #[test]
+    fn sav_alloc_rejects_hostile_lengths_with_null() {
+        assert!(sav_alloc(SAV_BUF_MAX + 1).is_null());
+        assert!(sav_alloc(i32::MAX).is_null());
+        assert!(sav_alloc(-1).is_null());
+        assert!(sav_alloc(i32::MIN).is_null());
+        // A rejection also empties the scratch, so a page that ignored the
+        // NULL and called load_game anyway would parse "" (clean error),
+        // never a stale prior text.
+        SAV_BUF.with(|b| assert!(b.borrow().is_empty()));
+        // In-range lengths (the cap itself included) still allocate.
+        assert!(!sav_alloc(16).is_null());
+        SAV_BUF.with(|b| assert_eq!(b.borrow().len(), 16));
+        assert!(!sav_alloc(SAV_BUF_MAX).is_null());
+        SAV_BUF.with(|b| assert_eq!(b.borrow().len(), SAV_BUF_MAX as usize));
     }
 
     /// The slot-listing primitive for the (sibling-branch) Load/Save menus:

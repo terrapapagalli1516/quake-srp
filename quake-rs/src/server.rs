@@ -890,6 +890,61 @@ fn reset_lightstyles() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Per-thread transport capture/restore for the savegame loader.
+//
+// `Server::load_savegame` builds a THROWAWAY server (`with_pak` +
+// `spawn_entities`) before the `.sav` blocks have proven parseable, and that
+// build resets/repopulates the per-thread transports (the lightstyle table,
+// the skill cell) and queues spawn-time events (sounds, particles, svc
+// commands). On success the new server owns all of it; on FAILURE the caller
+// keeps its old `Server` — whose next `run_frame` re-syncs `lightstyles` from
+// the shared transport and whose `skill()` reads the shared cell — so a
+// rejected save would otherwise leak its lightstyles/skill into the running
+// game it was supposed to leave intact (save.rs's documented deviation from
+// the C's Sys_Error). The loader captures the persistent transports up front
+// and, on any error, restores them and discards the transient queues (the
+// same drop-the-spawn's-one-shots treatment every SUCCESSFUL build applies).
+// ---------------------------------------------------------------------------
+
+/// The persistent per-thread transports a savegame load clobbers, captured by
+/// [`crate::save`]'s loader before it spawns the throwaway server and handed
+/// back through [`restore_transports`] when the load fails.
+pub(crate) struct TransportSnapshot {
+    lightstyles: [String; MAX_LIGHTSTYLES],
+    skill: i32,
+}
+
+/// Capture the caller's per-thread transport state (see [`TransportSnapshot`]).
+pub(crate) fn capture_transports() -> TransportSnapshot {
+    TransportSnapshot {
+        lightstyles: snapshot_lightstyles(),
+        skill: skill_value(),
+    }
+}
+
+/// Put the captured persistent transports back and discard everything the
+/// failed build queued, so the still-running game's next frame sees exactly
+/// the state it left behind. The transient queues are cleared rather than
+/// captured: the caller drains them at the end of every frame (and a load
+/// runs between frames), so "empty" IS the caller's state — replaying the
+/// failed spawn's one-shot sounds/particles/svc commands into the surviving
+/// game would be its own leak.
+pub(crate) fn restore_transports(snap: TransportSnapshot) {
+    LIGHTSTYLES.with(|t| *t.borrow_mut() = snap.lightstyles);
+    SKILL.with(|s| s.set(snap.skill));
+    reset_changelevel();
+    reset_restart();
+    reset_svc_recognizer();
+    reset_temp_entity_decoder();
+    let _ = take_sound_events();
+    let _ = take_static_sounds();
+    let _ = take_particle_bursts();
+    let _ = take_messages();
+    let _ = take_temp_entities();
+    let _ = take_svc_events();
+}
+
 /// `PF_lightstyle` (#35): `void(float style, string value) lightstyle`. The C
 /// `PF_lightstyle` stored `value` into `sv.lightstyles[style]` and, for live
 /// clients, broadcast an `svc_lightstyle` update. This headless server has no
