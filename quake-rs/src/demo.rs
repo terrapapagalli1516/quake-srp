@@ -28,7 +28,8 @@
 #![forbid(unsafe_code)]
 
 use crate::error::{QError, Result};
-use crate::server::{ParticleBurst, StaticSound, TempEntityEvent};
+use crate::server::{ParticleBurst, SoundEvent, StaticSound, TempEntityEvent, MAX_LIGHTSTYLES};
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // protocol.h constants
@@ -39,6 +40,13 @@ pub const PROTOCOL_VERSION: i32 = 15;
 
 /// Default player view height when `SU_VIEWHEIGHT` is absent (`DEFAULT_VIEWHEIGHT`).
 const DEFAULT_VIEWHEIGHT: f32 = 22.0;
+
+/// `DEFAULT_SOUND_PACKET_VOLUME` (cl_parse.c): the volume byte when `SND_VOLUME`
+/// is absent from an `svc_sound` field mask.
+const DEFAULT_SOUND_PACKET_VOLUME: i32 = 255;
+/// `DEFAULT_SOUND_PACKET_ATTENUATION` (cl_parse.c): the attenuation when
+/// `SND_ATTENUATION` is absent.
+const DEFAULT_SOUND_PACKET_ATTENUATION: f32 = 1.0;
 
 // Fast-update field bits (`U_*`). The low byte arrives with the command byte;
 // the high byte arrives via `U_MOREBITS`.
@@ -66,8 +74,10 @@ const SU_PUNCH1: i32 = 1 << 2;
 // and (SU_VELOCITY1 << i) below, exactly as in CL_ParseClientdata.
 const SU_VELOCITY1: i32 = 1 << 5;
 // (1<<8) is unused (was SU_AIMENT).
-// SU_ITEMS / SU_ONGROUND / SU_INWATER carry no extra bytes that we must skip
-// beyond the always-present long; only the data-bearing bits below matter.
+// SU_ITEMS (1<<9) carries no extra byte — the items long is ALWAYS present
+// ("[always sent]" in CL_ParseClientdata).
+const SU_ONGROUND: i32 = 1 << 10;
+const SU_INWATER: i32 = 1 << 11;
 const SU_WEAPONFRAME: i32 = 1 << 12;
 const SU_ARMOR: i32 = 1 << 13;
 const SU_WEAPON: i32 = 1 << 14;
@@ -115,8 +125,21 @@ const SVC_CDTRACK: i32 = 32;
 const SVC_SELLSCREEN: i32 = 33;
 const SVC_CUTSCENE: i32 = 34;
 
-// The `cl.stats[]` slots (quakedef.h `STAT_*`) the intermission overlay reads.
+// The `cl.stats[]` slots (quakedef.h `STAT_*`). `CL_ParseClientdata` fills the
+// HUD slots every message; `svc_updatestat` + the killed/secret ticks maintain
+// the level totals.
 const MAX_CL_STATS: usize = 32;
+const STAT_HEALTH: usize = 0;
+// STAT_FRAGS (1) is multiplayer-only; never filled here.
+const STAT_WEAPON: usize = 2;
+const STAT_AMMO: usize = 3;
+const STAT_ARMOR: usize = 4;
+const STAT_WEAPONFRAME: usize = 5;
+const STAT_SHELLS: usize = 6;
+const STAT_NAILS: usize = 7;
+const STAT_ROCKETS: usize = 8;
+const STAT_CELLS: usize = 9;
+const STAT_ACTIVEWEAPON: usize = 10;
 const STAT_TOTALSECRETS: usize = 11;
 const STAT_TOTALMONSTERS: usize = 12;
 const STAT_SECRETS: usize = 13;
@@ -333,6 +356,36 @@ pub struct DemoFrame {
     pub particles: Vec<ParticleBurst>,
     /// `svc_temp_entity` effects fired during this frame's message block.
     pub temp_entities: Vec<TempEntityEvent>,
+    /// `svc_sound` one-shots fired during this frame's message block
+    /// (`CL_ParseStartSoundPacket` -> `S_StartSound`): recorded gunshots,
+    /// monster barks, doors. A front-end queues each ONCE through the same
+    /// spatialized path live play uses, with the recorded camera as listener.
+    pub sounds: Vec<SoundEvent>,
+    /// `svc_stopsound` stops fired during this block, as `(entity, channel)`
+    /// pairs (the wire short split `i >> 3` / `i & 7` — exactly `S_StopSound`'s
+    /// arguments). id's shipped demo1/2/3 carry none, but the protocol supports
+    /// them (e.g. a stopped platform hum).
+    pub stop_sounds: Vec<(i32, i32)>,
+    /// `svc_damage` events from this block (`V_ParseDamage`): drive the red
+    /// damage flash + the view-kick roll/pitch on the recorded POV.
+    pub damage: Vec<DamageEvent>,
+    /// `svc_print` text fragments from this block, in arrival order. A
+    /// front-end accumulates them Con_Print-style (line-break only on `'\n'`)
+    /// into its notify overlay — pickup messages arrive as several fragments
+    /// ("You got the ", "shells", "\n").
+    pub prints: Vec<String>,
+    /// `svc_centerprint` messages from this block (`SCR_CenterPrint`).
+    pub centerprints: Vec<String>,
+    /// The recorded lightstyle table (`cl_lightstyle[]`, `svc_lightstyle`) as of
+    /// this frame — the signon carries the full set, and a switch-triggered
+    /// light can update one mid-demo. Shared (`Rc`) across frames; a front-end
+    /// feeds it to [`crate::server::lightstyle_scales_at`] for the exact 10 Hz
+    /// `R_AnimateLight` flicker the recording's world had.
+    pub lightstyles: Rc<Vec<String>>,
+    /// The per-client view/inventory state from this block's `svc_clientdata`
+    /// (`CL_ParseClientdata`): stats, items, punchangle, velocity. Drives the
+    /// status bar, weapon viewmodel and V_CalcRefdef bob during playback.
+    pub client: DemoClientData,
     /// `cl.intermission` as of this frame (CL_ParseServerMessage): 0 = playing,
     /// 1 = `svc_intermission` (stats overlay), 2 = `svc_finale` (plaque + text),
     /// 3 = `svc_cutscene` (text only). A front-end draws the matching overlay.
@@ -364,6 +417,94 @@ pub struct DemoStats {
     pub secrets: i32,
     /// `cl.stats[STAT_TOTALSECRETS]`.
     pub total_secrets: i32,
+}
+
+/// One `svc_damage` event (`V_ParseDamage`, view.c): the armour-absorbed and
+/// blood (health) damage counts plus the world-space attack origin. A front-end
+/// reproduces the C's damage flash (`cshifts[CSHIFT_DAMAGE]`) and the
+/// `v_dmg_roll`/`v_dmg_pitch` view kick from these.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DamageEvent {
+    /// `armor = MSG_ReadByte()` — points the armour absorbed.
+    pub armor: i32,
+    /// `blood = MSG_ReadByte()` — health points lost.
+    pub blood: i32,
+    /// `from[]` — the attack origin (3 coords), for the directional kick.
+    pub from: [f32; 3],
+}
+
+/// The `CL_ParseClientdata` payload (cl_parse.c): everything the per-message
+/// `svc_clientdata` tells the client about ITSELF. Field names follow the C.
+///
+/// The HUD slots (`health`/`ammo`/`shells`.. and `active_weapon`) mirror
+/// `cl.stats[STAT_*]`; `weapon_model` is `cl.stats[STAT_WEAPON]` — the
+/// *modelindex* of the first-person weapon (`view->model =
+/// cl.model_precache[cl.stats[STAT_WEAPON]]` in V_CalcRefdef), distinct from
+/// `active_weapon` (`STAT_ACTIVEWEAPON`, the IT_* bit the sbar highlights —
+/// stored as the raw wire byte exactly like the C's `standard_quake` arm, so
+/// the axe's 4096 truncates to 0 and highlights nothing, an id quirk kept).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DemoClientData {
+    /// `cl.items` — the IT_* inventory bits (always sent).
+    pub items: i32,
+    /// `cl.onground` (`SU_ONGROUND` flag bit).
+    pub onground: bool,
+    /// `cl.inwater` (`SU_INWATER` flag bit).
+    pub inwater: bool,
+    /// `cl.idealpitch` (`SU_IDEALPITCH`, default 0) — recorded for completeness
+    /// (only the server-side pitch drift consumed it).
+    pub idealpitch: f32,
+    /// `cl.punchangle` — the weapon-fire view kick, added to the view angles by
+    /// V_CalcRefdef every frame (NOT interpolated between messages).
+    pub punchangle: [f32; 3],
+    /// `cl.velocity` — the player velocity, interpolated between the two most
+    /// recent messages (`cl.mvelocity[1] -> [0]`) by the snapshot fraction
+    /// exactly like CL_RelinkEntities. Drives V_CalcBob + the strafe roll.
+    pub velocity: [f32; 3],
+    /// `cl.stats[STAT_HEALTH]` (always sent; a short).
+    pub health: i32,
+    /// `cl.stats[STAT_AMMO]` — the ACTIVE weapon's ammo count (always sent).
+    pub ammo: i32,
+    /// `cl.stats[STAT_ARMOR]` (`SU_ARMOR`, default 0).
+    pub armor: i32,
+    /// `cl.stats[STAT_WEAPON]` (`SU_WEAPON`, default 0) — viewmodel modelindex.
+    pub weapon_model: i32,
+    /// `cl.stats[STAT_WEAPONFRAME]` (`SU_WEAPONFRAME`, default 0).
+    pub weaponframe: i32,
+    /// `cl.stats[STAT_SHELLS..=STAT_CELLS]` (always sent).
+    pub shells: i32,
+    pub nails: i32,
+    pub rockets: i32,
+    pub cells: i32,
+    /// `cl.stats[STAT_ACTIVEWEAPON]` (always sent; the IT_* weapon byte).
+    pub active_weapon: i32,
+}
+
+impl Default for DemoClientData {
+    fn default() -> Self {
+        // The zero state matches a freshly memset `cl` (CL_ClearState) — all
+        // stats 0, no items, airborne. Health 0 also means a pre-clientdata
+        // frame draws no viewmodel (R_DrawViewModel's health gate), matching
+        // the loading-era state the C never renders anyway.
+        DemoClientData {
+            items: 0,
+            onground: false,
+            inwater: false,
+            idealpitch: 0.0,
+            punchangle: [0.0; 3],
+            velocity: [0.0; 3],
+            health: 0,
+            ammo: 0,
+            armor: 0,
+            weapon_model: 0,
+            weaponframe: 0,
+            shells: 0,
+            nails: 0,
+            rockets: 0,
+            cells: 0,
+            active_weapon: 0,
+        }
+    }
 }
 
 /// A fully parsed demo: level metadata, precache tables, and all frames.
@@ -460,6 +601,41 @@ struct ClientState {
     /// `svc_temp_entity` effects decoded since the last [`snapshot`], drained
     /// into the [`DemoFrame`] and then cleared (one block == one frame).
     pending_tents: Vec<TempEntityEvent>,
+    /// `svc_sound` one-shots decoded since the last [`snapshot`] (drained like
+    /// the particle/tent lists — one block == one frame of sound events).
+    pending_sounds: Vec<SoundEvent>,
+    /// `svc_stopsound` `(entity, channel)` stops decoded since the last snapshot.
+    pending_stops: Vec<(i32, i32)>,
+    /// `svc_damage` events decoded since the last snapshot (`V_ParseDamage`).
+    pending_damage: Vec<DamageEvent>,
+    /// `svc_print` fragments decoded since the last snapshot (`Con_Printf`).
+    pending_prints: Vec<String>,
+    /// `svc_centerprint` messages decoded since the last snapshot.
+    pending_centerprints: Vec<String>,
+    /// `cl_lightstyle[]` — the recorded animated-light pattern table
+    /// (`svc_lightstyle`). `Rc` so each frame snapshot shares the table instead
+    /// of cloning 64 strings; a mid-demo style change copies-on-write.
+    lightstyles: Rc<Vec<String>>,
+    /// `cl.idealpitch` / `cl.punchangle` (CL_ParseClientdata).
+    idealpitch: f32,
+    punchangle: [f32; 3],
+    /// `cl.mvelocity[0]`/`[1]` — the player velocity of the two most recent
+    /// messages; CL_RelinkEntities lerps `cl.velocity` between them.
+    mvelocity: [[f32; 3]; 2],
+    /// `cl.items` / `cl.onground` / `cl.inwater` (CL_ParseClientdata).
+    items: i32,
+    onground: bool,
+    inwater: bool,
+    /// Signon completion (`cls.signon == SIGNONS`): set by the FIRST entity
+    /// fast-update after a serverinfo — "first update is the final signon
+    /// stage" (CL_ParseUpdate, cl_parse.c:340). Until then the C never renders
+    /// (the loading plaque holds via `scr_disabled_for_loading` until
+    /// SCR_EndLoadingPlaque), so no frames are emitted: this kills the
+    /// void-camera frames a demo's signon blocks would otherwise render from a
+    /// zeroed view entity. (The C counts three `svc_signonnum` stages first;
+    /// for replaying a recorded stream the first-update rule alone is what
+    /// flips drawing on, and is equivalent for real demos.)
+    signon_complete: bool,
     /// `svc_spawnstaticsound` registrations (`CL_ParseStaticSound` ->
     /// `S_StaticSound` persistent loops), accumulated for [`Demo::static_sounds`].
     static_sounds: Vec<StaticSound>,
@@ -492,6 +668,19 @@ impl ClientState {
             mtime: [0.0; 2],
             pending_particles: Vec::new(),
             pending_tents: Vec::new(),
+            pending_sounds: Vec::new(),
+            pending_stops: Vec::new(),
+            pending_damage: Vec::new(),
+            pending_prints: Vec::new(),
+            pending_centerprints: Vec::new(),
+            lightstyles: Rc::new(vec![String::new(); MAX_LIGHTSTYLES]),
+            idealpitch: 0.0,
+            punchangle: [0.0; 3],
+            mvelocity: [[0.0; 3]; 2],
+            items: 0,
+            onground: false,
+            inwater: false,
+            signon_complete: false,
             static_sounds: Vec::new(),
             stats: [0; MAX_CL_STATS],
             intermission: 0,
@@ -519,6 +708,22 @@ impl ClientState {
         // level (CL_ClearState wipes the client-side effect pools too).
         self.pending_particles.clear();
         self.pending_tents.clear();
+        self.pending_sounds.clear();
+        self.pending_stops.clear();
+        self.pending_damage.clear();
+        self.pending_prints.clear();
+        self.pending_centerprints.clear();
+        // CL_ClearState memsets the per-client view state too; the new level's
+        // signon repopulates the lightstyle table, and drawing gates again on
+        // its first entity update (the loading plaque holds across the change).
+        self.lightstyles = Rc::new(vec![String::new(); MAX_LIGHTSTYLES]);
+        self.idealpitch = 0.0;
+        self.punchangle = [0.0; 3];
+        self.mvelocity = [[0.0; 3]; 2];
+        self.items = 0;
+        self.onground = false;
+        self.inwater = false;
+        self.signon_complete = false;
         // S_StopAllSounds on the new serverinfo drops the old level's static
         // loop channels; the new signon re-registers its own.
         self.static_sounds.clear();
@@ -559,12 +764,15 @@ enum ParseFlow {
 /// Parse a Quake `.dem` file from memory and replay it into [`Demo`].
 ///
 /// This is the *keyframe* stream: exactly one [`DemoFrame`] per server message
-/// block, each holding the authoritative post-message state (interpolation
-/// fraction `frac == 1`, i.e. every entity at its newest snapshot) with the
-/// stale-entity cull from `CL_RelinkEntities` applied — entities that went
-/// silent in the latest message stop rendering instead of lingering. For smooth
-/// (non-choppy) playback that lerps between snapshots, use
-/// [`parse_demo_interpolated`].
+/// block **once the signon completes** (the first entity fast-update; blocks
+/// before it are the signon — serverinfo/baselines/statics — during which the
+/// C never draws, so no frames are emitted and playback starts in-world rather
+/// than on a zeroed void camera). Each frame holds the authoritative
+/// post-message state (interpolation fraction `frac == 1`, i.e. every entity
+/// at its newest snapshot) with the stale-entity cull from `CL_RelinkEntities`
+/// applied — entities that went silent in the latest message stop rendering
+/// instead of lingering. For smooth (non-choppy) playback that lerps between
+/// snapshots, use [`parse_demo_interpolated`].
 ///
 /// Framing (`CL_PlayDemo_f` + `CL_GetMessage`): an ASCII CD-track integer
 /// followed by `'\n'`, then a sequence of blocks, each
@@ -723,18 +931,31 @@ fn parse_demo_with(
         // svc_time, set up entity msg history, etc.).
         let flow = parse_server_message(&mut cl, msg)?;
 
-        // Snapshot AFTER the block (only once we have a world). `snapshot`
-        // drains this block's pending effect events into the frame and clears
-        // them, so the next block starts collecting from empty.
-        if cl.have_serverinfo {
+        // Snapshot AFTER the block — but only once we have a world AND the
+        // signon completed (the first entity update; CL_ParseUpdate's
+        // `cls.signon == SIGNONS-1` promotion). The C draws NOTHING until then
+        // (the loading plaque holds via `scr_disabled_for_loading` until
+        // SCR_EndLoadingPlaque), so the signon blocks' zeroed camera never
+        // reaches the screen. `snapshot` drains this block's pending effect
+        // events into the frame and clears them, so the next block starts
+        // collecting from empty.
+        if cl.have_serverinfo && cl.signon_complete {
             emit(&mut cl, prev_mtime0, &mut frames);
         } else {
-            // Before the world exists no frame is emitted, so any stray effect
-            // events parsed in a pre-serverinfo block would otherwise leak into
-            // the first real frame. Drop them to keep frame N's lists == the
-            // events of block N.
+            // Before drawing starts no frame is emitted, so any stray effect
+            // events parsed in a signon block would otherwise leak into the
+            // first real frame. Drop them to keep frame N's lists == the
+            // events of block N. (Prints too: SCR_EndLoadingPlaque runs
+            // Con_ClearNotify, so signon console text never shows as notify
+            // lines. Persistent STATE — lightstyles, stats, statics, the
+            // clientdata — is of course kept.)
             cl.pending_particles.clear();
             cl.pending_tents.clear();
+            cl.pending_sounds.clear();
+            cl.pending_stops.clear();
+            cl.pending_damage.clear();
+            cl.pending_prints.clear();
+            cl.pending_centerprints.clear();
         }
 
         if let ParseFlow::Stop = flow {
@@ -849,6 +1070,21 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
     // a fresh empty Vec without cloning).
     let particles = std::mem::take(&mut cl.pending_particles);
     let temp_entities = std::mem::take(&mut cl.pending_tents);
+    let sounds = std::mem::take(&mut cl.pending_sounds);
+    let stop_sounds = std::mem::take(&mut cl.pending_stops);
+    let damage = std::mem::take(&mut cl.pending_damage);
+    let prints = std::mem::take(&mut cl.pending_prints);
+    let centerprints = std::mem::take(&mut cl.pending_centerprints);
+
+    // "interpolate player info" (CL_RelinkEntities): cl.velocity lerps between
+    // the two most recent messages' mvelocity by the same fraction as the
+    // entities (a plain lerp — no teleport guard, exactly the C). punchangle is
+    // NOT interpolated; the latest clientdata value applies as-is.
+    let velocity = [
+        cl.mvelocity[1][0] + frac * (cl.mvelocity[0][0] - cl.mvelocity[1][0]),
+        cl.mvelocity[1][1] + frac * (cl.mvelocity[0][1] - cl.mvelocity[1][1]),
+        cl.mvelocity[1][2] + frac * (cl.mvelocity[0][2] - cl.mvelocity[1][2]),
+    ];
 
     DemoFrame {
         time: cl.time,
@@ -858,6 +1094,30 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
         entities,
         particles,
         temp_entities,
+        sounds,
+        stop_sounds,
+        damage,
+        prints,
+        centerprints,
+        lightstyles: Rc::clone(&cl.lightstyles),
+        client: DemoClientData {
+            items: cl.items,
+            onground: cl.onground,
+            inwater: cl.inwater,
+            idealpitch: cl.idealpitch,
+            punchangle: cl.punchangle,
+            velocity,
+            health: cl.stats[STAT_HEALTH],
+            ammo: cl.stats[STAT_AMMO],
+            armor: cl.stats[STAT_ARMOR],
+            weapon_model: cl.stats[STAT_WEAPON],
+            weaponframe: cl.stats[STAT_WEAPONFRAME],
+            shells: cl.stats[STAT_SHELLS],
+            nails: cl.stats[STAT_NAILS],
+            rockets: cl.stats[STAT_ROCKETS],
+            cells: cl.stats[STAT_CELLS],
+            active_weapon: cl.stats[STAT_ACTIVEWEAPON],
+        },
         intermission: cl.intermission,
         completed_time: cl.completed_time,
         finale_text: cl.finale_text.clone(),
@@ -1019,7 +1279,7 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
 
             SVC_CLIENTDATA => {
                 let bits = r.read_short();
-                cl.viewheight = parse_clientdata(&mut r, bits)?;
+                parse_clientdata(cl, &mut r, bits)?;
             }
 
             SVC_VERSION => {
@@ -1036,17 +1296,37 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
                 return Ok(ParseFlow::Stop);
             }
 
-            SVC_PRINT | SVC_CENTERPRINT | SVC_STUFFTEXT => {
+            SVC_PRINT => {
+                // Con_Printf("%s", MSG_ReadString()): recorded as a raw
+                // fragment — the front-end accumulates Con_Print-style (a line
+                // breaks only on '\n'; pickups arrive as several fragments).
+                cl.pending_prints.push(r.read_string());
+            }
+
+            SVC_CENTERPRINT => {
+                // SCR_CenterPrint(MSG_ReadString()).
+                cl.pending_centerprints.push(r.read_string());
+            }
+
+            SVC_STUFFTEXT => {
+                // Cbuf_AddText(MSG_ReadString()): console commands the server
+                // stuffs into the client. Consumed but INERT — there is no
+                // command buffer here. id's demo1/2/3 only ever stuff "bf\n"
+                // (V_BonusFlash_f, the bonus-pickup gold flash — a cosmetic
+                // this port doesn't wire in live play either); a live server
+                // could also stuff e.g. cvar sets or "reconnect", none of
+                // which apply to replaying a recorded stream.
                 let _ = r.read_string();
             }
 
             SVC_DAMAGE => {
-                // V_ParseDamage: byte armor, byte blood, 3 coords from[].
-                let _ = r.read_byte();
-                let _ = r.read_byte();
-                let _ = r.read_coord();
-                let _ = r.read_coord();
-                let _ = r.read_coord();
+                // V_ParseDamage: byte armor, byte blood, 3 coords from[] (the
+                // attack origin). Recorded onto the frame; the front-end
+                // reproduces the damage cshift + v_dmg_roll/pitch view kick.
+                let armor = r.read_byte();
+                let blood = r.read_byte();
+                let from = [r.read_coord(), r.read_coord(), r.read_coord()];
+                cl.pending_damage.push(DamageEvent { armor, blood, from });
             }
 
             SVC_SERVERINFO => {
@@ -1076,16 +1356,31 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_LIGHTSTYLE => {
-                let _ = r.read_byte();
-                let _ = r.read_string();
+                // Q_strcpy(cl_lightstyle[i].map, MSG_ReadString()): the
+                // RECORDED animated-light patterns (the signon carries the
+                // full table; a triggered light can update one mid-demo). The
+                // C Sys_Errors on i >= MAX_LIGHTSTYLES; like svc_updatestat's
+                // hostile-index case we drop the write instead (defensive —
+                // and a short read's -1 must not alias onto style 0).
+                let i = r.read_byte();
+                let s = r.read_string();
+                if let Some(slot) = usize::try_from(i)
+                    .ok()
+                    .filter(|&i| i < MAX_LIGHTSTYLES)
+                    .and_then(|i| Rc::make_mut(&mut cl.lightstyles).get_mut(i))
+                {
+                    *slot = s;
+                }
             }
 
             SVC_SOUND => {
-                parse_start_sound(&mut r)?;
+                parse_start_sound(cl, &mut r)?;
             }
 
             SVC_STOPSOUND => {
-                let _ = r.read_short();
+                // S_StopSound(i>>3, i&7): stop the named entity's channel.
+                let i = r.read_short();
+                cl.pending_stops.push((i >> 3, i & 7));
             }
 
             SVC_UPDATENAME => {
@@ -1208,6 +1503,13 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
 // ---------------------------------------------------------------------------
 
 fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Result<()> {
+    // CL_ParseUpdate (cl_parse.c:340): "if (cls.signon == SIGNONS - 1) { //
+    // first update is the final signon stage — cls.signon = SIGNONS;
+    // CL_SignonReply(); }". The first entity update completes the signon,
+    // which is what re-enables drawing (SCR_EndLoadingPlaque). Frame emission
+    // gates on this flag (see parse_demo_with).
+    cl.signon_complete = true;
+
     if bits & U_MOREBITS != 0 {
         let i = r.read_byte();
         bits |= i << 8;
@@ -1374,79 +1676,129 @@ fn spawn_static(r: &mut NetReader) -> Entity {
 // CL_ParseClientdata
 // ---------------------------------------------------------------------------
 
-/// Parse the per-client data block, consuming every field in `CL_ParseClientdata`
-/// order so the stream stays aligned.
-///
-/// Returns the parsed view height (`SU_VIEWHEIGHT` value or `DEFAULT_VIEWHEIGHT`),
-/// which the caller stores in client state for the camera snapshot. All other
-/// fields are consumed for alignment but otherwise ignored.
-fn parse_clientdata(r: &mut NetReader, bits: i32) -> Result<f32> {
-    let viewheight = if bits & SU_VIEWHEIGHT != 0 {
+/// Parse the per-client data block, decoding every field in `CL_ParseClientdata`
+/// order (cl_parse.c) into the client state — view height, ideal pitch, punch
+/// angles, velocity, items, ground/water flags, and the `cl.stats[]` HUD slots
+/// (weaponframe / armor / weapon / health / ammo / shells..cells / active
+/// weapon). The bit order and the absent-bit defaults are the C's EXACTLY —
+/// every optional field resets to its default when its bit is missing (the
+/// server resends the full set each message).
+fn parse_clientdata(cl: &mut ClientState, r: &mut NetReader, bits: i32) -> Result<()> {
+    cl.viewheight = if bits & SU_VIEWHEIGHT != 0 {
         r.read_char() as f32
     } else {
         DEFAULT_VIEWHEIGHT
     };
 
-    if bits & SU_IDEALPITCH != 0 {
-        let _ = r.read_char();
-    }
+    cl.idealpitch = if bits & SU_IDEALPITCH != 0 {
+        r.read_char() as f32
+    } else {
+        0.0
+    };
 
-    // punchangle[i] / velocity[i], interleaved, for i in 0..3.
+    // VectorCopy(cl.mvelocity[0], cl.mvelocity[1]): shift the velocity history
+    // BEFORE reading the new values, so CL_RelinkEntities can lerp between the
+    // two most recent messages.
+    cl.mvelocity[1] = cl.mvelocity[0];
+
+    // punchangle[i] / velocity[i], interleaved, for i in 0..3. Velocity is
+    // quantized as value/16 on the wire (`cl.mvelocity[0][i] =
+    // MSG_ReadChar()*16`); punch angles are whole degrees in a char.
     for i in 0..3 {
-        if bits & (SU_PUNCH1 << i) != 0 {
-            let _ = r.read_char();
-        }
-        if bits & (SU_VELOCITY1 << i) != 0 {
-            let _ = r.read_char();
-        }
+        cl.punchangle[i] = if bits & (SU_PUNCH1 << i) != 0 {
+            r.read_char() as f32
+        } else {
+            0.0
+        };
+        cl.mvelocity[0][i] = if bits & (SU_VELOCITY1 << i) != 0 {
+            r.read_char() as f32 * 16.0
+        } else {
+            0.0
+        };
     }
 
-    // items — always a long.
-    let _ = r.read_long();
+    // items — always a long ("[always sent]"). The C also latches per-bit
+    // item_gettime[] flash times here; only the sbar icon flash consumed
+    // those, which this port's HUD doesn't animate (documented sbar nit).
+    cl.items = r.read_long();
 
-    if bits & SU_WEAPONFRAME != 0 {
-        let _ = r.read_byte();
-    }
-    if bits & SU_ARMOR != 0 {
-        let _ = r.read_byte();
-    }
-    if bits & SU_WEAPON != 0 {
-        let _ = r.read_byte();
-    }
+    cl.onground = bits & SU_ONGROUND != 0;
+    cl.inwater = bits & SU_INWATER != 0;
 
-    let _health = r.read_short(); // always
-    let _ammo = r.read_byte(); // always
+    cl.stats[STAT_WEAPONFRAME] = if bits & SU_WEAPONFRAME != 0 {
+        r.read_byte()
+    } else {
+        0
+    };
+    cl.stats[STAT_ARMOR] = if bits & SU_ARMOR != 0 { r.read_byte() } else { 0 };
+    cl.stats[STAT_WEAPON] = if bits & SU_WEAPON != 0 { r.read_byte() } else { 0 };
+
+    cl.stats[STAT_HEALTH] = r.read_short(); // always
+    cl.stats[STAT_AMMO] = r.read_byte(); // always
     // shells / nails / rockets / cells — always 4 bytes.
-    for _ in 0..4 {
-        let _ = r.read_byte();
+    for i in 0..4 {
+        cl.stats[STAT_SHELLS + i] = r.read_byte();
     }
-    // active weapon — always 1 byte.
-    let _ = r.read_byte();
+    // active weapon — always 1 byte. standard_quake stores the raw byte (the
+    // QuakeC IT_* weapon value truncated through the wire byte; Rogue/Hipnotic's
+    // `1<<i` re-expansion is the non-standard_quake arm we don't model).
+    cl.stats[STAT_ACTIVEWEAPON] = r.read_byte();
 
-    Ok(viewheight)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // CL_ParseStartSoundPacket
 // ---------------------------------------------------------------------------
 
-fn parse_start_sound(r: &mut NetReader) -> Result<()> {
+/// `CL_ParseStartSoundPacket` (cl_parse.c): decode one `svc_sound` into a
+/// [`SoundEvent`] on the pending list — the exact `S_StartSound(ent, channel,
+/// cl.sound_precache[sound_num], pos, volume/255.0, attenuation)` call the C
+/// made, with the byte-domain defaults (`DEFAULT_SOUND_PACKET_VOLUME` 255,
+/// attenuation byte / 64.0, default 1.0) and the `channel >> 3` / `& 7`
+/// entity+channel split.
+fn parse_start_sound(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
     let field_mask = r.read_byte();
 
-    if field_mask & SND_VOLUME != 0 {
-        let _ = r.read_byte();
-    }
-    if field_mask & SND_ATTENUATION != 0 {
-        let _ = r.read_byte();
-    }
+    let volume = if field_mask & SND_VOLUME != 0 {
+        r.read_byte()
+    } else {
+        DEFAULT_SOUND_PACKET_VOLUME
+    };
+    let attenuation = if field_mask & SND_ATTENUATION != 0 {
+        r.read_byte() as f32 / 64.0
+    } else {
+        DEFAULT_SOUND_PACKET_ATTENUATION
+    };
 
-    let _channel = r.read_short();
-    let _sound_num = r.read_byte();
+    let channel = r.read_short();
+    let sound_num = r.read_byte();
 
-    // 3 coords for position.
-    let _ = r.read_coord();
-    let _ = r.read_coord();
-    let _ = r.read_coord();
+    let entity = channel >> 3;
+    let channel = channel & 7;
+    // The C Host_Errors on ent > MAX_EDICTS; a hostile entity number here is
+    // harmless (it is only a spatialization/override key), so record it as-is.
+
+    let origin = [r.read_coord(), r.read_coord(), r.read_coord()];
+
+    // Resolve the precache name like S_StartSound's cl.sound_precache[] index;
+    // an out-of-range index leaves the sample empty (the front-end drops
+    // nameless events, mirroring S_StartSound's `if (!sfx) return`).
+    let sample = usize::try_from(sound_num)
+        .ok()
+        .and_then(|i| cl.sound_precache.get(i))
+        .cloned()
+        .unwrap_or_default();
+
+    cl.pending_sounds.push(SoundEvent {
+        entity,
+        channel,
+        sound_index: sound_num,
+        sample,
+        origin,
+        volume: volume as f32 / 255.0,
+        attenuation,
+    });
     Ok(())
 }
 
@@ -1801,7 +2153,10 @@ mod tests {
         assert_eq!(demo.level_name, "test");
         assert_eq!(demo.map_name(), Some("maps/x.bsp"));
         assert_eq!(demo.model_precache.get(1).map(|s| s.as_str()), Some("maps/x.bsp"));
-        assert_eq!(demo.frames.len(), 2, "one keyframe per block");
+        // Block 1 is pure signon (serverinfo/baselines, no entity update): the
+        // C draws nothing until the first fast-update completes the signon, so
+        // only block 2 emits a keyframe.
+        assert_eq!(demo.frames.len(), 1, "one keyframe per post-signon block");
 
         let frame = demo.frames.last().expect("a frame");
 
@@ -1888,6 +2243,7 @@ mod tests {
         w_angle(&mut msg, 0.0);
         w_coord(&mut msg, 3.0);
         w_angle(&mut msg, 0.0);
+        write_signon_update(&mut msg); // complete the signon so a frame emits
 
         let file = demo_with_message(&msg);
         let demo = parse_demo(&file).expect("parse");
@@ -1953,10 +2309,21 @@ mod tests {
         w_string(msg, ""); // end of sounds
     }
 
+    /// Append the minimal entity fast-update that COMPLETES THE SIGNON (the
+    /// C's "first update is the final signon stage", CL_ParseUpdate) so the
+    /// block emits a frame: command byte `0x80` (no field bits) + entity
+    /// number 1. Every real demo carries updates; a stream without one renders
+    /// nothing, exactly like the C holding the loading plaque forever.
+    fn write_signon_update(msg: &mut Vec<u8>) {
+        w_byte(msg, 0x80); // fast update, bits == 0
+        w_byte(msg, 1); // entity 1 (modelindex stays baseline 0 -> invisible)
+    }
+
     #[test]
     fn particle_and_temp_entity_are_surfaced_on_the_frame() {
         let mut msg = Vec::new();
         write_serverinfo(&mut msg);
+        write_signon_update(&mut msg); // complete the signon so a frame emits
 
         // svc_particle: org (4, -8, 16), dir bytes (16, -32, 0) -> /16 ==
         // (1, -2, 0), count 12, color 73.
@@ -1999,6 +2366,7 @@ mod tests {
         // R_ParseParticleEffect: count == 255 is R_ParticleExplosion (1024).
         let mut msg = Vec::new();
         write_serverinfo(&mut msg);
+        write_signon_update(&mut msg);
         w_byte(&mut msg, SVC_PARTICLE);
         w_coord(&mut msg, 0.0);
         w_coord(&mut msg, 0.0);
@@ -2024,6 +2392,7 @@ mod tests {
         // TE_EXPLOSION2 carries coord3 + colorStart + colorLength.
         let mut msg = Vec::new();
         write_serverinfo(&mut msg);
+        write_signon_update(&mut msg);
         w_byte(&mut msg, SVC_TEMP_ENTITY);
         w_byte(&mut msg, TE_EXPLOSION2);
         w_coord(&mut msg, 1.0);
@@ -2052,6 +2421,7 @@ mod tests {
         // Block 1: serverinfo + one particle.
         let mut b1 = Vec::new();
         write_serverinfo(&mut b1);
+        write_signon_update(&mut b1); // complete the signon so frames emit
         w_byte(&mut b1, SVC_PARTICLE);
         w_coord(&mut b1, 1.0);
         w_coord(&mut b1, 1.0);
@@ -2460,6 +2830,7 @@ mod tests {
         w_byte(&mut b1, SVC_KILLEDMONSTER);
         w_byte(&mut b1, SVC_FOUNDSECRET);
         w_byte(&mut b1, SVC_KILLEDMONSTER);
+        write_signon_update(&mut b1); // complete the signon so frames emit
 
         let mut b2 = Vec::new();
         w_byte(&mut b2, SVC_TIME);
@@ -2523,5 +2894,366 @@ mod tests {
         msg.extend_from_slice(&31i32.to_le_bytes());
         let _ = parse_server_message(&mut cl, &msg);
         assert_eq!(cl.stats[STAT_TOTALMONSTERS], 31);
+    }
+
+    // =======================================================================
+    // Demo-parity decode: svc_sound / svc_stopsound / svc_lightstyle /
+    // svc_clientdata / svc_damage / svc_print+centerprint / signon gating.
+    // =======================================================================
+
+    /// Serverinfo with one precached sound so svc_sound can resolve a name.
+    fn write_serverinfo_with_sound(msg: &mut Vec<u8>, sound: &str) {
+        w_byte(msg, SVC_SERVERINFO);
+        w_long(msg, PROTOCOL_VERSION);
+        w_byte(msg, 1);
+        w_byte(msg, 0);
+        w_string(msg, "lvl");
+        w_string(msg, "maps/z.bsp");
+        w_string(msg, ""); // end of models
+        w_string(msg, sound); // sound_precache[1]
+        w_string(msg, ""); // end of sounds
+    }
+
+    #[test]
+    fn svc_sound_decodes_into_frame_sound_events() {
+        // Full field mask: SND_VOLUME + SND_ATTENUATION. Entity 5 channel 2 is
+        // packed as (5<<3)|2 on the wire short; sound 1 resolves through the
+        // precache; vol 128 -> 128/255; atten byte 128 -> 2.0.
+        let mut msg = Vec::new();
+        write_serverinfo_with_sound(&mut msg, "doors/drclos4.wav");
+        write_signon_update(&mut msg);
+        w_byte(&mut msg, SVC_SOUND);
+        w_byte(&mut msg, SND_VOLUME | SND_ATTENUATION);
+        w_byte(&mut msg, 128); // volume byte
+        w_byte(&mut msg, 128); // attenuation byte -> /64 = 2.0
+        w_short(&mut msg, (5 << 3) | 2); // entity 5, channel 2
+        w_byte(&mut msg, 1); // sound_precache[1]
+        w_coord(&mut msg, 100.0);
+        w_coord(&mut msg, -8.0);
+        w_coord(&mut msg, 24.0);
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        assert_eq!(frame.sounds.len(), 1, "one sound event recorded");
+        let s = &frame.sounds[0];
+        assert_eq!(s.entity, 5, "entity = channel >> 3");
+        assert_eq!(s.channel, 2, "channel = channel & 7");
+        assert_eq!(s.sample, "doors/drclos4.wav", "precache name resolved");
+        assert_eq!(s.sound_index, 1);
+        assert_eq!(s.origin, [100.0, -8.0, 24.0]);
+        assert_eq!(s.volume, 128.0 / 255.0, "vol byte / 255");
+        assert_eq!(s.attenuation, 2.0, "atten byte / 64");
+    }
+
+    #[test]
+    fn svc_sound_defaults_match_cl_parsestartsoundpacket() {
+        // No field-mask bits: volume defaults to 255 (-> 1.0) and attenuation
+        // to 1.0 (DEFAULT_SOUND_PACKET_*).
+        let mut msg = Vec::new();
+        write_serverinfo_with_sound(&mut msg, "weapons/guncock.wav");
+        write_signon_update(&mut msg);
+        w_byte(&mut msg, SVC_SOUND);
+        w_byte(&mut msg, 0); // field_mask: no volume, no attenuation byte
+        w_short(&mut msg, (1 << 3) | 4); // entity 1 (the view entity), chan 4
+        w_byte(&mut msg, 1);
+        w_coord(&mut msg, 0.0);
+        w_coord(&mut msg, 0.0);
+        w_coord(&mut msg, 0.0);
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let s = &demo.frames.last().expect("a frame").sounds[0];
+        assert_eq!(s.volume, 1.0, "DEFAULT_SOUND_PACKET_VOLUME 255 -> 1.0");
+        assert_eq!(s.attenuation, 1.0, "DEFAULT_SOUND_PACKET_ATTENUATION");
+        assert_eq!((s.entity, s.channel), (1, 4));
+
+        // An out-of-range precache index leaves the sample empty
+        // (S_StartSound's sfx == NULL early-out) without desyncing.
+        let mut msg2 = Vec::new();
+        write_serverinfo_with_sound(&mut msg2, "weapons/guncock.wav");
+        write_signon_update(&mut msg2);
+        w_byte(&mut msg2, SVC_SOUND);
+        w_byte(&mut msg2, 0);
+        w_short(&mut msg2, 8);
+        w_byte(&mut msg2, 99); // not precached
+        w_coord(&mut msg2, 0.0);
+        w_coord(&mut msg2, 0.0);
+        w_coord(&mut msg2, 0.0);
+        let demo2 = parse_demo(&demo_with_message(&msg2)).expect("parse");
+        let s2 = &demo2.frames.last().expect("a frame").sounds[0];
+        assert!(s2.sample.is_empty(), "unresolvable index -> empty sample");
+        assert_eq!(s2.sound_index, 99);
+    }
+
+    #[test]
+    fn svc_stopsound_decodes_entity_and_channel() {
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        write_signon_update(&mut msg);
+        w_byte(&mut msg, SVC_STOPSOUND);
+        w_short(&mut msg, (7 << 3) | 3); // S_StopSound(7, 3)
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        assert_eq!(frame.stop_sounds, vec![(7, 3)], "wire short split i>>3 / i&7");
+    }
+
+    #[test]
+    fn svc_lightstyle_populates_the_recorded_table() {
+        // Style 0 = "m" and style 1 = the torch flicker, set in the signon;
+        // a mid-demo block updates style 4 — the frame tables must reflect
+        // each block's state (Rc copy-on-write).
+        let mut b1 = Vec::new();
+        w_time(&mut b1, 1.0);
+        write_serverinfo(&mut b1);
+        for (i, s) in [(0, "m"), (1, "mmnmmommommnonmmonqnmmo")] {
+            w_byte(&mut b1, SVC_LIGHTSTYLE);
+            w_byte(&mut b1, i);
+            w_string(&mut b1, s);
+        }
+        write_signon_update(&mut b1);
+
+        let mut b2 = Vec::new();
+        w_time(&mut b2, 1.1);
+        w_byte(&mut b2, SVC_LIGHTSTYLE);
+        w_byte(&mut b2, 4);
+        w_string(&mut b2, "az");
+
+        let mut file = Vec::new();
+        file.extend_from_slice(b"-1\n");
+        push_block(&mut file, [0.0; 3], &b1);
+        push_block(&mut file, [0.0; 3], &b2);
+
+        let demo = parse_demo(&file).expect("parse");
+        assert_eq!(demo.frames.len(), 2);
+        let f1 = &demo.frames[0];
+        assert_eq!(f1.lightstyles.len(), MAX_LIGHTSTYLES);
+        assert_eq!(f1.lightstyles[0], "m");
+        assert_eq!(f1.lightstyles[1], "mmnmmommommnonmmonqnmmo");
+        assert_eq!(f1.lightstyles[4], "", "style 4 unset in block 1");
+        let f2 = &demo.frames[1];
+        assert_eq!(f2.lightstyles[4], "az", "mid-demo style change lands");
+        assert_eq!(f2.lightstyles[0], "m", "earlier styles persist");
+        // The table feeds the same R_AnimateLight math as the live walk: style
+        // 0 ('m') = 264/256; an unset style stays at normal brightness.
+        let scales = crate::server::lightstyle_scales_at(&f1.lightstyles, 0.0);
+        assert!((scales[0] - 264.0 / 256.0).abs() < 1e-6, "'m' = 264/256");
+        assert!((scales[2] - 1.0).abs() < 1e-6, "unset style = 1.0");
+        // A two-char "az" style animates at 10 Hz: t=1.1 -> char index 11 % 2
+        // = 1 -> 'z' = 550/256; t=1.0 -> index 10 % 2 = 0 -> 'a' = 0.
+        let s2a = crate::server::lightstyle_scales_at(&f2.lightstyles, 1.0);
+        let s2b = crate::server::lightstyle_scales_at(&f2.lightstyles, 1.1);
+        assert!((s2a[4] - 0.0).abs() < 1e-6, "'a' = 0 (dark)");
+        assert!((s2b[4] - 550.0 / 256.0).abs() < 1e-6, "'z' = 550/256");
+
+        // A hostile/out-of-range style index is dropped, not a panic.
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        write_signon_update(&mut msg);
+        w_byte(&mut msg, SVC_LIGHTSTYLE);
+        w_byte(&mut msg, MAX_LIGHTSTYLES as i32); // == 64, out of range
+        w_string(&mut msg, "zz");
+        let demo2 = parse_demo(&demo_with_message(&msg)).expect("parse");
+        assert!(demo2.frames.last().unwrap().lightstyles.iter().all(|s| s.is_empty()));
+    }
+
+    /// Build an svc_clientdata payload with EVERY SU_* bit set, mirroring
+    /// SV_WriteClientdataToMessage's field order exactly.
+    fn write_full_clientdata(msg: &mut Vec<u8>) {
+        let bits = SU_VIEWHEIGHT
+            | SU_IDEALPITCH
+            | SU_PUNCH1
+            | (SU_PUNCH1 << 1)
+            | (SU_PUNCH1 << 2)
+            | SU_VELOCITY1
+            | (SU_VELOCITY1 << 1)
+            | (SU_VELOCITY1 << 2)
+            | SU_ONGROUND
+            | SU_INWATER
+            | SU_WEAPONFRAME
+            | SU_ARMOR
+            | SU_WEAPON;
+        w_byte(msg, SVC_CLIENTDATA);
+        w_short(msg, bits);
+        w_char(msg, 30); // viewheight
+        w_char(msg, -5); // idealpitch
+        // (punch, velocity) interleaved per axis; velocity wire = value/16.
+        w_char(msg, 1); // punch x
+        w_char(msg, 20); // vel x -> 320
+        w_char(msg, 2); // punch y
+        w_char(msg, -10); // vel y -> -160
+        w_char(msg, 3); // punch z
+        w_char(msg, 0); // vel z -> 0
+        w_long(msg, 0x40_0001); // items
+        w_byte(msg, 6); // weaponframe
+        w_byte(msg, 50); // armor
+        w_byte(msg, 9); // weapon (viewmodel modelindex)
+        w_short(msg, 86); // health
+        w_byte(msg, 25); // active ammo
+        w_byte(msg, 25); // shells
+        w_byte(msg, 40); // nails
+        w_byte(msg, 5); // rockets
+        w_byte(msg, 60); // cells
+        w_byte(msg, 1); // active weapon (IT_SHOTGUN)
+    }
+
+    #[test]
+    fn svc_clientdata_decodes_every_field_in_c_bit_order() {
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        write_signon_update(&mut msg);
+        write_full_clientdata(&mut msg);
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let c = demo.frames.last().expect("a frame").client;
+        assert_eq!(c.idealpitch, -5.0);
+        assert_eq!(c.punchangle, [1.0, 2.0, 3.0]);
+        assert_eq!(c.velocity, [320.0, -160.0, 0.0], "wire char * 16");
+        assert_eq!(c.items, 0x40_0001);
+        assert!(c.onground && c.inwater);
+        assert_eq!(c.weaponframe, 6);
+        assert_eq!(c.armor, 50);
+        assert_eq!(c.weapon_model, 9, "STAT_WEAPON = viewmodel modelindex");
+        assert_eq!(c.health, 86);
+        assert_eq!(c.ammo, 25);
+        assert_eq!((c.shells, c.nails, c.rockets, c.cells), (25, 40, 5, 60));
+        assert_eq!(c.active_weapon, 1, "STAT_ACTIVEWEAPON = wire weapon byte");
+        // The viewheight reached the camera: view entity 1 sits at the origin
+        // (the signon update grew it with a zero baseline), so eye z == 30.
+        let f = demo.frames.last().unwrap();
+        assert_eq!(f.view_origin[2], 30.0, "SU_VIEWHEIGHT drives the camera");
+    }
+
+    #[test]
+    fn svc_clientdata_absent_bits_reset_to_defaults() {
+        // Message 1 sets everything; message 2 (bits == 0) must RESET punch /
+        // velocity / weaponframe / armor / weapon to 0 and viewheight to the
+        // default — the C reassigns every field each message.
+        let mut b1 = Vec::new();
+        w_time(&mut b1, 1.0);
+        write_serverinfo(&mut b1);
+        write_signon_update(&mut b1);
+        write_full_clientdata(&mut b1);
+
+        let mut b2 = Vec::new();
+        w_time(&mut b2, 1.1);
+        w_byte(&mut b2, SVC_CLIENTDATA);
+        w_short(&mut b2, 0); // no optional bits
+        w_long(&mut b2, 0); // items (always)
+        w_short(&mut b2, 100); // health (always)
+        w_byte(&mut b2, 0); // ammo
+        for _ in 0..4 {
+            w_byte(&mut b2, 0); // shells..cells
+        }
+        w_byte(&mut b2, 0); // active weapon
+
+        let mut file = Vec::new();
+        file.extend_from_slice(b"-1\n");
+        push_block(&mut file, [0.0; 3], &b1);
+        push_block(&mut file, [0.0; 3], &b2);
+
+        let demo = parse_demo(&file).expect("parse");
+        let c = demo.frames.last().expect("a frame").client;
+        assert_eq!(c.punchangle, [0.0; 3], "absent SU_PUNCH* resets to 0");
+        assert_eq!(c.weaponframe, 0);
+        assert_eq!(c.armor, 0);
+        assert_eq!(c.weapon_model, 0);
+        assert_eq!(c.health, 100);
+        assert!(!c.onground && !c.inwater);
+        // mvelocity[0] reset to 0; the keyframe (frac == 1) shows the new
+        // snapshot even though mvelocity[1] kept the previous value.
+        assert_eq!(c.velocity, [0.0; 3], "frac == 1 -> newest velocity");
+        let f = demo.frames.last().unwrap();
+        assert_eq!(f.view_origin[2], DEFAULT_VIEWHEIGHT, "viewheight reset");
+    }
+
+    #[test]
+    fn svc_damage_decodes_armor_blood_and_direction() {
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        write_signon_update(&mut msg);
+        w_byte(&mut msg, SVC_DAMAGE);
+        w_byte(&mut msg, 6); // armor
+        w_byte(&mut msg, 14); // blood
+        w_coord(&mut msg, 64.0);
+        w_coord(&mut msg, -32.0);
+        w_coord(&mut msg, 8.0);
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        assert_eq!(
+            frame.damage,
+            vec![DamageEvent { armor: 6, blood: 14, from: [64.0, -32.0, 8.0] }]
+        );
+    }
+
+    #[test]
+    fn svc_print_and_centerprint_surface_on_the_frame() {
+        // Pickup messages arrive as several svc_print fragments; the frame
+        // records them in order (the front-end joins on '\n' like Con_Print).
+        let mut msg = Vec::new();
+        write_serverinfo(&mut msg);
+        write_signon_update(&mut msg);
+        for s in ["You got the ", "shells", "\n"] {
+            w_byte(&mut msg, SVC_PRINT);
+            w_string(&mut msg, s);
+        }
+        w_byte(&mut msg, SVC_CENTERPRINT);
+        w_string(&mut msg, "You need the gold key");
+
+        let file = demo_with_message(&msg);
+        let demo = parse_demo(&file).expect("parse");
+        let frame = demo.frames.last().expect("a frame");
+        assert_eq!(frame.prints, vec!["You got the ", "shells", "\n"]);
+        assert_eq!(frame.centerprints, vec!["You need the gold key"]);
+    }
+
+    #[test]
+    fn no_frames_emit_before_the_first_entity_update() {
+        // Three signon-style blocks (serverinfo, baselines + stray events — no
+        // fast-update anywhere) followed by one gameplay block with the first
+        // update: only the gameplay block emits a frame, and pre-signon effect
+        // events never leak into it. This is the C's loading-plaque hold
+        // (drawing starts at the first update = final signon stage), which
+        // kills the recorded demos' void-camera intro frames.
+        let mut b1 = Vec::new();
+        w_time(&mut b1, 1.0);
+        write_serverinfo(&mut b1);
+        let mut b2 = Vec::new();
+        w_baseline(&mut b2, 2, 5);
+        // A stray signon-block sound + print must NOT leak into frame 0.
+        w_byte(&mut b2, SVC_SOUND);
+        w_byte(&mut b2, 0);
+        w_short(&mut b2, 8);
+        w_byte(&mut b2, 0);
+        w_coord(&mut b2, 0.0);
+        w_coord(&mut b2, 0.0);
+        w_coord(&mut b2, 0.0);
+        w_byte(&mut b2, SVC_PRINT);
+        w_string(&mut b2, "VERSION 1.07 SERVER");
+        let mut b3 = Vec::new();
+        w_time(&mut b3, 1.4);
+        w_update(&mut b3, 2, [10.0, 0.0, 0.0], 0.0, 0);
+
+        let mut file = Vec::new();
+        file.extend_from_slice(b"-1\n");
+        push_block(&mut file, [0.0; 3], &b1);
+        push_block(&mut file, [0.0; 3], &b2);
+        push_block(&mut file, [9.0, 99.0, 0.0], &b3);
+
+        let demo = parse_demo(&file).expect("parse");
+        assert_eq!(demo.frames.len(), 1, "only the post-signon block emits");
+        let f = &demo.frames[0];
+        assert_eq!(f.time, 1.4, "playback starts at the first update's time");
+        assert!(f.sounds.is_empty(), "signon sound events do not leak");
+        assert!(f.prints.is_empty(), "signon prints do not leak (Con_ClearNotify)");
+        assert!(
+            f.entities.iter().any(|e| e.modelindex == 5),
+            "the first update's entity renders"
+        );
     }
 }

@@ -916,6 +916,52 @@ fn lightstyle_letter_value(ch: u8) -> f32 {
     v as f32 * 22.0
 }
 
+/// `R_AnimateLight` (r_light.c) over an arbitrary style table: the per-style
+/// brightness scale at game `time`, one entry per [`MAX_LIGHTSTYLES`] index.
+/// Shared by [`Server::lightstyle_scales`] (the live walk's `sv.lightstyles`)
+/// and demo playback (the RECORDED `svc_lightstyle` table a `.dem` carries),
+/// so both paths animate through the identical 10 Hz logic.
+///
+/// `styles` shorter than [`MAX_LIGHTSTYLES`] treats the missing tail as unset
+/// (scale `1.0`), so a demo-frame table can be passed directly.
+///
+/// For style `j` with pattern string of length `L`:
+/// * `L == 0` (unset) → scale `1.0` (the C `d_lightstylevalue = 256`, i.e.
+///   "normal"). Treating a missing style as normal keeps faces that reference
+///   an unset style at full brightness rather than going dark.
+/// * else the string animates at 10 chars/sec: `k = floor(time*10) mod L`,
+///   `ch = string[k]`, and the C `d_lightstylevalue[j] = (ch - 'a') * 22`
+///   (so `'a'` → 0 = dark, `'m'` → 264 = normal, `'z'` → 550 ≈ double-bright).
+pub fn lightstyle_scales_at(styles: &[String], time: f32) -> [f32; MAX_LIGHTSTYLES] {
+    // Normalise by 256 — id's white point — NOT by 'm' (264). R_AnimateLight
+    // sets d_lightstylevalue[j] = (letter-'a')*22 (so worldspawn's lightstyle
+    // (0,"m") gives style 0 = 264), and R_BuildLightMap renders luxel*scale
+    // against the constant 255*256 white point. So a steady 'm' world is
+    // luxel*264/256 = 1.03125x — slightly brighter than a literal luxel*256.
+    // Normalising by 'm' (264) made style 0 exactly 1.0, rendering the entire
+    // static-lit world ~1 colormap row too dark; /256 matches id. An UNSET style
+    // still maps to 1.0 below (R_AnimateLight's length==0 default of 256).
+    const NORMAL: f32 = 256.0;
+    // Animation phase in characters; floor(time*10), guarded against a
+    // non-finite/huge time so the modulo index never overflows or panics.
+    let phase: i64 = if time.is_finite() {
+        (time * 10.0).floor() as i64
+    } else {
+        0
+    };
+    std::array::from_fn(|j| {
+        let s = styles.get(j).map(|s| s.as_bytes()).unwrap_or(b"");
+        if s.is_empty() {
+            return 1.0; // unset style -> normal (256/264 ~ never; treat as 1.0)
+        }
+        let len = s.len() as i64;
+        // Positive modulo: ((phase % len) + len) % len keeps k in 0..len even
+        // for a negative phase (a time before 0).
+        let k = (((phase % len) + len) % len) as usize;
+        lightstyle_letter_value(s[k]) / NORMAL
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Sound-event queue (PF_sound / PF_ambientsound).
 //
@@ -2275,33 +2321,9 @@ impl Server {
     /// whole static-lit world ~1 colormap row too dark). An UNSET style still maps
     /// to `1.0` (R_AnimateLight's `length == 0` default of 256).
     pub fn lightstyle_scales(&self, time: f32) -> [f32; MAX_LIGHTSTYLES] {
-        // Normalise by 256 — id's white point — NOT by 'm' (264). R_AnimateLight
-        // sets d_lightstylevalue[j] = (letter-'a')*22 (so worldspawn's lightstyle
-        // (0,"m") gives style 0 = 264), and R_BuildLightMap renders luxel*scale
-        // against the constant 255*256 white point. So a steady 'm' world is
-        // luxel*264/256 = 1.03125x — slightly brighter than a literal luxel*256.
-        // Normalising by 'm' (264) made style 0 exactly 1.0, rendering the entire
-        // static-lit world ~1 colormap row too dark; /256 matches id. An UNSET style
-        // still maps to 1.0 below (R_AnimateLight's length==0 default of 256).
-        const NORMAL: f32 = 256.0;
-        // Animation phase in characters; floor(time*10), guarded against a
-        // non-finite/huge time so the modulo index never overflows or panics.
-        let phase: i64 = if time.is_finite() {
-            (time * 10.0).floor() as i64
-        } else {
-            0
-        };
-        std::array::from_fn(|j| {
-            let s = self.lightstyles[j].as_bytes();
-            if s.is_empty() {
-                return 1.0; // unset style -> normal (256/264 ~ never; treat as 1.0)
-            }
-            let len = s.len() as i64;
-            // Positive modulo: ((phase % len) + len) % len keeps k in 0..len even
-            // for a negative phase (a time before 0).
-            let k = (((phase % len) + len) % len) as usize;
-            lightstyle_letter_value(s[k]) / NORMAL
-        })
+        // Delegates to the shared table-driven helper so demo playback (the
+        // recorded svc_lightstyle table) animates through the IDENTICAL logic.
+        lightstyle_scales_at(&self.lightstyles, time)
     }
 
     /// The number of live (not-free) edicts, including the world (edict 0).
