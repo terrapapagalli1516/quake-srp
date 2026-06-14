@@ -2964,6 +2964,28 @@ pub extern "C" fn save_comment_ptr() -> *const u8 {
     SAVE_COMMENT.with(|c| c.borrow().as_ptr())
 }
 
+/// MERGE SEAM (Load/Save menu <- localStorage): assign menu slot `slot`'s
+/// comment from the savegame text the page just placed in the scratch via
+/// [`sav_alloc`] (one stored `.sav` per call). An empty/absent/unparseable
+/// buffer marks the slot unused (`"--- UNUSED SLOT ---"` in M_Load_Draw).
+/// The page refreshes all 12 slots at boot and after every persisted save,
+/// so the menu's listings always mirror what localStorage actually holds.
+#[no_mangle]
+pub extern "C" fn menu_set_save_comment(slot: i32) {
+    let Ok(slot) = usize::try_from(slot) else { return };
+    let bytes = SAV_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    let comment = if bytes.is_empty() {
+        String::new()
+    } else {
+        let text = String::from_utf8_lossy(&bytes);
+        match quake_rs::save::parse_savegame(&text) {
+            Ok(sg) => quake_rs::save::comment_for_display(&sg.comment),
+            Err(_) => String::new(),
+        }
+    };
+    ensure_app(|a| a.menu.set_save_comment(slot, comment.clone()));
+}
+
 /// `COM_DefaultExtension` (common.c): append `ext` unless the last path
 /// component already carries a `.` extension.
 fn default_extension(path: &str, ext: &str) -> String {

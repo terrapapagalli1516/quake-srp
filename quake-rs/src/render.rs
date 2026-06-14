@@ -7226,6 +7226,15 @@ impl Menu {
         self.save_comments = comments;
     }
 
+    /// Set one slot's comment (the host refreshes slots individually as the
+    /// page reads each stored savegame out of localStorage). Out-of-range is
+    /// ignored; an empty string marks the slot unused.
+    pub fn set_save_comment(&mut self, i: usize, comment: String) {
+        if let Some(c) = self.save_comments.get_mut(i) {
+            *c = comment;
+        }
+    }
+
     /// The comment for save slot `i` (empty = unused). Out-of-range is empty.
     pub fn save_comment(&self, i: usize) -> &str {
         self.save_comments.get(i).map(String::as_str).unwrap_or("")

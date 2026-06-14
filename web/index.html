@@ -1036,6 +1036,31 @@ const savEncoder = new TextEncoder();
 // Persist every save the engine queued this frame. poll_save() pops one into
 // linear memory and returns its text length (0 = none); a localStorage failure
 // (quota/private mode) is reported back so the console shows an error.
+// MERGE SEAM (Load/Save menu <- localStorage): the menu's 12 slot listings
+// mirror localStorage. For each console-slot key s0..s11, hand the stored
+// .sav text to the engine (sav_alloc scratch) and let menu_set_save_comment
+// extract + assign the comment; absent/blocked slots are marked unused with
+// an empty buffer. Runs at boot and after every persisted save.
+function refreshSaveComments() {
+  if (!exp || typeof exp.menu_set_save_comment !== 'function'
+           || typeof exp.sav_alloc !== 'function') return;
+  for (let i = 0; i < 12; i++) {
+    let text = null;
+    try { text = localStorage.getItem(SAVE_PREFIX + 's' + i + '.sav'); } catch (e) {}
+    if (text !== null) {
+      const bytes = savEncoder.encode(text);
+      const ptr = exp.sav_alloc(bytes.length);
+      if (ptr) {
+        new Uint8Array(exp.memory.buffer, ptr, bytes.length).set(bytes);
+        exp.menu_set_save_comment(i);
+        continue;
+      }
+    }
+    exp.sav_alloc(0);              // empty scratch = unused slot
+    exp.menu_set_save_comment(i);
+  }
+}
+
 function drainSaves() {
   if (!exp || typeof exp.poll_save !== 'function') return;
   for (let guard = 0; guard < 4; guard++) {
@@ -1047,6 +1072,7 @@ function drainSaves() {
       new Uint8Array(exp.memory.buffer, exp.save_text_ptr(), len));
     try {
       localStorage.setItem(SAVE_PREFIX + name, text);
+      refreshSaveComments();   // the Load/Save menu listings mirror storage
     } catch (e) {
       if (typeof exp.save_store_failed === 'function') exp.save_store_failed();
     }

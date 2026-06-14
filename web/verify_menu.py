@@ -74,6 +74,13 @@ with sync_playwright() as p:
     }""")
     time.sleep(0.4)
 
+    # 0. First-gesture overlay (merged webui-input behavior): the click-to-play
+    #    scrim is up at boot and would consume the first Enter/Space as the
+    #    start gesture. Dismiss it with a click so the keys below drive the
+    #    MENU, like a player who already started.
+    pg.evaluate("document.getElementById('overlay').click()")
+    time.sleep(0.4)
+
     # 1. Attract boot: the menu is open over the demo; arrows queue menu1.
     check("attract boot lands in the menu", vis() == 1 and scr() == MAIN)
     snd0 = pg.evaluate("window.__menuSounds")
