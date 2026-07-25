@@ -7124,6 +7124,8 @@ pub struct Menu {
     bgm_volume: f32,
     /// `cl_forwardspeed > 200` (Always Run). LIVE: the host swaps
     /// cl_forwardspeed/cl_backspeed 200 <-> 400 on it (M_AdjustSliders case 8).
+    /// DEVIATION: defaults ON in this port (id's default.cfg leaves
+    /// cl_forwardspeed at 200, i.e. off) — nobody wants to walk.
     always_run: bool,
     /// `m_pitch < 0` (Invert Mouse). LIVE: the host flips the mouse-pitch sign
     /// (in_win.c IN_MouseMove: `cl.viewangles[PITCH] += m_pitch.value * mouse_y`).
@@ -7170,7 +7172,8 @@ impl Default for Menu {
 
 impl Menu {
     /// A closed menu sitting on the main screen with the cursor on the first item,
-    /// with the Options cvars at their id defaults.
+    /// with the Options cvars at their id defaults — except Always Run, which
+    /// this port defaults ON (see the field's DEVIATION note).
     pub fn new() -> Menu {
         Menu {
             visible: false,
@@ -7181,7 +7184,7 @@ impl Menu {
             volume: VOLUME_DEFAULT,
             gamma: GAMMA_DEFAULT,
             bgm_volume: BGM_DEFAULT,
-            always_run: false,
+            always_run: true,
             invert_mouse: false,
             lookspring: false,
             lookstrafe: false,
@@ -7774,17 +7777,19 @@ impl Menu {
         }
     }
 
-    /// Reset every Options cvar to its id default (`exec default.cfg`). The render
-    /// resolution preset is left to the host (the framebuffer is its own source of
-    /// truth), matching how a `default.cfg` would not change the live mode here.
-    /// The key bindings reset too — the C's `default.cfg` is mostly `bind` lines,
-    /// re-executed wholesale by this row.
+    /// Reset every Options cvar to its *port* default (`exec default.cfg`) — id's
+    /// values everywhere except Always Run, which resets to ON (this port's
+    /// default; see the field's DEVIATION note). The render resolution preset is
+    /// left to the host (the framebuffer is its own source of truth), matching
+    /// how a `default.cfg` would not change the live mode here. The key bindings
+    /// reset too — the C's `default.cfg` is mostly `bind` lines, re-executed
+    /// wholesale by this row.
     pub fn reset_defaults(&mut self) {
         self.sensitivity = SENS_DEFAULT;
         self.volume = VOLUME_DEFAULT;
         self.gamma = GAMMA_DEFAULT;
         self.bgm_volume = BGM_DEFAULT;
-        self.always_run = false;
+        self.always_run = true;
         self.invert_mouse = false;
         self.lookspring = false;
         self.lookstrafe = false;
@@ -13660,19 +13665,20 @@ mod tests {
         }
         assert!((m.bgm_volume() - BGM_MAX).abs() < 1e-6);
 
-        // Checkboxes toggle regardless of direction (matches the C).
-        for (row, getter) in [
-            (ROW_ALWAYSRUN, Menu::always_run as fn(&Menu) -> bool),
-            (ROW_INVERTMOUSE, Menu::invert_mouse),
-            (ROW_LOOKSPRING, Menu::lookspring),
-            (ROW_LOOKSTRAFE, Menu::lookstrafe),
+        // Checkboxes toggle regardless of direction (matches the C). Always Run
+        // starts ON (this port's default); the rest start off.
+        for (row, getter, initial) in [
+            (ROW_ALWAYSRUN, Menu::always_run as fn(&Menu) -> bool, true),
+            (ROW_INVERTMOUSE, Menu::invert_mouse, false),
+            (ROW_LOOKSPRING, Menu::lookspring, false),
+            (ROW_LOOKSTRAFE, Menu::lookstrafe, false),
         ] {
             m.cursor = row;
-            assert!(!getter(&m), "checkbox row {row} starts off");
+            assert_eq!(getter(&m), initial, "checkbox row {row} starts at its default");
             assert!(!m.adjust(1), "a checkbox never reports a resolution change");
-            assert!(getter(&m), "right toggles it on");
+            assert_eq!(getter(&m), !initial, "right toggles it");
             m.adjust(-1);
-            assert!(!getter(&m), "left toggles it back off");
+            assert_eq!(getter(&m), initial, "left toggles it back");
         }
     }
 
@@ -13696,12 +13702,12 @@ mod tests {
         m.adjust(1);
         m.adjust(1);
         m.cursor = ROW_ALWAYSRUN;
-        m.adjust(1);
-        assert!(m.sensitivity() != SENS_DEFAULT && m.always_run());
+        m.adjust(1); // toggles OFF (Always Run defaults on in this port)
+        assert!(m.sensitivity() != SENS_DEFAULT && !m.always_run());
         m.cursor = ROW_DEFAULTS;
         assert_eq!(m.select(), MenuAction::ResetDefaults);
         assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "defaults restored");
-        assert!(!m.always_run(), "checkboxes reset to off");
+        assert!(m.always_run(), "Always Run resets to ON (the port default)");
 
         // Customize controls opens the Keys screen (M_Menu_Keys_f); Escape
         // returns to Options (M_Keys_Key K_ESCAPE -> M_Menu_Options_f).
@@ -14051,7 +14057,7 @@ mod tests {
         m.adjust(-1); // bgmvolume 1.0 -> 0.9
         for row in [ROW_ALWAYSRUN, ROW_INVERTMOUSE, ROW_LOOKSPRING, ROW_LOOKSTRAFE] {
             m.cursor = row;
-            m.adjust(1); // toggles flip regardless of direction
+            m.adjust(1); // toggles flip regardless of direction (Always Run: on -> OFF)
         }
         // Rebind through the real grab path: Options > Customize controls,
         // Enter on "jump / swim up" (one key bound — no unbind-first), 'j'.
@@ -14083,7 +14089,7 @@ mod tests {
         assert!((m.sensitivity() - 3.5).abs() < 1e-6, "Mouse speed survives");
         assert!((m.volume() - 0.6).abs() < 1e-6, "Sound volume survives");
         assert!((m.bgm_volume() - 0.9).abs() < 1e-6, "CD volume survives");
-        assert!(m.always_run(), "Always Run survives");
+        assert!(!m.always_run(), "Always Run (toggled off its on-default) survives");
         assert!(m.invert_mouse(), "Invert Mouse survives");
         assert!(m.lookspring(), "Lookspring survives");
         assert!(m.lookstrafe(), "Lookstrafe survives");

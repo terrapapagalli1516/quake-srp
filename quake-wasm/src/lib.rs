@@ -66,6 +66,8 @@ const SPEED: f32 = 320.0;
 /// `cl_forwardspeed`/`cl_backspeed` ("200"): the walking forward/back rate. The
 /// Options "Always Run" toggle swaps them 200 <-> 400 (menu.c M_AdjustSliders
 /// case 8); the C sets both cvars to the same value there, so one pair suffices.
+/// Always Run defaults ON in this port (Menu's DEVIATION note), so the
+/// out-of-the-box rate is the 400 run (320 effective under sv_maxspeed).
 const CL_FORWARDSPEED_WALK: f32 = 200.0;
 const CL_FORWARDSPEED_RUN: f32 = 400.0;
 /// `cl_sidespeed` ("350"): the strafe rate — NOT changed by Always Run.
@@ -5387,7 +5389,7 @@ mod tests {
         for _ in 0..4 {
             menu_down();
         }
-        menu_right(); // Always Run row: toggle on
+        menu_right(); // Always Run row: toggle OFF (this port defaults it on)
         for _ in 0..8 {
             menu_up();
         }
@@ -5400,7 +5402,7 @@ mod tests {
             let b = c.borrow();
             let m = &b.as_ref().unwrap().menu;
             assert!((m.gamma() - 0.95).abs() < 1e-6, "gamma set through the menu");
-            assert!(m.always_run(), "Always Run set through the menu");
+            assert!(!m.always_run(), "Always Run toggled off through the menu");
             assert_eq!(m.action_for_key(b'j'), Some(render::BIND_JUMP), "rebound");
         });
 
@@ -5414,7 +5416,7 @@ mod tests {
             assert_eq!(m.screen(), render::MenuScreen::Main, "navigation reset");
             assert_eq!(m.cursor(), 0, "cursor reset");
             assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives re-boot");
-            assert!(m.always_run(), "Always Run survives re-boot");
+            assert!(!m.always_run(), "Always Run (toggled off) survives re-boot");
             assert_eq!(
                 m.action_for_key(b'j'),
                 Some(render::BIND_JUMP),
@@ -5430,21 +5432,22 @@ mod tests {
             let b = c.borrow();
             let m = &b.as_ref().unwrap().menu;
             assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives New Game");
-            assert!(m.always_run(), "Always Run survives New Game");
+            assert!(!m.always_run(), "Always Run (toggled off) survives New Game");
             assert_eq!(
                 m.action_for_key(b'j'),
                 Some(render::BIND_JUMP),
                 "key rebind survives New Game"
             );
         });
-        // And the surviving choice is LIVE in the fresh walk: Always Run runs
-        // +forward at cl_forwardspeed 400 (the 200<->400 swap), not 200.
+        // And the surviving choice is LIVE in the fresh walk: with Always Run
+        // toggled off, +forward walks at cl_forwardspeed 200 (the 200<->400
+        // swap), not the on-by-default 400.
         key_down(i32::from(b'w'));
         step(0.05);
         assert_eq!(
             walk_mut(|w| w.key_move.fwd),
-            400.0,
-            "Always Run drives the new walk at 400"
+            200.0,
+            "Always Run off drives the new walk at 200"
         );
         key_up(i32::from(b'w'));
     }
@@ -7672,32 +7675,19 @@ mod tests {
         assert_eq!(boot(), 1);
         close_menu();
 
-        // Default binding: w = +forward at cl_forwardspeed 200.
+        // Default binding: w = +forward at cl_forwardspeed 400 — Always Run
+        // defaults ON in this port (Menu's DEVIATION note).
         key_down(i32::from(b'w'));
         step(0.05);
-        let fwd_walk = walk_mut(|w| w.key_move.fwd);
-        assert_eq!(fwd_walk, 200.0, "+forward walks at cl_forwardspeed 200");
+        let fwd_run = walk_mut(|w| w.key_move.fwd);
+        assert_eq!(fwd_run, 400.0, "+forward runs at cl_forwardspeed 400 (Always Run default)");
 
         // Hold +speed (Shift, default.cfg): cl_movespeedkey doubles it.
         key_down(134); // K_SHIFT
         step(0.05);
-        assert_eq!(walk_mut(|w| w.key_move.fwd), 400.0, "+speed doubles via cl_movespeedkey");
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 800.0, "+speed doubles via cl_movespeedkey");
         key_up(134);
 
-        // Always Run (Options row 8) swaps cl_forwardspeed to 400.
-        menu_cancel(); // open the menu
-        menu_down();
-        menu_down();
-        menu_select(); // -> Options (Main cursor 2)
-        for _ in 0..8 {
-            menu_down(); // ROW_ALWAYSRUN (M_AdjustSliders case 8)
-        }
-        menu_right(); // toggle on
-        menu_cancel(); // Options -> Main
-        menu_cancel(); // Main -> closed
-        assert_eq!(menu_visible(), 0);
-        step(0.05);
-        assert_eq!(walk_mut(|w| w.key_move.fwd), 400.0, "Always Run raises the walk to 400");
         // The player really moves (the server clamps wishspeed to sv_maxspeed
         // 320, so 400 is 320 effective — exactly WinQuake's run).
         let (x0, y0) = (listener_x(), listener_y());
@@ -7706,6 +7696,25 @@ mod tests {
         }
         let dist = ((listener_x() - x0).powi(2) + (listener_y() - y0).powi(2)).sqrt();
         assert!(dist > 100.0, "held +forward displaces the player (moved {dist:.1}u)");
+
+        // Always Run (Options row 8) swaps cl_forwardspeed 400 -> 200.
+        menu_cancel(); // open the menu
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options (Main cursor 2)
+        for _ in 0..8 {
+            menu_down(); // ROW_ALWAYSRUN (M_AdjustSliders case 8)
+        }
+        menu_right(); // toggle OFF
+        menu_cancel(); // Options -> Main
+        menu_cancel(); // Main -> closed
+        assert_eq!(menu_visible(), 0);
+        step(0.05);
+        assert_eq!(
+            walk_mut(|w| w.key_move.fwd),
+            200.0,
+            "toggling Always Run off drops the walk to 200"
+        );
 
         // Releasing the key stops the contribution.
         key_up(i32::from(b'w'));
@@ -7905,7 +7914,8 @@ mod tests {
         // The new key drives +forward; the old one no longer does.
         key_down(i32::from(b'o'));
         step(0.05);
-        assert_eq!(walk_mut(|w| w.key_move.fwd), 200.0, "rebound key walks forward");
+        // (400: Always Run defaults on, so +forward moves at the run speed.)
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 400.0, "rebound key moves forward");
         key_up(i32::from(b'o'));
         key_down(i32::from(b'w'));
         step(0.05);
