@@ -14,7 +14,8 @@
 //! | sim      | walk: `SV_Physics` tick + client-side drains/effects/entity list;  |
 //! |          | demo: `CL_ReadFromServer` frame advance + effects + entity list    |
 //! | render3d | `R_RenderView` (`render_scene_ext_sprited`), split further by the  |
-//! |          | engine's `RenderStats` into world/submodel/external/alias/…        |
+//! |          | engine's `RenderStats` into world/submodel/external/alias/… and    |
+//! |          | the world pass into pvs/sort/setup(+raster)/light/surf             |
 //! | post3d   | `D_WarpScreen` + the `V_CalcBlend` bookkeeping                     |
 //! | hud2d    | `Sbar_Draw` / intermission overlays + centerprint/notify           |
 //! | menu     | `M_Draw`                                                           |
@@ -73,8 +74,9 @@ mod imp {
     /// engine's render phases (ms), then the render counters.
     pub(super) const NAMES: &str = "input,sim,render3d,post3d,hud2d,menu,console,blend,pack,\
 world,submodel,external,alias,particle,sprite,viewmodel,\
+world_pvs,world_sort,world_setup,world_light,world_surf,\
 faces_pvs_culled,faces_frustum_culled,faces_drawn,world_tris,world_px,surf_hits,surf_misses,\
-sub_faces_drawn,sub_lm_builds";
+surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds";
 
     #[cfg(target_arch = "wasm32")]
     #[link(wasm_import_module = "quake_bench")]
@@ -173,6 +175,11 @@ sub_faces_drawn,sub_lm_builds";
                 ms(s.particle_ns),
                 ms(s.sprite_ns),
                 ms(s.viewmodel_ns),
+                ms(s.world_pvs_ns),
+                ms(s.world_sort_ns),
+                ms(s.world_setup_ns),
+                ms(s.world_light_ns),
+                ms(s.world_surf_ns),
                 s.faces_pvs_culled as f64,
                 s.faces_frustum_culled as f64,
                 s.faces_drawn as f64,
@@ -180,6 +187,8 @@ sub_faces_drawn,sub_lm_builds";
                 s.world_pixels as f64,
                 s.surf_hits as f64,
                 s.surf_misses as f64,
+                s.surf_baked as f64,
+                s.surf_bypass_baked as f64,
                 s.sub_faces_drawn as f64,
                 s.sub_lm_builds as f64,
             ];
@@ -194,6 +203,7 @@ sub_faces_drawn,sub_lm_builds";
 ///
 /// `cargo test --release --features bench --lib -- --ignored --nocapture native_bench`
 /// Knobs (env): `QUAKE_BENCH_WORKLOADS` (comma list, default `demo1,walk_e1m1`),
+/// (`walk_<map>` / `fire_<map>` = the scripted live walk, `fire_` with +attack held),
 /// `QUAKE_BENCH_RES` (comma list of WxH, default `320x200,640x400,1280x800`),
 /// `QUAKE_BENCH_FRAMES` (default 600), `QUAKE_BENCH_WARMUP` (default 60).
 /// Prints one `BENCHJSON {...}` line per (workload, resolution) with per-frame
@@ -227,7 +237,7 @@ mod native {
         match workload {
             "attract" => boot_attract() == 1,
             "demo1" => boot_demo() == 1,
-            w if w.starts_with("walk_") => {
+            w if w.starts_with("walk_") || w.starts_with("fire_") => {
                 let map = &w["walk_".len()..];
                 if boot() != 1 {
                     return false;
@@ -274,10 +284,11 @@ mod native {
                 bench_enable(1);
                 let mut cols: Vec<Vec<f64>> = vec![Vec::new(); names.len() + 1];
                 for f in 0..warmup + frames {
-                    if wl.starts_with("walk_") {
+                    if wl.starts_with("walk_") || wl.starts_with("fire_") {
                         let (fwd, turn) = walk_input(f);
                         set_move(fwd, 0.0);
                         look(-turn, 0.0);
+                        set_attack(wl.starts_with("fire_") as i32);
                     }
                     let t0 = std::time::Instant::now();
                     step(DT);

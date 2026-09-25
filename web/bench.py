@@ -23,6 +23,7 @@ phase gets a wasm/native ratio. Workloads (all at dt = 1/72):
   demo1      boot_demo(): id's recorded e1m3 run, menu closed
   walk_e1m1  boot() + Esc: live server, scripted look-around + run (walkInput below)
   walk_e1m3  as walk_e1m1 after the console's `map e1m3` (the dense-sim map)
+  fire_e1m1  walk_e1m1 with +attack held (muzzle-flash dynamic lights every shot)
 
 Usage:
   uv run web/bench.py --build                 # build the bench wasm, run the default set
@@ -164,7 +165,7 @@ INIT_JS = r"""
   function startWorkload(e, wl) {
     if (wl === 'attract') return e.boot_attract() === 1;
     if (wl === 'demo1') return e.boot_demo() === 1;
-    if (wl.startsWith('walk_')) {
+    if (wl.startsWith('walk_') || wl.startsWith('fire_')) {
       const map = wl.slice(5);
       if (e.boot() !== 1) return false;
       if (map !== 'e1m1') {
@@ -209,9 +210,10 @@ INIT_JS = r"""
     let f = 0, last = -1;
     await new Promise(resolve => {
       function tick(ts) {
-        if (cfg.workload.startsWith('walk_')) {
+        if (cfg.workload.startsWith('walk_') || cfg.workload.startsWith('fire_')) {
           const [fwd, turn] = walkInput(f);
           e.set_move(fwd, 0); e.look(-turn, 0);
+          e.set_attack(cfg.workload.startsWith('fire_') ? 1 : 0);
         }
         const t0 = performance.now();
         e.step(cfg.dt);
@@ -394,10 +396,14 @@ if args.native:
 results["load_after"] = open("/proc/loadavg").read().split()[:3] if os.path.exists("/proc/loadavg") else []
 
 # --- report -------------------------------------------------------------------
-ROWS = ["step", "input", "sim", "render3d", "world", "submodel", "external", "alias", "particle",
-        "sprite", "viewmodel", "post3d", "hud2d", "menu", "console", "blend", "pack",
-        "copy", "put", "js", "raf"]
-COUNTERS = ["faces_pvs_culled", "faces_frustum_culled", "faces_drawn", "world_tris", "world_px", "surf_hits", "surf_misses", "sub_faces_drawn"]
+ROWS = ["step", "input", "sim", "render3d", "world", " pvs", " sort", " setup", " light",
+        " surf", "submodel", "external", "alias", "particle", "sprite", "viewmodel", "post3d",
+        "hud2d", "menu", "console", "blend", "pack", "copy", "put", "js", "raf"]
+# Indented rows are world-pass sub-phases (" setup" includes the raster itself).
+SUBKEY = {" pvs": "world_pvs", " sort": "world_sort", " setup": "world_setup",
+          " light": "world_light", " surf": "world_surf"}
+COUNTERS = ["faces_pvs_culled", "faces_frustum_culled", "faces_drawn", "world_tris", "world_px",
+            "surf_hits", "surf_misses", "surf_rebakes", "surf_bypass_bakes", "sub_faces_drawn"]
 print(f"\nquake-rust browser bench — {len(wasm_bytes) / 1048576:.1f} MB wasm, frames={args.frames} "
       f"warmup={args.warmup}, dt=1/72, load {' '.join(results['load_before'])} -> "
       f"{' '.join(results['load_after'])}")
@@ -413,12 +419,13 @@ for wl in workloads:
     head = f"\n{wl:<11}" + "".join(f"| {r['w']}x{r['h']:<5} med   p95  nat  x " for r in runs)
     print(head)
     for row in ROWS:
-        if not any(row in r["cols"] for r in runs):
+        key = SUBKEY.get(row, row)
+        if not any(key in r["cols"] for r in runs):
             continue
         line = f"  {row:<9}"
         for r in runs:
-            xs = r["cols"].get(row, [])
-            nat = native_by.get((wl, r["w"], r["h"]), {}).get(row)
+            xs = r["cols"].get(key, [])
+            nat = native_by.get((wl, r["w"], r["h"]), {}).get(key)
             nm = med(nat) if nat else float("nan")
             m = med(xs)
             ratio = m / nm if nm and nm > 0.005 else float("nan")
