@@ -7,7 +7,7 @@
 use crate::menu::{
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
     BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_RIGHT,
-    BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
+    BIND_IMPULSE_0, BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
 };
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
@@ -100,6 +100,11 @@ pub(crate) fn default_bindings() -> [Option<u8>; 256] {
     bind(K_RIGHTARROW, BIND_RIGHT);
     bind(K_SPACE, BIND_JUMP);
     bind(K_TAB, BIND_SHOWSCORES);
+    // bind 1 "impulse 1" .. bind 8 "impulse 8", bind 0 "impulse 0" — by key
+    // NUMBER, so the digit row selects weapons whatever Shift or the layout.
+    for n in 0..=8u8 {
+        bind(b'0' + n, BIND_IMPULSE_0 + n as usize);
+    }
     bind(b'/', BIND_CHANGEWEAPON);
     bind(K_MOUSE1, BIND_ATTACK);
     // This port's established layout (overrides default.cfg's a=+lookup,
@@ -132,5 +137,14 @@ mod tests {
     #[test]
     fn tab_shows_the_scores_as_in_default_cfg() {
         assert_eq!(default_bindings()[K_TAB as usize], Some(BIND_SHOWSCORES as u8));
+    }
+
+    #[test]
+    fn digits_are_impulses_as_in_default_cfg() {
+        let b = default_bindings();
+        for n in 0..=8u8 {
+            assert_eq!(b[(b'0' + n) as usize], Some((BIND_IMPULSE_0 + n as usize) as u8));
+        }
+        assert_eq!(b[b'9' as usize], None, "default.cfg leaves 9 unbound");
     }
 }

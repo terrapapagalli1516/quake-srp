@@ -3,7 +3,7 @@
 //! (`Key_Event` through the menu's binding table): the key/mouse exports the
 //! page calls and the per-frame [`KeyMove`] the client frame consumes.
 
-use quake_rs::menu::BIND_SHOWSCORES;
+use quake_rs::menu::{BIND_IMPULSE_0, BIND_SHOWSCORES};
 use quake_rs::render::{
     Menu, BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP,
     BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT,
@@ -223,6 +223,13 @@ pub extern "C" fn key_down(keynum: i32) {
             return; // key_dest != key_game: no command dispatch.
         }
         match a.menu.action_for_key(keynum as u8) {
+            // "impulse N" (IN_Impulse: `in_impulse = atoi(argv[1])`), sent with
+            // the next move.
+            Some(c) if (BIND_IMPULSE_0..=BIND_IMPULSE_0 + 8).contains(&c) => {
+                if let Some(w) = a.walk.as_mut() {
+                    w.next_impulse = (c - BIND_IMPULSE_0) as i32;
+                }
+            }
             Some(BIND_CHANGEWEAPON) => {
                 // "impulse 10": queue the next-weapon impulse once, like the
                 // console command (Cbuf -> IN_Impulse).
@@ -426,6 +433,28 @@ mod tests {
             clamp_pitch(75.0) > 70.0 && clamp_pitch(-75.0) == -70.0,
             "down range exceeds 70 while up range does not"
         );
+    }
+
+    /// CENSUS F17: the digit row is `bind N "impulse N"` by key NUMBER (the
+    /// page sends e.code's Digit* keynums, so Shift+2 and AZERTY's unshifted
+    /// row still deliver keynum '2'): impulse 7 selects the rocket launcher.
+    #[test]
+    fn digit_keys_are_impulse_bindings() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.next_impulse = 9); // all weapons + ammo
+        step(0.05);
+        key_down(i32::from(b'7'));
+        key_up(i32::from(b'7'));
+        assert_eq!(walk_mut(|w| w.next_impulse), 7, "'7' queues impulse 7");
+        for _ in 0..3 {
+            step(0.05);
+        }
+        assert_eq!(player_field("weapon") as i32, IT_RL, "impulse 7 selected the launcher");
+        key_down(i32::from(b'0'));
+        assert_eq!(walk_mut(|w| w.next_impulse), 0, "'0' is impulse 0");
+        key_up(i32::from(b'0'));
     }
 
     /// CENSUS F11: Tab is default.cfg's `+showscores` — while it is held the

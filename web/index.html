@@ -403,22 +403,17 @@ addEventListener('keydown', e => {
     if (!e.repeat && k === 'y' && exp.menu_quit_yes) { exp.menu_quit_yes(); e.preventDefault(); return; }
     if (!e.repeat && k === 'n' && exp.menu_quit_no)  { exp.menu_quit_no();  e.preventDefault(); return; }
     // Swallow the other gameplay keys so the world stays idle behind the menu.
-    if (MOVE_KEYS.includes(k) || (k >= '1' && k <= '8')) { e.preventDefault(); return; }
+    if (MOVE_KEYS.includes(k)) { e.preventDefault(); return; }
   }
 
   if (k === 'f') toggleFullscreen();
-  // Weapon select: number keys 1-8 queue the matching QuakeC impulse
-  // (1 axe, 2 shotgun, 3 super shotgun, 4 nailgun, 5 super nailgun,
-  // 6 grenade launcher, 7 rocket launcher, 8 lightning) on the next frame.
-  if (!e.repeat && k >= '1' && k <= '8' && exp && exp.set_impulse) {
-    exp.set_impulse(parseInt(k, 10));
-    e.preventDefault();
-    return;
-  }
   // Every other game key goes to the engine by Quake keynum: the bindings
   // table (keys.c keybindings, editable in Options > Customize controls) turns
   // held keys into +forward/+back/+moveleft/+moveright/+jump/+attack/+speed/
-  // +lookup/+lookdown/turns each frame (CL_BaseMove/CL_AdjustAngles port).
+  // +lookup/+lookdown/turns each frame (CL_BaseMove/CL_AdjustAngles port), and
+  // key presses into commands — the digit row's "impulse 1".."impulse 8"
+  // (weapon select) by physical key (e.code), so Shift+digit and non-US
+  // layouts select weapons too.
   // The !e.repeat gate mirrors Key_Event's autorepeat ignore; held-state
   // movement needs only the first down (keyup clears it).
   const qk = quakeKey(e);

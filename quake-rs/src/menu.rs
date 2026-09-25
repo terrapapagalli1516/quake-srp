@@ -126,6 +126,10 @@ pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
 /// `bind TAB "+showscores"` (default.cfg): `sb_showscores` while held, so
 /// `Sbar_Draw` shows the scorebar and `Sbar_SoloScoreboard`.
 pub const BIND_SHOWSCORES: usize = NUM_BINDNAMES + 2;
+/// `bind 0 "impulse 0"` .. `bind 8 "impulse 8"` (default.cfg): the command
+/// `"impulse N"` is `BIND_IMPULSE_0 + N` for N in 0..=8 (`"impulse 10"` is the
+/// listed [`BIND_CHANGEWEAPON`] row).
+pub const BIND_IMPULSE_0: usize = NUM_BINDNAMES + 3;
 
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A
