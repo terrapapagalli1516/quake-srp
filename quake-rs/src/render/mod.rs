@@ -29,6 +29,9 @@
 use crate::bsp::Bsp;
 use crate::math::{cross, dot, normalize, sub, Vec3};
 
+#[cfg(test)]
+mod fixtures;
+
 // ---------------------------------------------------------------------------
 // Image
 // ---------------------------------------------------------------------------
@@ -10465,6 +10468,13 @@ pub fn draw_console(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dlight::DynamicLight;
+    use crate::render::fixtures::{
+        lightmapped_demo_room, one_face_bsp, one_face_bsp_zplane, ramp_palette, reset_render_caches,
+        solid_conchars, solid_pic, synthetic_liquid_pixels, synthetic_sky_pixels, test_backtile,
+        tiny_mdl, two_style_face_bsp,
+    };
+    use crate::wad::{Qpic, Wad2, CMP_NONE, LUMPINFO_SIZE, NAME_LEN, TYP_QPIC, WADINFO_SIZE};
 
     #[test]
     fn view_bob_is_zero_at_rest_and_oscillates_when_moving() {
@@ -10658,48 +10668,6 @@ mod tests {
         let cam = Camera::looking_at([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 90.0);
         // Must not panic.
         let _img = render_bsp(&bsp, &cam, 80, 60);
-    }
-
-    /// Build a tiny but valid single-skin single-frame MDL whose frame-0
-    /// triangle, after the model->world transform, sits in front of the camera.
-    /// Uses a large `scale` so the decoded vertices span a visible extent.
-    fn tiny_mdl() -> crate::mdl::Mdl {
-        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
-        let header = MdlHeader {
-            ident: i32::from_le_bytes(*b"IDPO"),
-            version: 6,
-            // 1 unit of v -> 1 world unit; origin shifts to centre the box.
-            scale: [1.0, 1.0, 1.0],
-            scale_origin: [-16.0, -16.0, -16.0],
-            boundingradius: 32.0,
-            eyeposition: [0.0, 0.0, 0.0],
-            numskins: 1,
-            skinwidth: 1,
-            skinheight: 1,
-            numverts: 3,
-            numtris: 1,
-            numframes: 1,
-            synctype: 0,
-            flags: 0,
-            size: 1.0,
-        };
-        let verts = vec![
-            TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
-            TriVertex { v: [32, 0, 0], lightnormalindex: 0 },
-            TriVertex { v: [0, 0, 32], lightnormalindex: 0 },
-        ];
-        Mdl {
-            header,
-            skins: vec![Skin::Single(vec![0])],
-            stverts: vec![StVert { onseam: 0, s: 0, t: 0 }; 3],
-            triangles: vec![Triangle { facesfront: 1, vertindex: [0, 1, 2] }],
-            frames: vec![Frame::Single(AliasFrame {
-                name: "f0".into(),
-                bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
-                bboxmax: TriVertex { v: [32, 0, 32], lightnormalindex: 0 },
-                verts,
-            })],
-        }
     }
 
     #[test]
@@ -11192,40 +11160,6 @@ mod tests {
         assert!((lm.factor_at(16.0, 16.0) - 2.0).abs() < 1e-6);
     }
 
-    /// Build a one-face BSP with the given lighting lump, lightofs, and flags,
-    /// plus a 32x32 (=> 3x3 luxel) world polygon.
-    fn one_face_bsp(
-        lighting: Vec<u8>,
-        lightofs: i32,
-        flags: i32,
-    ) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
-        let mut bsp = demo_room();
-        // Replace texinfo[0] with an axis-aligned one and clear textures so the
-        // texinfo lookup in face_lightmap resolves predictably.
-        bsp.texinfo = vec![crate::bsp::TexInfo {
-            vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-            miptex: 0,
-            flags,
-        }];
-        bsp.lighting = lighting;
-        let face = crate::bsp::DFace {
-            planenum: 0,
-            side: 0,
-            firstedge: 0,
-            numedges: 4,
-            texinfo: 0,
-            styles: [0, 0, 0, 0],
-            lightofs,
-        };
-        let poly = vec![
-            [0.0, 0.0, 0.0],
-            [32.0, 0.0, 0.0],
-            [32.0, 32.0, 0.0],
-            [0.0, 32.0, 0.0],
-        ];
-        (bsp, face, poly)
-    }
-
     #[test]
     fn face_lightmap_present() {
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], 0, 0);
@@ -11267,22 +11201,6 @@ mod tests {
     }
 
     // -- Dynamic lights (R_AddDynamicLights) -------------------------------
-
-    use crate::dlight::DynamicLight;
-
-    /// `one_face_bsp` with plane 0 forced to the z=0 surface plane (`normal
-    /// [0,0,1]`, `dist 0`) so a light's distance/impact math is predictable: the
-    /// 3x3-luxel face spans surface `(s,t)` in `0..=32` (texmins 0, axis-aligned
-    /// vecs), so luxel `(i,j)` lives at world `(16i, 16j, 0)`.
-    fn one_face_bsp_zplane(luxel: u8) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
-        let (mut bsp, face, poly) = one_face_bsp(vec![luxel; 9], 0, 0);
-        bsp.planes[0] = crate::bsp::DPlane {
-            normal: [0.0, 0.0, 1.0],
-            dist: 0.0,
-            ptype: 0,
-        };
-        (bsp, face, poly)
-    }
 
     #[test]
     fn dynamic_light_brightens_near_luxel_only() {
@@ -11545,23 +11463,6 @@ mod tests {
     }
 
     // -- Animated light styles (R_BuildLightMap multi-style combine) -------
-
-    /// A z-plane one-face BSP whose face uses two light styles. The LIGHTING
-    /// lump concatenates the two `3x3` luxel blocks: block for `styles[0]` first
-    /// (all `b0`), then `styles[1]` (all `b1`). `styles` are the style indices.
-    fn two_style_face_bsp(
-        styles: [u8; 4],
-        b0: u8,
-        b1: u8,
-    ) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
-        // 9 luxels per block, two blocks concatenated.
-        let mut lighting = vec![b0; 9];
-        lighting.extend(std::iter::repeat(b1).take(9));
-        let (mut bsp, mut face, poly) = one_face_bsp_zplane(b0);
-        bsp.lighting = lighting;
-        face.styles = styles;
-        (bsp, face, poly)
-    }
 
     #[test]
     fn single_steady_style0_neutral_is_static_and_byte_identical() {
@@ -13207,19 +13108,6 @@ mod tests {
         }
     }
 
-    /// Build a synthetic 64x64 "liquid" miptexture: a vivid gradient of palette
-    /// indices so a small change in the sampled (s,t) lands on a different index.
-    fn synthetic_liquid_pixels() -> Vec<u8> {
-        let mut px = vec![0u8; 64 * 64];
-        for y in 0..64usize {
-            for x in 0..64usize {
-                // A non-trivial pattern: index depends on both axes.
-                px[y * 64 + x] = ((x * 4 + y * 7) % 256) as u8;
-            }
-        }
-        px
-    }
-
     #[test]
     fn turbulent_sampler_animates_at_fixed_st() {
         // Drive `raster_triangle_tex` in Turb mode over a single screen-filling
@@ -13414,23 +13302,6 @@ mod tests {
         for p in &drawn {
             assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "turb must store the raw texel, no colormap");
         }
-    }
-
-    /// Build a synthetic 256x128 sky miptexture: the LEFT half (the alpha overlay)
-    /// is index 0 (transparent) in a band and a vivid index elsewhere; the RIGHT
-    /// half (the solid background) is a gradient. So compositing shows the
-    /// background through the transparent overlay band.
-    fn synthetic_sky_pixels() -> Vec<u8> {
-        let mut px = vec![0u8; 256 * 128];
-        for y in 0..128usize {
-            for x in 0..128usize {
-                // Left (overlay) half: transparent (0) in the left third, else 200.
-                px[y * 256 + x] = if x < 42 { 0 } else { 200 };
-                // Right (background) half: a non-zero gradient, never 0.
-                px[y * 256 + (128 + x)] = (1 + ((x + y) % 200)) as u8;
-            }
-        }
-        px
     }
 
     #[test]
@@ -13656,19 +13527,6 @@ mod tests {
     }
 
     // -- HUD / status bar -----------------------------------------------------
-
-    use crate::wad::{Qpic, Wad2, CMP_NONE, LUMPINFO_SIZE, NAME_LEN, TYP_QPIC, WADINFO_SIZE};
-
-    /// A test palette where index `i` maps to the RGB `[i, i, i]` (so a texel's
-    /// palette index is recoverable from any channel of the drawn pixel). Index
-    /// 255 stays the transparent colour and is never blitted.
-    fn ramp_palette() -> [[u8; 3]; 256] {
-        let mut p = [[0u8; 3]; 256];
-        for (i, px) in p.iter_mut().enumerate() {
-            *px = [i as u8, i as u8, i as u8];
-        }
-        p
-    }
 
     /// A test conchars atlas where every glyph texel is the lit index 3 (except
     /// the byte-0 cell, which stays the transparent index 0), so any drawn
@@ -14032,12 +13890,6 @@ mod tests {
         // Per-weapon suffix is correct across the 7 weapons (shotgun..lightng).
         assert_eq!(weapon_flash_name(6, 0.0), "inva1_lightng");
         assert_eq!(weapon_flash_name(4, 0.0), "inva1_rlaunch");
-    }
-
-    /// A 128x128 conchars atlas with EVERY glyph cell solidly filled (index 95),
-    /// so any drawn character paints recognisable pixels.
-    fn solid_conchars() -> Qpic {
-        Qpic { width: 128, height: 128, data: vec![95u8; 128 * 128] }
     }
 
     #[test]
@@ -14583,15 +14435,6 @@ mod tests {
     }
 
     // -- main menu (Menu engine + draw_menu + draw_string) ------------------
-
-    /// A solid `w*h` Qpic filled with palette index `idx`.
-    fn solid_pic(w: i32, h: i32, idx: u8) -> crate::wad::Qpic {
-        crate::wad::Qpic {
-            width: w,
-            height: h,
-            data: vec![idx; (w * h) as usize],
-        }
-    }
 
     #[test]
     fn menu_move_cursor_wraps_within_each_screen() {
@@ -16232,14 +16075,6 @@ mod tests {
 
     // -- Lightmap surface cache --------------------------------------------
 
-    /// Clear both thread-local caches so a test starts from a known state
-    /// (tests share a thread, and a prior test may have populated them).
-    fn reset_render_caches() {
-        GEOM_CACHE.with(|c| *c.borrow_mut() = None);
-        LIGHT_CACHE.with(|c| *c.borrow_mut() = None);
-        SURF_CACHE.with(|c| *c.borrow_mut() = None);
-    }
-
     #[test]
     fn lightmap_cache_returns_bit_identical_luxels_for_same_style_key() {
         reset_render_caches();
@@ -16372,27 +16207,6 @@ mod tests {
             }
             _ => unreachable!(),
         }
-    }
-
-    /// A `demo_room` whose every face is a 2-style lightmapped wall (styles
-    /// `[0, 1]`) pointing into a uniform lighting lump. Rendering this with a
-    /// non-neutral style-1 scale forces the OWNED multi-style combine on every
-    /// face -> exercises the lightmap surface cache end-to-end.
-    fn lightmapped_demo_room(block0: u8, block1: u8) -> Bsp {
-        let mut bsp = demo_room();
-        // Two concatenated blocks per face, uniform so any face's grid (whatever
-        // its extents) reads well-defined bytes. Lump is large enough for the
-        // biggest face's 2*lmw*lmh.
-        let mut lighting = vec![block0; 200_000];
-        for b in lighting.iter_mut().skip(100_000) {
-            *b = block1;
-        }
-        bsp.lighting = lighting;
-        for f in bsp.faces.iter_mut() {
-            f.lightofs = 0;
-            f.styles = [0, 1, 255, 255];
-        }
-        bsp
     }
 
     #[test]
@@ -16718,13 +16532,6 @@ mod tests {
         let r = calc_refdef(8, 4, 30.0, false);
         assert!(r.vrect.x + r.vrect.w <= 8 && r.vrect.y + r.vrect.h <= 4);
         let _ = calc_refdef(0, 0, 100.0, false);
-    }
-
-    /// A 64x64 backtile whose texel (x, y) is palette index `(x + 64*y) % 251`,
-    /// so any sampling error shows up as the wrong colour.
-    fn test_backtile() -> Qpic {
-        let data = (0..64 * 64).map(|i| (i % 251) as u8).collect();
-        Qpic { width: 64, height: 64, data }
     }
 
     #[test]
