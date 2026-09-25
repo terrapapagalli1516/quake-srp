@@ -406,6 +406,7 @@ scenario's shots, before the branch -> after.
 | centerprint 1/3/5 lines, expired (4) | 91.6 -> 100 | 3.8 -> 100 | 2.7 -> 100 |
 | notify lines (1) | 98.6 -> 100 | 3.8 -> 100 | 2.6 -> 100 |
 | console sliding, down, typing (3) | 36.7 -> 99.1 | 4.8 -> 98.2 | 2.8 -> 97.3 |
+| console scrolled back by PgUp/PgDn, 4 and 2 lines (2; `quake/polish4b`, before it no backscroll) | 98.4 -> 99.2 | 98.5 -> 99.0 | 98.6 -> 98.9 |
 | intermission, also at viewsize 50 (2) | 100 -> 100 | 0.1 -> 100 | 0.0 -> 100 |
 | finale mid-reveal, later (2) | 85.7 -> 100 | 0.6 -> 100 | 0.0 -> 100 |
 | menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 -> 100 | 43.8 -> 99.9 -> 100 | 47.1 -> 99.95 -> 100 |
@@ -434,7 +435,8 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   (41.5% before). What is left is the console's version stamp (below) and,
   on Options, its Web extras row. `oracle.c` shoots a composited frame that
   renders no view (disconnected) as the screen stands.
-- *Console* (400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
+- *Console* (and `console_scroll`, the menu over the disconnected console:
+  400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
   string stamped on the conback. id's Linux build (the oracle) writes "(Linux
   Quake 1.30) 1.09"; the port writes what the DOS build writes, "1.09", at the
   same place — it matches the tail of the oracle's string pixel for pixel. The

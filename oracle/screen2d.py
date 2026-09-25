@@ -125,6 +125,10 @@ SCENARIOS: dict[str, list] = {
     "console": [("frames", 1), ("cmd", "clear"), ("print", "Some console text"), ("print", "a second line"),
                 ("console",), ("frames", 2), ("shot", "sliding"), ("frames", 10), ("shot", "down"),
                 ("type", "noclip"), ("frames", 1), ("shot", "typed")],
+    # Key_Console's PgUp/PgDn: con_backscroll 2 lines a press
+    "console_scroll": [("frames", 1), ("cmd", "clear")] + [("print", f"scrollback line {i}") for i in range(40)]
+    + [("console",), ("frames", 10), ("key", "PGUP"), ("key", "PGUP"), ("frames", 1), ("shot", "up4"),
+       ("key", "PGDN"), ("frames", 1), ("shot", "up2")],
     "intermission": [("frames", 1), ("intermission", 1, 75, ""), ("frames", 2), ("shot", "stats"),
                      ("viewsize", 50), ("frames", 2), ("shot", "stats_v50")],
     "finale": [("frames", 1), ("intermission", 2, 75,

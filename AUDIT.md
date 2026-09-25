@@ -1808,6 +1808,33 @@ each; the C followed and the evidence are in the commit messages.
   `wasm_` name like the extras' (not id's); `cmdlist`, which id never had,
   is gone. The page's console drawer and README list both. Test
   `help_is_the_help_screen_and_wasm_help_the_ports_list`.
+- ✅ **The console had no history, no Tab completion, no scrollback, and
+  typed any Unicode** (MED). `Key_Console` (keys.c) is now whole in the
+  engine's `Console::key`: `key_lines[32]` with `edit_line` / `history_line`
+  (Up walks back over the non-empty lines — at the oldest it stays, the slot
+  after `edit_line`; Down forward, past the newest to an empty line; Enter
+  echoes the line, even an empty one, and keeps it), Tab
+  (`Cmd_CompleteCommand` then `Cvar_CompleteVariable` on the whole line,
+  case-sensitive prefix, the name and a space: `"map "`) over this console's
+  commands in the order id's `cmd_functions` list meets them (registered
+  last, found first: `timedemo`, `playdemo`, `impulse`, `sizedown`, ... `echo`;
+  then `wasm_help`) and its cvars (`viewsize`, the `wasm_*` extras), PgUp/PgDn
+  (and the wheel keys) moving `con_backscroll` by 2 within `con_totallines -
+  (vid.height>>3) - 1`, any print (`Con_Print`) and a new console width
+  (`Con_CheckResize`) resetting it, `Con_DrawConsole` drawing that many lines
+  up; only ASCII 32..126 types (`key >= 32 && key <= 127`), 254 characters at
+  most (`MAXCMDLINE`). The scrollback keeps `con_totallines = CON_TEXTSIZE /
+  con_linewidth` lines as id's ring does (431 at 320 wide, 138 at 960; was a
+  flat 200). Home/End are Key_Console's too, but no console keys, so
+  `Key_Event` runs their bindings (End: `centerview`) as in id. Tests
+  `up_and_down_walk_the_32_line_history`, `tab_completes_a_command_then_a_cvar`,
+  `pgup_and_pgdn_scroll_the_text_back`,
+  `console_history_completion_and_backscroll_through_key_event`,
+  `every_completion_is_a_command_the_console_knows`; `web/verify_extras.py`
+  (Up Up and Tab through the page's keys). 2-D oracle, new scenario
+  `console_scroll` (PgUp twice, then PgDn): 98.4 → 99.2% at 320x200 (738 →
+  398 px, the version stamp left), 98.5 → 99.0 at 640x400, 98.6 → 98.9 at
+  960x600.
 
 ## LOW (27)
 

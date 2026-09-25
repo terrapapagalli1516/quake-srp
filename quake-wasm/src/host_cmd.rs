@@ -19,6 +19,29 @@ use crate::snd_dma;
 /// `MAX_DEMONAME` (client.h): a `cls.demos` slot holds 15 characters.
 const MAX_DEMONAME: usize = 16;
 
+/// The commands this console runs, in the order `Cmd_CompleteCommand` meets
+/// id's (`cmd_functions`: `Cmd_AddCommand` puts each in front, so the one
+/// registered last — `timedemo`, in `CL_Init` — comes first; `echo`, from
+/// `Cmd_Init`, last), then the port's own.
+pub(crate) const COMMANDS: &[&str] = &[
+    "timedemo", "playdemo", "impulse", "sizedown", "sizeup", "help", "clear", "stopdemo", "demos",
+    "startdemos", "give", "save", "load", "pause", "kill", "noclip", "map", "fly", "god", "echo",
+    "wasm_help",
+];
+
+/// `Cmd_CompleteCommand` then `Cvar_CompleteVariable` (cmd.c, cvar.c), what
+/// Tab in the console runs: the first command, else the first cvar, whose
+/// name starts with `partial` (case matters, `Q_strncmp`); nothing for an
+/// empty line. The cvars are `viewsize` (id's `scr_viewsize`) and the Web
+/// extras' `wasm_*`.
+pub(crate) fn complete(partial: &str) -> Option<String> {
+    if partial.is_empty() {
+        return None;
+    }
+    let cvars = std::iter::once("viewsize").chain(crate::extras::cvar_names());
+    COMMANDS.iter().copied().chain(cvars).find(|name| name.starts_with(partial)).map(str::to_string)
+}
+
 /// `Host_Startdemos_f`: `startdemos <demo> ...` sets the demo loop (at most
 /// [`MAX_DEMOS`]) and, with nothing running (`!sv.active &&
 /// !cls.demoplayback`) and the loop not switched off, starts it

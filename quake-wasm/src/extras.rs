@@ -41,7 +41,12 @@ pub(crate) fn console_command(a: &mut App, argv: &[&str]) -> bool {
     true
 }
 
-/// The console's `help` lines for the extras, one per variable.
+/// The extras' console variable names, for Tab completion.
+pub(crate) fn cvar_names() -> impl Iterator<Item = &'static str> {
+    WEB_EXTRAS.iter().map(|w| w.cvar)
+}
+
+/// The console's `wasm_help` lines for the extras, one per variable.
 pub(crate) fn help_lines() -> impl Iterator<Item = String> {
     WEB_EXTRAS.iter().map(|w| format!("  {:<19}{}", format!("{} 0|1", w.cvar), w.summary))
 }
