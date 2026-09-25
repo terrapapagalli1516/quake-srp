@@ -22,6 +22,7 @@ use quake_rs::tent::{BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 
 use crate::PAK;
+use crate::console::ConNotify;
 use crate::cl_walk::net_angle;
 use crate::input::{clamp_pitch, KeyMove};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP_SND_QUEUE};
@@ -152,14 +153,9 @@ pub(crate) struct Walk {
     /// (Quake's `scr_centertime` ~2s); replaced by the next centerprint. Drawn
     /// centered over the view.
     pub(crate) centerprint: Option<(String, f32)>,
-    /// The fading top-left notify lines (`bprint`/`sprint`): text + expiry clock
-    /// (Quake's `con_notifytime` ~3s), capped to the last few.
-    pub(crate) notify: Vec<(String, f32)>,
-    /// The in-progress notify line (Con_Print model): bprint/sprint text accumulates
-    /// here and only breaks into a notify line on '\n'. Quake item pickups print via
-    /// several `sprint` calls ("You receive ", "25", " health\n"); the C console
-    /// joins them into ONE line, so we must not emit one notify line per call.
-    pub(crate) notify_pending: String,
+    /// The top-left notify lines (`bprint`/`sprint` through Con_Print, shown by
+    /// Con_DrawNotify), on the host clock.
+    pub(crate) notify: ConNotify,
     /// `cl.time`: accumulated game time (seconds), advanced by `dt` each
     /// `step_walk` that runs the server. On a local server the C's
     /// `CL_LerpPoint` snaps `cl.time` to the server's message time, so it stops
@@ -288,11 +284,9 @@ pub(crate) struct DemoPlay {
     /// Current centerprint + expiry (recorded `svc_centerprint`, scr_centertime
     /// ~2 s on the demo's recorded frame clock).
     pub(crate) centerprint: Option<(String, f32)>,
-    /// Notify lines + expiries (recorded `svc_print`, con_notifytime ~3 s).
-    pub(crate) notify: Vec<(String, f32)>,
-    /// The in-progress notify line (Con_Print model: break only on '\n') —
-    /// recorded pickups print as several svc_print fragments.
-    pub(crate) notify_pending: String,
+    /// The notify lines (recorded `svc_print` through Con_Print), on the
+    /// recorded clock.
+    pub(crate) notify: ConNotify,
     /// The `viewsize` cvar this frame (the Options "Screen size" slider),
     /// refreshed by `step` from the menu before stepping, like `key_move`:
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
@@ -360,8 +354,7 @@ impl DemoPlay {
             v_dmg_pitch: 0.0,
             oldz: f32::NAN,
             centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
+            notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
             trail_org: HashMap::new(),
             tracercount: 0,
@@ -686,8 +679,7 @@ pub(crate) fn assemble_walk(
         item_gettime: [0.0; 32],
         oldz: f32::NAN,
         centerprint: None,
-        notify: Vec::new(),
-        notify_pending: String::new(),
+        notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
         clock: 0.0,
         host_time: 0.0,

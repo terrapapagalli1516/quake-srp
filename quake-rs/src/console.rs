@@ -10,8 +10,9 @@ use crate::draw::{
 use crate::menu::realtime_blink_bit;
 use crate::render::Image;
 
-/// Draw the notify lines (`bprint`/`sprint`, Con_DrawNotify): stacked at the
-/// top-left of the 320x200 virtual screen, scaled to the framebuffer.
+/// Draw the notify lines (`bprint`/`sprint`, Con_DrawNotify): stacked from
+/// the very top of the 320x200 virtual screen (`v = 0`), each character at
+/// `(x+1)<<3`, scaled to the framebuffer.
 pub fn draw_notify(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
@@ -22,7 +23,7 @@ pub fn draw_notify(
         return;
     }
     let scale = image.w as f32 / HUD_VIRT_W;
-    let mut vy = 8.0;
+    let mut vy = 0.0;
     for line in lines {
         draw_string_scaled(image, conchars, 8.0, vy, line, scale, 0.0, 0.0, palette);
         vy += 8.0;

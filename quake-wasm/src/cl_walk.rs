@@ -331,23 +331,9 @@ pub(crate) fn step_walk(
         if m.center {
             w.centerprint = Some((m.text, w.host_time + 2.0));
         } else {
-            // Con_Print model: accumulate notify text and only break into a line on
-            // '\n'. Quake pickups print via several sprint() calls ("You receive ",
-            // "25", " health\n") that the C console joins into ONE line; emitting one
-            // notify line per call would wrongly split a single message across lines.
-            w.notify_pending.push_str(&m.text);
-        }
-    }
-    // Flush every complete ('\n'-terminated) line from the pending buffer; the
-    // trailing partial (no newline yet) stays buffered until more text arrives.
-    while let Some(nl) = w.notify_pending.find('\n') {
-        let line: String = w.notify_pending.drain(..=nl).collect();
-        let line = line.trim_end_matches(['\n', '\r']).to_string();
-        if !line.trim().is_empty() {
-            w.notify.push((line, w.host_time + 3.0));
-            while w.notify.len() > 4 {
-                w.notify.remove(0);
-            }
+            // Con_Print: pickups print via several sprint() calls ("You receive
+            // ", "25", " health\n") that land on one console line.
+            w.notify.print(&m.text, w.host_time);
         }
     }
     if let Some((_, exp)) = &w.centerprint {
@@ -355,8 +341,6 @@ pub(crate) fn step_walk(
             w.centerprint = None;
         }
     }
-    let host_time = w.host_time;
-    w.notify.retain(|(_, exp)| host_time < *exp);
 
     // 2b. Realise the particle() bursts the world fired this frame (explosions,
     //     blood, gibs) into the live pool, then age it under gravity and retire
@@ -970,8 +954,8 @@ pub(crate) fn step_walk(
             if let Some((text, _)) = &w.centerprint {
                 render::draw_centerprint(&mut img, cc, &w.palette, text);
             }
-            if !w.notify.is_empty() {
-                let lines: Vec<&str> = w.notify.iter().map(|(t, _)| t.as_str()).collect();
+            let lines = w.notify.visible(w.host_time);
+            if !lines.is_empty() {
                 render::draw_notify(&mut img, cc, &w.palette, &lines);
             }
         }

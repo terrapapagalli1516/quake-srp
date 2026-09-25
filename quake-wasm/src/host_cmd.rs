@@ -406,7 +406,6 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     // already-flushed notify lines + the centerprint. Their expiry is an ABSOLUTE
     // clock value, and the clock resets to 0 below, so a stale "You got the Quad!"
     // would otherwise linger over the new level for old-clock seconds.
-    w.notify_pending.clear();
     w.notify.clear();
     w.centerprint = None;
     w.clock = 0.0;
@@ -486,7 +485,6 @@ pub(crate) fn try_restart(w: &mut Walk) {
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
     w.beams.clear();
-    w.notify_pending.clear();
     w.notify.clear();
     w.centerprint = None;
     w.clock = 0.0;

@@ -118,22 +118,12 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     if bonus {
         d.bonus_blend = BONUS_PERCENT;
     }
-    // svc_print fragments accumulate Con_Print-style (a notify line breaks
-    // only on '\n' — pickups arrive as several fragments) with Quake's
-    // con_notifytime expiry on the demo's recorded clock; svc_centerprint
-    // replaces the current centered message (SCR_CenterPrint, ~2 s).
+    // svc_print fragments go through Con_Print (pickups arrive as several
+    // fragments on one console line), timed on the demo's recorded clock;
+    // svc_centerprint replaces the current centered message (SCR_CenterPrint,
+    // ~2 s).
     for p in &prints {
-        d.notify_pending.push_str(p);
-    }
-    while let Some(nl) = d.notify_pending.find('\n') {
-        let line: String = d.notify_pending.drain(..=nl).collect();
-        let line = line.trim_end_matches(['\n', '\r']).to_string();
-        if !line.trim().is_empty() {
-            d.notify.push((line, now + 3.0));
-            while d.notify.len() > 4 {
-                d.notify.remove(0);
-            }
-        }
+        d.notify.print(p, now);
     }
     if let Some(text) = centerprints.into_iter().next_back() {
         d.centerprint = Some((text, now + 2.0));
@@ -176,7 +166,6 @@ pub(crate) fn step_demo(
         d.v_dmg_time = 0.0;
         d.centerprint = None;
         d.notify.clear();
-        d.notify_pending.clear();
         d.oldz = f32::NAN;
     }
     // Advance to the frame matching the recorded server time. Stop at the last
@@ -539,15 +528,13 @@ pub(crate) fn step_demo(
             d.centerprint = None;
         }
     }
-    let ftime = f.time;
-    d.notify.retain(|(_, exp)| ftime < *exp);
     if !menu_up && f.intermission == 0 {
         if let Some(cc) = d.conchars.as_ref() {
             if let Some((text, _)) = &d.centerprint {
                 render::draw_centerprint(&mut img, cc, &d.palette, text);
             }
-            if !d.notify.is_empty() {
-                let lines: Vec<&str> = d.notify.iter().map(|(t, _)| t.as_str()).collect();
+            let lines = d.notify.visible(f.time);
+            if !lines.is_empty() {
                 render::draw_notify(&mut img, cc, &d.palette, &lines);
             }
         }
