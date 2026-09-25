@@ -21,11 +21,11 @@ use quake_rs::server::Server;
 use quake_rs::tent::{BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 use quake_rs::console::ConNotify;
+use quake_rs::client::cl_input::{clamp_pitch, KeyMove};
 
 use crate::PAK;
 use crate::host::ShowFps;
 use crate::cl_walk::net_angle;
-use crate::input::{clamp_pitch, KeyMove};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP_SND_QUEUE};
 use crate::vid::{DEFAULT_H, DEFAULT_W};
 

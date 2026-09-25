@@ -6,12 +6,12 @@
 //! framebuffer (`VID_ShiftPalette`).
 
 use quake_rs::render::{self, build_gamma_table};
+use quake_rs::client::cl_input::derive_key_move;
 
 use crate::app::{build_demo_n, ensure_app};
 use crate::bench::{self, Phase};
 use crate::cl_demo::step_demo;
 use crate::cl_walk::step_walk;
-use crate::input::derive_key_move;
 use crate::snd_dma::{SND_QUEUE, STOP_SND_QUEUE};
 
 /// `Host_FilterTime` (host.c): the most a single frame may advance the game —

@@ -22,7 +22,7 @@
 //! | `cl_walk`   | cl_main.c, cl_parse.c, view.c, screen.c | `step_walk`: the live client frame               |
 //! | `cl_demo`   | cl_demo.c, cl_parse.c, view.c           | `step_demo`: the recorded-demo client frame      |
 //! | `cl_tent`   | cl_tent.c, r_part.c                     | temp-entity effects, trail flags                 |
-//! | `input`     | cl_input.c, in_win.c, keys.c            | bindings-driven moves, mouse look, key exports   |
+//! | `input`     | in_win.c, keys.c                        | mouse look, key exports (the moves: `client::cl_input`) |
 //! | `menu`      | menu.c `M_Keydown`                      | menu key exports and the actions they return     |
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle/typing exports                    |
 //! | `extras`    | —                                       | the Web extras' `wasm_*` cvars (values in the menu), the renderer's per-frame copy |

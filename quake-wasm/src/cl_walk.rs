@@ -14,14 +14,14 @@ use quake_rs::client::view::{
     cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
 };
+use quake_rs::client::cl_input::{
+    clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
+};
 
 use crate::app::{color_for_name, Walk};
 use crate::bench::{self, Phase};
 use crate::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use crate::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
-use crate::input::{
-    clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
-};
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
 

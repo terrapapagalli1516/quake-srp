@@ -8,9 +8,9 @@ use std::cell::RefCell;
 use quake_rs::bsp::Bsp;
 use quake_rs::progs::Progs;
 use quake_rs::server::Server;
+use quake_rs::client::cl_input::clamp_pitch;
 
 use crate::app::{assemble_walk, ensure_app, pak, Walk};
-use crate::input::clamp_pitch;
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
 
 // ---------------------------------------------------------------------------
