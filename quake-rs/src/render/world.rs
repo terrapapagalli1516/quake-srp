@@ -135,32 +135,50 @@ pub(super) fn draw_world_textured(
         .unwrap_or(0);
     mark_dlights(bsp, world_headnode, dlights, &mut dlight_bits);
 
-    // FRONT-TO-BACK ORDER. With a z-buffer the final image is identical for ANY draw
-    // order (the nearest surface always wins the depth test), but drawing near faces
-    // FIRST lets the z-test reject occluded pixels BEFORE the per-pixel shading
-    // (block read + framebuffer write) — cutting the ~1.9x world overdraw the
-    // profiler measured. Sort visible faces by squared centroid distance (ascending);
-    // bad-geom faces sort last (they draw nothing). This reuses the per-face geom
-    // cache, so the ordering pass also warms it for the draw loop below. (A true BSP
-    // back-to-front/front-to-back walk would be marginally better, but centroid sort
-    // captures the bulk of the win for walls and is far simpler / output-identical.)
+    // CULL, THEN FRONT-TO-BACK ORDER. With a z-buffer the final image is identical
+    // for ANY draw order (the nearest surface always wins the depth test), but
+    // drawing near faces FIRST lets the z-test reject occluded pixels BEFORE the
+    // per-pixel shading (block read + framebuffer write) — cutting the ~1.9x world
+    // overdraw the profiler measured. Only the faces that survive the PVS and
+    // frustum culls are keyed and sorted (~700-860 of e1m3's 5,059), by squared
+    // centroid distance, ascending. `sort_by` is stable, so the survivors come out
+    // in exactly the order the old sort-everything-then-cull pass drew them: a
+    // stable sort's order is (key, original index), and dropping faces from its
+    // input does not reorder the rest. (A true BSP front-to-back walk would be
+    // marginally better; the centroid sort captures the bulk of the win.)
     let _t_sort = prof.then(StatInstant::now);
-    let mut world_order: Vec<(f32, usize)> =
-        Vec::with_capacity(world_end.saturating_sub(world_first));
+    let mut world_order: Vec<(f32, usize)> = Vec::new();
     for fi in world_first..world_end {
-        let key = match bsp.faces.get(fi) {
-            Some(face) => {
-                let g = face_geom_cached(bsp, fi, face);
-                if g.bad {
-                    f32::MAX
-                } else {
-                    let d = sub(g.center, cam.pos);
-                    dot(d, d)
-                }
-            }
-            None => f32::MAX,
+        let face = match bsp.faces.get(fi) {
+            Some(f) => f,
+            None => continue,
         };
-        world_order.push((key, fi));
+        stat(|s| s.faces_total += 1);
+        // Skip faces outside the potentially-visible set. A missing mask entry
+        // (or no mask at all) means "draw" — culling never removes a face it is
+        // unsure about.
+        if let Some(mask) = &visible_face {
+            if !mask.get(fi).copied().unwrap_or(true) {
+                stat(|s| s.faces_pvs_culled += 1);
+                continue;
+            }
+        }
+        // Static per-face geometry (poly / normal / centroid / AABB), built once
+        // for the world model and reused every frame. `bad` reproduces the
+        // original `face_world_poly` early-out exactly.
+        let g = face_geom_cached(bsp, fi, face);
+        if g.bad {
+            continue;
+        }
+        // FRUSTUM CULL (R_CullBox): reject faces whose static world AABB is fully
+        // outside the view, BEFORE projection / lightmap / raster. Conservative —
+        // a face touching the view survives. A culled face draws nothing.
+        if frustum.culls(g.mins, g.maxs) {
+            stat(|s| s.faces_frustum_culled += 1);
+            continue;
+        }
+        let d = sub(g.center, cam.pos);
+        world_order.push((dot(d, d), fi));
     }
     world_order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     if let Some(t) = _t_sort { t_sort += t.elapsed().as_nanos() as u64; }
@@ -171,33 +189,8 @@ pub(super) fn draw_world_textured(
             Some(f) => f,
             None => continue,
         };
-        stat(|s| s.faces_total += 1);
-        // Skip faces outside the potentially-visible set. A missing mask entry
-        // (or no mask at all) means "draw" — culling never removes a face it is
-        // unsure about.
-        if let Some(mask) = &visible_face {
-            if !mask.get(face_index).copied().unwrap_or(true) {
-                stat(|s| s.faces_pvs_culled += 1);
-                continue;
-            }
-        }
-
-        // Static per-face geometry (poly / normal / centroid / AABB), built once
-        // for the world model and reused every frame. `bad` reproduces the
-        // original `face_world_poly` early-out exactly.
+        // Already fetched (and culled) above: an `Rc` refcount bump.
         let geom = face_geom_cached(bsp, face_index, face);
-        if geom.bad {
-            continue;
-        }
-
-        // FRUSTUM CULL (R_CullBox): reject faces whose static world AABB is fully
-        // outside the view, BEFORE projection / lightmap / raster. Conservative —
-        // a face touching the view survives. This precedes the normal/backface
-        // checks; a culled face draws nothing, so the output is unchanged.
-        if frustum.culls(geom.mins, geom.maxs) {
-            stat(|s| s.faces_frustum_culled += 1);
-            continue;
-        }
 
         let world_poly: &[Vec3] = &geom.poly;
         let normal = match geom.normal {

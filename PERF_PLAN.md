@@ -315,6 +315,12 @@ The fidelity classes are:
   unchanged.
 - **Functions:** `draw_world_textured`. Optionally, cache `compute_visible_faces` by view leaf; it
   allocates three `Vec<bool>` per frame.
+- **Done** (branch `quake/w1`): cull first, then sort the survivors. `world_sort` (now the PVS and
+  frustum filter plus the sort) **0.11–0.14 → 0.016–0.045 ms** per frame, native and wasm, at
+  640×400 and 1280×800; the whole frame moves within noise. Goldens and wasm frame hashes are
+  identical (demo1, walk_e1m1, fire_e1m1 and walk_e1m3 at 640×400, every 20th frame). Not done:
+  the view-leaf cache of `compute_visible_faces`. `world_pvs` measures 0.011–0.020 ms, too little
+  to be worth a cache.
 
 **A3. Quake's edge-sorted span renderer.** *(faithful, the endpoint; a large job)*
 
