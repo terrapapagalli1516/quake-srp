@@ -113,7 +113,7 @@ Deferred (documented, lower priority / higher risk):
 - ✅ **Intermission view** (MED) — fixed in the ship push (2026-06-10).
 - ⬜ LOWs: client_think pre/post-think order; PF_particle byte count/dir quantize;
   clip_box inopen/plane_dist coords; SV_NewChaseDir integer abs; OP_ADDRESS world
-  guard; AngleVectors f64-vs-float (golden-sensitive); sky foreground drift; particle
+  guard; AngleVectors f64-vs-float (golden-sensitive); ~~sky foreground drift~~ (✅ Session 7); particle
   on-screen size ramp; ST_RAND syncbase; alias triangle near-clip; tracer parity;
   lightstyle /264-vs-/256 (golden-sensitive); sky-name case sensitivity.
 
@@ -445,6 +445,16 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   in fixed point (id's `3.14159`, 256 entries, not periodic), added before the
   `>>16`, on `(s+8192)<<16` (`Mod_LoadFaces`' turb `texturemins`). e1m1 water
   from above 21.1% → 99.45%. Goldens: e1m2 `a6f98d8a` → `76905e15`.
+- ✅ **Sky layers + sampling** (class 4; was the LOW "sky foreground drift") —
+  the front layer is now `R_MakeSky`'s composite, shifted `(int)(skytime*8)`
+  texels over the back (so it scrolls at 2x), `skytime` wrapped at 512 s
+  (`R_SetSkyFrame`), `D_Sky_uv_To_st` at the integer pixel and screen centre.
+  And `D_DrawSkyScans8`'s spans: the world pass records its sky pixels and
+  `resolve_sky_spans` redraws each visible run of one sky face exactly every 32
+  pixels, stepped between. e1m2 sky region (130,0,65,32, mip 0 + exact
+  perspective on id's side): 15.6% at the start, 23.5% after the class-3 fix,
+  93.2% with the layers, 99.8% with the spans. e1m2 world 61.25 → 64.07.
+  Goldens unchanged (no sky in them).
 
 ## LOW (27)
 

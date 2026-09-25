@@ -1463,132 +1463,277 @@ fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (i32, i32) {
     (sturb, tturb)
 }
 
-/// Sample one texel of the two-layer scrolling sky from a 256x128 sky
-/// miptexture, porting `EmitBothSkyLayers` (`gl_warp.c`) / `R_InitSky`.
-///
-/// The sky miptexture is `tw=256` wide, `th=128` tall: two side-by-side
-/// 128x128 layers. Per `R_InitSky`, the **right** half (`[128,256)`) is the
-/// solid background layer, and the **left** half (`[0,128)`) is the alpha
-/// overlay whose palette index `0` is transparent (showing the background
-/// through it). `EmitBothSkyLayers` scrolls the background at `time*8` and the
-/// overlay at `time*16` (twice as fast). Here the perspective-correct surface
-/// `(s,t)` plays the role of the GL sky direction: it is scaled down and the
-/// per-layer scroll offset added, then wrapped into each 128x128 layer.
-///
-/// Returns a palette index. Every lookup is `.get()`-guarded and wrapped with
-/// `rem_euclid`, so a malformed (non-256x128) sky texture never panics: it
-/// simply samples whatever is in range, and a too-small texture yields index 0.
-#[inline]
-fn sky_texel(pixels: &[u8], tw: usize, th: usize, s: f32, t: f32, time: f32) -> u8 {
-    // Layer dimension: the texture is conceptually two `lh`-wide square layers.
-    // Use half the width (clamped to the height) so a real 256x128 sky gives
-    // 128x128 layers; degenerate sizes still stay in range via the wraps below.
-    let lw = (tw / 2).max(1);
-    let lh = th.max(1);
+/// `SKYSIZE` (d_iface.h): each sky layer is 128x128 texels.
+const SKYSIZE: i32 = 128;
+/// `SKYMASK` (d_iface.h), and `R_SKY_SMASK`/`R_SKY_TMASK >> 16` (d_local.h).
+const SKYMASK: i32 = SKYSIZE - 1;
+/// `iskyspeed` (r_sky.c): the scroll, in texels per second.
+const SKY_SPEED: f32 = 8.0;
 
-    // The surface (s,t) stand in for the GL sky direction; scale them down so a
-    // wall's worth of texels maps across the layer rather than tiling violently.
-    // (1/8 keeps the cloud features a sensible on-screen size.)
-    let bs = s * 0.125;
-    let bt = t * 0.125;
-
-    // Background (solid) layer: right half, scroll = time*8.
-    let back = {
-        let sx = ((bs + time * 8.0) as i64).rem_euclid(lw as i64) as usize;
-        let sy = (bt as i64).rem_euclid(lh as i64) as usize;
-        // Right half starts at column `lw` (= 128 for a real sky).
-        pixels.get(sy * tw + (lw + sx)).copied().unwrap_or(0)
-    };
-
-    // Overlay (alpha) layer: left half, scroll = time*16. Palette index 0 is
-    // transparent — where transparent, the background shows through.
-    let front = {
-        let sx = ((bs + time * 16.0) as i64).rem_euclid(lw as i64) as usize;
-        let sy = (bt as i64).rem_euclid(lh as i64) as usize;
-        pixels.get(sy * tw + sx).copied().unwrap_or(0)
-    };
-
-    if front != 0 {
-        front
-    } else {
-        back
-    }
-}
-
-/// The camera projection a sky pixel needs to recover its world view direction,
-/// porting `D_Sky_uv_To_st`'s use of `vpn`/`vright`/`vup` and the screen centre.
+/// The per-frame sky state a sky pixel needs, porting the globals
+/// `D_Sky_uv_To_st` and `R_MakeSky` read: the view basis (`vpn`/`vright`/
+/// `vup`), the screen centre, the normaliser, and the scroll.
 ///
 /// The sky is an infinite dome: what a screen pixel shows depends on the view
-/// DIRECTION through that pixel, NOT on the wall polygon's `(s,t)`. This carries
-/// the camera basis and the projection parameters so [`sky_texel_view`] can
-/// rebuild the ray for each covered pixel.
+/// DIRECTION through that pixel, NOT on the wall polygon's `(s,t)`.
 #[derive(Clone, Copy)]
 struct SkyView {
     forward: Vec3,
     right: Vec3,
     up: Vec3,
-    /// Screen centre (`w/2`, `h/2`).
-    cx: f32,
-    cy: f32,
-    /// `max(width, height)` — the `temp` normaliser in `D_Sky_uv_To_st`. The C
-    /// derives the ray from this fixed `8192/longest` scaling (a fixed dome angle,
-    /// independent of the render FOV), so the camera focal length is not used.
+    /// `(int)vid.width>>1`, `(int)vid.height>>1` — `D_Sky_uv_To_st`'s integer
+    /// screen centre (not the projection's `xcenter`, which is half a pixel off).
+    half_w: i32,
+    half_h: i32,
+    /// `max(vrect.width, vrect.height)` — the `temp` normaliser in
+    /// `D_Sky_uv_To_st`: a fixed dome angle, independent of the render FOV.
     longest: f32,
+    /// `skytime*skyspeed`, added to both `s` and `t` (`D_Sky_uv_To_st`).
+    scroll: f32,
+    /// `R_MakeSky`'s `xshift`/`yshift` = `(int)(skytime*skyspeed)`: the extra
+    /// offset of the front (cloud) layer, so it moves at twice the back's speed.
+    shift: i32,
 }
 
-/// Sample the sky for screen pixel `(u, v)` by projecting the **view direction**
-/// onto the scrolling sky, porting `D_Sky_uv_To_st` (`d_sky.c`).
-///
-/// `D_Sky_uv_To_st` builds the world ray for the pixel —
-/// `end = 4096*vpn + wu*vright + wv*vup` with `wu`/`wv` the screen offsets scaled
-/// by `8192/longest`, then `end[2] *= 3` (vertical squash) and normalise — and
-/// derives the sky coords `s = scroll + 6*(SKYSIZE/2-1)*end[0]`,
-/// `t = scroll + 6*(SKYSIZE/2-1)*end[1]`. The `scroll = skytime*skyspeed` drifts
-/// the whole sky over time (`skyspeed = 8`). We feed those `(s,t)` to the same
-/// two-layer overlay/background lookup [`sky_texel`] already implements, so the
-/// front cloud layer scrolls over the solid background. The result depends only
-/// on where the camera looks, so the sky no longer smears with wall coords and
-/// scrolls as the player turns.
-///
-/// SAFETY: `focal`/`longest` are guarded against 0 by the caller; the lookup is
-/// `sky_texel`, which bounds-checks and wraps, so a malformed sky never panics.
-#[allow(clippy::too_many_arguments)]
+impl SkyView {
+    /// The sky state for a `w`x`h` view at game `time`. `R_SetSkyFrame`
+    /// (r_sky.c): `skytime = cl.time - (int)(cl.time/temp)*temp` with
+    /// `temp = SKYSIZE*s1*s2` = 512, where `s1`/`s2` are `iskyspeed` 8 and
+    /// `iskyspeed2` 2 over their gcd.
+    fn new(forward: Vec3, right: Vec3, up: Vec3, w: usize, h: usize, time: f32) -> SkyView {
+        const TEMP: f64 = 512.0;
+        let t = time as f64;
+        let skytime = (t - ((t / TEMP) as i32 as f64) * TEMP) as f32;
+        let scroll = skytime * SKY_SPEED;
+        SkyView {
+            forward,
+            right,
+            up,
+            half_w: (w as i32) >> 1,
+            half_h: (h as i32) >> 1,
+            longest: w.max(h) as f32,
+            scroll,
+            shift: scroll as i32,
+        }
+    }
+}
+
+/// `D_Sky_uv_To_st` (d_sky.c): the 16.16 sky coordinates for screen pixel
+/// `(u,v)` — build the ray `4096*vpn + wu*vright + wv*vup` (screen offsets from
+/// the integer centre scaled by `8192/longest`), squash it vertically
+/// (`end[2] *= 3`), normalise, then `s = (skytime*skyspeed + 6*(SKYSIZE/2-1)*end[0])
+/// * 0x10000` and the same for `t` with `end[1]`. Float math as the C (`wu`/`wv`
+/// computed in double, stored to float; `VectorNormalize` multiplies by `1/length`).
 #[inline]
-fn sky_texel_view(pixels: &[u8], tw: usize, th: usize, u: f32, v: f32, sky: &SkyView, time: f32) -> u8 {
-    // `SKYSIZE` (128) -> 6*(SKYSIZE/2 - 1) = 6*63 = 378, the C dome scale.
-    const SKY_DOME_SCALE: f32 = 6.0 * (128.0 / 2.0 - 1.0);
-    const SKY_SPEED: f32 = 8.0;
-
-    // Screen offsets, scaled exactly as D_Sky_uv_To_st (8192/longest), but we work
-    // in our projection: a pixel `(u,v)` corresponds to camera-space direction
-    // proportional to `right*(u-cx)/focal + up*-(v-cy)/focal + forward`. Scaling
-    // by 4096 forward (the C uses `4096*vpn` with `8192*offset`) keeps the same
-    // ratio; the subsequent normalise removes the absolute scale.
-    let longest = if sky.longest > 0.0 { sky.longest } else { 1.0 };
-    let wu = 8192.0 * (u - sky.cx) / longest;
-    let wv = 8192.0 * (sky.cy - v) / longest;
-
+fn sky_uv_to_st(u: i32, v: i32, sky: &SkyView) -> (i32, i32) {
+    let longest = if sky.longest > 0.0 { sky.longest as f64 } else { 1.0 };
+    let wu = (8192.0 * (u - sky.half_w) as f64 / longest) as f32;
+    let wv = (8192.0 * (sky.half_h - v) as f64 / longest) as f32;
+    let (f, r, up) = (sky.forward, sky.right, sky.up);
     let mut end = [
-        4096.0 * sky.forward[0] + wu * sky.right[0] + wv * sky.up[0],
-        4096.0 * sky.forward[1] + wu * sky.right[1] + wv * sky.up[1],
-        4096.0 * sky.forward[2] + wu * sky.right[2] + wv * sky.up[2],
+        4096.0 * f[0] + wu * r[0] + wv * up[0],
+        4096.0 * f[1] + wu * r[1] + wv * up[1],
+        4096.0 * f[2] + wu * r[2] + wv * up[2],
     ];
-    end[2] *= 3.0; // vertical squash so the dome is shallow
-    let (dir, len) = normalize(end);
-    if len == 0.0 {
-        return 0;
+    end[2] *= 3.0;
+    // VectorNormalize (mathlib.c)
+    let length = (end[0] * end[0] + end[1] * end[1] + end[2] * end[2]).sqrt();
+    if length != 0.0 {
+        let ilength = 1.0 / length;
+        end[0] *= ilength;
+        end[1] *= ilength;
+    }
+    // 6*(SKYSIZE/2-1) = 378
+    const DOME: f32 = (6 * (SKYSIZE / 2 - 1)) as f32;
+    let s = ((sky.scroll + DOME * end[0]) * 65536.0) as i32;
+    let t = ((sky.scroll + DOME * end[1]) * 65536.0) as i32;
+    (s, t)
+}
+
+/// One sky texel for the 16.16 sky coordinates `(s,t)`, porting what
+/// `D_DrawSkyScans8` reads — `r_skysource[((t & R_SKY_TMASK) >> 8) +
+/// ((s & R_SKY_SMASK) >> 16)]`, i.e. row `(t>>16)&127`, column `(s>>16)&127` of
+/// `newsky` — and what `R_MakeSky` composited there: the front layer (the
+/// miptexture's LEFT half, `R_InitSky`'s `bottomsky`, index 0 transparent)
+/// shifted by `shift` texels on both axes, over the back layer (the RIGHT half,
+/// unshifted).
+///
+/// `pixels` is the `tw`-wide sky miptexture (256x128 in every id map). Every read
+/// is `.get()`-guarded, so a malformed sky never panics (it yields index 0).
+#[inline]
+fn sky_sample(pixels: &[u8], tw: usize, s: i32, t: i32, shift: i32) -> u8 {
+    let x = (s >> 16) & SKYMASK;
+    let y = (t >> 16) & SKYMASK;
+    let fy = ((y + shift) & SKYMASK) as usize;
+    let fx = ((x + shift) & SKYMASK) as usize;
+    match pixels.get(fy * tw + fx).copied() {
+        Some(front) if front != 0 => front,
+        _ => pixels.get(y as usize * tw + (tw / 2) + x as usize).copied().unwrap_or(0),
+    }
+}
+
+/// Sample the sky for screen pixel `(u, v)`: [`sky_uv_to_st`] then
+/// [`sky_sample`]. (id evaluates `D_Sky_uv_To_st` exactly only every 32 pixels
+/// of a span and steps linearly between — see [`resolve_sky_spans`].)
+#[inline]
+fn sky_texel_view(pixels: &[u8], tw: usize, u: i32, v: i32, sky: &SkyView) -> u8 {
+    let (s, t) = sky_uv_to_st(u, v, sky);
+    sky_sample(pixels, tw, s, t, sky.shift)
+}
+
+/// `SKY_SPAN_SHIFT` (d_sky.c): `D_DrawSkyScans8` evaluates `D_Sky_uv_To_st`
+/// exactly every `1 << 5` = 32 pixels of a span and steps linearly between.
+const SKY_SPAN_SHIFT: i32 = 5;
+const SKY_SPAN_MAX: i32 = 1 << SKY_SPAN_SHIFT;
+
+/// The world pass's sky pixels, kept until the brush passes are done so they
+/// can be drawn as id draws them: `D_DrawSkyScans8` walks each sky SPAN — a run
+/// of pixels on one scanline where one sky face is the nearest surface (what
+/// `R_LeadingEdge`/`R_TrailingEdge` emit) — and interpolates the sky
+/// coordinates across 32-pixel segments from the span's first pixel. Which
+/// pixels form a span is only known once every nearer surface is drawn, so the
+/// world pass records `(face, depth)` per sky pixel and [`resolve_sky_spans`]
+/// recovers the runs afterwards: a pixel is still sky iff the z-buffer still
+/// holds the depth the sky wrote (any nearer write lowers it).
+struct SkySpans {
+    w: usize,
+    h: usize,
+    /// Per pixel: `1 +` the sky face that won the depth test there (0 = none).
+    key: Vec<u32>,
+    /// Per pixel: the depth that sky face wrote to the z-buffer.
+    depth: Vec<f32>,
+    /// Rows written since the last reset, `[lo, hi)`.
+    lo: usize,
+    hi: usize,
+    /// The frame's sky state (every sky face of a frame shares it).
+    view: Option<SkyView>,
+}
+
+impl SkySpans {
+    const EMPTY: SkySpans =
+        SkySpans { w: 0, h: 0, key: Vec::new(), depth: Vec::new(), lo: 0, hi: 0, view: None };
+
+    /// Start a frame of `w`x`h`: forget the previous frame's pixels (only the
+    /// rows it touched are cleared, so a sky-less frame costs nothing).
+    fn reset(&mut self, w: usize, h: usize) {
+        let n = w.saturating_mul(h);
+        if self.w != w || self.h != h || self.key.len() != n {
+            self.key = vec![0; n];
+            self.depth = vec![0.0; n];
+            self.w = w;
+            self.h = h;
+        } else if self.lo < self.hi {
+            self.key[self.lo * w..self.hi * w].fill(0);
+        }
+        self.lo = h;
+        self.hi = 0;
+        self.view = None;
     }
 
-    let scroll = time * SKY_SPEED;
-    // s/t in texels: the dome scale projects the direction onto the layer. We feed
-    // these to `sky_texel` with time=0 (the scroll is folded into s/t here), but
-    // `sky_texel` adds its own per-layer scroll — so pass the raw projected coords
-    // and let the two-layer overlay/background lookup add the front/back drift.
-    let s = scroll + SKY_DOME_SCALE * dir[0];
-    let t = scroll + SKY_DOME_SCALE * dir[1];
-    // `sky_texel` expects (s,t) that it scales by 0.125; pre-multiply by 8 so the
-    // dome projection lands at a sensible cloud scale after its internal *0.125.
-    sky_texel(pixels, tw, th, s * 8.0, t * 8.0, 0.0)
+    #[inline]
+    fn record(&mut self, idx: usize, row: usize, key: u32, depth: f32) {
+        if let (Some(k), Some(d)) = (self.key.get_mut(idx), self.depth.get_mut(idx)) {
+            *k = key;
+            *d = depth;
+            self.lo = self.lo.min(row);
+            self.hi = self.hi.max(row + 1);
+        }
+    }
+}
+
+/// `D_DrawSkyScans8` (d_sky.c) for one span of `count` pixels starting at screen
+/// `(u, v)`, written into `out` (that scanline's pixels from `u`): the sky
+/// coordinates are exact at the span start and every 32 pixels, stepped by
+/// `(next - cur) >> 5` between; the last segment steps by an integer division
+/// over its `count - 1` so it ends exactly on the span's last pixel.
+#[allow(clippy::too_many_arguments)]
+fn draw_sky_span(
+    out: &mut [[u8; 3]],
+    u: i32,
+    v: i32,
+    count: i32,
+    pixels: &[u8],
+    tw: usize,
+    view: &SkyView,
+    palette: &[[u8; 3]; 256],
+) {
+    let mut u = u;
+    let mut count = count;
+    let (mut s, mut t) = sky_uv_to_st(u, v, view);
+    let (mut sstep, mut tstep) = (0i32, 0i32);
+    let mut out = out.iter_mut();
+    while count > 0 {
+        let spancount = count.min(SKY_SPAN_MAX);
+        count -= spancount;
+        let (mut snext, mut tnext) = (s, t);
+        if count > 0 {
+            u += spancount;
+            (snext, tnext) = sky_uv_to_st(u, v, view);
+            sstep = snext.wrapping_sub(s) >> SKY_SPAN_SHIFT;
+            tstep = tnext.wrapping_sub(t) >> SKY_SPAN_SHIFT;
+        } else {
+            let spancountminus1 = spancount - 1;
+            if spancountminus1 > 0 {
+                u += spancountminus1;
+                (snext, tnext) = sky_uv_to_st(u, v, view);
+                sstep = snext.wrapping_sub(s) / spancountminus1;
+                tstep = tnext.wrapping_sub(t) / spancountminus1;
+            }
+        }
+        for _ in 0..spancount {
+            if let Some(p) = out.next() {
+                *p = palette[sky_sample(pixels, tw, s, t, view.shift) as usize];
+            }
+            s = s.wrapping_add(sstep);
+            t = t.wrapping_add(tstep);
+        }
+        s = snext;
+        t = tnext;
+    }
+}
+
+/// Draw the world pass's deferred sky ([`SkySpans`]) as `D_DrawSkyScans8` does,
+/// once every brush surface that can occlude it is in the z-buffer (and before
+/// the alias models, which in id are drawn after `D_DrawSurfaces` too). Each run
+/// of pixels on a row that one sky face still owns is one span. The texture is
+/// `r_skysource`: `R_InitSky` runs for every `sky*` miptexture `Mod_LoadTextures`
+/// loads, so the last one wins.
+fn resolve_sky_spans(image: &mut Image, zbuf: &[f32], bsp: &Bsp, palette: &[[u8; 3]; 256]) {
+    SKY_SPANS_SCRATCH.with(|cell| {
+        let mut sp = cell.borrow_mut();
+        let (w, h) = (image.w, image.h);
+        let sky_tex = bsp
+            .textures
+            .iter()
+            .rev()
+            .flatten()
+            .find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty());
+        if let (Some(view), Some(mt), true) = (sp.view, sky_tex, sp.w == w && sp.h == h) {
+            let tw = mt.width as usize;
+            for y in sp.lo..sp.hi.min(h) {
+                let row = y * w;
+                let mut x = 0usize;
+                while x < w {
+                    let k = sp.key[row + x];
+                    let live = |x: usize| {
+                        sp.key[row + x] == k && zbuf.get(row + x) == Some(&sp.depth[row + x])
+                    };
+                    if k == 0 || !live(x) {
+                        x += 1;
+                        continue;
+                    }
+                    let u0 = x;
+                    while x < w && live(x) {
+                        x += 1;
+                    }
+                    if let Some(out) = image.rgb.get_mut(row + u0..row + x) {
+                        draw_sky_span(out, u0 as i32, y as i32, (x - u0) as i32, &mt.pixels, tw, &view, palette);
+                    }
+                }
+            }
+        }
+        sp.reset(w, h);
+    });
 }
 
 /// How the per-pixel `(s,t)` -> texel step of [`raster_triangle_tex`] behaves.
@@ -1601,11 +1746,13 @@ fn sky_texel_view(pixels: &[u8], tw: usize, th: usize, u: f32, v: f32, sky: &Sky
 enum SurfaceMode<'a> {
     /// Ordinary wall: sample `pixels` at the interpolated `(s,t)`.
     Normal,
-    /// Liquid: SIN-warp `(s,t)` by `time` before sampling (fullbright).
+    /// Liquid: SIN-warp `(s,t)` by `time` before sampling. Unlit.
     Turb { turb: &'a TurbTable, time: f32 },
     /// Sky: project the per-pixel VIEW DIRECTION onto the scrolling sky dome
-    /// (`D_Sky_uv_To_st`) rather than mapping wall `(s,t)`. Fullbright.
-    Sky { time: f32, view: SkyView },
+    /// (`D_Sky_uv_To_st`) rather than mapping wall `(s,t)`. Unlit. With `defer`
+    /// (the world pass) the pixel only takes the depth and is recorded for
+    /// [`resolve_sky_spans`] under the face key; without, it is sampled exactly.
+    Sky { view: SkyView, defer: Option<(&'a std::cell::RefCell<SkySpans>, u32)> },
 }
 
 /// Which animated kind a miptexture name selects: liquids begin with `*`
@@ -1770,6 +1917,12 @@ fn raster_triangle_tex(
     let dw0dx = -(v2.y - v1.y) * inv_area;
     let dw1dx = -(v0.y - v2.y) * inv_area;
     let dw2dx = -(v1.y - v0.y) * inv_area;
+    // A deferred sky face records its pixels instead of drawing them (one
+    // borrow per triangle).
+    let mut sky_defer = match mode {
+        SurfaceMode::Sky { defer: Some((cell, key)), .. } => Some((cell.borrow_mut(), key)),
+        _ => None,
+    };
 
     for py in min_y..=max_y {
         let sy = py as f32 + 0.5;
@@ -1800,7 +1953,6 @@ fn raster_triangle_tex(
             if depth >= *zc {
                 break 'pixel;
             }
-            let sx = px as f32 + 0.5;
             // Perspective divide reuses `depth` (= 1/inv_z) as a multiply instead of
             // two more reciprocals — the affine numerators times 1/z. (Differs from
             // `/inv_z` by at most a ULP, which never crosses a texel boundary.)
@@ -1837,11 +1989,17 @@ fn raster_triangle_tex(
                     };
                     (p, 1.0)
                 }
-                SurfaceMode::Sky { time, view } => {
-                    // Project the per-pixel VIEW DIRECTION onto the scrolling sky
-                    // dome (`D_Sky_uv_To_st`) — the sky no longer uses wall (s,t).
-                    // `sx`/`sy` are the pixel centre in screen space; fullbright.
-                    (sky_texel_view(pixels, tw, th, sx, sy, &view, time) as usize, 1.0)
+                SurfaceMode::Sky { view, .. } => {
+                    if let Some((spans, key)) = sky_defer.as_mut() {
+                        // Drawn later, span by span (`resolve_sky_spans`).
+                        *zc = depth;
+                        spans.record(idx, py as usize, *key, depth);
+                        break 'pixel;
+                    }
+                    // Project the pixel's VIEW DIRECTION onto the scrolling sky
+                    // dome (`D_Sky_uv_To_st`) — the sky does not use wall (s,t).
+                    // id passes the integer pixel `(u,v)`; unlit.
+                    (sky_texel_view(pixels, tw, px as i32, py as i32, &view) as usize, 1.0)
                 }
             };
             *zc = depth;
@@ -2032,6 +2190,7 @@ pub fn render_bsp_textured(
     // Static (time 0) world: liquids/sky show their texture but do not advance.
     let turb = TurbTable::new();
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None);
+    resolve_sky_spans(&mut image, &zbuf, bsp, palette);
     image
 }
 
@@ -2823,6 +2982,10 @@ thread_local! {
     /// so per-frame marking allocates nothing once the buffer has grown to the
     /// map's face count. See [`mark_dlights`].
     static DLIGHT_BITS_SCRATCH: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Per-thread deferred sky pixels ([`SkySpans`]): the world pass records
+    /// into it, [`resolve_sky_spans`] draws and resets it once the brush passes
+    /// are done.
+    static SKY_SPANS_SCRATCH: std::cell::RefCell<SkySpans> = const { std::cell::RefCell::new(SkySpans::EMPTY) };
 }
 
 /// Granular per-phase render profiler — phase wall-times (ns) plus face/triangle/
@@ -3615,6 +3778,14 @@ fn draw_world_textured(
     // cannot brighten faces there. The scratch is thread-local and reused; with
     // no live dlights it stays empty and every face reads mask 0.
     let mut dlight_bits = DLIGHT_BITS_SCRATCH.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    // The sky is drawn span by span once the brush passes are done
+    // (`resolve_sky_spans`); this frame's sky pixels are recorded here.
+    let sky_view = SkyView::new(forward, right, up, w, h, time);
+    let sky_spans = std::cell::RefCell::new(
+        SKY_SPANS_SCRATCH.with(|b| std::mem::replace(&mut *b.borrow_mut(), SkySpans::EMPTY)),
+    );
+    sky_spans.borrow_mut().reset(w, h);
+    sky_spans.borrow_mut().view = Some(sky_view);
     let world_headnode = bsp
         .models
         .first()
@@ -3734,17 +3905,7 @@ fn draw_world_textured(
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
             SurfKind::Turb => SurfaceMode::Turb { turb, time },
-            SurfKind::Sky => SurfaceMode::Sky {
-                time,
-                view: SkyView {
-                    forward,
-                    right,
-                    up,
-                    cx,
-                    cy,
-                    longest: (w.max(h)) as f32,
-                },
-            },
+            SurfKind::Sky => SurfaceMode::Sky { view: sky_view, defer: Some((&sky_spans, face_index as u32 + 1)) },
         };
 
         // Build the view-space polygon (vx,vy,vz,s,t per world vertex), then clip
@@ -3881,6 +4042,7 @@ fn draw_world_textured(
 
     // Return the marking scratch for the next pass/frame (keeps its capacity).
     DLIGHT_BITS_SCRATCH.with(|b| *b.borrow_mut() = dlight_bits);
+    SKY_SPANS_SCRATCH.with(|b| *b.borrow_mut() = sky_spans.into_inner());
 
     // Flush sub-phase timers. `setup` = whole draw-loop body minus the measured
     // lightmap + surf-block calls (so it captures geom-cache fetch, the culls,
@@ -4101,17 +4263,7 @@ fn draw_submodel(
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
             SurfKind::Turb => SurfaceMode::Turb { turb, time },
-            SurfKind::Sky => SurfaceMode::Sky {
-                time,
-                view: SkyView {
-                    forward,
-                    right,
-                    up,
-                    cx,
-                    cy,
-                    longest: (w.max(h)) as f32,
-                },
-            },
+            SurfKind::Sky => SurfaceMode::Sky { view: SkyView::new(forward, right, up, w, h, time), defer: None },
         };
 
         // Build the view-space polygon from the SHIFTED vertices (for vx/vy/vz)
@@ -5292,6 +5444,9 @@ pub fn render_scene_ext_sprited(
         draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
     }
     if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
+    // The sky, span by span, now that every brush surface that can cover it has
+    // been drawn (id: `D_DrawSkyScans8` inside `D_DrawSurfaces`, before entities).
+    resolve_sky_spans(&mut image, &zbuf, bsp, palette);
     let ta = stats_on().then(std::time::Instant::now);
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, w, h, palette, dlights, light_styles, time);
@@ -12081,21 +12236,14 @@ mod tests {
         let (w, h) = (48usize, 48usize);
         // Build a SkyView for a given look direction (forward), with an orthonormal
         // right/up basis. This stands in for the camera the world pass passes in.
-        let make_view = |forward: Vec3| {
+        let make_view = |forward: Vec3, time: f32| {
             let (f, _) = normalize(forward);
             // right = forward x worldup, up = right x forward (orthonormal-ish).
             let (right, _) = normalize(cross(f, [0.0, 0.0, 1.0]));
             let (up, _) = normalize(cross(right, f));
-            SkyView {
-                forward: f,
-                right,
-                up,
-                cx: w as f32 / 2.0,
-                cy: h as f32 / 2.0,
-                longest: w.max(h) as f32,
-            }
+            SkyView::new(f, right, up, w, h, time)
         };
-        let render_at = |time: f32, view: SkyView| {
+        let render_at = |view: SkyView| {
             let mut img = Image::new(w, h, [0, 0, 0]); // background = pure black
             let mut zb = vec![f32::INFINITY; w * h];
             // The (s,t) here are IGNORED by the sky path (it uses the view ray),
@@ -12106,14 +12254,13 @@ mod tests {
             raster_triangle_tex(
                 &mut img, &mut zb, v0, v1, v2,
                 &pixels, 256, 128, &pal, 1.0, None,
-                SurfaceMode::Sky { time, view },
+                SurfaceMode::Sky { view, defer: None },
                 None,
             );
             img
         };
-        let view_n = make_view([1.0, 0.0, 0.0]); // looking +X
-        let a = render_at(0.0, view_n);
-        let b = render_at(1.0, view_n);
+        let a = render_at(make_view([1.0, 0.0, 0.0], 0.0)); // looking +X
+        let b = render_at(make_view([1.0, 0.0, 0.0], 1.0));
 
         // (1) Non-background: the sky drew real texels (not a flat empty frame).
         let drawn = a.rgb.iter().filter(|&&p| p != [0, 0, 0]).count();
@@ -12125,36 +12272,78 @@ mod tests {
 
         // (3) View-dependent: looking a different direction shows a different patch
         // of sky (the whole point of projecting the view ray).
-        let view_e = make_view([0.0, 1.0, 0.0]); // looking +Y
-        let c = render_at(0.0, view_e);
+        let c = render_at(make_view([0.0, 1.0, 0.0], 0.0)); // looking +Y
         let view_diff = a.rgb.iter().zip(c.rgb.iter()).filter(|(x, y)| x != y).count();
         assert!(view_diff > 0, "sky must change with the view direction (dome projection)");
     }
 
     #[test]
-    fn sky_texel_composites_overlay_over_background() {
-        // Where the overlay (left half) is transparent (index 0), the background
-        // (right half) shows through; where the overlay is opaque, it wins. At
-        // time 0 there is no scroll, so the layout maps directly.
+    fn sky_sample_composites_the_shifted_front_over_the_back() {
+        // R_MakeSky: where the front layer (left half) is transparent (index 0)
+        // the back layer (right half, unshifted) shows through; where it is
+        // opaque it wins — read `shift` texels further along on both axes.
         let pixels = synthetic_sky_pixels();
         let tw = 256usize;
-        let th = 128usize;
-
-        // sky_texel scales (s,t) by 0.125 internally, so to land on overlay
-        // column `c` (in [0,128)) we pass s = c/0.125 = c*8.
-        // Column 0 of the overlay is transparent (x<42) -> shows the background's
-        // column 0 (= 1 + (0+0)%200 = 1).
-        let at0 = sky_texel(&pixels, tw, th, 0.0, 0.0, 0.0);
-        assert_eq!(at0, 1, "transparent overlay should reveal background texel");
-
-        // Column 64 of the overlay is opaque (x>=42) -> the overlay value 200.
-        let at64 = sky_texel(&pixels, tw, th, 64.0 * 8.0, 0.0, 0.0);
-        assert_eq!(at64, 200, "opaque overlay texel should win over background");
-
-        // A degenerate (too-small) sky texture never panics and returns index 0
-        // (everything out of range).
+        let fx = |x: i32| x << 16; // a texel column as a 16.16 coordinate
+        // Front column 0 is transparent (x < 42): the back's (0,0) = 1.
+        assert_eq!(sky_sample(&pixels, tw, fx(0), fx(0), 0), 1);
+        // Front column 64 is opaque: 200.
+        assert_eq!(sky_sample(&pixels, tw, fx(64), fx(0), 0), 200);
+        // Shifted by 50, column 0 reads the front's column 50 (opaque) ...
+        assert_eq!(sky_sample(&pixels, tw, fx(0), fx(0), 50), 200);
+        // ... and column 100 wraps to the front's 150 & 127 = 22 (transparent),
+        // so the back shows at the UNSHIFTED (100, 3): 1 + (100+3)%200.
+        assert_eq!(sky_sample(&pixels, tw, fx(100), fx(3), 50), 104);
+        // Coordinates wrap at 128 texels (`R_SKY_SMASK`), negatives included.
+        assert_eq!(sky_sample(&pixels, tw, fx(128 + 64), fx(-128), 0), 200);
+        // A degenerate (too-small) sky texture never panics: index 0.
         let tiny = vec![0u8; 4];
-        assert_eq!(sky_texel(&tiny, 2, 2, 1e6, -1e6, 5.0), 0);
+        assert_eq!(sky_sample(&tiny, 2, fx(1000), fx(-1000), 5), 0);
+    }
+
+    #[test]
+    fn sky_view_front_layer_scrolls_twice_as_fast() {
+        // R_SetSkyFrame + R_MakeSky: the whole sky scrolls skytime*8 texels
+        // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top.
+        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, 1.6);
+        assert_eq!((v.scroll, v.shift), (12.8, 12));
+        // skytime wraps at SKYSIZE*4*1 = 512 s.
+        let w = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, 513.0);
+        assert_eq!((w.scroll, w.shift), (8.0, 8));
+        // D_Sky_uv_To_st at the integer screen centre, looking along +X: the ray
+        // is +X, so s = (scroll + 378) * 0x10000 and t = scroll * 0x10000.
+        assert_eq!((v.half_w, v.half_h), (160, 100));
+        let (s, t) = sky_uv_to_st(160, 100, &v);
+        assert_eq!((s >> 16, t >> 16), (390, 12));
+    }
+
+    #[test]
+    fn sky_span_steps_every_32_pixels_like_d_drawskyscans8() {
+        // A 40-pixel span: exact at u0 and u0+32, stepped by (next-cur)>>5 in
+        // between, then the 8-pixel tail stepped by division over 7.
+        let pixels = synthetic_sky_pixels();
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, 0, 0];
+        }
+        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320, 200, 3.3);
+        let (u0, row, n) = (17, 60, 40);
+        let mut out = vec![[0u8; 3]; n as usize];
+        draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v, &pal);
+        let (s0, t0) = sky_uv_to_st(u0, row, &v);
+        let (s1, t1) = sky_uv_to_st(u0 + 32, row, &v);
+        let (s2, t2) = sky_uv_to_st(u0 + 39, row, &v);
+        let mut want = Vec::new();
+        let (ss, ts) = ((s1 - s0) >> 5, (t1 - t0) >> 5);
+        for i in 0..32 {
+            want.push(sky_sample(&pixels, 256, s0 + i * ss, t0 + i * ts, v.shift));
+        }
+        let (ss, ts) = ((s2 - s1) / 7, (t2 - t1) / 7);
+        for i in 0..8 {
+            want.push(sky_sample(&pixels, 256, s1 + i * ss, t1 + i * ts, v.shift));
+        }
+        let got: Vec<u8> = out.iter().map(|p| p[0]).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
