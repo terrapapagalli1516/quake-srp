@@ -45,12 +45,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
     }
     let mut sizes = Vec::new();
     for r in res.split(',') {
-        let (a, b) = r.split_once('x').ok_or("--res WxH")?;
-        let (w, h): (usize, usize) = (a.parse().map_err(|_| "--res WxH")?, b.parse().map_err(|_| "--res WxH")?);
-        if w == 0 || h == 0 {
-            return Err("--res: a zero-sized screen".into());
-        }
-        sizes.push((w, h));
+        sizes.push(super::parse_res(r)?);
     }
 
     // The archive in memory, as the page embeds it.

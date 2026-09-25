@@ -1756,6 +1756,21 @@ each; the C followed and the evidence are in the commit messages.
   muzzle-flash rows (`+attack --settle 3`, world and ents, e1m1/2/3/7) and the
   goldens are unchanged (no moved model in reach). Test
   `a_moved_brush_model_is_lit_by_the_lights_where_they_are`.
+- ✅ **No view larger than id's `MAXWIDTH` x `MAXHEIGHT`** (MED). A view
+  2048 or more pixels wide panicked in release: the edge renderer's 12.20
+  fixed-point u of the view's right edge, `(w << 20) + 0xFFFFF`, wraps an i32
+  there, and `R_StepActiveU`'s push-back walked off the edge list
+  (`quaketool view … --res 2048x400`, index out of bounds). id never has such
+  a view: `r_shared.h` has `MAXWIDTH` 1280 and `MAXHEIGHT` 1024, which size
+  its tables (`newedges[MAXHEIGHT]`, `d_scantable`), and `vid_win.c` /
+  `vid_ext.c` list no larger mode. Now `render::MAXWIDTH`/`MAXHEIGHT` and
+  `clamp_to_max`: `render_scene_ext_sprited` draws at most that size (the
+  returned image says what it drew; a screen composed around a smaller view
+  gets the backtile, no panic), `render_edges` refuses anything larger, and
+  quaketool's `--res` (view, play, timedemo, `QUAKE_RES`) clamps with a note
+  on stderr. The page already capped its modes at 1280x800. Tests
+  `no_view_is_larger_than_id_maxwidth_by_maxheight`,
+  `res_is_at_most_id_largest_mode`.
 
 ## LOW (27)
 

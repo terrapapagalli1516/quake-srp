@@ -94,6 +94,28 @@ pub use warp::apply_warp;
 pub use world::{BModelInstance, ExternalBModel};
 
 // ---------------------------------------------------------------------------
+// The largest view
+// ---------------------------------------------------------------------------
+
+/// id's widest and tallest view (`r_shared.h`: `MAXWIDTH` 1280, `MAXHEIGHT`
+/// 1024): `vid_win.c` and `vid_ext.c` offer no larger mode, and the renderer
+/// sizes its tables by them (`newedges[MAXHEIGHT]`, `d_scantable`, the warp's
+/// `column[MAXWIDTH+AMP2*2]`). The edge renderer's 12.20 fixed-point u
+/// (`(vid.width << 20) + 0xFFFFF` for the right edge) wraps a 32-bit int from
+/// 2048 pixels wide, so a larger view is never drawn: [`render_scene_ext_sprited`]
+/// renders at most this size ([`clamp_to_max`]).
+pub const MAXWIDTH: usize = 1280;
+/// See [`MAXWIDTH`].
+pub const MAXHEIGHT: usize = 1024;
+
+/// `(w, h)` limited to id's largest view, [`MAXWIDTH`] x [`MAXHEIGHT`], as
+/// its video drivers never set a larger mode.
+#[must_use]
+pub fn clamp_to_max(w: usize, h: usize) -> (usize, usize) {
+    (w.min(MAXWIDTH), h.min(MAXHEIGHT))
+}
+
+// ---------------------------------------------------------------------------
 // Image
 // ---------------------------------------------------------------------------
 
@@ -849,6 +871,10 @@ pub fn render_scene_ext(
 /// written into the never-cleared 16-bit `d_pzbuffer` — then the entities
 /// against that buffer. Neither the image nor the z-buffer is cleared: the
 /// spans cover the view.
+///
+/// The view is at most id's [`MAXWIDTH`] x [`MAXHEIGHT`]: a larger `w` or `h`
+/// is clamped ([`clamp_to_max`]), and the returned image's `w`/`h` say what
+/// was drawn.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext_sprited(
     bsp: &Bsp,
@@ -868,6 +894,8 @@ pub fn render_scene_ext_sprited(
     sprites: &[SpriteInstance],
     opts: &RenderOptions,
 ) -> Image {
+    // No mode is larger than id's (the edge renderer's fixed point needs it).
+    let (w, h) = clamp_to_max(w, h);
     // The frame's buffers, kept across frames (see [`recycle_image`]).
     let mut image = Image::reused_uncleared(w, h);
     if w == 0 || h == 0 {

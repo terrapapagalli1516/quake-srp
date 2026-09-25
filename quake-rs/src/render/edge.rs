@@ -427,7 +427,13 @@ pub(super) fn render_edges(
     external: &[ExternalBModel],
 ) {
     let (w, h) = (image.w, image.h);
-    if w == 0 || h == 0 || izbuf.len() < w * h || image.rgb.len() < w * h {
+    // Nothing larger than id's MAXWIDTH x MAXHEIGHT: from 2048 wide the
+    // 12.20 fixed-point u of the view's right edge wraps an i32
+    // ([`super::MAXWIDTH`]; the caller clamps, this refuses).
+    if w == 0 || h == 0 || w > super::MAXWIDTH || h > super::MAXHEIGHT {
+        return;
+    }
+    if izbuf.len() < w * h || image.rgb.len() < w * h {
         return;
     }
     EDGE_STATE.with(|cell| {
@@ -2088,6 +2094,27 @@ mod tests {
             let c = cross(sub(poly[1], poly[0]), sub(poly[2], poly[1]));
             assert!(dot(c, n) < 0.0, "face {f:?} is wound counter-clockwise");
         }
+    }
+
+    #[test]
+    fn no_view_is_larger_than_id_maxwidth_by_maxheight() {
+        // r_shared.h's MAXWIDTH x MAXHEIGHT (1280 x 1024): from 2048 wide the
+        // right edge's 12.20 u, `(w << 20) + 0xFFFFF`, wraps an i32 and the
+        // scan indexed past its edges (a release panic). The entry clamps...
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let wide = render(&cam, 2048, 400);
+        assert_eq!((wide.w, wide.h), (1280, 400));
+        assert_eq!(wide.rgb, render(&cam, 1280, 400).rgb, "drawn as id's widest mode");
+        let tall = render(&cam, 320, 1100);
+        assert_eq!((tall.w, tall.h), (320, 1024));
+        // ...and the edge renderer refuses what it cannot draw.
+        let mut image = Image { w: 2048, h: 8, rgb: vec![[1, 2, 3]; 2048 * 8] };
+        let mut z = vec![7i16; 2048 * 8];
+        render_edges(
+            &mut image, &mut z, &demo_room(), &cam, &RenderOptions::default(), &palette(), &TurbTable::new(),
+            0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None, &[], &[],
+        );
+        assert!(image.rgb.iter().all(|&p| p == [1, 2, 3]) && z.iter().all(|&v| v == 7));
     }
 
     #[test]
