@@ -108,7 +108,7 @@ pub(super) struct TurbTable {
 
 impl TurbTable {
     /// Build the table once at render start (`f64::sin` is not `const`).
-    // `3.14159` is id's literal; exact pi would move entries (see `apply_warp`).
+    // `3.14159` is id's literal; exact pi would move entries (see `intsintable`).
     #[allow(clippy::approx_constant)]
     pub(super) fn new() -> TurbTable {
         let mut tab = [0i32; 2 * TURB_CYCLE];
