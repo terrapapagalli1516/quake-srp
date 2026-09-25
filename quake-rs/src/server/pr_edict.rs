@@ -335,8 +335,8 @@ impl Server {
         // frame, items settle onto the floor) so the world is in its resting
         // initial state before play begins. A per-entity think fault is isolated
         // by run_frame (it never aborts the load).
-        let _ = self.run_frame(SETTLE_FRAMETIME);
-        let _ = self.run_frame(SETTLE_FRAMETIME);
+        let _ = self.run_frame_f64(SETTLE_FRAMETIME);
+        let _ = self.run_frame_f64(SETTLE_FRAMETIME);
 
         // classnames sorted by count desc, then name asc for determinism.
         classname_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

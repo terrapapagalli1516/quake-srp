@@ -39,8 +39,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      and when a timedemo finishes
 //   oracle_shot path                   queue a shot: writes path.pgm (raw palette
 //                                      indices), path.ppm (RGB), path.json (the view,
-//                                      clock, vrect, light styles, ...) and path.ents
+//                                      clock, vrect, light styles, ...), path.ents
 //                                      (the entities the frame drew, one per line)
+//                                      and path.parts (the particles it drew)
 //   oracle_spans 8|16|1                 (a cvar) the textured-span routine: 8 = id's portable
 //                                      C D_DrawSpans8 (default), 16 = d_draw16.s's D_DrawSpans16 in C
 //                                      (the x86 asm default, d_subdiv16 1, its integer steps), 1 = exact
@@ -553,6 +554,25 @@ static void Oracle_Dump (oracle_shot_t *s, int stage)
 	Sys_Printf ("oracle: wrote %s.{pgm,ppm,json,ents} (%dx%d, t=%.3f)\n", s->path, vid.width, vid.height, used_time);
 }
 
+// The particles R_DrawParticles is about to draw, as path.parts: the ones
+// alive at cl.time (its kill loops drop `die < cl.time` first), in list order,
+// "x y z color" (color is a float, stored to the byte buffer). Written before the render, which moves each particle after
+// drawing it.
+extern particle_t	*active_particles;
+
+static void Oracle_DumpParticles (oracle_shot_t *s)
+{
+	FILE		*f;
+	particle_t	*p;
+
+	f = Oracle_Open (s->path, "parts");
+	fprintf (f, "# org[3] color: R_DrawParticles' list order, alive at cl.time\n");
+	for (p=active_particles ; p ; p=p->next)
+		if (!(p->die < cl.time))
+			fprintf (f, "%.9g %.9g %.9g %d\n", p->org[0], p->org[1], p->org[2], (int)p->color);
+	fclose (f);
+}
+
 static void Oracle_MaybeExit (void)
 {
 	if (exit_when_done && numshots && curshot == numshots && !full_pending)
@@ -623,6 +643,8 @@ void __wrap_R_RenderView (void)
 	}
 	if (active && active->has_time)
 		cl.time = active->time;
+	if (active)
+		Oracle_DumpParticles (active);
 
 	__real_R_RenderView ();
 	used_time = cl.time;

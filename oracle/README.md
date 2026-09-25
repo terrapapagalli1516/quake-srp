@@ -68,22 +68,24 @@ loopback-only `net_none`, and three files of ours (`c/`, GPL like id's):
   dump `vid.buffer` the instant the 3-D view is done — before the sbar, console,
   notify text or centerprint touch it — as `.pgm` (raw palette indices, the real
   output), `.ppm`, `.json` (vieworg/angles, `cl.time`, vrect, fov, the 64
-  `d_lightstylevalue`s, viewleaf contents, ...) and `.ents` (every entity on the
+  `d_lightstylevalue`s, viewleaf contents, ...), `.ents` (every entity on the
   frame's draw list, statics included: model, origin, angles, frame, skin,
-  syncbase).
+  syncbase) and `.parts` (the particles `R_DrawParticles` is about to draw, in
+  its order: origin and colour, written before the render moves them).
 
 It is built as a static 32-bit i386 binary (1996 code assumes 32-bit pointers) in
 a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
 
 **Port side.** `quaketool view <pak> <map> <out.ppm> [--res] [--origin] [--angles]
-[--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--viewmodel M:F] [--bench N]` renders one exactly
+[--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--bench N]` renders one exactly
 specified view through the same `render_scene_ext_sprited` the game uses. It is a
 new subcommand; no existing output changed (goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`).
 
 **Matching inputs.** By default the camera and clock are id's own first frame after
 signon (`V_CalcRefdef`'s eye, `cl.time` = 1.6 on these maps), handed verbatim to
 the port. In `ents` mode the port draws **id's entity list** (the `.ents` file),
-so the diff measures rendering, not the simulation. Note: that first-frame eye is
+so the diff measures rendering, not the simulation; in both modes it draws id's
+particles (the `.parts` file). Note: that first-frame eye is
 12 units below the standing eye height — `V_CalcRefdef`'s stair smoothing starts
 from `static float oldz = 0` and clamps to 12 below the origin; `--settle 2` gives
 the steady eye. (The port's live path starts `oldz` at the origin, so its first
@@ -122,6 +124,25 @@ is how the browser page shows every preset). 320x200 against `--spans 16`: 100.0
 above the status bar, `--viewsize 100`) 100.00 / 99.46 / 100.00 / 100.00. Before
 the port's projection took the aspect it scored 31.35 / 26.90 / 20.23 / 14.23
 against id's 4:3 frame (then with id at mip 0 and exact perspective).
+
+**Underwater** (e1m1's pool, `--view=750,898,-332,0,90,0 --time 1.6`: id's
+`r_dowarp` view, rendered into the 320x200-at-most warp buffer and stretched
+over the screen by `D_WarpScreen`), `--spans 16`: 99.89 / 99.89 / 99.90 / 99.89
+at 320x200 / 640x400 / 960x600 / 1280x800, 99.93 at all four at the page's
+aspect. `compare.py` places the view by the `.json`'s `scr_vrect`: above
+320x200 an underwater frame's `vrect` is the warp buffer's rectangle, not the
+screen's. Below viewsize 120 an underwater view is not comparable (the port's
+`view --vrect` draws it unwarped; `compare.py` warns).
+
+**Particles** (the shotgun's puffs on e1m1's first wall: `--c-cmd +attack
+--settle 3`, 120 particles; the port draws id's own list, the `.parts` file):
+over the pixels a particle touches in either renderer, 100% at 320x200 /
+640x400 / 960x600 (39 / 151 / 393 px) since `quake/polish2`'s port of
+`D_DrawParticle`; before, 12.8 / 12.6 / 15.0% (the walls' `xscale` instead of
+`xscaleshrink`, a centred square of `focal/z` pixels instead of `izi >>
+d_pix_shift` from `(u, v)`, clipping instead of dropping at the edge, and a
+float depth test where id's quantized 1/z lets the later particle win a tie).
+The rest of that frame is the settle-3 arch below.
 
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
 1432.386,1397.978,233.254,9.344,-103.449,0`, `--spans 16`) scores 99.99% world and
@@ -295,11 +316,10 @@ Timings are noisy: compare within one sitting.
   rounding. Other asm-vs-C differences are unmeasured.
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
   1996. The x87-vs-SSE check bounds the float noise at ~0.03%.
-- Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No particles,
-  underwater warp, sprites or intermission were compared (the oracle can render
-  them; nobody looked yet). Dynamic lights: the muzzle-flash frames above, since
-  PERF_PLAN A2 (`AUDIT.md`); the port's `view` draws no particles, so a shot's
-  puffs count as differences there.
+- Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No sprites or
+  intermission were compared (the oracle can render them; nobody looked yet);
+  the underwater warp in one view and particles in one burst (above). Dynamic
+  lights: the muzzle-flash frames above, since PERF_PLAN A2 (`AUDIT.md`).
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
 - `viewsize` below 120: the 3-D view rectangle is compared (`--viewsize N`);
@@ -361,14 +381,14 @@ scenario's shots, before the branch -> after.
 | faces by health, pain, dead (9) | 98.4 -> 100 | 4.1 -> 100 | 2.7 -> 100 |
 | quad, ring, pentagram, suit, ring+pent (5) | 98.4 -> 100 | 3.3 -> 100 | 2.4 -> 100 |
 | armour types (3) | 98.4 -> 100 | 3.6 -> 100 | 2.5 -> 100 |
-| new-weapon flash (1) | 96.7 -> 98.3 | 4.1 -> 99.2 | 2.9 -> 99.4 |
+| new-weapon flash (1) | 96.7 -> 98.3 -> 100 | 4.1 -> 99.2 -> 100 | 2.9 -> 99.4 -> 100 |
 | Tab scoreboard at viewsize 100/110/120/50 (4) | 98.4 -> 100 | 4.2 -> 100 | 2.0 -> 100 |
 | centerprint 1/3/5 lines, expired (4) | 91.6 -> 100 | 3.8 -> 100 | 2.7 -> 100 |
 | notify lines (1) | 98.6 -> 100 | 3.8 -> 100 | 2.6 -> 100 |
 | console sliding, down, typing (3) | 36.7 -> 99.1 | 4.8 -> 98.2 | 2.8 -> 97.3 |
 | intermission, also at viewsize 50 (2) | 100 -> 100 | 0.1 -> 100 | 0.0 -> 100 |
 | finale mid-reveal, later (2) | 85.7 -> 100 | 0.6 -> 100 | 0.0 -> 100 |
-| menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 | 43.8 -> 99.9 | 47.1 -> 99.95 |
+| menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 -> 100 | 43.8 -> 99.9 -> 100 | 47.1 -> 99.95 -> 100 |
 | menus: options, customize, video (3) | 95.4 -> 95.5 | 41.5 -> 98.8 | 44.7 -> 99.5 |
 | menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
 | quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
@@ -392,16 +412,21 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
 - *Video Options* (2422 px): the mode list is the video driver's (`VID_MenuDraw`
   in `vid_win.c`/`vid_dos.c`), and the port's is its own; only the title is
   id's in both.
-- *The new-weapon flash* (256 px): not the 2-D layer. The port's `sv.time`
-  adds up in f32 (`sv_phys.rs`: `gset_float("time", start_time + dt)`), id's is a
-  double; after 60 frames of 0.1 s the port's clock is 7.2999954, so
-  `(int)((cl.time - item_gettime)*10)` lands on 2 where id's gives 3 — the flash
-  shows the frame before. At the oracle's exact 0.1 s frames every sample sits on
-  such a boundary; at real frame times it is a one-frame phase shift.
-- *Returning to Single Player from Load* (206 px): id keeps each menu's cursor
-  (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...: Escape from
-  Options lands on "Options"); the port's one cursor starts every screen at its
-  first row. Behaviour in `menu.rs`, left for after the Extras-menu work.
+- ~~*The new-weapon flash* (256 px)~~: not the 2-D layer. The port's `sv.time`
+  added up in f32, id's is a double; after 60 frames of 0.1 s the port's clock
+  was 7.2999954, so `(int)((cl.time - item_gettime)*10)` landed on 2 where id's
+  gives 3 — the flash showed the frame before. `sv.time` is a double since
+  `quake/polish2`: 100% in all three modes.
+- ~~*Returning to Single Player from Load* (206 px)~~: id keeps each menu's
+  cursor (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...:
+  Escape from Options lands on "Options"); the port's one cursor started every
+  screen at its first row. Per-menu cursors since `quake/polish2`: 100%.
+- *Options* (291 px): the port's 14th row, Web extras (in the slot of the
+  `_WIN32` build's "Use Mouse"), which id's DOS/Linux list does not have. The
+  `menu_options` scenario reaches Video Options with twelve DOWNs, not one UP,
+  since UP from row 0 wraps to that 14th row in the port (it had been
+  comparing id's Video Modes with the port's Web extras page since the extras
+  merge).
 - Not in the matrix: the pause plaque (the port has no `pause`), the loading
   plaque (the port loads within a frame and draws none), `SCR_ModalMessage`'s New
   Game question (it blocks in a key loop the null input driver never ends; its

@@ -9,7 +9,7 @@ ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.
 > a faithful software renderer (lightmaps, the lit-surface cache, dynamic lights with `R_MarkLights`
 > gating, warp/sky, particles, beams, viewmodel, HUD/menus/console), demo playback, and sound event/
 > ambient-loop plumbing (mixing itself is the host's job — the browser uses Web Audio). What it does NOT
-> do: multiplayer/netcode, save/load, CD audio. Every subsystem was audited against the original C
+> do: multiplayer/netcode, CD audio. Every subsystem was audited against the original C
 > (66-finding ledger + seven review rounds in `../AUDIT.md`).
 
 ## Status
@@ -71,8 +71,8 @@ ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.
 | Sound control (what reaches the mixer) | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server::msg` | ✅ `S_StartSound`'s channel choice (`SND_PickChannel`'s override, the view-entity rule), `S_StaticSound`'s loop gates, `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap), `PF_ambientsound` static loops, `GetWavinfo` cue loops; the mixing is the platform's (the browser: Web Audio) |
 | Little-endian byte reader, error type | (replaces `LittleLong`/`Sys_Error`) | `read`, `error` | ✅ scaffold |
 
-The crate is **~39,000 lines of zero-dependency, `unsafe`-free Rust with 458 lib + 8 integration tests**
-(all data-free; the sibling `quake-wasm` crate adds 48 e2e tests against the real embedded shareware pak).
+The crate is **~39,000 lines of zero-dependency, `unsafe`-free Rust with ~580 lib + 8 integration tests**
+(all data-free; the sibling `quake-wasm` crate adds ~120 e2e tests against the real embedded shareware pak).
 
 ### Validated against the real Quake shareware
 

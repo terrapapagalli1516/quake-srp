@@ -557,13 +557,8 @@ mod tests {
         );
 
         // Back to 1.0: the identity special case restores the EXACT bytes.
-        menu_cancel(); // reopen (lands on Main)
-        menu_down();
-        menu_down();
-        menu_select();
-        for _ in 0..4 {
-            menu_down();
-        }
+        menu_cancel(); // reopen: Main, still on "Options" (m_main_cursor)
+        menu_select(); // Options, still on Brightness (options_cursor)
         menu_left(); // gamma 0.95 -> 1.0 (clamped at GAMMA_MAX)
         menu_cancel();
         menu_cancel();

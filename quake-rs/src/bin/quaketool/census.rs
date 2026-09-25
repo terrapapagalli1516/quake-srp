@@ -50,7 +50,8 @@ const FL_MONSTER: i32 = 32;
 const SOLID_TRIGGER: i32 = 1;
 const SOLID_BSP: i32 = 4;
 const MOVETYPE_PUSH: i32 = 7;
-const DT: f32 = 0.1;
+/// id's frame at the oracle's pace: `host_frametime` exactly 0.1 (a double).
+const DT: f64 = 0.1;
 
 /// The builtin names by number (pr_cmds.c `pr_builtin[]`), for the report.
 fn builtin_name(n: usize) -> &'static str {
@@ -231,7 +232,7 @@ fn frame(server: &mut Server, pak: &Pak, run: &mut Run, cmd: &UserCmd) {
     if fix != 0.0 {
         run.fixangle_seen += 1;
     }
-    match server.client_frame(cmd, DT) {
+    match server.client_frame_f64(cmd, DT) {
         Ok(fr) => {
             if fr.think_errors > 0 {
                 let tail: String = server.vm.output.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
@@ -292,7 +293,7 @@ fn idle(server: &mut Server, pak: &Pak, run: &mut Run, secs: f32, buttons: i32) 
     let player = server.player_edict();
     let va = server.vm.ent_get_vector(player, "v_angle");
     let cmd = UserCmd { yaw: va[1], pitch: va[0], buttons, ..Default::default() };
-    for _ in 0..(secs / DT).round() as usize {
+    for _ in 0..(f64::from(secs) / DT).round() as usize {
         frame(server, pak, run, &cmd);
     }
 }
@@ -372,18 +373,17 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
     install_wrappers(&mut server.vm);
     server.set_map_name(&path);
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
-    let player = server.connect_client().map_err(|e| e.to_string())?;
-    server.run_signon_frames();
-    let spawn_log: Vec<String> = LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
-
-    let mut run = Run::default();
-    drain(&mut server, pak, &mut run);
     // Every brush pusher (doors, plats, buttons, trains, secret doors, walls);
-    // not the world, which SV_SpawnServer also makes MOVETYPE_PUSH.
+    // not the world, which SV_SpawnServer also makes MOVETYPE_PUSH. Their
+    // baselines are taken before the player connects: PutClientInServer's
+    // force_retouch opens doors whose trigger field holds a monster during
+    // the signon frames (e1m8's *6), and a door already open at the baseline
+    // would read "never moved".
+    let mut pushers = BTreeMap::new();
     for e in 1..server.vm.num_edicts() {
         if live(&server, e) && server.vm.ent_get_float(e as i32, "movetype") as i32 == MOVETYPE_PUSH {
             let ei = e as i32;
-            run.pushers.insert(
+            pushers.insert(
                 ei,
                 (
                     server.vm.ent_get_string(ei, "classname"),
@@ -394,6 +394,13 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
             );
         }
     }
+    let player = server.connect_client().map_err(|e| e.to_string())?;
+    server.run_signon_frames();
+    let spawn_log: Vec<String> = LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
+
+    let mut run = Run { pushers, ..Run::default() };
+    track_pushers(&server, &mut run); // the signon frames' moves
+    drain(&mut server, pak, &mut run);
 
     let _ = writeln!(o, "\n=== {map} ===");
     let _ = writeln!(
@@ -838,7 +845,7 @@ pub fn cmd_census_edicts(pak_path: &str, map: &str, times: &str) -> Result<Strin
     let mut o = String::new();
     for t in times {
         while server.time() + 0.05 < t {
-            let _ = server.client_frame(&cmd, DT);
+            let _ = server.client_frame_f64(&cmd, DT);
             let _ = server.drain_sounds();
             let _ = server.drain_messages();
             let _ = server.drain_temp_entities();

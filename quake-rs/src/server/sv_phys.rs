@@ -35,6 +35,14 @@ impl Server {
     /// The host is PRESENT throughout the loop (think functions reach it via
     /// `with_host`); only the brief `PushEntity` trace borrows it out.
     pub fn run_frame(&mut self, dt: f32) -> Result<FrameReport> {
+        self.run_frame_f64(f64::from(dt))
+    }
+
+    /// [`Server::run_frame`] with id's `double host_frametime`: `sv.time`
+    /// (a double) advances by exactly it, as `SV_Physics` does.
+    pub fn run_frame_f64(&mut self, host_frametime: f64) -> Result<FrameReport> {
+        let dt = host_frametime as f32;
+        self.vm.host_frametime = host_frametime;
         // host_frametime = dt; sv.time advances at the END in the C, but the
         // think-time test compares against sv.time + host_frametime, so we set
         // frametime now and bump time after the loop.
@@ -44,10 +52,8 @@ impl Server {
         reset_message_parsers();
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
         self.cleanup_ents();
+        // (float)sv.time, what every `pr_global_struct->time = sv.time` stores.
         let start_time = self.time();
-        // Record sv.time for the monster-locomotion relink touches (SV_TouchLinks
-        // uses sv.time, not the clamped per-think `time` global).
-        self.vm.sv_time = start_time;
 
         let mut thinks_fired = 0usize;
         let mut think_errors = 0usize;
@@ -89,8 +95,7 @@ impl Server {
         }
 
         self.decrement_force_retouch();
-        // sv.time += host_frametime (end of SV_Physics).
-        self.vm.set_glob_float(self.vm.go.time, start_time + dt);
+        self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
         // sync any updates from the write transport into the owned table.
@@ -103,6 +108,16 @@ impl Server {
         })
     }
 
+    /// The end of `SV_Physics`: `sv.time += host_frametime`, in double. (The
+    /// port also leaves the `time` global at the new time's float between
+    /// frames; in the C it keeps the frame's last value, but every C path that
+    /// runs QuakeC outside `SV_Physics` sets it to `sv.time` first.)
+    fn end_physics_frame(&mut self, host_frametime: f64) {
+        self.vm.sv_time += host_frametime;
+        let t = self.time();
+        self.vm.set_glob_float(self.vm.go.time, t);
+    }
+
     /// Process one live edict for a frame: per-movetype physics plus
     /// `SV_RunThink`. Returns whether a think fired. `run_think` returns
     /// `(fired, alive)`; physics runs whenever the entity is still alive,
@@ -112,11 +127,11 @@ impl Server {
         match movetype {
             MOVETYPE_PUSH => self.physics_pusher(ent, start_time, dt),
             MOVETYPE_NONE => {
-                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                let (fired, _alive) = self.run_think(ent)?;
                 Ok(fired)
             }
             MOVETYPE_NOCLIP => {
-                let (fired, alive) = self.run_think(ent, start_time, dt)?;
+                let (fired, alive) = self.run_think(ent)?;
                 if alive {
                     self.integrate_noclip(ent, dt);
                 }
@@ -130,7 +145,7 @@ impl Server {
                 // resting on the floor still maintains watertype/waterlevel and
                 // splashes when pushed into liquid.
                 self.physics_step(ent, start_time, dt);
-                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                let (fired, _alive) = self.run_think(ent)?;
                 if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
                     self.check_water_transition(ent);
                 }
@@ -138,7 +153,7 @@ impl Server {
             }
             MOVETYPE_TOSS | MOVETYPE_BOUNCE | MOVETYPE_FLY | MOVETYPE_FLYMISSILE => {
                 // SV_Physics_Toss: think first; if alive, gravity + clipped move.
-                let (fired, alive) = self.run_think(ent, start_time, dt)?;
+                let (fired, alive) = self.run_think(ent)?;
                 if alive {
                     self.physics_toss(ent, movetype, start_time, dt);
                 }
@@ -147,7 +162,7 @@ impl Server {
             _ => {
                 // MOVETYPE_WALK and any others: think only (no client AI).
                 let _ = MOVETYPE_WALK;
-                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                let (fired, _alive) = self.run_think(ent)?;
                 Ok(fired)
             }
         }
@@ -167,7 +182,8 @@ impl Server {
         let oldltime = self.vm.ent_float(ent, self.vm.fo.ltime);
         let thinktime = self.vm.ent_float(ent, self.vm.fo.nextthink);
 
-        let movetime = if thinktime < oldltime + dt {
+        // thinktime < ent->v.ltime + host_frametime: float + double.
+        let movetime = if f64::from(thinktime) < f64::from(oldltime) + self.vm.host_frametime {
             let m = thinktime - oldltime;
             if m < 0.0 {
                 0.0
@@ -462,14 +478,17 @@ impl Server {
     /// due it returns `(false, true)` — nothing ran, the entity lives on, and
     /// the caller still runs per-movetype physics. Errors from the think
     /// propagate (the caller decides whether to abort the frame).
-    fn run_think(&mut self, ent: i32, sv_time: f32, dt: f32) -> Result<(bool, bool)> {
+    fn run_think(&mut self, ent: i32) -> Result<(bool, bool)> {
         let thinktime = self.vm.ent_float(ent, self.vm.fo.nextthink);
-        if thinktime <= 0.0 || thinktime > sv_time + dt {
+        // `thinktime > sv.time + host_frametime`: the float promoted, the sum
+        // in double (sv.time a double since server.h).
+        let sv_time = self.vm.sv_time;
+        if thinktime <= 0.0 || f64::from(thinktime) > sv_time + self.vm.host_frametime {
             // Not due: SV_RunThink returns true (alive); nothing fired.
             return Ok((false, true));
         }
-        // Don't let things stay in the past.
-        let thinktime = if thinktime < sv_time { sv_time } else { thinktime };
+        // Don't let things stay in the past (thinktime = sv.time: a float).
+        let thinktime = if f64::from(thinktime) < sv_time { sv_time as f32 } else { thinktime };
 
         self.vm.set_ent_float(ent, self.vm.fo.nextthink, 0.0);
         self.vm.set_glob_float(self.vm.go.time, thinktime);
@@ -854,6 +873,14 @@ impl Server {
     /// (`PlayerPreThink` -> movement -> `PlayerPostThink`), all others via the
     /// generic [`Self::process_entity`] path. `dt` is the frame time.
     pub fn client_frame(&mut self, cmd: &UserCmd, dt: f32) -> Result<FrameReport> {
+        self.client_frame_f64(cmd, f64::from(dt))
+    }
+
+    /// [`Server::client_frame`] with id's `double host_frametime`: `sv.time`
+    /// (a double) advances by exactly it, as `SV_Physics` does.
+    pub fn client_frame_f64(&mut self, cmd: &UserCmd, host_frametime: f64) -> Result<FrameReport> {
+        let dt = host_frametime as f32;
+        self.vm.host_frametime = host_frametime;
         // host_frametime = dt; sv.time advances at the END of SV_Physics in the
         // C, but the think-due test compares against sv.time + host_frametime, so
         // (as run_frame does) we set frametime now and bump time after the loop.
@@ -869,10 +896,8 @@ impl Server {
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before this
         // frame's thinks (the host already consumed it via entity_dlights()).
         self.cleanup_ents();
+        // (float)sv.time, what every `pr_global_struct->time = sv.time` stores.
         let start_time = self.time();
-        // Record sv.time for the monster-locomotion relink touches (SV_TouchLinks
-        // uses sv.time, not the clamped per-think `time` global).
-        self.vm.sv_time = start_time;
 
         // Host_ServerFrame runs SV_RunClients BEFORE SV_Physics: SV_ReadClientMove
         // copies the usercmd onto the client edict (v_angle, buttons, impulse),
@@ -942,8 +967,7 @@ impl Server {
             self.set_ideal_pitch(self.player);
         }
 
-        // sv.time += host_frametime (end of SV_Physics).
-        self.vm.set_glob_float(self.vm.go.time, start_time + dt);
+        self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
         // sync any updates from the write transport into the owned table.
@@ -985,14 +1009,14 @@ impl Server {
         let mut fired = false;
         match movetype {
             MOVETYPE_NONE => {
-                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                let (f, alive) = self.run_think(ent)?;
                 fired = f;
                 if !alive {
                     return Ok(fired);
                 }
             }
             MOVETYPE_WALK => {
-                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                let (f, alive) = self.run_think(ent)?;
                 fired = f;
                 if !alive {
                     return Ok(fired);
@@ -1012,7 +1036,7 @@ impl Server {
                 self.walk_move(ent, start_time, dt);
             }
             MOVETYPE_FLY => {
-                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                let (f, alive) = self.run_think(ent)?;
                 fired = f;
                 if !alive {
                     return Ok(fired);
@@ -1021,7 +1045,7 @@ impl Server {
                 self.player_fly_move(ent, start_time, dt);
             }
             MOVETYPE_NOCLIP => {
-                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                let (f, alive) = self.run_think(ent)?;
                 fired = f;
                 if !alive {
                     return Ok(fired);
@@ -1040,7 +1064,7 @@ impl Server {
                 // `velocity_z += random()*300`) and the fall back to the floor.
                 // Previously this fell into the think-only fallback arm and a
                 // corpse killed mid-air froze in place.
-                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                let (f, alive) = self.run_think(ent)?;
                 fired = f;
                 if !alive {
                     return Ok(fired);
@@ -1049,7 +1073,7 @@ impl Server {
             }
             _ => {
                 // Any other movetype on a client: think only (no movement).
-                let (f, _alive) = self.run_think(ent, start_time, dt)?;
+                let (f, _alive) = self.run_think(ent)?;
                 fired = f;
             }
         }
@@ -1669,6 +1693,86 @@ mod tests {
         assert!((server.vm.gget_float("startframe_time") - (t0 + 0.1)).abs() < 1e-6);
     }
 
+    /// A server whose StartFrame records `time` in `startframe_time` (40) and
+    /// whose function `record` stores `time` in `think_time` (41).
+    fn time_recording_server() -> Server {
+        let mut b = Builder::new();
+        b.entityfields = 8;
+        b.add_global("self", 4, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("startframe_time", EV_FLOAT, 40);
+        b.add_global("think_time", EV_FLOAT, 41);
+        b.add_field("nextthink", EV_FLOAT, 1);
+        b.add_field("think", EV_FUNCTION, 2);
+        b.add_field("movetype", EV_FLOAT, 3);
+        for (name, dst) in [("StartFrame", 40i16), ("record", 41)] {
+            b.add_function(
+                name,
+                vec![
+                    Statement { op: Op::StoreF as u16, a: 33, b: dst, c: 0 },
+                    Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+                ],
+            );
+        }
+        let progs = Progs::parse(&b.build()).expect("parse");
+        Server::new(empty_bsp(), progs).expect("server")
+    }
+
+    #[test]
+    fn sv_time_is_a_double_and_the_qc_time_global_its_float() {
+        // server.h: `double time`; SV_Physics ends with sv.time +=
+        // host_frametime and each pr_global_struct->time = sv.time stores a
+        // float. The port added the QC float global up in f32: after 63 frames
+        // of 0.1 s from 1.0 that is 7.2999954, a frame's flash early in
+        // (int)((cl.time - item_gettime)*10).
+        let mut server = time_recording_server();
+        assert_eq!(server.sv_time(), 1.0, "SV_SpawnServer: sv.time = 1.0");
+        let mut double = 1.0f64;
+        let mut float = 1.0f32;
+        for _ in 0..63 {
+            server.run_frame_f64(0.1).expect("frame");
+            double += 0.1;
+            float += 0.1;
+        }
+        assert_eq!(server.sv_time(), double, "the clock adds host_frametime in double");
+        assert_eq!(server.time(), 7.3f32);
+        assert_eq!(server.vm.gget_float("time"), 7.3f32, "the QC global holds (float)sv.time");
+        assert_eq!(server.vm.gget_float("startframe_time"), 7.2f32, "StartFrame got (float)sv.time");
+        assert_ne!(float, 7.3f32, "the old f32 sum ({float}) is a float step off");
+        // The f32 entry point widens its dt: 0.1f32 is 1.5e-9 over 0.1, well
+        // under a float step here.
+        let mut server = time_recording_server();
+        for _ in 0..63 {
+            server.run_frame(0.1).expect("frame");
+        }
+        assert_eq!(server.time(), 7.3f32);
+    }
+
+    #[test]
+    fn a_think_is_due_by_sv_time_plus_host_frametime_in_double() {
+        // SV_RunThink: `if (thinktime <= 0 || thinktime > sv.time +
+        // host_frametime) return true;` compares the float nextthink with a
+        // double. QuakeC's `self.nextthink = time + 0.1` at sv.time 7.3 stores
+        // (float)(7.3f + 0.1f) = 7.4f = 7.40000010: above 7.3 + 0.1 in double,
+        // so the think waits a frame, and then runs with time = 7.4f (not
+        // raised to sv.time 7.3999999999999995). In f32 7.3f + 0.1f is 7.4f
+        // itself and the think ran a frame early.
+        let mut server = time_recording_server();
+        let record = server.vm.progs.find_function("record").expect("record") as i32;
+        server.set_sv_time(7.3);
+        let thinker = server.vm.spawn();
+        server.vm.ent_set_int(thinker, "think", record);
+        server.vm.ent_set_float(thinker, "nextthink", 7.3f32 + 0.1f32);
+        server.vm.gset_float("think_time", -1.0);
+        server.run_frame_f64(0.1).expect("frame");
+        assert_eq!(server.vm.gget_float("think_time"), -1.0, "not due at sv.time 7.3");
+        server.run_frame_f64(0.1).expect("frame");
+        assert_eq!(server.vm.gget_float("think_time"), 7.4f32, "due at 7.4, time = the thinktime");
+        assert_eq!(server.vm.ent_get_float(thinker, "nextthink"), 0.0);
+    }
+
     #[test]
     fn player_prethink_sees_sv_time_not_a_preceding_thinktime() {
         // CENSUS L4: SV_Physics_Client sets pr_global_struct->time = sv.time
@@ -1738,15 +1842,29 @@ mod tests {
     fn sv_gravity_cvar_drives_add_gravity() {
         // CENSUS F3: world.qc worldspawn does cvar_set("sv_gravity", "100") on
         // e1m8, and SV_AddGravity reads sv_gravity.value: one 0.1 s frame at
-        // 100 gives -10, not -80. A fresh server is back at the default 800.
+        // 100 gives -10, not -80.
         let (mut server, e) = toss_server();
+        assert_eq!(server.sv_gravity(), 800.0, "the cvar's default");
         super::super::host::set_sv_gravity(100.0);
         assert_eq!(server.sv_gravity(), 100.0);
         server.run_frame(0.1).expect("frame");
         let vz = server.vm.ent_get_vector(e, "velocity")[2];
         assert!((vz + 10.0).abs() < 1e-3, "sv_gravity 100: expected -10, got {vz}");
-        let (fresh, _) = toss_server();
-        assert_eq!(fresh.sv_gravity(), 800.0, "a fresh server starts at the default");
+        // The cvar outlives the map (SV_SpawnServer never touches it): the next
+        // server keeps 100 until its worldspawn sets it, as id1's does on
+        // every map (the census test that loads e1m5 after e1m8 relies on
+        // that cvar_set, not on a reset).
+        let (mut next, e2) = toss_server();
+        assert_eq!(next.sv_gravity(), 100.0, "a new map keeps the cvar");
+        let name = next.vm.intern("sv_gravity");
+        let val = next.vm.intern("800");
+        next.vm.argc = 2;
+        next.vm.set_gi(crate::progs::OFS_PARM0, name);
+        next.vm.set_gi(crate::progs::OFS_PARM1, val);
+        (next.vm.builtins[72])(&mut next.vm).expect("cvar_set"); // worldspawn's
+        next.run_frame(0.1).expect("frame");
+        let vz = next.vm.ent_get_vector(e2, "velocity")[2];
+        assert!((vz + 80.0).abs() < 1e-3, "cvar_set(\"sv_gravity\", \"800\"): expected -80, got {vz}");
     }
 
     // ------------------------------------------------------ water + toss

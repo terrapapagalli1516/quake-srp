@@ -169,7 +169,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                     // pre-fix behaviour (the prior NO-OP set `time` to its own
                     // current value). See FIX-1 notes: the physics paths get the
                     // true start-of-frame time; this monster path keeps `time`.
-                    let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
+                    let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
                     touch_triggers(vm, ent, time);
                 }
                 return true;
@@ -208,7 +208,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             if relink {
                 link_edict(vm, ent);
                 // Monster think path: keep the live `time` global (see FIX-1).
-                let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
+                let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
                 touch_triggers(vm, ent, time);
             }
             let flags = vm.ent_float(ent, vm.fo.flags) as i32;
@@ -228,7 +228,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             if relink {
                 link_edict(vm, ent);
                 // Monster think path: keep the live `time` global (see FIX-1).
-                let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
+                let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
                 touch_triggers(vm, ent, time);
             }
             return true;
@@ -251,7 +251,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     if relink {
         link_edict(vm, ent);
         // Monster think path: keep the live `time` global (see FIX-1).
-        let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
+        let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
         touch_triggers(vm, ent, time);
     }
     true
@@ -289,13 +289,13 @@ pub fn sv_step_direction(vm: &mut Vm, ent: i32, yaw: f32, dist: f32) -> bool {
         }
         link_edict(vm, ent);
         // Monster think path: keep the live `time` global (see FIX-1).
-        let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
+        let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
         touch_triggers(vm, ent, time);
         return true;
     }
     link_edict(vm, ent);
     // Monster think path: keep the live `time` global (see FIX-1).
-    let time = vm.sv_time; // SV_TouchLinks uses sv.time, not the per-think time global
+    let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
     touch_triggers(vm, ent, time);
     false
 }

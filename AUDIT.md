@@ -808,7 +808,7 @@ and the commit messages.
 - ✅ **L1 live punchangle in whole degrees** (`MSG_WriteChar(punchangle[i])`): `client_punchangle` truncates to signed chars for the camera and the gun.
 - ✅ **L8 particles drawn before they move** (`R_DrawParticles`: free `die < cl.time`, draw, then move/ramp): `ParticleSystem::retire` + `integrate`, called around the draw list in step_walk/step_demo.
 - ✅ **L9 dlights drawn before they decay** (Host_Frame: `CL_DecayLights` after `SCR_UpdateScreen`; R_PushDlights skips `die < cl.time`): step_walk renders `pushed_dlights` and decays after the 3-D view.
-- ✅ **L11 notify lines** (`Con_Print` 38-column word-wrapped lines stamped at their start; `Con_DrawNotify` last 4 from `v = 0`): quake-wasm `ConNotify`, live + demo; `draw_notify` from y = 0. Still open: prints never reach the drop-down console's scrollback.
+- ✅ **L11 notify lines** (`Con_Print` 38-column word-wrapped lines stamped at their start; `Con_DrawNotify` last 4 from `v = 0`): quake-wasm `ConNotify`, live + demo; `draw_notify` from y = 0. ~~Still open: prints never reach the drop-down console's scrollback~~ (✅ `quake/polish`, c71989f).
 - ✅ **L12 default.cfg binds** — ENTER `+jump`, MOUSE2 `+forward`, `\` and MOUSE3 `+mlook`, INS `+klook` seeded; the page sends MOUSE2/MOUSE3 while locked. Not done: PAUSE (no `pause`), the F-key commands, `t` messagemode.
 - ✅ **L14 New Game asks first while a game runs** (`M_SinglePlayer_Key` → `SCR_ModalMessage`, y/n/Escape, faded screen + `SCR_DrawNotifyString`): `Menu::new_game_confirm`, raised when the host-set `server_active`; y (`menu_quit_yes`) starts the game.
 
@@ -817,7 +817,7 @@ and the commit messages.
 One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 
 - ✅ **Chthon's electricity** — boss.qc `lightning_fire` writes TE_LIGHTNING3 to MSG_ALL (`sv.reliable_datagram`), which `CL_ParseServerMessage` parses like the datagram; the port decoded temp entities only from MSG_BROADCAST, so Chthon died with no bolt drawn. `server/msg.rs` now runs one svc parser per buffer (datagram, reliable), each reading temp entities and commands alike (fix first found by the `chthon` agent, salvaged `00bf4a7`). Test `cl_tent::tests::chthon_lightning_reaches_the_client_and_kills_him_on_e1m7`.
-- ✅ **F3 e1m8 low gravity** — `sv_gravity` is a live cvar (`server/host.rs`): world.qc `worldspawn`'s `cvar_set("sv_gravity", "100"|"800")` lands, `cvar("sv_gravity")` reads it, `SV_AddGravity`, `SV_Physics_Step`'s landing-sound threshold and the live `R_DrawParticles` gravity use it; a fresh server starts at 800. Test `census_e1m8_has_low_gravity` (+ `sv_gravity_cvar_drives_add_gravity`). The demo path keeps 800 (no server runs during playback).
+- ✅ **F3 e1m8 low gravity** — `sv_gravity` is a live cvar (`server/host.rs`): world.qc `worldspawn`'s `cvar_set("sv_gravity", "100"|"800")` lands, `cvar("sv_gravity")` reads it, `SV_AddGravity`, `SV_Physics_Step`'s landing-sound threshold and the live `R_DrawParticles` gravity use it; a fresh server starts at 800 (since `quake/polish2` the cvar outlives the map, as id's: the next worldspawn sets it). Test `census_e1m8_has_low_gravity` (+ `sv_gravity_cvar_drives_add_gravity`). The demo path keeps 800 (no server runs during playback).
 - ✅ **F5 b_*.bsp item boxes** — two causes. (1) `WorldModel::precache_model` spread the external model's bounds a second time (`Bsp::parse` already applies `Mod_LoadSubmodels`' pixel): the explosive box was 34 wide (hull2) and floated 2 units. (2) `world::clip_box` treated touching boxes as overlapping; the C box hull (`SV_InitBoxHull`) is half-open, `mins <= p < maxs`, so e1m1's 10-health box beside a grunt and e1m6's 25-health box beside an ogre no longer "fall out of the level" in PlaceItem's droptofloor. Oracle edict diff: both boxes present, explosive box at id's z -207.969; nothing else moved on any map. Tests `census_bmodel_item_bounds_are_spread_once`, `clip_box_is_half_open_like_the_c_box_hull`.
 - ✅ **F8 force_retouch** — `SV_Physics` relinks every live edict with `SV_LinkEdict(ent, true)` while the QC global is set (`spawn_tdeath`, `teleport_use` set 2) and decrements it after the loop; now both `run_frame` and `client_frame` do (world skipped, SOLID_NOT relinked without touching). e1m6 doors *31/*76 and e1m8 *6 open at the level start as in id (oracle: open by t 4.7; at t 1.7 the port is 0.2 s ahead, the signon-timing gap below). Tests `census_force_retouch_opens_e1m6_start_door`, `force_retouch_relinks_stationary_edicts_for_two_frames`. Open: the port connects the player at sv.time 1.2, id's signon at ~1.4.
 - ✅ **F9 looping mover sounds** — `queue_sounds` carries each sample's `cue ` loop window (`GetWavinfo`) through `poll_sound` (`sound_loop_start` -1 = one-shot) and no longer drops `misc/null.wav`; the page loops such a source (`SND_PaintChannels`) until a later sound on its (entity, channel) overrides it, re-spatializes it every frame from its fixed origin like the C channel, lets an inaudible sound still end its key's loop (`S_StartSound` picks the channel before the audibility test), guards the async first decode against an override that landed meanwhile, and stops every dynamic source on a level change (`S_StopAllSounds`). Tests `queue_sounds_carries_the_cue_loop_so_movers_hum_until_their_stop_sound`, `web/verify_loops.py` (demo1's first door hum loops, then its stop sound ends it).
@@ -870,7 +870,13 @@ C followed and the test are in the commit message.
   `quaketool view` (which now warps an underwater eye like id's
   `R_RenderView`). Oracle, e1m1's pool (`--view=750,898,-332,0,90,0 --time
   1.6`), exact%: 320x200 97.58; 640x400 48.22 -> 97.59; 960x600 44.14 ->
-  97.60; 1280x800 42.65 -> 97.63 (before = the full-resolution warp). Cheaper
+  97.60; 1280x800 42.65 -> 97.63 (before = the full-resolution warp; id's
+  `--spans 8` against the port's then exact perspective). *Re-measured on
+  `quake/polish2`* after `compare.py` stopped taking the warp buffer's
+  `r_refdef.vrect` for the screen's (it had scored this view 6.6% at 960x600
+  since `quake/w2b`): against `--spans 16` 99.89 / 99.89 / 99.90 / 99.89,
+  at the page's aspect (`--aspect 0.8333333`) 99.93 at all four; against
+  `--spans 8` 98.53 / 98.57 / 98.54 / 98.58. Cheaper
   too: an underwater frame renders 320x152 at every preset. At every 16:10
   mode the C's pixel aspect for the warp buffer equals `vid.aspect`, so the
   square-pixel projection is exact; for a mode taller than 16:10 id squeezes
@@ -986,12 +992,12 @@ exact and the other six are four explained residues (95.5-99.9%). Goldens unchan
   `toggling_the_console_clears_the_notify_lines`.
 
 Found, not fixed (outside the 2-D drawing, or another branch's file):
-- **Menu cursors are not remembered** — id keeps one per menu
+- ✅ (`quake/polish2`, "Second review fixes") **Menu cursors are not remembered** — id keeps one per menu
   (`m_main_cursor`, `m_singleplayer_cursor`, `options_cursor`, `load_cursor`
   shared by Load and Save, ...): Escape from Options lands on "Options", the
   port's single cursor on "Single Player". `menu.rs` behaviour, left for after
   the Extras-menu work (screen2d `menu_sp.sp_again`, 206 px).
-- **`sv.time` adds up in f32** (`sv_phys.rs`: `gset_float("time", start_time +
+- ✅ (`quake/polish2`, "Second review fixes") **`sv.time` adds up in f32** (`sv_phys.rs`: `gset_float("time", start_time +
   dt)`); id's `sv.time` is a double copied into the QuakeC float each frame.
   After 60 frames of 0.1 s the port reads 7.2999954, so the new-weapon flash
   (`(int)((cl.time - item_gettime)*10)`) is a frame behind (screen2d
@@ -1237,6 +1243,185 @@ box and byte-identical when off, the `wasm_*` commands and the exports;
     all unchanged. Test `resolved_fields_match_the_by_name_accessors`.
   - Speed: simbench e1m3 2.64 → 0.29 ms per tick. The wasm sim phase is 68–76% lower, and the
     walk_e1m3 frame goes 1.39 → 0.77 ms at 320×200 (PERF_PLAN D2).
+
+## Second review fixes (2026-09-25, branch `quake/polish2`)
+
+Findings of the second adversarial review that live outside `quake-wasm/src/`
+(another branch is moving the client there); one line each, the C and the
+test in the commit message.
+
+- ✅ **Oracle: underwater views above 320x200 compared the wrong rectangle**
+  (MED, tooling) — `compare.py` took the `.json`'s `vrect` (`r_refdef.vrect`)
+  for the view's place on the screen. With the eye in a liquid above 320x200
+  that is the rectangle in `R_SetupFrame`'s warp buffer (0,0,320,200), not
+  the screen's, so it cropped id's frame to its top-left corner and asked the
+  port for an unwarped 320x200 view: e1m1's pool scored 6.6% at 960x600. It
+  now takes `scr_vrect` (already in the `.json` since `quake/fid2d`), which
+  `D_WarpScreen` stretches the buffer over, and warns for an underwater view
+  below viewsize 120 (`quaketool view --vrect` draws it unwarped). The pool,
+  `--spans 16`: 99.89 / 99.89 / 99.90 / 99.89 at 320x200 / 640x400 / 960x600 /
+  1280x800; 99.93 at all four at the page's aspect. The stale 97.6 numbers in
+  "Review fixes" are corrected there.
+- ✅ **Particles drawn as `D_DrawParticle`** (LOW) — `draw_particles` projected
+  with the walls' `xscale`/`yscale` where `R_DrawParticles` scales `vright`/
+  `vup` by `R_ViewChanged`'s `xscaleshrink = (vrect.width-6)/
+  horizontalFieldOfView` (3 px nearer the centre at a 320-wide view's edge);
+  it also sized a centred square by `round(focal/z)`, clipped it at the edge
+  and z-tested float depth. Now `render/part.rs` is `D_DrawParticle`
+  (`d_part.c`) with `D_ViewChanged`'s constants (`d_modech.c`): `u =
+  (int)(xcenter + zi*x + 0.5)`, `pix = (int)(zi*0x8000) >> d_pix_shift`
+  clamped to `[d_pix_min, d_pix_max]`, drawn from `(u, v)` right and down,
+  dropped whole past `d_vrectright_particle`/`d_vrectbottom_particle`,
+  `PARTICLE_Z_CLIP` 8, and id's `pz <= izi` on the quantized 1/z (particles
+  of one burst tie often; the later wins). Measured: the oracle now dumps
+  the particles it draws (`.parts`) and `quaketool view --particles` draws
+  them; the shotgun's puffs on e1m1 match 100% of particle pixels at 320x200
+  / 640x400 / 960x600 (were 12.8 / 12.6 / 15.0%). Tests
+  `particles_project_with_r_main_c_xscaleshrink`,
+  `particle_size_is_d_part_cs_izi_shift`,
+  `particles_obey_d_part_cs_clip_and_edges`,
+  `particles_tie_on_d_part_cs_quantized_1_over_z`. Goldens unchanged (no
+  particles in them).
+- ✅ **`sv.time` is a double** (fid2d's leftover) — id's `server_t.time` is a
+  `double` (server.h), advanced by `SV_Physics`' `sv.time += host_frametime`
+  (a double too), and QuakeC sees its float through each
+  `pr_global_struct->time = sv.time`. The port kept the clock in the QC float
+  global and added `dt` in f32: 7.2999954 after 63 frames of 0.1 s from 1.0,
+  so the new-weapon flash's `(int)((cl.time - item_gettime)*10)` showed the
+  frame before (screen2d `flash.rl_new`), and the error grows with the session.
+  Now `Vm::sv_time` is an f64 (`Server::sv_time`), `Server::time()` its float
+  (the QC global's and `svc_time`'s value), and the double comparisons are
+  double: `SV_RunThink`'s `thinktime > sv.time + host_frametime` and
+  `thinktime = sv.time`, `SV_Physics_Pusher`'s `ltime + host_frametime`,
+  `SV_ClientThink`/`SV_WaterJump`'s `teleport_time`, `ED_Alloc`/`ED_Free`'s
+  `freetime`. New entry points `run_frame_f64`/`client_frame_f64` take id's
+  `double host_frametime`; the f32 ones widen theirs (quake-wasm's, for now).
+  The settle frames and the quaketool drivers (census, census-edicts,
+  simbench, sim, playtest, changelevel) run id's exact 0.1. Savegames: written
+  `%f` from the double (`Host_Savegame_f`), read into a float and restarted
+  from it (`Host_Loadgame_f`'s `float time`). Tests
+  `sv_time_is_a_double_and_the_qc_time_global_its_float`,
+  `a_think_is_due_by_sv_time_plus_host_frametime_in_double` (a think at
+  `time + 0.1` = 7.4f waits a frame at sv.time 7.3, as in the C; the f32 sum
+  ran it early), the save tests (`1234.567890` written, the float read back).
+  Evidence: screen2d `flash.rl_new` 98.3 / 99.2 / 99.4% -> 100% at 320x200 /
+  640x400 / 960x600. id's edicts (the oracle's `oracle_edicts`, nine maps at
+  t = 1.7 ... 120.7) against `census-edicts`: `nextthink` mismatches over
+  every non-monster edict 310 -> 252, none worse (every map's player idle
+  think now on id's phase, e1m1's two start doors at 4.040/4.035, e1m4,
+  e1m6, e1m8 movers); the dump at 120.7 no longer reads 120.699. simbench
+  and the census change as a one-frame think phase shift propagates through
+  random-driven fights (e1m1, e1m3, e1m5-e1m7 simbench counts identical;
+  census: no new fault, error or never-moved mover). **Goldens re-baselined**
+  (e1m1 unchanged): e1m2 `8ce25660` -> `9ae2b478`, e1m3 `3531e9cd` ->
+  `2ca0f916`. The scene is taken after `SV_SpawnServer`'s two settle frames,
+  at sv.time 1.2; an item's `PlaceItem` think at `time + 0.2` = 1.2f =
+  1.2000000477 is later than 1.1 + 0.1 in double, so it has not run yet and
+  the shells box (e1m2) and an ammo box (e1m3) stand where the map put them,
+  as in id's (its edict dump at t = 1.2: every item's nextthink 1.200, not yet
+  dropped). The f32 sum 1.1f + 0.1f = 1.2f ran it a frame early.
+- ✅ **`sv_gravity` outlives the map; the gravity checks can fail** (LOW) —
+  `Server::new` reset the cvar to 800 before worldspawn ran, so the census
+  test's "the next map's worldspawn sets it back to 800" (e1m5 after e1m8,
+  `quake-wasm/src/census_tests.rs`) and the unit test's "a fresh server
+  starts at the default" held whatever worldspawn did. id's cvar outlives the
+  map (`SV_SpawnServer` never touches it; id1's worldspawn sets it on every
+  map). The reset is gone; the unit test (`sv_gravity_cvar_drives_add_gravity`)
+  now checks the next server keeps 100 until `cvar_set("sv_gravity", "800")`,
+  and the census test fails if that `cvar_set` is dropped (checked by breaking
+  it: 100 != 800). Savegame loads run worldspawn (`Host_Loadgame_f` ->
+  `SV_SpawnServer`), so an e1m8 save still loads at 100.
+- ✅ **Stale docs** — README and quake-rs/README said save/load was out of
+  scope and counted 458 + 48 tests; the verify-script list, CENSUS L11's moot
+  "still open", L15 (partly fixed by F9, not marked; the per-side clamp after
+  the master volume and the one-shots' per-frame spatialisation are still
+  open, `web/index.html` `playRouted`), the census tests described as
+  `#[ignore]`d, and the fix-client L11 / fix-server F3 lines. Not changed,
+  another agent's files: `render/surf.rs`'s `mipadjust` comment is backwards
+  (it says a texture scaled up in the editor "drops to a coarser mip sooner";
+  its short axes give `mipadjust` 4, which raises `nearzi * scale_for_mip *
+  mipadjust`, so it keeps a FINER level longer — and it counts world units
+  per texel, not texels per unit); `quake-wasm/src/census_tests.rs`'s module
+  doc still says `#[ignore]`.
+- ✅ **Menu cursors kept per menu** (fid2d's leftover) — `menu.c` keeps one
+  static cursor per menu and no `M_Menu_*_f` resets it (only `M_Menu_Help_f`
+  sets `help_page = 0`): Escape from Options lands on "Options", Load after
+  a load opens on that slot, the Quit prompt returns to its screen's row.
+  The port had one cursor that every screen change put back on row 0.
+  `menu.rs` now keeps `m_main_cursor`, `m_singleplayer_cursor`,
+  `load_cursor` (Load and Save share it), `m_multiplayer_cursor`,
+  `options_cursor`, `keys_cursor`, `vid_line` and the Web extras page's own;
+  Help and Quit have none. `vid_line` is a static in `vid_dos.c` too; id's
+  starts on the list's first line (the live mode in a default DOS setup),
+  the port's list is its own, so the first visit opens on the live mode and
+  later ones where the player left it. `reset_nav` (the host's boot) puts
+  them all at 0, a program start. Tests
+  `each_menu_keeps_its_cursor_like_menu_cs_statics`,
+  `a_closed_menu_reopens_on_m_main_cursor`,
+  `help_starts_on_page_0_and_quit_returns_to_the_screens_cursor`,
+  `video_opens_on_the_live_mode_then_keeps_vid_line`,
+  `reset_nav_is_a_program_start_for_the_cursors`. screen2d
+  `menu_sp.sp_again` 99.62 / 99.90 / 99.95% -> 100%; every menu shot now
+  matches in all three modes except the two explained ones (Options' Web
+  extras row, Video's mode list). `web/verify_menu.py`
+  follows id's cursors (61/61). **Two quake-wasm tests fail with this
+  commit** (they re-navigate assuming the reset; quake-wasm is off limits
+  here): see the list below. The commit is the branch's last.
+
+Left for the quake-wasm pass (found here, not changed: `quake-wasm/src/` is
+being moved into `quake-rs/src/client/`):
+- The live host hands `client_frame` an f32 `dt`, which the server widens;
+  call `client_frame_f64` with `Host_FilterTime`'s double `host_frametime`, so
+  `sv.time` adds exactly id's frame times.
+- `census_tests.rs`'s module doc says the tests are `#[ignore]`d; all twenty
+  run in the normal suite.
+- The page's sound law (not quake-wasm, but the same pass): `playRouted` /
+  `spatializeDynLoop` clamp each side after the master volume (id clamps
+  `leftvol`/`rightvol` at 255, `snd_mix.c`, then scales by `volume`), and
+  non-looping one-shots are not re-spatialised each frame (`S_Update` runs
+  `SND_Spatialize` on every channel) — CENSUS L15's open half.
+- Tooling: `quaketool view --vrect` draws an underwater view unwarped
+  (`compare.py` warns); the warp at viewsize below 120 is not compared.
+- Menu cursors (below): two quake-wasm tests navigate assuming the old reset
+  (`host::tests::gamma_changes_the_presented_frame_and_one_is_byte_identity`,
+  `input::tests::invert_mouse_flips_pitch_and_lookspring_recentres_on_unlock`:
+  after reopening the menu they press DOWN twice for "Options", which from
+  the kept "Options" is Quit); each needs its re-navigation shortened to
+  `menu_cancel(); menu_select();` (+ one DOWN for Lookspring). And
+  `Menu::reset_nav` is shared by `boot()` (a program start, where menu.c's
+  statics are 0) and New Game / load / `map` (where id keeps every cursor):
+  split it so only the boot resets the cursors (app.rs's re-boot test pins
+  cursor 0 after `boot()`).
+- ✅ **Census: e1m8's `*6` reported "never moved"** (LOW, tooling) — the mover
+  baselines were taken after the signon frames, by which time
+  `PutClientInServer`'s `force_retouch` had opened the door (an ogre stands
+  in its trigger field, CENSUS F8). Baselines are now taken right after the
+  spawn, before the player connects: e1m8 "19 total, 17 moved, never moved:
+  func_wall#111(*16) func_wall#159(*27)", `*6` among the movers already
+  moving at the idle; no other line of the census changes.
+- ✅ **The Load menu was empty after a page reload** (LOW, pre-existing) —
+  `refreshSaveComments()` (the page's `M_ScanSaves`: localStorage's
+  `s0..s11.sav` into the menu's slot comments) ran only after a save,
+  though its comment said "at boot"; a reloaded page listed every slot as
+  `--- UNUSED SLOT ---` and refused to load them. id rescans each time the
+  screen opens (`M_ScanSaves` in `M_Menu_Load_f` / `M_Menu_Save_f`). The page
+  now scans at boot and whenever the menu enters Load or Save
+  (`menu_visible` / `menu_screen_id`, checked before the frame that draws
+  it); existing exports only. `web/verify_save.py` also saves to slot 0,
+  reloads, forgets the boot scan and opens Load: slot 0's row is the save's
+  comment and Enter loads it (the old page fails both).
+- ✅ **A hum could start after its own stop and loop** (LOW) —
+  `drainGameSounds`: an inaudible sound (gain <= 0.02) called `stopKey`
+  without bumping `keySeq`, so a looping sample whose first decode was still
+  pending when an inaudible sound on its (entity, channel) arrived (a far
+  door's stop sound during its hum's first decode) started afterwards and
+  looped forever. `S_StartSound` picks the channel, and so overrides the
+  old sound, before the audibility test (snd_dma.c); the page now bumps
+  `keySeq` first, so the pending decode sees the override. `web/verify_loops.py`
+  feeds the two sounds through `drainGameSounds` from a stand-in `exp` (a
+  fresh 8-bit WAV at the listener on entity 900 channel 2, then a sound
+  10000 units away on the same key): the hum no longer starts (the old page
+  fails), and alone it does (the control).
 
 ## LOW (27)
 

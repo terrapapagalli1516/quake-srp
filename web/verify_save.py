@@ -2,7 +2,9 @@
 """Savegame round-trip in a real browser: drive the drop-down console to
 `save` (the .sav text lands under a per-name localStorage key), keep playing,
 `load` (the world snaps back to the saved spot — pixel evidence), then RELOAD
-the page and `load` again (persistence across sessions).
+the page and `load` again (persistence across sessions), and check the
+reloaded page's Load menu lists the slot saved in the first session and loads
+it on Enter (id rescans the saves whenever Load/Save opens, M_ScanSaves).
 
 Usage: verify_save.py [webdir]   (defaults to this script's directory; pass a
 temp dir holding index.html + a freshly built quake_wasm.wasm to test changes
@@ -19,6 +21,8 @@ httpd.daemon_threads = True
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 KEY = "quake-rs.sav.evidence.sav"
+SLOT = 0
+SLOT_KEY = f"quake-rs.sav.s{SLOT}.sav"
 fails = []
 
 GRAB = """() => {
@@ -77,6 +81,7 @@ with sync_playwright() as p:
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
     wait_ready(pg)
     pg.evaluate(f"localStorage.removeItem('{KEY}')")
+    pg.evaluate("for (let i = 0; i < 12; i++) localStorage.removeItem('quake-rs.sav.s' + i + '.sav')")
 
     boot_walk(pg)
 
@@ -90,6 +95,11 @@ with sync_playwright() as p:
     # SAVE through the real console; the page persists it on the next frame.
     console_line(pg, "save evidence")
     pg.wait_for_function(f"localStorage.getItem('{KEY}') !== null", timeout=5000)
+    # ...and into menu slot SLOT (the Load menu's sN.sav), the same instant.
+    pg.wait_for_function("exp.console_visible && exp.console_visible() === 1", timeout=5000)
+    pg.keyboard.type(f"save s{SLOT}", delay=15)
+    pg.keyboard.press("Enter")
+    pg.wait_for_function(f"localStorage.getItem('{SLOT_KEY}') !== null", timeout=5000)
     pg.keyboard.press("Backquote")  # close the console again
     size = pg.evaluate(f"(localStorage.getItem('{KEY}')||'').length")
     head = pg.evaluate(f"(localStorage.getItem('{KEY}')||'').slice(0, 2)")
@@ -147,6 +157,69 @@ with sync_playwright() as p:
     else:
         print("PASS the save survives a page reload and loads again")
 
+    # THE LOAD MENU after that reload: id rescans the saves each time Load
+    # or Save opens (M_ScanSaves in M_Menu_Load_f / M_Menu_Save_f). Forget
+    # what the page listed at boot, open Load: it must list slot SLOT again
+    # (its row is not "--- UNUSED SLOT ---") and load it on Enter (M_Load_Key
+    # refuses a slot that is not loadable). SLOT is 0, where the cursor
+    # starts, so no cursor keys are involved.
+    LOAD = 2
+    scr = lambda: pg.evaluate("exp.menu_screen_id()")
+    forget = f"exp.sav_alloc(0); exp.menu_set_save_comment({SLOT})"
+    pg.evaluate(forget)
+    pg.keyboard.press("Escape")  # the menu, over the loaded game (paused)
+    pg.wait_for_function("exp.menu_visible() === 1", timeout=5000)
+    for k in ["Enter", "ArrowDown", "Enter"]:  # Single Player > Load
+        pg.keyboard.press(k)
+        time.sleep(0.15)
+    if scr() != LOAD:
+        fails.append(f"could not open the Load menu (screen {scr()})")
+    time.sleep(0.4)
+    listed = pg.evaluate(GRAB)
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_save_loadmenu.png"))
+    # The same screen with the slot forgotten again: its row must change. The
+    # world is paused behind the menu; only the cursor (left of the text) blinks.
+    pg.evaluate(forget)
+    time.sleep(0.4)
+    unlisted = pg.evaluate(GRAB)
+    w = pg.evaluate("exp.width()")
+    ox = (w - 320) // 2  # the 2-D layer at its own pixel size, top centre
+
+    def row_band(img, row):
+        y0 = 32 + 8 * row
+        return [img[(y * w + x) * 4] for y in range(y0, y0 + 8) for x in range(ox + 16, ox + 16 + 8 * 39)]
+
+    changed = row_band(listed, SLOT) != row_band(unlisted, SLOT)
+    others_same = row_band(listed, SLOT + 1) == row_band(unlisted, SLOT + 1)
+    print(f"Load menu row {SLOT}: listed != unused: {changed}; row {SLOT + 1} unchanged: {others_same}")
+    if not (changed and others_same):
+        fails.append("opening Load did not list the saved slot (no M_ScanSaves on entry)")
+    # Leave and reopen Load (another rescan), then Enter on the slot. Single
+    # Player reopens on Load (m_singleplayer_cursor is kept, menu.c); a port
+    # whose cursor resets lands on New Game, whose "Are you sure?" N answers.
+    pg.keyboard.press("Escape")
+    time.sleep(0.15)
+    pg.keyboard.press("Enter")
+    time.sleep(0.3)
+    if scr() != LOAD:
+        for k in ["n", "ArrowDown", "Enter"]:
+            pg.keyboard.press(k)
+            time.sleep(0.15)
+    if scr() != LOAD:
+        fails.append(f"could not reopen the Load menu (screen {scr()})")
+    time.sleep(0.3)
+    pg.keyboard.press("Enter")
+    time.sleep(0.8)
+    if pg.evaluate("exp.menu_visible()") != 0:
+        fails.append("Enter on the reopened Load menu's slot did not load it (not loadable)")
+    else:
+        d_slot = diff_frac(pg.evaluate(GRAB), f_saved)
+        print(f"Load menu slot {SLOT} loaded frame vs saved instant: {d_slot:.1%}")
+        if d_slot >= 0.25:
+            fails.append(f"loading slot {SLOT} from the menu did not restore the saved view ({d_slot:.1%})")
+        else:
+            print("PASS a reloaded page's Load menu lists the saved slot and loads it")
+
     print("errors:", errs[-5:])
     if errs:
         fails.append(f"console errors: {errs[-5:]}")
@@ -156,4 +229,4 @@ httpd.shutdown()
 if fails:
     print("FAIL:", "; ".join(fails))
     raise SystemExit(1)
-print("done: save/load verified (key persisted, view restored, survives reload)")
+print("done: save/load verified (key persisted, view restored, survives reload, Load menu lists it)")

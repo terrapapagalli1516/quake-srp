@@ -142,7 +142,7 @@ const CONTENTS_EMPTY: i32 = -1;
 
 /// `host_frametime` used for the two post-spawn settle frames in
 /// `SV_SpawnServer` ("run two frames to allow everything to settle").
-const SETTLE_FRAMETIME: f32 = 0.1;
+const SETTLE_FRAMETIME: f64 = 0.1;
 
 /// `sv_gravity` default ("800"), from `sv_phys.c`.
 const SV_GRAVITY: f32 = 800.0;
@@ -434,9 +434,23 @@ pub struct UserCmd {
 // SV_Physics_Client / SV_WalkMove over [`sv_move`]), so it collides with
 // monsters, doors and items.
 impl Server {
-    /// The current `time` global.
+    /// `sv.time` as a float: what `pr_global_struct->time = sv.time` stores for
+    /// QuakeC and `svc_time`'s `MSG_WriteFloat(sv.time)` sends the client (so a
+    /// local client's `cl.time`). The clock itself is [`Server::sv_time`].
     pub fn time(&self) -> f32 {
-        self.vm.gget_float("time")
+        self.vm.sv_time as f32
+    }
+
+    /// `sv.time`, the server clock (a `double` in id's `server_t`).
+    pub fn sv_time(&self) -> f64 {
+        self.vm.sv_time
+    }
+
+    /// Set `sv.time` (and, as the C's next `pr_global_struct->time = sv.time`
+    /// would, the QuakeC `time` global to its float).
+    pub fn set_sv_time(&mut self, t: f64) {
+        self.vm.sv_time = t;
+        self.vm.gset_float("time", t as f32);
     }
 
     /// The number of live (not-free) edicts, including the world (edict 0).

@@ -431,13 +431,11 @@ mod tests {
         assert_eq!(player_pitch(), -40.0, "no lookspring, no recentre");
 
         // Lookspring ON (row 10): unlock starts the V_StartPitchDrift recentre.
+        // (Main reopens on "Options" and Options on Invert Mouse: menu.c
+        // keeps m_main_cursor and options_cursor.)
         menu_cancel();
-        menu_down();
-        menu_down();
         menu_select();
-        for _ in 0..10 {
-            menu_down(); // ROW_LOOKSPRING (M_AdjustSliders case 10)
-        }
+        menu_down(); // ROW_LOOKSPRING (M_AdjustSliders case 10)
         menu_right();
         menu_cancel();
         menu_cancel();
