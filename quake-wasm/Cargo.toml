@@ -14,6 +14,12 @@ crate-type = ["cdylib"]
 [dependencies]
 quake-rs = { path = "../quake-rs" }
 
+[features]
+# Opt-in per-phase frame timers for `web/bench.py` (see src/bench.rs). The build
+# imports a clock from the page (`quake_bench.now_ms`), which only the harness
+# supplies, so it is never the deployed wasm. Off by default: zero code.
+bench = []
+
 [profile.release]
 opt-level = 3
 lto = true

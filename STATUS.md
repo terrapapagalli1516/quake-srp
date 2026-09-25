@@ -317,6 +317,9 @@ Render @ browser res now: 320×200 **2.81 ms (355 fps)**, 640×400 **5.49 ms (18
   per-pixel path; mip-LOD would let them use the cache and shrink block memory.
 
 ### Profiler / benchmarks
+- **Browser (2026-09-25): `uv run web/bench.py --build --native`** — the real page in headless
+  Chromium, deterministic workloads at dt=1/72, per-phase median/p95 for wasm and its native twin
+  (see its docstring). The measured baseline and the ranked optimisation plan are in `PERF_PLAN.md`.
 - **Render:** `render.rs` has an opt-in `RenderStats` (per-phase ns timers + face/tri/
   pixel/cache counters), zero-cost when off, surfaced by `QUAKE_BENCH=<iters>
   QUAKE_RES=WxH quaketool scene <pak> <map> <out>`. It now also reports **world-pass

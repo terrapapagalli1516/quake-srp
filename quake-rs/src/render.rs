@@ -2936,6 +2936,48 @@ fn stat(f: impl FnOnce(&mut RenderStats)) {
     }
 }
 
+thread_local! {
+    /// Clock override for the [`RenderStats`] phase timers: a monotonic
+    /// milliseconds source (e.g. the browser's `performance.now()`), for targets
+    /// where `std::time::Instant` is unavailable (`wasm32-unknown-unknown` panics
+    /// on it). `None` (the default) uses `Instant`.
+    static STATS_CLOCK: std::cell::Cell<Option<fn() -> f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Install (or clear) the [`RenderStats`] timer clock — a monotonic milliseconds
+/// source. The wasm shell's opt-in benchmark build passes `performance.now()`
+/// here so [`render_stats_begin`] works in the browser; native callers never
+/// need it. Only read while profiling is on, so the game pays nothing.
+pub fn set_render_stats_clock(clock: Option<fn() -> f64>) {
+    STATS_CLOCK.with(|c| c.set(clock));
+}
+
+/// A profiler timestamp: `std::time::Instant`, or a reading of the clock
+/// installed by [`set_render_stats_clock`]. Only constructed while profiling.
+#[derive(Clone, Copy)]
+enum StatInstant {
+    Std(std::time::Instant),
+    Ms(fn() -> f64, f64),
+}
+
+impl StatInstant {
+    fn now() -> StatInstant {
+        match STATS_CLOCK.with(|c| c.get()) {
+            Some(clock) => StatInstant::Ms(clock, clock()),
+            None => StatInstant::Std(std::time::Instant::now()),
+        }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        match *self {
+            StatInstant::Std(t) => t.elapsed(),
+            StatInstant::Ms(clock, t0) => {
+                std::time::Duration::from_nanos(((clock() - t0).max(0.0) * 1.0e6) as u64)
+            }
+        }
+    }
+}
+
 /// Maximum baked surface-cache block, in texels. A face larger than this stays on
 /// the per-pixel lighting path, so one pathological giant surface can't allocate a
 /// multi-MB block; virtually every real id1 face is far smaller.
@@ -3569,7 +3611,7 @@ fn draw_world_textured(
     let mut t_sort: u64 = 0;
     let mut t_light: u64 = 0;
     let mut t_surf: u64 = 0;
-    let _t_pvs = prof.then(std::time::Instant::now);
+    let _t_pvs = prof.then(StatInstant::now);
 
     // PVS culling: a per-face visibility mask for the camera's leaf, or `None`
     // when there is no usable PVS (no vis lump, solid/outside leaf, malformed) —
@@ -3630,7 +3672,7 @@ fn draw_world_textured(
     // cache, so the ordering pass also warms it for the draw loop below. (A true BSP
     // back-to-front/front-to-back walk would be marginally better, but centroid sort
     // captures the bulk of the win for walls and is far simpler / output-identical.)
-    let _t_sort = prof.then(std::time::Instant::now);
+    let _t_sort = prof.then(StatInstant::now);
     let mut world_order: Vec<(f32, usize)> =
         Vec::with_capacity(world_end.saturating_sub(world_first));
     for fi in world_first..world_end {
@@ -3651,7 +3693,7 @@ fn draw_world_textured(
     world_order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     if let Some(t) = _t_sort { t_sort += t.elapsed().as_nanos() as u64; }
 
-    let _t_body = prof.then(std::time::Instant::now);
+    let _t_body = prof.then(StatInstant::now);
     for &(_, face_index) in &world_order {
         let face = match bsp.faces.get(face_index) {
             Some(f) => f,
@@ -3719,7 +3761,7 @@ fn draw_world_textured(
         let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         // This face's `R_MarkLights` mask (0 = no dynamic light reaches it).
         let face_dlightbits = dlight_bits.get(face_index).copied().unwrap_or(0);
-        let _t_l = prof.then(std::time::Instant::now);
+        let _t_l = prof.then(StatInstant::now);
         let lightmap = if kind == SurfKind::Normal {
             // Goes through the lightmap SURFACE CACHE (R_BuildLightMap cache):
             // reuses the combined luxel buffer while the resolved style scales
@@ -3793,7 +3835,7 @@ fn draw_world_textured(
                 // pixel. Turb/sky/dynamically-lit/colormap-less surfaces keep the
                 // per-pixel path (raster_triangle_tex).
                 stat(|s| { s.faces_drawn += 1; s.world_tris += (proj.len() - 2) as u64; });
-                let _t_s = prof.then(std::time::Instant::now);
+                let _t_s = prof.then(StatInstant::now);
                 let surf = if matches!(mode, SurfaceMode::Normal) {
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
@@ -5285,19 +5327,20 @@ pub fn render_scene_ext_sprited(
     // The turbulent SIN table for liquid warp, built once and shared by the
     // world + brush-submodel passes (sky needs no table).
     let turb = TurbTable::new();
-    // Phase wall-timers: `Instant::now()` is only evaluated when the profiler is on
-    // (via `.then(..)`), so the shared render path — and wasm, where the profiler is
-    // never enabled and `Instant` is unavailable — never constructs one.
-    let tw = stats_on().then(std::time::Instant::now);
+    // Phase wall-timers: `StatInstant::now()` is only evaluated when the profiler is
+    // on (via `.then(..)`), so the shared render path never reads a clock. (On wasm,
+    // where `Instant` is unavailable, only the opt-in benchmark build turns the
+    // profiler on, after installing a JS clock via `set_render_stats_clock`.)
+    let tw = stats_on().then(StatInstant::now);
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights, colormap);
     if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
-    let ts = stats_on().then(std::time::Instant::now);
+    let ts = stats_on().then(StatInstant::now);
     for bm in bmodels {
         // Inline submodels share the world `bsp`, so their surface blocks ARE cached.
         draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame, true);
     }
     if let Some(t) = ts { stat(|s| s.submodel_ns += t.elapsed().as_nanos() as u64); }
-    let te = stats_on().then(std::time::Instant::now);
+    let te = stats_on().then(StatInstant::now);
     // External brush models (Quake's `b_*.bsp` item boxes: explosive box, ammo
     // and health boxes). Each draws its OWN bsp's MODEL-0 faces, translated to the
     // item origin, against the shared z-buffer so it occludes/ is occluded by the
@@ -5314,23 +5357,23 @@ pub fn render_scene_ext_sprited(
         draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
     }
     if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
-    let ta = stats_on().then(std::time::Instant::now);
+    let ta = stats_on().then(StatInstant::now);
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, w, h, palette, dlights, light_styles, time);
     }
     if let Some(t) = ta { stat(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
     // Particles draw after the world/models, z-tested against the same buffer so
     // walls occlude them, but before the viewmodel (which always draws on top).
-    let tp = stats_on().then(std::time::Instant::now);
+    let tp = stats_on().then(StatInstant::now);
     draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h);
     if let Some(t) = tp { stat(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
     // Sprite-model entities (explosion flash, bubbles) — camera-facing billboards,
     // z-tested against the same buffer, drawn after models and before the viewmodel.
-    let tsp = stats_on().then(std::time::Instant::now);
+    let tsp = stats_on().then(StatInstant::now);
     draw_sprites(&mut image, &mut zbuf, cam, sprites, palette, time, w, h);
     if let Some(t) = tsp { stat(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
     // The weapon viewmodel draws last, on top of the world and every model.
-    let tv = stats_on().then(std::time::Instant::now);
+    let tv = stats_on().then(StatInstant::now);
     if let Some(vm) = viewmodel {
         draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, vm.origin_ofs, palette, w, h);
     }
