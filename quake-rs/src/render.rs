@@ -8559,6 +8559,55 @@ fn draw_char_scaled(
     }
 }
 
+/// `M_Print` (menu.c): menu text in the conchars' second, bronze half — each
+/// character is drawn as cell `c + 128` — at virtual `(vx, vy)`, 8 px apart.
+/// (`M_PrintWhite` is plain [`draw_string_scaled`].) The menus print their
+/// labels, values and hints this way; white marks only the odd highlight (the
+/// current video mode, "No Communications Available").
+#[allow(clippy::too_many_arguments)]
+fn m_print(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    vx: f32,
+    vy: f32,
+    text: &str,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    for (i, b) in text.bytes().enumerate() {
+        let x = vx + 8.0 * i as f32;
+        draw_char_scaled(image, conchars, x, vy, b.wrapping_add(128), scale, ox, oy, palette);
+    }
+}
+
+/// `Draw_FadeScreen` (draw.c), which `M_Draw` runs under every menu drawn over
+/// the game or a demo: three pixels in four go to palette index 0 in a fixed
+/// dither — row `y` keeps only the pixels with `x & 3 == (y & 1) << 1`. The
+/// pattern is laid on the 320x200 virtual screen, scaled like the rest of the
+/// 2-D layer (each virtual pixel a `scale x scale` block).
+pub fn fade_screen(image: &mut Image, palette: &[[u8; 3]; 256]) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let scale = (image.w as f32 / MENU_VIRT_W).min(image.h as f32 / MENU_VIRT_H);
+    let inv = if scale.is_finite() && scale > 0.0 { 1.0 / scale } else { 1.0 };
+    let black = palette[0];
+    // Virtual column of each framebuffer column, computed once.
+    let vcols: Vec<usize> = (0..image.w).map(|x| (x as f32 * inv) as usize).collect();
+    for y in 0..image.h {
+        let vy = (y as f32 * inv) as usize;
+        let t = (vy & 1) << 1;
+        let row = &mut image.rgb[y * image.w..(y + 1) * image.w];
+        for (px, &vx) in row.iter_mut().zip(vcols.iter()) {
+            if vx & 3 != t {
+                *px = black;
+            }
+        }
+    }
+}
+
 /// Draw a slider widget (`M_DrawSlider`) with its trough origin at virtual
 /// `(x, y)`: glyph 128 (left cap) at `x-8`, [`SLIDER_RANGE`] copies of glyph 129
 /// (middle) starting at `x`, glyph 130 (right cap) just past them, and the knob
@@ -8628,6 +8677,11 @@ pub fn draw_menu(
     }
     let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
     let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+
+    // M_Draw: the game/demo underneath fades first (Draw_FadeScreen). (The
+    // C's other branch, the console background under a forced-up console,
+    // can't occur: this port's menu and console never share the screen.)
+    fade_screen(image, palette);
 
     // The animated cursor frame: (int)(host_time*10) % 6. Guard a non-finite /
     // negative clock so the index stays 0..6.
@@ -8783,7 +8837,7 @@ fn draw_options_screen(
         // The labels.
         for (i, label) in OPTIONS_LABELS.iter().enumerate() {
             let ry = OPTIONS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
-            draw_string_scaled(image, cc, OPTIONS_LABEL_X, ry, label, scale, ox, oy, palette);
+            m_print(image, cc, OPTIONS_LABEL_X, ry, label, scale, ox, oy, palette);
         }
 
         // The analog widgets (M_DrawSlider) on the slider rows, each with its
@@ -8812,7 +8866,8 @@ fn draw_options_screen(
         ];
         for (row, on) in checks {
             let ry = OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
-            draw_string_scaled(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy, palette);
+            // M_DrawCheckbox: M_Print (x, y, "on" / "off").
+            m_print(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy, palette);
         }
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
@@ -8853,7 +8908,7 @@ fn draw_load_save_screen(
             let ry = 32.0 + i as f32 * 8.0;
             let text = menu.save_comment(i);
             let row = if text.is_empty() { UNUSED_SLOT } else { text };
-            draw_string_scaled(image, cc, 16.0, ry, row, scale, ox, oy, palette);
+            m_print(image, cc, 16.0, ry, row, scale, ox, oy, palette);
         }
         let cy = 32.0 + menu.cursor as f32 * 8.0;
         draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
@@ -8923,30 +8978,31 @@ fn draw_keys_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     let Some(cc) = conchars else { return };
+    // Every string on this screen is M_Print (bronze).
     if menu.bind_grabbing() {
-        draw_string_scaled(
+        m_print(
             image, cc, 12.0, 32.0, "Press a key or button for this action", scale, ox, oy,
             palette,
         );
     } else {
-        draw_string_scaled(
+        m_print(
             image, cc, 18.0, 32.0, "Enter to change, backspace to clear", scale, ox, oy, palette,
         );
     }
     for (i, (_, label)) in BINDNAMES.iter().enumerate() {
         let y = 48.0 + 8.0 * i as f32;
-        draw_string_scaled(image, cc, 16.0, y, label, scale, ox, oy, palette);
+        m_print(image, cc, 16.0, y, label, scale, ox, oy, palette);
         let keys = menu.find_keys_for_command(i);
         match keys[0] {
-            None => draw_string_scaled(image, cc, 140.0, y, "???", scale, ox, oy, palette),
+            None => m_print(image, cc, 140.0, y, "???", scale, ox, oy, palette),
             Some(k0) => {
                 let name = keynum_to_string(k0);
-                draw_string_scaled(image, cc, 140.0, y, &name, scale, ox, oy, palette);
+                m_print(image, cc, 140.0, y, &name, scale, ox, oy, palette);
                 if let Some(k1) = keys[1] {
                     // M_Print (140 + x + 8, y, "or"); M_Print (140 + x + 32, ...).
                     let x = name.len() as f32 * 8.0;
-                    draw_string_scaled(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy, palette);
-                    draw_string_scaled(
+                    m_print(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy, palette);
+                    m_print(
                         image, cc, 140.0 + x + 32.0, y, &keynum_to_string(k1), scale, ox, oy,
                         palette,
                     );
@@ -8966,8 +9022,8 @@ fn draw_keys_screen(
 
 /// Draw the video-modes screen — this port's `VID_MenuDraw` (vid_win.c): the
 /// `vidmodes` title centered at y=4, one row per [`RESOLUTION_PRESETS`] entry
-/// from y=36 (the C lists `WIDTHxHEIGHT` mode descriptions and marks the
-/// current mode), the flashing cursor on the highlighted row, and hint lines.
+/// from y=36 (`WIDTHxHEIGHT`, bronze; the current mode white, as the C marks
+/// it), the flashing cursor on the highlighted row, and hint lines.
 /// Single column — the C's 3-wide grid exists to fit 15+ DOS modes; 7 presets
 /// fit one column.
 #[allow(clippy::too_many_arguments)]
@@ -8987,26 +9043,25 @@ fn draw_video_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     let Some(cc) = conchars else { return };
+    // VID_MenuDraw prints every mode with M_Print (bronze) except the current
+    // one, which it prints with M_PrintWhite.
     let current = menu.resolution();
     for (i, &(w, h)) in RESOLUTION_PRESETS.iter().enumerate() {
         let y = 36.0 + 8.0 * i as f32;
-        let mut row = format!("{w}x{h}");
+        let row = format!("{w}x{h}");
         if (w, h) == current {
-            row.push_str("  (current)");
+            draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
+        } else {
+            m_print(image, cc, 16.0, y, &row, scale, ox, oy, palette);
         }
-        draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
     }
     let cy = 36.0 + menu.cursor as f32 * 8.0;
     draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
     // single column's foot.
     let hints_y = 36.0 + RESOLUTION_PRESETS.len() as f32 * 8.0 + 16.0;
-    draw_string_scaled(
-        image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy, palette,
-    );
-    draw_string_scaled(
-        image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy, palette,
-    );
+    m_print(image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy, palette);
+    m_print(image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy, palette);
 }
 
 /// Draw the Help/Ordering screen (`M_Help_Draw`): blit the current page pic
@@ -13607,20 +13662,92 @@ mod tests {
     fn draw_menu_skips_missing_pics_without_panic() {
         let pal = ramp_palette();
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        let before = img.rgb.clone();
+        let mut faded = Image::new(320, 200, [9, 9, 9]);
+        fade_screen(&mut faded, &pal);
         let mut m = Menu::new();
         m.open();
-        // All pics absent: nothing should draw, and it must not panic.
+        // All pics absent: only M_Draw's Draw_FadeScreen shows, and no panic.
         let pics = MenuPics::default();
         draw_menu(&mut img, &m, &pics, None, 0.3, 0.0, &pal);
-        assert_eq!(img.rgb, before, "an all-empty MenuPics must leave the frame untouched");
+        assert_eq!(img.rgb, faded.rgb, "an all-empty MenuPics draws only the fade");
 
-        // A hidden menu never draws.
+        // A hidden menu never draws (not even the fade).
         m.close();
+        let before = img.rgb.clone();
         let solid = solid_pic(64, 16, 7);
         let pics2 = MenuPics { mainmenu: Some(solid), ..Default::default() };
         draw_menu(&mut img, &m, &pics2, None, 0.3, 0.0, &pal);
         assert_eq!(img.rgb, before, "a hidden menu must not draw");
+    }
+
+    #[test]
+    fn fade_screen_blackens_three_pixels_in_four_like_draw_fadescreen() {
+        // Draw_FadeScreen: row y keeps only x & 3 == (y & 1) << 1; the rest go
+        // to palette index 0.
+        let mut pal = ramp_palette();
+        pal[0] = [1, 2, 3];
+        let keep = [200u8, 100, 50];
+        let mut img = Image::new(320, 200, keep);
+        fade_screen(&mut img, &pal);
+        for y in 0..200 {
+            for x in 0..320 {
+                let want = if x & 3 == (y & 1) << 1 { keep } else { pal[0] };
+                assert_eq!(img.rgb[y * 320 + x], want, "({x},{y})");
+            }
+        }
+        // Scaled 2-D layer: at 640x400 each virtual pixel is a 2x2 block.
+        let mut big = Image::new(640, 400, keep);
+        fade_screen(&mut big, &pal);
+        for &(x, y) in &[(0, 0), (1, 1), (4, 2), (5, 3), (2, 0), (0, 2), (639, 399)] {
+            let (vx, vy) = (x / 2, y / 2);
+            let want = if vx & 3 == (vy & 1) << 1 { keep } else { pal[0] };
+            assert_eq!(big.rgb[y * 640 + x], want, "({x},{y})");
+        }
+        let kept = big.rgb.iter().filter(|&&p| p == keep).count();
+        assert_eq!(kept, 640 * 400 / 4, "a quarter of the screen survives");
+        fade_screen(&mut Image::new(0, 0, keep), &pal);
+    }
+
+    #[test]
+    fn options_labels_are_m_print_bronze_and_the_current_video_mode_white() {
+        // M_Print draws cell c + 128 (the conchars' bronze half); M_PrintWhite
+        // the plain cell. A conchars whose bronze 'S' (211) is index 5 and
+        // plain 'S' (83) index 6 tells them apart on the Options "Screen size"
+        // label and on the Video list.
+        let pal = ramp_palette();
+        let mut data = vec![0u8; 128 * 128];
+        let mut fill = |cell: usize, idx: u8| {
+            let (cx, cy) = ((cell % 16) * 8, (cell / 16) * 8);
+            for y in 0..8 {
+                for x in 0..8 {
+                    data[(cy + y) * 128 + cx + x] = idx;
+                }
+            }
+        };
+        for c in 32..127usize {
+            fill(c, 6); // white half
+            fill(c + 128, 5); // bronze half
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+        // "           Screen size" at (16, 56): the 'S' is the 12th character.
+        let s_px = (56 + 3) * 320 + 16 + 11 * 8 + 3;
+        assert_eq!(img.rgb[s_px], pal[5], "Options labels are M_Print (bronze)");
+        // Video Options: the current mode white, the others bronze.
+        m.sync_resolution(640, 400);
+        m.cursor = ROW_VIDEO;
+        m.select();
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+        let row_px = |row: usize| (36 + row * 8 + 3) * 320 + 16 + 3;
+        assert_eq!(img.rgb[row_px(2)], pal[6], "640x400 (current) is M_PrintWhite");
+        assert_eq!(img.rgb[row_px(0)], pal[5], "320x200 is M_Print");
+        assert_eq!(img.rgb[row_px(6)], pal[5], "1280x800 is M_Print");
     }
 
     #[test]
