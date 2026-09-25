@@ -1200,24 +1200,44 @@ async function main() {
   // the first canvas sync so it's created at the right backing-store size.
   restoreResolution();
 
-  const ctx = canvas.getContext('2d');
+  // An opaque canvas (the framebuffer's alpha is always 255): the browser
+  // composites it without blending. `?lowlatency` in the URL also asks for a
+  // desynchronized canvas, which can skip a frame of compositor latency where
+  // the browser supports it (Chrome on Windows / ChromeOS) at the risk of
+  // tearing; off by default, and not verifiable in headless Chromium.
+  const LOW_LATENCY = new URLSearchParams(location.search).has('lowlatency');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
   // The render resolution is RUNTIME state: Options > Video Options can change
-  // it. Track the current backing-store size + ImageData and re-create them
-  // whenever the engine reports a different width()/height(). The CSS display size (768x480)
+  // it. Track the current backing-store size and re-fit the canvas whenever the
+  // engine reports a different width()/height(). The CSS display size (640x480)
   // stays fixed, so a larger backing store just gives a crisper pixel-upscale.
-  let W = 0, H = 0, img = null;
+  let W = 0, H = 0;
   function syncCanvasSize() {
     const w = exp.width(), h = exp.height();
-    if (w === W && h === H && img) return;
+    if (w === W && h === H) return;
     W = w; H = h;
     canvas.width = W; canvas.height = H;
-    img = ctx.createImageData(W, H);
     // The resolution just changed (boot, or a Video Options mode): persist
     // it so a reload comes back at the same size. This is the single choke point
     // for every resolution change, so it captures menu picks and restores alike.
     saveResolution(W, H);
   }
   syncCanvasSize();
+  // The presented frame: an ImageData built straight over the framebuffer in
+  // wasm memory, so presenting is one putImageData with no copy into a
+  // JS-side ImageData first. Rebuilt when the bytes move: a memory.grow
+  // detaches the old ArrayBuffer, and a resolution change reallocates the
+  // framebuffer (new pointer, new size).
+  let frameImg = null, frameBuf = null, framePtr = 0;
+  function frameImage() {
+    const buf = exp.memory.buffer, ptr = exp.framebuffer();
+    if (!frameImg || buf !== frameBuf || ptr !== framePtr
+        || frameImg.width !== W || frameImg.height !== H) {
+      frameImg = new ImageData(new Uint8ClampedArray(buf, ptr, W * H * 4), W, H);
+      frameBuf = buf; framePtr = ptr;
+    }
+    return frameImg;
+  }
   // Ready: swap the overlay's boot panel for the click-to-play prompt — the
   // page's ONE scrim appearance, retired forever by the first gesture.
   bootEl.classList.add('hidden');
@@ -1253,10 +1273,7 @@ async function main() {
     // The render resolution may have changed this frame (Video Options): re-fit the
     // canvas + ImageData to the new size before blitting.
     syncCanvasSize();
-    const ptr = exp.framebuffer();
-    const mem = new Uint8Array(exp.memory.buffer, ptr, W * H * 4); // re-view (memory may grow)
-    img.data.set(mem);
-    ctx.putImageData(img, 0, 0);
+    ctx.putImageData(frameImage(), 0, 0);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

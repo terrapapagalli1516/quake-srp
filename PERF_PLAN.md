@@ -432,6 +432,16 @@ The fidelity classes are:
   - `getContext('2d', {alpha: false, desynchronized: true})`. The second flag also cuts a frame of
     compositor latency.
   - After B5: a WebGL palette texture, which uploads 1 byte per pixel plus 256 colours.
+- **Done** (branch `quake/host`): the page presents an `ImageData` built over the framebuffer in
+  wasm memory (rebuilt when `memory.buffer`, the pointer or the size changes), on an
+  `alpha: false` context; `image-rendering: pixelated` unchanged. The page's per-frame work
+  outside `step` at 1280×800 (60 Hz headless, two sittings of 3 × 4 s): **0.34–0.37 → 0.13–0.14
+  ms**. `alpha: false` alone measured neutral (0.143–0.149 without it). A present probe hashes
+  the canvas against the wasm framebuffer through a demo, a JS `memory.grow`, a map load and a
+  resolution change: equal everywhere, and equal to the old copy path. `desynchronized` is
+  **opt-in** (`index.html?lowlatency`): neutral and identical in headless, but headless cannot
+  show what it changes (Chrome on Windows/ChromeOS skips the compositor, which can tear), so it
+  is not the default.
 
 ### C. Entities
 
