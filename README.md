@@ -30,6 +30,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 | `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`. |
 | `quake-wasm/` | the `cdylib` browser shell (~5.4k lines incl. its e2e tests): compiles the engine to `wasm32`, owns the walk/demo/menu/console front-end state, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. |
 | `web/` | the browser page (`index.html`) + headless-verify scripts (`verify_walk.py`, `verify_ambient.py`). |
+| `oracle/` | id's own WinQuake software renderer built headless from the C (null drivers, docker i386 build) + `compare.py`: renders the same view in both and diffs them pixel for pixel. See `oracle/README.md` for how to run it and the ranked fidelity findings. |
 | `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |
 | `screenshots/` | rendered output from real e1m1 / start (the lit shots, the walkthrough GIF). |
 

@@ -60,6 +60,7 @@ fn main() {
         "render-demo" => need(rest, 1, cmd).and_then(|a| cmd_render_demo(&a[0])),
         "menu" => need(rest, 2, cmd).and_then(|a| cmd_menu(&a[0], &a[1])),
         "scene" => need(rest, 3, cmd).and_then(|a| cmd_scene(&a[0], &a[1], &a[2])),
+        "view" => need(rest, 3, cmd).and_then(cmd_view),
         "walk" => need(rest, 3, cmd).and_then(|a| {
             cmd_walk(&a[0], &a[1], &a[2], a.get(3).and_then(|s| s.parse().ok()).unwrap_or(40))
         }),
@@ -128,6 +129,8 @@ fn usage() {
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--ents FILE] [--viewmodel M:F] [--bench N]\n\
+         \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
          \tquaketool playtest <pak> <map.bsp> [out.ppm]  spawn a player, walk forward, report state + render POV\n\
@@ -1919,6 +1922,212 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         model_cache.values().filter(|v| v.is_some()).count(),
         skipped_load
     );
+    let _ = writeln!(o, "  -> {out} ({}x{} PPM)", img.w, img.h);
+    Ok(Out::Text(o))
+}
+
+/// `view <pak> <map.bsp> <out.ppm> [options]` — render ONE exactly specified view,
+/// so the C oracle (`oracle/`: id's own software renderer, headless) can be diffed
+/// against this port pixel for pixel. The camera is given in Quake's convention —
+/// `r_refdef.vieworg` and `r_refdef.viewangles` (pitch positive looks DOWN) — and
+/// the clock is explicit, so light styles, sky scroll, liquid turb and texture
+/// animation sit at the same phase as the C frame.
+///
+/// ```text
+/// --res WxH          framebuffer size (default 320x200)
+/// --origin x,y,z     eye position (default info_player_start + 22, the view height)
+/// --angles p,y,r     view angles in degrees (default 0,<start angle>,0)
+/// --time T           the render clock, cl.time (default: the server clock after spawn)
+/// --fov F            horizontal field of view (default 90)
+/// --ents FILE        draw these entities: the oracle's `.ents` list, one per line,
+///                    `model ox oy oz pitch yaw roll frame skin syncbase effects kind`
+///                    (without it: the world only, as r_drawentities 0)
+/// --viewmodel M:F    also draw weapon model M at frame F
+/// --bench N          then render the same view N more times, report warm ms/frame
+/// ```
+///
+/// The map's entities are still spawned (worldspawn's QuakeC sets the light-style
+/// strings), but only `--ents` decides what is drawn. No existing command's output
+/// depends on this one.
+fn cmd_view(args: &[String]) -> Result<Out, String> {
+    use std::collections::HashMap;
+
+    let (pak_path, map_name, out) = (&args[0], &args[1], &args[2]);
+    let parse_vec3 = |flag: &str, s: &str| -> Result<[f32; 3], String> {
+        let v: Vec<f32> = s.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+            .map_err(|_| format!("{flag}: expected x,y,z, got {s:?}"))?;
+        if v.len() != 3 {
+            return Err(format!("{flag}: expected 3 comma-separated numbers, got {s:?}"));
+        }
+        Ok([v[0], v[1], v[2]])
+    };
+    let (mut w, mut h) = (320usize, 200usize);
+    let (mut origin, mut angles, mut time, mut fov) = (None, None, None, 90.0f32);
+    let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
+    let mut bench: Option<u32> = None;
+    let mut i = 3;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        let val = args.get(i + 1).ok_or_else(|| format!("{flag} needs a value"))?;
+        match flag {
+            "--res" => {
+                let (a, b) = val.split_once(['x', 'X']).ok_or_else(|| format!("--res: expected WxH, got {val:?}"))?;
+                w = a.trim().parse().map_err(|_| format!("--res: bad width {a:?}"))?;
+                h = b.trim().parse().map_err(|_| format!("--res: bad height {b:?}"))?;
+            }
+            "--origin" => origin = Some(parse_vec3(flag, val)?),
+            "--angles" => angles = Some(parse_vec3(flag, val)?),
+            "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
+            "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
+            "--ents" => ents_path = Some(val.as_str()),
+            "--viewmodel" => viewmodel_arg = Some(val.as_str()),
+            "--bench" => bench = Some(val.parse::<u32>().map_err(|_| format!("--bench: bad count {val:?}"))?.max(1)),
+            other => return Err(format!("view: unknown option {other:?}")),
+        }
+        i += 2;
+    }
+
+    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let read_pak = |name: &str| -> Result<Vec<u8>, String> {
+        pak.read_file(name)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("{name} not found in {pak_path}"))
+    };
+    let bsp_bytes = read_pak(map_name)?;
+    let bsp = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?;
+    let bsp_sim = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?;
+    let palette = render::parse_palette(&read_pak("gfx/palette.lmp")?)
+        .ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
+    let colormap = pak.read_file("gfx/colormap.lmp").ok().flatten();
+    let progs = Progs::parse(&read_pak("progs.dat")?).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
+    server.spawn_entities().map_err(|e| e.to_string())?;
+
+    // Default camera: the player start at the view height (DEFAULT_VIEWHEIGHT 22).
+    let start = player_start(&bsp.entities);
+    let origin = match (origin, start) {
+        (Some(o), _) => o,
+        (None, Some((o, _))) => [o[0], o[1], o[2] + 22.0],
+        (None, None) => return Err("map has no info_player_start; pass --origin".into()),
+    };
+    let angles = angles.unwrap_or([0.0, start.map_or(0.0, |(_, a)| a), 0.0]);
+    let cam = Camera { pos: origin, yaw: angles[1], pitch: -angles[0], roll: angles[2], fov_deg: fov };
+    let time = time.unwrap_or_else(|| server.time());
+    let light_styles = server.lightstyle_scales(time);
+
+    // The entity list, resolved against per-name model caches (each file parsed once).
+    let mut mdls: HashMap<String, Option<Mdl>> = HashMap::new();
+    let mut sprs: HashMap<String, Option<Sprite>> = HashMap::new();
+    let mut ext: HashMap<String, Option<Bsp>> = HashMap::new();
+    // (model, origin, angles, frame, skin) per alias entity.
+    type AliasDesc = (String, [f32; 3], [f32; 3], usize, i32);
+    let mut alias_descs: Vec<AliasDesc> = Vec::new();
+    let mut sprite_descs: Vec<(String, [f32; 3], usize)> = Vec::new();
+    let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
+    let mut bmodels: Vec<render::BModelInstance> = Vec::new();
+    let mut skipped = 0usize;
+    if let Some(p) = ents_path {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read {p}: {e}"))?;
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let num = |k: usize| f.get(k).and_then(|s| s.parse::<f32>().ok());
+            let (Some(model), Some(ox), Some(oy), Some(oz), Some(ap), Some(ay), Some(ar), Some(fr), Some(sk)) =
+                (f.first(), num(1), num(2), num(3), num(4), num(5), num(6), num(7), num(8))
+            else {
+                return Err(format!("{p}: malformed entity line {line:?}"));
+            };
+            let (model, org, ang) = (model.to_string(), [ox, oy, oz], [ap, ay, ar]);
+            if let Some(n) = model.strip_prefix('*') {
+                let model_index = n.parse().map_err(|_| format!("{p}: bad submodel {model:?}"))?;
+                bmodels.push(render::BModelInstance { model_index, origin: org, frame: fr as i32 });
+            } else if model.ends_with(".bsp") {
+                ext.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Bsp::parse(&b).ok()));
+                ext_descs.push((model, org));
+            } else if model.ends_with(".spr") {
+                sprs.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Sprite::parse(&b).ok()));
+                sprite_descs.push((model, org, fr as usize));
+            } else if model.ends_with(".mdl") {
+                mdls.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Mdl::parse(&b).ok()));
+                alias_descs.push((model, org, ang, fr as usize, sk as i32));
+            } else {
+                skipped += 1;
+            }
+        }
+    }
+    let instances: Vec<render::ModelInstance> = alias_descs
+        .iter()
+        .filter_map(|(name, org, ang, frame, skin)| match mdls.get(name) {
+            Some(Some(mdl)) => Some(render::ModelInstance {
+                mdl,
+                origin: *org,
+                yaw: ang[1],
+                pitch: ang[0],
+                roll: ang[2],
+                color: color_for_name(name),
+                frame: *frame,
+                skinnum: *skin,
+            }),
+            _ => None,
+        })
+        .collect();
+    let externals: Vec<render::ExternalBModel> = ext_descs
+        .iter()
+        .filter_map(|(name, org)| match ext.get(name) {
+            Some(Some(bsp)) => Some(render::ExternalBModel { bsp, origin: *org }),
+            _ => None,
+        })
+        .collect();
+    let sprites: Vec<render::SpriteInstance> = sprite_descs
+        .iter()
+        .filter_map(|(name, org, frame)| match sprs.get(name) {
+            Some(Some(sprite)) => Some(render::SpriteInstance { sprite, origin: *org, frame: *frame }),
+            _ => None,
+        })
+        .collect();
+    let vm_mdl = match viewmodel_arg {
+        Some(arg) => {
+            let (name, frame) = arg.rsplit_once(':').unwrap_or((arg, "0"));
+            let frame: usize = frame.parse().map_err(|_| format!("--viewmodel: bad frame in {arg:?}"))?;
+            Some((Mdl::parse(&read_pak(name)?).map_err(|e| e.to_string())?, frame))
+        }
+        None => None,
+    };
+    let unresolved = alias_descs.len() + ext_descs.len() + sprite_descs.len()
+        - instances.len() - externals.len() - sprites.len();
+
+    let render_once = || {
+        let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel { mdl, frame: *frame });
+        render::render_scene_ext_sprited(
+            &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &[],
+            &light_styles, colormap.as_deref(), &sprites,
+        )
+    };
+    let img = render_once();
+    // Warm re-renders of the same view (the first, cold frame above is excluded),
+    // the port side of the oracle's `oracle_bench`: renderer cost only.
+    let bench = bench.map(|n| {
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(render_once());
+        }
+        (n, start.elapsed().as_secs_f64() * 1000.0 / n as f64)
+    });
+    img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
+    let mut o = String::new();
+    let _ = writeln!(
+        o,
+        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}",
+        origin[0], origin[1], origin[2], angles[0], angles[1], angles[2]
+    );
+    let _ = writeln!(
+        o,
+        "  entities: {} alias, {} submodel, {} external, {} sprite ({} unresolved, {} unknown kind)",
+        instances.len(), bmodels.len(), externals.len(), sprites.len(), unresolved, skipped
+    );
+    if let Some((n, per)) = bench {
+        let _ = writeln!(o, "  bench {n} warm frames -> {per:.4} ms/frame ({:.1} fps)", 1000.0 / per);
+    }
     let _ = writeln!(o, "  -> {out} ({}x{} PPM)", img.w, img.h);
     Ok(Out::Text(o))
 }
