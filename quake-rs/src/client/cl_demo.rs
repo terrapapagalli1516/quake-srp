@@ -251,7 +251,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
         d.damage_blend = 0.0;
         d.bonus_blend = 0.0;
         d.faceanimtime = 0.0;
-        d.cl_items = 0;
+        d.cl_items = d.demo.frames[0].client.items; // unflashed (DemoPlay::new)
         d.item_gettime = [0.0; 32];
         d.v_dmg_time = 0.0;
         d.centerprint = None;

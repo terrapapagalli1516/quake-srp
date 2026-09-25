@@ -112,7 +112,13 @@ pub fn client_punchangle(w: &Walk) -> [f32; 3] {
 /// `sigil_touch` only sets `serverflags`, so this is how a rune reaches the
 /// status bar.
 pub fn client_items(w: &Walk) -> i32 {
-    (w.server.vm.ent_get_float(w.player, "items") as i32) | ((w.server.serverflags() as i32) << 28)
+    server_items(&w.server, w.player)
+}
+
+/// [`client_items`] for a `server` and `player` not yet in a [`Walk`] (a
+/// level being assembled).
+pub fn server_items(server: &crate::server::Server, player: i32) -> i32 {
+    (server.vm.ent_get_float(player, "items") as i32) | ((server.serverflags() as i32) << 28)
 }
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
@@ -351,8 +357,8 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
     }
 
     // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the
-    // server clock the HUD reads — after any level swap above, whose
-    // CL_ClearState zeroed cl.items.
+    // server clock the HUD reads — after any level swap above, which seeded
+    // cl.items with the spawn items (see `stamp_item_gettime`).
     let items = client_items(w);
     let now_sv = w.server.time();
     stamp_item_gettime(&mut w.cl_items, &mut w.item_gettime, items, now_sv);

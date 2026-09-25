@@ -620,4 +620,32 @@ mod tests {
             img.rgb.len()
         );
     }
+
+    /// CENSUS F18 on the recorded stream: C's demo playback parses the signon
+    /// and frame 0's block in one CL_ReadFromServer, before the first
+    /// CL_LerpPoint, so the recorded player's weapons are stamped at about
+    /// host_frametime and nothing flashes when demo1 starts (or, here, when it
+    /// loops). A weapon got later in the recording still flashes.
+    #[test]
+    fn demo_start_does_not_flash_the_recorded_weapons() {
+        let mut d = build_demo().expect("the embedded demo boots");
+        let items0 = d.demo.frames[0].client.items;
+        assert_ne!(items0 & 1, 0, "demo1's player carries the shotgun");
+        let unflashed = |d: &DemoPlay| d.item_gettime.iter().all(|&t| t == 0.0);
+        assert_eq!(d.cl_items, items0);
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert!(unflashed(&d), "playback start");
+        let _ = step_demo(&mut d, 1.0e6, false, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 0, "wrapped");
+        assert_eq!(d.cl_items, items0);
+        assert!(unflashed(&d), "the loop wrap");
+        // A bit the recording gains later is stamped on its frame's clock.
+        let got = d.demo.frames.iter().position(|f| f.client.items & !items0 != 0);
+        if let Some(i) = got {
+            let dt = d.demo.frames[i].time - d.demo.frames[0].time;
+            let _ = step_demo(&mut d, dt, false, 160, 100);
+            assert!(!unflashed(&d), "frame {i}'s new item is stamped");
+        }
+    }
 }

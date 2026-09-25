@@ -1745,8 +1745,8 @@ fn parse_clientdata(cl: &mut ClientState, r: &mut NetReader, bits: i32) -> Resul
     }
 
     // items — always a long ("[always sent]"). The C also latches per-bit
-    // item_gettime[] flash times here; only the sbar icon flash consumed
-    // those, which this port's HUD doesn't animate (documented sbar nit).
+    // item_gettime[] flash times here; the client does that per played frame
+    // (`client::view::stamp_item_gettime`).
     cl.items = r.read_long();
 
     cl.onground = bits & SU_ONGROUND != 0;

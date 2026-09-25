@@ -17,6 +17,7 @@ use crate::progs::Progs;
 use crate::server::Server;
 
 use super::cl_input::clamp_pitch;
+use super::cl_main::client_items;
 use super::{assemble_walk, spawn_view_angles, SoundCall, Walk};
 
 /// Sane upper bounds the `give` command clamps to, mirroring Quake's pickup
@@ -327,7 +328,9 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     w.damage_blend = 0.0;
     w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
-    w.cl_items = 0;
+    // CL_ClearState + the signon's clientdata: the carried items, unflashed
+    // (`stamp_item_gettime`).
+    w.cl_items = client_items(w);
     w.item_gettime = [0.0; 32];
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
@@ -409,7 +412,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     w.damage_blend = 0.0;
     w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
-    w.cl_items = 0;
+    w.cl_items = client_items(w); // unflashed, as at a changelevel
     w.item_gettime = [0.0; 32];
     w.oldz = f32::NAN;
     // Same intermission/finale reset as a changelevel (CL_ClearState).
