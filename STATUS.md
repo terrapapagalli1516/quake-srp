@@ -138,11 +138,11 @@ from 52,000 to 67,000 lines.
 
 **Reviews.** Two adversarial reviews of the merged tree; their findings were fixed on
 `quake/polish` ("Review fixes"), `quake/polish2` and `quake/polish3` ("Second review
-fixes", both sides). The visible ones: loading a save kept no options; the underwater
-view is rendered at id's 320x200 warp buffer; the client clock is `cl.time`; `sv.time` is
-a double (the new-weapon flash was a frame early); particles are `D_DrawParticle`; every
-menu keeps its own cursor; no weapon-icon flash at level start; a busy frame could leave
-a door hum looping forever.
+fixes", both sides). The fixes a player could see: loading a save no longer resets the
+options; the underwater view is rendered in id's 320x200 warp buffer; the client clock is
+`cl.time`; `sv.time` is a double (the new-weapon flash was a frame early); particles are
+drawn as `D_DrawParticle`; every menu keeps its own cursor; carried weapons no longer flash
+at each level start; a busy frame can no longer leave a door hum looping forever.
 
 **Goldens.** They moved with each deliberate fidelity fix, every move recorded in
 AUDIT.md with its pixel count: `fb14bd65` / `a6f98d8a` / `0211e6d4` at the start →
@@ -173,23 +173,26 @@ and 118 at `3ba835f`.
 
 ## Quick commands
 
+From the repository root:
+
 ```bash
 # tests (quake-rs: no game data; quake-wasm: the embedded shareware pak)
-cd quake-rs && cargo test --release        # 581 lib + 1 bin + 8 integration
-cd quake-wasm && cargo test --release      # 118 (+1 ignored harness)
+(cd quake-rs && cargo test --release)      # 581 lib + 1 bin + 8 integration
+(cd quake-wasm && cargo test --release)    # 118 (+1 ignored harness)
 
 # goldens (needs the pak): sha256 prefixes 4807aaa1 / 9ae2b478 / c65b7046 at 3ba835f
-./target/release/quaketool scene ../quake-data/ID1/PAK0.PAK maps/e1m1.bsp /tmp/e1m1.ppm
+Q=quake-rs/target/release/quaketool PAK=quake-data/ID1/PAK0.PAK
+for m in e1m1 e1m2 e1m3; do $Q scene $PAK maps/$m.bsp /tmp/$m.ppm >/dev/null; sha256sum /tmp/$m.ppm; done
 
 # the browser's client natively, frame hashes as bench.py prints them
-./target/release/quaketool play ../quake-data/ID1/PAK0.PAK demo1,walk_e1m1 --res 320x200,640x400 --hash-every 30
+$Q play $PAK demo1,walk_e1m1 --res 320x200,640x400 --hash-every 30
 
 # benchmark (the page in headless Chromium + a native twin)
 uv run --with playwright web/bench.py --build --native
 
 # wasm build + serve
-cd quake-wasm && cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/quake_wasm.wasm ../web/ && cd .. && miniserve -C -p 8196 web
+(cd quake-wasm && cargo build --release --target wasm32-unknown-unknown)
+cp quake-wasm/target/wasm32-unknown-unknown/release/quake_wasm.wasm web/ && miniserve -C -p 8196 web
 ```
 
 ---

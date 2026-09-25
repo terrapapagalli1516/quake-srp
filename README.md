@@ -73,7 +73,7 @@ cd quake-rs && cargo build --release
 
 ## What works
 
-Checked on the real shareware data unless noted.
+Checked on the real shareware data.
 
 - **Files:** PAK (with id's CRC), WAD2, BSP v29, MDL, SPR, the palette and colormap.
 - **QuakeC:** the bytecode VM (all 66 opcodes) and the builtins the id1 progs call.
@@ -130,7 +130,7 @@ departs from id's. The list is one table, `WEB_EXTRAS` in `quake-rs/src/menu.rs`
 | `oracle/` | id's WinQuake built headless from the C, and the scripts that diff its frames against the port's (`oracle/README.md`) |
 | `census/` | helpers for the gameplay census (`CENSUS.md`): id's edicts dumped and diffed against the port's, a QuakeC symbol dump |
 | `gen_samples.py`, `gen_progs.py` | synthetic assets and progs, so the engine's tests need no game data |
-| `screenshots/` | older rendered output (some predate tonight's renderer) |
+| `screenshots/` | older rendered output, from before the 2026-09-25 renderer work |
 
 ## How it is checked
 
@@ -138,8 +138,9 @@ departs from id's. The list is one table, `WEB_EXTRAS` in `quake-rs/src/menu.rs`
   integration tests, no game data needed. In `quake-wasm`: 118 end-to-end tests against the
   embedded shareware pak (plus one ignored harness, `oracle_screen`). All pass at `3ba835f`.
 - **Golden renders.** `quaketool scene <pak> maps/e1mN.bsp out.ppm` for e1m1, e1m2, e1m3;
-  the sha256 prefixes at `3ba835f` are `4807aaa1`, `9ae2b478`, `c65b7046`. A change that
-  moves them is either byte-identical or a deliberate fidelity fix recorded in `AUDIT.md`.
+  the sha256 prefixes at `3ba835f` are `4807aaa1`, `9ae2b478`, `c65b7046`. A change leaves
+  them byte-identical, or it is a deliberate fidelity fix and `AUDIT.md` records the move
+  with its pixel count.
 - **The oracle.** `uv run oracle/compare.py` renders the same view, clock and entities in id's
   renderer and the port and counts matching palette indices. Against id's x86 16-pixel spans
   the standard views (e1m1, e1m2, e1m3, e1m7) match 99.91–99.98% with square pixels and
