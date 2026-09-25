@@ -56,6 +56,7 @@ pub mod tent;
 pub mod render;
 pub mod draw;
 pub mod screen;
+pub mod sbar;
 pub mod dlight;
 pub mod demo;
 pub mod snd;

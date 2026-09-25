@@ -6,7 +6,8 @@
 //! gun placement of `V_CalcRefdef` / `CalcGunAngle`.
 
 use crate::math::Vec3;
-use super::{Camera, Image, IT_INVISIBILITY, IT_INVULNERABILITY, IT_QUAD, IT_SUIT};
+use crate::sbar::{IT_INVISIBILITY, IT_INVULNERABILITY, IT_QUAD, IT_SUIT};
+use super::{Camera, Image};
 
 /// Quake's `V_CalcBob` (view.c): the sinusoidal head-bob amount (world units) to
 /// add to the eye height while moving, so the view rocks up and down with each

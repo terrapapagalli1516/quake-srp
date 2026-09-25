@@ -238,8 +238,9 @@ pub fn draw_centerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{draw_finale_overlay, RESOLUTION_PRESETS};
+    use crate::render::RESOLUTION_PRESETS;
     use crate::render::fixtures::{ramp_palette, solid_conchars, test_backtile};
+    use crate::sbar::draw_finale_overlay;
     use crate::wad::Qpic;
 
     #[test]
