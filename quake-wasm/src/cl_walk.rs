@@ -777,7 +777,8 @@ pub(crate) fn step_walk(
     let parts: Vec<([f32; 3], u8)> =
         w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
     if dt.is_finite() && dt > 0.0 && !paused {
-        w.particles.integrate(dt, now, 800.0 * 0.05);
+        // grav = frametime * sv_gravity.value * 0.05 (100 on e1m8).
+        w.particles.integrate(dt, now, w.server.sv_gravity() * 0.05);
     }
     // The live dynamic lights (explosions / muzzle flashes) light up nearby
     // walls: R_PushDlights skips `die < cl.time || !radius`. A light is drawn

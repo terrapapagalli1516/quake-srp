@@ -378,8 +378,9 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
 
     let mut run = Run::default();
     drain(&mut server, pak, &mut run);
-    // Every brush pusher (doors, plats, buttons, trains, secret doors, walls).
-    for e in 0..server.vm.num_edicts() {
+    // Every brush pusher (doors, plats, buttons, trains, secret doors, walls);
+    // not the world, which SV_SpawnServer also makes MOVETYPE_PUSH.
+    for e in 1..server.vm.num_edicts() {
         if live(&server, e) && server.vm.ent_get_float(e as i32, "movetype") as i32 == MOVETYPE_PUSH {
             let ei = e as i32;
             run.pushers.insert(

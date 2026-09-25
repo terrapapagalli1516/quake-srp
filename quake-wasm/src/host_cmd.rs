@@ -447,7 +447,10 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
 /// matching how `restart` works in id's single-player. A read/parse failure leaves
 /// the (dead) level running rather than crashing.
 pub(crate) fn try_restart(w: &mut Walk) {
-    let serverflags = w.server.serverflags();
+    // Host_Restart_f -> SV_SpawnServer with NO SV_SaveSpawnparms: the level is
+    // respawned with svs.serverflags, the runes held on ENTRY — a rune taken
+    // on this level before dying is lost, as in id's game.
+    let serverflags = w.server.level_entry_serverflags();
     let skill = w.server.skill();
     let read = |n: &str| w.pak.read_file(n).ok().flatten();
     let Some(map_bytes) = read(&w.map_name) else { return };
@@ -521,6 +524,25 @@ mod tests {
     use crate::menu::menu_cancel;
     use crate::test_util::*;
     use crate::vid::{set_resolution, viewsize};
+
+    #[test]
+    fn restart_respawns_with_the_level_entry_serverflags() {
+        // CENSUS L7: Host_Restart_f -> SV_SpawnServer writes svs.serverflags
+        // (the runes held on ENTRY) into the QC global; only SV_SaveSpawnparms,
+        // at a changelevel, reads the live global back. So a rune taken on
+        // e1m7 is lost if the player dies there, and a changelevel carries it.
+        let mut w = crate::app::build_walk_map("maps/e1m7.bsp").expect("e1m7 boots");
+        w.server.vm.gset_float("serverflags", 1.0); // sigil_touch: rune 1
+        try_restart(&mut w);
+        assert_eq!(w.server.serverflags(), 0.0, "the rune taken on this level is gone");
+        // Arrive with rune 1 (a changelevel carries the live bits), take rune 2.
+        w.server.vm.gset_float("serverflags", 1.0);
+        try_changelevel(&mut w, "e1m7");
+        assert_eq!(w.server.level_entry_serverflags(), 1.0, "carried by the changelevel");
+        w.server.vm.gset_float("serverflags", 3.0);
+        try_restart(&mut w);
+        assert_eq!(w.server.serverflags(), 1.0, "restart keeps the entry rune only");
+    }
 
     #[test]
     fn sizeup_sizedown_console_commands_and_default_binds() {

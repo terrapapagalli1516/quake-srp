@@ -113,9 +113,10 @@ fn census_single_player_pauses_behind_the_menu() {
 /// CENSUS F3 (HIGH). e1m8 is low gravity: QC `worldspawn` does
 /// `cvar_set("sv_gravity", "100")` on maps/e1m8.bsp, and SV_AddGravity uses the
 /// cvar (`velocity[2] -= ent_gravity * sv_gravity.value * host_frametime`). The
-/// port's `bi_cvar_set` drops it and physics uses a constant 800.
+/// port's `bi_cvar_set` dropped it and physics used a constant 800. The client's
+/// `R_DrawParticles` reads the same cvar (`grav = frametime * sv_gravity * 0.05`),
+/// and every other map's worldspawn sets it back to 800.
 #[test]
-#[ignore = "census F3: e1m8's sv_gravity 100 is ignored"]
 fn census_e1m8_has_low_gravity() {
     let mut w = build_walk_map("maps/e1m8.bsp").expect("e1m8 boots");
     for _ in 0..3 {
@@ -131,17 +132,39 @@ fn census_e1m8_has_low_gravity() {
     step(&mut w, 0.1);
     let vz = w.server.vm.ent_get_vector(p, "velocity")[2];
     assert!((vz + 10.0).abs() < 1.0, "one 0.1 s frame of sv_gravity 100 gives vz -10, got {vz}");
+
+    // The particles fall at sv_gravity too: a teleport splash is pt_slowgrav
+    // (vel[2] -= grav), so one 0.1 s frame takes 0.1 * 100 * 0.05 = 0.5 off.
+    w.particles = quake_rs::particles::ParticleSystem::new();
+    let o = w.server.vm.ent_get_vector(p, "origin");
+    let now = w.clock;
+    w.particles.spawn_teleport_splash(o, now, &mut w.prng);
+    let before: Vec<f32> = w.particles.particles().iter().map(|q| q.velocity[2]).collect();
+    step(&mut w, 0.1);
+    let after = &w.particles.particles()[..before.len()];
+    for (b, a) in before.iter().zip(after) {
+        assert!((b - a.velocity[2] - 0.5).abs() < 1e-3, "particle vz {b} -> {}", a.velocity[2]);
+    }
+
+    // The next map's worldspawn does cvar_set("sv_gravity", "800").
+    let w = build_walk_map("maps/e1m5.bsp").expect("e1m5 boots");
+    assert_eq!(w.server.sv_gravity(), 800.0);
 }
 
 /// CENSUS F5 (MED). External brush-model items (`maps/b_*.bsp`) get the
 /// Mod_LoadSubmodels pixel spread ONCE: b_explob.bsp's raw (1,1,1)-(31,31,63)
-/// becomes (0,0,0)-(32,32,64). The port spreads twice (Bsp::parse, then the
-/// server's precache_model), so the boxes are 34 units wide — traces use hull2
-/// instead of hull1 — and droptofloor fails near walls/monsters: e1m1 loses the
-/// 10-health box at (1224,2464,-304) ("Bonus item fell out of level"; id's
-/// oracle keeps it), the e1m1 explosive box floats 2 units up.
+/// becomes (0,0,0)-(32,32,64). The port spread twice (Bsp::parse, then the
+/// server's precache_model), so the explosive box was 34 units wide — traces
+/// used hull2 instead of hull1 — and floated 2 units up. Two health boxes
+/// (setsize '0 0 0' '32 32 56', not affected by the spread) vanished for a
+/// second reason: PlaceItem's droptofloor started "inside" a monster whose box
+/// they only touch — e1m1's 10-health box at (1224,2464) against a grunt,
+/// e1m6's 25-health box at (-672,832) against an ogre — where id's box hull is
+/// half-open (a point on a max face is outside), so id keeps both ("Bonus item
+/// fell out of level" never prints in id's log). Positions from id's oracle
+/// edict dump (sv.time 1.7): box z -207.969, the health boxes at z -303.969
+/// and 0.031 (droptofloor stops DIST_EPSILON above the floor).
 #[test]
-#[ignore = "census F5: b_*.bsp item bounds are pixel-spread twice"]
 fn census_bmodel_item_bounds_are_spread_once() {
     let w = build_walk().expect("e1m1 boots");
     let bx = find(&w, |w, e| class(w, e) == "misc_explobox").expect("e1m1 has an explosive box");
@@ -149,32 +172,42 @@ fn census_bmodel_item_bounds_are_spread_once() {
     assert_eq!(w.server.vm.ent_get_vector(bx, "maxs"), [32.0, 32.0, 64.0]);
     assert_eq!(
         w.server.vm.ent_get_vector(bx, "origin")[2],
-        -208.0,
+        -207.96875,
         "droptofloor settles the box on the floor, as in id's game"
     );
-    let health = find(&w, |w, e| {
-        let o = w.server.vm.ent_get_vector(e, "origin");
-        class(w, e) == "item_health" && (o[0] - 1224.0).abs() < 1.0 && (o[1] - 2464.0).abs() < 1.0
-    });
-    assert!(health.is_some(), "the 10-health box at (1224, 2464) survives PlaceItem's droptofloor");
+    let health_at = |w: &Walk, x: f32, y: f32| {
+        find(w, |w, e| {
+            let o = w.server.vm.ent_get_vector(e, "origin");
+            class(w, e) == "item_health" && (o[0] - x).abs() < 1.0 && (o[1] - y).abs() < 1.0
+        })
+        .map(|e| w.server.vm.ent_get_vector(e, "origin")[2])
+    };
+    assert_eq!(health_at(&w, 1224.0, 2464.0), Some(-303.96875), "e1m1's 10-health box beside the grunt");
+    let w = build_walk_map("maps/e1m6.bsp").expect("e1m6 boots");
+    assert_eq!(health_at(&w, -672.0, 832.0), Some(0.03125), "e1m6's 25-health box beside the ogre");
 }
 
 /// CENSUS F8 (MED). The level start relinks every entity with touches: the
 /// player's PutClientInServer -> spawn_tdeath sets `force_retouch = 2`, and
 /// SV_Physics does `if (pr_global_struct->force_retouch) SV_LinkEdict (ent,
 /// true)` for every edict for two frames. An ogre standing in e1m6's door *31
-/// trigger field therefore opens it at once (id's oracle: the door has moved 30
-/// units by sv.time 1.7). The port has no force_retouch; the door stays shut.
+/// (and *76) trigger field therefore opens it at once, and one in e1m8's *6;
+/// id's oracle has them fully open by sv.time 4.7 (*31 x -56, *76 x 56, *6
+/// y -72). The port had no force_retouch; the doors stayed shut.
 #[test]
-#[ignore = "census F8: force_retouch is not modelled (level-start doors stay shut)"]
 fn census_force_retouch_opens_e1m6_start_door() {
-    let mut w = build_walk_map("maps/e1m6.bsp").expect("e1m6 boots");
-    while w.server.time() < 1.7 {
-        step(&mut w, 0.1);
-    }
-    let door = find(&w, |w, e| w.server.vm.ent_get_string(e, "model") == "*31").expect("door *31");
-    let o = w.server.vm.ent_get_vector(door, "origin");
-    assert!(o[0].abs() > 1.0, "door *31 is opening by t=1.7 (id: x=-30), port origin {o:?}");
+    let door_at = |map: &str, model: &str| {
+        let mut w = build_walk_map(map).expect("map boots");
+        while w.server.time() < 4.7 {
+            step(&mut w, 0.1);
+        }
+        let door = find(&w, |w, e| w.server.vm.ent_get_string(e, "model") == model).expect("the door");
+        let o = w.server.vm.ent_get_vector(door, "origin");
+        o.map(|v| (v * 100.0).round() / 100.0 + 0.0) // movedir float noise; -0 -> 0
+    };
+    assert_eq!(door_at("maps/e1m6.bsp", "*31"), [-56.0, 0.0, 0.0], "e1m6 door *31 open");
+    assert_eq!(door_at("maps/e1m6.bsp", "*76"), [56.0, 0.0, 0.0], "e1m6 door *76 open");
+    assert_eq!(door_at("maps/e1m8.bsp", "*6"), [0.0, -72.0, 0.0], "e1m8 door *6 open");
 }
 
 /// CENSUS F6 (MED). Every pickup flashes the screen gold: the QC item touch
@@ -201,12 +234,14 @@ fn census_pickup_flashes_the_screen_gold() {
 /// CENSUS F7 (MED). The player's `netname` is "player": Host_Spawn_f does
 /// `ent->v.netname = host_client->name` (cl_name defaults to "player"), and the
 /// QC prints it in "player entered the game" and every obituary ("player was
-/// shot by a Grunt"). The port never sets it.
+/// shot by a Grunt"). The port never set it. Host_Spawn_f also sets `team =
+/// (cl_color & 15) + 1` and `colormap = NUM_FOR_EDICT(ent)`.
 #[test]
-#[ignore = "census F7: the player's netname is never set (obituaries lose their subject)"]
 fn census_player_netname_is_player() {
     let w = build_walk().expect("e1m1 boots");
     assert_eq!(w.server.vm.ent_get_string(w.player, "netname"), "player");
+    assert_eq!(w.server.vm.ent_get_float(w.player, "team"), 1.0);
+    assert_eq!(w.server.vm.ent_get_float(w.player, "colormap"), w.player as f32);
 }
 
 /// CENSUS F4 (HIGH). A weapon key pressed while the weapon is cooling down is
@@ -285,4 +320,39 @@ fn census_rune_icons_reach_the_status_bar() {
         v
     };
     assert_ne!(cell(&before), cell(&after), "the rune 1 icon is drawn after the pickup");
+}
+
+/// CENSUS L5 (LOW). Host_ServerFrame runs SV_RunClients (SV_ReadClientMove +
+/// SV_ClientThink: friction and acceleration) BEFORE SV_Physics, whose
+/// PlayerPreThink then runs PlayerJump / WaterMove on the accelerated
+/// velocity. A standing jump with forward held: SV_ClientThink still sees the
+/// player on the ground and accelerates it to the full wish speed, then
+/// PlayerJump adds 270 up; the other way round the jump clears FL_ONGROUND
+/// first and the air move caps the gain at 30 u/s. Ground truth from id's
+/// oracle (e1m1, `+forward` `+jump` from rest, 0.1 s frames; the press frame
+/// is CL_KeyState's half step, forwardmove 100): the player moves 10 units
+/// forward every frame and rises 19, 11, 3, then falls 5.
+#[test]
+fn census_client_think_runs_before_player_prethink() {
+    let mut w = build_walk().expect("e1m1 boots");
+    for _ in 0..10 {
+        step(&mut w, 0.1); // settle on the floor, FL_JUMPRELEASED set
+    }
+    let p = w.player;
+    assert!(w.server.vm.ent_get_float(p, "flags") as i32 & 512 != 0, "on the ground");
+    let mut o = w.server.vm.ent_get_vector(p, "origin");
+    assert_eq!(o, [480.0, -352.0, 88.03125], "id's resting spot");
+    for (frame, dz) in [19.0, 11.0, 3.0, -5.0].into_iter().enumerate() {
+        let cmd = quake_rs::server::UserCmd {
+            forwardmove: if frame == 0 { 100.0 } else { 200.0 },
+            yaw: 90.0,
+            buttons: 2, // +jump held
+            ..Default::default()
+        };
+        w.server.client_frame(&cmd, 0.1).expect("frame");
+        let n = w.server.vm.ent_get_vector(p, "origin");
+        assert!((n[1] - o[1] - 10.0).abs() < 0.01, "frame {frame}: 10 units forward, got {}", n[1] - o[1]);
+        assert!((n[2] - o[2] - dz).abs() < 0.01, "frame {frame}: dz {dz}, got {}", n[2] - o[2]);
+        o = n;
+    }
 }
