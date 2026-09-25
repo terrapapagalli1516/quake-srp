@@ -5,6 +5,22 @@ things stand" note — read it before continuing.
 
 ---
 
+## The 2-D layer measured and matched (2026-09-25, branch `quake/fid2d`)
+
+`uv run oracle/screen2d.py` diffs the status bar, menus, console, text and
+overlays against id's composited screen (63 shots x 320x200/640x400/960x600;
+`oracle/README.md`). 57 of 63 are now pixel-exact in each mode; the rest are
+explained there. **Visible change:** WinQuake draws the 2-D layer at its own
+pixel size in every mode, so at the browser's default 960x600 the bar is 320
+wide at the bottom centre and the menus sit top centre. The old blown-up
+layout is the opt-in **"scaled 2-D" extra**: the wasm export
+`set_scaled_2d(1)` — not yet wired into the page's Extras menu or saved.
+Found for other branches (AUDIT.md): menu cursors not remembered per menu,
+`sv.time` accumulated in f32, WASD default binds, no pause/loading plaques,
+`give` unlike `Host_Give_f`.
+
+---
+
 ## Options menu + screen framing (2026-09-25, branch `quake/options`)
 
 User-reported: Options cursor blinked too fast; Screen size seemed wrong.
