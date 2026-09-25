@@ -411,6 +411,7 @@ scenario's shots, before the branch -> after.
 | finale mid-reveal, later (2) | 85.7 -> 100 | 0.6 -> 100 | 0.0 -> 100 |
 | menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 -> 100 | 43.8 -> 99.9 -> 100 | 47.1 -> 99.95 -> 100 |
 | menus: options, customize, video (3) | 95.4 -> 95.5 | 41.5 -> 98.8 | 44.7 -> 99.5 |
+| menus: Multiplayer > Setup — on Accept, colours stepped, typing the host name, the player's name (4; `quake/polish4b`, before it no Setup) | 77.3 -> 100 | 93.6 -> 100 | 97.1 -> 100 |
 | menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
 | quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
 | pause: the plaque and "player paused the game", unpaused (2; `quake/timedemo`, before it no `pause`) | 100 | 100 | 100 |

@@ -1572,6 +1572,8 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
         menudot,
         help,
         textbox: std::array::from_fn(|i| lmp(quake_rs::menu::TEXTBOX_PICS[i])),
+        bigbox: lmp("gfx/bigbox.lmp"),
+        menuplyr: lmp("gfx/menuplyr.lmp"),
     };
     let conchars = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok()).and_then(|w| {
         let lump = w.lump("conchars")?;

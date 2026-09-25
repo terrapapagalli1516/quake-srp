@@ -1835,6 +1835,36 @@ each; the C followed and the evidence are in the commit messages.
   `console_scroll` (PgUp twice, then PgDn): 98.4 → 99.2% at 320x200 (738 →
   398 px, the version stamp left), 98.5 → 99.0 at 640x400, 98.6 → 98.9 at
   960x600.
+- ✅ **Multiplayer > Setup did nothing** (MED). `M_Menu_Setup_f`,
+  `M_Setup_Draw` and `M_Setup_Key` are ported (`MenuScreen::Setup`): the
+  screen fills from the cvars when it opens (`hostname` "UNNAMED", `_cl_name`
+  "player", `_cl_color` 0) on `setup_cursor` (a static starting at 4, Accept
+  Changes); "Hostname" and "Your name" in 16-column text boxes with the text
+  cursor (10/11) after the name on its row, "Shirt color", "Pants color",
+  "Accept Changes" in its box, `gfx/bigbox.lmp` around `gfx/menuplyr.lmp`
+  drawn through `M_BuildTranslationTable(top*16, bottom*16)` (the shirt rows
+  16..31 and pants rows 96..111 taken from the chosen colour rows, backwards
+  from row 128 on — `M_DrawTransPicTranslate`); Up/Down (menu1), Left/Right
+  and Enter step the colours on their rows (menu3, wrapping 0..13), do
+  nothing on the name rows, Backspace and any key 32..127 edit the names
+  (15 characters), Accept sets what changed and returns to Multiplayer
+  (m_entersound), Escape returns without. The cvars live with the menu's;
+  the console reads and sets them as id's does: `name` / `color` (the
+  client halves of `Host_Name_f` / `Host_Color_f`: print, or set — 15
+  characters; each colour `& 15`, at most 13) and `hostname`, `_cl_name`,
+  `_cl_color` (`Cvar_Command`), all in Tab completion. Not done: the name
+  reaching the player's edict (`netname`, "player entered the game") — the
+  port's server connects the player as "player" (`Server::connect_client_inner`,
+  `server/`, another branch's), and `colormap` is never visible in single
+  player (CENSUS: no chase camera; bodies are coop-only). 2-D oracle, new
+  scenario `menu_setup` (on Accept Changes, the colours stepped, typing the
+  host name, then the name): 100% at 320x200, 640x400 and 960x600, the
+  translated preview included (before: Enter on Setup stayed on Multiplayer,
+  77.3 / 93.6 / 97.1%). Tests `setup_is_m_setup_key`,
+  `translation_table_is_m_buildtranslationtable`,
+  `setup_draws_the_translated_player`,
+  `setup_sets_the_name_and_colours_the_console_reads`; `web/verify_menu.py`
+  (Setup opens, Escape returns).
 
 ## LOW (27)
 

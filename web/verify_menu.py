@@ -118,6 +118,14 @@ with sync_playwright() as p:
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_multi.png"))
     key("ArrowDown"); key("Enter")
     check("Multiplayer Enter responds in place (no net)", scr() == MULTI)
+    # Setup (row 2) is M_Menu_Setup_f: its own screen; type into the name and
+    # step a colour, then Escape back without accepting.
+    key("ArrowDown"); key("Enter")
+    check("Multiplayer > Setup opens", scr() == 11)
+    key("ArrowUp", 3); key("Backspace"); key("x"); key("ArrowDown"); key("ArrowRight")
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_setup.png"))
+    key("Escape")
+    check("Esc on Setup returns to Multiplayer", scr() == MULTI)
     key("Escape")
     check("Esc on Multiplayer returns to Main", scr() == MAIN)
 

@@ -217,7 +217,7 @@ pub extern "C" fn menu_bind_key(keynum: i32) {
 /// verification/debug export (the browser checks the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
-/// 10 the port's Web extras.
+/// 10 the port's Web extras, 11 Multiplayer > Setup.
 #[no_mangle]
 pub extern "C" fn menu_screen_id() -> i32 {
     APP.with(|c| {
@@ -235,6 +235,7 @@ pub extern "C" fn menu_screen_id() -> i32 {
                 render::MenuScreen::Help => 8,
                 render::MenuScreen::Quit => 9,
                 render::MenuScreen::Extras => 10,
+                render::MenuScreen::Setup => 11,
             })
             .unwrap_or(0)
     })

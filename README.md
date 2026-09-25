@@ -59,7 +59,8 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   (`V_UpdatePalette`'s palette shifts: damage flash, underwater tint); a **status-bar HUD** and the **intermission/finale overlays**
   (`Sbar_IntermissionOverlay`, the 8-chars/sec finale text reveal).
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
-  with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
+  with **Single Player → `start` hub**, **Multiplayer > Setup** (host name, your name, shirt and pants colours on the
+  translated player preview — the client's `name`/`color`; no netcode behind it), a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
   `fly`/`give`/`impulse`/`map`/`kill`/`clear`, `pause` (the PAUSE key: id's plaque) and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`;
   `help` is id's (the Help/Ordering screen), and the port's own list of what its console runs is `wasm_help` (not an id command).
