@@ -293,10 +293,10 @@ impl Server {
                 continue;
             }
             let ei = e as i32;
-            let eff = self.vm.ent_get_float(ei, "effects") as i32;
+            let eff = self.vm.ent_float(ei, self.vm.fo.effects) as i32;
             if eff & EF_MUZZLEFLASH != 0 {
                 self.vm
-                    .ent_set_float(ei, "effects", (eff & !EF_MUZZLEFLASH) as f32);
+                    .set_ent_float(ei, self.vm.fo.effects, (eff & !EF_MUZZLEFLASH) as f32);
             }
         }
     }
@@ -332,8 +332,8 @@ impl Server {
         let mut sent = vec![false; n];
         let clent = self.player;
         let pvs = if clent > 0 {
-            let org = vm.ent_get_vector(clent, "origin");
-            let ofs = vm.ent_get_vector(clent, "view_ofs");
+            let org = vm.ent_vec(clent, vm.fo.origin);
+            let ofs = vm.ent_vec(clent, vm.fo.view_ofs);
             self.fat_pvs([org[0] + ofs[0], org[1] + ofs[1], org[2] + ofs[2]])
         } else {
             None
@@ -348,8 +348,7 @@ impl Server {
                 continue;
             }
             // "ignore ents without visible models"
-            if vm.ent_get_float(ent, "modelindex") == 0.0 || vm.ent_string_ref(ent, "model").is_empty()
-            {
+            if vm.ent_float(ent, vm.fo.modelindex) == 0.0 || vm.ent_str(ent, vm.fo.model).is_empty() {
                 continue;
             }
             *slot = match &pvs {
@@ -396,12 +395,12 @@ impl Server {
                 continue;
             }
             let ent = e as i32;
-            let effects = self.vm.ent_get_float(ent, "effects") as i32;
+            let effects = self.vm.ent_float(ent, self.vm.fo.effects) as i32;
             if effects == 0 {
                 continue;
             }
-            let origin = self.vm.ent_get_vector(ent, "origin");
-            let angles = self.vm.ent_get_vector(ent, "angles");
+            let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
+            let angles = self.vm.ent_vec(ent, self.vm.fo.angles);
 
             if effects & EF_MUZZLEFLASH != 0 {
                 let (forward, _r, _u) = angle_vectors(angles);

@@ -233,12 +233,12 @@ Both counts come from scratch-instrumented builds, not from the committed harnes
 | framebuffer and palette | 8-bit indices. Cshift and gamma are a **256-entry** palette operation (`V_UpdatePalette` ramps, then `VID_ShiftPalette`) | `[u8;3]` RGB per pixel; `apply_blend` does float math per pixel per channel; pack uses 4 `Vec::push` per pixel | blend 11.9 ms, pack 2.3 ms at 1280×800 |
 | surface cache | `D_CacheSurface` at `D_MipLevelForScale`'s mip (4 levels; `basemip` 1, 0.4, 0.2). A fixed, LRU-rover cache of `SURFCACHE_SIZE_AT_320X200` (600 KB) + 3 B/px above 64,000 px. Lit surfaces rebuilt with `R_AddDynamicLights` | mip 0 only; one unbounded block per face; lit faces bypass the cache into `raster_triangle_tex`: bilinear lightmap + `colormap_row` on every **screen pixel** | the firing and explosion spikes above; lighting per pixel, not per texel |
 | 3-D viewport | `R_SetVrect`: at viewsize 100, the vrect height is vid.height − `sb_lines` (48 of 200 lines). `R_ViewChanged`: `yscale = xscale · pixelAspect` (0.833 at 16:10) | full-height render with the sbar painted over the bottom 24%. Square-pixel projection, then **presented** at 4:3 (AUDIT H6) | 24% of 3-D pixels are thrown away. The horizon sits too low, and the world is stretched 1.2× vertically (see A4) |
-| which entities are drawn | `SV_WriteEntitiesToClient` sends only entities touching `SV_FatPVS`; statics use efrags on visible leaves (`R_StoreEfrags`); `R_AliasCheckBBox` rejects by frustum | every edict with a model index, every frame, one triangle at a time | ~75% of alias triangles per frame belong to models with no on-screen vertex |
+| which entities are drawn | `SV_WriteEntitiesToClient` sends only entities touching `SV_FatPVS`; statics use efrags on visible leaves (`R_StoreEfrags`); `R_AliasCheckBBox` rejects by frustum | every edict with a model index, every frame, one triangle at a time (C1 done: as the C) | ~75% of alias triangles per frame belong to models with no on-screen vertex |
 | alias raster | `R_AliasPreparePoints` (each vertex transformed once). `D_PolysetDraw`: affine, Gouraud light through `acolormap`, `lzi >= *lpz` test. Viewmodel shares the z-buffer with `ziscale × 3` (`R_AliasDrawModel`) | 3 transforms per triangle; flat Lambert as an RGB multiply (**not colormapped**); perspective-correct bbox raster. Viewmodel allocates and clears a **full-resolution local z-buffer every frame** | viewmodel 1.4–1.9 ms at 1280×800 |
 | frame rate | `Host_FilterTime`: return early when less than 1/72 s has passed | `step(dt)` once per rAF at the display rate | 2× work at 144 Hz |
 | external brush boxes (`b_*.bsp`) | surfaces go through the surface cache like any brush surface | `cache_surf = false`: re-baked every frame | 0.27–0.87 ms per frame, at any resolution |
 | underwater warp | `D_WarpScreen`, 8-bit, into the view buffer | clones the whole RGB frame, plus 3 `Vec` allocations per call | 1.7 ms at 1280×800 |
-| entity field access | direct `entvars_t` struct members | `ent_get_*(ent, "name")`: a `HashMap<String>` SipHash lookup per field per entity | about 3% of the frame on e1m3; most of sim |
+| entity field access | direct `entvars_t` struct members | `ent_get_*(ent, "name")`: a `HashMap<String>` SipHash lookup per field per entity (D2 done: resolved once per progs) | about 3% of the frame on e1m3; most of sim |
 
 ---
 
@@ -744,6 +744,43 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
   stats.
 - **Also:** `ent_get_string(e, "model")` allocates a `String` per entity per frame. Compare
   borrowed `&str` instead.
+- **Done** (branch `quake/sim`):
+  - `Vm::fo` (`FieldOfs`: every `entvars_t` field, plus `gravity`, which `SV_AddGravity` looks up
+    by name) and `Vm::go` (`GlobalOfs`: `self`, `other`, `time`, `frametime`,
+    `force_retouch`) are resolved by name once, in `Vm::new`. The `Fld` and `Glb` handles are
+    read and written with `ent_float`, `set_ent_vec`, `ent_str`, `glob_int` and the rest. The
+    by-name accessors now resolve the name and call the same code, so a missing field still
+    reads 0 and drops writes.
+  - Converted:
+    - `SV_Move`'s edict scan, `SV_LinkEdict`, trigger touching and `SV_Impact`.
+    - All of `sv_phys.rs`: the per-edict loop, thinks, the pusher, step, toss and walk moves,
+      and the water checks.
+    - `sv_move.rs` (monster steps).
+    - The builtins that scan every edict: `PF_checkclient` (it looks for `FL_CLIENT` from edict
+      1, and the port's player is the last edict), `PF_aim` and `PF_findradius`. `PF_find`
+      compares borrowed strings.
+    - `SV_CleanupEnts`, the entity dlights, C1's send test, `ED_Free`, and `step_walk`'s
+      gather. The model-cache loop borrows the model name; it used to allocate a `String` per
+      edict per frame.
+  - Name lookups per frame: walk_e1m3 29,300 → 90, walk_e1m1 10,800 → 85. The rest are
+    once-per-frame reads of the player and the HUD. Before, 79% of the lookups were `solid`,
+    `owner`, `mins`, `maxs`, `absmin` and `absmax`: the fields `SV_Move`'s scan reads for every
+    edict on every trace.
+  - **Byte-identical:**
+    - The simbench counts (e1m1, e1m3) and the census output (nine maps) are unchanged.
+    - So are the `census-edicts` dumps of all nine maps at five times, and the goldens.
+    - 720 frame hashes match C1's: walk_e1m1, walk_e1m3, fire_e1m1, quad_e1m1 and demo1 at
+      320×200 and 640×400, every 10th of 720 frames.
+  - Speed:
+    - simbench, per tick: e1m1 0.89 → 0.11 ms, e1m3 2.64 → 0.29 ms.
+    - Bench: wasm medians of two interleaved rounds, native in parentheses, ms.
+
+      | | 320×200 | 640×400 | 1280×800 |
+      |---|---|---|---|
+      | walk_e1m3 step | 1.39 → 0.77 (0.89 → 0.51) | 2.46 → 1.82 (1.66 → 1.24) | 6.25 → 5.51 (4.68 → 4.35) |
+      | walk_e1m3 sim | 0.83 → 0.23 (0.51 → 0.13) | 0.96 → 0.28 | 0.96 → 0.30 |
+      | walk_e1m1 step | 0.97 → 0.54 (0.55 → 0.41) | 2.02 → 1.46 | 5.68 → 5.28 |
+      | fire_e1m1 step | 1.05 → 0.64 (0.57 → 0.41) | 1.96 → 1.59 | 5.64 → 5.46 |
 
 **D3. The pak as one static slice.** *(byte-identical; memory and jank)*
 

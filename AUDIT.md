@@ -830,7 +830,7 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 - ✅ **L6 ED_Alloc / ED_Free** — `Vm::spawn` reuses a free slot only if it was freed in the first two seconds of server time or more than 0.5 s ago (`freetime`), so a missile spawned the frame another is removed never inherits its slot (no stray trail); `Vm::free_edict` clears only `ED_Free`'s fields (model, takedamage, modelindex, colormap, skin, frame, origin, angles, solid; nextthink -1) and keeps the rest, as id does. Tests `ed_alloc_waits_half_a_second_before_reusing_a_freed_slot`, `ed_free_clears_only_the_fields_the_c_clears`.
 - ✅ **F7 the player's name** — `connect_client_inner` sets up the client edict as `Host_Spawn_f` does before `ClientConnect`: `netname` "player" (cl_name), `team` 1 ((cl_color & 15) + 1), `colormap` = its edict number. Obituaries read "player was shot by a Grunt". Test `census_player_netname_is_player`.
 
-## Entity culling (PERF_PLAN C1; 2026-09-25, branch `quake/sim`)
+## Entity culling and resolved fields (PERF_PLAN C1, D2; 2026-09-25, branch `quake/sim`)
 
 - ✅ **C1: the live client relinks only what the server sends** (`SV_WriteEntitiesToClient`,
   `CL_RelinkEntities`). The port used to relink and draw every edict with a model, every frame.
@@ -869,6 +869,24 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
   - Seen, not changed: the port's `SV_ClipToLinks` "points never interact" test uses
     `maxs - mins` where the C reads `v.size`. The two differ only if QuakeC writes
     `mins`/`maxs` without `setsize`.
+- ✅ **D2: entity fields are resolved once per progs, not hashed per access.** This is
+  byte-identical.
+  - id reads `entvars_t` members at fixed offsets. The port looked every field up by name,
+    SipHash into a `HashMap<String>`, per access: 29,300 lookups per frame on walk_e1m3. 79% of
+    them were the fields `SV_Move`'s per-trace scan reads for every edict.
+  - `Vm::fo` (`FieldOfs`: every `entvars_t` field, and `gravity`) and `Vm::go` (the per-frame
+    globals) now hold `Fld`/`Glb` handles, resolved by name in `Vm::new`, so any progs works.
+    The by-name accessors resolve the name and then run the same code, so the semantics cannot
+    drift. A field the progs lacks reads 0 and drops writes.
+  - The server's per-frame paths, the edict-scanning builtins and the client gather use the
+    handles. The model-cache loop borrows names instead of allocating a `String` per edict per
+    frame, and `PF_find` compares borrowed strings. 90 lookups per frame remain: once-per-frame
+    reads of the player and the HUD.
+  - Proof: the simbench counts, the census output, the `census-edicts` dumps of nine maps at
+    five times, the goldens, and 720 frame hashes across five workloads and two resolutions are
+    all unchanged. Test `resolved_fields_match_the_by_name_accessors`.
+  - Speed: simbench e1m3 2.64 → 0.29 ms per tick. The wasm sim phase is 68–76% lower, and the
+    walk_e1m3 frame goes 1.39 → 0.77 ms at 320×200 (PERF_PLAN D2).
 
 ## LOW (27)
 

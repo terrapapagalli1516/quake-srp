@@ -37,15 +37,15 @@ use crate::vm::{EdictLeafs, HostTrace, Vm};
 /// here.) `pub(crate)` so the savegame loader (`save.rs`) can relink loaded
 /// edicts exactly as `Host_Loadgame_f` does (`SV_LinkEdict(ent, false)`).
 pub(crate) fn link_edict(vm: &mut Vm, e: i32) {
-    let origin = vm.ent_get_vector(e, "origin");
-    let mins = vm.ent_get_vector(e, "mins");
-    let maxs = vm.ent_get_vector(e, "maxs");
+    let origin = vm.ent_vec(e, vm.fo.origin);
+    let mins = vm.ent_vec(e, vm.fo.mins);
+    let maxs = vm.ent_vec(e, vm.fo.maxs);
     let mut absmin = v_add(origin, mins);
     let mut absmax = v_add(origin, maxs);
     // SV_LinkEdict expands the abs box so tangent boxes still register as
     // touching: items get a generous ±15 on X/Y (easier pickups), everything
     // else ±1 on all axes (movement is clipped an epsilon shy of the surface).
-    let flags = vm.ent_get_float(e, "flags") as i32;
+    let flags = vm.ent_float(e, vm.fo.flags) as i32;
     if flags & FL_ITEM != 0 {
         absmin[0] -= 15.0;
         absmin[1] -= 15.0;
@@ -57,8 +57,8 @@ pub(crate) fn link_edict(vm: &mut Vm, e: i32) {
             absmax[i] += 1.0;
         }
     }
-    vm.ent_set_vector(e, "absmin", absmin);
-    vm.ent_set_vector(e, "absmax", absmax);
+    vm.set_ent_vec(e, vm.fo.absmin, absmin);
+    vm.set_ent_vec(e, vm.fo.absmax, absmax);
     find_touched_leafs(vm, e, absmin, absmax);
 }
 
@@ -75,7 +75,7 @@ fn find_touched_leafs(vm: &mut Vm, e: i32, absmin: Vec3, absmax: Vec3) {
         return;
     }
     let mut leafs = EdictLeafs::default();
-    if vm.ent_get_float(e, "modelindex") != 0.0 {
+    if vm.ent_float(e, vm.fo.modelindex) != 0.0 {
         if let Some(host) = vm.host.as_deref() {
             host.bsp().touched_leafs(absmin, absmax, &mut |leaf| leafs.push(leaf));
         }
@@ -236,7 +236,7 @@ pub fn sv_move(
                 break;
             }
 
-            let solid = vm.ent_get_float(ei, "solid") as i32;
+            let solid = vm.ent_float(ei, vm.fo.solid) as i32;
 
             // MOVE_NOMONSTERS: clip only against the world + SOLID_BSP bmodels;
             // skip every box entity (monsters, items, and the player itself).
@@ -251,10 +251,10 @@ pub fn sv_move(
             // detonates immediately. Only world (edict 0) is never a passedict,
             // so the gate is for ignore > 0 (`clip->passedict` set).
             if ignore > 0 {
-                if vm.ent_get_int(ei, "owner") == ignore {
+                if vm.ent_int(ei, vm.fo.owner) == ignore {
                     continue; // don't clip against own missiles
                 }
-                if vm.ent_get_int(ignore, "owner") == ei {
+                if vm.ent_int(ignore, vm.fo.owner) == ei {
                     continue; // don't clip against owner
                 }
 
@@ -267,13 +267,13 @@ pub fn sv_move(
                 // box has zero extent on x. Only the world (edict 0) is never a
                 // passedict, so this is gated on `ignore > 0`.
                 let pass_size_x = {
-                    let pmins = vm.ent_get_vector(ignore, "mins");
-                    let pmaxs = vm.ent_get_vector(ignore, "maxs");
+                    let pmins = vm.ent_vec(ignore, vm.fo.mins);
+                    let pmaxs = vm.ent_vec(ignore, vm.fo.maxs);
                     pmaxs[0] - pmins[0]
                 };
                 if pass_size_x != 0.0 {
-                    let tmins = vm.ent_get_vector(ei, "mins");
-                    let tmaxs = vm.ent_get_vector(ei, "maxs");
+                    let tmins = vm.ent_vec(ei, vm.fo.mins);
+                    let tmaxs = vm.ent_vec(ei, vm.fo.maxs);
                     if tmaxs[0] - tmins[0] == 0.0 {
                         continue; // points never interact
                     }
@@ -286,8 +286,8 @@ pub fn sv_move(
             // setorigin/setsize/move, exactly as SV_LinkEdict maintains them, so this
             // is the same test the C runs — and result-identical (a box that can't
             // overlap the move can't be hit by the precise clip below).
-            let absmin = vm.ent_get_vector(ei, "absmin");
-            let absmax = vm.ent_get_vector(ei, "absmax");
+            let absmin = vm.ent_vec(ei, vm.fo.absmin);
+            let absmax = vm.ent_vec(ei, vm.fo.absmax);
             if absmin[0] > box_maxs[0]
                 || absmin[1] > box_maxs[1]
                 || absmin[2] > box_maxs[2]
@@ -298,7 +298,7 @@ pub fn sv_move(
                 continue;
             }
 
-            let origin = vm.ent_get_vector(ei, "origin");
+            let origin = vm.ent_vec(ei, vm.fo.origin);
 
             // MOVE_MISSILE FL_MONSTER expansion (world.c SV_ClipToLinks): a
             // missile move clips FL_MONSTER touch entities against the +-15
@@ -306,7 +306,7 @@ pub fn sv_move(
             // detonate when they land NEAR a monster. Non-monster entities and
             // the world keep the move's own `mins`/`maxs`.
             let (clip_mins, clip_maxs) =
-                if missile && (vm.ent_get_float(ei, "flags") as i32) & FL_MONSTER != 0 {
+                if missile && (vm.ent_float(ei, vm.fo.flags) as i32) & FL_MONSTER != 0 {
                     ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0])
                 } else {
                     (mins, maxs)
@@ -317,7 +317,7 @@ pub fn sv_move(
                     // model "*N" -> submodel index N. Borrow the name (no per-clip
                     // String allocation); the &str borrow ends with this expression.
                     let idx = vm
-                        .ent_string_ref(ei, "model")
+                        .ent_str(ei, vm.fo.model)
                         .strip_prefix('*')
                         .and_then(|d| d.parse::<usize>().ok());
                     match idx {
@@ -328,8 +328,8 @@ pub fn sv_move(
                     }
                 }
                 SOLID_BBOX | SOLID_SLIDEBOX => {
-                    let ent_mins = vm.ent_get_vector(ei, "mins");
-                    let ent_maxs = vm.ent_get_vector(ei, "maxs");
+                    let ent_mins = vm.ent_vec(ei, vm.fo.mins);
+                    let ent_maxs = vm.ent_vec(ei, vm.fo.maxs);
                     crate::world::clip_box(
                         start, end, clip_mins, clip_maxs, ent_mins, ent_maxs, origin,
                     )
@@ -384,35 +384,35 @@ pub fn sv_move(
 /// robustness elsewhere in the server. The host must be PRESENT (this calls
 /// `execute`); never invoke it from inside `with_host`.
 pub fn sv_impact(vm: &mut Vm, e1: i32, e2: i32, sv_time: f32) {
-    let old_self = vm.gget_int("self");
-    let old_other = vm.gget_int("other");
+    let old_self = vm.glob_int(vm.go.self_);
+    let old_other = vm.glob_int(vm.go.other);
     // SV_Impact (sv_phys.c:160) sets pr_global_struct->time = sv.time before the
     // touch functions run, so a touch sees the frame's start time — not a stale
     // value left in the `time` global by the entity's own think (which
     // SV_RunThink clamps to [sv.time, sv.time+frametime] and is usually past
     // sv.time). The C does not restore `time` afterward, matching the order here.
-    vm.gset_float("time", sv_time);
+    vm.set_glob_float(vm.go.time, sv_time);
 
     run_touch(vm, e1, e2);
     run_touch(vm, e2, e1);
 
-    vm.gset_int("self", old_self);
-    vm.gset_int("other", old_other);
+    vm.set_glob_int(vm.go.self_, old_self);
+    vm.set_glob_int(vm.go.other, old_other);
 }
 
 /// Run `toucher`'s `touch` function with `self = toucher`, `other = with`, when
 /// `toucher` has a valid `touch` function and is not `SOLID_NOT`. A fault is
 /// caught and the interpreter reset (the entity's bad touch is isolated).
 fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
-    let touch = vm.ent_get_int(toucher, "touch");
+    let touch = vm.ent_int(toucher, vm.fo.touch);
     if touch <= 0 || (touch as usize) >= vm.progs.functions.len() {
         return; // no touch function (the C `if (e->v.touch ...)`)
     }
-    if vm.ent_get_float(toucher, "solid") as i32 == SOLID_NOT {
+    if vm.ent_float(toucher, vm.fo.solid) as i32 == SOLID_NOT {
         return;
     }
-    vm.gset_int("self", toucher);
-    vm.gset_int("other", with);
+    vm.set_glob_int(vm.go.self_, toucher);
+    vm.set_glob_int(vm.go.other, with);
     if vm.execute(touch as usize).is_err() {
         vm.reset_execution();
     }
@@ -431,8 +431,8 @@ fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
 pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
     // Gather first: collect the trigger edicts to fire so we don't execute
     // QuakeC while iterating (the touch could spawn/free edicts).
-    let mover_absmin = vm.ent_get_vector(mover, "absmin");
-    let mover_absmax = vm.ent_get_vector(mover, "absmax");
+    let mover_absmin = vm.ent_vec(mover, vm.fo.absmin);
+    let mover_absmax = vm.ent_vec(mover, vm.fo.absmax);
 
     let mut to_fire: Vec<i32> = Vec::new();
     let n = vm.num_edicts();
@@ -444,15 +444,15 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
         if vm.edict_free.get(e).copied().unwrap_or(true) {
             continue;
         }
-        if vm.ent_get_float(ei, "solid") as i32 != SOLID_TRIGGER {
+        if vm.ent_float(ei, vm.fo.solid) as i32 != SOLID_TRIGGER {
             continue;
         }
-        let touch = vm.ent_get_int(ei, "touch");
+        let touch = vm.ent_int(ei, vm.fo.touch);
         if touch <= 0 || (touch as usize) >= vm.progs.functions.len() {
             continue; // no touch function
         }
-        let t_absmin = vm.ent_get_vector(ei, "absmin");
-        let t_absmax = vm.ent_get_vector(ei, "absmax");
+        let t_absmin = vm.ent_vec(ei, vm.fo.absmin);
+        let t_absmax = vm.ent_vec(ei, vm.fo.absmax);
         // AABB overlap (the C's six-way reject test, inverted).
         if mover_absmin[0] > t_absmax[0]
             || mover_absmin[1] > t_absmax[1]
@@ -467,33 +467,33 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
     }
 
     // Now run each trigger's touch (host is present here).
-    let old_self = vm.gget_int("self");
-    let old_other = vm.gget_int("other");
+    let old_self = vm.glob_int(vm.go.self_);
+    let old_other = vm.glob_int(vm.go.other);
     for t in to_fire {
         // Re-check the edict is still live and a trigger (a prior touch may have
         // freed or changed it).
         if vm.edict_free.get(t as usize).copied().unwrap_or(true) {
             continue;
         }
-        if vm.ent_get_float(t, "solid") as i32 != SOLID_TRIGGER {
+        if vm.ent_float(t, vm.fo.solid) as i32 != SOLID_TRIGGER {
             continue;
         }
-        let touch = vm.ent_get_int(t, "touch");
+        let touch = vm.ent_int(t, vm.fo.touch);
         if touch <= 0 || (touch as usize) >= vm.progs.functions.len() {
             continue;
         }
-        vm.gset_int("self", t);
-        vm.gset_int("other", mover);
+        vm.set_glob_int(vm.go.self_, t);
+        vm.set_glob_int(vm.go.other, mover);
         // SV_TouchLinks (world.c:304) sets pr_global_struct->time = sv.time
         // before EACH trigger touch, so the touch sees the frame's start time
         // rather than a stale think-time left in the `time` global.
-        vm.gset_float("time", sv_time);
+        vm.set_glob_float(vm.go.time, sv_time);
         if vm.execute(touch as usize).is_err() {
             vm.reset_execution();
         }
     }
-    vm.gset_int("self", old_self);
-    vm.gset_int("other", old_other);
+    vm.set_glob_int(vm.go.self_, old_self);
+    vm.set_glob_int(vm.go.other, old_other);
 }
 
 #[cfg(test)]

@@ -105,6 +105,101 @@ pub trait Host {
     fn bsp(&self) -> &crate::bsp::Bsp;
 }
 
+/// An entity field resolved once by name: its cell offset within an edict, or
+/// `None` when the progs declares no such field. Reads of a missing field give
+/// 0 and writes are dropped, exactly as the by-name accessors
+/// ([`Vm::ent_get_float`] and friends) behave; they resolve the name and call
+/// the same code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fld(Option<u16>);
+
+/// A global resolved once by name (see [`Fld`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Glb(Option<u16>);
+
+impl Fld {
+    fn ofs(self) -> Option<usize> {
+        self.0.map(usize::from)
+    }
+}
+
+impl Glb {
+    fn ofs(self) -> Option<usize> {
+        self.0.map(usize::from)
+    }
+}
+
+/// The QuakeC name of a [`FieldOfs`] member: its identifier, or the literal
+/// given for one that is a Rust keyword.
+macro_rules! qc_name {
+    ($name:ident) => {
+        stringify!($name)
+    };
+    ($name:ident $qc:literal) => {
+        $qc
+    };
+}
+
+/// Declares [`FieldOfs`]: one [`Fld`] per named field, resolved by name.
+macro_rules! field_ofs {
+    ($($name:ident $(= $qc:literal)?),* $(,)?) => {
+        /// `entvars_t` (progdefs.h): every engine-visible entity field, resolved by
+        /// name once, when the progs is loaded ([`Vm::new`]), plus `gravity`, which
+        /// `SV_AddGravity` finds with `GetEdictFieldValue`. id's engine reads these
+        /// as struct members at offsets fixed by the id1 progs; the port looks them
+        /// up by name so any progs works, and this table spares the hot paths a hash
+        /// of the name on every access (PERF_PLAN D2).
+        #[derive(Clone, Copy, Debug, Default)]
+        pub struct FieldOfs {
+            $(pub $name: Fld,)*
+        }
+
+        impl FieldOfs {
+            /// Resolve every field of `progs` by name.
+            pub fn resolve(progs: &Progs) -> FieldOfs {
+                FieldOfs { $($name: Fld(progs.field_offset(qc_name!($name $($qc)?))),)* }
+            }
+        }
+    };
+}
+
+field_ofs!(
+    modelindex, absmin, absmax, ltime, movetype, solid, origin, oldorigin, velocity, angles,
+    avelocity, punchangle, classname, model, frame, skin, effects, mins, maxs, size, touch,
+    use_ = "use", think, blocked, nextthink, groundentity, health, frags, weapon, weaponmodel,
+    weaponframe, currentammo, ammo_shells, ammo_nails, ammo_rockets, ammo_cells, items,
+    takedamage, chain, deadflag, view_ofs, button0, button1, button2, impulse, fixangle, v_angle,
+    idealpitch, netname, enemy, flags, colormap, team, max_health, teleport_time, armortype,
+    armorvalue, waterlevel, watertype, ideal_yaw, yaw_speed, aiment, goalentity, spawnflags,
+    target, targetname, dmg_take, dmg_save, dmg_inflictor, owner, movedir, message, sounds,
+    noise, noise1, noise2, noise3, gravity,
+);
+
+/// The `globalvars_t` (progdefs.h) globals the per-frame server paths touch,
+/// resolved by name at progs load like [`FieldOfs`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GlobalOfs {
+    pub self_: Glb,
+    pub other: Glb,
+    pub time: Glb,
+    pub frametime: Glb,
+    pub force_retouch: Glb,
+}
+
+impl GlobalOfs {
+    /// Resolve the globals of `progs` by name.
+    pub fn resolve(progs: &Progs) -> GlobalOfs {
+        let g = |name| Glb(progs.global_offset(name));
+        GlobalOfs {
+            self_: g("self"),
+            other: g("other"),
+            time: g("time"),
+            frametime: g("frametime"),
+            force_retouch: g("force_retouch"),
+        }
+    }
+}
+
 /// Maximum interpreter call depth (`MAX_STACK_DEPTH`).
 const MAX_STACK_DEPTH: usize = 32;
 /// Size of the saved-locals stack (`LOCALSTACK_SIZE`).
@@ -181,6 +276,11 @@ pub struct Vm {
     pub argc: usize,
     /// When set, the interpreter records a per-statement trace into `output`.
     pub trace: bool,
+    /// The entity fields (`entvars_t`) resolved by name at load; read and write
+    /// them with [`Vm::ent_float`] and friends.
+    pub fo: FieldOfs,
+    /// The per-frame globals resolved by name at load ([`Vm::glob_float`] ...).
+    pub go: GlobalOfs,
     /// Optional engine host providing world services to the engine builtins.
     /// Taken out and restored around each use via [`Vm::with_host`] so a builtin
     /// can mutate both the host and the rest of the VM without a borrow clash.
@@ -251,7 +351,11 @@ impl Vm {
         let f_think = progs.find_field("think").map(|d| d.ofs as usize);
         let f_nextthink = progs.find_field("nextthink").map(|d| d.ofs as usize);
 
+        let fo = FieldOfs::resolve(&progs);
+        let go = GlobalOfs::resolve(&progs);
         let mut vm = Vm {
+            fo,
+            go,
             progs,
             globals,
             edict_fields: Vec::new(),
@@ -308,57 +412,126 @@ impl Vm {
 
     // --- name-resolved access (for the engine builtins and the spawner) ------
 
-    /// Entity-field cell offset for `name`. O(1) via the progs' cached name->ofs
-    /// map (this is on the hot path of every `ent_get_*`/`ent_set_*`).
+    /// Entity-field cell offset for `name`: a hash of the name into the progs'
+    /// name->ofs map. Per-frame code holds a resolved [`Fld`] from [`Vm::fo`].
     pub fn field_ofs(&self, name: &str) -> Option<usize> {
         self.progs.field_offset(name).map(|o| o as usize)
     }
-    /// Global cell offset for `name`, O(1) via the progs' cached map.
+    /// Global cell offset for `name`, through the progs' name->ofs map.
     pub fn global_ofs(&self, name: &str) -> Option<usize> {
         self.progs.global_offset(name).map(|o| o as usize)
     }
 
-    /// Read entity field `name` as a float (0.0 if the field is unknown).
-    pub fn ent_get_float(&self, e: i32, name: &str) -> f32 {
-        self.field_ofs(name).map(|o| self.ef(e, o)).unwrap_or(0.0)
+    /// Resolve entity field `name` to a handle (see [`Fld`]).
+    pub fn fld(&self, name: &str) -> Fld {
+        Fld(self.progs.field_offset(name))
     }
-    /// Write entity field `name` as a float (no-op if the field is unknown).
-    pub fn ent_set_float(&mut self, e: i32, name: &str, v: f32) {
-        if let Some(o) = self.field_ofs(name) {
+    /// Resolve global `name` to a handle (see [`Glb`]).
+    pub fn glb(&self, name: &str) -> Glb {
+        Glb(self.progs.global_offset(name))
+    }
+
+    // --- resolved access: the hot paths hold a Fld/Glb from `fo`/`go` --------
+
+    /// Read field `f` of edict `e` as a float (0.0 for a missing field).
+    pub fn ent_float(&self, e: i32, f: Fld) -> f32 {
+        f.ofs().map(|o| self.ef(e, o)).unwrap_or(0.0)
+    }
+    /// Write field `f` of edict `e` as a float (dropped for a missing field).
+    pub fn set_ent_float(&mut self, e: i32, f: Fld, v: f32) {
+        if let Some(o) = f.ofs() {
             self.set_ef(e, o, v);
         }
     }
-    /// Read entity field `name` as an int.
-    pub fn ent_get_int(&self, e: i32, name: &str) -> i32 {
-        self.field_ofs(name).map(|o| self.ei(e, o)).unwrap_or(0)
+    /// Read field `f` of edict `e` as an int.
+    pub fn ent_int(&self, e: i32, f: Fld) -> i32 {
+        f.ofs().map(|o| self.ei(e, o)).unwrap_or(0)
     }
-    /// Write entity field `name` as an int.
-    pub fn ent_set_int(&mut self, e: i32, name: &str, v: i32) {
-        if let Some(o) = self.field_ofs(name) {
+    /// Write field `f` of edict `e` as an int.
+    pub fn set_ent_int(&mut self, e: i32, f: Fld, v: i32) {
+        if let Some(o) = f.ofs() {
             self.set_ei(e, o, v);
         }
     }
-    /// Read entity field `name` as a vector.
-    pub fn ent_get_vector(&self, e: i32, name: &str) -> Vec3 {
-        self.field_ofs(name).map(|o| self.ev(e, o)).unwrap_or([0.0; 3])
+    /// Read field `f` of edict `e` as a vector.
+    pub fn ent_vec(&self, e: i32, f: Fld) -> Vec3 {
+        f.ofs().map(|o| self.ev(e, o)).unwrap_or([0.0; 3])
     }
-    /// Write entity field `name` as a vector.
-    pub fn ent_set_vector(&mut self, e: i32, name: &str, v: Vec3) {
-        if let Some(o) = self.field_ofs(name) {
+    /// Write field `f` of edict `e` as a vector.
+    pub fn set_ent_vec(&mut self, e: i32, f: Fld, v: Vec3) {
+        if let Some(o) = f.ofs() {
             self.set_ev(e, o, v);
         }
     }
+    /// Borrow string field `f` of edict `e` (`""` for a null or bad string).
+    pub fn ent_str(&self, e: i32, f: Fld) -> &str {
+        string_in(&self.strings, self.ent_int(e, f))
+    }
+    /// Read global `g` as a float.
+    pub fn glob_float(&self, g: Glb) -> f32 {
+        g.ofs().map(|o| self.gf(o)).unwrap_or(0.0)
+    }
+    /// Write global `g` as a float.
+    pub fn set_glob_float(&mut self, g: Glb, v: f32) {
+        if let Some(o) = g.ofs() {
+            self.set_gf(o, v);
+        }
+    }
+    /// Read global `g` as an int.
+    pub fn glob_int(&self, g: Glb) -> i32 {
+        g.ofs().map(|o| self.gi(o)).unwrap_or(0)
+    }
+    /// Write global `g` as an int (also `.entity`/`.function` globals).
+    pub fn set_glob_int(&mut self, g: Glb, v: i32) {
+        if let Some(o) = g.ofs() {
+            self.set_gi(o, v);
+        }
+    }
+    /// Read global `g` as a vector.
+    pub fn glob_vec(&self, g: Glb) -> Vec3 {
+        g.ofs().map(|o| self.gv(o)).unwrap_or([0.0; 3])
+    }
+    /// Write global `g` as a vector.
+    pub fn set_glob_vec(&mut self, g: Glb, v: Vec3) {
+        if let Some(o) = g.ofs() {
+            self.set_gv(o, v);
+        }
+    }
+
+    // --- by-name access: resolve the name, then the same code ----------------
+
+    /// Read entity field `name` as a float (0.0 if the field is unknown).
+    pub fn ent_get_float(&self, e: i32, name: &str) -> f32 {
+        self.ent_float(e, self.fld(name))
+    }
+    /// Write entity field `name` as a float (no-op if the field is unknown).
+    pub fn ent_set_float(&mut self, e: i32, name: &str, v: f32) {
+        self.set_ent_float(e, self.fld(name), v);
+    }
+    /// Read entity field `name` as an int.
+    pub fn ent_get_int(&self, e: i32, name: &str) -> i32 {
+        self.ent_int(e, self.fld(name))
+    }
+    /// Write entity field `name` as an int.
+    pub fn ent_set_int(&mut self, e: i32, name: &str, v: i32) {
+        self.set_ent_int(e, self.fld(name), v);
+    }
+    /// Read entity field `name` as a vector.
+    pub fn ent_get_vector(&self, e: i32, name: &str) -> Vec3 {
+        self.ent_vec(e, self.fld(name))
+    }
+    /// Write entity field `name` as a vector.
+    pub fn ent_set_vector(&mut self, e: i32, name: &str, v: Vec3) {
+        self.set_ent_vec(e, self.fld(name), v);
+    }
     /// Resolve entity field `name` (a `string_t`) to an owned string.
     pub fn ent_get_string(&self, e: i32, name: &str) -> String {
-        let s = self.ent_get_int(e, name);
-        self.get_string(s)
+        self.ent_string_ref(e, name).to_string()
     }
-    /// Borrow entity field `name` as a `&str` (no owned-String allocation). For
-    /// hot paths that only read the value (e.g. parsing a `"*N"` submodel name in
-    /// the per-tick collision loop). Returns `""` for a null/out-of-range string.
+    /// Borrow entity field `name` as a `&str` (no owned-String allocation).
+    /// Returns `""` for a null/out-of-range string.
     pub fn ent_string_ref(&self, e: i32, name: &str) -> &str {
-        let s = self.ent_get_int(e, name);
-        string_in(&self.strings, s)
+        self.ent_str(e, self.fld(name))
     }
     /// Intern `value` and store its `string_t` in entity field `name`.
     pub fn ent_set_string(&mut self, e: i32, name: &str, value: &str) {
@@ -368,33 +541,27 @@ impl Vm {
 
     /// Read global `name` as a float.
     pub fn gget_float(&self, name: &str) -> f32 {
-        self.global_ofs(name).map(|o| self.gf(o)).unwrap_or(0.0)
+        self.glob_float(self.glb(name))
     }
     /// Write global `name` as a float.
     pub fn gset_float(&mut self, name: &str, v: f32) {
-        if let Some(o) = self.global_ofs(name) {
-            self.set_gf(o, v);
-        }
+        self.set_glob_float(self.glb(name), v);
     }
     /// Read global `name` as an int.
     pub fn gget_int(&self, name: &str) -> i32 {
-        self.global_ofs(name).map(|o| self.gi(o)).unwrap_or(0)
+        self.glob_int(self.glb(name))
     }
     /// Write global `name` as an int (also used for `.entity`/`.function` globals).
     pub fn gset_int(&mut self, name: &str, v: i32) {
-        if let Some(o) = self.global_ofs(name) {
-            self.set_gi(o, v);
-        }
+        self.set_glob_int(self.glb(name), v);
     }
     /// Read global `name` as a vector.
     pub fn gget_vector(&self, name: &str) -> Vec3 {
-        self.global_ofs(name).map(|o| self.gv(o)).unwrap_or([0.0; 3])
+        self.glob_vec(self.glb(name))
     }
     /// Write global `name` as a vector.
     pub fn gset_vector(&mut self, name: &str, v: Vec3) {
-        if let Some(o) = self.global_ofs(name) {
-            self.set_gv(o, v);
-        }
+        self.set_glob_vec(self.glb(name), v);
     }
 
     /// Number of 32-bit fields per entity (`progs->entityfields`). Always at
@@ -601,13 +768,14 @@ impl Vm {
         if e <= 0 || e as usize >= self.edict_free.len() {
             return; // never free the world
         }
-        for name in ["takedamage", "modelindex", "colormap", "skin", "frame", "solid"] {
-            self.ent_set_float(e, name, 0.0);
+        let fo = self.fo;
+        for f in [fo.takedamage, fo.modelindex, fo.colormap, fo.skin, fo.frame, fo.solid] {
+            self.set_ent_float(e, f, 0.0);
         }
-        self.ent_set_int(e, "model", 0);
-        self.ent_set_vector(e, "origin", [0.0; 3]);
-        self.ent_set_vector(e, "angles", [0.0; 3]);
-        self.ent_set_float(e, "nextthink", -1.0);
+        self.set_ent_int(e, fo.model, 0);
+        self.set_ent_vec(e, fo.origin, [0.0; 3]);
+        self.set_ent_vec(e, fo.angles, [0.0; 3]);
+        self.set_ent_float(e, fo.nextthink, -1.0);
         let e = e as usize;
         self.edict_free[e] = true;
         if let Some(st) = self.edict_static.get_mut(e) {
@@ -1635,6 +1803,46 @@ mod tests {
         // sanity: the function index resolved
         assert_eq!(vm.progs.find_function("dbl"), Some(dbl_idx));
         let _ = OFS_NULL;
+    }
+
+    /// D2: the handles in `fo`/`go` are the by-name lookups done once at load —
+    /// same cells, and a field the progs lacks reads 0 and drops writes.
+    #[test]
+    fn resolved_fields_match_the_by_name_accessors() {
+        let mut b = Builder::new();
+        b.entityfields = 6;
+        for (name, type_, ofs) in [("solid", 2u16, 0u16), ("origin", 3, 1), ("model", 1, 4)] {
+            let s_name = b.intern(name);
+            b.fielddefs.push(Def { type_, ofs, s_name });
+        }
+        for (name, ofs) in [("self", 30u16), ("time", 31)] {
+            let s_name = b.intern(name);
+            b.globaldefs.push(Def { type_: 2, ofs, s_name });
+        }
+        let img = b.build();
+        let mut vm = Vm::load(&img).expect("load");
+        assert_eq!(vm.fo.origin, vm.fld("origin"));
+        assert_eq!(vm.fo.origin.ofs(), Some(1));
+        assert_eq!(vm.fo.health, Fld::default(), "a field this progs lacks");
+        assert_eq!(vm.go.time.ofs(), Some(31));
+        assert_eq!(vm.go.force_retouch, Glb::default());
+
+        let e = vm.spawn();
+        vm.set_ent_vec(e, vm.fo.origin, [1.0, 2.0, 3.0]);
+        vm.ent_set_float(e, "solid", 4.0);
+        vm.ent_set_string(e, "model", "progs/player.mdl");
+        assert_eq!(vm.ent_get_vector(e, "origin"), [1.0, 2.0, 3.0]);
+        assert_eq!(vm.ent_float(e, vm.fo.solid), 4.0);
+        assert_eq!(vm.ent_str(e, vm.fo.model), "progs/player.mdl");
+        let cells = vm.edict_fields.clone();
+        vm.set_ent_float(e, vm.fo.health, 9.0);
+        vm.set_ent_vec(e, vm.fo.velocity, [9.0; 3]);
+        assert_eq!(vm.edict_fields, cells, "writes to a missing field are dropped");
+        assert_eq!(vm.ent_float(e, vm.fo.health), 0.0);
+        assert_eq!(vm.ent_str(e, vm.fo.classname), "");
+        vm.set_glob_float(vm.go.time, 2.5);
+        assert_eq!(vm.gget_float("time"), 2.5);
+        assert_eq!(vm.glob_float(vm.go.force_retouch), 0.0);
     }
 
     #[test]
