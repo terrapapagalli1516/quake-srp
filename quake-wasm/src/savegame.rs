@@ -169,8 +169,10 @@ pub extern "C" fn load_game() -> i32 {
                 // touches a cvar (viewsize, gamma, volume, sensitivity, Always
                 // Run, ...) nor keybindings[], and M_Load_Key only sets
                 // m_state = m_none. Same reset as New Game; the slot comments
-                // and the video mode survive with it.
+                // and the video mode survive with it. The console goes at
+                // once (SCR_BeginLoadingPlaque zeroes scr_con_current).
                 a.console.open = false;
+                a.console.set_current(0.0);
                 a.menu.reset_nav();
                 a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             });

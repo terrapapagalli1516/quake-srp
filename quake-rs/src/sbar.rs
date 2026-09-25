@@ -5,8 +5,8 @@
 //! `Sbar_IntermissionOverlay`, `Sbar_FinaleOverlay`.
 
 use crate::draw::{
-    blit_qpic_at, blit_scaled, conchars_pic, HUD_TRANSPARENT, HUD_VIRT_W, MENU_VIRT_H,
-    MENU_VIRT_W,
+    blit_qpic_at, blit_scaled, conchars_pic, draw_tile_clear, screen_2d, HUD_TRANSPARENT,
+    HUD_VIRT_W,
 };
 use crate::render::Image;
 use crate::screen::draw_center_string_revealed;
@@ -24,8 +24,8 @@ use crate::screen::draw_center_string_revealed;
 // This port keeps the same virtual coordinates Quake uses. The caller hands us a
 // [`Hud`] holding a borrow of the parsed `gfx.wad`, the palette, and the three
 // integer stats read off the player edict; [`draw_hud_into`] then blits the bar
-// scaled to the actual framebuffer width and bottom-anchored, so a 320, 480, or
-// 640-wide frame all get a full-width bar.
+// 320 wide at the bottom centre of the screen, backtile either side on a wider
+// one, as Sbar_Draw does (or blown up with the "scaled 2-D" extra).
 //
 // Integration choice (lowest churn): the HUD is a *separate* `pub fn
 // draw_hud_into(image, hud)` the scene callers invoke on the returned `Image`,
@@ -39,9 +39,38 @@ use crate::screen::draw_center_string_revealed;
 // and HUD-pic texels equal to palette index 255 are skipped (Quake's transparent
 // colour for the status-bar pics).
 
-/// The status bar's height in virtual rows (`sbar.c` draws it as the bottom 24
-/// rows of the 320x200 virtual screen).
+/// The status bar's height in virtual rows (`SBAR_HEIGHT`: the bottom 24 rows
+/// of the screen).
 const HUD_BAR_H: f32 = 24.0;
+
+/// Where the bar's coordinates land on the framebuffer: `Sbar_DrawPic` and
+/// friends draw at `(x + ((vid.width - 320)>>1), y + vid.height - SBAR_HEIGHT)`
+/// on the [`screen_2d`] screen, each of its pixels `scale` framebuffer pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BarXf {
+    scale: f32,
+    /// Framebuffer x of the bar's x = 0 (the 320-wide bar centred).
+    ox: f32,
+    /// Framebuffer y of the bar's y = 0 (the top of the 24-row sbar strip).
+    vy_top: f32,
+}
+
+impl BarXf {
+    /// The transform on a `vid_w x vid_h` framebuffer.
+    fn new(vid_w: usize, vid_h: usize) -> BarXf {
+        let sc = screen_2d(vid_w, vid_h);
+        BarXf {
+            scale: sc.scale,
+            ox: ((sc.w - HUD_VIRT_W as i32) >> 1) as f32 * sc.scale,
+            vy_top: (sc.h as f32 - HUD_BAR_H) * sc.scale,
+        }
+    }
+
+    /// The framebuffer pixel of bar coordinate `(vx, vy)`.
+    fn at(&self, vx: f32, vy: f32) -> (i64, i64) {
+        ((self.ox + vx * self.scale).floor() as i64, (self.vy_top + vy * self.scale).floor() as i64)
+    }
+}
 
 /// The Quake HUD overlay: the parsed `gfx.wad`, the screen palette, and the
 /// player stats to display. Built by the caller each frame from the player edict
@@ -106,13 +135,9 @@ pub struct Hud<'a> {
     pub sb_lines: i32,
 }
 
-/// Blit one `Qpic` at virtual position `(vx, vy)` in 320x200 space, scaled by
-/// `scale` to the framebuffer and bottom-anchored (so the 24-px bar sits flush
-/// at the bottom of any-height frame).
-///
-/// `vy_top` is the framebuffer y (in pixels) of virtual row 0 of the bar, i.e.
-/// `image.h - HUD_BAR_H * scale`; a pic at virtual `(vx, vy)` lands its top-left
-/// at `(vx*scale, vy_top + vy*scale)`. Each destination pixel samples its source
+/// Blit one `Qpic` at bar position `(vx, vy)` (`Sbar_DrawPic`): its top-left
+/// lands at [`BarXf::at`], each texel a `scale`-pixel block. Each destination
+/// pixel samples its source
 /// texel nearest-neighbour; texels equal to [`HUD_TRANSPARENT`] (255) are left
 /// transparent, leaving the underlying 3-D pixel untouched. Every write is
 /// clipped to the framebuffer, so a pic that overhangs an edge never panics.
@@ -121,11 +146,10 @@ fn blit_qpic(
     pic: &crate::wad::Qpic,
     vx: f32,
     vy: f32,
-    scale: f32,
-    vy_top: f32,
+    xf: BarXf,
     palette: &[[u8; 3]; 256],
 ) {
-    if pic.width <= 0 || pic.height <= 0 || scale <= 0.0 {
+    if pic.width <= 0 || pic.height <= 0 || xf.scale <= 0.0 {
         return;
     }
     let pw = pic.width as usize;
@@ -136,11 +160,10 @@ fn blit_qpic(
     }
 
     // Destination top-left in framebuffer pixels, and the scaled pic extent.
-    let dst_x0 = (vx * scale).floor() as i64;
-    let dst_y0 = (vy_top + vy * scale).floor() as i64;
-    let dst_w = (pw as f32 * scale).round().max(1.0) as i64;
-    let dst_h = (ph as f32 * scale).round().max(1.0) as i64;
-    let inv_scale = 1.0 / scale;
+    let (dst_x0, dst_y0) = xf.at(vx, vy);
+    let dst_w = (pw as f32 * xf.scale).round().max(1.0) as i64;
+    let dst_h = (ph as f32 * xf.scale).round().max(1.0) as i64;
+    let inv_scale = 1.0 / xf.scale;
     // Transparent texels leave the 3-D pixel as-is.
     blit_scaled(
         image,
@@ -169,8 +192,7 @@ fn draw_num(
     value: i32,
     vx: f32,
     vy: f32,
-    scale: f32,
-    vy_top: f32,
+    xf: BarXf,
     wad: &crate::wad::Wad2,
     palette: &[[u8; 3]; 256],
     alt: bool,
@@ -205,7 +227,7 @@ fn draw_num(
         if let Ok(pic) = wad.qpic(name) {
             let w = pic.width.max(0) as f32;
             pen -= w;
-            blit_qpic(image, &pic, pen, vy, scale, vy_top, palette);
+            blit_qpic(image, &pic, pen, vy, xf, palette);
         } else {
             // Missing digit pic: still advance by a default 24-virtual slot so
             // the remaining digits keep their right-justified positions.
@@ -341,21 +363,21 @@ fn blit_named(
     name: &str,
     vx: f32,
     vy: f32,
-    scale: f32,
-    vy_top: f32,
+    xf: BarXf,
     palette: &[[u8; 3]; 256],
 ) {
     if name.is_empty() {
         return;
     }
     if let Ok(pic) = wad.qpic(name) {
-        blit_qpic(image, &pic, vx, vy, scale, vy_top, palette);
+        blit_qpic(image, &pic, vx, vy, xf, palette);
     }
 }
 
 /// Stamp one console-font glyph (`conchars` cell `ch`) at virtual `(vx, vy)` in
-/// 320x200 bar space, scaled/anchored exactly like [`blit_qpic`] — a port of
-/// `Sbar_DrawCharacter`'s `Draw_Character`.
+/// 320x200 bar space, scaled/anchored exactly like [`blit_qpic`] — the
+/// `Draw_Character` under `Sbar_DrawString` and `Sbar_DrawCharacter` (whose
+/// callers add its `+ 4`).
 ///
 /// `conchars` is the raw 128x128 atlas wrapped as a [`crate::wad::Qpic`]
 /// (`width = height = 128`), a 16x16 grid of 8x8 glyphs; byte `ch`'s glyph sits at
@@ -372,8 +394,7 @@ fn draw_sbar_char(
     ch: u8,
     vx: f32,
     vy: f32,
-    scale: f32,
-    vy_top: f32,
+    xf: BarXf,
     palette: &[[u8; 3]; 256],
 ) {
     if conchars.width != 128 || conchars.height != 128 || conchars.data.len() < 128 * 128 {
@@ -382,11 +403,10 @@ fn draw_sbar_char(
     let cell_x = (ch as usize % 16) * 8;
     let cell_y = (ch as usize / 16) * 8;
     // Destination top-left in framebuffer pixels and the 8x8 scaled extent.
-    let dst_x0 = (vx * scale).floor() as i64;
-    let dst_y0 = (vy_top + vy * scale).floor() as i64;
-    let dst_w = (8.0 * scale).round().max(1.0) as i64;
-    let dst_h = (8.0 * scale).round().max(1.0) as i64;
-    let inv_scale = 1.0 / scale;
+    let (dst_x0, dst_y0) = xf.at(vx, vy);
+    let dst_w = (8.0 * xf.scale).round().max(1.0) as i64;
+    let dst_h = (8.0 * xf.scale).round().max(1.0) as i64;
+    let inv_scale = 1.0 / xf.scale;
     // conchars uses palette index 0 as the transparent glyph background.
     blit_scaled(
         image,
@@ -403,18 +423,17 @@ fn draw_sbar_char(
 /// `Sbar_DrawInventory` (sbar.c): the `ibar` strip in the 24 virtual rows above
 /// the status strip and, on it, the owned weapons, the four ammo counts, the
 /// keys/powerups and the sigils. Called by [`draw_hud_into`] only while
-/// `sb_lines > 24`. `scale` / `vy_top` are the bar's transform (see there).
+/// `sb_lines > 24`. `xf` is the bar's transform.
 fn draw_sbar_inventory(
     image: &mut Image,
     hud: &Hud,
     conchars: Option<&crate::wad::Qpic>,
-    scale: f32,
-    vy_top: f32,
+    xf: BarXf,
 ) {
     let wad = hud.wad;
     let pal = hud.palette;
     // The `ibar` strip in the 24 rows above the sbar: Sbar_DrawPic(0, -24, sb_ibar).
-    blit_named(image, wad, "ibar", 0.0, -24.0, scale, vy_top, pal);
+    blit_named(image, wad, "ibar", 0.0, -24.0, xf, pal);
 
     // Weapon icons: for each owned weapon (items bit IT_SHOTGUN<<i, i=0..6), draw
     // `sb_weapons[flashon][i]` at Sbar_DrawPic(i*24, -16, ...): the `inva1..5_*`
@@ -423,7 +442,7 @@ fn draw_sbar_inventory(
     for i in 0..7 {
         if hud.items & (IT_SHOTGUN << i) != 0 {
             let name = weapon_icon_name(weapon_flashon(hud, i), i);
-            blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, scale, vy_top, pal);
+            blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, xf, pal);
         }
     }
 
@@ -441,10 +460,12 @@ fn draw_sbar_inventory(
                 if c == b' ' {
                     continue;
                 }
-                // Gold digit glyph 18 + (c - '0'); x = (6*i + 1 + j)*8 - 2, y = -24.
+                // Gold digit glyph 18 + (c - '0'); x = (6*i + 1 + j)*8 - 2, y = -24,
+                // and Sbar_DrawCharacter (sbar.c:293) draws 4 pixels right of
+                // its x: `Draw_Character (x + ((vid.width - 320)>>1) + 4, ...)`.
                 let glyph = 18 + (c - b'0');
-                let vx = ((6 * i + 1 + j) as f32) * 8.0 - 2.0;
-                draw_sbar_char(image, cc, glyph, vx, -24.0, scale, vy_top, pal);
+                let vx = ((6 * i + 1 + j) as f32) * 8.0 - 2.0 + 4.0;
+                draw_sbar_char(image, cc, glyph, vx, -24.0, xf, pal);
             }
         }
     }
@@ -454,12 +475,12 @@ fn draw_sbar_inventory(
     // bits 1<<(28+i) at Sbar_DrawPic(320-32 + i*8, -16, ...).
     for (i, name) in SB_ITEM_NAMES.iter().enumerate() {
         if hud.items & (1 << (17 + i)) != 0 {
-            blit_named(image, wad, name, 192.0 + (i as f32) * 16.0, -16.0, scale, vy_top, pal);
+            blit_named(image, wad, name, 192.0 + (i as f32) * 16.0, -16.0, xf, pal);
         }
     }
     for (i, name) in SB_SIGIL_NAMES.iter().enumerate() {
         if hud.items & (1 << (28 + i)) != 0 {
-            blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, scale, vy_top, pal);
+            blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, xf, pal);
         }
     }
 }
@@ -468,9 +489,11 @@ fn draw_sbar_inventory(
 /// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
 /// non-deathmatch path).
 ///
-/// The whole bar is laid out in Quake's fixed 320x200 virtual space and scaled by
-/// `image.w / 320` (nearest-neighbour) so it spans the full framebuffer width,
-/// bottom-anchored. The *status area* is 48 virtual rows tall: the `ibar`
+/// The bar is 320 wide, centred at the bottom of the [`screen_2d`] screen
+/// (`Sbar_DrawPic`'s `(vid.width - 320)>>1`), with `backtile` either side of
+/// it on a wider screen (`Draw_TileClear (0, vid.height - sb_lines,
+/// vid.width, sb_lines)`); the "scaled 2-D" extra blows it up with the rest
+/// of the 2-D layer. The *status area* is 48 virtual rows tall: the `ibar`
 /// inventory strip (320x24) sits in the 24 rows ABOVE the `sbar` (320x24)
 /// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
 /// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
@@ -493,23 +516,30 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     if image.w == 0 || image.h == 0 {
         return;
     }
-    // Scale the 320-wide virtual layout to the real framebuffer width.
-    let scale = image.w as f32 / HUD_VIRT_W;
-    if !scale.is_finite() || scale <= 0.0 {
+    // The bar's transform: 320 wide, centred at the bottom of the 2-D screen;
+    // the ibar sits 24 rows above the sbar strip (negative vy).
+    let xf = BarXf::new(image.w, image.h);
+    if !xf.scale.is_finite() || xf.scale <= 0.0 {
         return;
     }
-    // Framebuffer y of virtual row 0 of the bar (top of the `sbar` strip); the
-    // 24-px sbar sits flush at the bottom, the ibar 24 rows above it (negative vy).
-    let vy_top = image.h as f32 - HUD_BAR_H * scale;
     let wad = hud.wad;
     let pal = hud.palette;
     let conchars = conchars_pic(wad);
+
+    // Sbar_Draw: `if (sb_lines && vid.width > 320) Draw_TileClear (0,
+    // vid.height - sb_lines, vid.width, sb_lines);` — the backtile either side
+    // of the bar (and under it, where the bar pics draw over it).
+    let sc = screen_2d(image.w, image.h);
+    if hud.sb_lines > 0 && sc.w > HUD_VIRT_W as i32 {
+        let y0 = sc.px(sc.h - hud.sb_lines).max(0) as usize;
+        draw_tile_clear(image, wad.qpic("backtile").ok().as_ref(), 0, y0, image.w, image.h - y0.min(image.h), pal);
+    }
 
     // ----- Inventory bar (Sbar_DrawInventory) -------------------------------
     // Sbar_Draw: `if (sb_lines > 24) Sbar_DrawInventory ();` — viewsize 110
     // (sb_lines 24) keeps only the status strip, 120 (0) neither.
     if hud.sb_lines > 24 {
-        draw_sbar_inventory(image, hud, conchars.as_ref(), scale, vy_top);
+        draw_sbar_inventory(image, hud, conchars.as_ref(), xf);
     }
 
     // ----- Status bar (the sbar block of Sbar_Draw) -------------------------
@@ -517,9 +547,9 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // status strip with the dark `scorebar` pic + the solo scoreboard
     // (Monsters/Secrets/Time/level), keeping the ibar above. (sbar.c:948-953.)
     if hud.health <= 0 || hud.show_scores {
-        blit_named(image, wad, "scorebar", 0.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, "scorebar", 0.0, 0.0, xf, pal);
         if let Some(cc) = &conchars {
-            draw_solo_scoreboard(image, cc, hud, scale, vy_top, pal);
+            draw_solo_scoreboard(image, cc, hud, xf, pal);
         }
         return;
     }
@@ -529,7 +559,7 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     }
 
     // 1. Background strip (sbar, 320x24) at virtual (0,0).
-    blit_named(image, wad, "sbar", 0.0, 0.0, scale, vy_top, pal);
+    blit_named(image, wad, "sbar", 0.0, 0.0, xf, pal);
 
     // Armour field (Sbar_Draw, sbar.c:968-997). Under invulnerability the C draws a
     // gold "666" and the Pentagram-of-Protection disc over the armour slot and shows
@@ -537,17 +567,17 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // sb_armor[type])) keyed on IT_ARMOR3/2/1 plus the armour number at
     // Sbar_DrawNum(24, ..) — right edge virtual x=96, gold when <=25.
     if hud.items & IT_INVULNERABILITY != 0 {
-        draw_num(image, 666, 96.0, 0.0, scale, vy_top, wad, pal, true);
-        blit_named(image, wad, "disc", 0.0, 0.0, scale, vy_top, pal);
+        draw_num(image, 666, 96.0, 0.0, xf, wad, pal, true);
+        blit_named(image, wad, "disc", 0.0, 0.0, xf, pal);
     } else {
         if hud.items & IT_ARMOR3 != 0 {
-            blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, scale, vy_top, pal);
+            blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, xf, pal);
         } else if hud.items & IT_ARMOR2 != 0 {
-            blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, scale, vy_top, pal);
+            blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, xf, pal);
         } else if hud.items & IT_ARMOR1 != 0 {
-            blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, scale, vy_top, pal);
+            blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, xf, pal);
         }
-        draw_num(image, hud.armor, 96.0, 0.0, scale, vy_top, wad, pal, hud.armor <= 25);
+        draw_num(image, hud.armor, 96.0, 0.0, xf, wad, pal, hud.armor <= 25);
     }
 
     // Face (Sbar_DrawFace) at x=112, y=0. Powerup faces take priority in the C's
@@ -556,36 +586,36 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // with anim 1 (the pain face) while `cl.time <= cl.faceanimtime`.
     let inv_iv = IT_INVISIBILITY | IT_INVULNERABILITY;
     if hud.items & inv_iv == inv_iv {
-        blit_named(image, wad, FACE_INVIS_INVULN, 112.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, FACE_INVIS_INVULN, 112.0, 0.0, xf, pal);
     } else if hud.items & IT_QUAD != 0 {
-        blit_named(image, wad, FACE_QUAD, 112.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, FACE_QUAD, 112.0, 0.0, xf, pal);
     } else if hud.items & IT_INVISIBILITY != 0 {
-        blit_named(image, wad, FACE_INVIS, 112.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, FACE_INVIS, 112.0, 0.0, xf, pal);
     } else if hud.items & IT_INVULNERABILITY != 0 {
-        blit_named(image, wad, FACE_INVULN, 112.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, FACE_INVULN, 112.0, 0.0, xf, pal);
     } else {
         let names = if hud.face_pain { &FACE_PAIN_NAMES } else { &FACE_NAMES };
         let face = names[face_bracket(hud.health)];
-        blit_named(image, wad, face, 112.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, face, 112.0, 0.0, xf, pal);
     }
 
     // Health number: Sbar_DrawNum(136, health, 3, health<=25) — right edge x=208.
-    draw_num(image, hud.health, 208.0, 0.0, scale, vy_top, wad, pal, hud.health <= 25);
+    draw_num(image, hud.health, 208.0, 0.0, xf, wad, pal, hud.health <= 25);
 
     // Ammo-type icon (Sbar_DrawPic(224, 0, sb_ammo[type])) by the active weapon's
     // ammo type, keyed on the items ammo bits IT_SHELLS/NAILS/ROCKETS/CELLS.
     if hud.items & IT_SHELLS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[0], 224.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[0], 224.0, 0.0, xf, pal);
     } else if hud.items & IT_NAILS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[1], 224.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[1], 224.0, 0.0, xf, pal);
     } else if hud.items & IT_ROCKETS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[2], 224.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[2], 224.0, 0.0, xf, pal);
     } else if hud.items & IT_CELLS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[3], 224.0, 0.0, scale, vy_top, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[3], 224.0, 0.0, xf, pal);
     }
 
     // Current ammo number: Sbar_DrawNum(248, ammo, 3, ammo<=10) — right edge x=320.
-    draw_num(image, hud.ammo, 320.0, 0.0, scale, vy_top, wad, pal, hud.ammo <= 10);
+    draw_num(image, hud.ammo, 320.0, 0.0, xf, wad, pal, hud.ammo <= 10);
 }
 
 /// `Sbar_SoloScoreboard` (sbar.c:457): the single-player stats drawn over the
@@ -597,14 +627,13 @@ fn draw_solo_scoreboard(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
     hud: &Hud,
-    scale: f32,
-    vy_top: f32,
+    xf: BarXf,
     pal: &[[u8; 3]; 256],
 ) {
     let draw = |image: &mut Image, vx: f32, vy: f32, s: &str| {
         for (i, &c) in s.as_bytes().iter().enumerate() {
             // Sbar_DrawString blits the raw ASCII glyph (space included, harmless).
-            draw_sbar_char(image, conchars, c, vx + (i as f32) * 8.0, vy, scale, vy_top, pal);
+            draw_sbar_char(image, conchars, c, vx + (i as f32) * 8.0, vy, xf, pal);
         }
     };
     draw(
@@ -691,9 +720,10 @@ fn intermission_number(
 /// `Sbar_IntermissionOverlay` (sbar.c): the single-player level-complete screen —
 /// the `gfx/complete.lmp` banner at (64,24), the `gfx/inter.lmp` plaque at (0,56),
 /// and the big-number time (minutes:seconds), secrets found/total and monsters
-/// killed/total beside the plaque's labels. Drawn in the 320x200 virtual space,
-/// uniformly scaled and centered like the menu (`min(w/320, h/200)`); on the
-/// engine's 16:10 presets that equals the HUD's `w/320` with zero offset.
+/// killed/total beside the plaque's labels. The C draws them all with plain
+/// `Draw_Pic`/`Draw_TransPic` at those screen coordinates — no centring — so
+/// on a screen bigger than 320x200 they sit in its top-left corner; the
+/// "scaled 2-D" extra blows them up with the rest of the 2-D layer.
 ///
 /// `complete`/`inter` are the two pak pics (`Draw_CachePic` in the C); either
 /// being absent just skips that blit — the numbers still draw, never a panic.
@@ -709,14 +739,8 @@ pub fn draw_intermission_overlay(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let sx = image.w as f32 / MENU_VIRT_W;
-    let sy = image.h as f32 / MENU_VIRT_H;
-    let scale = sx.min(sy);
-    if !scale.is_finite() || scale <= 0.0 {
-        return;
-    }
-    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
-    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+    let scale = screen_2d(image.w, image.h).scale;
+    let (ox, oy) = (0.0, 0.0);
 
     // Draw_Pic(64, 24, "gfx/complete.lmp") — the "Level Complete" banner.
     if let Some(pic) = complete {
@@ -777,19 +801,12 @@ pub fn draw_finale_overlay(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let sx = image.w as f32 / MENU_VIRT_W;
-    let sy = image.h as f32 / MENU_VIRT_H;
-    let scale = sx.min(sy);
-    if !scale.is_finite() || scale <= 0.0 {
-        return;
-    }
-    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
-    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+    let sc = screen_2d(image.w, image.h);
 
     // Draw_TransPic((vid.width - pic->width)/2, 16, "gfx/finale.lmp").
     if let Some(pic) = finale_pic {
-        let vx = (MENU_VIRT_W - pic.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, pic, vx, 16.0, scale, ox, oy, palette);
+        let vx = ((sc.w - pic.width.max(0)) / 2) as f32;
+        blit_qpic_at(image, pic, vx, 16.0, sc.scale, 0.0, 0.0, palette);
     }
     // scr_printspeed defaults to "8" (screen.c): 8 characters per second.
     if let Some(cc) = conchars {
@@ -914,7 +931,7 @@ mod tests {
                             }
                         }
                     }
-                    draw_sbar_char(&mut got, &atlas, ch, vx, vy, scale, vy_top, &pal);
+                    draw_sbar_char(&mut got, &atlas, ch, vx, vy, BarXf { scale, ox: 0.0, vy_top }, &pal);
                     assert!(got.rgb == want.rgb, "glyph {ch} scale {scale} ({vx},{vy}) top {vy_top}");
                 }
                 let mut want = Image::new(80, 64, [5, 5, 5]);
@@ -933,7 +950,7 @@ mod tests {
                         }
                     }
                 }
-                blit_qpic(&mut got, &pic, vx, vy, scale, vy_top, &pal);
+                blit_qpic(&mut got, &pic, vx, vy, BarXf { scale, ox: 0.0, vy_top }, &pal);
                 assert!(got.rgb == want.rgb, "pic scale {scale} ({vx},{vy}) top {vy_top}");
             }
         }
@@ -952,7 +969,7 @@ mod tests {
         let pic = Qpic { width: 3, height: 3, data };
 
         // scale 1, no vertical offset (vy_top = 0), placed at virtual (0,0).
-        blit_qpic(&mut img, &pic, 0.0, 0.0, 1.0, 0.0, &pal);
+        blit_qpic(&mut img, &pic, 0.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &pal);
 
         // The centre texel was transparent: the background pixel is untouched.
         assert_eq!(img.rgb[8 + 1], [0, 0, 0], "index-255 texel left bg unchanged");
@@ -966,7 +983,7 @@ mod tests {
         // on-screen part must still draw.
         let mut img2 = Image::new(8, 8, [0, 0, 0]);
         // Place top-left at virtual (7,7): only the (0,0) texel is on-screen.
-        blit_qpic(&mut img2, &pic, 7.0, 7.0, 1.0, 0.0, &pal);
+        blit_qpic(&mut img2, &pic, 7.0, 7.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &pal);
         assert_eq!(img2.rgb[7 * 8 + 7], [5, 5, 5], "on-screen overhang texel drew");
         // Nothing wrapped to row 0 / col 0 from the off-screen part.
         let drawn = img2.rgb.iter().filter(|p| **p != [0, 0, 0]).count();
@@ -982,7 +999,7 @@ mod tests {
         // num pics are 24x24. A 3-digit value (e.g. 100) fills [0,72); the digit
         // region (x in [0,72), y in [0,24)) must have changed.
         let mut img3 = Image::new(80, 24, [0, 0, 0]);
-        draw_num(&mut img3, 100, 72.0, 0.0, 1.0, 0.0, &wad, &pal, false);
+        draw_num(&mut img3, 100, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, &pal, false);
         let changed_3: usize = (0..24)
             .flat_map(|y| (0..72).map(move |x| (x, y)))
             .filter(|&(x, y)| img3.rgb[y * 80 + x] != [0, 0, 0])
@@ -993,7 +1010,7 @@ mod tests {
         // 24px slot [48,72) and leave the left two slots [0,48) untouched, proving
         // right-justification (the units digit lands at the same right edge).
         let mut img1 = Image::new(80, 24, [0, 0, 0]);
-        draw_num(&mut img1, 7, 72.0, 0.0, 1.0, 0.0, &wad, &pal, false);
+        draw_num(&mut img1, 7, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, &pal, false);
         // Right slot [48,72) changed.
         let right_changed: usize = (0..24)
             .flat_map(|y| (48..72).map(move |x| (x, y)))
@@ -1030,7 +1047,7 @@ mod tests {
         let wad = build_hud_wad();
         let pal = ramp_palette();
         let mut img = Image::new(200, 48, [0, 0, 0]);
-        draw_num(&mut img, 7, 72.0, 0.0, 2.0, 0.0, &wad, &pal, false);
+        draw_num(&mut img, 7, 72.0, 0.0, BarXf { scale: 2.0, ox: 0.0, vy_top: 0.0 }, &wad, &pal, false);
 
         // Pixels exist in the cell [96,144); none at or past 144.
         let in_cell = (0..48)
@@ -1500,6 +1517,13 @@ mod tests {
             .filter(|&(x, y)| img.rgb[y * 320 + x] == [95, 95, 95])
             .count();
         assert!(count_px > 0, "small ammo counts drew on the ibar");
+        // "100" shells: the first digit at (6*0+1)*8 - 2, plus Sbar_DrawCharacter's 4.
+        let first_x = (152..176)
+            .flat_map(|y| (0..320).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [95, 95, 95])
+            .map(|(x, _)| x)
+            .min();
+        assert_eq!(first_x, Some(10), "the shells count starts at x = 8 - 2 + 4");
 
         // A sigil (index 90) drew near the right edge of the ibar (x≈288).
         let sigil_px = (160..176)

@@ -39,10 +39,12 @@ GRAB = """() => {
              data: Array.from(g.getImageData(0, 0, c.width, c.height).data) };
 }"""
 
-def nonblack_fraction(f):
-    d, n = f["data"], f["w"] * f["h"]
-    lit = sum(1 for i in range(0, len(d), 4) if d[i] or d[i+1] or d[i+2])
-    return lit / max(1, n)
+def nonblack_fraction(f, y0=0, y1=None):
+    """Fraction of non-black pixels within rows y0..y1 (default: all)."""
+    w, d = f["w"], f["data"]
+    y1 = f["h"] if y1 is None else y1
+    lit = sum(1 for i in range(y0 * w * 4, y1 * w * 4, 4) if d[i] or d[i+1] or d[i+2])
+    return lit / max(1, (y1 - y0) * w)
 
 def changed_fraction(a, b, y0, y1):
     """Fraction of pixels that differ between two grabs within rows y0..y1."""
@@ -80,11 +82,14 @@ with sync_playwright() as p:
 
     # 1. The attract demo starts in-world: the very first canvas frames carry a
     # real scene (the old signon void rendered ~1.2 s of black from a zeroed
-    # camera). Sample as early as possible after boot.
+    # camera). Sample as early as possible after boot. The menu is up and
+    # Draw_FadeScreen keeps one pixel in four of the scene, so judge the rows
+    # between id's 320x200 menu (the top of the screen) and the status bar:
+    # a scene there is ~25% lit through the fade, the void 0%.
     first = pg.evaluate(GRAB)
-    frac = nonblack_fraction(first) if first else 0.0
-    check("first rendered frame is in-world (no void intro)", frac > 0.40,
-          f"{frac:.0%} non-black")
+    frac = nonblack_fraction(first, int(first["h"] * 0.4), int(first["h"] * 0.75)) if first else 0.0
+    check("first rendered frame is in-world (no void intro)", frac > 0.15,
+          f"{frac:.0%} non-black under the fade")
 
     # 2. Recorded one-shot sounds fire through Web Audio. The page only builds
     # its AudioContext on a user gesture; create + resume it directly (the
@@ -104,7 +109,7 @@ with sync_playwright() as p:
           plays > 0, f"{plays} plays")
 
     # 3. Close the menu (Escape) so the bare demo view + sbar show, then prove
-    # the status bar: the bottom band (24/200 of the height) is drawn from the
+    # the status bar: the bottom band (the 24-row sbar strip) is drawn from the
     # recorded stats and stays STABLE across frames, while the 3-D scene above
     # changes (the recorded camera is moving). Without the sbar the band would
     # be live 3-D and change like the rest.
@@ -121,7 +126,10 @@ with sync_playwright() as p:
         time.sleep(1.5)
         b = pg.evaluate(GRAB)
         h = a["h"]
-        bar_h = max(1, round(h * 24 / 200))  # the sbar band (virtual 24 rows)
+        # the sbar strip: id's 24 rows, or 24 of the 320x200 screen under the
+        # "scaled 2-D" extra
+        scaled = pg.evaluate("exp.scaled_2d ? exp.scaled_2d() : 0")
+        bar_h = max(1, round(h * 24 / 200)) if scaled else 24
         scene = changed_fraction(a, b, 0, int(h * 0.6))
         band = changed_fraction(a, b, h - bar_h, h)
         if best is None or band - scene < best[0] - best[1]:

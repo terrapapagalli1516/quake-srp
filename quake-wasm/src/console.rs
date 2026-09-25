@@ -13,7 +13,17 @@ use crate::host_cmd::execute_console_command;
 /// playing; closing slides it back. While open the console owns the keyboard.
 #[no_mangle]
 pub extern "C" fn console_toggle() {
-    ensure_app(|a| a.console.toggle());
+    ensure_app(|a| {
+        a.console.toggle();
+        // Con_ToggleConsole_f: `memset (con_times, 0, sizeof(con_times))` —
+        // the notify lines are gone after the console goes down or up.
+        if let Some(w) = a.walk.as_mut() {
+            w.notify.clear();
+        }
+        if let Some(d) = a.demo.as_mut() {
+            d.notify.clear();
+        }
+    });
 }
 
 /// `1` when the console is open (capturing the keyboard), else `0`. The page
@@ -79,6 +89,29 @@ pub extern "C" fn console_enter() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn toggling_the_console_clears_the_notify_lines() {
+        // Con_ToggleConsole_f zeroes con_times: nothing printed before the
+        // console went down (or up) shows as a notify line after it.
+        use crate::app::boot;
+        use crate::test_util::{close_menu, walk_mut};
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| {
+            let t = w.host_time;
+            w.notify.print("You got the shells\n", t);
+            assert_eq!(w.notify.visible(t), ["You got the shells"]);
+        });
+        console_toggle();
+        assert!(walk_mut(|w| w.notify.visible(w.host_time).is_empty()), "cleared going down");
+        walk_mut(|w| {
+            let t = w.host_time;
+            w.notify.print("printed while it was down\n", t);
+        });
+        console_toggle();
+        assert!(walk_mut(|w| w.notify.visible(w.host_time).is_empty()), "cleared going up");
+    }
+
     /// CENSUS L11 (the rest): Con_Print writes the console's text buffer, so
     /// what the game prints reaches the drop-down console's scrollback as
     /// well as the notify lines — word-wrapped at con_linewidth (38) there
@@ -92,6 +125,8 @@ mod tests {
         use quake_rs::progs::OFS_PARM0;
         assert_eq!(boot(), 1);
         close_menu();
+        // A 320-wide screen: con_linewidth 38 (Con_CheckResize).
+        crate::vid::set_resolution(320, 200);
         step(0.05);
         walk_mut(|w| {
             let vm = &mut w.server.vm;

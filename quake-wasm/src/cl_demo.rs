@@ -137,6 +137,8 @@ pub(crate) fn step_demo(
     render_w: usize,
     render_h: usize,
 ) -> (render::Image, Vec<([u8; 3], f32)>) {
+    // Con_CheckResize: the notify lines are laid out con_linewidth wide.
+    d.notify.check_resize(render_w, render_h);
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
     d.elapsed += dt;

@@ -590,6 +590,7 @@ fn load_menu_pics(
         vidmodes: lmp("gfx/vidmodes.lmp"),
         menudot,
         help,
+        textbox: std::array::from_fn(|i| lmp(quake_rs::menu::TEXTBOX_PICS[i])),
     };
 
     // conchars is a raw 128x128 byte block (TYP_MIPTEX, no QPIC header) inside

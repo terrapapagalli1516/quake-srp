@@ -13,7 +13,8 @@ use crate::app::{ensure_app, APP};
 /// can mark it current). The page restores the player's *saved* resolution from
 /// `localStorage` over this on load, and Options > Video Options lets them change
 /// it at runtime; the chosen size now persists across boots / New Game / reloads. The
-/// menu + HUD auto-scale to whatever size they're drawn into.
+/// menu + HUD are drawn at their own pixel size, as WinQuake draws them in every
+/// mode, unless the [`set_scaled_2d`] extra blows them up.
 pub(crate) const DEFAULT_W: usize = 960;
 pub(crate) const DEFAULT_H: usize = 600;
 /// Sane bounds for [`set_resolution`] (and the menu presets): the framebuffer is
@@ -65,7 +66,8 @@ pub extern "C" fn height() -> i32 {
 /// height 200..=800, and total pixels <= 1_280*800 so a runaway can't OOM) via
 /// [`clamp_resolution`]; out-of-range input is clamped, never a panic. After this,
 /// `width()`/`height()` report the new (clamped) size and the next `step` renders
-/// the scene at it. The menu + HUD auto-scale to the new framebuffer size.
+/// the scene at it. The menu + HUD are drawn at their own pixel size, as in
+/// WinQuake (blown up to the framebuffer with the [`set_scaled_2d`] extra).
 #[no_mangle]
 pub extern "C" fn set_resolution(w: i32, h: i32) {
     let (cw, ch) = clamp_resolution(w, h);
@@ -122,6 +124,22 @@ pub extern "C" fn viewsize() -> f32 {
 #[no_mangle]
 pub extern "C" fn set_viewsize(v: f32) {
     ensure_app(|a| a.menu.set_viewsize(v));
+}
+
+/// The "scaled 2-D" extra (not id; off by default): `1` draws the status bar,
+/// menus, console and text as id's 320x200 screen blown up to fill the
+/// framebuffer, `0` at their own pixel size as WinQuake does in every mode
+/// ([`quake_rs::draw::set_scaled_2d`]). For the page's extras; takes effect
+/// on the next frame.
+#[no_mangle]
+pub extern "C" fn set_scaled_2d(on: i32) {
+    quake_rs::draw::set_scaled_2d(on != 0);
+}
+
+/// `1` while the "scaled 2-D" extra is on ([`set_scaled_2d`]).
+#[no_mangle]
+pub extern "C" fn scaled_2d() -> i32 {
+    quake_rs::draw::scaled_2d() as i32
 }
 
 #[no_mangle]

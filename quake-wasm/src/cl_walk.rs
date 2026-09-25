@@ -174,6 +174,8 @@ pub(crate) fn step_walk(
     render_w: usize,
     render_h: usize,
 ) -> (render::Image, Vec<([u8; 3], f32)>) {
+    // Con_CheckResize: the notify lines are laid out con_linewidth wide.
+    w.notify.check_resize(render_w, render_h);
     // Host_ServerFrame (host.c): "always pause in single player if in console
     // or menus" — `if (!sv.paused && (svs.maxclients > 1 || key_dest ==
     // key_game)) SV_Physics ();`, and SV_RunClients gates SV_ClientThink the
@@ -967,6 +969,10 @@ pub(crate) fn step_walk(
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
     let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, w.clock) } else { view };
+    // The 2-D oracle harness paints the view one flat colour (the C oracle's
+    // `oracle_blank`), so a shot measures the 2-D layer alone. Tests only.
+    #[cfg(test)]
+    let view = crate::oracle_screen::blank_view(view, &w.palette);
     // The screen: the view at its rectangle, backtile around it
     // (SCR_UpdateScreen's Draw_TileClear), the status bar drawn over below.
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
@@ -1194,8 +1200,10 @@ mod tests {
             // in the static spawn view (scrolling sky, flame group-frames, the
             // 10 Hz lightstyle flicker) touches <= ~0.4% of pixels per frame;
             // the settle pop touched 17.8%-45.9% and the fireball-dlight pop
-            // 13.3%. A 2% ceiling separates bug from animation with a wide
-            // margin in both directions.
+            // 13.3%. A 10 Hz light-style tick re-lights whole walls: with the
+            // 2-D layer 1:1 (a 48-row bar, so a 960x552 view at 960x600) and
+            // per-texel relighting that tick touches ~2.4%. A 4% ceiling still
+            // separates bug from animation with a wide margin both ways.
             let fb: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
             let nd = prev
                 .chunks_exact(4)
@@ -1203,7 +1211,7 @@ mod tests {
                 .filter(|(a4, b4)| a4[..3] != b4[..3])
                 .count();
             assert!(
-                nd <= w * h / 50,
+                nd <= w * h / 25,
                 "frame {i} vs {}: {nd} px differ ({:.2}%) — a one-time view shift leaked into the first frames",
                 i - 1,
                 100.0 * nd as f64 / (w * h) as f64
@@ -1726,7 +1734,15 @@ mod tests {
         let (u640, c) = frame_at(&mut w, under, 640, 400);
         assert_eq!(c, quake_rs::bsp::CONTENTS_WATER);
         let (u320, _) = frame_at(&mut w, under, 320, 200);
-        assert_eq!(u640, u320, "underwater: the same 320x152 render at both sizes");
+        // id's 48-row bar is (int)(48 * 200/400) = 24 rows of the warp buffer
+        // at 640x400: a 320x176 render, taller than 320x200's 320x152.
+        assert!(u640 > u320, "underwater: 320x176 at 640x400 ({u640} vs {u320})");
+        {
+            // The "scaled 2-D" extra's bar is 48 rows of the 320x200 screen.
+            let _extra = Scaled2dGuard::set(true);
+            let (s640, _) = frame_at(&mut w, under, 640, 400);
+            assert_eq!(s640, u320, "underwater, scaled 2-D: the same 320x152 render at both sizes");
+        }
         let (a640, c) = frame_at(&mut w, above, 640, 400);
         assert_eq!(c, quake_rs::bsp::CONTENTS_EMPTY);
         let (a320, _) = frame_at(&mut w, above, 320, 200);

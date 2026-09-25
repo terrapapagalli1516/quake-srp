@@ -10,16 +10,94 @@ use crate::render::Image;
 /// skipped when blitting (`sbar.c` / `draw.c` treat 255 as see-through).
 pub(crate) const HUD_TRANSPARENT: u8 = 255;
 
-/// The virtual screen width Quake's `sbar.c` was authored against. The whole bar
-/// is laid out in this 320-wide space, then scaled to the real framebuffer.
+/// The virtual screen width Quake's `sbar.c` was authored against: the bar is
+/// 320 wide, centred on wider screens.
 pub(crate) const HUD_VIRT_W: f32 = 320.0;
+
+thread_local! {
+    /// The "scaled 2-D" extra ([`set_scaled_2d`]); off = id.
+    static SCALED_2D: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Turn the "scaled 2-D" extra on or off. **Off is id** (the default): in
+/// every video mode WinQuake draws the status bar, menus, console and text at
+/// their own pixel size — a 320-wide bar centred at the bottom of a 640x480
+/// screen with backtile either side, the menus at the top centre, a console
+/// `vid.width/8 - 2` characters wide. **On** (an opt-in departure, for big
+/// browser canvases) lays the 2-D layer out on a 320x200 screen, as id does
+/// in mode 0, and blows every pixel of it up to fill the frame
+/// ([`screen_2d`]). The 3-D view is unaffected either way, except that the
+/// status bar it must clear grows with the scale.
+pub fn set_scaled_2d(on: bool) {
+    SCALED_2D.with(|c| c.set(on));
+}
+
+/// Whether the "scaled 2-D" extra is on ([`set_scaled_2d`]).
+pub fn scaled_2d() -> bool {
+    SCALED_2D.with(|c| c.get())
+}
+
+/// Tests: the "scaled 2-D" extra set for as long as the guard lives, then
+/// back off (so a failing test cannot leak it into the next one on its thread).
+#[cfg(test)]
+pub(crate) struct Scaled2dGuard;
+
+#[cfg(test)]
+impl Scaled2dGuard {
+    pub(crate) fn set(on: bool) -> Scaled2dGuard {
+        set_scaled_2d(on);
+        Scaled2dGuard
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scaled2dGuard {
+    fn drop(&mut self) {
+        set_scaled_2d(false);
+    }
+}
+
+/// The 2-D layer's geometry on a framebuffer: the screen id's 2-D code lays
+/// out against (`vid.width` x `vid.height`) and the size of one of its pixels
+/// in framebuffer pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Screen2d {
+    /// Framebuffer pixels per 2-D pixel: 1 (id), or the extra's scale.
+    pub scale: f32,
+    /// `vid.width` and `vid.height` as the 2-D code sees them.
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Screen2d {
+    /// The framebuffer pixel of 2-D coordinate `v` (its top or left edge).
+    pub fn px(&self, v: i32) -> i64 {
+        (v as f32 * self.scale).floor() as i64
+    }
+}
+
+/// The 2-D screen of a `vid_w x vid_h` framebuffer: the framebuffer itself at
+/// scale 1 (id), or with the "scaled 2-D" extra ([`set_scaled_2d`]) the
+/// largest scale at which a 320x200 screen fits, the layout then done on the
+/// framebuffer divided by it — 320x200 on every 16:10 mode.
+pub fn screen_2d(vid_w: usize, vid_h: usize) -> Screen2d {
+    if scaled_2d() {
+        let s = (vid_w as f32 / HUD_VIRT_W).min(vid_h as f32 / MENU_VIRT_H);
+        if s.is_finite() && s > 1.0 {
+            let w = ((vid_w as f32 / s).round() as i32).max(HUD_VIRT_W as i32);
+            let h = ((vid_h as f32 / s).round() as i32).max(MENU_VIRT_H as i32);
+            return Screen2d { scale: s, w, h };
+        }
+    }
+    Screen2d { scale: 1.0, w: vid_w as i32, h: vid_h as i32 }
+}
 
 /// `Draw_TileClear` (draw.c): fill the framebuffer rectangle `(x, y, w, h)` with
 /// the 64x64 `backtile` pic, tiled from the SCREEN origin (texel
 /// `(x mod 64, y mod 64)`), as SCR_UpdateScreen does under a view smaller than
-/// the screen. Like the rest of the 2-D layer the tile is the 320x200 virtual
-/// screen's, scaled by `vid_w/320` (nearest-neighbour). A missing or malformed
-/// `backtile` fills black; every write is clipped.
+/// the screen. Like the rest of the 2-D layer the tile is drawn at the
+/// [`screen_2d`] scale (1 unless the "scaled 2-D" extra is on). A missing or
+/// malformed `backtile` fills black; every write is clipped.
 pub fn draw_tile_clear(
     image: &mut Image,
     backtile: Option<&crate::wad::Qpic>,
@@ -44,7 +122,7 @@ pub fn draw_tile_clear(
         }
         return;
     };
-    let scale = image.w as f32 / HUD_VIRT_W;
+    let scale = screen_2d(image.w, image.h).scale;
     let inv = if scale.is_finite() && scale > 0.0 { 1.0 / scale } else { 1.0 };
     let (tw, th) = (t.width as usize, t.height as usize);
     // The tile column of every framebuffer column, once per call.
@@ -364,13 +442,13 @@ pub(crate) fn draw_char_scaled(
 /// `Draw_FadeScreen` (draw.c), which `M_Draw` runs under every menu drawn over
 /// the game or a demo: three pixels in four go to palette index 0 in a fixed
 /// dither — row `y` keeps only the pixels with `x & 3 == (y & 1) << 1`. The
-/// pattern is laid on the 320x200 virtual screen, scaled like the rest of the
-/// 2-D layer (each virtual pixel a `scale x scale` block).
+/// pattern is laid on the [`screen_2d`] pixels (the framebuffer's own unless
+/// the "scaled 2-D" extra blows each up to a `scale x scale` block).
 pub fn fade_screen(image: &mut Image, palette: &[[u8; 3]; 256]) {
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let scale = (image.w as f32 / MENU_VIRT_W).min(image.h as f32 / MENU_VIRT_H);
+    let scale = screen_2d(image.w, image.h).scale;
     let inv = if scale.is_finite() && scale > 0.0 { 1.0 / scale } else { 1.0 };
     let black = palette[0];
     // Virtual column of each framebuffer column, computed once, and from it
@@ -423,7 +501,15 @@ mod tests {
                 assert_eq!(img.rgb[y * 320 + x], want, "({x},{y})");
             }
         }
-        // Scaled 2-D layer: at 640x400 each virtual pixel is a 2x2 block.
+        // id at 640x400: the same dither on the framebuffer's own pixels.
+        let mut big = Image::new(640, 400, keep);
+        fade_screen(&mut big, &pal);
+        for &(x, y) in &[(0, 0), (1, 1), (4, 2), (6, 3), (2, 0), (0, 2), (639, 399)] {
+            let want = if x & 3 == (y & 1) << 1 { keep } else { pal[0] };
+            assert_eq!(big.rgb[y * 640 + x], want, "({x},{y})");
+        }
+        // The "scaled 2-D" extra at 640x400: each virtual pixel a 2x2 block.
+        let _extra = Scaled2dGuard::set(true);
         let mut big = Image::new(640, 400, keep);
         fade_screen(&mut big, &pal);
         for &(x, y) in &[(0, 0), (1, 1), (4, 2), (5, 3), (2, 0), (0, 2), (639, 399)] {
@@ -597,9 +683,13 @@ mod tests {
     fn fade_screen_matches_the_per_pixel_dither_at_any_scale() {
         let mut pal = ramp_palette();
         pal[0] = [1, 2, 3];
-        for &(w, h) in &[(320, 200), (333, 211), (400, 300), (960, 600), (1120, 700), (1280, 800), (7, 3)] {
+        for (scaled, &(w, h)) in [false, true]
+            .into_iter()
+            .flat_map(|e| [(320, 200), (333, 211), (400, 300), (960, 600), (1120, 700), (1280, 800), (7, 3)].iter().map(move |r| (e, r)))
+        {
+            let _extra = Scaled2dGuard::set(scaled);
             let under: Vec<[u8; 3]> = bytes(w as u32, w * h).iter().map(|&b| [b, 9, 9]).collect();
-            let scale = (w as f32 / MENU_VIRT_W).min(h as f32 / MENU_VIRT_H);
+            let scale = if scaled { (w as f32 / MENU_VIRT_W).min(h as f32 / MENU_VIRT_H).max(1.0) } else { 1.0 };
             let inv = 1.0 / scale;
             let mut want = under.clone();
             for y in 0..h {
@@ -612,7 +702,7 @@ mod tests {
             }
             let mut got = Image { w, h, rgb: under };
             fade_screen(&mut got, &pal);
-            assert!(got.rgb == want, "{w}x{h}");
+            assert!(got.rgb == want, "{w}x{h} scaled {scaled}");
         }
     }
 
@@ -621,11 +711,12 @@ mod tests {
         let pal = ramp_palette();
         let tile = test_backtile();
         let odd = crate::wad::Qpic { width: 13, height: 7, data: bytes(3, 13 * 7) };
-        for t in [&tile, &odd] {
+        for (scaled, t) in [(false, &tile), (false, &odd), (true, &tile), (true, &odd)] {
+            let _extra = Scaled2dGuard::set(scaled);
             for &(w, h) in &[(320, 200), (400, 300), (640, 400), (1120, 700), (1280, 800), (333, 211)] {
                 for &(x, y, rw, rh) in &[(0, 0, w, h), (5, 7, w / 3, h / 2), (w - 9, h - 4, 40, 40), (0, h / 2, w, 1)] {
                     let mut want = Image::new(w, h, [7, 7, 7]);
-                    let inv = 1.0 / (w as f32 / HUD_VIRT_W);
+                    let inv = if scaled { 1.0 / (w as f32 / HUD_VIRT_W) } else { 1.0 };
                     let (tw, th) = (t.width as usize, t.height as usize);
                     for py in y..(y + rh).min(h) {
                         for px in x..(x + rw).min(w) {
@@ -655,9 +746,15 @@ mod tests {
         assert_eq!(img.rgb[79 * 320 + 169], at(169, 79));
         assert_eq!(img.rgb[29 * 320 + 70], [7, 7, 7], "outside the rect untouched");
         assert_eq!(img.rgb[30 * 320 + 170], [7, 7, 7], "outside the rect untouched");
-        // Scale 2 (640 wide): each texel covers 2x2 pixels, like the rest of
-        // the scaled 2-D layer.
+        // 640 wide: id tiles every mode at the tile's own size ...
         let mut big = Image::new(640, 400, [7, 7, 7]);
+        draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400, &pal);
+        for &(x, y) in &[(0, 0), (1, 1), (129, 3), (300, 250), (639, 399)] {
+            assert_eq!(big.rgb[y * 640 + x], at(x, y), "({x},{y})");
+        }
+        // ... the "scaled 2-D" extra makes each texel 2x2 pixels, like the
+        // rest of its 2-D layer.
+        let _extra = Scaled2dGuard::set(true);
         draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400, &pal);
         for &(x, y) in &[(0, 0), (1, 1), (129, 3), (300, 250), (639, 399)] {
             assert_eq!(big.rgb[y * 640 + x], at(x / 2, y / 2), "({x},{y})");
