@@ -732,6 +732,14 @@ C followed and the test are in the commit message.
   `sliver_triangles_wrap_like_the_c_ints`, `float_to_int_is_x86s_not_rusts_saturation`;
   the review's stress harness (4000 random gun/entity renders with overflow
   checks) panicked at iteration 3068 before, none now. Goldens unchanged.
+- ✅ **`intsintable` is not wrapped** (LOW) — `D_WarpScreen` reads
+  `turb = intsintable + phase` at `turb[u]`/`turb[v]` over the whole screen, and
+  `R_InitTurb`'s `3.14159` makes the table non-periodic: at i = 128, 256, ...
+  the entry is 2 where a wrapped cycle gives 3. `apply_warp` indexed `& 127`;
+  now it reads the unwrapped table (`intsintable`). Tests
+  `intsintable_is_r_initturbs_unwrapped_table`,
+  `warp_reads_intsintable_past_the_first_cycle`. (Turbulent8's `sintable` was
+  already unwrapped, fid1.)
 
 ## LOW (27)
 
