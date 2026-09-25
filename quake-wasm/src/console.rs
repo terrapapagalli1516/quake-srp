@@ -11,10 +11,19 @@ use crate::host_cmd::execute_console_command;
 /// Toggle the drop-down console (the `~` / backtick key, Quake's
 /// `Con_ToggleConsole_f`). Opening slides the panel down over whatever is
 /// playing; closing slides it back. While open the console owns the keyboard.
+/// Disconnected, with the console covering the screen, it brings up the main
+/// menu instead (`M_Menu_Main_f`: there is no game to go back to).
 #[no_mangle]
 pub extern "C" fn console_toggle() {
     ensure_app(|a| {
-        a.console.toggle();
+        if a.disconnected && (a.console.open || !a.menu.visible) {
+            if a.console.open {
+                a.console.toggle();
+            }
+            a.menu.open();
+        } else {
+            a.console.toggle();
+        }
         // Con_ToggleConsole_f: `memset (con_times, 0, sizeof(con_times))` —
         // the notify lines are gone after the console goes down or up.
         if let Some(w) = a.walk.as_mut() {
@@ -28,14 +37,11 @@ pub extern "C" fn console_toggle() {
 
 /// `1` when the console is open (capturing the keyboard), else `0`. The page
 /// reads this to route keys to the console instead of the game / menu.
+/// Disconnected, the console is forced up and takes the typing unless the
+/// menu is up (keys.c: `key_game` with `con_forcedup` goes to `Key_Console`).
 #[no_mangle]
 pub extern "C" fn console_visible() -> i32 {
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| a.console.open as i32)
-            .unwrap_or(0)
-    })
+    APP.with(|c| c.borrow().as_ref().map(|a| a.console_has_keys() as i32).unwrap_or(0))
 }
 
 /// Append one typed character to the console input line. `code` is a Unicode
@@ -45,7 +51,7 @@ pub extern "C" fn console_visible() -> i32 {
 #[no_mangle]
 pub extern "C" fn console_char(code: u32) {
     ensure_app(|a| {
-        if !a.console.open {
+        if !a.console_has_keys() {
             return;
         }
         // Reject invalid scalar values; `putchar` further filters control chars
@@ -61,7 +67,7 @@ pub extern "C" fn console_char(code: u32) {
 #[no_mangle]
 pub extern "C" fn console_backspace() {
     ensure_app(|a| {
-        if a.console.open {
+        if a.console_has_keys() {
             a.console.backspace();
         }
     });
@@ -77,7 +83,7 @@ pub extern "C" fn console_enter() {
     let line = APP.with(|c| {
         c.borrow_mut()
             .as_mut()
-            .filter(|a| a.console.open)
+            .filter(|a| a.console_has_keys())
             .and_then(|a| a.console.take_input())
     });
     if let Some(line) = line {

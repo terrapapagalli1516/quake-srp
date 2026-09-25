@@ -107,8 +107,7 @@ fn new_game() {
     {
         if let Some(nw) = build_walk_map(render::NEW_GAME_MAP) {
             ensure_app(|a| {
-                a.walk = Some(nw);
-                a.mode = 0;
+                a.start_game(nw);
                 // Reset the menu's NAVIGATION and leave it closed. The player's
                 // options and key rebinds SURVIVE New Game: WinQuake's
                 // M_SinglePlayer "New Game" just runs `map start` — cvars and
@@ -133,6 +132,12 @@ pub extern "C" fn menu_cancel() {
     ensure_app(|a| {
         if a.menu.visible {
             let _ = a.menu.cancel();
+            // M_Main_Key K_ESCAPE: leaving the menu with nothing playing
+            // resumes the demo loop (`if (cls.demonum != -1 &&
+            // !cls.demoplayback && cls.state != ca_connected) CL_NextDemo ();`).
+            if !a.menu.visible && a.disconnected {
+                crate::cl_demo::cl_next_demo(a);
+            }
         } else {
             a.menu.open();
         }

@@ -1423,6 +1423,41 @@ being moved into `quake-rs/src/client/`):
   10000 units away on the same key): the hum no longer starts (the old page
   fails), and alone it does (the control).
 
+## Demo commands, timedemo, pause (2026-09-25, branch `quake/timedemo`)
+
+Quake's own demo and pause commands (CENSUS L12's pause half), against
+`cl_demo.c`, `cl_main.c`, `host.c` and `host_cmd.c`.
+
+- ✅ **`playdemo`, `stopdemo`, `startdemos`, `demos`, and the attract loop
+  through them.** `cls`'s demo half is host state (`quake-wasm` `App::cls`:
+  `demos[8]`, `demonum`) and the commands are id's: `CL_PlayDemo_f`
+  (`CL_Disconnect`, `COM_DefaultExtension` ".dem", "Playing demo from %s.",
+  "ERROR: couldn't open." + `demonum = -1`; the usage line "play <demoname> :
+  plays a demo" is the C's), `Host_Stopdemo_f`, `Host_Startdemos_f` ("%i
+  demo(s) in loop", "Max %i demos in demoloop", 15-character names, starts the
+  loop only with nothing running and the loop not off, else switches it off),
+  `Host_Demos_f` (off: back at the second slot). The boots run quake.rc's
+  `startdemos demo1 demo2 demo3`, and a demo's end is `Host_EndGame`:
+  `CL_NextDemo` (wrap after the last listed slot) or, outside the loop,
+  `CL_Disconnect`. `map`, `load` and New Game switch the loop off
+  (`cls.demonum = -1` in `Host_Map_f`/`Host_Loadgame_f`) and disconnect the
+  demo. The attract loop cycles demo1 → demo2 → demo3 as before (F15), now
+  printing id's console lines as it goes.
+- ✅ **Disconnected** (`cls.state == ca_disconnected`: after `stopdemo`, a demo
+  ending outside the loop, a `playdemo` that cannot open its file): nothing
+  plays and the console covers the screen (`con_forcedup`: full height at
+  once, its input line drawn, typing goes to it — `Key_Event`'s `key_game &&
+  con_forcedup`), the menu over it; the console toggle brings up the main
+  menu (`Con_ToggleConsole_f` with no connection), and leaving the main menu
+  resumes the loop (`M_Main_Key`'s `CL_NextDemo`). Before this there was no
+  such state: the port always had a level or a demo.
+- Kept, not id's: **the menu does not stop the demo loop.** `M_Menu_Main_f`
+  saves `cls.demonum` and sets -1 while the menu is up, so in id's Quake the
+  demo playing when the menu opened is the last: at its end the client
+  disconnects and the menu sits over the console until it is closed. The
+  port boots with the menu open over the attract loop and keeps cycling
+  behind it (F15, left as it was).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

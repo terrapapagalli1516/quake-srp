@@ -32,13 +32,47 @@ use super::{
 /// in turn (`CL_NextDemo` on each demo's `svc_disconnect`), wrapping to the first.
 pub const DEMOS: [&str; 3] = ["demo1.dem", "demo2.dem", "demo3.dem"];
 
+/// `MAX_DEMOS` (client.h): the most demos `startdemos` keeps in its loop.
+pub const MAX_DEMOS: usize = 8;
+
+/// `COM_DefaultExtension` (common.c): `path` with `extension` (".dem")
+/// appended unless its last path component already has a `.EXT` — `demo1`
+/// becomes `demo1.dem`. (Like the C, the first character is never looked at.)
+pub fn default_extension(path: &str, extension: &str) -> String {
+    let b = path.as_bytes();
+    let mut i = b.len();
+    while i > 1 {
+        i -= 1;
+        match b[i] {
+            b'/' => break,
+            b'.' => return path.to_string(),
+            _ => {}
+        }
+    }
+    format!("{path}{extension}")
+}
+
 /// `playdemo` of [`DEMOS`]`[demonum % 3]` from `pak` (`CL_PlayDemo_f`): the
 /// demo's sounds start through `sound` ([`SoundCall::StopAll`], then the
 /// signon's static loops).
 pub fn build_demo_n(pak: Pak, demonum: usize, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
     let demonum = demonum % DEMOS.len();
+    let mut d = build_demo(pak, DEMOS[demonum], sound)?;
+    d.demonum = demonum;
+    Some(d)
+}
+
+/// `playdemo <name>`'s load (`CL_PlayDemo_f`, and the first `CL_GetMessage`s
+/// that read its signon): the demo file `name` (with its extension, as
+/// `COM_FOpenFile` takes it; [`default_extension`]) from `pak`, its world
+/// and models, played back smoothly — interpolated between the recorded
+/// messages as `CL_RelinkEntities` does ([`demo_frame`]). `None` when the
+/// file is missing or unplayable (the C prints "ERROR: couldn't open.").
+/// The demo's sounds start through `sound` ([`SoundCall::StopAll`], then the
+/// signon's static loops).
+pub fn build_demo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
     let read = |n: &str| pak.read_file(n).ok().flatten();
-    let demo_bytes = read(DEMOS[demonum])?;
+    let demo_bytes = read(name)?;
     let demo = parse_demo(&demo_bytes).ok()?;
     let map = demo.map_name()?.to_string();
     let bsp = Bsp::parse(&read(&map)?).ok()?;
@@ -109,7 +143,6 @@ pub fn build_demo_n(pak: Pak, demonum: usize, sound: &mut Vec<SoundCall>) -> Opt
     d.pic_complete = pic_complete;
     d.pic_inter = pic_inter;
     d.pic_finale = pic_finale;
-    d.demonum = demonum;
     Some(d)
 }
 
@@ -662,3 +695,19 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     ClientFrame { image: img, cshifts: shifts, sound }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_extension_is_com_default_extension() {
+        assert_eq!(default_extension("demo1", ".dem"), "demo1.dem");
+        assert_eq!(default_extension("demo1.dem", ".dem"), "demo1.dem");
+        assert_eq!(default_extension("mine.old", ".dem"), "mine.old");
+        assert_eq!(default_extension("a.b/demo2", ".dem"), "a.b/demo2.dem");
+        assert_eq!(default_extension("", ".dem"), ".dem");
+        // The C stops at the first character without testing it.
+        assert_eq!(default_extension(".x", ".dem"), ".x.dem");
+    }
+}

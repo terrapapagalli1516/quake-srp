@@ -9,11 +9,10 @@ use quake_rs::render::{self, build_gamma_table};
 use quake_rs::client::cl_input::derive_key_move;
 use quake_rs::client::host::{host_filter_time, HOST_FRAMETIME_MAX, HOST_FRAMETIME_MIN};
 
-use crate::app::{build_demo_n, ensure_app};
+use crate::app::ensure_app;
 use crate::bench::{self, Phase};
-use crate::cl_demo::step_demo;
+use crate::cl_demo::{host_end_game, step_demo};
 use crate::cl_walk::step_walk;
-use crate::snd_dma::{SND_QUEUE, STOP_SND_QUEUE};
 
 /// [`host_filter_time`], or — with the `wasm_uncapped` extra on (a departure,
 /// opt-in via Options > Web extras, default off) — the same frame without the
@@ -87,6 +86,17 @@ fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], ramps: Option<&[[u8; 256]; 3]>) 
     }
 }
 
+/// `SCR_SetUpToDrawConsole` + `SCR_DrawConsole`: slide the console (`dt`,
+/// `host_frametime`) and draw it over `img` at its height.
+fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f32) {
+    a.console.slide(dt, a.render_w, a.render_h);
+    if a.console.current() > 0.0 {
+        if let (Some(img), Some(palette)) = (img, a.active_palette()) {
+            render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
+        }
+    }
+}
+
 /// One call per display refresh: `dt` is the raw wall-clock time since the
 /// previous call. Like `Host_Frame`, it all goes to `realtime`, then
 /// [`host_filter_time`] decides whether a frame runs: at most 72 per second
@@ -148,6 +158,13 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // while gameplay is gated.
         let km = derive_key_move(&a.menu, &a.keys_held);
         let viewsize = a.menu.viewsize();
+        // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
+        // last frame, CL_NextDemo plays the next of the `startdemos` loop
+        // (quake.rc: demo1 demo2 demo3) — or, outside the loop, the client
+        // disconnects. CL_PlayDemo_f's CL_Disconnect stops every sound first.
+        if a.demoplayback() && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
+            host_end_game(a);
+        }
         // The renderer's options are built inside the client frame, under this
         // borrow: hand it the menu's Web extras (wasm_exactpersp) first.
         crate::extras::set_frame_extras(a.menu.extras());
@@ -162,22 +179,6 @@ pub extern "C" fn step(dt: f32) -> i32 {
             // +showscores only reaches the game while it owns the keyboard.
             d.show_scores = km.showscores && !gate_gameplay;
         }
-        // Host_EndGame on the demo's svc_disconnect -> CL_NextDemo: once a demo
-        // has shown its last frame, the next of quake.rc's `startdemos demo1
-        // demo2 demo3` starts (a demo that cannot be built leaves this one to
-        // loop, step_demo's fallback). CL_PlayDemo_f's CL_Disconnect stops
-        // every sound first.
-        if a.mode == 1 && dt > 0.0 {
-            let next = a.demo.as_ref().filter(|d| d.at_end()).map(|d| d.demonum + 1);
-            if let Some(next) = next.and_then(build_demo_n) {
-                SND_QUEUE.with(|q| q.borrow_mut().clear());
-                STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
-                let mut next = next;
-                next.viewsize = viewsize;
-                next.show_scores = km.showscores && !gate_gameplay;
-                a.demo = Some(next);
-            }
-        }
         // Each mode returns its frame plus its colour shifts (`cl.cshifts`, in
         // order): the software V_UpdatePalette shift tints the WHOLE screen, so it
         // is applied as the frame is packed, after the HUD/menu/console, not just
@@ -190,6 +191,11 @@ pub extern "C" fn step(dt: f32) -> i32 {
         };
         let (mut img, cshifts) = match frame {
             Some((image, cshifts)) => (Some(image), cshifts),
+            // Disconnected (con_forcedup): no view — V_RenderView draws
+            // nothing and the console covers the screen, the menu over it.
+            None if a.disconnected && a.palette.is_some() => {
+                (Some(render::Image::new(w, h, [0, 0, 0])), Vec::new())
+            }
             None => (None, Vec::new()),
         };
         // Con_Print: the frame's prints (svc_print) reach the console
@@ -233,6 +239,14 @@ pub extern "C" fn step(dt: f32) -> i32 {
             }
         }
 
+        // con_forcedup: with nothing playing the console covers the screen,
+        // and SCR_UpdateScreen draws it (SCR_DrawConsole) before M_Draw puts
+        // the menu over it.
+        a.console.forced_up = a.disconnected;
+        if a.console.forced_up {
+            console_layer(a, img.as_mut(), dt);
+        }
+
         // The main menu overlays WHATEVER is playing (walk OR the attract demo).
         // Drawn here in the dispatcher, after the active mode rendered its frame
         // and BEFORE packing to the framebuffer. Mirroring Quake's key_dest model
@@ -269,20 +283,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // active mode's palette and realtime for the input cursor flash
         // (Con_DrawInput). SCR_SetUpToDrawConsole slides it first: down to half
         // the screen while open, back up when closed (drawn until it is gone).
-        a.console.slide(dt, w, h);
-        if a.console.current() > 0.0 {
-            if let Some(img) = img.as_mut() {
-                if let Some(palette) = a.active_palette() {
-                    render::draw_console(
-                        img,
-                        &a.console,
-                        a.conback.as_ref(),
-                        a.conchars.as_ref(),
-                        palette,
-                        a.realtime,
-                    );
-                }
-            }
+        if !a.console.forced_up {
+            console_layer(a, img.as_mut(), dt);
         }
         bench::lap(Phase::Console);
 

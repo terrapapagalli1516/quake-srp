@@ -60,7 +60,8 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
-  `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
+  `fly`/`give`/`impulse`/`map`/`kill`/`clear` and id's demo commands `playdemo`/`stopdemo`/`startdemos`/`demos`.
+  Boots into the menu **over the playing attract demo** (quake.rc's `startdemos demo1 demo2 demo3`).
 - **Web extras** — the port is id's Quake by default (Always Run aside). Its departures are opt-in, all
   off by default, on one page: **Options > Web extras**, drawn like id's Options page, each also a
   `wasm_*` console variable (listed in `quake-wasm/src/extras.rs`): an **uncapped frame rate** (no
