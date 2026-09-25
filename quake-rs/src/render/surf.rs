@@ -643,12 +643,13 @@ pub(super) fn face_lightmap_world_cached<'a>(
 mod tests {
     use super::*;
     use crate::dlight::DynamicLight;
-    use crate::render::{demo_room, render_scene_ext, Camera, ExternalBModel};
+    use crate::render::{demo_room, render_scene_ext, Camera};
     use crate::render::fixtures::{
         lightmapped_demo_room, one_face_bsp_zplane, reset_render_caches, two_style_face_bsp,
     };
     use crate::render::light::{ALL_DLIGHT_BITS, NEUTRAL_LIGHTSTYLE_SCALES};
     use crate::render::stats::{render_stats_begin, render_stats_end};
+    use crate::render::world::ExternalBModel;
 
     #[test]
     fn texture_animation_selects_frame_by_time() {
