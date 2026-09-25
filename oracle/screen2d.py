@@ -130,7 +130,9 @@ SCENARIOS: dict[str, list] = {
                   ("key", "DOWNARROW"), ("frames", 1), ("shot", "main_row2")],
     "menu_sp": [("frames", 1), ("key", "ESCAPE"), ("key", "ENTER"), ("frames", 1), ("shot", "sp"),
                 ("key", "DOWNARROW"), ("key", "ENTER"), ("frames", 1), ("shot", "load"),
-                ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "ENTER"), ("frames", 1), ("shot", "save")],
+                ("key", "ESCAPE"), ("frames", 1), ("shot", "sp_again")],
+    "menu_save": [("frames", 1), ("key", "ESCAPE"), ("key", "ENTER"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
+                  ("key", "ENTER"), ("frames", 1), ("shot", "save")],
     "menu_mp": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "ENTER"), ("frames", 1),
                 ("shot", "mp")],
     "menu_options": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
@@ -149,9 +151,12 @@ SCENARIOS: dict[str, list] = {
 
 
 def c_lines(steps, out: Path, name: str) -> list[str]:
-    # cl_forwardspeed/cl_backspeed 400: Always Run, the port's one default departure
+    # cl_forwardspeed/cl_backspeed 400: Always Run, the port's one sanctioned default
+    # departure; the WASD binds are the port's default layout (keys.rs), so the
+    # Customize screen compares drawing, not bindings
     lines = ["oracle_exit 0", "oracle_stage 1", f"oracle_blank {BLANK}", "crosshair 0", "viewsize 100",
-             "cl_forwardspeed 400", "cl_backspeed 400",
+             "cl_forwardspeed 400", "cl_backspeed 400", "bind w +forward", "bind s +back",
+             "bind a +moveleft", "bind d +moveright",
              "map e1m1"] + ["wait"] * 20
     for st in steps:
         op, args = st[0], st[1:]
