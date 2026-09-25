@@ -155,13 +155,18 @@ fn census_e1m8_has_low_gravity() {
 
 /// CENSUS F5 (MED). External brush-model items (`maps/b_*.bsp`) get the
 /// Mod_LoadSubmodels pixel spread ONCE: b_explob.bsp's raw (1,1,1)-(31,31,63)
-/// becomes (0,0,0)-(32,32,64). The port spreads twice (Bsp::parse, then the
-/// server's precache_model), so the boxes are 34 units wide — traces use hull2
-/// instead of hull1 — and droptofloor fails near walls/monsters: e1m1 loses the
-/// 10-health box at (1224,2464,-304) ("Bonus item fell out of level"; id's
-/// oracle keeps it), the e1m1 explosive box floats 2 units up.
+/// becomes (0,0,0)-(32,32,64). The port spread twice (Bsp::parse, then the
+/// server's precache_model), so the explosive box was 34 units wide — traces
+/// used hull2 instead of hull1 — and floated 2 units up. Two health boxes
+/// (setsize '0 0 0' '32 32 56', not affected by the spread) vanished for a
+/// second reason: PlaceItem's droptofloor started "inside" a monster whose box
+/// they only touch — e1m1's 10-health box at (1224,2464) against a grunt,
+/// e1m6's 25-health box at (-672,832) against an ogre — where id's box hull is
+/// half-open (a point on a max face is outside), so id keeps both ("Bonus item
+/// fell out of level" never prints in id's log). Positions from id's oracle
+/// edict dump (sv.time 1.7): box z -207.969, the health boxes at z -303.969
+/// and 0.031 (droptofloor stops DIST_EPSILON above the floor).
 #[test]
-#[ignore = "census F5: b_*.bsp item bounds are pixel-spread twice"]
 fn census_bmodel_item_bounds_are_spread_once() {
     let w = build_walk().expect("e1m1 boots");
     let bx = find(&w, |w, e| class(w, e) == "misc_explobox").expect("e1m1 has an explosive box");
@@ -169,14 +174,19 @@ fn census_bmodel_item_bounds_are_spread_once() {
     assert_eq!(w.server.vm.ent_get_vector(bx, "maxs"), [32.0, 32.0, 64.0]);
     assert_eq!(
         w.server.vm.ent_get_vector(bx, "origin")[2],
-        -208.0,
+        -207.96875,
         "droptofloor settles the box on the floor, as in id's game"
     );
-    let health = find(&w, |w, e| {
-        let o = w.server.vm.ent_get_vector(e, "origin");
-        class(w, e) == "item_health" && (o[0] - 1224.0).abs() < 1.0 && (o[1] - 2464.0).abs() < 1.0
-    });
-    assert!(health.is_some(), "the 10-health box at (1224, 2464) survives PlaceItem's droptofloor");
+    let health_at = |w: &Walk, x: f32, y: f32| {
+        find(w, |w, e| {
+            let o = w.server.vm.ent_get_vector(e, "origin");
+            class(w, e) == "item_health" && (o[0] - x).abs() < 1.0 && (o[1] - y).abs() < 1.0
+        })
+        .map(|e| w.server.vm.ent_get_vector(e, "origin")[2])
+    };
+    assert_eq!(health_at(&w, 1224.0, 2464.0), Some(-303.96875), "e1m1's 10-health box beside the grunt");
+    let w = build_walk_map("maps/e1m6.bsp").expect("e1m6 boots");
+    assert_eq!(health_at(&w, -672.0, 832.0), Some(0.03125), "e1m6's 25-health box beside the ogre");
 }
 
 /// CENSUS F8 (MED). The level start relinks every entity with touches: the

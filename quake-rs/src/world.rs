@@ -650,6 +650,14 @@ pub fn trace_world(bsp: &Bsp, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) ->
 /// using a `DIST_EPSILON` pullback on the entry plane (matching the engine's
 /// near-side bias so the mover stops just shy). Starting inside the box sets
 /// `startsolid` (and `allsolid`); a clear pass returns `fraction == 1`.
+///
+/// The box is HALF-OPEN, `bmin <= p < bmax` on each axis, as the C box hull
+/// is: `SV_InitBoxHull` puts CONTENTS_EMPTY on the front (`d >= 0`) of each
+/// max plane and on the back (`d < 0`) of each min plane, so a point exactly
+/// on a max face is outside and one exactly on a min face is inside. Boxes
+/// that merely touch on the target's max side do not collide — e1m1's
+/// 10-health box dropped beside a grunt, e1m6's 25-health box beside an ogre,
+/// reach the floor as in id's game instead of "falling out of the level".
 pub fn clip_box(
     start: Vec3,
     end: Vec3,
@@ -697,12 +705,13 @@ pub fn clip_box(
     let mut inside = true;
 
     for i in 0..3 {
-        if start[i] < bmin[i] || start[i] > bmax[i] {
+        let outside = start[i] < bmin[i] || start[i] >= bmax[i]; // half-open
+        if outside {
             inside = false;
         }
         if d[i] == 0.0 {
             // Parallel to this slab: if outside it, the segment can never enter.
-            if start[i] < bmin[i] || start[i] > bmax[i] {
+            if outside {
                 return tr; // misses entirely -> clear
             }
             continue;
@@ -718,7 +727,10 @@ pub fn clip_box(
             std::mem::swap(&mut t1, &mut t2);
             sign = 1.0;
         }
-        if t1 > tenter {
+        // `t1 == 0` with no entry yet: the start sits exactly on a max face
+        // (outside, half-open) moving in; the C crosses that plane at once
+        // and stops the mover against it at fraction 0.
+        if t1 > tenter || (t1 == 0.0 && enter_axis < 0) {
             tenter = t1;
             enter_axis = i as i32;
             enter_sign = sign;
@@ -1413,6 +1425,45 @@ mod tests {
             [100.0, 0.0, 0.0],
         );
         assert!(tr2.startsolid && tr2.allsolid, "stays inside -> trapped (allsolid)");
+    }
+
+    #[test]
+    fn clip_box_is_half_open_like_the_c_box_hull() {
+        // SV_InitBoxHull: CONTENTS_EMPTY in front of each max plane (d >= 0),
+        // behind each min plane (d < 0). e1m1's 10-health box (0..32 x 0..32 x
+        // 0..56, dropping from z -298) beside a grunt at (1232, 2448) (-16..16):
+        // its y range starts exactly at the grunt's absmax.y 2464, so the drop is
+        // clear of the grunt (id keeps the box; the port used to start "inside").
+        let drop = |y: f32| {
+            clip_box(
+                [1224.0, y, -298.0],
+                [1224.0, y, -554.0],
+                [0.0, 0.0, 0.0],
+                [32.0, 32.0, 56.0],
+                [-16.0, -16.0, -24.0],
+                [16.0, 16.0, 40.0],
+                [1232.0, 2448.0, -280.0],
+            )
+        };
+        let tr = drop(2464.0);
+        assert!(!tr.startsolid && tr.fraction == 1.0, "touching the max face: no contact");
+        // Touching the MIN face (the box's y max == the grunt's absmin.y) is
+        // inside in the C, so it still starts solid.
+        let tr = drop(2432.0 - 32.0);
+        assert!(tr.startsolid, "touching the min face: inside");
+        // Starting exactly on a max face and moving in stops at once (the C
+        // crosses the max plane at fraction 0), rather than passing through.
+        let tr = clip_box(
+            [16.0, 0.0, 0.0],
+            [-100.0, 0.0, 0.0],
+            [0.0; 3],
+            [0.0; 3],
+            [-16.0; 3],
+            [16.0; 3],
+            [0.0; 3],
+        );
+        assert!(!tr.startsolid, "on the max face is outside");
+        assert_eq!((tr.fraction, tr.plane_normal), (0.0, [1.0, 0.0, 0.0]));
     }
 
     #[test]
