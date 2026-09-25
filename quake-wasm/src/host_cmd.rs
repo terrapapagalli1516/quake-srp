@@ -9,9 +9,9 @@ use quake_rs::particles::ParticleSystem;
 use quake_rs::progs::Progs;
 use quake_rs::server::Server;
 
+use crate::app::{build_walk_map, ensure_app, player_start, Walk};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
-use crate::app::{build_walk_map, ensure_app, player_start, Walk};
 
 // --- console command execution -------------------------------------------
 
@@ -511,13 +511,13 @@ pub(crate) fn try_restart(w: &mut Walk) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
-    use crate::console::{console_toggle, console_visible};
-    use crate::menu::menu_cancel;
-    use crate::input::{key_down, key_up, set_attack};
-    use crate::vid::{set_resolution, viewsize};
-    use crate::host::step;
     use crate::app::{boot, APP};
+    use crate::console::{console_toggle, console_visible};
+    use crate::host::step;
+    use crate::input::{key_down, key_up, set_attack};
+    use crate::menu::menu_cancel;
+    use crate::test_util::*;
+    use crate::vid::{set_resolution, viewsize};
 
     #[test]
     fn sizeup_sizedown_console_commands_and_default_binds() {

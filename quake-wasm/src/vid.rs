@@ -119,11 +119,11 @@ pub(crate) fn backtile_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
-    use crate::console::console_toggle;
-    use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
-    use crate::host::step;
     use crate::app::boot;
+    use crate::console::console_toggle;
+    use crate::host::step;
+    use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
+    use crate::test_util::*;
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
 

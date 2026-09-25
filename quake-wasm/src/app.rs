@@ -21,10 +21,10 @@ use quake_rs::server::Server;
 use quake_rs::tent::{BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 
+use crate::PAK;
 use crate::input::KeyMove;
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP_SND_QUEUE};
 use crate::vid::{DEFAULT_H, DEFAULT_W};
-use crate::PAK;
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
 const DEMO_FILE: &str = "demo1.dem";
@@ -895,13 +895,13 @@ pub extern "C" fn in_walk_mode() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
     use crate::cl_demo::step_demo;
     use crate::host::step;
     use crate::input::{key_down, key_up};
     use crate::menu::{
         menu_bind_key, menu_cancel, menu_down, menu_right, menu_select, menu_up, menu_visible,
     };
+    use crate::test_util::*;
 
     #[test]
     fn options_and_rebinds_survive_reboot_and_new_game() {

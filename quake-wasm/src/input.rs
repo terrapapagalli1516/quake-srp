@@ -399,11 +399,11 @@ pub extern "C" fn look(dyaw: f32, dpitch: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
+    use crate::app::boot;
+    use crate::host::step;
     use crate::menu::{menu_cancel, menu_down, menu_right, menu_select, menu_visible};
     use crate::snd_dma::{listener_x, listener_y};
-    use crate::host::step;
-    use crate::app::boot;
+    use crate::test_util::*;
 
     #[test]
     fn pitch_clamp_is_asymmetric_like_cl_adjustangles() {

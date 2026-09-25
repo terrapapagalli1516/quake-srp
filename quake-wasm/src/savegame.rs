@@ -10,9 +10,9 @@ use quake_rs::progs::Progs;
 use quake_rs::render::Menu;
 use quake_rs::server::Server;
 
-use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
-use crate::input::clamp_pitch;
 use crate::app::{assemble_walk, ensure_app, pak, Walk};
+use crate::input::clamp_pitch;
+use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
 
 // ---------------------------------------------------------------------------
 // Savegame persistence bridge (page-owned localStorage)
@@ -375,12 +375,12 @@ fn build_walk_savegame(text: &str) -> Result<Walk, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
-    use crate::console::console_toggle;
-    use crate::input::{set_attack, set_move};
-    use crate::vid::set_resolution;
-    use crate::host::step;
     use crate::app::{boot, boot_attract, APP};
+    use crate::console::console_toggle;
+    use crate::host::step;
+    use crate::input::{set_attack, set_move};
+    use crate::test_util::*;
+    use crate::vid::set_resolution;
 
     // ------------------------------------------------------------ save/load
 

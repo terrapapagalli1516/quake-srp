@@ -5,9 +5,9 @@
 
 use quake_rs::render::{self, MenuAction};
 
+use crate::app::{build_walk_map, ensure_app, APP};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::vid::clamp_resolution;
-use crate::app::{build_walk_map, ensure_app, APP};
 
 // --- main menu: keyboard navigation exports (ArrowUp/Down, Enter, Escape) ---
 
@@ -265,11 +265,11 @@ pub extern "C" fn menu_visible() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
-    use crate::input::{key_down, key_up};
-    use crate::vid::{height, set_resolution, width};
-    use crate::host::step;
     use crate::app::{boot, boot_attract};
+    use crate::host::step;
+    use crate::input::{key_down, key_up};
+    use crate::test_util::*;
+    use crate::vid::{height, set_resolution, width};
 
     #[test]
     fn video_menu_applies_a_preset_through_the_resolution_plumbing() {

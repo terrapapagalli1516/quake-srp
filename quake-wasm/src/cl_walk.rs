@@ -11,6 +11,7 @@ use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::server::UserCmd;
 use quake_rs::tent::BeamModel;
 
+use crate::app::{color_for_name, Walk};
 use crate::bench::{self, Phase};
 use crate::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use crate::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
@@ -19,7 +20,6 @@ use crate::input::{
 };
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
-use crate::app::{color_for_name, Walk};
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
 /// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
@@ -874,12 +874,12 @@ pub(crate) fn step_walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
-    use crate::console::{console_toggle, console_visible};
-    use crate::menu::menu_select;
-    use crate::vid::set_resolution;
-    use crate::host::step;
     use crate::app::{boot, boot_attract, build_walk, APP};
+    use crate::console::{console_toggle, console_visible};
+    use crate::host::step;
+    use crate::menu::menu_select;
+    use crate::test_util::*;
+    use crate::vid::set_resolution;
 
     /// Regression for the one-time texture/lighting "pops" in the first second of
     /// live play (two distinct root causes, both whole-view shimmers):

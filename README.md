@@ -28,7 +28,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 | Path | What |
 |------|------|
 | `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`. |
-| `quake-wasm/` | the `cdylib` browser shell (~5.4k lines incl. its e2e tests): compiles the engine to `wasm32`, owns the walk/demo/menu/console front-end state, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. |
+| `quake-wasm/` | the `cdylib` browser shell (~5.5k lines + ~3.9k of e2e tests): compiles the engine to `wasm32`, owns the walk/demo/menu/console front-end state, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. Modules are named after the id file they port the client/host side of (`host` = `Host_Frame`, `cl_walk`/`cl_demo`/`cl_tent`, `input`, `menu`, `console`, `host_cmd`, `savegame`, `snd_dma`, `vid`, plus `app` for the state and boots); `src/lib.rs` maps every export to its module. |
 | `web/` | the browser page (`index.html`) + headless-verify scripts (`verify_walk.py`, `verify_ambient.py`). |
 | `oracle/` | id's own WinQuake software renderer built headless from the C (null drivers, docker i386 build) + `compare.py`: renders the same view in both and diffs them pixel for pixel. See `oracle/README.md` for how to run it and the ranked fidelity findings. |
 | `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |

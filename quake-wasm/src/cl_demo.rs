@@ -8,12 +8,14 @@ use quake_rs::particles::ParticleSystem;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::tent::BeamModel;
 
+use crate::app::DemoPlay;
 use crate::bench::{self, Phase};
 use crate::cl_tent::spawn_temp_entity;
 use crate::host_cmd::IT_INVISIBILITY;
-use crate::snd_dma::{push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER};
+use crate::snd_dma::{
+    push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
+};
 use crate::vid::backtile_for;
-use crate::app::DemoPlay;
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
 /// exactly ONCE: a frame rendered across several steps (small `dt`) must not
@@ -574,18 +576,19 @@ pub(crate) fn step_demo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
     use quake_rs::demo::parse_demo;
     use quake_rs::mdl::Mdl;
     use quake_rs::particles::Lcg;
     use quake_rs::server::{SoundEvent, TempEntityEvent};
     use quake_rs::tent::Beams;
+
+    use crate::app::{build_demo, pak};
     use crate::snd_dma::{
         poll_sound, set_audio_ready, sound_channel, sound_entity, sound_is_view_entity,
         sound_volume, SND_QUEUE,
     };
+    use crate::test_util::*;
     use crate::vid::{DEFAULT_H, DEFAULT_W};
-    use crate::app::{build_demo, pak};
 
     #[test]
     fn step_demo_shows_the_last_frame_before_looping() {

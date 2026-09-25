@@ -727,13 +727,12 @@ pub extern "C" fn volume() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::*;
     use quake_rs::progs::Progs;
-    use quake_rs::server::Server;
-    use crate::menu::{menu_down, menu_select, menu_up};
-    use crate::app::{boot, boot_attract, boot_demo};
+    use quake_rs::server::{Server, SoundEvent};
 
-    use quake_rs::server::SoundEvent;
+    use crate::app::{boot, boot_attract, boot_demo};
+    use crate::menu::{menu_down, menu_select, menu_up};
+    use crate::test_util::*;
 
     fn ev(entity: i32, channel: i32, sample: &str, vol: f32) -> SoundEvent {
         SoundEvent {

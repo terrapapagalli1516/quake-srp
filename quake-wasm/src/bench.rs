@@ -5,7 +5,7 @@
 //! extra exports, no state. With the feature on, the module imports ONE
 //! function, `quake_bench.now_ms` (the page's `performance.now()`, supplied by
 //! the harness — the stock page instantiates with no imports, so the feature
-//! build is for the harness only), and [`crate::step`] laps a timer at each
+//! build is for the harness only), and [`crate::host::step`] laps a timer at each
 //! phase boundary of the frame:
 //!
 //! | phase    | what it covers (C analogue)                                        |
