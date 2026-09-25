@@ -1,26 +1,40 @@
 //! The game client — the part of Quake that in id's source is `cl_*.c`,
 //! `view.c` and the client half of `host.c`/`host_cmd.c`: it turns the local
 //! server's state (or a recorded demo's stream) into a finished screen and
-//! the calls a platform makes into its sound, video and console layers.
+//! the calls it makes into the platform's sound layer. The browser shell
+//! (quake-wasm) runs it for the page; `quaketool play` runs it natively.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //!
 //! ## Layout
 //!
-//! | module   | id counterpart | what |
-//! |----------|----------------|------|
-//! | [`cl_demo`] | cl_demo.c, cl_parse.c, view.c | `CL_PlayDemo_f`'s playback build, quake.rc's demo loop, [`cl_demo::demo_frame`]: the demo client frame |
-//! | [`cl_input`] | cl_input.c   | `KeyMove`: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
-//! | [`cl_main`] | cl_main.c, cl_parse.c, view.c, screen.c | [`cl_main::walk_frame`]: the live client frame |
-//! | [`cl_tent`] | cl_tent.c, r_part.c | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
-//! | [`host`] | host.c | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
-//! | [`host_cmd`] | host_cmd.c | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats |
-//! | [`view`] | view.c         | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times |
+//! | module       | id counterpart                    | what |
+//! |--------------|-----------------------------------|------|
+//! | this file    | client.h, host.c                  | the client state per mode — the live [`Walk`] (with the local server it drives) and the recorded [`DemoPlay`] — and what a frame takes and gives: [`Vid`], [`ClientFrame`], [`SoundCall`]; the frame-timer and view hooks |
+//! | [`cl_main`]  | cl_main.c, cl_parse.c, view.c, screen.c | [`cl_main::walk_frame`]: the live client frame — `CL_SendMove` into the server tick, the client side of `CL_ParseServerMessage`, `CL_RelinkEntities`, `V_CalcRefdef`, `SCR_UpdateScreen`'s view, blends and status bar |
+//! | [`cl_demo`]  | cl_demo.c, cl_parse.c, view.c     | `CL_PlayDemo_f`'s build, quake.rc's demo loop, [`cl_demo::demo_frame`]: the recorded stream rendered like live play |
+//! | [`cl_tent`]  | cl_tent.c, r_part.c               | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
+//! | [`cl_input`] | cl_input.c                        | [`cl_input::KeyMove`]: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
+//! | [`view`]     | view.c                            | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times (the renderer's half of view.c is `render`'s) |
+//! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
+//! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
 //!
-//! This file holds the client state — client.h's `client_state_t`, one per
-//! mode: the live [`Walk`] with the local server it drives, and the recorded
-//! [`DemoPlay`] — and what the client hands the platform: the calls it makes
-//! into the sound layer ([`SoundCall`]), and the frame timers ([`lap`]).
+//! ## What a frame takes and gives
+//!
+//! A frame — [`cl_main::walk_frame`] or [`cl_demo::demo_frame`] — takes the
+//! client state, the frame time (from [`host::host_filter_time`]), whether
+//! the game is paused behind the menu or console, and the [`Vid`] it draws
+//! (the mode, the display's aspect, the renderer extra). It returns a
+//! [`ClientFrame`]: the screen, `cl.cshifts` for the platform to present it
+//! through (after its menu and console), and the calls it made into the
+//! sound layer — [`SoundCall`]s, in call order: `S_StartSound` batches,
+//! `S_StopSound`, `S_StopAllSounds` and the `S_StaticSound` loops of a level
+//! change, and `S_Update`'s listener pose and ambient leaf. The level loads
+//! record the same calls into a caller's `Vec`. What else the host needs it
+//! reads off the state, as id's host reads `cl`: the printed text for its
+//! console ([`Walk::notify`]), `pending_sellscreen`, `intermission`. A
+//! platform may install frame timers ([`set_lap_hook`]) and a hook on the
+//! finished 3-D view ([`set_view_hook`]); none is installed by default.
 
 pub mod cl_demo;
 pub mod cl_input;
@@ -137,7 +151,7 @@ pub struct Walk {
     /// pointer-unlock started it; the view re-levels at `pitch_vel` deg/sec until
     /// it reaches 0 or mouse/keyboard look stops it (V_StopPitchDrift).
     pub pitch_drift: bool,
-    /// `cl.pitchvel` — the drift rate, seeded with [`V_CENTERSPEED`] and
+    /// `cl.pitchvel` — the drift rate, seeded with [`V_CENTERSPEED`](cl_input::V_CENTERSPEED) and
     /// accelerated by it each second while drifting (V_DriftPitch).
     pub pitch_vel: f32,
     /// Full-screen damage-flash intensity (Quake's `CSHIFT_DAMAGE` percent,
@@ -200,7 +214,7 @@ pub struct Walk {
     pub dlights: DynamicLights,
     /// The beam temp-entity slots (`cl_beams`): lightning bolts the drained
     /// `TE_LIGHTNING1/2/3` / `TE_BEAM` events refresh ([`Beams::parse_beam`])
-    /// and [`step_walk`] expands into bolt-model instances each frame
+    /// and [`walk_frame`](cl_main::walk_frame) expands into bolt-model instances each frame
     /// (`CL_UpdateTEnts`). Cleared on changelevel/restart (`CL_ClearState`).
     pub beams: Beams,
     /// Reused per-frame scratch for the expanded beam pieces (no per-frame
@@ -257,7 +271,7 @@ pub struct DemoPlay {
     /// stream: each frame's effects are spawned ONCE when playback advances onto
     /// it, then the pool is aged under gravity and drawn into the scene (sharing
     /// its z-buffer) — so the demo shows blood, gunshot puffs and explosions just
-    /// like [`step_walk`] does for live play.
+    /// like [`walk_frame`](cl_main::walk_frame) does for live play.
     pub particles: ParticleSystem,
     /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
     pub prng: Lcg,
@@ -317,7 +331,7 @@ pub struct DemoPlay {
     pub trail_org: HashMap<i32, [f32; 3]>,
     /// R_RocketTrail's `static int tracercount` for the demo's tracer trails.
     pub tracercount: u32,
-    /// Which of [`DEMOS`] this is (the next one follows it, CL_NextDemo).
+    /// Which of [`DEMOS`](cl_demo::DEMOS) this is (the next one follows it, CL_NextDemo).
     pub demonum: usize,
     /// `sb_showscores` (`+showscores`, Tab held): Sbar_Draw shows the solo
     /// scoreboard during playback too. Refreshed by `step` like `viewsize`.
@@ -417,7 +431,7 @@ pub fn spawn_view_angles(server: &Server, player: i32) -> (f32, f32) {
     (net_angle(a[1]), clamp_pitch(net_angle(a[0])))
 }
 
-/// Shared tail of the walk builders ([`build_walk_map`] / the savegame load
+/// Shared tail of the walk builders ([`build_walk_map`](host_cmd::build_walk_map) / the savegame load
 /// path): load the render-side assets (palette, gfx.wad, colormap, conchars,
 /// plaque pics) from the pak and assemble a fresh [`Walk`] around an
 /// already-built server. Every per-session field starts from its clean-slate

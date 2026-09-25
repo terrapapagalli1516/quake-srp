@@ -5,6 +5,28 @@ things stand" note — read it before continuing.
 
 ---
 
+## The game client moves into the engine (2026-09-25, branch `quake/client`)
+
+Structure only; no behaviour changed. The part of quake-wasm that is id's
+`cl_*.c`/`view.c`/client half of `host.c`/`host_cmd.c` is now
+`quake-rs/src/client/` (`mod.rs` Walk/DemoPlay/Vid/ClientFrame/SoundCall,
+`cl_main` walk_frame, `cl_demo` demo_frame + CL_PlayDemo_f, `cl_tent`,
+`cl_input` KeyMove, `view` V_ParseDamage, `host` Host_FilterTime, `host_cmd`
+level loads + cheats); ConNotify joined `quake_rs::console`, snd_dma.c's
+channel choice and static-loop gates `quake_rs::snd`. A client frame takes a
+`Vid` and returns a `ClientFrame { image, cshifts, sound }`: the sound calls
+(S_StartSound batches, S_StopSound, S_StopAllSounds, S_StaticSound,
+S_Update's listener + ambient leaf) are recorded in order instead of pushed
+into quake-wasm's thread-locals; quake-wasm's `snd_dma::play` carries them
+out. quake-wasm is the platform layer (exports, App, queues, localStorage,
+extras); its `step_walk`/`step_demo` keep their signatures and its e2e tests.
+Proof: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1
+--res 320x200,640x400` prints the browser's `bench.py --hash-every 30` table
+byte for byte. Frame hashes, ABI, goldens, simbench/census, tests (moved
+ones counted), clippy and the eight verify scripts unchanged.
+
+---
+
 ## Projection and spans (2026-09-25, branch `quake/w2b`)
 
 The 3-D view as DOS/Windows players saw it (details in AUDIT.md's section of

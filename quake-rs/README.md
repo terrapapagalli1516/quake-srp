@@ -59,8 +59,16 @@ ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.
 | Menus (main, single player, load/save, options, keys, video, help, quit) | `menu.c` | `menu` | ✅ |
 | Key numbers, names, default binds | `keys.c` | `keys` | ✅ |
 | Drop-down console, notify lines | `console.c` | `console` | ✅ |
+| Game client: the client state, the frame's output | `client.h`, `host.c` | `client` (`client/mod.rs`: `Walk`, `DemoPlay`, `Vid`, `ClientFrame`, `SoundCall`) | ✅ everything the browser runs, run natively by `quaketool play` (its frames hash identical to the browser's) |
+| ↳ the live client frame | `cl_main.c`, `cl_parse.c`, `view.c`, `screen.c` | `client::cl_main` | ✅ `walk_frame`: `CL_SendMove` into the server tick, the client side of `CL_ParseServerMessage`, `CL_RelinkEntities` (PVS-sent entities, efrag statics, trails, `EF_*` lights), `V_CalcRefdef`, `SCR_UpdateScreen`'s view, blends and status bar |
+| ↳ demo playback | `cl_demo.c`, `cl_parse.c`, `view.c` | `client::cl_demo` | ✅ `CL_PlayDemo_f`'s build, quake.rc's demo loop, `demo_frame` |
+| ↳ temp-entity effects, trail flags | `cl_tent.c`, `cl_main.c` | `client::cl_tent` | ✅ |
+| ↳ keyboard moves | `cl_input.c` | `client::cl_input` | ✅ `CL_BaseMove` / `CL_AdjustAngles` over the held keys and the binding table |
+| ↳ damage kick, bonus flash, item get-times | `view.c` | `client::view` | ✅ `V_ParseDamage`, `V_BonusFlash_f` |
+| ↳ the frame gate | `host.c` | `client::host` | ✅ `Host_FilterTime` |
+| ↳ level loads, cheats | `host_cmd.c` | `client::host_cmd` | ✅ `map`, changelevel, restart, a savegame's rebuild; god / noclip / fly / kill / give / impulse |
 | Particles + temp entities | `r_part.c`, `cl_tent.c` | `particles`, `tent`, `dlight` | ✅ trails/explosions/splashes + lightning-beam store and expansion |
-| Ambient sound | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server::msg` | ✅ `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap) + `PF_ambientsound` static loops + `GetWavinfo` cue-loop gate |
+| Sound control (what reaches the mixer) | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server::msg` | ✅ `S_StartSound`'s channel choice (`SND_PickChannel`'s override, the view-entity rule), `S_StaticSound`'s loop gates, `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap), `PF_ambientsound` static loops, `GetWavinfo` cue loops; the mixing is the platform's (the browser: Web Audio) |
 | Little-endian byte reader, error type | (replaces `LittleLong`/`Sys_Error`) | `read`, `error` | ✅ scaffold |
 
 The crate is **~39,000 lines of zero-dependency, `unsafe`-free Rust with 458 lib + 8 integration tests**
@@ -101,8 +109,9 @@ Run against id's freely-redistributable shareware `pak0.pak` (`quake106.zip` →
 
 The engine lib compiles to `wasm32-unknown-unknown` **unchanged** (`cargo build --lib --target wasm32-unknown-unknown`)
 — the payoff of zero dependencies + an all-in-memory API (`Pak::from_bytes`, loaders over `&[u8]`, the renderer's
-`Vec<[u8;3]>` framebuffer). The sibling `quake-wasm` crate is the `cdylib` shell (~5.4k lines incl. its e2e tests)
-that `include_bytes!`s the pak, owns the walk/demo/menu/console front-end state, and exports plain `extern "C"`
+`Vec<[u8;3]>` framebuffer). The sibling `quake-wasm` crate is the `cdylib` shell — the platform layer (~3.0k lines + ~5.4k of e2e tests)
+that `include_bytes!`s the pak, holds the host state (menu, console, framebuffer) around this crate's `client`, carries out
+the sound calls each client frame returns, and exports plain `extern "C"`
 functions — **no `wasm-bindgen`, no dependencies, and not a single `unsafe {}` block** (the only "unsafe" is the
 `#[no_mangle]` export attribute; the page reads the framebuffer out of linear memory itself, Rust only hands out
 `Vec::as_ptr()`). `web/index.html` boots it, runs a `requestAnimationFrame` loop blitting the framebuffer to a
@@ -190,6 +199,8 @@ quaketool demo <pak> <dem> <out> [stride]  # replay + render a recorded demo
 quaketool playtest <pak> <map> [out.ppm]   # spawn a player client, walk, report state
 quaketool simbench <pak> <map> [frames]    # benchmark the game-logic tick (no rendering)
 quaketool changelevel <pak> <map>          # drive a player through the exit; prove inventory carries
+quaketool play <pak> <workloads> [frames] [--res WxH,..] [--hash-every N] [--ppm PREFIX]
+                                           # run the browser's game client (quake_rs::client) natively
 ```
 
 `scene` doubles as the **golden-render harness** (`QUAKE_BENCH=<iters>` / `QUAKE_RES=WxH` /

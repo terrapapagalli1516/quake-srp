@@ -27,8 +27,8 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 
 | Path | What |
 |------|------|
-| `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`. |
-| `quake-wasm/` | the `cdylib` browser shell (~5.5k lines + ~3.9k of e2e tests): compiles the engine to `wasm32`, owns the walk/demo/menu/console front-end state, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. Modules are named after the id file they port the client/host side of (`host` = `Host_Frame`, `cl_walk`/`cl_demo`/`cl_tent`, `input`, `menu`, `console`, `host_cmd`, `savegame`, `snd_dma`, `vid`, plus `app` for the state and boots); `src/lib.rs` maps every export to its module. |
+| `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`, the game client too: `client/` is the live frame against the local server and demo playback (id's `cl_*.c`, `view.c`, the client half of `host.c`/`host_cmd.c`), which the browser runs and `quaketool play` runs natively. |
+| `quake-wasm/` | the `cdylib` browser shell — the platform layer (~3.0k lines + ~5.4k of e2e tests): compiles the engine to `wasm32`, holds the host state (`App`: mode, menu, console, clocks, framebuffer) around `quake_rs::client`, carries out the sound calls each client frame returns for the page's Web Audio, bridges saves to localStorage, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. Modules are named after the id file they port the platform/host side of (`host` = `Host_Frame`, `vid`, `snd_dma`, `input`, `menu`, `console`, `host_cmd`, `savegame`, plus `app` for the state and boots; `cl_walk`/`cl_demo` run the client's frames for the page); `src/lib.rs` maps every export to its module. |
 | `web/` | the browser page (`index.html`) + headless-verify scripts (`verify_walk.py`, `verify_ambient.py`). |
 | `oracle/` | id's own WinQuake software renderer built headless from the C (null drivers, docker i386 build) + `compare.py`: renders the same view in both and diffs them pixel for pixel. See `oracle/README.md` for how to run it and the ranked fidelity findings. |
 | `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |
@@ -89,11 +89,11 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 458 lib + 8 integration tests, no game data required (synthetic fixtures)
+cargo test          # 575 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
-`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene walk demo playtest simbench changelevel`.
+`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene view walk demo playtest simbench changelevel census census-edicts play`. `play` runs the browser's game client natively: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1 --res 320x200,640x400` prints the same frame hashes as `uv run --with playwright web/bench.py --hash-every 30` with those workloads and resolutions, byte for byte.
 
 ### Getting the game data (not committed)
 
