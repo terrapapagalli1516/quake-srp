@@ -21,6 +21,32 @@ use crate::input::{
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
 
+/// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
+/// (`((int)f*256/360) & 255`) then `MSG_ReadAngle` (`MSG_ReadChar() *
+/// (360.0/256)`) — whole degrees truncated, then 256 steps, signed.
+pub(crate) fn net_angle(f: f32) -> f32 {
+    let b = ((f as i32).wrapping_mul(256) / 360) & 255;
+    (b as u8 as i8) as f32 * (360.0 / 256.0)
+}
+
+/// `SV_WriteClientdataToMessage`'s fixangle (sv_main.c) and the client's
+/// `svc_setangle` (cl_parse.c): when the QuakeC forced the player's facing
+/// (`fixangle = 1` — teleporters, the intermission camera, PutClientInServer),
+/// the server sends the entity's `angles` and clears the flag, and the client
+/// takes them as `cl.viewangles`. This shell has no view roll, so the roll the
+/// message carries (0 at every id1 site) is dropped; the pitch is clamped as
+/// CL_AdjustAngles clamps it on the next move.
+fn apply_fixangle(w: &mut Walk) {
+    let p = w.player;
+    if p < 0 || w.server.vm.ent_get_float(p, "fixangle") == 0.0 {
+        return;
+    }
+    let a = w.server.vm.ent_get_vector(p, "angles");
+    w.pitch = clamp_pitch(net_angle(a[0]));
+    w.yaw = net_angle(a[1]);
+    w.server.vm.ent_set_float(p, "fixangle", 0.0);
+}
+
 /// Owned visible-entity descriptor gathered from the server before rendering:
 /// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
 type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32);
@@ -147,6 +173,7 @@ pub(crate) fn step_walk(
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
         let _ = w.server.client_frame(&cmd, dt);
+        apply_fixangle(w);
     }
 
     // 1a. MSG_ALL server commands (CL_ParseServerMessage, cl_parse.c): the QuakeC
@@ -1136,6 +1163,23 @@ mod tests {
             }
             let _ = std::fs::write(format!("{dir}/{name}.ppm"), out);
         });
+    }
+
+    /// CENSUS F1: svc_setangle carries MSG_WriteAngle's byte — whole degrees,
+    /// 256 steps, read back signed — and a new level starts facing the angles
+    /// PutClientInServer gave the player (Host_Spawn_f's setangle).
+    #[test]
+    fn setangle_quantises_like_the_wire_and_spawns_face_the_spot() {
+        assert_eq!(net_angle(90.0), 90.0);
+        assert_eq!(net_angle(45.0), 45.0);
+        assert_eq!(net_angle(270.0), -90.0, "byte 192 reads back as char -64");
+        assert_eq!(net_angle(10.9), 7.0 * 360.0 / 256.0, "(int)10.9*256/360 = 7");
+        assert_eq!(net_angle(-90.0), -90.0);
+        let w = build_walk().expect("e1m1 boots");
+        let spot = crate::app::player_start(&w.bsp.entities).expect("e1m1 has a start").1;
+        assert_eq!(w.yaw, net_angle(spot), "the view faces info_player_start's angle");
+        assert_eq!(w.pitch, 0.0);
+        assert_eq!(w.server.vm.ent_get_float(w.player, "fixangle"), 0.0);
     }
 
     /// CENSUS F2: behind the menu/console single player is paused

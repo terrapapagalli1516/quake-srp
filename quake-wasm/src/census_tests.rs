@@ -56,7 +56,6 @@ fn angle_diff(a: f32, b: f32) -> f32 {
 /// `cl.viewangles` become the destination's angles. The port's view angles
 /// (`w.yaw`/`w.pitch`) are only ever written by input.
 #[test]
-#[ignore = "census F1: teleporters do not turn the view (svc_setangle/fixangle)"]
 fn census_teleport_turns_the_view_to_the_destination() {
     let mut w = build_walk_map("maps/start.bsp").expect("start boots");
     for _ in 0..5 {

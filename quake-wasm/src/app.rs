@@ -22,7 +22,8 @@ use quake_rs::tent::{BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 
 use crate::PAK;
-use crate::input::KeyMove;
+use crate::cl_walk::net_angle;
+use crate::input::{clamp_pitch, KeyMove};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP_SND_QUEUE};
 use crate::vid::{DEFAULT_H, DEFAULT_W};
 
@@ -418,6 +419,18 @@ pub(crate) fn color_for_name(name: &str) -> [u8; 3] {
     table[(h % table.len() as u32) as usize]
 }
 
+/// The view angles a freshly spawned client starts with, as `(yaw, pitch)`:
+/// Host_Spawn_f (host_cmd.c) sends `svc_setangle` with the player entity's
+/// `angles` right after PutClientInServer ("never send a roll angle"), so the
+/// view faces the spot QuakeC's SelectSpawnPoint chose — `info_player_start`,
+/// `info_player_start2` once a rune is held, or `testplayerstart`. Read after
+/// the connect, before the settle frames.
+pub(crate) fn spawn_view_angles(server: &Server, player: i32) -> (f32, f32) {
+    let a = server.vm.ent_get_vector(player, "angles");
+    (net_angle(a[1]), clamp_pitch(net_angle(a[0])))
+}
+
+#[cfg(test)]
 pub(crate) fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
     for block in ents.split('}') {
         let toks: Vec<&str> = block.split('"').collect();
@@ -607,7 +620,6 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let bsp = Bsp::parse(&read(map)?).ok()?;
     let bsp_sim = Bsp::parse(&read(map)?).ok()?;
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
-    let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
     // Pass the pak so external brush-model item boxes (b_*.bsp) collide + take
@@ -621,6 +633,7 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     server.set_map_name(map);
     server.spawn_entities().ok()?;
     let player = server.connect_client().ok()?;
+    let (yaw, pitch) = spawn_view_angles(&server, player);
     // Capture the level-entry spawn parms (the just-connected, full-state player) so
     // a single-player respawn can reload THIS level with them.
     let entry_parms = server.save_spawn_parms();
@@ -652,7 +665,7 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let _ = server.drain_messages();
     let _ = server.drain_svc_events();
 
-    assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, 0.0)
+    assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, pitch)
 }
 
 pub(crate) fn build_demo() -> Option<DemoPlay> {
