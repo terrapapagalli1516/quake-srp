@@ -91,7 +91,7 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 575 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
+cargo test          # 581 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
@@ -119,6 +119,12 @@ cd quake-wasm && cargo build --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/quake_wasm.wasm ../web/
 miniserve --port 8080 -C ../web      # any static server works; open /index.html
 ```
+
+The page shows the game in the largest 4:3 box the window fits under its header, with the status line
+still in view (never smaller than 640x480; narrow screens and fullscreen have their own rules): the
+framebuffer is 16:10 and stretched to 4:3 as a 1996 monitor showed those modes. The window sets how
+big the picture is; the resolution (Options > Video Options, 960x600 by default) only sets how fine
+its pixels are, and the status bar and menus are drawn 1:1 in it, as WinQuake draws them.
 
 The wasm is 18.7 MB, nearly all of it the embedded pak (the code is ~0.8 MB). miniserve's `-C`
 (`--compress-response`) compresses it on the fly: Chrome gets brotli at **8.6 MB** (gzip 9.6 MB,

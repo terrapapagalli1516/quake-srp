@@ -112,7 +112,13 @@ pub fn client_punchangle(w: &Walk) -> [f32; 3] {
 /// `sigil_touch` only sets `serverflags`, so this is how a rune reaches the
 /// status bar.
 pub fn client_items(w: &Walk) -> i32 {
-    (w.server.vm.ent_get_float(w.player, "items") as i32) | ((w.server.serverflags() as i32) << 28)
+    server_items(&w.server, w.player)
+}
+
+/// [`client_items`] for a `server` and `player` not yet in a [`Walk`] (a
+/// level being assembled).
+pub fn server_items(server: &crate::server::Server, player: i32) -> i32 {
+    (server.vm.ent_get_float(player, "items") as i32) | ((server.serverflags() as i32) << 28)
 }
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
@@ -163,7 +169,11 @@ pub fn offset_box(origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3]
     )
 }
 
-pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFrame {
+/// One live client frame (see the module doc) of `host_frametime` seconds —
+/// `Host_FilterTime`'s double, which the server's `sv.time` advances by
+/// exactly (`client_frame_f64`); the client's own timing takes it as an `f32`.
+pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    let dt = host_frametime as f32;
     let (render_w, render_h) = (vid.width, vid.height);
     let mut sound = Vec::new();
     // Con_CheckResize: the notify lines are laid out con_linewidth wide.
@@ -281,7 +291,7 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
-        let _ = w.server.client_frame(&cmd, dt);
+        let _ = w.server.client_frame_f64(&cmd, host_frametime);
         // CL_LerpPoint on a local server: cl.time = the message time, sv.time
         // after this frame's physics.
         w.clock = w.server.time();
@@ -351,8 +361,8 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
     }
 
     // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the
-    // server clock the HUD reads — after any level swap above, whose
-    // CL_ClearState zeroed cl.items.
+    // server clock the HUD reads — after any level swap above, which seeded
+    // cl.items with the spawn items (see `stamp_item_gettime`).
     let items = client_items(w);
     let now_sv = w.server.time();
     stamp_item_gettime(&mut w.cl_items, &mut w.item_gettime, items, now_sv);

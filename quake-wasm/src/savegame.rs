@@ -778,4 +778,24 @@ mod tests {
         SAV_BUF.with(|b| *b.borrow_mut() = b"not a save".to_vec());
         assert_eq!(extract_save_comment(), 0);
     }
+
+    /// Second review: saves the port wrote before it named the player
+    /// (Host_Spawn_f's `netname = host_client->name`, 2026-09-25) have no
+    /// netname in the player's block, and a load keeps the save's fields
+    /// (Host_Spawn_f skips the edict setup when `sv.loadgame`), so obituaries
+    /// read "  was shot by ..." until the next level. Such a save loads as
+    /// "player"; a save that names the player keeps its name.
+    #[test]
+    fn old_saves_load_with_the_player_named() {
+        let w = crate::app::build_walk().expect("e1m1 boots");
+        let text = w.server.write_savegame();
+        let named = "\"netname\" \"player\"\n";
+        assert_eq!(text.matches(named).count(), 1, "one player block names it");
+        let netname = |t: &str| {
+            let l = build_walk_savegame(t).expect("loads");
+            l.server.vm.ent_get_string(l.player, "netname")
+        };
+        assert_eq!(netname(&text.replace(named, "")), "player", "an old save");
+        assert_eq!(netname(&text.replace(named, "\"netname\" \"Ranger\"\n")), "Ranger");
+    }
 }

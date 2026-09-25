@@ -16,7 +16,7 @@ use crate::app::Walk;
 /// console); the frame's sound calls are carried out.
 pub(crate) fn step_walk(
     w: &mut Walk,
-    dt: f32,
+    dt: f64,
     menu_up: bool,
     render_w: usize,
     render_h: usize,
@@ -371,16 +371,22 @@ mod tests {
     }
 
     /// CENSUS F18: CL_ParseClientdata stamps `cl.item_gettime` for every newly
-    /// set items bit (and CL_ClearState's zeroed cl.items makes the level start
-    /// stamp what the player carries); the HUD then cycles the new weapon's
-    /// `inva1..5` icons for a second.
+    /// set items bit; the HUD then cycles the new weapon's `inva1..5` icons
+    /// for a second. What a level starts with never flashes: CL_ClearState
+    /// zeroes cl.items AND cl.time, and the signon's clientdata is parsed
+    /// before CL_LerpPoint first snaps cl.time to the server's (cl_main.c
+    /// CL_ReadFromServer), so the stamps are ~host_frametime and cl.time is
+    /// past 1.2 by the first drawn frame. New game, restart, changelevel and
+    /// load all start with the carried items seeded and every get-time 0.
     #[test]
-    fn new_items_are_stamped_for_the_icon_flash() {
+    fn only_items_got_in_play_flash_not_what_a_level_starts_with() {
+        let unflashed =
+            |w: &Walk| w.cl_items == client_items(w) && w.item_gettime.iter().all(|&t| t == 0.0);
         let mut w = build_walk().expect("e1m1 boots");
+        assert_ne!(client_items(&w) & 1, 0, "the player spawns with the shotgun (bit 0)");
+        assert!(unflashed(&w), "new game");
         step_walk(&mut w, 0.05, false, 320, 200);
-        let t0 = w.server.time();
-        assert_eq!(w.item_gettime[0], t0, "the shotgun (bit 0) flashes at level start");
-        assert_eq!(w.cl_items, client_items(&w));
+        assert!(unflashed(&w), "the first frame stamps nothing");
         for _ in 0..30 {
             step_walk(&mut w, 0.05, false, 320, 200);
         }
@@ -388,7 +394,25 @@ mod tests {
         step_walk(&mut w, 0.05, false, 320, 200);
         let t1 = w.server.time();
         assert_eq!(w.item_gettime[4], t1, "the rocket launcher (bit 4) was just got");
-        assert_eq!(w.item_gettime[0], t0, "the shotgun keeps its old stamp");
+        assert_eq!(w.item_gettime[0], 0.0, "the carried shotgun was never stamped");
+
+        try_restart(&mut w, &mut Vec::new());
+        assert!(unflashed(&w), "restart");
+        w.next_impulse = 9;
+        step_walk(&mut w, 0.05, false, 320, 200);
+        assert_ne!(w.item_gettime[4], 0.0, "got again after the restart");
+        try_changelevel(&mut w, "e1m2", &mut Vec::new());
+        assert_ne!(client_items(&w) & (1 << 4), 0, "the rocket launcher is carried");
+        assert!(unflashed(&w), "changelevel");
+        step_walk(&mut w, 0.05, false, 320, 200);
+        assert!(unflashed(&w));
+
+        let text = w.server.write_savegame();
+        let mut l = quake_rs::client::host_cmd::build_walk_savegame(w.pak.clone(), &text, &mut Vec::new())
+            .expect("the save loads");
+        assert!(unflashed(&l), "load");
+        step_walk(&mut l, 0.05, false, 320, 200);
+        assert!(unflashed(&l));
     }
 
     /// CENSUS F1: svc_setangle carries MSG_WriteAngle's byte — whole degrees,
@@ -686,6 +710,20 @@ mod tests {
         assert_eq!(w.map_name, "maps/e1m2.bsp");
         assert_eq!(w.clock, w.server.time());
         assert!(w.clock > 1.0 && w.clock < 2.0, "{}", w.clock);
+    }
+
+    /// The live host hands the server Host_FilterTime's double: `sv.time` (a
+    /// double) adds exactly `host_frametime`, as SV_Physics does, not the f32
+    /// the client frame times itself with.
+    #[test]
+    fn the_server_advances_by_the_hosts_double() {
+        let mut w = build_walk().expect("e1m1 boots");
+        let t0 = w.server.sv_time();
+        let _ = step_walk(&mut w, 1.0 / 72.0, false, 320, 200);
+        assert_eq!(w.server.sv_time(), t0 + 1.0 / 72.0);
+        assert_ne!(1.0 / 72.0, f64::from((1.0f64 / 72.0) as f32));
+        let _ = step_walk(&mut w, 0.05, true, 320, 200); // paused behind the menu
+        assert_eq!(w.server.sv_time(), t0 + 1.0 / 72.0);
     }
 
     // -------------------------------------------------------------------

@@ -690,6 +690,52 @@ mod tests {
         }
     }
 
+    /// Second review: the 12-sound cap ran before the (entity, channel)
+    /// override, so a mover's stop sound (CHAN_VOICE) in a busy frame was
+    /// dropped and its "moving" hum looped forever. SND_PickChannel's
+    /// same-key override comes before anything else and always wins
+    /// (snd_dma.c:365), so the C never loses it: past the cap a non-zero
+    /// channel's sound still goes out, replacing an undrained entry of its key.
+    #[test]
+    fn queue_cap_never_drops_a_channel_override() {
+        let mv = test_wav(Some(8), 64);
+        let stop = test_wav(None, 32);
+        let pak = build_test_pak(&[
+            ("sound/a.wav", b"AAAA"),
+            ("sound/doors/doormv1.wav", &mv),
+            ("sound/doors/drclos4.wav", &stop),
+        ]);
+        reset_queue();
+        queue_sounds(&pak, &[ev(5, 2, "doors/doormv1.wav", 1.0)], -1);
+        assert!(poll_sound() > 0 && sound_loop_start() > 0.0, "the door hums (a loop)");
+        // A busy frame: twelve channel-0 sounds, then the door stops, then a
+        // thirteenth channel-0 sound and a second override of the same key.
+        let mut frame: Vec<SoundEvent> = (0..12).map(|i| ev(100 + i, 0, "a.wav", 0.5)).collect();
+        frame.push(ev(5, 2, "doors/drclos4.wav", 1.0));
+        frame.push(ev(113, 0, "a.wav", 0.5));
+        frame.push(ev(6, 1, "a.wav", 0.25));
+        frame.push(ev(6, 1, "a.wav", 0.75));
+        queue_sounds(&pak, &frame, -1);
+        let mut got = Vec::new();
+        while poll_sound() > 0 {
+            got.push((sound_entity(), sound_channel(), sound_volume(), sound_loop_start()));
+        }
+        assert_eq!(got.len(), 14, "12 channel-0 sounds + one per overridden key: {got:?}");
+        assert!(got.contains(&(5, 2, 1.0, -1.0)), "the door's stop sound reaches its key");
+        assert!(got.contains(&(6, 1, 0.75, -1.0)), "the later override of (6, 1) wins");
+        assert!(!got.iter().any(|g| g.0 == 113), "a channel-0 sound past the cap is dropped");
+        // An undrained keyed entry from an earlier frame is replaced, not doubled.
+        reset_queue();
+        let full: Vec<SoundEvent> = (0..12).map(|i| ev(100 + i, 0, "a.wav", 0.5)).collect();
+        queue_sounds(&pak, &full, -1);
+        queue_sounds(&pak, &[ev(5, 2, "doors/doormv1.wav", 1.0)], -1);
+        queue_sounds(&pak, &[ev(5, 2, "doors/drclos4.wav", 1.0)], -1);
+        let n = SND_QUEUE.with(|q| q.borrow().len());
+        assert_eq!(n, 13);
+        reset_queue();
+        set_audio_ready(0);
+    }
+
     #[test]
     fn queue_sounds_skips_until_audio_ready() {
         let pak = build_test_pak(&[("sound/a.wav", b"AAAA")]);

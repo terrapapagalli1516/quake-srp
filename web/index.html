@@ -52,8 +52,18 @@
      monitor (non-square pixels, ~1.2x taller than wide). The render target is
      16:10 square-pixel, so we present it in a 4:3 box — the framebuffer is
      stretched vertically 1.2x exactly like a 1996 CRT. Without this the HUD
-     digits/menu/world look horizontally over-wide ("squat"). */
-  canvas { image-rendering:pixelated; width:640px; height:480px; background:#000;
+     digits/menu/world look horizontally over-wide ("squat").
+     How big the box is is the monitor's business, not the engine's: it is the
+     largest 4:3 box the window fits under the header with the status line
+     still in view (--chrome-v: the header, the bezel and the status line, plus
+     a little air; --chrome-h: the bezel and a 16px gutter each side), and
+     never smaller than 640x480 (the page scrolls instead). WinQuake draws the
+     status bar and menus 1:1 in every mode, so at the default 960x600 they
+     are 320 wide: in a fixed 640x480 box they came out a third of the size. */
+  canvas { --chrome-v:168px; --chrome-h:56px;
+    image-rendering:pixelated; background:#000;
+    width:max(640px, min(100vw - var(--chrome-h), (100vh - var(--chrome-v)) * 4 / 3));
+    height:auto; aspect-ratio:4 / 3;
     border:1px solid #333; display:block; cursor:crosshair; }
   #overlay { position:absolute; inset:0; display:flex; flex-direction:column;
     align-items:center; justify-content:center;
@@ -676,12 +686,21 @@ function registerSource(src, ent, chan) {
   src.onended = () => { if (playingByKey.get(key) === src) playingByKey.delete(key); };
 }
 
-function playBuffer(buf, sp, ent, chan, lp) {
+function playBuffer(buf, sp, ent, chan, lp, pp) {
   if (lp) { playDynLoop(buf, ent, chan, lp); return; }
   const s = audioCtx.createBufferSource();
   s.buffer = buf;
-  playRouted(s, sp);
+  const nodes = playRouted(s, sp);
   registerSource(s, ent, chan);
+  // S_Update re-spatializes every dynamic channel each frame from the origin
+  // S_StartSound gave it (snd_dma.c: "update spatialization for static and
+  // dynamic sounds"), one-shots included: turn, and a gunshot moves across.
+  if (nodes && pp) {
+    const l = { src: s, lg: nodes.lg, rg: nodes.rg, lp: pp };
+    dynShots.push(l);
+    const keyed = s.onended;
+    s.onended = () => { dynShots = dynShots.filter(x => x !== l); if (keyed) keyed(); };
+  }
   s.start();
   window.__sndStats.plays++;
 }
@@ -692,6 +711,9 @@ function playBuffer(buf, sp, ent, chan, lp) {
 // Like the C channel it is re-spatialized every frame from its fixed origin
 // (updateLoopingAudio). lp = {ls, le, ox, oy, oz, vol, atten, view}.
 let dynLoops = [];       // {src, lg, rg, lp}
+// Playing one-shots with their spatial params (playBuffer), re-spatialized
+// every frame like the loops.
+let dynShots = [];       // {src, lg, rg, lp}
 function playDynLoop(buf, ent, chan, lp) {
   const src = makeLoopSource(buf, lp.ls, lp.le);
   const lg = audioCtx.createGain(); lg.gain.value = 0;
@@ -718,10 +740,9 @@ function spatializeDynLoop(l) {
   const p = l.lp;
   // SND_Spatialize: the view entity is full volume, centred; else the law.
   const sp = p.view ? { gain: p.vol, pan: 0 } : spatialGain(p.ox, p.oy, p.oz, p.vol, p.atten);
-  const mono = sp.gain * masterVolume();
-  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
-  l.lg.gain.value = clamp01(mono * (1 - sp.pan));
-  l.rg.gain.value = clamp01(mono * (1 + sp.pan));
+  const [lv, rv] = sideGains(sp, masterVolume());
+  l.lg.gain.value = lv;
+  l.rg.gain.value = rv;
 }
 
 // SND_PickChannel's override without a new source: stop what plays on the key.
@@ -781,11 +802,14 @@ function drainGameSounds() {
     const chan = typeof exp.sound_channel === 'function' ? exp.sound_channel() : 0;
     // The sample's cue loop window (poll_sound): start < 0 = a one-shot.
     const ls = typeof exp.sound_loop_start === 'function' ? exp.sound_loop_start() : -1;
-    const lp = ls >= 0 && sp ? {
-      ls, le: exp.sound_loop_end(), ox: exp.sound_origin_x(), oy: exp.sound_origin_y(),
-      oz: exp.sound_origin_z(), vol: exp.sound_volume(), atten: exp.sound_attenuation(),
+    // The channel's spatial params (S_StartSound's origin, volume,
+    // attenuation, view entity), which S_Update re-spatializes every frame.
+    const pp = sp ? {
+      ox: exp.sound_origin_x(), oy: exp.sound_origin_y(), oz: exp.sound_origin_z(),
+      vol: exp.sound_volume(), atten: exp.sound_attenuation(),
       view: typeof exp.sound_is_view_entity === 'function' && !!exp.sound_is_view_entity(),
     } : null;
+    const lp = ls >= 0 && pp ? { ...pp, ls, le: exp.sound_loop_end() } : null;
     const kkey = ent + ':' + chan;
     const seq = (keySeq.get(kkey) || 0) + 1;
     if (chan > 0) keySeq.set(kkey, seq);
@@ -801,7 +825,7 @@ function drainGameSounds() {
     const key = wavKey(view);
     const cached = decodedSounds.get(key);
     if (cached) {
-      playBuffer(cached, sp, ent, chan, lp);       // already decoded — instant, no hitch
+      playBuffer(cached, sp, ent, chan, lp, pp);   // already decoded — instant, no hitch
       continue;
     }
     // First time for this clip: copy out of wasm memory, decode, cache, play —
@@ -811,7 +835,7 @@ function drainGameSounds() {
       decodedSounds.set(key, buf);
       if (chan > 0 && keySeq.get(kkey) !== seq) return;
       if (typeof exp.sound_generation === 'function' && exp.sound_generation() !== gen) return;
-      playBuffer(buf, sp, ent, chan, lp);
+      playBuffer(buf, sp, ent, chan, lp, pp);
     }).catch(() => {});
   }
 }
@@ -839,12 +863,24 @@ function drainMenuSounds() {
   }
 }
 
+// SND_Spatialize's per-side volumes, then the master volume: leftvol =
+// vol*(1-dot), rightvol = vol*(1+dot) (distance-attenuated), each clamped at
+// 255 — full — by the mixer (snd_mix.c SND_PaintChannelFrom8/16) BEFORE
+// S_TransferPaintBuffer scales the mix by `volume`. So a near source panned
+// hard reaches full volume times the master on its side, never more (clamping
+// after the master made it up to 1/volume louder: 1.43x at the default 0.7).
+function sideGains(sp, master) {
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  return [clamp01(sp.gain * (1 - sp.pan)) * master, clamp01(sp.gain * (1 + sp.pan)) * master];
+}
+
 // Wire a decoded BufferSource to the destination. With spatial params we
 // reproduce Quake's SND_Spatialize pan law (snd_dma.c) exactly: LINEAR left/right
-// volumes leftvol = mono*(1-dot), rightvol = mono*(1+dot), each clamped to full —
-// so the near side reaches FULL gain (not the equal-power -3 dB centre a
-// StereoPanner gives). The mono source feeds two gains into a stereo merger.
-// With no params (sp == null), play flat (full volume, centred).
+// volumes (sideGains) — so the near side reaches FULL gain (not the equal-power
+// -3 dB centre a StereoPanner gives). The mono source feeds two gains into a
+// stereo merger, which are returned ({lg, rg}) for the per-frame
+// re-spatialization; null otherwise. With no params (sp == null), play flat
+// (full volume, centred).
 function playRouted(src, sp) {
   const master = masterVolume();
   if (!sp) {
@@ -854,24 +890,24 @@ function playRouted(src, sp) {
     g.connect(audioCtx.destination);
     return;
   }
-  // mono = distance-attenuated, master-scaled volume; pan = dot(dir, listener
-  // right) in [-1,1] (left = -1). leftvol/rightvol are linear in the dot, like id.
-  const mono = sp.gain * master;
-  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  // sp.gain = distance-attenuated volume; pan = dot(dir, listener right) in
+  // [-1,1] (left = -1). leftvol/rightvol are linear in the dot, like id.
   if (typeof audioCtx.createChannelMerger === 'function') {
-    const lg = audioCtx.createGain(); lg.gain.value = clamp01(mono * (1 - sp.pan));
-    const rg = audioCtx.createGain(); rg.gain.value = clamp01(mono * (1 + sp.pan));
+    const [lv, rv] = sideGains(sp, master);
+    const lg = audioCtx.createGain(); lg.gain.value = lv;
+    const rg = audioCtx.createGain(); rg.gain.value = rv;
     const merger = audioCtx.createChannelMerger(2);
     src.connect(lg); lg.connect(merger, 0, 0);   // left channel
     src.connect(rg); rg.connect(merger, 0, 1);   // right channel
     merger.connect(audioCtx.destination);
-  } else {
-    // No channel merger available: fall back to a centred mono gain.
-    const g = audioCtx.createGain();
-    g.gain.value = mono;
-    src.connect(g);
-    g.connect(audioCtx.destination);
+    return { lg, rg };
   }
+  // No channel merger available: fall back to a centred mono gain.
+  const g = audioCtx.createGain();
+  g.gain.value = Math.min(1, sp.gain) * master;
+  src.connect(g);
+  g.connect(audioCtx.destination);
+  return null;
 }
 
 // --- Looping ambient audio --------------------------------------------------
@@ -909,11 +945,12 @@ function stopAllLoops() {
   for (const l of ambientLoops) { try { l.src.stop(); } catch (e) {} }
   staticLoops = []; ambientLoops = [];
   ambientStarted = false;
-  // S_StopAllSounds stops the dynamic channels too: every keyed one-shot and
-  // every looping one (a door hum must not carry into the next level).
+  // S_StopAllSounds stops the dynamic channels too: every one-shot and every
+  // looping one (a door hum must not carry into the next level).
   for (const s of playingByKey.values()) { try { s.stop(); } catch (e) {} }
   for (const l of dynLoops) { try { l.src.stop(); } catch (e) {} }
-  playingByKey.clear(); dynLoops = []; keySeq.clear();
+  for (const l of dynShots) { try { l.src.stop(); } catch (e) {} }
+  playingByKey.clear(); dynLoops = []; dynShots = []; keySeq.clear();
 }
 
 // Decode WAV bytes through the shared content-hash cache, then cb(buffer).
@@ -1009,13 +1046,14 @@ function updateLoopingAudio() {
   const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
   // Statics: id's linear pan law, same as playRouted's one-shot path.
   for (const l of staticLoops) {
-    const sp = spatialGain(l.ox, l.oy, l.oz, l.vol, l.atten);
-    const mono = sp.gain * master;
-    l.lg.gain.value = clamp01(mono * (1 - sp.pan));
-    l.rg.gain.value = clamp01(mono * (1 + sp.pan));
+    const [lv, rv] = sideGains(spatialGain(l.ox, l.oy, l.oz, l.vol, l.atten), master);
+    l.lg.gain.value = lv;
+    l.rg.gain.value = rv;
   }
-  // Looping one-shots (door/lift/train hums): the same per-frame law.
+  // Looping one-shots (door/lift/train hums) and the playing one-shots: the
+  // same per-frame law (S_Update runs SND_Spatialize on every channel).
   for (const l of dynLoops) spatializeDynLoop(l);
+  for (const l of dynShots) spatializeDynLoop(l);
   // Leaf ambients: engine-ramped volume, both channels equal.
   for (const l of ambientLoops) {
     l.g.gain.value = clamp01(exp.ambient_gain(l.ch) * master);
@@ -1395,8 +1433,9 @@ async function main() {
   const ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
   // The render resolution is RUNTIME state: Options > Video Options can change
   // it. Track the current backing-store size and re-fit the canvas whenever the
-  // engine reports a different width()/height(). The CSS display size (640x480)
-  // stays fixed, so a larger backing store just gives a crisper pixel-upscale.
+  // engine reports a different width()/height(). The CSS display size (the
+  // largest 4:3 box the window fits, see the canvas rule) does not follow it,
+  // so a larger backing store just gives a crisper pixel-upscale.
   let W = 0, H = 0;
   function syncCanvasSize() {
     const w = exp.width(), h = exp.height();

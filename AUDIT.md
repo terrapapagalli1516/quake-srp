@@ -1372,7 +1372,9 @@ test in the commit message.
   here): see the list below. The commit is the branch's last.
 
 Left for the quake-wasm pass (found here, not changed: `quake-wasm/src/` is
-being moved into `quake-rs/src/client/`):
+being moved into `quake-rs/src/client/`) — all done on `quake/polish3`
+("Second review fixes, client side", below), the `--vrect` tooling item
+aside:
 - The live host hands `client_frame` an f32 `dt`, which the server widens;
   call `client_frame_f64` with `Host_FilterTime`'s double `host_frametime`, so
   `sv.time` adds exactly id's frame times.
@@ -1546,6 +1548,103 @@ being moved into `quake-rs/src/client/`):
     frame hashes over four workloads at 320x200 and 640x400). Its fill-rule and
     crack tests went with it; the edge renderer's coverage is id's by
     construction (the spans partition every scanline).
+
+## Second review fixes, client side (2026-09-25, branch `quake/polish3`)
+
+The second review's client/platform findings, polish2's quake-wasm
+follow-ups, and one presentation fix. One commit each; the C followed and
+the evidence are in the commit messages. On `quake/overnight` after
+`quake/polish2` and `quake/edge`: goldens `4807aaa1` / `9ae2b478` /
+`c65b7046` unchanged.
+
+- ✅ **Every carried weapon flashed at each level start** (MED) — restart,
+  load and demo start too. The port stamped `cl.item_gettime` against the
+  zeroed `cl.items` at its own `cl.time` (~1.2), so the icons flashed for a
+  second. In the C, `CL_ClearState` zeroes `cl.time` too, and the signon's
+  clientdata is parsed in `CL_ReadFromServer` after `cl.time +=
+  host_frametime` and before `CL_LerpPoint` snaps `cl.time` to the
+  server's: the owned bits are stamped at about `host_frametime`, and the
+  flash is over by the first drawn frame (`cl.time` >= 1.2). Demo playback
+  reads the signon and frame 0's block in one `CL_ReadFromServer`, the
+  same. Every `CL_ClearState` site (New Game/map/load via `assemble_walk`,
+  changelevel, restart, `DemoPlay::new`, the demo's wrap) seeds the spawn
+  items with the get-times at 0. Tests
+  `only_items_got_in_play_flash_not_what_a_level_starts_with` (replaces the
+  test that locked the bug in), `demo_start_does_not_flash_the_recorded_weapons`.
+  Oracle (screen2d's harness without its 30-frame settle, e1m1): the
+  status-bar rows at `cl.time` 1.9 / 2.3 differed from id's by 264 / 245 px,
+  now 0 / 0 at 320x200 and 960x600. CENSUS F18's premise corrected.
+  `quaketool play` frame hashes change at frames 0, 30 and 60 only (inside
+  the old flash).
+- ✅ **A door/lift/train hum could loop forever** (MED) — the 12-sound
+  cap ran before the (entity, channel) override, so a mover's stop sound
+  (CHAN_VOICE) in a busy frame was dropped. `SND_PickChannel`'s same-key
+  override comes first and always wins: past the cap a non-zero channel's
+  sound still goes out, replacing an undrained entry of its key (bounded:
+  the cap plus one per key). Test `queue_cap_never_drops_a_channel_override`.
+- ✅ **Console-only prints never reached the notify lines** (LOW) —
+  `Con_Print` stamps `con_times` for every console line, so "Saving game to
+  s1.sav..." / "done." after a menu save show over the game. The console
+  keeps what the host prints for the active mode's notify lines
+  (`Console::take_unnotified`, handed over after every `ensure_app`); a
+  console toggle (`Con_ToggleConsole_f` zeroes `con_times`) or a level load
+  (`SCR_EndLoadingPlaque`'s `Con_ClearNotify`) drops it; `map`'s own
+  "loading" line stays console-only. Test `console_prints_reach_the_notify_lines`.
+  Options > "Go to console" is `Con_ToggleConsole_f` too (it set the
+  console open without zeroing `con_times`); test
+  `go_to_console_is_con_toggleconsole_f`.
+- ✅ **Tab pressed in the menu became +showscores when the menu closed**
+  (LOW) — `Key_Event` hands a key down to its binding only when
+  `key_dest == key_menu && menubound[key]`, `key_dest == key_console &&
+  !consolekeys[key]`, or in the game; `key_down` now routes with those
+  tables (Tab in the menu is `M_Keydown`'s). Test
+  `keys_pressed_in_the_menu_or_console_do_not_hold_their_binding`.
+- ✅ **Old saves loaded with an empty netname** (LOW) — "  was shot by a
+  Grunt" until the next level: a load keeps the save's fields
+  (`Host_Spawn_f` skips the edict setup when `sv.loadgame`), and saves from
+  before tonight had none. An empty one loads as "player". Test
+  `old_saves_load_with_the_player_named`.
+- ✅ **The underwater warp allocated every frame** (LOW) — `rowptr`,
+  `column` and ~1000 f64-sin entries of `intsintable`. They live in a
+  thread-local table now (R_InitTurb fills `intsintable` once), rebuilt only
+  when a size changes. Byte-identical: `quaketool view` of e1m1's pool at
+  five modes x two times, `cmp`-equal; test
+  `warp_tables_kept_across_frames_change_nothing`.
+- ✅ **Demo particles fell at a constant 800** (LOW) — `R_DrawParticles`
+  reads the client's `sv_gravity` cvar in playback too (e1m8's worldspawn
+  leaves it at 100, and it outlives the map); `Server::sv_gravity_cvar()`.
+  Test `demo_particles_fall_by_the_sv_gravity_cvar`. The census tests'
+  module doc no longer says they are `#[ignore]`d.
+- ✅ **polish2's follow-ups**: (a) `Menu::reset_nav` keeps menu.c's
+  cursors (a `map`, New Game, load or demo keeps them); only a program
+  start (`boot`, `boot_attract`: `Menu::reset_boot`) zeroes them. Tests
+  `only_a_program_start_resets_the_cursors`,
+  `only_a_boot_resets_the_menu_cursors`. (b) The live host drives the
+  server with `Host_FilterTime`'s double (`client_frame_f64`): `sv.time`
+  adds exactly `host_frametime`; the client's own timing takes the same f32
+  as before. Tests `host_frametime_is_the_double`,
+  `the_server_advances_by_the_hosts_double`; `quaketool play` hashes
+  identical. (c) CENSUS L15's open half, in the page: each side clamped at
+  full before the master volume (`snd_mix.c` clamps `leftvol`/`rightvol`
+  at 255, then `S_TransferPaintBuffer` scales by `volume`; the page
+  clamped after it, up to 1.43x louder), and one-shots re-spatialised every
+  frame (`S_Update`). `web/verify_loops.py` section 4.
+- ✅ **The canvas box fits the window** (presentation) — the page showed
+  the framebuffer in a fixed 640x480 box; with the 2-D layer 1:1, the
+  default 960x600's 320-wide status bar and menus came out 213 px wide. The
+  canvas is now the largest 4:3 box the window fits under the header with
+  the status line in view, never under 640x480; the narrow-screen and
+  fullscreen rules are unchanged. 1440x900: 640x480 -> 976x732; 1920x1080:
+  -> 1216x912. The engine's rendering and resolutions are untouched.
+
+Found, not fixed:
+- `S_StaticSound` combines static channels of the same sample into one
+  (`S_Update`'s "combine static sounds", whose summed volumes then clamp at
+  255); the page plays each torch on its own source, so several near
+  torches of one sample are louder than id's.
+- The page drains at most 16 one-shots a frame (`drainGameSounds`' guard);
+  past the cap the queue can now hold a few more keyed entries, which then
+  play a frame later.
 
 ## LOW (27)
 

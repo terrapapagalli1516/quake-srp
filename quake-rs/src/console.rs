@@ -147,7 +147,8 @@ const CON_NOTIFYTIME: f32 = 3.0;
 /// In the C the notify lines are the tail of the console's own text buffer:
 /// the same text also goes to the drop-down console's scrollback. The mode
 /// that printed it keeps it in [`ConNotify::take_printed`] until the host
-/// hands it to its drop-down [`Console`] ([`Console::print`]).
+/// hands it to its drop-down [`Console`] ([`Console::print_notified`]); what
+/// the host prints there comes back the other way ([`ConNotify::lay`]).
 #[derive(Default)]
 pub struct ConNotify {
     /// The last console lines and their `con_times` stamps.
@@ -159,8 +160,17 @@ pub struct ConNotify {
 }
 
 impl ConNotify {
-    /// `Con_Print(txt)` at clock `now`.
+    /// `Con_Print(txt)` at clock `now`: the notify lines, and kept for the
+    /// console scrollback ([`ConNotify::take_printed`]).
     pub fn print(&mut self, txt: &str, now: f32) {
+        self.lay(txt, now);
+        self.printed.push_str(txt);
+    }
+
+    /// `Con_Print(txt)`'s notify half at clock `now`, for text the console
+    /// scrollback already has (what the host printed there,
+    /// [`Console::take_unnotified`]).
+    pub fn lay(&mut self, txt: &str, now: f32) {
         let lines = &mut self.lines;
         self.cursor.print(txt, |op| match op {
             ConOp::Linefeed => {
@@ -179,7 +189,6 @@ impl ConNotify {
                 }
             }
         });
-        self.printed.push_str(txt);
     }
 
     /// The text printed since the last call, for the console scrollback.
@@ -270,6 +279,9 @@ pub struct Console {
     /// covers now — it slides toward half the screen while open and back to
     /// nothing when closed ([`Console::slide`]).
     current: f32,
+    /// Text [`Console::print`] laid into the scrollback that the notify lines
+    /// have not had yet ([`Console::take_unnotified`]).
+    unnotified: String,
 }
 
 impl Default for Console {
@@ -287,6 +299,7 @@ impl Console {
             cursor: ConCursor::default(),
             input: String::new(),
             current: 0.0,
+            unnotified: String::new(),
         }
     }
 
@@ -299,6 +312,9 @@ impl Console {
         if self.open {
             self.input.clear();
         }
+        // It also zeroes con_times: nothing printed so far becomes a notify
+        // line (the host clears the mode's notify lines).
+        self.unnotified.clear();
         self.open = !self.open;
     }
 
@@ -383,8 +399,18 @@ impl Console {
     /// at [`CON_LINEWIDTH`] ([`ConCursor`]). Text without a final `\n` leaves
     /// the line open, so the next print continues it (a pickup's `sprint`
     /// fragments join on one line). The oldest line drops once the history
-    /// exceeds [`CONSOLE_SCROLLBACK_CAP`].
+    /// exceeds [`CONSOLE_SCROLLBACK_CAP`]. The notify lines are the same text
+    /// in the C (`con_times` stamps the console's own lines), so it is also
+    /// kept for them ([`Console::take_unnotified`]): "Saving game to s0.sav..."
+    /// after a menu save shows over the game.
     pub fn print(&mut self, txt: &str) {
+        self.print_notified(txt);
+        self.unnotified.push_str(txt);
+    }
+
+    /// [`Console::print`] for text the notify lines already have (what the
+    /// game printed through [`ConNotify::print`]): the scrollback only.
+    pub fn print_notified(&mut self, txt: &str) {
         let lines = &mut self.lines;
         self.cursor.print(txt, |op| match op {
             ConOp::Linefeed => {
@@ -411,6 +437,12 @@ impl Console {
         let mut line = line.into();
         line.push('\n');
         self.print(&line);
+    }
+
+    /// The text [`Console::print`] has laid into the scrollback since the last
+    /// call, for the host to hand to the notify lines ([`ConNotify::lay`]).
+    pub fn take_unnotified(&mut self) -> String {
+        std::mem::take(&mut self.unnotified)
     }
 
     /// The current number of scrollback lines (for tests / host inspection).

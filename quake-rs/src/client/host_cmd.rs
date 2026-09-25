@@ -17,6 +17,7 @@ use crate::progs::Progs;
 use crate::server::Server;
 
 use super::cl_input::clamp_pitch;
+use super::cl_main::client_items;
 use super::{assemble_walk, spawn_view_angles, SoundCall, Walk};
 
 /// Sane upper bounds the `give` command clamps to, mirroring Quake's pickup
@@ -327,7 +328,9 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     w.damage_blend = 0.0;
     w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
-    w.cl_items = 0;
+    // CL_ClearState + the signon's clientdata: the carried items, unflashed
+    // (`stamp_item_gettime`).
+    w.cl_items = client_items(w);
     w.item_gettime = [0.0; 32];
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
@@ -409,7 +412,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     w.damage_blend = 0.0;
     w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
-    w.cl_items = 0;
+    w.cl_items = client_items(w); // unflashed, as at a changelevel
     w.item_gettime = [0.0; 32];
     w.oldz = f32::NAN;
     // Same intermission/finale reset as a changelevel (CL_ClearState).
@@ -459,6 +462,14 @@ pub fn build_walk_savegame(pak: Pak, text: &str, sound: &mut Vec<SoundCall>) -> 
     let mut server =
         Server::load_savegame(sim_bsp, progs, Some(pak.clone()), text).map_err(|e| e.to_string())?;
     let player = server.player_edict();
+    // Host_Spawn_f names the client edict (`netname = host_client->name`) only
+    // for a fresh spawn: a loaded game keeps the save's. Saves the port wrote
+    // before it did that (2026-09-25) carry an empty netname, which read
+    // "  was shot by a Grunt" until the next level; give them the name
+    // Host_Spawn_f would have (cl_name's "player").
+    if server.vm.ent_get_string(player, "netname").is_empty() {
+        server.vm.ent_set_string(player, "netname", "player");
+    }
 
     // The save's spawn parms are the level-ENTRY parms (svs.clients->
     // spawn_parms): a respawn on the loaded level restores the state the

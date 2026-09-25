@@ -251,7 +251,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
         d.damage_blend = 0.0;
         d.bonus_blend = 0.0;
         d.faceanimtime = 0.0;
-        d.cl_items = 0;
+        d.cl_items = d.demo.frames[0].client.items; // unflashed (DemoPlay::new)
         d.item_gettime = [0.0; 32];
         d.v_dmg_time = 0.0;
         d.centerprint = None;
@@ -469,8 +469,11 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     d.particles.retire(f.time);
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    // `grav = frametime * sv_gravity.value * 0.05`: R_DrawParticles reads the
+    // client's own sv_gravity cvar in playback too — 800, or what the last map
+    // played set it to (e1m8's worldspawn: 100), not the recording's.
     if dt.is_finite() && dt > 0.0 {
-        d.particles.integrate(dt, f.time, 800.0 * 0.05);
+        d.particles.integrate(dt, f.time, crate::server::Server::sv_gravity_cvar() * 0.05);
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
