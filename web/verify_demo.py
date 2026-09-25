@@ -108,16 +108,27 @@ with sync_playwright() as p:
     # recorded stats and stays STABLE across frames, while the 3-D scene above
     # changes (the recorded camera is moving). Without the sbar the band would
     # be live 3-D and change like the rest.
+    # A whole-screen palette shift (V_UpdatePalette: demo1's pickups flash the
+    # gold bonus shift, hits the damage shift) repaints every pixel of the bar
+    # too, so a pair of grabs that straddles a flash says nothing about the
+    # bar: take up to four pairs and judge the steadiest.
     pg.keyboard.press("Escape")
     pg.wait_for_function("!exp.menu_visible || !exp.menu_visible()", timeout=5000)
     time.sleep(0.3)
-    a = pg.evaluate(GRAB)
-    time.sleep(1.5)
-    b = pg.evaluate(GRAB)
-    h = a["h"]
-    bar_h = max(1, round(h * 24 / 200))      # the sbar band (virtual 24 rows)
-    scene = changed_fraction(a, b, 0, int(h * 0.6))
-    band = changed_fraction(a, b, h - bar_h, h)
+    best = None
+    for _ in range(4):
+        a = pg.evaluate(GRAB)
+        time.sleep(1.5)
+        b = pg.evaluate(GRAB)
+        h = a["h"]
+        bar_h = max(1, round(h * 24 / 200))  # the sbar band (virtual 24 rows)
+        scene = changed_fraction(a, b, 0, int(h * 0.6))
+        band = changed_fraction(a, b, h - bar_h, h)
+        if best is None or band - scene < best[0] - best[1]:
+            best = (band, scene, a)
+        if band < scene / 3:
+            break
+    band, scene, a = best
     check("3-D scene changes between frames (camera moving)", scene > 0.05,
           f"{scene:.1%} changed")
     check("sbar band is stable while the scene moves (bar is drawn)",

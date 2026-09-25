@@ -91,6 +91,15 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     w.faceanimtime = w.server.time() + FACE_ANIM_TIME;
 }
 
+/// `cl.punchangle` as SV_WriteClientdataToMessage sends it: each component
+/// through `MSG_WriteChar` — the float truncated to an int, kept as a signed
+/// byte — so the shotgun's -2 kick reads -2, then -1 while DropPunchAngle eases
+/// the server's value back, then 0: whole-degree steps, not a smooth ease.
+pub(crate) fn client_punchangle(w: &Walk) -> [f32; 3] {
+    let p = w.server.vm.ent_get_vector(w.player, "punchangle");
+    p.map(|v| (v as i32) as i8 as f32)
+}
+
 /// `cl.items` as SV_WriteClientdataToMessage sends it: the player's `items`
 /// with the rune bits "stuffed into the high bits of items for sbar" —
 /// `(int)ent->v.items | ((int)pr_global_struct->serverflags << 28)`. QC
@@ -660,7 +669,7 @@ pub(crate) fn step_walk(
     } else {
         // Add the weapon-fire view kick (cl.punchangle, view.c:957); the engine's
         // drop_punch_angle already decays it back to zero each frame.
-        let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
+        let punch = client_punchangle(w);
         // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity
         // plus the svc_damage kick (decaying over v_kicktime by host_frametime),
         // plus the punchangle's roll component; the dead-view tilt (80°)
@@ -760,7 +769,7 @@ pub(crate) fn step_walk(
             // V_CalcRefdef's gun origin (the forward bob + the viewsize fudge)
             // and CalcGunAngle's angles (the view before the punch, no lean).
             Some(Some(mdl)) => {
-                let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
+                let punch = client_punchangle(w);
                 let angles = render::viewmodel_angles(&cam, punch, ang[2]);
                 Some(Viewmodel {
                     mdl,
@@ -1258,6 +1267,18 @@ mod tests {
         assert!(w.v_dmg_pitch > 5.0, "hit from the front pitches the view: {}", w.v_dmg_pitch);
         assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < crate::view::V_KICKTIME, "kick running");
         assert!(w.server.time() <= w.faceanimtime, "the pain face shows");
+    }
+
+    /// CENSUS L1: the client's punchangle is MSG_WriteChar'd — truncated to
+    /// whole degrees — so the shotgun kick steps -2, -1, 0.
+    #[test]
+    fn punchangle_reaches_the_view_in_whole_degrees() {
+        let mut w = build_walk().expect("e1m1 boots");
+        let p = w.player;
+        w.server.vm.ent_set_vector(p, "punchangle", [-1.9, 0.5, -2.0]);
+        assert_eq!(client_punchangle(&w), [-1.0, 0.0, -2.0]);
+        w.server.vm.ent_set_vector(p, "punchangle", [-4.0, 0.0, 0.0]);
+        assert_eq!(client_punchangle(&w), [-4.0, 0.0, 0.0]);
     }
 
     /// CENSUS F18: CL_ParseClientdata stamps `cl.item_gettime` for every newly
