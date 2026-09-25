@@ -108,6 +108,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         }
         if let Some(d) = a.demo.as_mut() {
             d.viewsize = viewsize;
+            // +showscores only reaches the game while it owns the keyboard.
+            d.show_scores = km.showscores && !gate_gameplay;
         }
         // Each mode returns its frame plus a DEFERRED screen blend (color, alpha):
         // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it

@@ -282,6 +282,9 @@ pub(crate) struct DemoPlay {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub(crate) viewsize: f32,
+    /// `sb_showscores` (`+showscores`, Tab held): Sbar_Draw shows the solo
+    /// scoreboard during playback too. Refreshed by `step` like `viewsize`.
+    pub(crate) show_scores: bool,
 }
 
 impl DemoPlay {
@@ -321,6 +324,7 @@ impl DemoPlay {
             notify: Vec::new(),
             notify_pending: String::new(),
             viewsize: render::VIEWSIZE_DEFAULT,
+            show_scores: false,
         }
     }
 }

@@ -3,6 +3,7 @@
 //! (`Key_Event` through the menu's binding table): the key/mouse exports the
 //! page calls and the per-frame [`KeyMove`] the client frame consumes.
 
+use quake_rs::menu::BIND_SHOWSCORES;
 use quake_rs::render::{
     Menu, BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP,
     BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT,
@@ -88,6 +89,9 @@ pub(crate) struct KeyMove {
     pub(crate) look: f32,
     /// `+speed` held (cl_movespeedkey / cl_anglespeedkey modifiers).
     pub(crate) speed: bool,
+    /// `+showscores` held (`sb_showscores`): the status bar shows the solo
+    /// scoreboard instead of the stats.
+    pub(crate) showscores: bool,
 }
 
 /// Derive this frame's [`KeyMove`] from the page-held keys through the menu's
@@ -139,6 +143,7 @@ pub(crate) fn derive_key_move(menu: &Menu, held: &[bool; 256]) -> KeyMove {
         turn: if strafe { 0.0 } else { st(BIND_LEFT) - st(BIND_RIGHT) },
         look: st(BIND_LOOKUP) - st(BIND_LOOKDOWN),
         speed,
+        showscores: st(BIND_SHOWSCORES) > 0.0,
     }
 }
 
@@ -421,6 +426,35 @@ mod tests {
             clamp_pitch(75.0) > 70.0 && clamp_pitch(-75.0) == -70.0,
             "down range exceeds 70 while up range does not"
         );
+    }
+
+    /// CENSUS F11: Tab is default.cfg's `+showscores` — while it is held the
+    /// status bar shows the scorebar + Sbar_SoloScoreboard; it does not open
+    /// the menu.
+    #[test]
+    fn tab_held_shows_the_solo_scoreboard() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        let sbar = || {
+            APP.with(|c| {
+                let b = c.borrow();
+                let a = b.as_ref().unwrap();
+                let rows = 24 * a.render_w / 320; // the status strip, scaled
+                a.fb[(a.render_h - rows) * a.render_w * 4..].to_vec()
+            })
+        };
+        step(0.0);
+        let stats = sbar();
+        key_down(9); // K_TAB
+        step(0.0);
+        assert!(walk_mut(|w| w.key_move.showscores), "+showscores is held");
+        assert_eq!(menu_visible(), 0, "Tab does not open the menu");
+        let scores = sbar();
+        assert_ne!(stats, scores, "the scoreboard replaces the stats while Tab is held");
+        key_up(9);
+        step(0.0);
+        assert_eq!(sbar(), stats, "releasing Tab brings the stats back");
     }
 
     #[test]

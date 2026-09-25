@@ -517,7 +517,7 @@ pub(crate) fn step_demo(
             secrets: f.stats.secrets,
             total_secrets: f.stats.total_secrets,
             level_name: &d.demo.level_name,
-            show_scores: false,
+            show_scores: d.show_scores,
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);

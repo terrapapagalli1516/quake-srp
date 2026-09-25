@@ -884,9 +884,9 @@ pub(crate) fn step_walk(
             secrets: gcount("found_secrets"),
             total_secrets: gcount("total_secrets"),
             level_name: &level_name,
-            // Tab "show scores" isn't wired as a key yet; the dead-player branch
-            // (health <= 0) inside draw_hud_into handles the death scoreboard.
-            show_scores: false,
+            // `+showscores` held (Tab); the dead-player branch (health <= 0)
+            // inside draw_hud_into handles the death scoreboard.
+            show_scores: km.showscores,
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);

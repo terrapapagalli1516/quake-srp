@@ -7,7 +7,7 @@
 use crate::menu::{
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
     BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_RIGHT,
-    BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
+    BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
 };
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
@@ -99,6 +99,7 @@ pub(crate) fn default_bindings() -> [Option<u8>; 256] {
     bind(K_LEFTARROW, BIND_LEFT);
     bind(K_RIGHTARROW, BIND_RIGHT);
     bind(K_SPACE, BIND_JUMP);
+    bind(K_TAB, BIND_SHOWSCORES);
     bind(b'/', BIND_CHANGEWEAPON);
     bind(K_MOUSE1, BIND_ATTACK);
     // This port's established layout (overrides default.cfg's a=+lookup,
@@ -126,5 +127,10 @@ mod tests {
         assert_eq!(keynum_to_string(K_F12), "F12");
         assert_eq!(keynum_to_string(K_DEL), "DEL");
         assert_eq!(keynum_to_string(0), "UNKNOWN");
+    }
+
+    #[test]
+    fn tab_shows_the_scores_as_in_default_cfg() {
+        assert_eq!(default_bindings()[K_TAB as usize], Some(BIND_SHOWSCORES as u8));
     }
 }

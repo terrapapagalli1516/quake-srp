@@ -123,6 +123,9 @@ pub const BIND_MOVEDOWN: usize = 17;
 /// binding. `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
 pub const BIND_SIZEUP: usize = NUM_BINDNAMES;
 pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
+/// `bind TAB "+showscores"` (default.cfg): `sb_showscores` while held, so
+/// `Sbar_Draw` shows the scorebar and `Sbar_SoloScoreboard`.
+pub const BIND_SHOWSCORES: usize = NUM_BINDNAMES + 2;
 
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A

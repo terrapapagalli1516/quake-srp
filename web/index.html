@@ -193,7 +193,8 @@
     <div class="col">
       <h2>Interface</h2>
       <div class="keys">
-        <span class="k"><kbd>Esc</kbd> / <kbd>Tab</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule — use <kbd>Tab</kbd> to stay)</span>
+        <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule)</span>
+        <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
         <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys</span>
         <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
@@ -360,7 +361,7 @@ addEventListener('keydown', e => {
   // --- Customize-controls bind grab: while the Keys screen waits for a key
   //     (menu.c bind_grab), EVERY key — including Escape (cancel), Tab, arrows,
   //     Enter — is the key being defined, so route it raw to the engine before
-  //     the Esc/Tab menu handling below can steal it (M_Keys_Key's grab branch
+  //     the Esc menu handling below can steal it (M_Keys_Key's grab branch
   //     runs before the normal switch in the C too).
   if (menuVisible() && exp && exp.menu_bind_grabbing && exp.menu_bind_grabbing()) {
     const bq = quakeKey(e);
@@ -369,13 +370,13 @@ addEventListener('keydown', e => {
     return;
   }
 
-  // --- Main menu navigation. Escape OR Tab reaches the menu (opens it from the
-  //     game, or backs out within it). Tab is the fullscreen-safe alternative:
-  //     in fullscreen the browser eats Escape to exit fullscreen, so Tab lets you
-  //     still reach the menu without leaving fullscreen. When the menu is up,
-  //     Arrow Up/Down move the cursor, Enter selects — and we DON'T let those
-  //     keys also drive the game (no movement/turn while navigating the menu).
-  if ((k === 'escape' || k === 'tab') && exp && exp.menu_cancel) {
+  // --- Main menu navigation. Escape reaches the menu (default.cfg's
+  //     "togglemenu": opens it from the game, backs out within it). Tab is
+  //     default.cfg's +showscores and goes to the engine below like any bound
+  //     key. When the menu is up, Arrow Up/Down move the cursor, Enter selects —
+  //     and we DON'T let those keys also drive the game (no movement/turn while
+  //     navigating the menu).
+  if (k === 'escape' && exp && exp.menu_cancel) {
     exp.menu_cancel();
     e.preventDefault();
     return;
@@ -422,8 +423,9 @@ addEventListener('keydown', e => {
   // movement needs only the first down (keyup clears it).
   const qk = quakeKey(e);
   if (!e.repeat && qk !== null && exp && exp.key_down) exp.key_down(qk);
-  // Stop the browser's own use of the movement keys (Space/arrows scroll).
-  if (MOVE_KEYS.includes(k)) e.preventDefault();
+  // Stop the browser's own use of the movement keys (Space/arrows scroll) and
+  // of Tab (focus moves).
+  if (MOVE_KEYS.includes(k) || k === 'tab') e.preventDefault();
 });
 addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
@@ -442,7 +444,7 @@ addEventListener('keyup', e => {
 // Space/Enter (the 🔊 sound toggle was the known offender — every jump replayed
 // the test SFX). Blur in the bubble phase right after the control acted; the
 // help drawer's <summary> holds focus the same way, so it's covered too. (Tab
-// never moves focus here — it's bound to the menu — so a click is the only way
+// never moves focus here — it is +showscores, its default prevented — so a click is the only way
 // any control gains focus.)
 document.addEventListener('click', e => {
   const f = e.target.closest && e.target.closest('button, summary');
@@ -479,8 +481,7 @@ fsBtn.addEventListener('click', toggleFullscreen);
 // first Esc only releases the capture (our pointerlockchange handler then opens
 // the menu — native muscle memory still works), but a SECOND Esc — pointer
 // free — exits fullscreen itself. That second step is the browser's, not ours;
-// F toggles fullscreen deliberately and Tab reaches the menu without ever
-// touching Esc.
+// F toggles fullscreen deliberately.
 let fsHintTimer = 0;
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement) { fsHint.classList.remove('show'); return; }
