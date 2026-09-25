@@ -89,6 +89,15 @@ pub struct RenderStats {
     pub alias_models: u64,
     pub alias_accepted: u64,
     pub alias_tris: u64,
+    /// The edge renderer (`RenderOptions::edges`): edges, surfaces and spans
+    /// made per frame (summed), and the most edges / surfaces one frame made —
+    /// against id's pools, `r_maxedges` 2400 and `r_maxsurfs` 800 (the
+    /// background and the dummy surface not counted), which the port grows.
+    pub edges_emitted: u64,
+    pub surfs_emitted: u64,
+    pub spans_emitted: u64,
+    pub edges_peak: u64,
+    pub surfs_peak: u64,
 }
 
 impl RenderStats {
@@ -103,6 +112,7 @@ impl RenderStats {
         world_surf_ns: 0,
         surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0, surf_texels_baked: 0,
         alias_models: 0, alias_accepted: 0, alias_tris: 0,
+        edges_emitted: 0, surfs_emitted: 0, spans_emitted: 0, edges_peak: 0, surfs_peak: 0,
     };
 }
 

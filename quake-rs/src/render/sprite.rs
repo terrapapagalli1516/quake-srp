@@ -5,7 +5,7 @@
 //! `WinQuake/d_sprite.c`.
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image, Projection, RenderOptions};
+use super::{Camera, Image, Projection, RenderOptions, ZBuf};
 
 /// A sprite-model entity to draw as a camera-facing billboard (Quake's
 /// `mod_sprite` entities: the `s_explod.spr` explosion flash, bubbles, etc.).
@@ -31,7 +31,7 @@ pub struct SpriteInstance<'a> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_sprites(
     image: &mut Image,
-    zbuf: &mut [f32],
+    mut zbuf: ZBuf,
     cam: &Camera,
     opts: &RenderOptions,
     sprites: &[SpriteInstance],
@@ -63,6 +63,9 @@ pub(super) fn draw_sprites(
         }
         let sx = cx + focal * dot(rel, right) / vz;
         let sy = cy - yscale * dot(rel, up) / vz;
+        // The billboard faces the eye, so its 1/z is the same at every pixel:
+        // `izi = (int)(zi * 0x8000 * 0x10000)`, compared as `izi >> 16`.
+        let izi16 = ((1.0 / vz) * 32768.0 * 65536.0) as i32 >> 16;
         // 1 texel = 1 world unit; the facing billboard scales by xscale/vz across
         // and yscale/vz down. The frame `origin` is the left/up offset of its
         // top-left from the centre (Quake: up = origin[1], down =
@@ -100,9 +103,20 @@ pub(super) fn draw_sprites(
                     continue; // transparent
                 }
                 let idx = py * w + px;
-                if vz < zbuf[idx] {
+                let pass = match &mut zbuf {
+                    // D_SpriteDrawSpans: `if (*pz <= (izi >> 16)) *pz = izi >> 16`.
+                    ZBuf::Izi(zb) if zb[idx] as i32 <= izi16 => {
+                        zb[idx] = izi16 as i16;
+                        true
+                    }
+                    ZBuf::Depth(zb) if vz < zb[idx] => {
+                        zb[idx] = vz;
+                        true
+                    }
+                    _ => false,
+                };
+                if pass {
                     image.rgb[idx] = palette[texel as usize];
-                    zbuf[idx] = vz;
                 }
             }
         }
@@ -168,7 +182,7 @@ mod tests {
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, ZBuf::Depth(&mut zbuf), &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
         assert!(painted > 0, "a sprite in front must paint pixels");
         let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -186,7 +200,7 @@ mod tests {
         let pal = [[7u8, 7, 7]; 256];
         let spr = test_sprite(16, 16, 255);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, ZBuf::Depth(&mut zbuf), &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         assert!(img.rgb.iter().all(|&p| p == bg), "index-255 texels are transparent (nothing painted)");
         assert!(zbuf.iter().all(|&z| z == f32::INFINITY), "transparent sprite writes no depth");
     }
@@ -203,7 +217,7 @@ mod tests {
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, ZBuf::Depth(&mut zbuf), &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         assert!(img.rgb.iter().all(|&p| p == bg), "a sprite behind a nearer wall is z-tested out");
     }
 }

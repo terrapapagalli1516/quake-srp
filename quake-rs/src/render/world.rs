@@ -27,7 +27,7 @@ use super::warp::TurbTable;
 /// side-flipped: flipping the normal and the distance together changes
 /// nothing) and texinfo, seen from `eye` in the face's model space. `None` for
 /// a missing plane or an eye on the plane (the face is edge-on).
-fn face_grads(
+pub(super) fn face_grads(
     bsp: &Bsp,
     face: &crate::bsp::DFace,
     view: &ScreenProj,

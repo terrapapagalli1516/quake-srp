@@ -49,6 +49,7 @@ use warp::TurbTable;
 use world::{draw_submodel, draw_world_textured};
 
 mod view;
+mod edge;
 mod raster;
 mod light;
 mod surf;
@@ -200,6 +201,9 @@ thread_local! {
     /// The world z-buffer (`d_pzbuffer`), re-filled by every
     /// [`render_scene_ext_sprited`].
     static ZBUF: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// id's `d_pzbuffer` for the edge renderer: never cleared, since every
+    /// frame's world spans write every pixel of it.
+    static IZBUF: std::cell::RefCell<Vec<i16>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Hand a finished frame's pixel buffer back so the next frame reuses it
@@ -356,6 +360,35 @@ pub struct RenderOptions {
     /// (`D_DrawSpans16`, `Turbulent8`); that is the default. The browser's
     /// `wasm_exactpersp 1` sets this.
     pub exact_perspective: bool,
+    /// The world pass: id's edge-sorted span renderer (`r_edge.c`; `true`) —
+    /// every face and brush-entity face clipped into one edge list, spans
+    /// emitted per scanline for the nearest surface, each pixel drawn once
+    /// with no z test, and the 16-bit `1/z` of each (`d_pzbuffer`) left for
+    /// the entities to test — or the port's earlier polygon walker (`false`):
+    /// faces front to back against an f32 z-buffer, the entities testing
+    /// that depth.
+    pub edges: bool,
+}
+
+/// The frame's depth buffer as the entity passes (alias models, the gun,
+/// particles, sprites) test and write it.
+pub(crate) enum ZBuf<'a> {
+    /// The polygon walker's view depth: f32, smaller is nearer, cleared to
+    /// infinity every frame.
+    Depth(&'a mut [f32]),
+    /// id's `d_pzbuffer`: `(1/z * 0x8000 * 0x10000) >> 16` as a short, larger
+    /// is nearer, every pixel written by the world's spans (`D_DrawZSpans`).
+    Izi(&'a mut [i16]),
+}
+
+impl ZBuf<'_> {
+    /// The same buffer, borrowed again for one pass.
+    pub(crate) fn reborrow(&mut self) -> ZBuf<'_> {
+        match self {
+            ZBuf::Depth(z) => ZBuf::Depth(z),
+            ZBuf::Izi(z) => ZBuf::Izi(z),
+        }
+    }
 }
 
 /// A view's place on the screen ([`RenderOptions::screen`]): its top-left
@@ -371,7 +404,7 @@ pub struct ScreenPlace {
 
 impl Default for RenderOptions {
     fn default() -> RenderOptions {
-        RenderOptions { pixel_aspect: 1.0, screen: None, exact_perspective: false }
+        RenderOptions { pixel_aspect: 1.0, screen: None, exact_perspective: false, edges: false }
     }
 }
 
@@ -695,17 +728,11 @@ pub fn render_bsp_textured(
     h: usize,
     palette: &[[u8; 3]; 256],
 ) -> Image {
-    let mut image = Image::new(w, h, [10, 10, 14]);
-    if w == 0 || h == 0 {
-        return image;
-    }
-    let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     // Static (time 0) world: liquids/sky show their texture but do not advance.
-    let turb = TurbTable::new();
-    let opts = RenderOptions::default();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, &opts, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None);
-    resolve_sky_spans(&mut image, &zbuf, bsp, palette);
-    image
+    render_scene_ext_sprited(
+        bsp, cam, w, h, palette, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[],
+        &RenderOptions::default(),
+    )
 }
 
 /// Render `bsp` with its real miptextures (as [`render_bsp_textured`]) and then
@@ -880,6 +907,12 @@ pub fn render_scene_ext_sprited(
     sprites: &[SpriteInstance],
     opts: &RenderOptions,
 ) -> Image {
+    if opts.edges {
+        return render_scene_edges(
+            bsp, cam, w, h, palette, models, bmodels, external, viewmodel, time, particles, dlights,
+            light_styles, colormap, sprites, opts,
+        );
+    }
     // The frame's buffers, kept across frames (see [`recycle_image`]) and
     // filled exactly as fresh ones.
     let mut image = Image::reused(w, h, [10, 10, 14]);
@@ -934,29 +967,99 @@ pub fn render_scene_ext_sprited(
     // The sky, span by span, now that every brush surface that can cover it has
     // been drawn (id: `D_DrawSkyScans8` inside `D_DrawSurfaces`, before entities).
     resolve_sky_spans(&mut image, &zbuf, bsp, palette);
+    draw_entities(
+        &mut image, ZBuf::Depth(&mut zbuf), bsp, cam, palette, models, viewmodel, time, particles, dlights,
+        light_styles, colormap, sprites, opts,
+    );
+    ZBUF.with(|z| *z.borrow_mut() = zbuf);
+    image
+}
+
+/// The entity passes after the world: alias models, particles, sprites and the
+/// gun, each testing (and writing) the frame's depth buffer `zbuf`.
+#[allow(clippy::too_many_arguments)]
+fn draw_entities(
+    image: &mut Image,
+    mut zbuf: ZBuf,
+    bsp: &Bsp,
+    cam: &Camera,
+    palette: &[[u8; 3]; 256],
+    models: &[ModelInstance],
+    viewmodel: Option<Viewmodel>,
+    time: f32,
+    particles: &[(Vec3, u8)],
+    dlights: &[crate::dlight::DynamicLight],
+    light_styles: &[f32; LIGHTSTYLES],
+    colormap: Option<&[u8]>,
+    sprites: &[SpriteInstance],
+    opts: &RenderOptions,
+) {
+    let (w, h) = (image.w, image.h);
     let ta = stats_on().then(StatInstant::now);
     for inst in models {
-        draw_alias_model(&mut image, &mut zbuf, bsp, cam, opts, inst, palette, dlights, light_styles, time, colormap);
+        draw_alias_model(image, zbuf.reborrow(), bsp, cam, opts, inst, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = ta { stat(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
     // Particles draw after the world/models, z-tested against the same buffer so
     // walls occlude them. (id draws them after the gun; with the gun's tripled
     // 1/z in the shared z-buffer the order only matters on exact ties.)
     let tp = stats_on().then(StatInstant::now);
-    draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h, opts.aspect());
+    part::draw_particles_z(image, zbuf.reborrow(), cam, particles, palette, w, h, opts.aspect());
     if let Some(t) = tp { stat(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
     // Sprite-model entities (explosion flash, bubbles) — camera-facing billboards,
     // z-tested against the same buffer, drawn after models and before the viewmodel.
     let tsp = stats_on().then(StatInstant::now);
-    draw_sprites(&mut image, &mut zbuf, cam, opts, sprites, palette, time, w, h);
+    draw_sprites(image, zbuf.reborrow(), cam, opts, sprites, palette, time, w, h);
     if let Some(t) = tsp { stat(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
     // The weapon: R_DrawViewModel, after the entities.
     let tv = stats_on().then(StatInstant::now);
     if let Some(vm) = viewmodel {
-        draw_viewmodel(&mut image, &mut zbuf, bsp, cam, opts, &vm, palette, dlights, light_styles, time, colormap);
+        draw_viewmodel(image, zbuf.reborrow(), bsp, cam, opts, &vm, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
-    ZBUF.with(|z| *z.borrow_mut() = zbuf);
+}
+
+/// [`render_scene_ext_sprited`] with id's edge renderer for the world
+/// ([`RenderOptions::edges`], `R_RenderView_`): `R_EdgeDrawing` — the world
+/// and every brush entity through one edge list, each pixel of the view drawn
+/// once, its `1/z` into the never-cleared 16-bit `d_pzbuffer` — then the
+/// entities against that buffer. No clear of the image or the z-buffer: the
+/// spans cover the view.
+#[allow(clippy::too_many_arguments)]
+fn render_scene_edges(
+    bsp: &Bsp,
+    cam: &Camera,
+    w: usize,
+    h: usize,
+    palette: &[[u8; 3]; 256],
+    models: &[ModelInstance],
+    bmodels: &[BModelInstance],
+    external: &[ExternalBModel],
+    viewmodel: Option<Viewmodel>,
+    time: f32,
+    particles: &[(Vec3, u8)],
+    dlights: &[crate::dlight::DynamicLight],
+    light_styles: &[f32; LIGHTSTYLES],
+    colormap: Option<&[u8]>,
+    sprites: &[SpriteInstance],
+    opts: &RenderOptions,
+) -> Image {
+    let mut image = Image::reused_uncleared(w, h);
+    if w == 0 || h == 0 {
+        return image;
+    }
+    let mut izbuf = IZBUF.with(|z| std::mem::take(&mut *z.borrow_mut()));
+    izbuf.resize(w.saturating_mul(h), 0);
+    let turb = TurbTable::new();
+    edge::render_edges(
+        &mut image, &mut izbuf, bsp, cam, opts, palette, &turb, time, light_styles, dlights, colormap, bmodels,
+        external,
+    );
+    draw_entities(
+        &mut image, ZBuf::Izi(&mut izbuf), bsp, cam, palette, models, viewmodel, time, particles, dlights,
+        light_styles, colormap, sprites, opts,
+    );
+    IZBUF.with(|z| *z.borrow_mut() = izbuf);
     image
 }
 
@@ -1014,6 +1117,14 @@ pub fn demo_room() -> Bsp {
         texinfo_index: i16,
         ptype: i32,
     ) {
+        // Wind the quad as qbsp does: clockwise seen from its front (the side
+        // the normal points to), the order id's edge renderer reads leading
+        // and trailing edges from (`R_EmitEdge`).
+        let mut corners = corners;
+        let (e1, e2) = (sub(corners[1], corners[0]), sub(corners[2], corners[1]));
+        if dot(cross(e1, e2), normal) > 0.0 {
+            corners.reverse();
+        }
         let base_vtx = vertexes.len() as u16;
         for c in corners {
             vertexes.push(DVertex { point: c });
@@ -1516,3 +1627,4 @@ mod tests {
         bsp
     }
 }
+

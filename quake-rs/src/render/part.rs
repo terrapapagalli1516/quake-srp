@@ -5,7 +5,7 @@
 //! The particle simulation itself is [`crate::particles`].
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image, Projection};
+use super::{Camera, Image, Projection, ZBuf};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
 /// against the shared `zbuf`, porting the visible result of Quake's software
@@ -42,6 +42,23 @@ use super::{Camera, Image, Projection};
 pub fn draw_particles(
     image: &mut Image,
     zbuf: &mut [f32],
+    cam: &Camera,
+    particles: &[(Vec3, u8)],
+    palette: &[[u8; 3]; 256],
+    w: usize,
+    h: usize,
+    pixel_aspect: f32,
+) {
+    draw_particles_z(image, ZBuf::Depth(zbuf), cam, particles, palette, w, h, pixel_aspect);
+}
+
+/// [`draw_particles`] against either depth buffer: with id's 16-bit
+/// `d_pzbuffer` ([`ZBuf::Izi`]) the test is `D_DrawParticle`'s — `izi =
+/// (int)(zi * 0x8000)`, drawn where `pz[0] <= izi`, which it writes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_particles_z(
+    image: &mut Image,
+    mut zbuf: ZBuf,
     cam: &Camera,
     particles: &[(Vec3, u8)],
     palette: &[[u8; 3]; 256],
@@ -89,6 +106,9 @@ pub fn draw_particles(
         let pix = pix.clamp(d_pix_min, d_pix_max);
 
         let rgb = palette[color as usize];
+        // D_DrawParticle's 16-bit 1/z: `zi = 1.0 / transformed[2]`, `izi =
+        // (int)(zi * 0x8000)`.
+        let izi = ((1.0 / vz) * 32768.0) as i32;
 
         // Draw a `pix`x`pix` square. The C anchors the square at `(u,v)` and
         // extends right/down; we centre it on the projected point (`half` each
@@ -108,12 +128,25 @@ pub fn draw_particles(
                     continue;
                 }
                 let idx = (py as usize) * w + (px as usize);
-                if let Some(z) = zbuf.get_mut(idx) {
-                    if vz < *z {
-                        *z = vz;
-                        if let Some(dst) = image.rgb.get_mut(idx) {
-                            *dst = rgb;
+                let pass = match &mut zbuf {
+                    ZBuf::Izi(zb) => match zb.get_mut(idx) {
+                        Some(z) if *z as i32 <= izi => {
+                            *z = izi as i16;
+                            true
                         }
+                        _ => false,
+                    },
+                    ZBuf::Depth(zb) => match zb.get_mut(idx) {
+                        Some(z) if vz < *z => {
+                            *z = vz;
+                            true
+                        }
+                        _ => false,
+                    },
+                };
+                if pass {
+                    if let Some(dst) = image.rgb.get_mut(idx) {
+                        *dst = rgb;
                     }
                 }
             }

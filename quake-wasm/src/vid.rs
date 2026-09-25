@@ -101,6 +101,8 @@ pub(crate) fn render_options(
         pixel_aspect: render::vid_aspect(render_w, render_h, DISPLAY_ASPECT),
         screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: render_w, vid_h: render_h }),
         exact_perspective: crate::extras::extras().exact_persp,
+        // The world pass: the engine's default (id's edge renderer).
+        ..render::RenderOptions::default()
     }
 }
 

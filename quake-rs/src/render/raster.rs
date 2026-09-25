@@ -408,7 +408,7 @@ impl PolyGrads {
 /// `s`/`t` from it either at every pixel ([`Persp::Exact`]) or at 16-pixel
 /// segment ends ([`Persp::Spans16`], [`Span::st_at`]).
 #[derive(Clone, Copy)]
-struct Span {
+pub(super) struct Span {
     y: usize,
     x0: usize,
     x1: usize,
@@ -493,11 +493,31 @@ fn z_test_runs(zrow: &mut [f32], sp: &Span, runs: &mut Vec<(usize, usize)>) -> u
 /// A surface-cache block's fixed-point frame for [`span16_cached`]: `sadjust`/
 /// `tadjust` (the eye's block coordinate, 16.16) and `bbextents`/`bbextentt`
 /// (`(extent << 16) - 1`: the last position inside the surface).
-struct BlockFixed {
+pub(super) struct BlockFixed {
     sadjust: i64,
     tadjust: i64,
     bbextents: i64,
     bbextentt: i64,
+}
+
+impl BlockFixed {
+    /// The frame of a `bw x bh` block whose texel `(0, 0)` is the surface's
+    /// `texmins` (at the block's mip level, as `grads`): the span routines'
+    /// 16.16 texel arithmetic, `z = 0x10000 / zi`, then `s = (int)(sdivz * z) +
+    /// sadjust` — the eye-relative part truncated toward zero, the eye's block
+    /// coordinate `sadjust` rounded — and the texel `s >> 16`. In f64, so an
+    /// exact texel is the perspective one up to id's own 1/65536 steps.
+    /// `D_CalcGradients`' `bbextents = ((extents << 16) >> miplevel) - 1`: the
+    /// block is `extents >> miplevel` texels a side (`face_surf_block`).
+    pub(super) fn new(grads: &PolyGrads, texmins: [f32; 2], bw: usize, bh: usize) -> BlockFixed {
+        let st_eye = grads.st_eye;
+        BlockFixed {
+            sadjust: ((st_eye[0] - texmins[0] as f64) * 65536.0 + 0.5).floor() as i64,
+            tadjust: ((st_eye[1] - texmins[1] as f64) * 65536.0 + 0.5).floor() as i64,
+            bbextents: ((bw as i64) << 16) - 1,
+            bbextentt: ((bh as i64) << 16) - 1,
+        }
+    }
 }
 
 /// `D_DrawSpans16` (d_draw16.s) for one polygon row over a surface-cache
@@ -850,50 +870,79 @@ fn raster_turb16(
     turb: &TurbTable,
     time: f32,
 ) {
-    const BBEXTENTS: i64 = (16384 << 16) - 1;
     let (w, h) = (image.w, image.h);
-    let st_eye = grads.st_eye;
-    let sadjust = ((st_eye[0] + 8192.0) * 65536.0 + 0.5).floor() as i64;
-    let tadjust = ((st_eye[1] + 8192.0) * 65536.0 + 0.5).floor() as i64;
+    let (sadjust, tadjust) = turb_adjust(grads);
     let phase = turb_phase(time);
-    let (tw_i, th_i) = (tw as i32, th as i32);
     let mut runs = ROW_RUNS.with(|r| std::mem::take(&mut *r.borrow_mut()));
     scan_poly(poly, w, h, grads, |sp| {
         let row = sp.y * w;
         z_test_runs(&mut zbuf[row + sp.x0..row + sp.x1], &sp, &mut runs);
         let crow = &mut image.rgb[row + sp.x0..row + sp.x1];
         for &(run, end) in &runs {
-            let (s0, t0) = sp.st_at(run, sadjust, tadjust);
-            let (mut s, mut t) = (s0.clamp(0, BBEXTENTS), t0.clamp(0, BBEXTENTS));
-            let mut k0 = run;
-            while k0 < end {
-                let n = (end - k0).min(16);
-                let (sn, tn, ss, ts);
-                if k0 + n < end {
-                    let (a, b) = sp.st_at(k0 + 16, sadjust, tadjust);
-                    (sn, tn) = (a.clamp(16, BBEXTENTS), b.clamp(16, BBEXTENTS));
-                    (ss, ts) = ((sn - s) >> 4, (tn - t) >> 4);
-                } else {
-                    let (a, b) = sp.st_at(k0 + n - 1, sadjust, tadjust);
-                    (sn, tn) = (a.clamp(16, BBEXTENTS), b.clamp(16, BBEXTENTS));
-                    (ss, ts) = if n > 1 { ((sn - s) / (n as i64 - 1), (tn - t) / (n as i64 - 1)) } else { (0, 0) };
-                }
-                // In the C's `int`s from here: the masked start and the steps.
-                let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
-                let (ss, ts) = (ss as i32, ts as i32);
-                for c in &mut crow[k0..k0 + n] {
-                    let (sturb, tturb) = turb.texel(phase, a, b);
-                    let texel = pixels.get(tturb.rem_euclid(th_i) as usize * tw + sturb.rem_euclid(tw_i) as usize);
-                    *c = palette[texel.copied().unwrap_or(0) as usize];
-                    a = a.wrapping_add(ss);
-                    b = b.wrapping_add(ts);
-                }
-                (s, t) = (sn, tn);
-                k0 += n;
-            }
+            turb16_run(crow, &sp, run, end, sadjust, tadjust, pixels, tw, th, palette, turb, phase);
         }
     });
     ROW_RUNS.with(|r| *r.borrow_mut() = runs);
+}
+
+/// A liquid's `sadjust`/`tadjust`: the eye's 16.16 coordinates in the frame
+/// `Mod_LoadFaces` gives turbulent surfaces (`texturemins` -8192).
+fn turb_adjust(grads: &PolyGrads) -> (i64, i64) {
+    let st_eye = grads.st_eye;
+    (
+        ((st_eye[0] + 8192.0) * 65536.0 + 0.5).floor() as i64,
+        ((st_eye[1] + 8192.0) * 65536.0 + 0.5).floor() as i64,
+    )
+}
+
+/// `Turbulent8` over pixels `run..end` of the span `sp` (one of id's spans):
+/// see [`raster_turb16`]. `crow` is the span's row from its first pixel.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn turb16_run(
+    crow: &mut [[u8; 3]],
+    sp: &Span,
+    run: usize,
+    end: usize,
+    sadjust: i64,
+    tadjust: i64,
+    pixels: &[u8],
+    tw: usize,
+    th: usize,
+    palette: &[[u8; 3]; 256],
+    turb: &TurbTable,
+    phase: usize,
+) {
+    const BBEXTENTS: i64 = (16384 << 16) - 1;
+    let (tw_i, th_i) = (tw as i32, th as i32);
+    let (s0, t0) = sp.st_at(run, sadjust, tadjust);
+    let (mut s, mut t) = (s0.clamp(0, BBEXTENTS), t0.clamp(0, BBEXTENTS));
+    let mut k0 = run;
+    while k0 < end {
+        let n = (end - k0).min(16);
+        let (sn, tn, ss, ts);
+        if k0 + n < end {
+            let (a, b) = sp.st_at(k0 + 16, sadjust, tadjust);
+            (sn, tn) = (a.clamp(16, BBEXTENTS), b.clamp(16, BBEXTENTS));
+            (ss, ts) = ((sn - s) >> 4, (tn - t) >> 4);
+        } else {
+            let (a, b) = sp.st_at(k0 + n - 1, sadjust, tadjust);
+            (sn, tn) = (a.clamp(16, BBEXTENTS), b.clamp(16, BBEXTENTS));
+            (ss, ts) = if n > 1 { ((sn - s) / (n as i64 - 1), (tn - t) / (n as i64 - 1)) } else { (0, 0) };
+        }
+        // In the C's `int`s from here: the masked start and the steps.
+        let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
+        let (ss, ts) = (ss as i32, ts as i32);
+        for c in &mut crow[k0..k0 + n] {
+            let (sturb, tturb) = turb.texel(phase, a, b);
+            let texel = pixels.get(tturb.rem_euclid(th_i) as usize * tw + sturb.rem_euclid(tw_i) as usize);
+            *c = palette[texel.copied().unwrap_or(0) as usize];
+            a = a.wrapping_add(ss);
+            b = b.wrapping_add(ts);
+        }
+        (s, t) = (sn, tn);
+        k0 += n;
+    }
 }
 
 /// A wall whose lit+colormapped surface block is already baked (see
@@ -924,24 +973,11 @@ pub(super) fn raster_poly_cached(
     if zbuf.len() < w * h || image.rgb.len() < w * h {
         return;
     }
-    let st_eye = grads.st_eye;
     let (bw_i, bh_i) = (bw as i64, bh as i64);
-    // The span routines' 16.16 texel arithmetic: `z = 0x10000 / zi`, then
-    // `s = (int)(sdivz * z) + sadjust` — the eye-relative part truncated toward
-    // zero, the eye's block coordinate `sadjust` rounded — and the texel
-    // `s >> 16`. In f64, so an exact texel is the perspective one up to id's
-    // own 1/65536 steps. (The z-buffer's `z * 2^-16` is a power-of-two scale:
-    // bit-identical to `1.0 / zi`, which the other span loops store.)
-    let sadjust = ((st_eye[0] - texmins[0] as f64) * 65536.0 + 0.5).floor() as i64;
-    let tadjust = ((st_eye[1] - texmins[1] as f64) * 65536.0 + 0.5).floor() as i64;
-    // `D_CalcGradients`' `bbextents = ((extents << 16) >> miplevel) - 1`: the
-    // block is `extents >> miplevel` texels a side (`face_surf_block`).
-    let fx = BlockFixed {
-        sadjust,
-        tadjust,
-        bbextents: (bw_i << 16) - 1,
-        bbextentt: (bh_i << 16) - 1,
-    };
+    // (The z-buffer's `z * 2^-16` below is a power-of-two scale: bit-identical
+    // to `1.0 / zi`, which the other span loops store.)
+    let fx = BlockFixed::new(grads, texmins, bw, bh);
+    let (sadjust, tadjust) = (fx.sadjust, fx.tadjust);
     // Local written-pixel tally (overdraw metric), folded into the profiler ONCE
     // at the end so the hot loop never touches a thread-local.
     let mut drawn = 0u64;
@@ -980,6 +1016,156 @@ pub(super) fn raster_poly_cached(
     });
     ROW_RUNS.with(|r| *r.borrow_mut() = runs);
     stat(|s| s.world_pixels += drawn);
+}
+
+// ---------------------------------------------------------------------------
+// The span routines of `D_DrawSurfaces` (d_edge.c), for id's own spans
+// ---------------------------------------------------------------------------
+//
+// `edge.rs` hands each surface its spans — the runs of a scanline where it is
+// the nearest surface, cut by `R_ScanEdges` — and every pixel of the view is in
+// exactly one of them, so these draw with no z test. A span is `count` pixels
+// from `(u, v)`; `crow` is the image row from `u`. The texel arithmetic is the
+// polygon walker's above (a surface's gradients evaluated at the span's first
+// pixel centre), so a surface drawn over the same run gets the same texels.
+
+/// The accumulators of the span of `count` pixels at `(u, v)` from `grads`
+/// (pixel `u`'s centre is `u + 0.5` in the gradients' screen coordinates,
+/// id's `u`): `D_DrawSpans8`'s `du = (float)pspan->u`, `dv = (float)pspan->v`.
+pub(super) fn span_at(grads: &PolyGrads, u: usize, v: usize, count: usize) -> Span {
+    let (cx, cy) = (u as f64 + 0.5, v as f64 + 0.5);
+    Span {
+        y: v,
+        x0: u,
+        x1: u + count,
+        zi: grads.zi.at(cx, cy),
+        sz: grads.sz.at(cx, cy),
+        tz: grads.tz.at(cx, cy),
+        dzi: grads.zi.dx,
+        dsz: grads.sz.dx,
+        dtz: grads.tz.dx,
+    }
+}
+
+/// `(*d_drawspans)` on a surface-cache block: `D_DrawSpans16` (the default) or
+/// the port's exact-perspective extra, over one span. As [`raster_poly_cached`]
+/// without the z test.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn span_cached(
+    crow: &mut [[u8; 3]],
+    sp: &Span,
+    fx: &BlockFixed,
+    block: &[u8],
+    bw: usize,
+    bh: usize,
+    palette: &[[u8; 3]; 256],
+    persp: Persp,
+) {
+    if persp == Persp::Spans16 {
+        span16_cached(crow, sp, fx, block, bw, palette, &[(0, crow.len())]);
+        return;
+    }
+    let (bw_i, bh_i) = (bw as i64, bh as i64);
+    let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
+    for c in crow.iter_mut() {
+        // No z test: a non-positive `zi` (rounding at a clipped edge) saturates
+        // and the clamp keeps the read in the block.
+        let z = 65536.0 / zi;
+        let bx = ((((sz * z) as i64) + fx.sadjust) >> 16).clamp(0, bw_i - 1) as usize;
+        let by = ((((tz * z) as i64) + fx.tadjust) >> 16).clamp(0, bh_i - 1) as usize;
+        *c = palette[block[by * bw + bx] as usize];
+        zi += sp.dzi;
+        sz += sp.dsz;
+        tz += sp.dtz;
+    }
+}
+
+/// `Turbulent8` (or, as the extra, the exact per-pixel warp) over one span of
+/// a liquid surface: [`raster_turb16`] / [`raster_poly_tex`]'s `Turb` mode
+/// without the z test.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn span_turb(
+    crow: &mut [[u8; 3]],
+    sp: &Span,
+    grads: &PolyGrads,
+    pixels: &[u8],
+    tw: usize,
+    th: usize,
+    palette: &[[u8; 3]; 256],
+    turb: &TurbTable,
+    time: f32,
+    persp: Persp,
+) {
+    if tw == 0 || th == 0 || pixels.len() < tw * th {
+        return;
+    }
+    if persp == Persp::Spans16 {
+        let (sadjust, tadjust) = turb_adjust(grads);
+        turb16_run(crow, sp, 0, crow.len(), sadjust, tadjust, pixels, tw, th, palette, turb, turb_phase(time));
+        return;
+    }
+    let st_eye = grads.st_eye;
+    let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
+    for c in crow.iter_mut() {
+        let z = 1.0 / zi;
+        let (s2, t2) = warp_st(turb, (sz * z + st_eye[0]) as f32, (tz * z + st_eye[1]) as f32, time);
+        let tx = s2.rem_euclid(tw as i32) as usize;
+        let ty = t2.rem_euclid(th as i32) as usize;
+        *c = palette[pixels.get(ty * tw + tx).copied().unwrap_or(0) as usize];
+        zi += sp.dzi;
+        sz += sp.dsz;
+        tz += sp.dtz;
+    }
+}
+
+/// A wall with no surface-cache block (no colormap, no lightmap, or over the
+/// block size cap — never in id's maps), per pixel: [`raster_poly_tex`]'s
+/// `Normal` mode without the z test.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn span_tex(
+    crow: &mut [[u8; 3]],
+    sp: &Span,
+    grads: &PolyGrads,
+    pixels: &[u8],
+    tw: usize,
+    th: usize,
+    palette: &[[u8; 3]; 256],
+    shade: f32,
+    lightmap: Option<&LightMap>,
+    colormap: Option<&[u8]>,
+) {
+    if tw == 0 || th == 0 || pixels.len() < tw * th {
+        return;
+    }
+    let colormap = colormap.filter(|cm| cm.len() >= COLORMAP_LEN);
+    let st_eye = grads.st_eye;
+    let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
+    for c in crow.iter_mut() {
+        let z = 1.0 / zi;
+        let s = (sz * z + st_eye[0]) as f32;
+        let t = (tz * z + st_eye[1]) as f32;
+        let tx = (s as i64).rem_euclid(tw as i64) as usize;
+        let ty = (t as i64).rem_euclid(th as i64) as usize;
+        let texel = pixels.get(ty * tw + tx).copied().unwrap_or(0) as usize;
+        let brightness = match lightmap {
+            Some(lm) => lm.factor_at(s, t),
+            None => shade,
+        };
+        *c = match colormap {
+            Some(cm) => palette[cm[colormap_row(brightness) * 256 + texel] as usize],
+            None => {
+                let rgb = palette[texel];
+                [
+                    (rgb[0] as f32 * brightness).clamp(0.0, 255.0) as u8,
+                    (rgb[1] as f32 * brightness).clamp(0.0, 255.0) as u8,
+                    (rgb[2] as f32 * brightness).clamp(0.0, 255.0) as u8,
+                ]
+            }
+        };
+        zi += sp.dzi;
+        sz += sp.dsz;
+        tz += sp.dtz;
+    }
 }
 
 #[cfg(test)]

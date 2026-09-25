@@ -205,7 +205,7 @@ impl SkySpans {
 /// `(next - cur) >> 5` between; the last segment steps by an integer division
 /// over its `count - 1` so it ends exactly on the span's last pixel.
 #[allow(clippy::too_many_arguments)]
-fn draw_sky_span(
+pub(super) fn draw_sky_span(
     out: &mut [[u8; 3]],
     u: i32,
     v: i32,
@@ -260,12 +260,7 @@ pub(super) fn resolve_sky_spans(image: &mut Image, zbuf: &[f32], bsp: &Bsp, pale
     SKY_SPANS_SCRATCH.with(|cell| {
         let mut sp = cell.borrow_mut();
         let (w, h) = (image.w, image.h);
-        let sky_tex = bsp
-            .textures
-            .iter()
-            .rev()
-            .flatten()
-            .find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty());
+        let sky_tex = sky_texture(bsp);
         if let (Some(view), Some(mt), true) = (sp.view, sky_tex, sp.w == w && sp.h == h) {
             let tw = mt.width as usize;
             for y in sp.lo..sp.hi.min(h) {
@@ -292,6 +287,16 @@ pub(super) fn resolve_sky_spans(image: &mut Image, zbuf: &[f32], bsp: &Bsp, pale
         }
         sp.reset(w, h);
     });
+}
+
+/// `r_skysource`'s miptexture: `R_InitSky` runs for every `sky*` miptexture
+/// `Mod_LoadTextures` loads, so the map's last one wins.
+pub(super) fn sky_texture(bsp: &Bsp) -> Option<&crate::bsp::MipTex> {
+    bsp.textures
+        .iter()
+        .rev()
+        .flatten()
+        .find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty())
 }
 
 thread_local! {
