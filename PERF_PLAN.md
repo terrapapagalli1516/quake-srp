@@ -432,6 +432,16 @@ The fidelity classes are:
   - `getContext('2d', {alpha: false, desynchronized: true})`. The second flag also cuts a frame of
     compositor latency.
   - After B5: a WebGL palette texture, which uploads 1 byte per pixel plus 256 colours.
+- **Done** (branch `quake/host`): the page presents an `ImageData` built over the framebuffer in
+  wasm memory (rebuilt when `memory.buffer`, the pointer or the size changes), on an
+  `alpha: false` context; `image-rendering: pixelated` unchanged. The page's per-frame work
+  outside `step` at 1280×800 (60 Hz headless, two sittings of 3 × 4 s): **0.34–0.37 → 0.13–0.14
+  ms**. `alpha: false` alone measured neutral (0.143–0.149 without it). A present probe hashes
+  the canvas against the wasm framebuffer through a demo, a JS `memory.grow`, a map load and a
+  resolution change: equal everywhere, and equal to the old copy path. `desynchronized` is
+  **opt-in** (`index.html?lowlatency`): neutral and identical in headless, but headless cannot
+  show what it changes (Chrome on Windows/ChromeOS skips the compositor, which can tear), so it
+  is not the default.
 
 ### C. Entities
 
@@ -500,6 +510,19 @@ The fidelity classes are:
     Document that tolerance as the only deviation.
 - **Where:** in the page's `frame()`, or as a gate inside `step()`, which is safer for other hosts.
 - **Gain:** half the work on 120/144 Hz displays; nothing at 60 Hz.
+- **Done** (branch `quake/host`): the gate is inside `step()` (`host_filter_time`), which now
+  returns 1 when a frame ran and 0 when the cap skipped the call; the page presents only on 1.
+  `realtime` still takes every call's time, `oldrealtime` jumps to `realtime` on a run (the C's
+  dropped overshoot), `dt = 0` stays the automation's always-render frozen frame. Tolerance
+  **1 ms**, mid-window: above 0.56 ms a 75 Hz display runs every refresh, below 1.39 ms 165 and
+  240 Hz stay at or under 72 fps (half a 144 Hz vsync, 3.5 ms, would give 82.5 and 80). Unit
+  tests drive 0.1 ms-coarsened rAF stamps: 60 → 60, 75 → 75 (the tolerance's one overshoot),
+  90 → 45, 100 → 50, 120 → 60, 144 → 72, 165 → 55, 240 → 60, 360 → 72 fps, each at one fixed
+  vsync count per frame; jittered 144 Hz stays at 72; game time equals real time. Headless:
+  60 Hz vsync unchanged (60.2 host frames/s both); uncapped rAF at 320×200, step CPU **952 →
+  ~150 ms per second** (606 → ~47 host frames/s; uncapped headless rAF is not a display, so its
+  rate is not a refresh rate). Bench hashes identical; `bench.py` realigns the gate before a
+  fixed run and its `--live` counts skipped refreshes.
 
 **D2. Resolve hot entity fields once.** *(byte-identical)*
 
@@ -522,6 +545,11 @@ The fidelity classes are:
   - Memory: 81 MB → 175 MB after four map loads.
 - **Mechanism:** `Pak::from_static(&'static [u8])`, or a `Source::Static` variant, cloned as a
   cheap handle.
+- **Done** (branch `quake/host`): `Pak::from_static` over a `Source::Static` image; the wasm
+  `pak()` uses it, so every `Pak` clone (Walk, DemoPlay, `Server::with_pak`) copies only the
+  directory. Measured in headless Chromium: linear memory after boot **81.4 → 52.9 MB**, after
+  `map e1m1`…`map e1m4` **170.8 → 61.5 MB**; each `map` command 4–5 ms faster (e1m1 20.2 →
+  16.4 ms). Framebuffer hashes and goldens identical. `server.rs` untouched.
 
 **D4. Delivery.** *(neutral)*
 
@@ -533,6 +561,19 @@ The fidelity classes are:
   re-downloads 18.7 MB. The page would fetch `pak0.pak` separately, cacheable, and copy it in
   through an alloc export, the same pattern as `sav_alloc`.
 - **`wasm-opt -O3`** as an optional deploy step (§6).
+- **Done** (branch `quake/host`), compression + streaming:
+  - `miniserve -C` compresses on the fly: brotli 8.6 MB (Chrome's pick), gzip 9.6, zstd 8.3, for
+    ~0.4 s of server CPU per download. README's browser section has the command. First frame,
+    headless at an emulated 50 Mbit/s: 3.51 s → 1.76 s; on localhost it is a loss (0.19 → 0.54 s).
+  - The page streams: a byte-counting `TransformStream` feeds `instantiateStreaming` (a
+    pass-through rather than a `tee`, so nothing is buffered twice), re-wrapped as an
+    `application/wasm` `Response`, so a wrong server MIME type still streams. No 19 MB JS copy,
+    and the 30 ms "let the bar paint" pause is gone. Local first frame 218–223 → 191–196 ms
+    (three interleaved runs of 7). Browsers without `instantiateStreaming` or `TransformStream`
+    keep the buffered path. Checked: right MIME, `application/octet-stream`, no streaming API, and
+    gzip with a compressed `Content-Length` (the bar now shows only the MB counter when a
+    `Content-Encoding` is set). `bench.py` hooks both entry points.
+  - Not done: the pak split and `wasm-opt`.
 
 ---
 

@@ -1123,41 +1123,70 @@ function setProgress(received, total) {
     setStatus(`downloading engine… ${MB(received)} MB`);
   }
 }
+function downloadDone(bytes) {
+  bootFill.classList.remove('indet');
+  bootFill.style.width = '100%';
+  setStatus('instantiating ' + (bytes / 1048576 | 0) + ' MB WebAssembly…');
+}
 
-// Fetch the wasm as a streamed byte buffer, reporting progress per chunk. Falls
-// back to a one-shot arrayBuffer() when the body isn't streamable (old engines).
-async function fetchWasmBytes() {
+// Fetch and instantiate the engine. Streaming path: the body flows through a
+// byte-counting pass-through (the progress bar) straight into
+// instantiateStreaming, so the browser compiles the code section while the
+// pak-sized data section is still arriving and no JS copy of the 19 MB is
+// ever assembled. The counted stream is re-wrapped as an application/wasm
+// Response, so a server that labels .wasm with another MIME type (which
+// instantiateStreaming rejects) still works. Browsers without
+// instantiateStreaming / TransformStream take the buffered path.
+async function loadEngine() {
   const resp = await fetch('quake_wasm.wasm');
   if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching quake_wasm.wasm');
-  let total = parseInt(resp.headers.get('Content-Length') || '0', 10) || 0;
-  if (!resp.body || !resp.body.getReader) return await resp.arrayBuffer();
-  const reader = resp.body.getReader();
-  const chunks = [];
+  // A compressed body's Content-Length is the compressed size, but the stream
+  // yields decompressed bytes: no usable total, so show the MB counter only.
+  let total = resp.headers.get('Content-Encoding') ? 0
+    : parseInt(resp.headers.get('Content-Length') || '0', 10) || 0;
   let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.byteLength;
+  const count = (n) => {
+    received += n;
     // A compressing server reports the COMPRESSED size in Content-Length while
     // the stream yields decompressed bytes — if the counter passes the claimed
     // total, the total was a lie: fall back to the indeterminate display.
     if (total > 0 && received > total) total = 0;
     setProgress(received, total);
+  };
+  if (resp.body && typeof TransformStream === 'function'
+      && typeof WebAssembly.instantiateStreaming === 'function') {
+    const counted = resp.body.pipeThrough(new TransformStream({
+      transform(chunk, ctl) { count(chunk.byteLength); ctl.enqueue(chunk); },
+      flush() { downloadDone(received); },
+    }));
+    const wasm = new Response(counted, { headers: { 'Content-Type': 'application/wasm' } });
+    return (await WebAssembly.instantiateStreaming(wasm, {})).instance;
   }
-  const buf = new Uint8Array(received);
-  let off = 0;
-  for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
-  return buf.buffer;
+  // Buffered fallback: read the body chunk by chunk (or in one go when it
+  // isn't streamable), then instantiate the assembled bytes.
+  let bytes;
+  if (resp.body && resp.body.getReader) {
+    const reader = resp.body.getReader();
+    const chunks = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      count(value.byteLength);
+    }
+    bytes = new Uint8Array(received);
+    let off = 0;
+    for (const c of chunks) { bytes.set(c, off); off += c.byteLength; }
+  } else {
+    bytes = new Uint8Array(await resp.arrayBuffer());
+  }
+  downloadDone(bytes.byteLength);
+  await new Promise(r => setTimeout(r, 30));   // let the full bar paint before the compile
+  return (await WebAssembly.instantiate(bytes, {})).instance;
 }
 
 async function main() {
-  const bytes = await fetchWasmBytes();
-  bootFill.classList.remove('indet');
-  bootFill.style.width = '100%';
-  setStatus('instantiating ' + (bytes.byteLength/1048576|0) + ' MB WebAssembly…');
-  await new Promise(r => setTimeout(r, 30));   // let the full bar paint before the compile
-  const { instance } = await WebAssembly.instantiate(bytes, {});
+  const instance = await loadEngine();
   exp = instance.exports;
 
   setStatus('booting: parsing pak0.pak, loading the attract demo…');
@@ -1171,24 +1200,44 @@ async function main() {
   // the first canvas sync so it's created at the right backing-store size.
   restoreResolution();
 
-  const ctx = canvas.getContext('2d');
+  // An opaque canvas (the framebuffer's alpha is always 255): the browser
+  // composites it without blending. `?lowlatency` in the URL also asks for a
+  // desynchronized canvas, which can skip a frame of compositor latency where
+  // the browser supports it (Chrome on Windows / ChromeOS) at the risk of
+  // tearing; off by default, and not verifiable in headless Chromium.
+  const LOW_LATENCY = new URLSearchParams(location.search).has('lowlatency');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
   // The render resolution is RUNTIME state: Options > Video Options can change
-  // it. Track the current backing-store size + ImageData and re-create them
-  // whenever the engine reports a different width()/height(). The CSS display size (768x480)
+  // it. Track the current backing-store size and re-fit the canvas whenever the
+  // engine reports a different width()/height(). The CSS display size (640x480)
   // stays fixed, so a larger backing store just gives a crisper pixel-upscale.
-  let W = 0, H = 0, img = null;
+  let W = 0, H = 0;
   function syncCanvasSize() {
     const w = exp.width(), h = exp.height();
-    if (w === W && h === H && img) return;
+    if (w === W && h === H) return;
     W = w; H = h;
     canvas.width = W; canvas.height = H;
-    img = ctx.createImageData(W, H);
     // The resolution just changed (boot, or a Video Options mode): persist
     // it so a reload comes back at the same size. This is the single choke point
     // for every resolution change, so it captures menu picks and restores alike.
     saveResolution(W, H);
   }
   syncCanvasSize();
+  // The presented frame: an ImageData built straight over the framebuffer in
+  // wasm memory, so presenting is one putImageData with no copy into a
+  // JS-side ImageData first. Rebuilt when the bytes move: a memory.grow
+  // detaches the old ArrayBuffer, and a resolution change reallocates the
+  // framebuffer (new pointer, new size).
+  let frameImg = null, frameBuf = null, framePtr = 0;
+  function frameImage() {
+    const buf = exp.memory.buffer, ptr = exp.framebuffer();
+    if (!frameImg || buf !== frameBuf || ptr !== framePtr
+        || frameImg.width !== W || frameImg.height !== H) {
+      frameImg = new ImageData(new Uint8ClampedArray(buf, ptr, W * H * 4), W, H);
+      frameBuf = buf; framePtr = ptr;
+    }
+    return frameImg;
+  }
   // Ready: swap the overlay's boot panel for the click-to-play prompt — the
   // page's ONE scrim appearance, retired forever by the first gesture.
   bootEl.classList.add('hidden');
@@ -1198,16 +1247,20 @@ async function main() {
 
   let last = performance.now();
   function frame(now) {
-    // The RAW elapsed time: the engine splits it like Host_FilterTime — all of
-    // it to `realtime` (the flashing menu/console cursors), at most 0.1 s to
-    // the game clock (so a hitch or a backgrounded tab can't lurch the world).
+    // The RAW elapsed time since the last rAF: the engine runs it through
+    // Host_FilterTime — all of it to `realtime` (the flashing menu/console
+    // cursors); a host frame only once 1/72 s has passed since the last one,
+    // advancing the game by that time, at most 0.1 s (so a hitch or a
+    // backgrounded tab can't lurch the world).
     const dt = Math.max(0, (now - last) / 1000); last = now;
     // Movement/turn/attack all flow from the held-key states the keydown/keyup
     // handlers fed the engine (key_down/key_up by Quake keynum): each step
     // derives the move from the BINDINGS table (CL_BaseMove/CL_AdjustAngles),
     // so Options > Customize controls really rebinds, Always Run really swaps
     // cl_forwardspeed, and the menu/console gate gameplay engine-side.
-    exp.step(dt);
+    // step() returns 0 when the 72 fps cap skipped this refresh: no new frame,
+    // nothing queued, nothing to present (an older wasm returns undefined).
+    if (exp.step(dt) === 0) { requestAnimationFrame(frame); return; }
     drainGameSounds();
     drainStopSounds();
     drainMenuSounds();
@@ -1220,10 +1273,7 @@ async function main() {
     // The render resolution may have changed this frame (Video Options): re-fit the
     // canvas + ImageData to the new size before blitting.
     syncCanvasSize();
-    const ptr = exp.framebuffer();
-    const mem = new Uint8Array(exp.memory.buffer, ptr, W * H * 4); // re-view (memory may grow)
-    img.data.set(mem);
-    ctx.putImageData(img, 0, 0);
+    ctx.putImageData(frameImage(), 0, 0);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

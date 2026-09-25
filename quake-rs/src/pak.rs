@@ -73,6 +73,10 @@ enum Source {
     File(PathBuf),
     /// Whole archive held in memory (tests and small paks).
     Memory(Vec<u8>),
+    /// Whole archive borrowed from a `'static` image (the browser build's
+    /// `include_bytes!` pak): never copied, so cloning the [`Pak`] handle
+    /// copies only its directory.
+    Static(&'static [u8]),
 }
 
 /// An opened PAK archive (the in-memory `pack_t`).
@@ -163,6 +167,19 @@ impl Pak {
         let (entries, dir_crc) = Self::decode_directory(&bytes)?;
         Ok(Pak {
             source: Source::Memory(bytes),
+            entries,
+            name,
+            dir_crc,
+        })
+    }
+
+    /// Build a [`Pak`] over a `'static` archive image without copying it (the
+    /// browser build embeds the shareware pak with `include_bytes!`). Entry
+    /// reads slice the image; a clone of the returned handle shares it.
+    pub fn from_static(name: String, bytes: &'static [u8]) -> Result<Pak> {
+        let (entries, dir_crc) = Self::decode_directory(bytes)?;
+        Ok(Pak {
+            source: Source::Static(bytes),
             entries,
             name,
             dir_crc,
@@ -268,9 +285,9 @@ impl Pak {
 
     /// Read the contents of one directory entry.
     ///
-    /// For a memory-backed archive this slices the retained buffer; for a
-    /// file-backed archive it opens the file, seeks to `filepos`, and reads
-    /// `filelen` bytes.
+    /// For a memory-backed (or static) archive this slices the retained
+    /// buffer; for a file-backed archive it opens the file, seeks to
+    /// `filepos`, and reads `filelen` bytes.
     pub fn read_entry(&self, e: &PakEntry) -> Result<Vec<u8>> {
         if e.filepos < 0 {
             return Err(QError::invalid(format!(
@@ -287,20 +304,20 @@ impl Pak {
         let filepos = e.filepos as usize;
         let filelen = e.filelen as usize;
 
-        match &self.source {
-            Source::Memory(bytes) => {
-                // slice_at bounds-checks filepos + filelen against the buffer.
-                let slice = Reader::new(bytes).slice_at(filepos, filelen)?;
-                Ok(slice.to_vec())
-            }
+        let image: &[u8] = match &self.source {
+            Source::Memory(bytes) => bytes,
+            Source::Static(bytes) => bytes,
             Source::File(path) => {
                 let mut file = File::open(path)?;
                 file.seek(SeekFrom::Start(e.filepos as u64))?;
                 let mut out = vec![0u8; filelen];
                 file.read_exact(&mut out)?;
-                Ok(out)
+                return Ok(out);
             }
-        }
+        };
+        // slice_at bounds-checks filepos + filelen against the buffer.
+        let slice = Reader::new(image).slice_at(filepos, filelen)?;
+        Ok(slice.to_vec())
     }
 
     /// Find a file by name and read its contents.
@@ -426,6 +443,36 @@ mod tests {
 
         // Missing file: Ok(None), not an error.
         assert!(pak.read_file("nope.dat").unwrap().is_none());
+    }
+
+    #[test]
+    fn from_static_reads_like_from_bytes_and_clones_share_the_image() {
+        let files = sample_files();
+        let img: &'static [u8] = Box::leak(build_pack(&files).into_boxed_slice());
+        let owned = Pak::from_bytes("t.pak".into(), img.to_vec()).unwrap();
+        let pak = Pak::from_static("t.pak".into(), img).unwrap();
+        assert_eq!(pak.entries(), owned.entries());
+        assert_eq!(pak.dir_crc(), owned.dir_crc());
+        for (name, data) in &files {
+            assert_eq!(&pak.read_file(name).unwrap().expect("found"), data);
+        }
+        assert!(pak.read_file("nope.dat").unwrap().is_none());
+        // A clone is a handle onto the same image, not a copy of it.
+        let clone = pak.clone();
+        match (&pak.source, &clone.source) {
+            (Source::Static(a), Source::Static(b)) => {
+                assert!(std::ptr::eq(*a, *b) && std::ptr::eq(*a, img));
+            }
+            other => panic!("expected two static sources, got {other:?}"),
+        }
+        // The same bounds checks as the owned image.
+        let past_end = PakEntry {
+            name: "x".into(),
+            filepos: img.len() as i32 - 2,
+            filelen: 4,
+        };
+        assert!(pak.read_entry(&past_end).is_err());
+        assert!(Pak::from_static("bad".into(), b"NOPE").is_err());
     }
 
     #[test]

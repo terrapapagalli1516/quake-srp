@@ -103,6 +103,24 @@ cargo run --release --bin quaketool -- render ID1/PAK0.PAK ... # etc.
 The browser build (`quake-wasm`) `include_bytes!`s a pak at build time, so it needs the data present to compile;
 the engine lib and all tests do **not**.
 
+### In the browser
+
+```sh
+cd quake-wasm && cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/quake_wasm.wasm ../web/
+miniserve --port 8080 -C ../web      # any static server works; open /index.html
+```
+
+The wasm is 18.7 MB, nearly all of it the embedded pak (the code is ~0.8 MB). miniserve's `-C`
+(`--compress-response`) compresses it on the fly: Chrome gets brotli at **8.6 MB** (gzip 9.6 MB,
+zstd 8.3 MB). That costs the server ~0.4 s of CPU per download (nothing is cached), so it pays on
+links slower than ~400 Mbit/s: at an emulated 50 Mbit/s, first frame 3.5 → 1.8 s; on localhost it
+is slower (0.19 → 0.54 s). The page stream-compiles the module (`WebAssembly.instantiateStreaming`)
+whatever MIME type the server sends, and falls back to a buffered load on browsers without it;
+behind compression the loading bar shows a MB counter instead of a percentage. Splitting the pak
+out of the wasm, so an engine update doesn't re-download 18.7 MB of unchanged data, is an open
+option (PERF_PLAN D4).
+
 ## Performance
 
 The software renderer is per-pixel bound, so frame time scales with resolution. A

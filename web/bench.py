@@ -59,7 +59,9 @@ ap.add_argument("--warmup", type=int, default=60)
 ap.add_argument("--native", action="store_true", help="also run the native twin (cargo test)")
 ap.add_argument("--profile", action="store_true", help="CDP CPU profile of each fixed run")
 ap.add_argument("--live", type=float, default=0.0,
-                help="also sample the page's OWN loop for N seconds (frame pacing)")
+                help="also sample the page's OWN loop for N seconds (frame pacing; use "
+                     "--vsync: uncapped headless rAF is not a display, and with the 72 fps "
+                     "cap its rate follows the page's own work)")
 ap.add_argument("--hash-every", type=int, default=0)
 ap.add_argument("--json", help="write every raw per-frame series here")
 ap.add_argument("--port", type=int, default=int(os.environ.get("QUAKE_VERIFY_PORT", "8230")))
@@ -113,10 +115,12 @@ INIT_JS = r"""
   // 2. Startup timing + the bench build's clock import (quake_bench.now_ms). An
   //    import the module does not declare is ignored, so the stock wasm loads too.
   //    In live mode the exports are re-wrapped so step() is timed per call.
+  //    Both entry points are hooked: the page streams (instantiateStreaming,
+  //    whose start is the start of the download) and falls back to buffered
+  //    instantiate.
   window.__startup = {};
-  window.__live = { step: [], put: [], raf: [] };
-  const inst = WebAssembly.instantiate;
-  WebAssembly.instantiate = async function (src, imports) {
+  window.__live = { step: [], put: [], raf: [], skipped: 0 };
+  const hook = (inst) => async function (src, imports) {
     imports = Object.assign({}, imports || {});
     imports.quake_bench = { now_ms: () => performance.now() };
     window.__startup.instantiate_start = performance.now();
@@ -130,10 +134,14 @@ INIT_JS = r"""
       window.__startup.boot_attract_ms = performance.now() - t0; return v;
     };
     if (window.__benchLiveWrap) {
+      // Host_FilterTime's 72 fps cap: step() returns 0 on a refresh it skipped.
+      // Record only the frames that ran; count the skipped calls.
       ex.step = function (dt) {
-        const t0 = performance.now(); real.step(dt);
+        const t0 = performance.now(); const ran = real.step(dt);
+        if (ran === 0) { window.__live.skipped++; return ran; }
         window.__live.step.push(performance.now() - t0);
         window.__live.raf.push(t0);
+        return ran;
       };
     }
     if (window.__startup.first_step === undefined) {
@@ -145,6 +153,10 @@ INIT_JS = r"""
     }
     return { module: r.module, instance: { exports: ex } };
   };
+  WebAssembly.instantiate = hook(WebAssembly.instantiate);
+  if (WebAssembly.instantiateStreaming) {
+    WebAssembly.instantiateStreaming = hook(WebAssembly.instantiateStreaming);
+  }
   if (window.__benchLiveWrap) {
     const put = CanvasRenderingContext2D.prototype.putImageData;
     CanvasRenderingContext2D.prototype.putImageData = function (...a) {
@@ -196,6 +208,11 @@ INIT_JS = r"""
     const e = exp;   // the page's top-level `let exp` (a global binding)
     window.__benchRAFPaused = true;
     await new Promise(r => setTimeout(r, 100));   // let the page's in-flight frame drain
+    // Realign Host_FilterTime's gate: a refresh the page's loop skipped left
+    // realtime ahead of the last frame, and that leftover would ride into the
+    // first measured frame. One long step runs a frame and consumes it, so
+    // every measured step advances exactly cfg.dt (as before the 72 fps cap).
+    e.step(0.2);
     if (!startWorkload(e, cfg.workload)) return { error: 'workload failed to boot: ' + cfg.workload };
     if (typeof hideOverlayForever === 'function') hideOverlayForever();   // the click-to-play scrim
     e.set_resolution(cfg.w, cfg.h);
@@ -333,7 +350,9 @@ with sync_playwright() as p:
         const s = window.__startup;
         const r = performance.getEntriesByType('resource').find(e => e.name.endsWith('quake_wasm.wasm'));
         return { fetch_ms: r ? r.responseEnd - r.startTime : null,
-                 instantiate_ms: s.instantiate_end - s.instantiate_start,
+                 // From the end of the download to an instantiated module (the
+                 // streaming path compiles during the download).
+                 instantiate_ms: r ? s.instantiate_end - r.responseEnd : null,
                  boot_attract_ms: s.boot_attract_ms,
                  nav_to_first_frame_ms: s.first_step,
                  isolated: self.crossOriginIsolated }
@@ -369,7 +388,7 @@ with sync_playwright() as p:
 
     if args.live > 0:
         lp, lerrs = fresh_page(live_wrap=True)
-        lp.evaluate("window.__live = { step: [], put: [], raf: [] }")
+        lp.evaluate("window.__live = { step: [], put: [], raf: [], skipped: 0 }")
         time.sleep(args.live)
         lv = lp.evaluate("window.__live")
         st_ = lv["raf"]
@@ -379,6 +398,7 @@ with sync_playwright() as p:
             "period_median": med(gaps), "period_p95": pct(gaps, 95), "period_p99": pct(gaps, 99),
             "step_median": med(lv["step"]), "step_p95": pct(lv["step"], 95),
             "put_median": med(lv["put"]), "long_frames_over_20ms": sum(1 for g in gaps if g > 20),
+            "skipped": lv.get("skipped", 0), "seconds": args.live,
         }
         errs += lerrs
         lp.close()
@@ -413,7 +433,8 @@ print(f"\nquake-rust browser bench — {len(wasm_bytes) / 1048576:.1f} MB wasm, 
       f"warmup={args.warmup}, dt=1/72, load {' '.join(results['load_before'])} -> "
       f"{' '.join(results['load_after'])}")
 s = results["startup"]
-print(f"startup: fetch {s['fetch_ms']:.0f} ms (local), instantiate {s['instantiate_ms']:.0f} ms, "
+print(f"startup: fetch {s['fetch_ms']:.0f} ms (local), instantiated {s['instantiate_ms']:.0f} ms "
+      f"after the download, "
       f"boot_attract {s['boot_attract_ms']:.0f} ms, navigation->first frame "
       f"{s['nav_to_first_frame_ms']:.0f} ms; gzip -6 size {s['wasm_gzip6_mb']} MB")
 native_by = {(n["workload"], n["w"], n["h"]): n["values"] for n in results["native"]}
@@ -452,7 +473,9 @@ if results["live"]:
           f"{lv['res'][0]}x{lv['res'][1]}, real dt): {lv['frames']} frames, period median "
           f"{lv['period_median']:.2f} / p95 {lv['period_p95']:.2f} / p99 {lv['period_p99']:.2f} ms, "
           f"step median {lv['step_median']:.2f} / p95 {lv['step_p95']:.2f}, put median "
-          f"{lv['put_median']:.2f}, frames >20 ms: {lv['long_frames_over_20ms']}")
+          f"{lv['put_median']:.2f}, frames >20 ms: {lv['long_frames_over_20ms']}; "
+          f"{lv['frames'] / lv['seconds']:.1f} host frames/s, {lv['skipped']} refreshes skipped "
+          f"by the 72 fps cap")
 print("\nrows: ms per frame (median, p95); nat = native median of the same workload via "
       "native_bench; x = wasm/native. raf - js = the browser's own per-frame work.")
 if errs:
