@@ -332,12 +332,17 @@ fn clip_poly_plane_into(input: &[VView], near: f32, out: &mut Vec<VView>) {
         }
         // Emit a crossing vertex whenever the edge straddles the plane. The
         // denominator is non-zero precisely because the endpoints differ in
-        // inside-ness, hence differ in `vz`.
+        // inside-ness, hence differ in `vz`. The crossing is always computed
+        // from the INSIDE endpoint toward the outside one, whichever way the
+        // polygon walks the edge: two faces sharing a clipped edge walk it in
+        // opposite directions, and must get the same bits for the new vertex,
+        // or the span raster's fill rule could leave a crack between them.
         if cur_in != next_in {
-            let denom = next.vz - cur.vz;
+            let (inside, outside) = if cur_in { (cur, next) } else { (next, cur) };
+            let denom = outside.vz - inside.vz;
             if denom != 0.0 {
-                let alpha = (near - cur.vz) / denom;
-                out.push(vview_lerp(cur, next, alpha));
+                let alpha = (near - inside.vz) / denom;
+                out.push(vview_lerp(inside, outside, alpha));
             }
         }
     }
@@ -729,6 +734,36 @@ mod tests {
     /// two front vertices are kept verbatim and the two edges crossing the plane
     /// each contribute one new vertex with `vz == NEAR` and correctly-lerped
     /// `(vx, vy, s, t)`.
+    #[test]
+    fn clip_poly_near_shared_edge_gets_identical_crossing() {
+        // Two faces sharing the edge P-Q (P behind the near plane, Q in front)
+        // walk it in opposite directions; the crossing vertex each emits must be
+        // bit-identical, or the span raster could crack along it.
+        let p = vv(-3.7, 1.3, 0.21, 17.3, -4.1);
+        let q = vv(5.9, -2.2, 7.9, -3.3, 11.7);
+        let r = vv(9.1, 4.4, 6.3, 2.0, 2.0); // left face: P -> Q -> R
+        let l = vv(-8.0, -6.1, 5.2, 1.0, 9.0); // right face: Q -> P -> L
+        let a = clip_poly_near(&[p, q, r]);
+        let b = clip_poly_near(&[q, p, l]);
+        let on_near = |o: &[VView]| -> Vec<[u32; 5]> {
+            o.iter()
+                .filter(|v| v.vz == NEAR_PLANE)
+                .map(|v| [v.vx.to_bits(), v.vy.to_bits(), v.vz.to_bits(), v.s.to_bits(), v.t.to_bits()])
+                .collect()
+        };
+        // Each face's crossing on the shared edge P-Q: the near vertex whose
+        // position is on segment P-Q (the other crossing is on the unshared edge).
+        let shared = |o: &[VView]| {
+            let alpha = (NEAR_PLANE - q.vz) / (p.vz - q.vz);
+            let x = q.vx + (p.vx - q.vx) * alpha;
+            on_near(o)
+                .into_iter()
+                .find(|bits| (f32::from_bits(bits[0]) - x).abs() < 1e-3)
+                .expect("a crossing on P-Q")
+        };
+        assert_eq!(shared(&a), shared(&b), "shared clipped edge must give the same vertex bits");
+    }
+
     #[test]
     fn clip_poly_near_straddling_triangle_lerps_correctly() {
         // Apex behind the plane, base in front. Numbers chosen so the crossings

@@ -351,6 +351,14 @@ static void Oracle_Dump (oracle_shot_t *s, int stage)
 		if (cl_dlights[i].die >= cl.time && cl_dlights[i].radius > 0)
 			x++;
 	fprintf (f, "  \"active_dlights\": %d,\n", x);
+	// the lights themselves, as R_PushDlights sees them (quaketool view --dlight)
+	fprintf (f, "  \"dlights\": [");
+	for (i=0, x=0 ; i<MAX_DLIGHTS ; i++)
+		if (cl_dlights[i].die >= cl.time && cl_dlights[i].radius > 0)
+			fprintf (f, "%s[%.9g, %.9g, %.9g, %.9g, %.9g]", x++ ? ", " : "",
+				cl_dlights[i].origin[0], cl_dlights[i].origin[1], cl_dlights[i].origin[2],
+				cl_dlights[i].radius, cl_dlights[i].minlight);
+	fprintf (f, "],\n");
 	fprintf (f, "  \"entities\": %d,\n", n);
 	if (bench_frames)
 		fprintf (f, "  \"bench_frames\": %d,\n  \"bench_ms\": %.6f,\n", bench_frames, bench_ms);
