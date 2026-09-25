@@ -193,14 +193,6 @@ pub(crate) fn step_demo(
     // guards against re-spawning while a frame lingers across several steps.
     spawn_demo_frame_effects(d, d.idx);
 
-    // Age the live particle pool one frame under the same gentle gravity the
-    // live walk uses (sv_gravity * 0.05 with the default sv_gravity = 800), then
-    // retire the expired ones. Guarded against a non-finite/negative dt.
-    if dt.is_finite() && dt > 0.0 {
-        let now = d.demo.frames[d.idx].time;
-        d.particles.advance(dt, now, 800.0 * 0.05);
-    }
-
     let f = &d.demo.frames[d.idx];
 
     // CL_RelinkEntities' model-flag trails (R_RocketTrail from the entity's
@@ -395,8 +387,14 @@ pub(crate) fn step_demo(
     // stream) is passed as (world pos, palette index) so blood/puffs/explosions
     // draw into the scene sharing its z-buffer. Demos carry no dynamic lights
     // here (empty; a deferred LOW).
+    // R_DrawParticles' order, as in step_walk: retire (`die < cl.time`), draw,
+    // then move and ramp.
+    d.particles.retire(f.time);
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    if dt.is_finite() && dt > 0.0 {
+        d.particles.integrate(dt, f.time, 800.0 * 0.05);
+    }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
     // — the demo's torch flicker matches the recording exactly. A synthetic

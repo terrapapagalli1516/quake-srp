@@ -422,10 +422,10 @@ pub(crate) fn step_walk(
             now,
         );
     }
-    // R_DrawParticles / CL_DecayLights step by `cl.time - cl.oldtime`, which
-    // is 0 while paused: nothing moves, fades or dies.
+    // CL_DecayLights steps by `cl.time - cl.oldtime`, which is 0 while
+    // paused: nothing fades or dies. (The particles move after they are drawn,
+    // below.)
     if dt.is_finite() && dt > 0.0 && !paused {
-        w.particles.advance(dt, now, 800.0 * 0.05);
         w.dlights.advance(dt, now);
     }
 
@@ -781,10 +781,17 @@ pub(crate) fn step_walk(
             _ => None,
         }
     };
-    // The live particles as (world pos, palette index); they share the scene
-    // z-buffer so any behind a wall are correctly hidden.
+    // R_DrawParticles: free the particles whose `die < cl.time`, draw the rest
+    // as (world pos, palette index) — they share the scene z-buffer, so any
+    // behind a wall are hidden — and only then move each one and step its
+    // ramp by `cl.time - cl.oldtime` (0 while paused). A particle is drawn
+    // where and as it was spawned on its first frame, and on its last.
+    w.particles.retire(now);
     let parts: Vec<([f32; 3], u8)> =
         w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    if dt.is_finite() && dt > 0.0 && !paused {
+        w.particles.integrate(dt, now, 800.0 * 0.05);
+    }
     // The live dynamic lights (explosions / muzzle flashes) light up nearby walls.
     let active_dlights = w.dlights.active();
     // The animated light-style scales (torch flicker, pulsing lights) at the
