@@ -863,9 +863,11 @@ impl Server {
         // uses sv.time, not the clamped per-think `time` global).
         self.vm.sv_time = start_time;
 
-        // Let the progs know a new frame has started (self/other = world).
+        // Let the progs know a new frame has started (self/other = world,
+        // time = sv.time).
         let mut thinks_fired = 0usize;
         let mut think_errors = 0usize;
+        self.vm.gset_float("time", start_time);
         match self.run_sys("StartFrame", 0, 0) {
             Ok(_) => {}
             Err(_) => think_errors += 1, // isolated; the interpreter was reset
@@ -941,7 +943,11 @@ impl Server {
         // during the move, but PreThink runs first and must see it set.)
         self.apply_usercmd_to_edict(ent, cmd);
 
-        // call standard client pre-think (self = player)
+        // call standard client pre-think (self = player). SV_Physics_Client sets
+        // `pr_global_struct->time = sv.time` first: without it PreThink reads the
+        // `time` a preceding think left (its clamped thinktime), so its timers
+        // (air_finished, lava damage, IntermissionThink) could fire a frame early.
+        self.vm.gset_float("time", start_time);
         self.run_sys("PlayerPreThink", ent, 0)?;
         if self.is_free(ent) {
             return Ok(false);
@@ -1524,6 +1530,30 @@ mod tests {
         server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
         (server, e)
+    }
+
+    #[test]
+    fn player_prethink_sees_sv_time_not_a_preceding_thinktime() {
+        // CENSUS L4: SV_Physics_Client sets pr_global_struct->time = sv.time
+        // before PlayerPreThink. An edict thinking earlier in the frame at
+        // nextthink = sv.time + 0.05 leaves `time` = its thinktime (SV_RunThink);
+        // PreThink must still read sv.time.
+        let record_time = vec![
+            Statement { op: Op::StoreF as u16, a: 33, b: 56, c: 0 }, // prethink_time = time
+            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+        ];
+        let (img, c100, org) = player_progs_with_prethink(record_time);
+        let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        prime_player_globals(&mut server, c100, org);
+        let thinker = server.vm.spawn();
+        let noop = server.vm.progs.find_function("StartFrame").expect("a DONE-only function");
+        server.vm.ent_set_int(thinker, "think", noop as i32);
+        let t0 = server.time();
+        server.vm.ent_set_float(thinker, "nextthink", t0 + 0.05);
+        let player = server.connect_client().expect("connect");
+        assert!(thinker < player, "the thinker runs before the player in the edict loop");
+        server.client_frame(&UserCmd::default(), 0.1).expect("frame");
+        assert_eq!(server.vm.gget_float("prethink_time"), t0, "PreThink saw sv.time");
     }
 
     #[test]

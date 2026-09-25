@@ -471,7 +471,14 @@ pub(super) fn floor_bsp() -> Bsp {
 /// Returns `(image, g_const100_ofs, g_origin_vec_ofs)` so the test can place
 /// the `100.0` float and the `(0,0,40)` vector the spawn function stores.
 pub(super) fn player_progs() -> (Vec<u8>, usize, usize) {
+    player_progs_with_prethink(vec![Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 }])
+}
+
+/// [`player_progs`] with `prethink` as the body of `PlayerPreThink` (the global
+/// `prethink_time` at offset 56 is free for it to record into).
+pub(super) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, usize, usize) {
     let mut b = Builder::new();
+    b.add_global("prethink_time", EV_FLOAT, 56);
     b.entityfields = 48;
 
     // Engine globals the server sets/reads.
@@ -531,7 +538,7 @@ pub(super) fn player_progs() -> (Vec<u8>, usize, usize) {
     b.add_function("SetNewParms", vec![done()]);
     b.add_function("ClientConnect", vec![done()]);
     b.add_function("StartFrame", vec![done()]);
-    b.add_function("PlayerPreThink", vec![done()]);
+    b.add_function("PlayerPreThink", prethink);
     b.add_function("PlayerPostThink", vec![done()]);
 
     // PutClientInServer: STOREP_F const100 -> self.health;
