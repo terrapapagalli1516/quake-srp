@@ -308,7 +308,8 @@ pub(crate) fn step_walk(
         );
     }
     if dt.is_finite() && dt > 0.0 {
-        w.particles.advance(dt, now, 800.0 * 0.05);
+        // R_DrawParticles: grav = frametime * sv_gravity.value * 0.05 (100 on e1m8).
+        w.particles.advance(dt, now, w.server.sv_gravity() * 0.05);
         w.dlights.advance(dt, now);
     }
 

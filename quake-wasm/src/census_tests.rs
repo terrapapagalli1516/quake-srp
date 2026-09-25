@@ -115,9 +115,10 @@ fn census_single_player_pauses_behind_the_menu() {
 /// CENSUS F3 (HIGH). e1m8 is low gravity: QC `worldspawn` does
 /// `cvar_set("sv_gravity", "100")` on maps/e1m8.bsp, and SV_AddGravity uses the
 /// cvar (`velocity[2] -= ent_gravity * sv_gravity.value * host_frametime`). The
-/// port's `bi_cvar_set` drops it and physics uses a constant 800.
+/// port's `bi_cvar_set` dropped it and physics used a constant 800. The client's
+/// `R_DrawParticles` reads the same cvar (`grav = frametime * sv_gravity * 0.05`),
+/// and every other map's worldspawn sets it back to 800.
 #[test]
-#[ignore = "census F3: e1m8's sv_gravity 100 is ignored"]
 fn census_e1m8_has_low_gravity() {
     let mut w = build_walk_map("maps/e1m8.bsp").expect("e1m8 boots");
     for _ in 0..3 {
@@ -133,6 +134,23 @@ fn census_e1m8_has_low_gravity() {
     step(&mut w, 0.1);
     let vz = w.server.vm.ent_get_vector(p, "velocity")[2];
     assert!((vz + 10.0).abs() < 1.0, "one 0.1 s frame of sv_gravity 100 gives vz -10, got {vz}");
+
+    // The particles fall at sv_gravity too: a teleport splash is pt_slowgrav
+    // (vel[2] -= grav), so one 0.1 s frame takes 0.1 * 100 * 0.05 = 0.5 off.
+    w.particles = quake_rs::particles::ParticleSystem::new();
+    let o = w.server.vm.ent_get_vector(p, "origin");
+    let now = w.clock;
+    w.particles.spawn_teleport_splash(o, now, &mut w.prng);
+    let before: Vec<f32> = w.particles.particles().iter().map(|q| q.velocity[2]).collect();
+    step(&mut w, 0.1);
+    let after = &w.particles.particles()[..before.len()];
+    for (b, a) in before.iter().zip(after) {
+        assert!((b - a.velocity[2] - 0.5).abs() < 1e-3, "particle vz {b} -> {}", a.velocity[2]);
+    }
+
+    // The next map's worldspawn does cvar_set("sv_gravity", "800").
+    let w = build_walk_map("maps/e1m5.bsp").expect("e1m5 boots");
+    assert_eq!(w.server.sv_gravity(), 800.0);
 }
 
 /// CENSUS F5 (MED). External brush-model items (`maps/b_*.bsp`) get the

@@ -13,7 +13,7 @@
 //! The collision queries are world.c's (`sv_world.rs`); the player's wish
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
-use super::host::{reset_changelevel, reset_restart};
+use super::host::{reset_changelevel, reset_restart, sv_gravity};
 use super::lightstyle::snapshot_lightstyles;
 use super::msg::reset_message_parsers;
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
@@ -21,7 +21,7 @@ use super::{
     FrameReport, Server, UserCmd, CONTENTS_EMPTY,
     CONTENTS_SOLID, FL_FLY, FL_ONGROUND, FL_SWIM, FL_WATERJUMP, MOVETYPE_BOUNCE, MOVETYPE_FLY,
     MOVETYPE_FLYMISSILE, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, MOVETYPE_STEP,
-    MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_BSP, SOLID_NOT, SOLID_TRIGGER, SV_GRAVITY, SV_MAXVELOCITY,
+    MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_BSP, SOLID_NOT, SOLID_TRIGGER, SV_MAXVELOCITY,
 };
 use crate::math::{add as v_add, angle_vectors, Vec3};
 use crate::world;
@@ -512,7 +512,7 @@ impl Server {
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
             // hitsound = velocity[2] < sv_gravity * -0.1, sampled BEFORE gravity.
             let vel_z = self.vm.ent_get_vector(ent, "velocity")[2];
-            let hitsound = vel_z < SV_GRAVITY * -0.1;
+            let hitsound = vel_z < sv_gravity() * -0.1;
 
             // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
             // SV_LinkEdict(ent, true). The C runs the full slide move (NOT a
@@ -723,7 +723,7 @@ impl Server {
             }
         };
         let mut vel = self.vm.ent_get_vector(ent, "velocity");
-        vel[2] -= ent_gravity * SV_GRAVITY * dt;
+        vel[2] -= ent_gravity * sv_gravity() * dt;
         self.vm.ent_set_vector(ent, "velocity", vel);
     }
 
@@ -1445,6 +1445,17 @@ mod tests {
         // A MOVETYPE_TOSS entity with no due think falls under gravity. The empty
         // world traces as blocked at fraction 0 (headnode out of range -> solid),
         // so origin won't move, but velocity must gain downward speed.
+        let (mut server, e) = toss_server();
+        server.run_frame(0.1).expect("frame");
+
+        // velocity.z should be negative (gravity pulled it down): -1*800*0.1 = -80.
+        let vel = server.vm.ent_get_vector(e, "velocity");
+        assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
+        assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+    }
+
+    /// A server holding one airborne MOVETYPE_TOSS point entity at z 100.
+    fn toss_server() -> (Server, i32) {
         let mut b = Builder::new();
         b.entityfields = 16;
         b.add_global("self", 4, 31);
@@ -1462,8 +1473,7 @@ mod tests {
 
         let img = b.build();
         let progs = Progs::parse(&img).expect("parse");
-        let bsp = empty_bsp();
-        let mut server = Server::new(bsp, progs).expect("server");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
 
         let e = server.vm.spawn();
         server.vm.ent_set_float(e, "movetype", MOVETYPE_TOSS as f32);
@@ -1474,13 +1484,22 @@ mod tests {
         // tiny point box so trace uses hull 0.
         server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+        (server, e)
+    }
 
+    #[test]
+    fn sv_gravity_cvar_drives_add_gravity() {
+        // CENSUS F3: world.qc worldspawn does cvar_set("sv_gravity", "100") on
+        // e1m8, and SV_AddGravity reads sv_gravity.value: one 0.1 s frame at
+        // 100 gives -10, not -80. A fresh server is back at the default 800.
+        let (mut server, e) = toss_server();
+        super::super::host::set_sv_gravity(100.0);
+        assert_eq!(server.sv_gravity(), 100.0);
         server.run_frame(0.1).expect("frame");
-
-        // velocity.z should be negative (gravity pulled it down): -1*800*0.1 = -80.
-        let vel = server.vm.ent_get_vector(e, "velocity");
-        assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
-        assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+        let vz = server.vm.ent_get_vector(e, "velocity")[2];
+        assert!((vz + 10.0).abs() < 1e-3, "sv_gravity 100: expected -10, got {vz}");
+        let (fresh, _) = toss_server();
+        assert_eq!(fresh.sv_gravity(), 800.0, "a fresh server starts at the default");
     }
 
     // ------------------------------------------------------ water + toss

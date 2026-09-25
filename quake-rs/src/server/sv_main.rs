@@ -15,7 +15,7 @@
 //! sv_main.c's message senders (`SV_StartSound`, `SV_StartParticle`) live with
 //! the rest of the message side in `msg.rs`.
 
-use super::host::{reset_changelevel, reset_restart, reset_skill};
+use super::host::{reset_changelevel, reset_restart, reset_skill, reset_sv_gravity};
 use super::lightstyle::reset_lightstyles;
 use super::msg::{reset_message_parsers, take_svc_events};
 use super::pr_cmds::install_engine_builtins;
@@ -108,6 +108,8 @@ impl Server {
         // [`Server::set_skill`] after construction (the same way it carries
         // `serverflags`).
         reset_skill();
+        // Likewise `sv_gravity` (id1's worldspawn sets it on every map anyway).
+        reset_sv_gravity();
 
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.

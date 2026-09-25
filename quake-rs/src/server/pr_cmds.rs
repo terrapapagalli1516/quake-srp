@@ -16,7 +16,7 @@
 //! `changelevel` / `localcmd` in `host.rs`, `walkmove` / `movetogoal` /
 //! `checkbottom` in `sv_move.rs`.
 
-use super::host::{bi_changelevel, bi_localcmd, set_skill_value, skill_value};
+use super::host::{bi_changelevel, bi_localcmd, set_skill_value, set_sv_gravity, skill_value, sv_gravity};
 use super::lightstyle::bi_lightstyle;
 use super::msg::{
     bi_ambientsound, bi_bprint, bi_centerprint, bi_particle, bi_sound, bi_sprint, bi_writeangle,
@@ -26,7 +26,7 @@ use super::msg::{
 use super::pr_edict::parse_float;
 use super::sv_move::{bi_checkbottom, bi_movetogoal, bi_walkmove};
 use super::sv_world::{link_edict, sv_move};
-use super::{FL_CLIENT, FL_ONGROUND, SOLID_NOT, SV_GRAVITY, SV_MAXVELOCITY};
+use super::{FL_CLIENT, FL_ONGROUND, SOLID_NOT, SV_MAXVELOCITY};
 use crate::math::{add as v_add, angle_vectors, sub as v_sub, Vec3};
 use crate::vm::{Builtin, Vm};
 use crate::Result;
@@ -228,13 +228,13 @@ fn bi_cvar(vm: &mut Vm) -> Result<()> {
 }
 
 /// The handful of cvar defaults the spawn/think code reads. Values match the
-/// stock `*.c` declarations (`sv_gravity` "800", `deathmatch` "0"). `skill` is
-/// the *live* value (see [`SKILL`]): `cvar_set("skill", N)` from a difficulty
+/// stock `*.c` declarations (`deathmatch` "0"). `skill` and `sv_gravity` are
+/// the *live* values (see [`SKILL`]): `cvar_set("skill", N)` from a difficulty
 /// portal updates it and `cvar("skill")` reads it back, so the QuakeC sees the
 /// difficulty it selected (the old stub returned a constant 1.0 unconditionally).
 pub(super) fn cvar_value(name: &str) -> f32 {
     match name {
-        "sv_gravity" => SV_GRAVITY,
+        "sv_gravity" => sv_gravity(),
         "sv_maxvelocity" => SV_MAXVELOCITY,
         "deathmatch" | "coop" | "teamplay" => 0.0,
         "skill" => skill_value() as f32,
@@ -243,17 +243,17 @@ pub(super) fn cvar_value(name: &str) -> f32 {
 }
 
 /// `PF_cvar_set` (#72): `void(string var, string val) cvar_set`. The C calls
-/// `Cvar_Set(var, val)`. This headless port has no cvar registry, so the only
-/// cvar with a live backing store is `skill` (see [`SKILL`]); setting it is what
-/// makes the start-map difficulty portals (`trigger_setskill` -> `cvar_set
-/// ("skill", N)`) actually change which monsters/items spawn. Any other cvar
-/// name is a benign no-op (the value is parsed but has nowhere to land), exactly
-/// as the old `bi_noop` behaved — but `skill` now persists.
+/// `Cvar_Set(var, val)`. This headless port has no cvar registry; the cvars the
+/// id1 progs set have live backing stores in `host.rs`: `skill` (the start-map
+/// difficulty portals, `trigger_setskill` -> `cvar_set("skill", N)`) and
+/// `sv_gravity` (world.qc `worldspawn`: 100 on e1m8, 800 elsewhere). Any other
+/// name is a benign no-op.
 fn bi_cvar_set(vm: &mut Vm) -> Result<()> {
     let name = vm.arg_string(0);
-    if name == "skill" {
-        let val = parse_float(&vm.arg_string(1));
-        set_skill_value(val);
+    match name.as_str() {
+        "skill" => set_skill_value(parse_float(&vm.arg_string(1))),
+        "sv_gravity" => set_sv_gravity(parse_float(&vm.arg_string(1))),
+        _ => {}
     }
     Ok(())
 }
@@ -645,7 +645,7 @@ mod tests {
         let s = vm.intern("sv_gravity");
         vm.set_gi(crate::progs::OFS_PARM0, s);
         (vm.builtins[45])(&mut vm).expect("cvar");
-        assert_eq!(vm.gf(OFS_RETURN), SV_GRAVITY);
+        assert_eq!(vm.gf(OFS_RETURN), 800.0);
     }
 
     #[test]
