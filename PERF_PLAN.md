@@ -390,6 +390,16 @@ The fidelity classes are:
 - **Evidence:** 2.34 → 0.73 ms at 1280×800, with identical hashes. The prototype is
   `fb.resize(n*4)` plus `chunks_exact_mut(4).zip(&img.rgb)`, in place of `clear()` and 4× `push`.
 - **Functions:** the pack at the end of `step`, in both the gamma-1 and gamma-LUT arms.
+- **Done** (branch `quake/perf-b`): `pack_rgba` in `quake-wasm/src/host.rs` resizes `vid.buffer`
+  once (a no-op at a steady resolution, so its pointer stays put) and writes each pixel's four
+  bytes in place through `chunks_exact_mut(4)`. Pack, median ms, A/B in one sitting:
+  | | 640×400 | 1280×800 |
+  |---|---|---|
+  | wasm | 0.55 → **0.11** | 2.41 → **0.46** |
+  | native | 0.46 → 0.11 | 1.79 → 0.42 |
+
+  wasm step, demo1 at 1280×800: 19.9 → 17.3 ms. Framebuffer hashes (`--hash-every 60`) identical
+  on demo1, walk_e1m1 and quad_e1m1 at both sizes.
 
 **B3. Keep frame buffers across frames.** *(byte-identical)*
 

@@ -50,6 +50,28 @@ fn host_filter_time(realtime: f64, oldrealtime: &mut f64) -> Option<f32> {
     Some((elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
 }
 
+/// The finished RGB frame into the presented RGBA framebuffer (`vid.buffer`
+/// for the page's `ImageData`), through `lut` when one is given, alpha 255.
+/// `fb` takes `rgb`'s size (a no-op at a steady resolution, so its pointer
+/// and allocation stay put) and is written in place, four bytes a pixel —
+/// not `clear()` plus four `Vec::push`es, which cost ~5x as much (PERF_PLAN B1:
+/// 2.41 -> 0.46 ms at 1280x800 in wasm).
+fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], lut: Option<&[u8; 256]>) {
+    fb.resize(rgb.len() * 4, 255);
+    match lut {
+        None => {
+            for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
+                out.copy_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+        }
+        Some(t) => {
+            for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
+                out.copy_from_slice(&[t[px[0] as usize], t[px[1] as usize], t[px[2] as usize], 255]);
+            }
+        }
+    }
+}
+
 /// One call per display refresh: `dt` is the raw wall-clock time since the
 /// previous call. Like `Host_Frame`, it all goes to `realtime`, then
 /// [`host_filter_time`] decides whether a frame runs: at most 72 per second
@@ -200,30 +222,17 @@ pub extern "C" fn step(dt: f32) -> i32 {
                 a.gamma_value = g;
                 a.gamma_table = build_gamma_table(g);
             }
-            let fb = &mut a.fb;
-            fb.clear();
             if a.gamma_value == 1.0 {
                 // BuildGammaTable's g == 1.0 identity: skip the LUT entirely so
                 // the default presentation stays byte-exact.
-                for px in &img.rgb {
-                    fb.push(px[0]);
-                    fb.push(px[1]);
-                    fb.push(px[2]);
-                    fb.push(255);
-                }
+                pack_rgba(&mut a.fb, &img.rgb, None);
             } else {
                 // The port's hardware-palette boundary (VID_ShiftPalette): the
                 // finished, cshift-blended frame maps through gammatable as it
                 // becomes the presented RGBA — the same order as the C, where
                 // V_UpdatePalette blends the cshifts into the palette FIRST and
                 // gamma is applied to the result.
-                let t = &a.gamma_table;
-                for px in &img.rgb {
-                    fb.push(t[px[0] as usize]);
-                    fb.push(t[px[1] as usize]);
-                    fb.push(t[px[2] as usize]);
-                    fb.push(255);
-                }
+                pack_rgba(&mut a.fb, &img.rgb, Some(&a.gamma_table));
             }
         }
         bench::lap(Phase::Pack);
