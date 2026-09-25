@@ -19,7 +19,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 > working **Options menu** (screen size, mouse, volume; resolution under Video Options) and a **drop-down console** (`~`) with
 > `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`/`pause`/`timedemo`, and it saves and loads (Single Player > Save/Load, the
 > `save`/`load` commands; the page keeps the `.sav` text in localStorage). What it is *not*: multiplayer/netcode
-> (out of scope). Everything claimed below is real and tested: **~580 engine + ~120 wasm tests**, zero dependencies, no
+> (out of scope). Everything claimed below is real and tested: **~600 engine + ~135 wasm tests**, zero dependencies, no
 > `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
 > against golden scene renders (byte-identical unless a fidelity fix deliberately re-baselines — each such
 > re-baseline is recorded in `AUDIT.md`).
@@ -97,7 +97,7 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 587 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
+cargo test          # 596 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 

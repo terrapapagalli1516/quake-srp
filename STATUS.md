@@ -5,6 +5,28 @@ things stand" note — read it before continuing.
 
 ---
 
+## Final review fixes, UI side (2026-09-25, branch `quake/polish4b`)
+
+The final review's menu/console/keyboard/page findings (AUDIT.md's section
+of the same name), one commit each. **Every key now goes through keys.c's
+`Key_Event`** (`quake-wasm` `input.rs` `key_event(keynum, down, ch)`; the
+page sends every key there), so the menu (`Menu::keydown`, each screen's
+`M_*_Key`), the console (`Console::key`, `Key_Console`) and the bindings
+split the keyboard as id's: the console key is the `toggleconsole` binding
+(nothing over the menu, refused by a key grab), the Quit prompt takes only
+y/n, the mouse buttons bind on Customize controls. **Boot is id's**: the
+attract demos with no menu, any key brings it up, and the menu stops the
+loop (`M_Menu_Main_f`'s `m_save_demonum`; the menu over the disconnected
+console's background). `help` is the Help screen (`wasm_help` the port's
+list); the console has id's 32-line history, Tab completion and PgUp/PgDn
+backscroll; **Multiplayer > Setup** is ported (pixel-exact in the 2-D
+oracle, `name`/`color`/`hostname` in the console; the name does not reach
+the edict — the server connects "player", server/ is another branch's); the
+Web extras page is laid out like Options; the page snaps its canvas box to
+whole pixels per column where close. New 2-D oracle scenarios `menu_setup`
+(100%), `menu_disconnected`, `console_scroll` (the version stamp left);
+`oracle.c` shoots a frame with no view. Goldens unchanged.
+
 ## Demo commands, timedemo, pause (2026-09-25, branch `quake/timedemo`)
 
 id's own demo and pause commands, as the C does them (AUDIT.md's section of
