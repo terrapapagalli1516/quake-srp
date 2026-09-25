@@ -1349,6 +1349,18 @@ test in the commit message.
   it); existing exports only. `web/verify_save.py` also saves to slot 0,
   reloads, forgets the boot scan and opens Load: slot 0's row is the save's
   comment and Enter loads it (the old page fails both).
+- ✅ **A hum could start after its own stop and loop** (LOW) —
+  `drainGameSounds`: an inaudible sound (gain <= 0.02) called `stopKey`
+  without bumping `keySeq`, so a looping sample whose first decode was still
+  pending when an inaudible sound on its (entity, channel) arrived (a far
+  door's stop sound during its hum's first decode) started afterwards and
+  looped forever. `S_StartSound` picks the channel, and so overrides the
+  old sound, before the audibility test (snd_dma.c); the page now bumps
+  `keySeq` first, so the pending decode sees the override. `web/verify_loops.py`
+  feeds the two sounds through `drainGameSounds` from a stand-in `exp` (a
+  fresh 8-bit WAV at the listener on entity 900 channel 2, then a sound
+  10000 units away on the same key): the hum no longer starts (the old page
+  fails), and alone it does (the control).
 
 ## LOW (27)
 

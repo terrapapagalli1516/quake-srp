@@ -786,12 +786,15 @@ function drainGameSounds() {
       oz: exp.sound_origin_z(), vol: exp.sound_volume(), atten: exp.sound_attenuation(),
       view: typeof exp.sound_is_view_entity === 'function' && !!exp.sound_is_view_entity(),
     } : null;
-    // S_StartSound picks (and so overrides) the channel before it tests
-    // audibility: an inaudible sound still ends its key's loop, then drops.
-    if (sp && sp.gain <= 0.02) { stopKey(ent, chan); continue; }
     const kkey = ent + ':' + chan;
     const seq = (keySeq.get(kkey) || 0) + 1;
     if (chan > 0) keySeq.set(kkey, seq);
+    // S_StartSound picks (and so overrides) the channel before it tests
+    // audibility: an inaudible sound still ends its key's sound, then drops.
+    // That is the one playing (stopKey) or one whose first decode is still
+    // pending: the keySeq bump above stops that from starting after it (a
+    // door hum would otherwise start after its own stop sound, and loop).
+    if (sp && sp.gain <= 0.02) { stopKey(ent, chan); continue; }
     const gen = typeof exp.sound_generation === 'function' ? exp.sound_generation() : 0;
     const ptr = exp.sound_ptr();
     const view = new Uint8Array(exp.memory.buffer, ptr, len);
