@@ -91,6 +91,40 @@ pub extern "C" fn console_enter() {
     }
 }
 
+thread_local! {
+    /// The scrollback as [`console_text_len`] last laid it out.
+    static CONSOLE_TEXT: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A read-only verification export (like `key_is_down`): lay the console's
+/// scrollback out as text — one line per `\n`, a byte per character — and
+/// return its length; [`console_text_ptr`] points at it. The browser
+/// harnesses read what the game printed (the `timedemo` line, "player paused
+/// the game") through it.
+#[no_mangle]
+pub extern "C" fn console_text_len() -> i32 {
+    let text: Vec<u8> = APP.with(|c| {
+        let b = c.borrow();
+        let mut t = Vec::new();
+        if let Some(a) = b.as_ref() {
+            for line in a.console.lines() {
+                t.extend(line.chars().map(|ch| ch as u32 as u8));
+                t.push(b'\n');
+            }
+        }
+        t
+    });
+    let n = text.len() as i32;
+    CONSOLE_TEXT.with(|c| *c.borrow_mut() = text);
+    n
+}
+
+/// Pointer to the text [`console_text_len`] laid out.
+#[no_mangle]
+pub extern "C" fn console_text_ptr() -> *const u8 {
+    CONSOLE_TEXT.with(|c| c.borrow().as_ptr())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +201,19 @@ mod tests {
             &lines[lines.len() - 2..],
             ["You got the Grenade Launcher and a ", "very long tail to wrap"]
         );
+    }
+
+    #[test]
+    fn console_text_lays_out_the_scrollback() {
+        ensure_app(|a| {
+            a.console.clear();
+            a.console.println("first");
+            a.console.println("second line");
+        });
+        let n = console_text_len();
+        let text = CONSOLE_TEXT.with(|c| c.borrow().clone());
+        assert_eq!(n as usize, text.len());
+        assert_eq!(text, b"first\nsecond line\n");
     }
 
     #[test]
