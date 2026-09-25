@@ -101,7 +101,17 @@ impl ConNotify {
 /// playing; closing slides it back. While open the console owns the keyboard.
 #[no_mangle]
 pub extern "C" fn console_toggle() {
-    ensure_app(|a| a.console.toggle());
+    ensure_app(|a| {
+        a.console.toggle();
+        // Con_ToggleConsole_f: `memset (con_times, 0, sizeof(con_times))` —
+        // the notify lines are gone after the console goes down or up.
+        if let Some(w) = a.walk.as_mut() {
+            w.notify.clear();
+        }
+        if let Some(d) = a.demo.as_mut() {
+            d.notify.clear();
+        }
+    });
 }
 
 /// `1` when the console is open (capturing the keyboard), else `0`. The page
@@ -170,6 +180,29 @@ mod tests {
     /// CENSUS L11: Con_Print lays text into 38-column console lines (word
     /// wrapped, a line stamped when it starts) and Con_DrawNotify shows the
     /// last 4 younger than con_notifytime — fragments join, blank lines count.
+    #[test]
+    fn toggling_the_console_clears_the_notify_lines() {
+        // Con_ToggleConsole_f zeroes con_times: nothing printed before the
+        // console went down (or up) shows as a notify line after it.
+        use crate::app::boot;
+        use crate::test_util::{close_menu, walk_mut};
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| {
+            let t = w.host_time;
+            w.notify.print("You got the shells\n", t);
+            assert_eq!(w.notify.visible(t), ["You got the shells"]);
+        });
+        console_toggle();
+        assert!(walk_mut(|w| w.notify.visible(w.host_time).is_empty()), "cleared going down");
+        walk_mut(|w| {
+            let t = w.host_time;
+            w.notify.print("printed while it was down\n", t);
+        });
+        console_toggle();
+        assert!(walk_mut(|w| w.notify.visible(w.host_time).is_empty()), "cleared going up");
+    }
+
     #[test]
     fn notify_lines_follow_con_print() {
         use super::ConNotify;
