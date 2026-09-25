@@ -429,6 +429,26 @@ The fidelity classes are:
   `Image` API has to change; keep the old functions as wrappers for the tests.
 - **Coordination:** A3 later removes the clears. Until then, keep `fill` so the output stays
   byte-identical.
+- **Done** (branch `quake/perf-b`), without changing any signature: a small per-thread pool in
+  `render/mod.rs` (like the sky-span and surface caches). The host hands each presented frame
+  back (`render::recycle_image`); the next frame's view (`render_scene_ext_sprited`, still
+  filled with its background exactly as before), its z-buffer, the composed screen and
+  `apply_warp`'s snapshot reuse those allocations. The bigger win was in `compose_view`, which
+  since the vrect framing (viewsize 100 renders the view above the status bar) allocated a
+  zeroed screen, tile-cleared **all** of it and then copied the view over 76% of it: now the tile
+  goes only to the four bands around the view and the screen needs no clear (a test composes over
+  dirty spare buffers for every viewsize, against the old full-clear compose). post3d (warp +
+  compose), median ms, A/B in one sitting:
+  | | 640×400 | 1280×800 |
+  |---|---|---|
+  | wasm | 0.45 → **0.13** | 1.78 → **0.59** |
+  | native | 0.41 → 0.11 | 1.61 → 0.47 |
+
+  wasm step at 1280×800: demo1 17.0 → 16.1, walk_e1m1 11.7 → 10.7 ms. render3d is unchanged
+  within noise (reusing its buffers saves the allocation, not the fills). Hashes identical on
+  demo1, attract and walk_e1m1 at both sizes; goldens unchanged. **Not done here:**
+  `draw_viewmodel`'s full-resolution `local_z` (alias.rs, agent C's C3), and the warp could write
+  straight into the composed screen (only underwater).
 
 **B4. HUD, menu and console blits.** *(byte-identical)*
 

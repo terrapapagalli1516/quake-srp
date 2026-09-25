@@ -230,6 +230,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
 
         if let Some(img) = img {
             pack_rgba(&mut a.fb, &img.rgb, ramps.as_ref());
+            // Presented: its buffer serves the next frame (render::recycle_image).
+            render::recycle_image(img);
         }
         bench::lap(Phase::Pack);
         bench::frame_end();
