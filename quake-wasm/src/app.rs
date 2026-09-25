@@ -284,6 +284,47 @@ pub(crate) struct DemoPlay {
     pub(crate) viewsize: f32,
 }
 
+impl DemoPlay {
+    /// A playback of `demo` over `bsp` at its first frame: no models, sprites,
+    /// colormap or overlay pics yet (the caller loads what it has), and every
+    /// per-playback field — clocks, particles, beams, view shifts, messages —
+    /// at its clean-slate default.
+    pub(crate) fn new(pak: Pak, bsp: Bsp, palette: [[u8; 3]; 256], demo: Demo) -> DemoPlay {
+        DemoPlay {
+            bsp,
+            palette,
+            demo,
+            pak,
+            models: Vec::new(),
+            sprites: Vec::new(),
+            colormap: None,
+            colors: Vec::new(),
+            elapsed: 0.0,
+            idx: 0,
+            particles: ParticleSystem::new(),
+            prng: Lcg::new(0x9E37_79B9),
+            last_spawned_idx: usize::MAX,
+            beams: Beams::new(),
+            beam_scratch: Vec::new(),
+            gfx_wad: None,
+            conchars: None,
+            pic_complete: None,
+            pic_inter: None,
+            pic_finale: None,
+            damage_blend: 0.0,
+            damage_color: [255, 0, 0],
+            v_dmg_time: 0.0,
+            v_dmg_roll: 0.0,
+            v_dmg_pitch: 0.0,
+            oldz: f32::NAN,
+            centerprint: None,
+            notify: Vec::new(),
+            notify_pending: String::new(),
+            viewsize: render::VIEWSIZE_DEFAULT,
+        }
+    }
+}
+
 pub(crate) struct App {
     pub(crate) walk: Option<Walk>,
     pub(crate) demo: Option<DemoPlay>,
@@ -732,38 +773,17 @@ pub(crate) fn build_demo() -> Option<DemoPlay> {
     let pic_complete = lmp("gfx/complete.lmp");
     let pic_inter = lmp("gfx/inter.lmp");
     let pic_finale = lmp("gfx/finale.lmp");
-    Some(DemoPlay {
-        bsp,
-        palette,
-        demo,
-        pak,
-        models,
-        sprites,
-        colormap,
-        colors,
-        elapsed: 0.0,
-        idx: 0,
-        particles: ParticleSystem::new(),
-        prng: Lcg::new(0x9E37_79B9),
-        last_spawned_idx: usize::MAX,
-        beams: Beams::new(),
-        beam_scratch: Vec::new(),
-        pic_complete,
-        pic_inter,
-        pic_finale,
-        gfx_wad,
-        conchars,
-        damage_blend: 0.0,
-        damage_color: [255, 0, 0],
-        v_dmg_time: 0.0,
-        v_dmg_roll: 0.0,
-        v_dmg_pitch: 0.0,
-        oldz: f32::NAN,
-        centerprint: None,
-        notify: Vec::new(),
-        notify_pending: String::new(),
-        viewsize: render::VIEWSIZE_DEFAULT,
-    })
+    let mut d = DemoPlay::new(pak, bsp, palette, demo);
+    d.models = models;
+    d.sprites = sprites;
+    d.colormap = colormap;
+    d.colors = colors;
+    d.gfx_wad = gfx_wad;
+    d.conchars = conchars;
+    d.pic_complete = pic_complete;
+    d.pic_inter = pic_inter;
+    d.pic_finale = pic_finale;
+    Some(d)
 }
 
 pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {

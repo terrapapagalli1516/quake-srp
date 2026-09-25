@@ -580,7 +580,6 @@ mod tests {
     use quake_rs::mdl::Mdl;
     use quake_rs::particles::Lcg;
     use quake_rs::server::{SoundEvent, TempEntityEvent};
-    use quake_rs::tent::Beams;
 
     use crate::app::{build_demo, pak};
     use crate::snd_dma::{
@@ -608,38 +607,8 @@ mod tests {
             // Three frames at t = 0, 1, 2.
             frames: vec![frame(0.0), frame(1.0), frame(2.0)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.prng = Lcg::new(1);
         let n = d.demo.frames.len();
 
         // Drive several 1.0s steps and record which frame index is RENDERED
@@ -710,38 +679,8 @@ mod tests {
             viewentity: 0,
             frames: vec![plain(0.0), effect_frame, plain(0.10)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.prng = Lcg::new(1);
 
         // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
         // explosion (1024) particles populate the pool; after one tick of aging
@@ -828,38 +767,11 @@ mod tests {
             static_sounds: Vec::new(),
             frames: vec![plain(0.0), bolt_frame, plain(0.10)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: vec![None, None, Some(bolt_mdl)],
-            sprites: vec![None, None, None],
-            colormap: None,
-            colors: vec![[200; 3]; 3],
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.models = vec![None, None, Some(bolt_mdl)];
+        d.sprites = vec![None, None, None];
+        d.colors = vec![[200; 3]; 3];
+        d.prng = Lcg::new(1);
 
         // Advance onto the bolt frame: the recorded beam lands in the store and
         // the render expands it (75 units => 3 pieces at 0/30/60 along +x).
@@ -1003,38 +915,8 @@ mod tests {
             viewentity: 1,
             frames: vec![plain(0.0), sound_frame, plain(0.10)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[("sound/doors/x.wav", b"WAVE")]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[("sound/doors/x.wav", b"WAVE")]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.prng = Lcg::new(1);
 
         reset_queue(); // clears SND_QUEUE + marks audio ready
         let _ = step_demo(&mut d, 0.05, false, 160, 100);
@@ -1087,38 +969,9 @@ mod tests {
             // loop (a wrap re-spawns the damage frame's events).
             frames: vec![plain(0.0), dmg_frame, plain(0.10), plain(1.0), plain(2.0)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [0, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.damage_color = [0, 0, 0];
+        d.prng = Lcg::new(1);
 
         let (_img, color, alpha) = step_demo(&mut d, 0.05, false, 160, 100);
         assert_eq!(d.idx, 1, "advanced onto the damage frame");
