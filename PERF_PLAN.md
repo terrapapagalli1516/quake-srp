@@ -384,6 +384,22 @@ The fidelity classes are:
   - Use the port's rounding for a byte-identical first step.
 - **Functions:** `apply_blend`, `build_gamma_table`, and the pack in `step`.
 - **Risk:** very low.
+- **Done** (branch `quake/perf-b`), the faithful variant, and more faithful than this item
+  assumed: the software `V_UpdatePalette` (view.c's `!GLQUAKE` branch) never calls `V_CalcBlend`
+  (that is GLQuake's). It walks `cl.cshifts` in order over each palette level with
+  `v += (percent*(destcolor-v)) >> 8` (`int` percent, arithmetic shift), then `gammatable[v]`.
+  `render::cshift_ramps` builds exactly that as three 256-entry ramps; the frames hand the
+  dispatcher their cshift list instead of a (colour, alpha); `pack_rgba` maps every pixel through
+  the ramps (gamma folded in, so a shift costs one pass). `apply_blend`/`combine_cshifts` are gone.
+  quad_e1m1 (the Quad's shift on every frame), median ms, A/B in one sitting:
+  | | blend + pack | step |
+  |---|---|---|
+  | wasm 640×400 | 2.86 + 0.12 → **0 + 0.23** | 8.38 → 5.62 |
+  | wasm 1280×800 | 11.38 + 0.45 → **0 + 0.93** | 30.79 → 19.93 |
+  | native 1280×800 | 7.12 + 0.42 → 0 + 0.70 | 28.88 → 22.18 |
+
+  Frames with no shift are byte-identical (demo1, walk_e1m1 hashes equal; goldens unchanged).
+  Shifted frames move by at most 2 levels per channel (`AUDIT.md`, "Frame composition").
 
 **B1. The RGB→RGBA pack.** *(byte-identical)*
 
@@ -685,7 +701,7 @@ means about 4–5 ms per frame, far inside a 60 Hz budget.
 - **Fidelity issues found, not fixed** (they belong in `AUDIT.md`):
   - A4: vrect and pixelAspect.
   - C2: alias models are not colormapped, and the code comment claims otherwise.
-  - B2: the cshift rounds where the C truncates.
+  - B2: the cshift rounds where the C truncates. (Fixed on `quake/perf-b`.)
   - A2: dlit faces are lit per pixel.
   - C3: the viewmodel placement is ad hoc.
 - **Not investigated:**

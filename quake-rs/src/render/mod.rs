@@ -87,8 +87,8 @@ pub use part::draw_particles;
 pub use sprite::SpriteInstance;
 pub use stats::{render_stats_begin, render_stats_end, set_render_stats_clock, RenderStats};
 pub use view::{
-    apply_blend, build_gamma_table, combine_cshifts, content_cshift, powerup_cshift, view_bob,
-    viewmodel_angles, viewmodel_fudge, viewmodel_origin_ofs,
+    build_gamma_table, content_cshift, cshift_ramps, powerup_cshift, view_bob, viewmodel_angles,
+    viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
 pub use warp::apply_warp;

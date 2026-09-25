@@ -40,9 +40,9 @@ fn centre(w: &Walk, e: i32) -> [f32; 3] {
     [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5]
 }
 
-fn step(w: &mut Walk, dt: f32) -> ([u8; 3], f32) {
-    let (_, c, a) = step_walk(w, dt, false, 320, 200);
-    (c, a)
+/// One walk frame; returns its colour shifts (`cl.cshifts`, in order).
+fn step(w: &mut Walk, dt: f32) -> Vec<([u8; 3], f32)> {
+    step_walk(w, dt, false, 320, 200).1
 }
 
 fn angle_diff(a: f32, b: f32) -> f32 {
@@ -181,8 +181,8 @@ fn census_force_retouch_opens_e1m6_start_door() {
 
 /// CENSUS F6 (MED). Every pickup flashes the screen gold: the QC item touch
 /// functions `stuffcmd(other, "bf\n")`, V_BonusFlash_f sets the bonus cshift to
-/// (215,186,69) at 50%, and V_CalcBlend folds it into the palette shift. The
-/// port's `stuffcmd` is a no-op.
+/// (215,186,69) at 50%, and V_UpdatePalette folds it into the palette shift.
+/// The port's `stuffcmd` is a no-op.
 #[test]
 #[ignore = "census F6: the 'bf' bonus flash never fires"]
 fn census_pickup_flashes_the_screen_gold() {
@@ -194,10 +194,10 @@ fn census_pickup_flashes_the_screen_gold() {
     let p = w.player;
     let c = centre(&w, item);
     set_origin(&mut w, p, c);
-    let (color, alpha) = step(&mut w, 0.05);
+    let cshifts = step(&mut w, 0.05);
     assert!(
-        alpha > 0.0 && color[0] > color[2],
-        "a gold (215,186,69) bonus shift is in the blend after the pickup; got {color:?} @ {alpha}"
+        cshifts.iter().any(|&(color, percent)| color == [215, 186, 69] && percent > 0.0),
+        "a gold (215,186,69) bonus shift is on after the pickup; got {cshifts:?}"
     );
 }
 

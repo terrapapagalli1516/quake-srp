@@ -1,8 +1,9 @@
 //! The frame — host.c's `Host_Frame` as the `step` export the page calls
 //! once per display refresh: `Host_FilterTime`'s 72 fps gate, then the
 //! active mode's client frame, then the rest of `SCR_UpdateScreen` (the menu
-//! and console overlays, `V_UpdatePalette`'s whole-screen blend) and the
-//! gamma pack into the presented framebuffer (`VID_ShiftPalette`).
+//! and console overlays) and `V_UpdatePalette`: the cshifts and gamma as
+//! per-channel ramps the finished frame is packed through into the presented
+//! framebuffer (`VID_ShiftPalette`).
 
 use quake_rs::render::{self, build_gamma_table};
 
@@ -51,22 +52,23 @@ fn host_filter_time(realtime: f64, oldrealtime: &mut f64) -> Option<f32> {
 }
 
 /// The finished RGB frame into the presented RGBA framebuffer (`vid.buffer`
-/// for the page's `ImageData`), through `lut` when one is given, alpha 255.
+/// for the page's `ImageData`), each channel through its ramp when `ramps` is
+/// given ([`render::cshift_ramps`]: the cshifts, then gamma), alpha 255.
 /// `fb` takes `rgb`'s size (a no-op at a steady resolution, so its pointer
 /// and allocation stay put) and is written in place, four bytes a pixel —
 /// not `clear()` plus four `Vec::push`es, which cost ~5x as much (PERF_PLAN B1:
 /// 2.41 -> 0.46 ms at 1280x800 in wasm).
-fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], lut: Option<&[u8; 256]>) {
+fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], ramps: Option<&[[u8; 256]; 3]>) {
     fb.resize(rgb.len() * 4, 255);
-    match lut {
+    match ramps {
         None => {
             for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
                 out.copy_from_slice(&[px[0], px[1], px[2], 255]);
             }
         }
-        Some(t) => {
+        Some([r, g, b]) => {
             for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
-                out.copy_from_slice(&[t[px[0] as usize], t[px[1] as usize], t[px[2] as usize], 255]);
+                out.copy_from_slice(&[r[px[0] as usize], g[px[1] as usize], b[px[2] as usize], 255]);
             }
         }
     }
@@ -129,18 +131,19 @@ pub extern "C" fn step(dt: f32) -> i32 {
         if let Some(d) = a.demo.as_mut() {
             d.viewsize = viewsize;
         }
-        // Each mode returns its frame plus a DEFERRED screen blend (color, alpha):
-        // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it
-        // after the HUD/menu/console have composited, not just over the 3D view.
+        // Each mode returns its frame plus its colour shifts (`cl.cshifts`, in
+        // order): the software V_UpdatePalette shift tints the WHOLE screen, so it
+        // is applied as the frame is packed, after the HUD/menu/console, not just
+        // over the 3D view.
         bench::lap(Phase::Input);
         let frame = if a.mode == 1 {
             a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
         } else {
             a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
         };
-        let (mut img, blend) = match frame {
-            Some((image, bc, ba)) => (Some(image), (bc, ba)),
-            None => (None, ([0u8, 0, 0], 0.0f32)),
+        let (mut img, cshifts) = match frame {
+            Some((image, cshifts)) => (Some(image), cshifts),
+            None => (None, Vec::new()),
         };
 
         // svc_sellscreen (cl_parse.c): the C ran `Cmd_ExecuteString("help")` —
@@ -205,35 +208,28 @@ pub extern "C" fn step(dt: f32) -> i32 {
         }
         bench::lap(Phase::Console);
 
-        // V_UpdatePalette runs LAST in SCR_UpdateScreen: tint the fully composited
-        // frame (3D + HUD + centerprint/notify + menu + console) with the deferred
-        // damage/water/powerup blend, matching software Quake's whole-screen palette
-        // shift. A zero alpha (no active shift, or the demo path) is a no-op.
-        if let Some(img) = img.as_mut() {
-            render::apply_blend(img, blend.0, blend.1);
+        // V_UpdatePalette runs LAST in SCR_UpdateScreen. V_CheckGamma (view.c):
+        // rebuild the gamma table only when the cvar actually changed.
+        let g = a.menu.gamma();
+        if g != a.gamma_value {
+            a.gamma_value = g;
+            a.gamma_table = build_gamma_table(g);
         }
+        // The cshifts, then gamma, as per-channel ramps: the port's hardware-
+        // palette boundary (VID_ShiftPalette). The fully composited frame (3D +
+        // HUD + centerprint/notify + menu + console) maps through them as it
+        // becomes the presented RGBA, which is the C's whole-palette shift for
+        // every palette colour. No shift at gamma 1.0 (BuildGammaTable's
+        // identity) skips the lookups: the default presentation is a copy.
+        let ramps = if cshifts.is_empty() && a.gamma_value == 1.0 {
+            None
+        } else {
+            Some(render::cshift_ramps(&cshifts, &a.gamma_table))
+        };
         bench::lap(Phase::Blend);
 
         if let Some(img) = img {
-            // V_CheckGamma (view.c): rebuild the gamma LUT only when the cvar
-            // actually changed since the last frame.
-            let g = a.menu.gamma();
-            if g != a.gamma_value {
-                a.gamma_value = g;
-                a.gamma_table = build_gamma_table(g);
-            }
-            if a.gamma_value == 1.0 {
-                // BuildGammaTable's g == 1.0 identity: skip the LUT entirely so
-                // the default presentation stays byte-exact.
-                pack_rgba(&mut a.fb, &img.rgb, None);
-            } else {
-                // The port's hardware-palette boundary (VID_ShiftPalette): the
-                // finished, cshift-blended frame maps through gammatable as it
-                // becomes the presented RGBA — the same order as the C, where
-                // V_UpdatePalette blends the cshifts into the palette FIRST and
-                // gamma is applied to the result.
-                pack_rgba(&mut a.fb, &img.rgb, Some(&a.gamma_table));
-            }
+            pack_rgba(&mut a.fb, &img.rgb, ramps.as_ref());
         }
         bench::lap(Phase::Pack);
         bench::frame_end();

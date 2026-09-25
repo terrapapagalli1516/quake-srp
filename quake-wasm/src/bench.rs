@@ -16,12 +16,12 @@
 //! | render3d | `R_RenderView` (`render_scene_ext_sprited`), split further by the  |
 //! |          | engine's `RenderStats` into world/submodel/external/alias/… and    |
 //! |          | the world pass into pvs/sort/setup(+raster)/light/surf             |
-//! | post3d   | `D_WarpScreen` + the `V_CalcBlend` bookkeeping                     |
+//! | post3d   | `D_WarpScreen`, the view composed into the screen, the cshifts     |
 //! | hud2d    | `Sbar_Draw` / intermission overlays + centerprint/notify           |
 //! | menu     | `M_Draw`                                                           |
 //! | console  | `Con_DrawConsole`                                                  |
-//! | blend    | the `V_UpdatePalette` cshift, applied per pixel                    |
-//! | pack     | gamma + RGB -> RGBA into the presented framebuffer                 |
+//! | blend    | `V_UpdatePalette`: the cshift + gamma ramps (256 entries each)     |
+//! | pack     | RGB -> RGBA through the ramps into the presented framebuffer       |
 //!
 //! Timing never changes what is drawn: the laps only read the clock, and the
 //! engine's `RenderStats` counters are the same ones `quaketool`'s
