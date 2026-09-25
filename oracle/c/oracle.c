@@ -42,8 +42,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      clock, vrect, light styles, ...) and path.ents
 //                                      (the entities the frame drew, one per line)
 //   oracle_spans 8|16|1                 (a cvar) the textured-span routine: 8 = id's portable
-//                                      C D_DrawSpans8 (default), 16 = D_DrawSpans16's 16-pixel
-//                                      subdivision (the x86 asm default, d_subdiv16 1), 1 = exact
+//                                      C D_DrawSpans8 (default), 16 = d_draw16.s's D_DrawSpans16 in C
+//                                      (the x86 asm default, d_subdiv16 1, its integer steps), 1 = exact
 //                                      per-pixel perspective (an attribution experiment, not id)
 //   oracle_bench n                     (a cvar) render each shot n more times first and report
 //                                      the warm ms/frame (renderer only)
@@ -490,31 +490,41 @@ void __real_D_DrawSpans8 (espan_t *pspan);
 
 /*
 =============
-Oracle_DrawSpansN
+Oracle_DrawSpans16
 
-D_DrawSpans8 (d_scan.c) with the segment length a parameter: exact s/z, t/z,
-1/z every `seg` pixels, affine in between; the last segment steps by division
-to its final pixel. seg 16 is the algorithm of d_draw16.s's D_DrawSpans16 in
-portable C arithmetic (the asm keeps x87 intermediates and rounds with fistp
-under the chop mode R_RenderView_ sets, so rare texels may still differ).
+d_draw16.s's D_DrawSpans16 in portable C: exact s/z, t/z, 1/z at a span's
+first pixel and every 16 pixels (as D_DrawSpans8 every 8), with the asm's
+integer steps rather than D_DrawSpans8's:
+  - a full 16-pixel segment steps by (snext - s) / 16 EXACTLY: the asm keeps
+    the step's 20 fractional bits (the integer part >> 20, the fraction << 12
+    with carry), so pixel i reads (16*s + i*(snext - s)) >> 20;
+  - the last segment (count <= 16 pixels left) lands on the span's last pixel,
+    its n = count - 1 steps (snext - s) * reciprocal_table_16[n] >> 31
+    (1/n in 1.31, d_varsa.s), or snext - s for n == 1;
+  - s and t at a segment's end are clamped to [4096, bbextents] (the span's
+    first pixel to [0, bbextents], as in the C).
+What remains is the asm's float arithmetic: x87 at single precision with the
+chop rounding R_RenderView_ sets (Sys_LowFPPrecision), here gcc's x87 code.
 =============
 */
-static void Oracle_DrawSpansN (espan_t *pspan, int seg, int segshift)
+static const int reciprocal_table_16[16] = {
+	0, 0, 0x40000000, 0x2aaaaaaa, 0x20000000, 0x19999999, 0x15555555, 0x12492492,
+	0x10000000, 0xe38e38e, 0xccccccc, 0xba2e8ba, 0xaaaaaaa, 0x9d89d89, 0x9249249, 0x8888888
+};
+
+static void Oracle_DrawSpans16 (espan_t *pspan)
 {
-	int				count, spancount;
+	int				count, n, i;
 	unsigned char	*pbase, *pdest;
 	fixed16_t		s, t, snext, tnext, sstep, tstep;
-	float			sdivz, tdivz, zi, z, du, dv, spancountminus1;
-	float			sdivzsegstepu, tdivzsegstepu, zisegstepu;
-
-	sstep = 0;
-	tstep = 0;
+	float			sdivz, tdivz, zi, z, du, dv;
+	float			sdivz16stepu, tdivz16stepu, zi16stepu;
 
 	pbase = (unsigned char *)cacheblock;
 
-	sdivzsegstepu = d_sdivzstepu * seg;
-	tdivzsegstepu = d_tdivzstepu * seg;
-	zisegstepu = d_zistepu * seg;
+	sdivz16stepu = d_sdivzstepu * 16;
+	tdivz16stepu = d_tdivzstepu * 16;
+	zi16stepu = d_zistepu * 16;
 
 	do
 	{
@@ -545,71 +555,76 @@ static void Oracle_DrawSpansN (espan_t *pspan, int seg, int segshift)
 
 		do
 		{
-			if (count >= seg)
-				spancount = seg;
-			else
-				spancount = count;
-
-			count -= spancount;
-
-			if (count)
+			if (count > 16)
 			{
-				sdivz += sdivzsegstepu;
-				tdivz += tdivzsegstepu;
-				zi += zisegstepu;
+				sdivz += sdivz16stepu;
+				tdivz += tdivz16stepu;
+				zi += zi16stepu;
 				z = (float)0x10000 / zi;
 
 				snext = (int)(sdivz * z) + sadjust;
-				if (snext > bbextents)
+				if (snext < 4096)
+					snext = 4096;
+				else if (snext > bbextents)
 					snext = bbextents;
-				else if (snext < seg)
-					snext = seg;
 
 				tnext = (int)(tdivz * z) + tadjust;
-				if (tnext > bbextentt)
+				if (tnext < 4096)
+					tnext = 4096;
+				else if (tnext > bbextentt)
 					tnext = bbextentt;
-				else if (tnext < seg)
-					tnext = seg;
 
-				sstep = (snext - s) >> segshift;
-				tstep = (tnext - t) >> segshift;
+				for (i = 0 ; i < 16 ; i++)
+					*pdest++ = *(pbase +
+							(int)(((long long)s * 16 + (long long)i * (snext - s)) >> 20) +
+							(int)(((long long)t * 16 + (long long)i * (tnext - t)) >> 20) * cachewidth);
+
+				s = snext;
+				t = tnext;
+				count -= 16;
 			}
 			else
 			{
-				spancountminus1 = (float)(spancount - 1);
-				sdivz += d_sdivzstepu * spancountminus1;
-				tdivz += d_tdivzstepu * spancountminus1;
-				zi += d_zistepu * spancountminus1;
-				z = (float)0x10000 / zi;
-				snext = (int)(sdivz * z) + sadjust;
-				if (snext > bbextents)
-					snext = bbextents;
-				else if (snext < seg)
-					snext = seg;
-
-				tnext = (int)(tdivz * z) + tadjust;
-				if (tnext > bbextentt)
-					tnext = bbextentt;
-				else if (tnext < seg)
-					tnext = seg;
-
-				if (spancount > 1)
+				n = count - 1;
+				sstep = tstep = 0;
+				if (n)
 				{
-					sstep = (snext - s) / (spancount - 1);
-					tstep = (tnext - t) / (spancount - 1);
+					sdivz += d_sdivzstepu * n;
+					tdivz += d_tdivzstepu * n;
+					zi += d_zistepu * n;
+					z = (float)0x10000 / zi;
+
+					snext = (int)(sdivz * z) + sadjust;
+					if (snext < 4096)
+						snext = 4096;
+					else if (snext > bbextents)
+						snext = bbextents;
+
+					tnext = (int)(tdivz * z) + tadjust;
+					if (tnext < 4096)
+						tnext = 4096;
+					else if (tnext > bbextentt)
+						tnext = bbextentt;
+
+					if (n == 1)
+					{
+						sstep = snext - s;
+						tstep = tnext - t;
+					}
+					else
+					{
+						sstep = (int)(((long long)(snext - s) * reciprocal_table_16[n]) >> 31);
+						tstep = (int)(((long long)(tnext - t) * reciprocal_table_16[n]) >> 31);
+					}
 				}
+				for (i = 0 ; i <= n ; i++)
+				{
+					*pdest++ = *(pbase + (s >> 16) + (t >> 16) * cachewidth);
+					s += sstep;
+					t += tstep;
+				}
+				count = 0;
 			}
-
-			do
-			{
-				*pdest++ = *(pbase + (s >> 16) + (t >> 16) * cachewidth);
-				s += sstep;
-				t += tstep;
-			} while (--spancount > 0);
-
-			s = snext;
-			t = tnext;
-
 		} while (count > 0);
 
 	} while ((pspan = pspan->pnext) != NULL);
@@ -672,7 +687,7 @@ void __wrap_D_DrawSpans8 (espan_t *pspan)
 	switch ((int)oracle_spans.value)
 	{
 	case 16:
-		Oracle_DrawSpansN (pspan, 16, 4);
+		Oracle_DrawSpans16 (pspan);
 		break;
 	case 1:
 		Oracle_DrawSpansExact (pspan);

@@ -92,6 +92,7 @@ pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 pub(crate) fn render_options(render_w: usize, render_h: usize) -> render::RenderOptions {
     render::RenderOptions {
         pixel_aspect: render::vid_aspect(render_w, render_h, DISPLAY_ASPECT),
+        ..Default::default()
     }
 }
 

@@ -248,7 +248,7 @@ pub(super) fn draw_world_textured(
         if let Some(t) = _t_l { t_light += t.elapsed().as_nanos() as u64; }
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
-            SurfKind::Turb => SurfaceMode::Turb { turb, time },
+            SurfKind::Turb => SurfaceMode::Turb { turb, time, persp: opts.persp() },
             SurfKind::Sky => SurfaceMode::Sky { view: sky_view, defer: Some((&sky_spans, face_index as u32 + 1)) },
         };
 
@@ -310,7 +310,7 @@ pub(super) fn draw_world_textured(
                 match surf {
                     Some((block, bw, bh, tmins)) => {
                         stat(|s| s.surf_hits += 1);
-                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette);
+                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette, opts.persp());
                     }
                     None => {
                         stat(|s| s.surf_misses += 1);
@@ -574,7 +574,7 @@ pub(super) fn draw_submodel(
         };
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
-            SurfKind::Turb => SurfaceMode::Turb { turb, time },
+            SurfKind::Turb => SurfaceMode::Turb { turb, time, persp: opts.persp() },
             SurfKind::Sky => SurfaceMode::Sky { view: SkyView::new(forward, right, up, w, h, time), defer: None },
         };
 
@@ -631,7 +631,7 @@ pub(super) fn draw_submodel(
                 match surf {
                     Some((block, bw, bh, tmins)) => {
                         stat(|s| s.sub_surf_hits += 1);
-                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette);
+                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette, opts.persp());
                     }
                     None => {
                         stat(|s| s.sub_surf_misses += 1);

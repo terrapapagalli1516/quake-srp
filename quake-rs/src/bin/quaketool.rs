@@ -134,7 +134,7 @@ fn usage() {
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -1957,6 +1957,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 /// --aspect A         vid.aspect, R_ViewChanged's pixelAspect (default 1, square
 ///                    pixels, as the oracle's vid_null; id's DOS/Win 320x200 on a
 ///                    4:3 monitor is 0.8333 — the oracle's -oracle_aspect)
+/// --exactpersp 0|1   1: exact perspective at every pixel, the port's extra (default
+///                    0: id's 16-pixel segments, D_DrawSpans16 / Turbulent8)
 /// --ents FILE        draw these entities: the oracle's `.ents` list, one per line,
 ///                    `model ox oy oz pitch yaw roll frame skin syncbase effects kind`
 ///                    (without it: the world only, as r_drawentities 0)
@@ -2004,6 +2006,13 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             "--angles" => angles = Some(parse_vec3(flag, val)?),
             "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
+            "--exactpersp" => {
+                opts.exact_perspective = match val.as_str() {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(format!("--exactpersp: expected 0 or 1, got {val:?}")),
+                }
+            }
             "--aspect" => {
                 opts.pixel_aspect = val.parse().map_err(|_| format!("--aspect: bad number {val:?}"))?;
                 if !(opts.pixel_aspect.is_finite() && opts.pixel_aspect > 0.0) {
@@ -2177,9 +2186,10 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let mut o = String::new();
     let _ = writeln!(
         o,
-        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}",
+        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}{}",
         origin[0], origin[1], origin[2], angles[0], angles[1], angles[2],
-        if opts.pixel_aspect != 1.0 { format!(" aspect {}", opts.pixel_aspect) } else { String::new() }
+        if opts.pixel_aspect != 1.0 { format!(" aspect {}", opts.pixel_aspect) } else { String::new() },
+        if opts.exact_perspective { " exactpersp" } else { "" }
     );
     let _ = writeln!(
         o,

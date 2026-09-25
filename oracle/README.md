@@ -23,7 +23,8 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--time T` | pin `cl.time` (light styles, sky, turb, texture and alias animation) |
 | `--settle N` | shoot N frames after signon instead of the first |
 | `--crop name:x,y,w,h` | extra 6x C / port / diff PNG of a region |
-| `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the 16-pixel segments of the x86 asm `D_DrawSpans16` (what DOS/Win players saw, `d_subdiv16 1`); 1 = exact per-pixel perspective (an experiment, not id) |
+| `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the x86 asm's `D_DrawSpans16` in C, its integer steps included (what DOS/Win players saw, `d_subdiv16 1` — and what the port draws); 1 = exact per-pixel perspective (an experiment, not id) |
+| `--exactpersp` | the port's exact per-pixel perspective extra (`quaketool view --exactpersp 1`) instead of its default 16-pixel spans; pair it with `--spans 1` |
 | `--aspect A` | `vid.aspect` for both renderers (`-oracle_aspect` / `quaketool view --aspect`). Default 1.0, square pixels; `0.8333333` is id's DOS/Win 16:10 modes on a 4:3 monitor — and what the browser page shows (every preset is 16:10, presented at 4:3) |
 | `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
@@ -73,7 +74,7 @@ It is built as a static 32-bit i386 binary (1996 code assumes 32-bit pointers) i
 a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
 
 **Port side.** `quaketool view <pak> <map> <out.ppm> [--res] [--origin] [--angles]
-[--time] [--fov] [--ents FILE] [--viewmodel M:F] [--bench N]` renders one exactly
+[--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--viewmodel M:F] [--bench N]` renders one exactly
 specified view through the same `render_scene_ext_sprited` the game uses. It is a
 new subcommand; no existing output changed (goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`).
 
@@ -158,7 +159,7 @@ classes a crop is not about removed on id's side where possible.
 | 4 | sky front layer not offset | the whole cloud layer | bug — **fixed** |
 | 5 | weapon viewmodel placement | ~5 pts when drawn | bug — **fixed** |
 | 6 | surface-cache lightmap stepping | 1.5-4.4% | departure |
-| 7 | affine span segments | 1-5% | expected so far (design) |
+| 7 | affine span segments | 1-5% | the port draws the x86's 16 — **fixed** against `--spans 16` |
 | 8 | turb warp rounding | ~20-25% of liquid pixels | departure — **fixed** |
 | 9 | sample-less faces | the e1m1 golden view shows one | departure — **fixed** |
 
@@ -220,9 +221,14 @@ classes a crop is not about removed on id's side where possible.
    rounding off. (id's x86 `surf8.s` steps with deltas; not checked against it.)
 7. **Span subdivision** (`crops/spans.png`: vertical stripes where the affine error
    crosses a texel). id divides every 8 pixels (portable C) or 16 (x86 asm) and
-   steps s/t linearly between; the port divides per pixel. Documented as a perf
-   item in STATUS.md; a faithful port would subdivide (16 to match what players
-   saw, 8 to match id's C).
+   steps s/t linearly between; the port divided per pixel. **Fixed** (branch
+   `quake/w2b`): the port draws what players saw, `d_draw16.s`'s `D_DrawSpans16`
+   (its integer steps) on the surface cache and `Turbulent8`'s 16-pixel segments
+   on liquids, over id's spans (the 16-pixel grid restarts where a surface
+   comes out from behind a nearer one). Against `--spans 16` the rows match as
+   well as exact against exact; against id's portable C (`--spans 8`, the
+   default) this class is now the 8-vs-16 difference. The old per-pixel
+   perspective is the port's opt-in extra (`--exactpersp`).
 8. **Turb warp.** The port rounds `sintable` to whole texels and floors s/t before
    adding; id adds the 16.16 table value to the fixed-point coordinate and then
    takes `>> 16`, over 16-pixel segments. About a fifth of liquid pixels land one
@@ -255,7 +261,9 @@ pixel). Timings are noisy: compare within one sitting.
 
 - id's C, not id's asm. The shipped x86 binaries used `d_draw16.s`, `surf8.s`,
   `d_polysa.s` and friends; the oracle runs the portable C. `--spans 16`
-  reproduces the 16-pixel segment algorithm in C, not the asm's exact x87
+  reproduces `D_DrawSpans16` in C with the asm's integer steps (since
+  `quake/w2b`; before, `D_DrawSpans8`'s — the two differ on 0-40 pixels of a
+  320x200 frame), not the asm's x87 single-precision chop
   rounding. Other asm-vs-C differences are unmeasured.
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
   1996. The x87-vs-SSE check bounds the float noise at ~0.03%.

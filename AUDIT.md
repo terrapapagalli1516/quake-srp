@@ -695,7 +695,51 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
   - Page screenshots before/after at 320x200 and 960x600 (e1m1 spawn): the
     rivet grid on the walls, square in the texture, was 1.17:1 tall and is
     1:1; the view shows 1.2x more vertically, and the gun is DOS Quake's.
+- ✅ **16-pixel perspective spans** (oracle class 7; the LOW "affine span
+  subdivision"). The shipped x86 WinQuake drew the surface cache with
+  `D_DrawSpans16` (`d_draw16.s`, `d_subdiv16` 1): exact perspective every 16
+  pixels, affine in between; the port divided at every pixel. Now
+  `raster.rs`'s `span16_cached` is the asm's integer algorithm: the 16.16
+  coordinates exact at a span's first pixel (clamped to `[0, bbextents]`) and
+  at each full segment's end (clamped to `[4096, bbextents]`), stepped by
+  `(snext - s)/16` with the 20 fractional bits the asm carries; the last
+  segment lands on the span's last pixel with `reciprocal_table_16`'s
+  `floor(ds * R[n] / 2^31)`. Liquids follow `Turbulent8` (C in both builds):
+  16-pixel segments, `>> 4` steps, the C division on the last one, the
+  `(CYCLE << 16) - 1` mask per segment. And the spans are id's: `R_ScanEdges`
+  cuts a surface's row at every nearer surface's edge, so the 16-pixel grid
+  restarts where a surface becomes visible; the port draws front to back
+  against its z-buffer, so a span is a run of pixels passing the z test. Sky
+  stays on its 32-pixel `D_DrawSkyScans8` runs, found the same way.
+  - **Oracle, id at mip 0** (the mip class removed), `--spans 16` on id's
+    side: 88.74 / 89.99 / 93.57 / 85.62 → **95.61 / 97.43 / 98.51 / 98.68**,
+    the same as exact against exact (95.61 / 97.40 / 98.50 / 98.66); 640x480
+    93.69 / 93.85 / 96.57 / 95.01 → 95.93 / 97.60 / 98.50 / 98.75. Without the
+    z-test runs (the 16-pixel grid anchored at the polygon's left edge) e1m1 /
+    e1m2 read 94.40 / 95.20: the remainder was stripes on partly hidden walls.
+    Liquid pixels of an oblique teleporter (e1m1, `--view=1260,1050,-368,0,60,0
+    --time 3.25`): 92.15% → 100.00%. Floors and pools, whose 1/z is constant
+    along a row, were already exact.
+  - **Id as shipped on x86** (`--spans 16`, id's own mips): 80.37 / 63.78 /
+    65.41 / 67.94 → 86.95 / 64.29 / 66.14 / 80.35; against id's portable C
+    (`--spans 8`, the oracle's default) it falls, as it must: 84.74 / 64.06 /
+    65.88 / 75.62 → 82.04 / 63.79 / 65.56 / 72.23.
+  - **The oracle's `--spans 16`** was a C re-creation with `D_DrawSpans8`'s
+    integer steps (`>> 4`, clamp 16, division); it now has the asm's (the
+    exact 1/16 steps, clamp 4096, `reciprocal_table_16`). The two differ on 0 /
+    6 / 40 / 40 pixels of the four standard frames; the port with either
+    arithmetic matches id within ±0.05 points, the size of id's float noise.
+  - **Goldens** (640x400): e1m1 `bb64996e` → `2023d7d9` (5025 px, 1.96%),
+    e1m2 `8186a64c` → `1ac070d0` (7612 px, 2.97%), e1m3 `f41e8b59` →
+    `cc121e29` (5218 px, 2.04%) — texel steps inside 16-pixel segments.
+  - **Speed:** wasm world −17 to −24% at 1280x800 (demo1 4.37 → 3.59 ms,
+    walk_e1m3 3.30 → 2.62), native world +30-40%; PERF_PLAN §6 has the table.
+  - The old per-pixel perspective stays as an opt-in extra
+    (`RenderOptions::exact_perspective`, `quaketool view --exactpersp 1`,
+    `compare.py --exactpersp`): byte-identical to before (the oracle's exact
+    rows are unchanged). The uncached per-pixel wall path (faces over the
+    surface-cache size cap, or no colormap — never in id's maps) stays exact.
 
 ## LOW (27)
 
-Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.
+Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

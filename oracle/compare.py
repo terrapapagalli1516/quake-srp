@@ -154,6 +154,8 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     ]
     if args.aspect is not None:
         cmd += ["--aspect", str(args.aspect)]
+    if args.exactpersp:
+        cmd += ["--exactpersp", "1"]
     if ents:
         cmd += ["--ents", str(out / f"{case}.c.ents")]
     # id's live dynamic lights (muzzle flashes, explosions: e.g. --c-cmd +attack)
@@ -246,6 +248,9 @@ def main() -> None:
     ap.add_argument("--spans", type=int, choices=(8, 16, 1), default=8,
                     help="C span routine: 8 = id's portable C D_DrawSpans8 (default), 16 = the asm's "
                          "16-pixel segments (d_subdiv16), 1 = exact per-pixel perspective (experiment)")
+    ap.add_argument("--exactpersp", action="store_true",
+                    help="the port's exact per-pixel perspective extra (default: id's 16-pixel spans, "
+                         "which --spans 16 gives id's side too)")
     ap.add_argument("--c-cmd", action="append", default=[],
                     help="extra C console command before the map loads (repeatable), e.g. 'd_mipscale 0'")
     ap.add_argument("--aspect", type=float,

@@ -286,7 +286,7 @@ The fidelity classes are:
 - **Done** (branch `quake/w1`): `scan_poly` walks each clipped polygon row by row under id's fill
   rule (pixel centre, top-left, half-open). The span loops in `raster_poly_cached`,
   `raster_poly_tex` and `raster_poly_flat` cover the cached, turb, sky, per-pixel and flat faces.
-  A `Span` is the place for 16-pixel subdivision. The gradients are not solved from a vertex
+  A `Span` is the place for 16-pixel subdivision (done on `quake/w2b`, §6). The gradients are not solved from a vertex
   triple; they are `D_CalcGradients`' analytic planes (`PolyGrads::for_plane`), with s and t
   relative to the eye and f64 steps: the absolute-s f32 interpolation misplaced ~0.3% of texels.
   - **Speed,** A/B against A0 in one sitting, median ms (load 3.5–5):
@@ -753,7 +753,17 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
   auto-vectorised almost nothing (+67 bytes). It would also drop Safari < 16.4. Revisit only with
   hand-written SIMD, for example for A3's span loop or the B1/B2 pack.
 - **16-pixel affine subdivision on its own**: no wasm gain on top of A1. Do it for fidelity, as
-  part of A3, not for speed.
+  part of A3, not for speed. **Done anyway, for fidelity** (branch `quake/w2b`: `D_DrawSpans16`
+  and `Turbulent8` over z-test runs, see `AUDIT.md`), and in wasm it is a gain after all, because
+  the row is now two tight loops — the z test with its one divide per pixel, then the texels by
+  integer steps over the runs that passed. A/B against the aspect commit, one sitting, two
+  rounds, median ms, wasm world at 1280×800: demo1 4.37/4.01 → 3.59/3.32, walk_e1m1 3.14/3.36 →
+  2.41/2.54, fire_e1m1 3.51/3.56 → 2.80/2.88, walk_e1m3 3.30/3.48 → 2.62/2.78 (−17 to −24%);
+  step demo1 6.70/5.99 → 5.82/5.33; at 640×400 world −10 to −25%. **Native is the other way:**
+  the native twin's world rises ~30-40% (demo1 2.91/3.22 → 4.21/4.51 at 1280×800), and
+  `quaketool view --bench` at 1280×800 reads 5.0 (exact) vs 5.6-6.2 ms. Of four structures tried,
+  a depth pass into a row buffer then texels was the fastest natively (−10% against exact) but
+  +8% in wasm; the shipped one is the fastest in wasm. Not understood; the browser is the target.
 - **`wasm-opt -O3`** (binaryen v132 via `bunx -p binaryen`):
   - identical hashes; step −2 to −5% (demo1 1280×800: 19.6 → 18.7 ms);
   - 640 KB smaller: code 773 → 662 KB, and the name section is stripped.

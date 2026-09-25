@@ -146,24 +146,43 @@ fn turb_fixed(s: f32) -> i32 {
 /// The 16.16 table value is added to the 16.16 coordinate BEFORE the `>> 16`, so
 /// the fractional parts carry. The caller wraps into the texture (`rem_euclid`;
 /// = `& 63` for the 64x64 liquids id ships). The coordinate here is exact per
-/// pixel; id steps it linearly across 16-pixel segments (class 7 in
+/// pixel: the port's exact-perspective extra. id steps it linearly across
+/// 16-pixel segments, as the default does (`raster_turb16`; class 7 in
 /// `oracle/README.md`, the span-subdivision item, shared with the walls).
 #[inline]
 pub(super) fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (i32, i32) {
-    const MASK: i32 = TURB_CYCLE as i32 - 1;
-    let phase = ((time * TURB_SPEED) as i32 & MASK) as usize;
-    let sf = turb_fixed(s);
-    let tf = turb_fixed(t);
-    let sturb = sf.wrapping_add(turb.tab[phase + ((tf >> 16) & MASK) as usize]) >> 16;
-    let tturb = tf.wrapping_add(turb.tab[phase + ((sf >> 16) & MASK) as usize]) >> 16;
-    (sturb, tturb)
+    turb.texel(turb_phase(time), turb_fixed(s), turb_fixed(t))
+}
+
+/// `Turbulent8`'s table phase: `r_turb_turb = sintable + ((int)(cl.time*SPEED)
+/// & (CYCLE-1))`.
+#[inline]
+pub(super) fn turb_phase(time: f32) -> usize {
+    ((time * TURB_SPEED) as i32 & (TURB_CYCLE as i32 - 1)) as usize
+}
+
+/// `(CYCLE << 16) - 1`: `Turbulent8` masks each segment's start coordinates
+/// with it before `D_DrawTurbulent8Span` steps them.
+pub(super) const TURB_COORD_MASK: i32 = ((TURB_CYCLE as i32) << 16) - 1;
+
+impl TurbTable {
+    /// `D_DrawTurbulent8Span`'s texel for the 16.16 coordinates `(s, t)` at the
+    /// table `phase` ([`turb_phase`]), before the `& 63`:
+    /// `((s + turb[(t>>16) & (CYCLE-1)]) >> 16`, and `t` the other way round.
+    #[inline]
+    pub(super) fn texel(&self, phase: usize, s: i32, t: i32) -> (i32, i32) {
+        const MASK: i32 = TURB_CYCLE as i32 - 1;
+        let sturb = s.wrapping_add(self.tab[phase + ((t >> 16) & MASK) as usize]) >> 16;
+        let tturb = t.wrapping_add(self.tab[phase + ((s >> 16) & MASK) as usize]) >> 16;
+        (sturb, tturb)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
-    use crate::render::raster::{outline, raster_poly_tex, AttrVert, PolyGrads, SurfaceMode};
+    use crate::render::raster::{outline, raster_poly_tex, AttrVert, Persp, PolyGrads, SurfaceMode};
 
     #[test]
     fn turb_table_matches_r_initturb() {
@@ -231,7 +250,7 @@ mod tests {
             raster_poly_tex(
                 &mut img, &mut zb, &outline(&tri), &g,
                 &pixels, 64, 64, &pal, 1.0, None,
-                SurfaceMode::Turb { turb: &turb, time },
+                SurfaceMode::Turb { turb: &turb, time, persp: Persp::Exact },
                 None,
             );
             img

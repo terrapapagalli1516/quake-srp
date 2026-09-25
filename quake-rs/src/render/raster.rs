@@ -12,7 +12,7 @@ use crate::math::Vec3;
 use super::light::{colormap_row, LightMap, COLORMAP_LEN};
 use super::sky::{sky_texel_view, SkySpans, SkyView};
 use super::stats::stat;
-use super::warp::{warp_st, TurbTable};
+use super::warp::{turb_phase, warp_st, TurbTable, TURB_COORD_MASK};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -168,8 +168,9 @@ pub(super) fn raster_triangle(
 pub(super) enum SurfaceMode<'a> {
     /// Ordinary wall: sample `pixels` at the interpolated `(s,t)`.
     Normal,
-    /// Liquid: SIN-warp `(s,t)` by `time` before sampling. Unlit.
-    Turb { turb: &'a TurbTable, time: f32 },
+    /// Liquid: SIN-warp `(s,t)` by `time` before sampling (`Turbulent8`), with
+    /// `(s,t)` exact every 16 pixels or at every pixel (`persp`). Unlit.
+    Turb { turb: &'a TurbTable, time: f32, persp: Persp },
     /// Sky: project the per-pixel VIEW DIRECTION onto the scrolling sky dome
     /// (`D_Sky_uv_To_st`) rather than mapping wall `(s,t)`. Unlit. With `defer`
     /// (the world pass) the pixel only takes the depth and is recorded for
@@ -392,9 +393,9 @@ impl PolyGrads {
 /// `D_DrawSpans8`'s `zi`/`sdivz`/`tdivz` and `d_zistepu`/`d_sdivzstepu`/
 /// `d_tdivzstepu`. The span loops step each with one add per pixel, in f64 (the
 /// same cost as f32 in wasm, and no drift worth a texel across 1280 pixels);
-/// the start is evaluated from the planes per span. This is where
-/// `D_DrawSpans16`'s 16-pixel subdivision would go (divide at the segment ends,
-/// step `s`/`t` affinely between).
+/// the start is evaluated from the planes per span. The textured loops take
+/// `s`/`t` from it either at every pixel ([`Persp::Exact`]) or at 16-pixel
+/// segment ends ([`Persp::Spans16`], [`Span::st_at`]).
 #[derive(Clone, Copy)]
 struct Span {
     y: usize,
@@ -406,6 +407,154 @@ struct Span {
     dzi: f64,
     dsz: f64,
     dtz: f64,
+}
+
+impl Span {
+    /// The 16.16 texel coordinates at pixel `k` of the span, unclamped: `z =
+    /// 0x10000 / zi`, `s = (int)(sdivz * z) + sadjust` — `D_DrawSpans8`'s and
+    /// `D_DrawSpans16`'s per-segment divide (the planes evaluated in f64 at
+    /// the pixel; id accumulates `sdivz16stepu` in float). A non-positive `zi`
+    /// (rounding at a near-clipped edge) saturates, and the callers clamp.
+    #[inline]
+    fn st_at(&self, k: usize, sadjust: i64, tadjust: i64) -> (i64, i64) {
+        let kf = k as f64;
+        let z = 65536.0 / (self.zi + kf * self.dzi);
+        (((self.sz + kf * self.dsz) * z) as i64 + sadjust, ((self.tz + kf * self.dtz) * z) as i64 + tadjust)
+    }
+}
+
+/// How a textured brush span finds its texels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Persp {
+    /// What 1996 players saw: the x86 WinQuake's `D_DrawSpans16` (`d_draw16.s`,
+    /// `d_subdiv16` 1) on the surface cache and `Turbulent8` on liquids —
+    /// exact perspective every 16 pixels, affine in between.
+    Spans16,
+    /// Exact perspective at every pixel: not id; the port's opt-in extra
+    /// ([`RenderOptions::exact_perspective`](super::RenderOptions::exact_perspective)).
+    Exact,
+}
+
+/// `reciprocal_table_16` (d_varsa.s): `1/n` for `n = 2..=15` in 1.31 fixed
+/// point, `floor(2^31 / n)`. `D_DrawSpans16`'s last segment steps by
+/// `(snext - s) * 2` times this, keeping the high word: `floor(ds * R / 2^31)`.
+const RECIPROCAL_16: [i64; 16] = [
+    0, 0, 0x4000_0000, 0x2aaa_aaaa, 0x2000_0000, 0x1999_9999, 0x1555_5555, 0x1249_2492,
+    0x1000_0000, 0x0e38_e38e, 0x0ccc_cccc, 0x0ba2_e8ba, 0x0aaa_aaaa, 0x09d8_9d89, 0x0924_9249,
+    0x0888_8888,
+];
+
+thread_local! {
+    /// One polygon row's runs for the 16-pixel span routines, kept across calls.
+    static ROW_RUNS: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The z test for one polygon row: write the depth (1/z stepped from the
+/// span's start, as the exact loops step it) wherever it is nearer than
+/// `zrow`, and collect in `runs` each stretch `a..b` of pixels that passed —
+/// the port's stand-in for the spans `R_ScanEdges` cuts a surface into (see
+/// [`span16_cached`]). Returns the pixels that passed.
+#[inline]
+fn z_test_runs(zrow: &mut [f32], sp: &Span, runs: &mut Vec<(usize, usize)>) -> usize {
+    runs.clear();
+    let mut zi = sp.zi;
+    let (mut start, mut in_run) = (0usize, false);
+    for (k, zc) in zrow.iter_mut().enumerate() {
+        let depth = if zi > 0.0 { (1.0 / zi) as f32 } else { f32::INFINITY };
+        let nearer = depth < *zc;
+        *zc = if nearer { depth } else { *zc };
+        if nearer != in_run {
+            if nearer {
+                start = k;
+            } else {
+                runs.push((start, k));
+            }
+            in_run = nearer;
+        }
+        zi += sp.dzi;
+    }
+    if in_run {
+        runs.push((start, zrow.len()));
+    }
+    runs.iter().map(|&(a, b)| b - a).sum()
+}
+
+/// A surface-cache block's fixed-point frame for [`span16_cached`]: `sadjust`/
+/// `tadjust` (the eye's block coordinate, 16.16) and `bbextents`/`bbextentt`
+/// (`(extent << 16) - 1`: the last position inside the surface).
+struct BlockFixed {
+    sadjust: i64,
+    tadjust: i64,
+    bbextents: i64,
+    bbextentt: i64,
+}
+
+/// `D_DrawSpans16` (d_draw16.s) for one polygon row over a surface-cache
+/// block. id draws a surface's SPANS — the runs of a row where it is the
+/// nearest surface, which `R_ScanEdges` cuts at every nearer surface's edge —
+/// so the 16-pixel grid restarts at each run's first pixel. The port draws
+/// polygons front to back against its z-buffer, so a run is a stretch of
+/// pixels that passed the z test ([`z_test_runs`]). Per run: the texel
+/// coordinates are exact at the first pixel, then at the end of every full
+/// 16-pixel segment, and in between stepped by `(snext - s) / 16` exactly (the
+/// asm carries the step's 20 fractional bits: pixel `k` reads
+/// `(16*s + k*(snext - s)) >> 20`); the last segment of `n + 1` pixels lands on
+/// the run's last pixel, stepped by `reciprocal_table_16`
+/// (`floor((snext - s) * R[n] / 2^31)`, 16.16), one pixel alone at the
+/// previous segment's end. The first position is clamped to `[0, bbextents]`,
+/// every later one to `[4096, bbextents]` (the asm's low clamp, 1/16 texel).
+/// Every position is then inside the surface — a full segment's lie between
+/// its clamped ends, and the last segment's floor-biased steps undershoot its
+/// end by at most `n` < 4096 — so each texel is in the block without a
+/// per-pixel clamp.
+fn span16_cached(
+    crow: &mut [[u8; 3]],
+    sp: &Span,
+    fx: &BlockFixed,
+    block: &[u8],
+    bw: usize,
+    palette: &[[u8; 3]; 256],
+    runs: &[(usize, usize)],
+) {
+    for &(run, end) in runs {
+        let (s0, t0) = sp.st_at(run, fx.sadjust, fx.tadjust);
+        let (mut s, mut t) = (s0.clamp(0, fx.bbextents), t0.clamp(0, fx.bbextentt));
+        let mut k0 = run;
+        while k0 < end {
+            let left = end - k0;
+            // The positions this segment steps through: `16*s + i*ds` with 20
+            // fractional bits (a full segment), or `s + i*ds` with 16.
+            let (n, shift, mut sa, mut ta, ds, dt, next);
+            if left > 16 {
+                // A full segment: exact again at pixel k0 + 16.
+                let (sn, tn) = sp.st_at(k0 + 16, fx.sadjust, fx.tadjust);
+                let (sn, tn) = (sn.max(4096).min(fx.bbextents), tn.max(4096).min(fx.bbextentt));
+                (n, shift, sa, ta, ds, dt, next) = (16, 20, s * 16, t * 16, sn - s, tn - t, (sn, tn));
+            } else {
+                // The last segment: `left - 1` steps land on the run's last pixel.
+                let steps = left - 1;
+                let (mut ss, mut ts) = (0i64, 0i64);
+                if steps > 0 {
+                    let (sn, tn) = sp.st_at(k0 + steps, fx.sadjust, fx.tadjust);
+                    let (dss, dts) = (sn.max(4096).min(fx.bbextents) - s, tn.max(4096).min(fx.bbextentt) - t);
+                    (ss, ts) = if steps == 1 {
+                        (dss, dts)
+                    } else {
+                        ((dss * RECIPROCAL_16[steps]) >> 31, (dts * RECIPROCAL_16[steps]) >> 31)
+                    };
+                }
+                (n, shift, sa, ta, ds, dt, next) = (left, 16, s, t, ss, ts, (s, t));
+            }
+            for c in &mut crow[k0..k0 + n] {
+                let texel = block.get((ta >> shift) as usize * bw + (sa >> shift) as usize);
+                *c = palette[texel.copied().unwrap_or(0) as usize];
+                sa += ds;
+                ta += dt;
+            }
+            (s, t) = next;
+            k0 += n;
+        }
+    }
 }
 
 /// Below this |2 x area| (in square pixels) even the best vertex triple of a
@@ -546,6 +695,10 @@ pub(super) fn raster_poly_tex(
     if zbuf.len() < w * h || image.rgb.len() < w * h {
         return;
     }
+    if let SurfaceMode::Turb { turb, time, persp: Persp::Spans16 } = mode {
+        raster_turb16(image, zbuf, poly, grads, pixels, tw, th, palette, turb, time);
+        return;
+    }
     // Only use a correctly-sized colormap; a malformed one falls back to the
     // linear multiply (never reads out of bounds).
     let colormap = colormap.filter(|cm| cm.len() >= COLORMAP_LEN);
@@ -599,7 +752,7 @@ pub(super) fn raster_poly_tex(
                         };
                         (p, b)
                     }
-                    SurfaceMode::Turb { turb, time } => {
+                    SurfaceMode::Turb { turb, time, .. } => {
                         // SIN-warp the (s,t) before the (tiling) wrap; unlit.
                         let (s2, t2) = warp_st(turb, s, t, time);
                         let tx = s2.rem_euclid(tw as i32) as usize;
@@ -663,11 +816,81 @@ pub(super) fn raster_poly_tex(
     });
 }
 
+/// A liquid polygon as `Turbulent8` (d_scan.c; C in the x86 build too) draws
+/// it, span by span ([`z_test_runs`], as [`span16_cached`]): the 16.16
+/// coordinates exact at a span's first pixel (clamped to `[0, bbextents]`) and
+/// at each 16-pixel segment's end (clamped to `[16, bbextents]`), stepped by
+/// `(snext - s) >> 4` in between; the last segment ends on the span's last
+/// pixel, stepped by the C division `(snext - s) / (spancount - 1)`. Each
+/// segment's start is masked to `(CYCLE << 16) - 1` and `D_DrawTurbulent8Span`
+/// warps every pixel ([`TurbTable::texel`]). The face's frame is
+/// `Mod_LoadFaces`' for turbulent surfaces (`texturemins` -8192, `extents`
+/// 16384). The raw texel, no colormap.
+#[allow(clippy::too_many_arguments)]
+fn raster_turb16(
+    image: &mut Image,
+    zbuf: &mut [f32],
+    poly: &[ProjT],
+    grads: &PolyGrads,
+    pixels: &[u8],
+    tw: usize,
+    th: usize,
+    palette: &[[u8; 3]; 256],
+    turb: &TurbTable,
+    time: f32,
+) {
+    const BBEXTENTS: i64 = (16384 << 16) - 1;
+    let (w, h) = (image.w, image.h);
+    let st_eye = grads.st_eye;
+    let sadjust = ((st_eye[0] + 8192.0) * 65536.0 + 0.5).floor() as i64;
+    let tadjust = ((st_eye[1] + 8192.0) * 65536.0 + 0.5).floor() as i64;
+    let phase = turb_phase(time);
+    let (tw_i, th_i) = (tw as i32, th as i32);
+    let mut runs = ROW_RUNS.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    scan_poly(poly, w, h, grads, |sp| {
+        let row = sp.y * w;
+        z_test_runs(&mut zbuf[row + sp.x0..row + sp.x1], &sp, &mut runs);
+        let crow = &mut image.rgb[row + sp.x0..row + sp.x1];
+        for &(run, end) in &runs {
+            let (s0, t0) = sp.st_at(run, sadjust, tadjust);
+            let (mut s, mut t) = (s0.clamp(0, BBEXTENTS), t0.clamp(0, BBEXTENTS));
+            let mut k0 = run;
+            while k0 < end {
+                let n = (end - k0).min(16);
+                let (sn, tn, ss, ts);
+                if k0 + n < end {
+                    let (a, b) = sp.st_at(k0 + 16, sadjust, tadjust);
+                    (sn, tn) = (a.clamp(16, BBEXTENTS), b.clamp(16, BBEXTENTS));
+                    (ss, ts) = ((sn - s) >> 4, (tn - t) >> 4);
+                } else {
+                    let (a, b) = sp.st_at(k0 + n - 1, sadjust, tadjust);
+                    (sn, tn) = (a.clamp(16, BBEXTENTS), b.clamp(16, BBEXTENTS));
+                    (ss, ts) = if n > 1 { ((sn - s) / (n as i64 - 1), (tn - t) / (n as i64 - 1)) } else { (0, 0) };
+                }
+                // In the C's `int`s from here: the masked start and the steps.
+                let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
+                let (ss, ts) = (ss as i32, ts as i32);
+                for c in &mut crow[k0..k0 + n] {
+                    let (sturb, tturb) = turb.texel(phase, a, b);
+                    let texel = pixels.get(tturb.rem_euclid(th_i) as usize * tw + sturb.rem_euclid(tw_i) as usize);
+                    *c = palette[texel.copied().unwrap_or(0) as usize];
+                    a = a.wrapping_add(ss);
+                    b = b.wrapping_add(ts);
+                }
+                (s, t) = (sn, tn);
+                k0 += n;
+            }
+        }
+    });
+    ROW_RUNS.with(|r| *r.borrow_mut() = runs);
+}
+
 /// A wall whose lit+colormapped surface block is already baked (see
-/// [`face_surf_block`](super::surf::face_surf_block)) — `D_DrawSpans8` over a
-/// cached surface. The inner pixel is ONE block read (texture, lightmap and
-/// colormap are folded into the block) plus a palette lookup; the z test and
-/// write stay. This is the warm-frame hot path for walls.
+/// [`face_surf_block`](super::surf::face_surf_block)) — `D_DrawSpans16` (or,
+/// as the port's extra, exact perspective) over a cached surface. The inner
+/// pixel is ONE block read (texture, lightmap and colormap are folded into the
+/// block) plus a palette lookup; the z test and write stay. This is the
+/// warm-frame hot path for walls.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn raster_poly_cached(
     image: &mut Image,
@@ -679,6 +902,7 @@ pub(super) fn raster_poly_cached(
     bh: usize,
     texmins: [f32; 2],
     palette: &[[u8; 3]; 256],
+    persp: Persp,
 ) {
     let (w, h) = (image.w, image.h);
     if w == 0 || h == 0 || bw == 0 || bh == 0 || block.len() < bw.saturating_mul(bh) {
@@ -689,23 +913,38 @@ pub(super) fn raster_poly_cached(
     }
     let st_eye = grads.st_eye;
     let (bw_i, bh_i) = (bw as i64, bh as i64);
-    // `D_DrawSpans8`'s 16.16 texel arithmetic: `z = 0x10000 / zi`, then
+    // The span routines' 16.16 texel arithmetic: `z = 0x10000 / zi`, then
     // `s = (int)(sdivz * z) + sadjust` — the eye-relative part truncated toward
     // zero, the eye's block coordinate `sadjust` rounded — and the texel
-    // `s >> 16`. In f64, so the texel is the exact perspective one up to id's
+    // `s >> 16`. In f64, so an exact texel is the perspective one up to id's
     // own 1/65536 steps. (The z-buffer's `z * 2^-16` is a power-of-two scale:
     // bit-identical to `1.0 / zi`, which the other span loops store.)
     let sadjust = ((st_eye[0] - texmins[0] as f64) * 65536.0 + 0.5).floor() as i64;
     let tadjust = ((st_eye[1] - texmins[1] as f64) * 65536.0 + 0.5).floor() as i64;
+    // `D_CalcGradients`' `bbextents = (extents << 16) - 1`: the block is one
+    // texel wider and taller than the surface's `extents` (it ends on the last
+    // luxel's texel, `face_surf_block`).
+    let fx = BlockFixed {
+        sadjust,
+        tadjust,
+        bbextents: ((bw_i - 1) << 16).max(1) - 1,
+        bbextentt: ((bh_i - 1) << 16).max(1) - 1,
+    };
     // Local written-pixel tally (overdraw metric), folded into the profiler ONCE
     // at the end so the hot loop never touches a thread-local.
     let mut drawn = 0u64;
+    let mut runs = ROW_RUNS.with(|r| std::mem::take(&mut *r.borrow_mut()));
     scan_poly(poly, w, h, grads, |sp| {
         let row = sp.y * w;
         // Per-span row slices: in bounds by the span's screen clip, so the loop
         // indexes them without per-pixel bounds checks.
         let zrow = &mut zbuf[row + sp.x0..row + sp.x1];
         let crow = &mut image.rgb[row + sp.x0..row + sp.x1];
+        if persp == Persp::Spans16 {
+            drawn += z_test_runs(zrow, &sp, &mut runs) as u64;
+            span16_cached(crow, &sp, &fx, block, bw, palette, &runs);
+            return;
+        }
         let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
         for (zc, c) in zrow.iter_mut().zip(crow.iter_mut()) {
             if zi > 0.0 {
@@ -727,6 +966,7 @@ pub(super) fn raster_poly_cached(
             tz += sp.dtz;
         }
     });
+    ROW_RUNS.with(|r| *r.borrow_mut() = runs);
     stat(|s| s.world_pixels += drawn);
 }
 
@@ -833,25 +1073,114 @@ mod tests {
         }
 
         let turb = TurbTable::new();
-        let (w, h) = (16usize, 16usize);
+        let (w, h) = (40usize, 16usize);
+        for persp in [Persp::Spans16, Persp::Exact] {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut zb = vec![f32::INFINITY; w * h];
+            let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
+            let tri = [v0, v1, v2];
+            let g = PolyGrads::from_vertices(&tri).expect("triangle");
+            raster_poly_tex(
+                &mut img, &mut zb, &outline(&tri), &g,
+                &pixels, 64, 64, &pal, 1.0, None,
+                SurfaceMode::Turb { turb: &turb, time: 0.0, persp },
+                Some(&cm),
+            );
+            let drawn: Vec<[u8; 3]> = img.rgb.iter().copied().filter(|p| *p != [0, 0, 0]).collect();
+            assert!(!drawn.is_empty(), "turb triangle drew nothing");
+            for p in &drawn {
+                assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "turb must store the raw texel, no colormap");
+            }
+        }
+    }
+
+    // -- D_DrawSpans16 over the surface cache --------------------------------
+
+    /// A 40x8 quad over a 256x256 block whose texel at (bx, by) is
+    /// `(bx + 3*by) & 255`, drawn cached with `persp`; `zl`/`zr` are the depth at the
+    /// left and right edges (the texel s runs 20.3 -> 180.3 across, t 30.3 -> 40.3
+    /// down, perspective-correct, never on a texel boundary: the last segment's
+    /// reciprocal steps run up to n/65536 texel low). `occlude` pre-fills the
+    /// z-buffer of the first `occlude` columns with a nearer depth. Returns
+    /// palette indices.
+    fn cached_quad(persp: Persp, zl: f32, zr: f32, occlude: usize) -> Vec<u8> {
+        let (w, h) = (40usize, 8usize);
+        let (bw, bh) = (256usize, 256usize);
+        let block: Vec<u8> = (0..bw * bh).map(|i| ((i % bw) + 3 * (i / bw)) as u8).collect();
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, 0, 0];
+        }
+        let v = |x: f32, y: f32, vz: f32, s: f32, t: f32| AttrVert { x, y, vz, s, t };
+        let quad = [
+            v(0.0, 0.0, zl, 20.3, 30.3),
+            v(w as f32, 0.0, zr, 180.3, 30.3),
+            v(w as f32, h as f32, zr, 180.3, 40.3),
+            v(0.0, h as f32, zl, 20.3, 40.3),
+        ];
+        let g = PolyGrads::from_vertices(&quad).expect("quad");
         let mut img = Image::new(w, h, [0, 0, 0]);
         let mut zb = vec![f32::INFINITY; w * h];
-        let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-        let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-        let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
-        let tri = [v0, v1, v2];
-        let g = PolyGrads::from_vertices(&tri).expect("triangle");
-        raster_poly_tex(
-            &mut img, &mut zb, &outline(&tri), &g,
-            &pixels, 64, 64, &pal, 1.0, None,
-            SurfaceMode::Turb { turb: &turb, time: 0.0 },
-            Some(&cm),
-        );
-        let drawn: Vec<[u8; 3]> = img.rgb.iter().copied().filter(|p| *p != [0, 0, 0]).collect();
-        assert!(!drawn.is_empty(), "turb triangle drew nothing");
-        for p in &drawn {
-            assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "turb must store the raw texel, no colormap");
+        for y in 0..h {
+            zb[y * w..y * w + occlude].fill(0.001);
         }
+        raster_poly_cached(&mut img, &mut zb, &outline(&quad), &g, &block, bw, bh, [0.0, 0.0], &pal, persp);
+        img.rgb.iter().map(|p| p[0]).collect()
+    }
+
+    #[test]
+    fn spans16_is_exact_where_one_over_z_is_constant() {
+        // A surface parallel to the screen: s/z and 1/z are both linear, so the
+        // affine segments land on the exact texels everywhere.
+        assert_eq!(cached_quad(Persp::Spans16, 2.0, 2.0, 0), cached_quad(Persp::Exact, 2.0, 2.0, 0));
+    }
+
+    #[test]
+    fn spans16_is_exact_at_each_segment_start_of_a_run() {
+        // An oblique wall (1/z from 1 to 1/8 across 40 px): D_DrawSpans16
+        // divides at the run's first pixel and every 16 pixels after it (0, 16,
+        // 32: the last segment is 32..40), stepping affinely between — so it
+        // agrees with exact perspective there and not everywhere else.
+        let w = 40usize;
+        let exact = cached_quad(Persp::Exact, 1.0, 8.0, 0);
+        let s16 = cached_quad(Persp::Spans16, 1.0, 8.0, 0);
+        for y in 0..8 {
+            for x in [0usize, 16, 32] {
+                assert_eq!(s16[y * w + x], exact[y * w + x], "row {y} pixel {x}");
+            }
+        }
+        assert!(s16.iter().zip(&exact).filter(|(a, b)| a != b).count() > 40, "segments are affine");
+        // The same wall behind a nearer surface over its first 5 columns: id's
+        // span (R_ScanEdges) starts at the first visible pixel, so the grid
+        // restarts there: exact at 5, 21 and 37.
+        let hidden = cached_quad(Persp::Spans16, 1.0, 8.0, 5);
+        for y in 0..8 {
+            assert!(hidden[y * w..y * w + 5].iter().all(|&p| p == 0), "occluded pixels untouched");
+            for x in [5usize, 21, 37] {
+                assert_eq!(hidden[y * w + x], exact[y * w + x], "row {y} pixel {x}");
+            }
+        }
+        assert_ne!(hidden[5 * w..6 * w], s16[5 * w..6 * w], "the grid moved with the run");
+    }
+
+    #[test]
+    fn spans16_steps_like_d_draw16_s() {
+        // The last segment's step is reciprocal_table_16's floor(ds * R / 2^31),
+        // not the C division (which truncates toward zero): over 3 steps,
+        // 100000 steps by 33333 either way, -100000 by -33334 (the C: -33333).
+        assert_eq!((100_000i64 * RECIPROCAL_16[3]) >> 31, 33_333);
+        assert_eq!((-100_000i64 * RECIPROCAL_16[3]) >> 31, -33_334);
+        for (n, &r) in RECIPROCAL_16.iter().enumerate().skip(2) {
+            assert_eq!(r, (1i64 << 31) / n as i64, "1/{n} in 1.31");
+        }
+        // A full segment's step keeps 20 fractional bits (the asm's frac << 12
+        // with carry): from s = 0xFFF0 towards snext = s + 31, pixel 15 is at
+        // 0xFFF0 + 15*31/16 = 0x1_0001.1 -> texel 1, where D_DrawSpans8-style
+        // `(snext - s) >> 4` steps (1 each) stop at 0xFFFF -> texel 0.
+        let (s, ds) = (0xFFF0i64, 31i64);
+        assert_eq!(((16 * s + 15 * ds) >> 20, (s + 15 * (ds >> 4)) >> 16), (1, 0));
     }
 
     // -- The polygon span walker's fill rule --------------------------------

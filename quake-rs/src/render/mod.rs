@@ -342,15 +342,30 @@ pub struct RenderOptions {
     /// brush models, alias models and the gun, sprites, particles and the
     /// frustum. The sky does not use it (`D_Sky_uv_To_st` maps screen pixels).
     pub pixel_aspect: f32,
+    /// EXTRA, not id (default off): exact perspective at every pixel of the
+    /// surface-cached walls and the liquids. id's x86 renderer, what 1996
+    /// players saw, is exact only every 16 pixels and affine in between
+    /// (`D_DrawSpans16`, `Turbulent8`); that is the default. The browser's
+    /// `wasm_exactpersp 1` sets this.
+    pub exact_perspective: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> RenderOptions {
-        RenderOptions { pixel_aspect: 1.0 }
+        RenderOptions { pixel_aspect: 1.0, exact_perspective: false }
     }
 }
 
 impl RenderOptions {
+    /// The span routine for textured brush surfaces.
+    fn persp(&self) -> raster::Persp {
+        if self.exact_perspective {
+            raster::Persp::Exact
+        } else {
+            raster::Persp::Spans16
+        }
+    }
+
     /// [`RenderOptions::pixel_aspect`], with a non-finite or non-positive value
     /// read as square pixels.
     pub(crate) fn aspect(&self) -> f32 {
@@ -1266,7 +1281,7 @@ mod tests {
         let render = |pixel_aspect: f32| {
             render_scene_ext_sprited(
                 &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
-                None, &[], &RenderOptions { pixel_aspect },
+                None, &[], &RenderOptions { pixel_aspect, ..Default::default() },
             )
         };
         // The pillar's face: the colour at the centre; its columns on the centre
