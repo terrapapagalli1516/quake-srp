@@ -64,7 +64,7 @@ ALL_WEAPONS = (IT_AXE | IT_SHOTGUN | IT_SUPER_SHOTGUN | IT_NAILGUN | IT_SUPER_NA
 #   ("impulse", n) ("console",) ("type", text: typed into the console, no Enter)
 #   ("key", NAME) ("showscores", 0|1)
 #   ("centerprint", text) ("print", text) ("intermission", n, t, text)
-#   ("faceanim",) ("cmd", line) ("shot", name)
+#   ("faceanim",) ("quitmsg", n) ("cmd", line) ("shot", name)
 # Every scenario starts on e1m1 after 20 frames (the console has retracted), at viewsize 100.
 # ---------------------------------------------------------------------------
 
@@ -143,8 +143,9 @@ SCENARIOS: dict[str, list] = {
     "menu_help": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
                   ("key", "DOWNARROW"), ("key", "ENTER"), ("frames", 1), ("shot", "help1"),
                   ("key", "RIGHTARROW"), ("frames", 1), ("shot", "help2")],
-    "menu_quit": [("frames", 1), ("key", "ESCAPE"), ("key", "UPARROW"), ("key", "ENTER"), ("frames", 1),
-                  ("shot", "quit")],
+    "menu_quit": [("frames", 1), ("key", "ESCAPE"), ("key", "UPARROW"), ("key", "ENTER"), ("quitmsg", 4),
+                  ("frames", 1), ("shot", "quit"), ("quitmsg", 6), ("frames", 1), ("shot", "quit6"),
+                  ("key", "n"), ("frames", 1), ("shot", "back")],
 }
 
 
@@ -189,6 +190,8 @@ def c_lines(steps, out: Path, name: str) -> list[str]:
             lines.append(f"oracle_intermission {args[0]} {args[1]} {args[2]}".rstrip())
         elif op == "faceanim":
             lines.append("oracle_faceanim")
+        elif op == "quitmsg":
+            lines.append(f"oracle_quitmsg {args[0]}")
         elif op == "cmd":
             lines.append(args[0])
         elif op == "shot":
@@ -211,7 +214,7 @@ def port_lines(steps, out: Path, name: str, res, metas: dict) -> list[str]:
             lines.append(f"frames {args[0]}")
         elif op == "field":
             lines.append(f"field {args[0]} " + " ".join(str(v) for v in args[1:]))
-        elif op in ("serverflags", "impulse", "type", "key", "showscores", "centerprint", "cmd"):
+        elif op in ("serverflags", "impulse", "type", "key", "showscores", "centerprint", "cmd", "quitmsg"):
             lines.append(f"{op} {args[0]}")
         elif op == "console":
             lines.append("console")

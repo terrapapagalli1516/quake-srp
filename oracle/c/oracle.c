@@ -63,6 +63,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //   oracle_faceanim                    cl.faceanimtime = cl.time + 0.2 (V_ParseDamage's pain face)
 //   oracle_key keyname                 Key_Event down + up (keys.c names: ESCAPE, ENTER,
 //                                      UPARROW, DOWNARROW, TAB, a single character, ...)
+//   oracle_quitmsg n                   the quit prompt's message (msgNumber, rand()&7)
 // A shot's .json also carries the 2-D clocks and state (realtime, host_time,
 // scr_centertime_start, scr_con_current, key_dest, cl.stats, ...).
 
@@ -112,6 +113,7 @@ cvar_t		oracle_blank = {"oracle_blank", "-1"};
 extern double	host_time;
 extern float	scr_centertime_start, scr_centertime_off;
 extern int		m_state;
+extern int		msgNumber;
 ddef_t		*ED_FindField (char *name);
 ddef_t		*ED_FindGlobal (char *name);
 qboolean	ED_ParseEpair (void *base, ddef_t *key, char *s);
@@ -368,6 +370,13 @@ static void Oracle_FaceAnim_f (void)
 	Sbar_Changed ();
 }
 
+// oracle_quitmsg n -- the quit prompt's message (M_Menu_Quit_f's rand()&7)
+static void Oracle_QuitMsg_f (void)
+{
+	if (Cmd_Argc () == 2)
+		msgNumber = Q_atoi (Cmd_Argv (1)) & 7;
+}
+
 static void Oracle_Key_f (void)
 {
 	int		k;
@@ -395,6 +404,7 @@ void Oracle_Init (void)
 	Cmd_AddCommand ("oracle_intermission", Oracle_Intermission_f);
 	Cmd_AddCommand ("oracle_faceanim", Oracle_FaceAnim_f);
 	Cmd_AddCommand ("oracle_key", Oracle_Key_f);
+	Cmd_AddCommand ("oracle_quitmsg", Oracle_QuitMsg_f);
 	Cvar_RegisterVariable (&oracle_blank);
 	Cmd_AddCommand ("oracle_quit", Oracle_Quit_f);
 	Cmd_AddCommand ("oracle_edicts", Oracle_Edicts_f);

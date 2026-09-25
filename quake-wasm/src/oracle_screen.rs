@@ -30,6 +30,7 @@
 //! | `print TEXT` | a QuakeC print (`\n` = newline): the notify lines and the console |
 //! | `intermission N T [TEXT]` | svc_intermission (1) / svc_finale (2) / svc_cutscene (3), completed time T |
 //! | `faceanim` | V_ParseDamage's pain face (`faceanimtime = cl.time + 0.2`) |
+//! | `quitmsg N` | the quit prompt's message (`msgNumber`, else `rand()&7`) |
 //! | `clocks REALTIME HOST_TIME CLTIME CENTERSTART` | the C shot frame's clocks, for the next `shot` |
 //! | `shot PATH` | one more frame (`step(0.1)`, as the C's shot is the frame that ran `oracle_shot`), then the `clocks` handed over and the frame drawn again frozen (`step(0)`); writes the framebuffer as `PATH` (P6 PPM) |
 
@@ -219,6 +220,7 @@ fn run(script: &str) {
                     }
                 });
             }
+            "quitmsg" => ensure_app(|a| a.menu.set_quit_message(num(0) as usize)),
             "faceanim" => ensure_app(|a| {
                 let w = a.walk.as_mut().expect("a walk");
                 w.faceanimtime = w.server.time() + 0.2;
