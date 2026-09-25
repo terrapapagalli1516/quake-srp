@@ -5,6 +5,20 @@ things stand" note — read it before continuing.
 
 ---
 
+## Second review fixes (2026-09-25, branch `quake/polish2`)
+
+The second review's findings outside `quake-wasm/src/` (AUDIT.md's section
+of the same name): `sv.time` is a double (the item flash matches id; goldens
+e1m2/e1m3 re-baselined to `9ae2b478`/`2ca0f916`, an item not yet dropped at
+sv.time 1.2 as in id's); particles drawn as `D_DrawParticle` (100% of
+particle pixels against the oracle, which now dumps them); the oracle's
+underwater comparison fixed (99.9%); the Load menu lists saves after a
+page reload; a pending hum can no longer outlive its stop; `sv_gravity`
+outlives the map; census mover baselines; stale docs. Left for the
+quake-wasm pass: see the AUDIT section's list.
+
+---
+
 ## Projection and spans (2026-09-25, branch `quake/w2b`)
 
 The 3-D view as DOS/Windows players saw it (details in AUDIT.md's section of
@@ -30,7 +44,7 @@ wide at the bottom centre and the menus sit top centre. The old blown-up
 layout is the opt-in **"scaled 2-D" extra**: the wasm export
 `set_scaled_2d(1)` — not yet wired into the page's Extras menu or saved.
 Found for other branches (AUDIT.md): menu cursors not remembered per menu,
-`sv.time` accumulated in f32, WASD default binds, no pause/loading plaques,
+`sv.time` accumulated in f32 (fixed on `quake/polish2`), WASD default binds, no pause/loading plaques,
 `give` unlike `Host_Give_f`.
 
 ---

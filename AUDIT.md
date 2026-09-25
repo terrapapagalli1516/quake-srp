@@ -808,7 +808,7 @@ and the commit messages.
 - ✅ **L1 live punchangle in whole degrees** (`MSG_WriteChar(punchangle[i])`): `client_punchangle` truncates to signed chars for the camera and the gun.
 - ✅ **L8 particles drawn before they move** (`R_DrawParticles`: free `die < cl.time`, draw, then move/ramp): `ParticleSystem::retire` + `integrate`, called around the draw list in step_walk/step_demo.
 - ✅ **L9 dlights drawn before they decay** (Host_Frame: `CL_DecayLights` after `SCR_UpdateScreen`; R_PushDlights skips `die < cl.time`): step_walk renders `pushed_dlights` and decays after the 3-D view.
-- ✅ **L11 notify lines** (`Con_Print` 38-column word-wrapped lines stamped at their start; `Con_DrawNotify` last 4 from `v = 0`): quake-wasm `ConNotify`, live + demo; `draw_notify` from y = 0. Still open: prints never reach the drop-down console's scrollback.
+- ✅ **L11 notify lines** (`Con_Print` 38-column word-wrapped lines stamped at their start; `Con_DrawNotify` last 4 from `v = 0`): quake-wasm `ConNotify`, live + demo; `draw_notify` from y = 0. ~~Still open: prints never reach the drop-down console's scrollback~~ (✅ `quake/polish`, c71989f).
 - ✅ **L12 default.cfg binds** — ENTER `+jump`, MOUSE2 `+forward`, `\` and MOUSE3 `+mlook`, INS `+klook` seeded; the page sends MOUSE2/MOUSE3 while locked. Not done: PAUSE (no `pause`), the F-key commands, `t` messagemode.
 - ✅ **L14 New Game asks first while a game runs** (`M_SinglePlayer_Key` → `SCR_ModalMessage`, y/n/Escape, faded screen + `SCR_DrawNotifyString`): `Menu::new_game_confirm`, raised when the host-set `server_active`; y (`menu_quit_yes`) starts the game.
 
@@ -817,7 +817,7 @@ and the commit messages.
 One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 
 - ✅ **Chthon's electricity** — boss.qc `lightning_fire` writes TE_LIGHTNING3 to MSG_ALL (`sv.reliable_datagram`), which `CL_ParseServerMessage` parses like the datagram; the port decoded temp entities only from MSG_BROADCAST, so Chthon died with no bolt drawn. `server/msg.rs` now runs one svc parser per buffer (datagram, reliable), each reading temp entities and commands alike (fix first found by the `chthon` agent, salvaged `00bf4a7`). Test `cl_tent::tests::chthon_lightning_reaches_the_client_and_kills_him_on_e1m7`.
-- ✅ **F3 e1m8 low gravity** — `sv_gravity` is a live cvar (`server/host.rs`): world.qc `worldspawn`'s `cvar_set("sv_gravity", "100"|"800")` lands, `cvar("sv_gravity")` reads it, `SV_AddGravity`, `SV_Physics_Step`'s landing-sound threshold and the live `R_DrawParticles` gravity use it; a fresh server starts at 800. Test `census_e1m8_has_low_gravity` (+ `sv_gravity_cvar_drives_add_gravity`). The demo path keeps 800 (no server runs during playback).
+- ✅ **F3 e1m8 low gravity** — `sv_gravity` is a live cvar (`server/host.rs`): world.qc `worldspawn`'s `cvar_set("sv_gravity", "100"|"800")` lands, `cvar("sv_gravity")` reads it, `SV_AddGravity`, `SV_Physics_Step`'s landing-sound threshold and the live `R_DrawParticles` gravity use it; a fresh server starts at 800 (since `quake/polish2` the cvar outlives the map, as id's: the next worldspawn sets it). Test `census_e1m8_has_low_gravity` (+ `sv_gravity_cvar_drives_add_gravity`). The demo path keeps 800 (no server runs during playback).
 - ✅ **F5 b_*.bsp item boxes** — two causes. (1) `WorldModel::precache_model` spread the external model's bounds a second time (`Bsp::parse` already applies `Mod_LoadSubmodels`' pixel): the explosive box was 34 wide (hull2) and floated 2 units. (2) `world::clip_box` treated touching boxes as overlapping; the C box hull (`SV_InitBoxHull`) is half-open, `mins <= p < maxs`, so e1m1's 10-health box beside a grunt and e1m6's 25-health box beside an ogre no longer "fall out of the level" in PlaceItem's droptofloor. Oracle edict diff: both boxes present, explosive box at id's z -207.969; nothing else moved on any map. Tests `census_bmodel_item_bounds_are_spread_once`, `clip_box_is_half_open_like_the_c_box_hull`.
 - ✅ **F8 force_retouch** — `SV_Physics` relinks every live edict with `SV_LinkEdict(ent, true)` while the QC global is set (`spawn_tdeath`, `teleport_use` set 2) and decrements it after the loop; now both `run_frame` and `client_frame` do (world skipped, SOLID_NOT relinked without touching). e1m6 doors *31/*76 and e1m8 *6 open at the level start as in id (oracle: open by t 4.7; at t 1.7 the port is 0.2 s ahead, the signon-timing gap below). Tests `census_force_retouch_opens_e1m6_start_door`, `force_retouch_relinks_stationary_edicts_for_two_frames`. Open: the port connects the player at sv.time 1.2, id's signon at ~1.4.
 - ✅ **F9 looping mover sounds** — `queue_sounds` carries each sample's `cue ` loop window (`GetWavinfo`) through `poll_sound` (`sound_loop_start` -1 = one-shot) and no longer drops `misc/null.wav`; the page loops such a source (`SND_PaintChannels`) until a later sound on its (entity, channel) overrides it, re-spatializes it every frame from its fixed origin like the C channel, lets an inaudible sound still end its key's loop (`S_StartSound` picks the channel before the audibility test), guards the async first decode against an override that landed meanwhile, and stops every dynamic source on a level change (`S_StopAllSounds`). Tests `queue_sounds_carries_the_cue_loop_so_movers_hum_until_their_stop_sound`, `web/verify_loops.py` (demo1's first door hum loops, then its stop sound ends it).
@@ -1331,6 +1331,33 @@ test in the commit message.
   and the census test fails if that `cvar_set` is dropped (checked by breaking
   it: 100 != 800). Savegame loads run worldspawn (`Host_Loadgame_f` ->
   `SV_SpawnServer`), so an e1m8 save still loads at 100.
+- ✅ **Stale docs** — README and quake-rs/README said save/load was out of
+  scope and counted 458 + 48 tests; the verify-script list, CENSUS L11's moot
+  "still open", L15 (partly fixed by F9, not marked; the per-side clamp after
+  the master volume and the one-shots' per-frame spatialisation are still
+  open, `web/index.html` `playRouted`), the census tests described as
+  `#[ignore]`d, and the fix-client L11 / fix-server F3 lines. Not changed,
+  another agent's files: `render/surf.rs`'s `mipadjust` comment is backwards
+  (it says a texture scaled up in the editor "drops to a coarser mip sooner";
+  its short axes give `mipadjust` 4, which raises `nearzi * scale_for_mip *
+  mipadjust`, so it keeps a FINER level longer — and it counts world units
+  per texel, not texels per unit); `quake-wasm/src/census_tests.rs`'s module
+  doc still says `#[ignore]`.
+
+Left for the quake-wasm pass (found here, not changed: `quake-wasm/src/` is
+being moved into `quake-rs/src/client/`):
+- The live host hands `client_frame` an f32 `dt`, which the server widens;
+  call `client_frame_f64` with `Host_FilterTime`'s double `host_frametime`, so
+  `sv.time` adds exactly id's frame times.
+- `census_tests.rs`'s module doc says the tests are `#[ignore]`d; all twenty
+  run in the normal suite.
+- The page's sound law (not quake-wasm, but the same pass): `playRouted` /
+  `spatializeDynLoop` clamp each side after the master volume (id clamps
+  `leftvol`/`rightvol` at 255, `snd_mix.c`, then scales by `volume`), and
+  non-looping one-shots are not re-spatialised each frame (`S_Update` runs
+  `SND_Spatialize` on every channel) — CENSUS L15's open half.
+- Tooling: `quaketool view --vrect` draws an underwater view unwarped
+  (`compare.py` warns); the warp at viewsize below 120 is not compared.
 - ✅ **Census: e1m8's `*6` reported "never moved"** (LOW, tooling) — the mover
   baselines were taken after the signon frames, by which time
   `PutClientInServer`'s `force_retouch` had opened the door (an ogre stands

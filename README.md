@@ -17,8 +17,9 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 > exit to the **intermission stats screen** (Time / Secrets / Kills from the QC-placed camera) — through to the
 > **episode-end finale text** — with your inventory carried to the next map: the whole shareware episode. There's a
 > working **Options menu** (screen size, mouse, volume; resolution under Video Options) and a **drop-down console** (`~`) with
-> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`. What it is *not*: multiplayer/netcode or save/load (out of
-> scope). Everything claimed below is real and tested: **458 engine + 48 wasm tests**, zero dependencies, no
+> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`, and it saves and loads (Single Player > Save/Load, the
+> `save`/`load` commands; the page keeps the `.sav` text in localStorage). What it is *not*: multiplayer/netcode
+> (out of scope). Everything claimed below is real and tested: **~580 engine + ~120 wasm tests**, zero dependencies, no
 > `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
 > against golden scene renders (byte-identical unless a fidelity fix deliberately re-baselines — each such
 > re-baseline is recorded in `AUDIT.md`).
@@ -29,7 +30,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 |------|------|
 | `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`. |
 | `quake-wasm/` | the `cdylib` browser shell (~5.5k lines + ~3.9k of e2e tests): compiles the engine to `wasm32`, owns the walk/demo/menu/console front-end state, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. Modules are named after the id file they port the client/host side of (`host` = `Host_Frame`, `cl_walk`/`cl_demo`/`cl_tent`, `input`, `menu`, `console`, `host_cmd`, `savegame`, `snd_dma`, `vid`, plus `app` for the state and boots); `src/lib.rs` maps every export to its module. |
-| `web/` | the browser page (`index.html`) + headless-verify scripts (`verify_walk.py`, `verify_ambient.py`). |
+| `web/` | the browser page (`index.html`) + eight headless-Chromium verify scripts (`verify_*.py`: walk, ambient, demo, input, menu, save, loops, extras). |
 | `oracle/` | id's own WinQuake software renderer built headless from the C (null drivers, docker i386 build) + `compare.py`: renders the same view in both and diffs them pixel for pixel. See `oracle/README.md` for how to run it and the ranked fidelity findings. |
 | `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |
 | `screenshots/` | rendered output from real e1m1 / start (the lit shots, the walkthrough GIF). |
@@ -89,7 +90,7 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 458 lib + 8 integration tests, no game data required (synthetic fixtures)
+cargo test          # ~580 lib + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
@@ -166,7 +167,7 @@ ledger in `AUDIT.md`, all HIGHs closed). What remains:
 - **A documented divergence tail** — one narrow MEDIUM (maps with no lighting lump render Lambert where id
   is fullbright; test maps only) and assorted cosmetic LOWs (the demo path's missing explosion dlight).
   Tracked with plans in `AUDIT.md`; the gameplay census's findings in `CENSUS.md`.
-- **Multiplayer & save/load** — out of scope for this single-player, headless-server port.
+- **Multiplayer** — out of scope for this single-player, headless-server port.
 
 ## Licensing
 
