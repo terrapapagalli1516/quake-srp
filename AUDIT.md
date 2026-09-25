@@ -519,6 +519,19 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   view (ogre + two flames) 21.8% → 100.0% with id as shipped. nonpal% is 0
   everywhere. Goldens: `fb14bd65` → `d103ba3f`, `76905e15` → `a833cbac`,
   `0211e6d4` → `ed42c092` (monsters/items in all three).
+- ✅ **Viewmodel** (class 5; the placement itself landed with the options
+  branch) — what still differed from id: the gun is drawn by the alias
+  pipeline above (lighting, affine, tripled 1/z in the shared z-buffer
+  instead of a private depth buffer, no gun at fov > 90); its origin lacks
+  the camera's 1/32 node-line epsilon (-1/32 relative, ~0.5 px at 320x200);
+  the bob moves it along the full view pitch (V_CalcRefdef has just set the
+  entity angles to the view's, not the server's third); and its angles are
+  CalcGunAngle's — the view before `cl.punchangle`, without the view roll
+  (`Viewmodel::angles`, `viewmodel_angles`). `quaketool view --viewent` takes
+  the C's `cl.viewent`. e1m1/e1m2/e1m3 at `--settle 3`, id with mip 0 + exact
+  perspective: the frame with the gun matches as well as the world-only
+  frame (93.96/96.88/98.52 vs 93.95/96.85/98.51); the gun region 99.9%.
+  Goldens unchanged (no gun in them).
 
 ## LOW (27)
 

@@ -4175,12 +4175,18 @@ fn step_walk(
         None
     } else {
         match w.model_cache.get(&weapon_name) {
-            // V_CalcRefdef's gun origin: the forward bob + the viewsize fudge.
-            Some(Some(mdl)) => Some(Viewmodel {
-                mdl,
-                frame: weapon_frame,
-                origin_ofs: render::viewmodel_origin_ofs(&cam, bob, w.viewsize),
-            }),
+            // V_CalcRefdef's gun origin (the forward bob + the viewsize fudge)
+            // and CalcGunAngle's angles (the view before the punch, no lean).
+            Some(Some(mdl)) => {
+                let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
+                let angles = render::viewmodel_angles(&cam, punch, ang[2]);
+                Some(Viewmodel {
+                    mdl,
+                    frame: weapon_frame,
+                    origin_ofs: render::viewmodel_origin_ofs(angles, bob, w.viewsize),
+                    angles,
+                })
+            }
             _ => None,
         }
     };
@@ -4795,10 +4801,14 @@ fn step_demo(
                 // V_CalcRefdef's gun origin from the recorded velocity's bob.
                 let vel = client.velocity;
                 let bob = render::view_bob((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), f.time);
+                // CalcGunAngle: the recorded view (with the damage kick's
+                // pitch) before the punch, and the recorded roll.
+                let angles = render::viewmodel_angles(&cam, client.punchangle, f.view_angles[2]);
                 Some(Viewmodel {
                     mdl,
                     frame: client.weaponframe.max(0) as usize,
-                    origin_ofs: render::viewmodel_origin_ofs(&cam, bob, d.viewsize),
+                    origin_ofs: render::viewmodel_origin_ofs(angles, bob, d.viewsize),
+                    angles,
                 })
             }
             _ => None,

@@ -6009,9 +6009,25 @@ pub struct Viewmodel<'a> {
     pub frame: usize,
     /// Where V_CalcRefdef puts the gun (`view->origin`) relative to the
     /// camera (`r_refdef.vieworg`), in world units: see
-    /// [`viewmodel_origin_ofs`]. The model is posed there with the view's
-    /// orientation.
+    /// [`viewmodel_origin_ofs`].
     pub origin_ofs: Vec3,
+    /// The gun's orientation, `cl.viewent.angles` as CalcGunAngle leaves
+    /// them — pitch (+up, like [`Camera::pitch`]), yaw, roll: the view angles
+    /// BEFORE `cl.punchangle` is added and without V_CalcViewRoll's roll (only
+    /// `cl.viewangles[ROLL]`), so the weapon kick and the strafe lean move the
+    /// view but not the gun. See [`viewmodel_angles`].
+    pub angles: Vec3,
+}
+
+/// CalcGunAngle's `cl.viewent.angles` (view.c) for a camera built from the
+/// view angles plus `punch` (`cl.punchangle`, QuakeC order: pitch +down, yaw,
+/// roll): the camera's pitch and yaw with the punch taken back out, and the
+/// client's own view roll `view_roll` (`cl.viewangles[ROLL]`, 0 in play) in
+/// place of the camera's lean. (The yaw/pitch lag terms of CalcGunAngle are
+/// always 0 — it subtracts the view angles from themselves — and the idle
+/// sway is 0 at `v_idlescale 0`.)
+pub fn viewmodel_angles(cam: &Camera, punch: Vec3, view_roll: f32) -> Vec3 {
+    [cam.pitch + punch[0], cam.yaw - punch[1], view_roll]
 }
 
 /// V_CalcRefdef's viewsize "fudge" (view.c): "fudge position around to keep
@@ -6034,19 +6050,24 @@ pub fn viewmodel_fudge(viewsize: f32) -> f32 {
 
 /// The gun origin relative to the camera, as V_CalcRefdef builds it: both
 /// start at the entity origin + `viewheight` + the vertical bob (so those
-/// cancel), then the gun moves `forward * bob * 0.4` — `forward` from the
-/// player ENTITY's angles, whose pitch the server keeps at a third of the view
-/// pitch (SV_ClientThink `angles[PITCH] = -v_angle[PITCH]/3`) — and up by the
-/// viewsize fudge ([`viewmodel_fudge`]). (The C's 1/32 camera epsilon is not
-/// modelled here or on the camera.)
-pub fn viewmodel_origin_ofs(cam: &Camera, bob: f32, viewsize: f32) -> Vec3 {
-    let yaw = (cam.yaw as f64).to_radians();
-    let elev = (cam.pitch as f64 / 3.0).to_radians();
+/// cancel); the camera then gets the 1/32 "never sit exactly on a node line"
+/// epsilon on each axis and the gun does not, the gun moves `forward * bob *
+/// 0.4` — `forward` from the player entity's angles, which V_CalcRefdef has
+/// just set to the view's yaw and pitch (`ent->angles[PITCH] =
+/// -cl.viewangles[PITCH]`) — and up by the viewsize fudge
+/// ([`viewmodel_fudge`]). `gun_angles` are [`Viewmodel::angles`]; they differ
+/// from `cl.viewangles` only by a demo's damage-kick pitch (an accepted
+/// hundredth-of-a-unit gap). The epsilon is relative, so it is right whether or
+/// not the caller's camera carries it.
+pub fn viewmodel_origin_ofs(gun_angles: Vec3, bob: f32, viewsize: f32) -> Vec3 {
+    const EPSILON: f32 = 1.0 / 32.0;
+    let yaw = (gun_angles[1] as f64).to_radians();
+    let elev = (gun_angles[0] as f64).to_radians();
     let f = (bob * 0.4) as f64;
     [
-        (f * elev.cos() * yaw.cos()) as f32,
-        (f * elev.cos() * yaw.sin()) as f32,
-        (f * elev.sin()) as f32 + viewmodel_fudge(viewsize),
+        (f * elev.cos() * yaw.cos()) as f32 - EPSILON,
+        (f * elev.cos() * yaw.sin()) as f32 - EPSILON,
+        (f * elev.sin()) as f32 + viewmodel_fudge(viewsize) - EPSILON,
     ]
 }
 
@@ -6090,12 +6111,11 @@ fn draw_viewmodel(
         return;
     }
     let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
-    // CalcGunAngle: the gun faces the view (its pitch is stored "backward", as
-    // the camera's +up pitch); cl.viewangles' roll, which is 0 in play.
+    // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
     let ent = AliasEntity {
         mdl: vm.mdl,
         origin,
-        angles: [cam.pitch, cam.yaw, 0.0],
+        angles: vm.angles,
         frame: vm.frame,
         skinnum: 0,
         color: [180, 180, 180],
@@ -12816,7 +12836,7 @@ mod tests {
 
         let img_a = render_scene_ext(
             &bsp, &cam_a, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_a.pitch, cam_a.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12825,7 +12845,7 @@ mod tests {
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_b.pitch, cam_b.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12899,7 +12919,7 @@ mod tests {
 
         let with_gun = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12947,7 +12967,7 @@ mod tests {
         frameless.frames.clear();
         let img = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12963,7 +12983,7 @@ mod tests {
         // Must not panic.
         let _ = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -13035,17 +13055,20 @@ mod tests {
         for vs in [30.0, 50.0, 70.0, 120.0, 95.0] {
             assert_eq!(viewmodel_fudge(vs), 0.0, "viewsize {vs}");
         }
-        // No bob: the gun sits straight above the eye by the fudge (world Z).
-        let cam = Camera { pos: [0.0; 3], yaw: 37.0, pitch: 30.0, roll: 0.0, fov_deg: 90.0 };
-        assert_eq!(viewmodel_origin_ofs(&cam, 0.0, 100.0), [0.0, 0.0, 2.0]);
-        // Bob pushes it along the entity's facing (yaw, a third of the pitch)
-        // by 0.4 * bob.
-        let flat = Camera { pos: [0.0; 3], yaw: 90.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let o = viewmodel_origin_ofs(&flat, 5.0, 120.0);
-        assert!(o[0].abs() < 1e-5 && (o[1] - 2.0).abs() < 1e-5 && o[2].abs() < 1e-5, "{o:?}");
-        let up = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 90.0, roll: 0.0, fov_deg: 90.0 };
-        let o = viewmodel_origin_ofs(&up, 5.0, 120.0);
-        assert!((o[2] - 2.0 * 30f32.to_radians().sin()).abs() < 1e-5, "{o:?}");
+        // No bob: the gun sits above the eye by the fudge (world Z), less the
+        // camera's 1/32 node-line epsilon on every axis.
+        const E: f32 = 1.0 / 32.0;
+        assert_eq!(viewmodel_origin_ofs([30.0, 37.0, 0.0], 0.0, 100.0), [-E, -E, 2.0 - E]);
+        // Bob pushes it along the view's facing (V_CalcRefdef has just set the
+        // entity angles to the view's) by 0.4 * bob.
+        let o = viewmodel_origin_ofs([0.0, 90.0, 0.0], 5.0, 120.0);
+        assert!((o[0] + E).abs() < 1e-5 && (o[1] - 2.0 + E).abs() < 1e-5 && (o[2] + E).abs() < 1e-5, "{o:?}");
+        let o = viewmodel_origin_ofs([90.0, 0.0, 0.0], 5.0, 120.0);
+        assert!((o[2] - 2.0 + E).abs() < 1e-5 && (o[0] + E).abs() < 1e-5, "{o:?}");
+        // CalcGunAngle: the punch comes back out of the camera's pitch and yaw;
+        // the gun takes the client's own roll, not the camera's lean.
+        let cam = Camera { pos: [0.0; 3], yaw: 40.0, pitch: -12.0, roll: 3.0, fov_deg: 90.0 };
+        assert_eq!(viewmodel_angles(&cam, [2.0, 1.0, 0.5], 0.0), [-10.0, 39.0, 0.0]);
     }
 
     #[test]
@@ -13065,7 +13088,7 @@ mod tests {
 
         let img = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
