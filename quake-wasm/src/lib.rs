@@ -275,6 +275,11 @@ struct Walk {
     /// This frame's bindings-derived keyboard input (CL_BaseMove/CL_AdjustAngles
     /// over the page-held keys), refreshed by `step` before `step_walk` runs.
     key_move: KeyMove,
+    /// The `viewsize` cvar this frame (the Options "Screen size" slider),
+    /// refreshed by `step` from the menu before stepping, like `key_move`:
+    /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
+    /// much status bar shows.
+    viewsize: f32,
     /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
     /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
     /// mouse X away from yaw). Drained into the next UserCmd then cleared.
@@ -437,6 +442,11 @@ struct DemoPlay {
     /// The in-progress notify line (Con_Print model: break only on '\n') —
     /// recorded pickups print as several svc_print fragments.
     notify_pending: String,
+    /// The `viewsize` cvar this frame (the Options "Screen size" slider),
+    /// refreshed by `step` from the menu before stepping, like `key_move`:
+    /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
+    /// much status bar shows.
+    viewsize: f32,
 }
 
 struct App {
@@ -729,6 +739,7 @@ fn assemble_walk(
         centerprint: None,
         notify: Vec::new(),
         notify_pending: String::new(),
+        viewsize: render::VIEWSIZE_DEFAULT,
         clock: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
@@ -896,6 +907,7 @@ fn build_demo() -> Option<DemoPlay> {
         centerprint: None,
         notify: Vec::new(),
         notify_pending: String::new(),
+        viewsize: render::VIEWSIZE_DEFAULT,
     })
 }
 
@@ -1974,8 +1986,13 @@ pub extern "C" fn step(dt: f32) {
         // keys.c's keybindings) and hand it to the walk; step_walk zeroes it
         // while gameplay is gated.
         let km = derive_key_move(&a.menu, &a.keys_held);
+        let viewsize = a.menu.viewsize();
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
+            wk.viewsize = viewsize;
+        }
+        if let Some(d) = a.demo.as_mut() {
+            d.viewsize = viewsize;
         }
         // Each mode returns its frame plus a DEFERRED screen blend (color, alpha):
         // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it
@@ -3485,6 +3502,22 @@ fn try_restart(w: &mut Walk) {
 /// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
 type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32);
 
+/// The `backtile` pic (`draw_backtile`, gfx.wad) for [`render::compose_view`],
+/// fetched only when the 3-D view leaves part of the screen to tile-clear
+/// (viewsize below 120). `None` when the view covers the whole frame or the
+/// wad lacks it (then the border fills black).
+fn backtile_for(
+    vrect: &render::ViewRect,
+    render_w: usize,
+    render_h: usize,
+    gfx_wad: Option<&quake_rs::wad::Wad2>,
+) -> Option<Qpic> {
+    if vrect.w == render_w && vrect.h == render_h {
+        return None;
+    }
+    gfx_wad.and_then(|g| g.qpic("backtile").ok())
+}
+
 fn step_walk(
     w: &mut Walk,
     dt: f32,
@@ -4114,8 +4147,13 @@ fn step_walk(
     // The animated light-style scales (torch flicker, pulsing lights) at the
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
-    let mut img =
-        render::render_scene_ext_sprited(&w.bsp, &cam, render_w, render_h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
+    // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
+    // (the view sits ABOVE the status bar, projected about its own centre) and
+    // how much status bar shows; an intermission is always full screen.
+    let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission);
+    let vrect = refdef.vrect;
+    let mut view =
+        render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
     //     player lost health/armour this frame, and tint the view when the eye is
@@ -4162,8 +4200,13 @@ fn step_walk(
     // (contents <= CONTENTS_WATER, r_waterwarp default on), warp the 3-D frame
     // BEFORE the content tint so the screen ripples, not just darkens.
     if eye_contents <= quake_rs::bsp::CONTENTS_WATER {
-        render::apply_warp(&mut img, w.clock);
+        render::apply_warp(&mut view, w.clock); // D_WarpScreen warps the vrect only
     }
+    // The screen: the view at its rectangle, backtile around it
+    // (SCR_UpdateScreen's Draw_TileClear), the status bar drawn over below.
+    let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
+    let mut img =
+        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &w.palette);
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
         shifts.push(cs);
@@ -4274,6 +4317,7 @@ fn step_walk(
             // Tab "show scores" isn't wired as a key yet; the dead-player branch
             // (health <= 0) inside draw_hud_into handles the death scoreboard.
             show_scores: false,
+            sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
     }
@@ -4707,14 +4751,21 @@ fn step_demo(
             _ => None,
         }
     };
-    let mut img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    // SCR_CalcRefdef: the same viewsize framing as live play (the C's demo IS
+    // the client rendering a recorded stream).
+    let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0);
+    let vrect = refdef.vrect;
+    let mut view = render::render_scene_ext_sprited(&d.bsp, &cam, vrect.w, vrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
     // D_WarpScreen: a submerged recorded POV ripples exactly like live play —
-    // the warp applies to the 3-D frame FIRST; the content tint joins the
+    // the warp applies to the 3-D view FIRST; the content tint joins the
     // deferred whole-screen blend below (V_CalcBlend order).
     let eye_contents = quake_rs::world::point_contents(&d.bsp, cam.pos);
     if eye_contents <= quake_rs::bsp::CONTENTS_WATER {
-        render::apply_warp(&mut img, f.time);
+        render::apply_warp(&mut view, f.time);
     }
+    let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
+    let mut img =
+        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
     // owning the screen (`key_dest == key_game` — i.e. no menu/console up).
@@ -4785,6 +4836,7 @@ fn step_demo(
             total_secrets: f.stats.total_secrets,
             level_name: &d.demo.level_name,
             show_scores: false,
+            sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
     }
@@ -5088,6 +5140,7 @@ mod tests {
             centerprint: None,
             notify: Vec::new(),
             notify_pending: String::new(),
+            viewsize: render::VIEWSIZE_DEFAULT,
         };
         let n = d.demo.frames.len();
 
@@ -5189,6 +5242,7 @@ mod tests {
             centerprint: None,
             notify: Vec::new(),
             notify_pending: String::new(),
+            viewsize: render::VIEWSIZE_DEFAULT,
         };
 
         // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
@@ -6383,6 +6437,7 @@ mod tests {
             centerprint: None,
             notify: Vec::new(),
             notify_pending: String::new(),
+            viewsize: render::VIEWSIZE_DEFAULT,
         };
 
         // Advance onto the bolt frame: the recorded beam lands in the store and
@@ -7091,6 +7146,7 @@ mod tests {
             centerprint: None,
             notify: Vec::new(),
             notify_pending: String::new(),
+            viewsize: render::VIEWSIZE_DEFAULT,
         };
 
         reset_queue(); // clears SND_QUEUE + marks audio ready
@@ -7174,6 +7230,7 @@ mod tests {
             centerprint: None,
             notify: Vec::new(),
             notify_pending: String::new(),
+            viewsize: render::VIEWSIZE_DEFAULT,
         };
 
         let (_img, color, alpha) = step_demo(&mut d, 0.05, false, 160, 100);

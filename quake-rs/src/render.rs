@@ -5802,6 +5802,193 @@ const HUD_VIRT_W: f32 = 320.0;
 /// rows of the 320x200 virtual screen).
 const HUD_BAR_H: f32 = 24.0;
 
+// ---------------------------------------------------------------------------
+// Screen layout: scr_viewsize -> the 3-D view rectangle + sb_lines
+// (SCR_CalcRefdef / R_SetVrect / Draw_TileClear)
+// ---------------------------------------------------------------------------
+
+/// `scr_viewsize` ("viewsize", screen.c: default "100", archived) and its
+/// bounds: SCR_CalcRefdef clamps it to 30..=120 and `M_AdjustSliders` /
+/// `sizeup` / `sizedown` move it in steps of 10. 100 is the full-width view
+/// above the full status bar; 110 drops the inventory strip; 120 drops the
+/// status bar entirely; below 100 the view shrinks, centred, inside a
+/// `backtile` border.
+pub const VIEWSIZE_DEFAULT: f32 = 100.0;
+pub const VIEWSIZE_MIN: f32 = 30.0;
+pub const VIEWSIZE_MAX: f32 = 120.0;
+pub const VIEWSIZE_STEP: f32 = 10.0;
+
+/// `sb_lines` for the full status bar: the 24-row `sbar` plus the 24-row
+/// `ibar` inventory strip (SCR_CalcRefdef's `24+16+8`).
+pub const SB_LINES_FULL: i32 = 48;
+
+/// A rectangle of the framebuffer, in pixels (`vrect_t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewRect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// What `SCR_CalcRefdef` works out each time the view changes: where the 3-D
+/// view goes (`r_refdef.vrect`) and how many status-bar lines are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refdef {
+    /// `r_refdef.vrect`: the 3-D view rectangle in framebuffer pixels. The
+    /// renderer draws into a `vrect.w x vrect.h` image with the projection
+    /// centred on it and `fov_x` spanning its width — R_ViewChanged's
+    /// `xcenter = vrect.width/2 + vrect.x`, `xscale = vrect.width / (2 tan(fov_x/2))`,
+    /// `yscale = xscale` (square pixels); the software renderer derives its
+    /// vertical extent from that, not from CalcFov's `fov_y`.
+    pub vrect: ViewRect,
+    /// `sb_lines` in the status bar's 320x200 virtual rows: 48 (sbar + inventory),
+    /// 24 (sbar only) or 0 (no status bar).
+    pub sb_lines: i32,
+}
+
+/// `SCR_CalcRefdef` + `R_SetVrect` (screen.c / r_main.c) for a `vid_w x vid_h`
+/// framebuffer: bound `viewsize` to 30..=120, pick `sb_lines` (an intermission
+/// is always full screen: `size = 120`), then size the view rectangle —
+/// `viewsize`% of the screen (100 at most), at least 96 wide, width a multiple
+/// of 8 and height even, never taller than the screen minus the status bar,
+/// centred horizontally on the screen and vertically in the space above the
+/// status bar.
+///
+/// The one adaptation: this port draws the 2-D layer (status bar, menus) as the
+/// 320x200 virtual screen scaled by `vid_w/320`, so the status bar the view must
+/// clear (`lineadj`) is `sb_lines` scaled to framebuffer rows — exactly the
+/// rows [`draw_hud_into`] paints. At 320x200 every number is the C's.
+///
+/// The arithmetic keeps the C's types: `size` is a `float`, the products are
+/// truncated to `int` (so e.g. 70% of 320 is `(int)(320 * 0.7f) = 224`, as an
+/// IEEE-single build computes it).
+pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> Refdef {
+    // SCR_CalcRefdef: bound viewsize (a non-number reads as the default).
+    let viewsize = if viewsize.is_finite() {
+        viewsize.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX)
+    } else {
+        VIEWSIZE_DEFAULT
+    };
+    // "intermission is always full screen"
+    let size = if intermission { 120.0 } else { viewsize };
+    let sb_lines = if size >= 120.0 {
+        0 // no status bar at all
+    } else if size >= 110.0 {
+        24 // no inventory
+    } else {
+        SB_LINES_FULL
+    };
+    // The status bar's framebuffer rows: draw_hud_into scales the 320-wide bar
+    // by vid_w/320 and bottom-anchors it, so it covers ceil(sb_lines * scale).
+    let vw = vid_w as i64;
+    let vh = vid_h as i64;
+    let scale = vid_w as f32 / HUD_VIRT_W;
+    let mut lineadj = ((sb_lines as f32 * scale).ceil() as i64).clamp(0, vh);
+
+    // R_SetVrect (r_main.c).
+    let mut size: f32 = if viewsize > 100.0 { 100.0 } else { viewsize };
+    if intermission {
+        size = 100.0;
+        lineadj = 0;
+    }
+    size /= 100.0;
+    let h = vh - lineadj;
+    let mut w = (vw as f32 * size) as i64;
+    if w < 96 {
+        size = (96.0 / vw.max(1) as f64) as f32;
+        w = 96; // min for icons
+    }
+    w &= !7;
+    let mut height = (vh as f32 * size) as i64;
+    if height > vh - lineadj {
+        height = vh - lineadj;
+    }
+    height &= !1;
+    // (A frame narrower than 96/8 px never occurs in the C; clamp so a tiny
+    // test framebuffer still yields an in-bounds rectangle.)
+    let w = w.clamp(0, vw);
+    let height = height.clamp(0, vh);
+    let x = ((vw - w) / 2).max(0);
+    let y = ((h - height) / 2).max(0);
+    Refdef {
+        vrect: ViewRect { x: x as usize, y: y as usize, w: w as usize, h: height as usize },
+        sb_lines,
+    }
+}
+
+/// `Draw_TileClear` (draw.c): fill the framebuffer rectangle `(x, y, w, h)` with
+/// the 64x64 `backtile` pic, tiled from the SCREEN origin (texel
+/// `(x mod 64, y mod 64)`), as SCR_UpdateScreen does under a view smaller than
+/// the screen. Like the rest of the 2-D layer the tile is the 320x200 virtual
+/// screen's, scaled by `vid_w/320` (nearest-neighbour). A missing or malformed
+/// `backtile` fills black; every write is clipped.
+pub fn draw_tile_clear(
+    image: &mut Image,
+    backtile: Option<&crate::wad::Qpic>,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    palette: &[[u8; 3]; 256],
+) {
+    let x1 = x.saturating_add(w).min(image.w);
+    let y1 = y.saturating_add(h).min(image.h);
+    if x >= x1 || y >= y1 {
+        return;
+    }
+    let tile = backtile.filter(|t| {
+        t.width > 0 && t.height > 0 && t.data.len() >= (t.width as usize) * (t.height as usize)
+    });
+    let scale = image.w as f32 / HUD_VIRT_W;
+    let inv = if scale.is_finite() && scale > 0.0 { 1.0 / scale } else { 1.0 };
+    for py in y..y1 {
+        let row = &mut image.rgb[py * image.w..py * image.w + image.w];
+        let Some(t) = tile else {
+            row[x..x1].fill([0, 0, 0]);
+            continue;
+        };
+        let (tw, th) = (t.width as usize, t.height as usize);
+        let ty = ((py as f32 * inv) as usize) % th;
+        let trow = &t.data[ty * tw..ty * tw + tw];
+        for (px, out) in row.iter_mut().enumerate().take(x1).skip(x) {
+            let tx = ((px as f32 * inv) as usize) % tw;
+            *out = palette[trow[tx] as usize];
+        }
+    }
+}
+
+/// Put the rendered 3-D `view` (a `vrect.w x vrect.h` image) into a
+/// `vid_w x vid_h` screen at `vrect`, with everything outside it tile-cleared
+/// ([`draw_tile_clear`] — SCR_UpdateScreen's `Draw_TileClear(0,0,vid.width,
+/// vid.height)` under the view). A view that already IS the whole screen
+/// (viewsize 120, an intermission) comes back untouched, at zero cost. The
+/// status bar is drawn over the result afterwards, as in the C.
+pub fn compose_view(
+    view: Image,
+    vrect: ViewRect,
+    vid_w: usize,
+    vid_h: usize,
+    backtile: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+) -> Image {
+    if vrect.x == 0 && vrect.y == 0 && view.w == vid_w && view.h == vid_h {
+        return view;
+    }
+    let mut img = Image::new(vid_w, vid_h, [0, 0, 0]);
+    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, vid_h, palette);
+    let cw = view.w.min(vid_w.saturating_sub(vrect.x));
+    for vy in 0..view.h {
+        let py = vrect.y + vy;
+        if py >= vid_h {
+            break;
+        }
+        let dst = py * vid_w + vrect.x;
+        img.rgb[dst..dst + cw].copy_from_slice(&view.rgb[vy * view.w..vy * view.w + cw]);
+    }
+    img
+}
+
 /// The Quake HUD overlay: the parsed `gfx.wad`, the screen palette, and the
 /// player stats to display. Built by the caller each frame from the player edict
 /// and the loaded `gfx.wad`; consumed by [`draw_hud_into`].
@@ -5855,6 +6042,10 @@ pub struct Hud<'a> {
     /// Force the scorebar + solo scoreboard (Tab "show scores"); the C also shows it
     /// whenever `cl.stats[STAT_HEALTH] <= 0`, which [`draw_hud_into`] handles directly.
     pub show_scores: bool,
+    /// `sb_lines` from [`calc_refdef`] (the viewsize): 48 draws the inventory
+    /// strip and the status bar, 24 the status bar alone, 0 neither — though
+    /// the death / Tab scoreboard still shows at 0, as in `Sbar_Draw`.
+    pub sb_lines: i32,
 }
 
 /// Blit one `Qpic` at virtual position `(vx, vy)` in 320x200 space, scaled by
@@ -6199,44 +6390,19 @@ pub fn conchars_pic(wad: &crate::wad::Wad2) -> Option<crate::wad::Qpic> {
     })
 }
 
-/// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
-/// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
-/// non-deathmatch path).
-///
-/// The whole bar is laid out in Quake's fixed 320x200 virtual space and scaled by
-/// `image.w / 320` (nearest-neighbour) so it spans the full framebuffer width,
-/// bottom-anchored. The *status area* is 48 virtual rows tall: the `ibar`
-/// inventory strip (320x24) sits in the 24 rows ABOVE the `sbar` (320x24)
-/// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
-/// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
-///
-/// Drawing order (mirrors `Sbar_Draw` → `Sbar_DrawInventory` then the sbar block):
-///  1. `ibar` strip, then on it: owned weapon icons (the selected one flashing its
-///     `inva*` frames), the four small ammo counts, keys/powerups, and sigils.
-///  2. `sbar` strip, then on it: the armour-type icon + armour number (left), the
-///     animated player face (centre, x=112), the health number, the ammo-type
-///     icon (x=224) and the current-ammo number (right).
-///
-/// Every pic is fetched via `wad.qpic(name).ok()` (and `conchars` via
-/// `lump_data`), so a `gfx.wad` missing any element degrades gracefully — that
-/// element just doesn't draw, never a panic and never an errored frame.
-pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
-    if image.w == 0 || image.h == 0 {
-        return;
-    }
-    // Scale the 320-wide virtual layout to the real framebuffer width.
-    let scale = image.w as f32 / HUD_VIRT_W;
-    if !scale.is_finite() || scale <= 0.0 {
-        return;
-    }
-    // Framebuffer y of virtual row 0 of the bar (top of the `sbar` strip); the
-    // 24-px sbar sits flush at the bottom, the ibar 24 rows above it (negative vy).
-    let vy_top = image.h as f32 - HUD_BAR_H * scale;
+/// `Sbar_DrawInventory` (sbar.c): the `ibar` strip in the 24 virtual rows above
+/// the status strip and, on it, the owned weapons, the four ammo counts, the
+/// keys/powerups and the sigils. Called by [`draw_hud_into`] only while
+/// `sb_lines > 24`. `scale` / `vy_top` are the bar's transform (see there).
+fn draw_sbar_inventory(
+    image: &mut Image,
+    hud: &Hud,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    vy_top: f32,
+) {
     let wad = hud.wad;
     let pal = hud.palette;
-    let conchars = conchars_pic(wad);
-
-    // ----- Inventory bar (Sbar_DrawInventory) -------------------------------
     // The `ibar` strip in the 24 rows above the sbar: Sbar_DrawPic(0, -24, sb_ibar).
     blit_named(image, wad, "ibar", 0.0, -24.0, scale, vy_top, pal);
 
@@ -6264,7 +6430,7 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // the ibar, small gold digits. Sbar_DrawInventory formats "%3i" (right-justified
     // in 3 chars) and draws each non-space char via Sbar_DrawCharacter at
     // ((6*i+1..3)*8 - 2, -24) using glyph `18 + digit` (the gold conchars digits).
-    if let Some(cc) = &conchars {
+    if let Some(cc) = conchars {
         let counts = [hud.ammo_shells, hud.ammo_nails, hud.ammo_rockets, hud.ammo_cells];
         for (i, &count) in counts.iter().enumerate() {
             // "%3i": right-justified, blanks for leading zeros, clamped to >=0.
@@ -6295,6 +6461,55 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
             blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, scale, vy_top, pal);
         }
     }
+}
+
+/// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
+/// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
+/// non-deathmatch path).
+///
+/// The whole bar is laid out in Quake's fixed 320x200 virtual space and scaled by
+/// `image.w / 320` (nearest-neighbour) so it spans the full framebuffer width,
+/// bottom-anchored. The *status area* is 48 virtual rows tall: the `ibar`
+/// inventory strip (320x24) sits in the 24 rows ABOVE the `sbar` (320x24)
+/// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
+/// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
+///
+/// How much of it draws follows `hud.sb_lines` ([`calc_refdef`]): the inventory
+/// strip only above 24 lines, the status strip only above 0 — but the death /
+/// Tab scoreboard (`scorebar`) regardless, exactly like `Sbar_Draw`.
+///
+/// Drawing order (mirrors `Sbar_Draw` → `Sbar_DrawInventory` then the sbar block):
+///  1. `ibar` strip, then on it: owned weapon icons (the selected one flashing its
+///     `inva*` frames), the four small ammo counts, keys/powerups, and sigils.
+///  2. `sbar` strip, then on it: the armour-type icon + armour number (left), the
+///     animated player face (centre, x=112), the health number, the ammo-type
+///     icon (x=224) and the current-ammo number (right).
+///
+/// Every pic is fetched via `wad.qpic(name).ok()` (and `conchars` via
+/// `lump_data`), so a `gfx.wad` missing any element degrades gracefully — that
+/// element just doesn't draw, never a panic and never an errored frame.
+pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    // Scale the 320-wide virtual layout to the real framebuffer width.
+    let scale = image.w as f32 / HUD_VIRT_W;
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    // Framebuffer y of virtual row 0 of the bar (top of the `sbar` strip); the
+    // 24-px sbar sits flush at the bottom, the ibar 24 rows above it (negative vy).
+    let vy_top = image.h as f32 - HUD_BAR_H * scale;
+    let wad = hud.wad;
+    let pal = hud.palette;
+    let conchars = conchars_pic(wad);
+
+    // ----- Inventory bar (Sbar_DrawInventory) -------------------------------
+    // Sbar_Draw: `if (sb_lines > 24) Sbar_DrawInventory ();` — viewsize 110
+    // (sb_lines 24) keeps only the status strip, 120 (0) neither.
+    if hud.sb_lines > 24 {
+        draw_sbar_inventory(image, hud, conchars.as_ref(), scale, vy_top);
+    }
 
     // ----- Status bar (the sbar block of Sbar_Draw) -------------------------
     // When the player is dead (health <= 0) or holding Tab, the C replaces the whole
@@ -6305,6 +6520,10 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
         if let Some(cc) = &conchars {
             draw_solo_scoreboard(image, cc, hud, scale, vy_top, pal);
         }
+        return;
+    }
+    // `else if (sb_lines)`: no status strip at viewsize 120.
+    if hud.sb_lines <= 0 {
         return;
     }
 
@@ -7131,6 +7350,9 @@ pub struct Menu {
     /// Index into [`RESOLUTION_PRESETS`] for the Options "Screen size" row
     /// (0 = the fast 320x200 default). [`adjust`](Menu::adjust) cycles it.
     res_preset: usize,
+    /// `viewsize` cvar (`scr_viewsize`), [`VIEWSIZE_MIN`]..=[`VIEWSIZE_MAX`]:
+    /// the host frames the 3-D view with it ([`calc_refdef`]).
+    viewsize: f32,
     /// `sensitivity` cvar (Mouse Speed), [`SENS_MIN`]..=[`SENS_MAX`].
     sensitivity: f32,
     /// `volume` cvar (Sound Volume), [`VOLUME_MIN`]..=[`VOLUME_MAX`]. The host maps
@@ -7201,6 +7423,7 @@ impl Menu {
             screen: MenuScreen::Main,
             cursor: 0,
             res_preset: 0,
+            viewsize: VIEWSIZE_DEFAULT,
             sensitivity: SENS_DEFAULT,
             volume: VOLUME_DEFAULT,
             gamma: GAMMA_DEFAULT,
@@ -7836,6 +8059,12 @@ impl Menu {
         if let Some(i) = RESOLUTION_PRESETS.iter().position(|&(pw, ph)| pw == w && ph == h) {
             self.res_preset = i;
         }
+    }
+
+    /// The `viewsize` cvar (`scr_viewsize`, 30..=120, default 100): the host
+    /// sizes the 3-D view and the status bar from it via [`calc_refdef`].
+    pub fn viewsize(&self) -> f32 {
+        self.viewsize
     }
 
     /// The Options "Mouse Speed" as a sensitivity multiplier the host applies to
@@ -12509,6 +12738,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -12561,6 +12791,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -12606,6 +12837,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
         assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
@@ -12885,6 +13117,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -12974,6 +13207,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         // All face pics share index 70 here, so we can't distinguish quad vs health
         // by colour — instead assert the call path doesn't panic and a face drew.
@@ -15089,5 +15323,216 @@ mod tests {
         bsp_b.faces.push(face_b.clone());
         let gb = face_geom_cached(&bsp_b, 0, &face_b);
         assert!(!gb.bad);
+    }
+
+    // -- SCR_CalcRefdef / R_SetVrect / Draw_TileClear / sb_lines -------------
+
+    fn vr(x: usize, y: usize, w: usize, h: usize) -> ViewRect {
+        ViewRect { x, y, w, h }
+    }
+
+    #[test]
+    fn calc_refdef_matches_the_c_at_320x200() {
+        // viewsize 100: the full width ABOVE the 48-line status bar — not a
+        // full-screen view with the bar pasted over its bottom (the old bug:
+        // horizon at y=100 instead of 76, 48 rows rendered only to be covered).
+        let r = calc_refdef(320, 200, 100.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 152), 48));
+        // 110: no inventory strip -> 24 lines, the view grows to 176.
+        let r = calc_refdef(320, 200, 110.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 176), 24));
+        // 120: no status bar at all -> the whole screen.
+        let r = calc_refdef(320, 200, 120.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 200), 0));
+        // 50: half size, centred horizontally on the screen and vertically in
+        // the 152 rows above the bar: x = (320-160)/2, y = (152-100)/2.
+        let r = calc_refdef(320, 200, 50.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(80, 26, 160, 100), 48));
+        // 30, the minimum: exactly the 96-wide "min for icons".
+        let r = calc_refdef(320, 200, 30.0, false);
+        assert_eq!(r.vrect, vr(112, 46, 96, 60));
+        // 70: (int)(320 * 0.7f) = 224 (& ~7 = 224), (int)(200 * 0.7f) = 140.
+        let r = calc_refdef(320, 200, 70.0, false);
+        assert_eq!(r.vrect, vr(48, 6, 224, 140));
+        // 90: 288x180 would overlap the bar -> clipped to the 152 rows above it.
+        let r = calc_refdef(320, 200, 90.0, false);
+        assert_eq!(r.vrect, vr(16, 0, 288, 152));
+    }
+
+    #[test]
+    fn calc_refdef_bounds_viewsize_and_goes_full_screen_for_intermission() {
+        // SCR_CalcRefdef clamps viewsize to 30..=120.
+        assert_eq!(calc_refdef(320, 200, 5.0, false), calc_refdef(320, 200, 30.0, false));
+        assert_eq!(calc_refdef(320, 200, 500.0, false), calc_refdef(320, 200, 120.0, false));
+        assert_eq!(calc_refdef(320, 200, f32::NAN, false), calc_refdef(320, 200, 100.0, false));
+        // "intermission is always full screen": any viewsize, no status bar.
+        for vs in [30.0, 50.0, 100.0, 110.0, 120.0] {
+            let r = calc_refdef(320, 200, vs, true);
+            assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 200), 0), "viewsize {vs}");
+        }
+    }
+
+    #[test]
+    fn calc_refdef_scales_the_status_bar_with_the_2d_layer() {
+        // The port's 2-D layer is the 320x200 screen scaled by w/320, so the
+        // view clears exactly the rows draw_hud_into paints: 48*scale.
+        assert_eq!(calc_refdef(960, 600, 100.0, false).vrect, vr(0, 0, 960, 456));
+        assert_eq!(calc_refdef(480, 300, 100.0, false).vrect, vr(0, 0, 480, 228));
+        assert_eq!(calc_refdef(1120, 700, 110.0, false).vrect, vr(0, 0, 1120, 616));
+        assert_eq!(calc_refdef(1280, 800, 120.0, false).vrect, vr(0, 0, 1280, 800));
+        // 960x600 at 50: 480x300 centred above the 144-row bar.
+        assert_eq!(calc_refdef(960, 600, 50.0, false).vrect, vr(240, 78, 480, 300));
+        // Every preset at every step stays inside the frame and above the bar.
+        for &(w, h) in RESOLUTION_PRESETS.iter() {
+            for step in 3..=12 {
+                let r = calc_refdef(w as usize, h as usize, step as f32 * 10.0, false);
+                let bar = (r.sb_lines as f32 * w as f32 / 320.0).ceil() as usize;
+                assert!(r.vrect.x + r.vrect.w <= w as usize);
+                assert!(r.vrect.y + r.vrect.h + bar <= h as usize, "{w}x{h} @ {step}0");
+                assert_eq!(r.vrect.w % 8, 0);
+                assert_eq!(r.vrect.h % 2, 0);
+            }
+        }
+        // A degenerate frame never panics or escapes the bounds.
+        let r = calc_refdef(8, 4, 30.0, false);
+        assert!(r.vrect.x + r.vrect.w <= 8 && r.vrect.y + r.vrect.h <= 4);
+        let _ = calc_refdef(0, 0, 100.0, false);
+    }
+
+    /// A 64x64 backtile whose texel (x, y) is palette index `(x + 64*y) % 251`,
+    /// so any sampling error shows up as the wrong colour.
+    fn test_backtile() -> Qpic {
+        let data = (0..64 * 64).map(|i| (i % 251) as u8).collect();
+        Qpic { width: 64, height: 64, data }
+    }
+
+    #[test]
+    fn draw_tile_clear_tiles_from_the_screen_origin() {
+        let pal = ramp_palette();
+        let tile = test_backtile();
+        let at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
+        // Scale 1 (320 wide): texel (x mod 64, y mod 64) — anchored at the
+        // SCREEN origin, not the rectangle's corner (Draw_TileClear's offsets).
+        let mut img = Image::new(320, 200, [7, 7, 7]);
+        draw_tile_clear(&mut img, Some(&tile), 70, 30, 100, 50, &pal);
+        assert_eq!(img.rgb[30 * 320 + 70], at(70, 30));
+        assert_eq!(img.rgb[79 * 320 + 169], at(169, 79));
+        assert_eq!(img.rgb[29 * 320 + 70], [7, 7, 7], "outside the rect untouched");
+        assert_eq!(img.rgb[30 * 320 + 170], [7, 7, 7], "outside the rect untouched");
+        // Scale 2 (640 wide): each texel covers 2x2 pixels, like the rest of
+        // the scaled 2-D layer.
+        let mut big = Image::new(640, 400, [7, 7, 7]);
+        draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400, &pal);
+        for &(x, y) in &[(0, 0), (1, 1), (129, 3), (300, 250), (639, 399)] {
+            assert_eq!(big.rgb[y * 640 + x], at(x / 2, y / 2), "({x},{y})");
+        }
+        // No tile: black, never a panic; an off-frame rect is a no-op.
+        let mut img2 = Image::new(32, 32, [7, 7, 7]);
+        draw_tile_clear(&mut img2, None, 0, 0, 32, 32, &pal);
+        assert!(img2.rgb.iter().all(|&p| p == [0, 0, 0]));
+        draw_tile_clear(&mut img2, Some(&tile), 40, 40, 10, 10, &pal);
+    }
+
+    #[test]
+    fn compose_view_places_the_view_inside_a_backtile_border() {
+        let pal = ramp_palette();
+        let tile = test_backtile();
+        // viewsize 50 at 320x200: a 160x100 view at (80, 26).
+        let r = calc_refdef(320, 200, 50.0, false);
+        let view = Image::new(r.vrect.w, r.vrect.h, [250, 1, 2]);
+        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), &pal);
+        assert_eq!((img.w, img.h), (320, 200));
+        let tile_at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
+        for y in 0..200 {
+            for x in 0..320 {
+                let inside = (80..240).contains(&x) && (26..126).contains(&y);
+                let want = if inside { [250, 1, 2] } else { tile_at(x, y) };
+                assert_eq!(img.rgb[y * 320 + x], want, "({x},{y})");
+            }
+        }
+        // A full-screen view (viewsize 120) passes through untouched.
+        let full = calc_refdef(320, 200, 120.0, false);
+        let view = Image::new(320, 200, [250, 1, 2]);
+        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal);
+        assert!(out.rgb.iter().all(|&p| p == [250, 1, 2]));
+    }
+
+    /// A gfx.wad with the three status-bar strips as solid colours: `sbar`
+    /// (index 1), `ibar` (2) and `scorebar` (3).
+    fn build_sbar_strips_wad() -> Wad2 {
+        let pics: Vec<(String, Vec<u8>)> = vec![
+            ("sbar".to_string(), qpic_payload(320, 24, 1)),
+            ("ibar".to_string(), qpic_payload(320, 24, 2)),
+            ("scorebar".to_string(), qpic_payload(320, 24, 3)),
+        ];
+        let mut payloads = Vec::new();
+        let mut offsets = Vec::new();
+        let mut pos = WADINFO_SIZE;
+        for (_, p) in &pics {
+            offsets.push(pos);
+            payloads.extend_from_slice(p);
+            pos += p.len();
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"WAD2");
+        bytes.extend_from_slice(&(pics.len() as i32).to_le_bytes());
+        bytes.extend_from_slice(&(pos as i32).to_le_bytes());
+        bytes.extend_from_slice(&payloads);
+        let mut dir = Vec::new();
+        for ((name, p), &off) in pics.iter().zip(offsets.iter()) {
+            push_lump(&mut dir, off as i32, p.len() as i32, name);
+        }
+        bytes.extend_from_slice(&dir);
+        Wad2::parse(bytes).expect("synthetic strips wad parses")
+    }
+
+    #[test]
+    fn draw_hud_follows_sb_lines_like_sbar_draw() {
+        let wad = build_sbar_strips_wad();
+        let pal = ramp_palette();
+        let fill = [42u8, 42, 42];
+        let draw = |sb_lines: i32, health: i32| {
+            let mut img = Image::new(320, 200, fill);
+            let hud = Hud {
+                wad: &wad,
+                palette: &pal,
+                health,
+                ammo: 0,
+                armor: 0,
+                items: 0,
+                weapon: 0,
+                ammo_shells: 0,
+                ammo_nails: 0,
+                ammo_rockets: 0,
+                ammo_cells: 0,
+                time: 0.0,
+                monsters: 0,
+                total_monsters: 0,
+                secrets: 0,
+                total_secrets: 0,
+                level_name: "",
+                show_scores: false,
+                sb_lines,
+            };
+            draw_hud_into(&mut img, &hud);
+            img
+        };
+        let ibar_row = 160 * 320 + 5; // inside rows 152..176
+        let sbar_row = 190 * 320 + 5; // inside rows 176..200
+        // 48 lines (viewsize <= 100): inventory strip over the status strip.
+        let img = draw(48, 100);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (pal[2], pal[1]));
+        assert_eq!(img.rgb[151 * 320 + 5], fill, "nothing above the 48 lines");
+        // 24 lines (viewsize 110): the status strip alone.
+        let img = draw(24, 100);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (fill, pal[1]));
+        // 0 lines (viewsize 120): no status bar at all.
+        let img = draw(0, 100);
+        assert!(img.rgb.iter().all(|&p| p == fill), "sb_lines 0 draws nothing");
+        // ...except the death scoreboard, which Sbar_Draw shows regardless.
+        let img = draw(0, 0);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (fill, pal[3]));
+        let img = draw(48, 0);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (pal[2], pal[3]));
     }
 }
