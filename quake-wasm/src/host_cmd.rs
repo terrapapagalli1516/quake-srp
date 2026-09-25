@@ -1,7 +1,7 @@
 //! Console commands — `Cmd_ExecuteString`'s dispatch (cmd.c) against the
 //! App: echo/clear/help, the viewsize cvar commands, the Web extras, `map`,
-//! save/load, the demo commands (cl_demo.c's `playdemo`, host_cmd.c's demo
-//! loop control `startdemos`/`demos`/`stopdemo`), and the
+//! save/load, the demo commands (cl_demo.c's `playdemo`/`timedemo`,
+//! host_cmd.c's demo loop control `startdemos`/`demos`/`stopdemo`), and the
 //! cheats god/noclip/fly/kill/give/impulse, which act on the live
 //! [`Walk`](crate::app::Walk) through the client's host_cmd.c
 //! ([`quake_rs::client::host_cmd`], which also holds the level swaps
@@ -11,7 +11,7 @@ use quake_rs::client::cl_demo::MAX_DEMOS;
 use quake_rs::client::host_cmd::run_game_command;
 
 use crate::app::{build_walk_map, ensure_app, App};
-use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback};
+use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma;
 
@@ -96,7 +96,7 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
                 a.console.println("  impulse <n>   map <name>");
                 a.console.println("  save <name>   load <name>");
-                a.console.println("  playdemo <name>");
+                a.console.println("  playdemo <name>  timedemo <name>");
                 a.console.println("  stopdemo  demos  startdemos <d..>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
@@ -132,15 +132,17 @@ pub(crate) fn execute_console_command(line: &str) {
         _ => {}
     }
 
-    // The demo commands: cl_demo.c's CL_PlayDemo_f (its `Cmd_Argc() != 2`
-    // usage line is the C's, "play" included) and host_cmd.c's demo loop
-    // control.
-    if matches!(cmd_lower.as_str(), "playdemo" | "stopdemo" | "startdemos" | "demos") {
+    // The demo commands: cl_demo.c's CL_PlayDemo_f / CL_TimeDemo_f (the
+    // `Cmd_Argc() != 2` usage lines are the C's, "play" included) and
+    // host_cmd.c's demo loop control.
+    if matches!(cmd_lower.as_str(), "playdemo" | "timedemo" | "stopdemo" | "startdemos" | "demos") {
         ensure_app(|a| match cmd_lower.as_str() {
             "playdemo" if argv.len() != 2 => a.console.println("play <demoname> : plays a demo"),
             "playdemo" => {
-                cl_play_demo(a, argv[1]);
+                cl_play_demo(a, argv[1], false);
             }
+            "timedemo" if argv.len() != 2 => a.console.println("timedemo <demoname> : gets demo speeds"),
+            "timedemo" => cl_timedemo(a, argv[1]),
             "stopdemo" => host_stopdemo(a),
             "startdemos" => host_startdemos(a, &argv[1..]),
             _ => host_demos(a),

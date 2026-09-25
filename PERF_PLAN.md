@@ -951,3 +951,44 @@ means about 4–5 ms per frame, far inside a 60 Hz budget.
   - The surface cache's steady-state memory per map (A5).
   - Sound decode/playback cost in the page: the bench runs with audio locked, so the page's
     `drain*Sounds` do not play anything.
+
+---
+
+## 10. id's own measurement: `timedemo` (2026-09-25, branch `quake/timedemo`)
+
+`timedemo demo1` — how 1996 measured Quake — runs in the port as id's `CL_TimeDemo_f`: the
+demo plays one recorded message per host frame with no 72 fps cap and no pacing (`cls.timedemo`:
+`Host_FilterTime` never skips; the demo clock is each message's own time, as `CL_LerpPoint` gives
+in a timedemo), frames count from the second one after the command (`td_startframe`,
+`td_starttime`), and `CL_FinishTimeDemo` prints `"%i frames %5.1f seconds %5.1f fps"` to the
+console. Two ways in:
+
+```sh
+quaketool timedemo pak0.pak demo1 --res 320x200,640x400     # native: the page's client, key_game
+oracle/build/quake-oracle -basedir DIR -oracle_realtime -width 640 -height 400 +timedemo demo1
+```
+
+and the browser console's `timedemo demo1` (`web/verify_timedemo.py` runs it). **The frame counts
+are id's:** demo1 969, demo2 985, demo3 1090 frames, the port and id's C alike.
+
+**What a frame includes.** id's C (the oracle): portable C, gcc -O2 x87, one core, null
+drivers — the demo message, the 3-D view into the 8-bit buffer, the status bar and text; no
+`VID_Update` blit, no sound mixing. The port natively (`quaketool timedemo`): what the page's
+`step` does for a frame with the menu and console closed — the message, the 3-D view, the status
+bar and text, and the frame through the palette-shift ramps into RGBA (the page's pack; the C has
+no such step); the sound calls are dropped. `realtime` is the wall clock at the top of each frame
+in both.
+
+Native against id's C, demo1, one sitting, the two alternated, 5 rounds, median fps (load
+1.2–2.1 during the runs). id's C at square pixels and at the page's pixel aspect
+(`-oracle_aspect 0.8333333`: every preset is 16:10 shown at 4:3, which the port draws):
+
+| demo1 | id's C, square pixels | id's C, the page's aspect | port, native | port, native without the RGBA pack (a one-off) | port / id's (same aspect) |
+|---|---:|---:|---:|---:|---:|
+| 320×200 | 2033 | 1961 | 1678 | 1784 | 0.86 (0.91 without the pack) |
+| 640×400 | 817 | 786 | 530 | 552 | 0.67 (0.70) |
+| 960×600 | 452 | 445 | 249 | — | 0.56 |
+
+The gap grows with the pixel count: the world pass. Natively it is the 16-pixel spans' slower
+path (§6: native world +30–40% since `quake/w2b`, not understood; wasm is the target and got
+faster). The RGBA pack is 6–8% of a native frame.

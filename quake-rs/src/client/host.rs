@@ -42,6 +42,16 @@ pub fn host_filter_time(realtime: f64, oldrealtime: &mut f64) -> Option<f32> {
     Some((elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
 }
 
+/// `Host_FilterTime` with the cap off — while `cls.timedemo` is set
+/// (`if (!cls.timedemo && realtime - oldrealtime < 1.0/72.0)`), every call
+/// runs a host frame, advancing the game by the real time since the last one
+/// under the same [0.001, 0.1] clamps.
+pub fn host_filter_time_uncapped(realtime: f64, oldrealtime: &mut f64) -> f32 {
+    let elapsed = realtime - *oldrealtime;
+    *oldrealtime = realtime;
+    (elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -807,6 +807,29 @@ pub fn parse_demo(bytes: &[u8]) -> Result<Demo> {
         cl.time = cl.mtime[0];
         frames.push(snapshot(cl, 1.0, &|_| false));
     })
+    .map(|(demo, _)| demo)
+}
+
+/// Parse a `.dem` file for `timedemo` (`CL_TimeDemo_f`): the keyframe stream
+/// of [`parse_demo`] — one [`DemoFrame`] per message once the signon
+/// completes, every entity at its newest snapshot and `cl.time` the
+/// message's time, as `CL_LerpPoint` gives while `cls.timedemo` is set — with
+/// the `EF_ROTATE` spin of [`parse_demo_interpolated`] (`rotating_models`).
+/// `CL_GetMessage` meters out one message per host frame in a timedemo, so a
+/// frame here is a host frame there. The message holding the demo's closing
+/// `svc_disconnect` ends playback (`Host_EndGame`) in the frame that reads
+/// it, which draws nothing: it has no frame here (a stream that simply runs
+/// out ends the same way, `CL_StopPlayback`, a frame after its last message).
+pub fn parse_demo_timedemo(bytes: &[u8], rotating_models: &[usize]) -> Result<Demo> {
+    let is_rotating = |m: usize| rotating_models.contains(&m);
+    let (mut demo, disconnected) = parse_demo_with(bytes, |cl, _prev_mtime0, frames| {
+        cl.time = cl.mtime[0];
+        frames.push(snapshot(cl, 1.0, &is_rotating));
+    })?;
+    if disconnected {
+        demo.frames.pop(); // the closing svc_disconnect's block
+    }
+    Ok(demo)
 }
 
 /// Parse a `.dem` file into a *smooth* frame stream by interpolating between the
@@ -859,17 +882,20 @@ pub fn parse_demo_interpolated(
             frames.push(snapshot(cl, frac, &is_rotating));
         }
     })
+    .map(|(demo, _)| demo)
 }
 
 /// Shared demo replay core: parse the framing + every message block, calling
 /// `emit` once per block (after a world exists) to turn the current client
 /// state into zero or more [`DemoFrame`]s. `emit` receives the client state,
 /// the `mtime[0]` value from *before* this block (the start of the
-/// interpolation interval), and the output frame list.
+/// interpolation interval), and the output frame list. Also returns whether
+/// the stream ended on an `svc_disconnect` whose block went through `emit`
+/// (rather than running out, or disconnecting before the signon completed).
 fn parse_demo_with(
     bytes: &[u8],
     mut emit: impl FnMut(&mut ClientState, f32, &mut Vec<DemoFrame>),
-) -> Result<Demo> {
+) -> Result<(Demo, bool)> {
     // --- Skip the CD-track header line: digits/'-' up to and including '\n'.
     // CL_PlayDemo_f reads bytes until '\n'. If there is no newline at all the
     // file is not a demo.
@@ -889,6 +915,7 @@ fn parse_demo_with(
 
     let mut cl = ClientState::new();
     let mut frames: Vec<DemoFrame> = Vec::new();
+    let mut disconnected = false;
 
     // --- Block loop (CL_GetMessage demo branch).
     loop {
@@ -979,18 +1006,22 @@ fn parse_demo_with(
         }
 
         if let ParseFlow::Stop = flow {
+            // The svc_disconnect block went through `emit` above if drawing
+            // had begun.
+            disconnected = cl.have_serverinfo && cl.signon_complete;
             break;
         }
     }
 
-    Ok(Demo {
+    let demo = Demo {
         viewentity: cl.viewentity,
         level_name: cl.level_name,
         model_precache: cl.model_precache,
         sound_precache: cl.sound_precache,
         static_sounds: cl.static_sounds,
         frames,
-    })
+    };
+    Ok((demo, disconnected))
 }
 
 /// Build a [`DemoFrame`] from the current client state.
@@ -3282,5 +3313,51 @@ mod tests {
             f.entities.iter().any(|e| e.modelindex == 5),
             "the first update's entity renders"
         );
+    }
+
+    /// A demo of `n` post-signon messages at t = 1.0, 1.1, ... (one reliable
+    /// message without svc_time after the second), ending in id's closing
+    /// `svc_disconnect` block when `disconnect`.
+    fn timed_demo(n: usize, disconnect: bool) -> Vec<u8> {
+        let mut file = b"-1\n".to_vec();
+        let mut signon = Vec::new();
+        w_byte(&mut signon, SVC_TIME);
+        w_float(&mut signon, 0.9);
+        write_serverinfo(&mut signon);
+        push_block(&mut file, [0.0; 3], &signon);
+        for i in 0..n {
+            let mut m = Vec::new();
+            w_byte(&mut m, SVC_TIME);
+            w_float(&mut m, 1.0 + 0.1 * i as f32);
+            write_signon_update(&mut m);
+            push_block(&mut file, [0.0; 3], &m);
+            if i == 1 {
+                let mut print = Vec::new();
+                w_byte(&mut print, SVC_PRINT);
+                w_string(&mut print, "a reliable message\n");
+                push_block(&mut file, [0.0; 3], &print);
+            }
+        }
+        if disconnect {
+            let mut d = Vec::new();
+            w_byte(&mut d, SVC_DISCONNECT);
+            push_block(&mut file, [0.0; 3], &d);
+        }
+        file
+    }
+
+    #[test]
+    fn the_timedemo_stream_is_one_frame_per_message_without_the_disconnect() {
+        let file = timed_demo(4, true);
+        // The keyframe stream: the signon-completing message, the 3 after it,
+        // the time-less print, and the closing svc_disconnect's block.
+        assert_eq!(parse_demo(&file).unwrap().frames.len(), 6);
+        let td = parse_demo_timedemo(&file, &[]).unwrap();
+        let times: Vec<f32> = td.frames.iter().map(|f| f.time).collect();
+        // A message without svc_time is its own frame, at the time it keeps.
+        assert_eq!(times, [1.0, 1.1, 1.1, 1.2, 1.3], "the disconnect's frame is gone");
+        assert_eq!(td.frames[2].prints, ["a reliable message\n"]);
+        // A stream that just runs out keeps its last message.
+        assert_eq!(parse_demo_timedemo(&timed_demo(4, false), &[]).unwrap().frames.len(), 5);
     }
 }

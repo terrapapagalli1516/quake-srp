@@ -7,7 +7,7 @@
 
 use std::cell::RefCell;
 
-use quake_rs::client::cl_demo::MAX_DEMOS;
+use quake_rs::client::cl_demo::{TimeDemoClock, MAX_DEMOS};
 use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
@@ -25,8 +25,8 @@ const WALK_MAP: &str = "maps/e1m1.bsp";
 /// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop.
 pub(crate) const QUAKE_RC_DEMOS: [&str; 3] = ["demo1", "demo2", "demo3"];
 
-/// `cls` (client.h `client_static_t`), its demo half: the `startdemos` loop.
-/// Host state: it outlives every demo.
+/// `cls` (client.h `client_static_t`), its demo half: the `startdemos` loop
+/// and `timedemo`'s bookkeeping. Host state: it outlives every demo.
 #[derive(Debug, Default)]
 pub(crate) struct Cls {
     /// `cls.demos`: the loop `startdemos` set, played in turn by
@@ -37,6 +37,10 @@ pub(crate) struct Cls {
     /// started, a `playdemo` failed, or `startdemos` found something already
     /// running). 0 at start, like the C's zeroed `cls`.
     pub(crate) demonum: i32,
+    /// `cls.timedemo`: the demo plays one message a host frame, uncapped.
+    pub(crate) timedemo: bool,
+    /// `cls.td_startframe` / `cls.td_starttime`.
+    pub(crate) td: TimeDemoClock,
 }
 
 pub(crate) struct App {
@@ -104,7 +108,10 @@ pub(crate) struct App {
     pub(crate) gamma_table: [u8; 256],
     /// The presented-frame counter behind the `wasm_showfps` extra.
     pub(crate) show_fps: ShowFps,
-    /// `cls`'s demo loop.
+    /// `host_framecount` (host.c): host frames completed — `step` calls that
+    /// ran a frame. `timedemo` counts its frames on it.
+    pub(crate) host_framecount: i64,
+    /// `cls`'s demo loop and timedemo state.
     pub(crate) cls: Cls,
     /// `cls.state == ca_disconnected` after a disconnect (`stopdemo`, a demo
     /// ending outside the loop, a `playdemo` that could not open its file):
@@ -179,10 +186,12 @@ impl App {
 
     /// Start playing `walk`, the way `map` / `load` / New Game start a game:
     /// `cls.demonum = -1` ("stop demo loop in case this fails") and
-    /// `CL_Disconnect` from any demo — then the walk is the active mode.
+    /// `CL_Disconnect` from any demo (a timedemo prints its line) — then the
+    /// walk is the active mode.
     pub(crate) fn start_game(&mut self, walk: Walk) {
         self.cls.demonum = -1;
         crate::cl_demo::cl_stop_playback(self);
+        self.cls.timedemo = false;
         self.demo = None;
         self.walk = Some(walk);
         self.mode = 0;
@@ -333,12 +342,17 @@ pub(crate) fn build_demo_n(demonum: usize) -> Option<DemoPlay> {
     demo
 }
 
-/// The demo file `name` from the embedded pak, for `playdemo`
-/// ([`cl_demo::build_demo`]), its sound calls carried out.
-pub(crate) fn build_demo_file(name: &str) -> Option<DemoPlay> {
+/// The demo file `name` from the embedded pak — for `playdemo`
+/// ([`cl_demo::build_demo`]) or for `timedemo`
+/// ([`cl_demo::build_timedemo`]) — its sound calls carried out.
+pub(crate) fn build_demo_file(name: &str, timedemo: bool) -> Option<DemoPlay> {
     let pak = pak()?;
     let mut sound = Vec::new();
-    let demo = cl_demo::build_demo(pak.clone(), name, &mut sound);
+    let demo = if timedemo {
+        cl_demo::build_timedemo(pak.clone(), name, &mut sound)
+    } else {
+        cl_demo::build_demo(pak.clone(), name, &mut sound)
+    };
     snd_dma::play(&pak, sound);
     demo
 }
@@ -366,6 +380,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 gamma_value: 1.0,
                 gamma_table: build_gamma_table(1.0),
                 show_fps: ShowFps::default(),
+                host_framecount: 0,
                 cls: Cls::default(),
                 disconnected: false,
                 palette: None,

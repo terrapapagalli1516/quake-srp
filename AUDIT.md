@@ -1451,6 +1451,27 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
   menu (`Con_ToggleConsole_f` with no connection), and leaving the main menu
   resumes the loop (`M_Main_Key`'s `CL_NextDemo`). Before this there was no
   such state: the port always had a level or a demo.
+- ✅ **`timedemo`** (`CL_TimeDemo_f`, `CL_FinishTimeDemo`): the demo one
+  recorded message per host frame, no 72 fps cap (`Host_FilterTime`'s
+  `!cls.timedemo`), each drawn at its message's time (`CL_LerpPoint` in a
+  timedemo: no interpolation; the parser's keyframes, EF_ROTATE spin
+  included); the first frame reads through the message after the one that
+  completed the signon, as `CL_GetMessage` does; the frame that reads the
+  closing `svc_disconnect` draws nothing and ends it (`Host_EndGame`: the loop's
+  next demo, or disconnected), and `CL_StopPlayback` (a `stopdemo`,
+  `playdemo`, `map` mid-run) ends it early; `"%i frames %5.1f seconds %5.1f
+  fps"` from `host_framecount - td_startframe - 1` and `realtime -
+  td_starttime` (a float, as `cls.td_starttime`), `time = 1` if 0. The
+  particles move by the time between messages (`cl.time - cl.oldtime`), the
+  view kick, fades and stair smoothing by `host_frametime`. demo1/2/3 draw
+  969/985/1090 frames, id's counts (oracle). The browser runs host frames
+  back to back in ~12 ms slices per animation frame, presenting the last;
+  each `step` is handed the previous one's duration, so `realtime` adds up
+  the frames' own time and not the page's pauses between slices (what the
+  number includes: `PERF_PLAN.md` §10). One departure: id's sets
+  `cls.timedemo` even when the file does not open, which only leaves the host
+  uncapped until the next disconnect; the port sets it when the demo plays.
+  Natively: `quaketool timedemo`.
 - Kept, not id's: **the menu does not stop the demo loop.** `M_Menu_Main_f`
   saves `cls.demonum` and sets -1 while the menu is up, so in id's Quake the
   demo playing when the menu opened is the last: at its end the client

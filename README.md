@@ -60,7 +60,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
-  `fly`/`give`/`impulse`/`map`/`kill`/`clear` and id's demo commands `playdemo`/`stopdemo`/`startdemos`/`demos`.
+  `fly`/`give`/`impulse`/`map`/`kill`/`clear` and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`.
   Boots into the menu **over the playing attract demo** (quake.rc's `startdemos demo1 demo2 demo3`).
 - **Web extras** — the port is id's Quake by default (Always Run aside). Its departures are opt-in, all
   off by default, on one page: **Options > Web extras**, drawn like id's Options page, each also a
@@ -95,7 +95,7 @@ cargo test          # 575 lib + 1 bin + 8 integration tests, no game data requir
 cargo run --release --bin quaketool -- --help
 ```
 
-`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene view walk demo playtest simbench changelevel census census-edicts play`. `play` runs the browser's game client natively: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1 --res 320x200,640x400` prints the same frame hashes as `uv run --with playwright web/bench.py --hash-every 30` with those workloads and resolutions, byte for byte.
+`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene view walk demo playtest simbench changelevel census census-edicts play timedemo`. `play` runs the browser's game client natively: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1 --res 320x200,640x400` prints the same frame hashes as `uv run --with playwright web/bench.py --hash-every 30` with those workloads and resolutions, byte for byte.
 
 ### Getting the game data (not committed)
 
@@ -131,6 +131,13 @@ out of the wasm, so an engine update doesn't re-download 18.7 MB of unchanged da
 option (PERF_PLAN D4).
 
 ## Performance
+
+Quake measured itself with `timedemo demo1`, and so does the port: type it in the
+console (`~`), or run it natively with `quaketool timedemo pak0.pak demo1 --res 640x400`.
+It is id's `CL_TimeDemo_f` — the demo one recorded message per frame with no 72 fps cap
+— and prints id's line, `969 frames   1.8 seconds 529.5 fps`: the same 969 frames id's C
+draws (969 / 985 / 1090 for demo1 / 2 / 3), so the rate sits next to id's C run the same
+way (`oracle/`; numbers in `PERF_PLAN.md` §10).
 
 The software renderer is per-pixel bound, so frame time scales with resolution. A
 built-in benchmark renders a map repeatedly and reports the warm per-frame cost plus a

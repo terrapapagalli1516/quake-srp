@@ -57,6 +57,7 @@
 //! |------------|---------|
 //! | `app`      | `boot` `boot_demo` `boot_attract` `in_walk_mode` |
 //! | `host`     | `step` |
+//! | `cl_demo`  | `timedemo_running` |
 //! | `vid`      | `width` `height` `set_resolution` `framebuffer` `viewsize` `set_viewsize` `set_scaled_2d` `scaled_2d` |
 //! | `input`    | `key_down` `key_up` `key_is_down` `mouse_move` `pointer_unlocked` `look` `player_pitch` `mouse_sensitivity`; legacy/automation: `set_move` `set_attack` `set_jump` `set_movedown` `set_impulse` |
 //! | `menu`     | `menu_up` `menu_down` `menu_left` `menu_right` `menu_select` `menu_cancel` `menu_quit_yes` `menu_quit_no` `menu_backspace` `menu_bind_grabbing` `menu_bind_key` `menu_screen_id` `menu_visible`; the Web extras: `extras` `set_extras` |

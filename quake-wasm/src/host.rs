@@ -7,25 +7,25 @@
 
 use quake_rs::render::{self, build_gamma_table};
 use quake_rs::client::cl_input::derive_key_move;
-use quake_rs::client::host::{host_filter_time, HOST_FRAMETIME_MAX, HOST_FRAMETIME_MIN};
+use quake_rs::client::host::{host_filter_time, host_filter_time_uncapped};
 
 use crate::app::ensure_app;
 use crate::bench::{self, Phase};
-use crate::cl_demo::{host_end_game, step_demo};
+use crate::cl_demo::{host_end_game, step_demo, step_timedemo};
 use crate::cl_walk::step_walk;
 
-/// [`host_filter_time`], or — with the `wasm_uncapped` extra on (a departure,
-/// opt-in via Options > Web extras, default off) — the same frame without the
-/// 72 fps cap: every call runs, advancing the game by the time since the last
-/// frame under the same [0.001, 0.1] clamps. A 120/144 Hz display then runs
-/// one host frame per refresh, as the port did before it had the gate.
+/// [`host_filter_time`], or the same frame without the 72 fps cap — every
+/// call runs, advancing the game by the time since the last frame under the
+/// same [0.001, 0.1] clamps ([`host_filter_time_uncapped`]) — while a
+/// `timedemo` runs (id's `cls.timedemo`), or with the `wasm_uncapped` extra on
+/// (a departure, opt-in via Options > Web extras, default off). A 120/144 Hz
+/// display then runs one host frame per refresh, as the port did before it
+/// had the gate.
 fn host_frame_time(realtime: f64, oldrealtime: &mut f64, uncapped: bool) -> Option<f32> {
     if !uncapped {
         return host_filter_time(realtime, oldrealtime);
     }
-    let elapsed = realtime - *oldrealtime;
-    *oldrealtime = realtime;
-    Some((elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
+    Some(host_filter_time_uncapped(realtime, oldrealtime))
 }
 
 /// The `wasm_showfps` extra's measurement (a departure, opt-in via Options >
@@ -108,6 +108,12 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 /// `dt = 0` (or a non-finite / negative `dt`) is the tests' and automation's
 /// frozen frame: it always renders, and neither the gate nor the game clock
 /// moves.
+///
+/// While a `timedemo` runs every call is a host frame playing the next
+/// recorded message; the page then calls `step` back to back, each call's
+/// `dt` the previous call's own duration (see `web/index.html`), so
+/// `realtime` — the clock `CL_FinishTimeDemo` measures on — adds up the time
+/// the frames took and not the page's pauses between batches of them.
 #[no_mangle]
 pub extern "C" fn step(dt: f32) -> i32 {
     // Guard a non-finite / negative dt so both clocks only move forward.
@@ -118,7 +124,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // `realtime += time`): it drives the flashing cursors, which keep
         // animating over a frozen frame.
         a.realtime += real_dt as f64;
-        let uncapped = a.menu.extras().uncapped;
+        let uncapped = a.menu.extras().uncapped || a.cls.timedemo;
         let dt = if real_dt == 0.0 {
             0.0
         } else {
@@ -162,7 +168,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // last frame, CL_NextDemo plays the next of the `startdemos` loop
         // (quake.rc: demo1 demo2 demo3) — or, outside the loop, the client
         // disconnects. CL_PlayDemo_f's CL_Disconnect stops every sound first.
-        if a.demoplayback() && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
+        // (A timedemo ends in its own frame, below.)
+        if a.demoplayback() && !a.cls.timedemo && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
             host_end_game(a);
         }
         // The renderer's options are built inside the client frame, under this
@@ -184,11 +191,30 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // is applied as the frame is packed, after the HUD/menu/console, not just
         // over the 3D view.
         bench::lap(Phase::Input);
-        let frame = if a.mode == 1 {
-            a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
-        } else {
-            a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
-        };
+        let mut frame = None;
+        if a.cls.timedemo && a.demoplayback() {
+            // CL_GetMessage in a timedemo: this frame's message (the second
+            // frame starts the clock), or the end of the demo — Host_EndGame
+            // then finishes the timedemo (CL_FinishTimeDemo's line) and the
+            // loop's next demo, if any, plays from this frame.
+            let (framecount, realtime) = (a.host_framecount, a.realtime);
+            a.cls.td.message(framecount, realtime);
+            frame = a.demo.as_mut().and_then(|d| step_timedemo(d, dt, gate_gameplay, w, h));
+            if frame.is_none() {
+                host_end_game(a);
+                if let Some(d) = a.demo.as_mut() {
+                    d.viewsize = viewsize;
+                    d.show_scores = km.showscores && !gate_gameplay;
+                }
+            }
+        }
+        if frame.is_none() {
+            frame = if a.mode == 1 {
+                a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
+            } else {
+                a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
+            };
+        }
         let (mut img, cshifts) = match frame {
             Some((image, cshifts)) => (Some(image), cshifts),
             // Disconnected (con_forcedup): no view — V_RenderView draws
@@ -315,6 +341,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
         }
         bench::lap(Phase::Pack);
         bench::frame_end();
+        a.host_framecount += 1;
     });
     ran
 }
@@ -322,6 +349,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quake_rs::client::host::{HOST_FRAMETIME_MAX, HOST_FRAMETIME_MIN};
     use crate::app::{boot, APP};
     use crate::console::console_toggle;
     use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};

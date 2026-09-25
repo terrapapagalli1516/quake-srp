@@ -3,7 +3,10 @@
 //! live play: per-frame effect replay (svc_particle, temp entities,
 //! svc_sound/stopsound, svc_damage, prints — cl_parse.c / cl_tent.c / view.c
 //! `V_ParseDamage`) and [`demo_frame`], the recorded-POV `V_CalcRefdef` +
-//! `SCR_UpdateScreen` for one frame.
+//! `SCR_UpdateScreen` for one frame. `timedemo` (`CL_TimeDemo_f`) plays a
+//! demo one message per host frame ([`build_timedemo`], [`timedemo_frame`])
+//! and [`TimeDemoClock`] keeps `cls.td_*` and prints `CL_FinishTimeDemo`'s
+//! line.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/cl_demo.c`.
@@ -71,6 +74,29 @@ pub fn build_demo_n(pak: Pak, demonum: usize, sound: &mut Vec<SoundCall>) -> Opt
 /// The demo's sounds start through `sound` ([`SoundCall::StopAll`], then the
 /// signon's static loops).
 pub fn build_demo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
+    build_demo_with(pak, name, sound, |bytes, rotating| {
+        crate::demo::parse_demo_interpolated(bytes, 60.0, rotating).ok()
+    })
+}
+
+/// `timedemo <name>`'s load (`CL_TimeDemo_f`): as [`build_demo`], but one
+/// frame per recorded message, each at the message's own time with no
+/// interpolation — what `CL_LerpPoint` gives while `cls.timedemo` is set
+/// ([`crate::demo::parse_demo_timedemo`]). Played by [`timedemo_frame`].
+pub fn build_timedemo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
+    build_demo_with(pak, name, sound, |bytes, rotating| {
+        crate::demo::parse_demo_timedemo(bytes, rotating).ok()
+    })
+}
+
+/// The shared load of [`build_demo`] / [`build_timedemo`]: `parse` turns the
+/// demo's bytes and the set of `EF_ROTATE` model indices into the frames.
+fn build_demo_with(
+    pak: Pak,
+    name: &str,
+    sound: &mut Vec<SoundCall>,
+    parse: impl Fn(&[u8], &[usize]) -> Option<crate::demo::Demo>,
+) -> Option<DemoPlay> {
     let read = |n: &str| pak.read_file(n).ok().flatten();
     let demo_bytes = read(name)?;
     let demo = parse_demo(&demo_bytes).ok()?;
@@ -99,10 +125,11 @@ pub fn build_demo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<De
     if demo.frames.is_empty() {
         return None;
     }
-    // Re-parse with inter-frame interpolation — smooth 60 fps playback instead of
-    // the choppy 10 Hz keyframes (CL_LerpPoint), plus EF_ROTATE spin for any model
-    // whose header flags it (rotating pickups). The set of rotating model indices
-    // is derived from the just-loaded MDL headers.
+    // Re-parse for playback (`parse`): with inter-frame interpolation —
+    // smooth 60 fps playback instead of the choppy 10 Hz keyframes
+    // (CL_LerpPoint) — or a timedemo's one frame per message, plus EF_ROTATE
+    // spin for any model whose header flags it (rotating pickups). The set of
+    // rotating model indices is derived from the just-loaded MDL headers.
     let rotating: Vec<usize> = models
         .iter()
         .enumerate()
@@ -112,7 +139,7 @@ pub fn build_demo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<De
                 .map(|_| i)
         })
         .collect();
-    let demo = crate::demo::parse_demo_interpolated(&demo_bytes, 60.0, &rotating).ok()?;
+    let demo = parse(&demo_bytes, &rotating)?;
     if demo.frames.is_empty() {
         return None;
     }
@@ -255,11 +282,15 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
     }
 }
 
+/// One host frame of demo playback: the recorded clock advances by `dt` and
+/// playback moves on to the message it has reached (spawning the effects of
+/// every message passed on the way), then the frame is drawn
+/// ([`render_demo_frame`]). After the last frame it loops to the first (the
+/// host normally starts the next demo instead, `CL_NextDemo`).
 pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> ClientFrame {
-    let (render_w, render_h) = (vid.width, vid.height);
     let mut sound = Vec::new();
     // Con_CheckResize: the notify lines are laid out con_linewidth wide.
-    d.notify.check_resize(render_w, render_h);
+    d.notify.check_resize(vid.width, vid.height);
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
     d.elapsed += dt;
@@ -304,7 +335,53 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     // tiny dt holds us on the same frame the wrap reset us to). `last_spawned_idx`
     // guards against re-spawning while a frame lingers across several steps.
     spawn_demo_frame_effects(d, d.idx, &mut sound);
+    render_demo_frame(d, dt, dt, menu_up, vid, sound)
+}
 
+/// One host frame of `timedemo` (`cls.timedemo`): `CL_GetMessage` reads
+/// exactly one message a frame, whatever the time. The first frame — the one
+/// `CL_TimeDemo_f` ran in — reads the whole signon and the message after the
+/// one that completed it (frames 0 and 1 here), every later frame the next
+/// message; each is drawn at its own time (`CL_LerpPoint` snaps `cl.time` to
+/// `mtime[0]`). `frametime` is the host frame's `host_frametime` (the view
+/// kick, the palette-shift fades, the stair smoothing and the sound ramps run
+/// on it); the particles move by `cl.time - cl.oldtime`, the recorded time
+/// between the two messages. `None` when there is no next message: the demo
+/// has ended (its `svc_disconnect`, `Host_EndGame`, or the file running out,
+/// `CL_StopPlayback`) and this frame draws nothing — the host finishes the
+/// timedemo ([`TimeDemoClock::finish`]). Built by [`build_timedemo`].
+pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid) -> Option<ClientFrame> {
+    let mut sound = Vec::new();
+    d.notify.check_resize(vid.width, vid.height);
+    let n = d.demo.frames.len();
+    let first = d.last_spawned_idx == usize::MAX;
+    if first {
+        spawn_demo_frame_effects(d, 0, &mut sound);
+    }
+    if d.idx + 1 >= n {
+        return None;
+    }
+    let oldtime = d.demo.frames[d.idx].time;
+    d.idx += 1;
+    spawn_demo_frame_effects(d, d.idx, &mut sound);
+    let cl_frametime = d.demo.frames[d.idx].time - oldtime;
+    Some(render_demo_frame(d, frametime, cl_frametime, menu_up, vid, sound))
+}
+
+/// Draw demo frame `d.idx` (its effects already spawned): the recorded POV's
+/// `V_CalcRefdef`, `S_Update`, the 3-D view and `SCR_UpdateScreen`'s 2-D
+/// layer. `dt` is `host_frametime`; `cl_frametime` is `cl.time - cl.oldtime`,
+/// the particles' step (the two are the same frame time in ordinary
+/// playback).
+fn render_demo_frame(
+    d: &mut DemoPlay,
+    dt: f32,
+    cl_frametime: f32,
+    menu_up: bool,
+    vid: &Vid,
+    mut sound: Vec<SoundCall>,
+) -> ClientFrame {
+    let (render_w, render_h) = (vid.width, vid.height);
     let f = &d.demo.frames[d.idx];
 
     // CL_RelinkEntities' model-flag trails (R_RocketTrail from the entity's
@@ -502,8 +579,8 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     d.particles.retire(f.time);
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    if dt.is_finite() && dt > 0.0 {
-        d.particles.integrate(dt, f.time, 800.0 * 0.05);
+    if cl_frametime.is_finite() && cl_frametime > 0.0 {
+        d.particles.integrate(cl_frametime, f.time, 800.0 * 0.05);
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
@@ -696,9 +773,84 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
 }
 
 
+/// `cls.timedemo`'s bookkeeping (client.h `td_startframe`, `td_starttime`;
+/// `td_lastframe`'s one message a frame is [`timedemo_frame`]'s): where the
+/// measurement starts, and `CL_FinishTimeDemo`'s line. The host owns it, as
+/// `cls` outlives a demo: `td_starttime` keeps its last value until a second
+/// frame sets it again.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TimeDemoClock {
+    /// `cls.td_startframe`: `host_framecount` when `timedemo` ran.
+    pub td_startframe: i64,
+    /// `cls.td_starttime` (a float in the C): `realtime` at the start of the
+    /// second frame, "so the bogus time on the first frame doesn't count".
+    pub td_starttime: f32,
+}
+
+impl TimeDemoClock {
+    /// `CL_TimeDemo_f`: the measurement starts in this host frame.
+    pub fn start(&mut self, host_framecount: i64) {
+        self.td_startframe = host_framecount;
+    }
+
+    /// `CL_GetMessage` in a timedemo, about to read the host frame's message:
+    /// the second frame grabs the real start time.
+    pub fn message(&mut self, host_framecount: i64, realtime: f64) {
+        if host_framecount == self.td_startframe + 1 {
+            self.td_starttime = realtime as f32;
+        }
+    }
+
+    /// `CL_FinishTimeDemo`'s line, `"%i frames %5.1f seconds %5.1f fps"`, at
+    /// `host_framecount` and `realtime` of the frame the demo ended in: the
+    /// frames drawn since the first ("the first frame didn't count") and the
+    /// time since the second began.
+    pub fn finish(&self, host_framecount: i64, realtime: f64) -> String {
+        let frames = (host_framecount - self.td_startframe) - 1;
+        let mut time = (realtime - self.td_starttime as f64) as f32;
+        if time == 0.0 {
+            time = 1.0;
+        }
+        let fps = frames as f32 / time;
+        format!("{frames} frames {time:5.1} seconds {fps:5.1} fps")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timedemo_frame_reads_one_message_a_frame_from_the_second() {
+        use crate::demo::{Demo, DemoFrame};
+        let frame = |t: f32| DemoFrame { time: t, ..Default::default() };
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            viewentity: 0,
+            frames: vec![frame(1.0), frame(1.1), frame(1.1), frame(1.3)],
+        };
+        let pak = crate::pak::Pak::from_bytes("t".into(), {
+            let mut img = b"PACK".to_vec();
+            img.extend_from_slice(&12i32.to_le_bytes());
+            img.extend_from_slice(&0i32.to_le_bytes());
+            img
+        })
+        .unwrap();
+        let mut d = DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo);
+        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false };
+        // The first frame (CL_TimeDemo_f's) reads through the second message;
+        // the time between messages is not what moves playback on.
+        let mut shown = Vec::new();
+        while let Some(f) = timedemo_frame(&mut d, 0.5, false, &vid) {
+            shown.push((d.idx, d.demo.frames[d.idx].time));
+            render::recycle_image(f.image);
+        }
+        assert_eq!(shown, [(1, 1.1), (2, 1.1), (3, 1.3)]);
+        assert!(timedemo_frame(&mut d, 0.5, false, &vid).is_none(), "it stays ended");
+    }
 
     #[test]
     fn default_extension_is_com_default_extension() {
@@ -709,5 +861,22 @@ mod tests {
         assert_eq!(default_extension("", ".dem"), ".dem");
         // The C stops at the first character without testing it.
         assert_eq!(default_extension(".x", ".dem"), ".x.dem");
+    }
+
+    #[test]
+    fn finish_prints_cl_finishtimedemo_line() {
+        // timedemo in host frame 10; the second frame (11) starts at 2.5 s;
+        // the demo ends in frame 980 at 12.5 s: frames 11..979 were drawn.
+        let mut c = TimeDemoClock::default();
+        c.start(10);
+        c.message(10, 2.0); // the first frame's time doesn't count
+        c.message(11, 2.5);
+        c.message(12, 2.51);
+        assert_eq!(c.td_starttime, 2.5);
+        assert_eq!(c.finish(980, 12.5), "969 frames  10.0 seconds  96.9 fps");
+        // %5.1f pads to five columns and grows past them.
+        assert_eq!(c.finish(980, 1002.5), "969 frames 1000.0 seconds   1.0 fps");
+        // `if (!time) time = 1;`
+        assert_eq!(c.finish(14, 2.5), "3 frames   1.0 seconds   3.0 fps");
     }
 }

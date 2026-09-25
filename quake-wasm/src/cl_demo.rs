@@ -1,17 +1,18 @@
 //! cl_demo.c's host half for the page. [`step_demo`] runs the client's
 //! [`demo_frame`] (quake-rs `client::cl_demo`: a recorded `.dem` rendered like
 //! live play) on the page's [`Vid`](crate::vid::vid) and hands its sound calls
-//! to [`snd_dma`](crate::snd_dma). The rest is `cls`'s demo state against the
-//! App: `CL_PlayDemo_f`, `CL_StopPlayback`, `CL_Disconnect`, `CL_NextDemo`
-//! and `Host_EndGame` (a demo's `svc_disconnect`: the loop's next demo, or
-//! disconnected). Its tests drive the real client on synthetic and on id's
-//! recorded demos.
+//! to [`snd_dma`](crate::snd_dma); [`step_timedemo`] does the same for a
+//! `timedemo` frame. The rest is `cls`'s demo state against the App:
+//! `CL_PlayDemo_f`, `CL_TimeDemo_f`, `CL_StopPlayback`/`CL_FinishTimeDemo`,
+//! `CL_Disconnect`, `CL_NextDemo` and `Host_EndGame` (a demo's
+//! `svc_disconnect`: the loop's next demo, or disconnected). Its tests drive
+//! the real client on synthetic and on id's recorded demos.
 
-use quake_rs::client::cl_demo::{default_extension, demo_frame, MAX_DEMOS};
+use quake_rs::client::cl_demo::{default_extension, demo_frame, timedemo_frame, MAX_DEMOS};
 use quake_rs::client::SoundCall;
 use quake_rs::render;
 
-use crate::app::{build_demo_file, App, DemoPlay};
+use crate::app::{build_demo_file, App, DemoPlay, APP};
 
 /// One frame of demo playback at `render_w x render_h`: the finished screen
 /// and its colour shifts (`cl.cshifts`, applied by the host after the menu and
@@ -28,6 +29,23 @@ pub(crate) fn step_demo(
     (frame.image, frame.cshifts)
 }
 
+/// A finished screen and its colour shifts (`cl.cshifts`).
+type ShiftedFrame = (render::Image, Vec<([u8; 3], f32)>);
+
+/// One host frame of `timedemo` at `render_w x render_h` ([`timedemo_frame`]:
+/// the next recorded message, drawn), or `None` when the demo has ended.
+pub(crate) fn step_timedemo(
+    d: &mut DemoPlay,
+    frametime: f32,
+    menu_up: bool,
+    render_w: usize,
+    render_h: usize,
+) -> Option<ShiftedFrame> {
+    let frame = timedemo_frame(d, frametime, menu_up, &crate::vid::vid(render_w, render_h))?;
+    crate::snd_dma::play(&d.pak, frame.sound);
+    Some((frame.image, frame.cshifts))
+}
+
 /// `S_StopAllSounds (true)`: every sound, the loops and ambients included.
 fn stop_all_sounds() {
     crate::snd_dma::SND_QUEUE.with(|q| q.borrow_mut().clear());
@@ -37,12 +55,22 @@ fn stop_all_sounds() {
     }
 }
 
-/// `CL_StopPlayback`: a playing demo stops.
+/// `CL_FinishTimeDemo`: the timedemo is over; its line goes to the console.
+fn cl_finish_timedemo(a: &mut App) {
+    a.cls.timedemo = false;
+    let line = a.cls.td.finish(a.host_framecount, a.realtime);
+    a.console.println(line);
+}
+
+/// `CL_StopPlayback`: a playing demo stops (a timedemo prints its line).
 pub(crate) fn cl_stop_playback(a: &mut App) {
     if !a.demoplayback() {
         return;
     }
     a.demo = None;
+    if a.cls.timedemo {
+        cl_finish_timedemo(a);
+    }
 }
 
 /// `CL_Disconnect`: every sound stops, a demo stops playing or the local game
@@ -51,6 +79,7 @@ pub(crate) fn cl_stop_playback(a: &mut App) {
 pub(crate) fn cl_disconnect(a: &mut App) {
     stop_all_sounds();
     cl_stop_playback(a);
+    a.cls.timedemo = false;
     a.demo = None;
     a.walk = None;
     a.mode = 1;
@@ -60,12 +89,13 @@ pub(crate) fn cl_disconnect(a: &mut App) {
 /// `CL_PlayDemo_f` after its argument check: disconnect, print
 /// "Playing demo from <name>.", and start the demo — or print "ERROR:
 /// couldn't open." and stop the demo loop (`cls.demonum = -1`), staying
-/// disconnected. True when it plays.
-pub(crate) fn cl_play_demo(a: &mut App, arg: &str) -> bool {
+/// disconnected. `timedemo` builds it for [`step_timedemo`]. True when it
+/// plays.
+pub(crate) fn cl_play_demo(a: &mut App, arg: &str, timedemo: bool) -> bool {
     cl_disconnect(a);
     let name = default_extension(arg, ".dem");
     a.console.println(format!("Playing demo from {name}."));
-    let Some(mut d) = build_demo_file(&name) else {
+    let Some(mut d) = build_demo_file(&name, timedemo) else {
         a.console.println("ERROR: couldn't open.");
         a.cls.demonum = -1;
         return false;
@@ -75,6 +105,20 @@ pub(crate) fn cl_play_demo(a: &mut App, arg: &str) -> bool {
     a.mode = 1;
     a.disconnected = false;
     true
+}
+
+/// `CL_TimeDemo_f` after its argument check: `CL_PlayDemo_f`, then the
+/// measurement starts in this host frame — the one the next `step` runs
+/// (the C runs the command inside the frame it counts from). The port only
+/// sets `cls.timedemo` when the demo opened: id's sets it regardless, which
+/// just leaves a failed `timedemo` running uncapped until the next disconnect.
+pub(crate) fn cl_timedemo(a: &mut App, arg: &str) {
+    if !cl_play_demo(a, arg, true) {
+        return;
+    }
+    a.cls.timedemo = true;
+    let frame = a.host_framecount;
+    a.cls.td.start(frame);
 }
 
 /// `CL_NextDemo`: the loop's next demo (`playdemo cls.demos[cls.demonum]`),
@@ -97,7 +141,7 @@ pub(crate) fn cl_next_demo(a: &mut App) {
     let name = a.cls.demos[a.cls.demonum as usize].clone();
     // Cbuf_InsertText ("playdemo ...") runs after the increment below.
     a.cls.demonum += 1;
-    cl_play_demo(a, &name);
+    cl_play_demo(a, &name, false);
 }
 
 /// `Host_EndGame` for a demo that has played its last message
@@ -109,6 +153,14 @@ pub(crate) fn host_end_game(a: &mut App) {
     } else {
         cl_disconnect(a);
     }
+}
+
+/// `1` while a `timedemo` runs (`cls.timedemo`): the page then runs host
+/// frames back to back, a time slice's worth per animation frame, instead of
+/// one per refresh.
+#[no_mangle]
+pub extern "C" fn timedemo_running() -> i32 {
+    APP.with(|c| c.borrow().as_ref().map(|a| a.cls.timedemo as i32).unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -756,10 +808,14 @@ mod tests {
         assert_eq!((demo1.as_deref(), n), (Some("maps/e1m3.bsp"), 1), "demo1 plays; demos[1] is next");
         crate::menu::menu_cancel(); // the menu away (it does not stop the loop here)
         console_toggle();
-        // A bad argument count prints the C's usage line ("play", as id's).
+        // Bad argument counts print the C's usage lines ("play", as id's).
         run_console_line("playdemo");
+        run_console_line("timedemo a b");
         let lines = console_lines();
-        assert_eq!(lines[lines.len() - 2..], ["]playdemo", "play <demoname> : plays a demo"]);
+        assert_eq!(
+            lines[lines.len() - 4..],
+            ["]playdemo", "play <demoname> : plays a demo", "]timedemo a b", "timedemo <demoname> : gets demo speeds"]
+        );
         // playdemo inside the loop: the loop carries on after it (demonum kept).
         run_console_line("playdemo demo3");
         let (demo3, n) = playing();
@@ -837,5 +893,90 @@ mod tests {
         step(0.05);
         let cur = APP.with(|c| c.borrow().as_ref().unwrap().console.current());
         assert!(cur < h as f32, "connected again: the console slides away ({cur})");
+    }
+
+    // -- timedemo --------------------------------------------------------------
+
+    /// Parse `CL_FinishTimeDemo`'s line: (frames, seconds, fps).
+    fn timedemo_line(line: &str) -> Option<(i64, f32, f32)> {
+        let rest = line.strip_suffix(" fps")?;
+        let (frames, rest) = rest.split_once(" frames ")?;
+        let (secs, fps) = rest.split_once(" seconds ")?;
+        Some((frames.parse().ok()?, secs.trim().parse().ok()?, fps.trim().parse().ok()?))
+    }
+
+    #[test]
+    fn timedemo_demo1_draws_969_frames_as_ids_and_the_loop_goes_on() {
+        use crate::app::boot_attract;
+        use crate::console::console_toggle;
+        use crate::host::step;
+        assert_eq!(boot_attract(), 1);
+        crate::menu::menu_cancel();
+        console_toggle();
+        crate::vid::set_resolution(320, 200);
+        run_console_line("timedemo demo1");
+        assert_eq!(timedemo_running(), 1);
+        assert_eq!(console_lines().last().map(String::as_str), Some("Playing demo from demo1.dem."));
+        // No 72 fps cap: every call is a host frame, one recorded message
+        // each (1 ms apart here, so the measured time is exact).
+        let mut frames = 0;
+        let mut idx = Vec::new();
+        while timedemo_running() == 1 && frames < 2000 {
+            assert_eq!(step(0.001), 1, "a timedemo frame runs on every call");
+            frames += 1;
+            if frames <= 3 {
+                idx.push(APP.with(|c| c.borrow().as_ref().unwrap().demo.as_ref().unwrap().idx));
+            }
+        }
+        assert_eq!(idx, [1, 2, 3], "the first frame reads through the second message, then one a frame");
+        let lines = console_lines();
+        let line = lines.iter().rev().find(|l| l.contains(" frames ")).expect("the timedemo line");
+        let (n, secs, fps) = timedemo_line(line).unwrap_or_else(|| panic!("{line:?}"));
+        // id's oracle: `timedemo demo1` draws 969 frames (oracle/README.md).
+        assert_eq!(n, 969, "{line}");
+        assert_eq!(frames, 971, "969 counted, the first, and the one that read svc_disconnect");
+        assert!((secs - 1.0).abs() < 1e-6 && (fps - 1000.0).abs() < 0.5, "969 x 1 ms: {line}");
+        assert_eq!(line, &format!("{n} frames {secs:5.1} seconds {fps:5.1} fps"), "%i %5.1f %5.1f");
+        // Host_EndGame inside the loop: CL_NextDemo (the loop's demos[1]),
+        // played normally again (the 72 fps cap is back).
+        let (d, demonum) = playing();
+        assert!(d.is_some() && demonum == 2, "{d:?} {demonum}");
+        assert_eq!(timedemo_running(), 0);
+        let ran: i32 = (0..144).map(|_| step(1.0 / 144.0)).sum();
+        assert_eq!(ran, 72, "the cap again");
+    }
+
+    #[test]
+    fn timedemo_outside_the_loop_disconnects_and_a_stop_prints_the_partial_count() {
+        use crate::app::boot_attract;
+        use crate::console::console_toggle;
+        use crate::host::step;
+        assert_eq!(boot_attract(), 1);
+        console_toggle();
+        crate::vid::set_resolution(320, 200);
+        // CL_StopPlayback mid-run finishes it: frames drawn after the first.
+        run_console_line("timedemo demo2");
+        for _ in 0..100 {
+            step(0.002);
+        }
+        run_console_line("stopdemo");
+        let lines = console_lines();
+        let line = lines.iter().rev().find(|l| l.contains(" frames ")).expect("the partial line");
+        let (n, secs, _) = timedemo_line(line).unwrap();
+        assert_eq!((n, (secs * 10.0).round()), (99, 2.0), "{line}");
+        assert_eq!(playing(), (None, 1), "stopped, disconnected; the loop keeps its place");
+        // The loop off (startdemos while playing), a timedemo ends disconnected.
+        run_console_line("playdemo demo1");
+        run_console_line("startdemos demo1 demo2 demo3");
+        run_console_line("timedemo demo3");
+        let mut guard = 0;
+        while timedemo_running() == 1 && guard < 3000 {
+            step(0.001);
+            guard += 1;
+        }
+        let lines = console_lines();
+        let (n, _, _) = timedemo_line(lines.iter().rev().find(|l| l.contains(" frames ")).unwrap()).unwrap();
+        assert_eq!(n, 1090, "demo3, as id's");
+        assert_eq!(playing(), (None, -1), "Host_EndGame outside the loop: CL_Disconnect");
     }
 }

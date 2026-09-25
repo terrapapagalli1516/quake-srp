@@ -298,6 +298,8 @@ id's portable C (1 core, gcc -O2, x87), `timedemo demo1`, 969 frames, sound and
 input null: **1480 fps at 320x200, 535 at 640x480, 192 at 1280x1024**
 (`oracle/build/quake-oracle -basedir <dir with id1/pak0.pak> -oracle_realtime
 -width W -height H +timedemo demo1`). id's renderer cannot go above 1280x1024.
+The port runs the same `timedemo` (`quaketool timedemo pak0.pak demo1 --res WxH`, or
+the browser console): the same 969 frames, its rate next to id's in `PERF_PLAN.md` §10.
 
 Same view, warm, world only (`compare.py --modes world --bench 100`): the port
 takes **0.55-0.81x** id's time at 320x200, **0.69-1.12x** at 640x480 and
