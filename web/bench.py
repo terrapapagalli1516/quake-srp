@@ -42,7 +42,7 @@ isolated and performance.now() is ~5 us, not the 100 us of a normal page.
 Headless Chromium composites in software: `put` and `raf - js` are indicative
 of the browser's share, not of a GPU-accelerated desktop browser.
 """
-import argparse, collections, functools, gzip, http.server, json, os, shutil
+import argparse, atexit, collections, functools, gzip, http.server, json, os, shutil
 import socketserver, statistics, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -74,6 +74,7 @@ if args.build:
                     "--features", "bench", "--target-dir", "target/bench"],
                    cwd=wasm_crate, check=True)
     WEB = tempfile.mkdtemp(prefix="quake-bench-")
+    atexit.register(shutil.rmtree, WEB, True)
     shutil.copy(os.path.join(HERE, "index.html"), WEB)
     shutil.copy(os.path.join(wasm_crate, "target/bench/wasm32-unknown-unknown/release/quake_wasm.wasm"), WEB)
 else:
