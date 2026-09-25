@@ -538,7 +538,8 @@ mod tests {
         for stamps in [[5.0, 10.0, 15.0], [13.0, 26.0, 40.0]] {
             let (mut a, mut b) = (0.0, 0.0);
             for t in stamps {
-                assert_eq!(host_frame_time(t / 1000.0, &mut a, false), host_filter_time(t / 1000.0, &mut b));
+                let t = t / 1000.0;
+                assert_eq!(host_frame_time(t, &mut a, false), host_filter_time(t, &mut b));
                 assert_eq!(a, b);
             }
         }

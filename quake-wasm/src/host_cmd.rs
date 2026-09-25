@@ -71,13 +71,10 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  save <name>   load <name>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
-                a.console.println("web extras (not id's; Options menu):");
-                let mut line = String::from(" ");
-                for (name, _) in WASM_EXTRAS {
-                    line.push(' ');
-                    line.push_str(name);
+                a.console.println("web extras (not id's; see Options):");
+                for (name, _, what) in WASM_EXTRAS {
+                    a.console.println(format!("  {:<19}{what}", format!("{name} 0|1")));
                 }
-                a.console.println(line + " [0|1]");
             });
             return;
         }
@@ -108,7 +105,7 @@ pub(crate) fn execute_console_command(line: &str) {
 
     // The Web extras (Options > Web extras): the port's opt-in departures,
     // under a `wasm_` prefix no id command or cvar uses.
-    if let Some(&(name, extra)) = WASM_EXTRAS.iter().find(|(n, _)| *n == cmd_lower) {
+    if let Some(&(name, extra, _)) = WASM_EXTRAS.iter().find(|(n, _, _)| *n == cmd_lower) {
         ensure_app(|a| wasm_extra_command(a, name, extra, argv.get(1).copied()));
         return;
     }
@@ -163,16 +160,17 @@ pub(crate) fn execute_console_command(line: &str) {
     }
 }
 
-/// The Web extras' console commands, each switching one extra: no argument
-/// prints it the way `Cvar_Command` prints a cvar, one argument sets it
-/// (`atof(arg) != 0` is on). Exact perspective is left out of a build without
-/// it ([`render::EXTRAS_HAS_EXACTPERSP`]).
-const WASM_EXTRAS_ALL: [(&str, render::Extra); 3] = [
-    ("wasm_uncapped", render::Extra::Uncapped),
-    ("wasm_showfps", render::Extra::ShowFps),
-    ("wasm_exactpersp", render::Extra::ExactPersp),
+/// The Web extras' console commands (name, extra, `help` line), each
+/// switching one extra: no argument prints it the way `Cvar_Command` prints a
+/// cvar, one argument sets it (`atof(arg) != 0` is on). Exact perspective is
+/// left out of a build without it ([`render::EXTRAS_HAS_EXACTPERSP`]).
+type WasmExtra = (&'static str, render::Extra, &'static str);
+const WASM_EXTRAS_ALL: [WasmExtra; 3] = [
+    ("wasm_uncapped", render::Extra::Uncapped, "no 72 fps cap"),
+    ("wasm_showfps", render::Extra::ShowFps, "frame rate"),
+    ("wasm_exactpersp", render::Extra::ExactPersp, "exact persp."),
 ];
-const WASM_EXTRAS: &[(&str, render::Extra)] =
+const WASM_EXTRAS: &[WasmExtra] =
     if render::EXTRAS_HAS_EXACTPERSP { &WASM_EXTRAS_ALL } else { WASM_EXTRAS_ALL.split_at(2).0 };
 
 /// Run one `wasm_*` extra command (see [`WASM_EXTRAS`]).
@@ -649,8 +647,9 @@ mod tests {
         let help: Vec<String> = APP.with(|c| {
             c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
         });
-        let help = help.join("\n");
-        assert!(help.contains("wasm_uncapped wasm_showfps"), "help lists them: {help}");
+        assert!(help.iter().any(|l| l == "  wasm_uncapped 0|1  no 72 fps cap"), "{help:?}");
+        assert!(help.iter().any(|l| l == "  wasm_showfps 0|1   frame rate"), "{help:?}");
+        assert!(help.iter().all(|l| l.len() <= 38), "fits a 320-wide console: {help:?}");
     }
 
     // -----------------------------------------------------------------------
