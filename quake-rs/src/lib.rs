@@ -59,6 +59,7 @@ pub mod screen;
 pub mod sbar;
 pub mod keys;
 pub mod menu;
+pub mod console;
 pub mod dlight;
 pub mod demo;
 pub mod snd;
