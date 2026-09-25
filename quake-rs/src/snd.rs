@@ -406,8 +406,14 @@ impl SndParams {
     }
 }
 
+/// The one-shot queue's cap: the new sounds a frame may add (a non-zero
+/// channel's go past it; see [`queue_sounds`]).
+pub const QUEUE_CAP: usize = 12;
+
 /// Load the WAV bytes for the gameplay sounds in `events` and push them onto the
 /// playback queue `q`, capped at 12 so a noisy frame can't grow it without bound.
+/// A sound on a non-zero channel still goes out past the cap (it overrides its
+/// `(entity, channel)`, which the C never drops).
 ///
 /// A sample with a `cue ` loop point carries its loop window
 /// ([`SndParams::loop_start`]) and the page LOOPS it, as `SND_PaintChannels`
@@ -492,8 +498,37 @@ pub fn queue_sounds(
             }
         }
 
-        if q.len() >= 12 {
-            continue; // queue cap reached
+        if q.len() >= QUEUE_CAP {
+            // The cap drops a channel-0 sound, but not one on a non-zero
+            // channel: SND_PickChannel's same-(entity, channel) override comes
+            // first and always wins (snd_dma.c:365, "allways override sound
+            // from same entity"), so the C never loses it, and the page needs
+            // it to stop what that key plays — a door, lift or train's stop
+            // sound (CHAN_VOICE) dropped in a busy frame left its "moving" hum
+            // looping forever. It replaces an undrained entry of the same key
+            // if there is one, so the queue stays bounded (the cap plus one
+            // entry per key).
+            if ev.channel == 0 {
+                continue;
+            }
+            if let Ok(Some(bytes)) = pak.read_file(&path) {
+                set_loop_window(&mut params, &bytes);
+                let old = q.iter().position(|(_, p)| {
+                    p.channel != 0 && p.entity == ev.entity && (p.channel == ev.channel || ev.channel == -1)
+                });
+                let qi = match old {
+                    Some(qi) => {
+                        q[qi] = (bytes, params);
+                        qi
+                    }
+                    None => {
+                        q.push((bytes, params));
+                        q.len() - 1
+                    }
+                };
+                placed.push(((ev.entity, ev.channel), qi));
+            }
+            continue;
         }
         if let Ok(Some(bytes)) = pak.read_file(&path) {
             set_loop_window(&mut params, &bytes);
