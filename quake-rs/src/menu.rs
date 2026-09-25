@@ -1419,10 +1419,9 @@ fn draw_slider(
 /// [`menu_cursor_glyph`].
 ///
 /// Each pic is fetched from `pics` and skipped if absent (`None`) — a pak missing
-/// the menu art still renders the rest without panicking. `conchars`, when
-/// present, draws the small version label at the bottom (purely cosmetic; the
-/// menu items themselves come from the `mainmenu`/`sp_menu` graphics, exactly as
-/// in Quake).
+/// the menu art still renders the rest without panicking. `conchars` draws the
+/// text screens (Options, Keys, Load/Save, Quit); the Main and Single Player
+/// items come from the `mainmenu`/`sp_menu` graphics, exactly as in Quake.
 pub fn draw_menu(
     image: &mut Image,
     menu: &Menu,
@@ -1542,13 +1541,6 @@ pub fn draw_menu(
     if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
         let cy = 32.0 + menu.cursor as f32 * 20.0;
         blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
-    }
-
-    // A small version label along the bottom (cosmetic; uses draw_string so the
-    // conchars font path is exercised faithfully). Quake stamps the version with
-    // the +128 "brown" character range; here we draw plain ASCII.
-    if let Some(cc) = conchars {
-        draw_string_scaled(image, cc, 4.0, MENU_VIRT_H - 12.0, "quake-rs", scale, ox, oy, palette);
     }
 }
 
