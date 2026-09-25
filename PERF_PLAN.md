@@ -339,6 +339,24 @@ The fidelity classes are:
   colormap.
 - **Fidelity.** This also removes the port-specific tightening "flip baked → per-pixel", noted in
   STATUS, which the C never had.
+- **Done** (branch `quake/w1`): `face_surf_block` bakes a dlit wall with the light and marks the
+  entry `dlight`, and its hit test is `D_CacheSurface`'s. That test also takes the texture, which
+  fixes animated wall textures frozen by the cache. `any_dlight_reaches` now only saves rebakes of
+  faces the light marks but never reaches.
+  - **Speed,** A/B against A1 in one sitting, fire_e1m1, median / p95 ms:
+
+    | build | step, wasm 640×400 | step, wasm 1280×800 | step, native 1280×800 | render3d p95, wasm 1280×800 |
+    |---|---|---|---|---|
+    | A1 | 3.66 / 6.50 | 11.15 / 20.64 | 9.28 / 22.15 | 14.87 |
+    | A2 | 3.25 / 5.26 | 9.89 / 12.86 | 8.83 / 15.31 | 7.37 |
+
+    Native `QUAKE_DLIGHT=eye` on e1m1 at 1280×800, three runs: radius 350 **30.6–31.8 → 14.0–14.5
+    ms** (world 24.0–24.6 → 9.6–10.0); radius 200 28.2–29.7 → 11.7–12.2 ms; with no light, 7.7–8.3
+    ms for both. The other workloads move within noise.
+  - **Identity:** the goldens and the oracle's standard rows are identical to A1's. Wasm hashes
+    differ only on fire_e1m1's lit frames.
+  - **Remaining cost of a lit frame:** the bake runs at mip 0 with a bilinear `factor_at` per
+    texel. Mip levels (A5) and `R_DrawSurfaceBlock8`'s luxel-block stepping would cut it.
 
 **A0. Sort only the faces that survive the PVS and frustum culls.** *(byte-identical)*
 

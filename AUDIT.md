@@ -561,7 +561,7 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   Accepted gap: 85–100 Hz displays get half their rate (the C gate needs two
   vsyncs there).
 
-## World pass: polygon spans (2026-09-25, branch `quake/w1`, PERF_PLAN A0–A2)
+## World pass: polygon spans, dlit surface cache (2026-09-25, branch `quake/w1`, PERF_PLAN A0–A2)
 
 - ✅ **A1: faces scan-converted as polygons.** Each clipped world, submodel
   and external-box face was fan-triangulated and each triangle's bounding box
@@ -604,6 +604,32 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
     average. Tried without effect: floor versus 16.16 texel arithmetic, vertex
     versus plane gradients, f32 versus f64 divides, an id-style float camera
     basis.
+- ✅ **A2: dynamically lit walls through the surface cache**
+  (`D_CacheSurface` + `R_AddDynamicLights`). A wall a dynamic light reached
+  left the surface cache for a per-pixel path, with bilinear lightmap and
+  colormap on every screen pixel. Now `face_surf_block` bakes it with the
+  light at texel resolution, and marks the entry `dlight` (`cache->dlight`):
+  it is never a hit, so the first frame without the light rebuilds it.
+  Two fixes come with the C's hit test:
+  - **The texture is part of the key** (`cache->texture`). Animated wall
+    textures (`+0…`) were frozen on whichever frame was baked first, on every
+    cached wall; a unit test now fails on the old code.
+  - **The submodel `ent_frame == 0` gate is gone.** An activated button's
+    alternate texture is just another texture.
+
+  Goldens unchanged. Oracle muzzle-flash frames (new: `compare.py --c-cmd
+  +attack --settle 3`, with id's `cl_dlights` handed to `quaketool view
+  --dlight`), mip 0 + exact, 320×200, exact% before → after: e1m1 64.12 →
+  90.01, e1m2 88.46 → 96.85, e1m3 76.47 → 97.77; as shipped, 55.96 → 80.30,
+  52.28 → 60.66, 40.72 → 60.95.
+  - **Pixels the flash lights in id** (e1m3): the port matches 96.1% of them,
+    was 23.1%. Of the rest, about 1% are the gunshot's particles (`view`
+    draws none) and about 3% are one colormap row off. That is the class-6
+    lightmap interpolation (oracle README), which a dlight's steep gradient
+    brings out more than static light does. So dlit lighting is per texel
+    now, but not id's texel for texel until class 6 is ported.
+  - **e1m1's lit frames** also carry the settle ≥ 3 light-style offset of the
+    harness (oracle README).
 
 ## LOW (27)
 

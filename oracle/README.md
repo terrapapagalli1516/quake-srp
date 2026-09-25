@@ -24,7 +24,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--settle N` | shoot N frames after signon instead of the first |
 | `--crop name:x,y,w,h` | extra 6x C / port / diff PNG of a region |
 | `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the 16-pixel segments of the x86 asm `D_DrawSpans16` (what DOS/Win players saw, `d_subdiv16 1`); 1 = exact per-pixel perspective (an experiment, not id) |
-| `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable) |
+| `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
 | `--viewmodel` | draw the weapon too (the port is handed id's `cl.viewent` origin and angles, `quaketool view --viewent`) |
 | `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD |
@@ -251,9 +251,11 @@ pixel). Timings are noisy: compare within one sitting.
   rounding. Other asm-vs-C differences are unmeasured.
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
   1996. The x87-vs-SSE check bounds the float noise at ~0.03%.
-- Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No particles, dynamic
-  lights, underwater warp, sprites or intermission were compared (the oracle can
-  render them; nobody looked yet).
+- Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No particles,
+  underwater warp, sprites or intermission were compared (the oracle can render
+  them; nobody looked yet). Dynamic lights: the muzzle-flash frames above, since
+  PERF_PLAN A2 (`AUDIT.md`); the port's `view` draws no particles, so a shot's
+  puffs count as differences there.
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
 - `viewsize` below 120: the C side renders it (`--c-only --full`), the port's

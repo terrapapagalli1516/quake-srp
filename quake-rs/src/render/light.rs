@@ -793,25 +793,19 @@ thread_local! {
 /// Beyond the mask + plane tests, the light's impact point is tested against
 /// the face's texture-space extent with the same `max(sd,td) + min(sd,td)/2`
 /// distance estimate `add_dynamic_lights` uses per luxel — i.e. "would this
-/// light add light to at least one luxel of this face". This extent test is a
-/// PORT-SPECIFIC tightening of the CACHE-PATH decision only: the C keys its
-/// surface-cache rebuild on the marking alone (`d_surf.c` checks
-/// `surf->dlightframe`) and over-marking there costs only a redundant rebuild,
-/// because the C always renders through the surface cache. This port instead
-/// flips a "dlit" face from the baked block onto the per-pixel path (which
-/// shades visibly differently — the documented texel-center-bake vs bilinear
-/// divergence), and `R_MarkLights` marks EVERY face stored on a straddled node
-/// regardless of lateral distance (e.g. the whole length of a long floor plane
-/// while a rocket flies past one end) — so without the extent test such
-/// zero-contribution faces would shimmer for no pixel change (the visible
-/// first-frames "pop" this fixed: the start map's distant lava fireballs).
-/// Skipping them is sound: a face receiving no luxel light renders identically
-/// on the baked path. Conservative at the rim: the extent is the luxel grid's
-/// quantized bounds and the distance is the continuous minimum (the port-wide
-/// f32 convention; the C truncates `sd`/`td` to int), so a light is never
-/// declared "not reaching" when `add_dynamic_lights` would contribute; a
-/// missing plane or texinfo falls back to `false`/plane-only (no light is
-/// folded without a plane; without texinfo stay conservative).
+/// light add light to at least one luxel of this face". The C rebuilds a
+/// surface-cache block on the marking alone (`D_CacheSurface` checks
+/// `surf->dlightframe`), and `R_MarkLights` marks EVERY face stored on a
+/// straddled node regardless of lateral distance (e.g. the whole length of a
+/// long floor plane while a rocket flies past one end). A marked face that no
+/// luxel of receives light bakes to exactly its unlit block, so skipping it is
+/// output-identical and saves the rebake — the only purpose of the extent test.
+/// Conservative at the rim: the extent is the luxel grid's quantized bounds and
+/// the distance is the continuous minimum (the port-wide f32 convention; the C
+/// truncates `sd`/`td` to int), so a light is never declared "not reaching"
+/// when `add_dynamic_lights` would contribute; a missing plane or texinfo falls
+/// back to `false`/plane-only (no light is folded without a plane; without
+/// texinfo stay conservative).
 pub(super) fn any_dlight_reaches(
     bsp: &Bsp,
     face: &crate::bsp::DFace,

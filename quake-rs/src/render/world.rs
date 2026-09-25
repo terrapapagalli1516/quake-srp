@@ -232,14 +232,14 @@ pub(super) fn draw_world_textured(
         let tex = ti.and_then(|t| {
             let mi: usize = t.miptex.try_into().ok()?;
             let anim_mi = texture_animation(bsp, mi, 0, time);
-            bsp.textures.get(anim_mi).and_then(|o| o.as_ref())
+            bsp.textures.get(anim_mi).and_then(|o| o.as_ref()).map(|mt| (anim_mi, mt))
         });
 
         // Classify the surface (liquid / sky / wall) by its miptex name so the
         // animated special surfaces route to the warp/scroll sampler. Liquids
         // and sky are fullbright and NOT lightmapped, so only walls compute a
         // baked static lightmap.
-        let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
+        let kind = tex.map(|(_, mt)| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         // This face's `R_MarkLights` mask (0 = no dynamic light reaches it).
         let face_dlightbits = dlight_bits.get(face_index).copied().unwrap_or(0);
         let _t_l = prof.then(StatInstant::now);
@@ -288,13 +288,14 @@ pub(super) fn draw_world_textured(
         let shade = (0.5 + 0.5 * lambert).min(1.0);
 
         match tex {
-            Some(mt) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
+            Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 let (tw, th) = (mt.width as usize, mt.height as usize);
                 // Lit SURFACE CACHE (Quake d_surf.c): a lightmapped wall with a
-                // colormap and no reaching dynamic light bakes texture*lightmap*
-                // colormap into a per-surface block ONCE, then reads one byte per
-                // pixel. Turb/sky/dynamically-lit/colormap-less surfaces keep the
-                // per-pixel path (raster_poly_tex).
+                // colormap bakes texture*lightmap*colormap into a per-surface
+                // block, then reads one byte per pixel; a dynamically lit one is
+                // rebaked with the light while it lasts (`D_CacheSurface`).
+                // Turb/sky/colormap-less surfaces keep the per-pixel path
+                // (raster_poly_tex).
                 stat(|s| { s.faces_drawn += 1; s.world_tris += (proj.len() - 2) as u64; });
                 let _t_s = prof.then(StatInstant::now);
                 let surf = if matches!(mode, SurfaceMode::Normal) {
@@ -303,7 +304,8 @@ pub(super) fn draw_world_textured(
                             let dlit = any_dlight_reaches(bsp, face, dlights, face_dlightbits);
                             // World model: cacheable (stable `Bsp` across frames).
                             face_surf_block(
-                                face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit, true,
+                                face_index, face, tex_index, mt, lm, cm, fp, n_faces, light_styles,
+                                dlit, true,
                             )
                         }
                         _ => None,
@@ -569,13 +571,13 @@ pub(super) fn draw_submodel(
         let tex = ti.and_then(|t| {
             let mi: usize = t.miptex.try_into().ok()?;
             let anim_mi = texture_animation(bsp, mi, ent_frame, time);
-            bsp.textures.get(anim_mi).and_then(|o| o.as_ref())
+            bsp.textures.get(anim_mi).and_then(|o| o.as_ref()).map(|mt| (anim_mi, mt))
         });
 
         // Classify the surface (liquid / sky / wall) by its miptex name. Liquids
         // and sky are fullbright and NOT lightmapped; only walls compute a
         // lightmap (from the LOCAL polygon — texinfo extents are origin-independent).
-        let kind = tex.map(|mt| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
+        let kind = tex.map(|(_, mt)| classify_surface(&mt.name)).unwrap_or(SurfKind::Normal);
         // This face's `R_MarkLights` mask (0 = no dynamic light reaches it).
         let face_dlightbits = dlight_bits.get(face_index).copied().unwrap_or(0);
         let lightmap = if kind == SurfKind::Normal {
@@ -618,21 +620,21 @@ pub(super) fn draw_submodel(
         let shade = (0.5 + 0.5 * lambert).min(1.0);
 
         match tex {
-            Some(mt) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
+            Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 let (tw, th) = (mt.width as usize, mt.height as usize);
                 stat(|s| { s.sub_faces_drawn += 1; s.sub_tris += (proj.len() - 2) as u64; });
                 // Lit SURFACE CACHE for submodels (doors/plats/buttons) — same as the
-                // world pass. Gated on `ent_frame == 0`: an ACTIVATED brush entity
-                // (frame != 0) samples the alternate (+a..+j) texture cycle — a
-                // different miptex than the baked block — so it falls back to the
-                // per-pixel path. Turb/sky/dlit/colormap-less faces also fall back.
-                let surf = if ent_frame == 0 && matches!(mode, SurfaceMode::Normal) {
+                // world pass. An ACTIVATED brush entity (frame != 0) samples the
+                // alternate (+a..+j) texture cycle: a different `tex_index`, so the
+                // block is rebuilt, as the C's `cache->texture` check does.
+                // Turb/sky/colormap-less faces keep the per-pixel path.
+                let surf = if matches!(mode, SurfaceMode::Normal) {
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
                             let dlit = any_dlight_reaches(bsp, face, &local_dlights, face_dlightbits);
                             face_surf_block(
-                                face_index, face, mt, lm, cm, fp, n_faces, light_styles, dlit,
-                                cache_surf,
+                                face_index, face, tex_index, mt, lm, cm, fp, n_faces, light_styles,
+                                dlit, cache_surf,
                             )
                         }
                         _ => None,
