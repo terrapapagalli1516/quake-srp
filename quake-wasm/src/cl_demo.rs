@@ -4,7 +4,8 @@
 //! cl_tent.c / view.c `V_ParseDamage`) and `step_demo`, the recorded-POV
 //! `V_CalcRefdef` + `SCR_UpdateScreen` for one frame.
 
-use quake_rs::client::{lap, Phase};
+use quake_rs::client::host_cmd::IT_INVISIBILITY;
+use quake_rs::client::{lap, Listener, Phase};
 use quake_rs::particles::ParticleSystem;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::tent::BeamModel;
@@ -15,10 +16,7 @@ use quake_rs::client::view::{
 use quake_rs::client::cl_tent::{rocket_trail_type, spawn_temp_entity};
 
 use crate::app::DemoPlay;
-use crate::host_cmd::IT_INVISIBILITY;
-use crate::snd_dma::{
-    push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
-};
+use crate::snd_dma::{push_stop_sounds, queue_sounds, update_ambient_channels, LISTENER};
 use crate::vid::backtile_for;
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool

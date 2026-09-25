@@ -1,374 +1,25 @@
 //! The shell's state and its boots — the [`App`] (host-level state that
 //! outlives a level: mode, menu, console, clocks, framebuffer, held keys)
-//! and the two things it runs, the live [`Walk`] and the recorded
-//! [`DemoPlay`] (client.h's `client_state_t`, one per mode); host.c's
-//! one-time asset loads, the walk builders (`SV_SpawnServer` + the client
-//! connect, as `map` runs them), `CL_PlayDemo_f`'s demo build, and the
+//! around the client it runs, the live [`Walk`] or the recorded [`DemoPlay`]
+//! ([`quake_rs::client`]); host.c's one-time asset loads, the embedded pak,
+//! the client's level loads with their sound calls carried out, and the
 //! `boot*` exports the page starts a mode with.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
-use quake_rs::bsp::Bsp;
-use quake_rs::demo::{parse_demo, Demo};
-use quake_rs::dlight::DynamicLights;
-use quake_rs::mdl::Mdl;
+use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
-use quake_rs::particles::{Lcg, ParticleSystem};
-use quake_rs::progs::Progs;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
-use quake_rs::server::Server;
-use quake_rs::tent::{BeamSegment, Beams};
 use quake_rs::wad::Qpic;
-use quake_rs::console::ConNotify;
-use quake_rs::client::cl_input::{clamp_pitch, KeyMove};
 
 use crate::PAK;
 use crate::host::ShowFps;
-use crate::cl_walk::net_angle;
-use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP_SND_QUEUE};
+use crate::snd_dma::{self, SND_QUEUE, STOP_SND_QUEUE};
 use crate::vid::{DEFAULT_H, DEFAULT_W};
 
+pub(crate) use quake_rs::client::{DemoPlay, Walk};
+
 const WALK_MAP: &str = "maps/e1m1.bsp";
-/// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop's demos, played
-/// in turn (`CL_NextDemo` on each demo's `svc_disconnect`), wrapping to the first.
-pub(crate) const DEMOS: [&str; 3] = ["demo1.dem", "demo2.dem", "demo3.dem"];
-
-/// Interactive walk state: a live server ticked every frame, rendered from the
-/// player edict. Monster thinks advance their animation frames and move them,
-/// and the sound queue surfaces the events they fire.
-pub(crate) struct Walk {
-    pub(crate) server: Server,
-    /// A second copy of the map BSP for rendering (the server owns its own copy
-    /// inside the world host).
-    pub(crate) bsp: Bsp,
-    pub(crate) palette: [[u8; 3]; 256],
-    /// The parsed `gfx.wad` (sbar + digit pics) for the status-bar HUD overlay,
-    /// or `None` if the archive lacked/could not parse it. Parsed once at boot so
-    /// the per-frame HUD draw is allocation-light.
-    pub(crate) gfx_wad: Option<quake_rs::wad::Wad2>,
-    /// `gfx/colormap.lmp` — the 64x256 shade LUT for faithful colormap-indexed
-    /// wall lighting (Quake never overbrights). `None` falls back to the linear
-    /// brightness multiply. Loaded once at boot.
-    pub(crate) colormap: Option<Vec<u8>>,
-    /// The `conchars` font (extracted once from `gfx_wad`) for the on-screen
-    /// message overlay — centerprint (centered) + notify lines (top-left).
-    pub(crate) conchars: Option<Qpic>,
-    /// The archive, kept open so sound samples load on demand as events fire.
-    pub(crate) pak: Pak,
-    /// Parsed alias models keyed by in-pak name (`None` = absent/unparseable).
-    pub(crate) model_cache: HashMap<String, Option<Mdl>>,
-    /// Parsed *external brush* models keyed by in-pak name (`None` =
-    /// absent/unparseable). These are Quake's standalone `maps/b_*.bsp` item
-    /// boxes (explosive box, ammo/health boxes) that items `setmodel()` to at
-    /// runtime. Cached like `model_cache` so a box parses once and backs every
-    /// instance of that item; rendered via [`render::ExternalBModel`].
-    pub(crate) bmodel_cache: HashMap<String, Option<Bsp>>,
-    /// Parsed sprite models (`.spr`) keyed by name, cached like `model_cache` so a
-    /// sprite (the explosion flash, bubbles) parses once and backs every instance.
-    pub(crate) sprite_cache: HashMap<String, Option<quake_rs::spr::Sprite>>,
-    /// Per-entity previous render origin, keyed by edict index — the source point
-    /// for R_RocketTrail (rockets/grenades/gibs trail from their old origin to the
-    /// new one each frame). Defaults to the current origin the first time an
-    /// entity is seen, so there's no spurious trail on spawn.
-    pub(crate) trail_org: HashMap<i32, [f32; 3]>,
-    /// Quake's `tracercount` (CL_RelinkEntities `static int`): alternates the
-    /// tracer-trail offset direction; threaded across `spawn_rocket_trail` calls.
-    pub(crate) tracercount: u32,
-    /// The world map's in-pak path (e.g. `maps/e1m1.bsp`). An entity whose
-    /// `model` equals this is the worldspawn brush — never loaded as an external
-    /// box (it is already drawn as the world).
-    pub(crate) map_name: String,
-    /// The spawn parms captured when this level was ENTERED (the alive player's
-    /// inventory at level start). A single-player respawn (`localcmd("restart")`)
-    /// reloads the current level with THESE, since a dead player's state is empty.
-    pub(crate) entry_parms: [f32; quake_rs::server::NUM_SPAWN_PARMS],
-    pub(crate) player: i32,
-    pub(crate) yaw: f32,
-    pub(crate) pitch: f32,
-    pub(crate) in_fwd: f32,
-    pub(crate) in_side: f32,
-    pub(crate) in_attack: bool,
-    /// Whether the jump key is held (UserCmd button bit 1 -> the player's
-    /// `button2`, which the QuakeC PlayerJump reads to leap when on the ground).
-    pub(crate) in_jump: bool,
-    /// Whether the swim-down key (`c`) is held: drives `UserCmd.upmove` negative,
-    /// which `SV_WaterMove` reads to sink. Ignored out of water (the WALK air
-    /// move zeroes the vertical wish). Swim-UP reuses `in_jump` (Space) the same
-    /// way — in water it pushes up, on land it just jumps.
-    pub(crate) in_down: bool,
-    /// A one-shot impulse (weapon switch etc.) queued by `set_impulse`, applied
-    /// to the next `step_walk` UserCmd then cleared — matching how Quake's
-    /// `impulse` console command fires once. 0 means "no impulse this frame".
-    pub(crate) next_impulse: i32,
-    /// This frame's bindings-derived keyboard input (CL_BaseMove/CL_AdjustAngles
-    /// over the page-held keys), refreshed by `step` before `step_walk` runs.
-    pub(crate) key_move: KeyMove,
-    /// The `viewsize` cvar this frame (the Options "Screen size" slider),
-    /// refreshed by `step` from the menu before stepping, like `key_move`:
-    /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
-    /// much status bar shows.
-    pub(crate) viewsize: f32,
-    /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
-    /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
-    /// mouse X away from yaw). Drained into the next UserCmd then cleared.
-    pub(crate) mouse_side: f32,
-    /// Accumulated mouse forwardmove units (IN_MouseMove's else branch:
-    /// `cmd->forwardmove -= m_forward.value * mouse_y` while +strafe holds mouse
-    /// Y out of the pitch path). Drained like `mouse_side`.
-    pub(crate) mouse_fwd: f32,
-    /// Pitch drift active (view.c `!cl.nodrift`): centerview or a lookspring
-    /// pointer-unlock started it; the view re-levels at `pitch_vel` deg/sec until
-    /// it reaches 0 or mouse/keyboard look stops it (V_StopPitchDrift).
-    pub(crate) pitch_drift: bool,
-    /// `cl.pitchvel` — the drift rate, seeded with [`V_CENTERSPEED`] and
-    /// accelerated by it each second while drifting (V_DriftPitch).
-    pub(crate) pitch_vel: f32,
-    /// Full-screen damage-flash intensity (Quake's `CSHIFT_DAMAGE` percent,
-    /// 0..150): bumped by each svc_damage (V_ParseDamage) and faded each frame.
-    pub(crate) damage_blend: f32,
-    /// The damage-flash tint colour (`V_ParseDamage` picks (200,100,100) when armour
-    /// absorbs most, (220,50,50) for armour-only, (255,0,0) for pure blood).
-    pub(crate) damage_color: [u8; 3],
-    /// `cl.cshifts[CSHIFT_BONUS].percent`: the gold pickup flash a stuffed
-    /// `bf` sets to 50 (V_BonusFlash_f), dropped `dt*100` per frame.
-    pub(crate) bonus_blend: f32,
-    /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
-    /// view kick of the last svc_damage, decaying over `v_kicktime`.
-    pub(crate) v_dmg_time: f32,
-    pub(crate) v_dmg_roll: f32,
-    pub(crate) v_dmg_pitch: f32,
-    /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
-    /// like the HUD's `time`): the status bar shows the pain face until then.
-    pub(crate) faceanimtime: f32,
-    /// `cl.items` as last received and `cl.item_gettime[]` (CL_ParseClientdata,
-    /// server clock): the new-weapon icon flash. Zeroed with the level
-    /// (CL_ClearState), so a level start flashes what the player carries.
-    pub(crate) cl_items: i32,
-    pub(crate) item_gettime: [f32; 32],
-    /// Stair-step view smoothing accumulator (`view.c` V_CalcRefdef `oldz`): the eye
-    /// Z lags the player Z by up to 12 units while climbing so stairs glide instead
-    /// of jolting. NaN until the first frame establishes it.
-    pub(crate) oldz: f32,
-    /// Current centered message (`centerprint`) + the clock time it expires at
-    /// (Quake's `scr_centertime` ~2s); replaced by the next centerprint. Drawn
-    /// centered over the view.
-    pub(crate) centerprint: Option<(String, f32)>,
-    /// The top-left notify lines (`bprint`/`sprint` through Con_Print, shown by
-    /// Con_DrawNotify), on the host clock.
-    pub(crate) notify: ConNotify,
-    /// `cl.time` (seconds). On a local server `CL_LerpPoint` snaps it to the
-    /// server's message time, `sv.time` after the frame's physics, so it is
-    /// the server's clock: about 1.2 s at a spawn (SV_SpawnServer's 1.0 + the
-    /// signon frames), the save's time after a load, and it stops with the
-    /// server while single player is paused behind the menu/console. Drives
-    /// the sky, liquids, underwater warp, texture/alias animation, light
-    /// styles, particles, dlight decay, the rotating pickups, the bob and the
-    /// intermission sway.
-    pub(crate) clock: f32,
-    /// Host time (seconds): advanced by every frame's `dt`, paused or not. The
-    /// notify lines (Con_DrawNotify ages them in `realtime`) and the centerprint
-    /// (SCR_CheckDrawCenterString counts `scr_centertime_off` down by
-    /// `host_frametime`) expire on this clock, so they keep timing out behind the
-    /// menu as in the C.
-    pub(crate) host_time: f32,
-    /// Live engine particles (the `particle()` builtin's effect). Bursts the
-    /// QuakeC fires each frame are drained into this pool, aged under gravity,
-    /// and drawn into the scene sharing its z-buffer.
-    pub(crate) particles: ParticleSystem,
-    /// Deterministic RNG for particle spawns (no `rand` crate; std-only).
-    pub(crate) prng: Lcg,
-    /// Live dynamic lights (explosions, muzzle flashes, EF_* lights). Allocated
-    /// each frame from the drained temp entities + the server's entity_dlights,
-    /// decayed under `advance`, and passed to the renderer to light the walls.
-    pub(crate) dlights: DynamicLights,
-    /// The beam temp-entity slots (`cl_beams`): lightning bolts the drained
-    /// `TE_LIGHTNING1/2/3` / `TE_BEAM` events refresh ([`Beams::parse_beam`])
-    /// and [`step_walk`] expands into bolt-model instances each frame
-    /// (`CL_UpdateTEnts`). Cleared on changelevel/restart (`CL_ClearState`).
-    pub(crate) beams: Beams,
-    /// Reused per-frame scratch for the expanded beam pieces (no per-frame
-    /// allocation on the common no-beam frames; `Beams::update` clears it).
-    pub(crate) beam_scratch: Vec<BeamSegment>,
-    /// `cl.intermission` (client.h): 0 = playing, 1 = the level-complete stats
-    /// overlay (svc_intermission), 2 = the episode finale text + plaque
-    /// (svc_finale), 3 = cutscene text only (svc_cutscene). While non-zero the
-    /// view is the QC-placed intermission camera (V_CalcIntermissionRefdef): no
-    /// bob/roll/punch, no viewmodel, no status bar.
-    pub(crate) intermission: u8,
-    /// `cl.completed_time` — the clock latched when the intermission started
-    /// (the overlay's minutes:seconds completion time).
-    pub(crate) completed_time: f32,
-    /// The `svc_finale`/`svc_cutscene` text (`SCR_CenterPrint`'d in the C),
-    /// revealed at `scr_printspeed` (8) chars/sec from `finale_start`.
-    pub(crate) finale_text: String,
-    /// `scr_centertime_start` — the clock when the finale text began revealing.
-    pub(crate) finale_start: f32,
-    /// `svc_sellscreen` arrived this frame: the C ran `Cmd_ExecuteString("help")`,
-    /// i.e. popped the Help/Ordering menu — the `step` dispatcher (which owns the
-    /// menu) takes this flag and opens it.
-    pub(crate) pending_sellscreen: bool,
-    /// `gfx/complete.lmp` — the "Level Complete" banner (Sbar_IntermissionOverlay).
-    pub(crate) pic_complete: Option<Qpic>,
-    /// `gfx/inter.lmp` — the Time/Secrets/Kills intermission plaque.
-    pub(crate) pic_inter: Option<Qpic>,
-    /// `gfx/finale.lmp` — the finale plaque (Sbar_FinaleOverlay).
-    pub(crate) pic_finale: Option<Qpic>,
-}
-
-/// Recorded-demo playback state.
-pub(crate) struct DemoPlay {
-    pub(crate) bsp: Bsp,
-    pub(crate) palette: [[u8; 3]; 256],
-    pub(crate) demo: Demo,
-    /// The archive, kept open so the recorded `svc_sound` one-shots can load
-    /// their WAV bytes on demand — the demo's audio runs through the SAME
-    /// `queue_sounds` path live play uses.
-    pub(crate) pak: Pak,
-    /// Parsed model per precache index (None for non-`.mdl` / missing).
-    pub(crate) models: Vec<Option<Mdl>>,
-    /// Parsed sprite per precache index (None for non-`.spr` / missing); the boot
-    /// demo's explosion flashes (s_explod.spr) render from these.
-    pub(crate) sprites: Vec<Option<quake_rs::spr::Sprite>>,
-    /// `gfx/colormap.lmp` — the 64-row shade LUT. The demo path must thread it like
-    /// the live walk does, else world surfaces render overbright (linear fallback)
-    /// instead of through id's no-overbright colormap shading.
-    pub(crate) colormap: Option<Vec<u8>>,
-    pub(crate) colors: Vec<[u8; 3]>,
-    pub(crate) elapsed: f32,
-    pub(crate) idx: usize,
-    /// Live particles replayed from the recorded `svc_particle` / temp-entity
-    /// stream: each frame's effects are spawned ONCE when playback advances onto
-    /// it, then the pool is aged under gravity and drawn into the scene (sharing
-    /// its z-buffer) — so the demo shows blood, gunshot puffs and explosions just
-    /// like [`step_walk`] does for live play.
-    pub(crate) particles: ParticleSystem,
-    /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
-    pub(crate) prng: Lcg,
-    /// The frame index whose effects were last spawned, so a frame rendered for
-    /// several steps spawns its bursts only on the step that ADVANCES onto it
-    /// (never re-spawning while it lingers). `usize::MAX` = "none spawned yet".
-    pub(crate) last_spawned_idx: usize,
-    /// The beam temp-entity slots (`cl_beams`) replayed from the recorded
-    /// `TE_LIGHTNING1/2/3` / `TE_BEAM` stream; expanded into bolt-model
-    /// instances each frame like the live walk. Cleared on the demo loop wrap.
-    pub(crate) beams: Beams,
-    /// Reused per-frame scratch for the expanded beam pieces.
-    pub(crate) beam_scratch: Vec<BeamSegment>,
-    /// `gfx.wad` (the big digit pics) for a recorded intermission's stats
-    /// overlay; `None` degrades to no overlay, never a panic.
-    pub(crate) gfx_wad: Option<quake_rs::wad::Wad2>,
-    /// The conchars font for a recorded finale's revealed center string.
-    pub(crate) conchars: Option<Qpic>,
-    /// `gfx/complete.lmp` / `gfx/inter.lmp` / `gfx/finale.lmp` — the plaques a
-    /// recorded intermission/finale frame draws (Sbar_Intermission/FinaleOverlay).
-    pub(crate) pic_complete: Option<Qpic>,
-    pub(crate) pic_inter: Option<Qpic>,
-    pub(crate) pic_finale: Option<Qpic>,
-    /// `cl.cshifts[CSHIFT_DAMAGE].percent` for the recorded POV: bumped by each
-    /// recorded `svc_damage` (V_ParseDamage: `+= 3*count`, clamped 0..150) and
-    /// faded `dt*150` per rendered frame (V_UpdatePalette), exactly like the
-    /// live walk's damage flash.
-    pub(crate) damage_blend: f32,
-    /// The damage tint V_ParseDamage picked (armour-dominant pink / armour
-    /// orange-red / pure-blood red).
-    pub(crate) damage_color: [u8; 3],
-    /// `cl.cshifts[CSHIFT_BONUS].percent` for the recorded POV: a recorded
-    /// `svc_stufftext "bf"` sets it to 50 (V_BonusFlash_f), faded `dt*100`.
-    pub(crate) bonus_blend: f32,
-    /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
-    /// view kick a recorded svc_damage applies, decaying over `v_kicktime`.
-    pub(crate) v_dmg_time: f32,
-    pub(crate) v_dmg_roll: f32,
-    pub(crate) v_dmg_pitch: f32,
-    /// Stair-step smoothing accumulator (V_CalcRefdef `oldz`) for the recorded
-    /// view entity; NaN until the first frame establishes it.
-    pub(crate) oldz: f32,
-    /// Current centerprint + expiry (recorded `svc_centerprint`, scr_centertime
-    /// ~2 s on the demo's recorded frame clock).
-    pub(crate) centerprint: Option<(String, f32)>,
-    /// The notify lines (recorded `svc_print` through Con_Print), on the
-    /// recorded clock.
-    pub(crate) notify: ConNotify,
-    /// The `viewsize` cvar this frame (the Options "Screen size" slider),
-    /// refreshed by `step` from the menu before stepping, like `key_move`:
-    /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
-    /// much status bar shows.
-    pub(crate) viewsize: f32,
-    /// Each relinked entity's origin as last rendered (CL_RelinkEntities'
-    /// `oldorg`), keyed by entity number, for the model-flag trails; an entity
-    /// missing from a frame is forgotten (its next sighting is a forcelink).
-    pub(crate) trail_org: HashMap<i32, [f32; 3]>,
-    /// R_RocketTrail's `static int tracercount` for the demo's tracer trails.
-    pub(crate) tracercount: u32,
-    /// Which of [`DEMOS`] this is (the next one follows it, CL_NextDemo).
-    pub(crate) demonum: usize,
-    /// `sb_showscores` (`+showscores`, Tab held): Sbar_Draw shows the solo
-    /// scoreboard during playback too. Refreshed by `step` like `viewsize`.
-    pub(crate) show_scores: bool,
-    /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`): the status bar
-    /// shows the pain face until then.
-    pub(crate) faceanimtime: f32,
-    /// `cl.items` as last shown and `cl.item_gettime[]` on the recorded clock
-    /// (CL_ParseClientdata): the new-weapon icon flash. Zeroed at playback
-    /// start and on the loop wrap (CL_ClearState).
-    pub(crate) cl_items: i32,
-    pub(crate) item_gettime: [f32; 32],
-}
-
-impl DemoPlay {
-    /// The last frame has been shown: the recording is over (id's demos end
-    /// with `svc_disconnect`, which the parser stops at).
-    pub(crate) fn at_end(&self) -> bool {
-        self.idx + 1 >= self.demo.frames.len()
-    }
-
-    /// A playback of `demo` over `bsp` at its first frame: no models, sprites,
-    /// colormap or overlay pics yet (the caller loads what it has), and every
-    /// per-playback field — clocks, particles, beams, view shifts, messages —
-    /// at its clean-slate default.
-    pub(crate) fn new(pak: Pak, bsp: Bsp, palette: [[u8; 3]; 256], demo: Demo) -> DemoPlay {
-        DemoPlay {
-            bsp,
-            palette,
-            demo,
-            pak,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(0x9E37_79B9),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            bonus_blend: 0.0,
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: ConNotify::default(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-            trail_org: HashMap::new(),
-            tracercount: 0,
-            demonum: 0,
-            show_scores: false,
-            faceanimtime: 0.0,
-            cl_items: 0,
-            item_gettime: [0.0; 32],
-        }
-    }
-}
 
 pub(crate) struct App {
     pub(crate) walk: Option<Walk>,
@@ -495,29 +146,6 @@ thread_local! {
     pub(crate) static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn color_for_name(name: &str) -> [u8; 3] {
-    let mut h: u32 = 2166136261;
-    for b in name.bytes() {
-        h = (h ^ b as u32).wrapping_mul(16777619);
-    }
-    let table = [
-        [220, 80, 80], [80, 200, 120], [90, 130, 230], [220, 200, 90],
-        [200, 110, 210], [110, 210, 210], [230, 150, 80],
-    ];
-    table[(h % table.len() as u32) as usize]
-}
-
-/// The view angles a freshly spawned client starts with, as `(yaw, pitch)`:
-/// Host_Spawn_f (host_cmd.c) sends `svc_setangle` with the player entity's
-/// `angles` right after PutClientInServer ("never send a roll angle"), so the
-/// view faces the spot QuakeC's SelectSpawnPoint chose — `info_player_start`,
-/// `info_player_start2` once a rune is held, or `testplayerstart`. Read after
-/// the connect, before the settle frames.
-pub(crate) fn spawn_view_angles(server: &Server, player: i32) -> (f32, f32) {
-    let a = server.vm.ent_get_vector(player, "angles");
-    (net_angle(a[1]), clamp_pitch(net_angle(a[0])))
-}
-
 #[cfg(test)]
 pub(crate) fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
     for block in ents.split('}') {
@@ -615,152 +243,16 @@ pub(crate) fn build_walk() -> Option<Walk> {
     build_walk_map(WALK_MAP)
 }
 
-/// Shared tail of the walk builders ([`build_walk_map`] / the savegame load
-/// path): load the render-side assets (palette, gfx.wad, colormap, conchars,
-/// plaque pics) from the pak and assemble a fresh [`Walk`] around an
-/// already-built server. Every per-session field starts from its clean-slate
-/// default (no particles/dlights/beams/notify, clock 0). Returns `None` only
-/// when the palette is missing/unparseable (nothing could render).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_walk(
-    pak: Pak,
-    map: String,
-    server: Server,
-    player: i32,
-    entry_parms: [f32; quake_rs::server::NUM_SPAWN_PARMS],
-    bsp: Bsp,
-    yaw: f32,
-    pitch: f32,
-) -> Option<Walk> {
-    let read = |n: &str| pak.read_file(n).ok().flatten();
-    let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
-    // The HUD pics live in gfx.wad; parse it once (None if absent/unparseable).
-    let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
-    let colormap = read("gfx/colormap.lmp");
-    let conchars = gfx_wad.as_ref().and_then(render::conchars_pic);
-    // The intermission/finale plaques are pak `.lmp` pics (Draw_CachePic in the
-    // C), loaded once like the menu pics; any absent one just doesn't draw.
-    let lmp = |n: &str| -> Option<Qpic> { read(n).and_then(|b| Qpic::parse(&b).ok()) };
-    let pic_complete = lmp("gfx/complete.lmp");
-    let pic_inter = lmp("gfx/inter.lmp");
-    let pic_finale = lmp("gfx/finale.lmp");
-    let clock = server.time(); // cl.time = sv.time (see `Walk::clock`)
-    Some(Walk {
-        server,
-        bsp,
-        palette,
-        gfx_wad,
-        colormap,
-        conchars,
-        pak,
-        model_cache: HashMap::new(),
-        bmodel_cache: HashMap::new(),
-        sprite_cache: HashMap::new(),
-        trail_org: HashMap::new(),
-        tracercount: 0,
-        map_name: map,
-        entry_parms,
-        player,
-        yaw,
-        pitch,
-        in_fwd: 0.0,
-        in_side: 0.0,
-        in_attack: false,
-        in_jump: false,
-        in_down: false,
-        next_impulse: 0,
-        // Bindings-driven input state (CL_BaseMove derivation; ship/options-menu).
-        key_move: KeyMove::default(),
-        mouse_side: 0.0,
-        mouse_fwd: 0.0,
-        pitch_drift: false,
-        pitch_vel: 0.0,
-        damage_blend: 0.0,
-        damage_color: [255, 0, 0],
-        bonus_blend: 0.0,
-        v_dmg_time: 0.0,
-        v_dmg_roll: 0.0,
-        v_dmg_pitch: 0.0,
-        faceanimtime: 0.0,
-        cl_items: 0,
-        item_gettime: [0.0; 32],
-        oldz: f32::NAN,
-        centerprint: None,
-        notify: ConNotify::default(),
-        viewsize: render::VIEWSIZE_DEFAULT,
-        clock,
-        host_time: 0.0,
-        particles: ParticleSystem::new(),
-        prng: Lcg::new(0x9E37_79B9),
-        dlights: DynamicLights::new(),
-        beams: Beams::new(),
-        beam_scratch: Vec::new(),
-        intermission: 0,
-        completed_time: 0.0,
-        finale_text: String::new(),
-        finale_start: 0.0,
-        pending_sellscreen: false,
-        pic_complete,
-        pic_inter,
-        pic_finale,
-    })
-}
-
-/// Build a live walk on `map` (a `maps/*.bsp` pak path): boot uses [`WALK_MAP`];
-/// New Game uses [`render::NEW_GAME_MAP`] (the `start` hub).
+/// Build a live walk on `map` (a `maps/*.bsp` pak path) from the embedded
+/// pak ([`quake_rs::client::host_cmd::build_walk_map`]), its sound calls
+/// carried out: boot uses [`WALK_MAP`]; New Game uses
+/// [`render::NEW_GAME_MAP`] (the `start` hub).
 pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
-    let read = |n: &str| pak.read_file(n).ok().flatten();
-    let bsp = Bsp::parse(&read(map)?).ok()?;
-    let bsp_sim = Bsp::parse(&read(map)?).ok()?;
-    let progs = Progs::parse(&read("progs.dat")?).ok()?;
-
-    // A live server: spawn the map's entities, then connect the local player.
-    // Pass the pak so external brush-model item boxes (b_*.bsp) collide + take
-    // damage (the explosive box becomes shootable).
-    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).ok()?;
-    // Discard any static-sound registrations a previously FAILED spawn left in
-    // the thread-local registry, so this level's drain below is exactly its own.
-    let _ = server.drain_static_sounds();
-    // SV_SpawnServer set world.model + the mapname global before loading the
-    // entities (the QuakeC episode-end finale check reads world.model).
-    server.set_map_name(map);
-    server.spawn_entities().ok()?;
-    let player = server.connect_client().ok()?;
-    let (yaw, pitch) = spawn_view_angles(&server, player);
-    // Capture the level-entry spawn parms (the just-connected, full-state player) so
-    // a single-player respawn can reload THIS level with them.
-    let entry_parms = server.save_spawn_parms();
-    // The signon-sequence physics frames the C runs between PutClientInServer and
-    // the first rendered frame (Host_Spawn_f/Host_Begin_f each precede an
-    // SV_Physics tick before signon 4 re-enables drawing). Without them the
-    // just-spawned player — placed at spot.origin + '0 0 1', ~5 units up on the
-    // start map — falls to the floor ON SCREEN over the first frames: the
-    // reported one-time texture/lighting "pop" (every surface resamples as the
-    // eye drops). Frame 0 must render the settled WinQuake pose.
-    server.run_signon_frames();
-
-    // The level is committed past this point (nothing below fails). Tear down
-    // the previous level/mode's looping audio and register this level's placed
-    // `ambientsound()` loops (torches, wind, hums) for the page to start —
-    // PF_ambientsound wrote these into the signon ONCE; the QuakeC registered
-    // them all during spawn_entities, so one drain captures them all.
-    bump_sound_generation();
-    let statics = server.drain_static_sounds();
-    queue_static_sounds(&pak, &statics);
-    // Drop one-shot events the spawn + settle ticks queued, like the
-    // changelevel/restart paths do (in the C the client misses signon-era
-    // datagram sounds while not yet `spawned`; tick 2's are technically
-    // deliverable there — dropping both is a deliberate, inaudible-on-id-maps
-    // simplification, kept identical across all three walk-building paths).
-    let _ = server.drain_sounds();
-    let _ = server.drain_particles();
-    let _ = server.drain_temp_entities();
-    let _ = server.drain_messages();
-    let _ = server.drain_svc_events();
-    let _ = quake_rs::builtins::take_stufftext();
-
-    assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, pitch)
+    let mut sound = Vec::new();
+    let walk = host_cmd::build_walk_map(pak.clone(), map, &mut sound);
+    snd_dma::play(&pak, sound);
+    walk
 }
 
 /// The first attract demo (`demo1`).
@@ -768,84 +260,14 @@ pub(crate) fn build_demo() -> Option<DemoPlay> {
     build_demo_n(0)
 }
 
-/// `playdemo` of [`DEMOS`]`[demonum % 3]`.
+/// `playdemo` of [`DEMOS`](cl_demo::DEMOS)`[demonum % 3]` from the embedded pak
+/// ([`quake_rs::client::cl_demo::build_demo_n`]), its sound calls carried out.
 pub(crate) fn build_demo_n(demonum: usize) -> Option<DemoPlay> {
-    let demonum = demonum % DEMOS.len();
     let pak = pak()?;
-    let read = |n: &str| pak.read_file(n).ok().flatten();
-    let demo_bytes = read(DEMOS[demonum])?;
-    let demo = parse_demo(&demo_bytes).ok()?;
-    let map = demo.map_name()?.to_string();
-    let bsp = Bsp::parse(&read(&map)?).ok()?;
-    let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
-
-    // Load a model (alias or sprite) + colour per precache index.
-    let mut models = Vec::with_capacity(demo.model_precache.len());
-    let mut sprites: Vec<Option<quake_rs::spr::Sprite>> =
-        Vec::with_capacity(demo.model_precache.len());
-    let mut colors = Vec::with_capacity(demo.model_precache.len());
-    for name in &demo.model_precache {
-        if name.ends_with(".mdl") {
-            models.push(read(name).and_then(|b| Mdl::parse(&b).ok()));
-            sprites.push(None);
-        } else if name.ends_with(".spr") {
-            models.push(None);
-            sprites.push(read(name).and_then(|b| quake_rs::spr::Sprite::parse(&b).ok()));
-        } else {
-            models.push(None);
-            sprites.push(None);
-        }
-        colors.push(color_for_name(name));
-    }
-    if demo.frames.is_empty() {
-        return None;
-    }
-    // Re-parse with inter-frame interpolation — smooth 60 fps playback instead of
-    // the choppy 10 Hz keyframes (CL_LerpPoint), plus EF_ROTATE spin for any model
-    // whose header flags it (rotating pickups). The set of rotating model indices
-    // is derived from the just-loaded MDL headers.
-    let rotating: Vec<usize> = models
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| {
-            m.as_ref()
-                .filter(|md| md.header.flags & quake_rs::demo::EF_ROTATE != 0)
-                .map(|_| i)
-        })
-        .collect();
-    let demo = quake_rs::demo::parse_demo_interpolated(&demo_bytes, 60.0, &rotating).ok()?;
-    if demo.frames.is_empty() {
-        return None;
-    }
-    // Demo committed (nothing below fails): tear down the previous level/mode's
-    // looping audio and register the demo signon's `svc_spawnstaticsound` loops
-    // (CL_ParseStaticSound ran these on the live client during demo playback
-    // too — the e1m3 demo has its own torches).
-    bump_sound_generation();
-    queue_static_sounds(&pak, &demo.static_sounds);
-    // The overlay assets for a recorded intermission/finale (each optional —
-    // a demo without one never touches them).
-    let gfx_wad = read("gfx.wad").and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
-    let conchars = gfx_wad.as_ref().and_then(render::conchars_pic);
-    let lmp = |n: &str| -> Option<Qpic> { read(n).and_then(|b| Qpic::parse(&b).ok()) };
-    // Resolve everything that reads the pak BEFORE the struct literal so the
-    // `read`/`lmp` closure borrows end and `pak` can move into the DemoPlay.
-    let colormap = read("gfx/colormap.lmp");
-    let pic_complete = lmp("gfx/complete.lmp");
-    let pic_inter = lmp("gfx/inter.lmp");
-    let pic_finale = lmp("gfx/finale.lmp");
-    let mut d = DemoPlay::new(pak, bsp, palette, demo);
-    d.models = models;
-    d.sprites = sprites;
-    d.colormap = colormap;
-    d.colors = colors;
-    d.gfx_wad = gfx_wad;
-    d.conchars = conchars;
-    d.pic_complete = pic_complete;
-    d.pic_inter = pic_inter;
-    d.pic_finale = pic_finale;
-    d.demonum = demonum;
-    Some(d)
+    let mut sound = Vec::new();
+    let demo = cl_demo::build_demo_n(pak.clone(), demonum, &mut sound);
+    snd_dma::play(&pak, sound);
+    demo
 }
 
 pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
@@ -918,7 +340,7 @@ pub extern "C" fn boot() -> i32 {
 }
 
 /// Start recorded-demo playback at demo1.dem (e1m3); demo2 and demo3 follow
-/// (quake.rc's startdemos cycle, see [`DEMOS`]). Returns 1 on success.
+/// (quake.rc's startdemos cycle, see [`DEMOS`](cl_demo::DEMOS)). Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn boot_demo() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode

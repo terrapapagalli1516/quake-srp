@@ -5,7 +5,8 @@
 //! entities), `CL_RelinkEntities` (cl_main.c), `V_CalcRefdef` (view.c) and
 //! `SCR_UpdateScreen`'s 3-D view, blends, status bar and overlays (screen.c).
 
-use quake_rs::client::{lap, Phase};
+use quake_rs::client::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
+use quake_rs::client::{color_for_name, lap, net_angle, Listener, Phase};
 use quake_rs::bsp::Bsp;
 use quake_rs::mdl::Mdl;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
@@ -20,18 +21,9 @@ use quake_rs::client::cl_input::{
 };
 use quake_rs::client::cl_tent::{rocket_trail_type, spawn_temp_entity};
 
-use crate::app::{color_for_name, Walk};
-use crate::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
-use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
+use crate::app::Walk;
+use crate::snd_dma::{queue_sounds, update_ambient_channels, LISTENER};
 use crate::vid::backtile_for;
-
-/// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
-/// (`((int)f*256/360) & 255`) then `MSG_ReadAngle` (`MSG_ReadChar() *
-/// (360.0/256)`) — whole degrees truncated, then 256 steps, signed.
-pub(crate) fn net_angle(f: f32) -> f32 {
-    let b = ((f as i32).wrapping_mul(256) / 360) & 255;
-    (b as u8 as i8) as f32 * (360.0 / 256.0)
-}
 
 /// `SV_WriteClientdataToMessage`'s fixangle (sv_main.c) and the client's
 /// `svc_setangle` (cl_parse.c): when the QuakeC forced the player's facing
@@ -348,14 +340,18 @@ pub(crate) fn step_walk(
     //     reconnecting the client so DecodeLevelParms restores the carried
     //     inventory. A missing/bad map leaves the current level running.
     if let Some(next_map) = w.server.take_pending_changelevel() {
-        try_changelevel(w, &next_map);
+        let mut sound = Vec::new();
+        try_changelevel(w, &next_map, &mut sound);
+        crate::snd_dma::play(&w.pak, sound);
         // The swap reset the world; render this frame from the *new* level so the
         // player never sees a frame straddling two maps.
     } else if w.server.take_pending_restart() {
         // Single-player respawn: QuakeC ran localcmd("restart") (a dead player who
         // pressed a button). Reload the current level with the entry inventory.
         // `else if` so a changelevel this frame takes precedence over a restart.
-        try_restart(w);
+        let mut sound = Vec::new();
+        try_restart(w, &mut sound);
+        crate::snd_dma::play(&w.pak, sound);
     }
 
     // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the
@@ -1768,10 +1764,10 @@ mod tests {
         let t = w.clock;
         let _ = step_walk(&mut w, 0.05, true, 320, 200); // paused behind the menu
         assert_eq!((w.clock, w.server.time()), (t, t));
-        try_restart(&mut w);
+        try_restart(&mut w, &mut Vec::new());
         assert_eq!(w.clock, w.server.time());
         assert!(w.clock < t, "a restarted level's clock starts over");
-        try_changelevel(&mut w, "e1m2");
+        try_changelevel(&mut w, "e1m2", &mut Vec::new());
         assert_eq!(w.map_name, "maps/e1m2.bsp");
         assert_eq!(w.clock, w.server.time());
         assert!(w.clock > 1.0 && w.clock < 2.0, "{}", w.clock);

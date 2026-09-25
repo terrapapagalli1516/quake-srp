@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 
 use quake_rs::bsp::{Bsp, NUM_AMBIENTS};
+use quake_rs::client::{Listener, SoundCall};
 use quake_rs::pak::Pak;
 use quake_rs::render::{self, MenuSound};
 use quake_rs::server::StaticSound;
@@ -122,17 +123,23 @@ pub extern "C" fn set_audio_ready(ready: i32) {
     AUDIO_READY.with(|r| *r.borrow_mut() = ready != 0);
 }
 
-/// Listener pose the page reads to spatialize queued sounds.
-#[derive(Clone, Copy)]
-pub(crate) struct Listener {
-    pub(crate) pos: [f32; 3],
-    pub(crate) forward: [f32; 3],
-    pub(crate) right: [f32; 3],
-}
-
-impl Listener {
-    const fn zero() -> Self {
-        Listener { pos: [0.0; 3], forward: [0.0; 3], right: [0.0; 3] }
+/// Carry out the calls a client frame or a level load made into the sound
+/// layer ([`SoundCall`]), in the order it made them: the one-shot queue, the
+/// stops, a level change's loop teardown and new placed loops, and
+/// `S_Update`'s listener pose and ambient ramp. `pak` is the client's, which
+/// the samples load from.
+pub(crate) fn play(pak: &Pak, calls: Vec<SoundCall>) {
+    for call in calls {
+        match call {
+            SoundCall::Start { events, view_entity } => queue_sounds(pak, &events, view_entity),
+            SoundCall::Stop(stops) => push_stop_sounds(&stops),
+            SoundCall::StopAll => bump_sound_generation(),
+            SoundCall::Static(statics) => queue_static_sounds(pak, &statics),
+            SoundCall::Update { listener, leaf_ambient, frametime } => {
+                LISTENER.with(|l| *l.borrow_mut() = listener);
+                ramp_ambient_channels(leaf_ambient.as_ref(), frametime);
+            }
+        }
     }
 }
 
