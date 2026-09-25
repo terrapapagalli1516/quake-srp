@@ -462,6 +462,14 @@ pub fn build_walk_savegame(pak: Pak, text: &str, sound: &mut Vec<SoundCall>) -> 
     let mut server =
         Server::load_savegame(sim_bsp, progs, Some(pak.clone()), text).map_err(|e| e.to_string())?;
     let player = server.player_edict();
+    // Host_Spawn_f names the client edict (`netname = host_client->name`) only
+    // for a fresh spawn: a loaded game keeps the save's. Saves the port wrote
+    // before it did that (2026-09-25) carry an empty netname, which read
+    // "  was shot by a Grunt" until the next level; give them the name
+    // Host_Spawn_f would have (cl_name's "player").
+    if server.vm.ent_get_string(player, "netname").is_empty() {
+        server.vm.ent_set_string(player, "netname", "player");
+    }
 
     // The save's spawn parms are the level-ENTRY parms (svs.clients->
     // spawn_parms): a respawn on the loaded level restores the state the
