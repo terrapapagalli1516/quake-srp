@@ -1790,6 +1790,22 @@ each; the C followed and the evidence are in the commit messages.
   entity's box in id), and on e1m1–e1m3 every entity both sides have
   matches id's box. Census and simbench output unchanged. Test
   `alias_and_sprite_models_get_mod_load_model_bounds`.
+- ✅ **Hardening against malformed maps** (no shareware map reaches these;
+  id's C would crash or loop too). `SV_AddToFatPVS`'s one-sided descent is a
+  loop, and only its recursion was depth-bounded, so a node tree that loops
+  (a child pointing back up) never returned: `add_to_fat_pvs` now spends a
+  `nodes + leafs` visit budget (a real tree reaches each once) in the loop
+  too, as `touched_leafs` does (`fat_pvs_unions_the_leaves_within_8_units`
+  gained a one-sided and a two-sided cycle). A world face whose plane index
+  is past the plane lump had its edges emitted and then no surface posted,
+  so `R_LeadingEdge` read a surface that does not exist (misdrawn, or an
+  index panic when it was the frame's last): `R_RenderFace` now skips such a
+  face whole (`a_face_with_a_bad_plane_index_is_skipped`: the frame equals
+  one without the face). A span whose 1/z is exactly 0 at a clipped edge
+  saturated `(sdivz * z) as i64` and the `+ sadjust` overflowed in a debug
+  build; the adds wrap as the C's `int`s (release output unchanged: release
+  already wrapped), and the clamps keep the texel in the block
+  (`a_span_at_zero_1_over_z_wraps_like_the_c_int`).
 
 ## LOW (27)
 

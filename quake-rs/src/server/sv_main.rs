@@ -312,7 +312,8 @@ impl Server {
         let bsp = self.vm.host.as_deref()?.bsp();
         let mut fat = vec![false; bsp.leafs.len()];
         if !bsp.nodes.is_empty() {
-            add_to_fat_pvs(bsp, org, 0, 0, &mut fat);
+            let mut budget = bsp.nodes.len() + bsp.leafs.len();
+            add_to_fat_pvs(bsp, org, 0, 0, &mut budget, &mut fat);
         }
         Some(fat)
     }
@@ -446,12 +447,20 @@ impl Server {
 /// `SV_AddToFatPVS` (sv_main.c): OR into `fat` the PVS of every non-solid leaf
 /// within 8 units of `org`, from node or leaf `child` down. The plane distance
 /// is the full dot product, as the C computes it here (no axial shortcut).
-/// Bad indices end the branch; the depth bound stops a malformed cycle.
-fn add_to_fat_pvs(bsp: &Bsp, org: Vec3, mut child: i32, depth: usize, fat: &mut [bool]) {
+/// Bad indices end the branch. A malformed tree whose nodes loop cannot hang
+/// it: `budget` (the caller's `nodes + leafs`, which a real tree never
+/// exhausts — each node and leaf is reached once) counts every node and leaf
+/// visited, the one-sided descents of the loop included, and the depth bound
+/// keeps the recursion off the end of the stack.
+fn add_to_fat_pvs(bsp: &Bsp, org: Vec3, mut child: i32, depth: usize, budget: &mut usize, fat: &mut [bool]) {
     if depth > crate::bsp::TOUCHED_LEAFS_MAX_DEPTH {
         return;
     }
     loop {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
         if child < 0 {
             let leaf = (-1 - child) as usize;
             if bsp.leafs.get(leaf).is_some_and(|l| l.contents != CONTENTS_SOLID) {
@@ -472,7 +481,7 @@ fn add_to_fat_pvs(bsp: &Bsp, org: Vec3, mut child: i32, depth: usize, fat: &mut 
             child = i32::from(node.children[1]);
         } else {
             // go down both
-            add_to_fat_pvs(bsp, org, i32::from(node.children[0]), depth + 1, fat);
+            add_to_fat_pvs(bsp, org, i32::from(node.children[0]), depth + 1, budget, fat);
             child = i32::from(node.children[1]);
         }
     }
@@ -709,15 +718,26 @@ mod tests {
             leaf(CONTENTS_SOLID, 2),
         ];
         b.visibility = vec![0b0001, 0b0110, 0b1111];
-        let fat = |x: f32| {
+        let fat = |b: &Bsp, x: f32| {
             let mut f = vec![false; b.leafs.len()];
-            add_to_fat_pvs(&b, [x, 0.0, 0.0], 0, 0, &mut f);
+            let mut budget = b.nodes.len() + b.leafs.len();
+            add_to_fat_pvs(b, [x, 0.0, 0.0], 0, 0, &mut budget, &mut f);
             (0..f.len()).filter(|&l| f[l]).collect::<Vec<_>>()
         };
-        assert_eq!(fat(-50.0), vec![1]);
-        assert_eq!(fat(-8.5), vec![1], "just over 8 units away");
-        assert_eq!(fat(-8.0), vec![1, 2, 3], "within 8: both sides");
-        assert_eq!(fat(50.0), vec![2, 3]);
-        assert_eq!(fat(196.0), vec![2, 3], "the solid leaf beyond adds nothing");
+        assert_eq!(fat(&b, -50.0), vec![1]);
+        assert_eq!(fat(&b, -8.5), vec![1], "just over 8 units away");
+        assert_eq!(fat(&b, -8.0), vec![1, 2, 3], "within 8: both sides");
+        assert_eq!(fat(&b, 50.0), vec![2, 3]);
+        assert_eq!(fat(&b, 196.0), vec![2, 3], "the solid leaf beyond adds nothing");
+        // A malformed tree whose nodes loop ends (bad maps only): node 1's
+        // front child is node 0, which sends x = 150 back to node 1 forever
+        // (one-sided, the loop's own step), and node 2 at x = 200 recurses
+        // into itself on both sides.
+        let mut cyclic = b.clone();
+        cyclic.nodes[1].children = [0, -3];
+        assert_eq!(fat(&cyclic, 150.0), Vec::<usize>::new(), "gives up, nothing added");
+        let mut both = b.clone();
+        both.nodes[2].children = [2, 2];
+        assert_eq!(fat(&both, 200.0), Vec::<usize>::new());
     }
 }

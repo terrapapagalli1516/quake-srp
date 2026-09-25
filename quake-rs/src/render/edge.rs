@@ -1083,8 +1083,15 @@ impl EdgeState {
 
     /// `R_RenderFace`: push face `fi` of `bsp` (the current entity's model)
     /// through the clip planes into the edge list and post its surface.
+    ///
+    /// A face whose plane index is out of range (a malformed map; id would
+    /// read past `mplane_t`) is skipped whole: its edges would name a surface
+    /// [`Self::post_surface`] cannot post.
     fn render_face(&mut self, bsp: &Bsp, fi: usize, clipflags: u32) {
         let face = &bsp.faces[fi];
+        if usize::try_from(face.planenum).ok().and_then(|p| bsp.planes.get(p)).is_none() {
+            return;
+        }
         let (chain, nchain) = Self::clip_chain(clipflags);
         let chain = &chain[..nchain];
         self.r_emitted = false;
@@ -1464,7 +1471,8 @@ impl EdgeState {
     }
 
     /// `R_RenderBmodelFace`: a brush-model fragment's edges (a `bedge_t` list)
-    /// through the clip planes; its surface keyed as its leaf.
+    /// through the clip planes; its surface keyed as its leaf. (A face with a
+    /// bad plane index never gets here: [`Self::front_faces`] drops it.)
     fn render_bmodel_face(&mut self, bsp: &Bsp, pedges: u32, fi: usize) {
         self.r_pedge_owner = NONE; // the dummy `tedge`
         let (chain, nchain) = Self::clip_chain(self.r_clipflags);
@@ -2115,6 +2123,58 @@ mod tests {
             0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None, &[], &[],
         );
         assert!(image.rgb.iter().all(|&p| p == [1, 2, 3]) && z.iter().all(|&v| v == 7));
+    }
+
+    #[test]
+    fn a_face_with_a_bad_plane_index_is_skipped() {
+        // demo_room under one node whose two leaves see every face: the world
+        // walk (R_RecursiveWorldNode) reaches the faces through the node. A
+        // face naming a plane past the lump had its edges emitted but no
+        // surface posted, and R_LeadingEdge indexed past the surfaces.
+        use crate::bsp::{DLeaf, DNode, DPlane, CONTENTS_EMPTY, NUM_AMBIENTS};
+        let mut bsp = demo_room();
+        let n = bsp.faces.len();
+        bsp.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: -1000.0, ptype: 0 });
+        let node_plane = (bsp.planes.len() - 1) as i32;
+        bsp.nodes = vec![DNode {
+            planenum: node_plane,
+            children: [-2, -3],
+            mins: [-300; 3],
+            maxs: [300; 3],
+            firstface: 0,
+            numfaces: n as u16,
+        }];
+        let leaf = |contents| DLeaf {
+            contents,
+            visofs: -1,
+            mins: [-300; 3],
+            maxs: [300; 3],
+            firstmarksurface: 0,
+            nummarksurfaces: n as u16,
+            ambient_level: [0; NUM_AMBIENTS],
+        };
+        bsp.leafs = vec![leaf(CONTENTS_SOLID), leaf(CONTENTS_EMPTY), leaf(CONTENTS_EMPTY)];
+        bsp.marksurfaces = (0..n as u16).collect();
+        for f in &mut bsp.faces {
+            f.side = 0;
+        }
+        bsp.models[0].headnode = [0; crate::bsp::MAX_MAP_HULLS];
+        bsp.models[0].visleafs = 2;
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let pal = palette();
+        let draw = |bsp: &Bsp| {
+            render_scene_ext_sprited(
+                bsp, &cam, 96, 64, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[],
+                &RenderOptions::default(),
+            )
+        };
+        for fi in 0..n {
+            let mut bad = bsp.clone();
+            bad.faces[fi].planenum = 9999;
+            let mut gone = bsp.clone();
+            gone.faces[fi].numedges = 0;
+            assert_eq!(draw(&bad).rgb, draw(&gone).rgb, "face {fi} is left out, the rest drawn");
+        }
     }
 
     #[test]

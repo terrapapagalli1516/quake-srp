@@ -371,13 +371,18 @@ impl Span {
     /// The 16.16 texel coordinates at pixel `k` of the span, unclamped: `z =
     /// 0x10000 / zi`, `s = (int)(sdivz * z) + sadjust` — `D_DrawSpans8`'s and
     /// `D_DrawSpans16`'s per-segment divide (the planes evaluated in f64 at
-    /// the pixel; id accumulates `sdivz16stepu` in float). A non-positive `zi`
-    /// (rounding at a near-clipped edge) saturates, and the callers clamp.
+    /// the pixel; id accumulates `sdivz16stepu` in float). A zero `zi`
+    /// (rounding at a near-clipped edge) makes `z` infinite and the product
+    /// saturates; the add wraps, as the C's `int` does (never a debug-build
+    /// overflow panic), and the callers clamp.
     #[inline]
     fn st_at(&self, k: usize, sadjust: i64, tadjust: i64) -> (i64, i64) {
         let kf = k as f64;
         let z = 65536.0 / (self.zi + kf * self.dzi);
-        (((self.sz + kf * self.dsz) * z) as i64 + sadjust, ((self.tz + kf * self.dtz) * z) as i64 + tadjust)
+        (
+            (((self.sz + kf * self.dsz) * z) as i64).wrapping_add(sadjust),
+            (((self.tz + kf * self.dtz) * z) as i64).wrapping_add(tadjust),
+        )
     }
 }
 
@@ -616,8 +621,8 @@ pub(super) fn span_cached(
         // No z test: a non-positive `zi` (rounding at a clipped edge) saturates
         // and the clamp keeps the read in the block.
         let z = 65536.0 / zi;
-        let bx = ((((sz * z) as i64) + fx.sadjust) >> 16).clamp(0, bw_i - 1) as usize;
-        let by = ((((tz * z) as i64) + fx.tadjust) >> 16).clamp(0, bh_i - 1) as usize;
+        let bx = (((sz * z) as i64).wrapping_add(fx.sadjust) >> 16).clamp(0, bw_i - 1) as usize;
+        let by = (((tz * z) as i64).wrapping_add(fx.tadjust) >> 16).clamp(0, bh_i - 1) as usize;
         *c = palette[block[by * bw + bx] as usize];
         zi += sp.dzi;
         sz += sp.dsz;
@@ -877,6 +882,25 @@ mod tests {
         // `(snext - s) >> 4` steps (1 each) stop at 0xFFFF -> texel 0.
         let (s, ds) = (0xFFF0i64, 31i64);
         assert_eq!(((16 * s + 15 * ds) >> 20, (s + 15 * (ds >> 4)) >> 16), (1, 0));
+    }
+
+    #[test]
+    fn a_span_at_zero_1_over_z_wraps_like_the_c_int() {
+        // zi exactly 0 at a near-clipped edge: z = 0x10000 / 0 is infinite,
+        // `(sdivz * z) as i64` saturates, and `+ sadjust` overflowed (a panic
+        // in a debug build). It wraps as the C's `s = (int)(sdivz * z) +
+        // sadjust` does, and the span routines clamp into the surface.
+        let sp = Span { zi: 0.0, sz: 1.0, tz: -1.0, dzi: 0.0, dsz: 0.0, dtz: 0.0 };
+        assert_eq!(sp.st_at(0, 5, -5), (i64::MAX.wrapping_add(5), i64::MIN.wrapping_add(-5)));
+        let fx = BlockFixed { sadjust: 5, tadjust: -5, bbextents: (4 << 16) - 1, bbextentt: (4 << 16) - 1 };
+        let block = [7u8; 16];
+        let mut pal = [[0u8; 3]; 256];
+        pal[7] = [1, 2, 3];
+        for persp in [Persp::Spans16, Persp::Exact] {
+            let mut row = [[9u8; 3]; 20];
+            span_cached(&mut row, &sp, &fx, &block, 4, 4, &pal, persp);
+            assert!(row.iter().all(|&p| p == [1, 2, 3]), "{persp:?}: every pixel reads the block");
+        }
     }
 
     /// The test gradients' guard: a zero-area or non-finite triangle has none.
