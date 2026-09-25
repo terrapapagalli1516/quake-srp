@@ -376,7 +376,9 @@ ledger:
   13.3% px pops → max 0.86%.
 - ✅ **R_MarkLights BSP dlight gating (MED)** — faithful per-face dlightbits
   node recursion (R_PushDlights/R_MarkLights); submodels marked via their own
-  headnode with entity-local origins (R_DrawBEntitiesOnList). e1m1 A/B with an
+  headnode (R_DrawBEntitiesOnList) — with entity-local origins until the final
+  review, now with the world-space lights as id's (below, "Final review fixes,
+  engine side"). e1m1 A/B with an
   injected light: 90,525 affected px → 10,411 (strict subset). Merge
   composition: mask (C-faithful "may contribute") → plane test → luxel-extent
   test — the extent test is a PORT-SPECIFIC tightening of the cache-path
@@ -1730,6 +1732,30 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
   disconnects and the menu sits over the console until it is closed. The
   port boots with the menu open over the attract loop and keeps cycling
   behind it (F15, left as it was).
+
+## Final review fixes, engine side (2026-09-25, branch `quake/polish4a`)
+
+The final review's engine findings (renderer, server, hardening). One commit
+each; the C followed and the evidence are in the commit messages.
+
+- ✅ **Dynamic lights on moved brush models are id's** (MED). The edge
+  renderer moved each light into a brush model's frame (`origin - bm.origin`)
+  before marking and lighting its faces. id does not: `R_DrawBEntitiesOnList`
+  calls `R_MarkLights (&cl_dlights[k], 1<<k, clmodel->nodes +
+  clmodel->hulls[0].firstclipnode)` with the light as it is, and
+  `R_AddDynamicLights` measures `cl_dlights[lnum].origin` against the face's
+  own plane and texinfo — the model's, where the map put it. So a lowered lift
+  or an opened door is lit as if it had not moved. The old note called the
+  shift deliberate ("arguably fixes a C quirk that mis-lights moved doors");
+  under the rule the C wins. Oracle (`--c-cmd "impulse 9" --c-cmd +attack
+  --modes ents --spans 16`, id's `cl_dlights` handed over): e1m6's start lift
+  (lowered 184, the flash above it) looking down the shaft, `--settle 3
+  --view=-64,672,100,89,270,0` 82.56 → 100.00 and from `-64,672,180` 94.87 →
+  100.00; e1m8's door `*6` (opened 72 units) beside a grunt's flash,
+  `--settle 20 --view=272,100,-60,30,270,0`, 99.72 → 99.98. The standard
+  muzzle-flash rows (`+attack --settle 3`, world and ents, e1m1/2/3/7) and the
+  goldens are unchanged (no moved model in reach). Test
+  `a_moved_brush_model_is_lit_by_the_lights_where_they_are`.
 
 ## LOW (27)
 

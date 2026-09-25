@@ -192,8 +192,12 @@ struct Ent<'a> {
     /// Whether its faces are the world bsp's (so the surface cache and the
     /// dlight mask are keyed by their face index).
     world_bsp: bool,
-    /// Dynamic lights in the model's frame (none for external boxes).
-    dlights: Vec<crate::dlight::DynamicLight>,
+    /// The frame's dynamic lights, in world space for the world and the inline
+    /// brush models alike (`R_DrawBEntitiesOnList` marks a moved door with
+    /// `cl_dlights` as they are, and `R_AddDynamicLights` tests them against
+    /// the model's own planes); none for the external boxes, which id never
+    /// marks.
+    dlights: &'a [crate::dlight::DynamicLight],
 }
 
 /// The renderer's state: what id keeps in globals and in the model (the edge
@@ -460,27 +464,24 @@ impl EdgeState {
         // The frame's models: the world, then the brush entities in list order
         // (inline submodels, then the external boxes).
         let mut ents: Vec<Ent> = Vec::with_capacity(1 + bmodels.len() + external.len());
-        ents.push(Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights: dlights.to_vec() });
+        ents.push(Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights });
         for bm in bmodels {
             if bm.model_index == 0 || bm.model_index >= bsp.models.len() {
                 continue;
             }
-            // `R_DrawBEntitiesOnList`: the lights in the model's frame.
-            let local = dlights
-                .iter()
-                .map(|dl| {
-                    let mut d = *dl;
-                    d.origin = sub(dl.origin, bm.origin);
-                    d
-                })
-                .collect();
-            ents.push(Ent { bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights: local });
+            // `R_DrawBEntitiesOnList` hands `R_MarkLights` `&cl_dlights[k]`
+            // untranslated, and `R_AddDynamicLights` measures
+            // `cl_dlights[lnum].origin` against the surface's plane and
+            // texinfo, which are the model's own (a door's faces where the
+            // map put it): a light is not moved into a moved model's frame,
+            // so a moved door or lift is lit as if it had not moved, as in id.
+            ents.push(Ent { bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights });
         }
         for ext in external {
             if ext.bsp.models.is_empty() {
                 continue;
             }
-            ents.push(Ent { bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: Vec::new() });
+            ents.push(Ent { bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: &[] });
         }
 
         // `R_PushDlights` over the world, and `R_MarkLights` over each inline
@@ -491,7 +492,7 @@ impl EdgeState {
         mark_dlights(bsp, world_head, dlights, &mut bits);
         for e in ents.iter().skip(1).filter(|e| e.world_bsp) {
             let head = e.bsp.models[e.model].headnode.first().copied().unwrap_or(0);
-            mark_dlights_more(bsp, head, &e.dlights, &mut bits);
+            mark_dlights_more(bsp, head, e.dlights, &mut bits);
         }
 
         // Phase times as offsets from `t0` (only while profiling).
@@ -1925,10 +1926,10 @@ impl EdgeState {
             None
         } else if s.ent == 0 {
             let geom = face_geom_cached(bsp, fi, face);
-            face_lightmap_world_cached(bsp, fi, face, &geom.poly, light_styles, &e.dlights, face_bits)
+            face_lightmap_world_cached(bsp, fi, face, &geom.poly, light_styles, e.dlights, face_bits)
         } else if face_world_poly(bsp, face, &mut self.poly) {
             stat(|st| st.sub_lm_builds += 1);
-            face_lightmap_dyn(bsp, face, &self.poly, light_styles, &e.dlights, face_bits)
+            face_lightmap_dyn(bsp, face, &self.poly, light_styles, e.dlights, face_bits)
         } else {
             None
         };
@@ -1945,7 +1946,7 @@ impl EdgeState {
                 }
                 let block = match (lightmap.as_ref(), colormap) {
                     (Some(lm), Some(cm)) => {
-                        let dlit = any_dlight_reaches(bsp, face, &e.dlights, face_bits);
+                        let dlit = any_dlight_reaches(bsp, face, e.dlights, face_bits);
                         // D_MipLevelForScale on the surface's nearest 1/z
                         let mip = ti.map_or(0, |t| mipview.level_for_nearzi(s.nearzi, t));
                         face_surf_block(

@@ -984,8 +984,10 @@ pub(super) fn mark_dlights(
 /// own subtree, `R_MarkLights` from its `firstclipnode` in
 /// `R_DrawBEntitiesOnList` — OR-ing its lights' bits into `bits` without
 /// clearing what the world (or another entity) marked there: the models' face
-/// ranges are disjoint, so one mask serves them all. `dlights` are the lights
-/// in the entity's frame, in the same order (the same bits) as the world's.
+/// ranges are disjoint, so one mask serves them all. `dlights` are the world's
+/// lights, untranslated, in the same order (the same bits): id marks a moved
+/// door's subtree with `cl_dlights` as they are, against the model's own
+/// planes.
 pub(super) fn mark_dlights_more(
     bsp: &Bsp,
     headnode: i32,
@@ -1820,6 +1822,44 @@ mod tests {
                 "far-room floor lit through the wall at {sample:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_moved_brush_model_is_lit_by_the_lights_where_they_are() {
+        // `R_DrawBEntitiesOnList` marks a brush model with `cl_dlights`
+        // untranslated (`R_MarkLights (&cl_dlights[k], 1<<k, clmodel->nodes +
+        // clmodel->hulls[0].firstclipnode)`) and `R_AddDynamicLights` measures
+        // `cl_dlights[lnum].origin` against the face's own plane: a lift
+        // lowered 64 units is lit by a light 8 units above where the map put
+        // it, and not by one 8 units above where it is now.
+        reset_render_caches();
+        let mut bsp = two_rooms_bsp();
+        // The world is the far floor (node 2); model 1, the near floor (x 0..256,
+        // z 0, its own subtree node 1), is the lift.
+        let model = |firstface, headnode| crate::bsp::DModel {
+            mins: [-256.0, -128.0, -16.0],
+            maxs: [256.0, 128.0, 16.0],
+            origin: [0.0; 3],
+            headnode: [headnode, 0, 0, 0],
+            visleafs: 0,
+            firstface,
+            numfaces: 1,
+        };
+        bsp.models = vec![model(1, 2), model(0, 1)];
+        let lift = [crate::render::BModelInstance { model_index: 1, origin: [0.0, 0.0, -64.0], frame: 0 }];
+        let pal = [[128u8, 128, 128]; 256];
+        let cam = Camera::looking_at([128.0, -200.0, 200.0], [128.0, 0.0, -64.0], 90.0);
+        let (w, h) = (200usize, 150usize);
+        let frame = |dl: &[DynamicLight]| {
+            render_scene_ext(&bsp, &cam, w, h, &pal, &[], &lift, &[], None, 0.0, &[], dl, &NEUTRAL_LIGHTSTYLE_SCALES, None)
+        };
+        let (x, y) = project_px(&cam, w, h, [128.0, 0.0, -64.0]);
+        let at = |img: &Image| img.rgb[y * w + x];
+        let dark = frame(&[]);
+        let above_the_map = DynamicLight::new([128.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
+        assert_ne!(at(&frame(&[above_the_map])), at(&dark), "lit as if it had not moved");
+        let above_the_lift = DynamicLight::new([128.0, 0.0, -56.0], 36.0, 10.0, 0.0, 0.0, 0);
+        assert_eq!(at(&frame(&[above_the_lift])), at(&dark), "56 units from its own plane: unlit");
     }
 
     /// The brightness -> colormap-row curve must reproduce `R_BuildLightMap`'s

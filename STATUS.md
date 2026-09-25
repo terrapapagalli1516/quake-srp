@@ -248,7 +248,7 @@ pass; goldens byte-identical throughout (`fb14bd65`/`a6f98d8a`/`0211e6d4`).**
    17.8% + 13.3% pops → max 0.86% (sky scroll + flicker only).
 6. **R_MarkLights BSP dlight gating** (deferred-twice MED): per-face u32
    dlightbits via faithful sphere-vs-plane node recursion (world: headnode[0];
-   inline submodels: own headnode, entity-local origins per
+   inline submodels: own headnode, entity-local origins (world-space since `quake/polish4a`, as id's) per
    R_DrawBEntitiesOnList). A/B on e1m1 with an injected light: 90,525 affected
    px → 10,411 (80,114 bleed px removed, 0 added — strict subset). Composed
    at merge with (5): mask (C-faithful "may contribute") → plane test → luxel-
@@ -505,10 +505,10 @@ push. What remains is the LOW tail, all reviewer-vetted as non-blocking:
   invisible phase offset vs cl.time); ~~demo1 playback shows ~1.2 s of
   void-camera frames at start/loop-wrap~~ — ✅ CLOSED (demo-parity branch:
   frame emission now gates on signon completion, so the void frames are never
-  emitted; loop wrap equally clean, seam-tested); submodel dlight marking uses
-  entity-local light origins where the C used world-space (deliberate —
-  consistent with the port's local per-luxel submodel lighting; arguably fixes
-  a C quirk that mis-lights moved doors).
+  emitted; loop wrap equally clean, seam-tested); ~~submodel dlight marking uses
+  entity-local light origins where the C used world-space~~ — ✅ CLOSED
+  (`quake/polish4a`: world-space lights, as id's; a moved door is lit as if
+  it had not moved, AUDIT.md "Final review fixes, engine side").
 
 ---
 
