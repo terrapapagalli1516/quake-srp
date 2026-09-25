@@ -264,6 +264,12 @@ struct SurfCacheEntry {
     /// lightmap cache — a torch tick rebuilds the block).
     style_scales: [f32; crate::bsp::MAXLIGHTMAPS],
     n_styles: usize,
+    /// The texture baked in (`cache->texture`): an animated wall's frame index
+    /// into `bsp.textures`, so the next animation frame rebuilds the block.
+    texture: usize,
+    /// Baked with dynamic light folded in (`cache->dlight`): never reused, so the
+    /// first frame the light is gone rebuilds the block without it.
+    dlight: bool,
     /// Baked palette indices, `bw * bh`, row-major. `Rc` so a frame's draw clones
     /// the handle (a refcount bump), not the (possibly large) buffer.
     block: std::rc::Rc<Vec<u8>>,
@@ -302,20 +308,30 @@ const SURF_BLOCK_MAX: usize = 1 << 20;
 /// A baked surface block handle: `(texels, width, height, surface origin)`.
 type SurfBlockRef = (std::rc::Rc<Vec<u8>>, usize, usize, [f32; 2]);
 
-/// Build (and cache) a world face's lit+colormapped surface block (mip 0). Returns
-/// the `Rc` handle + dimensions + surface origin, or `None` (caller keeps the
-/// per-pixel path) when there is no usable colormap, the face is dynamically lit
-/// (`dlit` — the moving dlight can't be baked), the texture is missing, or the
-/// block would exceed [`SURF_BLOCK_MAX`].
+/// Build (and cache) a world face's lit+colormapped surface block (mip 0):
+/// `D_CacheSurface`. Returns the `Rc` handle + dimensions + surface origin, or
+/// `None` (caller keeps the per-pixel path) when there is no usable colormap, the
+/// texture is missing, or the block would exceed [`SURF_BLOCK_MAX`].
+///
+/// `tex_index` is the (animated) texture's index in `bsp.textures`, and `lm` the
+/// face's lightmap for this frame, dynamic lights included when `dlit` (a light
+/// reaches the face, [`any_dlight_reaches`]). A dynamically lit face is baked like
+/// any other — `R_BuildLightMap` runs `R_AddDynamicLights`, then `R_DrawSurface`
+/// — and its entry marked `dlight`, as the C marks `cache->dlight`: a dlit block
+/// is never a hit, so the light is rebaked every frame it is live and the first
+/// frame after it dies rebuilds the block without it. The hit test is the C's:
+/// same texture, same style values, no dlight now or at the bake.
 ///
 /// FIDELITY: at mip 0 the block is 1:1 with surface texels, so the sampled texture
-/// texel is identical to the per-pixel path; only the lighting is sampled at texel
-/// centres (then nearest-read per pixel) rather than per screen pixel — which is
-/// exactly what Quake's surface cache does (`R_BuildLightMap` + `D_DrawSurfaceBlock8`).
+/// texel is identical to the per-pixel path; the lighting is sampled per texel
+/// (then nearest-read per pixel) rather than per screen pixel — which is what
+/// Quake's surface cache does (`R_BuildLightMap` + `D_DrawSurfaceBlock8`; the
+/// interpolation between luxels differs, see oracle class 6).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn face_surf_block(
     idx: usize,
     face: &crate::bsp::DFace,
+    tex_index: usize,
     mt: &crate::bsp::MipTex,
     lm: &LightMap,
     colormap: &[u8],
@@ -325,7 +341,7 @@ pub(super) fn face_surf_block(
     dlit: bool,
     cache_surf: bool,
 ) -> Option<SurfBlockRef> {
-    if dlit || colormap.len() < COLORMAP_LEN {
+    if colormap.len() < COLORMAP_LEN {
         return None;
     }
     let (tw, th) = (mt.width as usize, mt.height as usize);
@@ -405,9 +421,13 @@ pub(super) fn face_surf_block(
             });
         }
         let sc = slot.as_mut().expect("just initialised");
-        // HIT: same face, same resolved style scales -> reuse the baked block.
+        // HIT (`D_CacheSurface`): no dynamic light now or in the bake, same
+        // texture, same resolved style scales -> reuse the baked block.
         if let Some(e) = sc.entries.get(idx).and_then(|e| e.as_ref()) {
-            if e.n_styles == n_styles
+            if !dlit
+                && !e.dlight
+                && e.texture == tex_index
+                && e.n_styles == n_styles
                 && e.bw == bw
                 && e.bh == bh
                 && e.style_scales[..n_styles] == scales[..n_styles]
@@ -416,13 +436,15 @@ pub(super) fn face_surf_block(
                 return Some((e.block.clone(), e.bw, e.bh, e.texmins));
             }
         }
-        // MISS: bake once and store.
+        // MISS: bake and store, marked `dlight` when a light is folded in.
         stat(|s| s.surf_baked += 1);
         let block = bake();
         if let Some(e) = sc.entries.get_mut(idx) {
             *e = Some(SurfCacheEntry {
                 style_scales: scales,
                 n_styles,
+                texture: tex_index,
+                dlight: dlit,
                 block: block.clone(),
                 bw,
                 bh,
@@ -1014,6 +1036,100 @@ mod tests {
             after.surf_baked
         );
         assert_eq!(after.surf_cache_hits, world_hits, "world cache must be fully intact");
+    }
+
+    /// A colormap whose rows differ (row `r` maps texel `c` to `(c + 3r) % 256`)
+    /// and a grey palette, so a lighting change shows up as a pixel change.
+    fn ramp_colormap() -> (Vec<u8>, [[u8; 3]; 256]) {
+        let mut cm = vec![0u8; COLORMAP_LEN];
+        for (i, v) in cm.iter_mut().enumerate() {
+            *v = ((i % 256 + 3 * (i / 256)) % 256) as u8;
+        }
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8; 3];
+        }
+        (cm, pal)
+    }
+
+    /// A2 (`D_CacheSurface`): a dynamically lit wall is baked into the surface
+    /// cache with the light (no per-pixel fallback), rebaked every frame the
+    /// light lives (`cache->dlight`), and rebuilt without it the first frame after
+    /// — never lingering — and a cold cache draws the same lit frame.
+    #[test]
+    fn dlit_faces_bake_through_the_surface_cache_and_rebuild_when_the_light_dies() {
+        reset_render_caches();
+        let world = demo_room_with_walls(lightmapped_demo_room(40, 0));
+        let (cm, pal) = ramp_colormap();
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let dl = DynamicLight::new([0.0, 0.0, 0.0], 300.0, f32::MAX, 0.0, 0.0, 0);
+        let render = |dls: &[DynamicLight]| {
+            render_stats_begin();
+            let img = render_scene_ext(
+                &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], dls,
+                &NEUTRAL_LIGHTSTYLE_SCALES, Some(&cm),
+            );
+            (img, render_stats_end())
+        };
+        let (unlit, _) = render(&[]);
+        let (lit, st) = render(std::slice::from_ref(&dl));
+        assert_ne!(lit.rgb, unlit.rgb, "the light must show");
+        assert_eq!(st.surf_misses, 0, "no dlit face may fall back to the per-pixel path");
+        assert!(st.surf_baked > 0, "dlit faces are baked with the light");
+        // Lit again: a dlit block is never reused (the light may have moved).
+        let (lit2, st2) = render(std::slice::from_ref(&dl));
+        assert_eq!(lit2.rgb, lit.rgb);
+        assert_eq!(st2.surf_baked, st.surf_baked, "every dlit face rebakes every lit frame");
+        // The light dies: exactly those entries rebuild, and the frame is unlit.
+        let (after, st3) = render(&[]);
+        assert_eq!(after.rgb, unlit.rgb, "the light must not linger in the cache");
+        assert_eq!(st3.surf_baked, st.surf_baked, "the dlit entries rebuild without the light");
+        let (_, st4) = render(&[]);
+        assert_eq!(st4.surf_baked, 0, "then the cache is warm again");
+        // History-free: a cold cache draws the same lit frame.
+        reset_render_caches();
+        assert_eq!(render(std::slice::from_ref(&dl)).0.rgb, lit.rgb);
+    }
+
+    /// `D_CacheSurface` keys a block on its texture (`cache->texture`): an
+    /// animated wall's next frame rebuilds the block instead of showing the
+    /// first frame forever.
+    #[test]
+    fn animated_wall_texture_rebuilds_its_cached_block() {
+        use crate::bsp::{MipTex, TexAnim};
+        reset_render_caches();
+        let mut world = lightmapped_demo_room(40, 0);
+        let mk = |name: &str, texel: u8, anim: TexAnim| {
+            Some(MipTex {
+                name: name.into(),
+                width: 16,
+                height: 16,
+                offsets: [0, 0, 0, 0],
+                pixels: vec![texel; 16 * 16],
+                anim: Some(anim),
+            })
+        };
+        world.textures = vec![
+            mk("+0wall", 10, TexAnim { total: 4, min: 0, max: 2, next: 1, alternate: None }),
+            mk("+1wall", 90, TexAnim { total: 4, min: 2, max: 4, next: 0, alternate: None }),
+        ];
+        for ti in world.texinfo.iter_mut() {
+            ti.miptex = 0;
+        }
+        let (cm, pal) = ramp_colormap();
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let render = |time: f32| {
+            render_scene_ext(
+                &world, &cam, 160, 120, &pal, &[], &[], &[], None, time, &[], &[],
+                &NEUTRAL_LIGHTSTYLE_SCALES, Some(&cm),
+            )
+        };
+        let f0 = render(0.0);
+        let f1 = render(0.2);
+        assert_ne!(f0.rgb, f1.rgb, "the animation's second frame must show");
+        assert_eq!(render(0.0).rgb, f0.rgb, "and the first again");
+        reset_render_caches();
+        assert_eq!(render(0.2).rgb, f1.rgb, "a warm cache draws what a cold one does");
     }
 
     #[test]

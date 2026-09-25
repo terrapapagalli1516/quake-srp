@@ -1963,6 +1963,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 /// --viewent x,y,z,p,y,r  the weapon's origin and angles, `cl.viewent` (default:
 ///                    V_CalcRefdef's for a still player at viewsize 120)
 /// --bench N          then render the same view N more times, report warm ms/frame
+/// --dlight x,y,z,radius[,minlight]  a live dynamic light (repeatable; the oracle
+///                    passes id's `cl_dlights`, in slot order)
 /// ```
 ///
 /// The map's entities are still spawned (worldspawn's QuakeC sets the light-style
@@ -1985,6 +1987,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
     let mut bench: Option<u32> = None;
     let mut viewent: Option<[f32; 6]> = None;
+    let mut dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -2000,6 +2003,16 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
             "--ents" => ents_path = Some(val.as_str()),
+            "--dlight" => {
+                let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+                    .map_err(|_| format!("--dlight: expected x,y,z,radius[,minlight], got {val:?}"))?;
+                if v.len() != 4 && v.len() != 5 {
+                    return Err(format!("--dlight: expected 4 or 5 numbers, got {val:?}"));
+                }
+                // Live for this frame (die far away, no decay); unowned.
+                let minlight = v.get(4).copied().unwrap_or(0.0);
+                dlights.push(quake_rs::dlight::DynamicLight::new([v[0], v[1], v[2]], v[3], f32::MAX, minlight, 0.0, 0));
+            }
             "--viewmodel" => viewmodel_arg = Some(val.as_str()),
             "--viewent" => {
                 let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
@@ -2138,7 +2151,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             angles: gun_angles,
         });
         render::render_scene_ext_sprited(
-            &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &[],
+            &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
             &light_styles, colormap.as_deref(), &sprites,
         )
     };

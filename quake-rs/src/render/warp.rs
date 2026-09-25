@@ -163,7 +163,7 @@ pub(super) fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (i32, i32)
 mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
-    use crate::render::raster::{raster_triangle_tex, ProjT, SurfaceMode};
+    use crate::render::raster::{outline, raster_poly_tex, AttrVert, PolyGrads, SurfaceMode};
 
     #[test]
     fn turb_table_matches_r_initturb() {
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn turbulent_sampler_animates_at_fixed_st() {
-        // Drive `raster_triangle_tex` in Turb mode over a single screen-filling
+        // Drive `raster_poly_tex` in Turb mode over a single screen-filling
         // triangle and confirm that sampling the SAME geometry at two different
         // `time` values produces a DIFFERENT framebuffer (it animates), while
         // every sampled index stays in bounds (no panic, no garbage).
@@ -223,11 +223,13 @@ mod tests {
         let render_at = |time: f32| {
             let mut img = Image::new(w, h, [0, 0, 0]);
             let mut zb = vec![f32::INFINITY; w * h];
-            let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
-            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
-            raster_triangle_tex(
-                &mut img, &mut zb, v0, v1, v2,
+            let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
+            let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
+            let tri = [v0, v1, v2];
+            let g = PolyGrads::from_vertices(&tri).expect("triangle");
+            raster_poly_tex(
+                &mut img, &mut zb, &outline(&tri), &g,
                 &pixels, 64, 64, &pal, 1.0, None,
                 SurfaceMode::Turb { turb: &turb, time },
                 None,
