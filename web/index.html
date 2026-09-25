@@ -196,7 +196,7 @@
         <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule)</span>
         <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
-        <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys</span>
+        <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys, Web extras for the port's opt-in extras (all off by default)</span>
         <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
         <span class="k"><kbd>F</kbd></span><span>fullscreen</span>
         <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
@@ -214,6 +214,7 @@
       <code>impulse 9</code><span>all weapons + ammo</span>
       <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
       <code>kill</code><span>respawn</span>
+      <code>wasm_showfps 1</code><span>the Web extras (not in id's Quake, all off by default): <code>wasm_uncapped</code> lifts the 72 fps cap, <code>wasm_showfps</code> shows the frame rate</span>
       <code>help</code><span>everything else (<code>echo</code>, <code>clear</code>, …)</span>
     </div>
   </details>
@@ -1103,6 +1104,46 @@ function restoreResolution() {
   if (w > 0 && h > 0) exp.set_resolution(w, h);
 }
 
+// --- Screen size + Web extras persistence ------------------------------------
+// Two more settings survive a reload the same way: `viewsize` (Options >
+// Screen size, `-`/`=`, the console — id's config.cfg archives it) and the
+// Web extras (Options > Web extras / the wasm_* commands: the port's opt-in
+// departures from id's Quake, all off by default), stored as the engine's
+// extras() bits. Restored after boot; saved when a frame shows them changed.
+// Feature-checked, so an older wasm without the exports just skips them.
+const VIEWSIZE_KEY = 'quake-rs.viewsize';
+const EXTRAS_KEY = 'quake-rs.extras';
+let savedViewsize = null, savedExtras = null;
+function storeGet(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function storeSet(key, value) {
+  try { localStorage.setItem(key, String(value)); } catch (e) { /* private mode / blocked */ }
+}
+function restorePrefs() {
+  if (!exp) return;
+  const vs = storeGet(VIEWSIZE_KEY);
+  if (vs !== null && /^\d+(\.\d+)?$/.test(vs) && typeof exp.set_viewsize === 'function') {
+    exp.set_viewsize(parseFloat(vs));       // the engine bounds it to 30..120
+  }
+  const ex = storeGet(EXTRAS_KEY);
+  if (ex !== null && /^\d+$/.test(ex) && typeof exp.set_extras === 'function') {
+    exp.set_extras(parseInt(ex, 10));       // unknown bits are ignored
+  }
+  savedViewsize = typeof exp.viewsize === 'function' ? exp.viewsize() : null;
+  savedExtras = typeof exp.extras === 'function' ? exp.extras() : null;
+}
+function syncPrefs() {
+  if (typeof exp.viewsize === 'function') {
+    const v = exp.viewsize();
+    if (v !== savedViewsize) { savedViewsize = v; storeSet(VIEWSIZE_KEY, v); }
+  }
+  if (typeof exp.extras === 'function') {
+    const x = exp.extras();
+    if (x !== savedExtras) { savedExtras = x; storeSet(EXTRAS_KEY, x); }
+  }
+}
+
 // --- Savegame persistence (page-owned localStorage) -------------------------
 // The engine's console `save <name>` / `load <name>` commands speak .sav TEXT
 // (WinQuake's Host_Savegame_f format) through the wasm exports; the PAGE owns
@@ -1279,6 +1320,8 @@ async function main() {
   // Restore a previously-chosen resolution (if any) over the boot default, BEFORE
   // the first canvas sync so it's created at the right backing-store size.
   restoreResolution();
+  // ...and the saved Screen size + Web extras (the engine clamps both).
+  restorePrefs();
 
   // An opaque canvas (the framebuffer's alpha is always 255): the browser
   // composites it without blending. `?lowlatency` in the URL also asks for a
@@ -1348,6 +1391,7 @@ async function main() {
     updateSndUI();
     syncLockChip();
     drainSaves();          // persist any `save <name>` the console issued
+    syncPrefs();           // persist a changed Screen size / Web extras
     serviceLoadRequest();  // answer any `load <name>` with the stored text
 
     // The render resolution may have changed this frame (Video Options): re-fit the
