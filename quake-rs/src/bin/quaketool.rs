@@ -949,7 +949,12 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], roll: 0.0, fov_deg: 90.0 };
         let viewmodel = weapon_mdl
             .as_ref()
-            .map(|mdl| render::Viewmodel { mdl, frame: weapon_frame });
+            .map(|mdl| render::Viewmodel {
+                mdl,
+                frame: weapon_frame,
+                // No bob in this still; the default viewsize's fudge.
+                origin_ofs: render::viewmodel_origin_ofs(&cam, 0.0, render::VIEWSIZE_DEFAULT),
+            });
         // The live particles as (world pos, palette index) for the renderer; they
         // share the scene z-buffer so any behind a wall are hidden. Use the
         // peak-combat snapshot so the action shot actually shows the blood burst
@@ -992,6 +997,8 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 total_secrets: 0,
                 level_name: "",
                 show_scores: false,
+                // The tool frames the full view under the bar (no viewsize).
+                sb_lines: render::SB_LINES_FULL,
             };
             render::draw_hud_into(&mut img, &hud);
         }
@@ -1545,7 +1552,7 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
     // frame is reproducible).
     let mut menu = render::Menu::new();
     menu.open();
-    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, &palette);
+    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, 0.0, &palette);
 
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
@@ -2097,7 +2104,12 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         - instances.len() - externals.len() - sprites.len();
 
     let render_once = || {
-        let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel { mdl, frame: *frame });
+        let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel {
+            mdl,
+            frame: *frame,
+            // The view is full-frame (id at viewsize 120, the oracle default): no fudge, no bob.
+            origin_ofs: render::viewmodel_origin_ofs(&cam, 0.0, 120.0),
+        });
         render::render_scene_ext_sprited(
             &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &[],
             &light_styles, colormap.as_deref(), &sprites,

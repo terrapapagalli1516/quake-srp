@@ -7,11 +7,13 @@
      gate), Multiplayer (screen opens, Esc returns), Options, Help, Quit (N
      backs out);
   3. Options rows act: sliders move real cvars (mouse_sensitivity / volume /
-     screen size), Go-to-console opens the console, Reset-to-defaults
+     viewsize — Screen size is id's viewsize, it never resizes the
+     framebuffer), Go-to-console opens the console, Reset-to-defaults
      restores, Customize controls opens the Keys screen (bind grab works),
-     Video Options applies a resolution preset;
+     Video Options applies a resolution (WinQuake's M_Video mode list);
   4. walk-mode behaviors: BRIGHTNESS visibly brightens the canvas (gamma LUT)
-     and restores byte-fair at 1.0; ALWAYS RUN raises measured displacement;
+     and restores byte-fair at 1.0; ALWAYS RUN (on by default in this port)
+     toggles the measured displacement between the run and walk speeds;
      INVERT MOUSE flips the pitch sign; LOOKSPRING recentres on pointer
      unlock; a REBOUND key drives +forward and the old key stops; Save opens
      in-game and Enter closes (SaveSlot host no-op);
@@ -19,7 +21,8 @@
      (Shift+',' still strafes — keynum 44 — and a shifted release can't stick
      the key), and a re-boot / New Game keeps the live options + key rebinds
      (Menu::reset_nav resets navigation only);
-  6. no console errors anywhere.
+  6. the resolution picked in Video Options survives a page reload
+     (localStorage), and there are no console errors anywhere.
 
 Usage: verify_menu.py [webdir]   (defaults to the repo's web/; pass a temp dir
 holding index.html + a freshly built quake_wasm.wasm to test new exports
@@ -155,19 +158,25 @@ with sync_playwright() as p:
     sndB = pg.evaluate("window.__menuSounds")
     check("every slider/checkbox row responds audibly", sndB - sndA >= 12, f"+{sndB - sndA}")
 
-    # Screen size (row 3): right cycles the render resolution.
+    # Screen size (row 3) is viewsize: left/right step it by 10 (clamped
+    # 30..120) and the framebuffer size never changes.
     w0 = pg.evaluate("exp.width()")
     key("ArrowUp", 5)       # from row 8 back to row 3
-    key("ArrowRight")
-    w1 = pg.evaluate("exp.width()")
-    check("Screen size row resizes the framebuffer", w1 != w0, f"{w0} -> {w1}")
-    key("ArrowLeft")
-    check("...and back", pg.evaluate("exp.width()") == w0)
+    check("viewsize defaults to 100", pg.evaluate("exp.viewsize()") == 100)
+    key("ArrowLeft", 2)
+    check("Screen size row steps viewsize", pg.evaluate("exp.viewsize()") == 80,
+          f"{pg.evaluate('exp.viewsize()')}")
+    key("ArrowRight", 6)
+    check("...clamped at 120", pg.evaluate("exp.viewsize()") == 120)
+    check("...and never resizes the framebuffer", pg.evaluate("exp.width()") == w0)
+    key("ArrowLeft", 3)     # 90
 
     # Reset to defaults (row 2) restores the cvars.
     key("ArrowUp"); key("Enter")
     check("Reset to defaults restores sensitivity",
           abs(pg.evaluate("exp.mouse_sensitivity()") - 1.0) < 1e-5)
+    check("Reset to defaults restores viewsize 100 (default.cfg)",
+          pg.evaluate("exp.viewsize()") == 100)
 
     # Customize controls (row 0): the Keys screen + a bind grab that Escape
     # cancels (full rebinding is proven in walk mode below).
@@ -184,13 +193,20 @@ with sync_playwright() as p:
     key("Escape")
     check("Esc on Keys returns to Options", scr() == OPTIONS)
 
-    # Video Options (row 12): the mode list applies a preset on Enter.
+    # Video Options (row 12): the mode list applies a mode on Enter (the list
+    # opens on the current 960x600; one line up is 800x500). Kept for the
+    # reload check at the end.
     key("ArrowDown", 12); key("Enter")
     check("Video Options opens the mode list", scr() == VIDEO)
-    key("ArrowDown"); key("Enter")
-    wv = pg.evaluate("exp.width()")
-    check("Enter applies the highlighted mode", wv != w0, f"{w0} -> {wv}")
-    pg.evaluate(f"exp.set_resolution({w0}, {pg.evaluate('exp.height()') * w0 // wv})")
+    key("ArrowUp")
+    check("moving the line alone keeps the mode", pg.evaluate("exp.width()") == w0)
+    key("Enter")
+    time.sleep(0.2)
+    wv, hv = pg.evaluate("[exp.width(), exp.height()]")
+    check("Enter applies the highlighted mode", (wv, hv) == (800, 500), f"{w0} -> {wv}x{hv}")
+    check("the page persisted it",
+          pg.evaluate("localStorage.getItem('quake-rs.resolution')") == "800x500")
+    check("the mode never touches viewsize", pg.evaluate("exp.viewsize()") == 100)
     key("Escape")
     check("Esc on Video returns to Options", scr() == OPTIONS)
 
@@ -236,7 +252,9 @@ with sync_playwright() as p:
     check("gamma 1.0 restores the brightness", abs(lum3 - lum1) < lum1 * 0.05,
           f"mean back to {lum3:.1f}")
 
-    # ALWAYS RUN: displacement per second rises (200 -> 400, server-clamped 320).
+    # ALWAYS RUN: displacement per second drops when it is toggled OFF (this
+    # port defaults it ON and the checkbox pass above left it on; Reset to
+    # defaults never touches it: 400 -> server-clamped 320 vs the 200 walk).
     # Turn the player 180 between runs (1125 counts * 0.16 deg) so each run
     # retraces the same free corridor instead of piling into a wall.
     turn_around = lambda: pg.evaluate("exp.mouse_move(1125, 0)")
@@ -246,14 +264,14 @@ with sync_playwright() as p:
         time.sleep(0.2)
         x1, y1 = pg.evaluate("[exp.listener_x(), exp.listener_y()]")
         return ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
-    d_walk = walk_dist(1.0)
+    d_run = walk_dist(1.0)
     key("Escape"); key("ArrowDown", 2); key("Enter")
-    key("ArrowDown", 8); key("ArrowRight")        # Always Run on
+    key("ArrowDown", 8); key("ArrowRight")        # Always Run off
     key("Escape"); key("Escape")
     turn_around()
-    d_run = walk_dist(1.0)
-    check("Always Run raises the measured speed", d_run > d_walk * 1.25,
-          f"{d_walk:.0f}u -> {d_run:.0f}u per 1.0s")
+    d_walk = walk_dist(1.0)
+    check("Always Run (default on) runs faster than walking", d_run > d_walk * 1.25,
+          f"run {d_run:.0f}u vs walk {d_walk:.0f}u per 1.0s")
 
     # INVERT MOUSE: the same mouse-down delta flips the pitch sign.
     p0 = pg.evaluate("exp.player_pitch()")
@@ -339,6 +357,10 @@ with sync_playwright() as p:
     key("ArrowDown", 5); key("ArrowRight", 2)          # Mouse speed +2 steps
     sens_set = pg.evaluate("exp.mouse_sensitivity()")
     key("Escape"); key("Escape")
+    # default.cfg binds '-' to sizedown and '=' to sizeup (in the game only).
+    key("Minus", 2); key("Equal")
+    check("'-' / '=' step viewsize in the game", pg.evaluate("exp.viewsize()") == 90,
+          f"{pg.evaluate('exp.viewsize()')}")
     pg.evaluate("document.getElementById('walkBtn').click()")  # re-boot e1m1
     time.sleep(1.2)
     check("re-boot reopens the menu at Main", vis() == 1 and scr() == MAIN)
@@ -350,6 +372,7 @@ with sync_playwright() as p:
     pg.wait_for_function("!exp.menu_visible()", timeout=15000)
     check("New Game keeps the Mouse speed cvar",
           abs(pg.evaluate("exp.mouse_sensitivity()") - sens_set) < 1e-5)
+    check("New Game keeps viewsize", pg.evaluate("exp.viewsize()") == 90)
     time.sleep(0.5)
     d_reb = walk_dist(0.7, "o")
     check("the rebound +forward key survives re-boot + New Game", d_reb > 80,
@@ -359,7 +382,20 @@ with sync_playwright() as p:
     check("'w' stays unbound (bindings aren't reseeded)", d_w2 < 20,
           f"{d_w2:.0f}u")
 
-    # 6. Console must be clean.
+    # 6. The Video Options mode survives a reload (the page's localStorage
+    #    restore runs before the first canvas sync).
+    pg.reload(wait_until="load")
+    pg.wait_for_function("typeof exp !== 'undefined' && exp && exp.boot", timeout=120000)
+    pg.wait_for_function(
+        "document.getElementById('status').textContent.includes('ready')", timeout=30000)
+    check("the Video Options mode survives a reload",
+          pg.evaluate("[exp.width(), exp.height()]") == [800, 500],
+          f"{pg.evaluate('[exp.width(), exp.height()]')}")
+    check("...and the canvas backing store follows it",
+          pg.evaluate("[document.getElementById('c').width, document.getElementById('c').height]")
+          == [800, 500])
+
+    # 7. Console must be clean.
     print("errors:", errs[-5:])
     check("no console errors", not errs)
     br.close()
