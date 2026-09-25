@@ -911,6 +911,14 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
     `compare.py --exactpersp`): byte-identical to before (the oracle's exact
     rows are unchanged). The uncached per-pixel wall path (faces over the
     surface-cache size cap, or no colormap — never in id's maps) stays exact.
+- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0). The browser
+  reaches the exact-perspective renderer option through a console variable.
+  All of the port's opt-in extras live in one place, `quake-wasm/src/
+  extras.rs`: a table of `wasm_*` cvars that behave like id's (`wasm_x` prints
+  `"wasm_x" is "0"`, `wasm_x 1` sets it, `Q_atof` semantics), process state like
+  id's cvars (not saved), read by `vid::render_options` each frame; `help`
+  lists them. An extras menu can drive the same table. Always Run, the one
+  default departure, stays with the menu options (it is id's own setting).
 
 ## LOW (27)
 

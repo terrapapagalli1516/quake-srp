@@ -88,11 +88,13 @@ pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 /// How the renderer draws the 3-D view of a `render_w x render_h` frame:
 /// `vid.aspect` for that mode on the page's [`DISPLAY_ASPECT`] (vid_win.c's
 /// `(h/w)*(320/240)`: 0.8333 at every 16:10 preset), which `R_ViewChanged`
-/// folds into the projection so the world is not stretched by the 4:3 display.
+/// folds into the projection so the world is not stretched by the 4:3 display;
+/// and the port's renderer extras, off unless their `wasm_*` cvar is set
+/// ([`crate::extras`]).
 pub(crate) fn render_options(render_w: usize, render_h: usize) -> render::RenderOptions {
     render::RenderOptions {
         pixel_aspect: render::vid_aspect(render_w, render_h, DISPLAY_ASPECT),
-        ..Default::default()
+        exact_perspective: crate::extras::extras().exact_persp,
     }
 }
 

@@ -60,6 +60,9 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
   `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
+  The port's few opt-in departures from id are console variables named `wasm_*`, off by default and
+  listed in one place, `quake-wasm/src/extras.rs` (so far `wasm_exactpersp 1`: exact perspective on
+  every pixel instead of id's 16-pixel spans).
 - **Sound** — the QuakeC `sound` + temp-entity sounds drive a queue the browser plays through Web Audio with
   **distance/stereo spatialization** relative to the player (samples resolved under the `sound/` pak dir); **placed
   `ambientsound()` loops** (torch crackle, machine hums — `svc_spawnstaticsound` semantics, wire-byte-exact
