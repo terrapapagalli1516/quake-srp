@@ -129,7 +129,7 @@ fn usage() {
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--ents FILE] [--viewmodel M:F]\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--ents FILE] [--viewmodel M:F] [--bench N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -1943,6 +1943,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 ///                    `model ox oy oz pitch yaw roll frame skin syncbase effects kind`
 ///                    (without it: the world only, as r_drawentities 0)
 /// --viewmodel M:F    also draw weapon model M at frame F
+/// --bench N          then render the same view N more times, report warm ms/frame
 /// ```
 ///
 /// The map's entities are still spawned (worldspawn's QuakeC sets the light-style
@@ -1963,6 +1964,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let (mut w, mut h) = (320usize, 200usize);
     let (mut origin, mut angles, mut time, mut fov) = (None, None, None, 90.0f32);
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
+    let mut bench: Option<u32> = None;
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -1979,6 +1981,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
             "--ents" => ents_path = Some(val.as_str()),
             "--viewmodel" => viewmodel_arg = Some(val.as_str()),
+            "--bench" => bench = Some(val.parse::<u32>().map_err(|_| format!("--bench: bad count {val:?}"))?.max(1)),
             other => return Err(format!("view: unknown option {other:?}")),
         }
         i += 2;
@@ -2090,14 +2093,26 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         }
         None => None,
     };
-    let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel { mdl, frame: *frame });
     let unresolved = alias_descs.len() + ext_descs.len() + sprite_descs.len()
         - instances.len() - externals.len() - sprites.len();
 
-    let img = render::render_scene_ext_sprited(
-        &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &[],
-        &light_styles, colormap.as_deref(), &sprites,
-    );
+    let render_once = || {
+        let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel { mdl, frame: *frame });
+        render::render_scene_ext_sprited(
+            &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &[],
+            &light_styles, colormap.as_deref(), &sprites,
+        )
+    };
+    let img = render_once();
+    // Warm re-renders of the same view (the first, cold frame above is excluded),
+    // the port side of the oracle's `oracle_bench`: renderer cost only.
+    let bench = bench.map(|n| {
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(render_once());
+        }
+        (n, start.elapsed().as_secs_f64() * 1000.0 / n as f64)
+    });
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
     let mut o = String::new();
     let _ = writeln!(
@@ -2110,6 +2125,9 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         "  entities: {} alias, {} submodel, {} external, {} sprite ({} unresolved, {} unknown kind)",
         instances.len(), bmodels.len(), externals.len(), sprites.len(), unresolved, skipped
     );
+    if let Some((n, per)) = bench {
+        let _ = writeln!(o, "  bench {n} warm frames -> {per:.4} ms/frame ({:.1} fps)", 1000.0 / per);
+    }
     let _ = writeln!(o, "  -> {out} ({}x{} PPM)", img.w, img.h);
     Ok(Out::Text(o))
 }
