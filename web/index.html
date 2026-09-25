@@ -193,7 +193,7 @@
     <div class="col">
       <h2>Interface</h2>
       <div class="keys">
-        <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule)</span>
+        <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
         <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
         <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys, Web extras for the port's opt-in extras (all off by default)</span>
@@ -378,9 +378,11 @@ addEventListener('keydown', e => {
   //     default.cfg's +showscores and goes to the engine below like any bound
   //     key. When the menu is up, Arrow Up/Down move the cursor, Enter selects —
   //     and we DON'T let those keys also drive the game (no movement/turn while
-  //     navigating the menu).
+  //     navigating the menu). Esc ignores autorepeat, as Key_Event does: with
+  //     Esc keyboard-locked in fullscreen a held Esc (the browser's way out)
+  //     must not flicker the menu while the browser counts to two seconds.
   if (k === 'escape' && exp && exp.menu_cancel) {
-    exp.menu_cancel();
+    if (!e.repeat) escKeyMenu();
     e.preventDefault();
     return;
   }
@@ -474,18 +476,55 @@ function toggleFullscreen() {
 }
 fsBtn.addEventListener('click', toggleFullscreen);
 
-// Entering fullscreen: surface the two-key contract for a moment. The browser
-// RESERVES Esc here and we cannot intercept it: with the mouse captured the
-// first Esc only releases the capture (our pointerlockchange handler then opens
-// the menu — native muscle memory still works), but a SECOND Esc — pointer
-// free — exits fullscreen itself. That second step is the browser's, not ours;
-// F toggles fullscreen deliberately.
+// --- Esc in fullscreen ---------------------------------------------------------
+// The browser RESERVES Esc: with the mouse captured the first Esc only releases
+// the capture (our pointerlockchange handler then opens the menu), and a second
+// Esc, pointer free, leaves fullscreen. In id's Quake Esc just toggles the menu
+// (keys.c: togglemenu), and in fullscreen, with Tab bound to +showscores, it is
+// the only way to the menu. Where the Keyboard Lock API exists (Chromium:
+// Chrome, Edge, Opera), locking Escape while fullscreen hands a TAPPED Esc to
+// the page like any key, so it toggles the menu and the mouse stays captured;
+// HOLDING Esc (about 2 s) still leaves fullscreen, the browser's own way out,
+// and F toggles fullscreen as before. Elsewhere the two-step flow above stands.
+// Headless Chromium resolves the lock but has no browser-side Esc handling, so
+// what a real browser does with a locked Esc is unverified; the page logic is
+// covered by verify_extras.py.
+let escLocked = false;          // Esc is keyboard-locked (fullscreen, Chromium)
+let escKeyAt = -1e9, lockLossMenuAt = -1e9;   // performance.now() stamps
+// One Esc, one toggle. Should a browser both deliver a locked Esc AND drop the
+// pointer lock for it, the pair counts once, whichever event comes first.
+const ESC_PAIR_MS = 300;
+function escKeyMenu() {
+  escKeyAt = performance.now();
+  if (escLocked && escKeyAt - lockLossMenuAt < ESC_PAIR_MS) return;
+  exp.menu_cancel();            // opens the menu when hidden, else backs out
+}
+function lockEscape() {
+  const kb = navigator.keyboard;
+  if (!kb || typeof kb.lock !== 'function') return Promise.resolve(false);
+  return kb.lock(['Escape']).then(() => true, () => false);
+}
+function unlockEscape() {
+  escLocked = false;
+  try { navigator.keyboard?.unlock?.(); } catch (e) { /* not supported */ }
+}
+function fsHintHtml(locked) {
+  return locked
+    ? 'Esc = menu &nbsp;·&nbsp; hold Esc or F = leave fullscreen'
+    : 'Esc = menu &nbsp;·&nbsp; F = leave fullscreen';
+}
+// Entering fullscreen: lock Esc, then surface the contract for a moment.
 let fsHintTimer = 0;
 document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement) { fsHint.classList.remove('show'); return; }
-  fsHint.classList.add('show');
-  clearTimeout(fsHintTimer);
-  fsHintTimer = setTimeout(() => fsHint.classList.remove('show'), 3000);
+  if (!document.fullscreenElement) { unlockEscape(); fsHint.classList.remove('show'); return; }
+  lockEscape().then(ok => {
+    if (!document.fullscreenElement) return;   // left again before the lock settled
+    escLocked = ok;
+    fsHint.innerHTML = fsHintHtml(ok);
+    fsHint.classList.add('show');
+    clearTimeout(fsHintTimer);
+    fsHintTimer = setTimeout(() => fsHint.classList.remove('show'), 3000);
+  });
 });
 
 // Starting a session from a button is a real gesture: unlock audio with it and
@@ -1019,13 +1058,18 @@ canvas.addEventListener('contextmenu', e => e.preventDefault());
 // plain Esc KEYDOWNS are deliverable again and navigate BACK in the menu as
 // the engine expects; closing the menu re-locks on the next canvas click. In
 // fullscreen the same flow holds, because Esc with the lock held releases ONLY
-// the lock — a second Esc (unlocked) then exits fullscreen, the browser's call.
+// the lock — a second Esc (unlocked) then exits fullscreen, the browser's call
+// — except where Esc is keyboard-locked (see "Esc in fullscreen"): there the
+// Esc keydown itself reaches the page and toggles the menu, the mouse stays
+// captured, and a lock loss that pairs with that keydown is not a second Esc.
 document.addEventListener('pointerlockchange', () => {
   if (!locked()) {
     const pageInitiated = expectUnlock;
     expectUnlock = false;
-    if (!pageInitiated && inWalkMode() && !menuVisible() && !consoleVisible()
-        && exp && exp.menu_cancel) {
+    const pairsWithEscKey = escLocked && performance.now() - escKeyAt < ESC_PAIR_MS;
+    if (!pageInitiated && !pairsWithEscKey && inWalkMode() && !menuVisible()
+        && !consoleVisible() && exp && exp.menu_cancel) {
+      lockLossMenuAt = performance.now();
       exp.menu_cancel();    // menu_cancel OPENS the menu when it is hidden
     }
     // Leaving pointer lock is this port's "+mlook released": the engine applies
