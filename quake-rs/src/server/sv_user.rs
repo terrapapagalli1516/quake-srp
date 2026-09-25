@@ -228,8 +228,8 @@ impl Server {
 
         // hack to not let you back into the teleporter you just left.
         let teleport_time = self.vm.ent_get_float(ent, "teleport_time");
-        let time = self.time();
-        if time < teleport_time && fmove < 0.0 {
+        // sv.time < sv_player->v.teleport_time: a double against a float.
+        if self.sv_time() < f64::from(teleport_time) && fmove < 0.0 {
             fmove = 0.0;
         }
 
@@ -338,7 +338,7 @@ impl Server {
     fn water_jump(&mut self, ent: i32) {
         let teleport_time = self.vm.ent_get_float(ent, "teleport_time");
         let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
-        if self.time() > teleport_time || waterlevel == 0 {
+        if self.sv_time() > f64::from(teleport_time) || waterlevel == 0 {
             let flags = self.vm.ent_get_float(ent, "flags") as i32;
             self.vm.ent_set_float(ent, "flags", (flags & !FL_WATERJUMP) as f32);
             self.vm.ent_set_float(ent, "teleport_time", 0.0);

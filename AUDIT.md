@@ -997,7 +997,7 @@ Found, not fixed (outside the 2-D drawing, or another branch's file):
   shared by Load and Save, ...): Escape from Options lands on "Options", the
   port's single cursor on "Single Player". `menu.rs` behaviour, left for after
   the Extras-menu work (screen2d `menu_sp.sp_again`, 206 px).
-- **`sv.time` adds up in f32** (`sv_phys.rs`: `gset_float("time", start_time +
+- ✅ (`quake/polish2`, "Second review fixes") **`sv.time` adds up in f32** (`sv_phys.rs`: `gset_float("time", start_time +
   dt)`); id's `sv.time` is a double copied into the QuakeC float each frame.
   After 60 frames of 0.1 s the port reads 7.2999954, so the new-weapon flash
   (`(int)((cl.time - item_gettime)*10)`) is a frame behind (screen2d
@@ -1282,6 +1282,44 @@ test in the commit message.
   `particles_obey_d_part_cs_clip_and_edges`,
   `particles_tie_on_d_part_cs_quantized_1_over_z`. Goldens unchanged (no
   particles in them).
+- ✅ **`sv.time` is a double** (fid2d's leftover) — id's `server_t.time` is a
+  `double` (server.h), advanced by `SV_Physics`' `sv.time += host_frametime`
+  (a double too), and QuakeC sees its float through each
+  `pr_global_struct->time = sv.time`. The port kept the clock in the QC float
+  global and added `dt` in f32: 7.2999954 after 63 frames of 0.1 s from 1.0,
+  so the new-weapon flash's `(int)((cl.time - item_gettime)*10)` showed the
+  frame before (screen2d `flash.rl_new`), and the error grows with the session.
+  Now `Vm::sv_time` is an f64 (`Server::sv_time`), `Server::time()` its float
+  (the QC global's and `svc_time`'s value), and the double comparisons are
+  double: `SV_RunThink`'s `thinktime > sv.time + host_frametime` and
+  `thinktime = sv.time`, `SV_Physics_Pusher`'s `ltime + host_frametime`,
+  `SV_ClientThink`/`SV_WaterJump`'s `teleport_time`, `ED_Alloc`/`ED_Free`'s
+  `freetime`. New entry points `run_frame_f64`/`client_frame_f64` take id's
+  `double host_frametime`; the f32 ones widen theirs (quake-wasm's, for now).
+  The settle frames and the quaketool drivers (census, census-edicts,
+  simbench, sim, playtest, changelevel) run id's exact 0.1. Savegames: written
+  `%f` from the double (`Host_Savegame_f`), read into a float and restarted
+  from it (`Host_Loadgame_f`'s `float time`). Tests
+  `sv_time_is_a_double_and_the_qc_time_global_its_float`,
+  `a_think_is_due_by_sv_time_plus_host_frametime_in_double` (a think at
+  `time + 0.1` = 7.4f waits a frame at sv.time 7.3, as in the C; the f32 sum
+  ran it early), the save tests (`1234.567890` written, the float read back).
+  Evidence: screen2d `flash.rl_new` 98.3 / 99.2 / 99.4% -> 100% at 320x200 /
+  640x400 / 960x600. id's edicts (the oracle's `oracle_edicts`, nine maps at
+  t = 1.7 ... 120.7) against `census-edicts`: `nextthink` mismatches over
+  every non-monster edict 310 -> 252, none worse (every map's player idle
+  think now on id's phase, e1m1's two start doors at 4.040/4.035, e1m4,
+  e1m6, e1m8 movers); the dump at 120.7 no longer reads 120.699. simbench
+  and the census change as a one-frame think phase shift propagates through
+  random-driven fights (e1m1, e1m3, e1m5-e1m7 simbench counts identical;
+  census: no new fault, error or never-moved mover). **Goldens re-baselined**
+  (e1m1 unchanged): e1m2 `8ce25660` -> `9ae2b478`, e1m3 `3531e9cd` ->
+  `2ca0f916`. The scene is taken after `SV_SpawnServer`'s two settle frames,
+  at sv.time 1.2; an item's `PlaceItem` think at `time + 0.2` = 1.2f =
+  1.2000000477 is later than 1.1 + 0.1 in double, so it has not run yet and
+  the shells box (e1m2) and an ammo box (e1m3) stand where the map put them,
+  as in id's (its edict dump at t = 1.2: every item's nextthink 1.200, not yet
+  dropped). The f32 sum 1.1f + 0.1f = 1.2f ran it a frame early.
 
 ## LOW (27)
 

@@ -381,7 +381,7 @@ scenario's shots, before the branch -> after.
 | faces by health, pain, dead (9) | 98.4 -> 100 | 4.1 -> 100 | 2.7 -> 100 |
 | quad, ring, pentagram, suit, ring+pent (5) | 98.4 -> 100 | 3.3 -> 100 | 2.4 -> 100 |
 | armour types (3) | 98.4 -> 100 | 3.6 -> 100 | 2.5 -> 100 |
-| new-weapon flash (1) | 96.7 -> 98.3 | 4.1 -> 99.2 | 2.9 -> 99.4 |
+| new-weapon flash (1) | 96.7 -> 98.3 -> 100 | 4.1 -> 99.2 -> 100 | 2.9 -> 99.4 -> 100 |
 | Tab scoreboard at viewsize 100/110/120/50 (4) | 98.4 -> 100 | 4.2 -> 100 | 2.0 -> 100 |
 | centerprint 1/3/5 lines, expired (4) | 91.6 -> 100 | 3.8 -> 100 | 2.7 -> 100 |
 | notify lines (1) | 98.6 -> 100 | 3.8 -> 100 | 2.6 -> 100 |
@@ -412,12 +412,11 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
 - *Video Options* (2422 px): the mode list is the video driver's (`VID_MenuDraw`
   in `vid_win.c`/`vid_dos.c`), and the port's is its own; only the title is
   id's in both.
-- *The new-weapon flash* (256 px): not the 2-D layer. The port's `sv.time`
-  adds up in f32 (`sv_phys.rs`: `gset_float("time", start_time + dt)`), id's is a
-  double; after 60 frames of 0.1 s the port's clock is 7.2999954, so
-  `(int)((cl.time - item_gettime)*10)` lands on 2 where id's gives 3 — the flash
-  shows the frame before. At the oracle's exact 0.1 s frames every sample sits on
-  such a boundary; at real frame times it is a one-frame phase shift.
+- ~~*The new-weapon flash* (256 px)~~: not the 2-D layer. The port's `sv.time`
+  added up in f32, id's is a double; after 60 frames of 0.1 s the port's clock
+  was 7.2999954, so `(int)((cl.time - item_gettime)*10)` landed on 2 where id's
+  gives 3 — the flash showed the frame before. `sv.time` is a double since
+  `quake/polish2`: 100% in all three modes.
 - *Returning to Single Player from Load* (206 px): id keeps each menu's cursor
   (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...: Escape from
   Options lands on "Options"); the port's one cursor starts every screen at its

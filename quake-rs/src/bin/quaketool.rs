@@ -497,7 +497,7 @@ fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, String>
         let mut total = 0usize;
         let mut errs = 0usize;
         for _ in 0..frames {
-            let fr = server.run_frame(0.1).map_err(|e| e.to_string())?;
+            let fr = server.run_frame_f64(0.1).map_err(|e| e.to_string())?;
             total += fr.thinks_fired;
             errs += fr.think_errors;
         }
@@ -617,7 +617,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     let start = server.vm.ent_get_vector(player, "origin");
     let mut thinks = 0usize;
     for _ in 0..40 {
-        let fr = server.client_frame(&cmd, 0.1).map_err(|e| format!("client_frame: {e}"))?;
+        let fr = server.client_frame_f64(&cmd, 0.1).map_err(|e| format!("client_frame: {e}"))?;
         thinks += fr.thinks_fired;
     }
     let end = server.vm.ent_get_vector(player, "origin");
@@ -663,7 +663,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         // Tick ~2s so the doors slide and reach their open state.
         let still = UserCmd { yaw: spawn_yaw, ..Default::default() };
         for _ in 0..20 {
-            let _ = server.client_frame(&still, 0.1);
+            let _ = server.client_frame_f64(&still, 0.1);
         }
         let mut moved = 0;
         let mut max_disp = 0.0f32;
@@ -752,7 +752,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             let still = UserCmd { yaw, pitch, ..Default::default() };
             let _ = writeln!(o, "  AI probe (10 frames, player standing in view):");
             for f in 0..10 {
-                server.client_frame(&still, 0.1).map_err(|e| format!("probe: {e}"))?;
+                server.client_frame_f64(&still, 0.1).map_err(|e| format!("probe: {e}"))?;
                 if !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true) {
                     let enemy = server.vm.ent_get_int(mon, "enemy");
                     let frame = server.vm.ent_get_float(mon, "frame");
@@ -776,7 +776,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let mut te_explosions = 0usize;
         let mut te_gunshots = 0usize;
         for _ in 0..15 {
-            server.client_frame(&fire, 0.1).map_err(|e| format!("fire frame: {e}"))?;
+            server.client_frame_f64(&fire, 0.1).map_err(|e| format!("fire frame: {e}"))?;
             for s in server.drain_sounds() {
                 sounds.push(s.sample);
             }
@@ -1076,14 +1076,14 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
     // heaviest realistic per-frame logic load.
     let spawn_yaw = player_start(&entities).map(|(_, a)| a).unwrap_or(0.0);
     let cmd = UserCmd { forwardmove: 400.0, yaw: spawn_yaw, ..Default::default() };
-    const DT: f32 = 0.1;
+    const DT: f64 = 0.1;
 
     // Warm-up: a handful of frames to populate the VM field-offset cache and let
     // the player settle onto the ground / nearby monsters notice it, so the timed
     // window measures steady state, not first-touch costs.
     let warmup = 20u32.min(frames);
     for _ in 0..warmup {
-        let _ = server.client_frame(&cmd, DT).map_err(|e| format!("client_frame: {e}"))?;
+        let _ = server.client_frame_f64(&cmd, DT).map_err(|e| format!("client_frame: {e}"))?;
     }
 
     // Timed window.
@@ -1093,7 +1093,7 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
     let mut think_errors = 0usize;
     let start = Instant::now();
     for _ in 0..frames {
-        let fr = server.client_frame(&cmd, DT).map_err(|e| format!("client_frame: {e}"))?;
+        let fr = server.client_frame_f64(&cmd, DT).map_err(|e| format!("client_frame: {e}"))?;
         thinks += fr.thinks_fired;
         think_errors += fr.think_errors;
     }
@@ -1110,7 +1110,7 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
     }
 
     let per_ms = elapsed.as_secs_f64() * 1000.0 / frames as f64;
-    let game_secs = frames as f64 * DT as f64;
+    let game_secs = frames as f64 * DT;
     let mut o = String::new();
     let _ = writeln!(
         o,
@@ -1241,7 +1241,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         // touch fires (SV_TouchLinks runs during SV_Physics_Client).
         server.vm.ent_set_vector(player, "origin", centre);
         server.vm.ent_set_vector(player, "velocity", [0.0, 0.0, 0.0]);
-        server.client_frame(&cmd, 0.1).map_err(|e| format!("client_frame: {e}"))?;
+        server.client_frame_f64(&cmd, 0.1).map_err(|e| format!("client_frame: {e}"))?;
         if let Some(m) = server.take_pending_changelevel() {
             requested = Some(m);
             break;

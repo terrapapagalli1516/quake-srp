@@ -115,6 +115,7 @@ impl Server {
 
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.
+        vm.sv_time = 1.0;
         vm.gset_float("time", 1.0);
         // mapname / world entity defaults are best-effort: only set if present.
         vm.gset_int("world", 0);

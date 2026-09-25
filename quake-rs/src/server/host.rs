@@ -314,8 +314,8 @@ impl Server {
             buttons: 0,
             impulse: 0,
         };
-        let _ = self.client_frame(&cmd, SETTLE_FRAMETIME);
-        let _ = self.client_frame(&cmd, SETTLE_FRAMETIME);
+        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
+        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
     }
 
     /// `SV_SaveSpawnparms` for the local client: set the QuakeC `self` global to
