@@ -91,6 +91,16 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     w.faceanimtime = w.server.time() + FACE_ANIM_TIME;
 }
 
+/// The dynamic lights R_PushDlights marks this frame: every slot with a
+/// radius whose `die` has not passed (`die < cl.time || !radius` is skipped),
+/// at its current — not yet decayed — radius.
+fn pushed_dlights(
+    dlights: &quake_rs::dlight::DynamicLights,
+    now: f32,
+) -> Vec<quake_rs::dlight::DynamicLight> {
+    dlights.active().into_iter().filter(|dl| dl.die >= now).collect()
+}
+
 /// `cl.punchangle` as SV_WriteClientdataToMessage sends it: each component
 /// through `MSG_WriteChar` — the float truncated to an int, kept as a signed
 /// byte — so the shotgun's -2 kick reads -2, then -1 while DropPunchAngle eases
@@ -422,13 +432,6 @@ pub(crate) fn step_walk(
             now,
         );
     }
-    // CL_DecayLights steps by `cl.time - cl.oldtime`, which is 0 while
-    // paused: nothing fades or dies. (The particles move after they are drawn,
-    // below.)
-    if dt.is_finite() && dt > 0.0 && !paused {
-        w.dlights.advance(dt, now);
-    }
-
     // 3. Make sure every live entity's alias model is cached (runtime-spawned
     //    entities — gibs, projectiles — can appear after boot).
     let n = w.server.vm.num_edicts();
@@ -792,8 +795,11 @@ pub(crate) fn step_walk(
     if dt.is_finite() && dt > 0.0 && !paused {
         w.particles.integrate(dt, now, 800.0 * 0.05);
     }
-    // The live dynamic lights (explosions / muzzle flashes) light up nearby walls.
-    let active_dlights = w.dlights.active();
+    // The live dynamic lights (explosions / muzzle flashes) light up nearby
+    // walls: R_PushDlights skips `die < cl.time || !radius`. A light is drawn
+    // at the radius it was allocated with; CL_DecayLights shrinks it after the
+    // frame (below).
+    let active_dlights = pushed_dlights(&w.dlights, now);
     // The animated light-style scales (torch flicker, pulsing lights) at the
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
@@ -806,6 +812,11 @@ pub(crate) fn step_walk(
     let mut view =
         render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
     bench::lap(Phase::Render3d);
+    // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
+    // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
+    if dt.is_finite() && dt > 0.0 && !paused {
+        w.dlights.advance(dt, now);
+    }
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash (V_UpdatePalette
     //     drops it after this frame's svc_damage was parsed) and tint the view
@@ -1274,6 +1285,26 @@ mod tests {
         assert!(w.v_dmg_pitch > 5.0, "hit from the front pitches the view: {}", w.v_dmg_pitch);
         assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < crate::view::V_KICKTIME, "kick running");
         assert!(w.server.time() <= w.faceanimtime, "the pain face shows");
+    }
+
+    /// CENSUS L9: an explosion's dlight is drawn at its full 350 radius on the
+    /// frame CL_ParseTEnt allocated it (CL_DecayLights runs after
+    /// SCR_UpdateScreen), a light past its `die` is not drawn, and the frame
+    /// still decays the pool once.
+    #[test]
+    fn dlights_are_drawn_before_they_decay() {
+        let mut w = build_walk().expect("e1m1 boots");
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let now = w.clock;
+        w.dlights.alloc(0, [0.0; 3], 350.0, now + 0.5, 300.0, 0.0, now);
+        w.dlights.alloc(0, [64.0, 0.0, 0.0], 200.0, now - 0.01, 0.0, 0.0, now);
+        let drawn = pushed_dlights(&w.dlights, now);
+        assert_eq!(drawn.len(), 1, "the dead light is not pushed");
+        assert_eq!(drawn[0].radius, 350.0, "full radius on its first frame");
+        let before = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let after = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
+        assert!((before - after - 0.05 * 300.0).abs() < 1e-3, "{before} -> {after}");
     }
 
     /// CENSUS L1: the client's punchangle is MSG_WriteChar'd — truncated to
