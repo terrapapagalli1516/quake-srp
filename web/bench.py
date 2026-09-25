@@ -33,6 +33,10 @@ Usage:
            --hash-every N (framebuffer FNV hashes, to prove two builds render
            identically)  --json OUT.json  --port 8230 (or QUAKE_VERIFY_PORT)
 
+Hashes: attract frames include the menu cursor, animated on the App clock,
+which also counts the page's own frames before the harness took over; prove
+build identity on the other workloads.
+
 Timer resolution: the server sends COOP/COEP so the page is cross-origin
 isolated and performance.now() is ~5 us, not the 100 us of a normal page.
 Headless Chromium composites in software: `put` and `raf - js` are indicative
@@ -48,7 +52,7 @@ ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 ap.add_argument("webdir", nargs="?", help="dir with index.html + quake_wasm.wasm (default: web/)")
 ap.add_argument("--build", action="store_true",
                 help="cargo-build the --features bench wasm and serve it from a temp dir")
-ap.add_argument("--workloads", default="demo1,walk_e1m1,walk_e1m3,attract")
+ap.add_argument("--workloads", default="demo1,attract,walk_e1m1,fire_e1m1,walk_e1m3")
 ap.add_argument("--res", default="320x200,640x400,1280x800")
 ap.add_argument("--frames", type=int, default=600)
 ap.add_argument("--warmup", type=int, default=60)
