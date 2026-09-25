@@ -1,12 +1,165 @@
 # Faithfulness Audit — Rust port vs id's original C
 
+The ledger of every difference found between the port and id's WinQuake C, and what was
+done about it, with the evidence. Newest work is at the bottom; this top part is the way
+in: an index of the 2026-09-25 sections, then everything still open, in one list.
+
+## The 2026-09-25 sections
+
+In file order (roughly merge order). Each names its branch; the merge message on
+`quake/overnight` summarises it too.
+
+- **Options menu + screen framing** (`quake/options`) — 4 Hz menu and console cursors;
+  Screen size is `viewsize` again, the view framed by `SCR_CalcRefdef` above the status
+  bar; the gun at `V_CalcRefdef`'s origin; menus fade and print bronze; Reset = `default.cfg`.
+- **Session 7 — oracle-measured render fixes** (`quake/fid1`) — liquids and sky from the
+  raw texel with `Turbulent8`'s math; `R_MakeSky`'s layers; id's alias pipeline
+  (`D_PolysetDraw`, colormapped, affine); the gun's angles; faces without light samples black.
+- **Host loop: Host_FilterTime's 72 fps cap** (`quake/host`) — the 72 fps gate, with a
+  1 ms tolerance.
+- **Frame composition** (`quake/perf-b`) — palette shifts as the software
+  `V_UpdatePalette`'s integer ramps.
+- **World pass: polygon spans, dlit surface cache** (`quake/w1`) — id's fill rule and
+  `D_CalcGradients`; dynamically lit walls through the surface cache; animated wall
+  textures no longer frozen; `R_AddDynamicLights` in integers.
+- **World pass: mip levels, lightmap stepping** (`quake/w2a`) — `D_MipLevelForScale` and a
+  cache block per mip level; `R_DrawSurfaceBlock8`'s integer lightmap stepping.
+- **Census client/host fixes** (`quake/fix-client`) — CENSUS F1 F2 F4 F6 F10 F11 F13–F18,
+  L1 L2 L8 L9 L11 L12 (part) L14 L24.
+- **Census fixes, server side** (`quake/fix-server`) — Chthon's lightning (`MSG_ALL` temp
+  entities); CENSUS F3 F5 F7 F8 F9, L4–L7 L18 L20 L25 (half).
+- **Review fixes** (`quake/polish`) — loading keeps the options; `D_PolysetDraw`'s int
+  wrap; the underwater view in id's 320x200 warp buffer; the unwrapped `intsintable`; the
+  client clock is `cl.time`; `quaketool playtest` framing; prints reach the console.
+- **The 2-D layer against id's composited screen** (`quake/fid2d`) — the 2-D layer 1:1 as
+  WinQuake draws it; id's console; the DOS quit prompt; status-bar and centre-print offsets.
+- **Projection and spans** (`quake/w2b`) — the pixel aspect in the projection (the world
+  was 1.2x tall); `D_DrawSpans16`; the sky centred on the screen; `wasm_exactpersp`.
+- **Web extras: the opt-in departures** (`quake/extras`) — the Web extras page; `viewsize`
+  persists; Esc in fullscreen.
+- **Entity culling and resolved fields** (`quake/sim`) — `SV_WriteEntitiesToClient`'s PVS
+  test and efrag statics (CENSUS L22: flashes lit walls through walls); fields resolved
+  once per progs.
+- **Second review fixes** (`quake/polish2`) — the oracle's underwater rectangle;
+  `D_DrawParticle`; `sv.time` a double; `sv_gravity` outlives the map; per-menu cursors;
+  the Load menu after a reload; a hum that could outlive its stop.
+- **World pass: id's edge renderer** (`quake/edge`) — `r_edge.c`/`d_edge.c` for the world
+  and brush models; entities against the 16-bit z-buffer.
+- **Second review fixes, client side** (`quake/polish3`) — no weapon flash at level start;
+  a mover's stop sound survives the sound cap; console prints reach the notify lines;
+  menu and console key routing; old saves' player name; the warp keeps its tables; demo
+  particles fall by `sv_gravity`; the canvas is the largest 4:3 box.
+
+Without a section here: the census itself (`CENSUS.md`), the oracle (`oracle/README.md`),
+the performance plan (`PERF_PLAN.md`), and the structure-only branches — the render,
+server and quake-wasm splits and the move of the game client into `quake_rs::client` —
+which were byte-identical (STATUS.md).
+
+## Open, as of 2026-09-25
+
+Everything known to differ from id's WinQuake, or not yet checked, gathered from the
+sections below, `CENSUS.md`, `oracle/README.md` and `PERF_PLAN.md`, one line each with
+where it came from. Items marked *(2026-06)* were not re-checked tonight.
+
+**Decisions, not work**
+- Four control departures are on by default: mouse look held while the pointer is locked,
+  WASD over `default.cfg`'s `a`/`d`, `f` for fullscreen, Space adding swim-up speed
+  (CENSUS, "Rule departures on by default").
+
+**Game and client**
+- No `pause` (command, `PAUSE` bind, `SCR_DrawPause`'s plaque) and no loading plaque
+  (`SCR_DrawLoading`) (fid2d; CENSUS L12).
+- Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12, `t` messagemode (CENSUS L12).
+- `give` is not `Host_Give_f`: it clamps, has an armour case, fills a missing amount, and
+  selects the weapon (CENSUS L13).
+- No pitch drift on slopes: `cl.idealpitch` is fixed at 0 (CENSUS L3).
+- `setmodel` on an alias or sprite model sets a zero box (id: ±16, the sprite's size); no
+  shareware effect found (CENSUS L10).
+- `objerror`/`error` do not end the game as `Host_Error` does (CENSUS L16).
+- `makestatic` keeps the edict (id frees it into the signon); nothing visible (CENSUS L17).
+- `checkclient` traces a line of sight instead of using the 0.1 s client PVS (CENSUS L19).
+- The gibbed player's head leaves no blood trail: the client skips the player's edict
+  before trails, where id skips only drawing it (CENSUS L23).
+- The player is the last edict, not edict 1: physics runs it after the map's entities,
+  and edict numbers are one off against id's (CENSUS L25; fix-server).
+- The player connects at `sv.time` 1.2, id's signon at about 1.4 (fix-server, F8).
+- A stuffed `bf` runs in the same host frame; id's `Cbuf_Execute` runs it one frame later
+  (fix-client, F6; accepted).
+- The 72 fps gate gives an 85–100 Hz display half its rate, as id's would (host; accepted).
+- Console `kill` drains only a pending restart, not a same-frame changelevel (2026-06).
+- `quaketool`'s walk paths skip the signon settle frames, to keep their output stable
+  (2026-06, deliberate).
+
+**Demo playback**
+- No dynamic lights in demo playback: explosions and rockets light nothing (Round 4;
+  fix-client F13).
+- Demo statics are drawn without the efrag test (same pixels, more work) (sim).
+- The loop wrap keeps the ambient ramp warm where id restarts it from 0 (2026-06,
+  deliberate).
+
+**Renderer**
+- A map with no lighting lump renders lit; id draws it fullbright. Test maps only (fid1).
+- Edge renderer: id's fixed pools (`r_maxedges`, `r_maxsurfs`, `MAXSPANS`) are growable
+  buffers, so where id would drop far faces the port draws them (id's demos never come
+  close); brush models do not rotate (none do in the shareware); brush entities join the
+  edge list in a fixed order, not `cl_visedicts`' (exact ties only); `r_clearcolor` is
+  fixed at 2; a camera inside solid shows floors id leaves as background (not understood,
+  not reachable in play) (edge).
+- Statics use the edict's float origin and angles, not `svc_spawnstatic`'s bytes, and skip
+  the frustum test on their efrag leaves; the packet-overflow cutoff of
+  `SV_WriteEntitiesToClient` is not modelled (sim).
+- `SV_ClipToLinks` uses `maxs - mins` where id reads `v.size` (differs only if QuakeC sets
+  `mins`/`maxs` without `setsize`) (sim).
+- For a mode taller than 16:10 (not a preset) the underwater warp buffer is narrowed
+  instead of squeezed through id's aspect (polish; w2b).
+- `CL_UpdateTEnts`' `MAX_VISEDICTS` half-cap and its index clobber (undefined in the C)
+  are not modelled (ship push, deliberate).
+- Architecture, not pixels: the framebuffer is RGB, not 8-bit (PERF_PLAN B5); the surface
+  cache has no fixed-size pool; external `b_*.bsp` boxes bypass it (PERF_PLAN C4).
+
+**Menus**
+- Video Options lists the port's modes in one column, not `VID_MenuDraw`'s grid with its
+  test/default keys (options).
+- The browser console has no `d_mipscale`/`d_mipcap` (w2a).
+
+**Sound**
+- Static sounds of one sample are separate Web Audio sources, where `S_Update` combines
+  them (and clamps the sum): several near torches are louder than id's (polish3; ship push).
+- The page plays at most 16 one-shots a frame; past that, keyed ones wait a frame (polish3).
+
+**Older LOW tail** *(2026-05/06, not re-checked)*: `PF_particle`'s byte count and
+direction quantising; `clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s
+integer abs; `OP_ADDRESS`'s world guard; `AngleVectors` in f64; `ST_RAND` syncbase;
+tracer parity; sky-name case; `push_entity`'s trigger order against `SV_Impact`; sprite
+group syncbase (Round 2, Round 5).
+
+**Tooling and docs**
+- `quaketool view --vrect` draws an underwater view unwarped, so the warp below viewsize
+  120 is not compared (polish2).
+- The oracle harness hands the port light styles 0.1 s off at settle ≥ 3 on e1m1
+  (oracle README); sprites and the intermission were never compared.
+- `render/surf.rs`'s `mipadjust` comment has the direction backwards (polish2; still so).
+- `quake-rs/src/lib.rs`'s crate doc still describes only the file-format loaders (found
+  while writing these docs).
+- Engineering: `Vm::intern` never de-duplicates and `vm.output` is never drained in the
+  browser build; both grow for a level's life (CENSUS).
+
+**Not verified**
+- Esc under the Keyboard Lock API in a real fullscreen browser (extras; headless has none).
+- Anything on a real GPU browser, Firefox, Safari, a phone, or a real 120/144 Hz display
+  (PERF_PLAN §9).
+
+---
+
+## The original audit (2026-05-31)
+
 Generated 2026-05-31 by a 17-subsystem map→adversarial-verify pass comparing
 `quake-rs`/`quake-wasm` against id Software's GPL Quake C (`WinQuake/`). **66
 confirmed discrepancies**: 15 high, 24 medium, 27 low (the 27 low are mostly
 cosmetic edge cases; see the workflow result if needed). This is the working
 roadmap toward a fully faithful single-player port. Out of scope (intentional):
-multiplayer/netcode, save/load, audio mixing internals (we use Web Audio),
-video/platform init.
+multiplayer/netcode, save/load (since ported: `quake-rs/src/save.rs`, id's `.sav`
+format), audio mixing internals (we use Web Audio), video/platform init.
 
 Per-subsystem confirmed/rejected: physics 7/0 · user-move 5/1 · builtins 5/2 ·
 sbar 10/0 · renderer 6/1 · particles 6/0 · demo 6/0 · sound 4/0 · sv_main 4/1 ·
@@ -112,11 +265,12 @@ Deferred (documented, lower priority / higher risk):
   -1`) now black like id (Session 7); a map with no lighting lump at all still
   renders Lambert instead of id's row 0 (lightless/test maps only).
 - ✅ **Intermission view** (MED) — fixed in the ship push (2026-06-10).
-- ⬜ LOWs: client_think pre/post-think order; PF_particle byte count/dir quantize;
+- ⬜ LOWs: ~~client_think pre/post-think order~~ (✅ CENSUS L5, `quake/fix-server`); PF_particle byte count/dir quantize;
   clip_box inopen/plane_dist coords; SV_NewChaseDir integer abs; OP_ADDRESS world
-  guard; AngleVectors f64-vs-float (golden-sensitive); ~~sky foreground drift~~ (✅ Session 7); particle
-  on-screen size ramp; ST_RAND syncbase; alias triangle near-clip; tracer parity;
-  lightstyle /264-vs-/256 (golden-sensitive); sky-name case sensitivity.
+  guard; AngleVectors f64-vs-float (golden-sensitive); ~~sky foreground drift~~ (✅ Session 7); ~~particle
+  on-screen size ramp~~ (✅ `quake/polish2`, `D_DrawParticle`); ST_RAND syncbase; ~~alias triangle near-clip~~
+  (✅ Session 7, `R_AliasClipTriangle`); tracer parity;
+  ~~lightstyle /264-vs-/256~~ (✅ Round 5, normalised by 256); sky-name case sensitivity.
 
 ### Round 3 — verify-the-fixes + fresh passes (12 dims) + adversarial verify
 
@@ -318,7 +472,7 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 4. ✅ **Stereo pan law** (`web`) — linear 1±dot with full near-side gain.
 5. ✅ **`svc_particle`** → R_RunParticleEffect (not the rocket explosion).
 
-## Still open
+## Still open (as of 2026-06; superseded by "Open, as of 2026-09-25" at the top)
 
 All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 (see the session entry below). The remaining tail, all LOW / niche:
@@ -386,7 +540,9 @@ ledger:
 
 **Performance:** resolved — see STATUS.md's scorecard (the surface-cache fix +
 clone/alloc hunt landed; 36 fps @1080p idle, per-pixel bound; SIMD remains the
-only further ~2× lever and is unscheduled).
+only further ~2× lever and is unscheduled). *(Superseded by `PERF_PLAN.md`,
+2026-09-25: the larger levers were Quake's own techniques; `simd128` measured
+no gain.)*
 
 ## Session 6 — demo playback parity (2026-06-11, branch `ship/demo-parity`)
 
@@ -473,7 +629,7 @@ seeming not to do the right thing. Both real, plus what they exposed:
 - Open: the Video list is one column (the C's 3-wide grid with "Windowed" /
   "Fullscreen" headers and T/D test/default keys is not modelled); the port's
   2-D layer stays a scaled 320x200 screen (WinQuake draws it 1:1 at higher
-  modes, with a tiled strip beside a 320-wide sbar); pixel aspect stays square
+  modes, with a tiled strip beside a 320-wide sbar) — fixed on `quake/fid2d`; pixel aspect stays square
   (id's 320x200 uses pixelAspect 0.8333 for 4:3 CRTs) — fixed on `quake/w2b`.
 
 Evidence: 489 lib + 67 wasm tests (blink rates, refdef at 100/110/120/90/70/
@@ -623,7 +779,9 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
     79.873 → 79.907 (118 views better, 23 worse), with id at mip 0 + exact
     perspective 97.682 → 97.760 (139 better, 5 worse); 640×480 90.636 →
     90.774 (138 / 6), and 97.611 → 97.801 (144 / 0).
-  - **Open:** the 16 standard rows (`compare.py` world, 320×200 and 640×480,
+  - **Open** *(superseded: after the mip levels, the 16-pixel spans and the edge
+    renderer these rows read 99.91–99.98 against id's x86 spans; see "World pass:
+    id's edge renderer")*: the 16 standard rows (`compare.py` world, 320×200 and 640×480,
     id as shipped and mip 0 + exact) rise on 9 rows and fall by 0.01–0.03
     points on 7 (e1m1 84.76 → 84.74, e1m7 75.65 → 75.62, …; PERF_PLAN A1
     has the table). The lost pixels are single pixels at texel boundaries
@@ -656,7 +814,8 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
     draws none) and about 3% are one colormap row off. That is the class-6
     lightmap interpolation (oracle README), which a dlight's steep gradient
     brings out more than static light does. So dlit lighting is per texel
-    now, but not id's texel for texel until class 6 is ported.
+    now, but not id's texel for texel until class 6 is ported. (Ported on
+    `quake/w2a`, "Dynamic lights at the chosen level" below.)
   - **e1m1's lit frames** also carry the settle ≥ 3 light-style offset of the
     harness (oracle README).
 - ✅ **`R_AddDynamicLights` in the C's integers.** The per-luxel distance
@@ -966,10 +1125,13 @@ exact and the other six are four explained residues (95.5-99.9%). Goldens unchan
   320x200 screen to fill the framebuffer. `draw::screen_2d` is now the screen
   id's code lays out on: the framebuffer at scale 1 by default, or with the new
   **"scaled 2-D" extra** (`draw::set_scaled_2d`, wasm export `set_scaled_2d(1)`)
-  the old 320x200 blow-up. 640x400: 1-55% of 2-D pixels -> 99-100%. **Needs
+  the old 320x200 blow-up. 640x400: 1-55% of 2-D pixels -> 99-100%. ~~**Needs
   wiring** into the page's extras (not done here: the Extras menu and the
   page's persistence are another branch's); until then the browser's default
-  960x600 shows id's small bar and menus.
+  960x600 shows id's small bar and menus.~~ Wired since (`dafa2c7`): "Scaled 2-D
+  layer" on Options > Web extras, `wasm_scaled2d`, persisted; and the page's canvas
+  grew to the largest 4:3 box the window fits (`quake/polish3`), so the 1:1 bar is
+  not tiny.
 - ✅ **The console** (`d27eebb`) — a fixed 60% panel that snapped on and off,
   the conback's top rows squeezed into it, its own text layout. Now
   `SCR_SetUpToDrawConsole` (screen.c:458: `scr_con_current` slides 300 rows a
@@ -1168,6 +1330,7 @@ earlier verify scripts).
 | Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
 | Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
 | Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s). | departure, opt-in via Web extras, default off |
+| Scaled 2-D layer | `wasm_scaled2d 0\|1` | the status bar, menus, console and text blown up from a 320x200 screen, the port's old layout, instead of WinQuake's 1:1 2-D layer (`draw::set_scaled_2d`, `quake/fid2d`'s). Added by the chair after this branch (`dafa2c7`, extras bit 8). | departure, opt-in via Web extras, default off |
 
 Faithful, same branch:
 - ✅ **viewsize persists across reloads** — id's `scr_viewsize` is archived
@@ -1187,7 +1350,7 @@ Esc row, layout and colours, bits) and `draw_fps` placement; quake-wasm tests
 for `host_frame_time` (every refresh at 60..240 Hz, clamps), 72 vs 144 frames
 a second at 144 Hz through `step`, the FPS window, the readout confined to its
 box and byte-identical when off, the `wasm_*` commands and the exports;
-`web/verify_extras.py` 36/36.
+`web/verify_extras.py` 36/36 (40/40 at `3ba835f`, with the fourth extra).
 
 ## Entity culling and resolved fields (PERF_PLAN C1, D2; 2026-09-25, branch `quake/sim`)
 
@@ -1648,4 +1811,4 @@ Found, not fixed:
 
 ## LOW (27)
 
-Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.
+Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (~~SV_TryUnstick/WallFriction~~ (✅ Round 2), ~~force_retouch~~ (✅ CENSUS F8, `quake/fix-server`), sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled. The current list is "Open, as of 2026-09-25" at the top.
