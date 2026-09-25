@@ -182,7 +182,7 @@ demo1 at 2602 / 1007 / 516 fps at 320x200 / 640x400 / 960x600 where id's C runs 
 
 ## What is left
 
-- **The control departures** above: a decision, not work.
+- **The departures** above (the controls, the attract loop behind the menu): a decision, not work.
 - **Missing binds:** `default.cfg`'s F-keys and `t` (`messagemode`). (No loading plaque
   either, on purpose: a level loads within one frame.)
 - **Demo playback makes no dynamic lights** (explosions light the walls live, not in demos).
