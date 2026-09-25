@@ -4,9 +4,7 @@
 //! Source: `WinQuake/screen.c` — `SCR_CalcRefdef` (with `R_SetVrect`, `r_main.c`),
 //! `SCR_UpdateScreen`'s tile-cleared border, `SCR_DrawCenterString`.
 
-use crate::draw::{
-    draw_char_scaled, draw_tile_clear, HUD_VIRT_W, MENU_VIRT_H, MENU_VIRT_W,
-};
+use crate::draw::{draw_char_scaled, draw_tile_clear, screen_2d};
 use crate::render::Image;
 
 // ---------------------------------------------------------------------------
@@ -62,10 +60,11 @@ pub struct Refdef {
 /// centred horizontally on the screen and vertically in the space above the
 /// status bar.
 ///
-/// The one adaptation: this port draws the 2-D layer (status bar, menus) as the
-/// 320x200 virtual screen scaled by `vid_w/320`, so the status bar the view must
-/// clear (`lineadj`) is `sb_lines` scaled to framebuffer rows — exactly the
-/// rows [`draw_hud_into`](crate::sbar::draw_hud_into) paints. At 320x200 every number is the C's.
+/// The status bar the view must clear (`lineadj`) is `sb_lines` 2-D rows,
+/// which the "scaled 2-D" extra ([`crate::draw::set_scaled_2d`]) makes
+/// `sb_lines * scale` framebuffer rows — exactly the rows
+/// [`draw_hud_into`](crate::sbar::draw_hud_into) paints. Without the extra
+/// every number is the C's, in every mode.
 ///
 /// The arithmetic keeps the C's types: `size` is a `float`, the products are
 /// truncated to `int` (so e.g. 70% of 320 is `(int)(320 * 0.7f) = 224`, as an
@@ -94,9 +93,9 @@ fn status_lines(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -
     } else {
         SB_LINES_FULL
     };
-    // The status bar's framebuffer rows: draw_hud_into scales the 320-wide bar
-    // by vid_w/320 and bottom-anchors it, so it covers ceil(sb_lines * scale).
-    let scale = vid_w as f32 / HUD_VIRT_W;
+    // The status bar's framebuffer rows: sb_lines 2-D rows, bottom-anchored
+    // (ceil(sb_lines * scale) under the "scaled 2-D" extra).
+    let scale = screen_2d(vid_w, vid_h).scale;
     let lineadj = ((sb_lines as f32 * scale).ceil() as i64).clamp(0, vid_h as i64);
     (viewsize, sb_lines, lineadj)
 }
@@ -145,7 +144,8 @@ pub const WARP_HEIGHT: usize = 200;
 /// own size (the stretch is 1:1). A larger one is scaled down to 320 wide,
 /// then capped at 200 high, and R_SetVrect runs on that with the status-bar
 /// lines scaled by the same factor: `(int)(sb_lines * (h / vid.height))`
-/// (here the port's scaled `lineadj`, the C's unscaled sbar). At every 16:10
+/// (the 2-D layer's `lineadj`: the C's own unless the "scaled 2-D" extra is
+/// on). At every 16:10
 /// mode — all of [`RESOLUTION_PRESETS`](crate::menu::RESOLUTION_PRESETS) —
 /// that is the 320x200 screen's own view rectangle.
 ///
@@ -225,7 +225,7 @@ pub fn compose_view(
 /// lands one row higher — 69 on a 200-line screen, not 70 (measured: the
 /// oracle's x87 build draws row 69). In f64 the product rounds up to 70.0,
 /// so this is the exact floor in integers: `floor(height*0.35 - epsilon)`.
-fn center_string_top(vid_h: i32) -> i32 {
+pub(crate) fn center_string_top(vid_h: i32) -> i32 {
     (vid_h * 7 - 1).div_euclid(20)
 }
 
@@ -250,26 +250,19 @@ pub fn draw_center_string_revealed(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let sx = image.w as f32 / MENU_VIRT_W;
-    let sy = image.h as f32 / MENU_VIRT_H;
-    let scale = sx.min(sy);
-    if !scale.is_finite() || scale <= 0.0 {
-        return;
-    }
-    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
-    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
-
+    let sc = screen_2d(image.w, image.h);
     let lines: Vec<&str> = text.split('\n').collect();
     // scr_center_lines <= 4 => y = vid.height*0.35; taller => 48.
-    let mut vy = if lines.len() <= 4 { center_string_top(MENU_VIRT_H as i32) as f32 } else { 48.0 };
+    let mut vy = if lines.len() <= 4 { center_string_top(sc.h) as f32 } else { 48.0 };
     let mut budget = remaining;
     for line in lines {
         // The C scans the line width up to 40 characters.
         let bytes = line.as_bytes();
         let l = bytes.len().min(40);
-        let vx = (MENU_VIRT_W - l as f32 * 8.0) * 0.5;
+        // x = (vid.width - l*8)/2, an int.
+        let vx = ((sc.w - l as i32 * 8) / 2) as f32;
         for (j, &c) in bytes[..l].iter().enumerate() {
-            draw_char_scaled(image, conchars, vx + j as f32 * 8.0, vy, c, scale, ox, oy, palette);
+            draw_char_scaled(image, conchars, vx + j as f32 * 8.0, vy, c, sc.scale, 0.0, 0.0, palette);
             if budget == 0 {
                 return; // `if (!remaining--) return;` — this char was the last.
             }
@@ -424,8 +417,14 @@ mod tests {
 
     #[test]
     fn calc_refdef_scales_the_status_bar_with_the_2d_layer() {
-        // The port's 2-D layer is the 320x200 screen scaled by w/320, so the
+        // id: the status bar is 48 rows in every mode.
+        assert_eq!(calc_refdef(960, 600, 100.0, false).vrect, vr(0, 0, 960, 552));
+        assert_eq!(calc_refdef(480, 300, 100.0, false).vrect, vr(0, 0, 480, 252));
+        assert_eq!(calc_refdef(1120, 700, 110.0, false).vrect, vr(0, 0, 1120, 676));
+        assert_eq!(calc_refdef(960, 600, 50.0, false).vrect, vr(240, 126, 480, 300));
+        // The "scaled 2-D" extra: the 320x200 screen scaled by w/320, so the
         // view clears exactly the rows draw_hud_into paints: 48*scale.
+        let _extra = crate::draw::Scaled2dGuard::set(true);
         assert_eq!(calc_refdef(960, 600, 100.0, false).vrect, vr(0, 0, 960, 456));
         assert_eq!(calc_refdef(480, 300, 100.0, false).vrect, vr(0, 0, 480, 228));
         assert_eq!(calc_refdef(1120, 700, 110.0, false).vrect, vr(0, 0, 1120, 616));
@@ -455,6 +454,12 @@ mod tests {
         for vs in [30.0, 50.0, 100.0, 110.0, 120.0] {
             assert_eq!(warp_vrect(320, 200, vs, false), calc_refdef(320, 200, vs, false).vrect);
         }
+        // id's 48-row bar on a 960x600 screen is (int)(48 * 200/600) = 16 rows
+        // of the warp buffer.
+        assert_eq!(warp_vrect(960, 600, 100.0, false), vr(0, 0, 320, 184));
+        assert_eq!(warp_vrect(640, 400, 100.0, false), vr(0, 0, 320, 176));
+        // The "scaled 2-D" extra's bar is 48 rows of the 320x200 screen.
+        let _extra = crate::draw::Scaled2dGuard::set(true);
         // Every 16:10 preset renders underwater into the 320x200 screen's view
         // rectangle (the status-bar lines scaled back by h / vid.height) —
         // which D_WarpScreen stretches over the preset's own view rectangle.

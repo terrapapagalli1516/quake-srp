@@ -1589,7 +1589,15 @@ mod tests {
         let (u640, c) = frame_at(&mut w, under, 640, 400);
         assert_eq!(c, quake_rs::bsp::CONTENTS_WATER);
         let (u320, _) = frame_at(&mut w, under, 320, 200);
-        assert_eq!(u640, u320, "underwater: the same 320x152 render at both sizes");
+        // id's 48-row bar is (int)(48 * 200/400) = 24 rows of the warp buffer
+        // at 640x400: a 320x176 render, taller than 320x200's 320x152.
+        assert!(u640 > u320, "underwater: 320x176 at 640x400 ({u640} vs {u320})");
+        {
+            // The "scaled 2-D" extra's bar is 48 rows of the 320x200 screen.
+            let _extra = Scaled2dGuard::set(true);
+            let (s640, _) = frame_at(&mut w, under, 640, 400);
+            assert_eq!(s640, u320, "underwater, scaled 2-D: the same 320x152 render at both sizes");
+        }
         let (a640, c) = frame_at(&mut w, above, 640, 400);
         assert_eq!(c, quake_rs::bsp::CONTENTS_EMPTY);
         let (a320, _) = frame_at(&mut w, above, 320, 200);

@@ -5,12 +5,12 @@
 //! `M_DrawSlider`, `bindnames`; the video list is `vid_win.c`'s `VID_MenuDraw`.
 
 use crate::draw::{
-    blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, fill_rect, MENU_VIRT_H,
+    blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, fill_rect, screen_2d,
     MENU_VIRT_W,
 };
 use crate::keys::{default_bindings, keynum_to_string, K_ESCAPE};
 use crate::render::Image;
-use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{center_string_top, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 
 // ---------------------------------------------------------------------------
 // Main menu (a port of menu.c: M_Main_Draw/_Key, M_SinglePlayer_Draw/_Key)
@@ -1407,10 +1407,10 @@ fn draw_slider(
 /// Draw the main menu (or single-player submenu) over `image`, a port of
 /// `M_Main_Draw` / `M_SinglePlayer_Draw`.
 ///
-/// The layout is Quake's fixed 320x200 virtual canvas, scaled to fit `image`
-/// (`scale = min(w/320, h/200)`) and centered, so it looks identical on the
-/// 320x200 wasm framebuffer (scale 1, no offset) and on the 640x400 PPM the tool
-/// writes (scale 2, centered).
+/// The layout is menu.c's 320-wide one, centred across the top of the
+/// [`screen_2d`] screen as `M_DrawPic`'s `(vid.width - 320)>>1` centres it —
+/// at the framebuffer's own pixel size, or blown up with the "scaled 2-D"
+/// extra.
 ///
 /// Two clocks, exactly like the C: `host_time` (the clamped-frametime host
 /// clock) drives the animated menudot spinner, `(int)(host_time*10) % 6`
@@ -1434,16 +1434,15 @@ pub fn draw_menu(
     if !menu.visible || image.w == 0 || image.h == 0 {
         return;
     }
-    // Fit the 320x200 canvas into the frame, centered (integer-ish scale keeps
-    // the pixel art crisp; we allow any positive scale and center the remainder).
-    let sx = image.w as f32 / MENU_VIRT_W;
-    let sy = image.h as f32 / MENU_VIRT_H;
-    let scale = sx.min(sy);
+    // M_DrawPic / M_DrawCharacter: `x + ((vid.width - 320)>>1)`, y as given —
+    // the 320-wide menu centred across the top of the 2-D screen.
+    let sc = screen_2d(image.w, image.h);
+    let scale = sc.scale;
     if !scale.is_finite() || scale <= 0.0 {
         return;
     }
-    let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
-    let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
+    let ox = ((sc.w - MENU_VIRT_W as i32) >> 1) as f32 * scale;
+    let oy = 0.0;
 
     // M_Draw: the game/demo underneath fades first (Draw_FadeScreen). (The
     // C's other branch, the console background under a forced-up console,
@@ -1454,7 +1453,7 @@ pub fn draw_menu(
     // SCR_DrawNotifyString) — the menu itself is not drawn.
     if menu.new_game_confirm {
         if let Some(cc) = conchars {
-            draw_notify_string(image, cc, NEW_GAME_CONFIRM, scale, ox, oy, palette);
+            draw_notify_string(image, cc, NEW_GAME_CONFIRM, scale, palette);
         }
         return;
     }
@@ -1854,26 +1853,28 @@ fn draw_help_screen(
 /// `M_SinglePlayer_Key`'s New Game question (SCR_ModalMessage).
 const NEW_GAME_CONFIRM: &str = "Are you sure you want to\nstart a new game?\n";
 
-/// `SCR_DrawNotifyString` (screen.c): each line (up to 40 columns) centred,
-/// from `y = vid.height*0.35`, in plain (white) conchars.
+/// `SCR_DrawNotifyString` (screen.c): each line (up to 40 columns) centred on
+/// the screen, from `y = vid.height*0.35` (x87's row 69 on a 200-line screen,
+/// [`center_string_top`]), in plain (white) conchars.
 fn draw_notify_string(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
     text: &str,
     scale: f32,
-    ox: f32,
-    oy: f32,
     palette: &[[u8; 3]; 256],
 ) {
-    let mut y = (MENU_VIRT_H * 0.35).floor();
+    // vid.width / vid.height of the 2-D screen: the text is placed on it, not
+    // on the menu's centred 320 columns.
+    let sc = screen_2d(image.w, image.h);
+    let mut y = center_string_top(sc.h) as f32;
     let mut lines: Vec<&str> = text.split('\n').collect();
     if text.ends_with('\n') {
         lines.pop(); // the loop stops at the terminating NUL after the last \n
     }
     for line in lines {
         let line = &line[..line.len().min(40)];
-        let x = ((MENU_VIRT_W as i32 - line.len() as i32 * 8) / 2) as f32;
-        draw_string_scaled(image, conchars, x, y, line, scale, ox, oy, palette);
+        let x = ((sc.w - line.len() as i32 * 8) / 2) as f32;
+        draw_string_scaled(image, conchars, x, y, line, scale, 0.0, 0.0, palette);
         y += 8.0;
     }
 }

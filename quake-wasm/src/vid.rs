@@ -90,6 +90,22 @@ pub extern "C" fn viewsize() -> f32 {
     })
 }
 
+/// The "scaled 2-D" extra (not id; off by default): `1` draws the status bar,
+/// menus, console and text as id's 320x200 screen blown up to fill the
+/// framebuffer, `0` at their own pixel size as WinQuake does in every mode
+/// ([`quake_rs::draw::set_scaled_2d`]). For the page's extras; takes effect
+/// on the next frame.
+#[no_mangle]
+pub extern "C" fn set_scaled_2d(on: i32) {
+    quake_rs::draw::set_scaled_2d(on != 0);
+}
+
+/// `1` while the "scaled 2-D" extra is on ([`set_scaled_2d`]).
+#[no_mangle]
+pub extern "C" fn scaled_2d() -> i32 {
+    quake_rs::draw::scaled_2d() as i32
+}
+
 #[no_mangle]
 pub extern "C" fn framebuffer() -> *const u8 {
     APP.with(|c| {

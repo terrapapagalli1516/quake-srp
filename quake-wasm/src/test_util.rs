@@ -82,3 +82,20 @@ pub(crate) fn close_menu() {
 pub(crate) fn menu_screen() -> render::MenuScreen {
     APP.with(|c| c.borrow().as_ref().unwrap().menu.screen())
 }
+
+/// The "scaled 2-D" extra on for as long as the guard lives, then back off
+/// (so a failing test cannot leak it into the next test on its thread).
+pub(crate) struct Scaled2dGuard;
+
+impl Scaled2dGuard {
+    pub(crate) fn set(on: bool) -> Scaled2dGuard {
+        quake_rs::draw::set_scaled_2d(on);
+        Scaled2dGuard
+    }
+}
+
+impl Drop for Scaled2dGuard {
+    fn drop(&mut self) {
+        quake_rs::draw::set_scaled_2d(false);
+    }
+}
