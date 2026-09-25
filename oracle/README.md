@@ -26,7 +26,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the 16-pixel segments of the x86 asm `D_DrawSpans16` (what DOS/Win players saw, `d_subdiv16 1`); 1 = exact per-pixel perspective (an experiment, not id) |
 | `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
-| `--viewmodel` | draw the weapon too |
+| `--viewmodel` | draw the weapon too (the port is handed id's `cl.viewent` origin and angles, `quaketool view --viewent`) |
 | `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD |
 | `--quaketool PATH` / `--oracle PATH` | A/B a different build of either side |
 
@@ -87,35 +87,50 @@ the steady eye. (The port's live path starts `oldz` at the origin, so its first
 
 ## Results (320x200 unless stated, 2026-09-25)
 
+After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below,
+see `AUDIT.md`; the numbers before them are in the git history of this file).
+
 Headline — id's C as written (`D_DrawSpans8`, its own mip levels) vs the port:
 
 | map | world exact% | with entities | entity pixels exact% | 640x480 world |
 |---|---:|---:|---:|---:|
 | e1m1 | 84.76 | 84.75 | 0.0 (16 px) | 90.79 |
-| e1m2 | 60.16 | 60.04 | 14.6 (403 px) | 72.78 |
-| e1m3 | 65.83 | 65.74 | 18.6 (226 px) | 90.74 |
-| e1m7 | 75.48 | 75.45 | 8.5 (59 px) | 94.43 |
+| e1m2 | 64.07 | 64.34 | 97.8 (363 px) | 78.19 |
+| e1m3 | 65.83 | 65.83 | 44.8 (221 px) | 90.74 |
+| e1m7 | 75.65 | 75.67 | 58.2 (55 px) | 94.55 |
+
+The entity-pixel column counts the world pixels around and behind an entity too,
+so it is dominated by class 1 here; with id's mip 0 + exact perspective it reads
+93.75 / 99.72 / 99.53 / 98.15 (was 93.75 / 15.92 / 70.97 / 45.76). nonpal% is 0 in
+every case (was up to 0.45).
 
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
-1432.386,1397.978,233.254,9.344,-103.449,0`) scores 71.5% world / 71.0% with
-entities. With the viewmodel drawn (`--viewmodel --settle 3`), e1m1 drops from
-84.8% to 79.7%.
+1432.386,1397.978,233.254,9.344,-103.449,0`) scores 73.95% world / 74.50% with
+entities, its entity pixels 100.00% (was 71.5 / 71.0 / 21.8). With the viewmodel
+drawn (`--viewmodel --settle 3`), e1m1 scores 84.34%, the same as the world-only
+frame at that settle (84.33; was 79.7 with the gun). At a settle of 3 or more e1m1's
+far arch differs for a harness reason: id's light styles in that frame (its
+`.json`) are the ones the port derives for 0.1 s earlier (measured) — probably id flooring a double
+`cl.time` that the harness hands over rounded to a float. Passing id's `d_lightstylevalue` to
+the port would remove it (not done).
 
 **Attribution ladder** — id's renderer made to drop one known difference at a time
 (world only; `characterise.sh` prints it):
 
 | id's renderer configured as | e1m1 | e1m2 | e1m3 | e1m7 |
 |---|---:|---:|---:|---:|
-| as written (`--spans 8`) | 84.76 | 60.16 | 65.83 | 75.48 |
-| 16-px segments (`--spans 16`, the x86 asm) | 80.39 | 59.87 | 65.33 | 67.80 |
-| exact per-pixel perspective (`--spans 1`) | 86.97 | 60.36 | 66.00 | 80.22 |
-| mip 0 forced (`--c-cmd "d_mipscale 0"`) | 93.13 | 89.67 | 97.13 | 93.17 |
-| mip 0 + exact perspective | 95.63 | 93.50 | 98.39 | 98.50 |
-| ... and the port given id's lightmap stepping (temporary patch, not committed) | 99.96 | 95.98 | 99.87 | 99.74 |
+| as written (`--spans 8`) | 84.76 | 64.07 | 65.83 | 75.65 |
+| 16-px segments (`--spans 16`, the x86 asm) | 80.39 | 63.79 | 65.33 | 67.98 |
+| exact per-pixel perspective (`--spans 1`) | 86.98 | 64.27 | 66.00 | 80.39 |
+| mip 0 forced (`--c-cmd "d_mipscale 0"`) | 93.13 | 93.59 | 97.13 | 93.35 |
+| mip 0 + exact perspective | 95.63 | 97.41 | 98.39 | 98.68 |
+| ... and the port given id's lightmap stepping (temporary patch, not committed; measured BEFORE the Session 7 fixes) | 99.96 | 95.98 | 99.87 | 99.74 |
 
 With that last step at 640x480: 99.91 / 94.45 / 99.75 / 99.80, and a pitched and
-rolled view (e1m1, pitch -15 yaw 100 roll 12) 99.96. The e1m2 remainder is the sky
-and two water pools (classes 4-5 below). What is left elsewhere (0.04-0.26%) is the
+rolled view (e1m1, pitch -15 yaw 100 roll 12) 99.96. The e1m2 remainder then was
+the sky and two water pools (classes 3, 4, 8 below, since fixed: the e1m2 sky
+region now matches 99.8%; the pools' scattered residue, ~2%, is probably class 7 —
+id steps turb s/t over 16-pixel segments — not verified). What is left elsewhere (0.04-0.26%) is the
 size of id's own floating-point noise: the oracle built with SSE2 float math
 instead of x87 (`ORACLE_FPMATH=sse oracle/build.sh`) differs from the x87 build on
 0.003-0.031% of pixels. So **projection, fov, pixel centres, edge rules, near
@@ -130,14 +145,14 @@ classes a crop is not about removed on id's side where possible.
 | # | class | size | verdict |
 |---|---|---|---|
 | 1 | mip level selection | 5-37 pts of exact% | departure |
-| 2 | alias-model lighting / shading | 80-90% of entity pixels | bug |
-| 3 | liquids and sky drawn overbright | ~75% of liquid/sky pixels | bug |
-| 4 | sky front layer not offset | the whole cloud layer | bug |
-| 5 | weapon viewmodel placement | ~5 pts when drawn | bug |
+| 2 | alias-model lighting / shading | 80-90% of entity pixels | bug — **fixed** (Session 7) |
+| 3 | liquids and sky drawn overbright | ~75% of liquid/sky pixels | bug — **fixed** |
+| 4 | sky front layer not offset | the whole cloud layer | bug — **fixed** |
+| 5 | weapon viewmodel placement | ~5 pts when drawn | bug — **fixed** |
 | 6 | surface-cache lightmap stepping | 1.5-4.4% | departure |
 | 7 | affine span segments | 1-5% | expected so far (design) |
-| 8 | turb warp rounding | ~20-25% of liquid pixels | departure (minor) |
-| 9 | sample-less faces | not seen in these views | departure (code) |
+| 8 | turb warp rounding | ~20-25% of liquid pixels | departure — **fixed** |
+| 9 | sample-less faces | the e1m1 golden view shows one | departure — **fixed** |
 
 1. **Mip levels** (`crops/mip.png`). The port always samples mip 0; id picks a mip
    per surface (`D_MipLevelForScale` on `nearzi * scale_for_mip * mipadjust`,
@@ -155,14 +170,17 @@ classes a crop is not about removed on id's side where possible.
    `R_AliasTransformFinalVert`, then Gouraud colormap rows in `D_PolysetDraw` —
    fullbright texels untouched. Only 8-19% of entity pixels match. id
    also draws alias triangles affine (the port: perspective-correct) — minor,
-   masked by the lighting.
+   masked by the lighting. **Fixed:** the port now runs a port of that whole
+   pipeline (`R_AliasCheckBBox`, `R_AliasClipTriangle`, `D_PolysetDraw`'s
+   fixed-point edge walker, affine, recursive subdivision for far models) — the
+   altar view's entity pixels match 100%.
 3. **Liquids and sky overbright** (`crops/liquid.png`, `crops/pools.png`). The port
    maps turb and sky texels through colormap **row 0**, the brightest row (about
    2x); id writes the raw texel (`D_DrawTurbulent8Span`, `D_DrawSkyScans8` — no
    colormap; the identity is around row 31/32). Looking down at e1m1's water: 21%
    match, and 72-80% of liquid/sky pixels equal `palette[colormap[0][id's texel]]`.
-   Lava survives because its texels are fullbright indices. `render.rs` around the
-   `SurfaceMode::Turb | SurfaceMode::Sky => 0` row choice.
+   Lava survives because its texels are fullbright indices. **Fixed** (raw texel):
+   e1m1 water from above 21% -> 99.45% with class 8.
 4. **Sky layers** (`crops/sky.png`). id's `R_MakeSky` composites the front layer
    shifted by `(int)(skytime*skyspeed)` texels in both axes over the unshifted back
    layer, then `D_Sky_uv_To_st` adds `skytime*skyspeed` to both — front scrolls at
@@ -171,11 +189,18 @@ classes a crop is not about removed on id's side where possible.
    (only the class-3 brightness remains). Also expected-minor: id samples the sky
    exactly only every 32 pixels (`SKY_SPAN_SHIFT`) and uses the integer screen
    centre. (AUDIT's LOW "sky foreground drift" is this, and it is not small.)
+   **Fixed**, the 32-pixel spans included (the world pass defers its sky pixels
+   and redraws each visible run of a sky face as one span): the e1m2 sky region
+   matches 99.8%. Open: at a viewsize below 120 id's sky centre is the SCREEN's
+   (`vid.width>>1`), not the view rectangle's; the port uses the view's.
 5. **Viewmodel** (`crops/viewmodel.png`). The port hangs the gun with invented
    offsets (`OFS_FORWARD 7`, `OFS_RIGHT 1.5`, `OFS_UP 3.5`) and its own depth buffer;
    id puts `cl.viewent` at the eye (+ bob, + the `scr_viewsize` fudge), angles from
    `CalcGunAngle`, drawn by `R_AliasDrawModel` like any alias model. The port's
-   shotgun is several times larger and in a different place.
+   shotgun is several times larger and in a different place. **Fixed** (the
+   origin with the options branch; then the alias pipeline, the camera's 1/32
+   epsilon, full-pitch bob, CalcGunAngle's pre-punch angles, the tripled 1/z):
+   the frame with the gun matches as well as the frame without it.
 6. **Lightmap stepping** (`crops/lightmap.png`). id's `R_DrawSurfaceBlock8_mip0`
    interpolates the already inverted, clamped light (`t = (255*256 - bl) >> 2`,
    `>= 64`) with `>> 4` integer steps, and horizontally walks from the **right**
@@ -193,11 +218,14 @@ classes a crop is not about removed on id's side where possible.
 8. **Turb warp.** The port rounds `sintable` to whole texels and floors s/t before
    adding; id adds the 16.16 table value to the fixed-point coordinate and then
    takes `>> 16`, over 16-pixel segments. About a fifth of liquid pixels land one
-   texel off once class 3 is factored out.
-9. **Sample-less faces** (`lightofs == -1`, ~375 world faces in e1m1, ~430 in e1m2).
+   texel off once class 3 is factored out. **Fixed** (per pixel; id's 16-pixel
+   linear segments are class 7).
+9. **Sample-less faces** (`lightofs == -1`, ~375 world faces in e1m1, ~430 in e1m2 —
+   ordinary textures, not the sky/turb faces, which are counted apart).
    id's `R_BuildLightMap` leaves them at ambient 0, i.e. colormap row 63 (black);
-   the port draws them at normal brightness. Not visible in any view measured here
-   (the class ladder reaches 99.9% without it), so it is a code-reading verdict.
+   the port drew them at normal brightness. Not visible in the views above, but
+   the e1m1 golden camera shows one (a recessed panel edge). **Fixed**; still
+   open: a map with no lighting lump (id: fullbright) renders Lambert.
    AUDIT's "lightless/test maps only" is wrong about where such faces exist.
 
 Brush entities (doors, plats, `b_*.bsp` boxes) matched about as well as the world

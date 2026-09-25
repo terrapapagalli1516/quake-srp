@@ -108,12 +108,13 @@ Fixed:
 
 Deferred (documented, lower priority / higher risk):
 - ✅ **R_MarkLights BSP dlight gating** (MED) — fixed in the ship push (2026-06-10).
-- ⬜ **No-lightmap face fullbright/black** (MED) — sample-less faces render Lambert
-  instead of row 0 / row 63; narrow (lightless/test maps), golden-sensitive.
+- ✅/⬜ **No-lightmap face fullbright/black** (MED) — sample-less faces (`lightofs
+  -1`) now black like id (Session 7); a map with no lighting lump at all still
+  renders Lambert instead of id's row 0 (lightless/test maps only).
 - ✅ **Intermission view** (MED) — fixed in the ship push (2026-06-10).
 - ⬜ LOWs: client_think pre/post-think order; PF_particle byte count/dir quantize;
   clip_box inopen/plane_dist coords; SV_NewChaseDir integer abs; OP_ADDRESS world
-  guard; AngleVectors f64-vs-float (golden-sensitive); sky foreground drift; particle
+  guard; AngleVectors f64-vs-float (golden-sensitive); ~~sky foreground drift~~ (✅ Session 7); particle
   on-screen size ramp; ST_RAND syncbase; alias triangle near-clip; tracer parity;
   lightstyle /264-vs-/256 (golden-sensitive); sky-name case sensitivity.
 
@@ -322,8 +323,8 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 (see the session entry below). The remaining tail, all LOW / niche:
 
-- **No-lightmap face fullbright/black** (MED but narrow — lightless/test maps
-  only, golden-sensitive).
+- **Lightless maps** (no lighting lump): Lambert instead of id's fullbright row 0
+  (narrow; test maps only). Sample-less faces in lit maps: ✅ Session 7.
 - Demo explosion dlight. (~~Sound channel override only dedups within a
   frame~~ — ✅ closed in Session 6: cross-frame (entity,channel) override +
   S_StopSound in the page registry, live + demo.)
@@ -481,6 +482,68 @@ binds, console commands, Video mode, e1m1 framing, fudge); clippy 0/0; all six
 verify_*.py green (verify_menu 60/60 incl. reload persistence); goldens
 byte-identical `fb14bd65`/`a6f98d8a`/`0211e6d4` (the scene camera has no
 status bar or viewmodel).
+
+## Session 7 — oracle-measured render fixes (2026-09-25, branch `quake/fid1`)
+
+Each fix measured with `oracle/compare.py` (id's own renderer, headless); the
+numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
+
+- ✅ **Liquids and sky overbright** (class 3) — turb/sky went through colormap
+  row 0 (~2x); id's `D_DrawTurbulent8Span`/`D_DrawSkyScans8` store the raw
+  texel. **Turb warp** (class 8) — now `Turbulent8`'s 16.16 math: `sintable`
+  in fixed point (id's `3.14159`, 256 entries, not periodic), added before the
+  `>>16`, on `(s+8192)<<16` (`Mod_LoadFaces`' turb `texturemins`). e1m1 water
+  from above 21.1% → 99.45%. Goldens: e1m2 `a6f98d8a` → `76905e15`.
+- ✅ **Sky layers + sampling** (class 4; was the LOW "sky foreground drift") —
+  the front layer is now `R_MakeSky`'s composite, shifted `(int)(skytime*8)`
+  texels over the back (so it scrolls at 2x), `skytime` wrapped at 512 s
+  (`R_SetSkyFrame`), `D_Sky_uv_To_st` at the integer pixel and screen centre.
+  And `D_DrawSkyScans8`'s spans: the world pass records its sky pixels and
+  `resolve_sky_spans` redraws each visible run of one sky face exactly every 32
+  pixels, stepped between. e1m2 sky region (130,0,65,32, mip 0 + exact
+  perspective on id's side): 15.6% at the start, 23.5% after the class-3 fix,
+  93.2% with the layers, 99.8% with the spans. e1m2 world 61.25 → 64.07.
+  Goldens unchanged (no sky in them).
+- ✅ **Alias models** (class 2; the old "alias-model colormap LUT" item) — the
+  port lit them with its own heuristic and an RGB multiply (off-palette
+  colours, fullbright flames darkened) and rasterised them perspective-correct.
+  Now every alias model and the gun go through a port of id's pipeline:
+  `R_DrawEntitiesOnList`/`R_DrawViewModel` light (R_LightPoint + dlights,
+  128/192 clamps, gun >= 24), `R_AliasSetupLighting` (`LIGHT_MIN`, the
+  `{-1,0,0}` light vector in the model frame), `R_AliasCheckBBox`
+  (trivial accept, subdivision beyond `r_aliastransition`, `size/11`),
+  per-vertex `r_avertexnormals` light, `R_AliasClipTriangle`, and
+  `D_PolysetDraw` — affine, Gouraud, integer vertices, `acolormap[texel +
+  (light & 0xFF00)]`, 16-bit-z semantics against the shared z-buffer, the
+  gun's 1/z tripled. Entity pixels (id with mip 0 + exact perspective):
+  e1m2 15.9% → 99.7%, e1m3 71.0% → 99.5%, e1m7 45.8% → 98.2%; the e1m2 altar
+  view (ogre + two flames) 21.8% → 100.0% with id as shipped. nonpal% is 0
+  everywhere. Goldens: `fb14bd65` → `d103ba3f`, `76905e15` → `a833cbac`,
+  `0211e6d4` → `ed42c092` (monsters/items in all three).
+- ✅ **Viewmodel** (class 5; the placement itself landed with the options
+  branch) — what still differed from id: the gun is drawn by the alias
+  pipeline above (lighting, affine, tripled 1/z in the shared z-buffer
+  instead of a private depth buffer, no gun at fov > 90); its origin lacks
+  the camera's 1/32 node-line epsilon (-1/32 relative, ~0.5 px at 320x200);
+  the bob moves it along the full view pitch (V_CalcRefdef has just set the
+  entity angles to the view's, not the server's third); and its angles are
+  CalcGunAngle's — the view before `cl.punchangle`, without the view roll
+  (`Viewmodel::angles`, `viewmodel_angles`). `quaketool view --viewent` takes
+  the C's `cl.viewent`. e1m1/e1m2/e1m3 at `--settle 3`, id with mip 0 + exact
+  perspective: the frame with the gun matches as well as the world-only
+  frame (93.96/96.88/98.52 vs 93.95/96.85/98.51); the gun region 99.9%.
+  Goldens unchanged (no gun in them).
+- ✅ **Sample-less faces** (class 9) — they are NOT (only) sky/turb: e1m1 has
+  375 world + 211 submodel faces with ordinary textures and `lightofs -1`
+  (e1m2 431/241, e1m3 431/490 — the light tool found no light reaching them),
+  besides its 304 turb + 63 sky faces. The port drew them with its Lambert
+  fallback; `R_BuildLightMap` clears to the ambient (0), has no samples to
+  add, adds dlights and inverts — black. Now the same. None is visible in the
+  oracle's standard views; the e1m1 golden view shows one (a recessed panel
+  edge): that view's region 94.6% → 97.7% against id. Goldens: e1m1
+  `d103ba3f` → `5b29abb8`, e1m3 `ed42c092` → `e3d873f0` (3 px), e1m2
+  unchanged. Still open: a map with no lighting lump renders Lambert, id
+  fullbright.
 
 ## LOW (27)
 

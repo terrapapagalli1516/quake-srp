@@ -1224,9 +1224,10 @@ fn face_lightmap<'a>(
 /// by `light_styles`, plus any dynamic lights in `dlights` that reach the face
 /// (`R_AddDynamicLights`). Returns `None` if the face is fullbright.
 ///
-/// A face is fullbright when there is no `lighting` lump, the face has no
-/// lightmap (`lightofs < 0`), the surface is special (sky/liquid — `TEX_SPECIAL`),
-/// or the computed luxel grid would not fit in the remaining `lighting` slice.
+/// `None` (the caller's fallback shade) when there is no `lighting` lump, the
+/// surface is special (sky/liquid — `TEX_SPECIAL`), or the computed luxel grid
+/// would not fit in the remaining `lighting` slice. A normal face without samples
+/// (`lightofs < 0`) gets an all-zero (black) map plus any reaching dlights.
 ///
 /// `light_styles` is the per-style brightness scale (`1.0` == normal,
 /// [`NEUTRAL_LIGHTSTYLE_SCALES`] disables animation). A face's `styles[0..3]`
@@ -1260,35 +1261,29 @@ fn face_lightmap_dyn<'a>(
         return None;
     }
 
-    // FAITHFULNESS (dlight on an unlit face): a NORMAL wall with no baked lightmap
-    // (`lightofs < 0`) is NOT fullbright when a dynamic light reaches it — Quake's
-    // `R_BuildLightMap` clears the block to ambient and `R_AddDynamicLights` adds
-    // onto it (the surface still gets a `blocklights` array). We mirror that: when
-    // such a face has reaching dlights we build a ZERO base and add the lights;
-    // when there are no dlights we keep returning `None` (fullbright), so the
-    // common case is byte-identical to before.
+    // A NORMAL wall with no light samples (`lightofs < 0`: the light tool found
+    // nothing reaching it — hundreds of such faces per id map) is BLACK, not
+    // fullbright: `R_BuildLightMap` clears the block to the ambient
+    // (`r_refdef.ambientlight`, `r_ambient` 0), has no samples to add
+    // (`surf->samples` is NULL), adds any dynamic lights (`R_AddDynamicLights`),
+    // then inverts — so 0 is colormap row 63. We build that zero base, plus the
+    // lights that reach the face.
     if face.lightofs < 0 {
-        if dlights.is_empty() || dlightbits == 0 {
-            return None;
-        }
         let (texmins, extent) = surface_extents(ti, world_poly)?;
         let lmw = (extent[0] / 16 + 1) as usize;
         let lmh = (extent[1] / 16 + 1) as usize;
         let count = lmw.checked_mul(lmh)?;
         let texmins_f = [texmins[0] as f32, texmins[1] as f32];
-        // Pass an EMPTY `static_samples` and a `None` base: `add_dynamic_lights`
-        // lazily materialises a zero-filled buffer (the C "clear to ambient", with
-        // ambient 0) ONLY when a light actually reaches this face, and returns
-        // `None` otherwise. So a far-away dlight leaves the unlit face fullbright
-        // (unchanged), while a reaching one dims/brightens it like the C.
-        let _ = count; // the grid size is implicit in lmw*lmh inside the helper
+        // An EMPTY `static_samples` and a `None` base: `add_dynamic_lights`
+        // materialises the zero ("clear to ambient") buffer only when a light
+        // actually reaches this face, else returns `None` — then it is all zero.
         let no_samples: &[u8] = &[];
-        let luxels = match add_dynamic_lights(
-            bsp, face, ti, texmins_f, lmw, lmh, no_samples, None, dlights, dlightbits,
-        ) {
-            Some(owned) => Luxels::Owned(owned),
-            None => return None,
+        let lit = if dlights.is_empty() || dlightbits == 0 {
+            None
+        } else {
+            add_dynamic_lights(bsp, face, ti, texmins_f, lmw, lmh, no_samples, None, dlights, dlightbits)
         };
+        let luxels = Luxels::Owned(lit.unwrap_or_else(|| vec![0.0; count]));
         return Some(LightMap { luxels, lmw, lmh, texmins: texmins_f });
     }
 
@@ -1378,224 +1373,381 @@ fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> Option<([i3
 // Animated special surfaces: liquid turbulent warp + scrolling sky
 // ---------------------------------------------------------------------------
 //
-// Quake's `TEX_SPECIAL` faces (liquids and sky) are not lightmapped — they are
-// drawn fullbright and *animated* every frame. This port reproduces two of
-// those animations against the same perspective-correct `(s,t)` the textured
-// rasteriser already interpolates:
+// Quake's `TEX_SPECIAL` faces (liquids and sky) are not lightmapped: they store
+// the raw texel (no colormap) and are *animated* every frame. This port
+// reproduces the software renderer's two animations against the same
+// perspective-correct `(s,t)` the textured rasteriser already interpolates:
 //
 //  * **Liquids** (miptex name begins with `*`: `*water1`, `*lava1`, `*slime`,
-//    `*teleport`, …) get the SIN warp of `R_DrawTurbulent` / `EmitWaterPolys`
-//    (`gl_warp.c`): each axis of the sample is displaced by a sine of the OTHER
-//    axis plus time. See [`TurbTable`] / [`warp_st`].
+//    `*teleport`, …) get `Turbulent8`/`D_DrawTurbulent8Span`'s warp (`d_scan.c`):
+//    each axis of the 16.16 sample is displaced by a sine of the OTHER axis plus
+//    time. See [`TurbTable`] / [`warp_st`].
 //  * **Sky** (miptex name begins with `sky`: `sky1`, `sky4`, …) gets the
-//    two-layer SCROLL of `EmitBothSkyLayers` (`gl_warp.c`) over the 256x128 sky
-//    miptexture (two side-by-side 128x128 layers). See [`sky_texel`].
+//    two-layer scroll of `R_MakeSky` (`r_sky.c`) sampled along the view ray by
+//    `D_DrawSkyScans8` (`d_sky.c`). See [`sky_texel_view`].
 
-/// WinQuake `R_InitTurb` constants (r_main.c / r_local.h): the software liquid
-/// warp drives a 128-entry sine table by the INTEGER texel coordinate (not a
-/// scaled float coord like GLQuake's `EmitWaterPolys`), scrolled by `time*SPEED`.
+/// WinQuake `R_InitTurb` constants (r_main.c / r_local.h / r_shared.h): the
+/// software liquid warp drives a 128-cycle sine table by the integer part of the
+/// OTHER axis' 16.16 texel coordinate, scrolled by `time*SPEED`.
 const TURB_CYCLE: usize = 128;
-/// `AMP` — the table swings `8 + 8*sin` texels (0..16; the +8 DC bias is wrapped
-/// off by the 64-texel liquid texture downstream, exactly as `&63` in `d_scan.c`).
-const TURB_AMP: f32 = 8.0;
+/// `AMP` (`8*0x10000`) — the table swings `8 + 8*sin` texels in 16.16 fixed point
+/// (0..16 texels; the +8 DC bias is wrapped off by the 64-texel liquid texture
+/// downstream, exactly as `&63` in `d_scan.c`).
+const TURB_AMP: f64 = (8 * 0x10000) as f64;
 /// `SPEED` — the table phase advances by `time*20` per second.
 const TURB_SPEED: f32 = 20.0;
 
-/// WinQuake's `sintable` (`R_InitTurb`): `sintable[i] = 8 + 8*sin(i*2pi/128)` in
-/// texel units, 128-periodic. Indexed by an integer texel coordinate (the other
-/// axis) plus the time phase — this is the SOFTWARE `Turbulent8` warp, which has a
-/// different ripple wavelength and ~20x the scroll speed of the GL water warp.
+/// WinQuake's `sintable` (`R_InitTurb`, r_main.c):
+/// `sintable[i] = AMP + sin(i*3.14159*2/CYCLE)*AMP`, 16.16 fixed point, truncated.
+/// `Turbulent8` indexes it as `(sintable + phase)[coord & 127]` — up to entry 254 —
+/// and id's truncated `3.14159` makes the table NOT exactly 128-periodic, so the
+/// first `2*CYCLE` entries are kept rather than one wrapped cycle.
 struct TurbTable {
-    tab: [i32; TURB_CYCLE],
+    tab: [i32; 2 * TURB_CYCLE],
 }
 
 impl TurbTable {
-    /// Build the table once at render start (`f32::sin` is not yet `const`).
+    /// Build the table once at render start (`f64::sin` is not `const`).
+    // `3.14159` is id's literal; exact pi would move entries (see `apply_warp`).
+    #[allow(clippy::approx_constant)]
     fn new() -> TurbTable {
-        let mut tab = [0i32; TURB_CYCLE];
-        let mut i = 0usize;
-        while i < TURB_CYCLE {
-            tab[i] = (TURB_AMP
-                + TURB_AMP * ((i as f32) * 2.0 * std::f32::consts::PI / (TURB_CYCLE as f32)).sin())
-            .round() as i32;
-            i += 1;
+        let mut tab = [0i32; 2 * TURB_CYCLE];
+        for (i, e) in tab.iter_mut().enumerate() {
+            // C: int = int + double*int -> double, then truncated to int.
+            *e = (TURB_AMP + ((i as f64) * 3.14159 * 2.0 / TURB_CYCLE as f64).sin() * TURB_AMP) as i32;
         }
         TurbTable { tab }
     }
-
-    /// The texel displacement for integer index `k` (the OTHER axis' texel coord
-    /// plus the time phase), masked to the 128 cycle exactly as the C `&(CYCLE-1)`.
-    #[inline]
-    fn at_int(&self, k: i32) -> i32 {
-        self.tab[(k & (TURB_CYCLE as i32 - 1)) as usize]
-    }
 }
 
-/// Apply the SOFTWARE liquid warp (`d_scan.c` `Turbulent8`) to a surface texel
-/// `(s,t)` at game `time`, returning the displaced integer-texel `(s2,t2)`:
+/// A liquid surface coordinate in `Turbulent8`'s 16.16 fixed point:
+/// `(int)(sdivz*z) + sadjust`, clamped to `[0, bbextents]` — with the extents
+/// `Mod_LoadFaces` gives every turbulent face (`texturemins = -8192`,
+/// `extents = 16384`), so the fixed value is `(s + 8192) * 0x10000`. `s` is the
+/// texinfo coordinate the rasteriser interpolates.
+#[inline]
+fn turb_fixed(s: f32) -> i32 {
+    // s*0x10000 is exact in f32 (a power of two); `as` truncates like the C cast.
+    let v = (s * 65536.0) as i32 as i64 + (8192 << 16);
+    v.clamp(0, (16384 << 16) - 1) as i32
+}
+
+/// Apply the SOFTWARE liquid warp to the surface coordinate `(s,t)` at game
+/// `time`, returning the texel `(sturb, tturb)` to sample — `D_DrawTurbulent8Span`
+/// (`d_scan.c`) on `Turbulent8`'s fixed-point coordinates:
 ///
 /// ```text
-/// phase = (int)(time * SPEED)               // SPEED = 20
-/// s2 = s + sintable[(t + phase) & 127]      // sintable in texels
-/// t2 = t + sintable[(s + phase) & 127]
+/// turb  = sintable + ((int)(cl.time*SPEED) & (CYCLE-1));
+/// sturb = ((s + turb[(t>>16)&(CYCLE-1)]) >> 16) & 63;
+/// tturb = ((t + turb[(s>>16)&(CYCLE-1)]) >> 16) & 63;
 /// ```
 ///
-/// Each axis is offset by the sine of the *other* axis' integer texel coordinate
-/// plus the time phase, so the surface ripples. The caller wraps `(s2,t2)` into
-/// the 64-texel liquid texture via `rem_euclid` (matching the C's final `&63`).
+/// The 16.16 table value is added to the 16.16 coordinate BEFORE the `>> 16`, so
+/// the fractional parts carry. The caller wraps into the texture (`rem_euclid`;
+/// = `& 63` for the 64x64 liquids id ships). The coordinate here is exact per
+/// pixel; id steps it linearly across 16-pixel segments (class 7 in
+/// `oracle/README.md`, the span-subdivision item, shared with the walls).
 #[inline]
-fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (f32, f32) {
-    let phase = (time * TURB_SPEED) as i32;
-    let si = s.floor() as i32;
-    let ti = t.floor() as i32;
-    let s2 = (si + turb.at_int(ti + phase)) as f32;
-    let t2 = (ti + turb.at_int(si + phase)) as f32;
-    (s2, t2)
+fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (i32, i32) {
+    const MASK: i32 = TURB_CYCLE as i32 - 1;
+    let phase = ((time * TURB_SPEED) as i32 & MASK) as usize;
+    let sf = turb_fixed(s);
+    let tf = turb_fixed(t);
+    let sturb = sf.wrapping_add(turb.tab[phase + ((tf >> 16) & MASK) as usize]) >> 16;
+    let tturb = tf.wrapping_add(turb.tab[phase + ((sf >> 16) & MASK) as usize]) >> 16;
+    (sturb, tturb)
 }
 
-/// Sample one texel of the two-layer scrolling sky from a 256x128 sky
-/// miptexture, porting `EmitBothSkyLayers` (`gl_warp.c`) / `R_InitSky`.
-///
-/// The sky miptexture is `tw=256` wide, `th=128` tall: two side-by-side
-/// 128x128 layers. Per `R_InitSky`, the **right** half (`[128,256)`) is the
-/// solid background layer, and the **left** half (`[0,128)`) is the alpha
-/// overlay whose palette index `0` is transparent (showing the background
-/// through it). `EmitBothSkyLayers` scrolls the background at `time*8` and the
-/// overlay at `time*16` (twice as fast). Here the perspective-correct surface
-/// `(s,t)` plays the role of the GL sky direction: it is scaled down and the
-/// per-layer scroll offset added, then wrapped into each 128x128 layer.
-///
-/// Returns a palette index. Every lookup is `.get()`-guarded and wrapped with
-/// `rem_euclid`, so a malformed (non-256x128) sky texture never panics: it
-/// simply samples whatever is in range, and a too-small texture yields index 0.
-#[inline]
-fn sky_texel(pixels: &[u8], tw: usize, th: usize, s: f32, t: f32, time: f32) -> u8 {
-    // Layer dimension: the texture is conceptually two `lh`-wide square layers.
-    // Use half the width (clamped to the height) so a real 256x128 sky gives
-    // 128x128 layers; degenerate sizes still stay in range via the wraps below.
-    let lw = (tw / 2).max(1);
-    let lh = th.max(1);
+/// `SKYSIZE` (d_iface.h): each sky layer is 128x128 texels.
+const SKYSIZE: i32 = 128;
+/// `SKYMASK` (d_iface.h), and `R_SKY_SMASK`/`R_SKY_TMASK >> 16` (d_local.h).
+const SKYMASK: i32 = SKYSIZE - 1;
+/// `iskyspeed` (r_sky.c): the scroll, in texels per second.
+const SKY_SPEED: f32 = 8.0;
 
-    // The surface (s,t) stand in for the GL sky direction; scale them down so a
-    // wall's worth of texels maps across the layer rather than tiling violently.
-    // (1/8 keeps the cloud features a sensible on-screen size.)
-    let bs = s * 0.125;
-    let bt = t * 0.125;
-
-    // Background (solid) layer: right half, scroll = time*8.
-    let back = {
-        let sx = ((bs + time * 8.0) as i64).rem_euclid(lw as i64) as usize;
-        let sy = (bt as i64).rem_euclid(lh as i64) as usize;
-        // Right half starts at column `lw` (= 128 for a real sky).
-        pixels.get(sy * tw + (lw + sx)).copied().unwrap_or(0)
-    };
-
-    // Overlay (alpha) layer: left half, scroll = time*16. Palette index 0 is
-    // transparent — where transparent, the background shows through.
-    let front = {
-        let sx = ((bs + time * 16.0) as i64).rem_euclid(lw as i64) as usize;
-        let sy = (bt as i64).rem_euclid(lh as i64) as usize;
-        pixels.get(sy * tw + sx).copied().unwrap_or(0)
-    };
-
-    if front != 0 {
-        front
-    } else {
-        back
-    }
-}
-
-/// The camera projection a sky pixel needs to recover its world view direction,
-/// porting `D_Sky_uv_To_st`'s use of `vpn`/`vright`/`vup` and the screen centre.
+/// The per-frame sky state a sky pixel needs, porting the globals
+/// `D_Sky_uv_To_st` and `R_MakeSky` read: the view basis (`vpn`/`vright`/
+/// `vup`), the screen centre, the normaliser, and the scroll.
 ///
 /// The sky is an infinite dome: what a screen pixel shows depends on the view
-/// DIRECTION through that pixel, NOT on the wall polygon's `(s,t)`. This carries
-/// the camera basis and the projection parameters so [`sky_texel_view`] can
-/// rebuild the ray for each covered pixel.
+/// DIRECTION through that pixel, NOT on the wall polygon's `(s,t)`.
 #[derive(Clone, Copy)]
 struct SkyView {
     forward: Vec3,
     right: Vec3,
     up: Vec3,
-    /// Screen centre (`w/2`, `h/2`).
-    cx: f32,
-    cy: f32,
-    /// `max(width, height)` — the `temp` normaliser in `D_Sky_uv_To_st`. The C
-    /// derives the ray from this fixed `8192/longest` scaling (a fixed dome angle,
-    /// independent of the render FOV), so the camera focal length is not used.
+    /// `(int)vid.width>>1`, `(int)vid.height>>1` — `D_Sky_uv_To_st`'s integer
+    /// screen centre (not the projection's `xcenter`, which is half a pixel off).
+    half_w: i32,
+    half_h: i32,
+    /// `max(vrect.width, vrect.height)` — the `temp` normaliser in
+    /// `D_Sky_uv_To_st`: a fixed dome angle, independent of the render FOV.
     longest: f32,
+    /// `skytime*skyspeed`, added to both `s` and `t` (`D_Sky_uv_To_st`).
+    scroll: f32,
+    /// `R_MakeSky`'s `xshift`/`yshift` = `(int)(skytime*skyspeed)`: the extra
+    /// offset of the front (cloud) layer, so it moves at twice the back's speed.
+    shift: i32,
 }
 
-/// Sample the sky for screen pixel `(u, v)` by projecting the **view direction**
-/// onto the scrolling sky, porting `D_Sky_uv_To_st` (`d_sky.c`).
-///
-/// `D_Sky_uv_To_st` builds the world ray for the pixel —
-/// `end = 4096*vpn + wu*vright + wv*vup` with `wu`/`wv` the screen offsets scaled
-/// by `8192/longest`, then `end[2] *= 3` (vertical squash) and normalise — and
-/// derives the sky coords `s = scroll + 6*(SKYSIZE/2-1)*end[0]`,
-/// `t = scroll + 6*(SKYSIZE/2-1)*end[1]`. The `scroll = skytime*skyspeed` drifts
-/// the whole sky over time (`skyspeed = 8`). We feed those `(s,t)` to the same
-/// two-layer overlay/background lookup [`sky_texel`] already implements, so the
-/// front cloud layer scrolls over the solid background. The result depends only
-/// on where the camera looks, so the sky no longer smears with wall coords and
-/// scrolls as the player turns.
-///
-/// SAFETY: `focal`/`longest` are guarded against 0 by the caller; the lookup is
-/// `sky_texel`, which bounds-checks and wraps, so a malformed sky never panics.
-#[allow(clippy::too_many_arguments)]
+impl SkyView {
+    /// The sky state for a `w`x`h` view at game `time`. `R_SetSkyFrame`
+    /// (r_sky.c): `skytime = cl.time - (int)(cl.time/temp)*temp` with
+    /// `temp = SKYSIZE*s1*s2` = 512, where `s1`/`s2` are `iskyspeed` 8 and
+    /// `iskyspeed2` 2 over their gcd.
+    fn new(forward: Vec3, right: Vec3, up: Vec3, w: usize, h: usize, time: f32) -> SkyView {
+        const TEMP: f64 = 512.0;
+        let t = time as f64;
+        let skytime = (t - ((t / TEMP) as i32 as f64) * TEMP) as f32;
+        let scroll = skytime * SKY_SPEED;
+        SkyView {
+            forward,
+            right,
+            up,
+            half_w: (w as i32) >> 1,
+            half_h: (h as i32) >> 1,
+            longest: w.max(h) as f32,
+            scroll,
+            shift: scroll as i32,
+        }
+    }
+}
+
+/// `D_Sky_uv_To_st` (d_sky.c): the 16.16 sky coordinates for screen pixel
+/// `(u,v)` — build the ray `4096*vpn + wu*vright + wv*vup` (screen offsets from
+/// the integer centre scaled by `8192/longest`), squash it vertically
+/// (`end[2] *= 3`), normalise, then `s = (skytime*skyspeed + 6*(SKYSIZE/2-1)*end[0])
+/// * 0x10000` and the same for `t` with `end[1]`. Float math as the C (`wu`/`wv`
+/// computed in double, stored to float; `VectorNormalize` multiplies by `1/length`).
 #[inline]
-fn sky_texel_view(pixels: &[u8], tw: usize, th: usize, u: f32, v: f32, sky: &SkyView, time: f32) -> u8 {
-    // `SKYSIZE` (128) -> 6*(SKYSIZE/2 - 1) = 6*63 = 378, the C dome scale.
-    const SKY_DOME_SCALE: f32 = 6.0 * (128.0 / 2.0 - 1.0);
-    const SKY_SPEED: f32 = 8.0;
-
-    // Screen offsets, scaled exactly as D_Sky_uv_To_st (8192/longest), but we work
-    // in our projection: a pixel `(u,v)` corresponds to camera-space direction
-    // proportional to `right*(u-cx)/focal + up*-(v-cy)/focal + forward`. Scaling
-    // by 4096 forward (the C uses `4096*vpn` with `8192*offset`) keeps the same
-    // ratio; the subsequent normalise removes the absolute scale.
-    let longest = if sky.longest > 0.0 { sky.longest } else { 1.0 };
-    let wu = 8192.0 * (u - sky.cx) / longest;
-    let wv = 8192.0 * (sky.cy - v) / longest;
-
+fn sky_uv_to_st(u: i32, v: i32, sky: &SkyView) -> (i32, i32) {
+    let longest = if sky.longest > 0.0 { sky.longest as f64 } else { 1.0 };
+    let wu = (8192.0 * (u - sky.half_w) as f64 / longest) as f32;
+    let wv = (8192.0 * (sky.half_h - v) as f64 / longest) as f32;
+    let (f, r, up) = (sky.forward, sky.right, sky.up);
     let mut end = [
-        4096.0 * sky.forward[0] + wu * sky.right[0] + wv * sky.up[0],
-        4096.0 * sky.forward[1] + wu * sky.right[1] + wv * sky.up[1],
-        4096.0 * sky.forward[2] + wu * sky.right[2] + wv * sky.up[2],
+        4096.0 * f[0] + wu * r[0] + wv * up[0],
+        4096.0 * f[1] + wu * r[1] + wv * up[1],
+        4096.0 * f[2] + wu * r[2] + wv * up[2],
     ];
-    end[2] *= 3.0; // vertical squash so the dome is shallow
-    let (dir, len) = normalize(end);
-    if len == 0.0 {
-        return 0;
+    end[2] *= 3.0;
+    // VectorNormalize (mathlib.c)
+    let length = (end[0] * end[0] + end[1] * end[1] + end[2] * end[2]).sqrt();
+    if length != 0.0 {
+        let ilength = 1.0 / length;
+        end[0] *= ilength;
+        end[1] *= ilength;
+    }
+    // 6*(SKYSIZE/2-1) = 378
+    const DOME: f32 = (6 * (SKYSIZE / 2 - 1)) as f32;
+    let s = ((sky.scroll + DOME * end[0]) * 65536.0) as i32;
+    let t = ((sky.scroll + DOME * end[1]) * 65536.0) as i32;
+    (s, t)
+}
+
+/// One sky texel for the 16.16 sky coordinates `(s,t)`, porting what
+/// `D_DrawSkyScans8` reads — `r_skysource[((t & R_SKY_TMASK) >> 8) +
+/// ((s & R_SKY_SMASK) >> 16)]`, i.e. row `(t>>16)&127`, column `(s>>16)&127` of
+/// `newsky` — and what `R_MakeSky` composited there: the front layer (the
+/// miptexture's LEFT half, `R_InitSky`'s `bottomsky`, index 0 transparent)
+/// shifted by `shift` texels on both axes, over the back layer (the RIGHT half,
+/// unshifted).
+///
+/// `pixels` is the `tw`-wide sky miptexture (256x128 in every id map). Every read
+/// is `.get()`-guarded, so a malformed sky never panics (it yields index 0).
+#[inline]
+fn sky_sample(pixels: &[u8], tw: usize, s: i32, t: i32, shift: i32) -> u8 {
+    let x = (s >> 16) & SKYMASK;
+    let y = (t >> 16) & SKYMASK;
+    let fy = ((y + shift) & SKYMASK) as usize;
+    let fx = ((x + shift) & SKYMASK) as usize;
+    match pixels.get(fy * tw + fx).copied() {
+        Some(front) if front != 0 => front,
+        _ => pixels.get(y as usize * tw + (tw / 2) + x as usize).copied().unwrap_or(0),
+    }
+}
+
+/// Sample the sky for screen pixel `(u, v)`: [`sky_uv_to_st`] then
+/// [`sky_sample`]. (id evaluates `D_Sky_uv_To_st` exactly only every 32 pixels
+/// of a span and steps linearly between — see [`resolve_sky_spans`].)
+#[inline]
+fn sky_texel_view(pixels: &[u8], tw: usize, u: i32, v: i32, sky: &SkyView) -> u8 {
+    let (s, t) = sky_uv_to_st(u, v, sky);
+    sky_sample(pixels, tw, s, t, sky.shift)
+}
+
+/// `SKY_SPAN_SHIFT` (d_sky.c): `D_DrawSkyScans8` evaluates `D_Sky_uv_To_st`
+/// exactly every `1 << 5` = 32 pixels of a span and steps linearly between.
+const SKY_SPAN_SHIFT: i32 = 5;
+const SKY_SPAN_MAX: i32 = 1 << SKY_SPAN_SHIFT;
+
+/// The world pass's sky pixels, kept until the brush passes are done so they
+/// can be drawn as id draws them: `D_DrawSkyScans8` walks each sky SPAN — a run
+/// of pixels on one scanline where one sky face is the nearest surface (what
+/// `R_LeadingEdge`/`R_TrailingEdge` emit) — and interpolates the sky
+/// coordinates across 32-pixel segments from the span's first pixel. Which
+/// pixels form a span is only known once every nearer surface is drawn, so the
+/// world pass records `(face, depth)` per sky pixel and [`resolve_sky_spans`]
+/// recovers the runs afterwards: a pixel is still sky iff the z-buffer still
+/// holds the depth the sky wrote (any nearer write lowers it).
+struct SkySpans {
+    w: usize,
+    h: usize,
+    /// Per pixel: `1 +` the sky face that won the depth test there (0 = none).
+    key: Vec<u32>,
+    /// Per pixel: the depth that sky face wrote to the z-buffer.
+    depth: Vec<f32>,
+    /// Rows written since the last reset, `[lo, hi)`.
+    lo: usize,
+    hi: usize,
+    /// The frame's sky state (every sky face of a frame shares it).
+    view: Option<SkyView>,
+}
+
+impl SkySpans {
+    const EMPTY: SkySpans =
+        SkySpans { w: 0, h: 0, key: Vec::new(), depth: Vec::new(), lo: 0, hi: 0, view: None };
+
+    /// Start a frame of `w`x`h`: forget the previous frame's pixels (only the
+    /// rows it touched are cleared, so a sky-less frame costs nothing).
+    fn reset(&mut self, w: usize, h: usize) {
+        let n = w.saturating_mul(h);
+        if self.w != w || self.h != h || self.key.len() != n {
+            self.key = vec![0; n];
+            self.depth = vec![0.0; n];
+            self.w = w;
+            self.h = h;
+        } else if self.lo < self.hi {
+            self.key[self.lo * w..self.hi * w].fill(0);
+        }
+        self.lo = h;
+        self.hi = 0;
+        self.view = None;
     }
 
-    let scroll = time * SKY_SPEED;
-    // s/t in texels: the dome scale projects the direction onto the layer. We feed
-    // these to `sky_texel` with time=0 (the scroll is folded into s/t here), but
-    // `sky_texel` adds its own per-layer scroll — so pass the raw projected coords
-    // and let the two-layer overlay/background lookup add the front/back drift.
-    let s = scroll + SKY_DOME_SCALE * dir[0];
-    let t = scroll + SKY_DOME_SCALE * dir[1];
-    // `sky_texel` expects (s,t) that it scales by 0.125; pre-multiply by 8 so the
-    // dome projection lands at a sensible cloud scale after its internal *0.125.
-    sky_texel(pixels, tw, th, s * 8.0, t * 8.0, 0.0)
+    #[inline]
+    fn record(&mut self, idx: usize, row: usize, key: u32, depth: f32) {
+        if let (Some(k), Some(d)) = (self.key.get_mut(idx), self.depth.get_mut(idx)) {
+            *k = key;
+            *d = depth;
+            self.lo = self.lo.min(row);
+            self.hi = self.hi.max(row + 1);
+        }
+    }
+}
+
+/// `D_DrawSkyScans8` (d_sky.c) for one span of `count` pixels starting at screen
+/// `(u, v)`, written into `out` (that scanline's pixels from `u`): the sky
+/// coordinates are exact at the span start and every 32 pixels, stepped by
+/// `(next - cur) >> 5` between; the last segment steps by an integer division
+/// over its `count - 1` so it ends exactly on the span's last pixel.
+#[allow(clippy::too_many_arguments)]
+fn draw_sky_span(
+    out: &mut [[u8; 3]],
+    u: i32,
+    v: i32,
+    count: i32,
+    pixels: &[u8],
+    tw: usize,
+    view: &SkyView,
+    palette: &[[u8; 3]; 256],
+) {
+    let mut u = u;
+    let mut count = count;
+    let (mut s, mut t) = sky_uv_to_st(u, v, view);
+    let (mut sstep, mut tstep) = (0i32, 0i32);
+    let mut out = out.iter_mut();
+    while count > 0 {
+        let spancount = count.min(SKY_SPAN_MAX);
+        count -= spancount;
+        let (mut snext, mut tnext) = (s, t);
+        if count > 0 {
+            u += spancount;
+            (snext, tnext) = sky_uv_to_st(u, v, view);
+            sstep = snext.wrapping_sub(s) >> SKY_SPAN_SHIFT;
+            tstep = tnext.wrapping_sub(t) >> SKY_SPAN_SHIFT;
+        } else {
+            let spancountminus1 = spancount - 1;
+            if spancountminus1 > 0 {
+                u += spancountminus1;
+                (snext, tnext) = sky_uv_to_st(u, v, view);
+                sstep = snext.wrapping_sub(s) / spancountminus1;
+                tstep = tnext.wrapping_sub(t) / spancountminus1;
+            }
+        }
+        for _ in 0..spancount {
+            if let Some(p) = out.next() {
+                *p = palette[sky_sample(pixels, tw, s, t, view.shift) as usize];
+            }
+            s = s.wrapping_add(sstep);
+            t = t.wrapping_add(tstep);
+        }
+        s = snext;
+        t = tnext;
+    }
+}
+
+/// Draw the world pass's deferred sky ([`SkySpans`]) as `D_DrawSkyScans8` does,
+/// once every brush surface that can occlude it is in the z-buffer (and before
+/// the alias models, which in id are drawn after `D_DrawSurfaces` too). Each run
+/// of pixels on a row that one sky face still owns is one span. The texture is
+/// `r_skysource`: `R_InitSky` runs for every `sky*` miptexture `Mod_LoadTextures`
+/// loads, so the last one wins.
+fn resolve_sky_spans(image: &mut Image, zbuf: &[f32], bsp: &Bsp, palette: &[[u8; 3]; 256]) {
+    SKY_SPANS_SCRATCH.with(|cell| {
+        let mut sp = cell.borrow_mut();
+        let (w, h) = (image.w, image.h);
+        let sky_tex = bsp
+            .textures
+            .iter()
+            .rev()
+            .flatten()
+            .find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty());
+        if let (Some(view), Some(mt), true) = (sp.view, sky_tex, sp.w == w && sp.h == h) {
+            let tw = mt.width as usize;
+            for y in sp.lo..sp.hi.min(h) {
+                let row = y * w;
+                let mut x = 0usize;
+                while x < w {
+                    let k = sp.key[row + x];
+                    let live = |x: usize| {
+                        sp.key[row + x] == k && zbuf.get(row + x) == Some(&sp.depth[row + x])
+                    };
+                    if k == 0 || !live(x) {
+                        x += 1;
+                        continue;
+                    }
+                    let u0 = x;
+                    while x < w && live(x) {
+                        x += 1;
+                    }
+                    if let Some(out) = image.rgb.get_mut(row + u0..row + x) {
+                        draw_sky_span(out, u0 as i32, y as i32, (x - u0) as i32, &mt.pixels, tw, &view, palette);
+                    }
+                }
+            }
+        }
+        sp.reset(w, h);
+    });
 }
 
 /// How the per-pixel `(s,t)` -> texel step of [`raster_triangle_tex`] behaves.
 ///
 /// `Normal` is the existing wall path (optional lightmap). `Turb` and `Sky`
-/// drive the animated special-surface sampling above; both are drawn fullbright
-/// (Quake never lightmaps liquids or sky), so they ignore the `lightmap`/`shade`
-/// brightness inputs and the rasteriser applies a fixed unit brightness.
+/// drive the animated special-surface sampling above; both are unlit (Quake never
+/// lightmaps liquids or sky): they ignore the `lightmap`/`shade` inputs and store
+/// the raw texel, with no colormap row, as `D_DrawTurbulent8Span`/`D_DrawSkyScans8`.
 #[derive(Clone, Copy)]
 enum SurfaceMode<'a> {
     /// Ordinary wall: sample `pixels` at the interpolated `(s,t)`.
     Normal,
-    /// Liquid: SIN-warp `(s,t)` by `time` before sampling (fullbright).
+    /// Liquid: SIN-warp `(s,t)` by `time` before sampling. Unlit.
     Turb { turb: &'a TurbTable, time: f32 },
     /// Sky: project the per-pixel VIEW DIRECTION onto the scrolling sky dome
-    /// (`D_Sky_uv_To_st`) rather than mapping wall `(s,t)`. Fullbright.
-    Sky { time: f32, view: SkyView },
+    /// (`D_Sky_uv_To_st`) rather than mapping wall `(s,t)`. Unlit. With `defer`
+    /// (the world pass) the pixel only takes the depth and is recorded for
+    /// [`resolve_sky_spans`] under the face key; without, it is sampled exactly.
+    Sky { view: SkyView, defer: Option<(&'a std::cell::RefCell<SkySpans>, u32)> },
 }
 
 /// Which animated kind a miptexture name selects: liquids begin with `*`
@@ -1760,6 +1912,12 @@ fn raster_triangle_tex(
     let dw0dx = -(v2.y - v1.y) * inv_area;
     let dw1dx = -(v0.y - v2.y) * inv_area;
     let dw2dx = -(v1.y - v0.y) * inv_area;
+    // A deferred sky face records its pixels instead of drawing them (one
+    // borrow per triangle).
+    let mut sky_defer = match mode {
+        SurfaceMode::Sky { defer: Some((cell, key)), .. } => Some((cell.borrow_mut(), key)),
+        _ => None,
+    };
 
     for py in min_y..=max_y {
         let sy = py as f32 + 0.5;
@@ -1790,7 +1948,6 @@ fn raster_triangle_tex(
             if depth >= *zc {
                 break 'pixel;
             }
-            let sx = px as f32 + 0.5;
             // Perspective divide reuses `depth` (= 1/inv_z) as a multiply instead of
             // two more reciprocals — the affine numerators times 1/z. (Differs from
             // `/inv_z` by at most a ULP, which never crosses a texel boundary.)
@@ -1817,21 +1974,27 @@ fn raster_triangle_tex(
                     (p, b)
                 }
                 SurfaceMode::Turb { turb, time } => {
-                    // SIN-warp the (s,t) before the (tiling) wrap; fullbright.
+                    // SIN-warp the (s,t) before the (tiling) wrap; unlit.
                     let (s2, t2) = warp_st(turb, s, t, time);
-                    let tx = (s2 as i64).rem_euclid(tw as i64) as usize;
-                    let ty = (t2 as i64).rem_euclid(th as i64) as usize;
+                    let tx = s2.rem_euclid(tw as i32) as usize;
+                    let ty = t2.rem_euclid(th as i32) as usize;
                     let p = match pixels.get(ty * tw + tx) {
                         Some(&p) => p as usize,
                         None => break 'pixel,
                     };
                     (p, 1.0)
                 }
-                SurfaceMode::Sky { time, view } => {
-                    // Project the per-pixel VIEW DIRECTION onto the scrolling sky
-                    // dome (`D_Sky_uv_To_st`) — the sky no longer uses wall (s,t).
-                    // `sx`/`sy` are the pixel centre in screen space; fullbright.
-                    (sky_texel_view(pixels, tw, th, sx, sy, &view, time) as usize, 1.0)
+                SurfaceMode::Sky { view, .. } => {
+                    if let Some((spans, key)) = sky_defer.as_mut() {
+                        // Drawn later, span by span (`resolve_sky_spans`).
+                        *zc = depth;
+                        spans.record(idx, py as usize, *key, depth);
+                        break 'pixel;
+                    }
+                    // Project the pixel's VIEW DIRECTION onto the scrolling sky
+                    // dome (`D_Sky_uv_To_st`) — the sky does not use wall (s,t).
+                    // id passes the integer pixel `(u,v)`; unlit.
+                    (sky_texel_view(pixels, tw, px as i32, py as i32, &view) as usize, 1.0)
                 }
             };
             *zc = depth;
@@ -1841,19 +2004,18 @@ fn raster_triangle_tex(
                     // the brightness, then index the colormap to get a PALETTE
                     // INDEX, which is finally looked up in the palette. This is
                     // an INDEX lookup (no RGB multiply) and so can never
-                    // overbright past the base colour. Liquids/sky are
-                    // fullbright (brightness 1.0) but route through the brightest
-                    // row 0 (`colormap[texel]`) — `colormap_row(1.0)` is *not*
-                    // row 0, so fullbright surfaces force the row explicitly.
+                    // overbright past the base colour. Liquids and sky take NO
+                    // colormap at all: `D_DrawTurbulent8Span` and
+                    // `D_DrawSkyScans8` store the raw texel (`*pdest =
+                    // *(pbase + ...)`, `r_skysource[...]`) — the identity, which
+                    // sits around row 31/32, not the brightest row 0.
                     Some(cm) => {
-                        let row = match mode {
-                            SurfaceMode::Normal => colormap_row(brightness),
-                            // Turb/Sky are fullbright: the brightest row.
-                            SurfaceMode::Turb { .. } | SurfaceMode::Sky { .. } => 0,
+                        let pal_index = match mode {
+                            // row < COLORMAP_ROWS and texel < 256, so this index
+                            // is < COLORMAP_LEN <= cm.len() (checked above).
+                            SurfaceMode::Normal => cm[colormap_row(brightness) * 256 + texel] as usize,
+                            SurfaceMode::Turb { .. } | SurfaceMode::Sky { .. } => texel,
                         };
-                        // row < COLORMAP_ROWS and texel < 256, so this index is
-                        // < COLORMAP_LEN <= cm.len() (checked above).
-                        let pal_index = cm[row * 256 + texel] as usize;
                         *p = palette[pal_index];
                     }
                     // Fallback: the original linear `palette[texel] * brightness`
@@ -2023,6 +2185,7 @@ pub fn render_bsp_textured(
     // Static (time 0) world: liquids/sky show their texture but do not advance.
     let turb = TurbTable::new();
     draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None);
+    resolve_sky_spans(&mut image, &zbuf, bsp, palette);
     image
 }
 
@@ -2822,6 +2985,10 @@ thread_local! {
     /// so per-frame marking allocates nothing once the buffer has grown to the
     /// map's face count. See [`mark_dlights`].
     static DLIGHT_BITS_SCRATCH: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Per-thread deferred sky pixels ([`SkySpans`]): the world pass records
+    /// into it, [`resolve_sky_spans`] draws and resets it once the brush passes
+    /// are done.
+    static SKY_SPANS_SCRATCH: std::cell::RefCell<SkySpans> = const { std::cell::RefCell::new(SkySpans::EMPTY) };
 }
 
 /// Granular per-phase render profiler — phase wall-times (ns) plus face/triangle/
@@ -3656,6 +3823,14 @@ fn draw_world_textured(
     // cannot brighten faces there. The scratch is thread-local and reused; with
     // no live dlights it stays empty and every face reads mask 0.
     let mut dlight_bits = DLIGHT_BITS_SCRATCH.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    // The sky is drawn span by span once the brush passes are done
+    // (`resolve_sky_spans`); this frame's sky pixels are recorded here.
+    let sky_view = SkyView::new(forward, right, up, w, h, time);
+    let sky_spans = std::cell::RefCell::new(
+        SKY_SPANS_SCRATCH.with(|b| std::mem::replace(&mut *b.borrow_mut(), SkySpans::EMPTY)),
+    );
+    sky_spans.borrow_mut().reset(w, h);
+    sky_spans.borrow_mut().view = Some(sky_view);
     let world_headnode = bsp
         .models
         .first()
@@ -3775,17 +3950,7 @@ fn draw_world_textured(
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
             SurfKind::Turb => SurfaceMode::Turb { turb, time },
-            SurfKind::Sky => SurfaceMode::Sky {
-                time,
-                view: SkyView {
-                    forward,
-                    right,
-                    up,
-                    cx,
-                    cy,
-                    longest: (w.max(h)) as f32,
-                },
-            },
+            SurfKind::Sky => SurfaceMode::Sky { view: sky_view, defer: Some((&sky_spans, face_index as u32 + 1)) },
         };
 
         // Build the view-space polygon (vx,vy,vz,s,t per world vertex), then clip
@@ -3922,6 +4087,7 @@ fn draw_world_textured(
 
     // Return the marking scratch for the next pass/frame (keeps its capacity).
     DLIGHT_BITS_SCRATCH.with(|b| *b.borrow_mut() = dlight_bits);
+    SKY_SPANS_SCRATCH.with(|b| *b.borrow_mut() = sky_spans.into_inner());
 
     // Flush sub-phase timers. `setup` = whole draw-loop body minus the measured
     // lightmap + surf-block calls (so it captures geom-cache fetch, the culls,
@@ -4142,17 +4308,7 @@ fn draw_submodel(
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
             SurfKind::Turb => SurfaceMode::Turb { turb, time },
-            SurfKind::Sky => SurfaceMode::Sky {
-                time,
-                view: SkyView {
-                    forward,
-                    right,
-                    up,
-                    cx,
-                    cy,
-                    longest: (w.max(h)) as f32,
-                },
-            },
+            SurfKind::Sky => SurfaceMode::Sky { view: SkyView::new(forward, right, up, w, h, time), defer: None },
         };
 
         // Build the view-space polygon from the SHIFTED vertices (for vx/vy/vz)
@@ -4393,28 +4549,6 @@ fn mdl_frame_verts(
     mdl.frame_pose(f, time)
 }
 
-/// Decode one MDL vertex into model space:
-/// `p[i] = scale[i] * v[i] + scale_origin[i]` (the byte-compressed-vertex
-/// reconstruction from Quake's alias renderer).
-fn mdl_vertex_model_space(header: &crate::mdl::MdlHeader, tv: &crate::mdl::TriVertex) -> Vec3 {
-    [
-        header.scale[0] * (tv.v[0] as f32) + header.scale_origin[0],
-        header.scale[1] * (tv.v[1] as f32) + header.scale_origin[1],
-        header.scale[2] * (tv.v[2] as f32) + header.scale_origin[2],
-    ]
-}
-
-/// Apply an instance's world transform to a model-space point: rotate about `+Z`
-/// by `yaw` (degrees), then translate by `origin`.
-fn mdl_model_to_world(p: Vec3, yaw_rad: f64, origin: Vec3) -> Vec3 {
-    let (sin_y, cos_y) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
-    [
-        p[0] * cos_y - p[1] * sin_y + origin[0],
-        p[0] * sin_y + p[1] * cos_y + origin[1],
-        p[2] + origin[2],
-    ]
-}
-
 /// `ALIAS_ONSEAM` flag (`modelgen.h`): the stvert lies on the texture seam that
 /// separates the model skin's front half from its back half.
 const ALIAS_ONSEAM: i32 = 0x0020;
@@ -4457,58 +4591,1178 @@ fn mdl_skin(mdl: &crate::mdl::Mdl, skinnum: i32, time: f32) -> Option<ModelSkin<
     })
 }
 
-/// Compute the skin texel coordinate `(s, t)` for one triangle vertex, porting
-/// the onseam/back-face `s`-shift that `GL_MakeAliasModelDisplayLists` /
-/// `R_AliasPreparePoints` (and the software `aliastris` setup) apply.
-///
-/// Quake packs a model's front and back skin halves side by side in one image.
-/// A vertex whose stvert carries the `ALIAS_ONSEAM` flag belongs to the seam;
-/// when it is referenced by a *back-facing* triangle (`facesfront == 0`) its `s`
-/// must be shifted right by `skinwidth / 2` so it samples the back half. Front
-/// triangles, and any vertex not on the seam, use the raw `s`. `t` is never
-/// shifted.
-///
-/// Returns texel coordinates as `f32` for [`raster_triangle_tex`]'s
-/// perspective-correct interpolation. The result is *not* clamped here; the
-/// rasteriser bounds the per-pixel sample.
-fn mdl_skin_st(stvert: &crate::mdl::StVert, facesfront: bool, skinwidth: usize) -> (f32, f32) {
-    let mut s = stvert.s;
-    if (stvert.onseam & ALIAS_ONSEAM) != 0 && !facesfront {
-        // skinwidth/2 as i32; skinwidth came from a non-negative header field.
-        let half = (skinwidth / 2) as i32;
-        s = s.saturating_add(half);
-    }
-    (s as f32, stvert.t as f32)
+// ---------------------------------------------------------------------------
+// Alias models as id's software renderer draws them: R_AliasDrawModel and its
+// setup (r_alias.c), R_AliasClipTriangle (r_aclip.c), D_PolysetDraw (d_polyse.c)
+// ---------------------------------------------------------------------------
+//
+// Every alias model — monsters, items, torches and the weapon — goes through
+// the same pipeline as in WinQuake: the vertices are transformed and projected
+// to INTEGER screen coordinates with a per-vertex light level
+// (`R_AliasTransformFinalVert`: the ambient light, minus the shade light times
+// the vertex normal's cosine to a fixed light vector), triangles that cross the
+// view edges or come nearer than `ALIAS_Z_CLIP_PLANE` are clipped
+// (`R_AliasClipTriangle`), and each triangle is filled by `D_PolysetDraw`'s
+// fixed-point edge walker: AFFINE texture mapping, Gouraud-stepped light, 1/z
+// stepped for the z-buffer, and every pixel written through the colormap —
+// `acolormap[texel + (light & 0xFF00)]` — so the output is always a palette
+// index and fullbright texels stay fullbright.
+
+/// `ALIAS_*_CLIP` (r_shared.h): a final vertex's out-codes.
+const ALIAS_LEFT_CLIP: i32 = 0x0001;
+const ALIAS_TOP_CLIP: i32 = 0x0002;
+const ALIAS_RIGHT_CLIP: i32 = 0x0004;
+const ALIAS_BOTTOM_CLIP: i32 = 0x0008;
+const ALIAS_Z_CLIP: i32 = 0x0010;
+const ALIAS_XY_CLIP_MASK: i32 = 0x000F;
+/// `ALIAS_Z_CLIP_PLANE` (r_local.h): alias triangles are clipped 5 units in
+/// front of the eye.
+const ALIAS_Z_CLIP_PLANE: f32 = 5.0;
+/// `LIGHT_MIN` (r_alias.c): no vertex is lit below this.
+const LIGHT_MIN: i32 = 5;
+/// `VID_CBITS` / `VID_GRADES` (vid.h): 64 light levels.
+const VID_CBITS: i32 = 6;
+const VID_GRADES: i32 = 1 << VID_CBITS;
+/// The `r_aliastransbase` / `r_aliastransadj` cvar defaults (r_main.c): beyond
+/// this distance a whole-on-screen model is drawn by recursive subdivision.
+const R_ALIASTRANSBASE: f32 = 200.0;
+const R_ALIASTRANSADJ: f32 = 100.0;
+/// The light vector `R_DrawEntitiesOnList` and `R_DrawViewModel` give every
+/// alias model (`{-1, 0, 0}`, "FIXME: remove and do real lighting").
+const ALIAS_LIGHTVEC: Vec3 = [-1.0, 0.0, 0.0];
+/// `(float)0x8000 * 0x10000`: the 1/z scale of alias z (`ziscale`), 2^31.
+const ALIAS_ZISCALE: f64 = 2_147_483_648.0;
+/// The sentinel `D_RasterizeAliasPolySmooth` stores in a span's `count`.
+const SPAN_END: i32 = -999_999;
+
+/// `finalvert_t` (r_shared.h): `v` = screen u, v, skin s, t (16.16), light
+/// (colormap offset, 8.8 rows), 1/z (scaled by 2^31); plus the out-codes /
+/// `ALIAS_ONSEAM` flag.
+#[derive(Clone, Copy, Default, Debug)]
+struct FinalVert {
+    v: [i32; 6],
+    flags: i32,
 }
 
-/// Draw one alias-model instance into `image`/`zbuf`, sharing the world's depth
-/// buffer so the model occludes and is occluded by BSP geometry.
-///
-/// Uses the same camera basis, focal length, projection, and near clip as
-/// [`draw_world_textured`]. Each triangle's three vertices (from the instance's
-/// posed frame, [`mdl_frame_verts`]) are reconstructed in model space,
-/// transformed to world space (yaw about `+Z`, then translate), and projected.
-///
-/// ## Skin texturing
-/// When the model carries a usable skin (resolved by [`mdl_skin`]: skin 0's
-/// pixels with positive `skinwidth`/`skinheight` and enough bytes) each triangle
-/// is drawn through the perspective-correct textured rasteriser
-/// [`raster_triangle_tex`], sampling the palette-indexed skin via `palette`.
-/// Per-vertex skin coordinates come from the base ST vertices ([`mdl_skin_st`]),
-/// including the `ALIAS_ONSEAM` back-face `s`-shift, and are clamped into the
-/// skin so a vertex on the seam never wraps to bleed the opposite half.
-///
-/// ## Fallback
-/// If the model has no usable skin, or a triangle references an out-of-range
-/// stvert/vertex, that triangle (or the whole model) is drawn flat with
-/// `inst.color` exactly as before, so nothing regresses for un-skinned models.
-///
-/// Shading is the existing per-triangle Lambert term
-/// `max(0.25, dot(normal, light_dir))`, passed as the `shade` argument to the
-/// textured rasteriser (and folded into `inst.color` on the flat path). A
-/// triangle is skipped whole if any vertex is at/behind the near plane. Every
-/// model index goes through `.get()`; malformed data is skipped, never panicked
-/// on.
+/// The view state R_ViewChanged / R_SetupFrame leave for the alias renderer:
+/// `vpn`/`vright`/`vup`, `r_origin`, `aliasxcenter`/`aliasycenter`,
+/// `aliasxscale`/`aliasyscale` (`r_aliasuvscale` 1), the `aliasvrect` (the
+/// whole image: the port renders the view rectangle into its own image), and
+/// `r_aliastransition`/`r_resfudge`.
+struct AliasView {
+    vpn: Vec3,
+    vright: Vec3,
+    vup: Vec3,
+    origin: Vec3,
+    xcenter: f32,
+    ycenter: f32,
+    xscale: f32,
+    yscale: f32,
+    right: i32,
+    bottom: i32,
+    transition: f32,
+    resfudge: f32,
+    /// `scr_fov > 90`: R_DrawViewModel draws no gun.
+    fov_over_90: bool,
+}
+
+impl AliasView {
+    fn new(cam: &Camera, w: usize, h: usize) -> AliasView {
+        let (vpn, vright, vup) = cam.basis();
+        // R_ViewChanged: horizontalFieldOfView = 2*tan(fov_x/360*M_PI); square
+        // pixels, so yscale = xscale (the port's projection; the oracle's too).
+        let hfov = (2.0 * (cam.fov_deg as f64 / 360.0 * std::f64::consts::PI).tan()) as f32;
+        let hfov = if hfov.abs() > 1e-6 { hfov } else { 2.0 };
+        let xscale = w as f32 / hfov;
+        let res_scale = ((w * h) as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov as f64);
+        AliasView {
+            vpn,
+            vright,
+            vup,
+            origin: cam.pos,
+            xcenter: w as f32 * 0.5 - 0.5,
+            ycenter: h as f32 * 0.5 - 0.5,
+            xscale,
+            yscale: xscale,
+            right: w as i32,
+            bottom: h as i32,
+            transition: (R_ALIASTRANSBASE as f64 * res_scale) as f32,
+            resfudge: (R_ALIASTRANSADJ as f64 * res_scale) as f32,
+            fov_over_90: cam.fov_deg > 90.0,
+        }
+    }
+
+    /// The `ALIAS_*_CLIP` out-codes of a projected vertex against `aliasvrect`.
+    fn xy_flags(&self, u: i32, v: i32) -> i32 {
+        let mut f = 0;
+        if u < 0 {
+            f |= ALIAS_LEFT_CLIP;
+        }
+        if v < 0 {
+            f |= ALIAS_TOP_CLIP;
+        }
+        if u > self.right {
+            f |= ALIAS_RIGHT_CLIP;
+        }
+        if v > self.bottom {
+            f |= ALIAS_BOTTOM_CLIP;
+        }
+        f
+    }
+}
+
+/// One alias entity to draw: the fields of `entity_t` `R_AliasDrawModel` reads.
+struct AliasEntity<'a> {
+    mdl: &'a crate::mdl::Mdl,
+    origin: Vec3,
+    /// `angles` as the entity stores them (pitch, yaw, roll; pitch "backward").
+    angles: Vec3,
+    frame: usize,
+    skinnum: i32,
+    /// The flat colour for a model without a usable skin (port fallback).
+    color: [u8; 3],
+}
+
+/// `R_ConcatTransforms` (mathlib.c).
+fn concat_transforms(a: &[[f32; 4]; 3], b: &[[f32; 4]; 3]) -> [[f32; 4]; 3] {
+    let mut o = [[0.0f32; 4]; 3];
+    for i in 0..3 {
+        for j in 0..4 {
+            o[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+        }
+        o[i][3] += a[i][3];
+    }
+    o
+}
+
+/// `R_AliasSetUpTransform` (r_alias.c): model bytes -> view space (x right,
+/// y down, z forward) in one 3x4 matrix, `viewmatrix * t2matrix * tmatrix`.
+/// With `trivial_accept` the rows are pre-scaled for the unclipped projection
+/// (x and y to screen units, all three by 2^-31 so 1/z comes out scaled).
+/// Returns the matrix and the entity's `alias_forward/right/up`.
+fn alias_setup_transform(
+    view: &AliasView,
+    header: &crate::mdl::MdlHeader,
+    ent: &AliasEntity,
+    trivial_accept: i32,
+) -> ([[f32; 4]; 3], [Vec3; 3]) {
+    let angles = [-ent.angles[0], ent.angles[1], ent.angles[2]];
+    let (fwd, right, up) = crate::math::angle_vectors(angles);
+    let mut tmatrix = [[0.0f32; 4]; 3];
+    for (i, row) in tmatrix.iter_mut().enumerate() {
+        row[i] = header.scale[i];
+        row[3] = header.scale_origin[i];
+    }
+    let mut t2 = [[0.0f32; 4]; 3];
+    for i in 0..3 {
+        t2[i][0] = fwd[i];
+        t2[i][1] = -right[i];
+        t2[i][2] = up[i];
+        // -modelorg, modelorg = r_origin - r_entorigin
+        t2[i][3] = -(view.origin[i] - ent.origin[i]);
+    }
+    let rotation = concat_transforms(&t2, &tmatrix);
+    let viewmatrix = [
+        [view.vright[0], view.vright[1], view.vright[2], 0.0],
+        [-view.vup[0], -view.vup[1], -view.vup[2], 0.0],
+        [view.vpn[0], view.vpn[1], view.vpn[2], 0.0],
+    ];
+    let mut m = concat_transforms(&viewmatrix, &rotation);
+    if trivial_accept != 0 {
+        let k = 1.0 / ALIAS_ZISCALE;
+        for (row, scale) in m.iter_mut().zip([view.xscale as f64 * k, view.yscale as f64 * k, k]) {
+            for e in row.iter_mut() {
+                *e = (*e as f64 * scale) as f32;
+            }
+        }
+    }
+    (m, [fwd, right, up])
+}
+
+/// `R_AliasTransformVector` / the transform half of `R_AliasTransformFinalVert`.
+#[inline]
+fn alias_transform_point(m: &[[f32; 4]; 3], p: [f32; 3]) -> [f32; 3] {
+    [
+        p[0] * m[0][0] + p[1] * m[0][1] + p[2] * m[0][2] + m[0][3],
+        p[0] * m[1][0] + p[1] * m[1][1] + p[2] * m[1][2] + m[1][3],
+        p[0] * m[2][0] + p[1] * m[2][1] + p[2] * m[2][2] + m[2][3],
+    ]
+}
+
+/// The bounding box `R_AliasCheckBBox` tests: the frame's (a group's own box
+/// for a group frame), with an out-of-range frame read as 0.
+fn alias_frame_bbox(mdl: &crate::mdl::Mdl, frame: usize) -> Option<([u8; 3], [u8; 3])> {
+    let f = mdl.frames.get(frame).or_else(|| mdl.frames.first())?;
+    Some(match f {
+        crate::mdl::Frame::Single(af) => (af.bboxmin.v, af.bboxmax.v),
+        crate::mdl::Frame::Group { bboxmin, bboxmax, .. } => (bboxmin.v, bboxmax.v),
+    })
+}
+
+/// `R_AliasCheckBBox` (r_alias.c): transform the frame's bounding box; reject
+/// the model when it is wholly nearer than the z-clip plane or wholly off one
+/// side of the view, else return `trivial_accept`: 1 when no corner needs any
+/// clipping, | 2 when also farther than `r_aliastransition + size*r_resfudge`
+/// (drawn by recursive subdivision), 0 when triangles may need clipping.
+fn alias_check_bbox(view: &AliasView, ent: &AliasEntity) -> Option<i32> {
+    let header = &ent.mdl.header;
+    let (m, _) = alias_setup_transform(view, header, ent, 0);
+    let (lo, hi) = alias_frame_bbox(ent.mdl, ent.frame)?;
+    let (lo, hi) = (lo.map(f32::from), hi.map(f32::from));
+    // basepts: x from min for 0..3 and max for 4..7; y and z as the C lists them.
+    let xs = [lo[0], lo[0], lo[0], lo[0], hi[0], hi[0], hi[0], hi[0]];
+    let ys = [lo[1], hi[1], hi[1], lo[1], hi[1], lo[1], lo[1], hi[1]];
+    let zs = [lo[2], lo[2], hi[2], hi[2], lo[2], lo[2], hi[2], hi[2]];
+    let mut aux = [[0.0f32; 3]; 16];
+    let mut zflag = [false; 16];
+    let mut zclipped = false;
+    let mut zfullyclipped = true;
+    let mut minz: i32 = 9999;
+    for i in 0..8 {
+        aux[i] = alias_transform_point(&m, [xs[i], ys[i], zs[i]]);
+        if aux[i][2] < ALIAS_Z_CLIP_PLANE {
+            zflag[i] = true;
+            zclipped = true;
+        } else {
+            if aux[i][2] < minz as f32 {
+                minz = aux[i][2] as i32;
+            }
+            zfullyclipped = false;
+        }
+    }
+    if zfullyclipped {
+        return None;
+    }
+    let mut numv = 8;
+    if zclipped {
+        // aedges: the box's 12 edges; a crossing edge contributes its point on
+        // the clip plane.
+        const AEDGES: [(usize, usize); 12] =
+            [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 5), (1, 4), (2, 7), (3, 6)];
+        for &(a, b) in &AEDGES {
+            if zflag[a] != zflag[b] {
+                let (pa, pb) = (aux[a], aux[b]);
+                let frac = (ALIAS_Z_CLIP_PLANE - pa[2]) / (pb[2] - pa[2]);
+                aux[numv] = [pa[0] + (pb[0] - pa[0]) * frac, pa[1] + (pb[1] - pa[1]) * frac, ALIAS_Z_CLIP_PLANE];
+                zflag[numv] = false;
+                numv += 1;
+            }
+        }
+    }
+    let mut anyclip = 0;
+    let mut allclip = ALIAS_XY_CLIP_MASK;
+    for i in 0..numv {
+        if zflag[i] {
+            continue;
+        }
+        let zi = 1.0 / aux[i][2];
+        let v0 = aux[i][0] * view.xscale * zi + view.xcenter;
+        let v1 = aux[i][1] * view.yscale * zi + view.ycenter;
+        let mut flags = 0;
+        if v0 < 0.0 {
+            flags |= ALIAS_LEFT_CLIP;
+        }
+        if v1 < 0.0 {
+            flags |= ALIAS_TOP_CLIP;
+        }
+        if v0 > view.right as f32 {
+            flags |= ALIAS_RIGHT_CLIP;
+        }
+        if v1 > view.bottom as f32 {
+            flags |= ALIAS_BOTTOM_CLIP;
+        }
+        anyclip |= flags;
+        allclip &= flags;
+    }
+    if allclip != 0 {
+        return None;
+    }
+    let mut trivial_accept = i32::from(anyclip == 0 && !zclipped);
+    // Mod_LoadAliasModel keeps `size * ALIAS_BASE_SIZE_RATIO` (1/11).
+    let size = (header.size as f64 * (1.0 / 11.0)) as f32;
+    if trivial_accept != 0 && minz as f32 > view.transition + size * view.resfudge {
+        trivial_accept |= 2;
+    }
+    Some(trivial_accept)
+}
+
+/// The light `R_DrawEntitiesOnList` / `R_DrawViewModel` hand `R_AliasDrawModel`
+/// (`alight_t`): `R_LightPoint` at the origin (at least 24 for the gun), plus
+/// every dynamic light reaching it (`radius - distance`) into the ambient, then
+/// ambient clamped to 128 and ambient + shade to 192. Returns (ambient, shade).
+fn alias_entity_light(
+    bsp: &Bsp,
+    origin: Vec3,
+    light_styles: &[f32; LIGHTSTYLES],
+    dlights: &[crate::dlight::DynamicLight],
+    viewmodel: bool,
+) -> (i32, i32) {
+    // R_LightPoint's integer (`r >>= 8` of the style-scaled sum; the float sum
+    // here is exact, so its floor is that integer).
+    let mut j = r_light_point(bsp, origin, light_styles).floor() as i32;
+    if viewmodel && j < 24 {
+        j = 24; // "allways give some light on gun"
+    }
+    let mut ambient = j;
+    let mut shade = j;
+    for dl in dlights {
+        if viewmodel && dl.radius == 0.0 {
+            continue;
+        }
+        let d = [origin[0] - dl.origin[0], origin[1] - dl.origin[1], origin[2] - dl.origin[2]];
+        let add = dl.radius - (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if add > 0.0 {
+            ambient = (ambient as f32 + add) as i32; // int += float
+        }
+    }
+    // "clamp lighting so it doesn't overbright as much"
+    if ambient > 128 {
+        ambient = 128;
+    }
+    if ambient + shade > 192 {
+        shade = 192 - ambient;
+    }
+    (ambient, shade)
+}
+
+/// `R_AliasSetupLighting` (r_alias.c): the ambient light as an inverted
+/// colormap offset (`(255 - ambient) << VID_CBITS`, never below `LIGHT_MIN`),
+/// the shade light in the same units, and the light vector rotated into the
+/// model's frame.
+fn alias_setup_lighting(ambient: i32, shade: i32, axes: &[Vec3; 3]) -> (i32, f32, Vec3) {
+    let mut r_ambientlight = ambient.max(LIGHT_MIN);
+    r_ambientlight = (255 - r_ambientlight) << VID_CBITS;
+    if r_ambientlight < LIGHT_MIN {
+        r_ambientlight = LIGHT_MIN;
+    }
+    let r_shadelight = (shade.max(0) as f32) * VID_GRADES as f32;
+    let lv = ALIAS_LIGHTVEC;
+    let plightvec = [dot(lv, axes[0]), -dot(lv, axes[1]), dot(lv, axes[2])];
+    (r_ambientlight, r_shadelight, plightvec)
+}
+
+/// Everything `R_AliasDrawModel` sets up for one model and `D_PolysetDraw`
+/// reads: the skin (`r_affinetridesc`), the colormap, the lighting, and the
+/// transform.
+struct AliasSetup<'a> {
+    transform: [[f32; 4]; 3],
+    r_ambientlight: i32,
+    r_shadelight: f32,
+    plightvec: Vec3,
+    ziscale: f64,
+    /// `r_affinetridesc.drawtype`: recursive subdivision instead of the edge walker.
+    subdiv: bool,
+    skin: Option<&'a [u8]>,
+    skinwidth: i32,
+    seamfixup: i32,
+    colormap: Option<&'a [u8]>,
+    flat: [u8; 3],
+}
+
+impl AliasSetup<'_> {
+    /// `R_AliasTransformFinalVert` (r_alias.c): view-space position (the
+    /// auxvert), skin coordinates in 16.16, and the vertex light: the ambient
+    /// offset, lowered by `shadelight * cos` where the normal faces the light.
+    fn final_vert(&self, tv: &crate::mdl::TriVertex, st: &crate::mdl::StVert) -> ClipVert {
+        let av = alias_transform_point(&self.transform, tv.v.map(f32::from));
+        let mut fv = FinalVert { v: [0; 6], flags: st.onseam };
+        fv.v[2] = st.s.wrapping_shl(16);
+        fv.v[3] = st.t.wrapping_shl(16);
+        fv.v[4] = self.vertex_light(tv.lightnormalindex);
+        (fv, av)
+    }
+
+    #[inline]
+    fn vertex_light(&self, lightnormalindex: u8) -> i32 {
+        let n = R_AVERTEXNORMALS.get(lightnormalindex as usize).copied().unwrap_or([0.0; 3]);
+        let lightcos = dot(n, self.plightvec);
+        let mut temp = self.r_ambientlight;
+        if lightcos < 0.0 {
+            temp += (self.r_shadelight * lightcos) as i32;
+            if temp < 0 {
+                temp = 0;
+            }
+        }
+        temp
+    }
+}
+
+/// `R_AliasProjectFinalVert` (r_alias.c): project a view-space point (z at
+/// least `ALIAS_Z_CLIP_PLANE`) to integer screen coordinates and scaled 1/z.
+fn alias_project(fv: &mut FinalVert, av: [f32; 3], view: &AliasView, ziscale: f64) {
+    let zi = 1.0 / av[2];
+    fv.v[5] = (zi as f64 * ziscale) as i32;
+    fv.v[0] = ((av[0] as f64 * view.xscale as f64 * zi as f64) + view.xcenter as f64) as i32;
+    fv.v[1] = ((av[1] as f64 * view.yscale as f64 * zi as f64) + view.ycenter as f64) as i32;
+}
+
+/// Draw one alias entity: `R_AliasDrawModel` (r_alias.c). `trivial_accept`
+/// comes from [`alias_check_bbox`] (always 0 for the gun, which is never
+/// bbox-tested); the gun's 1/z is tripled (`ziscale * 3`) so it wins the depth
+/// test against anything but a wall right against the eye.
+#[allow(clippy::too_many_arguments)]
+fn alias_draw_model(
+    fb: &mut PolyFramebuffer,
+    view: &AliasView,
+    ent: &AliasEntity,
+    trivial_accept: i32,
+    light: (i32, i32),
+    viewmodel: bool,
+    time: f32,
+    colormap: Option<&[u8]>,
+) {
+    let mdl = ent.mdl;
+    let header = &mdl.header;
+    // R_AliasSetupSkin: the entity's skin (a skin group animates by time).
+    let skin = mdl_skin(mdl, ent.skinnum, time);
+    let skinwidth = skin.as_ref().map_or(header.skinwidth.max(0), |s| s.width as i32);
+    let (transform, axes) = alias_setup_transform(view, header, ent, trivial_accept);
+    let (r_ambientlight, r_shadelight, plightvec) = alias_setup_lighting(light.0, light.1, &axes);
+    // R_AliasSetupFrame
+    let Some(verts) = mdl_frame_verts(mdl, ent.frame, time) else {
+        return;
+    };
+    let setup = AliasSetup {
+        transform,
+        r_ambientlight,
+        r_shadelight,
+        plightvec,
+        ziscale: if viewmodel { ALIAS_ZISCALE * 3.0 } else { ALIAS_ZISCALE },
+        subdiv: trivial_accept == 3,
+        skin: skin.as_ref().map(|s| &s.pixels[..s.width * s.height]),
+        skinwidth,
+        seamfixup: (skinwidth >> 1) << 16,
+        colormap: colormap.filter(|cm| cm.len() >= COLORMAP_LEN),
+        flat: ent.color,
+    };
+    let n = verts.len().min(mdl.stverts.len());
+    let mut fverts: Vec<FinalVert> = Vec::with_capacity(n);
+    let mut aux: Vec<[f32; 3]> = Vec::with_capacity(n);
+    for (tv, st) in verts.iter().zip(mdl.stverts.iter()) {
+        let (mut fv, av) = setup.final_vert(tv, st);
+        if trivial_accept != 0 {
+            // R_AliasTransformAndProjectFinalVerts: the transform is prescaled,
+            // so 1/z comes out times 2^31 and x, y in screen units.
+            let zi = 1.0 / av[2];
+            fv.v[5] = zi as i32;
+            fv.v[0] = ((av[0] * zi) as f64 + view.xcenter as f64) as i32;
+            fv.v[1] = ((av[1] * zi) as f64 + view.ycenter as f64) as i32;
+        } else if av[2] < ALIAS_Z_CLIP_PLANE {
+            fv.flags |= ALIAS_Z_CLIP;
+        } else {
+            alias_project(&mut fv, av, view, setup.ziscale);
+            fv.flags |= view.xy_flags(fv.v[0], fv.v[1]);
+        }
+        fverts.push(fv);
+        aux.push(av);
+    }
+    let vert = |i: i32| usize::try_from(i).ok().filter(|&i| i < fverts.len());
+    if trivial_accept != 0 {
+        // R_AliasPrepareUnclippedPoints
+        if setup.subdiv {
+            fb.draw_final_verts(&setup, &fverts, view);
+        }
+        for tri in &mdl.triangles {
+            if let (Some(a), Some(b), Some(c)) = (vert(tri.vertindex[0]), vert(tri.vertindex[1]), vert(tri.vertindex[2])) {
+                fb.polyset_draw(&setup, [fverts[a], fverts[b], fverts[c]], tri.facesfront != 0);
+            }
+        }
+    } else {
+        // R_AliasPreparePoints: clip and draw each triangle.
+        for tri in &mdl.triangles {
+            let (Some(a), Some(b), Some(c)) = (vert(tri.vertindex[0]), vert(tri.vertindex[1]), vert(tri.vertindex[2]))
+            else {
+                continue;
+            };
+            let pfv = [fverts[a], fverts[b], fverts[c]];
+            let all = pfv[0].flags & pfv[1].flags & pfv[2].flags;
+            let any = pfv[0].flags | pfv[1].flags | pfv[2].flags;
+            if all & (ALIAS_XY_CLIP_MASK | ALIAS_Z_CLIP) != 0 {
+                continue; // completely clipped
+            }
+            if any & (ALIAS_XY_CLIP_MASK | ALIAS_Z_CLIP) == 0 {
+                fb.polyset_draw(&setup, pfv, tri.facesfront != 0);
+            } else {
+                alias_clip_triangle(fb, &setup, view, pfv, [aux[a], aux[b], aux[c]], tri.facesfront != 0);
+            }
+        }
+    }
+}
+
+/// A clipped-polygon vertex: the final vertex and its view-space position.
+type ClipVert = (FinalVert, [f32; 3]);
+
+/// `R_AliasClip` (r_aclip.c): clip the polygon `input` against one out-code
+/// `flag`, the new vertices from `clip`, each given fresh xy out-codes.
+fn alias_clip(
+    input: &[ClipVert],
+    flag: i32,
+    view: &AliasView,
+    clip: &dyn Fn(&ClipVert, &ClipVert) -> FinalVert,
+) -> Vec<ClipVert> {
+    let mut out = Vec::with_capacity(input.len() + 2);
+    let count = input.len();
+    let mut j = count.wrapping_sub(1);
+    for i in 0..count {
+        let oldflags = input[j].0.flags & flag;
+        let flags = input[i].0.flags & flag;
+        if flags != 0 && oldflags != 0 {
+            j = i;
+            continue;
+        }
+        if (oldflags ^ flags) != 0 {
+            let mut v = clip(&input[j], &input[i]);
+            v.flags = view.xy_flags(v.v[0], v.v[1]);
+            out.push((v, [0.0; 3]));
+        }
+        if flags == 0 {
+            out.push(input[i]);
+        }
+        j = i;
+    }
+    out
+}
+
+/// The screen-edge clips of r_aclip.c (`R_Alias_clip_left` and friends): the
+/// crossing point at `bound` along axis `axis` (0 = u, 1 = v), every field
+/// interpolated and rounded (`+ 0.5`), always from the vertex lower on screen.
+fn alias_clip_screen(a: &FinalVert, b: &FinalVert, axis: usize, bound: i32) -> FinalVert {
+    let (p0, p1) = if a.v[1] >= b.v[1] { (a, b) } else { (b, a) };
+    let scale = (bound - p0.v[axis]) as f32 / (p1.v[axis] - p0.v[axis]) as f32;
+    let mut out = FinalVert::default();
+    for i in 0..6 {
+        out.v[i] = (p0.v[i] as f64 + ((p1.v[i] - p0.v[i]) as f32 * scale) as f64 + 0.5) as i32;
+    }
+    out
+}
+
+/// `R_AliasClipTriangle` (r_aclip.c): clip a triangle that crosses the z
+/// plane or a view edge, clamp the result into the view, and draw it as a fan.
+fn alias_clip_triangle(
+    fb: &mut PolyFramebuffer,
+    setup: &AliasSetup,
+    view: &AliasView,
+    pfv: [FinalVert; 3],
+    aux: [[f32; 3]; 3],
+    facesfront: bool,
+) {
+    // copy vertexes and fix seam texture coordinates
+    let mut poly: Vec<ClipVert> = (0..3)
+        .map(|i| {
+            let mut v = pfv[i];
+            if !facesfront && (v.flags & ALIAS_ONSEAM) != 0 {
+                v.v[2] += setup.seamfixup;
+            }
+            (v, aux[i])
+        })
+        .collect();
+    let mut clipflags = pfv[0].flags | pfv[1].flags | pfv[2].flags;
+    if clipflags & ALIAS_Z_CLIP != 0 {
+        // R_Alias_clip_z: interpolate in view space to the plane, then project.
+        let clip_z = |a: &ClipVert, b: &ClipVert| {
+            let (p0, p1) = if a.0.v[1] >= b.0.v[1] { (a, b) } else { (b, a) };
+            let (av0, av1) = (p0.1, p1.1);
+            let scale = (ALIAS_Z_CLIP_PLANE - av0[2]) / (av1[2] - av0[2]);
+            let avout = [av0[0] + (av1[0] - av0[0]) * scale, av0[1] + (av1[1] - av0[1]) * scale, ALIAS_Z_CLIP_PLANE];
+            let mut out = FinalVert::default();
+            for i in 2..5 {
+                out.v[i] = (p0.0.v[i] as f32 + (p1.0.v[i] - p0.0.v[i]) as f32 * scale) as i32;
+            }
+            alias_project(&mut out, avout, view, setup.ziscale);
+            out
+        };
+        poly = alias_clip(&poly, ALIAS_Z_CLIP, view, &clip_z);
+        if poly.is_empty() {
+            return;
+        }
+        clipflags = poly.iter().take(3).fold(0, |f, v| f | v.0.flags);
+    }
+    let edges: [(i32, usize, i32); 4] = [
+        (ALIAS_LEFT_CLIP, 0, 0),
+        (ALIAS_RIGHT_CLIP, 0, view.right),
+        (ALIAS_BOTTOM_CLIP, 1, view.bottom),
+        (ALIAS_TOP_CLIP, 1, 0),
+    ];
+    for (flag, axis, bound) in edges {
+        if clipflags & flag != 0 {
+            let clip = |a: &ClipVert, b: &ClipVert| alias_clip_screen(&a.0, &b.0, axis, bound);
+            poly = alias_clip(&poly, flag, view, &clip);
+            if poly.is_empty() {
+                return;
+            }
+        }
+    }
+    for (v, _) in poly.iter_mut() {
+        v.v[0] = v.v[0].clamp(0, view.right);
+        v.v[1] = v.v[1].clamp(0, view.bottom);
+        v.flags = 0;
+    }
+    for i in 1..poly.len().saturating_sub(1) {
+        fb.polyset_draw(setup, [poly[0].0, poly[i].0, poly[i + 1].0], facesfront);
+    }
+}
+
+/// `spanpackage_t` (d_polyse.c), with the destination and z pointers as one
+/// framebuffer index and the skin pointer as a skin index.
+#[derive(Clone, Copy, Default)]
+struct SpanPackage {
+    pdest: isize,
+    count: i32,
+    ptex: isize,
+    sfrac: i32,
+    tfrac: i32,
+    light: i32,
+    zi: i32,
+}
+
+/// `edgetables` (d_polyse.c): per vertex ordering, the left and right edge
+/// chains (indices into `r_p0/r_p1/r_p2`) and their edge counts.
+const POLY_EDGETABLES: [(usize, [usize; 3], usize, [usize; 3]); 12] = [
+    (1, [0, 2, 0], 2, [0, 1, 2]),
+    (2, [1, 0, 2], 1, [1, 2, 0]),
+    (1, [0, 2, 0], 1, [1, 2, 0]),
+    (1, [1, 0, 0], 2, [1, 2, 0]),
+    (2, [0, 2, 1], 1, [0, 1, 0]),
+    (1, [2, 1, 0], 1, [2, 0, 0]),
+    (1, [2, 1, 0], 2, [2, 0, 1]),
+    (2, [2, 1, 0], 1, [2, 0, 0]),
+    (1, [1, 0, 0], 1, [1, 2, 0]),
+    (1, [2, 1, 0], 1, [0, 1, 0]),
+    (1, [1, 0, 0], 1, [2, 0, 0]),
+    (1, [0, 2, 0], 1, [0, 1, 0]),
+];
+
+/// `FloorDivMod` (mathlib.c) for the long edges `adivtab` does not cover.
+fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
+    if denom <= 0.0 {
+        return (0, 0); // the C Sys_Errors; a zero-height edge draws nothing
+    }
+    if numer >= 0.0 {
+        let x = (numer / denom).floor();
+        (x as i32, (numer - x * denom).floor() as i32)
+    } else {
+        let x = (-numer / denom).floor();
+        let mut q = -(x as i32);
+        let mut r = (-numer - x * denom).floor() as i32;
+        if r != 0 {
+            q -= 1;
+            r = denom as i32 - r;
+        }
+        (q, r)
+    }
+}
+
+/// The framebuffer side of `D_PolysetDraw` (d_polyse.c): the image, the shared
+/// z-buffer, and the rasteriser state the C keeps in globals.
+struct PolyFramebuffer<'a> {
+    rgb: &'a mut [[u8; 3]],
+    zbuf: &'a mut [f32],
+    width: isize,
+    palette: &'a [[u8; 3]; 256],
+    // D_PolysetSetUpForLineScan
+    errorterm: i32,
+    erroradjustup: i32,
+    erroradjustdown: i32,
+    ubasestep: i32,
+    // D_PolysetCalcGradients
+    r_lstepx: i32,
+    r_lstepy: i32,
+    r_sstepx: i32,
+    r_sstepy: i32,
+    r_tstepx: i32,
+    r_tstepy: i32,
+    r_zistepx: i32,
+    r_zistepy: i32,
+    a_sstepxfrac: i32,
+    a_tstepxfrac: i32,
+    a_ststepxwhole: isize,
+    // the left-edge walk
+    d_aspancount: i32,
+    d_countextrastep: i32,
+    d_pdest: isize,
+    d_ptex: isize,
+    d_sfrac: i32,
+    d_tfrac: i32,
+    d_light: i32,
+    d_zi: i32,
+    d_pdestbasestep: isize,
+    d_pdestextrastep: isize,
+    d_ptexbasestep: isize,
+    d_ptexextrastep: isize,
+    d_sfracbasestep: i32,
+    d_sfracextrastep: i32,
+    d_tfracbasestep: i32,
+    d_tfracextrastep: i32,
+    d_lightbasestep: i32,
+    d_lightextrastep: i32,
+    d_zibasestep: i32,
+    d_ziextrastep: i32,
+    spans: Vec<SpanPackage>,
+    next_span: usize,
+}
+
+impl<'a> PolyFramebuffer<'a> {
+    fn new(image: &'a mut Image, zbuf: &'a mut [f32], palette: &'a [[u8; 3]; 256]) -> PolyFramebuffer<'a> {
+        let width = image.w as isize;
+        let height = image.h;
+        PolyFramebuffer {
+            rgb: &mut image.rgb,
+            zbuf,
+            width,
+            palette,
+            errorterm: 0,
+            erroradjustup: 0,
+            erroradjustdown: 0,
+            ubasestep: 0,
+            r_lstepx: 0,
+            r_lstepy: 0,
+            r_sstepx: 0,
+            r_sstepy: 0,
+            r_tstepx: 0,
+            r_tstepy: 0,
+            r_zistepx: 0,
+            r_zistepy: 0,
+            a_sstepxfrac: 0,
+            a_tstepxfrac: 0,
+            a_ststepxwhole: 0,
+            d_aspancount: 0,
+            d_countextrastep: 0,
+            d_pdest: 0,
+            d_ptex: 0,
+            d_sfrac: 0,
+            d_tfrac: 0,
+            d_light: 0,
+            d_zi: 0,
+            d_pdestbasestep: 0,
+            d_pdestextrastep: 0,
+            d_ptexbasestep: 0,
+            d_ptexextrastep: 0,
+            d_sfracbasestep: 0,
+            d_sfracextrastep: 0,
+            d_tfracbasestep: 0,
+            d_tfracextrastep: 0,
+            d_lightbasestep: 0,
+            d_lightextrastep: 0,
+            d_zibasestep: 0,
+            d_ziextrastep: 0,
+            // DPS_MAXSPANS: one package per scanline, plus the end marker.
+            spans: vec![SpanPackage::default(); height + 2],
+            next_span: 0,
+        }
+    }
+
+    /// The z test and write of one alias pixel. id keeps a 16-bit z-buffer of
+    /// `(1/z * 0x8000 * 0x10000) >> 16`; the port keeps float depth, so the
+    /// world's depth is quantised the same way for the `>=` test, and the depth
+    /// written back is one that quantises to the alias pixel's value.
+    #[inline]
+    fn plot(&mut self, idx: isize, zi: i32, pal_index: u8, setup: &AliasSetup) {
+        let Ok(i) = usize::try_from(idx) else { return };
+        let Some(z) = self.zbuf.get_mut(i) else { return };
+        let z16 = zi >> 16;
+        let world16 = if z.is_finite() && *z > 0.0 { (((ALIAS_ZISCALE / *z as f64) as i64) >> 16) as i32 } else { i32::MIN };
+        if z16 >= world16 {
+            *z = (32768.0 / (z16 as f64 + 0.5)) as f32;
+            if let Some(p) = self.rgb.get_mut(i) {
+                *p = if setup.skin.is_some() { self.palette[pal_index as usize] } else { setup.flat };
+            }
+        }
+    }
+
+    /// `acolormap[texel + (light & 0xFF00)]` for the skin texel at `ptex`.
+    #[inline]
+    fn shade(setup: &AliasSetup, ptex: isize, light: i32) -> u8 {
+        let texel = setup
+            .skin
+            .and_then(|s| usize::try_from(ptex).ok().and_then(|i| s.get(i)))
+            .copied()
+            .unwrap_or(0);
+        match setup.colormap {
+            Some(cm) => cm.get(texel as usize + (light & 0xFF00) as usize).copied().unwrap_or(texel),
+            None => texel,
+        }
+    }
+
+    /// `D_PolysetDrawFinalVerts` (d_polyse.c): the vertices of a subdivided
+    /// model, drawn as points first.
+    fn draw_final_verts(&mut self, setup: &AliasSetup, fverts: &[FinalVert], view: &AliasView) {
+        for fv in fverts {
+            if fv.v[0] < view.right && fv.v[1] < view.bottom && fv.v[0] >= 0 && fv.v[1] >= 0 {
+                let ptex = (fv.v[3] >> 16) as isize * setup.skinwidth as isize + (fv.v[2] >> 16) as isize;
+                let pix = Self::shade(setup, ptex, fv.v[4]);
+                self.plot(fv.v[1] as isize * self.width + fv.v[0] as isize, fv.v[5], pix, setup);
+            }
+        }
+    }
+
+    /// `D_PolysetDraw` for one triangle: `D_DrawSubdiv` or `D_DrawNonSubdiv`,
+    /// both of which skip back faces and move the back-facing seam vertices to
+    /// the skin's back half.
+    fn polyset_draw(&mut self, setup: &AliasSetup, v: [FinalVert; 3], facesfront: bool) {
+        let d_xdenom = (v[0].v[1] - v[1].v[1])
+            .wrapping_mul(v[0].v[0] - v[2].v[0])
+            .wrapping_sub((v[0].v[0] - v[1].v[0]).wrapping_mul(v[0].v[1] - v[2].v[1]));
+        if d_xdenom >= 0 {
+            return;
+        }
+        let mut p = [v[0].v, v[1].v, v[2].v];
+        if !facesfront {
+            for (pi, vi) in p.iter_mut().zip(v.iter()) {
+                if vi.flags & ALIAS_ONSEAM != 0 {
+                    pi[2] += setup.seamfixup;
+                }
+            }
+        }
+        if setup.subdiv {
+            // D_DrawSubdiv: one light for the whole triangle (vertex 0's).
+            let light = v[0].v[4] & 0xFF00;
+            self.recursive_triangle(setup, light, p[0], p[1], p[2], 0);
+        } else {
+            self.rasterize_smooth(setup, p, d_xdenom);
+        }
+    }
+
+    /// `D_PolysetRecursiveTriangle` (d_polyse.c): split the longest-first edge
+    /// until every edge is at most a pixel, plotting each split point on a
+    /// leading edge.
+    #[allow(clippy::too_many_arguments)]
+    fn recursive_triangle(&mut self, setup: &AliasSetup, light: i32, lp1: [i32; 6], lp2: [i32; 6], lp3: [i32; 6], depth: u32) {
+        if depth > 64 {
+            return;
+        }
+        let far = |a: &[i32; 6], b: &[i32; 6]| {
+            let du = b[0] - a[0];
+            let dv = b[1] - a[1];
+            !(-1..=1).contains(&du) || !(-1..=1).contains(&dv)
+        };
+        let (lp1, lp2, lp3) = if far(&lp1, &lp2) {
+            (lp1, lp2, lp3)
+        } else if far(&lp2, &lp3) {
+            (lp2, lp3, lp1) // split2
+        } else if far(&lp3, &lp1) {
+            (lp3, lp1, lp2) // split3
+        } else {
+            return; // entire tri is filled
+        };
+        let mut new = [0i32; 6];
+        for i in [0, 1, 2, 3, 5] {
+            new[i] = (lp1[i] + lp2[i]) >> 1;
+        }
+        // draw the point if splitting a leading edge
+        let leading = !(lp2[1] > lp1[1] || (lp2[1] == lp1[1] && lp2[0] < lp1[0]));
+        if leading {
+            let ptex = (new[3] >> 16) as isize * setup.skinwidth as isize + (new[2] >> 16) as isize;
+            let pix = Self::shade(setup, ptex, light);
+            self.plot(new[1] as isize * self.width + new[0] as isize, new[5], pix, setup);
+        }
+        self.recursive_triangle(setup, light, lp3, lp1, new, depth + 1);
+        self.recursive_triangle(setup, light, lp3, new, lp2, depth + 1);
+    }
+
+    /// `D_PolysetSetUpForLineScan` (d_polyse.c): Bresenham setup for an edge.
+    fn setup_line_scan(&mut self, startu: i32, startv: i32, endu: i32, endv: i32) {
+        self.errorterm = -1;
+        let tm = endu - startu;
+        let tn = endv - startv;
+        if (-15..=16).contains(&tm) && (-15..=16).contains(&tn) {
+            let (q, r) = ADIVTAB[(((tm + 15) << 5) + (tn + 15)) as usize];
+            self.ubasestep = q;
+            self.erroradjustup = r;
+        } else {
+            let (q, r) = floor_div_mod(tm as f64, tn as f64);
+            self.ubasestep = q;
+            self.erroradjustup = r;
+        }
+        self.erroradjustdown = tn;
+    }
+
+    /// `D_PolysetCalcGradients` (d_polyse.c): the per-pixel x and y steps of
+    /// light, s, t and 1/z across the (affine) triangle.
+    fn calc_gradients(&mut self, p: &[[i32; 6]; 3], d_xdenom: i32, skinwidth: i32) {
+        let p00_minus_p20 = (p[0][0] - p[2][0]) as f64;
+        let p01_minus_p21 = (p[0][1] - p[2][1]) as f64;
+        let p10_minus_p20 = (p[1][0] - p[2][0]) as f64;
+        let p11_minus_p21 = (p[1][1] - p[2][1]) as f64;
+        let xstepdenominv = 1.0 / d_xdenom as f32 as f64;
+        let ystepdenominv = -xstepdenominv;
+        let step = |k: usize| {
+            let t0 = (p[0][k] - p[2][k]) as f64;
+            let t1 = (p[1][k] - p[2][k]) as f64;
+            (
+                (t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv,
+                (t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv,
+            )
+        };
+        // ceil() for light so positive steps are exaggerated, negative diminished
+        let (lx, ly) = step(4);
+        self.r_lstepx = lx.ceil() as i32;
+        self.r_lstepy = ly.ceil() as i32;
+        let (sx, sy) = step(2);
+        self.r_sstepx = sx as i32;
+        self.r_sstepy = sy as i32;
+        let (tx, ty) = step(3);
+        self.r_tstepx = tx as i32;
+        self.r_tstepy = ty as i32;
+        let (zx, zy) = step(5);
+        self.r_zistepx = zx as i32;
+        self.r_zistepy = zy as i32;
+        self.a_sstepxfrac = self.r_sstepx & 0xFFFF;
+        self.a_tstepxfrac = self.r_tstepx & 0xFFFF;
+        self.a_ststepxwhole = skinwidth as isize * (self.r_tstepx >> 16) as isize + (self.r_sstepx >> 16) as isize;
+    }
+
+    /// The package for the current left-edge position.
+    fn push_span(&mut self) {
+        if let Some(sp) = self.spans.get_mut(self.next_span) {
+            *sp = SpanPackage {
+                pdest: self.d_pdest,
+                count: self.d_aspancount,
+                ptex: self.d_ptex,
+                sfrac: self.d_sfrac,
+                tfrac: self.d_tfrac,
+                light: self.d_light,
+                zi: self.d_zi,
+            };
+        }
+        self.next_span += 1;
+    }
+
+    /// `D_PolysetScanLeftEdge` (d_polyse.c): walk `height` rows down the left
+    /// edge, one span package per row.
+    fn scan_left_edge(&mut self, height: i32, skinwidth: isize) {
+        let mut height = height;
+        loop {
+            self.push_span();
+            self.errorterm += self.erroradjustup;
+            if self.errorterm >= 0 {
+                self.d_pdest += self.d_pdestextrastep;
+                self.d_aspancount += self.d_countextrastep;
+                self.d_ptex += self.d_ptexextrastep;
+                self.d_sfrac += self.d_sfracextrastep;
+                self.d_ptex += (self.d_sfrac >> 16) as isize;
+                self.d_sfrac &= 0xFFFF;
+                self.d_tfrac += self.d_tfracextrastep;
+                if self.d_tfrac & 0x10000 != 0 {
+                    self.d_ptex += skinwidth;
+                    self.d_tfrac &= 0xFFFF;
+                }
+                self.d_light += self.d_lightextrastep;
+                self.d_zi += self.d_ziextrastep;
+                self.errorterm -= self.erroradjustdown;
+            } else {
+                self.d_pdest += self.d_pdestbasestep;
+                self.d_aspancount += self.ubasestep;
+                self.d_ptex += self.d_ptexbasestep;
+                self.d_sfrac += self.d_sfracbasestep;
+                self.d_ptex += (self.d_sfrac >> 16) as isize;
+                self.d_sfrac &= 0xFFFF;
+                self.d_tfrac += self.d_tfracbasestep;
+                if self.d_tfrac & 0x10000 != 0 {
+                    self.d_ptex += skinwidth;
+                    self.d_tfrac &= 0xFFFF;
+                }
+                self.d_light += self.d_lightbasestep;
+                self.d_zi += self.d_zibasestep;
+            }
+            height -= 1;
+            if height <= 0 {
+                break;
+            }
+        }
+    }
+
+    /// Start a left edge at `top`: `d_ptex`/fractions (`frac`: keep the vertex's
+    /// fractional s/t — the first edge does, the second restarts at 0 as in the
+    /// C), light, 1/z and the destination.
+    fn start_left_edge(&mut self, top: &[i32; 6], righttop_u: i32, skinwidth: isize, frac: bool) {
+        self.d_aspancount = top[0] - righttop_u;
+        self.d_ptex = (top[2] >> 16) as isize + (top[3] >> 16) as isize * skinwidth;
+        if frac {
+            self.d_sfrac = top[2] & 0xFFFF;
+            self.d_tfrac = top[3] & 0xFFFF;
+        } else {
+            self.d_sfrac = 0;
+            self.d_tfrac = 0;
+        }
+        self.d_light = top[4];
+        self.d_zi = top[5];
+        self.d_pdest = top[1] as isize * self.width + top[0] as isize;
+    }
+
+    /// The left-edge steps for the edge just set up by `setup_line_scan`.
+    fn left_edge_steps(&mut self, skinwidth: isize) {
+        self.d_pdestbasestep = self.width + self.ubasestep as isize;
+        self.d_pdestextrastep = self.d_pdestbasestep + 1;
+        // for negative steps in x along left edge, bias toward overflow rather
+        // than underflow
+        let working_lstepx = if self.ubasestep < 0 { self.r_lstepx - 1 } else { self.r_lstepx };
+        self.d_countextrastep = self.ubasestep + 1;
+        let sb = self.r_sstepy.wrapping_add(self.r_sstepx.wrapping_mul(self.ubasestep));
+        let tb = self.r_tstepy.wrapping_add(self.r_tstepx.wrapping_mul(self.ubasestep));
+        self.d_ptexbasestep = (sb >> 16) as isize + (tb >> 16) as isize * skinwidth;
+        self.d_sfracbasestep = sb & 0xFFFF;
+        self.d_tfracbasestep = tb & 0xFFFF;
+        self.d_lightbasestep = self.r_lstepy + working_lstepx * self.ubasestep;
+        self.d_zibasestep = self.r_zistepy.wrapping_add(self.r_zistepx.wrapping_mul(self.ubasestep));
+        let se = self.r_sstepy.wrapping_add(self.r_sstepx.wrapping_mul(self.d_countextrastep));
+        let te = self.r_tstepy.wrapping_add(self.r_tstepx.wrapping_mul(self.d_countextrastep));
+        self.d_ptexextrastep = (se >> 16) as isize + (te >> 16) as isize * skinwidth;
+        self.d_sfracextrastep = se & 0xFFFF;
+        self.d_tfracextrastep = te & 0xFFFF;
+        self.d_lightextrastep = self.d_lightbasestep + working_lstepx;
+        self.d_ziextrastep = self.d_zibasestep.wrapping_add(self.r_zistepx);
+    }
+
+    /// `D_PolysetDrawSpans8` (d_polyse.c): walk the right edge down the span
+    /// packages from `start` to the end marker, filling each row from the left
+    /// edge to the right one.
+    fn draw_spans(&mut self, setup: &AliasSetup, start: usize) {
+        let skinwidth = setup.skinwidth as isize;
+        let mut k = start;
+        loop {
+            let Some(sp) = self.spans.get(k).copied() else { return };
+            let lcount = self.d_aspancount - sp.count;
+            self.errorterm += self.erroradjustup;
+            if self.errorterm >= 0 {
+                self.d_aspancount += self.d_countextrastep;
+                self.errorterm -= self.erroradjustdown;
+            } else {
+                self.d_aspancount += self.ubasestep;
+            }
+            if lcount > 0 {
+                let (mut lpdest, mut lptex) = (sp.pdest, sp.ptex);
+                let (mut lsfrac, mut ltfrac, mut llight, mut lzi) = (sp.sfrac, sp.tfrac, sp.light, sp.zi);
+                for _ in 0..lcount {
+                    let pix = Self::shade(setup, lptex, llight);
+                    self.plot(lpdest, lzi, pix, setup);
+                    lpdest += 1;
+                    lzi = lzi.wrapping_add(self.r_zistepx);
+                    llight = llight.wrapping_add(self.r_lstepx);
+                    lptex += self.a_ststepxwhole;
+                    lsfrac += self.a_sstepxfrac;
+                    lptex += (lsfrac >> 16) as isize;
+                    lsfrac &= 0xFFFF;
+                    ltfrac += self.a_tstepxfrac;
+                    if ltfrac & 0x10000 != 0 {
+                        lptex += skinwidth;
+                        ltfrac &= 0xFFFF;
+                    }
+                }
+            }
+            k += 1;
+            match self.spans.get(k) {
+                Some(next) if next.count != SPAN_END => {}
+                _ => return,
+            }
+        }
+    }
+
+    /// `D_RasterizeAliasPolySmooth` + `D_PolysetSetEdgeTable` (d_polyse.c):
+    /// fill one screen triangle, top to bottom, left edge exclusive of the
+    /// right.
+    fn rasterize_smooth(&mut self, setup: &AliasSetup, p: [[i32; 6]; 3], d_xdenom: i32) {
+        // D_PolysetSetEdgeTable
+        let mut edgetableindex = 0usize;
+        let table = 'table: {
+            if p[0][1] >= p[1][1] {
+                if p[0][1] == p[1][1] {
+                    break 'table if p[0][1] < p[2][1] { 2 } else { 5 };
+                }
+                edgetableindex = 1;
+            }
+            if p[0][1] == p[2][1] {
+                break 'table if edgetableindex != 0 { 8 } else { 9 };
+            } else if p[1][1] == p[2][1] {
+                break 'table if edgetableindex != 0 { 10 } else { 11 };
+            }
+            if p[0][1] > p[2][1] {
+                edgetableindex += 2;
+            }
+            if p[1][1] > p[2][1] {
+                edgetableindex += 4;
+            }
+            edgetableindex
+        };
+        let (numleft, left, numright, right) = POLY_EDGETABLES[table];
+        let skinwidth = setup.skinwidth as isize;
+        let plefttop = p[left[0]];
+        let prighttop = p[right[0]];
+        let pleftbottom = p[left[1]];
+        let prightbottom = p[right[1]];
+        let initialleftheight = pleftbottom[1] - plefttop[1];
+        let initialrightheight = prightbottom[1] - prighttop[1];
+        if initialleftheight < 0 || initialrightheight < 0 {
+            return;
+        }
+
+        self.calc_gradients(&p, d_xdenom, setup.skinwidth);
+
+        // scan out the top (and possibly only) part of the left edge
+        self.next_span = 0;
+        self.start_left_edge(&plefttop, prighttop[0], skinwidth, true);
+        if initialleftheight == 1 {
+            self.push_span();
+        } else if initialleftheight > 1 {
+            self.setup_line_scan(plefttop[0], plefttop[1], pleftbottom[0], pleftbottom[1]);
+            self.left_edge_steps(skinwidth);
+            self.scan_left_edge(initialleftheight, skinwidth);
+        }
+        // scan out the bottom part of the left edge, if it exists
+        if numleft == 2 {
+            let top = pleftbottom;
+            let bottom = p[left[2]];
+            let height = bottom[1] - top[1];
+            self.start_left_edge(&top, prighttop[0], skinwidth, false);
+            if height == 1 {
+                self.push_span();
+            } else if height > 1 {
+                self.setup_line_scan(top[0], top[1], bottom[0], bottom[1]);
+                self.left_edge_steps(skinwidth);
+                self.scan_left_edge(height, skinwidth);
+            }
+        }
+
+        // scan out the top (and possibly only) part of the right edge,
+        // updating the count field
+        let need = self.next_span.max(initialrightheight as usize) + 2;
+        if self.spans.len() < need {
+            self.spans.resize(need, SpanPackage::default());
+        }
+        self.setup_line_scan(prighttop[0], prighttop[1], prightbottom[0], prightbottom[1]);
+        self.d_aspancount = 0;
+        self.d_countextrastep = self.ubasestep + 1;
+        let irh = initialrightheight as usize;
+        let originalcount = self.spans[irh].count;
+        self.spans[irh].count = SPAN_END; // mark end of the spanpackages
+        if irh > 0 {
+            self.draw_spans(setup, 0);
+        }
+
+        // scan out the bottom part of the right edge, if it exists
+        if numright == 2 {
+            self.spans[irh].count = originalcount;
+            self.d_aspancount = prightbottom[0] - prighttop[0];
+            let top = prightbottom;
+            let bottom = p[right[2]];
+            let height = bottom[1] - top[1];
+            if height <= 0 {
+                return;
+            }
+            self.setup_line_scan(top[0], top[1], bottom[0], bottom[1]);
+            self.d_countextrastep = self.ubasestep + 1;
+            let end = irh + height as usize;
+            if self.spans.len() <= end {
+                self.spans.resize(end + 1, SpanPackage::default());
+            }
+            self.spans[end].count = SPAN_END;
+            self.draw_spans(setup, irh);
+        }
+    }
+}
+
+/// Draw one alias-model instance, as `R_DrawEntitiesOnList` does: the bounding
+/// box test (`R_AliasCheckBBox`), the light at the origin plus dynamic lights,
+/// then `R_AliasDrawModel`. The model shares the world's z-buffer.
 #[allow(clippy::too_many_arguments)]
 fn draw_alias_model(
     image: &mut Image,
@@ -4516,238 +5770,162 @@ fn draw_alias_model(
     bsp: &Bsp,
     cam: &Camera,
     inst: &ModelInstance,
-    w: usize,
-    h: usize,
     palette: &[[u8; 3]; 256],
     dlights: &[crate::dlight::DynamicLight],
     light_styles: &[f32; LIGHTSTYLES],
     time: f32,
+    colormap: Option<&[u8]>,
 ) {
-    const NEAR: f32 = 1.0;
-    if w == 0 || h == 0 {
+    if image.w == 0 || image.h == 0 {
         return;
     }
-
-    let (forward, right, up) = cam.basis();
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
-    let tan_half = half_fov.tan();
-    let focal = if tan_half.abs() < 1e-6 {
-        cx
-    } else {
-        (cx as f64 / tan_half) as f32
+    let view = AliasView::new(cam, image.w, image.h);
+    let ent = AliasEntity {
+        mdl: inst.mdl,
+        origin: inst.origin,
+        angles: [inst.pitch, inst.yaw, inst.roll],
+        frame: inst.frame,
+        skinnum: inst.skinnum,
+        color: inst.color,
     };
-
-    // FAITHFULNESS (alias lighting): instead of a fixed directional Lambert, the C
-    // (`R_DrawEntitiesOnList`) lights an alias model from the WORLD: it samples
-    // `R_LightPoint(origin)` for the baked light at the model's feet, then adds
-    // any dynamic light whose radius reaches the origin (`add = radius - dist`).
-    // We compute the same scalar here, once per model. The sampled world light is
-    // 0..255; a `+`-prefixed style flicker is folded in via `light_styles`. We map
-    // that scalar to a per-model brightness `model_light` and modulate it by a mild
-    // per-triangle Lambert so silhouettes still read.
-    let world_light = r_light_point(bsp, inst.origin, light_styles);
-    let mut ambient = world_light;
-    for dl in dlights {
-        let dx = inst.origin[0] - dl.origin[0];
-        let dy = inst.origin[1] - dl.origin[1];
-        let dz = inst.origin[2] - dl.origin[2];
-        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-        let add = dl.radius - dist;
-        if add > 0.0 {
-            ambient += add; // C: `lighting.ambientlight += add`
-        }
-    }
-    // C clamps ambient to 128 (so it never fully whites out) before the lighting
-    // table; here we normalise to a 0..~1.2 brightness. A pitch-black sample
-    // (`ambient` near 0) still leaves the model dimly visible (floor ~0.25), and a
-    // fully-lit/dlit sample saturates near 1.2 (a little overbright for dlights).
-    let ambient = ambient.min(255.0);
-    let model_light = (0.25 + ambient / 200.0).clamp(0.25, 1.2);
-
-    // Model orientation (r_alias.c R_AliasSetUpTransform). With pitch=roll=0 this is
-    // exactly the +Z yaw rotation, so zero-orientation models take the original fast
-    // path and render bit-identically. With a pitch or roll (flying projectiles,
-    // banking flyers) we build the full basis from AngleVectors and transform each
-    // point as `p[0]*forward - p[1]*right + p[2]*up + origin` (the C t2matrix whose
-    // columns are forward / -right / up over angles [PITCH=-pitch, YAW, ROLL]).
-    let yaw_rad = (inst.yaw as f64).to_radians();
-    let oriented = inst.pitch != 0.0 || inst.roll != 0.0;
-    let (m_fwd, m_right, m_up) = if oriented {
-        crate::math::angle_vectors([-inst.pitch, inst.yaw, inst.roll])
-    } else {
-        ([0.0; 3], [0.0; 3], [0.0; 3]) // unused on the fast path
+    let Some(trivial_accept) = alias_check_bbox(&view, &ent) else {
+        return;
     };
-
-    let verts = match mdl_frame_verts(inst.mdl, inst.frame, time) {
-        Some(v) => v,
-        None => return, // no frame -> nothing to draw
-    };
-    let header = &inst.mdl.header;
-
-    // Resolve the model's skin once, by the entity's skinnum and the scene time
-    // (group skins animate). `None` => the whole model uses the flat colour path
-    // (items without skins, malformed dims, short pixel buffers).
-    let skin = mdl_skin(inst.mdl, inst.skinnum, time);
-
-    for tri in &inst.mdl.triangles {
-        // Resolve the three frame vertices, fully bounds-checked.
-        let mut world: [Vec3; 3] = [[0.0; 3]; 3];
-        let mut ok = true;
-        for (slot, &vi) in tri.vertindex.iter().enumerate() {
-            let idx: usize = match usize::try_from(vi) {
-                Ok(i) => i,
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            };
-            let tv = match verts.get(idx) {
-                Some(tv) => tv,
-                None => {
-                    ok = false;
-                    break;
-                }
-            };
-            let p = mdl_vertex_model_space(header, tv);
-            // `slot` is 0..3 by the array length; in-range by construction.
-            if let Some(w) = world.get_mut(slot) {
-                *w = if oriented {
-                    [
-                        p[0] * m_fwd[0] - p[1] * m_right[0] + p[2] * m_up[0] + inst.origin[0],
-                        p[0] * m_fwd[1] - p[1] * m_right[1] + p[2] * m_up[1] + inst.origin[1],
-                        p[0] * m_fwd[2] - p[1] * m_right[2] + p[2] * m_up[2] + inst.origin[2],
-                    ]
-                } else {
-                    mdl_model_to_world(p, yaw_rad, inst.origin)
-                };
-            }
-        }
-        if !ok {
-            continue;
-        }
-
-        let (a, b, c) = (world[0], world[1], world[2]);
-
-        // World-space flat normal; skip degenerate triangles.
-        let (normal, nlen) = normalize(cross(sub(b, a), sub(c, a)));
-        if nlen == 0.0 {
-            continue;
-        }
-        // Brightness = world-sampled model light, modulated by a gentle Lambert so
-        // the silhouette still reads (the C's `r_shadelight*lightcos` term). The
-        // directional term only varies brightness within [0.7, 1.0]*model_light,
-        // so the model never goes black on a back face — the world light dominates.
-        let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
-        let lambert = 0.7 + 0.3 * dot(normal, light_dir).max(0.0);
-        let shade = (model_light * lambert).clamp(0.0, MAX_LIGHT_FACTOR);
-        let color = [
-            (inst.color[0] as f32 * shade).clamp(0.0, 255.0) as u8,
-            (inst.color[1] as f32 * shade).clamp(0.0, 255.0) as u8,
-            (inst.color[2] as f32 * shade).clamp(0.0, 255.0) as u8,
-        ];
-
-        // Per-vertex skin coordinates, if this model has a usable skin AND every
-        // vertex of this triangle resolves to a real stvert. The onseam/back-face
-        // s-shift is applied, then the coords are clamped into the skin so a seam
-        // vertex never wraps into the opposite half (the skin is not tiled).
-        let st: Option<[(f32, f32); 3]> = skin.as_ref().and_then(|sk| {
-            let facesfront = tri.facesfront != 0;
-            let max_s = sk.width.saturating_sub(1) as f32;
-            let max_t = sk.height.saturating_sub(1) as f32;
-            let mut out = [(0.0f32, 0.0f32); 3];
-            for (slot, &vi) in tri.vertindex.iter().enumerate() {
-                let idx: usize = usize::try_from(vi).ok()?;
-                let sv = inst.mdl.stverts.get(idx)?;
-                let (s, t) = mdl_skin_st(sv, facesfront, sk.width);
-                // Clamp to [0, w-1]/[0, h-1]: no tiling/wrap for skins.
-                let slot_st = out.get_mut(slot)?;
-                *slot_st = (s.clamp(0.0, max_s), t.clamp(0.0, max_t));
-            }
-            Some(out)
-        });
-
-        // Project all three; skip the whole triangle if any is at/behind near.
-        // `xy[i]` holds (screen-x, screen-y, forward-depth) per vertex.
-        let mut xy: [(f32, f32, f32); 3] = [(0.0, 0.0, 0.0); 3];
-        let mut clipped = false;
-        for (slot, v) in world.iter().enumerate() {
-            let rel = sub(*v, cam.pos);
-            let vz = dot(rel, forward);
-            if vz <= NEAR {
-                clipped = true;
-                break;
-            }
-            let vx = dot(rel, right);
-            let vy = dot(rel, up);
-            if let Some(p) = xy.get_mut(slot) {
-                *p = (cx + focal * vx / vz, cy - focal * vy / vz, vz);
-            }
-        }
-        if clipped {
-            continue;
-        }
-
-        // FIX-3: screen-space backface cull, matching the WinQuake SOFTWARE
-        // renderer. D_DrawNonSubdiv/D_DrawSubdiv (d_polyse.c:203,265) skip an
-        // alias triangle whose final screen verts give `d_xdenom >= 0`, drawing
-        // only front faces (`d_xdenom < 0`). Our `edge(v0,v1,v2)` signed area is
-        // exactly `-d_xdenom` (verified algebraically), so a front face has
-        // `area > 0` and we cull `area <= 0`. Verified visually: with this sign
-        // a live grunt still fully renders (its back faces were already
-        // z-occluded, so 0 visible pixels change); the opposite sign erases the
-        // monster's front faces. The barycentric rasteriser still draws either
-        // winding, so this cull only suppresses the now-redundant back faces.
-        {
-            let area = edge(xy[0].0, xy[0].1, xy[1].0, xy[1].1, xy[2].0, xy[2].1);
-            if area <= 0.0 {
-                continue;
-            }
-        }
-
-        match (&skin, st) {
-            (Some(sk), Some(st)) => {
-                // Textured: build ProjT vertices and sample the skin through the
-                // palette. Models are never lightmapped -> `None` lightmap.
-                let mk = |i: usize| ProjT {
-                    x: xy[i].0,
-                    y: xy[i].1,
-                    vz: xy[i].2,
-                    s: st[i].0,
-                    t: st[i].1,
-                };
-                raster_triangle_tex(
-                    image,
-                    zbuf,
-                    mk(0),
-                    mk(1),
-                    mk(2),
-                    sk.pixels,
-                    sk.width,
-                    sk.height,
-                    palette,
-                    shade,
-                    None,
-                    SurfaceMode::Normal,
-                    // Alias models are not colormapped (they keep the linear
-                    // shade multiply, matching the C's separate alias path).
-                    None,
-                );
-            }
-            _ => {
-                // Flat fallback (no usable skin, or a triangle's stverts were
-                // out of range): draw with the shaded instance colour.
-                let p = |i: usize| Projected {
-                    x: xy[i].0,
-                    y: xy[i].1,
-                    depth: xy[i].2,
-                };
-                raster_triangle(image, zbuf, p(0), p(1), p(2), color);
-            }
-        }
-    }
+    let light = alias_entity_light(bsp, inst.origin, light_styles, dlights, false);
+    let mut fb = PolyFramebuffer::new(image, zbuf, palette);
+    alias_draw_model(&mut fb, &view, &ent, trivial_accept, light, false, time, colormap);
 }
+
+/// `r_avertexnormals` (anorms.h): the 162 precomputed vertex normals an MDL
+/// vertex's `lightnormalindex` selects.
+#[rustfmt::skip]
+static R_AVERTEXNORMALS: [[f32; 3]; 162] = [
+    [-0.525731, 0.000000, 0.850651], [-0.442863, 0.238856, 0.864188], [-0.295242, 0.000000, 0.955423],
+    [-0.309017, 0.500000, 0.809017], [-0.162460, 0.262866, 0.951056], [0.000000, 0.000000, 1.000000],
+    [0.000000, 0.850651, 0.525731], [-0.147621, 0.716567, 0.681718], [0.147621, 0.716567, 0.681718],
+    [0.000000, 0.525731, 0.850651], [0.309017, 0.500000, 0.809017], [0.525731, 0.000000, 0.850651],
+    [0.295242, 0.000000, 0.955423], [0.442863, 0.238856, 0.864188], [0.162460, 0.262866, 0.951056],
+    [-0.681718, 0.147621, 0.716567], [-0.809017, 0.309017, 0.500000], [-0.587785, 0.425325, 0.688191],
+    [-0.850651, 0.525731, 0.000000], [-0.864188, 0.442863, 0.238856], [-0.716567, 0.681718, 0.147621],
+    [-0.688191, 0.587785, 0.425325], [-0.500000, 0.809017, 0.309017], [-0.238856, 0.864188, 0.442863],
+    [-0.425325, 0.688191, 0.587785], [-0.716567, 0.681718, -0.147621], [-0.500000, 0.809017, -0.309017],
+    [-0.525731, 0.850651, 0.000000], [0.000000, 0.850651, -0.525731], [-0.238856, 0.864188, -0.442863],
+    [0.000000, 0.955423, -0.295242], [-0.262866, 0.951056, -0.162460], [0.000000, 1.000000, 0.000000],
+    [0.000000, 0.955423, 0.295242], [-0.262866, 0.951056, 0.162460], [0.238856, 0.864188, 0.442863],
+    [0.262866, 0.951056, 0.162460], [0.500000, 0.809017, 0.309017], [0.238856, 0.864188, -0.442863],
+    [0.262866, 0.951056, -0.162460], [0.500000, 0.809017, -0.309017], [0.850651, 0.525731, 0.000000],
+    [0.716567, 0.681718, 0.147621], [0.716567, 0.681718, -0.147621], [0.525731, 0.850651, 0.000000],
+    [0.425325, 0.688191, 0.587785], [0.864188, 0.442863, 0.238856], [0.688191, 0.587785, 0.425325],
+    [0.809017, 0.309017, 0.500000], [0.681718, 0.147621, 0.716567], [0.587785, 0.425325, 0.688191],
+    [0.955423, 0.295242, 0.000000], [1.000000, 0.000000, 0.000000], [0.951056, 0.162460, 0.262866],
+    [0.850651, -0.525731, 0.000000], [0.955423, -0.295242, 0.000000], [0.864188, -0.442863, 0.238856],
+    [0.951056, -0.162460, 0.262866], [0.809017, -0.309017, 0.500000], [0.681718, -0.147621, 0.716567],
+    [0.850651, 0.000000, 0.525731], [0.864188, 0.442863, -0.238856], [0.809017, 0.309017, -0.500000],
+    [0.951056, 0.162460, -0.262866], [0.525731, 0.000000, -0.850651], [0.681718, 0.147621, -0.716567],
+    [0.681718, -0.147621, -0.716567], [0.850651, 0.000000, -0.525731], [0.809017, -0.309017, -0.500000],
+    [0.864188, -0.442863, -0.238856], [0.951056, -0.162460, -0.262866], [0.147621, 0.716567, -0.681718],
+    [0.309017, 0.500000, -0.809017], [0.425325, 0.688191, -0.587785], [0.442863, 0.238856, -0.864188],
+    [0.587785, 0.425325, -0.688191], [0.688191, 0.587785, -0.425325], [-0.147621, 0.716567, -0.681718],
+    [-0.309017, 0.500000, -0.809017], [0.000000, 0.525731, -0.850651], [-0.525731, 0.000000, -0.850651],
+    [-0.442863, 0.238856, -0.864188], [-0.295242, 0.000000, -0.955423], [-0.162460, 0.262866, -0.951056],
+    [0.000000, 0.000000, -1.000000], [0.295242, 0.000000, -0.955423], [0.162460, 0.262866, -0.951056],
+    [-0.442863, -0.238856, -0.864188], [-0.309017, -0.500000, -0.809017], [-0.162460, -0.262866, -0.951056],
+    [0.000000, -0.850651, -0.525731], [-0.147621, -0.716567, -0.681718], [0.147621, -0.716567, -0.681718],
+    [0.000000, -0.525731, -0.850651], [0.309017, -0.500000, -0.809017], [0.442863, -0.238856, -0.864188],
+    [0.162460, -0.262866, -0.951056], [0.238856, -0.864188, -0.442863], [0.500000, -0.809017, -0.309017],
+    [0.425325, -0.688191, -0.587785], [0.716567, -0.681718, -0.147621], [0.688191, -0.587785, -0.425325],
+    [0.587785, -0.425325, -0.688191], [0.000000, -0.955423, -0.295242], [0.000000, -1.000000, 0.000000],
+    [0.262866, -0.951056, -0.162460], [0.000000, -0.850651, 0.525731], [0.000000, -0.955423, 0.295242],
+    [0.238856, -0.864188, 0.442863], [0.262866, -0.951056, 0.162460], [0.500000, -0.809017, 0.309017],
+    [0.716567, -0.681718, 0.147621], [0.525731, -0.850651, 0.000000], [-0.238856, -0.864188, -0.442863],
+    [-0.500000, -0.809017, -0.309017], [-0.262866, -0.951056, -0.162460], [-0.850651, -0.525731, 0.000000],
+    [-0.716567, -0.681718, -0.147621], [-0.716567, -0.681718, 0.147621], [-0.525731, -0.850651, 0.000000],
+    [-0.500000, -0.809017, 0.309017], [-0.238856, -0.864188, 0.442863], [-0.262866, -0.951056, 0.162460],
+    [-0.864188, -0.442863, 0.238856], [-0.809017, -0.309017, 0.500000], [-0.688191, -0.587785, 0.425325],
+    [-0.681718, -0.147621, 0.716567], [-0.442863, -0.238856, 0.864188], [-0.587785, -0.425325, 0.688191],
+    [-0.309017, -0.500000, 0.809017], [-0.147621, -0.716567, 0.681718], [-0.425325, -0.688191, 0.587785],
+    [-0.162460, -0.262866, 0.951056], [0.442863, -0.238856, 0.864188], [0.162460, -0.262866, 0.951056],
+    [0.309017, -0.500000, 0.809017], [0.147621, -0.716567, 0.681718], [0.000000, -0.525731, 0.850651],
+    [0.425325, -0.688191, 0.587785], [0.587785, -0.425325, 0.688191], [0.688191, -0.587785, 0.425325],
+    [-0.955423, 0.295242, 0.000000], [-0.951056, 0.162460, 0.262866], [-1.000000, 0.000000, 0.000000],
+    [-0.850651, 0.000000, 0.525731], [-0.955423, -0.295242, 0.000000], [-0.951056, -0.162460, 0.262866],
+    [-0.864188, 0.442863, -0.238856], [-0.951056, 0.162460, -0.262866], [-0.809017, 0.309017, -0.500000],
+    [-0.864188, -0.442863, -0.238856], [-0.951056, -0.162460, -0.262866], [-0.809017, -0.309017, -0.500000],
+    [-0.681718, 0.147621, -0.716567], [-0.681718, -0.147621, -0.716567], [-0.850651, 0.000000, -0.525731],
+    [-0.688191, 0.587785, -0.425325], [-0.587785, 0.425325, -0.688191], [-0.425325, 0.688191, -0.587785],
+    [-0.425325, -0.688191, -0.587785], [-0.587785, -0.425325, -0.688191], [-0.688191, -0.587785, -0.425325],
+];
+
+/// `adivtab` (adivtab.h): `{quotient, remainder}` of numerator / denominator
+/// for both in -15..=16, indexed `((num+15) << 5) + (den+15)` — the small-edge
+/// shortcut of `D_PolysetSetUpForLineScan`.
+#[rustfmt::skip]
+static ADIVTAB: [(i32, i32); 1024] = [
+    (1, 0), (1, -1), (1, -2), (1, -3), (1, -4), (1, -5), (1, -6), (1, -7), (2, -1), (2, -3), (3, 0), (3, -3), (5, 0), (7, -1), (15, 0), (0, 0),
+    (-15, 0), (-8, 1), (-5, 0), (-4, 1), (-3, 0), (-3, 3), (-3, 6), (-2, 1), (-2, 3), (-2, 5), (-2, 7), (-2, 9), (-2, 11), (-2, 13), (-1, 0), (-1, 1),
+    (0, -14), (1, 0), (1, -1), (1, -2), (1, -3), (1, -4), (1, -5), (1, -6), (2, 0), (2, -2), (2, -4), (3, -2), (4, -2), (7, 0), (14, 0), (0, 0),
+    (-14, 0), (-7, 0), (-5, 1), (-4, 2), (-3, 1), (-3, 4), (-2, 0), (-2, 2), (-2, 4), (-2, 6), (-2, 8), (-2, 10), (-2, 12), (-1, 0), (-1, 1), (-1, 2),
+    (0, -13), (0, -13), (1, 0), (1, -1), (1, -2), (1, -3), (1, -4), (1, -5), (1, -6), (2, -1), (2, -3), (3, -1), (4, -1), (6, -1), (13, 0), (0, 0),
+    (-13, 0), (-7, 1), (-5, 2), (-4, 3), (-3, 2), (-3, 5), (-2, 1), (-2, 3), (-2, 5), (-2, 7), (-2, 9), (-2, 11), (-1, 0), (-1, 1), (-1, 2), (-1, 3),
+    (0, -12), (0, -12), (0, -12), (1, 0), (1, -1), (1, -2), (1, -3), (1, -4), (1, -5), (2, 0), (2, -2), (3, 0), (4, 0), (6, 0), (12, 0), (0, 0),
+    (-12, 0), (-6, 0), (-4, 0), (-3, 0), (-3, 3), (-2, 0), (-2, 2), (-2, 4), (-2, 6), (-2, 8), (-2, 10), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4),
+    (0, -11), (0, -11), (0, -11), (0, -11), (1, 0), (1, -1), (1, -2), (1, -3), (1, -4), (1, -5), (2, -1), (2, -3), (3, -2), (5, -1), (11, 0), (0, 0),
+    (-11, 0), (-6, 1), (-4, 1), (-3, 1), (-3, 4), (-2, 1), (-2, 3), (-2, 5), (-2, 7), (-2, 9), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5),
+    (0, -10), (0, -10), (0, -10), (0, -10), (0, -10), (1, 0), (1, -1), (1, -2), (1, -3), (1, -4), (2, 0), (2, -2), (3, -1), (5, 0), (10, 0), (0, 0),
+    (-10, 0), (-5, 0), (-4, 2), (-3, 2), (-2, 0), (-2, 2), (-2, 4), (-2, 6), (-2, 8), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6),
+    (0, -9), (0, -9), (0, -9), (0, -9), (0, -9), (0, -9), (1, 0), (1, -1), (1, -2), (1, -3), (1, -4), (2, -1), (3, 0), (4, -1), (9, 0), (0, 0),
+    (-9, 0), (-5, 1), (-3, 0), (-3, 3), (-2, 1), (-2, 3), (-2, 5), (-2, 7), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7),
+    (0, -8), (0, -8), (0, -8), (0, -8), (0, -8), (0, -8), (0, -8), (1, 0), (1, -1), (1, -2), (1, -3), (2, 0), (2, -2), (4, 0), (8, 0), (0, 0),
+    (-8, 0), (-4, 0), (-3, 1), (-2, 0), (-2, 2), (-2, 4), (-2, 6), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8),
+    (0, -7), (0, -7), (0, -7), (0, -7), (0, -7), (0, -7), (0, -7), (0, -7), (1, 0), (1, -1), (1, -2), (1, -3), (2, -1), (3, -1), (7, 0), (0, 0),
+    (-7, 0), (-4, 1), (-3, 2), (-2, 1), (-2, 3), (-2, 5), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8), (-1, 9),
+    (0, -6), (0, -6), (0, -6), (0, -6), (0, -6), (0, -6), (0, -6), (0, -6), (0, -6), (1, 0), (1, -1), (1, -2), (2, 0), (3, 0), (6, 0), (0, 0),
+    (-6, 0), (-3, 0), (-2, 0), (-2, 2), (-2, 4), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8), (-1, 9), (-1, 10),
+    (0, -5), (0, -5), (0, -5), (0, -5), (0, -5), (0, -5), (0, -5), (0, -5), (0, -5), (0, -5), (1, 0), (1, -1), (1, -2), (2, -1), (5, 0), (0, 0),
+    (-5, 0), (-3, 1), (-2, 1), (-2, 3), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8), (-1, 9), (-1, 10), (-1, 11),
+    (0, -4), (0, -4), (0, -4), (0, -4), (0, -4), (0, -4), (0, -4), (0, -4), (0, -4), (0, -4), (0, -4), (1, 0), (1, -1), (2, 0), (4, 0), (0, 0),
+    (-4, 0), (-2, 0), (-2, 2), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8), (-1, 9), (-1, 10), (-1, 11), (-1, 12),
+    (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (0, -3), (1, 0), (1, -1), (3, 0), (0, 0),
+    (-3, 0), (-2, 1), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8), (-1, 9), (-1, 10), (-1, 11), (-1, 12), (-1, 13),
+    (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (0, -2), (1, 0), (2, 0), (0, 0),
+    (-2, 0), (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8), (-1, 9), (-1, 10), (-1, 11), (-1, 12), (-1, 13), (-1, 14),
+    (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (0, -1), (1, 0), (0, 0),
+    (-1, 0), (-1, 1), (-1, 2), (-1, 3), (-1, 4), (-1, 5), (-1, 6), (-1, 7), (-1, 8), (-1, 9), (-1, 10), (-1, 11), (-1, 12), (-1, 13), (-1, 14), (-1, 15),
+    (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
+    (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
+    (-1, -14), (-1, -13), (-1, -12), (-1, -11), (-1, -10), (-1, -9), (-1, -8), (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (0, 0),
+    (1, 0), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1),
+    (-1, -13), (-1, -12), (-1, -11), (-1, -10), (-1, -9), (-1, -8), (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, 0), (0, 0),
+    (2, 0), (1, 0), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2), (0, 2),
+    (-1, -12), (-1, -11), (-1, -10), (-1, -9), (-1, -8), (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -1), (-3, 0), (0, 0),
+    (3, 0), (1, 1), (1, 0), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3), (0, 3),
+    (-1, -11), (-1, -10), (-1, -9), (-1, -8), (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -2), (-2, 0), (-4, 0), (0, 0),
+    (4, 0), (2, 0), (1, 1), (1, 0), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4), (0, 4),
+    (-1, -10), (-1, -9), (-1, -8), (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -3), (-2, -1), (-3, -1), (-5, 0), (0, 0),
+    (5, 0), (2, 1), (1, 2), (1, 1), (1, 0), (0, 5), (0, 5), (0, 5), (0, 5), (0, 5), (0, 5), (0, 5), (0, 5), (0, 5), (0, 5), (0, 5),
+    (-1, -9), (-1, -8), (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -4), (-2, -2), (-2, 0), (-3, 0), (-6, 0), (0, 0),
+    (6, 0), (3, 0), (2, 0), (1, 2), (1, 1), (1, 0), (0, 6), (0, 6), (0, 6), (0, 6), (0, 6), (0, 6), (0, 6), (0, 6), (0, 6), (0, 6),
+    (-1, -8), (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -5), (-2, -3), (-2, -1), (-3, -2), (-4, -1), (-7, 0), (0, 0),
+    (7, 0), (3, 1), (2, 1), (1, 3), (1, 2), (1, 1), (1, 0), (0, 7), (0, 7), (0, 7), (0, 7), (0, 7), (0, 7), (0, 7), (0, 7), (0, 7),
+    (-1, -7), (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -6), (-2, -4), (-2, -2), (-2, 0), (-3, -1), (-4, 0), (-8, 0), (0, 0),
+    (8, 0), (4, 0), (2, 2), (2, 0), (1, 3), (1, 2), (1, 1), (1, 0), (0, 8), (0, 8), (0, 8), (0, 8), (0, 8), (0, 8), (0, 8), (0, 8),
+    (-1, -6), (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -7), (-2, -5), (-2, -3), (-2, -1), (-3, -3), (-3, 0), (-5, -1), (-9, 0), (0, 0),
+    (9, 0), (4, 1), (3, 0), (2, 1), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0), (0, 9), (0, 9), (0, 9), (0, 9), (0, 9), (0, 9), (0, 9),
+    (-1, -5), (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -8), (-2, -6), (-2, -4), (-2, -2), (-2, 0), (-3, -2), (-4, -2), (-5, 0), (-10, 0), (0, 0),
+    (10, 0), (5, 0), (3, 1), (2, 2), (2, 0), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0), (0, 10), (0, 10), (0, 10), (0, 10), (0, 10), (0, 10),
+    (-1, -4), (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -9), (-2, -7), (-2, -5), (-2, -3), (-2, -1), (-3, -4), (-3, -1), (-4, -1), (-6, -1), (-11, 0), (0, 0),
+    (11, 0), (5, 1), (3, 2), (2, 3), (2, 1), (1, 5), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0), (0, 11), (0, 11), (0, 11), (0, 11), (0, 11),
+    (-1, -3), (-1, -2), (-1, -1), (-1, 0), (-2, -10), (-2, -8), (-2, -6), (-2, -4), (-2, -2), (-2, 0), (-3, -3), (-3, 0), (-4, 0), (-6, 0), (-12, 0), (0, 0),
+    (12, 0), (6, 0), (4, 0), (3, 0), (2, 2), (2, 0), (1, 5), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0), (0, 12), (0, 12), (0, 12), (0, 12),
+    (-1, -2), (-1, -1), (-1, 0), (-2, -11), (-2, -9), (-2, -7), (-2, -5), (-2, -3), (-2, -1), (-3, -5), (-3, -2), (-4, -3), (-5, -2), (-7, -1), (-13, 0), (0, 0),
+    (13, 0), (6, 1), (4, 1), (3, 1), (2, 3), (2, 1), (1, 6), (1, 5), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0), (0, 13), (0, 13), (0, 13),
+    (-1, -1), (-1, 0), (-2, -12), (-2, -10), (-2, -8), (-2, -6), (-2, -4), (-2, -2), (-2, 0), (-3, -4), (-3, -1), (-4, -2), (-5, -1), (-7, 0), (-14, 0), (0, 0),
+    (14, 0), (7, 0), (4, 2), (3, 2), (2, 4), (2, 2), (2, 0), (1, 6), (1, 5), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0), (0, 14), (0, 14),
+    (-1, 0), (-2, -13), (-2, -11), (-2, -9), (-2, -7), (-2, -5), (-2, -3), (-2, -1), (-3, -6), (-3, -3), (-3, 0), (-4, -1), (-5, 0), (-8, -1), (-15, 0), (0, 0),
+    (15, 0), (7, 1), (5, 0), (3, 3), (3, 0), (2, 3), (2, 1), (1, 7), (1, 6), (1, 5), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0), (0, 15),
+    (-2, -14), (-2, -12), (-2, -10), (-2, -8), (-2, -6), (-2, -4), (-2, -2), (-2, 0), (-3, -5), (-3, -2), (-4, -4), (-4, 0), (-6, -2), (-8, 0), (-16, 0), (0, 0),
+    (16, 0), (8, 0), (5, 1), (4, 0), (3, 1), (2, 4), (2, 2), (2, 0), (1, 7), (1, 6), (1, 5), (1, 4), (1, 3), (1, 2), (1, 1), (1, 0),
+];
 
 /// One brush submodel placed in the world: which inline model
 /// (`bsp.models[model_index]`) to draw and where (`origin`).
@@ -4868,9 +6046,25 @@ pub struct Viewmodel<'a> {
     pub frame: usize,
     /// Where V_CalcRefdef puts the gun (`view->origin`) relative to the
     /// camera (`r_refdef.vieworg`), in world units: see
-    /// [`viewmodel_origin_ofs`]. The model is posed there with the view's
-    /// orientation.
+    /// [`viewmodel_origin_ofs`].
     pub origin_ofs: Vec3,
+    /// The gun's orientation, `cl.viewent.angles` as CalcGunAngle leaves
+    /// them — pitch (+up, like [`Camera::pitch`]), yaw, roll: the view angles
+    /// BEFORE `cl.punchangle` is added and without V_CalcViewRoll's roll (only
+    /// `cl.viewangles[ROLL]`), so the weapon kick and the strafe lean move the
+    /// view but not the gun. See [`viewmodel_angles`].
+    pub angles: Vec3,
+}
+
+/// CalcGunAngle's `cl.viewent.angles` (view.c) for a camera built from the
+/// view angles plus `punch` (`cl.punchangle`, QuakeC order: pitch +down, yaw,
+/// roll): the camera's pitch and yaw with the punch taken back out, and the
+/// client's own view roll `view_roll` (`cl.viewangles[ROLL]`, 0 in play) in
+/// place of the camera's lean. (The yaw/pitch lag terms of CalcGunAngle are
+/// always 0 — it subtracts the view angles from themselves — and the idle
+/// sway is 0 at `v_idlescale 0`.)
+pub fn viewmodel_angles(cam: &Camera, punch: Vec3, view_roll: f32) -> Vec3 {
+    [cam.pitch + punch[0], cam.yaw - punch[1], view_roll]
 }
 
 /// V_CalcRefdef's viewsize "fudge" (view.c): "fudge position around to keep
@@ -4893,19 +6087,24 @@ pub fn viewmodel_fudge(viewsize: f32) -> f32 {
 
 /// The gun origin relative to the camera, as V_CalcRefdef builds it: both
 /// start at the entity origin + `viewheight` + the vertical bob (so those
-/// cancel), then the gun moves `forward * bob * 0.4` — `forward` from the
-/// player ENTITY's angles, whose pitch the server keeps at a third of the view
-/// pitch (SV_ClientThink `angles[PITCH] = -v_angle[PITCH]/3`) — and up by the
-/// viewsize fudge ([`viewmodel_fudge`]). (The C's 1/32 camera epsilon is not
-/// modelled here or on the camera.)
-pub fn viewmodel_origin_ofs(cam: &Camera, bob: f32, viewsize: f32) -> Vec3 {
-    let yaw = (cam.yaw as f64).to_radians();
-    let elev = (cam.pitch as f64 / 3.0).to_radians();
+/// cancel); the camera then gets the 1/32 "never sit exactly on a node line"
+/// epsilon on each axis and the gun does not, the gun moves `forward * bob *
+/// 0.4` — `forward` from the player entity's angles, which V_CalcRefdef has
+/// just set to the view's yaw and pitch (`ent->angles[PITCH] =
+/// -cl.viewangles[PITCH]`) — and up by the viewsize fudge
+/// ([`viewmodel_fudge`]). `gun_angles` are [`Viewmodel::angles`]; they differ
+/// from `cl.viewangles` only by a demo's damage-kick pitch (an accepted
+/// hundredth-of-a-unit gap). The epsilon is relative, so it is right whether or
+/// not the caller's camera carries it.
+pub fn viewmodel_origin_ofs(gun_angles: Vec3, bob: f32, viewsize: f32) -> Vec3 {
+    const EPSILON: f32 = 1.0 / 32.0;
+    let yaw = (gun_angles[1] as f64).to_radians();
+    let elev = (gun_angles[0] as f64).to_radians();
     let f = (bob * 0.4) as f64;
     [
-        (f * elev.cos() * yaw.cos()) as f32,
-        (f * elev.cos() * yaw.sin()) as f32,
-        (f * elev.sin()) as f32 + viewmodel_fudge(viewsize),
+        (f * elev.cos() * yaw.cos()) as f32 - EPSILON,
+        (f * elev.cos() * yaw.sin()) as f32 - EPSILON,
+        (f * elev.sin()) as f32 + viewmodel_fudge(viewsize) - EPSILON,
     ]
 }
 
@@ -4919,231 +6118,48 @@ pub struct SpriteInstance<'a> {
     pub frame: usize,
 }
 
-/// Draw the first-person weapon viewmodel anchored to the camera, on top of all
-/// world geometry — a port of Quake's `R_DrawViewModel` (the `cl.viewent`, drawn
-/// last at the view origin with the view angles so it never clips into walls).
-///
-/// ## View anchoring
-/// Each model-space vertex `p` (decoded by [`mdl_vertex_model_space`]:
-/// `scale*v + scale_origin`) is posed at V_CalcRefdef's gun origin — the
-/// camera plus `origin_ofs` ([`viewmodel_origin_ofs`]: the forward bob term and
-/// the viewsize fudge) — with the view's orientation:
-/// `world_v = cam.pos + origin_ofs + forward*p[0] + right*(-p[1]) + up*p[2]`.
-/// The MDL forward axis (`+X`) maps to the camera's `forward`, the MDL `+Y` to
-/// the camera's *left* (hence the `-p[1]` on `right`), and `+Z` to `up`. The
-/// `v_*.mdl` models are authored for exactly that pose (their vertices sit
-/// below and ahead of the eye); triangles nearer than `ALIAS_Z_CLIP_PLANE`
-/// (5 units) are clipped, as r_aclip.c does, so the grip is trimmed. Because
-/// the basis is the *camera* basis, the gun turns and pitches with the view.
-///
-/// ## Always on top
-/// The viewmodel uses its **own** depth buffer (`vz` of its own triangles),
-/// cleared fresh here, instead of the shared world z-buffer. So its triangles
-/// depth-sort correctly against *each other* (near gun parts occlude far ones)
-/// yet always overwrite whatever world/model pixel was there — a wall directly
-/// ahead can never hide the gun. The shared world z-buffer is never written, so
-/// nothing leaks into the next frame's depth ordering.
-///
-/// ## Texturing / shading / safety
-/// Identical to [`draw_alias_model`]: the model's skin (resolved by [`mdl_skin`])
-/// is sampled perspective-correctly through `palette` with the onseam back-face
-/// `s`-shift ([`mdl_skin_st`]); a skinless model (or an out-of-range stvert)
-/// falls back to a flat shaded grey. Lambert shading uses the same light vector.
-/// Every index goes through `.get()`; malformed data is skipped, never panicked
-/// on.
+/// Draw the first-person weapon — `R_DrawViewModel` (r_main.c): `cl.viewent`
+/// posed at V_CalcRefdef's gun origin (the camera plus `origin_ofs`, see
+/// [`viewmodel_origin_ofs`]) facing along the view, lit by `R_LightPoint` at
+/// that origin (at least 24) plus dynamic lights, and drawn by the same
+/// `R_AliasDrawModel` as any alias model — never bbox-tested, so every
+/// triangle takes the clipping path (the grip nearer than `ALIAS_Z_CLIP_PLANE`
+/// is trimmed), and with its 1/z tripled so it wins the shared depth test
+/// against everything but a wall right against the eye. No gun at an fov over
+/// 90 (`r_fov_greater_than_90`).
 #[allow(clippy::too_many_arguments)]
 fn draw_viewmodel(
     image: &mut Image,
     zbuf: &mut [f32],
+    bsp: &Bsp,
     cam: &Camera,
-    mdl: &crate::mdl::Mdl,
-    frame: usize,
-    origin_ofs: Vec3,
+    vm: &Viewmodel,
     palette: &[[u8; 3]; 256],
-    w: usize,
-    h: usize,
+    dlights: &[crate::dlight::DynamicLight],
+    light_styles: &[f32; LIGHTSTYLES],
+    time: f32,
+    colormap: Option<&[u8]>,
 ) {
-    // `ALIAS_Z_CLIP_PLANE` (r_local.h): alias-model triangles are clipped
-    // where they come nearer than 5 units to the eye (r_aclip.c). With the gun
-    // posed at V_CalcRefdef's origin (a hair above the eye) this trims the
-    // grip, exactly as the C shows the held weapon — only its forward part.
-    const ALIAS_Z_CLIP_PLANE: f32 = 5.0;
-    if w == 0 || h == 0 {
+    if image.w == 0 || image.h == 0 {
         return;
     }
-
-    let (forward, right, up) = cam.basis();
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
-    let tan_half = half_fov.tan();
-    let focal = if tan_half.abs() < 1e-6 {
-        cx
-    } else {
-        (cx as f64 / tan_half) as f32
-    };
-
-    let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
-    // V_CalcRefdef's `view->origin`.
-    let gun = [cam.pos[0] + origin_ofs[0], cam.pos[1] + origin_ofs[1], cam.pos[2] + origin_ofs[2]];
-
-    // The viewmodel carries only a `frame` (no group-anim time / skinnum), so it
-    // poses at `time = 0` (first sub-pose of any group) with skin 0 — its prior
-    // behaviour. An out-of-range frame still resets to 0 inside `mdl_frame_verts`.
-    let verts = match mdl_frame_verts(mdl, frame, 0.0) {
-        Some(v) => v,
-        None => return, // no frame -> nothing to draw
-    };
-    let header = &mdl.header;
-    let skin = mdl_skin(mdl, 0, 0.0);
-
-    // The viewmodel owns this depth buffer so it sorts against itself but always
-    // overwrites the world (never written here, so it never bleeds across frames).
-    let mut local_z = vec![f32::INFINITY; w.saturating_mul(h)];
-    let _ = zbuf; // the shared world z-buffer is intentionally left untouched
-
-    for tri in &mdl.triangles {
-        // Decode + view-anchor the three frame vertices, fully bounds-checked.
-        let mut world: [Vec3; 3] = [[0.0; 3]; 3];
-        let mut ok = true;
-        for (slot, &vi) in tri.vertindex.iter().enumerate() {
-            let idx: usize = match usize::try_from(vi) {
-                Ok(i) => i,
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            };
-            let tv = match verts.get(idx) {
-                Some(tv) => tv,
-                None => {
-                    ok = false;
-                    break;
-                }
-            };
-            let p = mdl_vertex_model_space(header, tv);
-            // Pose at the gun origin with the view's orientation: +X ->
-            // forward, +Y -> left (so -Y on `right`), +Z -> up.
-            let (fx, rx, ux) = (p[0], -p[1], p[2]);
-            if let Some(wv) = world.get_mut(slot) {
-                *wv = [
-                    gun[0] + forward[0] * fx + right[0] * rx + up[0] * ux,
-                    gun[1] + forward[1] * fx + right[1] * rx + up[1] * ux,
-                    gun[2] + forward[2] * fx + right[2] * rx + up[2] * ux,
-                ];
-            }
-        }
-        if !ok {
-            continue;
-        }
-
-        let (a, b, c) = (world[0], world[1], world[2]);
-        let (normal, nlen) = normalize(cross(sub(b, a), sub(c, a)));
-        if nlen == 0.0 {
-            continue;
-        }
-        // The gun faces every which way; light it by |dot| so no facet goes black.
-        let shade = dot(normal, light_dir).abs().clamp(0.25, 1.0);
-        let flat = [
-            (180.0 * shade).clamp(0.0, 255.0) as u8,
-            (180.0 * shade).clamp(0.0, 255.0) as u8,
-            (180.0 * shade).clamp(0.0, 255.0) as u8,
-        ];
-
-        // Per-vertex skin coords (with the onseam back-face s-shift), clamped so
-        // a seam vertex never wraps into the opposite half of the skin.
-        let st: Option<[(f32, f32); 3]> = skin.as_ref().and_then(|sk| {
-            let facesfront = tri.facesfront != 0;
-            let max_s = sk.width.saturating_sub(1) as f32;
-            let max_t = sk.height.saturating_sub(1) as f32;
-            let mut out = [(0.0f32, 0.0f32); 3];
-            for (slot, &vi) in tri.vertindex.iter().enumerate() {
-                let idx: usize = usize::try_from(vi).ok()?;
-                let sv = mdl.stverts.get(idx)?;
-                let (s, t) = mdl_skin_st(sv, facesfront, sk.width);
-                let slot_st = out.get_mut(slot)?;
-                *slot_st = (s.clamp(0.0, max_s), t.clamp(0.0, max_t));
-            }
-            Some(out)
-        });
-
-        // Build the three view-space verts (vx/vy/vz on the right/up/forward
-        // axes) carrying the per-vertex skin (s, t) already computed above, then
-        // CLIP against the near plane instead of dropping the whole triangle the
-        // moment one vertex falls at/behind it. This is the same Sutherland–
-        // Hodgman path the world / submodel passes use (`clip_poly_near`), so the
-        // grip (model-X < 0, behind the eye) is trimmed at the plane while the
-        // barrel ahead of the eye still draws — the authentic held-gun pose.
-        let in_st = st.unwrap_or([(0.0, 0.0); 3]);
-        let mut vviews: [VView; 3] = [VView { vx: 0.0, vy: 0.0, vz: 0.0, s: 0.0, t: 0.0 }; 3];
-        for (slot, v) in world.iter().enumerate() {
-            let rel = sub(*v, cam.pos);
-            if let (Some(slot_v), Some(&(s, t))) = (vviews.get_mut(slot), in_st.get(slot)) {
-                *slot_v = VView {
-                    vx: dot(rel, right),
-                    vy: dot(rel, up),
-                    vz: dot(rel, forward),
-                    s,
-                    t,
-                };
-            }
-        }
-        let mut poly = Vec::new();
-        clip_poly_plane_into(&vviews, ALIAS_Z_CLIP_PLANE, &mut poly);
-        if poly.len() < 3 {
-            continue; // wholly behind the eye -> nothing to draw
-        }
-
-        // Project the clipped polygon to screen (every `vz >= 5` now).
-        let proj: Vec<ProjT> = poly
-            .iter()
-            .map(|v| ProjT {
-                x: cx + focal * v.vx / v.vz,
-                y: cy - focal * v.vy / v.vz,
-                vz: v.vz,
-                s: v.s,
-                t: v.t,
-            })
-            .collect();
-
-        // FIX-3: screen-space backface cull on the PROJECTED polygon, matching
-        // the WinQuake SOFTWARE renderer (D_DrawNonSubdiv/D_DrawSubdiv reject a
-        // triangle whose final screen verts give `d_xdenom >= 0`). Our
-        // `edge(v0,v1,v2)` signed area is exactly `-d_xdenom`, so a front face
-        // has `area > 0`; we cull `area <= 0`. Using the first three clipped
-        // verts is the same winding test as the unclipped path (clipping is a
-        // convex truncation, so it preserves orientation).
-        {
-            let area = edge(
-                proj[0].x, proj[0].y, proj[1].x, proj[1].y, proj[2].x, proj[2].y,
-            );
-            if area <= 0.0 {
-                continue;
-            }
-        }
-
-        // Fan-rasterise the clipped polygon (verts 0, i, i+1) into the PRIVATE
-        // z-buffer. `(s, t)` interpolate correctly through `clip_poly_near` +
-        // the perspective-correct raster, exactly as the world path; the flat
-        // fallback (no usable skin) draws the shaded grey through the same fan.
-        for i in 1..proj.len() - 1 {
-            let (v0, v1, v2) = (proj[0], proj[i], proj[i + 1]);
-            match &skin {
-                Some(sk) if st.is_some() => {
-                    raster_triangle_tex(
-                        image, &mut local_z, v0, v1, v2,
-                        sk.pixels, sk.width, sk.height, palette, shade, None, SurfaceMode::Normal,
-                        // Viewmodel is not colormapped (linear shade multiply).
-                        None,
-                    );
-                }
-                _ => {
-                    let p = |v: &ProjT| Projected { x: v.x, y: v.y, depth: v.vz };
-                    raster_triangle(image, &mut local_z, p(&v0), p(&v1), p(&v2), flat);
-                }
-            }
-        }
+    let view = AliasView::new(cam, image.w, image.h);
+    if view.fov_over_90 {
+        return;
     }
+    let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
+    // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
+    let ent = AliasEntity {
+        mdl: vm.mdl,
+        origin,
+        angles: vm.angles,
+        frame: vm.frame,
+        skinnum: 0,
+        color: [180, 180, 180],
+    };
+    let light = alias_entity_light(bsp, origin, light_styles, dlights, true);
+    let mut fb = PolyFramebuffer::new(image, zbuf, palette);
+    alias_draw_model(&mut fb, &view, &ent, 0, light, true, time, colormap);
 }
 
 /// Render `bsp` with its real miptextures (as [`render_bsp_textured`]) and then
@@ -5224,7 +6240,7 @@ pub fn render_scene(
 /// index)` pair. They are drawn **after** the world / submodels / alias models
 /// but **before** the camera-anchored viewmodel, sharing the same internal
 /// z-buffer — so a particle behind a wall is correctly hidden, while the gun
-/// still draws on top of everything (it has its own depth buffer). Passing an
+/// still wins (its 1/z is tripled, as `R_AliasDrawModel` does). Passing an
 /// empty `particles` slice draws no particles and leaves the image identical to
 /// the pre-particle behaviour, which is why [`render_scene`] and every prior
 /// caller can pass `&[]`.
@@ -5357,13 +6373,17 @@ pub fn render_scene_ext_sprited(
         draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
     }
     if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
+    // The sky, span by span, now that every brush surface that can cover it has
+    // been drawn (id: `D_DrawSkyScans8` inside `D_DrawSurfaces`, before entities).
+    resolve_sky_spans(&mut image, &zbuf, bsp, palette);
     let ta = stats_on().then(StatInstant::now);
     for inst in models {
-        draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, w, h, palette, dlights, light_styles, time);
+        draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = ta { stat(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
     // Particles draw after the world/models, z-tested against the same buffer so
-    // walls occlude them, but before the viewmodel (which always draws on top).
+    // walls occlude them. (id draws them after the gun; with the gun's tripled
+    // 1/z in the shared z-buffer the order only matters on exact ties.)
     let tp = stats_on().then(StatInstant::now);
     draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h);
     if let Some(t) = tp { stat(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
@@ -5372,10 +6392,10 @@ pub fn render_scene_ext_sprited(
     let tsp = stats_on().then(StatInstant::now);
     draw_sprites(&mut image, &mut zbuf, cam, sprites, palette, time, w, h);
     if let Some(t) = tsp { stat(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
-    // The weapon viewmodel draws last, on top of the world and every model.
+    // The weapon: R_DrawViewModel, after the entities.
     let tv = stats_on().then(StatInstant::now);
     if let Some(vm) = viewmodel {
-        draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, vm.origin_ofs, palette, w, h);
+        draw_viewmodel(&mut image, &mut zbuf, bsp, cam, &vm, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     image
@@ -9852,32 +10872,6 @@ mod tests {
     // -- Alias-model skin texturing: skin resolution + onseam texcoord math --
 
     #[test]
-    fn mdl_skin_st_onseam_backface_shift() {
-        use crate::mdl::StVert;
-        const SKINWIDTH: usize = 100;
-
-        // A vertex NOT on the seam: s is the raw stvert.s on both front and back
-        // triangles, t is always the raw stvert.t.
-        let plain = StVert { onseam: 0, s: 10, t: 7 };
-        assert_eq!(mdl_skin_st(&plain, true, SKINWIDTH), (10.0, 7.0));
-        assert_eq!(mdl_skin_st(&plain, false, SKINWIDTH), (10.0, 7.0));
-
-        // A seam vertex (ALIAS_ONSEAM set): on a FRONT triangle s is unshifted;
-        // on a BACK triangle s is shifted right by skinwidth/2. The two cases
-        // must differ by exactly skinwidth/2; t is unchanged.
-        let seam = StVert { onseam: ALIAS_ONSEAM, s: 10, t: 7 };
-        let (front_s, front_t) = mdl_skin_st(&seam, true, SKINWIDTH);
-        let (back_s, back_t) = mdl_skin_st(&seam, false, SKINWIDTH);
-        assert_eq!((front_s, front_t), (10.0, 7.0), "front seam vertex unshifted");
-        assert_eq!((back_s, back_t), (60.0, 7.0), "back seam vertex shifted by w/2");
-        assert_eq!(back_s - front_s, (SKINWIDTH / 2) as f32);
-
-        // Other bits set in `onseam` but not ALIAS_ONSEAM -> treated as not-seam.
-        let other = StVert { onseam: 0x0001, s: 10, t: 7 };
-        assert_eq!(mdl_skin_st(&other, false, SKINWIDTH), (10.0, 7.0));
-    }
-
-    #[test]
     fn mdl_skin_resolves_single_and_rejects_bad() {
         use crate::mdl::Skin;
 
@@ -10252,9 +11246,12 @@ mod tests {
         let (bsp, face, poly) = one_face_bsp(Vec::new(), 0, 0);
         assert!(face_lightmap(&bsp, &face, &poly).is_none());
 
-        // lightofs < 0 -> fullbright.
+        // lightofs < 0 on a normal face -> NOT fullbright: R_BuildLightMap's
+        // zero ("ambient") block, i.e. black (colormap row 63).
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], -1, 0);
-        assert!(face_lightmap(&bsp, &face, &poly).is_none());
+        let lm = face_lightmap(&bsp, &face, &poly).expect("a sample-less face is lit (black)");
+        assert_eq!(lm.factor_at(16.0, 16.0), 0.0);
+        assert_eq!(colormap_row(lm.factor_at(16.0, 16.0)), COLORMAP_ROWS - 1);
 
         // TEX_SPECIAL (sky/liquid) -> fullbright.
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], 0, crate::bsp::TEX_SPECIAL);
@@ -10314,19 +11311,17 @@ mod tests {
 
     #[test]
     fn unlit_face_hit_by_dlight_is_not_fullbright() {
-        // FIX 6: a NORMAL wall with no baked lightmap (lightofs < 0) is fullbright
-        // with no dlights, but a reaching dynamic light must build a lightmap (zero
-        // base + the light) instead of staying fullbright.
+        // A NORMAL wall with no baked lightmap (lightofs < 0) is black (zero base)
+        // with no dlights, and a reaching dynamic light adds onto that base.
         let (bsp, face, poly) = one_face_bsp_zplane(0);
         // Force lightofs < 0 (no baked samples) but keep the face NORMAL (flags 0).
         let mut unlit = face.clone();
         unlit.lightofs = -1;
 
-        // With no dlights: fullbright (None).
-        assert!(
-            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0).is_none(),
-            "an unlit face with no dlights stays fullbright"
-        );
+        // With no dlights: all zero (black).
+        let dark = face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0)
+            .expect("an unlit face with no dlights is black, not fullbright");
+        assert_eq!(dark.factor_at(0.0, 0.0), 0.0);
 
         // A bright light 16 units above luxel (0,0): the face is now lightmapped,
         // owning a buffer, bright near the impact and dark (not fullbright) away.
@@ -10341,13 +11336,11 @@ mod tests {
         assert!(near > 0.1, "near the dlight the unlit face lights up: {near}");
         assert!(far < 0.05, "away from the dlight the unlit face is dark, not fullbright: {far}");
 
-        // A far-away dlight that never reaches leaves the face fullbright (None),
-        // so the common case (dlights elsewhere in the level) is unchanged.
+        // A far-away dlight that never reaches leaves the face black.
         let far_dl = DynamicLight::new([0.0, 0.0, 100_000.0], 200.0, 10.0, 0.0, 0.0, 0);
-        assert!(
-            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl), ALL_DLIGHT_BITS).is_none(),
-            "a non-reaching dlight leaves the unlit face fullbright"
-        );
+        let lm = face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl), ALL_DLIGHT_BITS)
+            .expect("still a (black) lightmap");
+        assert_eq!(lm.factor_at(0.0, 0.0), 0.0, "a non-reaching dlight leaves the unlit face black");
     }
 
     /// `one_face_bsp_zplane` with the face's surfedge/edge/vertex walk wired to
@@ -11880,7 +12873,7 @@ mod tests {
 
         let img_a = render_scene_ext(
             &bsp, &cam_a, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_a.pitch, cam_a.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -11889,7 +12882,7 @@ mod tests {
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_b.pitch, cam_b.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -11963,7 +12956,7 @@ mod tests {
 
         let with_gun = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12011,7 +13004,7 @@ mod tests {
         frameless.frames.clear();
         let img = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12027,7 +13020,7 @@ mod tests {
         // Must not panic.
         let _ = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12099,17 +13092,20 @@ mod tests {
         for vs in [30.0, 50.0, 70.0, 120.0, 95.0] {
             assert_eq!(viewmodel_fudge(vs), 0.0, "viewsize {vs}");
         }
-        // No bob: the gun sits straight above the eye by the fudge (world Z).
-        let cam = Camera { pos: [0.0; 3], yaw: 37.0, pitch: 30.0, roll: 0.0, fov_deg: 90.0 };
-        assert_eq!(viewmodel_origin_ofs(&cam, 0.0, 100.0), [0.0, 0.0, 2.0]);
-        // Bob pushes it along the entity's facing (yaw, a third of the pitch)
-        // by 0.4 * bob.
-        let flat = Camera { pos: [0.0; 3], yaw: 90.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let o = viewmodel_origin_ofs(&flat, 5.0, 120.0);
-        assert!(o[0].abs() < 1e-5 && (o[1] - 2.0).abs() < 1e-5 && o[2].abs() < 1e-5, "{o:?}");
-        let up = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 90.0, roll: 0.0, fov_deg: 90.0 };
-        let o = viewmodel_origin_ofs(&up, 5.0, 120.0);
-        assert!((o[2] - 2.0 * 30f32.to_radians().sin()).abs() < 1e-5, "{o:?}");
+        // No bob: the gun sits above the eye by the fudge (world Z), less the
+        // camera's 1/32 node-line epsilon on every axis.
+        const E: f32 = 1.0 / 32.0;
+        assert_eq!(viewmodel_origin_ofs([30.0, 37.0, 0.0], 0.0, 100.0), [-E, -E, 2.0 - E]);
+        // Bob pushes it along the view's facing (V_CalcRefdef has just set the
+        // entity angles to the view's) by 0.4 * bob.
+        let o = viewmodel_origin_ofs([0.0, 90.0, 0.0], 5.0, 120.0);
+        assert!((o[0] + E).abs() < 1e-5 && (o[1] - 2.0 + E).abs() < 1e-5 && (o[2] + E).abs() < 1e-5, "{o:?}");
+        let o = viewmodel_origin_ofs([90.0, 0.0, 0.0], 5.0, 120.0);
+        assert!((o[2] - 2.0 + E).abs() < 1e-5 && (o[0] + E).abs() < 1e-5, "{o:?}");
+        // CalcGunAngle: the punch comes back out of the camera's pitch and yaw;
+        // the gun takes the client's own roll, not the camera's lean.
+        let cam = Camera { pos: [0.0; 3], yaw: 40.0, pitch: -12.0, roll: 3.0, fov_deg: 90.0 };
+        assert_eq!(viewmodel_angles(&cam, [2.0, 1.0, 0.5], 0.0), [-10.0, 39.0, 0.0]);
     }
 
     #[test]
@@ -12129,7 +13125,7 @@ mod tests {
 
         let img = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
             0.0,
             &[],
             &[],
@@ -12175,41 +13171,39 @@ mod tests {
     }
 
     #[test]
-    fn turb_table_amplitude_and_wrap() {
-        // R_InitTurb: tab[i] = round(8 + 8*sin(i*2pi/128)) in texels — DC-biased,
-        // so the range is [0, 2*AMP]; index masking keeps any integer in range.
+    fn turb_table_matches_r_initturb() {
+        // R_InitTurb: sintable[i] = (int)(AMP + sin(i*3.14159*2/CYCLE)*AMP), 16.16,
+        // DC-biased so the range is [0, 2*AMP]. Spot values computed from the C
+        // expression: i=0 -> AMP exactly; i=32 falls just short of pi/2 (id's
+        // 3.14159), so it never reaches 2*AMP.
         let turb = TurbTable::new();
-        let max = *turb.tab.iter().max().unwrap();
-        let min = *turb.tab.iter().min().unwrap();
-        assert_eq!(max, (2.0 * TURB_AMP) as i32, "peak should be 2*AMP, got {max}");
-        assert_eq!(min, 0, "trough should be 0 (DC-biased), got {min}");
-        // `at_int` never panics for huge/negative indices and stays in [0,2*AMP].
-        for &k in &[0, 127, 128, -1, 1_000_000, -1_000_000] {
-            let v = turb.at_int(k);
-            assert!((0..=(2.0 * TURB_AMP) as i32).contains(&v), "at_int({k}) = {v} out of range");
-        }
+        assert_eq!(turb.tab[0], 8 << 16);
+        assert_eq!(turb.tab[32], 1_048_575, "3.14159 keeps the peak one unit short");
+        assert!(turb.tab.iter().all(|&v| (0..=16 << 16).contains(&v)));
+        // Not exactly periodic (3.14159 < pi): entries past the first cycle are
+        // their own values, which is why Turbulent8's `phase + (t>>16 & 127)` reads
+        // the second cycle rather than wrapping.
+        assert!((0..TURB_CYCLE).any(|i| turb.tab[i] != turb.tab[i + TURB_CYCLE]));
     }
 
     #[test]
-    fn warp_st_animates_and_stays_bounded() {
-        // The turbulent warp must MOVE the sampled (s,t) as time advances (so the
-        // surface visibly ripples), and the displacement is bounded by ±AMP on
-        // each axis (so a tiling texture's rem_euclid keeps it in range).
+    fn warp_st_is_turbulent8_fixed_point() {
+        // D_DrawTurbulent8Span on Turbulent8's coordinates: the 16.16 sine is added
+        // to the 16.16 coordinate (texturemins -8192) BEFORE the >>16, so a
+        // fraction carries into the texel.
         let turb = TurbTable::new();
-        let (s, t) = (20.0f32, 33.0f32);
-        let (s0, t0) = warp_st(&turb, s, t, 0.0);
-        let (s1, t1) = warp_st(&turb, s, t, 0.37);
-        // Animated: the time phase (time*SPEED) shifts the table index, so the
-        // sampled texel moves between two times.
-        assert!(
-            (s0 - s1).abs() > 0.5 || (t0 - t1).abs() > 0.5,
-            "warp should change the sample between two times: ({s0},{t0}) vs ({s1},{t1})"
-        );
-        // Bounded: displacement off the floored base texel is the DC-biased table
-        // value in [0, 2*AMP] (then rem_euclid wraps it into the 64-texel liquid).
-        for (warped, base) in [(s1, s.floor()), (t1, t.floor())] {
-            let d = warped - base;
-            assert!((0.0..=2.0 * TURB_AMP + 1e-3).contains(&d), "displacement {d} out of range");
+        let (s, t) = (20.75f32, 33.5f32);
+        let phase = (0.37f32 * 20.0) as usize; // 7
+        let sf = ((20.75 + 8192.0) * 65536.0) as i32;
+        let tf = ((33.5 + 8192.0) * 65536.0) as i32;
+        let want_s = (sf + turb.tab[phase + ((tf >> 16) & 127) as usize]) >> 16;
+        let want_t = (tf + turb.tab[phase + ((sf >> 16) & 127) as usize]) >> 16;
+        assert_eq!(warp_st(&turb, s, t, 0.37), (want_s, want_t));
+        // Animated: the time phase shifts the table index.
+        assert_ne!(warp_st(&turb, s, t, 0.0), warp_st(&turb, s, t, 0.37));
+        // Bounded: the offset from the base texel (plus id's +8192) is in [0, 16].
+        for (warped, base) in [(want_s, sf >> 16), (want_t, tf >> 16)] {
+            assert!((0..=16).contains(&(warped - base)), "displacement out of range");
         }
     }
 
@@ -12380,11 +13374,11 @@ mod tests {
         assert_ne!(want_index, TEXEL, "test ramp should remap the index at row 31");
     }
 
-    /// Liquids/sky stay fullbright = the brightest row 0 (`colormap[texel]`) even
-    /// when their `brightness` is the neutral 1.0 — the row is forced to 0 by the
-    /// surface mode, not derived from the brightness.
+    /// Liquids write the RAW texel (`D_DrawTurbulent8Span`: no colormap at all),
+    /// even with a colormap supplied and a neutral `brightness` — neither row 0
+    /// (the old overbright) nor any other row.
     #[test]
-    fn colormap_fullbright_surfaces_use_row_zero() {
+    fn colormap_turb_writes_the_raw_texel() {
         let mut pal = [[0u8; 3]; 256];
         for (i, p) in pal.iter_mut().enumerate() {
             *p = [i as u8, i as u8, i as u8];
@@ -12393,12 +13387,12 @@ mod tests {
         // 64x64 so the Turb warp's index wrap is well-defined; fill with TEXEL.
         let pixels = vec![TEXEL; 64 * 64];
 
-        // Colormap ramp: colormap[row*256+col] = (col + row) mod 256. Row 0 keeps
-        // the index unchanged, so a fullbright (row-0) pixel == palette[TEXEL].
+        // Colormap ramp: colormap[row*256+col] = (col + row + 1) mod 256 — NO row
+        // is the identity, so any colormap use would move the index off TEXEL.
         let mut cm = vec![0u8; COLORMAP_LEN];
         for row in 0..COLORMAP_ROWS {
             for col in 0..256usize {
-                cm[row * 256 + col] = ((col + row) % 256) as u8;
+                cm[row * 256 + col] = ((col + row + 1) % 256) as u8;
             }
         }
 
@@ -12416,10 +13410,9 @@ mod tests {
             Some(&cm),
         );
         let drawn: Vec<[u8; 3]> = img.rgb.iter().copied().filter(|p| *p != [0, 0, 0]).collect();
-        assert!(!drawn.is_empty(), "fullbright triangle drew nothing");
+        assert!(!drawn.is_empty(), "turb triangle drew nothing");
         for p in &drawn {
-            // Row 0: index unchanged -> palette[TEXEL] grey.
-            assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "fullbright surface must use colormap row 0");
+            assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "turb must store the raw texel, no colormap");
         }
     }
 
@@ -12458,21 +13451,14 @@ mod tests {
         let (w, h) = (48usize, 48usize);
         // Build a SkyView for a given look direction (forward), with an orthonormal
         // right/up basis. This stands in for the camera the world pass passes in.
-        let make_view = |forward: Vec3| {
+        let make_view = |forward: Vec3, time: f32| {
             let (f, _) = normalize(forward);
             // right = forward x worldup, up = right x forward (orthonormal-ish).
             let (right, _) = normalize(cross(f, [0.0, 0.0, 1.0]));
             let (up, _) = normalize(cross(right, f));
-            SkyView {
-                forward: f,
-                right,
-                up,
-                cx: w as f32 / 2.0,
-                cy: h as f32 / 2.0,
-                longest: w.max(h) as f32,
-            }
+            SkyView::new(f, right, up, w, h, time)
         };
-        let render_at = |time: f32, view: SkyView| {
+        let render_at = |view: SkyView| {
             let mut img = Image::new(w, h, [0, 0, 0]); // background = pure black
             let mut zb = vec![f32::INFINITY; w * h];
             // The (s,t) here are IGNORED by the sky path (it uses the view ray),
@@ -12483,14 +13469,13 @@ mod tests {
             raster_triangle_tex(
                 &mut img, &mut zb, v0, v1, v2,
                 &pixels, 256, 128, &pal, 1.0, None,
-                SurfaceMode::Sky { time, view },
+                SurfaceMode::Sky { view, defer: None },
                 None,
             );
             img
         };
-        let view_n = make_view([1.0, 0.0, 0.0]); // looking +X
-        let a = render_at(0.0, view_n);
-        let b = render_at(1.0, view_n);
+        let a = render_at(make_view([1.0, 0.0, 0.0], 0.0)); // looking +X
+        let b = render_at(make_view([1.0, 0.0, 0.0], 1.0));
 
         // (1) Non-background: the sky drew real texels (not a flat empty frame).
         let drawn = a.rgb.iter().filter(|&&p| p != [0, 0, 0]).count();
@@ -12502,36 +13487,78 @@ mod tests {
 
         // (3) View-dependent: looking a different direction shows a different patch
         // of sky (the whole point of projecting the view ray).
-        let view_e = make_view([0.0, 1.0, 0.0]); // looking +Y
-        let c = render_at(0.0, view_e);
+        let c = render_at(make_view([0.0, 1.0, 0.0], 0.0)); // looking +Y
         let view_diff = a.rgb.iter().zip(c.rgb.iter()).filter(|(x, y)| x != y).count();
         assert!(view_diff > 0, "sky must change with the view direction (dome projection)");
     }
 
     #[test]
-    fn sky_texel_composites_overlay_over_background() {
-        // Where the overlay (left half) is transparent (index 0), the background
-        // (right half) shows through; where the overlay is opaque, it wins. At
-        // time 0 there is no scroll, so the layout maps directly.
+    fn sky_sample_composites_the_shifted_front_over_the_back() {
+        // R_MakeSky: where the front layer (left half) is transparent (index 0)
+        // the back layer (right half, unshifted) shows through; where it is
+        // opaque it wins — read `shift` texels further along on both axes.
         let pixels = synthetic_sky_pixels();
         let tw = 256usize;
-        let th = 128usize;
-
-        // sky_texel scales (s,t) by 0.125 internally, so to land on overlay
-        // column `c` (in [0,128)) we pass s = c/0.125 = c*8.
-        // Column 0 of the overlay is transparent (x<42) -> shows the background's
-        // column 0 (= 1 + (0+0)%200 = 1).
-        let at0 = sky_texel(&pixels, tw, th, 0.0, 0.0, 0.0);
-        assert_eq!(at0, 1, "transparent overlay should reveal background texel");
-
-        // Column 64 of the overlay is opaque (x>=42) -> the overlay value 200.
-        let at64 = sky_texel(&pixels, tw, th, 64.0 * 8.0, 0.0, 0.0);
-        assert_eq!(at64, 200, "opaque overlay texel should win over background");
-
-        // A degenerate (too-small) sky texture never panics and returns index 0
-        // (everything out of range).
+        let fx = |x: i32| x << 16; // a texel column as a 16.16 coordinate
+        // Front column 0 is transparent (x < 42): the back's (0,0) = 1.
+        assert_eq!(sky_sample(&pixels, tw, fx(0), fx(0), 0), 1);
+        // Front column 64 is opaque: 200.
+        assert_eq!(sky_sample(&pixels, tw, fx(64), fx(0), 0), 200);
+        // Shifted by 50, column 0 reads the front's column 50 (opaque) ...
+        assert_eq!(sky_sample(&pixels, tw, fx(0), fx(0), 50), 200);
+        // ... and column 100 wraps to the front's 150 & 127 = 22 (transparent),
+        // so the back shows at the UNSHIFTED (100, 3): 1 + (100+3)%200.
+        assert_eq!(sky_sample(&pixels, tw, fx(100), fx(3), 50), 104);
+        // Coordinates wrap at 128 texels (`R_SKY_SMASK`), negatives included.
+        assert_eq!(sky_sample(&pixels, tw, fx(128 + 64), fx(-128), 0), 200);
+        // A degenerate (too-small) sky texture never panics: index 0.
         let tiny = vec![0u8; 4];
-        assert_eq!(sky_texel(&tiny, 2, 2, 1e6, -1e6, 5.0), 0);
+        assert_eq!(sky_sample(&tiny, 2, fx(1000), fx(-1000), 5), 0);
+    }
+
+    #[test]
+    fn sky_view_front_layer_scrolls_twice_as_fast() {
+        // R_SetSkyFrame + R_MakeSky: the whole sky scrolls skytime*8 texels
+        // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top.
+        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, 1.6);
+        assert_eq!((v.scroll, v.shift), (12.8, 12));
+        // skytime wraps at SKYSIZE*4*1 = 512 s.
+        let w = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, 513.0);
+        assert_eq!((w.scroll, w.shift), (8.0, 8));
+        // D_Sky_uv_To_st at the integer screen centre, looking along +X: the ray
+        // is +X, so s = (scroll + 378) * 0x10000 and t = scroll * 0x10000.
+        assert_eq!((v.half_w, v.half_h), (160, 100));
+        let (s, t) = sky_uv_to_st(160, 100, &v);
+        assert_eq!((s >> 16, t >> 16), (390, 12));
+    }
+
+    #[test]
+    fn sky_span_steps_every_32_pixels_like_d_drawskyscans8() {
+        // A 40-pixel span: exact at u0 and u0+32, stepped by (next-cur)>>5 in
+        // between, then the 8-pixel tail stepped by division over 7.
+        let pixels = synthetic_sky_pixels();
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, 0, 0];
+        }
+        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320, 200, 3.3);
+        let (u0, row, n) = (17, 60, 40);
+        let mut out = vec![[0u8; 3]; n as usize];
+        draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v, &pal);
+        let (s0, t0) = sky_uv_to_st(u0, row, &v);
+        let (s1, t1) = sky_uv_to_st(u0 + 32, row, &v);
+        let (s2, t2) = sky_uv_to_st(u0 + 39, row, &v);
+        let mut want = Vec::new();
+        let (ss, ts) = ((s1 - s0) >> 5, (t1 - t0) >> 5);
+        for i in 0..32 {
+            want.push(sky_sample(&pixels, 256, s0 + i * ss, t0 + i * ts, v.shift));
+        }
+        let (ss, ts) = ((s2 - s1) / 7, (t2 - t1) / 7);
+        for i in 0..8 {
+            want.push(sky_sample(&pixels, 256, s1 + i * ss, t1 + i * ts, v.shift));
+        }
+        let got: Vec<u8> = out.iter().map(|p| p[0]).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
@@ -15828,5 +16855,121 @@ mod tests {
         assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (fill, pal[3]));
         let img = draw(48, 0);
         assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (pal[2], pal[3]));
+    }
+
+    // -- Alias models: R_AliasSetupLighting + D_PolysetDraw --
+
+    #[test]
+    fn adivtab_is_floor_div_mod_for_downward_edges() {
+        // D_PolysetSetUpForLineScan's table and FloorDivMod agree wherever the
+        // C can reach FloorDivMod (a positive edge height).
+        for tm in -15..=16 {
+            for tn in 1..=16 {
+                let t = ADIVTAB[(((tm + 15) << 5) + (tn + 15)) as usize];
+                assert_eq!(t, floor_div_mod(tm as f64, tn as f64), "{tm}/{tn}");
+            }
+        }
+    }
+
+    #[test]
+    fn alias_lighting_follows_r_drawentitiesonlist_and_setup_lighting() {
+        // No lightdata: R_LightPoint is 255 -> ambient clamps to 128 and the
+        // shade to 192 - 128.
+        let bsp = demo_room();
+        assert_eq!(alias_entity_light(&bsp, [0.0; 3], &NEUTRAL_LIGHTSTYLE_SCALES, &[], false), (128, 64));
+        // R_AliasSetupLighting: (255 - 128) << 6, shade * 64, and the light
+        // vector {-1,0,0} in the model's frame (identity here).
+        let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (amb, shade, lv) = alias_setup_lighting(128, 64, &axes);
+        assert_eq!((amb, shade, lv), (8128, 4096.0, [-1.0, -0.0, 0.0]));
+        // A dark model is still lit at LIGHT_MIN: (255 - 5) << 6.
+        assert_eq!(alias_setup_lighting(0, 0, &axes).0, 16000);
+        let setup = AliasSetup {
+            transform: [[0.0; 4]; 3],
+            r_ambientlight: amb,
+            r_shadelight: shade,
+            plightvec: lv,
+            ziscale: ALIAS_ZISCALE,
+            subdiv: false,
+            skin: None,
+            skinwidth: 0,
+            seamfixup: 0,
+            colormap: None,
+            flat: [0; 3],
+        };
+        // Normal 52 is +x, straight into the light: ambient - shadelight.
+        assert_eq!(setup.vertex_light(52), 8128 - 4096);
+        // Normal 0 faces away (cos > 0): just the ambient.
+        assert_eq!(setup.vertex_light(0), 8128);
+    }
+
+    /// Fill one screen triangle through `D_PolysetDraw`'s edge walker with a 1x1
+    /// skin of `texel` and light `light` at every vertex.
+    fn polyset_fill(img: &mut Image, verts: [(i32, i32); 3], texel: u8, light: i32, cm: Option<&[u8]>) {
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, 0, 0];
+        }
+        let skin = [texel];
+        let setup = AliasSetup {
+            transform: [[0.0; 4]; 3],
+            r_ambientlight: 0,
+            r_shadelight: 0.0,
+            plightvec: [0.0; 3],
+            ziscale: ALIAS_ZISCALE,
+            subdiv: false,
+            skin: Some(&skin),
+            skinwidth: 1,
+            seamfixup: 0,
+            colormap: cm,
+            flat: [0; 3],
+        };
+        let fv = |(u, v): (i32, i32)| FinalVert { v: [u, v, 0, 0, light, 1 << 24], flags: 0 };
+        let mut zbuf = vec![f32::INFINITY; img.w * img.h];
+        let mut fb = PolyFramebuffer::new(img, &mut zbuf, &pal);
+        fb.polyset_draw(&setup, [fv(verts[0]), fv(verts[1]), fv(verts[2])], true);
+    }
+
+    #[test]
+    fn polyset_triangles_tile_a_square_exactly_once() {
+        // Two front-facing triangles splitting an 8x8 square cover its 64
+        // pixels with no gap and no overlap, and nothing outside it: the fill
+        // rule of D_RasterizeAliasPolySmooth (left edge in, right edge out, top
+        // row in, bottom row out).
+        let count = |img: &Image| img.rgb.iter().filter(|p| p[0] != 0).count();
+        let mut a = Image::new(12, 12, [0, 0, 0]);
+        polyset_fill(&mut a, [(2, 2), (10, 2), (10, 10)], 1, 0, None);
+        let mut b = Image::new(12, 12, [0, 0, 0]);
+        polyset_fill(&mut b, [(2, 2), (10, 10), (2, 10)], 2, 0, None);
+        assert_eq!((count(&a), count(&b)), (36, 28));
+        for y in 0..12 {
+            for x in 0..12 {
+                let inside = (2..10).contains(&x) && (2..10).contains(&y);
+                let (pa, pb) = (a.rgb[y * 12 + x][0] != 0, b.rgb[y * 12 + x][0] != 0);
+                assert_eq!(pa || pb, inside, "({x},{y})");
+                assert!(!(pa && pb), "overlap at ({x},{y})");
+            }
+        }
+        // Back faces (d_xdenom >= 0) draw nothing.
+        let mut c = Image::new(12, 12, [0, 0, 0]);
+        polyset_fill(&mut c, [(2, 2), (10, 10), (10, 2)], 1, 0, None);
+        assert_eq!(count(&c), 0);
+    }
+
+    #[test]
+    fn polyset_pixels_go_through_the_colormap_row_of_the_light() {
+        // acolormap[texel + (light & 0xFF00)]: row 40 of this colormap maps
+        // texel 10 to 77, row 0 to itself (a fullbright texel stays itself).
+        let mut cm = vec![0u8; COLORMAP_LEN];
+        for row in 0..COLORMAP_ROWS {
+            for col in 0..256 {
+                cm[row * 256 + col] = if row == 40 && col == 10 { 77 } else { col as u8 };
+            }
+        }
+        let mut img = Image::new(8, 8, [0, 0, 0]);
+        polyset_fill(&mut img, [(0, 0), (8, 0), (8, 8)], 10, (40 << 8) + 0x7F, Some(&cm));
+        let drawn: Vec<u8> = img.rgb.iter().filter(|p| p[0] != 0).map(|p| p[0]).collect();
+        assert!(!drawn.is_empty());
+        assert!(drawn.iter().all(|&i| i == 77), "{drawn:?}");
     }
 }

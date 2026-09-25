@@ -155,7 +155,9 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     if ents:
         cmd += ["--ents", str(out / f"{case}.c.ents")]
     if args.viewmodel and meta["viewmodel"]["model"]:
-        cmd += ["--viewmodel", f'{meta["viewmodel"]["model"]}:{meta["viewmodel"]["frame"]}']
+        vm = meta["viewmodel"]
+        cmd += ["--viewmodel", f'{vm["model"]}:{vm["frame"]}',
+                "--viewent", ",".join(repr(float(v)) for v in vm["origin"] + vm["angles"])]
     if args.bench:
         cmd += ["--bench", str(args.bench)]
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

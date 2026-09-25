@@ -129,7 +129,7 @@ fn usage() {
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--ents FILE] [--viewmodel M:F] [--bench N]\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -953,7 +953,8 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 mdl,
                 frame: weapon_frame,
                 // No bob in this still; the default viewsize's fudge.
-                origin_ofs: render::viewmodel_origin_ofs(&cam, 0.0, render::VIEWSIZE_DEFAULT),
+                origin_ofs: render::viewmodel_origin_ofs([cam.pitch, cam.yaw, 0.0], 0.0, render::VIEWSIZE_DEFAULT),
+                angles: [cam.pitch, cam.yaw, 0.0],
             });
         // The live particles as (world pos, palette index) for the renderer; they
         // share the scene z-buffer so any behind a wall are hidden. Use the
@@ -1950,6 +1951,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 ///                    `model ox oy oz pitch yaw roll frame skin syncbase effects kind`
 ///                    (without it: the world only, as r_drawentities 0)
 /// --viewmodel M:F    also draw weapon model M at frame F
+/// --viewent x,y,z,p,y,r  the weapon's origin and angles, `cl.viewent` (default:
+///                    V_CalcRefdef's for a still player at viewsize 120)
 /// --bench N          then render the same view N more times, report warm ms/frame
 /// ```
 ///
@@ -1972,6 +1975,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let (mut origin, mut angles, mut time, mut fov) = (None, None, None, 90.0f32);
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
     let mut bench: Option<u32> = None;
+    let mut viewent: Option<[f32; 6]> = None;
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -1988,6 +1992,11 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
             "--ents" => ents_path = Some(val.as_str()),
             "--viewmodel" => viewmodel_arg = Some(val.as_str()),
+            "--viewent" => {
+                let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+                    .map_err(|_| format!("--viewent: expected x,y,z,p,y,r, got {val:?}"))?;
+                viewent = Some(v.try_into().map_err(|_| format!("--viewent: expected 6 numbers, got {val:?}"))?);
+            }
             "--bench" => bench = Some(val.parse::<u32>().map_err(|_| format!("--bench: bad count {val:?}"))?.max(1)),
             other => return Err(format!("view: unknown option {other:?}")),
         }
@@ -2104,11 +2113,20 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         - instances.len() - externals.len() - sprites.len();
 
     let render_once = || {
+        // cl.viewent as given (the oracle's), else V_CalcRefdef's for a still
+        // player in a full-frame view (id at viewsize 120: no fudge, no bob).
+        let (origin_ofs, gun_angles) = match viewent {
+            Some(v) => ([v[0] - cam.pos[0], v[1] - cam.pos[1], v[2] - cam.pos[2]], [v[3], v[4], v[5]]),
+            None => {
+                let a = [cam.pitch, cam.yaw, 0.0];
+                (render::viewmodel_origin_ofs(a, 0.0, 120.0), a)
+            }
+        };
         let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel {
             mdl,
             frame: *frame,
-            // The view is full-frame (id at viewsize 120, the oracle default): no fudge, no bob.
-            origin_ofs: render::viewmodel_origin_ofs(&cam, 0.0, 120.0),
+            origin_ofs,
+            angles: gun_angles,
         });
         render::render_scene_ext_sprited(
             &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &[],
