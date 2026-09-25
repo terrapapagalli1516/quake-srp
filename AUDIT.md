@@ -712,6 +712,74 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
     `nearzi` and so possibly its own level; the port picks one level per face.
     The wasm console has no `d_mipscale`/`d_mipcap` commands yet.
 
+- ✅ **Lightmap stepping** (oracle class 6, ±1 colormap row on 1.5–4.4% of
+  pixels). The bake took a float bilinear lightmap factor at each texel's corner
+  and then picked the row. id builds `blocklights` in 8.8 integers
+  (`R_BuildLightMap`: each style's luxel times its `d_lightstylevalue`, plus
+  `R_AddDynamicLights`' truncated `(rad - dist)*256`), inverts and clamps them
+  (`(255*256 - bl) >> 2`, at least `1 << 6`), and `R_DrawSurfaceBlock8_mip0..3`
+  walks each `16 >> miplevel` cell down its left and right edges in integer
+  steps `(bottom - top) >> (4 - miplevel)` and along each row from the RIGHT
+  edge's value by `(left - right) >> (4 - miplevel)`, indexing
+  `colormap[(light & 0xFF00) + texel]`. Now exactly that
+  (`LightMap::blocklights_into`, `surf::draw_surface_block`); the port's f32
+  luxels are the C's sum over 256, each term exact, so `luxel * 256` is id's
+  integer. The oracle agent's temporary patch of earlier tonight, made
+  permanent for all four levels.
+  - **Oracle,** exact% world-only 320×200, item 1 → this: as shipped 92.20 →
+    97.44, 91.03 → 97.12, 96.68 → 99.16, 92.58 → 94.96 (e1m1/2/3/7);
+    640×480 94.78 → 99.20, 95.40 → 98.77, 97.56 → 99.30, 97.39 → 98.77;
+    against id's exact perspective (`--spans 1`, its own mips) 94.55 →
+    99.94, 92.64 → 99.18, 97.47 → 99.98, 97.46 → 99.91; both at mip 0 with
+    exact perspective 95.61 → 99.93, 97.40 → 99.88, 98.50 → 99.98, 98.66 →
+    99.91 (640×480: 99.96 / 99.96 / 99.99 / 99.98). What is left as shipped
+    is id's 8-pixel affine span segments (class 7, branch `quake/w2b`).
+    Over 72 more views (4 maps × 6 yaws × 3 pitches, `--spans 1`) the mean is
+    99.99%, the worst 99.83.
+  - **Goldens:** e1m1 `bb64996e` → `959d0221` (9,953 px, 3.9%), e1m2
+    `3d47c70d` → `0cd18471` (8,041 px, 3.1%), e1m3 `c7e5b50e` → `b63ae8b7`
+    (7,555 px, 3.0%): single colormap rows on light gradients. From before
+    item 1: 9,953 / 42,613 / 36,634 px.
+- ✅ **Dynamic lights at the chosen level** (w1's A2 path): a dlit face is baked
+  by the same `face_surf_block`, so it gets the level and the integer stepping
+  with the light's `blocklights` folded in (`cache->dlight` as before).
+  Muzzle-flash frames (`--c-cmd +attack --settle 3`), 320×200, base → now: as
+  shipped e1m1 80.64 → 95.36, e1m2 60.66 → 96.16, e1m3 61.00 → 98.98; mip 0
+  + exact 90.35 → 98.11, 96.85 → 99.46, 97.82 → 99.89. On the pixels id's
+  flash changes (id's lit frame against id's frame at the same view and
+  clock without the shot): e1m1 83.4% → 99.8% (14,296 px), e1m2 90.3% →
+  94.9% (825 px; the other 42 are the shot's blood particles, which `view`
+  does not draw), e1m3 96.1% → 99.5% (13,211 px). e1m1 keeps the harness's
+  settle ≥ 3 light-style offset (oracle README).
+- **Speed and memory** (items 1 and 2), native twin of `web/bench.py`, a fresh
+  process per resolution, medians of two runs; base → mip levels → + stepping:
+  - Texels baked per frame (`surf_texels`, the world cache plus the external
+    boxes' uncached bakes): demo1 4,348 → 2,847 / 3,511 / 3,993 (320×200 /
+    640×400 / 1280×800); walk_e1m1 35,185 → 3,963 / 6,983 / 11,482;
+    fire_e1m1 48,660 → 16,322 / 19,594 / 23,880; walk_e1m3 68,628 → 2,902 /
+    5,683 / 10,767.
+  - Time in `face_surf_block` (mean ms per frame): fire_e1m1 0.45–0.46 →
+    0.34–0.45 → 0.026–0.047; walk_e1m1 0.17–0.18 → 0.09–0.19 → 0.016–0.033.
+    Whole step, fire_e1m1 median / p95: 320×200 1.48 / 3.79 → 0.68 / 1.35
+    ms, 640×400 2.17 / 4.92 → 1.55 / 2.75, 1280×800 5.37 / 8.91 → 4.97 /
+    7.40; walk_e1m3 320×200 2.80 → 1.28, 640×400 3.78 → 2.32, 1280×800 7.09
+    → 5.78. demo1 moves within noise.
+  - `QUAKE_DLIGHT=eye` on e1m1 at 1280×800 (w1 left it at ~14 ms): radius 350
+    14.1–15.1 → 10.0–13.9 → 7.4–9.1 ms, radius 200 12.1–12.7 → 8.0–8.5 —
+    the unlit frame is 8.2–8.6.
+  - Surface cache resident (`surfcache_kb`, the most over a run): demo1 3,489
+    KB → 2,166 / 2,985 / 3,359; walk_e1m1 1,973 → 975 / 1,367 / 1,785;
+    walk_e1m3 3,350 → 1,071 / 1,757 / 1,998. (id's fixed pool is 600 KB at
+    320×200 and ~3.4 MB at 1280×800, `D_SurfaceCacheForRes`.)
+- **Still open:** `nearzi` is the clipped outline's, which is id's in all but
+  one quirk: `R_RenderFace` re-uses `r_rightexit`/`r_leftexit` when the edge
+  that should set them was cached as fully clipped by an earlier face this
+  frame, so id can give a face the `1/z` of a stale point from another face —
+  a finer level than its geometry (seen: face 733 at e1m2's first frame, id
+  mip 0 from a point at z 96, the port mip 1; 0.7% of that frame, 0.17% of
+  one of the 72 sweep views, nothing elsewhere). Reproducing it means
+  running id's edge clipping and edge cache in `R_RecursiveWorldNode`'s order.
+
 ## Census client/host fixes (2026-09-25, branch `quake/fix-client`)
 
 One line per CENSUS.md finding fixed; the evidence and the C are in CENSUS.md

@@ -8,7 +8,7 @@
 use crate::bsp::Bsp;
 use crate::math::Vec3;
 use super::light::{
-    any_dlight_reaches, colormap_row, face_lightmap_dyn, LightMap, Luxels, COLORMAP_LEN,
+    any_dlight_reaches, face_lightmap_dyn, LightMap, Luxels, COLORMAP_LEN,
     LIGHTSTYLES, STYLE_NONE,
 };
 use super::stats::stat;
@@ -518,10 +518,10 @@ pub(super) struct SurfBlock {
 /// same texture, same style values, no dlight now or at the bake — per face and
 /// mip level (`surface->cachespots[miplevel]`).
 ///
-/// The bake is `R_DrawSurface`'s shape: the block is `extents >> miplevel`
-/// texels a side (`surfwidth`), from the level's texture; each texel is lit by
-/// the lightmap factor at its corner (id interpolates in integer steps between
-/// luxels instead, oracle class 6).
+/// The bake is `R_DrawSurface`: the block is `extents >> miplevel` texels a side
+/// (`surfwidth`), made of one `16 >> miplevel` square per pair of lightmap
+/// columns and rows, each lit by `R_DrawSurfaceBlock8_mip0..3`'s integer
+/// interpolation ([`draw_surface_block`]).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn face_surf_block(
     idx: usize,
@@ -568,20 +568,10 @@ pub(super) fn face_surf_block(
     let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
     let bake = || -> std::rc::Rc<Vec<u8>> {
         stat(|s| s.surf_texels_baked += total as u64);
-        // The level's texture tiled from `texturemins >> mip`; the light is the
-        // lightmap factor at the texel's corner in full-resolution texels.
-        let soffset = (texmins_i[0] >> mip).rem_euclid(smax as i32) as usize;
-        let toffset = (texmins_i[1] >> mip).rem_euclid(tmax as i32) as usize;
+        let mut light = Vec::new();
+        lm.blocklights_into(&mut light);
         let mut block = vec![0u8; total];
-        for j in 0..bh {
-            let trow = (toffset + j) % tmax * smax;
-            let tf = lm.texmins[1] + (j << mip) as f32;
-            for i in 0..bw {
-                let texel = tex[trow + (soffset + i) % smax] as usize;
-                let row = colormap_row(lm.factor_at(lm.texmins[0] + (i << mip) as f32, tf));
-                block[j * bw + i] = colormap[row * 256 + texel];
-            }
-        }
+        draw_surface_block(tex, smax, tmax, texmins_i, mip, &light, lm.lmw, colormap, &mut block, bw, bh);
         std::rc::Rc::new(block)
     };
     let made = |block| SurfBlock { block, bw, bh, texmins, mip };
@@ -648,6 +638,82 @@ pub(super) fn face_surf_block(
         }
         Some(made(block))
     })
+}
+
+/// `R_DrawSurface` with `R_DrawSurfaceBlock8_mip0..3` (`r_surf.c`): fill `out`
+/// (`bw x bh`, the surface at mip level `mip`) from the level's texture (`tex`,
+/// `smax x tmax`, tiled from `texturemins >> mip`) and the face's inverted
+/// `blocklights` (`light`, `lmw` wide; [`LightMap::blocklights_into`]).
+///
+/// The surface is `bw >> (4 - mip)` by `bh >> (4 - mip)` blocks of `16 >> mip`
+/// texels, one per lightmap cell. Down each block's left and right edges the
+/// light steps from the top luxel toward the bottom one by `(bottom - top) >>
+/// (4 - mip)` per row (`lightleftstep`, `lightrightstep`); along each row it
+/// starts at the RIGHT edge's value and steps by `(left - right) >> (4 - mip)`
+/// per texel toward the left (`lightstep`), all in integers with arithmetic
+/// shifts. A texel is `colormap[(light & 0xFF00) + texel]`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_surface_block(
+    tex: &[u8],
+    smax: usize,
+    tmax: usize,
+    texmins: [i32; 2],
+    mip: u32,
+    light: &[i32],
+    lmw: usize,
+    colormap: &[u8],
+    out: &mut [u8],
+    bw: usize,
+    bh: usize,
+) {
+    let blocksize = 16usize >> mip;
+    let shift = 4 - mip;
+    let (nh, nv) = (bw >> shift, bh >> shift);
+    if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh || colormap.len() < COLORMAP_LEN {
+        return;
+    }
+    // `soffset`/`basetoffset`: where the surface's first texel falls in the tiled
+    // texture ("+ (smax << 16)" in the C only keeps the % positive).
+    let soffset = (texmins[0] >> mip).rem_euclid(smax as i32) as usize;
+    let toffset = (texmins[1] >> mip).rem_euclid(tmax as i32) as usize;
+    let lux = |x: usize, y: usize| light.get(y * lmw + x).copied().unwrap_or(1 << 6);
+    for v in 0..nv {
+        for u in 0..nh {
+            // r_lightptr[0], r_lightptr[1], and the same one lightmap row down.
+            let mut lightleft = lux(u, v);
+            let mut lightright = lux(u + 1, v);
+            let lightleftstep = (lux(u, v + 1) - lightleft) >> shift;
+            let lightrightstep = (lux(u + 1, v + 1) - lightright) >> shift;
+            // The block's first texture column (the C wraps `soffset` a block at a
+            // time; id's textures are 16-aligned, so this is the same column).
+            let s0 = (soffset + u * blocksize) % smax;
+            for i in 0..blocksize {
+                let y = v * blocksize + i;
+                let trow = (toffset + y) % tmax * smax;
+                let src = &tex[trow..trow + smax];
+                let dst = &mut out[y * bw + u * blocksize..y * bw + (u + 1) * blocksize];
+                let lightstep = (lightleft - lightright) >> shift;
+                let mut l = lightright;
+                // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
+                // floor steps overshoot the lower one by less than 15 per edge,
+                // so the index stays inside the 64 x 256 colormap.
+                if s0 + blocksize <= smax {
+                    let seg = &src[s0..s0 + blocksize];
+                    for b in (0..blocksize).rev() {
+                        dst[b] = colormap[(l & 0xFF00) as usize + seg[b] as usize];
+                        l += lightstep;
+                    }
+                } else {
+                    for b in (0..blocksize).rev() {
+                        dst[b] = colormap[(l & 0xFF00) as usize + src[(s0 + b) % smax] as usize];
+                        l += lightstep;
+                    }
+                }
+                lightright += lightrightstep;
+                lightleft += lightleftstep;
+            }
+        }
+    }
 }
 
 /// Compute (and cache) a world-model face's static geometry. Returns a clone of
@@ -1454,6 +1520,62 @@ mod tests {
         flat.mips = Default::default();
         let sb = face_surf_block(0, &face, 0, &flat, &lm, &cm, fp, 1, &styles, false, false, 2).expect("block");
         assert_eq!((sb.mip, sb.bw, sb.bh), (0, 64, 48));
+    }
+
+    // -- R_DrawSurfaceBlock8_mip0..3: id's integer light stepping ------------
+
+    /// A colormap whose entry is its row (texel 0 everywhere), so a baked block
+    /// reads back `light >> 8` per texel.
+    fn row_colormap() -> Vec<u8> {
+        (0..COLORMAP_LEN).map(|i| (i / 256) as u8).collect()
+    }
+
+    /// The C's stepping, hand-worked: one lightmap cell with (inverted) luxels
+    /// 1000 (top left), 2000 (top right), 3000 (bottom left), 500 (bottom right).
+    /// Each row starts at the right edge's value and steps left by
+    /// `(left - right) >> 4`, flooring (-1000 >> 4 = -63), so texel 15 gets the
+    /// right luxel exactly and texel 0 gets `right + 15 * step` — not the left
+    /// luxel, which a bilinear sample (the port's old bake) gives it.
+    #[test]
+    fn surface_block_steps_light_like_r_draw_surface_block8() {
+        let cm = row_colormap();
+        let light = [1000, 2000, 3000, 500];
+        let tex = vec![0u8; 16 * 16];
+        let mut out = vec![0u8; 16 * 16];
+        draw_surface_block(&tex, 16, 16, [0, 0], 0, &light, 2, &cm, &mut out, 16, 16);
+        let at = |x: usize, y: usize| out[y * 16 + x] as i32;
+        assert_eq!(at(15, 0), 2000 >> 8);
+        assert_eq!(at(0, 0), (2000 - 15 * 63) >> 8, "1055: row 4, where the left luxel is row 3");
+        // Down the edges: left += (3000-1000)>>4 = 125, right += (500-2000)>>4 = -94.
+        assert_eq!(at(15, 15), (2000 - 15 * 94) >> 8);
+        assert_eq!(at(0, 15), (590 + 15 * ((2875 - 590) >> 4)) >> 8);
+        assert_eq!(at(8, 8), (1248 + 7 * ((2000 - 1248) >> 4)) >> 8);
+        // Mip 1: 8-texel cells, shifts of 3: -1000 >> 3 = -125, -1500 >> 3 = -188.
+        let tex1 = vec![0u8; 8 * 8];
+        let mut out1 = vec![0u8; 8 * 8];
+        draw_surface_block(&tex1, 8, 8, [0, 0], 1, &light, 2, &cm, &mut out1, 8, 8);
+        let at1 = |x: usize, y: usize| out1[y * 8 + x] as i32;
+        assert_eq!(at1(7, 0), 2000 >> 8);
+        assert_eq!(at1(0, 0), (2000 - 7 * 125) >> 8);
+        assert_eq!(at1(7, 7), (2000 - 7 * 188) >> 8);
+        assert_eq!(at1(0, 7), (684 + 7 * ((2750 - 684) >> 3)) >> 8);
+    }
+
+    /// `R_DrawSurface`'s texture addressing at a mip level: the level tiled
+    /// from `texturemins >> miplevel` (kept positive as the C's `+ (smax << 16)`
+    /// does), across two cells.
+    #[test]
+    fn surface_block_tiles_the_level_from_texturemins() {
+        // Row 0 of the colormap is the identity; every luxel is row 0.
+        let cm: Vec<u8> = (0..COLORMAP_LEN).map(|i| (i % 256) as u8).collect();
+        let level: Vec<u8> = (0..16 * 16).map(|i| i as u8).collect();
+        let light = [64; 3 * 2];
+        let mut out = vec![0u8; 16 * 8];
+        // texturemins (48, -16) at mip 1: offsets 24 % 16 = 8 and -8 mod 16 = 8.
+        draw_surface_block(&level, 16, 16, [48, -16], 1, &light, 3, &cm, &mut out, 16, 8);
+        for (y, x) in [(0, 0), (0, 7), (0, 8), (3, 15), (7, 9)] {
+            assert_eq!(out[y * 16 + x] as usize, (8 + y) % 16 * 16 + (8 + x) % 16, "texel ({x}, {y})");
+        }
     }
 
     #[test]
