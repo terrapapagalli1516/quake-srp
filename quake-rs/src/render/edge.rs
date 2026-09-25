@@ -192,8 +192,12 @@ struct Ent<'a> {
     /// Whether its faces are the world bsp's (so the surface cache and the
     /// dlight mask are keyed by their face index).
     world_bsp: bool,
-    /// Dynamic lights in the model's frame (none for external boxes).
-    dlights: Vec<crate::dlight::DynamicLight>,
+    /// The frame's dynamic lights, in world space for the world and the inline
+    /// brush models alike (`R_DrawBEntitiesOnList` marks a moved door with
+    /// `cl_dlights` as they are, and `R_AddDynamicLights` tests them against
+    /// the model's own planes); none for the external boxes, which id never
+    /// marks.
+    dlights: &'a [crate::dlight::DynamicLight],
 }
 
 /// The renderer's state: what id keeps in globals and in the model (the edge
@@ -423,7 +427,13 @@ pub(super) fn render_edges(
     external: &[ExternalBModel],
 ) {
     let (w, h) = (image.w, image.h);
-    if w == 0 || h == 0 || izbuf.len() < w * h || image.rgb.len() < w * h {
+    // Nothing larger than id's MAXWIDTH x MAXHEIGHT: from 2048 wide the
+    // 12.20 fixed-point u of the view's right edge wraps an i32
+    // ([`super::MAXWIDTH`]; the caller clamps, this refuses).
+    if w == 0 || h == 0 || w > super::MAXWIDTH || h > super::MAXHEIGHT {
+        return;
+    }
+    if izbuf.len() < w * h || image.rgb.len() < w * h {
         return;
     }
     EDGE_STATE.with(|cell| {
@@ -460,27 +470,24 @@ impl EdgeState {
         // The frame's models: the world, then the brush entities in list order
         // (inline submodels, then the external boxes).
         let mut ents: Vec<Ent> = Vec::with_capacity(1 + bmodels.len() + external.len());
-        ents.push(Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights: dlights.to_vec() });
+        ents.push(Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights });
         for bm in bmodels {
             if bm.model_index == 0 || bm.model_index >= bsp.models.len() {
                 continue;
             }
-            // `R_DrawBEntitiesOnList`: the lights in the model's frame.
-            let local = dlights
-                .iter()
-                .map(|dl| {
-                    let mut d = *dl;
-                    d.origin = sub(dl.origin, bm.origin);
-                    d
-                })
-                .collect();
-            ents.push(Ent { bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights: local });
+            // `R_DrawBEntitiesOnList` hands `R_MarkLights` `&cl_dlights[k]`
+            // untranslated, and `R_AddDynamicLights` measures
+            // `cl_dlights[lnum].origin` against the surface's plane and
+            // texinfo, which are the model's own (a door's faces where the
+            // map put it): a light is not moved into a moved model's frame,
+            // so a moved door or lift is lit as if it had not moved, as in id.
+            ents.push(Ent { bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights });
         }
         for ext in external {
             if ext.bsp.models.is_empty() {
                 continue;
             }
-            ents.push(Ent { bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: Vec::new() });
+            ents.push(Ent { bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: &[] });
         }
 
         // `R_PushDlights` over the world, and `R_MarkLights` over each inline
@@ -491,7 +498,7 @@ impl EdgeState {
         mark_dlights(bsp, world_head, dlights, &mut bits);
         for e in ents.iter().skip(1).filter(|e| e.world_bsp) {
             let head = e.bsp.models[e.model].headnode.first().copied().unwrap_or(0);
-            mark_dlights_more(bsp, head, &e.dlights, &mut bits);
+            mark_dlights_more(bsp, head, e.dlights, &mut bits);
         }
 
         // Phase times as offsets from `t0` (only while profiling).
@@ -1076,8 +1083,15 @@ impl EdgeState {
 
     /// `R_RenderFace`: push face `fi` of `bsp` (the current entity's model)
     /// through the clip planes into the edge list and post its surface.
+    ///
+    /// A face whose plane index is out of range (a malformed map; id would
+    /// read past `mplane_t`) is skipped whole: its edges would name a surface
+    /// [`Self::post_surface`] cannot post.
     fn render_face(&mut self, bsp: &Bsp, fi: usize, clipflags: u32) {
         let face = &bsp.faces[fi];
+        if usize::try_from(face.planenum).ok().and_then(|p| bsp.planes.get(p)).is_none() {
+            return;
+        }
         let (chain, nchain) = Self::clip_chain(clipflags);
         let chain = &chain[..nchain];
         self.r_emitted = false;
@@ -1457,7 +1471,8 @@ impl EdgeState {
     }
 
     /// `R_RenderBmodelFace`: a brush-model fragment's edges (a `bedge_t` list)
-    /// through the clip planes; its surface keyed as its leaf.
+    /// through the clip planes; its surface keyed as its leaf. (A face with a
+    /// bad plane index never gets here: [`Self::front_faces`] drops it.)
     fn render_bmodel_face(&mut self, bsp: &Bsp, pedges: u32, fi: usize) {
         self.r_pedge_owner = NONE; // the dummy `tedge`
         let (chain, nchain) = Self::clip_chain(self.r_clipflags);
@@ -1925,10 +1940,10 @@ impl EdgeState {
             None
         } else if s.ent == 0 {
             let geom = face_geom_cached(bsp, fi, face);
-            face_lightmap_world_cached(bsp, fi, face, &geom.poly, light_styles, &e.dlights, face_bits)
+            face_lightmap_world_cached(bsp, fi, face, &geom.poly, light_styles, e.dlights, face_bits)
         } else if face_world_poly(bsp, face, &mut self.poly) {
             stat(|st| st.sub_lm_builds += 1);
-            face_lightmap_dyn(bsp, face, &self.poly, light_styles, &e.dlights, face_bits)
+            face_lightmap_dyn(bsp, face, &self.poly, light_styles, e.dlights, face_bits)
         } else {
             None
         };
@@ -1945,7 +1960,7 @@ impl EdgeState {
                 }
                 let block = match (lightmap.as_ref(), colormap) {
                     (Some(lm), Some(cm)) => {
-                        let dlit = any_dlight_reaches(bsp, face, &e.dlights, face_bits);
+                        let dlit = any_dlight_reaches(bsp, face, e.dlights, face_bits);
                         // D_MipLevelForScale on the surface's nearest 1/z
                         let mip = ti.map_or(0, |t| mipview.level_for_nearzi(s.nearzi, t));
                         face_surf_block(
@@ -2086,6 +2101,79 @@ mod tests {
             let n = super::super::surf::face_normal(&bsp, f).expect("plane");
             let c = cross(sub(poly[1], poly[0]), sub(poly[2], poly[1]));
             assert!(dot(c, n) < 0.0, "face {f:?} is wound counter-clockwise");
+        }
+    }
+
+    #[test]
+    fn no_view_is_larger_than_id_maxwidth_by_maxheight() {
+        // r_shared.h's MAXWIDTH x MAXHEIGHT (1280 x 1024): from 2048 wide the
+        // right edge's 12.20 u, `(w << 20) + 0xFFFFF`, wraps an i32 and the
+        // scan indexed past its edges (a release panic). The entry clamps...
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let wide = render(&cam, 2048, 400);
+        assert_eq!((wide.w, wide.h), (1280, 400));
+        assert_eq!(wide.rgb, render(&cam, 1280, 400).rgb, "drawn as id's widest mode");
+        let tall = render(&cam, 320, 1100);
+        assert_eq!((tall.w, tall.h), (320, 1024));
+        // ...and the edge renderer refuses what it cannot draw.
+        let mut image = Image { w: 2048, h: 8, rgb: vec![[1, 2, 3]; 2048 * 8] };
+        let mut z = vec![7i16; 2048 * 8];
+        render_edges(
+            &mut image, &mut z, &demo_room(), &cam, &RenderOptions::default(), &palette(), &TurbTable::new(),
+            0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None, &[], &[],
+        );
+        assert!(image.rgb.iter().all(|&p| p == [1, 2, 3]) && z.iter().all(|&v| v == 7));
+    }
+
+    #[test]
+    fn a_face_with_a_bad_plane_index_is_skipped() {
+        // demo_room under one node whose two leaves see every face: the world
+        // walk (R_RecursiveWorldNode) reaches the faces through the node. A
+        // face naming a plane past the lump had its edges emitted but no
+        // surface posted, and R_LeadingEdge indexed past the surfaces.
+        use crate::bsp::{DLeaf, DNode, DPlane, CONTENTS_EMPTY, NUM_AMBIENTS};
+        let mut bsp = demo_room();
+        let n = bsp.faces.len();
+        bsp.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: -1000.0, ptype: 0 });
+        let node_plane = (bsp.planes.len() - 1) as i32;
+        bsp.nodes = vec![DNode {
+            planenum: node_plane,
+            children: [-2, -3],
+            mins: [-300; 3],
+            maxs: [300; 3],
+            firstface: 0,
+            numfaces: n as u16,
+        }];
+        let leaf = |contents| DLeaf {
+            contents,
+            visofs: -1,
+            mins: [-300; 3],
+            maxs: [300; 3],
+            firstmarksurface: 0,
+            nummarksurfaces: n as u16,
+            ambient_level: [0; NUM_AMBIENTS],
+        };
+        bsp.leafs = vec![leaf(CONTENTS_SOLID), leaf(CONTENTS_EMPTY), leaf(CONTENTS_EMPTY)];
+        bsp.marksurfaces = (0..n as u16).collect();
+        for f in &mut bsp.faces {
+            f.side = 0;
+        }
+        bsp.models[0].headnode = [0; crate::bsp::MAX_MAP_HULLS];
+        bsp.models[0].visleafs = 2;
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let pal = palette();
+        let draw = |bsp: &Bsp| {
+            render_scene_ext_sprited(
+                bsp, &cam, 96, 64, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[],
+                &RenderOptions::default(),
+            )
+        };
+        for fi in 0..n {
+            let mut bad = bsp.clone();
+            bad.faces[fi].planenum = 9999;
+            let mut gone = bsp.clone();
+            gone.faces[fi].numedges = 0;
+            assert_eq!(draw(&bad).rgb, draw(&gone).rgb, "face {fi} is left out, the rest drawn");
         }
     }
 

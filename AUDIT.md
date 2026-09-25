@@ -539,7 +539,9 @@ ledger:
   13.3% px pops → max 0.86%.
 - ✅ **R_MarkLights BSP dlight gating (MED)** — faithful per-face dlightbits
   node recursion (R_PushDlights/R_MarkLights); submodels marked via their own
-  headnode with entity-local origins (R_DrawBEntitiesOnList). e1m1 A/B with an
+  headnode (R_DrawBEntitiesOnList) — with entity-local origins until the final
+  review, now with the world-space lights as id's (below, "Final review fixes,
+  engine side"). e1m1 A/B with an
   injected light: 90,525 affected px → 10,411 (strict subset). Merge
   composition: mask (C-faithful "may contribute") → plane test → luxel-extent
   test — the extent test is a PORT-SPECIFIC tightening of the cache-path
@@ -1645,7 +1647,8 @@ aside:
     cleared, image or z-buffer. The texel arithmetic of a span is the
     polygon walker's (the gradients at the span's first pixel), so a
     surface drawn over the same run gets the same texels.
-- ✅ **The entities test id's 16-bit `d_pzbuffer`** (`ZBuf::Izi`): alias
+- ✅ **The entities test id's 16-bit `d_pzbuffer`** (`render::ZBUF`, an
+  `[i16]` the world's spans fill; the entity passes take it as `zbuf`): alias
   models and the gun `D_PolysetDraw`'s `(lzi >> 16) >= *lpz`, particles
   `D_DrawParticle`'s `izi = (int)(zi * 0x8000)`, sprites the sprite spans'
   `izi >> 16` against `D_DrawZSpans`' values; the gun's tripled 1/z as before.
@@ -1905,6 +1908,97 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
   disconnects and the menu sits over the console until it is closed. The
   port boots with the menu open over the attract loop and keeps cycling
   behind it (F15, left as it was).
+
+## Final review fixes, engine side (2026-09-25, branch `quake/polish4a`)
+
+The final review's engine findings (renderer, server, hardening). One commit
+each; the C followed and the evidence are in the commit messages. Checks at
+the end of the branch: goldens `4807aaa1` / `9ae2b478` / `c65b7046`
+unchanged; the standard oracle rows (`--aspect 0.8333333 --spans 16`, world
+and ents) 100.00; census, simbench (nine maps) and the `quaketool play`
+hashes unchanged; 592 lib + 2 bin + 8 integration tests and 126 wasm, clippy
+clean in both crates (and with `--features bench`); the nine `web/verify_*.py`
+pass on the default wasm.
+
+- ✅ **Dynamic lights on moved brush models are id's** (MED). The edge
+  renderer moved each light into a brush model's frame (`origin - bm.origin`)
+  before marking and lighting its faces. id does not: `R_DrawBEntitiesOnList`
+  calls `R_MarkLights (&cl_dlights[k], 1<<k, clmodel->nodes +
+  clmodel->hulls[0].firstclipnode)` with the light as it is, and
+  `R_AddDynamicLights` measures `cl_dlights[lnum].origin` against the face's
+  own plane and texinfo — the model's, where the map put it. So a lowered lift
+  or an opened door is lit as if it had not moved. The old note called the
+  shift deliberate ("arguably fixes a C quirk that mis-lights moved doors");
+  under the rule the C wins. Oracle (`--c-cmd "impulse 9" --c-cmd +attack
+  --modes ents --spans 16`, id's `cl_dlights` handed over): e1m6's start lift
+  (lowered 184, the flash above it) looking down the shaft, `--settle 3
+  --view=-64,672,100,89,270,0` 82.56 → 100.00 and from `-64,672,180` 94.87 →
+  100.00; e1m8's door `*6` (opened 72 units) beside a grunt's flash,
+  `--settle 20 --view=272,100,-60,30,270,0`, 99.72 → 99.98. The standard
+  muzzle-flash rows (`+attack --settle 3`, world and ents, e1m1/2/3/7) and the
+  goldens are unchanged (no moved model in reach). Test
+  `a_moved_brush_model_is_lit_by_the_lights_where_they_are`.
+- ✅ **No view larger than id's `MAXWIDTH` x `MAXHEIGHT`** (MED). A view
+  2048 or more pixels wide panicked in release: the edge renderer's 12.20
+  fixed-point u of the view's right edge, `(w << 20) + 0xFFFFF`, wraps an i32
+  there, and `R_StepActiveU`'s push-back walked off the edge list
+  (`quaketool view … --res 2048x400`, index out of bounds). id never has such
+  a view: `r_shared.h` has `MAXWIDTH` 1280 and `MAXHEIGHT` 1024, which size
+  its tables (`newedges[MAXHEIGHT]`, `d_scantable`), and `vid_win.c` /
+  `vid_ext.c` list no larger mode. Now `render::MAXWIDTH`/`MAXHEIGHT` and
+  `clamp_to_max`: `render_scene_ext_sprited` draws at most that size (the
+  returned image says what it drew; a screen composed around a smaller view
+  gets the backtile, no panic), `render_edges` refuses anything larger, and
+  quaketool's `--res` (view, play, timedemo, `QUAKE_RES`) clamps with a note
+  on stderr. The page already capped its modes at 1280x800. Tests
+  `no_view_is_larger_than_id_maxwidth_by_maxheight`,
+  `res_is_at_most_id_largest_mode`.
+- ✅ **`setmodel` gives alias models and sprites id's box** (LOW, CENSUS
+  L10). The port gave every `.mdl`/`.spr` a zero box (its comment said id
+  did). `PF_setmodel` is `SetMinMaxSize (e, mod->mins, mod->maxs, true)` on
+  the model `PF_precache_model` loaded (`sv.models[i] = Mod_ForName (s,
+  true)`), and `Mod_LoadModel` gives an alias model ±16
+  (`Mod_LoadAliasModel`, "FIXME: do this right") and a sprite
+  `±maxwidth/2` across, `±maxheight/2` up (`Mod_LoadSpriteModel`). Precache
+  now resolves every model file's bounds by its magic (IDPO, IDSP, else a
+  brush model's submodel 0, as before for the b_*.bsp boxes). What QuakeC
+  `setsize`s afterwards is unchanged; what it does not — an explosion's
+  `s_explod.spr` (56x56: ±28, id's rocket explosion in `oracle_edicts` is
+  ±28 too) — now links with id's box, so `SV_WriteEntitiesToClient`'s leaf
+  test sends it where id would. Evidence: the edict dumps gained `mins`/`maxs`
+  (`oracle_edicts`, `quaketool census-edicts`, `edict_diff.py --fields
+  mins,maxs`): over nine maps × five times the port's boxes change only for
+  the flames and torches L17 keeps as live edicts (±16, their static
+  entity's box in id), and on e1m1–e1m3 every entity both sides have
+  matches id's box. Census and simbench output unchanged. Test
+  `alias_and_sprite_models_get_mod_load_model_bounds`.
+- ✅ **Hardening against malformed maps** (no shareware map reaches these;
+  id's C would crash or loop too). `SV_AddToFatPVS`'s one-sided descent is a
+  loop, and only its recursion was depth-bounded, so a node tree that loops
+  (a child pointing back up) never returned: `add_to_fat_pvs` now spends a
+  `nodes + leafs` visit budget (a real tree reaches each once) in the loop
+  too, as `touched_leafs` does (`fat_pvs_unions_the_leaves_within_8_units`
+  gained a one-sided and a two-sided cycle). A world face whose plane index
+  is past the plane lump had its edges emitted and then no surface posted,
+  so `R_LeadingEdge` read a surface that does not exist (misdrawn, or an
+  index panic when it was the frame's last): `R_RenderFace` now skips such a
+  face whole (`a_face_with_a_bad_plane_index_is_skipped`: the frame equals
+  one without the face). A span whose 1/z is exactly 0 at a clipped edge
+  saturated `(sdivz * z) as i64` and the `+ sadjust` overflowed in a debug
+  build; the adds wrap as the C's `int`s (release output unchanged: release
+  already wrapped), and the clamps keep the texel in the block
+  (`a_span_at_zero_1_over_z_wraps_like_the_c_int`).
+- ✅ **Stale docs made true.** `draw_particles` said the port's buffer
+  "holds depth" and recomputed `izi` from it; it is id's 16-bit
+  `d_pzbuffer`, compared and stored as `D_DrawParticle` does.
+  `render_scene_ext`'s doc described the polygon walker's order (brush
+  entities first "to cut the world's spans", a depth buffer that makes the
+  order irrelevant, the external boxes drawn "after the world") and a
+  design note about a task option; it now describes `R_RenderView`'s
+  passes over the edge renderer. The edge section above named a `ZBuf::Izi`
+  type that does not exist (the buffer is `render::ZBUF`, `[i16]`). The
+  `with_pak` docs (server and world model) now say what the pak resolves
+  since the `setmodel` fix above.
 
 ## LOW (27)
 

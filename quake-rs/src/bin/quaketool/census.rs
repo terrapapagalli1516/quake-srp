@@ -863,9 +863,10 @@ pub fn cmd_census_edicts(pak_path: &str, map: &str, times: &str) -> Result<Strin
             let ei = e as i32;
             let org = vm.ent_get_vector(ei, "origin");
             let an = vm.ent_get_vector(ei, "angles");
+            let (mi, ma) = (vm.ent_get_vector(ei, "mins"), vm.ent_get_vector(ei, "maxs"));
             let _ = writeln!(
                 o,
-                "{e}\t{}\t{}\t{:.3} {:.3} {:.3}\t{:.3} {:.3} {:.3}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{}",
+                "{e}\t{}\t{}\t{:.3} {:.3} {:.3}\t{:.3} {:.3} {:.3}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{}\t{:.3} {:.3} {:.3}\t{:.3} {:.3} {:.3}",
                 vm.ent_get_string(ei, "classname"),
                 vm.ent_get_string(ei, "model"),
                 org[0], org[1], org[2], an[0], an[1], an[2],
@@ -877,6 +878,7 @@ pub fn cmd_census_edicts(pak_path: &str, map: &str, times: &str) -> Result<Strin
                 vm.ent_get_float(ei, "nextthink"),
                 vm.ent_get_float(ei, "effects"),
                 vm.ent_get_string(ei, "targetname"),
+                mi[0], mi[1], mi[2], ma[0], ma[1], ma[2],
             );
         }
     }

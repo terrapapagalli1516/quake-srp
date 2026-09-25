@@ -11,7 +11,7 @@ Edict numbers differ between the two (the port reserves the player after the
 map's entities), so entities are matched by (classname, model) and then
 greedily by nearest origin.
 
-    uv run census/edict_diff.py C.txt PORT.txt [--t 4.7] [--fields frame,movetype,...]
+    uv run census/edict_diff.py C.txt PORT.txt [--t 4.7] [--fields frame,movetype,mins,maxs,...]
 
 Prints the entities only one side has, and matched pairs whose origin differs by
 more than --tol units or whose compared fields differ. Monster AI is random-
@@ -24,7 +24,7 @@ import math
 from collections import defaultdict
 
 COLS = ["num", "classname", "model", "origin", "angles", "frame", "movetype", "solid", "flags",
-        "health", "nextthink", "effects", "targetname"]
+        "health", "nextthink", "effects", "targetname", "mins", "maxs"]
 
 
 def load(path):
@@ -43,6 +43,9 @@ def load(path):
         d = dict(zip(COLS, f))
         d["origin"] = tuple(float(x) for x in d["origin"].split())
         d["angles"] = tuple(float(x) for x in d["angles"].split())
+        # mins/maxs (the box setmodel/setsize gave it): empty in older dumps
+        d["mins"] = tuple(float(x) for x in d["mins"].split())
+        d["maxs"] = tuple(float(x) for x in d["maxs"].split())
         for k in ("frame", "movetype", "solid", "flags", "health", "nextthink", "effects"):
             try:
                 d[k] = float(d[k])
@@ -93,7 +96,7 @@ def main():
                 used_c.add(i)
                 used_p.add(j)
                 c, p = cs[i], ps[j]
-                fd = [f"{f} {c[f]:g}/{p[f]:g}" for f in fields if c[f] != p[f]]
+                fd = [f"{f} {val(c[f])}/{val(p[f])}" for f in fields if c[f] != p[f]]
                 if dd > a.tol or fd:
                     diffs.append(f"  {key[0]:24s} {key[1]:22s} C#{c['num']:>4} {fmt(c['origin'])} port#{p['num']:>4} {fmt(p['origin'])} d={dd:.1f} {' '.join(fd)}")
             only_c += [f"  {key[0]:24s} {key[1]:22s} C#{cs[i]['num']:>4} {fmt(cs[i]['origin'])} tn={cs[i]['targetname']}" for i in range(len(cs)) if i not in used_c]
@@ -108,6 +111,10 @@ def main():
 
 def fmt(v):
     return "(" + " ".join(f"{x:.1f}" for x in v) + ")"
+
+
+def val(x):
+    return fmt(x) if isinstance(x, tuple) else f"{x:g}"
 
 
 if __name__ == "__main__":

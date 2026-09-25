@@ -163,6 +163,27 @@ fn need<'a>(rest: &'a [String], n: usize, cmd: &str) -> Result<&'a [String], Str
     }
 }
 
+/// A `--res WxH` screen size (`x` or `X`), never zero, at most id's largest
+/// mode, `render::MAXWIDTH` x `render::MAXHEIGHT` (1280 x 1024): a larger
+/// one is clamped with a note on stderr, as id's drivers offer no such mode.
+fn parse_res(r: &str) -> Result<(usize, usize), String> {
+    let (a, b) = r.split_once(['x', 'X']).ok_or_else(|| format!("--res: expected WxH, got {r:?}"))?;
+    let w: usize = a.trim().parse().map_err(|_| format!("--res: bad width {a:?}"))?;
+    let h: usize = b.trim().parse().map_err(|_| format!("--res: bad height {b:?}"))?;
+    if w == 0 || h == 0 {
+        return Err("--res: a zero-sized screen".into());
+    }
+    let (cw, ch) = render::clamp_to_max(w, h);
+    if (cw, ch) != (w, h) {
+        eprintln!(
+            "--res {w}x{h}: id's largest mode is {}x{} (MAXWIDTH x MAXHEIGHT); using {cw}x{ch}",
+            render::MAXWIDTH,
+            render::MAXHEIGHT
+        );
+    }
+    Ok((cw, ch))
+}
+
 fn read(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))
 }
@@ -1876,10 +1897,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         let iters: u32 = iters.parse().unwrap_or(60).max(1);
         let (bw, bh) = std::env::var("QUAKE_RES")
             .ok()
-            .and_then(|s| {
-                let mut it = s.split(['x', 'X']);
-                Some((it.next()?.trim().parse().ok()?, it.next()?.trim().parse().ok()?))
-            })
+            .and_then(|s| parse_res(&s).ok())
             .unwrap_or((640usize, 400usize));
         let opts = render::RenderOptions::default();
         let render_once = || {
@@ -2062,11 +2080,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         let flag = args[i].as_str();
         let val = args.get(i + 1).ok_or_else(|| format!("{flag} needs a value"))?;
         match flag {
-            "--res" => {
-                let (a, b) = val.split_once(['x', 'X']).ok_or_else(|| format!("--res: expected WxH, got {val:?}"))?;
-                w = a.trim().parse().map_err(|_| format!("--res: bad width {a:?}"))?;
-                h = b.trim().parse().map_err(|_| format!("--res: bad height {b:?}"))?;
-            }
+            "--res" => (w, h) = parse_res(val)?,
             "--origin" => origin = Some(parse_vec3(flag, val)?),
             "--angles" => angles = Some(parse_vec3(flag, val)?),
             "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
@@ -2525,5 +2539,15 @@ mod tests {
         // id's 48-row bar in every mode (the "scaled 2-D" extra would make it 96).
         assert_eq!(refdef.vrect, render::ViewRect { x: 0, y: 0, w: 640, h: 352 });
         assert_eq!(render::viewmodel_fudge(viewsize), 2.0, "V_CalcRefdef's fudge at 100");
+    }
+
+    #[test]
+    fn res_is_at_most_id_largest_mode() {
+        // r_shared.h's MAXWIDTH x MAXHEIGHT: `view --res 2048x400` panicked in
+        // the edge renderer (its 12.20 u wraps from 2048 wide).
+        assert_eq!(parse_res("640x400"), Ok((640, 400)));
+        assert_eq!(parse_res("2048X400"), Ok((1280, 400)));
+        assert_eq!(parse_res("320x2000"), Ok((320, 1024)));
+        assert!(parse_res("0x200").is_err() && parse_res("320").is_err());
     }
 }

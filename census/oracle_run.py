@@ -12,7 +12,7 @@ The oracle's clock is deterministic: every Host_Frame is exactly 0.1 s, and a
 
     oracle_edicts PATH   append every live server edict (classname, model,
                          origin, angles, frame, movetype, solid, flags, health,
-                         nextthink, effects, targetname) with a "# t=" header
+                         nextthink, effects, targetname, mins, maxs) with a "# t=" header
     oracle_client PATH   append cl.time, cl.viewangles, punch, idealpitch, the
                          four cshifts (contents/damage/bonus/powerup), stats
 
