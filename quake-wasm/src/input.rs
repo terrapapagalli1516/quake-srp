@@ -9,7 +9,7 @@ use quake_rs::render::{
     BIND_MOVEUP, BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
 };
 
-use crate::{ensure_app, APP};
+use crate::app::{ensure_app, APP};
 
 /// The legacy analog [`set_move`]/[`set_jump`]/[`set_movedown`] scale (`sv_maxspeed`):
 /// those exports predate the bindings-driven key path and feed tests/automation;
@@ -403,7 +403,7 @@ mod tests {
     use crate::menu::{menu_cancel, menu_down, menu_right, menu_select, menu_visible};
     use crate::snd_dma::{listener_x, listener_y};
     use crate::host::step;
-    use crate::boot;
+    use crate::app::boot;
 
     #[test]
     fn pitch_clamp_is_asymmetric_like_cl_adjustangles() {

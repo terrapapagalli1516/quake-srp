@@ -4,7 +4,7 @@
 //! through [`execute_console_command`].
 
 use crate::host_cmd::execute_console_command;
-use crate::{ensure_app, APP};
+use crate::app::{ensure_app, APP};
 
 // --- drop-down console: toggle / typing / execution exports (the `~` key) ---
 

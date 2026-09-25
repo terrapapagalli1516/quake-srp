@@ -6,7 +6,7 @@
 use quake_rs::render;
 use quake_rs::wad::Qpic;
 
-use crate::{ensure_app, APP};
+use crate::app::{ensure_app, APP};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
@@ -123,7 +123,7 @@ mod tests {
     use crate::console::console_toggle;
     use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
     use crate::host::step;
-    use crate::boot;
+    use crate::app::boot;
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
 

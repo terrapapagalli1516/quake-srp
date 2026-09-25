@@ -211,12 +211,12 @@ surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds";
 #[cfg(all(test, feature = "bench"))]
 mod native {
     use super::imp::{bench_enable, bench_value, NAMES};
+    use crate::app::{boot, boot_attract, boot_demo, in_walk_mode};
     use crate::console::{console_char, console_enter, console_toggle, console_visible};
+    use crate::host::step;
     use crate::input::{look, set_attack, set_move};
     use crate::menu::{menu_cancel, menu_visible};
-    use crate::host::step;
     use crate::vid::set_resolution;
-    use crate::*;
 
     /// Quake's frame cadence (`host_maxfps` 72): every workload steps at it.
     const DT: f32 = 1.0 / 72.0;

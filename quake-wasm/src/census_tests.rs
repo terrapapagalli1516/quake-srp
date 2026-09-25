@@ -5,9 +5,11 @@
 //! its fix: `cargo test --release census -- --ignored` lists what is still open.
 //! Un-ignore a test in the commit that fixes its finding.
 
-use super::*;
-use crate::cl_walk::step_walk;
 use quake_rs::progs::OFS_PARM0;
+use quake_rs::render;
+
+use crate::app::{build_walk, build_walk_map, Walk};
+use crate::cl_walk::step_walk;
 
 /// `PF_setorigin` through the engine's own builtin (origin + SV_LinkEdict), so
 /// the absmin/absmax the trigger touches read are right.

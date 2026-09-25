@@ -11,7 +11,7 @@ use quake_rs::server::Server;
 
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
-use crate::{build_walk_map, ensure_app, player_start, Walk};
+use crate::app::{build_walk_map, ensure_app, player_start, Walk};
 
 // --- console command execution -------------------------------------------
 
@@ -517,7 +517,7 @@ mod tests {
     use crate::input::{key_down, key_up, set_attack};
     use crate::vid::{set_resolution, viewsize};
     use crate::host::step;
-    use crate::{boot, APP};
+    use crate::app::{boot, APP};
 
     #[test]
     fn sizeup_sizedown_console_commands_and_default_binds() {

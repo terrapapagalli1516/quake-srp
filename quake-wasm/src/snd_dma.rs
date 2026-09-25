@@ -15,7 +15,7 @@ use quake_rs::snd::{
     wav_info, AmbientChannels, AMBIENT_FADE_DEFAULT, AMBIENT_LEVEL_DEFAULT, AMBIENT_SAMPLES,
 };
 
-use crate::{ensure_app, pak, APP};
+use crate::app::{ensure_app, pak, APP};
 
 // --- sound: hand real Quake .wav bytes out of the pak for the page to play ---
 
@@ -731,7 +731,7 @@ mod tests {
     use quake_rs::progs::Progs;
     use quake_rs::server::Server;
     use crate::menu::{menu_down, menu_select, menu_up};
-    use crate::{boot, boot_attract, boot_demo};
+    use crate::app::{boot, boot_attract, boot_demo};
 
     use quake_rs::server::SoundEvent;
 

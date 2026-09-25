@@ -19,7 +19,7 @@ use crate::input::{
 };
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
-use crate::{color_for_name, Walk};
+use crate::app::{color_for_name, Walk};
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
 /// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
@@ -879,7 +879,7 @@ mod tests {
     use crate::menu::menu_select;
     use crate::vid::set_resolution;
     use crate::host::step;
-    use crate::{boot, boot_attract, build_walk, APP};
+    use crate::app::{boot, boot_attract, build_walk, APP};
 
     /// Regression for the one-time texture/lighting "pops" in the first second of
     /// live play (two distinct root causes, both whole-view shimmers):

@@ -13,7 +13,7 @@ use crate::cl_tent::spawn_temp_entity;
 use crate::host_cmd::IT_INVISIBILITY;
 use crate::snd_dma::{push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
-use crate::DemoPlay;
+use crate::app::DemoPlay;
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
 /// exactly ONCE: a frame rendered across several steps (small `dt`) must not
@@ -585,7 +585,7 @@ mod tests {
         sound_volume, SND_QUEUE,
     };
     use crate::vid::{DEFAULT_H, DEFAULT_W};
-    use crate::{build_demo, pak};
+    use crate::app::{build_demo, pak};
 
     #[test]
     fn step_demo_shows_the_last_frame_before_looping() {

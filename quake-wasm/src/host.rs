@@ -9,7 +9,7 @@ use quake_rs::render::{self, build_gamma_table};
 use crate::bench::{self, Phase};
 use crate::cl_demo::step_demo;
 use crate::cl_walk::step_walk;
-use crate::ensure_app;
+use crate::app::ensure_app;
 use crate::input::derive_key_move;
 
 /// `Host_FilterTime` (host.c): the most a single frame may advance the game —
@@ -238,7 +238,7 @@ mod tests {
     use crate::test_util::*;
     use crate::console::console_toggle;
     use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
-    use crate::{boot, APP};
+    use crate::app::{boot, APP};
 
     // -- Host_FilterTime: realtime vs host_time ---------------------------------
 
