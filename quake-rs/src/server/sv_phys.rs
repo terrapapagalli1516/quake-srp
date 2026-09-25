@@ -51,6 +51,13 @@ impl Server {
 
         let mut thinks_fired = 0usize;
         let mut think_errors = 0usize;
+        // SV_Physics always starts with StartFrame (self/other = world, time =
+        // sv.time) — the spawn settle frames included, so QC's `skill`,
+        // `teamplay` and `framecount` globals are set from the first frame.
+        self.vm.gset_float("time", start_time);
+        if self.run_sys("StartFrame", 0, 0).is_err() {
+            think_errors += 1; // isolated; the interpreter was reset
+        }
         let n = self.vm.num_edicts();
 
         for e in 0..n {
@@ -1530,6 +1537,33 @@ mod tests {
         server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
         (server, e)
+    }
+
+    #[test]
+    fn run_frame_starts_with_startframe_like_sv_physics() {
+        // CENSUS L20: SV_Physics runs StartFrame (time = sv.time) every frame,
+        // the spawn settle frames too; run_frame (those frames) skipped it.
+        let mut b = Builder::new();
+        b.add_global("self", 4, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("startframe_time", EV_FLOAT, 40);
+        b.add_function(
+            "StartFrame",
+            vec![
+                Statement { op: Op::StoreF as u16, a: 33, b: 40, c: 0 },
+                Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            ],
+        );
+        let progs = Progs::parse(&b.build()).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+        server.vm.gset_float("startframe_time", -1.0);
+        let t0 = server.time();
+        server.run_frame(0.1).expect("frame");
+        assert_eq!(server.vm.gget_float("startframe_time"), t0, "StartFrame ran at sv.time");
+        server.run_frame(0.1).expect("frame");
+        assert!((server.vm.gget_float("startframe_time") - (t0 + 0.1)).abs() < 1e-6);
     }
 
     #[test]
