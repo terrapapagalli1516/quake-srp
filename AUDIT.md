@@ -740,6 +740,28 @@ C followed and the test are in the commit message.
   `intsintable_is_r_initturbs_unwrapped_table`,
   `warp_reads_intsintable_past_the_first_cycle`. (Turbulent8's `sintable` was
   already unwrapped, fid1.)
+- ✅ **Underwater view at the warp buffer's resolution** — with the eye in
+  water/slime/lava, id's `R_SetupFrame` renders the view into `r_warpbuffer`
+  (at most `WARP_WIDTH` x `WARP_HEIGHT`, 320x200: the mode scaled to 320 wide,
+  capped at 200 high, `R_SetVrect` on that with `sb_lines * h/vid.height`)
+  and `D_WarpScreen` stretches it over `scr_vrect` (`wratio`/`hratio`, the
+  C's float row/column tables). The port rendered and warped at full
+  resolution. Now `screen::warp_vrect` + `apply_warp(view, out_w, out_h,
+  clock)` (a new signature, so `render/mod.rs` is untouched), live, demo and
+  `quaketool view` (which now warps an underwater eye like id's
+  `R_RenderView`). Oracle, e1m1's pool (`--view=750,898,-332,0,90,0 --time
+  1.6`), exact%: 320x200 97.58; 640x400 48.22 -> 97.59; 960x600 44.14 ->
+  97.60; 1280x800 42.65 -> 97.63 (before = the full-resolution warp). Cheaper
+  too: an underwater frame renders 320x152 at every preset. At every 16:10
+  mode the C's pixel aspect for the warp buffer equals `vid.aspect`, so the
+  square-pixel projection is exact; for a mode taller than 16:10 id squeezes
+  320x200 through that aspect and the port narrows the buffer instead
+  (`vid.width*200/vid.height` wide: same picture, e.g. 266 columns at 4:3).
+  Whoever lands the pixel-aspect projection: the warp buffer's aspect is
+  `vid.aspect * (h/w) * (vid.width/vid.height)` (R_ViewChanged). Tests
+  `warp_vrect_is_r_setupframes_warp_buffer_view`,
+  `warp_stretches_the_warp_buffer_over_the_screen_view`,
+  `underwater_view_renders_into_the_warp_buffer`. Goldens unchanged.
 
 ## LOW (27)
 

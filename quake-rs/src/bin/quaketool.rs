@@ -1969,7 +1969,10 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 ///
 /// The map's entities are still spawned (worldspawn's QuakeC sets the light-style
 /// strings), but only `--ents` decides what is drawn. No existing command's output
-/// depends on this one.
+/// depends on this one. With the eye in water, slime or lava the view is id's
+/// `r_waterwarp` one: rendered into the (at most 320x200) warp buffer and
+/// stretched over the frame by `D_WarpScreen` at `--time`, as `R_RenderView`
+/// does before the oracle's shot.
 fn cmd_view(args: &[String]) -> Result<Out, String> {
     use std::collections::HashMap;
 
@@ -2134,6 +2137,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let unresolved = alias_descs.len() + ext_descs.len() + sprite_descs.len()
         - instances.len() - externals.len() - sprites.len();
 
+    let dowarp = quake_rs::world::point_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
     let render_once = || {
         // cl.viewent as given (the oracle's), else V_CalcRefdef's for a still
         // player in a full-frame view (id at viewsize 120: no fudge, no bob).
@@ -2150,10 +2154,13 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             origin_ofs,
             angles: gun_angles,
         });
-        render::render_scene_ext_sprited(
-            &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
+        // R_SetupFrame's r_dowarp, for the full-frame view (viewsize 120).
+        let r = if dowarp { quake_rs::screen::warp_vrect(w, h, 120.0, false) } else { render::ViewRect { x: 0, y: 0, w, h } };
+        let view = render::render_scene_ext_sprited(
+            &bsp, &cam, r.w, r.h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
             &light_styles, colormap.as_deref(), &sprites,
-        )
+        );
+        if dowarp { render::apply_warp(view, w, h, time) } else { view }
     };
     let img = render_once();
     // Warm re-renders of the same view (the first, cold frame above is excluded),
@@ -2169,8 +2176,9 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let mut o = String::new();
     let _ = writeln!(
         o,
-        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}",
-        origin[0], origin[1], origin[2], angles[0], angles[1], angles[2]
+        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}",
+        origin[0], origin[1], origin[2], angles[0], angles[1], angles[2],
+        if dowarp { " (underwater: D_WarpScreen)" } else { "" }
     );
     let _ = writeln!(
         o,
