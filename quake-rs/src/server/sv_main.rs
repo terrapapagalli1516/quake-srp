@@ -218,6 +218,13 @@ impl Server {
         // Reserve a fresh edict (the first free slot after spawn_entities).
         let ent = self.vm.spawn();
         self.player = ent;
+        // Host_Spawn_f sets up the cleared client edict before ClientConnect:
+        // `colormap = NUM_FOR_EDICT(ent)`, `team = (colors & 15) + 1` (cl_color
+        // "0") and `netname = host_client->name` (cl_name "player") — the
+        // subject of "player entered the game" and every obituary.
+        self.vm.ent_set_float(ent, "colormap", ent as f32);
+        self.vm.ent_set_float(ent, "team", 1.0);
+        self.vm.ent_set_string(ent, "netname", "player");
 
         // Default the engine-managed physics fields before the script runs, so a
         // minimal mod that only sets health/origin still yields a walking client

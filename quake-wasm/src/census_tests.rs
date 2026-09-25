@@ -237,12 +237,14 @@ fn census_pickup_flashes_the_screen_gold() {
 /// CENSUS F7 (MED). The player's `netname` is "player": Host_Spawn_f does
 /// `ent->v.netname = host_client->name` (cl_name defaults to "player"), and the
 /// QC prints it in "player entered the game" and every obituary ("player was
-/// shot by a Grunt"). The port never sets it.
+/// shot by a Grunt"). The port never set it. Host_Spawn_f also sets `team =
+/// (cl_color & 15) + 1` and `colormap = NUM_FOR_EDICT(ent)`.
 #[test]
-#[ignore = "census F7: the player's netname is never set (obituaries lose their subject)"]
 fn census_player_netname_is_player() {
     let w = build_walk().expect("e1m1 boots");
     assert_eq!(w.server.vm.ent_get_string(w.player, "netname"), "player");
+    assert_eq!(w.server.vm.ent_get_float(w.player, "team"), 1.0);
+    assert_eq!(w.server.vm.ent_get_float(w.player, "colormap"), w.player as f32);
 }
 
 /// CENSUS F4 (HIGH). A weapon key pressed while the weapon is cooling down is
