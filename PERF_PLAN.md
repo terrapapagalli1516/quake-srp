@@ -1,5 +1,84 @@
 # quake-rust — performance plan
 
+## Where it stands (2026-09-25, `3ba835f`)
+
+**Before and after.** Wasm step median / p95 per frame, native median in parentheses, ms,
+headless Chromium, `uv run --with playwright web/bench.py --build --native`. *Before* is
+§3's baseline (`5af4fa1` plus the harness, load 2.3–3.3); *after* was run on `3ba835f`
+for this summary (10:45, load 2.6 → 2.3). Two sittings at similar load, so read the
+ratios, not the last digit. The inputs are the same; the frames are not quite: the game
+now draws what id's does (the view above the status bar, the 4:3 pixel aspect, only the
+entities the server sends).
+
+| workload | 320×200 | 640×400 | 1280×800 |
+|---|---|---|---|
+| demo1 | 2.41 / 2.88 (1.65) → **0.58 / 0.72 (0.45)** | 6.40 / 8.00 (3.87) → **1.41 / 1.69 (1.05)** | 22.64 / 33.10 (13.14) → **4.53 / 5.02 (3.23)** |
+| attract | 2.66 / 3.48 (1.62) → **0.61 / 0.75 (0.51)** | 6.88 / 9.46 (4.38) → **1.44 / 1.66 (1.18)** | 23.13 / 30.06 (15.21) → **4.82 / 5.47 (3.62)** |
+| walk_e1m1 | 2.10 / 3.90 (1.66) → **0.43 / 0.78 (0.27)** | 4.90 / 8.43 (3.37) → **1.09 / 1.54 (0.71)** | 16.13 / 24.95 (9.90) → **3.49 / 4.15 (2.52)** |
+| fire_e1m1 | 2.58 / 4.75 (2.09) → **0.38 / 0.63 (0.29)** | 5.88 / 10.56 (4.05) → **1.03 / 1.40 (0.77)** | 19.17 / 34.65 (11.31) → **3.62 / 4.39 (2.67)** |
+| walk_e1m3 | 4.57 / 6.00 (3.60) → **0.50 / 0.62 (0.38)** | 7.43 / 8.88 (5.44) → **1.17 / 1.32 (0.87)** | 20.67 / 24.58 (14.23) → **3.86 / 4.25 (2.82)** |
+
+About 5x faster at 1280×800, and the spikes are gone: fire_e1m1's p95 was 1.8x its
+median (dynamic lights), now 1.2x; demo1's damage-flash frames no longer cost 11 ms
+extra. A wasm frame costs 1.2–1.6x the native one (it was 1.2–1.7x).
+
+Where demo1's 4.53 ms at 1280×800 goes now (was 22.64): the 3-D view 3.68 (was 19.42),
+of which the world 2.91 (15.01), alias models 0.45 (1.34), the gun 0.20 (1.37); the
+status bar 0.09 (0.76); the RGBA pack 0.45 (2.36); the palette shift 0 on every frame
+(11.9 on a shifted frame). The page adds 0.42 for the copy and `putImageData`.
+
+Elsewhere, from the branch reports below:
+
+- **Game logic:** `quaketool simbench` e1m3 2.41–2.64 → 0.29 ms per tick (D2). In the
+  browser, walk_e1m3's sim phase at 320×200: 0.74 → 0.17 ms (this run).
+- **Memory:** 81 → 53 MB after boot, 171 → 62 MB after four map loads (D3, measured on
+  `quake/host`).
+- **Startup, local:** navigation to first frame 204 → 173 ms (this run); served
+  compressed over an emulated 50 Mbit/s link, 3.5 → 1.8 s (D4).
+- **High-refresh displays:** the 72 fps cap (D1) halves the work at 144 Hz, and a 120 Hz
+  display runs at 60 fps. Argued from the code and unit-tested, not measured on a real
+  display.
+- **Against id's own renderer** (native, warm, world only, `oracle/compare.py --bench`):
+  the port takes 0.30–0.34x id's time at 320×200, 0.37–0.45x at 640×480 and 0.43–0.51x
+  at 1280×1024 (A3).
+
+**The items**, in the order of §5:
+
+| item | what | status |
+|---|---|---|
+| A1 | polygon spans instead of bounding-box triangles | done (`quake/w1`), then replaced by A3 |
+| A2 | dynamically lit walls through the surface cache | done (`quake/w1`) |
+| A0 | sort only the faces that survive the culls | done (`quake/w1`); moot since A3 |
+| A3 | id's edge-sorted span renderer | done (`quake/edge`): wasm frame −23 to −33%, native −43 to −57%; the polygon walker deleted |
+| A4 | the view above the status bar; the pixel aspect | done (`quake/options`, `quake/w2b`) |
+| A5 | mip levels in the surface cache | done (`quake/w2a`), with `R_DrawSurfaceBlock8`'s lightmap stepping |
+| B1 | RGBA pack in place | done (`quake/perf-b`) |
+| B2 | palette shift as `V_UpdatePalette`'s ramps | done (`quake/perf-b`), id's truncation |
+| B3 | keep the frame buffers | done (`quake/perf-b`) |
+| B4 | HUD, menu and console blits by rows | done (`quake/perf-b`) |
+| B5 | the 8-bit framebuffer | **open** (what it would take: B5 below) |
+| B6 | present from wasm memory | done (`quake/host`); `?lowlatency` opt-in |
+| C1 | cull entities as the server does | done (`quake/sim`); also fixed CENSUS L22 |
+| C2 | alias models through `D_PolysetDraw` | done (`quake/fid1`, as a fidelity fix) |
+| C3 | the gun on the shared z-buffer, placed by `V_CalcRefdef` | done (`quake/options`, `quake/fid1`) |
+| C4 | cache the external boxes' surfaces | **not done**; after C1 and A5 walk_e1m3 bakes 2 box faces a frame (the `surf_bypa` counter), too little to matter |
+| D1 | `Host_FilterTime`'s 72 fps cap | done (`quake/host`); "Uncapped framerate" is a Web extra |
+| D2 | resolve entity fields once | done (`quake/sim`) |
+| D3 | the pak as one static slice | done (`quake/host`) |
+| D4 | compressed, streamed delivery | compression and streaming done (`quake/host`); **open:** the pak split out of the wasm, `wasm-opt` |
+
+**Still open or unmeasured:** B5; D4's pak split and `wasm-opt`; C4 (not worth it now);
+real GPU browsers, Firefox, Safari, phones and a real 120/144 Hz display (§9); the page's
+sound cost (the bench runs with audio locked).
+
+The rest of this file is the plan as written on branch `quake/perf`, with each item's
+outcome added under it by the branch that did it. Its numbers are the baseline's unless an
+item says otherwise.
+
+---
+
+## The plan (branch `quake/perf`), with outcomes
+
 2026-09-25, branch `quake/perf`. Measurement and a plan. The only code in this round is the
 benchmark harness and its opt-in timers. Implementers: the code is about to be split into modules,
 so everything below names **functions and mechanisms**, never line numbers.
@@ -11,6 +90,8 @@ change that is faster but not faithful can only ship as an opt-in extra.
 ---
 
 ## 1. Summary
+
+*At the baseline, `5af4fa1`. The current numbers are at the top of this file.*
 
 At 1280×800 in the browser, a frame of id's demo1 costs **~19–23 ms** in wasm. The time goes to:
 
@@ -57,11 +138,15 @@ The wins that do exist are code changes, so per the brief they stay in this plan
 
 **Browser:**
 ```sh
-uv run web/bench.py --build --native      # builds the `--features bench` wasm; runs everything below
-uv run web/bench.py --build --workloads demo1 --res 1280x800 --profile  # plus a CDP CPU profile
-uv run web/bench.py DIR --hash-every 60   # any index.html + wasm; framebuffer hashes for A/B identity
-uv run web/bench.py --build --live 15 --vsync   # sample the page's OWN loop (pacing at 60 Hz)
+uv run --with playwright web/bench.py --build --native      # builds the `--features bench` wasm; runs everything below
+uv run --with playwright web/bench.py --build --workloads demo1 --res 1280x800 --profile  # plus a CDP CPU profile
+uv run --with playwright web/bench.py DIR --hash-every 60   # any index.html + wasm; framebuffer hashes for A/B identity
+uv run --with playwright web/bench.py --build --live 15 --vsync   # sample the page's OWN loop (pacing at 60 Hz)
 ```
+
+(`--with playwright` is needed: the script's shebang carries it, but `uv run script.py`
+does not read the shebang, and a plain `uv run web/bench.py` stops at the playwright
+import.)
 
 - **What it runs.** `web/bench.py` boots the real page in headless Chromium, pauses its rAF loop,
   and drives these workloads at dt = 1/72:
@@ -239,6 +324,13 @@ Both counts come from scratch-instrumented builds, not from the committed harnes
 | external brush boxes (`b_*.bsp`) | surfaces go through the surface cache like any brush surface | `cache_surf = false`: re-baked every frame | 0.27–0.87 ms per frame, at any resolution |
 | underwater warp | `D_WarpScreen`, 8-bit, into the view buffer | clones the whole RGB frame, plus 3 `Vec` allocations per call | 1.7 ms at 1280×800 |
 | entity field access | direct `entvars_t` struct members | `ent_get_*(ent, "name")`: a `HashMap<String>` SipHash lookup per field per entity (D2 done: resolved once per progs) | about 3% of the frame on e1m3; most of sim |
+
+The port column is the baseline's. Every row has since been done the C's way (the item
+table at the top) except three: the framebuffer is still RGB, with the palette shift and
+gamma applied once in the pack (B5 open); the surface cache keeps a block per face and
+mip level with no fixed-size pool like id's (its resident size is measured under A5);
+and the external boxes still bypass it (C4, now 2 faces a frame). The underwater view renders into id's 320×200
+warp buffer since `quake/polish`, and the warp keeps its tables since `quake/polish3`.
 
 ---
 
@@ -728,6 +820,9 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
   the C". It is not colormapped and can overbright.
 - **Prerequisite for:** B5.
 - **Functions:** `draw_alias_model`, `mdl_frame_verts`, `mdl_vertex_model_space`, `draw_viewmodel`.
+- **Done** (branch `quake/fid1`, as a fidelity fix: `render/alias.rs`, `render/polyse.rs`;
+  `AUDIT.md`, "Session 7"). Entity pixels against the oracle 15.9–71.0% → 98.2–99.7%, and
+  100% since the edge renderer. Its speed was not measured on its own.
 
 **C3. The viewmodel on the shared z-buffer with Quake's ×3 bias.** *(faithful)*
 
@@ -736,6 +831,9 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
   view-entity origin.
 - **Gain:** part of the viewmodel's 1.4–1.9 ms at 1280×800.
 - **Output:** changes where the gun meets walls.
+- **Done**: the placement on `quake/options` (`V_CalcRefdef`'s origin), the shared
+  z-buffer with the tripled 1/z on `quake/fid1`. The gun costs 0.20 ms at 1280×800 on
+  demo1 now (was 1.37).
 
 **C4. Cache the surfaces of external brush boxes.** *(byte-identical)*
 
@@ -745,6 +843,8 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
 - **Mechanism:** a small per-model cache keyed by the model name or the `Bsp` pointer, alongside the
   world slot in `face_surf_block`.
 - **Owner:** Agent A, because the change is inside `face_surf_block`'s bypass branch.
+- **Not done.** C1 (only the boxes the server sends) and A5 (mip levels) took most of its
+  cost away: walk_e1m3 bakes 2 box faces a frame at `3ba835f` (`surf_bypa`), from 84.
 
 ### D. Host loop, sim glue, startup (owns `web/index.html`)
 
@@ -905,6 +1005,12 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
 
 ## 7. What makes it feel slow, beyond frame time
 
+*At the baseline. Since then: the spikes (B2, A2), the pak copies (D3) and the work per
+display refresh (D1) are fixed; the mip levels (A5) shrank the surface cache; the page's
+canvas is the largest 4:3 box the window fits (976×732 in a 1440×900 window, so the
+default 960×600 is no longer squeezed into 640×480); the download (the pak split, D4) and
+the input latency are as described.*
+
 - **Missed vsyncs at the default resolution.** At 960×600 in the page's own loop, 6% of frames took
   longer than 20 ms at 60 Hz: a step median of 14.2 ms against a 16.7 ms budget, with p95
   19.8 ms. A1 + B1 + B2 should bring 960×600 to about 7 ms.
@@ -963,6 +1069,9 @@ at 1280×800 goes from ~19 ms to **~6–8 ms**:
 With B2 and A2, the damage-flash and firing spikes are gone too. At the default 960×600, that
 means about 4–5 ms per frame, far inside a 60 Hz budget.
 
+*Outcome: demo1 at 1280×800 measured 4.53 ms at `3ba835f` (the table at the top), below
+the projection, mostly because A3 was done as well.*
+
 ---
 
 ## 9. Open, or not verified
@@ -976,12 +1085,13 @@ means about 4–5 ms per frame, far inside a 60 Hz budget.
   checked for cracks only by counting background pixels on two frames.
 - **Estimates, not measurements:** the gain for C2. (C1's and A3's savings are measured; see
   C1 and A3.)
-- **Fidelity issues found, not fixed** (they belong in `AUDIT.md`):
-  - A4: vrect and pixelAspect.
-  - C2: alias models are not colormapped, and the code comment claims otherwise.
+- **Fidelity issues found, not fixed** (they belong in `AUDIT.md`) — *all fixed since:*
+  - A4: vrect and pixelAspect. (Fixed on `quake/options` and `quake/w2b`.)
+  - C2: alias models are not colormapped, and the code comment claims otherwise. (Fixed on
+    `quake/fid1`.)
   - B2: the cshift rounds where the C truncates. (Fixed on `quake/perf-b`.)
-  - A2: dlit faces are lit per pixel.
-  - C3: the viewmodel placement is ad hoc.
+  - A2: dlit faces are lit per pixel. (Fixed on `quake/w1`.)
+  - C3: the viewmodel placement is ad hoc. (Fixed on `quake/options` and `quake/fid1`.)
 - **Not investigated:**
   - The surface cache's steady-state memory per map (A5).
   - Sound decode/playback cost in the page: the bench runs with audio locked, so the page's
