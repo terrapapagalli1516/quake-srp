@@ -236,6 +236,8 @@ const playEl = document.getElementById('play');
 const lockChip = document.getElementById('lockChip');
 const fsHint = document.getElementById('fsHint');
 const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
+// MouseEvent.button -> Quake keynum (keys.h K_MOUSE1/2/3): left, middle, right.
+const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
 // Is the in-game menu currently up (capturing keyboard)?
 function menuVisible() { return !!(exp && exp.menu_visible && exp.menu_visible()); }
@@ -916,15 +918,19 @@ canvas.addEventListener('mousedown', (e) => {
     // behaviour (inWalkMode() defaults true).
     if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
   }
-  // Left-click while locked is K_MOUSE1 (bound to +attack by default;
-  // rebindable in Options > Customize controls).
-  else if (e.button === 0 && exp && exp.key_down) { exp.key_down(200); }
+  // While locked the buttons are K_MOUSE1/2/3 (in_win.c: left, right,
+  // middle), through the bindings like any key — default.cfg: MOUSE1
+  // +attack, MOUSE2 +forward, MOUSE3 +mlook (rebindable in Options >
+  // Customize controls).
+  else if (MOUSE_KEYNUMS[e.button] && exp && exp.key_down) { exp.key_down(MOUSE_KEYNUMS[e.button]); }
   dragging = true;
 });
 addEventListener('mouseup', (e) => {
   dragging = false;
-  if (e.button === 0 && exp && exp.key_up) exp.key_up(200);   // K_MOUSE1 release
+  if (MOUSE_KEYNUMS[e.button] && exp && exp.key_up) exp.key_up(MOUSE_KEYNUMS[e.button]);
 });
+// The right button is MOUSE2 in the game, not the browser's context menu.
+canvas.addEventListener('contextmenu', e => e.preventDefault());
 // The standard web-port Esc pattern. The browser RESERVES Esc while the
 // pointer is locked — the keydown never reaches the page; Esc's only effect is
 // releasing the lock. So when the lock is LOST without the page asking (this

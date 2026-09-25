@@ -116,6 +116,11 @@ pub const BIND_STRAFE: usize = 10;
 pub const BIND_LOOKUP: usize = 11;
 pub const BIND_LOOKDOWN: usize = 12;
 pub const BIND_CENTERVIEW: usize = 13;
+/// `+mlook` / `+klook`: listed and bindable; mouse look is permanent under
+/// pointer lock here and keyboard look is not modelled, so holding them does
+/// nothing.
+pub const BIND_MLOOK: usize = 14;
+pub const BIND_KLOOK: usize = 15;
 pub const BIND_MOVEUP: usize = 16;
 pub const BIND_MOVEDOWN: usize = 17;
 /// Commands `default.cfg` binds that `M_Keys_Draw` doesn't list: they sit past
@@ -2874,13 +2879,13 @@ mod tests {
             m.adjust(1); // toggles flip regardless of direction (Always Run: on -> OFF)
         }
         // Rebind through the real grab path: Options > Customize controls,
-        // Enter on "jump / swim up" (one key bound — no unbind-first), 'j'.
+        // Enter on "change weapon" (one key bound, '/' — no unbind-first), 'j'.
         m.cursor = ROW_CONTROLS;
         m.select(); // -> Keys
-        m.cursor = BIND_JUMP;
+        m.cursor = BIND_CHANGEWEAPON;
         m.select(); // starts the grab
         m.bind_key(b'j');
-        assert_eq!(m.action_for_key(b'j'), Some(BIND_JUMP));
+        assert_eq!(m.action_for_key(b'j'), Some(BIND_CHANGEWEAPON));
         // Host-mirrored externals: slot comments + the Save gate.
         let mut comments: [String; MAX_SAVEGAMES] = Default::default();
         comments[3] = "e1m1 quick".to_string();
@@ -2907,7 +2912,7 @@ mod tests {
         assert!(m.invert_mouse(), "Invert Mouse survives");
         assert!(m.lookspring(), "Lookspring survives");
         assert!(m.lookstrafe(), "Lookstrafe survives");
-        assert_eq!(m.action_for_key(b'j'), Some(BIND_JUMP), "rebinds survive");
+        assert_eq!(m.action_for_key(b'j'), Some(BIND_CHANGEWEAPON), "rebinds survive");
         assert_eq!(m.action_for_key(K_SPACE), Some(BIND_JUMP), "seeded binds survive");
         assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD), "seeded binds survive");
         assert_eq!(m.save_comment(3), "e1m1 quick", "host-set slot comments survive");

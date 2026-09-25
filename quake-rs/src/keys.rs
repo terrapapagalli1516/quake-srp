@@ -7,7 +7,8 @@
 use crate::menu::{
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
     BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_RIGHT,
-    BIND_IMPULSE_0, BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
+    BIND_IMPULSE_0, BIND_KLOOK, BIND_MLOOK, BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP,
+    BIND_SPEED, BIND_STRAFE,
 };
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
@@ -99,6 +100,7 @@ pub(crate) fn default_bindings() -> [Option<u8>; 256] {
     bind(K_LEFTARROW, BIND_LEFT);
     bind(K_RIGHTARROW, BIND_RIGHT);
     bind(K_SPACE, BIND_JUMP);
+    bind(K_ENTER, BIND_JUMP);
     bind(K_TAB, BIND_SHOWSCORES);
     // bind 1 "impulse 1" .. bind 8 "impulse 8", bind 0 "impulse 0" — by key
     // NUMBER, so the digit row selects weapons whatever Shift or the layout.
@@ -107,6 +109,10 @@ pub(crate) fn default_bindings() -> [Option<u8>; 256] {
     }
     bind(b'/', BIND_CHANGEWEAPON);
     bind(K_MOUSE1, BIND_ATTACK);
+    bind(K_MOUSE2, BIND_FORWARD);
+    bind(b'\\', BIND_MLOOK);
+    bind(K_MOUSE3, BIND_MLOOK);
+    bind(K_INS, BIND_KLOOK);
     // This port's established layout (overrides default.cfg's a=+lookup,
     // d=+moveup; w/s were unbound there):
     bind(b'w', BIND_FORWARD);
@@ -132,6 +138,16 @@ mod tests {
         assert_eq!(keynum_to_string(K_F12), "F12");
         assert_eq!(keynum_to_string(K_DEL), "DEL");
         assert_eq!(keynum_to_string(0), "UNKNOWN");
+    }
+
+    #[test]
+    fn default_cfg_binds_enter_mouse2_mlook_klook() {
+        let b = default_bindings();
+        assert_eq!(b[K_ENTER as usize], Some(BIND_JUMP as u8));
+        assert_eq!(b[K_MOUSE2 as usize], Some(BIND_FORWARD as u8));
+        assert_eq!(b[b'\\' as usize], Some(BIND_MLOOK as u8));
+        assert_eq!(b[K_MOUSE3 as usize], Some(BIND_MLOOK as u8));
+        assert_eq!(b[K_INS as usize], Some(BIND_KLOOK as u8));
     }
 
     #[test]
