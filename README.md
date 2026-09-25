@@ -60,9 +60,13 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
   `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
-  The port's few opt-in departures from id are console variables named `wasm_*`, off by default and
-  listed in one place, `quake-wasm/src/extras.rs` (so far `wasm_exactpersp 1`: exact perspective on
-  every pixel instead of id's 16-pixel spans).
+- **Web extras** — the port is id's Quake by default (Always Run aside). Its departures are opt-in, all
+  off by default, on one page: **Options > Web extras**, drawn like id's Options page, each also a
+  `wasm_*` console variable (listed in `quake-wasm/src/extras.rs`): an **uncapped frame rate** (no
+  72 fps cap, for 120/144 Hz displays; `wasm_uncapped 1`), an **FPS readout** in QuakeWorld's style
+  (`wasm_showfps 1`) and **exact perspective** on every pixel instead of id's 16-pixel spans
+  (`wasm_exactpersp 1`). The page remembers them across reloads, as it does the resolution and
+  Screen size. Recorded in `AUDIT.md` ("Web extras").
 - **Sound** — the QuakeC `sound` + temp-entity sounds drive a queue the browser plays through Web Audio with
   **distance/stereo spatialization** relative to the player (samples resolved under the `sound/` pak dir); **placed
   `ambientsound()` loops** (torch crackle, machine hums — `svc_spawnstaticsound` semantics, wire-byte-exact

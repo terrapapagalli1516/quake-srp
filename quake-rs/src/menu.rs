@@ -37,12 +37,14 @@ use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP}
 const MAIN_ITEMS: usize = 5;
 /// `SINGLEPLAYER_ITEMS` (menu.c): the single-player menu has 3 entries.
 const SINGLEPLAYER_ITEMS: usize = 3;
-/// `OPTIONS_ITEMS` (menu.c, the non-Win32 layout = 13 rows). The cursor wraps over
-/// all 13; the row indices match `M_AdjustSliders` / `M_Options_Key`:
+/// `OPTIONS_ITEMS` (menu.c): id's 13 rows plus this port's one. The row
+/// indices 0..=12 match `M_AdjustSliders` / `M_Options_Key`:
 /// 0 Customize controls, 1 Go to console, 2 Reset to defaults, 3 Screen size,
 /// 4 Brightness, 5 Mouse Speed, 6 CD Music Volume, 7 Sound Volume, 8 Always Run,
-/// 9 Invert Mouse, 10 Lookspring, 11 Lookstrafe, 12 Video Options.
-const OPTIONS_ITEMS: usize = 13;
+/// 9 Invert Mouse, 10 Lookspring, 11 Lookstrafe, 12 Video Options. Row 13 is
+/// the port's "Web extras" ([`ROW_EXTRAS`]), in the slot the C's own `_WIN32`
+/// build gives its 14th row ("Use Mouse", y=136, `OPTIONS_ITEMS 14`).
+const OPTIONS_ITEMS: usize = 14;
 
 /// `OptionRow` — the stable index for each Options row (matches the C's
 /// `options_cursor` cases in `M_AdjustSliders` / `M_Options_Key`).
@@ -59,6 +61,113 @@ const ROW_INVERTMOUSE: usize = 9;
 const ROW_LOOKSPRING: usize = 10;
 const ROW_LOOKSTRAFE: usize = 11;
 const ROW_VIDEO: usize = 12;
+/// PORT ROW (not in id's Quake): "Web extras" opens [`MenuScreen::Extras`],
+/// the one home of this port's opt-in departures ([`Extras`]).
+const ROW_EXTRAS: usize = 13;
+
+// ---------------------------------------------------------------------------
+// Web extras: the port's opt-in departures from id's Quake
+// ---------------------------------------------------------------------------
+
+/// The port's opt-in departures from id's Quake (Options > Web extras, and
+/// the `wasm_*` console commands). Every one defaults OFF: with all of them
+/// off the port behaves as id's Quake (Always Run aside). They are not cvars
+/// in default.cfg, so "Reset to defaults" leaves them alone; the page
+/// persists them in localStorage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Extras {
+    /// `wasm_uncapped`: run a host frame on every display refresh instead of
+    /// `Host_FilterTime`'s 72 fps cap (a 120/144 Hz display runs 120/144 fps).
+    pub uncapped: bool,
+    /// `wasm_showfps`: a frame-rate readout in conchars at the bottom right,
+    /// above the status bar (QuakeWorld's `SCR_DrawFPS`).
+    pub show_fps: bool,
+    /// `wasm_exactpersp`: textured walls and liquids with exact perspective
+    /// at every pixel instead of id's 16-pixel affine spans.
+    pub exact_persp: bool,
+}
+
+/// One Web extra (a row of [`WEB_EXTRAS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Extra {
+    Uncapped,
+    ShowFps,
+    ExactPersp,
+}
+
+impl Extras {
+    /// The bits the page stores (the `extras`/`set_extras` exports):
+    /// 1 uncapped, 2 show FPS, 4 exact perspective.
+    pub fn bits(self) -> u32 {
+        self.uncapped as u32 | (self.show_fps as u32) << 1 | (self.exact_persp as u32) << 2
+    }
+
+    /// The inverse of [`Extras::bits`]; unknown bits are ignored.
+    pub fn from_bits(bits: u32) -> Extras {
+        Extras { uncapped: bits & 1 != 0, show_fps: bits & 2 != 0, exact_persp: bits & 4 != 0 }
+    }
+
+    /// Whether `e` is on.
+    pub fn get(self, e: Extra) -> bool {
+        match e {
+            Extra::Uncapped => self.uncapped,
+            Extra::ShowFps => self.show_fps,
+            Extra::ExactPersp => self.exact_persp,
+        }
+    }
+
+    /// Switch `e` on or off.
+    pub fn set(&mut self, e: Extra, on: bool) {
+        match e {
+            Extra::Uncapped => self.uncapped = on,
+            Extra::ShowFps => self.show_fps = on,
+            Extra::ExactPersp => self.exact_persp = on,
+        }
+    }
+}
+
+/// One Web extra, as the Options > Web extras page and the console know it.
+#[derive(Debug, Clone, Copy)]
+pub struct WebExtra {
+    /// The value it switches.
+    pub extra: Extra,
+    /// Its console variable (`wasm_*`, a name no id command or cvar uses).
+    pub cvar: &'static str,
+    /// Its row label, right-justified to the Options label column like id's.
+    pub label: &'static str,
+    /// The two bronze help lines shown under the list while its row is
+    /// highlighted (a third names the console variable).
+    pub help: [&'static str; 2],
+    /// Its one-line summary in the console's `help`.
+    pub summary: &'static str,
+}
+
+/// THE table of the port's opt-in extras, in Extras-page order: the page's
+/// rows and the console's `wasm_*` variables are both read from it, and
+/// their values are the menu's [`Extras`].
+pub const WEB_EXTRAS: [WebExtra; 3] = [
+    WebExtra {
+        extra: Extra::Uncapped,
+        cvar: "wasm_uncapped",
+        label: "    Uncapped framerate",
+        help: ["One frame every display refresh,", "past Quake's 72 fps cap"],
+        summary: "no 72 fps cap",
+    },
+    WebExtra {
+        extra: Extra::ShowFps,
+        cvar: "wasm_showfps",
+        label: "              Show FPS",
+        help: ["Frames per second, bottom right,", "as QuakeWorld's show_fps drew it"],
+        summary: "frame rate",
+    },
+    WebExtra {
+        extra: Extra::ExactPersp,
+        cvar: "wasm_exactpersp",
+        label: "     Exact perspective",
+        help: ["Perspective exact at every pixel,", "not id's 16-pixel spans"],
+        summary: "exact persp.",
+    },
+];
 
 /// `MULTIPLAYER_ITEMS` (menu.c): the multiplayer menu has 3 entries (Join /
 /// New Game / Setup). Netcode is out of scope for this port, so like the C with
@@ -282,6 +391,11 @@ pub enum MenuScreen {
     Help,
     /// The Quit confirmation prompt (`m_quit`): "Are you sure you want to quit?".
     Quit,
+    /// PORT SCREEN (not in id's Quake): Options > Web extras, the port's
+    /// opt-in departures ([`Extras`]) as on/off rows drawn in `M_Options_Draw`'s
+    /// idiom. Left/right/Enter toggle (`M_AdjustSliders`' checkbox rows);
+    /// Escape returns to Options on the Web extras row.
+    Extras,
 }
 
 impl MenuScreen {
@@ -297,6 +411,7 @@ impl MenuScreen {
             MenuScreen::Options => OPTIONS_ITEMS,
             MenuScreen::Keys => NUM_BINDNAMES,
             MenuScreen::Video => RESOLUTION_PRESETS.len(),
+            MenuScreen::Extras => WEB_EXTRAS.len(),
             MenuScreen::Help | MenuScreen::Quit => 1,
         }
     }
@@ -461,6 +576,10 @@ pub struct Menu {
     /// Escape (no) answer it; the menu is not drawn, only the faded screen and
     /// the question.
     new_game_confirm: bool,
+    /// The port's opt-in departures (Options > Web extras), all off by
+    /// default. Like the Options cvars they survive navigation resets; unlike
+    /// them no default.cfg line resets them.
+    extras: Extras,
 }
 
 impl Default for Menu {
@@ -497,6 +616,7 @@ impl Menu {
             game_active: false,
             server_active: false,
             new_game_confirm: false,
+            extras: Extras::default(),
         }
     }
 
@@ -598,7 +718,7 @@ impl Menu {
     /// cursor on the first item, no Help page / Quit return / bind grab, queued
     /// sounds dropped — while KEEPING every user choice: the Options cvars
     /// (Screen size, gamma, sensitivity, volume, CD volume, Always Run, Invert
-    /// Mouse, lookspring, lookstrafe) and the whole key-bindings table. In
+    /// Mouse, lookspring, lookstrafe), the Web extras and the whole key-bindings table. In
     /// WinQuake a map start / New Game only restarts the server: cvars and
     /// `keybindings[]` live in host state (persisted by
     /// `Host_WriteConfiguration`) and are never reset by `map start`
@@ -711,6 +831,8 @@ impl Menu {
     /// * Keys > row: start the bind grab (`bind_grab`), unbinding first when the
     ///   row already shows two keys (`M_Keys_Key` K_ENTER).
     /// * Video > row: apply the highlighted preset ([`MenuAction::ResolutionChanged`]).
+    /// * Options > Web extras (port row): the Extras screen; Extras > row:
+    ///   toggle that extra (menu2 + menu3, like an Options checkbox).
     /// * Quit > Enter == "Yes": close the menu ([`MenuAction::Closed`]).
     /// * Help: Enter is inert ([`MenuAction::None`]).
     pub fn select(&mut self) -> MenuAction {
@@ -844,6 +966,14 @@ impl Menu {
                     self.cursor = self.res_preset.min(RESOLUTION_PRESETS.len() - 1);
                     MenuAction::None
                 }
+                ROW_EXTRAS => {
+                    // PORT ROW: open the Web extras screen, entered like
+                    // M_Menu_Video_f (m_entersound) with the cursor on top.
+                    self.snd(MenuSound::Menu2);
+                    self.screen = MenuScreen::Extras;
+                    self.cursor = 0;
+                    MenuAction::None
+                }
                 ROW_CONSOLE => {
                     // m_state = m_none; Con_ToggleConsole_f(). The latched
                     // m_entersound never fires (the menu closed) — silent.
@@ -884,6 +1014,13 @@ impl Menu {
                 self.res_preset = self.cursor.min(RESOLUTION_PRESETS.len() - 1);
                 MenuAction::ResolutionChanged
             }
+            MenuScreen::Extras => {
+                // As an Options checkbox row: Enter latches m_entersound and
+                // falls through to the toggle (its own menu3).
+                self.snd(MenuSound::Menu2);
+                self.adjust(1);
+                MenuAction::None
+            }
             MenuScreen::Help => MenuAction::None,
             MenuScreen::Quit => {
                 // Enter == "Yes": Host_Quit_f. Here that closes the menu (quit to
@@ -903,7 +1040,8 @@ impl Menu {
     ///   branch's `K_ESCAPE`) — the screen stays;
     /// * SinglePlayer/Multiplayer/Options/Help return to Main; Load/Save return
     ///   to SinglePlayer; Keys/Video return to Options (each `M_Menu_*_f` plays
-    ///   `m_entersound`) — all [`MenuAction::Back`];
+    ///   `m_entersound`), Extras to Options on its own row — all
+    ///   [`MenuAction::Back`];
     /// * the Quit prompt answers "No" → restores the previous screen
     ///   ([`MenuAction::Back`]);
     /// * the Main screen closes the menu ([`MenuAction::Closed`]).
@@ -953,6 +1091,14 @@ impl Menu {
                 self.snd(MenuSound::Menu1);
                 self.screen = MenuScreen::Options;
                 self.cursor = 0;
+                self.snd(MenuSound::Menu2);
+                MenuAction::Back
+            }
+            MenuScreen::Extras => {
+                // M_Menu_Options_f (menu2), back on the row that opened it —
+                // the C's options_cursor is a static that keeps its place.
+                self.screen = MenuScreen::Options;
+                self.cursor = ROW_EXTRAS;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
@@ -1059,6 +1205,16 @@ impl Menu {
             self.move_cursor(step);
             return;
         }
+        // The Extras rows are checkboxes: menu3, then flip regardless of the
+        // direction, like M_AdjustSliders' checkbox cases.
+        if self.screen == MenuScreen::Extras {
+            self.snd(MenuSound::Menu3);
+            if let Some(e) = WEB_EXTRAS.get(self.cursor).map(|w| w.extra) {
+                let on = self.extras.get(e);
+                self.extras.set(e, !on);
+            }
+            return;
+        }
         if self.screen != MenuScreen::Options {
             return;
         }
@@ -1102,7 +1258,8 @@ impl Menu {
     /// "default cvars" at its end — `viewsize 100`, `gamma 1.0`, `volume 0.7`,
     /// `sensitivity 3`. Nothing else: CD Music Volume, Always Run
     /// (`cl_forwardspeed`), Invert Mouse (`m_pitch`), Lookspring and
-    /// Lookstrafe keep their values, as in WinQuake, and so does the video mode.
+    /// Lookstrafe keep their values, as in WinQuake, and so do the video mode and
+    /// the port's Web extras.
     pub fn reset_defaults(&mut self) {
         self.viewsize = VIEWSIZE_DEFAULT;
         self.gamma = GAMMA_DEFAULT;
@@ -1211,6 +1368,22 @@ impl Menu {
     /// turning while mouse-looking.
     pub fn lookstrafe(&self) -> bool {
         self.lookstrafe
+    }
+
+    /// The port's opt-in extras (Options > Web extras), all off by default.
+    pub fn extras(&self) -> Extras {
+        self.extras
+    }
+
+    /// Replace the extras wholesale (the page restoring its saved choice).
+    /// Exact perspective stays off in a build without it.
+    pub fn set_extras(&mut self, extras: Extras) {
+        self.extras = Extras::from_bits(extras.bits());
+    }
+
+    /// Switch one extra (its `wasm_*` console command).
+    pub fn set_extra(&mut self, e: Extra, on: bool) {
+        self.extras.set(e, on);
     }
 
     // --- key bindings (M_Keys_*, keys.c) -----------------------------------
@@ -1500,7 +1673,7 @@ pub fn draw_menu(
     }
 
     // The plaque is shared by the Main / SinglePlayer / Multiplayer / Options
-    // screens (M_DrawTransPic (16,4)).
+    // screens (M_DrawTransPic (16,4)), and the port's Extras page of Options.
     if let Some(p) = &pics.qplaque {
         blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy, palette);
     }
@@ -1510,6 +1683,11 @@ pub fn draw_menu(
     // whole body so each screen draws its own title + rows.
     if menu.screen == MenuScreen::Options {
         draw_options_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+        return;
+    }
+    // The port's Web extras page: a page of Options (same plaque + title).
+    if menu.screen == MenuScreen::Extras {
+        draw_extras_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
         return;
     }
 
@@ -1564,8 +1742,9 @@ const OPTIONS_LABEL_X: f32 = 16.0;
 /// `M_DrawCheckbox(220,…)`).
 const OPTIONS_WIDGET_X: f32 = 220.0;
 
-/// The 13 Options labels, pre-padded to right-justify at x≈184 — copied verbatim
-/// from `M_Options_Draw` so the column lines up with the widgets at x=220.
+/// The Options labels, pre-padded to right-justify at x≈184 — the first 13
+/// copied verbatim from `M_Options_Draw` so the column lines up with the
+/// widgets at x=220; the 14th is the port's row, padded the same way.
 const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
     "    Customize controls",
     "         Go to console",
@@ -1580,6 +1759,7 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
     "            Lookspring",
     "            Lookstrafe",
     "         Video Options",
+    "            Web extras",
 ];
 
 /// Draw the Options submenu, a faithful port of `M_Options_Draw`: the `p_option`
@@ -1651,6 +1831,64 @@ fn draw_options_screen(
         let cy = OPTIONS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
         draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
     }
+}
+
+/// The Extras screen's layout, in `M_Keys_Draw`'s shape: a white header line
+/// at y=32, then the rows from y=48, 8 px apart, and the highlighted row's
+/// help lines from y=[`EXTRAS_HELP_Y`].
+const EXTRAS_HEADER_Y: f32 = 32.0;
+const EXTRAS_ROW_Y0: f32 = 48.0;
+const EXTRAS_HELP_Y: f32 = 88.0;
+/// The Extras header (`M_PrintWhite`, centred): what these rows are.
+const EXTRAS_HEADER: &str = "Web extras: not in id's Quake";
+
+/// Draw the port's Web extras screen in `M_Options_Draw`'s idiom: qplaque
+/// (drawn by the caller) and the `p_option` title (it is a page of Options),
+/// the [`EXTRAS_HEADER`] in white, then each extra as an Options checkbox row
+/// — the right-justified `M_Print` label at x=16, `M_DrawCheckbox`'s "on" /
+/// "off" at x=220, the 4 Hz flashing cursor at x=200 — and, under the list,
+/// the highlighted row's three bronze help lines, centred.
+#[allow(clippy::too_many_arguments)]
+fn draw_extras_screen(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    cursor_glyph: u8,
+    palette: &[[u8; 3]; 256],
+) {
+    if let Some(t) = &pics.p_option {
+        let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+    }
+    let Some(cc) = conchars else { return };
+    let centred = |s: &str| ((MENU_VIRT_W as i32 - s.len() as i32 * 8) / 2) as f32;
+    draw_string_scaled(
+        image, cc, centred(EXTRAS_HEADER), EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette,
+    );
+    for (i, row) in WEB_EXTRAS.iter().enumerate() {
+        let y = EXTRAS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
+        m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy, palette);
+        let on = checkbox_text(menu.extras.get(row.extra));
+        m_print(image, cc, OPTIONS_WIDGET_X, y, on, scale, ox, oy, palette);
+    }
+    let cy = EXTRAS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
+    draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
+    if let Some(row) = WEB_EXTRAS.get(menu.cursor) {
+        for (i, line) in extras_help_lines(row).iter().enumerate() {
+            let y = EXTRAS_HELP_Y + i as f32 * 8.0;
+            m_print(image, cc, centred(line), y, line, scale, ox, oy, palette);
+        }
+    }
+}
+
+/// The three help lines under the Extras list for `row`: its two, then its
+/// console variable.
+fn extras_help_lines(row: &WebExtra) -> [String; 3] {
+    [row.help[0].to_string(), row.help[1].to_string(), format!("console: {} 0/1", row.cvar)]
 }
 
 /// Draw the Load or Save slot list, a port of `M_Load_Draw` / `M_Save_Draw`:
@@ -2255,8 +2493,8 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Options);
         assert_eq!(m.cursor(), 0, "entering Options resets the cursor to the top row");
         assert!(m.visible);
-        // Up wraps from row 0 to the last row (12), down wraps 12 -> 0: the cursor
-        // covers all OPTIONS_ITEMS (13) rows.
+        // Up wraps from row 0 to the last row (13), down wraps 13 -> 0: the cursor
+        // covers all OPTIONS_ITEMS (14) rows.
         m.move_cursor(-1);
         assert_eq!(m.cursor(), OPTIONS_ITEMS - 1, "up from row 0 wraps to the last row");
         m.move_cursor(1);
@@ -2528,13 +2766,14 @@ mod tests {
     }
 
     #[test]
-    fn options_cursor_wraps_over_all_thirteen_rows() {
-        // The cursor must visit every one of the 13 OPTIONS_ITEMS rows and wrap.
+    fn options_cursor_wraps_over_all_fourteen_rows() {
+        // The cursor must visit every one of the 14 OPTIONS_ITEMS rows (id's
+        // 13 + Web extras) and wrap.
         let mut m = Menu::new();
         m.open();
         m.cursor = 2;
         m.select(); // -> Options
-        assert_eq!(MenuScreen::Options.item_count(), 13);
+        assert_eq!(MenuScreen::Options.item_count(), 14);
         assert_eq!(m.cursor(), 0);
         let mut seen = [false; OPTIONS_ITEMS];
         for _ in 0..OPTIONS_ITEMS {
@@ -2543,9 +2782,9 @@ mod tests {
         }
         assert!(seen.iter().all(|&v| v), "every Options row must be reachable");
         assert_eq!(m.cursor(), 0, "a full lap returns to row 0");
-        // A big positive delta wraps modulo 13.
+        // A big positive delta wraps modulo 14.
         m.cursor = 0;
-        m.move_cursor(40); // 40 % 13 = 1
+        m.move_cursor(43); // 43 % 14 = 1
         assert_eq!(m.cursor(), 1);
     }
 
@@ -2665,6 +2904,182 @@ mod tests {
         let before = m.volume();
         m.select();
         assert!(m.volume() > before, "Enter on Sound Volume nudges it up");
+    }
+
+    // -- the port's Web extras ----------------------------------------------
+
+    #[test]
+    fn web_extras_default_off_toggle_like_checkboxes_and_back_out_to_their_row() {
+        let mut m = Menu::new();
+        assert_eq!(m.extras(), Extras::default(), "every extra defaults off");
+        assert_eq!(m.extras().bits(), 0);
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        m.cursor = ROW_EXTRAS;
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Extras, "Web extras opens its screen");
+        assert_eq!(m.cursor(), 0);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2], "entered with m_entersound");
+
+        // Checkbox rows: left and right both flip (menu3 each); Enter flips
+        // with menu2 + menu3, like an Options checkbox row.
+        let rows = &WEB_EXTRAS;
+        for (i, e) in rows.iter().map(|r| r.extra).enumerate() {
+            m.cursor = i;
+            assert!(!m.extras().get(e));
+            m.adjust(1);
+            assert!(m.extras().get(e), "right turns {e:?} on");
+            m.adjust(1);
+            assert!(!m.extras().get(e), "the direction is ignored: right again flips it off");
+            m.adjust(-1);
+            assert!(m.extras().get(e), "left flips it too");
+            assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 3]);
+            m.select();
+            assert!(!m.extras().get(e), "Enter flips it");
+            assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
+        }
+        assert_eq!(m.extras(), Extras::default());
+
+        // The cursor wraps over this build's rows (menu1 per move).
+        m.cursor = 0;
+        m.move_cursor(-1);
+        assert_eq!(m.cursor(), rows.len() - 1, "up from the top wraps to the last row");
+        m.move_cursor(1);
+        assert_eq!(m.cursor(), 0);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu1; 2]);
+
+        // Escape: back to Options on the Web extras row (options_cursor keeps
+        // its place in the C), with m_entersound.
+        m.cursor = 1;
+        m.adjust(1); // Show FPS on
+        m.take_sounds();
+        assert_eq!(m.cancel(), MenuAction::Back);
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_EXTRAS));
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+
+        // They are not default.cfg cvars: Reset to defaults keeps them, and
+        // so does a navigation reset (re-boot / New Game).
+        m.cursor = ROW_DEFAULTS;
+        assert_eq!(m.select(), MenuAction::ResetDefaults);
+        assert!(m.extras().show_fps, "Reset to defaults leaves the extras alone");
+        m.reset_nav();
+        assert!(m.extras().show_fps, "reset_nav keeps them");
+
+        // The console commands' setter and the page's restore.
+        m.set_extra(Extra::Uncapped, true);
+        assert_eq!(m.extras().bits(), 0b011);
+        m.set_extras(Extras::default());
+        assert_eq!(m.extras(), Extras::default());
+    }
+
+    #[test]
+    fn web_extras_bits_round_trip() {
+        for bits in 0..8u32 {
+            let e = Extras::from_bits(bits);
+            assert_eq!(e.bits(), bits, "bits {bits:03b}");
+            let rows = [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp];
+            for (i, x) in rows.into_iter().enumerate() {
+                assert_eq!(e.get(x), bits & (1 << i) != 0, "bit {i} is {x:?}");
+            }
+        }
+        assert_eq!(Extras::from_bits(0xffff_fff8), Extras::default(), "unknown bits are ignored");
+        assert_eq!(MenuScreen::Extras.item_count(), 3);
+    }
+
+    #[test]
+    fn web_extras_table_lists_each_extra_once_in_the_page_idiom() {
+        let extras: Vec<Extra> = WEB_EXTRAS.iter().map(|w| w.extra).collect();
+        assert_eq!(extras, [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp], "bit order");
+        for w in &WEB_EXTRAS {
+            assert!(w.cvar.starts_with("wasm_"), "{}: not an id name", w.cvar);
+            assert_eq!(w.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", w.cvar);
+            for line in extras_help_lines(w) {
+                assert!(line.len() <= 38, "{line:?} fits the 320-wide page");
+            }
+        }
+    }
+
+    #[test]
+    fn web_extras_screen_draws_in_the_options_idiom() {
+        // Bronze (M_Print, c+128) is index 5, white (M_PrintWhite) index 6;
+        // glyph 12 blank, 13 the cursor (index 7), as in id's conchars.
+        let pal = ramp_palette();
+        let mut data = vec![0u8; 128 * 128];
+        let mut fill = |cell: usize, idx: u8| {
+            let (cx, cy) = ((cell % 16) * 8, (cell / 16) * 8);
+            for y in 0..8 {
+                for x in 0..8 {
+                    data[(cy + y) * 128 + cx + x] = idx;
+                }
+            }
+        };
+        for c in 33..127usize {
+            fill(c, 6);
+            fill(c + 128, 5);
+        }
+        fill(13, 7);
+        let cc = crate::wad::Qpic { width: 128, height: 128, data };
+        let pics = MenuPics {
+            qplaque: Some(solid_pic(32, 144, 9)),
+            p_option: Some(solid_pic(120, 24, 8)),
+            ..Default::default()
+        };
+        let px = |img: &Image, x: usize, y: usize| img.rgb[(y + 3) * 320 + x + 3];
+
+        // Options: the port's row is the 14th, at y=136 (the C's _WIN32 row),
+        // right-justified with id's labels ("Web extras" ends at x=184).
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select();
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.0, &pal);
+        assert_eq!(OPTIONS_LABELS[ROW_EXTRAS].len(), OPTIONS_LABELS[ROW_VIDEO].len());
+        assert_eq!(px(&img, 16 + 12 * 8, 136), pal[5], "'W' of Web extras, bronze, y=136");
+        assert_eq!(px(&img, 16 + 21 * 8, 136), pal[5], "its 's' in the last label column");
+
+        // The Extras screen: plaque + OPTIONS title, a white header at y=32,
+        // the rows from y=48 (bronze labels, "off" at x=220), the cursor at
+        // x=200 while the 4 Hz blink shows it, the help lines under the list.
+        m.cursor = ROW_EXTRAS;
+        m.select();
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
+        assert_eq!(img.rgb[4 * 320 + 16], pal[9], "qplaque at (16,4)");
+        assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
+        let hx = (320 - EXTRAS_HEADER.len() * 8) / 2;
+        assert_eq!(px(&img, hx, 32), pal[6], "the header is M_PrintWhite");
+        for (i, label) in WEB_EXTRAS.iter().map(|r| r.label).enumerate() {
+            let y = 48 + i * 8;
+            let first = label.bytes().position(|b| b != b' ').unwrap();
+            assert_eq!(px(&img, 16 + first * 8, y), pal[5], "row {i} label bronze");
+            assert_eq!(px(&img, 220, y), pal[5], "row {i} checkbox 'off' at x=220");
+        }
+        assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
+        let help = WEB_EXTRAS[0].help;
+        let hx0 = (320 - help[0].len() * 8) / 2;
+        assert_eq!(px(&img, hx0, 88), pal[5], "row 0's help, bronze, from y=88");
+        // realtime 0.1: the blink is off (glyph 12, blank).
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.1, &pal);
+        assert_eq!(px(&img, 200, 48), pal[0], "the cursor blinks");
+        // "on" replaces "off" once toggled; the help follows the cursor.
+        m.adjust(1);
+        m.move_cursor(1);
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
+        assert_eq!(px(&img, 220 + 16, 48), pal[0], "\"on\" is two characters");
+        assert_eq!(px(&img, 220 + 16, 56), pal[5], "\"off\" is three");
+        let help1 = WEB_EXTRAS[1].help;
+        let hx1 = (320 - help1[0].len() * 8) / 2;
+        assert_eq!(px(&img, hx1, 88), pal[5], "row 1's help once the cursor moves");
+        assert_eq!(px(&img, 200, 56), pal[7], "the cursor on row 1");
+        // Without conchars only the pics draw; nothing panics.
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &pics, None, 0.0, 0.3, &pal);
+        assert_eq!(img.rgb[4 * 320 + 100], pal[8]);
     }
 
     #[test]

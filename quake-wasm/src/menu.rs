@@ -240,7 +240,8 @@ pub extern "C" fn menu_bind_key(keynum: i32) {
 /// The menu screen currently showing, as a stable id — a read-only
 /// verification/debug export (the browser checks the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
-/// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit.
+/// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
+/// 10 the port's Web extras.
 #[no_mangle]
 pub extern "C" fn menu_screen_id() -> i32 {
     APP.with(|c| {
@@ -257,9 +258,27 @@ pub extern "C" fn menu_screen_id() -> i32 {
                 render::MenuScreen::Video => 7,
                 render::MenuScreen::Help => 8,
                 render::MenuScreen::Quit => 9,
+                render::MenuScreen::Extras => 10,
             })
             .unwrap_or(0)
     })
+}
+
+// --- Web extras: the port's opt-in departures (Options > Web extras) --------
+
+/// The Web extras as bits — 1 `wasm_uncapped`, 2 `wasm_showfps`,
+/// 4 `wasm_exactpersp` ([`render::Extras::bits`]); 0 (all off, id's Quake)
+/// by default. The page stores this in localStorage whenever it changes.
+#[no_mangle]
+pub extern "C" fn extras() -> i32 {
+    APP.with(|c| c.borrow().as_ref().map(|a| a.menu.extras().bits() as i32).unwrap_or(0))
+}
+
+/// Set the Web extras from [`extras`]' bits: the page restoring the saved
+/// choice after boot. Unknown bits are ignored.
+#[no_mangle]
+pub extern "C" fn set_extras(bits: i32) {
+    ensure_app(|a| a.menu.set_extras(render::Extras::from_bits(bits as u32)));
 }
 
 /// 1 when the menu is currently visible (capturing input), else 0. The page
@@ -375,6 +394,40 @@ mod tests {
         assert_eq!(menu_visible(), 0, "Save Enter closes the menu");
         // The world is untouched by the no-op (player still alive on e1m1).
         assert!(player_field("health") > 0.0);
+    }
+
+    #[test]
+    fn web_extras_screen_toggles_through_the_exports() {
+        assert_eq!(boot(), 1);
+        assert_eq!(extras(), 0, "every extra defaults off");
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options
+        for _ in 0..13 {
+            menu_down(); // the port's row 13, Web extras
+        }
+        menu_select();
+        assert_eq!(menu_screen_id(), 10, "Web extras opens its screen");
+        menu_right(); // Uncapped framerate
+        assert_eq!(extras(), 1);
+        menu_down();
+        menu_select(); // Enter toggles Show FPS
+        assert_eq!(extras(), 3);
+        menu_left(); // left toggles too
+        assert_eq!(extras(), 1);
+        menu_cancel();
+        assert_eq!(menu_screen_id(), 5, "Esc returns to Options");
+        menu_select(); // ...on the Web extras row
+        assert_eq!(menu_screen_id(), 10);
+        // The page's restore; unknown bits are dropped.
+        set_extras(-1);
+        assert_eq!(extras(), 7);
+        set_extras(0);
+        assert_eq!(extras(), 0);
+        // They survive a re-boot (reset_nav) like the Options cvars.
+        set_extras(2);
+        assert_eq!(boot(), 1);
+        assert_eq!(extras(), 2);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use quake_rs::wad::Qpic;
 
 use crate::PAK;
 use crate::console::ConNotify;
+use crate::host::ShowFps;
 use crate::cl_walk::net_angle;
 use crate::input::{clamp_pitch, KeyMove};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP_SND_QUEUE};
@@ -432,6 +433,8 @@ pub(crate) struct App {
     /// hardware-palette boundary (`VID_ShiftPalette`). Identity at gamma 1.0,
     /// where the pack skips it entirely (byte-exact default).
     pub(crate) gamma_table: [u8; 256],
+    /// The presented-frame counter behind the `wasm_showfps` extra.
+    pub(crate) show_fps: ShowFps,
 }
 
 impl App {
@@ -866,6 +869,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 keys_held: [false; 256],
                 gamma_value: 1.0,
                 gamma_table: build_gamma_table(1.0),
+                show_fps: ShowFps::default(),
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {

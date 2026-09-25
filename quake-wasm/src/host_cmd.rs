@@ -70,8 +70,10 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  save <name>   load <name>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
-                let names: Vec<&str> = crate::extras::CVARS.iter().map(|c| c.name).collect();
-                a.console.println(format!("  extras (not id, 0|1): {}", names.join(" ")));
+                a.console.println("web extras (not id's; see Options):");
+                for line in crate::extras::help_lines() {
+                    a.console.println(line);
+                }
             });
             return;
         }
@@ -100,11 +102,10 @@ pub(crate) fn execute_console_command(line: &str) {
         _ => {}
     }
 
-    // The port's extras (`wasm_*`, not id's; all off by default): `extras.rs`.
-    if let Some(out) = crate::extras::console_command(&argv) {
-        if let Some(line) = out {
-            ensure_app(|a| a.console.println(line));
-        }
+    // The Web extras (`wasm_*`, not id's; all off by default): `extras.rs`.
+    let mut extra = false;
+    ensure_app(|a| extra = crate::extras::console_command(a, &argv));
+    if extra {
         return;
     }
 
@@ -591,6 +592,37 @@ mod tests {
         key_down(i32::from(b'-'));
         key_up(i32::from(b'-'));
         assert_eq!(viewsize(), 110.0, "no binding runs while the menu is up");
+    }
+
+    #[test]
+    fn wasm_extra_commands_print_and_set_like_cvars() {
+        use crate::menu::extras;
+        let last_line = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
+        };
+        // No walk needed: they are host settings, like viewsize.
+        console_toggle();
+        assert_eq!(extras(), 0, "every extra starts off");
+        run_console_line("wasm_uncapped");
+        assert_eq!(last_line().as_deref(), Some("\"wasm_uncapped\" is \"0\""));
+        run_console_line("wasm_uncapped 1");
+        assert_eq!(extras(), 1);
+        run_console_line("WASM_SHOWFPS 1"); // Cmd_ExecuteString is case-blind
+        assert_eq!(extras(), 3);
+        run_console_line("wasm_showfps");
+        assert_eq!(last_line().as_deref(), Some("\"wasm_showfps\" is \"1\""));
+        run_console_line("wasm_uncapped 0");
+        run_console_line("wasm_showfps junk"); // atof("junk") = 0: off
+        assert_eq!(extras(), 0);
+        run_console_line("wasm_exactpersp 1");
+        assert_eq!(extras(), 4);
+        run_console_line("help");
+        let help: Vec<String> = APP.with(|c| {
+            c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
+        });
+        assert!(help.iter().any(|l| l == "  wasm_uncapped 0|1  no 72 fps cap"), "{help:?}");
+        assert!(help.iter().any(|l| l == "  wasm_showfps 0|1   frame rate"), "{help:?}");
+        assert!(help.iter().all(|l| l.len() <= 38), "fits a 320-wide console: {help:?}");
     }
 
     // -----------------------------------------------------------------------

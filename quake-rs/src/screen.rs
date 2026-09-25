@@ -314,6 +314,35 @@ pub fn draw_centerprint(
     }
 }
 
+/// EXTRA, not in id's Quake (Options > Web extras, `wasm_showfps`): the frame
+/// rate as QuakeWorld's `SCR_DrawFPS` (QW/client/screen.c) draws it —
+/// `sprintf(st, "%3d FPS", lastfps)` in white conchars (`Draw_String`) at
+/// `x = vid.width - strlen(st)*8 - 8`, `y = vid.height - sb_lines - 8`: the
+/// bottom-right corner, just above the status bar. `fps` is the host's
+/// count (QW's `lastfps`). The coordinates are the port's 2-D layer: the
+/// 320-wide virtual screen scaled by `image.w/320` and anchored to the
+/// bottom, like the status bar ([`draw_hud_into`](crate::sbar::draw_hud_into)).
+pub fn draw_fps(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    palette: &[[u8; 3]; 256],
+    fps: u32,
+    sb_lines: i32,
+) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let scale = image.w as f32 / HUD_VIRT_W;
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let st = format!("{fps:3} FPS");
+    let vx = HUD_VIRT_W - st.len() as f32 * 8.0 - 8.0;
+    let vid_h = image.h as f32 / scale;
+    let vy = vid_h - sb_lines.max(0) as f32 - 8.0;
+    draw_string_scaled(image, conchars, vx, vy, &st, scale, 0.0, 0.0, palette);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +396,35 @@ mod tests {
         draw_finale_overlay(&mut img, Some(&cc), &pal, Some(&plaque), "", 0.0);
         assert_eq!(px(&img, 110 + 1, 16 + 1), [52, 52, 52], "finale.lmp centered at y=16");
         assert_eq!(px(&img, 100, 16 + 1), [0, 0, 0], "left of the centered plaque is clear");
+    }
+
+    #[test]
+    fn draw_fps_sits_bottom_right_above_the_status_bar_like_scr_drawfps() {
+        let pal = ramp_palette();
+        let cc = solid_conchars();
+        let lit = pal[95];
+        // " 60 FPS": x = 320 - 7*8 - 8 = 256 (a blank), '6' at 264; y = 200 -
+        // sb_lines - 8.
+        for (sb_lines, y) in [(48, 144usize), (24, 168), (0, 192)] {
+            let mut img = Image::new(320, 200, [0, 0, 0]);
+            draw_fps(&mut img, &cc, &pal, 60, sb_lines);
+            let px = |x: usize, y: usize| img.rgb[y * 320 + x];
+            assert_eq!(px(264, y), lit, "sb_lines {sb_lines}: '6' at (264, {y})");
+            assert_eq!(px(311, y + 7), lit, "'S' ends at x=311 (8 px from the edge)");
+            assert_eq!(px(312, y), [0, 0, 0], "an 8 px margin on the right");
+            assert_eq!(px(263, y), [0, 0, 0], "%3d pads 60 with a blank");
+            assert_eq!(px(264, y - 1), [0, 0, 0], "one text row tall");
+            if y + 8 < 200 {
+                assert_eq!(px(264, y + 8), [0, 0, 0], "one text row tall");
+            }
+        }
+        // Three digits fill the pad; the 2-D layer scales with the frame
+        // (960x600: scale 3, the bar bottom-anchored).
+        let mut img = Image::new(960, 600, [0, 0, 0]);
+        draw_fps(&mut img, &cc, &pal, 144, 48);
+        let px = |x: usize, y: usize| img.rgb[y * 960 + x];
+        assert_eq!(px(256 * 3, 144 * 3), lit, "'1' at virtual (256, 144)");
+        assert_eq!(px(256 * 3 - 1, 144 * 3), [0, 0, 0]);
     }
 
     #[test]

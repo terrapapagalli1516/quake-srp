@@ -1026,6 +1026,9 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
   id's cvars (not saved), read by `vid::render_options` each frame; `help`
   lists them. An extras menu can drive the same table. Always Run, the one
   default departure, stays with the menu options (it is id's own setting).
+  (Since the merge with `quake/extras`: the values live in the menu, on
+  Options > Web extras, and the page persists them; `extras.rs` keeps the
+  cvar table and hands the renderer each frame's copy. See "Web extras".)
 - ✅ **Sky centre below viewsize 120** (the open item of oracle class 4).
   `D_Sky_uv_To_st` centres the sky on the SCREEN (`u - (vid.width>>1)`,
   `(vid.height>>1) - v` in screen pixels); the port centred it on the view
@@ -1050,6 +1053,50 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
   taller than 16:10 (not a preset) `warp_vrect` narrows the buffer because
   the port had square pixels; with `pixel_aspect` id's 320-wide buffer and
   its aspect are now possible (not done).
+
+## Web extras: the opt-in departures (2026-09-25, branch `quake/extras`)
+
+The rule: faithful by default, Always Run the only default departure; other
+departures live behind an explicit opt-in. Their home is **Options > Web
+extras**, a 14th Options row in the slot id's `_WIN32` build gives its own
+14th row ("Use Mouse", y=136). It opens a page of Options drawn in
+`M_Options_Draw`'s idiom (qplaque + OPTIONS title, a white "Web extras: not
+in id's Quake" header, `M_Print` labels, on/off at x=220, the 4 Hz cursor,
+menu1/2/3, Esc back to the same Options row) with help lines for the
+highlighted row. Each extra is also a console variable. One table lists them
+(`render::WEB_EXTRAS`: the value, its `wasm_*` name, its row label and help);
+one place holds their values (the menu's `Extras`, what the page draws and
+persists); `quake-wasm/src/extras.rs` (from `quake/w2b`) is their console
+side and hands the renderer each frame's copy. None is a default.cfg cvar,
+so Reset to defaults and re-boots keep them; the page persists them in
+localStorage. With every extra off the port is unchanged (goldens, all seven
+earlier verify scripts).
+
+| extra | switch | what | status |
+|---|---|---|---|
+| Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
+| Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
+| Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s). | departure, opt-in via Web extras, default off |
+
+Faithful, same branch:
+- ✅ **viewsize persists across reloads** — id's `scr_viewsize` is archived
+  (config.cfg); since Screen size stopped being the resolution it reset on
+  every reload. The page stores it like the resolution (`set_viewsize`).
+- ✅ **Esc ignores autorepeat** — `Key_Event` ignores repeats of every key
+  but backspace and pause; the page's Esc toggled the menu on each repeat.
+- ✅ **Esc in fullscreen** — the page locks Escape with the Keyboard Lock API
+  while fullscreen (Chromium), so a tapped Esc toggles the menu like id's
+  `togglemenu` with the mouse still captured, and a held Esc leaves
+  fullscreen; elsewhere the browser's two-step Esc stands. Unverified: a real
+  browser's handling of a locked Esc (headless has none); the page logic is
+  tested.
+
+Evidence: quake-rs lib tests for the Extras screen (defaults, toggles, sounds,
+Esc row, layout and colours, bits) and `draw_fps` placement; quake-wasm tests
+for `host_frame_time` (every refresh at 60..240 Hz, clamps), 72 vs 144 frames
+a second at 144 Hz through `step`, the FPS window, the readout confined to its
+box and byte-identical when off, the `wasm_*` commands and the exports;
+`web/verify_extras.py` 36/36.
 
 ## LOW (27)
 
