@@ -61,8 +61,18 @@ pub fn stufftext_bonus_flash(text: &str) -> bool {
 
 /// `CL_ParseClientdata` (cl_parse.c:549): when `cl.items` changes, every bit
 /// newly set gets `cl.item_gettime[j] = cl.time` (the status bar flashes the
-/// new weapon's icon for a second). `CL_ClearState` zeroes `cl.items`, so a
-/// level (or demo) start stamps everything owned.
+/// new weapon's icon for a second).
+///
+/// A level (or demo) start does NOT flash what the player carries.
+/// `CL_ClearState` zeroes `cl.items` but also `cl.time`, and the first
+/// clientdata (Host_Spawn_f's, in the signon) is parsed in
+/// `CL_ReadFromServer` after `cl.time += host_frametime` and BEFORE
+/// `CL_RelinkEntities`' `CL_LerpPoint` snaps `cl.time` to the server's
+/// message time: every owned bit is stamped at about `host_frametime`, and by
+/// the first drawn frame `cl.time` is at least SV_SpawnServer's 1.0 plus its
+/// two 0.1 s frames, so `(int)((cl.time - item_gettime)*10)` is already past
+/// 10. Every `CL_ClearState` site here therefore seeds the last items with
+/// the spawn items and leaves the get-times at 0, which draws the same bar.
 pub fn stamp_item_gettime(cl_items: &mut i32, gettime: &mut [f32; 32], items: i32, time: f32) {
     if items == *cl_items {
         return;

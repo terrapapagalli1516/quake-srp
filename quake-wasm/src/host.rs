@@ -21,7 +21,7 @@ use crate::cl_walk::step_walk;
 /// (a departure, opt-in via Options > Web extras, default off). A 120/144 Hz
 /// display then runs one host frame per refresh, as the port did before it
 /// had the gate.
-fn host_frame_time(realtime: f64, oldrealtime: &mut f64, uncapped: bool) -> Option<f32> {
+fn host_frame_time(realtime: f64, oldrealtime: &mut f64, uncapped: bool) -> Option<f64> {
     if !uncapped {
         return host_filter_time(realtime, oldrealtime);
     }
@@ -125,7 +125,9 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // animating over a frozen frame.
         a.realtime += real_dt as f64;
         let uncapped = a.menu.extras().uncapped || a.cls.timedemo;
-        let dt = if real_dt == 0.0 {
+        // `host_frametime`, the C's double: the server advances sv.time by it
+        // exactly; everything else here times itself with its f32.
+        let host_frametime = if real_dt == 0.0 {
             0.0
         } else {
             match host_frame_time(a.realtime, &mut a.oldrealtime, uncapped) {
@@ -133,6 +135,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
                 None => return,
             }
         };
+        let dt = host_frametime as f32;
         ran = 1;
         // Every presented real frame counts toward the wasm_showfps readout
         // (counted whether or not it is shown, so switching it on reads true
@@ -212,7 +215,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
             frame = if a.mode == 1 {
                 a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
             } else {
-                a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
+                a.walk.as_mut().map(|wk| step_walk(wk, host_frametime, gate_gameplay, w, h))
             };
         }
         let (mut img, cshifts) = match frame {
@@ -226,14 +229,14 @@ pub extern "C" fn step(dt: f32) -> i32 {
         };
         // Con_Print: the frame's prints (svc_print) reach the console
         // scrollback too — the C keeps one text buffer, whose last lines are
-        // the notify lines the mode drew.
+        // the notify lines the mode drew (which have this text already).
         let printed = if a.mode == 1 {
             a.demo.as_mut().map(|d| d.notify.take_printed())
         } else {
             a.walk.as_mut().map(|wk| wk.notify.take_printed())
         };
         if let Some(text) = printed.filter(|t| !t.is_empty()) {
-            a.console.print(&text);
+            a.console.print_notified(&text);
         }
 
         // svc_sellscreen (cl_parse.c): the C ran `Cmd_ExecuteString("help")` —
@@ -442,7 +445,7 @@ mod tests {
             for _ in 0..hz as usize * 2 {
                 realtime += (1.0 / hz) as f32 as f64;
                 let f = host_frame_time(realtime, &mut old, true);
-                game += f.expect("uncapped: every refresh is a host frame") as f64;
+                game += f.expect("uncapped: every refresh is a host frame");
             }
             assert!((game - realtime).abs() < 1e-4, "{hz} Hz: game {game} vs real {realtime}");
         }

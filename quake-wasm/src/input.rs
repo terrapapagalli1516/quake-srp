@@ -86,24 +86,52 @@ pub extern "C" fn set_impulse(n: i32) {
 
 // --- bindings-driven game keys (keys.c Key_Event -> keybindings consult) -----
 
+/// keys.c's `consolekeys[]` (Key_Init): the keys the console keeps for itself
+/// while it is down — 32..127 but the toggle key, Enter, Tab, the arrows,
+/// Backspace (127), PgUp/PgDn, Shift and the mouse wheel.
+fn consolekey(k: usize) -> bool {
+    matches!(k, 9 | 13 | 32..=131 | 134 | 149 | 150 | 239 | 240) && k != usize::from(b'`') && k != usize::from(b'~')
+}
+
+/// keys.c's `menubound[]`: Escape and F1..F12, the only keys whose bindings
+/// run while the menu is up.
+fn menubound(k: usize) -> bool {
+    k == 27 || (135..=146).contains(&k)
+}
+
 /// A game key went down, by Quake keynum (keys.h: printable ASCII is itself
 /// lowercase; arrows/modifiers take the 128+ block; mouse buttons 200+). The
 /// held state feeds the per-frame `CL_BaseMove` derivation through the menu's
 /// binding table; the non-`+` commands (`impulse 10`, `centerview`) fire their
-/// one-shot here like `Key_Event`'s command dispatch. The page must not route
-/// keys here while the menu/console own the keyboard (`key_dest != key_game`) —
-/// and the engine gates the one-shots regardless.
+/// one-shot here like `Key_Event`'s command dispatch. A key down reaches its
+/// binding only where Key_Event sends it to the interpreter: in the game,
+/// with the menu up only the `menubound` keys, with the console down only the
+/// keys it does not keep (`consolekeys`); anything else was `M_Keydown`'s or
+/// `Key_Console`'s, so its `+` button never starts (its key up still sends
+/// the `-`: [`key_up`]). Tab pressed in the menu is not `+showscores` once the
+/// menu closes. The one-shots also wait for the game.
 #[no_mangle]
 pub extern "C" fn key_down(keynum: i32) {
     if !(0..256).contains(&keynum) {
         return;
     }
     ensure_app(|a| {
-        a.keys_held[keynum as usize] = true;
-        // default.cfg's `bind PAUSE "pause"`: PAUSE is no console key, so
-        // Key_Event runs its binding with the console down too (the menu
-        // binds only the F-keys and Escape).
-        if a.menu.action_for_key(keynum as u8) == Some(BIND_PAUSE) && !a.menu.visible {
+        let k = keynum as usize;
+        let to_binding = if a.console.open {
+            !consolekey(k)
+        } else if a.menu.visible {
+            menubound(k)
+        } else {
+            true
+        };
+        if !to_binding {
+            return;
+        }
+        a.keys_held[k] = true;
+        // default.cfg's `bind PAUSE "pause"`: PAUSE is no console key, so its
+        // command runs with the console down too (not in the menu: it is not
+        // menubound).
+        if a.menu.action_for_key(keynum as u8) == Some(BIND_PAUSE) {
             crate::host_cmd::host_pause(a);
             return;
         }
@@ -296,6 +324,45 @@ mod tests {
     use crate::menu::{menu_cancel, menu_down, menu_right, menu_select, menu_visible};
     use crate::snd_dma::{listener_x, listener_y};
     use crate::test_util::*;
+
+    /// Second review: Key_Event hands a key down to its binding only where
+    /// key_dest lets it through (keys.c: `key_dest == key_menu &&
+    /// menubound[key]`, `key_dest == key_console && !consolekeys[key]`, or
+    /// the game); Tab pressed with the menu up is M_Keydown's, so it is not
+    /// +showscores when the menu closes with Tab still held. The key up is
+    /// harmless. With the console down, Shift (a console key) is the
+    /// console's, Ctrl (not one) reaches +attack as in the C.
+    #[test]
+    fn keys_pressed_in_the_menu_or_console_do_not_hold_their_binding() {
+        use quake_rs::client::cl_input::derive_key_move;
+        let showscores = || APP.with(|c| {
+            let a = c.borrow();
+            let a = a.as_ref().unwrap();
+            derive_key_move(&a.menu, &a.keys_held).showscores
+        });
+        assert_eq!(boot(), 1);
+        assert_eq!(menu_visible(), 1, "boot opens the menu over e1m1");
+        key_down(9); // Tab, into the menu
+        menu_cancel(); // the menu closes, Tab still held
+        assert_eq!(menu_visible(), 0);
+        step(0.05);
+        assert_eq!(key_is_down(9), 0);
+        assert!(!showscores(), "Tab went to M_Keydown, not +showscores");
+        key_up(9);
+        key_down(9); // pressed in the game: the scoreboard
+        assert!(showscores());
+        key_up(9);
+        assert!(!showscores());
+        crate::console::console_toggle();
+        key_down(134); // Shift: consolekeys[K_SHIFT]
+        key_down(133); // Ctrl: not a console key
+        assert_eq!((key_is_down(134), key_is_down(133)), (0, 1));
+        key_up(133);
+        crate::console::console_toggle();
+        assert!(consolekey(usize::from(b'w')) && consolekey(9) && consolekey(127) && consolekey(240));
+        assert!(!consolekey(96) && !consolekey(126) && !consolekey(133) && !consolekey(200));
+        assert!(menubound(27) && menubound(135) && menubound(146) && !menubound(9));
+    }
 
     /// CENSUS F17: the digit row is `bind N "impulse N"` by key NUMBER (the
     /// page sends e.code's Digit* keynums, so Shift+2 and AZERTY's unshifted

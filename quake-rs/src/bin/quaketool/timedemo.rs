@@ -77,7 +77,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
         let line = loop {
             // Host_FilterTime: realtime is the wall clock; no cap in a timedemo.
             let realtime = t0.elapsed().as_secs_f64();
-            let frametime = host_filter_time_uncapped(realtime, &mut oldrealtime);
+            let frametime = host_filter_time_uncapped(realtime, &mut oldrealtime) as f32;
             clock.message(host_framecount, realtime);
             let Some(frame) = cl_demo::timedemo_frame(&mut d, frametime, false, &vid) else {
                 break clock.finish(host_framecount, realtime);

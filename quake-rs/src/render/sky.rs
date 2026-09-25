@@ -6,7 +6,6 @@
 
 use crate::bsp::Bsp;
 use crate::math::Vec3;
-use super::Image;
 use super::surf::{classify_surface, SurfKind};
 
 /// `SKYSIZE` (d_iface.h): each sky layer is 128x128 texels.
@@ -130,74 +129,10 @@ fn sky_sample(pixels: &[u8], tw: usize, s: i32, t: i32, shift: i32) -> u8 {
     }
 }
 
-/// Sample the sky for screen pixel `(u, v)`: [`sky_uv_to_st`] then
-/// [`sky_sample`]. (id evaluates `D_Sky_uv_To_st` exactly only every 32 pixels
-/// of a span and steps linearly between — see [`resolve_sky_spans`].)
-#[inline]
-pub(super) fn sky_texel_view(pixels: &[u8], tw: usize, u: i32, v: i32, sky: &SkyView) -> u8 {
-    let (s, t) = sky_uv_to_st(u, v, sky);
-    sky_sample(pixels, tw, s, t, sky.shift)
-}
-
 /// `SKY_SPAN_SHIFT` (d_sky.c): `D_DrawSkyScans8` evaluates `D_Sky_uv_To_st`
 /// exactly every `1 << 5` = 32 pixels of a span and steps linearly between.
 const SKY_SPAN_SHIFT: i32 = 5;
 const SKY_SPAN_MAX: i32 = 1 << SKY_SPAN_SHIFT;
-
-/// The world pass's sky pixels, kept until the brush passes are done so they
-/// can be drawn as id draws them: `D_DrawSkyScans8` walks each sky SPAN — a run
-/// of pixels on one scanline where one sky face is the nearest surface (what
-/// `R_LeadingEdge`/`R_TrailingEdge` emit) — and interpolates the sky
-/// coordinates across 32-pixel segments from the span's first pixel. Which
-/// pixels form a span is only known once every nearer surface is drawn, so the
-/// world pass records `(face, depth)` per sky pixel and [`resolve_sky_spans`]
-/// recovers the runs afterwards: a pixel is still sky iff the z-buffer still
-/// holds the depth the sky wrote (any nearer write lowers it).
-pub(super) struct SkySpans {
-    w: usize,
-    h: usize,
-    /// Per pixel: `1 +` the sky face that won the depth test there (0 = none).
-    key: Vec<u32>,
-    /// Per pixel: the depth that sky face wrote to the z-buffer.
-    depth: Vec<f32>,
-    /// Rows written since the last reset, `[lo, hi)`.
-    lo: usize,
-    hi: usize,
-    /// The frame's sky state (every sky face of a frame shares it).
-    pub(super) view: Option<SkyView>,
-}
-
-impl SkySpans {
-    pub(super) const EMPTY: SkySpans =
-        SkySpans { w: 0, h: 0, key: Vec::new(), depth: Vec::new(), lo: 0, hi: 0, view: None };
-
-    /// Start a frame of `w`x`h`: forget the previous frame's pixels (only the
-    /// rows it touched are cleared, so a sky-less frame costs nothing).
-    pub(super) fn reset(&mut self, w: usize, h: usize) {
-        let n = w.saturating_mul(h);
-        if self.w != w || self.h != h || self.key.len() != n {
-            self.key = vec![0; n];
-            self.depth = vec![0.0; n];
-            self.w = w;
-            self.h = h;
-        } else if self.lo < self.hi {
-            self.key[self.lo * w..self.hi * w].fill(0);
-        }
-        self.lo = h;
-        self.hi = 0;
-        self.view = None;
-    }
-
-    #[inline]
-    pub(super) fn record(&mut self, idx: usize, row: usize, key: u32, depth: f32) {
-        if let (Some(k), Some(d)) = (self.key.get_mut(idx), self.depth.get_mut(idx)) {
-            *k = key;
-            *d = depth;
-            self.lo = self.lo.min(row);
-            self.hi = self.hi.max(row + 1);
-        }
-    }
-}
 
 /// `D_DrawSkyScans8` (d_sky.c) for one span of `count` pixels starting at screen
 /// `(u, v)`, written into `out` (that scanline's pixels from `u`): the sky
@@ -205,7 +140,7 @@ impl SkySpans {
 /// `(next - cur) >> 5` between; the last segment steps by an integer division
 /// over its `count - 1` so it ends exactly on the span's last pixel.
 #[allow(clippy::too_many_arguments)]
-fn draw_sky_span(
+pub(super) fn draw_sky_span(
     out: &mut [[u8; 3]],
     u: i32,
     v: i32,
@@ -250,55 +185,14 @@ fn draw_sky_span(
     }
 }
 
-/// Draw the world pass's deferred sky ([`SkySpans`]) as `D_DrawSkyScans8` does,
-/// once every brush surface that can occlude it is in the z-buffer (and before
-/// the alias models, which in id are drawn after `D_DrawSurfaces` too). Each run
-/// of pixels on a row that one sky face still owns is one span. The texture is
-/// `r_skysource`: `R_InitSky` runs for every `sky*` miptexture `Mod_LoadTextures`
-/// loads, so the last one wins.
-pub(super) fn resolve_sky_spans(image: &mut Image, zbuf: &[f32], bsp: &Bsp, palette: &[[u8; 3]; 256]) {
-    SKY_SPANS_SCRATCH.with(|cell| {
-        let mut sp = cell.borrow_mut();
-        let (w, h) = (image.w, image.h);
-        let sky_tex = bsp
-            .textures
-            .iter()
-            .rev()
-            .flatten()
-            .find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty());
-        if let (Some(view), Some(mt), true) = (sp.view, sky_tex, sp.w == w && sp.h == h) {
-            let tw = mt.width as usize;
-            for y in sp.lo..sp.hi.min(h) {
-                let row = y * w;
-                let mut x = 0usize;
-                while x < w {
-                    let k = sp.key[row + x];
-                    let live = |x: usize| {
-                        sp.key[row + x] == k && zbuf.get(row + x) == Some(&sp.depth[row + x])
-                    };
-                    if k == 0 || !live(x) {
-                        x += 1;
-                        continue;
-                    }
-                    let u0 = x;
-                    while x < w && live(x) {
-                        x += 1;
-                    }
-                    if let Some(out) = image.rgb.get_mut(row + u0..row + x) {
-                        draw_sky_span(out, u0 as i32, y as i32, (x - u0) as i32, &mt.pixels, tw, &view, palette);
-                    }
-                }
-            }
-        }
-        sp.reset(w, h);
-    });
-}
-
-thread_local! {
-    /// Per-thread deferred sky pixels ([`SkySpans`]): the world pass records
-    /// into it, [`resolve_sky_spans`] draws and resets it once the brush passes
-    /// are done.
-    pub(super) static SKY_SPANS_SCRATCH: std::cell::RefCell<SkySpans> = const { std::cell::RefCell::new(SkySpans::EMPTY) };
+/// `r_skysource`'s miptexture: `R_InitSky` runs for every `sky*` miptexture
+/// `Mod_LoadTextures` loads, so the map's last one wins.
+pub(super) fn sky_texture(bsp: &Bsp) -> Option<&crate::bsp::MipTex> {
+    bsp.textures
+        .iter()
+        .rev()
+        .flatten()
+        .find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty())
 }
 
 #[cfg(test)]
@@ -306,7 +200,6 @@ mod tests {
     use super::*;
     use crate::math::{cross, normalize};
     use crate::render::fixtures::synthetic_sky_pixels;
-    use crate::render::raster::{outline, raster_poly_tex, AttrVert, PolyGrads, SurfaceMode};
 
     #[test]
     fn sky_sampler_renders_nonbackground_and_animates() {
@@ -333,39 +226,30 @@ mod tests {
             let (up, _) = normalize(cross(right, f));
             SkyView::new(f, right, up, w, h, ((w as i32) >> 1, (h as i32) >> 1), time)
         };
+        // The view as D_DrawSurfaces draws a sky surface covering it: one span
+        // per row (the sky uses the view ray, not a face's (s,t)).
         let render_at = |view: SkyView| {
-            let mut img = Image::new(w, h, [0, 0, 0]); // background = pure black
-            let mut zb = vec![f32::INFINITY; w * h];
-            // The (s,t) here are IGNORED by the sky path (it uses the view ray),
-            // but a covering triangle is still needed to rasterise the screen area.
-            let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
-            let tri = [v0, v1, v2];
-            let g = PolyGrads::from_vertices(&tri).expect("triangle");
-            raster_poly_tex(
-                &mut img, &mut zb, &outline(&tri), &g,
-                &pixels, 256, 128, &pal, 1.0, None,
-                SurfaceMode::Sky { view, defer: None },
-                None,
-            );
-            img
+            let mut rgb = vec![[0u8; 3]; w * h]; // background = pure black
+            for (y, row) in rgb.chunks_mut(w).enumerate() {
+                draw_sky_span(row, 0, y as i32, w as i32, &pixels, 256, &view, &pal);
+            }
+            rgb
         };
         let a = render_at(make_view([1.0, 0.0, 0.0], 0.0)); // looking +X
         let b = render_at(make_view([1.0, 0.0, 0.0], 1.0));
 
         // (1) Non-background: the sky drew real texels (not a flat empty frame).
-        let drawn = a.rgb.iter().filter(|&&p| p != [0, 0, 0]).count();
+        let drawn = a.iter().filter(|&&p| p != [0, 0, 0]).count();
         assert!(drawn > 0, "sky face rendered no pixels (should show the sky texture)");
 
         // (2) Animated: scrolling shifts the texels, so the two frames differ.
-        let changed = a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count();
+        let changed = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
         assert!(changed > 0, "sky must scroll (differ) between two times");
 
         // (3) View-dependent: looking a different direction shows a different patch
         // of sky (the whole point of projecting the view ray).
         let c = render_at(make_view([0.0, 1.0, 0.0], 0.0)); // looking +Y
-        let view_diff = a.rgb.iter().zip(c.rgb.iter()).filter(|(x, y)| x != y).count();
+        let view_diff = a.iter().zip(c.iter()).filter(|(x, y)| x != y).count();
         assert!(view_diff > 0, "sky must change with the view direction (dome projection)");
     }
 

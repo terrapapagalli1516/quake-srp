@@ -104,6 +104,10 @@ pub(crate) fn cl_play_demo(a: &mut App, arg: &str, timedemo: bool) -> bool {
     a.demo = Some(d);
     a.mode = 1;
     a.disconnected = false;
+    // The demo's signon ends in SCR_EndLoadingPlaque's Con_ClearNotify:
+    // nothing printed so far (this line, a timedemo's result) is a notify
+    // line over it.
+    let _ = a.console.take_unnotified();
     true
 }
 
@@ -1009,5 +1013,71 @@ mod tests {
             changed.iter().all(|&i| (96..224).contains(&(i % 320)) && (64..88).contains(&(i / 320))),
             "only where SCR_DrawPause puts it"
         );
+    }
+
+    /// R_DrawParticles' `grav = frametime * sv_gravity.value * 0.05` reads the
+    /// client's own cvar in playback too (it was a constant 800 here): at the
+    /// default a recorded svc_particle puff (pt_slowgrav, dir 0) leaves its
+    /// first 0.05 s frame at vz -2; after e1m8 (worldspawn sets 100, and the
+    /// cvar outlives the map) at -0.25.
+    #[test]
+    fn demo_particles_fall_by_the_sv_gravity_cvar() {
+        use quake_rs::demo::{Demo, DemoFrame};
+        use quake_rs::server::ParticleBurst;
+        let vz = || {
+            let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
+            let puff = DemoFrame {
+                time: 0.05,
+                particles: vec![ParticleBurst { org: [0.0; 3], dir: [0.0; 3], color: 73, count: 20 }],
+                ..Default::default()
+            };
+            let demo = Demo {
+                level_name: "test".into(),
+                static_sounds: Vec::new(),
+                model_precache: vec![String::new(), "maps/test.bsp".into()],
+                sound_precache: Vec::new(),
+                viewentity: 0,
+                frames: vec![plain(0.0), puff, plain(0.10), plain(0.15)],
+            };
+            let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+            let _ = step_demo(&mut d, 0.05, false, 64, 40);
+            assert_eq!(d.idx, 1);
+            let v: Vec<f32> = d.particles.particles().iter().map(|p| p.velocity[2]).collect();
+            assert!(!v.is_empty() && v.iter().all(|&z| z == v[0]), "{v:?}");
+            v[0]
+        };
+        let _ = crate::app::build_walk_map("maps/e1m1.bsp").expect("e1m1"); // sv_gravity 800
+        assert_eq!(vz(), -800.0 * 0.05 * 0.05);
+        let _ = crate::app::build_walk_map("maps/e1m8.bsp").expect("e1m8"); // sv_gravity 100
+        assert_eq!(vz(), -100.0 * 0.05 * 0.05);
+        let _ = crate::app::build_walk_map("maps/e1m1.bsp");
+    }
+
+    /// CENSUS F18 on the recorded stream: C's demo playback parses the signon
+    /// and frame 0's block in one CL_ReadFromServer, before the first
+    /// CL_LerpPoint, so the recorded player's weapons are stamped at about
+    /// host_frametime and nothing flashes when demo1 starts (or, here, when it
+    /// loops). A weapon got later in the recording still flashes.
+    #[test]
+    fn demo_start_does_not_flash_the_recorded_weapons() {
+        let mut d = build_demo().expect("the embedded demo boots");
+        let items0 = d.demo.frames[0].client.items;
+        assert_ne!(items0 & 1, 0, "demo1's player carries the shotgun");
+        let unflashed = |d: &DemoPlay| d.item_gettime.iter().all(|&t| t == 0.0);
+        assert_eq!(d.cl_items, items0);
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert!(unflashed(&d), "playback start");
+        let _ = step_demo(&mut d, 1.0e6, false, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 0, "wrapped");
+        assert_eq!(d.cl_items, items0);
+        assert!(unflashed(&d), "the loop wrap");
+        // A bit the recording gains later is stamped on its frame's clock.
+        let got = d.demo.frames.iter().position(|f| f.client.items & !items0 != 0);
+        if let Some(i) = got {
+            let dt = d.demo.frames[i].time - d.demo.frames[0].time;
+            let _ = step_demo(&mut d, dt, false, 160, 100);
+            assert!(!unflashed(&d), "frame {i}'s new item is stamped");
+        }
     }
 }

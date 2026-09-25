@@ -1,0 +1,2100 @@
+//! The world and brush models as id draws them: edges, sorted spans, no z test.
+//!
+//! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
+//! Sources: `WinQuake/r_bsp.c` (`R_RecursiveWorldNode`, `R_DrawSubmodelPolygons`,
+//! `R_DrawSolidClippedSubmodelPolygons`, `R_RecursiveClipBPoly`), `r_draw.c`
+//! (`R_EmitEdge`, `R_ClipEdge`, `R_EmitCachedEdge`, `R_RenderFace`,
+//! `R_RenderBmodelFace`), `r_edge.c` (`R_BeginEdgeFrame`, `R_InsertNewEdges`,
+//! `R_RemoveEdges`, `R_StepActiveU`, `R_CleanupSpan`, `R_LeadingEdge`,
+//! `R_TrailingEdge`, `R_GenerateSpans`, `R_ScanEdges`), `r_main.c`
+//! (`R_ViewChanged`'s clip planes, `R_MarkLeaves`, `R_BmodelCheckBBox`,
+//! `R_DrawBEntitiesOnList`, `R_EdgeDrawing`), `r_misc.c` (`R_TransformFrustum`,
+//! `R_SetUpFrustumIndexes`), `r_efrag.c` (`R_SplitEntityOnNode2`), `d_edge.c`
+//! (`D_DrawSurfaces`) and `d_scan.c` (`D_DrawZSpans`).
+//!
+//! The frame: the world's BSP is walked front to back (`R_RecursiveWorldNode`);
+//! every visible face is clipped to the four sides of the view and its edges
+//! are projected into a per-scanline list, each edge carrying the surface on
+//! its left or right and the surface a key that orders it front to back (the
+//! walk's order). Brush entities join the same list: a door or an item box
+//! that spans several world leaves is cut into fragments by the world's planes,
+//! each keyed like the leaf it is in; one in a single leaf keeps whole faces
+//! and sorts against the other brush models there on 1/z. `R_ScanEdges` then
+//! walks the scanlines with an active edge table and a stack of the surfaces
+//! under the current pixel, and emits a span wherever the top surface changes.
+//! `D_DrawSurfaces` draws each surface's spans once — so each pixel of the view
+//! is written exactly once, with no z test — and writes the 16-bit `1/z` of
+//! every span into the z-buffer (`D_DrawZSpans`), which only the entities read.
+//!
+//! id's fixed pools — `MAXEDGES`, `MAXSURFS` (`r_maxedges`/`r_maxsurfs`, 2400
+//! and 800 by default) and `MAXSPANS` (3000, flushed through `D_DrawSurfaces`
+//! when full) — are growable buffers here. Running out of spans only changes
+//! when id draws, never what; running out of edges or surfaces drops faces
+//! ("Short %d surfaces"), which id's shareware maps do not do at the view
+//! sizes it supports (the counters in [`super::RenderStats`] show the peak).
+
+use crate::bsp::{Bsp, DFace, TexInfo, CONTENTS_SOLID};
+use crate::math::{dot, normalize, sub, Vec3};
+use super::light::{
+    any_dlight_reaches, face_lightmap_dyn, mark_dlights, mark_dlights_more, LightMap, LIGHTSTYLES,
+};
+use super::raster::{
+    hash_color, span_at, span_cached, span_tex, span_turb, BlockFixed, ScreenProj,
+};
+use super::sky::{draw_sky_span, sky_texture, SkyView};
+use super::stats::{stat, stats_on, StatInstant};
+use super::surf::{
+    classify_surface, face_geom_cached, face_lightmap_world_cached, face_surf_block,
+    face_world_poly, texture_animation, MipView, SurfKind, WorldFingerprint,
+};
+use super::vis::point_in_leaf;
+use super::warp::TurbTable;
+use super::world::{face_grads, BModelInstance, ExternalBModel};
+use super::{Camera, Image, Projection, RenderOptions};
+
+/// "No edge / no span / no surface" in the index links.
+const NONE: u32 = u32::MAX;
+
+/// The four sentinel edges, at the head of the edge buffer (`edge_head`,
+/// `edge_tail`, `edge_aftertail`, `edge_sentinel`); the frame's edges follow
+/// from [`FIRST_EDGE`] (`r_edges`).
+const EDGE_HEAD: u32 = 0;
+const EDGE_TAIL: u32 = 1;
+const EDGE_AFTERTAIL: u32 = 2;
+const EDGE_SENTINEL: u32 = 3;
+const FIRST_EDGE: u32 = 4;
+
+/// `surfaces[1]`, the background: behind everything, drawn in `r_clearcolor`.
+const BACKGROUND: u32 = 1;
+
+/// `msurface_t` flags (`model.h`).
+const SURF_PLANEBACK: u8 = 2;
+const SURF_DRAWSKY: u8 = 4;
+const SURF_DRAWTURB: u8 = 0x10;
+const SURF_DRAWBACKGROUND: u8 = 0x40;
+
+/// `BACKFACE_EPSILON` (`r_local.h`).
+const BACKFACE_EPSILON: f64 = 0.01;
+/// `NEAR_CLIP` (`r_local.h`): `R_EmitEdge` clamps a vertex's depth to it.
+const NEAR_CLIP: f32 = 0.01;
+/// `r_draw.c`'s edge-cache codes in `medge_t.cachededgeoffset`.
+const FULLY_CLIPPED_CACHED: u32 = 0x8000_0000;
+const FRAMECOUNT_MASK: u32 = 0x7FFF_FFFF;
+const NOT_CACHEABLE: u32 = 0x7FFF_FFFF;
+/// `R_BmodelCheckBBox`'s "not in view".
+const BMODEL_FULLY_CLIPPED: u32 = 0x10;
+/// `r_clearcolor` (default 2): the background surface's palette index.
+const R_CLEARCOLOR: usize = 2;
+/// `D_DrawSurfaces`' background gradient: "effectively at infinity".
+const BACKGROUND_ZI: f32 = -0.9;
+/// A BSP deeper than this is malformed (id's maps are a few dozen deep).
+const MAX_DEPTH: u32 = 1024;
+
+/// `edge_t` (`r_shared.h`). `u` is 12.20 fixed point, `ceil`-biased
+/// (`u * 0x100000 + 0xFFFFF`), so `u >> 20` is the first pixel right of it.
+#[derive(Clone, Copy)]
+struct Edge {
+    u: i32,
+    u_step: i32,
+    prev: u32,
+    next: u32,
+    /// The surface on the edge's left (it is that surface's trailing edge) and
+    /// on its right (leading); 0 = none.
+    surfs: [u32; 2],
+    nextremove: u32,
+    nearzi: f32,
+    /// The world `medge_t` it was made from (the edge cache's owner test), or
+    /// [`NONE`] for a brush model's.
+    owner: u32,
+}
+
+impl Edge {
+    const ZERO: Edge =
+        Edge { u: 0, u_step: 0, prev: NONE, next: NONE, surfs: [0, 0], nextremove: NONE, nearzi: 0.0, owner: NONE };
+}
+
+/// `surf_t` (`r_shared.h`).
+#[derive(Clone, Copy)]
+struct Surf {
+    next: u32,
+    prev: u32,
+    /// Head of this surface's span list (`espan_t.pnext` links).
+    spans: u32,
+    /// Front-to-back order: smaller is nearer.
+    key: i32,
+    last_u: i32,
+    spanstate: i32,
+    flags: u8,
+    insubmodel: bool,
+    nearzi: f32,
+    d_zistepu: f32,
+    d_zistepv: f32,
+    d_ziorigin: f32,
+    /// Which model of the frame ([`Ent`]) and which of its bsp's faces.
+    ent: u32,
+    face: u32,
+}
+
+impl Surf {
+    const ZERO: Surf = Surf {
+        next: 0,
+        prev: 0,
+        spans: NONE,
+        key: 0,
+        last_u: 0,
+        spanstate: 0,
+        flags: 0,
+        insubmodel: false,
+        nearzi: 0.0,
+        d_zistepu: 0.0,
+        d_zistepv: 0.0,
+        d_ziorigin: 0.0,
+        ent: 0,
+        face: 0,
+    };
+}
+
+/// `espan_t`: `count` pixels from `(u, v)`.
+#[derive(Clone, Copy)]
+struct ESpan {
+    u: i32,
+    v: i32,
+    count: i32,
+    pnext: u32,
+}
+
+/// `bedge_t` (`r_bsp.c`): a brush-model edge being clipped into the world's
+/// leaves; the vertices by value (id points at `mvertex_t`s).
+#[derive(Clone, Copy)]
+struct BEdge {
+    v: [Vec3; 2],
+    pnext: u32,
+}
+
+/// `clipplane_t`: one side of the view (`view_clipplanes`).
+#[derive(Clone, Copy)]
+struct ClipPlane {
+    normal: Vec3,
+    dist: f32,
+    leftedge: bool,
+    rightedge: bool,
+}
+
+/// One model in the frame's edge list: the world (entity 0), an inline brush
+/// entity of the world's bsp, or an external `b_*.bsp` item box.
+struct Ent<'a> {
+    bsp: &'a Bsp,
+    /// `bsp.models[model]`.
+    model: usize,
+    origin: Vec3,
+    /// The entity's `frame` (`R_TextureAnimation`'s alternate cycle).
+    frame: i32,
+    /// Whether its faces are the world bsp's (so the surface cache and the
+    /// dlight mask are keyed by their face index).
+    world_bsp: bool,
+    /// Dynamic lights in the model's frame (none for external boxes).
+    dlights: Vec<crate::dlight::DynamicLight>,
+}
+
+/// The renderer's state: what id keeps in globals and in the model (the edge
+/// cache in `medge_t`, leaf keys, visframes), kept across frames as the C
+/// keeps it, and the frame's buffers (reused).
+struct EdgeState {
+    /// The world these per-model arrays belong to.
+    world: Option<WorldFingerprint>,
+    /// `r_framecount`.
+    framecount: u32,
+    /// `r_visframecount` and the leaf it was marked for (`r_oldviewleaf`).
+    visframecount: u32,
+    oldviewleaf: Option<usize>,
+    /// `mnode_t.visframe`, `mleaf_t.visframe`, `mnode_t.parent`, `mleaf_t.parent`
+    /// (`Mod_SetParent`), `mleaf_t.key`, `msurface_t.visframe`, and
+    /// `medge_t.cachededgeoffset`, all of the world model.
+    node_visframe: Vec<u32>,
+    leaf_visframe: Vec<u32>,
+    node_parent: Vec<i32>,
+    leaf_parent: Vec<i32>,
+    leaf_key: Vec<i32>,
+    face_visframe: Vec<u32>,
+    cachededgeoffset: Vec<u32>,
+    /// `r_draw.c`'s statics: where the last clipped edges left and entered the
+    /// view's left and right sides. Never reset — a face whose edge that would
+    /// set one is skipped (cached) reuses an earlier face's (id's quirk).
+    leftenter: Vec3,
+    leftexit: Vec3,
+    rightenter: Vec3,
+    rightexit: Vec3,
+    /// `r_bsp.c`'s statics `pfrontenter`/`pfrontexit`.
+    pfrontenter: Vec3,
+    pfrontexit: Vec3,
+    /// The frame's view (`R_ViewChanged`, `R_SetupFrame`).
+    w: usize,
+    h: usize,
+    xcenter: f32,
+    ycenter: f32,
+    xscale: f32,
+    yscale: f32,
+    xscaleinv: f32,
+    yscaleinv: f32,
+    fvrectx_adj: f32,
+    fvrecty_adj: f32,
+    fvrectright_adj: f32,
+    fvrectbottom_adj: f32,
+    vrect_x_adj_shift20: i32,
+    vrectright_adj_shift20: i32,
+    vpn: Vec3,
+    vright: Vec3,
+    vup: Vec3,
+    r_origin: Vec3,
+    /// The eye in the current model's frame (`modelorg`).
+    modelorg: Vec3,
+    screenedge: [Vec3; 4],
+    clip: [ClipPlane; 4],
+    frustum_indexes: [[usize; 6]; 4],
+    /// `r_draw.c`'s per-face globals.
+    insubmodel: bool,
+    currententity: u32,
+    cacheoffset: u32,
+    r_leftclipped: bool,
+    r_rightclipped: bool,
+    makeleftedge: bool,
+    makerightedge: bool,
+    r_nearzionly: bool,
+    r_emitted: bool,
+    r_nearzi: f32,
+    r_u1: f32,
+    r_v1: f32,
+    r_lzi1: f32,
+    r_ceilv1: i32,
+    r_lastvertvalid: bool,
+    /// `r_pedge`, as the owner written into the edges it makes.
+    r_pedge_owner: u32,
+    r_currentkey: i32,
+    r_currentbkey: i32,
+    r_clipflags: u32,
+    /// `r_edge.c`'s scan state.
+    current_iv: i32,
+    fv: f32,
+    edge_head_u_shift20: i32,
+    edge_tail_u_shift20: i32,
+    /// The frame's buffers.
+    edges: Vec<Edge>,
+    surfs: Vec<Surf>,
+    spans: Vec<ESpan>,
+    newedges: Vec<u32>,
+    removeedges: Vec<u32>,
+    bedges: Vec<BEdge>,
+    dlight_bits: Vec<u32>,
+    poly: Vec<Vec3>,
+}
+
+impl EdgeState {
+    const EMPTY: EdgeState = EdgeState {
+        world: None,
+        framecount: 1,
+        visframecount: 0,
+        oldviewleaf: None,
+        node_visframe: Vec::new(),
+        leaf_visframe: Vec::new(),
+        node_parent: Vec::new(),
+        leaf_parent: Vec::new(),
+        leaf_key: Vec::new(),
+        face_visframe: Vec::new(),
+        cachededgeoffset: Vec::new(),
+        leftenter: [0.0; 3],
+        leftexit: [0.0; 3],
+        rightenter: [0.0; 3],
+        rightexit: [0.0; 3],
+        pfrontenter: [0.0; 3],
+        pfrontexit: [0.0; 3],
+        w: 0,
+        h: 0,
+        xcenter: 0.0,
+        ycenter: 0.0,
+        xscale: 1.0,
+        yscale: 1.0,
+        xscaleinv: 1.0,
+        yscaleinv: 1.0,
+        fvrectx_adj: 0.0,
+        fvrecty_adj: 0.0,
+        fvrectright_adj: 0.0,
+        fvrectbottom_adj: 0.0,
+        vrect_x_adj_shift20: 0,
+        vrectright_adj_shift20: 0,
+        vpn: [0.0; 3],
+        vright: [0.0; 3],
+        vup: [0.0; 3],
+        r_origin: [0.0; 3],
+        modelorg: [0.0; 3],
+        screenedge: [[0.0; 3]; 4],
+        clip: [ClipPlane { normal: [0.0; 3], dist: 0.0, leftedge: false, rightedge: false }; 4],
+        frustum_indexes: [[0; 6]; 4],
+        insubmodel: false,
+        currententity: 0,
+        cacheoffset: 0,
+        r_leftclipped: false,
+        r_rightclipped: false,
+        makeleftedge: false,
+        makerightedge: false,
+        r_nearzionly: false,
+        r_emitted: false,
+        r_nearzi: 0.0,
+        r_u1: 0.0,
+        r_v1: 0.0,
+        r_lzi1: 0.0,
+        r_ceilv1: 0,
+        r_lastvertvalid: false,
+        r_pedge_owner: NONE,
+        r_currentkey: 0,
+        r_currentbkey: 0,
+        r_clipflags: 0,
+        current_iv: 0,
+        fv: 0.0,
+        edge_head_u_shift20: 0,
+        edge_tail_u_shift20: 0,
+        edges: Vec::new(),
+        surfs: Vec::new(),
+        spans: Vec::new(),
+        newedges: Vec::new(),
+        removeedges: Vec::new(),
+        bedges: Vec::new(),
+        dlight_bits: Vec::new(),
+        poly: Vec::new(),
+    };
+}
+
+thread_local! {
+    static EDGE_STATE: std::cell::RefCell<EdgeState> = const { std::cell::RefCell::new(EdgeState::EMPTY) };
+}
+
+/// `(int)` of a float as the x86 does it: truncation, and 0x80000000 for a
+/// NaN or a value out of range (Rust's `as` saturates).
+#[inline]
+fn c_ftoi(x: f64) -> i32 {
+    if x > -2_147_483_649.0 && x < 2_147_483_648.0 {
+        x as i32
+    } else {
+        i32::MIN
+    }
+}
+
+/// `VectorNormalize` (mathlib.c), in floats.
+fn vector_normalize(v: Vec3) -> Vec3 {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if length != 0.0 {
+        let ilength = 1.0 / length;
+        [v[0] * ilength, v[1] * ilength, v[2] * ilength]
+    } else {
+        v
+    }
+}
+
+/// Whether `bsp` has the node tree and leaves id's world walk needs (every
+/// map qbsp writes does; the synthetic test rooms may not).
+fn has_tree(bsp: &Bsp) -> bool {
+    !bsp.nodes.is_empty() && !bsp.leafs.is_empty()
+}
+
+/// A child reference of a `dnode_t`: `>= 0` a node, `< 0` the leaf `-1 - c`.
+#[inline]
+fn child_ref(c: i16) -> i32 {
+    c as i32
+}
+
+/// Draw the world and the brush entities into `image` as id does
+/// (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`, `R_ScanEdges`
+/// with `D_DrawSurfaces`), writing every pixel of the view exactly once and
+/// the 16-bit `1/z` of each into `izbuf` (`d_pzbuffer`), which the entity
+/// passes test against.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_edges(
+    image: &mut Image,
+    izbuf: &mut [i16],
+    bsp: &Bsp,
+    cam: &Camera,
+    opts: &RenderOptions,
+    palette: &[[u8; 3]; 256],
+    turb: &TurbTable,
+    time: f32,
+    light_styles: &[f32; LIGHTSTYLES],
+    dlights: &[crate::dlight::DynamicLight],
+    colormap: Option<&[u8]>,
+    bmodels: &[BModelInstance],
+    external: &[ExternalBModel],
+) {
+    let (w, h) = (image.w, image.h);
+    if w == 0 || h == 0 || izbuf.len() < w * h || image.rgb.len() < w * h {
+        return;
+    }
+    EDGE_STATE.with(|cell| {
+        let mut st = cell.borrow_mut();
+        st.frame(image, izbuf, bsp, cam, opts, palette, turb, time, light_styles, dlights, colormap, bmodels, external);
+    });
+}
+
+impl EdgeState {
+    #[allow(clippy::too_many_arguments)]
+    fn frame(
+        &mut self,
+        image: &mut Image,
+        izbuf: &mut [i16],
+        bsp: &Bsp,
+        cam: &Camera,
+        opts: &RenderOptions,
+        palette: &[[u8; 3]; 256],
+        turb: &TurbTable,
+        time: f32,
+        light_styles: &[f32; LIGHTSTYLES],
+        dlights: &[crate::dlight::DynamicLight],
+        colormap: Option<&[u8]>,
+        bmodels: &[BModelInstance],
+        external: &[ExternalBModel],
+    ) {
+        let prof = stats_on();
+        let t0 = prof.then(StatInstant::now);
+        let (w, h) = (image.w, image.h);
+        self.new_world(bsp);
+        self.setup_frame(cam, w, h, opts);
+        self.mark_leaves(bsp);
+
+        // The frame's models: the world, then the brush entities in list order
+        // (inline submodels, then the external boxes).
+        let mut ents: Vec<Ent> = Vec::with_capacity(1 + bmodels.len() + external.len());
+        ents.push(Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights: dlights.to_vec() });
+        for bm in bmodels {
+            if bm.model_index == 0 || bm.model_index >= bsp.models.len() {
+                continue;
+            }
+            // `R_DrawBEntitiesOnList`: the lights in the model's frame.
+            let local = dlights
+                .iter()
+                .map(|dl| {
+                    let mut d = *dl;
+                    d.origin = sub(dl.origin, bm.origin);
+                    d
+                })
+                .collect();
+            ents.push(Ent { bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights: local });
+        }
+        for ext in external {
+            if ext.bsp.models.is_empty() {
+                continue;
+            }
+            ents.push(Ent { bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: Vec::new() });
+        }
+
+        // `R_PushDlights` over the world, and `R_MarkLights` over each inline
+        // brush model's own subtree (`R_DrawBEntitiesOnList`); the external
+        // boxes are instanced models, which id never marks.
+        let mut bits = std::mem::take(&mut self.dlight_bits);
+        let world_head = bsp.models.first().and_then(|m| m.headnode.first().copied()).unwrap_or(0);
+        mark_dlights(bsp, world_head, dlights, &mut bits);
+        for e in ents.iter().skip(1).filter(|e| e.world_bsp) {
+            let head = e.bsp.models[e.model].headnode.first().copied().unwrap_or(0);
+            mark_dlights_more(bsp, head, &e.dlights, &mut bits);
+        }
+
+        // Phase times as offsets from `t0` (only while profiling).
+        let lap = || t0.map_or(0, |t| t.elapsed().as_nanos() as u64);
+        self.begin_edge_frame();
+        self.render_world(bsp);
+        let t1 = lap();
+        self.draw_bentities(bsp, &ents);
+        let t2 = lap();
+        self.scan_edges();
+        let t3 = lap();
+        self.draw_surfaces(image, izbuf, cam, opts, palette, turb, time, light_styles, colormap, &ents, &bits);
+        self.dlight_bits = bits;
+        if prof {
+            let t4 = lap();
+            let (edges, surfs, spans) = (
+                self.edges.len() as u64 - FIRST_EDGE as u64,
+                self.surfs.len() as u64 - 2,
+                self.spans.len() as u64,
+            );
+            stat(|s| {
+                // world = the whole pass but the brush entities' edge setup,
+                // which goes to `submodel` (their spans are drawn with the
+                // world's); `sort` = the world walk to edges, `setup` = the scan.
+                s.world_ns += t1 + (t4 - t2);
+                s.submodel_ns += t2 - t1;
+                s.world_sort_ns += t1;
+                s.world_setup_ns += t3 - t2;
+                s.world_surf_ns += t4 - t3;
+                s.edges_emitted += edges;
+                s.surfs_emitted += surfs;
+                s.spans_emitted += spans;
+                s.edges_peak = s.edges_peak.max(edges);
+                s.surfs_peak = s.surfs_peak.max(surfs);
+            });
+        }
+    }
+
+    /// Size the per-model arrays for a new world (`Mod_LoadBrushModel`,
+    /// `Mod_SetParent`): everything id keeps in the model starts at zero.
+    fn new_world(&mut self, bsp: &Bsp) {
+        let fp = WorldFingerprint::of(bsp);
+        if self.world == Some(fp)
+            && self.node_visframe.len() == bsp.nodes.len()
+            && self.leaf_visframe.len() == bsp.leafs.len()
+            && self.face_visframe.len() == bsp.faces.len()
+            && self.cachededgeoffset.len() == bsp.edges.len()
+        {
+            return;
+        }
+        self.world = Some(fp);
+        self.oldviewleaf = None;
+        self.node_visframe = vec![0; bsp.nodes.len()];
+        self.leaf_visframe = vec![0; bsp.leafs.len()];
+        self.node_parent = vec![-1; bsp.nodes.len()];
+        self.leaf_parent = vec![-1; bsp.leafs.len()];
+        self.leaf_key = vec![0; bsp.leafs.len()];
+        self.face_visframe = vec![0; bsp.faces.len()];
+        self.cachededgeoffset = vec![0; bsp.edges.len()];
+        // Mod_SetParent (loadmodel->nodes, NULL), iteratively.
+        let root = bsp.models.first().and_then(|m| m.headnode.first().copied()).unwrap_or(0);
+        let mut stack: Vec<(i32, i32)> = vec![(root, -1)];
+        // Every node is visited once and pushes two children (a malformed,
+        // cyclic tree stops here).
+        let mut budget = 2 * bsp.nodes.len() + 2;
+        while let Some((node, parent)) = stack.pop() {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            if node < 0 {
+                if let Some(p) = self.leaf_parent.get_mut((-1 - node) as usize) {
+                    *p = parent;
+                }
+                continue;
+            }
+            let Some(n) = bsp.nodes.get(node as usize) else { continue };
+            self.node_parent[node as usize] = parent;
+            stack.push((child_ref(n.children[0]), node));
+            stack.push((child_ref(n.children[1]), node));
+        }
+    }
+
+    /// `R_ViewChanged`'s projection and clip planes, `R_SetupFrame`'s view and
+    /// `R_TransformFrustum` / `R_SetUpFrustumIndexes`, for a `w x h` view.
+    fn setup_frame(&mut self, cam: &Camera, w: usize, h: usize, opts: &RenderOptions) {
+        self.framecount = self.framecount.wrapping_add(1);
+        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
+        let (vpn, vright, vup) = cam.basis();
+        self.w = w;
+        self.h = h;
+        // id's pixel centres are on the integers: xcenter = width/2 - 0.5.
+        self.xcenter = cx - 0.5;
+        self.ycenter = cy - 0.5;
+        self.xscale = xscale;
+        self.yscale = yscale;
+        self.xscaleinv = 1.0 / xscale;
+        self.yscaleinv = 1.0 / yscale;
+        let (wf, hf) = (w as f32, h as f32);
+        self.fvrectx_adj = -0.5;
+        self.fvrecty_adj = -0.5;
+        self.fvrectright_adj = wf - 0.5;
+        self.fvrectbottom_adj = hf - 0.5;
+        self.vrect_x_adj_shift20 = (1 << 19) - 1;
+        self.vrectright_adj_shift20 = ((w as i32) << 20) + (1 << 19) - 1;
+        self.vpn = vpn;
+        self.vright = vright;
+        self.vup = vup;
+        self.r_origin = cam.pos;
+        self.modelorg = cam.pos;
+        // R_ViewChanged: the screen-edge planes through the view's sides, from
+        // the fields of view the projection implies (horizontalFieldOfView =
+        // width / xscale, verticalFieldOfView = height / yscale).
+        let hfov = wf / xscale;
+        let vfov = hf / yscale;
+        self.screenedge = [
+            vector_normalize([-1.0 / (0.5 * hfov), 0.0, 1.0]),
+            vector_normalize([1.0 / (0.5 * hfov), 0.0, 1.0]),
+            vector_normalize([0.0, -1.0 / (0.5 * vfov), 1.0]),
+            vector_normalize([0.0, 1.0 / (0.5 * vfov), 1.0]),
+        ];
+        for (i, c) in self.clip.iter_mut().enumerate() {
+            c.leftedge = i == 0;
+            c.rightedge = i == 1;
+        }
+        self.transform_frustum();
+        // R_SetUpFrustumIndexes
+        for i in 0..4 {
+            for j in 0..3 {
+                if self.clip[i].normal[j] < 0.0 {
+                    self.frustum_indexes[i][j] = j;
+                    self.frustum_indexes[i][j + 3] = j + 3;
+                } else {
+                    self.frustum_indexes[i][j] = j + 3;
+                    self.frustum_indexes[i][j + 3] = j;
+                }
+            }
+        }
+    }
+
+    /// `R_TransformFrustum`: the view's sides in the current model's frame.
+    fn transform_frustum(&mut self) {
+        let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
+        for i in 0..4 {
+            let se = self.screenedge[i];
+            let v = [se[2], -se[0], se[1]];
+            let v2 = [
+                v[1] * vright[0] + v[2] * vup[0] + v[0] * vpn[0],
+                v[1] * vright[1] + v[2] * vup[1] + v[0] * vpn[1],
+                v[1] * vright[2] + v[2] * vup[2] + v[0] * vpn[2],
+            ];
+            self.clip[i].normal = v2;
+            self.clip[i].dist = dot(self.modelorg, v2);
+        }
+    }
+
+    /// `R_MarkLeaves`: mark every leaf in the view leaf's PVS and the nodes
+    /// above it with a new `r_visframecount`, once per view leaf. No PVS (no
+    /// vis data, leaf 0, a leaf without vis info) marks every leaf.
+    fn mark_leaves(&mut self, bsp: &Bsp) {
+        let viewleaf = point_in_leaf(bsp, self.r_origin).unwrap_or(0);
+        if self.oldviewleaf == Some(viewleaf) {
+            return;
+        }
+        self.visframecount = self.visframecount.wrapping_add(1);
+        self.oldviewleaf = Some(viewleaf);
+        let numleafs = bsp
+            .models
+            .first()
+            .map_or(0, |m| m.visleafs.max(0) as usize)
+            .min(bsp.leafs.len().saturating_sub(1));
+        let vis = match bsp.leafs.get(viewleaf) {
+            Some(leaf) if viewleaf != 0 && !bsp.visibility.is_empty() => {
+                crate::bsp::decompress_vis(&bsp.visibility, leaf.visofs, numleafs)
+            }
+            _ => vec![true; numleafs + 1],
+        };
+        let frame = self.visframecount;
+        for i in 0..numleafs {
+            if !vis.get(i + 1).copied().unwrap_or(false) {
+                continue;
+            }
+            let leaf = i + 1;
+            self.leaf_visframe[leaf] = frame;
+            let mut node = self.leaf_parent[leaf];
+            let mut budget = bsp.nodes.len();
+            while node >= 0 && budget > 0 {
+                budget -= 1;
+                let n = node as usize;
+                if self.node_visframe[n] == frame {
+                    break;
+                }
+                self.node_visframe[n] = frame;
+                node = self.node_parent[n];
+            }
+        }
+    }
+
+    #[inline]
+    fn visframe_of(&self, node: i32) -> u32 {
+        if node >= 0 {
+            self.node_visframe.get(node as usize).copied().unwrap_or(0)
+        } else {
+            self.leaf_visframe.get((-1 - node) as usize).copied().unwrap_or(0)
+        }
+    }
+
+    /// `R_BeginEdgeFrame` (r_draw_order 0: `R_GenerateSpans`, the background
+    /// at key 0x7FFFFFFF).
+    fn begin_edge_frame(&mut self) {
+        self.edges.clear();
+        self.edges.resize(FIRST_EDGE as usize, Edge::ZERO);
+        self.surfs.clear();
+        self.surfs.push(Surf::ZERO); // surface 0: the "no surface" dummy
+        self.surfs.push(Surf { flags: SURF_DRAWBACKGROUND, key: 0x7FFF_FFFF, ..Surf::ZERO });
+        self.r_currentkey = 0;
+        self.newedges.clear();
+        self.newedges.resize(self.h, NONE);
+        self.removeedges.clear();
+        self.removeedges.resize(self.h, NONE);
+        self.spans.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // r_bsp.c: the world walk
+    // -----------------------------------------------------------------------
+
+    /// `R_RenderWorld`.
+    fn render_world(&mut self, bsp: &Bsp) {
+        self.currententity = 0;
+        self.insubmodel = false;
+        self.modelorg = self.r_origin;
+        let root = bsp.models.first().and_then(|m| m.headnode.first().copied()).unwrap_or(0);
+        if !has_tree(bsp) {
+            // No node tree (the synthetic test rooms).
+            self.render_world_flat(bsp);
+            return;
+        }
+        self.recursive_world_node(bsp, root, 15, 0);
+    }
+
+    /// A bsp with no nodes (the synthetic test rooms; never id's) has no
+    /// front-to-back order: its faces go in as one leaf's brush model would —
+    /// one key, sorted on 1/z at their edges (`R_DrawSubmodelPolygons`).
+    fn render_world_flat(&mut self, bsp: &Bsp) {
+        let Some(m) = bsp.models.first() else { return };
+        let f0 = m.firstface.max(0) as usize;
+        let end = (f0 + m.numfaces.max(0) as usize).min(bsp.faces.len());
+        self.insubmodel = true;
+        for fi in f0..end {
+            let face = &bsp.faces[fi];
+            let Some(plane) = usize::try_from(face.planenum).ok().and_then(|p| bsp.planes.get(p)) else { continue };
+            let d = (dot(self.modelorg, plane.normal) - plane.dist) as f64;
+            let back = face.side != 0;
+            if (back && d < -BACKFACE_EPSILON) || (!back && d > BACKFACE_EPSILON) {
+                self.r_currentkey = 0;
+                self.render_face(bsp, fi, 15);
+            }
+        }
+        self.insubmodel = false;
+    }
+
+    /// `R_RecursiveWorldNode`.
+    fn recursive_world_node(&mut self, bsp: &Bsp, node: i32, mut clipflags: u32, depth: u32) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let (minmaxs, leaf) = if node < 0 {
+            let li = (-1 - node) as usize;
+            let Some(l) = bsp.leafs.get(li) else { return };
+            if l.contents == CONTENTS_SOLID {
+                return;
+            }
+            (
+                [l.mins[0], l.mins[1], l.mins[2], l.maxs[0], l.maxs[1], l.maxs[2]].map(|v| v as f32),
+                Some(li),
+            )
+        } else {
+            let Some(n) = bsp.nodes.get(node as usize) else { return };
+            ([n.mins[0], n.mins[1], n.mins[2], n.maxs[0], n.maxs[1], n.maxs[2]].map(|v| v as f32), None)
+        };
+        if self.visframe_of(node) != self.visframecount {
+            return;
+        }
+        // Cull against the clip planes unless trivially accepted.
+        if clipflags != 0 {
+            for i in 0..4 {
+                if clipflags & (1 << i) == 0 {
+                    continue;
+                }
+                let pindex = self.frustum_indexes[i];
+                let c = self.clip[i];
+                let rejectpt = [minmaxs[pindex[0]], minmaxs[pindex[1]], minmaxs[pindex[2]]];
+                let d = dot(rejectpt, c.normal) as f64 - c.dist as f64;
+                if d <= 0.0 {
+                    return;
+                }
+                let acceptpt = [minmaxs[pindex[3]], minmaxs[pindex[4]], minmaxs[pindex[5]]];
+                let d = dot(acceptpt, c.normal) as f64 - c.dist as f64;
+                if d >= 0.0 {
+                    clipflags &= !(1 << i); // node is entirely on screen
+                }
+            }
+        }
+        if let Some(li) = leaf {
+            let l = &bsp.leafs[li];
+            let first = l.firstmarksurface as usize;
+            let count = l.nummarksurfaces as usize;
+            if let Some(marks) = bsp.marksurfaces.get(first..first + count) {
+                for &m in marks {
+                    if let Some(v) = self.face_visframe.get_mut(m as usize) {
+                        *v = self.framecount;
+                    }
+                }
+            }
+            self.leaf_key[li] = self.r_currentkey;
+            self.r_currentkey += 1; // all bmodels in a leaf share the same key
+            return;
+        }
+        let n = &bsp.nodes[node as usize];
+        let Some(plane) = usize::try_from(n.planenum).ok().and_then(|p| bsp.planes.get(p)) else { return };
+        let dotv: f64 = match plane.ptype {
+            0..=2 => (self.modelorg[plane.ptype as usize] - plane.dist) as f64,
+            _ => (dot(self.modelorg, plane.normal) - plane.dist) as f64,
+        };
+        let side = if dotv >= 0.0 { 0 } else { 1 };
+        let (front, back) = (child_ref(n.children[side]), child_ref(n.children[side ^ 1]));
+        self.recursive_world_node(bsp, front, clipflags, depth + 1);
+        let c = n.numfaces as usize;
+        if c != 0 {
+            let first = n.firstface as usize;
+            let want_back = if dotv < -BACKFACE_EPSILON {
+                Some(true)
+            } else if dotv > BACKFACE_EPSILON {
+                Some(false)
+            } else {
+                None
+            };
+            if let Some(want_back) = want_back {
+                for fi in first..(first + c).min(bsp.faces.len()) {
+                    let back_face = bsp.faces[fi].side != 0;
+                    if back_face == want_back && self.face_visframe[fi] == self.framecount {
+                        self.render_face(bsp, fi, clipflags);
+                    }
+                }
+            }
+            // all surfaces on the same node share the same sequence number
+            self.r_currentkey += 1;
+        }
+        self.recursive_world_node(bsp, back, clipflags, depth + 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // r_draw.c: faces to edges
+    // -----------------------------------------------------------------------
+
+    /// The clip-plane chain for `clipflags` (`view_clipplanes[i].next`): the
+    /// set planes, lowest first.
+    fn clip_chain(clipflags: u32) -> ([u8; 4], usize) {
+        let mut chain = [0u8; 4];
+        let mut n = 0;
+        for i in 0..4u8 {
+            if clipflags & (1 << i) != 0 {
+                chain[n] = i;
+                n += 1;
+            }
+        }
+        (chain, n)
+    }
+
+    /// `view_clipplanes[1].next`: the chain after the right plane.
+    fn after_right(chain: &[u8]) -> &[u8] {
+        match chain.iter().position(|&p| p == 1) {
+            Some(k) => &chain[k + 1..],
+            None => &[],
+        }
+    }
+
+    /// Transform and project a vertex as `R_EmitEdge` does: `(u, v, 1/z)`.
+    #[inline]
+    fn project(&self, p: Vec3) -> (f32, f32, f32) {
+        let local = [p[0] - self.modelorg[0], p[1] - self.modelorg[1], p[2] - self.modelorg[2]];
+        let t0 = dot(local, self.vright);
+        let t1 = dot(local, self.vup);
+        let mut t2 = dot(local, self.vpn);
+        if t2 < NEAR_CLIP {
+            t2 = NEAR_CLIP;
+        }
+        let lzi = 1.0 / t2;
+        let scale = self.xscale * lzi;
+        let mut u = self.xcenter + scale * t0;
+        if u < self.fvrectx_adj {
+            u = self.fvrectx_adj;
+        }
+        if u > self.fvrectright_adj {
+            u = self.fvrectright_adj;
+        }
+        let scale = self.yscale * lzi;
+        let mut v = self.ycenter - scale * t1;
+        if v < self.fvrecty_adj {
+            v = self.fvrecty_adj;
+        }
+        if v > self.fvrectbottom_adj {
+            v = self.fvrectbottom_adj;
+        }
+        (u, v, lzi)
+    }
+
+    /// `R_EmitEdge`.
+    fn emit_edge(&mut self, pv0: Vec3, pv1: Vec3) {
+        let (u0, v0, mut lzi0, ceilv0);
+        if self.r_lastvertvalid {
+            (u0, v0, lzi0, ceilv0) = (self.r_u1, self.r_v1, self.r_lzi1, self.r_ceilv1);
+        } else {
+            let (u, v, lzi) = self.project(pv0);
+            (u0, v0, lzi0, ceilv0) = (u, v, lzi, (v as f64).ceil() as i32);
+        }
+        let (u1, v1, lzi1) = self.project(pv1);
+        (self.r_u1, self.r_v1, self.r_lzi1) = (u1, v1, lzi1);
+        if lzi1 > lzi0 {
+            lzi0 = lzi1;
+        }
+        if lzi0 > self.r_nearzi {
+            self.r_nearzi = lzi0; // for mipmap finding
+        }
+        // for right edges, all we want is the effect on 1/z
+        if self.r_nearzionly {
+            return;
+        }
+        self.r_emitted = true;
+        self.r_ceilv1 = (v1 as f64).ceil() as i32;
+        if ceilv0 == self.r_ceilv1 {
+            // we cache unclipped horizontal edges as fully clipped
+            if self.cacheoffset != NOT_CACHEABLE {
+                self.cacheoffset = FULLY_CLIPPED_CACHED | (self.framecount & FRAMECOUNT_MASK);
+            }
+            return; // horizontal edge
+        }
+        let surf = self.surfs.len() as u32;
+        let (v, v2, u_step, u, surfs);
+        if ceilv0 < self.r_ceilv1 {
+            // trailing edge (go from p1 to p2)
+            v = ceilv0;
+            v2 = self.r_ceilv1 - 1;
+            surfs = [surf, 0];
+            u_step = (self.r_u1 - u0) / (self.r_v1 - v0);
+            u = u0 + (v as f32 - v0) * u_step;
+        } else {
+            // leading edge (go from p2 to p1)
+            v2 = ceilv0 - 1;
+            v = self.r_ceilv1;
+            surfs = [0, surf];
+            u_step = (u0 - self.r_u1) / (v0 - self.r_v1);
+            u = self.r_u1 + (v as f32 - self.r_v1) * u_step;
+        }
+        if v < 0 || v2 < v || v2 as usize >= self.h {
+            return; // cannot happen with a clamped projection; a NaN guard
+        }
+        let mut eu = c_ftoi((u * 1_048_576.0 + 1_048_575.0) as f64);
+        // avoid stepping off the edges of the screen
+        if eu < self.vrect_x_adj_shift20 {
+            eu = self.vrect_x_adj_shift20;
+        }
+        if eu > self.vrectright_adj_shift20 {
+            eu = self.vrectright_adj_shift20;
+        }
+        let e = self.edges.len() as u32;
+        self.edges.push(Edge {
+            u: eu,
+            u_step: c_ftoi((u_step * 1_048_576.0) as f64),
+            prev: NONE,
+            next: NONE,
+            surfs,
+            nextremove: NONE,
+            nearzi: lzi0,
+            owner: self.r_pedge_owner,
+        });
+        // sort the edge in normally
+        let mut u_check = eu;
+        if surfs[0] != 0 {
+            u_check = u_check.wrapping_add(1); // sort trailers after leaders
+        }
+        let (v, v2) = (v as usize, v2 as usize);
+        let head = self.newedges[v];
+        if head == NONE || self.edges[head as usize].u >= u_check {
+            self.edges[e as usize].next = head;
+            self.newedges[v] = e;
+        } else {
+            let mut pcheck = head;
+            loop {
+                let nx = self.edges[pcheck as usize].next;
+                if nx == NONE || self.edges[nx as usize].u >= u_check {
+                    break;
+                }
+                pcheck = nx;
+            }
+            self.edges[e as usize].next = self.edges[pcheck as usize].next;
+            self.edges[pcheck as usize].next = e;
+        }
+        self.edges[e as usize].nextremove = self.removeedges[v2];
+        self.removeedges[v2] = e;
+    }
+
+    /// `R_ClipEdge`: clip `pv0 -> pv1` against the planes of `chain`, noting
+    /// where it leaves and enters the left and right sides, then emit it.
+    fn clip_edge(&mut self, pv0: Vec3, pv1: Vec3, chain: &[u8]) {
+        for (k, &pi) in chain.iter().enumerate() {
+            let clip = self.clip[pi as usize];
+            let d0 = dot(pv0, clip.normal) - clip.dist;
+            let d1 = dot(pv1, clip.normal) - clip.dist;
+            let lerp = |f: f32| {
+                [
+                    pv0[0] + f * (pv1[0] - pv0[0]),
+                    pv0[1] + f * (pv1[1] - pv0[1]),
+                    pv0[2] + f * (pv1[2] - pv0[2]),
+                ]
+            };
+            if d0 >= 0.0 {
+                // point 0 is unclipped
+                if d1 >= 0.0 {
+                    continue; // both points are unclipped
+                }
+                // only point 1 is clipped; we don't cache clipped edges
+                self.cacheoffset = NOT_CACHEABLE;
+                let clipvert = lerp(d0 / (d0 - d1));
+                if clip.leftedge {
+                    self.r_leftclipped = true;
+                    self.leftexit = clipvert;
+                } else if clip.rightedge {
+                    self.r_rightclipped = true;
+                    self.rightexit = clipvert;
+                }
+                self.clip_edge(pv0, clipvert, &chain[k + 1..]);
+                return;
+            }
+            // point 0 is clipped
+            if d1 < 0.0 {
+                // both points are clipped; we do cache fully clipped edges
+                if !self.r_leftclipped {
+                    self.cacheoffset = FULLY_CLIPPED_CACHED | (self.framecount & FRAMECOUNT_MASK);
+                }
+                return;
+            }
+            // only point 0 is clipped
+            self.r_lastvertvalid = false;
+            // we don't cache partially clipped edges
+            self.cacheoffset = NOT_CACHEABLE;
+            let clipvert = lerp(d0 / (d0 - d1));
+            if clip.leftedge {
+                self.r_leftclipped = true;
+                self.leftenter = clipvert;
+            } else if clip.rightedge {
+                self.r_rightclipped = true;
+                self.rightenter = clipvert;
+            }
+            self.clip_edge(clipvert, pv1, &chain[k + 1..]);
+            return;
+        }
+        // add the edge
+        self.emit_edge(pv0, pv1);
+    }
+
+    /// `R_EmitCachedEdge`: this face shares an edge an earlier face made.
+    fn emit_cached_edge(&mut self, cached: u32) {
+        let surf = self.surfs.len() as u32;
+        let e = &mut self.edges[(FIRST_EDGE + cached) as usize];
+        if e.surfs[0] == 0 {
+            e.surfs[0] = surf;
+        } else {
+            e.surfs[1] = surf;
+        }
+        if e.nearzi > self.r_nearzi {
+            self.r_nearzi = e.nearzi; // for mipmap finding
+        }
+        self.r_emitted = true;
+    }
+
+    /// The model the current entity draws from (`currententity->model`).
+    fn vertex(bsp: &Bsp, i: u16) -> Option<Vec3> {
+        bsp.vertexes.get(i as usize).map(|v| v.point)
+    }
+
+    /// `R_RenderFace`: push face `fi` of `bsp` (the current entity's model)
+    /// through the clip planes into the edge list and post its surface.
+    fn render_face(&mut self, bsp: &Bsp, fi: usize, clipflags: u32) {
+        let face = &bsp.faces[fi];
+        let (chain, nchain) = Self::clip_chain(clipflags);
+        let chain = &chain[..nchain];
+        self.r_emitted = false;
+        self.r_nearzi = 0.0;
+        self.r_nearzionly = false;
+        self.makeleftedge = false;
+        self.makerightedge = false;
+        self.r_lastvertvalid = false;
+        // Only the world's own edges are ever looked up in the edge cache (a
+        // brush model's edges are its own: qbsp shares edges within a model),
+        // so a brush model's edges get no owner and write no cache entry.
+        let world_edges = !self.insubmodel;
+        for i in 0..face.numedges.max(0) as usize {
+            let Some(&lindex) = usize::try_from(face.firstedge).ok().and_then(|f| bsp.surfedges.get(f + i)) else {
+                continue;
+            };
+            let (ei, a, b) = if lindex > 0 { (lindex as usize, 0, 1) } else { ((-(lindex as i64)) as usize, 1, 0) };
+            let Some(medge) = bsp.edges.get(ei) else { continue };
+            self.r_pedge_owner = if world_edges { ei as u32 } else { NONE };
+            // if the edge is cached, we can just reuse the edge
+            if !self.insubmodel {
+                let off = self.cachededgeoffset[ei];
+                if off & FULLY_CLIPPED_CACHED != 0 {
+                    if off & FRAMECOUNT_MASK == self.framecount & FRAMECOUNT_MASK {
+                        self.r_lastvertvalid = false;
+                        continue;
+                    }
+                } else {
+                    let made = self.edges.len() as u32 - FIRST_EDGE;
+                    if made > off && self.edges[(FIRST_EDGE + off) as usize].owner == ei as u32 {
+                        self.emit_cached_edge(off);
+                        self.r_lastvertvalid = false;
+                        continue;
+                    }
+                }
+            }
+            let (Some(p0), Some(p1)) = (Self::vertex(bsp, medge.v[a]), Self::vertex(bsp, medge.v[b])) else {
+                continue;
+            };
+            // assume it's cacheable
+            self.cacheoffset = self.edges.len() as u32 - FIRST_EDGE;
+            self.r_leftclipped = false;
+            self.r_rightclipped = false;
+            self.clip_edge(p0, p1, chain);
+            if world_edges {
+                self.cachededgeoffset[ei] = self.cacheoffset;
+            }
+            self.makeleftedge |= self.r_leftclipped;
+            self.makerightedge |= self.r_rightclipped;
+            self.r_lastvertvalid = true;
+        }
+        self.finish_face(chain);
+        if !self.r_emitted {
+            return;
+        }
+        let key = self.r_currentkey;
+        self.r_currentkey += 1;
+        self.post_surface(bsp, fi, key, self.insubmodel);
+    }
+
+    /// The end of `R_RenderFace` / `R_RenderBmodelFace`: the extra edge along
+    /// the left side, and the right side's `1/z`.
+    fn finish_face(&mut self, chain: &[u8]) {
+        self.r_pedge_owner = NONE; // the dummy `tedge`
+        if self.makeleftedge {
+            self.r_lastvertvalid = false;
+            let (a, b) = (self.leftexit, self.leftenter);
+            self.clip_edge(a, b, chain.get(1..).unwrap_or(&[]));
+        }
+        if self.makerightedge {
+            self.r_lastvertvalid = false;
+            self.r_nearzionly = true;
+            let (a, b) = (self.rightexit, self.rightenter);
+            self.clip_edge(a, b, Self::after_right(chain));
+        }
+    }
+
+    /// Post the current face as a surface (the end of `R_RenderFace`): its
+    /// `1/z` plane in screen space, `D_DrawZSpans`' and the 1/z sort's.
+    fn post_surface(&mut self, bsp: &Bsp, fi: usize, key: i32, insubmodel: bool) {
+        let face = &bsp.faces[fi];
+        let Some(plane) = usize::try_from(face.planenum).ok().and_then(|p| bsp.planes.get(p)) else { return };
+        let p_normal = [dot(plane.normal, self.vright), dot(plane.normal, self.vup), dot(plane.normal, self.vpn)];
+        let distinv = 1.0 / (plane.dist - dot(self.modelorg, plane.normal));
+        let d_zistepu = p_normal[0] * self.xscaleinv * distinv;
+        let d_zistepv = -p_normal[1] * self.yscaleinv * distinv;
+        let d_ziorigin = p_normal[2] * distinv - self.xcenter * d_zistepu - self.ycenter * d_zistepv;
+        let flags = face_flags(bsp, face);
+        self.surfs.push(Surf {
+            next: 0,
+            prev: 0,
+            spans: NONE,
+            key,
+            last_u: 0,
+            spanstate: 0,
+            flags,
+            insubmodel,
+            nearzi: self.r_nearzi,
+            d_zistepu,
+            d_zistepv,
+            d_ziorigin,
+            ent: self.currententity,
+            face: fi as u32,
+        });
+    }
+}
+
+/// `Mod_LoadFaces`' flags for a face: `SURF_PLANEBACK`, and `SURF_DRAWSKY` /
+/// `SURF_DRAWTURB` from its texture's name.
+fn face_flags(bsp: &Bsp, face: &DFace) -> u8 {
+    let mut flags = if face.side != 0 { SURF_PLANEBACK } else { 0 };
+    let kind = usize::try_from(face.texinfo)
+        .ok()
+        .and_then(|t| bsp.texinfo.get(t))
+        .and_then(|ti| usize::try_from(ti.miptex).ok())
+        .and_then(|m| bsp.textures.get(m))
+        .and_then(|t| t.as_ref())
+        .map(|mt| classify_surface(&mt.name));
+    match kind {
+        Some(SurfKind::Sky) => flags |= SURF_DRAWSKY,
+        Some(SurfKind::Turb) => flags |= SURF_DRAWTURB,
+        _ => {}
+    }
+    flags
+}
+
+impl EdgeState {
+    // -----------------------------------------------------------------------
+    // r_main.c / r_bsp.c: brush entities into the same edge list
+    // -----------------------------------------------------------------------
+
+    /// `R_BmodelCheckBBox` (an unrotated model): the clip flags its box needs
+    /// against the view's sides, or [`BMODEL_FULLY_CLIPPED`].
+    fn bmodel_check_bbox(&self, minmaxs: &[f32; 6]) -> u32 {
+        let mut clipflags = 0;
+        for i in 0..4 {
+            let pindex = self.frustum_indexes[i];
+            let c = self.clip[i];
+            let rejectpt = [minmaxs[pindex[0]], minmaxs[pindex[1]], minmaxs[pindex[2]]];
+            let d = dot(rejectpt, c.normal) as f64 - c.dist as f64;
+            if d <= 0.0 {
+                return BMODEL_FULLY_CLIPPED;
+            }
+            let acceptpt = [minmaxs[pindex[3]], minmaxs[pindex[4]], minmaxs[pindex[5]]];
+            let d = dot(acceptpt, c.normal) as f64 - c.dist as f64;
+            if d <= 0.0 {
+                clipflags |= 1 << i;
+            }
+        }
+        clipflags
+    }
+
+    /// `R_SplitEntityOnNode2`: the first world node whose plane splits the
+    /// box, or the (non-solid) leaf holding all of it; `None` when the box is
+    /// only in solid space or outside the PVS.
+    fn split_entity_on_node(&self, world: &Bsp, mut node: i32, emins: Vec3, emaxs: Vec3) -> Option<i32> {
+        for _ in 0..MAX_DEPTH {
+            if self.visframe_of(node) != self.visframecount {
+                return None;
+            }
+            if node < 0 {
+                let leaf = world.leafs.get((-1 - node) as usize)?;
+                return (leaf.contents != CONTENTS_SOLID).then_some(node);
+            }
+            let n = world.nodes.get(node as usize)?;
+            let p = usize::try_from(n.planenum).ok().and_then(|i| world.planes.get(i))?;
+            // BOX_ON_PLANE_SIDE: the axial shortcut, else BoxOnPlaneSide.
+            let sides = if (0..3).contains(&p.ptype) {
+                let t = p.ptype as usize;
+                if p.dist <= emins[t] {
+                    1
+                } else if p.dist >= emaxs[t] {
+                    2
+                } else {
+                    3
+                }
+            } else {
+                crate::math::box_on_plane_side(emins, emaxs, &crate::math::Plane::new(p.normal, p.dist))
+            };
+            if sides == 3 {
+                return Some(node); // remember first splitter
+            }
+            // not split yet; recurse down the contacted side
+            node = child_ref(if sides & 1 != 0 { n.children[0] } else { n.children[1] });
+        }
+        None
+    }
+
+    /// `R_DrawBEntitiesOnList`'s brush half: every brush entity's faces into
+    /// the edge list, clipped to the world's leaves when it spans several.
+    fn draw_bentities(&mut self, world: &Bsp, ents: &[Ent]) {
+        let oldorigin = self.modelorg;
+        let world_root = world.models.first().and_then(|m| m.headnode.first().copied()).unwrap_or(0);
+        self.insubmodel = true;
+        for (ei, e) in ents.iter().enumerate().skip(1) {
+            let m = &e.bsp.models[e.model];
+            let emins = [e.origin[0] + m.mins[0], e.origin[1] + m.mins[1], e.origin[2] + m.mins[2]];
+            let emaxs = [e.origin[0] + m.maxs[0], e.origin[1] + m.maxs[1], e.origin[2] + m.maxs[2]];
+            let minmaxs = [emins[0], emins[1], emins[2], emaxs[0], emaxs[1], emaxs[2]];
+            let clipflags = self.bmodel_check_bbox(&minmaxs);
+            if clipflags == BMODEL_FULLY_CLIPPED {
+                continue;
+            }
+            self.currententity = ei as u32;
+            self.modelorg = sub(self.r_origin, e.origin);
+            // R_RotateBmodel (no rotation): the view's sides in the model's frame.
+            self.transform_frustum();
+            let top = if !has_tree(world) {
+                None
+            } else {
+                self.split_entity_on_node(world, world_root, emins, emaxs)
+            };
+            match top {
+                // Not a leaf: clipped to the world BSP.
+                Some(node) if node >= 0 => {
+                    self.r_clipflags = clipflags;
+                    self.draw_solid_clipped_submodel_polygons(world, e, node);
+                }
+                // In one leaf: whole faces, sorted on 1/z against the leaf's others.
+                Some(leaf) => self.draw_submodel_polygons(e, clipflags, self.leaf_key[(-1 - leaf) as usize]),
+                // No world tree (synthetic rooms): whole faces, sorted on 1/z
+                // with the world's (`render_world_flat`).
+                None if !has_tree(world) => self.draw_submodel_polygons(e, clipflags, 0),
+                None => {}
+            }
+            // put back world frustum clipping
+            self.modelorg = oldorigin;
+            self.transform_frustum();
+        }
+        self.insubmodel = false;
+        self.currententity = 0;
+    }
+
+    /// The model's front faces (`psurf` loop with `BACKFACE_EPSILON`).
+    fn front_faces<'b>(&self, e: &'b Ent) -> impl Iterator<Item = usize> + 'b {
+        let m = &e.bsp.models[e.model];
+        let f0 = m.firstface.max(0) as usize;
+        let end = (f0 + m.numfaces.max(0) as usize).min(e.bsp.faces.len());
+        let modelorg = self.modelorg;
+        (f0..end).filter(move |&fi| {
+            let face = &e.bsp.faces[fi];
+            let Some(plane) = usize::try_from(face.planenum).ok().and_then(|p| e.bsp.planes.get(p)) else {
+                return false;
+            };
+            let d = (dot(modelorg, plane.normal) - plane.dist) as f64;
+            if face.side != 0 {
+                d < -BACKFACE_EPSILON
+            } else {
+                d > BACKFACE_EPSILON
+            }
+        })
+    }
+
+    /// `R_DrawSubmodelPolygons`: a model in one leaf, every front face keyed
+    /// as that leaf (`R_RenderFace` with `insubmodel`).
+    fn draw_submodel_polygons(&mut self, e: &Ent, clipflags: u32, key: i32) {
+        let faces: Vec<usize> = self.front_faces(e).collect();
+        for fi in faces {
+            self.r_currentkey = key;
+            self.render_face(e.bsp, fi, clipflags);
+        }
+    }
+
+    /// `R_DrawSolidClippedSubmodelPolygons`: each front face's edges, clipped
+    /// down the world BSP from `topnode` into its leaves.
+    fn draw_solid_clipped_submodel_polygons(&mut self, world: &Bsp, e: &Ent, topnode: i32) {
+        let faces: Vec<usize> = self.front_faces(e).collect();
+        for fi in faces {
+            let face = &e.bsp.faces[fi];
+            // copy the edges to bedges, flipping if necessary so always
+            // clockwise winding
+            self.bedges.clear();
+            let n = face.numedges.max(0) as usize;
+            let mut ok = n > 0;
+            for j in 0..n {
+                let se = usize::try_from(face.firstedge).ok().and_then(|f| e.bsp.surfedges.get(f + j));
+                let Some(&lindex) = se else {
+                    ok = false;
+                    break;
+                };
+                let (ei, a, b) = if lindex > 0 { (lindex as usize, 0, 1) } else { ((-(lindex as i64)) as usize, 1, 0) };
+                let verts = e.bsp.edges.get(ei).and_then(|m| Some((Self::vertex(e.bsp, m.v[a])?, Self::vertex(e.bsp, m.v[b])?)));
+                let Some((v0, v1)) = verts else {
+                    ok = false;
+                    break;
+                };
+                let next = if j + 1 < n { j as u32 + 1 } else { NONE };
+                self.bedges.push(BEdge { v: [v0, v1], pnext: next });
+            }
+            if ok {
+                self.recursive_clip_bpoly(world, e.bsp, e.origin, 0, topnode, fi, 0);
+            }
+        }
+    }
+
+    /// `R_RecursiveClipBPoly`: split the edge list `pedges` by `node`'s plane
+    /// (in the model's frame), close each side along the plane, and send each
+    /// side down its child — to `R_RenderBmodelFace` at a non-solid leaf in the
+    /// PVS, keyed as that leaf.
+    #[allow(clippy::too_many_arguments)]
+    fn recursive_clip_bpoly(&mut self, world: &Bsp, model: &Bsp, entorigin: Vec3, pedges: u32, node: i32, fi: usize, depth: u32) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Some(n) = world.nodes.get(node as usize) else { return };
+        let Some(splitplane) = usize::try_from(n.planenum).ok().and_then(|p| world.planes.get(p)) else { return };
+        let mut psideedges = [NONE, NONE];
+        let mut makeclippededge = false;
+        // transform the BSP plane into model space
+        let tdist = splitplane.dist - dot(entorigin, splitplane.normal);
+        let tnormal = splitplane.normal;
+        // clip edges to BSP plane
+        let mut p = pedges;
+        while p != NONE {
+            let pe = self.bedges[p as usize];
+            let pnextedge = pe.pnext;
+            let (plastvert, pvert) = (pe.v[0], pe.v[1]);
+            let lastdist = dot(plastvert, tnormal) - tdist;
+            let lastside = if lastdist > 0.0 { 0 } else { 1 };
+            let dist = dot(pvert, tnormal) - tdist;
+            let side = if dist > 0.0 { 0 } else { 1 };
+            if side != lastside {
+                // clipped: generate the clipped vertex, split into two edges
+                let frac = lastdist / (lastdist - dist);
+                let ptvert = [
+                    plastvert[0] + frac * (pvert[0] - plastvert[0]),
+                    plastvert[1] + frac * (pvert[1] - plastvert[1]),
+                    plastvert[2] + frac * (pvert[2] - plastvert[2]),
+                ];
+                let e1 = self.bedges.len() as u32;
+                self.bedges.push(BEdge { v: [plastvert, ptvert], pnext: psideedges[lastside] });
+                psideedges[lastside] = e1;
+                self.bedges.push(BEdge { v: [ptvert, pvert], pnext: psideedges[side] });
+                psideedges[side] = e1 + 1;
+                if side == 0 {
+                    // entering for front, exiting for back
+                    self.pfrontenter = ptvert;
+                } else {
+                    self.pfrontexit = ptvert;
+                }
+                makeclippededge = true;
+            } else {
+                // add the edge to the appropriate side
+                self.bedges[p as usize].pnext = psideedges[side];
+                psideedges[side] = p;
+            }
+            p = pnextedge;
+        }
+        // if anything was clipped, reconstitute and add the edges along the
+        // clip plane to both sides (but in opposite directions)
+        if makeclippededge {
+            let e1 = self.bedges.len() as u32;
+            self.bedges.push(BEdge { v: [self.pfrontexit, self.pfrontenter], pnext: psideedges[0] });
+            psideedges[0] = e1;
+            self.bedges.push(BEdge { v: [self.pfrontenter, self.pfrontexit], pnext: psideedges[1] });
+            psideedges[1] = e1 + 1;
+        }
+        // draw or recurse further
+        for (i, &edges) in psideedges.iter().enumerate() {
+            if edges == NONE {
+                continue;
+            }
+            let pn = child_ref(n.children[i]);
+            if self.visframe_of(pn) != self.visframecount {
+                continue; // not in the PVS
+            }
+            if pn < 0 {
+                let li = (-1 - pn) as usize;
+                if world.leafs.get(li).is_some_and(|l| l.contents != CONTENTS_SOLID) {
+                    self.r_currentbkey = self.leaf_key[li];
+                    self.render_bmodel_face(model, edges, fi);
+                }
+            } else {
+                self.recursive_clip_bpoly(world, model, entorigin, edges, pn, fi, depth + 1);
+            }
+        }
+    }
+
+    /// `R_RenderBmodelFace`: a brush-model fragment's edges (a `bedge_t` list)
+    /// through the clip planes; its surface keyed as its leaf.
+    fn render_bmodel_face(&mut self, bsp: &Bsp, pedges: u32, fi: usize) {
+        self.r_pedge_owner = NONE; // the dummy `tedge`
+        let (chain, nchain) = Self::clip_chain(self.r_clipflags);
+        let chain = &chain[..nchain];
+        self.r_emitted = false;
+        self.r_nearzi = 0.0;
+        self.r_nearzionly = false;
+        self.makeleftedge = false;
+        self.makerightedge = false;
+        self.r_lastvertvalid = false;
+        let mut p = pedges;
+        while p != NONE {
+            let e = self.bedges[p as usize];
+            self.r_leftclipped = false;
+            self.r_rightclipped = false;
+            self.clip_edge(e.v[0], e.v[1], chain);
+            self.makeleftedge |= self.r_leftclipped;
+            self.makerightedge |= self.r_rightclipped;
+            p = e.pnext;
+        }
+        self.finish_face(chain);
+        if !self.r_emitted {
+            return;
+        }
+        self.post_surface(bsp, fi, self.r_currentbkey, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // r_edge.c: the scan
+    // -----------------------------------------------------------------------
+
+    /// `R_ScanEdges` (without its span-pool flush: the pool grows): every
+    /// scanline's spans, from the edges `newedges` / `removeedges` hold.
+    fn scan_edges(&mut self) {
+        let (w, h) = (self.w as i32, self.h as i32);
+        // clear active edges to just the background edges around the screen
+        let head_u = 0i32;
+        self.edges[EDGE_HEAD as usize] =
+            Edge { u: head_u, u_step: 0, prev: NONE, next: EDGE_TAIL, surfs: [0, BACKGROUND], ..Edge::ZERO };
+        self.edge_head_u_shift20 = head_u >> 20;
+        let tail_u = (w << 20) + 0xFFFFF;
+        self.edges[EDGE_TAIL as usize] =
+            Edge { u: tail_u, u_step: 0, prev: EDGE_HEAD, next: EDGE_AFTERTAIL, surfs: [BACKGROUND, 0], ..Edge::ZERO };
+        self.edge_tail_u_shift20 = tail_u >> 20;
+        // force a move
+        self.edges[EDGE_AFTERTAIL as usize] =
+            Edge { u: -1, u_step: 0, prev: EDGE_TAIL, next: EDGE_SENTINEL, ..Edge::ZERO };
+        // `2000 << 24` in a 32-bit int
+        self.edges[EDGE_SENTINEL as usize] =
+            Edge { u: 2000i32.wrapping_mul(1 << 24), u_step: 0, prev: EDGE_AFTERTAIL, ..Edge::ZERO };
+        let bottom = h - 1;
+        for iv in 0..bottom {
+            self.scan_line(iv);
+            let re = self.removeedges[iv as usize];
+            if re != NONE {
+                self.remove_edges(re);
+            }
+            let first = self.edges[EDGE_HEAD as usize].next;
+            if first != EDGE_TAIL {
+                self.step_active_u(first);
+            }
+        }
+        // the last scan (no need to step or sort or remove on the last scan)
+        self.scan_line(bottom);
+    }
+
+    /// One scanline of `R_ScanEdges`: add the new edges, generate the spans.
+    fn scan_line(&mut self, iv: i32) {
+        self.current_iv = iv;
+        self.fv = iv as f32;
+        // mark that the head (background start) span is pre-included
+        self.surfs[BACKGROUND as usize].spanstate = 1;
+        let ne = self.newedges[iv as usize];
+        if ne != NONE {
+            let first = self.edges[EDGE_HEAD as usize].next;
+            self.insert_new_edges(ne, first);
+        }
+        self.generate_spans();
+    }
+
+    /// `R_InsertNewEdges`: merge the u-sorted list `toadd` into the active
+    /// edge table from `edgelist`.
+    fn insert_new_edges(&mut self, mut toadd: u32, mut edgelist: u32) {
+        while toadd != NONE {
+            let next_edge = self.edges[toadd as usize].next;
+            let u = self.edges[toadd as usize].u;
+            while self.edges[edgelist as usize].u < u {
+                edgelist = self.edges[edgelist as usize].next;
+            }
+            // insert toadd before edgelist
+            let prev = self.edges[edgelist as usize].prev;
+            self.edges[toadd as usize].next = edgelist;
+            self.edges[toadd as usize].prev = prev;
+            self.edges[prev as usize].next = toadd;
+            self.edges[edgelist as usize].prev = toadd;
+            toadd = next_edge;
+        }
+    }
+
+    /// `R_RemoveEdges`.
+    fn remove_edges(&mut self, mut pedge: u32) {
+        while pedge != NONE {
+            let Edge { prev, next, nextremove, .. } = self.edges[pedge as usize];
+            self.edges[next as usize].prev = prev;
+            self.edges[prev as usize].next = next;
+            pedge = nextremove;
+        }
+    }
+
+    /// `R_StepActiveU`: step every active edge to the next scanline, moving
+    /// back any that passed the one before it.
+    fn step_active_u(&mut self, mut pedge: u32) {
+        let mut budget = self.edges.len() * 2 + 8;
+        loop {
+            if budget == 0 {
+                return;
+            }
+            budget -= 1;
+            let e = &mut self.edges[pedge as usize];
+            e.u = e.u.wrapping_add(e.u_step);
+            let (u, prev) = (e.u, e.prev);
+            if u >= self.edges[prev as usize].u {
+                pedge = self.edges[pedge as usize].next;
+                continue;
+            }
+            // pushback:
+            if pedge == EDGE_AFTERTAIL {
+                return;
+            }
+            // push it back to keep it sorted
+            let pnext_edge = self.edges[pedge as usize].next;
+            // pull the edge out of the edge list
+            let next = pnext_edge;
+            self.edges[next as usize].prev = prev;
+            self.edges[prev as usize].next = next;
+            // find out where the edge goes in the edge list (id would walk
+            // past `edge_head` for an edge left of the screen, which its
+            // clamps never make; stop there)
+            let mut pwedge = self.edges[prev as usize].prev;
+            if pwedge == NONE {
+                pwedge = EDGE_HEAD;
+            }
+            while pwedge != EDGE_HEAD && self.edges[pwedge as usize].u > u {
+                pwedge = self.edges[pwedge as usize].prev;
+            }
+            // put the edge back into the edge list
+            let after = self.edges[pwedge as usize].next;
+            self.edges[pedge as usize].next = after;
+            self.edges[pedge as usize].prev = pwedge;
+            self.edges[after as usize].prev = pedge;
+            self.edges[pwedge as usize].next = pedge;
+            pedge = pnext_edge;
+            if pedge == EDGE_TAIL {
+                return;
+            }
+        }
+    }
+
+    /// Add a span of `surf`: `count` pixels from `u` on the current scanline.
+    #[inline]
+    fn emit_span(&mut self, surf: u32, u: i32, count: i32) {
+        let idx = self.spans.len() as u32;
+        let s = &mut self.surfs[surf as usize];
+        self.spans.push(ESpan { u, v: self.current_iv, count, pnext: s.spans });
+        s.spans = idx;
+    }
+
+    /// `R_GenerateSpans`: walk the active edges left to right, keeping the
+    /// stack of surfaces under the pixel, and emit a span wherever the top
+    /// changes.
+    fn generate_spans(&mut self) {
+        // clear active surfaces to just the background surface
+        let bg = &mut self.surfs[BACKGROUND as usize];
+        bg.next = BACKGROUND;
+        bg.prev = BACKGROUND;
+        bg.last_u = self.edge_head_u_shift20;
+        let mut edge = self.edges[EDGE_HEAD as usize].next;
+        while edge != EDGE_TAIL {
+            let surfs = self.edges[edge as usize].surfs;
+            if surfs[0] != 0 {
+                // it has a left surface, so a surface is going away for this span
+                self.trailing_edge(surfs[0], edge);
+                if surfs[1] == 0 {
+                    edge = self.edges[edge as usize].next;
+                    continue;
+                }
+            }
+            self.leading_edge(edge);
+            edge = self.edges[edge as usize].next;
+        }
+        self.cleanup_span();
+    }
+
+    /// `R_CleanupSpan`: at the right edge of the screen, emit a span for
+    /// whatever is on top and reset the stack's span states.
+    fn cleanup_span(&mut self) {
+        let surf = self.surfs[BACKGROUND as usize].next;
+        let iu = self.edge_tail_u_shift20;
+        let last_u = self.surfs[surf as usize].last_u;
+        if iu > last_u {
+            self.emit_span(surf, last_u, iu - last_u);
+        }
+        let mut s = surf;
+        let mut budget = self.surfs.len() + 1;
+        loop {
+            self.surfs[s as usize].spanstate = 0;
+            s = self.surfs[s as usize].next;
+            budget -= 1;
+            if s == BACKGROUND || budget == 0 {
+                break;
+            }
+        }
+    }
+
+    /// `R_TrailingEdge`: `surf` ends at `edge`.
+    fn trailing_edge(&mut self, surf: u32, edge: u32) {
+        let s = &mut self.surfs[surf as usize];
+        s.spanstate -= 1;
+        // don't generate a span if this is an inverted span, with the end edge
+        // preceding the start edge (that is, we haven't seen the start edge yet)
+        if s.spanstate != 0 {
+            return;
+        }
+        if surf == self.surfs[BACKGROUND as usize].next {
+            // emit a span (current top going away)
+            let iu = self.edges[edge as usize].u >> 20;
+            let last_u = self.surfs[surf as usize].last_u;
+            if iu > last_u {
+                self.emit_span(surf, last_u, iu - last_u);
+            }
+            // set last_u on the surface below
+            let below = self.surfs[surf as usize].next;
+            self.surfs[below as usize].last_u = iu;
+        }
+        let Surf { prev, next, .. } = self.surfs[surf as usize];
+        self.surfs[prev as usize].next = next;
+        self.surfs[next as usize].prev = prev;
+    }
+
+    /// `R_LeadingEdge` (`R_LeadingEdge`'s sort: by key, and brush models in
+    /// the same leaf by their `1/z` at the edge).
+    fn leading_edge(&mut self, edge: u32) {
+        let surf = self.edges[edge as usize].surfs[1];
+        if surf == 0 {
+            return;
+        }
+        // it's adding a new surface in, so find the correct place
+        self.surfs[surf as usize].spanstate += 1;
+        // don't start a span if this is an inverted span, with the end edge
+        // preceding the start edge (that is, we've already seen the end edge)
+        if self.surfs[surf as usize].spanstate != 1 {
+            return;
+        }
+        let s = self.surfs[surf as usize];
+        let edge_u = self.edges[edge as usize].u;
+        // 1/z at the edge, for two brush models in the same leaf
+        let fu = (edge_u.wrapping_sub(0xFFFFF) as f32) as f64 * (1.0 / 1_048_576.0);
+        let fv = self.fv;
+        let zi_at = |t: &Surf| (t.d_ziorigin + fv * t.d_zistepv) as f64 + fu * t.d_zistepu as f64;
+        // `true` when `s` sorts in front of `t`, which has the same key.
+        let in_front = |t: &Surf| {
+            let newzi = zi_at(&s);
+            let testzi = zi_at(t);
+            if newzi * 0.99 >= testzi {
+                return true;
+            }
+            newzi * 1.01 >= testzi && s.d_zistepu >= t.d_zistepu
+        };
+        let mut surf2 = self.surfs[BACKGROUND as usize].next;
+        let mut newtop = false;
+        let s2 = self.surfs[surf2 as usize];
+        if s.key < s2.key || (s.insubmodel && s.key == s2.key && in_front(&s2)) {
+            newtop = true;
+        } else {
+            // continue_search
+            let mut budget = self.surfs.len() + 1;
+            loop {
+                loop {
+                    surf2 = self.surfs[surf2 as usize].next;
+                    budget -= 1;
+                    if s.key <= self.surfs[surf2 as usize].key || budget == 0 {
+                        break;
+                    }
+                }
+                let t = self.surfs[surf2 as usize];
+                if s.key == t.key && budget > 0 {
+                    // two surfaces on the same plane: the one already active is
+                    // in front, unless they are brush models, sorted on 1/z
+                    if s.insubmodel && in_front(&t) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+        if newtop {
+            // emit a span (obscures current top)
+            let iu = edge_u >> 20;
+            let last_u = self.surfs[surf2 as usize].last_u;
+            if iu > last_u {
+                self.emit_span(surf2, last_u, iu - last_u);
+            }
+            // set last_u on the new span
+            self.surfs[surf as usize].last_u = iu;
+        }
+        // gotposition: insert before surf2
+        let prev = self.surfs[surf2 as usize].prev;
+        self.surfs[surf as usize].next = surf2;
+        self.surfs[surf as usize].prev = prev;
+        self.surfs[prev as usize].next = surf;
+        self.surfs[surf2 as usize].prev = surf;
+    }
+
+    // -----------------------------------------------------------------------
+    // d_edge.c: the surfaces, span by span
+    // -----------------------------------------------------------------------
+
+    /// `D_DrawSurfaces`: each surface's spans once, then their `1/z`
+    /// (`D_DrawZSpans`).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_surfaces(
+        &mut self,
+        image: &mut Image,
+        izbuf: &mut [i16],
+        cam: &Camera,
+        opts: &RenderOptions,
+        palette: &[[u8; 3]; 256],
+        turb: &TurbTable,
+        time: f32,
+        light_styles: &[f32; LIGHTSTYLES],
+        colormap: Option<&[u8]>,
+        ents: &[Ent],
+        bits: &[u32],
+    ) {
+        let (w, h) = (self.w, self.h);
+        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
+        let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
+        let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
+        let mipview = MipView::new(xscale, yscale);
+        let sky_view = SkyView::new(vpn, vright, vup, w, h, opts.sky_centre(w, h), time);
+        let sky_tex = sky_texture(ents[0].bsp);
+        let persp = opts.persp();
+        let (light_dir, _) = normalize([0.3, 0.5, 1.0]);
+        let clear = palette[R_CLEARCOLOR];
+        let mut drawn = 0u64;
+        let mut faces = 0u64;
+        let spans_owned = std::mem::take(&mut self.spans);
+        let spans = &spans_owned;
+        let span_list = |head: u32| {
+            let mut p = head;
+            std::iter::from_fn(move || {
+                let sp = *spans.get(p as usize)?;
+                p = sp.pnext;
+                // clamp to the row (id's stepping keeps it there)
+                let u0 = sp.u.clamp(0, w as i32) as usize;
+                let u1 = (sp.u + sp.count).clamp(0, w as i32) as usize;
+                let v = sp.v.clamp(0, h as i32 - 1) as usize;
+                Some((u0, v, u1.saturating_sub(u0)))
+            })
+            .filter(|&(_, _, n)| n > 0)
+        };
+        for si in 1..self.surfs.len() {
+            let s = self.surfs[si];
+            if s.spans == NONE {
+                continue;
+            }
+            let (mut ziorigin, mut zistepu, mut zistepv) = (s.d_ziorigin, s.d_zistepu, s.d_zistepv);
+            if s.flags & SURF_DRAWBACKGROUND != 0 {
+                // the background: effectively at infinity
+                (ziorigin, zistepu, zistepv) = (BACKGROUND_ZI, 0.0, 0.0);
+                for (u, v, n) in span_list(s.spans) {
+                    image.rgb[v * w + u..v * w + u + n].fill(clear);
+                }
+            } else {
+                faces += 1;
+                if s.flags & SURF_DRAWSKY != 0 {
+                    for (u, v, n) in span_list(s.spans) {
+                        let row = &mut image.rgb[v * w + u..v * w + u + n];
+                        match sky_tex {
+                            Some(mt) => draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &sky_view, palette),
+                            None => row.fill(clear),
+                        }
+                        drawn += n as u64;
+                    }
+                } else {
+                    drawn += self.draw_face_spans(
+                        image, &s, &span_list, &sview, &mipview, cam, persp, palette, turb, time, light_styles,
+                        colormap, ents, bits, light_dir, clear,
+                    );
+                }
+            }
+            // D_DrawZSpans
+            let izistep = c_ftoi((zistepu * 32768.0 * 65536.0) as f64);
+            for (u, v, n) in span_list(s.spans) {
+                let zi = (ziorigin + v as f32 * zistepv + u as f32 * zistepu) as f64;
+                let mut izi = c_ftoi(zi * 32768.0 * 65536.0);
+                for z in &mut izbuf[v * w + u..v * w + u + n] {
+                    *z = (izi >> 16) as i16;
+                    izi = izi.wrapping_add(izistep);
+                }
+            }
+        }
+        self.spans = spans_owned;
+        stat(|st| {
+            st.world_pixels += drawn;
+            st.faces_drawn += faces;
+        });
+    }
+
+    /// One wall or liquid surface's spans (`D_DrawSurfaces`' turbulent and
+    /// cached branches, and the port's fallbacks for textureless or unlit
+    /// faces). Returns the pixels drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_face_spans<I: Iterator<Item = (usize, usize, usize)>>(
+        &mut self,
+        image: &mut Image,
+        s: &Surf,
+        span_list: &impl Fn(u32) -> I,
+        sview: &ScreenProj,
+        mipview: &MipView,
+        cam: &Camera,
+        persp: super::raster::Persp,
+        palette: &[[u8; 3]; 256],
+        turb: &TurbTable,
+        time: f32,
+        light_styles: &[f32; LIGHTSTYLES],
+        colormap: Option<&[u8]>,
+        ents: &[Ent],
+        bits: &[u32],
+        light_dir: Vec3,
+        clear: [u8; 3],
+    ) -> u64 {
+        let w = self.w;
+        let e = &ents[s.ent as usize];
+        let bsp = e.bsp;
+        let fi = s.face as usize;
+        let face = &bsp.faces[fi];
+        let ti: Option<&TexInfo> = usize::try_from(face.texinfo).ok().and_then(|i| bsp.texinfo.get(i));
+        // R_TextureAnimation: the frame drawn, with the entity's alternate cycle.
+        let tex = ti.and_then(|t| {
+            let mi: usize = t.miptex.try_into().ok()?;
+            let anim_mi = texture_animation(bsp, mi, e.frame, time);
+            bsp.textures.get(anim_mi).and_then(|o| o.as_ref()).map(|mt| (anim_mi, mt))
+        });
+        let mut drawn = 0u64;
+        let fill = |image: &mut Image, c: [u8; 3]| {
+            let mut n_all = 0u64;
+            for (u, v, n) in span_list(s.spans) {
+                image.rgb[v * w + u..v * w + u + n].fill(c);
+                n_all += n as u64;
+            }
+            n_all
+        };
+        // The face's gradients from the eye in the model's frame.
+        let Some(grads) = face_grads(bsp, face, sview, sub(cam.pos, e.origin), ti) else {
+            return fill(image, clear);
+        };
+        let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
+        let normal = super::surf::face_normal(bsp, face).unwrap_or([0.0, 0.0, 1.0]);
+        let shade = (0.5 + 0.5 * dot(normal, light_dir).max(0.0)).min(1.0);
+        let turbulent = s.flags & SURF_DRAWTURB != 0;
+        // Only walls are lightmapped (sky and liquids are TEX_SPECIAL).
+        let lightmap: Option<LightMap> = if turbulent {
+            None
+        } else if s.ent == 0 {
+            let geom = face_geom_cached(bsp, fi, face);
+            face_lightmap_world_cached(bsp, fi, face, &geom.poly, light_styles, &e.dlights, face_bits)
+        } else if face_world_poly(bsp, face, &mut self.poly) {
+            stat(|st| st.sub_lm_builds += 1);
+            face_lightmap_dyn(bsp, face, &self.poly, light_styles, &e.dlights, face_bits)
+        } else {
+            None
+        };
+        match tex {
+            Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
+                let (tw, th) = (mt.width as usize, mt.height as usize);
+                if turbulent {
+                    for (u, v, n) in span_list(s.spans) {
+                        let row = &mut image.rgb[v * w + u..v * w + u + n];
+                        span_turb(row, &span_at(&grads, u, v), &grads, &mt.pixels, tw, th, palette, turb, time, persp);
+                        drawn += n as u64;
+                    }
+                    return drawn;
+                }
+                let block = match (lightmap.as_ref(), colormap) {
+                    (Some(lm), Some(cm)) => {
+                        let dlit = any_dlight_reaches(bsp, face, &e.dlights, face_bits);
+                        // D_MipLevelForScale on the surface's nearest 1/z
+                        let mip = ti.map_or(0, |t| mipview.level_for_nearzi(s.nearzi, t));
+                        face_surf_block(
+                            fi, face, tex_index, mt, lm, cm, WorldFingerprint::of(bsp), bsp.faces.len(),
+                            light_styles, dlit, e.world_bsp, mip,
+                        )
+                    }
+                    _ => None,
+                };
+                match block {
+                    Some(sb) => {
+                        stat(|st| st.surf_hits += 1);
+                        let g = grads.mip_scaled(sb.mip);
+                        let fx = BlockFixed::new(&g, sb.texmins, sb.bw, sb.bh);
+                        for (u, v, n) in span_list(s.spans) {
+                            let row = &mut image.rgb[v * w + u..v * w + u + n];
+                            span_cached(row, &span_at(&g, u, v), &fx, &sb.block, sb.bw, sb.bh, palette, persp);
+                            drawn += n as u64;
+                        }
+                    }
+                    None => {
+                        stat(|st| st.surf_misses += 1);
+                        for (u, v, n) in span_list(s.spans) {
+                            let row = &mut image.rgb[v * w + u..v * w + u + n];
+                            span_tex(row, &span_at(&grads, u, v), &grads, &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), colormap);
+                            drawn += n as u64;
+                        }
+                    }
+                }
+            }
+            _ => {
+                // The port's flat colour for a face without a texture (test
+                // maps): a 1x1 texture lit by the lightmap when there is one.
+                let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
+                let base = hash_color(key);
+                let to8 = |c: f32| (c * 255.0).clamp(0.0, 255.0) as u8;
+                match lightmap.as_ref() {
+                    Some(lm) => {
+                        let mut pal1 = [[0u8; 3]; 256];
+                        pal1[0] = [to8(base[0]), to8(base[1]), to8(base[2])];
+                        for (u, v, n) in span_list(s.spans) {
+                            let row = &mut image.rgb[v * w + u..v * w + u + n];
+                            span_tex(row, &span_at(&grads, u, v), &grads, &[0u8], 1, 1, &pal1, shade, Some(lm), colormap);
+                            drawn += n as u64;
+                        }
+                    }
+                    None => drawn += fill(image, [to8(base[0] * shade), to8(base[1] * shade), to8(base[2] * shade)]),
+                }
+            }
+        }
+        drawn
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::cross;
+    use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
+    use crate::render::{demo_room, recycle_image, render_scene_ext_sprited, ZBUF};
+
+    fn palette() -> [[u8; 3]; 256] {
+        let mut pal = [[0u8; 3]; 256];
+        for (i, p) in pal.iter_mut().enumerate() {
+            *p = [i as u8, (i * 7) as u8, (i * 13) as u8];
+        }
+        pal
+    }
+
+    fn render(cam: &Camera, w: usize, h: usize) -> Image {
+        render_scene_ext_sprited(
+            &demo_room(), cam, w, h, &palette(), &[], &[], &[], None, 0.0, &[], &[],
+            &NEUTRAL_LIGHTSTYLE_SCALES, None, &[], &RenderOptions::default(),
+        )
+    }
+
+    #[test]
+    fn the_pillar_sorts_in_front_of_the_far_wall() {
+        // A synthetic room without a node tree sorts its faces on 1/z at their
+        // edges: straight at the pillar, its -X face covers the centre and the
+        // far wall shows on either side of it on the same row, all at depths
+        // D_DrawZSpans put there (pillar 168 units ahead, far wall 456).
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let (w, h) = (160usize, 100usize);
+        let img = render(&cam, w, h);
+        let row = h / 2;
+        let (centre, side) = (img.rgb[row * w + w / 2], img.rgb[row * w + w / 2 + 40]);
+        assert_ne!(centre, side, "pillar and far wall are different surfaces");
+        assert!(![centre, side].contains(&palette()[R_CLEARCOLOR]), "both drawn");
+        ZBUF.with(|z| {
+            let z = z.borrow();
+            assert_eq!(z[row * w + w / 2], (32768.0f64 / 168.0) as i16);
+            assert_eq!(z[row * w + w / 2 + 40], (32768.0f64 / 456.0) as i16);
+        });
+    }
+
+    #[test]
+    fn every_pixel_is_drawn_so_the_frame_needs_no_clear() {
+        // The spans cover the view: a recycled buffer full of garbage is
+        // overwritten everywhere.
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let fresh = render(&cam, 96, 64);
+        recycle_image(Image { w: 96, h: 64, rgb: vec![[1, 2, 3]; 96 * 64] });
+        let again = render(&cam, 96, 64);
+        assert_eq!(fresh.rgb, again.rgb);
+        assert!(!again.rgb.contains(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn the_background_is_r_clearcolor_at_infinity() {
+        // Outside the room looking away from it: one background span per row,
+        // palette[2], and D_DrawZSpans' -0.9 "at infinity" 1/z.
+        let cam = Camera::looking_at([-400.0, 0.0, 0.0], [-800.0, 0.0, 0.0], 90.0);
+        let img = render(&cam, 64, 40);
+        assert!(img.rgb.iter().all(|&p| p == palette()[R_CLEARCOLOR]));
+        let bg = ((-0.9f32 as f64 * 32768.0 * 65536.0) as i32 >> 16) as i16;
+        ZBUF.with(|z| assert!(z.borrow()[..64 * 40].iter().all(|&v| v == bg)));
+    }
+
+    #[test]
+    fn the_zbuffer_holds_the_16_bit_1_over_z_of_the_nearest_surface() {
+        // Straight at the pillar's -X face, 168 units ahead: `(int)(zi * 0x8000
+        // * 0x10000) >> 16` = 32768/168 = 195 at the centre pixel.
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let _ = render(&cam, 64, 40);
+        ZBUF.with(|z| assert_eq!(z.borrow()[20 * 64 + 32], (32768.0f64 / 168.0) as i16));
+    }
+
+    #[test]
+    fn the_demo_room_is_wound_as_qbsp_winds_faces() {
+        // Clockwise seen from the front — `R_EmitEdge` reads a face's leading
+        // and trailing edges from that order, so a face wound the other way
+        // makes only inverted spans and draws nothing.
+        let bsp = demo_room();
+        for f in &bsp.faces {
+            let mut poly = Vec::new();
+            assert!(face_world_poly(&bsp, f, &mut poly));
+            let n = super::super::surf::face_normal(&bsp, f).expect("plane");
+            let c = cross(sub(poly[1], poly[0]), sub(poly[2], poly[1]));
+            assert!(dot(c, n) < 0.0, "face {f:?} is wound counter-clockwise");
+        }
+    }
+
+    #[test]
+    fn c_ftoi_is_the_x86_conversion() {
+        assert_eq!(c_ftoi(1.9), 1);
+        assert_eq!(c_ftoi(-1.9), -1);
+        assert_eq!(c_ftoi(3.0e9), i32::MIN);
+        assert_eq!(c_ftoi(-3.0e9), i32::MIN);
+        assert_eq!(c_ftoi(f64::NAN), i32::MIN);
+    }
+}

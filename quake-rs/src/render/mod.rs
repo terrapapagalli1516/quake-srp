@@ -1,15 +1,12 @@
-//! A from-scratch software rasteriser driven by the parsed BSP data.
+//! The software renderer: id's WinQuake 3-D view, driven by the parsed BSP data.
 //!
-//! This is **not** a port of Quake's asm-heavy `d_*.c` span renderer (the
-//! original `WinQuake` software pipeline walked the BSP front-to-back, built
-//! edge tables, and emitted affine-textured spans via hand-tuned x86). Instead
-//! this module is a small, self-contained, allocation-light triangle
-//! rasteriser written purely against the *parsed* [`Bsp`] lump records produced
-//! by [`crate::bsp`]: it reconstructs each face polygon from the
-//! surfedge/edge/vertex tables, transforms it into camera space, perspective
-//! projects it, fan-triangulates, and fills triangles with barycentric
-//! coverage plus a per-pixel depth buffer. Shading is a flat per-face Lambert
-//! term over a stable per-surface hue — no palette, no lightmaps, no textures.
+//! The world and the brush entities go through a port of id's edge-sorted span
+//! renderer (`edge`: `r_bsp.c`, `r_draw.c`, `r_edge.c`, `d_edge.c`) — the BSP
+//! walked front to back into one edge list, spans emitted per scanline for the
+//! nearest surface, each pixel drawn once over the surface cache with
+//! `D_DrawSpans16`, and a 16-bit 1/z buffer left for the entities: alias
+//! models (`D_PolysetDraw`), sprites and particles. [`render_bsp`] is a
+//! flat-shaded triangle debug view with no textures or lightmaps.
 //!
 //! Design goals, in priority order:
 //!  * **Memory safety.** No `unsafe` (the crate is `#![forbid(unsafe_code)]`),
@@ -30,10 +27,11 @@
 //!
 //! This file keeps `r_main.c`'s share: [`Image`], [`Camera`], the flat
 //! [`render_bsp`] and the `render_scene*` entry points (`R_RenderView`). The rest
-//! follows id's files: `view` (view.c), `world` (r_bsp.c), `raster` (the
-//! triangle fillers), `light` (r_light.c, `R_BuildLightMap`), `surf` (r_surf.c,
+//! follows id's files: `view` (view.c), `edge` (r_bsp.c, r_draw.c, r_edge.c,
+//! d_edge.c), `world` (the brush entities handed to it), `raster` (the span
+//! routines, d_scan.c), `light` (r_light.c, `R_BuildLightMap`), `surf` (r_surf.c,
 //! d_surf.c), `warp` (d_scan.c's turbulence), `sky` (r_sky.c, d_sky.c), `vis`
-//! (PVS, frustum, near clip), `alias` (r_alias.c, r_aclip.c), `polyse`
+//! (`Mod_PointInLeaf`), `alias` (r_alias.c, r_aclip.c), `polyse`
 //! (d_polyse.c), `sprite` (r_sprite.c), `part` (r_part.c), `stats` (the
 //! profiler). The 2-D layer is beside it: [`crate::draw`], [`crate::screen`],
 //! [`crate::sbar`], [`crate::menu`], [`crate::keys`], [`crate::console`].
@@ -42,13 +40,12 @@ use crate::bsp::Bsp;
 use crate::math::{cross, dot, normalize, sub, Vec3};
 use alias::{draw_alias_model, draw_viewmodel};
 use raster::{hash_color, raster_triangle, Projected};
-use sky::resolve_sky_spans;
 use sprite::draw_sprites;
 use stats::{stat, stats_on, StatInstant};
 use warp::TurbTable;
-use world::{draw_submodel, draw_world_textured};
 
 mod view;
+mod edge;
 mod raster;
 mod light;
 mod surf;
@@ -94,7 +91,7 @@ pub use view::{
 };
 pub use vis::point_in_leaf;
 pub use warp::apply_warp;
-pub use world::{draw_brush_bsp, BModelInstance, ExternalBModel};
+pub use world::{BModelInstance, ExternalBModel};
 
 // ---------------------------------------------------------------------------
 // Image
@@ -119,15 +116,6 @@ impl Image {
             h,
             rgb: vec![bg; count],
         }
-    }
-
-    /// [`Image::new`] on a spare frame buffer ([`recycle_image`]) when one is
-    /// kept: the same pixels (all `bg`), no allocation at a steady size.
-    pub(crate) fn reused(w: usize, h: usize, bg: [u8; 3]) -> Image {
-        let mut rgb = take_spare_rgb();
-        rgb.clear();
-        rgb.resize(w.saturating_mul(h), bg);
-        Image { w, h, rgb }
     }
 
     /// A `w * h` image on a spare frame buffer whose old pixels are LEFT IN
@@ -186,8 +174,7 @@ impl Image {
 // per-thread pool: the host hands a presented frame back ([`recycle_image`])
 // and the next frame's view ([`render_scene_ext_sprited`]), composed screen
 // ([`compose_view`]) and warp snapshot ([`apply_warp`]) reuse the allocations.
-// It is purely an allocation cache — every reuse either fills the buffer as a
-// fresh one was ([`Image::reused`]) or writes every pixel
+// It is purely an allocation cache — every reuse writes every pixel
 // ([`Image::reused_uncleared`]) — so nothing drawn depends on it.
 
 /// Spare frame buffers kept: one frame's view, composed screen and warp
@@ -197,9 +184,11 @@ const SPARE_FRAMES: usize = 3;
 thread_local! {
     /// Pixel buffers of frames handed back by [`recycle_image`].
     static SPARE_RGB: std::cell::RefCell<Vec<Vec<[u8; 3]>>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// The world z-buffer (`d_pzbuffer`), re-filled by every
-    /// [`render_scene_ext_sprited`].
-    static ZBUF: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// id's z-buffer, `d_pzbuffer`: the 16-bit 1/z of every pixel of the view,
+    /// `(1/z * 0x8000 * 0x10000) >> 16` (larger is nearer). Never cleared:
+    /// every frame's world spans write all of it (`D_DrawZSpans`), and the
+    /// entities test and write it.
+    static ZBUF: std::cell::RefCell<Vec<i16>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Hand a finished frame's pixel buffer back so the next frame reuses it
@@ -683,11 +672,10 @@ pub fn parse_palette(bytes: &[u8]) -> Option<[[u8; 3]; 256]> {
     Some(pal)
 }
 
-/// Render `bsp` with its real miptextures sampled through `palette` (Quake's
-/// `gfx/palette.lmp`). Texture coordinates come from each face's `texinfo` axes;
-/// sampling is perspective-correct. Faces whose texture has no inline pixels
-/// fall back to the flat hashed colour of [`render_bsp`]. Same view transform,
-/// projection, near clip, and backface cull as [`render_bsp`].
+/// Render `bsp` alone with its real miptextures sampled through `palette`
+/// (Quake's `gfx/palette.lmp`), at time 0 with neutral light styles and no
+/// colormap: the world pass of [`render_scene_ext_sprited`] with no entities.
+/// Faces whose texture has no inline pixels fall back to a flat hashed colour.
 pub fn render_bsp_textured(
     bsp: &Bsp,
     cam: &Camera,
@@ -695,17 +683,11 @@ pub fn render_bsp_textured(
     h: usize,
     palette: &[[u8; 3]; 256],
 ) -> Image {
-    let mut image = Image::new(w, h, [10, 10, 14]);
-    if w == 0 || h == 0 {
-        return image;
-    }
-    let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     // Static (time 0) world: liquids/sky show their texture but do not advance.
-    let turb = TurbTable::new();
-    let opts = RenderOptions::default();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, &opts, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None);
-    resolve_sky_spans(&mut image, &zbuf, bsp, palette);
-    image
+    render_scene_ext_sprited(
+        bsp, cam, w, h, palette, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[],
+        &RenderOptions::default(),
+    )
 }
 
 /// Render `bsp` with its real miptextures (as [`render_bsp_textured`]) and then
@@ -861,6 +843,12 @@ pub fn render_scene_ext(
 /// `mod_sprite` entities (the `s_explod.spr` explosion flash, bubbles) — and the
 /// [`RenderOptions`] (pixel aspect, extras). An empty `sprites` slice and the
 /// default options are byte-identical to [`render_scene_ext`].
+///
+/// `R_RenderView_`: `R_EdgeDrawing` — the world and every brush entity through
+/// one edge list ([`edge`]), each pixel of the view drawn once and its `1/z`
+/// written into the never-cleared 16-bit `d_pzbuffer` — then the entities
+/// against that buffer. Neither the image nor the z-buffer is cleared: the
+/// spans cover the view.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext_sprited(
     bsp: &Bsp,
@@ -880,60 +868,25 @@ pub fn render_scene_ext_sprited(
     sprites: &[SpriteInstance],
     opts: &RenderOptions,
 ) -> Image {
-    // The frame's buffers, kept across frames (see [`recycle_image`]) and
-    // filled exactly as fresh ones.
-    let mut image = Image::reused(w, h, [10, 10, 14]);
+    // The frame's buffers, kept across frames (see [`recycle_image`]).
+    let mut image = Image::reused_uncleared(w, h);
     if w == 0 || h == 0 {
         return image;
     }
     let mut zbuf = ZBUF.with(|z| std::mem::take(&mut *z.borrow_mut()));
-    zbuf.clear();
-    zbuf.resize(w.saturating_mul(h), f32::INFINITY);
-    // The turbulent SIN table for liquid warp, built once and shared by the
-    // world + brush-submodel passes (sky needs no table).
+    zbuf.resize(w.saturating_mul(h), 0);
+    // The turbulent SIN table for liquid warp.
     let turb = TurbTable::new();
-    // Phase wall-timers: `StatInstant::now()` is only evaluated when the profiler is
-    // on (via `.then(..)`), so the shared render path never reads a clock. (On wasm,
-    // where `Instant` is unavailable, only the opt-in benchmark build turns the
-    // profiler on, after installing a JS clock via `set_render_stats_clock`.)
-    //
-    // Brush entities first, then the world. The z-buffer makes visibility the
-    // same in any order, but id puts bmodel faces in the world's edge list, so
-    // a door or an item box in front of a wall cuts that wall's spans — and the
-    // 16-pixel span routines restart their grid where a run of passing z tests
-    // starts (`raster.rs`, `z_test_runs`). Drawn first, a bmodel cuts the
-    // world's runs as it cuts id's spans (the case that shows: e1m3's shells
-    // box). A world face in front of a bmodel does not cut its runs; no oracle
-    // view has shown that.
-    let ts = stats_on().then(StatInstant::now);
-    for bm in bmodels {
-        // Inline submodels share the world `bsp`, so their surface blocks ARE cached.
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, opts, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame, true);
-    }
-    if let Some(t) = ts { stat(|s| s.submodel_ns += t.elapsed().as_nanos() as u64); }
-    let te = stats_on().then(StatInstant::now);
-    // External brush models (Quake's `b_*.bsp` item boxes: explosive box, ammo
-    // and health boxes). Each draws its OWN bsp's MODEL-0 faces, translated to the
-    // item origin, against the shared z-buffer so it occludes/ is occluded by the
-    // world correctly. These boxes are not dynamically lit in the original game,
-    // so the shared submodel path is called with no dlights (its static/multi-
-    // style lightmap, or fullbright, is used). The one `turb` table built above is
-    // reused, so drawing N boxes builds no extra tables. An empty `external` slice
-    // draws nothing, leaving the image identical to the pre-external behaviour —
-    // which is why `render_scene` and every prior caller can pass `&[]`.
-    for ext in external {
-        // External item boxes re-clone their bsp per instance every frame, so they
-        // BYPASS the surface cache (cache_surf = false) — caching them would only
-        // evict the world's resident cache. See [`face_surf_block`].
-        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, opts, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
-    }
-    if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
-    let tw = stats_on().then(StatInstant::now);
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, opts, palette, &turb, time, light_styles, dlights, colormap);
-    if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
-    // The sky, span by span, now that every brush surface that can cover it has
-    // been drawn (id: `D_DrawSkyScans8` inside `D_DrawSurfaces`, before entities).
-    resolve_sky_spans(&mut image, &zbuf, bsp, palette);
+    edge::render_edges(
+        &mut image, &mut zbuf, bsp, cam, opts, palette, &turb, time, light_styles, dlights, colormap, bmodels,
+        external,
+    );
+    // The entities: alias models, particles, sprites and the gun, each testing
+    // (and writing) the world's 16-bit 1/z. Phase wall-timers: `StatInstant::now()`
+    // is only evaluated when the profiler is on (via `.then(..)`), so the shared
+    // render path never reads a clock. (On wasm, where `Instant` is unavailable,
+    // only the opt-in benchmark build turns the profiler on, after installing a
+    // JS clock via `set_render_stats_clock`.)
     let ta = stats_on().then(StatInstant::now);
     for inst in models {
         draw_alias_model(&mut image, &mut zbuf, bsp, cam, opts, inst, palette, dlights, light_styles, time, colormap);
@@ -989,7 +942,7 @@ pub fn demo_room() -> Bsp {
     //
     // For each quad we:
     //   * push its 4 corners as vertexes,
-    //   * push 4 edges connecting them in CCW order (as seen from inside),
+    //   * push 4 edges connecting them in order (wound clockwise from inside),
     //   * push 4 surfedges (positive, forward) referencing those edges,
     //   * push a plane (inward normal) and a face referencing the surfedges.
     //
@@ -1014,6 +967,14 @@ pub fn demo_room() -> Bsp {
         texinfo_index: i16,
         ptype: i32,
     ) {
+        // Wind the quad as qbsp does: clockwise seen from its front (the side
+        // the normal points to), the order id's edge renderer reads leading
+        // and trailing edges from (`R_EmitEdge`).
+        let mut corners = corners;
+        let (e1, e2) = (sub(corners[1], corners[0]), sub(corners[2], corners[1]));
+        if dot(cross(e1, e2), normal) > 0.0 {
+            corners.reverse();
+        }
         let base_vtx = vertexes.len() as u16;
         for c in corners {
             vertexes.push(DVertex { point: c });
@@ -1382,8 +1343,7 @@ mod tests {
     #[test]
     fn render_scene_empty_matches_textured() {
         // With no instances, render_scene must be pixel-for-pixel identical to
-        // render_bsp_textured — proving the draw_world_textured refactor is
-        // behaviour-preserving.
+        // render_bsp_textured (the world alone).
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
@@ -1516,3 +1476,4 @@ mod tests {
         bsp
     }
 }
+

@@ -21,37 +21,74 @@ use super::Image;
 /// (V_SetContentsColor), so wobble and tint compose as in software Quake. The
 /// view's buffer goes back to the frame pool.
 pub fn apply_warp(view: Image, out_w: usize, out_h: usize, clock: f32) -> Image {
-    const AMP2: usize = 3;
     const SPEED: f64 = 20.0;
     let (w, h) = (view.w, view.h);
     if w == 0 || h == 0 || out_w == 0 || out_h == 0 || view.rgb.len() < w * h {
         super::recycle_image(view);
         return Image::new(out_w, out_h, [0, 0, 0]);
     }
-    let wratio = w as f32 / out_w as f32;
-    let hratio = h as f32 / out_h as f32;
-    // rowptr[v] = (int)((float)v * hratio * h / (h + AMP2*2)), v < scr height + 2*AMP2
-    let rowptr: Vec<usize> = (0..out_h + 2 * AMP2)
-        .map(|v| ((v as f32 * hratio * h as f32 / (h + 2 * AMP2) as f32) as usize).min(h - 1))
-        .collect();
-    // column[u] = (int)((float)u * wratio * w / (w + AMP2*2)), u < scr width + 2*AMP2
-    let column: Vec<usize> = (0..out_w + 2 * AMP2)
-        .map(|u| ((u as f32 * wratio * w as f32 / (w + 2 * AMP2) as f32) as usize).min(w - 1))
-        .collect();
     let phase = ((clock as f64 * SPEED) as i64 & 127) as usize;
-    // `turb = intsintable + phase`, read at `turb[u]` and `turb[v]` across the
-    // whole screen: the table (R_InitTurb) is not wrapped to one cycle.
-    let sintable = intsintable(phase + out_w.max(out_h));
     let mut out = Image::reused_uncleared(out_w, out_h);
-    for (v, row) in out.rgb.chunks_exact_mut(out_w).take(out_h).enumerate() {
-        let tv = sintable[phase + v] as usize; // 0..2*AMP2
-        for (u, px) in row.iter_mut().enumerate() {
-            let tu = sintable[phase + u] as usize; // 0..2*AMP2
-            *px = view.rgb[rowptr[v + tu] * w + column[tv + u]];
+    WARP_TABLES.with(|t| {
+        let mut t = t.borrow_mut();
+        t.prepare(w, h, out_w, out_h, phase + out_w.max(out_h));
+        let WarpTables { rowptr, column, sin, .. } = &*t;
+        for (v, row) in out.rgb.chunks_exact_mut(out_w).take(out_h).enumerate() {
+            let tv = sin[phase + v] as usize; // 0..2*AMP2
+            for (u, px) in row.iter_mut().enumerate() {
+                let tu = sin[phase + u] as usize; // 0..2*AMP2
+                *px = view.rgb[rowptr[v + tu] * w + column[tv + u]];
+            }
         }
-    }
+    });
     super::recycle_image(view);
     out
+}
+
+/// `AMP2` (d_local.h): the warp's sine swings `0..2*AMP2` pixels.
+const WARP_AMP2: usize = 3;
+
+/// [`apply_warp`]'s tables, kept across frames like id's static arrays
+/// (`D_WarpScreen`'s `rowptr`/`column` and R_InitTurb's `intsintable`), so an
+/// underwater frame allocates nothing: `rowptr` and `column` for the last
+/// view and screen sizes, and `intsintable` as far as any frame has read it.
+struct WarpTables {
+    /// `(view w, view h, screen w, screen h)` the row/column tables are for.
+    sizes: (usize, usize, usize, usize),
+    rowptr: Vec<usize>,
+    column: Vec<usize>,
+    sin: Vec<i32>,
+}
+
+thread_local! {
+    static WARP_TABLES: std::cell::RefCell<WarpTables> = const {
+        std::cell::RefCell::new(WarpTables { sizes: (0, 0, 0, 0), rowptr: Vec::new(), column: Vec::new(), sin: Vec::new() })
+    };
+}
+
+impl WarpTables {
+    /// The tables for a `w x h` view warped over an `out_w x out_h` screen,
+    /// with at least `n` entries of `intsintable`. The arithmetic is
+    /// `D_WarpScreen`'s `float`s, as it was per frame.
+    fn prepare(&mut self, w: usize, h: usize, out_w: usize, out_h: usize, n: usize) {
+        extend_intsintable(&mut self.sin, n);
+        if self.sizes == (w, h, out_w, out_h) {
+            return;
+        }
+        self.sizes = (w, h, out_w, out_h);
+        let wratio = w as f32 / out_w as f32;
+        let hratio = h as f32 / out_h as f32;
+        // rowptr[v] = (int)((float)v * hratio * h / (h + AMP2*2)), v < scr height + 2*AMP2
+        self.rowptr.clear();
+        self.rowptr.extend((0..out_h + 2 * WARP_AMP2).map(|v| {
+            ((v as f32 * hratio * h as f32 / (h + 2 * WARP_AMP2) as f32) as usize).min(h - 1)
+        }));
+        // column[u] = (int)((float)u * wratio * w / (w + AMP2*2)), u < scr width + 2*AMP2
+        self.column.clear();
+        self.column.extend((0..out_w + 2 * WARP_AMP2).map(|u| {
+            ((u as f32 * wratio * w as f32 / (w + 2 * WARP_AMP2) as f32) as usize).min(w - 1)
+        }));
+    }
 }
 
 /// `intsintable` (`R_InitTurb`, r_main.c): `AMP2 + sin(i*3.14159*2/CYCLE)*AMP2`,
@@ -61,12 +98,20 @@ pub fn apply_warp(view: Image, out_w: usize, out_h: usize, clock: f32) -> Image 
 /// and it is not 128-periodic: at i = 128, 256, ... the sine is a hair below 0
 /// and the entry is 2 where i = 0 gives 3. `D_WarpScreen` indexes it without
 /// wrapping, so neither may be folded to one cycle.
-#[allow(clippy::approx_constant)]
+#[cfg(test)]
 fn intsintable(n: usize) -> Vec<i32> {
+    let mut t = Vec::new();
+    extend_intsintable(&mut t, n);
+    t
+}
+
+/// Grow `tab` (the first entries of `intsintable`) to at least `n`.
+#[allow(clippy::approx_constant)]
+fn extend_intsintable(tab: &mut Vec<i32>, n: usize) {
     const AMP2: f64 = 3.0;
-    (0..n)
-        .map(|i| (AMP2 + ((i as f64) * 3.14159 * 2.0 / 128.0).sin() * AMP2) as i32)
-        .collect()
+    for i in tab.len()..n {
+        tab.push((AMP2 + ((i as f64) * 3.14159 * 2.0 / 128.0).sin() * AMP2) as i32);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +226,7 @@ impl TurbTable {
 mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
-    use crate::render::raster::{outline, raster_poly_tex, AttrVert, Persp, PolyGrads, SurfaceMode};
+    use crate::render::raster::{span_at, span_turb, AttrVert, Persp, PolyGrads};
 
     /// A `w x h` image whose pixel (x, y) is `[x, y, 0]`, to read back which
     /// source pixel the warp chose.
@@ -254,6 +299,49 @@ mod tests {
         assert!(apply_warp(coord_image(4, 4), 0, 0, 0.0).rgb.is_empty());
     }
 
+    /// The warp kept its tables across frames (second review: it allocated
+    /// `rowptr`, `column` and `intsintable` every underwater frame): frames at
+    /// changing sizes and clocks give exactly what the per-frame computation
+    /// gave, reproduced here from the code before the change.
+    #[test]
+    fn warp_tables_kept_across_frames_change_nothing() {
+        fn per_frame(view: &Image, out_w: usize, out_h: usize, clock: f32) -> Vec<[u8; 3]> {
+            let (w, h) = (view.w, view.h);
+            let (wratio, hratio) = (w as f32 / out_w as f32, h as f32 / out_h as f32);
+            let rowptr: Vec<usize> = (0..out_h + 6)
+                .map(|v| ((v as f32 * hratio * h as f32 / (h + 6) as f32) as usize).min(h - 1))
+                .collect();
+            let column: Vec<usize> = (0..out_w + 6)
+                .map(|u| ((u as f32 * wratio * w as f32 / (w + 6) as f32) as usize).min(w - 1))
+                .collect();
+            let phase = ((clock as f64 * 20.0) as i64 & 127) as usize;
+            let sintable = intsintable(phase + out_w.max(out_h));
+            let mut out = vec![[0u8; 3]; out_w * out_h];
+            for v in 0..out_h {
+                for u in 0..out_w {
+                    let (tu, tv) = (sintable[phase + u] as usize, sintable[phase + v] as usize);
+                    out[v * out_w + u] = view.rgb[rowptr[v + tu] * w + column[tv + u]];
+                }
+            }
+            out
+        }
+        let frames = [
+            (320, 152, 960, 456, 1.6f32),
+            (320, 152, 960, 456, 1.62),
+            (320, 200, 320, 200, 7.3),
+            (266, 200, 800, 600, 0.0),
+            (320, 152, 960, 456, 12.9),
+            (320, 200, 1280, 800, 3.37),
+            (320, 152, 960, 456, 1.6),
+        ];
+        for (w, h, ow, oh, clock) in frames {
+            let view = coord_image(w, h);
+            let want = per_frame(&view, ow, oh, clock);
+            let got = apply_warp(view, ow, oh, clock);
+            assert!(got.rgb == want, "{w}x{h} over {ow}x{oh} at {clock}");
+        }
+    }
+
     #[test]
     fn turb_table_matches_r_initturb() {
         // R_InitTurb: sintable[i] = (int)(AMP + sin(i*3.14159*2/CYCLE)*AMP), 16.16,
@@ -293,8 +381,8 @@ mod tests {
 
     #[test]
     fn turbulent_sampler_animates_at_fixed_st() {
-        // Drive `raster_poly_tex` in Turb mode over a single screen-filling
-        // triangle and confirm that sampling the SAME geometry at two different
+        // Draw a liquid surface covering the view (one span per row, as
+        // D_DrawSurfaces would) and confirm that sampling the SAME geometry at two different
         // `time` values produces a DIFFERENT framebuffer (it animates), while
         // every sampled index stays in bounds (no panic, no garbage).
         let turb = TurbTable::new();
@@ -306,23 +394,18 @@ mod tests {
             *p = [i as u8, i as u8, i as u8];
         }
 
-        // One large triangle covering the framebuffer, spanning a range of (s,t)
-        // so the warp samples many texels.
+        // A surface spanning a range of (s,t) so the warp samples many texels.
         let (w, h) = (40usize, 40usize);
+        let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+        let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
+        let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
+        let g = PolyGrads::from_vertices(&[v0, v1, v2]).expect("triangle");
         let render_at = |time: f32| {
             let mut img = Image::new(w, h, [0, 0, 0]);
-            let mut zb = vec![f32::INFINITY; w * h];
-            let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
-            let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
-            let tri = [v0, v1, v2];
-            let g = PolyGrads::from_vertices(&tri).expect("triangle");
-            raster_poly_tex(
-                &mut img, &mut zb, &outline(&tri), &g,
-                &pixels, 64, 64, &pal, 1.0, None,
-                SurfaceMode::Turb { turb: &turb, time, persp: Persp::Exact },
-                None,
-            );
+            for y in 0..h {
+                let row = &mut img.rgb[y * w..(y + 1) * w];
+                span_turb(row, &span_at(&g, 0, y), &g, &pixels, 64, 64, &pal, &turb, time, Persp::Exact);
+            }
             img
         };
         let a = render_at(0.0);
@@ -336,7 +419,7 @@ mod tests {
         // proving the sample stayed in bounds (out-of-range would have continued).
         assert!(
             a.rgb.iter().any(|p| *p != [0, 0, 0]),
-            "turbulent triangle drew nothing"
+            "turbulent surface drew nothing"
         );
         for p in a.rgb.iter().chain(b.rgb.iter()) {
             assert!(p[0] == p[1] && p[1] == p[2], "sampled colour not a palette grey: {p:?}");

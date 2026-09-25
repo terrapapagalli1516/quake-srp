@@ -15,8 +15,9 @@ demo3`; a demo's end is `Host_EndGame` → `CL_NextDemo`), a disconnected state
 message per host frame, uncapped, `CL_FinishTimeDemo`'s line: 969 / 985 /
 1090 frames for demo1/2/3, id's counts — in the console (the page runs host
 frames back to back in ~12 ms slices) and natively, `quaketool timedemo pak
-demo1 --res WxH`, next to id's C (`PERF_PLAN.md` §10: native 1678 / 530 / 249
-fps at 320x200 / 640x400 / 960x600 against id's 1961 / 786 / 445); **`pause`**
+demo1 --res WxH`, next to id's C (`PERF_PLAN.md` §10, with the edge renderer:
+native 2602 / 1007 / 516 fps at 320x200 / 640x400 / 960x600 against id's
+1822 / 745 / 419; the browser 1916 / 723 / 381); **`pause`**
 (the PAUSE key, `Host_Pause_f`, `SCR_DrawPause` — pixel-exact against id's
 screen in the 2-D oracle's new `pause` scenario; CENSUS L12's pause half).
 No loading plaque: loads take 6–23 ms, inside a frame. Evidence: the new
@@ -44,6 +45,22 @@ Proof: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1
 byte for byte. Frame hashes, ABI, goldens, simbench/census, tests (moved
 ones counted), clippy and the eight verify scripts unchanged.
 
+## Second review fixes, client side (2026-09-25, branch `quake/polish3`)
+
+The second review's client/platform findings (AUDIT.md's section of the same
+name): no weapon-icon flash at level/load/demo start (id stamps the signon's
+items before CL_LerpPoint, so it is over by the first frame); a busy frame
+can no longer drop a mover's stop sound past the 12-sound cap (the hum
+looped forever); console prints reach the notify lines, and "Go to console"
+is Con_ToggleConsole_f; Tab pressed in the menu is not +showscores after it;
+old saves load with the player named; the underwater warp keeps its tables;
+demo particles fall by the sv_gravity cvar. polish2's quake-wasm leftovers:
+only a program start resets the menu cursors; the host drives the server
+with Host_FilterTime's double; the page clamps each side before the master
+volume and re-spatialises one-shots (CENSUS L15 closed). **Visible:** the
+page's canvas is the largest 4:3 box the window fits (976x732 at 1440x900,
+never under 640x480), so the 1:1 status bar and menus are a sensible size.
+
 ## Second review fixes (2026-09-25, branch `quake/polish2`)
 
 The second review's findings outside `quake-wasm/src/` (AUDIT.md's section
@@ -57,6 +74,19 @@ outlives the map; census mover baselines; stale docs; menu cursors kept per
 menu, as id's (the last commit: two quake-wasm tests need their menu
 navigation updated with it). Left for the quake-wasm pass: see the AUDIT
 section's list.
+
+## The world through id's edge renderer (2026-09-25, branch `quake/edge`)
+
+PERF_PLAN A3: the world and the brush entities are drawn as WinQuake draws
+them (`render/edge.rs`): the BSP walked front to back into one edge list,
+spans per scanline for the nearest surface, each pixel drawn once with no z
+test, the 16-bit 1/z left for the entities (details in AUDIT.md's section of
+the same name). The polygon walker it replaced is deleted (the branch's last
+commit, byte-identical; the chair can drop it). Oracle: 372 cases, none
+worse by more than a pixel, e1m2 99.21 -> 99.94 (id's face-733 mip quirk now
+reproduced), entity pixels 100% everywhere, brush-entity views 94.35 ->
+99.37. Wasm frame −23 to −33% (p95 −21 to −36%), native −43 to −57%. e1m3
+golden `3531e9cd` -> `1867f5a7` (150 px).
 
 ---
 

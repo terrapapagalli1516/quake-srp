@@ -390,6 +390,13 @@ impl Server {
         sv_gravity()
     }
 
+    /// [`Self::sv_gravity`] with no server at hand: demo playback reads the
+    /// cvar too, and it holds what the last map's worldspawn set (the cvar
+    /// outlives the map, in the C as here).
+    pub fn sv_gravity_cvar() -> f32 {
+        sv_gravity()
+    }
+
     /// Take (and clear) the deferred level-change request a `changelevel()`
     /// builtin recorded this frame, or `None` if none was issued. A front-end
     /// calls this once after [`Self::client_frame`]: when it returns `Some(map)`,

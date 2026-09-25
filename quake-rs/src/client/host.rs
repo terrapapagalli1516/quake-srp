@@ -7,10 +7,10 @@
 /// `Host_FilterTime` (host.c): the most a single frame may advance the game —
 /// a longer real frame (a hitch, a backgrounded tab) is clamped to 0.1 s of
 /// `host_frametime` while `realtime` still takes the whole elapsed time.
-pub const HOST_FRAMETIME_MAX: f32 = 0.1;
+pub const HOST_FRAMETIME_MAX: f64 = 0.1;
 /// `Host_FilterTime`'s lower clamp on `host_frametime` ("don't allow really
 /// long or short frames").
-pub const HOST_FRAMETIME_MIN: f32 = 0.001;
+pub const HOST_FRAMETIME_MIN: f64 = 0.001;
 /// `Host_FilterTime`'s frame cap: no host frame runs until 1/72 s of real
 /// time has passed since the last one ("framerate is too high").
 pub const HOST_FRAME_INTERVAL: f64 = 1.0 / 72.0;
@@ -32,24 +32,26 @@ pub const HOST_FRAME_TOLERANCE: f64 = 0.001;
 /// too high": do nothing this call. `Some(host_frametime)` = run a frame that
 /// advances the game by the real time since the last frame, clamped to
 /// [0.001, 0.1]; `oldrealtime` moves up to `realtime`, dropping any
-/// overshoot, as the C does.
-pub fn host_filter_time(realtime: f64, oldrealtime: &mut f64) -> Option<f32> {
+/// overshoot, as the C does. `host_frametime` is the C's `double`: the server
+/// advances `sv.time` by exactly it (`Server::client_frame_f64`); the client
+/// frame's own timing takes it as an `f32`.
+pub fn host_filter_time(realtime: f64, oldrealtime: &mut f64) -> Option<f64> {
     let elapsed = realtime - *oldrealtime;
     if elapsed < HOST_FRAME_INTERVAL - HOST_FRAME_TOLERANCE {
         return None;
     }
     *oldrealtime = realtime;
-    Some((elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
+    Some(elapsed.clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
 }
 
 /// `Host_FilterTime` with the cap off — while `cls.timedemo` is set
 /// (`if (!cls.timedemo && realtime - oldrealtime < 1.0/72.0)`), every call
 /// runs a host frame, advancing the game by the real time since the last one
 /// under the same [0.001, 0.1] clamps.
-pub fn host_filter_time_uncapped(realtime: f64, oldrealtime: &mut f64) -> f32 {
+pub fn host_filter_time_uncapped(realtime: f64, oldrealtime: &mut f64) -> f64 {
     let elapsed = realtime - *oldrealtime;
     *oldrealtime = realtime;
-    (elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX)
+    elapsed.clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX)
 }
 
 #[cfg(test)]
@@ -62,7 +64,7 @@ mod tests {
     /// timestamp (ms, as the browser reports them), `dt` narrowed to the
     /// export's f32 and summed into an f64 `realtime`. Returns, per call,
     /// `Some(host_frametime)` when a frame ran.
-    fn gate_run(stamps_ms: &[f64]) -> Vec<Option<f32>> {
+    fn gate_run(stamps_ms: &[f64]) -> Vec<Option<f64>> {
         let (mut realtime, mut oldrealtime, mut last) = (0.0f64, 0.0f64, 0.0f64);
         stamps_ms
             .iter()
@@ -76,7 +78,7 @@ mod tests {
     }
 
     /// The call indices at which a frame ran.
-    fn ran_at(runs: &[Option<f32>]) -> Vec<usize> {
+    fn ran_at(runs: &[Option<f64>]) -> Vec<usize> {
         runs.iter().enumerate().filter(|(_, r)| r.is_some()).map(|(i, _)| i).collect()
     }
 
@@ -117,10 +119,21 @@ mod tests {
             let fps = at.len() as f64 / 10.0;
             assert!((fps - hz / k as f64).abs() < 0.2, "{hz} Hz: {fps} fps");
             // The game clock loses nothing: host_frametime sums to real time.
-            let game: f64 = runs.iter().flatten().map(|&t| t as f64).sum();
+            let game: f64 = runs.iter().flatten().sum();
             let real = stamps[*at.last().unwrap()] / 1000.0;
             assert!((game - real).abs() < 1e-3, "{hz} Hz: game {game} vs real {real}");
         }
+    }
+
+    /// `host_frametime` is the C's double — `realtime - oldrealtime`, clamped
+    /// with the double literals 0.001 and 0.1 (host.c) — not an f32 widened
+    /// on the way to the server.
+    #[test]
+    fn host_frametime_is_the_double() {
+        let mut old = 0.0;
+        assert_eq!(host_filter_time(0.05, &mut old), Some(0.05));
+        assert_ne!(0.05, f64::from(0.05f32));
+        assert_eq!(host_filter_time(0.5, &mut old), Some(0.1));
     }
 
     #[test]
@@ -173,7 +186,7 @@ mod tests {
                 assert!(since < min + 1e-3, "call {i} skipped {since} ms after the last frame");
             }
         }
-        let game: f64 = runs.iter().flatten().map(|&t| t as f64).sum();
+        let game: f64 = runs.iter().flatten().sum();
         assert!((game - stamps[*at.last().unwrap()] / 1000.0).abs() < 1e-3);
     }
 }

@@ -12,7 +12,9 @@ own demo1:
      pending ends it too (S_StartSound picks the channel before the
      audibility test): fed through drainGameSounds from a stand-in `exp`, the
      hum never starts (and, as a control, the same hum alone does);
-  4. no console errors.
+  4. a one-shot's sides are clamped at full before the master volume
+     (snd_mix.c) and it is re-spatialized every frame (S_Update);
+  5. no console errors.
 
 Usage: verify_loops.py [webdir]   (defaults to the repo's web/; pass a temp dir
 holding index.html + a freshly built quake_wasm.wasm).
@@ -69,9 +71,10 @@ with sync_playwright() as p:
                      + dz * exp.listener_right_z()) / dist;
                 pan = Math.min(1, Math.max(-1, pan));
             }
-            const mono = Math.max(0, 1 - dist * p.atten / 1000) * p.vol * masterVolume();
-            return Math.abs(l.lg.gain.value - Math.min(1, Math.max(0, mono * (1 - pan)))) < 0.05
-                && Math.abs(l.rg.gain.value - Math.min(1, Math.max(0, mono * (1 + pan)))) < 0.05;
+            // Each side clamped at full BEFORE the master volume (snd_mix.c).
+            const g = Math.max(0, 1 - dist * p.atten / 1000) * p.vol, m = masterVolume();
+            return Math.abs(l.lg.gain.value - Math.min(1, Math.max(0, g * (1 - pan))) * m) < 0.05
+                && Math.abs(l.rg.gain.value - Math.min(1, Math.max(0, g * (1 + pan))) * m) < 0.05;
         }),
     })""")
     check("a door hum plays as a looping source", s1["n"] >= 1 and s1["looping"], str(s1))
@@ -124,6 +127,68 @@ with sync_playwright() as p:
     }"""
     check("control: a lone hum on a fresh sample starts once decoded", pg.evaluate(hum, True))
     check("an inaudible sound on its key keeps a pending hum from starting", not pg.evaluate(hum, False))
+
+    # 4. A one-shot (no cue point) 50 units to the listener's right, fed the
+    #    same way: each side is clamped at full BEFORE the master volume
+    #    (snd_mix.c clamps leftvol/rightvol at 255, S_TransferPaintBuffer then
+    #    scales by `volume`), so its near side is the master volume, not full;
+    #    and S_Update re-spatializes it every frame from its origin while the
+    #    recorded player moves on.
+    shot = """async () => {
+        const real = exp;
+        const n = 22050, wav = new Uint8Array(44 + n);
+        const dv = new DataView(wav.buffer);
+        const tag = (o, s) => { for (let i = 0; i < 4; i++) wav[o + i] = s.charCodeAt(i); };
+        tag(0, 'RIFF'); dv.setUint32(4, 36 + n, true); tag(8, 'WAVE');
+        tag(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+        dv.setUint16(22, 1, true); dv.setUint32(24, 11025, true); dv.setUint32(28, 11025, true);
+        dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+        tag(36, 'data'); dv.setUint32(40, n, true);
+        for (let i = 0; i < n; i++) wav[44 + i] = 128 + ((Math.random() * 64) | 0) - 32;
+        const o = [real.listener_x() + 50 * real.listener_right_x(),
+                   real.listener_y() + 50 * real.listener_right_y(),
+                   real.listener_z() + 50 * real.listener_right_z()];
+        let q = 1;
+        exp = {
+            memory: { buffer: wav.buffer }, set_audio_ready: () => {}, volume: () => real.volume(),
+            poll_sound: () => q-- > 0 ? wav.length : 0,
+            sound_ptr: () => 0, sound_entity: () => 901, sound_channel: () => 0,
+            sound_loop_start: () => -1, sound_loop_end: () => 0,
+            sound_origin_x: () => o[0], sound_origin_y: () => o[1], sound_origin_z: () => o[2],
+            sound_volume: () => 1, sound_attenuation: () => 1, sound_is_view_entity: () => 0,
+            listener_x: () => real.listener_x(), listener_y: () => real.listener_y(),
+            listener_z: () => real.listener_z(), listener_right_x: () => real.listener_right_x(),
+            listener_right_y: () => real.listener_right_y(), listener_right_z: () => real.listener_right_z(),
+            sound_generation: () => real.sound_generation(),
+        };
+        const before = dynShots.length;
+        try { drainGameSounds(); } finally { exp = real; }
+        for (let i = 0; i < 40 && dynShots.length === before; i++) await new Promise(r => setTimeout(r, 25));
+        const l = dynShots[dynShots.length - 1];
+        if (!l || l.lp.ox !== o[0]) return { ok: false };
+        const first = [l.lg.gain.value, l.rg.gain.value];
+        const lx0 = [real.listener_x(), real.listener_y()];
+        await new Promise(r => setTimeout(r, 700));
+        const law = () => {
+            const dx = o[0] - exp.listener_x(), dy = o[1] - exp.listener_y(), dz = o[2] - exp.listener_z();
+            const dist = Math.hypot(dx, dy, dz);
+            const pan = Math.min(1, Math.max(-1, (dx * exp.listener_right_x() + dy * exp.listener_right_y()
+                + dz * exp.listener_right_z()) / dist));
+            const g = Math.max(0, 1 - dist / 1000), m = masterVolume();
+            return [Math.min(1, g * (1 - pan)) * m, Math.min(1, g * (1 + pan)) * m];
+        };
+        const now = [l.lg.gain.value, l.rg.gain.value], want = law();
+        const moved = Math.hypot(real.listener_x() - lx0[0], real.listener_y() - lx0[1]);
+        l.src.stop();
+        return { ok: true, first, master: masterVolume(), now, want, moved };
+    }"""
+    r = pg.evaluate(shot)
+    check("a one-shot is tracked for re-spatialization", r["ok"], str(r))
+    if r["ok"]:
+        check("its near side is clamped before the master volume (right = volume, not 1)",
+              abs(r["first"][1] - r["master"]) < 0.02 and r["first"][0] < 0.05 and r["master"] < 1, str(r))
+        check("it is re-spatialized each frame from its origin as the player moves",
+              r["moved"] > 1 and all(abs(a - b) < 0.03 for a, b in zip(r["now"], r["want"])), str(r))
 
     check("no console errors", not errs, str(errs[-5:]))
     br.close()

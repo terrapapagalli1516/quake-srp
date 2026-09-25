@@ -519,7 +519,7 @@ pub enum MenuAction {
 /// screen (no `M_Menu_*_f` touches one), so each menu keeps its place: Escape
 /// from Options lands on "Options" in the main menu, Load after a load opens
 /// on the slot just loaded. Load and Save share `load_cursor`. The Help and
-/// Quit screens have none. All are 0 at program start ([`Menu::reset_nav`]).
+/// Quit screens have none. All are 0 at program start ([`Menu::reset_boot`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Cursors {
     /// `m_main_cursor`.
@@ -808,10 +808,11 @@ impl Menu {
         self.visible = false;
     }
 
-    /// Reset the menu's NAVIGATION to boot state — closed, on the Main screen,
-    /// every menu's cursor on its first item (menu.c's statics at program
-    /// start), no Help page / Quit return / bind grab, queued sounds dropped —
-    /// while KEEPING every user choice: the Options cvars
+    /// Reset the menu's NAVIGATION — closed, on the Main screen, no Help page /
+    /// Quit return / bind grab, queued sounds dropped — while KEEPING every
+    /// menu's cursor (menu.c's statics: a `map`, New Game, load or demo leaves
+    /// them where they were; only a program start has them at 0,
+    /// [`Menu::reset_boot`]) and every user choice: the Options cvars
     /// (Screen size, gamma, sensitivity, volume, CD volume, Always Run, Invert
     /// Mouse, lookspring, lookstrafe), the Web extras and the whole key-bindings table. In
     /// WinQuake a map start / New Game only restarts the server: cvars and
@@ -823,19 +824,23 @@ impl Menu {
     /// Load/Save slot comments (`set_save_comments`) and the game-active gate
     /// (refreshed every `step`) — survive too: they reflect engine state, not
     /// navigation.
-    ///
-    /// The cursors are a program start's: in the C a `map`, New Game or load
-    /// keeps them, but the host's boot shares this reset (see AUDIT.md,
-    /// "Second review fixes").
     pub fn reset_nav(&mut self) {
         self.visible = false;
         self.screen = MenuScreen::Main;
-        self.cursors = Cursors::default();
         self.help_page = 0;
         self.quit_prev = MenuScreen::Main;
         self.bind_grab = false;
         self.new_game_confirm = false;
         self.sounds.clear();
+    }
+
+    /// A program start's menu: [`Menu::reset_nav`] with every menu's cursor on
+    /// its first item (menu.c's statics as the program loads). The host's boots
+    /// (the page's load and its walk button) call this; the user choices
+    /// survive it too.
+    pub fn reset_boot(&mut self) {
+        self.reset_nav();
+        self.cursors = Cursors::default();
     }
 
     /// Open the menu directly on the Help/Ordering screen (`M_Menu_Help_f`,
@@ -2507,8 +2512,11 @@ mod tests {
         assert_eq!(m.cursor(), 1, "vid_line keeps its place");
     }
 
+    /// menu.c's cursors are statics: a `map`, New Game, load or demo keeps
+    /// them ([`Menu::reset_nav`]); only a program start has them at 0
+    /// ([`Menu::reset_boot`]).
     #[test]
-    fn reset_nav_is_a_program_start_for_the_cursors() {
+    fn only_a_program_start_resets_the_cursors() {
         let mut m = Menu::new();
         m.open();
         down(&mut m, 2);
@@ -2516,6 +2524,11 @@ mod tests {
         down(&mut m, 5);
         m.cancel();
         m.reset_nav();
+        m.open();
+        assert_eq!(m.cursor(), 2, "m_main_cursor kept");
+        m.select();
+        assert_eq!(m.cursor(), 5, "options_cursor kept");
+        m.reset_boot();
         m.open();
         assert_eq!(m.cursor(), 0);
         down(&mut m, 2);
@@ -3776,10 +3789,11 @@ mod tests {
         // The re-boot reset.
         m.reset_nav();
 
-        // Navigation is back at boot state...
+        // Navigation is back at boot state (the cursors kept: m_main_cursor
+        // is still on Options)...
         assert!(!m.visible, "reset_nav leaves the menu closed");
         assert_eq!(m.screen(), MenuScreen::Main);
-        assert_eq!(m.cursor(), 0);
+        assert_eq!(m.cursor(), 2);
         assert_eq!(m.help_page(), 0);
         assert!(!m.bind_grabbing(), "a pending bind grab is cancelled");
         assert!(m.take_sounds().is_empty(), "queued menu sounds are dropped");
@@ -3804,7 +3818,7 @@ mod tests {
         m.open();
         assert!(m.visible);
         assert_eq!(m.screen(), MenuScreen::Main);
-        assert_eq!(m.cursor(), 0);
+        assert_eq!(m.cursor(), 2, "on m_main_cursor");
     }
 
     #[test]

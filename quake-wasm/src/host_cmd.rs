@@ -253,6 +253,10 @@ fn run_map_command(name: Option<&str>) {
         Some(nw) => {
             a.start_game(nw);
             a.console.println(format!("loading {name}"));
+            // The port's own line (Host_Map_f prints none): the console keeps
+            // it, the notify lines don't — SCR_EndLoadingPlaque's Con_ClearNotify
+            // starts the new level with none.
+            let _ = a.console.take_unnotified();
             // The level loaded: close the console so the player sees the new map
             // — at once, as SCR_BeginLoadingPlaque zeroes scr_con_current.
             a.console.open = false;

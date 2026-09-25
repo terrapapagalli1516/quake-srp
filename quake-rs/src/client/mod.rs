@@ -172,8 +172,9 @@ pub struct Walk {
     /// like the HUD's `time`): the status bar shows the pain face until then.
     pub faceanimtime: f32,
     /// `cl.items` as last received and `cl.item_gettime[]` (CL_ParseClientdata,
-    /// server clock): the new-weapon icon flash. Zeroed with the level
-    /// (CL_ClearState), so a level start flashes what the player carries.
+    /// server clock): the new-weapon icon flash. A level start (CL_ClearState)
+    /// seeds the items the player spawns with and zeroes the get-times, so
+    /// what the player carries does not flash (`view::stamp_item_gettime`).
     pub cl_items: i32,
     pub item_gettime: [f32; 32],
     /// Stair-step view smoothing accumulator (`view.c` V_CalcRefdef `oldz`): the eye
@@ -344,8 +345,10 @@ pub struct DemoPlay {
     /// shows the pain face until then.
     pub faceanimtime: f32,
     /// `cl.items` as last shown and `cl.item_gettime[]` on the recorded clock
-    /// (CL_ParseClientdata): the new-weapon icon flash. Zeroed at playback
-    /// start and on the loop wrap (CL_ClearState).
+    /// (CL_ParseClientdata): the new-weapon icon flash. Playback start and the
+    /// loop wrap (CL_ClearState) seed the first frame's items (the signon's
+    /// clientdata) with the get-times at 0: nothing flashes at the start
+    /// (`view::stamp_item_gettime`).
     pub cl_items: i32,
     pub item_gettime: [f32; 32],
 }
@@ -362,6 +365,10 @@ impl DemoPlay {
     /// per-playback field — clocks, particles, beams, view shifts, messages —
     /// at its clean-slate default.
     pub fn new(pak: Pak, bsp: Bsp, palette: [[u8; 3]; 256], demo: Demo) -> DemoPlay {
+        // CL_ClearState: the signon and frame 0's block are parsed in one
+        // CL_ReadFromServer, before the first CL_LerpPoint, so their items
+        // are stamped at about host_frametime and never flash.
+        let cl_items = demo.frames.first().map_or(0, |f| f.client.items);
         DemoPlay {
             bsp,
             palette,
@@ -399,7 +406,7 @@ impl DemoPlay {
             demonum: 0,
             show_scores: false,
             faceanimtime: 0.0,
-            cl_items: 0,
+            cl_items,
             item_gettime: [0.0; 32],
         }
     }
@@ -467,6 +474,9 @@ pub fn assemble_walk(
     let pic_finale = lmp("gfx/finale.lmp");
     let pic_pause = lmp("gfx/pause.lmp");
     let clock = server.time(); // cl.time = sv.time (see `Walk::clock`)
+    // CL_ClearState + the signon's clientdata: what the player spawns with,
+    // unflashed (`view::stamp_item_gettime`).
+    let cl_items = cl_main::server_items(&server, player);
     Some(Walk {
         server,
         bsp,
@@ -504,7 +514,7 @@ pub fn assemble_walk(
         v_dmg_roll: 0.0,
         v_dmg_pitch: 0.0,
         faceanimtime: 0.0,
-        cl_items: 0,
+        cl_items,
         item_gettime: [0.0; 32],
         oldz: f32::NAN,
         centerprint: None,
