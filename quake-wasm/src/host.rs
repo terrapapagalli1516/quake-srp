@@ -122,6 +122,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         let game_active =
             a.mode == 0 && a.walk.as_ref().map(|wk| wk.intermission == 0).unwrap_or(false);
         a.menu.set_game_active(game_active);
+        // sv.active (New Game asks "Are you sure?" while a game runs).
+        a.menu.set_server_active(a.mode == 0 && a.walk.is_some());
         // Derive this frame's bindings-driven keyboard input (CL_BaseMove over
         // keys.c's keybindings) and hand it to the walk; step_walk zeroes it
         // while gameplay is gated.

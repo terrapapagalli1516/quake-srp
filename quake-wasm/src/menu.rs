@@ -95,10 +95,16 @@ pub extern "C" fn menu_select() {
         }
     }
     if start_new_game {
-        // Fresh single-player game on the start hub (NEW_GAME_MAP). Rebuild the
-        // whole walk — new Server, new connected client — switch to walk mode and
-        // leave the menu closed. From the hub the player picks skill + episode
-        // (changelevel).
+        new_game();
+    }
+}
+
+/// Single Player > New Game (`map start`): a fresh single-player game on the
+/// start hub (NEW_GAME_MAP). Rebuild the whole walk — new Server, new
+/// connected client — switch to walk mode and leave the menu closed. From the
+/// hub the player picks skill + episode (changelevel).
+fn new_game() {
+    {
         if let Some(nw) = build_walk_map(render::NEW_GAME_MAP) {
             ensure_app(|a| {
                 a.walk = Some(nw);
@@ -136,14 +142,20 @@ pub extern "C" fn menu_cancel() {
 /// Answer the Quit confirmation prompt "Yes" (the literal `Y` key, `M_Quit_Key`
 /// 'y'/'Y'): close the menu (quit to the attract loop). A no-op off the Quit
 /// screen, so the page can route a `Y` press here unconditionally while the menu
-/// is up. Enter (`menu_select`) on the Quit screen does the same thing.
+/// is up. Enter (`menu_select`) on the Quit screen does the same thing. The
+/// same key answers New Game's "Are you sure?" (SCR_ModalMessage's 'y'),
+/// which starts the new game.
 #[no_mangle]
 pub extern "C" fn menu_quit_yes() {
+    let mut start_new_game = false;
     ensure_app(|a| {
         if a.menu.visible {
-            let _ = a.menu.quit_yes();
+            start_new_game = a.menu.quit_yes() == MenuAction::NewGame;
         }
     });
+    if start_new_game {
+        new_game();
+    }
 }
 
 /// Answer the Quit confirmation prompt "No" (the literal `N` key, `M_Quit_Key`
@@ -270,6 +282,34 @@ mod tests {
     use crate::input::{key_down, key_up};
     use crate::test_util::*;
     use crate::vid::{height, set_resolution, width};
+
+    /// CENSUS L14 through the exports: with the walk running, Single Player >
+    /// New Game asks first; 'n' keeps the game, 'y' starts the start hub.
+    #[test]
+    fn new_game_in_a_running_game_asks_first() {
+        assert_eq!(boot(), 1); // e1m1 with the menu open over it
+        step(0.05); // the host tells the menu sv.active
+        menu_select(); // Main > Single Player
+        menu_select(); // New Game -> "Are you sure?"
+        let (confirm, map) = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.menu.new_game_confirm(), a.walk.as_ref().unwrap().map_name.clone())
+        });
+        assert!(confirm, "the modal is up");
+        assert_eq!(map, "maps/e1m1.bsp", "no new game yet");
+        menu_quit_no();
+        assert_eq!(menu_visible(), 1, "'n': the menu stays");
+        menu_select();
+        menu_quit_yes();
+        let (vis, map) = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.menu.visible, a.walk.as_ref().unwrap().map_name.clone())
+        });
+        assert!(!vis, "'y' closes the menu");
+        assert_eq!(map, render::NEW_GAME_MAP, "and starts the start hub");
+    }
 
     #[test]
     fn video_menu_applies_a_preset_through_the_resolution_plumbing() {
