@@ -674,10 +674,11 @@ pub(super) fn raster_poly_tex(
 
 /// A wall whose lit+colormapped surface block is already baked (see
 /// [`face_surf_block`](super::surf::face_surf_block)) — `D_DrawSpans8` over a
-/// cached surface. `grads` and `texmins` are in the block's mip-level texels.
-/// The inner pixel is ONE block read (texture, lightmap and colormap are folded
-/// into the block) plus a palette lookup; the z test and write stay. This is
-/// the warm-frame hot path for walls.
+/// cached surface. The inner pixel is ONE block read (texture, lightmap and
+/// colormap are folded into the block) plus a palette lookup; the z test and
+/// write stay. This is the warm-frame hot path for walls. `grads` and `texmins`
+/// are in the block's mip-level texels (`PolyGrads::mip_scaled`); the block is
+/// `extents >> miplevel` a side, so the clamp below is exactly `bbextents`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn raster_poly_cached(
     image: &mut Image,
@@ -722,10 +723,9 @@ pub(super) fn raster_poly_cached(
                 let z = 65536.0 / zi;
                 let depth = (z * (1.0 / 65536.0)) as f32;
                 if depth < *zc {
-                    // Nearest texel of the block (at its mip level: the caller
-                    // passes `grads.mip_scaled`). The clamp is id's `bbextents`:
-                    // the block is `extents >> miplevel` wide, so the last texel
-                    // is `(((extents << 16) >> miplevel) - 1) >> 16`.
+                    // Nearest surface texel within the block extent (the block is
+                    // 1:1 with surface texels at mip 0). The clamp keeps a texel
+                    // read in the block, as `bbextents` does in id's span loop.
                     let bx = ((((sz * z) as i64) + sadjust) >> 16).clamp(0, bw_i - 1) as usize;
                     let by = ((((tz * z) as i64) + tadjust) >> 16).clamp(0, bh_i - 1) as usize;
                     *zc = depth;
