@@ -28,7 +28,9 @@ use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP
 use crate::vid::{DEFAULT_H, DEFAULT_W};
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
-const DEMO_FILE: &str = "demo1.dem";
+/// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop's demos, played
+/// in turn (`CL_NextDemo` on each demo's `svc_disconnect`), wrapping to the first.
+pub(crate) const DEMOS: [&str; 3] = ["demo1.dem", "demo2.dem", "demo3.dem"];
 
 /// Interactive walk state: a live server ticked every frame, rendered from the
 /// player edict. Monster thinks advance their animation frames and move them,
@@ -302,6 +304,8 @@ pub(crate) struct DemoPlay {
     pub(crate) trail_org: HashMap<i32, [f32; 3]>,
     /// R_RocketTrail's `static int tracercount` for the demo's tracer trails.
     pub(crate) tracercount: u32,
+    /// Which of [`DEMOS`] this is (the next one follows it, CL_NextDemo).
+    pub(crate) demonum: usize,
     /// `sb_showscores` (`+showscores`, Tab held): Sbar_Draw shows the solo
     /// scoreboard during playback too. Refreshed by `step` like `viewsize`.
     pub(crate) show_scores: bool,
@@ -316,6 +320,12 @@ pub(crate) struct DemoPlay {
 }
 
 impl DemoPlay {
+    /// The last frame has been shown: the recording is over (id's demos end
+    /// with `svc_disconnect`, which the parser stops at).
+    pub(crate) fn at_end(&self) -> bool {
+        self.idx + 1 >= self.demo.frames.len()
+    }
+
     /// A playback of `demo` over `bsp` at its first frame: no models, sprites,
     /// colormap or overlay pics yet (the caller loads what it has), and every
     /// per-playback field — clocks, particles, beams, view shifts, messages —
@@ -355,6 +365,7 @@ impl DemoPlay {
             viewsize: render::VIEWSIZE_DEFAULT,
             trail_org: HashMap::new(),
             tracercount: 0,
+            demonum: 0,
             show_scores: false,
             faceanimtime: 0.0,
             cl_items: 0,
@@ -753,10 +764,17 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, pitch)
 }
 
+/// The first attract demo (`demo1`).
 pub(crate) fn build_demo() -> Option<DemoPlay> {
+    build_demo_n(0)
+}
+
+/// `playdemo` of [`DEMOS`]`[demonum % 3]`.
+pub(crate) fn build_demo_n(demonum: usize) -> Option<DemoPlay> {
+    let demonum = demonum % DEMOS.len();
     let pak = pak()?;
     let read = |n: &str| pak.read_file(n).ok().flatten();
-    let demo_bytes = read(DEMO_FILE)?;
+    let demo_bytes = read(DEMOS[demonum])?;
     let demo = parse_demo(&demo_bytes).ok()?;
     let map = demo.map_name()?.to_string();
     let bsp = Bsp::parse(&read(&map)?).ok()?;
@@ -827,6 +845,7 @@ pub(crate) fn build_demo() -> Option<DemoPlay> {
     d.pic_complete = pic_complete;
     d.pic_inter = pic_inter;
     d.pic_finale = pic_finale;
+    d.demonum = demonum;
     Some(d)
 }
 
@@ -898,7 +917,8 @@ pub extern "C" fn boot() -> i32 {
     ok as i32
 }
 
-/// Start recorded-demo playback (demo1.dem / e1m3). Returns 1 on success.
+/// Start recorded-demo playback at demo1.dem (e1m3); demo2 and demo3 follow
+/// (quake.rc's startdemos cycle, see [`DEMOS`]). Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn boot_demo() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode
@@ -1081,6 +1101,42 @@ mod tests {
             let a = b.as_ref().expect("app exists");
             (a.mode, a.walk.is_some(), a.demo.is_some(), a.menu.visible)
         })
+    }
+
+    #[test]
+    fn attract_loop_cycles_demo1_demo2_demo3() {
+        // quake.rc `startdemos demo1 demo2 demo3`: each demo's svc_disconnect
+        // runs CL_NextDemo, so the attract loop plays the three in turn and
+        // wraps — not demo1 forever.
+        assert_eq!(boot_attract(), 1);
+        let demo = || {
+            APP.with(|c| {
+                let b = c.borrow();
+                let d = b.as_ref().unwrap().demo.as_ref().unwrap();
+                (d.demonum, d.demo.map_name().unwrap_or("").to_string(), d.idx)
+            })
+        };
+        let to_end = || {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let d = b.as_mut().unwrap().demo.as_mut().unwrap();
+                d.idx = d.demo.frames.len() - 1; // the last frame has been shown
+            })
+        };
+        let (n0, map0, _) = demo();
+        assert_eq!(n0, 0);
+        let mut maps = vec![map0];
+        for want in [1, 2, 0] {
+            to_end();
+            step(0.05);
+            let (n, map, idx) = demo();
+            assert_eq!(n, want, "the next demo in startdemos order");
+            assert!(idx < 10, "it plays from its start (frame {idx})");
+            maps.push(map);
+        }
+        assert_eq!(maps[0], maps[3], "demo1 again after demo3");
+        assert!(maps[0] != maps[1] && maps[1] != maps[2], "three different recordings: {maps:?}");
+        assert_eq!(menu_visible(), 1, "the menu stays up over the loop");
     }
 
     #[test]

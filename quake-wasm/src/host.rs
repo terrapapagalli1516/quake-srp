@@ -6,11 +6,12 @@
 
 use quake_rs::render::{self, build_gamma_table};
 
-use crate::app::ensure_app;
+use crate::app::{build_demo_n, ensure_app};
 use crate::bench::{self, Phase};
 use crate::cl_demo::step_demo;
 use crate::cl_walk::step_walk;
 use crate::input::derive_key_move;
+use crate::snd_dma::{SND_QUEUE, STOP_SND_QUEUE};
 
 /// `Host_FilterTime` (host.c): the most a single frame may advance the game —
 /// a longer real frame (a hitch, a backgrounded tab) is clamped to 0.1 s of
@@ -110,6 +111,22 @@ pub extern "C" fn step(dt: f32) -> i32 {
             d.viewsize = viewsize;
             // +showscores only reaches the game while it owns the keyboard.
             d.show_scores = km.showscores && !gate_gameplay;
+        }
+        // Host_EndGame on the demo's svc_disconnect -> CL_NextDemo: once a demo
+        // has shown its last frame, the next of quake.rc's `startdemos demo1
+        // demo2 demo3` starts (a demo that cannot be built leaves this one to
+        // loop, step_demo's fallback). CL_PlayDemo_f's CL_Disconnect stops
+        // every sound first.
+        if a.mode == 1 && dt > 0.0 {
+            let next = a.demo.as_ref().filter(|d| d.at_end()).map(|d| d.demonum + 1);
+            if let Some(next) = next.and_then(build_demo_n) {
+                SND_QUEUE.with(|q| q.borrow_mut().clear());
+                STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
+                let mut next = next;
+                next.viewsize = viewsize;
+                next.show_scores = km.showscores && !gate_gameplay;
+                a.demo = Some(next);
+            }
         }
         // Each mode returns its frame plus a DEFERRED screen blend (color, alpha):
         // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it
