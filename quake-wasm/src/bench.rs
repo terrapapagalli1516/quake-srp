@@ -211,6 +211,7 @@ surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds";
 #[cfg(all(test, feature = "bench"))]
 mod native {
     use super::imp::{bench_enable, bench_value, NAMES};
+    use crate::console::{console_char, console_enter, console_toggle, console_visible};
     use crate::*;
 
     /// Quake's frame cadence (`host_maxfps` 72): every workload steps at it.

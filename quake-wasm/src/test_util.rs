@@ -5,7 +5,8 @@ use quake_rs::pak::{Pak, DIRENTRY_SIZE, HEADER_SIZE, NAME_SIZE};
 use quake_rs::render;
 
 use crate::snd_dma::{set_audio_ready, SND_QUEUE};
-use crate::{console_char, console_enter, Walk, APP};
+use crate::console::{console_char, console_enter};
+use crate::{Walk, APP};
 
 /// Build a synthetic PACK image holding the given (name, contents) files, so
 /// `queue_sounds` can resolve real bytes for hand-crafted sound names without

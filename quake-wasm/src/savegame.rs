@@ -375,9 +375,8 @@ fn build_walk_savegame(text: &str) -> Result<Walk, String> {
 mod tests {
     use super::*;
     use crate::test_util::*;
-    use crate::{
-        boot, boot_attract, console_toggle, set_attack, set_move, set_resolution, step, APP,
-    };
+    use crate::console::console_toggle;
+    use crate::{boot, boot_attract, set_attack, set_move, set_resolution, step, APP};
 
     // ------------------------------------------------------------ save/load
 

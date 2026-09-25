@@ -512,9 +512,9 @@ pub(crate) fn try_restart(w: &mut Walk) {
 mod tests {
     use super::*;
     use crate::test_util::*;
+    use crate::console::{console_toggle, console_visible};
     use crate::{
-        boot, console_toggle, console_visible, key_down, key_up, menu_cancel, set_attack,
-        set_resolution, step, viewsize, APP,
+        boot, key_down, key_up, menu_cancel, set_attack, set_resolution, step, viewsize, APP,
     };
 
     #[test]
