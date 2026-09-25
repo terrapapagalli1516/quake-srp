@@ -4,8 +4,8 @@
 //! Source: `WinQuake/d_polyse.c` — `D_PolysetDraw`, `D_RasterizeAliasPolySmooth`,
 //! `D_PolysetCalcGradients`, `D_PolysetDrawSpans8`; `adivtab.h`.
 
-use super::{Image, ZBuf};
-use super::alias::{AliasSetup, AliasView, FinalVert, ALIAS_ONSEAM, ALIAS_ZISCALE};
+use super::Image;
+use super::alias::{AliasSetup, AliasView, FinalVert, ALIAS_ONSEAM};
 
 /// The sentinel `D_RasterizeAliasPolySmooth` stores in a span's `count`.
 const SPAN_END: i32 = -999_999;
@@ -78,7 +78,7 @@ fn c_ftoi(x: f64) -> i32 {
 /// z-buffer, and the rasteriser state the C keeps in globals.
 pub(super) struct PolyFramebuffer<'a> {
     rgb: &'a mut [[u8; 3]],
-    zbuf: ZBuf<'a>,
+    zbuf: &'a mut [i16],
     width: isize,
     palette: &'a [[u8; 3]; 256],
     // D_PolysetSetUpForLineScan
@@ -124,7 +124,7 @@ pub(super) struct PolyFramebuffer<'a> {
 }
 
 impl<'a> PolyFramebuffer<'a> {
-    pub(super) fn new(image: &'a mut Image, zbuf: ZBuf<'a>, palette: &'a [[u8; 3]; 256]) -> PolyFramebuffer<'a> {
+    pub(super) fn new(image: &'a mut Image, zbuf: &'a mut [i16], palette: &'a [[u8; 3]; 256]) -> PolyFramebuffer<'a> {
         let width = image.w as isize;
         let height = image.h;
         PolyFramebuffer {
@@ -175,34 +175,14 @@ impl<'a> PolyFramebuffer<'a> {
 
     /// The z test and write of one alias pixel: `D_PolysetDraw`'s
     /// `if ((lzi >> 16) >= *lpz) { *lpz = lzi >> 16; ... }` against id's
-    /// 16-bit z-buffer of `(1/z * 0x8000 * 0x10000) >> 16` ([`ZBuf::Izi`]). Against
-    /// the polygon walker's float depth ([`ZBuf::Depth`]) the world's depth is
-    /// quantised the same way for the `>=` test, and the depth written back is
-    /// one that quantises to the alias pixel's value.
+    /// 16-bit z-buffer of `(1/z * 0x8000 * 0x10000) >> 16`.
     #[inline]
     fn plot(&mut self, idx: isize, zi: i32, pal_index: u8, setup: &AliasSetup) {
         let Ok(i) = usize::try_from(idx) else { return };
+        let Some(z) = self.zbuf.get_mut(i) else { return };
         let z16 = zi >> 16;
-        let pass = match &mut self.zbuf {
-            ZBuf::Izi(zb) => {
-                let Some(z) = zb.get_mut(i) else { return };
-                let pass = z16 >= *z as i32;
-                if pass {
-                    *z = z16 as i16;
-                }
-                pass
-            }
-            ZBuf::Depth(zb) => {
-                let Some(z) = zb.get_mut(i) else { return };
-                let world16 = if z.is_finite() && *z > 0.0 { (((ALIAS_ZISCALE / *z as f64) as i64) >> 16) as i32 } else { i32::MIN };
-                let pass = z16 >= world16;
-                if pass {
-                    *z = (32768.0 / (z16 as f64 + 0.5)) as f32;
-                }
-                pass
-            }
-        };
-        if pass {
+        if z16 >= *z as i32 {
+            *z = z16 as i16;
             if let Some(p) = self.rgb.get_mut(i) {
                 *p = if setup.skin.is_some() { self.palette[pal_index as usize] } else { setup.flat };
             }
@@ -680,6 +660,7 @@ static ADIVTAB: [(i32, i32); 1024] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::alias::ALIAS_ZISCALE;
     use crate::render::light::{COLORMAP_LEN, COLORMAP_ROWS};
 
     // -- Alias models: R_AliasSetupLighting + D_PolysetDraw --
@@ -718,8 +699,8 @@ mod tests {
             flat: [0; 3],
         };
         let fv = |(u, v): (i32, i32)| FinalVert { v: [u, v, 0, 0, light, 1 << 24], flags: 0 };
-        let mut zbuf = vec![f32::INFINITY; img.w * img.h];
-        let mut fb = PolyFramebuffer::new(img, ZBuf::Depth(&mut zbuf), &pal);
+        let mut zbuf = vec![i16::MIN; img.w * img.h];
+        let mut fb = PolyFramebuffer::new(img, &mut zbuf, &pal);
         fb.polyset_draw(&setup, [fv(verts[0]), fv(verts[1]), fv(verts[2])], true);
     }
 
@@ -788,8 +769,8 @@ mod tests {
         let fv = |u: i32, v: i32, zi: i32| FinalVert { v: [u, v, 0, 0, 0x7F00, zi], flags: 0 };
         let tri = [fv(0, 0, near), fv(4, 200, near), fv(2, 101, far)];
         let mut img = Image::new(8, 208, [0, 0, 0]);
-        let mut zbuf = vec![f32::INFINITY; img.w * img.h];
-        let mut fb = PolyFramebuffer::new(&mut img, ZBuf::Depth(&mut zbuf), &pal);
+        let mut zbuf = vec![i16::MIN; img.w * img.h];
+        let mut fb = PolyFramebuffer::new(&mut img, &mut zbuf, &pal);
         fb.polyset_draw(&setup, tri, true);
         let t = f64::from(near - far);
         assert_eq!((fb.r_zistepx, fb.r_zistepy), (i32::MIN, c_ftoi(-t)));

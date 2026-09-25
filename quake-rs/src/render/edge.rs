@@ -1797,7 +1797,7 @@ impl EdgeState {
         let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
         let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
         let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
-        let mipview = MipView::new(cx, cy, xscale, yscale);
+        let mipview = MipView::new(xscale, yscale);
         let sky_view = SkyView::new(vpn, vright, vup, w, h, opts.sky_centre(w, h), time);
         let sky_tex = sky_texture(ents[0].bsp);
         let persp = opts.persp();
@@ -1938,7 +1938,7 @@ impl EdgeState {
                 if turbulent {
                     for (u, v, n) in span_list(s.spans) {
                         let row = &mut image.rgb[v * w + u..v * w + u + n];
-                        span_turb(row, &span_at(&grads, u, v, n), &grads, &mt.pixels, tw, th, palette, turb, time, persp);
+                        span_turb(row, &span_at(&grads, u, v), &grads, &mt.pixels, tw, th, palette, turb, time, persp);
                         drawn += n as u64;
                     }
                     return drawn;
@@ -1962,7 +1962,7 @@ impl EdgeState {
                         let fx = BlockFixed::new(&g, sb.texmins, sb.bw, sb.bh);
                         for (u, v, n) in span_list(s.spans) {
                             let row = &mut image.rgb[v * w + u..v * w + u + n];
-                            span_cached(row, &span_at(&g, u, v, n), &fx, &sb.block, sb.bw, sb.bh, palette, persp);
+                            span_cached(row, &span_at(&g, u, v), &fx, &sb.block, sb.bw, sb.bh, palette, persp);
                             drawn += n as u64;
                         }
                     }
@@ -1970,7 +1970,7 @@ impl EdgeState {
                         stat(|st| st.surf_misses += 1);
                         for (u, v, n) in span_list(s.spans) {
                             let row = &mut image.rgb[v * w + u..v * w + u + n];
-                            span_tex(row, &span_at(&grads, u, v, n), &grads, &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), colormap);
+                            span_tex(row, &span_at(&grads, u, v), &grads, &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), colormap);
                             drawn += n as u64;
                         }
                     }
@@ -1988,7 +1988,7 @@ impl EdgeState {
                         pal1[0] = [to8(base[0]), to8(base[1]), to8(base[2])];
                         for (u, v, n) in span_list(s.spans) {
                             let row = &mut image.rgb[v * w + u..v * w + u + n];
-                            span_tex(row, &span_at(&grads, u, v, n), &grads, &[0u8], 1, 1, &pal1, shade, Some(lm), colormap);
+                            span_tex(row, &span_at(&grads, u, v), &grads, &[0u8], 1, 1, &pal1, shade, Some(lm), colormap);
                             drawn += n as u64;
                         }
                     }
@@ -2005,11 +2005,7 @@ mod tests {
     use super::*;
     use crate::math::cross;
     use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
-    use crate::render::{demo_room, recycle_image, render_scene_ext_sprited, IZBUF};
-
-    fn opts(edges: bool) -> RenderOptions {
-        RenderOptions { edges, ..RenderOptions::default() }
-    }
+    use crate::render::{demo_room, recycle_image, render_scene_ext_sprited, ZBUF};
 
     fn palette() -> [[u8; 3]; 256] {
         let mut pal = [[0u8; 3]; 256];
@@ -2019,25 +2015,31 @@ mod tests {
         pal
     }
 
-    fn render(cam: &Camera, w: usize, h: usize, edges: bool) -> Image {
+    fn render(cam: &Camera, w: usize, h: usize) -> Image {
         render_scene_ext_sprited(
             &demo_room(), cam, w, h, &palette(), &[], &[], &[], None, 0.0, &[], &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES, None, &[], &opts(edges),
+            &NEUTRAL_LIGHTSTYLE_SCALES, None, &[], &RenderOptions::default(),
         )
     }
 
     #[test]
-    fn edges_draw_the_demo_room_as_the_polygon_walker_does() {
-        // Convex room, a pillar in front of a wall: the key/1-over-z sort and
-        // the fill rule leave every pixel where the z-buffered walker put it.
-        for (pos, target) in [
-            ([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
-            ([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0]),
-            ([150.0, 120.0, -60.0], [-40.0, 0.0, 20.0]),
-        ] {
-            let cam = Camera::looking_at(pos, target, 90.0);
-            assert_eq!(render(&cam, 160, 100, true).rgb, render(&cam, 160, 100, false).rgb, "from {pos:?}");
-        }
+    fn the_pillar_sorts_in_front_of_the_far_wall() {
+        // A synthetic room without a node tree sorts its faces on 1/z at their
+        // edges: straight at the pillar, its -X face covers the centre and the
+        // far wall shows on either side of it on the same row, all at depths
+        // D_DrawZSpans put there (pillar 168 units ahead, far wall 456).
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let (w, h) = (160usize, 100usize);
+        let img = render(&cam, w, h);
+        let row = h / 2;
+        let (centre, side) = (img.rgb[row * w + w / 2], img.rgb[row * w + w / 2 + 40]);
+        assert_ne!(centre, side, "pillar and far wall are different surfaces");
+        assert!(![centre, side].contains(&palette()[R_CLEARCOLOR]), "both drawn");
+        ZBUF.with(|z| {
+            let z = z.borrow();
+            assert_eq!(z[row * w + w / 2], (32768.0f64 / 168.0) as i16);
+            assert_eq!(z[row * w + w / 2 + 40], (32768.0f64 / 456.0) as i16);
+        });
     }
 
     #[test]
@@ -2045,9 +2047,9 @@ mod tests {
         // The spans cover the view: a recycled buffer full of garbage is
         // overwritten everywhere.
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let fresh = render(&cam, 96, 64, true);
+        let fresh = render(&cam, 96, 64);
         recycle_image(Image { w: 96, h: 64, rgb: vec![[1, 2, 3]; 96 * 64] });
-        let again = render(&cam, 96, 64, true);
+        let again = render(&cam, 96, 64);
         assert_eq!(fresh.rgb, again.rgb);
         assert!(!again.rgb.contains(&[1, 2, 3]));
     }
@@ -2057,10 +2059,10 @@ mod tests {
         // Outside the room looking away from it: one background span per row,
         // palette[2], and D_DrawZSpans' -0.9 "at infinity" 1/z.
         let cam = Camera::looking_at([-400.0, 0.0, 0.0], [-800.0, 0.0, 0.0], 90.0);
-        let img = render(&cam, 64, 40, true);
+        let img = render(&cam, 64, 40);
         assert!(img.rgb.iter().all(|&p| p == palette()[R_CLEARCOLOR]));
         let bg = ((-0.9f32 as f64 * 32768.0 * 65536.0) as i32 >> 16) as i16;
-        IZBUF.with(|z| assert!(z.borrow()[..64 * 40].iter().all(|&v| v == bg)));
+        ZBUF.with(|z| assert!(z.borrow()[..64 * 40].iter().all(|&v| v == bg)));
     }
 
     #[test]
@@ -2068,8 +2070,8 @@ mod tests {
         // Straight at the pillar's -X face, 168 units ahead: `(int)(zi * 0x8000
         // * 0x10000) >> 16` = 32768/168 = 195 at the centre pixel.
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
-        let _ = render(&cam, 64, 40, true);
-        IZBUF.with(|z| assert_eq!(z.borrow()[20 * 64 + 32], (32768.0f64 / 168.0) as i16));
+        let _ = render(&cam, 64, 40);
+        ZBUF.with(|z| assert_eq!(z.borrow()[20 * 64 + 32], (32768.0f64 / 168.0) as i16));
     }
 
     #[test]

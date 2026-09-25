@@ -1162,7 +1162,7 @@ box and byte-identical when off, the `wasm_*` commands and the exports;
 ## World pass: id's edge renderer (2026-09-25, branch `quake/edge`, PERF_PLAN A3)
 
 - ✅ **The world and the brush entities are drawn as WinQuake draws them**
-  (`render/edge.rs`, `RenderOptions::edges`, now the default). Before, each
+  (`render/edge.rs`). Before, each
   clipped face was a polygon walked row by row, front to back by centroid,
   against an f32 z-buffer cleared every frame, with the 16-pixel grid
   restarted wherever a run of passing z tests began. Now the frame is
@@ -1272,8 +1272,13 @@ box and byte-identical when off, the `wasm_*` commands and the exports;
     trailing edges from the winding, and a face wound the other way makes only
     inverted spans. A bsp without nodes or leaves (test fixtures only) goes in
     as one leaf's brush model, sorted on 1/z.
-  - `quaketool view --edges 0|1` and `QUAKE_EDGES=0|1` (`view`, `scene`)
-    choose the world pass for A/B while the polygon walker is kept.
+  - The polygon walker is deleted (`draw_world_textured`, `draw_submodel`,
+    `draw_brush_bsp`, the `raster_poly_*` fillers, the deferred sky, the
+    face-AABB frustum and near-plane clip, the f32 z-buffer): the last commit
+    of the branch, byte-identical (goldens, the 372 oracle cases, 104 wasm
+    frame hashes over four workloads at 320x200 and 640x400). Its fill-rule and
+    crack tests went with it; the edge renderer's coverage is id's by
+    construction (the spans partition every scanline).
 
 ## LOW (27)
 

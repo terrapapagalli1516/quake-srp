@@ -5,7 +5,7 @@
 //! The particle simulation itself is [`crate::particles`].
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image, Projection, ZBuf};
+use super::{Camera, Image, Projection};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
 /// against the shared `zbuf`, porting the visible result of Quake's software
@@ -29,9 +29,9 @@ use super::{Camera, Image, Projection, ZBuf};
 /// `d_pix_max = round(width/80)`, `d_pix_shift = 8 - round(width/320)`
 /// (`d_modech.c`). We reproduce that same continuous ramp (rather than a
 /// 2-bucket step) so a particle grows smoothly as it nears the eye and shrinks to
-/// the minimum size far away. For every covered pixel the existing z-buffer test
-/// is reused: the pixel is written only when `vz < zbuf[idx]` (strictly nearer),
-/// and the depth is written so later, nearer geometry can still overdraw it.
+/// the minimum size far away. Every covered pixel takes `D_DrawParticle`'s test
+/// against id's 16-bit z-buffer: `izi = (int)(zi * 0x8000)`, drawn where
+/// `pz <= izi`, which it writes.
 /// Off-screen pixels are clipped by the loop bounds; the colour is
 /// `palette[color]`.
 ///
@@ -41,24 +41,7 @@ use super::{Camera, Image, Projection, ZBuf};
 #[allow(clippy::too_many_arguments)]
 pub fn draw_particles(
     image: &mut Image,
-    zbuf: &mut [f32],
-    cam: &Camera,
-    particles: &[(Vec3, u8)],
-    palette: &[[u8; 3]; 256],
-    w: usize,
-    h: usize,
-    pixel_aspect: f32,
-) {
-    draw_particles_z(image, ZBuf::Depth(zbuf), cam, particles, palette, w, h, pixel_aspect);
-}
-
-/// [`draw_particles`] against either depth buffer: with id's 16-bit
-/// `d_pzbuffer` ([`ZBuf::Izi`]) the test is `D_DrawParticle`'s — `izi =
-/// (int)(zi * 0x8000)`, drawn where `pz[0] <= izi`, which it writes.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn draw_particles_z(
-    image: &mut Image,
-    mut zbuf: ZBuf,
+    zbuf: &mut [i16],
     cam: &Camera,
     particles: &[(Vec3, u8)],
     palette: &[[u8; 3]; 256],
@@ -128,25 +111,12 @@ pub(super) fn draw_particles_z(
                     continue;
                 }
                 let idx = (py as usize) * w + (px as usize);
-                let pass = match &mut zbuf {
-                    ZBuf::Izi(zb) => match zb.get_mut(idx) {
-                        Some(z) if *z as i32 <= izi => {
-                            *z = izi as i16;
-                            true
+                if let Some(z) = zbuf.get_mut(idx) {
+                    if *z as i32 <= izi {
+                        *z = izi as i16;
+                        if let Some(dst) = image.rgb.get_mut(idx) {
+                            *dst = rgb;
                         }
-                        _ => false,
-                    },
-                    ZBuf::Depth(zb) => match zb.get_mut(idx) {
-                        Some(z) if vz < *z => {
-                            *z = vz;
-                            true
-                        }
-                        _ => false,
-                    },
-                };
-                if pass {
-                    if let Some(dst) = image.rgb.get_mut(idx) {
-                        *dst = rgb;
                     }
                 }
             }
@@ -166,24 +136,24 @@ mod tests {
     fn draw_particles_in_front_changes_a_pixel() {
         // A camera at the origin looking down +X; a particle 100 units straight
         // ahead must project near screen centre and paint its palette colour over
-        // a fresh (cleared) z-buffer.
+        // a z-buffer that holds nothing nearer.
         let w = 80usize;
         let h = 60usize;
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
-        let mut zbuf = vec![f32::INFINITY; w * h];
+        let mut zbuf = vec![i16::MIN; w * h];
         let mut pal = [[0u8, 0, 0]; 256];
         pal[42] = [200, 50, 30]; // the particle colour
 
         draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h, 1.0);
 
         // Some pixel changed to the particle colour, and the matching z-buffer
-        // slot now holds the particle's forward depth (~100), not +inf.
+        // slot now holds the particle's 1/z: (int)(0x8000 / 100) = 327.
         let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
         assert!(painted > 0, "a particle in front must paint at least one pixel");
-        let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
-        assert!((nearest - 100.0).abs() < 1.0, "z-buffer holds the particle depth, got {nearest}");
+        let nearest = zbuf.iter().copied().max().unwrap();
+        assert_eq!(nearest, 327, "z-buffer holds the particle's 1/z");
     }
 
     #[test]
@@ -197,7 +167,7 @@ mod tests {
         pal[42] = [200, 50, 30];
         let row_of = |aspect: f32| {
             let mut img = Image::new(w, h, [0, 0, 0]);
-            let mut zbuf = vec![f32::INFINITY; w * h];
+            let mut zbuf = vec![i16::MIN; w * h];
             draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 30.0], 42)], &pal, w, h, aspect);
             let i = img.rgb.iter().position(|&p| p == [200, 50, 30]).expect("particle drawn");
             (i % w, i / w)
@@ -210,15 +180,15 @@ mod tests {
 
     #[test]
     fn draw_particles_behind_wall_is_z_tested_out() {
-        // Same view, but pre-fill the z-buffer with a NEARER depth (a wall at
-        // depth 10) everywhere. A particle at depth 100 is behind it and must NOT
-        // be drawn (the z-test rejects vz >= zbuf).
+        // Same view, but pre-fill the z-buffer with a NEARER 1/z (a wall at
+        // depth 10, 0x8000/10) everywhere. A particle at depth 100 is behind it
+        // and must NOT be drawn (D_DrawParticle draws only where pz <= izi).
         let w = 80usize;
         let h = 60usize;
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
-        let mut zbuf = vec![10.0f32; w * h]; // a wall closer than the particle
+        let mut zbuf = vec![3276i16; w * h]; // a wall closer than the particle
         let mut pal = [[0u8, 0, 0]; 256];
         pal[42] = [200, 50, 30];
 
@@ -230,7 +200,7 @@ mod tests {
             "a particle behind a nearer wall must be z-tested out (not drawn)"
         );
         // And the z-buffer is unchanged (still the wall depth).
-        assert!(zbuf.iter().all(|&z| z == 10.0), "occluded particle must not overwrite the z-buffer");
+        assert!(zbuf.iter().all(|&z| z == 3276), "occluded particle must not overwrite the z-buffer");
     }
 
     #[test]
@@ -242,7 +212,7 @@ mod tests {
         let h = 60usize;
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let mut img = Image::new(w, h, [9, 9, 9]);
-        let mut zbuf = vec![500.0f32; w * h]; // a wall FARTHER than the particle
+        let mut zbuf = vec![65i16; w * h]; // a wall FARTHER than the particle (depth 500)
         let mut pal = [[0u8, 0, 0]; 256];
         pal[7] = [10, 220, 40];
 
@@ -250,8 +220,8 @@ mod tests {
 
         let painted = img.rgb.iter().filter(|&&p| p == [10, 220, 40]).count();
         assert!(painted > 0, "a particle nearer than the wall must paint");
-        let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
-        assert!((nearest - 100.0).abs() < 1.0, "nearer particle writes its depth, got {nearest}");
+        let nearest = zbuf.iter().copied().max().unwrap();
+        assert_eq!(nearest, 327, "nearer particle writes its 1/z");
     }
 
     #[test]
@@ -263,7 +233,7 @@ mod tests {
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
-        let mut zbuf = vec![f32::INFINITY; w * h];
+        let mut zbuf = vec![i16::MIN; w * h];
         let pal = [[200u8, 200, 200]; 256];
 
         // -X is behind a camera looking down +X.

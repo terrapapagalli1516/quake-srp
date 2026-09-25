@@ -395,8 +395,8 @@ The fidelity classes are:
   `R_ClipEdge` / `R_EmitEdge` with the edge cache, the brush entities through
   `R_DrawSubmodelPolygons` / `R_DrawSolidClippedSubmodelPolygons`, `R_ScanEdges` with
   `R_LeadingEdge`'s key and 1/z sort, `D_DrawSurfaces` with `D_DrawZSpans`, and the
-  entities against the 16-bit z-buffer. `RenderOptions::edges` (default on) keeps the
-  polygon walker for A/B (`quaketool view --edges`, `QUAKE_EDGES`).
+  entities against the 16-bit z-buffer. The polygon walker was kept behind a switch for the
+  A/B below, then deleted (byte-identical).
   - **Speed,** A/B in one sitting (the tree before A3, exported, against this branch),
     two rounds, `bench.py --build --native`, median of the per-round medians, ms, load
     1.7–2.1. "brush" is world + submodel + external: the edge renderer books the brush

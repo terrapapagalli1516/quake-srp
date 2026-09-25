@@ -1622,19 +1622,6 @@ fn color_for_name(name: &str) -> [u8; 3] {
     }
 }
 
-/// The render options of `scene` and `view`: the defaults, with the world
-/// pass chosen by `QUAKE_EDGES=0|1` when set (A/B of the edge renderer,
-/// `RenderOptions::edges`, in one build; `view --edges` overrides it).
-fn scene_opts() -> render::RenderOptions {
-    let mut opts = render::RenderOptions::default();
-    match std::env::var("QUAKE_EDGES").as_deref() {
-        Ok("0") => opts.edges = false,
-        Ok("1") => opts.edges = true,
-        _ => {}
-    }
-    opts
-}
-
 /// `scene`: parse a map from a PAK, spawn its QuakeC entities, and software-
 /// render the world plus every spawned entity's `.mdl` alias model at its world
 /// position, all sharing one z-buffer so models occlude correctly.
@@ -1884,7 +1871,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
                 Some((it.next()?.trim().parse().ok()?, it.next()?.trim().parse().ok()?))
             })
             .unwrap_or((640usize, 400usize));
-        let opts = scene_opts();
+        let opts = render::RenderOptions::default();
         let render_once = || {
             render::render_scene_ext_sprited(
                 &bsp_for_render, &cam, bw, bh, &palette, &instances, &bmodels, &external, None,
@@ -1947,7 +1934,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         return Ok(Out::Text(o));
     }
 
-    let img = render::render_scene_ext_sprited(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(), &[], &scene_opts());
+    let img = render::render_scene_ext_sprited(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(), &[], &render::RenderOptions::default());
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
@@ -2031,7 +2018,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     };
     let (mut w, mut h) = (320usize, 200usize);
     let (mut origin, mut angles, mut time, mut fov) = (None, None, None, 90.0f32);
-    let mut opts = scene_opts();
+    let mut opts = render::RenderOptions::default();
     let mut vrect: Option<(usize, usize, usize, usize)> = None;
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
     let mut bench: Option<u32> = None;
@@ -2064,13 +2051,6 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
                     "0" => false,
                     "1" => true,
                     _ => return Err(format!("--exactpersp: expected 0 or 1, got {val:?}")),
-                }
-            }
-            "--edges" => {
-                opts.edges = match val.as_str() {
-                    "0" => false,
-                    "1" => true,
-                    _ => return Err(format!("--edges: expected 0 or 1, got {val:?}")),
                 }
             }
             "--aspect" => {

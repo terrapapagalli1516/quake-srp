@@ -19,7 +19,9 @@ thread_local! {
 /// when tuning performance.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderStats {
-    /// Per-phase wall time in nanoseconds.
+    /// Per-phase wall time in nanoseconds. `world_ns` is the edge renderer's
+    /// whole pass but the brush entities' edge setup, which is `submodel_ns`
+    /// (their spans are drawn with the world's); `external_ns` stays 0.
     pub world_ns: u64,
     pub submodel_ns: u64,
     pub external_ns: u64,
@@ -27,42 +29,34 @@ pub struct RenderStats {
     pub particle_ns: u64,
     pub sprite_ns: u64,
     pub viewmodel_ns: u64,
-    /// World-model faces in the model-0 range.
+    /// The polygon walker's face counts (PVS and frustum culls, triangles),
+    /// kept for the harnesses' columns: the edge renderer leaves them 0.
     pub faces_total: u64,
-    /// Faces skipped by the PVS visibility mask.
     pub faces_pvs_culled: u64,
-    /// Faces skipped by the view-frustum AABB cull.
     pub faces_frustum_culled: u64,
-    /// Faces that reached the rasteriser (world pass).
+    /// Surfaces the world pass drew (those that own a span; not the background).
     pub faces_drawn: u64,
-    /// Triangles submitted by the world pass.
     pub world_tris: u64,
-    /// Pixels actually written by the world pass (overdraw proxy: a pixel covered by
-    /// N drawn surfaces counts N times).
+    /// Pixels the world pass drew: every pixel of the view once, less the
+    /// background's.
     pub world_pixels: u64,
-    /// Lit-surface-cache hits / misses (world pass).
+    /// Surfaces drawn from a surface-cache block / per pixel.
     pub surf_hits: u64,
     pub surf_misses: u64,
-    /// Submodel pass: faces drawn, triangles, and pixels written. The submodel
-    /// pass currently has NO surface cache and NO front-to-back ordering, so these
-    /// reveal how much of the (often surprisingly large) submodel time is overdraw
-    /// vs per-pixel lightmap+colormap cost — the next optimization target.
+    /// The polygon walker's submodel pass counts (0 with the edge renderer,
+    /// whose brush entities are surfaces like the world's), but for
+    /// `sub_lm_builds`, the brush-entity lightmaps built per frame.
     pub sub_faces_visited: u64,
     pub sub_faces_drawn: u64,
     pub sub_surf_hits: u64,
     pub sub_surf_misses: u64,
     pub sub_tris: u64,
-    /// Submodel lightmap rebuilds (every submodel face rebuilds via
-    /// `face_lightmap_dyn` each frame — no cache).
     pub sub_lm_builds: u64,
-    /// World-pass sub-phase timers (ns), for finding the FIXED per-face cost that
-    /// dominates the frame independent of resolution. Only populated while
-    /// profiling. `world_pvs_ns` is the once-per-frame PVS+frustum build; the rest
-    /// accumulate across the per-face loop. `world_setup_ns` is the loop-body
-    /// remainder (geom fetch + culls + projection + the per-pixel raster, since
-    /// raster is not separately metered) and so also absorbs the `Instant` overhead
-    /// of the nested light/surf timers — read it as "everything that isn't lightmap
-    /// or surf-block lookup", not a precise figure.
+    /// World-pass sub-phase timers (ns), only while profiling: `world_sort_ns`
+    /// the world walk to edges (`R_RenderWorld`), `world_setup_ns` the scan
+    /// (`R_ScanEdges`), `world_surf_ns` `D_DrawSurfaces` (surface cache, spans,
+    /// z spans); `world_pvs_ns` and `world_light_ns` are the polygon walker's
+    /// and stay 0.
     pub world_pvs_ns: u64,
     pub world_sort_ns: u64,
     pub world_setup_ns: u64,
@@ -89,7 +83,7 @@ pub struct RenderStats {
     pub alias_models: u64,
     pub alias_accepted: u64,
     pub alias_tris: u64,
-    /// The edge renderer (`RenderOptions::edges`): edges, surfaces and spans
+    /// The edge renderer (`edge.rs`): edges, surfaces and spans
     /// made per frame (summed), and the most edges / surfaces one frame made —
     /// against id's pools, `r_maxedges` 2400 and `r_maxsurfs` 800 (the
     /// background and the dummy surface not counted), which the port grows.

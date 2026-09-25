@@ -160,34 +160,21 @@ pub(super) fn texture_animation(bsp: &Bsp, base_index: usize, ent_frame: i32, ti
 }
 
 /// Per-face STATIC geometry for the world model, computed once and reused every
-/// frame (the world model never moves, so its faces' polygons, normals,
-/// centroids, surface extents and AABBs are frame-invariant). Caching this skips
-/// the surfedge/edge/vertex walk, the centroid loop, and `surface_extents` for
-/// every visible face on every frame.
+/// frame (the world model never moves): the polygon a face's lightmap extents
+/// come from (`CalcSurfaceExtents`), without the surfedge/edge/vertex walk every
+/// frame.
 #[derive(Clone)]
 pub(super) struct FaceGeom {
-    /// Reconstructed world-space polygon (same vertices/order `face_world_poly`
-    /// produces — so downstream projection/texturing is byte-identical). Behind an
-    /// `Rc` so the per-frame cache fetch (`face_geom_cached`, twice per face) is an
-    /// O(1) refcount bump, not a deep `Vec` copy — the vertices are immutable once
-    /// built.
+    /// Reconstructed world-space polygon (the vertices/order `face_world_poly`
+    /// produces), empty when that fails. Behind an `Rc` so the per-frame cache
+    /// fetch is an O(1) refcount bump, not a deep `Vec` copy.
     pub(super) poly: std::rc::Rc<Vec<Vec3>>,
-    /// Outward face normal (`face_normal`), or `None` if the plane was bad.
-    pub(super) normal: Option<Vec3>,
-    /// Polygon centroid (the exact same accumulate-then-`*1/n` the loop used).
-    pub(super) center: Vec3,
-    /// World-space AABB of `poly` (for the frustum cull).
-    pub(super) mins: Vec3,
-    pub(super) maxs: Vec3,
-    /// `true` when `face_world_poly` failed (degenerate/out-of-range face); the
-    /// loop then skips it exactly as before.
-    pub(super) bad: bool,
 }
 
 /// The world-model static-geometry cache. Keyed by a cheap world fingerprint so
 /// it self-invalidates on a changelevel (face indices are meaningless after the
 /// BSP is swapped). `geoms[i]` is lazily filled the first time face `i` is
-/// reached; `Frustum` AABBs read from it.
+/// reached.
 pub(super) struct GeomCache {
     fingerprint: WorldFingerprint,
     geoms: Vec<Option<FaceGeom>>,
@@ -357,45 +344,27 @@ pub fn mip_cvars() -> MipCvars {
     MIP_CVARS.with(|m| m.get())
 }
 
-/// `NEAR_CLIP` (`r_local.h`): `R_EmitEdge` clamps a vertex's view depth to at
-/// least this before taking `1/z`.
-const NEAR_CLIP: f32 = 0.01;
-
 /// What `D_DrawSurfaces` needs to pick a surface's mip level, set up once per
-/// frame and pass: `D_SetupFrame`'s `d_scalemip`/`d_minmip`, `D_ViewChanged`'s
-/// `scale_for_mip`, and the view frustum's four side planes `R_ClipEdge` clips
-/// the edges against before `R_EmitEdge` records the nearest `1/z`.
+/// frame: `D_SetupFrame`'s `d_scalemip`/`d_minmip` and `D_ViewChanged`'s
+/// `scale_for_mip`.
 pub(super) struct MipView {
     scalemip: [f32; NUM_MIPS - 1],
     minmip: u32,
     scale_for_mip: f32,
-    /// The side planes as slopes: a view-space point is inside iff
-    /// `|vx| <= tan_x * vz` and `|vy| <= tan_y * vz`.
-    tan_x: f32,
-    tan_y: f32,
-    /// Clip scratch (reused across faces).
-    a: Vec<[f32; 3]>,
-    b: Vec<[f32; 3]>,
 }
 
 impl MipView {
-    /// For a view whose screen centre is `(cx, cy)` pixels from its edges, with
-    /// `x = cx + focal_x*vx/vz`, `y = cy - focal_y*vy/vz`. `scale_for_mip` is the
-    /// larger focal length (`xscale`, or `yscale` when the pixels are taller than
-    /// wide); the frustum's sides run through the view rectangle's edges, as
-    /// `R_ViewChanged`'s `screenedge` planes do.
-    pub(super) fn new(cx: f32, cy: f32, focal_x: f32, focal_y: f32) -> MipView {
+    /// For a view projected with `x = cx + xscale*vx/vz`, `y = cy -
+    /// yscale*vy/vz`: `scale_for_mip` is the larger scale (`xscale`, or
+    /// `yscale` when the pixels are taller than wide).
+    pub(super) fn new(xscale: f32, yscale: f32) -> MipView {
         let cv = mip_cvars();
         // d_minmip = d_mipcap.value (float to int truncates), clamped to 0..3.
         let minmip = (cv.mipcap as i32).clamp(0, NUM_MIPS as i32 - 1) as u32;
         MipView {
             scalemip: BASEMIP.map(|b| b * cv.mipscale),
             minmip,
-            scale_for_mip: if focal_y > focal_x { focal_y } else { focal_x },
-            tan_x: cx / focal_x,
-            tan_y: cy / focal_y,
-            a: Vec::new(),
-            b: Vec::new(),
+            scale_for_mip: if yscale > xscale { yscale } else { xscale },
         }
     }
 
@@ -415,51 +384,10 @@ impl MipView {
     }
 
     /// `D_DrawSurfaces`' `D_MipLevelForScale(s->nearzi * scale_for_mip *
-    /// pface->texinfo->mipadjust)` for a surface whose edges gave `nearzi`.
+    /// pface->texinfo->mipadjust)` for a surface whose edges gave `nearzi`
+    /// (`R_EmitEdge`'s nearest `1/z` of the face as clipped to the view).
     pub(super) fn level_for_nearzi(&self, nearzi: f32, ti: &crate::bsp::TexInfo) -> u32 {
         self.level_for_scale(nearzi * self.scale_for_mip * mipadjust(ti))
-    }
-
-    /// The mip level `D_DrawSurfaces` draws a face at: `D_MipLevelForScale(
-    /// nearzi * scale_for_mip * mipadjust)`. `views` is the face's polygon in
-    /// view space (`x` right, `y` up, `z` forward — unclipped); `ti` its texinfo.
-    pub(super) fn level_for_face(&mut self, views: &[super::vis::VView], ti: &crate::bsp::TexInfo) -> u32 {
-        let nearzi = self.nearzi(views);
-        self.level_for_scale(nearzi * self.scale_for_mip * mipadjust(ti))
-    }
-
-    /// `surf->nearzi`: the largest `1/z` among the vertices of the polygon
-    /// clipped to the four side planes of the frustum, each `z` clamped to
-    /// [`NEAR_CLIP`] — what `R_RenderFace` gathers as `R_EmitEdge` projects the
-    /// clipped edges (the left clip edge, and the right one for its `1/z` only,
-    /// included). 0 when nothing is left (the face covers no pixel).
-    fn nearzi(&mut self, views: &[super::vis::VView]) -> f32 {
-        let (tx, ty) = (self.tan_x, self.tan_y);
-        self.a.clear();
-        self.a.extend(views.iter().map(|v| [v.vx, v.vy, v.vz]));
-        // The side planes, right, left, top and bottom, as (axis, sign, slope):
-        // a point's distance inside is `slope * z + sign * p[axis]`.
-        for (axis, sign, slope) in [(0, -1.0f32, tx), (0, 1.0, tx), (1, -1.0, ty), (1, 1.0, ty)] {
-            let d = |p: &[f32; 3]| slope * p[2] + sign * p[axis];
-            self.b.clear();
-            let n = self.a.len();
-            for i in 0..n {
-                let (p, q) = (self.a[i], self.a[(i + 1) % n]);
-                let (dp, dq) = (d(&p), d(&q));
-                if dp >= 0.0 {
-                    self.b.push(p);
-                }
-                if (dp >= 0.0) != (dq >= 0.0) {
-                    let f = dp / (dp - dq);
-                    self.b.push([p[0] + f * (q[0] - p[0]), p[1] + f * (q[1] - p[1]), p[2] + f * (q[2] - p[2])]);
-                }
-            }
-            std::mem::swap(&mut self.a, &mut self.b);
-            if self.a.is_empty() {
-                return 0.0;
-            }
-        }
-        self.a.iter().fold(0.0f32, |m, p| m.max(1.0 / p[2].max(NEAR_CLIP)))
     }
 }
 
@@ -746,51 +674,10 @@ pub(super) fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) 
         }
         // Build it once.
         let mut poly: Vec<Vec3> = Vec::new();
-        let ok = face_world_poly(bsp, face, &mut poly);
-        let geom = if !ok {
-            FaceGeom {
-                poly: std::rc::Rc::new(Vec::new()),
-                normal: None,
-                center: [0.0; 3],
-                mins: [0.0; 3],
-                maxs: [0.0; 3],
-                bad: true,
-            }
-        } else {
-            let normal = face_normal(bsp, face);
-            // Centroid: identical accumulate-then-scale to the inline loop.
-            let mut center = [0.0f32; 3];
-            for v in &poly {
-                for k in 0..3 {
-                    center[k] += v[k];
-                }
-            }
-            let inv_n = 1.0 / poly.len() as f32;
-            for c in &mut center {
-                *c *= inv_n;
-            }
-            // World AABB for the frustum cull.
-            let mut mins = [f32::INFINITY; 3];
-            let mut maxs = [f32::NEG_INFINITY; 3];
-            for v in &poly {
-                for k in 0..3 {
-                    if v[k] < mins[k] {
-                        mins[k] = v[k];
-                    }
-                    if v[k] > maxs[k] {
-                        maxs[k] = v[k];
-                    }
-                }
-            }
-            FaceGeom {
-                poly: std::rc::Rc::new(poly),
-                normal,
-                center,
-                mins,
-                maxs,
-                bad: false,
-            }
-        };
+        if !face_world_poly(bsp, face, &mut poly) {
+            poly.clear();
+        }
+        let geom = FaceGeom { poly: std::rc::Rc::new(poly) };
         if let Some(g) = gc.geoms.get_mut(idx) {
             *g = Some(geom.clone());
         }
@@ -1419,18 +1306,18 @@ mod tests {
     #[test]
     fn mip_level_for_scale_is_d_mip_level_for_scale() {
         set_mip_cvars(MipCvars::DEFAULT);
-        let mv = MipView::new(160.0, 100.0, 160.0, 160.0);
+        let mv = MipView::new(160.0, 160.0);
         let levels: Vec<u32> =
             [5.0, 1.0, 0.999, 0.4, 0.399, 0.2, 0.199, 0.0].iter().map(|&s| mv.level_for_scale(s)).collect();
         assert_eq!(levels, [0, 0, 1, 1, 2, 2, 3, 3]);
         // d_mipscale 0: every scale (>= 0) is mip 0.
         set_mip_cvars(MipCvars { mipscale: 0.0, mipcap: 0.0 });
-        assert_eq!(MipView::new(160.0, 100.0, 160.0, 160.0).level_for_scale(0.0), 0);
+        assert_eq!(MipView::new(160.0, 160.0).level_for_scale(0.0), 0);
         // d_mipcap 2 (and 9, clamped to 3): never finer than that.
         set_mip_cvars(MipCvars { mipscale: 1.0, mipcap: 2.0 });
-        assert_eq!(MipView::new(160.0, 100.0, 160.0, 160.0).level_for_scale(5.0), 2);
+        assert_eq!(MipView::new(160.0, 160.0).level_for_scale(5.0), 2);
         set_mip_cvars(MipCvars { mipscale: 1.0, mipcap: 9.0 });
-        assert_eq!(MipView::new(160.0, 100.0, 160.0, 160.0).level_for_scale(5.0), 3);
+        assert_eq!(MipView::new(160.0, 160.0).level_for_scale(5.0), 3);
         set_mip_cvars(MipCvars::DEFAULT);
     }
 
@@ -1449,28 +1336,22 @@ mod tests {
         assert_eq!(mipadjust(&ti(0.25)), 4.0);
     }
 
-    /// `surf->nearzi` comes from the polygon clipped to the frustum's sides: a
-    /// floor running from behind the eye to far ahead is nearest where the
-    /// bottom of the view cuts it, not at its vertex behind the camera.
+    /// `D_DrawSurfaces`' level for a surface's `nearzi`: `nearzi *
+    /// scale_for_mip * mipadjust` through `D_MipLevelForScale`.
     #[test]
-    fn nearzi_is_taken_from_the_frustum_clipped_polygon() {
-        use super::super::vis::VView;
-        let v = |vx: f32, vy: f32, vz: f32| VView { vx, vy, vz, s: 0.0, t: 0.0 };
-        // 90 degrees both ways: |vx| <= vz, |vy| <= vz.
-        let mut mv = MipView::new(100.0, 100.0, 100.0, 100.0);
-        let floor = [v(-50.0, -20.0, -10.0), v(50.0, -20.0, -10.0), v(50.0, -20.0, 200.0), v(-50.0, -20.0, 200.0)];
-        assert!((mv.nearzi(&floor) - 1.0 / 20.0).abs() < 1e-6, "got {}", mv.nearzi(&floor));
-        // Wholly left of the view: nothing left, nearzi 0 (mip 3).
-        let off = [v(-300.0, 0.0, 10.0), v(-200.0, 0.0, 10.0), v(-200.0, 5.0, 100.0)];
-        assert_eq!(mv.nearzi(&off), 0.0);
-        // Wholly inside: the nearest vertex, its z clamped to NEAR_CLIP.
-        let inside = [v(0.0, 0.0, 40.0), v(1.0, 0.0, 30.0), v(0.0, 1.0, 50.0)];
-        assert!((mv.nearzi(&inside) - 1.0 / 30.0).abs() < 1e-7);
+    fn the_level_comes_from_nearzi_scale_for_mip_and_mipadjust() {
+        let mv = MipView::new(100.0, 100.0);
         let ti = crate::bsp::TexInfo { vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], miptex: 0, flags: 0 };
         // scale = (1/30) * 100 * 1 = 3.3 -> mip 0; at 10x the distance 0.33 -> mip 2.
-        assert_eq!(mv.level_for_face(&inside, &ti), 0);
-        let far: Vec<VView> = inside.iter().map(|p| v(p.vx * 10.0, p.vy * 10.0, p.vz * 10.0)).collect();
-        assert_eq!(mv.level_for_face(&far, &ti), 2);
+        assert_eq!(mv.level_for_nearzi(1.0 / 30.0, &ti), 0);
+        assert_eq!(mv.level_for_nearzi(1.0 / 300.0, &ti), 2);
+        // Nothing of the face in view: nearzi 0, the coarsest level.
+        assert_eq!(mv.level_for_nearzi(0.0, &ti), 3);
+        // Short texture axes (mipadjust 4) scale it up: 1.33 -> mip 0.
+        let big = crate::bsp::TexInfo { vecs: [[0.25, 0.0, 0.0, 0.0], [0.0, 0.25, 0.0, 0.0]], miptex: 0, flags: 0 };
+        assert_eq!(mv.level_for_nearzi(1.0 / 300.0, &big), 0);
+        // The larger of the two scales is scale_for_mip (pixels taller than wide).
+        assert_eq!(MipView::new(100.0, 300.0).level_for_nearzi(1.0 / 300.0, &ti), 0);
     }
 
     /// A 32x32 wall texture whose level `m` texels are all `10 * m + 1`.
@@ -1654,7 +1535,6 @@ mod tests {
         // First call builds + caches; second returns the cached clone.
         let g1 = face_geom_cached(&bsp, 0, &face);
         let g2 = face_geom_cached(&bsp, 0, &face);
-        assert!(!g1.bad);
         // The cached poly must equal a direct face_world_poly reconstruction
         // (face_world_poly walks the BSP edge tables, so this — not the helper's
         // literal `poly` used for lightmap math — is the geometry the loop sees).
@@ -1662,18 +1542,12 @@ mod tests {
         assert!(face_world_poly(&bsp, &face, &mut direct));
         assert_eq!(*g1.poly, direct);
         assert_eq!(*g2.poly, direct);
-        // Normal + centroid match a direct compute.
-        assert_eq!(g1.normal, face_normal(&bsp, &face));
-        // AABB encloses every vertex.
-        for v in &direct {
-            for (k, &c) in v.iter().enumerate() {
-                assert!(g1.mins[k] <= c && c <= g1.maxs[k]);
-            }
-        }
         // A different world (more faces) invalidates: still a correct rebuild.
         let (mut bsp_b, face_b, _polyb) = two_style_face_bsp([0, 255, 255, 255], 50, 50);
         bsp_b.faces.push(face_b.clone());
         let gb = face_geom_cached(&bsp_b, 0, &face_b);
-        assert!(!gb.bad);
+        let mut direct_b = Vec::new();
+        assert!(face_world_poly(&bsp_b, &face_b, &mut direct_b));
+        assert_eq!(*gb.poly, direct_b);
     }
 }

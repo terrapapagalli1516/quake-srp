@@ -7,7 +7,7 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
-use super::{Camera, Image, RenderOptions, ZBuf};
+use super::{Camera, Image, RenderOptions};
 use super::light::{r_light_point, COLORMAP_LEN, LIGHTSTYLES};
 use super::polyse::PolyFramebuffer;
 
@@ -763,7 +763,7 @@ fn alias_clip_triangle(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_alias_model(
     image: &mut Image,
-    zbuf: ZBuf,
+    zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
     opts: &RenderOptions,
@@ -898,7 +898,7 @@ pub struct Viewmodel<'a> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_viewmodel(
     image: &mut Image,
-    zbuf: ZBuf,
+    zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
     opts: &RenderOptions,

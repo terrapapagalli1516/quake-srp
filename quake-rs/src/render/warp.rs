@@ -181,7 +181,7 @@ impl TurbTable {
 mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
-    use crate::render::raster::{outline, raster_poly_tex, AttrVert, Persp, PolyGrads, SurfaceMode};
+    use crate::render::raster::{span_at, span_turb, AttrVert, Persp, PolyGrads};
 
     /// A `w x h` image whose pixel (x, y) is `[x, y, 0]`, to read back which
     /// source pixel the warp chose.
@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn turbulent_sampler_animates_at_fixed_st() {
-        // Drive `raster_poly_tex` in Turb mode over a single screen-filling
-        // triangle and confirm that sampling the SAME geometry at two different
+        // Draw a liquid surface covering the view (one span per row, as
+        // D_DrawSurfaces would) and confirm that sampling the SAME geometry at two different
         // `time` values produces a DIFFERENT framebuffer (it animates), while
         // every sampled index stays in bounds (no panic, no garbage).
         let turb = TurbTable::new();
@@ -306,23 +306,18 @@ mod tests {
             *p = [i as u8, i as u8, i as u8];
         }
 
-        // One large triangle covering the framebuffer, spanning a range of (s,t)
-        // so the warp samples many texels.
+        // A surface spanning a range of (s,t) so the warp samples many texels.
         let (w, h) = (40usize, 40usize);
+        let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+        let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
+        let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
+        let g = PolyGrads::from_vertices(&[v0, v1, v2]).expect("triangle");
         let render_at = |time: f32| {
             let mut img = Image::new(w, h, [0, 0, 0]);
-            let mut zb = vec![f32::INFINITY; w * h];
-            let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
-            let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
-            let tri = [v0, v1, v2];
-            let g = PolyGrads::from_vertices(&tri).expect("triangle");
-            raster_poly_tex(
-                &mut img, &mut zb, &outline(&tri), &g,
-                &pixels, 64, 64, &pal, 1.0, None,
-                SurfaceMode::Turb { turb: &turb, time, persp: Persp::Exact },
-                None,
-            );
+            for y in 0..h {
+                let row = &mut img.rgb[y * w..(y + 1) * w];
+                span_turb(row, &span_at(&g, 0, y), &g, &pixels, 64, 64, &pal, &turb, time, Persp::Exact);
+            }
             img
         };
         let a = render_at(0.0);
@@ -336,7 +331,7 @@ mod tests {
         // proving the sample stayed in bounds (out-of-range would have continued).
         assert!(
             a.rgb.iter().any(|p| *p != [0, 0, 0]),
-            "turbulent triangle drew nothing"
+            "turbulent surface drew nothing"
         );
         for p in a.rgb.iter().chain(b.rgb.iter()) {
             assert!(p[0] == p[1] && p[1] == p[2], "sampled colour not a palette grey: {p:?}");

@@ -5,7 +5,7 @@
 //! `WinQuake/d_sprite.c`.
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image, Projection, RenderOptions, ZBuf};
+use super::{Camera, Image, Projection, RenderOptions};
 
 /// A sprite-model entity to draw as a camera-facing billboard (Quake's
 /// `mod_sprite` entities: the `s_explod.spr` explosion flash, bubbles, etc.).
@@ -23,15 +23,16 @@ pub struct SpriteInstance<'a> {
 /// screen-aligned billboard: the sprite faces the camera, so a frame W×H pixels (1
 /// texel = 1 world unit) spans `xscale*W/vz` × `yscale*H/vz` framebuffer pixels around
 /// the projected origin, offset by the frame's `origin` (left/up). Palette index 255
-/// is transparent (`d_sprite.c`). Nearest-neighbour sampled; behind-wall pixels are
-/// hidden by the depth test (`vz < zbuf`) and write depth so nearer geometry wins.
+/// is transparent (`d_sprite.c`). Nearest-neighbour sampled; each pixel takes the
+/// sprite spans' test against id's 16-bit z-buffer (`*pz <= izi >> 16`) and writes
+/// its 1/z, so nearer geometry wins.
 /// Oriented sprites fall back to the facing billboard (good enough for shareware).
 // Mirrors R_DrawSprite (r_sprite.c); the C reads globals (vid, r_refdef, cl.time)
 // that this port passes explicitly.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_sprites(
     image: &mut Image,
-    mut zbuf: ZBuf,
+    zbuf: &mut [i16],
     cam: &Camera,
     opts: &RenderOptions,
     sprites: &[SpriteInstance],
@@ -103,19 +104,9 @@ pub(super) fn draw_sprites(
                     continue; // transparent
                 }
                 let idx = py * w + px;
-                let pass = match &mut zbuf {
-                    // D_SpriteDrawSpans: `if (*pz <= (izi >> 16)) *pz = izi >> 16`.
-                    ZBuf::Izi(zb) if zb[idx] as i32 <= izi16 => {
-                        zb[idx] = izi16 as i16;
-                        true
-                    }
-                    ZBuf::Depth(zb) if vz < zb[idx] => {
-                        zb[idx] = vz;
-                        true
-                    }
-                    _ => false,
-                };
-                if pass {
+                // D_SpriteDrawSpans: `if (*pz <= (izi >> 16)) *pz = izi >> 16`.
+                if zbuf[idx] as i32 <= izi16 {
+                    zbuf[idx] = izi16 as i16;
                     image.rgb[idx] = palette[texel as usize];
                 }
             }
@@ -177,16 +168,16 @@ mod tests {
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
-        let mut zbuf = vec![f32::INFINITY; w * h];
+        let mut zbuf = vec![i16::MIN; w * h];
         let mut pal = [[0u8, 0, 0]; 256];
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, ZBuf::Depth(&mut zbuf), &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
         assert!(painted > 0, "a sprite in front must paint pixels");
-        let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
-        assert!((nearest - 100.0).abs() < 1.0, "z holds the sprite depth, got {nearest}");
+        // (int)(1/100 * 0x8000 * 0x10000) >> 16 = 327.
+        assert_eq!(zbuf.iter().copied().max().unwrap(), 327, "z holds the sprite's 1/z");
     }
 
     #[test]
@@ -196,28 +187,28 @@ mod tests {
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
-        let mut zbuf = vec![f32::INFINITY; w * h];
+        let mut zbuf = vec![i16::MIN; w * h];
         let pal = [[7u8, 7, 7]; 256];
         let spr = test_sprite(16, 16, 255);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, ZBuf::Depth(&mut zbuf), &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         assert!(img.rgb.iter().all(|&p| p == bg), "index-255 texels are transparent (nothing painted)");
-        assert!(zbuf.iter().all(|&z| z == f32::INFINITY), "transparent sprite writes no depth");
+        assert!(zbuf.iter().all(|&z| z == i16::MIN), "transparent sprite writes no depth");
     }
 
     #[test]
     fn draw_sprite_behind_wall_is_z_tested_out() {
-        // A sprite at depth 100 behind a wall (z-buffer pre-filled to 10) is hidden.
+        // A sprite at depth 100 behind a wall (the z-buffer holding depth 10's 1/z) is hidden.
         let (w, h) = (80usize, 60usize);
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let bg = [9u8, 9, 9];
         let mut img = Image::new(w, h, bg);
-        let mut zbuf = vec![10.0f32; w * h];
+        let mut zbuf = vec![3276i16; w * h];
         let mut pal = [[0u8, 0, 0]; 256];
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, ZBuf::Depth(&mut zbuf), &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         assert!(img.rgb.iter().all(|&p| p == bg), "a sprite behind a nearer wall is z-tested out");
     }
 }
