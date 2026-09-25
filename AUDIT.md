@@ -870,7 +870,13 @@ C followed and the test are in the commit message.
   `quaketool view` (which now warps an underwater eye like id's
   `R_RenderView`). Oracle, e1m1's pool (`--view=750,898,-332,0,90,0 --time
   1.6`), exact%: 320x200 97.58; 640x400 48.22 -> 97.59; 960x600 44.14 ->
-  97.60; 1280x800 42.65 -> 97.63 (before = the full-resolution warp). Cheaper
+  97.60; 1280x800 42.65 -> 97.63 (before = the full-resolution warp; id's
+  `--spans 8` against the port's then exact perspective). *Re-measured on
+  `quake/polish2`* after `compare.py` stopped taking the warp buffer's
+  `r_refdef.vrect` for the screen's (it had scored this view 6.6% at 960x600
+  since `quake/w2b`): against `--spans 16` 99.89 / 99.89 / 99.90 / 99.89,
+  at the page's aspect (`--aspect 0.8333333`) 99.93 at all four; against
+  `--spans 8` 98.53 / 98.57 / 98.54 / 98.58. Cheaper
   too: an underwater frame renders 320x152 at every preset. At every 16:10
   mode the C's pixel aspect for the warp buffer equals `vid.aspect`, so the
   square-pixel projection is exact; for a mode taller than 16:10 id squeezes
@@ -1237,6 +1243,25 @@ box and byte-identical when off, the `wasm_*` commands and the exports;
     all unchanged. Test `resolved_fields_match_the_by_name_accessors`.
   - Speed: simbench e1m3 2.64 → 0.29 ms per tick. The wasm sim phase is 68–76% lower, and the
     walk_e1m3 frame goes 1.39 → 0.77 ms at 320×200 (PERF_PLAN D2).
+
+## Second review fixes (2026-09-25, branch `quake/polish2`)
+
+Findings of the second adversarial review that live outside `quake-wasm/src/`
+(another branch is moving the client there); one line each, the C and the
+test in the commit message.
+
+- ✅ **Oracle: underwater views above 320x200 compared the wrong rectangle**
+  (MED, tooling) — `compare.py` took the `.json`'s `vrect` (`r_refdef.vrect`)
+  for the view's place on the screen. With the eye in a liquid above 320x200
+  that is the rectangle in `R_SetupFrame`'s warp buffer (0,0,320,200), not
+  the screen's, so it cropped id's frame to its top-left corner and asked the
+  port for an unwarped 320x200 view: e1m1's pool scored 6.6% at 960x600. It
+  now takes `scr_vrect` (already in the `.json` since `quake/fid2d`), which
+  `D_WarpScreen` stretches the buffer over, and warns for an underwater view
+  below viewsize 120 (`quaketool view --vrect` draws it unwarped). The pool,
+  `--spans 16`: 99.89 / 99.89 / 99.90 / 99.89 at 320x200 / 640x400 / 960x600 /
+  1280x800; 99.93 at all four at the page's aspect. The stale 97.6 numbers in
+  "Review fixes" are corrected there.
 
 ## LOW (27)
 

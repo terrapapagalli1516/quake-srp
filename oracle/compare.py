@@ -155,8 +155,8 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     if args.aspect is not None:
         cmd += ["--aspect", str(args.aspect)]
     # A view smaller than the screen (viewsize below 120): the port renders
-    # r_refdef.vrect alone, placed on the screen (the sky is centred on it).
-    vx, vy, vw, vh = meta["vrect"]
+    # the view rectangle alone, placed on the screen (the sky is centred on it).
+    vx, vy, vw, vh = screen_vrect(meta)
     if (vw, vh) != (w, h):
         cmd += ["--vrect", f"{vx},{vy},{vw},{vh}"]
     if args.exactpersp:
@@ -182,6 +182,15 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     if res.returncode != 0:
         sys.exit(f"quaketool view failed for {case}:\n{res.stdout}{res.stderr}")
     return res.stdout
+
+
+def screen_vrect(meta: dict) -> list[int]:
+    """The 3-D view's rectangle on the screen: `scr_vrect` (SCR_CalcRefdef).
+    `r_refdef.vrect` (the .json's "vrect") is the same rectangle except for an
+    underwater view above 320x200: R_SetupFrame's r_dowarp renders into the
+    (at most 320x200) warp buffer, so r_refdef.vrect is the rectangle in that
+    buffer, and D_WarpScreen stretches it over scr_vrect."""
+    return meta.get("scr_vrect", meta["vrect"])
 
 
 def recover_indices(rgb: np.ndarray, c_idx: np.ndarray, pal: np.ndarray):
@@ -304,9 +313,12 @@ def main() -> None:
                 print(f"{case}: {out / case}.c.ppm  vrect {meta['vrect']}  t={meta['time']:.3f}  "
                       f"eye {meta['vieworg']} {meta['viewangles']}")
                 continue
+            vx, vy, vw, vh = screen_vrect(meta)
+            if meta.get("dowarp") and (vw, vh) != (w, h):
+                print(f"warning: {case}: an underwater view below viewsize 120 — the port's `view --vrect` "
+                      f"draws it unwarped, id's is warped", file=sys.stderr)
             port_out = run_port(args, qt, case, mapname, meta, mode == "ents", out)
             c_idx = read_pnm(out / f"{case}.c.pgm")
-            vx, vy, vw, vh = meta["vrect"]
             if (vw, vh) != (w, h):  # compare the 3-D view rectangle (viewsize below 120)
                 c_idx = c_idx[vy:vy + vh, vx:vx + vw]
             c_rgb = pal[c_idx]

@@ -123,6 +123,15 @@ above the status bar, `--viewsize 100`) 100.00 / 99.46 / 100.00 / 100.00. Before
 the port's projection took the aspect it scored 31.35 / 26.90 / 20.23 / 14.23
 against id's 4:3 frame (then with id at mip 0 and exact perspective).
 
+**Underwater** (e1m1's pool, `--view=750,898,-332,0,90,0 --time 1.6`: id's
+`r_dowarp` view, rendered into the 320x200-at-most warp buffer and stretched
+over the screen by `D_WarpScreen`), `--spans 16`: 99.89 / 99.89 / 99.90 / 99.89
+at 320x200 / 640x400 / 960x600 / 1280x800, 99.93 at all four at the page's
+aspect. `compare.py` places the view by the `.json`'s `scr_vrect`: above
+320x200 an underwater frame's `vrect` is the warp buffer's rectangle, not the
+screen's. Below viewsize 120 an underwater view is not comparable (the port's
+`view --vrect` draws it unwarped; `compare.py` warns).
+
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
 1432.386,1397.978,233.254,9.344,-103.449,0`, `--spans 16`) scores 99.99% world and
 with entities, its entity pixels 100.00% (788 px; 664 px, 100%, at the page's
@@ -296,8 +305,8 @@ Timings are noisy: compare within one sitting.
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
   1996. The x87-vs-SSE check bounds the float noise at ~0.03%.
 - Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No particles,
-  underwater warp, sprites or intermission were compared (the oracle can render
-  them; nobody looked yet). Dynamic lights: the muzzle-flash frames above, since
+  sprites or intermission were compared (the oracle can render them; nobody
+  looked yet); the underwater warp in one view (above). Dynamic lights: the muzzle-flash frames above, since
   PERF_PLAN A2 (`AUDIT.md`); the port's `view` draws no particles, so a shot's
   puffs count as differences there.
 - The entity mode tests rendering of id's entity list; it says nothing about
