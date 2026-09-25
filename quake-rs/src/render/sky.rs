@@ -293,8 +293,8 @@ thread_local! {
 mod tests {
     use super::*;
     use crate::math::{cross, normalize};
-    use crate::render::{raster_triangle_tex, ProjT, SurfaceMode};
     use crate::render::fixtures::synthetic_sky_pixels;
+    use crate::render::raster::{raster_triangle_tex, ProjT, SurfaceMode};
 
     #[test]
     fn sky_sampler_renders_nonbackground_and_animates() {

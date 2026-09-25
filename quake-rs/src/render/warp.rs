@@ -157,8 +157,8 @@ pub(super) fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (i32, i32)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{raster_triangle_tex, ProjT, SurfaceMode};
     use crate::render::fixtures::synthetic_liquid_pixels;
+    use crate::render::raster::{raster_triangle_tex, ProjT, SurfaceMode};
 
     #[test]
     fn turb_table_matches_r_initturb() {
