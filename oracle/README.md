@@ -388,7 +388,7 @@ scenario's shots, before the branch -> after.
 | console sliding, down, typing (3) | 36.7 -> 99.1 | 4.8 -> 98.2 | 2.8 -> 97.3 |
 | intermission, also at viewsize 50 (2) | 100 -> 100 | 0.1 -> 100 | 0.0 -> 100 |
 | finale mid-reveal, later (2) | 85.7 -> 100 | 0.6 -> 100 | 0.0 -> 100 |
-| menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 | 43.8 -> 99.9 | 47.1 -> 99.95 |
+| menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 -> 100 | 43.8 -> 99.9 -> 100 | 47.1 -> 99.95 -> 100 |
 | menus: options, customize, video (3) | 95.4 -> 95.5 | 41.5 -> 98.8 | 44.7 -> 99.5 |
 | menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
 | quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
@@ -417,10 +417,16 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   was 7.2999954, so `(int)((cl.time - item_gettime)*10)` landed on 2 where id's
   gives 3 — the flash showed the frame before. `sv.time` is a double since
   `quake/polish2`: 100% in all three modes.
-- *Returning to Single Player from Load* (206 px): id keeps each menu's cursor
-  (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...: Escape from
-  Options lands on "Options"); the port's one cursor starts every screen at its
-  first row. Behaviour in `menu.rs`, left for after the Extras-menu work.
+- ~~*Returning to Single Player from Load* (206 px)~~: id keeps each menu's
+  cursor (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...:
+  Escape from Options lands on "Options"); the port's one cursor started every
+  screen at its first row. Per-menu cursors since `quake/polish2`: 100%.
+- *Options* (291 px): the port's 14th row, Web extras (in the slot of the
+  `_WIN32` build's "Use Mouse"), which id's DOS/Linux list does not have. The
+  `menu_options` scenario reaches Video Options with twelve DOWNs, not one UP,
+  since UP from row 0 wraps to that 14th row in the port (it had been
+  comparing id's Video Modes with the port's Web extras page since the extras
+  merge).
 - Not in the matrix: the pause plaque (the port has no `pause`), the loading
   plaque (the port loads within a frame and draws none), `SCR_ModalMessage`'s New
   Game question (it blocks in a key loop the null input driver never ends; its

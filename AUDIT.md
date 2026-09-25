@@ -992,7 +992,7 @@ exact and the other six are four explained residues (95.5-99.9%). Goldens unchan
   `toggling_the_console_clears_the_notify_lines`.
 
 Found, not fixed (outside the 2-D drawing, or another branch's file):
-- **Menu cursors are not remembered** — id keeps one per menu
+- ✅ (`quake/polish2`, "Second review fixes") **Menu cursors are not remembered** — id keeps one per menu
   (`m_main_cursor`, `m_singleplayer_cursor`, `options_cursor`, `load_cursor`
   shared by Load and Save, ...): Escape from Options lands on "Options", the
   port's single cursor on "Single Player". `menu.rs` behaviour, left for after
@@ -1343,6 +1343,30 @@ test in the commit message.
   mipadjust`, so it keeps a FINER level longer — and it counts world units
   per texel, not texels per unit); `quake-wasm/src/census_tests.rs`'s module
   doc still says `#[ignore]`.
+- ✅ **Menu cursors kept per menu** (fid2d's leftover) — `menu.c` keeps one
+  static cursor per menu and no `M_Menu_*_f` resets it (only `M_Menu_Help_f`
+  sets `help_page = 0`): Escape from Options lands on "Options", Load after
+  a load opens on that slot, the Quit prompt returns to its screen's row.
+  The port had one cursor that every screen change put back on row 0.
+  `menu.rs` now keeps `m_main_cursor`, `m_singleplayer_cursor`,
+  `load_cursor` (Load and Save share it), `m_multiplayer_cursor`,
+  `options_cursor`, `keys_cursor`, `vid_line` and the Web extras page's own;
+  Help and Quit have none. `vid_line` is a static in `vid_dos.c` too; id's
+  starts on the list's first line (the live mode in a default DOS setup),
+  the port's list is its own, so the first visit opens on the live mode and
+  later ones where the player left it. `reset_nav` (the host's boot) puts
+  them all at 0, a program start. Tests
+  `each_menu_keeps_its_cursor_like_menu_cs_statics`,
+  `a_closed_menu_reopens_on_m_main_cursor`,
+  `help_starts_on_page_0_and_quit_returns_to_the_screens_cursor`,
+  `video_opens_on_the_live_mode_then_keeps_vid_line`,
+  `reset_nav_is_a_program_start_for_the_cursors`. screen2d
+  `menu_sp.sp_again` 99.62 / 99.90 / 99.95% -> 100%; every menu shot now
+  matches in all three modes except the two explained ones (Options' Web
+  extras row, Video's mode list). `web/verify_menu.py`
+  follows id's cursors (61/61). **Two quake-wasm tests fail with this
+  commit** (they re-navigate assuming the reset; quake-wasm is off limits
+  here): see the list below. The commit is the branch's last.
 
 Left for the quake-wasm pass (found here, not changed: `quake-wasm/src/` is
 being moved into `quake-rs/src/client/`):
@@ -1358,6 +1382,16 @@ being moved into `quake-rs/src/client/`):
   `SND_Spatialize` on every channel) — CENSUS L15's open half.
 - Tooling: `quaketool view --vrect` draws an underwater view unwarped
   (`compare.py` warns); the warp at viewsize below 120 is not compared.
+- Menu cursors (below): two quake-wasm tests navigate assuming the old reset
+  (`host::tests::gamma_changes_the_presented_frame_and_one_is_byte_identity`,
+  `input::tests::invert_mouse_flips_pitch_and_lookspring_recentres_on_unlock`:
+  after reopening the menu they press DOWN twice for "Options", which from
+  the kept "Options" is Quit); each needs its re-navigation shortened to
+  `menu_cancel(); menu_select();` (+ one DOWN for Lookspring). And
+  `Menu::reset_nav` is shared by `boot()` (a program start, where menu.c's
+  statics are 0) and New Game / load / `map` (where id keeps every cursor):
+  split it so only the boot resets the cursors (app.rs's re-boot test pins
+  cursor 0 after `boot()`).
 - ✅ **Census: e1m8's `*6` reported "never moved"** (LOW, tooling) — the mover
   baselines were taken after the signon frames, by which time
   `PutClientInServer`'s `force_retouch` had opened the door (an ogre stands

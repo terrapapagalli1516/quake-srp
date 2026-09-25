@@ -14,8 +14,10 @@ sv.time 1.2 as in id's); particles drawn as `D_DrawParticle` (100% of
 particle pixels against the oracle, which now dumps them); the oracle's
 underwater comparison fixed (99.9%); the Load menu lists saves after a
 page reload; a pending hum can no longer outlive its stop; `sv_gravity`
-outlives the map; census mover baselines; stale docs. Left for the
-quake-wasm pass: see the AUDIT section's list.
+outlives the map; census mover baselines; stale docs; menu cursors kept per
+menu, as id's (the last commit: two quake-wasm tests need their menu
+navigation updated with it). Left for the quake-wasm pass: see the AUDIT
+section's list.
 
 ---
 
@@ -44,7 +46,7 @@ wide at the bottom centre and the menus sit top centre. The old blown-up
 layout is the opt-in **"scaled 2-D" extra**: the wasm export
 `set_scaled_2d(1)` — not yet wired into the page's Extras menu or saved.
 Found for other branches (AUDIT.md): menu cursors not remembered per menu,
-`sv.time` accumulated in f32 (fixed on `quake/polish2`), WASD default binds, no pause/loading plaques,
+`sv.time` accumulated in f32 (both fixed on `quake/polish2`), WASD default binds, no pause/loading plaques,
 `give` unlike `Host_Give_f`.
 
 ---
