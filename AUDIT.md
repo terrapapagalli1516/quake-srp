@@ -1865,6 +1865,17 @@ each; the C followed and the evidence are in the commit messages.
   `setup_draws_the_translated_player`,
   `setup_sets_the_name_and_colours_the_console_reads`; `web/verify_menu.py`
   (Setup opens, Escape returns).
+- ✅ **The Web extras page's text ran under the plaque** (LOW; the port's
+  own page). Its white header and help lines were centred across the 320
+  columns, so they crossed `qplaque` (x 16..47). The page is now laid out as
+  `M_Options_Draw` lays out Options: the rows from y=32, 8 px apart, labels
+  right-justified from x=16, "on"/"off" at x=220, the cursor at x=200; under
+  them, starting at x=64 (clear of the plaque, as Setup's labels), the white
+  "Not in id's Quake" and the highlighted row's two help lines and its
+  console variable, each at most 32 columns (two help lines shortened).
+  Test `web_extras_screen_draws_in_the_options_idiom` (nothing but the plaque
+  in its columns). Screenshots, 1440x900, the scaled 2-D extra on and off:
+  `extras_{before,after}_scaled2d{1,0}.png` (not committed).
 
 ## LOW (27)
 

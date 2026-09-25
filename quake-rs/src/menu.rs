@@ -156,7 +156,8 @@ pub struct WebExtra {
     /// Its row label, right-justified to the Options label column like id's.
     pub label: &'static str,
     /// The two bronze help lines shown under the list while its row is
-    /// highlighted (a third names the console variable).
+    /// highlighted (a third names the console variable), at most
+    /// [`EXTRAS_NOTE_COLS`] characters so they clear the plaque.
     pub help: [&'static str; 2],
     /// Its one-line summary in the console's `help`.
     pub summary: &'static str,
@@ -184,14 +185,14 @@ pub const WEB_EXTRAS: [WebExtra; 4] = [
         extra: Extra::ExactPersp,
         cvar: "wasm_exactpersp",
         label: "     Exact perspective",
-        help: ["Perspective exact at every pixel,", "not id's 16-pixel spans"],
+        help: ["Perspective exact at each pixel,", "not id's 16-pixel spans"],
         summary: "exact persp.",
     },
     WebExtra {
         extra: Extra::Scaled2d,
         cvar: "wasm_scaled2d",
         label: "      Scaled 2-D layer",
-        help: ["Status bar, menus and text blown", "up from 320x200 to fill the screen"],
+        help: ["Status bar, menus and text blown", "up from 320x200 to full screen"],
         summary: "scaled 2-D layer",
     },
 ];
@@ -2299,21 +2300,27 @@ fn draw_options_screen(
     }
 }
 
-/// The Extras screen's layout, in `M_Keys_Draw`'s shape: a white header line
-/// at y=32, then the rows from y=48, 8 px apart, and the highlighted row's
-/// help lines from y=[`EXTRAS_HELP_Y`].
-const EXTRAS_HEADER_Y: f32 = 32.0;
-const EXTRAS_ROW_Y0: f32 = 48.0;
-const EXTRAS_HELP_Y: f32 = 88.0;
-/// The Extras header (`M_PrintWhite`, centred): what these rows are.
-const EXTRAS_HEADER: &str = "Web extras: not in id's Quake";
+/// The Extras screen's layout is `M_Options_Draw`'s: the rows from y=32, 8
+/// px apart (as Options' first rows), the labels at x=16, the checkboxes at
+/// x=220, the cursor at x=200. Under them, right of the plaque (`qplaque` is
+/// 32 wide at x=16), the notes: from x=[`EXTRAS_NOTE_X`], the white
+/// [`EXTRAS_HEADER`] at y=[`EXTRAS_HEADER_Y`] and the highlighted row's help
+/// lines from y=[`EXTRAS_HELP_Y`], at most [`EXTRAS_NOTE_COLS`] columns.
+const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
+const EXTRAS_NOTE_X: f32 = 64.0;
+const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
+const EXTRAS_HEADER_Y: f32 = 80.0;
+const EXTRAS_HELP_Y: f32 = 96.0;
+/// The Extras header (`M_PrintWhite`): what these rows are.
+const EXTRAS_HEADER: &str = "Not in id's Quake";
 
-/// Draw the port's Web extras screen in `M_Options_Draw`'s idiom: qplaque
-/// (drawn by the caller) and the `p_option` title (it is a page of Options),
-/// the [`EXTRAS_HEADER`] in white, then each extra as an Options checkbox row
-/// — the right-justified `M_Print` label at x=16, `M_DrawCheckbox`'s "on" /
-/// "off" at x=220, the 4 Hz flashing cursor at x=200 — and, under the list,
-/// the highlighted row's three bronze help lines, centred.
+/// Draw the port's Web extras screen as `M_Options_Draw` draws Options:
+/// qplaque (drawn by the caller) and the `p_option` title (it is a page of
+/// Options), each extra an Options checkbox row — the right-justified
+/// `M_Print` label at x=16, `M_DrawCheckbox`'s "on" / "off" at x=220, the
+/// 4 Hz flashing cursor at x=200 — and, under the rows and clear of the
+/// plaque, the [`EXTRAS_HEADER`] in white and the highlighted row's three
+/// bronze help lines.
 #[allow(clippy::too_many_arguments)]
 fn draw_extras_screen(
     image: &mut Image,
@@ -2331,10 +2338,6 @@ fn draw_extras_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     let Some(cc) = conchars else { return };
-    let centred = |s: &str| ((MENU_VIRT_W as i32 - s.len() as i32 * 8) / 2) as f32;
-    draw_string_scaled(
-        image, cc, centred(EXTRAS_HEADER), EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette,
-    );
     for (i, row) in WEB_EXTRAS.iter().enumerate() {
         let y = EXTRAS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
         m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy, palette);
@@ -2343,10 +2346,12 @@ fn draw_extras_screen(
     }
     let cy = EXTRAS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
+    draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette);
     if let Some(row) = WEB_EXTRAS.get(menu.cursor()) {
         for (i, line) in extras_help_lines(row).iter().enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
-            m_print(image, cc, centred(line), y, line, scale, ox, oy, palette);
+            let line = &line[..line.len().min(EXTRAS_NOTE_COLS)];
+            m_print(image, cc, EXTRAS_NOTE_X, y, line, scale, ox, oy, palette);
         }
     }
 }
@@ -3950,7 +3955,7 @@ mod tests {
             assert!(w.cvar.starts_with("wasm_"), "{}: not an id name", w.cvar);
             assert_eq!(w.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", w.cvar);
             for line in extras_help_lines(w) {
-                assert!(line.len() <= 38, "{line:?} fits the 320-wide page");
+                assert!(line.len() <= EXTRAS_NOTE_COLS, "{line:?} fits right of the plaque");
             }
         }
     }
@@ -3994,42 +3999,44 @@ mod tests {
         assert_eq!(px(&img, 16 + 12 * 8, 136), pal[5], "'W' of Web extras, bronze, y=136");
         assert_eq!(px(&img, 16 + 21 * 8, 136), pal[5], "its 's' in the last label column");
 
-        // The Extras screen: plaque + OPTIONS title, a white header at y=32,
-        // the rows from y=48 (bronze labels, "off" at x=220), the cursor at
-        // x=200 while the 4 Hz blink shows it, the help lines under the list.
+        // The Extras screen, as M_Options_Draw: plaque + OPTIONS title, the
+        // rows from y=32 (bronze labels, "off" at x=220), the cursor at x=200
+        // while the 4 Hz blink shows it; under them, right of the plaque, the
+        // white header at y=80 and the row's help lines from y=96, at x=64.
         m.set_cursor(ROW_EXTRAS);
         m.select();
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
         assert_eq!(img.rgb[4 * 320 + 16], pal[9], "qplaque at (16,4)");
         assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
-        let hx = (320 - EXTRAS_HEADER.len() * 8) / 2;
-        assert_eq!(px(&img, hx, 32), pal[6], "the header is M_PrintWhite");
+        assert_eq!(px(&img, 64, 80), pal[6], "the header is M_PrintWhite");
         for (i, label) in WEB_EXTRAS.iter().map(|r| r.label).enumerate() {
-            let y = 48 + i * 8;
+            let y = 32 + i * 8;
             let first = label.bytes().position(|b| b != b' ').unwrap();
             assert_eq!(px(&img, 16 + first * 8, y), pal[5], "row {i} label bronze");
             assert_eq!(px(&img, 220, y), pal[5], "row {i} checkbox 'off' at x=220");
         }
-        assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        let help = WEB_EXTRAS[0].help;
-        let hx0 = (320 - help[0].len() * 8) / 2;
-        assert_eq!(px(&img, hx0, 88), pal[5], "row 0's help, bronze, from y=88");
+        assert_eq!(px(&img, 200, 32), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
+        assert_eq!(px(&img, 64, 96), pal[5], "row 0's help, bronze, from y=96");
+        // Nothing but the plaque in its columns: every note starts right of it.
+        for y in 30..200 {
+            for x in 16..48 {
+                assert_eq!(img.rgb[y * 320 + x], pal[if y < 148 { 9 } else { 0 }], "({x},{y})");
+            }
+        }
         // realtime 0.1: the blink is off (glyph 12, blank).
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.1, &pal);
-        assert_eq!(px(&img, 200, 48), pal[0], "the cursor blinks");
+        assert_eq!(px(&img, 200, 32), pal[0], "the cursor blinks");
         // "on" replaces "off" once toggled; the help follows the cursor.
         m.adjust(1);
         m.move_cursor(1);
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
-        assert_eq!(px(&img, 220 + 16, 48), pal[0], "\"on\" is two characters");
-        assert_eq!(px(&img, 220 + 16, 56), pal[5], "\"off\" is three");
-        let help1 = WEB_EXTRAS[1].help;
-        let hx1 = (320 - help1[0].len() * 8) / 2;
-        assert_eq!(px(&img, hx1, 88), pal[5], "row 1's help once the cursor moves");
-        assert_eq!(px(&img, 200, 56), pal[7], "the cursor on row 1");
+        assert_eq!(px(&img, 220 + 16, 32), pal[0], "\"on\" is two characters");
+        assert_eq!(px(&img, 220 + 16, 40), pal[5], "\"off\" is three");
+        assert_eq!(px(&img, 64, 96), pal[5], "row 1's help once the cursor moves");
+        assert_eq!(px(&img, 200, 40), pal[7], "the cursor on row 1");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, None, 0.0, 0.3, &pal);
