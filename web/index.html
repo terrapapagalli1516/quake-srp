@@ -59,7 +59,9 @@
      a little air; --chrome-h: the bezel and a 16px gutter each side), and
      never smaller than 640x480 (the page scrolls instead). WinQuake draws the
      status bar and menus 1:1 in every mode, so at the default 960x600 they
-     are 320 wide: in a fixed 640x480 box they came out a third of the size. */
+     are 320 wide: in a fixed 640x480 box they came out a third of the size.
+     fitCanvas() then snaps that box (see there): pixelated scaling by a
+     factor just past a whole number doubles a column here and there. */
   canvas { --chrome-v:168px; --chrome-h:56px;
     image-rendering:pixelated; background:#000;
     width:max(640px, min(100vw - var(--chrome-h), (100vh - var(--chrome-v)) * 4 / 3));
@@ -1411,17 +1413,49 @@ async function main() {
   // largest 4:3 box the window fits, see the canvas rule) does not follow it,
   // so a larger backing store just gives a crisper pixel-upscale.
   let W = 0, H = 0;
+  // The canvas box, snapped. The CSS rule gives the largest 4:3 box the
+  // window fits; with image-rendering:pixelated a box a little wider than the
+  // framebuffer (976 px for 960 columns at 1440x900) doubles one column in
+  // ~60, which bands the menu's checkerboard fade and the 1:1 text, and a
+  // box narrower than it drops whole columns out of that text. So, in device
+  // pixels per framebuffer column (s):
+  //   - s at or up to 1/8 past a whole number k: the box is exactly k columns
+  //     per framebuffer column (every column k pixels wide; the picture
+  //     gives up at most a ninth of its width for it);
+  //   - s below 1 (a window narrower than the framebuffer): the natural box,
+  //     smoothed (image-rendering:auto) — no column is dropped, the text is
+  //     a little soft;
+  //   - otherwise (1.27 at 1920x1080): the natural box, pixelated, as before.
+  // Rows are another matter: the 16:10 framebuffer is shown at 4:3, 1.2 rows
+  // per column's worth (a 1996 monitor's stretch), so every fifth row is one
+  // pixel taller whatever the box.
+  const SNAP = 1 / 8;
+  function fitCanvas() {
+    canvas.style.width = canvas.style.height = canvas.style.imageRendering = '';
+    const natural = parseFloat(getComputedStyle(canvas).width);
+    const dpr = window.devicePixelRatio || 1;
+    const s = natural * dpr / W;
+    if (!(s > 0)) return;
+    let width = natural;
+    if (s >= 1 && s - Math.floor(s) <= SNAP * Math.floor(s)) width = Math.floor(s) * W / dpr;
+    else if (s < 1) canvas.style.imageRendering = 'auto';
+    canvas.style.width = width + 'px';
+    canvas.style.height = width * 3 / 4 + 'px';
+  }
   function syncCanvasSize() {
     const w = exp.width(), h = exp.height();
     if (w === W && h === H) return;
     W = w; H = h;
     canvas.width = W; canvas.height = H;
+    fitCanvas();   // the snap depends on W
     // The resolution just changed (boot, or a Video Options mode): persist
     // it so a reload comes back at the same size. This is the single choke point
     // for every resolution change, so it captures menu picks and restores alike.
     saveResolution(W, H);
   }
   syncCanvasSize();
+  addEventListener('resize', fitCanvas);
+  document.addEventListener('fullscreenchange', fitCanvas);
   // The presented frame: an ImageData built straight over the framebuffer in
   // wasm memory, so presenting is one putImageData with no copy into a
   // JS-side ImageData first. Rebuilt when the bytes move: a memory.grow

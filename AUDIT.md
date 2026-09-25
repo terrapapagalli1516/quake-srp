@@ -1876,6 +1876,26 @@ each; the C followed and the evidence are in the commit messages.
   Test `web_extras_screen_draws_in_the_options_idiom` (nothing but the plaque
   in its columns). Screenshots, 1440x900, the scaled 2-D extra on and off:
   `extras_{before,after}_scaled2d{1,0}.png` (not committed).
+- ✅ **The canvas box banded the pixelated picture** (LOW; the page). The
+  largest 4:3 box a 1440x900 window fits is 976 wide for the default 960
+  columns: with `image-rendering: pixelated` one column in ~60 was doubled,
+  which striped the menu's checkerboard fade and the 1:1 text; in windows
+  narrower than the framebuffer whole columns of 1:1 text were dropped. The
+  page's `fitCanvas()` now snaps the fitted box, in device pixels per
+  framebuffer column `s`: at most 1/8 past a whole number `k`, the box is
+  exactly `k` (960x720 at 1440x900; the picture gives up at most a ninth of
+  its width); below 1, the fitted box drawn smooth (`image-rendering:
+  auto`); otherwise the fitted box, pixelated as before (1216x912 at
+  1920x1080: 1.27 per column spreads its doubled columns evenly, one in
+  four, and smoothing would blur the whole 3-D view to hide it). It runs on
+  load, resize (so zoom and devicePixelRatio), fullscreen and every
+  resolution change. The rows cannot be made even: the 16:10 framebuffer
+  is shown at 4:3, 1.2 rows per column's width, every fifth row a pixel
+  taller. Measured over the Quit prompt's fade (screen columns that repeat
+  their neighbour): 1440x900, 16 of 977 → 0; 1920x1080, 256 of 1217 (as
+  before); 1024x768 no longer drops columns (smoothed). `web/verify_input.py`
+  checks the three boxes. Screenshots `box_{before,after}_{1440x900,1920x1080}.png`
+  and their zoomed crops (not committed).
 
 ## LOW (27)
 

@@ -17,6 +17,11 @@
      walk mode with no menu/console up; never in attract/demo/locked states.
   5. KEYBOARD-ONLY PLAY — arrows move the camera and Ctrl fires (+attack)
      without the pointer ever being locked.
+  6. THE CANVAS BOX — at 1440x900 the 960-wide framebuffer gets a 960x720
+     box (a whole pixel per column: the 976 the window fits doubled one
+     column in 60), at 1920x1080 the natural 1216x912 (1.27 is no near
+     whole number), at 1024x768 an 800x600 box drawn smooth (a pixelated
+     shrink drops columns).
 
 Headless fullscreen is approximate: the F/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
@@ -297,6 +302,22 @@ with sync_playwright() as p:
     else:
         print("SKIP fullscreen checks (headless refused requestFullscreen) — "
               "covered by the manual test script")
+
+    # (6) The canvas box (fitCanvas): the largest 4:3 box the window fits,
+    # snapped to a whole number of pixels per framebuffer column when it is
+    # at most 1/8 past one (no doubled column in the pixelated upscale),
+    # smoothed when it is narrower than the framebuffer (no dropped column).
+    box = lambda: pg.evaluate("""(() => { const c = document.getElementById('c');
+        return [parseFloat(c.style.width), parseFloat(c.style.height),
+                getComputedStyle(c).imageRendering, exp.width()]; })()""")
+    for (vw, vh), want in [((1440, 900), (960, 720, "pixelated")),
+                           ((1920, 1080), (1216, 912, "pixelated")),
+                           ((1024, 768), (800, 600, "auto"))]:
+        pg.set_viewport_size({"width": vw, "height": vh})
+        time.sleep(0.3)
+        b = box()
+        check(f"{vw}x{vh}: the {b[3]}-wide framebuffer in a {want[0]}x{want[1]} box, {want[2]}",
+              b[3] == 960 and (round(b[0]), round(b[1]), b[2]) == want, str(b))
 
     check("no console errors", not errs, str(errs[-5:]))
     br.close()

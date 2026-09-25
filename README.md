@@ -130,7 +130,12 @@ The page shows the game in the largest 4:3 box the window fits under its header,
 still in view (never smaller than 640x480; narrow screens and fullscreen have their own rules): the
 framebuffer is 16:10 and stretched to 4:3 as a 1996 monitor showed those modes. The window sets how
 big the picture is; the resolution (Options > Video Options, 960x600 by default) only sets how fine
-its pixels are, and the status bar and menus are drawn 1:1 in it, as WinQuake draws them.
+its pixels are, and the status bar and menus are drawn 1:1 in it, as WinQuake draws them. The box is
+then snapped for the pixelated scaling: when it is at most an eighth wider than a whole number of
+screen pixels per framebuffer column, it is exactly that number (960 wide at 1440x900, not 976,
+which doubled one column in 60 and striped the menu's fade); when it is narrower than the framebuffer
+it is drawn smooth instead of dropping columns; otherwise it stays as fitted (1216 at 1920x1080). The
+rows cannot be made even: 16:10 shown at 4:3 is 1.2 rows per column's width.
 
 The wasm is 18.7 MB, nearly all of it the embedded pak (the code is ~0.8 MB). miniserve's `-C`
 (`--compress-response`) compresses it on the fly: Chrome gets brotli at **8.6 MB** (gzip 9.6 MB,
