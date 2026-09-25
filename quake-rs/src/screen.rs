@@ -130,6 +130,11 @@ pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool
 /// vid.height)` under the view). A view that already IS the whole screen
 /// (viewsize 120, an intermission) comes back untouched, at zero cost. The
 /// status bar is drawn over the result afterwards, as in the C.
+///
+/// Every screen pixel is written exactly once — the tile only goes where the
+/// view does not, the four bands around it — so the screen is a spare frame
+/// buffer left uncleared ([`Image::reused_uncleared`]), and the view's own
+/// buffer goes back to the pool ([`crate::render::recycle_image`]).
 pub fn compose_view(
     view: Image,
     vrect: ViewRect,
@@ -141,17 +146,23 @@ pub fn compose_view(
     if vrect.x == 0 && vrect.y == 0 && view.w == vid_w && view.h == vid_h {
         return view;
     }
-    let mut img = Image::new(vid_w, vid_h, [0, 0, 0]);
-    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, vid_h, palette);
-    let cw = view.w.min(vid_w.saturating_sub(vrect.x));
-    for vy in 0..view.h {
-        let py = vrect.y + vy;
-        if py >= vid_h {
-            break;
-        }
-        let dst = py * vid_w + vrect.x;
+    let mut img = Image::reused_uncleared(vid_w, vid_h);
+    // The rectangle the view covers, clipped to the screen: [x0, x1) x [y0, y1).
+    let x0 = vrect.x.min(vid_w);
+    let x1 = x0 + view.w.min(vid_w - x0);
+    let y0 = vrect.y.min(vid_h);
+    let y1 = y0 + view.h.min(vid_h - y0);
+    // The tile everywhere else: above, below, then either side.
+    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, y0, palette);
+    draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1, palette);
+    draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0, palette);
+    draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0, palette);
+    let cw = x1 - x0;
+    for (vy, py) in (y0..y1).enumerate() {
+        let dst = py * vid_w + x0;
         img.rgb[dst..dst + cw].copy_from_slice(&view.rgb[vy * view.w..vy * view.w + cw]);
     }
+    crate::render::recycle_image(view);
     img
 }
 
@@ -392,5 +403,54 @@ mod tests {
         let view = Image::new(320, 200, [250, 1, 2]);
         let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal);
         assert!(out.rgb.iter().all(|&p| p == [250, 1, 2]));
+    }
+
+    #[test]
+    fn compose_view_on_a_dirty_spare_buffer_matches_a_fresh_full_clear() {
+        // The screen is a recycled buffer left uncleared, so every pixel must
+        // be written: compare with the straightforward compose (a fresh
+        // screen, the tile everywhere, the view copied over it) with garbage
+        // in every spare buffer first, for every viewsize, a few sizes, with
+        // and without a backtile, and views hanging off the screen.
+        let pal = ramp_palette();
+        let tile = test_backtile();
+        let reference = |view: &Image, vrect: ViewRect, w: usize, h: usize, t: Option<&Qpic>| {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            draw_tile_clear(&mut img, t, 0, 0, w, h, &pal);
+            for vy in 0..view.h {
+                for vx in 0..view.w {
+                    img.put((vrect.x + vx) as i32, (vrect.y + vy) as i32, view.rgb[vy * view.w + vx]);
+                }
+            }
+            img.rgb
+        };
+        let mut cases = Vec::new();
+        for &(w, h) in &[(320, 200), (640, 400), (1280, 800), (400, 300)] {
+            for vs in (30..=120).step_by(10) {
+                cases.push((w, h, calc_refdef(w, h, vs as f32, false).vrect));
+            }
+        }
+        cases.push((320, 200, ViewRect { x: 300, y: 190, w: 64, h: 32 }));
+        cases.push((320, 200, ViewRect { x: 400, y: 10, w: 16, h: 16 }));
+        cases.push((320, 200, ViewRect { x: 0, y: 0, w: 100, h: 300 }));
+        for (i, &(w, h, vrect)) in cases.iter().enumerate() {
+            let view = Image::new(vrect.w, vrect.h, [250, (i % 7) as u8, 2]);
+            for t in [Some(&tile), None] {
+                for _ in 0..3 {
+                    crate::render::recycle_image(Image::new(w, h + 7, [1, 2, 3]));
+                }
+                let want = reference(&view, vrect, w, h, t);
+                let got = compose_view(
+                    Image { w: view.w, h: view.h, rgb: view.rgb.clone() },
+                    vrect,
+                    w,
+                    h,
+                    t,
+                    &pal,
+                );
+                assert_eq!((got.w, got.h), (w, h));
+                assert!(got.rgb == want, "{w}x{h} {vrect:?} tile {}", t.is_some());
+            }
+        }
     }
 }

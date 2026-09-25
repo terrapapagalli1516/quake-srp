@@ -146,7 +146,7 @@ pub(crate) fn step_demo(
     menu_up: bool,
     render_w: usize,
     render_h: usize,
-) -> (render::Image, [u8; 3], f32) {
+) -> (render::Image, Vec<([u8; 3], f32)>) {
     let n = d.demo.frames.len();
     let t0 = d.demo.frames[0].time;
     d.elapsed += dt;
@@ -579,13 +579,8 @@ pub(crate) fn step_demo(
     if let Some(cs) = render::powerup_cshift(client.items) {
         shifts.push(cs);
     }
-    let blend = if shifts.is_empty() {
-        ([0u8, 0, 0], 0.0f32)
-    } else {
-        render::combine_cshifts(&shifts)
-    };
     bench::lap(Phase::Hud2d);
-    (img, blend.0, blend.1)
+    (img, shifts)
 }
 
 #[cfg(test)]
@@ -962,8 +957,8 @@ mod tests {
     }
 
     /// A recorded svc_damage drives the SAME flash + view-kick math live play
-    /// uses (V_ParseDamage): the deferred blend returned by step_demo carries
-    /// the red cshift, and the kick state arms + decays.
+    /// uses (V_ParseDamage): the deferred cshifts returned by step_demo carry
+    /// the red flash, and the kick state arms + decays.
     #[test]
     fn step_demo_damage_event_drives_flash_and_kick() {
         use quake_rs::demo::{DamageEvent, Demo, DemoFrame};
@@ -989,7 +984,7 @@ mod tests {
         d.damage_color = [0, 0, 0];
         d.prng = Lcg::new(1);
 
-        let (_img, color, alpha) = step_demo(&mut d, 0.05, false, 160, 100);
+        let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
         assert_eq!(d.idx, 1, "advanced onto the damage frame");
         // count = max(10, blood*0.5) = 10 -> percent 30, faded by 0.05*150 =
         // 7.5 within the same step (V_UpdatePalette) -> 22.5.
@@ -999,8 +994,11 @@ mod tests {
             d.damage_blend
         );
         assert_eq!(d.damage_color, [255, 0, 0], "pure-blood red tint");
-        assert_eq!(color, [255, 0, 0], "the deferred blend carries the flash");
-        assert!(alpha > 0.0, "non-zero blend returned to the dispatcher");
+        assert_eq!(
+            cshifts,
+            vec![([255, 0, 0], d.damage_blend)],
+            "the deferred cshifts carry the flash to the dispatcher"
+        );
         // The directional kick armed (forward hit -> pitch kick, no roll) and
         // already decayed one step (v_dmg_time -= host_frametime).
         assert!(
@@ -1103,10 +1101,9 @@ mod tests {
             frames: vec![plain(0.0), bf, plain(0.10), plain(1.0)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
-        let (_img, color, alpha) = step_demo(&mut d, 0.05, false, 160, 100);
+        let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
         assert!((d.bonus_blend - (50.0 - 0.05 * 100.0)).abs() < 1e-3, "{}", d.bonus_blend);
-        assert_eq!(color, crate::view::BONUS_COLOR);
-        assert!(alpha > 0.0);
+        assert_eq!(cshifts, vec![(crate::view::BONUS_COLOR, d.bonus_blend)], "the bonus cshift");
 
         let pak = pak().expect("pak");
         let real = parse_demo(&pak.read_file("demo1.dem").unwrap().unwrap()).unwrap();
@@ -1136,9 +1133,9 @@ mod tests {
 
         // Status bar A/B: one step with the wad, then re-render the SAME frame
         // without it (dt == 0 holds the frame) — the sbar region must differ.
-        let (with_hud, _, _) = step_demo(&mut d, 0.016, false, 320, 200);
+        let (with_hud, _) = step_demo(&mut d, 0.016, false, 320, 200);
         d.gfx_wad = None;
-        let (without, _, _) = step_demo(&mut d, 0.0, false, 320, 200);
+        let (without, _) = step_demo(&mut d, 0.0, false, 320, 200);
         assert_eq!(with_hud.rgb.len(), without.rgb.len());
         // Quake's sbar is the bottom 24 rows of the 320x200 virtual screen.
         let bar_rows = 24usize;
@@ -1162,7 +1159,7 @@ mod tests {
         let n = d.demo.frames.len();
         let _ = step_demo(&mut d, 1.0e6, false, 160, 100);
         assert_eq!(d.idx, n - 1, "fast-forwarded to the last frame");
-        let (img, _, _) = step_demo(&mut d, 0.05, false, 160, 100);
+        let (img, _) = step_demo(&mut d, 0.05, false, 160, 100);
         assert_eq!(d.idx, 0, "the wrap landed back on frame 0");
         assert!(
             !d.demo.frames[0].entities.is_empty(),

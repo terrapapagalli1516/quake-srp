@@ -5,7 +5,8 @@
 //! `Sbar_IntermissionOverlay`, `Sbar_FinaleOverlay`.
 
 use crate::draw::{
-    blit_qpic_at, conchars_pic, HUD_TRANSPARENT, HUD_VIRT_W, MENU_VIRT_H, MENU_VIRT_W,
+    blit_qpic_at, blit_scaled, conchars_pic, HUD_TRANSPARENT, HUD_VIRT_W, MENU_VIRT_H,
+    MENU_VIRT_W,
 };
 use crate::render::Image;
 use crate::screen::draw_center_string_revealed;
@@ -140,36 +141,17 @@ fn blit_qpic(
     let dst_w = (pw as f32 * scale).round().max(1.0) as i64;
     let dst_h = (ph as f32 * scale).round().max(1.0) as i64;
     let inv_scale = 1.0 / scale;
-
-    for dy in 0..dst_h {
-        let py = dst_y0 + dy;
-        if py < 0 || py >= image.h as i64 {
-            continue;
-        }
-        // Map this destination row back to a source texel row (nearest).
-        let sy = (dy as f32 * inv_scale) as usize;
-        if sy >= ph {
-            continue;
-        }
-        for dx in 0..dst_w {
-            let px = dst_x0 + dx;
-            if px < 0 || px >= image.w as i64 {
-                continue;
-            }
-            let sx = (dx as f32 * inv_scale) as usize;
-            if sx >= pw {
-                continue;
-            }
-            let texel = match pic.data.get(sy * pw + sx) {
-                Some(&t) => t,
-                None => continue,
-            };
-            if texel == HUD_TRANSPARENT {
-                continue; // transparent: leave the 3-D pixel as-is
-            }
-            image.put(px as i32, py as i32, palette[texel as usize]);
-        }
-    }
+    // Transparent texels leave the 3-D pixel as-is.
+    blit_scaled(
+        image,
+        &pic.data,
+        pw,
+        (0, 0, pw, ph),
+        (dst_x0, dst_y0, dst_w, dst_h),
+        inv_scale,
+        HUD_TRANSPARENT,
+        palette,
+    );
 }
 
 /// Draw a right-justified non-negative integer using the big `num_*` digit pics
@@ -405,35 +387,17 @@ fn draw_sbar_char(
     let dst_w = (8.0 * scale).round().max(1.0) as i64;
     let dst_h = (8.0 * scale).round().max(1.0) as i64;
     let inv_scale = 1.0 / scale;
-    for dy in 0..dst_h {
-        let py = dst_y0 + dy;
-        if py < 0 || py >= image.h as i64 {
-            continue;
-        }
-        let sy = (dy as f32 * inv_scale) as usize;
-        if sy >= 8 {
-            continue;
-        }
-        for dx in 0..dst_w {
-            let px = dst_x0 + dx;
-            if px < 0 || px >= image.w as i64 {
-                continue;
-            }
-            let sx = (dx as f32 * inv_scale) as usize;
-            if sx >= 8 {
-                continue;
-            }
-            let texel = match conchars.data.get((cell_y + sy) * 128 + (cell_x + sx)) {
-                Some(&t) => t,
-                None => continue,
-            };
-            // conchars uses palette index 0 as the transparent glyph background.
-            if texel == 0 {
-                continue;
-            }
-            image.put(px as i32, py as i32, palette[texel as usize]);
-        }
-    }
+    // conchars uses palette index 0 as the transparent glyph background.
+    blit_scaled(
+        image,
+        &conchars.data,
+        128,
+        (cell_x, cell_y, 8, 8),
+        (dst_x0, dst_y0, dst_w, dst_h),
+        inv_scale,
+        0,
+        palette,
+    );
 }
 
 /// `Sbar_DrawInventory` (sbar.c): the `ibar` strip in the 24 virtual rows above
@@ -911,6 +875,68 @@ mod tests {
         debug_assert_eq!(bytes.len(), infotableofs + pics.len() * LUMPINFO_SIZE);
 
         Wad2::parse(bytes).expect("synthetic gfx.wad parses")
+    }
+
+    #[test]
+    fn sbar_glyphs_and_pics_match_the_per_pixel_blit() {
+        // draw_sbar_char blits an 8x8 cell out of the 128-wide atlas and
+        // blit_qpic a whole pic, both through draw::blit_scaled now; check
+        // them against the per-pixel loops they replaced, at fractional
+        // scales, clipped at every edge.
+        let pal = ramp_palette();
+        let mut x = 12345u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 5) as u8
+        };
+        let atlas = Qpic { width: 128, height: 128, data: (0..128 * 128).map(|_| next() % 4).collect() };
+        let pic = Qpic { width: 24, height: 24, data: (0..24 * 24).map(|_| next() | 0xf0).collect() };
+        for &scale in &[0.5f32, 1.0, 1.37, 2.0, 2.5, 3.5, 4.0] {
+            let inv = 1.0 / scale;
+            for &(vx, vy, vy_top) in &[(0.0f32, 0.0f32, 40.0f32), (-3.0, -24.0, 50.5), (60.0, 2.0, 30.25), (70.0, 10.0, 61.0)] {
+                for ch in [0u8, 18, 27, 65, 255] {
+                    let mut want = Image::new(80, 64, [5, 5, 5]);
+                    let mut got = Image::new(80, 64, [5, 5, 5]);
+                    let (cx, cy) = ((ch as usize % 16) * 8, (ch as usize / 16) * 8);
+                    let x0 = (vx * scale).floor() as i64;
+                    let y0 = (vy_top + vy * scale).floor() as i64;
+                    let n = (8.0 * scale).round().max(1.0) as i64;
+                    for dy in 0..n {
+                        for dx in 0..n {
+                            let (sx, sy) = ((dx as f32 * inv) as usize, (dy as f32 * inv) as usize);
+                            if sx < 8 && sy < 8 {
+                                let t = atlas.data[(cy + sy) * 128 + cx + sx];
+                                if t != 0 {
+                                    want.put((x0 + dx) as i32, (y0 + dy) as i32, pal[t as usize]);
+                                }
+                            }
+                        }
+                    }
+                    draw_sbar_char(&mut got, &atlas, ch, vx, vy, scale, vy_top, &pal);
+                    assert!(got.rgb == want.rgb, "glyph {ch} scale {scale} ({vx},{vy}) top {vy_top}");
+                }
+                let mut want = Image::new(80, 64, [5, 5, 5]);
+                let mut got = Image::new(80, 64, [5, 5, 5]);
+                let x0 = (vx * scale).floor() as i64;
+                let y0 = (vy_top + vy * scale).floor() as i64;
+                let n = (24.0 * scale).round().max(1.0) as i64;
+                for dy in 0..n {
+                    for dx in 0..n {
+                        let (sx, sy) = ((dx as f32 * inv) as usize, (dy as f32 * inv) as usize);
+                        if sx < 24 && sy < 24 {
+                            let t = pic.data[sy * 24 + sx];
+                            if t != HUD_TRANSPARENT {
+                                want.put((x0 + dx) as i32, (y0 + dy) as i32, pal[t as usize]);
+                            }
+                        }
+                    }
+                }
+                blit_qpic(&mut got, &pic, vx, vy, scale, vy_top, &pal);
+                assert!(got.rgb == want.rgb, "pic scale {scale} ({vx},{vy}) top {vy_top}");
+            }
+        }
     }
 
     #[test]

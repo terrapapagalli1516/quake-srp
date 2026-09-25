@@ -561,6 +561,35 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   Accepted gap: 85–100 Hz displays get half their rate (the C gate needs two
   vsyncs there).
 
+## Frame composition (PERF_PLAN B, 2026-09-25, branch `quake/perf-b`)
+
+- ✅ **Cshifts are the software `V_UpdatePalette`'s integer ramps** (B2). The
+  port blended the finished frame per pixel in f32 through `V_CalcBlend`'s
+  combined alpha, rounding — but `V_CalcBlend` is GLQuake's (`#ifdef
+  GLQUAKE`); the software build walks `cl.cshifts` (CONTENTS, DAMAGE, BONUS,
+  POWERUP) over every palette level with `v += (percent*(destcolor-v)) >> 8`
+  (`int` percent, arithmetic shift: fractions round toward minus infinity) and
+  then `gammatable[v]`. `render::cshift_ramps` is that, per channel, and the
+  host packs the finished frame through the three ramps (a palette colour's
+  channels looked up in them = the C's shifted palette entry). Unit-tested
+  against hand-worked C values, including the order dependence (water then
+  damage: level 100 → 197; the other way round 160).
+  **Re-baseline:** only frames with a shift on move; the goldens have none and
+  are unchanged (`5b29abb8`/`a833cbac`/`e3d873f0`). Over id's palette the new
+  ramps differ from the old blend on 180–249 of 256 colours per shift, by 1
+  level (2 at most, lava and the 150% damage flash). On real frames at 320×200
+  (native dumps, old vs new): the Quad walk — 30 of 30 sampled frames differ,
+  76–94% of pixels each, every channel by exactly 1, always darker; id's demo1
+  — the 28 damage-flash frames (of 720) differ, 80–100% of pixels, |d| 1
+  (2 on 11% of changed pixels), darker except 102 channels. The other 692
+  frames are byte-identical.
+- **Seen, not changed (the cshift *state*, another branch's):** the C keeps
+  `percent` as an `int`, so `cl.cshifts[CSHIFT_DAMAGE].percent -=
+  host_frametime*150` truncates every frame (150 → 147 at 72 fps, not
+  147.9); the port decays a float and truncates only in the ramp. And
+  `V_SetContentsColor`'s `default:` is water — any contents other than
+  empty/solid/lava/slime, sky included — where `content_cshift` returns none.
+
 ## Census client/host fixes (2026-09-25, branch `quake/fix-client`)
 
 One line per CENSUS.md finding fixed; the evidence and the C are in CENSUS.md
