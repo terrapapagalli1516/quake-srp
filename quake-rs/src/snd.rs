@@ -3,6 +3,11 @@
 //! (`S_UpdateAmbientSounds`) and the `.wav` header/loop-point parser
 //! (`GetWavinfo`).
 //!
+//! What reaches the mixer is here too: `S_StartSound`'s channel choice
+//! (`SND_PickChannel`'s `(entity, channel)` override and `SND_Spatialize`'s
+//! view-entity rule, [`queue_sounds`]) and `S_StaticSound`'s gates
+//! ([`queue_static_sounds`]), each filling a queue a platform plays.
+//!
 //! The actual MIXING is out of scope (the audit's explicit deviation: the web
 //! front-end mixes with Web Audio). What is kept faithful here is the *control*
 //! data: which ambient channels exist, how each frame's target volume is
@@ -11,6 +16,8 @@
 //! `cue ` chunk loop start the C refused to static-loop without).
 
 use crate::bsp::NUM_AMBIENTS;
+use crate::pak::Pak;
+use crate::server::{SoundEvent, StaticSound};
 
 /// Ambient channel indices (`bspfile.h`). WinQuake only ever loads sounds for
 /// the first two (`S_Init`: `ambience/water1.wav` + `ambience/wind2.wav`);
@@ -328,6 +335,247 @@ pub fn wav_info(bytes: &[u8]) -> Option<WavInfo> {
         samples,
         data_offset: data + 8,
     })
+}
+
+// ---------------------------------------------------------------------------
+// What reaches the mixer: S_StartSound's channels and S_StaticSound's loops
+// ---------------------------------------------------------------------------
+
+/// Spatial parameters for one queued sound: its world emission point, volume
+/// (`0.0..=1.0`) and attenuation (`0.0..=4.0`, where 0 = audible everywhere).
+#[derive(Clone, Copy, Debug)]
+pub struct SndParams {
+    pub origin: [f32; 3],
+    pub volume: f32,
+    pub attenuation: f32,
+    /// True when this sound came from the listener's own view entity (the
+    /// player edict). The C `SND_Spatialize` (snd_dma.c:407-412) forces such
+    /// sounds to full master volume on both channels with NO distance falloff
+    /// or pan; the page reads this via `sound_is_view_entity` to skip its
+    /// spatial attenuation for player-local sounds (weapon fire, pain, etc.).
+    pub is_view_entity: bool,
+    /// The emitting entity + channel (`SND_PickChannel`'s override key). The
+    /// page reads these via `sound_entity`/`sound_channel` to keep a registry
+    /// of PLAYING sources per `(entity, channel)`, so a NEW sound on a
+    /// non-zero channel STOPS the source it overrides (the C "always override
+    /// sound from same entity" — channel 0 never overrides), and an
+    /// `svc_stopsound` can stop the keyed source (S_StopSound).
+    pub entity: i32,
+    pub channel: i32,
+    /// The sample's `cue ` loop point in SECONDS (`GetWavinfo`'s `loopstart`
+    /// over the rate), or -1.0 for a one-shot (`loopstart == -1`). The C mixer
+    /// loops ANY channel whose sample has one (`SND_PaintChannels`: at the end
+    /// `if (sc->loopstart >= 0) ch->pos = sc->loopstart`) until another sound
+    /// takes the same (entity, channel) or all sounds stop: the door, lift and
+    /// train "moving" hums.
+    pub loop_start: f32,
+    /// Loop end in seconds (`info.samples` over the rate).
+    pub loop_end: f32,
+}
+
+/// Fill `p`'s loop window from the sample's `cue ` chunk (`GetWavinfo`).
+fn set_loop_window(p: &mut SndParams, bytes: &[u8]) {
+    let info = wav_info(bytes);
+    (p.loop_start, p.loop_end) = match info {
+        Some(i) if i.loop_start.is_some() => {
+            let rate = i.rate.max(1) as f32;
+            (i.loop_start.unwrap_or(0) as f32 / rate, i.samples as f32 / rate)
+        }
+        _ => (-1.0, 0.0),
+    };
+}
+
+impl SndParams {
+    /// The emitting entity (what the page's `sound_entity` reads).
+    pub fn entity(&self) -> i32 {
+        self.entity
+    }
+
+    /// Nothing queued yet: no sound, a one-shot.
+    pub const fn zero() -> Self {
+        SndParams {
+            origin: [0.0; 3],
+            volume: 0.0,
+            attenuation: 0.0,
+            is_view_entity: false,
+            entity: 0,
+            channel: 0,
+            loop_start: -1.0,
+            loop_end: 0.0,
+        }
+    }
+}
+
+/// Load the WAV bytes for the gameplay sounds in `events` and push them onto the
+/// playback queue `q`, capped at 12 so a noisy frame can't grow it without bound.
+///
+/// A sample with a `cue ` loop point carries its loop window
+/// ([`SndParams::loop_start`]) and the page LOOPS it, as `SND_PaintChannels`
+/// does, until a later sound on the same (entity, channel) overrides it: the
+/// door/lift/train "moving" samples (`doors/doormv1`, `hydro1`, `stndr1`,
+/// `plats/plat1`, `medplat1`, `train1`, ...) hum until their stop sound. The
+/// silent `misc/null.wav` is queued like any other sample, since it too
+/// overrides its (entity, channel).
+///
+/// `ambience/*` one-shots are real gameplay content and queue like any other
+/// sample: trigger_push wind tunnels fire `sound (other, CHAN_AUTO,
+/// "ambience/windfly.wav", 1, ATTN_NORM)` (QuakeC `trigger_push_touch`, heard
+/// on E1M6); windfly has no cue chunk, so it plays once.
+///
+/// Mixing follows the C `SND_PickChannel` (snd_dma.c:354-390), keyed on the
+/// `(entity, channel)` pair carried by each `SoundEvent` — NOT on the sample
+/// name. A repeat `(entity, channel)` with a non-zero channel RESTARTS that
+/// channel (the later event overrides the earlier queued one for that key,
+/// matching "always override sound from same entity"); `channel == -1` matches
+/// any channel of that entity. Channel 0 NEVER overrides (the C comment:
+/// "channel 0 never overrides") so every channel-0 emitter queues separately.
+/// This keeps two distinct emitters of the SAME sample (e.g. two doors, or a
+/// gunshot and a footstep) from collapsing into one and losing the other's
+/// origin/volume.
+///
+/// `view_entity` is the listener's own edict (the player): a sound from it is
+/// flagged so the page plays it at full volume with no falloff (see
+/// `SndParams::is_view_entity`).
+pub fn queue_sounds(
+    q: &mut Vec<(Vec<u8>, SndParams)>,
+    pak: &Pak,
+    events: &[SoundEvent],
+    view_entity: i32,
+) {
+    // Queue indices of entries already placed this call, keyed by their
+    // (entity, channel) — only for non-zero channels (channel 0 never
+    // overrides, so it is never recorded here and always appends).
+    let mut placed: Vec<((i32, i32), usize)> = Vec::new();
+    for ev in events {
+        let name = ev.sample.as_str();
+        if name.is_empty() {
+            continue;
+        }
+
+        // QuakeC sample names are relative to the "sound/" directory (the C
+        // `S_LoadSound` does sprintf(buf, "sound/%s", name)); the pak stores
+        // them under that prefix. Without it every read_file misses and the
+        // sound is silently dropped — the long-standing "no in-game sound".
+        let path = format!("sound/{name}");
+
+        let mut params = SndParams {
+            origin: ev.origin,
+            volume: ev.volume,
+            attenuation: ev.attenuation,
+            is_view_entity: ev.entity == view_entity,
+            entity: ev.entity,
+            channel: ev.channel,
+            loop_start: -1.0,
+            loop_end: 0.0,
+        };
+
+        // Channel restart (SND_PickChannel): a non-zero channel from the
+        // same entity overrides that entity's prior queued entry on the same
+        // channel, so the channel plays the latest sound, not a stale one.
+        // The C wildcard is `entchannel == -1` on the NEW event only; QuakeC's
+        // SV_StartSound emit path always carries a concrete channel 0..7
+        // (the -1 "any" form is only used to STOP sounds, never emitted here),
+        // so we match the C's predicate exactly: new-channel -1 is a wildcard.
+        if ev.channel != 0 {
+            let hit = placed.iter().position(|&((e, c), _)| {
+                e == ev.entity && (c == ev.channel || ev.channel == -1)
+            });
+            if let Some(pi) = hit {
+                let qi = placed[pi].1;
+                if let Ok(Some(bytes)) = pak.read_file(&path) {
+                    set_loop_window(&mut params, &bytes);
+                    q[qi] = (bytes, params);
+                    // Re-key to this channel so a following -1 still matches.
+                    placed[pi].0 = (ev.entity, ev.channel);
+                }
+                continue;
+            }
+        }
+
+        if q.len() >= 12 {
+            continue; // queue cap reached
+        }
+        if let Ok(Some(bytes)) = pak.read_file(&path) {
+            set_loop_window(&mut params, &bytes);
+            let qi = q.len();
+            q.push((bytes, params));
+            if ev.channel != 0 {
+                placed.push(((ev.entity, ev.channel), qi));
+            }
+        }
+    }
+}
+
+/// One registered static (looping) sound awaiting pickup by the mixer: the WAV
+/// bytes, its spatial params, and the loop window `GetWavinfo` found (seconds;
+/// `loop_end` 0.0 = loop to the buffer's end, Web Audio's `loopEnd` default).
+#[derive(Clone, Debug)]
+pub struct StaticLoop {
+    pub bytes: Vec<u8>,
+    pub params: SndParams,
+    pub loop_start: f32,
+    pub loop_end: f32,
+}
+
+/// The C's effective static-sound budget. `S_StaticSound` (snd_dma.c) refuses
+/// at `total_channels == MAX_CHANNELS` (128), but `total_channels` starts at
+/// `MAX_DYNAMIC_CHANNELS + NUM_AMBIENTS` = 8 + 4 = 12 (`S_Init`), so at most
+/// 116 statics ever fit — and `total_channels++` happens BEFORE the
+/// load/loop checks, so a registration that then FAILS (missing or unlooped
+/// sample) still burns its slot (see [`queue_static_sounds`]).
+pub const MAX_STATIC_SOUNDS: usize = 128 - (8 + 4);
+
+/// Load the WAV bytes for each placed static sound and queue them in `q` for
+/// the mixer's loop pickup — the `S_StaticSound` (snd_dma.c:620) gate: a sample the
+/// pak lacks is dropped, and so is one with no loop point (`sc->loopstart ==
+/// -1` -> "Sound %s not looped"). Quake's ambient samples all carry a `cue `
+/// loop chunk; one-shots don't, and the C refuses to static-loop them.
+pub fn queue_static_sounds(q: &mut Vec<StaticLoop>, pak: &Pak, statics: &[StaticSound]) {
+    // The statics' share of the C channel table (`total_channels - 12`).
+    // Local to the call: `S_StopAllSounds` resets `total_channels` on
+    // every level change, and a level registers its statics exactly once
+    // (one drain -> one call, right after the generation bump).
+    let mut slots = 0usize;
+    for s in statics {
+        if slots >= MAX_STATIC_SOUNDS {
+            break; // the C's "total_channels == MAX_CHANNELS" refusal
+        }
+        if s.sample.is_empty() {
+            continue; // the C's `if (!sfx) return` — before the slot grab
+        }
+        // `total_channels++` precedes S_LoadSound and the loop check in
+        // the C, so each of the drops below still burns its slot.
+        slots += 1;
+        // Sample names are relative to "sound/" (S_LoadSound's sprintf),
+        // exactly like the one-shot path in `queue_sounds`.
+        let path = format!("sound/{}", s.sample);
+        let Ok(Some(bytes)) = pak.read_file(&path) else {
+            continue;
+        };
+        let Some(info) = wav_info(&bytes) else {
+            continue;
+        };
+        let Some(loop_start) = info.loop_start else {
+            continue; // "Sound %s not looped" — never static-loop a one-shot
+        };
+        let rate = info.rate.max(1) as f32;
+        let (loop_start, loop_end) = (loop_start as f32 / rate, info.samples as f32 / rate);
+        q.push(StaticLoop {
+            bytes,
+            params: SndParams {
+                origin: s.origin,
+                volume: s.volume,
+                attenuation: s.attenuation,
+                is_view_entity: false, // statics are placed in the world
+                entity: 0,             // statics carry no override key
+                channel: 0,
+                loop_start,
+                loop_end,
+            },
+            loop_start,
+            loop_end,
+        });
+    }
 }
 
 #[cfg(test)]
