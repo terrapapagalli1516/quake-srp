@@ -5,6 +5,26 @@ things stand" note — read it before continuing.
 
 ---
 
+## Demo commands, timedemo, pause (2026-09-25, branch `quake/timedemo`)
+
+id's own demo and pause commands, as the C does them (AUDIT.md's section of
+the same name): `playdemo`, `stopdemo`, `startdemos`, `demos` with `cls`'s
+demo loop in the App (the boots run quake.rc's `startdemos demo1 demo2
+demo3`; a demo's end is `Host_EndGame` → `CL_NextDemo`), a disconnected state
+(the console forced up over the screen); **`timedemo`** — one recorded
+message per host frame, uncapped, `CL_FinishTimeDemo`'s line: 969 / 985 /
+1090 frames for demo1/2/3, id's counts — in the console (the page runs host
+frames back to back in ~12 ms slices) and natively, `quaketool timedemo pak
+demo1 --res WxH`, next to id's C (`PERF_PLAN.md` §10, with the edge renderer:
+native 2602 / 1007 / 516 fps at 320x200 / 640x400 / 960x600 against id's
+1822 / 745 / 419; the browser 1916 / 723 / 381); **`pause`**
+(the PAUSE key, `Host_Pause_f`, `SCR_DrawPause` — pixel-exact against id's
+screen in the 2-D oracle's new `pause` scenario; CENSUS L12's pause half).
+No loading plaque: loads take 6–23 ms, inside a frame. Evidence: the new
+`web/verify_timedemo.py` (timedemo + pause through the page's keys; a new
+read-only export `console_text_len`/`_ptr` reads the console), unit and
+census tests; play hashes, census, simbench and goldens unchanged.
+
 ## The game client moves into the engine (2026-09-25, branch `quake/client`)
 
 Structure only; no behaviour changed. The part of quake-wasm that is id's

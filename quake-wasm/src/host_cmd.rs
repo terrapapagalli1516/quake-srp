@@ -1,15 +1,79 @@
 //! Console commands — `Cmd_ExecuteString`'s dispatch (cmd.c) against the
 //! App: echo/clear/help, the viewsize cvar commands, the Web extras, `map`,
-//! save/load, and the cheats god/noclip/fly/kill/give/impulse, which act on
-//! the live [`Walk`](crate::app::Walk) through the client's host_cmd.c
+//! save/load, `pause`, the demo commands (cl_demo.c's `playdemo`/`timedemo`,
+//! host_cmd.c's demo loop control `startdemos`/`demos`/`stopdemo`), and the
+//! cheats god/noclip/fly/kill/give/impulse, which act on the live
+//! [`Walk`](crate::app::Walk) through the client's host_cmd.c
 //! ([`quake_rs::client::host_cmd`], which also holds the level swaps
 //! `changelevel` and `restart`).
 
+use quake_rs::client::cl_demo::MAX_DEMOS;
 use quake_rs::client::host_cmd::run_game_command;
 
-use crate::app::{build_walk_map, ensure_app};
+use crate::app::{build_walk_map, ensure_app, App};
+use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma;
+
+/// `MAX_DEMONAME` (client.h): a `cls.demos` slot holds 15 characters.
+const MAX_DEMONAME: usize = 16;
+
+/// `Host_Startdemos_f`: `startdemos <demo> ...` sets the demo loop (at most
+/// [`MAX_DEMOS`]) and, with nothing running (`!sv.active &&
+/// !cls.demoplayback`) and the loop not switched off, starts it
+/// (`CL_NextDemo`); otherwise the loop is off until `demos`.
+pub(crate) fn host_startdemos(a: &mut App, names: &[&str]) {
+    let mut c = names.len();
+    if c > MAX_DEMOS {
+        a.console.println(format!("Max {MAX_DEMOS} demos in demoloop"));
+        c = MAX_DEMOS;
+    }
+    a.console.println(format!("{c} demo(s) in loop"));
+    for (slot, name) in a.cls.demos.iter_mut().zip(&names[..c]) {
+        // strncpy (cls.demos[i-1], Cmd_Argv(i), sizeof(cls.demos[0])-1)
+        *slot = name.chars().take(MAX_DEMONAME - 1).collect();
+    }
+    if !a.sv_active() && a.cls.demonum != -1 && !a.demoplayback() {
+        a.cls.demonum = 0;
+        cl_next_demo(a);
+    } else {
+        a.cls.demonum = -1;
+    }
+}
+
+/// `Host_Demos_f`: back to the demo loop — disconnect and play its next demo
+/// (the second, if the loop was off).
+fn host_demos(a: &mut App) {
+    if a.cls.demonum == -1 {
+        a.cls.demonum = 1;
+    }
+    cl_disconnect(a);
+    cl_next_demo(a);
+}
+
+/// `pause` from this client: `Host_Pause_f` is forwarded to the server
+/// (`Cmd_ForwardToServer`), which toggles `sv.paused` and broadcasts who did
+/// it ([`quake_rs::server::Server::pause`]). During demo playback it goes
+/// nowhere ("not really connected"); with nothing running it cannot go.
+pub(crate) fn host_pause(a: &mut App) {
+    if a.demoplayback() {
+        return;
+    }
+    match a.walk.as_mut().filter(|_| a.mode == 0) {
+        Some(w) => w.server.pause(),
+        None => a.console.println("Can't \"pause\", not connected"),
+    }
+}
+
+/// `Host_Stopdemo_f`: stop the playing demo and disconnect (the loop keeps
+/// its place: `demos`, or leaving the menu, resumes it).
+fn host_stopdemo(a: &mut App) {
+    if !a.demoplayback() {
+        return;
+    }
+    cl_stop_playback(a);
+    cl_disconnect(a);
+}
 
 // --- console command execution -------------------------------------------
 
@@ -42,10 +106,12 @@ pub(crate) fn execute_console_command(line: &str) {
         "help" | "cmdlist" => {
             ensure_app(|a| {
                 a.console.println("commands:");
-                a.console.println("  god noclip fly kill");
+                a.console.println("  god noclip fly kill  pause");
                 a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
                 a.console.println("  impulse <n>   map <name>");
                 a.console.println("  save <name>   load <name>");
+                a.console.println("  playdemo <name>  timedemo <name>");
+                a.console.println("  stopdemo  demos  startdemos <d..>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
                 a.console.println("web extras (not id's; see Options):");
@@ -78,6 +144,28 @@ pub(crate) fn execute_console_command(line: &str) {
             return;
         }
         _ => {}
+    }
+
+    // The demo commands: cl_demo.c's CL_PlayDemo_f / CL_TimeDemo_f (the
+    // `Cmd_Argc() != 2` usage lines are the C's, "play" included) and
+    // host_cmd.c's demo loop control.
+    if cmd_lower == "pause" {
+        ensure_app(host_pause);
+        return;
+    }
+    if matches!(cmd_lower.as_str(), "playdemo" | "timedemo" | "stopdemo" | "startdemos" | "demos") {
+        ensure_app(|a| match cmd_lower.as_str() {
+            "playdemo" if argv.len() != 2 => a.console.println("play <demoname> : plays a demo"),
+            "playdemo" => {
+                cl_play_demo(a, argv[1], false);
+            }
+            "timedemo" if argv.len() != 2 => a.console.println("timedemo <demoname> : gets demo speeds"),
+            "timedemo" => cl_timedemo(a, argv[1]),
+            "stopdemo" => host_stopdemo(a),
+            "startdemos" => host_startdemos(a, &argv[1..]),
+            _ => host_demos(a),
+        });
+        return;
     }
 
     // The Web extras (`wasm_*`, not id's; all off by default): `extras.rs`.
@@ -163,8 +251,7 @@ fn run_map_command(name: Option<&str>) {
     let new_walk = build_walk_map(&path);
     ensure_app(|a| match new_walk {
         Some(nw) => {
-            a.walk = Some(nw);
-            a.mode = 0;
+            a.start_game(nw);
             a.console.println(format!("loading {name}"));
             // The port's own line (Host_Map_f prints none): the console keeps
             // it, the notify lines don't — SCR_EndLoadingPlaque's Con_ClearNotify

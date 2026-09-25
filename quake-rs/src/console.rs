@@ -279,6 +279,10 @@ pub struct Console {
     /// covers now — it slides toward half the screen while open and back to
     /// nothing when closed ([`Console::slide`]).
     current: f32,
+    /// `con_forcedup` (console.c): nothing is playing (the client is not
+    /// connected), so the console covers the whole screen and shows its input
+    /// line whether or not it is open. The host sets it each frame.
+    pub forced_up: bool,
     /// Text [`Console::print`] laid into the scrollback that the notify lines
     /// have not had yet ([`Console::take_unnotified`]).
     unnotified: String,
@@ -299,6 +303,7 @@ impl Console {
             cursor: ConCursor::default(),
             input: String::new(),
             current: 0.0,
+            forced_up: false,
             unnotified: String::new(),
         }
     }
@@ -334,6 +339,12 @@ impl Console {
             self.cursor.set_width(width);
         }
         let sc = screen_2d(vid_w, vid_h);
+        if self.forced_up {
+            // con_forcedup: `scr_conlines = vid.height; scr_con_current =
+            // scr_conlines;` — full screen at once.
+            self.current = sc.h as f32;
+            return;
+        }
         let conlines = if self.open { (sc.h / 2) as f32 } else { 0.0 };
         let step = SCR_CONSPEED * frametime.max(0.0);
         if conlines < self.current {
@@ -583,8 +594,9 @@ pub fn draw_console(
         }
         y += 8;
     }
-    // Con_DrawInput: only while typing is possible.
-    if console.open {
+    // Con_DrawInput: only while typing is possible (`key_dest ==
+    // key_console`, or the console forced up).
+    if console.open || console.forced_up {
         let mut text: Vec<u8> = std::iter::once(b']').chain(console.input.chars().map(|c| c as u32 as u8)).collect();
         let linepos = text.len();
         text.push(console_cursor_glyph(realtime));

@@ -357,3 +357,88 @@ fn census_client_think_runs_before_player_prethink() {
         o = n;
     }
 }
+
+/// CENSUS L12 (the pause half). default.cfg binds PAUSE to `pause`
+/// (Host_Pause_f, forwarded to the server): single player stops — sv.paused,
+/// so neither SV_ClientThink nor SV_Physics runs and cl.time stands, while
+/// cl.paused keeps V_CalcRefdef from moving the view — the server broadcasts
+/// "player paused the game", and SCR_DrawPause puts gfx/pause.lmp at
+/// ((w - 128)/2, (h - 48 - 24)/2). PAUSE is no console key, so it works
+/// with the console down; the menu does not bind it. Pressed again, it all
+/// resumes ("player unpaused the game").
+#[test]
+fn census_pause_stops_the_game_and_shows_the_plaque() {
+    use crate::app::{boot, pak, APP};
+    use crate::console::console_toggle;
+    use crate::host::step as host_step;
+    use crate::input::{key_down, key_up};
+    assert_eq!(boot(), 1);
+    crate::test_util::close_menu();
+    crate::vid::set_resolution(320, 200);
+    for _ in 0..10 {
+        host_step(0.05);
+    }
+    let state = || {
+        APP.with(|c| {
+            let b = c.borrow();
+            let w = b.as_ref().unwrap().walk.as_ref().unwrap();
+            (w.server.time(), w.server.vm.ent_get_vector(w.player, "origin"), w.clock, w.server.paused)
+        })
+    };
+    let fb = || APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+    let pause_key = || {
+        key_down(255); // K_PAUSE
+        key_up(255);
+    };
+    pause_key();
+    host_step(0.05);
+    let s0 = state();
+    assert!(s0.3, "PAUSE: sv.paused");
+    // +forward held for a second: nothing moves and no clock runs.
+    key_down(i32::from(b'w'));
+    for _ in 0..20 {
+        host_step(0.05);
+    }
+    assert_eq!(state(), s0, "the world stands still");
+    // The plaque, texel for texel, at id's place on a 320x200 screen.
+    let lmp = pak().unwrap().read_file("gfx/pause.lmp").unwrap().unwrap();
+    let pic = quake_rs::wad::Qpic::parse(&lmp).unwrap();
+    let pal = render::parse_palette(&pak().unwrap().read_file("gfx/palette.lmp").unwrap().unwrap()).unwrap();
+    assert_eq!((pic.width, pic.height), (128, 24));
+    let shot = fb();
+    for y in 0..24 {
+        for x in 0..128 {
+            let i = ((64 + y) * 320 + 96 + x) * 4;
+            let want = pal[pic.data[y * 128 + x] as usize];
+            assert_eq!(shot[i..i + 3], want, "plaque texel ({x},{y})");
+        }
+    }
+    // Once the notify line has gone (con_notifytime 3 s of realtime), the
+    // paused frames are identical: sky, liquids, lights, particles all stand.
+    for _ in 0..70 {
+        host_step(0.05);
+    }
+    let a = fb();
+    host_step(0.05);
+    assert!(a == fb(), "paused frames are the same frame");
+    // The menu does not bind PAUSE; the console does not take it.
+    crate::menu::menu_cancel(); // open the menu
+    pause_key();
+    assert!(state().3, "PAUSE in the menu does nothing");
+    crate::menu::menu_cancel(); // close it
+    console_toggle();
+    pause_key();
+    assert!(!state().3, "PAUSE with the console down: unpaused");
+    console_toggle();
+    for _ in 0..10 {
+        host_step(0.05);
+    }
+    let s1 = state();
+    assert!(s1.0 > s0.0 && s1.2 > s0.2, "the clocks run again");
+    assert!(s1.1 != s0.1, "+forward moves the player again");
+    key_up(i32::from(b'w'));
+    let text: Vec<String> =
+        APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect());
+    let said: Vec<&String> = text.iter().filter(|l| l.contains("the game")).collect();
+    assert_eq!(said, ["player paused the game", "player unpaused the game"], "SV_BroadcastPrintf");
+}

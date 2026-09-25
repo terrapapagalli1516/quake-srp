@@ -159,8 +159,7 @@ pub extern "C" fn load_game() -> i32 {
     match build_walk_savegame(&text) {
         Ok(nw) => {
             ensure_app(|a| {
-                a.walk = Some(nw);
-                a.mode = 0;
+                a.start_game(nw);
                 // The loaded game starts playing: close the console + menu
                 // (the same post-swap treatment as the console `map` command).
                 // Only the menu's NAVIGATION resets: Host_Loadgame_f never

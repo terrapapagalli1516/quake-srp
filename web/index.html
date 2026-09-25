@@ -329,6 +329,7 @@ function quakeKey(e) {
     case 'Backspace': return 127; case 'Insert': return 147; case 'Delete': return 148;
     case 'PageDown': return 149; case 'PageUp': return 150;
     case 'Home': return 151; case 'End': return 152;
+    case 'Pause': return 255;
   }
   if (/^F([1-9]|1[0-2])$/.test(k)) return 135 + parseInt(k.slice(1), 10) - 1;
   return null;
@@ -358,6 +359,9 @@ addEventListener('keydown', e => {
     return;
   }
   if (consoleVisible()) {
+    // PAUSE is no console key (keys.c consolekeys): its binding, default.cfg's
+    // "pause", runs with the console down too.
+    if (e.key === 'Pause') { if (!e.repeat) exp.key_down?.(255); e.preventDefault(); return; }
     if (k === 'escape')    { exp.console_toggle();   e.preventDefault(); return; }
     if (k === 'backspace') { exp.console_backspace?.(); e.preventDefault(); return; }
     if (k === 'enter')     { exp.console_enter?.();   e.preventDefault(); return; }
@@ -1470,6 +1474,30 @@ async function main() {
   readyToPlay = true;
   statusEl.textContent = 'ready — click to play';
 
+  // timedemo (CL_TimeDemo_f): while cls.timedemo is set Host_FilterTime caps
+  // nothing and the C runs host frames back to back. The page cannot block,
+  // so it runs as many as fit in a time slice per animation frame — every one
+  // rendered, as a timedemo measures rendering — and presents the last. Each
+  // step() is handed the previous step's own duration as its dt (the first of
+  // a slice, the last one of the slice before), so the engine's realtime, the
+  // clock CL_FinishTimeDemo reads, adds up the time the frames took and not
+  // the browser's pauses between slices (presenting, events, waiting for the
+  // next animation frame).
+  const TIMEDEMO_SLICE_MS = 12;
+  let timedemoLastDur = 0;
+  function hostFrames(dt) {
+    if (!(exp.timedemo_running && exp.timedemo_running())) return exp.step(dt);
+    const t0 = performance.now();
+    let t = t0, d = timedemoLastDur;
+    do {
+      exp.step(d);
+      const t2 = performance.now();
+      d = (t2 - t) / 1000; t = t2;
+    } while (t - t0 < TIMEDEMO_SLICE_MS && exp.timedemo_running());
+    timedemoLastDur = d;
+    return 1;
+  }
+
   let last = performance.now();
   function frame(now) {
     // The RAW elapsed time since the last rAF: the engine runs it through
@@ -1487,7 +1515,7 @@ async function main() {
     // cl_forwardspeed, and the menu/console gate gameplay engine-side.
     // step() returns 0 when the 72 fps cap skipped this refresh: no new frame,
     // nothing queued, nothing to present (an older wasm returns undefined).
-    if (exp.step(dt) === 0) { requestAnimationFrame(frame); return; }
+    if (hostFrames(dt) === 0) { requestAnimationFrame(frame); return; }
     drainGameSounds();
     drainStopSounds();
     drainMenuSounds();

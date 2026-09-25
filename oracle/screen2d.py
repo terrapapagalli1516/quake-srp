@@ -131,6 +131,10 @@ SCENARIOS: dict[str, list] = {
                                 "As the corpse of the monstrous entity\\nChthon sinks back into the lava whence\\n"
                                 "it rose, you grip the Rune of Earth\\nMagic tightly."),
                ("frames", 20), ("shot", "reveal"), ("frames", 30), ("shot", "later")],
+    # `pause` itself: a key's bound command would run after the whole script
+    # on id's side (Cbuf_AddText)
+    "pause": [("frames", 1), ("cmd", "pause"), ("frames", 2), ("shot", "paused"), ("cmd", "pause"),
+              ("frames", 2), ("shot", "unpaused")],
     "menu_main": [("frames", 1), ("key", "ESCAPE"), ("frames", 1), ("shot", "main"),
                   ("key", "DOWNARROW"), ("frames", 1), ("shot", "main_row2")],
     "menu_sp": [("frames", 1), ("key", "ESCAPE"), ("key", "ENTER"), ("frames", 1), ("shot", "sp"),

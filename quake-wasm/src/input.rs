@@ -4,7 +4,7 @@
 //! `CL_AdjustAngles`) is [`quake_rs::client::cl_input`]'s.
 
 use quake_rs::client::cl_input::{clamp_pitch, V_CENTERSPEED};
-use quake_rs::menu::BIND_IMPULSE_0;
+use quake_rs::menu::{BIND_IMPULSE_0, BIND_PAUSE};
 use quake_rs::render::{BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_SIZEDOWN, BIND_SIZEUP, BIND_STRAFE};
 
 use crate::app::{ensure_app, APP};
@@ -128,6 +128,13 @@ pub extern "C" fn key_down(keynum: i32) {
             return;
         }
         a.keys_held[k] = true;
+        // default.cfg's `bind PAUSE "pause"`: PAUSE is no console key, so its
+        // command runs with the console down too (not in the menu: it is not
+        // menubound).
+        if a.menu.action_for_key(keynum as u8) == Some(BIND_PAUSE) {
+            crate::host_cmd::host_pause(a);
+            return;
+        }
         if a.menu.visible || a.console.open {
             return; // key_dest != key_game: no command dispatch.
         }

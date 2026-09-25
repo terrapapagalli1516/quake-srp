@@ -268,6 +268,8 @@ pub const BIND_SHOWSCORES: usize = NUM_BINDNAMES + 2;
 /// `"impulse N"` is `BIND_IMPULSE_0 + N` for N in 0..=8 (`"impulse 10"` is the
 /// listed [`BIND_CHANGEWEAPON`] row).
 pub const BIND_IMPULSE_0: usize = NUM_BINDNAMES + 3;
+/// `bind PAUSE "pause"` (default.cfg): `Host_Pause_f`.
+pub const BIND_PAUSE: usize = BIND_IMPULSE_0 + 9;
 
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A

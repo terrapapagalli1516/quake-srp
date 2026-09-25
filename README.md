@@ -17,7 +17,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 > exit to the **intermission stats screen** (Time / Secrets / Kills from the QC-placed camera) — through to the
 > **episode-end finale text** — with your inventory carried to the next map: the whole shareware episode. There's a
 > working **Options menu** (screen size, mouse, volume; resolution under Video Options) and a **drop-down console** (`~`) with
-> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`, and it saves and loads (Single Player > Save/Load, the
+> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`/`pause`/`timedemo`, and it saves and loads (Single Player > Save/Load, the
 > `save`/`load` commands; the page keeps the `.sav` text in localStorage). What it is *not*: multiplayer/netcode
 > (out of scope). Everything claimed below is real and tested: **~580 engine + ~120 wasm tests**, zero dependencies, no
 > `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
@@ -30,7 +30,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 |------|------|
 | `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`, the game client too: `client/` is the live frame against the local server and demo playback (id's `cl_*.c`, `view.c`, the client half of `host.c`/`host_cmd.c`), which the browser runs and `quaketool play` runs natively. |
 | `quake-wasm/` | the `cdylib` browser shell — the platform layer (~3.0k lines + ~5.4k of e2e tests): compiles the engine to `wasm32`, holds the host state (`App`: mode, menu, console, clocks, framebuffer) around `quake_rs::client`, carries out the sound calls each client frame returns for the page's Web Audio, bridges saves to localStorage, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. Modules are named after the id file they port the platform/host side of (`host` = `Host_Frame`, `vid`, `snd_dma`, `input`, `menu`, `console`, `host_cmd`, `savegame`, plus `app` for the state and boots; `cl_walk`/`cl_demo` run the client's frames for the page); `src/lib.rs` maps every export to its module. |
-| `web/` | the browser page (`index.html`) + eight headless-Chromium verify scripts (`verify_*.py`: walk, ambient, demo, input, menu, save, loops, extras). |
+| `web/` | the browser page (`index.html`) + nine headless-Chromium verify scripts (`verify_*.py`: walk, ambient, demo, input, menu, save, loops, extras, timedemo — `timedemo demo1` and `pause`). |
 | `oracle/` | id's own WinQuake software renderer built headless from the C (null drivers, docker i386 build) + `compare.py`: renders the same view in both and diffs them pixel for pixel. See `oracle/README.md` for how to run it and the ranked fidelity findings. |
 | `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |
 | `screenshots/` | rendered output from real e1m1 / start (the lit shots, the walkthrough GIF). |
@@ -61,7 +61,8 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
-  `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
+  `fly`/`give`/`impulse`/`map`/`kill`/`clear`, `pause` (the PAUSE key: id's plaque) and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`.
+  Boots into the menu **over the playing attract demo** (quake.rc's `startdemos demo1 demo2 demo3`).
 - **Web extras** — the port is id's Quake by default (Always Run aside). Its departures are opt-in, all
   off by default, on one page: **Options > Web extras**, drawn like id's Options page, each also a
   `wasm_*` console variable (listed in `quake-wasm/src/extras.rs`): an **uncapped frame rate** (no
@@ -91,11 +92,11 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 581 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
+cargo test          # 587 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 
-`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene view walk demo playtest simbench changelevel census census-edicts play`. `play` runs the browser's game client natively: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1 --res 320x200,640x400` prints the same frame hashes as `uv run --with playwright web/bench.py --hash-every 30` with those workloads and resolutions, byte for byte.
+`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene view walk demo playtest simbench changelevel census census-edicts play timedemo`. `play` runs the browser's game client natively: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1 --res 320x200,640x400` prints the same frame hashes as `uv run --with playwright web/bench.py --hash-every 30` with those workloads and resolutions, byte for byte.
 
 ### Getting the game data (not committed)
 
@@ -137,6 +138,13 @@ out of the wasm, so an engine update doesn't re-download 18.7 MB of unchanged da
 option (PERF_PLAN D4).
 
 ## Performance
+
+Quake measured itself with `timedemo demo1`, and so does the port: type it in the
+console (`~`), or run it natively with `quaketool timedemo pak0.pak demo1 --res 640x400`.
+It is id's `CL_TimeDemo_f` — the demo one recorded message per frame with no 72 fps cap
+— and prints id's line, `969 frames   1.0 seconds 1006.6 fps`: the same 969 frames id's C
+draws (969 / 985 / 1090 for demo1 / 2 / 3), so the rate sits next to id's C run the same
+way (`oracle/`; numbers in `PERF_PLAN.md` §10).
 
 The software renderer is per-pixel bound, so frame time scales with resolution. A
 built-in benchmark renders a map repeatedly and reports the warm per-frame cost plus a

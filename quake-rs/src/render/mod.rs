@@ -75,7 +75,7 @@ pub use crate::sbar::{
     draw_finale_overlay, draw_hud_into, draw_intermission_overlay, Hud, IntermissionStats,
 };
 pub use crate::screen::{
-    calc_refdef, compose_view, draw_centerprint, draw_fps, vid_aspect, ViewRect,
+    calc_refdef, compose_view, draw_centerprint, draw_fps, draw_pause, vid_aspect, ViewRect,
     SB_LINES_FULL, VIEWSIZE_DEFAULT,
 };
 // The renderer's public API (its files are private).
