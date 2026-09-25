@@ -95,6 +95,9 @@ or accept and record):
 | `f` | unbound | toggles fullscreen | `web/index.html` |
 | Space in water/fly | `+jump` only (PlayerJump's 100 u/s swim-up) | also adds `upmove` (swims up ~140 u/s; rises in fly/noclip) | quake-wasm `KeyMove` / key handling |
 
+Opt-in departures, off by default, live on Options > Web extras (`wasm_*`
+console commands); AUDIT.md "Web extras" lists them.
+
 ## Corrections to the ledger (AUDIT.md / code comments)
 
 - **Round 3 "Refuted: PF_makestatic ED_Free"** — the C does free: `// throw the entity away now ED_Free (ent);` (pr_cmds.c `PF_makestatic`). The port's no-op is harmless (L17) but the refutation is wrong.

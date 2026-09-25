@@ -711,6 +711,46 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 - ✅ **L6 ED_Alloc / ED_Free** — `Vm::spawn` reuses a free slot only if it was freed in the first two seconds of server time or more than 0.5 s ago (`freetime`), so a missile spawned the frame another is removed never inherits its slot (no stray trail); `Vm::free_edict` clears only `ED_Free`'s fields (model, takedamage, modelindex, colormap, skin, frame, origin, angles, solid; nextthink -1) and keeps the rest, as id does. Tests `ed_alloc_waits_half_a_second_before_reusing_a_freed_slot`, `ed_free_clears_only_the_fields_the_c_clears`.
 - ✅ **F7 the player's name** — `connect_client_inner` sets up the client edict as `Host_Spawn_f` does before `ClientConnect`: `netname` "player" (cl_name), `team` 1 ((cl_color & 15) + 1), `colormap` = its edict number. Obituaries read "player was shot by a Grunt". Test `census_player_netname_is_player`.
 
+## Web extras: the opt-in departures (2026-09-25, branch `quake/extras`)
+
+The rule: faithful by default, Always Run the only default departure; other
+departures live behind an explicit opt-in. Their home is **Options > Web
+extras**, a 14th Options row in the slot id's `_WIN32` build gives its own
+14th row ("Use Mouse", y=136). It opens a page of Options drawn in
+`M_Options_Draw`'s idiom (qplaque + OPTIONS title, a white "Web extras: not
+in id's Quake" header, `M_Print` labels, on/off at x=220, the 4 Hz cursor,
+menu1/2/3, Esc back to the same Options row) with help lines for the
+highlighted row. Each extra is also a console command. None is a default.cfg
+cvar, so Reset to defaults and re-boots keep them; the page persists them in
+localStorage. With every extra off the port is unchanged (goldens, all seven
+earlier verify scripts).
+
+| extra | switch | what | status |
+|---|---|---|---|
+| Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
+| Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
+| Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (the renderer option is `quake/w2b`'s). Hidden behind `EXTRAS_HAS_EXACTPERSP` until that option is on this branch. | departure, opt-in via Web extras, default off |
+
+Faithful, same branch:
+- ✅ **viewsize persists across reloads** — id's `scr_viewsize` is archived
+  (config.cfg); since Screen size stopped being the resolution it reset on
+  every reload. The page stores it like the resolution (`set_viewsize`).
+- ✅ **Esc ignores autorepeat** — `Key_Event` ignores repeats of every key
+  but backspace and pause; the page's Esc toggled the menu on each repeat.
+- ✅ **Esc in fullscreen** — the page locks Escape with the Keyboard Lock API
+  while fullscreen (Chromium), so a tapped Esc toggles the menu like id's
+  `togglemenu` with the mouse still captured, and a held Esc leaves
+  fullscreen; elsewhere the browser's two-step Esc stands. Unverified: a real
+  browser's handling of a locked Esc (headless has none); the page logic is
+  tested.
+
+Evidence: quake-rs lib tests for the Extras screen (defaults, toggles, sounds,
+Esc row, layout and colours, bits) and `draw_fps` placement; quake-wasm tests
+for `host_frame_time` (every refresh at 60..240 Hz, clamps), 72 vs 144 frames
+a second at 144 Hz through `step`, the FPS window, the readout confined to its
+box and byte-identical when off, the `wasm_*` commands and the exports;
+`web/verify_extras.py` 36/36.
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.
