@@ -5,7 +5,7 @@
 //! `V_CalcRefdef` + `SCR_UpdateScreen` for one frame.
 
 use quake_rs::client::host_cmd::IT_INVISIBILITY;
-use quake_rs::client::{lap, Listener, Phase};
+use quake_rs::client::{backtile_for, lap, render_options, Listener, Phase};
 use quake_rs::particles::ParticleSystem;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::tent::BeamModel;
@@ -17,7 +17,6 @@ use quake_rs::client::cl_tent::{rocket_trail_type, spawn_temp_entity};
 
 use crate::app::DemoPlay;
 use crate::snd_dma::{push_stop_sounds, queue_sounds, update_ambient_channels, LISTENER};
-use crate::vid::backtile_for;
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
 /// exactly ONCE: a frame rendered across several steps (small `dt`) must not
@@ -439,7 +438,7 @@ pub(crate) fn step_demo(
     } else {
         vrect
     };
-    let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &crate::vid::render_options(&rvrect, render_w, render_h));
+    let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &render_options(&rvrect, &crate::vid::vid(render_w, render_h)));
     lap(Phase::Render3d);
     // D_WarpScreen: stretched over the screen's view rectangle while it
     // wobbles — the warp applies to the 3-D view FIRST; the content tint joins

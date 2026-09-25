@@ -3,8 +3,8 @@
 //! and the bits of screen.c the page reads or both client frames share (the
 //! `viewsize` cvar, `Draw_TileClear`'s backtile).
 
+use quake_rs::client::Vid;
 use quake_rs::render;
-use quake_rs::wad::Qpic;
 
 use crate::app::{ensure_app, APP};
 
@@ -87,21 +87,15 @@ pub extern "C" fn set_resolution(w: i32, h: i32) {
 /// shown 1.2x taller than wide.
 pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 
-/// How the renderer draws the 3-D view `vrect` of a `render_w x render_h` frame:
-/// `vid.aspect` for that mode on the page's [`DISPLAY_ASPECT`] (vid_win.c's
-/// `(h/w)*(320/240)`: 0.8333 at every 16:10 preset), which `R_ViewChanged`
-/// folds into the projection so the world is not stretched by the 4:3 display;
-/// where the view sits on that screen (`D_Sky_uv_To_st` centres the sky on the
-/// screen); and the port's renderer extras, off unless switched on (Options >
-/// Web extras, `wasm_*`; [`crate::extras::extras`]).
-pub(crate) fn render_options(
-    vrect: &render::ViewRect,
-    render_w: usize,
-    render_h: usize,
-) -> render::RenderOptions {
-    render::RenderOptions {
-        pixel_aspect: render::vid_aspect(render_w, render_h, DISPLAY_ASPECT),
-        screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: render_w, vid_h: render_h }),
+/// The screen the client frames draw ([`Vid`]): the mode, shown at the page's
+/// [`DISPLAY_ASPECT`] (which `vid.aspect` folds into the projection so the
+/// world is not stretched by the 4:3 display), with the renderer's Web extra
+/// (Options > Web extras, `wasm_exactpersp`; [`crate::extras::extras`]).
+pub(crate) fn vid(render_w: usize, render_h: usize) -> Vid {
+    Vid {
+        width: render_w,
+        height: render_h,
+        display_aspect: DISPLAY_ASPECT,
         exact_perspective: crate::extras::extras().exact_persp,
     }
 }
@@ -150,22 +144,6 @@ pub extern "C" fn framebuffer() -> *const u8 {
             .map(|a| a.fb.as_ptr())
             .unwrap_or(std::ptr::null())
     })
-}
-
-/// The `backtile` pic (`draw_backtile`, gfx.wad) for [`render::compose_view`],
-/// fetched only when the 3-D view leaves part of the screen to tile-clear
-/// (viewsize below 120). `None` when the view covers the whole frame or the
-/// wad lacks it (then the border fills black).
-pub(crate) fn backtile_for(
-    vrect: &render::ViewRect,
-    render_w: usize,
-    render_h: usize,
-    gfx_wad: Option<&quake_rs::wad::Wad2>,
-) -> Option<Qpic> {
-    if vrect.w == render_w && vrect.h == render_h {
-        return None;
-    }
-    gfx_wad.and_then(|g| g.qpic("backtile").ok())
 }
 
 #[cfg(test)]

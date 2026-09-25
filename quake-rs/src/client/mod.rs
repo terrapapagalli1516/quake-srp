@@ -11,6 +11,7 @@
 //! |----------|----------------|------|
 //! | [`cl_demo`] | cl_demo.c | `CL_PlayDemo_f`'s playback build, quake.rc's demo loop |
 //! | [`cl_input`] | cl_input.c   | `KeyMove`: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
+//! | [`cl_main`] | cl_main.c, cl_parse.c, view.c, screen.c | [`cl_main::walk_frame`]: the live client frame |
 //! | [`cl_tent`] | cl_tent.c, r_part.c | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
 //! | [`host`] | host.c | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats |
@@ -23,6 +24,7 @@
 
 pub mod cl_demo;
 pub mod cl_input;
+pub mod cl_main;
 pub mod cl_tent;
 pub mod host;
 pub mod host_cmd;
@@ -507,6 +509,86 @@ pub fn assemble_walk(
 }
 
 // ---------------------------------------------------------------------------
+// The screen a frame draws, and what it hands back
+// ---------------------------------------------------------------------------
+
+/// The screen a client frame draws — vid.h's `viddef_t` as the platform set
+/// the mode — and how the platform shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vid {
+    /// The mode's size in pixels (`vid.width` x `vid.height`).
+    pub width: usize,
+    pub height: usize,
+    /// The width:height ratio the platform DISPLAYS the whole frame at (the
+    /// browser page: 4:3, as DOS and Windows Quake's modes filled a 4:3
+    /// monitor); with the mode's size it gives `vid.aspect`.
+    pub display_aspect: f64,
+    /// Exact perspective at every pixel of walls and liquids instead of id's
+    /// 16-pixel spans (`D_DrawSpans16`): the web port's `wasm_exactpersp`
+    /// extra, off in id's Quake.
+    pub exact_perspective: bool,
+}
+
+/// How the renderer draws the 3-D view `vrect` of the frame `vid` describes:
+/// `vid.aspect` for that mode on its display (vid_win.c's `(h/w)*(320/240)`:
+/// 0.8333 at every 16:10 mode shown at 4:3), which `R_ViewChanged` folds into
+/// the projection so the world is not stretched by the display; where the
+/// view sits on that screen (`D_Sky_uv_To_st` centres the sky on the screen);
+/// and the renderer extra, off unless the platform switched it on.
+pub fn render_options(vrect: &render::ViewRect, vid: &Vid) -> render::RenderOptions {
+    render::RenderOptions {
+        pixel_aspect: render::vid_aspect(vid.width, vid.height, vid.display_aspect),
+        screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: vid.width, vid_h: vid.height }),
+        exact_perspective: vid.exact_perspective,
+    }
+}
+
+/// The `backtile` pic (`draw_backtile`, gfx.wad) for [`render::compose_view`],
+/// fetched only when the 3-D view leaves part of the screen to tile-clear
+/// (viewsize below 120). `None` when the view covers the whole frame or the
+/// wad lacks it (then the border fills black).
+pub fn backtile_for(
+    vrect: &render::ViewRect,
+    render_w: usize,
+    render_h: usize,
+    gfx_wad: Option<&crate::wad::Wad2>,
+) -> Option<Qpic> {
+    if vrect.w == render_w && vrect.h == render_h {
+        return None;
+    }
+    gfx_wad.and_then(|g| g.qpic("backtile").ok())
+}
+
+/// One client frame, as the platform presents it: the finished screen, the
+/// palette shift to present it through, and the frame's sound calls.
+pub struct ClientFrame {
+    /// The screen: the 3-D view at its rectangle, the backtile around it, the
+    /// status bar or intermission overlay, the centerprint and notify lines.
+    /// (The menu and the console are the host's, drawn over it.)
+    pub image: render::Image,
+    /// `cl.cshifts` in order — contents, damage, bonus, powerup — for
+    /// `V_UpdatePalette`: the software renderer's palette shift tints the
+    /// WHOLE screen, so the platform applies them after the menu and console.
+    pub cshifts: Vec<([u8; 3], f32)>,
+    /// What the frame said to the sound layer, in call order.
+    pub sound: Vec<SoundCall>,
+}
+
+/// `S_Update` for the listener `listener` in `bsp` over a frame of `dt`: its
+/// pose, and what `S_UpdateAmbientSounds` ramps the four automatic ambient
+/// channels toward — the listener's leaf's `ambient_level[]` targets (water
+/// wash / sky wind); `None` outside the world, where the C's `!l` branch
+/// silences the channels without resetting the ramp. The C runs it from
+/// `S_Update` in play and demo playback alike.
+pub fn s_update(bsp: &Bsp, listener: Listener, dt: f32) -> SoundCall {
+    let frametime = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
+    let leaf_ambient = render::point_in_leaf(bsp, listener.pos)
+        .and_then(|li| bsp.leafs.get(li))
+        .map(|l| l.ambient_level);
+    SoundCall::Update { listener, leaf_ambient, frametime }
+}
+
+// ---------------------------------------------------------------------------
 // What the client hands the sound layer
 // ---------------------------------------------------------------------------
 
@@ -588,5 +670,31 @@ pub fn set_lap_hook(hook: Option<fn(Phase)>) {
 pub fn lap(phase: Phase) {
     if let Some(hook) = LAP_HOOK.with(Cell::get) {
         hook(phase);
+    }
+}
+
+thread_local! {
+    /// The hook [`view_hook`] runs the finished 3-D view through, if any.
+    static VIEW_HOOK: Cell<Option<ViewHook>> = const { Cell::new(None) };
+}
+
+/// A harness's last word on the finished 3-D view of a live frame, before the
+/// 2-D layer is drawn over it (see [`set_view_hook`]).
+pub type ViewHook = fn(render::Image, &[[u8; 3]; 256]) -> render::Image;
+
+/// Install (or clear) the [`ViewHook`]: the 2-D oracle harness (quake-wasm's
+/// `oracle_screen`) paints the view one flat colour, as the C oracle's
+/// `oracle_blank` fills `scr_vrect`, so a shot measures the 2-D layer alone.
+/// None is installed by default.
+pub fn set_view_hook(hook: Option<ViewHook>) {
+    VIEW_HOOK.with(|c| c.set(hook));
+}
+
+/// The 3-D view through the installed [`ViewHook`] (unchanged without one).
+#[inline]
+pub fn view_hook(view: render::Image, palette: &[[u8; 3]; 256]) -> render::Image {
+    match VIEW_HOOK.with(Cell::get) {
+        Some(hook) => hook(view, palette),
+        None => view,
     }
 }
