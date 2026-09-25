@@ -7,10 +7,10 @@
 
 use std::cell::RefCell;
 
-use quake_rs::bsp::{Bsp, NUM_AMBIENTS};
+use quake_rs::bsp::NUM_AMBIENTS;
 use quake_rs::client::{Listener, SoundCall};
 use quake_rs::pak::Pak;
-use quake_rs::render::{self, MenuSound};
+use quake_rs::render::MenuSound;
 use quake_rs::server::StaticSound;
 use quake_rs::snd::{
     wav_info, AmbientChannels, AMBIENT_FADE_DEFAULT, AMBIENT_LEVEL_DEFAULT, AMBIENT_SAMPLES,
@@ -99,7 +99,7 @@ thread_local! {
     /// The current listener pose, refreshed every walk `step`: eye position plus
     /// the forward and right unit vectors derived from the player's yaw. The page
     /// reads these via `listener_*` exports to spatialize each sound.
-    pub(crate) static LISTENER: RefCell<Listener> = const { RefCell::new(Listener::zero()) };
+    static LISTENER: RefCell<Listener> = const { RefCell::new(Listener::zero()) };
     /// Whether the page's `AudioContext` is running yet. The page calls
     /// `set_audio_ready(1)` once the context resumes (it starts suspended until a
     /// user gesture). Until then `queue_sounds` drops sounds on the floor instead
@@ -173,7 +173,7 @@ pub(crate) fn play(pak: &Pak, calls: Vec<SoundCall>) {
 /// `view_entity` is the listener's own edict (the player): a sound from it is
 /// flagged so the page plays it at full volume with no falloff (see
 /// `SndParams::is_view_entity`).
-pub(crate) fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity: i32) {
+fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity: i32) {
     if events.is_empty() {
         return;
     }
@@ -411,7 +411,7 @@ thread_local! {
 }
 
 /// Queue `(entity, channel)` stops for the page (see [`STOP_SND_QUEUE`]).
-pub(crate) fn push_stop_sounds(stops: &[(i32, i32)]) {
+fn push_stop_sounds(stops: &[(i32, i32)]) {
     if stops.is_empty() {
         return;
     }
@@ -501,7 +501,7 @@ thread_local! {
 /// new generation and tears its loop nodes down; the engine-side static queue
 /// is dropped (a not-yet-picked-up loop from the old level must never start
 /// over the new one) and the ambient master_vols restart from silence.
-pub(crate) fn bump_sound_generation() {
+fn bump_sound_generation() {
     SOUND_GENERATION.with(|g| {
         let mut g = g.borrow_mut();
         *g = g.wrapping_add(1);
@@ -516,7 +516,7 @@ pub(crate) fn bump_sound_generation() {
 /// pak lacks is dropped, and so is one with no loop point (`sc->loopstart ==
 /// -1` -> "Sound %s not looped"). Quake's ambient samples all carry a `cue `
 /// loop chunk; one-shots don't, and the C refuses to static-loop them.
-pub(crate) fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
+fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
     STATIC_QUEUE.with(|q| {
         let mut q = q.borrow_mut();
         // The statics' share of the C channel table (`total_channels - 12`).
@@ -683,20 +683,6 @@ fn ramp_ambient_channels(leaf_levels: Option<&[u8; NUM_AMBIENTS]>, frametime: f3
     AMBIENT_VOLS.with(|v| *v.borrow_mut() = vols);
 }
 
-/// One frame of `S_UpdateAmbientSounds` for the listener standing at `eye` in
-/// `bsp`: look up the view leaf and ramp the four ambient channels toward its
-/// `ambient_level[]` targets. Called from both `step_walk` and `step_demo`
-/// (the C runs it from `S_Update` regardless of game/demo mode). A listener
-/// outside the world (no leaf) silences the channels without resetting the
-/// ramp, exactly like the C's `!l` branch.
-pub(crate) fn update_ambient_channels(bsp: &Bsp, eye: [f32; 3], dt: f32) {
-    let frametime = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
-    let leaf_levels = render::point_in_leaf(bsp, eye)
-        .and_then(|li| bsp.leafs.get(li))
-        .map(|l| l.ambient_level);
-    ramp_ambient_channels(leaf_levels.as_ref(), frametime);
-}
-
 /// The listener (player) pose as of the last walk `step`: eye position and the
 /// forward/right unit vectors derived from the player's yaw. The page reads
 /// these to spatialize each sound (distance from `pos`, pan via dot with right).
@@ -777,6 +763,7 @@ pub extern "C" fn volume() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quake_rs::bsp::Bsp;
     use quake_rs::progs::Progs;
     use quake_rs::server::{Server, SoundEvent};
 

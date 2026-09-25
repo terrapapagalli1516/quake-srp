@@ -9,7 +9,7 @@
 //!
 //! | module   | id counterpart | what |
 //! |----------|----------------|------|
-//! | [`cl_demo`] | cl_demo.c | `CL_PlayDemo_f`'s playback build, quake.rc's demo loop |
+//! | [`cl_demo`] | cl_demo.c, cl_parse.c, view.c | `CL_PlayDemo_f`'s playback build, quake.rc's demo loop, [`cl_demo::demo_frame`]: the demo client frame |
 //! | [`cl_input`] | cl_input.c   | `KeyMove`: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
 //! | [`cl_main`] | cl_main.c, cl_parse.c, view.c, screen.c | [`cl_main::walk_frame`]: the live client frame |
 //! | [`cl_tent`] | cl_tent.c, r_part.c | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
