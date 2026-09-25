@@ -49,6 +49,9 @@ In file order (roughly merge order). Each names its branch; the merge message on
   a mover's stop sound survives the sound cap; console prints reach the notify lines;
   menu and console key routing; old saves' player name; the warp keeps its tables; demo
   particles fall by `sv_gravity`; the canvas is the largest 4:3 box.
+- **Demo commands, timedemo, pause** (`quake/timedemo`, merged last) — `playdemo`,
+  `stopdemo`, `startdemos`, `demos` and the disconnected state; `timedemo` with id's frame
+  counts; `pause` and `SCR_DrawPause`; why there is no loading plaque.
 
 Without a section here: the census itself (`CENSUS.md`), the oracle (`oracle/README.md`),
 the performance plan (`PERF_PLAN.md`), and the structure-only branches — the render,
@@ -65,11 +68,17 @@ where it came from. Items marked *(2026-06)* were not re-checked on 2026-09-25.
 - Four control departures are on by default: mouse look held while the pointer is locked,
   WASD over `default.cfg`'s `a`/`d`, `f` for fullscreen, Space adding swim-up speed
   (CENSUS, "Rule departures on by default").
+- Kept on purpose: the main menu does not stop the attract loop; id's `M_Menu_Main_f`
+  sets `cls.demonum = -1`, so its demo loop ends with the current demo (timedemo, "Kept,
+  not id's").
 
 **Game and client**
-- No `pause` (command, `PAUSE` bind, `SCR_DrawPause`'s plaque) and no loading plaque
-  (`SCR_DrawLoading`) (fid2d; CENSUS L12).
-- Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12, `t` messagemode (CENSUS L12).
+- Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12, `t` messagemode (CENSUS L12; its
+  `pause` half is done). No loading plaque, on purpose: loads finish inside a frame
+  (timedemo).
+- `pause`: the `pausable` and `showpause` cvars (id's defaults, both 1, are what the port
+  does) and `VID_HandlePause` are not modelled; `timedemo` sets `cls.timedemo` only when
+  the demo opens, where id's sets it anyway (timedemo).
 - `give` is not `Host_Give_f`: it clamps, has an armour case, fills a missing amount, and
   selects the weapon (CENSUS L13).
 - No pitch drift on slopes: `cl.idealpitch` is fixed at 0 (CENSUS L3).
@@ -95,7 +104,7 @@ where it came from. Items marked *(2026-06)* were not re-checked on 2026-09-25.
   fix-client F13).
 - Demo statics are drawn without the efrag test (same pixels, more work) (sim).
 - The loop wrap keeps the ambient ramp warm where id restarts it from 0 (2026-06,
-  deliberate).
+  deliberate; not re-checked since the loop moved to `CL_NextDemo` on `quake/timedemo`).
 
 **Renderer**
 - A map with no lighting lump renders lit; id draws it fullbright. Test maps only (fid1).
@@ -1173,8 +1182,9 @@ Found, not fixed (outside the 2-D drawing, or another branch's file):
   are ~0.24 ms of a 13.9 ms frame).
 - **Default key binds are WASD** (`keys.rs`: w/s/a/d/c over `default.cfg`'s
   a = +lookup, d = +moveup) — a default departure besides Always Run.
-- **No pause** — `pause` (default.cfg binds PAUSE) and `SCR_DrawPause`'s plaque;
-  **no loading plaque** (`SCR_DrawLoading`).
+- ✅ (`quake/timedemo`, "Demo commands, timedemo, pause") **No pause** —
+  `pause` (default.cfg binds PAUSE) and `SCR_DrawPause`'s plaque;
+  **no loading plaque** (`SCR_DrawLoading`: not needed, see that section).
 - **`give` is not `Host_Give_f`** — it clamps, has an `a` (armour) case,
   defaults a missing amount to full, and selects the weapon it gives; id sets
   the field to `atoi(argv[2])` (0 when missing) and only ORs the weapon bit.
@@ -1545,7 +1555,7 @@ aside:
   call `client_frame_f64` with `Host_FilterTime`'s double `host_frametime`, so
   `sv.time` adds exactly id's frame times.
 - `census_tests.rs`'s module doc says the tests are `#[ignore]`d; all ten
-  (this line said twenty; the file has ten) run in the normal suite.
+  (this line said twenty; the file had ten at `3ba835f`) run in the normal suite.
 - The page's sound law (not quake-wasm, but the same pass): `playRouted` /
   `spatializeDynLoop` clamp each side after the master volume (id clamps
   `leftvol`/`rightvol` at 255, `snd_mix.c`, then scales by `volume`), and
@@ -1811,6 +1821,90 @@ Found, not fixed:
 - The page drains at most 16 one-shots a frame (`drainGameSounds`' guard);
   past the cap the queue can now hold a few more keyed entries, which then
   play a frame later.
+
+## Demo commands, timedemo, pause (2026-09-25, branch `quake/timedemo`)
+
+Quake's own demo and pause commands (CENSUS L12's pause half), against
+`cl_demo.c`, `cl_main.c`, `host.c` and `host_cmd.c`.
+
+- ✅ **`playdemo`, `stopdemo`, `startdemos`, `demos`, and the attract loop
+  through them.** `cls`'s demo half is host state (`quake-wasm` `App::cls`:
+  `demos[8]`, `demonum`) and the commands are id's: `CL_PlayDemo_f`
+  (`CL_Disconnect`, `COM_DefaultExtension` ".dem", "Playing demo from %s.",
+  "ERROR: couldn't open." + `demonum = -1`; the usage line "play <demoname> :
+  plays a demo" is the C's), `Host_Stopdemo_f`, `Host_Startdemos_f` ("%i
+  demo(s) in loop", "Max %i demos in demoloop", 15-character names, starts the
+  loop only with nothing running and the loop not off, else switches it off),
+  `Host_Demos_f` (off: back at the second slot). The boots run quake.rc's
+  `startdemos demo1 demo2 demo3`, and a demo's end is `Host_EndGame`:
+  `CL_NextDemo` (wrap after the last listed slot) or, outside the loop,
+  `CL_Disconnect`. `map`, `load` and New Game switch the loop off
+  (`cls.demonum = -1` in `Host_Map_f`/`Host_Loadgame_f`) and disconnect the
+  demo. The attract loop cycles demo1 → demo2 → demo3 as before (F15), now
+  printing id's console lines as it goes.
+- ✅ **Disconnected** (`cls.state == ca_disconnected`: after `stopdemo`, a demo
+  ending outside the loop, a `playdemo` that cannot open its file): nothing
+  plays and the console covers the screen (`con_forcedup`: full height at
+  once, its input line drawn, typing goes to it — `Key_Event`'s `key_game &&
+  con_forcedup`), the menu over it; the console toggle brings up the main
+  menu (`Con_ToggleConsole_f` with no connection), and leaving the main menu
+  resumes the loop (`M_Main_Key`'s `CL_NextDemo`). Before this there was no
+  such state: the port always had a level or a demo.
+- ✅ **`timedemo`** (`CL_TimeDemo_f`, `CL_FinishTimeDemo`): the demo one
+  recorded message per host frame, no 72 fps cap (`Host_FilterTime`'s
+  `!cls.timedemo`), each drawn at its message's time (`CL_LerpPoint` in a
+  timedemo: no interpolation; the parser's keyframes, EF_ROTATE spin
+  included); the first frame reads through the message after the one that
+  completed the signon, as `CL_GetMessage` does; the frame that reads the
+  closing `svc_disconnect` draws nothing and ends it (`Host_EndGame`: the loop's
+  next demo, or disconnected), and `CL_StopPlayback` (a `stopdemo`,
+  `playdemo`, `map` mid-run) ends it early; `"%i frames %5.1f seconds %5.1f
+  fps"` from `host_framecount - td_startframe - 1` and `realtime -
+  td_starttime` (a float, as `cls.td_starttime`), `time = 1` if 0. The
+  particles move by the time between messages (`cl.time - cl.oldtime`), the
+  view kick, fades and stair smoothing by `host_frametime`. demo1/2/3 draw
+  969/985/1090 frames, id's counts (oracle). The browser runs host frames
+  back to back in ~12 ms slices per animation frame, presenting the last;
+  each `step` is handed the previous one's duration, so `realtime` adds up
+  the frames' own time and not the page's pauses between slices (what the
+  number includes: `PERF_PLAN.md` §10). One departure: id's sets
+  `cls.timedemo` even when the file does not open, which only leaves the host
+  uncapped until the next disconnect; the port sets it when the demo plays.
+  Natively: `quaketool timedemo`.
+- ✅ **`pause`** (`Host_Pause_f`, CENSUS L12's pause half): default.cfg's
+  `bind PAUSE "pause"` (also with the console down: PAUSE is no console key;
+  not in the menu), forwarded to the server (`Cmd_ForwardToServer`: nothing
+  during demo playback, `Can't "pause", not connected` with nothing running),
+  which toggles `sv.paused` and broadcasts "player paused the game" /
+  "player unpaused the game" (`SV_BroadcastPrintf`, the notify line and the
+  console). While paused neither `SV_ClientThink` nor `SV_Physics` runs, so
+  `sv.time` and with it `cl.time` stand — particles, dlights, light styles,
+  sky, liquids, animations; `cl.paused` (the local client's `svc_setpause`,
+  the same frame) keeps V_CalcRefdef off, so the view keeps its kick and
+  stair smoothing (`steptime = cl.time - cl.oldtime`: nothing while the
+  server stands, behind the menu too); the palette-shift fades, the notify
+  and centerprint timers and the ambient ramps run on host time, playing
+  sounds and loops carry on, as in the C. `SCR_DrawPause` draws
+  `gfx/pause.lmp` at `((w - 128)/2, (h - 48 - 24)/2)` outside an
+  intermission, under the menu; a recorded `svc_setpause` shows it during
+  demo playback. Against id's composited screen (`oracle/screen2d.py`,
+  scenario `pause`): 100% at 320x200, 640x400 and 960x600, paused and
+  unpaused. Not modelled: the `pausable` and `showpause` cvars (both 1, id's
+  defaults, and the port has no cvar registry) and `VID_HandlePause` (the
+  Windows build frees a windowed mode's mouse while paused).
+- **No loading plaque, and none needed** (`SCR_BeginLoadingPlaque` /
+  `SCR_DrawLoading`): id's draws `gfx/loading.lmp` over the last frame while a
+  changelevel, restart, a load or the next attract demo loads, because
+  loading took seconds. The port loads within the frame that starts it —
+  measured in the browser (headless Chromium, wasm): `map e1m2` 8–23 ms,
+  `map e1m1` 6–10 ms, `playdemo demo2` 7–9 ms — so there is no loading
+  moment to show it in.
+- Kept, not id's: **the menu does not stop the demo loop.** `M_Menu_Main_f`
+  saves `cls.demonum` and sets -1 while the menu is up, so in id's Quake the
+  demo playing when the menu opened is the last: at its end the client
+  disconnects and the menu sits over the console until it is closed. The
+  port boots with the menu open over the attract loop and keeps cycling
+  behind it (F15, left as it was).
 
 ## LOW (27)
 

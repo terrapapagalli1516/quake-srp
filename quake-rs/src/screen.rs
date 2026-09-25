@@ -4,7 +4,7 @@
 //! Source: `WinQuake/screen.c` — `SCR_CalcRefdef` (with `R_SetVrect`, `r_main.c`),
 //! `SCR_UpdateScreen`'s tile-cleared border, `SCR_DrawCenterString`.
 
-use crate::draw::{draw_char_scaled, draw_string_scaled, draw_tile_clear, screen_2d};
+use crate::draw::{blit_qpic_at, draw_char_scaled, draw_string_scaled, draw_tile_clear, screen_2d};
 use crate::render::Image;
 
 // ---------------------------------------------------------------------------
@@ -291,6 +291,18 @@ pub fn draw_center_string_revealed(
     }
 }
 
+/// `SCR_DrawPause` (screen.c): while `cl.paused` (and `showpause`, default
+/// 1), the `gfx/pause.lmp` plaque, centred across the 2-D screen and above
+/// its middle — `Draw_Pic ((vid.width - pic->width)/2, (vid.height - 48 -
+/// pic->height)/2, pic)`. (`Draw_Pic` copies every texel; the plaque has no
+/// transparent ones, so the see-through blit draws the same.)
+pub fn draw_pause(image: &mut Image, pic: &crate::wad::Qpic, palette: &[[u8; 3]; 256]) {
+    let sc = screen_2d(image.w, image.h);
+    let x = (sc.w - pic.width) / 2;
+    let y = (sc.h - 48 - pic.height) / 2;
+    blit_qpic_at(image, pic, x as f32, y as f32, sc.scale, 0.0, 0.0, palette);
+}
+
 /// Draw a `centerprint` message: `SCR_DrawCenterString` outside the finale
 /// (`remaining = 9999`, the whole string) — [`draw_center_string_revealed`].
 pub fn draw_centerprint(
@@ -330,7 +342,28 @@ pub fn draw_fps(
 mod tests {
     use super::*;
     use crate::menu::RESOLUTION_PRESETS;
-    use crate::render::fixtures::{ramp_palette, solid_conchars, test_backtile};
+    use crate::render::fixtures::{ramp_palette, solid_conchars, solid_pic, test_backtile};
+
+    #[test]
+    fn the_pause_plaque_sits_where_scr_drawpause_puts_it() {
+        // gfx/pause.lmp is 128x24: ((w - 128)/2, (h - 48 - 24)/2) in 2-D pixels.
+        let pal = ramp_palette();
+        let pic = solid_pic(128, 24, 7);
+        for (w, h, x, y, scale) in [(320, 200, 96, 64, 1), (640, 400, 256, 164, 1), (960, 600, 416, 264, 1)] {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            draw_pause(&mut img, &pic, &pal);
+            let lit: Vec<usize> = (0..w * h).filter(|&i| img.rgb[i] == pal[7]).collect();
+            assert_eq!(lit.len(), 128 * 24 * scale * scale, "{w}x{h}");
+            assert_eq!((lit[0] % w, lit[0] / w), (x, y), "{w}x{h}: top-left");
+        }
+        // The scaled-2-D extra lays it out on 320x200 and blows it up.
+        let _g = crate::draw::Scaled2dGuard::set(true);
+        let mut img = Image::new(960, 600, [0, 0, 0]);
+        draw_pause(&mut img, &pic, &pal);
+        let lit: Vec<usize> = (0..960 * 600).filter(|&i| img.rgb[i] == pal[7]).collect();
+        assert_eq!(lit.len(), 128 * 24 * 9);
+        assert_eq!((lit[0] % 960, lit[0] / 960), (96 * 3, 64 * 3));
+    }
     use crate::sbar::draw_finale_overlay;
     use crate::wad::Qpic;
 

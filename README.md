@@ -30,7 +30,9 @@ Two things follow that a player notices:
 **Not yet within the rule:** four control departures are still on by default and wait for
 a decision (CENSUS.md, "Rule departures on by default"): mouse look is held permanently
 while the pointer is locked (id: `+mlook` off), WASD moves (id binds `a`/`d` to look up
-and move up), `f` toggles fullscreen, and Space in water also adds upward speed.
+and move up), `f` toggles fullscreen, and Space in water also adds upward speed. And one
+kept on purpose (AUDIT.md, "Demo commands, timedemo, pause"): the attract demos keep
+cycling behind the main menu, where id's menu stops the loop after the current demo.
 
 ## Run it
 
@@ -99,7 +101,9 @@ Checked on the real shareware data.
   placed ambient loops, the leaf ambients (water, wind), looping mover sounds. The mixing
   is the platform's: Web Audio in the browser.
 - **Console:** `god`, `noclip`, `fly`, `give`, `impulse`, `kill`, `map`, `save`, `load`,
-  `viewsize`, `sizeup`/`sizedown`, the `wasm_*` extras, `clear`, `help`.
+  `pause` (also the PAUSE key, with id's plaque), id's demo commands (`playdemo`,
+  `timedemo`, `stopdemo`, `startdemos`, `demos`), `viewsize`, `sizeup`/`sizedown`, the
+  `wasm_*` extras, `clear`, `help`.
 
 ## Web extras
 
@@ -126,7 +130,7 @@ departs from id's. The list is one table, `WEB_EXTRAS` in `quake-rs/src/menu.rs`
 | `quake-rs/src/` 2-D | `draw`, `screen`, `sbar`, `menu`, `keys`, `console` |
 | `quake-rs/src/client/` | the game client: `cl_main` (the live frame), `cl_demo`, `cl_tent`, `cl_input`, `view`, `host` (`Host_FilterTime`), `host_cmd` (level loads, cheats). The browser runs it; `quaketool play` runs it natively. |
 | `quake-wasm/` | the browser's platform layer (about 3k lines of code and 6k of end-to-end tests): the exported functions the page calls, the host state (menu, console, clocks, framebuffer), carrying out the client's sound calls for Web Audio, saves in localStorage, the `wasm_*` extras. No `wasm-bindgen`, no dependencies. |
-| `web/` | the page (`index.html`), eight headless-Chromium checks (`verify_*.py`), the benchmark (`bench.py`) and a screenshot tool (`shoot.py`) |
+| `web/` | the page (`index.html`), nine headless-Chromium checks (`verify_*.py`), the benchmark (`bench.py`) and a screenshot tool (`shoot.py`) |
 | `oracle/` | id's WinQuake built headless from the C, and the scripts that diff its frames against the port's (`oracle/README.md`) |
 | `census/` | helpers for the gameplay census (`CENSUS.md`): id's edicts dumped and diffed against the port's, a QuakeC symbol dump |
 | `gen_samples.py`, `gen_progs.py` | synthetic assets and progs, so the engine's tests need no game data |
@@ -134,11 +138,11 @@ departs from id's. The list is one table, `WEB_EXTRAS` in `quake-rs/src/menu.rs`
 
 ## How it is checked
 
-- **Tests.** `cargo test --release` in `quake-rs`: 581 library + 1 `quaketool` + 8
-  integration tests, no game data needed. In `quake-wasm`: 118 end-to-end tests against the
-  embedded shareware pak (plus one ignored harness, `oracle_screen`). All pass at `3ba835f`.
+- **Tests.** `cargo test --release` in `quake-rs`: 587 library + 1 `quaketool` + 8
+  integration tests, no game data needed. In `quake-wasm`: 126 end-to-end tests against the
+  embedded shareware pak (plus one ignored harness, `oracle_screen`). All pass at `31775f5`.
 - **Golden renders.** `quaketool scene <pak> maps/e1mN.bsp out.ppm` for e1m1, e1m2, e1m3;
-  the sha256 prefixes at `3ba835f` are `4807aaa1`, `9ae2b478`, `c65b7046`. A change leaves
+  the sha256 prefixes at `31775f5` are `4807aaa1`, `9ae2b478`, `c65b7046`. A change leaves
   them byte-identical, or it is a deliberate fidelity fix and `AUDIT.md` records the move
   with its pixel count.
 - **The oracle.** `uv run oracle/compare.py` renders the same view, clock and entities in id's
@@ -149,7 +153,8 @@ departs from id's. The list is one table, `WEB_EXTRAS` in `quake-rs/src/menu.rs`
 - **The census.** `quaketool census` plays all nine maps headless through the real QuakeC;
   with `census/` it diffs id's server edicts against the port's (`CENSUS.md`).
 - **The browser.** `uv run --with playwright web/verify_<name>.py` for walk, ambient, demo,
-  input, menu, save, loops and extras: each boots the real page in headless Chromium.
+  input, menu, save, loops, extras and timedemo: each boots the real page in headless
+  Chromium.
 - **Native and browser agree.** `quaketool play <pak> demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1
   --res 320x200,640x400 --hash-every 30` prints the same frame hashes as the browser
   (`uv run --with playwright web/bench.py --hash-every 30` with those workloads).
@@ -168,10 +173,18 @@ the surface cache for dynamically lit walls, mip levels, and sending the client 
 entities in its PVS. Absolute milliseconds swing with machine load; compare builds in one
 sitting.
 
+Quake measured itself with `timedemo demo1`, and so does the port: type it in the console,
+or run `quaketool timedemo <pak> demo1 --res 640x400`. It draws the same 969 frames as id's
+C (985 and 1090 for demo2 and demo3) and prints id's line. Against id's portable C built
+from the source (`oracle/`) at the page's pixel aspect, one sitting: the port natively runs
+demo1 at 2602 / 1007 / 516 fps at 320x200 / 640x400 / 960x600 where id's C runs 1822 / 745 /
+419, and the browser (wasm) at 1916 / 723 / 381 (`PERF_PLAN.md` §10).
+
 ## What is left
 
 - **The control departures** above: a decision, not work.
-- **No `pause`** and no loading plaque yet; the F-key binds and `messagemode` are missing.
+- **Missing binds:** `default.cfg`'s F-keys and `t` (`messagemode`). (No loading plaque
+  either, on purpose: a level loads within one frame.)
 - **Demo playback makes no dynamic lights** (explosions light the walls live, not in demos).
 - **Smaller faithfulness gaps**, each small or rare: `give` is not `Host_Give_f`; no
   pitch drift on slopes (`cl.idealpitch` fixed at 0); a gibbed player's head leaves no blood

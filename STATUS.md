@@ -1,6 +1,6 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-09-25, after the overnight push (`quake/overnight` at `3ba835f`). The
+Last updated 2026-09-25, after the overnight push (`quake/overnight` at `31775f5`). The
 first section is where things stand; the second is what the night changed; the rest is
 the older history, kept as evidence, with superseded items marked.
 
@@ -18,7 +18,9 @@ the older history, kept as evidence, with superseded items marked.
 - **Two things for the user to decide:**
   1. Four control departures are still on by default (CENSUS.md, "Rule departures on by
      default"): mouse look held while the pointer is locked, WASD, `f` for fullscreen,
-     Space swimming up faster. Keep them as recorded exceptions, or make them extras?
+     Space swimming up faster. And one kept on purpose by `quake/timedemo`: the attract
+     demos keep cycling behind the main menu, where id's menu stops the loop after the
+     current demo. Keep them as recorded exceptions, or make them extras?
   2. The 72 fps cap is on by default, as in id's `Host_FilterTime`: a 144 Hz display runs
      at 72 fps, a 120 Hz one at 60 (every other refresh). It is faithful, and the chair
      kept it; "Uncapped framerate" in Web extras turns it off. Flagging it because it is
@@ -29,22 +31,23 @@ the older history, kept as evidence, with superseded items marked.
   matches id's composited screen except three explained residues (`oracle/README.md`).
   The gameplay census found 18 HIGH/MED differences; all are fixed (`CENSUS.md`).
 - **Speed.** In the browser (headless Chromium, wasm), id's demo1 at 1280x800 takes 4.5 ms
-  a frame, from 22.6 ms at the start of the night (median; p95 33.1 → 5.0 ms). Details
-  and caveats in `PERF_PLAN.md`.
-- **Checks at `3ba835f`** (run for this document): `cargo test --release` passes in both
-  crates, 581 + 1 + 8 in quake-rs and 118 in quake-wasm (1 ignored: the `oracle_screen`
+  a frame, from 22.6 ms at the start of the night (median; p95 33.1 → 5.0 ms). id's own
+  measure, `timedemo demo1`, now runs in the port: natively it is 1.23–1.43x the speed of
+  id's portable C at 320x200–960x600, and in the browser about as fast as id's C (0.91–1.05x).
+  Details and caveats in `PERF_PLAN.md` (§10 for timedemo).
+- **Checks at `31775f5`** (run for this document): `cargo test --release` passes in both
+  crates, 587 + 1 + 8 in quake-rs and 126 in quake-wasm (1 ignored: the `oracle_screen`
   harness). Goldens (`quaketool scene`, sha256 prefix): e1m1 `4807aaa1`, e1m2 `9ae2b478`,
-  e1m3 `c65b7046`. The eight `web/verify_*.py` scripts pass (walk, ambient 13/13, demo
-  9/9, input 36/36, menu 61/61, save, loops 10/10, extras 40/40; headless Chromium,
-  run on a scratch copy of the page).
-- **Deployed.** `http://localhost:8196/index.html` serves the `3ba835f` build
-  (`miniserve -C`, from a work directory).
-- **In flight when this was written:** `quake/timedemo` (id's `timedemo`, `playdemo`,
-  `stopdemo`, `startdemos`, `demos`, and `pause`) and a final review of `3ba835f`.
+  e1m3 `c65b7046`. The nine `web/verify_*.py` scripts pass (walk, ambient 13/13, demo
+  9/9, input 36/36, menu 61/61, save, loops 10/10, extras 40/40, timedemo 31/31; headless
+  Chromium, on a scratch copy of the page). `quaketool timedemo` draws demo1's 969 frames.
+- **Deployed.** When this was written, `http://localhost:8196/index.html` served the
+  `3ba835f` build (`miniserve -C`, from a work directory), from before the timedemo
+  merge. The final review of `3ba835f` reported no HIGH and four MED findings; they are
+  in the chair's ledger (row 28), not yet triaged into `AUDIT.md`.
 - **What is left:** `AUDIT.md`, "Open, as of 2026-09-25", one list. The largest items: no
-  `pause` or loading plaque (pause is on `quake/timedemo`), no dynamic lights in demo
-  playback, the control departures above, and nothing measured on a real GPU browser or a
-  real high-refresh display.
+  dynamic lights in demo playback, the departures above, and nothing measured on a real
+  GPU browser or a real high-refresh display.
 
 ---
 
@@ -54,7 +57,7 @@ the user's brief: faithful by default (only Always Run departs; anything
 else becomes an opt-in extra), three bugs they had noticed (Chthon has no electricity; the
 Options cursor blinks too fast; Screen size does the wrong thing), performance, well
 structured code. The chair split it into branches, one agent each, merged into
-`quake/overnight` in order (`git log --first-parent 5af4fa1..3ba835f`; each merge message
+`quake/overnight` in order (`git log --first-parent 5af4fa1..31775f5`; each merge message
 summarises its branch). The chair's ledger is
 a `PLAN.md` outside this repository.
 
@@ -118,6 +121,14 @@ perspective, scaled 2-D layer. Off by default, persisted by the page, each a `wa
 console variable. Also: `viewsize` persists across reloads, and Esc works in fullscreen
 through the Keyboard Lock API (not verified in a real browser).
 
+**id's demo commands, `timedemo` and `pause`** ("Demo commands, timedemo, pause"; merged
+last). `playdemo`, `stopdemo`, `startdemos` and `demos` as `cl_demo.c` has them, with the
+attract loop running through them and id's disconnected state (the console forced up);
+`timedemo` plays a demo one message per frame, uncapped, and prints id's line — the same
+969 / 985 / 1090 frames as id's C for demo1–3; `pause` with `SCR_DrawPause`'s plaque,
+pixel-exact against id's screen. No loading plaque, on purpose: a level loads in 6–23 ms,
+inside a frame. Natively `quaketool timedemo`; in the browser, `web/verify_timedemo.py`.
+
 **Performance** (`PERF_PLAN.md`). Mostly by doing what Quake did, which also made it more
 faithful: the 72 fps `Host_FilterTime` cap; the embedded pak as one static slice (memory
 81 → 53 MB after boot, 171 → 62 MB after four map loads); the palette shift as
@@ -146,10 +157,10 @@ at each level start; a busy frame can no longer leave a door hum looping forever
 
 **Goldens.** They moved with each deliberate fidelity fix, every move recorded in
 AUDIT.md with its pixel count: `fb14bd65` / `a6f98d8a` / `0211e6d4` at the start →
-`4807aaa1` / `9ae2b478` / `c65b7046` at `3ba835f`.
+`4807aaa1` / `9ae2b478` / `c65b7046` at `3ba835f` and still at `31775f5`.
 
-**Tests.** 475 library + 8 integration and 64 quake-wasm tests at the start; 581 + 1 + 8
-and 118 at `3ba835f`.
+**Tests.** 475 library + 8 integration and 64 quake-wasm tests at the start; 587 + 1 + 8
+and 126 at `31775f5`.
 
 ## How to work here
 
@@ -177,10 +188,10 @@ From the repository root:
 
 ```bash
 # tests (quake-rs: no game data; quake-wasm: the embedded shareware pak)
-(cd quake-rs && cargo test --release)      # 581 lib + 1 bin + 8 integration
-(cd quake-wasm && cargo test --release)    # 118 (+1 ignored harness)
+(cd quake-rs && cargo test --release)      # 587 lib + 1 bin + 8 integration
+(cd quake-wasm && cargo test --release)    # 126 (+1 ignored harness)
 
-# goldens (needs the pak): sha256 prefixes 4807aaa1 / 9ae2b478 / c65b7046 at 3ba835f
+# goldens (needs the pak): sha256 prefixes 4807aaa1 / 9ae2b478 / c65b7046 at 31775f5
 Q=quake-rs/target/release/quaketool PAK=quake-data/ID1/PAK0.PAK
 for m in e1m1 e1m2 e1m3; do $Q scene $PAK maps/$m.bsp /tmp/$m.ppm >/dev/null; sha256sum /tmp/$m.ppm; done
 

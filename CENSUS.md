@@ -1,11 +1,11 @@
 # Faithfulness census — game and client (2026-09-25)
 
-**Status at `3ba835f`:** all 18 HIGH and MED findings (F1–F18) are fixed, each by the
-commit named in its row. Of the 25 LOWs, 16 are fixed (L1 L2 L4–L9 L11 L14 L15 L18 L20–L22
-L24), two in part (L12, L25), and seven open (L3 L10 L13 L16 L17 L19 L23), listed with the
-rest in `AUDIT.md`, "Open, as of 2026-09-25". The departures in "Rule departures on by
-default" below still wait for a decision. The text below is the census as written, with
-the fixes marked in its rows.
+**Status at `31775f5`:** all 18 HIGH and MED findings (F1–F18) are fixed, each by the
+commit named in its row. Of the 25 LOWs, 16 are fixed (L1 L2 L4–L9 L11 L14 L15 L18
+L20–L22 L24), two in part (L12: all but the F-keys and `t`; L25), and seven open (L3 L10
+L13 L16 L17 L19 L23), listed with the rest in `AUDIT.md`, "Open, as of 2026-09-25". The
+departures in "Rule departures on by default" below still wait for a decision. The text
+below is the census as written, with the fixes marked in its rows.
 
 A systematic sweep for bugs of the "Chthon has no electricity" kind: things a
 player of id's WinQuake would notice, found by method rather than by luck. This
@@ -30,7 +30,7 @@ evidence; anything marked *hunch* has none beyond reading.
 | `oracle_edicts` / `oracle_client` / `oracle_quit` (added to `oracle/c/oracle.c`) + `census/oracle_run.py` | Runs **id's own WinQuake** headless through a console script (0.1 s per frame, `waits N` = N frames) and dumps its server edicts / client state. |
 | `quaketool census-edicts` + `census/edict_diff.py` | Dumps the port's edicts at the same `sv.time` in the same format and diffs them against id's (matched by classname+model, then nearest origin). Run for all nine maps at t = 1.7, 4.7, 10.7, 20.7, 40.7 s (player idle at the start). |
 | `census/qcsym.py` | Symbolic disassembler for `progs.dat` (the QC source is not on disk): resolves globals, immediates and call targets, and lists every call site of a builtin with its constant arguments — every `stuffcmd`, `sound`, `cvar`, `cvar_set`, `lightstyle`, `WriteByte` the id1 progs issue. |
-| `quake-wasm/src/census_tests.rs` (new) | Nine tests (ten since) that assert id's behaviour through the live path (`build_walk_map` + `step_walk`) on the real pak, written `#[ignore]`d, each the acceptance test for its fix and un-ignored in the fixing commit; all now run in the normal suite, as the module doc says since `quake/polish3`. Other fixes' tests live next to the code they test. |
+| `quake-wasm/src/census_tests.rs` (new) | Nine tests (eleven since) that assert id's behaviour through the live path (`build_walk_map` + `step_walk`) on the real pak, written `#[ignore]`d, each the acceptance test for its fix and un-ignored in the fixing commit; all now run in the normal suite, as the module doc says since `quake/polish3`. Other fixes' tests live next to the code they test. |
 | code reading | Every `svc_*` in `cl_parse.c`, every `TE_*` in `cl_tent.c`, every builtin the progs call (`pr_cmds.c`), `CL_RelinkEntities`, `r_part.c`, `view.c`, the sound paths, `menu.c`/`keys.c`/`cl_input.c`/`host_cmd.c`, compared line by line with the port. |
 
 ## Findings, ranked
@@ -71,7 +71,7 @@ evidence; anything marked *hunch* has none beyond reading.
 | L9 | ✅ fixed in 076c217. Explosion dlights decay one frame before first drawn (C decays after `SCR_UpdateScreen`). | host.c; `step_walk` `dlights.advance` |
 | L10 | `setmodel` on alias/sprite models sets a zero box; WinQuake uses ±16 (alias) / ±maxwidth/2 (sprite). Only entities that never `setsize` afterwards (explosion sprites, flames, `viewthing`) — no shareware effect found. The `model_bbox` comment claims the C does zero. | model.c `Mod_LoadAliasModel`; `WorldModel::model_bbox` |
 | L11 | ✅ fixed in b9feb31 (position, Con_Print wrap/stamps) and on `quake/polish` (prints reach the console scrollback, word-wrapped the same; the "still open" console-output-to-notify note is moot: `Con_ToggleConsole_f` zeroes `con_times`, 0cdcb1a). Notify lines start at y=8 (C: y=0) and wrap only on `\n` (C word-wraps at `con_linewidth`); prints never reach the console scrollback. | console.c `Con_DrawNotify`; `render::draw_notify` |
-| L12 | ✅ partly fixed in 15eb688 (ENTER, MOUSE2, `\`/MOUSE3, INS; PAUSE, the F-keys and `t` still missing). Missing default.cfg binds: ENTER `+jump`, MOUSE2 `+forward`, MOUSE3/`\` `+mlook`, INS `+klook`, PAUSE `pause` (no `pause` command or plaque at all), F1–F4/F6/F9/F10/F12, `t` messagemode (inert is fine). | default.cfg in pak0; `render::default_bindings`, page mouse routing |
+| L12 | ✅ partly fixed in 15eb688 (ENTER, MOUSE2, `\`/MOUSE3, INS) and on `quake/timedemo` (PAUSE: the `pause` command and `SCR_DrawPause`'s plaque, `census_pause_stops_the_game_and_shows_the_plaque`; the 2-D oracle's `pause` scenario is pixel-exact); the F-keys and `t` still missing. Missing default.cfg binds: ENTER `+jump`, MOUSE2 `+forward`, MOUSE3/`\` `+mlook`, INS `+klook`, PAUSE `pause` (no `pause` command or plaque at all), F1–F4/F6/F9/F10/F12, `t` messagemode (inert is fine). | default.cfg in pak0; `render::default_bindings`, page mouse routing |
 | L13 | `give` differs from `Host_Give_f`: sets `weapon` without `W_SetCurrentAmmo` (stale viewmodel/ammo), clamps, has an `a` case, prints. Cheat-only. | host_cmd.c; `run_give_command` |
 | L14 | ✅ fixed in d21a2b9. New Game while a game runs has no "Are you sure?" (`M_SinglePlayer_Key` → `SCR_ModalMessage`). | menu.c |
 | L15 | ✅ fixed: `misc/null.wav` queues and overrides, and an inaudible sound ends the sound on its (entity, channel), since d7583c6 (F9) — one whose first decode is still pending too since eddd9e0 (`quake/polish2`); each side clamped at full before the master volume, and one-shots re-spatialised every frame, on `quake/polish3` (`web/verify_loops.py` section 4). Sound: near-side gain clamped after the master volume (C clamps per side at 255 before `volume`) — up to 1.43× louder close and panned at volume 0.7; one-shots are not re-spatialised each frame; an inaudible new sound (gain ≤ 0.02) does not cut the old one on its (entity, channel); `misc/null.wav` never overrides. | snd_dma.c `SND_Spatialize`/`SND_PickChannel`; `web/index.html playRouted`, `queue_sounds` |

@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 
+use quake_rs::client::cl_demo::{TimeDemoClock, MAX_DEMOS};
 use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
@@ -20,6 +21,27 @@ use crate::vid::{DEFAULT_H, DEFAULT_W};
 pub(crate) use quake_rs::client::{DemoPlay, Walk};
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
+
+/// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop.
+pub(crate) const QUAKE_RC_DEMOS: [&str; 3] = ["demo1", "demo2", "demo3"];
+
+/// `cls` (client.h `client_static_t`), its demo half: the `startdemos` loop
+/// and `timedemo`'s bookkeeping. Host state: it outlives every demo.
+#[derive(Debug, Default)]
+pub(crate) struct Cls {
+    /// `cls.demos`: the loop `startdemos` set, played in turn by
+    /// `CL_NextDemo`. A shorter `startdemos` leaves the later slots as they
+    /// were, as the C's strncpy does.
+    pub(crate) demos: [String; MAX_DEMOS],
+    /// `cls.demonum`: the loop's next demo; -1 = don't play demos (a game
+    /// started, a `playdemo` failed, or `startdemos` found something already
+    /// running). 0 at start, like the C's zeroed `cls`.
+    pub(crate) demonum: i32,
+    /// `cls.timedemo`: the demo plays one message a host frame, uncapped.
+    pub(crate) timedemo: bool,
+    /// `cls.td_startframe` / `cls.td_starttime`.
+    pub(crate) td: TimeDemoClock,
+}
 
 pub(crate) struct App {
     pub(crate) walk: Option<Walk>,
@@ -86,6 +108,20 @@ pub(crate) struct App {
     pub(crate) gamma_table: [u8; 256],
     /// The presented-frame counter behind the `wasm_showfps` extra.
     pub(crate) show_fps: ShowFps,
+    /// `host_framecount` (host.c): host frames completed — `step` calls that
+    /// ran a frame. `timedemo` counts its frames on it.
+    pub(crate) host_framecount: i64,
+    /// `cls`'s demo loop and timedemo state.
+    pub(crate) cls: Cls,
+    /// `cls.state == ca_disconnected` after a disconnect (`stopdemo`, a demo
+    /// ending outside the loop, a `playdemo` that could not open its file):
+    /// nothing plays, and the console covers the screen (`con_forcedup`).
+    /// Until the first boot the App is not id's startup screen, so this
+    /// starts false.
+    pub(crate) disconnected: bool,
+    /// `gfx/palette.lmp`, for what is drawn with no level loaded (the
+    /// disconnected screen's console and menu). Loaded with the menu assets.
+    pub(crate) palette: Option<[[u8; 3]; 256]>,
 }
 
 impl App {
@@ -127,18 +163,52 @@ impl App {
                 .ok()
                 .flatten()
                 .and_then(|b| Qpic::parse(&b).ok());
+            self.palette =
+                pak.read_file("gfx/palette.lmp").ok().flatten().and_then(|b| render::parse_palette(&b));
         }
+    }
+
+    /// Whether typing goes to the console: it is open (`key_dest ==
+    /// key_console`), or forced up while disconnected with no menu over it.
+    pub(crate) fn console_has_keys(&self) -> bool {
+        self.console.open || (self.disconnected && !self.menu.visible)
+    }
+
+    /// `cls.demoplayback`: a demo is the active mode.
+    pub(crate) fn demoplayback(&self) -> bool {
+        self.mode == 1 && self.demo.is_some()
+    }
+
+    /// `sv.active`: a local game is the active mode.
+    pub(crate) fn sv_active(&self) -> bool {
+        self.mode == 0 && self.walk.is_some()
+    }
+
+    /// Start playing `walk`, the way `map` / `load` / New Game start a game:
+    /// `cls.demonum = -1` ("stop demo loop in case this fails") and
+    /// `CL_Disconnect` from any demo (a timedemo prints its line) — then the
+    /// walk is the active mode.
+    pub(crate) fn start_game(&mut self, walk: Walk) {
+        self.cls.demonum = -1;
+        crate::cl_demo::cl_stop_playback(self);
+        self.cls.timedemo = false;
+        self.demo = None;
+        self.walk = Some(walk);
+        self.mode = 0;
+        self.disconnected = false;
     }
 
     /// The palette of the active mode (the walk's, or the demo's), for the menu
     /// overlay. `None` when no mode has a scene yet (then there is nothing to
     /// overlay the menu onto anyway).
     pub(crate) fn active_palette(&self) -> Option<&[[u8; 3]; 256]> {
-        if self.mode == 1 {
+        let mode = if self.mode == 1 {
             self.demo.as_ref().map(|d| &d.palette)
         } else {
             self.walk.as_ref().map(|w| &w.palette)
-        }
+        };
+        // Disconnected, nothing has a scene: the pak's palette.
+        mode.or(if self.disconnected { self.palette.as_ref() } else { None })
     }
 
     /// `Con_ToggleConsole_f` (console.c): the console goes down or up, the
@@ -293,16 +363,33 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
 }
 
 /// The first attract demo (`demo1`).
+#[cfg(test)]
 pub(crate) fn build_demo() -> Option<DemoPlay> {
     build_demo_n(0)
 }
 
 /// `playdemo` of [`DEMOS`](cl_demo::DEMOS)`[demonum % 3]` from the embedded pak
 /// ([`quake_rs::client::cl_demo::build_demo_n`]), its sound calls carried out.
+#[cfg(test)]
 pub(crate) fn build_demo_n(demonum: usize) -> Option<DemoPlay> {
     let pak = pak()?;
     let mut sound = Vec::new();
     let demo = cl_demo::build_demo_n(pak.clone(), demonum, &mut sound);
+    snd_dma::play(&pak, sound);
+    demo
+}
+
+/// The demo file `name` from the embedded pak — for `playdemo`
+/// ([`cl_demo::build_demo`]) or for `timedemo`
+/// ([`cl_demo::build_timedemo`]) — its sound calls carried out.
+pub(crate) fn build_demo_file(name: &str, timedemo: bool) -> Option<DemoPlay> {
+    let pak = pak()?;
+    let mut sound = Vec::new();
+    let demo = if timedemo {
+        cl_demo::build_timedemo(pak.clone(), name, &mut sound)
+    } else {
+        cl_demo::build_demo(pak.clone(), name, &mut sound)
+    };
     snd_dma::play(&pak, sound);
     demo
 }
@@ -330,6 +417,10 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 gamma_value: 1.0,
                 gamma_table: build_gamma_table(1.0),
                 show_fps: ShowFps::default(),
+                host_framecount: 0,
+                cls: Cls::default(),
+                disconnected: false,
+                palette: None,
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
@@ -358,8 +449,7 @@ pub extern "C" fn boot() -> i32 {
         // the current mode untouched (mirrors boot_demo's success gate) so a
         // failed boot doesn't strand the app in walk mode with no Walk.
         if let Some(w) = w {
-            a.walk = Some(w);
-            a.mode = 0;
+            a.start_game(w);
             // Quake boots INTO the menu over the e1m1 frame. A program start's
             // NAVIGATION (closed, main screen, every cursor 0: menu.c's statics)
             // and the menu opened over the walk — but KEEP the player's options,
@@ -386,13 +476,11 @@ pub extern "C" fn boot_demo() -> i32 {
     // (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
     STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
-    let d = build_demo();
-    let ok = d.is_some();
+    let mut ok = false;
     ensure_app(|a| {
         a.ensure_menu_assets();
-        a.demo = d;
-        if a.demo.is_some() {
-            a.mode = 1;
+        ok = start_attract_loop(a);
+        if ok {
             // The demo button plays the demo with the menu CLOSED (clean
             // playback). `boot_attract` is the variant that opens the menu over it.
             // Navigation-only reset: options/bindings/slot comments survive (the
@@ -408,6 +496,17 @@ pub extern "C" fn boot_demo() -> i32 {
     ok as i32
 }
 
+/// quake.rc's `startdemos demo1 demo2 demo3` as the page's boots run it:
+/// whatever was running is disconnected (so the loop always starts —
+/// `Host_Startdemos_f` itself only starts it with nothing running), the loop
+/// is set and `CL_NextDemo` plays demo1. True when it plays.
+fn start_attract_loop(a: &mut App) -> bool {
+    crate::cl_demo::cl_disconnect(a);
+    a.cls.demonum = 0;
+    crate::host_cmd::host_startdemos(a, &QUAKE_RC_DEMOS);
+    a.demoplayback()
+}
+
 /// Boot into the ATTRACT loop: start recorded-demo playback (demo1.dem) with the
 /// main menu OPEN over it — exactly how Quake boots (the menu draws on top of the
 /// playing demo, the "attract" screen). The page calls this on load instead of
@@ -420,13 +519,11 @@ pub extern "C" fn boot_attract() -> i32 {
     // (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
     STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
-    let d = build_demo();
-    let built = d.is_some();
+    let mut built = false;
     ensure_app(|a| {
         a.ensure_menu_assets();
-        if let Some(d) = d {
-            a.demo = Some(d);
-            a.mode = 1;
+        built = start_attract_loop(a);
+        if built {
             // The menu overlays the PLAYING attract demo. Navigation-only reset
             // (options/bindings survive a re-entry to the attract loop). PRESERVE
             // the chosen resolution (keep the live framebuffer) and sync the
@@ -606,11 +703,13 @@ mod tests {
         // runs CL_NextDemo, so the attract loop plays the three in turn and
         // wraps — not demo1 forever.
         assert_eq!(boot_attract(), 1);
+        // (the demo playing: the one before cls.demonum, the loop's next)
         let demo = || {
             APP.with(|c| {
                 let b = c.borrow();
-                let d = b.as_ref().unwrap().demo.as_ref().unwrap();
-                (d.demonum, d.demo.map_name().unwrap_or("").to_string(), d.idx)
+                let a = b.as_ref().unwrap();
+                let d = a.demo.as_ref().unwrap();
+                (a.cls.demonum - 1, d.demo.map_name().unwrap_or("").to_string(), d.idx)
             })
         };
         let to_end = || {

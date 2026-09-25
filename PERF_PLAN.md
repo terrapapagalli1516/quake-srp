@@ -41,6 +41,11 @@ Elsewhere, from the branch reports below:
 - **Against id's own renderer** (native, warm, world only, `oracle/compare.py --bench`):
   the port takes 0.30–0.34x id's time at 320×200, 0.37–0.45x at 640×480 and 0.43–0.51x
   at 1280×1024 (A3).
+- **Against id's whole frame, id's way:** `timedemo demo1` (§10, `quake/timedemo`), the
+  same 969 frames in both. At the page's pixel aspect, one sitting: id's portable C 1822 /
+  745 / 419 fps at 320×200 / 640×400 / 960×600; the port natively 2602 / 1007 / 516
+  (1.23–1.43x), in the browser 1916 / 723 / 381 (0.91–1.05x). Before the edge renderer
+  the port was at 0.56–0.86x natively.
 
 **The items**, in the order of §5:
 
@@ -73,7 +78,7 @@ sound cost (the bench runs with audio locked).
 
 The rest of this file is the plan as written on branch `quake/perf`, with each item's
 outcome added under it by the branch that did it. Its numbers are the baseline's unless an
-item says otherwise.
+item says otherwise. §10, at the end, is `timedemo` against id's C.
 
 ---
 
@@ -1096,3 +1101,53 @@ the projection, mostly because A3 was done as well.*
   - The surface cache's steady-state memory per map (A5).
   - Sound decode/playback cost in the page: the bench runs with audio locked, so the page's
     `drain*Sounds` do not play anything.
+
+---
+
+## 10. id's own measurement: `timedemo` (2026-09-25, branch `quake/timedemo`)
+
+`timedemo demo1` — how 1996 measured Quake — runs in the port as id's `CL_TimeDemo_f`: the
+demo plays one recorded message per host frame with no 72 fps cap and no pacing (`cls.timedemo`:
+`Host_FilterTime` never skips; the demo clock is each message's own time, as `CL_LerpPoint` gives
+in a timedemo), frames count from the second one after the command (`td_startframe`,
+`td_starttime`), and `CL_FinishTimeDemo` prints `"%i frames %5.1f seconds %5.1f fps"` to the
+console. Two ways in:
+
+```sh
+quaketool timedemo pak0.pak demo1 --res 320x200,640x400     # native: the page's client, key_game
+oracle/build/quake-oracle -basedir DIR -oracle_realtime -width 640 -height 400 +timedemo demo1
+```
+
+and the browser console's `timedemo demo1` (`web/verify_timedemo.py` runs it). **The frame counts
+are id's:** demo1 969, demo2 985, demo3 1090 frames, the port and id's C alike.
+
+**What a frame includes.** id's C (the oracle): portable C, gcc -O2 x87, one core, null
+drivers — the demo message, the 3-D view into the 8-bit buffer, the status bar and text; no
+`VID_Update` blit, no sound mixing. The port natively (`quaketool timedemo`): what the page's
+`step` does for a frame with the menu and console closed — the message, the 3-D view, the status
+bar and text, and the frame through the palette-shift ramps into RGBA (the page's pack; the C has
+no such step); the sound calls are dropped. `realtime` is the wall clock at the top of each frame
+in both.
+
+**The browser** (the console's `timedemo demo1` in headless Chromium, `web/verify_timedemo.py`):
+the page runs host frames back to back in ~12 ms slices, one per animation frame, and presents
+the last of each; every `step` is handed the previous one's own duration, so `realtime` adds up
+the frames' time and not the pauses between slices. A frame is the whole `step` — the message,
+the 3-D view, the 2-D layer (the menu and console were closed), the palette ramps and the RGBA
+pack — in wasm; not the canvas's `putImageData` (once a slice) nor the page's sound drain.
+
+On `quake/overnight` with id's edge renderer (`quake/edge`), demo1, median fps; native and id's
+C in one sitting, alternated, 5 rounds (load 2.5–4.6 during the runs); the browser 3 runs.
+id's C at square pixels and at the page's pixel aspect (`-oracle_aspect 0.8333333`: every preset
+is 16:10 shown at 4:3, which the port draws):
+
+| demo1 | id's C, square pixels | id's C, the page's aspect | port, native | port / id's (same aspect) | port, browser (wasm) |
+|---|---:|---:|---:|---:|---:|
+| 320×200 | 1880 | 1822 | 2602 | 1.43 | 1916 |
+| 640×400 | 767 | 745 | 1007 | 1.35 | 723 |
+| 960×600 | 427 | 419 | 516 | 1.23 | 381 |
+
+The port's native frame includes the RGBA pack the C does not have (6–8% of a native frame,
+measured before the edge renderer). Before `quake/edge` (the polygon-span world pass, same
+harness): native 1678 / 530 / 249 fps against id's 1961 / 786 / 445 — the edge renderer took the
+port from 0.56–0.86x of id's C to 1.23–1.43x.

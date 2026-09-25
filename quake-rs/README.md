@@ -73,17 +73,17 @@ where one file maps to one module.
 | `console` | `console.c` | the drop-down console, `Con_Print`, the notify lines |
 | `client` (`client/mod.rs`) | `client.h` | the game client's state (`Walk`, `DemoPlay`) and a frame's output (`ClientFrame`: the image, the palette shifts, the sound calls) |
 | `client::cl_main` | `cl_main.c`, `cl_parse.c`, `view.c`, `screen.c` | the live frame: the move into the server, the client side of the messages, `CL_RelinkEntities`, `V_CalcRefdef`, the screen |
-| `client::cl_demo` | `cl_demo.c`, `cl_parse.c`, `view.c` | demo playback and the attract loop |
+| `client::cl_demo` | `cl_demo.c`, `cl_parse.c`, `view.c` | demo playback, the attract loop, and `timedemo` (`CL_TimeDemo_f`, `CL_FinishTimeDemo`) |
 | `client::cl_tent` | `cl_tent.c`, `cl_main.c` | temp-entity effects and trails |
 | `client::cl_input` | `cl_input.c` | the move from the held keys and the mouse (`CL_BaseMove`, `CL_AdjustAngles`) |
 | `client::view` | `view.c` | `V_ParseDamage`, the view kick, `V_BonusFlash_f` |
 | `client::host` | `host.c` | `Host_FilterTime`, the 72 fps gate |
 | `client::host_cmd` | `host_cmd.c` | `map`, `changelevel`, `restart`, loading a save, and the cheats (`god`, `noclip`, `fly`, `kill`, `give`, `impulse`) |
-| `bin/quaketool.rs` (+ `census.rs`, `play.rs`) | — | the CLI below |
+| `bin/quaketool.rs` (+ `census.rs`, `play.rs`, `timedemo.rs`) | — | the CLI below |
 
-The crate is about 58,000 lines, about 36,000 of them outside the test modules. `cargo test
---release` runs 581 library, 1 `quaketool` and 8 integration tests, none needing game data;
-`../quake-wasm` adds 118 end-to-end tests against the real shareware pak.
+The crate is about 59,000 lines, about 36,000 of them outside the test modules. `cargo test
+--release` runs 587 library, 1 `quaketool` and 8 integration tests, none needing game data;
+`../quake-wasm` adds 126 end-to-end tests against the real shareware pak.
 
 ## Checked against the shareware data
 
@@ -127,7 +127,7 @@ the platform's sound and storage. It has no `wasm-bindgen`, no dependencies and 
 
 ```sh
 cargo build --release            # the library and quaketool
-cargo test --release             # 590 tests, no game data needed
+cargo test --release             # 596 tests, no game data needed
 cargo run --release --bin quaketool -- --help
 ```
 
@@ -162,6 +162,7 @@ quaketool census <pak> [map ...]            # headless playthrough of start and 
 quaketool census-edicts <pak> <map> <t,..>  # the port's edicts at server times, for the oracle diff
 quaketool play <pak> <workloads> [frames] [--res WxH,..] [--hash-every N] [--ppm PREFIX]
                                             # the browser's game client, natively
+quaketool timedemo <pak> <demo> [--res WxH,..]  # id's timedemo: one message a frame, uncapped, id's result line
 ```
 
 `scene` takes `QUAKE_BENCH=<iterations>`, `QUAKE_RES=WxH` and `QUAKE_DLIGHT=x,y,z,r|eye[:r]`

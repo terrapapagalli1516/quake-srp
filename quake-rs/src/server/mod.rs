@@ -373,6 +373,12 @@ pub struct Server {
     /// after taking the rune and id's game loses it. Set by
     /// [`Server::set_serverflags`].
     svs_serverflags: f32,
+    /// `sv.paused` (server.h): the `pause` command stopped the world
+    /// ([`Server::pause`]). While set, `Host_ServerFrame` runs neither
+    /// `SV_ClientThink` nor `SV_Physics`, so `sv.time` stands still; the
+    /// client follows it (`svc_setpause` sets `cl.paused` in the same host
+    /// frame on a local server). `SV_SpawnServer` clears it.
+    pub paused: bool,
 }
 
 /// The result of [`Server::spawn_entities`].

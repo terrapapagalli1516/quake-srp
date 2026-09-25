@@ -317,6 +317,8 @@ id's portable C (1 core, gcc -O2, x87), `timedemo demo1`, 969 frames, sound and
 input null: **1480 fps at 320x200, 535 at 640x480, 192 at 1280x1024**
 (`oracle/build/quake-oracle -basedir <dir with id1/pak0.pak> -oracle_realtime
 -width W -height H +timedemo demo1`). id's renderer cannot go above 1280x1024.
+The port runs the same `timedemo` (`quaketool timedemo pak0.pak demo1 --res WxH`, or
+the browser console): the same 969 frames, its rate next to id's in `PERF_PLAN.md` §10.
 
 Same view, warm, world only (`compare.py --modes world --spans 16 --bench 100`):
 the port takes **0.30-0.34x** id's time at 320x200, **0.37-0.45x** at 640x480 and
@@ -412,6 +414,7 @@ scenario's shots, before the branch -> after.
 | menus: options, customize, video (3) | 95.4 -> 95.5 | 41.5 -> 98.8 | 44.7 -> 99.5 |
 | menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
 | quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
+| pause: the plaque and "player paused the game", unpaused (2; `quake/timedemo`, before it no `pause`) | 100 | 100 | 100 |
 
 The before column is `bbfc6bc` with the same harness. The fixes, one commit
 each (`AUDIT.md`, "The 2-D layer"): the ammo counts 4 px left; a "quake-rs" label
@@ -447,8 +450,8 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   since UP from row 0 wraps to that 14th row in the port (it had been
   comparing id's Video Modes with the port's Web extras page since the extras
   merge).
-- Not in the matrix: the pause plaque (the port has no `pause`), the loading
-  plaque (the port loads within a frame and draws none), `SCR_ModalMessage`'s New
+- Not in the matrix: the loading plaque (the port loads within a frame and draws
+  none; the pause plaque is in it since `quake/timedemo`, the `pause` row above), `SCR_ModalMessage`'s New
   Game question (it blocks in a key loop the null input driver never ends; its
   text goes through the fixed `center_string_top`), the attract demo's HUD (the
   same drawing code as the live one), the crosshair (off by default).
