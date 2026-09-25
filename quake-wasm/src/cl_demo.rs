@@ -17,8 +17,8 @@ use crate::snd_dma::{
 };
 use crate::vid::backtile_for;
 use crate::view::{
-    parse_damage, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE, BONUS_PERCENT, FACE_ANIM_TIME,
-    V_KICKTIME,
+    parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE,
+    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
@@ -170,6 +170,8 @@ pub(crate) fn step_demo(
         d.damage_blend = 0.0;
         d.bonus_blend = 0.0;
         d.faceanimtime = 0.0;
+        d.cl_items = 0;
+        d.item_gettime = [0.0; 32];
         d.v_dmg_time = 0.0;
         d.centerprint = None;
         d.notify.clear();
@@ -278,6 +280,8 @@ pub(crate) fn step_demo(
     }
     // The recorded per-client state (svc_clientdata) drives V_CalcRefdef.
     let client = f.client;
+    // CL_ParseClientdata's item get-times on the recorded clock.
+    stamp_item_gettime(&mut d.cl_items, &mut d.item_gettime, client.items, f.time);
     let cam = if f.intermission != 0 {
         // V_CalcIntermissionRefdef (view.c): a recorded intermission renders
         // with the forced v_idlescale=1 idle sway (V_AddIdle, stock
@@ -496,6 +500,7 @@ pub(crate) fn step_demo(
             // The recorded server clock (cl.time) drives the weapon-flash
             // cycle + face animation, exactly what sbar.c reads.
             time: f.time,
+            item_gettime: Some(&d.item_gettime),
             monsters: f.stats.monsters,
             total_monsters: f.stats.total_monsters,
             secrets: f.stats.secrets,

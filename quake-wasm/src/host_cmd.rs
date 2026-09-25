@@ -415,6 +415,8 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.damage_blend = 0.0;
     w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
+    w.cl_items = 0;
+    w.item_gettime = [0.0; 32];
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
     // CL_ClearState: the new level starts OUT of intermission (cl.intermission=0)
@@ -491,6 +493,8 @@ pub(crate) fn try_restart(w: &mut Walk) {
     w.damage_blend = 0.0;
     w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
+    w.cl_items = 0;
+    w.item_gettime = [0.0; 32];
     w.oldz = f32::NAN;
     // Same intermission/finale reset as a changelevel (CL_ClearState).
     w.intermission = 0;

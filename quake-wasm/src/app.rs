@@ -137,6 +137,11 @@ pub(crate) struct Walk {
     /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
     /// like the HUD's `time`): the status bar shows the pain face until then.
     pub(crate) faceanimtime: f32,
+    /// `cl.items` as last received and `cl.item_gettime[]` (CL_ParseClientdata,
+    /// server clock): the new-weapon icon flash. Zeroed with the level
+    /// (CL_ClearState), so a level start flashes what the player carries.
+    pub(crate) cl_items: i32,
+    pub(crate) item_gettime: [f32; 32],
     /// Stair-step view smoothing accumulator (`view.c` V_CalcRefdef `oldz`): the eye
     /// Z lags the player Z by up to 12 units while climbing so stairs glide instead
     /// of jolting. NaN until the first frame establishes it.
@@ -297,6 +302,11 @@ pub(crate) struct DemoPlay {
     /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`): the status bar
     /// shows the pain face until then.
     pub(crate) faceanimtime: f32,
+    /// `cl.items` as last shown and `cl.item_gettime[]` on the recorded clock
+    /// (CL_ParseClientdata): the new-weapon icon flash. Zeroed at playback
+    /// start and on the loop wrap (CL_ClearState).
+    pub(crate) cl_items: i32,
+    pub(crate) item_gettime: [f32; 32],
 }
 
 impl DemoPlay {
@@ -339,6 +349,8 @@ impl DemoPlay {
             viewsize: render::VIEWSIZE_DEFAULT,
             show_scores: false,
             faceanimtime: 0.0,
+            cl_items: 0,
+            item_gettime: [0.0; 32],
         }
     }
 }
@@ -651,6 +663,8 @@ pub(crate) fn assemble_walk(
         v_dmg_roll: 0.0,
         v_dmg_pitch: 0.0,
         faceanimtime: 0.0,
+        cl_items: 0,
+        item_gettime: [0.0; 32],
         oldz: f32::NAN,
         centerprint: None,
         notify: Vec::new(),

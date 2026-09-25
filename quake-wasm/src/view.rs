@@ -33,6 +33,23 @@ pub(crate) fn stufftext_bonus_flash(text: &str) -> bool {
     text.split(['\n', ';']).any(|cmd| cmd.split_whitespace().next() == Some("bf"))
 }
 
+/// `CL_ParseClientdata` (cl_parse.c:549): when `cl.items` changes, every bit
+/// newly set gets `cl.item_gettime[j] = cl.time` (the status bar flashes the
+/// new weapon's icon for a second). `CL_ClearState` zeroes `cl.items`, so a
+/// level (or demo) start stamps everything owned.
+pub(crate) fn stamp_item_gettime(cl_items: &mut i32, gettime: &mut [f32; 32], items: i32, time: f32) {
+    if items == *cl_items {
+        return;
+    }
+    let (new, old) = (items as u32, *cl_items as u32);
+    for (j, t) in gettime.iter_mut().enumerate() {
+        if new & (1 << j) != 0 && old & (1 << j) == 0 {
+            *t = time;
+        }
+    }
+    *cl_items = items;
+}
+
 /// What one `svc_damage` does to the view (`V_ParseDamage`, view.c).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ParsedDamage {
@@ -82,6 +99,18 @@ pub(crate) fn parse_damage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_gettime_stamps_only_newly_set_bits() {
+        let (mut items, mut gt) = (0, [0.0f32; 32]);
+        stamp_item_gettime(&mut items, &mut gt, 0b11 | 1 << 31, 1.5);
+        assert_eq!((gt[0], gt[1], gt[31], gt[2]), (1.5, 1.5, 1.5, 0.0));
+        stamp_item_gettime(&mut items, &mut gt, 0b111 | 1 << 31, 7.0);
+        assert_eq!((gt[0], gt[2]), (1.5, 7.0), "only the new bit is stamped");
+        stamp_item_gettime(&mut items, &mut gt, 0b101, 9.0);
+        stamp_item_gettime(&mut items, &mut gt, 0b111, 9.5);
+        assert_eq!(gt[1], 9.5, "lost and got again: stamped again");
+    }
 
     #[test]
     fn stufftext_runs_bf_commands() {

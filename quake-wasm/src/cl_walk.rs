@@ -21,8 +21,8 @@ use crate::input::{
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
 use crate::view::{
-    parse_damage, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE, BONUS_PERCENT, FACE_ANIM_TIME,
-    V_KICKTIME,
+    parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE,
+    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 
 /// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
@@ -292,6 +292,13 @@ pub(crate) fn step_walk(
         // `else if` so a changelevel this frame takes precedence over a restart.
         try_restart(w);
     }
+
+    // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the
+    // server clock the HUD reads — after any level swap above, whose
+    // CL_ClearState zeroed cl.items.
+    let items = client_items(w);
+    let now_sv = w.server.time();
+    stamp_item_gettime(&mut w.cl_items, &mut w.item_gettime, items, now_sv);
 
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
     //    voices) to the page's audio queue.
@@ -912,6 +919,7 @@ pub(crate) fn step_walk(
             // SV_SpawnServer), not this walk's 0-based clock, matching what the
             // intermission overlay's completed_time latches.
             time: w.server.time(),
+            item_gettime: Some(&w.item_gettime),
             monsters: gcount("killed_monsters"),
             total_monsters: gcount("total_monsters"),
             secrets: gcount("found_secrets"),
@@ -1250,6 +1258,27 @@ mod tests {
         assert!(w.v_dmg_pitch > 5.0, "hit from the front pitches the view: {}", w.v_dmg_pitch);
         assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < crate::view::V_KICKTIME, "kick running");
         assert!(w.server.time() <= w.faceanimtime, "the pain face shows");
+    }
+
+    /// CENSUS F18: CL_ParseClientdata stamps `cl.item_gettime` for every newly
+    /// set items bit (and CL_ClearState's zeroed cl.items makes the level start
+    /// stamp what the player carries); the HUD then cycles the new weapon's
+    /// `inva1..5` icons for a second.
+    #[test]
+    fn new_items_are_stamped_for_the_icon_flash() {
+        let mut w = build_walk().expect("e1m1 boots");
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let t0 = w.server.time();
+        assert_eq!(w.item_gettime[0], t0, "the shotgun (bit 0) flashes at level start");
+        assert_eq!(w.cl_items, client_items(&w));
+        for _ in 0..30 {
+            step_walk(&mut w, 0.05, false, 320, 200);
+        }
+        w.next_impulse = 9; // every weapon
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let t1 = w.server.time();
+        assert_eq!(w.item_gettime[4], t1, "the rocket launcher (bit 4) was just got");
+        assert_eq!(w.item_gettime[0], t0, "the shotgun keeps its old stamp");
     }
 
     /// CENSUS F1: svc_setangle carries MSG_WriteAngle's byte — whole degrees,
