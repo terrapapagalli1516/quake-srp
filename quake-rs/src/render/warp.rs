@@ -12,7 +12,7 @@ use super::Image;
 /// [`warp_vrect`](crate::screen::warp_vrect)); the result is the screen's
 /// `out_w x out_h` view rectangle (`scr_vrect`), each pixel sampling the view
 /// displaced by a per-row/per-column sine (`AMP2 = 3`, `SPEED = 20`,
-/// [`intsintable`] from the 128-cycle phase) and stretched by
+/// `intsintable` from the 128-cycle phase) and stretched by
 /// `wratio = w / scr_vrect.width` (`hratio` likewise), with the slight edge
 /// compression `dim / (dim + 2*AMP2)` so it never reads outside the view.
 /// The row displacement is driven by the column's sine and vice versa. The

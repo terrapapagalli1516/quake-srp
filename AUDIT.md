@@ -784,6 +784,12 @@ C followed and the test are in the commit message.
   default screen: `calc_refdef` at viewsize 100, the view above the bar,
   `compose_view` with the backtile, the gun offset for the same viewsize.
   Test `playtest_frames_the_view_for_the_guns_viewsize`.
+- ✅ **Stale comments** — `render_scene_ext`'s doc (the gun "uses its own
+  depth buffer", "a plain `[f32; 256]`" sine table, "walls, alias models and
+  the viewmodel ignore `time`"), `Viewmodel`'s ("no world origin", "view
+  space", frame "clamped"), and the `V_CalcBlend` mentions in `cl_walk.rs`,
+  `cl_demo.rs` and the README (the shifts are the software `V_UpdatePalette`
+  ramps). Comments only (`render/mod.rs` touched for its doc comment alone).
 
 ## LOW (27)
 

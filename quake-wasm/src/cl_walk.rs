@@ -813,17 +813,15 @@ pub(crate) fn step_walk(
         w.dlights.advance(dt, now);
     }
 
-    // 5b. Screen blends (V_CalcBlend): fade the damage flash (V_UpdatePalette
-    //     drops it after this frame's svc_damage was parsed) and tint the view
-    //     when the eye is under water / in lava or slime. The blend is DEFERRED
-    //     (returned to the dispatcher) and applied to the whole composited frame
-    //     last, matching software V_UpdatePalette's whole-screen palette shift
-    //     (it tints the HUD, menu and console too — not the GL 3D-viewport-only
-    //     behaviour).
+    // 5b. Colour shifts (V_UpdatePalette, the software build's palette shift):
+    //     drop the damage and bonus flashes (after this frame's svc_damage was
+    //     parsed) and tint the view when the eye is under water / in lava or
+    //     slime. The shifts are DEFERRED (returned to the dispatcher) and the
+    //     finished screen goes through `render::cshift_ramps` last, so they
+    //     tint the HUD, menu and console too, as the palette shift does.
     let frametime = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
     w.damage_blend = cshift_drop(w.damage_blend, frametime, DAMAGE_FADE);
     w.bonus_blend = cshift_drop(w.bonus_blend, frametime, BONUS_FADE);
-    // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     // Underwater sine wobble (D_WarpScreen): the warp buffer's view, stretched
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
@@ -833,6 +831,7 @@ pub(crate) fn step_walk(
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
     let mut img =
         render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &w.palette);
+    // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
         shifts.push(cs);

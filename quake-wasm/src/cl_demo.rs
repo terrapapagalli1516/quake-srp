@@ -546,8 +546,8 @@ pub(crate) fn step_demo(
         }
     }
 
-    // Screen blends (V_CalcBlend order: CONTENTS -> DAMAGE -> BONUS ->
-    // POWERUP), all from the RECORDED stream: the eye-contents tint, the
+    // Colour shifts (V_UpdatePalette; cl.cshifts order CONTENTS -> DAMAGE ->
+    // BONUS -> POWERUP), all from the RECORDED stream: the eye-contents tint, the
     // svc_damage flash (faded dt*150 per frame like V_UpdatePalette), the
     // stuffed "bf" gold flash (dt*100), and the powerup tint from the
     // recorded cl.items. DEFERRED to the dispatcher so it tints the whole
