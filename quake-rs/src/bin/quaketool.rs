@@ -946,7 +946,12 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], roll: 0.0, fov_deg: 90.0 };
         let viewmodel = weapon_mdl
             .as_ref()
-            .map(|mdl| render::Viewmodel { mdl, frame: weapon_frame });
+            .map(|mdl| render::Viewmodel {
+                mdl,
+                frame: weapon_frame,
+                // No bob in this still; the default viewsize's fudge.
+                origin_ofs: render::viewmodel_origin_ofs(&cam, 0.0, render::VIEWSIZE_DEFAULT),
+            });
         // The live particles as (world pos, palette index) for the renderer; they
         // share the scene z-buffer so any behind a wall are hidden. Use the
         // peak-combat snapshot so the action shot actually shows the blood burst

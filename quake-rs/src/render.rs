@@ -2504,6 +2504,7 @@ fn vview_lerp(a: &VView, b: &VView, alpha: f32) -> VView {
 /// Convenience wrapper: clip against the near plane into a fresh `Vec` (for cold
 /// paths and tests). The per-face hot paths call [`clip_poly_near_into`] with a
 /// reused scratch buffer instead.
+#[cfg(test)]
 fn clip_poly_near(input: &[VView]) -> Vec<VView> {
     let mut out = Vec::new();
     clip_poly_near_into(input, &mut out);
@@ -2515,6 +2516,13 @@ fn clip_poly_near(input: &[VView]) -> Vec<VView> {
 /// overwhelmingly common per-face call allocates nothing. The vertices written
 /// are byte-identical to the previous return-a-fresh-`Vec` version.
 fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
+    clip_poly_plane_into(input, NEAR_PLANE, out);
+}
+
+/// [`clip_poly_near_into`] against an arbitrary view-space plane `vz >= near`
+/// (the alias clip plane, `ALIAS_Z_CLIP_PLANE`, for the viewmodel). The same
+/// arithmetic: with `near == NEAR_PLANE` the output is byte-identical.
+fn clip_poly_plane_into(input: &[VView], near: f32, out: &mut Vec<VView>) {
     out.clear();
     let n = input.len();
     if n == 0 {
@@ -2523,7 +2531,7 @@ fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
     // Fast path: a polygon entirely in front of the near plane is copied
     // unchanged (same vertices, same order). This keeps the overwhelmingly
     // common case a verbatim copy, guaranteeing no rasteriser regression.
-    if input.iter().all(|v| v.vz > NEAR_PLANE) {
+    if input.iter().all(|v| v.vz > near) {
         out.extend_from_slice(input);
         return;
     }
@@ -2531,8 +2539,8 @@ fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
     for i in 0..n {
         let cur = &input[i];
         let next = &input[(i + 1) % n];
-        let cur_in = cur.vz > NEAR_PLANE;
-        let next_in = next.vz > NEAR_PLANE;
+        let cur_in = cur.vz > near;
+        let next_in = next.vz > near;
         if cur_in {
             out.push(*cur);
         }
@@ -2542,7 +2550,7 @@ fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
         if cur_in != next_in {
             let denom = next.vz - cur.vz;
             if denom != 0.0 {
-                let alpha = (NEAR_PLANE - cur.vz) / denom;
+                let alpha = (near - cur.vz) / denom;
                 out.push(vview_lerp(cur, next, alpha));
             }
         }
@@ -4816,6 +4824,47 @@ pub fn draw_brush_bsp(
 pub struct Viewmodel<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub frame: usize,
+    /// Where V_CalcRefdef puts the gun (`view->origin`) relative to the
+    /// camera (`r_refdef.vieworg`), in world units: see
+    /// [`viewmodel_origin_ofs`]. The model is posed there with the view's
+    /// orientation.
+    pub origin_ofs: Vec3,
+}
+
+/// V_CalcRefdef's viewsize "fudge" (view.c): "fudge position around to keep
+/// amount of weapon visible roughly equal with different FOV" — the gun is
+/// raised 1 unit at viewsize 110, 2 at 100, 1 at 90 and 0.5 at 80 (exact
+/// compares on the cvar, as in the C), 0 otherwise.
+pub fn viewmodel_fudge(viewsize: f32) -> f32 {
+    if viewsize == 110.0 {
+        1.0
+    } else if viewsize == 100.0 {
+        2.0
+    } else if viewsize == 90.0 {
+        1.0
+    } else if viewsize == 80.0 {
+        0.5
+    } else {
+        0.0
+    }
+}
+
+/// The gun origin relative to the camera, as V_CalcRefdef builds it: both
+/// start at the entity origin + `viewheight` + the vertical bob (so those
+/// cancel), then the gun moves `forward * bob * 0.4` — `forward` from the
+/// player ENTITY's angles, whose pitch the server keeps at a third of the view
+/// pitch (SV_ClientThink `angles[PITCH] = -v_angle[PITCH]/3`) — and up by the
+/// viewsize fudge ([`viewmodel_fudge`]). (The C's 1/32 camera epsilon is not
+/// modelled here or on the camera.)
+pub fn viewmodel_origin_ofs(cam: &Camera, bob: f32, viewsize: f32) -> Vec3 {
+    let yaw = (cam.yaw as f64).to_radians();
+    let elev = (cam.pitch as f64 / 3.0).to_radians();
+    let f = (bob * 0.4) as f64;
+    [
+        (f * elev.cos() * yaw.cos()) as f32,
+        (f * elev.cos() * yaw.sin()) as f32,
+        (f * elev.sin()) as f32 + viewmodel_fudge(viewsize),
+    ]
 }
 
 /// A sprite-model entity to draw as a camera-facing billboard (Quake's
@@ -4834,15 +4883,16 @@ pub struct SpriteInstance<'a> {
 ///
 /// ## View anchoring
 /// Each model-space vertex `p` (decoded by [`mdl_vertex_model_space`]:
-/// `scale*v + scale_origin`) is mapped into the world *relative to the camera*
-/// rather than to a fixed world origin:
-/// `world_v = cam.pos + forward*(p[0] + FWD) + right*(-p[1] + RIGHT) + up*(p[2] + UP)`.
+/// `scale*v + scale_origin`) is posed at V_CalcRefdef's gun origin — the
+/// camera plus `origin_ofs` ([`viewmodel_origin_ofs`]: the forward bob term and
+/// the viewsize fudge) — with the view's orientation:
+/// `world_v = cam.pos + origin_ofs + forward*p[0] + right*(-p[1]) + up*p[2]`.
 /// The MDL forward axis (`+X`) maps to the camera's `forward`, the MDL `+Y` to
 /// the camera's *left* (hence the `-p[1]` on `right`), and `+Z` to `up`. The
-/// fixed `(FWD, RIGHT, UP)` offset nudges the gun forward, slightly right, and
-/// down so it sits at the lower-centre of the frame (Quake hangs the gun below
-/// and ahead of the eye). Because the basis is the *camera* basis, the gun turns
-/// and pitches with the view and never sits at a world position.
+/// `v_*.mdl` models are authored for exactly that pose (their vertices sit
+/// below and ahead of the eye); triangles nearer than `ALIAS_Z_CLIP_PLANE`
+/// (5 units) are clipped, as r_aclip.c does, so the grip is trimmed. Because
+/// the basis is the *camera* basis, the gun turns and pitches with the view.
 ///
 /// ## Always on top
 /// The viewmodel uses its **own** depth buffer (`vz` of its own triangles),
@@ -4858,7 +4908,7 @@ pub struct SpriteInstance<'a> {
 /// `s`-shift ([`mdl_skin_st`]); a skinless model (or an out-of-range stvert)
 /// falls back to a flat shaded grey. Lambert shading uses the same light vector.
 /// Every index goes through `.get()`; malformed data is skipped, never panicked
-/// on. A triangle is skipped whole if any vertex falls at/behind the near plane.
+/// on.
 #[allow(clippy::too_many_arguments)]
 fn draw_viewmodel(
     image: &mut Image,
@@ -4866,35 +4916,16 @@ fn draw_viewmodel(
     cam: &Camera,
     mdl: &crate::mdl::Mdl,
     frame: usize,
+    origin_ofs: Vec3,
     palette: &[[u8; 3]; 256],
     w: usize,
     h: usize,
 ) {
-    const NEAR: f32 = 1.0;
-    // The view-space offset (in MDL/world units) that hangs the gun at the eye,
-    // slightly right of and below centre, matching Quake's hand-held pose. These
-    // are added in the camera basis below (forward / right / up). Quake draws the
-    // viewmodel essentially AT the eye and lets the near plane CLIP the grip: the
-    // `v_*` weapon models span roughly model-X (forward) in [-14, +28] and
-    // model-Z (up) in [-12, 0] (below the eye). With the near-plane CLIPPING now
-    // in place (`clip_poly_near` below), the grip (model-X < 0, behind the eye)
-    // is trimmed at the plane while the barrel (0..28) extends forward — so the
-    // gun sits large at the lower-centre/right of the frame instead of being
-    // shoved 16..58 units ahead (the old +30 push made it look distant + tiny).
-    //
-    // `OFS_FORWARD` is a tiny positive nudge: it only keeps the grip from landing
-    // exactly on the near plane (a degenerate edge) — it does NOT push the gun
-    // away. `OFS_RIGHT` (negative -> camera right, since the gun is anchored with
-    // `-p[1]` on `right`) nudges it just right of centre; `OFS_UP` lifts the
-    // already-low (model-Z < 0) barrel up so the grip is clipped at the bottom
-    // edge rather than the whole gun falling off-screen.
-    //
-    // The placement is in *proportion* resolution-independent: focal length
-    // scales with the frame width and the screen centre with its size, so the
-    // gun keeps the same lower-centre fraction of the frame at any `w`/`h`.
-    const OFS_FORWARD: f32 = 7.0;
-    const OFS_RIGHT: f32 = 1.5;
-    const OFS_UP: f32 = 3.5;
+    // `ALIAS_Z_CLIP_PLANE` (r_local.h): alias-model triangles are clipped
+    // where they come nearer than 5 units to the eye (r_aclip.c). With the gun
+    // posed at V_CalcRefdef's origin (a hair above the eye) this trims the
+    // grip, exactly as the C shows the held weapon — only its forward part.
+    const ALIAS_Z_CLIP_PLANE: f32 = 5.0;
     if w == 0 || h == 0 {
         return;
     }
@@ -4911,6 +4942,8 @@ fn draw_viewmodel(
     };
 
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
+    // V_CalcRefdef's `view->origin`.
+    let gun = [cam.pos[0] + origin_ofs[0], cam.pos[1] + origin_ofs[1], cam.pos[2] + origin_ofs[2]];
 
     // The viewmodel carries only a `frame` (no group-anim time / skinnum), so it
     // poses at `time = 0` (first sub-pose of any group) with skin 0 — its prior
@@ -4947,16 +4980,14 @@ fn draw_viewmodel(
                 }
             };
             let p = mdl_vertex_model_space(header, tv);
-            // Anchor to the camera basis: +X -> forward, +Y -> left (so -Y on
-            // `right`), +Z -> up; plus the fixed lower-centre offset.
-            let fx = p[0] + OFS_FORWARD;
-            let rx = -p[1] + OFS_RIGHT;
-            let ux = p[2] + OFS_UP;
+            // Pose at the gun origin with the view's orientation: +X ->
+            // forward, +Y -> left (so -Y on `right`), +Z -> up.
+            let (fx, rx, ux) = (p[0], -p[1], p[2]);
             if let Some(wv) = world.get_mut(slot) {
                 *wv = [
-                    cam.pos[0] + forward[0] * fx + right[0] * rx + up[0] * ux,
-                    cam.pos[1] + forward[1] * fx + right[1] * rx + up[1] * ux,
-                    cam.pos[2] + forward[2] * fx + right[2] * rx + up[2] * ux,
+                    gun[0] + forward[0] * fx + right[0] * rx + up[0] * ux,
+                    gun[1] + forward[1] * fx + right[1] * rx + up[1] * ux,
+                    gun[2] + forward[2] * fx + right[2] * rx + up[2] * ux,
                 ];
             }
         }
@@ -5015,13 +5046,13 @@ fn draw_viewmodel(
                 };
             }
         }
-        let _ = NEAR; // the plane lives in `clip_poly_near` (`NEAR_PLANE`, == NEAR)
-        let poly = clip_poly_near(&vviews);
+        let mut poly = Vec::new();
+        clip_poly_plane_into(&vviews, ALIAS_Z_CLIP_PLANE, &mut poly);
         if poly.len() < 3 {
             continue; // wholly behind the eye -> nothing to draw
         }
 
-        // Project the clipped polygon to screen (every `vz >= NEAR` now).
+        // Project the clipped polygon to screen (every `vz >= 5` now).
         let proj: Vec<ProjT> = poly
             .iter()
             .map(|v| ProjT {
@@ -5301,7 +5332,7 @@ pub fn render_scene_ext_sprited(
     // The weapon viewmodel draws last, on top of the world and every model.
     let tv = stats_on().then(std::time::Instant::now);
     if let Some(vm) = viewmodel {
-        draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, palette, w, h);
+        draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, vm.origin_ofs, palette, w, h);
     }
     if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     image
@@ -11647,15 +11678,16 @@ mod tests {
     /// skin so it takes the textured path through `palette[7]`.
     fn viewmodel_mdl() -> crate::mdl::Mdl {
         use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
-        // Mirror the real `v_*` weapon layout: forward along model `+X`, thin in
-        // `+Y`, and sitting *below* the eye (model `Z < 0`, via `scale_origin`).
-        // So after the camera-anchor + lower-centre offset the gun lands in the
-        // lower half of the frame, like the shipping weapon models.
+        // Mirror the real `v_*` weapon layout: forward along model `+X`, and
+        // sitting *below* the eye (model `Z < 0`, via `scale_origin`), so posed
+        // at the gun origin it lands in the lower half of the frame, like the
+        // shipping weapon models. The triangle lies flat (a gun's top face): a
+        // vertical one through the eye's own column would be seen edge-on.
         let header = MdlHeader {
             ident: i32::from_le_bytes(*b"IDPO"),
             version: 6,
             scale: [1.0, 1.0, 1.0],
-            scale_origin: [10.0, 0.0, -10.0],
+            scale_origin: [10.0, -4.0, -10.0],
             boundingradius: 64.0,
             eyeposition: [0.0, 0.0, 0.0],
             numskins: 1,
@@ -11668,13 +11700,13 @@ mod tests {
             flags: 0,
             size: 1.0,
         };
-        // Decoded model space: X in [10, 26] (forward), Z in [-10, -2] (below the
-        // eye). With OFS_FORWARD = 30 every vertex sits well in front of the near
-        // plane at any yaw, so the triangle always rasterises.
+        // Decoded model space: X in [10, 26] (forward, clear of the 5-unit
+        // alias clip plane), Y in [-4, 4], Z = -10 (below the eye), so the
+        // triangle always rasterises.
         let verts = vec![
             TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
             TriVertex { v: [16, 0, 0], lightnormalindex: 0 },
-            TriVertex { v: [8, 0, 8], lightnormalindex: 0 },
+            TriVertex { v: [8, 8, 0], lightnormalindex: 0 },
         ];
         Mdl {
             header,
@@ -11695,7 +11727,7 @@ mod tests {
             frames: vec![Frame::Single(AliasFrame {
                 name: "v0".into(),
                 bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
-                bboxmax: TriVertex { v: [16, 0, 8], lightnormalindex: 0 },
+                bboxmax: TriVertex { v: [16, 8, 0], lightnormalindex: 0 },
                 verts,
             })],
         }
@@ -11755,7 +11787,7 @@ mod tests {
 
         let img_a = render_scene_ext(
             &bsp, &cam_a, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11764,7 +11796,7 @@ mod tests {
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11838,7 +11870,7 @@ mod tests {
 
         let with_gun = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11886,7 +11918,7 @@ mod tests {
         frameless.frames.clear();
         let img = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &frameless, frame: 0 }),
+            Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11902,7 +11934,7 @@ mod tests {
         // Must not panic.
         let _ = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &bad, frame: 0 }),
+            Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11911,21 +11943,21 @@ mod tests {
         );
     }
 
-    /// A viewmodel whose geometry deliberately *straddles* the near plane: in
-    /// model space its forward axis (`+X`) runs from well behind the eye to well
-    /// in front of it, so after the camera anchor + the small `OFS_FORWARD` the
-    /// grip end is behind `vz == NEAR` and the barrel end is in front — exactly
-    /// the authentic held-gun layout that the near-plane CLIP must handle.
+    /// A viewmodel whose geometry deliberately *straddles* the alias clip plane:
+    /// in model space its forward axis (`+X`) runs from well behind the eye to
+    /// well in front of it, so the grip end is nearer than `ALIAS_Z_CLIP_PLANE`
+    /// and the barrel end is beyond it — exactly the authentic held-gun layout
+    /// that the clip must handle.
     fn straddling_viewmodel_mdl() -> crate::mdl::Mdl {
         use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
         let header = MdlHeader {
             ident: i32::from_le_bytes(*b"IDPO"),
             version: 6,
             scale: [1.0, 1.0, 1.0],
-            // Model-X (forward) runs from -20 (grip, behind the eye after the
-            // small forward offset) to +20 (barrel, in front). Model-Z < 0 keeps
-            // it below the eye, like a real weapon.
-            scale_origin: [-20.0, 0.0, -8.0],
+            // Model-X (forward) runs from -20 (grip, behind the eye) to +20
+            // (barrel, in front). Model-Z < 0 keeps it below the eye, like a real
+            // weapon; flat, like `viewmodel_mdl`.
+            scale_origin: [-20.0, -4.0, -8.0],
             boundingradius: 64.0,
             eyeposition: [0.0, 0.0, 0.0],
             numskins: 1,
@@ -11938,11 +11970,12 @@ mod tests {
             flags: 0,
             size: 1.0,
         };
-        // Decoded model space: X in [-20, +20] (straddles the eye), Z in [-8, 0].
+        // Decoded model space: X in [-20, +20] (straddles the eye and the
+        // 5-unit clip plane), Y in [-4, 4], Z = -8.
         let verts = vec![
             TriVertex { v: [0, 0, 0], lightnormalindex: 0 },   // X=-20 (behind)
             TriVertex { v: [40, 0, 0], lightnormalindex: 0 },   // X=+20 (in front)
-            TriVertex { v: [20, 0, 8], lightnormalindex: 0 },   // X=0 (on the eye)
+            TriVertex { v: [20, 8, 0], lightnormalindex: 0 },   // X=0 (on the eye)
         ];
         Mdl {
             header,
@@ -11957,19 +11990,42 @@ mod tests {
             frames: vec![Frame::Single(AliasFrame {
                 name: "v0".into(),
                 bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
-                bboxmax: TriVertex { v: [40, 0, 8], lightnormalindex: 0 },
+                bboxmax: TriVertex { v: [40, 8, 0], lightnormalindex: 0 },
                 verts,
             })],
         }
     }
 
     #[test]
+    fn viewmodel_origin_follows_v_calcrefdef() {
+        // The viewsize fudge: exact compares on the cvar, as in view.c.
+        assert_eq!(viewmodel_fudge(100.0), 2.0);
+        assert_eq!(viewmodel_fudge(110.0), 1.0);
+        assert_eq!(viewmodel_fudge(90.0), 1.0);
+        assert_eq!(viewmodel_fudge(80.0), 0.5);
+        for vs in [30.0, 50.0, 70.0, 120.0, 95.0] {
+            assert_eq!(viewmodel_fudge(vs), 0.0, "viewsize {vs}");
+        }
+        // No bob: the gun sits straight above the eye by the fudge (world Z).
+        let cam = Camera { pos: [0.0; 3], yaw: 37.0, pitch: 30.0, roll: 0.0, fov_deg: 90.0 };
+        assert_eq!(viewmodel_origin_ofs(&cam, 0.0, 100.0), [0.0, 0.0, 2.0]);
+        // Bob pushes it along the entity's facing (yaw, a third of the pitch)
+        // by 0.4 * bob.
+        let flat = Camera { pos: [0.0; 3], yaw: 90.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let o = viewmodel_origin_ofs(&flat, 5.0, 120.0);
+        assert!(o[0].abs() < 1e-5 && (o[1] - 2.0).abs() < 1e-5 && o[2].abs() < 1e-5, "{o:?}");
+        let up = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 90.0, roll: 0.0, fov_deg: 90.0 };
+        let o = viewmodel_origin_ofs(&up, 5.0, 120.0);
+        assert!((o[2] - 2.0 * 30f32.to_radians().sin()).abs() < 1e-5, "{o:?}");
+    }
+
+    #[test]
     fn viewmodel_straddling_near_plane_is_clipped_not_dropped() {
         // A viewmodel that crosses the near plane (part behind the eye, part in
         // front) must be CLIPPED — its front part still draws SOME pixels — rather
-        // than having every crossing triangle dropped whole (the old behaviour,
-        // which is exactly why `OFS_FORWARD` used to shove the gun far away). The
-        // render must not panic.
+        // than having every crossing triangle dropped whole (an old behaviour
+        // that once made this port shove the gun far away). The render must not
+        // panic.
         let bsp = demo_room();
         let mut pal = [[0u8; 3]; 256];
         pal[7] = [255, 255, 0]; // the viewmodel's pure-yellow skin (B == 0)
@@ -11980,7 +12036,7 @@ mod tests {
 
         let img = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],

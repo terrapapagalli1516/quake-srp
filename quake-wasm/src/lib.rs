@@ -4175,7 +4175,12 @@ fn step_walk(
         None
     } else {
         match w.model_cache.get(&weapon_name) {
-            Some(Some(mdl)) => Some(Viewmodel { mdl, frame: weapon_frame }),
+            // V_CalcRefdef's gun origin: the forward bob + the viewsize fudge.
+            Some(Some(mdl)) => Some(Viewmodel {
+                mdl,
+                frame: weapon_frame,
+                origin_ofs: render::viewmodel_origin_ofs(&cam, bob, w.viewsize),
+            }),
             _ => None,
         }
     };
@@ -4787,7 +4792,14 @@ fn step_demo(
     } else {
         match d.models.get(client.weapon_model.max(0) as usize) {
             Some(Some(mdl)) => {
-                Some(Viewmodel { mdl, frame: client.weaponframe.max(0) as usize })
+                // V_CalcRefdef's gun origin from the recorded velocity's bob.
+                let vel = client.velocity;
+                let bob = render::view_bob((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), f.time);
+                Some(Viewmodel {
+                    mdl,
+                    frame: client.weaponframe.max(0) as usize,
+                    origin_ofs: render::viewmodel_origin_ofs(&cam, bob, d.viewsize),
+                })
             }
             _ => None,
         }
@@ -5544,7 +5556,9 @@ mod tests {
         // view (centre 100) shifted up 24 rows, and the 110 view (320x176,
         // centre 88) is it shifted up 12 — i.e. id's framing: the view ends at
         // the status bar instead of running under it. (Allow a few edge pixels
-        // for float rounding in the rasteriser.)
+        // for float rounding in the rasteriser. The rows the gun can reach are
+        // left out: V_CalcRefdef's viewsize fudge raises it 2 units at 100 and
+        // 1 at 110 over 120, so it does NOT simply shift.)
         let matching = |f: &Vec<[u8; 3]>, rows: usize, shift: usize| {
             (0..rows)
                 .flat_map(|y| (0..320).map(move |x| (x, y)))
@@ -5552,8 +5566,8 @@ mod tests {
                 .count() as f64
                 / (rows * 320) as f64
         };
-        let m100 = matching(&f100, 152, 24);
-        let m110 = matching(&f110, 176, 12);
+        let m100 = matching(&f100, 110, 24);
+        let m110 = matching(&f110, 122, 12);
         assert!(m100 > 0.99, "viewsize 100 = the 120 view shifted up 24 rows ({m100:.4})");
         assert!(m110 > 0.99, "viewsize 110 = the 120 view shifted up 12 rows ({m110:.4})");
         // ...and NOT the 120 view unshifted (the old full-screen framing).
