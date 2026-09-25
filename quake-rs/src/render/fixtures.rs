@@ -146,7 +146,7 @@ pub(super) fn synthetic_sky_pixels() -> Vec<u8> {
 /// A test palette where index `i` maps to the RGB `[i, i, i]` (so a texel's
 /// palette index is recoverable from any channel of the drawn pixel). Index
 /// 255 stays the transparent colour and is never blitted.
-pub(super) fn ramp_palette() -> [[u8; 3]; 256] {
+pub(crate) fn ramp_palette() -> [[u8; 3]; 256] {
     let mut p = [[0u8; 3]; 256];
     for (i, px) in p.iter_mut().enumerate() {
         *px = [i as u8, i as u8, i as u8];
@@ -200,7 +200,7 @@ pub(super) fn lightmapped_demo_room(block0: u8, block1: u8) -> Bsp {
 
 /// A 64x64 backtile whose texel (x, y) is palette index `(x + 64*y) % 251`,
 /// so any sampling error shows up as the wrong colour.
-pub(super) fn test_backtile() -> Qpic {
+pub(crate) fn test_backtile() -> Qpic {
     let data = (0..64 * 64).map(|i| (i % 251) as u8).collect();
     Qpic { width: 64, height: 64, data }
 }

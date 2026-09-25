@@ -54,6 +54,7 @@ pub mod particles;
 pub mod tent;
 
 pub mod render;
+pub mod draw;
 pub mod dlight;
 pub mod demo;
 pub mod snd;
