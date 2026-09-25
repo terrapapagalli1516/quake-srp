@@ -2,11 +2,13 @@
 //!
 //! Built only with `--features bench`. The default build (the deployed page)
 //! compiles every hook below to an empty inline function: no clock import, no
-//! extra exports, no state. With the feature on, the module imports ONE
-//! function, `quake_bench.now_ms` (the page's `performance.now()`, supplied by
-//! the harness — the stock page instantiates with no imports, so the feature
-//! build is for the harness only), and [`crate::host::step`] laps a timer at each
-//! phase boundary of the frame:
+//! extra exports, no state (the client frames' laps in quake-rs find no timer
+//! installed, [`quake_rs::client::lap`]). With the feature on, the module
+//! imports ONE function, `quake_bench.now_ms` (the page's `performance.now()`,
+//! supplied by the harness — the stock page instantiates with no imports, so
+//! the feature build is for the harness only), and [`crate::host::step`] laps a
+//! timer at each phase boundary of the frame, the client frames' phases through
+//! the hook `bench_enable` installs ([`quake_rs::client::set_lap_hook`]):
 //!
 //! | phase    | what it covers (C analogue)                                        |
 //! |----------|--------------------------------------------------------------------|
@@ -28,18 +30,7 @@
 //! `QUAKE_BENCH` prints (gated on a flag the game never sets).
 
 /// A frame phase, in execution order; see the module table.
-#[derive(Clone, Copy)]
-pub(crate) enum Phase {
-    Input = 0,
-    Sim,
-    Render3d,
-    Post3d,
-    Hud2d,
-    Menu,
-    Console,
-    Blend,
-    Pack,
-}
+pub(crate) use quake_rs::client::Phase;
 
 /// Start a frame's timers (the top of `step`).
 #[inline(always)]
@@ -142,6 +133,7 @@ alias_models,alias_accepted,alias_tris";
     #[no_mangle]
     pub extern "C" fn bench_enable(on: i32) {
         render::set_render_stats_clock(if on != 0 { Some(now_ms) } else { None });
+        quake_rs::client::set_lap_hook(if on != 0 { Some(lap) } else { None });
         ON.with(|c| c.set(on != 0));
     }
 

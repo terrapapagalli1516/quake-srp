@@ -1,40 +1,45 @@
 //! The client side of view.c the live and demo frames share: `V_ParseDamage`
 //! (the damage colour shift, the directional view kick and the status-bar
 //! pain face an `svc_damage` starts), `V_CalcViewRoll`'s kick, and
-//! `V_BonusFlash_f` (the gold pickup flash a stuffed `bf` starts).
+//! `V_BonusFlash_f` (the gold pickup flash a stuffed `bf` starts). The rest of
+//! view.c the renderer uses (`V_CalcBob`, the cshift ramps, the gun placement)
+//! is [`crate::render`]'s `view`.
+//!
+//! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
+//! Source: `WinQuake/view.c`.
 
-use quake_rs::math::{angle_vectors, dot, normalize, Vec3};
+use crate::math::{angle_vectors, dot, normalize, Vec3};
 
 /// `v_kicktime` (view.c, default "0.5"): how long an svc_damage view kick lasts.
-pub(crate) const V_KICKTIME: f32 = 0.5;
+pub const V_KICKTIME: f32 = 0.5;
 /// `v_kickroll` (view.c, default "0.6"): roll degrees per damage count*side.
-pub(crate) const V_KICKROLL: f32 = 0.6;
+pub const V_KICKROLL: f32 = 0.6;
 /// `v_kickpitch` (view.c, default "0.6"): pitch degrees per damage count*side.
-pub(crate) const V_KICKPITCH: f32 = 0.6;
+pub const V_KICKPITCH: f32 = 0.6;
 /// `V_ParseDamage`'s `cl.faceanimtime = cl.time + 0.2`: how long the status
 /// bar shows the pain face after a hit.
-pub(crate) const FACE_ANIM_TIME: f32 = 0.2;
+pub const FACE_ANIM_TIME: f32 = 0.2;
 
 /// `V_BonusFlash_f` (view.c): `cl.cshifts[CSHIFT_BONUS]` becomes this colour at
 /// [`BONUS_PERCENT`]; V_UpdatePalette drops it by `host_frametime*100`.
-pub(crate) const BONUS_COLOR: [u8; 3] = [215, 186, 69];
-pub(crate) const BONUS_PERCENT: f32 = 50.0;
+pub const BONUS_COLOR: [u8; 3] = [215, 186, 69];
+pub const BONUS_PERCENT: f32 = 50.0;
 /// V_UpdatePalette's bonus drop per second (`host_frametime*100`).
-pub(crate) const BONUS_FADE: f32 = 100.0;
+pub const BONUS_FADE: f32 = 100.0;
 /// V_UpdatePalette's damage drop per second (`host_frametime*150`).
-pub(crate) const DAMAGE_FADE: f32 = 150.0;
+pub const DAMAGE_FADE: f32 = 150.0;
 
 /// `cl.cshifts[CSHIFT_DAMAGE].percent += 3*count` then the 0..150 clamp
 /// (V_ParseDamage). `percent` is an `int` in the C (client.h `cshift_t`), so
 /// the float sum truncates back to a whole percent.
-pub(crate) fn cshift_add(percent: f32, add: f32) -> f32 {
+pub fn cshift_add(percent: f32, add: f32) -> f32 {
     ((percent + add) as i32).clamp(0, 150) as f32
 }
 
 /// V_UpdatePalette's per-frame drop, `percent -= host_frametime*rate; if
 /// (percent <= 0) percent = 0;` — on an `int`, so every frame truncates: the
 /// damage flash loses 3 a frame at 72 fps (not 2.08), the bonus flash 2.
-pub(crate) fn cshift_drop(percent: f32, frametime: f32, rate: f32) -> f32 {
+pub fn cshift_drop(percent: f32, frametime: f32, rate: f32) -> f32 {
     let p = (percent - frametime * rate) as i32;
     if p <= 0 {
         0.0
@@ -50,7 +55,7 @@ pub(crate) fn cshift_drop(percent: f32, frametime: f32, rate: f32) -> f32 {
 /// commands are ignored. Accepted gap: the C's Cbuf_Execute runs the text at
 /// the start of the NEXT host frame, so id's flash starts one frame (~14 ms)
 /// later than here.
-pub(crate) fn stufftext_bonus_flash(text: &str) -> bool {
+pub fn stufftext_bonus_flash(text: &str) -> bool {
     text.split(['\n', ';']).any(|cmd| cmd.split_whitespace().next() == Some("bf"))
 }
 
@@ -58,7 +63,7 @@ pub(crate) fn stufftext_bonus_flash(text: &str) -> bool {
 /// newly set gets `cl.item_gettime[j] = cl.time` (the status bar flashes the
 /// new weapon's icon for a second). `CL_ClearState` zeroes `cl.items`, so a
 /// level (or demo) start stamps everything owned.
-pub(crate) fn stamp_item_gettime(cl_items: &mut i32, gettime: &mut [f32; 32], items: i32, time: f32) {
+pub fn stamp_item_gettime(cl_items: &mut i32, gettime: &mut [f32; 32], items: i32, time: f32) {
     if items == *cl_items {
         return;
     }
@@ -73,16 +78,16 @@ pub(crate) fn stamp_item_gettime(cl_items: &mut i32, gettime: &mut [f32; 32], it
 
 /// What one `svc_damage` does to the view (`V_ParseDamage`, view.c).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ParsedDamage {
+pub struct ParsedDamage {
     /// `3*count`, what `cl.cshifts[CSHIFT_DAMAGE].percent` gains (the caller
     /// clamps to 0..150).
-    pub(crate) percent: f32,
+    pub percent: f32,
     /// `cshifts[CSHIFT_DAMAGE].destcolor`: armour-dominant pink, some armour
     /// orange-red, pure blood red.
-    pub(crate) color: [u8; 3],
+    pub color: [u8; 3],
     /// `v_dmg_roll` / `v_dmg_pitch`: the kick, from the attack's side.
-    pub(crate) roll: f32,
-    pub(crate) pitch: f32,
+    pub roll: f32,
+    pub pitch: f32,
 }
 
 /// `V_ParseDamage`: `armor`/`blood` are the message's bytes, `from` the
@@ -91,7 +96,7 @@ pub(crate) struct ParsedDamage {
 /// angles as V_CalcRefdef keeps them — `YAW = viewangles[YAW]`, `PITCH =
 /// -viewangles[PITCH]` (entity pitch is stored backwards), roll ~0 — so
 /// AngleVectors sees the pitch mirrored, as in the C.
-pub(crate) fn parse_damage(
+pub fn parse_damage(
     armor: i32,
     blood: i32,
     from: Vec3,

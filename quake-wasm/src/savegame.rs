@@ -1,17 +1,15 @@
 //! Save/load — `Host_Savegame_f` / `Host_Loadgame_f` (host_cmd.c) over the
 //! page's localStorage: the console halves with the C's guards and messages,
-//! the rebuild of a [`Walk`] from a `.sav` text, and the scratch-buffer
+//! the rebuild of a [`Walk`] from a `.sav` text (the client's,
+//! [`quake_rs::client::host_cmd::build_walk_savegame`]), and the scratch-buffer
 //! exports the page moves the text through (plus the menu slot comments).
 
 use std::cell::RefCell;
 
-use quake_rs::bsp::Bsp;
-use quake_rs::progs::Progs;
-use quake_rs::server::Server;
+use quake_rs::client::host_cmd;
 
-use crate::app::{assemble_walk, ensure_app, pak, Walk};
-use crate::input::clamp_pitch;
-use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
+use crate::app::{ensure_app, pak, Walk};
+use crate::snd_dma;
 
 // ---------------------------------------------------------------------------
 // Savegame persistence bridge (page-owned localStorage)
@@ -300,83 +298,15 @@ pub(crate) fn do_load_command(name: Option<&str>) {
     LOAD_REQUEST.with(|r| *r.borrow_mut() = Some(fname));
 }
 
-/// `Host_Loadgame_f`'s post-fopen half: parse the header, spawn the named map,
-/// and rebuild a [`Walk`] around [`Server::load_savegame`]'s reconstructed
-/// world. Errors return the console message to print (the C's where it has
-/// one); the caller leaves the current game untouched on `Err`.
+/// `Host_Loadgame_f`'s post-fopen half on the embedded pak
+/// ([`quake_rs::client::host_cmd::build_walk_savegame`]), its sound calls
+/// carried out. Errors return the console message to print.
 fn build_walk_savegame(text: &str) -> Result<Walk, String> {
-    use quake_rs::save::{parse_savegame, SAVEGAME_VERSION};
-
-    let sg = parse_savegame(text).map_err(|e| e.to_string())?;
-    if sg.version != SAVEGAME_VERSION {
-        // Con_Printf ("Savegame is version %i, not %i\n", ...)
-        return Err(format!(
-            "Savegame is version {}, not {}",
-            sg.version, SAVEGAME_VERSION
-        ));
-    }
-    let couldnt = || "Couldn't load map".to_string(); // SV_SpawnServer failure
-    let pak = pak().ok_or_else(couldnt)?;
-    let read = |n: &str| pak.read_file(n).ok().flatten();
-    let map = format!("maps/{}.bsp", sg.map_name);
-    let map_bytes = read(&map).ok_or_else(couldnt)?;
-    let sim_bsp = Bsp::parse(&map_bytes).map_err(|_| couldnt())?;
-    let render_bsp = Bsp::parse(&map_bytes).map_err(|_| couldnt())?;
-    let progs_bytes = read("progs.dat").ok_or_else(couldnt)?;
-    let progs = Progs::parse(&progs_bytes).map_err(|e| e.to_string())?;
-
-    // The engine-side load: header -> SV_SpawnServer (map spawn functions DO
-    // run, rebuilding precaches; see save.rs) -> lightstyles -> globals ->
-    // edicts -> sv.time/spawn_parms. No entrance script, no signon settle.
-    let mut server =
-        Server::load_savegame(sim_bsp, progs, Some(pak.clone()), text).map_err(|e| e.to_string())?;
-    let player = server.player_edict();
-
-    // The save's spawn parms are the level-ENTRY parms (svs.clients->
-    // spawn_parms): a respawn on the loaded level restores the state the
-    // player entered it with, exactly like an uninterrupted session.
-    let entry_parms = sg.spawn_parms;
-
-    // View angles from the loaded player's v_angle. DEVIATION: the C's
-    // Host_Spawn_f sends an svc_setangle built from ent->v.angles (the model
-    // angles, whose pitch is the C's -v_angle/3 quirk, roll forced 0 — "never
-    // send a roll angle, because savegames can catch the server expecting the
-    // client to correct it"); restoring v_angle directly gives back the exact
-    // view the player saved with, roll-free here too (this shell has no
-    // persistent roll state).
-    let v_angle = server.vm.ent_get_vector(player, "v_angle");
-    let yaw = v_angle[1];
-    let pitch = clamp_pitch(v_angle[0]);
-
-    // Capture this load's placed ambient loops (registered while the map's
-    // spawn functions re-ran inside load_savegame) BEFORE the server moves
-    // into the Walk; committed to the page only after assembly succeeds.
-    let statics = server.drain_static_sounds();
-
-    let mut w = assemble_walk(
-        pak,
-        map,
-        server,
-        player,
-        entry_parms,
-        render_bsp,
-        yaw,
-        pitch,
-    )
-    .ok_or_else(couldnt)?;
-
-    // Committed: tear down the previous level/mode's looping audio, start this
-    // level's, and drop one-shot events the load's spawn + settle ticks queued
-    // (same treatment as every other walk-building path).
-    bump_sound_generation();
-    queue_static_sounds(&w.pak, &statics);
-    let _ = w.server.drain_sounds();
-    let _ = w.server.drain_particles();
-    let _ = w.server.drain_temp_entities();
-    let _ = w.server.drain_messages();
-    let _ = w.server.drain_svc_events();
-    let _ = quake_rs::builtins::take_stufftext();
-    Ok(w)
+    let pak = pak().ok_or_else(|| "Couldn't load map".to_string())?;
+    let mut sound = Vec::new();
+    let walk = host_cmd::build_walk_savegame(pak.clone(), text, &mut sound);
+    snd_dma::play(&pak, sound);
+    walk
 }
 
 #[cfg(test)]

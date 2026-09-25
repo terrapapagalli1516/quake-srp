@@ -1,6 +1,17 @@
-//! Browser (WASM) shell for `quake-rs`: an interactive first-person walk *and*
-//! recorded-demo playback, rendered to an RGBA framebuffer the page blits to a
-//! canvas.
+//! Browser (WASM) shell for `quake-rs`: the live game *and* recorded-demo
+//! playback, rendered to an RGBA framebuffer the page blits to a canvas.
+//!
+//! This crate is the platform layer — what id's source has in `vid_*.c`,
+//! `snd_*.c`, `in_*.c` and `sys_*.c`, plus the host state around the game:
+//! the `extern "C"` exports the page calls, the [`App`](app::App) held in a
+//! `thread_local`, the queues the page drains (sounds, saves), the
+//! localStorage bridge and the Web extras. The game client itself — the live
+//! frame against the local server, demo playback, the level loads, the
+//! cheats — is [`quake_rs::client`], which native tools run too
+//! (`quaketool play`). Each client frame hands back a
+//! [`ClientFrame`](quake_rs::client::ClientFrame): the screen, its palette
+//! shifts, and the calls it made into the sound layer, which [`snd_dma`]
+//! carries out for the page.
 //!
 //! The engine crate stays `#![forbid(unsafe_code)]` and compiles to
 //! `wasm32-unknown-unknown` unchanged. This shell has **zero `unsafe {}` blocks**
@@ -12,29 +23,30 @@
 //!
 //! ## Layout
 //!
-//! Each module is named after the WinQuake file whose client/host side it
-//! ports, and every `extern "C"` export lives next to its subsystem.
+//! Each module is named after the WinQuake file whose platform or host side
+//! it ports, and every `extern "C"` export lives next to its subsystem.
 //!
 //! | module      | id counterpart                          | what                                             |
 //! |-------------|-----------------------------------------|--------------------------------------------------|
-//! | `app`       | client.h, host.c, cl_demo.c `CL_PlayDemo_f` | `App`/`Walk`/`DemoPlay` state, asset loads, walk/demo builders, boot |
-//! | `host`      | host.c `Host_Frame`                     | `step`: the 72 fps gate, the mode's frame, overlays, blend, gamma pack |
-//! | `cl_walk`   | cl_main.c, cl_parse.c, view.c, screen.c | `step_walk`: the live client frame               |
-//! | `cl_demo`   | cl_demo.c, cl_parse.c, view.c           | `step_demo`: the recorded-demo client frame      |
-//! | `cl_tent`   | cl_tent.c, r_part.c                     | temp-entity effects, trail flags                 |
-//! | `input`     | cl_input.c, in_win.c, keys.c            | bindings-driven moves, mouse look, key exports   |
+//! | `app`       | host.c, client.h                        | the `App` (host state around the client's `Walk`/`DemoPlay`), the embedded pak, menu assets, the client's level loads with their sound calls carried out, the `boot*` exports |
+//! | `host`      | host.c `Host_Frame`                     | `step`: the 72 fps gate (`wasm_uncapped`), the mode's client frame, the menu/console overlays, the fps readout, blend, gamma pack |
+//! | `cl_walk`   | cl_main.c                               | `step_walk`: `client::cl_main::walk_frame` on the page's `Vid`, its sound calls to `snd_dma`; the live game's end-to-end tests |
+//! | `cl_demo`   | cl_demo.c                               | `step_demo`: `client::cl_demo::demo_frame` likewise; the playback tests |
+//! | `cl_tent`   | cl_tent.c                               | (tests only) Chthon's lightning end to end       |
+//! | `input`     | in_win.c, keys.c                        | mouse look, key exports (the moves: `client::cl_input`) |
 //! | `menu`      | menu.c `M_Keydown`                      | menu key exports and the actions they return     |
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle/typing exports                    |
 //! | `extras`    | —                                       | the Web extras' `wasm_*` cvars (values in the menu), the renderer's per-frame copy |
-//! | `host_cmd`  | host_cmd.c, cmd.c                       | console commands, `map`, changelevel, restart    |
+//! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | console command dispatch, `map` (the loads and cheats: `client::host_cmd`) |
 //! | `savegame`  | host_cmd.c `Host_Savegame_f`/`_Loadgame_f` | save/load over the page's localStorage        |
-//! | `snd_dma`   | snd_dma.c                               | sound queues for the page's Web Audio            |
-//! | `vid`       | vid_win.c, screen.c                     | resolution, framebuffer, viewsize, backtile      |
-//! | `view`      | view.c                                  | `V_ParseDamage`, the damage kick (live + demo)   |
+//! | `snd_dma`   | snd_win.c                               | the client's sound calls carried out: the queues for the page's Web Audio, the ambient ramps, the exports (the channel and loop gates: `quake_rs::snd`) |
+//! | `vid`       | vid_win.c                               | resolution, framebuffer, viewsize, the client frames' `Vid` |
 //! | `bench`     | —                                       | `--features bench` frame-phase timers            |
 //!
-//! Tests live with the code they exercise; `test_util` holds the fixtures
-//! several share, `census_tests` the CENSUS.md acceptance tests.
+//! Tests live with the code they exercise (the client's end-to-end tests
+//! here, since they need the embedded pak; its data-free unit tests in
+//! quake-rs); `test_util` holds the fixtures several share, `census_tests`
+//! the CENSUS.md acceptance tests, `oracle_screen` the 2-D oracle's port side.
 //!
 //! ## The JS ↔ wasm ABI
 //!
@@ -60,11 +72,13 @@
 //! The Web extras are the port's opt-in departures from id's Quake, all off
 //! by default, switched on Options > Web extras or by console command; as
 //! bits: 1 `wasm_uncapped` (no 72 fps cap), 2 `wasm_showfps` (frame-rate
-//! readout), 4 `wasm_exactpersp` (exact perspective at every pixel).
+//! readout), 4 `wasm_exactpersp` (exact perspective at every pixel), 8
+//! `wasm_scaled2d` (the 2-D layer scaled up to the screen).
 
 mod app;
 mod bench;
 mod cl_demo;
+#[cfg(test)]
 mod cl_tent;
 mod cl_walk;
 mod console;
@@ -76,7 +90,6 @@ mod menu;
 mod savegame;
 mod snd_dma;
 mod vid;
-mod view;
 #[cfg(test)]
 mod oracle_screen;
 #[cfg(test)]

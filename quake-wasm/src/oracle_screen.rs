@@ -54,9 +54,10 @@ thread_local! {
     static BLANK: Cell<Option<u8>> = const { Cell::new(None) };
 }
 
-/// cl_walk's hook: the 3-D view as one flat colour while a script asks for
-/// it (the C oracle's `oracle_blank` fills `scr_vrect` the same way).
-pub(crate) fn blank_view(mut view: Image, palette: &[[u8; 3]; 256]) -> Image {
+/// The live frame's view hook ([`quake_rs::client::set_view_hook`]): the 3-D
+/// view as one flat colour while a script asks for it (the C oracle's
+/// `oracle_blank` fills `scr_vrect` the same way).
+fn blank_view(mut view: Image, palette: &[[u8; 3]; 256]) -> Image {
     if let Some(idx) = BLANK.with(Cell::get) {
         view.rgb.fill(palette[idx as usize]);
     }
@@ -162,6 +163,7 @@ fn run(script: &str) {
             "blank" => {
                 let v = num(0) as i32;
                 BLANK.with(|b| b.set((0..256).contains(&v).then_some(v as u8)));
+                quake_rs::client::set_view_hook(Some(blank_view));
             }
             "map" => {
                 assert_eq!(boot(), 1, "boot");
