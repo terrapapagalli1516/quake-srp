@@ -13,15 +13,15 @@
 //! The collision queries are world.c's (`sv_world.rs`); the player's wish
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
-use super::host::{reset_changelevel, reset_restart};
+use super::host::{reset_changelevel, reset_restart, sv_gravity};
 use super::lightstyle::snapshot_lightstyles;
-use super::msg::{reset_svc_recognizer, reset_temp_entity_decoder};
+use super::msg::reset_message_parsers;
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
 use super::{
     FrameReport, Server, UserCmd, CONTENTS_EMPTY,
     CONTENTS_SOLID, FL_FLY, FL_ONGROUND, FL_SWIM, FL_WATERJUMP, MOVETYPE_BOUNCE, MOVETYPE_FLY,
     MOVETYPE_FLYMISSILE, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, MOVETYPE_STEP,
-    MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_BSP, SOLID_NOT, SOLID_TRIGGER, SV_GRAVITY, SV_MAXVELOCITY,
+    MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_BSP, SOLID_NOT, SOLID_TRIGGER, SV_MAXVELOCITY,
 };
 use crate::math::{add as v_add, angle_vectors, Vec3};
 use crate::world;
@@ -41,8 +41,7 @@ impl Server {
         self.vm.gset_float("frametime", dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
-        reset_temp_entity_decoder();
-        reset_svc_recognizer();
+        reset_message_parsers();
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
         self.cleanup_ents();
         let start_time = self.time();
@@ -52,15 +51,29 @@ impl Server {
 
         let mut thinks_fired = 0usize;
         let mut think_errors = 0usize;
-        let n = self.vm.num_edicts();
-
-        for e in 0..n {
+        // SV_Physics always starts with StartFrame (self/other = world, time =
+        // sv.time) — the spawn settle frames included, so QC's `skill`,
+        // `teamplay` and `framecount` globals are set from the first frame.
+        self.vm.gset_float("time", start_time);
+        if self.run_sys("StartFrame", 0, 0).is_err() {
+            think_errors += 1; // isolated; the interpreter was reset
+        }
+        // `for (i=0 ; i<sv.num_edicts ; i++)`: the bound is re-read every
+        // iteration, so an edict spawned by an earlier think this frame (a
+        // missile, a gib) gets its physics on the frame it was spawned.
+        let mut next = 0;
+        while next < self.vm.num_edicts() {
+            let e = next;
+            next += 1;
             // edict 0 is the world; process every non-free edict, as the C does.
             let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
             if free {
                 continue;
             }
             let ent = e as i32;
+            if !self.force_retouch_edict(ent, start_time) {
+                continue; // a retouch freed it
+            }
             let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
 
             // Isolate per-entity faults (e.g. a think hitting an unimplemented
@@ -75,6 +88,7 @@ impl Server {
             }
         }
 
+        self.decrement_force_retouch();
         // sv.time += host_frametime (end of SV_Physics).
         self.vm.gset_float("time", start_time + dt);
 
@@ -513,7 +527,7 @@ impl Server {
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
             // hitsound = velocity[2] < sv_gravity * -0.1, sampled BEFORE gravity.
             let vel_z = self.vm.ent_get_vector(ent, "velocity")[2];
-            let hitsound = vel_z < SV_GRAVITY * -0.1;
+            let hitsound = vel_z < sv_gravity() * -0.1;
 
             // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
             // SV_LinkEdict(ent, true). The C runs the full slide move (NOT a
@@ -712,6 +726,36 @@ impl Server {
         }
     }
 
+    /// `SV_Physics`' `if (pr_global_struct->force_retouch) SV_LinkEdict (ent,
+    /// true); // force retouch even for stationary`, run on each live edict
+    /// before its physics. QC sets the global to 2 in `spawn_tdeath` (every
+    /// `PutClientInServer` and teleport) and `teleport_use`, so for two frames
+    /// everything relinks and touches the triggers it overlaps: a monster
+    /// standing in a door's trigger field opens it at the level start (e1m6,
+    /// e1m8), one standing on a teleport destination is telefragged, and a
+    /// monster in a just-enabled teleporter is sent through. SV_LinkEdict skips
+    /// the world, and a SOLID_NOT edict is relinked but touches nothing.
+    /// Returns whether `ent` is still live (a touch may free it).
+    fn force_retouch_edict(&mut self, ent: i32, sv_time: f32) -> bool {
+        if ent == 0 || self.vm.gget_float("force_retouch") == 0.0 {
+            return true;
+        }
+        link_edict(&mut self.vm, ent);
+        if self.vm.ent_get_float(ent, "solid") as i32 != SOLID_NOT {
+            touch_triggers(&mut self.vm, ent, sv_time);
+        }
+        !self.is_free(ent)
+    }
+
+    /// The end of `SV_Physics`: `if (pr_global_struct->force_retouch)
+    /// pr_global_struct->force_retouch--;`.
+    fn decrement_force_retouch(&mut self) {
+        let n = self.vm.gget_float("force_retouch");
+        if n != 0.0 {
+            self.vm.gset_float("force_retouch", n - 1.0);
+        }
+    }
+
     /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
     /// where the per-entity `gravity` field defaults to 1.0 when unset/zero.
     fn add_gravity(&mut self, ent: i32, dt: f32) {
@@ -724,7 +768,7 @@ impl Server {
             }
         };
         let mut vel = self.vm.ent_get_vector(ent, "velocity");
-        vel[2] -= ent_gravity * SV_GRAVITY * dt;
+        vel[2] -= ent_gravity * sv_gravity() * dt;
         self.vm.ent_set_vector(ent, "velocity", vel);
     }
 
@@ -816,8 +860,7 @@ impl Server {
         self.vm.gset_float("frametime", dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
-        reset_temp_entity_decoder();
-        reset_svc_recognizer();
+        reset_message_parsers();
         // Drop any changelevel() / restart request a *prior* frame left unconsumed
         // (a well-behaved front-end drains it immediately, but a stale request must
         // never trigger a swap/respawn a frame late or against the wrong level).
@@ -831,24 +874,45 @@ impl Server {
         // uses sv.time, not the clamped per-think `time` global).
         self.vm.sv_time = start_time;
 
-        // Let the progs know a new frame has started (self/other = world).
+        // Host_ServerFrame runs SV_RunClients BEFORE SV_Physics: SV_ReadClientMove
+        // copies the usercmd onto the client edict (v_angle, buttons, impulse),
+        // then SV_ClientThink applies the look angles, the punch decay, friction
+        // and acceleration (or the swim / water-jump move) to its velocity. Only
+        // then does SV_Physics run StartFrame and every edict, the client's
+        // PlayerPreThink (WaterMove's drag, PlayerJump) acting on the
+        // ALREADY-accelerated velocity.
+        self.vm.gset_float("time", start_time);
+        if self.player >= 0 && !self.is_free(self.player) {
+            self.apply_usercmd_to_edict(self.player, cmd);
+            self.client_think(self.player, cmd, dt);
+        }
+
+        // Let the progs know a new frame has started (self/other = world,
+        // time = sv.time).
         let mut thinks_fired = 0usize;
         let mut think_errors = 0usize;
+        self.vm.gset_float("time", start_time);
         match self.run_sys("StartFrame", 0, 0) {
             Ok(_) => {}
             Err(_) => think_errors += 1, // isolated; the interpreter was reset
         }
 
-        let n = self.vm.num_edicts();
-        for e in 0..n {
+        // The bound is re-read every iteration, as in SV_Physics (see run_frame).
+        let mut next = 0;
+        while next < self.vm.num_edicts() {
+            let e = next;
+            next += 1;
             let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
             if free {
                 continue;
             }
             let ent = e as i32;
+            if !self.force_retouch_edict(ent, start_time) {
+                continue; // a retouch freed it
+            }
 
             let result = if ent == self.player {
-                self.physics_client(ent, cmd, start_time, dt)
+                self.physics_client(ent, start_time, dt)
             } else {
                 let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
                 self.process_entity(ent, movetype, start_time, dt)
@@ -861,6 +925,8 @@ impl Server {
                 }
             }
         }
+
+        self.decrement_force_retouch();
 
         // SV_WriteClientdataToMessage (sv_main.c) runs SV_SetIdealPitch once per
         // client per frame, after physics: compute the slope-following auto-pitch
@@ -894,17 +960,15 @@ impl Server {
     /// path chosen by movetype -> `touch_triggers` -> relink -> `PlayerPostThink`.
     /// Returns whether a think fired (for the frame report). A removed player
     /// (`free`) short-circuits the rest, like the C `SV_RunThink` guards.
-    fn physics_client(&mut self, ent: i32, cmd: &UserCmd, start_time: f32, dt: f32) -> Result<bool> {
-        // SV_ReadClientMove (sv_user.c) copies the usercmd onto the client edict
-        // BEFORE the physics frame: v_angle from the look angles, then the button
-        // bits and impulse. We do it here, immediately before PlayerPreThink, so
-        // the weapon code that runs inside PreThink/PostThink (W_WeaponFrame ->
-        // W_Attack reads `self.button0` and aims off `self.v_angle`) sees the
-        // current frame's input. (client_think later re-derives v_angle/angles
-        // during the move, but PreThink runs first and must see it set.)
-        self.apply_usercmd_to_edict(ent, cmd);
+    fn physics_client(&mut self, ent: i32, start_time: f32, dt: f32) -> Result<bool> {
+        // (The usercmd and SV_ClientThink were applied by client_frame before
+        // SV_Physics began, as SV_RunClients does.)
 
-        // call standard client pre-think (self = player)
+        // call standard client pre-think (self = player). SV_Physics_Client sets
+        // `pr_global_struct->time = sv.time` first: without it PreThink reads the
+        // `time` a preceding think left (its clamped thinktime), so its timers
+        // (air_finished, lava damage, IntermissionThink) could fire a frame early.
+        self.vm.gset_float("time", start_time);
         self.run_sys("PlayerPreThink", ent, 0)?;
         if self.is_free(ent) {
             return Ok(false);
@@ -933,11 +997,10 @@ impl Server {
                 if !alive {
                     return Ok(fired);
                 }
-                // SV_ClientThink does friction/acceleration toward wishdir; then
-                // gravity (unless in water or water-jumping) and the step-up walk
-                // move. check_water sets waterlevel/watertype so the QuakeC
-                // WaterMove (PlayerPostThink) can deal lava/slime damage.
-                self.client_think(ent, cmd, dt);
+                // (SV_ClientThink already ran, in SV_RunClients.) Gravity (unless
+                // in water or water-jumping) and the step-up walk move. check_water
+                // sets waterlevel/watertype so the QuakeC WaterMove (PlayerPreThink)
+                // can deal lava/slime damage.
                 let in_water = self.check_water(ent);
                 let flags = self.vm.ent_get_float(ent, "flags") as i32;
                 if !in_water && flags & FL_WATERJUMP == 0 {
@@ -954,7 +1017,6 @@ impl Server {
                 if !alive {
                     return Ok(fired);
                 }
-                self.client_think(ent, cmd, dt);
                 self.check_water(ent); // keep waterlevel/watertype live while flying
                 self.player_fly_move(ent, start_time, dt);
             }
@@ -964,7 +1026,6 @@ impl Server {
                 if !alive {
                     return Ok(fired);
                 }
-                self.client_think(ent, cmd, dt);
                 // origin += frametime * velocity (no clipping).
                 let origin = self.vm.ent_get_vector(ent, "origin");
                 let vel = self.vm.ent_get_vector(ent, "velocity");
@@ -1014,15 +1075,9 @@ impl Server {
         self.vm.gset_float("time", start_time);
         self.run_sys("PlayerPostThink", ent, 0)?;
 
-        // The impulse is a one-shot: a usercmd carries it for a single frame.
-        // Stock QuakeC's ImpulseCommands() clears `self.impulse` after handling
-        // it; the engine likewise treats it as edge-triggered (SV_ReadClientMove
-        // only overwrites it when a fresh non-zero impulse arrives). Clear it
-        // here so a held impulse fires once even if the mod's QuakeC forgot to.
-        if !self.is_free(ent) {
-            self.vm.ent_set_float(ent, "impulse", 0.0);
-        }
-
+        // No engine clear of `impulse` (census F4): the C never clears it —
+        // QuakeC's ImpulseCommands does, once W_WeaponFrame gets past the
+        // weapon cooldown, so a switch pressed mid-cooldown waits for it.
         Ok(fired)
     }
 
@@ -1447,6 +1502,17 @@ mod tests {
         // A MOVETYPE_TOSS entity with no due think falls under gravity. The empty
         // world traces as blocked at fraction 0 (headnode out of range -> solid),
         // so origin won't move, but velocity must gain downward speed.
+        let (mut server, e) = toss_server();
+        server.run_frame(0.1).expect("frame");
+
+        // velocity.z should be negative (gravity pulled it down): -1*800*0.1 = -80.
+        let vel = server.vm.ent_get_vector(e, "velocity");
+        assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
+        assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+    }
+
+    /// A server holding one airborne MOVETYPE_TOSS point entity at z 100.
+    fn toss_server() -> (Server, i32) {
         let mut b = Builder::new();
         b.entityfields = 16;
         b.add_global("self", 4, 31);
@@ -1464,8 +1530,7 @@ mod tests {
 
         let img = b.build();
         let progs = Progs::parse(&img).expect("parse");
-        let bsp = empty_bsp();
-        let mut server = Server::new(bsp, progs).expect("server");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
 
         let e = server.vm.spawn();
         server.vm.ent_set_float(e, "movetype", MOVETYPE_TOSS as f32);
@@ -1476,13 +1541,212 @@ mod tests {
         // tiny point box so trace uses hull 0.
         server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+        (server, e)
+    }
 
+    #[test]
+    fn ed_alloc_waits_half_a_second_before_reusing_a_freed_slot() {
+        // CENSUS L6: ED_Alloc takes a free slot only if it was freed in the
+        // first two seconds of server time or more than 0.5 s ago, so a missile
+        // spawned the frame another is removed never inherits its slot (and
+        // the client never draws a trail from the old one to the new).
+        let (img, _touch_fn, _g_one, _g_flag) = touch_progs();
+        let mut server = Server::new(world_open_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        server.vm.sv_time = 1.5; // the relaxed first two seconds
+        let a = server.vm.spawn();
+        server.vm.free_edict(a);
+        assert_eq!(server.vm.spawn(), a, "freed at t 1.5: reused at once");
+        server.vm.sv_time = 10.0;
+        server.vm.free_edict(a);
+        let b = server.vm.spawn();
+        assert_ne!(b, a, "freed this frame: not reused");
+        server.vm.sv_time = 10.4;
+        assert_ne!(server.vm.spawn(), a, "0.4 s later: still not");
+        server.vm.sv_time = 10.6;
+        assert_eq!(server.vm.spawn(), a, "0.6 s later: reused");
+    }
+
+    #[test]
+    fn ed_free_clears_only_the_fields_the_c_clears() {
+        // ED_Free zeroes model/takedamage/modelindex/colormap/skin/frame/origin/
+        // angles/solid, sets nextthink -1 and freetime; everything else stays
+        // (QuakeC holding a reference to a removed entity still reads it).
+        let (img, _touch_fn, _g_one, _g_flag) = touch_progs();
+        let mut server = Server::new(world_open_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        let e = server.vm.spawn();
+        server.vm.ent_set_string(e, "classname", "missile");
+        server.vm.ent_set_string(e, "model", "progs/missile.mdl");
+        server.vm.ent_set_vector(e, "origin", [1.0, 2.0, 3.0]);
+        server.vm.ent_set_vector(e, "velocity", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_float(e, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_float(e, "nextthink", 5.0);
+        server.vm.free_edict(e);
+        assert!(server.vm.is_free_edict(e));
+        assert_eq!(server.vm.ent_get_string(e, "model"), "");
+        assert_eq!(server.vm.ent_get_vector(e, "origin"), [0.0; 3]);
+        assert_eq!(server.vm.ent_get_float(e, "solid"), 0.0);
+        assert_eq!(server.vm.ent_get_float(e, "nextthink"), -1.0);
+        assert_eq!(server.vm.ent_get_string(e, "classname"), "missile", "kept");
+        assert_eq!(server.vm.ent_get_vector(e, "velocity"), [100.0, 0.0, 0.0], "kept");
+    }
+
+    #[test]
+    fn an_edict_spawned_by_a_think_moves_on_its_spawn_frame() {
+        // CENSUS L25: SV_Physics' loop re-reads sv.num_edicts every iteration,
+        // so a missile spawned by an earlier think gets its physics the same
+        // frame. The thinker's QC: e = spawn(); e.movetype = MOVETYPE_FLYMISSILE;
+        // e.velocity = '100 0 0'. After one 0.1 s frame it has moved 10 units.
+        let mut b = Builder::new();
+        b.entityfields = 32;
+        for (name, ty, ofs) in [("self", 4, 31), ("other", 4, 32), ("time", EV_FLOAT, 33), ("frametime", EV_FLOAT, 35)] {
+            b.add_global(name, ty, ofs);
+        }
+        for (name, ty, ofs) in [
+            ("classname", EV_STRING, 1), ("movetype", EV_FLOAT, 2), ("nextthink", EV_FLOAT, 3),
+            ("flags", EV_FLOAT, 4), ("velocity", 3, 5), ("origin", 3, 8), ("mins", 3, 11),
+            ("maxs", 3, 14), ("think", EV_FUNCTION, 17), ("solid", EV_FLOAT, 18),
+            ("absmin", 3, 19), ("absmax", 3, 22), ("size", 3, 25), ("groundentity", 4, 28),
+            ("owner", 4, 29),
+        ] {
+            b.add_field(name, ty, ofs);
+        }
+        let spawn = b.add_builtin("spawn", 14);
+        let (g_spawn, g_fmove, g_fvel, g_ptr, g_nine, g_vel) = (40i16, 41i16, 42i16, 43i16, 44i16, 45i16);
+        let st = |op: Op, a: i16, b: i16, c: i16| Statement { op: op as u16, a, b, c };
+        let spawner = b.add_function(
+            "spawner",
+            vec![
+                st(Op::Call0, g_spawn, 0, 0),
+                st(Op::Address, crate::progs::OFS_RETURN as i16, g_fmove, g_ptr),
+                st(Op::StorepF, g_nine, g_ptr, 0),
+                st(Op::Address, crate::progs::OFS_RETURN as i16, g_fvel, g_ptr),
+                st(Op::StorepV, g_vel, g_ptr, 0),
+                st(Op::Done, 0, 0, 0),
+            ],
+        );
+        let progs = Progs::parse(&b.build()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        server.vm.set_gi(g_spawn as usize, spawn as i32);
+        server.vm.set_gi(g_fmove as usize, 2);
+        server.vm.set_gi(g_fvel as usize, 5);
+        server.vm.set_gf(g_nine as usize, MOVETYPE_FLYMISSILE as f32);
+        server.vm.set_gv(g_vel as usize, [100.0, 0.0, 0.0]);
+        let thinker = server.vm.spawn();
+        server.vm.ent_set_int(thinker, "think", spawner as i32);
+        server.vm.ent_set_float(thinker, "nextthink", server.time());
+        let n0 = server.vm.num_edicts();
         server.run_frame(0.1).expect("frame");
+        let missile = n0 as i32; // appended by the think
+        assert_eq!(server.vm.ent_get_float(missile, "movetype"), MOVETYPE_FLYMISSILE as f32);
+        let x = server.vm.ent_get_vector(missile, "origin")[0];
+        assert!((x - 10.0).abs() < 1e-3, "moved on its spawn frame: x = {x}");
+    }
 
-        // velocity.z should be negative (gravity pulled it down): -1*800*0.1 = -80.
-        let vel = server.vm.ent_get_vector(e, "velocity");
-        assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
-        assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+    #[test]
+    fn run_frame_starts_with_startframe_like_sv_physics() {
+        // CENSUS L20: SV_Physics runs StartFrame (time = sv.time) every frame,
+        // the spawn settle frames too; run_frame (those frames) skipped it.
+        let mut b = Builder::new();
+        b.add_global("self", 4, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_global("startframe_time", EV_FLOAT, 40);
+        b.add_function(
+            "StartFrame",
+            vec![
+                Statement { op: Op::StoreF as u16, a: 33, b: 40, c: 0 },
+                Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            ],
+        );
+        let progs = Progs::parse(&b.build()).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+        server.vm.gset_float("startframe_time", -1.0);
+        let t0 = server.time();
+        server.run_frame(0.1).expect("frame");
+        assert_eq!(server.vm.gget_float("startframe_time"), t0, "StartFrame ran at sv.time");
+        server.run_frame(0.1).expect("frame");
+        assert!((server.vm.gget_float("startframe_time") - (t0 + 0.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn player_prethink_sees_sv_time_not_a_preceding_thinktime() {
+        // CENSUS L4: SV_Physics_Client sets pr_global_struct->time = sv.time
+        // before PlayerPreThink. An edict thinking earlier in the frame at
+        // nextthink = sv.time + 0.05 leaves `time` = its thinktime (SV_RunThink);
+        // PreThink must still read sv.time.
+        let record_time = vec![
+            Statement { op: Op::StoreF as u16, a: 33, b: 56, c: 0 }, // prethink_time = time
+            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+        ];
+        let (img, c100, org) = player_progs_with_prethink(record_time);
+        let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        prime_player_globals(&mut server, c100, org);
+        let thinker = server.vm.spawn();
+        let noop = server.vm.progs.find_function("StartFrame").expect("a DONE-only function");
+        server.vm.ent_set_int(thinker, "think", noop as i32);
+        let t0 = server.time();
+        server.vm.ent_set_float(thinker, "nextthink", t0 + 0.05);
+        let player = server.connect_client().expect("connect");
+        assert!(thinker < player, "the thinker runs before the player in the edict loop");
+        server.client_frame(&UserCmd::default(), 0.1).expect("frame");
+        assert_eq!(server.vm.gget_float("prethink_time"), t0, "PreThink saw sv.time");
+    }
+
+    #[test]
+    fn force_retouch_relinks_stationary_edicts_for_two_frames() {
+        // CENSUS F8: SV_Physics does SV_LinkEdict(ent, true) on every live edict
+        // while the QC force_retouch global is set, then decrements it. A
+        // stationary box inside a trigger is touched on exactly the two frames
+        // after spawn_tdeath's force_retouch = 2 — never without it — and a
+        // SOLID_NOT edict is relinked but touches nothing.
+        let (img, touch_fn, g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        server.vm.set_gf(g_one, 1.0);
+        let still = server.vm.spawn();
+        server.vm.ent_set_float(still, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(still, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(still, "mins", [-16.0; 3]);
+        server.vm.ent_set_vector(still, "maxs", [16.0; 3]);
+        let trigger = server.vm.spawn();
+        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
+        server.vm.ent_set_vector(trigger, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(trigger, "mins", [-8.0; 3]);
+        server.vm.ent_set_vector(trigger, "maxs", [8.0; 3]);
+        link_edict(&mut server.vm, trigger);
+        let frame = |server: &mut Server| {
+            server.vm.gset_float("touched_flag", 0.0);
+            server.run_frame(0.1).expect("frame");
+            server.vm.gget_float("touched_flag")
+        };
+        assert_eq!(frame(&mut server), 0.0, "no force_retouch: a stationary edict touches nothing");
+        server.vm.gset_float("force_retouch", 2.0);
+        assert_eq!(frame(&mut server), 1.0, "first force_retouch frame");
+        assert_eq!(server.vm.gget_float("force_retouch"), 1.0);
+        assert_eq!(server.vm.ent_get_vector(still, "absmin"), [83.0, -17.0, -17.0], "relinked");
+        assert_eq!(frame(&mut server), 1.0, "second force_retouch frame");
+        assert_eq!(server.vm.gget_float("force_retouch"), 0.0);
+        assert_eq!(frame(&mut server), 0.0, "and then no more");
+        server.vm.ent_set_float(still, "solid", SOLID_NOT as f32);
+        server.vm.gset_float("force_retouch", 1.0);
+        assert_eq!(frame(&mut server), 0.0, "SOLID_NOT: SV_LinkEdict returns before SV_TouchLinks");
+    }
+
+    #[test]
+    fn sv_gravity_cvar_drives_add_gravity() {
+        // CENSUS F3: world.qc worldspawn does cvar_set("sv_gravity", "100") on
+        // e1m8, and SV_AddGravity reads sv_gravity.value: one 0.1 s frame at
+        // 100 gives -10, not -80. A fresh server is back at the default 800.
+        let (mut server, e) = toss_server();
+        super::super::host::set_sv_gravity(100.0);
+        assert_eq!(server.sv_gravity(), 100.0);
+        server.run_frame(0.1).expect("frame");
+        let vz = server.vm.ent_get_vector(e, "velocity")[2];
+        assert!((vz + 10.0).abs() < 1e-3, "sv_gravity 100: expected -10, got {vz}");
+        let (fresh, _) = toss_server();
+        assert_eq!(fresh.sv_gravity(), 800.0, "a fresh server starts at the default");
     }
 
     // ------------------------------------------------------ water + toss

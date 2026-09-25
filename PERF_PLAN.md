@@ -428,6 +428,23 @@ The fidelity classes are:
 - **Mechanism:** `face_surf_block` keyed by (face, mip), with the C's `scale_for_mip` and
   `mipadjust`.
 - **Risk:** medium. It re-baselines the goldens.
+- **Done** (branch `quake/w2a`): `MipView` picks each face's level as `D_DrawSurfaces` does
+  (`nearzi` over the frustum-clipped outline × `scale_for_mip` × `mipadjust`, `d_scalemip`,
+  `d_minmip`), and `face_surf_block` bakes and caches one `extents >> miplevel` block per face per
+  level from the BSP's own mip levels; `draw_surface_block` lights it with
+  `R_DrawSurfaceBlock8_mip0..3`'s integer stepping (oracle class 6), dlit faces included. Oracle,
+  320×200 world as shipped: 84.74 / 64.06 / 65.88 / 75.62 → 92.20 / 91.03 / 96.68 / 92.58 with
+  the levels → 97.44 / 97.12 / 99.16 / 94.96 with the stepping (e1m1/2/3/7); against id's exact
+  perspective 99.94 / 99.18 / 99.98 / 99.91.
+  - **Speed,** native twin, fresh process per resolution, base → A5: texels baked per frame
+    fire_e1m1 48,660 → 16,322–23,880, walk_e1m1 35,185 → 3,963–11,482, walk_e1m3 68,628 →
+    2,902–10,767 (320×200–1280×800); `face_surf_block` time on fire_e1m1 0.45 → 0.03–0.05 ms per
+    frame; fire_e1m1 step p95 3.79 → 1.35 ms (320×200), 4.92 → 2.75 (640×400), 8.91 → 7.40
+    (1280×800). `QUAKE_DLIGHT=eye` at 1280×800: 14.1–15.1 → 7.4–9.1 ms, about the unlit frame.
+    A warm static frame costs what it did (`compare.py --bench`).
+  - **Memory,** surface cache resident: demo1 3.4 MB → 2.1 / 2.9 / 3.3 MB (320×200 / 640×400 /
+    1280×800), walk_e1m1 1.9 → 1.0 / 1.3 / 1.7 MB, walk_e1m3 3.3 → 1.0 / 1.7 / 2.0 MB. New bench
+    counters `surf_texels` and `surfcache_kb`. `AUDIT.md` has the rest and the goldens.
 
 ### B. Frame composition and presentation (wasm shell and 2-D)
 

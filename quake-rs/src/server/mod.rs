@@ -270,12 +270,13 @@ impl Host for WorldModel {
                 if let Ok(Some(bytes)) = pak.read_file(name) {
                     if let Ok(bsp) = crate::bsp::Bsp::parse(&bytes) {
                         if let Some(m) = bsp.models.first() {
-                            // `Mod_LoadSubmodels` spreads the raw bounds out by a
-                            // pixel (mins-1, maxs+1); b_explob.bsp's raw
-                            // (1,1,1)..(31,31,63) becomes (0,0,0)..(32,32,64).
-                            let mins = [m.mins[0] - 1.0, m.mins[1] - 1.0, m.mins[2] - 1.0];
-                            let maxs = [m.maxs[0] + 1.0, m.maxs[1] + 1.0, m.maxs[2] + 1.0];
-                            self.external_bounds.insert(name.to_string(), (mins, maxs));
+                            // Mod_LoadBrushModel copies submodel 0's bounds into
+                            // `mod->mins/maxs`, as spread ONCE by Mod_LoadSubmodels
+                            // (mins-1, maxs+1) — which `Bsp::parse` already did:
+                            // b_explob.bsp's raw (1,1,1)..(31,31,63) is
+                            // (0,0,0)..(32,32,64) here. (Spreading again made the
+                            // boxes 34 wide: hull2 traces, droptofloor failures.)
+                            self.external_bounds.insert(name.to_string(), (m.mins, m.maxs));
                         }
                     }
                 }
@@ -365,6 +366,13 @@ pub struct Server {
     /// carried/saved set; `Host_Savegame_f` writes exactly these into the
     /// `.sav` header, and `Host_Loadgame_f` restores them from it.
     pub(crate) client_spawn_parms: [f32; NUM_SPAWN_PARMS],
+    /// `svs.serverflags` (server.h): the rune bits kept across levels.
+    /// `SV_SpawnServer` writes it into the QC global before the entities load;
+    /// only `SV_SaveSpawnparms` (a changelevel) reads the live global back. A
+    /// `restart` therefore respawns with this LEVEL-ENTRY value: die on e1m7
+    /// after taking the rune and id's game loses it. Set by
+    /// [`Server::set_serverflags`].
+    svs_serverflags: f32,
 }
 
 /// The result of [`Server::spawn_entities`].

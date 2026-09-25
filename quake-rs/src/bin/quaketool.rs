@@ -999,6 +999,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 ammo_rockets: stat("ammo_rockets"),
                 ammo_cells: stat("ammo_cells"),
                 time: server.time(),
+                item_gettime: None,
                 monsters: 0,
                 total_monsters: 0,
                 secrets: 0,
@@ -1007,6 +1008,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 show_scores: false,
                 // The tool frames the full view under the bar (no viewsize).
                 sb_lines: render::SB_LINES_FULL,
+                face_pain: false,
             };
             render::draw_hud_into(&mut img, &hud);
         }
@@ -1968,6 +1970,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 /// --bench N          then render the same view N more times, report warm ms/frame
 /// --dlight x,y,z,radius[,minlight]  a live dynamic light (repeatable; the oracle
 ///                    passes id's `cl_dlights`, in slot order)
+/// --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
+/// --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
 /// ```
 ///
 /// The map's entities are still spawned (worldspawn's QuakeC sets the light-style
@@ -2037,6 +2041,12 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
                 viewent = Some(v.try_into().map_err(|_| format!("--viewent: expected 6 numbers, got {val:?}"))?);
             }
             "--bench" => bench = Some(val.parse::<u32>().map_err(|_| format!("--bench: bad count {val:?}"))?.max(1)),
+            "--d-mipscale" | "--d-mipcap" => {
+                let x: f32 = val.parse().map_err(|_| format!("{flag}: bad number {val:?}"))?;
+                let mut c = render::mip_cvars();
+                if flag == "--d-mipscale" { c.mipscale = x } else { c.mipcap = x }
+                render::set_mip_cvars(c);
+            }
             other => return Err(format!("view: unknown option {other:?}")),
         }
         i += 2;

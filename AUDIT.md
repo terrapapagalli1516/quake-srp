@@ -328,11 +328,11 @@ All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 - Demo explosion dlight. (~~Sound channel override only dedups within a
   frame~~ — ✅ closed in Session 6: cross-frame (entity,channel) override +
   S_StopSound in the page registry, live + demo.)
-- Minor sbar polish (pain-frame face anim); the Round-2 LOW list (sky
-  case-sensitivity, AngleVectors f64, lightstyle /264, etc. — all cosmetic).
-- Live-play damage-kick roll (the demo path replays it from recorded
-  svc_damage as of Session 6; live infers the flash from stat deltas and has
-  no `from` direction).
+- ~~Minor sbar polish (pain-frame face anim)~~ — ✅ census F16 below; the
+  Round-2 LOW list (sky case-sensitivity, AngleVectors f64, lightstyle /264,
+  etc. — all cosmetic).
+- ~~Live-play damage-kick roll~~ — ✅ census F16 below (live play reads
+  `dmg_take`/`dmg_save`/`dmg_inflictor` like SV_WriteClientdataToMessage).
 
 ## Session 5 — the ship push (2026-06-10)
 
@@ -666,6 +666,169 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   it stays conservative. Flash-lit pixels (mip 0 + exact, 320×200) now match
   83.4% on e1m1 (was 81.8%) and 96.1% on e1m3 (was 95.9%); no row fell.
   Goldens unchanged.
+
+## World pass: mip levels, lightmap stepping (2026-09-25, branch `quake/w2a`, PERF_PLAN A5)
+
+- ✅ **Mip levels** (oracle class 1, the largest departure). The port baked every
+  surface from the full-resolution texture; id draws each surface at the mip
+  level `D_DrawSurfaces` picks per frame, `D_MipLevelForScale(nearzi *
+  scale_for_mip * mipadjust)`, and caches one block per level. Now the same
+  (`surf.rs`: `MipView`, `face_surf_block`):
+  - **`nearzi`** is the largest `1/z` over the face's outline clipped to the
+    frustum's four side planes, `z` clamped to `NEAR_CLIP` 0.01 — what
+    `R_RenderFace` gathers from `R_EmitEdge` (the left clip edge and the
+    right one's `1/z` included). `scale_for_mip` is the larger focal length
+    (`D_ViewChanged`); `mipadjust` is `Mod_LoadTexinfo`'s 1/2/3/4 from the
+    mean texture-axis length; the thresholds are `basemip` {1, 0.4, 0.2} times
+    `d_mipscale`, floored at `d_mipcap` (`D_SetupFrame`; id sets no higher
+    floor at high resolutions). Both cvars are settable
+    (`render::set_mip_cvars`, `quaketool view --d-mipscale/--d-mipcap`;
+    `compare.py` hands a `--c-cmd "d_mipscale 0"` to both renderers).
+  - **The block** is `D_CacheSurface`'s: `extents >> miplevel` texels a side
+    (it was `extents + 1` at mip 0 — one column and row id never reads:
+    `bbextents` clamps s to `extents - 1`), from the level's texels
+    (`bsp.rs` now keeps levels 1..3, `MipTex::mip`), tiled from
+    `texturemins >> miplevel`; one cache slot per face per level
+    (`cachespots[miplevel]`). The span walker reads it through gradients
+    scaled by `1 / (1 << miplevel)` (`PolyGrads::mip_scaled`, `D_CalcGradients`'
+    `mipscale`). Submodels and the external `b_*.bsp` boxes pick their levels
+    the same way. A texture without levels 1..3 (synthetic tests) stays at
+    mip 0; a face whose texinfo maps it to a line (zero extent; id's
+    `D_SCAlloc` would `Sys_Error`) keeps the per-pixel path.
+  - **Oracle,** exact% world-only 320×200 (id as shipped): e1m1 84.74 →
+    92.20, e1m2 64.06 → 91.03, e1m3 65.88 → 96.68, e1m7 75.62 → 92.58;
+    640×480: 90.84 → 94.78, 78.28 → 95.40, 90.73 → 97.56, 94.58 → 97.39;
+    against id's exact per-pixel perspective (`--spans 1`) 86.95 → 94.55,
+    64.26 → 92.64, 66.11 → 97.47, 80.37 → 97.46. With both renderers at mip
+    0 (`d_mipscale 0`) every row is unchanged — the mip-0 bake is the old one.
+    Muzzle-flash frames (`--c-cmd +attack --settle 3`, as shipped): e1m1 80.64
+    → 87.02, e1m2 60.66 → 89.76, e1m3 61.00 → 95.80.
+  - **Goldens:** e1m1 `bb64996e` unchanged (every face in that view is at mip
+    0), e1m2 `8186a64c` → `3d47c70d` (38,742 px, 15.1%), e1m3 `f41e8b59` →
+    `c7e5b50e` (31,730 px, 12.4%): the distant walls, now drawn from id's
+    coarser levels.
+  - **Not done:** a brush model spanning several BSP leaves is split by
+    `R_DrawSolidClippedSubmodelPolygons` into fragments, each with its own
+    `nearzi` and so possibly its own level; the port picks one level per face.
+    The wasm console has no `d_mipscale`/`d_mipcap` commands yet.
+
+- ✅ **Lightmap stepping** (oracle class 6, ±1 colormap row on 1.5–4.4% of
+  pixels). The bake took a float bilinear lightmap factor at each texel's corner
+  and then picked the row. id builds `blocklights` in 8.8 integers
+  (`R_BuildLightMap`: each style's luxel times its `d_lightstylevalue`, plus
+  `R_AddDynamicLights`' truncated `(rad - dist)*256`), inverts and clamps them
+  (`(255*256 - bl) >> 2`, at least `1 << 6`), and `R_DrawSurfaceBlock8_mip0..3`
+  walks each `16 >> miplevel` cell down its left and right edges in integer
+  steps `(bottom - top) >> (4 - miplevel)` and along each row from the RIGHT
+  edge's value by `(left - right) >> (4 - miplevel)`, indexing
+  `colormap[(light & 0xFF00) + texel]`. Now exactly that
+  (`LightMap::blocklights_into`, `surf::draw_surface_block`); the port's f32
+  luxels are the C's sum over 256, each term exact, so `luxel * 256` is id's
+  integer. The oracle agent's temporary patch of earlier tonight, made
+  permanent for all four levels.
+  - **Oracle,** exact% world-only 320×200, item 1 → this: as shipped 92.20 →
+    97.44, 91.03 → 97.12, 96.68 → 99.16, 92.58 → 94.96 (e1m1/2/3/7);
+    640×480 94.78 → 99.20, 95.40 → 98.77, 97.56 → 99.30, 97.39 → 98.77;
+    against id's exact perspective (`--spans 1`, its own mips) 94.55 →
+    99.94, 92.64 → 99.18, 97.47 → 99.98, 97.46 → 99.91; both at mip 0 with
+    exact perspective 95.61 → 99.93, 97.40 → 99.88, 98.50 → 99.98, 98.66 →
+    99.91 (640×480: 99.96 / 99.96 / 99.99 / 99.98). What is left as shipped
+    is id's 8-pixel affine span segments (class 7, branch `quake/w2b`).
+    Over 72 more views (4 maps × 6 yaws × 3 pitches, `--spans 1`) the mean is
+    99.99%, the worst 99.83.
+  - **Goldens:** e1m1 `bb64996e` → `959d0221` (9,953 px, 3.9%), e1m2
+    `3d47c70d` → `0cd18471` (8,041 px, 3.1%), e1m3 `c7e5b50e` → `b63ae8b7`
+    (7,555 px, 3.0%): single colormap rows on light gradients. From before
+    item 1: 9,953 / 42,613 / 36,634 px.
+- ✅ **Dynamic lights at the chosen level** (w1's A2 path): a dlit face is baked
+  by the same `face_surf_block`, so it gets the level and the integer stepping
+  with the light's `blocklights` folded in (`cache->dlight` as before).
+  Muzzle-flash frames (`--c-cmd +attack --settle 3`), 320×200, base → now: as
+  shipped e1m1 80.64 → 95.36, e1m2 60.66 → 96.16, e1m3 61.00 → 98.98; mip 0
+  + exact 90.35 → 98.11, 96.85 → 99.46, 97.82 → 99.89. On the pixels id's
+  flash changes (id's lit frame against id's frame at the same view and
+  clock without the shot): e1m1 83.4% → 99.8% (14,296 px), e1m2 90.3% →
+  94.9% (825 px; the other 42 are the shot's blood particles, which `view`
+  does not draw), e1m3 96.1% → 99.5% (13,211 px). e1m1 keeps the harness's
+  settle ≥ 3 light-style offset (oracle README).
+- **Speed and memory** (items 1 and 2), native twin of `web/bench.py`, a fresh
+  process per resolution, medians of two runs; base → mip levels → + stepping:
+  - Texels baked per frame (`surf_texels`, the world cache plus the external
+    boxes' uncached bakes): demo1 4,348 → 2,847 / 3,511 / 3,993 (320×200 /
+    640×400 / 1280×800); walk_e1m1 35,185 → 3,963 / 6,983 / 11,482;
+    fire_e1m1 48,660 → 16,322 / 19,594 / 23,880; walk_e1m3 68,628 → 2,902 /
+    5,683 / 10,767.
+  - Time in `face_surf_block` (mean ms per frame): fire_e1m1 0.45–0.46 →
+    0.34–0.45 → 0.026–0.047; walk_e1m1 0.17–0.18 → 0.09–0.19 → 0.016–0.033.
+    Whole step, fire_e1m1 median / p95: 320×200 1.48 / 3.79 → 0.68 / 1.35
+    ms, 640×400 2.17 / 4.92 → 1.55 / 2.75, 1280×800 5.37 / 8.91 → 4.97 /
+    7.40; walk_e1m3 320×200 2.80 → 1.28, 640×400 3.78 → 2.32, 1280×800 7.09
+    → 5.78. demo1 moves within noise.
+  - Wasm (`web/bench.py --build`, two runs each, step median / p95 at 640×400,
+    median at 1280×800): walk_e1m3 3.42–3.60 / 4.60–4.86 → 2.62–2.78 /
+    3.49–3.63 ms, 7.50–7.74 → 6.58–6.85 (the external boxes' uncached bakes
+    0.81 → 0.08 ms); fire_e1m1 2.09–2.27 / 4.05–4.18 → 1.72–2.07 / 2.73–3.17,
+    5.67–5.94 → 5.37–5.75; walk_e1m1 p95 3.41–3.59 → 2.70–2.94; demo1 within
+    noise.
+  - `QUAKE_DLIGHT=eye` on e1m1 at 1280×800 (w1 left it at ~14 ms): radius 350
+    14.1–15.1 → 10.0–13.9 → 7.4–9.1 ms, radius 200 12.1–12.7 → 8.0–8.5 —
+    the unlit frame is 8.2–8.6.
+  - Surface cache resident (`surfcache_kb`, the most over a run): demo1 3,489
+    KB → 2,166 / 2,985 / 3,359; walk_e1m1 1,973 → 975 / 1,367 / 1,785;
+    walk_e1m3 3,350 → 1,071 / 1,757 / 1,998. (id's fixed pool is 600 KB at
+    320×200 and ~3.4 MB at 1280×800, `D_SurfaceCacheForRes`.)
+- **Still open:** `nearzi` is the clipped outline's, which is id's in all but
+  one quirk: `R_RenderFace` re-uses `r_rightexit`/`r_leftexit` when the edge
+  that should set them was cached as fully clipped by an earlier face this
+  frame, so id can give a face the `1/z` of a stale point from another face —
+  a finer level than its geometry (seen: face 733 at e1m2's first frame, id
+  mip 0 from a point at z 96, the port mip 1; 0.7% of that frame, 0.17% of
+  one of the 72 sweep views, nothing elsewhere). Reproducing it means
+  running id's edge clipping and edge cache in `R_RecursiveWorldNode`'s order.
+
+## Census client/host fixes (2026-09-25, branch `quake/fix-client`)
+
+One line per CENSUS.md finding fixed; the evidence and the C are in CENSUS.md
+and the commit messages.
+
+- ✅ **F2 single player pauses behind the menu/console** (`Host_ServerFrame`/`SV_RunClients`): `step_walk` runs no server frame while `key_dest != key_game`; `cl.time` (`w.clock`) freezes with it, host-time fades/countdowns keep going (new `Walk::host_time`); the attract demo keeps playing.
+- ✅ **F1 teleporters (and spawns) turn the view** (`SV_WriteClientdataToMessage` fixangle → `svc_setangle`; `Host_Spawn_f`'s setangle): after the server frame `step_walk` copies the player's `angles` into the view through `MSG_WriteAngle`/`ReadAngle` quantisation and clears `fixangle`; every walk builder starts facing the spawned player's `angles` (SelectSpawnPoint's spot, `info_player_start2` included) instead of parsing `info_player_start`.
+- ✅ **F4 an impulse pressed during the weapon cooldown is kept** (`SV_ReadClientMove` only sets a non-zero impulse; QC `ImpulseCommands` clears it after `W_WeaponFrame`'s cooldown return): `Server::physics_client` no longer zeroes `impulse` after PlayerPostThink (server.rs, a few lines + its two tests).
+- ✅ **F10 runes on the status bar** (`SV_WriteClientdataToMessage`: `items | serverflags << 28`): the live HUD's `items` is `client_items(w)`, so `Sbar_DrawInventory`'s sigil cells light up.
+- ✅ **F11 Tab = `+showscores`** (default.cfg `bind TAB +showscores`, `Sbar_Draw`'s `sb_showscores`): `BIND_SHOWSCORES` in the bindings table (TAB by default), `KeyMove::showscores` feeds `Hud::show_scores` live and in demo playback; the page no longer opens the menu on Tab (Esc still does).
+- ✅ **F17 weapon keys by key number** (default.cfg `bind 1 "impulse 1"`..`bind 8`, `bind 0 "impulse 0"`; Key_Event works on key numbers): `"impulse N"` commands in the bindings table, bound to the digit row by default; the page sends digits through `quakeKey` (e.code `Digit*`), so Shift+digit and AZERTY select weapons; the `e.key` digit path is gone.
+- ✅ **F16 damage flash, kick and pain face in god mode / with the Pentagram** (QC `T_Damage` accumulates `dmg_take`/`dmg_save` before its god/invulnerable returns; `SV_WriteClientdataToMessage` sends svc_damage and zeroes them; `V_ParseDamage`): `step_walk` reads and zeroes the three fields after the server frame instead of inferring the hit from health/armour deltas (the megahealth-rot guard is moot); the live view now has V_CalcViewRoll's directional kick and `cl.faceanimtime`'s pain face (`Hud::face_pain`, `face_p*`), demo playback too. `V_ParseDamage` lives in quake-wasm `view.rs`, shared.
+- ✅ **F6 gold bonus flash** (QC `stuffcmd(other, "bf\n")` at 16 pickup/powerup sites → `svc_stufftext` → `V_BonusFlash_f`, dropped `host_frametime*100` by V_UpdatePalette): `PF_stuffcmd` queues `(entity, text)` (builtins.rs; server.rs installs it at #21); the live walk runs `bf` for its player, demo playback runs recorded `svc_stufftext`; the bonus cshift sits between damage and powerup. Accepted gap: Cbuf_Execute would run it one host frame later.
+- ✅ **F18 new-weapon icon flash** (`CL_ParseClientdata` stamps `cl.item_gettime[j]` for newly set bits; `Sbar_DrawInventory`'s `flashon` picks `inva1..5` for a second): `Hud::item_gettime`, stamped by the live walk and the demo (zeroed with the level, so carried weapons flash at level start); keys/powerups/runes never visibly flash in the C (their `flashon` is 0).
+- ✅ **F13 demo trails** (`CL_RelinkEntities` → `R_RocketTrail` for model flags, live or demo): `EntSnapshot::num` + `DemoPlay::trail_org`; step_demo trails like step_walk (no EF_ROCKET dlight: demo dlights are still the open gap).
+- ✅ **F14 demo skins** (`CL_ParseUpdate` U_SKIN / baseline skin, `CL_ParseStatic`): demo.rs keeps the skin, `EntSnapshot::skin` → `ModelInstance::skinnum`; yellow armour is yellow in demo2/demo3.
+- ✅ **F15 attract loop cycles demo1 → demo2 → demo3** (quake.rc `startdemos`, `svc_disconnect` → `Host_EndGame` → `CL_NextDemo`): `DEMOS` + `build_demo_n`; the dispatcher starts the next demo when one has shown its last frame (same-demo wrap kept as the fallback).
+- ✅ **L2 cshift percents are ints** (client.h `cshift_t.percent` is `int`: V_ParseDamage's `+=` and V_UpdatePalette's drops truncate every frame — 150 → 147 at 72 fps): view.rs `cshift_add`/`cshift_drop` for the damage and bonus shifts, live and demo. Closes perf-b's first "seen, not changed" note above.
+- ✅ **L24 contents tint defaults to water** (`V_SetContentsColor`'s `default:` — sky included): `content_cshift` returns none only for empty/solid. Closes perf-b's second note.
+- ✅ **L1 live punchangle in whole degrees** (`MSG_WriteChar(punchangle[i])`): `client_punchangle` truncates to signed chars for the camera and the gun.
+- ✅ **L8 particles drawn before they move** (`R_DrawParticles`: free `die < cl.time`, draw, then move/ramp): `ParticleSystem::retire` + `integrate`, called around the draw list in step_walk/step_demo.
+- ✅ **L9 dlights drawn before they decay** (Host_Frame: `CL_DecayLights` after `SCR_UpdateScreen`; R_PushDlights skips `die < cl.time`): step_walk renders `pushed_dlights` and decays after the 3-D view.
+- ✅ **L11 notify lines** (`Con_Print` 38-column word-wrapped lines stamped at their start; `Con_DrawNotify` last 4 from `v = 0`): quake-wasm `ConNotify`, live + demo; `draw_notify` from y = 0. Still open: prints never reach the drop-down console's scrollback.
+- ✅ **L12 default.cfg binds** — ENTER `+jump`, MOUSE2 `+forward`, `\` and MOUSE3 `+mlook`, INS `+klook` seeded; the page sends MOUSE2/MOUSE3 while locked. Not done: PAUSE (no `pause`), the F-key commands, `t` messagemode.
+- ✅ **L14 New Game asks first while a game runs** (`M_SinglePlayer_Key` → `SCR_ModalMessage`, y/n/Escape, faded screen + `SCR_DrawNotifyString`): `Menu::new_game_confirm`, raised when the host-set `server_active`; y (`menu_quit_yes`) starts the game.
+
+## Census fixes, server side (2026-09-25, branch `quake/fix-server`)
+
+One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
+
+- ✅ **Chthon's electricity** — boss.qc `lightning_fire` writes TE_LIGHTNING3 to MSG_ALL (`sv.reliable_datagram`), which `CL_ParseServerMessage` parses like the datagram; the port decoded temp entities only from MSG_BROADCAST, so Chthon died with no bolt drawn. `server/msg.rs` now runs one svc parser per buffer (datagram, reliable), each reading temp entities and commands alike (fix first found by the `chthon` agent, salvaged `00bf4a7`). Test `cl_tent::tests::chthon_lightning_reaches_the_client_and_kills_him_on_e1m7`.
+- ✅ **F3 e1m8 low gravity** — `sv_gravity` is a live cvar (`server/host.rs`): world.qc `worldspawn`'s `cvar_set("sv_gravity", "100"|"800")` lands, `cvar("sv_gravity")` reads it, `SV_AddGravity`, `SV_Physics_Step`'s landing-sound threshold and the live `R_DrawParticles` gravity use it; a fresh server starts at 800. Test `census_e1m8_has_low_gravity` (+ `sv_gravity_cvar_drives_add_gravity`). The demo path keeps 800 (no server runs during playback).
+- ✅ **F5 b_*.bsp item boxes** — two causes. (1) `WorldModel::precache_model` spread the external model's bounds a second time (`Bsp::parse` already applies `Mod_LoadSubmodels`' pixel): the explosive box was 34 wide (hull2) and floated 2 units. (2) `world::clip_box` treated touching boxes as overlapping; the C box hull (`SV_InitBoxHull`) is half-open, `mins <= p < maxs`, so e1m1's 10-health box beside a grunt and e1m6's 25-health box beside an ogre no longer "fall out of the level" in PlaceItem's droptofloor. Oracle edict diff: both boxes present, explosive box at id's z -207.969; nothing else moved on any map. Tests `census_bmodel_item_bounds_are_spread_once`, `clip_box_is_half_open_like_the_c_box_hull`.
+- ✅ **F8 force_retouch** — `SV_Physics` relinks every live edict with `SV_LinkEdict(ent, true)` while the QC global is set (`spawn_tdeath`, `teleport_use` set 2) and decrements it after the loop; now both `run_frame` and `client_frame` do (world skipped, SOLID_NOT relinked without touching). e1m6 doors *31/*76 and e1m8 *6 open at the level start as in id (oracle: open by t 4.7; at t 1.7 the port is 0.2 s ahead, the signon-timing gap below). Tests `census_force_retouch_opens_e1m6_start_door`, `force_retouch_relinks_stationary_edicts_for_two_frames`. Open: the port connects the player at sv.time 1.2, id's signon at ~1.4.
+- ✅ **F9 looping mover sounds** — `queue_sounds` carries each sample's `cue ` loop window (`GetWavinfo`) through `poll_sound` (`sound_loop_start` -1 = one-shot) and no longer drops `misc/null.wav`; the page loops such a source (`SND_PaintChannels`) until a later sound on its (entity, channel) overrides it, re-spatializes it every frame from its fixed origin like the C channel, lets an inaudible sound still end its key's loop (`S_StartSound` picks the channel before the audibility test), guards the async first decode against an override that landed meanwhile, and stops every dynamic source on a level change (`S_StopAllSounds`). Tests `queue_sounds_carries_the_cue_loop_so_movers_hum_until_their_stop_sound`, `web/verify_loops.py` (demo1's first door hum loops, then its stop sound ends it).
+- ✅ **L4 `time` before PlayerPreThink** — `SV_Physics_Client` sets `pr_global_struct->time = sv.time` before `PlayerPreThink` (and `SV_Physics` before `StartFrame`); the port left the thinktime of the last think. Test `player_prethink_sees_sv_time_not_a_preceding_thinktime`.
+- ✅ **L20 StartFrame in every frame** — `run_frame` (the spawn settle frames) now runs `StartFrame` at `time = sv.time` like every `SV_Physics`. Test `run_frame_starts_with_startframe_like_sv_physics`.
+- ✅ **L25 (half) edict loop bound** — `SV_Physics` re-reads `sv.num_edicts` every iteration, so an edict a think spawns (a missile, a gib) gets physics on its spawn frame; `run_frame`/`client_frame` fixed the bound at frame start. Test `an_edict_spawned_by_a_think_moves_on_its_spawn_frame`. Not done: player-first order (the C reserves edict 1 for the client; the port allocates the player after the map, which also offsets every edict number by one against id's) — a numbering change across spawn, connect and savegames for a sub-frame ordering effect.
+- ✅ **L7 `restart` keeps only the level-entry runes** — `Server` keeps `svs.serverflags` (set with the QC global before spawn); `try_restart` respawns with it instead of the live global, as `Host_Restart_f` -> `SV_SpawnServer` does (only `SV_SaveSpawnparms`, at a changelevel, reads the global back). Test `restart_respawns_with_the_level_entry_serverflags`. As in id, a loaded save starts from a fresh `svs.serverflags` (0), since `Host_Loadgame_f` never sets it.
+- ✅ **L18 world edict** — `set_map_name` (the port's `SV_SpawnServer` world setup) now also sets edict 0's `modelindex` 1, `SOLID_BSP`, `MOVETYPE_PUSH`, replacing the documented deviation; collision and `SV_PushMove` already skip edict 0 as the C does, and its pusher pass is inert (`nextthink` 0). The oracle edict diff loses its `worldspawn movetype 7/0 solid 4/0` line; the census tool's pusher list skips the world. Test `set_map_name_sets_up_the_world_edict_like_sv_spawnserver`.
+- ✅ **L5 client think order** — `Host_ServerFrame` runs `SV_RunClients` (`SV_ReadClientMove` + `SV_ClientThink`) before `SV_Physics`; `client_frame` now does too, so `PlayerPreThink`'s `PlayerJump`/`WaterMove` act on the accelerated velocity (it also gives a dead player `DropPunchAngle`, which only ran for WALK/FLY/NOCLIP). A standing forward jump on e1m1 now follows id's oracle frame for frame (10 u forward per frame; it made 3). Test `census_client_think_runs_before_player_prethink`.
+- ✅ **L6 ED_Alloc / ED_Free** — `Vm::spawn` reuses a free slot only if it was freed in the first two seconds of server time or more than 0.5 s ago (`freetime`), so a missile spawned the frame another is removed never inherits its slot (no stray trail); `Vm::free_edict` clears only `ED_Free`'s fields (model, takedamage, modelindex, colormap, skin, frame, origin, angles, solid; nextthink -1) and keeps the rest, as id does. Tests `ed_alloc_waits_half_a_second_before_reusing_a_freed_slot`, `ed_free_clears_only_the_fields_the_c_clears`.
+- ✅ **F7 the player's name** — `connect_client_inner` sets up the client edict as `Host_Spawn_f` does before `ClientConnect`: `netname` "player" (cl_name), `team` 1 ((cl_color & 15) + 1), `colormap` = its edict number. Obituaries read "player was shot by a Grunt". Test `census_player_netname_is_player`.
 
 ## Projection and spans (2026-09-25, branch `quake/w2b`)
 

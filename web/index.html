@@ -193,7 +193,8 @@
     <div class="col">
       <h2>Interface</h2>
       <div class="keys">
-        <span class="k"><kbd>Esc</kbd> / <kbd>Tab</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule — use <kbd>Tab</kbd> to stay)</span>
+        <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu; in fullscreen a <em>second</em> <kbd>Esc</kbd> also leaves fullscreen (browser rule)</span>
+        <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
         <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys</span>
         <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
@@ -235,6 +236,8 @@ const playEl = document.getElementById('play');
 const lockChip = document.getElementById('lockChip');
 const fsHint = document.getElementById('fsHint');
 const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
+// MouseEvent.button -> Quake keynum (keys.h K_MOUSE1/2/3): left, middle, right.
+const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
 // Is the in-game menu currently up (capturing keyboard)?
 function menuVisible() { return !!(exp && exp.menu_visible && exp.menu_visible()); }
@@ -360,7 +363,7 @@ addEventListener('keydown', e => {
   // --- Customize-controls bind grab: while the Keys screen waits for a key
   //     (menu.c bind_grab), EVERY key — including Escape (cancel), Tab, arrows,
   //     Enter — is the key being defined, so route it raw to the engine before
-  //     the Esc/Tab menu handling below can steal it (M_Keys_Key's grab branch
+  //     the Esc menu handling below can steal it (M_Keys_Key's grab branch
   //     runs before the normal switch in the C too).
   if (menuVisible() && exp && exp.menu_bind_grabbing && exp.menu_bind_grabbing()) {
     const bq = quakeKey(e);
@@ -369,13 +372,13 @@ addEventListener('keydown', e => {
     return;
   }
 
-  // --- Main menu navigation. Escape OR Tab reaches the menu (opens it from the
-  //     game, or backs out within it). Tab is the fullscreen-safe alternative:
-  //     in fullscreen the browser eats Escape to exit fullscreen, so Tab lets you
-  //     still reach the menu without leaving fullscreen. When the menu is up,
-  //     Arrow Up/Down move the cursor, Enter selects — and we DON'T let those
-  //     keys also drive the game (no movement/turn while navigating the menu).
-  if ((k === 'escape' || k === 'tab') && exp && exp.menu_cancel) {
+  // --- Main menu navigation. Escape reaches the menu (default.cfg's
+  //     "togglemenu": opens it from the game, backs out within it). Tab is
+  //     default.cfg's +showscores and goes to the engine below like any bound
+  //     key. When the menu is up, Arrow Up/Down move the cursor, Enter selects —
+  //     and we DON'T let those keys also drive the game (no movement/turn while
+  //     navigating the menu).
+  if (k === 'escape' && exp && exp.menu_cancel) {
     exp.menu_cancel();
     e.preventDefault();
     return;
@@ -402,28 +405,24 @@ addEventListener('keydown', e => {
     if (!e.repeat && k === 'y' && exp.menu_quit_yes) { exp.menu_quit_yes(); e.preventDefault(); return; }
     if (!e.repeat && k === 'n' && exp.menu_quit_no)  { exp.menu_quit_no();  e.preventDefault(); return; }
     // Swallow the other gameplay keys so the world stays idle behind the menu.
-    if (MOVE_KEYS.includes(k) || (k >= '1' && k <= '8')) { e.preventDefault(); return; }
+    if (MOVE_KEYS.includes(k)) { e.preventDefault(); return; }
   }
 
   if (k === 'f') toggleFullscreen();
-  // Weapon select: number keys 1-8 queue the matching QuakeC impulse
-  // (1 axe, 2 shotgun, 3 super shotgun, 4 nailgun, 5 super nailgun,
-  // 6 grenade launcher, 7 rocket launcher, 8 lightning) on the next frame.
-  if (!e.repeat && k >= '1' && k <= '8' && exp && exp.set_impulse) {
-    exp.set_impulse(parseInt(k, 10));
-    e.preventDefault();
-    return;
-  }
   // Every other game key goes to the engine by Quake keynum: the bindings
   // table (keys.c keybindings, editable in Options > Customize controls) turns
   // held keys into +forward/+back/+moveleft/+moveright/+jump/+attack/+speed/
-  // +lookup/+lookdown/turns each frame (CL_BaseMove/CL_AdjustAngles port).
+  // +lookup/+lookdown/turns each frame (CL_BaseMove/CL_AdjustAngles port), and
+  // key presses into commands — the digit row's "impulse 1".."impulse 8"
+  // (weapon select) by physical key (e.code), so Shift+digit and non-US
+  // layouts select weapons too.
   // The !e.repeat gate mirrors Key_Event's autorepeat ignore; held-state
   // movement needs only the first down (keyup clears it).
   const qk = quakeKey(e);
   if (!e.repeat && qk !== null && exp && exp.key_down) exp.key_down(qk);
-  // Stop the browser's own use of the movement keys (Space/arrows scroll).
-  if (MOVE_KEYS.includes(k)) e.preventDefault();
+  // Stop the browser's own use of the movement keys (Space/arrows scroll) and
+  // of Tab (focus moves).
+  if (MOVE_KEYS.includes(k) || k === 'tab') e.preventDefault();
 });
 addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
@@ -442,7 +441,7 @@ addEventListener('keyup', e => {
 // Space/Enter (the 🔊 sound toggle was the known offender — every jump replayed
 // the test SFX). Blur in the bubble phase right after the control acted; the
 // help drawer's <summary> holds focus the same way, so it's covered too. (Tab
-// never moves focus here — it's bound to the menu — so a click is the only way
+// never moves focus here — it is +showscores, its default prevented — so a click is the only way
 // any control gains focus.)
 document.addEventListener('click', e => {
   const f = e.target.closest && e.target.closest('button, summary');
@@ -479,8 +478,7 @@ fsBtn.addEventListener('click', toggleFullscreen);
 // first Esc only releases the capture (our pointerlockchange handler then opens
 // the menu — native muscle memory still works), but a SECOND Esc — pointer
 // free — exits fullscreen itself. That second step is the browser's, not ours;
-// F toggles fullscreen deliberately and Tab reaches the menu without ever
-// touching Esc.
+// F toggles fullscreen deliberately.
 let fsHintTimer = 0;
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement) { fsHint.classList.remove('show'); return; }
@@ -509,7 +507,7 @@ document.getElementById('demoBtn').addEventListener('click', () => {
   statusEl.textContent = 'loading demo1 (e1m3)…';
   setTimeout(() => {
     exp.boot_demo();
-    statusEl.textContent = "playing demo1 — id's recorded e1m3 run";
+    statusEl.textContent = "playing demo1 — id's recorded e1m3 run (demo2 and demo3 follow)";
   }, 30);
 });
 
@@ -638,7 +636,8 @@ function registerSource(src, ent, chan) {
   src.onended = () => { if (playingByKey.get(key) === src) playingByKey.delete(key); };
 }
 
-function playBuffer(buf, sp, ent, chan) {
+function playBuffer(buf, sp, ent, chan, lp) {
+  if (lp) { playDynLoop(buf, ent, chan, lp); return; }
   const s = audioCtx.createBufferSource();
   s.buffer = buf;
   playRouted(s, sp);
@@ -646,6 +645,60 @@ function playBuffer(buf, sp, ent, chan) {
   s.start();
   window.__sndStats.plays++;
 }
+
+// A one-shot whose sample has a `cue ` loop point loops, as SND_PaintChannels
+// does, until a later sound on its (entity, channel) overrides it (door, lift
+// and train hums until their stop sound) or all sounds stop (level change).
+// Like the C channel it is re-spatialized every frame from its fixed origin
+// (updateLoopingAudio). lp = {ls, le, ox, oy, oz, vol, atten, view}.
+let dynLoops = [];       // {src, lg, rg, lp}
+function playDynLoop(buf, ent, chan, lp) {
+  const src = makeLoopSource(buf, lp.ls, lp.le);
+  const lg = audioCtx.createGain(); lg.gain.value = 0;
+  const rg = audioCtx.createGain(); rg.gain.value = 0;
+  if (typeof audioCtx.createChannelMerger === 'function') {
+    const m = audioCtx.createChannelMerger(2);
+    src.connect(lg); lg.connect(m, 0, 0);
+    src.connect(rg); rg.connect(m, 0, 1);
+    m.connect(audioCtx.destination);
+  } else {
+    src.connect(lg); lg.connect(audioCtx.destination); // mono fallback
+  }
+  const l = { src, lg, rg, lp };
+  dynLoops.push(l);
+  spatializeDynLoop(l);
+  registerSource(src, ent, chan);
+  const keyed = src.onended;
+  src.onended = () => { dynLoops = dynLoops.filter(x => x !== l); if (keyed) keyed(); };
+  src.start();
+  window.__sndStats.plays++;
+  window.__sndStats.loops = (window.__sndStats.loops || 0) + 1;
+}
+function spatializeDynLoop(l) {
+  const p = l.lp;
+  // SND_Spatialize: the view entity is full volume, centred; else the law.
+  const sp = p.view ? { gain: p.vol, pan: 0 } : spatialGain(p.ox, p.oy, p.oz, p.vol, p.atten);
+  const mono = sp.gain * masterVolume();
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  l.lg.gain.value = clamp01(mono * (1 - sp.pan));
+  l.rg.gain.value = clamp01(mono * (1 + sp.pan));
+}
+
+// SND_PickChannel's override without a new source: stop what plays on the key.
+function stopKey(ent, chan) {
+  if (!(chan > 0)) return;
+  const key = ent + ':' + chan;
+  const prev = playingByKey.get(key);
+  if (prev) {
+    try { prev.stop(); } catch (e) {}
+    playingByKey.delete(key);
+    window.__sndStats.stops++;
+  }
+}
+// Latest sound issued per (entity, channel): an async first decode starts its
+// source only if no newer sound took the key meanwhile (else the stop sound of
+// a short door travel could land before the hum and leave it looping).
+const keySeq = new Map();
 
 // Drain pending svc_stopsound stops (demo playback): poll_stop_sound() returns
 // the packed wire short (entity<<3 | channel), or -1 when empty; stop() the
@@ -686,20 +739,36 @@ function drainGameSounds() {
     // exports are absent — never keyed).
     const ent = typeof exp.sound_entity === 'function' ? exp.sound_entity() : 0;
     const chan = typeof exp.sound_channel === 'function' ? exp.sound_channel() : 0;
-    if (sp && sp.gain <= 0.02) continue;          // inaudibly far — don't even decode
+    // The sample's cue loop window (poll_sound): start < 0 = a one-shot.
+    const ls = typeof exp.sound_loop_start === 'function' ? exp.sound_loop_start() : -1;
+    const lp = ls >= 0 && sp ? {
+      ls, le: exp.sound_loop_end(), ox: exp.sound_origin_x(), oy: exp.sound_origin_y(),
+      oz: exp.sound_origin_z(), vol: exp.sound_volume(), atten: exp.sound_attenuation(),
+      view: typeof exp.sound_is_view_entity === 'function' && !!exp.sound_is_view_entity(),
+    } : null;
+    // S_StartSound picks (and so overrides) the channel before it tests
+    // audibility: an inaudible sound still ends its key's loop, then drops.
+    if (sp && sp.gain <= 0.02) { stopKey(ent, chan); continue; }
+    const kkey = ent + ':' + chan;
+    const seq = (keySeq.get(kkey) || 0) + 1;
+    if (chan > 0) keySeq.set(kkey, seq);
+    const gen = typeof exp.sound_generation === 'function' ? exp.sound_generation() : 0;
     const ptr = exp.sound_ptr();
     const view = new Uint8Array(exp.memory.buffer, ptr, len);
     const key = wavKey(view);
     const cached = decodedSounds.get(key);
     if (cached) {
-      playBuffer(cached, sp, ent, chan);           // already decoded — instant, no hitch
+      playBuffer(cached, sp, ent, chan, lp);       // already decoded — instant, no hitch
       continue;
     }
-    // First time for this clip: copy out of wasm memory, decode, cache, play.
+    // First time for this clip: copy out of wasm memory, decode, cache, play —
+    // unless the key was overridden or the level changed while decoding.
     const copy = view.slice();
     audioCtx.decodeAudioData(copy.buffer).then(buf => {
       decodedSounds.set(key, buf);
-      playBuffer(buf, sp, ent, chan);
+      if (chan > 0 && keySeq.get(kkey) !== seq) return;
+      if (typeof exp.sound_generation === 'function' && exp.sound_generation() !== gen) return;
+      playBuffer(buf, sp, ent, chan, lp);
     }).catch(() => {});
   }
 }
@@ -797,6 +866,11 @@ function stopAllLoops() {
   for (const l of ambientLoops) { try { l.src.stop(); } catch (e) {} }
   staticLoops = []; ambientLoops = [];
   ambientStarted = false;
+  // S_StopAllSounds stops the dynamic channels too: every keyed one-shot and
+  // every looping one (a door hum must not carry into the next level).
+  for (const s of playingByKey.values()) { try { s.stop(); } catch (e) {} }
+  for (const l of dynLoops) { try { l.src.stop(); } catch (e) {} }
+  playingByKey.clear(); dynLoops = []; keySeq.clear();
 }
 
 // Decode WAV bytes through the shared content-hash cache, then cb(buffer).
@@ -897,6 +971,8 @@ function updateLoopingAudio() {
     l.lg.gain.value = clamp01(mono * (1 - sp.pan));
     l.rg.gain.value = clamp01(mono * (1 + sp.pan));
   }
+  // Looping one-shots (door/lift/train hums): the same per-frame law.
+  for (const l of dynLoops) spatializeDynLoop(l);
   // Leaf ambients: engine-ramped volume, both channels equal.
   for (const l of ambientLoops) {
     l.g.gain.value = clamp01(exp.ambient_gain(l.ch) * master);
@@ -920,15 +996,19 @@ canvas.addEventListener('mousedown', (e) => {
     // behaviour (inWalkMode() defaults true).
     if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
   }
-  // Left-click while locked is K_MOUSE1 (bound to +attack by default;
-  // rebindable in Options > Customize controls).
-  else if (e.button === 0 && exp && exp.key_down) { exp.key_down(200); }
+  // While locked the buttons are K_MOUSE1/2/3 (in_win.c: left, right,
+  // middle), through the bindings like any key — default.cfg: MOUSE1
+  // +attack, MOUSE2 +forward, MOUSE3 +mlook (rebindable in Options >
+  // Customize controls).
+  else if (MOUSE_KEYNUMS[e.button] && exp && exp.key_down) { exp.key_down(MOUSE_KEYNUMS[e.button]); }
   dragging = true;
 });
 addEventListener('mouseup', (e) => {
   dragging = false;
-  if (e.button === 0 && exp && exp.key_up) exp.key_up(200);   // K_MOUSE1 release
+  if (MOUSE_KEYNUMS[e.button] && exp && exp.key_up) exp.key_up(MOUSE_KEYNUMS[e.button]);
 });
+// The right button is MOUSE2 in the game, not the browser's context menu.
+canvas.addEventListener('contextmenu', e => e.preventDefault());
 // The standard web-port Esc pattern. The browser RESERVES Esc while the
 // pointer is locked — the keydown never reaches the page; Esc's only effect is
 // releasing the lock. So when the lock is LOST without the page asking (this

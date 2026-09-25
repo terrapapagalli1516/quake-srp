@@ -20,10 +20,10 @@
 
 use super::lightstyle::{snapshot_lightstyles, LIGHTSTYLES, MAX_LIGHTSTYLES};
 use super::msg::{
-    reset_svc_recognizer, reset_temp_entity_decoder, take_messages, take_particle_bursts,
+    reset_message_parsers, take_messages, take_particle_bursts,
     take_sound_events, take_static_sounds, take_svc_events, take_temp_entities,
 };
-use super::{parm_global_name, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME};
+use super::{parm_global_name, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
 use crate::vm::Vm;
 use crate::Result;
 
@@ -73,6 +73,38 @@ pub(super) fn set_skill_value(v: f32) {
 /// (mirrors the per-thread reset of the changelevel / lightstyle transports).
 pub(super) fn reset_skill() {
     SKILL.with(|s| s.set(1));
+}
+
+// ---------------------------------------------------------------------------
+// The `sv_gravity` cvar (sv_phys.c: `{"sv_gravity","800",false,true}`).
+//
+// QuakeC sets it: world.qc `worldspawn` does `cvar_set("sv_gravity", "100")`
+// on maps/e1m8.bsp (Ziggurat Vertigo) and `cvar_set("sv_gravity", "800")` on
+// every other map. `SV_AddGravity`, `SV_Physics_Step`'s landing-sound
+// threshold and the client's `R_DrawParticles` read `sv_gravity.value`. Held
+// in a per-thread cell for the same reasons as [`SKILL`].
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Live `sv_gravity` value, defaulting to the cvar's "800".
+    static SV_GRAVITY_CVAR: std::cell::Cell<f32> = const { std::cell::Cell::new(SV_GRAVITY) };
+}
+
+/// `sv_gravity.value`.
+pub(super) fn sv_gravity() -> f32 {
+    SV_GRAVITY_CVAR.with(|g| g.get())
+}
+
+/// `Cvar_Set("sv_gravity", …)` (the value already `atof`ed).
+pub(super) fn set_sv_gravity(v: f32) {
+    SV_GRAVITY_CVAR.with(|g| g.set(v));
+}
+
+/// Back to the default "800" for a fresh server. The C cvar outlives a map,
+/// but id1's worldspawn sets it on every map, so this only matters to progs
+/// that never set it (the synthetic test progs).
+pub(super) fn reset_sv_gravity() {
+    set_sv_gravity(SV_GRAVITY);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +229,7 @@ pub(super) fn bi_localcmd(vm: &mut Vm) -> Result<()> {
 pub(crate) struct TransportSnapshot {
     lightstyles: [String; MAX_LIGHTSTYLES],
     skill: i32,
+    sv_gravity: f32,
 }
 
 /// Capture the caller's per-thread transport state (see [`TransportSnapshot`]).
@@ -204,6 +237,7 @@ pub(crate) fn capture_transports() -> TransportSnapshot {
     TransportSnapshot {
         lightstyles: snapshot_lightstyles(),
         skill: skill_value(),
+        sv_gravity: sv_gravity(),
     }
 }
 
@@ -217,10 +251,10 @@ pub(crate) fn capture_transports() -> TransportSnapshot {
 pub(crate) fn restore_transports(snap: TransportSnapshot) {
     LIGHTSTYLES.with(|t| *t.borrow_mut() = snap.lightstyles);
     SKILL.with(|s| s.set(snap.skill));
+    set_sv_gravity(snap.sv_gravity);
     reset_changelevel();
     reset_restart();
-    reset_svc_recognizer();
-    reset_temp_entity_decoder();
+    reset_message_parsers();
     let _ = take_sound_events();
     let _ = take_static_sounds();
     let _ = take_particle_bursts();
@@ -320,11 +354,20 @@ impl Server {
         self.vm.gget_float("serverflags")
     }
 
-    /// Write the `serverflags` QuakeC global. A no-op if the progs lacks the
-    /// global (the loader guards the offset), so calling it on a progs without
-    /// runes is harmless. See [`Self::serverflags`].
+    /// `SV_SpawnServer`'s `pr_global_struct->serverflags = svs.serverflags`: set
+    /// the carried rune bits (`svs.serverflags`) and write them into the QuakeC
+    /// global. Call before [`Self::spawn_entities`]. A no-op on the global if the
+    /// progs lacks it. See [`Self::serverflags`].
     pub fn set_serverflags(&mut self, flags: f32) {
+        self.svs_serverflags = flags;
         self.vm.gset_float("serverflags", flags);
+    }
+
+    /// `svs.serverflags`: the rune bits this level was entered with — what a
+    /// `restart` (`Host_Restart_f` -> `SV_SpawnServer`, no `SV_SaveSpawnparms`)
+    /// respawns with, whatever the live global says now.
+    pub fn level_entry_serverflags(&self) -> f32 {
+        self.svs_serverflags
     }
 
     /// The current integer skill level (0=easy, 1=medium, 2=hard, 3=nightmare).
@@ -345,6 +388,13 @@ impl Server {
     /// filter inhibits the right monsters/items. See [`Self::skill`].
     pub fn set_skill(&mut self, value: f32) {
         set_skill_value(value);
+    }
+
+    /// The live `sv_gravity` cvar (800, or 100 on e1m8 — world.qc `worldspawn`).
+    /// The client side reads it too: `R_DrawParticles`' particle gravity is
+    /// `sv_gravity * 0.05`.
+    pub fn sv_gravity(&self) -> f32 {
+        sv_gravity()
     }
 
     /// Take (and clear) the deferred level-change request a `changelevel()`

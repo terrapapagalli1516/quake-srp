@@ -330,6 +330,17 @@ impl PolyGrads {
         Some(PolyGrads { zi, sz, tz, st_eye })
     }
 
+    /// The gradients in mip level `mip`'s texels: `s/z`, `t/z` and the eye's
+    /// `(s, t)` times `1 / (1 << mip)` — `D_CalcGradients`' `mipscale` on
+    /// `d_sdivzstepu`..`d_tdivzorigin` and `sadjust`/`tadjust` (a power of two,
+    /// so exact). `1/z` is unchanged. For reading a surface block baked at that
+    /// level ([`SurfBlock`](super::surf::SurfBlock)).
+    pub(super) fn mip_scaled(&self, mip: u32) -> PolyGrads {
+        let k = 1.0 / (1u32 << mip.min(3)) as f64;
+        let sc = |l: Linear| Linear { o: l.o * k, dx: l.dx * k, dy: l.dy * k };
+        PolyGrads { zi: self.zi, sz: sc(self.sz), tz: sc(self.tz), st_eye: [self.st_eye[0] * k, self.st_eye[1] * k] }
+    }
+
     /// The same gradients recovered from synthetic vertices (their `vz`, and
     /// `s`/`t` taken as absolute: `st_eye` is zero) — the unit tests' polygons,
     /// which have no plane. Solved on the vertex triple of LARGEST area, the
@@ -890,7 +901,9 @@ fn raster_turb16(
 /// as the port's extra, exact perspective) over a cached surface. The inner
 /// pixel is ONE block read (texture, lightmap and colormap are folded into the
 /// block) plus a palette lookup; the z test and write stay. This is the
-/// warm-frame hot path for walls.
+/// warm-frame hot path for walls. `grads` and `texmins` are in the block's
+/// mip-level texels (`PolyGrads::mip_scaled`); the block is `extents >>
+/// miplevel` a side, so its last texel is exactly `bbextents`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn raster_poly_cached(
     image: &mut Image,
@@ -921,14 +934,13 @@ pub(super) fn raster_poly_cached(
     // bit-identical to `1.0 / zi`, which the other span loops store.)
     let sadjust = ((st_eye[0] - texmins[0] as f64) * 65536.0 + 0.5).floor() as i64;
     let tadjust = ((st_eye[1] - texmins[1] as f64) * 65536.0 + 0.5).floor() as i64;
-    // `D_CalcGradients`' `bbextents = (extents << 16) - 1`: the block is one
-    // texel wider and taller than the surface's `extents` (it ends on the last
-    // luxel's texel, `face_surf_block`).
+    // `D_CalcGradients`' `bbextents = ((extents << 16) >> miplevel) - 1`: the
+    // block is `extents >> miplevel` texels a side (`face_surf_block`).
     let fx = BlockFixed {
         sadjust,
         tadjust,
-        bbextents: ((bw_i - 1) << 16).max(1) - 1,
-        bbextentt: ((bh_i - 1) << 16).max(1) - 1,
+        bbextents: (bw_i << 16) - 1,
+        bbextentt: (bh_i << 16) - 1,
     };
     // Local written-pixel tally (overdraw metric), folded into the profiler ONCE
     // at the end so the hot loop never touches a thread-local.

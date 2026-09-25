@@ -369,6 +369,7 @@ fn build_walk_savegame(text: &str) -> Result<Walk, String> {
     let _ = w.server.drain_temp_entities();
     let _ = w.server.drain_messages();
     let _ = w.server.drain_svc_events();
+    let _ = quake_rs::builtins::take_stufftext();
     Ok(w)
 }
 

@@ -38,15 +38,17 @@ pub fn view_bob(vel_xy: f32, time: f32) -> f32 {
     bob.clamp(-7.0, 4.0)
 }
 
-/// The full-screen colour shift for a leaf content type (Quake's `cshift_water`
-/// / `cshift_slime` / `cshift_lava` from view.c), as `(rgb, percent)` where
-/// `percent` is 0..150. Empty / solid / sky return `None` (no tint).
+/// `V_SetContentsColor` (view.c): the full-screen colour shift for the view
+/// leaf's contents (`cshift_empty` / `cshift_lava` / `cshift_slime` /
+/// `cshift_water`), as `(rgb, percent)` where `percent` is 0..150. Empty and
+/// solid have none; the C's `default:` is water — every other contents, sky
+/// included (an eye in a sky volume, noclip only, is water-tinted).
 pub fn content_cshift(contents: i32) -> Option<([u8; 3], f32)> {
     match contents {
-        crate::bsp::CONTENTS_WATER => Some(([130, 80, 50], 128.0)),
+        crate::bsp::CONTENTS_EMPTY | crate::bsp::CONTENTS_SOLID => None,
         crate::bsp::CONTENTS_SLIME => Some(([0, 25, 5], 150.0)),
         crate::bsp::CONTENTS_LAVA => Some(([255, 80, 0], 150.0)),
-        _ => None,
+        _ => Some(([130, 80, 50], 128.0)),
     }
 }
 
@@ -221,6 +223,9 @@ mod tests {
         assert_eq!(content_cshift(crate::bsp::CONTENTS_SLIME), Some(([0, 25, 5], 150.0)));
         assert_eq!(content_cshift(crate::bsp::CONTENTS_LAVA), Some(([255, 80, 0], 150.0)));
         assert_eq!(content_cshift(crate::bsp::CONTENTS_EMPTY), None);
+        assert_eq!(content_cshift(crate::bsp::CONTENTS_SOLID), None);
+        // V_SetContentsColor's `default:` is water — sky included.
+        assert_eq!(content_cshift(crate::bsp::CONTENTS_SKY), Some(([130, 80, 50], 128.0)));
         assert_eq!(powerup_cshift(IT_QUAD | IT_INVULNERABILITY), Some(([0, 0, 255], 30.0)));
         assert_eq!(powerup_cshift(0), None);
     }

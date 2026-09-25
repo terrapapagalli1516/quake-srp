@@ -761,7 +761,27 @@ impl ParticleSystem {
     /// bounds-checked against the ramp table — a particle dies (per the C's
     /// `ramp >= N` guard) before its cursor could ever index past the array end,
     /// so no out-of-range access is possible even with a pathological `dt`.
+    ///
+    /// A front-end that draws the particles should follow `R_DrawParticles`'
+    /// order instead: [`retire`](Self::retire), draw, then
+    /// [`integrate`](Self::integrate) — this is the two halves in one call.
     pub fn advance(&mut self, dt: f32, now: f32, gravity: f32) {
+        self.integrate(dt, now, gravity);
+        // Retire expired particles (die <= now). retain keeps the live ones.
+        self.particles.retain(|p| p.die > now);
+    }
+
+    /// The head of `R_DrawParticles`' loop: free every particle whose `die <
+    /// cl.time` (one that dies exactly now is still drawn this frame).
+    pub fn retire(&mut self, now: f32) {
+        self.particles.retain(|p| p.die >= now);
+    }
+
+    /// The tail of `R_DrawParticles`' loop, run on each particle AFTER it was
+    /// drawn: `org += vel*frametime` and the per-type velocity/ramp update (a
+    /// ramp that runs out sets `die = now - 1`, the C's `die = -1`, so the next
+    /// [`retire`](Self::retire) frees it). Nothing is removed here.
+    pub fn integrate(&mut self, dt: f32, now: f32, gravity: f32) {
         let grav = gravity * dt;
         let time1 = dt * 5.0;
         let time2 = dt * 10.0;
@@ -837,8 +857,6 @@ impl ParticleSystem {
                 }
             }
         }
-        // Retire expired particles (die <= now). retain keeps the live ones.
-        self.particles.retain(|p| p.die > now);
     }
 
     /// The live particles (read-only). A front-end maps these to
@@ -1465,5 +1483,28 @@ mod tests {
         assert_eq!(ramp_color(&RAMP3, 6.0, 6.0), None);
         assert_eq!(ramp_color(&RAMP1, f32::NAN, 8.0), None);
         assert_eq!(ramp_color(&RAMP1, -1.0, 8.0), Some(0x6f)); // clamped to idx 0
+    }
+
+    /// CENSUS L8: R_DrawParticles frees `die < cl.time`, draws, THEN moves —
+    /// so the spray particles born with `die = cl.time + 0.1*0` are drawn once
+    /// (advance's move-then-retire never showed one in five), at their spawn
+    /// point.
+    #[test]
+    fn retire_then_integrate_draws_a_particle_on_its_last_frame() {
+        let mut sys = ParticleSystem::new();
+        let mut rng = Lcg::new(7);
+        sys.spawn_burst([0.0; 3], [0.0; 3], 73, 40, 1.0, &mut rng);
+        let born = sys.len();
+        let dying_now = sys.particles().iter().filter(|p| p.die == 1.0).count();
+        assert!(dying_now > 0, "some sprays die the frame they are born");
+        let spawn_org: Vec<_> = sys.particles().iter().map(|p| p.origin).collect();
+        sys.retire(1.0);
+        assert_eq!(sys.len(), born, "die == cl.time is still drawn");
+        let drawn: Vec<_> = sys.particles().iter().map(|p| p.origin).collect();
+        assert_eq!(drawn, spawn_org, "drawn where they were spawned");
+        sys.integrate(0.1, 1.0, 40.0);
+        assert_eq!(sys.len(), born, "integrate removes nothing");
+        sys.retire(1.1);
+        assert_eq!(sys.len(), born - dying_now, "next frame frees them");
     }
 }
