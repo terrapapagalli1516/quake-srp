@@ -9,6 +9,7 @@ diffs the two frames pixel for pixel.
 oracle/build.sh               # once (~20 s, docker); again after editing oracle/c/*
 uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-by-side PNGs
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
+uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
 ```
 
 Needs docker (for the build only), uv, cargo, and the shareware pak at
@@ -27,7 +28,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable); `d_mipscale` and `d_mipcap` are handed to the port too (`quaketool view --d-mipscale/--d-mipcap`). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
 | `--viewmodel` | draw the weapon too (the port is handed id's `cl.viewent` origin and angles, `quaketool view --viewent`) |
-| `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD |
+| `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD; `screen2d.py` compares the 2-D layer |
 | `--quaketool PATH` / `--oracle PATH` | A/B a different build of either side |
 
 ### Reading the output
@@ -275,5 +276,107 @@ Timings are noisy: compare within one sitting.
   puffs count as differences there.
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
-- `viewsize` below 120: the C side renders it (`--c-only --full`), the port's
-  `view` does not draw the HUD or shrink the 3-D view, so there is no diff yet.
+- `viewsize` below 120 and the rest of the 2-D layer: see the next section.
+
+## The 2-D layer (`screen2d.py`)
+
+```sh
+uv run oracle/screen2d.py                                   # every scenario, 320x200 + 640x400
+uv run oracle/screen2d.py --res 960x600 --only hud,console  # one mode, some scenarios
+uv run oracle/screen2d.py --list                            # the scenarios and their shots
+```
+
+The status bar, inventory, face, numbers, scoreboards, intermission and finale
+overlays, centerprints, notify lines, console, menus, fade and backtile, measured
+against id's own composited screen. Each scenario is a list of steps (set a stat,
+press a key, open the console, centerprint, start an intermission, let N frames
+pass, shoot) played through both programs from the same e1m1 start, 30 frames
+after the map loads:
+
+- **id's side** is the oracle run from a console script: `oracle_stage 1` dumps
+  the screen at `VID_Update`, and the new commands in `c/oracle.c` set the state:
+  `oracle_blank idx` (the 3-D view one flat palette index after every
+  `R_RenderView`), `oracle_field`/`oracle_global` (player fields and QuakeC
+  globals through `ED_ParseEpair`), `oracle_centerprint`, `oracle_intermission n t
+  [text]` (what `svc_intermission`/`svc_finale`/`svc_cutscene` do on the client),
+  `oracle_faceanim` (the pain face), `oracle_key` (`Key_Event`, so menus are
+  driven by keys as a player drives them), `oracle_quitmsg` (the quit prompt's
+  `rand()&7`). A shot's `.json` now carries `realtime`, `host_time`,
+  `scr_centertime_start`, `scr_con_current`, `key_dest`, `sb_lines`, `cl.stats`
+  and so on. `vid_oracle.c` registers `snd_null`'s two volume cvars (the Options
+  sliders read 0 without) and draws the video menu's title, so Options shows its
+  "Video Options" row as the DOS and Windows drivers do.
+- **The port's side** is the live `App` (the browser's own code, compiled
+  natively) driven through the page's exports by an ignored test,
+  `quake-wasm/src/oracle_screen.rs` (`QUAKE_SCREEN_SCRIPT=script cargo test
+  --release --lib oracle_screen -- --ignored`; the script commands are in its
+  header). A test-only hook in `cl_walk.rs` paints the view the same flat colour,
+  and each shot is handed the C frame's clocks (`realtime` for the flashing
+  cursors, `host_time` for the menu's spinning dot, the finale's reveal time).
+- Both sides get the port's two input defaults: Always Run (`cl_forwardspeed
+  400`), and the WASD binds (`keys.rs`; so the Customize screen compares drawing,
+  not bindings).
+
+With the 3-D view one colour, what differs is the 2-D layer. `exact%` is over the
+whole screen; `2d exact%` over the pixels that are not the blank colour in either
+screen. Colours are compared as presented, after `V_UpdatePalette`, so the
+powerup tints count. Per shot: `<scenario>.<shot>.side.png` (C | port | white
+where they differ). Bulky: write `--out` to disk, not `/tmp`.
+
+**Results** (2026-09-25, branch `quake/fid2d`): the lowest `2d exact%` of each
+scenario's shots, before the branch -> after.
+
+| scenario (shots) | 320x200 | 640x400 | 960x600 |
+|---|---:|---:|---:|
+| hud: viewsize 100/110/120/50/30 (5) | 98.4 -> 100 | 4.1 -> 100 | 2.9 -> 100 |
+| full inventory, keys, 4 runes (1) | 97.9 -> 100 | 3.7 -> 100 | 2.7 -> 100 |
+| each weapon selected (8) | 96.9 -> 100 | 3.6 -> 100 | 2.5 -> 100 |
+| faces by health, pain, dead (9) | 98.4 -> 100 | 4.1 -> 100 | 2.7 -> 100 |
+| quad, ring, pentagram, suit, ring+pent (5) | 98.4 -> 100 | 3.3 -> 100 | 2.4 -> 100 |
+| armour types (3) | 98.4 -> 100 | 3.6 -> 100 | 2.5 -> 100 |
+| new-weapon flash (1) | 96.7 -> 98.3 | 4.1 -> 99.2 | 2.9 -> 99.4 |
+| Tab scoreboard at viewsize 100/110/120/50 (4) | 98.4 -> 100 | 4.2 -> 100 | 2.0 -> 100 |
+| centerprint 1/3/5 lines, expired (4) | 91.6 -> 100 | 3.8 -> 100 | 2.7 -> 100 |
+| notify lines (1) | 98.6 -> 100 | 3.8 -> 100 | 2.6 -> 100 |
+| console sliding, down, typing (3) | 36.7 -> 99.1 | 4.8 -> 98.2 | 2.8 -> 97.3 |
+| intermission, also at viewsize 50 (2) | 100 -> 100 | 0.1 -> 100 | 0.0 -> 100 |
+| finale mid-reveal, later (2) | 85.7 -> 100 | 0.6 -> 100 | 0.0 -> 100 |
+| menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 | 43.8 -> 99.9 | 47.1 -> 99.95 |
+| menus: options, customize, video (3) | 95.4 -> 95.5 | 41.5 -> 98.8 | 44.7 -> 99.5 |
+| menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
+| quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
+
+The before column is `bbfc6bc` with the same harness. The fixes, one commit
+each (`AUDIT.md`, "The 2-D layer"): the ammo counts 4 px left; a "quake-rs" label
+under the main menu; a note line under Multiplayer; centerprints one row low;
+the whole 2-D layer blown up from 320x200 in every larger mode (id draws it 1:1:
+that is now the default and the blow-up an opt-in extra); the console (a fixed
+60% panel, no slide, the conback's top rows, its own text layout); the quit
+prompt (an invented box and question); the console's line width; the notify
+lines surviving a console toggle; the console lingering after `map`/`load`.
+
+**What is left, and why**
+
+- *Console* (400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
+  string stamped on the conback. id's Linux build (the oracle) writes "(Linux
+  Quake 1.30) 1.09"; the port writes what the DOS build writes, "1.09", at the
+  same place — it matches the tail of the oracle's string pixel for pixel. The
+  Windows build wrote "(WinQuake) 1.09".
+- *Video Options* (2422 px): the mode list is the video driver's (`VID_MenuDraw`
+  in `vid_win.c`/`vid_dos.c`), and the port's is its own; only the title is
+  id's in both.
+- *The new-weapon flash* (256 px): not the 2-D layer. The port's `sv.time`
+  adds up in f32 (`sv_phys.rs`: `gset_float("time", start_time + dt)`), id's is a
+  double; after 60 frames of 0.1 s the port's clock is 7.2999954, so
+  `(int)((cl.time - item_gettime)*10)` lands on 2 where id's gives 3 — the flash
+  shows the frame before. At the oracle's exact 0.1 s frames every sample sits on
+  such a boundary; at real frame times it is a one-frame phase shift.
+- *Returning to Single Player from Load* (206 px): id keeps each menu's cursor
+  (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...: Escape from
+  Options lands on "Options"); the port's one cursor starts every screen at its
+  first row. Behaviour in `menu.rs`, left for after the Extras-menu work.
+- Not in the matrix: the pause plaque (the port has no `pause`), the loading
+  plaque (the port loads within a frame and draws none), `SCR_ModalMessage`'s New
+  Game question (it blocks in a key loop the null input driver never ends; its
+  text goes through the fixed `center_string_top`), the attract demo's HUD (the
+  same drawing code as the live one), the crosshair (off by default).
