@@ -59,8 +59,10 @@ pub extern "C" fn menu_select() {
                 }
                 MenuAction::OpenConsole => {
                     // Options "Go to console": select() already closed the menu;
-                    // open the drop-down console (Con_ToggleConsole_f).
-                    a.console.open = true;
+                    // M_Options_Key runs Con_ToggleConsole_f (con_times zeroed).
+                    if !a.console.open {
+                        a.toggle_console();
+                    }
                 }
                 MenuAction::ResetDefaults => {
                     // Options "Reset to defaults": select() reset the in-menu

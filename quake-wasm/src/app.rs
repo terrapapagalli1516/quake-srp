@@ -141,6 +141,20 @@ impl App {
         }
     }
 
+    /// `Con_ToggleConsole_f` (console.c): the console goes down or up, the
+    /// typing is cleared on the way up, and `con_times` is zeroed — nothing
+    /// printed so far shows as a notify line afterwards. The `~` key and
+    /// Options > "Go to console" (M_Options_Key) both run it.
+    pub(crate) fn toggle_console(&mut self) {
+        self.console.toggle();
+        if let Some(w) = self.walk.as_mut() {
+            w.notify.clear();
+        }
+        if let Some(d) = self.demo.as_mut() {
+            d.notify.clear();
+        }
+    }
+
     /// `Con_Print`'s `con_times` for what the host printed on the console
     /// ([`Console::take_unnotified`](quake_rs::console::Console::take_unnotified)):
     /// the active mode's notify lines get it, stamped on the clock they age

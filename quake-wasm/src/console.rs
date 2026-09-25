@@ -13,17 +13,9 @@ use crate::host_cmd::execute_console_command;
 /// playing; closing slides it back. While open the console owns the keyboard.
 #[no_mangle]
 pub extern "C" fn console_toggle() {
-    ensure_app(|a| {
-        a.console.toggle();
-        // Con_ToggleConsole_f: `memset (con_times, 0, sizeof(con_times))` —
-        // the notify lines are gone after the console goes down or up.
-        if let Some(w) = a.walk.as_mut() {
-            w.notify.clear();
-        }
-        if let Some(d) = a.demo.as_mut() {
-            d.notify.clear();
-        }
-    });
+    // Con_ToggleConsole_f: `memset (con_times, 0, sizeof(con_times))` too —
+    // the notify lines are gone after the console goes down or up.
+    ensure_app(|a| a.toggle_console());
 }
 
 /// `1` when the console is open (capturing the keyboard), else `0`. The page
@@ -206,8 +198,33 @@ mod tests {
         assert_eq!(last.as_deref(), Some("loading e1m2"));
     }
 
+    /// Options > "Go to console" is Con_ToggleConsole_f (M_Options_Key), which
+    /// zeroes con_times: the notify lines go (the port opened the console
+    /// without it).
+    #[test]
+    fn go_to_console_is_con_toggleconsole_f() {
+        use crate::app::boot;
+        use crate::menu::{menu_cancel, menu_down, menu_select, menu_visible};
+        use crate::test_util::{close_menu, walk_mut};
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| {
+            let t = w.host_time;
+            w.notify.print("You got the shells\n", t);
+        });
+        menu_cancel(); // Escape: Main
+        menu_down();
+        menu_down();
+        menu_select(); // Options
+        menu_down(); // Go to console
+        menu_select();
+        assert_eq!((menu_visible(), console_visible()), (0, 1));
+        assert!(walk_mut(|w| w.notify.visible(w.host_time).is_empty()));
+    }
+
     #[test]
     fn console_toggle_flips_visibility_and_gates_typing() {
+
         // ensure_app exists; start closed.
         ensure_app(|_| {});
         assert_eq!(console_visible(), 0, "console starts closed");
