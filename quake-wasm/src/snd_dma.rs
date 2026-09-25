@@ -730,7 +730,8 @@ mod tests {
     use crate::test_util::*;
     use quake_rs::progs::Progs;
     use quake_rs::server::Server;
-    use crate::{boot, boot_attract, boot_demo, menu_down, menu_select, menu_up};
+    use crate::menu::{menu_down, menu_select, menu_up};
+    use crate::{boot, boot_attract, boot_demo};
 
     use quake_rs::server::SoundEvent;
 
