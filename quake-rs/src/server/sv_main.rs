@@ -126,6 +126,7 @@ impl Server {
             lightstyles: std::array::from_fn(|_| String::new()),
             map_name: String::new(),
             client_spawn_parms: [0.0; NUM_SPAWN_PARMS],
+            svs_serverflags: 0.0, // Host_Map_f: "haven't completed an episode yet"
         })
     }
 

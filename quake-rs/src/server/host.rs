@@ -354,11 +354,20 @@ impl Server {
         self.vm.gget_float("serverflags")
     }
 
-    /// Write the `serverflags` QuakeC global. A no-op if the progs lacks the
-    /// global (the loader guards the offset), so calling it on a progs without
-    /// runes is harmless. See [`Self::serverflags`].
+    /// `SV_SpawnServer`'s `pr_global_struct->serverflags = svs.serverflags`: set
+    /// the carried rune bits (`svs.serverflags`) and write them into the QuakeC
+    /// global. Call before [`Self::spawn_entities`]. A no-op on the global if the
+    /// progs lacks it. See [`Self::serverflags`].
     pub fn set_serverflags(&mut self, flags: f32) {
+        self.svs_serverflags = flags;
         self.vm.gset_float("serverflags", flags);
+    }
+
+    /// `svs.serverflags`: the rune bits this level was entered with — what a
+    /// `restart` (`Host_Restart_f` -> `SV_SpawnServer`, no `SV_SaveSpawnparms`)
+    /// respawns with, whatever the live global says now.
+    pub fn level_entry_serverflags(&self) -> f32 {
+        self.svs_serverflags
     }
 
     /// The current integer skill level (0=easy, 1=medium, 2=hard, 3=nightmare).

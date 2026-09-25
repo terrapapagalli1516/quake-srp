@@ -366,6 +366,13 @@ pub struct Server {
     /// carried/saved set; `Host_Savegame_f` writes exactly these into the
     /// `.sav` header, and `Host_Loadgame_f` restores them from it.
     pub(crate) client_spawn_parms: [f32; NUM_SPAWN_PARMS],
+    /// `svs.serverflags` (server.h): the rune bits kept across levels.
+    /// `SV_SpawnServer` writes it into the QC global before the entities load;
+    /// only `SV_SaveSpawnparms` (a changelevel) reads the live global back. A
+    /// `restart` therefore respawns with this LEVEL-ENTRY value: die on e1m7
+    /// after taking the rune and id's game loses it. Set by
+    /// [`Server::set_serverflags`].
+    svs_serverflags: f32,
 }
 
 /// The result of [`Server::spawn_entities`].
