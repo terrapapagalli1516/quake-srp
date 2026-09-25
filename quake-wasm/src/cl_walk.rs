@@ -47,6 +47,15 @@ fn apply_fixangle(w: &mut Walk) {
     w.server.vm.ent_set_float(p, "fixangle", 0.0);
 }
 
+/// `cl.items` as SV_WriteClientdataToMessage sends it: the player's `items`
+/// with the rune bits "stuffed into the high bits of items for sbar" —
+/// `(int)ent->v.items | ((int)pr_global_struct->serverflags << 28)`. QC
+/// `sigil_touch` only sets `serverflags`, so this is how a rune reaches the
+/// status bar.
+pub(crate) fn client_items(w: &Walk) -> i32 {
+    (w.server.vm.ent_get_float(w.player, "items") as i32) | ((w.server.serverflags() as i32) << 28)
+}
+
 /// Owned visible-entity descriptor gathered from the server before rendering:
 /// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
 type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32);
@@ -860,7 +869,7 @@ pub(crate) fn step_walk(
             // sync with the weapon), not always shells — sbar.c draws currentammo.
             ammo: stat("currentammo"),
             armor: stat("armorvalue"),
-            items: stat("items"),
+            items: client_items(w),
             weapon: stat("weapon"),
             ammo_shells: stat("ammo_shells"),
             ammo_nails: stat("ammo_nails"),

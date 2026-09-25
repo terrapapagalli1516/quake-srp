@@ -257,7 +257,6 @@ fn census_weapon_switch_survives_the_cooldown() {
 /// draws sigil i when `cl.items & (1<<(28+i))`. QC `sigil_touch` only ORs
 /// `serverflags`. The live HUD is built from the bare `items` field.
 #[test]
-#[ignore = "census F10: rune (sigil) icons never reach the live status bar"]
 fn census_rune_icons_reach_the_status_bar() {
     let mut w = build_walk_map("maps/e1m7.bsp").expect("e1m7 boots");
     for _ in 0..3 {
