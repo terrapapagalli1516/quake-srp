@@ -1,0 +1,1934 @@
+//! Per-frame physics: `SV_Physics` over every edict — thinks, the movetype
+//! integrators, pushers, and the player's slide / stair-step move.
+//!
+//! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
+//! Source: `WinQuake/sv_phys.c` — `SV_Physics` (as [`Server::run_frame`] and,
+//! with the local client, [`Server::client_frame`]), `SV_RunThink`,
+//! `SV_Physics_Pusher` / `SV_PushMove`, `SV_Physics_None` / `_Noclip` /
+//! `_Step` / `_Toss`, `SV_Physics_Client`, `SV_CheckStuck`,
+//! `SV_TestEntityPosition`, `SV_CheckWater`, `SV_CheckWaterTransition`,
+//! `SV_AddGravity`, `SV_CheckVelocity`, `SV_PushEntity`, `SV_FlyMove`,
+//! `SV_WalkMove`, `SV_WallFriction`, `SV_TryUnstick`, `ClipVelocity`.
+//!
+//! The collision queries are world.c's (`sv_world.rs`); the player's wish
+//! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
+
+use super::host::{reset_changelevel, reset_restart};
+use super::lightstyle::snapshot_lightstyles;
+use super::msg::{reset_svc_recognizer, reset_temp_entity_decoder};
+use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
+use super::{
+    FrameReport, Server, UserCmd, CONTENTS_EMPTY,
+    CONTENTS_SOLID, FL_FLY, FL_ONGROUND, FL_SWIM, FL_WATERJUMP, MOVETYPE_BOUNCE, MOVETYPE_FLY,
+    MOVETYPE_FLYMISSILE, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, MOVETYPE_STEP,
+    MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_BSP, SOLID_NOT, SOLID_TRIGGER, SV_GRAVITY, SV_MAXVELOCITY,
+};
+use crate::math::{add as v_add, angle_vectors, Vec3};
+use crate::world;
+use crate::Result;
+
+impl Server {
+    /// One server frame (a stripped `SV_Physics`): advance `time` by `dt`, set
+    /// `frametime`, then for each non-free edict run `SV_RunThink` and apply the
+    /// minimal per-movetype physics. Returns how many thinks fired.
+    ///
+    /// The host is PRESENT throughout the loop (think functions reach it via
+    /// `with_host`); only the brief `PushEntity` trace borrows it out.
+    pub fn run_frame(&mut self, dt: f32) -> Result<FrameReport> {
+        // host_frametime = dt; sv.time advances at the END in the C, but the
+        // think-time test compares against sv.time + host_frametime, so we set
+        // frametime now and bump time after the loop.
+        self.vm.gset_float("frametime", dt);
+        // Drop any half-collected temp-entity message from a prior (possibly
+        // faulted) frame so this frame's Write* bursts parse cleanly.
+        reset_temp_entity_decoder();
+        reset_svc_recognizer();
+        // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
+        self.cleanup_ents();
+        let start_time = self.time();
+        // Record sv.time for the monster-locomotion relink touches (SV_TouchLinks
+        // uses sv.time, not the clamped per-think `time` global).
+        self.vm.sv_time = start_time;
+
+        let mut thinks_fired = 0usize;
+        let mut think_errors = 0usize;
+        let n = self.vm.num_edicts();
+
+        for e in 0..n {
+            // edict 0 is the world; process every non-free edict, as the C does.
+            let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
+            if free {
+                continue;
+            }
+            let ent = e as i32;
+            let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+
+            // Isolate per-entity faults (e.g. a think hitting an unimplemented
+            // builtin): count it, reset the interpreter, and carry on — one bad
+            // entity must not abort the whole frame.
+            match self.process_entity(ent, movetype, start_time, dt) {
+                Ok(fired) => thinks_fired += fired as usize,
+                Err(_) => {
+                    think_errors += 1;
+                    self.vm.reset_execution();
+                }
+            }
+        }
+
+        // sv.time += host_frametime (end of SV_Physics).
+        self.vm.gset_float("time", start_time + dt);
+
+        // A think may have called lightstyle() (e.g. a trigger toggling a light);
+        // sync any updates from the write transport into the owned table.
+        self.lightstyles = snapshot_lightstyles();
+
+        Ok(FrameReport {
+            thinks_fired,
+            think_errors,
+            time: self.time(),
+        })
+    }
+
+    /// Process one live edict for a frame: per-movetype physics plus
+    /// `SV_RunThink`. Returns whether a think fired. `run_think` returns
+    /// `(fired, alive)`; physics runs whenever the entity is still alive,
+    /// independent of whether a think fired. Errors propagate so the caller can
+    /// isolate a faulting entity.
+    fn process_entity(&mut self, ent: i32, movetype: i32, start_time: f32, dt: f32) -> Result<bool> {
+        match movetype {
+            MOVETYPE_PUSH => self.physics_pusher(ent, start_time, dt),
+            MOVETYPE_NONE => {
+                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                Ok(fired)
+            }
+            MOVETYPE_NOCLIP => {
+                let (fired, alive) = self.run_think(ent, start_time, dt)?;
+                if alive {
+                    self.integrate_noclip(ent, dt);
+                }
+                Ok(fired)
+            }
+            MOVETYPE_STEP => {
+                // SV_Physics_Step: freefall (+ landing thud) if not on ground /
+                // fly / swim, then SV_RunThink, then SV_CheckWaterTransition —
+                // the C runs the water-transition check AFTER the think and
+                // unconditionally (outside the freefall branch), so a step entity
+                // resting on the floor still maintains watertype/waterlevel and
+                // splashes when pushed into liquid.
+                self.physics_step(ent, start_time, dt);
+                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+                    self.check_water_transition(ent);
+                }
+                Ok(fired)
+            }
+            MOVETYPE_TOSS | MOVETYPE_BOUNCE | MOVETYPE_FLY | MOVETYPE_FLYMISSILE => {
+                // SV_Physics_Toss: think first; if alive, gravity + clipped move.
+                let (fired, alive) = self.run_think(ent, start_time, dt)?;
+                if alive {
+                    self.physics_toss(ent, movetype, start_time, dt);
+                }
+                Ok(fired)
+            }
+            _ => {
+                // MOVETYPE_WALK and any others: think only (no client AI).
+                let _ = MOVETYPE_WALK;
+                let (fired, _alive) = self.run_think(ent, start_time, dt)?;
+                Ok(fired)
+            }
+        }
+    }
+
+    /// `SV_Physics_Pusher` (sv_phys.c): advance a `MOVETYPE_PUSH` bmodel
+    /// (`func_door`, `func_plat`, `func_button`, trains) by its velocity over the
+    /// frame, carrying riders and respecting blockers, then fire its `think` when
+    /// the local time `ltime` reaches `nextthink`.
+    ///
+    /// Faithful to the C: the move time is clamped so the pusher never steps past
+    /// its scheduled think, [`Self::push_move`] advances `ltime` (unless blocked),
+    /// and the think runs with `self = ent`, `other = world`. A QuakeC error in
+    /// the think is caught via `reset_execution` rather than aborting the host.
+    /// Returns whether the think fired.
+    fn physics_pusher(&mut self, ent: i32, start_time: f32, dt: f32) -> Result<bool> {
+        let oldltime = self.vm.ent_get_float(ent, "ltime");
+        let thinktime = self.vm.ent_get_float(ent, "nextthink");
+
+        let movetime = if thinktime < oldltime + dt {
+            let m = thinktime - oldltime;
+            if m < 0.0 {
+                0.0
+            } else {
+                m
+            }
+        } else {
+            dt
+        };
+
+        if movetime != 0.0 {
+            // SV_PushMove advances ent.ltime if it is not blocked.
+            self.push_move(ent, movetime, start_time)?;
+        }
+
+        let ltime = self.vm.ent_get_float(ent, "ltime");
+        let mut fired = false;
+        if thinktime > oldltime && thinktime <= ltime {
+            self.vm.ent_set_float(ent, "nextthink", 0.0);
+            self.vm.gset_float("time", start_time);
+            self.vm.gset_int("self", ent);
+            self.vm.gset_int("other", 0); // world
+            let think = self.vm.ent_get_int(ent, "think");
+            if think > 0 {
+                fired = true;
+                if self.vm.execute(think as usize).is_err() {
+                    self.vm.reset_execution();
+                }
+            }
+        }
+        Ok(fired)
+    }
+
+    /// `SV_PushMove` (sv_phys.c): translate a pusher by `velocity * movetime`,
+    /// dragging every entity that is either riding it (`FL_ONGROUND` with
+    /// `groundentity == pusher`) or whose box intersects the pusher's swept AABB.
+    ///
+    /// If a dragged entity ends up stuck (its box overlaps solid geometry after
+    /// moving), the whole move is reverted — the pusher and every already-moved
+    /// entity are restored to their saved origins — and the pusher's `blocked`
+    /// function is invoked (caught, never fatal). Otherwise the move stands and
+    /// `ltime` is advanced.
+    fn push_move(&mut self, pusher: i32, movetime: f32, sv_time: f32) -> Result<()> {
+        let velocity = self.vm.ent_get_vector(pusher, "velocity");
+        if velocity[0] == 0.0 && velocity[1] == 0.0 && velocity[2] == 0.0 {
+            let lt = self.vm.ent_get_float(pusher, "ltime");
+            self.vm.ent_set_float(pusher, "ltime", lt + movetime);
+            return Ok(());
+        }
+
+        let mut mov = [0.0f32; 3];
+        for i in 0..3 {
+            mov[i] = velocity[i] * movetime;
+        }
+
+        // Swept AABB of the pusher's move: start from absmin/absmax, then for each
+        // axis extend the leading edge in the direction of travel.
+        let absmin = self.vm.ent_get_vector(pusher, "absmin");
+        let absmax = self.vm.ent_get_vector(pusher, "absmax");
+        let mut mins = absmin;
+        let mut maxs = absmax;
+        for i in 0..3 {
+            if mov[i] < 0.0 {
+                mins[i] += mov[i];
+            } else {
+                maxs[i] += mov[i];
+            }
+        }
+
+        // Save and apply the pusher move.
+        let pushorig = self.vm.ent_get_vector(pusher, "origin");
+        self.vm
+            .ent_set_vector(pusher, "origin", v_add(pushorig, mov));
+        let lt = self.vm.ent_get_float(pusher, "ltime");
+        self.vm.ent_set_float(pusher, "ltime", lt + movetime);
+        link_edict(&mut self.vm, pusher);
+
+        // Collect entities to drag, moving each as we go (origin, saved-origin).
+        let mut moved: Vec<(i32, Vec3)> = Vec::new();
+        let num = self.vm.num_edicts() as i32;
+        let mut blocker: Option<i32> = None;
+
+        let mut check: i32 = 1;
+        while check < num {
+            if self.vm.edict_free.get(check as usize).copied().unwrap_or(true) {
+                check += 1;
+                continue;
+            }
+            if check == pusher {
+                check += 1;
+                continue;
+            }
+            let ck_movetype = self.vm.ent_get_float(check, "movetype") as i32;
+            // SV_PushMove skips PUSH, NONE, and NOCLIP entities (sv_phys.c:478).
+            if ck_movetype == MOVETYPE_PUSH
+                || ck_movetype == MOVETYPE_NONE
+                || ck_movetype == MOVETYPE_NOCLIP
+            {
+                check += 1;
+                continue;
+            }
+
+            // The check entity must be standing on the pusher, or its box must
+            // intersect the pusher's swept box; otherwise it is unaffected.
+            let flags = self.vm.ent_get_float(check, "flags") as i32;
+            let ground = self.vm.ent_get_int(check, "groundentity");
+            let riding = (flags & FL_ONGROUND) != 0 && ground == pusher;
+            if !riding {
+                let ck_absmin = self.vm.ent_get_vector(check, "absmin");
+                let ck_absmax = self.vm.ent_get_vector(check, "absmax");
+                if ck_absmin[0] >= maxs[0]
+                    || ck_absmin[1] >= maxs[1]
+                    || ck_absmin[2] >= maxs[2]
+                    || ck_absmax[0] <= mins[0]
+                    || ck_absmax[1] <= mins[1]
+                    || ck_absmax[2] <= mins[2]
+                {
+                    check += 1;
+                    continue;
+                }
+                // SV_PushMove (sv_phys.c): after the swept-box overlap test, a
+                // non-rider is only dragged if its bbox is actually inside the
+                // pusher's FINAL position (`if (!SV_TestEntityPosition(check))
+                // continue;`). The pusher origin was already advanced above, so
+                // this tests the (un-moved) check against the moved pusher and
+                // skips entities that merely brush the swept box without
+                // penetrating — no spurious pushing.
+                if !self.push_test_position(check) {
+                    check += 1;
+                    continue;
+                }
+            }
+
+            // Remove the onground flag for non-players (it is re-derived below).
+            if ck_movetype != MOVETYPE_WALK {
+                let f = self.vm.ent_get_float(check, "flags") as i32;
+                self.vm
+                    .ent_set_float(check, "flags", (f & !FL_ONGROUND) as f32);
+            }
+
+            // Drag the check along with the pusher and record it for rollback.
+            // SV_PushMove (sv_phys.c:509-512) moves the rider/pushed entity via
+            // SV_PushEntity (a CLIPPED move), temporarily making the pusher
+            // SOLID_NOT so the rider does not clip on the pusher itself, then
+            // restoring it. A clipped push lets a door push a rider against a
+            // wall (so the door later blocks/crushes) instead of teleporting the
+            // rider through solid geometry by an unclipped origin += mov.
+            let entorig = self.vm.ent_get_vector(check, "origin");
+            moved.push((check, entorig));
+
+            let pusher_solid = self.vm.ent_get_float(pusher, "solid");
+            self.vm.ent_set_float(pusher, "solid", SOLID_NOT as f32);
+            self.push_entity(check, mov, sv_time);
+            self.vm.ent_set_float(pusher, "solid", pusher_solid);
+            // push_entity already linked `check` (SV_PushEntity -> SV_LinkEdict).
+
+            // If the check is now stuck in solid geometry, the move is blocked.
+            if self.push_test_position(check) {
+                // A zero-thickness box (e.g. a flattened corpse) cannot block.
+                let cmins = self.vm.ent_get_vector(check, "mins");
+                let cmaxs = self.vm.ent_get_vector(check, "maxs");
+                if cmins[0] == cmaxs[0] {
+                    check += 1;
+                    continue;
+                }
+                let csolid = self.vm.ent_get_float(check, "solid") as i32;
+                if csolid == SOLID_NOT || csolid == SOLID_TRIGGER {
+                    // Corpse: squish its box flat so it stops blocking.
+                    let mut m = self.vm.ent_get_vector(check, "mins");
+                    m[0] = 0.0;
+                    m[1] = 0.0;
+                    self.vm.ent_set_vector(check, "mins", m);
+                    self.vm.ent_set_vector(check, "maxs", m);
+                    check += 1;
+                    continue;
+                }
+                blocker = Some(check);
+                break;
+            }
+
+            check += 1;
+        }
+
+        if let Some(block) = blocker {
+            // SV_PushMove (sv_phys.c:530-552) restores in a SPECIFIC order so the
+            // pusher's `blocked` function sees the right world state:
+            //   1. restore the BLOCKER (the stuck entity) and relink it,
+            //   2. restore the PUSHER (origin + ltime) and relink it,
+            //   3. run `blocked` (self=pusher, other=blocker),
+            //   4. ONLY THEN move back the other already-dragged riders.
+            // So when `blocked` runs, the OTHER riders are still at their pushed
+            // positions — restoring them all up-front (as the prior code did)
+            // changed what `blocked` observes.
+
+            // 1. Restore the blocker. `block` is also the last entry in `moved`
+            //    (pushed before its SV_PushEntity), so step 4's loop restores it
+            //    again harmlessly — exactly as the C re-restores moved_edict.
+            let block_saved = moved
+                .iter()
+                .rev()
+                .find(|&&(e, _)| e == block)
+                .map(|&(_, saved)| saved);
+            if let Some(saved) = block_saved {
+                self.vm.ent_set_vector(block, "origin", saved);
+                link_edict(&mut self.vm, block);
+            }
+
+            // 2. Restore the pusher (origin, relink, roll back ltime).
+            self.vm.ent_set_vector(pusher, "origin", pushorig);
+            link_edict(&mut self.vm, pusher);
+            let lt = self.vm.ent_get_float(pusher, "ltime");
+            self.vm.ent_set_float(pusher, "ltime", lt - movetime);
+
+            // 3. If the pusher has a "blocked" function, call it (self=pusher,
+            //    other=blocker). Caught, never fatal.
+            let blocked = self.vm.ent_get_int(pusher, "blocked");
+            if blocked > 0 {
+                self.vm.gset_int("self", pusher);
+                self.vm.gset_int("other", block);
+                if self.vm.execute(blocked as usize).is_err() {
+                    self.vm.reset_execution();
+                }
+            }
+
+            // 4. Move back every entity we already dragged (including the blocker
+            //    again — harmless, matches the C loop).
+            for &(e, saved) in &moved {
+                self.vm.ent_set_vector(e, "origin", saved);
+                link_edict(&mut self.vm, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// `SV_TestEntityPosition` (sv_phys.c): true when `ent`'s box overlaps solid
+    /// geometry at its current origin. Implemented, as in the C, by tracing the
+    /// entity's own box from its origin to its origin and reporting `startsolid`.
+    fn push_test_position(&mut self, ent: i32) -> bool {
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let mins = self.vm.ent_get_vector(ent, "mins");
+        let maxs = self.vm.ent_get_vector(ent, "maxs");
+        let trace = sv_move(&mut self.vm, origin, origin, mins, maxs, ent, false, false);
+        trace.startsolid
+    }
+
+    /// `SV_CheckStuck` (sv_phys.c:762): the "big hack" that frees a player wedged
+    /// in the clipping hull. If the box is clear, snapshot `oldorigin` and return.
+    /// Otherwise try `oldorigin`, then a 1-unit grid (`±1` in x/y, `0..18` up); the
+    /// first clear spot wins (relink there). If nothing is clear, restore the
+    /// original origin (the C `player is stuck`).
+    ///
+    /// Faithful transcription over [`Self::push_test_position`]
+    /// (`SV_TestEntityPosition`). The console diagnostics are dropped (headless).
+    fn check_stuck(&mut self, ent: i32) {
+        if !self.push_test_position(ent) {
+            // not stuck: remember this good spot.
+            let origin = self.vm.ent_get_vector(ent, "origin");
+            self.vm.ent_set_vector(ent, "oldorigin", origin);
+            return;
+        }
+
+        let org = self.vm.ent_get_vector(ent, "origin");
+        let oldorigin = self.vm.ent_get_vector(ent, "oldorigin");
+        self.vm.ent_set_vector(ent, "origin", oldorigin);
+        if !self.push_test_position(ent) {
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+
+        for z in 0..18 {
+            for i in -1..=1 {
+                for j in -1..=1 {
+                    let cand = [org[0] + i as f32, org[1] + j as f32, org[2] + z as f32];
+                    self.vm.ent_set_vector(ent, "origin", cand);
+                    if !self.push_test_position(ent) {
+                        link_edict(&mut self.vm, ent);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // still stuck: restore the original origin.
+        self.vm.ent_set_vector(ent, "origin", org);
+    }
+
+    /// `SV_RunThink` (sv_phys.c): if the edict's `nextthink` is in `(0, time+dt]`,
+    /// clear it, set the `time`/`self`/`other` globals, and execute its `think`.
+    /// Returns `(fired, alive)`: `fired` = a think executed this frame; `alive`
+    /// is `SV_RunThink`'s own bool (the edict was not removed). When no think is
+    /// due it returns `(false, true)` — nothing ran, the entity lives on, and
+    /// the caller still runs per-movetype physics. Errors from the think
+    /// propagate (the caller decides whether to abort the frame).
+    fn run_think(&mut self, ent: i32, sv_time: f32, dt: f32) -> Result<(bool, bool)> {
+        let thinktime = self.vm.ent_get_float(ent, "nextthink");
+        if thinktime <= 0.0 || thinktime > sv_time + dt {
+            // Not due: SV_RunThink returns true (alive); nothing fired.
+            return Ok((false, true));
+        }
+        // Don't let things stay in the past.
+        let thinktime = if thinktime < sv_time { sv_time } else { thinktime };
+
+        self.vm.ent_set_float(ent, "nextthink", 0.0);
+        self.vm.gset_float("time", thinktime);
+        self.vm.gset_int("self", ent);
+        self.vm.gset_int("other", 0);
+
+        let think = self.vm.ent_get_int(ent, "think");
+        let fnum = think as usize;
+        if think <= 0 || fnum >= self.vm.progs.functions.len() {
+            // nextthink consumed (as the C did), but no valid think to run;
+            // the entity is still alive.
+            return Ok((false, true));
+        }
+        // The C leaves pr_global_struct->time at thinktime afterward; we mirror that.
+        self.vm.execute(fnum)?;
+
+        // alive = !ent->free.
+        let free = self.vm.edict_free.get(ent as usize).copied().unwrap_or(true);
+        Ok((true, !free))
+    }
+
+    /// `SV_Physics_Noclip` integration: `angles += dt*avelocity`,
+    /// `origin += dt*velocity` (no clipping), then relink bounds.
+    fn integrate_noclip(&mut self, ent: i32, dt: f32) {
+        let angles = self.vm.ent_get_vector(ent, "angles");
+        let avel = self.vm.ent_get_vector(ent, "avelocity");
+        self.vm
+            .ent_set_vector(ent, "angles", crate::math::mul_add(angles, dt, avel));
+
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        self.vm
+            .ent_set_vector(ent, "origin", crate::math::mul_add(origin, dt, vel));
+
+        link_edict(&mut self.vm, ent);
+    }
+
+    /// `SV_Physics_Step` (non-`QUAKE2`): freefall when the edict is not on
+    /// ground / flying / swimming — `SV_AddGravity`, `SV_CheckVelocity`,
+    /// `SV_FlyMove` (the full slide move via [`Self::fly_move_core`], which
+    /// latches `FL_ONGROUND` on a floor contact and clips/slides velocity), then
+    /// `SV_LinkEdict(ent, true)` to trip triggers. Touch impacts during the
+    /// slide are handled inside [`Self::fly_move_core`] (which calls
+    /// [`sv_impact`]).
+    ///
+    /// A falling step entity that lands this frame (was airborne, now
+    /// `FL_ONGROUND`) plays `demon/dland2.wav` when it hit the ground hard
+    /// (downward speed exceeded `sv_gravity * 0.1` before gravity was applied) —
+    /// the landing thud. The caller ([`Self::process_entity`]) runs
+    /// `SV_CheckWaterTransition` afterward (after the think), matching the C
+    /// order, so even a step entity resting on the floor maintains
+    /// `watertype`/`waterlevel` and splashes when pushed into liquid.
+    fn physics_step(&mut self, ent: i32, sv_time: f32, dt: f32) {
+        let flags = self.vm.ent_get_float(ent, "flags") as i32;
+        if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+            // hitsound = velocity[2] < sv_gravity * -0.1, sampled BEFORE gravity.
+            let vel_z = self.vm.ent_get_vector(ent, "velocity")[2];
+            let hitsound = vel_z < SV_GRAVITY * -0.1;
+
+            // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
+            // SV_LinkEdict(ent, true). The C runs the full slide move (NOT a
+            // single PushEntity), so a freefalling MOVETYPE_STEP entity latches
+            // FL_ONGROUND on a floor contact and clips/slides its velocity
+            // instead of accumulating downward speed forever.
+            self.add_gravity(ent, dt);
+            self.check_velocity(ent);
+            let mut steptrace: Option<MoveTrace> = None;
+            let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
+
+            // SV_LinkEdict(ent, true) ends the freefall branch: it recomputes
+            // absmin/absmax from the NEW origin AND trips triggers/pickups for the
+            // moved entity. This is INSIDE the branch in the C (the on-ground /
+            // flying / swimming path returns before it), so an entity that skipped
+            // the move does not re-link here. Skip if a touch impact during the move
+            // already removed the entity.
+            if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+                // Recompute absmin/absmax FIRST (C SV_LinkEdict order), so the
+                // trigger overlap test — and, crucially, the sv_move abs-box
+                // broadphase on later moves — see the fresh box. Without this a
+                // fast-falling MOVETYPE_STEP monster kept a stale box and could be
+                // wrongly broadphase-rejected (a missed collision).
+                link_edict(&mut self.vm, ent);
+                touch_triggers(&mut self.vm, ent, sv_time);
+
+                // "just hit ground": FL_ONGROUND newly latched by the slide move
+                // -> the landing thud, gated on the pre-gravity downward speed.
+                let now_on_ground =
+                    (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND != 0;
+                if now_on_ground && hitsound {
+                    self.start_sound(ent, 0, "demon/dland2.wav", 255, 1.0);
+                }
+            }
+        }
+        // SV_CheckWaterTransition runs AFTER SV_RunThink in the C; the caller
+        // (process_entity's MOVETYPE_STEP arm) invokes it post-think.
+    }
+
+    /// `SV_Physics_Toss` (sv_phys.c, non-`QUAKE2`): if on ground, do nothing;
+    /// else add gravity (except FLY/FLYMISSILE), integrate angles, and move the
+    /// origin via a clipped `PushEntity`. The bounce/stop fixups after an impact
+    /// are applied via [`Self::clip_velocity`].
+    fn physics_toss(&mut self, ent: i32, movetype: i32, sv_time: f32, dt: f32) {
+        let flags = self.vm.ent_get_float(ent, "flags") as i32;
+        if flags & FL_ONGROUND != 0 {
+            return; // resting on the ground (C returns before CheckWaterTransition)
+        }
+        self.check_velocity(ent);
+
+        // add gravity (not for FLY / FLYMISSILE)
+        if movetype != MOVETYPE_FLY && movetype != MOVETYPE_FLYMISSILE {
+            self.add_gravity(ent, dt);
+        }
+
+        // move angles
+        let angles = self.vm.ent_get_vector(ent, "angles");
+        let avel = self.vm.ent_get_vector(ent, "avelocity");
+        self.vm
+            .ent_set_vector(ent, "angles", crate::math::mul_add(angles, dt, avel));
+
+        // move origin
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        let move_ = crate::math::scale(vel, dt);
+        let tr = self.push_entity(ent, move_, sv_time);
+
+        // SV_PushEntity ends with SV_LinkEdict(ent, true): trip triggers/pickups
+        // for the moved entity (unless a touch impact already removed it).
+        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+            touch_triggers(&mut self.vm, ent, sv_time);
+        }
+
+        if tr.fraction == 1.0 {
+            return; // clear move
+        }
+        let free = self.vm.edict_free.get(ent as usize).copied().unwrap_or(true);
+        if free {
+            return;
+        }
+
+        let backoff = if movetype == MOVETYPE_BOUNCE { 1.5 } else { 1.0 };
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        let new_vel = clip_velocity(vel, tr.plane_normal, backoff);
+        self.vm.ent_set_vector(ent, "velocity", new_vel);
+
+        // stop if on ground (nested ifs in the C, collapsed here — no elses)
+        if tr.plane_normal[2] > 0.7 && (new_vel[2] < 60.0 || movetype != MOVETYPE_BOUNCE) {
+            let flags = self.vm.ent_get_float(ent, "flags") as i32;
+            self.vm
+                .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+            // groundentity = EDICT_TO_PROG(trace.ent): the edict actually
+            // landed on (0 = world, >0 = a plat/door/other solid), not a
+            // hardcoded world. `tr.ent` is `-1` only when nothing was hit,
+            // but this branch runs only when fraction < 1 (something WAS hit),
+            // so clamp the "nothing" sentinel to the world (0) defensively.
+            self.vm.ent_set_int(ent, "groundentity", tr.ent.max(0));
+            self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+            self.vm.ent_set_vector(ent, "avelocity", [0.0; 3]);
+        }
+
+        // check for in water (SV_CheckWaterTransition). The C reaches this only
+        // when the move was NOT clear (the `fraction == 1` / freed early returns
+        // above skip it), so a grenade/gib that just struck something updates its
+        // watertype here and splashes on an air/liquid crossing.
+        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+            self.check_water_transition(ent);
+        }
+    }
+
+    /// `SV_CheckWater` (sv_phys.c:808): sample the world contents at the entity's
+    /// feet, waist and eyes and set its `waterlevel` (0..3) + `watertype`
+    /// (`CONTENTS_WATER`/`SLIME`/`LAVA`). Without this the QuakeC `WaterMove`
+    /// (run from `PlayerPostThink`) sees `waterlevel == 0` forever and never deals
+    /// lava/slime drowning damage. Returns `true` when at least waist-deep
+    /// (`waterlevel > 1`), which the caller uses to suppress gravity. A content
+    /// `<= CONTENTS_WATER` (-3) is liquid (LAVA -5 < SLIME -4 < WATER -3).
+    fn check_water(&mut self, ent: i32) -> bool {
+        const CONTENTS_WATER: i32 = -3;
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let mins = self.vm.ent_get_vector(ent, "mins");
+        let maxs = self.vm.ent_get_vector(ent, "maxs");
+        let view_ofs = self.vm.ent_get_vector(ent, "view_ofs");
+        let contents_at = |s: &mut Self, z: f32| -> i32 {
+            let p = [origin[0], origin[1], z];
+            s.vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID)
+        };
+
+        let mut waterlevel = 0i32;
+        let mut watertype = CONTENTS_EMPTY;
+        // Feet: origin.z + mins.z + 1.
+        if contents_at(self, origin[2] + mins[2] + 1.0) <= CONTENTS_WATER {
+            watertype = contents_at(self, origin[2] + mins[2] + 1.0);
+            waterlevel = 1;
+            // Waist: midpoint of the box.
+            if contents_at(self, origin[2] + (mins[2] + maxs[2]) * 0.5) <= CONTENTS_WATER {
+                waterlevel = 2;
+                // Eyes: origin.z + view_ofs.z.
+                if contents_at(self, origin[2] + view_ofs[2]) <= CONTENTS_WATER {
+                    waterlevel = 3;
+                }
+            }
+        }
+        self.vm.ent_set_float(ent, "waterlevel", waterlevel as f32);
+        self.vm.ent_set_float(ent, "watertype", watertype as f32);
+        waterlevel > 1
+    }
+
+    /// `SV_CheckWaterTransition` (sv_phys.c, non-`QUAKE2`): sample the world
+    /// contents at the entity's origin and maintain its `watertype` / `waterlevel`
+    /// fields, playing the `misc/h2ohit1.wav` splash whenever the entity crosses
+    /// the air/liquid boundary in either direction.
+    ///
+    /// Faithful to the C:
+    /// * `watertype == 0` (never set, i.e. just spawned) -> adopt the current
+    ///   contents and `waterlevel = 1` with no sound.
+    /// * contents is liquid (`<= CONTENTS_WATER`): if we were in `CONTENTS_EMPTY`
+    ///   we just splashed in -> play the sound; set `watertype = cont`,
+    ///   `waterlevel = 1`.
+    /// * contents is not liquid: if `watertype` was not already `CONTENTS_EMPTY`
+    ///   we just surfaced -> play the sound; set `watertype = CONTENTS_EMPTY`,
+    ///   `waterlevel = cont` (the C stores the raw contents value here).
+    ///
+    /// Without this, `MOVETYPE_TOSS`/`BOUNCE`/`STEP` entities (grenades, gibs,
+    /// dropped weapons, falling monsters) never get `watertype`/`waterlevel` and
+    /// emit no entry splash.
+    fn check_water_transition(&mut self, ent: i32) {
+        const CONTENTS_WATER: i32 = -3;
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let cont = self
+            .vm
+            .with_host(|_vm, h| h.point_contents(origin))
+            .unwrap_or(CONTENTS_SOLID);
+
+        let watertype = self.vm.ent_get_float(ent, "watertype") as i32;
+        if watertype == 0 {
+            // just spawned here
+            self.vm.ent_set_float(ent, "watertype", cont as f32);
+            self.vm.ent_set_float(ent, "waterlevel", 1.0);
+            return;
+        }
+
+        if cont <= CONTENTS_WATER {
+            if watertype == CONTENTS_EMPTY {
+                // just crossed into water
+                self.start_sound(ent, 0, "misc/h2ohit1.wav", 255, 1.0);
+            }
+            self.vm.ent_set_float(ent, "watertype", cont as f32);
+            self.vm.ent_set_float(ent, "waterlevel", 1.0);
+        } else {
+            if watertype != CONTENTS_EMPTY {
+                // just crossed out of water
+                self.start_sound(ent, 0, "misc/h2ohit1.wav", 255, 1.0);
+            }
+            self.vm.ent_set_float(ent, "watertype", CONTENTS_EMPTY as f32);
+            self.vm.ent_set_float(ent, "waterlevel", cont as f32);
+        }
+    }
+
+    /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
+    /// where the per-entity `gravity` field defaults to 1.0 when unset/zero.
+    fn add_gravity(&mut self, ent: i32, dt: f32) {
+        let ent_gravity = {
+            let g = self.vm.ent_get_float(ent, "gravity");
+            if g != 0.0 {
+                g
+            } else {
+                1.0
+            }
+        };
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        vel[2] -= ent_gravity * SV_GRAVITY * dt;
+        self.vm.ent_set_vector(ent, "velocity", vel);
+    }
+
+    /// `SV_CheckVelocity` (sv_phys.c): clamp each velocity component to
+    /// `±sv_maxvelocity` and scrub NaNs from velocity/origin.
+    fn check_velocity(&mut self, ent: i32) {
+        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let mut origin = self.vm.ent_get_vector(ent, "origin");
+        for i in 0..3 {
+            if vel[i].is_nan() {
+                vel[i] = 0.0;
+            }
+            if origin[i].is_nan() {
+                origin[i] = 0.0;
+            }
+            // vel[i] is NaN-scrubbed above, so .clamp matches the C's if/else if.
+            vel[i] = vel[i].clamp(-SV_MAXVELOCITY, SV_MAXVELOCITY);
+        }
+        self.vm.ent_set_vector(ent, "velocity", vel);
+        self.vm.ent_set_vector(ent, "origin", origin);
+    }
+
+    /// `SV_PushEntity` (sv_phys.c ~408): move `ent` by `push` via the
+    /// entity-aware [`sv_move`] (clipping against the world AND every solid
+    /// edict), set `origin = trace.endpos`, relink, and — when the move hit
+    /// another entity — run [`sv_impact`] so both touch functions fire. The
+    /// returned [`MoveTrace`] carries `fraction`/`plane_normal` for the toss/step
+    /// physics' bounce/stop fixups AND the hit `ent` index, which the toss-rest
+    /// and stair-step-down paths store as `groundentity` (`EDICT_TO_PROG(trace
+    /// .ent)`) so an entity resting on a plat/door records what it stands on.
+    ///
+    /// `sv_move` borrows the host internally and `sv_impact` executes QuakeC, so
+    /// neither is called while the host is held out.
+    fn push_entity(&mut self, ent: i32, push: Vec3, sv_time: f32) -> MoveTrace {
+        let origin = self.vm.ent_get_vector(ent, "origin");
+        let mins = self.vm.ent_get_vector(ent, "mins");
+        let maxs = self.vm.ent_get_vector(ent, "maxs");
+        let end = v_add(origin, push);
+
+        // SV_PushEntity (sv_phys.c:408-421) selects the move type from the
+        // MOVING entity:
+        //   * MOVETYPE_FLYMISSILE  -> MOVE_MISSILE   (FL_MONSTER touch entities
+        //     are clipped against a +-15 box so a rocket detonates NEAR a
+        //     monster, not only on a direct hit).
+        //   * SOLID_TRIGGER / SOLID_NOT -> MOVE_NOMONSTERS (dropped backpacks /
+        //     gibs / corpses pass THROUGH monster+player boxes instead of
+        //     hanging on them; only bmodels block).
+        //   * otherwise -> MOVE_NORMAL.
+        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        let solid = self.vm.ent_get_float(ent, "solid") as i32;
+        let missile = movetype == MOVETYPE_FLYMISSILE;
+        let nomonsters = !missile && (solid == SOLID_TRIGGER || solid == SOLID_NOT);
+
+        // Entity-aware move: clips world + all solid edicts; `ent` ignores
+        // itself (the C `passedict`).
+        let mt = sv_move(&mut self.vm, origin, end, mins, maxs, ent, nomonsters, missile);
+
+        self.vm.ent_set_vector(ent, "origin", mt.endpos);
+        link_edict(&mut self.vm, ent);
+
+        // SV_Impact (sv_phys.c SV_PushEntity ~426): `if (trace.ent) SV_Impact(...)`.
+        // trace.ent is the WORLD edict (index 0, a non-NULL pointer) on any world
+        // clip, so the mover's touch fires on world contact too — that is what makes
+        // a rocket fired into a wall DETONATE and a grenade clang (GrenadeTouch plays
+        // bounce.wav vs world). MoveTrace yields ent==-1 only for a clear move, ==0
+        // for a world hit, >0 for an entity, so `>= 0` includes the world and
+        // excludes only the no-hit case. (Previously `> 0` skipped every world hit,
+        // so wall-struck rockets/nails never exploded.)
+        if mt.ent >= 0 {
+            sv_impact(&mut self.vm, ent, mt.ent, sv_time);
+        }
+
+        // Return the full MoveTrace (carries `ent` for groundentity in addition
+        // to the fraction/plane the bounce-and-stop fixups need).
+        mt
+    }
+
+    /// One server frame driven by the local player's input.
+    ///
+    /// Mirrors `Host_Frame` -> `SV_Physics`: advance `time`/`frametime`, run the
+    /// `StartFrame` system function (self/other = world), then `SV_Physics` over
+    /// every live edict — the player edict via `SV_Physics_Client`
+    /// (`PlayerPreThink` -> movement -> `PlayerPostThink`), all others via the
+    /// generic [`Self::process_entity`] path. `dt` is the frame time.
+    pub fn client_frame(&mut self, cmd: &UserCmd, dt: f32) -> Result<FrameReport> {
+        // host_frametime = dt; sv.time advances at the END of SV_Physics in the
+        // C, but the think-due test compares against sv.time + host_frametime, so
+        // (as run_frame does) we set frametime now and bump time after the loop.
+        self.vm.gset_float("frametime", dt);
+        // Drop any half-collected temp-entity message from a prior (possibly
+        // faulted) frame so this frame's Write* bursts parse cleanly.
+        reset_temp_entity_decoder();
+        reset_svc_recognizer();
+        // Drop any changelevel() / restart request a *prior* frame left unconsumed
+        // (a well-behaved front-end drains it immediately, but a stale request must
+        // never trigger a swap/respawn a frame late or against the wrong level).
+        reset_changelevel();
+        reset_restart();
+        // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before this
+        // frame's thinks (the host already consumed it via entity_dlights()).
+        self.cleanup_ents();
+        let start_time = self.time();
+        // Record sv.time for the monster-locomotion relink touches (SV_TouchLinks
+        // uses sv.time, not the clamped per-think `time` global).
+        self.vm.sv_time = start_time;
+
+        // Let the progs know a new frame has started (self/other = world).
+        let mut thinks_fired = 0usize;
+        let mut think_errors = 0usize;
+        match self.run_sys("StartFrame", 0, 0) {
+            Ok(_) => {}
+            Err(_) => think_errors += 1, // isolated; the interpreter was reset
+        }
+
+        let n = self.vm.num_edicts();
+        for e in 0..n {
+            let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
+            if free {
+                continue;
+            }
+            let ent = e as i32;
+
+            let result = if ent == self.player {
+                self.physics_client(ent, cmd, start_time, dt)
+            } else {
+                let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+                self.process_entity(ent, movetype, start_time, dt)
+            };
+            match result {
+                Ok(fired) => thinks_fired += fired as usize,
+                Err(_) => {
+                    think_errors += 1;
+                    self.vm.reset_execution();
+                }
+            }
+        }
+
+        // SV_WriteClientdataToMessage (sv_main.c) runs SV_SetIdealPitch once per
+        // client per frame, after physics: compute the slope-following auto-pitch
+        // the QuakeC view code centres toward when you walk up/down stairs.
+        if self.player >= 0
+            && !self
+                .vm
+                .edict_free
+                .get(self.player as usize)
+                .copied()
+                .unwrap_or(true)
+        {
+            self.set_ideal_pitch(self.player);
+        }
+
+        // sv.time += host_frametime (end of SV_Physics).
+        self.vm.gset_float("time", start_time + dt);
+
+        // A think may have called lightstyle() (e.g. a trigger toggling a light);
+        // sync any updates from the write transport into the owned table.
+        self.lightstyles = snapshot_lightstyles();
+
+        Ok(FrameReport {
+            thinks_fired,
+            think_errors,
+            time: self.time(),
+        })
+    }
+
+    /// `SV_Physics_Client` (sv_phys.c ~1059): `PlayerPreThink` -> the movement
+    /// path chosen by movetype -> `touch_triggers` -> relink -> `PlayerPostThink`.
+    /// Returns whether a think fired (for the frame report). A removed player
+    /// (`free`) short-circuits the rest, like the C `SV_RunThink` guards.
+    fn physics_client(&mut self, ent: i32, cmd: &UserCmd, start_time: f32, dt: f32) -> Result<bool> {
+        // SV_ReadClientMove (sv_user.c) copies the usercmd onto the client edict
+        // BEFORE the physics frame: v_angle from the look angles, then the button
+        // bits and impulse. We do it here, immediately before PlayerPreThink, so
+        // the weapon code that runs inside PreThink/PostThink (W_WeaponFrame ->
+        // W_Attack reads `self.button0` and aims off `self.v_angle`) sees the
+        // current frame's input. (client_think later re-derives v_angle/angles
+        // during the move, but PreThink runs first and must see it set.)
+        self.apply_usercmd_to_edict(ent, cmd);
+
+        // call standard client pre-think (self = player)
+        self.run_sys("PlayerPreThink", ent, 0)?;
+        if self.is_free(ent) {
+            return Ok(false);
+        }
+
+        // SV_CheckVelocity clamps before the move (the slide clamps implicitly,
+        // but mirror the NaN/maxvelocity scrub the C does first).
+        self.check_velocity(ent);
+
+        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        // Each arm assigns `fired`; the initial value is just to satisfy the
+        // borrow checker on the early-return paths.
+        #[allow(unused_assignments)]
+        let mut fired = false;
+        match movetype {
+            MOVETYPE_NONE => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+            }
+            MOVETYPE_WALK => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                // SV_ClientThink does friction/acceleration toward wishdir; then
+                // gravity (unless in water or water-jumping) and the step-up walk
+                // move. check_water sets waterlevel/watertype so the QuakeC
+                // WaterMove (PlayerPostThink) can deal lava/slime damage.
+                self.client_think(ent, cmd, dt);
+                let in_water = self.check_water(ent);
+                let flags = self.vm.ent_get_float(ent, "flags") as i32;
+                if !in_water && flags & FL_WATERJUMP == 0 {
+                    self.add_gravity(ent, dt);
+                }
+                // SV_CheckStuck: free the player from the clipping hull (and
+                // latch `oldorigin`) right before the walk move, as the C does.
+                self.check_stuck(ent);
+                self.walk_move(ent, start_time, dt);
+            }
+            MOVETYPE_FLY => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                self.client_think(ent, cmd, dt);
+                self.check_water(ent); // keep waterlevel/watertype live while flying
+                self.player_fly_move(ent, start_time, dt);
+            }
+            MOVETYPE_NOCLIP => {
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                self.client_think(ent, cmd, dt);
+                // origin += frametime * velocity (no clipping).
+                let origin = self.vm.ent_get_vector(ent, "origin");
+                let vel = self.vm.ent_get_vector(ent, "velocity");
+                self.vm
+                    .ent_set_vector(ent, "origin", crate::math::mul_add(origin, dt, vel));
+            }
+            MOVETYPE_TOSS | MOVETYPE_BOUNCE => {
+                // SV_Physics_Client `case MOVETYPE_TOSS/BOUNCE: SV_Physics_Toss`:
+                // think first; if still alive, gravity + the clipped toss move. A
+                // client is MOVETYPE_TOSS exactly while DEAD (client.qc PlayerDie),
+                // so this is the corpse physics — the death pop (PlayerDie's
+                // `velocity_z += random()*300`) and the fall back to the floor.
+                // Previously this fell into the think-only fallback arm and a
+                // corpse killed mid-air froze in place.
+                let (f, alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+                if !alive {
+                    return Ok(fired);
+                }
+                self.physics_toss(ent, movetype, start_time, dt);
+            }
+            _ => {
+                // Any other movetype on a client: think only (no movement).
+                let (f, _alive) = self.run_think(ent, start_time, dt)?;
+                fired = f;
+            }
+        }
+
+        if self.is_free(ent) {
+            return Ok(fired);
+        }
+
+        // After moving, trip triggers so the player can pick up items / fire
+        // trigger fields (the C does this inside SV_LinkEdict during the move;
+        // here the move's link is bounds-only, so we touch triggers explicitly).
+        touch_triggers(&mut self.vm, ent, start_time);
+        if self.is_free(ent) {
+            return Ok(fired);
+        }
+
+        // call standard player post-think (relink first, like SV_Physics_Client).
+        // SV_Physics_Client (sv_phys.c:1128) sets pr_global_struct->time = sv.time
+        // before PlayerPostThink; without this the global is left at the move's
+        // touch time (or a think's clamped thinktime), so PostThink would read a
+        // stale `time`. run_sys sets self/other but never time.
+        link_edict(&mut self.vm, ent);
+        self.vm.gset_float("time", start_time);
+        self.run_sys("PlayerPostThink", ent, 0)?;
+
+        // The impulse is a one-shot: a usercmd carries it for a single frame.
+        // Stock QuakeC's ImpulseCommands() clears `self.impulse` after handling
+        // it; the engine likewise treats it as edge-triggered (SV_ReadClientMove
+        // only overwrites it when a fresh non-zero impulse arrives). Clear it
+        // here so a held impulse fires once even if the mod's QuakeC forgot to.
+        if !self.is_free(ent) {
+            self.vm.ent_set_float(ent, "impulse", 0.0);
+        }
+
+        Ok(fired)
+    }
+
+    /// `SV_FlyMove` (sv_phys.c ~229) against the ENTITY-AWARE [`sv_move`]: slide
+    /// the player box along the surfaces it hits over `dt`, sliding along walls
+    /// and creases instead of stopping dead. Returns the blocked bitmask
+    /// (1 = floor, 2 = wall/step, plus 4-ish dead-stop returns), sets
+    /// `FL_ONGROUND` on a floor contact, and runs the touch functions of any
+    /// entity it bumps via [`sv_impact`]. `out_steptrace` receives the trace of
+    /// the wall hit that triggers stair-stepping.
+    fn fly_move_core(
+        &mut self,
+        ent: i32,
+        dt: f32,
+        sv_time: f32,
+        out_steptrace: &mut Option<MoveTrace>,
+    ) -> i32 {
+        let num_bumps = 4;
+        let mut blocked = 0;
+        let original_velocity = self.vm.ent_get_vector(ent, "velocity");
+        let primal_velocity = original_velocity;
+        let mut original = original_velocity;
+        // Clip planes are capped at 5 (the `>= 5` guard below), so a fixed array
+        // + count avoids a per-call heap Vec — identical plane set, same order.
+        let mut planes: [Vec3; 5] = [[0.0; 3]; 5];
+        let mut nplanes = 0usize;
+        let mut time_left = dt;
+
+        for _bump in 0..num_bumps {
+            let velocity = self.vm.ent_get_vector(ent, "velocity");
+            if velocity == [0.0, 0.0, 0.0] {
+                break;
+            }
+            let origin = self.vm.ent_get_vector(ent, "origin");
+            let end = [
+                origin[0] + time_left * velocity[0],
+                origin[1] + time_left * velocity[1],
+                origin[2] + time_left * velocity[2],
+            ];
+            let mins = self.vm.ent_get_vector(ent, "mins");
+            let maxs = self.vm.ent_get_vector(ent, "maxs");
+            let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false, false);
+
+            if trace.allsolid {
+                // entity is trapped in another solid: stop dead.
+                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                return 3;
+            }
+
+            if trace.fraction > 0.0 {
+                // actually covered some distance
+                self.vm.ent_set_vector(ent, "origin", trace.endpos);
+                original = self.vm.ent_get_vector(ent, "velocity");
+                nplanes = 0;
+            }
+
+            if trace.fraction == 1.0 {
+                break; // moved the entire distance
+            }
+
+            if trace.plane_normal[2] > 0.7 {
+                blocked |= 1; // floor
+                // SV_FlyMove only latches FL_ONGROUND when the contacted floor
+                // is a SOLID_BSP edict (`trace.ent->v.solid == SOLID_BSP`). The
+                // world (edict 0) is SOLID_BSP and must still count; a
+                // SOLID_BBOX/SOLID_SLIDEBOX box (monster/item/player) must NOT
+                // become "ground" even when its top faces up.
+                let on_bsp = trace.ent == 0
+                    || (trace.ent > 0
+                        && self.vm.ent_get_float(trace.ent, "solid") as i32 == SOLID_BSP);
+                if on_bsp {
+                    let flags = self.vm.ent_get_float(ent, "flags") as i32;
+                    self.vm
+                        .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+                    self.vm.ent_set_int(ent, "groundentity", trace.ent.max(0));
+                }
+            }
+            if trace.plane_normal[2] == 0.0 {
+                blocked |= 2; // step / wall
+                *out_steptrace = Some(trace);
+            }
+
+            // run the impact function (host present; not inside with_host). C
+            // SV_FlyMove calls SV_Impact(ent, trace.ent) for EVERY clipped bump,
+            // world or entity — trace.ent is the world edict on a world hit. The
+            // loop already broke on fraction==1.0, so here trace.ent is 0 (world) or
+            // >0 (entity), never the -1 no-hit sentinel; `>= 0` fires the mover's
+            // touch on world contact too (mover with no touch is a no-op).
+            if trace.ent >= 0 {
+                sv_impact(&mut self.vm, ent, trace.ent, sv_time);
+                if self.is_free(ent) {
+                    break; // removed by the impact function
+                }
+            }
+
+            time_left -= time_left * trace.fraction;
+
+            // clipped to another plane
+            if nplanes >= 5 {
+                // this shouldn't really happen
+                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                return 3;
+            }
+            planes[nplanes] = trace.plane_normal;
+            nplanes += 1;
+
+            // modify original_velocity so it parallels all of the clip planes.
+            let mut new_velocity = [0.0f32; 3];
+            let mut i = 0usize;
+            while i < nplanes {
+                new_velocity = clip_velocity(original, planes[i], 1.0);
+                let mut ok = true;
+                let mut j = 0usize;
+                while j < nplanes {
+                    if j != i && crate::math::dot(new_velocity, planes[j]) < 0.0 {
+                        ok = false;
+                        break;
+                    }
+                    j += 1;
+                }
+                if ok {
+                    break;
+                }
+                i += 1;
+            }
+
+            if i != nplanes {
+                // go along this plane
+                self.vm.ent_set_vector(ent, "velocity", new_velocity);
+            } else {
+                // go along the crease (two planes)
+                if nplanes != 2 {
+                    self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                    return 7;
+                }
+                let dir = crate::math::cross(planes[0], planes[1]);
+                let cur = self.vm.ent_get_vector(ent, "velocity");
+                let d = crate::math::dot(dir, cur);
+                self.vm
+                    .ent_set_vector(ent, "velocity", crate::math::scale(dir, d));
+            }
+
+            // if velocity is against the original velocity, stop dead to avoid
+            // tiny oscillations in sloping corners.
+            let cur = self.vm.ent_get_vector(ent, "velocity");
+            if crate::math::dot(cur, primal_velocity) <= 0.0 {
+                self.vm.ent_set_vector(ent, "velocity", [0.0; 3]);
+                return blocked;
+            }
+        }
+
+        blocked
+    }
+
+    /// Plain fly move for `MOVETYPE_FLY` clients (no stair step-up), then relink.
+    fn player_fly_move(&mut self, ent: i32, sv_time: f32, dt: f32) {
+        let mut steptrace = None;
+        let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
+        link_edict(&mut self.vm, ent);
+    }
+
+    /// `SV_WalkMove` (sv_phys.c ~958): a slide move with a stair step-up of up to
+    /// [`world::STEPSIZE`] when the flat move is blocked by a wall, so the player
+    /// climbs small ledges. Faithful to id's algorithm over the entity-aware
+    /// [`Self::fly_move_core`]. Updates `FL_ONGROUND` from the down move and
+    /// relinks at the end.
+    fn walk_move(&mut self, ent: i32, sv_time: f32, dt: f32) {
+        // do a regular slide move unless it looks like you ran into a step.
+        let oldonground = (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND != 0;
+        // Clear ONGROUND; fly_move / the down move below will re-set it.
+        let flags0 = self.vm.ent_get_float(ent, "flags") as i32;
+        self.vm
+            .ent_set_float(ent, "flags", (flags0 & !FL_ONGROUND) as f32);
+
+        let oldorg = self.vm.ent_get_vector(ent, "origin");
+        let oldvel = self.vm.ent_get_vector(ent, "velocity");
+
+        let mut steptrace: Option<MoveTrace> = None;
+        let clip = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
+
+        if clip & 2 == 0 {
+            // move didn't block on a step.
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+        // don't stair up while jumping — UNLESS swimming. The C gate is
+        // `if (!oldonground && ent->v.waterlevel == 0) return;`, so a player in
+        // water (waterlevel > 0) can still step up onto a ledge even mid-air.
+        let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
+        if !oldonground && waterlevel == 0 {
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+        if self.vm.ent_get_float(ent, "movetype") as i32 != MOVETYPE_WALK {
+            link_edict(&mut self.vm, ent); // gibbed by a trigger
+            return;
+        }
+        if (self.vm.ent_get_float(ent, "flags") as i32) & FL_WATERJUMP != 0 {
+            link_edict(&mut self.vm, ent);
+            return;
+        }
+
+        // remember the no-step result.
+        let nosteporg = self.vm.ent_get_vector(ent, "origin");
+        let nostepvel = self.vm.ent_get_vector(ent, "velocity");
+
+        // try moving up and forward to go up a step.
+        self.vm.ent_set_vector(ent, "origin", oldorg); // back to start pos
+
+        // move up
+        let upmove = [0.0, 0.0, world::STEPSIZE];
+        self.push_entity(ent, upmove, sv_time);
+
+        // move forward (no vertical wish in velocity).
+        self.vm
+            .ent_set_vector(ent, "velocity", [oldvel[0], oldvel[1], 0.0]);
+        let mut steptrace2 = None;
+        let mut clip2 = self.fly_move_core(ent, dt, sv_time, &mut steptrace2);
+
+        // Stuck check (sv_phys.c SV_WalkMove ~1015): if the step-up forward move
+        // made essentially no horizontal progress (< 1/32 unit on BOTH axes) but
+        // still blocked, the player is wedged at a BSP hull angle-join — try the
+        // SV_TryUnstick nudge dance to free them, adopting its resulting clip.
+        if clip2 != 0 {
+            let neworg = self.vm.ent_get_vector(ent, "origin");
+            if (oldorg[0] - neworg[0]).abs() < 0.03125 && (oldorg[1] - neworg[1]).abs() < 0.03125 {
+                clip2 = self.sv_try_unstick(ent, oldvel, sv_time);
+            }
+        }
+
+        // Extra friction based on view angle (sv_phys.c ~1027): when the (possibly
+        // unstick-updated) forward move blocked on a wall, SV_WallFriction bleeds the
+        // tangential velocity using the wall normal from the forward move's trace.
+        if clip2 & 2 != 0 {
+            if let Some(tr) = &steptrace2 {
+                let normal = tr.plane_normal;
+                self.sv_wall_friction(ent, normal);
+            }
+        }
+
+        // move down by STEPSIZE - the vertical the original move would have done.
+        let downmove = [0.0, 0.0, -world::STEPSIZE + oldvel[2] * dt];
+        let downtrace = self.push_entity(ent, downmove, sv_time);
+
+        if downtrace.plane_normal[2] > 0.7 {
+            // Landed on a walkable floor: keep the stepped result. The C
+            // (sv_phys.c SV_WalkMove ~390) only latches FL_ONGROUND /
+            // groundentity HERE when the mover is a brush model
+            // (`ent->v.solid == SOLID_BSP`). A player (SOLID_SLIDEBOX) keeps the
+            // stepped origin but does NOT latch ground in the step-down branch —
+            // it already got FL_ONGROUND from the regular slide move
+            // (`fly_move_core` / SV_FlyMove, which gates on the contacted floor
+            // being SOLID_BSP). Unconditionally setting it here let players latch
+            // ground onto a step they only grazed; the gate restores the C.
+            if self.vm.ent_get_float(ent, "solid") as i32 == SOLID_BSP {
+                let flags = self.vm.ent_get_float(ent, "flags") as i32;
+                self.vm
+                    .ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+                // groundentity = EDICT_TO_PROG(downtrace.ent): the edict we
+                // stepped down onto (0 = world, >0 = a plat/door). `downtrace.ent`
+                // is `-1` only when the down-push was clear, but plane_normal[2] >
+                // 0.7 implies a floor contact, so clamp the sentinel to world (0).
+                self.vm.ent_set_int(ent, "groundentity", downtrace.ent.max(0));
+            }
+        } else {
+            // the push down didn't reach good ground: use the no-step move.
+            self.vm.ent_set_vector(ent, "origin", nosteporg);
+            self.vm.ent_set_vector(ent, "velocity", nostepvel);
+        }
+
+        link_edict(&mut self.vm, ent);
+    }
+
+    /// `SV_WallFriction` (sv_phys.c ~867): when the player walks into a wall while
+    /// facing toward it, bleed off the tangential velocity. `d = dot(normal,
+    /// forward(v_angle)) + 0.5`; if `d < 0` the into-wall component is removed and
+    /// the side component is scaled by `(1+d)`, so head-on contact loses the most
+    /// speed. Only X/Y are scaled (Z is left to gravity/step logic). Uses the
+    /// player's VIEW angles (`v_angle`), not the body `angles`.
+    fn sv_wall_friction(&mut self, ent: i32, normal: Vec3) {
+        let v_angle = self.vm.ent_get_vector(ent, "v_angle");
+        let (forward, _right, _up) = angle_vectors(v_angle);
+        let d = crate::math::dot(normal, forward) + 0.5;
+        if d >= 0.0 {
+            return;
+        }
+        let vel = self.vm.ent_get_vector(ent, "velocity");
+        let i = crate::math::dot(normal, vel);
+        let into = [normal[0] * i, normal[1] * i, normal[2] * i];
+        let side = [vel[0] - into[0], vel[1] - into[1], vel[2] - into[2]];
+        self.vm
+            .ent_set_vector(ent, "velocity", [side[0] * (1.0 + d), side[1] * (1.0 + d), vel[2]]);
+    }
+
+    /// `SV_TryUnstick` (sv_phys.c ~901): the player is wedged at a BSP hull
+    /// angle-join where float precision pins the step-up move. Nudge the player 2
+    /// units in each of 8 axial/diagonal directions, retry the original horizontal
+    /// move, and accept the first direction that frees > 4 units of progress on X or
+    /// Y; otherwise restore the position and try the next. If none work, zero the
+    /// velocity ("don't stick") and report a full block (7).
+    fn sv_try_unstick(&mut self, ent: i32, oldvel: Vec3, sv_time: f32) -> i32 {
+        let oldorg = self.vm.ent_get_vector(ent, "origin");
+        const DIRS: [[f32; 3]; 8] = [
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [-2.0, 0.0, 0.0],
+            [0.0, -2.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [-2.0, 2.0, 0.0],
+            [2.0, -2.0, 0.0],
+            [-2.0, -2.0, 0.0],
+        ];
+        for dir in DIRS {
+            // try pushing a little in an axial direction (from the stuck origin).
+            self.push_entity(ent, dir, sv_time);
+            // retry the original move (horizontal only).
+            self.vm
+                .ent_set_vector(ent, "velocity", [oldvel[0], oldvel[1], 0.0]);
+            let mut steptrace = None;
+            let clip = self.fly_move_core(ent, 0.1, sv_time, &mut steptrace);
+            let neworg = self.vm.ent_get_vector(ent, "origin");
+            if (oldorg[1] - neworg[1]).abs() > 4.0 || (oldorg[0] - neworg[0]).abs() > 4.0 {
+                return clip; // freed
+            }
+            // go back to the original (stuck) pos and try the next direction.
+            self.vm.ent_set_vector(ent, "origin", oldorg);
+        }
+        self.vm.ent_set_vector(ent, "velocity", [0.0, 0.0, 0.0]); // don't stick
+        7 // still not moving
+    }
+}
+
+/// Standalone `ClipVelocity` (so the physics methods can call it without
+/// borrowing `self`). `STOP_EPSILON = 0.1` matches the C.
+fn clip_velocity(vel: Vec3, normal: Vec3, overbounce: f32) -> Vec3 {
+    const STOP_EPSILON: f32 = 0.1;
+    let backoff = crate::math::dot(vel, normal) * overbounce;
+    let mut out = [0.0f32; 3];
+    for i in 0..3 {
+        let change = normal[i] * backoff;
+        out[i] = vel[i] - change;
+        if out[i] > -STOP_EPSILON && out[i] < STOP_EPSILON {
+            out[i] = 0.0;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bsp::Bsp;
+    use crate::progs::{Op, Progs, Statement};
+    use crate::server::testutil::*;
+    use crate::server::{FL_MONSTER, SOLID_BBOX, SOLID_SLIDEBOX};
+
+    // ------------------------------------------------------------- run_frame
+
+    #[test]
+    fn run_frame_fires_due_thinks() {
+        // Build a progs with a think function that sets a flag, and an entity
+        // (movetype NONE) whose nextthink is due.
+        let mut b = Builder::new();
+        b.entityfields = 8;
+        let g_flag = 30u16;
+        b.add_global("spawned_flag", EV_FLOAT, g_flag);
+        b.add_global("self", 4, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("frametime", EV_FLOAT, 35);
+        let g_one = 40u16;
+
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("spawnflags", EV_FLOAT, 2);
+        b.add_field("think", EV_FUNCTION, 3);
+        b.add_field("nextthink", EV_FLOAT, 4);
+        b.add_field("movetype", EV_FLOAT, 5);
+
+        let think_fn = b.add_function(
+            "do_think",
+            vec![
+                Statement {
+                    op: Op::StoreF as u16,
+                    a: g_one as i16,
+                    b: g_flag as i16,
+                    c: 0,
+                },
+                Statement {
+                    op: Op::Done as u16,
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                },
+            ],
+        );
+
+        let img = b.build();
+        let progs = Progs::parse(&img).expect("parse");
+        let bsp = empty_bsp();
+        let mut server = Server::new(bsp, progs).expect("server");
+        server.vm.set_gf(usize::from(g_one), 1.0);
+
+        // Spawn an entity, set movetype NONE, think=do_think, nextthink in past.
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_NONE as f32);
+        server.vm.ent_set_int(e, "think", think_fn as i32);
+        server.vm.ent_set_float(e, "nextthink", 0.5); // <= time(1.0)+dt
+
+        let before = server.time();
+        let report = server.run_frame(0.1).expect("frame");
+
+        assert_eq!(report.thinks_fired, 1, "the due think fired");
+        assert_eq!(server.vm.gget_float("spawned_flag"), 1.0);
+        // time advanced by dt.
+        assert!((report.time - (before + 0.1)).abs() < 1e-6);
+        // nextthink was consumed (set to 0).
+        assert_eq!(server.vm.ent_get_float(e, "nextthink"), 0.0);
+    }
+
+    #[test]
+    fn run_frame_toss_adds_gravity_and_moves() {
+        // A MOVETYPE_TOSS entity with no due think falls under gravity. The empty
+        // world traces as blocked at fraction 0 (headnode out of range -> solid),
+        // so origin won't move, but velocity must gain downward speed.
+        let mut b = Builder::new();
+        b.entityfields = 16;
+        b.add_global("self", 4, 31);
+        b.add_global("other", 4, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("frametime", EV_FLOAT, 35);
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("movetype", EV_FLOAT, 2);
+        b.add_field("nextthink", EV_FLOAT, 3);
+        b.add_field("flags", EV_FLOAT, 4);
+        b.add_field("velocity", 3 /*vector*/, 5); // 5,6,7
+        b.add_field("origin", 3, 8); // 8,9,10
+        b.add_field("mins", 3, 11);
+        b.add_field("maxs", 3, 14);
+
+        let img = b.build();
+        let progs = Progs::parse(&img).expect("parse");
+        let bsp = empty_bsp();
+        let mut server = Server::new(bsp, progs).expect("server");
+
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_TOSS as f32);
+        server.vm.ent_set_float(e, "nextthink", 0.0); // no think
+        server.vm.ent_set_float(e, "flags", 0.0); // not on ground
+        server.vm.ent_set_vector(e, "velocity", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "origin", [0.0, 0.0, 100.0]);
+        // tiny point box so trace uses hull 0.
+        server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+
+        server.run_frame(0.1).expect("frame");
+
+        // velocity.z should be negative (gravity pulled it down): -1*800*0.1 = -80.
+        let vel = server.vm.ent_get_vector(e, "velocity");
+        assert!(vel[2] < 0.0, "gravity should make velocity.z negative, got {vel:?}");
+        assert!((vel[2] - (-80.0)).abs() < 1e-3, "expected -80, got {}", vel[2]);
+    }
+
+    // ------------------------------------------------------ water + toss
+
+    /// A copy of [`world_open_bsp`] whose open leaf is `CONTENTS_WATER`, so
+    /// `point_contents(anywhere)` returns water. Used to exercise
+    /// `SV_CheckWaterTransition` (the entity reports it is submerged).
+    fn water_world_bsp() -> Bsp {
+        use crate::bsp::{CONTENTS_WATER, DLeaf};
+        let mut b = world_open_bsp();
+        // leaf 1 (the side both node children point at) becomes water.
+        b.leafs[1] = DLeaf {
+            contents: CONTENTS_WATER,
+            visofs: -1,
+            mins: [0; 3],
+            maxs: [0; 3],
+            firstmarksurface: 0,
+            nummarksurfaces: 0,
+            ambient_level: [0; 4],
+        };
+        b
+    }
+
+    /// A progs with the fields the toss/step physics touch by name, including
+    /// `watertype`/`waterlevel` so `SV_CheckWaterTransition` can write them.
+    fn step_physics_progs() -> Vec<u8> {
+        let mut b = Builder::new();
+        b.entityfields = 40;
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("movetype", EV_FLOAT, 2);
+        b.add_field("nextthink", EV_FLOAT, 3);
+        b.add_field("flags", EV_FLOAT, 4);
+        b.add_field("velocity", EV_VECTOR, 5); // 5,6,7
+        b.add_field("origin", EV_VECTOR, 8); // 8,9,10
+        b.add_field("mins", EV_VECTOR, 11); // 11,12,13
+        b.add_field("maxs", EV_VECTOR, 14); // 14,15,16
+        b.add_field("angles", EV_VECTOR, 17); // 17,18,19
+        b.add_field("avelocity", EV_VECTOR, 20); // 20,21,22
+        b.add_field("watertype", EV_FLOAT, 23);
+        b.add_field("waterlevel", EV_FLOAT, 24);
+        b.add_field("solid", EV_FLOAT, 25);
+        b.add_field("groundentity", EV_ENTITY, 26);
+        b.build()
+    }
+
+    #[test]
+    fn water_transition_sets_watertype_and_splashes() {
+        // FIX-3: a stepped entity that crosses from air into water gets its
+        // watertype/waterlevel set and plays the misc/h2ohit1.wav splash.
+        let progs = Progs::parse(&step_physics_progs()).expect("parse");
+        let mut server = Server::new(water_world_bsp(), progs).expect("server");
+
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_STEP as f32);
+        server.vm.ent_set_float(e, "nextthink", 0.0); // no think
+        // ON_GROUND so the freefall block is skipped but CheckWaterTransition
+        // still runs unconditionally at the end of SV_Physics_Step.
+        server.vm.ent_set_float(e, "flags", FL_ONGROUND as f32);
+        server.vm.ent_set_vector(e, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+        // Pretend it was previously in AIR so this frame is an air->water crossing
+        // (watertype != 0 avoids the silent "just spawned" path).
+        server.vm.ent_set_float(e, "watertype", CONTENTS_EMPTY as f32);
+        server.vm.ent_set_float(e, "waterlevel", 0.0);
+        let _ = server.drain_sounds(); // clear any startup queue
+
+        server.run_frame(0.1).expect("frame");
+
+        // watertype is now the liquid contents and waterlevel == 1.
+        assert_eq!(
+            server.vm.ent_get_float(e, "watertype") as i32,
+            crate::bsp::CONTENTS_WATER,
+            "watertype updated to the water contents"
+        );
+        assert_eq!(
+            server.vm.ent_get_float(e, "waterlevel"),
+            1.0,
+            "waterlevel set to 1 on entry"
+        );
+        // The air->water crossing queued the splash.
+        let sounds = server.drain_sounds();
+        assert!(
+            sounds.iter().any(|s| s.sample == "misc/h2ohit1.wav"),
+            "entering water plays misc/h2ohit1.wav, got {sounds:?}"
+        );
+    }
+
+    #[test]
+    fn water_transition_just_spawned_is_silent() {
+        // The "just spawned here" path (watertype == 0) adopts the current
+        // contents with waterlevel 1 and NO sound — faithful to the C early-out.
+        let progs = Progs::parse(&step_physics_progs()).expect("parse");
+        let mut server = Server::new(water_world_bsp(), progs).expect("server");
+
+        let e = server.vm.spawn();
+        server.vm.ent_set_float(e, "movetype", MOVETYPE_STEP as f32);
+        server.vm.ent_set_float(e, "flags", FL_ONGROUND as f32);
+        server.vm.ent_set_vector(e, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(e, "watertype", 0.0); // never set -> just spawned
+        let _ = server.drain_sounds();
+
+        server.run_frame(0.1).expect("frame");
+
+        assert_eq!(server.vm.ent_get_float(e, "waterlevel"), 1.0);
+        assert_eq!(
+            server.vm.ent_get_float(e, "watertype") as i32,
+            crate::bsp::CONTENTS_WATER
+        );
+        assert!(
+            server.drain_sounds().is_empty(),
+            "the just-spawned water adoption must be silent"
+        );
+    }
+
+    #[test]
+    fn toss_rest_records_groundentity_landed_on() {
+        // FIX-6: a MOVETYPE_TOSS entity that comes to rest sets groundentity to
+        // the bmodel it landed on (trace.ent), not a hardcoded world. Here it
+        // lands on a SOLID_BSP platform edict, so groundentity must be that edict.
+        let progs = Progs::parse(&step_physics_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        // A solid bmodel platform at the floor.
+        let plat = server.vm.spawn();
+        server.vm.ent_set_float(plat, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_float(plat, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_vector(plat, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(plat, "mins", [-64.0, -64.0, -8.0]);
+        server.vm.ent_set_vector(plat, "maxs", [64.0, 64.0, 0.0]);
+        link_edict(&mut server.vm, plat);
+
+        // A grenade-like toss entity just above the platform, falling.
+        let g = server.vm.spawn();
+        server.vm.ent_set_float(g, "movetype", MOVETYPE_TOSS as f32);
+        server.vm.ent_set_float(g, "flags", 0.0); // airborne
+        server.vm.ent_set_vector(g, "origin", [0.0, 0.0, 4.0]);
+        server.vm.ent_set_vector(g, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(g, "maxs", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(g, "velocity", [0.0, 0.0, -50.0]);
+        // groundentity starts as world (0); the rest path must overwrite it.
+        server.vm.ent_set_int(g, "groundentity", 0);
+        link_edict(&mut server.vm, g);
+
+        server.run_frame(0.1).expect("frame");
+
+        // It should have come to rest on the platform (FL_ONGROUND) and recorded
+        // the platform edict as its groundentity.
+        let on_ground = (server.vm.ent_get_float(g, "flags") as i32) & FL_ONGROUND != 0;
+        if on_ground {
+            assert_eq!(
+                server.vm.ent_get_int(g, "groundentity"),
+                plat,
+                "toss-rest groundentity is the platform it landed on"
+            );
+        }
+    }
+
+    // -------------------------------------------------- MOVETYPE_PUSH physics
+
+    /// Field/global layout for the `MOVETYPE_PUSH` tests: everything the pusher
+    /// physics reads/writes by name, including `ltime` (the bmodel's local time)
+    /// and `groundentity` (so a rider can be tied to its pusher). `think`/
+    /// `blocked` are present so the engine can find them, but the tests leave them
+    /// null so no QuakeC runs.
+    fn pusher_progs() -> Vec<u8> {
+        let mut b = Builder::new();
+        b.entityfields = 40;
+
+        b.add_global("self", EV_ENTITY, 31);
+        b.add_global("other", EV_ENTITY, 32);
+        b.add_global("time", EV_FLOAT, 33);
+        b.add_global("world", EV_ENTITY, 34);
+        b.add_global("frametime", EV_FLOAT, 35);
+
+        b.add_field("classname", EV_STRING, 1);
+        b.add_field("solid", EV_FLOAT, 2);
+        b.add_field("origin", EV_VECTOR, 4); // 4,5,6
+        b.add_field("mins", EV_VECTOR, 7); // 7,8,9
+        b.add_field("maxs", EV_VECTOR, 10); // 10,11,12
+        b.add_field("absmin", EV_VECTOR, 13); // 13,14,15
+        b.add_field("absmax", EV_VECTOR, 16); // 16,17,18
+        b.add_field("model", EV_STRING, 19);
+        b.add_field("movetype", EV_FLOAT, 20);
+        b.add_field("nextthink", EV_FLOAT, 21);
+        b.add_field("flags", EV_FLOAT, 22);
+        b.add_field("velocity", EV_VECTOR, 23); // 23,24,25
+        b.add_field("size", EV_VECTOR, 26); // 26,27,28
+        b.add_field("groundentity", EV_ENTITY, 29);
+        b.add_field("ltime", EV_FLOAT, 30);
+        b.add_field("think", EV_FUNCTION, 31);
+        b.add_field("blocked", EV_FUNCTION, 32);
+
+        b.build()
+    }
+
+    /// `SV_Physics_Pusher`/`SV_PushMove`: a `MOVETYPE_PUSH` bmodel given a
+    /// constant velocity and a future `nextthink` translates its origin by
+    /// `velocity * dt` over a frame, and its local time `ltime` advances by `dt`.
+    /// Uses the open world so `push_test_position` never reports the pusher stuck.
+    #[test]
+    fn run_frame_pusher_moves_by_velocity_and_advances_ltime() {
+        let progs = Progs::parse(&pusher_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let p = server.vm.spawn();
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_float(p, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(p, "velocity", [10.0, 0.0, 0.0]);
+        server.vm.ent_set_float(p, "ltime", 0.0);
+        // nextthink in the future so movetime = dt (not clamped) and no think fires.
+        server.vm.ent_set_float(p, "nextthink", 100.0);
+        link_edict(&mut server.vm, p);
+
+        let dt = 0.1;
+        let report = server.run_frame(dt).expect("frame");
+        assert_eq!(report.thinks_fired, 0, "future think must not fire");
+
+        let after = server.vm.ent_get_vector(p, "origin");
+        assert!(
+            (after[0] - 1.0).abs() < 1e-5,
+            "pusher origin x moved by velocity*dt (10*0.1=1.0), got {}",
+            after[0]
+        );
+        assert!(after[1].abs() < 1e-5 && after[2].abs() < 1e-5);
+        // ltime advanced by dt (SV_PushMove advances it when not blocked).
+        let ltime = server.vm.ent_get_float(p, "ltime");
+        assert!((ltime - dt).abs() < 1e-6, "ltime advanced by dt, got {ltime}");
+    }
+
+    /// A rider standing on the pusher (`FL_ONGROUND`, `groundentity == pusher`)
+    /// is carried by the same delta as the pusher.
+    #[test]
+    fn run_frame_pusher_carries_rider() {
+        let progs = Progs::parse(&pusher_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let p = server.vm.spawn();
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_float(p, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(p, "mins", [-64.0, -64.0, -16.0]);
+        server.vm.ent_set_vector(p, "maxs", [64.0, 64.0, 16.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 10.0]);
+        server.vm.ent_set_float(p, "ltime", 0.0);
+        server.vm.ent_set_float(p, "nextthink", 100.0);
+        link_edict(&mut server.vm, p);
+
+        // Rider resting on top of the pusher: a small bbox, onground, ground=pusher.
+        // Use MOVETYPE_WALK so the C keeps its FL_ONGROUND through the push (the
+        // `movetype != MOVETYPE_WALK` guard) and it runs no gravity of its own this
+        // frame, isolating the carry delta.
+        let r = server.vm.spawn();
+        server.vm.ent_set_float(r, "movetype", MOVETYPE_WALK as f32);
+        server.vm.ent_set_float(r, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(r, "origin", [0.0, 0.0, 32.0]);
+        server.vm.ent_set_vector(r, "mins", [-8.0, -8.0, -8.0]);
+        server.vm.ent_set_vector(r, "maxs", [8.0, 8.0, 8.0]);
+        server.vm.ent_set_float(r, "flags", FL_ONGROUND as f32);
+        server.vm.ent_set_int(r, "groundentity", p);
+        link_edict(&mut server.vm, r);
+
+        let dt = 0.1;
+        let _ = server.run_frame(dt).expect("frame");
+
+        // Both moved up by velocity*dt = 1.0.
+        let pafter = server.vm.ent_get_vector(p, "origin");
+        let rafter = server.vm.ent_get_vector(r, "origin");
+        assert!((pafter[2] - 1.0).abs() < 1e-5, "pusher z moved 1.0");
+        assert!(
+            (rafter[2] - 33.0).abs() < 1e-5,
+            "rider carried the same delta (32+1.0), got {}",
+            rafter[2]
+        );
+    }
+
+    /// A zero-velocity pusher only advances `ltime`; its origin does not change.
+    #[test]
+    fn run_frame_pusher_zero_velocity_only_advances_ltime() {
+        let progs = Progs::parse(&pusher_progs()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let p = server.vm.spawn();
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_PUSH as f32);
+        server.vm.ent_set_float(p, "solid", SOLID_BSP as f32);
+        server.vm.ent_set_vector(p, "origin", [5.0, 6.0, 7.0]);
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(p, "ltime", 0.0);
+        server.vm.ent_set_float(p, "nextthink", 100.0);
+        link_edict(&mut server.vm, p);
+
+        let dt = 0.1;
+        let _ = server.run_frame(dt).expect("frame");
+
+        let after = server.vm.ent_get_vector(p, "origin");
+        assert_eq!(after, [5.0, 6.0, 7.0], "zero-velocity pusher did not move");
+        let ltime = server.vm.ent_get_float(p, "ltime");
+        assert!(
+            (ltime - dt).abs() < 1e-6,
+            "ltime still advances by dt for a zero-velocity pusher, got {ltime}"
+        );
+    }
+
+    #[test]
+    fn push_entity_selects_nomonsters_for_trigger_and_not_solids() {
+        // SV_PushEntity (sv_phys.c:408-421) chooses the move type from the
+        // MOVING entity's solid: SOLID_TRIGGER / SOLID_NOT -> MOVE_NOMONSTERS
+        // (the dropped backpack / gib / corpse passes THROUGH monster boxes),
+        // anything else -> MOVE_NORMAL (it stops on the box).
+        //
+        // A monster box sits in the path. A SOLID_BBOX mover must stop short of
+        // it; a SOLID_NOT mover must pass through and reach its endpoint.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let monster = server.vm.spawn();
+        server.vm.ent_set_float(monster, "solid", SOLID_SLIDEBOX as f32);
+        server.vm.ent_set_float(monster, "flags", FL_MONSTER as f32);
+        server.vm.ent_set_vector(monster, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(monster, "mins", [-16.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(monster, "maxs", [16.0, 16.0, 16.0]);
+        server.vm.ent_set_vector(monster, "absmin", [84.0, -16.0, -16.0]);
+        server.vm.ent_set_vector(monster, "absmax", [116.0, 16.0, 16.0]);
+
+        // SOLID_BBOX mover (normal): stops on the monster box.
+        let blocker = server.vm.spawn();
+        server.vm.ent_set_float(blocker, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_float(blocker, "movetype", MOVETYPE_BOUNCE as f32);
+        server.vm.ent_set_vector(blocker, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(blocker, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(blocker, "maxs", [0.0, 0.0, 0.0]);
+        let tr_normal = server.push_entity(blocker, [200.0, 0.0, 0.0], 0.0);
+        assert!(
+            tr_normal.fraction < 1.0,
+            "a SOLID_BBOX mover (MOVE_NORMAL) is stopped by the monster"
+        );
+
+        // SOLID_NOT mover (e.g. a gib): MOVE_NOMONSTERS, passes through.
+        let gib = server.vm.spawn();
+        server.vm.ent_set_float(gib, "solid", SOLID_NOT as f32);
+        server.vm.ent_set_float(gib, "movetype", MOVETYPE_BOUNCE as f32);
+        server.vm.ent_set_vector(gib, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(gib, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(gib, "maxs", [0.0, 0.0, 0.0]);
+        let tr_not = server.push_entity(gib, [200.0, 0.0, 0.0], 0.0);
+        assert_eq!(
+            tr_not.fraction, 1.0,
+            "a SOLID_NOT mover (MOVE_NOMONSTERS) passes through the monster"
+        );
+
+        // SOLID_TRIGGER mover: also MOVE_NOMONSTERS, passes through.
+        let trig = server.vm.spawn();
+        server.vm.ent_set_float(trig, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_float(trig, "movetype", MOVETYPE_BOUNCE as f32);
+        server.vm.ent_set_vector(trig, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(trig, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(trig, "maxs", [0.0, 0.0, 0.0]);
+        let tr_trig = server.push_entity(trig, [200.0, 0.0, 0.0], 0.0);
+        assert_eq!(
+            tr_trig.fraction, 1.0,
+            "a SOLID_TRIGGER mover (MOVE_NOMONSTERS) passes through the monster"
+        );
+    }
+
+    #[test]
+    fn push_entity_flymissile_expands_against_monsters() {
+        // SV_PushEntity sends a MOVETYPE_FLYMISSILE mover through MOVE_MISSILE,
+        // so a rocket whose centre path passes 20 units to the side of a small
+        // monster still detonates (the +-15 expanded box reaches it). A
+        // non-missile mover on the same path passes by.
+        let (img, _t, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+
+        let monster = server.vm.spawn();
+        server.vm.ent_set_float(monster, "solid", SOLID_SLIDEBOX as f32);
+        server.vm.ent_set_float(monster, "flags", FL_MONSTER as f32);
+        server.vm.ent_set_vector(monster, "origin", [100.0, 20.0, 0.0]);
+        server.vm.ent_set_vector(monster, "mins", [-5.0, -5.0, -5.0]);
+        server.vm.ent_set_vector(monster, "maxs", [5.0, 5.0, 5.0]);
+
+        // The rocket: a point box, MOVETYPE_FLYMISSILE, path at y=0.
+        let rocket = server.vm.spawn();
+        server.vm.ent_set_float(rocket, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_float(rocket, "movetype", MOVETYPE_FLYMISSILE as f32);
+        server.vm.ent_set_vector(rocket, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(rocket, "mins", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(rocket, "maxs", [0.0, 0.0, 0.0]);
+        let tr = server.push_entity(rocket, [200.0, 0.0, 0.0], 0.0);
+        assert!(
+            tr.fraction < 1.0,
+            "a FLYMISSILE mover detonates NEAR the monster, got {}",
+            tr.fraction
+        );
+    }
+
+    #[test]
+    fn dead_client_movetype_toss_gets_corpse_physics() {
+        // SV_Physics_Client (sv_phys.c) routes a MOVETYPE_TOSS/BOUNCE client
+        // through SV_Physics_Toss — the dead player's corpse physics (client.qc
+        // PlayerDie sets movetype TOSS + a velocity pop). The old fallback arm
+        // ran the think only, freezing a mid-air corpse in place. The corpse
+        // must gain downward velocity (gravity) and fall.
+        let (img, g_const100, g_origin) = player_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+
+        let p = server.connect_client().expect("connect");
+        // A dead player hovering above the floor: TOSS, not on ground, no velocity.
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 120.0]);
+        server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(p, "health", 0.0);
+        server.vm.ent_set_float(p, "movetype", MOVETYPE_TOSS as f32);
+        let flags = server.vm.ent_get_float(p, "flags") as i32 & !FL_ONGROUND;
+        server.vm.ent_set_float(p, "flags", flags as f32);
+
+        server.client_frame(&UserCmd::default(), 0.1).expect("frame");
+
+        let vel = server.vm.ent_get_vector(p, "velocity");
+        let org = server.vm.ent_get_vector(p, "origin");
+        assert!(
+            vel[2] < 0.0,
+            "toss corpse gains downward velocity (gravity): vz = {}",
+            vel[2]
+        );
+        assert!(
+            org[2] < 120.0,
+            "toss corpse falls instead of freezing mid-air: z = {}",
+            org[2]
+        );
+    }
+}

@@ -1,0 +1,1576 @@
+//! The server→client message side, with no network: the event queues and the
+//! `Write*` recognisers a front-end drains every frame.
+//!
+//! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
+//! Sources:
+//! * `WinQuake/sv_main.c` — `SV_StartSound`, `SV_StartParticle`.
+//! * `WinQuake/pr_cmds.c` — `PF_sound`, `PF_ambientsound`, `PF_particle`,
+//!   `PF_bprint`/`PF_sprint`/`PF_centerprint`, and the `PF_Write*` family
+//!   (`MSG_Write*` into `WriteDest()`).
+//! * What the client made of those bytes: `WinQuake/cl_tent.c`
+//!   (`CL_ParseTEnt`, the temp entities) and `WinQuake/cl_parse.c`
+//!   (`CL_ParseServerMessage`, the `MSG_ALL` svc commands).
+//!
+//! In the C each of these became bytes in a client datagram, the signon or the
+//! reliable buffer. This single-process server has no netcode, so each lands
+//! in a per-thread queue instead — [`SoundEvent`], [`StaticSound`],
+//! [`ParticleBurst`], [`GameMessage`], [`TempEntityEvent`], [`SvcEvent`] —
+//! which the `Server::drain_*` methods below hand to the front-end. Builtins
+//! are `fn(&mut Vm)` and cannot see the `Server`, hence `thread_local!`s; each
+//! section restates why.
+
+use super::Server;
+use crate::vm::Vm;
+use crate::Result;
+
+// ---------------------------------------------------------------------------
+// Sound-event queue (PF_sound / PF_ambientsound).
+//
+// The C `PF_sound` -> `SV_StartSound` wrote an `svc_sound` message into the
+// per-client datagram for the network layer to flush. This headless server has
+// no netcode, so instead each fired sound is captured as a [`SoundEvent`] in a
+// process-wide queue that [`Server::drain_sounds`] hands to whatever audio
+// front-end (or test) wants it.
+//
+// Builtins are `fn(&mut Vm)` and cannot see the `Server`, and the `Vm` type
+// lives in `vm.rs` (which this task may not edit), so the queue cannot hang off
+// either. A `thread_local!` `RefCell<Vec<SoundEvent>>` reached from `bi_sound`
+// is the cleanest spot that keeps the builtin signature intact. Server methods
+// run on the same thread as the builtins they invoke, so the events a frame's
+// QuakeC fires are visible to `drain_sounds` immediately afterward.
+// ---------------------------------------------------------------------------
+
+/// One queued sound emission — the engine `SV_StartSound` payload, captured for
+/// a front-end instead of being serialised into a client datagram.
+///
+/// `origin` is the entity's box centre (`origin + 0.5*(mins+maxs)`), matching
+/// the coordinate `SV_StartSound` wrote. `sample` keeps the raw sound name;
+/// `sound_index` is its precache slot (`>= 1`) or `-1` if it was never
+/// precached (the C `Con_Printf("not precacheed")`-and-drop case — we still
+/// queue the event so a caller can see what was attempted).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundEvent {
+    /// The emitting edict index.
+    pub entity: i32,
+    /// Sound channel (0 = auto-allocate; 1..=7 override that entity/channel).
+    pub channel: i32,
+    /// Precache index of `sample`, or `-1` when it was not precached.
+    pub sound_index: i32,
+    /// The raw sound name (e.g. `"weapons/guncock.wav"`).
+    pub sample: String,
+    /// World-space emission point: `origin + 0.5*(mins + maxs)`.
+    pub origin: [f32; 3],
+    /// Volume in `0.0..=1.0` (the C scaled this by 255 for the packet byte).
+    pub volume: f32,
+    /// Attenuation in `0.0..=4.0` (0 = audible everywhere).
+    pub attenuation: f32,
+}
+
+thread_local! {
+    /// Process-wide (per-thread) queue the sound builtins push to and
+    /// [`Server::drain_sounds`] takes. See the module note above.
+    static SOUND_EVENTS: std::cell::RefCell<Vec<SoundEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a fired sound onto the thread-local queue.
+fn push_sound_event(ev: SoundEvent) {
+    SOUND_EVENTS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued sound event.
+pub(super) fn take_sound_events() -> Vec<SoundEvent> {
+    SOUND_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+// ---------------------------------------------------------------------------
+// Static (looping ambient) sound registry (PF_ambientsound).
+//
+// The C `PF_ambientsound` (pr_cmds.c) wrote an `svc_spawnstaticsound` into the
+// level signon packet; the client's `CL_ParseStaticSound` -> `S_StaticSound`
+// (snd_dma.c) then allocated a PERSISTENT looping channel re-spatialized every
+// frame. These are the torch crackles / wind / hums placed by the QuakeC at
+// level spawn. Like the one-shot queue above, this headless server has no
+// netcode, so each `ambientsound()` is recorded as a [`StaticSound`] in a
+// process-wide thread-local list that [`Server::drain_static_sounds`] hands to
+// the front-end ONCE (the front-end keeps the loops alive itself, mirroring how
+// the signon packet was sent once at connect).
+// ---------------------------------------------------------------------------
+
+/// One placed looping ambient sound — the `svc_spawnstaticsound` payload the C
+/// `PF_ambientsound` wrote into the signon, captured for a front-end.
+///
+/// `volume`/`attenuation` are kept in the QuakeC domain (`0.0..=1.0` /
+/// `0.0..=4.0`) but quantized through the same bytes the wire format used
+/// (`vol*255` and `atten*64`, truncated), so a front-end hears exactly what the
+/// original client was told. `sound_index` mirrors [`SoundEvent::sound_index`]:
+/// the precache slot, or `-1` when no host resolved it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticSound {
+    /// World-space emission point (`PF_ambientsound`'s literal `pos` argument —
+    /// static sounds are placed at a point, not on an entity).
+    pub origin: [f32; 3],
+    /// Precache index of `sample`, or `-1` when it was not resolved.
+    pub sound_index: i32,
+    /// The raw sound name (e.g. `"ambience/fire1.wav"`).
+    pub sample: String,
+    /// Volume in `0.0..=1.0`, quantized through the wire byte (`trunc(vol*255)/255`).
+    pub volume: f32,
+    /// Attenuation in `0.0..=4.0`, quantized through the wire byte
+    /// (`trunc(atten*64)/64`; `ATTN_STATIC` = 3 survives exactly).
+    pub attenuation: f32,
+}
+
+thread_local! {
+    /// Process-wide (per-thread) registry [`bi_ambientsound`] pushes to and
+    /// [`Server::drain_static_sounds`] takes. See the module note above; the
+    /// thread-local reasoning mirrors [`SOUND_EVENTS`] exactly.
+    static STATIC_SOUNDS: std::cell::RefCell<Vec<StaticSound>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a placed static sound onto the thread-local registry.
+fn push_static_sound(ev: StaticSound) {
+    STATIC_SOUNDS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every registered static sound.
+pub(super) fn take_static_sounds() -> Vec<StaticSound> {
+    STATIC_SOUNDS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
+/// `SV_StartSound`/`PF_ambientsound` wrote for the emission coordinate.
+fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
+    let origin = vm.ent_get_vector(e, "origin");
+    let mins = vm.ent_get_vector(e, "mins");
+    let maxs = vm.ent_get_vector(e, "maxs");
+    [
+        origin[0] + 0.5 * (mins[0] + maxs[0]),
+        origin[1] + 0.5 * (mins[1] + maxs[1]),
+        origin[2] + 0.5 * (mins[2] + maxs[2]),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Particle-burst queue (PF_particle).
+//
+// The C `PF_particle` -> `SV_StartParticle` wrote an `svc_particle` message
+// into the per-client datagram; the client's `R_RunParticleEffect` then spawned
+// the actual particles into its `d_*` software renderer. This headless server
+// has no client, so — exactly like the sound queue above — each fired
+// `particle()` is captured as a [`ParticleBurst`] in a process-wide thread-local
+// queue that [`Server::drain_particles`] hands to a front-end. The front-end
+// (wasm/quaketool) owns the live [`crate::particles::ParticleSystem`] that turns
+// a drained burst into spawned points, ages them, and draws them into the scene.
+//
+// The reasoning for a `thread_local!` (rather than a field on `Server` or `Vm`)
+// is identical to the sound queue's: builtins are `fn(&mut Vm)` and cannot see
+// the `Server`, and `vm.rs` is off-limits, so the queue cannot hang off either.
+// ---------------------------------------------------------------------------
+
+/// One queued `particle()` burst — the engine `SV_StartParticle` payload,
+/// captured for a front-end instead of being serialised into a client datagram.
+///
+/// The fields mirror `PF_particle`'s arguments verbatim: `org` is the emission
+/// origin, `dir` the direction/speed the C scaled into the velocity, `color` the
+/// base palette index of the 8-entry colour ramp, and `count` the number of
+/// particles to spawn. A front-end replays this through
+/// [`crate::particles::ParticleSystem::spawn_burst`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParticleBurst {
+    /// Emission origin (world space).
+    pub org: [f32; 3],
+    /// Direction/speed the renderer scales into each particle's velocity.
+    pub dir: [f32; 3],
+    /// Base palette index of the colour ramp (`color & ~7` selects the ramp).
+    pub color: u8,
+    /// How many particles to spawn (clamped against the pool cap on spawn).
+    pub count: i32,
+}
+
+thread_local! {
+    /// Process-wide (per-thread) queue [`bi_particle`] pushes to and
+    /// [`Server::drain_particles`] takes. See the module note above; mirrors the
+    /// [`SOUND_EVENTS`] queue exactly.
+    static PARTICLE_BURSTS: std::cell::RefCell<Vec<ParticleBurst>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a fired particle burst onto the thread-local queue.
+fn push_particle_burst(ev: ParticleBurst) {
+    PARTICLE_BURSTS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued particle burst.
+pub(super) fn take_particle_bursts() -> Vec<ParticleBurst> {
+    PARTICLE_BURSTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// A text message QuakeC asked to show the player: a `centerprint` (drawn
+/// centered for a couple of seconds — level intros, "you need the silver key")
+/// or a `bprint`/`sprint` notify line (item pickups, etc.). Drained each frame by
+/// the front-end, which renders + times them out.
+pub struct GameMessage {
+    /// True for `centerprint` (centered, transient); false for a notify line.
+    pub center: bool,
+    /// The message text (may contain '\n').
+    pub text: String,
+}
+
+thread_local! {
+    // QuakeC print routing the front-end displays. Same single-threaded-VM
+    // rationale as the sound/particle/temp-entity queues above.
+    static MESSAGES: std::cell::RefCell<Vec<GameMessage>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn push_message(center: bool, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    MESSAGES.with(|q| q.borrow_mut().push(GameMessage { center, text }));
+}
+
+pub(super) fn take_messages() -> Vec<GameMessage> {
+    MESSAGES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// `PF_centerprint` (#73): show the (var-arg concatenated) message centered on
+/// screen for a few seconds. The client arg (index 0) is ignored (single-player);
+/// the message is args from index 1. Also mirrored into the dev `output` log.
+pub(super) fn bi_centerprint(vm: &mut Vm) -> Result<()> {
+    let s = crate::builtins::var_string(vm, 1);
+    vm.output.push_str(&s);
+    push_message(true, s);
+    Ok(())
+}
+
+/// `PF_bprint` (#23): broadcast print — shown as a notify line.
+pub(super) fn bi_bprint(vm: &mut Vm) -> Result<()> {
+    let s = crate::builtins::var_string(vm, 0);
+    vm.output.push_str(&s);
+    push_message(false, s);
+    Ok(())
+}
+
+/// `PF_sprint` (#24): single-client print — a notify line (client arg at index 0
+/// ignored; message is args from index 1).
+pub(super) fn bi_sprint(vm: &mut Vm) -> Result<()> {
+    let s = crate::builtins::var_string(vm, 1);
+    vm.output.push_str(&s);
+    push_message(false, s);
+    Ok(())
+}
+
+/// `PF_particle` (#48): `void(vector org, vector dir, float color, float count)
+/// particle`. The C forwarded these straight to `SV_StartParticle`; here we
+/// queue a [`ParticleBurst`] for the front-end's [`crate::particles::ParticleSystem`]
+/// to realise. The base `color` and `count` are kept as the engine domain (a
+/// palette index and a particle count); the colour is cast into a `u8` palette
+/// index (the C `SV_StartParticle` itself wrote `color` as one packet byte).
+///
+/// FAITHFULNESS: the C `SV_StartParticle` early-returned when the network
+/// datagram was nearly full; we have no datagram, so every fired burst is
+/// queued. A negative/huge `count` is preserved as-is and clamped only when the
+/// `ParticleSystem` spawns it, so the engine never allocates on program data.
+pub(super) fn bi_particle(vm: &mut Vm) -> Result<()> {
+    let org = vm.arg_vector(0);
+    let dir = vm.arg_vector(1);
+    // color is a float palette index; clamp into 0..=255 before the byte cast so
+    // an out-of-range value can never wrap unexpectedly.
+    let color = vm.arg_float(2).clamp(0.0, 255.0) as u8;
+    // SV_StartParticle writes `count` through MSG_WriteByte, which TRUNCATES mod 256
+    // (`buf[0] = c`), and the client's CL_ParseParticleEffect maps the byte value
+    // EXACTLY 255 back to 1024 — the explosion sentinel (R_RunParticleEffect's fiery
+    // pt_explode burst). So the trigger is `(count & 0xFF) == 255`, not `count >=
+    // 255`: a stray count like 256 truncates to 0 (no explosion), and -1 wraps to
+    // 255 -> 1024, exactly as the C and the demo parser (demo.rs) do. The
+    // misc_explobox death does `particle(origin, '0 0 0', 75, 255)` -> 1024 -> burst.
+    let sent = (vm.arg_float(3) as i32 & 0xFF) as u8;
+    let count = if sent == 255 { 1024 } else { sent as i32 };
+
+    push_particle_burst(ParticleBurst {
+        org,
+        dir,
+        color,
+        count,
+    });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Temp-entity decoder + queue (the network Write* family, #52..#59).
+//
+// The C produced a temp entity by writing a short ordered burst into the
+// broadcast datagram from QuakeC: WriteByte(MSG_BROADCAST, svc_temp_entity=23),
+// WriteByte(MSG_BROADCAST, TE_type), then the per-type payload (coords / bytes).
+// The client's `CL_ParseTEnt` (cl_tent.c) read that burst back and turned each
+// temp entity into a particle effect (R_ParticleExplosion / R_RunParticleEffect)
+// plus, for explosions, a dynamic light and the `weapons/r_exp3.wav` sound.
+//
+// This headless server has no client and no datagram, so the Write* builtins
+// instead feed a small decoder state machine that recognises a broadcast temp
+// entity and, when its payload is complete, emits a [`TempEntityEvent`] onto a
+// thread-local queue that [`Server::drain_temp_entities`] hands to a front-end
+// (which maps it to the same [`crate::particles::ParticleSystem`] effects).
+//
+// As with the sound/particle queues above, a `thread_local!` is the only place
+// the state can live: builtins are `fn(&mut Vm)` and cannot see the `Server`,
+// and `vm.rs` is off-limits. Server methods run on the same thread as the
+// builtins, so a frame's events are visible to `drain_temp_entities` right after.
+// ---------------------------------------------------------------------------
+
+/// `svc_temp_entity` (protocol.h): the server-command byte a broadcast temp
+/// entity begins with. A `WriteByte(MSG_BROADCAST, 23)` opens the burst.
+const SVC_TEMP_ENTITY: u8 = 23;
+
+/// `MSG_BROADCAST` (pr_cmds.c `WriteDest`): the only message destination this
+/// headless server realises (the unreliable broadcast datagram all temp
+/// entities use). Writes to `MSG_ONE`/`MSG_ALL`/`MSG_INIT` are ignored.
+const MSG_BROADCAST: i32 = 0;
+
+// TE_* type bytes (protocol.h), as written after the svc_temp_entity byte.
+const TE_SPIKE: u8 = 0;
+const TE_SUPERSPIKE: u8 = 1;
+const TE_GUNSHOT: u8 = 2;
+const TE_EXPLOSION: u8 = 3;
+const TE_TAREXPLOSION: u8 = 4;
+const TE_LIGHTNING1: u8 = 5;
+const TE_LIGHTNING2: u8 = 6;
+const TE_WIZSPIKE: u8 = 7;
+const TE_KNIGHTSPIKE: u8 = 8;
+const TE_LIGHTNING3: u8 = 9;
+const TE_LAVASPLASH: u8 = 10;
+const TE_TELEPORT: u8 = 11;
+const TE_EXPLOSION2: u8 = 12;
+const TE_BEAM: u8 = 13;
+
+/// The `TE_*` type bytes (protocol.h), re-exported for front-ends that map a
+/// [`TempEntityEvent::te_type`] to an effect (the playtest/wasm callers). These
+/// are the same byte values the QuakeC writes after `svc_temp_entity`.
+pub mod te_consts {
+    /// Spike hitting a wall (nail impact): a small `R_RunParticleEffect` burst.
+    pub const TE_SPIKE: u8 = super::TE_SPIKE;
+    /// Super-spike (super-nail) wall impact: a larger burst.
+    pub const TE_SUPERSPIKE: u8 = super::TE_SUPERSPIKE;
+    /// Bullet hitting a wall: a medium burst.
+    pub const TE_GUNSHOT: u8 = super::TE_GUNSHOT;
+    /// Rocket/grenade explosion: a 1024-particle fiery explosion + sound.
+    pub const TE_EXPLOSION: u8 = super::TE_EXPLOSION;
+    /// Tarbaby explosion: treated as an explosion + sound.
+    pub const TE_TAREXPLOSION: u8 = super::TE_TAREXPLOSION;
+    /// Lightning bolt beam (bolt.mdl).
+    pub const TE_LIGHTNING1: u8 = super::TE_LIGHTNING1;
+    /// Lightning bolt beam (bolt2.mdl).
+    pub const TE_LIGHTNING2: u8 = super::TE_LIGHTNING2;
+    /// Wizard spike wall impact: a green-ish burst.
+    pub const TE_WIZSPIKE: u8 = super::TE_WIZSPIKE;
+    /// Knight spike wall impact.
+    pub const TE_KNIGHTSPIKE: u8 = super::TE_KNIGHTSPIKE;
+    /// Lightning bolt beam (bolt3.mdl).
+    pub const TE_LIGHTNING3: u8 = super::TE_LIGHTNING3;
+    /// Lava splash (a Chthon attack): approximated as an upward burst.
+    pub const TE_LAVASPLASH: u8 = super::TE_LAVASPLASH;
+    /// Teleport splash: approximated as an upward burst.
+    pub const TE_TELEPORT: u8 = super::TE_TELEPORT;
+    /// Colour-mapped explosion: a 1024-particle explosion + sound.
+    pub const TE_EXPLOSION2: u8 = super::TE_EXPLOSION2;
+    /// Grappling-hook beam (beam.mdl).
+    pub const TE_BEAM: u8 = super::TE_BEAM;
+}
+
+/// One decoded broadcast temp entity (the `CL_ParseTEnt` payload), captured for
+/// a front-end instead of spawning a client-side particle effect directly.
+///
+/// `pos` is the effect origin (the three `WriteCoord`s). For [`TE_EXPLOSION2`]
+/// (`te_type == 12`) `color_start`/`color_length` carry the two trailing colour
+/// bytes; for every other type they are `0`. Beam types (`TE_LIGHTNING1/2/3`,
+/// `TE_BEAM`) carry the owning entity number in `entity`, the *start* point in
+/// `pos` and the *end* point in `end` — a front-end feeds those three to
+/// [`crate::tent::Beams::parse_beam`] (the `CL_ParseBeam` slot store) to render
+/// the bolt; for every non-beam type `entity` is `0` and `end` equals `pos`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempEntityEvent {
+    /// The `TE_*` type byte (e.g. `3` = explosion, `2` = gunshot).
+    pub te_type: u8,
+    /// The effect origin (the three `WriteCoord` values; the beam START point).
+    pub pos: [f32; 3],
+    /// Beam types: the END point (the trailing three `WriteCoord`s). Non-beam
+    /// types carry no end point — set equal to `pos`.
+    pub end: [f32; 3],
+    /// Beam types: the owning entity number (the `WriteEntity` short before the
+    /// coords) — `CL_ParseBeam`'s slot-reuse key. `0` for non-beam types.
+    pub entity: i32,
+    /// `TE_EXPLOSION2` colour-ramp start index; `0` for other types.
+    pub color_start: u8,
+    /// `TE_EXPLOSION2` colour-ramp length; `0` for other types.
+    pub color_length: u8,
+}
+
+/// What payload shape a recognised `TE_*` type expects, so the decoder consumes
+/// exactly the right fields and stays byte-synchronised with the writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TePayload {
+    /// Three `WriteCoord`s, then emit (spikes, gunshots, explosions, splashes).
+    Coords3,
+    /// Three `WriteCoord`s then two colour bytes, then emit (`TE_EXPLOSION2`).
+    Coords3ThenTwoBytes,
+    /// A `short` entity index then six `WriteCoord`s (start+end), then emit with
+    /// no effect mapping (the beam/lightning types — consumed to stay in sync).
+    Beam,
+}
+
+/// Map a `TE_*` type byte to its payload shape, or `None` for an unknown type
+/// (the decoder then resets to `Idle`, dropping the in-progress message rather
+/// than guessing a length and corrupting every later write).
+fn te_payload(te_type: u8) -> Option<TePayload> {
+    match te_type {
+        TE_SPIKE | TE_SUPERSPIKE | TE_GUNSHOT | TE_EXPLOSION | TE_TAREXPLOSION
+        | TE_WIZSPIKE | TE_KNIGHTSPIKE | TE_LAVASPLASH | TE_TELEPORT => Some(TePayload::Coords3),
+        TE_EXPLOSION2 => Some(TePayload::Coords3ThenTwoBytes),
+        TE_LIGHTNING1 | TE_LIGHTNING2 | TE_LIGHTNING3 | TE_BEAM => Some(TePayload::Beam),
+        _ => None,
+    }
+}
+
+/// The temp-entity decoder state. `Idle` between messages; `InMessage` while
+/// collecting a recognised temp entity's payload.
+#[derive(Debug, Clone, PartialEq)]
+enum TeState {
+    /// Not inside a temp-entity message. The next `WriteByte(MSG_BROADCAST, 23)`
+    /// opens one; any other broadcast write is ignored here.
+    Idle,
+    /// Inside a temp entity: the `svc_temp_entity` byte was seen.
+    InMessage {
+        /// The `TE_*` type byte once read (`None` while awaiting it), with its
+        /// resolved payload shape.
+        ty: Option<(u8, TePayload)>,
+        /// `WriteCoord` values collected so far (bounded — see the decoder).
+        coords: Vec<f32>,
+        /// Trailing colour bytes collected so far (`TE_EXPLOSION2`, bounded).
+        bytes: Vec<u8>,
+        /// For [`TePayload::Beam`], the leading `short` (the beam's owning
+        /// entity index) once consumed (`None` while awaiting it).
+        beam_entity: Option<i32>,
+    },
+}
+
+thread_local! {
+    /// The temp-entity decoder state machine (per-thread). Driven by the Write*
+    /// builtins; reset to [`TeState::Idle`] whenever a message completes, an
+    /// unknown type is seen, or a new frame begins ([`Server::run_frame`] /
+    /// [`Server::client_frame`] reset it via [`reset_temp_entity_decoder`]).
+    static TE_STATE: std::cell::RefCell<TeState> =
+        const { std::cell::RefCell::new(TeState::Idle) };
+    /// Completed temp-entity events awaiting a [`Server::drain_temp_entities`].
+    /// Mirrors the [`SOUND_EVENTS`]/[`PARTICLE_BURSTS`] queues exactly.
+    static TEMP_ENTITIES: std::cell::RefCell<Vec<TempEntityEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The largest number of `WriteCoord`/colour-byte fields any modelled temp
+/// entity carries (the beam types: 6 coords). A hard cap on the collected vecs
+/// so a malformed stream can never grow them without bound.
+const TE_MAX_COORDS: usize = 6;
+
+/// Push a completed temp-entity event onto the thread-local queue.
+fn push_temp_entity(ev: TempEntityEvent) {
+    TEMP_ENTITIES.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued temp-entity event.
+pub(super) fn take_temp_entities() -> Vec<TempEntityEvent> {
+    TEMP_ENTITIES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Reset the decoder to [`TeState::Idle`], dropping any half-collected message.
+/// Called at the start of each server frame so a partial temp entity left by an
+/// errored think never bleeds into the next frame's writes.
+pub(super) fn reset_temp_entity_decoder() {
+    TE_STATE.with(|s| *s.borrow_mut() = TeState::Idle);
+}
+
+/// Feed one `WriteByte`/`WriteShort`/`WriteCoord`/… value to the decoder.
+///
+/// `dest` is the message destination (`PARM0`); only `MSG_BROADCAST` is decoded,
+/// every other destination is ignored (the C routed those to a specific client's
+/// reliable buffer, which this headless server has no client for). `field` says
+/// which kind of write this is so the decoder treats a coord as a coordinate, a
+/// byte/short as an integer payload field, etc.
+///
+/// The state machine is deliberately total: an unrecognised `TE_*` type, an
+/// over-long field run, or any unexpected write simply resets to `Idle` (drops
+/// the in-progress message) rather than panicking or guessing.
+fn te_feed(dest: i32, field: TeField, value: f32) {
+    if dest != MSG_BROADCAST {
+        return; // not a broadcast temp entity — ignore (no client buffers here).
+    }
+    TE_STATE.with(|cell| {
+        let mut st = cell.borrow_mut();
+        match &mut *st {
+            // --- between messages: only a WriteByte of svc_temp_entity opens one.
+            TeState::Idle => {
+                if matches!(field, TeField::Byte) && (value as i32) == SVC_TEMP_ENTITY as i32 {
+                    *st = TeState::InMessage {
+                        ty: None,
+                        coords: Vec::new(),
+                        bytes: Vec::new(),
+                        beam_entity: None,
+                    };
+                }
+                // Any other broadcast write outside a message is ignored.
+            }
+
+            // --- inside a temp entity.
+            TeState::InMessage {
+                ty,
+                coords,
+                bytes,
+                beam_entity,
+            } => {
+                // Awaiting the TE_* type byte (the second WriteByte).
+                if ty.is_none() {
+                    if matches!(field, TeField::Byte) {
+                        let tb = value as i32;
+                        // Out-of-byte-range or unknown type => drop the message.
+                        let te_type = if (0..=255).contains(&tb) { tb as u8 } else { 255 };
+                        match te_payload(te_type) {
+                            Some(shape) => *ty = Some((te_type, shape)),
+                            None => *st = TeState::Idle,
+                        }
+                    } else {
+                        // A non-byte write where the type was expected: desync; reset.
+                        *st = TeState::Idle;
+                    }
+                    return;
+                }
+
+                let (te_type, shape) = ty.expect("ty is Some here");
+                match shape {
+                    TePayload::Coords3 => {
+                        if matches!(field, TeField::Coord) && coords.len() < TE_MAX_COORDS {
+                            coords.push(value);
+                        }
+                        if coords.len() == 3 {
+                            let pos = [coords[0], coords[1], coords[2]];
+                            push_temp_entity(TempEntityEvent {
+                                te_type,
+                                pos,
+                                end: pos,
+                                entity: 0,
+                                color_start: 0,
+                                color_length: 0,
+                            });
+                            *st = TeState::Idle;
+                        }
+                    }
+                    TePayload::Coords3ThenTwoBytes => {
+                        if coords.len() < 3 {
+                            if matches!(field, TeField::Coord) && coords.len() < TE_MAX_COORDS {
+                                coords.push(value);
+                            }
+                        } else if matches!(field, TeField::Byte) && bytes.len() < 2 {
+                            bytes.push((value as i32).clamp(0, 255) as u8);
+                        }
+                        if coords.len() == 3 && bytes.len() == 2 {
+                            let pos = [coords[0], coords[1], coords[2]];
+                            push_temp_entity(TempEntityEvent {
+                                te_type,
+                                pos,
+                                end: pos,
+                                entity: 0,
+                                color_start: bytes[0],
+                                color_length: bytes[1],
+                            });
+                            *st = TeState::Idle;
+                        }
+                    }
+                    TePayload::Beam => {
+                        // short (entity index) first, then 6 coords (start+end).
+                        if beam_entity.is_none() {
+                            if matches!(field, TeField::Short | TeField::Entity) {
+                                *beam_entity = Some(value as i32);
+                            }
+                            // (A stray coord before the short is ignored; the
+                            // writer always emits the short first.)
+                        } else if matches!(field, TeField::Coord) && coords.len() < TE_MAX_COORDS {
+                            coords.push(value);
+                        }
+                        if let (Some(entity), true) = (*beam_entity, coords.len() == 6) {
+                            // START point in pos, END point in end, plus the owning
+                            // entity — everything CL_ParseBeam needs for its slot
+                            // store (crate::tent::Beams).
+                            push_temp_entity(TempEntityEvent {
+                                te_type,
+                                pos: [coords[0], coords[1], coords[2]],
+                                end: [coords[3], coords[4], coords[5]],
+                                entity,
+                                color_start: 0,
+                                color_length: 0,
+                            });
+                            *st = TeState::Idle;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Which `Write*` builtin produced a decoder field — lets [`te_feed`] tell a
+/// coordinate from an integer payload byte/short so it consumes the right shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeField {
+    /// `WriteByte`/`WriteChar` — an 8-bit integer field (svc byte, TE type byte,
+    /// or `TE_EXPLOSION2`'s two colour bytes).
+    Byte,
+    /// `WriteShort`/`WriteLong` — a 16/32-bit integer field (the beam entity index).
+    Short,
+    /// `WriteCoord`/`WriteAngle` — a world coordinate (captured as the raw float).
+    Coord,
+    /// `WriteEntity` — an entity index short (treated like [`TeField::Short`]).
+    Entity,
+}
+
+// ---------------------------------------------------------------------------
+// MSG_ALL server-command recognizer (svc_intermission / svc_finale / ...).
+//
+// The C `PF_WriteByte`/`PF_WriteString` route a `MSG_ALL` destination into
+// `sv.reliable_datagram`, which every client's `CL_ParseServerMessage`
+// (cl_parse.c) later reads back as `svc_*` commands. The vanilla progs writes
+// exactly these commands to MSG_ALL: `svc_killedmonster`/`svc_foundsecret`
+// (one byte, no payload — the engine reads the kill/secret counts from the
+// QuakeC globals directly, so these are recognised but not surfaced),
+// `svc_intermission` (no payload), `svc_finale` (+ one `WriteString`),
+// `svc_cdtrack` (+ two payload bytes: track, looptrack) and `svc_sellscreen`
+// (no payload); mission packs add `svc_cutscene` (+ string). This headless
+// server has no datagram, so — exactly like the temp-entity decoder above —
+// the Write* builtins feed a tiny recognizer whose completed commands queue as
+// [`SvcEvent`]s until [`Server::drain_svc_events`] hands them to the front-end
+// (which plays the client role: intermission camera, finale text, stats overlay).
+// ---------------------------------------------------------------------------
+
+/// `MSG_ALL` (pr_cmds.c `WriteDest`): the reliable broadcast message every
+/// client receives — the destination of the intermission/finale/stat commands.
+const MSG_ALL: i32 = 2;
+
+// The `svc_*` command bytes (protocol.h) the vanilla progs writes to MSG_ALL.
+const SVC_KILLEDMONSTER: u8 = 27;
+const SVC_FOUNDSECRET: u8 = 28;
+const SVC_INTERMISSION: u8 = 30;
+const SVC_FINALE: u8 = 31;
+const SVC_CDTRACK: u8 = 32;
+const SVC_SELLSCREEN: u8 = 33;
+const SVC_CUTSCENE: u8 = 34;
+
+/// One recognised MSG_ALL server command, surfaced to the front-end the way the
+/// client's `CL_ParseServerMessage` (cl_parse.c) would have acted on it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SvcEvent {
+    /// `svc_intermission` (30): the level ended — the C set `cl.intermission = 1`,
+    /// latched `cl.completed_time = cl.time` and went full-screen for the
+    /// intermission camera + `Sbar_IntermissionOverlay` stats.
+    Intermission,
+    /// `svc_finale` (31) + its `WriteString` payload: episode-end text — the C set
+    /// `cl.intermission = 2` and `SCR_CenterPrint`ed the string (slow char reveal).
+    Finale(String),
+    /// `svc_cutscene` (34) + its string: `cl.intermission = 3` (text only, no
+    /// plaque). Unused by the vanilla progs (mission packs use it).
+    Cutscene(String),
+    /// `svc_sellscreen` (33): the shareware "order the full game" pitch — the C ran
+    /// `Cmd_ExecuteString("help")`, i.e. opened the Help/Ordering pages.
+    SellScreen,
+}
+
+/// The MSG_ALL recognizer state. Like [`TeState`], deliberately total: any
+/// unexpected write resets to `Idle` rather than guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SvcAllState {
+    /// Between commands: the next `WriteByte` is an `svc_*` command byte.
+    Idle,
+    /// `svc_finale`/`svc_cutscene` seen; awaiting the `WriteString` payload.
+    /// `cutscene` distinguishes which event to emit.
+    AwaitString { cutscene: bool },
+    /// `svc_cdtrack` seen; the next N `WriteByte`s (track, looptrack) are payload
+    /// and must be consumed so they are not mistaken for command bytes.
+    SkipBytes(u8),
+}
+
+thread_local! {
+    /// The MSG_ALL recognizer state (per-thread, like [`TE_STATE`]). Reset at the
+    /// top of each server frame and in [`Server::with_pak`].
+    static SVC_ALL_STATE: std::cell::RefCell<SvcAllState> =
+        const { std::cell::RefCell::new(SvcAllState::Idle) };
+    /// Completed MSG_ALL commands awaiting a [`Server::drain_svc_events`].
+    static SVC_EVENTS: std::cell::RefCell<Vec<SvcEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push a completed MSG_ALL command onto the thread-local queue.
+fn push_svc_event(ev: SvcEvent) {
+    SVC_EVENTS.with(|q| q.borrow_mut().push(ev));
+}
+
+/// Take and clear every queued MSG_ALL command.
+pub(super) fn take_svc_events() -> Vec<SvcEvent> {
+    SVC_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Reset the recognizer to `Idle`, dropping any half-collected command. Called
+/// at the start of each server frame (next to [`reset_temp_entity_decoder`]) so
+/// a partial command left by an errored think never bleeds into the next frame.
+pub(super) fn reset_svc_recognizer() {
+    SVC_ALL_STATE.with(|s| *s.borrow_mut() = SvcAllState::Idle);
+}
+
+/// Feed one `WriteByte`/`WriteChar` value to the MSG_ALL recognizer (a no-op for
+/// any other destination). Unknown command bytes are ignored where the real
+/// stream would carry their payload too — the vanilla progs only ever writes the
+/// commands modelled here, so anything else is simply dropped, never panicking.
+fn svc_all_feed_byte(dest: i32, value: f32) {
+    if dest != MSG_ALL {
+        return;
+    }
+    SVC_ALL_STATE.with(|cell| {
+        let mut st = cell.borrow_mut();
+        match *st {
+            SvcAllState::Idle => {
+                let b = value as i32;
+                match if (0..=255).contains(&b) { b as u8 } else { 0 } {
+                    SVC_INTERMISSION => push_svc_event(SvcEvent::Intermission),
+                    SVC_FINALE => *st = SvcAllState::AwaitString { cutscene: false },
+                    SVC_CUTSCENE => *st = SvcAllState::AwaitString { cutscene: true },
+                    SVC_CDTRACK => *st = SvcAllState::SkipBytes(2),
+                    SVC_SELLSCREEN => push_svc_event(SvcEvent::SellScreen),
+                    // Stat ticks: the front-end reads killed_monsters /
+                    // found_secrets from the QuakeC globals (like the Tab
+                    // scoreboard), so these single-byte commands need no event.
+                    SVC_KILLEDMONSTER | SVC_FOUNDSECRET => {}
+                    _ => {} // unknown command byte: ignore (stay Idle).
+                }
+            }
+            SvcAllState::AwaitString { .. } => {
+                // A byte where the string was expected: desync; drop the command.
+                *st = SvcAllState::Idle;
+            }
+            SvcAllState::SkipBytes(n) => {
+                *st = if n <= 1 { SvcAllState::Idle } else { SvcAllState::SkipBytes(n - 1) };
+            }
+        }
+    });
+}
+
+/// Feed one `WriteString` value to the MSG_ALL recognizer (a no-op for any other
+/// destination): completes a pending `svc_finale`/`svc_cutscene`.
+fn svc_all_feed_string(dest: i32, text: String) {
+    if dest != MSG_ALL {
+        return;
+    }
+    SVC_ALL_STATE.with(|cell| {
+        let mut st = cell.borrow_mut();
+        if let SvcAllState::AwaitString { cutscene } = *st {
+            push_svc_event(if cutscene {
+                SvcEvent::Cutscene(text)
+            } else {
+                SvcEvent::Finale(text)
+            });
+        }
+        // A string outside AwaitString is not part of any modelled command; either
+        // way the recognizer returns to Idle.
+        *st = SvcAllState::Idle;
+    });
+}
+
+/// Feed a non-byte, non-string write to the recognizer: no modelled MSG_ALL
+/// command carries one, so it can only mean desync — reset to `Idle`.
+fn svc_all_feed_other(dest: i32) {
+    if dest != MSG_ALL {
+        return;
+    }
+    reset_svc_recognizer();
+}
+
+/// `PF_WriteByte` (#52): `void(float to, float value)`. Feeds the decoder an
+/// 8-bit field. The C did `MSG_WriteByte(WriteDest(), G_FLOAT(PARM1))`; here the
+/// destination is `PARM0` and the value `PARM1`.
+pub(super) fn bi_writebyte(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    svc_all_feed_byte(vm.arg_float(0) as i32, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteChar` (#53): like [`bi_writebyte`] (an 8-bit field). No temp entity
+/// uses a char field, but it is decoded as a byte so the stream stays in sync.
+pub(super) fn bi_writechar(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    svc_all_feed_byte(vm.arg_float(0) as i32, vm.arg_float(1));
+    Ok(())
+}
+
+/// `PF_WriteShort` (#54): a 16-bit integer field (the beam types' entity index).
+pub(super) fn bi_writeshort(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Short, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
+    Ok(())
+}
+
+/// `PF_WriteLong` (#55): a 32-bit integer field. Decoded like a short (no temp
+/// entity carries a long, but it keeps the stream synchronised if one appears).
+pub(super) fn bi_writelong(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Short, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
+    Ok(())
+}
+
+/// `PF_WriteCoord` (#56): a world coordinate. The C round-tripped through a lossy
+/// `*8` short; we capture the float value directly (the task notes this is fine).
+pub(super) fn bi_writecoord(vm: &mut Vm) -> Result<()> {
+    te_feed(vm.arg_float(0) as i32, TeField::Coord, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
+    Ok(())
+}
+
+/// `PF_WriteAngle` (#57): an angle byte. No modelled temp entity carries one;
+/// decoded as a coordinate field would be wrong, so it is treated as a [`TeField::Coord`]
+/// only for the (unused-by-temp-entities) angle slot — in practice angles never
+/// appear inside a temp-entity burst, so this just stays benign.
+pub(super) fn bi_writeangle(vm: &mut Vm) -> Result<()> {
+    // Angles are not part of any temp-entity payload; feed as a byte-like field
+    // so it cannot be mistaken for a coordinate (keeps Coords3 in sync if a
+    // writer ever interleaved one, which the stock game never does).
+    te_feed(vm.arg_float(0) as i32, TeField::Byte, vm.arg_float(1));
+    svc_all_feed_other(vm.arg_float(0) as i32);
+    Ok(())
+}
+
+/// `PF_WriteString` (#58): a string field. Temp entities carry no strings (the
+/// broadcast decoder ignores it), but a MSG_ALL string completes a pending
+/// `svc_finale`/`svc_cutscene` — the episode-end text the client's
+/// `CL_ParseServerMessage` read with `MSG_ReadString` and `SCR_CenterPrint`ed.
+pub(super) fn bi_writestring(vm: &mut Vm) -> Result<()> {
+    let dest = vm.arg_float(0) as i32;
+    if dest == MSG_ALL {
+        svc_all_feed_string(dest, vm.arg_string(1));
+    }
+    Ok(())
+}
+
+/// `PF_WriteEntity` (#59): an entity-index short — the C wrote
+/// `G_EDICTNUM(OFS_PARM1)`. The beam types' leading field: their owning
+/// entity number (the `Beams` slot-reuse / view-entity key). NOTE the arg is
+/// an entity reference (an INT global, `arg_entity`), not a float — reading it
+/// as a float would yield the f32 bit-reinterpretation of the edict index
+/// (~0.0 for every real entity), collapsing all beams onto one slot.
+pub(super) fn bi_writeentity(vm: &mut Vm) -> Result<()> {
+    te_feed(
+        vm.arg_float(0) as i32,
+        TeField::Entity,
+        vm.arg_entity(1) as f32,
+    );
+    svc_all_feed_other(vm.arg_float(0) as i32);
+    Ok(())
+}
+
+/// `PF_sound` (#8): `void(entity e, float chan, string sample, float vol,
+/// float atten) sound`. The arg layout mirrors `PF_sound`/`SV_StartSound`:
+/// `entity = PARM0`, `channel = PARM1`, `sample = PARM2`, `volume = PARM3`,
+/// `attenuation = PARM4`; the emission point is the entity's box centre.
+///
+/// FAITHFULNESS: the C `Sys_Error`s on out-of-range volume/attenuation/channel
+/// and silently drops an un-precached sample. We never abort the host on
+/// program data, so instead we keep the values as given (a front-end can clamp)
+/// and still queue the event even when the sample was not precached, recording
+/// `sound_index = -1` so the caller can tell. The C scaled volume by 255 into a
+/// packet byte; we keep the QuakeC-domain `0.0..=1.0` float for the front-end.
+pub(super) fn bi_sound(vm: &mut Vm) -> Result<()> {
+    let entity = vm.arg_entity(0);
+    let channel = vm.arg_float(1) as i32;
+    let sample = vm.arg_string(2);
+    let volume = vm.arg_float(3);
+    let attenuation = vm.arg_float(4);
+
+    let origin = entity_sound_origin(vm, entity);
+    // Resolve the precache slot without registering a new name: SV_StartSound
+    // only *looks up* an already-precached sample, dropping (here: marking -1)
+    // when absent.
+    let sound_index = lookup_sound_index(vm, &sample);
+
+    push_sound_event(SoundEvent {
+        entity,
+        channel,
+        sound_index,
+        sample,
+        origin,
+        volume,
+        attenuation,
+    });
+    Ok(())
+}
+
+/// `PF_ambientsound` (#74, pr_cmds.c): `void(vector pos, string sample, float
+/// vol, float atten) ambientsound`. The C emitted an `svc_spawnstaticsound`
+/// into the level signon at an explicit world position; the client's
+/// `S_StaticSound` then ran it as a PERSISTENT looping channel. We record it as
+/// a [`StaticSound`] for [`Server::drain_static_sounds`] — NOT as a one-shot
+/// [`SoundEvent`] (a loop is state, not an event).
+///
+/// Unlike `SV_StartSound`'s path (see [`lookup_sound_index`]'s DEVIATION),
+/// the precache gate here matches the C exactly: `PF_ambientsound` scans
+/// `sv.sound_precache` read-only and REFUSES an un-precached sample —
+/// `Con_Printf ("no precache: %s\n", samp); return;` — registering nothing.
+/// The message routes to [`Vm::output`] like the `print`/`dprint` builtins.
+///
+/// The wire format quantized volume and attenuation into bytes
+/// (`MSG_WriteByte(vol*255)` / `MSG_WriteByte(attenuation*64)`, C float→int
+/// truncation); `CL_ParseStaticSound` handed those bytes to `S_StaticSound`,
+/// which divided the attenuation byte back by 64. We apply the same round-trip
+/// (clamped to the byte range instead of wrapping, defensively) so a front-end
+/// hears exactly what the original client was told.
+pub(super) fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
+    let pos = vm.arg_vector(0);
+    let sample = vm.arg_string(1);
+    let volume = vm.arg_float(2);
+    let attenuation = vm.arg_float(3);
+
+    // "check to see if samp was properly precached" (pr_cmds.c:519-528).
+    let Some(sound_index) = vm.with_host(|_vm, h| h.find_sound(&sample)).flatten() else {
+        vm.output.push_str("no precache: ");
+        vm.output.push_str(&sample);
+        vm.output.push('\n');
+        return Ok(());
+    };
+
+    let vol_byte = (volume * 255.0).clamp(0.0, 255.0) as u8;
+    let atten_byte = (attenuation * 64.0).clamp(0.0, 255.0) as u8;
+    push_static_sound(StaticSound {
+        origin: pos,
+        sound_index,
+        sample,
+        volume: vol_byte as f32 / 255.0,
+        attenuation: atten_byte as f32 / 64.0,
+    });
+    Ok(())
+}
+
+/// Resolve `sample`'s precache slot for the one-shot [`SoundEvent`] paths
+/// (`bi_sound` / the physics `start_sound`). The C `SV_StartSound` only
+/// *searched* `sv.sound_precache` and dropped an un-precached sample. In
+/// practice QuakeC precaches every sound during `worldspawn` before any
+/// `sound()` fires, so `precache_sound` returns the existing stable slot
+/// (`>= 1`) without appending. Returns `-1` only when there is no host at all.
+///
+/// DEVIATION: an un-precached name is registered here (and so gets a real
+/// slot) rather than being dropped with a warning. The captured
+/// [`SoundEvent`] still carries the raw `sample`, so a front-end is never
+/// misled about what played. (`bi_ambientsound` does NOT use this: it matches
+/// the C's read-only check via [`Host::find_sound`] and drops.)
+fn lookup_sound_index(vm: &mut Vm, sample: &str) -> i32 {
+    vm.with_host(|_vm, h| h.precache_sound(sample)).unwrap_or(-1)
+}
+
+impl Server {
+    /// Take and clear the queued sound events fired by the QuakeC since the last
+    /// drain (`PF_sound`/`PF_ambientsound` pushes; see [`SoundEvent`]). A
+    /// front-end calls this once per frame to play them; tests use it to assert
+    /// a weapon actually fired. The queue is process-/thread-local, so call this
+    /// on the same thread that drove the frame.
+    pub fn drain_sounds(&mut self) -> Vec<SoundEvent> {
+        take_sound_events()
+    }
+
+    /// Take and clear the placed looping ambient sounds the QuakeC registered
+    /// via `ambientsound()` since the last drain (see [`StaticSound`]). The
+    /// level's worldspawn registers them all during `spawn_entities`, so a
+    /// front-end drains ONCE after the level builds and keeps the loops alive
+    /// itself — mirroring how the C wrote them once into the signon packet and
+    /// `S_StaticSound` kept a persistent channel. Thread-local like
+    /// [`Server::drain_sounds`]: call on the thread that spawned the level.
+    pub fn drain_static_sounds(&mut self) -> Vec<StaticSound> {
+        take_static_sounds()
+    }
+
+    /// Take and clear the queued on-screen messages (`centerprint`/`sprint`/
+    /// `bprint`) the QuakeC emitted since the last drain. The front-end shows
+    /// centered ones transiently and notify lines fading at the top.
+    pub fn drain_messages(&mut self) -> Vec<GameMessage> {
+        take_messages()
+    }
+
+    /// Take and clear the queued particle bursts fired by the QuakeC since the
+    /// last drain (`PF_particle` pushes; see [`ParticleBurst`]). A front-end
+    /// calls this once per frame and replays each burst into its
+    /// [`crate::particles::ParticleSystem`]; tests use it to assert an
+    /// explosion/spawn actually emitted particles. The queue is
+    /// process-/thread-local, so call this on the same thread that drove the
+    /// frame (mirrors [`Server::drain_sounds`]).
+    pub fn drain_particles(&mut self) -> Vec<ParticleBurst> {
+        take_particle_bursts()
+    }
+
+    /// Take and clear the queued temp-entity events decoded from the QuakeC's
+    /// broadcast `Write*` bursts since the last drain (rocket/grenade explosions,
+    /// bullet wall-impacts, nail/spike impacts). A front-end calls this once per
+    /// frame and maps each [`TempEntityEvent`] to the matching
+    /// [`crate::particles::ParticleSystem`] effect (and an explosion sound); tests
+    /// use it to assert a temp entity actually fired. The queue is
+    /// process-/thread-local, so call this on the same thread that drove the frame
+    /// (mirrors [`Server::drain_sounds`]/[`Server::drain_particles`]).
+    pub fn drain_temp_entities(&mut self) -> Vec<TempEntityEvent> {
+        take_temp_entities()
+    }
+
+    /// Take and clear the queued MSG_ALL server commands recognised from the
+    /// QuakeC's `WriteByte(MSG_ALL, ...)` bursts since the last drain
+    /// (`svc_intermission` / `svc_finale` / `svc_cutscene` / `svc_sellscreen`).
+    /// A front-end calls this once per frame and plays the client role of
+    /// `CL_ParseServerMessage` (cl_parse.c): enter intermission mode, latch the
+    /// completed time, start the finale text reveal. Thread-local like
+    /// [`Server::drain_temp_entities`] — call it on the thread that drove the frame.
+    pub fn drain_svc_events(&mut self) -> Vec<SvcEvent> {
+        take_svc_events()
+    }
+
+    /// `SV_StartSound` (sv_phys.c helper, via `world.c`): queue a sound emitted by
+    /// `ent` on `channel` with the named `sample`. `volume_byte` is the C 0..255
+    /// byte (255 = full); we store it back in the QuakeC `0.0..=1.0` domain the
+    /// [`SoundEvent`] queue uses. Used by the toss/step physics for the
+    /// water-entry splash and the landing thud (the C calls these directly, not
+    /// through the QuakeC `sound` builtin).
+    pub(super) fn start_sound(&mut self, ent: i32, channel: i32, sample: &str, volume_byte: i32, attenuation: f32) {
+        let origin = entity_sound_origin(&self.vm, ent);
+        let sound_index = lookup_sound_index(&mut self.vm, sample);
+        push_sound_event(SoundEvent {
+            entity: ent,
+            channel,
+            sound_index,
+            sample: sample.to_string(),
+            origin,
+            volume: (volume_byte as f32) / 255.0,
+            attenuation,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progs::{Progs, OFS_PARM0};
+    use crate::server::testutil::*;
+
+    #[test]
+    fn bi_sound_queues_event_and_drain_clears() {
+        // bi_sound (PF_sound) must push a SoundEvent with the faithful fields and
+        // drain_sounds must return then clear it. Drive the builtin directly by
+        // placing its args in the PARM globals and calling it.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        // Give an entity a box so the centre offset is non-trivial.
+        let e = server.vm.spawn();
+        server.vm.ent_set_vector(e, "origin", [10.0, 20.0, 30.0]);
+        server.vm.ent_set_vector(e, "mins", [-2.0, -4.0, -6.0]);
+        server.vm.ent_set_vector(e, "maxs", [2.0, 4.0, 16.0]);
+
+        // Precache the sample so it resolves to a real slot, then set up PARMs.
+        let sample = "ambience/wind2.wav";
+        server.vm.with_host(|_vm, h| h.precache_sound(sample));
+        let s_t = server.vm.intern(sample);
+        // PARM0=entity, PARM1=channel(2), PARM2=sample, PARM3=vol(0.5), PARM4=atten(2)
+        server.vm.set_gi(OFS_PARM0, e);
+        server.vm.set_gf(OFS_PARM0 + 3, 2.0);
+        server.vm.set_gi(OFS_PARM0 + 6, s_t);
+        server.vm.set_gf(OFS_PARM0 + 9, 0.5);
+        server.vm.set_gf(OFS_PARM0 + 12, 2.0);
+
+        bi_sound(&mut server.vm).expect("bi_sound");
+
+        let sounds = server.drain_sounds();
+        assert_eq!(sounds.len(), 1);
+        let ev = &sounds[0];
+        assert_eq!(ev.entity, e);
+        assert_eq!(ev.channel, 2);
+        assert_eq!(ev.sample, sample);
+        assert_eq!(ev.volume, 0.5);
+        assert_eq!(ev.attenuation, 2.0);
+        // centre = (10,20,30) + 0.5*((-2,-4,-6)+(2,4,16)) = (10,20,30)+(0,0,5) = (10,20,35)
+        assert_eq!(ev.origin, [10.0, 20.0, 35.0]);
+        assert!(ev.sound_index >= 1, "precached sample resolved");
+
+        // The queue is empty after draining.
+        assert!(
+            server.drain_sounds().is_empty(),
+            "drain_sounds cleared the queue"
+        );
+    }
+
+    #[test]
+    fn bi_ambientsound_records_static_sound_and_drain_clears() {
+        // bi_ambientsound (PF_ambientsound, #74) must record a StaticSound (a
+        // persistent loop, NOT a one-shot SoundEvent) carrying the placed
+        // position and the byte-quantized volume/attenuation the wire format
+        // (`svc_spawnstaticsound`) carried, and drain_static_sounds must return
+        // then clear it. Drive the builtin directly via the PARM globals.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let _ = server.drain_static_sounds(); // clear any startup registrations
+
+        // Precache the sample so it resolves to a real slot, then set up PARMs:
+        // PARM0=pos(vec), PARM1=sample, PARM2=vol(0.5), PARM3=atten(3=ATTN_STATIC)
+        // — FireAmbient's exact call for the e1m1 torches.
+        let sample = "ambience/fire1.wav";
+        server.vm.with_host(|_vm, h| h.precache_sound(sample));
+        let s_t = server.vm.intern(sample);
+        server.vm.set_gv(OFS_PARM0, [100.0, -50.0, 24.0]);
+        server.vm.set_gi(OFS_PARM0 + 3, s_t);
+        server.vm.set_gf(OFS_PARM0 + 6, 0.5);
+        server.vm.set_gf(OFS_PARM0 + 9, 3.0);
+
+        bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
+
+        let statics = server.drain_static_sounds();
+        assert_eq!(statics.len(), 1, "one static sound recorded");
+        let s = &statics[0];
+        assert_eq!(s.origin, [100.0, -50.0, 24.0], "placed at the literal pos");
+        assert_eq!(s.sample, sample);
+        // vol 0.5 -> byte trunc(127.5)=127 -> 127/255 (the wire round-trip).
+        assert_eq!(s.volume, 127.0 / 255.0);
+        // atten 3 -> byte 192 -> 192/64 = 3.0 exactly (ATTN_STATIC survives).
+        assert_eq!(s.attenuation, 3.0);
+        assert!(s.sound_index >= 1, "precached sample resolved");
+
+        // It is a loop registration, not a one-shot: the SoundEvent queue is
+        // untouched, and the static registry is empty after draining.
+        assert!(
+            server.drain_sounds().is_empty(),
+            "no one-shot SoundEvent queued by ambientsound"
+        );
+        assert!(
+            server.drain_static_sounds().is_empty(),
+            "drain_static_sounds cleared the registry"
+        );
+    }
+
+    #[test]
+    fn bi_ambientsound_clamps_out_of_range_bytes() {
+        // The C MSG_WriteByte would wrap out-of-range values; we clamp
+        // defensively (QuakeC only ever passes sane 0..1 / 0..4 values).
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let _ = server.drain_static_sounds();
+
+        let sample = "ambience/wind2.wav";
+        server.vm.with_host(|_vm, h| h.precache_sound(sample));
+        let s_t = server.vm.intern(sample);
+        server.vm.set_gv(OFS_PARM0, [0.0; 3]);
+        server.vm.set_gi(OFS_PARM0 + 3, s_t);
+        server.vm.set_gf(OFS_PARM0 + 6, 9.0); // vol byte clamps to 255
+        server.vm.set_gf(OFS_PARM0 + 9, 9.0); // atten byte clamps to 255
+        bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
+
+        let statics = server.drain_static_sounds();
+        assert_eq!(statics[0].volume, 1.0, "volume byte clamps to 255");
+        assert_eq!(
+            statics[0].attenuation,
+            255.0 / 64.0,
+            "attenuation byte clamps to 255"
+        );
+    }
+
+    #[test]
+    fn bi_ambientsound_drops_unprecached_sample_like_the_c() {
+        // PF_ambientsound scans sv.sound_precache READ-ONLY: an un-precached
+        // sample is refused with `Con_Printf ("no precache: %s\n", samp)` and
+        // nothing is registered — and the check must not grow the precache
+        // table either (unlike the one-shot path's lookup_sound_index).
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let _ = server.drain_static_sounds();
+
+        let s_t = server.vm.intern("ambience/notthere.wav");
+        server.vm.set_gv(OFS_PARM0, [0.0; 3]);
+        server.vm.set_gi(OFS_PARM0 + 3, s_t);
+        server.vm.set_gf(OFS_PARM0 + 6, 0.5);
+        server.vm.set_gf(OFS_PARM0 + 9, 3.0);
+        bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
+
+        assert!(
+            server.drain_static_sounds().is_empty(),
+            "un-precached ambientsound registers nothing"
+        );
+        assert!(
+            server.vm.output.contains("no precache: ambience/notthere.wav\n"),
+            "the C's console message, routed to vm.output: {:?}",
+            server.vm.output
+        );
+        assert_eq!(
+            server.vm.with_host(|_vm, h| h.find_sound("ambience/notthere.wav")),
+            Some(None),
+            "the read-only check must not register the name as a side effect"
+        );
+    }
+
+    #[test]
+    fn bi_particle_queues_burst_and_drain_clears() {
+        // bi_particle (PF_particle, #48) must push a ParticleBurst carrying its
+        // (org, dir, color, count) arguments verbatim, and drain_particles must
+        // return then clear it. Drive the builtin directly by placing its args in
+        // the PARM globals, mirroring bi_sound_queues_event_and_drain_clears.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        // particle(org, dir, color, count): PARM0=org(vec), PARM1=dir(vec),
+        // PARM2=color(float), PARM3=count(float).
+        server.vm.set_gv(OFS_PARM0, [10.0, 20.0, 30.0]);
+        server.vm.set_gv(OFS_PARM0 + 3, [0.0, 0.0, 1.0]);
+        server.vm.set_gf(OFS_PARM0 + 6, 73.0); // base palette index
+        server.vm.set_gf(OFS_PARM0 + 9, 12.0); // count
+
+        bi_particle(&mut server.vm).expect("bi_particle");
+
+        let bursts = server.drain_particles();
+        assert_eq!(bursts.len(), 1, "one burst queued");
+        let b = &bursts[0];
+        assert_eq!(b.org, [10.0, 20.0, 30.0]);
+        assert_eq!(b.dir, [0.0, 0.0, 1.0]);
+        assert_eq!(b.color, 73);
+        assert_eq!(b.count, 12);
+
+        // The queue is empty after draining.
+        assert!(
+            server.drain_particles().is_empty(),
+            "drain_particles cleared the queue"
+        );
+    }
+
+    #[test]
+    fn bi_particle_clamps_out_of_range_color_to_byte() {
+        // A float color outside 0..=255 must clamp into the palette-index byte
+        // range rather than wrapping unexpectedly when cast.
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+
+        server.vm.set_gv(OFS_PARM0, [0.0; 3]);
+        server.vm.set_gv(OFS_PARM0 + 3, [0.0; 3]);
+        server.vm.set_gf(OFS_PARM0 + 6, 99999.0); // absurd color -> clamps to 255
+        server.vm.set_gf(OFS_PARM0 + 9, 1.0);
+        bi_particle(&mut server.vm).expect("bi_particle");
+        let b = server.drain_particles();
+        assert_eq!(b[0].color, 255, "out-of-range color clamps to 255");
+
+        server.vm.set_gf(OFS_PARM0 + 6, -10.0); // negative -> clamps to 0
+        bi_particle(&mut server.vm).expect("bi_particle");
+        let b = server.drain_particles();
+        assert_eq!(b[0].color, 0, "negative color clamps to 0");
+    }
+
+    // ------------------------------------------------ temp-entity decoder
+
+    /// Drive a `WriteByte(dest, value)` builtin: dest in PARM0, value in PARM1.
+    fn write_byte(server: &mut Server, dest: i32, value: f32) {
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gf(OFS_PARM0 + 3, value);
+        bi_writebyte(&mut server.vm).expect("bi_writebyte");
+    }
+    /// Drive a `WriteCoord(dest, value)` builtin.
+    fn write_coord(server: &mut Server, dest: i32, value: f32) {
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gf(OFS_PARM0 + 3, value);
+        bi_writecoord(&mut server.vm).expect("bi_writecoord");
+    }
+    /// Drive a `WriteShort(dest, value)` builtin.
+    fn write_short(server: &mut Server, dest: i32, value: f32) {
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gf(OFS_PARM0 + 3, value);
+        bi_writeshort(&mut server.vm).expect("bi_writeshort");
+    }
+    /// A fresh server plus a cleared decoder/queue (the thread-locals persist
+    /// across tests on the same thread, so reset before each scenario).
+    fn te_server() -> Server {
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let server = Server::new(floor_bsp(), progs).expect("server");
+        reset_temp_entity_decoder();
+        let _ = take_temp_entities(); // clear any residue from a prior test
+        server
+    }
+
+    #[test]
+    fn te_explosion_burst_yields_one_event_with_pos() {
+        // WriteByte(0,23) WriteByte(0,3) WriteCoord(0,x/y/z) -> one TE_EXPLOSION.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32); // svc_temp_entity
+        write_byte(&mut server, 0, TE_EXPLOSION as f32); // type 3
+        write_coord(&mut server, 0, 16.0);
+        write_coord(&mut server, 0, -32.0);
+        write_coord(&mut server, 0, 48.5);
+
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1, "exactly one temp entity emitted");
+        assert_eq!(evs[0].te_type, TE_EXPLOSION);
+        assert_eq!(evs[0].pos, [16.0, -32.0, 48.5]);
+        assert_eq!(evs[0].color_start, 0);
+        assert_eq!(evs[0].color_length, 0);
+        // drain cleared the queue (mirrors drain_sounds).
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "drain_temp_entities cleared the queue"
+        );
+    }
+
+    /// Drive a `WriteString(dest, text)` builtin (interning the text first, as
+    /// the progs loader would have).
+    fn write_string(server: &mut Server, dest: i32, text: &str) {
+        let ofs = server.vm.intern(text);
+        server.vm.set_gf(OFS_PARM0, dest as f32);
+        server.vm.set_gi(OFS_PARM0 + 3, ofs);
+        bi_writestring(&mut server.vm).expect("bi_writestring");
+    }
+    /// A fresh server plus a cleared MSG_ALL recognizer/queue (thread-locals
+    /// persist across tests on one thread, so reset before each scenario).
+    fn svc_server() -> Server {
+        let server = te_server();
+        reset_svc_recognizer();
+        let _ = take_svc_events();
+        server
+    }
+
+    #[test]
+    fn svc_intermission_byte_on_msg_all_yields_event() {
+        // execute_changelevel (client.qc): WriteByte(MSG_ALL, SVC_INTERMISSION).
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
+        assert!(server.drain_svc_events().is_empty(), "drain cleared the queue");
+    }
+
+    #[test]
+    fn svc_finale_byte_plus_string_yields_finale_text() {
+        // ExitIntermission (client.qc): WriteByte(MSG_ALL, SVC_FINALE) then
+        // WriteString(MSG_ALL, <episode text>).
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_FINALE as f32);
+        assert!(server.drain_svc_events().is_empty(), "no event until the string lands");
+        write_string(&mut server, MSG_ALL, "the Rune of Earth Magic");
+        assert_eq!(
+            server.drain_svc_events(),
+            vec![SvcEvent::Finale("the Rune of Earth Magic".into())]
+        );
+    }
+
+    #[test]
+    fn svc_cdtrack_payload_bytes_do_not_desync_the_stream() {
+        // ExitIntermission writes cdtrack THEN the finale: WriteByte(MSG_ALL, 32),
+        // WriteByte(MSG_ALL, 2), WriteByte(MSG_ALL, 3) — the two payload bytes must
+        // be consumed, not read as commands — then the intermission/finale follows.
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_CDTRACK as f32);
+        write_byte(&mut server, MSG_ALL, 2.0);
+        write_byte(&mut server, MSG_ALL, 3.0);
+        write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
+    }
+
+    #[test]
+    fn svc_stat_ticks_and_other_destinations_yield_no_events() {
+        let mut server = svc_server();
+        // killed_monsters/found_secrets arrive as bare MSG_ALL bytes; the engine
+        // reads the counts from the QuakeC globals, so no event surfaces.
+        write_byte(&mut server, MSG_ALL, SVC_KILLEDMONSTER as f32);
+        write_byte(&mut server, MSG_ALL, SVC_FOUNDSECRET as f32);
+        // A broadcast (MSG_BROADCAST=0) temp-entity burst must not feed the
+        // MSG_ALL recognizer even though 30 is svc_intermission.
+        write_byte(&mut server, 0, SVC_INTERMISSION as f32);
+        // MSG_ONE / MSG_INIT are likewise ignored.
+        write_byte(&mut server, 1, SVC_INTERMISSION as f32);
+        write_byte(&mut server, 3, SVC_INTERMISSION as f32);
+        assert!(server.drain_svc_events().is_empty());
+    }
+
+    #[test]
+    fn svc_sellscreen_and_cutscene_recognised() {
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_SELLSCREEN as f32);
+        write_byte(&mut server, MSG_ALL, SVC_CUTSCENE as f32);
+        write_string(&mut server, MSG_ALL, "cut");
+        assert_eq!(
+            server.drain_svc_events(),
+            vec![SvcEvent::SellScreen, SvcEvent::Cutscene("cut".into())]
+        );
+    }
+
+    #[test]
+    fn svc_recognizer_resets_on_unexpected_write_and_new_server() {
+        let mut server = svc_server();
+        // A non-byte/string MSG_ALL write mid-command means desync: drop it.
+        write_byte(&mut server, MSG_ALL, SVC_FINALE as f32);
+        write_short(&mut server, MSG_ALL, 7.0);
+        write_string(&mut server, MSG_ALL, "late text");
+        assert!(
+            server.drain_svc_events().is_empty(),
+            "desynced finale dropped, stray string ignored"
+        );
+        // A queued event from the OLD level must not leak across a new server
+        // (with_pak clears state + queue, mirroring reset_changelevel).
+        write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
+        let fresh = svc_server();
+        drop(fresh);
+        assert!(
+            take_svc_events().is_empty(),
+            "a fresh server cleared the queued events"
+        );
+    }
+
+    #[test]
+    fn te_gunshot_burst_carries_its_type() {
+        // A TE_GUNSHOT (type 2) sequence yields te_type == 2.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_GUNSHOT as f32);
+        write_coord(&mut server, 0, 1.0);
+        write_coord(&mut server, 0, 2.0);
+        write_coord(&mut server, 0, 3.0);
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].te_type, TE_GUNSHOT);
+        assert_eq!(evs[0].pos, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn te_explosion2_consumes_three_coords_then_two_bytes() {
+        // EXPLOSION2 (type 12): 3 coords + colorStart + colorLength byte.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_EXPLOSION2 as f32);
+        write_coord(&mut server, 0, 10.0);
+        write_coord(&mut server, 0, 20.0);
+        write_coord(&mut server, 0, 30.0);
+        write_byte(&mut server, 0, 105.0); // colorStart
+        write_byte(&mut server, 0, 8.0); // colorLength
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].te_type, TE_EXPLOSION2);
+        assert_eq!(evs[0].pos, [10.0, 20.0, 30.0]);
+        assert_eq!(evs[0].color_start, 105);
+        assert_eq!(evs[0].color_length, 8);
+    }
+
+    #[test]
+    fn te_beam_consumes_short_and_six_coords() {
+        // A beam (TE_BEAM=13): short entity index + 6 coords (start+end), all
+        // captured for CL_ParseBeam (crate::tent): entity = slot key, pos =
+        // start point, end = end point.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_BEAM as f32);
+        write_short(&mut server, 0, 7.0); // entity index
+        write_coord(&mut server, 0, 1.0); // start
+        write_coord(&mut server, 0, 2.0);
+        write_coord(&mut server, 0, 3.0);
+        write_coord(&mut server, 0, 4.0); // end
+        write_coord(&mut server, 0, 5.0);
+        write_coord(&mut server, 0, 6.0);
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1, "beam emits exactly one event");
+        assert_eq!(evs[0].te_type, TE_BEAM);
+        assert_eq!(evs[0].entity, 7, "beam entity = the WriteShort slot key");
+        assert_eq!(evs[0].pos, [1.0, 2.0, 3.0], "beam pos = start point");
+        assert_eq!(evs[0].end, [4.0, 5.0, 6.0], "beam end = end point");
+    }
+
+    #[test]
+    fn te_lightning_write_entity_captures_the_edict_number() {
+        // The REAL beam writers (W_FireLightning etc.) pass the owner through
+        // WriteEntity, whose parm is an entity reference — an INT global
+        // (G_EDICTNUM), not a float. Reading it as a float yields the f32
+        // bit-reinterpretation of the index (~0.0 for every edict), which would
+        // collapse all beams onto one slot and break the view-entity tracking.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_LIGHTNING2 as f32);
+        // WriteEntity(MSG_BROADCAST, self): an int edict number in PARM1.
+        server.vm.set_gf(OFS_PARM0, 0.0);
+        server.vm.set_gi(OFS_PARM0 + 3, 1); // the player edict
+        bi_writeentity(&mut server.vm).expect("bi_writeentity");
+        for v in [10.0, 20.0, 30.0, 40.0, 50.0, 60.0] {
+            write_coord(&mut server, 0, v);
+        }
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].te_type, TE_LIGHTNING2);
+        assert_eq!(
+            evs[0].entity, 1,
+            "WriteEntity's int edict number survives the decode"
+        );
+        assert_eq!(evs[0].pos, [10.0, 20.0, 30.0]);
+        assert_eq!(evs[0].end, [40.0, 50.0, 60.0]);
+    }
+
+    #[test]
+    fn te_non_broadcast_dest_produces_no_event() {
+        // Writes on MSG_ONE (dest 1) are ignored: no temp entity is decoded.
+        let mut server = te_server();
+        write_byte(&mut server, 1, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 1, TE_EXPLOSION as f32);
+        write_coord(&mut server, 1, 16.0);
+        write_coord(&mut server, 1, 32.0);
+        write_coord(&mut server, 1, 48.0);
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "MSG_ONE writes produce no broadcast temp entity"
+        );
+    }
+
+    #[test]
+    fn te_unknown_type_resets_and_next_message_still_parses() {
+        // An unknown type byte resets the decoder cleanly (no event), and a
+        // following valid message must still parse.
+        let mut server = te_server();
+        // Unknown type 200 -> reset, drop.
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, 200.0); // not a known TE_*
+        // These stray coords land in Idle and are ignored.
+        write_coord(&mut server, 0, 9.0);
+        write_coord(&mut server, 0, 9.0);
+        write_coord(&mut server, 0, 9.0);
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "unknown type emits nothing"
+        );
+
+        // A clean, valid message right after still decodes.
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_SPIKE as f32);
+        write_coord(&mut server, 0, 7.0);
+        write_coord(&mut server, 0, 8.0);
+        write_coord(&mut server, 0, 9.0);
+        let evs = server.drain_temp_entities();
+        assert_eq!(evs.len(), 1, "the next valid message parses after a reset");
+        assert_eq!(evs[0].te_type, TE_SPIKE);
+        assert_eq!(evs[0].pos, [7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn te_decoder_reset_drops_partial_message() {
+        // A half-collected message (svc + type + one coord) is dropped by a
+        // frame reset; a fresh message after the reset parses cleanly.
+        let mut server = te_server();
+        write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
+        write_byte(&mut server, 0, TE_EXPLOSION as f32);
+        write_coord(&mut server, 0, 1.0); // only one of three coords
+        reset_temp_entity_decoder(); // frame boundary
+        // Continuing the old coords now must NOT complete a stale message.
+        write_coord(&mut server, 0, 2.0);
+        write_coord(&mut server, 0, 3.0);
+        assert!(
+            server.drain_temp_entities().is_empty(),
+            "reset dropped the partial temp entity"
+        );
+    }
+}
