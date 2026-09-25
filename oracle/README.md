@@ -29,6 +29,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable); `d_mipscale` and `d_mipcap` are handed to the port too (`quaketool view --d-mipscale/--d-mipcap`). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
 | `--viewmodel` | draw the weapon too (the port is handed id's `cl.viewent` origin and angles, `quaketool view --viewent`) |
+| `--viewsize N` | id's `scr_viewsize` (default 120, the whole screen). Below 120 the 3-D view rectangle (`r_refdef.vrect` from id's `.json`) is compared: the port renders it placed on the screen (`quaketool view --vrect`) |
 | `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD |
 | `--quaketool PATH` / `--oracle PATH` | A/B a different build of either side |
 
@@ -212,8 +213,10 @@ classes a crop is not about removed on id's side where possible.
    centre. (AUDIT's LOW "sky foreground drift" is this, and it is not small.)
    **Fixed**, the 32-pixel spans included (the world pass defers its sky pixels
    and redraws each visible run of a sky face as one span): the e1m2 sky region
-   matches 99.8%. Open: at a viewsize below 120 id's sky centre is the SCREEN's
-   (`vid.width>>1`), not the view rectangle's; the port uses the view's.
+   matches 99.8%. Below viewsize 120 id's sky centre is the SCREEN's
+   (`vid.width>>1`), not the view rectangle's; **fixed** on `quake/w2b` (the port
+   used the view's: 24 rows off at viewsize 100): the e1m2 sky region at viewsize
+   100 / 110 / 70 matches 75.1 / 46.4 / 43.4% before, 100% after.
 5. **Viewmodel** (`crops/viewmodel.png`). The port hangs the gun with invented
    offsets (`OFS_FORWARD 7`, `OFS_RIGHT 1.5`, `OFS_UP 3.5`) and its own depth buffer;
    id puts `cl.viewent` at the eye (+ bob, + the `scr_viewsize` fudge), angles from
@@ -291,5 +294,5 @@ Timings are noisy: compare within one sitting.
   puffs count as differences there.
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
-- `viewsize` below 120: the C side renders it (`--c-only --full`), the port's
-  `view` does not draw the HUD or shrink the 3-D view, so there is no diff yet.
+- `viewsize` below 120: the 3-D view rectangle is compared (`--viewsize N`), not
+  the HUD or the border around it (the port's `view` draws neither).

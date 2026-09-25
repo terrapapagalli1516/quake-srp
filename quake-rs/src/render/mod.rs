@@ -343,6 +343,13 @@ pub struct RenderOptions {
     /// brush models, alias models and the gun, sprites, particles and the
     /// frustum. The sky does not use it (`D_Sky_uv_To_st` maps screen pixels).
     pub pixel_aspect: f32,
+    /// Where the view sits on the screen: `r_refdef.vrect`'s corner in the
+    /// `vid.width x vid.height` framebuffer. `None` (the default): the view is
+    /// the whole screen. The sky needs it: `D_Sky_uv_To_st` centres the sky on
+    /// the SCREEN (`vid.width>>1`, `vid.height>>1`), not on the view, so a view
+    /// above the status bar or inside a border (viewsize below 120) sees the
+    /// sky off its own centre — 24 rows at 320x200 and the default viewsize 100.
+    pub screen: Option<ScreenPlace>,
     /// EXTRA, not id (default off): exact perspective at every pixel of the
     /// surface-cached walls and the liquids. id's x86 renderer, what 1996
     /// players saw, is exact only every 16 pixels and affine in between
@@ -351,13 +358,33 @@ pub struct RenderOptions {
     pub exact_perspective: bool,
 }
 
+/// A view's place on the screen ([`RenderOptions::screen`]): its top-left
+/// corner `(x, y)` in a `vid_w x vid_h` framebuffer — `r_refdef.vrect.x/y` and
+/// `vid.width/height`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenPlace {
+    pub x: usize,
+    pub y: usize,
+    pub vid_w: usize,
+    pub vid_h: usize,
+}
+
 impl Default for RenderOptions {
     fn default() -> RenderOptions {
-        RenderOptions { pixel_aspect: 1.0, exact_perspective: false }
+        RenderOptions { pixel_aspect: 1.0, screen: None, exact_perspective: false }
     }
 }
 
 impl RenderOptions {
+    /// `D_Sky_uv_To_st`'s screen centre in a `w x h` view's own pixels:
+    /// `(vid.width>>1) - vrect.x`, `(vid.height>>1) - vrect.y`.
+    fn sky_centre(&self, w: usize, h: usize) -> (i32, i32) {
+        match self.screen {
+            Some(p) => ((p.vid_w as i32 >> 1) - p.x as i32, (p.vid_h as i32 >> 1) - p.y as i32),
+            None => (w as i32 >> 1, h as i32 >> 1),
+        }
+    }
+
     /// The span routine for textured brush surfaces.
     fn persp(&self) -> raster::Persp {
         if self.exact_perspective {
@@ -1309,6 +1336,22 @@ mod tests {
         assert_eq!((l1, r1), (l2, r2), "the width does not change");
         // 160*64/168 = 61 rows above the centre with square pixels, 51 at 0.8333.
         assert_eq!((up1, up2), (61, 51));
+    }
+
+    #[test]
+    fn the_sky_is_centred_on_the_screen_not_the_view() {
+        // D_Sky_uv_To_st: u - (vid.width>>1), (vid.height>>1) - v, in screen
+        // pixels. A view that is the whole screen has its own centre; the 320x152
+        // view above a 48-line status bar (viewsize 100) has the screen's centre
+        // 24 rows below its own; the viewsize-70 view (224x140 at 48,6) is off
+        // both ways.
+        let at = |screen| RenderOptions { screen, ..Default::default() };
+        assert_eq!(at(None).sky_centre(320, 200), (160, 100));
+        assert_eq!(at(None).sky_centre(320, 152), (160, 76));
+        let sbar = ScreenPlace { x: 0, y: 0, vid_w: 320, vid_h: 200 };
+        assert_eq!(at(Some(sbar)).sky_centre(320, 152), (160, 100));
+        let border = ScreenPlace { x: 48, y: 6, vid_w: 320, vid_h: 200 };
+        assert_eq!(at(Some(border)).sky_centre(224, 140), (112, 94));
     }
 
     #[test]

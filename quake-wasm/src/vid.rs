@@ -85,15 +85,21 @@ pub extern "C" fn set_resolution(w: i32, h: i32) {
 /// shown 1.2x taller than wide.
 pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 
-/// How the renderer draws the 3-D view of a `render_w x render_h` frame:
+/// How the renderer draws the 3-D view `vrect` of a `render_w x render_h` frame:
 /// `vid.aspect` for that mode on the page's [`DISPLAY_ASPECT`] (vid_win.c's
 /// `(h/w)*(320/240)`: 0.8333 at every 16:10 preset), which `R_ViewChanged`
 /// folds into the projection so the world is not stretched by the 4:3 display;
-/// and the port's renderer extras, off unless their `wasm_*` cvar is set
+/// where the view sits on that screen (`D_Sky_uv_To_st` centres the sky on the
+/// screen); and the port's renderer extras, off unless their `wasm_*` cvar is set
 /// ([`crate::extras`]).
-pub(crate) fn render_options(render_w: usize, render_h: usize) -> render::RenderOptions {
+pub(crate) fn render_options(
+    vrect: &render::ViewRect,
+    render_w: usize,
+    render_h: usize,
+) -> render::RenderOptions {
     render::RenderOptions {
         pixel_aspect: render::vid_aspect(render_w, render_h, DISPLAY_ASPECT),
+        screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: render_w, vid_h: render_h }),
         exact_perspective: crate::extras::extras().exact_persp,
     }
 }

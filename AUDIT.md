@@ -919,6 +919,20 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
   id's cvars (not saved), read by `vid::render_options` each frame; `help`
   lists them. An extras menu can drive the same table. Always Run, the one
   default departure, stays with the menu options (it is id's own setting).
+- ✅ **Sky centre below viewsize 120** (the open item of oracle class 4).
+  `D_Sky_uv_To_st` centres the sky on the SCREEN (`u - (vid.width>>1)`,
+  `(vid.height>>1) - v` in screen pixels); the port centred it on the view
+  rectangle — 24 rows off at the default viewsize 100, 12 at 110, both axes
+  inside a border. `RenderOptions::screen` (the vrect's corner on the
+  `vid_w x vid_h` screen) now gives `SkyView` the screen's centre in the
+  view's pixels; the page passes it every frame. The oracle compares views
+  below 120 now (`compare.py --viewsize N` hands id's vrect to `quaketool
+  view --vrect` and crops id's frame to it). e1m2 at `--spans 16`: the sky
+  region matches 75.1 / 46.4 / 43.4% at viewsize 100 / 110 / 70 before, 100%
+  after; the whole view 98.90 → 99.97, 97.56 → 99.56, 95.98 → 99.03 (what is
+  left at 110 and 70, and at 120 too — 99.21 — is a ceiling face at the top
+  right and one floor edge, the same with exact perspective on the merged
+  base; not investigated). Goldens unchanged (the scene view is the screen).
 
 ## LOW (27)
 

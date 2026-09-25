@@ -134,7 +134,7 @@ pub(super) fn draw_world_textured(
     let mut dlight_bits = DLIGHT_BITS_SCRATCH.with(|b| std::mem::take(&mut *b.borrow_mut()));
     // The sky is drawn span by span once the brush passes are done
     // (`resolve_sky_spans`); this frame's sky pixels are recorded here.
-    let sky_view = SkyView::new(forward, right, up, w, h, time);
+    let sky_view = SkyView::new(forward, right, up, w, h, opts.sky_centre(w, h), time);
     let sky_spans = std::cell::RefCell::new(
         SKY_SPANS_SCRATCH.with(|b| std::mem::replace(&mut *b.borrow_mut(), SkySpans::EMPTY)),
     );
@@ -586,7 +586,7 @@ pub(super) fn draw_submodel(
         let mode = match kind {
             SurfKind::Normal => SurfaceMode::Normal,
             SurfKind::Turb => SurfaceMode::Turb { turb, time, persp: opts.persp() },
-            SurfKind::Sky => SurfaceMode::Sky { view: SkyView::new(forward, right, up, w, h, time), defer: None },
+            SurfKind::Sky => SurfaceMode::Sky { view: SkyView::new(forward, right, up, w, h, opts.sky_centre(w, h), time), defer: None },
         };
 
         // The face plane's gradients, in the model's LOCAL frame, where Quake

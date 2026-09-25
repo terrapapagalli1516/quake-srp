@@ -795,7 +795,7 @@ pub(crate) fn step_walk(
     let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission);
     let vrect = refdef.vrect;
     let mut view =
-        render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites, &crate::vid::render_options(render_w, render_h));
+        render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites, &crate::vid::render_options(&vrect, render_w, render_h));
     bench::lap(Phase::Render3d);
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.

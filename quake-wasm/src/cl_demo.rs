@@ -430,7 +430,7 @@ pub(crate) fn step_demo(
     bench::lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0);
     let vrect = refdef.vrect;
-    let mut view = render::render_scene_ext_sprited(&d.bsp, &cam, vrect.w, vrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &crate::vid::render_options(render_w, render_h));
+    let mut view = render::render_scene_ext_sprited(&d.bsp, &cam, vrect.w, vrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &crate::vid::render_options(&vrect, render_w, render_h));
     bench::lap(Phase::Render3d);
     // D_WarpScreen: a submerged recorded POV ripples exactly like live play —
     // the warp applies to the 3-D view FIRST; the content tint joins the

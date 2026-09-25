@@ -154,6 +154,11 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     ]
     if args.aspect is not None:
         cmd += ["--aspect", str(args.aspect)]
+    # A view smaller than the screen (viewsize below 120): the port renders
+    # r_refdef.vrect alone, placed on the screen (the sky is centred on it).
+    vx, vy, vw, vh = meta["vrect"]
+    if (vw, vh) != (w, h):
+        cmd += ["--vrect", f"{vx},{vy},{vw},{vh}"]
     if args.exactpersp:
         cmd += ["--exactpersp", "1"]
     if ents:
@@ -301,6 +306,9 @@ def main() -> None:
                 continue
             port_out = run_port(args, qt, case, mapname, meta, mode == "ents", out)
             c_idx = read_pnm(out / f"{case}.c.pgm")
+            vx, vy, vw, vh = meta["vrect"]
+            if (vw, vh) != (w, h):  # compare the 3-D view rectangle (viewsize below 120)
+                c_idx = c_idx[vy:vy + vh, vx:vx + vw]
             c_rgb = pal[c_idx]
             p_rgb = read_pnm(out / f"{case}.port.ppm")
             if p_rgb.shape != c_rgb.shape:
