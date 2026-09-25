@@ -76,6 +76,17 @@ impl ConNotify {
             .collect()
     }
 
+    /// `Con_CheckResize` for a `vid_w x vid_h` framebuffer: text is laid out
+    /// `con_linewidth` wide ([`quake_rs::console::con_linewidth`]); a new width
+    /// cuts the lines to it and `Con_ClearNotify`s them.
+    pub(crate) fn check_resize(&mut self, vid_w: usize, vid_h: usize) {
+        let width = quake_rs::console::con_linewidth(vid_w, vid_h);
+        if width != self.cursor.width() {
+            self.cursor.set_width(width);
+            self.lines.clear();
+        }
+    }
+
     /// `Con_ClearNotify` (a level load): nothing is shown until new text. The
     /// console keeps the text (and still gets what was printed).
     pub(crate) fn clear(&mut self) {
@@ -195,6 +206,8 @@ mod tests {
         use quake_rs::progs::OFS_PARM0;
         assert_eq!(boot(), 1);
         close_menu();
+        // A 320-wide screen: con_linewidth 38 (Con_CheckResize).
+        crate::vid::set_resolution(320, 200);
         step(0.05);
         walk_mut(|w| {
             let vm = &mut w.server.vm;

@@ -130,6 +130,8 @@ pub(crate) fn step_walk(
     render_w: usize,
     render_h: usize,
 ) -> (render::Image, Vec<([u8; 3], f32)>) {
+    // Con_CheckResize: the notify lines are laid out con_linewidth wide.
+    w.notify.check_resize(render_w, render_h);
     // Host_ServerFrame (host.c): "always pause in single player if in console
     // or menus" — `if (!sv.paused && (svs.maxclients > 1 || key_dest ==
     // key_game)) SV_Physics ();`, and SV_RunClients gates SV_ClientThink the

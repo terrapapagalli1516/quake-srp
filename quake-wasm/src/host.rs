@@ -225,8 +225,10 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // while open — matching Quake, where the menu and the drop-down console are
         // mutually exclusive via key_dest. It owns the keyboard while open. Uses the
         // active mode's palette and realtime for the input cursor flash
-        // (Con_DrawInput). A closed console draws nothing.
-        if a.console.open {
+        // (Con_DrawInput). SCR_SetUpToDrawConsole slides it first: down to half
+        // the screen while open, back up when closed (drawn until it is gone).
+        a.console.slide(dt, w, h);
+        if a.console.current() > 0.0 {
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
                     render::draw_console(
