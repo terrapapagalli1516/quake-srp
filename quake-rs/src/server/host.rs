@@ -20,7 +20,7 @@
 
 use super::lightstyle::{snapshot_lightstyles, LIGHTSTYLES, MAX_LIGHTSTYLES};
 use super::msg::{
-    reset_svc_recognizer, reset_temp_entity_decoder, take_messages, take_particle_bursts,
+    reset_message_parsers, take_messages, take_particle_bursts,
     take_sound_events, take_static_sounds, take_svc_events, take_temp_entities,
 };
 use super::{parm_global_name, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME};
@@ -219,8 +219,7 @@ pub(crate) fn restore_transports(snap: TransportSnapshot) {
     SKILL.with(|s| s.set(snap.skill));
     reset_changelevel();
     reset_restart();
-    reset_svc_recognizer();
-    reset_temp_entity_decoder();
+    reset_message_parsers();
     let _ = take_sound_events();
     let _ = take_static_sounds();
     let _ = take_particle_bursts();

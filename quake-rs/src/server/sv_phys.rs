@@ -15,7 +15,7 @@
 
 use super::host::{reset_changelevel, reset_restart};
 use super::lightstyle::snapshot_lightstyles;
-use super::msg::{reset_svc_recognizer, reset_temp_entity_decoder};
+use super::msg::reset_message_parsers;
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
 use super::{
     FrameReport, Server, UserCmd, CONTENTS_EMPTY,
@@ -41,8 +41,7 @@ impl Server {
         self.vm.gset_float("frametime", dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
-        reset_temp_entity_decoder();
-        reset_svc_recognizer();
+        reset_message_parsers();
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
         self.cleanup_ents();
         let start_time = self.time();
@@ -816,8 +815,7 @@ impl Server {
         self.vm.gset_float("frametime", dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
-        reset_temp_entity_decoder();
-        reset_svc_recognizer();
+        reset_message_parsers();
         // Drop any changelevel() / restart request a *prior* frame left unconsumed
         // (a well-behaved front-end drains it immediately, but a stale request must
         // never trigger a swap/respawn a frame late or against the wrong level).

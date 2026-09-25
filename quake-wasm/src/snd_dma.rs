@@ -43,6 +43,12 @@ pub(crate) struct SndParams {
 }
 
 impl SndParams {
+    /// The emitting entity (tests read what `sound_entity` hands the page).
+    #[cfg(test)]
+    pub(crate) fn entity(&self) -> i32 {
+        self.entity
+    }
+
     const fn zero() -> Self {
         SndParams {
             origin: [0.0; 3],

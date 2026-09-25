@@ -299,8 +299,8 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 /// `setspawnparms`, the print routers, `cvar_set`). (`sound` queues a
 /// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
 /// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
-/// [`bi_particle`]; the `Write*` family (#52..#59) drives the temp-entity
-/// decoder via [`te_feed`].)
+/// [`bi_particle`]; the `Write*` family (#52..#59) feeds the per-buffer svc
+/// parsers in `msg.rs`.)
 fn bi_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
@@ -533,8 +533,8 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 48, bi_particle); // particle (queues a ParticleBurst)
     put(t, 49, bi_changeyaw); // changeyaw
 
-    // #52..#59: the network Write* family. These drive the temp-entity decoder
-    // (broadcast Write* bursts -> TempEntityEvents); see te_feed.
+    // #52..#59: the network Write* family. These feed one svc parser per message
+    // buffer (MSG_BROADCAST, MSG_ALL) -> TempEntityEvents + SvcEvents; see msg.rs.
     put(t, 52, bi_writebyte); // WriteByte
     put(t, 53, bi_writechar); // WriteChar
     put(t, 54, bi_writeshort); // WriteShort
