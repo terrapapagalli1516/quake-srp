@@ -614,8 +614,12 @@ fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
     None
 }
 
+/// The embedded pak as a borrowed handle: `from_static` slices the
+/// `include_bytes!` image in place, so a boot, a map load, a sound load and
+/// every `Pak` clone (Walk, DemoPlay, `Server::with_pak`) cost a directory
+/// parse, never an 18.7 MB copy.
 fn pak() -> Option<quake_rs::pak::Pak> {
-    quake_rs::pak::Pak::from_bytes("pak0.pak".into(), PAK.to_vec()).ok()
+    quake_rs::pak::Pak::from_static("pak0.pak".into(), PAK).ok()
 }
 
 /// Load the main-menu pics from the pak's `.lmp` files (`Qpic::parse` on each)

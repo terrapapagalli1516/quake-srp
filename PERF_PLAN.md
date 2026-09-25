@@ -522,6 +522,11 @@ The fidelity classes are:
   - Memory: 81 MB → 175 MB after four map loads.
 - **Mechanism:** `Pak::from_static(&'static [u8])`, or a `Source::Static` variant, cloned as a
   cheap handle.
+- **Done** (branch `quake/host`): `Pak::from_static` over a `Source::Static` image; the wasm
+  `pak()` uses it, so every `Pak` clone (Walk, DemoPlay, `Server::with_pak`) copies only the
+  directory. Measured in headless Chromium: linear memory after boot **81.4 → 52.9 MB**, after
+  `map e1m1`…`map e1m4` **170.8 → 61.5 MB**; each `map` command 4–5 ms faster (e1m1 20.2 →
+  16.4 ms). Framebuffer hashes and goldens identical. `server.rs` untouched.
 
 **D4. Delivery.** *(neutral)*
 
