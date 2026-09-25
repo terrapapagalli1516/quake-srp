@@ -11,10 +11,10 @@ use quake_rs::client::view::{
     cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
 };
+use quake_rs::client::cl_tent::{rocket_trail_type, spawn_temp_entity};
 
 use crate::app::DemoPlay;
 use crate::bench::{self, Phase};
-use crate::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use crate::host_cmd::IT_INVISIBILITY;
 use crate::snd_dma::{
     push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,

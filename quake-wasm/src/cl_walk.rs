@@ -17,10 +17,10 @@ use quake_rs::client::view::{
 use quake_rs::client::cl_input::{
     clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
 };
+use quake_rs::client::cl_tent::{rocket_trail_type, spawn_temp_entity};
 
 use crate::app::{color_for_name, Walk};
 use crate::bench::{self, Phase};
-use crate::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use crate::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;

@@ -10,7 +10,9 @@
 //! | module   | id counterpart | what |
 //! |----------|----------------|------|
 //! | [`cl_input`] | cl_input.c   | `KeyMove`: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
+//! | [`cl_tent`] | cl_tent.c, r_part.c | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
 //! | [`view`] | view.c         | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times |
 
 pub mod cl_input;
+pub mod cl_tent;
 pub mod view;

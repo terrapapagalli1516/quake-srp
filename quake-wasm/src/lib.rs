@@ -21,7 +21,7 @@
 //! | `host`      | host.c `Host_Frame`                     | `step`: the 72 fps gate, the mode's frame, overlays, blend, gamma pack |
 //! | `cl_walk`   | cl_main.c, cl_parse.c, view.c, screen.c | `step_walk`: the live client frame               |
 //! | `cl_demo`   | cl_demo.c, cl_parse.c, view.c           | `step_demo`: the recorded-demo client frame      |
-//! | `cl_tent`   | cl_tent.c, r_part.c                     | temp-entity effects, trail flags                 |
+//! | `cl_tent`   | cl_tent.c                               | (tests only) Chthon's lightning end to end; the code is `client::cl_tent` |
 //! | `input`     | in_win.c, keys.c                        | mouse look, key exports (the moves: `client::cl_input`) |
 //! | `menu`      | menu.c `M_Keydown`                      | menu key exports and the actions they return     |
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle/typing exports                    |
@@ -64,6 +64,7 @@
 mod app;
 mod bench;
 mod cl_demo;
+#[cfg(test)]
 mod cl_tent;
 mod cl_walk;
 mod console;
