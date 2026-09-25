@@ -26,7 +26,7 @@ use crate::Result;
 const DI_NODIR: f32 = -1.0;
 
 // ---------------------------------------------------------------------------
-// (D2) Monster movement: the AI walk/chase steps.
+// Monster movement: the AI walk/chase steps.
 //
 // Ported from sv_move.c (`SV_CheckBottom` ~36, `SV_movestep` ~110,
 // `SV_StepDirection` ~232, `SV_FixCheckBottom` ~267, `SV_NewChaseDir` ~283,
@@ -467,7 +467,7 @@ pub fn sv_move_to_goal(vm: &mut Vm, dist: f32) {
 }
 
 // ---------------------------------------------------------------------------
-// (D3) The monster-movement engine builtins (pr_cmds.c).
+// The monster-movement engine builtins (pr_cmds.c).
 // ---------------------------------------------------------------------------
 
 /// `PF_walkmove` (#32): `float(float yaw, float dist) walkmove`. Steps `self`

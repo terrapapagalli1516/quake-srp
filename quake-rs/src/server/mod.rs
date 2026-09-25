@@ -1,19 +1,38 @@
-//! The Quake server: the world model, the engine builtins, entity spawning, and
-//! a minimal physics frame.
+//! The Quake server: a QuakeC VM with the engine builtins installed over a
+//! loaded map — entity spawning, physics, collision, monster movement, the
+//! local player client, and the message side a front-end drains each frame.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
-//! Sources:
-//! * `WinQuake/pr_cmds.c` — the `PF_*` engine builtins (`PF_setorigin`,
-//!   `PF_setmodel`, `PF_setsize`, `PF_precache_model`/`_sound`/`_file`,
-//!   `PF_droptofloor`, `PF_traceline`, `PF_pointcontents`, `PF_makevectors`,
-//!   `PF_cvar`, `PF_walkmove`, `PF_aim`, `PF_changeyaw`, …) and the
-//!   `pr_builtin[]` dispatch table (the non-`QUAKE2` build).
-//! * `WinQuake/pr_edict.c` — `ED_LoadFromFile`, `ED_ParseEdict`,
-//!   `ED_ParseEpair`, `ED_NewString`, and the `SetMinMaxSize` helper.
-//! * `WinQuake/common.c` — `COM_Parse` (the tokenizer).
-//! * `WinQuake/sv_phys.c` — `SV_RunThink`, `SV_Physics`, `SV_Physics_Toss`,
-//!   `SV_Physics_None`/`_Noclip`/`_Step`, `SV_AddGravity`, `SV_PushEntity`,
-//!   `SV_CheckVelocity`.
+//! This file is the `server.h` part: the [`Server`] itself, the
+//! [`WorldModel`] (the map as the [`Host`] the builtins reach it through), the
+//! spawn/frame reports, [`UserCmd`], the shared `server.h` constants, and the
+//! re-exports that keep every public `server::…` path flat. The rest is split
+//! along id's own files, each `impl Server` block in the module of the C
+//! function it ports:
+//!
+//! | module       | id's C                         | what it holds                              |
+//! |--------------|--------------------------------|--------------------------------------------|
+//! | `sv_main`    | `sv_main.c`, `cl_main.c`       | `SV_SpawnServer`, `SV_ConnectClient`,      |
+//! |              |                                | `SV_CleanupEnts`, the `EF_*` dlights       |
+//! | `pr_edict`   | `pr_edict.c`, `common.c`       | `ED_LoadFromFile` + parsers, `COM_Parse`   |
+//! | `pr_cmds`    | `pr_cmds.c`                    | world-touching builtins, the table install |
+//! | `sv_phys`    | `sv_phys.c`                    | `SV_Physics`, movetypes, pushers, the      |
+//! |              |                                | player's `SV_WalkMove` / `SV_FlyMove`      |
+//! | `sv_user`    | `sv_user.c`, `view.c`          | `SV_ClientThink`: friction, acceleration,  |
+//! |              |                                | swimming, ideal pitch; `V_CalcRoll`        |
+//! | `sv_world`   | `world.c`, `sv_phys.c`         | `SV_Move`, `SV_LinkEdict` bounds,          |
+//! |              |                                | `SV_TouchLinks`, `SV_Impact`               |
+//! | `sv_move`    | `sv_move.c`                    | monster stepping and chasing               |
+//! | `msg`        | `sv_main.c`, `pr_cmds.c`,      | sound / particle / print queues, `Write*`  |
+//! |              | `cl_tent.c`, `cl_parse.c`      | → temp entities and svc events             |
+//! | `lightstyle` | `pr_cmds.c`, `r_light.c`       | `PF_lightstyle`, `R_AnimateLight`          |
+//! | `host`       | `host_cmd.c`, `sv_main.c`      | skill, deferred changelevel / restart,     |
+//! |              |                                | spawn parms, `kill`, signon frames         |
+//!
+//! Below the server sit the crate-level layers it builds on: `vm.rs`
+//! (pr_exec.c and the edict runtime), `builtins.rs` (pr_cmds.c's
+//! self-contained builtins), `world.rs` (the BSP hull traces) — and `save.rs`
+//! (`Host_Savegame_f` / `Host_Loadgame_f`) above it.
 //!
 //! ## Faithfulness and safety
 //!
@@ -147,7 +166,7 @@ fn parm_global_name(i: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// (A) The world model: crate::vm::Host backed by a parsed BSP.
+// The world model: crate::vm::Host backed by a parsed BSP.
 // ---------------------------------------------------------------------------
 
 /// The server's view of the loaded map: the parsed BSP plus the precache name
@@ -304,7 +323,7 @@ impl Host for WorldModel {
 }
 
 // ---------------------------------------------------------------------------
-// (C) The Server.
+// The Server.
 // ---------------------------------------------------------------------------
 
 /// The headless Quake server: a QuakeC VM with the engine builtins installed and
@@ -396,8 +415,17 @@ pub struct UserCmd {
     pub impulse: i32,
 }
 
+// The accessors and QuakeC entry-point helpers every part of the server uses;
+// the rest of `impl Server` is spread over the submodules (see the table in
+// the module header).
+//
+// The local player is a real edict the QuakeC game logic owns (health / items
+// / weapons). The engine connects it (`sv_main`: SV_ConnectClient), turns its
+// usercmd into velocity (`sv_user`: SV_ClientThink) and moves it with
+// friction, acceleration and ENTITY-AWARE collision (`sv_phys`:
+// SV_Physics_Client / SV_WalkMove over [`sv_move`]), so it collides with
+// monsters, doors and items.
 impl Server {
-
     /// The current `time` global.
     pub fn time(&self) -> f32 {
         self.vm.gget_float("time")
@@ -412,21 +440,6 @@ impl Server {
             .count()
     }
 
-}
-
-// ---------------------------------------------------------------------------
-// (C2) The local player / client.
-//
-// Ported from sv_user.c (`SV_ClientThink`, `SV_AirMove`, `SV_UserFriction`,
-// `SV_Accelerate`, `SV_AirAccelerate`, `DropPunchAngle`), sv_phys.c
-// (`SV_Physics_Client`, `SV_WalkMove`, `SV_FlyMove`, `SV_Physics`), host_cmd.c
-// (`Host_Spawn_f`) and sv_main.c (`SV_ConnectClient`). The player is a real
-// edict the QuakeC game logic owns (health/items/weapons); the engine drives
-// its per-frame physics with friction, acceleration and ENTITY-AWARE collision
-// (via [`sv_move`]) so it collides with monsters, doors and items.
-// ---------------------------------------------------------------------------
-
-impl Server {
     /// The local player's edict index, or `-1` if no client has connected.
     pub fn player_edict(&self) -> i32 {
         self.player
@@ -510,7 +523,6 @@ impl Server {
         }
         self.vm.edict_free.get(e as usize).copied().unwrap_or(true)
     }
-
 }
 
 /// Build a [`QError`] for an unexpected server condition. (Currently unused on

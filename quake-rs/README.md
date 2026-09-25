@@ -25,14 +25,24 @@ ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.
 | SPR sprite loader | `spritegn.h`, `model.c` | `spr` | ✅ ported + tested |
 | QuakeC bytecode format + disassembler | `pr_comp.h`, `progs.h`, `pr_edict.c` | `progs` | ✅ ported + tested |
 | QuakeC virtual machine (interpreter) | `pr_exec.c`, `pr_edict.c` | `vm` | ✅ ported + tested |
-| QuakeC builtins | `pr_cmds.c` | `builtins`, `server` | ✅ pure builtins + engine builtins (setmodel/setorigin/precache/traceline/droptofloor/pointcontents/…) |
+| QuakeC builtins | `pr_cmds.c` | `builtins`, `server::pr_cmds` (+ `server::msg` / `lightstyle` / `host` / `sv_move`) | ✅ pure builtins + engine builtins (setmodel/setorigin/precache/traceline/droptofloor/pointcontents/…); each engine builtin lives with the server state it drives |
 | BSP collision hull trace | `world.c` | `world` | ✅ `SV_RecursiveHullCheck` + `SV_HullPointContents` (hulls 0/1/2), box trace |
 | Player movement (slide + walk) | `sv_phys.c` | `world` | ✅ `ClipVelocity` + `SV_FlyMove` slide, stair step-up, ground-snap |
 | Demo + net protocol playback | `cl_demo.c`, `cl_parse.c`, `protocol.h` | `demo` | ✅ `.dem` framing + `svc_*` demux + bit-packed entity deltas → per-frame snapshots |
-| Server: spawn, physics, AI, combat, client | `pr_edict.c`, `sv_phys.c`, `sv_move.c`, `sv_user.c`, `sv_main.c`, `host_cmd.c` | `server` | ✅ full single-player tick: spawn + settle, walk/toss/bounce/fly/pusher physics, entity collision + touch, monster AI, combat, player client (incl. death→respawn), changelevel + intermission svc flow, signon settle frames |
+| Server: spawn, physics, AI, combat, client | `server.h` + the files below | `server` (`server/mod.rs`: `Server`, `WorldModel` host, reports, `UserCmd`, re-exports) | ✅ full single-player tick: spawn + settle, walk/toss/bounce/fly/pusher physics, entity collision + touch, monster AI, combat, player client (incl. death→respawn), changelevel + intermission svc flow, signon settle frames |
+| ↳ level bring-up, client connect | `sv_main.c`, `cl_main.c` | `server::sv_main` | ✅ `SV_SpawnServer`, `SV_ConnectClient` (+ `Host_Spawn_f`), `SV_CleanupEnts`, `EF_*` entity dlights |
+| ↳ entity spawning | `pr_edict.c`, `common.c` | `server::pr_edict` | ✅ `ED_LoadFromFile` (skill filter, settle frames), `ED_ParseEdict` / `ED_ParseEpair`, `COM_Parse` |
+| ↳ engine builtins | `pr_cmds.c` | `server::pr_cmds` | ✅ the world-touching `PF_*` (setmodel/setorigin/precache/traceline/droptofloor/aim/checkclient/findradius/…) + the `pr_builtin[]` install |
+| ↳ physics tick | `sv_phys.c` | `server::sv_phys` | ✅ `SV_Physics` + `SV_Physics_Client`, movetypes, `SV_PushMove`, `SV_WalkMove` / `SV_FlyMove`, water checks |
+| ↳ player input → velocity | `sv_user.c`, `view.c` | `server::sv_user` | ✅ `SV_ClientThink` / `SV_AirMove`, friction + acceleration, `SV_WaterMove` / `SV_WaterJump`, `SV_SetIdealPitch`, `V_CalcRoll` |
+| ↳ entity collision + touch | `world.c`, `sv_phys.c` | `server::sv_world` | ✅ `SV_Move` vs world + every solid edict (abs-box broadphase), `SV_LinkEdict` bounds, `SV_TouchLinks`, `SV_Impact` |
+| ↳ monster movement | `sv_move.c`, `pr_cmds.c` | `server::sv_move` | ✅ `SV_movestep`, `SV_StepDirection`, `SV_NewChaseDir`, `SV_MoveToGoal`, `SV_CheckBottom`; `walkmove` / `movetogoal` / `checkbottom` |
+| ↳ server→client messages | `sv_main.c`, `pr_cmds.c`, `cl_tent.c`, `cl_parse.c` | `server::msg` | ✅ sound / static-sound / particle / print queues; `Write*` → temp-entity decoder + `MSG_ALL` svc recogniser (intermission, finale) |
+| ↳ light styles | `pr_cmds.c`, `r_light.c` | `server::lightstyle` | ✅ `PF_lightstyle` table + `R_AnimateLight` scales (shared with demo playback) |
+| ↳ host commands | `host_cmd.c`, `sv_main.c` | `server::host` | ✅ skill, deferred `changelevel` / `restart`, `SV_SaveSpawnparms` + serverflags across levels, `Host_Kill_f`, signon frames |
 | Software renderer | `r_*.c`, `d_*.c` (semantics; rasteriser is from-scratch) | `render` | ✅ perspective-correct textured world, baked lightmaps + lit-surface cache (`d_surf.c`), dynamic lights w/ `R_MarkLights` BSP gating, animated styles, liquid/sky warp, alias/sprite/brush models, viewmodel, HUD + menus + console + intermission overlays |
 | Particles + temp entities | `r_part.c`, `cl_tent.c` | `particles`, `tent`, `dlight` | ✅ trails/explosions/splashes + lightning-beam store and expansion |
-| Ambient sound | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server` | ✅ `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap) + `PF_ambientsound` static loops + `GetWavinfo` cue-loop gate |
+| Ambient sound | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server::msg` | ✅ `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap) + `PF_ambientsound` static loops + `GetWavinfo` cue-loop gate |
 | Little-endian byte reader, error type | (replaces `LittleLong`/`Sys_Error`) | `read`, `error` | ✅ scaffold |
 
 The crate is **~39,000 lines of zero-dependency, `unsafe`-free Rust with 458 lib + 8 integration tests**

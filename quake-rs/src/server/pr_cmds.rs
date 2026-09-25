@@ -32,7 +32,7 @@ use crate::vm::{Builtin, Vm};
 use crate::Result;
 
 // ---------------------------------------------------------------------------
-// (B) Engine builtins. Each is an `fn(&mut Vm) -> Result<()>`.
+// Engine builtins. Each is an `fn(&mut Vm) -> Result<()>`.
 //
 // Field/global access is by name through the Vm helpers. World services are
 // reached via `vm.with_host(...)`, which must NOT be held across `vm.execute`.

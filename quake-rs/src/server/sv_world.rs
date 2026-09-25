@@ -18,7 +18,7 @@ use crate::math::{add as v_add, Vec3};
 use crate::vm::{HostTrace, Vm};
 
 // ---------------------------------------------------------------------------
-// (D) Entity-aware move, impact, and trigger touching.
+// Entity-aware move, impact, and trigger touching.
 //
 // Ported from world.c (`SV_Move` ~923, `SV_ClipMoveToEntity` ~722,
 // `SV_TouchLinks` ~258) and sv_phys.c (`SV_Impact` ~153, `SV_PushEntity`
@@ -138,8 +138,8 @@ impl MoveTrace {
 /// the move's own box. When `missile == false` (every caller except the
 /// `MOVETYPE_FLYMISSILE` branch of `push_entity`), behaviour is identical to a
 /// plain `MOVE_NORMAL` clip.
-/// Sample the world point-contents at `p` (the [`Host`]-backed `SV_PointContents`
-/// the builtins use): `CONTENTS_EMPTY` (-1), `SOLID` (-2), `WATER` (-3),
+/// Sample the world point-contents at `p` (the [`Host`](crate::vm::Host)-backed
+/// `SV_PointContents` the builtins use): `CONTENTS_EMPTY` (-1), `SOLID` (-2), `WATER` (-3),
 /// `SLIME` (-4), `LAVA` (-5), etc. Exposed for tooling/tests (e.g. probing where
 /// a liquid is); `CONTENTS_SOLID` if there is no host.
 pub fn probe_point_contents(vm: &mut Vm, p: Vec3) -> i32 {
