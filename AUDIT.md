@@ -482,6 +482,22 @@ verify_*.py green (verify_menu 60/60 incl. reload persistence); goldens
 byte-identical `fb14bd65`/`a6f98d8a`/`0211e6d4` (the scene camera has no
 status bar or viewmodel).
 
+## Host loop: Host_FilterTime's 72 fps cap (2026-09-25, branch `quake/host`)
+
+- ✅ **Frame cap** — the port stepped and rendered once per rAF, so a 144 Hz
+  display ran twice Quake's frames. `step()` now gates like Host_FilterTime:
+  `realtime += dt` every call; a frame runs only once 1/72 s has passed since
+  the last (`oldrealtime = realtime`, overshoot dropped) and advances the game
+  by that time clamped to [0.001, 0.1]; `step` returns 0 on a skipped call and
+  the page presents nothing. `dt = 0` remains the tests' frozen frame.
+- **Deviation (documented at `HOST_FRAME_TOLERANCE`):** a frame may run up to
+  1 ms early. A rAF host sees whole vsyncs; at 144 Hz two are 13.889 ms, on
+  the knife edge of 1/72 s, and the strict test judders 72/48 fps. With 1 ms:
+  60/75/90/100/120/144/165/240/360 Hz give 60/75/45/50/60/72/55/60/72 fps,
+  each at a fixed vsync count per frame (unit-tested). Only 75 Hz exceeds 72.
+  Accepted gap: 85–100 Hz displays get half their rate (the C gate needs two
+  vsyncs there).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

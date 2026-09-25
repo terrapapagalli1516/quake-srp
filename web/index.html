@@ -1198,16 +1198,20 @@ async function main() {
 
   let last = performance.now();
   function frame(now) {
-    // The RAW elapsed time: the engine splits it like Host_FilterTime — all of
-    // it to `realtime` (the flashing menu/console cursors), at most 0.1 s to
-    // the game clock (so a hitch or a backgrounded tab can't lurch the world).
+    // The RAW elapsed time since the last rAF: the engine runs it through
+    // Host_FilterTime — all of it to `realtime` (the flashing menu/console
+    // cursors); a host frame only once 1/72 s has passed since the last one,
+    // advancing the game by that time, at most 0.1 s (so a hitch or a
+    // backgrounded tab can't lurch the world).
     const dt = Math.max(0, (now - last) / 1000); last = now;
     // Movement/turn/attack all flow from the held-key states the keydown/keyup
     // handlers fed the engine (key_down/key_up by Quake keynum): each step
     // derives the move from the BINDINGS table (CL_BaseMove/CL_AdjustAngles),
     // so Options > Customize controls really rebinds, Always Run really swaps
     // cl_forwardspeed, and the menu/console gate gameplay engine-side.
-    exp.step(dt);
+    // step() returns 0 when the 72 fps cap skipped this refresh: no new frame,
+    // nothing queued, nothing to present (an older wasm returns undefined).
+    if (exp.step(dt) === 0) { requestAnimationFrame(frame); return; }
     drainGameSounds();
     drainStopSounds();
     drainMenuSounds();

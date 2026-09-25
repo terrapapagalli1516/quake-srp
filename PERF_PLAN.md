@@ -500,6 +500,19 @@ The fidelity classes are:
     Document that tolerance as the only deviation.
 - **Where:** in the page's `frame()`, or as a gate inside `step()`, which is safer for other hosts.
 - **Gain:** half the work on 120/144 Hz displays; nothing at 60 Hz.
+- **Done** (branch `quake/host`): the gate is inside `step()` (`host_filter_time`), which now
+  returns 1 when a frame ran and 0 when the cap skipped the call; the page presents only on 1.
+  `realtime` still takes every call's time, `oldrealtime` jumps to `realtime` on a run (the C's
+  dropped overshoot), `dt = 0` stays the automation's always-render frozen frame. Tolerance
+  **1 ms**, mid-window: above 0.56 ms a 75 Hz display runs every refresh, below 1.39 ms 165 and
+  240 Hz stay at or under 72 fps (half a 144 Hz vsync, 3.5 ms, would give 82.5 and 80). Unit
+  tests drive 0.1 ms-coarsened rAF stamps: 60 → 60, 75 → 75 (the tolerance's one overshoot),
+  90 → 45, 100 → 50, 120 → 60, 144 → 72, 165 → 55, 240 → 60, 360 → 72 fps, each at one fixed
+  vsync count per frame; jittered 144 Hz stays at 72; game time equals real time. Headless:
+  60 Hz vsync unchanged (60.2 host frames/s both); uncapped rAF at 320×200, step CPU **952 →
+  ~150 ms per second** (606 → ~47 host frames/s; uncapped headless rAF is not a display, so its
+  rate is not a refresh rate). Bench hashes identical; `bench.py` realigns the gate before a
+  fixed run and its `--live` counts skipped refreshes.
 
 **D2. Resolve hot entity fields once.** *(byte-identical)*
 
