@@ -1801,6 +1801,13 @@ each; the C followed and the evidence are in the commit messages.
   scripts that opened with "the attract menu" (`verify_demo`, `_input`,
   `_menu`, `_extras`, `_timedemo`) now check that no menu is up at boot and
   that a key brings it.
+- ✅ **`help` printed the port's command list** (MED). menu.c registers
+  `help` as `M_Menu_Help_f`: the Help/Ordering screen on its first page,
+  the menu taking the keyboard from the console (`App::m_menu_help`, which
+  `svc_sellscreen` runs too). The port's list moved to `wasm_help`, a
+  `wasm_` name like the extras' (not id's); `cmdlist`, which id never had,
+  is gone. The page's console drawer and README list both. Test
+  `help_is_the_help_screen_and_wasm_help_the_ports_list`.
 
 ## LOW (27)
 

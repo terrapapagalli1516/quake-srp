@@ -1,5 +1,6 @@
 //! Console commands — `Cmd_ExecuteString`'s dispatch (cmd.c) against the
-//! App: echo/clear/help, the viewsize cvar commands, the Web extras, `map`,
+//! App: echo/clear, `help` (the Help/Ordering screen), the viewsize cvar
+//! commands, the Web extras and the port's `wasm_help` list, `map`,
 //! save/load, `pause`, the demo commands (cl_demo.c's `playdemo`/`timedemo`,
 //! host_cmd.c's demo loop control `startdemos`/`demos`/`stopdemo`), and the
 //! cheats god/noclip/fly/kill/give/impulse, which act on the live
@@ -88,7 +89,7 @@ pub(crate) fn execute_console_command(line: &str) {
     let Some(&cmd) = argv.first() else { return };
     let cmd_lower = cmd.to_ascii_lowercase();
 
-    // Commands that don't need the walk: echo / clear / help / cmdlist.
+    // Commands that don't need the walk: echo / clear / help / wasm_help.
     match cmd_lower.as_str() {
         "clear" => {
             ensure_app(|a| a.console.clear());
@@ -103,9 +104,17 @@ pub(crate) fn execute_console_command(line: &str) {
             ensure_app(|a| a.console.println(text));
             return;
         }
-        "help" | "cmdlist" => {
+        // M_Menu_Help_f (menu.c registers it as `help`): the Help/Ordering
+        // screen, on its first page, with the keyboard (key_dest =
+        // key_menu: the console goes up).
+        "help" => {
+            ensure_app(App::m_menu_help);
+            return;
+        }
+        // Not id's: the port's command list (`help` is id's Help screen).
+        "wasm_help" => {
             ensure_app(|a| {
-                a.console.println("commands:");
+                a.console.println("this port's commands:");
                 a.console.println("  god noclip fly kill  pause");
                 a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
                 a.console.println("  impulse <n>   map <name>");
@@ -114,6 +123,7 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  stopdemo  demos  startdemos <d..>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
+                a.console.println("  wasm_help (this list)");
                 a.console.println("web extras (not id's; see Options):");
                 for line in crate::extras::help_lines() {
                     a.console.println(line);
@@ -370,13 +380,43 @@ mod tests {
         assert_eq!(extras(), 0);
         run_console_line("wasm_exactpersp 1");
         assert_eq!(extras(), 4);
-        run_console_line("help");
+        run_console_line("wasm_help");
         let help: Vec<String> = APP.with(|c| {
             c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
         });
         assert!(help.iter().any(|l| l == "  wasm_uncapped 0|1  no 72 fps cap"), "{help:?}");
         assert!(help.iter().any(|l| l == "  wasm_showfps 0|1   frame rate"), "{help:?}");
         assert!(help.iter().all(|l| l.len() <= 38), "fits a 320-wide console: {help:?}");
+    }
+
+    /// Final review (UI): menu.c registers `help` as M_Menu_Help_f — the
+    /// Help/Ordering screen on its first page, the menu taking the keyboard
+    /// from the console — where the port printed its own command list; that
+    /// list is `wasm_help` now. `cmdlist` was the port's too: id has none.
+    #[test]
+    fn help_is_the_help_screen_and_wasm_help_the_ports_list() {
+        use crate::menu::{menu_right, menu_screen_id, menu_visible};
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("help");
+        assert_eq!((menu_visible(), menu_screen_id(), console_visible()), (1, 8, 0), "the Help screen");
+        menu_right();
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().menu.help_page()), 1);
+        menu_cancel(); // M_Help_Key K_ESCAPE -> M_Menu_Main_f
+        assert_eq!(menu_screen_id(), 0);
+        menu_cancel();
+        console_toggle();
+        run_console_line("help");
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().menu.help_page()), 0, "help_page = 0");
+        menu_cancel();
+        menu_cancel();
+        console_toggle();
+        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        run_console_line("wasm_help");
+        assert!(lines().iter().any(|l| l == "this port's commands:"), "{:?}", lines());
+        run_console_line("cmdlist");
+        assert_eq!(lines().last().map(String::as_str), Some("unknown command: cmdlist"));
     }
 
     // -----------------------------------------------------------------------

@@ -224,6 +224,14 @@ impl App {
         self.menu.open();
     }
 
+    /// `M_Menu_Help_f` (menu.c; the `help` command and `svc_sellscreen`):
+    /// the Help/Ordering screen on its first page, the menu taking the
+    /// keyboard (`key_dest = key_menu`). The demo loop is untouched.
+    pub(crate) fn m_menu_help(&mut self) {
+        self.console.open = false;
+        self.menu.open_help();
+    }
+
     /// `M_ToggleMenu_f` (menu.c), what Escape does outside the menu and the
     /// `togglemenu` command: over the game the main menu opens; with the
     /// console down, the console goes up (`Con_ToggleConsole_f`); within the

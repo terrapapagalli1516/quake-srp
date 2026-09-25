@@ -243,11 +243,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // pop the Help/Ordering menu (the shareware episode-end "order Quake"
         // pitch). The walk raised the flag during its step; the menu (owned
         // here, at the App level) opens on the Help screen for the next frame.
-        if let Some(wk) = a.walk.as_mut() {
-            if wk.pending_sellscreen {
-                wk.pending_sellscreen = false;
-                a.menu.open_help();
-            }
+        if a.walk.as_mut().is_some_and(|wk| std::mem::take(&mut wk.pending_sellscreen)) {
+            a.m_menu_help();
         }
 
         // The wasm_showfps extra (off by default): QuakeWorld draws it with the

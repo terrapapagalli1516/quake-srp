@@ -61,7 +61,8 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
-  `fly`/`give`/`impulse`/`map`/`kill`/`clear`, `pause` (the PAUSE key: id's plaque) and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`.
+  `fly`/`give`/`impulse`/`map`/`kill`/`clear`, `pause` (the PAUSE key: id's plaque) and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`;
+  `help` is id's (the Help/Ordering screen), and the port's own list of what its console runs is `wasm_help` (not an id command).
   Boots as Quake does, into the **attract demos** (quake.rc's `startdemos demo1 demo2 demo3`) with no menu:
   any key during a demo brings up the main menu, which stops the loop until it is closed (`M_Menu_Main_f`); the
   page's click-to-start overlay is only the gesture browsers want before they play sound. Every key goes
