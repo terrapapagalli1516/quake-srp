@@ -5,7 +5,8 @@
 //! `M_DrawSlider`, `bindnames`; the video list is `vid_win.c`'s `VID_MenuDraw`.
 
 use crate::draw::{
-    blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, MENU_VIRT_H, MENU_VIRT_W,
+    blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, fill_rect, MENU_VIRT_H,
+    MENU_VIRT_W,
 };
 use crate::keys::{default_bindings, keynum_to_string, K_ESCAPE};
 use crate::render::Image;
@@ -1802,11 +1803,7 @@ fn draw_quit_screen(
     let y0 = (oy + BOX_Y0 * scale).floor() as i32;
     let x1 = (ox + (BOX_X0 + BOX_W) * scale).ceil() as i32;
     let y1 = (oy + (BOX_Y0 + BOX_H) * scale).ceil() as i32;
-    for py in y0..y1 {
-        for px in x0..x1 {
-            image.put(px, py, [0, 0, 0]);
-        }
-    }
+    fill_rect(image, x0 as i64, y0 as i64, x1 as i64, y1 as i64, [0, 0, 0]);
 
     if let Some(cc) = conchars {
         // Two centered lines, like the C's four-line quitMessage box.
