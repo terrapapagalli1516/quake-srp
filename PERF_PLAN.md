@@ -366,6 +366,19 @@ The fidelity classes are:
 
 ### B. Frame composition and presentation (wasm shell and 2-D)
 
+**Group result** (branch `quake/perf-b`: B1–B4 against `a83bcdb`, one sitting, wasm step median
+ms; native in parentheses). B5 is not done; its "what it would take" is below.
+
+| workload | 640×400 | 1280×800 |
+|---|---|---|
+| demo1 | 6.28 → **4.13** (3.37 → 2.44) | 19.24 → **14.55** (11.76 → 7.77) |
+| attract (demo + menu) | 5.84 → **4.20** (3.96 → 2.57) | 20.16 → **15.07** (13.08 → 9.29) |
+| walk_e1m1 | 3.94 → **2.87** (2.83 → 2.05) | 13.51 → **9.36** (9.07 → 5.92) |
+| quad_e1m1 (a cshift every frame) | 9.65 → **4.95** (8.57 → 5.81) | 32.80 → **17.12** (30.28 → 20.50) |
+
+Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 in wasm went from
+4.96 ms to 0.90 on demo1, and from 16.6 to 1.43 on quad_e1m1.
+
 **B2. Cshift and gamma as per-channel 256-entry ramps.** *(faithful, byte-identical variant available)*
 
 - **Evidence:**
@@ -384,12 +397,40 @@ The fidelity classes are:
   - Use the port's rounding for a byte-identical first step.
 - **Functions:** `apply_blend`, `build_gamma_table`, and the pack in `step`.
 - **Risk:** very low.
+- **Done** (branch `quake/perf-b`), the faithful variant, and more faithful than this item
+  assumed: the software `V_UpdatePalette` (view.c's `!GLQUAKE` branch) never calls `V_CalcBlend`
+  (that is GLQuake's). It walks `cl.cshifts` in order over each palette level with
+  `v += (percent*(destcolor-v)) >> 8` (`int` percent, arithmetic shift), then `gammatable[v]`.
+  `render::cshift_ramps` builds exactly that as three 256-entry ramps; the frames hand the
+  dispatcher their cshift list instead of a (colour, alpha); `pack_rgba` maps every pixel through
+  the ramps (gamma folded in, so a shift costs one pass). `apply_blend`/`combine_cshifts` are gone.
+  quad_e1m1 (the Quad's shift on every frame), median ms, A/B in one sitting:
+
+  | | blend + pack | step |
+  |---|---|---|
+  | wasm 640×400 | 2.86 + 0.12 → **0 + 0.23** | 8.38 → 5.62 |
+  | wasm 1280×800 | 11.38 + 0.45 → **0 + 0.93** | 30.79 → 19.93 |
+  | native 1280×800 | 7.12 + 0.42 → 0 + 0.70 | 28.88 → 22.18 |
+
+  Frames with no shift are byte-identical (demo1, walk_e1m1 hashes equal; goldens unchanged).
+  Shifted frames move by at most 2 levels per channel (`AUDIT.md`, "Frame composition").
 
 **B1. The RGB→RGBA pack.** *(byte-identical)*
 
 - **Evidence:** 2.34 → 0.73 ms at 1280×800, with identical hashes. The prototype is
   `fb.resize(n*4)` plus `chunks_exact_mut(4).zip(&img.rgb)`, in place of `clear()` and 4× `push`.
 - **Functions:** the pack at the end of `step`, in both the gamma-1 and gamma-LUT arms.
+- **Done** (branch `quake/perf-b`): `pack_rgba` in `quake-wasm/src/host.rs` resizes `vid.buffer`
+  once (a no-op at a steady resolution, so its pointer stays put) and writes each pixel's four
+  bytes in place through `chunks_exact_mut(4)`. Pack, median ms, A/B in one sitting:
+
+  | | 640×400 | 1280×800 |
+  |---|---|---|
+  | wasm | 0.55 → **0.11** | 2.41 → **0.46** |
+  | native | 0.46 → 0.11 | 1.79 → 0.42 |
+
+  wasm step, demo1 at 1280×800: 19.9 → 17.3 ms. Framebuffer hashes (`--hash-every 60`) identical
+  on demo1, walk_e1m1 and quad_e1m1 at both sizes.
 
 **B3. Keep frame buffers across frames.** *(byte-identical)*
 
@@ -403,6 +444,28 @@ The fidelity classes are:
   `Image` API has to change; keep the old functions as wrappers for the tests.
 - **Coordination:** A3 later removes the clears. Until then, keep `fill` so the output stays
   byte-identical.
+- **Done** (branch `quake/perf-b`), without changing any signature: a small per-thread pool in
+  `render/mod.rs` (like the sky-span and surface caches). The host hands each presented frame
+  back (`render::recycle_image`); the next frame's view (`render_scene_ext_sprited`, still
+  filled with its background exactly as before), its z-buffer, the composed screen and
+  `apply_warp`'s snapshot reuse those allocations. The bigger win was in `compose_view`, which
+  since the vrect framing (viewsize 100 renders the view above the status bar) allocated a
+  zeroed screen, tile-cleared **all** of it and then copied the view over 76% of it: now the tile
+  goes only to the four bands around the view and the screen needs no clear (a test composes over
+  dirty spare buffers for every viewsize, against the old full-clear compose). post3d (warp +
+  compose), median ms, A/B in one sitting:
+
+  | | 640×400 | 1280×800 |
+  |---|---|---|
+  | wasm | 0.45 → **0.13** | 1.78 → **0.59** |
+  | native | 0.41 → 0.11 | 1.61 → 0.47 |
+
+  wasm step at 1280×800: demo1 17.0 → 16.1, walk_e1m1 11.7 → 10.7 ms. render3d is unchanged
+  within noise (reusing its buffers saves the allocation, not the fills). Hashes identical on
+  demo1, attract and walk_e1m1 at both sizes; goldens unchanged. (The viewmodel's private
+  full-resolution z-buffer measured above is already gone: since the `quake/fid1` alias port the
+  gun draws into the shared z-buffer with its 1/z tripled.) **Not done:** the warp could write
+  straight into the composed screen instead of warping the view in place (underwater only).
 
 **B4. HUD, menu and console blits.** *(byte-identical)*
 
@@ -411,6 +474,27 @@ The fidelity classes are:
 - **Mechanism:** compute a source-x map once per blit, clip rows and columns up front, and write
   the row slice directly. The same applies to `blit_qpic_at`, `draw_string_scaled` and
   `draw_char_scaled`.
+- **Done** (branch `quake/perf-b`): one blit, `draw::blit_scaled` (the source-column map and the
+  clipping once per blit, rows written as slices, the same float expressions as before), under
+  `blit_qpic_at`, the status bar's `blit_qpic` and `draw_sbar_char`; glyph blocks
+  (`draw_string_scaled`/`draw_char_scaled`, one `stamp_glyph`) as clipped row fills
+  (`fill_rect`); `draw_tile_clear` with a column map and each repeated tile row copied;
+  `fade_screen` as black runs between precomputed kept columns; the console's conback with a
+  column map. Median ms, wasm, two A/B rounds in one sitting (they agree to ±0.01):
+
+  | phase | 640×400 | 1280×800 |
+  |---|---|---|
+  | hud2d (status bar) | 0.21 → **0.09** | 0.77 → **0.28** |
+  | menu (attract) | 0.39 → **0.18** | 1.51 → **0.61** |
+  | post3d (tile under the bar) | 0.15 → 0.06 | 0.57 → 0.20 |
+  | console (native, 40 lines) | 0.36 → 0.21 | 1.20 → 0.54 |
+
+  wasm step at 1280×800: attract 17.2 → 15.5, demo1 15.9 → 15.2 ms. Byte-identical: bench hashes
+  equal on demo1 and walk_e1m1 (attract's differ only by its menu-cursor phase, see §2); a native
+  sweep of 456 distinct frames — every menu screen, the Options rows, Keys, Video, Help, Quit,
+  the HUD at viewsizes 30–120, the console, the Quad, demo1 — at eight resolutions (320×200 to
+  1280×800, plus 333×211 and 1280×720) is identical before and after; differential tests pin each
+  helper to the per-pixel loop it replaced at fractional scales.
 
 **B5. The 8-bit framebuffer, which is Quake's architecture.** *(faithful, later)*
 
@@ -420,6 +504,27 @@ The fidelity classes are:
 - **Requires:** every writer to emit palette indices. **Blocked on C2**: alias shading must go
   through the colormap first. The flat-hash and linear fallbacks (no colormap) are test-only paths.
 - **Enables:** a WebGL present, below.
+- **What it would take, seen from B1–B4** (not implemented; 2026-09-25):
+  - *The blocker has moved.* C2 has in effect landed (`quake/fid1`: alias models and the gun go
+    through `D_PolysetDraw` and `acolormap`; the oracle's nonpal% is 0 on every map). What still
+    writes RGB that is not a palette colour: the `colormap: None` linear fallbacks in
+    `raster.rs` (maps or tests without `gfx/colormap.lmp`), `hash_color` (the flat `render_bsp`,
+    test-only), the untextured alias `setup.flat`, the view's `[10, 10, 14]` background (visible
+    through the void; which index id shows there is for the oracle to say) and the console's
+    `[10, 10, 14]` no-conback fallback.
+  - *The 2-D layer is ready.* Every blit now goes through `draw::blit_scaled`, `stamp_glyph`,
+    `fill_rect`, `draw_tile_clear` and `fade_screen`, and each of them looks up `palette[texel]`
+    at one place: emitting the index instead is a one-line change per helper.
+  - *Presentation is ready.* B2 already builds `V_UpdatePalette`'s ramps; with indices, apply them
+    to the 256 palette colours once per frame (768 lookups, exactly the C), make a `[u32; 256]`
+    and pack with one lookup and one 4-byte store per pixel — the cost of today's identity pack
+    (0.46 ms at 1280×800), with any shift free.
+  - *The work:* `Image.rgb: Vec<[u8; 3]>` → `Vec<u8>` plus the palette, through every writer
+    (world, raster, surf, light, sky, warp, alias/polyse, sprite, part, the 2-D layer) and every
+    test that reads pixels as RGB (they would read `palette[idx]`). The goldens are PPMs through
+    the palette, so they should not move. Frame fills, the view→screen copy and the warp move a
+    third of the bytes. Do it after A1 (it rewrites the world writers anyway), as one mechanical
+    sweep behind a byte-identity check of the goldens and the bench hashes.
 
 **B6. Present path in the page.** *(neutral; lands with D because it touches index.html)*
 
@@ -675,7 +780,7 @@ means about 4–5 ms per frame, far inside a 60 Hz budget.
 - **Fidelity issues found, not fixed** (they belong in `AUDIT.md`):
   - A4: vrect and pixelAspect.
   - C2: alias models are not colormapped, and the code comment claims otherwise.
-  - B2: the cshift rounds where the C truncates.
+  - B2: the cshift rounds where the C truncates. (Fixed on `quake/perf-b`.)
   - A2: dlit faces are lit per pixel.
   - C3: the viewmodel placement is ad hoc.
 - **Not investigated:**

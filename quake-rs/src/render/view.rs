@@ -2,12 +2,12 @@
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/view.c` — `V_CalcBob`, the contents/powerup cshifts and
-//! `V_CalcBlend` (applied as `V_UpdatePalette` does), `BuildGammaTable`, and the
-//! gun placement of `V_CalcRefdef` / `CalcGunAngle`.
+//! the software `V_UpdatePalette`'s ramps, `BuildGammaTable`, and the gun
+//! placement of `V_CalcRefdef` / `CalcGunAngle`.
 
 use crate::math::Vec3;
 use crate::sbar::{IT_INVISIBILITY, IT_INVULNERABILITY, IT_QUAD, IT_SUIT};
-use super::{Camera, Image};
+use super::Camera;
 
 /// Quake's `V_CalcBob` (view.c): the sinusoidal head-bob amount (world units) to
 /// add to the eye height while moving, so the view rocks up and down with each
@@ -69,52 +69,42 @@ pub fn powerup_cshift(items: i32) -> Option<([u8; 3], f32)> {
     }
 }
 
-/// Combine colour shifts `(rgb, percent 0..255)` into a single blend colour and
-/// alpha (0..1), porting Quake's `V_CalcBlend` accumulation (each shift is
-/// alpha-over the running total). Empty list / all-zero percents give alpha 0.
-// `!(percent > 0.0)` is deliberate (a hardened V_CalcBlend skip): it also skips a
-// NaN percent, which the clippy-suggested `percent <= 0.0` would let through.
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
-pub fn combine_cshifts(shifts: &[([u8; 3], f32)]) -> ([u8; 3], f32) {
-    let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    for &(color, percent) in shifts {
-        if !(percent > 0.0) {
-            continue;
-        }
-        let a2 = (percent / 255.0).clamp(0.0, 1.0);
-        a += a2 * (1.0 - a);
-        if a <= 0.0 {
-            continue;
-        }
-        let an = (a2 / a).clamp(0.0, 1.0); // share of the new colour in the mix
-        r = r * (1.0 - an) + color[0] as f32 * an;
-        g = g * (1.0 - an) + color[1] as f32 * an;
-        b = b * (1.0 - an) + color[2] as f32 * an;
-    }
-    let to_u8 = |v: f32| v.round().clamp(0.0, 255.0) as u8;
-    ([to_u8(r), to_u8(g), to_u8(b)], a.clamp(0.0, 1.0))
-}
-
-/// Blend `color` over every pixel of `image` at `alpha` (0..1) — the full-screen
-/// polyblend (damage flash, underwater/lava/slime tint). `alpha <= 0` is a no-op.
-/// Software Quake's `V_UpdatePalette` runs LAST in `SCR_UpdateScreen` and shifts the
-/// whole VGA palette, so the tint covers the ENTIRE composited screen — 3-D view,
-/// status bar, centerprint, menu and console alike. Apply this to the FINISHED frame
-/// after every overlay, not just the 3-D viewport (which would be the GL look).
-// `!(alpha > 0.0)` is deliberate: a NaN alpha must also be a no-op, which the
-// clippy-suggested `alpha <= 0.0` would not guarantee.
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
-pub fn apply_blend(image: &mut Image, color: [u8; 3], alpha: f32) {
-    if !(alpha > 0.0) {
-        return;
-    }
-    let a = alpha.min(1.0);
-    let inv = 1.0 - a;
-    for px in image.rgb.iter_mut() {
-        for c in 0..3 {
-            px[c] = (px[c] as f32 * inv + color[c] as f32 * a).round().clamp(0.0, 255.0) as u8;
+/// `V_UpdatePalette` (view.c, the software build's — not GLQuake's
+/// `V_CalcBlend`): the frame's colour shifts `(destcolor, percent)`, in
+/// `cl.cshifts` order (CONTENTS, DAMAGE, BONUS, POWERUP), with the gamma
+/// table after them, as one 256-entry ramp per channel. Every level `v` is
+/// moved toward each shift's colour in turn with the C's integer arithmetic,
+///
+/// ```text
+/// v += (percent * (destcolor - v)) >> 8;
+/// ```
+///
+/// where `percent` is `cshift_t`'s `int` (a fractional percent truncates)
+/// and `>>` is an arithmetic shift (a negative step rounds toward minus
+/// infinity), and then becomes `gammatable[v]`. The C runs this over the
+/// 256 palette colours and hands the result to `VID_ShiftPalette`. A channel
+/// only ever depends on itself, so a palette colour looked up in these ramps
+/// channel by channel IS the C's shifted palette entry: the host packs the
+/// finished frame through them, which tints the whole screen (3-D view,
+/// status bar, menu, console) exactly as the palette shift does. No shifts
+/// and the identity gamma give the identity ramps.
+pub fn cshift_ramps(shifts: &[([u8; 3], f32)], gamma: &[u8; 256]) -> [[u8; 256]; 3] {
+    let mut ramps = [[0u8; 256]; 3];
+    for (c, ramp) in ramps.iter_mut().enumerate() {
+        for (i, out) in ramp.iter_mut().enumerate() {
+            let mut v = i as i32;
+            for &(dest, percent) in shifts {
+                // `as` truncates like the C's float-to-int (a NaN reads as 0);
+                // the clamp to client.h's "0-256" keeps the product in range
+                // and never moves a real percent (they top out at 150).
+                let p = (percent as i32).clamp(0, 256);
+                v += (p * (dest[c] as i32 - v)) >> 8;
+            }
+            // With p in 0..=256, v stays between its start and the colour.
+            *out = gamma[v.clamp(0, 255) as usize];
         }
     }
+    ramps
 }
 
 /// CalcGunAngle's `cl.viewent.angles` (view.c) for a camera built from the
@@ -226,28 +216,51 @@ mod tests {
     }
 
     #[test]
-    fn screen_blend_damage_tint_and_apply() {
-        // Content shifts: water/slime/lava tint, empty/solid none.
+    fn content_cshifts_are_view_c_s() {
         assert_eq!(content_cshift(crate::bsp::CONTENTS_WATER), Some(([130, 80, 50], 128.0)));
+        assert_eq!(content_cshift(crate::bsp::CONTENTS_SLIME), Some(([0, 25, 5], 150.0)));
         assert_eq!(content_cshift(crate::bsp::CONTENTS_LAVA), Some(([255, 80, 0], 150.0)));
         assert_eq!(content_cshift(crate::bsp::CONTENTS_EMPTY), None);
+        assert_eq!(powerup_cshift(IT_QUAD | IT_INVULNERABILITY), Some(([0, 0, 255], 30.0)));
+        assert_eq!(powerup_cshift(0), None);
+    }
 
-        // No shifts => fully transparent.
-        let (_c, a0) = combine_cshifts(&[]);
-        assert_eq!(a0, 0.0);
-
-        // A red damage shift gives a reddish blend with partial alpha.
-        let (c, a) = combine_cshifts(&[([255, 0, 0], 150.0)]);
-        assert!(a > 0.0 && a < 1.0, "alpha {a} should be partial");
-        assert!(c[0] > c[1] && c[0] > c[2], "blend should be reddish, got {c:?}");
-
-        // apply_blend with alpha 0 is a no-op; with alpha>0 it moves pixels toward
-        // the blend colour.
-        let mut img = Image { w: 2, h: 1, rgb: vec![[10, 10, 10], [10, 10, 10]] };
-        apply_blend(&mut img, [255, 0, 0], 0.0);
-        assert_eq!(img.rgb[0], [10, 10, 10], "alpha 0 must not change pixels");
-        apply_blend(&mut img, [255, 0, 0], 0.5);
-        assert!(img.rgb[0][0] > 100 && img.rgb[0][1] < 10, "red 0.5 blend: {:?}", img.rgb[0]);
+    #[test]
+    fn cshift_ramps_are_v_update_palettes_integer_steps() {
+        let id = build_gamma_table(1.0);
+        let identity: [[u8; 256]; 3] = [id, id, id];
+        // No shifts (or only zero percents) and gamma 1: the identity.
+        assert_eq!(cshift_ramps(&[], &id), identity);
+        assert_eq!(cshift_ramps(&[([255, 0, 0], 0.0), ([9, 9, 9], 0.9)], &id), identity);
+        // The damage flash at its cap, by hand from the C:
+        //   r: 10 + (150*(255-10) >> 8) = 10 + (36750 >> 8) = 10 + 143 = 153
+        //   g: 10 + (150*(0-10)   >> 8) = 10 + (-1500 >> 8) = 10 - 6   = 4
+        // (the float alpha-blend this replaces gave 154 and 4).
+        let dmg = cshift_ramps(&[([255, 0, 0], 150.0)], &id);
+        assert_eq!((dmg[0][10], dmg[1][10], dmg[2][10]), (153, 4, 4));
+        assert_eq!((dmg[0][255], dmg[1][0]), (255, 0), "the ends stay in range");
+        // cshift_t.percent is an int: 22.9 steps like 22.
+        assert_eq!(cshift_ramps(&[([255, 0, 0], 22.9)], &id), cshift_ramps(&[([255, 0, 0], 22.0)], &id));
+        // The shifts apply in order. Level 100, red, water then damage:
+        //   100 + (128*30 >> 8) = 115;  115 + (150*140 >> 8) = 115 + 82 = 197
+        // and the other way round:
+        //   100 + (150*155 >> 8) = 190; 190 + (128*-60 >> 8) = 190 - 30 = 160.
+        let water = ([130, 80, 50], 128.0);
+        let damage = ([255, 0, 0], 150.0);
+        assert_eq!(cshift_ramps(&[water, damage], &id)[0][100], 197);
+        assert_eq!(cshift_ramps(&[damage, water], &id)[0][100], 160);
+        // Gamma comes last: gammatable[shifted level].
+        let g = build_gamma_table(0.7);
+        let lit = cshift_ramps(&[water, damage], &g);
+        let shifted = cshift_ramps(&[water, damage], &id);
+        for (c, (lit, shifted)) in lit.iter().zip(&shifted).enumerate() {
+            for (i, (&l, &s)) in lit.iter().zip(shifted).enumerate() {
+                assert_eq!(l, g[s as usize], "channel {c} level {i}");
+            }
+        }
+        // A garbage percent is contained, never a panic or an out-of-range level.
+        let wild = cshift_ramps(&[([255, 255, 255], f32::NAN), ([0, 0, 0], 1.0e9)], &id);
+        assert_eq!(wild[0][200], 0, "a huge percent is the whole colour");
     }
 
     #[test]

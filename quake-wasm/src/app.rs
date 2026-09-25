@@ -1093,8 +1093,8 @@ mod tests {
             let d = a.demo.as_mut().unwrap();
             // Render the current demo frame with a tiny dt twice; with the menu
             // OFF and ON. (A tiny dt keeps both renders on the same frame.)
-            let (plain, _, _) = step_demo(d, 0.0001, false, w, h);
-            let (mut withm, _, _) = step_demo(d, 0.0001, false, w, h);
+            let (plain, _) = step_demo(d, 0.0001, false, w, h);
+            let (mut withm, _) = step_demo(d, 0.0001, false, w, h);
             let pal = a.active_palette().expect("demo palette");
             render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, a.realtime, pal);
             // The two frames are the same scene; only the menu overlay differs.

@@ -31,7 +31,7 @@ pub(crate) fn step_walk(
     menu_up: bool,
     render_w: usize,
     render_h: usize,
-) -> (render::Image, [u8; 3], f32) {
+) -> (render::Image, Vec<([u8; 3], f32)>) {
     // Advance the animation clock (used for liquid warp + sky scroll). Guard
     // against a non-finite/negative dt so the clock only ever moves forward.
     if dt.is_finite() && dt > 0.0 {
@@ -741,14 +741,9 @@ pub(crate) fn step_walk(
     // V_UpdatePalette (software view.c): the cshift is a whole-PALETTE shift run
     // LAST in SCR_UpdateScreen, so it tints the ENTIRE screen — 3D view, status bar,
     // centerprint, menu, console — not just the 3D viewport (that 3D-only scope is
-    // the GLQuake R_PolyBlend look). We DEFER the blend: draw the HUD/messages on the
-    // untinted frame and return (color, alpha) so the dispatcher tints the fully
-    // composited frame (after the menu/console overlay too).
-    let blend = if shifts.is_empty() {
-        ([0u8, 0, 0], 0.0f32)
-    } else {
-        render::combine_cshifts(&shifts)
-    };
+    // the GLQuake R_PolyBlend look). We DEFER the shifts: draw the HUD/messages on
+    // the untinted frame and return them so the dispatcher applies them to the
+    // fully composited frame (after the menu/console overlay too).
     bench::lap(Phase::Post3d);
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
@@ -865,10 +860,10 @@ pub(crate) fn step_walk(
 
     // The main-menu overlay is drawn by the `step` dispatcher (the menu lives at
     // the App level now so it can overlay walk OR the attract demo); step_walk no
-    // longer draws it. The deferred screen blend rides out with the frame so the
+    // longer draws it. The deferred cshifts ride out with the frame so the
     // dispatcher tints the whole composited image (HUD + menu + console included).
     bench::lap(Phase::Hud2d);
-    (img, blend.0, blend.1)
+    (img, shifts)
 }
 
 #[cfg(test)]
@@ -1035,10 +1030,10 @@ mod tests {
         // beam and once with the store cleared. The ONLY difference is the bolt
         // model pieces, so differing pixels prove the bolt drew into the scene.
         let rng = w.prng;
-        let (with_bolt, _, _) = step_walk(&mut w, 0.0, false, 320, 200);
+        let (with_bolt, _) = step_walk(&mut w, 0.0, false, 320, 200);
         w.prng = rng;
         w.beams.clear();
-        let (without_bolt, _, _) = step_walk(&mut w, 0.0, false, 320, 200);
+        let (without_bolt, _) = step_walk(&mut w, 0.0, false, 320, 200);
         let diff = with_bolt
             .rgb
             .iter()

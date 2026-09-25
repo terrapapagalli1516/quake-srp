@@ -52,17 +52,22 @@ pub fn apply_warp(image: &mut Image, clock: f32) {
         *c = u.clamp(0, w - 1) as usize;
     }
     let phase = ((clock as f64 * SPEED) as i64 & 127) as usize;
-    let src = image.rgb.clone(); // pre-warp snapshot
+    // The pre-warp snapshot (id warps out of `r_warpbuffer`), on a spare
+    // frame buffer kept across frames rather than a fresh clone.
+    let mut src = super::take_spare_rgb();
+    src.clear();
+    src.extend_from_slice(&image.rgb);
     let (wu, hu) = (w as usize, h as usize);
-    for v in 0..hu {
+    for (v, row) in image.rgb.chunks_exact_mut(wu).take(hu).enumerate() {
         let tv = sintable[(phase + v) & 127] as usize; // 0..2*AMP2
-        for u in 0..wu {
+        for (u, out) in row.iter_mut().enumerate() {
             let tu = sintable[(phase + u) & 127] as usize; // 0..2*AMP2
             let src_row = rowptr[v + tu];
             let src_col = column[tv + u];
-            image.rgb[v * wu + u] = src[src_row * wu + src_col];
+            *out = src[src_row * wu + src_col];
         }
     }
+    super::recycle_rgb(src);
 }
 
 // ---------------------------------------------------------------------------

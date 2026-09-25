@@ -87,8 +87,8 @@ pub use part::draw_particles;
 pub use sprite::SpriteInstance;
 pub use stats::{render_stats_begin, render_stats_end, set_render_stats_clock, RenderStats};
 pub use view::{
-    apply_blend, build_gamma_table, combine_cshifts, content_cshift, powerup_cshift, view_bob,
-    viewmodel_angles, viewmodel_fudge, viewmodel_origin_ofs,
+    build_gamma_table, content_cshift, cshift_ramps, powerup_cshift, view_bob, viewmodel_angles,
+    viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
 pub use warp::apply_warp;
@@ -117,6 +117,24 @@ impl Image {
             h,
             rgb: vec![bg; count],
         }
+    }
+
+    /// [`Image::new`] on a spare frame buffer ([`recycle_image`]) when one is
+    /// kept: the same pixels (all `bg`), no allocation at a steady size.
+    pub(crate) fn reused(w: usize, h: usize, bg: [u8; 3]) -> Image {
+        let mut rgb = take_spare_rgb();
+        rgb.clear();
+        rgb.resize(w.saturating_mul(h), bg);
+        Image { w, h, rgb }
+    }
+
+    /// A `w * h` image on a spare frame buffer whose old pixels are LEFT IN
+    /// PLACE (only growth is filled, black): for a caller that writes every
+    /// pixel, so the clear would be wasted.
+    pub(crate) fn reused_uncleared(w: usize, h: usize) -> Image {
+        let mut rgb = take_spare_rgb();
+        rgb.resize(w.saturating_mul(h), [0, 0, 0]);
+        Image { w, h, rgb }
     }
 
     /// Set the pixel at `(x, y)` to `c`. A bounds-checked no-op when the
@@ -154,6 +172,57 @@ impl Image {
         out.flush()?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Frame buffers kept across frames
+// ---------------------------------------------------------------------------
+//
+// Quake allocates its frame buffers once per video mode — `vid.buffer`, the
+// z-buffer `d_pzbuffer`, `r_warpbuffer` — and draws into them every frame. The
+// port's frame is an `Image` returned by value, so the same effect is a small
+// per-thread pool: the host hands a presented frame back ([`recycle_image`])
+// and the next frame's view ([`render_scene_ext_sprited`]), composed screen
+// ([`compose_view`]) and warp snapshot ([`apply_warp`]) reuse the allocations.
+// It is purely an allocation cache — every reuse either fills the buffer as a
+// fresh one was ([`Image::reused`]) or writes every pixel
+// ([`Image::reused_uncleared`]) — so nothing drawn depends on it.
+
+/// Spare frame buffers kept: one frame's view, composed screen and warp
+/// snapshot.
+const SPARE_FRAMES: usize = 3;
+
+thread_local! {
+    /// Pixel buffers of frames handed back by [`recycle_image`].
+    static SPARE_RGB: std::cell::RefCell<Vec<Vec<[u8; 3]>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The world z-buffer (`d_pzbuffer`), re-filled by every
+    /// [`render_scene_ext_sprited`].
+    static ZBUF: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Hand a finished frame's pixel buffer back so the next frame reuses it
+/// instead of allocating (the host calls this once the frame is presented).
+/// Nothing drawn depends on whether it is called.
+pub fn recycle_image(image: Image) {
+    recycle_rgb(image.rgb);
+}
+
+/// [`recycle_image`] for a bare pixel buffer (the warp's snapshot).
+pub(crate) fn recycle_rgb(rgb: Vec<[u8; 3]>) {
+    if rgb.capacity() == 0 {
+        return;
+    }
+    SPARE_RGB.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() < SPARE_FRAMES {
+            s.push(rgb);
+        }
+    });
+}
+
+/// A spare pixel buffer (old contents and all), or an empty one.
+pub(crate) fn take_spare_rgb() -> Vec<[u8; 3]> {
+    SPARE_RGB.with(|s| s.borrow_mut().pop()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -700,11 +769,15 @@ pub fn render_scene_ext_sprited(
     colormap: Option<&[u8]>,
     sprites: &[SpriteInstance],
 ) -> Image {
-    let mut image = Image::new(w, h, [10, 10, 14]);
+    // The frame's buffers, kept across frames (see [`recycle_image`]) and
+    // filled exactly as fresh ones.
+    let mut image = Image::reused(w, h, [10, 10, 14]);
     if w == 0 || h == 0 {
         return image;
     }
-    let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
+    let mut zbuf = ZBUF.with(|z| std::mem::take(&mut *z.borrow_mut()));
+    zbuf.clear();
+    zbuf.resize(w.saturating_mul(h), f32::INFINITY);
     // The turbulent SIN table for liquid warp, built once and shared by the
     // world + brush-submodel passes (sky needs no table).
     let turb = TurbTable::new();
@@ -763,6 +836,7 @@ pub fn render_scene_ext_sprited(
         draw_viewmodel(&mut image, &mut zbuf, bsp, cam, &vm, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
+    ZBUF.with(|z| *z.borrow_mut() = zbuf);
     image
 }
 

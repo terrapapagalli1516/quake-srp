@@ -4,7 +4,9 @@
 //! Source: `WinQuake/console.c` — `Con_Print`, `Con_DrawInput`, `Con_DrawConsole`,
 //! `Con_DrawNotify`.
 
-use crate::draw::{draw_char_scaled, draw_string_scaled, HUD_TRANSPARENT, HUD_VIRT_W, MENU_VIRT_H};
+use crate::draw::{
+    draw_char_scaled, draw_string_scaled, fill_rect, HUD_TRANSPARENT, HUD_VIRT_W, MENU_VIRT_H,
+};
 use crate::menu::realtime_blink_bit;
 use crate::render::Image;
 
@@ -221,23 +223,22 @@ pub fn draw_console(
             if pic.data.len() < pw.saturating_mul(ph) {
                 false
             } else {
+                // The source column of every framebuffer column, once.
+                let cols: Vec<usize> =
+                    (0..image.w).map(|px| ((px * pw) / image.w.max(1)).min(pw - 1)).collect();
                 for py in 0..panel_h {
                     // Map this panel row back to a source texel row (nearest).
                     let sy = (py * ph) / panel_h.max(1);
                     let sy = sy.min(ph - 1);
-                    for px in 0..image.w {
-                        let sx = (px * pw) / image.w.max(1);
-                        let sx = sx.min(pw - 1);
-                        let texel = match pic.data.get(sy * pw + sx) {
-                            Some(&t) => t,
-                            None => continue,
-                        };
+                    let srow = &pic.data[sy * pw..sy * pw + pw];
+                    let row = &mut image.rgb[py * image.w..(py + 1) * image.w];
+                    for (out, &sx) in row.iter_mut().zip(&cols) {
+                        let texel = srow[sx];
                         // conback is fully opaque; index 255 stays transparent
                         // to be safe (matches the other blits).
-                        if texel == HUD_TRANSPARENT {
-                            continue;
+                        if texel != HUD_TRANSPARENT {
+                            *out = palette[texel as usize];
                         }
-                        image.put(px as i32, py as i32, palette[texel as usize]);
                     }
                 }
                 true
@@ -247,12 +248,7 @@ pub fn draw_console(
     };
     if !drew_back {
         // Dark fill fallback so the panel is always visible without a conback.
-        let fill = [10u8, 10, 14];
-        for py in 0..panel_h {
-            for px in 0..image.w {
-                image.put(px as i32, py as i32, fill);
-            }
-        }
+        fill_rect(image, 0, 0, image.w as i64, panel_h as i64, [10, 10, 14]);
     }
 
     // 2 + 3. Text. Without conchars there is nothing to draw the font with.
