@@ -52,8 +52,18 @@
      monitor (non-square pixels, ~1.2x taller than wide). The render target is
      16:10 square-pixel, so we present it in a 4:3 box — the framebuffer is
      stretched vertically 1.2x exactly like a 1996 CRT. Without this the HUD
-     digits/menu/world look horizontally over-wide ("squat"). */
-  canvas { image-rendering:pixelated; width:640px; height:480px; background:#000;
+     digits/menu/world look horizontally over-wide ("squat").
+     How big the box is is the monitor's business, not the engine's: it is the
+     largest 4:3 box the window fits under the header with the status line
+     still in view (--chrome-v: the header, the bezel and the status line, plus
+     a little air; --chrome-h: the bezel and a 16px gutter each side), and
+     never smaller than 640x480 (the page scrolls instead). WinQuake draws the
+     status bar and menus 1:1 in every mode, so at the default 960x600 they
+     are 320 wide: in a fixed 640x480 box they came out a third of the size. */
+  canvas { --chrome-v:168px; --chrome-h:56px;
+    image-rendering:pixelated; background:#000;
+    width:max(640px, min(100vw - var(--chrome-h), (100vh - var(--chrome-v)) * 4 / 3));
+    height:auto; aspect-ratio:4 / 3;
     border:1px solid #333; display:block; cursor:crosshair; }
   #overlay { position:absolute; inset:0; display:flex; flex-direction:column;
     align-items:center; justify-content:center;
@@ -1395,8 +1405,9 @@ async function main() {
   const ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
   // The render resolution is RUNTIME state: Options > Video Options can change
   // it. Track the current backing-store size and re-fit the canvas whenever the
-  // engine reports a different width()/height(). The CSS display size (640x480)
-  // stays fixed, so a larger backing store just gives a crisper pixel-upscale.
+  // engine reports a different width()/height(). The CSS display size (the
+  // largest 4:3 box the window fits, see the canvas rule) does not follow it,
+  // so a larger backing store just gives a crisper pixel-upscale.
   let W = 0, H = 0;
   function syncCanvasSize() {
     const w = exp.width(), h = exp.height();
