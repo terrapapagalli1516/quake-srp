@@ -1224,9 +1224,10 @@ fn face_lightmap<'a>(
 /// by `light_styles`, plus any dynamic lights in `dlights` that reach the face
 /// (`R_AddDynamicLights`). Returns `None` if the face is fullbright.
 ///
-/// A face is fullbright when there is no `lighting` lump, the face has no
-/// lightmap (`lightofs < 0`), the surface is special (sky/liquid — `TEX_SPECIAL`),
-/// or the computed luxel grid would not fit in the remaining `lighting` slice.
+/// `None` (the caller's fallback shade) when there is no `lighting` lump, the
+/// surface is special (sky/liquid — `TEX_SPECIAL`), or the computed luxel grid
+/// would not fit in the remaining `lighting` slice. A normal face without samples
+/// (`lightofs < 0`) gets an all-zero (black) map plus any reaching dlights.
 ///
 /// `light_styles` is the per-style brightness scale (`1.0` == normal,
 /// [`NEUTRAL_LIGHTSTYLE_SCALES`] disables animation). A face's `styles[0..3]`
@@ -1260,35 +1261,29 @@ fn face_lightmap_dyn<'a>(
         return None;
     }
 
-    // FAITHFULNESS (dlight on an unlit face): a NORMAL wall with no baked lightmap
-    // (`lightofs < 0`) is NOT fullbright when a dynamic light reaches it — Quake's
-    // `R_BuildLightMap` clears the block to ambient and `R_AddDynamicLights` adds
-    // onto it (the surface still gets a `blocklights` array). We mirror that: when
-    // such a face has reaching dlights we build a ZERO base and add the lights;
-    // when there are no dlights we keep returning `None` (fullbright), so the
-    // common case is byte-identical to before.
+    // A NORMAL wall with no light samples (`lightofs < 0`: the light tool found
+    // nothing reaching it — hundreds of such faces per id map) is BLACK, not
+    // fullbright: `R_BuildLightMap` clears the block to the ambient
+    // (`r_refdef.ambientlight`, `r_ambient` 0), has no samples to add
+    // (`surf->samples` is NULL), adds any dynamic lights (`R_AddDynamicLights`),
+    // then inverts — so 0 is colormap row 63. We build that zero base, plus the
+    // lights that reach the face.
     if face.lightofs < 0 {
-        if dlights.is_empty() || dlightbits == 0 {
-            return None;
-        }
         let (texmins, extent) = surface_extents(ti, world_poly)?;
         let lmw = (extent[0] / 16 + 1) as usize;
         let lmh = (extent[1] / 16 + 1) as usize;
         let count = lmw.checked_mul(lmh)?;
         let texmins_f = [texmins[0] as f32, texmins[1] as f32];
-        // Pass an EMPTY `static_samples` and a `None` base: `add_dynamic_lights`
-        // lazily materialises a zero-filled buffer (the C "clear to ambient", with
-        // ambient 0) ONLY when a light actually reaches this face, and returns
-        // `None` otherwise. So a far-away dlight leaves the unlit face fullbright
-        // (unchanged), while a reaching one dims/brightens it like the C.
-        let _ = count; // the grid size is implicit in lmw*lmh inside the helper
+        // An EMPTY `static_samples` and a `None` base: `add_dynamic_lights`
+        // materialises the zero ("clear to ambient") buffer only when a light
+        // actually reaches this face, else returns `None` — then it is all zero.
         let no_samples: &[u8] = &[];
-        let luxels = match add_dynamic_lights(
-            bsp, face, ti, texmins_f, lmw, lmh, no_samples, None, dlights, dlightbits,
-        ) {
-            Some(owned) => Luxels::Owned(owned),
-            None => return None,
+        let lit = if dlights.is_empty() || dlightbits == 0 {
+            None
+        } else {
+            add_dynamic_lights(bsp, face, ti, texmins_f, lmw, lmh, no_samples, None, dlights, dlightbits)
         };
+        let luxels = Luxels::Owned(lit.unwrap_or_else(|| vec![0.0; count]));
         return Some(LightMap { luxels, lmw, lmh, texmins: texmins_f });
     }
 
@@ -11208,9 +11203,12 @@ mod tests {
         let (bsp, face, poly) = one_face_bsp(Vec::new(), 0, 0);
         assert!(face_lightmap(&bsp, &face, &poly).is_none());
 
-        // lightofs < 0 -> fullbright.
+        // lightofs < 0 on a normal face -> NOT fullbright: R_BuildLightMap's
+        // zero ("ambient") block, i.e. black (colormap row 63).
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], -1, 0);
-        assert!(face_lightmap(&bsp, &face, &poly).is_none());
+        let lm = face_lightmap(&bsp, &face, &poly).expect("a sample-less face is lit (black)");
+        assert_eq!(lm.factor_at(16.0, 16.0), 0.0);
+        assert_eq!(colormap_row(lm.factor_at(16.0, 16.0)), COLORMAP_ROWS - 1);
 
         // TEX_SPECIAL (sky/liquid) -> fullbright.
         let (bsp, face, poly) = one_face_bsp(vec![200u8; 9], 0, crate::bsp::TEX_SPECIAL);
@@ -11270,19 +11268,17 @@ mod tests {
 
     #[test]
     fn unlit_face_hit_by_dlight_is_not_fullbright() {
-        // FIX 6: a NORMAL wall with no baked lightmap (lightofs < 0) is fullbright
-        // with no dlights, but a reaching dynamic light must build a lightmap (zero
-        // base + the light) instead of staying fullbright.
+        // A NORMAL wall with no baked lightmap (lightofs < 0) is black (zero base)
+        // with no dlights, and a reaching dynamic light adds onto that base.
         let (bsp, face, poly) = one_face_bsp_zplane(0);
         // Force lightofs < 0 (no baked samples) but keep the face NORMAL (flags 0).
         let mut unlit = face.clone();
         unlit.lightofs = -1;
 
-        // With no dlights: fullbright (None).
-        assert!(
-            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0).is_none(),
-            "an unlit face with no dlights stays fullbright"
-        );
+        // With no dlights: all zero (black).
+        let dark = face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0)
+            .expect("an unlit face with no dlights is black, not fullbright");
+        assert_eq!(dark.factor_at(0.0, 0.0), 0.0);
 
         // A bright light 16 units above luxel (0,0): the face is now lightmapped,
         // owning a buffer, bright near the impact and dark (not fullbright) away.
@@ -11297,13 +11293,11 @@ mod tests {
         assert!(near > 0.1, "near the dlight the unlit face lights up: {near}");
         assert!(far < 0.05, "away from the dlight the unlit face is dark, not fullbright: {far}");
 
-        // A far-away dlight that never reaches leaves the face fullbright (None),
-        // so the common case (dlights elsewhere in the level) is unchanged.
+        // A far-away dlight that never reaches leaves the face black.
         let far_dl = DynamicLight::new([0.0, 0.0, 100_000.0], 200.0, 10.0, 0.0, 0.0, 0);
-        assert!(
-            face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl), ALL_DLIGHT_BITS).is_none(),
-            "a non-reaching dlight leaves the unlit face fullbright"
-        );
+        let lm = face_lightmap_dyn(&bsp, &unlit, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&far_dl), ALL_DLIGHT_BITS)
+            .expect("still a (black) lightmap");
+        assert_eq!(lm.factor_at(0.0, 0.0), 0.0, "a non-reaching dlight leaves the unlit face black");
     }
 
     /// `one_face_bsp_zplane` with the face's surfedge/edge/vertex walk wired to

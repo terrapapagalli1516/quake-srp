@@ -108,8 +108,9 @@ Fixed:
 
 Deferred (documented, lower priority / higher risk):
 - ✅ **R_MarkLights BSP dlight gating** (MED) — fixed in the ship push (2026-06-10).
-- ⬜ **No-lightmap face fullbright/black** (MED) — sample-less faces render Lambert
-  instead of row 0 / row 63; narrow (lightless/test maps), golden-sensitive.
+- ✅/⬜ **No-lightmap face fullbright/black** (MED) — sample-less faces (`lightofs
+  -1`) now black like id (Session 7); a map with no lighting lump at all still
+  renders Lambert instead of id's row 0 (lightless/test maps only).
 - ✅ **Intermission view** (MED) — fixed in the ship push (2026-06-10).
 - ⬜ LOWs: client_think pre/post-think order; PF_particle byte count/dir quantize;
   clip_box inopen/plane_dist coords; SV_NewChaseDir integer abs; OP_ADDRESS world
@@ -322,8 +323,8 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 (see the session entry below). The remaining tail, all LOW / niche:
 
-- **No-lightmap face fullbright/black** (MED but narrow — lightless/test maps
-  only, golden-sensitive).
+- **Lightless maps** (no lighting lump): Lambert instead of id's fullbright row 0
+  (narrow; test maps only). Sample-less faces in lit maps: ✅ Session 7.
 - Demo explosion dlight. (~~Sound channel override only dedups within a
   frame~~ — ✅ closed in Session 6: cross-frame (entity,channel) override +
   S_StopSound in the page registry, live + demo.)
@@ -532,6 +533,17 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   perspective: the frame with the gun matches as well as the world-only
   frame (93.96/96.88/98.52 vs 93.95/96.85/98.51); the gun region 99.9%.
   Goldens unchanged (no gun in them).
+- ✅ **Sample-less faces** (class 9) — they are NOT (only) sky/turb: e1m1 has
+  375 world + 211 submodel faces with ordinary textures and `lightofs -1`
+  (e1m2 431/241, e1m3 431/490 — the light tool found no light reaching them),
+  besides its 304 turb + 63 sky faces. The port drew them with its Lambert
+  fallback; `R_BuildLightMap` clears to the ambient (0), has no samples to
+  add, adds dlights and inverts — black. Now the same. None is visible in the
+  oracle's standard views; the e1m1 golden view shows one (a recessed panel
+  edge): that view's region 94.6% → 97.7% against id. Goldens: e1m1
+  `d103ba3f` → `5b29abb8`, e1m3 `ed42c092` → `e3d873f0` (3 px), e1m2
+  unchanged. Still open: a map with no lighting lump renders Lambert, id
+  fullbright.
 
 ## LOW (27)
 
