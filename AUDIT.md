@@ -630,6 +630,13 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
     now, but not id's texel for texel until class 6 is ported.
   - **e1m1's lit frames** also carry the settle ≥ 3 light-style offset of the
     harness (oracle README).
+- ✅ **`R_AddDynamicLights` in the C's integers.** The per-luxel distance
+  took float `sd`/`td` and `min/2`. The C truncates the offsets to `int`,
+  halves with `>> 1` and truncates `(rad - dist)*256` into the 8.8
+  `blocklights`. Now the same. `any_dlight_reaches` keeps a 2-unit margin so
+  it stays conservative. Flash-lit pixels (mip 0 + exact, 320×200) now match
+  83.4% on e1m1 (was 81.8%) and 96.1% on e1m3 (was 95.9%); no row fell.
+  Goldens unchanged.
 
 ## LOW (27)
 

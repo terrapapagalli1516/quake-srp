@@ -201,11 +201,12 @@ pub(super) const ALL_DLIGHT_BITS: u32 = u32::MAX;
 /// the light onto the surface plane (`impact = origin - normal*dist`), map it to
 /// luxel space through the same `texinfo.vecs`/`texmins` the static lightmap
 /// uses, and for each luxel add `rad - dist2` where
-/// `dist2 = max(sd,td) + min(sd,td)/2` is Quake's cheap distance estimate.
+/// `dist2 = max(sd,td) + (min(sd,td) >> 1)` is Quake's cheap distance estimate,
+/// in the C's integers: `sd`/`td` are the luxel offsets truncated to `int`.
 ///
-/// The add is in `0..255` luxel units (the C `(rad-dist)*256` matches `luxel*256`
-/// scaling; here both sides are kept in raw luxel units, so no `*256`). The
-/// `factor_at` clamp bounds the result.
+/// The add is in `0..255` luxel units: the C adds `(rad-dist)*256` to 8.8
+/// `blocklights`, truncated to an integer, so here `trunc((rad-dist)*256)/256`
+/// (exact in `f32`). The `factor_at` clamp bounds the result.
 #[allow(clippy::too_many_arguments)]
 fn add_dynamic_lights(
     bsp: &Bsp,
@@ -287,14 +288,16 @@ fn add_dynamic_lights(
         });
 
         for t in 0..lmh {
-            let td = (local1 - t as f32 * 16.0).abs();
+            // C: `td = local[1] - t*16;` into an int (truncation), then abs.
+            let td = ((local1 - (t * 16) as f32) as i32).abs();
             for s in 0..lmw {
-                let sd = (local0 - s as f32 * 16.0).abs();
-                let dist2 = if sd > td { sd + td * 0.5 } else { td + sd * 0.5 };
+                let sd = ((local0 - (s * 16) as f32) as i32).abs();
+                let dist2 = if sd > td { sd + (td >> 1) } else { td + (sd >> 1) } as f32;
                 if dist2 < reach {
                     let idx = t * lmw + s;
                     if let Some(cell) = buffer.get_mut(idx) {
-                        *cell += rad - dist2;
+                        // C: `blocklights[i] += (rad - dist)*256;` (unsigned).
+                        *cell += ((rad - dist2) * 256.0) as u32 as f32 / 256.0;
                     }
                 }
             }
@@ -801,11 +804,12 @@ thread_local! {
 /// luxel of receives light bakes to exactly its unlit block, so skipping it is
 /// output-identical and saves the rebake — the only purpose of the extent test.
 /// Conservative at the rim: the extent is the luxel grid's quantized bounds and
-/// the distance is the continuous minimum (the port-wide f32 convention; the C
-/// truncates `sd`/`td` to int), so a light is never declared "not reaching"
-/// when `add_dynamic_lights` would contribute; a missing plane or texinfo falls
-/// back to `false`/plane-only (no light is folded without a plane; without
-/// texinfo stay conservative).
+/// the distance is the continuous minimum, less 2 units — `add_dynamic_lights`
+/// truncates `sd`/`td` to integers and halves the smaller with `>> 1`, which
+/// shortens a luxel's distance by less than 2 — so a light is never declared
+/// "not reaching" when `add_dynamic_lights` would contribute; a missing plane
+/// or texinfo falls back to `false`/plane-only (no light is folded without a
+/// plane; without texinfo stay conservative).
 pub(super) fn any_dlight_reaches(
     bsp: &Bsp,
     face: &crate::bsp::DFace,
@@ -902,7 +906,7 @@ pub(super) fn any_dlight_reaches(
         let sd = (smin - ls).max(ls - smax).max(0.0);
         let td = (tmin - lt).max(lt - tmax).max(0.0);
         let dist2 = if sd > td { sd + td * 0.5 } else { td + sd * 0.5 };
-        if dist2 < rad - dl.minlight {
+        if dist2 - 2.0 < rad - dl.minlight {
             return true;
         }
     }
@@ -1173,6 +1177,24 @@ mod tests {
         // -> no add, stays at the static value.
         let far = lm.factor_at(32.0, 32.0);
         assert!((far - static_factor).abs() < 1e-4, "far luxel must be unchanged: {far} vs {static_factor}");
+    }
+
+    #[test]
+    fn dynamic_light_uses_the_c_integer_distances() {
+        // R_AddDynamicLights: `sd`/`td` truncated to int, the smaller halved with
+        // `>> 1`, and `(rad - dist)*256` truncated into 8.8 blocklights.
+        let (bsp, face, poly) = one_face_bsp_zplane(100);
+        // 10 units above impact (5.7, 21.9): rad = 60 - 10 = 50.
+        let dl = DynamicLight::new([5.7, 21.9, 10.0], 60.0, 10.0, 0.0, 0.0, 0);
+        let lm = face_lightmap_dyn(&bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), ALL_DLIGHT_BITS)
+            .expect("lightmap present");
+        assert_eq!((lm.lmw, lm.texmins), (3, [0.0, 0.0]), "fixture layout");
+        let Luxels::Owned(v) = &lm.luxels else { panic!("a reaching light owns the buffer") };
+        // Luxel (0,0): sd = 5, td = 21 -> dist 21 + (5 >> 1) = 23 -> +27
+        // (the float estimate would give 24.75 -> +25.25).
+        assert_eq!(v[0], 127.0);
+        // Luxel (1,1): sd = |trunc(-10.3)| = 10, td = trunc(5.9) = 5 -> 10 + 2 = 12 -> +38.
+        assert_eq!(v[4], 138.0);
     }
 
     #[test]
