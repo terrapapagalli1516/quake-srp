@@ -346,12 +346,13 @@ pub extern "C" fn boot() -> i32 {
         if let Some(w) = w {
             a.walk = Some(w);
             a.mode = 0;
-            // Quake boots INTO the menu over the e1m1 frame. Reset the menu's
-            // NAVIGATION (closed, main screen, cursor 0) and open it over the
-            // walk — but KEEP the player's options, key rebinds, and slot
-            // comments: in the C a map start never touches cvars/keybindings
-            // (they're host state), so re-booting must not wipe them.
-            a.menu.reset_nav();
+            // Quake boots INTO the menu over the e1m1 frame. A program start's
+            // NAVIGATION (closed, main screen, every cursor 0: menu.c's statics)
+            // and the menu opened over the walk — but KEEP the player's options,
+            // key rebinds, and slot comments: in the C a map start never touches
+            // cvars/keybindings (they're host state), so re-booting must not
+            // wipe them.
+            a.menu.reset_boot();
             a.menu.open();
             // PRESERVE the player's chosen resolution across the re-boot: keep the
             // current framebuffer size (the source of truth) and point the fresh
@@ -381,7 +382,8 @@ pub extern "C" fn boot_demo() -> i32 {
             // The demo button plays the demo with the menu CLOSED (clean
             // playback). `boot_attract` is the variant that opens the menu over it.
             // Navigation-only reset: options/bindings/slot comments survive (the
-            // C never resets cvars or keybindings on a mode change). PRESERVE the
+            // C never resets cvars or keybindings on a mode change). The menu
+            // cursors too (menu.c's statics; playdemo keeps them). PRESERVE the
             // chosen resolution too (keep the live framebuffer) and point the
             // menu's current video mode at it so it's correct when the player
             // next opens Video Options.
@@ -417,7 +419,8 @@ pub extern "C" fn boot_attract() -> i32 {
             // menu's current video mode to it. On the very first load the
             // framebuffer is at DEFAULT; the page then restores any saved
             // resolution over it.
-            a.menu.reset_nav();
+            // The page's load is the program start: every cursor 0.
+            a.menu.reset_boot();
             a.menu.open();
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
@@ -456,6 +459,40 @@ mod tests {
         menu_bind_key, menu_cancel, menu_down, menu_right, menu_select, menu_up, menu_visible,
     };
     use crate::test_util::*;
+
+    /// menu.c's cursors are statics: `map`, New Game, a load and a demo keep
+    /// them (Escape afterwards reopens Main on "Options" and Options on its
+    /// row); only a program start — the page's load and walk button, `boot` —
+    /// has them at 0.
+    #[test]
+    fn only_a_boot_resets_the_menu_cursors() {
+        let cursor = || APP.with(|c| c.borrow().as_ref().unwrap().menu.cursor());
+        assert_eq!(boot(), 1);
+        menu_down();
+        menu_down();
+        menu_select(); // Options
+        for _ in 0..3 {
+            menu_down();
+        }
+        menu_cancel(); // Main, on "Options"
+        menu_cancel(); // closed
+        crate::host_cmd::execute_console_command("map e1m2");
+        menu_cancel(); // Escape: M_Menu_Main_f
+        assert_eq!(cursor(), 2, "m_main_cursor survives `map`");
+        menu_select();
+        assert_eq!(cursor(), 3, "options_cursor survives `map`");
+        menu_cancel();
+        menu_cancel();
+        assert_eq!(boot_demo(), 1);
+        menu_cancel();
+        assert_eq!(cursor(), 2, "and the demo");
+        assert_eq!(boot(), 1);
+        assert_eq!(cursor(), 0, "a program start");
+        menu_down();
+        menu_down();
+        menu_select();
+        assert_eq!(cursor(), 0);
+    }
 
     #[test]
     fn options_and_rebinds_survive_reboot_and_new_game() {
