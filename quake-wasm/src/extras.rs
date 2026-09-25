@@ -14,6 +14,7 @@
 //! |---|---|---|
 //! | `wasm_uncapped` | 0 | a host frame every display refresh, without `Host_FilterTime`'s 72 fps cap (`host::step`) |
 //! | `wasm_showfps` | 0 | QuakeWorld's `SCR_DrawFPS` frame-rate readout (`host::step`, `render::draw_fps`) |
+//! | `wasm_scaled2d` | 0 | the 2-D layer blown up from 320x200 to fill the frame, where id draws it 1:1 at every resolution ([`quake_rs::draw::set_scaled_2d`], applied by `host::step`) |
 //! | `wasm_exactpersp` | 0 | exact perspective at every pixel of walls and liquids, where id's renderer is exact every 16 pixels and affine in between (`D_DrawSpans16`, `Turbulent8`); [`quake_rs::render::RenderOptions::exact_perspective`] |
 
 use std::cell::Cell;
@@ -47,7 +48,7 @@ pub(crate) fn help_lines() -> impl Iterator<Item = String> {
 
 thread_local! {
     static FRAME_EXTRAS: Cell<render::Extras> = const {
-        Cell::new(render::Extras { uncapped: false, show_fps: false, exact_persp: false })
+        Cell::new(render::Extras { uncapped: false, show_fps: false, exact_persp: false, scaled_2d: false })
     };
 }
 

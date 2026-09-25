@@ -123,10 +123,12 @@ pub extern "C" fn set_viewsize(v: f32) {
 /// The "scaled 2-D" extra (not id; off by default): `1` draws the status bar,
 /// menus, console and text as id's 320x200 screen blown up to fill the
 /// framebuffer, `0` at their own pixel size as WinQuake does in every mode
-/// ([`quake_rs::draw::set_scaled_2d`]). For the page's extras; takes effect
-/// on the next frame.
+/// ([`quake_rs::draw::set_scaled_2d`]). The Web extras row `wasm_scaled2d`
+/// (bit 8 of `extras`/`set_extras`) is the same switch: the menu holds the
+/// value and `host::step` applies it each frame; takes effect on the next frame.
 #[no_mangle]
 pub extern "C" fn set_scaled_2d(on: i32) {
+    ensure_app(|a| a.menu.set_extra(quake_rs::render::Extra::Scaled2d, on != 0));
     quake_rs::draw::set_scaled_2d(on != 0);
 }
 

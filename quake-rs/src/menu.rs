@@ -86,6 +86,10 @@ pub struct Extras {
     /// `wasm_exactpersp`: textured walls and liquids with exact perspective
     /// at every pixel instead of id's 16-pixel affine spans.
     pub exact_persp: bool,
+    /// `wasm_scaled2d`: the 2-D layer (status bar, menus, console, text)
+    /// blown up from a 320x200 screen to fill the frame, instead of id's 1:1
+    /// pixels at every resolution ([`crate::draw::set_scaled_2d`]).
+    pub scaled_2d: bool,
 }
 
 /// One Web extra (a row of [`WEB_EXTRAS`]).
@@ -94,18 +98,27 @@ pub enum Extra {
     Uncapped,
     ShowFps,
     ExactPersp,
+    Scaled2d,
 }
 
 impl Extras {
     /// The bits the page stores (the `extras`/`set_extras` exports):
-    /// 1 uncapped, 2 show FPS, 4 exact perspective.
+    /// 1 uncapped, 2 show FPS, 4 exact perspective, 8 scaled 2-D.
     pub fn bits(self) -> u32 {
-        self.uncapped as u32 | (self.show_fps as u32) << 1 | (self.exact_persp as u32) << 2
+        self.uncapped as u32
+            | (self.show_fps as u32) << 1
+            | (self.exact_persp as u32) << 2
+            | (self.scaled_2d as u32) << 3
     }
 
     /// The inverse of [`Extras::bits`]; unknown bits are ignored.
     pub fn from_bits(bits: u32) -> Extras {
-        Extras { uncapped: bits & 1 != 0, show_fps: bits & 2 != 0, exact_persp: bits & 4 != 0 }
+        Extras {
+            uncapped: bits & 1 != 0,
+            show_fps: bits & 2 != 0,
+            exact_persp: bits & 4 != 0,
+            scaled_2d: bits & 8 != 0,
+        }
     }
 
     /// Whether `e` is on.
@@ -114,6 +127,7 @@ impl Extras {
             Extra::Uncapped => self.uncapped,
             Extra::ShowFps => self.show_fps,
             Extra::ExactPersp => self.exact_persp,
+            Extra::Scaled2d => self.scaled_2d,
         }
     }
 
@@ -123,6 +137,7 @@ impl Extras {
             Extra::Uncapped => self.uncapped = on,
             Extra::ShowFps => self.show_fps = on,
             Extra::ExactPersp => self.exact_persp = on,
+            Extra::Scaled2d => self.scaled_2d = on,
         }
     }
 }
@@ -146,7 +161,7 @@ pub struct WebExtra {
 /// THE table of the port's opt-in extras, in Extras-page order: the page's
 /// rows and the console's `wasm_*` variables are both read from it, and
 /// their values are the menu's [`Extras`].
-pub const WEB_EXTRAS: [WebExtra; 3] = [
+pub const WEB_EXTRAS: [WebExtra; 4] = [
     WebExtra {
         extra: Extra::Uncapped,
         cvar: "wasm_uncapped",
@@ -167,6 +182,13 @@ pub const WEB_EXTRAS: [WebExtra; 3] = [
         label: "     Exact perspective",
         help: ["Perspective exact at every pixel,", "not id's 16-pixel spans"],
         summary: "exact persp.",
+    },
+    WebExtra {
+        extra: Extra::Scaled2d,
+        cvar: "wasm_scaled2d",
+        label: "      Scaled 2-D layer",
+        help: ["Status bar, menus and text blown", "up from 320x200 to fill the screen"],
+        summary: "scaled 2-D layer",
     },
 ];
 
@@ -3095,22 +3117,22 @@ mod tests {
 
     #[test]
     fn web_extras_bits_round_trip() {
-        for bits in 0..8u32 {
+        for bits in 0..16u32 {
             let e = Extras::from_bits(bits);
-            assert_eq!(e.bits(), bits, "bits {bits:03b}");
-            let rows = [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp];
+            assert_eq!(e.bits(), bits, "bits {bits:04b}");
+            let rows = [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp, Extra::Scaled2d];
             for (i, x) in rows.into_iter().enumerate() {
                 assert_eq!(e.get(x), bits & (1 << i) != 0, "bit {i} is {x:?}");
             }
         }
-        assert_eq!(Extras::from_bits(0xffff_fff8), Extras::default(), "unknown bits are ignored");
-        assert_eq!(MenuScreen::Extras.item_count(), 3);
+        assert_eq!(Extras::from_bits(0xffff_fff0), Extras::default(), "unknown bits are ignored");
+        assert_eq!(MenuScreen::Extras.item_count(), 4);
     }
 
     #[test]
     fn web_extras_table_lists_each_extra_once_in_the_page_idiom() {
         let extras: Vec<Extra> = WEB_EXTRAS.iter().map(|w| w.extra).collect();
-        assert_eq!(extras, [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp], "bit order");
+        assert_eq!(extras, [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp, Extra::Scaled2d], "bit order");
         for w in &WEB_EXTRAS {
             assert!(w.cvar.starts_with("wasm_"), "{}: not an id name", w.cvar);
             assert_eq!(w.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", w.cvar);
