@@ -132,7 +132,7 @@ fn census_e1m8_has_low_gravity() {
     assert!((vz + 10.0).abs() < 1.0, "one 0.1 s frame of sv_gravity 100 gives vz -10, got {vz}");
 }
 
-/// CENSUS F4 (MED). External brush-model items (`maps/b_*.bsp`) get the
+/// CENSUS F5 (MED). External brush-model items (`maps/b_*.bsp`) get the
 /// Mod_LoadSubmodels pixel spread ONCE: b_explob.bsp's raw (1,1,1)-(31,31,63)
 /// becomes (0,0,0)-(32,32,64). The port spreads twice (Bsp::parse, then the
 /// server's precache_model), so the boxes are 34 units wide — traces use hull2
@@ -140,7 +140,7 @@ fn census_e1m8_has_low_gravity() {
 /// 10-health box at (1224,2464,-304) ("Bonus item fell out of level"; id's
 /// oracle keeps it), the e1m1 explosive box floats 2 units up.
 #[test]
-#[ignore = "census F4: b_*.bsp item bounds are pixel-spread twice"]
+#[ignore = "census F5: b_*.bsp item bounds are pixel-spread twice"]
 fn census_bmodel_item_bounds_are_spread_once() {
     let w = build_walk().expect("e1m1 boots");
     let bx = find(&w, |w, e| class(w, e) == "misc_explobox").expect("e1m1 has an explosive box");
@@ -158,14 +158,14 @@ fn census_bmodel_item_bounds_are_spread_once() {
     assert!(health.is_some(), "the 10-health box at (1224, 2464) survives PlaceItem's droptofloor");
 }
 
-/// CENSUS F5 (MED). The level start relinks every entity with touches: the
+/// CENSUS F8 (MED). The level start relinks every entity with touches: the
 /// player's PutClientInServer -> spawn_tdeath sets `force_retouch = 2`, and
 /// SV_Physics does `if (pr_global_struct->force_retouch) SV_LinkEdict (ent,
 /// true)` for every edict for two frames. An ogre standing in e1m6's door *31
 /// trigger field therefore opens it at once (id's oracle: the door has moved 30
 /// units by sv.time 1.7). The port has no force_retouch; the door stays shut.
 #[test]
-#[ignore = "census F5: force_retouch is not modelled (level-start doors stay shut)"]
+#[ignore = "census F8: force_retouch is not modelled (level-start doors stay shut)"]
 fn census_force_retouch_opens_e1m6_start_door() {
     let mut w = build_walk_map("maps/e1m6.bsp").expect("e1m6 boots");
     while w.server.time() < 1.7 {
@@ -209,7 +209,7 @@ fn census_player_netname_is_player() {
     assert_eq!(w.server.vm.ent_get_string(w.player, "netname"), "player");
 }
 
-/// CENSUS F8 (HIGH). A weapon key pressed while the weapon is cooling down is
+/// CENSUS F4 (HIGH). A weapon key pressed while the weapon is cooling down is
 /// honoured when the cooldown ends: SV_ReadClientMove only ever SETS
 /// `v.impulse` (`if (i) host_client->edict->v.impulse = i;`), QC W_WeaponFrame
 /// returns early `if (time < self.attack_finished)`, and ImpulseCommands clears
@@ -218,7 +218,7 @@ fn census_player_netname_is_player() {
 /// e.g. switching away from the rocket launcher (or while holding fire with
 /// the nailgun/thunderbolt).
 #[test]
-#[ignore = "census F8: impulses pressed during a weapon cooldown are dropped"]
+#[ignore = "census F4: impulses pressed during a weapon cooldown are dropped"]
 fn census_weapon_switch_survives_the_cooldown() {
     let mut w = build_walk().expect("e1m1 boots");
     for _ in 0..5 {
@@ -252,12 +252,12 @@ fn census_weapon_switch_survives_the_cooldown() {
     );
 }
 
-/// CENSUS F9 (MED). The runes show on the status bar: SV_WriteClientdataToMessage
+/// CENSUS F10 (MED). The runes show on the status bar: SV_WriteClientdataToMessage
 /// sends `items = ent->v.items | (serverflags << 28)` and Sbar_DrawInventory
 /// draws sigil i when `cl.items & (1<<(28+i))`. QC `sigil_touch` only ORs
 /// `serverflags`. The live HUD is built from the bare `items` field.
 #[test]
-#[ignore = "census F9: rune (sigil) icons never reach the live status bar"]
+#[ignore = "census F10: rune (sigil) icons never reach the live status bar"]
 fn census_rune_icons_reach_the_status_bar() {
     let mut w = build_walk_map("maps/e1m7.bsp").expect("e1m7 boots");
     for _ in 0..3 {

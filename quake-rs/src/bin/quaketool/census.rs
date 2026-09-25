@@ -7,16 +7,21 @@
 //!
 //! 1. idle 3 s (trains start, lights animate, monsters idle);
 //! 2. god mode + `impulse 9` (all weapons/ammo, like the console cheat);
-//! 3. wake every monster (`enemy = player; FoundTarget()`), fight for 20 s;
-//! 4. kill every monster through QuakeC `T_Damage` — odd ones exactly
+//! 3. a duel with one monster of each kind: the player on the floor 96 units
+//!    in front of it, in its line of sight, for 8 s — every shareware attack
+//!    runs (the duellist is killed afterwards so it does not follow);
+//! 4. wake every other monster (`enemy = player; FoundTarget()`), 20 s;
+//! 5. kill every monster through QuakeC `T_Damage` — odd ones exactly
 //!    (normal death), even ones by 1000 (gibs);
-//! 5. touch every item/weapon/key/powerup (the `touch` SV_TouchLinks would call);
-//! 6. three passes over every trigger / button / door: put the player at its
-//!    centre and call its `touch`, damage every shootable brush model, then let
-//!    the world run 3 s — enough for multi-step sequences (Chthon's three
-//!    lightning hits, counters, secret doors);
-//! 7. finally the exit: touch `trigger_changelevel`, hold fire after 5.5 s so
-//!    `ExitIntermission` runs (twice, for the episode-end finale).
+//! 6. touch every item/weapon/key/powerup (the `touch` SV_TouchLinks would
+//!    call; the keys `impulse 9` gave are taken back first);
+//! 7. e1m7 only: Chthon — raise both electrodes, press the lightning button,
+//!    three times;
+//! 8. three passes over every trigger / button / door: call its `touch` with
+//!    the player as `other`, damage every shootable, then let the world run
+//!    3 s — enough for multi-step sequences (counters, relays, secret doors);
+//! 9. finally the exit: touch `trigger_changelevel`, hold fire after 6 s so
+//!    `ExitIntermission` runs (twice at an episode end, for the finale).
 //!
 //! It records what a faithfulness census needs: spawn-function coverage,
 //! QuakeC faults (think/spawn errors, `error`/`objerror`/`dprint` text), every
@@ -148,7 +153,6 @@ fn call_qc(server: &mut Server, name: &str, self_e: i32, other: i32, args: &[Arg
 enum Arg {
     Ent(i32),
     F(f32),
-    V([f32; 3]),
 }
 
 fn call_fnum(server: &mut Server, f: usize, self_e: i32, other: i32, args: &[Arg]) -> Result<(), String> {
@@ -162,7 +166,6 @@ fn call_fnum(server: &mut Server, f: usize, self_e: i32, other: i32, args: &[Arg
         match *a {
             Arg::Ent(e) => vm.set_gi(ofs, e),
             Arg::F(x) => vm.set_gf(ofs, x),
-            Arg::V(v) => vm.set_gv(ofs, v),
         }
     }
     vm.argc = args.len();
@@ -243,7 +246,8 @@ fn frame(server: &mut Server, pak: &Pak, run: &mut Run, cmd: &UserCmd) {
     run.frames += 1;
     let after = server.vm.ent_get_vector(player, "origin");
     let jump = ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
-    if jump > 64.0 {
+    // A teleport: a big move that set fixangle (teleport_touch does both).
+    if jump > 64.0 && server.vm.ent_get_float(player, "fixangle") != 0.0 {
         let ang = server.vm.ent_get_vector(player, "angles");
         let fixangle = server.vm.ent_get_float(player, "fixangle");
         run.teleports.push(format!(
@@ -293,8 +297,49 @@ fn idle(server: &mut Server, pak: &Pak, run: &mut Run, secs: f32, buttons: i32) 
     }
 }
 
+/// `PF_setorigin` through the engine's own builtin (origin + SV_LinkEdict).
+/// (A builtin cannot be the VM's entry function, so call the table slot.)
 fn set_origin(server: &mut Server, e: i32, org: [f32; 3]) {
-    let _ = call_qc(server, "setorigin", e, e, &[Arg::Ent(e), Arg::V(org)]);
+    let vm = &mut server.vm;
+    vm.set_gi(OFS_PARM0, e);
+    vm.set_gv(OFS_PARM0 + 3, org);
+    vm.argc = 2;
+    let f = vm.builtins[2];
+    let _ = f(vm);
+}
+
+
+fn point_contents(server: &mut Server, p: [f32; 3]) -> f32 {
+    let vm = &mut server.vm;
+    vm.set_gv(OFS_PARM0, p);
+    vm.argc = 1;
+    let f = vm.builtins[41];
+    let _ = f(vm);
+    vm.gf(quake_rs::progs::OFS_RETURN)
+}
+
+/// `traceline(a, b, TRUE, ignore)` through the engine's builtin; true when
+/// nothing solid lies between (trace_fraction == 1).
+fn trace_clear(server: &mut Server, a: [f32; 3], b: [f32; 3], ignore: i32) -> bool {
+    let vm = &mut server.vm;
+    vm.set_gv(OFS_PARM0, a);
+    vm.set_gv(OFS_PARM0 + 3, b);
+    vm.set_gf(OFS_PARM0 + 6, 1.0);
+    vm.set_gi(OFS_PARM0 + 9, ignore);
+    vm.argc = 4;
+    let f = vm.builtins[16];
+    let _ = f(vm);
+    vm.gget_float("trace_fraction") >= 1.0
+}
+
+/// `droptofloor()` for `e` through the engine's builtin; true on success.
+fn drop_to_floor(server: &mut Server, e: i32) -> bool {
+    let vm = &mut server.vm;
+    vm.gset_int("self", e);
+    vm.argc = 0;
+    let f = vm.builtins[34];
+    let _ = f(vm);
+    vm.gf(quake_rs::progs::OFS_RETURN) != 0.0
 }
 
 fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Result<(), String> {
@@ -391,6 +436,86 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
         .filter(|&e| live(&server, e) && (server.vm.ent_get_float(e as i32, "flags") as i32) & FL_MONSTER != 0)
         .map(|e| e as i32)
         .collect();
+    // 3b. a duel with one monster of each kind: put the player 96 units in
+    // front of it (the first direction whose spot is open), face it, and let
+    // it attack for 8 s — every shareware attack (grunt shots, dog bite, ogre
+    // grenades/chainsaw, zombie gib throws, scrag spit, knight sword, fiend
+    // leap, shambler lightning/claws) runs through QuakeC at least once.
+    let mut kinds: BTreeMap<String, i32> = BTreeMap::new();
+    for &m in &monsters {
+        if live(&server, m as usize) && server.vm.ent_get_float(m, "health") > 0.0 {
+            kinds.entry(server.vm.ent_get_string(m, "classname")).or_insert(m);
+        }
+    }
+    for (kind, m) in &kinds {
+        let m = *m;
+        if !live(&server, m as usize) || server.vm.ent_get_float(m, "health") <= 0.0 {
+            continue;
+        }
+        let mo = server.vm.ent_get_vector(m, "origin");
+        let mut spot = None;
+        for k in 0..8 {
+            let a = (k as f32 * 45.0).to_radians();
+            let p = [mo[0] + 96.0 * a.cos(), mo[1] + 96.0 * a.sin(), mo[2] + 8.0];
+            let eye = [mo[0], mo[1], mo[2] + 16.0];
+            if point_contents(&mut server, p) == -1.0 && trace_clear(&mut server, eye, p, m) {
+                // Settle the player's hull onto the floor there (PF_droptofloor
+                // fails if the hull starts solid, which SV_CheckStuck would
+                // otherwise undo by snapping back to oldorigin).
+                set_origin(&mut server, player, p);
+                if drop_to_floor(&mut server, player) {
+                    let q = server.vm.ent_get_vector(player, "origin");
+                    server.vm.ent_set_vector(player, "oldorigin", q);
+                    spot = Some(q);
+                    break;
+                }
+            }
+        }
+        let Some(p) = spot else {
+            let _ = writeln!(o, "duel {kind}: no open spot next to it");
+            continue;
+        };
+        set_origin(&mut server, player, p);
+        let yaw = (mo[1] - p[1]).atan2(mo[0] - p[0]).to_degrees();
+        server.vm.ent_set_int(m, "enemy", player);
+        let _ = call_qc(&mut server, "FoundTarget", m, player, &[]);
+        let te_before: BTreeMap<u8, usize> = run.te.clone();
+        let snd_before: BTreeMap<String, usize> = run.sounds.iter().map(|(k, v)| (k.clone(), v.0)).collect();
+        let cmd = UserCmd { yaw, ..Default::default() };
+        for _i in 0..80 {
+            set_origin(&mut server, player, p); // stand still where we were put
+            frame(&mut server, pak, &mut run, &cmd);
+            if std::env::var("CENSUS_DUEL").as_deref() == Ok(kind.as_str()) {
+                let th = server.vm.ent_get_int(m, "think");
+                let fname = server.vm.progs.functions.get(th as usize).map(|f| server.vm.progs.string(f.s_name).to_string());
+                eprintln!("{_i} {:?} org {:?} enemy {} health {} player {:?} psolid {} pmove {} p {:?}", fname, server.vm.ent_get_vector(m, "origin"), server.vm.ent_get_int(m, "enemy"), server.vm.ent_get_float(m, "health"), server.vm.ent_get_vector(player, "origin"), server.vm.ent_get_float(player, "solid"), server.vm.ent_get_float(player, "movetype"), p);
+            }
+        }
+        let te: Vec<String> = run
+            .te
+            .iter()
+            .filter(|(k, v)| te_before.get(k).copied().unwrap_or(0) < **v)
+            .map(|(k, v)| format!("TE{k}x{}", v - te_before.get(k).copied().unwrap_or(0)))
+            .collect();
+        let snd: Vec<String> = run
+            .sounds
+            .iter()
+            .filter(|(k, v)| snd_before.get(*k).copied().unwrap_or(0) < v.0 && !k.starts_with("player/"))
+            .map(|(k, _)| k.clone())
+            .collect();
+        // Kill it so it does not follow the player into the next duel.
+        if live(&server, m as usize) && server.vm.ent_get_float(m, "health") > 0.0 {
+            let _ = call_qc(&mut server, "T_Damage", m, player, &[Arg::Ent(m), Arg::Ent(player), Arg::Ent(player), Arg::F(1000.0)]);
+        }
+        let _ = writeln!(
+            o,
+            "duel {kind}#{m}: faults so far {}, temp ents [{}], sounds [{}]",
+            run.think_errors.len(),
+            te.join(" "),
+            snd.join(" ")
+        );
+    }
+
     let mut wake_err = 0;
     for &m in &monsters {
         server.vm.ent_set_int(m, "enemy", player);
@@ -444,9 +569,11 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
         .collect();
     let mut item_err = 0;
     for &it in &items {
+        // Call the touch SV_TouchLinks would call. The player is NOT moved
+        // there: a trigger/item centre is often inside a mover's path, where
+        // the pusher would be blocked by the player (plat_crush) and
+        // SV_CheckStuck would snap the player back anyway.
         let f = server.vm.ent_get_int(it, "touch") as usize;
-        let c = center(&server, it);
-        set_origin(&mut server, player, c);
         if call_fnum(&mut server, f, it, player, &[]).is_err() {
             item_err += 1;
         }
@@ -563,8 +690,6 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
                 continue;
             }
             if touch > 0 && (solid == SOLID_TRIGGER || solid == SOLID_BSP) {
-                let c = center(&server, t);
-                set_origin(&mut server, player, c);
                 if call_fnum(&mut server, touch as usize, t, player, &[]).is_err() {
                     trig_err += 1;
                     run.think_errors.push(format!("touch of {class}#{t} faulted"));
@@ -622,7 +747,7 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
     for e in run.think_errors.iter().take(12) {
         let _ = writeln!(o, "  {e}");
     }
-    let _ = writeln!(o, "fixangle set on the player in {} frames; big player jumps:", run.fixangle_seen);
+    let _ = writeln!(o, "fixangle set on the player in {} frames; teleports (big moves that set fixangle):", run.fixangle_seen);
     for t in run.teleports.iter().take(12) {
         let _ = writeln!(o, "  {t}");
     }
