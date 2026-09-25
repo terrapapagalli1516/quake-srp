@@ -90,62 +90,69 @@ the steady eye. (The port's live path starts `oldz` at the origin, so its first
 
 ## Results (320x200 unless stated, 2026-09-25)
 
-After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below)
-and the mip levels and lightmap stepping (branch `quake/w2a`: classes 1 and 6); see
-`AUDIT.md`. The numbers before them are in the git history of this file.
+After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below),
+the mip levels and lightmap stepping (branch `quake/w2a`: classes 1 and 6), and the
+pixel aspect, id's 16-pixel spans and the screen-centred sky (branch `quake/w2b`:
+class 7, class 4's open note); see `AUDIT.md`. The numbers before them are in the
+git history of this file.
 
-Headline — id's C as written (`D_DrawSpans8`, its own mip levels) vs the port:
+The port draws what DOS/Windows players saw: the x86 build's `D_DrawSpans16`. So the
+headline compares it with id's renderer set to the same (`--spans 16`); the oracle's
+default is still id's portable C as written (`D_DrawSpans8`), last column.
 
-| map | world exact% | with entities | entity pixels exact% | 640x480 world |
-|---|---:|---:|---:|---:|
-| e1m1 | 97.44 | 97.44 | 100.0 (15 px) | 99.20 |
-| e1m2 | 97.12 | 97.12 | 100.0 (357 px) | 98.77 |
-| e1m3 | 99.16 | 99.16 | 98.2 (221 px) | 99.30 |
-| e1m7 | 94.96 | 94.96 | 100.0 (54 px) | 98.77 |
+| map | `--spans 16` world exact% | with entities | entity pixels exact% | 640x480 world | 640x400 at the page's 4:3 aspect | `--spans 8` (default) world |
+|---|---:|---:|---:|---:|---:|---:|
+| e1m1 | 99.96 | 99.96 | 100.0 (15 px) | 99.97 | 100.00 | 94.57 |
+| e1m2 | 99.21 | 99.21 | 100.0 (357 px) | 99.97 | 100.00 | 96.09 |
+| e1m3 | 99.98 | 99.98 | 100.0 (239 px) | 99.99 | 100.00 | 97.27 |
+| e1m7 | 99.91 | 99.91 | 100.0 (54 px) | 99.94 | 100.00 | 91.72 |
 
-(Before classes 1 and 6: 84.76 / 64.07 / 65.83 / 75.65 world, 90.79 / 78.19 /
-90.74 / 94.55 at 640x480.) What remains here is almost all class 7, id's 8-pixel
-affine segments: against id's exact per-pixel perspective the port scores 99.94 /
-99.18 / 99.98 / 99.91. The entity-pixel column counts the world pixels around and
-behind an entity too. nonpal% is 0 in every case (was up to 0.45).
+(Before the 16-pixel spans, on the same base: 92.84 / 94.36 / 96.56 / 87.20 against
+`--spans 16`, 97.44 / 97.12 / 99.16 / 94.96 against `--spans 8`. Before classes 1
+and 6: 84.76 / 64.07 / 65.83 / 75.65 against `--spans 8`.) Against `--spans 8` what
+remains is id's portable C's 8-pixel segments against the port's 16 (class 7). The
+e1m2 row's 0.8% is one face at a finer mip in id than its geometry gives (class 1's
+open note). The entity-pixel column counts the world pixels around and behind an
+entity too. nonpal% is 0 in every case (was up to 0.45).
+
+**Pixel aspect** (`--aspect 0.8333333`: id's 16:10 modes on a 4:3 monitor, which
+is how the browser page shows every preset). 320x200 against `--spans 16`: 100.00 /
+98.73 / 100.00 / 100.00, entity pixels 100% everywhere; at viewsize 100 (the view
+above the status bar, `--viewsize 100`) 100.00 / 99.46 / 100.00 / 100.00. Before
+the port's projection took the aspect it scored 31.35 / 26.90 / 20.23 / 14.23
+against id's 4:3 frame (then with id at mip 0 and exact perspective).
 
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
-1432.386,1397.978,233.254,9.344,-103.449,0`) scores 98.58% world / 98.60% with
-entities, its entity pixels 100.00% (788 px). With the viewmodel drawn
-(`--viewmodel --settle 3`), e1m1 scores 95.63%, the same as the world-only frame at
-that settle. At a settle of 3 or more e1m1's
+1432.386,1397.978,233.254,9.344,-103.449,0`, `--spans 16`) scores 99.99% world and
+with entities, its entity pixels 100.00% (788 px; 664 px, 100%, at the page's
+aspect). With the viewmodel drawn (`--viewmodel --settle 3`), e1m1 scores 98.07%,
+the same as the world-only frame at that settle. At a settle of 3 or more e1m1's
 far arch differs for a harness reason: id's light styles in that frame (its
 `.json`) are the ones the port derives for 0.1 s earlier (measured) — probably id flooring a double
 `cl.time` that the harness hands over rounded to a float. Passing id's `d_lightstylevalue` to
 the port would remove it (not done).
 
-**Pixel aspect** (`--aspect 0.8333333`, id's 320x200 on a 4:3 monitor, which is how
-the browser page shows every preset; branch `quake/w2b`). With id at mip 0 + exact
-perspective: 95.89 / 97.60 / 98.50 / 98.79, as close as with square pixels
-(95.61 / 97.40 / 98.50 / 98.66); before the port's projection took the aspect it
-scored 31.35 / 26.90 / 20.23 / 14.23 against id's 4:3 frame. Entity pixels 100 /
-100 / 98.8 / 100; the altar view's 684 entity pixels 100%.
-
 **Attribution ladder** — id's renderer made to drop one known difference at a time
-(world only; `characterise.sh` prints it):
+against the port as it ships (16-pixel spans; world only; `characterise.sh` prints it):
 
 | id's renderer configured as | e1m1 | e1m2 | e1m3 | e1m7 |
 |---|---:|---:|---:|---:|
-| as written (`--spans 8`) | 97.44 | 97.12 | 99.16 | 94.96 |
-| 16-px segments (`--spans 16`, the x86 asm) | 92.84 | 94.36 | 96.51 | 87.23 |
-| exact per-pixel perspective (`--spans 1`) | 99.94 | 99.18 | 99.98 | 99.91 |
-| mip 0 forced (`--c-cmd "d_mipscale 0"`, both renderers) | 97.27 | 95.77 | 98.65 | 94.52 |
-| mip 0 + exact perspective | 99.93 | 99.88 | 99.98 | 99.91 |
+| as written (`--spans 8`) | 94.57 | 96.09 | 97.27 | 91.72 |
+| 16-px segments (`--spans 16`, the x86 asm) | 99.96 | 99.21 | 99.98 | 99.91 |
+| exact per-pixel perspective (`--spans 1`) | 92.85 | 94.39 | 96.58 | 87.19 |
+| mip 0 forced (`--c-cmd "d_mipscale 0"`, both renderers) | 94.57 | 94.26 | 96.05 | 91.70 |
+| mip 0 + 16-px segments | 99.95 | 99.93 | 99.98 | 99.91 |
+| mip 0 + exact perspective, the port's too (`--exactpersp`) | 99.93 | 99.88 | 99.98 | 99.91 |
 
 `d_mipscale` and `d_mipcap` are the port's cvars too, and `compare.py` hands them
-to both sides, so the "mip 0" rows now put both renderers at mip 0 (before the mip
-levels they configured id alone: 93.13 / 93.59 / 97.13 / 93.35 and 95.63 / 97.41 /
-98.39 / 98.68). Mip 0 + exact at 640x480: 99.96 / 99.96 / 99.99 / 99.98; a pitched
-and rolled view (e1m1, `--view=544,288,32,-15,100,12`) 100.00. Over 72 more views
+to both sides, so the "mip 0" rows put both renderers at mip 0. With the port's
+exact-perspective extra, id's exact rows are the pre-`quake/w2b` port's to the
+pixel: 99.94 / 99.18 / 99.98 / 99.91 at `--spans 1`. Mip 0 + exact at 640x480:
+99.96 / 99.96 / 99.99 / 99.98; a pitched and rolled view (e1m1,
+`--view=544,288,32,-15,100,12`) 100.00. Over 72 more views
 (the four start positions, 6 yaws x 3 pitches) against id's exact perspective and
-its own mip levels, the mean is 99.99% and the worst 99.83. The e1m2 row's 0.7% at
-`--spans 1` is one face at a finer mip in id than its geometry gives (class 1's
-open note). What is left elsewhere is the size of id's own floating-point noise: the oracle built with SSE2 float math
+its own mip levels, the mean is 99.99% and the worst 99.83 (before the 16-pixel
+spans, measured with the exact extra's arithmetic). What is left elsewhere is the size of id's own floating-point noise: the oracle built with SSE2 float math
 instead of x87 (`ORACLE_FPMATH=sse oracle/build.sh`) differs from the x87 build on
 0.003-0.031% of pixels. So **projection, fov, pixel centres, edge rules, near
 clipping, texture alignment, PVS and the camera convention are faithful**; every

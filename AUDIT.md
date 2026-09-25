@@ -832,6 +832,19 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 
 ## Projection and spans (2026-09-25, branch `quake/w2b`)
 
+**On the merged base** (`quake/overnight` `eb76c04`, with the mip levels), all
+four items: goldens e1m1 `959d0221` → `4807aaa1` (4983 px, 1.95%), e1m2
+`0cd18471` → `8ce25660` (5808 px, 2.27%), e1m3 `b63ae8b7` → `3531e9cd` (4077 px,
+1.59%) — all from the 16-pixel spans (the aspect and the sky centre leave the
+square-pixel full-screen scene alone). Oracle world, 320x200, against id's x86
+spans (`--spans 16`): 92.84 / 94.36 / 96.56 / 87.20 → **99.96 / 99.21 / 99.98 /
+99.91**; at the page's aspect (`--aspect 0.8333333`) 100.00 / 98.73 / 100.00 /
+100.00 and 100.00 at 640x400; against id's portable C (`--spans 8`, the
+default) 97.44 / 97.12 / 99.16 / 94.96 → 94.57 / 96.09 / 97.27 / 91.72 (8 against
+16 now). The exact extra reproduces the merged base byte for byte. The
+paragraphs below give each item's own before/after as measured on the old
+base.
+
 Measured with `oracle/compare.py` (exact-palette-index match %, 320x200,
 world, e1m1/e1m2/e1m3/e1m7 unless stated).
 
@@ -904,8 +917,9 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
     unchanged; the exact extra unchanged. Goldens (on the merged base with
     the mip levels): e1m1 `74522852` → `4807aaa1` (288 px), e1m2 `8ce25660`
     unchanged, e1m3 `ce0f5c89` → `3531e9cd` (13 px).
-  - **Speed:** wasm world −17 to −24% at 1280x800 (demo1 4.37 → 3.59 ms,
-    walk_e1m3 3.30 → 2.62), native world +30-40%; PERF_PLAN §6 has the table.
+  - **Speed** (on the merged base): wasm world −16 to −23% (demo1 at 1280x800
+    4.11 → 3.30 ms, walk_e1m3 3.35 → 2.73), step −5 to −13%; native world
+    +30-40%. PERF_PLAN §6 has the table.
   - The old per-pixel perspective stays as an opt-in extra
     (`RenderOptions::exact_perspective`, `quaketool view --exactpersp 1`,
     `compare.py --exactpersp`): byte-identical to before (the oracle's exact

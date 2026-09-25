@@ -773,14 +773,20 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
   part of A3, not for speed. **Done anyway, for fidelity** (branch `quake/w2b`: `D_DrawSpans16`
   and `Turbulent8` over z-test runs, see `AUDIT.md`), and in wasm it is a gain after all, because
   the row is now two tight loops — the z test with its one divide per pixel, then the texels by
-  integer steps over the runs that passed. A/B against the aspect commit, one sitting, two
-  rounds, median ms, wasm world at 1280×800: demo1 4.37/4.01 → 3.59/3.32, walk_e1m1 3.14/3.36 →
-  2.41/2.54, fire_e1m1 3.51/3.56 → 2.80/2.88, walk_e1m3 3.30/3.48 → 2.62/2.78 (−17 to −24%);
-  step demo1 6.70/5.99 → 5.82/5.33; at 640×400 world −10 to −25%. **Native is the other way:**
-  the native twin's world rises ~30-40% (demo1 2.91/3.22 → 4.21/4.51 at 1280×800), and
-  `quaketool view --bench` at 1280×800 reads 5.0 (exact) vs 5.6-6.2 ms. Of four structures tried,
-  a depth pass into a row buffer then texels was the fastest natively (−10% against exact) but
-  +8% in wasm; the shipped one is the fastest in wasm. Not understood; the browser is the target.
+  integer steps over the runs that passed. A/B on the merged base (`quake/overnight` `eb76c04`,
+  with the mip levels) against `quake/w2b`, one sitting, two rounds, median ms:
+
+  | workload | wasm world 640×400 | wasm world 1280×800 | wasm step 1280×800 | native world 1280×800 |
+  |---|---|---|---|---|
+  | demo1 | 1.25/1.30 → 1.07/1.07 | 4.11/4.17 → 3.30/3.34 | 6.04/6.15 → 5.28/5.45 | 3.10/3.16 → 4.30/4.14 |
+  | walk_e1m1 | 0.83/0.83 → 0.64/0.63 | 3.10/3.07 → 2.38/2.39 | 4.98/5.07 → 4.30/4.49 | 2.33/2.38 → 3.21/4.06 |
+  | fire_e1m1 | 0.85/0.85 → 0.69/0.66 | 3.15/3.11 → 2.49/2.43 | 5.15/5.07 → 4.53/4.63 | 2.37/2.34 → 3.20/3.34 |
+  | walk_e1m3 | 0.92/0.93 → 0.80/0.75 | 3.35/3.37 → 2.73/2.60 | 6.16/6.19 → 5.86/5.67 | 2.67/2.56 → 3.64/3.56 |
+
+  Wasm world −16 to −23%, step −5 to −13% (the same as before the merge). **Native is the other
+  way:** world +30-40%. Of four structures tried, a depth pass into a row buffer and then the
+  texels was the fastest natively (−10% against exact) but +8% in wasm; the shipped one is the
+  fastest in wasm. Not understood; the browser is the target.
 - **`wasm-opt -O3`** (binaryen v132 via `bunx -p binaryen`):
   - identical hashes; step −2 to −5% (demo1 1280×800: 19.6 → 18.7 ms);
   - 640 KB smaller: code 773 → 662 KB, and the name section is stripped.
