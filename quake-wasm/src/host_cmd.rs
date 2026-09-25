@@ -515,7 +515,8 @@ mod tests {
     use crate::console::{console_toggle, console_visible};
     use crate::menu::menu_cancel;
     use crate::input::{key_down, key_up, set_attack};
-    use crate::{boot, set_resolution, step, viewsize, APP};
+    use crate::vid::{set_resolution, viewsize};
+    use crate::{boot, step, APP};
 
     #[test]
     fn sizeup_sizedown_console_commands_and_default_binds() {

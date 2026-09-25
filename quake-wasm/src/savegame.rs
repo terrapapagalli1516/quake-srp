@@ -378,7 +378,8 @@ mod tests {
     use crate::test_util::*;
     use crate::console::console_toggle;
     use crate::input::{set_attack, set_move};
-    use crate::{boot, boot_attract, set_resolution, step, APP};
+    use crate::vid::set_resolution;
+    use crate::{boot, boot_attract, step, APP};
 
     // ------------------------------------------------------------ save/load
 
