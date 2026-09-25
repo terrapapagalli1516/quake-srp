@@ -4,7 +4,8 @@
 //! Source: `WinQuake/d_polyse.c` — `D_PolysetDraw`, `D_RasterizeAliasPolySmooth`,
 //! `D_PolysetCalcGradients`, `D_PolysetDrawSpans8`; `adivtab.h`.
 
-use super::{AliasSetup, AliasView, FinalVert, Image, ALIAS_ONSEAM, ALIAS_ZISCALE};
+use super::Image;
+use super::alias::{AliasSetup, AliasView, FinalVert, ALIAS_ONSEAM, ALIAS_ZISCALE};
 
 /// The sentinel `D_RasterizeAliasPolySmooth` stores in a span's `count`.
 const SPAN_END: i32 = -999_999;

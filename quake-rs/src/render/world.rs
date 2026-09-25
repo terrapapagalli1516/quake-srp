@@ -858,7 +858,8 @@ pub fn draw_brush_bsp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, render_scene, render_scene_ext, ModelInstance};
+    use crate::render::{demo_room, render_scene, render_scene_ext};
+    use crate::render::alias::ModelInstance;
     use crate::render::fixtures::tiny_mdl;
     use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
 
