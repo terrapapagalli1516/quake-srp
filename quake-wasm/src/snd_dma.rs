@@ -40,6 +40,27 @@ pub(crate) struct SndParams {
     /// `svc_stopsound` can stop the keyed source (S_StopSound).
     entity: i32,
     channel: i32,
+    /// The sample's `cue ` loop point in SECONDS (`GetWavinfo`'s `loopstart`
+    /// over the rate), or -1.0 for a one-shot (`loopstart == -1`). The C mixer
+    /// loops ANY channel whose sample has one (`SND_PaintChannels`: at the end
+    /// `if (sc->loopstart >= 0) ch->pos = sc->loopstart`) until another sound
+    /// takes the same (entity, channel) or all sounds stop: the door, lift and
+    /// train "moving" hums.
+    loop_start: f32,
+    /// Loop end in seconds (`info.samples` over the rate).
+    loop_end: f32,
+}
+
+/// Fill `p`'s loop window from the sample's `cue ` chunk (`GetWavinfo`).
+fn set_loop_window(p: &mut SndParams, bytes: &[u8]) {
+    let info = wav_info(bytes);
+    (p.loop_start, p.loop_end) = match info {
+        Some(i) if i.loop_start.is_some() => {
+            let rate = i.rate.max(1) as f32;
+            (i.loop_start.unwrap_or(0) as f32 / rate, i.samples as f32 / rate)
+        }
+        _ => (-1.0, 0.0),
+    };
 }
 
 impl SndParams {
@@ -57,6 +78,8 @@ impl SndParams {
             is_view_entity: false,
             entity: 0,
             channel: 0,
+            loop_start: -1.0,
+            loop_end: 0.0,
         }
     }
 }
@@ -114,16 +137,20 @@ impl Listener {
 }
 
 /// Load the WAV bytes for the gameplay sounds in `events` and push them onto the
-/// playback queue. The silent `misc/null.wav` is skipped, and the queue is
-/// capped at 12 so a noisy frame can't grow it without bound.
+/// playback queue, capped at 12 so a noisy frame can't grow it without bound.
+///
+/// A sample with a `cue ` loop point carries its loop window
+/// ([`SndParams::loop_start`]) and the page LOOPS it, as `SND_PaintChannels`
+/// does, until a later sound on the same (entity, channel) overrides it: the
+/// door/lift/train "moving" samples (`doors/doormv1`, `hydro1`, `stndr1`,
+/// `plats/plat1`, `medplat1`, `train1`, ...) hum until their stop sound. The
+/// silent `misc/null.wav` is queued like any other sample, since it too
+/// overrides its (entity, channel).
 ///
 /// `ambience/*` one-shots are real gameplay content and queue like any other
 /// sample: trigger_push wind tunnels fire `sound (other, CHAN_AUTO,
 /// "ambience/windfly.wav", 1, ATTN_NORM)` (QuakeC `trigger_push_touch`, heard
-/// on E1M6). DEVIATION (Web Audio scope): such samples carry a `cue ` loop
-/// chunk, which the C mixer would LOOP on the dynamic channel until overridden
-/// (`SND_PaintChannels` wraps at `sc->loopstart`); our one-shot source plays
-/// it through once.
+/// on E1M6); windfly has no cue chunk, so it plays once.
 ///
 /// Mixing follows the C `SND_PickChannel` (snd_dma.c:354-390), keyed on the
 /// `(entity, channel)` pair carried by each `SoundEvent` — NOT on the sample
@@ -159,7 +186,7 @@ pub(crate) fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], v
         let mut q = q.borrow_mut();
         for ev in events {
             let name = ev.sample.as_str();
-            if name.is_empty() || name == "misc/null.wav" {
+            if name.is_empty() {
                 continue;
             }
 
@@ -169,13 +196,15 @@ pub(crate) fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], v
             // sound is silently dropped — the long-standing "no in-game sound".
             let path = format!("sound/{name}");
 
-            let params = SndParams {
+            let mut params = SndParams {
                 origin: ev.origin,
                 volume: ev.volume,
                 attenuation: ev.attenuation,
                 is_view_entity: ev.entity == view_entity,
                 entity: ev.entity,
                 channel: ev.channel,
+                loop_start: -1.0,
+                loop_end: 0.0,
             };
 
             // Channel restart (SND_PickChannel): a non-zero channel from the
@@ -192,6 +221,7 @@ pub(crate) fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], v
                 if let Some(pi) = hit {
                     let qi = placed[pi].1;
                     if let Ok(Some(bytes)) = pak.read_file(&path) {
+                        set_loop_window(&mut params, &bytes);
                         q[qi] = (bytes, params);
                         // Re-key to this channel so a following -1 still matches.
                         placed[pi].0 = (ev.entity, ev.channel);
@@ -204,6 +234,7 @@ pub(crate) fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], v
                 continue; // queue cap reached
             }
             if let Ok(Some(bytes)) = pak.read_file(&path) {
+                set_loop_window(&mut params, &bytes);
                 let qi = q.len();
                 q.push((bytes, params));
                 if ev.channel != 0 {
@@ -218,7 +249,9 @@ pub(crate) fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], v
 /// (0 when the queue is empty). The page calls this in a loop each frame, reads
 /// `sound_ptr()` after each non-zero return, and plays it via Web Audio. The
 /// popped entry's spatial params are stashed for the `sound_origin_*` /
-/// `sound_volume` / `sound_attenuation` exports to read alongside the bytes.
+/// `sound_volume` / `sound_attenuation` exports to read alongside the bytes, and
+/// its loop window for `sound_loop_start`/`sound_loop_end` (start -1.0 = a
+/// one-shot; otherwise the page loops the source from there).
 #[no_mangle]
 pub extern "C" fn poll_sound() -> i32 {
     let next = SND_QUEUE.with(|q| {
@@ -233,6 +266,7 @@ pub extern "C" fn poll_sound() -> i32 {
         Some((bytes, params)) => {
             let len = bytes.len() as i32;
             SND.with(|s| *s.borrow_mut() = bytes);
+            SND_LOOP.with(|l| *l.borrow_mut() = (params.loop_start, params.loop_end));
             SND_CUR.with(|p| *p.borrow_mut() = params);
             len
         }
@@ -506,6 +540,7 @@ pub(crate) fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
                 continue; // "Sound %s not looped" — never static-loop a one-shot
             };
             let rate = info.rate.max(1) as f32;
+            let (loop_start, loop_end) = (loop_start as f32 / rate, info.samples as f32 / rate);
             q.push(StaticLoop {
                 bytes,
                 params: SndParams {
@@ -515,9 +550,11 @@ pub(crate) fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
                     is_view_entity: false, // statics are placed in the world
                     entity: 0,             // statics carry no override key
                     channel: 0,
+                    loop_start,
+                    loop_end,
                 },
-                loop_start: loop_start as f32 / rate,
-                loop_end: info.samples as f32 / rate,
+                loop_start,
+                loop_end,
             });
         }
     });
@@ -559,7 +596,7 @@ pub extern "C" fn poll_static_sound() -> i32 {
     }
 }
 
-/// Loop start of the most recent `poll_static_sound`/`load_ambient_sound`, in
+/// Loop start of the most recent `poll_sound`/`poll_static_sound`/`load_ambient_sound`, in
 /// SECONDS (the `cue ` chunk's sample offset over the WAV rate — sample-rate
 /// independent, so the page can hand it straight to `AudioBufferSourceNode.
 /// loopStart` no matter what rate `decodeAudioData` resampled to).
@@ -568,7 +605,7 @@ pub extern "C" fn sound_loop_start() -> f32 {
     SND_LOOP.with(|l| l.borrow().0)
 }
 
-/// Loop end in seconds of the most recent `poll_static_sound`/
+/// Loop end in seconds of the most recent `poll_sound`/`poll_static_sound`/
 /// `load_ambient_sound` (`GetWavinfo`'s `info.samples` over the rate; this is
 /// the full data length unless a `LIST`/`mark` chunk declared a shorter loop).
 /// 0.0 means "to the buffer's end" — Web Audio's `loopEnd` default.
@@ -828,7 +865,8 @@ mod tests {
         // trigger_push wind tunnels fire `sound (other, CHAN_AUTO,
         // "ambience/windfly.wav", 1, ATTN_NORM)` (QuakeC trigger_push_touch)
         // as genuine gameplay one-shots the C plays like any other sample.
-        // Only the silent misc/null.wav is skipped.
+        // The silent misc/null.wav queues too: it overrides its (entity,
+        // channel) like any sound, which is what ends some movers' loops.
         let pak = build_test_pak(&[
             ("sound/ambience/windfly.wav", b"WIND"),
             ("sound/misc/null.wav", b"NULL"),
@@ -840,8 +878,43 @@ mod tests {
             -1,
         );
         let got = drain_queue();
-        assert_eq!(got.len(), 1, "windfly queued; null.wav skipped");
+        assert_eq!(got.len(), 2, "windfly and null.wav both queued");
         assert_eq!(got[0].0, 0.8, "the ambience one-shot's own params");
+    }
+
+    #[test]
+    fn queue_sounds_carries_the_cue_loop_so_movers_hum_until_their_stop_sound() {
+        // CENSUS F9: GetWavinfo reads the `cue ` loop point and SND_PaintChannels
+        // loops the channel from it until another sound takes the same (entity,
+        // channel). A door (entity 5) plays its moving sound on CHAN_VOICE (2),
+        // then its stop sound on the same channel: the page gets the first with
+        // a loop window (and loops it) and the second as a one-shot on the same
+        // key (its registry stops the loop).
+        let mv = test_wav(Some(8), 64);
+        let stop = test_wav(None, 32);
+        let pak = build_test_pak(&[("sound/doors/doormv1.wav", &mv), ("sound/doors/drclos4.wav", &stop)]);
+        reset_queue();
+        queue_sounds(&pak, &[ev(5, 2, "doors/doormv1.wav", 1.0)], -1);
+        assert!(poll_sound() > 0);
+        assert_eq!((sound_entity(), sound_channel()), (5, 2));
+        assert!((sound_loop_start() - 8.0 / 11025.0).abs() < 1e-7, "loops from the cue point");
+        assert!((sound_loop_end() - 64.0 / 11025.0).abs() < 1e-7, "to the end of the data");
+        queue_sounds(&pak, &[ev(5, 2, "doors/drclos4.wav", 1.0)], -1);
+        assert!(poll_sound() > 0);
+        assert_eq!((sound_entity(), sound_channel()), (5, 2), "the stop sound's key");
+        assert_eq!(sound_loop_start(), -1.0, "no cue chunk: a one-shot");
+        // The real movers carry cue chunks; their stop sounds and null.wav don't.
+        let pak = crate::app::pak().expect("embedded pak");
+        let loops = |name: &str| {
+            let bytes = pak.read_file(&format!("sound/{name}")).ok().flatten().expect(name);
+            wav_info(&bytes).expect(name).loop_start.is_some()
+        };
+        for name in ["doors/doormv1.wav", "doors/hydro1.wav", "plats/plat1.wav", "plats/train1.wav"] {
+            assert!(loops(name), "{name} loops");
+        }
+        for name in ["doors/drclos4.wav", "plats/plat2.wav", "plats/train2.wav", "misc/null.wav"] {
+            assert!(!loops(name), "{name} is a one-shot");
+        }
     }
 
     #[test]

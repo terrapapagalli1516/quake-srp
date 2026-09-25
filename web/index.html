@@ -638,7 +638,8 @@ function registerSource(src, ent, chan) {
   src.onended = () => { if (playingByKey.get(key) === src) playingByKey.delete(key); };
 }
 
-function playBuffer(buf, sp, ent, chan) {
+function playBuffer(buf, sp, ent, chan, lp) {
+  if (lp) { playDynLoop(buf, ent, chan, lp); return; }
   const s = audioCtx.createBufferSource();
   s.buffer = buf;
   playRouted(s, sp);
@@ -646,6 +647,60 @@ function playBuffer(buf, sp, ent, chan) {
   s.start();
   window.__sndStats.plays++;
 }
+
+// A one-shot whose sample has a `cue ` loop point loops, as SND_PaintChannels
+// does, until a later sound on its (entity, channel) overrides it (door, lift
+// and train hums until their stop sound) or all sounds stop (level change).
+// Like the C channel it is re-spatialized every frame from its fixed origin
+// (updateLoopingAudio). lp = {ls, le, ox, oy, oz, vol, atten, view}.
+let dynLoops = [];       // {src, lg, rg, lp}
+function playDynLoop(buf, ent, chan, lp) {
+  const src = makeLoopSource(buf, lp.ls, lp.le);
+  const lg = audioCtx.createGain(); lg.gain.value = 0;
+  const rg = audioCtx.createGain(); rg.gain.value = 0;
+  if (typeof audioCtx.createChannelMerger === 'function') {
+    const m = audioCtx.createChannelMerger(2);
+    src.connect(lg); lg.connect(m, 0, 0);
+    src.connect(rg); rg.connect(m, 0, 1);
+    m.connect(audioCtx.destination);
+  } else {
+    src.connect(lg); lg.connect(audioCtx.destination); // mono fallback
+  }
+  const l = { src, lg, rg, lp };
+  dynLoops.push(l);
+  spatializeDynLoop(l);
+  registerSource(src, ent, chan);
+  const keyed = src.onended;
+  src.onended = () => { dynLoops = dynLoops.filter(x => x !== l); if (keyed) keyed(); };
+  src.start();
+  window.__sndStats.plays++;
+  window.__sndStats.loops = (window.__sndStats.loops || 0) + 1;
+}
+function spatializeDynLoop(l) {
+  const p = l.lp;
+  // SND_Spatialize: the view entity is full volume, centred; else the law.
+  const sp = p.view ? { gain: p.vol, pan: 0 } : spatialGain(p.ox, p.oy, p.oz, p.vol, p.atten);
+  const mono = sp.gain * masterVolume();
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  l.lg.gain.value = clamp01(mono * (1 - sp.pan));
+  l.rg.gain.value = clamp01(mono * (1 + sp.pan));
+}
+
+// SND_PickChannel's override without a new source: stop what plays on the key.
+function stopKey(ent, chan) {
+  if (!(chan > 0)) return;
+  const key = ent + ':' + chan;
+  const prev = playingByKey.get(key);
+  if (prev) {
+    try { prev.stop(); } catch (e) {}
+    playingByKey.delete(key);
+    window.__sndStats.stops++;
+  }
+}
+// Latest sound issued per (entity, channel): an async first decode starts its
+// source only if no newer sound took the key meanwhile (else the stop sound of
+// a short door travel could land before the hum and leave it looping).
+const keySeq = new Map();
 
 // Drain pending svc_stopsound stops (demo playback): poll_stop_sound() returns
 // the packed wire short (entity<<3 | channel), or -1 when empty; stop() the
@@ -686,20 +741,36 @@ function drainGameSounds() {
     // exports are absent — never keyed).
     const ent = typeof exp.sound_entity === 'function' ? exp.sound_entity() : 0;
     const chan = typeof exp.sound_channel === 'function' ? exp.sound_channel() : 0;
-    if (sp && sp.gain <= 0.02) continue;          // inaudibly far — don't even decode
+    // The sample's cue loop window (poll_sound): start < 0 = a one-shot.
+    const ls = typeof exp.sound_loop_start === 'function' ? exp.sound_loop_start() : -1;
+    const lp = ls >= 0 && sp ? {
+      ls, le: exp.sound_loop_end(), ox: exp.sound_origin_x(), oy: exp.sound_origin_y(),
+      oz: exp.sound_origin_z(), vol: exp.sound_volume(), atten: exp.sound_attenuation(),
+      view: typeof exp.sound_is_view_entity === 'function' && !!exp.sound_is_view_entity(),
+    } : null;
+    // S_StartSound picks (and so overrides) the channel before it tests
+    // audibility: an inaudible sound still ends its key's loop, then drops.
+    if (sp && sp.gain <= 0.02) { stopKey(ent, chan); continue; }
+    const kkey = ent + ':' + chan;
+    const seq = (keySeq.get(kkey) || 0) + 1;
+    if (chan > 0) keySeq.set(kkey, seq);
+    const gen = typeof exp.sound_generation === 'function' ? exp.sound_generation() : 0;
     const ptr = exp.sound_ptr();
     const view = new Uint8Array(exp.memory.buffer, ptr, len);
     const key = wavKey(view);
     const cached = decodedSounds.get(key);
     if (cached) {
-      playBuffer(cached, sp, ent, chan);           // already decoded — instant, no hitch
+      playBuffer(cached, sp, ent, chan, lp);       // already decoded — instant, no hitch
       continue;
     }
-    // First time for this clip: copy out of wasm memory, decode, cache, play.
+    // First time for this clip: copy out of wasm memory, decode, cache, play —
+    // unless the key was overridden or the level changed while decoding.
     const copy = view.slice();
     audioCtx.decodeAudioData(copy.buffer).then(buf => {
       decodedSounds.set(key, buf);
-      playBuffer(buf, sp, ent, chan);
+      if (chan > 0 && keySeq.get(kkey) !== seq) return;
+      if (typeof exp.sound_generation === 'function' && exp.sound_generation() !== gen) return;
+      playBuffer(buf, sp, ent, chan, lp);
     }).catch(() => {});
   }
 }
@@ -797,6 +868,11 @@ function stopAllLoops() {
   for (const l of ambientLoops) { try { l.src.stop(); } catch (e) {} }
   staticLoops = []; ambientLoops = [];
   ambientStarted = false;
+  // S_StopAllSounds stops the dynamic channels too: every keyed one-shot and
+  // every looping one (a door hum must not carry into the next level).
+  for (const s of playingByKey.values()) { try { s.stop(); } catch (e) {} }
+  for (const l of dynLoops) { try { l.src.stop(); } catch (e) {} }
+  playingByKey.clear(); dynLoops = []; keySeq.clear();
 }
 
 // Decode WAV bytes through the shared content-hash cache, then cb(buffer).
@@ -897,6 +973,8 @@ function updateLoopingAudio() {
     l.lg.gain.value = clamp01(mono * (1 - sp.pan));
     l.rg.gain.value = clamp01(mono * (1 + sp.pan));
   }
+  // Looping one-shots (door/lift/train hums): the same per-frame law.
+  for (const l of dynLoops) spatializeDynLoop(l);
   // Leaf ambients: engine-ramped volume, both channels equal.
   for (const l of ambientLoops) {
     l.g.gain.value = clamp01(exp.ambient_gain(l.ch) * master);
