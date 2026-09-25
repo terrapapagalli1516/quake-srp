@@ -71,8 +71,10 @@ fn set_min_max_size(vm: &mut Vm, e: i32, min: Vec3, max: Vec3) {
 }
 
 /// `PF_setmodel` (#3): `void(entity e, string m) setmodel`. Sets `model`,
-/// resolves `modelindex` via the host precache, and — for a `"*N"` brush
-/// submodel — copies the BSP submodel bounds into `mins`/`maxs`/`size`.
+/// resolves `modelindex` via the host precache, and copies the model's
+/// bounds into `mins`/`maxs`/`size` (`SetMinMaxSize (e, mod->mins,
+/// mod->maxs, true)`): a `"*N"` submodel's, or what `Mod_LoadModel` gave the
+/// model file (±16 for an alias model, ±maxwidth/2 for a sprite).
 fn bi_setmodel(vm: &mut Vm) -> Result<()> {
     let e = vm.arg_entity(0);
     let m = vm.arg_string(1);
@@ -93,8 +95,8 @@ fn bi_setmodel(vm: &mut Vm) -> Result<()> {
 
     vm.ent_set_float(e, "modelindex", idx as f32);
 
-    // SetMinMaxSize(e, mod->mins, mod->maxs) for a brush model; the C used a
-    // zero box when the model had no bounds (mod == NULL or a non-brush model).
+    // SetMinMaxSize(e, mod->mins, mod->maxs); `if (!mod)` the C used a zero
+    // box (here also a model the host could not resolve: no pak in tests).
     let (min, max) = bbox.unwrap_or(([0.0; 3], [0.0; 3]));
     set_min_max_size(vm, e, min, max);
     Ok(())

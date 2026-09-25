@@ -181,14 +181,44 @@ pub struct WorldModel {
     bsp: Bsp,
     precache_models: Vec<String>,
     precache_sounds: Vec<String>,
-    /// Optional pak, used to resolve the collision bounds of external brush
-    /// models (the `maps/b_*.bsp` item boxes — explosive/ammo/health boxes).
-    /// `None` (e.g. in unit tests) just falls back to the historical zero box.
+    /// Optional pak, used to resolve the bounds of the model files (alias
+    /// models, sprites and the external brush models, the `maps/b_*.bsp` item
+    /// boxes). `None` (e.g. in unit tests) falls back to a zero box.
     pak: Option<crate::pak::Pak>,
-    /// Cache of external brush-model MODEL-0 bounds, keyed by precache name
-    /// (e.g. `"maps/b_explob.bsp"` -> `(0,0,0)..(32,32,64)`). Populated lazily
-    /// by [`precache_model`] so `setmodel` can give the box a real bbox.
-    external_bounds: std::collections::HashMap<String, (Vec3, Vec3)>,
+    /// `mod->mins`/`maxs` of every model file precached, keyed by precache
+    /// name, as `Mod_LoadModel` set them (see [`model_file_bounds`]): e.g.
+    /// `"progs/player.mdl"` -> ±16, `"progs/s_explod.spr"` (56x56) -> ±28,
+    /// `"maps/b_explob.bsp"` -> `(0,0,0)..(32,32,64)`. Filled by
+    /// [`precache_model`] so `setmodel` finds them.
+    model_bounds: std::collections::HashMap<String, (Vec3, Vec3)>,
+}
+
+/// `mod->mins`/`maxs` of the model file `name` in `pak`, as `Mod_LoadModel`
+/// (model.c) sets them, by the file's magic: an alias model (`IDPO`) gets
+/// `Mod_LoadAliasModel`'s fixed ±16 ("FIXME: do this right"), a sprite
+/// (`IDSP`) `Mod_LoadSpriteModel`'s `±maxwidth/2` across and `±maxheight/2`
+/// up (C ints: `-psprite->maxwidth/2` truncates toward zero), anything else
+/// is a brush model: submodel 0's bounds, as spread ONCE by
+/// `Mod_LoadSubmodels` (mins-1, maxs+1) — which `Bsp::parse` already did:
+/// b_explob.bsp's raw (1,1,1)..(31,31,63) is (0,0,0)..(32,32,64) here
+/// (spreading again made the boxes 34 wide: hull2 traces, droptofloor
+/// failures). `None` for a missing or unreadable file (id's `Sys_Error`) and
+/// for bounds `SetMinMaxSize` would reject as backwards.
+fn model_file_bounds(pak: &crate::pak::Pak, name: &str) -> Option<(Vec3, Vec3)> {
+    let bytes = pak.read_file(name).ok().flatten()?;
+    match bytes.get(..4)? {
+        b"IDPO" => Some(([-16.0; 3], [16.0; 3])),
+        b"IDSP" => {
+            let h = crate::spr::Sprite::parse(&bytes).ok()?.header;
+            if h.width < 0 || h.height < 0 {
+                return None;
+            }
+            let (mw, mh) = (-h.width / 2, -h.height / 2);
+            let (xw, xh) = (h.width / 2, h.height / 2);
+            Some(([mw as f32, mw as f32, mh as f32], [xw as f32, xw as f32, xh as f32]))
+        }
+        _ => crate::bsp::Bsp::parse(&bytes).ok()?.models.first().map(|m| (m.mins, m.maxs)),
+    }
 }
 
 impl WorldModel {
@@ -209,7 +239,7 @@ impl WorldModel {
             precache_models: vec![String::new()],
             precache_sounds: vec![String::new()],
             pak,
-            external_bounds: std::collections::HashMap::new(),
+            model_bounds: std::collections::HashMap::new(),
         };
         // Slot 1 is the world brush model. id used the map name; "*0" is the
         // submodel-0 (worldspawn) reference and is what setmodel resolves.
@@ -254,32 +284,15 @@ fn precache_push(table: &mut Vec<String>, name: &str) -> i32 {
 
 impl Host for WorldModel {
     fn precache_model(&mut self, name: &str) -> i32 {
-        // External brush models — the `maps/b_*.bsp` item boxes (explosive box,
-        // ammo/health boxes) — carry their real collision bounds in their own
-        // BSP's MODEL-0. The C `PF_precache_model` loads every precached model
-        // via `Mod_ForName`, so `setmodel` later finds `mod->mins/maxs`; without
-        // it the box gets a zero bbox and hitscans/movement pass straight
-        // through (visible but unshootable). Resolve the bounds once from the
-        // pak and cache them. Any failure (no pak / missing file / parse error /
-        // no models) silently leaves them unset -> the historical zero box.
-        if name.ends_with(".bsp")
-            && Self::submodel_index(name).is_none()
-            && !self.external_bounds.contains_key(name)
-        {
-            if let Some(pak) = &self.pak {
-                if let Ok(Some(bytes)) = pak.read_file(name) {
-                    if let Ok(bsp) = crate::bsp::Bsp::parse(&bytes) {
-                        if let Some(m) = bsp.models.first() {
-                            // Mod_LoadBrushModel copies submodel 0's bounds into
-                            // `mod->mins/maxs`, as spread ONCE by Mod_LoadSubmodels
-                            // (mins-1, maxs+1) — which `Bsp::parse` already did:
-                            // b_explob.bsp's raw (1,1,1)..(31,31,63) is
-                            // (0,0,0)..(32,32,64) here. (Spreading again made the
-                            // boxes 34 wide: hull2 traces, droptofloor failures.)
-                            self.external_bounds.insert(name.to_string(), (m.mins, m.maxs));
-                        }
-                    }
-                }
+        // `PF_precache_model` loads every model it precaches (`sv.models[i] =
+        // Mod_ForName (s, true)`), so `PF_setmodel` later finds
+        // `mod->mins/maxs` for alias models, sprites and the external brush
+        // models (the `maps/b_*.bsp` item boxes, which without it were visible
+        // but unshootable). Resolve them once from the pak; any failure (no
+        // pak, a missing file, a parse error) leaves them unset -> a zero box.
+        if Self::submodel_index(name).is_none() && !self.model_bounds.contains_key(name) {
+            if let Some(b) = self.pak.as_ref().and_then(|pak| model_file_bounds(pak, name)) {
+                self.model_bounds.insert(name.to_string(), b);
             }
         }
         precache_push(&mut self.precache_models, name)
@@ -302,12 +315,13 @@ impl Host for WorldModel {
             let m = self.bsp.models.get(n)?;
             return Some((m.mins, m.maxs));
         }
-        // External brush models (the b_*.bsp item boxes) get the bounds we
-        // resolved + cached at precache time. Real ".mdl" alias models are not
-        // in the cache, so they still fall back to a zero box (faithful: the C
-        // `setmodel` also set a zero box for non-brush models, which the QuakeC
-        // then `setsize`s).
-        self.external_bounds.get(name).copied()
+        // Every other model file gets the bounds `Mod_LoadModel` gave it,
+        // resolved at precache time: ±16 for an alias model, ±maxwidth/2 and
+        // ±maxheight/2 for a sprite, submodel 0's for a b_*.bsp box
+        // (`PF_setmodel` -> `SetMinMaxSize (e, mod->mins, mod->maxs, true)`).
+        // What QuakeC `setsize`s afterwards overrides it; what it does not
+        // (an explosion's `s_explod.spr`, the flames) keeps it.
+        self.model_bounds.get(name).copied()
     }
 
     fn trace(&self, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) -> HostTrace {
@@ -602,12 +616,60 @@ mod tests {
         // `setmodel`'s `model_bbox` returns them — the box gets a real bbox
         // (e.g. b_explob.bsp -> (0,0,0)..(32,32,64)) instead of (0,0,0).
         let mut wm3 = WorldModel::with_pak(empty_bsp(), None);
-        wm3.external_bounds
+        wm3.model_bounds
             .insert("maps/b_explob.bsp".into(), ([0.0, 0.0, 0.0], [32.0, 32.0, 64.0]));
         assert_eq!(
             wm3.model_bbox("maps/b_explob.bsp"),
             Some(([0.0, 0.0, 0.0], [32.0, 32.0, 64.0]))
         );
+    }
+
+    /// CENSUS L10: `PF_setmodel` -> `SetMinMaxSize (e, mod->mins, mod->maxs,
+    /// true)` with the bounds `Mod_LoadModel` gave the file: ±16 for any alias
+    /// model (`Mod_LoadAliasModel`), `±maxwidth/2` across and `±maxheight/2`
+    /// up for a sprite (`Mod_LoadSpriteModel`, C ints), not a zero box.
+    #[test]
+    fn alias_and_sprite_models_get_mod_load_model_bounds() {
+        let mut spr = b"IDSP".to_vec();
+        for v in [1i32, 0] {
+            spr.extend_from_slice(&v.to_le_bytes()); // version, type
+        }
+        spr.extend_from_slice(&0f32.to_le_bytes()); // boundingradius
+        for v in [33i32, 21, 1] {
+            spr.extend_from_slice(&v.to_le_bytes()); // width, height, numframes
+        }
+        spr.extend_from_slice(&0f32.to_le_bytes()); // beamlength
+        for v in [0i32, 0, -16, 10, 33, 21] {
+            spr.extend_from_slice(&v.to_le_bytes()); // synctype; SPR_SINGLE, origin, size
+        }
+        spr.resize(spr.len() + 33 * 21, 0);
+        let mut mdl = b"IDPO".to_vec();
+        mdl.extend_from_slice(&6i32.to_le_bytes());
+        let files: [(&str, &[u8]); 2] = [("progs/s.spr", &spr), ("progs/m.mdl", &mdl)];
+        // PACK: header, the files, then the 64-byte directory entries.
+        let mut img = b"PACK".to_vec();
+        let body: usize = files.iter().map(|f| f.1.len()).sum();
+        img.extend_from_slice(&(12 + body as i32).to_le_bytes());
+        img.extend_from_slice(&(64 * files.len() as i32).to_le_bytes());
+        let mut dir = Vec::new();
+        for (name, bytes) in files {
+            let mut n = [0u8; 56];
+            n[..name.len()].copy_from_slice(name.as_bytes());
+            dir.extend_from_slice(&n);
+            dir.extend_from_slice(&(img.len() as i32).to_le_bytes());
+            dir.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+            img.extend_from_slice(bytes);
+        }
+        img.extend_from_slice(&dir);
+        let pak = crate::pak::Pak::from_bytes("t".into(), img).expect("pak");
+        let mut wm = WorldModel::with_pak(empty_bsp(), Some(pak));
+        for name in ["progs/s.spr", "progs/m.mdl", "progs/missing.mdl"] {
+            wm.precache_model(name);
+        }
+        // -33/2 and 33/2 truncate toward zero: 16; 21/2: 10.
+        assert_eq!(wm.model_bbox("progs/s.spr"), Some(([-16.0, -16.0, -10.0], [16.0, 16.0, 10.0])));
+        assert_eq!(wm.model_bbox("progs/m.mdl"), Some(([-16.0; 3], [16.0; 3])));
+        assert_eq!(wm.model_bbox("progs/missing.mdl"), None, "id would Sys_Error; a zero box");
     }
 
     // -------------------------------------------------------- world / builtins

@@ -196,7 +196,7 @@ static void Oracle_Shot_f (void)
 
 // oracle_edicts path -- the census instrument: append every live server edict
 // (number, classname, model, origin, angles, frame, movetype, solid, flags,
-// health, nextthink, effects, targetname) to path, preceded by a "# t=" line
+// health, nextthink, effects, targetname, mins, maxs) to path, preceded by a "# t=" line
 // with sv.time. Lets a port run be diffed against id's own simulation.
 static void Oracle_Edicts_f (void)
 {
@@ -221,12 +221,15 @@ static void Oracle_Edicts_f (void)
 		e = EDICT_NUM(i);
 		if (e->free)
 			continue;
-		fprintf (f, "%d\t%s\t%s\t%.3f %.3f %.3f\t%.3f %.3f %.3f\t%g\t%g\t%g\t%g\t%g\t%.3f\t%g\t%s\n", i,
+		fprintf (f, "%d\t%s\t%s\t%.3f %.3f %.3f\t%.3f %.3f %.3f\t%g\t%g\t%g\t%g\t%g\t%.3f\t%g\t%s"
+			"\t%.3f %.3f %.3f\t%.3f %.3f %.3f\n", i,
 			pr_strings + e->v.classname, pr_strings + e->v.model,
 			e->v.origin[0], e->v.origin[1], e->v.origin[2],
 			e->v.angles[0], e->v.angles[1], e->v.angles[2],
 			e->v.frame, e->v.movetype, e->v.solid, e->v.flags, e->v.health,
-			e->v.nextthink, e->v.effects, pr_strings + e->v.targetname);
+			e->v.nextthink, e->v.effects, pr_strings + e->v.targetname,
+			e->v.mins[0], e->v.mins[1], e->v.mins[2],
+			e->v.maxs[0], e->v.maxs[1], e->v.maxs[2]);
 	}
 	fclose (f);
 }

@@ -1771,6 +1771,25 @@ each; the C followed and the evidence are in the commit messages.
   on stderr. The page already capped its modes at 1280x800. Tests
   `no_view_is_larger_than_id_maxwidth_by_maxheight`,
   `res_is_at_most_id_largest_mode`.
+- ✅ **`setmodel` gives alias models and sprites id's box** (LOW, CENSUS
+  L10). The port gave every `.mdl`/`.spr` a zero box (its comment said id
+  did). `PF_setmodel` is `SetMinMaxSize (e, mod->mins, mod->maxs, true)` on
+  the model `PF_precache_model` loaded (`sv.models[i] = Mod_ForName (s,
+  true)`), and `Mod_LoadModel` gives an alias model ±16
+  (`Mod_LoadAliasModel`, "FIXME: do this right") and a sprite
+  `±maxwidth/2` across, `±maxheight/2` up (`Mod_LoadSpriteModel`). Precache
+  now resolves every model file's bounds by its magic (IDPO, IDSP, else a
+  brush model's submodel 0, as before for the b_*.bsp boxes). What QuakeC
+  `setsize`s afterwards is unchanged; what it does not — an explosion's
+  `s_explod.spr` (56x56: ±28, id's rocket explosion in `oracle_edicts` is
+  ±28 too) — now links with id's box, so `SV_WriteEntitiesToClient`'s leaf
+  test sends it where id would. Evidence: the edict dumps gained `mins`/`maxs`
+  (`oracle_edicts`, `quaketool census-edicts`, `edict_diff.py --fields
+  mins,maxs`): over nine maps × five times the port's boxes change only for
+  the flames and torches L17 keeps as live edicts (±16, their static
+  entity's box in id), and on e1m1–e1m3 every entity both sides have
+  matches id's box. Census and simbench output unchanged. Test
+  `alias_and_sprite_models_get_mod_load_model_bounds`.
 
 ## LOW (27)
 
