@@ -33,6 +33,9 @@ use quake_rs::snd::{
 use quake_rs::tent::{BeamModel, BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 
+mod bench;
+use bench::Phase;
+
 static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
@@ -1933,6 +1936,7 @@ pub extern "C" fn look(dyaw: f32, dpitch: f32) {
 #[no_mangle]
 pub extern "C" fn step(dt: f32) {
     ensure_app(|a| {
+        bench::frame_begin();
         // Advance the App clock (drives the menu cursor animation; mode-independent
         // so the cursor keeps blinking over a frozen frame). Guard a non-finite /
         // negative dt so it only moves forward.
@@ -1961,6 +1965,7 @@ pub extern "C" fn step(dt: f32) {
         // Each mode returns its frame plus a DEFERRED screen blend (color, alpha):
         // the software V_UpdatePalette cshift tints the WHOLE screen, so we apply it
         // after the HUD/menu/console have composited, not just over the 3D view.
+        bench::lap(Phase::Input);
         let frame = if a.mode == 1 {
             a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
         } else {
@@ -2009,6 +2014,7 @@ pub extern "C" fn step(dt: f32) {
                 }
             }
         }
+        bench::lap(Phase::Menu);
 
         // The console overlays everything and (per the gate above) replaces the menu
         // while open — matching Quake, where the menu and the drop-down console are
@@ -2029,6 +2035,7 @@ pub extern "C" fn step(dt: f32) {
                 }
             }
         }
+        bench::lap(Phase::Console);
 
         // V_UpdatePalette runs LAST in SCR_UpdateScreen: tint the fully composited
         // frame (3D + HUD + centerprint/notify + menu + console) with the deferred
@@ -2037,6 +2044,7 @@ pub extern "C" fn step(dt: f32) {
         if let Some(img) = img.as_mut() {
             render::apply_blend(img, blend.0, blend.1);
         }
+        bench::lap(Phase::Blend);
 
         if let Some(img) = img {
             // V_CheckGamma (view.c): rebuild the gamma LUT only when the cvar
@@ -2072,6 +2080,8 @@ pub extern "C" fn step(dt: f32) {
                 }
             }
         }
+        bench::lap(Phase::Pack);
+        bench::frame_end();
     });
 }
 
@@ -4093,8 +4103,10 @@ fn step_walk(
     // The animated light-style scales (torch flicker, pulsing lights) at the
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
+    bench::lap(Phase::Sim);
     let mut img =
         render::render_scene_ext_sprited(&w.bsp, &cam, render_w, render_h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
+    bench::lap(Phase::Render3d);
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
     //     player lost health/armour this frame, and tint the view when the eye is
@@ -4165,6 +4177,7 @@ fn step_walk(
     } else {
         render::combine_cshifts(&shifts)
     };
+    bench::lap(Phase::Post3d);
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
@@ -4281,6 +4294,7 @@ fn step_walk(
     // the App level now so it can overlay walk OR the attract demo); step_walk no
     // longer draws it. The deferred screen blend rides out with the frame so the
     // dispatcher tints the whole composited image (HUD + menu + console included).
+    bench::lap(Phase::Hud2d);
     (img, blend.0, blend.1)
 }
 
@@ -4686,7 +4700,9 @@ fn step_demo(
             _ => None,
         }
     };
+    bench::lap(Phase::Sim);
     let mut img = render::render_scene_ext_sprited(&d.bsp, &cam, render_w, render_h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    bench::lap(Phase::Render3d);
     // D_WarpScreen: a submerged recorded POV ripples exactly like live play —
     // the warp applies to the 3-D frame FIRST; the content tint joins the
     // deferred whole-screen blend below (V_CalcBlend order).
@@ -4694,6 +4710,7 @@ fn step_demo(
     if eye_contents <= quake_rs::bsp::CONTENTS_WATER {
         render::apply_warp(&mut img, f.time);
     }
+    bench::lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
     // owning the screen (`key_dest == key_game` — i.e. no menu/console up).
@@ -4814,6 +4831,7 @@ fn step_demo(
     } else {
         render::combine_cshifts(&shifts)
     };
+    bench::lap(Phase::Hud2d);
     (img, blend.0, blend.1)
 }
 
