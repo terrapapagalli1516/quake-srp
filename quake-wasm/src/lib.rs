@@ -24,7 +24,8 @@ use quake_rs::render::{
     self, build_gamma_table, Camera, Console, Menu, MenuAction, MenuPics, MenuSound,
     ModelInstance, Viewmodel, BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON,
     BIND_FORWARD, BIND_JUMP, BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN,
-    BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP, BIND_RIGHT, BIND_SPEED, BIND_STRAFE,
+    BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP, BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP,
+    BIND_SPEED, BIND_STRAFE,
 };
 use quake_rs::server::{Server, StaticSound, TempEntityEvent, UserCmd};
 use quake_rs::snd::{
@@ -38,10 +39,10 @@ static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");
 const WALK_MAP: &str = "maps/e1m1.bsp";
 const DEMO_FILE: &str = "demo1.dem";
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
-/// stay a member of [`render::RESOLUTION_PRESETS`] so the Options "Screen size"
-/// label can sync to it). The page restores the player's *saved* resolution from
-/// `localStorage` over this on load, and the Options menu lets them change it at
-/// runtime; the chosen size now persists across boots / New Game / reloads. The
+/// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
+/// can mark it current). The page restores the player's *saved* resolution from
+/// `localStorage` over this on load, and Options > Video Options lets them change
+/// it at runtime; the chosen size now persists across boots / New Game / reloads. The
 /// menu + HUD auto-scale to whatever size they're drawn into.
 const DEFAULT_W: usize = 960;
 const DEFAULT_H: usize = 600;
@@ -970,7 +971,7 @@ pub extern "C" fn boot() -> i32 {
             a.menu.open();
             // PRESERVE the player's chosen resolution across the re-boot: keep the
             // current framebuffer size (the source of truth) and point the fresh
-            // menu's Screen-size preset at it, instead of snapping back to DEFAULT.
+            // menu's current video mode at it, instead of snapping back to DEFAULT.
             // (Re-booting used to revert a menu-picked resolution; it no longer does.)
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
@@ -997,8 +998,8 @@ pub extern "C" fn boot_demo() -> i32 {
             // Navigation-only reset: options/bindings/slot comments survive (the
             // C never resets cvars or keybindings on a mode change). PRESERVE the
             // chosen resolution too (keep the live framebuffer) and point the
-            // menu's Screen-size preset at it so it's correct when the player
-            // next opens Options.
+            // menu's current video mode at it so it's correct when the player
+            // next opens Video Options.
             a.menu.reset_nav();
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
@@ -1028,7 +1029,7 @@ pub extern "C" fn boot_attract() -> i32 {
             // The menu overlays the PLAYING attract demo. Navigation-only reset
             // (options/bindings survive a re-entry to the attract loop). PRESERVE
             // the chosen resolution (keep the live framebuffer) and sync the
-            // menu's Screen-size label to it. On the very first load the
+            // menu's current video mode to it. On the very first load the
             // framebuffer is at DEFAULT; the page then restores any saved
             // resolution over it.
             a.menu.reset_nav();
@@ -1085,9 +1086,9 @@ pub extern "C" fn set_resolution(w: i32, h: i32) {
     let (cw, ch) = clamp_resolution(w, h);
     ensure_app(|a| {
         a.set_render_size(cw, ch);
-        // Keep the Options "Screen size" label pointing at the new size too, so a
-        // programmatic set (e.g. the page restoring a saved resolution on load)
-        // doesn't leave the menu showing a stale preset.
+        // Keep the Video Options "current mode" pointing at the new size too, so
+        // a programmatic set (e.g. the page restoring a saved resolution on load)
+        // doesn't leave the menu showing a stale mode.
         a.menu.sync_resolution(cw as i32, ch as i32);
     });
 }
@@ -1189,9 +1190,10 @@ pub extern "C" fn menu_select() {
             match a.menu.select() {
                 MenuAction::NewGame => start_new_game = true,
                 MenuAction::ResolutionChanged => {
-                    // Enter on the Options "Screen size" row cycled the preset;
-                    // capture the new (clamped) size and resize the framebuffer
-                    // after the borrow, exactly like the left/right-arrow path.
+                    // Enter on a Video Options mode line (VID_MenuKey K_ENTER ->
+                    // VID_SetMode): capture the new (clamped) size and resize the
+                    // framebuffer after the borrow. The page notices the new
+                    // width()/height(), re-fits the canvas and persists it.
                     let (rw, rh) = a.menu.resolution();
                     new_size = Some(clamp_resolution(rw, rh));
                 }
@@ -1202,9 +1204,8 @@ pub extern "C" fn menu_select() {
                 }
                 MenuAction::ResetDefaults => {
                     // Options "Reset to defaults": select() reset the in-menu
-                    // cvars; re-read the render-size preset (unchanged here) so the
-                    // Screen-size row stays in sync. Sensitivity/volume are read
-                    // live by the host each frame, so nothing else to do.
+                    // cvars (viewsize/sensitivity/volume/... are read live each
+                    // frame); the video mode is not a default.cfg cvar and stays.
                     a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
                 }
                 // Save/Load menu slots -> the Host_Savegame_f/Host_Loadgame_f
@@ -1249,7 +1250,7 @@ pub extern "C" fn menu_select() {
                 // Run, then New Game" flow must not lose them).
                 a.menu.reset_nav();
                 // PRESERVE the chosen resolution across New Game (keep the live
-                // framebuffer) and point the menu's Screen-size preset at it,
+                // framebuffer) and point the menu's current video mode at it,
                 // instead of snapping back to DEFAULT — starting a game no longer
                 // throws away a menu-picked resolution.
                 a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
@@ -1297,39 +1298,42 @@ pub extern "C" fn menu_quit_no() {
     });
 }
 
-/// Adjust the highlighted Options row leftward (decrement / cycle back), porting
-/// `K_LEFTARROW` on the options screen. A no-op unless the menu is visible AND on
-/// the Options screen ([`Menu::adjust`] itself enforces the latter). If the
-/// "Screen size" row changed, the framebuffer is reallocated to the menu's new
-/// [`Menu::resolution`] so `width()`/`height()` and the next `step` follow it.
+/// Adjust the highlighted Options row leftward (`K_LEFTARROW` -> `M_AdjustSliders
+/// (-1)`; on Load/Save/Keys/Video it moves the cursor, on Help it pages). A
+/// no-op when the menu is hidden. The Screen size row is `viewsize`, which the
+/// next `step` frames the view with — it never touches the framebuffer size
+/// (that is Enter on Video Options).
 #[no_mangle]
 pub extern "C" fn menu_left() {
     menu_adjust(-1);
 }
 
-/// Adjust the highlighted Options row rightward (increment / cycle forward),
-/// porting `K_RIGHTARROW`. See [`menu_left`] for the resolution-apply behaviour.
+/// Adjust the highlighted Options row rightward (`K_RIGHTARROW`). See
+/// [`menu_left`].
 #[no_mangle]
 pub extern "C" fn menu_right() {
     menu_adjust(1);
 }
 
-/// Shared body of [`menu_left`]/[`menu_right`]: adjust the Options row under the
-/// borrow, and if the Screen-size row changed, capture the new size and resize the
-/// framebuffer afterward (so we don't hold the borrow while touching the App's
-/// fb). No-op when the menu is hidden.
+/// Shared body of [`menu_left`]/[`menu_right`]. No-op when the menu is hidden.
 fn menu_adjust(delta: i32) {
-    let mut new_size: Option<(usize, usize)> = None;
     ensure_app(|a| {
-        if a.menu.visible && a.menu.adjust(delta) {
-            // The Screen-size row changed: read the new (clamped) resolution.
-            let (rw, rh) = a.menu.resolution();
-            new_size = Some(clamp_resolution(rw, rh));
+        if a.menu.visible {
+            a.menu.adjust(delta);
         }
     });
-    if let Some((w, h)) = new_size {
-        ensure_app(|a| a.set_render_size(w, h));
-    }
+}
+
+/// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.
+/// Read-only, for the page/verification harness like [`volume`].
+#[no_mangle]
+pub extern "C" fn viewsize() -> f32 {
+    APP.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|a| a.menu.viewsize())
+            .unwrap_or(render::VIEWSIZE_DEFAULT)
+    })
 }
 
 /// Backspace/Del while the menu is up: on the Customize-controls screen this
@@ -1409,6 +1413,10 @@ pub extern "C" fn key_down(keynum: i32) {
                     }
                 }
             }
+            // default.cfg's `+`/`=` "sizeup" and `-` "sizedown" (SCR_SizeUp_f /
+            // SCR_SizeDown_f): step the viewsize; the next frame reframes.
+            Some(BIND_SIZEUP) => a.menu.size_up(),
+            Some(BIND_SIZEDOWN) => a.menu.size_down(),
             _ => {}
         }
     });
@@ -1717,7 +1725,30 @@ fn execute_console_command(line: &str) {
                 a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
                 a.console.println("  impulse <n>   map <name>");
                 a.console.println("  save <name>   load <name>");
+                a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
+            });
+            return;
+        }
+        // SCR_SizeUp_f / SCR_SizeDown_f: viewsize +/- 10 (SCR_CalcRefdef bounds
+        // it to 30..120 on the next frame).
+        "sizeup" => {
+            ensure_app(|a| a.menu.size_up());
+            return;
+        }
+        "sizedown" => {
+            ensure_app(|a| a.menu.size_down());
+            return;
+        }
+        // The `viewsize` cvar (Cvar_Command): no argument prints it the C's way,
+        // one argument sets it (bounded like SCR_CalcRefdef).
+        "viewsize" => {
+            ensure_app(|a| match argv.get(1) {
+                None => {
+                    let v = a.menu.viewsize();
+                    a.console.println(format!("\"viewsize\" is \"{}\"", cvar_string(v)));
+                }
+                Some(arg) => a.menu.set_viewsize(arg.parse::<f32>().unwrap_or(0.0)),
             });
             return;
         }
@@ -1772,6 +1803,17 @@ fn execute_console_command(line: &str) {
     if !known {
         ensure_app(|a| a.console.println(format!("unknown command: {cmd}")));
     }
+}
+
+/// A cvar value as the console prints it: `%f` with the trailing zeros (and a
+/// bare trailing point) trimmed — `100`, `55.5`. (The C prints the cvar's
+/// STRING, which is whatever set it last: "100" from default.cfg, "55" typed,
+/// but "110.000000" after `Cvar_SetValue`'s `%f`. This port keeps no cvar
+/// strings, so it always prints the short form.)
+fn cvar_string(v: f32) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    s.to_string()
 }
 
 /// Run a command that acts on the live player edict, pushing any output lines
@@ -1916,8 +1958,8 @@ fn run_map_command(name: Option<&str>) {
             a.menu.reset_nav();
             // Preserve the player's chosen render resolution across a `map` (the C
             // keeps the video mode): the framebuffer is untouched, and we eagerly
-            // point the menu's Screen-size preset at it — same as every other
-            // re-boot site — so the Options label is correct the instant the
+            // point the menu's current video mode at it — same as every other
+            // re-boot site — so the Video Options list is correct the instant the
             // player opens it (not relying on the per-frame sync in step()).
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
@@ -2028,10 +2070,9 @@ pub extern "C" fn step(dt: f32) {
         // Uses the active mode's palette, host_time (the App clock) for the
         // menudot spinner and realtime for the flashing cursors.
         if menu_visible && !a.console.open {
-            // Keep the Options "Screen size" label tracking the actual render
+            // Keep the Video Options "current mode" tracking the actual render
             // resolution (the framebuffer is the source of truth), so a boot /
-            // New Game / `map` that changed the render size can't leave the label
-            // stale.
+            // New Game / `map` that changed the render size can't leave it stale.
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
@@ -5410,38 +5451,183 @@ mod tests {
     }
 
     #[test]
-    fn menu_left_right_cycle_resolution_and_apply() {
-        // A fresh boot sits in the menu on Main. Navigate to Options and cycle the
-        // Screen size row with menu_right; the engine's resolution must follow.
+    fn screen_size_is_viewsize_and_video_options_sets_the_mode() {
+        // WinQuake: Options "Screen size" is scr_viewsize; the video mode lives
+        // in Options > Video Options (M_Video -> VID_MenuDraw/VID_MenuKey). The
+        // port used to cycle render resolutions on the Screen size row.
         assert_eq!(boot(), 1);
         assert_eq!(menu_visible(), 1, "boot enters the menu");
-        // Default render size before touching anything (boot preserves it; a fresh
-        // app boots at DEFAULT = 960x600, which is preset index 4).
-        assert_eq!(width(), DEFAULT_W as i32);
-        assert_eq!(height(), DEFAULT_H as i32);
-        // Main cursor 0 is Single Player; move down to Options (item 2) and Enter.
+        assert_eq!((width(), height()), (DEFAULT_W as i32, DEFAULT_H as i32));
         menu_down(); // -> 1 (Multiplayer)
         menu_down(); // -> 2 (Options)
         menu_select(); // enter Options (cursor on row 0 = Customize controls)
-        assert_eq!(menu_visible(), 1);
-        // The Screen size row is row 3 (after Customize controls / Go to console /
-        // Reset to defaults), so step down 3 rows, then menu_right cycles the preset.
         menu_down(); // -> 1 (Go to console)
         menu_down(); // -> 2 (Reset to defaults)
         menu_down(); // -> 3 (Screen size)
-        // menu_right on a non-resolution row wouldn't change the size; on Screen
-        // size it cycles to the next preset (960x600 -> 1120x700) and reallocates
-        // the framebuffer.
+        assert_eq!(viewsize(), 100.0, "viewsize defaults to 100");
         menu_right();
-        assert_eq!((width(), height()), (1120, 700), "right cycles to the 1120x700 preset");
+        assert_eq!(viewsize(), 110.0, "right steps viewsize +10");
+        menu_left();
+        menu_left();
+        assert_eq!(viewsize(), 90.0, "left steps viewsize -10");
+        menu_select(); // Enter = M_AdjustSliders(1)
+        assert_eq!(viewsize(), 100.0);
+        assert_eq!(
+            (width(), height()),
+            (DEFAULT_W as i32, DEFAULT_H as i32),
+            "Screen size never resizes the framebuffer"
+        );
+        // Video Options (row 12): the cursor opens on the current mode (960x600,
+        // preset 4); left/right/up/down move the line only, Enter applies it.
+        for _ in 0..9 {
+            menu_down();
+        }
+        menu_select();
+        assert_eq!(menu_screen(), render::MenuScreen::Video);
+        APP.with(|c| assert_eq!(c.borrow().as_ref().unwrap().menu.cursor(), 4));
+        menu_down(); // -> 1120x700
+        menu_right(); // -> 1280x800 (VID_MenuKey moves the line)
+        menu_left(); // -> back to 1120x700
+        assert_eq!((width(), height()), (DEFAULT_W as i32, DEFAULT_H as i32), "moving the line alone");
+        menu_select();
+        assert_eq!((width(), height()), (1120, 700), "Enter sets the highlighted mode");
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), 1120 * 700 * 4, "fb reallocated to the new preset");
+            assert_eq!(a.fb.len(), 1120 * 700 * 4, "fb reallocated to the new mode");
+            assert_eq!(a.menu.resolution(), (1120, 700), "the list marks it current");
         });
-        // menu_left cycles back to the 960x600 default.
-        menu_left();
-        assert_eq!((width(), height()), (DEFAULT_W as i32, DEFAULT_H as i32), "left cycles back to the default");
+        assert_eq!(viewsize(), 100.0, "the mode never touches viewsize");
+        menu_cancel();
+        assert_eq!(menu_screen(), render::MenuScreen::Options, "Esc returns to Options");
+        set_resolution(DEFAULT_W as i32, DEFAULT_H as i32);
+    }
+
+    /// The finished RGBA framebuffer as RGB rows (gamma 1.0 = identity).
+    fn fb_rgb() -> (usize, usize, Vec<[u8; 3]>) {
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            let px = a.fb.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+            (a.render_w, a.render_h, px)
+        })
+    }
+
+    /// Set viewsize through the console (the `viewsize <n>` cvar command) and
+    /// render one frozen frame (dt = 0: the world, bob and animations hold).
+    fn frame_at_viewsize(vs: u32) -> Vec<[u8; 3]> {
+        console_toggle();
+        run_console_line(&format!("viewsize {vs}"));
+        console_toggle();
+        assert_eq!(viewsize(), vs as f32);
+        step(0.0);
+        fb_rgb().2
+    }
+
+    #[test]
+    fn viewsize_frames_the_view_above_the_status_bar_like_the_c() {
+        // SCR_CalcRefdef/R_SetVrect end to end on the real e1m1 at 320x200.
+        assert_eq!(boot(), 1);
+        set_resolution(320, 200);
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
+        step(0.05);
+        step(0.05);
+        let (w, h, _) = fb_rgb();
+        assert_eq!((w, h), (320, 200));
+        let f120 = frame_at_viewsize(120);
+        let f110 = frame_at_viewsize(110);
+        let f100 = frame_at_viewsize(100);
+        let f50 = frame_at_viewsize(50);
+        let row = |f: &Vec<[u8; 3]>, y: usize| f[y * 320..(y + 1) * 320].to_vec();
+        // The projection is centred on the view rectangle with the same
+        // xscale, so the 100 view (320x152, centre 76) is the full-screen 120
+        // view (centre 100) shifted up 24 rows, and the 110 view (320x176,
+        // centre 88) is it shifted up 12 — i.e. id's framing: the view ends at
+        // the status bar instead of running under it. (Allow a few edge pixels
+        // for float rounding in the rasteriser.)
+        let matching = |f: &Vec<[u8; 3]>, rows: usize, shift: usize| {
+            (0..rows)
+                .flat_map(|y| (0..320).map(move |x| (x, y)))
+                .filter(|&(x, y)| f[y * 320 + x] == f120[(y + shift) * 320 + x])
+                .count() as f64
+                / (rows * 320) as f64
+        };
+        let m100 = matching(&f100, 152, 24);
+        let m110 = matching(&f110, 176, 12);
+        assert!(m100 > 0.99, "viewsize 100 = the 120 view shifted up 24 rows ({m100:.4})");
+        assert!(m110 > 0.99, "viewsize 110 = the 120 view shifted up 12 rows ({m110:.4})");
+        // ...and NOT the 120 view unshifted (the old full-screen framing).
+        assert!(matching(&f100, 152, 0) < 0.9, "the horizon moved");
+        // sb_lines: 110 keeps the 24-row status strip of 100 and drops its
+        // inventory strip; 120 has no status bar (its bottom rows are world).
+        for y in 176..200 {
+            assert_eq!(row(&f110, y), row(&f100, y), "row {y}: the same status strip");
+        }
+        assert_ne!(row(&f110, 160), row(&f100, 160), "no inventory strip at 110");
+        // viewsize 50: a 160x100 view at (80, 26) inside the backtile border,
+        // the full 48-line status bar below.
+        let backtile = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            let wk = a.walk.as_ref().unwrap();
+            let t = wk.gfx_wad.as_ref().unwrap().qpic("backtile").expect("backtile in gfx.wad");
+            t.data.iter().map(|&i| wk.palette[i as usize]).collect::<Vec<_>>()
+        });
+        for y in 0..152 {
+            for x in 0..320 {
+                let inside = (80..240).contains(&x) && (26..126).contains(&y);
+                if !inside {
+                    assert_eq!(f50[y * 320 + x], backtile[(y % 64) * 64 + x % 64], "border ({x},{y})");
+                }
+            }
+        }
+        let interior_tiles = (26..126)
+            .flat_map(|y| (80..240).map(move |x| (x, y)))
+            .filter(|&(x, y)| f50[y * 320 + x] == backtile[(y % 64) * 64 + x % 64])
+            .count();
+        // (Brown walls match brown tile texels now and then: ~10% here.)
+        assert!(interior_tiles < 160 * 100 / 2, "the view, not the tile, fills the rectangle ({interior_tiles})");
+        for y in 152..200 {
+            assert_eq!(row(&f50, y), row(&f100, y), "row {y}: the same full status bar");
+        }
+        set_resolution(DEFAULT_W as i32, DEFAULT_H as i32);
+    }
+
+    #[test]
+    fn sizeup_sizedown_console_commands_and_default_binds() {
+        assert_eq!(boot(), 1);
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
+        console_toggle();
+        run_console_line("sizeup");
+        assert_eq!(viewsize(), 110.0);
+        run_console_line("sizeup");
+        run_console_line("sizeup");
+        assert_eq!(viewsize(), 120.0, "bounded at 120");
+        run_console_line("sizedown");
+        assert_eq!(viewsize(), 110.0);
+        run_console_line("viewsize");
+        let printed = APP.with(|c| {
+            c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string)
+        });
+        assert_eq!(printed.as_deref(), Some("\"viewsize\" is \"110\""), "Cvar_Command print");
+        run_console_line("viewsize 5");
+        assert_eq!(viewsize(), 30.0, "bounded at 30");
+        run_console_line("viewsize 100");
+        console_toggle();
+        // default.cfg: `-` sizedown, `=` / `+` sizeup — in the game only
+        // (key_dest == key_game), like every binding.
+        key_down(i32::from(b'-'));
+        key_up(i32::from(b'-'));
+        assert_eq!(viewsize(), 90.0, "'-' is sizedown");
+        key_down(i32::from(b'='));
+        key_up(i32::from(b'='));
+        key_down(i32::from(b'+'));
+        key_up(i32::from(b'+'));
+        assert_eq!(viewsize(), 110.0, "'=' and '+' are sizeup");
+        menu_cancel(); // open the menu: keys no longer reach the bindings
+        key_down(i32::from(b'-'));
+        key_up(i32::from(b'-'));
+        assert_eq!(viewsize(), 110.0, "no binding runs while the menu is up");
     }
 
     #[test]
@@ -5461,8 +5647,8 @@ mod tests {
             (640, 400),
             "re-boot preserves the chosen resolution (was the reported bug)"
         );
-        // ...and the fresh menu's Screen-size preset tracks the live framebuffer,
-        // so opening Options shows the real value (no label/fb desync).
+        // ...and the fresh menu's current video mode tracks the live framebuffer,
+        // so opening Video Options marks the real mode (no label/fb desync).
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
@@ -5471,7 +5657,7 @@ mod tests {
             assert_eq!(
                 a.menu.resolution(),
                 (640, 400),
-                "Options Screen-size label follows the preserved framebuffer"
+                "the Video Options current mode follows the preserved framebuffer"
             );
         });
     }

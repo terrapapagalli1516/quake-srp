@@ -6961,6 +6961,12 @@ pub const BIND_LOOKDOWN: usize = 12;
 pub const BIND_CENTERVIEW: usize = 13;
 pub const BIND_MOVEUP: usize = 16;
 pub const BIND_MOVEDOWN: usize = 17;
+/// Commands `default.cfg` binds that `M_Keys_Draw` doesn't list: they sit past
+/// the [`BINDNAMES`] rows, so Customize controls never shows them, but a
+/// rebind over their key or `Reset to defaults` treats them like any other
+/// binding. `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
+pub const BIND_SIZEUP: usize = NUM_BINDNAMES;
+pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
 /// the 128+ block. Only the keys a browser page can sensibly deliver are named
@@ -7042,6 +7048,9 @@ fn default_bindings() -> [Option<u8>; 256] {
     bind(K_END, BIND_CENTERVIEW);
     bind(b'z', BIND_LOOKDOWN);
     bind(K_SHIFT, BIND_SPEED);
+    bind(b'+', BIND_SIZEUP);
+    bind(b'=', BIND_SIZEUP);
+    bind(b'-', BIND_SIZEDOWN);
     bind(K_CTRL, BIND_ATTACK);
     bind(K_UPARROW, BIND_FORWARD);
     bind(K_DOWNARROW, BIND_BACK);
@@ -7060,19 +7069,15 @@ fn default_bindings() -> [Option<u8>; 256] {
     b
 }
 
-/// The selectable render-resolution presets the Options "Screen size" row cycles
-/// through, as `(width, height)` pairs. A consistent 16:10 ladder (each step
-/// +160w/+100h) from the fast `320x200` up to the host's `1280x800` clamp cap
-/// (`1_280*800` = the exact pixel budget). The engine *boots* at the host's chosen
-/// default (see wasm `DEFAULT_W`/`DEFAULT_H`), which must be one of these so the
-/// menu's Screen-size label can sync to it; higher presets render the 3-D scene at
-/// the larger size (the menu + HUD auto-scale to whatever framebuffer they're drawn
-/// into).
-///
-/// NOTE: this differs from id's `scr_viewsize` (30..120, which shrinks the 3-D
-/// viewport inside a fixed screen). Here the "Screen size" row instead cycles the
-/// engine's actual render resolution — the behaviour the host can really apply —
-/// while drawing a faithful slider whose knob tracks the preset's [0,1] fraction.
+/// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
+/// as `(width, height)` render resolutions — this port's `modelist`. A
+/// consistent 16:10 ladder (each step +160w/+100h) from the fast `320x200` up to
+/// the host's `1280x800` clamp cap (`1_280*800` = the exact pixel budget). The
+/// engine *boots* at the host's chosen default (see wasm `DEFAULT_W`/`DEFAULT_H`),
+/// which must be one of these so the list can mark the current mode; higher modes
+/// render the 3-D scene at the larger size (the menu + HUD auto-scale to whatever
+/// framebuffer they're drawn into). The Options "Screen size" row is id's
+/// `viewsize` (see [`calc_refdef`]), not the mode, exactly as in WinQuake.
 pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
     (320, 200),
     (480, 300),
@@ -7318,14 +7323,12 @@ pub enum MenuAction {
     /// drop-down console (`m_state = m_none; Con_ToggleConsole_f()`).
     OpenConsole,
     /// Options "Reset to defaults": the host should reset the option cvars
-    /// (`exec default.cfg`). [`Menu::select`] already reset the in-menu values; the
-    /// host re-reads [`Menu::resolution`]/sensitivity/volume afterward.
+    /// (`exec default.cfg`). [`Menu::select`] already reset the in-menu values
+    /// (viewsize, gamma, volume, sensitivity, bindings, ...); the host reads them
+    /// live each frame. The video mode is not a default.cfg cvar and stays.
     ResetDefaults,
-    /// The render resolution changed (Enter on the Options "Screen size" row falls
-    /// through to `M_AdjustSliders(1)`, which cycles the preset). The host must
-    /// reallocate its framebuffer to [`Menu::resolution`] — same as the
-    /// left/right-arrow path. Without this, Enter cycled the preset internally but
-    /// the host never resized, so the displayed size snapped back next frame.
+    /// Enter on a Video Options mode line (`VID_MenuKey` K_ENTER -> `VID_SetMode`):
+    /// the host must reallocate its framebuffer to [`Menu::resolution`].
     ResolutionChanged,
 }
 
@@ -7347,8 +7350,10 @@ pub struct Menu {
     screen: MenuScreen,
     /// The highlighted item index on the current screen (`0..item_count`).
     cursor: usize,
-    /// Index into [`RESOLUTION_PRESETS`] for the Options "Screen size" row
-    /// (0 = the fast 320x200 default). [`adjust`](Menu::adjust) cycles it.
+    /// Index into [`RESOLUTION_PRESETS`] of the live video mode (`vid_modenum`):
+    /// what the Video Options list marks as current and opens its cursor on.
+    /// The host keeps it synced to the real framebuffer
+    /// ([`sync_resolution`](Menu::sync_resolution)); Enter on the Video list sets it.
     res_preset: usize,
     /// `viewsize` cvar (`scr_viewsize`), [`VIEWSIZE_MIN`]..=[`VIEWSIZE_MAX`]:
     /// the host frames the 3-D view with it ([`calc_refdef`]).
@@ -7774,16 +7779,11 @@ impl Menu {
                 }
                 // Every other row: Enter latches m_entersound AND falls through
                 // to M_AdjustSliders(1) (its own menu3) — the C audibly plays
-                // BOTH. The Screen-size row resizes the framebuffer, so
-                // propagate that out to the host (the analog/checkbox rows
-                // return false -> None).
+                // BOTH. (Screen size is viewsize: the host reads it each frame.)
                 _ => {
                     self.snd(MenuSound::Menu2);
-                    if self.adjust(1) {
-                        MenuAction::ResolutionChanged
-                    } else {
-                        MenuAction::None
-                    }
+                    self.adjust(1);
+                    MenuAction::None
                 }
             },
             MenuScreen::Keys => {
@@ -7937,21 +7937,18 @@ impl Menu {
     /// porting `M_AdjustSliders` — plus the screens whose `M_*_Key` maps
     /// left/right onto cursor movement (`M_Load_Key`/`M_Save_Key`/`M_Keys_Key`
     /// pair LEFT with UP and RIGHT with DOWN; `VID_MenuKey` steps the mode line)
-    /// and Help paging.
-    ///
-    /// Returns `true` when the Screen-size row changed (so the host knows to
-    /// reallocate the framebuffer to [`resolution`](Menu::resolution)); `false`
-    /// otherwise.
-    pub fn adjust(&mut self, delta: i32) -> bool {
+    /// and Help paging. Nothing here changes the video mode: that is Enter on
+    /// the Video Options list ([`MenuAction::ResolutionChanged`]).
+    pub fn adjust(&mut self, delta: i32) {
         let step = delta.signum();
         if step == 0 {
-            return false;
+            return;
         }
         // M_Help_Key: RIGHT = next page, LEFT = previous page (the C handles
-        // left/right on Help identically to up/down). Not a resolution change.
+        // left/right on Help identically to up/down).
         if self.screen == MenuScreen::Help {
             self.page(step);
-            return false;
+            return;
         }
         // M_Load_Key / M_Save_Key / M_Keys_Key: LEFT pairs with UP and RIGHT
         // with DOWN (cursor movement, menu1 inside move_cursor). VID_MenuKey
@@ -7961,10 +7958,10 @@ impl Menu {
             MenuScreen::Load | MenuScreen::Save | MenuScreen::Keys | MenuScreen::Video
         ) {
             self.move_cursor(step);
-            return false;
+            return;
         }
         if self.screen != MenuScreen::Options {
-            return false;
+            return;
         }
         // M_AdjustSliders plays misc/menu3.wav unconditionally — even when the
         // cursor sits on an action row the switch below ignores.
@@ -7972,63 +7969,43 @@ impl Menu {
         let d = step as f32;
         match self.cursor {
             ROW_SCREENSIZE => {
-                // Cycle the resolution preset, wrapping both directions. (id's
-                // scr_viewsize is replaced by the engine's real render resolution.)
-                let n = RESOLUTION_PRESETS.len() as i32;
-                let next = (self.res_preset as i32 + step).rem_euclid(n);
-                let changed = next as usize != self.res_preset;
-                self.res_preset = next as usize;
-                changed
+                // scr_viewsize.value += dir * 10, clamped 30..=120.
+                self.viewsize =
+                    (self.viewsize + d * VIEWSIZE_STEP).clamp(VIEWSIZE_MIN, VIEWSIZE_MAX);
             }
             ROW_BRIGHTNESS => {
                 // v_gamma.value -= dir * 0.05 (LEFT brightens), clamp 0.5..=1.
                 self.gamma = (self.gamma - d * GAMMA_STEP).clamp(GAMMA_MIN, GAMMA_MAX);
-                false
             }
             ROW_MOUSESPEED => {
                 self.sensitivity =
                     (self.sensitivity + d * SENS_STEP).clamp(SENS_MIN, SENS_MAX);
-                false
             }
             ROW_CDVOLUME => {
                 self.bgm_volume = (self.bgm_volume + d * BGM_STEP).clamp(BGM_MIN, BGM_MAX);
-                false
             }
             ROW_SNDVOLUME => {
                 self.volume = (self.volume + d * VOLUME_STEP).clamp(VOLUME_MIN, VOLUME_MAX);
-                false
             }
             // Checkboxes ignore the direction and simply toggle (matches the C,
             // which flips the bool regardless of `dir`).
-            ROW_ALWAYSRUN => {
-                self.always_run = !self.always_run;
-                false
-            }
-            ROW_INVERTMOUSE => {
-                self.invert_mouse = !self.invert_mouse;
-                false
-            }
-            ROW_LOOKSPRING => {
-                self.lookspring = !self.lookspring;
-                false
-            }
-            ROW_LOOKSTRAFE => {
-                self.lookstrafe = !self.lookstrafe;
-                false
-            }
+            ROW_ALWAYSRUN => self.always_run = !self.always_run,
+            ROW_INVERTMOUSE => self.invert_mouse = !self.invert_mouse,
+            ROW_LOOKSPRING => self.lookspring = !self.lookspring,
+            ROW_LOOKSTRAFE => self.lookstrafe = !self.lookstrafe,
             // Action rows (Customize / Console / Defaults / Video): not adjustable.
-            _ => false,
+            _ => {}
         }
     }
 
     /// Reset every Options cvar to its *port* default (`exec default.cfg`) — id's
     /// values everywhere except Always Run, which resets to ON (this port's
-    /// default; see the field's DEVIATION note). The render resolution preset is
-    /// left to the host (the framebuffer is its own source of truth), matching
-    /// how a `default.cfg` would not change the live mode here. The key bindings
-    /// reset too — the C's `default.cfg` is mostly `bind` lines, re-executed
-    /// wholesale by this row.
+    /// default; see the field's DEVIATION note). `default.cfg` sets `viewsize
+    /// 100`. The video mode is not in `default.cfg`, so the live resolution
+    /// stays. The key bindings reset too — the C's `default.cfg` is mostly
+    /// `bind` lines, re-executed wholesale by this row.
     pub fn reset_defaults(&mut self) {
+        self.viewsize = VIEWSIZE_DEFAULT;
         self.sensitivity = SENS_DEFAULT;
         self.volume = VOLUME_DEFAULT;
         self.gamma = GAMMA_DEFAULT;
@@ -8040,9 +8017,9 @@ impl Menu {
         self.bindings = default_bindings();
     }
 
-    /// The currently-selected render resolution `(width, height)` from the Options
-    /// "Screen size" row (defaults to `320x200`). The host sizes its framebuffer
-    /// to this.
+    /// The current video mode `(width, height)` ([`RESOLUTION_PRESETS`] entry
+    /// `res_preset`; `320x200` until the host syncs it). Enter on the Video
+    /// Options list changes it and the host resizes its framebuffer to it.
     pub fn resolution(&self) -> (i32, i32) {
         RESOLUTION_PRESETS
             .get(self.res_preset)
@@ -8050,8 +8027,8 @@ impl Menu {
             .unwrap_or(RESOLUTION_PRESETS[0])
     }
 
-    /// Point the Options "Screen size" row at the preset matching `(w, h)`, if one
-    /// exists (otherwise leave it). The host calls this with its *actual* render
+    /// Point the Video Options "current mode" at the preset matching `(w, h)`, if
+    /// one exists (otherwise leave it). The host calls this with its *actual* render
     /// size so the displayed value always tracks reality — the framebuffer is the
     /// single source of truth, and the label can never desync from it (e.g. after
     /// a boot / New Game / `map` that changed the render size independently).
@@ -8065,6 +8042,26 @@ impl Menu {
     /// sizes the 3-D view and the status bar from it via [`calc_refdef`].
     pub fn viewsize(&self) -> f32 {
         self.viewsize
+    }
+
+    /// Set the `viewsize` cvar (the console's `viewsize <n>`), bounded to
+    /// 30..=120 as SCR_CalcRefdef bounds it (and writes back) on the next frame.
+    /// A non-number reads as 0 (`atof`), i.e. the minimum.
+    pub fn set_viewsize(&mut self, v: f32) {
+        let v = if v.is_finite() { v } else { 0.0 };
+        self.viewsize = v.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX);
+    }
+
+    /// `sizeup` (SCR_SizeUp_f): `viewsize += 10` (bounded as above). Bound to
+    /// `+` and `=` in default.cfg.
+    pub fn size_up(&mut self) {
+        self.set_viewsize(self.viewsize + VIEWSIZE_STEP);
+    }
+
+    /// `sizedown` (SCR_SizeDown_f): `viewsize -= 10` (bounded as above). Bound
+    /// to `-` in default.cfg.
+    pub fn size_down(&mut self) {
+        self.set_viewsize(self.viewsize - VIEWSIZE_STEP);
     }
 
     /// The Options "Mouse Speed" as a sensitivity multiplier the host applies to
@@ -8761,14 +8758,9 @@ fn draw_options_screen(
         // The analog widgets (M_DrawSlider) on the slider rows, each with its
         // cvar's [0,1] fraction.
         let slider_row = |row: usize| OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
-        // Screen size: the preset's fraction across RESOLUTION_PRESETS (the id
-        // engine uses (viewsize-30)/90; here we map the preset index instead).
-        let res_frac = if RESOLUTION_PRESETS.len() > 1 {
-            menu_res_fraction(menu)
-        } else {
-            0.0
-        };
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SCREENSIZE), res_frac, scale, ox, oy, palette);
+        // Screen size: r = (scr_viewsize - 30) / (120 - 30).
+        let size_frac = (menu.viewsize() - VIEWSIZE_MIN) / (VIEWSIZE_MAX - VIEWSIZE_MIN);
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SCREENSIZE), size_frac, scale, ox, oy, palette);
         // Brightness: r = (1 - gamma)/0.5.
         let bright_frac = (1.0 - menu.gamma()) / (GAMMA_MAX - GAMMA_MIN);
         draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_BRIGHTNESS), bright_frac, scale, ox, oy, palette);
@@ -8796,18 +8788,6 @@ fn draw_options_screen(
         let cy = OPTIONS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
         draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
     }
-}
-
-/// The Screen-size slider's [0,1] fraction: the current preset index divided by
-/// the last index (so the first preset is 0.0 and the last is 1.0). This stands in
-/// for id's `(scr_viewsize - 30)/90`, since the row drives the render resolution.
-fn menu_res_fraction(menu: &Menu) -> f32 {
-    let last = (RESOLUTION_PRESETS.len() - 1).max(1) as f32;
-    let idx = RESOLUTION_PRESETS
-        .iter()
-        .position(|&p| p == menu.resolution())
-        .unwrap_or(0) as f32;
-    idx / last
 }
 
 /// Draw the Load or Save slot list, a port of `M_Load_Draw` / `M_Save_Draw`:
@@ -13774,34 +13754,108 @@ mod tests {
     }
 
     #[test]
-    fn menu_adjust_cycles_resolution_preset() {
+    fn menu_screen_size_row_steps_viewsize_by_10_clamped_30_to_120() {
+        // M_AdjustSliders case 3: scr_viewsize += dir*10, clamped 30..=120 —
+        // the Screen size row is viewsize, NOT the video mode (the old port
+        // cycled render resolutions here; WinQuake keeps those in M_Video).
         let mut m = Menu::new();
         m.open();
         m.cursor = 2;
         m.select(); // -> Options
-        m.cursor = ROW_SCREENSIZE; // the Screen size row (3) holds the resolution.
+        m.cursor = ROW_SCREENSIZE;
         assert_eq!(m.screen(), MenuScreen::Options);
-        // Default is the fast 320x200 (preset index 0).
-        assert_eq!(m.resolution(), (320, 200));
-        // adjust(+1) advances to the next preset and the host-visible resolution
-        // follows. It returns `true` because the Screen-size row changed.
-        assert!(m.adjust(1), "advancing the Screen size row reports a change");
-        assert_eq!(m.resolution(), RESOLUTION_PRESETS[1]);
-        assert_eq!(m.resolution(), (480, 300));
-        // Walk through all presets and confirm it wraps back to 320x200.
-        for expect in [(640, 400), (800, 500), (960, 600), (1120, 700), (1280, 800), (320, 200)] {
-            assert!(m.adjust(1));
-            assert_eq!(m.resolution(), expect);
+        assert_eq!(m.viewsize(), 100.0, "default.cfg: viewsize 100");
+        let mode = m.resolution();
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 110.0);
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 120.0);
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 120.0, "clamped at 120 (no wrap)");
+        for expect in [110.0, 100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 30.0] {
+            m.adjust(-1);
+            assert_eq!(m.viewsize(), expect);
         }
-        // adjust(-1) cycles backward (wraps to the last preset from index 0).
-        assert!(m.adjust(-1));
-        assert_eq!(m.resolution(), (1280, 800));
-        // A zero delta is a no-op and reports no change.
-        assert!(!m.adjust(0));
-        assert_eq!(m.resolution(), (1280, 800));
-        // adjust only acts on the Options screen.
+        assert_eq!(m.resolution(), mode, "Screen size never touches the video mode");
+        // Enter falls through to M_AdjustSliders(1) (menu2 + menu3), no host action.
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.viewsize(), 40.0);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
+        // A zero delta is a no-op; adjust only acts on the Options screen.
+        m.adjust(0);
+        assert_eq!(m.viewsize(), 40.0);
         m.cancel(); // -> Main
-        assert!(!m.adjust(1), "adjust is a no-op off the Options screen");
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 40.0, "adjust is a no-op off the Options screen");
+        // Reset to defaults: default.cfg's `viewsize 100`.
+        m.reset_defaults();
+        assert_eq!(m.viewsize(), 100.0);
+    }
+
+    #[test]
+    fn options_screen_size_slider_tracks_viewsize() {
+        // M_Options_Draw: r = (scr_viewsize - 30) / (120 - 30); the knob (glyph
+        // 131) sits at 220 + 72*r on the Screen-size row (y = 56).
+        let pal = ramp_palette();
+        let mut data = vec![0u8; 128 * 128];
+        for y in 0..8 {
+            for x in 0..8 {
+                data[(8 * 8 + y) * 128 + 3 * 8 + x] = 3; // cell 131 = (3, 8)
+            }
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        let knob_x = |m: &Menu| {
+            let mut img = Image::new(320, 200, [0, 0, 0]);
+            draw_menu(&mut img, m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+            (0..320).find(|&x| img.rgb[56 * 320 + x] == pal[3]).expect("knob drawn")
+        };
+        assert_eq!(knob_x(&m), 276, "viewsize 100: r = 70/90 -> 220 + 56");
+        m.set_viewsize(30.0);
+        assert_eq!(knob_x(&m), 220, "viewsize 30: the left end");
+        m.set_viewsize(120.0);
+        assert_eq!(knob_x(&m), 292, "viewsize 120: the right end");
+    }
+
+    #[test]
+    fn sizeup_sizedown_and_the_viewsize_cvar_bound_like_scr_calcrefdef() {
+        let mut m = Menu::new();
+        m.size_up();
+        assert_eq!(m.viewsize(), 110.0);
+        m.size_up();
+        m.size_up();
+        assert_eq!(m.viewsize(), 120.0, "sizeup stops at 120");
+        for _ in 0..20 {
+            m.size_down();
+        }
+        assert_eq!(m.viewsize(), 30.0, "sizedown stops at 30");
+        // The console can set any value in range (not just multiples of 10);
+        // out-of-range and garbage clamp like SCR_CalcRefdef's bound.
+        m.set_viewsize(55.0);
+        assert_eq!(m.viewsize(), 55.0);
+        m.size_up();
+        assert_eq!(m.viewsize(), 65.0);
+        m.set_viewsize(7.0);
+        assert_eq!(m.viewsize(), 30.0);
+        m.set_viewsize(1e9);
+        assert_eq!(m.viewsize(), 120.0);
+        m.set_viewsize(f32::NAN);
+        assert_eq!(m.viewsize(), 30.0, "atof garbage = 0 -> the minimum");
+        // default.cfg binds + and = to sizeup and - to sizedown, as ordinary
+        // (rebindable) bindings that Customize controls doesn't list.
+        let m = Menu::new();
+        assert_eq!(m.action_for_key(b'+'), Some(BIND_SIZEUP));
+        assert_eq!(m.action_for_key(b'='), Some(BIND_SIZEUP));
+        assert_eq!(m.action_for_key(b'-'), Some(BIND_SIZEDOWN));
+        // Customize controls (the BINDNAMES rows) never lists them.
+        let listed = (0..NUM_BINDNAMES).flat_map(|c| m.find_keys_for_command(c));
+        for k in listed.flatten() {
+            assert!(![b'+', b'=', b'-'].contains(&k), "key {k} is not a Keys-screen row");
+        }
     }
 
     #[test]
@@ -13815,10 +13869,9 @@ mod tests {
         m.cursor = ROW_MOUSESPEED;
         assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6);
         assert!((m.mouse_sensitivity() - 1.0).abs() < 1e-6, "default mouse is 1.0x");
-        // Decreasing clamps at SENS_MIN (1), never below — and the Screen-size
-        // change flag is false for non-resolution rows.
+        // Decreasing clamps at SENS_MIN (1), never below.
         for _ in 0..40 {
-            assert!(!m.adjust(-1), "mouse-row adjust never reports a resolution change");
+            m.adjust(-1);
         }
         assert!((m.sensitivity() - SENS_MIN).abs() < 1e-6);
         // Increasing clamps at SENS_MAX (11).
@@ -14016,7 +14069,7 @@ mod tests {
         ] {
             m.cursor = row;
             assert_eq!(getter(&m), initial, "checkbox row {row} starts at its default");
-            assert!(!m.adjust(1), "a checkbox never reports a resolution change");
+            m.adjust(1);
             assert_eq!(getter(&m), !initial, "right toggles it");
             m.adjust(-1);
             assert_eq!(getter(&m), initial, "left toggles it back");
@@ -14291,8 +14344,10 @@ mod tests {
         m.cursor = RESOLUTION_PRESETS.len() - 1;
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0);
-        assert!(!m.adjust(1), "video left/right move the line, not the framebuffer");
-        assert_eq!(m.cursor(), 1);
+        let mode = m.resolution();
+        m.adjust(1);
+        assert_eq!(m.cursor(), 1, "video left/right move the line");
+        assert_eq!(m.resolution(), mode, "...but only Enter sets the mode");
     }
 
     #[test]
@@ -14387,7 +14442,7 @@ mod tests {
         m.cursor = 2;
         m.select(); // Main > Options
         m.cursor = ROW_SCREENSIZE;
-        assert!(m.adjust(1)); // 320x200 -> 480x300
+        m.adjust(-1); // viewsize 100 -> 90
         m.cursor = ROW_BRIGHTNESS;
         m.adjust(1); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
         m.cursor = ROW_MOUSESPEED;
@@ -14425,7 +14480,7 @@ mod tests {
         assert!(!m.bind_grabbing(), "a pending bind grab is cancelled");
         assert!(m.take_sounds().is_empty(), "queued menu sounds are dropped");
         // ...but EVERY user choice survives.
-        assert_eq!(m.resolution(), (480, 300), "Screen size survives");
+        assert_eq!(m.viewsize(), 90.0, "Screen size (viewsize) survives");
         assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives");
         assert!((m.sensitivity() - 3.5).abs() < 1e-6, "Mouse speed survives");
         assert!((m.volume() - 0.6).abs() < 1e-6, "Sound volume survives");
