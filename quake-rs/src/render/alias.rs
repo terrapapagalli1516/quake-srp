@@ -856,13 +856,15 @@ static R_AVERTEXNORMALS: [[f32; 3]; 162] = [
 /// The player's first-person weapon viewmodel: the parsed weapon [`Mdl`]
 /// (`progs/v_shot.mdl` and friends) plus the animation `frame` to pose.
 ///
-/// Unlike [`ModelInstance`], a viewmodel has **no world origin or yaw**: it is
-/// anchored to the camera (view space), always drawn in front of the player at
-/// the lower-centre of the frame and moving/rotating with the view — Quake's
-/// `cl.viewent`, drawn by `R_DrawViewModel`. See [`draw_viewmodel`].
+/// Unlike [`ModelInstance`], a viewmodel is placed relative to the camera:
+/// Quake's `cl.viewent`, which V_CalcRefdef puts at the eye plus the bob and
+/// viewsize fudge (`origin_ofs`) with CalcGunAngle's `angles`, drawn by
+/// `R_DrawViewModel` through the ordinary alias pipeline. See
+/// [`draw_viewmodel`].
 ///
-/// `frame` selects the pose (clamped by [`mdl_frame_verts`], so any value is
-/// safe). The model is borrowed so a cached `Mdl` backs it without cloning.
+/// `frame` selects the pose (an out-of-range frame draws frame 0, as
+/// `R_AliasSetupFrame` does, see [`mdl_frame_verts`]). The model is borrowed
+/// so a cached `Mdl` backs it without cloning.
 pub struct Viewmodel<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub frame: usize,

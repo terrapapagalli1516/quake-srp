@@ -71,7 +71,15 @@ pub struct Refdef {
 /// truncated to `int` (so e.g. 70% of 320 is `(int)(320 * 0.7f) = 224`, as an
 /// IEEE-single build computes it).
 pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> Refdef {
-    // SCR_CalcRefdef: bound viewsize (a non-number reads as the default).
+    let (viewsize, sb_lines, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);
+    Refdef { vrect: set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission), sb_lines }
+}
+
+/// SCR_CalcRefdef's first half: the bounded `viewsize` (a non-number reads as
+/// the default), `sb_lines`, and the framebuffer rows the status bar covers
+/// (the `lineadj` R_SetVrect keeps the view above: `sb_lines` scaled like the
+/// 2-D layer, see [`calc_refdef`]).
+fn status_lines(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> (f32, i32, i64) {
     let viewsize = if viewsize.is_finite() {
         viewsize.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX)
     } else {
@@ -88,12 +96,15 @@ pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool
     };
     // The status bar's framebuffer rows: draw_hud_into scales the 320-wide bar
     // by vid_w/320 and bottom-anchors it, so it covers ceil(sb_lines * scale).
-    let vw = vid_w as i64;
-    let vh = vid_h as i64;
     let scale = vid_w as f32 / HUD_VIRT_W;
-    let mut lineadj = ((sb_lines as f32 * scale).ceil() as i64).clamp(0, vh);
+    let lineadj = ((sb_lines as f32 * scale).ceil() as i64).clamp(0, vid_h as i64);
+    (viewsize, sb_lines, lineadj)
+}
 
-    // R_SetVrect (r_main.c).
+/// `R_SetVrect` (r_main.c): the view rectangle inside a `vw x vh` rectangle
+/// for a bounded `viewsize`, kept above `lineadj` status-bar rows.
+fn set_vrect(vw: i64, vh: i64, viewsize: f32, lineadj: i64, intermission: bool) -> ViewRect {
+    let mut lineadj = lineadj;
     let mut size: f32 = if viewsize > 100.0 { 100.0 } else { viewsize };
     if intermission {
         size = 100.0;
@@ -118,10 +129,51 @@ pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool
     let height = height.clamp(0, vh);
     let x = ((vw - w) / 2).max(0);
     let y = ((h - height) / 2).max(0);
-    Refdef {
-        vrect: ViewRect { x: x as usize, y: y as usize, w: w as usize, h: height as usize },
-        sb_lines,
+    ViewRect { x: x as usize, y: y as usize, w: w as usize, h: height as usize }
+}
+
+/// `WARP_WIDTH` x `WARP_HEIGHT` (d_iface.h): the size of `r_warpbuffer`, the
+/// most the underwater view is rendered at.
+pub const WARP_WIDTH: usize = 320;
+pub const WARP_HEIGHT: usize = 200;
+
+/// The view rectangle id renders an UNDERWATER frame into (`R_SetupFrame`,
+/// r_misc.c, with `r_dowarp`): the view is drawn into `r_warpbuffer` — a
+/// screen of at most [`WARP_WIDTH`] x [`WARP_HEIGHT`] — and `D_WarpScreen`
+/// then stretches it over the screen's view rectangle ([`calc_refdef`]'s
+/// `vrect`) while it wobbles it. A mode no larger than 320x200 renders at its
+/// own size (the stretch is 1:1). A larger one is scaled down to 320 wide,
+/// then capped at 200 high, and R_SetVrect runs on that with the status-bar
+/// lines scaled by the same factor: `(int)(sb_lines * (h / vid.height))`
+/// (here the port's scaled `lineadj`, the C's unscaled sbar). At every 16:10
+/// mode — all of [`RESOLUTION_PRESETS`](crate::menu::RESOLUTION_PRESETS) —
+/// that is the 320x200 screen's own view rectangle.
+///
+/// id's height cap is `h = maxwarpheight; w *= maxwarpheight / h`, a ratio
+/// of 1 (w stays 320), and R_ViewChanged's pixel aspect
+/// (`vid.aspect * (h / w) * (vid.width / vid.height)`) undoes the squeeze.
+/// The port projects square pixels, so for a mode taller than 16:10 it
+/// narrows the buffer instead (`w = vid.width * 200 / vid.height`): the same
+/// picture, sampled a little coarser across (e.g. 266 columns for 4:3). At
+/// 16:10 and wider the C's aspect is `vid.aspect` itself and nothing differs.
+pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> ViewRect {
+    let (viewsize, _, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);
+    if vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT {
+        return set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission);
     }
+    let (mut w, mut h) = (vid_w as f32, vid_h as f32);
+    if w > WARP_WIDTH as f32 {
+        h *= WARP_WIDTH as f32 / w;
+        w = WARP_WIDTH as f32;
+    }
+    if h > WARP_HEIGHT as f32 {
+        h = WARP_HEIGHT as f32;
+        // id: `w *= maxwarpheight / h` after that store, i.e. w stays 320 (see
+        // above); a 16:10 mode whose float h lands a hair over 200 keeps 320.
+        w = w.min((vid_w * WARP_HEIGHT / vid_h.max(1)) as f32);
+    }
+    let lineadj = (lineadj as f32 * (h / vid_h as f32)) as i64;
+    set_vrect(w as i64, h as i64, viewsize, lineadj, intermission)
 }
 
 /// Put the rendered 3-D `view` (a `vrect.w x vrect.h` image) into a
@@ -379,6 +431,31 @@ mod tests {
         let r = calc_refdef(8, 4, 30.0, false);
         assert!(r.vrect.x + r.vrect.w <= 8 && r.vrect.y + r.vrect.h <= 4);
         let _ = calc_refdef(0, 0, 100.0, false);
+    }
+
+    #[test]
+    fn warp_vrect_is_r_setupframes_warp_buffer_view() {
+        // No larger than 320x200: the screen's own view rectangle (1:1 warp).
+        for vs in [30.0, 50.0, 100.0, 110.0, 120.0] {
+            assert_eq!(warp_vrect(320, 200, vs, false), calc_refdef(320, 200, vs, false).vrect);
+        }
+        // Every 16:10 preset renders underwater into the 320x200 screen's view
+        // rectangle (the status-bar lines scaled back by h / vid.height) —
+        // which D_WarpScreen stretches over the preset's own view rectangle.
+        for &(w, h) in RESOLUTION_PRESETS.iter() {
+            for step in 3..=12 {
+                let vs = step as f32 * 10.0;
+                let want = calc_refdef(320, 200, vs, false).vrect;
+                assert_eq!(warp_vrect(w as usize, h as usize, vs, false), want, "{w}x{h} @ {vs}");
+            }
+            assert_eq!(warp_vrect(w as usize, h as usize, 50.0, true), vr(0, 0, 320, 200));
+        }
+        assert_eq!(warp_vrect(960, 600, 50.0, false), vr(80, 26, 160, 100));
+        // Wider than 16:10: 320 wide, the height follows the mode (C's too).
+        assert_eq!(warp_vrect(1280, 600, 120.0, false), vr(0, 0, 320, 150));
+        // Taller (4:3): id squeezes 320x200 with its pixel aspect; the square-
+        // pixel port keeps the shape instead (266 wide, &~7 -> 264).
+        assert_eq!(warp_vrect(640, 480, 120.0, false), vr(1, 0, 264, 200));
     }
 
     #[test]

@@ -830,6 +830,99 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 - ✅ **L6 ED_Alloc / ED_Free** — `Vm::spawn` reuses a free slot only if it was freed in the first two seconds of server time or more than 0.5 s ago (`freetime`), so a missile spawned the frame another is removed never inherits its slot (no stray trail); `Vm::free_edict` clears only `ED_Free`'s fields (model, takedamage, modelindex, colormap, skin, frame, origin, angles, solid; nextthink -1) and keeps the rest, as id does. Tests `ed_alloc_waits_half_a_second_before_reusing_a_freed_slot`, `ed_free_clears_only_the_fields_the_c_clears`.
 - ✅ **F7 the player's name** — `connect_client_inner` sets up the client edict as `Host_Spawn_f` does before `ClientConnect`: `netname` "player" (cl_name), `team` 1 ((cl_color & 15) + 1), `colormap` = its edict number. Obituaries read "player was shot by a Grunt". Test `census_player_netname_is_player`.
 
+## Review fixes (2026-09-25, branch `quake/polish`)
+
+Findings of the adversarial review of the overnight merge, one line each; the
+C followed and the test are in the commit message.
+
+- ✅ **Loading a save kept no options** (MED) — `load_game` rebuilt the Menu
+  (`Menu::new()`), so Screen size, Brightness, Always Run, every rebind and the
+  slot listings snapped to defaults. `Host_Loadgame_f` never touches a cvar or
+  `keybindings[]`; now the same `reset_nav()` as New Game. Test
+  `load_keeps_every_option_and_binding` (the `viewsize 60`, `save t`, `load t`
+  repro).
+- ✅ **Debug-build overflow on sliver alias triangles** (LOW) — after
+  `R_AliasClipTriangle` a sliver (d_xdenom of a few units under a long edge)
+  gets 1/z and light steps far out of `int` range. id's `(int)` gives
+  0x80000000 there (Rust's `as` saturated to 0x7FFFFFFF for positive ones) and
+  its `int` sums wrap; a debug build panicked in `scan_left_edge` (`d_zi +=`,
+  `d_light +=`). `polyse.rs` now converts with `c_ftoi` and wraps every step
+  sum and the subdivision midpoints like the C. Tests
+  `sliver_triangles_wrap_like_the_c_ints`, `float_to_int_is_x86s_not_rusts_saturation`;
+  the review's stress harness (4000 random gun/entity renders with overflow
+  checks) panicked at iteration 3068 before, none now. Goldens unchanged.
+- ✅ **`intsintable` is not wrapped** (LOW) — `D_WarpScreen` reads
+  `turb = intsintable + phase` at `turb[u]`/`turb[v]` over the whole screen, and
+  `R_InitTurb`'s `3.14159` makes the table non-periodic: at i = 128, 256, ...
+  the entry is 2 where a wrapped cycle gives 3. `apply_warp` indexed `& 127`;
+  now it reads the unwrapped table (`intsintable`). Tests
+  `intsintable_is_r_initturbs_unwrapped_table`,
+  `warp_reads_intsintable_past_the_first_cycle`. (Turbulent8's `sintable` was
+  already unwrapped, fid1.)
+- ✅ **Underwater view at the warp buffer's resolution** — with the eye in
+  water/slime/lava, id's `R_SetupFrame` renders the view into `r_warpbuffer`
+  (at most `WARP_WIDTH` x `WARP_HEIGHT`, 320x200: the mode scaled to 320 wide,
+  capped at 200 high, `R_SetVrect` on that with `sb_lines * h/vid.height`)
+  and `D_WarpScreen` stretches it over `scr_vrect` (`wratio`/`hratio`, the
+  C's float row/column tables). The port rendered and warped at full
+  resolution. Now `screen::warp_vrect` + `apply_warp(view, out_w, out_h,
+  clock)` (a new signature, so `render/mod.rs` is untouched), live, demo and
+  `quaketool view` (which now warps an underwater eye like id's
+  `R_RenderView`). Oracle, e1m1's pool (`--view=750,898,-332,0,90,0 --time
+  1.6`), exact%: 320x200 97.58; 640x400 48.22 -> 97.59; 960x600 44.14 ->
+  97.60; 1280x800 42.65 -> 97.63 (before = the full-resolution warp). Cheaper
+  too: an underwater frame renders 320x152 at every preset. At every 16:10
+  mode the C's pixel aspect for the warp buffer equals `vid.aspect`, so the
+  square-pixel projection is exact; for a mode taller than 16:10 id squeezes
+  320x200 through that aspect and the port narrows the buffer instead
+  (`vid.width*200/vid.height` wide: same picture, e.g. 266 columns at 4:3).
+  Whoever lands the pixel-aspect projection: the warp buffer's aspect is
+  `vid.aspect * (h/w) * (vid.width/vid.height)` (R_ViewChanged). Tests
+  `warp_vrect_is_r_setupframes_warp_buffer_view`,
+  `warp_stretches_the_warp_buffer_over_the_screen_view`,
+  `underwater_view_renders_into_the_warp_buffer`. Goldens unchanged.
+- ✅ **The client clock is `cl.time`** — the live walk's `w.clock` started at
+  0 and counted `dt`, so the sky, liquids, underwater warp, texture/alias
+  animation and `R_AnimateLight`'s `(int)(cl.time*10)` ran about 1.2 s behind
+  id's (and reset to 0 at every changelevel, restart and load). On a local
+  server `CL_LerpPoint` snaps `cl.time` to the message time, `sv.time` after
+  the frame's physics: `w.clock` is now `server.time()` after every server
+  frame and at every walk build (spawn, changelevel, restart, load = the
+  save's time), and still stops behind the menu. Particles, dlights, beams,
+  the bob, rotating pickups and the intermission sway run on it too, as they
+  do on `cl.time` in the C. Tests `client_clock_is_the_server_clock`, and the
+  load in `save_load_round_trips_the_world_digest`. Demo playback already ran
+  on the recorded `cl.time`.
+- ✅ **Damage flash percent is an `int`** (review item) — already fixed on
+  main by census L2 (`3ec96f4`, `cshift_add`/`cshift_drop`); the demo test
+  asserts id's 22 (30 - 7.5 truncated), the ramps take the int percent.
+  Nothing further to change.
+- ✅ **`quaketool playtest` framing** — the POV shot drew a full-screen view
+  (viewsize 120's framing) with the viewsize-100 gun fudge and pasted the
+  48-line bar over it, so the gun sat under the bar. Now it is the game's
+  default screen: `calc_refdef` at viewsize 100, the view above the bar,
+  `compose_view` with the backtile, the gun offset for the same viewsize.
+  Test `playtest_frames_the_view_for_the_guns_viewsize`.
+- ✅ **Stale comments** — `render_scene_ext`'s doc (the gun "uses its own
+  depth buffer", "a plain `[f32; 256]`" sine table, "walls, alias models and
+  the viewmodel ignore `time`"), `Viewmodel`'s ("no world origin", "view
+  space", frame "clamped"), and the `V_CalcBlend` mentions in `cl_walk.rs`,
+  `cl_demo.rs` and the README (the shifts are the software `V_UpdatePalette`
+  ramps). Comments only (`render/mod.rs` touched for its doc comment alone).
+- ✅ **Census L11: prints reach the console scrollback** — `Con_Print`
+  writes the console's text buffer, and the notify lines are its last
+  lines; the port showed `svc_print` text only in the notify overlay. Now
+  `quake_rs::console::ConCursor` is Con_Print's layout (`con_x`, the word
+  wrap at `con_linewidth` 38 — a word longer than a line runs on until its
+  remainder fits — `\n`, `\r`), shared by the notify lines and
+  `Console::print`; `println` is `Con_Printf("%s\n")` through it, so
+  console output wraps too and continues a line a print left open. The
+  dispatcher hands each frame's printed text (live or demo) to the console.
+  Tests `console_print_is_con_print`, `game_prints_reach_the_console_scrollback`
+  (e1m1's shells pickup). Still open: console command output does not reach
+  the notify lines (the C's one buffer shows `]god` / `godmode ON` there
+  for 3 s after the console closes).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

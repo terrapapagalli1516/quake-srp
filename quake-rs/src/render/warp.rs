@@ -6,68 +6,67 @@
 
 use super::Image;
 
-/// `D_WarpScreen` (d_scan.c): the underwater full-screen sine wobble applied when
-/// the view leaf is in water/slime/lava (`r_waterwarp`, default on). Each output
-/// pixel samples a source pixel displaced by a per-row/per-column sine offset
-/// (`AMP2 = 3`, `SPEED = 20`, 128-cycle `intsintable`), with a slight edge
-/// compression (`dim/(dim + 2*AMP2)`) so the warp never reads outside the frame.
-/// The row displacement is driven by the column's sine and vice-versa (the classic
-/// cross-coupled warp). Operates on a snapshot of the frame; `clock` drives the
-/// phase. Applied to the 3-D frame BEFORE the content tint (V_SetContentsColor),
-/// so wobble and tint compose exactly as in stock software Quake.
-// The `3.14159` below is id's truncated literal (see the in-body comment): using
-// `std::f64::consts::PI` would shift the table by one index and break the warp's
-// byte-identity, so the clippy::approx_constant lint is deliberately allowed here.
-#[allow(clippy::approx_constant)]
-pub fn apply_warp(image: &mut Image, clock: f32) {
-    const AMP2: i32 = 3;
+/// `D_WarpScreen` (d_scan.c): the underwater sine wobble, applied when the
+/// view leaf is in water/slime/lava (`r_waterwarp`, default on). `view` is the
+/// frame id renders into `r_warpbuffer` (at most 320x200, see
+/// [`warp_vrect`](crate::screen::warp_vrect)); the result is the screen's
+/// `out_w x out_h` view rectangle (`scr_vrect`), each pixel sampling the view
+/// displaced by a per-row/per-column sine (`AMP2 = 3`, `SPEED = 20`,
+/// `intsintable` from the 128-cycle phase) and stretched by
+/// `wratio = w / scr_vrect.width` (`hratio` likewise), with the slight edge
+/// compression `dim / (dim + 2*AMP2)` so it never reads outside the view.
+/// The row displacement is driven by the column's sine and vice versa. The
+/// ratios and row/column tables are the C's `float` arithmetic; `clock` drives
+/// the phase. Applied to the 3-D frame BEFORE the content tint
+/// (V_SetContentsColor), so wobble and tint compose as in software Quake. The
+/// view's buffer goes back to the frame pool.
+pub fn apply_warp(view: Image, out_w: usize, out_h: usize, clock: f32) -> Image {
+    const AMP2: usize = 3;
     const SPEED: f64 = 20.0;
-    let w = image.w as i32;
-    let h = image.h as i32;
-    if w <= 0 || h <= 0 {
-        return;
+    let (w, h) = (view.w, view.h);
+    if w == 0 || h == 0 || out_w == 0 || out_h == 0 || view.rgb.len() < w * h {
+        super::recycle_image(view);
+        return Image::new(out_w, out_h, [0, 0, 0]);
     }
-    // intsintable[i] = (int)(AMP2 + AMP2*sin(i*3.14159*2/128)) — truncated, 0..2*AMP2.
-    // id's R_InitTurb uses the truncated literal 3.14159 (NOT exact pi), so the table
-    // tops out at 5 (a broad plateau), never 6: at i=32 the argument falls just short
-    // of pi/2 so sin<1 and (int)5.999..=5. Using exact 2*pi would give 6 at i=32 — a
-    // one-index divergence. Match the C literal for bit-identical warp.
-    let mut sintable = [0i32; 128];
-    for (i, s) in sintable.iter_mut().enumerate() {
-        let f = AMP2 as f64 + AMP2 as f64 * ((i as f64) * 3.14159 * 2.0 / 128.0).sin();
-        *s = f as i32; // (int) truncation, matching the C table build
-    }
-    // rowptr[i] = compressed source row for stretched index i in 0..h+2*AMP2.
-    let rspan = (h + 2 * AMP2) as usize;
-    let mut rowptr = vec![0usize; rspan];
-    for (i, r) in rowptr.iter_mut().enumerate() {
-        let v = (i as i64 * h as i64 / (h + 2 * AMP2) as i64) as i32;
-        *r = v.clamp(0, h - 1) as usize;
-    }
-    // column[j] = compressed source column for stretched index j in 0..w+2*AMP2.
-    let cspan = (w + 2 * AMP2) as usize;
-    let mut column = vec![0usize; cspan];
-    for (j, c) in column.iter_mut().enumerate() {
-        let u = (j as i64 * w as i64 / (w + 2 * AMP2) as i64) as i32;
-        *c = u.clamp(0, w - 1) as usize;
-    }
+    let wratio = w as f32 / out_w as f32;
+    let hratio = h as f32 / out_h as f32;
+    // rowptr[v] = (int)((float)v * hratio * h / (h + AMP2*2)), v < scr height + 2*AMP2
+    let rowptr: Vec<usize> = (0..out_h + 2 * AMP2)
+        .map(|v| ((v as f32 * hratio * h as f32 / (h + 2 * AMP2) as f32) as usize).min(h - 1))
+        .collect();
+    // column[u] = (int)((float)u * wratio * w / (w + AMP2*2)), u < scr width + 2*AMP2
+    let column: Vec<usize> = (0..out_w + 2 * AMP2)
+        .map(|u| ((u as f32 * wratio * w as f32 / (w + 2 * AMP2) as f32) as usize).min(w - 1))
+        .collect();
     let phase = ((clock as f64 * SPEED) as i64 & 127) as usize;
-    // The pre-warp snapshot (id warps out of `r_warpbuffer`), on a spare
-    // frame buffer kept across frames rather than a fresh clone.
-    let mut src = super::take_spare_rgb();
-    src.clear();
-    src.extend_from_slice(&image.rgb);
-    let (wu, hu) = (w as usize, h as usize);
-    for (v, row) in image.rgb.chunks_exact_mut(wu).take(hu).enumerate() {
-        let tv = sintable[(phase + v) & 127] as usize; // 0..2*AMP2
-        for (u, out) in row.iter_mut().enumerate() {
-            let tu = sintable[(phase + u) & 127] as usize; // 0..2*AMP2
-            let src_row = rowptr[v + tu];
-            let src_col = column[tv + u];
-            *out = src[src_row * wu + src_col];
+    // `turb = intsintable + phase`, read at `turb[u]` and `turb[v]` across the
+    // whole screen: the table (R_InitTurb) is not wrapped to one cycle.
+    let sintable = intsintable(phase + out_w.max(out_h));
+    let mut out = Image::reused_uncleared(out_w, out_h);
+    for (v, row) in out.rgb.chunks_exact_mut(out_w).take(out_h).enumerate() {
+        let tv = sintable[phase + v] as usize; // 0..2*AMP2
+        for (u, px) in row.iter_mut().enumerate() {
+            let tu = sintable[phase + u] as usize; // 0..2*AMP2
+            *px = view.rgb[rowptr[v + tu] * w + column[tv + u]];
         }
     }
-    super::recycle_rgb(src);
+    super::recycle_image(view);
+    out
+}
+
+/// `intsintable` (`R_InitTurb`, r_main.c): `AMP2 + sin(i*3.14159*2/CYCLE)*AMP2`,
+/// truncated, for the first `n` indices (id fills `SIN_BUFFER_SIZE` = 1280+128,
+/// enough for `phase + u` over its widest mode). With id's truncated `3.14159`
+/// the argument falls just short of `pi/2` at i = 32, so the peak is 5, never 6;
+/// and it is not 128-periodic: at i = 128, 256, ... the sine is a hair below 0
+/// and the entry is 2 where i = 0 gives 3. `D_WarpScreen` indexes it without
+/// wrapping, so neither may be folded to one cycle.
+#[allow(clippy::approx_constant)]
+fn intsintable(n: usize) -> Vec<i32> {
+    const AMP2: f64 = 3.0;
+    (0..n)
+        .map(|i| (AMP2 + ((i as f64) * 3.14159 * 2.0 / 128.0).sin() * AMP2) as i32)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +108,7 @@ pub(super) struct TurbTable {
 
 impl TurbTable {
     /// Build the table once at render start (`f64::sin` is not `const`).
-    // `3.14159` is id's literal; exact pi would move entries (see `apply_warp`).
+    // `3.14159` is id's literal; exact pi would move entries (see `intsintable`).
     #[allow(clippy::approx_constant)]
     pub(super) fn new() -> TurbTable {
         let mut tab = [0i32; 2 * TURB_CYCLE];
@@ -164,6 +163,77 @@ mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
     use crate::render::raster::{outline, raster_poly_tex, AttrVert, PolyGrads, SurfaceMode};
+
+    /// A `w x h` image whose pixel (x, y) is `[x, y, 0]`, to read back which
+    /// source pixel the warp chose.
+    fn coord_image(w: usize, h: usize) -> Image {
+        let mut img = Image::new(w, h, [0, 0, 0]);
+        for y in 0..h {
+            for x in 0..w {
+                img.rgb[y * w + x] = [x as u8, y as u8, 0];
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn intsintable_is_r_initturbs_unwrapped_table() {
+        let t = intsintable(1408);
+        assert_eq!(&t[..4], &[3, 3, 3, 3]);
+        assert_eq!(t[32], 5, "3.14159: the peak stays one short of 6");
+        // Every 128th entry past the first is 2 (sin a hair below 0), not 3.
+        for k in 1..11 {
+            assert_eq!((t[128 * k], t[0]), (2, 3), "entry {}", 128 * k);
+        }
+        let differ = (0..1408).filter(|&i| t[i] != t[i & 127]).count();
+        assert_eq!(differ, 10, "exactly the multiples of 128 differ from a wrapped cycle");
+    }
+
+    #[test]
+    fn warp_reads_intsintable_past_the_first_cycle() {
+        // D_WarpScreen: dest[v][u] = rowptr[v + turb[u]][column[turb[v] + u]],
+        // turb = intsintable + phase. At phase 0, column 128 displaces its row
+        // by intsintable[128] = 2 (a wrapped table would give 3).
+        let (w, h) = (200usize, 40usize);
+        let img = apply_warp(coord_image(w, h), w, h, 0.0);
+        let rowptr = |i: usize| i * h / (h + 6);
+        for v in 0..h {
+            assert_eq!(img.rgb[v * w + 128][1] as usize, rowptr(v + 2), "row {v}");
+        }
+        // And column 0 (intsintable[0] = 3) for contrast.
+        assert_eq!(img.rgb[5 * w][1] as usize, rowptr(5 + 3));
+    }
+
+    #[test]
+    fn warp_stretches_the_warp_buffer_over_the_screen_view() {
+        // A 320x200 warp-buffer view stretched over a 640x400 scr_vrect (and a
+        // 960x600 one, whose ratio 1/3 is inexact): every output pixel is
+        // D_WarpScreen's sample, with the C's float row/column tables.
+        let (w, h) = (320usize, 200usize);
+        for (ow, oh, clock) in [(640usize, 400usize, 0.37f32), (960, 600, 5.0)] {
+            let out = apply_warp(coord_image(w, h), ow, oh, clock);
+            assert_eq!((out.w, out.h), (ow, oh));
+            let (wr, hr) = (w as f32 / ow as f32, h as f32 / oh as f32);
+            let phase = (clock as f64 * 20.0) as usize & 127;
+            let t = intsintable(phase + ow);
+            for v in (0..oh).step_by(7) {
+                for u in (0..ow).step_by(5) {
+                    let (tu, tv) = (t[phase + u] as usize, t[phase + v] as usize);
+                    let row = ((v + tu) as f32 * hr * h as f32 / (h + 6) as f32) as usize;
+                    let col = ((tv + u) as f32 * wr * w as f32 / (w + 6) as f32) as usize;
+                    let got = out.rgb[v * ow + u];
+                    // coord_image stores x mod 256 in channel 0.
+                    assert_eq!((got[0], got[1]), ((col & 255) as u8, row as u8), "({u},{v})");
+                }
+            }
+        }
+        // A 1:1 warp (a mode no larger than 320x200) is the integer-exact case.
+        let out = apply_warp(coord_image(w, h), w, h, 0.0);
+        assert_eq!(out.rgb[10 * w][1] as usize, (10 + 3) * h / (h + 6)); // turb[0] = 3
+        // Degenerate sizes never panic.
+        assert_eq!(apply_warp(Image::new(0, 0, [0; 3]), 4, 4, 0.0).rgb.len(), 16);
+        assert!(apply_warp(coord_image(4, 4), 0, 0, 0.0).rgb.is_empty());
+    }
 
     #[test]
     fn turb_table_matches_r_initturb() {
