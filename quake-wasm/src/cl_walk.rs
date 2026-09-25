@@ -826,6 +826,10 @@ pub(crate) fn step_walk(
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
     let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, w.clock) } else { view };
+    // The 2-D oracle harness paints the view one flat colour (the C oracle's
+    // `oracle_blank`), so a shot measures the 2-D layer alone. Tests only.
+    #[cfg(test)]
+    let view = crate::oracle_screen::blank_view(view, &w.palette);
     // The screen: the view at its rectangle, backtile around it
     // (SCR_UpdateScreen's Draw_TileClear), the status bar drawn over below.
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());

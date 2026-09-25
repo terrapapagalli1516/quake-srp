@@ -67,6 +67,8 @@ mod snd_dma;
 mod vid;
 mod view;
 #[cfg(test)]
+mod oracle_screen;
+#[cfg(test)]
 mod test_util;
 
 static PAK: &[u8] = include_bytes!("../../quake-data/ID1/PAK0.PAK");

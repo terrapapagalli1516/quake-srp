@@ -39,6 +39,33 @@ byte		oracle_palette[768];	// the palette most recently sent to the "hardware"
 void Oracle_Init (void);
 void Oracle_VidUpdate (void);
 
+void M_DrawPic (int x, int y, qpic_t *pic);
+void M_Menu_Options_f (void);
+extern void (*vid_menudrawfn)(void);
+extern void (*vid_menukeyfn)(int key);
+
+// The video menu: the title every id driver's VID_MenuDraw starts with
+// (vid_win.c, vid_dos.c), and Escape back to Options as their VID_MenuKey
+// does. Without a vid_menudrawfn menu.c hides the Options screen's "Video
+// Options" row (vid_null.c has none); the mode list below the title is the
+// driver's own and is not drawn.
+static void Oracle_VidMenuDraw (void)
+{
+	qpic_t	*p;
+
+	p = Draw_CachePic ("gfx/vidmodes.lmp");
+	M_DrawPic ((320-p->width)/2, 4, p);
+}
+
+static void Oracle_VidMenuKey (int key)
+{
+	if (key == K_ESCAPE)
+	{
+		S_LocalSound ("misc/menu1.wav");
+		M_Menu_Options_f ();
+	}
+}
+
 void	VID_SetPalette (unsigned char *palette)
 {
 	memcpy (oracle_palette, palette, 768);
@@ -88,6 +115,8 @@ void	VID_Init (unsigned char *palette)
 	D_InitCaches (surfcache, surfcachesize);
 
 	VID_SetPalette (palette);
+	vid_menudrawfn = Oracle_VidMenuDraw;
+	vid_menukeyfn = Oracle_VidMenuKey;
 	Oracle_Init ();
 }
 

@@ -47,6 +47,24 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      per-pixel perspective (an attribution experiment, not id)
 //   oracle_bench n                     (a cvar) render each shot n more times first and report
 //                                      the warm ms/frame (renderer only)
+//
+// The 2-D layer (oracle/screen2d.py drives these; see oracle/README.md):
+//   oracle_blank idx                   (a cvar, default -1 = off) fill the 3-D view rectangle
+//                                      (scr_vrect) with palette index idx after every
+//                                      R_RenderView, so a composited shot measures the 2-D
+//                                      layer alone (sbar, menus, console, text, backtile, fade)
+//   oracle_field name value...         set a field of the player's edict (ED_ParseEpair):
+//                                      health, items, weapon, ammo_shells, ...
+//   oracle_global name value...        set a QuakeC global the same way (serverflags, ...)
+//   oracle_centerprint text...         SCR_CenterPrint; a literal \n is a newline
+//   oracle_intermission n t [text...]  what svc_intermission (n 1), svc_finale (2) and
+//                                      svc_cutscene (3) do on the client, with
+//                                      cl.completed_time = t and the text centerprinted
+//   oracle_faceanim                    cl.faceanimtime = cl.time + 0.2 (V_ParseDamage's pain face)
+//   oracle_key keyname                 Key_Event down + up (keys.c names: ESCAPE, ENTER,
+//                                      UPARROW, DOWNARROW, TAB, a single character, ...)
+// A shot's .json also carries the 2-D clocks and state (realtime, host_time,
+// scr_centertime_start, scr_con_current, key_dest, cl.stats, ...).
 
 #include "quakedef.h"
 #include "r_local.h"
@@ -88,6 +106,16 @@ static vec3_t			natural_org, natural_ang;
 static qboolean			timedemo_seen;
 
 extern cvar_t	oracle_spans;
+
+// the 2-D layer instrument
+cvar_t		oracle_blank = {"oracle_blank", "-1"};
+extern double	host_time;
+extern float	scr_centertime_start, scr_centertime_off;
+extern int		m_state;
+ddef_t		*ED_FindField (char *name);
+ddef_t		*ED_FindGlobal (char *name);
+qboolean	ED_ParseEpair (void *base, ddef_t *key, char *s);
+int			Key_StringToKeynum (char *str);
 
 // oracle_bench N: after a shot's (cold) render, render the same view N more
 // times and report the warm ms/frame -- renderer only, like quaketool's --bench.
@@ -236,8 +264,135 @@ static void Oracle_Quit_f (void)
 	Sys_Quit ();
 }
 
+// The arguments from argv[first] on, joined by single spaces.
+static char *Oracle_ArgsFrom (int first)
+{
+	static char	buf[1024];
+	int			i;
+
+	buf[0] = 0;
+	for (i=first ; i<Cmd_Argc () ; i++)
+	{
+		if (i > first)
+			Q_strcat (buf, " ");
+		if (strlen (buf) + strlen (Cmd_Argv (i)) + 2 >= sizeof(buf))
+			break;
+		Q_strcat (buf, Cmd_Argv (i));
+	}
+	return buf;
+}
+
+// A literal backslash-n becomes a newline (the console tokenizer has no escapes).
+static char *Oracle_Unescape (char *s)
+{
+	char	*r, *w;
+
+	for (r = w = s ; *r ; r++)
+	{
+		if (r[0] == '\\' && r[1] == 'n')
+		{
+			*w++ = '\n';
+			r++;
+		}
+		else
+			*w++ = *r;
+	}
+	*w = 0;
+	return s;
+}
+
+// oracle_field name value... -- set a field of the player's edict
+static void Oracle_Field_f (void)
+{
+	ddef_t	*def;
+
+	if (Cmd_Argc () < 3 || !sv.active)
+	{
+		Con_Printf ("oracle_field name value (needs a running server)\n");
+		return;
+	}
+	def = ED_FindField (Cmd_Argv (1));
+	if (!def)
+	{
+		Con_Printf ("oracle_field: no field %s\n", Cmd_Argv (1));
+		return;
+	}
+	ED_ParseEpair ((void *)&svs.clients[0].edict->v, def, Oracle_ArgsFrom (2));
+}
+
+// oracle_global name value... -- set a QuakeC global
+static void Oracle_Global_f (void)
+{
+	ddef_t	*def;
+
+	if (Cmd_Argc () < 3 || !sv.active)
+	{
+		Con_Printf ("oracle_global name value (needs a running server)\n");
+		return;
+	}
+	def = ED_FindGlobal (Cmd_Argv (1));
+	if (!def)
+	{
+		Con_Printf ("oracle_global: no global %s\n", Cmd_Argv (1));
+		return;
+	}
+	ED_ParseEpair ((void *)pr_globals, def, Oracle_ArgsFrom (2));
+}
+
+static void Oracle_CenterPrint_f (void)
+{
+	SCR_CenterPrint (Oracle_Unescape (Oracle_ArgsFrom (1)));
+}
+
+// oracle_intermission n t [text] -- cl_parse.c's svc_intermission / svc_finale /
+// svc_cutscene, with the completion time given
+static void Oracle_Intermission_f (void)
+{
+	if (Cmd_Argc () < 3)
+	{
+		Con_Printf ("oracle_intermission n completed_time [text]\n");
+		return;
+	}
+	cl.intermission = Q_atoi (Cmd_Argv (1));
+	cl.completed_time = Q_atof (Cmd_Argv (2));
+	vid.recalc_refdef = true;	// go to full screen
+	if (cl.intermission >= 2)
+		SCR_CenterPrint (Oracle_Unescape (Oracle_ArgsFrom (3)));
+}
+
+static void Oracle_FaceAnim_f (void)
+{
+	cl.faceanimtime = cl.time + 0.2;
+}
+
+static void Oracle_Key_f (void)
+{
+	int		k;
+
+	if (Cmd_Argc () != 2)
+	{
+		Con_Printf ("oracle_key keyname\n");
+		return;
+	}
+	k = Key_StringToKeynum (Cmd_Argv (1));
+	if (k < 0)
+	{
+		Con_Printf ("oracle_key: unknown key %s\n", Cmd_Argv (1));
+		return;
+	}
+	Key_Event (k, true);
+	Key_Event (k, false);
+}
+
 void Oracle_Init (void)
 {
+	Cmd_AddCommand ("oracle_field", Oracle_Field_f);
+	Cmd_AddCommand ("oracle_global", Oracle_Global_f);
+	Cmd_AddCommand ("oracle_centerprint", Oracle_CenterPrint_f);
+	Cmd_AddCommand ("oracle_intermission", Oracle_Intermission_f);
+	Cmd_AddCommand ("oracle_faceanim", Oracle_FaceAnim_f);
+	Cmd_AddCommand ("oracle_key", Oracle_Key_f);
+	Cvar_RegisterVariable (&oracle_blank);
 	Cmd_AddCommand ("oracle_quit", Oracle_Quit_f);
 	Cmd_AddCommand ("oracle_edicts", Oracle_Edicts_f);
 	Cmd_AddCommand ("oracle_client", Oracle_Client_f);
@@ -366,6 +521,16 @@ static void Oracle_Dump (oracle_shot_t *s, int stage)
 		Oracle_ModelName (&cl.viewent), cl.viewent.frame,
 		cl.viewent.origin[0], cl.viewent.origin[1], cl.viewent.origin[2],
 		cl.viewent.angles[0], cl.viewent.angles[1], cl.viewent.angles[2]);
+	fprintf (f, "  \"realtime\": %.17g,\n  \"host_time\": %.17g,\n", realtime, host_time);
+	fprintf (f, "  \"centertime_start\": %.9g,\n  \"centertime_off\": %.9g,\n", scr_centertime_start, scr_centertime_off);
+	fprintf (f, "  \"con_current\": %.9g,\n  \"key_dest\": %d,\n  \"m_state\": %d,\n", scr_con_current, (int)key_dest, m_state);
+	fprintf (f, "  \"sb_lines\": %d,\n  \"intermission\": %d,\n  \"completed_time\": %.9g,\n", sb_lines, cl.intermission, cl.completed_time);
+	fprintf (f, "  \"faceanimtime\": %.9g,\n  \"paused\": %d,\n  \"items\": %d,\n", cl.faceanimtime, (int)cl.paused, cl.items);
+	fprintf (f, "  \"scr_vrect\": [%d, %d, %d, %d],\n", scr_vrect.x, scr_vrect.y, scr_vrect.width, scr_vrect.height);
+	fprintf (f, "  \"stats\": [");
+	for (i=0 ; i<MAX_CL_STATS ; i++)
+		fprintf (f, "%s%d", i ? ", " : "", cl.stats[i]);
+	fprintf (f, "],\n");
 	fprintf (f, "  \"lightstyles\": [");
 	for (i=0 ; i<MAX_LIGHTSTYLES ; i++)
 		fprintf (f, "%s%d", i ? ", " : "", d_lightstylevalue[i]);
@@ -408,6 +573,18 @@ static void Oracle_Bench (int n)
 	Sys_Printf ("oracle: bench %d warm frames -> %.4f ms/frame (%.1f fps)\n", n, bench_ms, 1000.0 / bench_ms);
 }
 
+// oracle_blank: the 3-D view rectangle as one flat palette index, so the
+// composited screen is the 2-D layer over a known background.
+static void Oracle_Blank (void)
+{
+	int		y;
+
+	if (oracle_blank.value < 0)
+		return;
+	for (y=scr_vrect.y ; y<scr_vrect.y + scr_vrect.height ; y++)
+		memset (vid.buffer + y*vid.rowbytes + scr_vrect.x, (int)oracle_blank.value & 255, scr_vrect.width);
+}
+
 void __wrap_R_RenderView (void)
 {
 	vec3_t	gunofs;
@@ -436,6 +613,7 @@ void __wrap_R_RenderView (void)
 
 	__real_R_RenderView ();
 	used_time = cl.time;
+	Oracle_Blank ();
 
 	bench_frames = 0;
 	if (active && oracle_bench.value > 0)
