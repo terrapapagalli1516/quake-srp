@@ -1578,6 +1578,39 @@ mod tests {
         }
     }
 
+    /// A dynamically lit face is baked at the level asked for, through the same
+    /// `blocklights` and integer stepping as a static one (`R_BuildLightMap` +
+    /// `R_AddDynamicLights`, then `R_DrawSurface` at `miplevel`), and never
+    /// reused (`cache->dlight`).
+    #[test]
+    fn dlit_faces_bake_at_their_mip_level_through_the_same_stepping() {
+        reset_render_caches();
+        let (cm, _) = ramp_colormap();
+        let mt = leveled_miptex();
+        let (bsp, face, _) = one_face_bsp_zplane(128);
+        let fp = WorldFingerprint::of(&bsp);
+        // A 64x48 surface whose luxels a light has pushed up unevenly.
+        let luxels: Vec<f32> = (0..5 * 4).map(|i| 100.0 + 7.0 * i as f32 + (i % 3) as f32 / 256.0).collect();
+        let lm = LightMap { luxels: Luxels::Owned(luxels), lmw: 5, lmh: 4, texmins: [-16.0, 32.0] };
+        let mut light = Vec::new();
+        lm.blocklights_into(&mut light);
+        render_stats_begin();
+        for mip in 0..4u32 {
+            let sb = face_surf_block(0, &face, 0, &mt, &lm, &cm, fp, 1, &NEUTRAL_LIGHTSTYLE_SCALES, true, true, mip)
+                .expect("block");
+            let (bw, bh) = (64 >> mip, 48 >> mip);
+            let mut want = vec![0u8; bw * bh];
+            let level = mt.mip(mip as usize).expect("level");
+            draw_surface_block(level, 32 >> mip, 32 >> mip, [-16, 32], mip, &light, 5, &cm, &mut want, bw, bh);
+            assert_eq!((sb.mip, sb.bw, sb.bh), (mip, bw, bh));
+            assert_eq!(*sb.block, want, "mip {mip}");
+            // Lit again: rebaked, never a hit.
+            let _ = face_surf_block(0, &face, 0, &mt, &lm, &cm, fp, 1, &NEUTRAL_LIGHTSTYLE_SCALES, true, true, mip);
+        }
+        let st = render_stats_end();
+        assert_eq!((st.surf_baked, st.surf_cache_hits), (8, 0));
+    }
+
     #[test]
     fn world_render_unaffected_by_intervening_different_world() {
         // Render world A, then a DIFFERENT world B (different geometry + lighting,
