@@ -672,7 +672,7 @@ pub(crate) fn step_walk(
     let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission);
     let vrect = refdef.vrect;
     let mut view =
-        render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
+        render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites, &crate::vid::render_options(render_w, render_h));
     bench::lap(Phase::Render3d);
 
     // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the

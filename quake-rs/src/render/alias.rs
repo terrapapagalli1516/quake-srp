@@ -7,7 +7,7 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
-use super::{Camera, Image};
+use super::{Camera, Image, RenderOptions};
 use super::light::{r_light_point, COLORMAP_LEN, LIGHTSTYLES};
 use super::polyse::PolyFramebuffer;
 
@@ -222,10 +222,10 @@ pub(super) struct AliasView {
 }
 
 impl AliasView {
-    fn new(cam: &Camera, w: usize, h: usize) -> AliasView {
+    fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> AliasView {
         let (vpn, vright, vup) = cam.basis();
-        // R_ViewChanged: horizontalFieldOfView = 2*tan(fov_x/360*M_PI); square
-        // pixels, so yscale = xscale (the port's projection; the oracle's too).
+        // R_ViewChanged: horizontalFieldOfView = 2*tan(fov_x/360*M_PI),
+        // aliasxscale = vrect.width / it, aliasyscale = aliasxscale * pixelAspect.
         let hfov = (2.0 * (cam.fov_deg as f64 / 360.0 * std::f64::consts::PI).tan()) as f32;
         let hfov = if hfov.abs() > 1e-6 { hfov } else { 2.0 };
         let xscale = w as f32 / hfov;
@@ -238,7 +238,7 @@ impl AliasView {
             xcenter: w as f32 * 0.5 - 0.5,
             ycenter: h as f32 * 0.5 - 0.5,
             xscale,
-            yscale: xscale,
+            yscale: xscale * pixel_aspect,
             right: w as i32,
             bottom: h as i32,
             transition: (R_ALIASTRANSBASE as f64 * res_scale) as f32,
@@ -766,6 +766,7 @@ pub(super) fn draw_alias_model(
     zbuf: &mut [f32],
     bsp: &Bsp,
     cam: &Camera,
+    opts: &RenderOptions,
     inst: &ModelInstance,
     palette: &[[u8; 3]; 256],
     dlights: &[crate::dlight::DynamicLight],
@@ -776,7 +777,7 @@ pub(super) fn draw_alias_model(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let view = AliasView::new(cam, image.w, image.h);
+    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
     let ent = AliasEntity {
         mdl: inst.mdl,
         origin: inst.origin,
@@ -893,6 +894,7 @@ pub(super) fn draw_viewmodel(
     zbuf: &mut [f32],
     bsp: &Bsp,
     cam: &Camera,
+    opts: &RenderOptions,
     vm: &Viewmodel,
     palette: &[[u8; 3]; 256],
     dlights: &[crate::dlight::DynamicLight],
@@ -903,7 +905,7 @@ pub(super) fn draw_viewmodel(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let view = AliasView::new(cam, image.w, image.h);
+    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
     if view.fov_over_90 {
         return;
     }

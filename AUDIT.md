@@ -268,7 +268,7 @@ lightmap + colormap-row + colormap-index every pixel.
 | H3 | `SV_WaterJump` (auto climb-out-of-water push) missing | ✅ fixed `1b29e97` |
 | H4 | Animated `+texture` sequencing (`Mod_LoadTextures`) + per-frame `R_TextureAnimation` missing — water/teleporters/switches/lights don't animate | ✅ fixed `8f13cb1` (R_TextureAnimation 10 Hz cycles) |
 | H5 | ALIAS_GROUP frames never animate — only the first sub-pose is drawn (e.g. flames) | ✅ fixed `8f13cb1` (group-frame + skin-group anim by time) |
-| H6 | `pixelAspect` — frame presented 16:10 square-pixel instead of authored 4:3 | ✅ fixed `9876cb4` (present at 4:3) |
+| H6 | `pixelAspect` — frame presented 16:10 square-pixel instead of authored 4:3 | ✅ fixed `9876cb4` (present at 4:3); the projection's `pixelAspect` ✅ `quake/w2b` |
 | H7 | `R_LavaSplash` not implemented — TE_LAVASPLASH faked as a 20-particle burst | ✅ fixed `8bda8cb` (TE→R_LavaSplash/R_TeleportSplash) |
 | H8 | `R_TeleportSplash` not implemented — TE_TELEPORT faked, wrong color | ✅ fixed `8bda8cb` (TE→R_LavaSplash/R_TeleportSplash) |
 | H9 | `R_RocketTrail` entirely missing — no rocket/grenade/gib/tracer/voor trails | ✅ fixed `8bda8cb` (trails wired per model flags) |
@@ -474,7 +474,7 @@ seeming not to do the right thing. Both real, plus what they exposed:
   "Fullscreen" headers and T/D test/default keys is not modelled); the port's
   2-D layer stays a scaled 320x200 screen (WinQuake draws it 1:1 at higher
   modes, with a tiled strip beside a 320-wide sbar); pixel aspect stays square
-  (id's 320x200 uses pixelAspect 0.8333 for 4:3 CRTs).
+  (id's 320x200 uses pixelAspect 0.8333 for 4:3 CRTs) — fixed on `quake/w2b`.
 
 Evidence: 489 lib + 67 wasm tests (blink rates, refdef at 100/110/120/90/70/
 50/30 + intermission + scaled modes, tile/compose, sb_lines HUD gating, slider,
@@ -666,6 +666,35 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   it stays conservative. Flash-lit pixels (mip 0 + exact, 320×200) now match
   83.4% on e1m1 (was 81.8%) and 96.1% on e1m3 (was 95.9%); no row fell.
   Goldens unchanged.
+
+## Projection and spans (2026-09-25, branch `quake/w2b`)
+
+Measured with `oracle/compare.py` (exact-palette-index match %, 320x200,
+world, e1m1/e1m2/e1m3/e1m7 unless stated).
+
+- ✅ **Pixel aspect** (the second half of H6, PERF_PLAN A4). Every render
+  preset is 16:10 and the page always shows the canvas at 4:3, as DOS Quake's
+  320x200 filled a 4:3 monitor; the port projected square pixels, so the whole
+  3-D view was shown 1.2x too tall. id folds the display into the projection:
+  `vid.aspect = (h/w)*(320/240)` (vid_win.c) is `R_ViewChanged`'s
+  `pixelAspect`, `yscale = xscale*pixelAspect`, and the frustum, the alias
+  scales, sprites and particles all take it. Now `render::RenderOptions::
+  pixel_aspect`, one `Projection` for every pass (world, submodels, external
+  boxes, alias models and the gun, sprites, particles, the frustum); the wasm
+  shell passes `vid_aspect(w, h, 4/3)` — 0.8333 at every preset. The sky
+  keeps its screen-pixel mapping (`D_Sky_uv_To_st` has no aspect), and a
+  particle stays a pixel square (`d_y_aspect_shift` is 0 below 1.4).
+  - **Oracle** (`--aspect 0.8333333` now reaches both renderers; id at mip 0
+    and exact perspective): 31.35 / 26.90 / 20.23 / 14.23 (the port square)
+    → 95.89 / 97.60 / 98.50 / 98.79, against 95.61 / 97.40 / 98.50 / 98.66
+    for both square. Entity pixels 100 / 100 / 98.8 / 100; the e1m2 altar
+    view (id as shipped) 100% of 684 entity pixels; with the gun
+    (`--viewmodel --settle 3`) 94.44 / 97.21 / 98.62.
+  - **Goldens unchanged** (`quaketool scene` writes a square-pixel PPM:
+    aspect 1). At aspect 1 every pass is bit-identical to before.
+  - Page screenshots before/after at 320x200 and 960x600 (e1m1 spawn): the
+    rivet grid on the walls, square in the texture, was 1.17:1 tall and is
+    1:1; the view shows 1.2x more vertically, and the gun is DOS Quake's.
 
 ## LOW (27)
 

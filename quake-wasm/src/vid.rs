@@ -78,6 +78,23 @@ pub extern "C" fn set_resolution(w: i32, h: i32) {
     });
 }
 
+/// The width:height ratio the page DISPLAYS the canvas at, whatever its backing
+/// store: `web/index.html` shows it in a 640x480 box, and with `aspect-ratio:
+/// 4/3` in fullscreen and on narrow screens — as DOS and Windows Quake's modes
+/// filled a 4:3 monitor. Every resolution preset is 16:10, so its pixels are
+/// shown 1.2x taller than wide.
+pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
+
+/// How the renderer draws the 3-D view of a `render_w x render_h` frame:
+/// `vid.aspect` for that mode on the page's [`DISPLAY_ASPECT`] (vid_win.c's
+/// `(h/w)*(320/240)`: 0.8333 at every 16:10 preset), which `R_ViewChanged`
+/// folds into the projection so the world is not stretched by the 4:3 display.
+pub(crate) fn render_options(render_w: usize, render_h: usize) -> render::RenderOptions {
+    render::RenderOptions {
+        pixel_aspect: render::vid_aspect(render_w, render_h, DISPLAY_ASPECT),
+    }
+}
+
 /// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.
 /// Read-only, for the page/verification harness like [`volume`].
 #[no_mangle]

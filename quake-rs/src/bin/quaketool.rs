@@ -134,7 +134,7 @@ fn usage() {
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -1954,6 +1954,9 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 /// --angles p,y,r     view angles in degrees (default 0,<start angle>,0)
 /// --time T           the render clock, cl.time (default: the server clock after spawn)
 /// --fov F            horizontal field of view (default 90)
+/// --aspect A         vid.aspect, R_ViewChanged's pixelAspect (default 1, square
+///                    pixels, as the oracle's vid_null; id's DOS/Win 320x200 on a
+///                    4:3 monitor is 0.8333 — the oracle's -oracle_aspect)
 /// --ents FILE        draw these entities: the oracle's `.ents` list, one per line,
 ///                    `model ox oy oz pitch yaw roll frame skin syncbase effects kind`
 ///                    (without it: the world only, as r_drawentities 0)
@@ -1982,6 +1985,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     };
     let (mut w, mut h) = (320usize, 200usize);
     let (mut origin, mut angles, mut time, mut fov) = (None, None, None, 90.0f32);
+    let mut opts = render::RenderOptions::default();
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
     let mut bench: Option<u32> = None;
     let mut viewent: Option<[f32; 6]> = None;
@@ -2000,6 +2004,12 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             "--angles" => angles = Some(parse_vec3(flag, val)?),
             "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
+            "--aspect" => {
+                opts.pixel_aspect = val.parse().map_err(|_| format!("--aspect: bad number {val:?}"))?;
+                if !(opts.pixel_aspect.is_finite() && opts.pixel_aspect > 0.0) {
+                    return Err(format!("--aspect: must be a positive number, got {val:?}"));
+                }
+            }
             "--ents" => ents_path = Some(val.as_str()),
             "--dlight" => {
                 let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
@@ -2150,7 +2160,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         });
         render::render_scene_ext_sprited(
             &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
-            &light_styles, colormap.as_deref(), &sprites,
+            &light_styles, colormap.as_deref(), &sprites, &opts,
         )
     };
     let img = render_once();
@@ -2167,8 +2177,9 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let mut o = String::new();
     let _ = writeln!(
         o,
-        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}",
-        origin[0], origin[1], origin[2], angles[0], angles[1], angles[2]
+        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}",
+        origin[0], origin[1], origin[2], angles[0], angles[1], angles[2],
+        if opts.pixel_aspect != 1.0 { format!(" aspect {}", opts.pixel_aspect) } else { String::new() }
     );
     let _ = writeln!(
         o,

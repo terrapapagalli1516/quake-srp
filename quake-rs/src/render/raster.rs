@@ -244,8 +244,9 @@ impl Linear {
 }
 
 /// The projection a face's gradients are taken in: the view basis (`vright`,
-/// `vup`, `vpn`), the screen centre and the focal length, as the brush passes
-/// project a vertex: `x = cx + focal*vx/vz`, `y = cy - focal*vy/vz`.
+/// `vup`, `vpn`) and `R_ViewChanged`'s centre and scales, as the brush passes
+/// project a vertex: `x = cx + xscale*vx/vz`, `y = cy - yscale*vy/vz`
+/// ([`Projection`](super::Projection); `yscale = xscale * pixelAspect`).
 #[derive(Clone, Copy)]
 pub(super) struct ScreenProj {
     pub(super) forward: Vec3,
@@ -253,7 +254,8 @@ pub(super) struct ScreenProj {
     pub(super) up: Vec3,
     pub(super) cx: f32,
     pub(super) cy: f32,
-    pub(super) focal: f32,
+    pub(super) xscale: f32,
+    pub(super) yscale: f32,
 }
 
 /// A face's screen-plane gradients of `1/z`, `s/z` and `t/z`, with `s`/`t`
@@ -297,12 +299,12 @@ impl PolyGrads {
         let tv = |v: [f64; 3]| [d3(v, view.right), d3(v, view.up), d3(v, view.forward)];
         let eye64 = as64(eye);
         let (cx, cy) = (view.cx as f64, view.cy as f64);
-        let inv_focal = 1.0 / view.focal as f64;
+        let (inv_xs, inv_ys) = (1.0 / view.xscale as f64, 1.0 / view.yscale as f64);
         // A view-space vector `p` gives the screen plane `p . (x', y', 1)` with
-        // `x' = (x - cx)/focal`, `y' = (cy - y)/focal` (the ray through (x, y)).
+        // `x' = (x - cx)/xscale`, `y' = (cy - y)/yscale` (the ray through (x, y)).
         let plane = |p: [f64; 3], scale: f64| {
-            let dx = p[0] * inv_focal * scale;
-            let dy = -p[1] * inv_focal * scale;
+            let dx = p[0] * inv_xs * scale;
+            let dy = -p[1] * inv_ys * scale;
             Linear { o: p[2] * scale - cx * dx - cy * dy, dx, dy }
         };
         let denom = dist as f64 - d3(eye64, normal);
@@ -1008,40 +1010,43 @@ mod tests {
         use crate::math::{cross, dot, normalize};
         let cam = crate::render::Camera::looking_at([10.0, -20.0, 30.0], [200.0, 50.0, -10.0], 90.0);
         let (forward, right, up) = cam.basis();
-        let (cx, cy, focal) = (160.0f32, 100.0f32, 160.0f32);
-        let view = ScreenProj { forward, right, up, cx, cy, focal };
-        let (n, _) = normalize([0.3, -0.5, 0.8]);
-        let dist = 40.0f32;
-        let ti = crate::bsp::TexInfo {
-            vecs: [[1.0, 0.0, 0.0, 5.5], [0.0, 0.7, 0.7, -3.0]],
-            miptex: 0,
-            flags: 0,
-        };
-        let (u, _) = normalize(cross(n, [0.0, 0.0, 1.0]));
-        let v = cross(n, u);
-        for origin in [[0.0f32; 3], [64.0, -32.0, 8.0]] {
-            // The model's frame: the plane and texinfo are local; the eye too.
-            let eye = [cam.pos[0] - origin[0], cam.pos[1] - origin[1], cam.pos[2] - origin[2]];
-            let g = PolyGrads::for_plane(&view, eye, n, dist, Some(&ti)).expect("eye off the plane");
-            for (a, b) in [(0.0f32, 0.0f32), (150.0, 20.0), (-80.0, 90.0), (300.0, -120.0)] {
-                let p = [n[0] * dist + a * u[0] + b * v[0], n[1] * dist + a * u[1] + b * v[1], n[2] * dist + a * u[2] + b * v[2]];
-                let rel = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
-                let (vx, vy, vz) = (dot(rel, right), dot(rel, up), dot(rel, forward));
-                if vz <= 1.0 {
-                    continue;
+        let (cx, cy, xscale) = (160.0f32, 100.0f32, 160.0f32);
+        // Square pixels and id's 320x200 on a 4:3 screen (pixelAspect 0.8333).
+        for yscale in [xscale, xscale * (200.0 / 320.0 * 4.0 / 3.0)] {
+            let view = ScreenProj { forward, right, up, cx, cy, xscale, yscale };
+            let (n, _) = normalize([0.3, -0.5, 0.8]);
+            let dist = 40.0f32;
+            let ti = crate::bsp::TexInfo {
+                vecs: [[1.0, 0.0, 0.0, 5.5], [0.0, 0.7, 0.7, -3.0]],
+                miptex: 0,
+                flags: 0,
+            };
+            let (u, _) = normalize(cross(n, [0.0, 0.0, 1.0]));
+            let v = cross(n, u);
+            for origin in [[0.0f32; 3], [64.0, -32.0, 8.0]] {
+                // The model's frame: the plane and texinfo are local; the eye too.
+                let eye = [cam.pos[0] - origin[0], cam.pos[1] - origin[1], cam.pos[2] - origin[2]];
+                let g = PolyGrads::for_plane(&view, eye, n, dist, Some(&ti)).expect("eye off the plane");
+                for (a, b) in [(0.0f32, 0.0f32), (150.0, 20.0), (-80.0, 90.0), (300.0, -120.0)] {
+                    let p = [n[0] * dist + a * u[0] + b * v[0], n[1] * dist + a * u[1] + b * v[1], n[2] * dist + a * u[2] + b * v[2]];
+                    let rel = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+                    let (vx, vy, vz) = (dot(rel, right), dot(rel, up), dot(rel, forward));
+                    if vz <= 1.0 {
+                        continue;
+                    }
+                    let (x, y) = ((cx + xscale * vx / vz) as f64, (cy - yscale * vy / vz) as f64);
+                    let zi = g.zi.at(x, y);
+                    let s = g.sz.at(x, y) / zi + g.st_eye[0];
+                    let t = g.tz.at(x, y) / zi + g.st_eye[1];
+                    let want_s = (p[0] * 1.0 + 5.5) as f64;
+                    let want_t = (p[1] * 0.7 + p[2] * 0.7 - 3.0) as f64;
+                    assert!((zi * vz as f64 - 1.0).abs() < 1e-4, "1/z at ({a},{b}): {zi} vs {}", 1.0 / vz);
+                    assert!((s - want_s).abs() < 2e-3, "s at ({a},{b}): {s} vs {want_s}");
+                    assert!((t - want_t).abs() < 2e-3, "t at ({a},{b}): {t} vs {want_t}");
                 }
-                let (x, y) = ((cx + focal * vx / vz) as f64, (cy - focal * vy / vz) as f64);
-                let zi = g.zi.at(x, y);
-                let s = g.sz.at(x, y) / zi + g.st_eye[0];
-                let t = g.tz.at(x, y) / zi + g.st_eye[1];
-                let want_s = (p[0] * 1.0 + 5.5) as f64;
-                let want_t = (p[1] * 0.7 + p[2] * 0.7 - 3.0) as f64;
-                assert!((zi * vz as f64 - 1.0).abs() < 1e-4, "1/z at ({a},{b}): {zi} vs {}", 1.0 / vz);
-                assert!((s - want_s).abs() < 2e-3, "s at ({a},{b}): {s} vs {want_s}");
-                assert!((t - want_t).abs() < 2e-3, "t at ({a},{b}): {t} vs {want_t}");
             }
+            // An eye on the plane sees it edge-on: no gradients.
+            assert!(PolyGrads::for_plane(&view, [5.0, 7.0, 40.0], [0.0, 0.0, 1.0], 40.0, None).is_none());
         }
-        // An eye on the plane sees it edge-on: no gradients.
-        assert!(PolyGrads::for_plane(&view, [5.0, 7.0, 40.0], [0.0, 0.0, 1.0], 40.0, None).is_none());
     }
 }

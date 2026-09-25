@@ -24,6 +24,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--settle N` | shoot N frames after signon instead of the first |
 | `--crop name:x,y,w,h` | extra 6x C / port / diff PNG of a region |
 | `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the 16-pixel segments of the x86 asm `D_DrawSpans16` (what DOS/Win players saw, `d_subdiv16 1`); 1 = exact per-pixel perspective (an experiment, not id) |
+| `--aspect A` | `vid.aspect` for both renderers (`-oracle_aspect` / `quaketool view --aspect`). Default 1.0, square pixels; `0.8333333` is id's DOS/Win 16:10 modes on a 4:3 monitor — and what the browser page shows (every preset is 16:10, presented at 4:3) |
 | `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
 | `--viewmodel` | draw the weapon too (the port is handed id's `cl.viewent` origin and angles, `quaketool view --viewent`) |
@@ -52,7 +53,7 @@ loopback-only `net_none`, and three files of ours (`c/`, GPL like id's):
 - `vid_oracle.c` — `vid_null.c` at any resolution (`-width`/`-height`, up to id's
   1280x1024 `MAXWIDTH`/`MAXHEIGHT`), buffers sized with `D_SurfaceCacheForRes` as
   the real drivers do, `vid.aspect` 1.0 (square pixels, as `vid_null`; id's DOS/Win
-  320x200 used 0.8333 — `--aspect`).
+  320x200 used 0.8333 — `--aspect`, which also hands the port the same value).
 - `sys_oracle.c` — `sys_null.c`'s file IO plus a deterministic clock: every
   `Host_Frame` is exactly 0.1 s and `Sys_FloatTime` is that virtual clock
   (`-oracle_realtime` switches to the wall clock for `timedemo`). `Sys_Quit` never
@@ -113,6 +114,13 @@ far arch differs for a harness reason: id's light styles in that frame (its
 `.json`) are the ones the port derives for 0.1 s earlier (measured) — probably id flooring a double
 `cl.time` that the harness hands over rounded to a float. Passing id's `d_lightstylevalue` to
 the port would remove it (not done).
+
+**Pixel aspect** (`--aspect 0.8333333`, id's 320x200 on a 4:3 monitor, which is how
+the browser page shows every preset; branch `quake/w2b`). With id at mip 0 + exact
+perspective: 95.89 / 97.60 / 98.50 / 98.79, as close as with square pixels
+(95.61 / 97.40 / 98.50 / 98.66); before the port's projection took the aspect it
+scored 31.35 / 26.90 / 20.23 / 14.23 against id's 4:3 frame. Entity pixels 100 /
+100 / 98.8 / 100; the altar view's 684 entity pixels 100%.
 
 **Attribution ladder** — id's renderer made to drop one known difference at a time
 (world only; `characterise.sh` prints it):

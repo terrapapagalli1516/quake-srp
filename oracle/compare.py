@@ -152,6 +152,8 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
         "--time", repr(meta["time"]),
         "--fov", repr(meta["fov_x"]),
     ]
+    if args.aspect is not None:
+        cmd += ["--aspect", str(args.aspect)]
     if ents:
         cmd += ["--ents", str(out / f"{case}.c.ents")]
     # id's live dynamic lights (muzzle flashes, explosions: e.g. --c-cmd +attack)
@@ -246,7 +248,9 @@ def main() -> None:
                          "16-pixel segments (d_subdiv16), 1 = exact per-pixel perspective (experiment)")
     ap.add_argument("--c-cmd", action="append", default=[],
                     help="extra C console command before the map loads (repeatable), e.g. 'd_mipscale 0'")
-    ap.add_argument("--aspect", type=float, help="C vid.aspect (default 1.0, square pixels)")
+    ap.add_argument("--aspect", type=float,
+                    help="vid.aspect, both renderers (default 1.0, square pixels; 0.8333333 = id's "
+                         "16:10 modes on a 4:3 monitor, what the browser page shows)")
     ap.add_argument("--crop", action="append", default=[], help="name:x,y,w,h — zoomed crop per case")
     ap.add_argument("--pak", type=Path, default=DEFAULT_PAK)
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs")

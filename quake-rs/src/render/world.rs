@@ -6,7 +6,7 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, normalize, sub, Vec3};
-use super::{Camera, Image};
+use super::{Camera, Image, Projection, RenderOptions};
 use super::light::{
     any_dlight_reaches, face_lightmap_dyn, mark_dlights, DLIGHT_BITS_SCRATCH, LIGHTSTYLES,
 };
@@ -58,6 +58,7 @@ pub(super) fn draw_world_textured(
     zbuf: &mut [f32],
     bsp: &Bsp,
     cam: &Camera,
+    opts: &RenderOptions,
     palette: &[[u8; 3]; 256],
     turb: &TurbTable,
     time: f32,
@@ -72,16 +73,8 @@ pub(super) fn draw_world_textured(
         return;
     }
     let (forward, right, up) = cam.basis();
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
-    let tan_half = half_fov.tan();
-    let focal = if tan_half.abs() < 1e-6 {
-        cx
-    } else {
-        (cx as f64 / tan_half) as f32
-    };
-    let view = ScreenProj { forward, right, up, cx, cy, focal };
+    let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
+    let view = ScreenProj { forward, right, up, cx, cy, xscale, yscale };
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
     // Sub-phase profiling: accumulate ns into locals (cheap), flush to RenderStats
@@ -102,7 +95,7 @@ pub(super) fn draw_world_textured(
     // once per frame from the camera + aspect; see [`Frustum::from_camera`] for
     // the exact match to the rasteriser's screen rectangle (so it never culls a
     // face that could draw a pixel).
-    let frustum = Frustum::from_camera(cam, w, h);
+    let frustum = Frustum::from_camera(cam, w, h, opts.aspect());
     let t_pvs = _t_pvs.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
     // The world pass draws ONLY model 0's faces. Brush submodels (doors, plats,
@@ -281,7 +274,7 @@ pub(super) fn draw_world_textured(
         }
         proj.clear();
         for vv in &clipped {
-            proj.push(ProjT { x: cx + focal * vv.vx / vv.vz, y: cy - focal * vv.vy / vv.vz });
+            proj.push(ProjT { x: cx + xscale * vv.vx / vv.vz, y: cy - yscale * vv.vy / vv.vz });
         }
 
         let lambert = dot(normal, light_dir).max(0.0);
@@ -423,6 +416,7 @@ pub(super) fn draw_submodel(
     zbuf: &mut [f32],
     bsp: &Bsp,
     cam: &Camera,
+    opts: &RenderOptions,
     palette: &[[u8; 3]; 256],
     model_index: usize,
     origin: Vec3,
@@ -469,18 +463,10 @@ pub(super) fn draw_submodel(
         })
         .collect();
 
-    // Same camera basis / focal length / projection as the world pass.
+    // Same camera basis / projection as the world pass.
     let (forward, right, up) = cam.basis();
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
-    let tan_half = half_fov.tan();
-    let focal = if tan_half.abs() < 1e-6 {
-        cx
-    } else {
-        (cx as f64 / tan_half) as f32
-    };
-    let view = ScreenProj { forward, right, up, cx, cy, focal };
+    let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
+    let view = ScreenProj { forward, right, up, cx, cy, xscale, yscale };
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
     // Submodel face range: [firstface, firstface + numfaces). Negative counts
@@ -613,7 +599,7 @@ pub(super) fn draw_submodel(
         }
         proj.clear();
         for vv in &clipped {
-            proj.push(ProjT { x: cx + focal * vv.vx / vv.vz, y: cy - focal * vv.vy / vv.vz });
+            proj.push(ProjT { x: cx + xscale * vv.vx / vv.vz, y: cy - yscale * vv.vy / vv.vz });
         }
 
         let lambert = dot(normal, light_dir).max(0.0);
@@ -783,6 +769,7 @@ pub fn draw_brush_bsp(
         zbuf,
         bsp,
         cam,
+        &RenderOptions::default(),
         palette,
         0,
         origin,

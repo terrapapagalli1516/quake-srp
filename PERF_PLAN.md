@@ -411,6 +411,13 @@ The fidelity classes are:
 - **Gain:** −24% of resolution-proportional 3-D work. That is about 3 ms at 1280×800 now, and about
   1.5 ms after A1.
 - **Risk: medium,** because the change cuts across every pass. It re-baselines every golden.
+- **Done.** The vrect half on branch `quake/options` (`calc_refdef`, the view rendered above
+  the status bar). The pixel aspect on `quake/w2b`: `RenderOptions::pixel_aspect` and one
+  `Projection` (`yscale = xscale · pixelAspect`) for every pass and the frustum; the page
+  passes `vid_aspect(w, h, 4/3)`, 0.8333 at every preset. Goldens unchanged (the scene tool
+  stays square). Speed within noise: the aspect adds no work, it only moves rows, and the
+  vertical field of view grows by 1.2x, so ~20% more of the world can be in view (see
+  `AUDIT.md`, "Projection and spans").
 
 **A5. Mip levels in the surface cache (`D_MipLevelForScale`).** *(faithful)*
 
