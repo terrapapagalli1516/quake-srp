@@ -1207,7 +1207,9 @@ const savEncoder = new TextEncoder();
 // mirror localStorage. For each console-slot key s0..s11, hand the stored
 // .sav text to the engine (sav_alloc scratch) and let menu_set_save_comment
 // extract + assign the comment; absent/blocked slots are marked unused with
-// an empty buffer. Runs at boot and after every persisted save.
+// an empty buffer. This is M_ScanSaves: it runs at boot, after every
+// persisted save, and whenever the menu opens Load or Save
+// (scanSavesOnMenuEntry: M_Menu_Load_f / M_Menu_Save_f rescan each time).
 function refreshSaveComments() {
   if (!exp || typeof exp.menu_set_save_comment !== 'function'
            || typeof exp.sav_alloc !== 'function') return;
@@ -1226,6 +1228,18 @@ function refreshSaveComments() {
     exp.sav_alloc(0);              // empty scratch = unused slot
     exp.menu_set_save_comment(i);
   }
+}
+
+// M_Menu_Load_f / M_Menu_Save_f call M_ScanSaves every time the screen opens.
+// The page sees the menu's screen through menu_visible/menu_screen_id and
+// rescans when it enters Load (2) or Save (3), before the frame that draws it.
+let lastMenuScreen = -1;
+function scanSavesOnMenuEntry() {
+  if (!exp || typeof exp.menu_screen_id !== 'function'
+           || typeof exp.menu_visible !== 'function') return;
+  const sid = exp.menu_visible() ? exp.menu_screen_id() : -1;
+  if ((sid === 2 || sid === 3) && sid !== lastMenuScreen) refreshSaveComments();
+  lastMenuScreen = sid;
 }
 
 function drainSaves() {
@@ -1366,6 +1380,8 @@ async function main() {
   restoreResolution();
   // ...and the saved Screen size + Web extras (the engine clamps both).
   restorePrefs();
+  // The Load/Save slot listings from localStorage (M_ScanSaves).
+  refreshSaveComments();
 
   // An opaque canvas (the framebuffer's alpha is always 255): the browser
   // composites it without blending. `?lowlatency` in the URL also asks for a
@@ -1420,6 +1436,8 @@ async function main() {
     // advancing the game by that time, at most 0.1 s (so a hitch or a
     // backgrounded tab can't lurch the world).
     const dt = Math.max(0, (now - last) / 1000); last = now;
+    // Load/Save just opened (a key this refresh): rescan before it draws.
+    scanSavesOnMenuEntry();
     // Movement/turn/attack all flow from the held-key states the keydown/keyup
     // handlers fed the engine (key_down/key_up by Quake keynum): each step
     // derives the move from the BINDINGS table (CL_BaseMove/CL_AdjustAngles),

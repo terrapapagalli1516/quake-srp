@@ -1338,6 +1338,17 @@ test in the commit message.
   spawn, before the player connects: e1m8 "19 total, 17 moved, never moved:
   func_wall#111(*16) func_wall#159(*27)", `*6` among the movers already
   moving at the idle; no other line of the census changes.
+- ✅ **The Load menu was empty after a page reload** (LOW, pre-existing) —
+  `refreshSaveComments()` (the page's `M_ScanSaves`: localStorage's
+  `s0..s11.sav` into the menu's slot comments) ran only after a save,
+  though its comment said "at boot"; a reloaded page listed every slot as
+  `--- UNUSED SLOT ---` and refused to load them. id rescans each time the
+  screen opens (`M_ScanSaves` in `M_Menu_Load_f` / `M_Menu_Save_f`). The page
+  now scans at boot and whenever the menu enters Load or Save
+  (`menu_visible` / `menu_screen_id`, checked before the frame that draws
+  it); existing exports only. `web/verify_save.py` also saves to slot 0,
+  reloads, forgets the boot scan and opens Load: slot 0's row is the save's
+  comment and Enter loads it (the old page fails both).
 
 ## LOW (27)
 
