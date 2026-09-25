@@ -29,7 +29,7 @@ import functools, http.server, os, socketserver, sys, threading, time
 from playwright.sync_api import sync_playwright
 
 WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = 8171
+PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8171"))
 Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
 socketserver.ThreadingTCPServer.allow_reuse_address = True
 httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
