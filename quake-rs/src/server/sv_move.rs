@@ -307,17 +307,6 @@ fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
     vm.ent_set_float(ent, "flags", (flags | FL_PARTIALGROUND) as f32);
 }
 
-/// `SV_NewChaseDir` (sv_move.c ~283): pick a new movement direction for `actor`
-/// toward `enemy` and step that way.
-///
-/// Faithful to id's heuristic: derive the preferred X (`d[1]`) and Y (`d[2]`)
-/// directions from the signed deltas to the enemy, try the diagonal when both
-/// axes have a preference, then the individual axes (optionally swapped at
-/// random or when the Y delta dominates), then the old direction, then a full
-/// 45-degree sweep (forward or backward at random), and finally the turnaround.
-/// If nothing works the actor keeps its old yaw and `FL_PARTIALGROUND` is set
-/// when it has no floor (via [`sv_fix_check_bottom`]). `rand()&n` is the VM's
-/// deterministic LCG so tests are reproducible.
 /// A small deterministic LCG for the AI's `rand()&n` symmetry-breaking in
 /// chase-direction selection. The C used libc `rand()`; here a process-global
 /// LCG keeps chase behaviour varied yet reproducible across runs/tests.
@@ -332,6 +321,17 @@ fn ai_rand() -> u32 {
     (next >> 16) & 0x7fff
 }
 
+/// `SV_NewChaseDir` (sv_move.c ~283): pick a new movement direction for `actor`
+/// toward `enemy` and step that way.
+///
+/// Faithful to id's heuristic: derive the preferred X (`d[1]`) and Y (`d[2]`)
+/// directions from the signed deltas to the enemy, try the diagonal when both
+/// axes have a preference, then the individual axes (optionally swapped at
+/// random or when the Y delta dominates), then the old direction, then a full
+/// 45-degree sweep (forward or backward at random), and finally the turnaround.
+/// If nothing works the actor keeps its old yaw and `FL_PARTIALGROUND` is set
+/// when it has no floor (via `sv_fix_check_bottom`). `rand()&n` is the VM's
+/// deterministic LCG so tests are reproducible.
 pub fn sv_new_chase_dir(vm: &mut Vm, actor: i32, enemy: i32, dist: f32) {
     let ideal_yaw = vm.ent_get_float(actor, "ideal_yaw");
     let olddir = crate::math::anglemod(((ideal_yaw / 45.0) as i32 as f32) * 45.0);

@@ -44,7 +44,7 @@ use crate::Result;
 // THREAD-LOCAL (not a process-global atomic): a server session runs all its
 // QuakeC on one thread, so a `thread_local` is the correct scope AND keeps each
 // test thread isolated (the cell is the same shape as the sound/lightstyle/
-// changelevel queues above).
+// changelevel transports — `msg.rs`, `lightstyle.rs`, and below).
 // ---------------------------------------------------------------------------
 
 thread_local! {
@@ -89,7 +89,7 @@ pub(super) fn reset_skill() {
 // the swap itself, never inside the builtin call.
 //
 // The `thread_local!` choice is identical to the sound/particle/temp-entity
-// queues above: builtins are `fn(&mut Vm)` and cannot see the `Server`, and
+// queues (`msg.rs`): builtins are `fn(&mut Vm)` and cannot see the `Server`, and
 // `vm.rs` is off-limits, so the deferred request cannot hang off either. Server
 // methods run on the same thread as the builtins, so a request a frame's QuakeC
 // fired is visible to `take_pending_changelevel` right after the frame.

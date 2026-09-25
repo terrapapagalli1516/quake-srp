@@ -262,6 +262,29 @@ impl Server {
         Ok(ent)
     }
 
+    /// `SV_CleanupEnts` (sv_main.c:557): clear the one-frame `EF_MUZZLEFLASH` bit on
+    /// every edict. QuakeC's `W_Attack` sets `self.effects |= EF_MUZZLEFLASH` on each
+    /// discharge and relies on the engine clearing it the same frame, so the muzzle
+    /// dynamic light lasts exactly one frame. The C clears at the END of the frame
+    /// (after the client read the bit); this single-process port clears at the START
+    /// of the next frame instead — equivalent, since nothing reads `effects` between
+    /// the host's `entity_dlights()` (end of this frame) and the next frame's thinks.
+    /// Without this the muzzle light, once lit, tracked the shooter forever.
+    pub(super) fn cleanup_ents(&mut self) {
+        let n = self.vm.num_edicts();
+        for e in 1..n {
+            if self.vm.edict_free.get(e).copied().unwrap_or(true) {
+                continue;
+            }
+            let ei = e as i32;
+            let eff = self.vm.ent_get_float(ei, "effects") as i32;
+            if eff & EF_MUZZLEFLASH != 0 {
+                self.vm
+                    .ent_set_float(ei, "effects", (eff & !EF_MUZZLEFLASH) as f32);
+            }
+        }
+    }
+
     /// Enumerate the per-frame entity dynamic-light contributions, porting the
     /// `EF_*` dlight spawns of `CL_RelinkEntities` (`cl_main.c`).
     ///
@@ -286,29 +309,6 @@ impl Server {
     /// If one entity has several light bits set, it yields several entries — but
     /// they share the entity's `key`, so `CL_AllocDlight` collapses them into one
     /// slot (the last wins), exactly as the C overwrote the same slot in sequence.
-    /// `SV_CleanupEnts` (sv_main.c:557): clear the one-frame `EF_MUZZLEFLASH` bit on
-    /// every edict. QuakeC's `W_Attack` sets `self.effects |= EF_MUZZLEFLASH` on each
-    /// discharge and relies on the engine clearing it the same frame, so the muzzle
-    /// dynamic light lasts exactly one frame. The C clears at the END of the frame
-    /// (after the client read the bit); this single-process port clears at the START
-    /// of the next frame instead — equivalent, since nothing reads `effects` between
-    /// the host's `entity_dlights()` (end of this frame) and the next frame's thinks.
-    /// Without this the muzzle light, once lit, tracked the shooter forever.
-    pub(super) fn cleanup_ents(&mut self) {
-        let n = self.vm.num_edicts();
-        for e in 1..n {
-            if self.vm.edict_free.get(e).copied().unwrap_or(true) {
-                continue;
-            }
-            let ei = e as i32;
-            let eff = self.vm.ent_get_float(ei, "effects") as i32;
-            if eff & EF_MUZZLEFLASH != 0 {
-                self.vm
-                    .ent_set_float(ei, "effects", (eff & !EF_MUZZLEFLASH) as f32);
-            }
-        }
-    }
-
     pub fn entity_dlights(&self) -> Vec<EntityDlight> {
         let mut out = Vec::new();
         let n = self.vm.num_edicts();

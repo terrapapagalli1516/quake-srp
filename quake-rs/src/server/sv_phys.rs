@@ -139,13 +139,6 @@ impl Server {
         }
     }
 
-    /// `SV_RunThink` (sv_phys.c): if the edict's `nextthink` is in `(0, time+dt]`,
-    /// clear it, set the `time`/`self`/`other` globals, and execute its `think`.
-    /// Returns `(fired, alive)`: `fired` = a think executed this frame; `alive`
-    /// is `SV_RunThink`'s own bool (the edict was not removed). When no think is
-    /// due it returns `(false, true)` — nothing ran, the entity lives on, and
-    /// the caller still runs per-movetype physics. Errors from the think
-    /// propagate (the caller decides whether to abort the frame).
     /// `SV_Physics_Pusher` (sv_phys.c): advance a `MOVETYPE_PUSH` bmodel
     /// (`func_door`, `func_plat`, `func_button`, trains) by its velocity over the
     /// frame, carrying riders and respecting blockers, then fire its `think` when
@@ -448,6 +441,13 @@ impl Server {
         self.vm.ent_set_vector(ent, "origin", org);
     }
 
+    /// `SV_RunThink` (sv_phys.c): if the edict's `nextthink` is in `(0, time+dt]`,
+    /// clear it, set the `time`/`self`/`other` globals, and execute its `think`.
+    /// Returns `(fired, alive)`: `fired` = a think executed this frame; `alive`
+    /// is `SV_RunThink`'s own bool (the edict was not removed). When no think is
+    /// due it returns `(false, true)` — nothing ran, the entity lives on, and
+    /// the caller still runs per-movetype physics. Errors from the think
+    /// propagate (the caller decides whether to abort the frame).
     fn run_think(&mut self, ent: i32, sv_time: f32, dt: f32) -> Result<(bool, bool)> {
         let thinktime = self.vm.ent_get_float(ent, "nextthink");
         if thinktime <= 0.0 || thinktime > sv_time + dt {

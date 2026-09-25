@@ -102,6 +102,15 @@ impl MoveTrace {
     }
 }
 
+/// Sample the world point-contents at `p` (the [`Host`](crate::vm::Host)-backed
+/// `SV_PointContents` the builtins use): `CONTENTS_EMPTY` (-1), `SOLID` (-2), `WATER` (-3),
+/// `SLIME` (-4), `LAVA` (-5), etc. Exposed for tooling/tests (e.g. probing where
+/// a liquid is); `CONTENTS_SOLID` if there is no host.
+pub fn probe_point_contents(vm: &mut Vm, p: Vec3) -> i32 {
+    vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID)
+}
+
+// Mirrors the C `SV_Move(start, mins, maxs, end, type, passedict)` signature (world.c).
 /// `SV_Move` (world.c ~923): box-trace `mins`/`maxs` from `start` to `end`
 /// against the world **and** every solid entity, returning the closest impact.
 ///
@@ -138,15 +147,6 @@ impl MoveTrace {
 /// the move's own box. When `missile == false` (every caller except the
 /// `MOVETYPE_FLYMISSILE` branch of `push_entity`), behaviour is identical to a
 /// plain `MOVE_NORMAL` clip.
-/// Sample the world point-contents at `p` (the [`Host`](crate::vm::Host)-backed
-/// `SV_PointContents` the builtins use): `CONTENTS_EMPTY` (-1), `SOLID` (-2), `WATER` (-3),
-/// `SLIME` (-4), `LAVA` (-5), etc. Exposed for tooling/tests (e.g. probing where
-/// a liquid is); `CONTENTS_SOLID` if there is no host.
-pub fn probe_point_contents(vm: &mut Vm, p: Vec3) -> i32 {
-    vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID)
-}
-
-// Mirrors the C `SV_Move(start, mins, maxs, end, type, passedict)` signature (world.c).
 #[allow(clippy::too_many_arguments)]
 pub fn sv_move(
     vm: &mut Vm,
