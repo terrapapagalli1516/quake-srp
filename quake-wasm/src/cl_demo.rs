@@ -621,6 +621,44 @@ mod tests {
         );
     }
 
+    /// R_DrawParticles' `grav = frametime * sv_gravity.value * 0.05` reads the
+    /// client's own cvar in playback too (it was a constant 800 here): at the
+    /// default a recorded svc_particle puff (pt_slowgrav, dir 0) leaves its
+    /// first 0.05 s frame at vz -2; after e1m8 (worldspawn sets 100, and the
+    /// cvar outlives the map) at -0.25.
+    #[test]
+    fn demo_particles_fall_by_the_sv_gravity_cvar() {
+        use quake_rs::demo::{Demo, DemoFrame};
+        use quake_rs::server::ParticleBurst;
+        let vz = || {
+            let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
+            let puff = DemoFrame {
+                time: 0.05,
+                particles: vec![ParticleBurst { org: [0.0; 3], dir: [0.0; 3], color: 73, count: 20 }],
+                ..Default::default()
+            };
+            let demo = Demo {
+                level_name: "test".into(),
+                static_sounds: Vec::new(),
+                model_precache: vec![String::new(), "maps/test.bsp".into()],
+                sound_precache: Vec::new(),
+                viewentity: 0,
+                frames: vec![plain(0.0), puff, plain(0.10), plain(0.15)],
+            };
+            let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+            let _ = step_demo(&mut d, 0.05, false, 64, 40);
+            assert_eq!(d.idx, 1);
+            let v: Vec<f32> = d.particles.particles().iter().map(|p| p.velocity[2]).collect();
+            assert!(!v.is_empty() && v.iter().all(|&z| z == v[0]), "{v:?}");
+            v[0]
+        };
+        let _ = crate::app::build_walk_map("maps/e1m1.bsp").expect("e1m1"); // sv_gravity 800
+        assert_eq!(vz(), -800.0 * 0.05 * 0.05);
+        let _ = crate::app::build_walk_map("maps/e1m8.bsp").expect("e1m8"); // sv_gravity 100
+        assert_eq!(vz(), -100.0 * 0.05 * 0.05);
+        let _ = crate::app::build_walk_map("maps/e1m1.bsp");
+    }
+
     /// CENSUS F18 on the recorded stream: C's demo playback parses the signon
     /// and frame 0's block in one CL_ReadFromServer, before the first
     /// CL_LerpPoint, so the recorded player's weapons are stamped at about

@@ -1,9 +1,10 @@
 //! Census tests (CENSUS.md): each test asserts what id's WinQuake does, on the
 //! real shareware data, through the live browser path (`build_walk_map` +
-//! `step_walk`). They are `#[ignore]`d because the port does not do it yet —
-//! each is the evidence for one CENSUS.md finding and the acceptance test for
-//! its fix: `cargo test --release census -- --ignored` lists what is still open.
-//! Un-ignore a test in the commit that fixes its finding.
+//! `step_walk`). Each was written `#[ignore]`d as the evidence for one
+//! CENSUS.md finding and un-ignored by the commit that fixed it; all of them
+//! run now, as those fixes' regression tests. A new finding's test starts
+//! `#[ignore]`d the same way (`cargo test --release census -- --ignored`
+//! lists what is still open).
 
 use quake_rs::progs::OFS_PARM0;
 use quake_rs::render;
