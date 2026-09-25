@@ -115,10 +115,12 @@ INIT_JS = r"""
   // 2. Startup timing + the bench build's clock import (quake_bench.now_ms). An
   //    import the module does not declare is ignored, so the stock wasm loads too.
   //    In live mode the exports are re-wrapped so step() is timed per call.
+  //    Both entry points are hooked: the page streams (instantiateStreaming,
+  //    whose start is the start of the download) and falls back to buffered
+  //    instantiate.
   window.__startup = {};
   window.__live = { step: [], put: [], raf: [], skipped: 0 };
-  const inst = WebAssembly.instantiate;
-  WebAssembly.instantiate = async function (src, imports) {
+  const hook = (inst) => async function (src, imports) {
     imports = Object.assign({}, imports || {});
     imports.quake_bench = { now_ms: () => performance.now() };
     window.__startup.instantiate_start = performance.now();
@@ -151,6 +153,10 @@ INIT_JS = r"""
     }
     return { module: r.module, instance: { exports: ex } };
   };
+  WebAssembly.instantiate = hook(WebAssembly.instantiate);
+  if (WebAssembly.instantiateStreaming) {
+    WebAssembly.instantiateStreaming = hook(WebAssembly.instantiateStreaming);
+  }
   if (window.__benchLiveWrap) {
     const put = CanvasRenderingContext2D.prototype.putImageData;
     CanvasRenderingContext2D.prototype.putImageData = function (...a) {
@@ -344,7 +350,9 @@ with sync_playwright() as p:
         const s = window.__startup;
         const r = performance.getEntriesByType('resource').find(e => e.name.endsWith('quake_wasm.wasm'));
         return { fetch_ms: r ? r.responseEnd - r.startTime : null,
-                 instantiate_ms: s.instantiate_end - s.instantiate_start,
+                 // From the end of the download to an instantiated module (the
+                 // streaming path compiles during the download).
+                 instantiate_ms: r ? s.instantiate_end - r.responseEnd : null,
                  boot_attract_ms: s.boot_attract_ms,
                  nav_to_first_frame_ms: s.first_step,
                  isolated: self.crossOriginIsolated }
@@ -425,7 +433,8 @@ print(f"\nquake-rust browser bench — {len(wasm_bytes) / 1048576:.1f} MB wasm, 
       f"warmup={args.warmup}, dt=1/72, load {' '.join(results['load_before'])} -> "
       f"{' '.join(results['load_after'])}")
 s = results["startup"]
-print(f"startup: fetch {s['fetch_ms']:.0f} ms (local), instantiate {s['instantiate_ms']:.0f} ms, "
+print(f"startup: fetch {s['fetch_ms']:.0f} ms (local), instantiated {s['instantiate_ms']:.0f} ms "
+      f"after the download, "
       f"boot_attract {s['boot_attract_ms']:.0f} ms, navigation->first frame "
       f"{s['nav_to_first_frame_ms']:.0f} ms; gzip -6 size {s['wasm_gzip6_mb']} MB")
 native_by = {(n["workload"], n["w"], n["h"]): n["values"] for n in results["native"]}

@@ -551,6 +551,19 @@ The fidelity classes are:
   re-downloads 18.7 MB. The page would fetch `pak0.pak` separately, cacheable, and copy it in
   through an alloc export, the same pattern as `sav_alloc`.
 - **`wasm-opt -O3`** as an optional deploy step (§6).
+- **Done** (branch `quake/host`), compression + streaming:
+  - `miniserve -C` compresses on the fly: brotli 8.6 MB (Chrome's pick), gzip 9.6, zstd 8.3, for
+    ~0.4 s of server CPU per download. README's browser section has the command. First frame,
+    headless at an emulated 50 Mbit/s: 3.51 s → 1.76 s; on localhost it is a loss (0.19 → 0.54 s).
+  - The page streams: a byte-counting `TransformStream` feeds `instantiateStreaming` (a
+    pass-through rather than a `tee`, so nothing is buffered twice), re-wrapped as an
+    `application/wasm` `Response`, so a wrong server MIME type still streams. No 19 MB JS copy,
+    and the 30 ms "let the bar paint" pause is gone. Local first frame 218–223 → 191–196 ms
+    (three interleaved runs of 7). Browsers without `instantiateStreaming` or `TransformStream`
+    keep the buffered path. Checked: right MIME, `application/octet-stream`, no streaming API, and
+    gzip with a compressed `Content-Length` (the bar now shows only the MB counter when a
+    `Content-Encoding` is set). `bench.py` hooks both entry points.
+  - Not done: the pak split and `wasm-opt`.
 
 ---
 
