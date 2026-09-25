@@ -710,6 +710,7 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   - **Not done:** a brush model spanning several BSP leaves is split by
     `R_DrawSolidClippedSubmodelPolygons` into fragments, each with its own
     `nearzi` and so possibly its own level; the port picks one level per face.
+    (Done since, by the edge renderer: "World pass: id's edge renderer" below.)
     The wasm console has no `d_mipscale`/`d_mipcap` commands yet.
 
 - ✅ **Lightmap stepping** (oracle class 6, ±1 colormap row on 1.5–4.4% of
@@ -785,6 +786,8 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   mip 0 from a point at z 96, the port mip 1; 0.7% of that frame, 0.17% of
   one of the 72 sweep views, nothing elsewhere). Reproducing it means
   running id's edge clipping and edge cache in `R_RecursiveWorldNode`'s order.
+  (Closed by the edge renderer, which does exactly that: "World pass: id's edge
+  renderer" below.)
 
 ## Census client/host fixes (2026-09-25, branch `quake/fix-client`)
 
@@ -1422,6 +1425,127 @@ being moved into `quake-rs/src/client/`):
   fresh 8-bit WAV at the listener on entity 900 channel 2, then a sound
   10000 units away on the same key): the hum no longer starts (the old page
   fails), and alone it does (the control).
+
+## World pass: id's edge renderer (2026-09-25, branch `quake/edge`, PERF_PLAN A3)
+
+- ✅ **The world and the brush entities are drawn as WinQuake draws them**
+  (`render/edge.rs`). Before, each
+  clipped face was a polygon walked row by row, front to back by centroid,
+  against an f32 z-buffer cleared every frame, with the 16-pixel grid
+  restarted wherever a run of passing z tests began. Now the frame is
+  `R_EdgeDrawing`'s:
+  - `R_RecursiveWorldNode` walks the BSP front to back from the view leaf's
+    PVS (`R_MarkLeaves`, parents as `Mod_SetParent`), culls nodes against the
+    four sides of the view (`R_TransformFrustum`, `R_SetUpFrustumIndexes`),
+    marks faces through the leaves' marksurfaces and gives every face, node
+    and leaf its key (smaller is nearer).
+  - `R_RenderFace` clips each face's edges to the view's sides (`R_ClipEdge`,
+    no near plane: `R_EmitEdge` clamps z to `NEAR_CLIP` and u/v to the view)
+    and puts them in per-scanline lists in the C's floats and 12.20 fixed
+    point, sharing edges through the `medge_t` edge cache (owner test,
+    "fully clipped" frame stamps), adding the left-side edge and the right
+    side's 1/z from `r_leftexit`/`r_rightexit`, which persist across faces as
+    the C's statics do.
+  - Brush entities join the same list (`R_DrawBEntitiesOnList`):
+    `R_BmodelCheckBBox`, `R_SplitEntityOnNode2`, then either
+    `R_DrawSubmodelPolygons` (one leaf: whole faces keyed as the leaf, sorted
+    on 1/z against the leaf's other brush models in `R_LeadingEdge`) or
+    `R_DrawSolidClippedSubmodelPolygons` (`R_RecursiveClipBPoly` cuts the
+    faces into fragments along the world's planes, each keyed as its leaf,
+    with its own `nearzi`). Inline submodels and external `b_*.bsp` boxes
+    alike.
+  - `R_ScanEdges` walks the scanlines with the active edge table
+    (`R_InsertNewEdges`, `R_StepActiveU`, `R_RemoveEdges`) and the surface
+    stack (`R_LeadingEdge`, `R_TrailingEdge`, `R_CleanupSpan`), emitting a span
+    wherever the nearest surface changes; the background surface
+    (`r_clearcolor` 2) owns what nothing covers.
+  - `D_DrawSurfaces` draws each surface's spans once: sky through
+    `D_DrawSkyScans8` (no more deferred sky pixels), liquids through
+    `Turbulent8`, walls at the mip level of their own `nearzi` through the
+    surface cache and `D_DrawSpans16`, then `D_DrawZSpans` writes the 16-bit
+    1/z. Every pixel of the view is written exactly once and nothing is
+    cleared, image or z-buffer. The texel arithmetic of a span is the
+    polygon walker's (the gradients at the span's first pixel), so a
+    surface drawn over the same run gets the same texels.
+- ✅ **The entities test id's 16-bit `d_pzbuffer`** (`ZBuf::Izi`): alias
+  models and the gun `D_PolysetDraw`'s `(lzi >> 16) >= *lpz`, particles
+  `D_DrawParticle`'s `izi = (int)(zi * 0x8000)`, sprites the sprite spans'
+  `izi >> 16` against `D_DrawZSpans`' values; the gun's tripled 1/z as before.
+- **What it reproduces that the polygon walker could not:**
+  - e1m2's face 733 (the w2a open note above): a stale `r_rightexit` gives it
+    another face's 1/z and a finer mip, as in id. e1m2's first frame 99.21 →
+    99.94% (`--spans 16`), 98.73 → 100.00 at the page's aspect, 99.46 →
+    100.00 at viewsize 100.
+  - Brush models cut into leaf fragments with their own mip levels (the w2a
+    "not done"), sorted with the world by leaf key instead of per-pixel depth;
+    world faces in front of a brush model now cut its spans too (w2b noted
+    they did not).
+  - Entity pixels match 100% in every oracle case (12 sweep views were
+    99.30–99.96, the entity cut into world spans differently).
+- **Oracle** (`compare.py`, id's x86 spans `--spans 16`, 320x200 unless
+  stated; before → after). 372 cases (the standard rows world and ents, both
+  span modes, 320x200 / 640x480 / 640x400 with and without the page's aspect,
+  viewsize 100, exact perspective, mip 0, muzzle flash, settle 3, a second
+  clock, the altar, the teleporter, the water, and 4 maps × 6 yaws × 3 pitches
+  at 320x200 and at 640x400 with aspect): mean 99.798 → 99.833, 55 better, 3
+  worse by one pixel each (worst −0.0016 points).
+
+  | row | e1m1 | e1m2 | e1m3 | e1m7 |
+  |---|---|---|---|---|
+  | world `--spans 16` | 99.959 → 99.961 | 99.206 → 99.941 | 99.981 → 99.981 | 99.911 → 99.911 |
+  | `--aspect 0.8333333` | 100.00 → 100.00 | 98.73 → 100.00 | 100.00 → 100.00 | 99.997 → 99.997 |
+  | viewsize 100, aspect | 100.00 → 100.00 | 99.46 → 100.00 | 100.00 → 100.00 | 99.996 → 99.996 |
+  | 640x480 | 99.971 → 99.971 | 99.968 → 99.968 | 99.992 → 99.992 | 99.943 → 99.944 |
+  | `--spans 8` (id's portable C) | 94.57 → 94.57 | 96.09 → 96.82 | 97.27 → 97.27 | 91.72 → 91.72 |
+  | exact extra vs `--spans 1` | 99.94 → 99.94 | 99.18 → 99.91 | 99.98 → 99.98 | 99.91 → 99.91 |
+  | muzzle flash (`+attack --settle 3`) | 98.02 → 98.02 | 98.34 → 99.46 | 99.89 → 99.89 | 99.69 → 99.69 |
+
+  Sweeps: 72 views at 320x200 (world and ents) 99.982 → 99.993 mean, 16
+  better, none worse; at 640x400 with aspect 99.9970 → 99.9972. Brush
+  entities: 144 views facing the first twelve brush models of each map from
+  two or four sides (ents mode) 94.35 → 99.37, 57 better, none worse; the
+  lowest left (57–94%) are cameras inside solid (leaf 0, no PVS), where id
+  shows the background on floors and walls both port renderers draw — not
+  understood, and not a place a player's eye can be. What is left in the
+  standard rows is texel-boundary pixels on 45-degree lines of floor texture
+  and a few sky pixels: float noise of the texel arithmetic (the edge
+  arithmetic in f64 instead of the C's floats moves nothing).
+- **Goldens:** e1m1 `4807aaa1` and e1m2 `8ce25660` unchanged; e1m3
+  `3531e9cd` → `1867f5a7` (150 px, 0.06%: texels of the shells box, now
+  drawn over id's spans and at its fragments' mip levels).
+- **Speed** (PERF_PLAN A3 has the tables): wasm whole frame −23 to −33% at
+  the median and −21 to −36% at p95 on demo1, walk_e1m1, fire_e1m1 and
+  walk_e1m3 at 640x400 and 1280x800; the brush pass (world + submodel +
+  external) −22 to −39%; native −43 to −57% per frame (the w2b native
+  regression is gone with its per-pixel z test).
+- **Accepted gaps and notes:**
+  - id's pools (`r_maxedges` 2400, `r_maxsurfs` 800, `MAXSPANS` 3000 with its
+    mid-scan flush) are growable buffers. Running out of spans only changes
+    when id draws; running out of edges or surfaces drops the farthest faces
+    and the brush models. id's demos never come close (at most 971 edges and
+    390 surfaces in any frame of demo1–3); `quaketool scene`'s camera, which
+    can stand in solid (no PVS), makes up to 3542 edges and 1400 surfaces,
+    where id would drop faces. `RenderStats` counts them.
+  - Brush models do not rotate (`BModelInstance` has no angles; the
+    shareware has no rotating brush models), so `R_RotateBmodel` is the
+    identity and only moves `modelorg` and the clip planes.
+  - id adds brush entities to the edge list in `cl_visedicts` order; the port
+    adds the inline submodels, then the external boxes. The order only breaks
+    exact ties (two edges at the same u, two same-leaf brush models at the
+    same 1/z).
+  - `r_clearcolor` is fixed at its default, 2.
+  - The synthetic test rooms are now wound clockwise seen from the front,
+    as qbsp winds every face: the edge renderer, like id's, takes leading and
+    trailing edges from the winding, and a face wound the other way makes only
+    inverted spans. A bsp without nodes or leaves (test fixtures only) goes in
+    as one leaf's brush model, sorted on 1/z.
+  - The polygon walker is deleted (`draw_world_textured`, `draw_submodel`,
+    `draw_brush_bsp`, the `raster_poly_*` fillers, the deferred sky, the
+    face-AABB frustum and near-plane clip, the f32 z-buffer): the last commit
+    of the branch, byte-identical (goldens, the 372 oracle cases, 104 wasm
+    frame hashes over four workloads at 320x200 and 640x400). Its fill-rule and
+    crack tests went with it; the edge renderer's coverage is id's by
+    construction (the spans partition every scanline).
 
 ## LOW (27)
 

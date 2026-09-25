@@ -96,8 +96,9 @@ the steady eye. (The port's live path starts `oldz` at the origin, so its first
 After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below),
 the mip levels and lightmap stepping (branch `quake/w2a`: classes 1 and 6), and the
 pixel aspect, id's 16-pixel spans and the screen-centred sky (branch `quake/w2b`:
-class 7, class 4's open note); see `AUDIT.md`. The numbers before them are in the
-git history of this file.
+class 7, class 4's open note), and id's edge-sorted span renderer for the world and
+brush models (branch `quake/edge`: class 1's open note, PERF_PLAN A3); see
+`AUDIT.md`. The numbers before them are in the git history of this file.
 
 The port draws what DOS/Windows players saw: the x86 build's `D_DrawSpans16`. So the
 headline compares it with id's renderer set to the same (`--spans 16`); the oracle's
@@ -106,22 +107,27 @@ default is still id's portable C as written (`D_DrawSpans8`), last column.
 | map | `--spans 16` world exact% | with entities | entity pixels exact% | 640x480 world | 640x400 at the page's 4:3 aspect | `--spans 8` (default) world |
 |---|---:|---:|---:|---:|---:|---:|
 | e1m1 | 99.96 | 99.96 | 100.0 (15 px) | 99.97 | 100.00 | 94.57 |
-| e1m2 | 99.21 | 99.21 | 100.0 (357 px) | 99.97 | 100.00 | 96.09 |
+| e1m2 | 99.94 | 99.94 | 100.0 (357 px) | 99.97 | 100.00 | 96.82 |
 | e1m3 | 99.98 | 99.98 | 100.0 (239 px) | 99.99 | 100.00 | 97.27 |
 | e1m7 | 99.91 | 99.91 | 100.0 (54 px) | 99.94 | 100.00 | 91.72 |
 
 (Before the 16-pixel spans, on the same base: 92.84 / 94.36 / 96.56 / 87.20 against
 `--spans 16`, 97.44 / 97.12 / 99.16 / 94.96 against `--spans 8`. Before classes 1
 and 6: 84.76 / 64.07 / 65.83 / 75.65 against `--spans 8`.) Against `--spans 8` what
-remains is id's portable C's 8-pixel segments against the port's 16 (class 7). The
-e1m2 row's 0.8% is one face at a finer mip in id than its geometry gives (class 1's
-open note). The entity-pixel column counts the world pixels around and behind an
-entity too. nonpal% is 0 in every case (was up to 0.45).
+remains is id's portable C's 8-pixel segments against the port's 16 (class 7).
+(Before the edge renderer e1m2 read 99.21 and 96.09: one face at a finer mip in id
+than its geometry gives, class 1's open note, which id's edge cache produces and the
+port now does too.) What is left in the `--spans 16` rows is single pixels on
+texel boundaries along 45-degree lines of floor texture and a few sky pixels —
+float noise of the texel arithmetic (carrying the edge arithmetic in f64 instead of
+the C's floats moves nothing). The entity-pixel column counts the world pixels
+around and behind an entity too. nonpal% is 0 in every case (was up to 0.45).
 
 **Pixel aspect** (`--aspect 0.8333333`: id's 16:10 modes on a 4:3 monitor, which
 is how the browser page shows every preset). 320x200 against `--spans 16`: 100.00 /
-98.73 / 100.00 / 100.00, entity pixels 100% everywhere; at viewsize 100 (the view
-above the status bar, `--viewsize 100`) 100.00 / 99.46 / 100.00 / 100.00. Before
+100.00 / 100.00 / 100.00 (e1m7 99.997), entity pixels 100% everywhere; at viewsize
+100 (the view above the status bar, `--viewsize 100`) 100.00 / 100.00 / 100.00 /
+100.00 (e1m2 was 98.73 and 99.46 before the edge renderer). Before
 the port's projection took the aspect it scored 31.35 / 26.90 / 20.23 / 14.23
 against id's 4:3 frame (then with id at mip 0 and exact perspective).
 
@@ -159,9 +165,9 @@ against the port as it ships (16-pixel spans; world only; `characterise.sh` prin
 
 | id's renderer configured as | e1m1 | e1m2 | e1m3 | e1m7 |
 |---|---:|---:|---:|---:|
-| as written (`--spans 8`) | 94.57 | 96.09 | 97.27 | 91.72 |
-| 16-px segments (`--spans 16`, the x86 asm) | 99.96 | 99.21 | 99.98 | 99.91 |
-| exact per-pixel perspective (`--spans 1`) | 92.85 | 94.39 | 96.58 | 87.19 |
+| as written (`--spans 8`) | 94.57 | 96.82 | 97.27 | 91.72 |
+| 16-px segments (`--spans 16`, the x86 asm) | 99.96 | 99.94 | 99.98 | 99.91 |
+| exact per-pixel perspective (`--spans 1`) | 92.85 | 95.12 | 96.58 | 87.19 |
 | mip 0 forced (`--c-cmd "d_mipscale 0"`, both renderers) | 94.57 | 94.26 | 96.05 | 91.70 |
 | mip 0 + 16-px segments | 99.95 | 99.93 | 99.98 | 99.91 |
 | mip 0 + exact perspective, the port's too (`--exactpersp`) | 99.93 | 99.88 | 99.98 | 99.91 |
@@ -169,7 +175,8 @@ against the port as it ships (16-pixel spans; world only; `characterise.sh` prin
 `d_mipscale` and `d_mipcap` are the port's cvars too, and `compare.py` hands them
 to both sides, so the "mip 0" rows put both renderers at mip 0. With the port's
 exact-perspective extra, id's exact rows are the pre-`quake/w2b` port's to the
-pixel: 99.94 / 99.18 / 99.98 / 99.91 at `--spans 1`. Mip 0 + exact at 640x480:
+pixel: 99.94 / 99.91 / 99.98 / 99.91 at `--spans 1` (e1m2 was 99.18 before the edge
+renderer). Mip 0 + exact at 640x480:
 99.96 / 99.96 / 99.99 / 99.98; a pitched and rolled view (e1m1,
 `--view=544,288,32,-15,100,12`) 100.00. Over 72 more views
 (the four start positions, 6 yaws x 3 pitches) against id's exact perspective and
@@ -210,7 +217,10 @@ classes a crop is not about removed on id's side where possible.
    earlier face when the edge that should set it was cached as fully clipped — the
    face then gets the `1/z` of another face's point, a finer level (e1m2's first
    frame: face 733, id mip 0 from a point at z 96, the port mip 1). Reproducing it
-   takes id's edge cache and `R_RecursiveWorldNode` order.
+   takes id's edge cache and `R_RecursiveWorldNode` order. **Fixed** with the edge
+   renderer (branch `quake/edge`, PERF_PLAN A3): the port runs id's edge list, so a
+   surface's `nearzi` comes from its own edges, stale exits included — e1m2 99.21 ->
+   99.94.
 2. **Alias models** (`crops/alias.png`, `crops/fullbright.png`). The port lights
    them with a heuristic (`0.25 + ambient/200`, a fixed-direction Lambert) and a
    linear RGB multiply with no colormap — hence the non-palette colours in the
@@ -289,8 +299,15 @@ classes a crop is not about removed on id's side where possible.
    open: a map with no lighting lump (id: fullbright) renders Lambert.
    AUDIT's "lightless/test maps only" is wrong about where such faces exist.
 
-Brush entities (doors, plats, `b_*.bsp` boxes) matched about as well as the world
-in the views tried, but were not examined closely.
+Brush entities (doors, plats, `b_*.bsp` boxes): since the edge renderer they sort
+with the world as id's do — in the world's edge list, clipped into the leaves they
+span, keyed like those leaves, and sorted on 1/z against the other brush models in
+the same leaf. 144 views facing the first twelve brush models of each map from
+two or four sides (`--modes ents --spans 16`, 320x200): mean 94.35 -> 99.37%, 57
+views better and none worse than the polygon walker. The lowest that remain (57 to
+94%) are all cameras inside solid (leaf 0: no PVS), where id's frame shows the
+background on floors and walls that both of the port's renderers draw; not
+understood, and not a place a player's eye can be.
 
 ## Speed
 
@@ -299,12 +316,13 @@ input null: **1480 fps at 320x200, 535 at 640x480, 192 at 1280x1024**
 (`oracle/build/quake-oracle -basedir <dir with id1/pak0.pak> -oracle_realtime
 -width W -height H +timedemo demo1`). id's renderer cannot go above 1280x1024.
 
-Same view, warm, world only (`compare.py --modes world --bench 100`): the port
-takes **0.55-0.81x** id's time at 320x200, **0.69-1.12x** at 640x480 and
-**0.98-1.40x** at 1280x1024 (it was 1.7-3.6x before the polygon span walker of
-PERF_PLAN A1; the mip levels leave a warm frame's cost where it was — they cut the
-rebakes, which a warm static view has none of). The port still divides per pixel.
-Timings are noisy: compare within one sitting.
+Same view, warm, world only (`compare.py --modes world --spans 16 --bench 100`):
+the port takes **0.30-0.34x** id's time at 320x200, **0.37-0.45x** at 640x480 and
+**0.43-0.51x** at 1280x1024 with id's edge renderer (PERF_PLAN A3); the polygon
+walker it replaced took 0.48-0.81x, 0.75-1.32x and 1.06-1.94x in the same sitting
+(and 1.7-3.6x before the polygon span walker of PERF_PLAN A1; the mip levels leave
+a warm frame's cost where it was — they cut the rebakes, which a warm static view
+has none of). Timings are noisy: compare within one sitting.
 
 ## Caveats — what was not verified
 

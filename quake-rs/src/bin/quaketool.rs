@@ -1877,10 +1877,11 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
                 Some((it.next()?.trim().parse().ok()?, it.next()?.trim().parse().ok()?))
             })
             .unwrap_or((640usize, 400usize));
+        let opts = render::RenderOptions::default();
         let render_once = || {
-            render::render_scene_ext(
+            render::render_scene_ext_sprited(
                 &bsp_for_render, &cam, bw, bh, &palette, &instances, &bmodels, &external, None,
-                server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(),
+                server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(), &[], &opts,
             )
         };
         let _ = std::hint::black_box(render_once()); // warm the per-face caches
@@ -1931,10 +1932,15 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             "  surf cache: {} true-hits, {} cached-rebakes (warm: should be ~0), {} external-bypass-bakes (expected, cheap)",
             st.surf_cache_hits, st.surf_baked, st.surf_bypass_baked,
         );
+        let _ = writeln!(
+            o,
+            "  edge renderer: {} edges, {} surfaces, {} spans (id's pools: r_maxedges 2400, r_maxsurfs 800)",
+            st.edges_emitted, st.surfs_emitted, st.spans_emitted,
+        );
         return Ok(Out::Text(o));
     }
 
-    let img = render::render_scene_ext(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref());
+    let img = render::render_scene_ext_sprited(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(), &[], &render::RenderOptions::default());
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();

@@ -39,6 +39,19 @@ menu, as id's (the last commit: two quake-wasm tests need their menu
 navigation updated with it). Left for the quake-wasm pass: see the AUDIT
 section's list.
 
+## The world through id's edge renderer (2026-09-25, branch `quake/edge`)
+
+PERF_PLAN A3: the world and the brush entities are drawn as WinQuake draws
+them (`render/edge.rs`): the BSP walked front to back into one edge list,
+spans per scanline for the nearest surface, each pixel drawn once with no z
+test, the 16-bit 1/z left for the entities (details in AUDIT.md's section of
+the same name). The polygon walker it replaced is deleted (the branch's last
+commit, byte-identical; the chair can drop it). Oracle: 372 cases, none
+worse by more than a pixel, e1m2 99.21 -> 99.94 (id's face-733 mip quirk now
+reproduced), entity pixels 100% everywhere, brush-entity views 94.35 ->
+99.37. Wasm frame −23 to −33% (p95 −21 to −36%), native −43 to −57%. e1m3
+golden `3531e9cd` -> `1867f5a7` (150 px).
+
 ---
 
 ## Projection and spans (2026-09-25, branch `quake/w2b`)

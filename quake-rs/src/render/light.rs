@@ -980,6 +980,35 @@ pub(super) fn mark_dlights(
     }
 }
 
+/// [`mark_dlights`] for one more model of the same `bsp` — a brush entity's
+/// own subtree, `R_MarkLights` from its `firstclipnode` in
+/// `R_DrawBEntitiesOnList` — OR-ing its lights' bits into `bits` without
+/// clearing what the world (or another entity) marked there: the models' face
+/// ranges are disjoint, so one mask serves them all. `dlights` are the lights
+/// in the entity's frame, in the same order (the same bits) as the world's.
+pub(super) fn mark_dlights_more(
+    bsp: &Bsp,
+    headnode: i32,
+    dlights: &[crate::dlight::DynamicLight],
+    bits: &mut Vec<u32>,
+) {
+    if dlights.is_empty() {
+        return;
+    }
+    if bsp.nodes.is_empty() {
+        bits.clear();
+        bits.resize(bsp.faces.len(), ALL_DLIGHT_BITS);
+        return;
+    }
+    if bits.len() < bsp.faces.len() {
+        bits.resize(bsp.faces.len(), 0);
+    }
+    for (i, dl) in dlights.iter().take(u32::BITS as usize).enumerate() {
+        let mut budget = bsp.nodes.len();
+        mark_lights_r(bsp, dl, 1u32 << i, headnode, &mut budget, bits);
+    }
+}
+
 /// `R_MarkLights` (`r_light.c`): descend the BSP from `node`, OR-ing `bit` into
 /// `bits[face]` for every surface the light's sphere reaches through the tree.
 ///
@@ -1539,11 +1568,12 @@ mod tests {
             DPlane { normal: [0.0, 0.0, 1.0], dist: 0.0, ptype: 2 },
         ];
 
-        // One floor quad per room (z=0, +Z normal, CCW seen from above so a
-        // camera above passes the backface cull).
+        // One floor quad per room (z=0, +Z normal, so a camera above passes
+        // the backface cull), clockwise seen from above as qbsp winds faces
+        // (the order the edge renderer takes leading and trailing edges from).
         let mut add_floor = |x0: f32, x1: f32| {
             let base = vertexes.len() as u16;
-            for c in [[x0, -128.0, 0.0], [x1, -128.0, 0.0], [x1, 128.0, 0.0], [x0, 128.0, 0.0]] {
+            for c in [[x0, 128.0, 0.0], [x1, 128.0, 0.0], [x1, -128.0, 0.0], [x0, -128.0, 0.0]] {
                 vertexes.push(DVertex { point: c });
             }
             let first_edge = surfedges.len() as i32;
