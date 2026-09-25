@@ -293,8 +293,10 @@ fn run_map_command(name: Option<&str>) {
             a.walk = Some(nw);
             a.mode = 0;
             a.console.println(format!("loading {name}"));
-            // The level loaded: close the console so the player sees the new map.
+            // The level loaded: close the console so the player sees the new map
+            // — at once, as SCR_BeginLoadingPlaque zeroes scr_con_current.
             a.console.open = false;
+            a.console.set_current(0.0);
             // Keep the menu closed too (a `map` from the console starts play).
             // Navigation-only reset: the C's `map` command never resets cvars or
             // keybindings, so the player's options and rebinds survive here too.
