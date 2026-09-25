@@ -83,6 +83,12 @@ pub struct RenderStats {
     /// distant surface costs a quarter, a sixteenth or a sixty-fourth of its
     /// mip-0 area (`R_DrawSurface`'s work).
     pub surf_texels_baked: u64,
+    /// Alias models handed to the renderer (`cl_visedicts` entries that reach
+    /// `R_DrawEntitiesOnList`), those `R_AliasCheckBBox` accepted, and the
+    /// accepted models' triangles.
+    pub alias_models: u64,
+    pub alias_accepted: u64,
+    pub alias_tris: u64,
 }
 
 impl RenderStats {
@@ -96,6 +102,7 @@ impl RenderStats {
         world_pvs_ns: 0, world_sort_ns: 0, world_setup_ns: 0, world_light_ns: 0,
         world_surf_ns: 0,
         surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0, surf_texels_baked: 0,
+        alias_models: 0, alias_accepted: 0, alias_tris: 0,
     };
 }
 

@@ -786,9 +786,14 @@ pub(super) fn draw_alias_model(
         skinnum: inst.skinnum,
         color: inst.color,
     };
+    super::stats::stat(|s| s.alias_models += 1);
     let Some(trivial_accept) = alias_check_bbox(&view, &ent) else {
         return;
     };
+    super::stats::stat(|s| {
+        s.alias_accepted += 1;
+        s.alias_tris += inst.mdl.header.numtris.max(0) as u64;
+    });
     let light = alias_entity_light(bsp, inst.origin, light_styles, dlights, false);
     let mut fb = PolyFramebuffer::new(image, zbuf, palette);
     alias_draw_model(&mut fb, &view, &ent, trivial_accept, light, false, time, colormap);

@@ -1098,6 +1098,64 @@ a second at 144 Hz through `step`, the FPS window, the readout confined to its
 box and byte-identical when off, the `wasm_*` commands and the exports;
 `web/verify_extras.py` 36/36.
 
+## Entity culling and resolved fields (PERF_PLAN C1, D2; 2026-09-25, branch `quake/sim`)
+
+- ✅ **C1: the live client relinks only what the server sends** (`SV_WriteEntitiesToClient`,
+  `CL_RelinkEntities`). The port used to relink and draw every edict with a model, every frame.
+  That lit walls from behind (CENSUS L22), trailed and spun what nobody could see, and drew 98
+  alias models per frame on e1m3 for about 3 visible.
+  - Now `SV_LinkEdict` records the edict's leaves (`SV_FindTouchedLeafs`, at most
+    `MAX_ENT_LEAFS` = 16, front child first). `SV_FatPVS` unions the PVS of every leaf within 8
+    units of the player's `origin + view_ofs`. An entity is sent when it has a `modelindex`, a
+    non-empty `model` and a leaf in that set; the player is always sent. `step_walk` gives
+    `EF_*` lights, trails, `EF_ROTATE` and drawing only to those. An entity that drops out
+    loses its trail history, as `CL_ParseUpdate`'s forcelink restarts it.
+  - `PF_makestatic` marks the edict a static. id frees the edict into the signon; the port keeps
+    it, because edict numbering and savegames follow it. A static is never relinked. It is drawn
+    when a leaf of its `R_AddEfrags` box is in the PVS of the leaf holding the view origin
+    (`R_MarkLeaves`, not fattened), after the relinked entities, as `R_StoreEfrags` appends it.
+    The box is ±16 for alias models (`Mod_LoadAliasModel`'s "FIXME"), ±maxwidth/2 and
+    ±maxheight/2 for sprites, and the model's bounds for brush models.
+  - Evidence: frame hashes are identical on four bench workloads (PERF_PLAN C1). The goldens,
+    the simbench counts and the census output are unchanged. Tests:
+    - `an_entity_outside_the_fat_pvs_is_not_drawn_and_its_flash_lights_nothing`: L22, with a
+      control that the light would have lit the wall.
+    - `an_entity_in_view_is_drawn_and_its_flash_made`.
+    - `statics_draw_through_efrags_in_the_view_pvs`.
+    - `touched_leafs_*`, `edict_leafs_cap_at_max_ent_leafs`, `leaf_pvs_*`,
+      `fat_pvs_unions_the_leaves_within_8_units`.
+  - Accepted gaps:
+    - Statics use the edict's float origin and angles, not `svc_spawnstatic`'s coord and angle
+      bytes.
+    - `R_RecursiveWorldNode`'s frustum test on an efrag's leaf is left out.
+      `R_AliasCheckBBox` and the z-buffer hide the same pixels, unless a mesh reaches past its
+      efrag box.
+    - `SV_WriteEntitiesToClient`'s "packet overflow" cutoff (`MAX_DATAGRAM`) is not modelled.
+    - Demo statics are still drawn without the efrag test. The output is the same; only the cost
+      differs.
+    - The `quaketool scene` tool view draws every entity.
+  - Seen, not changed: the port's `SV_ClipToLinks` "points never interact" test uses
+    `maxs - mins` where the C reads `v.size`. The two differ only if QuakeC writes
+    `mins`/`maxs` without `setsize`.
+- ✅ **D2: entity fields are resolved once per progs, not hashed per access.** This is
+  byte-identical.
+  - id reads `entvars_t` members at fixed offsets. The port looked every field up by name,
+    SipHash into a `HashMap<String>`, per access: 29,300 lookups per frame on walk_e1m3. 79% of
+    them were the fields `SV_Move`'s per-trace scan reads for every edict.
+  - `Vm::fo` (`FieldOfs`: every `entvars_t` field, and `gravity`) and `Vm::go` (the per-frame
+    globals) now hold `Fld`/`Glb` handles, resolved by name in `Vm::new`, so any progs works.
+    The by-name accessors resolve the name and then run the same code, so the semantics cannot
+    drift. A field the progs lacks reads 0 and drops writes.
+  - The server's per-frame paths, the edict-scanning builtins and the client gather use the
+    handles. The model-cache loop borrows names instead of allocating a `String` per edict per
+    frame, and `PF_find` compares borrowed strings. 90 lookups per frame remain: once-per-frame
+    reads of the player and the HUD.
+  - Proof: the simbench counts, the census output, the `census-edicts` dumps of nine maps at
+    five times, the goldens, and 720 frame hashes across five workloads and two resolutions are
+    all unchanged. Test `resolved_fields_match_the_by_name_accessors`.
+  - Speed: simbench e1m3 2.64 → 0.29 ms per tick. The wasm sim phase is 68–76% lower, and the
+    walk_e1m3 frame goes 1.39 → 0.77 ms at 320×200 (PERF_PLAN D2).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

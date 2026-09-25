@@ -295,13 +295,27 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
 /// the remaining network / client-routing builtins that have no world effect in
-/// this headless server (`makestatic`, `setspawnparms`). (`stuffcmd` queues
+/// this headless server (`setspawnparms`). (`makestatic` marks the edict a
+/// client static via [`bi_makestatic`]; `stuffcmd` queues
 /// its text via [`crate::builtins::pf_stuffcmd`]; `sound` queues a
 /// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
 /// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
 /// [`bi_particle`]; the `Write*` family (#52..#59) feeds the per-buffer svc
 /// parsers in `msg.rs`.)
 fn bi_noop(_vm: &mut Vm) -> Result<()> {
+    Ok(())
+}
+
+/// `PF_makestatic` (#69): `void(entity e) makestatic`. The C writes an
+/// `svc_spawnstatic` (model, frame, colormap, skin, origin, angles) into the
+/// signon and frees the edict; the client then draws that snapshot as a
+/// static entity — through efrags on the leaves it touches, never relinked
+/// (no trails, no `EF_*` lights, no spin). The port keeps the edict alive
+/// (edict numbering and savegames follow it; see `CENSUS.md`) and marks it
+/// static ([`Vm::make_static`]) so the client draws it the static way.
+fn bi_makestatic(vm: &mut Vm) -> Result<()> {
+    let e = vm.arg_entity(0);
+    vm.make_static(e);
     Ok(())
 }
 
@@ -324,7 +338,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
     // arg 1 (speed) is read but unused by PF_aim — the QC applies it to the shot.
 
     let v_forward = vm.gget_vector("v_forward");
-    let origin = vm.ent_get_vector(ent, "origin");
+    let origin = vm.ent_vec(ent, vm.fo.origin);
     let mut start = origin;
     start[2] += 20.0;
 
@@ -335,7 +349,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
         start[2] + 2048.0 * v_forward[2],
     ];
     let tr = sv_move(vm, start, end, [0.0; 3], [0.0; 3], ent, false, false);
-    if tr.ent > 0 && vm.ent_get_float(tr.ent, "takedamage") == DAMAGE_AIM {
+    if tr.ent > 0 && vm.ent_float(tr.ent, vm.fo.takedamage) == DAMAGE_AIM {
         vm.ret_vector(v_forward);
         return Ok(());
     }
@@ -350,12 +364,12 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
         if check == ent {
             continue;
         }
-        if vm.ent_get_float(check, "takedamage") != DAMAGE_AIM {
+        if vm.ent_float(check, vm.fo.takedamage) != DAMAGE_AIM {
             continue;
         }
-        let c_org = vm.ent_get_vector(check, "origin");
-        let c_min = vm.ent_get_vector(check, "mins");
-        let c_max = vm.ent_get_vector(check, "maxs");
+        let c_org = vm.ent_vec(check, vm.fo.origin);
+        let c_min = vm.ent_vec(check, vm.fo.mins);
+        let c_max = vm.ent_vec(check, vm.fo.maxs);
         // Aim at the centre of the target's bounding box.
         let target = [
             c_org[0] + 0.5 * (c_min[0] + c_max[0]),
@@ -377,7 +391,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
     }
 
     if bestent >= 0 {
-        let b_org = vm.ent_get_vector(bestent, "origin");
+        let b_org = vm.ent_vec(bestent, vm.fo.origin);
         let dir = [b_org[0] - origin[0], b_org[1] - origin[1], b_org[2] - origin[2]];
         let dist = dir[0] * v_forward[0] + dir[1] * v_forward[1] + dir[2] * v_forward[2];
         // Snap horizontally to v_forward*dist but keep the true vertical (dir.z).
@@ -403,7 +417,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
 /// The per-frame caching is dropped (it was a CPU optimization, not a behaviour
 /// change); the visibility result is identical for one client.
 fn bi_checkclient(vm: &mut Vm) -> Result<()> {
-    let self_e = vm.gget_int("self");
+    let self_e = vm.glob_int(vm.go.self_);
 
     // Find a live client edict by its FL_CLIENT flag (the C scanned svs.clients;
     // real progs.dat has no `viewentity` global, so we can't rely on that). A
@@ -414,8 +428,8 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
         if vm.edict_free.get(e).copied().unwrap_or(true) {
             continue;
         }
-        if (vm.ent_get_float(ent, "flags") as i32) & FL_CLIENT != 0
-            && vm.ent_get_float(ent, "health") > 0.0
+        if (vm.ent_float(ent, vm.fo.flags) as i32) & FL_CLIENT != 0
+            && vm.ent_float(ent, vm.fo.health) > 0.0
         {
             player = ent;
             break;
@@ -427,12 +441,12 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
     }
 
     // Eyes: origin + view_ofs for both ends of the sight line.
-    let self_org = vm.ent_get_vector(self_e, "origin");
-    let self_ofs = vm.ent_get_vector(self_e, "view_ofs");
+    let self_org = vm.ent_vec(self_e, vm.fo.origin);
+    let self_ofs = vm.ent_vec(self_e, vm.fo.view_ofs);
     let view = v_add(self_org, self_ofs);
 
-    let pl_org = vm.ent_get_vector(player, "origin");
-    let pl_ofs = vm.ent_get_vector(player, "view_ofs");
+    let pl_org = vm.ent_vec(player, vm.fo.origin);
+    let pl_ofs = vm.ent_vec(player, vm.fo.view_ofs);
     let target = v_add(pl_org, pl_ofs);
 
     // World-only line of sight (MOVE_NOMONSTERS, matching C PF_checkclient):
@@ -468,12 +482,12 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
         if vm.edict_free.get(e).copied().unwrap_or(true) {
             continue;
         }
-        if vm.ent_get_float(ei, "solid") as i32 == SOLID_NOT {
+        if vm.ent_float(ei, vm.fo.solid) as i32 == SOLID_NOT {
             continue;
         }
-        let origin = vm.ent_get_vector(ei, "origin");
-        let mins = vm.ent_get_vector(ei, "mins");
-        let maxs = vm.ent_get_vector(ei, "maxs");
+        let origin = vm.ent_vec(ei, vm.fo.origin);
+        let mins = vm.ent_vec(ei, vm.fo.mins);
+        let maxs = vm.ent_vec(ei, vm.fo.maxs);
         // eorg = org - (origin + (mins+maxs)/2): distance from the box centre.
         let eorg: Vec3 = [
             org[0] - (origin[0] + (mins[0] + maxs[0]) * 0.5),
@@ -484,7 +498,7 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
             continue;
         }
         // Link: this edict's chain points at the previous head; it becomes head.
-        vm.ent_set_int(ei, "chain", chain);
+        vm.set_ent_int(ei, vm.fo.chain, chain);
         chain = ei;
     }
 
@@ -547,7 +561,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 46, bi_localcmd); // localcmd (honours restart / changelevel / map; else no-op)
     put(t, 67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
     put(t, 68, bi_precache_file); // precache_file
-    put(t, 69, bi_noop); // makestatic
+    put(t, 69, bi_makestatic); // makestatic (marks a client static)
     put(t, 70, bi_changelevel); // changelevel (records the deferred map swap)
     put(t, 72, bi_cvar_set); // cvar_set (honours "skill"; else benign no-op)
     put(t, 74, bi_ambientsound); // ambientsound (records a StaticSound loop)

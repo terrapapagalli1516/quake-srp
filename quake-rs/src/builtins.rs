@@ -427,11 +427,12 @@ fn pf_find(vm: &mut Vm) -> Result<()> {
         let free = vm.edict_free.get(e as usize).copied().unwrap_or(true);
         if !free {
             let s_t = vm.ei(e, field);
-            let s = vm.get_string(s_t);
-            // Match by contents. In the C, `t = E_STRING(ed,f)` is the empty
-            // string "" (string offset 0), not NULL, so `strcmp(t, s)` matches
-            // an empty stored field against an empty search string. Compare
-            // contents directly — an empty `match` finds an empty field.
+            let s = crate::progs::string_in(&vm.strings, s_t);
+            // Match by contents, borrowed (no String per edict). In the C,
+            // `t = E_STRING(ed,f)` is the empty string "" (string offset 0),
+            // not NULL, so `strcmp(t, s)` matches an empty stored field against
+            // an empty search string. Compare contents directly — an empty
+            // `match` finds an empty field.
             if s == m {
                 vm.ret_entity(e);
                 return Ok(());

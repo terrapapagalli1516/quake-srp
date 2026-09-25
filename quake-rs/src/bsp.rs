@@ -609,6 +609,180 @@ impl Bsp {
 }
 
 // ---------------------------------------------------------------------------
+// The PVS and the leaves a box touches (model.c, world.c, r_efrag.c)
+// ---------------------------------------------------------------------------
+
+/// Run-length-decode a leaf's compressed PVS, starting at byte `visofs` in
+/// `model_vis` (the raw `LUMP_VISIBILITY` bytes).
+///
+/// Quake's RLE: a non-zero byte carries eight leaf-visibility bits directly
+/// (LSB first); a `0` byte is followed by a second byte giving a run length of
+/// *zero* bytes to emit (i.e. that many leaves not visible). Decoding stops once
+/// `numleafs` leaves have been produced. Mirrors `Mod_DecompressVis`.
+///
+/// Returns a `Vec<bool>` of length `numleafs + 1` indexed by leaf number; leaf 0
+/// (the shared solid/outside leaf) has no meaningful bit and is left `false`.
+/// When `visofs < 0` (no vis info for this leaf) every leaf is reported visible,
+/// matching the C `decompressed = mod_novis` all-ones fallback.
+pub fn decompress_vis(model_vis: &[u8], visofs: i32, numleafs: usize) -> Vec<bool> {
+    // The PVS describes leaves 1..=numleafs; index 0 is the solid leaf. Size the
+    // bitset to numleafs+1 so callers can index by leaf number directly.
+    let out_len = numleafs.saturating_add(1);
+
+    // No vis info -> everything visible (Quake's `mod_novis`).
+    let start: usize = match usize::try_from(visofs) {
+        Ok(s) => s,
+        Err(_) => return vec![true; out_len],
+    };
+
+    let mut out = vec![false; out_len];
+    let mut pos = start;
+    // `row` counts how many leaf bits we have produced so far. The C writes the
+    // decompressed bits starting at out[0]; we offset by 1 so out[L] is leaf L
+    // (leaf 0 stays false). Quake decompresses `(numleafs+7)>>3` bytes worth.
+    let mut leaf: usize = 1;
+
+    while leaf <= numleafs {
+        let byte = match model_vis.get(pos) {
+            Some(&b) => b,
+            // Ran off the end of the vis lump: stop (remaining leaves stay
+            // not-visible). Never indexes out of range.
+            None => break,
+        };
+        pos += 1;
+
+        if byte != 0 {
+            // Eight visibility bits, LSB = lowest leaf number.
+            let mut bit = 1u8;
+            for _ in 0..8 {
+                if leaf > numleafs {
+                    break;
+                }
+                if byte & bit != 0 {
+                    if let Some(slot) = out.get_mut(leaf) {
+                        *slot = true;
+                    }
+                }
+                leaf += 1;
+                bit <<= 1;
+            }
+        } else {
+            // A zero byte: the next byte is a count of zero-bytes (8 leaves each)
+            // to skip. A truncated run (no count byte) simply stops decoding.
+            let count = match model_vis.get(pos) {
+                Some(&c) => c as usize,
+                None => break,
+            };
+            pos += 1;
+            // Advance over `count` zero bytes = 8*count not-visible leaves.
+            leaf = leaf.saturating_add(count.saturating_mul(8));
+        }
+    }
+
+    out
+}
+
+/// How deep [`Bsp::touched_leafs`] follows the node tree before it gives up on
+/// a branch: far beyond any real map's tree, and bounded so malformed data
+/// cannot exhaust the stack.
+pub const TOUCHED_LEAFS_MAX_DEPTH: usize = 1024;
+
+/// `BOX_ON_PLANE_SIDE` (mathlib.h) on a disk plane: the axial fast path when
+/// the file's `type` is 0..2 (`dist <= emins[type]` -> 1, `dist >= emaxs[type]`
+/// -> 2, else 3), otherwise `BoxOnPlaneSide` on the normal's signbits.
+fn box_on_plane_side(emins: Vec3, emaxs: Vec3, p: &DPlane) -> u8 {
+    if (0..3).contains(&p.ptype) {
+        let t = p.ptype as usize;
+        if p.dist <= emins[t] {
+            1
+        } else if p.dist >= emaxs[t] {
+            2
+        } else {
+            3
+        }
+    } else {
+        crate::math::box_on_plane_side(emins, emaxs, &crate::math::Plane::new(p.normal, p.dist))
+    }
+}
+
+impl Bsp {
+    /// `Mod_LeafPVS` (model.c): which leaves are potentially visible from
+    /// `leaf`, indexed by leaf number (length `leafs.len()`, as
+    /// [`decompress_vis`] sizes it). Leaf 0 (the solid outside leaf), a leaf with
+    /// no vis info (`visofs == -1`) and a map with no vis lump see everything
+    /// (`mod_novis`).
+    #[must_use]
+    pub fn leaf_pvs(&self, leaf: usize) -> Vec<bool> {
+        let numleafs = self.leafs.len().saturating_sub(1);
+        match self.leafs.get(leaf) {
+            Some(l) if leaf != 0 && !self.visibility.is_empty() => {
+                decompress_vis(&self.visibility, l.visofs, numleafs)
+            }
+            _ => vec![true; numleafs + 1],
+        }
+    }
+
+    /// The non-solid world leaves the box `mins`..`maxs` touches, in the order
+    /// `SV_FindTouchedLeafs` (world.c) and `R_SplitEntityOnNode` (r_efrag.c)
+    /// reach them: from node 0 (`worldmodel->nodes`), `BOX_ON_PLANE_SIDE` at
+    /// each node, the front child's subtree before the back child's; a
+    /// `CONTENTS_SOLID` leaf is skipped. `visit` gets each leaf number and
+    /// returns `false` to stop the walk (the server's [`MAX_ENT_LEAFS`] cap, or
+    /// a search that has its answer).
+    ///
+    /// Malformed trees stop quietly: a bad child or plane index ends that
+    /// branch, and the walk visits at most `nodes + leafs` entries at most
+    /// [`TOUCHED_LEAFS_MAX_DEPTH`] deep, so a cyclic graph can neither loop nor
+    /// overflow the stack.
+    ///
+    /// [`MAX_ENT_LEAFS`]: crate::vm::MAX_ENT_LEAFS
+    pub fn touched_leafs(&self, mins: Vec3, maxs: Vec3, visit: &mut dyn FnMut(usize) -> bool) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let mut budget = self.nodes.len() + self.leafs.len();
+        self.touched_leafs_r(0, 0, mins, maxs, &mut budget, visit);
+    }
+
+    /// One step of [`Bsp::touched_leafs`]; returns `false` once the walk stops.
+    fn touched_leafs_r(
+        &self,
+        child: i32,
+        depth: usize,
+        mins: Vec3,
+        maxs: Vec3,
+        budget: &mut usize,
+        visit: &mut dyn FnMut(usize) -> bool,
+    ) -> bool {
+        if *budget == 0 || depth > TOUCHED_LEAFS_MAX_DEPTH {
+            return false;
+        }
+        *budget -= 1;
+        if child < 0 {
+            let leaf = (-1 - child) as usize;
+            return match self.leafs.get(leaf) {
+                Some(l) if l.contents != CONTENTS_SOLID => visit(leaf),
+                _ => true,
+            };
+        }
+        let Some(node) = self.nodes.get(child as usize) else { return true };
+        let Some(plane) = usize::try_from(node.planenum).ok().and_then(|p| self.planes.get(p))
+        else {
+            return true;
+        };
+        let sides = box_on_plane_side(mins, maxs, plane);
+        let [front, back] = node.children.map(i32::from);
+        if sides & 1 != 0 && !self.touched_leafs_r(front, depth + 1, mins, maxs, budget, visit) {
+            return false;
+        }
+        if sides & 2 != 0 {
+            return self.touched_leafs_r(back, depth + 1, mins, maxs, budget, visit);
+        }
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Lump-walking helpers
 // ---------------------------------------------------------------------------
 
@@ -1368,5 +1542,128 @@ mod tests {
         assert_eq!(dm.visleafs, 9);
         assert_eq!(dm.firstface, 100);
         assert_eq!(dm.numfaces, 12);
+    }
+
+    // -- touched_leafs / leaf_pvs ------------------------------------------
+
+    fn bare_bsp() -> Bsp {
+        Bsp {
+            version: BSPVERSION,
+            entities: String::new(),
+            planes: Vec::new(),
+            vertexes: Vec::new(),
+            edges: Vec::new(),
+            faces: Vec::new(),
+            nodes: Vec::new(),
+            leafs: Vec::new(),
+            clipnodes: Vec::new(),
+            texinfo: Vec::new(),
+            models: Vec::new(),
+            marksurfaces: Vec::new(),
+            surfedges: Vec::new(),
+            textures: Vec::new(),
+            visibility: Vec::new(),
+            lighting: Vec::new(),
+        }
+    }
+
+    fn leaf(contents: i32, visofs: i32) -> DLeaf {
+        DLeaf {
+            contents,
+            visofs,
+            mins: [0; 3],
+            maxs: [0; 3],
+            firstmarksurface: 0,
+            nummarksurfaces: 0,
+            ambient_level: [0; NUM_AMBIENTS],
+        }
+    }
+
+    /// Twenty axial planes x = 0, 10, .., 190 in a chain: node i's back side
+    /// (x < 10i) is leaf i+1, its front side node i+1; node 19's front is leaf
+    /// 21. Leaf 3 is solid.
+    fn chain_bsp() -> Bsp {
+        let mut b = bare_bsp();
+        for i in 0..20i16 {
+            b.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: 10.0 * f32::from(i), ptype: PLANE_X });
+            let front = if i < 19 { i + 1 } else { -22 };
+            b.nodes.push(DNode {
+                planenum: i32::from(i),
+                children: [front, -i - 2],
+                mins: [0; 3],
+                maxs: [0; 3],
+                firstface: 0,
+                numfaces: 0,
+            });
+        }
+        b.leafs.push(leaf(CONTENTS_SOLID, -1));
+        for l in 1..=21 {
+            b.leafs.push(leaf(if l == 3 { CONTENTS_SOLID } else { CONTENTS_EMPTY }, -1));
+        }
+        b
+    }
+
+    fn touched(b: &Bsp, lo: f32, hi: f32, cap: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        b.touched_leafs([lo, -1.0, -1.0], [hi, 1.0, 1.0], &mut |l| {
+            out.push(l);
+            out.len() < cap
+        });
+        out
+    }
+
+    #[test]
+    fn touched_leafs_walks_front_first_skips_solid_and_stops_on_request() {
+        let b = chain_bsp();
+        // A box across every plane: the front subtree first, so leaf 21 (in
+        // front of the last plane) comes first and leaf 1 last; solid 3 skipped.
+        let all: Vec<usize> = (1..=21).rev().filter(|&l| l != 3).collect();
+        assert_eq!(touched(&b, -5.0, 1000.0, usize::MAX), all);
+        // SV_FindTouchedLeafs keeps the first MAX_ENT_LEAFS of that order.
+        assert_eq!(touched(&b, -5.0, 1000.0, crate::vm::MAX_ENT_LEAFS), all[..16].to_vec());
+        // BOX_ON_PLANE_SIDE's axial edges: `dist <= mins` is front only,
+        // `dist >= maxs` back only.
+        assert_eq!(touched(&b, 15.0, 35.0, usize::MAX), vec![5, 4]);
+        assert_eq!(touched(&b, 10.0, 20.0, usize::MAX), Vec::<usize>::new(), "only solid leaf 3");
+        assert_eq!(touched(&b, 20.0, 29.0, usize::MAX), vec![4]);
+    }
+
+    #[test]
+    fn edict_leafs_cap_at_max_ent_leafs() {
+        let b = chain_bsp();
+        let mut leafs = crate::vm::EdictLeafs::default();
+        b.touched_leafs([-5.0, -1.0, -1.0], [1000.0, 1.0, 1.0], &mut |l| leafs.push(l));
+        let want: Vec<u16> = (6..=21).rev().filter(|&l| l != 3).collect();
+        assert_eq!(leafs.leafs(), &want[..]);
+    }
+
+    #[test]
+    fn touched_leafs_survives_malformed_trees() {
+        let mut b = chain_bsp();
+        b.nodes[5].children[0] = 0; // a cycle back to the root
+        b.nodes[7].planenum = 999; // a bad plane
+        let mut n = 0;
+        b.touched_leafs([-5.0, -1.0, -1.0], [1000.0, 1.0, 1.0], &mut |_| {
+            n += 1;
+            true
+        });
+        assert!(n <= b.nodes.len() + b.leafs.len());
+        assert_eq!(touched(&bare_bsp(), -5.0, 5.0, usize::MAX), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn leaf_pvs_decodes_the_row_or_sees_everything() {
+        let mut b = chain_bsp();
+        // Every leaf but 2 has no vis info; leaf 2's row sees leaves 1 and 9.
+        b.leafs[2].visofs = 0;
+        b.visibility = vec![0b0000_0001, 0b0000_0001, 0, 2];
+        let pvs = b.leaf_pvs(2);
+        let seen: Vec<usize> = (0..pvs.len()).filter(|&l| pvs[l]).collect();
+        assert_eq!(seen, vec![1, 9]);
+        assert!(b.leaf_pvs(5).iter().all(|&v| v), "visofs -1: mod_novis");
+        assert!(b.leaf_pvs(0).iter().all(|&v| v), "the solid leaf: mod_novis");
+        b.visibility.clear();
+        assert!(b.leaf_pvs(2).iter().all(|&v| v), "no vis lump: everything");
+        assert_eq!(b.leaf_pvs(2).len(), b.leafs.len());
     }
 }

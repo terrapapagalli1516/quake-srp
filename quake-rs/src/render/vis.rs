@@ -5,7 +5,7 @@
 //! `WinQuake/r_main.c` (`R_MarkLeaves`, the `R_SetFrustum` planes) and the
 //! `R_CullBox` test.
 
-use crate::bsp::Bsp;
+use crate::bsp::{decompress_vis, Bsp};
 use crate::math::{dot, Vec3};
 use super::Camera;
 
@@ -14,7 +14,9 @@ use super::Camera;
 // ---------------------------------------------------------------------------
 //
 // Ports three pieces of Quake's visibility pipeline:
-//   * `Mod_DecompressVis` (model.c): run-length-decode the per-leaf PVS bitset.
+//   * `Mod_DecompressVis` (model.c): run-length-decode the per-leaf PVS bitset
+//     (it lives with the model loader, [`crate::bsp::decompress_vis`], since
+//     the server's fat PVS needs it too).
 //   * `Mod_PointInLeaf` (model.c): walk the BSP node tree to the leaf a point
 //     falls in.
 //   * the leaf-marking core of `R_MarkLeaves` (r_main.c): expand the PVS into a
@@ -23,76 +25,6 @@ use super::Camera;
 // As everywhere in this module, every index into BSP-derived data is checked;
 // malformed data degrades to "draw everything" (the safe, non-culling default)
 // rather than panicking.
-
-/// Run-length-decode a leaf's compressed PVS, starting at byte `visofs` in
-/// `model_vis` (the raw `LUMP_VISIBILITY` bytes).
-///
-/// Quake's RLE: a non-zero byte carries eight leaf-visibility bits directly
-/// (LSB first); a `0` byte is followed by a second byte giving a run length of
-/// *zero* bytes to emit (i.e. that many leaves not visible). Decoding stops once
-/// `numleafs` leaves have been produced. Mirrors `Mod_DecompressVis`.
-///
-/// Returns a `Vec<bool>` of length `numleafs + 1` indexed by leaf number; leaf 0
-/// (the shared solid/outside leaf) has no meaningful bit and is left `false`.
-/// When `visofs < 0` (no vis info for this leaf) every leaf is reported visible,
-/// matching the C `decompressed = mod_novis` all-ones fallback.
-fn decompress_vis(model_vis: &[u8], visofs: i32, numleafs: usize) -> Vec<bool> {
-    // The PVS describes leaves 1..=numleafs; index 0 is the solid leaf. Size the
-    // bitset to numleafs+1 so callers can index by leaf number directly.
-    let out_len = numleafs.saturating_add(1);
-
-    // No vis info -> everything visible (Quake's `mod_novis`).
-    let start: usize = match usize::try_from(visofs) {
-        Ok(s) => s,
-        Err(_) => return vec![true; out_len],
-    };
-
-    let mut out = vec![false; out_len];
-    let mut pos = start;
-    // `row` counts how many leaf bits we have produced so far. The C writes the
-    // decompressed bits starting at out[0]; we offset by 1 so out[L] is leaf L
-    // (leaf 0 stays false). Quake decompresses `(numleafs+7)>>3` bytes worth.
-    let mut leaf: usize = 1;
-
-    while leaf <= numleafs {
-        let byte = match model_vis.get(pos) {
-            Some(&b) => b,
-            // Ran off the end of the vis lump: stop (remaining leaves stay
-            // not-visible). Never indexes out of range.
-            None => break,
-        };
-        pos += 1;
-
-        if byte != 0 {
-            // Eight visibility bits, LSB = lowest leaf number.
-            let mut bit = 1u8;
-            for _ in 0..8 {
-                if leaf > numleafs {
-                    break;
-                }
-                if byte & bit != 0 {
-                    if let Some(slot) = out.get_mut(leaf) {
-                        *slot = true;
-                    }
-                }
-                leaf += 1;
-                bit <<= 1;
-            }
-        } else {
-            // A zero byte: the next byte is a count of zero-bytes (8 leaves each)
-            // to skip. A truncated run (no count byte) simply stops decoding.
-            let count = match model_vis.get(pos) {
-                Some(&c) => c as usize,
-                None => break,
-            };
-            pos += 1;
-            // Advance over `count` zero bytes = 8*count not-visible leaves.
-            leaf = leaf.saturating_add(count.saturating_mul(8));
-        }
-    }
-
-    out
-}
 
 /// Walk the worldmodel's BSP node tree to find which leaf the world-space point
 /// `p` falls in, porting `Mod_PointInLeaf`.

@@ -1,12 +1,14 @@
 //! Bringing a level up: `SV_SpawnServer` (building the [`Server`]), the local
-//! client's `SV_ConnectClient`, `SV_CleanupEnts`, and the entity dynamic lights
-//! a client derives from each edict's `effects` bits.
+//! client's `SV_ConnectClient`, `SV_CleanupEnts`, which entities the client is
+//! sent (`SV_FatPVS`, `SV_WriteEntitiesToClient`'s test), and the entity
+//! dynamic lights a client derives from each edict's `effects` bits.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Sources:
 //! * `WinQuake/sv_main.c` — `SV_SpawnServer` (VM, builtins, globals, map name;
 //!   the entity load it calls is `ED_LoadFromFile`, in `pr_edict.rs`),
-//!   `SV_ConnectClient`, `SV_CleanupEnts`.
+//!   `SV_ConnectClient`, `SV_CleanupEnts`, `SV_AddToFatPVS` / `SV_FatPVS`,
+//!   and the entity filter of `SV_WriteEntitiesToClient`.
 //! * `WinQuake/host_cmd.c` — `Host_Spawn_f` (`ClientConnect` +
 //!   `PutClientInServer`, folded into the connect).
 //! * `WinQuake/cl_main.c` — `CL_RelinkEntities`' `EF_*` dlights
@@ -24,8 +26,8 @@ use super::{
     parm_global_name, Server, WorldModel, FL_CLIENT, MOVETYPE_NONE, MOVETYPE_PUSH,
     MOVETYPE_WALK, NUM_SPAWN_PARMS, SOLID_BSP, SOLID_NOT, SOLID_SLIDEBOX,
 };
-use crate::bsp::Bsp;
-use crate::math::angle_vectors;
+use crate::bsp::{Bsp, CONTENTS_SOLID};
+use crate::math::{angle_vectors, dot, Vec3};
 use crate::progs::Progs;
 use crate::vm::Vm;
 use crate::Result;
@@ -291,12 +293,73 @@ impl Server {
                 continue;
             }
             let ei = e as i32;
-            let eff = self.vm.ent_get_float(ei, "effects") as i32;
+            let eff = self.vm.ent_float(ei, self.vm.fo.effects) as i32;
             if eff & EF_MUZZLEFLASH != 0 {
                 self.vm
-                    .ent_set_float(ei, "effects", (eff & !EF_MUZZLEFLASH) as f32);
+                    .set_ent_float(ei, self.vm.fo.effects, (eff & !EF_MUZZLEFLASH) as f32);
             }
         }
+    }
+
+    /// `SV_FatPVS` (sv_main.c): the union of the PVS of every leaf within 8
+    /// units of `org` (`SV_AddToFatPVS`: descend both sides of any node plane
+    /// closer than 8; a solid leaf adds nothing), indexed by leaf number. `None`
+    /// without a host.
+    pub fn fat_pvs(&self, org: Vec3) -> Option<Vec<bool>> {
+        let bsp = self.vm.host.as_deref()?.bsp();
+        let mut fat = vec![false; bsp.leafs.len()];
+        if !bsp.nodes.is_empty() {
+            add_to_fat_pvs(bsp, org, 0, 0, &mut fat);
+        }
+        Some(fat)
+    }
+
+    /// Which edicts `SV_WriteEntitiesToClient` (sv_main.c) would send the local
+    /// client this frame, indexed by edict: every entity except the client
+    /// itself needs a `modelindex`, a non-empty `model`, and one of the leaves
+    /// it touched at its last link (`ent->leafnums`) in the fat PVS at the
+    /// client's eye (`origin + view_ofs`); the client is always sent. The world
+    /// (edict 0) and free edicts are `false` (a freed edict's `modelindex` is 0),
+    /// and so are `makestatic` statics, which the C freed into the signon.
+    ///
+    /// On the client, `CL_RelinkEntities` then relinks exactly these, minus any
+    /// whose model is null (`modelindex` 0 — possible only for the client
+    /// itself): the caller applies that. Without a host nothing is culled
+    /// (every in-use edict with a model is sent).
+    pub fn entities_sent_to_client(&self) -> Vec<bool> {
+        let vm = &self.vm;
+        let n = vm.num_edicts();
+        let mut sent = vec![false; n];
+        let clent = self.player;
+        let pvs = if clent > 0 {
+            let org = vm.ent_vec(clent, vm.fo.origin);
+            let ofs = vm.ent_vec(clent, vm.fo.view_ofs);
+            self.fat_pvs([org[0] + ofs[0], org[1] + ofs[1], org[2] + ofs[2]])
+        } else {
+            None
+        };
+        for (e, slot) in sent.iter_mut().enumerate().skip(1) {
+            let ent = e as i32;
+            if vm.is_free_edict(ent) || vm.is_static_edict(ent) {
+                continue;
+            }
+            if ent == clent {
+                *slot = true;
+                continue;
+            }
+            // "ignore ents without visible models"
+            if vm.ent_float(ent, vm.fo.modelindex) == 0.0 || vm.ent_str(ent, vm.fo.model).is_empty() {
+                continue;
+            }
+            *slot = match &pvs {
+                Some(pvs) => vm
+                    .edict_leafs(ent)
+                    .iter()
+                    .any(|&l| pvs.get(usize::from(l)).copied().unwrap_or(false)),
+                None => true,
+            };
+        }
+        sent
     }
 
     /// Enumerate the per-frame entity dynamic-light contributions, porting the
@@ -332,12 +395,12 @@ impl Server {
                 continue;
             }
             let ent = e as i32;
-            let effects = self.vm.ent_get_float(ent, "effects") as i32;
+            let effects = self.vm.ent_float(ent, self.vm.fo.effects) as i32;
             if effects == 0 {
                 continue;
             }
-            let origin = self.vm.ent_get_vector(ent, "origin");
-            let angles = self.vm.ent_get_vector(ent, "angles");
+            let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
+            let angles = self.vm.ent_vec(ent, self.vm.fo.angles);
 
             if effects & EF_MUZZLEFLASH != 0 {
                 let (forward, _r, _u) = angle_vectors(angles);
@@ -374,6 +437,41 @@ impl Server {
             }
         }
         out
+    }
+}
+
+/// `SV_AddToFatPVS` (sv_main.c): OR into `fat` the PVS of every non-solid leaf
+/// within 8 units of `org`, from node or leaf `child` down. The plane distance
+/// is the full dot product, as the C computes it here (no axial shortcut).
+/// Bad indices end the branch; the depth bound stops a malformed cycle.
+fn add_to_fat_pvs(bsp: &Bsp, org: Vec3, mut child: i32, depth: usize, fat: &mut [bool]) {
+    if depth > crate::bsp::TOUCHED_LEAFS_MAX_DEPTH {
+        return;
+    }
+    loop {
+        if child < 0 {
+            let leaf = (-1 - child) as usize;
+            if bsp.leafs.get(leaf).is_some_and(|l| l.contents != CONTENTS_SOLID) {
+                for (f, v) in fat.iter_mut().zip(bsp.leaf_pvs(leaf)) {
+                    *f |= v;
+                }
+            }
+            return;
+        }
+        let Some(node) = bsp.nodes.get(child as usize) else { return };
+        let Some(plane) = usize::try_from(node.planenum).ok().and_then(|p| bsp.planes.get(p)) else {
+            return;
+        };
+        let d = dot(org, plane.normal) - plane.dist;
+        if d > 8.0 {
+            child = i32::from(node.children[0]);
+        } else if d < -8.0 {
+            child = i32::from(node.children[1]);
+        } else {
+            // go down both
+            add_to_fat_pvs(bsp, org, i32::from(node.children[0]), depth + 1, fat);
+            child = i32::from(node.children[1]);
+        }
     }
 }
 
@@ -575,5 +673,48 @@ mod tests {
             7.5,
             "PutClientInServer ran AFTER the parm globals were set"
         );
+    }
+
+    /// SV_AddToFatPVS: the PVS of the leaf holding the point, OR'd with every
+    /// leaf whose plane is within 8 units; a solid leaf adds nothing.
+    #[test]
+    fn fat_pvs_unions_the_leaves_within_8_units() {
+        use crate::bsp::{DLeaf, DNode, DPlane, CONTENTS_EMPTY, NUM_AMBIENTS};
+        let leaf = |contents, visofs| DLeaf {
+            contents,
+            visofs,
+            mins: [0; 3],
+            maxs: [0; 3],
+            firstmarksurface: 0,
+            nummarksurfaces: 0,
+            ambient_level: [0; NUM_AMBIENTS],
+        };
+        // x < 0: leaf 1 (sees 1); 0 <= x < 100: leaf 2 (sees 2, 3);
+        // x >= 100: leaf 3 (sees 2, 3); x >= 200: solid leaf 4.
+        let mut b = empty_bsp();
+        b.planes = [0.0, 100.0, 200.0]
+            .iter()
+            .map(|&dist| DPlane { normal: [1.0, 0.0, 0.0], dist, ptype: 0 })
+            .collect();
+        let node = |planenum, children| DNode { planenum, children, mins: [0; 3], maxs: [0; 3], firstface: 0, numfaces: 0 };
+        b.nodes = vec![node(0, [1, -2]), node(1, [2, -3]), node(2, [-5, -4])];
+        b.leafs = vec![
+            leaf(CONTENTS_SOLID, -1),
+            leaf(CONTENTS_EMPTY, 0),
+            leaf(CONTENTS_EMPTY, 1),
+            leaf(CONTENTS_EMPTY, 1),
+            leaf(CONTENTS_SOLID, 2),
+        ];
+        b.visibility = vec![0b0001, 0b0110, 0b1111];
+        let fat = |x: f32| {
+            let mut f = vec![false; b.leafs.len()];
+            add_to_fat_pvs(&b, [x, 0.0, 0.0], 0, 0, &mut f);
+            (0..f.len()).filter(|&l| f[l]).collect::<Vec<_>>()
+        };
+        assert_eq!(fat(-50.0), vec![1]);
+        assert_eq!(fat(-8.5), vec![1], "just over 8 units away");
+        assert_eq!(fat(-8.0), vec![1, 2, 3], "within 8: both sides");
+        assert_eq!(fat(50.0), vec![2, 3]);
+        assert_eq!(fat(196.0), vec![2, 3], "the solid leaf beyond adds nothing");
     }
 }
