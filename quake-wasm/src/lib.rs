@@ -469,10 +469,17 @@ struct App {
     /// alongside the menu assets. `None` if the pak lacked it — `draw_console`
     /// then falls back to a dark fill.
     conback: Option<Qpic>,
-    /// Accumulated wall-clock time (seconds), advanced by `dt` each `step`
-    /// regardless of mode. Drives the menu cursor animation (Quake's `host_time`
-    /// in `M_DrawCursor`), which must keep blinking over a frozen frame too.
+    /// `host_time` (host.c): the accumulated CLAMPED frame time (seconds) —
+    /// `step`'s `dt` after Host_FilterTime's 0.1 s cap — advanced every `step`
+    /// regardless of mode. Drives the menudot spinner (`(int)(host_time*10) % 6`
+    /// in `M_Main_Draw` and friends), which keeps turning over a frozen frame.
     clock: f32,
+    /// `realtime` (host.c): the UNCLAMPED wall clock (seconds) — `step`'s raw
+    /// `dt` summed, before Host_FilterTime caps the frame time. Drives every
+    /// flashing cursor the C times on `realtime`: the menu cursors
+    /// (`12 + ((int)(realtime*4)&1)`) and the console input cursor
+    /// (`Con_DrawInput`, `con_cursorspeed` 4).
+    realtime: f64,
     /// Current render resolution (runtime; defaults to [`DEFAULT_W`] x
     /// [`DEFAULT_H`]). The scene renders at this size and the framebuffer is
     /// `render_w * render_h * 4` RGBA bytes, reallocated whenever it changes.
@@ -906,6 +913,7 @@ fn ensure_app(f: impl FnOnce(&mut App)) {
                 console: Console::new(),
                 conback: None,
                 clock: 0.0,
+                realtime: 0.0,
                 render_w: DEFAULT_W,
                 render_h: DEFAULT_H,
                 fb: vec![0u8; DEFAULT_W * DEFAULT_H * 4],
@@ -1929,16 +1937,27 @@ pub extern "C" fn look(dyaw: f32, dpitch: f32) {
     });
 }
 
-/// Advance the active mode by `dt` seconds and render into the framebuffer.
+/// `Host_FilterTime` (host.c): the most a single frame may advance the game —
+/// a longer real frame (a hitch, a backgrounded tab) is clamped to 0.1 s of
+/// `host_frametime` while `realtime` still takes the whole elapsed time.
+const HOST_FRAMETIME_MAX: f32 = 0.1;
+
+/// Advance the active mode by `dt` seconds of REAL elapsed time and render into
+/// the framebuffer. `dt` is the raw wall-clock delta since the last frame: like
+/// `Host_FilterTime`, it all goes to `realtime`, while the game (world, demo,
+/// `host_time`) advances by `host_frametime = min(dt, 0.1)`.
 #[no_mangle]
 pub extern "C" fn step(dt: f32) {
+    // Guard a non-finite / negative dt so both clocks only move forward.
+    let real_dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
+    // Host_FilterTime's upper clamp (its 0.001 floor and 72 fps cap are not
+    // modelled: dt = 0 must keep freezing the world for the tests/automation).
+    let dt = real_dt.min(HOST_FRAMETIME_MAX);
     ensure_app(|a| {
-        // Advance the App clock (drives the menu cursor animation; mode-independent
-        // so the cursor keeps blinking over a frozen frame). Guard a non-finite /
-        // negative dt so it only moves forward.
-        if dt.is_finite() && dt > 0.0 {
-            a.clock += dt;
-        }
+        // Advance both App clocks — mode-independent, so the menudot spinner and
+        // the flashing cursors keep animating over a frozen frame.
+        a.realtime += real_dt as f64;
+        a.clock += dt;
         let (w, h) = (a.render_w, a.render_h);
         // While the menu OR console is up, gameplay input is gated; the dispatcher
         // owns that state, so it tells step_walk whether to gate. step_demo ignores
@@ -1989,7 +2008,8 @@ pub extern "C" fn step(dt: f32) {
         // while the console is down — the console owns the screen+keyboard — so the
         // two never both show (and the console sits on top, matching SCR_UpdateScreen
         // drawing SCR_DrawConsole then M_Draw under mutual exclusion).
-        // Uses the active mode's palette and the App clock for the cursor frame.
+        // Uses the active mode's palette, host_time (the App clock) for the
+        // menudot spinner and realtime for the flashing cursors.
         if menu_visible && !a.console.open {
             // Keep the Options "Screen size" label tracking the actual render
             // resolution (the framebuffer is the source of truth), so a boot /
@@ -2004,6 +2024,7 @@ pub extern "C" fn step(dt: f32) {
                         &a.menu_pics,
                         a.conchars.as_ref(),
                         a.clock,
+                        a.realtime,
                         palette,
                     );
                 }
@@ -2013,8 +2034,8 @@ pub extern "C" fn step(dt: f32) {
         // The console overlays everything and (per the gate above) replaces the menu
         // while open — matching Quake, where the menu and the drop-down console are
         // mutually exclusive via key_dest. It owns the keyboard while open. Uses the
-        // active mode's palette and the App clock for the input cursor blink. A
-        // closed console draws nothing.
+        // active mode's palette and realtime for the input cursor flash
+        // (Con_DrawInput). A closed console draws nothing.
         if a.console.open {
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
@@ -2024,7 +2045,7 @@ pub extern "C" fn step(dt: f32) {
                         a.conback.as_ref(),
                         a.conchars.as_ref(),
                         palette,
-                        a.clock,
+                        a.realtime,
                     );
                 }
             }
@@ -5210,6 +5231,36 @@ mod tests {
         );
     }
 
+    // -- Host_FilterTime: realtime vs host_time ---------------------------------
+
+    #[test]
+    fn step_splits_realtime_from_host_time_like_host_filtertime() {
+        // The page hands step() the RAW elapsed time. Like Host_FilterTime,
+        // all of it goes to realtime (the flashing cursors' clock) while the
+        // game clock (host_time: the menudot spinner, the world) advances by
+        // host_frametime = min(dt, 0.1). No mode is booted: the clocks tick
+        // regardless.
+        let clocks = || {
+            APP.with(|c| {
+                let b = c.borrow();
+                let a = b.as_ref().expect("step creates the app");
+                (a.realtime, a.clock)
+            })
+        };
+        step(0.5); // a half-second hitch
+        let (rt, ht) = clocks();
+        assert!((rt - 0.5).abs() < 1e-9, "realtime takes the whole hitch: {rt}");
+        assert!((ht - 0.1).abs() < 1e-6, "host_time is capped at 0.1: {ht}");
+        step(0.05); // a normal frame advances both alike
+        let (rt, ht) = clocks();
+        assert!((rt - 0.55).abs() < 1e-6 && (ht - 0.15).abs() < 1e-6, "{rt} {ht}");
+        // Garbage never runs either clock backwards.
+        step(f32::NAN);
+        step(-1.0);
+        let (rt2, ht2) = clocks();
+        assert_eq!((rt2, ht2), (rt, ht), "non-finite / negative dt is ignored");
+    }
+
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
 
     #[test]
@@ -5564,7 +5615,7 @@ mod tests {
             let (plain, _, _) = step_demo(d, 0.0001, false, w, h);
             let (mut withm, _, _) = step_demo(d, 0.0001, false, w, h);
             let pal = a.active_palette().expect("demo palette");
-            render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, pal);
+            render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, a.realtime, pal);
             // The two frames are the same scene; only the menu overlay differs.
             plain.rgb != withm.rgb
         });

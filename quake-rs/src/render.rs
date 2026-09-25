@@ -6953,6 +6953,27 @@ const SLIDER_RANGE: usize = 10;
 const OPTIONS_CURSOR_BASE: u8 = 12;
 const OPTIONS_CURSOR_X: f32 = 200.0;
 
+/// `(int)(realtime*rate) & 1` — the C's cursor-flash bit, shared by the menu
+/// cursors (`rate` 4) and the console input cursor (`con_cursorspeed` 4). The C
+/// truncates the double product toward zero; `realtime` only grows, so a
+/// non-finite or non-positive clock is phase 0.
+fn realtime_blink_bit(realtime: f64, rate: f64) -> u8 {
+    if !realtime.is_finite() || realtime <= 0.0 {
+        return 0;
+    }
+    ((realtime * rate) as i64 & 1) as u8
+}
+
+/// The flashing menu cursor's conchars cell: `12 + ((int)(realtime*4) & 1)`,
+/// verbatim from every text menu that has one (`M_Options_Draw`,
+/// `M_Load_Draw`/`M_Save_Draw`, `M_Keys_Draw`, vid_win.c `VID_MenuDraw`). Glyph
+/// 12 is blank and 13 is the arrow, so the cursor is visible for a quarter
+/// second out of every half second: a 4 Hz toggle on REAL time. (The menudot
+/// spinner is the one menu animation on `host_time` — 10 Hz, see [`draw_menu`].)
+pub fn menu_cursor_glyph(realtime: f64) -> u8 {
+    OPTIONS_CURSOR_BASE + realtime_blink_bit(realtime, 4.0)
+}
+
 /// Which menu screen is showing. Mirrors the relevant `m_state` values from
 /// menu.c (`m_main`, `m_singleplayer`, `m_load`, `m_save`, `m_multiplayer`,
 /// `m_options`, `m_keys`, `m_video`, `m_help`, `m_quit`).
@@ -8315,8 +8336,13 @@ fn draw_slider(
 /// The layout is Quake's fixed 320x200 virtual canvas, scaled to fit `image`
 /// (`scale = min(w/320, h/200)`) and centered, so it looks identical on the
 /// 320x200 wasm framebuffer (scale 1, no offset) and on the 640x400 PPM the tool
-/// writes (scale 2, centered). `time` is the game clock in seconds; the cursor
-/// frame is `(time * 10) as usize % 6` (`(int)(host_time*10) % 6`).
+/// writes (scale 2, centered).
+///
+/// Two clocks, exactly like the C: `host_time` (the clamped-frametime host
+/// clock) drives the animated menudot spinner, `(int)(host_time*10) % 6`
+/// (`M_Main_Draw` and friends); `realtime` (the unclamped wall clock) drives
+/// every flashing conchars cursor, `12 + ((int)(realtime*4) & 1)` — see
+/// [`menu_cursor_glyph`].
 ///
 /// Each pic is fetched from `pics` and skipped if absent (`None`) — a pak missing
 /// the menu art still renders the rest without panicking. `conchars`, when
@@ -8328,7 +8354,8 @@ pub fn draw_menu(
     menu: &Menu,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
-    time: f32,
+    host_time: f32,
+    realtime: f64,
     palette: &[[u8; 3]; 256],
 ) {
     if !menu.visible || image.w == 0 || image.h == 0 {
@@ -8347,11 +8374,14 @@ pub fn draw_menu(
 
     // The animated cursor frame: (int)(host_time*10) % 6. Guard a non-finite /
     // negative clock so the index stays 0..6.
-    let frame = if time.is_finite() && time > 0.0 {
-        ((time * 10.0) as usize) % 6
+    let frame = if host_time.is_finite() && host_time > 0.0 {
+        ((host_time * 10.0) as usize) % 6
     } else {
         0
     };
+    // The flashing conchars cursor (Options / Load / Save / Keys / Video) runs
+    // on REAL time at 4 Hz, independent of the menudot's host_time spinner.
+    let cursor = menu_cursor_glyph(realtime);
 
     // The Help screen is a full-screen pic at (0,0); the Quit prompt is a small
     // text box; Load/Save/Keys/Video are a centered title + text rows with no
@@ -8367,15 +8397,15 @@ pub fn draw_menu(
             return;
         }
         MenuScreen::Load | MenuScreen::Save => {
-            draw_load_save_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            draw_load_save_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
             return;
         }
         MenuScreen::Keys => {
-            draw_keys_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            draw_keys_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
             return;
         }
         MenuScreen::Video => {
-            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
             return;
         }
         _ => {}
@@ -8391,7 +8421,7 @@ pub fn draw_menu(
     // the Main / SinglePlayer screens use their pre-baked list graphic. Branch the
     // whole body so each screen draws its own title + rows.
     if menu.screen == MenuScreen::Options {
-        draw_options_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+        draw_options_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
         return;
     }
 
@@ -8472,8 +8502,8 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
 /// Lookstrafe), and the flashing cursor glyph (12/13) at x=200 on the focused row.
 ///
 /// A missing `conchars` leaves the labels/widgets blank but still draws the title;
-/// nothing here panics. `frame` (the menudot animation frame) drives the cursor
-/// blink (glyph 12 vs 13) via its parity, so it animates with the same clock.
+/// nothing here panics. `cursor_glyph` is the flashing cursor's conchars cell
+/// this frame ([`menu_cursor_glyph`]: 12/13 on real time at 4 Hz).
 #[allow(clippy::too_many_arguments)]
 fn draw_options_screen(
     image: &mut Image,
@@ -8483,7 +8513,7 @@ fn draw_options_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     // The "OPTIONS" title plaque, centered like the other screens' titles.
@@ -8535,8 +8565,7 @@ fn draw_options_screen(
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
         let cy = OPTIONS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
-        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-        draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_char, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
 
@@ -8567,7 +8596,7 @@ fn draw_load_save_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     let title = if menu.screen == MenuScreen::Save {
@@ -8587,8 +8616,7 @@ fn draw_load_save_screen(
             draw_string_scaled(image, cc, 16.0, ry, row, scale, ox, oy, palette);
         }
         let cy = 32.0 + menu.cursor as f32 * 8.0;
-        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-        draw_char_scaled(image, cc, 8.0, cy, cursor_char, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
 
@@ -8647,7 +8675,7 @@ fn draw_keys_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.ttl_cstm {
@@ -8691,8 +8719,8 @@ fn draw_keys_screen(
         // M_DrawCharacter (130, 48 + keys_cursor*8, '=').
         draw_char_scaled(image, cc, 130.0, cy, b'=', scale, ox, oy, palette);
     } else {
-        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-        draw_char_scaled(image, cc, 130.0, cy, cursor_char, scale, ox, oy, palette);
+        // M_DrawCharacter (130, 48 + keys_cursor*8, 12+((int)(realtime*4)&1)).
+        draw_char_scaled(image, cc, 130.0, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
 
@@ -8711,7 +8739,7 @@ fn draw_video_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.vidmodes {
@@ -8729,8 +8757,7 @@ fn draw_video_screen(
         draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
     }
     let cy = 36.0 + menu.cursor as f32 * 8.0;
-    let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-    draw_char_scaled(image, cc, 8.0, cy, cursor_char, scale, ox, oy, palette);
+    draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
     // single column's foot.
     let hints_y = 36.0 + RESOLUTION_PRESETS.len() as f32 * 8.0 + 16.0;
@@ -8819,9 +8846,19 @@ pub const CONSOLE_INPUT_CAP: usize = 256;
 /// allocation-light and deterministic (no per-frame slide state to advance).
 const CONSOLE_HEIGHT_FRAC: f32 = 0.6;
 
-/// The conchars cell index of the flashing input cursor glyph (Quake's
-/// `Con_DrawInput` draws character 11 when `(int)(realtime*con_cursorspeed) & 1`).
-const CONSOLE_CURSOR_CHAR: char = 11 as char;
+/// `Con_DrawInput` (console.c) stamps `10 + ((int)(realtime*con_cursorspeed) & 1)`
+/// at the edit position: conchars cell 10 is blank and 11 is the block cursor.
+const CONSOLE_CURSOR_BASE: u8 = 10;
+/// `con_cursorspeed` (console.c: `float con_cursorspeed = 4;`): the input cursor
+/// toggles 4 times per second of real time.
+const CON_CURSORSPEED: f64 = 4.0;
+
+/// The console input cursor's conchars cell this frame (`Con_DrawInput`):
+/// `10 + ((int)(realtime*con_cursorspeed) & 1)` — blank, then the block, each
+/// for a quarter second of REAL time.
+pub fn console_cursor_glyph(realtime: f64) -> u8 {
+    CONSOLE_CURSOR_BASE + realtime_blink_bit(realtime, CON_CURSORSPEED)
+}
 
 /// The Quake drop-down console: a panel slid over the top of the screen holding
 /// a capped scrollback history plus a single editable input line. Toggled with
@@ -8948,8 +8985,9 @@ impl Console {
 ///     always visible.
 ///  2. the last few scrollback lines, drawn bottom-up just above the input line,
 ///     via [`draw_string`] in the conchars font.
-///  3. the input line as `"]" + input` plus a blinking cursor glyph (conchars
-///     char 11, blinking at ~2 Hz off `time`).
+///  3. the input line as `"]" + input` plus the flashing cursor glyph
+///     ([`console_cursor_glyph`]: cells 10/11 toggling at 4 Hz on `realtime`,
+///     the C's unclamped wall clock).
 ///
 /// Text is drawn at the same conchars scale the menu uses
 /// (`scale = framebuffer_height / 200`, the 320x200 virtual canvas), so the font
@@ -8962,7 +9000,7 @@ pub fn draw_console(
     conback: Option<&crate::wad::Qpic>,
     conchars: Option<&crate::wad::Qpic>,
     palette: &[[u8; 3]; 256],
-    time: f32,
+    realtime: f64,
 ) {
     if !console.open || image.w == 0 || image.h == 0 {
         return;
@@ -9031,29 +9069,16 @@ pub fn draw_console(
     let margin_x = (8.0 * scale).round();
     let input_y = (panel_h as f32 - line_step - 2.0 * scale).max(0.0);
 
-    // 3. The input line: "]" + input + a blinking cursor (conchars char 11,
-    //    blinking at ~2 Hz). Drawn directly in framebuffer pixels (scale folded
-    //    into the position + the draw_string_scaled glyph block).
+    // 3. The input line: "]" + input + the flashing cursor. Drawn directly in
+    //    framebuffer pixels (scale folded into the position + the glyph block).
     let prompt = format!("]{}", console.input());
     draw_string_scaled(image, cc, 0.0, 0.0, &prompt, scale, margin_x, input_y, palette);
-    // The cursor follows the last typed character; blink ~2 Hz off `time`.
-    let cursor_on = !time.is_finite() || ((time * 2.0) as i64 & 1) == 0;
-    if cursor_on {
-        let cursor_col = prompt.chars().count() as f32; // 8 virtual px per char
-        let mut s = String::new();
-        s.push(CONSOLE_CURSOR_CHAR);
-        draw_string_scaled(
-            image,
-            cc,
-            cursor_col * 8.0,
-            0.0,
-            &s,
-            scale,
-            margin_x,
-            input_y,
-            palette,
-        );
-    }
+    // Con_DrawInput: text[key_linepos] = 10 + ((int)(realtime*con_cursorspeed)&1)
+    // — the cursor cell sits at the edit position (the end of the line: this
+    // console has no cursor keys) and alternates blank/block at 4 Hz.
+    let cursor_col = prompt.chars().count() as f32; // 8 virtual px per char
+    let glyph = console_cursor_glyph(realtime);
+    draw_char_scaled(image, cc, cursor_col * 8.0, 0.0, glyph, scale, margin_x, input_y, palette);
 
     // 2. Scrollback: the lines just above the input, drawn bottom-up. How many
     //    rows fit between the top margin and the input line.
@@ -13317,14 +13342,14 @@ mod tests {
         m.open();
         // All pics absent: nothing should draw, and it must not panic.
         let pics = MenuPics::default();
-        draw_menu(&mut img, &m, &pics, None, 0.3, &pal);
+        draw_menu(&mut img, &m, &pics, None, 0.3, 0.0, &pal);
         assert_eq!(img.rgb, before, "an all-empty MenuPics must leave the frame untouched");
 
         // A hidden menu never draws.
         m.close();
         let solid = solid_pic(64, 16, 7);
         let pics2 = MenuPics { mainmenu: Some(solid), ..Default::default() };
-        draw_menu(&mut img, &m, &pics2, None, 0.3, &pal);
+        draw_menu(&mut img, &m, &pics2, None, 0.3, 0.0, &pal);
         assert_eq!(img.rgb, before, "a hidden menu must not draw");
     }
 
@@ -13340,7 +13365,7 @@ mod tests {
             mainmenu: Some(solid_pic(120, 80, 7)),
             ..Default::default()
         };
-        draw_menu(&mut img, &m, &pics, None, 0.0, &pal);
+        draw_menu(&mut img, &m, &pics, None, 0.0, 0.0, &pal);
         // At scale 1 on the 320x200 frame, virtual (72,32) maps to pixel (72,32).
         let idx = 32 * img.w + 72;
         assert_eq!(img.rgb[idx], pal[7], "the mainmenu pic must paint at (72,32)");
@@ -13364,12 +13389,94 @@ mod tests {
         // The cursor sits at (54, 32). frame = (time*10) % 6.
         let cursor_idx = 32 * 320 + 54;
         let mut img0 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img0, &m, &pics, None, 0.0, &pal); // frame 0 -> index 10
+        draw_menu(&mut img0, &m, &pics, None, 0.0, 0.0, &pal); // frame 0 -> index 10
         assert_eq!(img0.rgb[cursor_idx], pal[10]);
 
         let mut img1 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img1, &m, &pics, None, 0.35, &pal); // (3.5)->3 -> index 13
+        draw_menu(&mut img1, &m, &pics, None, 0.35, 0.0, &pal); // (3.5)->3 -> index 13
         assert_eq!(img1.rgb[cursor_idx], pal[13]);
+        // The spinner runs on host_time ONLY: realtime moving on (the flashing
+        // cursors' clock) leaves the menudot frame alone.
+        let mut img2 = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img2, &m, &pics, None, 0.35, 7.3, &pal);
+        assert_eq!(img2.rgb[cursor_idx], pal[13], "menudot ignores realtime");
+    }
+
+    #[test]
+    fn menu_cursor_flashes_at_4hz_on_realtime() {
+        // M_Options_Draw & co: 12 + ((int)(realtime*4) & 1). Glyph 12 (blank)
+        // for the first quarter second, 13 (the arrow) for the next, and so on
+        // — 4 toggles per second, NOT the menudot's 10 Hz frame parity (the old
+        // bug: the cursor followed (int)(host_time*10) % 6 & 1, 2.5x too fast).
+        assert_eq!(menu_cursor_glyph(0.0), 12);
+        assert_eq!(menu_cursor_glyph(0.10), 12, "0.10 s: the 10 Hz parity would say 13");
+        assert_eq!(menu_cursor_glyph(0.24), 12);
+        assert_eq!(menu_cursor_glyph(0.25), 13);
+        assert_eq!(menu_cursor_glyph(0.49), 13);
+        assert_eq!(menu_cursor_glyph(0.50), 12);
+        assert_eq!(menu_cursor_glyph(0.75), 13);
+        // Count the toggles over one second sampled at 1 ms: exactly 4 edges
+        // (at 0.25/0.5/0.75/1.0), whatever the frame rate.
+        let mut edges = 0;
+        let mut prev = menu_cursor_glyph(0.0);
+        for ms in 1..=1000 {
+            let g = menu_cursor_glyph(ms as f64 / 1000.0);
+            if g != prev {
+                edges += 1;
+            }
+            prev = g;
+        }
+        assert_eq!(edges, 4, "the menu cursor toggles 4 times per real second");
+        // A garbage clock is phase 0, never a panic.
+        assert_eq!(menu_cursor_glyph(f64::NAN), 12);
+        assert_eq!(menu_cursor_glyph(-3.0), 12);
+    }
+
+    #[test]
+    fn console_cursor_flashes_at_con_cursorspeed_on_realtime() {
+        // Con_DrawInput: 10 + ((int)(realtime*con_cursorspeed) & 1), speed 4.
+        // (The port used to blink cell 11 at 2 Hz off the host clock.)
+        assert_eq!(console_cursor_glyph(0.0), 10, "cell 10 (blank) first");
+        assert_eq!(console_cursor_glyph(0.3), 11, "the block from 0.25 s");
+        assert_eq!(console_cursor_glyph(0.6), 10);
+        assert_eq!(console_cursor_glyph(0.8), 11);
+        let mut edges = 0;
+        let mut prev = console_cursor_glyph(0.0);
+        for ms in 1..=1000 {
+            let g = console_cursor_glyph(ms as f64 / 1000.0);
+            if g != prev {
+                edges += 1;
+            }
+            prev = g;
+        }
+        assert_eq!(edges, 4, "the console cursor toggles 4 times per real second");
+    }
+
+    #[test]
+    fn draw_menu_options_cursor_follows_realtime_not_host_time() {
+        // End to end through draw_menu: a conchars whose cell 13 is lit and
+        // cell 12 is blank (like id's), cursor on the Options top row at
+        // (200, 32). host_time is held where the OLD parity code would have
+        // shown the arrow (frame 1 = 0.1 s); only realtime decides.
+        let pal = ramp_palette();
+        let mut data = vec![0u8; 128 * 128];
+        for y in 0..8 {
+            for x in 0..8 {
+                data[y * 128 + 13 * 8 + x] = 3; // cell 13 = (13, 0)
+            }
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options, cursor row 0
+        let px = 32 * 320 + 200;
+        let mut off = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut off, &m, &MenuPics::default(), Some(&conchars), 0.1, 0.1, &pal);
+        assert_eq!(off.rgb[px], [0, 0, 0], "realtime 0.1 s: cursor phase blank");
+        let mut on = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut on, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.3, &pal);
+        assert_eq!(on.rgb[px], pal[3], "realtime 0.3 s: the arrow shows");
     }
 
     #[test]
@@ -13529,7 +13636,7 @@ mod tests {
         let bg = [9u8, 9, 9];
         let mut img = Image::new(320, 200, bg);
         let before = img.rgb.clone();
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         // The Options screen must change pixels over the known background.
         assert_ne!(img.rgb, before, "the Options screen must draw something");
         // The title plaque (index 5) paints centered near the top: at virtual
@@ -13554,7 +13661,7 @@ mod tests {
         // scale 2): it must not panic and must draw the title + cursor scaled.
         let mut big = Image::new(640, 400, bg);
         let big_before = big.rgb.clone();
-        draw_menu(&mut big, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut big, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         assert_ne!(big.rgb, big_before, "the Options screen draws at 640x400 too");
         // At scale 2 the cursor's virtual (200,32) maps to pixel (400,64).
         let big_cursor_idx = 64 * big.w + 400;
@@ -13563,7 +13670,7 @@ mod tests {
         // Missing conchars leaves labels/widgets/cursor blank but still draws the
         // title; no panic.
         let mut img2 = Image::new(320, 200, bg);
-        draw_menu(&mut img2, &m, &pics, None, 0.0, &pal);
+        draw_menu(&mut img2, &m, &pics, None, 0.0, 0.0, &pal);
         assert_eq!(img2.rgb[title_idx], pal[5], "title still draws without conchars");
         assert_eq!(img2.rgb[cursor_idx], bg, "cursor needs conchars (blank without it)");
     }
@@ -14140,9 +14247,9 @@ mod tests {
             m.screen = screen;
             m.cursor = cursor;
             let mut img = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img, &m, &pics, None, 0.4, &pal); // no pics, no font
+            draw_menu(&mut img, &m, &pics, None, 0.4, 0.0, &pal); // no pics, no font
             let mut img2 = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img2, &m, &pics, Some(&conchars), 0.4, &pal);
+            draw_menu(&mut img2, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
             let inked = img2.rgb.iter().any(|&p| p != [9, 9, 9]);
             assert!(inked, "{screen:?} must draw its text rows with conchars present");
         }
@@ -14153,11 +14260,11 @@ mod tests {
         m.set_save_comments(comments);
         m.screen = MenuScreen::Load;
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
         m.screen = MenuScreen::Keys;
         m.bind_grab = true;
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
     }
 
     #[test]
@@ -14216,12 +14323,12 @@ mod tests {
         m.select(); // -> Help, page 0
         m.help_page = 2; // the page that has art
         let mut img = Image::new(320, 200, bg);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         assert_eq!(img.rgb[0], pal[6], "the help page pic must paint at (0,0)");
         // A missing page (page 0 here is None) draws nothing and never panics.
         m.help_page = 0;
         let mut img0 = Image::new(320, 200, bg);
-        draw_menu(&mut img0, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut img0, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         assert_eq!(img0.rgb[0], bg, "a missing help page leaves the frame untouched");
 
         // Quit: the confirm box must paint (the dark box + the prompt text).
@@ -14231,14 +14338,14 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Quit);
         let mut imgq = Image::new(320, 200, bg);
         let before = imgq.rgb.clone();
-        draw_menu(&mut imgq, &m, &MenuPics::default(), Some(&conchars), 0.0, &pal);
+        draw_menu(&mut imgq, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
         assert_ne!(imgq.rgb, before, "the Quit prompt must draw something");
         // The dark box paints black inside its region (e.g. virtual (60,80)).
         let box_idx = 80 * imgq.w + 60;
         assert_eq!(imgq.rgb[box_idx], [0, 0, 0], "the Quit box is a dark fill");
         // Without conchars the box still paints (no panic).
         let mut imgq2 = Image::new(320, 200, bg);
-        draw_menu(&mut imgq2, &m, &MenuPics::default(), None, 0.0, &pal);
+        draw_menu(&mut imgq2, &m, &MenuPics::default(), None, 0.0, 0.0, &pal);
         assert_eq!(imgq2.rgb[box_idx], [0, 0, 0], "the Quit box paints without conchars");
     }
 

@@ -1542,7 +1542,7 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
     // frame is reproducible).
     let mut menu = render::Menu::new();
     menu.open();
-    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, &palette);
+    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, 0.0, &palette);
 
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
