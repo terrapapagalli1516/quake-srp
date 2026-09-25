@@ -874,6 +874,19 @@ impl Server {
         // uses sv.time, not the clamped per-think `time` global).
         self.vm.sv_time = start_time;
 
+        // Host_ServerFrame runs SV_RunClients BEFORE SV_Physics: SV_ReadClientMove
+        // copies the usercmd onto the client edict (v_angle, buttons, impulse),
+        // then SV_ClientThink applies the look angles, the punch decay, friction
+        // and acceleration (or the swim / water-jump move) to its velocity. Only
+        // then does SV_Physics run StartFrame and every edict, the client's
+        // PlayerPreThink (WaterMove's drag, PlayerJump) acting on the
+        // ALREADY-accelerated velocity.
+        self.vm.gset_float("time", start_time);
+        if self.player >= 0 && !self.is_free(self.player) {
+            self.apply_usercmd_to_edict(self.player, cmd);
+            self.client_think(self.player, cmd, dt);
+        }
+
         // Let the progs know a new frame has started (self/other = world,
         // time = sv.time).
         let mut thinks_fired = 0usize;
@@ -899,7 +912,7 @@ impl Server {
             }
 
             let result = if ent == self.player {
-                self.physics_client(ent, cmd, start_time, dt)
+                self.physics_client(ent, start_time, dt)
             } else {
                 let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
                 self.process_entity(ent, movetype, start_time, dt)
@@ -947,15 +960,9 @@ impl Server {
     /// path chosen by movetype -> `touch_triggers` -> relink -> `PlayerPostThink`.
     /// Returns whether a think fired (for the frame report). A removed player
     /// (`free`) short-circuits the rest, like the C `SV_RunThink` guards.
-    fn physics_client(&mut self, ent: i32, cmd: &UserCmd, start_time: f32, dt: f32) -> Result<bool> {
-        // SV_ReadClientMove (sv_user.c) copies the usercmd onto the client edict
-        // BEFORE the physics frame: v_angle from the look angles, then the button
-        // bits and impulse. We do it here, immediately before PlayerPreThink, so
-        // the weapon code that runs inside PreThink/PostThink (W_WeaponFrame ->
-        // W_Attack reads `self.button0` and aims off `self.v_angle`) sees the
-        // current frame's input. (client_think later re-derives v_angle/angles
-        // during the move, but PreThink runs first and must see it set.)
-        self.apply_usercmd_to_edict(ent, cmd);
+    fn physics_client(&mut self, ent: i32, start_time: f32, dt: f32) -> Result<bool> {
+        // (The usercmd and SV_ClientThink were applied by client_frame before
+        // SV_Physics began, as SV_RunClients does.)
 
         // call standard client pre-think (self = player). SV_Physics_Client sets
         // `pr_global_struct->time = sv.time` first: without it PreThink reads the
@@ -990,11 +997,10 @@ impl Server {
                 if !alive {
                     return Ok(fired);
                 }
-                // SV_ClientThink does friction/acceleration toward wishdir; then
-                // gravity (unless in water or water-jumping) and the step-up walk
-                // move. check_water sets waterlevel/watertype so the QuakeC
-                // WaterMove (PlayerPostThink) can deal lava/slime damage.
-                self.client_think(ent, cmd, dt);
+                // (SV_ClientThink already ran, in SV_RunClients.) Gravity (unless
+                // in water or water-jumping) and the step-up walk move. check_water
+                // sets waterlevel/watertype so the QuakeC WaterMove (PlayerPreThink)
+                // can deal lava/slime damage.
                 let in_water = self.check_water(ent);
                 let flags = self.vm.ent_get_float(ent, "flags") as i32;
                 if !in_water && flags & FL_WATERJUMP == 0 {
@@ -1011,7 +1017,6 @@ impl Server {
                 if !alive {
                     return Ok(fired);
                 }
-                self.client_think(ent, cmd, dt);
                 self.check_water(ent); // keep waterlevel/watertype live while flying
                 self.player_fly_move(ent, start_time, dt);
             }
@@ -1021,7 +1026,6 @@ impl Server {
                 if !alive {
                     return Ok(fired);
                 }
-                self.client_think(ent, cmd, dt);
                 // origin += frametime * velocity (no clipping).
                 let origin = self.vm.ent_get_vector(ent, "origin");
                 let vel = self.vm.ent_get_vector(ent, "velocity");

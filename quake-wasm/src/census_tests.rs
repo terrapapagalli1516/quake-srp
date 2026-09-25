@@ -324,3 +324,38 @@ fn census_rune_icons_reach_the_status_bar() {
     };
     assert_ne!(cell(&before), cell(&after), "the rune 1 icon is drawn after the pickup");
 }
+
+/// CENSUS L5 (LOW). Host_ServerFrame runs SV_RunClients (SV_ReadClientMove +
+/// SV_ClientThink: friction and acceleration) BEFORE SV_Physics, whose
+/// PlayerPreThink then runs PlayerJump / WaterMove on the accelerated
+/// velocity. A standing jump with forward held: SV_ClientThink still sees the
+/// player on the ground and accelerates it to the full wish speed, then
+/// PlayerJump adds 270 up; the other way round the jump clears FL_ONGROUND
+/// first and the air move caps the gain at 30 u/s. Ground truth from id's
+/// oracle (e1m1, `+forward` `+jump` from rest, 0.1 s frames; the press frame
+/// is CL_KeyState's half step, forwardmove 100): the player moves 10 units
+/// forward every frame and rises 19, 11, 3, then falls 5.
+#[test]
+fn census_client_think_runs_before_player_prethink() {
+    let mut w = build_walk().expect("e1m1 boots");
+    for _ in 0..10 {
+        step(&mut w, 0.1); // settle on the floor, FL_JUMPRELEASED set
+    }
+    let p = w.player;
+    assert!(w.server.vm.ent_get_float(p, "flags") as i32 & 512 != 0, "on the ground");
+    let mut o = w.server.vm.ent_get_vector(p, "origin");
+    assert_eq!(o, [480.0, -352.0, 88.03125], "id's resting spot");
+    for (frame, dz) in [19.0, 11.0, 3.0, -5.0].into_iter().enumerate() {
+        let cmd = quake_rs::server::UserCmd {
+            forwardmove: if frame == 0 { 100.0 } else { 200.0 },
+            yaw: 90.0,
+            buttons: 2, // +jump held
+            ..Default::default()
+        };
+        w.server.client_frame(&cmd, 0.1).expect("frame");
+        let n = w.server.vm.ent_get_vector(p, "origin");
+        assert!((n[1] - o[1] - 10.0).abs() < 0.01, "frame {frame}: 10 units forward, got {}", n[1] - o[1]);
+        assert!((n[2] - o[2] - dz).abs() < 0.01, "frame {frame}: dz {dz}, got {}", n[2] - o[2]);
+        o = n;
+    }
+}
