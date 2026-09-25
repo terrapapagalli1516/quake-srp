@@ -18,7 +18,8 @@ and measure how far apart they are.
 
 Per case it writes, into --out (default: a fresh scratch dir it prints):
     <case>.c.ppm / .c.pgm / .c.json / .c.ents   id's frame (RGB, raw palette indices,
-                                                the view/clock metadata, the entity list)
+      / .c.parts                                the view/clock metadata, the entity list,
+                                                the particles it drew)
     <case>.port.ppm                             the port's frame
     <case>.side.png                             C | port | diff (2x, diff = max-channel
                                                 |dRGB| x4, white = far apart)
@@ -29,7 +30,8 @@ The view is the C's own first frame after signon (V_CalcRefdef's eye at the
 player's spawn, cl.time at that frame) unless --view/--time pin it; the port is
 then handed exactly that vieworg/viewangles/cl.time. In `ents` mode the port
 draws the entity list id's frame drew (the .ents file), so both renderers get the
-same inputs and the diff measures rendering alone, not the simulation.
+same inputs and the diff measures rendering alone, not the simulation. In either
+mode it draws the particles id's frame drew (the .parts file).
 """
 
 from __future__ import annotations
@@ -163,6 +165,11 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
         cmd += ["--exactpersp", "1"]
     if ents:
         cmd += ["--ents", str(out / f"{case}.c.ents")]
+    # id's particles in the frame (R_DrawParticles draws them whatever
+    # r_drawentities says): e.g. the shotgun's puffs with --c-cmd +attack
+    parts = out / f"{case}.c.parts"
+    if parts.exists():
+        cmd += ["--particles", str(parts)]
     # id's live dynamic lights (muzzle flashes, explosions: e.g. --c-cmd +attack)
     for dl in meta.get("dlights", []):
         cmd += ["--dlight", ",".join(repr(float(v)) for v in dl)]

@@ -134,7 +134,7 @@ fn usage() {
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -1987,6 +1987,8 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 /// --viewent x,y,z,p,y,r  the weapon's origin and angles, `cl.viewent` (default:
 ///                    V_CalcRefdef's for a still player at viewsize 120)
 /// --bench N          then render the same view N more times, report warm ms/frame
+/// --particles FILE   draw these particles: the oracle's `.parts` list, one per line,
+///                    `x y z color`, in id's draw order (without it: none)
 /// --dlight x,y,z,radius[,minlight]  a live dynamic light (repeatable; the oracle
 ///                    passes id's `cl_dlights`, in slot order)
 /// --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
@@ -1999,6 +2001,26 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 /// `r_waterwarp` one: rendered into the (at most 320x200) warp buffer and
 /// stretched over the frame by `D_WarpScreen` at `--time`, as `R_RenderView`
 /// does before the oracle's shot.
+/// The oracle's `.parts` file: `x y z color` per line (`#` comments), the
+/// particles `R_DrawParticles` drew, in its order.
+fn parse_particles(text: &str) -> Result<Vec<([f32; 3], u8)>, String> {
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let bad = || format!("line {}: expected `x y z color`, got {line:?}", n + 1);
+        let [x, y, z, c] = f[..] else { return Err(bad()) };
+        let num = |s: &str| s.parse::<f32>().map_err(|_| bad());
+        let color = c.parse::<i64>().map_err(|_| bad())?;
+        // id's particle colour is an int indexing the 8-bit palette (`byte` on draw).
+        out.push(([num(x)?, num(y)?, num(z)?], (color & 255) as u8));
+    }
+    Ok(out)
+}
+
 fn cmd_view(args: &[String]) -> Result<Out, String> {
     use std::collections::HashMap;
 
@@ -2019,6 +2041,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let mut bench: Option<u32> = None;
     let mut viewent: Option<[f32; 6]> = None;
     let mut dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
+    let mut particles: Vec<([f32; 3], u8)> = Vec::new();
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -2055,6 +2078,10 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
                 }
             }
             "--ents" => ents_path = Some(val.as_str()),
+            "--particles" => {
+                let text = std::fs::read_to_string(val).map_err(|e| format!("--particles {val}: {e}"))?;
+                particles = parse_particles(&text).map_err(|e| format!("--particles {val}: {e}"))?;
+            }
             "--dlight" => {
                 let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
                     .map_err(|_| format!("--dlight: expected x,y,z,radius[,minlight], got {val:?}"))?;
@@ -2228,13 +2255,13 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             let mut wopts = opts;
             wopts.screen = Some(render::ScreenPlace { x: r.x, y: r.y, vid_w: w, vid_h: h });
             let view = render::render_scene_ext_sprited(
-                &bsp, &cam, r.w, r.h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
+                &bsp, &cam, r.w, r.h, &palette, &instances, &bmodels, &externals, viewmodel, time, &particles, &dlights,
                 &light_styles, colormap.as_deref(), &sprites, &wopts,
             );
             return render::apply_warp(view, w, h, time);
         }
         render::render_scene_ext_sprited(
-            &bsp, &cam, view_w, view_h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
+            &bsp, &cam, view_w, view_h, &palette, &instances, &bmodels, &externals, viewmodel, time, &particles, &dlights,
             &light_styles, colormap.as_deref(), &sprites, &opts,
         )
     };

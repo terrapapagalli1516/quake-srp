@@ -1262,6 +1262,26 @@ test in the commit message.
   `--spans 16`: 99.89 / 99.89 / 99.90 / 99.89 at 320x200 / 640x400 / 960x600 /
   1280x800; 99.93 at all four at the page's aspect. The stale 97.6 numbers in
   "Review fixes" are corrected there.
+- ✅ **Particles drawn as `D_DrawParticle`** (LOW) — `draw_particles` projected
+  with the walls' `xscale`/`yscale` where `R_DrawParticles` scales `vright`/
+  `vup` by `R_ViewChanged`'s `xscaleshrink = (vrect.width-6)/
+  horizontalFieldOfView` (3 px nearer the centre at a 320-wide view's edge);
+  it also sized a centred square by `round(focal/z)`, clipped it at the edge
+  and z-tested float depth. Now `render/part.rs` is `D_DrawParticle`
+  (`d_part.c`) with `D_ViewChanged`'s constants (`d_modech.c`): `u =
+  (int)(xcenter + zi*x + 0.5)`, `pix = (int)(zi*0x8000) >> d_pix_shift`
+  clamped to `[d_pix_min, d_pix_max]`, drawn from `(u, v)` right and down,
+  dropped whole past `d_vrectright_particle`/`d_vrectbottom_particle`,
+  `PARTICLE_Z_CLIP` 8, and id's `pz <= izi` on the quantized 1/z (particles
+  of one burst tie often; the later wins). Measured: the oracle now dumps
+  the particles it draws (`.parts`) and `quaketool view --particles` draws
+  them; the shotgun's puffs on e1m1 match 100% of particle pixels at 320x200
+  / 640x400 / 960x600 (were 12.8 / 12.6 / 15.0%). Tests
+  `particles_project_with_r_main_c_xscaleshrink`,
+  `particle_size_is_d_part_cs_izi_shift`,
+  `particles_obey_d_part_cs_clip_and_edges`,
+  `particles_tie_on_d_part_cs_quantized_1_over_z`. Goldens unchanged (no
+  particles in them).
 
 ## LOW (27)
 

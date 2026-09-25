@@ -68,22 +68,24 @@ loopback-only `net_none`, and three files of ours (`c/`, GPL like id's):
   dump `vid.buffer` the instant the 3-D view is done — before the sbar, console,
   notify text or centerprint touch it — as `.pgm` (raw palette indices, the real
   output), `.ppm`, `.json` (vieworg/angles, `cl.time`, vrect, fov, the 64
-  `d_lightstylevalue`s, viewleaf contents, ...) and `.ents` (every entity on the
+  `d_lightstylevalue`s, viewleaf contents, ...), `.ents` (every entity on the
   frame's draw list, statics included: model, origin, angles, frame, skin,
-  syncbase).
+  syncbase) and `.parts` (the particles `R_DrawParticles` is about to draw, in
+  its order: origin and colour, written before the render moves them).
 
 It is built as a static 32-bit i386 binary (1996 code assumes 32-bit pointers) in
 a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
 
 **Port side.** `quaketool view <pak> <map> <out.ppm> [--res] [--origin] [--angles]
-[--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--viewmodel M:F] [--bench N]` renders one exactly
+[--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--bench N]` renders one exactly
 specified view through the same `render_scene_ext_sprited` the game uses. It is a
 new subcommand; no existing output changed (goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`).
 
 **Matching inputs.** By default the camera and clock are id's own first frame after
 signon (`V_CalcRefdef`'s eye, `cl.time` = 1.6 on these maps), handed verbatim to
 the port. In `ents` mode the port draws **id's entity list** (the `.ents` file),
-so the diff measures rendering, not the simulation. Note: that first-frame eye is
+so the diff measures rendering, not the simulation; in both modes it draws id's
+particles (the `.parts` file). Note: that first-frame eye is
 12 units below the standing eye height — `V_CalcRefdef`'s stair smoothing starts
 from `static float oldz = 0` and clamps to 12 below the origin; `--settle 2` gives
 the steady eye. (The port's live path starts `oldz` at the origin, so its first
@@ -131,6 +133,16 @@ aspect. `compare.py` places the view by the `.json`'s `scr_vrect`: above
 320x200 an underwater frame's `vrect` is the warp buffer's rectangle, not the
 screen's. Below viewsize 120 an underwater view is not comparable (the port's
 `view --vrect` draws it unwarped; `compare.py` warns).
+
+**Particles** (the shotgun's puffs on e1m1's first wall: `--c-cmd +attack
+--settle 3`, 120 particles; the port draws id's own list, the `.parts` file):
+over the pixels a particle touches in either renderer, 100% at 320x200 /
+640x400 / 960x600 (39 / 151 / 393 px) since `quake/polish2`'s port of
+`D_DrawParticle`; before, 12.8 / 12.6 / 15.0% (the walls' `xscale` instead of
+`xscaleshrink`, a centred square of `focal/z` pixels instead of `izi >>
+d_pix_shift` from `(u, v)`, clipping instead of dropping at the edge, and a
+float depth test where id's quantized 1/z lets the later particle win a tie).
+The rest of that frame is the settle-3 arch below.
 
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
 1432.386,1397.978,233.254,9.344,-103.449,0`, `--spans 16`) scores 99.99% world and
@@ -304,11 +316,10 @@ Timings are noisy: compare within one sitting.
   rounding. Other asm-vs-C differences are unmeasured.
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
   1996. The x87-vs-SSE check bounds the float noise at ~0.03%.
-- Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No particles,
-  sprites or intermission were compared (the oracle can render them; nobody
-  looked yet); the underwater warp in one view (above). Dynamic lights: the muzzle-flash frames above, since
-  PERF_PLAN A2 (`AUDIT.md`); the port's `view` draws no particles, so a shot's
-  puffs count as differences there.
+- Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No sprites or
+  intermission were compared (the oracle can render them; nobody looked yet);
+  the underwater warp in one view and particles in one burst (above). Dynamic
+  lights: the muzzle-flash frames above, since PERF_PLAN A2 (`AUDIT.md`).
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
 - `viewsize` below 120: the 3-D view rectangle is compared (`--viewsize N`);
