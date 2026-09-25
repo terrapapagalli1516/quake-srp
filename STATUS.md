@@ -1,119 +1,203 @@
-# Quake-RS — working status / hand-off
+# Quake-RS — status and hand-off
 
-Last updated 2026-06-11 (demo-parity branch). This file is the honest "where
-things stand" note — read it before continuing.
-
----
-
-## The game client moves into the engine (2026-09-25, branch `quake/client`)
-
-Structure only; no behaviour changed. The part of quake-wasm that is id's
-`cl_*.c`/`view.c`/client half of `host.c`/`host_cmd.c` is now
-`quake-rs/src/client/` (`mod.rs` Walk/DemoPlay/Vid/ClientFrame/SoundCall,
-`cl_main` walk_frame, `cl_demo` demo_frame + CL_PlayDemo_f, `cl_tent`,
-`cl_input` KeyMove, `view` V_ParseDamage, `host` Host_FilterTime, `host_cmd`
-level loads + cheats); ConNotify joined `quake_rs::console`, snd_dma.c's
-channel choice and static-loop gates `quake_rs::snd`. A client frame takes a
-`Vid` and returns a `ClientFrame { image, cshifts, sound }`: the sound calls
-(S_StartSound batches, S_StopSound, S_StopAllSounds, S_StaticSound,
-S_Update's listener + ambient leaf) are recorded in order instead of pushed
-into quake-wasm's thread-locals; quake-wasm's `snd_dma::play` carries them
-out. quake-wasm is the platform layer (exports, App, queues, localStorage,
-extras); its `step_walk`/`step_demo` keep their signatures and its e2e tests.
-Proof: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1
---res 320x200,640x400` prints the browser's `bench.py --hash-every 30` table
-byte for byte. Frame hashes, ABI, goldens, simbench/census, tests (moved
-ones counted), clippy and the eight verify scripts unchanged.
-
-## Second review fixes, client side (2026-09-25, branch `quake/polish3`)
-
-The second review's client/platform findings (AUDIT.md's section of the same
-name): no weapon-icon flash at level/load/demo start (id stamps the signon's
-items before CL_LerpPoint, so it is over by the first frame); a busy frame
-can no longer drop a mover's stop sound past the 12-sound cap (the hum
-looped forever); console prints reach the notify lines, and "Go to console"
-is Con_ToggleConsole_f; Tab pressed in the menu is not +showscores after it;
-old saves load with the player named; the underwater warp keeps its tables;
-demo particles fall by the sv_gravity cvar. polish2's quake-wasm leftovers:
-only a program start resets the menu cursors; the host drives the server
-with Host_FilterTime's double; the page clamps each side before the master
-volume and re-spatialises one-shots (CENSUS L15 closed). **Visible:** the
-page's canvas is the largest 4:3 box the window fits (976x732 at 1440x900,
-never under 640x480), so the 1:1 status bar and menus are a sensible size.
-
-## Second review fixes (2026-09-25, branch `quake/polish2`)
-
-The second review's findings outside `quake-wasm/src/` (AUDIT.md's section
-of the same name): `sv.time` is a double (the item flash matches id; goldens
-e1m2/e1m3 re-baselined to `9ae2b478`/`2ca0f916`, an item not yet dropped at
-sv.time 1.2 as in id's); particles drawn as `D_DrawParticle` (100% of
-particle pixels against the oracle, which now dumps them); the oracle's
-underwater comparison fixed (99.9%); the Load menu lists saves after a
-page reload; a pending hum can no longer outlive its stop; `sv_gravity`
-outlives the map; census mover baselines; stale docs; menu cursors kept per
-menu, as id's (the last commit: two quake-wasm tests need their menu
-navigation updated with it). Left for the quake-wasm pass: see the AUDIT
-section's list.
-
-## The world through id's edge renderer (2026-09-25, branch `quake/edge`)
-
-PERF_PLAN A3: the world and the brush entities are drawn as WinQuake draws
-them (`render/edge.rs`): the BSP walked front to back into one edge list,
-spans per scanline for the nearest surface, each pixel drawn once with no z
-test, the 16-bit 1/z left for the entities (details in AUDIT.md's section of
-the same name). The polygon walker it replaced is deleted (the branch's last
-commit, byte-identical; the chair can drop it). Oracle: 372 cases, none
-worse by more than a pixel, e1m2 99.21 -> 99.94 (id's face-733 mip quirk now
-reproduced), entity pixels 100% everywhere, brush-entity views 94.35 ->
-99.37. Wasm frame −23 to −33% (p95 −21 to −36%), native −43 to −57%. e1m3
-golden `3531e9cd` -> `1867f5a7` (150 px).
+Last updated 2026-09-25, after the overnight push (`quake/overnight` at `3ba835f`). The
+first section is where things stand; the second is what the night changed; the rest is
+the older history, kept as evidence, with superseded items marked.
 
 ---
 
-## Projection and spans (2026-09-25, branch `quake/w2b`)
+## Where things stand
 
-The 3-D view as DOS/Windows players saw it (details in AUDIT.md's section of
-the same name): the pixel aspect in the projection (every preset is 16:10
-and the page shows 4:3, so the world had been 1.2x too tall; now
-`R_ViewChanged`'s `yscale = xscale * pixelAspect` everywhere); the x86
-build's 16-pixel perspective spans (`D_DrawSpans16`, `Turbulent8`) over id's
-spans, with brush entities cutting the world's; the sky centred on the
-screen below viewsize 120. Exact per-pixel perspective is an opt-in extra,
-`wasm_exactpersp 1`; all extras live in `quake-wasm/src/extras.rs`. Oracle
-against id's x86 spans: 99.96 / 99.21 / 99.98 / 99.91 (320x200), 100.00 on
-all four at the page's aspect at 640x400. Wasm world −16 to −23%; native
-+30-40% (not understood; PERF_PLAN §6).
+- **What it is.** The shareware episode plays in the browser and natively, single player,
+  as id's WinQuake plays it: attract demos, New Game, E1M1–E1M8 with Chthon, death and
+  respawn, intermission and finale, save and load, Options, the console. `README.md` says
+  how to run it.
+- **The rule** is faithful to WinQuake by default, Always Run the only intended default
+  departure, everything else an opt-in Web extra (four exist: uncapped framerate, show FPS,
+  exact perspective, scaled 2-D layer).
+- **Two things for the user to decide:**
+  1. Four control departures are still on by default (CENSUS.md, "Rule departures on by
+     default"): mouse look held while the pointer is locked, WASD, `f` for fullscreen,
+     Space swimming up faster. Keep them as recorded exceptions, or make them extras?
+  2. The 72 fps cap is on by default, as in id's `Host_FilterTime`: a 144 Hz display runs
+     at 72 fps, a 120 Hz one at 60 (every other refresh). It is faithful, and the chair
+     kept it; "Uncapped framerate" in Web extras turns it off. Flagging it because it is
+     the one faithful change most likely to feel like a regression.
+- **Measured against id.** id's WinQuake renderer, built headless from the C (`oracle/`),
+  matches the port on 99.91–99.98% of pixels in the four standard views against id's x86
+  16-pixel spans, 100.00% at the page's 4:3 aspect, entity pixels 100%. The 2-D layer
+  matches id's composited screen except three explained residues (`oracle/README.md`).
+  The gameplay census found 18 HIGH/MED differences; all are fixed (`CENSUS.md`).
+- **Speed.** In the browser (headless Chromium, wasm), id's demo1 at 1280x800 takes 4.5 ms
+  a frame, from 22.6 ms at the start of the night (median; p95 33.1 → 5.0 ms). Details
+  and caveats in `PERF_PLAN.md`.
+- **Checks at `3ba835f`** (run for this document): `cargo test --release` passes in both
+  crates, 581 + 1 + 8 in quake-rs and 118 in quake-wasm (1 ignored: the `oracle_screen`
+  harness). Goldens (`quaketool scene`, sha256 prefix): e1m1 `4807aaa1`, e1m2 `9ae2b478`,
+  e1m3 `c65b7046`. The eight `web/verify_*.py` scripts pass (walk, ambient 13/13, demo
+  9/9, input 36/36, menu 61/61, save, loops 10/10, extras 40/40; headless Chromium,
+  run on a scratch copy of the page).
+- **Deployed.** `http://localhost:8196/index.html` serves the `3ba835f` build
+  (`miniserve -C`, from a work directory).
+- **In flight when this was written:** `quake/timedemo` (id's `timedemo`, `playdemo`,
+  `stopdemo`, `startdemos`, `demos`, and `pause`) and a final review of `3ba835f`.
+- **What is left:** `AUDIT.md`, "Open, as of 2026-09-25", one list. The largest items: no
+  `pause` or loading plaque (pause is on `quake/timedemo`), no dynamic lights in demo
+  playback, the control departures above, and nothing measured on a real GPU browser or a
+  real high-refresh display.
 
-## The 2-D layer measured and matched (2026-09-25, branch `quake/fid2d`)
+---
 
-`uv run oracle/screen2d.py` diffs the status bar, menus, console, text and
-overlays against id's composited screen (63 shots x 320x200/640x400/960x600;
-`oracle/README.md`). 57 of 63 are now pixel-exact in each mode; the rest are
-explained there. **Visible change:** WinQuake draws the 2-D layer at its own
-pixel size in every mode, so at the browser's default 960x600 the bar is 320
-wide at the bottom centre and the menus sit top centre. The old blown-up
-layout is the opt-in **"scaled 2-D" extra**: the wasm export
-`set_scaled_2d(1)` — not yet wired into the page's Extras menu or saved.
-Found for other branches (AUDIT.md): menu cursors not remembered per menu,
-`sv.time` accumulated in f32 (both fixed on `quake/polish2`), WASD default binds, no pause/loading plaques,
-`give` unlike `Host_Give_f`.
+## 2026-09-25: the overnight push
+
+the user's brief: faithful by default (only Always Run departs; anything
+else becomes an opt-in extra), three bugs they had noticed (Chthon has no electricity; the
+Options cursor blinks too fast; Screen size does the wrong thing), performance, well
+structured code. The chair split it into branches, one agent each, merged into
+`quake/overnight` in order (`git log --first-parent 5af4fa1..3ba835f`; each merge message
+summarises its branch). The chair's ledger is
+a `PLAN.md` outside this repository.
+
+**The three reported bugs.**
+- *Chthon's lightning* (`ce2dbf8`): boss.qc writes `TE_LIGHTNING3` to `MSG_ALL`, and the
+  port read temp entities only from the broadcast buffer, so the bolts were never drawn.
+  The server now parses each message buffer the way the client would. An end-to-end test
+  fights Chthon on e1m7 and kills him with the lightning.
+- *The Options cursor* (`962c82b`): it blinked off a 10 Hz frame counter; id's is
+  `(int)(realtime*4)&1`, 4 Hz. The console cursor was 2 Hz; also 4 now.
+- *Screen size* (`1e9a299`): the row had been turned into a resolution picker. It is id's
+  `viewsize` again (30–120, the view shrinks inside a tiled border, 110 drops the
+  inventory, 120 the status bar), with the view rendered above the status bar as
+  `SCR_CalcRefdef` does: before, the view filled the screen and the bar was pasted over
+  its bottom 24%, so the horizon sat too low. Resolution moved to Video Options.
+  AUDIT.md: "Options menu + screen framing".
+
+**Instruments, so "faithful" is measured instead of argued.**
+- *The oracle* (`oracle/`): id's WinQuake built from the C with null drivers renders the
+  same view, clock and entities as the port; `compare.py` counts matching palette
+  indices. `screen2d.py` does the same for the whole composited 2-D layer.
+- *The census* (`CENSUS.md`): `quaketool census` plays all nine maps headless through the
+  real QuakeC, and id's own server edicts are dumped and diffed against the port's. It
+  found 4 HIGH, 14 MED and 25 LOW differences.
+- *The benchmark* (`web/bench.py`): the real page in headless Chromium, fixed workloads,
+  per-phase timers, a native twin; `PERF_PLAN.md` holds the baseline and the plan.
+
+**The 3-D renderer, now id's.** In four steps, each measured by the oracle
+(AUDIT.md sections of the same names): id's alias-model pipeline, raw-texel liquids and
+sky, the sky's layer offset, the gun's placement ("Session 7"); id's mip levels and
+integer lightmap stepping ("mip levels, lightmap stepping"); the pixel aspect of a 16:10
+mode on a 4:3 screen — the world had been drawn 1.2x too tall — and the x86 build's
+16-pixel perspective spans ("Projection and spans"); and finally id's edge-sorted span
+renderer for the world and brush models, which replaced the port's own polygon walker
+("World pass: id's edge renderer"). Outcome, world pixels matching id's x86 renderer at
+320x200 in the four standard views (e1m1 / e1m2 / e1m3 / e1m7): **80.39 / 59.87 / 65.33 /
+67.80% when the oracle first ran → 99.96 / 99.94 / 99.98 / 99.91%**, and 100.00% at the
+page's aspect; entity pixels 0.0 / 14.6 / 18.6 / 8.5% → 100%.
+
+**The 2-D layer, now id's** ("The 2-D layer against id's composited screen"). WinQuake
+draws the status bar, menus and console 1:1 in every mode; the port blew up a 320x200
+screen. Now 1:1 by default (the old look is the "Scaled 2-D layer" extra), with id's
+sliding console, the DOS quit prompt, and a handful of pixel offsets. `screen2d.py` at
+640x400: 1–55% of 2-D pixels matched before, 100% on every shot after except three
+explained residues. To keep the 1:1 bar a sensible size, the page's canvas is now the
+largest 4:3 box the window fits (976x732 at 1440x900, was a fixed 640x480).
+
+**Gameplay** ("Census client/host fixes", "Census fixes, server side"). All 18 HIGH and
+MED census findings are fixed: teleporters turn the view; single player pauses behind the
+menu and console; e1m8 has its low gravity; a weapon switch pressed during a cooldown is
+kept; two health boxes no longer fall out of e1m1 and e1m6; the gold pickup flash; the
+player is named ("player was shot by a Grunt"); level-start doors open as in id; door and
+lift sounds loop until they stop; runes show on the status bar; Tab shows the scores;
+weapon keys work on any keyboard layout; damage flashes in god mode; new weapons flash;
+demos get trails, skins and the demo1 → demo2 → demo3 cycle. Plus 16 of the 25 LOWs, and
+two in part.
+
+**Web extras** ("Web extras: the opt-in departures"). Options > Web extras, in the slot
+id's Windows build uses for its 14th row: uncapped framerate, show FPS, exact
+perspective, scaled 2-D layer. Off by default, persisted by the page, each a `wasm_*`
+console variable. Also: `viewsize` persists across reloads, and Esc works in fullscreen
+through the Keyboard Lock API (not verified in a real browser).
+
+**Performance** (`PERF_PLAN.md`). Mostly by doing what Quake did, which also made it more
+faithful: the 72 fps `Host_FilterTime` cap; the embedded pak as one static slice (memory
+81 → 53 MB after boot, 171 → 62 MB after four map loads); the palette shift as
+`V_UpdatePalette`'s 256-entry ramps (a Quad frame at 1280x800: 32.8 → 17.1 ms, before the
+later world-pass gains); dynamically lit walls through the surface cache; mip levels;
+id's edge renderer (wasm frame −23 to −33%, native −43 to −57%); only the entities the
+server would send (e1m3's 98 alias models per frame → 3.8; it also stopped muzzle flashes
+lighting walls from behind); entity fields resolved once per progs instead of hashed on
+every access (the e1m3 game tick 2.64 → 0.29 ms). demo1 at 1280x800 in wasm: 22.6 → 4.5
+ms a frame.
+
+**Structure.** `render.rs` (15,000 lines), `server.rs` (9,900) and quake-wasm's `lib.rs`
+(8,000) were split along id's own files, byte-identical, one agent per file. Then the game
+client moved from quake-wasm into `quake_rs::client` (quake-wasm's code 6.3k → 3.0k lines),
+so `quaketool play` runs the browser's client natively and prints the same frame hashes.
+The polygon walker was deleted once the edge renderer won (−2.5k lines). The source grew
+from 52,000 to 67,000 lines.
+
+**Reviews.** Two adversarial reviews of the merged tree; their findings were fixed on
+`quake/polish` ("Review fixes"), `quake/polish2` and `quake/polish3` ("Second review
+fixes", both sides). The visible ones: loading a save kept no options; the underwater
+view is rendered at id's 320x200 warp buffer; the client clock is `cl.time`; `sv.time` is
+a double (the new-weapon flash was a frame early); particles are `D_DrawParticle`; every
+menu keeps its own cursor; no weapon-icon flash at level start; a busy frame could leave
+a door hum looping forever.
+
+**Goldens.** They moved with each deliberate fidelity fix, every move recorded in
+AUDIT.md with its pixel count: `fb14bd65` / `a6f98d8a` / `0211e6d4` at the start →
+`4807aaa1` / `9ae2b478` / `c65b7046` at `3ba835f`.
+
+**Tests.** 475 library + 8 integration and 64 quake-wasm tests at the start; 581 + 1 + 8
+and 118 at `3ba835f`.
+
+## How to work here
+
+- **Measure, don't claim.** After any renderer change, re-render the three goldens
+  (`quaketool scene <pak> maps/e1mN.bsp out.ppm`, sha256) and, for a fidelity change, run
+  `uv run oracle/compare.py`; record every golden move in `AUDIT.md` with its pixel count.
+  "Byte-identical" means the goldens and the `bench.py --hash-every` / `quaketool play
+  --hash-every` frame hashes did not move.
+- **Faithful first.** Read id's C for the thing you are changing (the WinQuake tree is at
+  `quake-c/WinQuake`) and name the C
+  function in the doc comment. A change that departs from id belongs in the Web extras.
+- **Benchmarks:** A/B two builds in one sitting and note the load; absolute milliseconds
+  swing 2–3x with what else is running.
+- **The web scripts need playwright:** `uv run --with playwright web/<script>.py` (their
+  shebang carries `--with playwright`; plain `uv run web/bench.py` fails). Parallel runs
+  take `QUAKE_VERIFY_PORT` so they don't collide.
+- **Commits:** only this project's files — the repo root has unrelated files; never
+  `git add` broadly. The built `web/quake_wasm.wasm` is gitignored (it embeds the pak);
+  the verify scripts write their screenshots into the web dir they serve, so point them at
+  a scratch copy unless you mean to update the committed ones.
+
+## Quick commands
+
+```bash
+# tests (quake-rs: no game data; quake-wasm: the embedded shareware pak)
+cd quake-rs && cargo test --release        # 581 lib + 1 bin + 8 integration
+cd quake-wasm && cargo test --release      # 118 (+1 ignored harness)
+
+# goldens (needs the pak): sha256 prefixes 4807aaa1 / 9ae2b478 / c65b7046 at 3ba835f
+./target/release/quaketool scene ../quake-data/ID1/PAK0.PAK maps/e1m1.bsp /tmp/e1m1.ppm
+
+# the browser's client natively, frame hashes as bench.py prints them
+./target/release/quaketool play ../quake-data/ID1/PAK0.PAK demo1,walk_e1m1 --res 320x200,640x400 --hash-every 30
+
+# benchmark (the page in headless Chromium + a native twin)
+uv run --with playwright web/bench.py --build --native
+
+# wasm build + serve
+cd quake-wasm && cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/quake_wasm.wasm ../web/ && cd .. && miniserve -C -p 8196 web
+```
 
 ---
 
-## Options menu + screen framing (2026-09-25, branch `quake/options`)
+# History before 2026-09-25
 
-User-reported: Options cursor blinked too fast; Screen size seemed wrong.
-Fixed faithful to the C (details + evidence in AUDIT.md's section of the
-same name): 4 Hz realtime cursors (menu + console; `step(dt)` takes raw dt
-and splits it like Host_FilterTime); Screen size is `viewsize` again
-(30..120, `sizeup`/`sizedown`/`viewsize`, `-`/`=` binds) and the view is
-framed by SCR_CalcRefdef/R_SetVrect — ABOVE the status bar, backtile border
-below 100, sbar/inventory by sb_lines; resolution only in Video Options
-(localStorage persistence unchanged); the gun at V_CalcRefdef's origin with
-the alias clip plane; menus fade the frame and print bronze (M_Print); Reset
-to defaults = default.cfg only. Goldens unchanged.
-
----
+Kept as evidence. Numbers and file names below are as they were then; where
+something has since been superseded it says so in place.
 
 ## Demo playback parity (2026-06-11, branch `ship/demo-parity`)
 
@@ -253,6 +337,9 @@ recorded below.
 
 ## TL;DR (pre-push state, 2026-05-31)
 
+*Superseded: the renderer described here (and every timing below) was replaced on
+2026-09-25; the surface-cache fix itself still stands (`surf.rs`).*
+
 - The shareware episode (E1) is playable in the browser; **401 lib + 25 wasm tests pass**.
 - **⭐ THE render bottleneck is FOUND AND FIXED.** The prior session's "fixed ~60 ms
   per-face cost, NOT per-pixel" lead was exactly right. Root cause: the lit-surface
@@ -287,6 +374,10 @@ recorded below.
 ---
 
 ## Resolution: higher default + it now PERSISTS (2026-06-09)
+
+*Superseded in part (2026-09-25): the Options row called "Screen size" here is id's
+`viewsize` again, and the resolution list lives in Options > Video Options. The 960x600
+default, the 16:10 presets and the localStorage persistence stand.*
 
 User report: picking a resolution in Options and then starting the game reverted it
 to the default. Root cause: `boot()` / `boot_demo()` / `boot_attract()` and the
@@ -327,6 +418,9 @@ errors. `web/quake_wasm.wasm` rebuilt + deployed.
 
 ## ⭐ PERFORMANCE — render bottleneck RESOLVED (was the "key lead")
 
+*2026-05-31. The triangle rasteriser these numbers measure was replaced on 2026-09-25
+(polygon spans, then id's edge renderer); current numbers are in `PERF_PLAN.md`.*
+
 The prior session's lead was correct: **a FIXED per-face cost independent of resolution**
 dominated the frame. With the host **idle** (load 0.4/16 — the prior session's "throttling"
 was likely partly this same fixed cost making all resolutions look uniformly slow), a
@@ -357,7 +451,7 @@ unchanged). Regression test: `external_models_bypass_and_dont_evict_world_surf_c
 bench's surf line now splits `cached-rebakes` (should be ~0 warm) from `external-bypass-bakes`
 (expected, one per visible item-box face).
 
-## Performance — current scorecard (idle host, e1m1)
+## Performance scorecard (2026-05-31, idle host, e1m1; superseded by `PERF_PLAN.md`)
 
 | res | before | after | speedup | phase split (after) |
 |-----|--------|-------|---------|---------------------|
@@ -394,56 +488,53 @@ IDENTICAL run-to-run, proving behaviour is unchanged):
 Render @ browser res now: 320×200 **2.81 ms (355 fps)**, 640×400 **5.49 ms (182 fps)**,
 1280×800 (the wasm cap) **15.5 ms (65 fps)**.
 
-### Next perf ideas (now genuinely optional — diminishing returns)
-- **Remaining LOW clone-hunt findings (deferred, marginal):** lightmap luxel `Vec<f32>` clone on
-  cache hit → `Rc` (only ~0.04 ms — needs a `Luxels` enum variant); `compute_visible_faces`
-  allocates two `Vec<bool>` per frame (cache by view-leaf); `touch_triggers`/`draw_submodel`
-  `local_dlights` scratch Vecs; pre-`with_capacity` the per-frame scratch Vecs. All byte-identical
-  but small.
-- **Inline submodels rebuild their lightmap every frame (no cache)** — `draw_submodel`
-  calls `face_lightmap_dyn` directly. Routing inline (cache_surf=true) Normal faces through
-  `face_lightmap_world_cached` would cache them. ~1 ms of the 2.1 ms submodel phase. Deferred.
-- **wasm/native SIMD (`simd128`)** — the per-pixel inner loop (palette/colormap byte reads,
-  z-test) could process 4–8 px/instruction for a further ~2× on the *remaining* per-pixel
-  cost. Substantial, genuinely-different work; only worth it if 36 fps @1080p isn't enough.
-- **16-pixel affine spans** (Quake's `D_DrawSpans`) — perspective divide every 16 px;
-  introduces sub-pixel drift (a fidelity trade).
-- **Mip selection** — large distant surfaces over the per-face cache cap stay on the
-  per-pixel path; mip-LOD would let them use the cache and shrink block memory.
+### Next perf ideas (2026-05-31) — superseded by `PERF_PLAN.md`
+
+The list (clone-hunt leftovers, caching inline submodels' lightmaps, `simd128`, 16-pixel
+spans, mip selection) was re-measured on 2026-09-25: `simd128` gave nothing, the 16-pixel
+spans and the mip levels are done (as fidelity fixes), and `draw_submodel` and
+`compute_visible_faces` no longer exist (id's edge renderer draws the brush models).
 
 ### Profiler / benchmarks
-- **Browser (2026-09-25): `uv run web/bench.py --build --native`** — the real page in headless
-  Chromium, deterministic workloads at dt=1/72, per-phase median/p95 for wasm and its native twin
-  (see its docstring). The measured baseline and the ranked optimisation plan are in `PERF_PLAN.md`.
-- **Render:** `render.rs` has an opt-in `RenderStats` (per-phase ns timers + face/tri/
-  pixel/cache counters), zero-cost when off, surfaced by `QUAKE_BENCH=<iters>
-  QUAKE_RES=WxH quaketool scene <pak> <map> <out>`. It now also reports **world-pass
-  sub-phases** (`pvs/sort/setup+raster/lightmap/surf`) and **surf-cache true-hits vs
-  rebakes** — wrap any new per-face work in these to keep the cost honest.
+
+(Current tools; the numbers in this bullet list are 2026-05-31's.)
+
+- **Browser (since 2026-09-25): `uv run --with playwright web/bench.py --build --native`** —
+  the real page in headless Chromium, deterministic workloads at dt=1/72, per-phase
+  median/p95 for wasm and its native twin (see its docstring). `PERF_PLAN.md` has the
+  measurements.
+- **Render:** `render/stats.rs` is an opt-in `RenderStats` (per-phase ns timers and face,
+  pixel, surface-cache and alias counters), zero-cost when off, surfaced by
+  `QUAKE_BENCH=<iters> QUAKE_RES=WxH quaketool scene <pak> <map> <out>` and by `bench.py`.
+  Wrap any new per-face work in it to keep the cost honest.
 - **Sim:** `quaketool simbench <pak> <map> [frames]` benchmarks the game-logic tick (no
   rendering): per-frame ms + VM statements + BSP traces + thinks. Deterministic
   (same counts run-to-run). After the hull-cache fix: e1m1 ≈ 0.82 ms/frame; e1m3 ≈ 2.44 ms/frame
-  (522 traces/frame — still the dense-collision map, now ~2× faster).
+  (522 traces/frame). Since the 2026-09-25 field-offset work (PERF_PLAN D2): e1m1 0.11,
+  e1m3 0.29 ms per tick.
 
 ---
 
 ## ⚠️ Caveats / debt
 
-1. **Golden baseline is `fb14bd65` / `a6f98d8a` / `0211e6d4`** (e1m1/e1m2/e1m3, post
-   submodel cache). The submodel surface cache (`d2fc0d6`) was re-verified
+1. *Superseded: the goldens are `4807aaa1` / `9ae2b478` / `c65b7046` since 2026-09-25
+   (top of this file).* **Golden baseline is `fb14bd65` / `a6f98d8a` / `0211e6d4`**
+   (e1m1/e1m2/e1m3, post submodel cache). The submodel surface cache (`d2fc0d6`) was re-verified
    **byte-identical** to its parent (0 px diff on e1m1), so its "byte-identical"
    message is correct. (Note: each *world*-cache texel-baking step earlier in the
    history legitimately re-baselined the golden; that's expected and faithful —
    texel-resolution lighting is what Quake's software renderer actually does.)
 2. **`ae3ba68` (linear-step perspective) really is NOT byte-identical** — it shifts
-   ~57 px (sub-pixel edge ULP drift); corrected by `3fce66c`. That one stands.
+   ~57 px (sub-pixel edge ULP drift); corrected by `3fce66c`. That one stands. *(Moot
+   since 2026-09-25: that rasteriser is deleted.)*
 3. **Benchmark absolute numbers swing with host load.** This session's numbers were
    taken on an **idle** host (load ~0.4/16) and are trustworthy; the prior session's
    "throttling" was likely partly the fixed surf-rebake cost (now fixed) making every
    resolution look uniformly slow. Still: re-check `uptime` before trusting ms, and A/B
    in one sitting.
 4. The `quaketool` bench's submodel profiler line label may lag the actual counters
-   (cosmetic only; the numbers are right).
+   (cosmetic only; the numbers are right). *(Not re-checked since the edge renderer
+   replaced the submodel pass.)*
 5. ~~**Texture "pop" on first frames**~~ — RESOLVED in the ship push (see top).
    The cold-cache guess was wrong; the real causes were the unsettled spawn
    rendering on camera + plane-only dlight gating. Lesson: the surf cache
@@ -464,11 +555,14 @@ client TOSS physics arm — both fixed (details in the ship-push section).
 
 ## Known-deferred items (LOW severity, documented in AUDIT.md)
 
+*As of 2026-06-11. The current list is `AUDIT.md`, "Open, as of 2026-09-25"; the
+marks added below say what happened to each since.*
+
 All previous HIGH/MED deferred items (lightning beams, R_MarkLights gating,
 intermission/finale, ambient sounds, texture pop) shipped in the 2026-06-10
 push. What remains is the LOW tail, all reviewer-vetted as non-blocking:
 
-- Demo explosion dlight (demo path emits no dynamic lights).
+- Demo explosion dlight (demo path emits no dynamic lights). *Still open.*
 - quaketool CLI walk paths skip the signon settle (deliberate — keeps CLI
   artifacts byte-stable; unify later with a walk-golden re-baseline).
 - Console `kill` drains only a pending restart, not a same-frame changelevel
@@ -478,51 +572,19 @@ push. What remains is the LOW tail, all reviewer-vetted as non-blocking:
 - ~~Sound-channel override only dedups within a frame~~ — ✅ CLOSED
   (demo-parity branch, 2026-06-11): the page-side (entity,channel) registry
   implements SND_PickChannel's cross-frame override + S_StopSound, live + demo.
-- Per-ammo sbar nits; pain-frame face anim; assorted Round-2 LOW list items.
+- ~~Per-ammo sbar nits; pain-frame face anim~~ — ✅ the status bar matches id's
+  composited screen pixel for pixel since 2026-09-25 (`oracle/screen2d.py`), the pain
+  face with census F16; assorted Round-2 LOW list items (in AUDIT.md's open list).
 - From the final whole-diff review (all vetted non-blocking): the demo loop
   wrap keeps the ambient ramp warm (deliberate seamless loop; the C's restart
-  re-ramps from 0); the intermission idle-sway phase uses w.clock (constant,
-  invisible phase offset vs cl.time); ~~demo1 playback shows ~1.2 s of
+  re-ramps from 0); ~~the intermission idle-sway phase uses w.clock (constant,
+  invisible phase offset vs cl.time)~~ — ✅ 2026-09-25 (`quake/polish`: the live
+  client clock is `cl.time`); ~~demo1 playback shows ~1.2 s of
   void-camera frames at start/loop-wrap~~ — ✅ CLOSED (demo-parity branch:
   frame emission now gates on signon completion, so the void frames are never
   emitted; loop wrap equally clean, seam-tested); submodel dlight marking uses
   entity-local light origins where the C used world-space (deliberate —
   consistent with the port's local per-luxel submodel lighting; arguably fixes
-  a C quirk that mis-lights moved doors).
+  a C quirk that mis-lights moved doors). *(Not re-checked since the edge
+  renderer, which follows `R_DrawBEntitiesOnList`.)*
 
----
-
-## How to work here (lessons from this session)
-
-- **Build/test/bench are reliable; trust them.** The "bash is broken" scare this
-  session was a self-inflicted misread from firing too many parallel tool calls at once
-  and mismatching results — NOT a tool fault. Work **serially**: one Edit, verify, one
-  Bash, read the result.
-- After any renderer change, re-render the 3 golden maps and `ppmdiff.py` against the
-  prior PPM (in a work directory) — don't claim "byte-identical"
-  without measuring.
-- Bench A/B in the same sitting (machine load swings results 2–3×).
-- Commit only `quake-rs/` + `quake-wasm/` sources (+ this file / README / AUDIT). The
-  repo root has unrelated untracked files (other projects) — never `git add` broadly.
-- The deployed `web/quake_wasm.wasm` is gitignored; rebuild + `cp`, don't commit it.
-
----
-
-## Quick commands
-
-```bash
-# tests
-cd quake-rs && cargo test --lib            # 458 tests (data-free)
-cd quake-wasm && cargo test                # 48 tests (real embedded pak)
-
-# render a map to PPM (needs a real pak0.pak)
-cargo run --release --bin quaketool -- scene <pak> maps/e1m1.bsp out.ppm
-
-# benchmark + per-phase profile
-QUAKE_BENCH=30 QUAKE_RES=1920x1080 \
-  cargo run --release --bin quaketool -- scene <pak> maps/e1m1.bsp out.ppm
-
-# wasm build + deploy
-cd quake-wasm && cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/quake_wasm.wasm ../web/
-```
