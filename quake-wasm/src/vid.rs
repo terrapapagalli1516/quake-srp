@@ -122,7 +122,8 @@ mod tests {
     use crate::test_util::*;
     use crate::console::console_toggle;
     use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
-    use crate::{boot, step};
+    use crate::host::step;
+    use crate::boot;
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
 

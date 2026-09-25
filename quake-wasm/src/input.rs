@@ -402,7 +402,8 @@ mod tests {
     use crate::test_util::*;
     use crate::menu::{menu_cancel, menu_down, menu_right, menu_select, menu_visible};
     use crate::snd_dma::{listener_x, listener_y};
-    use crate::{boot, step};
+    use crate::host::step;
+    use crate::boot;
 
     #[test]
     fn pitch_clamp_is_asymmetric_like_cl_adjustangles() {

@@ -878,7 +878,8 @@ mod tests {
     use crate::console::{console_toggle, console_visible};
     use crate::menu::menu_select;
     use crate::vid::set_resolution;
-    use crate::{boot, boot_attract, build_walk, step, APP};
+    use crate::host::step;
+    use crate::{boot, boot_attract, build_walk, APP};
 
     /// Regression for the one-time texture/lighting "pops" in the first second of
     /// live play (two distinct root causes, both whole-view shimmers):

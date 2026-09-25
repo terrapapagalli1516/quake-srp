@@ -214,6 +214,7 @@ mod native {
     use crate::console::{console_char, console_enter, console_toggle, console_visible};
     use crate::input::{look, set_attack, set_move};
     use crate::menu::{menu_cancel, menu_visible};
+    use crate::host::step;
     use crate::vid::set_resolution;
     use crate::*;
 

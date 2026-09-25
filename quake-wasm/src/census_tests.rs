@@ -6,6 +6,7 @@
 //! Un-ignore a test in the commit that fixes its finding.
 
 use super::*;
+use crate::cl_walk::step_walk;
 use quake_rs::progs::OFS_PARM0;
 
 /// `PF_setorigin` through the engine's own builtin (origin + SV_LinkEdict), so

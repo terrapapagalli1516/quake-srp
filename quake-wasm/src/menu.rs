@@ -268,7 +268,8 @@ mod tests {
     use crate::test_util::*;
     use crate::input::{key_down, key_up};
     use crate::vid::{height, set_resolution, width};
-    use crate::{boot, boot_attract, step};
+    use crate::host::step;
+    use crate::{boot, boot_attract};
 
     #[test]
     fn video_menu_applies_a_preset_through_the_resolution_plumbing() {
