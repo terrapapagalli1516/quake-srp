@@ -65,7 +65,7 @@ ALL_WEAPONS = (IT_AXE | IT_SHOTGUN | IT_SUPER_SHOTGUN | IT_NAILGUN | IT_SUPER_NA
 #   ("key", NAME) ("showscores", 0|1)
 #   ("centerprint", text) ("print", text) ("intermission", n, t, text)
 #   ("faceanim",) ("quitmsg", n) ("cmd", line) ("shot", name)
-# Every scenario starts on e1m1 after 20 frames (the console has retracted), at viewsize 100.
+# Every scenario starts on e1m1 after 30 frames (id's startup console has retracted, even at 960x600), at viewsize 100.
 # ---------------------------------------------------------------------------
 
 
@@ -163,7 +163,7 @@ def c_lines(steps, out: Path, name: str) -> list[str]:
     lines = ["oracle_exit 0", "oracle_stage 1", f"oracle_blank {BLANK}", "crosshair 0", "viewsize 100",
              "cl_forwardspeed 400", "cl_backspeed 400", "bind w +forward", "bind s +back",
              "bind a +moveleft", "bind d +moveright",
-             "map e1m1"] + ["wait"] * 20
+             "map e1m1"] + ["wait"] * 30
     for st in steps:
         op, args = st[0], st[1:]
         if op == "viewsize":
@@ -209,7 +209,7 @@ def c_lines(steps, out: Path, name: str) -> list[str]:
 
 def port_lines(steps, out: Path, name: str, res, metas: dict) -> list[str]:
     w, h = res
-    lines = [f"res {w} {h}", f"blank {BLANK}", "map e1m1", "cmd viewsize 100", "frames 20"]
+    lines = [f"res {w} {h}", f"blank {BLANK}", "map e1m1", "cmd viewsize 100", "frames 30"]
     for st in steps:
         op, args = st[0], st[1:]
         if op == "viewsize":
