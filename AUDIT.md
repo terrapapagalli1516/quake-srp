@@ -790,6 +790,19 @@ C followed and the test are in the commit message.
   space", frame "clamped"), and the `V_CalcBlend` mentions in `cl_walk.rs`,
   `cl_demo.rs` and the README (the shifts are the software `V_UpdatePalette`
   ramps). Comments only (`render/mod.rs` touched for its doc comment alone).
+- ✅ **Census L11: prints reach the console scrollback** — `Con_Print`
+  writes the console's text buffer, and the notify lines are its last
+  lines; the port showed `svc_print` text only in the notify overlay. Now
+  `quake_rs::console::ConCursor` is Con_Print's layout (`con_x`, the word
+  wrap at `con_linewidth` 38 — a word longer than a line runs on until its
+  remainder fits — `\n`, `\r`), shared by the notify lines and
+  `Console::print`; `println` is `Con_Printf("%s\n")` through it, so
+  console output wraps too and continues a line a print left open. The
+  dispatcher hands each frame's printed text (live or demo) to the console.
+  Tests `console_print_is_con_print`, `game_prints_reach_the_console_scrollback`
+  (e1m1's shells pickup). Still open: console command output does not reach
+  the notify lines (the C's one buffer shows `]god` / `godmode ON` there
+  for 3 s after the console closes).
 
 ## LOW (27)
 

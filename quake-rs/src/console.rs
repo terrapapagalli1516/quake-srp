@@ -39,6 +39,72 @@ pub fn draw_notify(
 /// is the same bounded-history idea with an owned [`VecDeque`]).
 pub const CONSOLE_SCROLLBACK_CAP: usize = 200;
 
+/// `con_linewidth` (console.c `Con_CheckResize`: `(vid.width >> 3) - 2`) for
+/// the 320-wide virtual screen the console and the notify lines are drawn on.
+pub const CON_LINEWIDTH: usize = (320 >> 3) - 2;
+
+/// One step of `Con_Print` on the console text buffer (see [`ConCursor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConOp {
+    /// `Con_Linefeed`: a new, empty line starts (and `con_times` is stamped).
+    Linefeed,
+    /// `con_current--` after a `\r`: the line just started is dropped, so the
+    /// next linefeed starts it over.
+    Unlinefeed,
+    /// A character goes at the end of the current line.
+    Char(u8),
+}
+
+/// `Con_Print`'s cursor (console.c): `con_x`, the column the next character
+/// goes to (0 = a new line starts with it), and the pending `\r`. Text is laid
+/// into [`CON_LINEWIDTH`]-wide lines: a word that would cross the edge starts a
+/// new line (one longer than a line runs on until its remainder fits the next
+/// line), `\n` ends the line and `\r` returns to its start. The console scrollback and the notify
+/// lines are the same text in the C (one buffer, `con->text`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConCursor {
+    con_x: usize,
+    cr: bool,
+}
+
+impl ConCursor {
+    /// `Con_Print(txt)`: hand each buffer operation to `buf`, in order.
+    pub fn print(&mut self, txt: &str, mut buf: impl FnMut(ConOp)) {
+        let b = txt.as_bytes();
+        for i in 0..b.len() {
+            let c = b[i];
+            // count word length: `txt[l] <= ' '` on a (signed) char, so a
+            // high-bit byte ends a word too.
+            let l = b[i..].iter().take(CON_LINEWIDTH).take_while(|&&ch| (ch as i8) > b' ' as i8).count();
+            // word wrap
+            if l != CON_LINEWIDTH && self.con_x + l > CON_LINEWIDTH {
+                self.con_x = 0;
+            }
+            if self.cr {
+                buf(ConOp::Unlinefeed);
+                self.cr = false;
+            }
+            if self.con_x == 0 {
+                buf(ConOp::Linefeed);
+            }
+            match c {
+                b'\n' => self.con_x = 0,
+                b'\r' => {
+                    self.con_x = 0;
+                    self.cr = true;
+                }
+                _ => {
+                    buf(ConOp::Char(c));
+                    self.con_x += 1;
+                    if self.con_x >= CON_LINEWIDTH {
+                        self.con_x = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The maximum length of the console input line (characters). Quake's
 /// `key_lines` buffer is `MAXCMDLINE = 256`; we cap a little lower and never let
 /// a runaway paste/hold grow the `String` without bound.
@@ -75,9 +141,12 @@ pub fn console_cursor_glyph(realtime: f64) -> u8 {
 pub struct Console {
     /// Whether the console is dropped down (drawn + capturing the keyboard).
     pub open: bool,
-    /// Scrollback history, oldest first. Capped at [`CONSOLE_SCROLLBACK_CAP`];
-    /// pushing past the cap drops the oldest line.
+    /// Scrollback history, oldest first: the `con->text` rows [`Console::print`]
+    /// lays text into. Capped at [`CONSOLE_SCROLLBACK_CAP`]; pushing past the
+    /// cap drops the oldest line.
     lines: std::collections::VecDeque<String>,
+    /// `Con_Print`'s position in the last line.
+    cursor: ConCursor,
     /// The current input line (the text after the `]` prompt), without the
     /// prompt or the cursor. Capped at [`CONSOLE_INPUT_CAP`] characters.
     input: String,
@@ -95,6 +164,7 @@ impl Console {
         Console {
             open: false,
             lines: std::collections::VecDeque::new(),
+            cursor: ConCursor::default(),
             input: String::new(),
         }
     }
@@ -147,17 +217,38 @@ impl Console {
         Some(line)
     }
 
-    /// Push one line into the scrollback, dropping the oldest line once the
-    /// history exceeds [`CONSOLE_SCROLLBACK_CAP`]. Embedded newlines are split so
-    /// a multi-line message counts as multiple capped lines.
-    pub fn println(&mut self, line: impl Into<String>) {
-        let line = line.into();
-        for part in line.split('\n') {
-            self.lines.push_back(part.to_string());
-            while self.lines.len() > CONSOLE_SCROLLBACK_CAP {
-                self.lines.pop_front();
+    /// `Con_Print(txt)` (console.c): lay `txt` into the scrollback, word-wrapped
+    /// at [`CON_LINEWIDTH`] ([`ConCursor`]). Text without a final `\n` leaves
+    /// the line open, so the next print continues it (a pickup's `sprint`
+    /// fragments join on one line). The oldest line drops once the history
+    /// exceeds [`CONSOLE_SCROLLBACK_CAP`].
+    pub fn print(&mut self, txt: &str) {
+        let lines = &mut self.lines;
+        self.cursor.print(txt, |op| match op {
+            ConOp::Linefeed => {
+                lines.push_back(String::new());
+                while lines.len() > CONSOLE_SCROLLBACK_CAP {
+                    lines.pop_front();
+                }
             }
-        }
+            ConOp::Unlinefeed => {
+                lines.pop_back();
+            }
+            ConOp::Char(c) => {
+                if let Some(l) = lines.back_mut() {
+                    l.push(c as char);
+                }
+            }
+        });
+    }
+
+    /// `Con_Printf("%s\n", line)`: [`Console::print`] the line and a newline
+    /// (so it wraps at the console width, and continues a line a print left
+    /// open, as in the C).
+    pub fn println(&mut self, line: impl Into<String>) {
+        let mut line = line.into();
+        line.push('\n');
+        self.print(&line);
     }
 
     /// The current number of scrollback lines (for tests / host inspection).
@@ -172,10 +263,14 @@ impl Console {
         self.lines.iter().map(String::as_str)
     }
 
-    /// Clear the scrollback history (Quake's `Con_Clear_f`). Leaves the input
-    /// line untouched.
+    /// Clear the scrollback history (Quake's `Con_Clear_f`, which blanks
+    /// `con->text` and leaves `con_x`: a line left open continues at its
+    /// column). Leaves the input line untouched.
     pub fn clear(&mut self) {
         self.lines.clear();
+        if self.cursor.con_x != 0 {
+            self.lines.push_back(" ".repeat(self.cursor.con_x));
+        }
     }
 }
 
@@ -421,6 +516,43 @@ mod tests {
         c2.clear();
         assert_eq!(c2.line_count(), 0, "clear empties the scrollback");
         assert_eq!(c2.input(), "abc", "clear leaves the input line untouched");
+    }
+
+    #[test]
+    fn console_print_is_con_print() {
+        // Con_Print: fragments join on one line, a word that would cross
+        // con_linewidth (38) starts the next, \r rewrites the line, and a
+        // Con_Printf continues a line a print left open.
+        let mut c = Console::new();
+        c.print("You receive ");
+        c.print("25");
+        c.print(" health\n");
+        c.print("aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd\n");
+        c.print("progress 1\rprogress 2\n");
+        c.print("You got the ");
+        c.println("Shotgun");
+        let long = "x".repeat(CON_LINEWIDTH + 5);
+        c.println(&long);
+        let lines: Vec<&str> = c.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "You receive 25 health",
+                "aaaaaaaaaa bbbbbbbbbb cccccccccc ",
+                "dddddddddd",
+                "progress 2",
+                "You got the Shotgun",
+                // A word longer than a line: its first characters fill the
+                // line until the rest (37) fits on the next, then it wraps.
+                &long[..6],
+                &long[6..],
+            ]
+        );
+        // Con_Clear_f blanks the text but keeps the column of an open line.
+        c.print("half");
+        c.clear();
+        c.println("way");
+        assert_eq!(c.lines().collect::<Vec<_>>(), ["    way"]);
     }
 
     #[test]
