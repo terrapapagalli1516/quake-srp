@@ -212,6 +212,7 @@ surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds";
 mod native {
     use super::imp::{bench_enable, bench_value, NAMES};
     use crate::console::{console_char, console_enter, console_toggle, console_visible};
+    use crate::input::{look, set_attack, set_move};
     use crate::menu::{menu_cancel, menu_visible};
     use crate::*;
 

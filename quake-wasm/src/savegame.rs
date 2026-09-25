@@ -11,7 +11,8 @@ use quake_rs::render::Menu;
 use quake_rs::server::Server;
 
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
-use crate::{assemble_walk, clamp_pitch, ensure_app, pak, Walk};
+use crate::input::clamp_pitch;
+use crate::{assemble_walk, ensure_app, pak, Walk};
 
 // ---------------------------------------------------------------------------
 // Savegame persistence bridge (page-owned localStorage)
@@ -376,7 +377,8 @@ mod tests {
     use super::*;
     use crate::test_util::*;
     use crate::console::console_toggle;
-    use crate::{boot, boot_attract, set_attack, set_move, set_resolution, step, APP};
+    use crate::input::{set_attack, set_move};
+    use crate::{boot, boot_attract, set_resolution, step, APP};
 
     // ------------------------------------------------------------ save/load
 

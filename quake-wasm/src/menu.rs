@@ -265,7 +265,8 @@ pub extern "C" fn menu_visible() -> i32 {
 mod tests {
     use super::*;
     use crate::test_util::*;
-    use crate::{boot, boot_attract, height, key_down, key_up, set_resolution, step, width};
+    use crate::input::{key_down, key_up};
+    use crate::{boot, boot_attract, height, set_resolution, step, width};
 
     #[test]
     fn video_menu_applies_a_preset_through_the_resolution_plumbing() {
