@@ -32,21 +32,29 @@ pub(crate) fn step_walk(
     render_w: usize,
     render_h: usize,
 ) -> (render::Image, [u8; 3], f32) {
-    // Advance the animation clock (used for liquid warp + sky scroll). Guard
-    // against a non-finite/negative dt so the clock only ever moves forward.
+    // Host_ServerFrame (host.c): "always pause in single player if in console
+    // or menus" — `if (!sv.paused && (svs.maxclients > 1 || key_dest ==
+    // key_game)) SV_Physics ();`, and SV_RunClients gates SV_ClientThink the
+    // same way. Nothing on the server runs while the menu or console is up, so
+    // sv.time stands still, and with it cl.time (on a local server CL_LerpPoint
+    // snaps cl.time to the server's message time): particles, dlight decay,
+    // light styles, sky and liquids, rotating pickups and the status-bar
+    // animations freeze. The client frame itself still runs — V_RenderView
+    // draws the view, and whatever the C drives off host_frametime / realtime
+    // keeps going: the palette-shift fades (V_UpdatePalette), the centerprint
+    // countdown and notify expiry, the ambient-sound ramps.
+    let paused = menu_up;
+    // Guard against a non-finite/negative dt so the clocks only move forward.
     if dt.is_finite() && dt > 0.0 {
-        w.clock += dt;
+        w.host_time += dt;
+        if !paused {
+            w.clock += dt;
+        }
     }
 
     // 1. Tick the live server with this frame's input. forwardmove/sidemove are
     //    Quake run speeds; the server's SV_ClientThink turns them into motion and
     //    runs every entity's think (so monsters animate and move).
-    //
-    //    While the menu is up, gate gameplay input: the world still TICKS (so it
-    //    idles — monsters keep their think schedule, doors finish moving) but the
-    //    player neither moves, fires, nor switches weapons. We send a zeroed
-    //    UserCmd at the current view angles (Quake's `key_dest == key_menu` stops
-    //    feeding the movement/attack/impulse commands the same way).
     // The bindings-driven keyboard input `step` derived this frame; zeroed while
     // the menu/console gate gameplay (key_dest != key_game).
     let km = if menu_up { KeyMove::default() } else { w.key_move };
@@ -133,11 +141,13 @@ pub(crate) fn step_walk(
         },
         impulse: if menu_up { 0 } else { w.next_impulse },
     };
-    // A queued impulse fires once (the server also clears the edict field after
-    // ImpulseCommands, but clearing here guarantees a held key fires a single
-    // weapon switch rather than re-selecting every frame).
-    w.next_impulse = 0;
-    let _ = w.server.client_frame(&cmd, dt);
+    if !paused {
+        // A queued impulse is sent once (CL_SendMove: `in_impulse = 0`). While
+        // paused it waits: the C's SV_ReadClientMove still stores it on the
+        // edict behind the menu, and it runs when the server does.
+        w.next_impulse = 0;
+        let _ = w.server.client_frame(&cmd, dt);
+    }
 
     // 1a. MSG_ALL server commands (CL_ParseServerMessage, cl_parse.c): the QuakeC
     //     end-of-level chain WriteBytes svc_intermission / svc_finale (+ text) /
@@ -201,10 +211,11 @@ pub(crate) fn step_walk(
     queue_sounds(&w.pak, &events, w.player);
 
     // 2a. Drain QuakeC's on-screen messages (centerprint / sprint / bprint) into
-    //     the timed display state, and expire old ones (clock = w.clock).
+    //     the timed display state, and expire old ones on the host clock
+    //     (the C times both off realtime / host_frametime, paused or not).
     for m in w.server.drain_messages() {
         if m.center {
-            w.centerprint = Some((m.text, w.clock + 2.0));
+            w.centerprint = Some((m.text, w.host_time + 2.0));
         } else {
             // Con_Print model: accumulate notify text and only break into a line on
             // '\n'. Quake pickups print via several sprint() calls ("You receive ",
@@ -219,19 +230,19 @@ pub(crate) fn step_walk(
         let line: String = w.notify_pending.drain(..=nl).collect();
         let line = line.trim_end_matches(['\n', '\r']).to_string();
         if !line.trim().is_empty() {
-            w.notify.push((line, w.clock + 3.0));
+            w.notify.push((line, w.host_time + 3.0));
             while w.notify.len() > 4 {
                 w.notify.remove(0);
             }
         }
     }
     if let Some((_, exp)) = &w.centerprint {
-        if w.clock >= *exp {
+        if w.host_time >= *exp {
             w.centerprint = None;
         }
     }
-    let clock = w.clock;
-    w.notify.retain(|(_, exp)| clock < *exp);
+    let host_time = w.host_time;
+    w.notify.retain(|(_, exp)| host_time < *exp);
 
     // 2b. Realise the particle() bursts the world fired this frame (explosions,
     //     blood, gibs) into the live pool, then age it under gravity and retire
@@ -307,7 +318,9 @@ pub(crate) fn step_walk(
             now,
         );
     }
-    if dt.is_finite() && dt > 0.0 {
+    // R_DrawParticles / CL_DecayLights step by `cl.time - cl.oldtime`, which
+    // is 0 while paused: nothing moves, fades or dies.
+    if dt.is_finite() && dt > 0.0 && !paused {
         w.particles.advance(dt, now, 800.0 * 0.05);
         w.dlights.advance(dt, now);
     }
@@ -1123,6 +1136,39 @@ mod tests {
             }
             let _ = std::fs::write(format!("{dir}/{name}.ppm"), out);
         });
+    }
+
+    /// CENSUS F2: behind the menu/console single player is paused
+    /// (Host_ServerFrame skips SV_Physics, SV_RunClients skips SV_ClientThink):
+    /// sv.time and cl.time stand still, the particles neither move nor die,
+    /// and a queued impulse waits for the server. What the C runs off
+    /// host_frametime / realtime keeps going: the damage fade and the
+    /// centerprint countdown.
+    #[test]
+    fn single_player_pause_freezes_the_world_but_not_the_host_clock() {
+        let mut w = build_walk().expect("e1m1 boots");
+        for _ in 0..3 {
+            step_walk(&mut w, 0.1, false, 320, 200);
+        }
+        w.particles.spawn_burst([0.0; 3], [0.0; 3], 73, 20, w.clock, &mut w.prng);
+        w.centerprint = Some(("paused".into(), w.host_time + 2.0));
+        w.damage_blend = 100.0;
+        w.next_impulse = 2;
+        let (sv0, cl0, parts0) = (w.server.time(), w.clock, w.particles.particles().len());
+        let org0 = w.particles.particles()[0].origin;
+        for _ in 0..25 {
+            step_walk(&mut w, 0.1, true, 320, 200); // menu up for 2.5 s
+        }
+        assert_eq!(w.server.time(), sv0, "sv.time stands still");
+        assert_eq!(w.clock, cl0, "cl.time stands still");
+        assert_eq!(w.particles.particles().len(), parts0, "no particle dies");
+        assert_eq!(w.particles.particles()[0].origin, org0, "no particle moves");
+        assert_eq!(w.next_impulse, 2, "the impulse waits for the server");
+        assert!(w.centerprint.is_none(), "the centerprint timed out behind the menu");
+        assert_eq!(w.damage_blend, 0.0, "the damage flash faded behind the menu");
+        step_walk(&mut w, 0.1, false, 320, 200);
+        assert!(w.server.time() > sv0, "the game resumes when the menu closes");
+        assert_eq!(w.next_impulse, 0, "and the waiting impulse is sent");
     }
 
     #[test]

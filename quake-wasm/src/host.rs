@@ -84,9 +84,11 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // host_time: the menudot spinner (mode-independent, like realtime).
         a.clock += dt;
         let (w, h) = (a.render_w, a.render_h);
-        // While the menu OR console is up, gameplay input is gated; the dispatcher
-        // owns that state, so it tells step_walk whether to gate. step_demo ignores
-        // gameplay input regardless. The console takes priority over the menu.
+        // While the menu OR console is up (key_dest != key_game) gameplay input is
+        // gated and single player pauses (Host_ServerFrame skips SV_Physics); the
+        // dispatcher owns that state, so it tells step_walk. The attract demo is
+        // client-side playback and keeps running (CL_GetMessage reads on).
+        // The console takes priority over the menu.
         let menu_visible = a.menu.visible;
         let gate_gameplay = menu_visible || a.console.open;
         // Keep the menu's M_Menu_Save_f gate current: a local single-player game

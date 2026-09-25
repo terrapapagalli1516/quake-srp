@@ -561,6 +561,13 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   Accepted gap: 85–100 Hz displays get half their rate (the C gate needs two
   vsyncs there).
 
+## Census client/host fixes (2026-09-25, branch `quake/fix-client`)
+
+One line per CENSUS.md finding fixed; the evidence and the C are in CENSUS.md
+and the commit messages.
+
+- ✅ **F2 single player pauses behind the menu/console** (`Host_ServerFrame`/`SV_RunClients`): `step_walk` runs no server frame while `key_dest != key_game`; `cl.time` (`w.clock`) freezes with it, host-time fades/countdowns keep going (new `Walk::host_time`); the attract demo keeps playing.
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

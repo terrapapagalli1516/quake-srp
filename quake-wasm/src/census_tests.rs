@@ -99,7 +99,6 @@ fn census_teleport_turns_the_view_to_the_destination() {
 /// || key_dest == key_game))`. The port ticks the server with a zeroed usercmd
 /// ("the world still TICKS"), so monsters keep attacking behind the menu.
 #[test]
-#[ignore = "census F2: the world keeps running behind the menu/console"]
 fn census_single_player_pauses_behind_the_menu() {
     let mut w = build_walk().expect("e1m1 boots");
     for _ in 0..5 {

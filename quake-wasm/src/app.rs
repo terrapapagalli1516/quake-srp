@@ -146,9 +146,19 @@ pub(crate) struct Walk {
     /// several `sprint` calls ("You receive ", "25", " health\n"); the C console
     /// joins them into ONE line, so we must not emit one notify line per call.
     pub(crate) notify_pending: String,
-    /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
-    /// the animated special surfaces: liquid warp + sky scroll in the renderer.
+    /// `cl.time`: accumulated game time (seconds), advanced by `dt` each
+    /// `step_walk` that runs the server. On a local server the C's
+    /// `CL_LerpPoint` snaps `cl.time` to the server's message time, so it stops
+    /// with the server while single player is paused behind the menu/console.
+    /// Drives the animated surfaces, light styles, particles, dlight decay, the
+    /// rotating pickups, the bob and the intermission sway.
     pub(crate) clock: f32,
+    /// Host time (seconds): advanced by every frame's `dt`, paused or not. The
+    /// notify lines (Con_DrawNotify ages them in `realtime`) and the centerprint
+    /// (SCR_CheckDrawCenterString counts `scr_centertime_off` down by
+    /// `host_frametime`) expire on this clock, so they keep timing out behind the
+    /// menu as in the C.
+    pub(crate) host_time: f32,
     /// Live engine particles (the `particle()` builtin's effect). Bursts the
     /// QuakeC fires each frame are drained into this pool, aged under gravity,
     /// and drawn into the scene sharing its z-buffer.
@@ -572,6 +582,7 @@ pub(crate) fn assemble_walk(
         notify_pending: String::new(),
         viewsize: render::VIEWSIZE_DEFAULT,
         clock: 0.0,
+        host_time: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
         dlights: DynamicLights::new(),
