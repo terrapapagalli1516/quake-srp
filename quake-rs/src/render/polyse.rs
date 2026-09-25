@@ -60,6 +60,20 @@ fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
     }
 }
 
+/// `(int)` of a float the way the x86 id built for does it (`fistp` /
+/// `cvttss2si`): truncation toward zero, and the "integer indefinite"
+/// 0x80000000 for a NaN or a value out of range, where Rust's `as` saturates
+/// (a huge positive step would come out 0x7FFFFFFF, id's 0x80000000). Sliver
+/// triangles out of `R_AliasClipTriangle` reach this: a denominator of 1 or 2
+/// under a long edge makes a 1/z step of 1e11.
+fn c_ftoi(x: f64) -> i32 {
+    if x > -2_147_483_649.0 && x < 2_147_483_648.0 {
+        x as i32
+    } else {
+        i32::MIN
+    }
+}
+
 /// The framebuffer side of `D_PolysetDraw` (d_polyse.c): the image, the shared
 /// z-buffer, and the rasteriser state the C keeps in globals.
 pub(super) struct PolyFramebuffer<'a> {
@@ -254,7 +268,7 @@ impl<'a> PolyFramebuffer<'a> {
         };
         let mut new = [0i32; 6];
         for i in [0, 1, 2, 3, 5] {
-            new[i] = (lp1[i] + lp2[i]) >> 1;
+            new[i] = lp1[i].wrapping_add(lp2[i]) >> 1; // C int: wraps
         }
         // draw the point if splitting a leading edge
         let leading = !(lp2[1] > lp1[1] || (lp2[1] == lp1[1] && lp2[0] < lp1[0]));
@@ -285,17 +299,21 @@ impl<'a> PolyFramebuffer<'a> {
     }
 
     /// `D_PolysetCalcGradients` (d_polyse.c): the per-pixel x and y steps of
-    /// light, s, t and 1/z across the (affine) triangle.
+    /// light, s, t and 1/z across the (affine) triangle. The C's `int`
+    /// differences wrap and its `(int)` casts give 0x80000000 out of range
+    /// ([`c_ftoi`]); the steps built from them wrap too (`left_edge_steps`,
+    /// `scan_left_edge`, `draw_spans`), so a sliver draws what id's does.
     fn calc_gradients(&mut self, p: &[[i32; 6]; 3], d_xdenom: i32, skinwidth: i32) {
-        let p00_minus_p20 = (p[0][0] - p[2][0]) as f64;
-        let p01_minus_p21 = (p[0][1] - p[2][1]) as f64;
-        let p10_minus_p20 = (p[1][0] - p[2][0]) as f64;
-        let p11_minus_p21 = (p[1][1] - p[2][1]) as f64;
+        let d = |a: i32, b: i32| a.wrapping_sub(b) as f64;
+        let p00_minus_p20 = d(p[0][0], p[2][0]);
+        let p01_minus_p21 = d(p[0][1], p[2][1]);
+        let p10_minus_p20 = d(p[1][0], p[2][0]);
+        let p11_minus_p21 = d(p[1][1], p[2][1]);
         let xstepdenominv = 1.0 / d_xdenom as f32 as f64;
         let ystepdenominv = -xstepdenominv;
         let step = |k: usize| {
-            let t0 = (p[0][k] - p[2][k]) as f64;
-            let t1 = (p[1][k] - p[2][k]) as f64;
+            let t0 = d(p[0][k], p[2][k]);
+            let t1 = d(p[1][k], p[2][k]);
             (
                 (t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv,
                 (t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv,
@@ -303,20 +321,21 @@ impl<'a> PolyFramebuffer<'a> {
         };
         // ceil() for light so positive steps are exaggerated, negative diminished
         let (lx, ly) = step(4);
-        self.r_lstepx = lx.ceil() as i32;
-        self.r_lstepy = ly.ceil() as i32;
+        self.r_lstepx = c_ftoi(lx.ceil());
+        self.r_lstepy = c_ftoi(ly.ceil());
         let (sx, sy) = step(2);
-        self.r_sstepx = sx as i32;
-        self.r_sstepy = sy as i32;
+        self.r_sstepx = c_ftoi(sx);
+        self.r_sstepy = c_ftoi(sy);
         let (tx, ty) = step(3);
-        self.r_tstepx = tx as i32;
-        self.r_tstepy = ty as i32;
+        self.r_tstepx = c_ftoi(tx);
+        self.r_tstepy = c_ftoi(ty);
         let (zx, zy) = step(5);
-        self.r_zistepx = zx as i32;
-        self.r_zistepy = zy as i32;
+        self.r_zistepx = c_ftoi(zx);
+        self.r_zistepy = c_ftoi(zy);
         self.a_sstepxfrac = self.r_sstepx & 0xFFFF;
         self.a_tstepxfrac = self.r_tstepx & 0xFFFF;
-        self.a_ststepxwhole = skinwidth as isize * (self.r_tstepx >> 16) as isize + (self.r_sstepx >> 16) as isize;
+        // int arithmetic in the C: wraps like it
+        self.a_ststepxwhole = skinwidth.wrapping_mul(self.r_tstepx >> 16).wrapping_add(self.r_sstepx >> 16) as isize;
     }
 
     /// The package for the current left-edge position.
@@ -354,8 +373,9 @@ impl<'a> PolyFramebuffer<'a> {
                     self.d_ptex += skinwidth;
                     self.d_tfrac &= 0xFFFF;
                 }
-                self.d_light += self.d_lightextrastep;
-                self.d_zi += self.d_ziextrastep;
+                // C ints: a sliver's steps wrap them (0x80000000 steps)
+                self.d_light = self.d_light.wrapping_add(self.d_lightextrastep);
+                self.d_zi = self.d_zi.wrapping_add(self.d_ziextrastep);
                 self.errorterm -= self.erroradjustdown;
             } else {
                 self.d_pdest += self.d_pdestbasestep;
@@ -369,8 +389,8 @@ impl<'a> PolyFramebuffer<'a> {
                     self.d_ptex += skinwidth;
                     self.d_tfrac &= 0xFFFF;
                 }
-                self.d_light += self.d_lightbasestep;
-                self.d_zi += self.d_zibasestep;
+                self.d_light = self.d_light.wrapping_add(self.d_lightbasestep);
+                self.d_zi = self.d_zi.wrapping_add(self.d_zibasestep);
             }
             height -= 1;
             if height <= 0 {
@@ -403,21 +423,21 @@ impl<'a> PolyFramebuffer<'a> {
         self.d_pdestextrastep = self.d_pdestbasestep + 1;
         // for negative steps in x along left edge, bias toward overflow rather
         // than underflow
-        let working_lstepx = if self.ubasestep < 0 { self.r_lstepx - 1 } else { self.r_lstepx };
+        let working_lstepx = if self.ubasestep < 0 { self.r_lstepx.wrapping_sub(1) } else { self.r_lstepx };
         self.d_countextrastep = self.ubasestep + 1;
         let sb = self.r_sstepy.wrapping_add(self.r_sstepx.wrapping_mul(self.ubasestep));
         let tb = self.r_tstepy.wrapping_add(self.r_tstepx.wrapping_mul(self.ubasestep));
         self.d_ptexbasestep = (sb >> 16) as isize + (tb >> 16) as isize * skinwidth;
         self.d_sfracbasestep = sb & 0xFFFF;
         self.d_tfracbasestep = tb & 0xFFFF;
-        self.d_lightbasestep = self.r_lstepy + working_lstepx * self.ubasestep;
+        self.d_lightbasestep = self.r_lstepy.wrapping_add(working_lstepx.wrapping_mul(self.ubasestep));
         self.d_zibasestep = self.r_zistepy.wrapping_add(self.r_zistepx.wrapping_mul(self.ubasestep));
         let se = self.r_sstepy.wrapping_add(self.r_sstepx.wrapping_mul(self.d_countextrastep));
         let te = self.r_tstepy.wrapping_add(self.r_tstepx.wrapping_mul(self.d_countextrastep));
         self.d_ptexextrastep = (se >> 16) as isize + (te >> 16) as isize * skinwidth;
         self.d_sfracextrastep = se & 0xFFFF;
         self.d_tfracextrastep = te & 0xFFFF;
-        self.d_lightextrastep = self.d_lightbasestep + working_lstepx;
+        self.d_lightextrastep = self.d_lightbasestep.wrapping_add(working_lstepx);
         self.d_ziextrastep = self.d_zibasestep.wrapping_add(self.r_zistepx);
     }
 
@@ -709,6 +729,54 @@ mod tests {
         let mut c = Image::new(12, 12, [0, 0, 0]);
         polyset_fill(&mut c, [(2, 2), (10, 10), (10, 2)], 1, 0, None);
         assert_eq!(count(&c), 0);
+    }
+
+    #[test]
+    fn float_to_int_is_x86s_not_rusts_saturation() {
+        // (int) on x86 truncates toward zero and gives 0x80000000 for NaN or
+        // anything out of range, positive included.
+        assert_eq!(c_ftoi(-2.7), -2);
+        assert_eq!(c_ftoi(2.7), 2);
+        assert_eq!(c_ftoi(2_147_483_647.0), i32::MAX);
+        assert_eq!(c_ftoi(-2_147_483_648.9), i32::MIN);
+        assert_eq!(c_ftoi(3.0e9), i32::MIN);
+        assert_eq!(c_ftoi(-3.0e9), i32::MIN);
+        assert_eq!(c_ftoi(f64::NAN), i32::MIN);
+    }
+
+    /// A sliver like the ones `R_AliasClipTriangle` leaves (review: 43 of
+    /// 75,600 gun renders, e.g. v_rock2 frame 1 at 320x200): d_xdenom -4 under
+    /// a 200-row edge whose ends are near and the middle vertex far. The 1/z
+    /// x step is 5.4e10: id's `(int)` makes it 0x80000000, and the left-edge
+    /// walk's `d_zi += d_ziextrastep` then wraps (a debug build panicked here).
+    #[test]
+    fn sliver_triangles_wrap_like_the_c_ints() {
+        let pal = [[0u8; 3]; 256];
+        let skin = [1u8; 4];
+        let setup = AliasSetup {
+            transform: [[0.0; 4]; 3],
+            r_ambientlight: 0,
+            r_shadelight: 0.0,
+            plightvec: [0.0; 3],
+            ziscale: ALIAS_ZISCALE,
+            subdiv: false,
+            skin: Some(&skin),
+            skinwidth: 2,
+            seamfixup: 0,
+            colormap: None,
+            flat: [0; 3],
+        };
+        let (near, far) = (1 << 30, 1 << 20);
+        let fv = |u: i32, v: i32, zi: i32| FinalVert { v: [u, v, 0, 0, 0x7F00, zi], flags: 0 };
+        let tri = [fv(0, 0, near), fv(4, 200, near), fv(2, 101, far)];
+        let mut img = Image::new(8, 208, [0, 0, 0]);
+        let mut zbuf = vec![f32::INFINITY; img.w * img.h];
+        let mut fb = PolyFramebuffer::new(&mut img, &mut zbuf, &pal);
+        fb.polyset_draw(&setup, tri, true);
+        let t = f64::from(near - far);
+        assert_eq!((fb.r_zistepx, fb.r_zistepy), (i32::MIN, c_ftoi(-t)));
+        assert_eq!(fb.d_zibasestep, c_ftoi(-t));
+        assert_eq!(fb.d_ziextrastep, c_ftoi(-t).wrapping_add(i32::MIN));
     }
 
     #[test]

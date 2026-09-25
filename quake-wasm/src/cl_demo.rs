@@ -430,15 +430,21 @@ pub(crate) fn step_demo(
     bench::lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0);
     let vrect = refdef.vrect;
-    let mut view = render::render_scene_ext_sprited(&d.bsp, &cam, vrect.w, vrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
-    bench::lap(Phase::Render3d);
-    // D_WarpScreen: a submerged recorded POV ripples exactly like live play —
-    // the warp applies to the 3-D view FIRST; the content tint joins the
-    // deferred whole-screen blend below (V_CalcBlend order).
+    // R_SetupFrame's r_dowarp: a submerged recorded POV renders into the warp
+    // buffer (at most 320x200) like live play.
     let eye_contents = quake_rs::world::point_contents(&d.bsp, cam.pos);
-    if eye_contents <= quake_rs::bsp::CONTENTS_WATER {
-        render::apply_warp(&mut view, f.time);
-    }
+    let dowarp = eye_contents <= quake_rs::bsp::CONTENTS_WATER;
+    let rvrect = if dowarp {
+        quake_rs::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0)
+    } else {
+        vrect
+    };
+    let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    bench::lap(Phase::Render3d);
+    // D_WarpScreen: stretched over the screen's view rectangle while it
+    // wobbles — the warp applies to the 3-D view FIRST; the content tint joins
+    // the deferred whole-screen blend below (V_UpdatePalette order).
+    let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, f.time) } else { view };
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img =
         render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette);
@@ -540,8 +546,8 @@ pub(crate) fn step_demo(
         }
     }
 
-    // Screen blends (V_CalcBlend order: CONTENTS -> DAMAGE -> BONUS ->
-    // POWERUP), all from the RECORDED stream: the eye-contents tint, the
+    // Colour shifts (V_UpdatePalette; cl.cshifts order CONTENTS -> DAMAGE ->
+    // BONUS -> POWERUP), all from the RECORDED stream: the eye-contents tint, the
     // svc_damage flash (faded dt*150 per frame like V_UpdatePalette), the
     // stuffed "bf" gold flash (dt*100), and the powerup tint from the
     // recorded cl.items. DEFERRED to the dispatcher so it tints the whole

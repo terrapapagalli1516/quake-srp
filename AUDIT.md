@@ -667,6 +667,125 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   83.4% on e1m1 (was 81.8%) and 96.1% on e1m3 (was 95.9%); no row fell.
   Goldens unchanged.
 
+## World pass: mip levels, lightmap stepping (2026-09-25, branch `quake/w2a`, PERF_PLAN A5)
+
+- ✅ **Mip levels** (oracle class 1, the largest departure). The port baked every
+  surface from the full-resolution texture; id draws each surface at the mip
+  level `D_DrawSurfaces` picks per frame, `D_MipLevelForScale(nearzi *
+  scale_for_mip * mipadjust)`, and caches one block per level. Now the same
+  (`surf.rs`: `MipView`, `face_surf_block`):
+  - **`nearzi`** is the largest `1/z` over the face's outline clipped to the
+    frustum's four side planes, `z` clamped to `NEAR_CLIP` 0.01 — what
+    `R_RenderFace` gathers from `R_EmitEdge` (the left clip edge and the
+    right one's `1/z` included). `scale_for_mip` is the larger focal length
+    (`D_ViewChanged`); `mipadjust` is `Mod_LoadTexinfo`'s 1/2/3/4 from the
+    mean texture-axis length; the thresholds are `basemip` {1, 0.4, 0.2} times
+    `d_mipscale`, floored at `d_mipcap` (`D_SetupFrame`; id sets no higher
+    floor at high resolutions). Both cvars are settable
+    (`render::set_mip_cvars`, `quaketool view --d-mipscale/--d-mipcap`;
+    `compare.py` hands a `--c-cmd "d_mipscale 0"` to both renderers).
+  - **The block** is `D_CacheSurface`'s: `extents >> miplevel` texels a side
+    (it was `extents + 1` at mip 0 — one column and row id never reads:
+    `bbextents` clamps s to `extents - 1`), from the level's texels
+    (`bsp.rs` now keeps levels 1..3, `MipTex::mip`), tiled from
+    `texturemins >> miplevel`; one cache slot per face per level
+    (`cachespots[miplevel]`). The span walker reads it through gradients
+    scaled by `1 / (1 << miplevel)` (`PolyGrads::mip_scaled`, `D_CalcGradients`'
+    `mipscale`). Submodels and the external `b_*.bsp` boxes pick their levels
+    the same way. A texture without levels 1..3 (synthetic tests) stays at
+    mip 0; a face whose texinfo maps it to a line (zero extent; id's
+    `D_SCAlloc` would `Sys_Error`) keeps the per-pixel path.
+  - **Oracle,** exact% world-only 320×200 (id as shipped): e1m1 84.74 →
+    92.20, e1m2 64.06 → 91.03, e1m3 65.88 → 96.68, e1m7 75.62 → 92.58;
+    640×480: 90.84 → 94.78, 78.28 → 95.40, 90.73 → 97.56, 94.58 → 97.39;
+    against id's exact per-pixel perspective (`--spans 1`) 86.95 → 94.55,
+    64.26 → 92.64, 66.11 → 97.47, 80.37 → 97.46. With both renderers at mip
+    0 (`d_mipscale 0`) every row is unchanged — the mip-0 bake is the old one.
+    Muzzle-flash frames (`--c-cmd +attack --settle 3`, as shipped): e1m1 80.64
+    → 87.02, e1m2 60.66 → 89.76, e1m3 61.00 → 95.80.
+  - **Goldens:** e1m1 `bb64996e` unchanged (every face in that view is at mip
+    0), e1m2 `8186a64c` → `3d47c70d` (38,742 px, 15.1%), e1m3 `f41e8b59` →
+    `c7e5b50e` (31,730 px, 12.4%): the distant walls, now drawn from id's
+    coarser levels.
+  - **Not done:** a brush model spanning several BSP leaves is split by
+    `R_DrawSolidClippedSubmodelPolygons` into fragments, each with its own
+    `nearzi` and so possibly its own level; the port picks one level per face.
+    The wasm console has no `d_mipscale`/`d_mipcap` commands yet.
+
+- ✅ **Lightmap stepping** (oracle class 6, ±1 colormap row on 1.5–4.4% of
+  pixels). The bake took a float bilinear lightmap factor at each texel's corner
+  and then picked the row. id builds `blocklights` in 8.8 integers
+  (`R_BuildLightMap`: each style's luxel times its `d_lightstylevalue`, plus
+  `R_AddDynamicLights`' truncated `(rad - dist)*256`), inverts and clamps them
+  (`(255*256 - bl) >> 2`, at least `1 << 6`), and `R_DrawSurfaceBlock8_mip0..3`
+  walks each `16 >> miplevel` cell down its left and right edges in integer
+  steps `(bottom - top) >> (4 - miplevel)` and along each row from the RIGHT
+  edge's value by `(left - right) >> (4 - miplevel)`, indexing
+  `colormap[(light & 0xFF00) + texel]`. Now exactly that
+  (`LightMap::blocklights_into`, `surf::draw_surface_block`); the port's f32
+  luxels are the C's sum over 256, each term exact, so `luxel * 256` is id's
+  integer. The oracle agent's temporary patch of earlier tonight, made
+  permanent for all four levels.
+  - **Oracle,** exact% world-only 320×200, item 1 → this: as shipped 92.20 →
+    97.44, 91.03 → 97.12, 96.68 → 99.16, 92.58 → 94.96 (e1m1/2/3/7);
+    640×480 94.78 → 99.20, 95.40 → 98.77, 97.56 → 99.30, 97.39 → 98.77;
+    against id's exact perspective (`--spans 1`, its own mips) 94.55 →
+    99.94, 92.64 → 99.18, 97.47 → 99.98, 97.46 → 99.91; both at mip 0 with
+    exact perspective 95.61 → 99.93, 97.40 → 99.88, 98.50 → 99.98, 98.66 →
+    99.91 (640×480: 99.96 / 99.96 / 99.99 / 99.98). What is left as shipped
+    is id's 8-pixel affine span segments (class 7, branch `quake/w2b`).
+    Over 72 more views (4 maps × 6 yaws × 3 pitches, `--spans 1`) the mean is
+    99.99%, the worst 99.83.
+  - **Goldens:** e1m1 `bb64996e` → `959d0221` (9,953 px, 3.9%), e1m2
+    `3d47c70d` → `0cd18471` (8,041 px, 3.1%), e1m3 `c7e5b50e` → `b63ae8b7`
+    (7,555 px, 3.0%): single colormap rows on light gradients. From before
+    item 1: 9,953 / 42,613 / 36,634 px.
+- ✅ **Dynamic lights at the chosen level** (w1's A2 path): a dlit face is baked
+  by the same `face_surf_block`, so it gets the level and the integer stepping
+  with the light's `blocklights` folded in (`cache->dlight` as before).
+  Muzzle-flash frames (`--c-cmd +attack --settle 3`), 320×200, base → now: as
+  shipped e1m1 80.64 → 95.36, e1m2 60.66 → 96.16, e1m3 61.00 → 98.98; mip 0
+  + exact 90.35 → 98.11, 96.85 → 99.46, 97.82 → 99.89. On the pixels id's
+  flash changes (id's lit frame against id's frame at the same view and
+  clock without the shot): e1m1 83.4% → 99.8% (14,296 px), e1m2 90.3% →
+  94.9% (825 px; the other 42 are the shot's blood particles, which `view`
+  does not draw), e1m3 96.1% → 99.5% (13,211 px). e1m1 keeps the harness's
+  settle ≥ 3 light-style offset (oracle README).
+- **Speed and memory** (items 1 and 2), native twin of `web/bench.py`, a fresh
+  process per resolution, medians of two runs; base → mip levels → + stepping:
+  - Texels baked per frame (`surf_texels`, the world cache plus the external
+    boxes' uncached bakes): demo1 4,348 → 2,847 / 3,511 / 3,993 (320×200 /
+    640×400 / 1280×800); walk_e1m1 35,185 → 3,963 / 6,983 / 11,482;
+    fire_e1m1 48,660 → 16,322 / 19,594 / 23,880; walk_e1m3 68,628 → 2,902 /
+    5,683 / 10,767.
+  - Time in `face_surf_block` (mean ms per frame): fire_e1m1 0.45–0.46 →
+    0.34–0.45 → 0.026–0.047; walk_e1m1 0.17–0.18 → 0.09–0.19 → 0.016–0.033.
+    Whole step, fire_e1m1 median / p95: 320×200 1.48 / 3.79 → 0.68 / 1.35
+    ms, 640×400 2.17 / 4.92 → 1.55 / 2.75, 1280×800 5.37 / 8.91 → 4.97 /
+    7.40; walk_e1m3 320×200 2.80 → 1.28, 640×400 3.78 → 2.32, 1280×800 7.09
+    → 5.78. demo1 moves within noise.
+  - Wasm (`web/bench.py --build`, two runs each, step median / p95 at 640×400,
+    median at 1280×800): walk_e1m3 3.42–3.60 / 4.60–4.86 → 2.62–2.78 /
+    3.49–3.63 ms, 7.50–7.74 → 6.58–6.85 (the external boxes' uncached bakes
+    0.81 → 0.08 ms); fire_e1m1 2.09–2.27 / 4.05–4.18 → 1.72–2.07 / 2.73–3.17,
+    5.67–5.94 → 5.37–5.75; walk_e1m1 p95 3.41–3.59 → 2.70–2.94; demo1 within
+    noise.
+  - `QUAKE_DLIGHT=eye` on e1m1 at 1280×800 (w1 left it at ~14 ms): radius 350
+    14.1–15.1 → 10.0–13.9 → 7.4–9.1 ms, radius 200 12.1–12.7 → 8.0–8.5 —
+    the unlit frame is 8.2–8.6.
+  - Surface cache resident (`surfcache_kb`, the most over a run): demo1 3,489
+    KB → 2,166 / 2,985 / 3,359; walk_e1m1 1,973 → 975 / 1,367 / 1,785;
+    walk_e1m3 3,350 → 1,071 / 1,757 / 1,998. (id's fixed pool is 600 KB at
+    320×200 and ~3.4 MB at 1280×800, `D_SurfaceCacheForRes`.)
+- **Still open:** `nearzi` is the clipped outline's, which is id's in all but
+  one quirk: `R_RenderFace` re-uses `r_rightexit`/`r_leftexit` when the edge
+  that should set them was cached as fully clipped by an earlier face this
+  frame, so id can give a face the `1/z` of a stale point from another face —
+  a finer level than its geometry (seen: face 733 at e1m2's first frame, id
+  mip 0 from a point at z 96, the port mip 1; 0.7% of that frame, 0.17% of
+  one of the 72 sweep views, nothing elsewhere). Reproducing it means
+  running id's edge clipping and edge cache in `R_RecursiveWorldNode`'s order.
+
 ## Census client/host fixes (2026-09-25, branch `quake/fix-client`)
 
 One line per CENSUS.md finding fixed; the evidence and the C are in CENSUS.md
@@ -710,6 +829,99 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 - ✅ **L5 client think order** — `Host_ServerFrame` runs `SV_RunClients` (`SV_ReadClientMove` + `SV_ClientThink`) before `SV_Physics`; `client_frame` now does too, so `PlayerPreThink`'s `PlayerJump`/`WaterMove` act on the accelerated velocity (it also gives a dead player `DropPunchAngle`, which only ran for WALK/FLY/NOCLIP). A standing forward jump on e1m1 now follows id's oracle frame for frame (10 u forward per frame; it made 3). Test `census_client_think_runs_before_player_prethink`.
 - ✅ **L6 ED_Alloc / ED_Free** — `Vm::spawn` reuses a free slot only if it was freed in the first two seconds of server time or more than 0.5 s ago (`freetime`), so a missile spawned the frame another is removed never inherits its slot (no stray trail); `Vm::free_edict` clears only `ED_Free`'s fields (model, takedamage, modelindex, colormap, skin, frame, origin, angles, solid; nextthink -1) and keeps the rest, as id does. Tests `ed_alloc_waits_half_a_second_before_reusing_a_freed_slot`, `ed_free_clears_only_the_fields_the_c_clears`.
 - ✅ **F7 the player's name** — `connect_client_inner` sets up the client edict as `Host_Spawn_f` does before `ClientConnect`: `netname` "player" (cl_name), `team` 1 ((cl_color & 15) + 1), `colormap` = its edict number. Obituaries read "player was shot by a Grunt". Test `census_player_netname_is_player`.
+
+## Review fixes (2026-09-25, branch `quake/polish`)
+
+Findings of the adversarial review of the overnight merge, one line each; the
+C followed and the test are in the commit message.
+
+- ✅ **Loading a save kept no options** (MED) — `load_game` rebuilt the Menu
+  (`Menu::new()`), so Screen size, Brightness, Always Run, every rebind and the
+  slot listings snapped to defaults. `Host_Loadgame_f` never touches a cvar or
+  `keybindings[]`; now the same `reset_nav()` as New Game. Test
+  `load_keeps_every_option_and_binding` (the `viewsize 60`, `save t`, `load t`
+  repro).
+- ✅ **Debug-build overflow on sliver alias triangles** (LOW) — after
+  `R_AliasClipTriangle` a sliver (d_xdenom of a few units under a long edge)
+  gets 1/z and light steps far out of `int` range. id's `(int)` gives
+  0x80000000 there (Rust's `as` saturated to 0x7FFFFFFF for positive ones) and
+  its `int` sums wrap; a debug build panicked in `scan_left_edge` (`d_zi +=`,
+  `d_light +=`). `polyse.rs` now converts with `c_ftoi` and wraps every step
+  sum and the subdivision midpoints like the C. Tests
+  `sliver_triangles_wrap_like_the_c_ints`, `float_to_int_is_x86s_not_rusts_saturation`;
+  the review's stress harness (4000 random gun/entity renders with overflow
+  checks) panicked at iteration 3068 before, none now. Goldens unchanged.
+- ✅ **`intsintable` is not wrapped** (LOW) — `D_WarpScreen` reads
+  `turb = intsintable + phase` at `turb[u]`/`turb[v]` over the whole screen, and
+  `R_InitTurb`'s `3.14159` makes the table non-periodic: at i = 128, 256, ...
+  the entry is 2 where a wrapped cycle gives 3. `apply_warp` indexed `& 127`;
+  now it reads the unwrapped table (`intsintable`). Tests
+  `intsintable_is_r_initturbs_unwrapped_table`,
+  `warp_reads_intsintable_past_the_first_cycle`. (Turbulent8's `sintable` was
+  already unwrapped, fid1.)
+- ✅ **Underwater view at the warp buffer's resolution** — with the eye in
+  water/slime/lava, id's `R_SetupFrame` renders the view into `r_warpbuffer`
+  (at most `WARP_WIDTH` x `WARP_HEIGHT`, 320x200: the mode scaled to 320 wide,
+  capped at 200 high, `R_SetVrect` on that with `sb_lines * h/vid.height`)
+  and `D_WarpScreen` stretches it over `scr_vrect` (`wratio`/`hratio`, the
+  C's float row/column tables). The port rendered and warped at full
+  resolution. Now `screen::warp_vrect` + `apply_warp(view, out_w, out_h,
+  clock)` (a new signature, so `render/mod.rs` is untouched), live, demo and
+  `quaketool view` (which now warps an underwater eye like id's
+  `R_RenderView`). Oracle, e1m1's pool (`--view=750,898,-332,0,90,0 --time
+  1.6`), exact%: 320x200 97.58; 640x400 48.22 -> 97.59; 960x600 44.14 ->
+  97.60; 1280x800 42.65 -> 97.63 (before = the full-resolution warp). Cheaper
+  too: an underwater frame renders 320x152 at every preset. At every 16:10
+  mode the C's pixel aspect for the warp buffer equals `vid.aspect`, so the
+  square-pixel projection is exact; for a mode taller than 16:10 id squeezes
+  320x200 through that aspect and the port narrows the buffer instead
+  (`vid.width*200/vid.height` wide: same picture, e.g. 266 columns at 4:3).
+  Whoever lands the pixel-aspect projection: the warp buffer's aspect is
+  `vid.aspect * (h/w) * (vid.width/vid.height)` (R_ViewChanged). Tests
+  `warp_vrect_is_r_setupframes_warp_buffer_view`,
+  `warp_stretches_the_warp_buffer_over_the_screen_view`,
+  `underwater_view_renders_into_the_warp_buffer`. Goldens unchanged.
+- ✅ **The client clock is `cl.time`** — the live walk's `w.clock` started at
+  0 and counted `dt`, so the sky, liquids, underwater warp, texture/alias
+  animation and `R_AnimateLight`'s `(int)(cl.time*10)` ran about 1.2 s behind
+  id's (and reset to 0 at every changelevel, restart and load). On a local
+  server `CL_LerpPoint` snaps `cl.time` to the message time, `sv.time` after
+  the frame's physics: `w.clock` is now `server.time()` after every server
+  frame and at every walk build (spawn, changelevel, restart, load = the
+  save's time), and still stops behind the menu. Particles, dlights, beams,
+  the bob, rotating pickups and the intermission sway run on it too, as they
+  do on `cl.time` in the C. Tests `client_clock_is_the_server_clock`, and the
+  load in `save_load_round_trips_the_world_digest`. Demo playback already ran
+  on the recorded `cl.time`.
+- ✅ **Damage flash percent is an `int`** (review item) — already fixed on
+  main by census L2 (`3ec96f4`, `cshift_add`/`cshift_drop`); the demo test
+  asserts id's 22 (30 - 7.5 truncated), the ramps take the int percent.
+  Nothing further to change.
+- ✅ **`quaketool playtest` framing** — the POV shot drew a full-screen view
+  (viewsize 120's framing) with the viewsize-100 gun fudge and pasted the
+  48-line bar over it, so the gun sat under the bar. Now it is the game's
+  default screen: `calc_refdef` at viewsize 100, the view above the bar,
+  `compose_view` with the backtile, the gun offset for the same viewsize.
+  Test `playtest_frames_the_view_for_the_guns_viewsize`.
+- ✅ **Stale comments** — `render_scene_ext`'s doc (the gun "uses its own
+  depth buffer", "a plain `[f32; 256]`" sine table, "walls, alias models and
+  the viewmodel ignore `time`"), `Viewmodel`'s ("no world origin", "view
+  space", frame "clamped"), and the `V_CalcBlend` mentions in `cl_walk.rs`,
+  `cl_demo.rs` and the README (the shifts are the software `V_UpdatePalette`
+  ramps). Comments only (`render/mod.rs` touched for its doc comment alone).
+- ✅ **Census L11: prints reach the console scrollback** — `Con_Print`
+  writes the console's text buffer, and the notify lines are its last
+  lines; the port showed `svc_print` text only in the notify overlay. Now
+  `quake_rs::console::ConCursor` is Con_Print's layout (`con_x`, the word
+  wrap at `con_linewidth` 38 — a word longer than a line runs on until its
+  remainder fits — `\n`, `\r`), shared by the notify lines and
+  `Console::print`; `println` is `Con_Printf("%s\n")` through it, so
+  console output wraps too and continues a line a print left open. The
+  dispatcher hands each frame's printed text (live or demo) to the console.
+  Tests `console_print_is_con_print`, `game_prints_reach_the_console_scrollback`
+  (e1m1's shells pickup). Still open: console command output does not reach
+  the notify lines (the C's one buffer shows `]god` / `godmode ON` there
+  for 3 s after the console closes).
 
 ## Web extras: the opt-in departures (2026-09-25, branch `quake/extras`)
 

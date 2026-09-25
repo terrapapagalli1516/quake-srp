@@ -142,12 +142,10 @@ pub(crate) fn step_walk(
     // keeps going: the palette-shift fades (V_UpdatePalette), the centerprint
     // countdown and notify expiry, the ambient-sound ramps.
     let paused = menu_up;
-    // Guard against a non-finite/negative dt so the clocks only move forward.
+    // Guard against a non-finite/negative dt so the clock only moves forward.
+    // (cl.time, `w.clock`, follows the server's clock below.)
     if dt.is_finite() && dt > 0.0 {
         w.host_time += dt;
-        if !paused {
-            w.clock += dt;
-        }
     }
 
     // 1. Tick the live server with this frame's input. forwardmove/sidemove are
@@ -246,6 +244,9 @@ pub(crate) fn step_walk(
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
         let _ = w.server.client_frame(&cmd, dt);
+        // CL_LerpPoint on a local server: cl.time = the message time, sv.time
+        // after this frame's physics.
+        w.clock = w.server.time();
         apply_fixangle(w);
         parse_client_damage(w, before);
         // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
@@ -264,17 +265,16 @@ pub(crate) fn step_walk(
         match ev {
             quake_rs::server::SvcEvent::Intermission => {
                 // cl.intermission = 1; cl.completed_time = cl.time (cl_parse.c:939).
-                // On a local server cl.time tracks sv.time, which SV_SpawnServer
-                // starts at 1.0 — NOT this walk's clock (which starts at 0), so the
-                // overlay's minutes:seconds shows exactly what vanilla shows. (The
-                // demo parser latches mtime[0], also server time — the paths agree.)
+                // On a local server cl.time is sv.time (`Walk::clock`), which
+                // SV_SpawnServer starts at 1.0, so the overlay's minutes:seconds
+                // shows exactly what vanilla shows. (The demo parser latches
+                // mtime[0], also server time — the paths agree.)
                 w.intermission = 1;
                 w.completed_time = w.server.time();
             }
             quake_rs::server::SvcEvent::Finale(text) => {
                 // cl.intermission = 2 + SCR_CenterPrint (scr_centertime_start).
-                // completed_time = cl.time = sv.time, as above; finale_start stays
-                // in the walk clock — the reveal only uses the DIFFERENCE
+                // completed_time = cl.time = sv.time, as above; the reveal uses
                 // w.clock - finale_start (cl.time - scr_centertime_start in the C).
                 w.intermission = 2;
                 w.completed_time = w.server.time();
@@ -794,8 +794,18 @@ pub(crate) fn step_walk(
     bench::lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission);
     let vrect = refdef.vrect;
-    let mut view =
-        render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
+    // R_SetupFrame's r_dowarp (r_waterwarp 1): with the eye's leaf in water,
+    // slime or lava the view is rendered into the (at most 320x200) warp
+    // buffer, and D_WarpScreen stretches it over `vrect` below.
+    let eye_contents = quake_rs::world::point_contents(&w.bsp, eye);
+    let dowarp = eye_contents <= quake_rs::bsp::CONTENTS_WATER;
+    let rvrect = if dowarp {
+        quake_rs::screen::warp_vrect(render_w, render_h, w.viewsize, intermission)
+    } else {
+        vrect
+    };
+    let view =
+        render::render_scene_ext_sprited(&w.bsp, &cam, rvrect.w, rvrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
     bench::lap(Phase::Render3d);
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
@@ -803,29 +813,25 @@ pub(crate) fn step_walk(
         w.dlights.advance(dt, now);
     }
 
-    // 5b. Screen blends (V_CalcBlend): fade the damage flash (V_UpdatePalette
-    //     drops it after this frame's svc_damage was parsed) and tint the view
-    //     when the eye is under water / in lava or slime. The blend is DEFERRED
-    //     (returned to the dispatcher) and applied to the whole composited frame
-    //     last, matching software V_UpdatePalette's whole-screen palette shift
-    //     (it tints the HUD, menu and console too — not the GL 3D-viewport-only
-    //     behaviour).
+    // 5b. Colour shifts (V_UpdatePalette, the software build's palette shift):
+    //     drop the damage and bonus flashes (after this frame's svc_damage was
+    //     parsed) and tint the view when the eye is under water / in lava or
+    //     slime. The shifts are DEFERRED (returned to the dispatcher) and the
+    //     finished screen goes through `render::cshift_ramps` last, so they
+    //     tint the HUD, menu and console too, as the palette shift does.
     let frametime = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
     w.damage_blend = cshift_drop(w.damage_blend, frametime, DAMAGE_FADE);
     w.bonus_blend = cshift_drop(w.bonus_blend, frametime, BONUS_FADE);
-    // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
-    let eye_contents = quake_rs::world::point_contents(&w.bsp, eye);
-    // Underwater sine wobble (D_WarpScreen): when the eye is in water/slime/lava
-    // (contents <= CONTENTS_WATER, r_waterwarp default on), warp the 3-D frame
-    // BEFORE the content tint so the screen ripples, not just darkens.
-    if eye_contents <= quake_rs::bsp::CONTENTS_WATER {
-        render::apply_warp(&mut view, w.clock); // D_WarpScreen warps the vrect only
-    }
+    // Underwater sine wobble (D_WarpScreen): the warp buffer's view, stretched
+    // over the screen's view rectangle while it wobbles, BEFORE the content
+    // tint so the screen ripples, not just darkens.
+    let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, w.clock) } else { view };
     // The screen: the view at its rectangle, backtile around it
     // (SCR_UpdateScreen's Draw_TileClear), the status bar drawn over below.
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
     let mut img =
         render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &w.palette);
+    // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
         shifts.push(cs);
@@ -1544,5 +1550,73 @@ mod tests {
             );
         });
         walk_mut(|w| w.in_attack = false);
+    }
+
+    /// R_SetupFrame's r_dowarp: with the eye in water the view is rendered
+    /// into the (at most) 320x200 warp buffer, and D_WarpScreen stretches it
+    /// over the screen's view rectangle. So underwater a 640x400 screen and a
+    /// 320x200 one render the same 320x152 view (the world pass writes the
+    /// same pixels), while above water 640x400 draws four times as many.
+    #[test]
+    fn underwater_view_renders_into_the_warp_buffer() {
+        use quake_rs::progs::OFS_PARM0;
+        let mut w = build_walk().expect("e1m1 boots");
+        let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        let p = w.player;
+        w.server.vm.ent_set_float(p, "movetype", 8.0); // MOVETYPE_NOCLIP: stays put
+        let frame_at = |w: &mut Walk, org: [f32; 3], rw: usize, rh: usize| {
+            let vm = &mut w.server.vm;
+            vm.set_gi(OFS_PARM0, p);
+            vm.set_gv(OFS_PARM0 + 3, org);
+            vm.argc = 2;
+            let setorigin = vm.builtins[2];
+            setorigin(vm).expect("setorigin");
+            vm.ent_set_vector(p, "velocity", [0.0; 3]);
+            render::render_stats_begin();
+            let (img, _) = step_walk(w, 0.0, false, rw, rh);
+            let px = render::render_stats_end().world_pixels;
+            let eye = [org[0], org[1], org[2] + 22.0];
+            assert_eq!((img.w, img.h), (rw, rh));
+            (px, quake_rs::world::point_contents(&w.bsp, eye))
+        };
+        // e1m1's start pool, eye at the review's oracle view (750, 898, -332),
+        // then lifted above the water in the same room.
+        let (under, above) = ([750.0, 898.0, -354.0], [750.0, 898.0, -272.0]);
+        let (u640, c) = frame_at(&mut w, under, 640, 400);
+        assert_eq!(c, quake_rs::bsp::CONTENTS_WATER);
+        let (u320, _) = frame_at(&mut w, under, 320, 200);
+        assert_eq!(u640, u320, "underwater: the same 320x152 render at both sizes");
+        let (a640, c) = frame_at(&mut w, above, 640, 400);
+        assert_eq!(c, quake_rs::bsp::CONTENTS_EMPTY);
+        let (a320, _) = frame_at(&mut w, above, 320, 200);
+        assert!(a640 > 3 * a320, "above water: 640x400 renders at full size ({a640} vs {a320})");
+    }
+
+    /// cl.time is the server's clock: on a local server CL_LerpPoint snaps it
+    /// to the message time, sv.time after the frame's physics. So the sky,
+    /// liquids, the underwater warp and R_AnimateLight's `(int)(cl.time*10)`
+    /// start at SV_SpawnServer's 1.0 plus the signon frames, not at 0, stop
+    /// with the server behind the menu, and follow it across a restart and a
+    /// changelevel (a load: `save_load_round_trips_the_world_digest`).
+    #[test]
+    fn client_clock_is_the_server_clock() {
+        let mut w = build_walk().expect("e1m1 boots");
+        let t0 = w.server.time();
+        assert!(t0 > 1.0, "sv.time at spawn: 1.0 + the signon frames ({t0})");
+        assert_eq!(w.clock, t0, "the first frame draws at cl.time = sv.time");
+        for _ in 0..5 {
+            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+            assert_eq!(w.clock, w.server.time());
+        }
+        let t = w.clock;
+        let _ = step_walk(&mut w, 0.05, true, 320, 200); // paused behind the menu
+        assert_eq!((w.clock, w.server.time()), (t, t));
+        try_restart(&mut w);
+        assert_eq!(w.clock, w.server.time());
+        assert!(w.clock < t, "a restarted level's clock starts over");
+        try_changelevel(&mut w, "e1m2");
+        assert_eq!(w.map_name, "maps/e1m2.bsp");
+        assert_eq!(w.clock, w.server.time());
+        assert!(w.clock > 1.0 && w.clock < 2.0, "{}", w.clock);
     }
 }

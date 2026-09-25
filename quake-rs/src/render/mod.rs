@@ -86,6 +86,7 @@ pub use alias::{ModelInstance, Viewmodel};
 pub use light::{LIGHTSTYLES, NEUTRAL_LIGHTSTYLE_SCALES};
 pub use part::draw_particles;
 pub use sprite::SpriteInstance;
+pub use surf::{mip_cvars, set_mip_cvars, surface_cache_usage, MipCvars};
 pub use stats::{render_stats_begin, render_stats_end, set_render_stats_clock, RenderStats};
 pub use view::{
     build_gamma_table, content_cshift, cshift_ramps, powerup_cshift, view_bob, viewmodel_angles,
@@ -655,19 +656,15 @@ pub fn render_scene(
 /// lightmap. An empty `external` slice draws nothing — byte-identical to the
 /// pre-external renderer, which is why every prior caller passes `&[]`.
 ///
-/// The `viewmodel`, when present, is drawn **last and on top** of everything:
-/// it is anchored to the camera (Quake's `cl.viewent`) and uses its own depth
-/// buffer ([`draw_viewmodel`]), so a wall directly ahead can never hide the gun
-/// and the shared world depth buffer is left untouched.
+/// The `viewmodel`, when present, is drawn **last** (`R_DrawViewModel`,
+/// [`draw_viewmodel`]): Quake's `cl.viewent` at V_CalcRefdef's gun origin,
+/// drawn by the alias pipeline into the shared z-buffer with its 1/z tripled,
+/// so only a wall right against the eye can cover it.
 ///
-/// `time` is the game/server time in seconds, used to animate the special
-/// surfaces: liquid faces (miptex name `*…`) get the Quake turbulent SIN warp
-/// and sky faces (miptex name `sky…`) get the two-layer scroll. An advancing
-/// `time` makes water ripple and sky drift; `time == 0` renders them static
-/// (still textured, just not animated). The turbulent sine table is built once
-/// per call (a plain `[f32; 256]`, no global state) and shared with the world
-/// and brush-submodel passes. Walls, alias models, and the viewmodel ignore
-/// `time` entirely.
+/// `time` is `cl.time` in seconds: the liquid turb (`Turbulent8`'s 16.16
+/// `sintable`, built once per call and shared by the world and brush-submodel
+/// passes), the sky's two-layer scroll, animated wall textures
+/// (`R_TextureAnimation`) and alias frame/skin groups all run on it.
 ///
 /// ## Particles
 /// `particles` is the live set of engine particles (Quake's `particle()`
@@ -1315,6 +1312,7 @@ mod tests {
             height: 64,
             offsets: [0, 0, 0, 0],
             pixels: synthetic_liquid_pixels(),
+            mips: Default::default(),
             anim: None,
         };
         let sky = MipTex {
@@ -1323,6 +1321,7 @@ mod tests {
             height: 128,
             offsets: [0, 0, 0, 0],
             pixels: synthetic_sky_pixels(),
+            mips: Default::default(),
             anim: None,
         };
         bsp.textures = vec![Some(liquid), Some(sky)];

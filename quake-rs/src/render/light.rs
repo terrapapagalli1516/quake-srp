@@ -114,7 +114,34 @@ impl LightMap<'_> {
         // bites when dynamic lights push a luxel above ~510.
         ((light / 255.0) * 2.0).min(MAX_LIGHT_FACTOR)
     }
+
+    /// `R_BuildLightMap`'s `blocklights`, after its "bound, invert, and shift":
+    /// one value per luxel (`lmw * lmh`, row-major) in `out`, each
+    /// `(255*256 - bl) >> (8 - VID_CBITS)` clamped to `>= 1 << 6`, where `bl` is
+    /// the C's 8.8 sum — every style's luxel times its `d_lightstylevalue`, plus
+    /// `R_AddDynamicLights`' truncated `(rad - dist)*256`. The row of the colormap
+    /// a texel takes is `light >> 8` of the value interpolated between these
+    /// ([`draw_surface_block`](super::surf::draw_surface_block)).
+    ///
+    /// The luxels here are that same sum over 256 (`d_lightstylevalue / 256` is a
+    /// style's scale, and a dynamic light adds a whole 8.8 step over 256), each
+    /// term exact in `f32`, so `luxel * 256` is the C's integer `bl`. A luxel the
+    /// store does not have reads 255, as [`Luxels::at`] does.
+    pub(super) fn blocklights_into(&self, out: &mut Vec<i32>) {
+        let n = self.lmw * self.lmh;
+        out.clear();
+        out.extend((0..n).map(|i| {
+            let bl = (self.luxels.at(i) as f64 * 256.0).round();
+            // `bl` is at most a few million, so the i64 is exact; a non-finite
+            // luxel (never produced) saturates and lands on a clamp.
+            let t = (65280 - bl as i64) >> (8 - VID_CBITS);
+            t.clamp(1 << 6, 65280 >> (8 - VID_CBITS)) as i32
+        }));
+    }
 }
+
+/// `VID_CBITS`: the colormap has `1 << VID_CBITS` light rows.
+const VID_CBITS: u32 = 6;
 
 /// Quake's `gfx/colormap.lmp` is `COLORMAP_ROWS * 256` bytes: `COLORMAP_ROWS`
 /// successive light rows of 256 palette indices each. Row 0 is the brightest
@@ -1768,6 +1795,24 @@ mod tests {
     /// The brightness -> colormap-row curve must reproduce `R_BuildLightMap`'s
     /// bound/invert/shift exactly (the no-overbright clamp at the top, the
     /// darkest row at the bottom, and the monotone ramp in between).
+    /// `R_BuildLightMap`'s bound, invert and shift, from the luxel sum in 8.8:
+    /// `luxel * d_lightstylevalue` (256 = a static face, 264 = style 'm').
+    #[test]
+    fn blocklights_are_r_build_light_map_inverted() {
+        let bytes = [100u8, 0, 255, 128];
+        let lm = LightMap { luxels: Luxels::Static(&bytes), lmw: 2, lmh: 2, texmins: [0.0, 0.0] };
+        let mut out = Vec::new();
+        lm.blocklights_into(&mut out);
+        // (65280 - 100*256) >> 2 = 9920; 0 -> 16320 (row 63); 255*256 -> 0 -> clamp 64.
+        assert_eq!(out, [9920, 16320, 64, (65280 - 128 * 256) >> 2]);
+        // Style 'm' (264/256): 100*264 = 26400 -> (65280 - 26400) >> 2 = 9720. Plus
+        // a dynamic light's 8.8 step of 1000/256: 27400 -> 9470.
+        let owned = vec![100.0 * 264.0 / 256.0, 100.0 * 264.0 / 256.0 + 1000.0 / 256.0, 300.0, 1e9];
+        let lm = LightMap { luxels: Luxels::Owned(owned), lmw: 2, lmh: 2, texmins: [0.0, 0.0] };
+        lm.blocklights_into(&mut out);
+        assert_eq!(out, [9720, 9470, 64, 64]);
+    }
+
     #[test]
     fn colormap_row_matches_quake_curve() {
         // brightness 2.0 (the static fullbright ceiling) and anything brighter

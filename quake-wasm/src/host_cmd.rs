@@ -431,20 +431,20 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.pitch = pitch;
 
     // New level, clean slate: drop the old level's particles / dynamic lights /
-    // beams (CL_ClearState memsets cl_beams) and reset the animation clock so
-    // liquids/sky restart from zero.
+    // beams (CL_ClearState memsets cl_beams); cl.time is the new server's.
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
     w.beams.clear();
     // Clear the on-screen text overlay on level load (SCR_BeginLoadingPlaque calls
     // Con_ClearNotify + scr_centertime_off=0): drop the half-built line AND the
-    // already-flushed notify lines + the centerprint. Their expiry is an ABSOLUTE
-    // clock value, and the clock resets to 0 below, so a stale "You got the Quad!"
-    // would otherwise linger over the new level for old-clock seconds.
+    // already-flushed notify lines + the centerprint (their expiry is an
+    // absolute time).
     w.notify.clear();
     w.centerprint = None;
-    w.clock = 0.0;
+    // cl.time: the new server's sv.time (SV_SpawnServer's 1.0 + the signon
+    // frames), which CL_LerpPoint snaps the client clock to.
+    w.clock = w.server.time();
     // CL_ClearState zeroes cl.cshifts and cl.faceanimtime (view.c's static
     // v_dmg_* kick is not in `cl` and runs out on its own).
     w.damage_blend = 0.0;
@@ -526,7 +526,9 @@ pub(crate) fn try_restart(w: &mut Walk) {
     w.beams.clear();
     w.notify.clear();
     w.centerprint = None;
-    w.clock = 0.0;
+    // cl.time: the new server's sv.time (SV_SpawnServer's 1.0 + the signon
+    // frames), which CL_LerpPoint snaps the client clock to.
+    w.clock = w.server.time();
     w.damage_blend = 0.0;
     w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
