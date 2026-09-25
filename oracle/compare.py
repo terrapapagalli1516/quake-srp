@@ -152,6 +152,15 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
         "--time", repr(meta["time"]),
         "--fov", repr(meta["fov_x"]),
     ]
+    if args.aspect is not None:
+        cmd += ["--aspect", str(args.aspect)]
+    # A view smaller than the screen (viewsize below 120): the port renders
+    # r_refdef.vrect alone, placed on the screen (the sky is centred on it).
+    vx, vy, vw, vh = meta["vrect"]
+    if (vw, vh) != (w, h):
+        cmd += ["--vrect", f"{vx},{vy},{vw},{vh}"]
+    if args.exactpersp:
+        cmd += ["--exactpersp", "1"]
     if ents:
         cmd += ["--ents", str(out / f"{case}.c.ents")]
     # id's live dynamic lights (muzzle flashes, explosions: e.g. --c-cmd +attack)
@@ -250,10 +259,15 @@ def main() -> None:
     ap.add_argument("--spans", type=int, choices=(8, 16, 1), default=8,
                     help="C span routine: 8 = id's portable C D_DrawSpans8 (default), 16 = the asm's "
                          "16-pixel segments (d_subdiv16), 1 = exact per-pixel perspective (experiment)")
+    ap.add_argument("--exactpersp", action="store_true",
+                    help="the port's exact per-pixel perspective extra (default: id's 16-pixel spans, "
+                         "which --spans 16 gives id's side too)")
     ap.add_argument("--c-cmd", action="append", default=[],
                     help="extra C console command before the map loads (repeatable), e.g. 'd_mipscale 0' "
                          "(d_mipscale and d_mipcap are handed to the port as well)")
-    ap.add_argument("--aspect", type=float, help="C vid.aspect (default 1.0, square pixels)")
+    ap.add_argument("--aspect", type=float,
+                    help="vid.aspect, both renderers (default 1.0, square pixels; 0.8333333 = id's "
+                         "16:10 modes on a 4:3 monitor, what the browser page shows)")
     ap.add_argument("--crop", action="append", default=[], help="name:x,y,w,h — zoomed crop per case")
     ap.add_argument("--pak", type=Path, default=DEFAULT_PAK)
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs")
@@ -292,6 +306,9 @@ def main() -> None:
                 continue
             port_out = run_port(args, qt, case, mapname, meta, mode == "ents", out)
             c_idx = read_pnm(out / f"{case}.c.pgm")
+            vx, vy, vw, vh = meta["vrect"]
+            if (vw, vh) != (w, h):  # compare the 3-D view rectangle (viewsize below 120)
+                c_idx = c_idx[vy:vy + vh, vx:vx + vw]
             c_rgb = pal[c_idx]
             p_rgb = read_pnm(out / f"{case}.port.ppm")
             if p_rgb.shape != c_rgb.shape:

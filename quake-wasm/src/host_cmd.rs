@@ -7,10 +7,9 @@ use quake_rs::bsp::Bsp;
 use quake_rs::dlight::DynamicLights;
 use quake_rs::particles::ParticleSystem;
 use quake_rs::progs::Progs;
-use quake_rs::render;
 use quake_rs::server::Server;
 
-use crate::app::{build_walk_map, ensure_app, spawn_view_angles, App, Walk};
+use crate::app::{build_walk_map, ensure_app, spawn_view_angles, Walk};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
 
@@ -72,8 +71,8 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
                 a.console.println("web extras (not id's; see Options):");
-                for (name, _, what) in WASM_EXTRAS {
-                    a.console.println(format!("  {:<19}{what}", format!("{name} 0|1")));
+                for line in crate::extras::help_lines() {
+                    a.console.println(line);
                 }
             });
             return;
@@ -103,10 +102,10 @@ pub(crate) fn execute_console_command(line: &str) {
         _ => {}
     }
 
-    // The Web extras (Options > Web extras): the port's opt-in departures,
-    // under a `wasm_` prefix no id command or cvar uses.
-    if let Some(&(name, extra, _)) = WASM_EXTRAS.iter().find(|(n, _, _)| *n == cmd_lower) {
-        ensure_app(|a| wasm_extra_command(a, name, extra, argv.get(1).copied()));
+    // The Web extras (`wasm_*`, not id's; all off by default): `extras.rs`.
+    let mut extra = false;
+    ensure_app(|a| extra = crate::extras::console_command(a, &argv));
+    if extra {
         return;
     }
 
@@ -157,30 +156,6 @@ pub(crate) fn execute_console_command(line: &str) {
     );
     if !known {
         ensure_app(|a| a.console.println(format!("unknown command: {cmd}")));
-    }
-}
-
-/// The Web extras' console commands (name, extra, `help` line), each
-/// switching one extra: no argument prints it the way `Cvar_Command` prints a
-/// cvar, one argument sets it (`atof(arg) != 0` is on). Exact perspective is
-/// left out of a build without it ([`render::EXTRAS_HAS_EXACTPERSP`]).
-type WasmExtra = (&'static str, render::Extra, &'static str);
-const WASM_EXTRAS_ALL: [WasmExtra; 3] = [
-    ("wasm_uncapped", render::Extra::Uncapped, "no 72 fps cap"),
-    ("wasm_showfps", render::Extra::ShowFps, "frame rate"),
-    ("wasm_exactpersp", render::Extra::ExactPersp, "exact persp."),
-];
-const WASM_EXTRAS: &[WasmExtra] =
-    if render::EXTRAS_HAS_EXACTPERSP { &WASM_EXTRAS_ALL } else { WASM_EXTRAS_ALL.split_at(2).0 };
-
-/// Run one `wasm_*` extra command (see [`WASM_EXTRAS`]).
-fn wasm_extra_command(a: &mut App, name: &str, extra: render::Extra, arg: Option<&str>) {
-    match arg {
-        None => {
-            let on = a.menu.extras().get(extra) as u8;
-            a.console.println(format!("\"{name}\" is \"{on}\""));
-        }
-        Some(v) => a.menu.set_extra(extra, v.parse::<f32>().unwrap_or(0.0) != 0.0),
     }
 }
 
@@ -640,11 +615,7 @@ mod tests {
         run_console_line("wasm_showfps junk"); // atof("junk") = 0: off
         assert_eq!(extras(), 0);
         run_console_line("wasm_exactpersp 1");
-        assert_eq!(
-            extras(),
-            if render::EXTRAS_HAS_EXACTPERSP { 4 } else { 0 },
-            "exact perspective only where the renderer has it"
-        );
+        assert_eq!(extras(), 4);
         run_console_line("help");
         let help: Vec<String> = APP.with(|c| {
             c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()

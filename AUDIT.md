@@ -268,7 +268,7 @@ lightmap + colormap-row + colormap-index every pixel.
 | H3 | `SV_WaterJump` (auto climb-out-of-water push) missing | ✅ fixed `1b29e97` |
 | H4 | Animated `+texture` sequencing (`Mod_LoadTextures`) + per-frame `R_TextureAnimation` missing — water/teleporters/switches/lights don't animate | ✅ fixed `8f13cb1` (R_TextureAnimation 10 Hz cycles) |
 | H5 | ALIAS_GROUP frames never animate — only the first sub-pose is drawn (e.g. flames) | ✅ fixed `8f13cb1` (group-frame + skin-group anim by time) |
-| H6 | `pixelAspect` — frame presented 16:10 square-pixel instead of authored 4:3 | ✅ fixed `9876cb4` (present at 4:3) |
+| H6 | `pixelAspect` — frame presented 16:10 square-pixel instead of authored 4:3 | ✅ fixed `9876cb4` (present at 4:3); the projection's `pixelAspect` ✅ `quake/w2b` |
 | H7 | `R_LavaSplash` not implemented — TE_LAVASPLASH faked as a 20-particle burst | ✅ fixed `8bda8cb` (TE→R_LavaSplash/R_TeleportSplash) |
 | H8 | `R_TeleportSplash` not implemented — TE_TELEPORT faked, wrong color | ✅ fixed `8bda8cb` (TE→R_LavaSplash/R_TeleportSplash) |
 | H9 | `R_RocketTrail` entirely missing — no rocket/grenade/gib/tracer/voor trails | ✅ fixed `8bda8cb` (trails wired per model flags) |
@@ -474,7 +474,7 @@ seeming not to do the right thing. Both real, plus what they exposed:
   "Fullscreen" headers and T/D test/default keys is not modelled); the port's
   2-D layer stays a scaled 320x200 screen (WinQuake draws it 1:1 at higher
   modes, with a tiled strip beside a 320-wide sbar); pixel aspect stays square
-  (id's 320x200 uses pixelAspect 0.8333 for 4:3 CRTs).
+  (id's 320x200 uses pixelAspect 0.8333 for 4:3 CRTs) — fixed on `quake/w2b`.
 
 Evidence: 489 lib + 67 wasm tests (blink rates, refdef at 100/110/120/90/70/
 50/30 + intermission + scaled modes, tile/compose, sb_lines HUD gating, slider,
@@ -923,6 +923,137 @@ C followed and the test are in the commit message.
   the notify lines (the C's one buffer shows `]god` / `godmode ON` there
   for 3 s after the console closes).
 
+## Projection and spans (2026-09-25, branch `quake/w2b`)
+
+**On the merged base** (`quake/overnight` `bbfc6bc`: the mip levels, the census and review fixes), all
+four items: goldens e1m1 `959d0221` → `4807aaa1` (4983 px, 1.95%), e1m2
+`0cd18471` → `8ce25660` (5808 px, 2.27%), e1m3 `b63ae8b7` → `3531e9cd` (4077 px,
+1.59%) — all from the 16-pixel spans (the aspect and the sky centre leave the
+square-pixel full-screen scene alone). Oracle world, 320x200, against id's x86
+spans (`--spans 16`): 92.84 / 94.36 / 96.56 / 87.20 → **99.96 / 99.21 / 99.98 /
+99.91**; at the page's aspect (`--aspect 0.8333333`) 100.00 / 98.73 / 100.00 /
+100.00 and 100.00 at 640x400; against id's portable C (`--spans 8`, the
+default) 97.44 / 97.12 / 99.16 / 94.96 → 94.57 / 96.09 / 97.27 / 91.72 (8 against
+16 now). The exact extra reproduces the merged base byte for byte. The
+paragraphs below give each item's own before/after as measured on the old
+base.
+
+Measured with `oracle/compare.py` (exact-palette-index match %, 320x200,
+world, e1m1/e1m2/e1m3/e1m7 unless stated).
+
+- ✅ **Pixel aspect** (the second half of H6, PERF_PLAN A4). Every render
+  preset is 16:10 and the page always shows the canvas at 4:3, as DOS Quake's
+  320x200 filled a 4:3 monitor; the port projected square pixels, so the whole
+  3-D view was shown 1.2x too tall. id folds the display into the projection:
+  `vid.aspect = (h/w)*(320/240)` (vid_win.c) is `R_ViewChanged`'s
+  `pixelAspect`, `yscale = xscale*pixelAspect`, and the frustum, the alias
+  scales, sprites and particles all take it. Now `render::RenderOptions::
+  pixel_aspect`, one `Projection` for every pass (world, submodels, external
+  boxes, alias models and the gun, sprites, particles, the frustum); the wasm
+  shell passes `vid_aspect(w, h, 4/3)` — 0.8333 at every preset. The sky
+  keeps its screen-pixel mapping (`D_Sky_uv_To_st` has no aspect), and a
+  particle stays a pixel square (`d_y_aspect_shift` is 0 below 1.4).
+  - **Oracle** (`--aspect 0.8333333` now reaches both renderers; id at mip 0
+    and exact perspective): 31.35 / 26.90 / 20.23 / 14.23 (the port square)
+    → 95.89 / 97.60 / 98.50 / 98.79, against 95.61 / 97.40 / 98.50 / 98.66
+    for both square. Entity pixels 100 / 100 / 98.8 / 100; the e1m2 altar
+    view (id as shipped) 100% of 684 entity pixels; with the gun
+    (`--viewmodel --settle 3`) 94.44 / 97.21 / 98.62.
+  - **Goldens unchanged** (`quaketool scene` writes a square-pixel PPM:
+    aspect 1). At aspect 1 every pass is bit-identical to before.
+  - Page screenshots before/after at 320x200 and 960x600 (e1m1 spawn): the
+    rivet grid on the walls, square in the texture, was 1.17:1 tall and is
+    1:1; the view shows 1.2x more vertically, and the gun is DOS Quake's.
+- ✅ **16-pixel perspective spans** (oracle class 7; the LOW "affine span
+  subdivision"). The shipped x86 WinQuake drew the surface cache with
+  `D_DrawSpans16` (`d_draw16.s`, `d_subdiv16` 1): exact perspective every 16
+  pixels, affine in between; the port divided at every pixel. Now
+  `raster.rs`'s `span16_cached` is the asm's integer algorithm: the 16.16
+  coordinates exact at a span's first pixel (clamped to `[0, bbextents]`) and
+  at each full segment's end (clamped to `[4096, bbextents]`), stepped by
+  `(snext - s)/16` with the 20 fractional bits the asm carries; the last
+  segment lands on the span's last pixel with `reciprocal_table_16`'s
+  `floor(ds * R[n] / 2^31)`. Liquids follow `Turbulent8` (C in both builds):
+  16-pixel segments, `>> 4` steps, the C division on the last one, the
+  `(CYCLE << 16) - 1` mask per segment. And the spans are id's: `R_ScanEdges`
+  cuts a surface's row at every nearer surface's edge, so the 16-pixel grid
+  restarts where a surface becomes visible; the port draws front to back
+  against its z-buffer, so a span is a run of pixels passing the z test. Sky
+  stays on its 32-pixel `D_DrawSkyScans8` runs, found the same way.
+  - **Oracle, id at mip 0** (the mip class removed), `--spans 16` on id's
+    side: 88.74 / 89.99 / 93.57 / 85.62 → **95.61 / 97.43 / 98.51 / 98.68**,
+    the same as exact against exact (95.61 / 97.40 / 98.50 / 98.66); 640x480
+    93.69 / 93.85 / 96.57 / 95.01 → 95.93 / 97.60 / 98.50 / 98.75. Without the
+    z-test runs (the 16-pixel grid anchored at the polygon's left edge) e1m1 /
+    e1m2 read 94.40 / 95.20: the remainder was stripes on partly hidden walls.
+    Liquid pixels of an oblique teleporter (e1m1, `--view=1260,1050,-368,0,60,0
+    --time 3.25`): 92.15% → 100.00%. Floors and pools, whose 1/z is constant
+    along a row, were already exact.
+  - **Id as shipped on x86** (`--spans 16`, id's own mips): 80.37 / 63.78 /
+    65.41 / 67.94 → 86.95 / 64.29 / 66.14 / 80.35; against id's portable C
+    (`--spans 8`, the oracle's default) it falls, as it must: 84.74 / 64.06 /
+    65.88 / 75.62 → 82.04 / 63.79 / 65.56 / 72.23.
+  - **The oracle's `--spans 16`** was a C re-creation with `D_DrawSpans8`'s
+    integer steps (`>> 4`, clamp 16, division); it now has the asm's (the
+    exact 1/16 steps, clamp 4096, `reciprocal_table_16`). The two differ on 0 /
+    6 / 40 / 40 pixels of the four standard frames; the port with either
+    arithmetic matches id within ±0.05 points, the size of id's float noise.
+  - **Goldens** (640x400): e1m1 `bb64996e` → `2023d7d9` (5025 px, 1.96%),
+    e1m2 `8186a64c` → `1ac070d0` (7612 px, 2.97%), e1m3 `f41e8b59` →
+    `cc121e29` (5218 px, 2.04%) — texel steps inside 16-pixel segments.
+  - **Brush entities before the world.** id's bmodel faces are in the
+    world's edge list, so an item box or a door cuts the spans of the wall
+    behind it; the port now draws brush entities first, so they cut the
+    world's z-test runs too. e1m3's standard entity frame (the shells box):
+    99.94 → 99.98% against `--spans 16` (the wall right of the box had
+    16-pixel stripes); 61 views facing doors, plats and buttons on e1m1-e1m3
+    unchanged; the exact extra unchanged. Goldens (on the merged base with
+    the mip levels): e1m1 `74522852` → `4807aaa1` (288 px), e1m2 `8ce25660`
+    unchanged, e1m3 `ce0f5c89` → `3531e9cd` (13 px).
+  - **Speed** (on the merged base): wasm world −16 to −23% (demo1 at 1280x800
+    4.11 → 3.30 ms, walk_e1m3 3.35 → 2.73), step −5 to −13%; native world
+    +30-40%. PERF_PLAN §6 has the table.
+  - The old per-pixel perspective stays as an opt-in extra
+    (`RenderOptions::exact_perspective`, `quaketool view --exactpersp 1`,
+    `compare.py --exactpersp`): byte-identical to before (the oracle's exact
+    rows are unchanged). The uncached per-pixel wall path (faces over the
+    surface-cache size cap, or no colormap — never in id's maps) stays exact.
+- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0). The browser
+  reaches the exact-perspective renderer option through a console variable.
+  All of the port's opt-in extras live in one place, `quake-wasm/src/
+  extras.rs`: a table of `wasm_*` cvars that behave like id's (`wasm_x` prints
+  `"wasm_x" is "0"`, `wasm_x 1` sets it, `Q_atof` semantics), process state like
+  id's cvars (not saved), read by `vid::render_options` each frame; `help`
+  lists them. An extras menu can drive the same table. Always Run, the one
+  default departure, stays with the menu options (it is id's own setting).
+  (Since the merge with `quake/extras`: the values live in the menu, on
+  Options > Web extras, and the page persists them; `extras.rs` keeps the
+  cvar table and hands the renderer each frame's copy. See "Web extras".)
+- ✅ **Sky centre below viewsize 120** (the open item of oracle class 4).
+  `D_Sky_uv_To_st` centres the sky on the SCREEN (`u - (vid.width>>1)`,
+  `(vid.height>>1) - v` in screen pixels); the port centred it on the view
+  rectangle — 24 rows off at the default viewsize 100, 12 at 110, both axes
+  inside a border. `RenderOptions::screen` (the vrect's corner on the
+  `vid_w x vid_h` screen) now gives `SkyView` the screen's centre in the
+  view's pixels; the page passes it every frame. The oracle compares views
+  below 120 now (`compare.py --viewsize N` hands id's vrect to `quaketool
+  view --vrect` and crops id's frame to it). e1m2 at `--spans 16`: the sky
+  region matches 75.1 / 46.4 / 43.4% at viewsize 100 / 110 / 70 before, 100%
+  after; the whole view 98.90 → 99.97, 97.56 → 99.56, 95.98 → 99.03 (what is
+  left at 110 and 70, and at 120 too — 99.21 — is a ceiling face at the top
+  right (a face at a finer mip in id than its geometry gives, oracle class
+  1's open note) and one floor edge, the same with exact perspective on the merged
+  base). Goldens unchanged (the scene view is the screen).
+- **Underwater** (with `quake/polish`'s warp buffer): an underwater view is
+  rendered at `warp_vrect`'s size with the screen's pixel aspect (for a
+  16:10 mode id's `vid.aspect*(h/w)*(vid.width/vid.height)` is `vid.aspect`)
+  and the sky placed as id places it — `D_Sky_uv_To_st` measures the warp
+  buffer's pixels from the SCREEN's centre, so above 320x200 an underwater
+  view of the sky is off-centre in WinQuake too, and here. Open: for modes
+  taller than 16:10 (not a preset) `warp_vrect` narrows the buffer because
+  the port had square pixels; with `pixel_aspect` id's 320-wide buffer and
+  its aspect are now possible (not done).
+
 ## Web extras: the opt-in departures (2026-09-25, branch `quake/extras`)
 
 The rule: faithful by default, Always Run the only default departure; other
@@ -932,8 +1063,12 @@ extras**, a 14th Options row in the slot id's `_WIN32` build gives its own
 `M_Options_Draw`'s idiom (qplaque + OPTIONS title, a white "Web extras: not
 in id's Quake" header, `M_Print` labels, on/off at x=220, the 4 Hz cursor,
 menu1/2/3, Esc back to the same Options row) with help lines for the
-highlighted row. Each extra is also a console command. None is a default.cfg
-cvar, so Reset to defaults and re-boots keep them; the page persists them in
+highlighted row. Each extra is also a console variable. One table lists them
+(`render::WEB_EXTRAS`: the value, its `wasm_*` name, its row label and help);
+one place holds their values (the menu's `Extras`, what the page draws and
+persists); `quake-wasm/src/extras.rs` (from `quake/w2b`) is their console
+side and hands the renderer each frame's copy. None is a default.cfg cvar,
+so Reset to defaults and re-boots keep them; the page persists them in
 localStorage. With every extra off the port is unchanged (goldens, all seven
 earlier verify scripts).
 
@@ -941,7 +1076,7 @@ earlier verify scripts).
 |---|---|---|---|
 | Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
 | Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
-| Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (the renderer option is `quake/w2b`'s). Hidden behind `EXTRAS_HAS_EXACTPERSP` until that option is on this branch. | departure, opt-in via Web extras, default off |
+| Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s). | departure, opt-in via Web extras, default off |
 
 Faithful, same branch:
 - ✅ **viewsize persists across reloads** — id's `scr_viewsize` is archived
@@ -965,4 +1100,4 @@ box and byte-identical when off, the `wasm_*` commands and the exports;
 
 ## LOW (27)
 
-Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.
+Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

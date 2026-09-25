@@ -69,11 +69,6 @@ const ROW_EXTRAS: usize = 13;
 // Web extras: the port's opt-in departures from id's Quake
 // ---------------------------------------------------------------------------
 
-/// Whether the Extras screen lists [`Extra::ExactPersp`]. The single switch
-/// that hides the row (and refuses `wasm_exactpersp`) for a build whose
-/// renderer has no exact-perspective option to drive.
-pub const EXTRAS_HAS_EXACTPERSP: bool = false;
-
 /// The port's opt-in departures from id's Quake (Options > Web extras, and
 /// the `wasm_*` console commands). Every one defaults OFF: with all of them
 /// off the port behaves as id's Quake (Always Run aside). They are not cvars
@@ -92,7 +87,7 @@ pub struct Extras {
     pub exact_persp: bool,
 }
 
-/// One row of the Extras screen.
+/// One Web extra (a row of [`WEB_EXTRAS`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Extra {
     Uncapped,
@@ -107,14 +102,9 @@ impl Extras {
         self.uncapped as u32 | (self.show_fps as u32) << 1 | (self.exact_persp as u32) << 2
     }
 
-    /// The inverse of [`Extras::bits`]; unknown bits are ignored, and so is
-    /// the exact-perspective bit when the build has no such option.
+    /// The inverse of [`Extras::bits`]; unknown bits are ignored.
     pub fn from_bits(bits: u32) -> Extras {
-        Extras {
-            uncapped: bits & 1 != 0,
-            show_fps: bits & 2 != 0,
-            exact_persp: EXTRAS_HAS_EXACTPERSP && bits & 4 != 0,
-        }
+        Extras { uncapped: bits & 1 != 0, show_fps: bits & 2 != 0, exact_persp: bits & 4 != 0 }
     }
 
     /// Whether `e` is on.
@@ -126,59 +116,58 @@ impl Extras {
         }
     }
 
-    /// Switch `e` on or off (exact perspective stays off in a build without
-    /// it).
+    /// Switch `e` on or off.
     pub fn set(&mut self, e: Extra, on: bool) {
         match e {
             Extra::Uncapped => self.uncapped = on,
             Extra::ShowFps => self.show_fps = on,
-            Extra::ExactPersp => self.exact_persp = on && EXTRAS_HAS_EXACTPERSP,
+            Extra::ExactPersp => self.exact_persp = on,
         }
     }
 }
 
-/// The Extras rows, top to bottom: the extra, its label (right-justified to
-/// the Options label column, like id's), and three bronze help lines shown
-/// under the list for the highlighted row. Exact perspective is last so
-/// hiding it ([`EXTRAS_HAS_EXACTPERSP`]) drops the tail.
-const EXTRAS_ROWS_ALL: [(Extra, &str, [&str; 3]); 3] = [
-    (
-        Extra::Uncapped,
-        "    Uncapped framerate",
-        [
-            "One frame every display refresh,",
-            "past Quake's 72 fps cap",
-            "console: wasm_uncapped 0/1",
-        ],
-    ),
-    (
-        Extra::ShowFps,
-        "              Show FPS",
-        [
-            "Frames per second, bottom right,",
-            "as QuakeWorld's show_fps drew it",
-            "console: wasm_showfps 0/1",
-        ],
-    ),
-    (
-        Extra::ExactPersp,
-        "     Exact perspective",
-        [
-            "Perspective exact at every pixel,",
-            "not id's 16-pixel spans",
-            "console: wasm_exactpersp 0/1",
-        ],
-    ),
-];
-
-/// The rows this build shows.
-fn extras_rows() -> &'static [(Extra, &'static str, [&'static str; 3])] {
-    if EXTRAS_HAS_EXACTPERSP {
-        &EXTRAS_ROWS_ALL
-    } else {
-        &EXTRAS_ROWS_ALL[..2]
-    }
+/// One Web extra, as the Options > Web extras page and the console know it.
+#[derive(Debug, Clone, Copy)]
+pub struct WebExtra {
+    /// The value it switches.
+    pub extra: Extra,
+    /// Its console variable (`wasm_*`, a name no id command or cvar uses).
+    pub cvar: &'static str,
+    /// Its row label, right-justified to the Options label column like id's.
+    pub label: &'static str,
+    /// The two bronze help lines shown under the list while its row is
+    /// highlighted (a third names the console variable).
+    pub help: [&'static str; 2],
+    /// Its one-line summary in the console's `help`.
+    pub summary: &'static str,
 }
+
+/// THE table of the port's opt-in extras, in Extras-page order: the page's
+/// rows and the console's `wasm_*` variables are both read from it, and
+/// their values are the menu's [`Extras`].
+pub const WEB_EXTRAS: [WebExtra; 3] = [
+    WebExtra {
+        extra: Extra::Uncapped,
+        cvar: "wasm_uncapped",
+        label: "    Uncapped framerate",
+        help: ["One frame every display refresh,", "past Quake's 72 fps cap"],
+        summary: "no 72 fps cap",
+    },
+    WebExtra {
+        extra: Extra::ShowFps,
+        cvar: "wasm_showfps",
+        label: "              Show FPS",
+        help: ["Frames per second, bottom right,", "as QuakeWorld's show_fps drew it"],
+        summary: "frame rate",
+    },
+    WebExtra {
+        extra: Extra::ExactPersp,
+        cvar: "wasm_exactpersp",
+        label: "     Exact perspective",
+        help: ["Perspective exact at every pixel,", "not id's 16-pixel spans"],
+        summary: "exact persp.",
+    },
+];
 
 /// `MULTIPLAYER_ITEMS` (menu.c): the multiplayer menu has 3 entries (Join /
 /// New Game / Setup). Netcode is out of scope for this port, so like the C with
@@ -422,7 +411,7 @@ impl MenuScreen {
             MenuScreen::Options => OPTIONS_ITEMS,
             MenuScreen::Keys => NUM_BINDNAMES,
             MenuScreen::Video => RESOLUTION_PRESETS.len(),
-            MenuScreen::Extras => extras_rows().len(),
+            MenuScreen::Extras => WEB_EXTRAS.len(),
             MenuScreen::Help | MenuScreen::Quit => 1,
         }
     }
@@ -1220,7 +1209,7 @@ impl Menu {
         // direction, like M_AdjustSliders' checkbox cases.
         if self.screen == MenuScreen::Extras {
             self.snd(MenuSound::Menu3);
-            if let Some(&(e, _, _)) = extras_rows().get(self.cursor) {
+            if let Some(e) = WEB_EXTRAS.get(self.cursor).map(|w| w.extra) {
                 let on = self.extras.get(e);
                 self.extras.set(e, !on);
             }
@@ -1880,21 +1869,26 @@ fn draw_extras_screen(
     draw_string_scaled(
         image, cc, centred(EXTRAS_HEADER), EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette,
     );
-    let rows = extras_rows();
-    for (i, &(e, label, _)) in rows.iter().enumerate() {
+    for (i, row) in WEB_EXTRAS.iter().enumerate() {
         let y = EXTRAS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
-        m_print(image, cc, OPTIONS_LABEL_X, y, label, scale, ox, oy, palette);
-        let on = checkbox_text(menu.extras.get(e));
+        m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy, palette);
+        let on = checkbox_text(menu.extras.get(row.extra));
         m_print(image, cc, OPTIONS_WIDGET_X, y, on, scale, ox, oy, palette);
     }
     let cy = EXTRAS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
-    if let Some((_, _, help)) = rows.get(menu.cursor) {
-        for (i, line) in help.iter().enumerate() {
+    if let Some(row) = WEB_EXTRAS.get(menu.cursor) {
+        for (i, line) in extras_help_lines(row).iter().enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
             m_print(image, cc, centred(line), y, line, scale, ox, oy, palette);
         }
     }
+}
+
+/// The three help lines under the Extras list for `row`: its two, then its
+/// console variable.
+fn extras_help_lines(row: &WebExtra) -> [String; 3] {
+    [row.help[0].to_string(), row.help[1].to_string(), format!("console: {} 0/1", row.cvar)]
 }
 
 /// Draw the Load or Save slot list, a port of `M_Load_Draw` / `M_Save_Draw`:
@@ -2931,8 +2925,8 @@ mod tests {
 
         // Checkbox rows: left and right both flip (menu3 each); Enter flips
         // with menu2 + menu3, like an Options checkbox row.
-        let rows = extras_rows();
-        for (i, &(e, _, _)) in rows.iter().enumerate() {
+        let rows = &WEB_EXTRAS;
+        for (i, e) in rows.iter().map(|r| r.extra).enumerate() {
             m.cursor = i;
             assert!(!m.extras().get(e));
             m.adjust(1);
@@ -2981,22 +2975,30 @@ mod tests {
     }
 
     #[test]
-    fn web_extras_bits_round_trip_and_exactpersp_follows_the_build_switch() {
+    fn web_extras_bits_round_trip() {
         for bits in 0..8u32 {
             let e = Extras::from_bits(bits);
-            let expect = if EXTRAS_HAS_EXACTPERSP { bits } else { bits & 0b011 };
-            assert_eq!(e.bits(), expect, "bits {bits:03b}");
+            assert_eq!(e.bits(), bits, "bits {bits:03b}");
+            let rows = [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp];
+            for (i, x) in rows.into_iter().enumerate() {
+                assert_eq!(e.get(x), bits & (1 << i) != 0, "bit {i} is {x:?}");
+            }
         }
         assert_eq!(Extras::from_bits(0xffff_fff8), Extras::default(), "unknown bits are ignored");
-        let mut e = Extras::default();
-        e.set(Extra::ExactPersp, true);
-        assert_eq!(e.exact_persp, EXTRAS_HAS_EXACTPERSP);
-        assert_eq!(MenuScreen::Extras.item_count(), 2 + EXTRAS_HAS_EXACTPERSP as usize);
-        assert_eq!(
-            extras_rows().iter().any(|r| r.0 == Extra::ExactPersp),
-            EXTRAS_HAS_EXACTPERSP,
-            "the row shows exactly when the build has the option"
-        );
+        assert_eq!(MenuScreen::Extras.item_count(), 3);
+    }
+
+    #[test]
+    fn web_extras_table_lists_each_extra_once_in_the_page_idiom() {
+        let extras: Vec<Extra> = WEB_EXTRAS.iter().map(|w| w.extra).collect();
+        assert_eq!(extras, [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp], "bit order");
+        for w in &WEB_EXTRAS {
+            assert!(w.cvar.starts_with("wasm_"), "{}: not an id name", w.cvar);
+            assert_eq!(w.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", w.cvar);
+            for line in extras_help_lines(w) {
+                assert!(line.len() <= 38, "{line:?} fits the 320-wide page");
+            }
+        }
     }
 
     #[test]
@@ -3049,14 +3051,14 @@ mod tests {
         assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
         let hx = (320 - EXTRAS_HEADER.len() * 8) / 2;
         assert_eq!(px(&img, hx, 32), pal[6], "the header is M_PrintWhite");
-        for (i, &(_, label, _)) in extras_rows().iter().enumerate() {
+        for (i, label) in WEB_EXTRAS.iter().map(|r| r.label).enumerate() {
             let y = 48 + i * 8;
             let first = label.bytes().position(|b| b != b' ').unwrap();
             assert_eq!(px(&img, 16 + first * 8, y), pal[5], "row {i} label bronze");
             assert_eq!(px(&img, 220, y), pal[5], "row {i} checkbox 'off' at x=220");
         }
         assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        let help = extras_rows()[0].2;
+        let help = WEB_EXTRAS[0].help;
         let hx0 = (320 - help[0].len() * 8) / 2;
         assert_eq!(px(&img, hx0, 88), pal[5], "row 0's help, bronze, from y=88");
         // realtime 0.1: the blink is off (glyph 12, blank).
@@ -3070,7 +3072,7 @@ mod tests {
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
         assert_eq!(px(&img, 220 + 16, 48), pal[0], "\"on\" is two characters");
         assert_eq!(px(&img, 220 + 16, 56), pal[5], "\"off\" is three");
-        let help1 = extras_rows()[1].2;
+        let help1 = WEB_EXTRAS[1].help;
         let hx1 = (320 - help1[0].len() * 8) / 2;
         assert_eq!(px(&img, hx1, 88), pal[5], "row 1's help once the cursor moves");
         assert_eq!(px(&img, 200, 56), pal[7], "the cursor on row 1");

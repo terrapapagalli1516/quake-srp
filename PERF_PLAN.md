@@ -286,7 +286,7 @@ The fidelity classes are:
 - **Done** (branch `quake/w1`): `scan_poly` walks each clipped polygon row by row under id's fill
   rule (pixel centre, top-left, half-open). The span loops in `raster_poly_cached`,
   `raster_poly_tex` and `raster_poly_flat` cover the cached, turb, sky, per-pixel and flat faces.
-  A `Span` is the place for 16-pixel subdivision. The gradients are not solved from a vertex
+  A `Span` is the place for 16-pixel subdivision (done on `quake/w2b`, §6). The gradients are not solved from a vertex
   triple; they are `D_CalcGradients`' analytic planes (`PolyGrads::for_plane`), with s and t
   relative to the eye and f64 steps: the absolute-s f32 interpolation misplaced ~0.3% of texels.
   - **Speed,** A/B against A0 in one sitting, median ms (load 3.5–5):
@@ -411,6 +411,13 @@ The fidelity classes are:
 - **Gain:** −24% of resolution-proportional 3-D work. That is about 3 ms at 1280×800 now, and about
   1.5 ms after A1.
 - **Risk: medium,** because the change cuts across every pass. It re-baselines every golden.
+- **Done.** The vrect half on branch `quake/options` (`calc_refdef`, the view rendered above
+  the status bar). The pixel aspect on `quake/w2b`: `RenderOptions::pixel_aspect` and one
+  `Projection` (`yscale = xscale · pixelAspect`) for every pass and the frustum; the page
+  passes `vid_aspect(w, h, 4/3)`, 0.8333 at every preset. Goldens unchanged (the scene tool
+  stays square). Speed within noise: the aspect adds no work, it only moves rows, and the
+  vertical field of view grows by 1.2x, so ~20% more of the world can be in view (see
+  `AUDIT.md`, "Projection and spans").
 
 **A5. Mip levels in the surface cache (`D_MipLevelForScale`).** *(faithful)*
 
@@ -763,7 +770,23 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
   auto-vectorised almost nothing (+67 bytes). It would also drop Safari < 16.4. Revisit only with
   hand-written SIMD, for example for A3's span loop or the B1/B2 pack.
 - **16-pixel affine subdivision on its own**: no wasm gain on top of A1. Do it for fidelity, as
-  part of A3, not for speed.
+  part of A3, not for speed. **Done anyway, for fidelity** (branch `quake/w2b`: `D_DrawSpans16`
+  and `Turbulent8` over z-test runs, see `AUDIT.md`), and in wasm it is a gain after all, because
+  the row is now two tight loops — the z test with its one divide per pixel, then the texels by
+  integer steps over the runs that passed. A/B on the merged base (`quake/overnight` `eb76c04`,
+  with the mip levels) against `quake/w2b`, one sitting, two rounds, median ms:
+
+  | workload | wasm world 640×400 | wasm world 1280×800 | wasm step 1280×800 | native world 1280×800 |
+  |---|---|---|---|---|
+  | demo1 | 1.25/1.30 → 1.07/1.07 | 4.11/4.17 → 3.30/3.34 | 6.04/6.15 → 5.28/5.45 | 3.10/3.16 → 4.30/4.14 |
+  | walk_e1m1 | 0.83/0.83 → 0.64/0.63 | 3.10/3.07 → 2.38/2.39 | 4.98/5.07 → 4.30/4.49 | 2.33/2.38 → 3.21/4.06 |
+  | fire_e1m1 | 0.85/0.85 → 0.69/0.66 | 3.15/3.11 → 2.49/2.43 | 5.15/5.07 → 4.53/4.63 | 2.37/2.34 → 3.20/3.34 |
+  | walk_e1m3 | 0.92/0.93 → 0.80/0.75 | 3.35/3.37 → 2.73/2.60 | 6.16/6.19 → 5.86/5.67 | 2.67/2.56 → 3.64/3.56 |
+
+  Wasm world −16 to −23%, step −5 to −13% (the same as before the merge). **Native is the other
+  way:** world +30-40%. Of four structures tried, a depth pass into a row buffer and then the
+  texels was the fastest natively (−10% against exact) but +8% in wasm; the shipped one is the
+  fastest in wasm. Not understood; the browser is the target.
 - **`wasm-opt -O3`** (binaryen v132 via `bunx -p binaryen`):
   - identical hashes; step −2 to −5% (demo1 1280×800: 19.6 → 18.7 ms);
   - 640 KB smaller: code 773 → 662 KB, and the name section is stripped.

@@ -25,6 +25,7 @@
 //! | `input`     | cl_input.c, in_win.c, keys.c            | bindings-driven moves, mouse look, key exports   |
 //! | `menu`      | menu.c `M_Keydown`                      | menu key exports and the actions they return     |
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle/typing exports                    |
+//! | `extras`    | —                                       | the Web extras' `wasm_*` cvars (values in the menu), the renderer's per-frame copy |
 //! | `host_cmd`  | host_cmd.c, cmd.c                       | console commands, `map`, changelevel, restart    |
 //! | `savegame`  | host_cmd.c `Host_Savegame_f`/`_Loadgame_f` | save/load over the page's localStorage        |
 //! | `snd_dma`   | snd_dma.c                               | sound queues for the page's Web Audio            |
@@ -67,6 +68,7 @@ mod cl_demo;
 mod cl_tent;
 mod cl_walk;
 mod console;
+mod extras;
 mod host;
 mod host_cmd;
 mod input;

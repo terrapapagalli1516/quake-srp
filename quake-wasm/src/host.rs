@@ -185,6 +185,9 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // while gameplay is gated.
         let km = derive_key_move(&a.menu, &a.keys_held);
         let viewsize = a.menu.viewsize();
+        // The renderer's options are built inside the client frame, under this
+        // borrow: hand it the menu's Web extras (wasm_exactpersp) first.
+        crate::extras::set_frame_extras(a.menu.extras());
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;

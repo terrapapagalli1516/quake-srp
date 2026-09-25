@@ -9,9 +9,9 @@ and Esc in fullscreen, end-to-end in headless Chromium:
      verify_extras_fps.png (the readout).
   2. wasm_uncapped through the real wasm: a second of 1/144 s steps presents
      72 frames with the cap (id's), 144 without.
-  3. wasm_showfps: on frozen frames, the readout changes only the box at the
-     bottom right above the status bar, and switching it off restores the
-     frame byte for byte.
+  3. On frozen frames: wasm_showfps changes only the box at the bottom
+     right above the status bar, wasm_exactpersp redraws the walls, and
+     switching either off restores id's frame byte for byte.
   4. Persistence: the extras bits and viewsize (plus the resolution) survive
      a reload through localStorage.
   5. Esc in fullscreen: F locks Escape (navigator.keyboard.lock(['Escape']),
@@ -124,6 +124,10 @@ with sync_playwright() as p:
     check("Left toggles it back", ext() == 1)
     key("ArrowUp"); key("ArrowLeft")
     check("all off again", ext() == 0)
+    key("ArrowDown", 2); key("ArrowRight")   # Exact perspective
+    check("Right toggles Exact perspective", ext() == 4)
+    key("ArrowLeft"); key("ArrowUp", 2)
+    check("...and back off", ext() == 0)
     key("Escape")
     check("Esc returns to Options", scr() == OPTIONS)
     key("Enter")
@@ -181,6 +185,18 @@ with sync_playwright() as p:
     frames(pg)
     pg.evaluate(GRAB, "_on2")
     check("on again: the same readout", pg.evaluate(DIFF, ["_on", "_on2"]) is None)
+    # wasm_exactpersp: the walls change, and off is id's frame again.
+    pg.evaluate("window._real.set_extras(4)")
+    frames(pg)
+    pg.evaluate(GRAB, "_exact")
+    d = pg.evaluate(DIFF, ["_off", "_exact"])
+    check("wasm_exactpersp redraws the walls", d is not None and d["n"] > 1000, str(d))
+    pg.evaluate("window._real.set_extras(0)")
+    frames(pg)
+    pg.evaluate(GRAB, "_off2")
+    check("...and off is id's spans again, byte for byte",
+          pg.evaluate(DIFF, ["_off", "_off2"]) is None)
+    pg.evaluate("window._real.set_extras(2)")
     pg.evaluate("exp = window._real")
 
     # 4. Persistence across a reload: extras, viewsize, resolution.

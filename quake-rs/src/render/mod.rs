@@ -68,18 +68,18 @@ pub(crate) mod fixtures;
 pub use crate::console::{draw_console, draw_notify, Console};
 pub use crate::draw::conchars_pic;
 pub use crate::menu::{
-    draw_menu, Extra, Extras, Menu, MenuAction, MenuPics, MenuScreen, MenuSound, BIND_ATTACK,
-    BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
-    BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP,
-    BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, EXTRAS_HAS_EXACTPERSP,
-    NEW_GAME_MAP, NUM_HELP_PAGES, RESOLUTION_PRESETS,
+    draw_menu, Extra, Extras, Menu, MenuAction, MenuPics, MenuScreen, MenuSound, WebExtra,
+    BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP,
+    BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT,
+    BIND_MOVEUP, BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, NEW_GAME_MAP,
+    NUM_HELP_PAGES, RESOLUTION_PRESETS, WEB_EXTRAS,
 };
 pub use crate::sbar::{
     draw_finale_overlay, draw_hud_into, draw_intermission_overlay, Hud, IntermissionStats,
 };
 pub use crate::screen::{
-    calc_refdef, compose_view, draw_centerprint, draw_fps, ViewRect, SB_LINES_FULL,
-    VIEWSIZE_DEFAULT,
+    calc_refdef, compose_view, draw_centerprint, draw_fps, vid_aspect, ViewRect,
+    SB_LINES_FULL, VIEWSIZE_DEFAULT,
 };
 // The renderer's public API (its files are private).
 pub use alias::{ModelInstance, Viewmodel};
@@ -322,6 +322,115 @@ impl Camera {
             (right[2] as f64 * sr + up[2] as f64 * cr) as f32,
         ];
         (forward, right2, up2)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The view: what R_ViewChanged derives beyond the camera
+// ---------------------------------------------------------------------------
+
+/// How a frame is drawn beyond what the [`Camera`] says: the refdef state
+/// `R_ViewChanged` (`r_main.c`) is handed besides the field of view, plus the
+/// port's opt-in extras. [`Default`] is id's `vid_null.c` view: square pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderOptions {
+    /// `vid.aspect`, which `R_ViewChanged` takes as `pixelAspect`: the height
+    /// of a displayed pixel over its width. 1.0 is square pixels. id's DOS and
+    /// Windows drivers set `(vid.height / vid.width) * (320/240)` — the mode is
+    /// shown on a 4:3 monitor, so 320x200 has pixels 1.2x taller than wide and
+    /// `vid.aspect` 0.8333 ([`crate::screen::vid_aspect`]). It scales every
+    /// vertical projection (`yscale = xscale * pixelAspect`): the world and
+    /// brush models, alias models and the gun, sprites, particles and the
+    /// frustum. The sky does not use it (`D_Sky_uv_To_st` maps screen pixels).
+    pub pixel_aspect: f32,
+    /// Where the view sits on the screen: `r_refdef.vrect`'s corner in the
+    /// `vid.width x vid.height` framebuffer. `None` (the default): the view is
+    /// the whole screen. The sky needs it: `D_Sky_uv_To_st` centres the sky on
+    /// the SCREEN (`vid.width>>1`, `vid.height>>1`), not on the view, so a view
+    /// above the status bar or inside a border (viewsize below 120) sees the
+    /// sky off its own centre — 24 rows at 320x200 and the default viewsize 100.
+    pub screen: Option<ScreenPlace>,
+    /// EXTRA, not id (default off): exact perspective at every pixel of the
+    /// surface-cached walls and the liquids. id's x86 renderer, what 1996
+    /// players saw, is exact only every 16 pixels and affine in between
+    /// (`D_DrawSpans16`, `Turbulent8`); that is the default. The browser's
+    /// `wasm_exactpersp 1` sets this.
+    pub exact_perspective: bool,
+}
+
+/// A view's place on the screen ([`RenderOptions::screen`]): its top-left
+/// corner `(x, y)` in a `vid_w x vid_h` framebuffer — `r_refdef.vrect.x/y` and
+/// `vid.width/height`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenPlace {
+    pub x: usize,
+    pub y: usize,
+    pub vid_w: usize,
+    pub vid_h: usize,
+}
+
+impl Default for RenderOptions {
+    fn default() -> RenderOptions {
+        RenderOptions { pixel_aspect: 1.0, screen: None, exact_perspective: false }
+    }
+}
+
+impl RenderOptions {
+    /// `D_Sky_uv_To_st`'s screen centre in a `w x h` view's own pixels:
+    /// `(vid.width>>1) - vrect.x`, `(vid.height>>1) - vrect.y`.
+    fn sky_centre(&self, w: usize, h: usize) -> (i32, i32) {
+        match self.screen {
+            Some(p) => ((p.vid_w as i32 >> 1) - p.x as i32, (p.vid_h as i32 >> 1) - p.y as i32),
+            None => (w as i32 >> 1, h as i32 >> 1),
+        }
+    }
+
+    /// The span routine for textured brush surfaces.
+    fn persp(&self) -> raster::Persp {
+        if self.exact_perspective {
+            raster::Persp::Exact
+        } else {
+            raster::Persp::Spans16
+        }
+    }
+
+    /// [`RenderOptions::pixel_aspect`], with a non-finite or non-positive value
+    /// read as square pixels.
+    pub(crate) fn aspect(&self) -> f32 {
+        let a = self.pixel_aspect;
+        if a.is_finite() && a > 0.0 {
+            a
+        } else {
+            1.0
+        }
+    }
+}
+
+/// `R_ViewChanged`'s projection of a `w x h` view: a view-space point
+/// `(vx, vy, vz)` (along `vright`, `vup`, `vpn`) lands at
+/// `x = cx + xscale*vx/vz`, `y = cy - yscale*vy/vz`.
+///
+/// `xscale = vrect.width / horizontalFieldOfView` = `(w/2) / tan(fov_x/2)` and
+/// `yscale = xscale * pixelAspect`; the vertical field of view follows from
+/// them (the software renderer never uses `fov_y`). The centre is `w/2, h/2`
+/// because pixel `(px, py)` has its centre at `(px + 0.5, py + 0.5)` here: id's
+/// `xcenter = w/2 - 0.5` with centres on the integers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Projection {
+    pub(crate) cx: f32,
+    pub(crate) cy: f32,
+    pub(crate) xscale: f32,
+    pub(crate) yscale: f32,
+}
+
+impl Projection {
+    pub(crate) fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> Projection {
+        let cx = w as f32 / 2.0;
+        let cy = h as f32 / 2.0;
+        let tan_half = (cam.fov_deg as f64 * 0.5).to_radians().tan();
+        // A degenerate fov falls back to ~90 degrees (xscale = cx).
+        let xscale = if tan_half.abs() < 1e-6 { cx } else { (cx as f64 / tan_half) as f32 };
+        Projection { cx, cy, xscale, yscale: xscale * pixel_aspect }
     }
 }
 
@@ -593,7 +702,8 @@ pub fn render_bsp_textured(
     let mut zbuf = vec![f32::INFINITY; w.saturating_mul(h)];
     // Static (time 0) world: liquids/sky show their texture but do not advance.
     let turb = TurbTable::new();
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None);
+    let opts = RenderOptions::default();
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, &opts, palette, &turb, 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None);
     resolve_sky_spans(&mut image, &zbuf, bsp, palette);
     image
 }
@@ -634,16 +744,16 @@ pub fn render_scene(
     )
 }
 
-/// Render the full scene: the textured world, then each brush submodel
-/// (`bmodels`), then each alias model (`models`), and finally the optional
-/// first-person `viewmodel` — all sharing one z-buffer so every world/model
-/// piece occludes (and is occluded by) the others correctly.
+/// Render the full scene: the brush submodels (`bmodels`) and external item
+/// boxes, then the textured world, then each alias model (`models`), and
+/// finally the optional first-person `viewmodel` — all sharing one z-buffer so
+/// every world/model piece occludes (and is occluded by) the others correctly.
 ///
-/// Brush submodels are drawn *before* alias models, matching `render_scene`'s
-/// world-then-models ordering; correctness does not depend on the order because
-/// the shared depth buffer resolves visibility per pixel. Passing an empty
-/// `bmodels`/`external` slice and `None` `viewmodel` reproduces [`render_scene`]
-/// exactly.
+/// Visibility does not depend on the order (the shared depth buffer resolves it
+/// per pixel); the brush entities go first so that they cut the world's
+/// 16-pixel spans as id's edge list does (see the pass order below). Passing an
+/// empty `bmodels`/`external` slice and `None` `viewmodel` reproduces
+/// [`render_scene`] exactly.
 ///
 /// ## External brush models (item boxes)
 /// `external` is the set of standalone `b_*.bsp` item boxes — Quake's
@@ -738,17 +848,19 @@ pub fn render_scene_ext(
     light_styles: &[f32; LIGHTSTYLES],
     colormap: Option<&[u8]>,
 ) -> Image {
-    // The 14-arg entry point every test / tool caller uses: no sprite entities.
+    // The 14-arg entry point every test / tool caller uses: no sprite entities,
+    // square pixels.
     render_scene_ext_sprited(
         bsp, cam, w, h, palette, models, bmodels, external, viewmodel, time, particles, dlights,
-        light_styles, colormap, &[],
+        light_styles, colormap, &[], &RenderOptions::default(),
     )
 }
 
 /// As [`render_scene_ext`], plus a list of camera-facing [`SpriteInstance`]s drawn
 /// (z-tested) after the alias models and before the viewmodel — Quake's
-/// `mod_sprite` entities (the `s_explod.spr` explosion flash, bubbles). Passing an
-/// empty `sprites` slice is byte-identical to [`render_scene_ext`].
+/// `mod_sprite` entities (the `s_explod.spr` explosion flash, bubbles) — and the
+/// [`RenderOptions`] (pixel aspect, extras). An empty `sprites` slice and the
+/// default options are byte-identical to [`render_scene_ext`].
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext_sprited(
     bsp: &Bsp,
@@ -766,6 +878,7 @@ pub fn render_scene_ext_sprited(
     light_styles: &[f32; LIGHTSTYLES],
     colormap: Option<&[u8]>,
     sprites: &[SpriteInstance],
+    opts: &RenderOptions,
 ) -> Image {
     // The frame's buffers, kept across frames (see [`recycle_image`]) and
     // filled exactly as fresh ones.
@@ -783,13 +896,19 @@ pub fn render_scene_ext_sprited(
     // on (via `.then(..)`), so the shared render path never reads a clock. (On wasm,
     // where `Instant` is unavailable, only the opt-in benchmark build turns the
     // profiler on, after installing a JS clock via `set_render_stats_clock`.)
-    let tw = stats_on().then(StatInstant::now);
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, palette, &turb, time, light_styles, dlights, colormap);
-    if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
+    //
+    // Brush entities first, then the world. The z-buffer makes visibility the
+    // same in any order, but id puts bmodel faces in the world's edge list, so
+    // a door or an item box in front of a wall cuts that wall's spans — and the
+    // 16-pixel span routines restart their grid where a run of passing z tests
+    // starts (`raster.rs`, `z_test_runs`). Drawn first, a bmodel cuts the
+    // world's runs as it cuts id's spans (the case that shows: e1m3's shells
+    // box). A world face in front of a bmodel does not cut its runs; no oracle
+    // view has shown that.
     let ts = stats_on().then(StatInstant::now);
     for bm in bmodels {
         // Inline submodels share the world `bsp`, so their surface blocks ARE cached.
-        draw_submodel(&mut image, &mut zbuf, bsp, cam, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame, true);
+        draw_submodel(&mut image, &mut zbuf, bsp, cam, opts, palette, bm.model_index, bm.origin, &turb, time, light_styles, dlights, colormap, bm.frame, true);
     }
     if let Some(t) = ts { stat(|s| s.submodel_ns += t.elapsed().as_nanos() as u64); }
     let te = stats_on().then(StatInstant::now);
@@ -806,32 +925,35 @@ pub fn render_scene_ext_sprited(
         // External item boxes re-clone their bsp per instance every frame, so they
         // BYPASS the surface cache (cache_surf = false) — caching them would only
         // evict the world's resident cache. See [`face_surf_block`].
-        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
+        draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, opts, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
     }
     if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
+    let tw = stats_on().then(StatInstant::now);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, opts, palette, &turb, time, light_styles, dlights, colormap);
+    if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
     // The sky, span by span, now that every brush surface that can cover it has
     // been drawn (id: `D_DrawSkyScans8` inside `D_DrawSurfaces`, before entities).
     resolve_sky_spans(&mut image, &zbuf, bsp, palette);
     let ta = stats_on().then(StatInstant::now);
     for inst in models {
-        draw_alias_model(&mut image, &mut zbuf, bsp, cam, inst, palette, dlights, light_styles, time, colormap);
+        draw_alias_model(&mut image, &mut zbuf, bsp, cam, opts, inst, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = ta { stat(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
     // Particles draw after the world/models, z-tested against the same buffer so
     // walls occlude them. (id draws them after the gun; with the gun's tripled
     // 1/z in the shared z-buffer the order only matters on exact ties.)
     let tp = stats_on().then(StatInstant::now);
-    draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h);
+    draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h, opts.aspect());
     if let Some(t) = tp { stat(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
     // Sprite-model entities (explosion flash, bubbles) — camera-facing billboards,
     // z-tested against the same buffer, drawn after models and before the viewmodel.
     let tsp = stats_on().then(StatInstant::now);
-    draw_sprites(&mut image, &mut zbuf, cam, sprites, palette, time, w, h);
+    draw_sprites(&mut image, &mut zbuf, cam, opts, sprites, palette, time, w, h);
     if let Some(t) = tsp { stat(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
     // The weapon: R_DrawViewModel, after the entities.
     let tv = stats_on().then(StatInstant::now);
     if let Some(vm) = viewmodel {
-        draw_viewmodel(&mut image, &mut zbuf, bsp, cam, &vm, palette, dlights, light_styles, time, colormap);
+        draw_viewmodel(&mut image, &mut zbuf, bsp, cam, opts, &vm, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     ZBUF.with(|z| *z.borrow_mut() = zbuf);
@@ -1177,6 +1299,55 @@ mod tests {
             "expected multiple surface hues, found {}",
             colors.len()
         );
+    }
+
+    #[test]
+    fn pixel_aspect_squashes_the_world_vertically_only() {
+        // R_ViewChanged: yscale = xscale * pixelAspect. At id's 320x200-on-4:3
+        // aspect (0.8333) the pillar keeps its width in pixels and its top edge
+        // comes 1/6 closer to the centre row, so the 4:3 display (pixels 1.2x
+        // taller than wide) shows its true shape.
+        let bsp = demo_room();
+        let pal = [[200u8, 200, 200]; 256];
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let (w, h) = (320usize, 200usize);
+        let render = |pixel_aspect: f32| {
+            render_scene_ext_sprited(
+                &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
+                None, &[], &RenderOptions { pixel_aspect, ..Default::default() },
+            )
+        };
+        // The pillar's face: the colour at the centre; its columns on the centre
+        // row and its top row on the centre column.
+        let extent = |img: &Image| {
+            let c = img.rgb[(h / 2) * w + w / 2];
+            let row: Vec<usize> = (0..w).filter(|&x| img.rgb[(h / 2) * w + x] == c).collect();
+            let top = (0..h).find(|&y| img.rgb[y * w + w / 2] == c).expect("pillar in view");
+            (row[0], row[row.len() - 1], h / 2 - top)
+        };
+        let square = render(1.0);
+        assert_eq!(square.rgb, render_scene(&bsp, &cam, w, h, &pal, &[]).rgb, "aspect 1 is the default");
+        let (l1, r1, up1) = extent(&square);
+        let (l2, r2, up2) = extent(&render(crate::screen::vid_aspect(w, h, 4.0 / 3.0)));
+        assert_eq!((l1, r1), (l2, r2), "the width does not change");
+        // 160*64/168 = 61 rows above the centre with square pixels, 51 at 0.8333.
+        assert_eq!((up1, up2), (61, 51));
+    }
+
+    #[test]
+    fn the_sky_is_centred_on_the_screen_not_the_view() {
+        // D_Sky_uv_To_st: u - (vid.width>>1), (vid.height>>1) - v, in screen
+        // pixels. A view that is the whole screen has its own centre; the 320x152
+        // view above a 48-line status bar (viewsize 100) has the screen's centre
+        // 24 rows below its own; the viewsize-70 view (224x140 at 48,6) is off
+        // both ways.
+        let at = |screen| RenderOptions { screen, ..Default::default() };
+        assert_eq!(at(None).sky_centre(320, 200), (160, 100));
+        assert_eq!(at(None).sky_centre(320, 152), (160, 76));
+        let sbar = ScreenPlace { x: 0, y: 0, vid_w: 320, vid_h: 200 };
+        assert_eq!(at(Some(sbar)).sky_centre(320, 152), (160, 100));
+        let border = ScreenPlace { x: 48, y: 6, vid_w: 320, vid_h: 200 };
+        assert_eq!(at(Some(border)).sky_centre(224, 140), (112, 94));
     }
 
     #[test]

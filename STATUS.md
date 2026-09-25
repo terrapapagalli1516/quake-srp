@@ -5,6 +5,22 @@ things stand" note — read it before continuing.
 
 ---
 
+## Projection and spans (2026-09-25, branch `quake/w2b`)
+
+The 3-D view as DOS/Windows players saw it (details in AUDIT.md's section of
+the same name): the pixel aspect in the projection (every preset is 16:10
+and the page shows 4:3, so the world had been 1.2x too tall; now
+`R_ViewChanged`'s `yscale = xscale * pixelAspect` everywhere); the x86
+build's 16-pixel perspective spans (`D_DrawSpans16`, `Turbulent8`) over id's
+spans, with brush entities cutting the world's; the sky centred on the
+screen below viewsize 120. Exact per-pixel perspective is an opt-in extra,
+`wasm_exactpersp 1`; all extras live in `quake-wasm/src/extras.rs`. Oracle
+against id's x86 spans: 99.96 / 99.21 / 99.98 / 99.91 (320x200), 100.00 on
+all four at the page's aspect at 640x400. Wasm world −16 to −23%; native
++30-40% (not understood; PERF_PLAN §6).
+
+---
+
 ## Options menu + screen framing (2026-09-25, branch `quake/options`)
 
 User-reported: Options cursor blinked too fast; Screen size seemed wrong.

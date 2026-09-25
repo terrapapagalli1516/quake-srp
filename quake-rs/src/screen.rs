@@ -38,6 +38,22 @@ pub struct ViewRect {
     pub h: usize,
 }
 
+/// `vid.aspect` for a `vid_w x vid_h` mode displayed with the width:height
+/// ratio `display_aspect` — `vid_win.c`/`vid_x.c`'s
+/// `((float)vid.height / (float)vid.width) * (320.0 / 240.0)` when the display
+/// is a 4:3 monitor (`display_aspect` 4/3). It is the height of a displayed
+/// pixel over its width, the `pixelAspect` of `R_ViewChanged`
+/// ([`RenderOptions::pixel_aspect`](crate::render::RenderOptions::pixel_aspect)):
+/// 0.8333 for 320x200 or 1280x800 on 4:3 (tall pixels), 1.0 for 640x480. The
+/// arithmetic is the C's: a float ratio times the double constant, stored to
+/// float.
+pub fn vid_aspect(vid_w: usize, vid_h: usize, display_aspect: f64) -> f32 {
+    if vid_w == 0 || vid_h == 0 || !(display_aspect.is_finite() && display_aspect > 0.0) {
+        return 1.0;
+    }
+    ((vid_h as f32 / vid_w as f32) as f64 * display_aspect) as f32
+}
+
 /// What `SCR_CalcRefdef` works out each time the view changes: where the 3-D
 /// view goes (`r_refdef.vrect`) and how many status-bar lines are shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +62,7 @@ pub struct Refdef {
     /// renderer draws into a `vrect.w x vrect.h` image with the projection
     /// centred on it and `fov_x` spanning its width — R_ViewChanged's
     /// `xcenter = vrect.width/2 + vrect.x`, `xscale = vrect.width / (2 tan(fov_x/2))`,
-    /// `yscale = xscale` (square pixels); the software renderer derives its
+    /// `yscale = xscale * pixelAspect` ([`vid_aspect`]); the software renderer derives its
     /// vertical extent from that, not from CalcFov's `fov_y`.
     pub vrect: ViewRect,
     /// `sb_lines` in the status bar's 320x200 virtual rows: 48 (sbar + inventory),
@@ -334,6 +350,21 @@ mod tests {
     use crate::render::fixtures::{ramp_palette, solid_conchars, test_backtile};
     use crate::sbar::draw_finale_overlay;
     use crate::wad::Qpic;
+
+    #[test]
+    fn vid_aspect_is_vid_win_c_on_a_4_3_display() {
+        // vid.aspect = ((float)h / (float)w) * (320.0 / 240.0), stored to float.
+        let four_three = 4.0 / 3.0;
+        for (w, h) in [(320, 200), (640, 400), (960, 600), (1280, 800)] {
+            assert_eq!(vid_aspect(w, h, four_three).to_bits(), 0x3F55_5555, "{w}x{h}: 0.8333333");
+        }
+        assert_eq!(vid_aspect(640, 480, four_three), 1.0);
+        assert_eq!(vid_aspect(320, 240, four_three), 1.0);
+        // A square-pixel display of the same mode, and nonsense, are square.
+        assert_eq!(vid_aspect(320, 200, 320.0 / 200.0), 1.0);
+        assert_eq!(vid_aspect(0, 200, four_three), 1.0);
+        assert_eq!(vid_aspect(320, 200, f64::NAN), 1.0);
+    }
 
     #[test]
     fn finale_center_string_reveals_at_printspeed() {

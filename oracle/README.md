@@ -23,10 +23,13 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--time T` | pin `cl.time` (light styles, sky, turb, texture and alias animation) |
 | `--settle N` | shoot N frames after signon instead of the first |
 | `--crop name:x,y,w,h` | extra 6x C / port / diff PNG of a region |
-| `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the 16-pixel segments of the x86 asm `D_DrawSpans16` (what DOS/Win players saw, `d_subdiv16 1`); 1 = exact per-pixel perspective (an experiment, not id) |
+| `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the x86 asm's `D_DrawSpans16` in C, its integer steps included (what DOS/Win players saw, `d_subdiv16 1` — and what the port draws); 1 = exact per-pixel perspective (an experiment, not id) |
+| `--exactpersp` | the port's exact per-pixel perspective extra (`quaketool view --exactpersp 1`) instead of its default 16-pixel spans; pair it with `--spans 1` |
+| `--aspect A` | `vid.aspect` for both renderers (`-oracle_aspect` / `quaketool view --aspect`). Default 1.0, square pixels; `0.8333333` is id's DOS/Win 16:10 modes on a 4:3 monitor — and what the browser page shows (every preset is 16:10, presented at 4:3) |
 | `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable); `d_mipscale` and `d_mipcap` are handed to the port too (`quaketool view --d-mipscale/--d-mipcap`). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
 | `--viewmodel` | draw the weapon too (the port is handed id's `cl.viewent` origin and angles, `quaketool view --viewent`) |
+| `--viewsize N` | id's `scr_viewsize` (default 120, the whole screen). Below 120 the 3-D view rectangle (`r_refdef.vrect` from id's `.json`) is compared: the port renders it placed on the screen (`quaketool view --vrect`) |
 | `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD |
 | `--quaketool PATH` / `--oracle PATH` | A/B a different build of either side |
 
@@ -52,7 +55,7 @@ loopback-only `net_none`, and three files of ours (`c/`, GPL like id's):
 - `vid_oracle.c` — `vid_null.c` at any resolution (`-width`/`-height`, up to id's
   1280x1024 `MAXWIDTH`/`MAXHEIGHT`), buffers sized with `D_SurfaceCacheForRes` as
   the real drivers do, `vid.aspect` 1.0 (square pixels, as `vid_null`; id's DOS/Win
-  320x200 used 0.8333 — `--aspect`).
+  320x200 used 0.8333 — `--aspect`, which also hands the port the same value).
 - `sys_oracle.c` — `sys_null.c`'s file IO plus a deterministic clock: every
   `Host_Frame` is exactly 0.1 s and `Sys_FloatTime` is that virtual clock
   (`-oracle_realtime` switches to the wall clock for `timedemo`). `Sys_Quit` never
@@ -72,7 +75,7 @@ It is built as a static 32-bit i386 binary (1996 code assumes 32-bit pointers) i
 a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
 
 **Port side.** `quaketool view <pak> <map> <out.ppm> [--res] [--origin] [--angles]
-[--time] [--fov] [--ents FILE] [--viewmodel M:F] [--bench N]` renders one exactly
+[--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--viewmodel M:F] [--bench N]` renders one exactly
 specified view through the same `render_scene_ext_sprited` the game uses. It is a
 new subcommand; no existing output changed (goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`).
 
@@ -87,55 +90,69 @@ the steady eye. (The port's live path starts `oldz` at the origin, so its first
 
 ## Results (320x200 unless stated, 2026-09-25)
 
-After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below)
-and the mip levels and lightmap stepping (branch `quake/w2a`: classes 1 and 6); see
-`AUDIT.md`. The numbers before them are in the git history of this file.
+After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below),
+the mip levels and lightmap stepping (branch `quake/w2a`: classes 1 and 6), and the
+pixel aspect, id's 16-pixel spans and the screen-centred sky (branch `quake/w2b`:
+class 7, class 4's open note); see `AUDIT.md`. The numbers before them are in the
+git history of this file.
 
-Headline — id's C as written (`D_DrawSpans8`, its own mip levels) vs the port:
+The port draws what DOS/Windows players saw: the x86 build's `D_DrawSpans16`. So the
+headline compares it with id's renderer set to the same (`--spans 16`); the oracle's
+default is still id's portable C as written (`D_DrawSpans8`), last column.
 
-| map | world exact% | with entities | entity pixels exact% | 640x480 world |
-|---|---:|---:|---:|---:|
-| e1m1 | 97.44 | 97.44 | 100.0 (15 px) | 99.20 |
-| e1m2 | 97.12 | 97.12 | 100.0 (357 px) | 98.77 |
-| e1m3 | 99.16 | 99.16 | 98.2 (221 px) | 99.30 |
-| e1m7 | 94.96 | 94.96 | 100.0 (54 px) | 98.77 |
+| map | `--spans 16` world exact% | with entities | entity pixels exact% | 640x480 world | 640x400 at the page's 4:3 aspect | `--spans 8` (default) world |
+|---|---:|---:|---:|---:|---:|---:|
+| e1m1 | 99.96 | 99.96 | 100.0 (15 px) | 99.97 | 100.00 | 94.57 |
+| e1m2 | 99.21 | 99.21 | 100.0 (357 px) | 99.97 | 100.00 | 96.09 |
+| e1m3 | 99.98 | 99.98 | 100.0 (239 px) | 99.99 | 100.00 | 97.27 |
+| e1m7 | 99.91 | 99.91 | 100.0 (54 px) | 99.94 | 100.00 | 91.72 |
 
-(Before classes 1 and 6: 84.76 / 64.07 / 65.83 / 75.65 world, 90.79 / 78.19 /
-90.74 / 94.55 at 640x480.) What remains here is almost all class 7, id's 8-pixel
-affine segments: against id's exact per-pixel perspective the port scores 99.94 /
-99.18 / 99.98 / 99.91. The entity-pixel column counts the world pixels around and
-behind an entity too. nonpal% is 0 in every case (was up to 0.45).
+(Before the 16-pixel spans, on the same base: 92.84 / 94.36 / 96.56 / 87.20 against
+`--spans 16`, 97.44 / 97.12 / 99.16 / 94.96 against `--spans 8`. Before classes 1
+and 6: 84.76 / 64.07 / 65.83 / 75.65 against `--spans 8`.) Against `--spans 8` what
+remains is id's portable C's 8-pixel segments against the port's 16 (class 7). The
+e1m2 row's 0.8% is one face at a finer mip in id than its geometry gives (class 1's
+open note). The entity-pixel column counts the world pixels around and behind an
+entity too. nonpal% is 0 in every case (was up to 0.45).
+
+**Pixel aspect** (`--aspect 0.8333333`: id's 16:10 modes on a 4:3 monitor, which
+is how the browser page shows every preset). 320x200 against `--spans 16`: 100.00 /
+98.73 / 100.00 / 100.00, entity pixels 100% everywhere; at viewsize 100 (the view
+above the status bar, `--viewsize 100`) 100.00 / 99.46 / 100.00 / 100.00. Before
+the port's projection took the aspect it scored 31.35 / 26.90 / 20.23 / 14.23
+against id's 4:3 frame (then with id at mip 0 and exact perspective).
 
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
-1432.386,1397.978,233.254,9.344,-103.449,0`) scores 98.58% world / 98.60% with
-entities, its entity pixels 100.00% (788 px). With the viewmodel drawn
-(`--viewmodel --settle 3`), e1m1 scores 95.63%, the same as the world-only frame at
-that settle. At a settle of 3 or more e1m1's
+1432.386,1397.978,233.254,9.344,-103.449,0`, `--spans 16`) scores 99.99% world and
+with entities, its entity pixels 100.00% (788 px; 664 px, 100%, at the page's
+aspect). With the viewmodel drawn (`--viewmodel --settle 3`), e1m1 scores 98.07%,
+the same as the world-only frame at that settle. At a settle of 3 or more e1m1's
 far arch differs for a harness reason: id's light styles in that frame (its
 `.json`) are the ones the port derives for 0.1 s earlier (measured) — probably id flooring a double
 `cl.time` that the harness hands over rounded to a float. Passing id's `d_lightstylevalue` to
 the port would remove it (not done).
 
 **Attribution ladder** — id's renderer made to drop one known difference at a time
-(world only; `characterise.sh` prints it):
+against the port as it ships (16-pixel spans; world only; `characterise.sh` prints it):
 
 | id's renderer configured as | e1m1 | e1m2 | e1m3 | e1m7 |
 |---|---:|---:|---:|---:|
-| as written (`--spans 8`) | 97.44 | 97.12 | 99.16 | 94.96 |
-| 16-px segments (`--spans 16`, the x86 asm) | 92.84 | 94.36 | 96.51 | 87.23 |
-| exact per-pixel perspective (`--spans 1`) | 99.94 | 99.18 | 99.98 | 99.91 |
-| mip 0 forced (`--c-cmd "d_mipscale 0"`, both renderers) | 97.27 | 95.77 | 98.65 | 94.52 |
-| mip 0 + exact perspective | 99.93 | 99.88 | 99.98 | 99.91 |
+| as written (`--spans 8`) | 94.57 | 96.09 | 97.27 | 91.72 |
+| 16-px segments (`--spans 16`, the x86 asm) | 99.96 | 99.21 | 99.98 | 99.91 |
+| exact per-pixel perspective (`--spans 1`) | 92.85 | 94.39 | 96.58 | 87.19 |
+| mip 0 forced (`--c-cmd "d_mipscale 0"`, both renderers) | 94.57 | 94.26 | 96.05 | 91.70 |
+| mip 0 + 16-px segments | 99.95 | 99.93 | 99.98 | 99.91 |
+| mip 0 + exact perspective, the port's too (`--exactpersp`) | 99.93 | 99.88 | 99.98 | 99.91 |
 
 `d_mipscale` and `d_mipcap` are the port's cvars too, and `compare.py` hands them
-to both sides, so the "mip 0" rows now put both renderers at mip 0 (before the mip
-levels they configured id alone: 93.13 / 93.59 / 97.13 / 93.35 and 95.63 / 97.41 /
-98.39 / 98.68). Mip 0 + exact at 640x480: 99.96 / 99.96 / 99.99 / 99.98; a pitched
-and rolled view (e1m1, `--view=544,288,32,-15,100,12`) 100.00. Over 72 more views
+to both sides, so the "mip 0" rows put both renderers at mip 0. With the port's
+exact-perspective extra, id's exact rows are the pre-`quake/w2b` port's to the
+pixel: 99.94 / 99.18 / 99.98 / 99.91 at `--spans 1`. Mip 0 + exact at 640x480:
+99.96 / 99.96 / 99.99 / 99.98; a pitched and rolled view (e1m1,
+`--view=544,288,32,-15,100,12`) 100.00. Over 72 more views
 (the four start positions, 6 yaws x 3 pitches) against id's exact perspective and
-its own mip levels, the mean is 99.99% and the worst 99.83. The e1m2 row's 0.7% at
-`--spans 1` is one face at a finer mip in id than its geometry gives (class 1's
-open note). What is left elsewhere is the size of id's own floating-point noise: the oracle built with SSE2 float math
+its own mip levels, the mean is 99.99% and the worst 99.83 (before the 16-pixel
+spans, measured with the exact extra's arithmetic). What is left elsewhere is the size of id's own floating-point noise: the oracle built with SSE2 float math
 instead of x87 (`ORACLE_FPMATH=sse oracle/build.sh`) differs from the x87 build on
 0.003-0.031% of pixels. So **projection, fov, pixel centres, edge rules, near
 clipping, texture alignment, PVS and the camera convention are faithful**; every
@@ -154,7 +171,7 @@ classes a crop is not about removed on id's side where possible.
 | 4 | sky front layer not offset | the whole cloud layer | bug — **fixed** |
 | 5 | weapon viewmodel placement | ~5 pts when drawn | bug — **fixed** |
 | 6 | surface-cache lightmap stepping | 1.5-4.4% | departure — **fixed** |
-| 7 | affine span segments | 1-5% | expected so far (design) |
+| 7 | affine span segments | 1-5% | the port draws the x86's 16 — **fixed** against `--spans 16` |
 | 8 | turb warp rounding | ~20-25% of liquid pixels | departure — **fixed** |
 | 9 | sample-less faces | the e1m1 golden view shows one | departure — **fixed** |
 
@@ -203,8 +220,10 @@ classes a crop is not about removed on id's side where possible.
    centre. (AUDIT's LOW "sky foreground drift" is this, and it is not small.)
    **Fixed**, the 32-pixel spans included (the world pass defers its sky pixels
    and redraws each visible run of a sky face as one span): the e1m2 sky region
-   matches 99.8%. Open: at a viewsize below 120 id's sky centre is the SCREEN's
-   (`vid.width>>1`), not the view rectangle's; the port uses the view's.
+   matches 99.8%. Below viewsize 120 id's sky centre is the SCREEN's
+   (`vid.width>>1`), not the view rectangle's; **fixed** on `quake/w2b` (the port
+   used the view's: 24 rows off at viewsize 100): the e1m2 sky region at viewsize
+   100 / 110 / 70 matches 75.1 / 46.4 / 43.4% before, 100% after.
 5. **Viewmodel** (`crops/viewmodel.png`). The port hangs the gun with invented
    offsets (`OFS_FORWARD 7`, `OFS_RIGHT 1.5`, `OFS_UP 3.5`) and its own depth buffer;
    id puts `cl.viewent` at the eye (+ bob, + the `scr_viewsize` fudge), angles from
@@ -227,9 +246,14 @@ classes a crop is not about removed on id's side where possible.
    the rows went 95.61 / 97.40 / 98.50 / 98.66 -> 99.93 / 99.88 / 99.98 / 99.91.
 7. **Span subdivision** (`crops/spans.png`: vertical stripes where the affine error
    crosses a texel). id divides every 8 pixels (portable C) or 16 (x86 asm) and
-   steps s/t linearly between; the port divides per pixel. Documented as a perf
-   item in STATUS.md; a faithful port would subdivide (16 to match what players
-   saw, 8 to match id's C).
+   steps s/t linearly between; the port divided per pixel. **Fixed** (branch
+   `quake/w2b`): the port draws what players saw, `d_draw16.s`'s `D_DrawSpans16`
+   (its integer steps) on the surface cache and `Turbulent8`'s 16-pixel segments
+   on liquids, over id's spans (the 16-pixel grid restarts where a surface
+   comes out from behind a nearer one). Against `--spans 16` the rows match as
+   well as exact against exact; against id's portable C (`--spans 8`, the
+   default) this class is now the 8-vs-16 difference. The old per-pixel
+   perspective is the port's opt-in extra (`--exactpersp`).
 8. **Turb warp.** The port rounds `sintable` to whole texels and floors s/t before
    adding; id adds the 16.16 table value to the fixed-point coordinate and then
    takes `>> 16`, over 16-pixel segments. About a fifth of liquid pixels land one
@@ -264,7 +288,9 @@ Timings are noisy: compare within one sitting.
 
 - id's C, not id's asm. The shipped x86 binaries used `d_draw16.s`, `surf8.s`,
   `d_polysa.s` and friends; the oracle runs the portable C. `--spans 16`
-  reproduces the 16-pixel segment algorithm in C, not the asm's exact x87
+  reproduces `D_DrawSpans16` in C with the asm's integer steps (since
+  `quake/w2b`; before, `D_DrawSpans8`'s — the two differ on 0-40 pixels of a
+  320x200 frame), not the asm's x87 single-precision chop
   rounding. Other asm-vs-C differences are unmeasured.
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
   1996. The x87-vs-SSE check bounds the float noise at ~0.03%.
@@ -275,5 +301,5 @@ Timings are noisy: compare within one sitting.
   puffs count as differences there.
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
-- `viewsize` below 120: the C side renders it (`--c-only --full`), the port's
-  `view` does not draw the HUD or shrink the 3-D view, so there is no diff yet.
+- `viewsize` below 120: the 3-D view rectangle is compared (`--viewsize N`), not
+  the HUD or the border around it (the port's `view` draws neither).
