@@ -503,6 +503,22 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   perspective on id's side): 15.6% at the start, 23.5% after the class-3 fix,
   93.2% with the layers, 99.8% with the spans. e1m2 world 61.25 → 64.07.
   Goldens unchanged (no sky in them).
+- ✅ **Alias models** (class 2; the old "alias-model colormap LUT" item) — the
+  port lit them with its own heuristic and an RGB multiply (off-palette
+  colours, fullbright flames darkened) and rasterised them perspective-correct.
+  Now every alias model and the gun go through a port of id's pipeline:
+  `R_DrawEntitiesOnList`/`R_DrawViewModel` light (R_LightPoint + dlights,
+  128/192 clamps, gun >= 24), `R_AliasSetupLighting` (`LIGHT_MIN`, the
+  `{-1,0,0}` light vector in the model frame), `R_AliasCheckBBox`
+  (trivial accept, subdivision beyond `r_aliastransition`, `size/11`),
+  per-vertex `r_avertexnormals` light, `R_AliasClipTriangle`, and
+  `D_PolysetDraw` — affine, Gouraud, integer vertices, `acolormap[texel +
+  (light & 0xFF00)]`, 16-bit-z semantics against the shared z-buffer, the
+  gun's 1/z tripled. Entity pixels (id with mip 0 + exact perspective):
+  e1m2 15.9% → 99.7%, e1m3 71.0% → 99.5%, e1m7 45.8% → 98.2%; the e1m2 altar
+  view (ogre + two flames) 21.8% → 100.0% with id as shipped. nonpal% is 0
+  everywhere. Goldens: `fb14bd65` → `d103ba3f`, `76905e15` → `a833cbac`,
+  `0211e6d4` → `ed42c092` (monsters/items in all three).
 
 ## LOW (27)
 
