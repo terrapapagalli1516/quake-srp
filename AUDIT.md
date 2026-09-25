@@ -1731,6 +1731,52 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
   port boots with the menu open over the attract loop and keeps cycling
   behind it (F15, left as it was).
 
+## Final review fixes, UI side (2026-09-25, branch `quake/polish4b`)
+
+The final review's menu, console, keyboard and page findings, against
+`keys.c`, `menu.c`, `console.c`, `cmd.c`/`cvar.c` and `host.c`. One commit
+each; the C followed and the evidence are in the commit messages.
+
+- ✅ **Keys went where the page sent them, not where `Key_Event` sends
+  them** (MED). The page routed the keyboard itself: the console key opened
+  the console over the menu and over a key grab, Enter answered the Quit
+  prompt "yes", and the mouse buttons could not be bound. Every key now goes
+  through one export, `key_event(keynum, down, ch)` — keys.c's `Key_Event`
+  in `quake-wasm` `input.rs`, in id's order: New Game's `SCR_ModalMessage`
+  takes every key first (`y` / `n` / Escape by key number); autorepeat is
+  ignored but for Backspace and Pause; an unbound mouse button prints "MOUSE2
+  is unbound, hit F4 to set."; Escape is the menu's own Escape or
+  `M_ToggleMenu_f`; a key up releases its `+` binding wherever the keyboard
+  is; a key down runs its binding in the game, with the console down only
+  for the keys it does not keep (`consolekeys`: so Home/End reach
+  `centerview`, as in id), with the menu up only for Escape and F1–F12
+  (`menubound`); every other key, Shift applied (`keyshift[]`), goes to
+  `M_Keydown` (the engine's `Menu::keydown`, each screen's `M_*_Key`) or
+  `Key_Console` (`Console::key`). The console key is default.cfg's `bind `` ` ``
+  "toggleconsole"` (and `~`), a binding like any other (`BIND_TOGGLECONSOLE`):
+  over the menu it is `M_Keydown`'s, which ignores it, and during a key grab
+  `M_Keys_Key` refuses it and ends the grab. The Quit prompt is `M_Quit_Key`:
+  only y/Y quit, n/N/Escape go back, Enter and the rest do nothing. The page
+  forwards the mouse buttons (K_MOUSE1..3) while a key is being grabbed, so
+  Customize controls binds them as id's does. Losing the window's focus runs
+  vid_win.c's `ClearAllStates` (`key_clear_states`: nothing stays held). The
+  menu/console exports the tests and automation use (`menu_up`,
+  `menu_select`, `console_enter`, ...) are one key each through the same
+  path, and so is the 2-D oracle's `key` (the C's `oracle_key` is
+  `Key_Event` too). One platform choice: the page hands `Key_Event` the
+  character the player's keyboard layout typed (`ch`), which the console and
+  the Setup name fields insert; id's inserts the key number through its US
+  `keyshift[]` table, which the port still uses when the page gives none —
+  the same on a US layout, and a French or German player types what the
+  keys say. Tests `the_quit_prompt_takes_only_y_and_n`,
+  `the_console_key_over_the_menu_is_the_menus`,
+  `mouse_buttons_bind_on_customize_controls`,
+  `autorepeat_is_ignored_but_for_backspace`, `keydown_is_each_screens_m_key`,
+  `key_init_tables_are_ids`, `key_console_enter_submits_and_echoes_the_line`
+  (an empty Enter echoes `]` as id's); `web/verify_menu.py` (Enter and `` ` ``
+  leave the Quit prompt up; a right click is the key a grab binds). The 2-D
+  oracle is unchanged (every menu scenario 100%, as before).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

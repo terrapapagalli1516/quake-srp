@@ -123,6 +123,11 @@ with sync_playwright() as p:
     key("ArrowRight", 2); key("Escape")
     key("ArrowDown", 1); key("Enter")   # Main still on Help (row 3): Quit
     check("Quit raises the confirm prompt", scr() == QUIT)
+    # M_Quit_Key answers only y/Y and n/N/Esc: Enter and the console key do
+    # nothing (the console key over the menu is M_Keydown's, not a console).
+    key("Enter"); key("`")
+    check("Enter and ` leave the Quit prompt up",
+          scr() == QUIT and vis() == 1 and pg.evaluate("exp.console_visible()") == 0)
     key("n")
     check("N answers the Quit prompt", scr() == MAIN and vis() == 1)
 
@@ -190,6 +195,15 @@ with sync_playwright() as p:
     key("Escape")
     check("Escape cancels the grab on the Keys screen",
           pg.evaluate("exp.menu_bind_grabbing()") == 0 and scr() == KEYS)
+    # The mouse buttons are keys to bind (K_MOUSE1..3): the page forwards a
+    # click while the grab waits ("change weapon", row 1: one key, so the
+    # grab adds MOUSE2 to it without unbinding '/').
+    key("ArrowUp"); key("Enter")
+    pg.locator("#c").click(button="right")
+    time.sleep(0.1)
+    check("a right click is the key a grab binds (MOUSE2)",
+          pg.evaluate("exp.menu_bind_grabbing()") == 0 and scr() == KEYS and vis() == 1)
+    key("ArrowDown")
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_keys.png"))
     key("Escape")
     check("Esc on Keys returns to Options", scr() == OPTIONS)

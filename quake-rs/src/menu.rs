@@ -8,7 +8,10 @@ use crate::draw::{
     blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, screen_2d,
     MENU_VIRT_W,
 };
-use crate::keys::{default_bindings, keynum_to_string, K_ESCAPE};
+use crate::keys::{
+    default_bindings, keynum_to_string, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE,
+    K_LEFTARROW, K_RIGHTARROW, K_UPARROW,
+};
 use crate::render::Image;
 use crate::screen::{center_string_top, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 
@@ -270,6 +273,10 @@ pub const BIND_SHOWSCORES: usize = NUM_BINDNAMES + 2;
 pub const BIND_IMPULSE_0: usize = NUM_BINDNAMES + 3;
 /// `bind PAUSE "pause"` (default.cfg): `Host_Pause_f`.
 pub const BIND_PAUSE: usize = BIND_IMPULSE_0 + 9;
+/// `` bind ` "toggleconsole" `` and `bind ~ "toggleconsole"` (default.cfg):
+/// `Con_ToggleConsole_f`. A binding like any other, so the console key opens
+/// the console only where `Key_Event` runs bindings — not over the menu.
+pub const BIND_TOGGLECONSOLE: usize = BIND_PAUSE + 1;
 
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A
@@ -500,8 +507,14 @@ pub enum MenuAction {
     NewGame,
     /// Backed out of a submenu to the main screen (Escape on a submenu).
     Back,
-    /// The menu just closed (Escape on the main screen, or confirmed Quit).
+    /// The menu just closed (a confirmed Quit, or "No" to a Quit prompt
+    /// raised over the game).
     Closed,
+    /// `M_Main_Key`'s Escape: the menu closed from the main screen. The host
+    /// puts the demo loop back (`cls.demonum = m_save_demonum`, which
+    /// `M_Menu_Main_f` switched off) and, with nothing playing, starts its
+    /// next demo (`CL_NextDemo`).
+    Resume,
     /// Options "Go to console": the host should close the menu and open the
     /// drop-down console (`m_state = m_none; Con_ToggleConsole_f()`).
     OpenConsole,
@@ -934,8 +947,8 @@ impl Menu {
     /// * Video > row: apply the highlighted preset ([`MenuAction::ResolutionChanged`]).
     /// * Options > Web extras (port row): the Extras screen; Extras > row:
     ///   toggle that extra (menu2 + menu3, like an Options checkbox).
-    /// * Quit > Enter == "Yes": close the menu ([`MenuAction::Closed`]).
-    /// * Help: Enter is inert ([`MenuAction::None`]).
+    /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
+    ///   y/Y answers the prompt, [`Menu::keydown`]).
     pub fn select(&mut self) -> MenuAction {
         if self.new_game_confirm {
             return MenuAction::None; // SCR_ModalMessage ignores Enter.
@@ -1112,15 +1125,81 @@ impl Menu {
                 self.adjust(1);
                 MenuAction::None
             }
-            MenuScreen::Help => MenuAction::None,
-            MenuScreen::Quit => {
-                // Enter == "Yes": Host_Quit_f. Here that closes the menu (quit to
-                // the attract loop). (The C's M_Quit_Key ignores Enter — only
-                // y/Y quits — but this port has always accepted Enter as Yes.)
-                self.close();
-                self.screen = MenuScreen::Main;
-                MenuAction::Closed
+            // M_Help_Key ignores Enter; so does M_Quit_Key, where only y/Y
+            // quit and n/N/Escape answer no.
+            MenuScreen::Help | MenuScreen::Quit => MenuAction::None,
+        }
+    }
+
+    /// `M_Keydown` (menu.c): a key press while the menu has the keyboard
+    /// (`key_dest == key_menu`), handed to the showing screen's `M_*_Key`.
+    /// `key` is the key number with Shift applied as `Key_Event` applies it
+    /// (`keyshift[]`). `text` is the character the key types, for the Setup
+    /// screen's name fields: the host passes the one its keyboard layout
+    /// produced, or `key` itself when printable (`M_Setup_Key`'s `k >= 32 &&
+    /// k <= 127`); `None` types nothing.
+    ///
+    /// Each screen's switch is id's: Escape backs out, the arrows move the
+    /// cursor (Load/Save/Keys pair LEFT with UP), Enter selects, Backspace and
+    /// Del unbind on Customize controls; while a key is being bound every key
+    /// goes to the grab (`M_Keys_Key`: Escape cancels, `` ` `` is refused); the
+    /// Quit prompt answers only y/Y (quit) and n/N/Escape (back); every other
+    /// key is ignored. (New Game's "Are you sure?" is `SCR_ModalMessage`,
+    /// which takes the keys before `Key_Event` routes them: [`Menu::modal_key`].)
+    pub fn keydown(&mut self, key: u8, text: Option<u8>) -> MenuAction {
+        let _ = text;
+        if !self.visible {
+            return MenuAction::None; // m_none
+        }
+        if self.screen == MenuScreen::Keys && self.bind_grab {
+            self.bind_key(key);
+            return MenuAction::None;
+        }
+        if self.screen == MenuScreen::Quit {
+            return match key {
+                K_ESCAPE | b'n' | b'N' => self.quit_back(),
+                b'y' | b'Y' => self.quit_yes(),
+                _ => MenuAction::None,
+            };
+        }
+        match key {
+            K_ESCAPE => self.cancel(),
+            K_UPARROW => {
+                self.move_cursor(-1);
+                MenuAction::None
             }
+            K_DOWNARROW => {
+                self.move_cursor(1);
+                MenuAction::None
+            }
+            K_LEFTARROW => {
+                self.adjust(-1);
+                MenuAction::None
+            }
+            K_RIGHTARROW => {
+                self.adjust(1);
+                MenuAction::None
+            }
+            K_ENTER => self.select(),
+            K_BACKSPACE | K_DEL => {
+                self.keys_backspace();
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// `SCR_ModalMessage`'s key loop, New Game's "Are you sure?": while it is
+    /// up ([`Menu::new_game_confirm`]) it takes every key event before
+    /// `Key_Event` routes it (`key_count` below zero), and a key down of `y`
+    /// answers yes ([`MenuAction::NewGame`]), `n` or Escape no — by key
+    /// number (`key_lastpress`), so Shift makes no difference. Any other key
+    /// does nothing.
+    pub fn modal_key(&mut self, key: u8) -> MenuAction {
+        match key {
+            b'y' => self.quit_yes(),
+            b'n' | K_ESCAPE => self.quit_no(),
+            _ => MenuAction::None,
         }
     }
 
@@ -1134,7 +1213,7 @@ impl Menu {
     ///   [`MenuAction::Back`];
     /// * the Quit prompt answers "No" → restores the previous screen
     ///   ([`MenuAction::Back`]);
-    /// * the Main screen closes the menu ([`MenuAction::Closed`]).
+    /// * the Main screen closes the menu ([`MenuAction::Resume`]).
     pub fn cancel(&mut self) -> MenuAction {
         if !self.visible {
             return MenuAction::None;
@@ -1193,9 +1272,10 @@ impl Menu {
                 self.quit_back()
             }
             MenuScreen::Main => {
-                // M_Main_Key K_ESCAPE -> key_dest = key_game
+                // M_Main_Key K_ESCAPE -> key_dest = key_game (the host puts
+                // the demo loop back).
                 self.close();
-                MenuAction::Closed
+                MenuAction::Resume
             }
         }
     }
@@ -2438,6 +2518,71 @@ mod tests {
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Multiplayer, 2));
     }
 
+    /// M_Keydown: each screen's M_*_Key switch, by key number.
+    #[test]
+    fn keydown_is_each_screens_m_key() {
+        use crate::keys::{K_BACKSPACE, K_DEL, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW};
+        let mut m = Menu::new();
+        assert_eq!(m.keydown(K_ENTER, None), MenuAction::None, "m_none: nothing");
+        m.open();
+        // Main: the arrows move, Left/Right/Tab/letters do nothing.
+        for k in [K_LEFTARROW, K_RIGHTARROW, b'\t', b'x', K_BACKSPACE] {
+            m.keydown(k, None);
+        }
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 0));
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_ENTER, None);
+        assert_eq!(m.screen(), MenuScreen::Options);
+        // Options: Right adjusts Screen size.
+        for _ in 0..3 {
+            m.keydown(K_DOWNARROW, None);
+        }
+        m.keydown(K_RIGHTARROW, None);
+        assert_eq!(m.viewsize(), VIEWSIZE_DEFAULT + VIEWSIZE_STEP);
+        // Customize controls: Left moves like Up; Del unbinds; during a grab
+        // every key is the grab's, Escape included.
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_ENTER, None);
+        assert_eq!(m.screen(), MenuScreen::Keys);
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_LEFTARROW, None);
+        assert_eq!(m.cursor(), 0, "Left pairs with Up");
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_DOWNARROW, None); // jump
+        m.keydown(K_DEL, None);
+        assert_eq!(m.find_keys_for_command(BIND_JUMP), [None, None], "Del unbinds");
+        m.keydown(K_ENTER, None);
+        m.keydown(K_UPARROW, None);
+        assert_eq!(m.action_for_key(K_UPARROW), Some(BIND_JUMP), "the grab took the arrow");
+        assert_eq!(m.cursor(), BIND_JUMP, "and did not move");
+        m.keydown(K_ENTER, None);
+        m.keydown(K_ESCAPE, None);
+        assert_eq!((m.screen(), m.bind_grabbing()), (MenuScreen::Keys, false), "Escape ends the grab");
+        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Options);
+        // Main's Escape closes it and asks for the demo loop back.
+        m.keydown(K_ESCAPE, None);
+        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Resume);
+        assert!(!m.visible);
+        // SCR_ModalMessage: y by key number, n or Escape; nothing else.
+        m.open();
+        m.set_server_active(true);
+        m.set_cursor(0);
+        m.keydown(K_ENTER, None);
+        m.keydown(K_ENTER, None);
+        assert!(m.new_game_confirm());
+        assert_eq!(m.modal_key(K_ENTER), MenuAction::None);
+        assert_eq!(m.modal_key(b'Y'), MenuAction::None, "Shift is not applied");
+        assert!(m.new_game_confirm());
+        assert_eq!(m.modal_key(K_ESCAPE), MenuAction::None);
+        assert!(!m.new_game_confirm() && m.visible, "Escape: no, the menu stays");
+        m.keydown(K_ENTER, None);
+        assert_eq!(m.modal_key(b'y'), MenuAction::NewGame);
+    }
+
     #[test]
     fn a_closed_menu_reopens_on_m_main_cursor() {
         // Options > Go to console closes the menu (m_state = m_none); the next
@@ -2594,8 +2739,9 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
 
-        // Escape on Main closes the menu.
-        assert_eq!(m.cancel(), MenuAction::Closed);
+        // Escape on Main closes the menu (M_Main_Key: the host resumes the
+        // demo loop).
+        assert_eq!(m.cancel(), MenuAction::Resume);
         assert!(!m.visible);
 
         // Cancel on a hidden menu is a no-op.
@@ -2611,11 +2757,15 @@ mod tests {
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
-        // Re-raise it and answer "Yes" via select (Enter): closes the menu.
+        // Re-raise it: Enter does nothing (M_Quit_Key: only y/Y quit), 'y'
+        // closes the menu.
         m.set_cursor(4);
         m.select();
         assert_eq!(m.screen(), MenuScreen::Quit);
-        assert_eq!(m.select(), MenuAction::Closed, "Enter on the Quit prompt quits");
+        assert_eq!(m.select(), MenuAction::None, "Enter does not answer the Quit prompt");
+        assert_eq!(m.keydown(K_ENTER, None), MenuAction::None);
+        assert!(m.visible && m.screen() == MenuScreen::Quit);
+        assert_eq!(m.keydown(b'Y', Some(b'Y')), MenuAction::Closed, "Y quits");
         assert!(!m.visible);
 
         // Main item Multiplayer (item 1) opens the multiplayer screen
@@ -3685,10 +3835,11 @@ mod tests {
         m.bind_key(K_ESCAPE);
         assert!(!m.bind_grabbing());
         assert_eq!(m.action_for_key(K_ESCAPE), None, "Escape never binds");
-        // The console key is refused too (the C's `k != '`'` check).
+        // The console key is refused too (the C's `k != '`'` check): it
+        // keeps default.cfg's toggleconsole.
         m.select();
         m.bind_key(b'`');
-        assert_eq!(m.action_for_key(b'`'), None, "backtick never binds");
+        assert_eq!(m.action_for_key(b'`'), Some(BIND_TOGGLECONSOLE), "backtick never binds");
 
         // cancel() during a grab also just ends the grab (screen stays).
         m.select();

@@ -2,9 +2,10 @@
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/console.c` — `Con_Print`, `Con_DrawInput`, `Con_DrawConsole`,
-//! `Con_DrawNotify`.
+//! `Con_DrawNotify`; `WinQuake/keys.c` — `Key_Console`, the line editing.
 
 use crate::draw::{draw_char_scaled, draw_string_scaled, fill_rect, screen_2d, Screen2d};
+use crate::keys::{K_BACKSPACE, K_ENTER, K_LEFTARROW};
 use crate::menu::realtime_blink_bit;
 use crate::render::Image;
 use std::collections::VecDeque;
@@ -391,19 +392,31 @@ impl Console {
         &self.input
     }
 
-    /// Take the entered command line: echo `"]" + line` into the scrollback,
-    /// clear the input, and return the line for the host to execute. Returns
-    /// `None` (drawing nothing into the scrollback) when the input is blank, so
-    /// pressing Enter on an empty line is a harmless no-op.
-    pub fn take_input(&mut self) -> Option<String> {
-        let line = std::mem::take(&mut self.input);
-        if line.trim().is_empty() {
-            return None;
+    /// `Key_Console` (keys.c): a key down the console has the keyboard for,
+    /// Shift applied (`keyshift[]`), with `text` the character it types (if
+    /// any). Enter submits the line — echoed into the scrollback with its `]`
+    /// prompt (`Con_Printf ("%s\n", key_lines[edit_line])`, an empty line
+    /// too) and returned for the host to execute (`Cbuf_AddText`); Backspace
+    /// and Left arrow take back the last character (the line has no cursor
+    /// to move); a printable key types `text`. Every other key does nothing.
+    pub fn key(&mut self, key: u8, text: Option<u8>) -> Option<String> {
+        match key {
+            K_ENTER => {
+                let line = std::mem::take(&mut self.input);
+                self.println(format!("]{line}"));
+                Some(line)
+            }
+            K_BACKSPACE | K_LEFTARROW => {
+                self.input.pop();
+                None
+            }
+            _ => {
+                if let Some(c) = text {
+                    self.putchar(c as char);
+                }
+                None
+            }
         }
-        // Echo the command into the scrollback with the `]` prompt, exactly as
-        // Quake's `Con_Printf` shows the line the player just submitted.
-        self.println(format!("]{line}"));
-        Some(line)
     }
 
     /// `Con_Print(txt)` (console.c): lay `txt` into the scrollback, word-wrapped
@@ -610,6 +623,7 @@ pub fn draw_console(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::{K_TAB, K_UPARROW};
     use crate::render::fixtures::{ramp_palette, solid_pic};
 
     /// CENSUS L11: Con_Print lays text into 38-column console lines (word
@@ -706,25 +720,24 @@ mod tests {
     }
 
     #[test]
-    fn console_take_input_returns_and_clears_and_echoes() {
+    fn key_console_enter_submits_and_echoes_the_line() {
         let mut c = Console::new();
-        for ch in "give h 100".chars() {
-            c.putchar(ch);
+        for ch in "give h 100x".bytes() {
+            c.key(ch, Some(ch));
         }
-        let before = c.line_count();
-        let got = c.take_input();
-        assert_eq!(got.as_deref(), Some("give h 100"), "take_input returns the line");
-        assert_eq!(c.input(), "", "take_input clears the input line");
-        assert_eq!(c.line_count(), before + 1, "the submitted line is echoed to scrollback");
-        // A blank line is a no-op: nothing returned, nothing echoed.
-        let n = c.line_count();
-        assert_eq!(c.take_input(), None, "blank input returns None");
-        assert_eq!(c.line_count(), n, "blank input echoes nothing");
-        for ch in "   ".chars() {
-            c.putchar(ch);
-        }
-        assert_eq!(c.take_input(), None, "whitespace-only input returns None");
-        assert_eq!(c.line_count(), n);
+        c.key(K_LEFTARROW, None); // Left arrow takes a character back too
+        assert_eq!(c.input(), "give h 100");
+        let got = c.key(K_ENTER, None);
+        assert_eq!(got.as_deref(), Some("give h 100"), "Enter returns the line");
+        assert_eq!(c.input(), "", "and starts a new one");
+        assert_eq!(c.lines().collect::<Vec<_>>(), ["]give h 100"], "echoed with its prompt");
+        // An empty line echoes its prompt as id's does, and runs nothing.
+        assert_eq!(c.key(K_ENTER, None).as_deref(), Some(""));
+        assert_eq!(c.lines().nth(1), Some("]"));
+        // A key that types nothing is ignored.
+        c.key(K_TAB, None);
+        c.key(K_UPARROW, None);
+        assert_eq!(c.input(), "");
     }
 
     #[test]

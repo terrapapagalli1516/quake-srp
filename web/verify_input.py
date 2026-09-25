@@ -185,10 +185,10 @@ with sync_playwright() as p:
     pg.evaluate("""() => {
         window._real = exp; window._atk = [];
         exp = { ...window._real };
-        // Merged input path: Ctrl is K_CTRL(133) through the BINDINGS table
-        // (default.cfg: ctrl = +attack, rebindable) — spy key_down/key_up.
-        exp.key_down = k => { if (k === 133) window._atk.push(1); return window._real.key_down(k); };
-        exp.key_up   = k => { if (k === 133) window._atk.push(0); return window._real.key_up(k); };
+        // Merged input path: Ctrl is K_CTRL(133) through Key_Event and the
+        // BINDINGS table (default.cfg: ctrl = +attack, rebindable) — spy
+        // key_event's downs and ups.
+        exp.key_event = (k, d, c) => { if (k === 133) window._atk.push(d); return window._real.key_event(k, d, c); };
     }""")
     pg.keyboard.down("Control"); time.sleep(0.15); pg.keyboard.up("Control")
     atk = pg.evaluate("window._atk")

@@ -419,10 +419,12 @@ mod tests {
             console_text()
         );
 
-        // A live walk now (console stays open across boot()).
+        // A live walk now (boot() opens the menu over it, the console up:
+        // M_Menu_Main_f's key_dest = key_menu); back to the console.
         assert_eq!(boot(), 1);
         set_resolution(320, 200);
         APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
+        console_toggle();
 
         run_console_line("save");
         assert!(console_text().contains("save <savename> : save a game"));

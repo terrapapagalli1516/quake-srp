@@ -122,6 +122,25 @@ pub(crate) struct App {
     /// `gfx/palette.lmp`, for what is drawn with no level loaded (the
     /// disconnected screen's console and menu). Loaded with the menu assets.
     pub(crate) palette: Option<[[u8; 3]; 256]>,
+    /// keys.c `key_repeats[256]`: key downs since each key's last up; a
+    /// second down is the keyboard's autorepeat, which `Key_Event` ignores
+    /// (Backspace and Pause aside).
+    pub(crate) key_repeats: [u8; 256],
+    /// keys.c `shift_down`: Shift is held, so a key types its `keyshift[]`.
+    pub(crate) shift_down: bool,
+}
+
+/// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
+/// and the console's open flags ([`App::key_dest`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyDest {
+    /// `key_game`: keys go to their bindings (with nothing playing, the
+    /// console keys type into the forced-up console).
+    Game,
+    /// `key_console`: the console is down.
+    Console,
+    /// `key_menu`: the menu is up.
+    Menu,
 }
 
 impl App {
@@ -174,6 +193,41 @@ impl App {
         self.console.open || (self.disconnected && !self.menu.visible)
     }
 
+    /// `key_dest`: the console while it is down, else the menu while it is
+    /// up, else the game. (The two are never both open by a key: the console
+    /// key goes to the menu's own keys while the menu is up.)
+    pub(crate) fn key_dest(&self) -> KeyDest {
+        if self.console.open {
+            KeyDest::Console
+        } else if self.menu.visible {
+            KeyDest::Menu
+        } else {
+            KeyDest::Game
+        }
+    }
+
+    /// `M_Menu_Main_f` (menu.c) from outside the menu: the main menu opens
+    /// on its kept cursor (`key_dest = key_menu`).
+    pub(crate) fn m_menu_main(&mut self) {
+        self.console.open = false;
+        self.menu.open();
+    }
+
+    /// `M_ToggleMenu_f` (menu.c), what Escape does outside the menu and the
+    /// `togglemenu` command: over the game the main menu opens; with the
+    /// console down, the console goes up (`Con_ToggleConsole_f`); within the
+    /// menu a submenu returns to Main and Main closes (without `M_Main_Key`'s
+    /// demo-loop resume).
+    pub(crate) fn m_toggle_menu(&mut self) {
+        match self.key_dest() {
+            KeyDest::Menu => {
+                let _ = self.menu.toggle();
+            }
+            KeyDest::Console => self.toggle_console(),
+            KeyDest::Game => self.m_menu_main(),
+        }
+    }
+
     /// `cls.demoplayback`: a demo is the active mode.
     pub(crate) fn demoplayback(&self) -> bool {
         self.mode == 1 && self.demo.is_some()
@@ -211,12 +265,20 @@ impl App {
         mode.or(if self.disconnected { self.palette.as_ref() } else { None })
     }
 
-    /// `Con_ToggleConsole_f` (console.c): the console goes down or up, the
-    /// typing is cleared on the way up, and `con_times` is zeroed — nothing
-    /// printed so far shows as a notify line afterwards. The `~` key and
-    /// Options > "Go to console" (M_Options_Key) both run it.
+    /// `Con_ToggleConsole_f` (console.c): the console goes down, or up — the
+    /// typing cleared — or, with nothing playing (disconnected), the main
+    /// menu comes up in its place (there is no game to go back to); and
+    /// `con_times` is zeroed — nothing printed so far shows as a notify line
+    /// afterwards. The console key's `toggleconsole` binding and Options >
+    /// "Go to console" (M_Options_Key) run it.
     pub(crate) fn toggle_console(&mut self) {
-        self.console.toggle();
+        if self.console.open && self.disconnected {
+            self.console.open = false;
+            self.m_menu_main();
+            let _ = self.console.take_unnotified();
+        } else {
+            self.console.toggle();
+        }
         if let Some(w) = self.walk.as_mut() {
             w.notify.clear();
         }
@@ -421,6 +483,8 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 cls: Cls::default(),
                 disconnected: false,
                 palette: None,
+                key_repeats: [0; 256],
+                shift_down: false,
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
@@ -457,7 +521,7 @@ pub extern "C" fn boot() -> i32 {
             // cvars/keybindings (they're host state), so re-booting must not
             // wipe them.
             a.menu.reset_boot();
-            a.menu.open();
+            a.m_menu_main();
             // PRESERVE the player's chosen resolution across the re-boot: keep the
             // current framebuffer size (the source of truth) and point the fresh
             // menu's current video mode at it, instead of snapping back to DEFAULT.
@@ -532,7 +596,7 @@ pub extern "C" fn boot_attract() -> i32 {
             // resolution over it.
             // The page's load is the program start: every cursor 0.
             a.menu.reset_boot();
-            a.menu.open();
+            a.m_menu_main();
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
     });

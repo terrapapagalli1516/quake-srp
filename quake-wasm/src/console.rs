@@ -1,32 +1,31 @@
 //! The drop-down console's key half — console.c's `Con_ToggleConsole_f` and
-//! keys.c's `Key_Console` (typing, backspace, enter): the exports the page
-//! routes the keyboard to while the console is down. Submitted lines run
+//! keys.c's `Key_Console` (typing, backspace, enter), which `Key_Event`
+//! ([`crate::input::key_event`]) hands the console's keys to; plus the
+//! exports automation types into the console with. Submitted lines run
 //! through [`execute_console_command`].
 
-use crate::app::{ensure_app, APP};
+use quake_rs::keys::{K_BACKSPACE, K_ENTER};
+
+use crate::app::{ensure_app, App, APP};
 use crate::host_cmd::execute_console_command;
+
+/// `Key_Console`: a key the console has the keyboard for (Shift applied),
+/// `text` the character it types. Returns the line Enter submitted, for the
+/// caller to execute once the App borrow ends.
+pub(crate) fn key_console(a: &mut App, key: u8, text: Option<u8>) -> Option<String> {
+    a.console.key(key, text)
+}
 
 // --- drop-down console: toggle / typing / execution exports (the `~` key) ---
 
-/// Toggle the drop-down console (the `~` / backtick key, Quake's
-/// `Con_ToggleConsole_f`). Opening slides the panel down over whatever is
-/// playing; closing slides it back. While open the console owns the keyboard.
-/// Disconnected, with the console covering the screen, it brings up the main
-/// menu instead (`M_Menu_Main_f`: there is no game to go back to).
+/// `Con_ToggleConsole_f` — what the console key's `toggleconsole` binding
+/// runs (the page sends the key through `key_event`): the console slides
+/// down over whatever is playing, or back up. With nothing playing
+/// (disconnected, the console covering the screen) closing it brings up the
+/// main menu instead: there is no game to go back to.
 #[no_mangle]
 pub extern "C" fn console_toggle() {
-    // Con_ToggleConsole_f: `memset (con_times, 0, sizeof(con_times))` too —
-    // the notify lines are gone after the console goes down or up.
-    ensure_app(|a| {
-        if a.disconnected && (a.console.open || !a.menu.visible) {
-            if a.console.open {
-                a.toggle_console();
-            }
-            a.menu.open();
-        } else {
-            a.toggle_console();
-        }
-    });
+    ensure_app(App::toggle_console);
 }
 
 /// `1` when the console is open (capturing the keyboard), else `0`. The page
@@ -38,10 +37,11 @@ pub extern "C" fn console_visible() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.console_has_keys() as i32).unwrap_or(0))
 }
 
-/// Append one typed character to the console input line. `code` is a Unicode
-/// scalar value (the page passes `key.charCodeAt(0)` / `key.codePointAt(0)`).
-/// Non-printable codes, the backtick/tilde (the toggle key), and anything while
-/// the console is closed are ignored. A no-op once the input line is full.
+/// Type one character into the console input line (automation: the page
+/// sends keys through `key_event`). `code` is a Unicode scalar value.
+/// Non-printable codes, the backtick/tilde (the toggle key), and anything
+/// while the console does not have the keyboard are ignored. A no-op once
+/// the input line is full.
 #[no_mangle]
 pub extern "C" fn console_char(code: u32) {
     ensure_app(|a| {
@@ -56,20 +56,21 @@ pub extern "C" fn console_char(code: u32) {
     });
 }
 
-/// Delete the last character of the console input line (Backspace). A no-op when
-/// the console is closed or the line is empty.
+/// Backspace in the console (`Key_Console`). A no-op when the console does
+/// not have the keyboard or the line is empty.
 #[no_mangle]
 pub extern "C" fn console_backspace() {
     ensure_app(|a| {
         if a.console_has_keys() {
-            a.console.backspace();
+            let _ = key_console(a, K_BACKSPACE, None);
         }
     });
 }
 
-/// Submit the console input line (Enter): echo it into the scrollback and
-/// execute it against the live game. A no-op when the console is closed or the
-/// line is blank. The command may swap the level (`map`) and close the console.
+/// Enter in the console (`Key_Console`): echo the line into the scrollback
+/// and execute it against the live game. A no-op when the console does not
+/// have the keyboard. The command may swap the level (`map`) and close the
+/// console.
 #[no_mangle]
 pub extern "C" fn console_enter() {
     // Take the line under the borrow, then execute it (execute_console_command
@@ -78,7 +79,7 @@ pub extern "C" fn console_enter() {
         c.borrow_mut()
             .as_mut()
             .filter(|a| a.console_has_keys())
-            .and_then(|a| a.console.take_input())
+            .and_then(|a| key_console(a, K_ENTER, None))
     });
     if let Some(line) = line {
         execute_console_command(&line);
