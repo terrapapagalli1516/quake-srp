@@ -3,7 +3,8 @@
 use crate::bsp::Bsp;
 use crate::math::Vec3;
 use crate::wad::Qpic;
-use super::{demo_room, GEOM_CACHE, LIGHT_CACHE, SURF_CACHE};
+use super::demo_room;
+use super::surf::{GEOM_CACHE, LIGHT_CACHE, SURF_CACHE};
 
 /// Build a tiny but valid single-skin single-frame MDL whose frame-0
 /// triangle, after the model->world transform, sits in front of the camera.

@@ -6,7 +6,8 @@
 
 use crate::bsp::Bsp;
 use crate::math::Vec3;
-use super::{classify_surface, Image, SurfKind};
+use super::Image;
+use super::surf::{classify_surface, SurfKind};
 
 /// `SKYSIZE` (d_iface.h): each sky layer is 128x128 texels.
 const SKYSIZE: i32 = 128;

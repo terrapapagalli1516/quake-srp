@@ -7,7 +7,7 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
-use super::face_world_poly;
+use super::surf::face_world_poly;
 
 // ---------------------------------------------------------------------------
 // BSP lightmaps (Quake's baked static lighting from the LIGHTING lump)
