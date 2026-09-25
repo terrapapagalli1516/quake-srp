@@ -296,6 +296,12 @@ pub(crate) struct DemoPlay {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub(crate) viewsize: f32,
+    /// Each relinked entity's origin as last rendered (CL_RelinkEntities'
+    /// `oldorg`), keyed by entity number, for the model-flag trails; an entity
+    /// missing from a frame is forgotten (its next sighting is a forcelink).
+    pub(crate) trail_org: HashMap<i32, [f32; 3]>,
+    /// R_RocketTrail's `static int tracercount` for the demo's tracer trails.
+    pub(crate) tracercount: u32,
     /// `sb_showscores` (`+showscores`, Tab held): Sbar_Draw shows the solo
     /// scoreboard during playback too. Refreshed by `step` like `viewsize`.
     pub(crate) show_scores: bool,
@@ -347,6 +353,8 @@ impl DemoPlay {
             notify: Vec::new(),
             notify_pending: String::new(),
             viewsize: render::VIEWSIZE_DEFAULT,
+            trail_org: HashMap::new(),
+            tracercount: 0,
             show_scores: false,
             faceanimtime: 0.0,
             cl_items: 0,

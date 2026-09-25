@@ -317,6 +317,11 @@ impl<'a> NetReader<'a> {
 /// can drive dynamic lights / brightfield particles exactly like the live walk.
 #[derive(Clone, Copy)]
 pub struct EntSnapshot {
+    /// The entity number (`cl_entities[num]`), or -1 for a static entity
+    /// (`cl_static_entities`, never relinked — no trails). A front-end keys
+    /// per-entity history on it: CL_RelinkEntities trails from the entity's
+    /// previous origin.
+    pub num: i32,
     pub modelindex: usize,
     pub frame: i32,
     pub origin: [f32; 3],
@@ -1050,6 +1055,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
         }
 
         entities.push(EntSnapshot {
+            num: i as i32,
             modelindex: e.modelindex as usize,
             frame: e.frame,
             origin,
@@ -1066,6 +1072,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
             angles[1] = bobjrotate;
         }
         entities.push(EntSnapshot {
+            num: -1,
             modelindex: e.modelindex.max(0) as usize,
             frame: e.frame,
             origin: e.msg_origins[0],

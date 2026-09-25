@@ -10,7 +10,7 @@ use quake_rs::tent::BeamModel;
 
 use crate::app::DemoPlay;
 use crate::bench::{self, Phase};
-use crate::cl_tent::spawn_temp_entity;
+use crate::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use crate::host_cmd::IT_INVISIBILITY;
 use crate::snd_dma::{
     push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
@@ -165,6 +165,7 @@ pub(crate) fn step_demo(
         // notify + centerprint text, and the stair-smoothing accumulator (their
         // expiries live on the recorded clock, which just jumped back to t0).
         d.particles = ParticleSystem::new();
+        d.trail_org.clear();
         d.beams.clear();
         d.last_spawned_idx = usize::MAX;
         d.damage_blend = 0.0;
@@ -201,6 +202,24 @@ pub(crate) fn step_demo(
     }
 
     let f = &d.demo.frames[d.idx];
+
+    // CL_RelinkEntities' model-flag trails (R_RocketTrail from the entity's
+    // previous origin: rocket/lavaball fire, grenade smoke, gib blood, zombie
+    // gibs, wizard/knight/vore tracers), exactly as in live play. A relinked
+    // entity's first sighting (forcelink) starts at its own origin, so an
+    // entity absent from this frame is forgotten. Statics never trail.
+    // (EF_ROCKET's dlight is not drawn: demo playback has no dlights yet.)
+    d.trail_org.retain(|num, _| f.entities.iter().any(|e| e.num == *num));
+    for e in &f.entities {
+        if e.num < 0 {
+            continue;
+        }
+        let flags = d.models.get(e.modelindex).and_then(|m| m.as_ref()).map_or(0, |m| m.header.flags);
+        if let Some(ttype) = rocket_trail_type(flags) {
+            let oldorg = d.trail_org.insert(e.num, e.origin).unwrap_or(e.origin);
+            d.particles.spawn_rocket_trail(oldorg, e.origin, ttype, &mut d.tracercount, f.time, &mut d.prng);
+        }
+    }
 
     let mut owned: Vec<ModelInstance> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
@@ -998,6 +1017,52 @@ mod tests {
             let _ = step_demo(&mut d, 0.05, false, 160, 100);
         }
         assert_eq!(d.damage_blend, 0.0, "flash fully faded");
+    }
+
+    /// CENSUS F13: CL_RelinkEntities runs R_RocketTrail for model-flag trails in
+    /// playback exactly as live: a recorded missile (progs/missile.mdl,
+    /// EF_ROCKET) trails fire from its previous origin, one particle per 3
+    /// units; its first sighting draws none, and a static never trails.
+    #[test]
+    fn step_demo_rocket_trails_from_the_previous_origin() {
+        use quake_rs::demo::{Demo, DemoFrame, EntSnapshot};
+        let missile = pak()
+            .and_then(|p| p.read_file("progs/missile.mdl").ok().flatten())
+            .and_then(|b| Mdl::parse(&b).ok())
+            .expect("progs/missile.mdl parses");
+        assert_ne!(rocket_trail_type(missile.header.flags), None, "missile.mdl carries EF_ROCKET");
+        let ent = |num: i32, x: f32| EntSnapshot {
+            num,
+            modelindex: 2,
+            frame: 0,
+            origin: [x, 0.0, 0.0],
+            angles: [0.0; 3],
+            effects: 0,
+        };
+        let frame = |t: f32, x: f32| DemoFrame {
+            time: t,
+            entities: vec![ent(7, x), ent(-1, 500.0)],
+            ..Default::default()
+        };
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into(), "progs/missile.mdl".into()],
+            sound_precache: Vec::new(),
+            viewentity: 0,
+            frames: vec![frame(0.0, 0.0), frame(0.05, 0.0), frame(0.10, 30.0), frame(1.0, 30.0)],
+        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.models = vec![None, None, Some(missile)];
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 1);
+        assert_eq!(d.particles.len(), 0, "first sighting: no trail");
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 2);
+        assert_eq!(d.particles.len(), 10, "30 units of rocket trail, one per 3");
+        // Along x = 0..30 (type 0 jitters each particle by rand()%6 - 3), far
+        // from the static at x = 500.
+        assert!(d.particles.particles().iter().all(|p| p.origin[0] > -4.0 && p.origin[0] < 34.0));
     }
 
     /// CENSUS F6: a recorded `svc_stufftext "bf"` runs V_BonusFlash_f — the
