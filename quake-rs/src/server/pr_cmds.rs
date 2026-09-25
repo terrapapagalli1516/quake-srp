@@ -295,8 +295,8 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
 /// the remaining network / client-routing builtins that have no world effect in
-/// this headless server (`stuffcmd`, `makestatic`, `lightstyle`, `changelevel`,
-/// `setspawnparms`, the print routers, `cvar_set`). (`sound` queues a
+/// this headless server (`makestatic`, `setspawnparms`). (`stuffcmd` queues
+/// its text via [`crate::builtins::pf_stuffcmd`]; `sound` queues a
 /// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
 /// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
 /// [`bi_particle`]; the `Write*` family (#52..#59) drives the temp-entity
