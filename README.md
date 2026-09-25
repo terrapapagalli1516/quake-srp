@@ -1,181 +1,199 @@
 # quake-rust
 
-A faithful, **dependency-free, `#![forbid(unsafe_code)]` Rust reimplementation** of id Software's *Quake*
-(1996), ported subsystem by subsystem from the original GPLv2 C source — and validated against the real
-shareware data at every step. It loads Quake's files, runs its QuakeC virtual machine, collides against its
-BSP worlds, spawns maps by executing the real game logic, moves a player through them with collision and
-physics, plays back recorded demos, renders the world with **baked lightmaps + textures + models**, and runs
-**interactively in a web browser** via WebAssembly.
+A Rust port of id Software's *Quake* (1996), ported file by file from id's GPLv2 WinQuake C
+source. No dependencies beyond the standard library, `#![forbid(unsafe_code)]`, and checked
+against the shareware data and against id's own renderer. It runs natively (the `quaketool`
+CLI) and in a web browser (WebAssembly, `<canvas>`, Web Audio).
 
-> **Honest framing.** This is a genuinely playable single-player port. It boots into the **Quake main menu drawn
-> over the attract demo**, New Game drops you in the **`start` skill/episode hub**, and you can walk, fight monsters
-> that wake/chase/attack, take damage (with the red flash), **die and respawn** (the full QuakeC death chain,
-> proven end-to-end), switch weapons — **including the thunderbolt's rendered lightning** — pick up items +
-> ammo/health/explosive boxes, open doors, ride elevators, see blood/explosions/dynamic lights (gated by the real
-> `R_MarkLights` BSP recursion, so light can't bleed through walls)/flickering torches, hear **spatialized in-game
-> sound + the placed ambient loops and leaf ambients** (torch crackle, machine hums, wind and water), and reach the
-> exit to the **intermission stats screen** (Time / Secrets / Kills from the QC-placed camera) — through to the
-> **episode-end finale text** — with your inventory carried to the next map: the whole shareware episode. There's a
-> working **Options menu** (screen size, mouse, volume; resolution under Video Options) and a **drop-down console** (`~`) with
-> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`, and it saves and loads (Single Player > Save/Load, the
-> `save`/`load` commands; the page keeps the `.sav` text in localStorage). What it is *not*: multiplayer/netcode
-> (out of scope). Everything claimed below is real and tested: **~580 engine + ~120 wasm tests**, zero dependencies, no
-> `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
-> against golden scene renders (byte-identical unless a fidelity fix deliberately re-baselines — each such
-> re-baseline is recorded in `AUDIT.md`).
+It plays the shareware episode in single player: the attract demos behind the main menu,
+New Game into the `start` hub, the eight E1 maps with their monsters, doors, lifts,
+secrets and Chthon, death and respawn, intermission and finale screens, save and load, the
+Options menu, and the drop-down console. Multiplayer and netcode are out of scope.
 
-## Layout
+## The rule
 
-| Path | What |
-|------|------|
-| `quake-rs/` | the engine crate (lib + `quaketool` CLI). All the subsystems live in `quake-rs/src/`, the game client too: `client/` is the live frame against the local server and demo playback (id's `cl_*.c`, `view.c`, the client half of `host.c`/`host_cmd.c`), which the browser runs and `quaketool play` runs natively. |
-| `quake-wasm/` | the `cdylib` browser shell — the platform layer (~3.0k lines + ~5.4k of e2e tests): compiles the engine to `wasm32`, holds the host state (`App`: mode, menu, console, clocks, framebuffer) around `quake_rs::client`, carries out the sound calls each client frame returns for the page's Web Audio, bridges saves to localStorage, and exposes plain `extern "C"` exports to a `<canvas>` — no `wasm-bindgen`, no deps. Modules are named after the id file they port the platform/host side of (`host` = `Host_Frame`, `vid`, `snd_dma`, `input`, `menu`, `console`, `host_cmd`, `savegame`, plus `app` for the state and boots; `cl_walk`/`cl_demo` run the client's frames for the page); `src/lib.rs` maps every export to its module. |
-| `web/` | the browser page (`index.html`) + eight headless-Chromium verify scripts (`verify_*.py`: walk, ambient, demo, input, menu, save, loops, extras). |
-| `oracle/` | id's own WinQuake software renderer built headless from the C (null drivers, docker i386 build) + `compare.py`: renders the same view in both and diffs them pixel for pixel. See `oracle/README.md` for how to run it and the ranked fidelity findings. |
-| `gen_samples.py`, `gen_progs.py` | independent Python asset/bytecode generators, so tests need no real data. |
-| `screenshots/` | rendered output from real e1m1 / start (the lit shots, the walkthrough GIF). |
+**Faithful to id's WinQuake by default.** The only intended default departure is Always
+Run. Anything else that differs from id's game is an opt-in **Web extra**, off by default
+(Options > Web extras, below).
 
-## What works (validated on the real shareware)
+Two things follow that a player notices:
 
-- **Asset formats** — PAK (+ CRC-16/CCITT, exact-match against stock `pak0.pak`), WAD2, BSP v29, MDL, SPR, palette.
-- **QuakeC VM** — the full bytecode interpreter (all 66 opcodes), edict/string/global runtime, builtins.
-- **Server** — `ED_LoadFromFile` spawns a map by running id's real spawn functions; `SV_Physics` tick (walk, toss,
-  bounce, fly, **`SV_Physics_Pusher`** for doors/platforms); entity-vs-entity collision (`SV_Move`), touch/impact,
-  **item pickups**; a real **player client** (`PutClientInServer` + `SV_ClientThink` movement, **impulse weapon
-  switching**, the C's **signon settle frames** before frame 0); **monster AI** (sight/`FindTarget`/`checkclient`,
-  chase, attack) and the movement builtins (`walkmove`/`movetogoal`/chase-dir/`findradius`); **combat**
-  (`traceline`→QuakeC `T_Damage`, player damage + **death → corpse physics → respawn**, proven through the real
-  QuakeC chain); **`changelevel`** with inventory carried across maps (`SetChangeParms`/`DecodeLevelParms`) and the
-  **intermission/finale flow** (the MSG_ALL `svc_intermission`/`svc_finale` stream from QC's `execute_changelevel`).
-- **Renderer** — id's **edge-sorted span renderer** for the world and brush models (`r_edge.c`: the BSP walked
-  front to back into one edge list, each pixel drawn once, a 16-bit 1/z buffer for the entities; PVS and
-  frustum culling, 16-pixel perspective spans, mip levels): **the full Quake lighting model** — baked BSP lightmaps + **dynamic
-  lights** (`R_AddDynamicLights`, gated by the **`R_MarkLights` BSP recursion** so light never crosses solid
-  planes) + **animated light styles** (`R_AnimateLight`: flickering torches); **alias-model frame animation** +
-  skins; brush submodels + **external `b_*.bsp` brush-model items** (explosive boxes, ammo/health boxes); turbulent
-  **water/lava/slime warp** + scrolling sky; first-person **weapon viewmodel**; **particles** (blood) +
-  **temp-entity effects** (fiery explosions, impacts, **lightning bolts** — `cl_tent.c`'s beam store expanding into
-  bolt models for the shambler/thunderbolt/Chthon trap); **head-bob** (`V_CalcBob`); **screen blends**
-  (`V_UpdatePalette`'s palette shifts: damage flash, underwater tint); a **status-bar HUD** and the **intermission/finale overlays**
-  (`Sbar_IntermissionOverlay`, the 8-chars/sec finale text reveal).
-- **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
-  with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
-  volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
-  `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
-- **Web extras** — the port is id's Quake by default (Always Run aside). Its departures are opt-in, all
-  off by default, on one page: **Options > Web extras**, drawn like id's Options page, each also a
-  `wasm_*` console variable (listed in `quake-wasm/src/extras.rs`): an **uncapped frame rate** (no
-  72 fps cap, for 120/144 Hz displays; `wasm_uncapped 1`), an **FPS readout** in QuakeWorld's style
-  (`wasm_showfps 1`) and **exact perspective** on every pixel instead of id's 16-pixel spans
-  (`wasm_exactpersp 1`). The page remembers them across reloads, as it does the resolution and
-  Screen size. Recorded in `AUDIT.md` ("Web extras").
-- **Sound** — the QuakeC `sound` + temp-entity sounds drive a queue the browser plays through Web Audio with
-  **distance/stereo spatialization** relative to the player (samples resolved under the `sound/` pak dir); **placed
-  `ambientsound()` loops** (torch crackle, machine hums — `svc_spawnstaticsound` semantics, wire-byte-exact
-  volume/attenuation) and the **automatic leaf ambients** (water/wind, ramped per `S_UpdateAmbientSounds` with the
-  C's integer math at its 72 fps frame cap).
-- **Demo playback** — parses the `.dem` net-protocol stream into per-frame entity snapshots **+ svc_particle /
-  svc_temp_entity effects + static sounds + intermission state**, and (demo-parity pass, 2026-06-11) the full
-  client-visible stream the C replays: **recorded svc_sound one-shots** (spatialized like live), **recorded
-  lightstyles**, **svc_clientdata stats driving the live status bar + weapon viewmodel**, **svc_damage flash +
-  view kick**, **svc_print/centerprint overlays**, and **V_CalcRefdef head-bob/lean** — frame emission gated on
-  signon completion so the attract loop starts (and wraps) in-world. The demo IS the game rendering a recorded
-  stream, as in WinQuake.
-- **Browser** — the engine compiles to `wasm32-unknown-unknown` unchanged; WASD + mouse-look + fullscreen, fire
-  (click), weapon select (1–8), `~` console, Esc menu, selectable resolution, lit, with HUD + sound.
+- **Frame rate.** id's `Host_FilterTime` caps the game at 72 frames a second, so the port
+  does too: a 144 Hz display runs at 72 fps and a 120 Hz display at 60 (every other
+  refresh). "Uncapped framerate" is a Web extra.
+- **Screen size and resolution.** Options > Screen size is id's `viewsize` (the 3-D view
+  shrinks inside a tiled border; 110 drops the inventory, 120 the status bar). The
+  render resolution is under Options > Video Options (960x600 by default). As in
+  WinQuake, the status bar and menus are drawn 1:1 at that resolution, so they get
+  smaller as it grows ("Scaled 2-D layer" is the Web extra that blows them up).
 
-See `quake-rs/README.md` for the full subsystem table, the C-source provenance of each module, and the verified
-`quaketool` command transcripts.
+**Not yet within the rule:** four control departures are still on by default and wait for
+a decision (CENSUS.md, "Rule departures on by default"): mouse look is held permanently
+while the pointer is locked (id: `+mlook` off), WASD moves (id binds `a`/`d` to look up
+and move up), `f` toggles fullscreen, and Space in water also adds upward speed.
 
-## Build & run
+## Run it
+
+The repo has no game data. Fetch id's freely redistributable shareware `pak0.pak` into
+`quake-data/ID1/PAK0.PAK` (the browser build embeds it at compile time):
 
 ```sh
-cd quake-rs
-cargo test          # 581 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
-cargo run --release --bin quaketool -- --help
-```
-
-`quaketool` subcommands: `info ls cat bsp map mdl spr wad dis run render render-demo menu sim scene view walk demo playtest simbench changelevel census census-edicts play`. `play` runs the browser's game client natively: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1 --res 320x200,640x400` prints the same frame hashes as `uv run --with playwright web/bench.py --hash-every 30` with those workloads and resolutions, byte for byte.
-
-### Getting the game data (not committed)
-
-The repo is **data-free** — Quake assets are copyrighted and excluded by `.gitignore`. To run against real maps,
-fetch id's freely-redistributable **shareware** `pak0.pak` (md5 `5906e599...`):
-
-```sh
-# quake106.zip -> resource.1 (LZH) -> id1/PAK0.PAK
 curl -sL -o quake106.zip https://raw.githubusercontent.com/Jason2Brownlee/QuakeOfficialArchive/main/bin/quake106.zip
-unzip quake106.zip resource.1 && bsdtar -xf resource.1 ID1/PAK0.PAK
-cargo run --release --bin quaketool -- render ID1/PAK0.PAK ... # etc.
+unzip quake106.zip resource.1 && bsdtar -xf resource.1 ID1/PAK0.PAK   # quake106.zip -> resource.1 (LZH) -> ID1/PAK0.PAK
+mkdir -p quake-data && mv ID1 quake-data/
 ```
 
-The browser build (`quake-wasm`) `include_bytes!`s a pak at build time, so it needs the data present to compile;
-the engine lib and all tests do **not**.
-
-### In the browser
+**In the browser:**
 
 ```sh
 cd quake-wasm && cargo build --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/quake_wasm.wasm ../web/
-miniserve --port 8080 -C ../web      # any static server works; open /index.html
+cd .. && miniserve -C -p 8196 web      # -C compresses responses: 9.1 MB with brotli instead of 19.7
 ```
 
-The page shows the game in the largest 4:3 box the window fits under its header, with the status line
-still in view (never smaller than 640x480; narrow screens and fullscreen have their own rules): the
-framebuffer is 16:10 and stretched to 4:3 as a 1996 monitor showed those modes. The window sets how
-big the picture is; the resolution (Options > Video Options, 960x600 by default) only sets how fine
-its pixels are, and the status bar and menus are drawn 1:1 in it, as WinQuake draws them.
+Then open `http://<host>:8196/index.html` (on the dev server: `http://localhost:8196/index.html`).
+`index.html?lowlatency` asks for a low-latency canvas (can tear; off by default). Any static
+server works. The wasm is 19.7 MB, of which 18.7 MB is the embedded pak.
 
-The wasm is 18.7 MB, nearly all of it the embedded pak (the code is ~0.8 MB). miniserve's `-C`
-(`--compress-response`) compresses it on the fly: Chrome gets brotli at **8.6 MB** (gzip 9.6 MB,
-zstd 8.3 MB). That costs the server ~0.4 s of CPU per download (nothing is cached), so it pays on
-links slower than ~400 Mbit/s: at an emulated 50 Mbit/s, first frame 3.5 → 1.8 s; on localhost it
-is slower (0.19 → 0.54 s). The page stream-compiles the module (`WebAssembly.instantiateStreaming`)
-whatever MIME type the server sends, and falls back to a buffered load on browsers without it;
-behind compression the loading bar shows a MB counter instead of a percentage. Splitting the pak
-out of the wasm, so an engine update doesn't re-download 18.7 MB of unchanged data, is an open
-option (PERF_PLAN D4).
+The page shows the game in the largest 4:3 box the window fits (never under 640x480), the
+way a 1996 monitor showed WinQuake's 16:10 modes. The window sets how big the picture is;
+the resolution only sets how fine its pixels are. Controls: mouse to look and click to
+fire, WASD, 1–8 for weapons, Tab for the scores, Esc for the menu, `~` for the console,
+`f` for fullscreen. The page keeps the resolution, Screen size, the Web extras and the
+saves (`.sav` text) in localStorage.
+
+**Natively** (the same game client the browser runs, no window):
+
+```sh
+cd quake-rs && cargo build --release
+# id's demo1, 660 frames at 640x400; every 60th frame hashed and written as /tmp/f-demo1-640x400-NNNN.ppm
+./target/release/quaketool play ../quake-data/ID1/PAK0.PAK demo1 --res 640x400 --hash-every 60 --ppm /tmp/f
+./target/release/quaketool --help          # every subcommand
+```
+
+## What works
+
+Checked on the real shareware data unless noted.
+
+- **Files:** PAK (with id's CRC), WAD2, BSP v29, MDL, SPR, the palette and colormap.
+- **QuakeC:** the bytecode VM (all 66 opcodes) and the builtins the id1 progs call.
+- **Server:** `SV_SpawnServer`, the physics tick (walk, step, toss, bounce, fly, push),
+  collision against the world and every entity, triggers, monster AI and movement, combat,
+  death and respawn, `changelevel` with the inventory carried, intermission and finale,
+  e1m8's low gravity, and savegames in id's `.sav` text format.
+- **Renderer** (id's software renderer): the world and brush models through id's
+  edge-sorted span renderer (each pixel drawn once, 16-pixel perspective spans, mip
+  levels, the surface cache), lightmaps with animated light styles and dynamic lights,
+  alias models and the gun through `D_PolysetDraw`, sprites, particles, beams, liquids,
+  the two-layer sky, the underwater warp, the palette shifts (damage, pickups, powerups,
+  water), and the pixel aspect of a 16:10 mode on a 4:3 screen.
+- **2-D layer:** status bar and inventory, scoreboards, intermission and finale overlays,
+  centre prints, notify lines, the sliding console, every menu (Main, Single Player,
+  Load/Save, Options, Customize controls, Video, Help, Quit), drawn 1:1 as WinQuake draws
+  them.
+- **Client:** the live frame against the local server, the view (bob, roll, kick,
+  stair smoothing, the gun's placement), temp entities, trails, dynamic lights, and demo
+  playback of id's demo1–demo3 (the attract loop cycles them, with sound, status bar and
+  gun).
+- **Sound:** what id's `snd_dma.c` decides — channel choice and override, spatialisation,
+  placed ambient loops, the leaf ambients (water, wind), looping mover sounds. The mixing
+  is the platform's: Web Audio in the browser.
+- **Console:** `god`, `noclip`, `fly`, `give`, `impulse`, `kill`, `map`, `save`, `load`,
+  `viewsize`, `sizeup`/`sizedown`, the `wasm_*` extras, `clear`, `help`.
+
+## Web extras
+
+Options > Web extras, drawn like id's Options page. All off by default; each is also a
+console variable; the page remembers them. With all of them off, none of what they change
+departs from id's. The list is one table, `WEB_EXTRAS` in `quake-rs/src/menu.rs`;
+`AUDIT.md`, "Web extras", has the details.
+
+| extra | console | what it changes |
+|---|---|---|
+| Uncapped framerate | `wasm_uncapped 1` | no 72 fps cap: a frame on every display refresh |
+| Show FPS | `wasm_showfps 1` | QuakeWorld's `"%3d FPS"` readout, bottom right |
+| Exact perspective | `wasm_exactpersp 1` | exact perspective at every pixel instead of id's 16-pixel spans |
+| Scaled 2-D layer | `wasm_scaled2d 1` | status bar, menus and console blown up from 320x200, as the port drew them before |
+
+## Layout
+
+| path | what |
+|---|---|
+| `quake-rs/` | the engine crate: a library plus the `quaketool` CLI. `quake-rs/README.md` lists every module with the id file it ports. |
+| `quake-rs/src/` (top level) | file formats (`pak`, `wad`, `bsp`, `mdl`, `spr`, `crc`), `math`, the QuakeC VM (`progs`, `vm`, `builtins`), BSP collision (`world`), savegames (`save`), demo parsing (`demo`), particles, beams, dynamic lights and sound control (`particles`, `tent`, `dlight`, `snd`) |
+| `quake-rs/src/server/` | the server, split along id's files: `sv_main`, `pr_edict`, `pr_cmds`, `sv_phys`, `sv_user`, `sv_world`, `sv_move`, `msg`, `lightstyle`, `host` |
+| `quake-rs/src/render/` | the 3-D renderer, split along id's files: `edge` (`r_edge.c`, `r_bsp.c`, `r_draw.c`, `d_edge.c`), `raster` (the span routines), `surf`, `light`, `sky`, `warp`, `alias`, `polyse`, `sprite`, `part`, `view`, `vis`, `world`, `stats` |
+| `quake-rs/src/` 2-D | `draw`, `screen`, `sbar`, `menu`, `keys`, `console` |
+| `quake-rs/src/client/` | the game client: `cl_main` (the live frame), `cl_demo`, `cl_tent`, `cl_input`, `view`, `host` (`Host_FilterTime`), `host_cmd` (level loads, cheats). The browser runs it; `quaketool play` runs it natively. |
+| `quake-wasm/` | the browser's platform layer (about 3k lines of code and 6k of end-to-end tests): the exported functions the page calls, the host state (menu, console, clocks, framebuffer), carrying out the client's sound calls for Web Audio, saves in localStorage, the `wasm_*` extras. No `wasm-bindgen`, no dependencies. |
+| `web/` | the page (`index.html`), eight headless-Chromium checks (`verify_*.py`), the benchmark (`bench.py`) and a screenshot tool (`shoot.py`) |
+| `oracle/` | id's WinQuake built headless from the C, and the scripts that diff its frames against the port's (`oracle/README.md`) |
+| `census/` | helpers for the gameplay census (`CENSUS.md`): id's edicts dumped and diffed against the port's, a QuakeC symbol dump |
+| `gen_samples.py`, `gen_progs.py` | synthetic assets and progs, so the engine's tests need no game data |
+| `screenshots/` | older rendered output (some predate tonight's renderer) |
+
+## How it is checked
+
+- **Tests.** `cargo test --release` in `quake-rs`: 581 library + 1 `quaketool` + 8
+  integration tests, no game data needed. In `quake-wasm`: 118 end-to-end tests against the
+  embedded shareware pak (plus one ignored harness, `oracle_screen`). All pass at `3ba835f`.
+- **Golden renders.** `quaketool scene <pak> maps/e1mN.bsp out.ppm` for e1m1, e1m2, e1m3;
+  the sha256 prefixes at `3ba835f` are `4807aaa1`, `9ae2b478`, `c65b7046`. A change that
+  moves them is either byte-identical or a deliberate fidelity fix recorded in `AUDIT.md`.
+- **The oracle.** `uv run oracle/compare.py` renders the same view, clock and entities in id's
+  renderer and the port and counts matching palette indices. Against id's x86 16-pixel spans
+  the standard views (e1m1, e1m2, e1m3, e1m7) match 99.91–99.98% with square pixels and
+  100.00% at the page's 4:3 aspect (e1m7 99.997); entity pixels 100%. `oracle/screen2d.py`
+  does the same for the 2-D layer. `oracle/README.md` has the numbers and what is left.
+- **The census.** `quaketool census` plays all nine maps headless through the real QuakeC;
+  with `census/` it diffs id's server edicts against the port's (`CENSUS.md`).
+- **The browser.** `uv run --with playwright web/verify_<name>.py` for walk, ambient, demo,
+  input, menu, save, loops and extras: each boots the real page in headless Chromium.
+- **Native and browser agree.** `quaketool play <pak> demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1
+  --res 320x200,640x400 --hash-every 30` prints the same frame hashes as the browser
+  (`uv run --with playwright web/bench.py --hash-every 30` with those workloads).
+- **Speed.** `uv run --with playwright web/bench.py --build --native` (the page in headless
+  Chromium plus a native twin); `QUAKE_BENCH=30 QUAKE_RES=WxH quaketool scene ...` (one fixed
+  view); `quaketool simbench` (game logic only). `PERF_PLAN.md` has the measurements.
 
 ## Performance
 
-The software renderer is per-pixel bound, so frame time scales with resolution. A
-built-in benchmark renders a map repeatedly and reports the warm per-frame cost plus a
-per-phase breakdown (world / submodel / alias / particle / …) and counters (faces drawn,
-overdraw pixels, surface-cache hit rate):
+A software renderer, so the cost grows with the pixel count. In the browser (headless
+Chromium, wasm), id's demo1 at 1280x800 took 22.6 ms a frame at the start of 2026-09-25
+and 4.5 ms after it (median; the two measured in different sittings at similar load —
+`PERF_PLAN.md` has the table and what each change bought). The largest gains came from
+doing what Quake did: id's edge-sorted span renderer, the palette shift as 256-entry ramps,
+the surface cache for dynamically lit walls, mip levels, and sending the client only the
+entities in its PVS. Absolute milliseconds swing with machine load; compare builds in one
+sitting.
 
-```sh
-QUAKE_BENCH=30 QUAKE_RES=1920x1080 \
-  cargo run --release --bin quaketool -- scene pak0.pak maps/e1m1.bsp out.ppm
-```
+## What is left
 
-**Relative cost is the meaningful part — absolute ms swings several-fold with host
-load** (an idle machine measured e1m1 @1080p ~33 ms; under load the same binary measured
-~91 ms). Always A/B two builds in one sitting. The shape: the **world (BSP wall) pass
-dominates** and scales ~linearly with pixel count; with id's edge-sorted spans it draws
-**each pixel once**, with no z test and nothing cleared (PERF_PLAN A3).
+- **The control departures** above: a decision, not work.
+- **No `pause`** and no loading plaque yet; the F-key binds and `messagemode` are missing.
+- **Demo playback makes no dynamic lights** (explosions light the walls live, not in demos).
+- **Smaller faithfulness gaps**, each small or rare: `give` is not `Host_Give_f`; no
+  pitch drift on slopes (`cl.idealpitch` fixed at 0); a gibbed player's head leaves no blood
+  trail; `objerror` does not end the game; torch flames stay live edicts; the player is not
+  edict 1, so edict numbers are one off against id's; several nearby torches of one sample
+  are louder than id's (one Web Audio source each, where id combines them); a map with no
+  lighting lump renders lit where id draws it fullbright (test maps only).
+- **Not measured:** real GPU browsers, Firefox, Safari, phones, a real 120/144 Hz display;
+  the Keyboard Lock handling of Esc in fullscreen (headless has none).
+- **Delivery:** the pak is inside the wasm, so an engine update re-downloads it
+  (splitting it out is PERF_PLAN D4).
 
-Key optimisations (in `render/` / `vm.rs` / `server.rs`): a **lit surface cache**
-(Quake's `d_surf.c` — bake texture × lightmap × colormap per surface once, then one
-byte/pixel), id's **edge-sorted span renderer** (`r_edge.c`: no overdraw, no z test),
-16-pixel perspective spans with integer steps in between, an **O(1) field-offset
-cache** in the VM, and an **abs-box broadphase** in `sv_move` (the ~25× sim speedup on
-dense maps). See `AUDIT.md` for the per-change ledger and `STATUS.md` for current WIP +
-the honest perf scorecard.
+The full list, with the evidence, is `AUDIT.md`, "Open, as of 2026-09-25".
 
-## Roadmap
+## More
 
-The single-player shareware experience is **feature-complete**: the core loop (fight, die, respawn, exit), the UI
-(menu / options / help / console), intermission + finale screens, in-game + demo sound with ambient loops,
-particles + lightning, selectable + persistent resolution, the `start` hub, the attract loop, and the external
-brush-model items are all done — every subsystem audited against id's C across seven review rounds (66-finding
-ledger in `AUDIT.md`, all HIGHs closed). What remains:
-
-- **A documented divergence tail** — one narrow MEDIUM (maps with no lighting lump render Lambert where id
-  is fullbright; test maps only) and assorted cosmetic LOWs (the demo path's missing explosion dlight).
-  Tracked with plans in `AUDIT.md`; the gameplay census's findings in `CENSUS.md`.
-- **Multiplayer** — out of scope for this single-player, headless-server port.
+- `STATUS.md` — where things stand, and the history.
+- `AUDIT.md` — every faithfulness finding and fix, with its evidence.
+- `CENSUS.md` — the gameplay census.
+- `PERF_PLAN.md` — the performance plan and its measurements.
+- `oracle/README.md` — the oracle, its results and its caveats.
 
 ## Licensing
 
-Derivative of Quake's GPLv2 source (© 1996–1997 id Software) → distributed under **GPL-2.0-or-later**. No game
-data is included.
+Derived from Quake's GPLv2 source (© 1996–1997 id Software), so GPL-2.0-or-later. No game data
+is included.
