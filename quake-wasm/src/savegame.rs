@@ -7,7 +7,6 @@ use std::cell::RefCell;
 
 use quake_rs::bsp::Bsp;
 use quake_rs::progs::Progs;
-use quake_rs::render::Menu;
 use quake_rs::server::Server;
 
 use crate::app::{assemble_walk, ensure_app, pak, Walk};
@@ -166,8 +165,13 @@ pub extern "C" fn load_game() -> i32 {
                 a.mode = 0;
                 // The loaded game starts playing: close the console + menu
                 // (the same post-swap treatment as the console `map` command).
+                // Only the menu's NAVIGATION resets: Host_Loadgame_f never
+                // touches a cvar (viewsize, gamma, volume, sensitivity, Always
+                // Run, ...) nor keybindings[], and M_Load_Key only sets
+                // m_state = m_none. Same reset as New Game; the slot comments
+                // and the video mode survive with it.
                 a.console.open = false;
-                a.menu = Menu::new();
+                a.menu.reset_nav();
                 a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             });
             1
@@ -382,6 +386,7 @@ mod tests {
     use crate::input::{set_attack, set_move};
     use crate::test_util::*;
     use crate::vid::set_resolution;
+    use quake_rs::render;
 
     // ------------------------------------------------------------ save/load
 
@@ -646,6 +651,73 @@ mod tests {
             step(0.05);
         }
         assert!(player_field("health") > 0.0);
+    }
+
+    /// `Host_Loadgame_f` never touches a cvar or `keybindings[]` (host_cmd.c;
+    /// `M_Load_Key` only sets `m_state = m_none`): the review repro
+    /// `viewsize 60`, `save t`, `load t` must keep Screen size 60, and every
+    /// other option, rebind and slot listing with it. The load used to rebuild
+    /// the Menu wholesale (`Menu::new()`), snapping all of them to defaults.
+    #[test]
+    fn load_keeps_every_option_and_binding() {
+        use crate::menu::{menu_bind_key, menu_down, menu_right, menu_select, menu_up};
+        assert_eq!(boot(), 1); // menu open on Main
+        set_resolution(320, 200);
+        // Options through the real menu exports: Brightness and Always Run.
+        menu_down();
+        menu_down();
+        menu_select(); // Main > Options
+        for _ in 0..4 {
+            menu_down();
+        }
+        menu_right(); // Brightness: v_gamma 1.0 -> 0.95
+        for _ in 0..4 {
+            menu_down();
+        }
+        menu_right(); // Always Run: on -> off
+        for _ in 0..8 {
+            menu_up();
+        }
+        menu_select(); // Customize controls
+        menu_down();
+        menu_down(); // "jump / swim up"
+        menu_select();
+        menu_bind_key(i32::from(b'j'));
+        APP.with(|c| {
+            let mut b = c.borrow_mut();
+            let m = &mut b.as_mut().unwrap().menu;
+            m.close();
+            m.set_save_comment(4, "e1m1 slot four".to_string());
+        });
+        console_toggle();
+        run_console_line("viewsize 60");
+        run_console_line("save t");
+        assert!(poll_save() > 0);
+        let (_, text) = SAVE_CUR.with(|c| c.borrow().clone());
+        run_console_line("load t");
+        assert!(poll_load_request() > 0);
+        SAV_BUF.with(|b| *b.borrow_mut() = text.into_bytes());
+        assert_eq!(load_game(), 1);
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            let m = &a.menu;
+            assert!(!m.visible && !a.console.open, "the loaded game plays");
+            assert_eq!(m.viewsize(), 60.0, "Screen size survives load");
+            assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives load");
+            assert!(!m.always_run(), "Always Run (off) survives load");
+            assert_eq!(
+                m.action_for_key(b'j'),
+                Some(render::BIND_JUMP),
+                "rebind survives load"
+            );
+            assert_eq!(
+                m.save_comment(4),
+                "e1m1 slot four",
+                "slot listings survive load"
+            );
+            assert_eq!(m.resolution(), (320, 200), "the video mode survives load");
+        });
     }
 
     /// Hostile input: garbage text, a wrong version, and a truncated save all

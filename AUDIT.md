@@ -711,6 +711,18 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 - ✅ **L6 ED_Alloc / ED_Free** — `Vm::spawn` reuses a free slot only if it was freed in the first two seconds of server time or more than 0.5 s ago (`freetime`), so a missile spawned the frame another is removed never inherits its slot (no stray trail); `Vm::free_edict` clears only `ED_Free`'s fields (model, takedamage, modelindex, colormap, skin, frame, origin, angles, solid; nextthink -1) and keeps the rest, as id does. Tests `ed_alloc_waits_half_a_second_before_reusing_a_freed_slot`, `ed_free_clears_only_the_fields_the_c_clears`.
 - ✅ **F7 the player's name** — `connect_client_inner` sets up the client edict as `Host_Spawn_f` does before `ClientConnect`: `netname` "player" (cl_name), `team` 1 ((cl_color & 15) + 1), `colormap` = its edict number. Obituaries read "player was shot by a Grunt". Test `census_player_netname_is_player`.
 
+## Review fixes (2026-09-25, branch `quake/polish`)
+
+Findings of the adversarial review of the overnight merge, one line each; the
+C followed and the test are in the commit message.
+
+- ✅ **Loading a save kept no options** (MED) — `load_game` rebuilt the Menu
+  (`Menu::new()`), so Screen size, Brightness, Always Run, every rebind and the
+  slot listings snapped to defaults. `Host_Loadgame_f` never touches a cvar or
+  `keybindings[]`; now the same `reset_nav()` as New Game. Test
+  `load_keeps_every_option_and_binding` (the `viewsize 60`, `save t`, `load t`
+  repro).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.
