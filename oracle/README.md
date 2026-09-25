@@ -11,7 +11,10 @@ uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-b
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
 ```
 
-`compare.py --help` lists every option. The ones you will use most:
+Needs docker (for the build only), uv, cargo, and the shareware pak at
+`quake-data/ID1/PAK0.PAK` (or `--pak`). The id source is read from
+`quake-c/WinQuake`
+(`QUAKE_C_SRC` overrides). `compare.py --help` lists every option. The ones you will use most:
 
 | option | what it does |
 |---|---|
