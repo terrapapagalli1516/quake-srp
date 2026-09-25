@@ -774,6 +774,16 @@ C followed and the test are in the commit message.
   do on `cl.time` in the C. Tests `client_clock_is_the_server_clock`, and the
   load in `save_load_round_trips_the_world_digest`. Demo playback already ran
   on the recorded `cl.time`.
+- ✅ **Damage flash percent is an `int`** (review item) — already fixed on
+  main by census L2 (`3ec96f4`, `cshift_add`/`cshift_drop`); the demo test
+  asserts id's 22 (30 - 7.5 truncated), the ramps take the int percent.
+  Nothing further to change.
+- ✅ **`quaketool playtest` framing** — the POV shot drew a full-screen view
+  (viewsize 120's framing) with the viewsize-100 gun fudge and pasted the
+  48-line bar over it, so the gun sat under the bar. Now it is the game's
+  default screen: `calc_refdef` at viewsize 100, the view above the bar,
+  `compose_view` with the backtile, the gun offset for the same viewsize.
+  Test `playtest_frames_the_view_for_the_guns_viewsize`.
 
 ## LOW (27)
 

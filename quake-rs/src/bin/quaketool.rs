@@ -954,13 +954,16 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
 
         let (eye, a) = server.player_view();
         let cam = Camera { pos: eye, yaw: a[1], pitch: -a[0], roll: 0.0, fov_deg: 90.0 };
+        let (vid_w, vid_h) = (640, 400);
+        let (viewsize, refdef) = pov_screen(vid_w, vid_h);
+        let vrect = refdef.vrect;
         let viewmodel = weapon_mdl
             .as_ref()
             .map(|mdl| render::Viewmodel {
                 mdl,
                 frame: weapon_frame,
-                // No bob in this still; the default viewsize's fudge.
-                origin_ofs: render::viewmodel_origin_ofs([cam.pitch, cam.yaw, 0.0], 0.0, render::VIEWSIZE_DEFAULT),
+                // No bob in this still.
+                origin_ofs: render::viewmodel_origin_ofs([cam.pitch, cam.yaw, 0.0], 0.0, viewsize),
                 angles: [cam.pitch, cam.yaw, 0.0],
             });
         // The live particles as (world pos, palette index) for the renderer; they
@@ -978,16 +981,19 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         // and the animated light-style scales so torches flicker and lights pulse.
         let light_styles = server.lightstyle_scales(server.time());
         let colormap = read("gfx/colormap.lmp").ok();
-        let mut img = render::render_scene_ext(&bsp_render, &cam, 640, 400, &palette, &inst, &bmodels, &external, viewmodel, server.time(), &parts, &peak_dlights, &light_styles, colormap.as_deref());
+        let view = render::render_scene_ext(&bsp_render, &cam, vrect.w, vrect.h, &palette, &inst, &bmodels, &external, viewmodel, server.time(), &parts, &peak_dlights, &light_styles, colormap.as_deref());
+        let gfx_wad = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok());
+        let backtile = gfx_wad.as_ref().and_then(|w| w.qpic("backtile").ok());
+        let mut img = render::compose_view(view, vrect, vid_w, vid_h, backtile.as_ref(), &palette);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
-        // game's gfx.wad, then blit it on top of the finished 3-D frame. If
+        // game's gfx.wad, then blit it on top of the composed screen. If
         // gfx.wad is missing or unparseable we just skip the overlay (the POV
         // shot still renders) rather than failing the whole command.
-        if let Some(wad) = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok()) {
+        if let Some(wad) = gfx_wad.as_ref() {
             let stat = |f: &str| server.vm.ent_get_float(player, f) as i32;
             let hud = render::Hud {
-                wad: &wad,
+                wad,
                 palette: &palette,
                 health: stat("health"),
                 ammo: stat("currentammo"),
@@ -1006,8 +1012,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 total_secrets: 0,
                 level_name: "",
                 show_scores: false,
-                // The tool frames the full view under the bar (no viewsize).
-                sb_lines: render::SB_LINES_FULL,
+                sb_lines: refdef.sb_lines,
                 face_pain: false,
             };
             render::draw_hud_into(&mut img, &hud);
@@ -1025,6 +1030,15 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         );
     }
     Ok(Out::Text(o))
+}
+
+/// The screen `playtest`'s POV shot is: the game's default viewsize (100),
+/// the 3-D view framed ABOVE the status bar by SCR_CalcRefdef — the framing
+/// V_CalcRefdef's gun fudge for that viewsize assumes, so the gun sits on the
+/// bar as in the game.
+fn pov_screen(vid_w: usize, vid_h: usize) -> (f32, quake_rs::screen::Refdef) {
+    let viewsize = render::VIEWSIZE_DEFAULT;
+    (viewsize, render::calc_refdef(vid_w, vid_h, viewsize, false))
 }
 
 /// `simbench <pak> <map.bsp> [frames]` — benchmark the GAME-LOGIC tick (no
@@ -2387,4 +2401,21 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
     );
     let _ = writeln!(o, "  wrote {out_prefix}_0000.ppm .. {out_prefix}_{:04}.ppm", written.saturating_sub(1));
     Ok(Out::Text(o))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playtest_frames_the_view_for_the_guns_viewsize() {
+        // The POV shot used the viewsize-100 gun offset on a full-screen view
+        // (viewsize 120's framing) with the bar pasted over it: the gun sat
+        // 48 rows low. Now both come from one viewsize.
+        let (viewsize, refdef) = pov_screen(640, 400);
+        assert_eq!(viewsize, 100.0);
+        assert_eq!(refdef.sb_lines, 48);
+        assert_eq!(refdef.vrect, render::ViewRect { x: 0, y: 0, w: 640, h: 304 });
+        assert_eq!(render::viewmodel_fudge(viewsize), 2.0, "V_CalcRefdef's fudge at 100");
+    }
 }
