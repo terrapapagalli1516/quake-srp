@@ -1737,7 +1737,13 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
 ## Final review fixes, engine side (2026-09-25, branch `quake/polish4a`)
 
 The final review's engine findings (renderer, server, hardening). One commit
-each; the C followed and the evidence are in the commit messages.
+each; the C followed and the evidence are in the commit messages. Checks at
+the end of the branch: goldens `4807aaa1` / `9ae2b478` / `c65b7046`
+unchanged; the standard oracle rows (`--aspect 0.8333333 --spans 16`, world
+and ents) 100.00; census, simbench (nine maps) and the `quaketool play`
+hashes unchanged; 592 lib + 2 bin + 8 integration tests and 126 wasm, clippy
+clean in both crates (and with `--features bench`); the nine `web/verify_*.py`
+pass on the default wasm.
 
 - ✅ **Dynamic lights on moved brush models are id's** (MED). The edge
   renderer moved each light into a brush model's frame (`origin - bm.origin`)

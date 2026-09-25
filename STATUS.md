@@ -5,6 +5,19 @@ things stand" note — read it before continuing.
 
 ---
 
+## Final review fixes, engine side (2026-09-25, branch `quake/polish4a`)
+
+The final review's engine findings (AUDIT.md's section of the same name):
+moved doors and lifts are lit by the world-space dynamic lights, as id's
+`R_DrawBEntitiesOnList` marks them (a lowered lift under a muzzle flash
+82.56 → 100.00% against the oracle); no view larger than id's `MAXWIDTH` x
+`MAXHEIGHT` (a 2048-wide view panicked; the renderer and quaketool's `--res`
+clamp to 1280x1024); `setmodel` gives alias models ±16 and sprites
+±maxwidth/2 (CENSUS L10; the edict dumps and `edict_diff.py` compare
+`mins`/`maxs` now); malformed maps cannot hang the fat PVS or panic the edge
+and span code; stale renderer docs. Goldens, census, simbench, play hashes
+and the standard oracle rows unchanged.
+
 ## Demo commands, timedemo, pause (2026-09-25, branch `quake/timedemo`)
 
 id's own demo and pause commands, as the C does them (AUDIT.md's section of
