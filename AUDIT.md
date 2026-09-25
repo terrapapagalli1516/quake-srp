@@ -925,7 +925,7 @@ C followed and the test are in the commit message.
 
 ## Projection and spans (2026-09-25, branch `quake/w2b`)
 
-**On the merged base** (`quake/overnight` `eb76c04`, with the mip levels), all
+**On the merged base** (`quake/overnight` `bbfc6bc`: the mip levels, the census and review fixes), all
 four items: goldens e1m1 `959d0221` → `4807aaa1` (4983 px, 1.95%), e1m2
 `0cd18471` → `8ce25660` (5808 px, 2.27%), e1m3 `b63ae8b7` → `3531e9cd` (4077 px,
 1.59%) — all from the 16-pixel spans (the aspect and the sky centre leave the
@@ -1038,8 +1038,18 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
   region matches 75.1 / 46.4 / 43.4% at viewsize 100 / 110 / 70 before, 100%
   after; the whole view 98.90 → 99.97, 97.56 → 99.56, 95.98 → 99.03 (what is
   left at 110 and 70, and at 120 too — 99.21 — is a ceiling face at the top
-  right and one floor edge, the same with exact perspective on the merged
-  base; not investigated). Goldens unchanged (the scene view is the screen).
+  right (a face at a finer mip in id than its geometry gives, oracle class
+  1's open note) and one floor edge, the same with exact perspective on the merged
+  base). Goldens unchanged (the scene view is the screen).
+- **Underwater** (with `quake/polish`'s warp buffer): an underwater view is
+  rendered at `warp_vrect`'s size with the screen's pixel aspect (for a
+  16:10 mode id's `vid.aspect*(h/w)*(vid.width/vid.height)` is `vid.aspect`)
+  and the sky placed as id places it — `D_Sky_uv_To_st` measures the warp
+  buffer's pixels from the SCREEN's centre, so above 320x200 an underwater
+  view of the sky is off-centre in WinQuake too, and here. Open: for modes
+  taller than 16:10 (not a preset) `warp_vrect` narrows the buffer because
+  the port had square pixels; with `pixel_aspect` id's 320-wide buffer and
+  its aspect are now possible (not done).
 
 ## LOW (27)
 
