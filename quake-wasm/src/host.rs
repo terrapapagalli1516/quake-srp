@@ -188,6 +188,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // The renderer's options are built inside the client frame, under this
         // borrow: hand it the menu's Web extras (wasm_exactpersp) first.
         crate::extras::set_frame_extras(a.menu.extras());
+        // The scaled-2-D extra is draw.rs state; the menu's value is the truth.
+        quake_rs::draw::set_scaled_2d(a.menu.extras().scaled_2d);
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;

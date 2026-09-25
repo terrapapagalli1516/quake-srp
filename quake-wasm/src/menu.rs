@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(menu_screen_id(), 10);
         // The page's restore; unknown bits are dropped.
         set_extras(-1);
-        assert_eq!(extras(), 7);
+        assert_eq!(extras(), 15);
         set_extras(0);
         assert_eq!(extras(), 0);
         // They survive a re-boot (reset_nav) like the Options cvars.
