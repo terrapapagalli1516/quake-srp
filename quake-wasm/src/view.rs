@@ -1,6 +1,7 @@
 //! The client side of view.c the live and demo frames share: `V_ParseDamage`
 //! (the damage colour shift, the directional view kick and the status-bar
-//! pain face an `svc_damage` starts) and `V_CalcViewRoll`'s kick.
+//! pain face an `svc_damage` starts), `V_CalcViewRoll`'s kick, and
+//! `V_BonusFlash_f` (the gold pickup flash a stuffed `bf` starts).
 
 use quake_rs::math::{angle_vectors, dot, normalize, Vec3};
 
@@ -13,6 +14,24 @@ pub(crate) const V_KICKPITCH: f32 = 0.6;
 /// `V_ParseDamage`'s `cl.faceanimtime = cl.time + 0.2`: how long the status
 /// bar shows the pain face after a hit.
 pub(crate) const FACE_ANIM_TIME: f32 = 0.2;
+
+/// `V_BonusFlash_f` (view.c): `cl.cshifts[CSHIFT_BONUS]` becomes this colour at
+/// [`BONUS_PERCENT`]; V_UpdatePalette drops it by `host_frametime*100`.
+pub(crate) const BONUS_COLOR: [u8; 3] = [215, 186, 69];
+pub(crate) const BONUS_PERCENT: f32 = 50.0;
+/// V_UpdatePalette's bonus drop per second (`host_frametime*100`).
+pub(crate) const BONUS_FADE: f32 = 100.0;
+
+/// Run server-stuffed text (`svc_stufftext`: `Cbuf_AddText`, then
+/// `Cbuf_Execute` splits it into commands at `;` and newlines) for the only
+/// command id1 stuffs, `bf` (V_BonusFlash_f — every item pickup and
+/// CheckPowerups, 16 `stuffcmd` sites): true when it contains one. Other
+/// commands are ignored. Accepted gap: the C's Cbuf_Execute runs the text at
+/// the start of the NEXT host frame, so id's flash starts one frame (~14 ms)
+/// later than here.
+pub(crate) fn stufftext_bonus_flash(text: &str) -> bool {
+    text.split(['\n', ';']).any(|cmd| cmd.split_whitespace().next() == Some("bf"))
+}
 
 /// What one `svc_damage` does to the view (`V_ParseDamage`, view.c).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,6 +82,14 @@ pub(crate) fn parse_damage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stufftext_runs_bf_commands() {
+        assert!(stufftext_bonus_flash("bf\n"));
+        assert!(stufftext_bonus_flash("echo hi; bf"));
+        assert!(!stufftext_bonus_flash("bfx\n"));
+        assert!(!stufftext_bonus_flash("reconnect\n"));
+    }
 
     #[test]
     fn parse_damage_counts_colours_and_kicks_like_v_parse_damage() {

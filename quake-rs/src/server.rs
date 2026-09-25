@@ -2026,7 +2026,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 17, bi_checkclient); // checkclient (line-of-sight to the player)
     put(t, 19, bi_precache_sound); // precache_sound
     put(t, 20, bi_precache_model); // precache_model
-    put(t, 21, bi_noop); // stuffcmd
+    put(t, 21, crate::builtins::pf_stuffcmd); // stuffcmd -> svc_stufftext queue
     put(t, 22, bi_findradius); // findradius (chain of edicts within rad)
     put(t, 23, bi_bprint); // bprint -> on-screen notify line
     put(t, 24, bi_sprint); // sprint -> on-screen notify line

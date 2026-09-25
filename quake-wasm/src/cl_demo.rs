@@ -16,7 +16,10 @@ use crate::snd_dma::{
     push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
 };
 use crate::vid::backtile_for;
-use crate::view::{parse_damage, FACE_ANIM_TIME, V_KICKTIME};
+use crate::view::{
+    parse_damage, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE, BONUS_PERCENT, FACE_ANIM_TIME,
+    V_KICKTIME,
+};
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
 /// exactly ONCE: a frame rendered across several steps (small `dt`) must not
@@ -46,6 +49,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     let damage = frame.damage.clone();
     let prints = frame.prints.clone();
     let centerprints = frame.centerprints.clone();
+    let bonus = frame.stufftext.iter().any(|t| stufftext_bonus_flash(t));
     let view_entity_origin = frame.view_entity_origin;
     let view_angles = frame.view_angles;
     for b in &bursts {
@@ -110,6 +114,10 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
         d.v_dmg_time = V_KICKTIME;
         d.faceanimtime = now + FACE_ANIM_TIME;
     }
+    // svc_stufftext "bf" (V_BonusFlash_f): the gold pickup flash.
+    if bonus {
+        d.bonus_blend = BONUS_PERCENT;
+    }
     // svc_print fragments accumulate Con_Print-style (a notify line breaks
     // only on '\n' — pickups arrive as several fragments) with Quake's
     // con_notifytime expiry on the demo's recorded clock; svc_centerprint
@@ -160,6 +168,7 @@ pub(crate) fn step_demo(
         d.beams.clear();
         d.last_spawned_idx = usize::MAX;
         d.damage_blend = 0.0;
+        d.bonus_blend = 0.0;
         d.faceanimtime = 0.0;
         d.v_dmg_time = 0.0;
         d.centerprint = None;
@@ -521,14 +530,16 @@ pub(crate) fn step_demo(
         }
     }
 
-    // Screen blends (V_CalcBlend order: CONTENTS -> DAMAGE -> POWERUP), all
-    // from the RECORDED stream: the eye-contents tint, the svc_damage flash
-    // (faded dt*150 per frame like V_UpdatePalette), and the powerup tint from
-    // the recorded cl.items. DEFERRED to the dispatcher so it tints the whole
+    // Screen blends (V_CalcBlend order: CONTENTS -> DAMAGE -> BONUS ->
+    // POWERUP), all from the RECORDED stream: the eye-contents tint, the
+    // svc_damage flash (faded dt*150 per frame like V_UpdatePalette), the
+    // stuffed "bf" gold flash (dt*100), and the powerup tint from the
+    // recorded cl.items. DEFERRED to the dispatcher so it tints the whole
     // composited frame (HUD + menu + console), like the live walk.
     {
         let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         d.damage_blend = (d.damage_blend - sdt * 150.0).max(0.0);
+        d.bonus_blend = (d.bonus_blend - sdt * BONUS_FADE).max(0.0);
     }
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
@@ -536,6 +547,9 @@ pub(crate) fn step_demo(
     }
     if d.damage_blend > 0.0 {
         shifts.push((d.damage_color, d.damage_blend));
+    }
+    if d.bonus_blend > 0.0 {
+        shifts.push((BONUS_COLOR, d.bonus_blend));
     }
     if let Some(cs) = render::powerup_cshift(client.items) {
         shifts.push(cs);
@@ -979,6 +993,34 @@ mod tests {
             let _ = step_demo(&mut d, 0.05, false, 160, 100);
         }
         assert_eq!(d.damage_blend, 0.0, "flash fully faded");
+    }
+
+    /// CENSUS F6: a recorded `svc_stufftext "bf"` runs V_BonusFlash_f — the
+    /// gold cshift at 50%, dropped dt*100 per frame — and id's demo1 carries
+    /// such pickups.
+    #[test]
+    fn step_demo_stufftext_bf_flashes_gold() {
+        use quake_rs::demo::{Demo, DemoFrame};
+        let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
+        let bf = DemoFrame { time: 0.05, stufftext: vec!["bf\n".into()], ..Default::default() };
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            viewentity: 0,
+            frames: vec![plain(0.0), bf, plain(0.10), plain(1.0)],
+        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        let (_img, color, alpha) = step_demo(&mut d, 0.05, false, 160, 100);
+        assert!((d.bonus_blend - (50.0 - 0.05 * 100.0)).abs() < 1e-3, "{}", d.bonus_blend);
+        assert_eq!(color, crate::view::BONUS_COLOR);
+        assert!(alpha > 0.0);
+
+        let pak = pak().expect("pak");
+        let real = parse_demo(&pak.read_file("demo1.dem").unwrap().unwrap()).unwrap();
+        let n = real.frames.iter().flat_map(|f| &f.stufftext).filter(|t| t.as_str() == "bf\n").count();
+        assert!(n > 0, "demo1 stuffs bf on its pickups");
     }
 
     /// The real boot demo draws the recorded status bar (sbar pixels differ

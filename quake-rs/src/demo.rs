@@ -376,6 +376,10 @@ pub struct DemoFrame {
     pub prints: Vec<String>,
     /// `svc_centerprint` messages from this block (`SCR_CenterPrint`).
     pub centerprints: Vec<String>,
+    /// `svc_stufftext` text from this block (`Cbuf_AddText`): console commands
+    /// the server stuffed into the client. id's demos stuff only `"bf\n"`
+    /// (V_BonusFlash_f, the gold pickup flash); the front-end runs those.
+    pub stufftext: Vec<String>,
     /// The recorded lightstyle table (`cl_lightstyle[]`, `svc_lightstyle`) as of
     /// this frame — the signon carries the full set, and a switch-triggered
     /// light can update one mid-demo. Shared (`Rc`) across frames; a front-end
@@ -612,6 +616,8 @@ struct ClientState {
     pending_prints: Vec<String>,
     /// `svc_centerprint` messages decoded since the last snapshot.
     pending_centerprints: Vec<String>,
+    /// `svc_stufftext` text decoded since the last snapshot.
+    pending_stufftext: Vec<String>,
     /// `cl_lightstyle[]` — the recorded animated-light pattern table
     /// (`svc_lightstyle`). `Rc` so each frame snapshot shares the table instead
     /// of cloning 64 strings; a mid-demo style change copies-on-write.
@@ -673,6 +679,7 @@ impl ClientState {
             pending_damage: Vec::new(),
             pending_prints: Vec::new(),
             pending_centerprints: Vec::new(),
+            pending_stufftext: Vec::new(),
             lightstyles: Rc::new(vec![String::new(); MAX_LIGHTSTYLES]),
             idealpitch: 0.0,
             punchangle: [0.0; 3],
@@ -713,6 +720,7 @@ impl ClientState {
         self.pending_damage.clear();
         self.pending_prints.clear();
         self.pending_centerprints.clear();
+        self.pending_stufftext.clear();
         // CL_ClearState memsets the per-client view state too; the new level's
         // signon repopulates the lightstyle table, and drawing gates again on
         // its first entity update (the loading plaque holds across the change).
@@ -956,6 +964,7 @@ fn parse_demo_with(
             cl.pending_damage.clear();
             cl.pending_prints.clear();
             cl.pending_centerprints.clear();
+            cl.pending_stufftext.clear();
         }
 
         if let ParseFlow::Stop = flow {
@@ -1075,6 +1084,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
     let damage = std::mem::take(&mut cl.pending_damage);
     let prints = std::mem::take(&mut cl.pending_prints);
     let centerprints = std::mem::take(&mut cl.pending_centerprints);
+    let stufftext = std::mem::take(&mut cl.pending_stufftext);
 
     // "interpolate player info" (CL_RelinkEntities): cl.velocity lerps between
     // the two most recent messages' mvelocity by the same fraction as the
@@ -1099,6 +1109,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
         damage,
         prints,
         centerprints,
+        stufftext,
         lightstyles: Rc::clone(&cl.lightstyles),
         client: DemoClientData {
             items: cl.items,
@@ -1310,13 +1321,10 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
 
             SVC_STUFFTEXT => {
                 // Cbuf_AddText(MSG_ReadString()): console commands the server
-                // stuffs into the client. Consumed but INERT — there is no
-                // command buffer here. id's demo1/2/3 only ever stuff "bf\n"
-                // (V_BonusFlash_f, the bonus-pickup gold flash — a cosmetic
-                // this port doesn't wire in live play either); a live server
-                // could also stuff e.g. cvar sets or "reconnect", none of
-                // which apply to replaying a recorded stream.
-                let _ = r.read_string();
+                // stuffs into the client, recorded onto the frame. id's
+                // demo1/2/3 only ever stuff "bf\n" (V_BonusFlash_f, the
+                // bonus-pickup gold flash), which the front-end runs.
+                cl.pending_stufftext.push(r.read_string());
             }
 
             SVC_DAMAGE => {

@@ -20,7 +20,10 @@ use crate::input::{
 };
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
-use crate::view::{parse_damage, FACE_ANIM_TIME, V_KICKTIME};
+use crate::view::{
+    parse_damage, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE, BONUS_PERCENT, FACE_ANIM_TIME,
+    V_KICKTIME,
+};
 
 /// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
 /// (`((int)f*256/360) & 255`) then `MSG_ReadAngle` (`MSG_ReadChar() *
@@ -226,6 +229,12 @@ pub(crate) fn step_walk(
         let _ = w.server.client_frame(&cmd, dt);
         apply_fixangle(w);
         parse_client_damage(w, before);
+        // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
+        for (ent, text) in quake_rs::builtins::take_stufftext() {
+            if ent == w.player && stufftext_bonus_flash(&text) {
+                w.bonus_blend = BONUS_PERCENT;
+            }
+        }
     }
 
     // 1a. MSG_ALL server commands (CL_ParseServerMessage, cl_parse.c): the QuakeC
@@ -783,8 +792,8 @@ pub(crate) fn step_walk(
     //     (it tints the HUD, menu and console too — not the GL 3D-viewport-only
     //     behaviour).
     w.damage_blend = (w.damage_blend - dt * 150.0).max(0.0);
-    // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> POWERUP (top). (Bonus
-    // pickup flash needs the QuakeC "bf" stuffcmd, not yet wired.)
+    w.bonus_blend = (w.bonus_blend - dt * BONUS_FADE).max(0.0);
+    // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let eye_contents = quake_rs::world::point_contents(&w.bsp, eye);
     // Underwater sine wobble (D_WarpScreen): when the eye is in water/slime/lava
     // (contents <= CONTENTS_WATER, r_waterwarp default on), warp the 3-D frame
@@ -803,6 +812,9 @@ pub(crate) fn step_walk(
     }
     if w.damage_blend > 0.0 {
         shifts.push((w.damage_color, w.damage_blend));
+    }
+    if w.bonus_blend > 0.0 {
+        shifts.push((BONUS_COLOR, w.bonus_blend));
     }
     // Powerup tint (Quad=blue, Biosuit=green, Ring=gray, Pentagram=yellow).
     if let Some(cs) = render::powerup_cshift(w.server.vm.ent_get_float(w.player, "items") as i32) {

@@ -413,6 +413,7 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     // CL_ClearState zeroes cl.cshifts and cl.faceanimtime (view.c's static
     // v_dmg_* kick is not in `cl` and runs out on its own).
     w.damage_blend = 0.0;
+    w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
@@ -434,6 +435,7 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     bump_sound_generation();
     queue_static_sounds(&w.pak, &statics);
     let _ = w.server.drain_svc_events();
+    let _ = quake_rs::builtins::take_stufftext();
 }
 
 /// Single-player respawn: reload the CURRENT level fresh and reconnect the player
@@ -487,6 +489,7 @@ pub(crate) fn try_restart(w: &mut Walk) {
     w.centerprint = None;
     w.clock = 0.0;
     w.damage_blend = 0.0;
+    w.bonus_blend = 0.0;
     w.faceanimtime = 0.0;
     w.oldz = f32::NAN;
     // Same intermission/finale reset as a changelevel (CL_ClearState).
@@ -503,6 +506,7 @@ pub(crate) fn try_restart(w: &mut Walk) {
     bump_sound_generation();
     queue_static_sounds(&w.pak, &statics);
     let _ = w.server.drain_svc_events();
+    let _ = quake_rs::builtins::take_stufftext();
 }
 
 #[cfg(test)]

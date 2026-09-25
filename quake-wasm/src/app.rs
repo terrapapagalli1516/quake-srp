@@ -126,6 +126,9 @@ pub(crate) struct Walk {
     /// The damage-flash tint colour (`V_ParseDamage` picks (200,100,100) when armour
     /// absorbs most, (220,50,50) for armour-only, (255,0,0) for pure blood).
     pub(crate) damage_color: [u8; 3],
+    /// `cl.cshifts[CSHIFT_BONUS].percent`: the gold pickup flash a stuffed
+    /// `bf` sets to 50 (V_BonusFlash_f), dropped `dt*100` per frame.
+    pub(crate) bonus_blend: f32,
     /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
     /// view kick of the last svc_damage, decaying over `v_kicktime`.
     pub(crate) v_dmg_time: f32,
@@ -264,6 +267,9 @@ pub(crate) struct DemoPlay {
     /// The damage tint V_ParseDamage picked (armour-dominant pink / armour
     /// orange-red / pure-blood red).
     pub(crate) damage_color: [u8; 3],
+    /// `cl.cshifts[CSHIFT_BONUS].percent` for the recorded POV: a recorded
+    /// `svc_stufftext "bf"` sets it to 50 (V_BonusFlash_f), faded `dt*100`.
+    pub(crate) bonus_blend: f32,
     /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
     /// view kick a recorded svc_damage applies, decaying over `v_kicktime`.
     pub(crate) v_dmg_time: f32,
@@ -322,6 +328,7 @@ impl DemoPlay {
             pic_finale: None,
             damage_blend: 0.0,
             damage_color: [255, 0, 0],
+            bonus_blend: 0.0,
             v_dmg_time: 0.0,
             v_dmg_roll: 0.0,
             v_dmg_pitch: 0.0,
@@ -639,6 +646,7 @@ pub(crate) fn assemble_walk(
         pitch_vel: 0.0,
         damage_blend: 0.0,
         damage_color: [255, 0, 0],
+        bonus_blend: 0.0,
         v_dmg_time: 0.0,
         v_dmg_roll: 0.0,
         v_dmg_pitch: 0.0,
@@ -718,6 +726,7 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let _ = server.drain_temp_entities();
     let _ = server.drain_messages();
     let _ = server.drain_svc_events();
+    let _ = quake_rs::builtins::take_stufftext();
 
     assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, pitch)
 }

@@ -182,7 +182,6 @@ fn census_force_retouch_opens_e1m6_start_door() {
 /// (215,186,69) at 50%, and V_CalcBlend folds it into the palette shift. The
 /// port's `stuffcmd` is a no-op.
 #[test]
-#[ignore = "census F6: the 'bf' bonus flash never fires"]
 fn census_pickup_flashes_the_screen_gold() {
     let mut w = build_walk().expect("e1m1 boots");
     for _ in 0..5 {
