@@ -9,7 +9,7 @@ use quake_rs::particles::ParticleSystem;
 use quake_rs::progs::Progs;
 use quake_rs::server::Server;
 
-use crate::app::{build_walk_map, ensure_app, player_start, Walk};
+use crate::app::{build_walk_map, ensure_app, spawn_view_angles, Walk};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
 
@@ -373,6 +373,7 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     // spawn_entities); committed to the page only once the swap succeeds below.
     let statics = ns.drain_static_sounds();
     let Ok(player) = ns.connect_client_with_parms(parms) else { return };
+    let (yaw, pitch) = spawn_view_angles(&ns, player);
     // The carried inventory at the start of the NEW level becomes its entry parms,
     // so a respawn on this level restores the state the player arrived with.
     let entry_parms = ns.save_spawn_parms();
@@ -385,15 +386,13 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     ns.run_signon_frames();
 
     // Commit the swap. From here nothing can fail.
-    let (_spawn, yaw) =
-        player_start(&render_bsp.entities).unwrap_or(([0.0, 0.0, 0.0], w.yaw));
     w.server = ns;
     w.bsp = render_bsp;
     w.player = player;
     w.entry_parms = entry_parms;
     w.map_name = map_file;
     w.yaw = yaw;
-    w.pitch = 0.0;
+    w.pitch = pitch;
 
     // New level, clean slate: drop the old level's particles / dynamic lights /
     // beams (CL_ClearState memsets cl_beams) and reset the animation clock so
@@ -407,14 +406,16 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     // already-flushed notify lines + the centerprint. Their expiry is an ABSOLUTE
     // clock value, and the clock resets to 0 below, so a stale "You got the Quad!"
     // would otherwise linger over the new level for old-clock seconds.
-    w.notify_pending.clear();
     w.notify.clear();
     w.centerprint = None;
     w.clock = 0.0;
-    // Reset the screen-blend state so the level change does not flash red.
+    // CL_ClearState zeroes cl.cshifts and cl.faceanimtime (view.c's static
+    // v_dmg_* kick is not in `cl` and runs out on its own).
     w.damage_blend = 0.0;
-    w.last_health = f32::NAN;
-    w.last_armor = f32::NAN;
+    w.bonus_blend = 0.0;
+    w.faceanimtime = 0.0;
+    w.cl_items = 0;
+    w.item_gettime = [0.0; 32];
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
     // CL_ClearState: the new level starts OUT of intermission (cl.intermission=0)
@@ -435,6 +436,7 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     bump_sound_generation();
     queue_static_sounds(&w.pak, &statics);
     let _ = w.server.drain_svc_events();
+    let _ = quake_rs::builtins::take_stufftext();
 }
 
 /// Single-player respawn: reload the CURRENT level fresh and reconnect the player
@@ -467,30 +469,30 @@ pub(crate) fn try_restart(w: &mut Walk) {
     }
     let statics = ns.drain_static_sounds();
     let Ok(player) = ns.connect_client_with_parms(w.entry_parms) else { return };
+    let (yaw, pitch) = spawn_view_angles(&ns, player);
     // The C's signon physics frames (see build_walk_map): settle the respawned
     // player onto the floor before the restarted level's frame 0 renders.
     ns.run_signon_frames();
 
     // Commit the reload (nothing below can fail).
-    let (_spawn, yaw) =
-        player_start(&render_bsp.entities).unwrap_or(([0.0, 0.0, 0.0], w.yaw));
     w.server = ns;
     w.bsp = render_bsp;
     w.player = player;
     w.yaw = yaw;
-    w.pitch = 0.0;
+    w.pitch = pitch;
     // Same clean-slate reset as a changelevel (the map restarted from scratch).
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
     w.beams.clear();
-    w.notify_pending.clear();
     w.notify.clear();
     w.centerprint = None;
     w.clock = 0.0;
     w.damage_blend = 0.0;
-    w.last_health = f32::NAN;
-    w.last_armor = f32::NAN;
+    w.bonus_blend = 0.0;
+    w.faceanimtime = 0.0;
+    w.cl_items = 0;
+    w.item_gettime = [0.0; 32];
     w.oldz = f32::NAN;
     // Same intermission/finale reset as a changelevel (CL_ClearState).
     w.intermission = 0;
@@ -506,12 +508,13 @@ pub(crate) fn try_restart(w: &mut Walk) {
     bump_sound_generation();
     queue_static_sounds(&w.pak, &statics);
     let _ = w.server.drain_svc_events();
+    let _ = quake_rs::builtins::take_stufftext();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{boot, APP};
+    use crate::app::{boot, player_start, APP};
     use crate::console::{console_toggle, console_visible};
     use crate::host::step;
     use crate::input::{key_down, key_up, set_attack};

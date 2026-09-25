@@ -22,12 +22,16 @@ use quake_rs::tent::{BeamSegment, Beams};
 use quake_rs::wad::Qpic;
 
 use crate::PAK;
-use crate::input::KeyMove;
+use crate::console::ConNotify;
+use crate::cl_walk::net_angle;
+use crate::input::{clamp_pitch, KeyMove};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds, SND_QUEUE, STOP_SND_QUEUE};
 use crate::vid::{DEFAULT_H, DEFAULT_W};
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
-const DEMO_FILE: &str = "demo1.dem";
+/// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop's demos, played
+/// in turn (`CL_NextDemo` on each demo's `svc_disconnect`), wrapping to the first.
+pub(crate) const DEMOS: [&str; 3] = ["demo1.dem", "demo2.dem", "demo3.dem"];
 
 /// Interactive walk state: a live server ticked every frame, rendered from the
 /// player edict. Monster thinks advance their animation frames and move them,
@@ -120,16 +124,27 @@ pub(crate) struct Walk {
     /// accelerated by it each second while drifting (V_DriftPitch).
     pub(crate) pitch_vel: f32,
     /// Full-screen damage-flash intensity (Quake's `CSHIFT_DAMAGE` percent,
-    /// 0..150): bumped when the player loses health/armour and faded each frame.
+    /// 0..150): bumped by each svc_damage (V_ParseDamage) and faded each frame.
     pub(crate) damage_blend: f32,
     /// The damage-flash tint colour (`V_ParseDamage` picks (200,100,100) when armour
     /// absorbs most, (220,50,50) for armour-only, (255,0,0) for pure blood).
     pub(crate) damage_color: [u8; 3],
-    /// Player health last frame (NaN until known / after a level change), used with
-    /// `last_armor` to split this frame's damage into blood vs armour for the flash.
-    pub(crate) last_health: f32,
-    /// Player armour last frame (NaN until known / after a level change).
-    pub(crate) last_armor: f32,
+    /// `cl.cshifts[CSHIFT_BONUS].percent`: the gold pickup flash a stuffed
+    /// `bf` sets to 50 (V_BonusFlash_f), dropped `dt*100` per frame.
+    pub(crate) bonus_blend: f32,
+    /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
+    /// view kick of the last svc_damage, decaying over `v_kicktime`.
+    pub(crate) v_dmg_time: f32,
+    pub(crate) v_dmg_roll: f32,
+    pub(crate) v_dmg_pitch: f32,
+    /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
+    /// like the HUD's `time`): the status bar shows the pain face until then.
+    pub(crate) faceanimtime: f32,
+    /// `cl.items` as last received and `cl.item_gettime[]` (CL_ParseClientdata,
+    /// server clock): the new-weapon icon flash. Zeroed with the level
+    /// (CL_ClearState), so a level start flashes what the player carries.
+    pub(crate) cl_items: i32,
+    pub(crate) item_gettime: [f32; 32],
     /// Stair-step view smoothing accumulator (`view.c` V_CalcRefdef `oldz`): the eye
     /// Z lags the player Z by up to 12 units while climbing so stairs glide instead
     /// of jolting. NaN until the first frame establishes it.
@@ -138,17 +153,22 @@ pub(crate) struct Walk {
     /// (Quake's `scr_centertime` ~2s); replaced by the next centerprint. Drawn
     /// centered over the view.
     pub(crate) centerprint: Option<(String, f32)>,
-    /// The fading top-left notify lines (`bprint`/`sprint`): text + expiry clock
-    /// (Quake's `con_notifytime` ~3s), capped to the last few.
-    pub(crate) notify: Vec<(String, f32)>,
-    /// The in-progress notify line (Con_Print model): bprint/sprint text accumulates
-    /// here and only breaks into a notify line on '\n'. Quake item pickups print via
-    /// several `sprint` calls ("You receive ", "25", " health\n"); the C console
-    /// joins them into ONE line, so we must not emit one notify line per call.
-    pub(crate) notify_pending: String,
-    /// Accumulated game time (seconds), advanced by `dt` each `step_walk`. Drives
-    /// the animated special surfaces: liquid warp + sky scroll in the renderer.
+    /// The top-left notify lines (`bprint`/`sprint` through Con_Print, shown by
+    /// Con_DrawNotify), on the host clock.
+    pub(crate) notify: ConNotify,
+    /// `cl.time`: accumulated game time (seconds), advanced by `dt` each
+    /// `step_walk` that runs the server. On a local server the C's
+    /// `CL_LerpPoint` snaps `cl.time` to the server's message time, so it stops
+    /// with the server while single player is paused behind the menu/console.
+    /// Drives the animated surfaces, light styles, particles, dlight decay, the
+    /// rotating pickups, the bob and the intermission sway.
     pub(crate) clock: f32,
+    /// Host time (seconds): advanced by every frame's `dt`, paused or not. The
+    /// notify lines (Con_DrawNotify ages them in `realtime`) and the centerprint
+    /// (SCR_CheckDrawCenterString counts `scr_centertime_off` down by
+    /// `host_frametime`) expire on this clock, so they keep timing out behind the
+    /// menu as in the C.
+    pub(crate) host_time: f32,
     /// Live engine particles (the `particle()` builtin's effect). Bursts the
     /// QuakeC fires each frame are drained into this pool, aged under gravity,
     /// and drawn into the scene sharing its z-buffer.
@@ -250,6 +270,9 @@ pub(crate) struct DemoPlay {
     /// The damage tint V_ParseDamage picked (armour-dominant pink / armour
     /// orange-red / pure-blood red).
     pub(crate) damage_color: [u8; 3],
+    /// `cl.cshifts[CSHIFT_BONUS].percent` for the recorded POV: a recorded
+    /// `svc_stufftext "bf"` sets it to 50 (V_BonusFlash_f), faded `dt*100`.
+    pub(crate) bonus_blend: f32,
     /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
     /// view kick a recorded svc_damage applies, decaying over `v_kicktime`.
     pub(crate) v_dmg_time: f32,
@@ -261,16 +284,87 @@ pub(crate) struct DemoPlay {
     /// Current centerprint + expiry (recorded `svc_centerprint`, scr_centertime
     /// ~2 s on the demo's recorded frame clock).
     pub(crate) centerprint: Option<(String, f32)>,
-    /// Notify lines + expiries (recorded `svc_print`, con_notifytime ~3 s).
-    pub(crate) notify: Vec<(String, f32)>,
-    /// The in-progress notify line (Con_Print model: break only on '\n') —
-    /// recorded pickups print as several svc_print fragments.
-    pub(crate) notify_pending: String,
+    /// The notify lines (recorded `svc_print` through Con_Print), on the
+    /// recorded clock.
+    pub(crate) notify: ConNotify,
     /// The `viewsize` cvar this frame (the Options "Screen size" slider),
     /// refreshed by `step` from the menu before stepping, like `key_move`:
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub(crate) viewsize: f32,
+    /// Each relinked entity's origin as last rendered (CL_RelinkEntities'
+    /// `oldorg`), keyed by entity number, for the model-flag trails; an entity
+    /// missing from a frame is forgotten (its next sighting is a forcelink).
+    pub(crate) trail_org: HashMap<i32, [f32; 3]>,
+    /// R_RocketTrail's `static int tracercount` for the demo's tracer trails.
+    pub(crate) tracercount: u32,
+    /// Which of [`DEMOS`] this is (the next one follows it, CL_NextDemo).
+    pub(crate) demonum: usize,
+    /// `sb_showscores` (`+showscores`, Tab held): Sbar_Draw shows the solo
+    /// scoreboard during playback too. Refreshed by `step` like `viewsize`.
+    pub(crate) show_scores: bool,
+    /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`): the status bar
+    /// shows the pain face until then.
+    pub(crate) faceanimtime: f32,
+    /// `cl.items` as last shown and `cl.item_gettime[]` on the recorded clock
+    /// (CL_ParseClientdata): the new-weapon icon flash. Zeroed at playback
+    /// start and on the loop wrap (CL_ClearState).
+    pub(crate) cl_items: i32,
+    pub(crate) item_gettime: [f32; 32],
+}
+
+impl DemoPlay {
+    /// The last frame has been shown: the recording is over (id's demos end
+    /// with `svc_disconnect`, which the parser stops at).
+    pub(crate) fn at_end(&self) -> bool {
+        self.idx + 1 >= self.demo.frames.len()
+    }
+
+    /// A playback of `demo` over `bsp` at its first frame: no models, sprites,
+    /// colormap or overlay pics yet (the caller loads what it has), and every
+    /// per-playback field — clocks, particles, beams, view shifts, messages —
+    /// at its clean-slate default.
+    pub(crate) fn new(pak: Pak, bsp: Bsp, palette: [[u8; 3]; 256], demo: Demo) -> DemoPlay {
+        DemoPlay {
+            bsp,
+            palette,
+            demo,
+            pak,
+            models: Vec::new(),
+            sprites: Vec::new(),
+            colormap: None,
+            colors: Vec::new(),
+            elapsed: 0.0,
+            idx: 0,
+            particles: ParticleSystem::new(),
+            prng: Lcg::new(0x9E37_79B9),
+            last_spawned_idx: usize::MAX,
+            beams: Beams::new(),
+            beam_scratch: Vec::new(),
+            gfx_wad: None,
+            conchars: None,
+            pic_complete: None,
+            pic_inter: None,
+            pic_finale: None,
+            damage_blend: 0.0,
+            damage_color: [255, 0, 0],
+            bonus_blend: 0.0,
+            v_dmg_time: 0.0,
+            v_dmg_roll: 0.0,
+            v_dmg_pitch: 0.0,
+            oldz: f32::NAN,
+            centerprint: None,
+            notify: ConNotify::default(),
+            viewsize: render::VIEWSIZE_DEFAULT,
+            trail_org: HashMap::new(),
+            tracercount: 0,
+            demonum: 0,
+            show_scores: false,
+            faceanimtime: 0.0,
+            cl_items: 0,
+            item_gettime: [0.0; 32],
+        }
+    }
 }
 
 pub(crate) struct App {
@@ -408,6 +502,18 @@ pub(crate) fn color_for_name(name: &str) -> [u8; 3] {
     table[(h % table.len() as u32) as usize]
 }
 
+/// The view angles a freshly spawned client starts with, as `(yaw, pitch)`:
+/// Host_Spawn_f (host_cmd.c) sends `svc_setangle` with the player entity's
+/// `angles` right after PutClientInServer ("never send a roll angle"), so the
+/// view faces the spot QuakeC's SelectSpawnPoint chose — `info_player_start`,
+/// `info_player_start2` once a rune is held, or `testplayerstart`. Read after
+/// the connect, before the settle frames.
+pub(crate) fn spawn_view_angles(server: &Server, player: i32) -> (f32, f32) {
+    let a = server.vm.ent_get_vector(player, "angles");
+    (net_angle(a[1]), clamp_pitch(net_angle(a[0])))
+}
+
+#[cfg(test)]
 pub(crate) fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
     for block in ents.split('}') {
         let toks: Vec<&str> = block.split('"').collect();
@@ -564,14 +670,19 @@ pub(crate) fn assemble_walk(
         pitch_vel: 0.0,
         damage_blend: 0.0,
         damage_color: [255, 0, 0],
-        last_health: f32::NAN,
-        last_armor: f32::NAN,
+        bonus_blend: 0.0,
+        v_dmg_time: 0.0,
+        v_dmg_roll: 0.0,
+        v_dmg_pitch: 0.0,
+        faceanimtime: 0.0,
+        cl_items: 0,
+        item_gettime: [0.0; 32],
         oldz: f32::NAN,
         centerprint: None,
-        notify: Vec::new(),
-        notify_pending: String::new(),
+        notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
         clock: 0.0,
+        host_time: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
         dlights: DynamicLights::new(),
@@ -596,7 +707,6 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let bsp = Bsp::parse(&read(map)?).ok()?;
     let bsp_sim = Bsp::parse(&read(map)?).ok()?;
     let progs = Progs::parse(&read("progs.dat")?).ok()?;
-    let (_spawn, yaw) = player_start(&bsp.entities).unwrap_or(([0.0, 0.0, 0.0], 0.0));
 
     // A live server: spawn the map's entities, then connect the local player.
     // Pass the pak so external brush-model item boxes (b_*.bsp) collide + take
@@ -610,6 +720,7 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     server.set_map_name(map);
     server.spawn_entities().ok()?;
     let player = server.connect_client().ok()?;
+    let (yaw, pitch) = spawn_view_angles(&server, player);
     // Capture the level-entry spawn parms (the just-connected, full-state player) so
     // a single-player respawn can reload THIS level with them.
     let entry_parms = server.save_spawn_parms();
@@ -640,14 +751,22 @@ pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let _ = server.drain_temp_entities();
     let _ = server.drain_messages();
     let _ = server.drain_svc_events();
+    let _ = quake_rs::builtins::take_stufftext();
 
-    assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, 0.0)
+    assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, pitch)
 }
 
+/// The first attract demo (`demo1`).
 pub(crate) fn build_demo() -> Option<DemoPlay> {
+    build_demo_n(0)
+}
+
+/// `playdemo` of [`DEMOS`]`[demonum % 3]`.
+pub(crate) fn build_demo_n(demonum: usize) -> Option<DemoPlay> {
+    let demonum = demonum % DEMOS.len();
     let pak = pak()?;
     let read = |n: &str| pak.read_file(n).ok().flatten();
-    let demo_bytes = read(DEMO_FILE)?;
+    let demo_bytes = read(DEMOS[demonum])?;
     let demo = parse_demo(&demo_bytes).ok()?;
     let map = demo.map_name()?.to_string();
     let bsp = Bsp::parse(&read(&map)?).ok()?;
@@ -708,38 +827,18 @@ pub(crate) fn build_demo() -> Option<DemoPlay> {
     let pic_complete = lmp("gfx/complete.lmp");
     let pic_inter = lmp("gfx/inter.lmp");
     let pic_finale = lmp("gfx/finale.lmp");
-    Some(DemoPlay {
-        bsp,
-        palette,
-        demo,
-        pak,
-        models,
-        sprites,
-        colormap,
-        colors,
-        elapsed: 0.0,
-        idx: 0,
-        particles: ParticleSystem::new(),
-        prng: Lcg::new(0x9E37_79B9),
-        last_spawned_idx: usize::MAX,
-        beams: Beams::new(),
-        beam_scratch: Vec::new(),
-        pic_complete,
-        pic_inter,
-        pic_finale,
-        gfx_wad,
-        conchars,
-        damage_blend: 0.0,
-        damage_color: [255, 0, 0],
-        v_dmg_time: 0.0,
-        v_dmg_roll: 0.0,
-        v_dmg_pitch: 0.0,
-        oldz: f32::NAN,
-        centerprint: None,
-        notify: Vec::new(),
-        notify_pending: String::new(),
-        viewsize: render::VIEWSIZE_DEFAULT,
-    })
+    let mut d = DemoPlay::new(pak, bsp, palette, demo);
+    d.models = models;
+    d.sprites = sprites;
+    d.colormap = colormap;
+    d.colors = colors;
+    d.gfx_wad = gfx_wad;
+    d.conchars = conchars;
+    d.pic_complete = pic_complete;
+    d.pic_inter = pic_inter;
+    d.pic_finale = pic_finale;
+    d.demonum = demonum;
+    Some(d)
 }
 
 pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
@@ -810,7 +909,8 @@ pub extern "C" fn boot() -> i32 {
     ok as i32
 }
 
-/// Start recorded-demo playback (demo1.dem / e1m3). Returns 1 on success.
+/// Start recorded-demo playback at demo1.dem (e1m3); demo2 and demo3 follow
+/// (quake.rc's startdemos cycle, see [`DEMOS`]). Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn boot_demo() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode
@@ -993,6 +1093,42 @@ mod tests {
             let a = b.as_ref().expect("app exists");
             (a.mode, a.walk.is_some(), a.demo.is_some(), a.menu.visible)
         })
+    }
+
+    #[test]
+    fn attract_loop_cycles_demo1_demo2_demo3() {
+        // quake.rc `startdemos demo1 demo2 demo3`: each demo's svc_disconnect
+        // runs CL_NextDemo, so the attract loop plays the three in turn and
+        // wraps — not demo1 forever.
+        assert_eq!(boot_attract(), 1);
+        let demo = || {
+            APP.with(|c| {
+                let b = c.borrow();
+                let d = b.as_ref().unwrap().demo.as_ref().unwrap();
+                (d.demonum, d.demo.map_name().unwrap_or("").to_string(), d.idx)
+            })
+        };
+        let to_end = || {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let d = b.as_mut().unwrap().demo.as_mut().unwrap();
+                d.idx = d.demo.frames.len() - 1; // the last frame has been shown
+            })
+        };
+        let (n0, map0, _) = demo();
+        assert_eq!(n0, 0);
+        let mut maps = vec![map0];
+        for want in [1, 2, 0] {
+            to_end();
+            step(0.05);
+            let (n, map, idx) = demo();
+            assert_eq!(n, want, "the next demo in startdemos order");
+            assert!(idx < 10, "it plays from its start (frame {idx})");
+            maps.push(map);
+        }
+        assert_eq!(maps[0], maps[3], "demo1 again after demo3");
+        assert!(maps[0] != maps[1] && maps[1] != maps[2], "three different recordings: {maps:?}");
+        assert_eq!(menu_visible(), 1, "the menu stays up over the loop");
     }
 
     #[test]

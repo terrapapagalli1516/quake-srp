@@ -78,12 +78,13 @@ pub struct Hud<'a> {
     pub ammo_rockets: i32,
     /// Cell count (QuakeC `ammo_cells`), fourth ibar ammo slot.
     pub ammo_cells: i32,
-    /// The server clock in seconds (`cl.time`), driving the selected-weapon flash
-    /// cycle and the face pain/grimace animation. (The orchestrator passes the
-    /// raw server time; the per-item acquire times of `cl.item_gettime[]` are not
-    /// tracked here, so weapon icons show their static owned/selected frame — see
-    /// the weapon-flash note in [`draw_hud_into`].)
+    /// The client clock in seconds (`cl.time`): the solo scoreboard's time and,
+    /// against [`Hud::item_gettime`], the new-weapon icon flash.
     pub time: f32,
+    /// `cl.item_gettime[32]`: the `cl.time` each `items` bit was last newly set
+    /// (CL_ParseClientdata). A weapon got less than a second ago cycles its
+    /// `inva1..5` icons (Sbar_DrawInventory). `None` draws every icon settled.
+    pub item_gettime: Option<&'a [f32; 32]>,
     /// Killed monsters / total (`cl.stats[STAT_MONSTERS/STAT_TOTALMONSTERS]`) for the
     /// solo scoreboard shown on death or Tab.
     pub monsters: i32,
@@ -96,6 +97,9 @@ pub struct Hud<'a> {
     /// Force the scorebar + solo scoreboard (Tab "show scores"); the C also shows it
     /// whenever `cl.stats[STAT_HEALTH] <= 0`, which [`draw_hud_into`] handles directly.
     pub show_scores: bool,
+    /// `cl.time <= cl.faceanimtime` (V_ParseDamage sets it 0.2 s ahead on every
+    /// hit): `Sbar_DrawFace` draws the pain face `face_p*` of the health bracket.
+    pub face_pain: bool,
     /// `sb_lines` from [`calc_refdef`](crate::screen::calc_refdef) (the viewsize): 48 draws the inventory
     /// strip and the status bar, 24 the status bar alone, 0 neither — though
     /// the death / Tab scoreboard still shows at 0, as in `Sbar_Draw`.
@@ -276,6 +280,8 @@ const SB_SIGIL_NAMES: [&str; 4] = ["sb_sigil1", "sb_sigil2", "sb_sigil3", "sb_si
 /// the lowest health (`face5`) and bracket 4 (`face1`) the highest, mirroring
 /// `Sbar_Init`'s `sb_faces[4]="face1" … sb_faces[0]="face5"`. Indexed `[bracket]`.
 const FACE_NAMES: [&str; 5] = ["face5", "face4", "face3", "face2", "face1"];
+/// `sb_faces[f][1]`: the pain faces (`face_p1` .. `face_p5`), same brackets.
+const FACE_PAIN_NAMES: [&str; 5] = ["face_p5", "face_p4", "face_p3", "face_p2", "face_p1"];
 
 /// `Sbar_DrawFace`'s powerup faces: invisibility+invulnerability, quad, invisibility,
 /// invulnerability — checked in that priority order before the health face.
@@ -299,22 +305,29 @@ fn face_bracket(health: i32) -> usize {
     }
 }
 
-/// The selection-flash frame name for the *currently selected* weapon `i` (0..6),
-/// keyed on the server `time` the orchestrator passes.
-///
-/// `Sbar_DrawInventory` cycles the active weapon through its 5 flash frames
-/// `inva1_*..inva5_*` (`sb_weapons[2+f][i]`) right after selection. We do not
-/// track per-item acquire times (only one `time` is supplied), so we run the same
-/// 5-frame cycle continuously off `time`: `frame = (int)(time*10) % 5` in 0..4,
-/// then the 1-based `inva{frame+1}_<suffix>` lump name. Non-selected owned weapons
-/// use the dim `inv_*` name from [`WEAPON_INV_NAMES`] (handled by the caller).
-// Retained for the future per-item `cl.item_gettime`-driven 1-second pickup flash;
-// the steady-state HUD now draws the settled `inv2_*` icon for the active weapon.
-#[allow(dead_code)]
-fn weapon_flash_name(i: usize, time: f32) -> String {
-    let suffix = WEAPON_SUFFIX.get(i).copied().unwrap_or("shotgun");
-    let f = ((time * 10.0).floor() as i64).rem_euclid(5) + 1;
-    format!("inva{f}_{suffix}")
+/// `Sbar_DrawInventory`'s `flashon` for owned weapon `i` (0..6):
+/// `(int)((cl.time - item_gettime[i])*10)`; from 10 on (a second after it was
+/// got) it is 1 for the active weapon (`inv2_*`) and 0 for the rest (`inv_*`),
+/// before that `flashon%5 + 2`, the `inva1..5_*` cycle. With no get-times the
+/// icon is settled.
+fn weapon_flashon(hud: &Hud, i: usize) -> i32 {
+    let settled = || i32::from(hud.weapon == IT_SHOTGUN << i);
+    let Some(gettime) = hud.item_gettime else { return settled() };
+    let flashon = ((hud.time - gettime[i]) * 10.0) as i32;
+    if flashon >= 10 {
+        settled()
+    } else {
+        flashon % 5 + 2
+    }
+}
+
+/// `sb_weapons[flashon][i]` (Sbar_Init): `inv_*`, `inv2_*`, then `inva1..5_*`.
+fn weapon_icon_name(flashon: i32, i: usize) -> String {
+    match flashon {
+        0 => WEAPON_INV_NAMES[i].to_string(),
+        1 => format!("inv2_{}", WEAPON_SUFFIX[i]),
+        f => format!("inva{}_{}", f - 1, WEAPON_SUFFIX[i]),
+    }
 }
 
 /// Try to fetch a HUD pic by name and blit it at virtual `(vx, vy)`; a missing or
@@ -404,22 +417,13 @@ fn draw_sbar_inventory(
     blit_named(image, wad, "ibar", 0.0, -24.0, scale, vy_top, pal);
 
     // Weapon icons: for each owned weapon (items bit IT_SHOTGUN<<i, i=0..6), draw
-    // its icon at Sbar_DrawPic(i*24, -16, ...). The currently-selected weapon shows
-    // the bright `inv2_*` icon, the rest the dim `inv_*` icon (Sbar_DrawInventory:
-    // for `flashon >= 10` — i.e. >1s after pickup, the steady state — the active
-    // weapon draws `sb_weapons[1][i]` = `inv2_*`). The 1-second post-pickup
-    // `inva1..5` flash needs per-item `cl.item_gettime`, which we don't track, so we
-    // render the settled bright icon the player sees the rest of the time.
+    // `sb_weapons[flashon][i]` at Sbar_DrawPic(i*24, -16, ...): the `inva1..5_*`
+    // flash for the first second after it was got, then the bright `inv2_*` for
+    // the active weapon and the dim `inv_*` for the rest (weapon_flashon).
     for i in 0..7 {
-        let bit = IT_SHOTGUN << i;
-        if hud.items & bit != 0 {
-            let selected = hud.weapon == bit;
-            if selected {
-                let name = format!("inv2_{}", WEAPON_SUFFIX[i]);
-                blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, scale, vy_top, pal);
-            } else {
-                blit_named(image, wad, WEAPON_INV_NAMES[i], (i as f32) * 24.0, -16.0, scale, vy_top, pal);
-            }
+        if hud.items & (IT_SHOTGUN << i) != 0 {
+            let name = weapon_icon_name(weapon_flashon(hud, i), i);
+            blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, scale, vy_top, pal);
         }
     }
 
@@ -548,8 +552,8 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 
     // Face (Sbar_DrawFace) at x=112, y=0. Powerup faces take priority in the C's
     // order: invisibility+invulnerability, then quad, then invisibility, then
-    // invulnerability; otherwise the health-bracket face (pain frame skipped — we
-    // don't track faceanimtime, so we use the static face[bracket][0]).
+    // invulnerability; otherwise the health-bracket face, `sb_faces[f][anim]`
+    // with anim 1 (the pain face) while `cl.time <= cl.faceanimtime`.
     let inv_iv = IT_INVISIBILITY | IT_INVULNERABILITY;
     if hud.items & inv_iv == inv_iv {
         blit_named(image, wad, FACE_INVIS_INVULN, 112.0, 0.0, scale, vy_top, pal);
@@ -560,7 +564,8 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     } else if hud.items & IT_INVULNERABILITY != 0 {
         blit_named(image, wad, FACE_INVULN, 112.0, 0.0, scale, vy_top, pal);
     } else {
-        let face = FACE_NAMES[face_bracket(hud.health)];
+        let names = if hud.face_pain { &FACE_PAIN_NAMES } else { &FACE_NAMES };
+        let face = names[face_bracket(hud.health)];
         blit_named(image, wad, face, 112.0, 0.0, scale, vy_top, pal);
     }
 
@@ -1069,6 +1074,7 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            item_gettime: None,
             monsters: 0,
             total_monsters: 0,
             secrets: 0,
@@ -1076,6 +1082,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -1122,6 +1129,7 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            item_gettime: None,
             monsters: 0,
             total_monsters: 0,
             secrets: 0,
@@ -1129,6 +1137,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -1168,6 +1177,7 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            item_gettime: None,
             monsters: 0,
             total_monsters: 0,
             secrets: 0,
@@ -1175,6 +1185,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
         assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
@@ -1204,15 +1215,47 @@ mod tests {
     }
 
     #[test]
-    fn weapon_flash_name_cycles_five_frames() {
-        // The selected-weapon flash cycles inva1..inva5 off (int)(time*10) % 5.
-        assert_eq!(weapon_flash_name(0, 0.0), "inva1_shotgun");
-        assert_eq!(weapon_flash_name(0, 0.1), "inva2_shotgun");
-        assert_eq!(weapon_flash_name(0, 0.4), "inva5_shotgun");
-        assert_eq!(weapon_flash_name(0, 0.5), "inva1_shotgun"); // wraps after 5
-        // Per-weapon suffix is correct across the 7 weapons (shotgun..lightng).
-        assert_eq!(weapon_flash_name(6, 0.0), "inva1_lightng");
-        assert_eq!(weapon_flash_name(4, 0.0), "inva1_rlaunch");
+    fn new_weapon_icons_flash_for_a_second() {
+        // Sbar_DrawInventory: flashon = (int)((cl.time - item_gettime[i])*10);
+        // < 10 cycles sb_weapons[flashon%5 + 2] (inva1..5), then inv2 for the
+        // active weapon and inv for the rest. No get-times: settled.
+        let wad = build_full_hud_wad();
+        let pal = ramp_palette();
+        let mut gettime = [0.0f32; 32];
+        gettime[4] = 10.0; // the rocket launcher (bit 4), got at t=10
+        let hud = |time: f32, gt: Option<&'static [f32; 32]>| Hud {
+            wad: &wad,
+            palette: &pal,
+            health: 100,
+            ammo: 0,
+            armor: 0,
+            items: IT_SHOTGUN | IT_SHOTGUN << 4,
+            weapon: IT_SHOTGUN,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time,
+            item_gettime: gt,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
+            face_pain: false,
+            sb_lines: SB_LINES_FULL,
+        };
+        let gt: &'static [f32; 32] = Box::leak(Box::new(gettime));
+        let name = |h: &Hud, i: usize| weapon_icon_name(weapon_flashon(h, i), i);
+        assert_eq!(name(&hud(10.0, Some(gt)), 4), "inva1_rlaunch");
+        assert_eq!(name(&hud(10.15, Some(gt)), 4), "inva2_rlaunch");
+        assert_eq!(name(&hud(10.45, Some(gt)), 4), "inva5_rlaunch");
+        assert_eq!(name(&hud(10.55, Some(gt)), 4), "inva1_rlaunch", "wraps after 5");
+        assert_eq!(name(&hud(11.0, Some(gt)), 4), "inv_rlaunch", "settled, not active");
+        assert_eq!(name(&hud(11.0, Some(gt)), 0), "inv2_shotgun", "settled, active");
+        assert_eq!(name(&hud(10.0, None), 4), "inv_rlaunch", "no get-times: settled");
+        assert_eq!(weapon_icon_name(6, 6), "inva5_lightng");
     }
 
     #[test]
@@ -1304,6 +1347,10 @@ mod tests {
         for name in ["face5", "face4", "face3", "face2", "face1", "face_inv2", "face_quad", "face_invis", "face_invul2"] {
             pics.push((name.to_string(), qpic_payload(24, 24, 70)));
         }
+        // Pain faces, index 71.
+        for name in FACE_PAIN_NAMES {
+            pics.push((name.to_string(), qpic_payload(24, 24, 71)));
+        }
         // Armour-type + ammo-type icons, index 80 / 85.
         for name in ARMOR_ICON_NAMES {
             pics.push((name.to_string(), qpic_payload(24, 24, 80)));
@@ -1389,6 +1436,7 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            item_gettime: None,
             monsters: 0,
             total_monsters: 0,
             secrets: 0,
@@ -1396,6 +1444,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -1479,6 +1528,7 @@ mod tests {
             ammo_rockets: 0,
             ammo_cells: 0,
             time: 0.0,
+            item_gettime: None,
             monsters: 0,
             total_monsters: 0,
             secrets: 0,
@@ -1486,6 +1536,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         // All face pics share index 70 here, so we can't distinguish quad vs health
         // by colour — instead assert the call path doesn't panic and a face drew.
@@ -1495,6 +1546,45 @@ mod tests {
             .filter(|&(x, y)| img.rgb[y * 320 + x] == [70, 70, 70])
             .count();
         assert!(face_px > 0, "a powerup (quad) face drew at x=112");
+    }
+
+    #[test]
+    fn draw_hud_pain_face_while_face_anim_runs() {
+        // Sbar_DrawFace: `sb_faces[f][cl.time <= cl.faceanimtime]` — the pain
+        // face of the health bracket right after a hit.
+        let wad = build_full_hud_wad();
+        let pal = ramp_palette();
+        let face = |face_pain: bool| {
+            let mut img = Image::new(320, 200, [0u8, 0, 0]);
+            let hud = Hud {
+                wad: &wad,
+                palette: &pal,
+                health: 45,
+                ammo: 0,
+                armor: 0,
+                items: 0,
+                weapon: 0,
+                ammo_shells: 0,
+                ammo_nails: 0,
+                ammo_rockets: 0,
+                ammo_cells: 0,
+                time: 0.0,
+                item_gettime: None,
+                monsters: 0,
+                total_monsters: 0,
+                secrets: 0,
+                total_secrets: 0,
+                level_name: "",
+                show_scores: false,
+                sb_lines: SB_LINES_FULL,
+                face_pain,
+            };
+            draw_hud_into(&mut img, &hud);
+            img.rgb[188 * 320 + 124]
+        };
+        assert_eq!(face(false), [70, 70, 70], "the steady face");
+        assert_eq!(face(true), [71, 71, 71], "the pain face");
+        assert_eq!(FACE_PAIN_NAMES[face_bracket(45)], "face_p3");
     }
 
     /// A gfx.wad with the three status-bar strips as solid colours: `sbar`
@@ -1546,12 +1636,14 @@ mod tests {
                 ammo_rockets: 0,
                 ammo_cells: 0,
                 time: 0.0,
+                item_gettime: None,
                 monsters: 0,
                 total_monsters: 0,
                 secrets: 0,
                 total_secrets: 0,
                 level_name: "",
                 show_scores: false,
+                face_pain: false,
                 sb_lines,
             };
             draw_hud_into(&mut img, &hud);

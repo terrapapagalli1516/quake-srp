@@ -56,7 +56,6 @@ fn angle_diff(a: f32, b: f32) -> f32 {
 /// `cl.viewangles` become the destination's angles. The port's view angles
 /// (`w.yaw`/`w.pitch`) are only ever written by input.
 #[test]
-#[ignore = "census F1: teleporters do not turn the view (svc_setangle/fixangle)"]
 fn census_teleport_turns_the_view_to_the_destination() {
     let mut w = build_walk_map("maps/start.bsp").expect("start boots");
     for _ in 0..5 {
@@ -99,7 +98,6 @@ fn census_teleport_turns_the_view_to_the_destination() {
 /// || key_dest == key_game))`. The port ticks the server with a zeroed usercmd
 /// ("the world still TICKS"), so monsters keep attacking behind the menu.
 #[test]
-#[ignore = "census F2: the world keeps running behind the menu/console"]
 fn census_single_player_pauses_behind_the_menu() {
     let mut w = build_walk().expect("e1m1 boots");
     for _ in 0..5 {
@@ -184,7 +182,6 @@ fn census_force_retouch_opens_e1m6_start_door() {
 /// (215,186,69) at 50%, and V_UpdatePalette folds it into the palette shift.
 /// The port's `stuffcmd` is a no-op.
 #[test]
-#[ignore = "census F6: the 'bf' bonus flash never fires"]
 fn census_pickup_flashes_the_screen_gold() {
     let mut w = build_walk().expect("e1m1 boots");
     for _ in 0..5 {
@@ -221,7 +218,6 @@ fn census_player_netname_is_player() {
 /// e.g. switching away from the rocket launcher (or while holding fire with
 /// the nailgun/thunderbolt).
 #[test]
-#[ignore = "census F4: impulses pressed during a weapon cooldown are dropped"]
 fn census_weapon_switch_survives_the_cooldown() {
     let mut w = build_walk().expect("e1m1 boots");
     for _ in 0..5 {
@@ -260,7 +256,6 @@ fn census_weapon_switch_survives_the_cooldown() {
 /// draws sigil i when `cl.items & (1<<(28+i))`. QC `sigil_touch` only ORs
 /// `serverflags`. The live HUD is built from the bare `items` field.
 #[test]
-#[ignore = "census F10: rune (sigil) icons never reach the live status bar"]
 fn census_rune_icons_reach_the_status_bar() {
     let mut w = build_walk_map("maps/e1m7.bsp").expect("e1m7 boots");
     for _ in 0..3 {

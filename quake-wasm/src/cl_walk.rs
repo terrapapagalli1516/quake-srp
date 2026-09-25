@@ -20,6 +20,104 @@ use crate::input::{
 };
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
+use crate::view::{
+    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
+};
+
+/// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
+/// (`((int)f*256/360) & 255`) then `MSG_ReadAngle` (`MSG_ReadChar() *
+/// (360.0/256)`) — whole degrees truncated, then 256 steps, signed.
+pub(crate) fn net_angle(f: f32) -> f32 {
+    let b = ((f as i32).wrapping_mul(256) / 360) & 255;
+    (b as u8 as i8) as f32 * (360.0 / 256.0)
+}
+
+/// `SV_WriteClientdataToMessage`'s fixangle (sv_main.c) and the client's
+/// `svc_setangle` (cl_parse.c): when the QuakeC forced the player's facing
+/// (`fixangle = 1` — teleporters, the intermission camera, PutClientInServer),
+/// the server sends the entity's `angles` and clears the flag, and the client
+/// takes them as `cl.viewangles`. This shell has no view roll, so the roll the
+/// message carries (0 at every id1 site) is dropped; the pitch is clamped as
+/// CL_AdjustAngles clamps it on the next move.
+fn apply_fixangle(w: &mut Walk) {
+    let p = w.player;
+    if p < 0 || w.server.vm.ent_get_float(p, "fixangle") == 0.0 {
+        return;
+    }
+    let a = w.server.vm.ent_get_vector(p, "angles");
+    w.pitch = clamp_pitch(net_angle(a[0]));
+    w.yaw = net_angle(a[1]);
+    w.server.vm.ent_set_float(p, "fixangle", 0.0);
+}
+
+/// `SV_WriteClientdataToMessage`'s svc_damage (sv_main.c) read by the client's
+/// `V_ParseDamage` (view.c). QC `T_Damage` adds to the client's `dmg_take` /
+/// `dmg_save` (and sets `dmg_inflictor`) BEFORE its god-mode and Pentagram
+/// returns, so a hit that costs no health still flashes, kicks and shows the
+/// pain face. The server sends them whenever either is non-zero and zeroes
+/// them: `MSG_WriteByte` of each (float truncated, then a byte) and the
+/// inflictor's box centre through `MSG_WriteCoord` (1/8 unit). `ent_origin`
+/// is the view entity's origin as the client has it when the message is
+/// parsed — last frame's (clientdata precedes the entity updates).
+fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
+    let p = w.player;
+    let vm = &mut w.server.vm;
+    let take = vm.ent_get_float(p, "dmg_take");
+    let save = vm.ent_get_float(p, "dmg_save");
+    if take == 0.0 && save == 0.0 {
+        return;
+    }
+    let mut other = vm.ent_get_int(p, "dmg_inflictor");
+    if other < 0 || other as usize >= vm.num_edicts() {
+        other = 0;
+    }
+    let (o, mins, maxs) = (
+        vm.ent_get_vector(other, "origin"),
+        vm.ent_get_vector(other, "mins"),
+        vm.ent_get_vector(other, "maxs"),
+    );
+    let coord = |i: usize| ((o[i] + 0.5 * (mins[i] + maxs[i])) * 8.0) as i32 as i16 as f32 / 8.0;
+    let from = [coord(0), coord(1), coord(2)];
+    vm.ent_set_float(p, "dmg_take", 0.0);
+    vm.ent_set_float(p, "dmg_save", 0.0);
+    let byte = |f: f32| (f as i32) & 255;
+    let pd = parse_damage(byte(save), byte(take), from, ent_origin, [w.pitch, w.yaw, 0.0]);
+    w.damage_blend = cshift_add(w.damage_blend, pd.percent);
+    w.damage_color = pd.color;
+    w.v_dmg_roll = pd.roll;
+    w.v_dmg_pitch = pd.pitch;
+    w.v_dmg_time = V_KICKTIME;
+    w.faceanimtime = w.server.time() + FACE_ANIM_TIME;
+}
+
+/// The dynamic lights R_PushDlights marks this frame: every slot with a
+/// radius whose `die` has not passed (`die < cl.time || !radius` is skipped),
+/// at its current — not yet decayed — radius.
+fn pushed_dlights(
+    dlights: &quake_rs::dlight::DynamicLights,
+    now: f32,
+) -> Vec<quake_rs::dlight::DynamicLight> {
+    dlights.active().into_iter().filter(|dl| dl.die >= now).collect()
+}
+
+/// `cl.punchangle` as SV_WriteClientdataToMessage sends it: each component
+/// through `MSG_WriteChar` — the float truncated to an int, kept as a signed
+/// byte — so the shotgun's -2 kick reads -2, then -1 while DropPunchAngle eases
+/// the server's value back, then 0: whole-degree steps, not a smooth ease.
+pub(crate) fn client_punchangle(w: &Walk) -> [f32; 3] {
+    let p = w.server.vm.ent_get_vector(w.player, "punchangle");
+    p.map(|v| (v as i32) as i8 as f32)
+}
+
+/// `cl.items` as SV_WriteClientdataToMessage sends it: the player's `items`
+/// with the rune bits "stuffed into the high bits of items for sbar" —
+/// `(int)ent->v.items | ((int)pr_global_struct->serverflags << 28)`. QC
+/// `sigil_touch` only sets `serverflags`, so this is how a rune reaches the
+/// status bar.
+pub(crate) fn client_items(w: &Walk) -> i32 {
+    (w.server.vm.ent_get_float(w.player, "items") as i32) | ((w.server.serverflags() as i32) << 28)
+}
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
 /// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
@@ -32,21 +130,29 @@ pub(crate) fn step_walk(
     render_w: usize,
     render_h: usize,
 ) -> (render::Image, Vec<([u8; 3], f32)>) {
-    // Advance the animation clock (used for liquid warp + sky scroll). Guard
-    // against a non-finite/negative dt so the clock only ever moves forward.
+    // Host_ServerFrame (host.c): "always pause in single player if in console
+    // or menus" — `if (!sv.paused && (svs.maxclients > 1 || key_dest ==
+    // key_game)) SV_Physics ();`, and SV_RunClients gates SV_ClientThink the
+    // same way. Nothing on the server runs while the menu or console is up, so
+    // sv.time stands still, and with it cl.time (on a local server CL_LerpPoint
+    // snaps cl.time to the server's message time): particles, dlight decay,
+    // light styles, sky and liquids, rotating pickups and the status-bar
+    // animations freeze. The client frame itself still runs — V_RenderView
+    // draws the view, and whatever the C drives off host_frametime / realtime
+    // keeps going: the palette-shift fades (V_UpdatePalette), the centerprint
+    // countdown and notify expiry, the ambient-sound ramps.
+    let paused = menu_up;
+    // Guard against a non-finite/negative dt so the clocks only move forward.
     if dt.is_finite() && dt > 0.0 {
-        w.clock += dt;
+        w.host_time += dt;
+        if !paused {
+            w.clock += dt;
+        }
     }
 
     // 1. Tick the live server with this frame's input. forwardmove/sidemove are
     //    Quake run speeds; the server's SV_ClientThink turns them into motion and
     //    runs every entity's think (so monsters animate and move).
-    //
-    //    While the menu is up, gate gameplay input: the world still TICKS (so it
-    //    idles — monsters keep their think schedule, doors finish moving) but the
-    //    player neither moves, fires, nor switches weapons. We send a zeroed
-    //    UserCmd at the current view angles (Quake's `key_dest == key_menu` stops
-    //    feeding the movement/attack/impulse commands the same way).
     // The bindings-driven keyboard input `step` derived this frame; zeroed while
     // the menu/console gate gameplay (key_dest != key_game).
     let km = if menu_up { KeyMove::default() } else { w.key_move };
@@ -133,11 +239,22 @@ pub(crate) fn step_walk(
         },
         impulse: if menu_up { 0 } else { w.next_impulse },
     };
-    // A queued impulse fires once (the server also clears the edict field after
-    // ImpulseCommands, but clearing here guarantees a held key fires a single
-    // weapon switch rather than re-selecting every frame).
-    w.next_impulse = 0;
-    let _ = w.server.client_frame(&cmd, dt);
+    if !paused {
+        // A queued impulse is sent once (CL_SendMove: `in_impulse = 0`). While
+        // paused it waits: the C's SV_ReadClientMove still stores it on the
+        // edict behind the menu, and it runs when the server does.
+        w.next_impulse = 0;
+        let before = w.server.vm.ent_get_vector(w.player, "origin");
+        let _ = w.server.client_frame(&cmd, dt);
+        apply_fixangle(w);
+        parse_client_damage(w, before);
+        // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
+        for (ent, text) in quake_rs::builtins::take_stufftext() {
+            if ent == w.player && stufftext_bonus_flash(&text) {
+                w.bonus_blend = BONUS_PERCENT;
+            }
+        }
+    }
 
     // 1a. MSG_ALL server commands (CL_ParseServerMessage, cl_parse.c): the QuakeC
     //     end-of-level chain WriteBytes svc_intermission / svc_finale (+ text) /
@@ -195,43 +312,35 @@ pub(crate) fn step_walk(
         try_restart(w);
     }
 
+    // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the
+    // server clock the HUD reads — after any level swap above, whose
+    // CL_ClearState zeroed cl.items.
+    let items = client_items(w);
+    let now_sv = w.server.time();
+    stamp_item_gettime(&mut w.cl_items, &mut w.item_gettime, items, now_sv);
+
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
     //    voices) to the page's audio queue.
     let events = w.server.drain_sounds();
     queue_sounds(&w.pak, &events, w.player);
 
     // 2a. Drain QuakeC's on-screen messages (centerprint / sprint / bprint) into
-    //     the timed display state, and expire old ones (clock = w.clock).
+    //     the timed display state, and expire old ones on the host clock
+    //     (the C times both off realtime / host_frametime, paused or not).
     for m in w.server.drain_messages() {
         if m.center {
-            w.centerprint = Some((m.text, w.clock + 2.0));
+            w.centerprint = Some((m.text, w.host_time + 2.0));
         } else {
-            // Con_Print model: accumulate notify text and only break into a line on
-            // '\n'. Quake pickups print via several sprint() calls ("You receive ",
-            // "25", " health\n") that the C console joins into ONE line; emitting one
-            // notify line per call would wrongly split a single message across lines.
-            w.notify_pending.push_str(&m.text);
-        }
-    }
-    // Flush every complete ('\n'-terminated) line from the pending buffer; the
-    // trailing partial (no newline yet) stays buffered until more text arrives.
-    while let Some(nl) = w.notify_pending.find('\n') {
-        let line: String = w.notify_pending.drain(..=nl).collect();
-        let line = line.trim_end_matches(['\n', '\r']).to_string();
-        if !line.trim().is_empty() {
-            w.notify.push((line, w.clock + 3.0));
-            while w.notify.len() > 4 {
-                w.notify.remove(0);
-            }
+            // Con_Print: pickups print via several sprint() calls ("You receive
+            // ", "25", " health\n") that land on one console line.
+            w.notify.print(&m.text, w.host_time);
         }
     }
     if let Some((_, exp)) = &w.centerprint {
-        if w.clock >= *exp {
+        if w.host_time >= *exp {
             w.centerprint = None;
         }
     }
-    let clock = w.clock;
-    w.notify.retain(|(_, exp)| clock < *exp);
 
     // 2b. Realise the particle() bursts the world fired this frame (explosions,
     //     blood, gibs) into the live pool, then age it under gravity and retire
@@ -307,11 +416,6 @@ pub(crate) fn step_walk(
             now,
         );
     }
-    if dt.is_finite() && dt > 0.0 {
-        w.particles.advance(dt, now, 800.0 * 0.05);
-        w.dlights.advance(dt, now);
-    }
-
     // 3. Make sure every live entity's alias model is cached (runtime-spawned
     //    entities — gibs, projectiles — can appear after boot).
     let n = w.server.vm.num_edicts();
@@ -552,19 +656,27 @@ pub(crate) fn step_walk(
     } else {
         // Add the weapon-fire view kick (cl.punchangle, view.c:957); the engine's
         // drop_punch_angle already decays it back to zero each frame.
-        let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
-        // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity,
-        // plus the punchangle's roll component; the dead-view tilt (80°) overrides
-        // when the player is dead. (Damage-kick roll needs svc_damage, not wired.)
+        let punch = client_punchangle(w);
+        // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity
+        // plus the svc_damage kick (decaying over v_kicktime by host_frametime),
+        // plus the punchangle's roll component; the dead-view tilt (80°)
+        // overrides when the player is dead.
         let body_angles = w.server.vm.ent_get_vector(w.player, "angles");
         let mut roll = quake_rs::server::v_calc_roll(body_angles, vel) + punch[2];
+        let mut kick_pitch = 0.0;
+        if w.v_dmg_time > 0.0 {
+            roll += w.v_dmg_time / V_KICKTIME * w.v_dmg_roll;
+            kick_pitch = w.v_dmg_time / V_KICKTIME * w.v_dmg_pitch;
+            w.v_dmg_time -= if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        }
         if w.server.vm.ent_get_float(w.player, "health") <= 0.0 {
             roll = 80.0; // dead view angle (replaces, per V_CalcViewRoll)
         }
         Camera {
             pos: eye,
             yaw: ang[1] + punch[1],
-            pitch: -(ang[0] + punch[0]), // QuakeC pitch is +down; the renderer's is +up.
+            // QuakeC pitch is +down; the renderer's is +up.
+            pitch: -(ang[0] + kick_pitch + punch[0]),
             roll,
             fov_deg: 90.0,
         }
@@ -644,7 +756,7 @@ pub(crate) fn step_walk(
             // V_CalcRefdef's gun origin (the forward bob + the viewsize fudge)
             // and CalcGunAngle's angles (the view before the punch, no lean).
             Some(Some(mdl)) => {
-                let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
+                let punch = client_punchangle(w);
                 let angles = render::viewmodel_angles(&cam, punch, ang[2]);
                 Some(Viewmodel {
                     mdl,
@@ -656,12 +768,22 @@ pub(crate) fn step_walk(
             _ => None,
         }
     };
-    // The live particles as (world pos, palette index); they share the scene
-    // z-buffer so any behind a wall are correctly hidden.
+    // R_DrawParticles: free the particles whose `die < cl.time`, draw the rest
+    // as (world pos, palette index) — they share the scene z-buffer, so any
+    // behind a wall are hidden — and only then move each one and step its
+    // ramp by `cl.time - cl.oldtime` (0 while paused). A particle is drawn
+    // where and as it was spawned on its first frame, and on its last.
+    w.particles.retire(now);
     let parts: Vec<([f32; 3], u8)> =
         w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
-    // The live dynamic lights (explosions / muzzle flashes) light up nearby walls.
-    let active_dlights = w.dlights.active();
+    if dt.is_finite() && dt > 0.0 && !paused {
+        w.particles.integrate(dt, now, 800.0 * 0.05);
+    }
+    // The live dynamic lights (explosions / muzzle flashes) light up nearby
+    // walls: R_PushDlights skips `die < cl.time || !radius`. A light is drawn
+    // at the radius it was allocated with; CL_DecayLights shrinks it after the
+    // frame (below).
+    let active_dlights = pushed_dlights(&w.dlights, now);
     // The animated light-style scales (torch flicker, pulsing lights) at the
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
@@ -674,47 +796,23 @@ pub(crate) fn step_walk(
     let mut view =
         render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
     bench::lap(Phase::Render3d);
-
-    // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
-    //     player lost health/armour this frame, and tint the view when the eye is
-    //     under water / in lava or slime. The blend is DEFERRED (returned to the
-    //     dispatcher) and applied to the whole composited frame last, matching
-    //     software V_UpdatePalette's whole-screen palette shift (it tints the HUD,
-    //     menu and console too — not the GL 3D-viewport-only behaviour).
-    w.damage_blend = (w.damage_blend - dt * 150.0).max(0.0);
-    let health = w.server.vm.ent_get_float(w.player, "health");
-    let armorv = w.server.vm.ent_get_float(w.player, "armorvalue");
-    if w.last_health.is_finite() {
-        // V_ParseDamage (view.c:316-379): blood = health lost, armor = armour lost.
-        // count = (blood+armor)/2 with a min-10 floor, and the flash adds 3*count.
-        // (The C reads the server's dmg_take/dmg_save bytes; we infer them from the
-        // per-frame stat deltas, which equal blood/armor in single-player.)
-        let blood = (w.last_health - health).max(0.0);
-        let armor = (w.last_armor - armorv).max(0.0);
-        // Suppress the inferred flash during megahealth rot: above max_health the
-        // QuakeC ticks health down 1/sec, which is NOT damage and never flashes in
-        // id (the real CSHIFT_DAMAGE comes only from svc_damage / T_Damage). Gate on
-        // post-tick health still exceeding max_health so the rot can't masquerade as
-        // a hit. (A genuine hit while overhealed is rare and self-corrects next hit.)
-        let max_health = w.server.vm.ent_get_float(w.player, "max_health");
-        let is_rot = max_health > 0.0 && health > max_health;
-        if blood + armor > 0.0 && !is_rot {
-            let count = (0.5 * (blood + armor)).max(10.0);
-            w.damage_blend = (w.damage_blend + 3.0 * count).min(150.0);
-            // Tint: armour-dominant -> pinkish, armour-only -> orange-red, else red.
-            w.damage_color = if armor > blood {
-                [200, 100, 100]
-            } else if armor > 0.0 {
-                [220, 50, 50]
-            } else {
-                [255, 0, 0]
-            };
-        }
+    // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
+    // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
+    if dt.is_finite() && dt > 0.0 && !paused {
+        w.dlights.advance(dt, now);
     }
-    w.last_health = health;
-    w.last_armor = armorv;
-    // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> POWERUP (top). (Bonus
-    // pickup flash needs the QuakeC "bf" stuffcmd, not yet wired.)
+
+    // 5b. Screen blends (V_CalcBlend): fade the damage flash (V_UpdatePalette
+    //     drops it after this frame's svc_damage was parsed) and tint the view
+    //     when the eye is under water / in lava or slime. The blend is DEFERRED
+    //     (returned to the dispatcher) and applied to the whole composited frame
+    //     last, matching software V_UpdatePalette's whole-screen palette shift
+    //     (it tints the HUD, menu and console too — not the GL 3D-viewport-only
+    //     behaviour).
+    let frametime = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+    w.damage_blend = cshift_drop(w.damage_blend, frametime, DAMAGE_FADE);
+    w.bonus_blend = cshift_drop(w.bonus_blend, frametime, BONUS_FADE);
+    // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let eye_contents = quake_rs::world::point_contents(&w.bsp, eye);
     // Underwater sine wobble (D_WarpScreen): when the eye is in water/slime/lava
     // (contents <= CONTENTS_WATER, r_waterwarp default on), warp the 3-D frame
@@ -733,6 +831,9 @@ pub(crate) fn step_walk(
     }
     if w.damage_blend > 0.0 {
         shifts.push((w.damage_color, w.damage_blend));
+    }
+    if w.bonus_blend > 0.0 {
+        shifts.push((BONUS_COLOR, w.bonus_blend));
     }
     // Powerup tint (Quad=blue, Biosuit=green, Ring=gray, Pentagram=yellow).
     if let Some(cs) = render::powerup_cshift(w.server.vm.ent_get_float(w.player, "items") as i32) {
@@ -815,7 +916,7 @@ pub(crate) fn step_walk(
             // sync with the weapon), not always shells — sbar.c draws currentammo.
             ammo: stat("currentammo"),
             armor: stat("armorvalue"),
-            items: stat("items"),
+            items: client_items(w),
             weapon: stat("weapon"),
             ammo_shells: stat("ammo_shells"),
             ammo_nails: stat("ammo_nails"),
@@ -825,14 +926,16 @@ pub(crate) fn step_walk(
             // SV_SpawnServer), not this walk's 0-based clock, matching what the
             // intermission overlay's completed_time latches.
             time: w.server.time(),
+            item_gettime: Some(&w.item_gettime),
             monsters: gcount("killed_monsters"),
             total_monsters: gcount("total_monsters"),
             secrets: gcount("found_secrets"),
             total_secrets: gcount("total_secrets"),
             level_name: &level_name,
-            // Tab "show scores" isn't wired as a key yet; the dead-player branch
-            // (health <= 0) inside draw_hud_into handles the death scoreboard.
-            show_scores: false,
+            // `+showscores` held (Tab); the dead-player branch (health <= 0)
+            // inside draw_hud_into handles the death scoreboard.
+            show_scores: km.showscores,
+            face_pain: w.server.time() <= w.faceanimtime,
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
@@ -851,8 +954,8 @@ pub(crate) fn step_walk(
             if let Some((text, _)) = &w.centerprint {
                 render::draw_centerprint(&mut img, cc, &w.palette, text);
             }
-            if !w.notify.is_empty() {
-                let lines: Vec<&str> = w.notify.iter().map(|(t, _)| t.as_str()).collect();
+            let lines = w.notify.visible(w.host_time);
+            if !lines.is_empty() {
                 render::draw_notify(&mut img, cc, &w.palette, &lines);
             }
         }
@@ -1118,6 +1221,157 @@ mod tests {
             }
             let _ = std::fs::write(format!("{dir}/{name}.ppm"), out);
         });
+    }
+
+    /// Run QC `T_Damage(targ, inflictor, attacker, damage)` on the live server.
+    fn qc_damage(w: &mut Walk, targ: i32, inflictor: i32, damage: f32) {
+        use quake_rs::progs::OFS_PARM0;
+        let f = w.server.vm.progs.find_function("T_Damage").expect("progs has T_Damage");
+        let vm = &mut w.server.vm;
+        vm.set_gi(OFS_PARM0, targ);
+        vm.set_gi(OFS_PARM0 + 3, inflictor);
+        vm.set_gi(OFS_PARM0 + 6, inflictor);
+        vm.set_gf(OFS_PARM0 + 9, damage);
+        vm.execute(f).expect("T_Damage runs");
+    }
+
+    /// CENSUS F16: QC T_Damage adds to `dmg_take`/`dmg_save` before its god-mode
+    /// return, and SV_WriteClientdataToMessage sends svc_damage whenever they
+    /// are non-zero — so a god-mode (or Pentagram) hit still flashes red, kicks
+    /// the view and shows the pain face; the fields are zeroed once sent.
+    #[test]
+    fn damage_in_god_mode_still_flashes_and_kicks() {
+        let mut w = build_walk().expect("e1m1 boots");
+        for _ in 0..3 {
+            step_walk(&mut w, 0.05, false, 320, 200);
+        }
+        let p = w.player;
+        let flags = w.server.vm.ent_get_float(p, "flags") as i32;
+        w.server.vm.ent_set_float(p, "flags", (flags | 64) as f32); // FL_GODMODE
+        // The inflictor: a spot 100 units straight ahead (yaw 0 -> +x).
+        w.yaw = 0.0;
+        w.pitch = 0.0;
+        let src = w.server.vm.spawn();
+        let o = w.server.vm.ent_get_vector(p, "origin");
+        w.server.vm.ent_set_vector(src, "origin", [o[0] + 100.0, o[1], o[2]]);
+        qc_damage(&mut w, p, src, 20.0);
+        assert_eq!(w.server.vm.ent_get_float(p, "health"), 100.0, "god mode: no health lost");
+        assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 20.0, "T_Damage counted the hit");
+        let (_, cshifts) = step_walk(&mut w, 0.05, false, 320, 200);
+        assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 0.0, "sent and zeroed");
+        assert!(
+            cshifts.iter().any(|&(c, pct)| c == [255, 0, 0] && pct > 0.0),
+            "a red damage cshift: {cshifts:?}"
+        );
+        // count = max(20*0.5, 10) = 10: percent 30, then one 0.05 s drop of 7.5,
+        // truncated like the C's int percent.
+        assert_eq!(w.damage_blend, 22.0);
+        assert!(w.v_dmg_pitch > 5.0, "hit from the front pitches the view: {}", w.v_dmg_pitch);
+        assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < crate::view::V_KICKTIME, "kick running");
+        assert!(w.server.time() <= w.faceanimtime, "the pain face shows");
+    }
+
+    /// CENSUS L9: an explosion's dlight is drawn at its full 350 radius on the
+    /// frame CL_ParseTEnt allocated it (CL_DecayLights runs after
+    /// SCR_UpdateScreen), a light past its `die` is not drawn, and the frame
+    /// still decays the pool once.
+    #[test]
+    fn dlights_are_drawn_before_they_decay() {
+        let mut w = build_walk().expect("e1m1 boots");
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let now = w.clock;
+        w.dlights.alloc(0, [0.0; 3], 350.0, now + 0.5, 300.0, 0.0, now);
+        w.dlights.alloc(0, [64.0, 0.0, 0.0], 200.0, now - 0.01, 0.0, 0.0, now);
+        let drawn = pushed_dlights(&w.dlights, now);
+        assert_eq!(drawn.len(), 1, "the dead light is not pushed");
+        assert_eq!(drawn[0].radius, 350.0, "full radius on its first frame");
+        let before = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let after = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
+        assert!((before - after - 0.05 * 300.0).abs() < 1e-3, "{before} -> {after}");
+    }
+
+    /// CENSUS L1: the client's punchangle is MSG_WriteChar'd — truncated to
+    /// whole degrees — so the shotgun kick steps -2, -1, 0.
+    #[test]
+    fn punchangle_reaches_the_view_in_whole_degrees() {
+        let mut w = build_walk().expect("e1m1 boots");
+        let p = w.player;
+        w.server.vm.ent_set_vector(p, "punchangle", [-1.9, 0.5, -2.0]);
+        assert_eq!(client_punchangle(&w), [-1.0, 0.0, -2.0]);
+        w.server.vm.ent_set_vector(p, "punchangle", [-4.0, 0.0, 0.0]);
+        assert_eq!(client_punchangle(&w), [-4.0, 0.0, 0.0]);
+    }
+
+    /// CENSUS F18: CL_ParseClientdata stamps `cl.item_gettime` for every newly
+    /// set items bit (and CL_ClearState's zeroed cl.items makes the level start
+    /// stamp what the player carries); the HUD then cycles the new weapon's
+    /// `inva1..5` icons for a second.
+    #[test]
+    fn new_items_are_stamped_for_the_icon_flash() {
+        let mut w = build_walk().expect("e1m1 boots");
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let t0 = w.server.time();
+        assert_eq!(w.item_gettime[0], t0, "the shotgun (bit 0) flashes at level start");
+        assert_eq!(w.cl_items, client_items(&w));
+        for _ in 0..30 {
+            step_walk(&mut w, 0.05, false, 320, 200);
+        }
+        w.next_impulse = 9; // every weapon
+        step_walk(&mut w, 0.05, false, 320, 200);
+        let t1 = w.server.time();
+        assert_eq!(w.item_gettime[4], t1, "the rocket launcher (bit 4) was just got");
+        assert_eq!(w.item_gettime[0], t0, "the shotgun keeps its old stamp");
+    }
+
+    /// CENSUS F1: svc_setangle carries MSG_WriteAngle's byte — whole degrees,
+    /// 256 steps, read back signed — and a new level starts facing the angles
+    /// PutClientInServer gave the player (Host_Spawn_f's setangle).
+    #[test]
+    fn setangle_quantises_like_the_wire_and_spawns_face_the_spot() {
+        assert_eq!(net_angle(90.0), 90.0);
+        assert_eq!(net_angle(45.0), 45.0);
+        assert_eq!(net_angle(270.0), -90.0, "byte 192 reads back as char -64");
+        assert_eq!(net_angle(10.9), 7.0 * 360.0 / 256.0, "(int)10.9*256/360 = 7");
+        assert_eq!(net_angle(-90.0), -90.0);
+        let w = build_walk().expect("e1m1 boots");
+        let spot = crate::app::player_start(&w.bsp.entities).expect("e1m1 has a start").1;
+        assert_eq!(w.yaw, net_angle(spot), "the view faces info_player_start's angle");
+        assert_eq!(w.pitch, 0.0);
+        assert_eq!(w.server.vm.ent_get_float(w.player, "fixangle"), 0.0);
+    }
+
+    /// CENSUS F2: behind the menu/console single player is paused
+    /// (Host_ServerFrame skips SV_Physics, SV_RunClients skips SV_ClientThink):
+    /// sv.time and cl.time stand still, the particles neither move nor die,
+    /// and a queued impulse waits for the server. What the C runs off
+    /// host_frametime / realtime keeps going: the damage fade and the
+    /// centerprint countdown.
+    #[test]
+    fn single_player_pause_freezes_the_world_but_not_the_host_clock() {
+        let mut w = build_walk().expect("e1m1 boots");
+        for _ in 0..3 {
+            step_walk(&mut w, 0.1, false, 320, 200);
+        }
+        w.particles.spawn_burst([0.0; 3], [0.0; 3], 73, 20, w.clock, &mut w.prng);
+        w.centerprint = Some(("paused".into(), w.host_time + 2.0));
+        w.damage_blend = 100.0;
+        w.next_impulse = 2;
+        let (sv0, cl0, parts0) = (w.server.time(), w.clock, w.particles.particles().len());
+        let org0 = w.particles.particles()[0].origin;
+        for _ in 0..25 {
+            step_walk(&mut w, 0.1, true, 320, 200); // menu up for 2.5 s
+        }
+        assert_eq!(w.server.time(), sv0, "sv.time stands still");
+        assert_eq!(w.clock, cl0, "cl.time stands still");
+        assert_eq!(w.particles.particles().len(), parts0, "no particle dies");
+        assert_eq!(w.particles.particles()[0].origin, org0, "no particle moves");
+        assert_eq!(w.next_impulse, 2, "the impulse waits for the server");
+        assert!(w.centerprint.is_none(), "the centerprint timed out behind the menu");
+        assert_eq!(w.damage_blend, 0.0, "the damage flash faded behind the menu");
+        step_walk(&mut w, 0.1, false, 320, 200);
+        assert!(w.server.time() > sv0, "the game resumes when the menu closes");
+        assert_eq!(w.next_impulse, 0, "and the waiting impulse is sent");
     }
 
     #[test]

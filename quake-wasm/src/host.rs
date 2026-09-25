@@ -7,11 +7,12 @@
 
 use quake_rs::render::{self, build_gamma_table};
 
-use crate::app::ensure_app;
+use crate::app::{build_demo_n, ensure_app};
 use crate::bench::{self, Phase};
 use crate::cl_demo::step_demo;
 use crate::cl_walk::step_walk;
 use crate::input::derive_key_move;
+use crate::snd_dma::{SND_QUEUE, STOP_SND_QUEUE};
 
 /// `Host_FilterTime` (host.c): the most a single frame may advance the game —
 /// a longer real frame (a hitch, a backgrounded tab) is clamped to 0.1 s of
@@ -108,9 +109,11 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // host_time: the menudot spinner (mode-independent, like realtime).
         a.clock += dt;
         let (w, h) = (a.render_w, a.render_h);
-        // While the menu OR console is up, gameplay input is gated; the dispatcher
-        // owns that state, so it tells step_walk whether to gate. step_demo ignores
-        // gameplay input regardless. The console takes priority over the menu.
+        // While the menu OR console is up (key_dest != key_game) gameplay input is
+        // gated and single player pauses (Host_ServerFrame skips SV_Physics); the
+        // dispatcher owns that state, so it tells step_walk. The attract demo is
+        // client-side playback and keeps running (CL_GetMessage reads on).
+        // The console takes priority over the menu.
         let menu_visible = a.menu.visible;
         let gate_gameplay = menu_visible || a.console.open;
         // Keep the menu's M_Menu_Save_f gate current: a local single-player game
@@ -119,6 +122,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         let game_active =
             a.mode == 0 && a.walk.as_ref().map(|wk| wk.intermission == 0).unwrap_or(false);
         a.menu.set_game_active(game_active);
+        // sv.active (New Game asks "Are you sure?" while a game runs).
+        a.menu.set_server_active(a.mode == 0 && a.walk.is_some());
         // Derive this frame's bindings-driven keyboard input (CL_BaseMove over
         // keys.c's keybindings) and hand it to the walk; step_walk zeroes it
         // while gameplay is gated.
@@ -130,6 +135,24 @@ pub extern "C" fn step(dt: f32) -> i32 {
         }
         if let Some(d) = a.demo.as_mut() {
             d.viewsize = viewsize;
+            // +showscores only reaches the game while it owns the keyboard.
+            d.show_scores = km.showscores && !gate_gameplay;
+        }
+        // Host_EndGame on the demo's svc_disconnect -> CL_NextDemo: once a demo
+        // has shown its last frame, the next of quake.rc's `startdemos demo1
+        // demo2 demo3` starts (a demo that cannot be built leaves this one to
+        // loop, step_demo's fallback). CL_PlayDemo_f's CL_Disconnect stops
+        // every sound first.
+        if a.mode == 1 && dt > 0.0 {
+            let next = a.demo.as_ref().filter(|d| d.at_end()).map(|d| d.demonum + 1);
+            if let Some(next) = next.and_then(build_demo_n) {
+                SND_QUEUE.with(|q| q.borrow_mut().clear());
+                STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
+                let mut next = next;
+                next.viewsize = viewsize;
+                next.show_scores = km.showscores && !gate_gameplay;
+                a.demo = Some(next);
+            }
         }
         // Each mode returns its frame plus its colour shifts (`cl.cshifts`, in
         // order): the software V_UpdatePalette shift tints the WHOLE screen, so it

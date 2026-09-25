@@ -3,8 +3,92 @@
 //! routes the keyboard to while the console is down. Submitted lines run
 //! through [`execute_console_command`].
 
+use std::collections::VecDeque;
+
 use crate::app::{ensure_app, APP};
 use crate::host_cmd::execute_console_command;
+
+/// `con_linewidth` for the 320-wide virtual screen the overlays draw in:
+/// `(vid.width >> 3) - 2`.
+const CON_LINEWIDTH: usize = (320 >> 3) - 2;
+/// `NUM_CON_TIMES` (console.c): the notify overlay shows the last 4 lines.
+const NUM_CON_TIMES: usize = 4;
+/// `con_notifytime` ("3"): seconds a notify line stays up.
+const CON_NOTIFYTIME: f32 = 3.0;
+
+/// The console text as the notify overlay sees it — `Con_Print` (console.c)
+/// laying printed text into `con_linewidth`-wide lines, word-wrapped, each
+/// line stamped with the time its first character arrived (`con_times`), and
+/// `Con_DrawNotify` showing the last [`NUM_CON_TIMES`] lines younger than
+/// `con_notifytime`. A line shows as soon as it starts (a print need not end
+/// in `\n`), blank lines included.
+#[derive(Default)]
+pub(crate) struct ConNotify {
+    /// The last console lines and their `con_times` stamps.
+    lines: VecDeque<(String, f32)>,
+    /// `con_x`: the column the next character goes to; 0 = a new line starts.
+    con_x: usize,
+    /// A `\r` was printed: the next character overwrites the current line.
+    cr: bool,
+}
+
+impl ConNotify {
+    /// `Con_Print(txt)` at clock `now`.
+    pub(crate) fn print(&mut self, txt: &str, now: f32) {
+        let b = txt.as_bytes();
+        for i in 0..b.len() {
+            let c = b[i];
+            // word wrap: the word starting here doesn't fit on this line.
+            let l = b[i..].iter().take(CON_LINEWIDTH).take_while(|&&ch| ch > b' ').count();
+            if l != CON_LINEWIDTH && self.con_x + l > CON_LINEWIDTH {
+                self.con_x = 0;
+            }
+            if self.cr {
+                self.lines.pop_back(); // con_current--
+                self.cr = false;
+            }
+            if self.con_x == 0 {
+                // Con_Linefeed, and "mark time for transparent overlay".
+                self.lines.push_back((String::new(), now));
+                while self.lines.len() > NUM_CON_TIMES {
+                    self.lines.pop_front();
+                }
+            }
+            match c {
+                b'\n' => self.con_x = 0,
+                b'\r' => {
+                    self.con_x = 0;
+                    self.cr = true;
+                }
+                _ => {
+                    if let Some((line, _)) = self.lines.back_mut() {
+                        line.push(c as char);
+                    }
+                    self.con_x += 1;
+                    if self.con_x >= CON_LINEWIDTH {
+                        self.con_x = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `Con_DrawNotify`'s lines at clock `now`, top to bottom: the last
+    /// [`NUM_CON_TIMES`] console lines, skipping any older than
+    /// `con_notifytime`.
+    pub(crate) fn visible(&self, now: f32) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter(|(_, t)| now - t <= CON_NOTIFYTIME)
+            .map(|(l, _)| l.as_str())
+            .collect()
+    }
+
+    /// `Con_ClearNotify` (a level load): nothing is shown until new text.
+    pub(crate) fn clear(&mut self) {
+        self.lines.clear();
+    }
+}
 
 // --- drop-down console: toggle / typing / execution exports (the `~` key) ---
 
@@ -78,6 +162,32 @@ pub extern "C" fn console_enter() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CENSUS L11: Con_Print lays text into 38-column console lines (word
+    /// wrapped, a line stamped when it starts) and Con_DrawNotify shows the
+    /// last 4 younger than con_notifytime — fragments join, blank lines count.
+    #[test]
+    fn notify_lines_follow_con_print() {
+        use super::ConNotify;
+        let mut n = ConNotify::default();
+        n.print("You receive ", 1.0);
+        n.print("25", 1.0);
+        assert_eq!(n.visible(1.0), ["You receive 25"], "a partial line already shows");
+        n.print(" health\n", 1.0);
+        assert_eq!(n.visible(1.0), ["You receive 25 health"]);
+        // 38 columns: the word that would cross the edge starts a new line.
+        n.print("aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd\n", 2.0);
+        assert_eq!(
+            n.visible(2.0),
+            ["You receive 25 health", "aaaaaaaaaa bbbbbbbbbb cccccccccc ", "dddddddddd"]
+        );
+        n.print("\n", 2.5); // a blank line takes a slot
+        n.print("last\n", 2.5);
+        assert_eq!(n.visible(2.5), ["aaaaaaaaaa bbbbbbbbbb cccccccccc ", "dddddddddd", "", "last"]);
+        assert_eq!(n.visible(5.2), ["", "last"], "con_notifytime 3 s from each line's start");
+        n.clear();
+        assert!(n.visible(5.2).is_empty());
+    }
 
     #[test]
     fn console_toggle_flips_visibility_and_gates_typing() {

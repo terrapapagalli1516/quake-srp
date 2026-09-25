@@ -10,12 +10,16 @@ use quake_rs::tent::BeamModel;
 
 use crate::app::DemoPlay;
 use crate::bench::{self, Phase};
-use crate::cl_tent::spawn_temp_entity;
+use crate::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use crate::host_cmd::IT_INVISIBILITY;
 use crate::snd_dma::{
     push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
 };
 use crate::vid::backtile_for;
+use crate::view::{
+    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
+};
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
 /// exactly ONCE: a frame rendered across several steps (small `dt`) must not
@@ -45,6 +49,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     let damage = frame.damage.clone();
     let prints = frame.prints.clone();
     let centerprints = frame.centerprints.clone();
+    let bonus = frame.stufftext.iter().any(|t| stufftext_bonus_flash(t));
     let view_entity_origin = frame.view_entity_origin;
     let view_angles = frame.view_angles;
     for b in &bursts {
@@ -101,62 +106,29 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     // svc_damage (V_ParseDamage, view.c): bump the damage cshift and compute
     // the directional view kick from the recorded attack origin.
     for dmg in &damage {
-        // count = blood*0.5 + armor*0.5, floored at 10; percent += 3*count,
-        // clamped 0..150.
-        let count = (dmg.blood as f32 * 0.5 + dmg.armor as f32 * 0.5).max(10.0);
-        d.damage_blend = (d.damage_blend + 3.0 * count).clamp(0.0, 150.0);
-        d.damage_color = if dmg.armor > dmg.blood {
-            [200, 100, 100] // armour absorbed most -> pinkish
-        } else if dmg.armor > 0 {
-            [220, 50, 50] // some armour -> orange-red
-        } else {
-            [255, 0, 0] // pure blood -> red
-        };
-        // from = normalize(from - ent->origin); AngleVectors(ent->angles) with
-        // the angles V_CalcRefdef maintains on the view entity: YAW =
-        // cl.viewangles[YAW], PITCH = -cl.viewangles[PITCH], ROLL untouched
-        // (~0 for the player).
-        let delta = [
-            dmg.from[0] - view_entity_origin[0],
-            dmg.from[1] - view_entity_origin[1],
-            dmg.from[2] - view_entity_origin[2],
-        ];
-        let (from_dir, _len) = quake_rs::math::normalize(delta);
-        let (forward, right, _up) =
-            quake_rs::math::angle_vectors([-view_angles[0], view_angles[1], 0.0]);
-        // v_kickroll 0.6 / v_kickpitch 0.6 / v_kicktime 0.5 (stock cvars).
-        d.v_dmg_roll = count * quake_rs::math::dot(from_dir, right) * V_KICKROLL;
-        d.v_dmg_pitch = count * quake_rs::math::dot(from_dir, forward) * V_KICKPITCH;
+        let pd = parse_damage(dmg.armor, dmg.blood, dmg.from, view_entity_origin, view_angles);
+        d.damage_blend = cshift_add(d.damage_blend, pd.percent);
+        d.damage_color = pd.color;
+        d.v_dmg_roll = pd.roll;
+        d.v_dmg_pitch = pd.pitch;
         d.v_dmg_time = V_KICKTIME;
+        d.faceanimtime = now + FACE_ANIM_TIME;
     }
-    // svc_print fragments accumulate Con_Print-style (a notify line breaks
-    // only on '\n' — pickups arrive as several fragments) with Quake's
-    // con_notifytime expiry on the demo's recorded clock; svc_centerprint
-    // replaces the current centered message (SCR_CenterPrint, ~2 s).
+    // svc_stufftext "bf" (V_BonusFlash_f): the gold pickup flash.
+    if bonus {
+        d.bonus_blend = BONUS_PERCENT;
+    }
+    // svc_print fragments go through Con_Print (pickups arrive as several
+    // fragments on one console line), timed on the demo's recorded clock;
+    // svc_centerprint replaces the current centered message (SCR_CenterPrint,
+    // ~2 s).
     for p in &prints {
-        d.notify_pending.push_str(p);
-    }
-    while let Some(nl) = d.notify_pending.find('\n') {
-        let line: String = d.notify_pending.drain(..=nl).collect();
-        let line = line.trim_end_matches(['\n', '\r']).to_string();
-        if !line.trim().is_empty() {
-            d.notify.push((line, now + 3.0));
-            while d.notify.len() > 4 {
-                d.notify.remove(0);
-            }
-        }
+        d.notify.print(p, now);
     }
     if let Some(text) = centerprints.into_iter().next_back() {
         d.centerprint = Some((text, now + 2.0));
     }
 }
-
-/// `v_kicktime` (view.c, default "0.5"): how long an svc_damage view kick lasts.
-const V_KICKTIME: f32 = 0.5;
-/// `v_kickroll` (view.c, default "0.6"): roll degrees per damage count*side.
-const V_KICKROLL: f32 = 0.6;
-/// `v_kickpitch` (view.c, default "0.6"): pitch degrees per damage count*side.
-const V_KICKPITCH: f32 = 0.6;
 
 pub(crate) fn step_demo(
     d: &mut DemoPlay,
@@ -183,13 +155,17 @@ pub(crate) fn step_demo(
         // notify + centerprint text, and the stair-smoothing accumulator (their
         // expiries live on the recorded clock, which just jumped back to t0).
         d.particles = ParticleSystem::new();
+        d.trail_org.clear();
         d.beams.clear();
         d.last_spawned_idx = usize::MAX;
         d.damage_blend = 0.0;
+        d.bonus_blend = 0.0;
+        d.faceanimtime = 0.0;
+        d.cl_items = 0;
+        d.item_gettime = [0.0; 32];
         d.v_dmg_time = 0.0;
         d.centerprint = None;
         d.notify.clear();
-        d.notify_pending.clear();
         d.oldz = f32::NAN;
     }
     // Advance to the frame matching the recorded server time. Stop at the last
@@ -206,15 +182,25 @@ pub(crate) fn step_demo(
     // guards against re-spawning while a frame lingers across several steps.
     spawn_demo_frame_effects(d, d.idx);
 
-    // Age the live particle pool one frame under the same gentle gravity the
-    // live walk uses (sv_gravity * 0.05 with the default sv_gravity = 800), then
-    // retire the expired ones. Guarded against a non-finite/negative dt.
-    if dt.is_finite() && dt > 0.0 {
-        let now = d.demo.frames[d.idx].time;
-        d.particles.advance(dt, now, 800.0 * 0.05);
-    }
-
     let f = &d.demo.frames[d.idx];
+
+    // CL_RelinkEntities' model-flag trails (R_RocketTrail from the entity's
+    // previous origin: rocket/lavaball fire, grenade smoke, gib blood, zombie
+    // gibs, wizard/knight/vore tracers), exactly as in live play. A relinked
+    // entity's first sighting (forcelink) starts at its own origin, so an
+    // entity absent from this frame is forgotten. Statics never trail.
+    // (EF_ROCKET's dlight is not drawn: demo playback has no dlights yet.)
+    d.trail_org.retain(|num, _| f.entities.iter().any(|e| e.num == *num));
+    for e in &f.entities {
+        if e.num < 0 {
+            continue;
+        }
+        let flags = d.models.get(e.modelindex).and_then(|m| m.as_ref()).map_or(0, |m| m.header.flags);
+        if let Some(ttype) = rocket_trail_type(flags) {
+            let oldorg = d.trail_org.insert(e.num, e.origin).unwrap_or(e.origin);
+            d.particles.spawn_rocket_trail(oldorg, e.origin, ttype, &mut d.tracercount, f.time, &mut d.prng);
+        }
+    }
 
     let mut owned: Vec<ModelInstance> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
@@ -233,7 +219,8 @@ pub(crate) fn step_demo(
                 // Demo entities carry their current animation frame from the net
                 // stream — use it so monsters in the demo are actually posed.
                 frame: e.frame.max(0) as usize,
-                skinnum: 0,
+                // R_AliasSetupSkin: `skinnum = currententity->skinnum`.
+                skinnum: e.skin,
             });
         } else if let Some(num) = d
             .demo
@@ -294,6 +281,8 @@ pub(crate) fn step_demo(
     }
     // The recorded per-client state (svc_clientdata) drives V_CalcRefdef.
     let client = f.client;
+    // CL_ParseClientdata's item get-times on the recorded clock.
+    stamp_item_gettime(&mut d.cl_items, &mut d.item_gettime, client.items, f.time);
     let cam = if f.intermission != 0 {
         // V_CalcIntermissionRefdef (view.c): a recorded intermission renders
         // with the forced v_idlescale=1 idle sway (V_AddIdle, stock
@@ -387,8 +376,14 @@ pub(crate) fn step_demo(
     // stream) is passed as (world pos, palette index) so blood/puffs/explosions
     // draw into the scene sharing its z-buffer. Demos carry no dynamic lights
     // here (empty; a deferred LOW).
+    // R_DrawParticles' order, as in step_walk: retire (`die < cl.time`), draw,
+    // then move and ramp.
+    d.particles.retire(f.time);
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    if dt.is_finite() && dt > 0.0 {
+        d.particles.integrate(dt, f.time, 800.0 * 0.05);
+    }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
     // — the demo's torch flicker matches the recording exactly. A synthetic
@@ -512,12 +507,14 @@ pub(crate) fn step_demo(
             // The recorded server clock (cl.time) drives the weapon-flash
             // cycle + face animation, exactly what sbar.c reads.
             time: f.time,
+            item_gettime: Some(&d.item_gettime),
             monsters: f.stats.monsters,
             total_monsters: f.stats.total_monsters,
             secrets: f.stats.secrets,
             total_secrets: f.stats.total_secrets,
             level_name: &d.demo.level_name,
-            show_scores: false,
+            show_scores: d.show_scores,
+            face_pain: f.time <= d.faceanimtime,
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
@@ -531,28 +528,28 @@ pub(crate) fn step_demo(
             d.centerprint = None;
         }
     }
-    let ftime = f.time;
-    d.notify.retain(|(_, exp)| ftime < *exp);
     if !menu_up && f.intermission == 0 {
         if let Some(cc) = d.conchars.as_ref() {
             if let Some((text, _)) = &d.centerprint {
                 render::draw_centerprint(&mut img, cc, &d.palette, text);
             }
-            if !d.notify.is_empty() {
-                let lines: Vec<&str> = d.notify.iter().map(|(t, _)| t.as_str()).collect();
+            let lines = d.notify.visible(f.time);
+            if !lines.is_empty() {
                 render::draw_notify(&mut img, cc, &d.palette, &lines);
             }
         }
     }
 
-    // Screen blends (V_CalcBlend order: CONTENTS -> DAMAGE -> POWERUP), all
-    // from the RECORDED stream: the eye-contents tint, the svc_damage flash
-    // (faded dt*150 per frame like V_UpdatePalette), and the powerup tint from
-    // the recorded cl.items. DEFERRED to the dispatcher so it tints the whole
+    // Screen blends (V_CalcBlend order: CONTENTS -> DAMAGE -> BONUS ->
+    // POWERUP), all from the RECORDED stream: the eye-contents tint, the
+    // svc_damage flash (faded dt*150 per frame like V_UpdatePalette), the
+    // stuffed "bf" gold flash (dt*100), and the powerup tint from the
+    // recorded cl.items. DEFERRED to the dispatcher so it tints the whole
     // composited frame (HUD + menu + console), like the live walk.
     {
         let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-        d.damage_blend = (d.damage_blend - sdt * 150.0).max(0.0);
+        d.damage_blend = cshift_drop(d.damage_blend, sdt, DAMAGE_FADE);
+        d.bonus_blend = cshift_drop(d.bonus_blend, sdt, BONUS_FADE);
     }
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
@@ -560,6 +557,9 @@ pub(crate) fn step_demo(
     }
     if d.damage_blend > 0.0 {
         shifts.push((d.damage_color, d.damage_blend));
+    }
+    if d.bonus_blend > 0.0 {
+        shifts.push((BONUS_COLOR, d.bonus_blend));
     }
     if let Some(cs) = render::powerup_cshift(client.items) {
         shifts.push(cs);
@@ -575,7 +575,6 @@ mod tests {
     use quake_rs::mdl::Mdl;
     use quake_rs::particles::Lcg;
     use quake_rs::server::{SoundEvent, TempEntityEvent};
-    use quake_rs::tent::Beams;
 
     use crate::app::{build_demo, pak};
     use crate::snd_dma::{
@@ -584,6 +583,7 @@ mod tests {
     };
     use crate::test_util::*;
     use crate::vid::{DEFAULT_H, DEFAULT_W};
+    use crate::view::V_KICKPITCH;
 
     #[test]
     fn step_demo_shows_the_last_frame_before_looping() {
@@ -603,38 +603,8 @@ mod tests {
             // Three frames at t = 0, 1, 2.
             frames: vec![frame(0.0), frame(1.0), frame(2.0)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.prng = Lcg::new(1);
         let n = d.demo.frames.len();
 
         // Drive several 1.0s steps and record which frame index is RENDERED
@@ -705,38 +675,8 @@ mod tests {
             viewentity: 0,
             frames: vec![plain(0.0), effect_frame, plain(0.10)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.prng = Lcg::new(1);
 
         // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
         // explosion (1024) particles populate the pool; after one tick of aging
@@ -823,38 +763,11 @@ mod tests {
             static_sounds: Vec::new(),
             frames: vec![plain(0.0), bolt_frame, plain(0.10)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: vec![None, None, Some(bolt_mdl)],
-            sprites: vec![None, None, None],
-            colormap: None,
-            colors: vec![[200; 3]; 3],
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.models = vec![None, None, Some(bolt_mdl)];
+        d.sprites = vec![None, None, None];
+        d.colors = vec![[200; 3]; 3];
+        d.prng = Lcg::new(1);
 
         // Advance onto the bolt frame: the recorded beam lands in the store and
         // the render expands it (75 units => 3 pieces at 0/30/60 along +x).
@@ -998,38 +911,8 @@ mod tests {
             viewentity: 1,
             frames: vec![plain(0.0), sound_frame, plain(0.10)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[("sound/doors/x.wav", b"WAVE")]),
-            damage_blend: 0.0,
-            damage_color: [255, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[("sound/doors/x.wav", b"WAVE")]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.prng = Lcg::new(1);
 
         reset_queue(); // clears SND_QUEUE + marks audio ready
         let _ = step_demo(&mut d, 0.05, false, 160, 100);
@@ -1082,45 +965,16 @@ mod tests {
             // loop (a wrap re-spawns the damage frame's events).
             frames: vec![plain(0.0), dmg_frame, plain(0.10), plain(1.0), plain(2.0)],
         };
-        let mut d = DemoPlay {
-            bsp: render::demo_room(),
-            palette: [[0u8; 3]; 256],
-            demo,
-            models: Vec::new(),
-            sprites: Vec::new(),
-            colormap: None,
-            colors: Vec::new(),
-            elapsed: 0.0,
-            idx: 0,
-            particles: ParticleSystem::new(),
-            prng: Lcg::new(1),
-            last_spawned_idx: usize::MAX,
-            beams: Beams::new(),
-            beam_scratch: Vec::new(),
-            gfx_wad: None,
-            conchars: None,
-            pic_complete: None,
-            pic_inter: None,
-            pic_finale: None,
-            pak: build_test_pak(&[]),
-            damage_blend: 0.0,
-            damage_color: [0, 0, 0],
-            v_dmg_time: 0.0,
-            v_dmg_roll: 0.0,
-            v_dmg_pitch: 0.0,
-            oldz: f32::NAN,
-            centerprint: None,
-            notify: Vec::new(),
-            notify_pending: String::new(),
-            viewsize: render::VIEWSIZE_DEFAULT,
-        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.damage_color = [0, 0, 0];
+        d.prng = Lcg::new(1);
 
         let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
         assert_eq!(d.idx, 1, "advanced onto the damage frame");
         // count = max(10, blood*0.5) = 10 -> percent 30, faded by 0.05*150 =
-        // 7.5 within the same step (V_UpdatePalette) -> 22.5.
+        // 7.5 within the same step (V_UpdatePalette) -> 22 (the C's int).
         assert!(
-            (d.damage_blend - 22.5).abs() < 1e-3,
+            d.damage_blend == 22.0,
             "V_ParseDamage percent 3*count then dt*150 fade, got {}",
             d.damage_blend
         );
@@ -1147,6 +1001,99 @@ mod tests {
             let _ = step_demo(&mut d, 0.05, false, 160, 100);
         }
         assert_eq!(d.damage_blend, 0.0, "flash fully faded");
+    }
+
+    /// CENSUS F14: entity skins come from U_SKIN, else the baseline's skin
+    /// (CL_ParseUpdate); yellow armour is armor.mdl skin 1 — demo2 and demo3
+    /// show one (demo1's stays out of sight).
+    #[test]
+    fn demo_skins_come_from_the_stream() {
+        let pak = pak().expect("pak");
+        for name in ["demo2.dem", "demo3.dem"] {
+            let demo = parse_demo(&pak.read_file(name).unwrap().unwrap()).unwrap();
+            let armor = demo.model_precache.iter().position(|m| m == "progs/armor.mdl");
+            let armor = armor.unwrap_or_else(|| panic!("{name} precaches armor.mdl"));
+            let yellow = demo
+                .frames
+                .iter()
+                .flat_map(|f| &f.entities)
+                .any(|e| e.modelindex == armor && e.skin == 1);
+            assert!(yellow, "{name} draws yellow armour (armor.mdl skin 1)");
+        }
+    }
+
+    /// CENSUS F13: CL_RelinkEntities runs R_RocketTrail for model-flag trails in
+    /// playback exactly as live: a recorded missile (progs/missile.mdl,
+    /// EF_ROCKET) trails fire from its previous origin, one particle per 3
+    /// units; its first sighting draws none, and a static never trails.
+    #[test]
+    fn step_demo_rocket_trails_from_the_previous_origin() {
+        use quake_rs::demo::{Demo, DemoFrame, EntSnapshot};
+        let missile = pak()
+            .and_then(|p| p.read_file("progs/missile.mdl").ok().flatten())
+            .and_then(|b| Mdl::parse(&b).ok())
+            .expect("progs/missile.mdl parses");
+        assert_ne!(rocket_trail_type(missile.header.flags), None, "missile.mdl carries EF_ROCKET");
+        let ent = |num: i32, x: f32| EntSnapshot {
+            num,
+            modelindex: 2,
+            frame: 0,
+            skin: 0,
+            origin: [x, 0.0, 0.0],
+            angles: [0.0; 3],
+            effects: 0,
+        };
+        let frame = |t: f32, x: f32| DemoFrame {
+            time: t,
+            entities: vec![ent(7, x), ent(-1, 500.0)],
+            ..Default::default()
+        };
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into(), "progs/missile.mdl".into()],
+            sound_precache: Vec::new(),
+            viewentity: 0,
+            frames: vec![frame(0.0, 0.0), frame(0.05, 0.0), frame(0.10, 30.0), frame(1.0, 30.0)],
+        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        d.models = vec![None, None, Some(missile)];
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 1);
+        assert_eq!(d.particles.len(), 0, "first sighting: no trail");
+        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        assert_eq!(d.idx, 2);
+        assert_eq!(d.particles.len(), 10, "30 units of rocket trail, one per 3");
+        // Along x = 0..30 (type 0 jitters each particle by rand()%6 - 3), far
+        // from the static at x = 500.
+        assert!(d.particles.particles().iter().all(|p| p.origin[0] > -4.0 && p.origin[0] < 34.0));
+    }
+
+    /// CENSUS F6: a recorded `svc_stufftext "bf"` runs V_BonusFlash_f — the
+    /// gold cshift at 50%, dropped dt*100 per frame — and id's demo1 carries
+    /// such pickups.
+    #[test]
+    fn step_demo_stufftext_bf_flashes_gold() {
+        use quake_rs::demo::{Demo, DemoFrame};
+        let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
+        let bf = DemoFrame { time: 0.05, stufftext: vec!["bf\n".into()], ..Default::default() };
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            viewentity: 0,
+            frames: vec![plain(0.0), bf, plain(0.10), plain(1.0)],
+        };
+        let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+        let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
+        assert!((d.bonus_blend - (50.0 - 0.05 * 100.0)).abs() < 1e-3, "{}", d.bonus_blend);
+        assert_eq!(cshifts, vec![(crate::view::BONUS_COLOR, d.bonus_blend)], "the bonus cshift");
+
+        let pak = pak().expect("pak");
+        let real = parse_demo(&pak.read_file("demo1.dem").unwrap().unwrap()).unwrap();
+        let n = real.frames.iter().flat_map(|f| &f.stufftext).filter(|t| t.as_str() == "bf\n").count();
+        assert!(n > 0, "demo1 stuffs bf on its pickups");
     }
 
     /// The real boot demo draws the recorded status bar (sbar pixels differ

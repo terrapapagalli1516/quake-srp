@@ -295,8 +295,8 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
 /// the remaining network / client-routing builtins that have no world effect in
-/// this headless server (`stuffcmd`, `makestatic`, `lightstyle`, `changelevel`,
-/// `setspawnparms`, the print routers, `cvar_set`). (`sound` queues a
+/// this headless server (`makestatic`, `setspawnparms`). (`stuffcmd` queues
+/// its text via [`crate::builtins::pf_stuffcmd`]; `sound` queues a
 /// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
 /// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
 /// [`bi_particle`]; the `Write*` family (#52..#59) drives the temp-entity
@@ -518,7 +518,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 17, bi_checkclient); // checkclient (line-of-sight to the player)
     put(t, 19, bi_precache_sound); // precache_sound
     put(t, 20, bi_precache_model); // precache_model
-    put(t, 21, bi_noop); // stuffcmd
+    put(t, 21, crate::builtins::pf_stuffcmd); // stuffcmd -> svc_stufftext queue
     put(t, 22, bi_findradius); // findradius (chain of edicts within rad)
     put(t, 23, bi_bprint); // bprint -> on-screen notify line
     put(t, 24, bi_sprint); // sprint -> on-screen notify line

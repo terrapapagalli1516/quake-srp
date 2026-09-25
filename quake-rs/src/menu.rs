@@ -116,6 +116,11 @@ pub const BIND_STRAFE: usize = 10;
 pub const BIND_LOOKUP: usize = 11;
 pub const BIND_LOOKDOWN: usize = 12;
 pub const BIND_CENTERVIEW: usize = 13;
+/// `+mlook` / `+klook`: listed and bindable; mouse look is permanent under
+/// pointer lock here and keyboard look is not modelled, so holding them does
+/// nothing.
+pub const BIND_MLOOK: usize = 14;
+pub const BIND_KLOOK: usize = 15;
 pub const BIND_MOVEUP: usize = 16;
 pub const BIND_MOVEDOWN: usize = 17;
 /// Commands `default.cfg` binds that `M_Keys_Draw` doesn't list: they sit past
@@ -124,6 +129,13 @@ pub const BIND_MOVEDOWN: usize = 17;
 /// binding. `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
 pub const BIND_SIZEUP: usize = NUM_BINDNAMES;
 pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
+/// `bind TAB "+showscores"` (default.cfg): `sb_showscores` while held, so
+/// `Sbar_Draw` shows the scorebar and `Sbar_SoloScoreboard`.
+pub const BIND_SHOWSCORES: usize = NUM_BINDNAMES + 2;
+/// `bind 0 "impulse 0"` .. `bind 8 "impulse 8"` (default.cfg): the command
+/// `"impulse N"` is `BIND_IMPULSE_0 + N` for N in 0..=8 (`"impulse 10"` is the
+/// listed [`BIND_CHANGEWEAPON`] row).
+pub const BIND_IMPULSE_0: usize = NUM_BINDNAMES + 3;
 
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A
@@ -440,6 +452,15 @@ pub struct Menu {
     /// host keeps it current via [`Menu::set_game_active`]; while false the
     /// Save screen refuses to open.
     game_active: bool,
+    /// `sv.active`: a local server is running (the live walk, intermission
+    /// included). Host-set via [`Menu::set_server_active`]; New Game asks
+    /// first while it is.
+    server_active: bool,
+    /// SCR_ModalMessage("Are you sure you want to\nstart a new game?\n") is up
+    /// (`M_SinglePlayer_Key`'s New Game with `sv.active`): only Y (yes), N and
+    /// Escape (no) answer it; the menu is not drawn, only the faded screen and
+    /// the question.
+    new_game_confirm: bool,
 }
 
 impl Default for Menu {
@@ -474,6 +495,8 @@ impl Menu {
             sounds: Vec::new(),
             save_comments: Default::default(),
             game_active: false,
+            server_active: false,
+            new_game_confirm: false,
         }
     }
 
@@ -498,6 +521,17 @@ impl Menu {
     /// open while false.
     pub fn set_game_active(&mut self, active: bool) {
         self.game_active = active;
+    }
+
+    /// Tell the menu whether a local server runs (`sv.active`): New Game then
+    /// asks "Are you sure?" first (`M_SinglePlayer_Key`). Refreshed every frame.
+    pub fn set_server_active(&mut self, active: bool) {
+        self.server_active = active;
+    }
+
+    /// The New Game "Are you sure?" modal is up (see [`Menu::quit_yes`]).
+    pub fn new_game_confirm(&self) -> bool {
+        self.new_game_confirm
     }
 
     /// Set the 12 Load/Save slot comments (`M_ScanSaves`' `m_filenames`): the
@@ -581,6 +615,7 @@ impl Menu {
         self.help_page = 0;
         self.quit_prev = MenuScreen::Main;
         self.bind_grab = false;
+        self.new_game_confirm = false;
         self.sounds.clear();
     }
 
@@ -626,6 +661,9 @@ impl Menu {
     /// count. On the Help screen up/down also page (the C maps `K_UPARROW`/
     /// `K_DOWNARROW` to page +/-); see [`page`](Menu::page).
     pub fn move_cursor(&mut self, delta: i32) {
+        if self.new_game_confirm {
+            return; // SCR_ModalMessage waits for y / n / Escape only.
+        }
         if self.screen == MenuScreen::Help {
             // M_Help_Key: UP = next page (m_help_page++), DOWN = previous. The host
             // passes up = -1 / down = +1 (cursor convention), so negate to map up
@@ -676,6 +714,9 @@ impl Menu {
     /// * Quit > Enter == "Yes": close the menu ([`MenuAction::Closed`]).
     /// * Help: Enter is inert ([`MenuAction::None`]).
     pub fn select(&mut self) -> MenuAction {
+        if self.new_game_confirm {
+            return MenuAction::None; // SCR_ModalMessage ignores Enter.
+        }
         match self.screen {
             MenuScreen::Main => {
                 // M_Main_Key K_ENTER: m_entersound = true for every item.
@@ -716,9 +757,18 @@ impl Menu {
             }
             MenuScreen::SinglePlayer => match self.cursor {
                 0 => {
-                    // New Game: the C runs `map start`; we start the hub and
-                    // close. (M_SinglePlayer_Key latches m_entersound, but the
-                    // menu closes before M_Draw can fire it — silent.)
+                    // New Game: `if (sv.active) if (!SCR_ModalMessage("Are
+                    // you sure you want to\nstart a new game?\n")) break;` —
+                    // with a game running, ask first (quit_yes / cancel
+                    // answer). m_entersound is latched either way.
+                    if self.server_active {
+                        self.snd(MenuSound::Menu2);
+                        self.new_game_confirm = true;
+                        return MenuAction::None;
+                    }
+                    // The C runs `map start`; we start the hub and close.
+                    // (M_SinglePlayer_Key latches m_entersound, but the menu
+                    // closes before M_Draw can fire it — silent.)
                     self.close();
                     self.screen = MenuScreen::Main;
                     self.cursor = 0;
@@ -861,6 +911,12 @@ impl Menu {
         if !self.visible {
             return MenuAction::None;
         }
+        if self.new_game_confirm {
+            // SCR_ModalMessage returns false on Escape: New Game `break`s,
+            // leaving the Single Player menu up.
+            self.new_game_confirm = false;
+            return MenuAction::None;
+        }
         if self.bind_grab {
             // M_Keys_Key while defining a key: menu1; Escape just ends the grab.
             self.snd(MenuSound::Menu1);
@@ -931,6 +987,15 @@ impl Menu {
     /// A no-op off the Quit screen. Returns [`MenuAction::Closed`] when it quit,
     /// else [`MenuAction::None`].
     pub fn quit_yes(&mut self) -> MenuAction {
+        if self.new_game_confirm {
+            // "y" answers the New Game modal: key_dest = key_game, disconnect,
+            // `map start`.
+            self.new_game_confirm = false;
+            self.close();
+            self.screen = MenuScreen::Main;
+            self.cursor = 0;
+            return MenuAction::NewGame;
+        }
         if self.screen != MenuScreen::Quit {
             return MenuAction::None;
         }
@@ -943,6 +1008,10 @@ impl Menu {
     /// Answer the Quit prompt "No" (the literal `N` key) — back out, same as
     /// [`cancel`](Menu::cancel) on the Quit screen. A no-op off the Quit screen.
     pub fn quit_no(&mut self) -> MenuAction {
+        if self.new_game_confirm {
+            self.new_game_confirm = false; // "n": no new game
+            return MenuAction::None;
+        }
         if self.screen != MenuScreen::Quit {
             return MenuAction::None;
         }
@@ -1382,6 +1451,15 @@ pub fn draw_menu(
     // can't occur: this port's menu and console never share the screen.)
     fade_screen(image, palette);
 
+    // SCR_ModalMessage's screen (scr_drawdialog: Sbar, Draw_FadeScreen,
+    // SCR_DrawNotifyString) — the menu itself is not drawn.
+    if menu.new_game_confirm {
+        if let Some(cc) = conchars {
+            draw_notify_string(image, cc, NEW_GAME_CONFIRM, scale, ox, oy, palette);
+        }
+        return;
+    }
+
     // The animated cursor frame: (int)(host_time*10) % 6. Guard a non-finite /
     // negative clock so the index stays 0..6.
     let frame = if host_time.is_finite() && host_time > 0.0 {
@@ -1785,6 +1863,33 @@ fn draw_help_screen(
 /// we draw a faithful-enough centered prompt — a dark box plus a plain
 /// "Are you sure you want to quit? (Y/N)" using conchars — so it works without the
 /// box pics or the message table. A missing `conchars` still paints the box.
+/// `M_SinglePlayer_Key`'s New Game question (SCR_ModalMessage).
+const NEW_GAME_CONFIRM: &str = "Are you sure you want to\nstart a new game?\n";
+
+/// `SCR_DrawNotifyString` (screen.c): each line (up to 40 columns) centred,
+/// from `y = vid.height*0.35`, in plain (white) conchars.
+fn draw_notify_string(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    text: &str,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    let mut y = (MENU_VIRT_H * 0.35).floor();
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop(); // the loop stops at the terminating NUL after the last \n
+    }
+    for line in lines {
+        let line = &line[..line.len().min(40)];
+        let x = ((MENU_VIRT_W as i32 - line.len() as i32 * 8) / 2) as f32;
+        draw_string_scaled(image, conchars, x, y, line, scale, ox, oy, palette);
+        y += 8.0;
+    }
+}
+
 fn draw_quit_screen(
     image: &mut Image,
     conchars: Option<&crate::wad::Qpic>,
@@ -2839,6 +2944,37 @@ mod tests {
         assert_eq!(m.action_for_key(b'x'), None, "custom binds reset too");
     }
 
+    /// CENSUS L14: with a game running (`sv.active`), New Game asks
+    /// SCR_ModalMessage("Are you sure you want to\nstart a new game?\n"):
+    /// only y (yes), n or Escape (no) answer; no leaves the Single Player menu.
+    #[test]
+    fn new_game_asks_first_while_a_game_runs() {
+        let mut m = Menu::new();
+        m.open();
+        m.select(); // Main > Single Player
+        assert_eq!(m.screen(), MenuScreen::SinglePlayer);
+        m.set_server_active(true);
+        assert_eq!(m.select(), MenuAction::None, "asks instead of starting");
+        assert!(m.new_game_confirm());
+        assert_eq!(m.select(), MenuAction::None, "Enter doesn't answer");
+        m.move_cursor(1);
+        assert_eq!(m.cursor(), 0, "arrows don't move behind the modal");
+        assert_eq!(m.cancel(), MenuAction::None, "Escape = no");
+        assert!(!m.new_game_confirm() && m.visible);
+        assert_eq!(m.screen(), MenuScreen::SinglePlayer, "no: back on Single Player");
+        m.select();
+        assert_eq!(m.quit_no(), MenuAction::None, "n = no");
+        assert!(!m.new_game_confirm());
+        m.select();
+        assert_eq!(m.quit_yes(), MenuAction::NewGame, "y starts it");
+        assert!(!m.visible && !m.new_game_confirm());
+        // No game running (the attract loop): straight in, as before.
+        let mut m = Menu::new();
+        m.open();
+        m.select();
+        assert_eq!(m.select(), MenuAction::NewGame);
+    }
+
     /// The host's re-boot sites (boot / boot_demo / boot_attract / New Game /
     /// `map`) reset the menu with [`Menu::reset_nav`]: navigation goes back to
     /// boot state but EVERY user choice survives — WinQuake's `map start`
@@ -2867,13 +3003,13 @@ mod tests {
             m.adjust(1); // toggles flip regardless of direction (Always Run: on -> OFF)
         }
         // Rebind through the real grab path: Options > Customize controls,
-        // Enter on "jump / swim up" (one key bound — no unbind-first), 'j'.
+        // Enter on "change weapon" (one key bound, '/' — no unbind-first), 'j'.
         m.cursor = ROW_CONTROLS;
         m.select(); // -> Keys
-        m.cursor = BIND_JUMP;
+        m.cursor = BIND_CHANGEWEAPON;
         m.select(); // starts the grab
         m.bind_key(b'j');
-        assert_eq!(m.action_for_key(b'j'), Some(BIND_JUMP));
+        assert_eq!(m.action_for_key(b'j'), Some(BIND_CHANGEWEAPON));
         // Host-mirrored externals: slot comments + the Save gate.
         let mut comments: [String; MAX_SAVEGAMES] = Default::default();
         comments[3] = "e1m1 quick".to_string();
@@ -2900,7 +3036,7 @@ mod tests {
         assert!(m.invert_mouse(), "Invert Mouse survives");
         assert!(m.lookspring(), "Lookspring survives");
         assert!(m.lookstrafe(), "Lookstrafe survives");
-        assert_eq!(m.action_for_key(b'j'), Some(BIND_JUMP), "rebinds survive");
+        assert_eq!(m.action_for_key(b'j'), Some(BIND_CHANGEWEAPON), "rebinds survive");
         assert_eq!(m.action_for_key(K_SPACE), Some(BIND_JUMP), "seeded binds survive");
         assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD), "seeded binds survive");
         assert_eq!(m.save_comment(3), "e1m1 quick", "host-set slot comments survive");

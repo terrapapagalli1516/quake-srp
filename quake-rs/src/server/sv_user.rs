@@ -112,10 +112,8 @@ impl Server {
     /// * `v_angle = [pitch, yaw, 0]` (the look angles the netcode delivered);
     /// * `button0 = buttons & 1` (attack);
     /// * `button2 = (buttons & 2) >> 1` (jump);
-    /// * `impulse = cmd.impulse` (the C only overwrites on a non-zero impulse;
-    ///   with a single client and one cmd per frame, writing it unconditionally
-    ///   each frame and clearing it after post-think is equivalent and keeps the
-    ///   one-shot semantics).
+    /// * `impulse = cmd.impulse` only when non-zero, like the C; the QuakeC
+    ///   (ImpulseCommands) clears it once it has acted on it.
     pub(super) fn apply_usercmd_to_edict(&mut self, ent: i32, cmd: &UserCmd) {
         // v_angle before PreThink so weapon aim is correct (client_think later
         // re-derives it from the same cmd during the move).
@@ -126,7 +124,7 @@ impl Server {
         self.vm
             .ent_set_float(ent, "button2", ((cmd.buttons & 2) >> 1) as f32);
         // The C only assigns impulse when the byte is non-zero (a 0 impulse means
-        // "no command this frame"); a stale impulse is cleared after post-think.
+        // "no command this frame"); the QuakeC clears it when it runs it.
         if cmd.impulse != 0 {
             self.vm.ent_set_float(ent, "impulse", cmd.impulse as f32);
         }
@@ -808,10 +806,10 @@ mod tests {
     }
 
     #[test]
-    fn impulse_delivered_then_cleared() {
-        // An impulse on the usercmd must be visible on the player edict during the
-        // frame (so ImpulseCommands could act on it) and cleared back to 0 after
-        // PlayerPostThink, so it fires exactly once.
+    fn impulse_is_set_only_by_a_nonzero_cmd_and_kept_for_the_progs() {
+        // SV_ReadClientMove: `if (i) host_client->edict->v.impulse = i;` — the
+        // engine only ever SETS the impulse; the QuakeC's ImpulseCommands clears
+        // it once it runs (this synthetic progs has none, so it stays).
         let (img, sound_fn) = attack_progs();
         let progs = Progs::parse(&img).expect("parse");
         let mut server = Server::new(floor_bsp(), progs).expect("server");
@@ -829,28 +827,23 @@ mod tests {
             ..UserCmd::default()
         };
         server.client_frame(&cmd, 0.1).expect("frame");
+        assert_eq!(server.vm.ent_get_float(p, "impulse"), 7.0, "the engine does not clear it");
 
-        // After the frame the engine has cleared it (the C clears the one-shot).
-        assert_eq!(
-            server.vm.ent_get_float(p, "impulse"),
-            0.0,
-            "impulse cleared after PlayerPostThink"
-        );
-
-        // A subsequent frame with no impulse leaves it at 0 (no stale repeat).
+        // A frame with no impulse leaves it alone (a 0 byte means "none").
         let none = UserCmd::default();
         server.client_frame(&none, 0.1).expect("frame");
-        assert_eq!(
-            server.vm.ent_get_float(p, "impulse"),
-            0.0,
-            "impulse stays cleared with no new command"
-        );
+        assert_eq!(server.vm.ent_get_float(p, "impulse"), 7.0, "a 0 impulse does not overwrite");
+
+        // A new non-zero impulse replaces it.
+        let three = UserCmd { impulse: 3, ..UserCmd::default() };
+        server.client_frame(&three, 0.1).expect("frame");
+        assert_eq!(server.vm.ent_get_float(p, "impulse"), 3.0);
     }
 
-    /// Prove the impulse is actually *present on the edict* mid-frame, before the
-    /// post-think clear, by having PlayerPreThink copy `self.impulse` into a flag.
+    /// Prove the impulse is actually *present on the edict* mid-frame, by having
+    /// PlayerPreThink copy `self.impulse` into a flag.
     #[test]
-    fn impulse_visible_to_prethink_before_clear() {
+    fn impulse_visible_to_prethink() {
         use attack_ofs::*;
         let mut b = Builder::new();
         b.entityfields = 56;
@@ -950,11 +943,7 @@ mod tests {
             3.0,
             "impulse was on the edict before PreThink ran"
         );
-        // ...and it was cleared afterward.
-        assert_eq!(
-            server.vm.ent_get_float(p, "impulse"),
-            0.0,
-            "impulse cleared after the frame"
-        );
+        // ...and the engine left it there (only the QuakeC clears it).
+        assert_eq!(server.vm.ent_get_float(p, "impulse"), 3.0, "impulse kept after the frame");
     }
 }

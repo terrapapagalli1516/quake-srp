@@ -1014,15 +1014,9 @@ impl Server {
         self.vm.gset_float("time", start_time);
         self.run_sys("PlayerPostThink", ent, 0)?;
 
-        // The impulse is a one-shot: a usercmd carries it for a single frame.
-        // Stock QuakeC's ImpulseCommands() clears `self.impulse` after handling
-        // it; the engine likewise treats it as edge-triggered (SV_ReadClientMove
-        // only overwrites it when a fresh non-zero impulse arrives). Clear it
-        // here so a held impulse fires once even if the mod's QuakeC forgot to.
-        if !self.is_free(ent) {
-            self.vm.ent_set_float(ent, "impulse", 0.0);
-        }
-
+        // No engine clear of `impulse` (census F4): the C never clears it —
+        // QuakeC's ImpulseCommands does, once W_WeaponFrame gets past the
+        // weapon cooldown, so a switch pressed mid-cooldown waits for it.
         Ok(fired)
     }
 

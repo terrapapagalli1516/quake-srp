@@ -368,7 +368,10 @@ with sync_playwright() as p:
           abs(pg.evaluate("exp.mouse_sensitivity()") - sens_set) < 1e-5,
           f"{sens_set:.2f}")
     key("Enter")            # Single Player
-    key("Enter")            # New Game -> start.bsp, menu closes
+    key("Enter")            # New Game: a game runs, so SCR_ModalMessage asks
+    check("New Game in a running game asks first (menu stays)",
+          vis() == 1 and scr() == SP)
+    key("y")                # "Are you sure?" -> y: start.bsp, menu closes
     pg.wait_for_function("!exp.menu_visible()", timeout=15000)
     check("New Game keeps the Mouse speed cvar",
           abs(pg.evaluate("exp.mouse_sensitivity()") - sens_set) < 1e-5)
