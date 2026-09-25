@@ -45,10 +45,13 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      C D_DrawSpans8 (default), 16 = D_DrawSpans16's 16-pixel
 //                                      subdivision (the x86 asm default, d_subdiv16 1), 1 = exact
 //                                      per-pixel perspective (an attribution experiment, not id)
+//   oracle_bench n                     (a cvar) render each shot n more times first and report
+//                                      the warm ms/frame (renderer only)
 
 #include "quakedef.h"
 #include "r_local.h"
 #include "d_local.h"
+#include <time.h>
 
 extern cvar_t	r_drawviewmodel;
 extern cvar_t	scr_fov;
@@ -57,10 +60,11 @@ extern byte		oracle_palette[768];
 void __real_R_RenderView (void);
 
 #define MAX_ORACLE_SHOTS	64
+#define ORACLE_MAXPATH		1024	// MAX_OSPATH (128) truncates real scratch paths
 
 typedef struct
 {
-	char		path[MAX_OSPATH];
+	char		path[ORACLE_MAXPATH];
 	qboolean	has_view;
 	vec3_t		org, ang;
 	qboolean	has_time;
@@ -84,6 +88,12 @@ static vec3_t			natural_org, natural_ang;
 static qboolean			timedemo_seen;
 
 extern cvar_t	oracle_spans;
+
+// oracle_bench N: after a shot's (cold) render, render the same view N more
+// times and report the warm ms/frame -- renderer only, like quaketool's --bench.
+cvar_t		oracle_bench = {"oracle_bench", "0"};
+static double	bench_ms;
+static int		bench_frames;
 
 static void Oracle_View_f (void)
 {
@@ -149,7 +159,7 @@ static void Oracle_Shot_f (void)
 		return;
 	}
 	shots[numshots] = pending;
-	Q_strncpy (shots[numshots].path, Cmd_Argv (1), MAX_OSPATH-1);
+	Q_strncpy (shots[numshots].path, Cmd_Argv (1), ORACLE_MAXPATH-1);
 	numshots++;
 }
 
@@ -162,13 +172,14 @@ void Oracle_Init (void)
 	Cmd_AddCommand ("oracle_exit", Oracle_Exit_f);
 	Cmd_AddCommand ("oracle_shot", Oracle_Shot_f);
 	Cvar_RegisterVariable (&oracle_spans);
+	Cvar_RegisterVariable (&oracle_bench);
 }
 
 //=============================================================================
 
 static FILE *Oracle_Open (char *path, char *ext)
 {
-	char	name[MAX_OSPATH + 8];
+	char	name[ORACLE_MAXPATH + 8];
 	FILE	*f;
 
 	sprintf (name, "%s.%s", path, ext);
@@ -265,6 +276,8 @@ static void Oracle_Dump (oracle_shot_t *s, int stage)
 			x++;
 	fprintf (f, "  \"active_dlights\": %d,\n", x);
 	fprintf (f, "  \"entities\": %d,\n", n);
+	if (bench_frames)
+		fprintf (f, "  \"bench_frames\": %d,\n  \"bench_ms\": %.6f,\n", bench_frames, bench_ms);
 	fprintf (f, "  \"viewmodel\": {\"model\": \"%s\", \"frame\": %d, \"origin\": [%.9g, %.9g, %.9g], \"angles\": [%.9g, %.9g, %.9g]},\n",
 		Oracle_ModelName (&cl.viewent), cl.viewent.frame,
 		cl.viewent.origin[0], cl.viewent.origin[1], cl.viewent.origin[2],
@@ -282,6 +295,33 @@ static void Oracle_MaybeExit (void)
 {
 	if (exit_when_done && numshots && curshot == numshots && !full_pending)
 		Sys_Quit ();
+}
+
+static double Oracle_WallTime (void)
+{
+	struct timespec	ts;
+
+	clock_gettime (CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+// R_StoreEfrags appends the static entities to cl_visedicts on every
+// R_RenderView, so each repeat starts from the list CL_RelinkEntities built.
+static void Oracle_Bench (int n)
+{
+	int		i, numvis;
+	double	t0;
+
+	numvis = cl_numvisedicts;
+	t0 = Oracle_WallTime ();
+	for (i=0 ; i<n ; i++)
+	{
+		cl_numvisedicts = numvis;
+		__real_R_RenderView ();
+	}
+	bench_ms = (Oracle_WallTime () - t0) * 1000.0 / n;
+	bench_frames = n;
+	Sys_Printf ("oracle: bench %d warm frames -> %.4f ms/frame (%.1f fps)\n", n, bench_ms, 1000.0 / bench_ms);
 }
 
 void __wrap_R_RenderView (void)
@@ -312,6 +352,10 @@ void __wrap_R_RenderView (void)
 
 	__real_R_RenderView ();
 	used_time = cl.time;
+
+	bench_frames = 0;
+	if (active && oracle_bench.value > 0)
+		Oracle_Bench ((int)oracle_bench.value);
 
 	if (active)
 	{

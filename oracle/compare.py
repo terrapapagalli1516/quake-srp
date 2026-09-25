@@ -8,8 +8,13 @@ and measure how far apart they are.
 
     uv run oracle/compare.py                         # e1m1 e1m2 e1m3 e1m7, world + ents, 320x200
     uv run oracle/compare.py --maps e1m1 --modes world --res 640x400
-    uv run oracle/compare.py --maps e1m3 --view 1100,-600,120,10,45,0 --time 3.2
+    uv run oracle/compare.py --maps e1m3 --view=-1200,-200,60,0,77,0 --time 3.2
     uv run oracle/compare.py --maps e1m1 --crop torch:120,90,40,30
+    uv run oracle/compare.py --modes world --bench 100            # + warm ms/frame, both renderers
+    uv run oracle/compare.py --spans 1 --c-cmd "d_mipscale 0"     # id's renderer minus two known classes
+    uv run oracle/compare.py --c-only --full --viewsize 100 --settle 10   # id's composited screen only
+
+(--view with a negative first number needs the `--view=` form.)
 
 Per case it writes, into --out (default: a fresh scratch dir it prints):
     <case>.c.ppm / .c.pgm / .c.json / .c.ents   id's frame (RGB, raw palette indices,
@@ -80,7 +85,9 @@ def read_pnm(path: Path) -> np.ndarray:
     return arr.reshape((h, w, 3) if ch == 3 else (h, w))
 
 
-def ensure_oracle() -> Path:
+def ensure_oracle(explicit: str | None = None) -> Path:
+    if explicit:
+        return Path(explicit).resolve()
     if not ORACLE_BIN.exists():
         print("building the C oracle (oracle/build.sh) ...", file=sys.stderr)
         subprocess.run([str(HERE / "build.sh")], check=True)
@@ -89,7 +96,7 @@ def ensure_oracle() -> Path:
 
 def ensure_quaketool(explicit: str | None) -> Path:
     if explicit:
-        return Path(explicit)
+        return Path(explicit).resolve()
     crate = PROJECT / "quake-rs"
     subprocess.run(
         ["cargo", "build", "--release", "--quiet", "--bin", "quaketool"], cwd=crate, check=True
@@ -114,6 +121,8 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
             "crosshair 0",
             f"oracle_settle {args.settle}",
             f"oracle_spans {args.spans}",
+            f"oracle_bench {args.bench}",
+            f"oracle_stage {1 if args.full else 0}",
         ] + args.c_cmd
         if args.view:
             cmds.append("oracle_view " + " ".join(repr(float(v)) for v in args.view))
@@ -121,7 +130,7 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
             cmds.append(f"oracle_time {args.time!r}")
         cmds += [f'oracle_shot "{out / case}.c"', f"map {mapname}"]
         (base / "id1" / "oracle.cfg").write_text("\n".join(cmds) + "\n")
-        cmd = [str(ensure_oracle()), "-basedir", str(base), "-width", str(w), "-height", str(h)]
+        cmd = [str(ensure_oracle(args.oracle)), "-basedir", str(base), "-width", str(w), "-height", str(h)]
         if args.aspect is not None:
             cmd += ["-oracle_aspect", str(args.aspect)]
         cmd += ["+exec", "oracle.cfg"]
@@ -147,6 +156,8 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
         cmd += ["--ents", str(out / f"{case}.c.ents")]
     if args.viewmodel and meta["viewmodel"]["model"]:
         cmd += ["--viewmodel", f'{meta["viewmodel"]["model"]}:{meta["viewmodel"]["frame"]}']
+    if args.bench:
+        cmd += ["--bench", str(args.bench)]
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if res.returncode != 0:
         sys.exit(f"quaketool view failed for {case}:\n{res.stdout}{res.stderr}")
@@ -184,6 +195,7 @@ def stats(c_idx, c_rgb, p_rgb, pal) -> dict:
     n = c_idx.size
     hist = {f"{lo}-{hi}" if lo != hi else str(lo): int(((dmax >= lo) & (dmax <= hi)).sum()) for lo, hi in BUCKETS}
     return {
+        "exact": p_idx == c_idx,
         "pixels": n,
         "exact_pct": float((p_idx == c_idx).mean() * 100),
         "mean_abs_index_delta": float(np.abs(p_idx - c_idx.astype(np.int32)).mean()),
@@ -221,6 +233,8 @@ def main() -> None:
     ap.add_argument("--time", type=float, help="pin cl.time for the frame")
     ap.add_argument("--settle", type=int, default=0, help="frames after signon before the shot")
     ap.add_argument("--viewmodel", action="store_true", help="draw the weapon too (r_drawviewmodel 1)")
+    ap.add_argument("--bench", type=int, default=0,
+                    help="also time N warm re-renders of the view in both renderers")
     ap.add_argument("--viewsize", type=int, default=120, help="C scr_viewsize (120 = no status bar)")
     ap.add_argument("--spans", type=int, choices=(8, 16, 1), default=8,
                     help="C span routine: 8 = id's portable C D_DrawSpans8 (default), 16 = the asm's "
@@ -231,6 +245,12 @@ def main() -> None:
     ap.add_argument("--crop", action="append", default=[], help="name:x,y,w,h — zoomed crop per case")
     ap.add_argument("--pak", type=Path, default=DEFAULT_PAK)
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs")
+    ap.add_argument("--oracle", help="use this C oracle binary (default oracle/build/quake-oracle)")
+    ap.add_argument("--full", action="store_true",
+                    help="C: dump the composited screen at VID_Update (sbar, console, notify text too) instead "
+                         "of the 3-D view alone; give the console --settle 8+ frames to retract")
+    ap.add_argument("--c-only", action="store_true",
+                    help="only render id's frame (e.g. at --viewsize 100, which the port's view cannot draw)")
     ap.add_argument("--out", type=Path, help="output dir (default: a new temp dir)")
     args = ap.parse_args()
 
@@ -240,10 +260,11 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     out = out.resolve()
     pal = np.frombuffer(read_pak_file(args.pak, "gfx/palette.lmp")[:768], dtype=np.uint8).reshape(256, 3)
-    qt = ensure_quaketool(args.quaketool)
+    qt = None if args.c_only else ensure_quaketool(args.quaketool)
 
     w, h = args.res
     rows, summary = [], {}
+    world_frames = {}  # map -> (C indices, port RGB) of its world-only frame
     for mapname in args.maps.split(","):
         for mode in args.modes.split(","):
             if mode not in ("world", "ents"):
@@ -251,7 +272,13 @@ def main() -> None:
             case = f"{mapname}_{mode}_{w}x{h}"
             t0 = time.time()
             meta = run_c(args, case, mapname, mode == "ents", out)
-            run_port(args, qt, case, mapname, meta, mode == "ents", out)
+            if meta["viewleaf_contents"] == -2:  # CONTENTS_SOLID
+                print(f"warning: {case}: the eye is inside solid — both renderers draw garbage there", file=sys.stderr)
+            if args.c_only:
+                print(f"{case}: {out / case}.c.ppm  vrect {meta['vrect']}  t={meta['time']:.3f}  "
+                      f"eye {meta['vieworg']} {meta['viewangles']}")
+                continue
+            port_out = run_port(args, qt, case, mapname, meta, mode == "ents", out)
             c_idx = read_pnm(out / f"{case}.c.pgm")
             c_rgb = pal[c_idx]
             p_rgb = read_pnm(out / f"{case}.port.ppm")
@@ -259,6 +286,16 @@ def main() -> None:
                 sys.exit(f"{case}: size mismatch C {c_rgb.shape} vs port {p_rgb.shape}")
             st = stats(c_idx, c_rgb, p_rgb, pal)
             dmax = st.pop("dmax")
+            exact = st.pop("exact")
+            if mode == "world":
+                world_frames[mapname] = (c_idx, p_rgb)
+            elif mapname in world_frames:
+                # the pixels entities touch, in either renderer: where the ents frame
+                # differs from the same view's world-only frame
+                wc, wp = world_frames[mapname]
+                mask = (c_idx != wc) | (p_rgb != wp).any(axis=2)
+                st["entity_px"] = int(mask.sum())
+                st["entity_exact_pct"] = float(exact[mask].mean() * 100) if mask.any() else None
             side_by_side(c_rgb, p_rgb, dmax, 2).save(out / f"{case}.side.png")
             for spec in args.crop:
                 name, box = spec.split(":")
@@ -269,14 +306,33 @@ def main() -> None:
                 "map": mapname, "mode": mode, "res": f"{w}x{h}", "time": meta["time"],
                 "vieworg": meta["vieworg"], "viewangles": meta["viewangles"], "entities": meta["entities"],
             })
+            if args.bench:
+                st["c_ms"] = meta.get("bench_ms")
+                st["port_ms"] = next((float(l.split("->")[1].split()[0]) for l in port_out.splitlines()
+                                      if "warm frames ->" in l), None)
             summary[case] = st
             rows.append((case, st, time.time() - t0))
 
+    if not rows:
+        return
     print(f"{'case':<24} {'exact%':>7} {'|dIdx|':>7} {'|dRGB|':>7} {'nonpal%':>7}  ents  max-channel |dRGB| histogram (% of pixels)")
     for case, st, _ in rows:
         hist = " ".join(f"{k}:{v * 100 / st['pixels']:.1f}" for k, v in st["maxchan_hist"].items())
         print(f"{case:<24} {st['exact_pct']:7.2f} {st['mean_abs_index_delta']:7.2f} {st['mean_abs_rgb_delta']:7.2f} "
               f"{st['nonpalette_pct']:7.2f}  {st['entities']:4d}  {hist}")
+    ent_rows = [(c, st) for c, st, _ in rows if st.get("entity_px")]
+    if ent_rows:
+        print(f"\n{'entity pixels':<24} {'count':>7} {'exact%':>7}   (pixels an entity touches in either renderer)")
+        for case, st in ent_rows:
+            print(f"{case:<24} {st['entity_px']:7d} {st['entity_exact_pct']:7.2f}")
+    if args.bench:
+        print(f"\nwarm renderer cost, same view, {args.bench} frames each (C = id's portable C, 1 core, "
+              f"-O2 x87; timings are noisy: compare in one sitting)")
+        print(f"{'case':<24} {'C ms':>8} {'port ms':>8} {'port/C':>7}")
+        for case, st, _ in rows:
+            c_ms, p_ms = st.get("c_ms"), st.get("port_ms")
+            if c_ms and p_ms:
+                print(f"{case:<24} {c_ms:8.3f} {p_ms:8.3f} {p_ms / c_ms:7.2f}")
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"\nimages + summary.json in {out}")
 
