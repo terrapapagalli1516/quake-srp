@@ -24,6 +24,9 @@ phase gets a wasm/native ratio. Workloads (all at dt = 1/72):
   walk_e1m1  boot() + Esc: live server, scripted look-around + run (walkInput below)
   walk_e1m3  as walk_e1m1 after the console's `map e1m3` (the dense-sim map)
   fire_e1m1  walk_e1m1 with +attack held (muzzle-flash dynamic lights every shot)
+  quad_e1m1  walk_e1m1 after the console's `impulse 255` (id's QuadCheat): the
+             Quad's blue V_UpdatePalette cshift is on every frame (not in the
+             default set; `--workloads quad_e1m1`)
 
 Usage:
   uv run web/bench.py --build                 # build the bench wasm, run the default set
@@ -178,11 +181,16 @@ INIT_JS = r"""
     if (ph < 648) return [0, 2.5];
     return [0, 0];
   }
+  // The live-walk workloads: walk_<map>, fire_<map> (+attack held) and
+  // quad_<map> (the Quad's cshift on).
+  function isWalk(wl) {
+    return wl.startsWith('walk_') || wl.startsWith('fire_') || wl.startsWith('quad_');
+  }
   // Boot a workload (native twin: start() in bench.rs).
   function startWorkload(e, wl) {
     if (wl === 'attract') return e.boot_attract() === 1;
     if (wl === 'demo1') return e.boot_demo() === 1;
-    if (wl.startsWith('walk_') || wl.startsWith('fire_')) {
+    if (isWalk(wl)) {
       const map = wl.slice(5);
       if (e.boot() !== 1) return false;
       if (map !== 'e1m1') {
@@ -192,6 +200,12 @@ INIT_JS = r"""
         if (e.console_visible()) e.console_toggle();
       }
       if (e.menu_visible()) e.menu_cancel();
+      if (wl.startsWith('quad_')) {
+        e.console_toggle();
+        for (const ch of 'impulse 255') e.console_char(ch.charCodeAt(0));
+        e.console_enter();
+        if (e.console_visible()) e.console_toggle();
+      }
       return e.in_walk_mode() === 1 && !e.menu_visible();
     }
     return false;
@@ -232,7 +246,7 @@ INIT_JS = r"""
     let f = 0, last = -1;
     await new Promise(resolve => {
       function tick(ts) {
-        if (cfg.workload.startsWith('walk_') || cfg.workload.startsWith('fire_')) {
+        if (isWalk(cfg.workload)) {
           const [fwd, turn] = walkInput(f);
           e.set_move(fwd, 0); e.look(-turn, 0);
           e.set_attack(cfg.workload.startsWith('fire_') ? 1 : 0);

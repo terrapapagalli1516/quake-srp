@@ -203,7 +203,8 @@ surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds";
 ///
 /// `cargo test --release --features bench --lib -- --ignored --nocapture native_bench`
 /// Knobs (env): `QUAKE_BENCH_WORKLOADS` (comma list, default `demo1,walk_e1m1`),
-/// (`walk_<map>` / `fire_<map>` = the scripted live walk, `fire_` with +attack held),
+/// (`walk_<map>` / `fire_<map>` / `quad_<map>` = the scripted live walk, `fire_` with
+/// +attack held, `quad_` after `impulse 255` so the Quad's cshift is on),
 /// `QUAKE_BENCH_RES` (comma list of WxH, default `320x200,640x400,1280x800`),
 /// `QUAKE_BENCH_FRAMES` (default 600), `QUAKE_BENCH_WARMUP` (default 60).
 /// Prints one `BENCHJSON {...}` line per (workload, resolution) with per-frame
@@ -237,12 +238,17 @@ mod native {
         }
     }
 
+    /// The live-walk workloads (`isWalk` in `web/bench.py`).
+    fn is_walk(wl: &str) -> bool {
+        wl.starts_with("walk_") || wl.starts_with("fire_") || wl.starts_with("quad_")
+    }
+
     /// Boot `workload` exactly as `web/bench.py`'s `startWorkload` does.
     fn start(workload: &str) -> bool {
         match workload {
             "attract" => boot_attract() == 1,
             "demo1" => boot_demo() == 1,
-            w if w.starts_with("walk_") || w.starts_with("fire_") => {
+            w if is_walk(w) => {
                 let map = &w["walk_".len()..];
                 if boot() != 1 {
                     return false;
@@ -261,6 +267,17 @@ mod native {
                 // the game and input is not gated.
                 if menu_visible() != 0 {
                     menu_cancel();
+                }
+                if w.starts_with("quad_") {
+                    // id's QuadCheat (weapons.qc, impulse 255): IT_QUAD for 30 s.
+                    console_toggle();
+                    for ch in "impulse 255".chars() {
+                        console_char(ch as u32);
+                    }
+                    console_enter();
+                    if console_visible() != 0 {
+                        console_toggle();
+                    }
                 }
                 in_walk_mode() == 1 && menu_visible() == 0
             }
@@ -289,7 +306,7 @@ mod native {
                 bench_enable(1);
                 let mut cols: Vec<Vec<f64>> = vec![Vec::new(); names.len() + 1];
                 for f in 0..warmup + frames {
-                    if wl.starts_with("walk_") || wl.starts_with("fire_") {
+                    if is_walk(wl) {
                         let (fwd, turn) = walk_input(f);
                         set_move(fwd, 0.0);
                         look(-turn, 0.0);
