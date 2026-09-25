@@ -58,6 +58,7 @@ pub mod draw;
 pub mod screen;
 pub mod sbar;
 pub mod keys;
+pub mod menu;
 pub mod dlight;
 pub mod demo;
 pub mod snd;

@@ -4,7 +4,7 @@
 //! Source: `WinQuake/keys.h` / `keys.c` (`K_*`, `Key_KeynumToString`) and the
 //! binds of `default.cfg`.
 
-use crate::render::{
+use crate::menu::{
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
     BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_RIGHT,
     BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,

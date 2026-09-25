@@ -161,7 +161,7 @@ pub(crate) fn solid_conchars() -> Qpic {
 }
 
 /// A solid `w*h` Qpic filled with palette index `idx`.
-pub(super) fn solid_pic(w: i32, h: i32, idx: u8) -> crate::wad::Qpic {
+pub(crate) fn solid_pic(w: i32, h: i32, idx: u8) -> crate::wad::Qpic {
     crate::wad::Qpic {
         width: w,
         height: h,
