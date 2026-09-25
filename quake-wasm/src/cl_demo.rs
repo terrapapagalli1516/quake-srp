@@ -4,6 +4,7 @@
 //! cl_tent.c / view.c `V_ParseDamage`) and `step_demo`, the recorded-POV
 //! `V_CalcRefdef` + `SCR_UpdateScreen` for one frame.
 
+use quake_rs::client::{lap, Phase};
 use quake_rs::particles::ParticleSystem;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::tent::BeamModel;
@@ -14,7 +15,6 @@ use quake_rs::client::view::{
 use quake_rs::client::cl_tent::{rocket_trail_type, spawn_temp_entity};
 
 use crate::app::DemoPlay;
-use crate::bench::{self, Phase};
 use crate::host_cmd::IT_INVISIBILITY;
 use crate::snd_dma::{
     push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
@@ -427,7 +427,7 @@ pub(crate) fn step_demo(
     };
     // SCR_CalcRefdef: the same viewsize framing as live play (the C's demo IS
     // the client rendering a recorded stream).
-    bench::lap(Phase::Sim);
+    lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0);
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp: a submerged recorded POV renders into the warp
@@ -440,7 +440,7 @@ pub(crate) fn step_demo(
         vrect
     };
     let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &crate::vid::render_options(&rvrect, render_w, render_h));
-    bench::lap(Phase::Render3d);
+    lap(Phase::Render3d);
     // D_WarpScreen: stretched over the screen's view rectangle while it
     // wobbles — the warp applies to the 3-D view FIRST; the content tint joins
     // the deferred whole-screen blend below (V_UpdatePalette order).
@@ -448,7 +448,7 @@ pub(crate) fn step_demo(
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img =
         render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette);
-    bench::lap(Phase::Post3d);
+    lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
     // owning the screen (`key_dest == key_game` — i.e. no menu/console up).
@@ -570,7 +570,7 @@ pub(crate) fn step_demo(
     if let Some(cs) = render::powerup_cshift(client.items) {
         shifts.push(cs);
     }
-    bench::lap(Phase::Hud2d);
+    lap(Phase::Hud2d);
     (img, shifts)
 }
 

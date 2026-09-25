@@ -5,6 +5,7 @@
 //! entities), `CL_RelinkEntities` (cl_main.c), `V_CalcRefdef` (view.c) and
 //! `SCR_UpdateScreen`'s 3-D view, blends, status bar and overlays (screen.c).
 
+use quake_rs::client::{lap, Phase};
 use quake_rs::bsp::Bsp;
 use quake_rs::mdl::Mdl;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
@@ -20,7 +21,6 @@ use quake_rs::client::cl_input::{
 use quake_rs::client::cl_tent::{rocket_trail_type, spawn_temp_entity};
 
 use crate::app::{color_for_name, Walk};
-use crate::bench::{self, Phase};
 use crate::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
@@ -932,7 +932,7 @@ pub(crate) fn step_walk(
     // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
     // (the view sits ABOVE the status bar, projected about its own centre) and
     // how much status bar shows; an intermission is always full screen.
-    bench::lap(Phase::Sim);
+    lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission);
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp (r_waterwarp 1): with the eye's leaf in water,
@@ -947,7 +947,7 @@ pub(crate) fn step_walk(
     };
     let view =
         render::render_scene_ext_sprited(&w.bsp, &cam, rvrect.w, rvrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites, &crate::vid::render_options(&rvrect, render_w, render_h));
-    bench::lap(Phase::Render3d);
+    lap(Phase::Render3d);
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
     if dt.is_finite() && dt > 0.0 && !paused {
@@ -993,7 +993,7 @@ pub(crate) fn step_walk(
     // the GLQuake R_PolyBlend look). We DEFER the shifts: draw the HUD/messages on
     // the untinted frame and return them so the dispatcher applies them to the
     // fully composited frame (after the menu/console overlay too).
-    bench::lap(Phase::Post3d);
+    lap(Phase::Post3d);
 
     // 6. Status bar (HUD) overlay: blit the bottom bar with the player's live
     //    health/ammo/armour on top of the finished 3-D frame. Skipped silently
@@ -1113,7 +1113,7 @@ pub(crate) fn step_walk(
     // the App level now so it can overlay walk OR the attract demo); step_walk no
     // longer draws it. The deferred cshifts ride out with the frame so the
     // dispatcher tints the whole composited image (HUD + menu + console included).
-    bench::lap(Phase::Hud2d);
+    lap(Phase::Hud2d);
     (img, shifts)
 }
 

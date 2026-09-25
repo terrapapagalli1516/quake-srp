@@ -18,3 +18,45 @@ pub mod cl_input;
 pub mod cl_tent;
 pub mod host;
 pub mod view;
+
+use std::cell::Cell;
+
+// ---------------------------------------------------------------------------
+// Frame timers
+// ---------------------------------------------------------------------------
+
+/// A phase of the host frame, in execution order, for a platform's frame
+/// timers (quake-wasm's `--features bench` build, `web/bench.py`). The client
+/// frames lap `Sim`, `Render3d`, `Post3d` and `Hud2d`; the host laps the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Input = 0,
+    Sim,
+    Render3d,
+    Post3d,
+    Hud2d,
+    Menu,
+    Console,
+    Blend,
+    Pack,
+}
+
+thread_local! {
+    /// The frame timer [`lap`] calls, if a platform installed one.
+    static LAP_HOOK: Cell<Option<fn(Phase)>> = const { Cell::new(None) };
+}
+
+/// Install (or clear) the frame timer [`lap`] hands each phase boundary to.
+/// None is installed by default: the game never times itself.
+pub fn set_lap_hook(hook: Option<fn(Phase)>) {
+    LAP_HOOK.with(|c| c.set(hook));
+}
+
+/// A phase boundary: the time since the previous lap belongs to `phase`.
+/// Calls the installed timer ([`set_lap_hook`]); without one, a no-op.
+#[inline]
+pub fn lap(phase: Phase) {
+    if let Some(hook) = LAP_HOOK.with(Cell::get) {
+        hook(phase);
+    }
+}
