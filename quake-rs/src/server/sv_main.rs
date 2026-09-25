@@ -21,8 +21,8 @@ use super::msg::{reset_message_parsers, take_svc_events};
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
 use super::{
-    parm_global_name, Server, WorldModel, FL_CLIENT, MOVETYPE_NONE,
-    MOVETYPE_WALK, NUM_SPAWN_PARMS, SOLID_NOT, SOLID_SLIDEBOX,
+    parm_global_name, Server, WorldModel, FL_CLIENT, MOVETYPE_NONE, MOVETYPE_PUSH,
+    MOVETYPE_WALK, NUM_SPAWN_PARMS, SOLID_BSP, SOLID_NOT, SOLID_SLIDEBOX,
 };
 use crate::bsp::Bsp;
 use crate::math::angle_vectors;
@@ -140,14 +140,18 @@ impl Server {
     /// `model`, so the value survives the parse). `name` may be bare (`"e1m7"`)
     /// or a pak path (`"maps/e1m7.bsp"`); both derive the same pair.
     ///
-    /// DEVIATION: the C also set the world edict's `modelindex`/`solid`/
-    /// `movetype` here; this port's collision and physics special-case edict 0
-    /// everywhere instead, and the stock QuakeC never reads those world fields,
-    /// so they stay unset to keep the world edict out of the mover paths.
+    /// The world edict also gets the rest of SV_SpawnServer's setup:
+    /// `modelindex = 1`, `solid = SOLID_BSP`, `movetype = MOVETYPE_PUSH`. The
+    /// collision and pusher paths skip edict 0 as the C's do (it is never
+    /// linked; SV_PushMove starts at edict 1), and with `nextthink` 0 its
+    /// SV_Physics_Pusher pass moves nothing, as in id.
     pub fn set_map_name(&mut self, name: &str) {
         let bare = name.trim_start_matches("maps/").trim_end_matches(".bsp").to_string();
         let full = format!("maps/{bare}.bsp");
         self.vm.ent_set_string(0, "model", &full);
+        self.vm.ent_set_float(0, "modelindex", 1.0); // the world model
+        self.vm.ent_set_float(0, "solid", SOLID_BSP as f32);
+        self.vm.ent_set_float(0, "movetype", MOVETYPE_PUSH as f32);
         let s = self.vm.intern(&bare);
         self.vm.gset_int("mapname", s);
         // sv.name (strcpy(sv.name, server) in SV_SpawnServer): kept for the
@@ -371,6 +375,28 @@ mod tests {
     use super::*;
     use crate::server::testutil::*;
     use crate::server::UserCmd;
+
+    #[test]
+    fn set_map_name_sets_up_the_world_edict_like_sv_spawnserver() {
+        // CENSUS L18: SV_SpawnServer gives edict 0 model = the map,
+        // modelindex 1, SOLID_BSP, MOVETYPE_PUSH (id's oracle dump: worldspawn
+        // movetype 7, solid 4).
+        let (img, c100, org) = player_progs();
+        let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        prime_player_globals(&mut server, c100, org);
+        server.set_map_name("e1m1");
+        assert_eq!(server.vm.ent_get_string(0, "model"), "maps/e1m1.bsp");
+        assert_eq!(server.vm.ent_get_float(0, "modelindex"), 1.0);
+        assert_eq!(server.vm.ent_get_float(0, "solid"), SOLID_BSP as f32);
+        assert_eq!(server.vm.ent_get_float(0, "movetype"), MOVETYPE_PUSH as f32);
+        // Its SV_Physics_Pusher pass is inert, and a player still stands on it.
+        let p = server.connect_client().expect("connect");
+        for _ in 0..10 {
+            server.client_frame(&UserCmd::default(), 0.1).expect("frame");
+        }
+        assert_eq!(server.vm.ent_get_vector(0, "origin"), [0.0; 3]);
+        assert!(server.vm.ent_get_float(p, "flags") as i32 & super::super::FL_ONGROUND != 0);
+    }
 
     #[test]
     fn connect_client_spawns_player_and_walks_without_tunnelling() {
