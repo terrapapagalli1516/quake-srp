@@ -12,7 +12,7 @@ thread_local! {
 }
 
 /// Granular per-phase render profiler — phase wall-times (ns) plus face/triangle/
-/// pixel/cache counts for one [`render_scene_ext_sprited`] call. Populated only
+/// pixel/cache counts for one [`render_scene_ext_sprited`](super::render_scene_ext_sprited) call. Populated only
 /// while profiling is enabled via [`render_stats_begin`]; every counter site is
 /// gated on the `STATS_ON` flag, so a normal (game/wasm) render touches none of it.
 /// Use this to see WHERE a frame's time goes (which phase, overdraw, cache hit rate)
@@ -96,7 +96,7 @@ impl RenderStats {
 }
 
 /// Enable the render profiler and clear its counters. The NEXT
-/// [`render_scene_ext_sprited`] accumulates into [`RenderStats`]; read + disable
+/// [`render_scene_ext_sprited`](super::render_scene_ext_sprited) accumulates into [`RenderStats`]; read + disable
 /// with [`render_stats_end`]. Intended for the `quaketool` benchmark, not the game.
 pub fn render_stats_begin() {
     RENDER_STATS.with(|s| *s.borrow_mut() = RenderStats::ZERO);

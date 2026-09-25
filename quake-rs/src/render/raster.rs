@@ -59,7 +59,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
 /// Edge function: signed area (times two) of the triangle `(a, b, c)`. Positive
 /// when `c` is to the left of the directed edge `a -> b` in screen space.
 #[inline]
-pub(super) fn edge(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
+fn edge(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
     (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
 }
 
@@ -169,7 +169,7 @@ pub(super) enum SurfaceMode<'a> {
     /// Sky: project the per-pixel VIEW DIRECTION onto the scrolling sky dome
     /// (`D_Sky_uv_To_st`) rather than mapping wall `(s,t)`. Unlit. With `defer`
     /// (the world pass) the pixel only takes the depth and is recorded for
-    /// [`resolve_sky_spans`] under the face key; without, it is sampled exactly.
+    /// [`resolve_sky_spans`](super::sky::resolve_sky_spans) under the face key; without, it is sampled exactly.
     Sky { view: SkyView, defer: Option<(&'a std::cell::RefCell<SkySpans>, u32)> },
 }
 
@@ -375,7 +375,7 @@ pub(super) fn raster_triangle_tex(
 }
 
 /// Fast rasteriser for a wall whose lit+colormapped surface block is already baked
-/// (see [`face_surf_block`]) — Quake's `D_DrawSpans` over a cached surface. Same
+/// (see [`face_surf_block`](super::surf::face_surf_block)) — Quake's `D_DrawSpans` over a cached surface. Same
 /// perspective-correct projection, incremental-edge stepping, near-clip handling
 /// and z-test as [`raster_triangle_tex`], but the inner pixel is ONE block read
 /// (the texture, lightmap and colormap are already folded into the block) plus a

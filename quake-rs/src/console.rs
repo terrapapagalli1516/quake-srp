@@ -185,7 +185,7 @@ impl Console {
 ///     missing `conback` falls back to a dark fill rectangle so the panel is
 ///     always visible.
 ///  2. the last few scrollback lines, drawn bottom-up just above the input line,
-///     via [`draw_string`] in the conchars font.
+///     via [`draw_string`](crate::draw::draw_string) in the conchars font.
 ///  3. the input line as `"]" + input` plus the flashing cursor glyph
 ///     ([`console_cursor_glyph`]: cells 10/11 toggling at 4 Hz on `realtime`,
 ///     the C's unclamped wall clock).

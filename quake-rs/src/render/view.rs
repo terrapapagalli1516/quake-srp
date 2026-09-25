@@ -153,7 +153,7 @@ pub fn viewmodel_fudge(viewsize: f32) -> f32 {
 /// 0.4` — `forward` from the player entity's angles, which V_CalcRefdef has
 /// just set to the view's yaw and pitch (`ent->angles[PITCH] =
 /// -cl.viewangles[PITCH]`) — and up by the viewsize fudge
-/// ([`viewmodel_fudge`]). `gun_angles` are [`Viewmodel::angles`]; they differ
+/// ([`viewmodel_fudge`]). `gun_angles` are [`Viewmodel::angles`](super::alias::Viewmodel::angles); they differ
 /// from `cl.viewangles` only by a demo's damage-kick pitch (an accepted
 /// hundredth-of-a-unit gap). The epsilon is relative, so it is right whether or
 /// not the caller's camera carries it.

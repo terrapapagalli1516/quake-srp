@@ -77,7 +77,7 @@ pub fn conchars_pic(wad: &crate::wad::Wad2) -> Option<crate::wad::Qpic> {
 
 /// The virtual screen width/height the menu is authored against (Quake's fixed
 /// 320x200 layout). `M_DrawPic`/`M_DrawTransPic` center this in the real screen
-/// via `(vid.width - 320) >> 1`; here [`draw_menu`] scales/centers instead.
+/// via `(vid.width - 320) >> 1`; here [`draw_menu`](crate::menu::draw_menu) scales/centers instead.
 pub(crate) const MENU_VIRT_W: f32 = 320.0;
 pub(crate) const MENU_VIRT_H: f32 = 200.0;
 
@@ -86,7 +86,7 @@ pub(crate) const MENU_VIRT_H: f32 = 200.0;
 /// pixels (so the virtual canvas can be centered in a wider/taller frame).
 /// Index-255 texels are transparent; every write clips at the framebuffer edge.
 ///
-/// This is the top-left-anchored sibling of [`blit_qpic`] (which bottom-anchors
+/// This is the top-left-anchored sibling of `sbar::blit_qpic` (which bottom-anchors
 /// the HUD). At `scale = 1.0`, `ox = oy = 0` a virtual `(vx, vy)` lands at the
 /// framebuffer pixel `(vx, vy)` — the case the 320x200 wasm framebuffer uses, so
 /// the menu coordinates from menu.c are used directly with no transform.

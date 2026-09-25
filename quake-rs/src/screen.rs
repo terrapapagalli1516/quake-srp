@@ -65,7 +65,7 @@ pub struct Refdef {
 /// The one adaptation: this port draws the 2-D layer (status bar, menus) as the
 /// 320x200 virtual screen scaled by `vid_w/320`, so the status bar the view must
 /// clear (`lineadj`) is `sb_lines` scaled to framebuffer rows — exactly the
-/// rows [`draw_hud_into`] paints. At 320x200 every number is the C's.
+/// rows [`draw_hud_into`](crate::sbar::draw_hud_into) paints. At 320x200 every number is the C's.
 ///
 /// The arithmetic keeps the C's types: `size` is a `float`, the products are
 /// truncated to `int` (so e.g. 70% of 320 is `(int)(320 * 0.7f) = 224`, as an

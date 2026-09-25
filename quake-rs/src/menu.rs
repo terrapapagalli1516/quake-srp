@@ -132,7 +132,7 @@ pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
 /// which must be one of these so the list can mark the current mode; higher modes
 /// render the 3-D scene at the larger size (the menu + HUD auto-scale to whatever
 /// framebuffer they're drawn into). The Options "Screen size" row is id's
-/// `viewsize` (see [`calc_refdef`]), not the mode, exactly as in WinQuake.
+/// `viewsize` (see [`calc_refdef`](crate::screen::calc_refdef)), not the mode, exactly as in WinQuake.
 pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
     (320, 200),
     (480, 300),
@@ -159,7 +159,7 @@ const VOLUME_DEFAULT: f32 = 0.7;
 
 /// `v_gamma` (Brightness): 0.5..=1, step 0.05 (RIGHT brightens: the C does
 /// `v_gamma.value -= dir * 0.05`); slider r = (1 - v)/0.5. Default 1.0. LIVE:
-/// the host runs the presented frame through [`build_gamma_table`] (the C
+/// the host runs the presented frame through [`build_gamma_table`](crate::render::build_gamma_table) (the C
 /// applies `gammatable` at the hardware-palette boundary,
 /// `V_UpdatePalette` -> `VID_ShiftPalette`); 1.0 is a byte-exact identity.
 const GAMMA_MIN: f32 = 0.5;
@@ -385,7 +385,7 @@ pub struct Menu {
     /// ([`sync_resolution`](Menu::sync_resolution)); Enter on the Video list sets it.
     res_preset: usize,
     /// `viewsize` cvar (`scr_viewsize`), [`VIEWSIZE_MIN`]..=[`VIEWSIZE_MAX`]:
-    /// the host frames the 3-D view with it ([`calc_refdef`]).
+    /// the host frames the 3-D view with it ([`calc_refdef`](crate::screen::calc_refdef)).
     viewsize: f32,
     /// `sensitivity` cvar (Mouse Speed), [`SENS_MIN`]..=[`SENS_MAX`].
     sensitivity: f32,
@@ -393,7 +393,7 @@ pub struct Menu {
     /// it to a 0.0..=1.0 master gain.
     volume: f32,
     /// `v_gamma` cvar (Brightness), [`GAMMA_MIN`]..=[`GAMMA_MAX`]. LIVE: the
-    /// host runs the presented frame through [`build_gamma_table`] with this
+    /// host runs the presented frame through [`build_gamma_table`](crate::render::build_gamma_table) with this
     /// (a byte-exact identity at the default 1.0).
     gamma: f32,
     /// `bgmvolume` cvar (CD Music Volume), [`BGM_MIN`]..=[`BGM_MAX`]. Live cvar;
@@ -1063,7 +1063,7 @@ impl Menu {
     }
 
     /// The `viewsize` cvar (`scr_viewsize`, 30..=120, default 100): the host
-    /// sizes the 3-D view and the status bar from it via [`calc_refdef`].
+    /// sizes the 3-D view and the status bar from it via [`calc_refdef`](crate::screen::calc_refdef).
     pub fn viewsize(&self) -> f32 {
         self.viewsize
     }
@@ -1108,7 +1108,7 @@ impl Menu {
     }
 
     /// The `v_gamma` cvar (Brightness, 0.5..=1). The host runs the presented
-    /// frame through [`build_gamma_table`] with this (identity at 1.0).
+    /// frame through [`build_gamma_table`](crate::render::build_gamma_table) with this (identity at 1.0).
     pub fn gamma(&self) -> f32 {
         self.gamma
     }

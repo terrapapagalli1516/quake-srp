@@ -25,6 +25,18 @@
 //! Coordinate conventions (Quake world space): `+X` east, `+Y` north, `+Z` up.
 //! The camera looks down its own `+forward`; see [`render_bsp`] for the full
 //! view transform and projection.
+//!
+//! ## Layout
+//!
+//! This file keeps `r_main.c`'s share: [`Image`], [`Camera`], the flat
+//! [`render_bsp`] and the `render_scene*` entry points (`R_RenderView`). The rest
+//! follows id's files: `view` (view.c), `world` (r_bsp.c), `raster` (the
+//! triangle fillers), `light` (r_light.c, `R_BuildLightMap`), `surf` (r_surf.c,
+//! d_surf.c), `warp` (d_scan.c's turbulence), `sky` (r_sky.c, d_sky.c), `vis`
+//! (PVS, frustum, near clip), `alias` (r_alias.c, r_aclip.c), `polyse`
+//! (d_polyse.c), `sprite` (r_sprite.c), `part` (r_part.c), `stats` (the
+//! profiler). The 2-D layer is beside it: [`crate::draw`], [`crate::screen`],
+//! [`crate::sbar`], [`crate::menu`], [`crate::keys`], [`crate::console`].
 
 use crate::bsp::Bsp;
 use crate::math::{cross, dot, normalize, sub, Vec3};
@@ -52,6 +64,7 @@ mod stats;
 #[cfg(test)]
 pub(crate) mod fixtures;
 
+// The 2-D layer's names quake-wasm and quaketool reach as `render::X`.
 pub use crate::console::{draw_console, draw_notify, Console};
 pub use crate::draw::conchars_pic;
 pub use crate::menu::{
@@ -67,6 +80,7 @@ pub use crate::sbar::{
 pub use crate::screen::{
     calc_refdef, compose_view, draw_centerprint, ViewRect, SB_LINES_FULL, VIEWSIZE_DEFAULT,
 };
+// The renderer's public API (its files are private).
 pub use alias::{ModelInstance, Viewmodel};
 pub use light::{LIGHTSTYLES, NEUTRAL_LIGHTSTYLE_SCALES};
 pub use part::draw_particles;

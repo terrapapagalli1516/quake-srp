@@ -95,7 +95,7 @@ pub struct Hud<'a> {
     /// Force the scorebar + solo scoreboard (Tab "show scores"); the C also shows it
     /// whenever `cl.stats[STAT_HEALTH] <= 0`, which [`draw_hud_into`] handles directly.
     pub show_scores: bool,
-    /// `sb_lines` from [`calc_refdef`] (the viewsize): 48 draws the inventory
+    /// `sb_lines` from [`calc_refdef`](crate::screen::calc_refdef) (the viewsize): 48 draws the inventory
     /// strip and the status bar, 24 the status bar alone, 0 neither — though
     /// the death / Tab scoreboard still shows at 0, as in `Sbar_Draw`.
     pub sb_lines: i32,
@@ -507,7 +507,7 @@ fn draw_sbar_inventory(
 /// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
 /// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
 ///
-/// How much of it draws follows `hud.sb_lines` ([`calc_refdef`]): the inventory
+/// How much of it draws follows `hud.sb_lines` ([`calc_refdef`](crate::screen::calc_refdef)): the inventory
 /// strip only above 24 lines, the status strip only above 0 — but the death /
 /// Tab scoreboard (`scorebar`) regardless, exactly like `Sbar_Draw`.
 ///

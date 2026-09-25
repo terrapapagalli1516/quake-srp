@@ -73,8 +73,8 @@ const MAX_LIGHT_FACTOR: f32 = 4.0;
 pub const LIGHTSTYLES: usize = 64;
 
 /// A no-op light-style scale table: every style at the "normal" `1.0`. Passing
-/// this to [`render_scene_ext`] leaves lightmaps exactly as the static (style-0)
-/// renderer produced them, which is what [`render_scene`] does — so all prior
+/// this to [`render_scene_ext`](super::render_scene_ext) leaves lightmaps exactly as the static (style-0)
+/// renderer produced them, which is what [`render_scene`](super::render_scene) does — so all prior
 /// behaviour and tests are unchanged. The animated front-ends instead pass
 /// `server.lightstyle_scales(time)`.
 pub const NEUTRAL_LIGHTSTYLE_SCALES: [f32; LIGHTSTYLES] = [1.0; LIGHTSTYLES];
@@ -927,7 +927,7 @@ pub(super) fn any_dlight_reaches(
 /// The C resets stale masks with the `dlightframe != r_dlightframecount` check;
 /// zero-filling the scratch each frame is the equivalent here.
 ///
-/// FALLBACK: a `Bsp` with no node tree (synthetic fixtures like [`demo_room`])
+/// FALLBACK: a `Bsp` with no node tree (synthetic fixtures like [`demo_room`](super::demo_room))
 /// has nothing to recurse, so every face is marked with [`ALL_DLIGHT_BITS`] and
 /// the per-light distance test in [`add_dynamic_lights`] remains the only gate —
 /// the pre-gating behaviour. Real maps always carry a node tree.

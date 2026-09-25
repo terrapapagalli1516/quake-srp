@@ -23,8 +23,8 @@ use super::surf::{
 use super::vis::{clip_poly_near_into, compute_visible_faces, Frustum, VView};
 use super::warp::TurbTable;
 
-/// The textured world pass, factored out of [`render_bsp_textured`] so it can
-/// share an image + z-buffer with the alias-model pass (see [`render_scene`]).
+/// The textured world pass, factored out of [`render_bsp_textured`](super::render_bsp_textured) so it can
+/// share an image + z-buffer with the alias-model pass (see [`render_scene`](super::render_scene)).
 ///
 /// Rasterises every visible BSP face into `image`/`zbuf` exactly as the original
 /// `render_bsp_textured` body did: same camera basis, focal length, projection,
@@ -35,7 +35,7 @@ use super::warp::TurbTable;
 /// Before the per-face loop it computes the camera's PVS via
 /// [`compute_visible_faces`]: when the map has visibility data and the camera is
 /// in a real (non-solid) leaf, faces outside the potentially-visible set are
-/// skipped. Maps with no visibility lump (e.g. [`demo_room`]) get the full draw,
+/// skipped. Maps with no visibility lump (e.g. [`demo_room`](super::demo_room)) get the full draw,
 /// so existing behaviour is unchanged there.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_world_textured(
@@ -758,7 +758,7 @@ pub(super) fn draw_submodel(
 /// reference an inline submodel through their `model` field `"*N"`, where `N`
 /// indexes `bsp.models`. Submodel 0 is the worldspawn (drawn by
 /// [`draw_world_textured`]); `N >= 1` are the brush entities, drawn by
-/// [`draw_submodel`] at this `origin`. See [`render_scene_ext`].
+/// [`draw_submodel`] at this `origin`. See [`render_scene_ext`](super::render_scene_ext).
 pub struct BModelInstance {
     pub model_index: usize,
     pub origin: Vec3,
@@ -785,7 +785,7 @@ pub struct BModelInstance {
 /// the **world** bsp by index. An `ExternalBModel` borrows a *separate*, already
 /// parsed [`Bsp`] (so one cached parse can back many instances without cloning)
 /// and always renders that bsp's model-0 faces. It is drawn by [`draw_brush_bsp`]
-/// / [`render_scene_ext`], sharing the world z-buffer so the box occludes — and
+/// / [`render_scene_ext`](super::render_scene_ext), sharing the world z-buffer so the box occludes — and
 /// is occluded by — the world and every other model correctly.
 pub struct ExternalBModel<'a> {
     /// The parsed standalone brush BSP (its MODEL 0 is the visible box).

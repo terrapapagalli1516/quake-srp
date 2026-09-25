@@ -21,7 +21,7 @@ use super::polyse::PolyFramebuffer;
 ///
 /// Borrows the model so a single parsed `Mdl` (e.g. cached by name) can back
 /// many instances without cloning. Rendered by [`draw_alias_model`] /
-/// [`render_scene`] sharing the world's z-buffer, so models occlude — and are
+/// [`render_scene`](super::render_scene) sharing the world's z-buffer, so models occlude — and are
 /// occluded by — BSP geometry correctly.
 ///
 /// `frame` selects which pose to draw (see [`mdl_frame_verts`]); an out-of-range
@@ -34,7 +34,7 @@ use super::polyse::PolyFramebuffer;
 /// track per-entity skins.
 ///
 /// Group-frame (`ALIAS_GROUP`) and group-skin (`ALIAS_SKIN_GROUP`) animation is
-/// driven by the **scene `time`** passed to [`render_scene_ext`] (not a
+/// driven by the **scene `time`** passed to [`render_scene_ext`](super::render_scene_ext) (not a
 /// per-instance field), so existing callers animate for free as game time
 /// advances. `R_AliasSetupFrame` / `R_AliasSetupSkin` select the sub-frame /
 /// sub-skin whose interval window contains that time.
@@ -868,19 +868,19 @@ pub struct Viewmodel<'a> {
     pub frame: usize,
     /// Where V_CalcRefdef puts the gun (`view->origin`) relative to the
     /// camera (`r_refdef.vieworg`), in world units: see
-    /// [`viewmodel_origin_ofs`].
+    /// [`viewmodel_origin_ofs`](super::view::viewmodel_origin_ofs).
     pub origin_ofs: Vec3,
     /// The gun's orientation, `cl.viewent.angles` as CalcGunAngle leaves
     /// them — pitch (+up, like [`Camera::pitch`]), yaw, roll: the view angles
     /// BEFORE `cl.punchangle` is added and without V_CalcViewRoll's roll (only
     /// `cl.viewangles[ROLL]`), so the weapon kick and the strafe lean move the
-    /// view but not the gun. See [`viewmodel_angles`].
+    /// view but not the gun. See [`viewmodel_angles`](super::view::viewmodel_angles).
     pub angles: Vec3,
 }
 
 /// Draw the first-person weapon — `R_DrawViewModel` (r_main.c): `cl.viewent`
 /// posed at V_CalcRefdef's gun origin (the camera plus `origin_ofs`, see
-/// [`viewmodel_origin_ofs`]) facing along the view, lit by `R_LightPoint` at
+/// [`viewmodel_origin_ofs`](super::view::viewmodel_origin_ofs)) facing along the view, lit by `R_LightPoint` at
 /// that origin (at least 24) plus dynamic lights, and drawn by the same
 /// `R_AliasDrawModel` as any alias model — never bbox-tested, so every
 /// triangle takes the clipping path (the grip nearer than `ALIAS_Z_CLIP_PLANE`

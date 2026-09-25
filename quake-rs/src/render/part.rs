@@ -12,7 +12,7 @@ use super::{Camera, Image};
 /// `R_DrawParticles` (`d_*.c`).
 ///
 /// Each particle is `(world_pos, palette index)`. The projection matches every
-/// other pass in this module (and [`render_scene_ext`], whose buffer this shares):
+/// other pass in this module (and [`render_scene_ext`](super::render_scene_ext), whose buffer this shares):
 /// `rel = p - cam.pos`; the forward depth `vz = dot(rel, forward)` is the z-test
 /// key; a particle at or behind the near plane (`vz <= NEAR`) is skipped; the
 /// screen position is `sx = cx + focal*dot(rel,right)/vz`,

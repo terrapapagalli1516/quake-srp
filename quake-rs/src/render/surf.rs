@@ -15,7 +15,7 @@ use super::stats::stat;
 
 /// Reconstruct a face's world-space polygon into `out`. Returns false if any
 /// index is out of range (the caller then skips the face). Mirrors the
-/// surfedge/edge/vertex walk in [`render_bsp`].
+/// surfedge/edge/vertex walk in [`render_bsp`](super::render_bsp).
 pub(super) fn face_world_poly(bsp: &Bsp, face: &crate::bsp::DFace, out: &mut Vec<Vec3>) -> bool {
     out.clear();
     let numedges = face.numedges as i64;
