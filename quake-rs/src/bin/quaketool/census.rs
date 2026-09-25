@@ -373,18 +373,17 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
     install_wrappers(&mut server.vm);
     server.set_map_name(&path);
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
-    let player = server.connect_client().map_err(|e| e.to_string())?;
-    server.run_signon_frames();
-    let spawn_log: Vec<String> = LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
-
-    let mut run = Run::default();
-    drain(&mut server, pak, &mut run);
     // Every brush pusher (doors, plats, buttons, trains, secret doors, walls);
-    // not the world, which SV_SpawnServer also makes MOVETYPE_PUSH.
+    // not the world, which SV_SpawnServer also makes MOVETYPE_PUSH. Their
+    // baselines are taken before the player connects: PutClientInServer's
+    // force_retouch opens doors whose trigger field holds a monster during
+    // the signon frames (e1m8's *6), and a door already open at the baseline
+    // would read "never moved".
+    let mut pushers = BTreeMap::new();
     for e in 1..server.vm.num_edicts() {
         if live(&server, e) && server.vm.ent_get_float(e as i32, "movetype") as i32 == MOVETYPE_PUSH {
             let ei = e as i32;
-            run.pushers.insert(
+            pushers.insert(
                 ei,
                 (
                     server.vm.ent_get_string(ei, "classname"),
@@ -395,6 +394,13 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
             );
         }
     }
+    let player = server.connect_client().map_err(|e| e.to_string())?;
+    server.run_signon_frames();
+    let spawn_log: Vec<String> = LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
+
+    let mut run = Run { pushers, ..Run::default() };
+    track_pushers(&server, &mut run); // the signon frames' moves
+    drain(&mut server, pak, &mut run);
 
     let _ = writeln!(o, "\n=== {map} ===");
     let _ = writeln!(

@@ -1320,6 +1320,24 @@ test in the commit message.
   the shells box (e1m2) and an ammo box (e1m3) stand where the map put them,
   as in id's (its edict dump at t = 1.2: every item's nextthink 1.200, not yet
   dropped). The f32 sum 1.1f + 0.1f = 1.2f ran it a frame early.
+- ✅ **`sv_gravity` outlives the map; the gravity checks can fail** (LOW) —
+  `Server::new` reset the cvar to 800 before worldspawn ran, so the census
+  test's "the next map's worldspawn sets it back to 800" (e1m5 after e1m8,
+  `quake-wasm/src/census_tests.rs`) and the unit test's "a fresh server
+  starts at the default" held whatever worldspawn did. id's cvar outlives the
+  map (`SV_SpawnServer` never touches it; id1's worldspawn sets it on every
+  map). The reset is gone; the unit test (`sv_gravity_cvar_drives_add_gravity`)
+  now checks the next server keeps 100 until `cvar_set("sv_gravity", "800")`,
+  and the census test fails if that `cvar_set` is dropped (checked by breaking
+  it: 100 != 800). Savegame loads run worldspawn (`Host_Loadgame_f` ->
+  `SV_SpawnServer`), so an e1m8 save still loads at 100.
+- ✅ **Census: e1m8's `*6` reported "never moved"** (LOW, tooling) — the mover
+  baselines were taken after the signon frames, by which time
+  `PutClientInServer`'s `force_retouch` had opened the door (an ogre stands
+  in its trigger field, CENSUS F8). Baselines are now taken right after the
+  spawn, before the player connects: e1m8 "19 total, 17 moved, never moved:
+  func_wall#111(*16) func_wall#159(*27)", `*6` among the movers already
+  moving at the idle; no other line of the census changes.
 
 ## LOW (27)
 

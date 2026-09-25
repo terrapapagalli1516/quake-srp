@@ -1842,15 +1842,29 @@ mod tests {
     fn sv_gravity_cvar_drives_add_gravity() {
         // CENSUS F3: world.qc worldspawn does cvar_set("sv_gravity", "100") on
         // e1m8, and SV_AddGravity reads sv_gravity.value: one 0.1 s frame at
-        // 100 gives -10, not -80. A fresh server is back at the default 800.
+        // 100 gives -10, not -80.
         let (mut server, e) = toss_server();
+        assert_eq!(server.sv_gravity(), 800.0, "the cvar's default");
         super::super::host::set_sv_gravity(100.0);
         assert_eq!(server.sv_gravity(), 100.0);
         server.run_frame(0.1).expect("frame");
         let vz = server.vm.ent_get_vector(e, "velocity")[2];
         assert!((vz + 10.0).abs() < 1e-3, "sv_gravity 100: expected -10, got {vz}");
-        let (fresh, _) = toss_server();
-        assert_eq!(fresh.sv_gravity(), 800.0, "a fresh server starts at the default");
+        // The cvar outlives the map (SV_SpawnServer never touches it): the next
+        // server keeps 100 until its worldspawn sets it, as id1's does on
+        // every map (the census test that loads e1m5 after e1m8 relies on
+        // that cvar_set, not on a reset).
+        let (mut next, e2) = toss_server();
+        assert_eq!(next.sv_gravity(), 100.0, "a new map keeps the cvar");
+        let name = next.vm.intern("sv_gravity");
+        let val = next.vm.intern("800");
+        next.vm.argc = 2;
+        next.vm.set_gi(crate::progs::OFS_PARM0, name);
+        next.vm.set_gi(crate::progs::OFS_PARM1, val);
+        (next.vm.builtins[72])(&mut next.vm).expect("cvar_set"); // worldspawn's
+        next.run_frame(0.1).expect("frame");
+        let vz = next.vm.ent_get_vector(e2, "velocity")[2];
+        assert!((vz + 80.0).abs() < 1e-3, "cvar_set(\"sv_gravity\", \"800\"): expected -80, got {vz}");
     }
 
     // ------------------------------------------------------ water + toss
