@@ -207,8 +207,14 @@ with sync_playwright() as p:
         locked = False
     check("canvas click captures the mouse in walk mode", locked)
     if locked:
-        check("chip hides while locked",
-              pg.evaluate("!lockChip.classList.contains('show')"))
+        # The page syncs the chip in its pointerlockchange handler, which runs
+        # AFTER pointerLockElement is already visible to the waiter above.
+        try:
+            pg.wait_for_function("!lockChip.classList.contains('show')", timeout=2000)
+            chip_hidden = True
+        except Exception:
+            chip_hidden = False
+        check("chip hides while locked", chip_hidden)
         # ...and losing the lock WITHOUT the page asking (= the browser's
         # reserved Esc; simulated -- headless can't deliver a real lock-Esc)
         # opens the in-game menu.
