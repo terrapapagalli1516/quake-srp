@@ -30,6 +30,9 @@ use quake_rs::spr::{Frame as SFrame, Sprite};
 use quake_rs::vm::Vm;
 use quake_rs::wad::{self, Wad2};
 
+#[path = "quaketool/census.rs"]
+mod census;
+
 /// What a command produced: text to print, or raw bytes (for `cat`).
 enum Out {
     Text(String),
@@ -72,6 +75,8 @@ fn main() {
             cmd_simbench(&a[0], &a[1], a.get(2).and_then(|s| s.parse().ok()).unwrap_or(600))
         }),
         "changelevel" => need(rest, 2, cmd).and_then(|a| cmd_changelevel(&a[0], &a[1])),
+        "census-edicts" => need(rest, 3, cmd).and_then(|a| census::cmd_census_edicts(&a[0], &a[1], &a[2]).map(Out::Text)),
+        "census" => need(rest, 1, cmd).and_then(|a| census::cmd_census(&a[0], &a[1..]).map(Out::Text)),
         "sim" => need(rest, 2, cmd).and_then(|a| {
             cmd_sim(&a[0], &a[1], a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5))
         }),
@@ -135,7 +140,9 @@ fn usage() {
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
          \tquaketool playtest <pak> <map.bsp> [out.ppm]  spawn a player, walk forward, report state + render POV\n\
          \tquaketool simbench <pak> <map.bsp> [frames]  benchmark the game-logic tick (physics/VM/AI/collision), no rendering\n\
-         \tquaketool changelevel <pak> <map.bsp>  drive a player into the map's exit, swap to the next level, prove inventory carries\n"
+         \tquaketool changelevel <pak> <map.bsp>  drive a player into the map's exit, swap to the next level, prove inventory carries\n\
+         \tquaketool census <pak> [map ...]  headless faithfulness playthrough (start, e1m1..e1m8 by default)\n\
+         \tquaketool census-edicts <pak> <map> <t1,t2,..>  dump live edicts at server times (oracle_edicts format)\n"
     );
 }
 

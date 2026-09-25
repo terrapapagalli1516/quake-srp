@@ -5030,6 +5030,10 @@ fn step_demo(
 }
 
 #[cfg(test)]
+#[path = "census_tests.rs"]
+mod census_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

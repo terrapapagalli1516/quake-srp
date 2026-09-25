@@ -163,8 +163,84 @@ static void Oracle_Shot_f (void)
 	numshots++;
 }
 
+// oracle_edicts path -- the census instrument: append every live server edict
+// (number, classname, model, origin, angles, frame, movetype, solid, flags,
+// health, nextthink, effects, targetname) to path, preceded by a "# t=" line
+// with sv.time. Lets a port run be diffed against id's own simulation.
+static void Oracle_Edicts_f (void)
+{
+	FILE	*f;
+	edict_t	*e;
+	int		i;
+
+	if (Cmd_Argc () != 2 || !sv.active)
+	{
+		Con_Printf ("oracle_edicts path (needs a running server)\n");
+		return;
+	}
+	f = fopen (Cmd_Argv (1), "a");
+	if (!f)
+	{
+		Con_Printf ("oracle_edicts: can't open %s\n", Cmd_Argv (1));
+		return;
+	}
+	fprintf (f, "# t=%.3f num_edicts=%d\n", sv.time, sv.num_edicts);
+	for (i=0 ; i<sv.num_edicts ; i++)
+	{
+		e = EDICT_NUM(i);
+		if (e->free)
+			continue;
+		fprintf (f, "%d\t%s\t%s\t%.3f %.3f %.3f\t%.3f %.3f %.3f\t%g\t%g\t%g\t%g\t%g\t%.3f\t%g\t%s\n", i,
+			pr_strings + e->v.classname, pr_strings + e->v.model,
+			e->v.origin[0], e->v.origin[1], e->v.origin[2],
+			e->v.angles[0], e->v.angles[1], e->v.angles[2],
+			e->v.frame, e->v.movetype, e->v.solid, e->v.flags, e->v.health,
+			e->v.nextthink, e->v.effects, pr_strings + e->v.targetname);
+	}
+	fclose (f);
+}
+
+// oracle_client path -- append the client-side state a census compares: cl.time,
+// the view angles, the four cshift percents (contents/damage/bonus/powerup) and
+// their colours, the punch angle, and the stats.
+static void Oracle_Client_f (void)
+{
+	FILE	*f;
+	int		i;
+
+	if (Cmd_Argc () != 2)
+	{
+		Con_Printf ("oracle_client path\n");
+		return;
+	}
+	f = fopen (Cmd_Argv (1), "a");
+	if (!f)
+		return;
+	fprintf (f, "t=%.3f viewangles=%.3f %.3f %.3f punch=%.3f %.3f %.3f idealpitch=%.3f onground=%d intermission=%d",
+		cl.time, cl.viewangles[0], cl.viewangles[1], cl.viewangles[2],
+		cl.punchangle[0], cl.punchangle[1], cl.punchangle[2], cl.idealpitch, cl.onground, cl.intermission);
+	for (i=0 ; i<NUM_CSHIFTS ; i++)
+		fprintf (f, " cshift%d=%d,%d,%d@%d", i, cl.cshifts[i].destcolor[0], cl.cshifts[i].destcolor[1],
+			cl.cshifts[i].destcolor[2], cl.cshifts[i].percent);
+	fprintf (f, " stats=");
+	for (i=0 ; i<16 ; i++)
+		fprintf (f, "%d,", cl.stats[i]);
+	fprintf (f, "\n");
+	fclose (f);
+}
+
+// oracle_quit -- Sys_Quit now (the stock `quit` opens the M_Menu_Quit confirm
+// unless the console is down, which a script run never has).
+static void Oracle_Quit_f (void)
+{
+	Sys_Quit ();
+}
+
 void Oracle_Init (void)
 {
+	Cmd_AddCommand ("oracle_quit", Oracle_Quit_f);
+	Cmd_AddCommand ("oracle_edicts", Oracle_Edicts_f);
+	Cmd_AddCommand ("oracle_client", Oracle_Client_f);
 	Cmd_AddCommand ("oracle_view", Oracle_View_f);
 	Cmd_AddCommand ("oracle_time", Oracle_Time_f);
 	Cmd_AddCommand ("oracle_stage", Oracle_Stage_f);
