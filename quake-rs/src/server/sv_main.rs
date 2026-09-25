@@ -74,9 +74,11 @@ impl Server {
     }
 
     /// Like [`new`], but threads a `pak` through to the [`WorldModel`] host so
-    /// external brush-model item boxes (`maps/b_*.bsp`) collide and take damage.
-    /// The interactive engines (wasm shell, quaketool) pass `Some(pak)`; the
-    /// test suite uses [`new`] (`None`) and keeps the prior zero-box behaviour.
+    /// `setmodel` gives every model file the box `Mod_LoadModel` gave it (the
+    /// `maps/b_*.bsp` item boxes collide and take damage; alias models ±16,
+    /// sprites ±half their size). The interactive engines (wasm shell,
+    /// quaketool) pass `Some(pak)`; the test suite uses [`new`] (`None`) and
+    /// keeps a zero box for them.
     pub fn with_pak(bsp: Bsp, progs: Progs, pak: Option<crate::pak::Pak>) -> Result<Server> {
         // Capture the entity text before the BSP moves into the host.
         let entities = bsp.entities.clone();

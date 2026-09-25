@@ -229,10 +229,10 @@ impl WorldModel {
         WorldModel::with_pak(bsp, None)
     }
 
-    /// Like [`new`], but with a pak so external brush-model (`b_*.bsp`) bounds
-    /// can be resolved for collision/damage. The interactive engines (wasm,
-    /// quaketool) pass `Some(pak)`; tests pass `None` and keep the zero-box
-    /// fallback.
+    /// Like [`new`], but with a pak so the model files' bounds (alias models,
+    /// sprites, the `b_*.bsp` boxes) can be resolved for `setmodel`. The
+    /// interactive engines (wasm, quaketool) pass `Some(pak)`; tests pass
+    /// `None` and keep the zero-box fallback.
     pub fn with_pak(bsp: Bsp, pak: Option<crate::pak::Pak>) -> WorldModel {
         let mut w = WorldModel {
             bsp,

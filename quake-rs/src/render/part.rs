@@ -35,12 +35,11 @@ use super::{Camera, Image};
 ///   320 wide a particle is `256/z` pixels, 1 to 4).
 /// - a `pix` wide, `pix << d_y_aspect_shift` tall block from `(u, v)` right
 ///   and down (`d_y_aspect_shift` = 1 only when `pixelAspect > 1.4`), each
-///   pixel written where `pz <= izi`, id's test on its z-buffer of
-///   `(int)(1/z * 0x8000)`, which writes `izi`. The port's buffer holds depth,
-///   so the stored `izi` is recomputed from it the same way, and a particle
-///   stores its own depth: its `izi` comes back exactly. Particles of a burst
-///   often share an `izi`; the later one in the list wins those ties, as in
-///   the C (a float depth test would let the nearer one win).
+///   pixel written where `pz <= izi` — `zbuf` is id's 16-bit `d_pzbuffer` as
+///   the edge renderer's `D_DrawZSpans` and the models left it, the short
+///   promoted to `int` for the compare — and `izi` stored, truncated to the
+///   short. Particles of a burst often share an `izi`; the later one in the
+///   list wins those ties, as in the C.
 ///
 /// Degenerate sizes and non-finite projections draw nothing.
 #[allow(clippy::too_many_arguments)]

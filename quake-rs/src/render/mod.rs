@@ -748,32 +748,29 @@ pub fn render_scene(
     )
 }
 
-/// Render the full scene: the brush submodels (`bmodels`) and external item
-/// boxes, then the textured world, then each alias model (`models`), and
-/// finally the optional first-person `viewmodel` — all sharing one z-buffer so
-/// every world/model piece occludes (and is occluded by) the others correctly.
-///
-/// Visibility does not depend on the order (the shared depth buffer resolves it
-/// per pixel); the brush entities go first so that they cut the world's
-/// 16-pixel spans as id's edge list does (see the pass order below). Passing an
-/// empty `bmodels`/`external` slice and `None` `viewmodel` reproduces
+/// Render the full scene as `R_RenderView` does: the world and every brush
+/// entity — the inline submodels (`bmodels`), then the external item boxes —
+/// through id's edge renderer (`edge.rs`: one edge list, each pixel of the view
+/// drawn once and its 16-bit 1/z written into `d_pzbuffer`), then the alias
+/// models (`models`) and the particles, each testing and writing that
+/// z-buffer, and last the optional first-person `viewmodel`. Passing an empty
+/// `bmodels`/`external` slice and `None` `viewmodel` reproduces
 /// [`render_scene`] exactly.
 ///
 /// ## External brush models (item boxes)
 /// `external` is the set of standalone `b_*.bsp` item boxes — Quake's
 /// `misc_explobox` and the ammo/health pickup boxes (see [`ExternalBModel`]).
-/// Each entry borrows its own parsed [`Bsp`] and is drawn (MODEL 0, translated to
-/// the item origin) by the same brush-face path as the world submodels, **after**
-/// the world and inline submodels but before the alias models, sharing the one
-/// z-buffer so the box occludes / is occluded correctly. These boxes are not
-/// dynamically lit in the original game, so they take the static (or fullbright)
-/// lightmap. An empty `external` slice draws nothing — byte-identical to the
-/// pre-external renderer, which is why every prior caller passes `&[]`.
+/// Each entry borrows its own parsed [`Bsp`] and joins the edge list after the
+/// inline submodels (MODEL 0 at the item's origin), cut along the world's
+/// leaves and sorted with it as `R_DrawBEntitiesOnList` does. They are
+/// instanced models, which id never marks for dynamic lights, so they take
+/// their static (or fullbright) lightmap. An empty `external` slice draws
+/// nothing.
 ///
 /// The `viewmodel`, when present, is drawn **last** (`R_DrawViewModel`,
 /// [`draw_viewmodel`]): Quake's `cl.viewent` at V_CalcRefdef's gun origin,
-/// drawn by the alias pipeline into the shared z-buffer with its 1/z tripled,
-/// so only a wall right against the eye can cover it.
+/// drawn by the alias pipeline into the z-buffer with its 1/z tripled, so
+/// only a wall right against the eye can cover it.
 ///
 /// `time` is `cl.time` in seconds: the liquid turb (`Turbulent8`'s 16.16
 /// `sintable`, built once per call and shared by the world and brush-submodel
@@ -781,23 +778,13 @@ pub fn render_scene(
 /// (`R_TextureAnimation`) and alias frame/skin groups all run on it.
 ///
 /// ## Particles
-/// `particles` is the live set of engine particles (Quake's `particle()`
-/// builtin effect: explosions, spawns, blood), each a `(world_pos, palette
-/// index)` pair. They are drawn **after** the world / submodels / alias models
-/// but **before** the camera-anchored viewmodel, sharing the same internal
-/// z-buffer — so a particle behind a wall is correctly hidden, while the gun
-/// still wins (its 1/z is tripled, as `R_AliasDrawModel` does). Passing an
-/// empty `particles` slice draws no particles and leaves the image identical to
-/// the pre-particle behaviour, which is why [`render_scene`] and every prior
-/// caller can pass `&[]`.
-///
-/// DESIGN NOTE: the particle slice is a trailing parameter on `render_scene_ext`
-/// (option (b) of the task) rather than a separate `draw_particles`-after-render
-/// entry point. `render_scene_ext` returns only the `Image`, not its z-buffer,
-/// so a standalone post-pass could not depth-test against the world; threading
-/// the slice through here lets the particles share the buffer that already
-/// exists. [`draw_particles`] is still exposed as a standalone `pub fn` for
-/// direct testing of the projection + z-test against a caller-owned buffer.
+/// `particles` is the frame's particle list (`R_DrawParticles`: explosions,
+/// spawns, blood), each a `(world_pos, palette index)` pair, drawn by
+/// `D_DrawParticle` against the same `d_pzbuffer` after the alias models and
+/// before the gun — so a particle behind a wall is hidden. (id draws them
+/// after the gun; with the gun's tripled 1/z the order only matters on exact
+/// ties.) An empty slice draws none. [`draw_particles`] is also public on its
+/// own, for tests of the projection and z test against a caller's buffer.
 ///
 /// ## Dynamic lights
 /// `dlights` is the live set of [`crate::dlight::DynamicLight`]s (explosions,

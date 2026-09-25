@@ -1472,7 +1472,8 @@ aside:
     cleared, image or z-buffer. The texel arithmetic of a span is the
     polygon walker's (the gradients at the span's first pixel), so a
     surface drawn over the same run gets the same texels.
-- ✅ **The entities test id's 16-bit `d_pzbuffer`** (`ZBuf::Izi`): alias
+- ✅ **The entities test id's 16-bit `d_pzbuffer`** (`render::ZBUF`, an
+  `[i16]` the world's spans fill; the entity passes take it as `zbuf`): alias
   models and the gun `D_PolysetDraw`'s `(lzi >> 16) >= *lpz`, particles
   `D_DrawParticle`'s `izi = (int)(zi * 0x8000)`, sprites the sprite spans'
   `izi >> 16` against `D_DrawZSpans`' values; the gun's tripled 1/z as before.
@@ -1806,6 +1807,17 @@ each; the C followed and the evidence are in the commit messages.
   build; the adds wrap as the C's `int`s (release output unchanged: release
   already wrapped), and the clamps keep the texel in the block
   (`a_span_at_zero_1_over_z_wraps_like_the_c_int`).
+- ✅ **Stale docs made true.** `draw_particles` said the port's buffer
+  "holds depth" and recomputed `izi` from it; it is id's 16-bit
+  `d_pzbuffer`, compared and stored as `D_DrawParticle` does.
+  `render_scene_ext`'s doc described the polygon walker's order (brush
+  entities first "to cut the world's spans", a depth buffer that makes the
+  order irrelevant, the external boxes drawn "after the world") and a
+  design note about a task option; it now describes `R_RenderView`'s
+  passes over the edge renderer. The edge section above named a `ZBuf::Izi`
+  type that does not exist (the buffer is `render::ZBUF`, `[i16]`). The
+  `with_pak` docs (server and world model) now say what the pak resolves
+  since the `setmodel` fix above.
 
 ## LOW (27)
 
