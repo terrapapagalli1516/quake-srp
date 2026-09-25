@@ -121,16 +121,19 @@ pub(crate) struct Walk {
     /// accelerated by it each second while drifting (V_DriftPitch).
     pub(crate) pitch_vel: f32,
     /// Full-screen damage-flash intensity (Quake's `CSHIFT_DAMAGE` percent,
-    /// 0..150): bumped when the player loses health/armour and faded each frame.
+    /// 0..150): bumped by each svc_damage (V_ParseDamage) and faded each frame.
     pub(crate) damage_blend: f32,
     /// The damage-flash tint colour (`V_ParseDamage` picks (200,100,100) when armour
     /// absorbs most, (220,50,50) for armour-only, (255,0,0) for pure blood).
     pub(crate) damage_color: [u8; 3],
-    /// Player health last frame (NaN until known / after a level change), used with
-    /// `last_armor` to split this frame's damage into blood vs armour for the flash.
-    pub(crate) last_health: f32,
-    /// Player armour last frame (NaN until known / after a level change).
-    pub(crate) last_armor: f32,
+    /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
+    /// view kick of the last svc_damage, decaying over `v_kicktime`.
+    pub(crate) v_dmg_time: f32,
+    pub(crate) v_dmg_roll: f32,
+    pub(crate) v_dmg_pitch: f32,
+    /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
+    /// like the HUD's `time`): the status bar shows the pain face until then.
+    pub(crate) faceanimtime: f32,
     /// Stair-step view smoothing accumulator (`view.c` V_CalcRefdef `oldz`): the eye
     /// Z lags the player Z by up to 12 units while climbing so stairs glide instead
     /// of jolting. NaN until the first frame establishes it.
@@ -285,6 +288,9 @@ pub(crate) struct DemoPlay {
     /// `sb_showscores` (`+showscores`, Tab held): Sbar_Draw shows the solo
     /// scoreboard during playback too. Refreshed by `step` like `viewsize`.
     pub(crate) show_scores: bool,
+    /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`): the status bar
+    /// shows the pain face until then.
+    pub(crate) faceanimtime: f32,
 }
 
 impl DemoPlay {
@@ -325,6 +331,7 @@ impl DemoPlay {
             notify_pending: String::new(),
             viewsize: render::VIEWSIZE_DEFAULT,
             show_scores: false,
+            faceanimtime: 0.0,
         }
     }
 }
@@ -632,8 +639,10 @@ pub(crate) fn assemble_walk(
         pitch_vel: 0.0,
         damage_blend: 0.0,
         damage_color: [255, 0, 0],
-        last_health: f32::NAN,
-        last_armor: f32::NAN,
+        v_dmg_time: 0.0,
+        v_dmg_roll: 0.0,
+        v_dmg_pitch: 0.0,
+        faceanimtime: 0.0,
         oldz: f32::NAN,
         centerprint: None,
         notify: Vec::new(),

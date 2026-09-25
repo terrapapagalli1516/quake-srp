@@ -95,6 +95,9 @@ pub struct Hud<'a> {
     /// Force the scorebar + solo scoreboard (Tab "show scores"); the C also shows it
     /// whenever `cl.stats[STAT_HEALTH] <= 0`, which [`draw_hud_into`] handles directly.
     pub show_scores: bool,
+    /// `cl.time <= cl.faceanimtime` (V_ParseDamage sets it 0.2 s ahead on every
+    /// hit): `Sbar_DrawFace` draws the pain face `face_p*` of the health bracket.
+    pub face_pain: bool,
     /// `sb_lines` from [`calc_refdef`](crate::screen::calc_refdef) (the viewsize): 48 draws the inventory
     /// strip and the status bar, 24 the status bar alone, 0 neither — though
     /// the death / Tab scoreboard still shows at 0, as in `Sbar_Draw`.
@@ -294,6 +297,8 @@ const SB_SIGIL_NAMES: [&str; 4] = ["sb_sigil1", "sb_sigil2", "sb_sigil3", "sb_si
 /// the lowest health (`face5`) and bracket 4 (`face1`) the highest, mirroring
 /// `Sbar_Init`'s `sb_faces[4]="face1" … sb_faces[0]="face5"`. Indexed `[bracket]`.
 const FACE_NAMES: [&str; 5] = ["face5", "face4", "face3", "face2", "face1"];
+/// `sb_faces[f][1]`: the pain faces (`face_p1` .. `face_p5`), same brackets.
+const FACE_PAIN_NAMES: [&str; 5] = ["face_p5", "face_p4", "face_p3", "face_p2", "face_p1"];
 
 /// `Sbar_DrawFace`'s powerup faces: invisibility+invulnerability, quad, invisibility,
 /// invulnerability — checked in that priority order before the health face.
@@ -584,8 +589,8 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 
     // Face (Sbar_DrawFace) at x=112, y=0. Powerup faces take priority in the C's
     // order: invisibility+invulnerability, then quad, then invisibility, then
-    // invulnerability; otherwise the health-bracket face (pain frame skipped — we
-    // don't track faceanimtime, so we use the static face[bracket][0]).
+    // invulnerability; otherwise the health-bracket face, `sb_faces[f][anim]`
+    // with anim 1 (the pain face) while `cl.time <= cl.faceanimtime`.
     let inv_iv = IT_INVISIBILITY | IT_INVULNERABILITY;
     if hud.items & inv_iv == inv_iv {
         blit_named(image, wad, FACE_INVIS_INVULN, 112.0, 0.0, scale, vy_top, pal);
@@ -596,7 +601,8 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     } else if hud.items & IT_INVULNERABILITY != 0 {
         blit_named(image, wad, FACE_INVULN, 112.0, 0.0, scale, vy_top, pal);
     } else {
-        let face = FACE_NAMES[face_bracket(hud.health)];
+        let names = if hud.face_pain { &FACE_PAIN_NAMES } else { &FACE_NAMES };
+        let face = names[face_bracket(hud.health)];
         blit_named(image, wad, face, 112.0, 0.0, scale, vy_top, pal);
     }
 
@@ -1050,6 +1056,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -1103,6 +1110,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -1149,6 +1157,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
         assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
@@ -1278,6 +1287,10 @@ mod tests {
         for name in ["face5", "face4", "face3", "face2", "face1", "face_inv2", "face_quad", "face_invis", "face_invul2"] {
             pics.push((name.to_string(), qpic_payload(24, 24, 70)));
         }
+        // Pain faces, index 71.
+        for name in FACE_PAIN_NAMES {
+            pics.push((name.to_string(), qpic_payload(24, 24, 71)));
+        }
         // Armour-type + ammo-type icons, index 80 / 85.
         for name in ARMOR_ICON_NAMES {
             pics.push((name.to_string(), qpic_payload(24, 24, 80)));
@@ -1370,6 +1383,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -1460,6 +1474,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            face_pain: false,
         };
         // All face pics share index 70 here, so we can't distinguish quad vs health
         // by colour — instead assert the call path doesn't panic and a face drew.
@@ -1469,6 +1484,44 @@ mod tests {
             .filter(|&(x, y)| img.rgb[y * 320 + x] == [70, 70, 70])
             .count();
         assert!(face_px > 0, "a powerup (quad) face drew at x=112");
+    }
+
+    #[test]
+    fn draw_hud_pain_face_while_face_anim_runs() {
+        // Sbar_DrawFace: `sb_faces[f][cl.time <= cl.faceanimtime]` — the pain
+        // face of the health bracket right after a hit.
+        let wad = build_full_hud_wad();
+        let pal = ramp_palette();
+        let face = |face_pain: bool| {
+            let mut img = Image::new(320, 200, [0u8, 0, 0]);
+            let hud = Hud {
+                wad: &wad,
+                palette: &pal,
+                health: 45,
+                ammo: 0,
+                armor: 0,
+                items: 0,
+                weapon: 0,
+                ammo_shells: 0,
+                ammo_nails: 0,
+                ammo_rockets: 0,
+                ammo_cells: 0,
+                time: 0.0,
+                monsters: 0,
+                total_monsters: 0,
+                secrets: 0,
+                total_secrets: 0,
+                level_name: "",
+                show_scores: false,
+                sb_lines: SB_LINES_FULL,
+                face_pain,
+            };
+            draw_hud_into(&mut img, &hud);
+            img.rgb[188 * 320 + 124]
+        };
+        assert_eq!(face(false), [70, 70, 70], "the steady face");
+        assert_eq!(face(true), [71, 71, 71], "the pain face");
+        assert_eq!(FACE_PAIN_NAMES[face_bracket(45)], "face_p3");
     }
 
     /// A gfx.wad with the three status-bar strips as solid colours: `sbar`
@@ -1526,6 +1579,7 @@ mod tests {
                 total_secrets: 0,
                 level_name: "",
                 show_scores: false,
+                face_pain: false,
                 sb_lines,
             };
             draw_hud_into(&mut img, &hud);

@@ -157,8 +157,8 @@ brush-model items are all done — every subsystem audited against id's C across
 ledger in `AUDIT.md`, all HIGHs closed). What remains:
 
 - **A documented divergence tail** — one narrow MEDIUM (maps with no lighting lump render Lambert where id
-  is fullbright; test maps only) and assorted cosmetic LOWs (the demo path's missing explosion dlight,
-  pain-frame face animation, live-play damage-kick roll). Tracked with plans in `AUDIT.md`.
+  is fullbright; test maps only) and assorted cosmetic LOWs (the demo path's missing explosion dlight).
+  Tracked with plans in `AUDIT.md`; the gameplay census's findings in `CENSUS.md`.
 - **Multiplayer & save/load** — out of scope for this single-player, headless-server port.
 
 ## Licensing

@@ -328,11 +328,11 @@ All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 - Demo explosion dlight. (~~Sound channel override only dedups within a
   frame~~ — ✅ closed in Session 6: cross-frame (entity,channel) override +
   S_StopSound in the page registry, live + demo.)
-- Minor sbar polish (pain-frame face anim); the Round-2 LOW list (sky
-  case-sensitivity, AngleVectors f64, lightstyle /264, etc. — all cosmetic).
-- Live-play damage-kick roll (the demo path replays it from recorded
-  svc_damage as of Session 6; live infers the flash from stat deltas and has
-  no `from` direction).
+- ~~Minor sbar polish (pain-frame face anim)~~ — ✅ census F16 below; the
+  Round-2 LOW list (sky case-sensitivity, AngleVectors f64, lightstyle /264,
+  etc. — all cosmetic).
+- ~~Live-play damage-kick roll~~ — ✅ census F16 below (live play reads
+  `dmg_take`/`dmg_save`/`dmg_inflictor` like SV_WriteClientdataToMessage).
 
 ## Session 5 — the ship push (2026-06-10)
 
@@ -572,6 +572,7 @@ and the commit messages.
 - ✅ **F10 runes on the status bar** (`SV_WriteClientdataToMessage`: `items | serverflags << 28`): the live HUD's `items` is `client_items(w)`, so `Sbar_DrawInventory`'s sigil cells light up.
 - ✅ **F11 Tab = `+showscores`** (default.cfg `bind TAB +showscores`, `Sbar_Draw`'s `sb_showscores`): `BIND_SHOWSCORES` in the bindings table (TAB by default), `KeyMove::showscores` feeds `Hud::show_scores` live and in demo playback; the page no longer opens the menu on Tab (Esc still does).
 - ✅ **F17 weapon keys by key number** (default.cfg `bind 1 "impulse 1"`..`bind 8`, `bind 0 "impulse 0"`; Key_Event works on key numbers): `"impulse N"` commands in the bindings table, bound to the digit row by default; the page sends digits through `quakeKey` (e.code `Digit*`), so Shift+digit and AZERTY select weapons; the `e.key` digit path is gone.
+- ✅ **F16 damage flash, kick and pain face in god mode / with the Pentagram** (QC `T_Damage` accumulates `dmg_take`/`dmg_save` before its god/invulnerable returns; `SV_WriteClientdataToMessage` sends svc_damage and zeroes them; `V_ParseDamage`): `step_walk` reads and zeroes the three fields after the server frame instead of inferring the hit from health/armour deltas (the megahealth-rot guard is moot); the live view now has V_CalcViewRoll's directional kick and `cl.faceanimtime`'s pain face (`Hud::face_pain`, `face_p*`), demo playback too. `V_ParseDamage` lives in quake-wasm `view.rs`, shared.
 
 ## LOW (27)
 

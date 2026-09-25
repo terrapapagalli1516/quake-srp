@@ -1007,6 +1007,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
                 show_scores: false,
                 // The tool frames the full view under the bar (no viewsize).
                 sb_lines: render::SB_LINES_FULL,
+                face_pain: false,
             };
             render::draw_hud_into(&mut img, &hud);
         }

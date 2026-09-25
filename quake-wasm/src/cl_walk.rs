@@ -20,6 +20,7 @@ use crate::input::{
 };
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
+use crate::view::{parse_damage, FACE_ANIM_TIME, V_KICKTIME};
 
 /// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
 /// (`((int)f*256/360) & 255`) then `MSG_ReadAngle` (`MSG_ReadChar() *
@@ -45,6 +46,46 @@ fn apply_fixangle(w: &mut Walk) {
     w.pitch = clamp_pitch(net_angle(a[0]));
     w.yaw = net_angle(a[1]);
     w.server.vm.ent_set_float(p, "fixangle", 0.0);
+}
+
+/// `SV_WriteClientdataToMessage`'s svc_damage (sv_main.c) read by the client's
+/// `V_ParseDamage` (view.c). QC `T_Damage` adds to the client's `dmg_take` /
+/// `dmg_save` (and sets `dmg_inflictor`) BEFORE its god-mode and Pentagram
+/// returns, so a hit that costs no health still flashes, kicks and shows the
+/// pain face. The server sends them whenever either is non-zero and zeroes
+/// them: `MSG_WriteByte` of each (float truncated, then a byte) and the
+/// inflictor's box centre through `MSG_WriteCoord` (1/8 unit). `ent_origin`
+/// is the view entity's origin as the client has it when the message is
+/// parsed — last frame's (clientdata precedes the entity updates).
+fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
+    let p = w.player;
+    let vm = &mut w.server.vm;
+    let take = vm.ent_get_float(p, "dmg_take");
+    let save = vm.ent_get_float(p, "dmg_save");
+    if take == 0.0 && save == 0.0 {
+        return;
+    }
+    let mut other = vm.ent_get_int(p, "dmg_inflictor");
+    if other < 0 || other as usize >= vm.num_edicts() {
+        other = 0;
+    }
+    let (o, mins, maxs) = (
+        vm.ent_get_vector(other, "origin"),
+        vm.ent_get_vector(other, "mins"),
+        vm.ent_get_vector(other, "maxs"),
+    );
+    let coord = |i: usize| ((o[i] + 0.5 * (mins[i] + maxs[i])) * 8.0) as i32 as i16 as f32 / 8.0;
+    let from = [coord(0), coord(1), coord(2)];
+    vm.ent_set_float(p, "dmg_take", 0.0);
+    vm.ent_set_float(p, "dmg_save", 0.0);
+    let byte = |f: f32| (f as i32) & 255;
+    let pd = parse_damage(byte(save), byte(take), from, ent_origin, [w.pitch, w.yaw, 0.0]);
+    w.damage_blend = (w.damage_blend + pd.percent).clamp(0.0, 150.0);
+    w.damage_color = pd.color;
+    w.v_dmg_roll = pd.roll;
+    w.v_dmg_pitch = pd.pitch;
+    w.v_dmg_time = V_KICKTIME;
+    w.faceanimtime = w.server.time() + FACE_ANIM_TIME;
 }
 
 /// `cl.items` as SV_WriteClientdataToMessage sends it: the player's `items`
@@ -181,8 +222,10 @@ pub(crate) fn step_walk(
         // paused it waits: the C's SV_ReadClientMove still stores it on the
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
+        let before = w.server.vm.ent_get_vector(w.player, "origin");
         let _ = w.server.client_frame(&cmd, dt);
         apply_fixangle(w);
+        parse_client_damage(w, before);
     }
 
     // 1a. MSG_ALL server commands (CL_ParseServerMessage, cl_parse.c): the QuakeC
@@ -602,18 +645,26 @@ pub(crate) fn step_walk(
         // Add the weapon-fire view kick (cl.punchangle, view.c:957); the engine's
         // drop_punch_angle already decays it back to zero each frame.
         let punch = w.server.vm.ent_get_vector(w.player, "punchangle");
-        // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity,
-        // plus the punchangle's roll component; the dead-view tilt (80°) overrides
-        // when the player is dead. (Damage-kick roll needs svc_damage, not wired.)
+        // View bank (V_CalcViewRoll, view.c:808): strafe lean from side-velocity
+        // plus the svc_damage kick (decaying over v_kicktime by host_frametime),
+        // plus the punchangle's roll component; the dead-view tilt (80°)
+        // overrides when the player is dead.
         let body_angles = w.server.vm.ent_get_vector(w.player, "angles");
         let mut roll = quake_rs::server::v_calc_roll(body_angles, vel) + punch[2];
+        let mut kick_pitch = 0.0;
+        if w.v_dmg_time > 0.0 {
+            roll += w.v_dmg_time / V_KICKTIME * w.v_dmg_roll;
+            kick_pitch = w.v_dmg_time / V_KICKTIME * w.v_dmg_pitch;
+            w.v_dmg_time -= if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        }
         if w.server.vm.ent_get_float(w.player, "health") <= 0.0 {
             roll = 80.0; // dead view angle (replaces, per V_CalcViewRoll)
         }
         Camera {
             pos: eye,
             yaw: ang[1] + punch[1],
-            pitch: -(ang[0] + punch[0]), // QuakeC pitch is +down; the renderer's is +up.
+            // QuakeC pitch is +down; the renderer's is +up.
+            pitch: -(ang[0] + kick_pitch + punch[0]),
             roll,
             fov_deg: 90.0,
         }
@@ -724,44 +775,14 @@ pub(crate) fn step_walk(
         render::render_scene_ext_sprited(&w.bsp, &cam, vrect.w, vrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites);
     bench::lap(Phase::Render3d);
 
-    // 5b. Screen blends (V_CalcBlend): fade the damage flash, bump it when the
-    //     player lost health/armour this frame, and tint the view when the eye is
-    //     under water / in lava or slime. The blend is DEFERRED (returned to the
-    //     dispatcher) and applied to the whole composited frame last, matching
-    //     software V_UpdatePalette's whole-screen palette shift (it tints the HUD,
-    //     menu and console too — not the GL 3D-viewport-only behaviour).
+    // 5b. Screen blends (V_CalcBlend): fade the damage flash (V_UpdatePalette
+    //     drops it after this frame's svc_damage was parsed) and tint the view
+    //     when the eye is under water / in lava or slime. The blend is DEFERRED
+    //     (returned to the dispatcher) and applied to the whole composited frame
+    //     last, matching software V_UpdatePalette's whole-screen palette shift
+    //     (it tints the HUD, menu and console too — not the GL 3D-viewport-only
+    //     behaviour).
     w.damage_blend = (w.damage_blend - dt * 150.0).max(0.0);
-    let health = w.server.vm.ent_get_float(w.player, "health");
-    let armorv = w.server.vm.ent_get_float(w.player, "armorvalue");
-    if w.last_health.is_finite() {
-        // V_ParseDamage (view.c:316-379): blood = health lost, armor = armour lost.
-        // count = (blood+armor)/2 with a min-10 floor, and the flash adds 3*count.
-        // (The C reads the server's dmg_take/dmg_save bytes; we infer them from the
-        // per-frame stat deltas, which equal blood/armor in single-player.)
-        let blood = (w.last_health - health).max(0.0);
-        let armor = (w.last_armor - armorv).max(0.0);
-        // Suppress the inferred flash during megahealth rot: above max_health the
-        // QuakeC ticks health down 1/sec, which is NOT damage and never flashes in
-        // id (the real CSHIFT_DAMAGE comes only from svc_damage / T_Damage). Gate on
-        // post-tick health still exceeding max_health so the rot can't masquerade as
-        // a hit. (A genuine hit while overhealed is rare and self-corrects next hit.)
-        let max_health = w.server.vm.ent_get_float(w.player, "max_health");
-        let is_rot = max_health > 0.0 && health > max_health;
-        if blood + armor > 0.0 && !is_rot {
-            let count = (0.5 * (blood + armor)).max(10.0);
-            w.damage_blend = (w.damage_blend + 3.0 * count).min(150.0);
-            // Tint: armour-dominant -> pinkish, armour-only -> orange-red, else red.
-            w.damage_color = if armor > blood {
-                [200, 100, 100]
-            } else if armor > 0.0 {
-                [220, 50, 50]
-            } else {
-                [255, 0, 0]
-            };
-        }
-    }
-    w.last_health = health;
-    w.last_armor = armorv;
     // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> POWERUP (top). (Bonus
     // pickup flash needs the QuakeC "bf" stuffcmd, not yet wired.)
     let eye_contents = quake_rs::world::point_contents(&w.bsp, eye);
@@ -887,6 +908,7 @@ pub(crate) fn step_walk(
             // `+showscores` held (Tab); the dead-player branch (health <= 0)
             // inside draw_hud_into handles the death scoreboard.
             show_scores: km.showscores,
+            face_pain: w.server.time() <= w.faceanimtime,
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
@@ -1172,6 +1194,50 @@ mod tests {
             }
             let _ = std::fs::write(format!("{dir}/{name}.ppm"), out);
         });
+    }
+
+    /// Run QC `T_Damage(targ, inflictor, attacker, damage)` on the live server.
+    fn qc_damage(w: &mut Walk, targ: i32, inflictor: i32, damage: f32) {
+        use quake_rs::progs::OFS_PARM0;
+        let f = w.server.vm.progs.find_function("T_Damage").expect("progs has T_Damage");
+        let vm = &mut w.server.vm;
+        vm.set_gi(OFS_PARM0, targ);
+        vm.set_gi(OFS_PARM0 + 3, inflictor);
+        vm.set_gi(OFS_PARM0 + 6, inflictor);
+        vm.set_gf(OFS_PARM0 + 9, damage);
+        vm.execute(f).expect("T_Damage runs");
+    }
+
+    /// CENSUS F16: QC T_Damage adds to `dmg_take`/`dmg_save` before its god-mode
+    /// return, and SV_WriteClientdataToMessage sends svc_damage whenever they
+    /// are non-zero — so a god-mode (or Pentagram) hit still flashes red, kicks
+    /// the view and shows the pain face; the fields are zeroed once sent.
+    #[test]
+    fn damage_in_god_mode_still_flashes_and_kicks() {
+        let mut w = build_walk().expect("e1m1 boots");
+        for _ in 0..3 {
+            step_walk(&mut w, 0.05, false, 320, 200);
+        }
+        let p = w.player;
+        let flags = w.server.vm.ent_get_float(p, "flags") as i32;
+        w.server.vm.ent_set_float(p, "flags", (flags | 64) as f32); // FL_GODMODE
+        // The inflictor: a spot 100 units straight ahead (yaw 0 -> +x).
+        w.yaw = 0.0;
+        w.pitch = 0.0;
+        let src = w.server.vm.spawn();
+        let o = w.server.vm.ent_get_vector(p, "origin");
+        w.server.vm.ent_set_vector(src, "origin", [o[0] + 100.0, o[1], o[2]]);
+        qc_damage(&mut w, p, src, 20.0);
+        assert_eq!(w.server.vm.ent_get_float(p, "health"), 100.0, "god mode: no health lost");
+        assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 20.0, "T_Damage counted the hit");
+        let (_, color, alpha) = step_walk(&mut w, 0.05, false, 320, 200);
+        assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 0.0, "sent and zeroed");
+        assert!(alpha > 0.0 && color == [255, 0, 0], "a red flash: {color:?} @ {alpha}");
+        // count = max(20*0.5, 10) = 10: percent 30, then one 0.05 s drop.
+        assert!((w.damage_blend - (30.0 - 0.05 * 150.0)).abs() < 1e-3, "{}", w.damage_blend);
+        assert!(w.v_dmg_pitch > 5.0, "hit from the front pitches the view: {}", w.v_dmg_pitch);
+        assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < crate::view::V_KICKTIME, "kick running");
+        assert!(w.server.time() <= w.faceanimtime, "the pain face shows");
     }
 
     /// CENSUS F1: svc_setangle carries MSG_WriteAngle's byte — whole degrees,

@@ -16,6 +16,7 @@ use crate::snd_dma::{
     push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
 };
 use crate::vid::backtile_for;
+use crate::view::{parse_damage, FACE_ANIM_TIME, V_KICKTIME};
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
 /// exactly ONCE: a frame rendered across several steps (small `dt`) must not
@@ -101,33 +102,13 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     // svc_damage (V_ParseDamage, view.c): bump the damage cshift and compute
     // the directional view kick from the recorded attack origin.
     for dmg in &damage {
-        // count = blood*0.5 + armor*0.5, floored at 10; percent += 3*count,
-        // clamped 0..150.
-        let count = (dmg.blood as f32 * 0.5 + dmg.armor as f32 * 0.5).max(10.0);
-        d.damage_blend = (d.damage_blend + 3.0 * count).clamp(0.0, 150.0);
-        d.damage_color = if dmg.armor > dmg.blood {
-            [200, 100, 100] // armour absorbed most -> pinkish
-        } else if dmg.armor > 0 {
-            [220, 50, 50] // some armour -> orange-red
-        } else {
-            [255, 0, 0] // pure blood -> red
-        };
-        // from = normalize(from - ent->origin); AngleVectors(ent->angles) with
-        // the angles V_CalcRefdef maintains on the view entity: YAW =
-        // cl.viewangles[YAW], PITCH = -cl.viewangles[PITCH], ROLL untouched
-        // (~0 for the player).
-        let delta = [
-            dmg.from[0] - view_entity_origin[0],
-            dmg.from[1] - view_entity_origin[1],
-            dmg.from[2] - view_entity_origin[2],
-        ];
-        let (from_dir, _len) = quake_rs::math::normalize(delta);
-        let (forward, right, _up) =
-            quake_rs::math::angle_vectors([-view_angles[0], view_angles[1], 0.0]);
-        // v_kickroll 0.6 / v_kickpitch 0.6 / v_kicktime 0.5 (stock cvars).
-        d.v_dmg_roll = count * quake_rs::math::dot(from_dir, right) * V_KICKROLL;
-        d.v_dmg_pitch = count * quake_rs::math::dot(from_dir, forward) * V_KICKPITCH;
+        let pd = parse_damage(dmg.armor, dmg.blood, dmg.from, view_entity_origin, view_angles);
+        d.damage_blend = (d.damage_blend + pd.percent).clamp(0.0, 150.0);
+        d.damage_color = pd.color;
+        d.v_dmg_roll = pd.roll;
+        d.v_dmg_pitch = pd.pitch;
         d.v_dmg_time = V_KICKTIME;
+        d.faceanimtime = now + FACE_ANIM_TIME;
     }
     // svc_print fragments accumulate Con_Print-style (a notify line breaks
     // only on '\n' — pickups arrive as several fragments) with Quake's
@@ -150,13 +131,6 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
         d.centerprint = Some((text, now + 2.0));
     }
 }
-
-/// `v_kicktime` (view.c, default "0.5"): how long an svc_damage view kick lasts.
-const V_KICKTIME: f32 = 0.5;
-/// `v_kickroll` (view.c, default "0.6"): roll degrees per damage count*side.
-const V_KICKROLL: f32 = 0.6;
-/// `v_kickpitch` (view.c, default "0.6"): pitch degrees per damage count*side.
-const V_KICKPITCH: f32 = 0.6;
 
 pub(crate) fn step_demo(
     d: &mut DemoPlay,
@@ -186,6 +160,7 @@ pub(crate) fn step_demo(
         d.beams.clear();
         d.last_spawned_idx = usize::MAX;
         d.damage_blend = 0.0;
+        d.faceanimtime = 0.0;
         d.v_dmg_time = 0.0;
         d.centerprint = None;
         d.notify.clear();
@@ -518,6 +493,7 @@ pub(crate) fn step_demo(
             total_secrets: f.stats.total_secrets,
             level_name: &d.demo.level_name,
             show_scores: d.show_scores,
+            face_pain: f.time <= d.faceanimtime,
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
@@ -588,6 +564,7 @@ mod tests {
     };
     use crate::test_util::*;
     use crate::vid::{DEFAULT_H, DEFAULT_W};
+    use crate::view::V_KICKPITCH;
 
     #[test]
     fn step_demo_shows_the_last_frame_before_looping() {

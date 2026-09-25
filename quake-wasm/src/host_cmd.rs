@@ -410,10 +410,10 @@ pub(crate) fn try_changelevel(w: &mut Walk, next_map: &str) {
     w.notify.clear();
     w.centerprint = None;
     w.clock = 0.0;
-    // Reset the screen-blend state so the level change does not flash red.
+    // CL_ClearState zeroes cl.cshifts and cl.faceanimtime (view.c's static
+    // v_dmg_* kick is not in `cl` and runs out on its own).
     w.damage_blend = 0.0;
-    w.last_health = f32::NAN;
-    w.last_armor = f32::NAN;
+    w.faceanimtime = 0.0;
     // Reset stair-step view smoothing so the new spawn doesn't glide from old Z.
     w.oldz = f32::NAN;
     // CL_ClearState: the new level starts OUT of intermission (cl.intermission=0)
@@ -487,8 +487,7 @@ pub(crate) fn try_restart(w: &mut Walk) {
     w.centerprint = None;
     w.clock = 0.0;
     w.damage_blend = 0.0;
-    w.last_health = f32::NAN;
-    w.last_armor = f32::NAN;
+    w.faceanimtime = 0.0;
     w.oldz = f32::NAN;
     // Same intermission/finale reset as a changelevel (CL_ClearState).
     w.intermission = 0;
