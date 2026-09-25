@@ -1,5 +1,12 @@
 # Faithfulness census — game and client (2026-09-25)
 
+**Status at `31775f5`:** all 18 HIGH and MED findings (F1–F18) are fixed, each by the
+commit named in its row. Of the 25 LOWs, 16 are fixed (L1 L2 L4–L9 L11 L14 L15 L18
+L20–L22 L24), two in part (L12: all but the F-keys and `t`; L25), and seven open (L3 L10
+L13 L16 L17 L19 L23), listed with the rest in `AUDIT.md`, "Open, as of 2026-09-25". The
+departures in "Rule departures on by default" below still wait for a decision. The text
+below is the census as written, with the fixes marked in its rows.
+
 A systematic sweep for bugs of the "Chthon has no electricity" kind: things a
 player of id's WinQuake would notice, found by method rather than by luck. This
 round finds and proves; it fixes nothing (fixes wait for the render.rs /
@@ -23,7 +30,7 @@ evidence; anything marked *hunch* has none beyond reading.
 | `oracle_edicts` / `oracle_client` / `oracle_quit` (added to `oracle/c/oracle.c`) + `census/oracle_run.py` | Runs **id's own WinQuake** headless through a console script (0.1 s per frame, `waits N` = N frames) and dumps its server edicts / client state. |
 | `quaketool census-edicts` + `census/edict_diff.py` | Dumps the port's edicts at the same `sv.time` in the same format and diffs them against id's (matched by classname+model, then nearest origin). Run for all nine maps at t = 1.7, 4.7, 10.7, 20.7, 40.7 s (player idle at the start). |
 | `census/qcsym.py` | Symbolic disassembler for `progs.dat` (the QC source is not on disk): resolves globals, immediates and call targets, and lists every call site of a builtin with its constant arguments — every `stuffcmd`, `sound`, `cvar`, `cvar_set`, `lightstyle`, `WriteByte` the id1 progs issue. |
-| `quake-wasm/src/census_tests.rs` (new) | Nine tests (twenty since) that assert id's behaviour through the live path (`build_walk_map` + `step_walk`) on the real pak, written `#[ignore]`d, each the acceptance test for its fix and un-ignored in the fixing commit; all now run in the normal suite (the file's module doc still describes them as ignored). |
+| `quake-wasm/src/census_tests.rs` (new) | Nine tests (eleven since) that assert id's behaviour through the live path (`build_walk_map` + `step_walk`) on the real pak, written `#[ignore]`d, each the acceptance test for its fix and un-ignored in the fixing commit; all now run in the normal suite, as the module doc says since `quake/polish3`. Other fixes' tests live next to the code they test. |
 | code reading | Every `svc_*` in `cl_parse.c`, every `TE_*` in `cl_tent.c`, every builtin the progs call (`pr_cmds.c`), `CL_RelinkEntities`, `r_part.c`, `view.c`, the sound paths, `menu.c`/`keys.c`/`cl_input.c`/`host_cmd.c`, compared line by line with the port. |
 
 ## Findings, ranked
@@ -73,7 +80,7 @@ evidence; anything marked *hunch* has none beyond reading.
 | L18 | ✅ fixed in 0d7f01c. The world edict has `solid 0`/`movetype 0`; `SV_SpawnServer` sets `SOLID_BSP`/`MOVETYPE_PUSH`. The only progs reader (`ClientObituary`) also checks `attacker != world`: no effect found. | oracle edict diff (`worldspawn movetype 7/0 solid 4/0`); `Server::set_map_name` |
 | L19 | `checkclient` uses a line-of-sight trace, not the cached 0.1 s client PVS; `FindTarget` follows it with `visible()` so the result only differs by the PVS staleness. | pr_cmds.c `PF_checkclient`; `bi_checkclient` |
 | L20 | ✅ fixed in a19ec64. The spawn settle frames skip `StartFrame` (C's `SV_Physics` always runs it); nothing reads `skill`/`framecount` in those 0.2 s. | sv_phys.c; `Server::spawn_entities` |
-| L21 | The gun's forward bob uses a third of the view pitch; V_CalcRefdef sets `ent->angles[PITCH] = -cl.viewangles[PITCH]` first (≤1.6 units). | view.c 885/907; `render::viewmodel_origin_ofs` |
+| L21 | ✅ fixed by the viewmodel work of `quake/fid1` (`render/view.rs` `viewmodel_origin_ofs` moves the gun along the full view pitch; `AUDIT.md`, "Session 7", Viewmodel). The gun's forward bob uses a third of the view pitch; V_CalcRefdef sets `ent->angles[PITCH] = -cl.viewangles[PITCH]` first (≤1.6 units). | view.c 885/907; `render::viewmodel_origin_ofs` |
 | L22 | ✅ fixed by PERF_PLAN C1 (branch `quake/sim`); the hunch was right. `entity_dlights` and trails covered every edict; the C only relinks entities the server sent (model + PVS), so an out-of-view muzzle flash lit surfaces through walls. `R_AddDynamicLights` lights by \|distance\| to the plane: on start.bsp a flash 54 units behind the wall ahead lights >100 px of its near side. Test `an_entity_outside_the_fat_pvs_is_not_drawn_and_its_flash_lights_nothing`. | sv_main.c `SV_WriteEntitiesToClient`; `Server::entity_dlights` |
 | L23 | The gibbed player's head (`h_player`, EF_GIB) gets no blood trail: the C skips only *drawing* the view entity, after trails. | cl_main.c:610; `step_walk` entity loop |
 | L24 | ✅ fixed in 3c8a862. Eye inside a sky volume (noclip only): C's `default:` gives the water tint, the port none. | view.c `V_SetContentsColor`; `render::content_cshift` |
@@ -144,7 +151,7 @@ spawnstatic, temp_entity, signonnum, killedmonster/foundsecret/updatestat
 (the live HUD reads the same QC globals), spawnstaticsound, cdtrack (inert:
 no CD audio), intermission/finale/cutscene/sellscreen, clientdata bit order,
 U_* bits (except skin), damage (demo path). Live-only gaps are F1, F6, F10,
-F16, L1.
+F16, L1 (all fixed since, as is the skin, F14).
 
 **Temp entities** (live and demo): SPIKE/SUPERSPIKE (count 10/20, tink1 on
 `rand()%5`, else ric1/2/3), GUNSHOT, EXPLOSION (1024 particles, r_exp3, dlight
@@ -218,7 +225,8 @@ uv run census/oracle_run.py --dev --out /tmp/o 'map e1m6' 'waits 5' 'oracle_edic
 quake-rs/target/release/quaketool census-edicts quake-data/ID1/PAK0.PAK e1m6 1.7 > /tmp/o/port.txt
 uv run census/edict_diff.py /tmp/o/c.txt /tmp/o/port.txt --t 1.7 --skip bodyque,player,light_torch_small_walltorch,light_flame_large_yellow,light_flame_small_yellow,light_flame_small_white
 uv run census/qcsym.py quake-data/ID1/PAK0.PAK calls stuffcmd cvar_set   # the progs' own calls
-cd quake-wasm && cargo test --release census -- --ignored                 # the open findings
+cd quake-wasm && cargo test --release census                              # the fixed findings' acceptance tests
+cd quake-wasm && cargo test --release census -- --ignored                 # a new open finding's test (none today)
 ```
 
 A console script longer than 8 KB overflows id's command buffer and the oracle

@@ -79,7 +79,9 @@ a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
 **Port side.** `quaketool view <pak> <map> <out.ppm> [--res] [--origin] [--angles]
 [--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--bench N]` renders one exactly
 specified view through the same `render_scene_ext_sprited` the game uses. It is a
-new subcommand; no existing output changed (goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`).
+new subcommand; no existing output changed (goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`
+when it was added; the renderer fixes since moved them to `4807aaa1`/`9ae2b478`/`c65b7046`
+at `3ba835f`).
 
 **Matching inputs.** By default the camera and clock are id's own first frame after
 signon (`V_CalcRefdef`'s eye, `cl.time` = 1.6 on these maps), handed verbatim to
@@ -448,8 +450,8 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   since UP from row 0 wraps to that 14th row in the port (it had been
   comparing id's Video Modes with the port's Web extras page since the extras
   merge).
-- Not in the matrix: the pause plaque (the port has no `pause`), the loading
-  plaque (the port loads within a frame and draws none), `SCR_ModalMessage`'s New
+- Not in the matrix: the loading plaque (the port loads within a frame and draws
+  none; the pause plaque is in it since `quake/timedemo`, the `pause` row above), `SCR_ModalMessage`'s New
   Game question (it blocks in a key loop the null input driver never ends; its
   text goes through the fixed `center_string_top`), the attract demo's HUD (the
   same drawing code as the live one), the crosshair (off by default).
