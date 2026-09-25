@@ -801,6 +801,9 @@ mod tests {
         use crate::app::boot_attract;
         use crate::console::{console_toggle, console_visible};
         use crate::host::step;
+        // 320x200: con_linewidth stays 38, so no Con_CheckResize clears the
+        // notify lines on the first frame.
+        crate::vid::set_resolution(320, 200);
         assert_eq!(boot_attract(), 1);
         let lines = console_lines();
         assert_eq!(
@@ -810,6 +813,16 @@ mod tests {
         );
         let (demo1, n) = playing();
         assert_eq!((demo1.as_deref(), n), (Some("maps/e1m3.bsp"), 1), "demo1 plays; demos[1] is next");
+        // Con_Printf stamps con_times, but the demo's signon ends in
+        // SCR_EndLoadingPlaque's Con_ClearNotify: no notify line over it.
+        step(0.05);
+        let notified = APP.with(|c| {
+            let b = c.borrow();
+            let d = b.as_ref().unwrap().demo.as_ref().unwrap();
+            let now = d.demo.frames[d.idx].time;
+            d.notify.visible(now).iter().map(|l| l.to_string()).collect::<Vec<_>>()
+        });
+        assert!(notified.is_empty(), "{notified:?}");
         crate::menu::menu_cancel(); // the menu away (it does not stop the loop here)
         console_toggle();
         // Bad argument counts print the C's usage lines ("play", as id's).
