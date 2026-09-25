@@ -70,6 +70,8 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  save <name>   load <name>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
+                let names: Vec<&str> = crate::extras::CVARS.iter().map(|c| c.name).collect();
+                a.console.println(format!("  extras (not id, 0|1): {}", names.join(" ")));
             });
             return;
         }
@@ -96,6 +98,14 @@ pub(crate) fn execute_console_command(line: &str) {
             return;
         }
         _ => {}
+    }
+
+    // The port's extras (`wasm_*`, not id's; all off by default): `extras.rs`.
+    if let Some(out) = crate::extras::console_command(&argv) {
+        if let Some(line) = out {
+            ensure_app(|a| a.console.println(line));
+        }
+        return;
     }
 
     // `map <name>` rebuilds the walk on a new level; handle it specially because

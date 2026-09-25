@@ -27,8 +27,10 @@ pub(super) struct SkyView {
     forward: Vec3,
     right: Vec3,
     up: Vec3,
-    /// `(int)vid.width>>1`, `(int)vid.height>>1` — `D_Sky_uv_To_st`'s integer
-    /// screen centre (not the projection's `xcenter`, which is half a pixel off).
+    /// `(int)vid.width>>1`, `(int)vid.height>>1` less the view's corner on the
+    /// screen, in the view's own pixels — `D_Sky_uv_To_st`'s integer
+    /// SCREEN centre (not the view's, and not the projection's `xcenter`,
+    /// which is half a pixel off).
     half_w: i32,
     half_h: i32,
     /// `max(vrect.width, vrect.height)` — the `temp` normaliser in
@@ -42,11 +44,21 @@ pub(super) struct SkyView {
 }
 
 impl SkyView {
-    /// The sky state for a `w`x`h` view at game `time`. `R_SetSkyFrame`
+    /// The sky state for a `w`x`h` view whose screen's centre is `centre` in
+    /// its own pixels ([`RenderOptions`](super::RenderOptions)`::sky_centre`),
+    /// at game `time`. `R_SetSkyFrame`
     /// (r_sky.c): `skytime = cl.time - (int)(cl.time/temp)*temp` with
     /// `temp = SKYSIZE*s1*s2` = 512, where `s1`/`s2` are `iskyspeed` 8 and
     /// `iskyspeed2` 2 over their gcd.
-    pub(super) fn new(forward: Vec3, right: Vec3, up: Vec3, w: usize, h: usize, time: f32) -> SkyView {
+    pub(super) fn new(
+        forward: Vec3,
+        right: Vec3,
+        up: Vec3,
+        w: usize,
+        h: usize,
+        centre: (i32, i32),
+        time: f32,
+    ) -> SkyView {
         const TEMP: f64 = 512.0;
         let t = time as f64;
         let skytime = (t - ((t / TEMP) as i32 as f64) * TEMP) as f32;
@@ -55,8 +67,8 @@ impl SkyView {
             forward,
             right,
             up,
-            half_w: (w as i32) >> 1,
-            half_h: (h as i32) >> 1,
+            half_w: centre.0,
+            half_h: centre.1,
             longest: w.max(h) as f32,
             scroll,
             shift: scroll as i32,
@@ -319,7 +331,7 @@ mod tests {
             // right = forward x worldup, up = right x forward (orthonormal-ish).
             let (right, _) = normalize(cross(f, [0.0, 0.0, 1.0]));
             let (up, _) = normalize(cross(right, f));
-            SkyView::new(f, right, up, w, h, time)
+            SkyView::new(f, right, up, w, h, ((w as i32) >> 1, (h as i32) >> 1), time)
         };
         let render_at = |view: SkyView| {
             let mut img = Image::new(w, h, [0, 0, 0]); // background = pure black
@@ -385,10 +397,10 @@ mod tests {
     fn sky_view_front_layer_scrolls_twice_as_fast() {
         // R_SetSkyFrame + R_MakeSky: the whole sky scrolls skytime*8 texels
         // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top.
-        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, 1.6);
+        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, (160, 100), 1.6);
         assert_eq!((v.scroll, v.shift), (12.8, 12));
         // skytime wraps at SKYSIZE*4*1 = 512 s.
-        let w = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, 513.0);
+        let w = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, (160, 100), 513.0);
         assert_eq!((w.scroll, w.shift), (8.0, 8));
         // D_Sky_uv_To_st at the integer screen centre, looking along +X: the ray
         // is +X, so s = (scroll + 378) * 0x10000 and t = scroll * 0x10000.
@@ -406,7 +418,7 @@ mod tests {
         for (i, p) in pal.iter_mut().enumerate() {
             *p = [i as u8, 0, 0];
         }
-        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320, 200, 3.3);
+        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320, 200, (160, 100), 3.3);
         let (u0, row, n) = (17, 60, 40);
         let mut out = vec![[0u8; 3]; n as usize];
         draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v, &pal);

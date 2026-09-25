@@ -5,7 +5,7 @@
 //! `WinQuake/d_sprite.c`.
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image};
+use super::{Camera, Image, Projection, RenderOptions};
 
 /// A sprite-model entity to draw as a camera-facing billboard (Quake's
 /// `mod_sprite` entities: the `s_explod.spr` explosion flash, bubbles, etc.).
@@ -21,7 +21,7 @@ pub struct SpriteInstance<'a> {
 /// the shared `zbuf`. Each sprite's active frame (a [`crate::spr::Frame::Single`]
 /// or a `Group` whose sub-frame is selected by `time`) is rasterised as a
 /// screen-aligned billboard: the sprite faces the camera, so a frame W×H pixels (1
-/// texel = 1 world unit) spans `focal*W/vz` × `focal*H/vz` framebuffer pixels around
+/// texel = 1 world unit) spans `xscale*W/vz` × `yscale*H/vz` framebuffer pixels around
 /// the projected origin, offset by the frame's `origin` (left/up). Palette index 255
 /// is transparent (`d_sprite.c`). Nearest-neighbour sampled; behind-wall pixels are
 /// hidden by the depth test (`vz < zbuf`) and write depth so nearer geometry wins.
@@ -33,6 +33,7 @@ pub(super) fn draw_sprites(
     image: &mut Image,
     zbuf: &mut [f32],
     cam: &Camera,
+    opts: &RenderOptions,
     sprites: &[SpriteInstance],
     palette: &[[u8; 3]; 256],
     time: f32,
@@ -44,15 +45,9 @@ pub(super) fn draw_sprites(
         return;
     }
     let (forward, right, up) = cam.basis();
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
-    let tan_half = half_fov.tan();
-    let focal = if tan_half.abs() < 1e-6 {
-        cx
-    } else {
-        (cx as f64 / tan_half) as f32
-    };
+    // R_SetupAndDrawSprite projects the sprite's corners with xscale/yscale, so
+    // a sprite is `pixelAspect` as tall in pixels as it is wide.
+    let Projection { cx, cy, xscale: focal, yscale } = Projection::new(cam, w, h, opts.aspect());
 
     for inst in sprites {
         let Some(frame) = select_sprite_frame(inst.sprite, inst.frame, time) else {
@@ -67,18 +62,20 @@ pub(super) fn draw_sprites(
             continue; // at/behind the near plane
         }
         let sx = cx + focal * dot(rel, right) / vz;
-        let sy = cy - focal * dot(rel, up) / vz;
-        // 1 texel = 1 world unit; the facing billboard scales by focal/vz. The frame
-        // `origin` is the left/up offset of its top-left from the centre (Quake:
-        // up = origin[1], down = origin[1]-height, left = origin[0]).
+        let sy = cy - yscale * dot(rel, up) / vz;
+        // 1 texel = 1 world unit; the facing billboard scales by xscale/vz across
+        // and yscale/vz down. The frame `origin` is the left/up offset of its
+        // top-left from the centre (Quake: up = origin[1], down =
+        // origin[1]-height, left = origin[0]).
         let scale = focal / vz;
+        let yscale_z = yscale / vz;
         let (fw, fh) = (frame.width as f32, frame.height as f32);
         let (ox, oy) = (frame.origin[0] as f32, frame.origin[1] as f32);
         // +up is -screen-y; the top edge is at world up-offset `oy`.
         let x0 = sx + ox * scale;
         let x1 = sx + (ox + fw) * scale;
-        let y0 = sy - oy * scale;
-        let y1 = sy - (oy - fh) * scale;
+        let y0 = sy - oy * yscale_z;
+        let y1 = sy - (oy - fh) * yscale_z;
         let (px0, px1) = (x0.min(x1), x0.max(x1));
         let (py0, py1) = (y0.min(y1), y0.max(y1));
         if !(px0.is_finite() && px1.is_finite() && py0.is_finite() && py1.is_finite()) {
@@ -171,7 +168,7 @@ mod tests {
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
         assert!(painted > 0, "a sprite in front must paint pixels");
         let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -189,7 +186,7 @@ mod tests {
         let pal = [[7u8, 7, 7]; 256];
         let spr = test_sprite(16, 16, 255);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         assert!(img.rgb.iter().all(|&p| p == bg), "index-255 texels are transparent (nothing painted)");
         assert!(zbuf.iter().all(|&z| z == f32::INFINITY), "transparent sprite writes no depth");
     }
@@ -206,7 +203,7 @@ mod tests {
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
         assert!(img.rgb.iter().all(|&p| p == bg), "a sprite behind a nearer wall is z-tested out");
     }
 }

@@ -377,17 +377,19 @@ pub(super) struct Frustum {
 }
 
 impl Frustum {
-    /// Derive the frustum from the camera and the framebuffer aspect.
+    /// Derive the frustum from the camera, the framebuffer size and the pixel
+    /// aspect (`R_ViewChanged`'s `screenedge` planes, from `verticalFieldOfView`).
     ///
     /// The side planes are built to EXACTLY match the screen rectangle the
     /// rasteriser draws into. The rasteriser projects a view-space vertex
     /// `(vx, vy, vz)` (along `right`/`up`/`forward`) to
-    /// `x = cx + focal*vx/vz`, `y = cy - focal*vy/vz` with `cx = w/2`,
-    /// `cy = h/2`, `focal = cx / tan(fov/2)`. On-screen means `0 <= x < w` and
-    /// `0 <= y < h`, i.e. `|vx/vz| <= cx/focal = tx` and `|vy/vz| <= cy/focal =
+    /// `x = cx + xscale*vx/vz`, `y = cy - yscale*vy/vz` with `cx = w/2`,
+    /// `cy = h/2`, `xscale = cx / tan(fov/2)`, `yscale = xscale * pixel_aspect`
+    /// ([`Projection`](super::Projection)). On-screen means `0 <= x < w` and
+    /// `0 <= y < h`, i.e. `|vx/vz| <= cx/xscale = tx` and `|vy/vz| <= cy/yscale =
     /// ty`. So the horizontal half-extent is `tx = tan(fov/2)` and the vertical
-    /// is `ty = (cy/cx)*tx = (h/w)*tan(fov/2)`. The inward side-plane normals in
-    /// VIEW coordinates are therefore:
+    /// is `ty = (cy/cx)*tx/pixel_aspect = (h/w)*tan(fov/2)/pixel_aspect`. The
+    /// inward side-plane normals in VIEW coordinates are therefore:
     ///   left   `( 1, 0, tx)`  (inside: `vx + tx*vz >= 0`)
     ///   right  `(-1, 0, tx)`
     ///   bottom `( 0, 1, ty)`
@@ -404,7 +406,7 @@ impl Frustum {
     /// normals are NOT normalised: the side/cull test only uses the SIGN of
     /// `dot(n, corner) - dist`, which a positive scale leaves unchanged, so
     /// skipping the normalise costs nothing and avoids a sqrt rounding step.
-    pub(super) fn from_camera(cam: &Camera, w: usize, h: usize) -> Frustum {
+    pub(super) fn from_camera(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> Frustum {
         let (forward, right, up) = cam.basis();
         let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
         let tan_half = half_fov.tan();
@@ -414,9 +416,9 @@ impl Frustum {
         // degenerate focal (tan ~ 0) the draw path falls back on (focal = cx,
         // i.e. tx = 1.0) so the frustum stays consistent with what is drawn.
         let tx = if tan_half.abs() < 1e-6 { 1.0f32 } else { tan_half as f32 };
-        // ty = (cy/cx)*tx; with cx==0 (zero-width) fall back to tx (the loop
-        // never runs for w==0 anyway).
-        let ty = if cxf != 0.0 { (cyf / cxf) * tx } else { tx };
+        // ty = (cy/cx)*tx/pixel_aspect (bit-exact at 1: x/1 == x); with cx==0
+        // (zero-width) fall back to tx (the loop never runs for w==0 anyway).
+        let ty = if cxf != 0.0 { (cyf / cxf) * tx / pixel_aspect } else { tx };
 
         // View-space inward normals (see doc comment), in (right, up, forward)
         // components.
@@ -822,7 +824,7 @@ mod tests {
     fn frustum_culls_box_behind_camera_keeps_box_in_front() {
         // Camera at the origin looking down +X (yaw 0, pitch 0), 90-deg fov.
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let frustum = Frustum::from_camera(&cam, 320, 200);
+        let frustum = Frustum::from_camera(&cam, 320, 200, 1.0);
 
         // A box entirely BEHIND the camera (negative X): fully outside the near
         // plane -> culled.
@@ -854,11 +856,29 @@ mod tests {
     }
 
     #[test]
+    fn frustum_top_and_bottom_follow_the_pixel_aspect() {
+        // R_ViewChanged: verticalFieldOfView = horizontalFieldOfView /
+        // screenAspect, screenAspect = width*pixelAspect/height. At 320x200 with
+        // square pixels the view reaches z = 62.5 at x = 100; at id's 4:3-monitor
+        // aspect 0.8333 it reaches z = 75. A box at z 66..70 is outside the first
+        // and inside the second.
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let (lo, hi) = ([99.0, -5.0, 66.0], [100.0, 5.0, 70.0]);
+        assert!(Frustum::from_camera(&cam, 320, 200, 1.0).culls(lo, hi));
+        assert!(!Frustum::from_camera(&cam, 320, 200, 200.0 / 320.0 * 4.0 / 3.0).culls(lo, hi));
+        // The sides do not move.
+        let side = ([99.0, 101.0, -5.0], [100.0, 110.0, 5.0]);
+        for aspect in [1.0, 0.8333333] {
+            assert!(Frustum::from_camera(&cam, 320, 200, aspect).culls(side.0, side.1));
+        }
+    }
+
+    #[test]
     fn frustum_never_culls_a_box_that_encloses_the_eye() {
         // A huge box around the camera straddles every plane -> never culled,
         // guaranteeing we never punch a hole when geometry surrounds the view.
         let cam = Camera { pos: [10.0, 20.0, 30.0], yaw: 35.0, pitch: -12.0, roll: 0.0, fov_deg: 90.0 };
-        let frustum = Frustum::from_camera(&cam, 640, 480);
+        let frustum = Frustum::from_camera(&cam, 640, 480, 1.0);
         assert!(
             !frustum.culls([-1000.0, -1000.0, -1000.0], [1000.0, 1000.0, 1000.0]),
             "a box enclosing the eye must never be culled"
@@ -879,7 +899,7 @@ mod tests {
         // A camera tucked in a corner looking along an axis so a good chunk of
         // the room's faces fall outside the view (some get culled).
         let cam = Camera { pos: [-240.0, -240.0, 20.0], yaw: 10.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let frustum = Frustum::from_camera(&cam, w, h);
+        let frustum = Frustum::from_camera(&cam, w, h, 1.0);
 
         let (forward, right, up) = cam.basis();
         let cx = w as f32 / 2.0;

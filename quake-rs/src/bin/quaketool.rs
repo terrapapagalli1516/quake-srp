@@ -134,7 +134,7 @@ fn usage() {
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -1970,6 +1970,15 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 /// --angles p,y,r     view angles in degrees (default 0,<start angle>,0)
 /// --time T           the render clock, cl.time (default: the server clock after spawn)
 /// --fov F            horizontal field of view (default 90)
+/// --aspect A         vid.aspect, R_ViewChanged's pixelAspect (default 1, square
+///                    pixels, as the oracle's vid_null; id's DOS/Win 320x200 on a
+///                    4:3 monitor is 0.8333 — the oracle's -oracle_aspect)
+/// --exactpersp 0|1   1: exact perspective at every pixel, the port's extra (default
+///                    0: id's 16-pixel segments, D_DrawSpans16 / Turbulent8)
+/// --vrect x,y,w,h    render only the view r_refdef.vrect: a w x h image, placed at
+///                    (x, y) of the --res screen (the sky is centred on the screen,
+///                    D_Sky_uv_To_st); the output is the w x h view (default: the
+///                    view is the whole screen, viewsize 120)
 /// --ents FILE        draw these entities: the oracle's `.ents` list, one per line,
 ///                    `model ox oy oz pitch yaw roll frame skin syncbase effects kind`
 ///                    (without it: the world only, as r_drawentities 0)
@@ -2003,6 +2012,8 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     };
     let (mut w, mut h) = (320usize, 200usize);
     let (mut origin, mut angles, mut time, mut fov) = (None, None, None, 90.0f32);
+    let mut opts = render::RenderOptions::default();
+    let mut vrect: Option<(usize, usize, usize, usize)> = None;
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
     let mut bench: Option<u32> = None;
     let mut viewent: Option<[f32; 6]> = None;
@@ -2021,6 +2032,27 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             "--angles" => angles = Some(parse_vec3(flag, val)?),
             "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
+            "--vrect" => {
+                let v: Vec<usize> = val.split(',').map(|p| p.trim().parse::<usize>()).collect::<Result<_, _>>()
+                    .map_err(|_| format!("--vrect: expected x,y,w,h, got {val:?}"))?;
+                let [x, y, vw, vh] = v[..] else {
+                    return Err(format!("--vrect: expected 4 numbers, got {val:?}"));
+                };
+                vrect = Some((x, y, vw, vh));
+            }
+            "--exactpersp" => {
+                opts.exact_perspective = match val.as_str() {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(format!("--exactpersp: expected 0 or 1, got {val:?}")),
+                }
+            }
+            "--aspect" => {
+                opts.pixel_aspect = val.parse().map_err(|_| format!("--aspect: bad number {val:?}"))?;
+                if !(opts.pixel_aspect.is_finite() && opts.pixel_aspect > 0.0) {
+                    return Err(format!("--aspect: must be a positive number, got {val:?}"));
+                }
+            }
             "--ents" => ents_path = Some(val.as_str()),
             "--dlight" => {
                 let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
@@ -2158,6 +2190,17 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     };
     let unresolved = alias_descs.len() + ext_descs.len() + sprite_descs.len()
         - instances.len() - externals.len() - sprites.len();
+    // The view: the whole screen, or r_refdef.vrect placed on it.
+    let (view_w, view_h) = match vrect {
+        Some((x, y, vw, vh)) => {
+            if vw == 0 || vh == 0 || x + vw > w || y + vh > h {
+                return Err(format!("--vrect: {vw}x{vh} at ({x}, {y}) is not inside the {w}x{h} screen"));
+            }
+            opts.screen = Some(render::ScreenPlace { x, y, vid_w: w, vid_h: h });
+            (vw, vh)
+        }
+        None => (w, h),
+    };
 
     let dowarp = quake_rs::world::point_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
     let render_once = || {
@@ -2176,13 +2219,23 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             origin_ofs,
             angles: gun_angles,
         });
-        // R_SetupFrame's r_dowarp, for the full-frame view (viewsize 120).
-        let r = if dowarp { quake_rs::screen::warp_vrect(w, h, 120.0, false) } else { render::ViewRect { x: 0, y: 0, w, h } };
-        let view = render::render_scene_ext_sprited(
-            &bsp, &cam, r.w, r.h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
-            &light_styles, colormap.as_deref(), &sprites,
-        );
-        if dowarp { render::apply_warp(view, w, h, time) } else { view }
+        // R_SetupFrame's r_dowarp, for the full-frame view (viewsize 120): the
+        // warp buffer's view, stretched over the screen by D_WarpScreen. (With
+        // --vrect the view is drawn unwarped.)
+        if dowarp && vrect.is_none() {
+            let r = quake_rs::screen::warp_vrect(w, h, 120.0, false);
+            let mut wopts = opts;
+            wopts.screen = Some(render::ScreenPlace { x: r.x, y: r.y, vid_w: w, vid_h: h });
+            let view = render::render_scene_ext_sprited(
+                &bsp, &cam, r.w, r.h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
+                &light_styles, colormap.as_deref(), &sprites, &wopts,
+            );
+            return render::apply_warp(view, w, h, time);
+        }
+        render::render_scene_ext_sprited(
+            &bsp, &cam, view_w, view_h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &dlights,
+            &light_styles, colormap.as_deref(), &sprites, &opts,
+        )
     };
     let img = render_once();
     // Warm re-renders of the same view (the first, cold frame above is excluded),
@@ -2198,9 +2251,12 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let mut o = String::new();
     let _ = writeln!(
         o,
-        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}",
+        "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}{}{}{}",
         origin[0], origin[1], origin[2], angles[0], angles[1], angles[2],
-        if dowarp { " (underwater: D_WarpScreen)" } else { "" }
+        if opts.pixel_aspect != 1.0 { format!(" aspect {}", opts.pixel_aspect) } else { String::new() },
+        if opts.exact_perspective { " exactpersp" } else { "" },
+        vrect.map(|(x, y, vw, vh)| format!(" vrect {x},{y},{vw},{vh}")).unwrap_or_default(),
+        if dowarp && vrect.is_none() { " (underwater: D_WarpScreen)" } else { "" }
     );
     let _ = writeln!(
         o,

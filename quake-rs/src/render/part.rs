@@ -5,7 +5,7 @@
 //! The particle simulation itself is [`crate::particles`].
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image};
+use super::{Camera, Image, Projection};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
 /// against the shared `zbuf`, porting the visible result of Quake's software
@@ -15,8 +15,11 @@ use super::{Camera, Image};
 /// other pass in this module (and [`render_scene_ext`](super::render_scene_ext), whose buffer this shares):
 /// `rel = p - cam.pos`; the forward depth `vz = dot(rel, forward)` is the z-test
 /// key; a particle at or behind the near plane (`vz <= NEAR`) is skipped; the
-/// screen position is `sx = cx + focal*dot(rel,right)/vz`,
-/// `sy = cy - focal*dot(rel,up)/vz`.
+/// screen position is `sx = cx + xscale*dot(rel,right)/vz`,
+/// `sy = cy - yscale*dot(rel,up)/vz` ([`Projection`](super::Projection):
+/// `yscale = xscale * pixel_aspect`, as `R_DrawParticles`' `r_pup` is `vup`
+/// scaled by `yscaleshrink`). The square stays square in pixels whatever the
+/// aspect, as `D_DrawParticle`'s is below `pixelAspect` 1.4.
 ///
 /// A particle is drawn as a `pix`x`pix` filled square whose side scales
 /// **continuously** with `1/z`, porting `R_DrawParticles`/`D_DrawParticle`
@@ -35,6 +38,7 @@ use super::{Camera, Image};
 /// SAFETY: `w`/`h` of `0`, non-finite projections, and out-of-range indices are
 /// all guarded; the only direct indexing is into the freshly-sized framebuffers,
 /// where the index is provably in bounds.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_particles(
     image: &mut Image,
     zbuf: &mut [f32],
@@ -43,6 +47,7 @@ pub fn draw_particles(
     palette: &[[u8; 3]; 256],
     w: usize,
     h: usize,
+    pixel_aspect: f32,
 ) {
     const NEAR: f32 = 1.0;
     if w == 0 || h == 0 || particles.is_empty() {
@@ -50,15 +55,7 @@ pub fn draw_particles(
     }
 
     let (forward, right, up) = cam.basis();
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let half_fov = (cam.fov_deg as f64 * 0.5).to_radians();
-    let tan_half = half_fov.tan();
-    let focal = if tan_half.abs() < 1e-6 {
-        cx
-    } else {
-        (cx as f64 / tan_half) as f32
-    };
+    let Projection { cx, cy, xscale: focal, yscale } = Projection::new(cam, w, h, pixel_aspect);
 
     // Resolution-scaled particle-size clamp, ported from `D_DrawParticle` /
     // `d_modech.c`. Quake authored its `0x8000`/`d_pix_shift` ramp against a
@@ -80,7 +77,7 @@ pub fn draw_particles(
         let vx = dot(rel, right);
         let vy = dot(rel, up);
         let sx = cx + focal * vx / vz;
-        let sy = cy - focal * vy / vz;
+        let sy = cy - yscale * vy / vz;
         if !(sx.is_finite() && sy.is_finite()) {
             continue;
         }
@@ -146,7 +143,7 @@ mod tests {
         let mut pal = [[0u8, 0, 0]; 256];
         pal[42] = [200, 50, 30]; // the particle colour
 
-        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h);
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h, 1.0);
 
         // Some pixel changed to the particle colour, and the matching z-buffer
         // slot now holds the particle's forward depth (~100), not +inf.
@@ -154,6 +151,28 @@ mod tests {
         assert!(painted > 0, "a particle in front must paint at least one pixel");
         let nearest = zbuf.iter().cloned().fold(f32::INFINITY, f32::min);
         assert!((nearest - 100.0).abs() < 1.0, "z-buffer holds the particle depth, got {nearest}");
+    }
+
+    #[test]
+    fn draw_particles_places_rows_by_the_pixel_aspect() {
+        // R_DrawParticles projects with r_pup = vup * yscaleshrink: at 320x200 a
+        // particle 30 units above the axis at depth 100 sits 160*30/100 = 48 rows
+        // above the centre with square pixels, 40 at id's 4:3 aspect 0.8333.
+        let (w, h) = (320usize, 200usize);
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let mut pal = [[0u8, 0, 0]; 256];
+        pal[42] = [200, 50, 30];
+        let row_of = |aspect: f32| {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut zbuf = vec![f32::INFINITY; w * h];
+            draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 30.0], 42)], &pal, w, h, aspect);
+            let i = img.rgb.iter().position(|&p| p == [200, 50, 30]).expect("particle drawn");
+            (i % w, i / w)
+        };
+        let (x1, y1) = row_of(1.0);
+        let (x2, y2) = row_of(200.0 / 320.0 * 4.0 / 3.0);
+        assert_eq!(x1, x2, "the aspect never moves a particle sideways");
+        assert_eq!((y1, y2), (52, 60));
     }
 
     #[test]
@@ -170,7 +189,7 @@ mod tests {
         let mut pal = [[0u8, 0, 0]; 256];
         pal[42] = [200, 50, 30];
 
-        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h);
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h, 1.0);
 
         // Nothing painted: the wall occludes the particle.
         assert!(
@@ -194,7 +213,7 @@ mod tests {
         let mut pal = [[0u8, 0, 0]; 256];
         pal[7] = [10, 220, 40];
 
-        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 7)], &pal, w, h);
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 7)], &pal, w, h, 1.0);
 
         let painted = img.rgb.iter().filter(|&&p| p == [10, 220, 40]).count();
         assert!(painted > 0, "a particle nearer than the wall must paint");
@@ -215,7 +234,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
 
         // -X is behind a camera looking down +X.
-        draw_particles(&mut img, &mut zbuf, &cam, &[([-100.0, 0.0, 0.0], 0)], &pal, w, h);
+        draw_particles(&mut img, &mut zbuf, &cam, &[([-100.0, 0.0, 0.0], 0)], &pal, w, h, 1.0);
         assert!(img.rgb.iter().all(|&p| p == bg), "a particle behind the camera draws nothing");
     }
 

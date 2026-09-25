@@ -439,7 +439,7 @@ pub(crate) fn step_demo(
     } else {
         vrect
     };
-    let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts);
+    let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &crate::vid::render_options(&rvrect, render_w, render_h));
     bench::lap(Phase::Render3d);
     // D_WarpScreen: stretched over the screen's view rectangle while it
     // wobbles — the warp applies to the 3-D view FIRST; the content tint joins

@@ -15,9 +15,12 @@ mkdir -p "$OUT"
 cmp() { uv run -q "$HERE/compare.py" "$@"; }
 rows() { grep -E '^(e1m|case|entity)' || true; }
 
-echo "== headline: id's C (D_DrawSpans8, its own mip levels) vs the port, first frame after signon"
-cmp --out "$OUT/headline" | rows
-cmp --res 640x480 --out "$OUT/headline640" | rows
+echo "== headline: id's x86 spans (D_DrawSpans16, its own mip levels) vs the port, first frame after signon"
+cmp --spans 16 --out "$OUT/headline" | rows
+cmp --spans 16 --res 640x480 --out "$OUT/headline640" | rows
+cmp --spans 16 --res 640x400 --aspect 0.8333333 --modes world --out "$OUT/headline_page" | rows
+echo "== id's portable C as written (D_DrawSpans8, the default)"
+cmp --modes world --out "$OUT/headline8" | rows
 
 echo
 echo "== attribution ladder, world only, 320x200: exact% as id's renderer drops one difference at a time"
@@ -31,11 +34,12 @@ ladder "id's C as shipped in source (spans 8)"
 ladder "16-px segments (the x86 asm, d_subdiv16 1)" --spans 16
 ladder "exact per-pixel perspective" --spans 1
 ladder "mip 0 forced (d_mipscale 0)" --c-cmd "d_mipscale 0"
-ladder "mip 0 + exact perspective" --spans 1 --c-cmd "d_mipscale 0"
+ladder "mip 0 + 16-px segments" --spans 16 --c-cmd "d_mipscale 0"
+ladder "mip 0 + exact perspective (the port's too)" --spans 1 --exactpersp --c-cmd "d_mipscale 0"
 
 echo
-echo "== crops (C | port | diff), each with the classes it does not show removed on the C side"
-EXACT=(--spans 1 --c-cmd "d_mipscale 0")
+echo "== crops (C | port | diff), each with the classes it does not show removed (both renderers)"
+EXACT=(--spans 1 --exactpersp --c-cmd "d_mipscale 0")
 crop() { # name, crop box, compare args...
     local name=$1 box=$2; shift 2
     cmp --crop "$name:$box" --out "$OUT/crop_$name" "$@" | awk -v n="$name" '/^e1m/ {printf "%-14s %s exact %s%%\n", n, $1, $2}'
