@@ -18,7 +18,7 @@ use super::sky::{SkySpans, SkyView, SKY_SPANS_SCRATCH};
 use super::stats::{stat, stats_on, StatInstant};
 use super::surf::{
     classify_surface, face_geom_cached, face_lightmap_world_cached, face_normal, face_surf_block,
-    face_world_poly, texture_animation, SurfKind, WorldFingerprint,
+    face_world_poly, texture_animation, MipView, SurfKind, WorldFingerprint,
 };
 use super::vis::{clip_poly_near_into, compute_visible_faces, Frustum, VView};
 use super::warp::TurbTable;
@@ -82,6 +82,9 @@ pub(super) fn draw_world_textured(
         (cx as f64 / tan_half) as f32
     };
     let view = ScreenProj { forward, right, up, cx, cy, focal };
+    // Per-face mip selection (`D_MipLevelForScale`): this frame's thresholds and
+    // frustum. The two focal lengths are x and y (equal: square pixels).
+    let mut mipview = MipView::new(cx, cy, focal, focal);
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
     // Sub-phase profiling: accumulate ns into locals (cheap), flush to RenderStats
@@ -302,10 +305,13 @@ pub(super) fn draw_world_textured(
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
                             let dlit = any_dlight_reaches(bsp, face, dlights, face_dlightbits);
+                            // `D_DrawSurfaces`: the mip level from the face's nearest
+                            // visible point (`views` is the unclipped outline).
+                            let mip = ti.map_or(0, |t| mipview.level_for_face(&views, t));
                             // World model: cacheable (stable `Bsp` across frames).
                             face_surf_block(
                                 face_index, face, tex_index, mt, lm, cm, fp, n_faces, light_styles,
-                                dlit, true,
+                                dlit, true, mip,
                             )
                         }
                         _ => None,
@@ -315,9 +321,11 @@ pub(super) fn draw_world_textured(
                 };
                 if let Some(t) = _t_s { t_surf += t.elapsed().as_nanos() as u64; }
                 match surf {
-                    Some((block, bw, bh, tmins)) => {
+                    Some(sb) => {
                         stat(|s| s.surf_hits += 1);
-                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette);
+                        // The block is at its mip level: so are the s/t gradients.
+                        let g = grads.mip_scaled(sb.mip);
+                        raster_poly_cached(image, zbuf, &proj, &g, &sb.block, sb.bw, sb.bh, sb.texmins, palette);
                     }
                     None => {
                         stat(|s| s.surf_misses += 1);
@@ -481,6 +489,9 @@ pub(super) fn draw_submodel(
         (cx as f64 / tan_half) as f32
     };
     let view = ScreenProj { forward, right, up, cx, cy, focal };
+    // Per-face mip selection, as the world pass (`D_DrawSurfaces` treats a
+    // bmodel's surfaces like the world's).
+    let mut mipview = MipView::new(cx, cy, focal, focal);
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
     // Submodel face range: [firstface, firstface + numfaces). Negative counts
@@ -632,9 +643,10 @@ pub(super) fn draw_submodel(
                     match (lightmap.as_ref(), colormap) {
                         (Some(lm), Some(cm)) => {
                             let dlit = any_dlight_reaches(bsp, face, &local_dlights, face_dlightbits);
+                            let mip = ti.map_or(0, |t| mipview.level_for_face(&views, t));
                             face_surf_block(
                                 face_index, face, tex_index, mt, lm, cm, fp, n_faces, light_styles,
-                                dlit, cache_surf,
+                                dlit, cache_surf, mip,
                             )
                         }
                         _ => None,
@@ -643,9 +655,10 @@ pub(super) fn draw_submodel(
                     None
                 };
                 match surf {
-                    Some((block, bw, bh, tmins)) => {
+                    Some(sb) => {
                         stat(|s| s.sub_surf_hits += 1);
-                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette);
+                        let g = grads.mip_scaled(sb.mip);
+                        raster_poly_cached(image, zbuf, &proj, &g, &sb.block, sb.bw, sb.bh, sb.texmins, palette);
                     }
                     None => {
                         stat(|s| s.sub_surf_misses += 1);

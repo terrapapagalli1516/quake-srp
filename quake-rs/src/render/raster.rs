@@ -327,6 +327,17 @@ impl PolyGrads {
         Some(PolyGrads { zi, sz, tz, st_eye })
     }
 
+    /// The gradients in mip level `mip`'s texels: `s/z`, `t/z` and the eye's
+    /// `(s, t)` times `1 / (1 << mip)` — `D_CalcGradients`' `mipscale` on
+    /// `d_sdivzstepu`..`d_tdivzorigin` and `sadjust`/`tadjust` (a power of two,
+    /// so exact). `1/z` is unchanged. For reading a surface block baked at that
+    /// level ([`SurfBlock`](super::surf::SurfBlock)).
+    pub(super) fn mip_scaled(&self, mip: u32) -> PolyGrads {
+        let k = 1.0 / (1u32 << mip.min(3)) as f64;
+        let sc = |l: Linear| Linear { o: l.o * k, dx: l.dx * k, dy: l.dy * k };
+        PolyGrads { zi: self.zi, sz: sc(self.sz), tz: sc(self.tz), st_eye: [self.st_eye[0] * k, self.st_eye[1] * k] }
+    }
+
     /// The same gradients recovered from synthetic vertices (their `vz`, and
     /// `s`/`t` taken as absolute: `st_eye` is zero) — the unit tests' polygons,
     /// which have no plane. Solved on the vertex triple of LARGEST area, the
@@ -665,7 +676,9 @@ pub(super) fn raster_poly_tex(
 /// [`face_surf_block`](super::surf::face_surf_block)) — `D_DrawSpans8` over a
 /// cached surface. The inner pixel is ONE block read (texture, lightmap and
 /// colormap are folded into the block) plus a palette lookup; the z test and
-/// write stay. This is the warm-frame hot path for walls.
+/// write stay. This is the warm-frame hot path for walls. `grads` and `texmins`
+/// are in the block's mip-level texels (`PolyGrads::mip_scaled`); the block is
+/// `extents >> miplevel` a side, so the clamp below is exactly `bbextents`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn raster_poly_cached(
     image: &mut Image,

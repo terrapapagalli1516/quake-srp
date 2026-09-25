@@ -24,7 +24,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--settle N` | shoot N frames after signon instead of the first |
 | `--crop name:x,y,w,h` | extra 6x C / port / diff PNG of a region |
 | `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the 16-pixel segments of the x86 asm `D_DrawSpans16` (what DOS/Win players saw, `d_subdiv16 1`); 1 = exact per-pixel perspective (an experiment, not id) |
-| `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
+| `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable); `d_mipscale` and `d_mipcap` are handed to the port too (`quaketool view --d-mipscale/--d-mipcap`). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
 | `--viewmodel` | draw the weapon too (the port is handed id's `cl.viewent` origin and angles, `quaketool view --viewent`) |
 | `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD |
@@ -87,28 +87,30 @@ the steady eye. (The port's live path starts `oldz` at the origin, so its first
 
 ## Results (320x200 unless stated, 2026-09-25)
 
-After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below,
-see `AUDIT.md`; the numbers before them are in the git history of this file).
+After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below)
+and the mip levels and lightmap stepping (branch `quake/w2a`: classes 1 and 6); see
+`AUDIT.md`. The numbers before them are in the git history of this file.
 
 Headline — id's C as written (`D_DrawSpans8`, its own mip levels) vs the port:
 
 | map | world exact% | with entities | entity pixels exact% | 640x480 world |
 |---|---:|---:|---:|---:|
-| e1m1 | 84.76 | 84.75 | 0.0 (16 px) | 90.79 |
-| e1m2 | 64.07 | 64.34 | 97.8 (363 px) | 78.19 |
-| e1m3 | 65.83 | 65.83 | 44.8 (221 px) | 90.74 |
-| e1m7 | 75.65 | 75.67 | 58.2 (55 px) | 94.55 |
+| e1m1 | 97.44 | 97.44 | 100.0 (15 px) | 99.20 |
+| e1m2 | 97.12 | 97.12 | 100.0 (357 px) | 98.77 |
+| e1m3 | 99.16 | 99.16 | 98.2 (221 px) | 99.30 |
+| e1m7 | 94.96 | 94.96 | 100.0 (54 px) | 98.77 |
 
-The entity-pixel column counts the world pixels around and behind an entity too,
-so it is dominated by class 1 here; with id's mip 0 + exact perspective it reads
-93.75 / 99.72 / 99.53 / 98.15 (was 93.75 / 15.92 / 70.97 / 45.76). nonpal% is 0 in
-every case (was up to 0.45).
+(Before classes 1 and 6: 84.76 / 64.07 / 65.83 / 75.65 world, 90.79 / 78.19 /
+90.74 / 94.55 at 640x480.) What remains here is almost all class 7, id's 8-pixel
+affine segments: against id's exact per-pixel perspective the port scores 99.94 /
+99.18 / 99.98 / 99.91. The entity-pixel column counts the world pixels around and
+behind an entity too. nonpal% is 0 in every case (was up to 0.45).
 
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
-1432.386,1397.978,233.254,9.344,-103.449,0`) scores 73.95% world / 74.50% with
-entities, its entity pixels 100.00% (was 71.5 / 71.0 / 21.8). With the viewmodel
-drawn (`--viewmodel --settle 3`), e1m1 scores 84.34%, the same as the world-only
-frame at that settle (84.33; was 79.7 with the gun). At a settle of 3 or more e1m1's
+1432.386,1397.978,233.254,9.344,-103.449,0`) scores 98.58% world / 98.60% with
+entities, its entity pixels 100.00% (788 px). With the viewmodel drawn
+(`--viewmodel --settle 3`), e1m1 scores 95.63%, the same as the world-only frame at
+that settle. At a settle of 3 or more e1m1's
 far arch differs for a harness reason: id's light styles in that frame (its
 `.json`) are the ones the port derives for 0.1 s earlier (measured) — probably id flooring a double
 `cl.time` that the harness hands over rounded to a float. Passing id's `d_lightstylevalue` to
@@ -119,19 +121,21 @@ the port would remove it (not done).
 
 | id's renderer configured as | e1m1 | e1m2 | e1m3 | e1m7 |
 |---|---:|---:|---:|---:|
-| as written (`--spans 8`) | 84.76 | 64.07 | 65.83 | 75.65 |
-| 16-px segments (`--spans 16`, the x86 asm) | 80.39 | 63.79 | 65.33 | 67.98 |
-| exact per-pixel perspective (`--spans 1`) | 86.98 | 64.27 | 66.00 | 80.39 |
-| mip 0 forced (`--c-cmd "d_mipscale 0"`) | 93.13 | 93.59 | 97.13 | 93.35 |
-| mip 0 + exact perspective | 95.63 | 97.41 | 98.39 | 98.68 |
-| ... and the port given id's lightmap stepping (temporary patch, not committed; measured BEFORE the Session 7 fixes) | 99.96 | 95.98 | 99.87 | 99.74 |
+| as written (`--spans 8`) | 97.44 | 97.12 | 99.16 | 94.96 |
+| 16-px segments (`--spans 16`, the x86 asm) | 92.84 | 94.36 | 96.51 | 87.23 |
+| exact per-pixel perspective (`--spans 1`) | 99.94 | 99.18 | 99.98 | 99.91 |
+| mip 0 forced (`--c-cmd "d_mipscale 0"`, both renderers) | 97.27 | 95.77 | 98.65 | 94.52 |
+| mip 0 + exact perspective | 99.93 | 99.88 | 99.98 | 99.91 |
 
-With that last step at 640x480: 99.91 / 94.45 / 99.75 / 99.80, and a pitched and
-rolled view (e1m1, pitch -15 yaw 100 roll 12) 99.96. The e1m2 remainder then was
-the sky and two water pools (classes 3, 4, 8 below, since fixed: the e1m2 sky
-region now matches 99.8%; the pools' scattered residue, ~2%, is probably class 7 —
-id steps turb s/t over 16-pixel segments — not verified). What is left elsewhere (0.04-0.26%) is the
-size of id's own floating-point noise: the oracle built with SSE2 float math
+`d_mipscale` and `d_mipcap` are the port's cvars too, and `compare.py` hands them
+to both sides, so the "mip 0" rows now put both renderers at mip 0 (before the mip
+levels they configured id alone: 93.13 / 93.59 / 97.13 / 93.35 and 95.63 / 97.41 /
+98.39 / 98.68). Mip 0 + exact at 640x480: 99.96 / 99.96 / 99.99 / 99.98; a pitched
+and rolled view (e1m1, `--view=544,288,32,-15,100,12`) 100.00. Over 72 more views
+(the four start positions, 6 yaws x 3 pitches) against id's exact perspective and
+its own mip levels, the mean is 99.99% and the worst 99.83. The e1m2 row's 0.7% at
+`--spans 1` is one face at a finer mip in id than its geometry gives (class 1's
+open note). What is left elsewhere is the size of id's own floating-point noise: the oracle built with SSE2 float math
 instead of x87 (`ORACLE_FPMATH=sse oracle/build.sh`) differs from the x87 build on
 0.003-0.031% of pixels. So **projection, fov, pixel centres, edge rules, near
 clipping, texture alignment, PVS and the camera convention are faithful**; every
@@ -144,12 +148,12 @@ classes a crop is not about removed on id's side where possible.
 
 | # | class | size | verdict |
 |---|---|---|---|
-| 1 | mip level selection | 5-37 pts of exact% | departure |
+| 1 | mip level selection | 5-37 pts of exact% | departure — **fixed** |
 | 2 | alias-model lighting / shading | 80-90% of entity pixels | bug — **fixed** (Session 7) |
 | 3 | liquids and sky drawn overbright | ~75% of liquid/sky pixels | bug — **fixed** |
 | 4 | sky front layer not offset | the whole cloud layer | bug — **fixed** |
 | 5 | weapon viewmodel placement | ~5 pts when drawn | bug — **fixed** |
-| 6 | surface-cache lightmap stepping | 1.5-4.4% | departure |
+| 6 | surface-cache lightmap stepping | 1.5-4.4% | departure — **fixed** |
 | 7 | affine span segments | 1-5% | expected so far (design) |
 | 8 | turb warp rounding | ~20-25% of liquid pixels | departure — **fixed** |
 | 9 | sample-less faces | the e1m1 golden view shows one | departure — **fixed** |
@@ -160,6 +164,14 @@ classes a crop is not about removed on id's side where possible.
    level (`R_DrawSurfaceBlock8_mip1..3`). Distant walls in id are blurrier and
    blotchier; in the port they sparkle. Forcing id to mip 0 moves e1m2 from 60% to
    90%. Largest class by far; also a speed lever (smaller cache blocks).
+   **Fixed** (`surf.rs` `MipView`, `face_surf_block`): the port picks the level as
+   `D_DrawSurfaces` does, `nearzi` over the outline clipped to the frustum's sides,
+   and bakes one `extents >> miplevel` block per face per level from the BSP's own
+   levels. Open: `R_RenderFace` can take a stale `r_rightexit`/`r_leftexit` from an
+   earlier face when the edge that should set it was cached as fully clipped — the
+   face then gets the `1/z` of another face's point, a finer level (e1m2's first
+   frame: face 733, id mip 0 from a point at z 96, the port mip 1). Reproducing it
+   takes id's edge cache and `R_RecursiveWorldNode` order.
 2. **Alias models** (`crops/alias.png`, `crops/fullbright.png`). The port lights
    them with a heuristic (`0.25 + ambient/200`, a fixed-direction Lambert) and a
    linear RGB multiply with no colormap — hence the non-palette colours in the
@@ -210,6 +222,9 @@ classes a crop is not about removed on id's side where possible.
    ladder's last row (a temporary port patch doing id's integer stepping; reverted).
    The comment on `face_surf_block` claims exactness; it is one texel and one
    rounding off. (id's x86 `surf8.s` steps with deltas; not checked against it.)
+   **Fixed** for all four levels (`LightMap::blocklights_into`,
+   `surf::draw_surface_block`): with both renderers at mip 0 and exact perspective
+   the rows went 95.61 / 97.40 / 98.50 / 98.66 -> 99.93 / 99.88 / 99.98 / 99.91.
 7. **Span subdivision** (`crops/spans.png`: vertical stripes where the affine error
    crosses a texel). id divides every 8 pixels (portable C) or 16 (x86 asm) and
    steps s/t linearly between; the port divides per pixel. Documented as a perf
@@ -239,9 +254,11 @@ input null: **1480 fps at 320x200, 535 at 640x480, 192 at 1280x1024**
 -width W -height H +timedemo demo1`). id's renderer cannot go above 1280x1024.
 
 Same view, warm, world only (`compare.py --modes world --bench 100`): the port
-takes **1.7-2.2x** id's time at 320x200, **2.3-2.7x** at 640x480 and **2.7-3.6x** at
-1280x1024 — while also doing more work per pixel (mip 0 everywhere, a divide per
-pixel). Timings are noisy: compare within one sitting.
+takes **0.55-0.81x** id's time at 320x200, **0.69-1.12x** at 640x480 and
+**0.98-1.40x** at 1280x1024 (it was 1.7-3.6x before the polygon span walker of
+PERF_PLAN A1; the mip levels leave a warm frame's cost where it was — they cut the
+rebakes, which a warm static view has none of). The port still divides per pixel.
+Timings are noisy: compare within one sitting.
 
 ## Caveats — what was not verified
 

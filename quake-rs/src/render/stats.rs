@@ -79,6 +79,10 @@ pub struct RenderStats {
     pub surf_cache_hits: u64,
     pub surf_baked: u64,
     pub surf_bypass_baked: u64,
+    /// Texels those bakes (cached and bypass) filled — at their mip level, so a
+    /// distant surface costs a quarter, a sixteenth or a sixty-fourth of its
+    /// mip-0 area (`R_DrawSurface`'s work).
+    pub surf_texels_baked: u64,
 }
 
 impl RenderStats {
@@ -91,7 +95,7 @@ impl RenderStats {
         sub_tris: 0, sub_lm_builds: 0,
         world_pvs_ns: 0, world_sort_ns: 0, world_setup_ns: 0, world_light_ns: 0,
         world_surf_ns: 0,
-        surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0,
+        surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0, surf_texels_baked: 0,
     };
 }
 
