@@ -90,7 +90,7 @@ See `quake-rs/README.md` for the full subsystem table, the C-source provenance o
 
 ```sh
 cd quake-rs
-cargo test          # 575 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
+cargo test          # 588 lib + 1 bin + 8 integration tests, no game data required (synthetic fixtures)
 cargo run --release --bin quaketool -- --help
 ```
 

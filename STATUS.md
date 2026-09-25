@@ -25,6 +25,22 @@ Proof: `quaketool play pak0.pak demo1,walk_e1m1,walk_e1m3,fire_e1m1,quad_e1m1
 byte for byte. Frame hashes, ABI, goldens, simbench/census, tests (moved
 ones counted), clippy and the eight verify scripts unchanged.
 
+## Second review fixes, client side (2026-09-25, branch `quake/polish3`)
+
+The second review's client/platform findings (AUDIT.md's section of the same
+name): no weapon-icon flash at level/load/demo start (id stamps the signon's
+items before CL_LerpPoint, so it is over by the first frame); a busy frame
+can no longer drop a mover's stop sound past the 12-sound cap (the hum
+looped forever); console prints reach the notify lines, and "Go to console"
+is Con_ToggleConsole_f; Tab pressed in the menu is not +showscores after it;
+old saves load with the player named; the underwater warp keeps its tables;
+demo particles fall by the sv_gravity cvar. polish2's quake-wasm leftovers:
+only a program start resets the menu cursors; the host drives the server
+with Host_FilterTime's double; the page clamps each side before the master
+volume and re-spatialises one-shots (CENSUS L15 closed). **Visible:** the
+page's canvas is the largest 4:3 box the window fits (976x732 at 1440x900,
+never under 640x480), so the 1:1 status bar and menus are a sensible size.
+
 ## Second review fixes (2026-09-25, branch `quake/polish2`)
 
 The second review's findings outside `quake-wasm/src/` (AUDIT.md's section
