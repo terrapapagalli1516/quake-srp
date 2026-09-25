@@ -1554,7 +1554,8 @@ aside:
 The second review's client/platform findings, polish2's quake-wasm
 follow-ups, and one presentation fix. One commit each; the C followed and
 the evidence are in the commit messages. On `quake/overnight` after
-`quake/polish2`: goldens `4807aaa1` / `9ae2b478` / `2ca0f916` unchanged.
+`quake/polish2` and `quake/edge`: goldens `4807aaa1` / `9ae2b478` /
+`c65b7046` unchanged.
 
 - ✅ **Every carried weapon flashed at each level start** (MED) — restart,
   load and demo start too. The port stamped `cl.item_gettime` against the
