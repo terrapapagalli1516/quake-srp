@@ -31,6 +31,7 @@ use crate::draw::{
     blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, HUD_TRANSPARENT, HUD_VIRT_W,
     MENU_VIRT_H, MENU_VIRT_W,
 };
+use crate::keys::{default_bindings, keynum_to_string, K_ESCAPE};
 use crate::math::{cross, dot, normalize, sub, Vec3};
 use crate::screen::{VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use alias::{draw_alias_model, draw_viewmodel};
@@ -1079,107 +1080,6 @@ pub const BIND_MOVEDOWN: usize = 17;
 /// binding. `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
 pub const BIND_SIZEUP: usize = NUM_BINDNAMES;
 pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
-
-/// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
-/// the 128+ block. Only the keys a browser page can sensibly deliver are named
-/// here; the bindings table spans the full `0..256` like the C `keybindings`.
-pub const K_TAB: u8 = 9;
-pub const K_ENTER: u8 = 13;
-pub const K_ESCAPE: u8 = 27;
-pub const K_SPACE: u8 = 32;
-pub const K_BACKSPACE: u8 = 127;
-pub const K_UPARROW: u8 = 128;
-pub const K_DOWNARROW: u8 = 129;
-pub const K_LEFTARROW: u8 = 130;
-pub const K_RIGHTARROW: u8 = 131;
-pub const K_ALT: u8 = 132;
-pub const K_CTRL: u8 = 133;
-pub const K_SHIFT: u8 = 134;
-pub const K_F1: u8 = 135;
-pub const K_F12: u8 = 146;
-pub const K_INS: u8 = 147;
-pub const K_DEL: u8 = 148;
-pub const K_PGDN: u8 = 149;
-pub const K_PGUP: u8 = 150;
-pub const K_HOME: u8 = 151;
-pub const K_END: u8 = 152;
-pub const K_MOUSE1: u8 = 200;
-pub const K_MOUSE2: u8 = 201;
-pub const K_MOUSE3: u8 = 202;
-
-/// `Key_KeynumToString` (keys.c): printable ASCII (33..=126) is the character
-/// itself (lowercase, as `Key_Event` delivers it); the named specials come from
-/// the `keynames` table; anything else is the C's `<UNKNOWN KEYNUM>` (shortened
-/// to fit the 320-wide menu column).
-pub fn keynum_to_string(keynum: u8) -> String {
-    if keynum > 32 && keynum < 127 {
-        return (keynum as char).to_string();
-    }
-    match keynum {
-        K_TAB => "TAB",
-        K_ENTER => "ENTER",
-        K_ESCAPE => "ESCAPE",
-        K_SPACE => "SPACE",
-        K_BACKSPACE => "BACKSPACE",
-        K_UPARROW => "UPARROW",
-        K_DOWNARROW => "DOWNARROW",
-        K_LEFTARROW => "LEFTARROW",
-        K_RIGHTARROW => "RIGHTARROW",
-        K_ALT => "ALT",
-        K_CTRL => "CTRL",
-        K_SHIFT => "SHIFT",
-        K_INS => "INS",
-        K_DEL => "DEL",
-        K_PGDN => "PGDN",
-        K_PGUP => "PGUP",
-        K_HOME => "HOME",
-        K_END => "END",
-        K_MOUSE1 => "MOUSE1",
-        K_MOUSE2 => "MOUSE2",
-        K_MOUSE3 => "MOUSE3",
-        f @ K_F1..=K_F12 => return format!("F{}", f - K_F1 + 1),
-        _ => "UNKNOWN",
-    }
-    .to_string()
-}
-
-/// The boot key bindings: id's `default.cfg` (from the pak) for every key the
-/// page delivers, PLUS this port's established WASD layout (the shareware
-/// `default.cfg` predates WASD — it binds `a` to `+lookup` and `d` to `+moveup`;
-/// this port has always shipped WASD movement, so WASD overrides those four,
-/// exactly as a player's `config.cfg` would).
-fn default_bindings() -> [Option<u8>; 256] {
-    let mut b: [Option<u8>; 256] = [None; 256];
-    let mut bind = |key: u8, cmd: usize| b[key as usize] = Some(cmd as u8);
-    // default.cfg (id, verbatim — the keys the page can deliver):
-    bind(K_ALT, BIND_STRAFE);
-    bind(b',', BIND_MOVELEFT);
-    bind(b'.', BIND_MOVERIGHT);
-    bind(K_DEL, BIND_LOOKDOWN);
-    bind(K_PGDN, BIND_LOOKUP);
-    bind(K_END, BIND_CENTERVIEW);
-    bind(b'z', BIND_LOOKDOWN);
-    bind(K_SHIFT, BIND_SPEED);
-    bind(b'+', BIND_SIZEUP);
-    bind(b'=', BIND_SIZEUP);
-    bind(b'-', BIND_SIZEDOWN);
-    bind(K_CTRL, BIND_ATTACK);
-    bind(K_UPARROW, BIND_FORWARD);
-    bind(K_DOWNARROW, BIND_BACK);
-    bind(K_LEFTARROW, BIND_LEFT);
-    bind(K_RIGHTARROW, BIND_RIGHT);
-    bind(K_SPACE, BIND_JUMP);
-    bind(b'/', BIND_CHANGEWEAPON);
-    bind(K_MOUSE1, BIND_ATTACK);
-    // This port's established layout (overrides default.cfg's a=+lookup,
-    // d=+moveup; w/s were unbound there):
-    bind(b'w', BIND_FORWARD);
-    bind(b's', BIND_BACK);
-    bind(b'a', BIND_MOVELEFT);
-    bind(b'd', BIND_MOVERIGHT);
-    bind(b'c', BIND_MOVEDOWN);
-    b
-}
 
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A
@@ -3181,6 +3081,7 @@ pub fn draw_console(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::{K_CTRL, K_MOUSE1, K_SHIFT, K_SPACE, K_UPARROW};
     use crate::render::fixtures::{
         ramp_palette, solid_pic, synthetic_liquid_pixels, synthetic_sky_pixels,
     };
@@ -4573,19 +4474,6 @@ mod tests {
         assert!(m.visible);
         assert_eq!(m.screen(), MenuScreen::Main);
         assert_eq!(m.cursor(), 0);
-    }
-
-    #[test]
-    fn keynum_names_match_key_keynum_to_string() {
-        assert_eq!(keynum_to_string(b'a'), "a");
-        assert_eq!(keynum_to_string(b'/'), "/");
-        assert_eq!(keynum_to_string(K_SPACE), "SPACE");
-        assert_eq!(keynum_to_string(K_UPARROW), "UPARROW");
-        assert_eq!(keynum_to_string(K_MOUSE1), "MOUSE1");
-        assert_eq!(keynum_to_string(K_F1), "F1");
-        assert_eq!(keynum_to_string(K_F12), "F12");
-        assert_eq!(keynum_to_string(K_DEL), "DEL");
-        assert_eq!(keynum_to_string(0), "UNKNOWN");
     }
 
     #[test]
