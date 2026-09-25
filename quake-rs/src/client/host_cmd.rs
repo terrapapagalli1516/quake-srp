@@ -88,7 +88,7 @@ pub fn run_game_command(
         // REAL chain: suicide frame, frag penalty, respawn() — which in single
         // player issues localcmd("restart\n")). NOT a health hack: the QuakeC
         // owns the death. The pending restart is honoured HERE, not left for
-        // step_walk, because client_frame clears stale requests at the top of
+        // walk_frame, because client_frame clears stale requests at the top of
         // each frame — and it matches the C, where the queued "restart" Cbuf
         // text executes right after the kill command itself.
         "kill" => match w.server.client_kill() {
@@ -201,7 +201,7 @@ pub fn build_walk_map(pak: Pak, map: &str, sound: &mut Vec<SoundCall>) -> Option
 
     // The level is committed past this point (nothing below fails). Tear down
     // the previous level/mode's looping audio and register this level's placed
-    // `ambientsound()` loops (torches, wind, hums) for the page to start —
+    // `ambientsound()` loops (torches, wind, hums) for the sound layer to start —
     // PF_ambientsound wrote these into the signon ONCE; the QuakeC registered
     // them all during spawn_entities, so one drain captures them all.
     sound.push(SoundCall::StopAll);
@@ -283,7 +283,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
         return;
     }
     // Capture the new level's placed ambient loops now (registered during
-    // spawn_entities); committed to the page only once the swap succeeds below.
+    // spawn_entities); committed to the sound layer only once the swap succeeds below.
     let statics = ns.drain_static_sounds();
     let Ok(player) = ns.connect_client_with_parms(parms) else { return };
     let (yaw, pitch) = spawn_view_angles(&ns, player);
@@ -344,7 +344,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     let _ = w.server.drain_temp_entities();
     let _ = w.server.drain_messages();
     // Looping audio: stop the OLD level's loops (S_StopAllSounds on changelevel)
-    // and hand the page the NEW level's placed ambient loops + a fresh ambient
+    // and hand the sound layer the NEW level's placed ambient loops + a fresh ambient
     // ramp, captured above right after spawn_entities.
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(statics));
@@ -478,7 +478,7 @@ pub fn build_walk_savegame(pak: Pak, text: &str, sound: &mut Vec<SoundCall>) -> 
 
     // Capture this load's placed ambient loops (registered while the map's
     // spawn functions re-ran inside load_savegame) BEFORE the server moves
-    // into the Walk; committed to the page only after assembly succeeds.
+    // into the Walk; committed to the sound layer only after assembly succeeds.
     let statics = server.drain_static_sounds();
 
     let mut w = assemble_walk(

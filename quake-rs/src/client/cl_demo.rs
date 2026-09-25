@@ -160,7 +160,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
     let mut te_sounds: Vec<crate::server::SoundEvent> = Vec::new();
     for ev in &tents {
         // Beam types refresh the entity's beam slot (CL_ParseBeam) with the
-        // frame's recorded server time; step_demo expands the live beams into
+        // frame's recorded server time; demo_frame expands the live beams into
         // bolt-model instances every render (CL_UpdateTEnts), exactly like the
         // live walk.
         if let Some(bm) = BeamModel::from_te_type(ev.te_type) {
@@ -168,7 +168,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
             continue;
         }
         // Reuse the live-walk mapping (explosion/impact/splash) — including
-        // its client-side impact sound, exactly like step_walk's te_sounds.
+        // its client-side impact sound, exactly like walk_frame's te_sounds.
         if let Some(name) = spawn_temp_entity(&mut d.particles, ev, now, &mut d.prng) {
             te_sounds.push(crate::server::SoundEvent {
                 entity: 0,
@@ -183,7 +183,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
     }
     // The RECORDED svc_sound one-shots (CL_ParseStartSoundPacket ->
     // S_StartSound): queue through the SAME spatialized path live play uses.
-    // The listener is the recorded camera pose, which step_demo refreshes
+    // The listener is the recorded camera pose, which demo_frame refreshes
     // every frame; the recorded view entity's own sounds (weapon fire, pain
     // grunts) get the full-volume centred treatment via the view_entity key.
     if !sounds.is_empty() {
@@ -192,8 +192,8 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
     if !te_sounds.is_empty() {
         sound.push(SoundCall::Start { events: te_sounds, view_entity: d.demo.viewentity as i32 });
     }
-    // svc_stopsound: hand the (entity, channel) stops to the page, which
-    // stop()s its registered source for that key (S_StopSound).
+    // svc_stopsound: hand the (entity, channel) stops to the sound layer (the
+    // page stop()s its registered source for that key, S_StopSound).
     sound.push(SoundCall::Stop(stops));
     // svc_damage (V_ParseDamage, view.c): bump the damage cshift and compute
     // the directional view kick from the recorded attack origin.
@@ -394,14 +394,14 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
         // is a no-op here (v_idlescale defaults to 0 outside intermission);
         // the 1/32 anti-node-line epsilon is omitted, matching this port's
         // live walk. The listener pose below deliberately stays UNbobbed
-        // (audio panning must not jitter with the head-bob), like step_walk.
+        // (audio panning must not jitter with the head-bob), like walk_frame.
         let vel = client.velocity;
         let speed_xy = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
         let bob = render::view_bob(speed_xy, f.time);
         let mut eye = f.view_origin; // view entity origin + recorded viewheight
         eye[2] += bob;
         // Stair-step smoothing (V_CalcRefdef ~960): the same port as
-        // step_walk's, driven by the recorded onground flag + the raw view
+        // walk_frame's, driven by the recorded onground flag + the raw view
         // entity origin z.
         let origin_z = f.view_entity_origin[2];
         let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
@@ -448,7 +448,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     // Sound listener pose + the per-leaf ambient channels follow the demo
     // camera (the C's S_Update runs in demo playback too — the recorded e1m3
     // run drifts past water and open sky, and its placed torch loops pan with
-    // the recorded view). Forward/right are the level yaw basis like step_walk.
+    // the recorded view). Forward/right are the level yaw basis like walk_frame.
     {
         let yaw_rad = (f.view_angles[1] as f64).to_radians();
         let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
@@ -464,7 +464,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     // stream) is passed as (world pos, palette index) so blood/puffs/explosions
     // draw into the scene sharing its z-buffer. Demos carry no dynamic lights
     // here (empty; a deferred LOW).
-    // R_DrawParticles' order, as in step_walk: retire (`die < cl.time`), draw,
+    // R_DrawParticles' order, as in walk_frame: retire (`die < cl.time`), draw,
     // then move and ramp.
     d.particles.retire(f.time);
     let parts: Vec<([f32; 3], u8)> =
@@ -582,7 +582,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
         // Status bar from the RECORDED cl.stats (svc_clientdata) — the C's
         // Sbar_Draw runs identically during demo playback, so the attract loop
         // shows the recorded player's health/ammo/armour/items exactly like
-        // live play. Drawn under the menu/console like step_walk's HUD (the C
+        // live play. Drawn under the menu/console like walk_frame's HUD (the C
         // draws the sbar regardless of key_dest; overlays paint on top).
         // draw_hud_into's dead-player branch shows the solo scoreboard when
         // the recorded health hits 0, like Sbar_Draw's scoreboard flip.
@@ -616,7 +616,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
 
     // On-screen messages from the recorded svc_print / svc_centerprint stream,
     // drawn through the same overlays live play uses, with the same key_dest +
-    // intermission gating as step_walk. Expiries live on the recorded clock.
+    // intermission gating as walk_frame. Expiries live on the recorded clock.
     if let Some((_, exp)) = &d.centerprint {
         if f.time >= *exp {
             d.centerprint = None;

@@ -128,11 +128,11 @@ pub struct Walk {
     /// way — in water it pushes up, on land it just jumps.
     pub in_down: bool,
     /// A one-shot impulse (weapon switch etc.) queued by `set_impulse`, applied
-    /// to the next `step_walk` UserCmd then cleared — matching how Quake's
+    /// to the next `walk_frame` UserCmd then cleared — matching how Quake's
     /// `impulse` console command fires once. 0 means "no impulse this frame".
     pub next_impulse: i32,
     /// This frame's bindings-derived keyboard input (CL_BaseMove/CL_AdjustAngles
-    /// over the page-held keys), refreshed by `step` before `step_walk` runs.
+    /// over the page-held keys), refreshed by `step` before `walk_frame` runs.
     pub key_move: KeyMove,
     /// The `viewsize` cvar this frame (the Options "Screen size" slider),
     /// refreshed by `step` from the menu before stepping, like `key_move`:
@@ -253,7 +253,7 @@ pub struct DemoPlay {
     pub demo: Demo,
     /// The archive, kept open so the recorded `svc_sound` one-shots can load
     /// their WAV bytes on demand — the demo's audio runs through the SAME
-    /// `queue_sounds` path live play uses.
+    /// `S_StartSound` path live play uses.
     pub pak: Pak,
     /// Parsed model per precache index (None for non-`.mdl` / missing).
     pub models: Vec<Option<Mdl>>,

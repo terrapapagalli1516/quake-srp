@@ -358,7 +358,7 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
     stamp_item_gettime(&mut w.cl_items, &mut w.item_gettime, items, now_sv);
 
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
-    //    voices) to the page's audio queue.
+    //    voices) to the sound layer.
     let events = w.server.drain_sounds();
     sound.push(SoundCall::Start { events, view_entity: w.player });
 
@@ -1105,7 +1105,7 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
     }
 
     // The main-menu overlay is drawn by the `step` dispatcher (the menu lives at
-    // the App level now so it can overlay walk OR the attract demo); step_walk no
+    // the App level now so it can overlay walk OR the attract demo); walk_frame no
     // longer draws it. The deferred cshifts ride out with the frame so the
     // dispatcher tints the whole composited image (HUD + menu + console included).
     lap(Phase::Hud2d);

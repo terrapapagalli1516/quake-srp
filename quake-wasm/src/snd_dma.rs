@@ -32,7 +32,7 @@ thread_local! {
     /// page reads these via the `sound_origin_*`/`sound_volume`/`sound_attenuation`
     /// exports after each non-zero `poll_sound`.
     static SND_CUR: RefCell<SndParams> = const { RefCell::new(SndParams::zero()) };
-    /// The current listener pose, refreshed every walk `step`: eye position plus
+    /// The current listener pose, refreshed by every client frame's `S_Update`: eye position plus
     /// the forward and right unit vectors derived from the player's yaw. The page
     /// reads these via `listener_*` exports to spatialize each sound.
     static LISTENER: RefCell<Listener> = const { RefCell::new(Listener::zero()) };
@@ -461,7 +461,7 @@ fn ramp_ambient_channels(leaf_levels: Option<&[u8; NUM_AMBIENTS]>, frametime: f3
     AMBIENT_VOLS.with(|v| *v.borrow_mut() = vols);
 }
 
-/// The listener (player) pose as of the last walk `step`: eye position and the
+/// The listener pose as of the last client frame's `S_Update`: eye position and the
 /// forward/right unit vectors derived from the player's yaw. The page reads
 /// these to spatialize each sound (distance from `pos`, pan via dot with right).
 #[no_mangle]

@@ -47,7 +47,7 @@ pub const CL_ANGLESPEEDKEY: f32 = 1.5;
 pub const V_CENTERSPEED: f32 = 500.0;
 
 /// One frame of bindings-derived keyboard input, computed in `step` from the
-/// held-key table + the menu's binding table and consumed by `step_walk` — a
+/// held-key table + the menu's binding table and consumed by `walk_frame` — a
 /// port of `CL_BaseMove`/`CL_AdjustAngles` (cl_input.c) over this port's
 /// permanently-held key states (`CL_KeyState`'s fractional first-frame impulse
 /// timing needs sub-frame key timestamps the page doesn't deliver; held = 1.0).
