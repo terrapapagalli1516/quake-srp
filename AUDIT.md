@@ -59,7 +59,7 @@ which were byte-identical (STATUS.md).
 
 Everything known to differ from id's WinQuake, or not yet checked, gathered from the
 sections below, `CENSUS.md`, `oracle/README.md` and `PERF_PLAN.md`, one line each with
-where it came from. Items marked *(2026-06)* were not re-checked tonight.
+where it came from. Items marked *(2026-06)* were not re-checked on 2026-09-25.
 
 **Decisions, not work**
 - Four control departures are on by default: mouse look held while the pointer is locked,
