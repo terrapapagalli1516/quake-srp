@@ -163,6 +163,49 @@ mod tests {
         );
     }
 
+    /// Second review: Con_Print stamps con_times for every line it lays into
+    /// the console text, not only the game's svc_prints, so what the host
+    /// prints is a notify line too — "Saving game to s1.sav..." and "done."
+    /// after a save from the menu (M_Save_Key sets key_dest = key_game and
+    /// stuffs `save s1`). Toggling the console (con_times zeroed) and a level
+    /// load (SCR_EndLoadingPlaque's Con_ClearNotify) drop them; the `map`
+    /// command's own "loading" line (Host_Map_f prints none) stays out.
+    #[test]
+    fn console_prints_reach_the_notify_lines() {
+        use crate::app::boot;
+        use crate::host::step;
+        use crate::host_cmd::execute_console_command;
+        use crate::menu::{menu_down, menu_select, menu_visible};
+        use crate::test_util::walk_mut;
+        let notify = || walk_mut(|w| w.notify.visible(w.host_time).iter().map(|l| l.to_string()).collect::<Vec<_>>());
+        assert_eq!(boot(), 1); // the menu is up over e1m1
+        step(0.05);
+        menu_select(); // Single Player
+        menu_down();
+        menu_down();
+        menu_select(); // Save
+        menu_down();
+        menu_select(); // slot 1: the menu closes and `save s1` runs
+        assert_eq!(menu_visible(), 0);
+        assert_eq!(notify(), ["Saving game to s1.sav...", "done."]);
+        step(0.05);
+        assert_eq!(notify(), ["Saving game to s1.sav...", "done."], "shown over the game");
+        let scrollback = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().count());
+        assert!(scrollback >= 2);
+        // Printed with the console down: gone when it goes up again.
+        console_toggle();
+        execute_console_command("echo typed in the console");
+        console_toggle();
+        assert!(notify().is_empty());
+        // A level load clears them, and `map`'s own line is console-only.
+        execute_console_command("echo before the map");
+        assert_eq!(notify(), ["before the map"]);
+        execute_console_command("map e1m2");
+        assert!(notify().is_empty(), "{:?}", notify());
+        let last = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
+        assert_eq!(last.as_deref(), Some("loading e1m2"));
+    }
+
     #[test]
     fn console_toggle_flips_visibility_and_gates_typing() {
         // ensure_app exists; start closed.

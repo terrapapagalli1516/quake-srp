@@ -140,6 +140,29 @@ impl App {
             self.walk.as_ref().map(|w| &w.palette)
         }
     }
+
+    /// `Con_Print`'s `con_times` for what the host printed on the console
+    /// ([`Console::take_unnotified`](quake_rs::console::Console::take_unnotified)):
+    /// the active mode's notify lines get it, stamped on the clock they age
+    /// on, so "Saving game to s0.sav..." after a menu save shows over the game
+    /// as in the C. Run after every [`ensure_app`] call, i.e. as soon as the
+    /// text is printed: a level load that follows (a fresh mode, whose notify
+    /// lines start empty) drops it, as SCR_EndLoadingPlaque's Con_ClearNotify
+    /// does.
+    fn con_notify(&mut self) {
+        let text = self.console.take_unnotified();
+        if text.is_empty() {
+            return;
+        }
+        if self.mode == 1 {
+            if let Some(d) = self.demo.as_mut() {
+                let now = d.demo.frames.get(d.idx).map_or(0.0, |f| f.time);
+                d.notify.lay(&text, now);
+            }
+        } else if let Some(w) = self.walk.as_mut() {
+            w.notify.lay(&text, w.host_time);
+        }
+    }
 }
 
 thread_local! {
@@ -297,6 +320,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
         }
         if let Some(a) = c.borrow_mut().as_mut() {
             f(a);
+            a.con_notify();
         }
     });
 }
