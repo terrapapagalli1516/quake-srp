@@ -13,10 +13,8 @@
 //! `save.rs` reuses the tokenizer and the epair parsers, as the C's
 //! `Host_Loadgame_f` shares `COM_Parse` / `ED_ParseEdict`.
 
-use super::{
-    cvar_value, set_skill_value, skill_value, snapshot_lightstyles, Server, SpawnReport,
-    SETTLE_FRAMETIME,
-};
+use super::host::{set_skill_value, skill_value};
+use super::{cvar_value, snapshot_lightstyles, Server, SpawnReport, SETTLE_FRAMETIME};
 use crate::math::Vec3;
 use crate::progs::EType;
 use crate::Result;

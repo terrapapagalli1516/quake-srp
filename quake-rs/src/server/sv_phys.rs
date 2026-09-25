@@ -13,11 +13,12 @@
 //! The collision queries are world.c's (`sv_world.rs`); the player's wish
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
+use super::host::{reset_changelevel, reset_restart};
 use super::lightstyle::snapshot_lightstyles;
 use super::msg::{reset_svc_recognizer, reset_temp_entity_decoder};
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
 use super::{
-    reset_changelevel, reset_restart, FrameReport, Server, UserCmd, CONTENTS_EMPTY,
+    FrameReport, Server, UserCmd, CONTENTS_EMPTY,
     CONTENTS_SOLID, FL_FLY, FL_ONGROUND, FL_SWIM, FL_WATERJUMP, MOVETYPE_BOUNCE, MOVETYPE_FLY,
     MOVETYPE_FLYMISSILE, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_PUSH, MOVETYPE_STEP,
     MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_BSP, SOLID_NOT, SOLID_TRIGGER, SV_GRAVITY, SV_MAXVELOCITY,
