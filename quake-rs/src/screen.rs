@@ -5,7 +5,7 @@
 //! `SCR_UpdateScreen`'s tile-cleared border, `SCR_DrawCenterString`.
 
 use crate::draw::{
-    draw_char_scaled, draw_string_scaled, draw_tile_clear, HUD_VIRT_W, MENU_VIRT_H, MENU_VIRT_W,
+    draw_char_scaled, draw_tile_clear, HUD_VIRT_W, MENU_VIRT_H, MENU_VIRT_W,
 };
 use crate::render::Image;
 
@@ -218,6 +218,17 @@ pub fn compose_view(
     img
 }
 
+/// `SCR_DrawCenterString`'s `y = vid.height*0.35` for a short message. The
+/// double 0.35 is a hair under 0.35 and x86 Quake multiplies in the x87's
+/// 64-bit mantissa (Sys_HighFPPrecision outside the 3-D view), where the
+/// product is exact: when `height*0.35` is a whole number the truncation
+/// lands one row higher — 69 on a 200-line screen, not 70 (measured: the
+/// oracle's x87 build draws row 69). In f64 the product rounds up to 70.0,
+/// so this is the exact floor in integers: `floor(height*0.35 - epsilon)`.
+fn center_string_top(vid_h: i32) -> i32 {
+    (vid_h * 7 - 1).div_euclid(20)
+}
+
 /// `SCR_DrawCenterString` (screen.c) in its finale mode: the centered text block
 /// revealed one character at a time. `remaining` is the C's
 /// `scr_printspeed.value * (cl.time - scr_centertime_start)` budget — note the
@@ -249,8 +260,8 @@ pub fn draw_center_string_revealed(
     let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
 
     let lines: Vec<&str> = text.split('\n').collect();
-    // scr_center_lines <= 4 => y = vid.height*0.35 (virtual 70); taller => 48.
-    let mut vy = if lines.len() <= 4 { 200.0 * 0.35 } else { 48.0 };
+    // scr_center_lines <= 4 => y = vid.height*0.35; taller => 48.
+    let mut vy = if lines.len() <= 4 { center_string_top(MENU_VIRT_H as i32) as f32 } else { 48.0 };
     let mut budget = remaining;
     for line in lines {
         // The C scans the line width up to 40 characters.
@@ -271,31 +282,15 @@ pub fn draw_center_string_revealed(
     }
 }
 
-/// Draw a `centerprint` message (SCR_DrawCenterString): each '\n'-split line is
-/// centered horizontally in the 320x200 virtual screen and the block is centered
-/// vertically, scaled to the framebuffer (`image.w/320`, the HUD/menu scale).
-/// No-op without conchars or on an empty frame.
+/// Draw a `centerprint` message: `SCR_DrawCenterString` outside the finale
+/// (`remaining = 9999`, the whole string) — [`draw_center_string_revealed`].
 pub fn draw_centerprint(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
     palette: &[[u8; 3]; 256],
     text: &str,
 ) {
-    if image.w == 0 || image.h == 0 {
-        return;
-    }
-    let scale = image.w as f32 / HUD_VIRT_W;
-    let lines: Vec<&str> = text.split('\n').collect();
-    // SCR_DrawCenterString: short messages (<= 4 lines) sit in the upper third at
-    // y = vid.height*0.35 (200*0.35 = 70 in the virtual screen); taller blocks
-    // start at y = 48 so they don't run off the bottom. NOT dead-centre.
-    let mut vy = if lines.len() <= 4 { 200.0 * 0.35 } else { 48.0 };
-    for line in lines {
-        let w = line.len() as f32 * 8.0;
-        let vx = ((HUD_VIRT_W - w) * 0.5).max(0.0);
-        draw_string_scaled(image, conchars, vx, vy, line, scale, 0.0, 0.0, palette);
-        vy += 8.0;
-    }
+    draw_center_string_revealed(image, conchars, palette, text, -1);
 }
 
 #[cfg(test)]
@@ -305,6 +300,27 @@ mod tests {
     use crate::render::fixtures::{ramp_palette, solid_conchars, test_backtile};
     use crate::sbar::draw_finale_overlay;
     use crate::wad::Qpic;
+
+    #[test]
+    fn centerprint_starts_at_row_69_like_x87_quake() {
+        // SCR_DrawCenterString: y = vid.height*0.35, 0.35 a double a hair
+        // under 0.35, the product exact in the x87's extended precision:
+        // (int)69.99999999999999556 = 69 on the 320x200 screen, not 70.
+        assert_eq!(center_string_top(200), 69);
+        assert_eq!(center_string_top(400), 139);
+        assert_eq!(center_string_top(201), 70); // 70.35
+        assert_eq!(center_string_top(480), 167); // 168 exactly -> 167
+        let pal = ramp_palette();
+        let cc = solid_conchars();
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_centerprint(&mut img, &cc, &pal, "AB");
+        let lit = |y: usize| (0..320).any(|x| img.rgb[y * 320 + x] != [0, 0, 0]);
+        let rows: Vec<usize> = (0..200).filter(|&y| lit(y)).collect();
+        assert_eq!(rows, (69..=76).collect::<Vec<_>>(), "rows 69..=76");
+        // (320 - 2*8)/2 = 152: the line centers on the screen.
+        assert_ne!(img.rgb[69 * 320 + 152], [0, 0, 0]);
+        assert_eq!(img.rgb[69 * 320 + 151], [0, 0, 0]);
+    }
 
     #[test]
     fn finale_center_string_reveals_at_printspeed() {

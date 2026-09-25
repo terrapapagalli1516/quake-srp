@@ -96,7 +96,7 @@ SCENARIOS: dict[str, list] = {
                              ("lg", IT_LIGHTNING, 100)]), []),
     "faces": stats(health=100) + SETTLE + sum(
         ([("field", "health", hp), ("frames", 1), ("shot", f"hp{hp}")] for hp in (250, 99, 79, 59, 39, 19, 5)),
-        []) + [("faceanim",), ("frames", 1), ("shot", "pain"), ("field", "health", -5), ("frames", 1),
+        []) + [("faceanim",), ("shot", "pain"), ("field", "health", -5), ("frames", 1),
                ("shot", "dead")],
     "powerups": stats(items=IT_SHOTGUN | IT_AXE | IT_SHELLS | IT_QUAD) + SETTLE + [("shot", "quad")]
     + [("field", "items", IT_SHOTGUN | IT_AXE | IT_SHELLS | IT_INVISIBILITY), ("frames", 25), ("shot", "invis")]

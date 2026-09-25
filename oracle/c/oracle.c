@@ -360,9 +360,12 @@ static void Oracle_Intermission_f (void)
 		SCR_CenterPrint (Oracle_Unescape (Oracle_ArgsFrom (3)));
 }
 
+// V_ParseDamage's pain face; the damage that sets it also changes a stat, whose
+// CL_ParseClientdata calls Sbar_Changed -- without one the sbar is not redrawn
 static void Oracle_FaceAnim_f (void)
 {
 	cl.faceanimtime = cl.time + 0.2;
+	Sbar_Changed ();
 }
 
 static void Oracle_Key_f (void)

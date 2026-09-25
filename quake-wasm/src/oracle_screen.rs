@@ -30,8 +30,8 @@
 //! | `print TEXT` | a QuakeC print (`\n` = newline): the notify lines and the console |
 //! | `intermission N T [TEXT]` | svc_intermission (1) / svc_finale (2) / svc_cutscene (3), completed time T |
 //! | `faceanim` | V_ParseDamage's pain face (`faceanimtime = cl.time + 0.2`) |
-//! | `clocks REALTIME HOST_TIME CLTIME CENTERSTART` | hand the C frame's clocks to the port before a shot |
-//! | `shot PATH` | render a frozen frame (`step(0)`) and write the framebuffer as `PATH` (P6 PPM) |
+//! | `clocks REALTIME HOST_TIME CLTIME CENTERSTART` | the C shot frame's clocks, for the next `shot` |
+//! | `shot PATH` | one more frame (`step(0.1)`, as the C's shot is the frame that ran `oracle_shot`), then the `clocks` handed over and the frame drawn again frozen (`step(0)`); writes the framebuffer as `PATH` (P6 PPM) |
 
 use std::cell::Cell;
 
@@ -142,6 +142,7 @@ fn write_ppm(path: &str) {
 }
 
 fn run(script: &str) {
+    let mut clocks: Option<(f64, f32, f32, f32)> = None;
     for (n, raw) in script.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -223,18 +224,24 @@ fn run(script: &str) {
                 let w = a.walk.as_mut().expect("a walk");
                 w.faceanimtime = w.server.time() + 0.2;
             }),
-            "clocks" => {
-                let (realtime, host_time, cltime, cstart) = (num(0), num(1), num(2), num(3));
-                ensure_app(|a| {
-                    a.realtime = realtime as f64;
-                    a.clock = host_time;
-                    if let Some(w) = a.walk.as_mut() {
-                        // The finale's reveal, as long into it as the C's.
-                        w.finale_start = w.clock - (cltime - cstart);
-                    }
-                });
-            }
+            "clocks" => clocks = Some((num(0) as f64, num(1), num(2), num(3))),
             "shot" => {
+                // The C's shot frame is a whole host frame (the one that ran
+                // `oracle_shot`): run one, then hand the port that frame's
+                // clocks and draw it again, frozen.
+                step(0.1);
+                if let Some((realtime, host_time, cltime, cstart)) = clocks.take() {
+                    ensure_app(|a| {
+                        // Host_FilterTime measures from oldrealtime: move it along.
+                        a.oldrealtime += realtime - a.realtime;
+                        a.realtime = realtime;
+                        a.clock = host_time;
+                        if let Some(w) = a.walk.as_mut() {
+                            // The finale's reveal, as long into it as the C's.
+                            w.finale_start = w.clock - (cltime - cstart);
+                        }
+                    });
+                }
                 step(0.0);
                 write_ppm(rest);
             }
