@@ -1562,6 +1562,7 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
         vidmodes: lmp("gfx/vidmodes.lmp"),
         menudot,
         help,
+        textbox: std::array::from_fn(|i| lmp(quake_rs::menu::TEXTBOX_PICS[i])),
     };
     let conchars = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok()).and_then(|w| {
         let lump = w.lump("conchars")?;

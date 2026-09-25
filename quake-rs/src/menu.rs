@@ -5,7 +5,7 @@
 //! `M_DrawSlider`, `bindnames`; the video list is `vid_win.c`'s `VID_MenuDraw`.
 
 use crate::draw::{
-    blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, fill_rect, screen_2d,
+    blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, screen_2d,
     MENU_VIRT_W,
 };
 use crate::keys::{default_bindings, keynum_to_string, K_ESCAPE};
@@ -433,6 +433,14 @@ pub struct Menu {
     /// Which screen the Quit prompt was raised from, restored on "No"
     /// (`m_quit_prevstate` / `wasInMenus`).
     quit_prev: MenuScreen,
+    /// `wasInMenus`: the prompt rose over a menu (drawn under it, and "No"
+    /// returns to it) rather than over the game.
+    quit_in_menus: bool,
+    /// `msgNumber`: which of the eight [`QUIT_MESSAGES`] the prompt shows,
+    /// `rand()&7` each time it opens.
+    quit_msg: usize,
+    /// The state of the C library `rand()` [`Menu::open_quit`] draws from.
+    quit_rand: u32,
     /// The Keys screen is waiting for the next key to bind (`bind_grab`,
     /// `M_Keys_Key`). The host routes raw keys to [`Menu::bind_key`] while set.
     bind_grab: bool,
@@ -490,6 +498,9 @@ impl Menu {
             lookstrafe: false,
             help_page: 0,
             quit_prev: MenuScreen::Main,
+            quit_in_menus: true,
+            quit_msg: 0,
+            quit_rand: 1,
             bind_grab: false,
             bindings: default_bindings(),
             sounds: Vec::new(),
@@ -958,10 +969,8 @@ impl Menu {
             }
             MenuScreen::Quit => {
                 // M_Quit_Key 'n'/Escape: restore the screen the prompt rose from
-                // (wasInMenus -> m_entersound = true).
-                self.screen = self.quit_prev;
-                self.snd(MenuSound::Menu2);
-                MenuAction::Back
+                // (wasInMenus -> m_entersound = true), or the game.
+                self.quit_back()
             }
             MenuScreen::Main => {
                 // M_Main_Key K_ESCAPE -> key_dest = key_game
@@ -978,9 +987,21 @@ impl Menu {
         if self.screen == MenuScreen::Quit {
             return;
         }
+        // M_Menu_Quit_f: wasInMenus = (key_dest == key_menu), and
+        // msgNumber = rand()&7 (the C library's LCG, seeded 1 like an
+        // un-srand()ed rand: 214013 / 2531011, bits 16..30).
+        self.quit_in_menus = self.visible;
+        self.quit_rand = self.quit_rand.wrapping_mul(214_013).wrapping_add(2_531_011);
+        self.quit_msg = ((self.quit_rand >> 16) & 0x7fff) as usize & 7;
         self.quit_prev = self.screen;
         self.visible = true;
         self.screen = MenuScreen::Quit;
+    }
+
+    /// Show quit message `n` (`msgNumber`, 0..8) — for a caller that must
+    /// match another run's random pick (the 2-D oracle harness).
+    pub fn set_quit_message(&mut self, n: usize) {
+        self.quit_msg = n & 7;
     }
 
     /// Answer the Quit prompt "Yes" (the literal `Y` key) — quit: close the menu.
@@ -1015,7 +1036,17 @@ impl Menu {
         if self.screen != MenuScreen::Quit {
             return MenuAction::None;
         }
-        // M_Quit_Key 'n': wasInMenus -> m_entersound = true.
+        self.quit_back()
+    }
+
+    /// M_Quit_Key 'n' / Escape: back to the menu the prompt rose over
+    /// (`wasInMenus`: m_entersound), else back to the game.
+    fn quit_back(&mut self) -> MenuAction {
+        if !self.quit_in_menus {
+            self.close();
+            self.screen = MenuScreen::Main;
+            return MenuAction::Closed;
+        }
         self.screen = self.quit_prev;
         self.snd(MenuSound::Menu2);
         MenuAction::Back
@@ -1351,7 +1382,38 @@ pub struct MenuPics {
     /// `gfx/help0.lmp`..`help5.lmp` — the 6 full-screen Help/Ordering pages
     /// (`M_Help_Draw` blits the current one at (0,0)).
     pub help: [Option<crate::wad::Qpic>; NUM_HELP_PAGES],
+    /// The `M_DrawTextBox` border pieces, in [`TEXTBOX_PICS`] order.
+    pub textbox: [Option<crate::wad::Qpic>; 10],
 }
+
+/// The pak pics `M_DrawTextBox` builds a box from, in [`MenuPics::textbox`]
+/// order: the left column (top, middle, bottom), the 16-wide middle columns
+/// (top, middle, the alternate middle of the second row, bottom), the right
+/// column (top, middle, bottom).
+pub const TEXTBOX_PICS: [&str; 10] = [
+    "gfx/box_tl.lmp",
+    "gfx/box_ml.lmp",
+    "gfx/box_bl.lmp",
+    "gfx/box_tm.lmp",
+    "gfx/box_mm.lmp",
+    "gfx/box_mm2.lmp",
+    "gfx/box_bm.lmp",
+    "gfx/box_tr.lmp",
+    "gfx/box_mr.lmp",
+    "gfx/box_br.lmp",
+];
+
+/// `quitMessage` (menu.c, the non-Windows builds): four 24-column lines each.
+const QUIT_MESSAGES: [[&str; 4]; 8] = [
+    ["  Are you gonna quit    ", "  this game just like   ", "   everything else?     ", "                        "],
+    [" Milord, methinks that  ", "   thou art a lowly     ", " quitter. Is this true? ", "                        "],
+    [" Do I need to bust your ", "  face open for trying  ", "        to quit?        ", "                        "],
+    [" Man, I oughta smack you", "   for trying to quit!  ", "     Press Y to get     ", "      smacked out.      "],
+    [" Press Y to quit like a ", "   big loser in life.   ", "  Press N to stay proud ", "    and successful!     "],
+    ["   If you press Y to    ", "  quit, I will summon   ", "  Satan all over your   ", "      hard drive!       "],
+    ["  Um, Asmodeus dislikes ", " his children trying to ", " quit. Press Y to return", "   to your Tinkertoys.  "],
+    ["  If you quit now, I'll ", "  throw a blanket-party ", "   for you next time!   ", "                        "],
+];
 
 /// `M_Print` (menu.c): menu text in the conchars' second, bronze half — each
 /// character is drawn as cell `c + 128` — at virtual `(vx, vy)`, 8 px apart.
@@ -1431,6 +1493,22 @@ pub fn draw_menu(
     realtime: f64,
     palette: &[[u8; 3]; 256],
 ) {
+    draw_menu_inner(image, menu, pics, conchars, host_time, realtime, palette, true);
+}
+
+/// [`draw_menu`], with `fade` false for `M_Draw`'s `m_recursiveDraw` (the
+/// screen the Quit prompt rose over, drawn under it without a second fade).
+#[allow(clippy::too_many_arguments)]
+fn draw_menu_inner(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    host_time: f32,
+    realtime: f64,
+    palette: &[[u8; 3]; 256],
+    fade: bool,
+) {
     if !menu.visible || image.w == 0 || image.h == 0 {
         return;
     }
@@ -1447,7 +1525,9 @@ pub fn draw_menu(
     // M_Draw: the game/demo underneath fades first (Draw_FadeScreen). (The
     // C's other branch, the console background under a forced-up console,
     // can't occur: this port's menu and console never share the screen.)
-    fade_screen(image, palette);
+    if fade {
+        fade_screen(image, palette);
+    }
 
     // SCR_ModalMessage's screen (scr_drawdialog: Sbar, Draw_FadeScreen,
     // SCR_DrawNotifyString) — the menu itself is not drawn.
@@ -1479,7 +1559,13 @@ pub fn draw_menu(
             return;
         }
         MenuScreen::Quit => {
-            draw_quit_screen(image, conchars, scale, ox, oy, palette);
+            // M_Quit_Draw: wasInMenus -> the menu it rose over, m_recursiveDraw.
+            if menu.quit_in_menus && menu.quit_prev != MenuScreen::Quit {
+                let mut under = menu.clone();
+                under.screen = menu.quit_prev;
+                draw_menu_inner(image, &under, pics, conchars, host_time, realtime, palette, false);
+            }
+            draw_quit_screen(image, menu, pics, conchars, scale, ox, oy, palette);
             return;
         }
         MenuScreen::Load | MenuScreen::Save => {
@@ -1845,11 +1931,6 @@ fn draw_help_screen(
     }
 }
 
-/// Draw the Quit confirmation prompt (`M_Quit_Draw`, non-Win32 path). The real
-/// engine draws `M_DrawTextBox(56,76,24,4)` with one of eight random taunts; here
-/// we draw a faithful-enough centered prompt — a dark box plus a plain
-/// "Are you sure you want to quit? (Y/N)" using conchars — so it works without the
-/// box pics or the message table. A missing `conchars` still paints the box.
 /// `M_SinglePlayer_Key`'s New Game question (SCR_ModalMessage).
 const NEW_GAME_CONFIRM: &str = "Are you sure you want to\nstart a new game?\n";
 
@@ -1879,34 +1960,81 @@ fn draw_notify_string(
     }
 }
 
+/// `M_DrawTextBox (x, y, width, lines)` (menu.c): a box of 8x8 border pics
+/// around `width` columns and `lines` rows of text, its top-left at `(x, y)` —
+/// the left column, then the middle 16 pixels at a time (`width -= 2`; the
+/// second row's middle piece is `box_mm2`), then the right column, each
+/// piece through `M_DrawTransPic`. Missing pieces are skipped.
+#[allow(clippy::too_many_arguments)]
+fn draw_text_box(
+    image: &mut Image,
+    pics: &MenuPics,
+    x: i32,
+    y: i32,
+    width: i32,
+    lines: i32,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    let mut put = |i: usize, cx: i32, cy: i32| {
+        if let Some(p) = &pics.textbox[i] {
+            blit_qpic_at(image, p, cx as f32, cy as f32, scale, ox, oy, palette);
+        }
+    };
+    // left side
+    let (mut cx, mut cy) = (x, y);
+    put(0, cx, cy);
+    for _ in 0..lines {
+        cy += 8;
+        put(1, cx, cy);
+    }
+    put(2, cx, cy + 8);
+    // middle
+    cx += 8;
+    let mut w = width;
+    while w > 0 {
+        cy = y;
+        put(3, cx, cy);
+        for n in 0..lines {
+            cy += 8;
+            put(if n >= 1 { 5 } else { 4 }, cx, cy);
+        }
+        put(6, cx, cy + 8);
+        w -= 2;
+        cx += 16;
+    }
+    // right side
+    cy = y;
+    put(7, cx, cy);
+    for _ in 0..lines {
+        cy += 8;
+        put(8, cx, cy);
+    }
+    put(9, cx, cy + 8);
+}
+
+/// `M_Quit_Draw` (menu.c, the non-Windows builds — DOS Quake's; WinQuake on
+/// Windows shows a credits box instead): `M_DrawTextBox (56, 76, 24, 4)` and
+/// the four lines of quit message `msgNumber` at (64, 84..108) in `M_Print`'s
+/// bronze. The menu it rose over is drawn first by [`draw_menu_inner`].
+#[allow(clippy::too_many_arguments)]
 fn draw_quit_screen(
     image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     scale: f32,
     ox: f32,
     oy: f32,
     palette: &[[u8; 3]; 256],
 ) {
-    // A dark box behind the prompt (stand-in for M_DrawTextBox). Virtual box
-    // 56,76 24x4 -> roughly x[56..264], y[76..116] in 320x200 space.
-    const BOX_X0: f32 = 56.0;
-    const BOX_Y0: f32 = 76.0;
-    const BOX_W: f32 = 208.0;
-    const BOX_H: f32 = 40.0;
-    let x0 = (ox + BOX_X0 * scale).floor() as i32;
-    let y0 = (oy + BOX_Y0 * scale).floor() as i32;
-    let x1 = (ox + (BOX_X0 + BOX_W) * scale).ceil() as i32;
-    let y1 = (oy + (BOX_Y0 + BOX_H) * scale).ceil() as i32;
-    fill_rect(image, x0 as i64, y0 as i64, x1 as i64, y1 as i64, [0, 0, 0]);
-
+    draw_text_box(image, pics, 56, 76, 24, 4, scale, ox, oy, palette);
     if let Some(cc) = conchars {
-        // Two centered lines, like the C's four-line quitMessage box.
-        let line1 = "Are you sure you want";
-        let line2 = "to quit?  (Y / N)";
-        let cx1 = (MENU_VIRT_W - line1.len() as f32 * 8.0) * 0.5;
-        let cx2 = (MENU_VIRT_W - line2.len() as f32 * 8.0) * 0.5;
-        draw_string_scaled(image, cc, cx1, 88.0, line1, scale, ox, oy, palette);
-        draw_string_scaled(image, cc, cx2, 100.0, line2, scale, ox, oy, palette);
+        for (i, line) in QUIT_MESSAGES[menu.quit_msg & 7].iter().enumerate() {
+            m_print(image, cc, 64.0, 84.0 + 8.0 * i as f32, line, scale, ox, oy, palette);
+        }
     }
 }
 
@@ -3143,21 +3271,42 @@ mod tests {
         draw_menu(&mut img0, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         assert_eq!(img0.rgb[0], bg, "a missing help page leaves the frame untouched");
 
-        // Quit: the confirm box must paint (the dark box + the prompt text).
+        // Quit (M_Quit_Draw): M_DrawTextBox (56, 76, 24, 4) from the box_*
+        // pics and quit message msgNumber at (64, 84..108) in M_Print's bronze.
         m.open();
         m.cursor = 4;
         m.select(); // -> Quit
         assert_eq!(m.screen(), MenuScreen::Quit);
+        m.set_quit_message(4);
+        let mut pics = MenuPics::default();
+        for (i, slot) in pics.textbox.iter_mut().enumerate() {
+            let w = if (3..=6).contains(&i) { 16 } else { 8 };
+            *slot = Some(solid_pic(w, 8, 20 + i as u8));
+        }
         let mut imgq = Image::new(320, 200, bg);
-        let before = imgq.rgb.clone();
-        draw_menu(&mut imgq, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
-        assert_ne!(imgq.rgb, before, "the Quit prompt must draw something");
-        // The dark box paints black inside its region (e.g. virtual (60,80)).
-        let box_idx = 80 * imgq.w + 60;
-        assert_eq!(imgq.rgb[box_idx], [0, 0, 0], "the Quit box is a dark fill");
+        draw_menu(&mut imgq, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
+        let at = |x: usize, y: usize| imgq.rgb[y * 320 + x];
+        assert_eq!(at(56, 76), pal[20], "box_tl at (56, 76)");
+        assert_eq!(at(56, 84), pal[21], "box_ml below it");
+        assert_eq!(at(64, 76), pal[23], "box_tm from x 64");
+        let mut bare = Image::new(320, 200, bg);
+        draw_menu(&mut bare, &m, &pics, None, 0.0, 0.0, &pal);
+        assert_eq!(bare.rgb[84 * 320 + 64], pal[24], "box_mm on the first text row");
+        assert_eq!(bare.rgb[92 * 320 + 64], pal[25], "box_mm2 from the second on");
+        assert_eq!(bare.rgb[108 * 320 + 64], pal[25], "box_mm2 on the fourth");
+        assert_eq!(at(64 + 12 * 16, 76), pal[27], "box_tr after 12 middle pieces");
+        assert_eq!(at(56, 116), pal[22], "box_bl under 4 rows");
+        // The message over the box: every conchars cell but 0 is lit here,
+        // and M_Print draws c + 128 — so the line's first cell paints.
+        assert_eq!(at(64, 84), pal[3], "the quit message at (64, 84)");
+        // The main menu it rose over is under it, faded once (1 in 4 kept).
+        assert_eq!(at(1, 0), pal[0], "faded");
         // Without conchars the box still paints (no panic).
         let mut imgq2 = Image::new(320, 200, bg);
-        draw_menu(&mut imgq2, &m, &MenuPics::default(), None, 0.0, 0.0, &pal);
-        assert_eq!(imgq2.rgb[box_idx], [0, 0, 0], "the Quit box paints without conchars");
+        draw_menu(&mut imgq2, &m, &pics, None, 0.0, 0.0, &pal);
+        assert_eq!(imgq2.rgb[76 * 320 + 56], pal[20], "the Quit box paints without conchars");
+        // "No" goes back to the menu it rose over.
+        assert_eq!(m.quit_no(), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Main);
     }
 }
