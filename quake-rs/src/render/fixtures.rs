@@ -156,7 +156,7 @@ pub(crate) fn ramp_palette() -> [[u8; 3]; 256] {
 
 /// A 128x128 conchars atlas with EVERY glyph cell solidly filled (index 95),
 /// so any drawn character paints recognisable pixels.
-pub(super) fn solid_conchars() -> Qpic {
+pub(crate) fn solid_conchars() -> Qpic {
     Qpic { width: 128, height: 128, data: vec![95u8; 128 * 128] }
 }
 
