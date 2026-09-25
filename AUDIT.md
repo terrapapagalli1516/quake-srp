@@ -434,6 +434,18 @@ Evidence: `web/verify_demo.py` (new permanent harness) 9/9 + verify_walk/
 verify_ambient green; 458 lib + 48 wasm tests; clippy 0/0; goldens
 byte-identical (scene renders no demos).
 
+## Session 7 — oracle-measured render fixes (2026-09-25, branch `quake/fid1`)
+
+Each fix measured with `oracle/compare.py` (id's own renderer, headless); the
+numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
+
+- ✅ **Liquids and sky overbright** (class 3) — turb/sky went through colormap
+  row 0 (~2x); id's `D_DrawTurbulent8Span`/`D_DrawSkyScans8` store the raw
+  texel. **Turb warp** (class 8) — now `Turbulent8`'s 16.16 math: `sintable`
+  in fixed point (id's `3.14159`, 256 entries, not periodic), added before the
+  `>>16`, on `(s+8192)<<16` (`Mod_LoadFaces`' turb `texturemins`). e1m1 water
+  from above 21.1% → 99.45%. Goldens: e1m2 `a6f98d8a` → `76905e15`.
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

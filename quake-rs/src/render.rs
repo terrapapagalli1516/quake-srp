@@ -1378,79 +1378,89 @@ fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> Option<([i3
 // Animated special surfaces: liquid turbulent warp + scrolling sky
 // ---------------------------------------------------------------------------
 //
-// Quake's `TEX_SPECIAL` faces (liquids and sky) are not lightmapped — they are
-// drawn fullbright and *animated* every frame. This port reproduces two of
-// those animations against the same perspective-correct `(s,t)` the textured
-// rasteriser already interpolates:
+// Quake's `TEX_SPECIAL` faces (liquids and sky) are not lightmapped: they store
+// the raw texel (no colormap) and are *animated* every frame. This port
+// reproduces the software renderer's two animations against the same
+// perspective-correct `(s,t)` the textured rasteriser already interpolates:
 //
 //  * **Liquids** (miptex name begins with `*`: `*water1`, `*lava1`, `*slime`,
-//    `*teleport`, …) get the SIN warp of `R_DrawTurbulent` / `EmitWaterPolys`
-//    (`gl_warp.c`): each axis of the sample is displaced by a sine of the OTHER
-//    axis plus time. See [`TurbTable`] / [`warp_st`].
+//    `*teleport`, …) get `Turbulent8`/`D_DrawTurbulent8Span`'s warp (`d_scan.c`):
+//    each axis of the 16.16 sample is displaced by a sine of the OTHER axis plus
+//    time. See [`TurbTable`] / [`warp_st`].
 //  * **Sky** (miptex name begins with `sky`: `sky1`, `sky4`, …) gets the
-//    two-layer SCROLL of `EmitBothSkyLayers` (`gl_warp.c`) over the 256x128 sky
-//    miptexture (two side-by-side 128x128 layers). See [`sky_texel`].
+//    two-layer scroll of `R_MakeSky` (`r_sky.c`) sampled along the view ray by
+//    `D_DrawSkyScans8` (`d_sky.c`). See [`sky_texel_view`].
 
-/// WinQuake `R_InitTurb` constants (r_main.c / r_local.h): the software liquid
-/// warp drives a 128-entry sine table by the INTEGER texel coordinate (not a
-/// scaled float coord like GLQuake's `EmitWaterPolys`), scrolled by `time*SPEED`.
+/// WinQuake `R_InitTurb` constants (r_main.c / r_local.h / r_shared.h): the
+/// software liquid warp drives a 128-cycle sine table by the integer part of the
+/// OTHER axis' 16.16 texel coordinate, scrolled by `time*SPEED`.
 const TURB_CYCLE: usize = 128;
-/// `AMP` — the table swings `8 + 8*sin` texels (0..16; the +8 DC bias is wrapped
-/// off by the 64-texel liquid texture downstream, exactly as `&63` in `d_scan.c`).
-const TURB_AMP: f32 = 8.0;
+/// `AMP` (`8*0x10000`) — the table swings `8 + 8*sin` texels in 16.16 fixed point
+/// (0..16 texels; the +8 DC bias is wrapped off by the 64-texel liquid texture
+/// downstream, exactly as `&63` in `d_scan.c`).
+const TURB_AMP: f64 = (8 * 0x10000) as f64;
 /// `SPEED` — the table phase advances by `time*20` per second.
 const TURB_SPEED: f32 = 20.0;
 
-/// WinQuake's `sintable` (`R_InitTurb`): `sintable[i] = 8 + 8*sin(i*2pi/128)` in
-/// texel units, 128-periodic. Indexed by an integer texel coordinate (the other
-/// axis) plus the time phase — this is the SOFTWARE `Turbulent8` warp, which has a
-/// different ripple wavelength and ~20x the scroll speed of the GL water warp.
+/// WinQuake's `sintable` (`R_InitTurb`, r_main.c):
+/// `sintable[i] = AMP + sin(i*3.14159*2/CYCLE)*AMP`, 16.16 fixed point, truncated.
+/// `Turbulent8` indexes it as `(sintable + phase)[coord & 127]` — up to entry 254 —
+/// and id's truncated `3.14159` makes the table NOT exactly 128-periodic, so the
+/// first `2*CYCLE` entries are kept rather than one wrapped cycle.
 struct TurbTable {
-    tab: [i32; TURB_CYCLE],
+    tab: [i32; 2 * TURB_CYCLE],
 }
 
 impl TurbTable {
-    /// Build the table once at render start (`f32::sin` is not yet `const`).
+    /// Build the table once at render start (`f64::sin` is not `const`).
+    // `3.14159` is id's literal; exact pi would move entries (see `apply_warp`).
+    #[allow(clippy::approx_constant)]
     fn new() -> TurbTable {
-        let mut tab = [0i32; TURB_CYCLE];
-        let mut i = 0usize;
-        while i < TURB_CYCLE {
-            tab[i] = (TURB_AMP
-                + TURB_AMP * ((i as f32) * 2.0 * std::f32::consts::PI / (TURB_CYCLE as f32)).sin())
-            .round() as i32;
-            i += 1;
+        let mut tab = [0i32; 2 * TURB_CYCLE];
+        for (i, e) in tab.iter_mut().enumerate() {
+            // C: int = int + double*int -> double, then truncated to int.
+            *e = (TURB_AMP + ((i as f64) * 3.14159 * 2.0 / TURB_CYCLE as f64).sin() * TURB_AMP) as i32;
         }
         TurbTable { tab }
     }
-
-    /// The texel displacement for integer index `k` (the OTHER axis' texel coord
-    /// plus the time phase), masked to the 128 cycle exactly as the C `&(CYCLE-1)`.
-    #[inline]
-    fn at_int(&self, k: i32) -> i32 {
-        self.tab[(k & (TURB_CYCLE as i32 - 1)) as usize]
-    }
 }
 
-/// Apply the SOFTWARE liquid warp (`d_scan.c` `Turbulent8`) to a surface texel
-/// `(s,t)` at game `time`, returning the displaced integer-texel `(s2,t2)`:
+/// A liquid surface coordinate in `Turbulent8`'s 16.16 fixed point:
+/// `(int)(sdivz*z) + sadjust`, clamped to `[0, bbextents]` — with the extents
+/// `Mod_LoadFaces` gives every turbulent face (`texturemins = -8192`,
+/// `extents = 16384`), so the fixed value is `(s + 8192) * 0x10000`. `s` is the
+/// texinfo coordinate the rasteriser interpolates.
+#[inline]
+fn turb_fixed(s: f32) -> i32 {
+    // s*0x10000 is exact in f32 (a power of two); `as` truncates like the C cast.
+    let v = (s * 65536.0) as i32 as i64 + (8192 << 16);
+    v.clamp(0, (16384 << 16) - 1) as i32
+}
+
+/// Apply the SOFTWARE liquid warp to the surface coordinate `(s,t)` at game
+/// `time`, returning the texel `(sturb, tturb)` to sample — `D_DrawTurbulent8Span`
+/// (`d_scan.c`) on `Turbulent8`'s fixed-point coordinates:
 ///
 /// ```text
-/// phase = (int)(time * SPEED)               // SPEED = 20
-/// s2 = s + sintable[(t + phase) & 127]      // sintable in texels
-/// t2 = t + sintable[(s + phase) & 127]
+/// turb  = sintable + ((int)(cl.time*SPEED) & (CYCLE-1));
+/// sturb = ((s + turb[(t>>16)&(CYCLE-1)]) >> 16) & 63;
+/// tturb = ((t + turb[(s>>16)&(CYCLE-1)]) >> 16) & 63;
 /// ```
 ///
-/// Each axis is offset by the sine of the *other* axis' integer texel coordinate
-/// plus the time phase, so the surface ripples. The caller wraps `(s2,t2)` into
-/// the 64-texel liquid texture via `rem_euclid` (matching the C's final `&63`).
+/// The 16.16 table value is added to the 16.16 coordinate BEFORE the `>> 16`, so
+/// the fractional parts carry. The caller wraps into the texture (`rem_euclid`;
+/// = `& 63` for the 64x64 liquids id ships). The coordinate here is exact per
+/// pixel; id steps it linearly across 16-pixel segments (class 7 in
+/// `oracle/README.md`, the span-subdivision item, shared with the walls).
 #[inline]
-fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (f32, f32) {
-    let phase = (time * TURB_SPEED) as i32;
-    let si = s.floor() as i32;
-    let ti = t.floor() as i32;
-    let s2 = (si + turb.at_int(ti + phase)) as f32;
-    let t2 = (ti + turb.at_int(si + phase)) as f32;
-    (s2, t2)
+fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (i32, i32) {
+    const MASK: i32 = TURB_CYCLE as i32 - 1;
+    let phase = ((time * TURB_SPEED) as i32 & MASK) as usize;
+    let sf = turb_fixed(s);
+    let tf = turb_fixed(t);
+    let sturb = sf.wrapping_add(turb.tab[phase + ((tf >> 16) & MASK) as usize]) >> 16;
+    let tturb = tf.wrapping_add(turb.tab[phase + ((sf >> 16) & MASK) as usize]) >> 16;
+    (sturb, tturb)
 }
 
 /// Sample one texel of the two-layer scrolling sky from a 256x128 sky
@@ -1584,9 +1594,9 @@ fn sky_texel_view(pixels: &[u8], tw: usize, th: usize, u: f32, v: f32, sky: &Sky
 /// How the per-pixel `(s,t)` -> texel step of [`raster_triangle_tex`] behaves.
 ///
 /// `Normal` is the existing wall path (optional lightmap). `Turb` and `Sky`
-/// drive the animated special-surface sampling above; both are drawn fullbright
-/// (Quake never lightmaps liquids or sky), so they ignore the `lightmap`/`shade`
-/// brightness inputs and the rasteriser applies a fixed unit brightness.
+/// drive the animated special-surface sampling above; both are unlit (Quake never
+/// lightmaps liquids or sky): they ignore the `lightmap`/`shade` inputs and store
+/// the raw texel, with no colormap row, as `D_DrawTurbulent8Span`/`D_DrawSkyScans8`.
 #[derive(Clone, Copy)]
 enum SurfaceMode<'a> {
     /// Ordinary wall: sample `pixels` at the interpolated `(s,t)`.
@@ -1817,10 +1827,10 @@ fn raster_triangle_tex(
                     (p, b)
                 }
                 SurfaceMode::Turb { turb, time } => {
-                    // SIN-warp the (s,t) before the (tiling) wrap; fullbright.
+                    // SIN-warp the (s,t) before the (tiling) wrap; unlit.
                     let (s2, t2) = warp_st(turb, s, t, time);
-                    let tx = (s2 as i64).rem_euclid(tw as i64) as usize;
-                    let ty = (t2 as i64).rem_euclid(th as i64) as usize;
+                    let tx = s2.rem_euclid(tw as i32) as usize;
+                    let ty = t2.rem_euclid(th as i32) as usize;
                     let p = match pixels.get(ty * tw + tx) {
                         Some(&p) => p as usize,
                         None => break 'pixel,
@@ -1841,19 +1851,18 @@ fn raster_triangle_tex(
                     // the brightness, then index the colormap to get a PALETTE
                     // INDEX, which is finally looked up in the palette. This is
                     // an INDEX lookup (no RGB multiply) and so can never
-                    // overbright past the base colour. Liquids/sky are
-                    // fullbright (brightness 1.0) but route through the brightest
-                    // row 0 (`colormap[texel]`) — `colormap_row(1.0)` is *not*
-                    // row 0, so fullbright surfaces force the row explicitly.
+                    // overbright past the base colour. Liquids and sky take NO
+                    // colormap at all: `D_DrawTurbulent8Span` and
+                    // `D_DrawSkyScans8` store the raw texel (`*pdest =
+                    // *(pbase + ...)`, `r_skysource[...]`) — the identity, which
+                    // sits around row 31/32, not the brightest row 0.
                     Some(cm) => {
-                        let row = match mode {
-                            SurfaceMode::Normal => colormap_row(brightness),
-                            // Turb/Sky are fullbright: the brightest row.
-                            SurfaceMode::Turb { .. } | SurfaceMode::Sky { .. } => 0,
+                        let pal_index = match mode {
+                            // row < COLORMAP_ROWS and texel < 256, so this index
+                            // is < COLORMAP_LEN <= cm.len() (checked above).
+                            SurfaceMode::Normal => cm[colormap_row(brightness) * 256 + texel] as usize,
+                            SurfaceMode::Turb { .. } | SurfaceMode::Sky { .. } => texel,
                         };
-                        // row < COLORMAP_ROWS and texel < 256, so this index is
-                        // < COLORMAP_LEN <= cm.len() (checked above).
-                        let pal_index = cm[row * 256 + texel] as usize;
                         *p = palette[pal_index];
                     }
                     // Fallback: the original linear `palette[texel] * brightness`
@@ -11792,41 +11801,39 @@ mod tests {
     }
 
     #[test]
-    fn turb_table_amplitude_and_wrap() {
-        // R_InitTurb: tab[i] = round(8 + 8*sin(i*2pi/128)) in texels — DC-biased,
-        // so the range is [0, 2*AMP]; index masking keeps any integer in range.
+    fn turb_table_matches_r_initturb() {
+        // R_InitTurb: sintable[i] = (int)(AMP + sin(i*3.14159*2/CYCLE)*AMP), 16.16,
+        // DC-biased so the range is [0, 2*AMP]. Spot values computed from the C
+        // expression: i=0 -> AMP exactly; i=32 falls just short of pi/2 (id's
+        // 3.14159), so it never reaches 2*AMP.
         let turb = TurbTable::new();
-        let max = *turb.tab.iter().max().unwrap();
-        let min = *turb.tab.iter().min().unwrap();
-        assert_eq!(max, (2.0 * TURB_AMP) as i32, "peak should be 2*AMP, got {max}");
-        assert_eq!(min, 0, "trough should be 0 (DC-biased), got {min}");
-        // `at_int` never panics for huge/negative indices and stays in [0,2*AMP].
-        for &k in &[0, 127, 128, -1, 1_000_000, -1_000_000] {
-            let v = turb.at_int(k);
-            assert!((0..=(2.0 * TURB_AMP) as i32).contains(&v), "at_int({k}) = {v} out of range");
-        }
+        assert_eq!(turb.tab[0], 8 << 16);
+        assert_eq!(turb.tab[32], 1_048_575, "3.14159 keeps the peak one unit short");
+        assert!(turb.tab.iter().all(|&v| (0..=16 << 16).contains(&v)));
+        // Not exactly periodic (3.14159 < pi): entries past the first cycle are
+        // their own values, which is why Turbulent8's `phase + (t>>16 & 127)` reads
+        // the second cycle rather than wrapping.
+        assert!((0..TURB_CYCLE).any(|i| turb.tab[i] != turb.tab[i + TURB_CYCLE]));
     }
 
     #[test]
-    fn warp_st_animates_and_stays_bounded() {
-        // The turbulent warp must MOVE the sampled (s,t) as time advances (so the
-        // surface visibly ripples), and the displacement is bounded by ±AMP on
-        // each axis (so a tiling texture's rem_euclid keeps it in range).
+    fn warp_st_is_turbulent8_fixed_point() {
+        // D_DrawTurbulent8Span on Turbulent8's coordinates: the 16.16 sine is added
+        // to the 16.16 coordinate (texturemins -8192) BEFORE the >>16, so a
+        // fraction carries into the texel.
         let turb = TurbTable::new();
-        let (s, t) = (20.0f32, 33.0f32);
-        let (s0, t0) = warp_st(&turb, s, t, 0.0);
-        let (s1, t1) = warp_st(&turb, s, t, 0.37);
-        // Animated: the time phase (time*SPEED) shifts the table index, so the
-        // sampled texel moves between two times.
-        assert!(
-            (s0 - s1).abs() > 0.5 || (t0 - t1).abs() > 0.5,
-            "warp should change the sample between two times: ({s0},{t0}) vs ({s1},{t1})"
-        );
-        // Bounded: displacement off the floored base texel is the DC-biased table
-        // value in [0, 2*AMP] (then rem_euclid wraps it into the 64-texel liquid).
-        for (warped, base) in [(s1, s.floor()), (t1, t.floor())] {
-            let d = warped - base;
-            assert!((0.0..=2.0 * TURB_AMP + 1e-3).contains(&d), "displacement {d} out of range");
+        let (s, t) = (20.75f32, 33.5f32);
+        let phase = (0.37f32 * 20.0) as usize; // 7
+        let sf = ((20.75 + 8192.0) * 65536.0) as i32;
+        let tf = ((33.5 + 8192.0) * 65536.0) as i32;
+        let want_s = (sf + turb.tab[phase + ((tf >> 16) & 127) as usize]) >> 16;
+        let want_t = (tf + turb.tab[phase + ((sf >> 16) & 127) as usize]) >> 16;
+        assert_eq!(warp_st(&turb, s, t, 0.37), (want_s, want_t));
+        // Animated: the time phase shifts the table index.
+        assert_ne!(warp_st(&turb, s, t, 0.0), warp_st(&turb, s, t, 0.37));
+        // Bounded: the offset from the base texel (plus id's +8192) is in [0, 16].
+        for (warped, base) in [(want_s, sf >> 16), (want_t, tf >> 16)] {
+            assert!((0..=16).contains(&(warped - base)), "displacement out of range");
         }
     }
 
@@ -11997,11 +12004,11 @@ mod tests {
         assert_ne!(want_index, TEXEL, "test ramp should remap the index at row 31");
     }
 
-    /// Liquids/sky stay fullbright = the brightest row 0 (`colormap[texel]`) even
-    /// when their `brightness` is the neutral 1.0 — the row is forced to 0 by the
-    /// surface mode, not derived from the brightness.
+    /// Liquids write the RAW texel (`D_DrawTurbulent8Span`: no colormap at all),
+    /// even with a colormap supplied and a neutral `brightness` — neither row 0
+    /// (the old overbright) nor any other row.
     #[test]
-    fn colormap_fullbright_surfaces_use_row_zero() {
+    fn colormap_turb_writes_the_raw_texel() {
         let mut pal = [[0u8; 3]; 256];
         for (i, p) in pal.iter_mut().enumerate() {
             *p = [i as u8, i as u8, i as u8];
@@ -12010,12 +12017,12 @@ mod tests {
         // 64x64 so the Turb warp's index wrap is well-defined; fill with TEXEL.
         let pixels = vec![TEXEL; 64 * 64];
 
-        // Colormap ramp: colormap[row*256+col] = (col + row) mod 256. Row 0 keeps
-        // the index unchanged, so a fullbright (row-0) pixel == palette[TEXEL].
+        // Colormap ramp: colormap[row*256+col] = (col + row + 1) mod 256 — NO row
+        // is the identity, so any colormap use would move the index off TEXEL.
         let mut cm = vec![0u8; COLORMAP_LEN];
         for row in 0..COLORMAP_ROWS {
             for col in 0..256usize {
-                cm[row * 256 + col] = ((col + row) % 256) as u8;
+                cm[row * 256 + col] = ((col + row + 1) % 256) as u8;
             }
         }
 
@@ -12033,10 +12040,9 @@ mod tests {
             Some(&cm),
         );
         let drawn: Vec<[u8; 3]> = img.rgb.iter().copied().filter(|p| *p != [0, 0, 0]).collect();
-        assert!(!drawn.is_empty(), "fullbright triangle drew nothing");
+        assert!(!drawn.is_empty(), "turb triangle drew nothing");
         for p in &drawn {
-            // Row 0: index unchanged -> palette[TEXEL] grey.
-            assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "fullbright surface must use colormap row 0");
+            assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "turb must store the raw texel, no colormap");
         }
     }
 
