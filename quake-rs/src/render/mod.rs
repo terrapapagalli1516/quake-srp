@@ -85,6 +85,7 @@ pub use alias::{ModelInstance, Viewmodel};
 pub use light::{LIGHTSTYLES, NEUTRAL_LIGHTSTYLE_SCALES};
 pub use part::draw_particles;
 pub use sprite::SpriteInstance;
+pub use surf::{mip_cvars, set_mip_cvars, surface_cache_usage, MipCvars};
 pub use stats::{render_stats_begin, render_stats_end, set_render_stats_clock, RenderStats};
 pub use view::{
     build_gamma_table, content_cshift, cshift_ramps, powerup_cshift, view_bob, viewmodel_angles,
@@ -1314,6 +1315,7 @@ mod tests {
             height: 64,
             offsets: [0, 0, 0, 0],
             pixels: synthetic_liquid_pixels(),
+            mips: Default::default(),
             anim: None,
         };
         let sky = MipTex {
@@ -1322,6 +1324,7 @@ mod tests {
             height: 128,
             offsets: [0, 0, 0, 0],
             pixels: synthetic_sky_pixels(),
+            mips: Default::default(),
             anim: None,
         };
         bsp.textures = vec![Some(liquid), Some(sky)];

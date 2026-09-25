@@ -374,8 +374,8 @@ impl DLeaf {
 
 /// `miptex_t`: the header of one mip texture. The four `offsets` are byte
 /// offsets (relative to the start of this `MipTex`) to the four mip levels,
-/// which immediately follow the header on disk; the pixel data itself is not
-/// captured here (the spec asks only for the header).
+/// which immediately follow the header on disk; `pixels` holds level 0 and
+/// `mips` levels 1..3 (`Mod_LoadTextures` copies all four).
 #[derive(Debug, Clone)]
 pub struct MipTex {
     pub name: String,
@@ -386,6 +386,11 @@ pub struct MipTex {
     /// captured from `offsets[0]`. Empty if the data lies outside the lump (some
     /// maps store animated/external textures with no inline pixels).
     pub pixels: Vec<u8>,
+    /// Mip levels 1, 2 and 3, from `offsets[1..4]`: `(width >> m) * (height >> m)`
+    /// palette indices each — what `R_DrawSurface` bakes a distant surface from
+    /// (`mt->offsets[r_drawsurf.surfmip]`). All empty when any level lies outside
+    /// the lump (or in synthetic textures); see [`MipTex::mip`].
+    pub mips: [Vec<u8>; MIPLEVELS - 1],
     /// Animation sequencing (`texture_t.anim_*`), filled by [`sequence_anims`]
     /// after all miptex are loaded. `None` for a non-animated texture (a name
     /// not beginning with `+`). When `Some`, the renderer cycles frames by time
@@ -451,14 +456,49 @@ impl MipTex {
         } else {
             Vec::new()
         };
+        // Levels 1..3, each at its own offset. `Mod_LoadTextures` copies
+        // `width*height/64*85` bytes after the header and indexes them with the
+        // same offsets; reading each level where its offset points is the same
+        // bytes for any well-formed lump, and never reads past this one.
+        let mut mips: [Vec<u8>; MIPLEVELS - 1] = Default::default();
+        if !pixels.is_empty() {
+            for (k, level) in mips.iter_mut().enumerate() {
+                let m = k + 1;
+                let n = ((width as usize) >> m) * ((height as usize) >> m);
+                let got = (offsets[m] != 0 && n > 0)
+                    .then(|| start.checked_add(offsets[m] as usize))
+                    .flatten()
+                    .and_then(|p| r.slice_at(p, n).ok());
+                match got {
+                    Some(s) => *level = s.to_vec(),
+                    None => {
+                        mips = Default::default();
+                        break;
+                    }
+                }
+            }
+        }
         Ok(MipTex {
             name,
             width,
             height,
             offsets,
             pixels,
+            mips,
             anim: None,
         })
+    }
+
+    /// Mip level `m`'s pixels (`0..=3`): `(width >> m) * (height >> m)` palette
+    /// indices, row-major, or `None` when that level was not captured.
+    pub fn mip(&self, m: usize) -> Option<&[u8]> {
+        let n = ((self.width as usize) >> m).checked_mul((self.height as usize) >> m)?;
+        let level = match m {
+            0 => &self.pixels,
+            1..=3 => &self.mips[m - 1],
+            _ => return None,
+        };
+        (n > 0 && level.len() >= n).then(|| &level[..n])
     }
 }
 
@@ -1101,6 +1141,52 @@ mod tests {
         assert_eq!(tex.height, 32);
         assert_eq!(tex.offsets[0], 40);
         assert!(bsp.textures[1].is_none());
+    }
+
+    /// All four levels are captured at their offsets (`Mod_LoadTextures`), and a
+    /// level that is not in the lump drops levels 1..3 (the renderer then stays
+    /// at mip 0) instead of reading past it.
+    #[test]
+    fn textures_capture_all_four_mip_levels() {
+        let lump_for = |levels_present: bool| {
+            let mut lump = Vec::new();
+            lump.extend_from_slice(&1i32.to_le_bytes());
+            lump.extend_from_slice(&8i32.to_le_bytes());
+            let mut name = [0u8; 16];
+            name[..4].copy_from_slice(b"wall");
+            lump.extend_from_slice(&name);
+            lump.extend_from_slice(&32u32.to_le_bytes());
+            lump.extend_from_slice(&16u32.to_le_bytes());
+            let sizes = [32 * 16, 16 * 8, 8 * 4, 4 * 2];
+            let mut off = 40u32;
+            for n in sizes {
+                lump.extend_from_slice(&off.to_le_bytes());
+                off += n;
+            }
+            // Level m's texels are all `10 * m + 1`.
+            for (m, n) in sizes.iter().enumerate() {
+                let n = if levels_present || m == 0 { *n as usize } else { 0 };
+                lump.extend(std::iter::repeat_n(10 * m as u8 + 1, n));
+            }
+            lump
+        };
+        let mut b = BspBuilder::new(BSPVERSION);
+        b.set_lump(LUMP_TEXTURES, &lump_for(true));
+        let bsp = Bsp::parse(&b.build()).expect("parse");
+        let tex = bsp.textures[0].as_ref().expect("present");
+        for m in 0..4 {
+            let level = tex.mip(m).expect("level present");
+            assert_eq!(level.len(), (32 >> m) * (16 >> m));
+            assert!(level.iter().all(|&p| p == 10 * m as u8 + 1), "level {m}");
+        }
+        assert!(tex.mip(4).is_none());
+
+        let mut b = BspBuilder::new(BSPVERSION);
+        b.set_lump(LUMP_TEXTURES, &lump_for(false));
+        let bsp = Bsp::parse(&b.build()).expect("parse");
+        let tex = bsp.textures[0].as_ref().expect("present");
+        assert_eq!(tex.mip(0).map(|l| l.len()), Some(32 * 16));
+        assert!((1..4).all(|m| tex.mip(m).is_none()));
     }
 
     #[test]

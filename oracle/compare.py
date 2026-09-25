@@ -163,6 +163,12 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
                 "--viewent", ",".join(repr(float(v)) for v in vm["origin"] + vm["angles"])]
     if args.bench:
         cmd += ["--bench", str(args.bench)]
+    # The renderer's mip cvars are the port's too: `--c-cmd "d_mipscale 0"` puts
+    # both renderers at mip 0.
+    for c in args.c_cmd:
+        name, _, val = c.strip().partition(" ")
+        if name in ("d_mipscale", "d_mipcap") and val.strip():
+            cmd += ["--" + name.replace("_", "-"), val.strip().strip('"')]
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if res.returncode != 0:
         sys.exit(f"quaketool view failed for {case}:\n{res.stdout}{res.stderr}")
@@ -245,7 +251,8 @@ def main() -> None:
                     help="C span routine: 8 = id's portable C D_DrawSpans8 (default), 16 = the asm's "
                          "16-pixel segments (d_subdiv16), 1 = exact per-pixel perspective (experiment)")
     ap.add_argument("--c-cmd", action="append", default=[],
-                    help="extra C console command before the map loads (repeatable), e.g. 'd_mipscale 0'")
+                    help="extra C console command before the map loads (repeatable), e.g. 'd_mipscale 0' "
+                         "(d_mipscale and d_mipcap are handed to the port as well)")
     ap.add_argument("--aspect", type=float, help="C vid.aspect (default 1.0, square pixels)")
     ap.add_argument("--crop", action="append", default=[], help="name:x,y,w,h — zoomed crop per case")
     ap.add_argument("--pak", type=Path, default=DEFAULT_PAK)

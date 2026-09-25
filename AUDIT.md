@@ -667,6 +667,51 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   83.4% on e1m1 (was 81.8%) and 96.1% on e1m3 (was 95.9%); no row fell.
   Goldens unchanged.
 
+## World pass: mip levels, lightmap stepping (2026-09-25, branch `quake/w2a`, PERF_PLAN A5)
+
+- ✅ **Mip levels** (oracle class 1, the largest departure). The port baked every
+  surface from the full-resolution texture; id draws each surface at the mip
+  level `D_DrawSurfaces` picks per frame, `D_MipLevelForScale(nearzi *
+  scale_for_mip * mipadjust)`, and caches one block per level. Now the same
+  (`surf.rs`: `MipView`, `face_surf_block`):
+  - **`nearzi`** is the largest `1/z` over the face's outline clipped to the
+    frustum's four side planes, `z` clamped to `NEAR_CLIP` 0.01 — what
+    `R_RenderFace` gathers from `R_EmitEdge` (the left clip edge and the
+    right one's `1/z` included). `scale_for_mip` is the larger focal length
+    (`D_ViewChanged`); `mipadjust` is `Mod_LoadTexinfo`'s 1/2/3/4 from the
+    mean texture-axis length; the thresholds are `basemip` {1, 0.4, 0.2} times
+    `d_mipscale`, floored at `d_mipcap` (`D_SetupFrame`; id sets no higher
+    floor at high resolutions). Both cvars are settable
+    (`render::set_mip_cvars`, `quaketool view --d-mipscale/--d-mipcap`;
+    `compare.py` hands a `--c-cmd "d_mipscale 0"` to both renderers).
+  - **The block** is `D_CacheSurface`'s: `extents >> miplevel` texels a side
+    (it was `extents + 1` at mip 0 — one column and row id never reads:
+    `bbextents` clamps s to `extents - 1`), from the level's texels
+    (`bsp.rs` now keeps levels 1..3, `MipTex::mip`), tiled from
+    `texturemins >> miplevel`; one cache slot per face per level
+    (`cachespots[miplevel]`). The span walker reads it through gradients
+    scaled by `1 / (1 << miplevel)` (`PolyGrads::mip_scaled`, `D_CalcGradients`'
+    `mipscale`). Submodels and the external `b_*.bsp` boxes pick their levels
+    the same way. A texture without levels 1..3 (synthetic tests) stays at
+    mip 0; a face whose texinfo maps it to a line (zero extent; id's
+    `D_SCAlloc` would `Sys_Error`) keeps the per-pixel path.
+  - **Oracle,** exact% world-only 320×200 (id as shipped): e1m1 84.74 →
+    92.20, e1m2 64.06 → 91.03, e1m3 65.88 → 96.68, e1m7 75.62 → 92.58;
+    640×480: 90.84 → 94.78, 78.28 → 95.40, 90.73 → 97.56, 94.58 → 97.39;
+    against id's exact per-pixel perspective (`--spans 1`) 86.95 → 94.55,
+    64.26 → 92.64, 66.11 → 97.47, 80.37 → 97.46. With both renderers at mip
+    0 (`d_mipscale 0`) every row is unchanged — the mip-0 bake is the old one.
+    Muzzle-flash frames (`--c-cmd +attack --settle 3`, as shipped): e1m1 80.64
+    → 87.02, e1m2 60.66 → 89.76, e1m3 61.00 → 95.80.
+  - **Goldens:** e1m1 `bb64996e` unchanged (every face in that view is at mip
+    0), e1m2 `8186a64c` → `3d47c70d` (38,742 px, 15.1%), e1m3 `f41e8b59` →
+    `c7e5b50e` (31,730 px, 12.4%): the distant walls, now drawn from id's
+    coarser levels.
+  - **Not done:** a brush model spanning several BSP leaves is split by
+    `R_DrawSolidClippedSubmodelPolygons` into fragments, each with its own
+    `nearzi` and so possibly its own level; the port picks one level per face.
+    The wasm console has no `d_mipscale`/`d_mipcap` commands yet.
+
 ## Census client/host fixes (2026-09-25, branch `quake/fix-client`)
 
 One line per CENSUS.md finding fixed; the evidence and the C are in CENSUS.md

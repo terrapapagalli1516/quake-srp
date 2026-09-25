@@ -252,12 +252,13 @@ pub(super) struct LightCache {
     entries: Vec<Option<LightCacheEntry>>,
 }
 
-/// One cached lit SURFACE block (Quake's `d_surf.c` surface cache entry, mip 0):
-/// the face's texture with the lightmap shaded in AND resolved through the colormap
-/// to a final palette index, one byte per surface texel. The rasteriser then reads
-/// a single byte per screen pixel (then one palette lookup) instead of sampling the
-/// texture, bilinear-interpolating the lightmap, and indexing the colormap per
-/// pixel — moving all of that to a per-texel bake done ONCE and reused every frame.
+/// One cached lit SURFACE block (Quake's `d_surf.c` surface cache entry): the
+/// face's texture at one mip level with the lightmap shaded in AND resolved
+/// through the colormap to a final palette index, one byte per texel of that
+/// level. The rasteriser then reads a single byte per screen pixel (then one
+/// palette lookup) instead of sampling the texture, the lightmap and the
+/// colormap per pixel — all of that is a per-texel bake done ONCE and reused
+/// every frame.
 #[derive(Clone)]
 struct SurfCacheEntry {
     /// Active styles' resolved scale values at bake time (the cache key, same as the
@@ -275,18 +276,19 @@ struct SurfCacheEntry {
     block: std::rc::Rc<Vec<u8>>,
     bw: usize,
     bh: usize,
-    /// Surface-space origin of the block (`s = texmins[0] + i`, `t = texmins[1] + j`).
-    texmins: [f32; 2],
 }
 
-/// The world model's lit-surface cache: its [`WorldFingerprint`] identity plus a
-/// per-face slot (rebuilt when an animated style ticks). Held as a single
-/// [`SURF_CACHE`] slot — only the world `Bsp` is ever cached (external brush
-/// models bypass it), so it self-invalidates on a changelevel via the
-/// fingerprint/`n_faces` check; see [`face_surf_block`].
+/// The world model's lit-surface cache: its [`WorldFingerprint`] identity plus
+/// one slot per face per mip level (`surface->cachespots[miplevel]`), each
+/// rebuilt when an animated style ticks. Held as a single [`SURF_CACHE`] slot —
+/// only the world `Bsp` is ever cached (external brush models bypass it), so it
+/// self-invalidates on a changelevel via the fingerprint/`n_faces` check; see
+/// [`face_surf_block`]. Unlike id's fixed-size cache with its LRU rover
+/// (`D_SCAlloc`), nothing is evicted until the level changes: eviction only ever
+/// costs id a rebake, never a different pixel.
 pub(super) struct SurfCache {
     fingerprint: WorldFingerprint,
-    entries: Vec<Option<SurfCacheEntry>>,
+    entries: Vec<[Option<SurfCacheEntry>; NUM_MIPS]>,
 }
 
 thread_local! {
@@ -298,20 +300,213 @@ thread_local! {
     /// submodels, which share the world `Bsp`). External brush models bypass it
     /// (they re-clone their `Bsp` every frame). See [`face_surf_block`].
     pub(super) static SURF_CACHE: std::cell::RefCell<Option<SurfCache>> = const { std::cell::RefCell::new(None) };
+    /// The renderer's `d_mipscale` / `d_mipcap` (see [`set_mip_cvars`]).
+    static MIP_CVARS: std::cell::Cell<MipCvars> = const { std::cell::Cell::new(MipCvars::DEFAULT) };
 }
+
+/// The bytes the lit-surface cache holds now (every baked block of every face at
+/// every mip level), and the number of blocks: the port's counterpart of id's
+/// fixed `D_SurfaceCacheForRes` pool, for measurement.
+pub fn surface_cache_usage() -> (usize, usize) {
+    SURF_CACHE.with(|c| {
+        c.borrow().as_ref().map_or((0, 0), |sc| {
+            sc.entries.iter().flatten().flatten().fold((0, 0), |(bytes, n), e| (bytes + e.block.len(), n + 1))
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Mip levels: D_MipLevelForScale (d_edge.c), D_SetupFrame (d_init.c)
+// ---------------------------------------------------------------------------
+
+/// `NUM_MIPS` (`d_init.c`): a miptex stores four levels.
+pub(super) const NUM_MIPS: usize = 4;
+
+/// `basemip` (`d_init.c`): the scales below which a surface drops to mip 1, 2
+/// and 3 — `{1.0, 0.5*0.8, 0.25*0.8}`, as the C's `float`s.
+const BASEMIP: [f32; NUM_MIPS - 1] = [1.0, 0.4, 0.2];
+
+/// The renderer's two mip cvars (`d_init.c`), with id's defaults: `d_mipscale`
+/// 1 multiplies the `basemip` thresholds (0 puts every surface at mip 0, as a
+/// scale is never below 0), and `d_mipcap` 0 is the finest level allowed
+/// (`d_minmip`; 3 draws everything at the coarsest).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MipCvars {
+    pub mipscale: f32,
+    pub mipcap: f32,
+}
+
+impl MipCvars {
+    pub const DEFAULT: MipCvars = MipCvars { mipscale: 1.0, mipcap: 0.0 };
+}
+
+impl Default for MipCvars {
+    fn default() -> MipCvars {
+        MipCvars::DEFAULT
+    }
+}
+
+/// Set `d_mipscale` / `d_mipcap` for the frames this thread renders from now on
+/// (the C reads the cvars in `D_SetupFrame`, every frame). The default is id's.
+pub fn set_mip_cvars(c: MipCvars) {
+    MIP_CVARS.with(|m| m.set(c));
+}
+
+/// The current `d_mipscale` / `d_mipcap`.
+pub fn mip_cvars() -> MipCvars {
+    MIP_CVARS.with(|m| m.get())
+}
+
+/// `NEAR_CLIP` (`r_local.h`): `R_EmitEdge` clamps a vertex's view depth to at
+/// least this before taking `1/z`.
+const NEAR_CLIP: f32 = 0.01;
+
+/// What `D_DrawSurfaces` needs to pick a surface's mip level, set up once per
+/// frame and pass: `D_SetupFrame`'s `d_scalemip`/`d_minmip`, `D_ViewChanged`'s
+/// `scale_for_mip`, and the view frustum's four side planes `R_ClipEdge` clips
+/// the edges against before `R_EmitEdge` records the nearest `1/z`.
+pub(super) struct MipView {
+    scalemip: [f32; NUM_MIPS - 1],
+    minmip: u32,
+    scale_for_mip: f32,
+    /// The side planes as slopes: a view-space point is inside iff
+    /// `|vx| <= tan_x * vz` and `|vy| <= tan_y * vz`.
+    tan_x: f32,
+    tan_y: f32,
+    /// Clip scratch (reused across faces).
+    a: Vec<[f32; 3]>,
+    b: Vec<[f32; 3]>,
+}
+
+impl MipView {
+    /// For a view whose screen centre is `(cx, cy)` pixels from its edges, with
+    /// `x = cx + focal_x*vx/vz`, `y = cy - focal_y*vy/vz`. `scale_for_mip` is the
+    /// larger focal length (`xscale`, or `yscale` when the pixels are taller than
+    /// wide); the frustum's sides run through the view rectangle's edges, as
+    /// `R_ViewChanged`'s `screenedge` planes do.
+    pub(super) fn new(cx: f32, cy: f32, focal_x: f32, focal_y: f32) -> MipView {
+        let cv = mip_cvars();
+        // d_minmip = d_mipcap.value (float to int truncates), clamped to 0..3.
+        let minmip = (cv.mipcap as i32).clamp(0, NUM_MIPS as i32 - 1) as u32;
+        MipView {
+            scalemip: BASEMIP.map(|b| b * cv.mipscale),
+            minmip,
+            scale_for_mip: if focal_y > focal_x { focal_y } else { focal_x },
+            tan_x: cx / focal_x,
+            tan_y: cy / focal_y,
+            a: Vec::new(),
+            b: Vec::new(),
+        }
+    }
+
+    /// `D_MipLevelForScale` (`d_edge.c`): 0 at or above `d_scalemip[0]`, 1 above
+    /// `[1]`, 2 above `[2]`, else 3; never finer than `d_minmip`.
+    pub(super) fn level_for_scale(&self, scale: f32) -> u32 {
+        let level = if scale >= self.scalemip[0] {
+            0
+        } else if scale >= self.scalemip[1] {
+            1
+        } else if scale >= self.scalemip[2] {
+            2
+        } else {
+            3
+        };
+        level.max(self.minmip)
+    }
+
+    /// The mip level `D_DrawSurfaces` draws a face at: `D_MipLevelForScale(
+    /// nearzi * scale_for_mip * mipadjust)`. `views` is the face's polygon in
+    /// view space (`x` right, `y` up, `z` forward — unclipped); `ti` its texinfo.
+    pub(super) fn level_for_face(&mut self, views: &[super::vis::VView], ti: &crate::bsp::TexInfo) -> u32 {
+        let nearzi = self.nearzi(views);
+        self.level_for_scale(nearzi * self.scale_for_mip * mipadjust(ti))
+    }
+
+    /// `surf->nearzi`: the largest `1/z` among the vertices of the polygon
+    /// clipped to the four side planes of the frustum, each `z` clamped to
+    /// [`NEAR_CLIP`] — what `R_RenderFace` gathers as `R_EmitEdge` projects the
+    /// clipped edges (the left clip edge, and the right one for its `1/z` only,
+    /// included). 0 when nothing is left (the face covers no pixel).
+    fn nearzi(&mut self, views: &[super::vis::VView]) -> f32 {
+        let (tx, ty) = (self.tan_x, self.tan_y);
+        self.a.clear();
+        self.a.extend(views.iter().map(|v| [v.vx, v.vy, v.vz]));
+        // The side planes, right, left, top and bottom, as (axis, sign, slope):
+        // a point's distance inside is `slope * z + sign * p[axis]`.
+        for (axis, sign, slope) in [(0, -1.0f32, tx), (0, 1.0, tx), (1, -1.0, ty), (1, 1.0, ty)] {
+            let d = |p: &[f32; 3]| slope * p[2] + sign * p[axis];
+            self.b.clear();
+            let n = self.a.len();
+            for i in 0..n {
+                let (p, q) = (self.a[i], self.a[(i + 1) % n]);
+                let (dp, dq) = (d(&p), d(&q));
+                if dp >= 0.0 {
+                    self.b.push(p);
+                }
+                if (dp >= 0.0) != (dq >= 0.0) {
+                    let f = dp / (dp - dq);
+                    self.b.push([p[0] + f * (q[0] - p[0]), p[1] + f * (q[1] - p[1]), p[2] + f * (q[2] - p[2])]);
+                }
+            }
+            std::mem::swap(&mut self.a, &mut self.b);
+            if self.a.is_empty() {
+                return 0.0;
+            }
+        }
+        self.a.iter().fold(0.0f32, |m, p| m.max(1.0 / p[2].max(NEAR_CLIP)))
+    }
+}
+
+/// `mipadjust` (`Mod_LoadTexinfo`, `model.c`): how many texels a world unit
+/// spans on this texinfo, in steps — the mean length of the two texture axes
+/// below 0.32 gives 4, below 0.49 3, below 0.99 2, else 1. A texture scaled up
+/// in the editor (short axes) drops to a coarser mip sooner.
+pub(super) fn mipadjust(ti: &crate::bsp::TexInfo) -> f32 {
+    let len = |k: usize| {
+        let v = &ti.vecs[k];
+        (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+    };
+    let l = ((len(0) + len(1)) / 2.0) as f64;
+    if l < 0.32 {
+        4.0
+    } else if l < 0.49 {
+        3.0
+    } else if l < 0.99 {
+        2.0
+    } else {
+        1.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The surface cache: D_CacheSurface (d_surf.c), R_DrawSurface (r_surf.c)
+// ---------------------------------------------------------------------------
 
 /// Maximum baked surface-cache block, in texels. A face larger than this stays on
 /// the per-pixel lighting path, so one pathological giant surface can't allocate a
-/// multi-MB block; virtually every real id1 face is far smaller.
+/// multi-MB block; id's `CalcSurfaceExtents` refuses any lightmapped face over
+/// 256 texels a side, far below this.
 const SURF_BLOCK_MAX: usize = 1 << 20;
 
-/// A baked surface block handle: `(texels, width, height, surface origin)`.
-type SurfBlockRef = (std::rc::Rc<Vec<u8>>, usize, usize, [f32; 2]);
+/// A baked surface block ([`face_surf_block`]): the palette indices, `bw * bh`
+/// row-major, at mip level `mip`, whose texel `(i, j)` is the surface's
+/// `(texmins[0] + i, texmins[1] + j)` in that level's texels. The span walker
+/// reads it through gradients scaled to the level
+/// ([`PolyGrads::mip_scaled`](super::raster::PolyGrads::mip_scaled)), as
+/// `D_CalcGradients` scales its steps by `mipscale`.
+pub(super) struct SurfBlock {
+    pub(super) block: std::rc::Rc<Vec<u8>>,
+    pub(super) bw: usize,
+    pub(super) bh: usize,
+    pub(super) texmins: [f32; 2],
+    pub(super) mip: u32,
+}
 
-/// Build (and cache) a world face's lit+colormapped surface block (mip 0):
-/// `D_CacheSurface`. Returns the `Rc` handle + dimensions + surface origin, or
-/// `None` (caller keeps the per-pixel path) when there is no usable colormap, the
-/// texture is missing, or the block would exceed [`SURF_BLOCK_MAX`].
+/// Build (and cache) a face's lit+colormapped surface block at mip level
+/// `miplevel`: `D_CacheSurface`. Returns the block, or `None` (the caller keeps
+/// the per-pixel path) when there is no usable colormap, the texture is missing,
+/// or the block would be empty or exceed [`SURF_BLOCK_MAX`]. A texture without
+/// its levels 1..3 (the synthetic ones in tests) is baked at mip 0.
 ///
 /// `tex_index` is the (animated) texture's index in `bsp.textures`, and `lm` the
 /// face's lightmap for this frame, dynamic lights included when `dlit` (a light
@@ -320,13 +515,13 @@ type SurfBlockRef = (std::rc::Rc<Vec<u8>>, usize, usize, [f32; 2]);
 /// — and its entry marked `dlight`, as the C marks `cache->dlight`: a dlit block
 /// is never a hit, so the light is rebaked every frame it is live and the first
 /// frame after it dies rebuilds the block without it. The hit test is the C's:
-/// same texture, same style values, no dlight now or at the bake.
+/// same texture, same style values, no dlight now or at the bake — per face and
+/// mip level (`surface->cachespots[miplevel]`).
 ///
-/// FIDELITY: at mip 0 the block is 1:1 with surface texels, so the sampled texture
-/// texel is identical to the per-pixel path; the lighting is sampled per texel
-/// (then nearest-read per pixel) rather than per screen pixel — which is what
-/// Quake's surface cache does (`R_BuildLightMap` + `D_DrawSurfaceBlock8`; the
-/// interpolation between luxels differs, see oracle class 6).
+/// The bake is `R_DrawSurface`'s shape: the block is `extents >> miplevel`
+/// texels a side (`surfwidth`), from the level's texture; each texel is lit by
+/// the lightmap factor at its corner (id interpolates in integer steps between
+/// luxels instead, oracle class 6).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn face_surf_block(
     idx: usize,
@@ -340,20 +535,19 @@ pub(super) fn face_surf_block(
     light_styles: &[f32; LIGHTSTYLES],
     dlit: bool,
     cache_surf: bool,
-) -> Option<SurfBlockRef> {
+    miplevel: u32,
+) -> Option<SurfBlock> {
     if colormap.len() < COLORMAP_LEN {
         return None;
     }
-    let (tw, th) = (mt.width as usize, mt.height as usize);
-    if tw == 0 || th == 0 || mt.pixels.len() < tw.saturating_mul(th) {
-        return None;
-    }
-    // The block spans the surface's texture-space extent at full resolution. lmw/lmh
-    // are extent/16 + 1 luxels, so the texel extent is (lmw-1)*16 + 1.
-    let bw = lm.lmw.saturating_sub(1).saturating_mul(16).saturating_add(1);
-    let bh = lm.lmh.saturating_sub(1).saturating_mul(16).saturating_add(1);
+    let mip = if (miplevel as usize) < NUM_MIPS && mt.mip(miplevel as usize).is_some() { miplevel } else { 0 };
+    let tex = mt.mip(mip as usize)?;
+    let (smax, tmax) = ((mt.width as usize) >> mip, (mt.height as usize) >> mip);
+    // `surfwidth = extents[0] >> miplevel`; `extents = (lmw - 1) * 16`.
+    let bw = lm.lmw.saturating_sub(1).saturating_mul(16) >> mip;
+    let bh = lm.lmh.saturating_sub(1).saturating_mul(16) >> mip;
     let total = bw.checked_mul(bh)?;
-    if bw == 0 || bh == 0 || total > SURF_BLOCK_MAX {
+    if smax == 0 || tmax == 0 || bw == 0 || bh == 0 || total > SURF_BLOCK_MAX {
         return None;
     }
     // Cache key: the active styles' resolved scales (matching the lightmap cache).
@@ -369,27 +563,28 @@ pub(super) fn face_surf_block(
         n_styles += 1;
     }
 
-    // The deterministic bake: for each surface texel (i,j) take the tiled base
-    // texel, shade it by the lightmap factor at the texel centre, pick the colormap
-    // row, and store the final palette index. Identical inputs -> identical bytes,
-    // so a cached block is bit-for-bit equal to a fresh one.
-    let texmins = lm.texmins;
+    // texturemins are whole multiples of 16, so `>> mip` is exact.
+    let texmins_i = [lm.texmins[0] as i32, lm.texmins[1] as i32];
+    let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
     let bake = || -> std::rc::Rc<Vec<u8>> {
-        let (tmi0, tmi1) = (texmins[0] as i64, texmins[1] as i64);
+        stat(|s| s.surf_texels_baked += total as u64);
+        // The level's texture tiled from `texturemins >> mip`; the light is the
+        // lightmap factor at the texel's corner in full-resolution texels.
+        let soffset = (texmins_i[0] >> mip).rem_euclid(smax as i32) as usize;
+        let toffset = (texmins_i[1] >> mip).rem_euclid(tmax as i32) as usize;
         let mut block = vec![0u8; total];
         for j in 0..bh {
-            let ty = ((tmi1 + j as i64).rem_euclid(th as i64)) as usize;
-            let tf = texmins[1] + j as f32;
+            let trow = (toffset + j) % tmax * smax;
+            let tf = lm.texmins[1] + (j << mip) as f32;
             for i in 0..bw {
-                let tx = ((tmi0 + i as i64).rem_euclid(tw as i64)) as usize;
-                let texel = mt.pixels[ty * tw + tx] as usize;
-                let bri = lm.factor_at(texmins[0] + i as f32, tf);
-                let row = colormap_row(bri);
+                let texel = tex[trow + (soffset + i) % smax] as usize;
+                let row = colormap_row(lm.factor_at(lm.texmins[0] + (i << mip) as f32, tf));
                 block[j * bw + i] = colormap[row * 256 + texel];
             }
         }
         std::rc::Rc::new(block)
     };
+    let made = |block| SurfBlock { block, bw, bh, texmins, mip };
 
     // EXTERNAL brush models (the b_*.bsp ammo/health/explosive boxes) bypass the
     // cache. The game clones each item's `Bsp` per visible instance every frame, so
@@ -400,7 +595,7 @@ pub(super) fn face_surf_block(
     // cheap; bake fresh and return without touching SURF_CACHE.
     if !cache_surf {
         stat(|s| s.surf_bypass_baked += 1);
-        return Some((bake(), bw, bh, texmins));
+        return Some(made(bake()));
     }
 
     // CACHED path — the world model and its inline submodels (doors/plats/buttons)
@@ -417,13 +612,14 @@ pub(super) fn face_surf_block(
         if needs_reset {
             *slot = Some(SurfCache {
                 fingerprint: fp,
-                entries: vec![None; n_faces],
+                entries: vec![Default::default(); n_faces],
             });
         }
         let sc = slot.as_mut().expect("just initialised");
+        let spot = sc.entries.get_mut(idx).map(|spots| &mut spots[mip as usize]);
         // HIT (`D_CacheSurface`): no dynamic light now or in the bake, same
         // texture, same resolved style scales -> reuse the baked block.
-        if let Some(e) = sc.entries.get(idx).and_then(|e| e.as_ref()) {
+        if let Some(Some(e)) = spot.as_deref() {
             if !dlit
                 && !e.dlight
                 && e.texture == tex_index
@@ -433,13 +629,13 @@ pub(super) fn face_surf_block(
                 && e.style_scales[..n_styles] == scales[..n_styles]
             {
                 stat(|s| s.surf_cache_hits += 1);
-                return Some((e.block.clone(), e.bw, e.bh, e.texmins));
+                return Some(made(e.block.clone()));
             }
         }
         // MISS: bake and store, marked `dlight` when a light is folded in.
         stat(|s| s.surf_baked += 1);
         let block = bake();
-        if let Some(e) = sc.entries.get_mut(idx) {
+        if let Some(e) = spot {
             *e = Some(SurfCacheEntry {
                 style_scales: scales,
                 n_styles,
@@ -448,10 +644,9 @@ pub(super) fn face_surf_block(
                 block: block.clone(),
                 bw,
                 bh,
-                texmins,
             });
         }
-        Some((block, bw, bh, texmins))
+        Some(made(block))
     })
 }
 
@@ -685,6 +880,7 @@ mod tests {
             height: 16,
             offsets: [0, 0, 0, 0],
             pixels: vec![0u8; 16 * 16],
+            mips: Default::default(),
             anim,
         };
         // Two-frame primary cycle: frame 0 (idx 0) and frame 1 (idx 1), ANIM_CYCLE=2.
@@ -726,6 +922,7 @@ mod tests {
             height: 16,
             offsets: [0, 0, 0, 0],
             pixels: vec![0u8; 16 * 16],
+            mips: Default::default(),
             anim: Some(anim),
         };
         // Primary frame at index 0 with alternate -> index 1 (a single-frame alt).
@@ -949,6 +1146,7 @@ mod tests {
                     height: 16,
                     offsets: [0, 0, 0, 0],
                     pixels: vec![(i * 7) as u8; 16 * 16],
+                    mips: Default::default(),
                     anim: None,
                 })
             })
@@ -1071,10 +1269,14 @@ mod tests {
             );
             (img, render_stats_end())
         };
-        let (unlit, _) = render(&[]);
+        let (unlit, st0) = render(&[]);
         let (lit, st) = render(std::slice::from_ref(&dl));
         assert_ne!(lit.rgb, unlit.rgb, "the light must show");
-        assert_eq!(st.surf_misses, 0, "no dlit face may fall back to the per-pixel path");
+        // demo_room's walls whose texinfo maps them to a line (zero extent) have
+        // no block at all (id's `D_SCAlloc` would `Sys_Error` on them); the light
+        // must not send any other face to the per-pixel path.
+        assert_eq!(st.surf_misses, st0.surf_misses, "no dlit face may fall back to the per-pixel path");
+        assert!(st.surf_hits > 0);
         assert!(st.surf_baked > 0, "dlit faces are baked with the light");
         // Lit again: a dlit block is never reused (the light may have moved).
         let (lit2, st2) = render(std::slice::from_ref(&dl));
@@ -1106,6 +1308,7 @@ mod tests {
                 height: 16,
                 offsets: [0, 0, 0, 0],
                 pixels: vec![texel; 16 * 16],
+                mips: Default::default(),
                 anim: Some(anim),
             })
         };
@@ -1130,6 +1333,127 @@ mod tests {
         assert_eq!(render(0.0).rgb, f0.rgb, "and the first again");
         reset_render_caches();
         assert_eq!(render(0.2).rgb, f1.rgb, "a warm cache draws what a cold one does");
+    }
+
+    // -- Mip levels (D_MipLevelForScale, D_CacheSurface per miplevel) -------
+
+    /// `D_MipLevelForScale`: `basemip` {1, 0.4, 0.2} times `d_mipscale`, and
+    /// never finer than `d_mipcap`.
+    #[test]
+    fn mip_level_for_scale_is_d_mip_level_for_scale() {
+        set_mip_cvars(MipCvars::DEFAULT);
+        let mv = MipView::new(160.0, 100.0, 160.0, 160.0);
+        let levels: Vec<u32> =
+            [5.0, 1.0, 0.999, 0.4, 0.399, 0.2, 0.199, 0.0].iter().map(|&s| mv.level_for_scale(s)).collect();
+        assert_eq!(levels, [0, 0, 1, 1, 2, 2, 3, 3]);
+        // d_mipscale 0: every scale (>= 0) is mip 0.
+        set_mip_cvars(MipCvars { mipscale: 0.0, mipcap: 0.0 });
+        assert_eq!(MipView::new(160.0, 100.0, 160.0, 160.0).level_for_scale(0.0), 0);
+        // d_mipcap 2 (and 9, clamped to 3): never finer than that.
+        set_mip_cvars(MipCvars { mipscale: 1.0, mipcap: 2.0 });
+        assert_eq!(MipView::new(160.0, 100.0, 160.0, 160.0).level_for_scale(5.0), 2);
+        set_mip_cvars(MipCvars { mipscale: 1.0, mipcap: 9.0 });
+        assert_eq!(MipView::new(160.0, 100.0, 160.0, 160.0).level_for_scale(5.0), 3);
+        set_mip_cvars(MipCvars::DEFAULT);
+    }
+
+    /// `Mod_LoadTexinfo`'s `mipadjust` from the mean texture-axis length.
+    #[test]
+    fn mipadjust_follows_the_texture_scale() {
+        let ti = |len: f32| crate::bsp::TexInfo {
+            vecs: [[len, 0.0, 0.0, 7.0], [0.0, 0.0, len, 0.0]],
+            miptex: 0,
+            flags: 0,
+        };
+        assert_eq!(mipadjust(&ti(1.0)), 1.0);
+        assert_eq!(mipadjust(&ti(2.0)), 1.0);
+        assert_eq!(mipadjust(&ti(0.5)), 2.0);
+        assert_eq!(mipadjust(&ti(0.4)), 3.0);
+        assert_eq!(mipadjust(&ti(0.25)), 4.0);
+    }
+
+    /// `surf->nearzi` comes from the polygon clipped to the frustum's sides: a
+    /// floor running from behind the eye to far ahead is nearest where the
+    /// bottom of the view cuts it, not at its vertex behind the camera.
+    #[test]
+    fn nearzi_is_taken_from_the_frustum_clipped_polygon() {
+        use super::super::vis::VView;
+        let v = |vx: f32, vy: f32, vz: f32| VView { vx, vy, vz, s: 0.0, t: 0.0 };
+        // 90 degrees both ways: |vx| <= vz, |vy| <= vz.
+        let mut mv = MipView::new(100.0, 100.0, 100.0, 100.0);
+        let floor = [v(-50.0, -20.0, -10.0), v(50.0, -20.0, -10.0), v(50.0, -20.0, 200.0), v(-50.0, -20.0, 200.0)];
+        assert!((mv.nearzi(&floor) - 1.0 / 20.0).abs() < 1e-6, "got {}", mv.nearzi(&floor));
+        // Wholly left of the view: nothing left, nearzi 0 (mip 3).
+        let off = [v(-300.0, 0.0, 10.0), v(-200.0, 0.0, 10.0), v(-200.0, 5.0, 100.0)];
+        assert_eq!(mv.nearzi(&off), 0.0);
+        // Wholly inside: the nearest vertex, its z clamped to NEAR_CLIP.
+        let inside = [v(0.0, 0.0, 40.0), v(1.0, 0.0, 30.0), v(0.0, 1.0, 50.0)];
+        assert!((mv.nearzi(&inside) - 1.0 / 30.0).abs() < 1e-7);
+        let ti = crate::bsp::TexInfo { vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], miptex: 0, flags: 0 };
+        // scale = (1/30) * 100 * 1 = 3.3 -> mip 0; at 10x the distance 0.33 -> mip 2.
+        assert_eq!(mv.level_for_face(&inside, &ti), 0);
+        let far: Vec<VView> = inside.iter().map(|p| v(p.vx * 10.0, p.vy * 10.0, p.vz * 10.0)).collect();
+        assert_eq!(mv.level_for_face(&far, &ti), 2);
+    }
+
+    /// A 32x32 wall texture whose level `m` texels are all `10 * m + 1`.
+    fn leveled_miptex() -> crate::bsp::MipTex {
+        crate::bsp::MipTex {
+            name: "wall".into(),
+            width: 32,
+            height: 32,
+            offsets: [0, 0, 0, 0],
+            pixels: vec![1; 32 * 32],
+            mips: [vec![11; 16 * 16], vec![21; 8 * 8], vec![31; 4 * 4]],
+            anim: None,
+        }
+    }
+
+    /// `D_CacheSurface` at a mip level: the block is `extents >> miplevel` a side,
+    /// baked from that level's texels, and each level has its own cache slot
+    /// (`cachespots[miplevel]`) — going back to a level is a hit.
+    #[test]
+    fn surface_blocks_are_baked_and_cached_per_mip_level() {
+        reset_render_caches();
+        let (cm, _) = ramp_colormap();
+        let mt = leveled_miptex();
+        // A 64x48-texel surface: 5x4 luxels, texturemins (-16, 32).
+        let luxels = vec![128u8; 5 * 4];
+        let lm = LightMap { luxels: Luxels::Static(&luxels), lmw: 5, lmh: 4, texmins: [-16.0, 32.0] };
+        let (_bsp, face, _) = one_face_bsp_zplane(128);
+        let fp = WorldFingerprint::of(&_bsp);
+        let styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        let get = |mip: u32| {
+            face_surf_block(0, &face, 0, &mt, &lm, &cm, fp, 1, &styles, false, true, mip).expect("block")
+        };
+        render_stats_begin();
+        for mip in 0..4u32 {
+            let sb = get(mip);
+            assert_eq!(sb.mip, mip);
+            assert_eq!((sb.bw, sb.bh), (64 >> mip, 48 >> mip));
+            assert_eq!(sb.texmins, [(-16 >> mip) as f32, (32 >> mip) as f32]);
+            // Uniform luxel 128: blocklights 128*256, t = (65280 - 32768) >> 2 =
+            // 8128, colormap row 31 of the level's texel (`ramp_colormap`: +3
+            // per row).
+            let want = (10 * mip + 1 + 3 * 31) as u8;
+            assert!(sb.block.iter().all(|&p| p == want), "mip {mip}");
+        }
+        let cold = render_stats_end();
+        assert_eq!((cold.surf_baked, cold.surf_cache_hits), (4, 0));
+        assert_eq!(cold.surf_texels_baked, 64 * 48 + 32 * 24 + 16 * 12 + 8 * 6);
+        render_stats_begin();
+        for mip in [2u32, 0, 3, 1] {
+            let _ = get(mip);
+        }
+        let warm = render_stats_end();
+        assert_eq!((warm.surf_baked, warm.surf_cache_hits), (0, 4), "every level stays cached");
+        let (bytes, blocks) = surface_cache_usage();
+        assert_eq!((bytes, blocks), (64 * 48 + 32 * 24 + 16 * 12 + 8 * 6, 4));
+        // A texture without levels 1..3 is baked at mip 0 whatever is asked.
+        let mut flat = leveled_miptex();
+        flat.mips = Default::default();
+        let sb = face_surf_block(0, &face, 0, &flat, &lm, &cm, fp, 1, &styles, false, false, 2).expect("block");
+        assert_eq!((sb.mip, sb.bw, sb.bh), (0, 64, 48));
     }
 
     #[test]

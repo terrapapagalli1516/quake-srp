@@ -327,6 +327,17 @@ impl PolyGrads {
         Some(PolyGrads { zi, sz, tz, st_eye })
     }
 
+    /// The gradients in mip level `mip`'s texels: `s/z`, `t/z` and the eye's
+    /// `(s, t)` times `1 / (1 << mip)` — `D_CalcGradients`' `mipscale` on
+    /// `d_sdivzstepu`..`d_tdivzorigin` and `sadjust`/`tadjust` (a power of two,
+    /// so exact). `1/z` is unchanged. For reading a surface block baked at that
+    /// level ([`SurfBlock`](super::surf::SurfBlock)).
+    pub(super) fn mip_scaled(&self, mip: u32) -> PolyGrads {
+        let k = 1.0 / (1u32 << mip.min(3)) as f64;
+        let sc = |l: Linear| Linear { o: l.o * k, dx: l.dx * k, dy: l.dy * k };
+        PolyGrads { zi: self.zi, sz: sc(self.sz), tz: sc(self.tz), st_eye: [self.st_eye[0] * k, self.st_eye[1] * k] }
+    }
+
     /// The same gradients recovered from synthetic vertices (their `vz`, and
     /// `s`/`t` taken as absolute: `st_eye` is zero) — the unit tests' polygons,
     /// which have no plane. Solved on the vertex triple of LARGEST area, the
@@ -663,9 +674,10 @@ pub(super) fn raster_poly_tex(
 
 /// A wall whose lit+colormapped surface block is already baked (see
 /// [`face_surf_block`](super::surf::face_surf_block)) — `D_DrawSpans8` over a
-/// cached surface. The inner pixel is ONE block read (texture, lightmap and
-/// colormap are folded into the block) plus a palette lookup; the z test and
-/// write stay. This is the warm-frame hot path for walls.
+/// cached surface. `grads` and `texmins` are in the block's mip-level texels.
+/// The inner pixel is ONE block read (texture, lightmap and colormap are folded
+/// into the block) plus a palette lookup; the z test and write stay. This is
+/// the warm-frame hot path for walls.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn raster_poly_cached(
     image: &mut Image,
@@ -710,9 +722,10 @@ pub(super) fn raster_poly_cached(
                 let z = 65536.0 / zi;
                 let depth = (z * (1.0 / 65536.0)) as f32;
                 if depth < *zc {
-                    // Nearest surface texel within the block extent (the block is
-                    // 1:1 with surface texels at mip 0). The clamp keeps a texel
-                    // read in the block, as `bbextents` does in id's span loop.
+                    // Nearest texel of the block (at its mip level: the caller
+                    // passes `grads.mip_scaled`). The clamp is id's `bbextents`:
+                    // the block is `extents >> miplevel` wide, so the last texel
+                    // is `(((extents << 16) >> miplevel) - 1) >> 16`.
                     let bx = ((((sz * z) as i64) + sadjust) >> 16).clamp(0, bw_i - 1) as usize;
                     let by = ((((tz * z) as i64) + tadjust) >> 16).clamp(0, bh_i - 1) as usize;
                     *zc = depth;

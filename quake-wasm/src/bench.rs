@@ -76,7 +76,7 @@ mod imp {
 world,submodel,external,alias,particle,sprite,viewmodel,\
 world_pvs,world_sort,world_setup,world_light,world_surf,\
 faces_pvs_culled,faces_frustum_culled,faces_drawn,world_tris,world_px,surf_hits,surf_misses,\
-surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds";
+surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds,surf_texels,surfcache_kb";
 
     #[cfg(target_arch = "wasm32")]
     #[link(wasm_import_module = "quake_bench")]
@@ -191,6 +191,10 @@ surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds";
                 s.surf_bypass_baked as f64,
                 s.sub_faces_drawn as f64,
                 s.sub_lm_builds as f64,
+                s.surf_texels_baked as f64,
+                // The surface cache resident after the frame (read now: the
+                // next frame has not run yet).
+                render::surface_cache_usage().0 as f64 / 1024.0,
             ];
             rest.get(i - N_PHASES).copied().unwrap_or(f64::NAN)
         })

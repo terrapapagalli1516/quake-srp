@@ -421,6 +421,11 @@ The fidelity classes are:
 - **Mechanism:** `face_surf_block` keyed by (face, mip), with the C's `scale_for_mip` and
   `mipadjust`.
 - **Risk:** medium. It re-baselines the goldens.
+- **Done** (branch `quake/w2a`): `MipView` picks each face's level as `D_DrawSurfaces` does
+  (`nearzi` over the frustum-clipped outline × `scale_for_mip` × `mipadjust`, `d_scalemip`,
+  `d_minmip`), and `face_surf_block` bakes and caches one `extents >> miplevel` block per face per
+  level from the BSP's own mip levels. Oracle, 320×200 world as shipped: 84.74 / 64.06 / 65.88 /
+  75.62 → 92.20 / 91.03 / 96.68 / 92.58 (e1m1/2/3/7); `AUDIT.md` has the rest and the goldens.
 
 ### B. Frame composition and presentation (wasm shell and 2-D)
 
