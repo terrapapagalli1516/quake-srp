@@ -414,6 +414,10 @@ pub struct DemoFrame {
     pub finale_start: f32,
     /// The `cl.stats[]` slots the intermission overlay shows.
     pub stats: DemoStats,
+    /// `cl.paused` as of this frame: a recorded `svc_setpause` (the recording
+    /// player paused) — `SCR_DrawPause` shows the plaque during playback.
+    /// id's shipped demos carry none.
+    pub paused: bool,
 }
 
 /// The `cl.stats[]` subset `Sbar_IntermissionOverlay` (and the solo scoreboard)
@@ -665,6 +669,8 @@ struct ClientState {
     /// The finale/cutscene text (`SCR_CenterPrint`) and its reveal start time.
     finale_text: String,
     finale_start: f32,
+    /// `cl.paused` — `svc_setpause`'s byte.
+    paused: bool,
 }
 
 impl ClientState {
@@ -705,6 +711,7 @@ impl ClientState {
             completed_time: 0.0,
             finale_text: String::new(),
             finale_start: 0.0,
+            paused: false,
         }
     }
 
@@ -752,6 +759,7 @@ impl ClientState {
         self.completed_time = 0.0;
         self.finale_text.clear();
         self.finale_start = 0.0;
+        self.paused = false;
     }
 
     /// `CL_EntityNum` — grow the entity array up to and including `num`.
@@ -1185,6 +1193,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
             secrets: cl.stats[STAT_SECRETS],
             total_secrets: cl.stats[STAT_TOTALSECRETS],
         },
+        paused: cl.paused,
     }
 }
 
@@ -1481,7 +1490,8 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_SETPAUSE => {
-                let _ = r.read_byte();
+                // cl.paused = MSG_ReadByte (); (the CD pause is not modelled).
+                cl.paused = r.read_byte() > 0;
             }
 
             SVC_SIGNONNUM => {

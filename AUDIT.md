@@ -1005,8 +1005,9 @@ Found, not fixed (outside the 2-D drawing, or another branch's file):
   are ~0.24 ms of a 13.9 ms frame).
 - **Default key binds are WASD** (`keys.rs`: w/s/a/d/c over `default.cfg`'s
   a = +lookup, d = +moveup) — a default departure besides Always Run.
-- **No pause** — `pause` (default.cfg binds PAUSE) and `SCR_DrawPause`'s plaque;
-  **no loading plaque** (`SCR_DrawLoading`).
+- ✅ (`quake/timedemo`, "Demo commands, timedemo, pause") **No pause** —
+  `pause` (default.cfg binds PAUSE) and `SCR_DrawPause`'s plaque;
+  **no loading plaque** (`SCR_DrawLoading`: not needed, see that section).
 - **`give` is not `Host_Give_f`** — it clamps, has an `a` (armour) case,
   defaults a missing amount to full, and selects the weapon it gives; id sets
   the field to `atoi(argv[2])` (0 when missing) and only ORs the weapon bit.
@@ -1472,6 +1473,34 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
   `cls.timedemo` even when the file does not open, which only leaves the host
   uncapped until the next disconnect; the port sets it when the demo plays.
   Natively: `quaketool timedemo`.
+- ✅ **`pause`** (`Host_Pause_f`, CENSUS L12's pause half): default.cfg's
+  `bind PAUSE "pause"` (also with the console down: PAUSE is no console key;
+  not in the menu), forwarded to the server (`Cmd_ForwardToServer`: nothing
+  during demo playback, `Can't "pause", not connected` with nothing running),
+  which toggles `sv.paused` and broadcasts "player paused the game" /
+  "player unpaused the game" (`SV_BroadcastPrintf`, the notify line and the
+  console). While paused neither `SV_ClientThink` nor `SV_Physics` runs, so
+  `sv.time` and with it `cl.time` stand — particles, dlights, light styles,
+  sky, liquids, animations; `cl.paused` (the local client's `svc_setpause`,
+  the same frame) keeps V_CalcRefdef off, so the view keeps its kick and
+  stair smoothing (`steptime = cl.time - cl.oldtime`: nothing while the
+  server stands, behind the menu too); the palette-shift fades, the notify
+  and centerprint timers and the ambient ramps run on host time, playing
+  sounds and loops carry on, as in the C. `SCR_DrawPause` draws
+  `gfx/pause.lmp` at `((w - 128)/2, (h - 48 - 24)/2)` outside an
+  intermission, under the menu; a recorded `svc_setpause` shows it during
+  demo playback. Against id's composited screen (`oracle/screen2d.py`,
+  scenario `pause`): 100% at 320x200, 640x400 and 960x600, paused and
+  unpaused. Not modelled: the `pausable` and `showpause` cvars (both 1, id's
+  defaults, and the port has no cvar registry) and `VID_HandlePause` (the
+  Windows build frees a windowed mode's mouse while paused).
+- **No loading plaque, and none needed** (`SCR_BeginLoadingPlaque` /
+  `SCR_DrawLoading`): id's draws `gfx/loading.lmp` over the last frame while a
+  changelevel, restart, a load or the next attract demo loads, because
+  loading took seconds. The port loads within the frame that starts it —
+  measured in the browser (headless Chromium, wasm): `map e1m2` 8–23 ms,
+  `map e1m1` 6–10 ms, `playdemo demo2` 7–9 ms — so there is no loading
+  moment to show it in.
 - Kept, not id's: **the menu does not stop the demo loop.** `M_Menu_Main_f`
   saves `cls.demonum` and sets -1 while the menu is up, so in id's Quake the
   demo playing when the menu opened is the last: at its end the client

@@ -979,4 +979,35 @@ mod tests {
         assert_eq!(n, 1090, "demo3, as id's");
         assert_eq!(playing(), (None, -1), "Host_EndGame outside the loop: CL_Disconnect");
     }
+
+    // -- pause during playback ---------------------------------------------------
+
+    #[test]
+    fn pause_goes_nowhere_in_a_demo_and_cannot_go_disconnected() {
+        use crate::app::boot_attract;
+        use crate::console::console_toggle;
+        assert_eq!(boot_attract(), 1);
+        console_toggle();
+        run_console_line("pause");
+        assert_eq!(console_lines().last().map(String::as_str), Some("]pause"), "demo playback: not really connected");
+        run_console_line("stopdemo");
+        run_console_line("pause");
+        assert_eq!(console_lines().last().map(String::as_str), Some("Can't \"pause\", not connected"));
+    }
+
+    #[test]
+    fn a_recorded_svc_setpause_shows_the_plaque() {
+        let mut d = build_demo().expect("the embedded demo boots");
+        let (plain, _) = step_demo(&mut d, 0.0, false, 320, 200);
+        for f in d.demo.frames.iter_mut() {
+            f.paused = true;
+        }
+        let (paused, _) = step_demo(&mut d, 0.0, false, 320, 200);
+        let changed: Vec<usize> = (0..320 * 200).filter(|&i| plain.rgb[i] != paused.rgb[i]).collect();
+        assert!(changed.len() > 1000, "the plaque is drawn ({} px)", changed.len());
+        assert!(
+            changed.iter().all(|&i| (96..224).contains(&(i % 320)) && (64..88).contains(&(i / 320))),
+            "only where SCR_DrawPause puts it"
+        );
+    }
 }

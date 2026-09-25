@@ -7,8 +7,8 @@
 use crate::menu::{
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
     BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_RIGHT,
-    BIND_IMPULSE_0, BIND_KLOOK, BIND_MLOOK, BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP,
-    BIND_SPEED, BIND_STRAFE,
+    BIND_IMPULSE_0, BIND_KLOOK, BIND_MLOOK, BIND_PAUSE, BIND_SHOWSCORES, BIND_SIZEDOWN,
+    BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
 };
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
@@ -37,6 +37,7 @@ pub const K_END: u8 = 152;
 pub const K_MOUSE1: u8 = 200;
 pub const K_MOUSE2: u8 = 201;
 pub const K_MOUSE3: u8 = 202;
+pub const K_PAUSE: u8 = 255;
 
 /// `Key_KeynumToString` (keys.c): printable ASCII (33..=126) is the character
 /// itself (lowercase, as `Key_Event` delivers it); the named specials come from
@@ -68,6 +69,7 @@ pub fn keynum_to_string(keynum: u8) -> String {
         K_MOUSE1 => "MOUSE1",
         K_MOUSE2 => "MOUSE2",
         K_MOUSE3 => "MOUSE3",
+        K_PAUSE => "PAUSE",
         f @ K_F1..=K_F12 => return format!("F{}", f - K_F1 + 1),
         _ => "UNKNOWN",
     }
@@ -113,6 +115,7 @@ pub(crate) fn default_bindings() -> [Option<u8>; 256] {
     bind(b'\\', BIND_MLOOK);
     bind(K_MOUSE3, BIND_MLOOK);
     bind(K_INS, BIND_KLOOK);
+    bind(K_PAUSE, BIND_PAUSE);
     // This port's established layout (overrides default.cfg's a=+lookup,
     // d=+moveup; w/s were unbound there):
     bind(b'w', BIND_FORWARD);
@@ -137,6 +140,7 @@ mod tests {
         assert_eq!(keynum_to_string(K_F1), "F1");
         assert_eq!(keynum_to_string(K_F12), "F12");
         assert_eq!(keynum_to_string(K_DEL), "DEL");
+        assert_eq!(keynum_to_string(K_PAUSE), "PAUSE");
         assert_eq!(keynum_to_string(0), "UNKNOWN");
     }
 
@@ -148,6 +152,11 @@ mod tests {
         assert_eq!(b[b'\\' as usize], Some(BIND_MLOOK as u8));
         assert_eq!(b[K_MOUSE3 as usize], Some(BIND_MLOOK as u8));
         assert_eq!(b[K_INS as usize], Some(BIND_KLOOK as u8));
+    }
+
+    #[test]
+    fn pause_is_bound_to_pause_as_in_default_cfg() {
+        assert_eq!(default_bindings()[K_PAUSE as usize], Some(BIND_PAUSE as u8));
     }
 
     #[test]

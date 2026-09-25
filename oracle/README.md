@@ -394,6 +394,7 @@ scenario's shots, before the branch -> after.
 | menus: options, customize, video (3) | 95.4 -> 95.5 | 41.5 -> 98.8 | 44.7 -> 99.5 |
 | menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
 | quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
+| pause: the plaque and "player paused the game", unpaused (2; `quake/timedemo`, before it no `pause`) | 100 | 100 | 100 |
 
 The before column is `bbfc6bc` with the same harness. The fixes, one commit
 each (`AUDIT.md`, "The 2-D layer"): the ammo counts 4 px left; a "quake-rs" label

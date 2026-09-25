@@ -1,6 +1,6 @@
 //! Console commands — `Cmd_ExecuteString`'s dispatch (cmd.c) against the
 //! App: echo/clear/help, the viewsize cvar commands, the Web extras, `map`,
-//! save/load, the demo commands (cl_demo.c's `playdemo`/`timedemo`,
+//! save/load, `pause`, the demo commands (cl_demo.c's `playdemo`/`timedemo`,
 //! host_cmd.c's demo loop control `startdemos`/`demos`/`stopdemo`), and the
 //! cheats god/noclip/fly/kill/give/impulse, which act on the live
 //! [`Walk`](crate::app::Walk) through the client's host_cmd.c
@@ -51,6 +51,20 @@ fn host_demos(a: &mut App) {
     cl_next_demo(a);
 }
 
+/// `pause` from this client: `Host_Pause_f` is forwarded to the server
+/// (`Cmd_ForwardToServer`), which toggles `sv.paused` and broadcasts who did
+/// it ([`quake_rs::server::Server::pause`]). During demo playback it goes
+/// nowhere ("not really connected"); with nothing running it cannot go.
+pub(crate) fn host_pause(a: &mut App) {
+    if a.demoplayback() {
+        return;
+    }
+    match a.walk.as_mut().filter(|_| a.mode == 0) {
+        Some(w) => w.server.pause(),
+        None => a.console.println("Can't \"pause\", not connected"),
+    }
+}
+
 /// `Host_Stopdemo_f`: stop the playing demo and disconnect (the loop keeps
 /// its place: `demos`, or leaving the menu, resumes it).
 fn host_stopdemo(a: &mut App) {
@@ -92,7 +106,7 @@ pub(crate) fn execute_console_command(line: &str) {
         "help" | "cmdlist" => {
             ensure_app(|a| {
                 a.console.println("commands:");
-                a.console.println("  god noclip fly kill");
+                a.console.println("  god noclip fly kill  pause");
                 a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
                 a.console.println("  impulse <n>   map <name>");
                 a.console.println("  save <name>   load <name>");
@@ -135,6 +149,10 @@ pub(crate) fn execute_console_command(line: &str) {
     // The demo commands: cl_demo.c's CL_PlayDemo_f / CL_TimeDemo_f (the
     // `Cmd_Argc() != 2` usage lines are the C's, "play" included) and
     // host_cmd.c's demo loop control.
+    if cmd_lower == "pause" {
+        ensure_app(host_pause);
+        return;
+    }
     if matches!(cmd_lower.as_str(), "playdemo" | "timedemo" | "stopdemo" | "startdemos" | "demos") {
         ensure_app(|a| match cmd_lower.as_str() {
             "playdemo" if argv.len() != 2 => a.console.println("play <demoname> : plays a demo"),

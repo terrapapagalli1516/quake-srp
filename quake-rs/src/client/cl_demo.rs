@@ -160,6 +160,7 @@ fn build_demo_with(
     let pic_complete = lmp("gfx/complete.lmp");
     let pic_inter = lmp("gfx/inter.lmp");
     let pic_finale = lmp("gfx/finale.lmp");
+    let pic_pause = lmp("gfx/pause.lmp");
     let mut d = DemoPlay::new(pak, bsp, palette, demo);
     d.models = models;
     d.sprites = sprites;
@@ -170,6 +171,7 @@ fn build_demo_with(
     d.pic_complete = pic_complete;
     d.pic_inter = pic_inter;
     d.pic_finale = pic_finale;
+    d.pic_pause = pic_pause;
     Some(d)
 }
 
@@ -722,6 +724,16 @@ fn render_demo_frame(
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
+    }
+
+    // SCR_DrawPause: a recorded svc_setpause shows the plaque (outside an
+    // intermission, whatever key_dest is). (V_RenderView also stops
+    // V_CalcRefdef while cl.paused; a recording's pause keeps its recorded
+    // view here — id's demos have none.)
+    if f.paused && f.intermission == 0 {
+        if let Some(pic) = d.pic_pause.as_ref() {
+            render::draw_pause(&mut img, pic, &d.palette);
+        }
     }
 
     // On-screen messages from the recorded svc_print / svc_centerprint stream,

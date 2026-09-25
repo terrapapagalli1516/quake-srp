@@ -319,6 +319,7 @@ function quakeKey(e) {
     case 'Backspace': return 127; case 'Insert': return 147; case 'Delete': return 148;
     case 'PageDown': return 149; case 'PageUp': return 150;
     case 'Home': return 151; case 'End': return 152;
+    case 'Pause': return 255;
   }
   if (/^F([1-9]|1[0-2])$/.test(k)) return 135 + parseInt(k.slice(1), 10) - 1;
   return null;
@@ -348,6 +349,9 @@ addEventListener('keydown', e => {
     return;
   }
   if (consoleVisible()) {
+    // PAUSE is no console key (keys.c consolekeys): its binding, default.cfg's
+    // "pause", runs with the console down too.
+    if (e.key === 'Pause') { if (!e.repeat) exp.key_down?.(255); e.preventDefault(); return; }
     if (k === 'escape')    { exp.console_toggle();   e.preventDefault(); return; }
     if (k === 'backspace') { exp.console_backspace?.(); e.preventDefault(); return; }
     if (k === 'enter')     { exp.console_enter?.();   e.preventDefault(); return; }

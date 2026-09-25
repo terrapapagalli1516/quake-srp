@@ -905,6 +905,19 @@ fn lookup_sound_index(vm: &mut Vm, sample: &str) -> i32 {
 }
 
 impl Server {
+    /// `Host_Pause_f` as the server runs it for the client that sent `pause`
+    /// (the console command is `Cmd_ForwardToServer`ed; `pausable` is 1, id's
+    /// default): toggle `sv.paused` and `SV_BroadcastPrintf` "<netname> paused
+    /// the game" / "... unpaused the game" — the notify line and console text
+    /// every client gets. The `svc_setpause` that follows is
+    /// [`Server::paused`] itself: the local client reads it the same frame.
+    pub fn pause(&mut self) {
+        self.paused = !self.paused;
+        let name = if self.player > 0 { self.vm.ent_get_string(self.player, "netname") } else { String::new() };
+        let what = if self.paused { "paused" } else { "unpaused" };
+        push_message(false, format!("{name} {what} the game\n"));
+    }
+
     /// Take and clear the queued sound events fired by the QuakeC since the last
     /// drain (`PF_sound`/`PF_ambientsound` pushes; see [`SoundEvent`]). A
     /// front-end calls this once per frame to play them; tests use it to assert

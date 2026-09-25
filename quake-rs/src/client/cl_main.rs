@@ -178,8 +178,14 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
     // animations freeze. The client frame itself still runs — V_RenderView
     // draws the view, and whatever the C drives off host_frametime / realtime
     // keeps going: the palette-shift fades (V_UpdatePalette), the centerprint
-    // countdown and notify expiry, the ambient-sound ramps.
-    let paused = menu_up;
+    // countdown and notify expiry, the ambient-sound ramps. The `pause`
+    // command stops the server the same way (`!sv.paused` in the same tests)
+    // for as long as it is on, and the client with it: `svc_setpause` sets
+    // `cl.paused` in the same host frame on a local server, and while it is
+    // set V_RenderView does not run V_CalcRefdef — the view keeps its last
+    // angles, kick and stair smoothing — and SCR_DrawPause shows the plaque.
+    let cl_paused = w.server.paused;
+    let paused = menu_up || cl_paused;
     // Guard against a non-finite/negative dt so the clock only moves forward.
     // (cl.time, `w.clock`, follows the server's clock below.)
     if dt.is_finite() && dt > 0.0 {
@@ -741,8 +747,11 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
         // layered on top); on first frame / not-climbing, oldz tracks origin exactly.
         let origin_z = w.server.vm.ent_get_vector(w.player, "origin")[2];
         let onground = (w.server.vm.ent_get_float(w.player, "flags") as i32) & FL_ONGROUND != 0;
+        // `steptime = cl.time - cl.oldtime`: nothing while the server is
+        // paused (behind the menu, or by `pause`), so the eye stays put.
+        let steptime = if paused { 0.0 } else { dt.max(0.0) };
         if w.oldz.is_finite() && onground && origin_z - w.oldz > 0.0 {
-            w.oldz += dt.max(0.0) * 80.0;
+            w.oldz += steptime * 80.0;
             if w.oldz > origin_z {
                 w.oldz = origin_z;
             }
@@ -780,7 +789,9 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
         if w.v_dmg_time > 0.0 {
             roll += w.v_dmg_time / V_KICKTIME * w.v_dmg_roll;
             kick_pitch = w.v_dmg_time / V_KICKTIME * w.v_dmg_pitch;
-            w.v_dmg_time -= if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+            if !cl_paused {
+                w.v_dmg_time -= if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+            }
         }
         if w.server.vm.ent_get_float(w.player, "health") <= 0.0 {
             roll = 80.0; // dead view angle (replaces, per V_CalcViewRoll)
@@ -1082,6 +1093,14 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
+    }
+
+    // SCR_DrawPause: the plaque while cl.paused, outside an intermission and
+    // whatever key_dest is (the menu draws over it).
+    if cl_paused && w.intermission == 0 {
+        if let Some(pic) = w.pic_pause.as_ref() {
+            render::draw_pause(&mut img, pic, &w.palette);
+        }
     }
 
     // On-screen messages the QuakeC printed (drained above): the current

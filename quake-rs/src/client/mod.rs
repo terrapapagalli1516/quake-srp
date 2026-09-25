@@ -244,6 +244,8 @@ pub struct Walk {
     pub pic_inter: Option<Qpic>,
     /// `gfx/finale.lmp` — the finale plaque (Sbar_FinaleOverlay).
     pub pic_finale: Option<Qpic>,
+    /// `gfx/pause.lmp` — the plaque `SCR_DrawPause` shows while paused.
+    pub pic_pause: Option<Qpic>,
 }
 
 /// Recorded-demo playback state.
@@ -295,6 +297,8 @@ pub struct DemoPlay {
     pub pic_complete: Option<Qpic>,
     pub pic_inter: Option<Qpic>,
     pub pic_finale: Option<Qpic>,
+    /// `gfx/pause.lmp`, for a recorded `svc_setpause` (`SCR_DrawPause`).
+    pub pic_pause: Option<Qpic>,
     /// `cl.cshifts[CSHIFT_DAMAGE].percent` for the recorded POV: bumped by each
     /// recorded `svc_damage` (V_ParseDamage: `+= 3*count`, clamped 0..150) and
     /// faded `dt*150` per rendered frame (V_UpdatePalette), exactly like the
@@ -379,6 +383,7 @@ impl DemoPlay {
             pic_complete: None,
             pic_inter: None,
             pic_finale: None,
+            pic_pause: None,
             damage_blend: 0.0,
             damage_color: [255, 0, 0],
             bonus_blend: 0.0,
@@ -460,6 +465,7 @@ pub fn assemble_walk(
     let pic_complete = lmp("gfx/complete.lmp");
     let pic_inter = lmp("gfx/inter.lmp");
     let pic_finale = lmp("gfx/finale.lmp");
+    let pic_pause = lmp("gfx/pause.lmp");
     let clock = server.time(); // cl.time = sv.time (see `Walk::clock`)
     Some(Walk {
         server,
@@ -519,6 +525,7 @@ pub fn assemble_walk(
         pic_complete,
         pic_inter,
         pic_finale,
+        pic_pause,
     })
 }
 

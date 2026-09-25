@@ -17,7 +17,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 > exit to the **intermission stats screen** (Time / Secrets / Kills from the QC-placed camera) — through to the
 > **episode-end finale text** — with your inventory carried to the next map: the whole shareware episode. There's a
 > working **Options menu** (screen size, mouse, volume; resolution under Video Options) and a **drop-down console** (`~`) with
-> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`, and it saves and loads (Single Player > Save/Load, the
+> `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`/`pause`/`timedemo`, and it saves and loads (Single Player > Save/Load, the
 > `save`/`load` commands; the page keeps the `.sav` text in localStorage). What it is *not*: multiplayer/netcode
 > (out of scope). Everything claimed below is real and tested: **~580 engine + ~120 wasm tests**, zero dependencies, no
 > `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
@@ -60,7 +60,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
-  `fly`/`give`/`impulse`/`map`/`kill`/`clear` and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`.
+  `fly`/`give`/`impulse`/`map`/`kill`/`clear`, `pause` (the PAUSE key: id's plaque) and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`.
   Boots into the menu **over the playing attract demo** (quake.rc's `startdemos demo1 demo2 demo3`).
 - **Web extras** — the port is id's Quake by default (Always Run aside). Its departures are opt-in, all
   off by default, on one page: **Options > Web extras**, drawn like id's Options page, each also a

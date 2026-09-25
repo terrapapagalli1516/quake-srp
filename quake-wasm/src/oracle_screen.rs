@@ -76,6 +76,7 @@ fn keynum(name: &str) -> Option<i32> {
         "DOWNARROW" => 129,
         "LEFTARROW" => 130,
         "RIGHTARROW" => 131,
+        "PAUSE" => 255,
         s if s.len() == 1 => s.to_ascii_lowercase().as_bytes()[0] as i32,
         _ => return None,
     })
