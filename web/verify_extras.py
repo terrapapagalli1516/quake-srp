@@ -175,8 +175,9 @@ with sync_playwright() as p:
     pg.evaluate(GRAB, "_off")
     w, h = pg.evaluate("[exp.width(), exp.height()]")
     d = pg.evaluate(DIFF, ["_on", "_off"])
-    s = w / 320
-    box = (256 * s, 312 * s, h - 56 * s, h - 48 * s)
+    # The 2-D layer is 1:1 as id draws it (the scaled-2-D extra is off):
+    # " 60 FPS" at x w-64..w-8, y h-56..h-48 (viewsize 100: sb_lines 48).
+    box = (w - 64, w - 8, h - 56, h - 48)
     inside = d is not None and d["x0"] >= box[0] and d["x1"] < box[1] \
         and d["y0"] >= box[2] and d["y1"] < box[3]
     check("the readout draws bottom right, above the status bar, and nowhere else",

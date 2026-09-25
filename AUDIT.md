@@ -919,9 +919,91 @@ C followed and the test are in the commit message.
   console output wraps too and continues a line a print left open. The
   dispatcher hands each frame's printed text (live or demo) to the console.
   Tests `console_print_is_con_print`, `game_prints_reach_the_console_scrollback`
-  (e1m1's shells pickup). Still open: console command output does not reach
-  the notify lines (the C's one buffer shows `]god` / `godmode ON` there
-  for 3 s after the console closes).
+  (e1m1's shells pickup). ~~Still open: console command output does not reach
+  the notify lines~~ — moot: `Con_ToggleConsole_f` zeroes `con_times`, so what
+  was printed while the console was down never shows as a notify line in the
+  C either (branch `quake/fid2d`, below).
+
+## The 2-D layer against id's composited screen (2026-09-25, branch `quake/fid2d`)
+
+`oracle/screen2d.py` (see `oracle/README.md`, "The 2-D layer") plays the same
+scenario through id's WinQuake and the port's live App with the 3-D view one
+flat colour on both sides, and diffs the screens: 63 shots x 3 modes. Before
+the branch the shots' 2-D pixels matched 37-100% at 320x200 and 0-100% (mostly
+under 55%) at 640x400 and 960x600; after, 57 of 63 shots in each mode are
+exact and the other six are four explained residues (95.5-99.9%). Goldens unchanged
+(`959d0221`/`0cd18471`/`b63ae8b7`, 3-D only).
+
+- ✅ **Ammo counts 4 px left** (`8b960c2`) — `Sbar_DrawCharacter` draws at
+  `x + ((vid.width - 320)>>1) + 4` (sbar.c:293); the port's inventory counts
+  used the bare x. Test: the shells count starts at x = 8 - 2 + 4.
+- ✅ **"quake-rs" under the Main / Single Player menus** (`77a0664`) — not in
+  `M_Main_Draw` (menu.c:291). Removed.
+- ✅ **A note line under Multiplayer** (`f20d28b`) — `M_MultiPlayer_Draw`
+  (menu.c:635) prints only "No Communications Available". Removed.
+- ✅ **Centerprints one row low** (`4a92962`) — `y = vid.height*0.35`
+  (screen.c:142, and `SCR_DrawNotifyString`'s) is `(int)` of a product the x87
+  computes in extended precision, where the double 0.35 leaves it a hair under
+  70: row 69 (the oracle's x87 build draws 69, its SSE build 70). The port took
+  70. `center_string_top` is the exact integer floor; the plain centerprint now
+  goes through the finale's `SCR_DrawCenterString` port (its 40-column scan).
+- ✅ **The 2-D layer blown up in every larger mode** (`cdfd57f`) — a default
+  departure: WinQuake draws the 2-D layer 1:1 in every video mode — the bar 320
+  wide at the bottom centre with backtile either side (`Sbar_Draw`,
+  sbar.c:938), menus across the top centre (`M_DrawPic`'s
+  `(vid.width-320)>>1`), the intermission at fixed screen coordinates, a 48-row
+  bar the view clears, `(int)(48*h/vid.height)` rows of the underwater warp
+  buffer, a console `vid.width/8-2` characters wide. The port scaled id's
+  320x200 screen to fill the framebuffer. `draw::screen_2d` is now the screen
+  id's code lays out on: the framebuffer at scale 1 by default, or with the new
+  **"scaled 2-D" extra** (`draw::set_scaled_2d`, wasm export `set_scaled_2d(1)`)
+  the old 320x200 blow-up. 640x400: 1-55% of 2-D pixels -> 99-100%. **Needs
+  wiring** into the page's extras (not done here: the Extras menu and the
+  page's persistence are another branch's); until then the browser's default
+  960x600 shows id's small bar and menus.
+- ✅ **The console** (`d27eebb`) — a fixed 60% panel that snapped on and off,
+  the conback's top rows squeezed into it, its own text layout. Now
+  `SCR_SetUpToDrawConsole` (screen.c:458: `scr_con_current` slides 300 rows a
+  second to `vid.height/2` and back), `Draw_ConsoleBackground` (draw.c:539: the
+  conback's BOTTOM rows, the version stamped in with `0x60 + texel` — the DOS
+  build's "1.09"), `Con_DrawConsole` (console.c:580: `(lines-16)>>3` rows from
+  `lines-16-rows*8`, x = `(col+1)*8`) and `Con_DrawInput` (the prompt line at
+  `lines-16`, prestepped past `con_linewidth`); closing clears the typing
+  (`Con_ToggleConsole_f`). `Con_CheckResize`: the console and notify text are
+  laid out `con_linewidth = (vid.width>>3)-2` wide (was 38 in every mode).
+  320x200: 37% -> 99.1% (the rest: the oracle's Linux version string).
+- ✅ **The Quit prompt** (`d6c0fe1`) — an invented black box asking "Are you sure
+  you want to quit?". Now `M_Quit_Draw` (menu.c:1674, the non-Windows builds,
+  i.e. DOS Quake's): the menu it rose over redrawn without a second fade
+  (`wasInMenus`, `m_recursiveDraw`), `M_DrawTextBox (56, 76, 24, 4)` from the
+  `gfx/box_*.lmp` pieces (menu.c:181), one of the eight `quitMessage` taunts
+  (`msgNumber = rand()&7`) in `M_Print`'s bronze; No/Escape return to that
+  menu, or to the game. 66% -> 100%. (WinQuake on Windows showed a credits box.)
+- ✅ **The console lingered after `map` / `load`** (`2b024a2`) —
+  `SCR_BeginLoadingPlaque` zeroes `scr_con_current`: it goes at once.
+- ✅ **Notify lines survived a console toggle** (`0cdcb1a`) —
+  `Con_ToggleConsole_f` zeroes `con_times`. Test
+  `toggling_the_console_clears_the_notify_lines`.
+
+Found, not fixed (outside the 2-D drawing, or another branch's file):
+- **Menu cursors are not remembered** — id keeps one per menu
+  (`m_main_cursor`, `m_singleplayer_cursor`, `options_cursor`, `load_cursor`
+  shared by Load and Save, ...): Escape from Options lands on "Options", the
+  port's single cursor on "Single Player". `menu.rs` behaviour, left for after
+  the Extras-menu work (screen2d `menu_sp.sp_again`, 206 px).
+- **`sv.time` adds up in f32** (`sv_phys.rs`: `gset_float("time", start_time +
+  dt)`); id's `sv.time` is a double copied into the QuakeC float each frame.
+  After 60 frames of 0.1 s the port reads 7.2999954, so the new-weapon flash
+  (`(int)((cl.time - item_gettime)*10)`) is a frame behind (screen2d
+  `flash.rl_new`), and the error grows with the session (at an hour, f32 steps
+  are ~0.24 ms of a 13.9 ms frame).
+- **Default key binds are WASD** (`keys.rs`: w/s/a/d/c over `default.cfg`'s
+  a = +lookup, d = +moveup) — a default departure besides Always Run.
+- **No pause** — `pause` (default.cfg binds PAUSE) and `SCR_DrawPause`'s plaque;
+  **no loading plaque** (`SCR_DrawLoading`).
+- **`give` is not `Host_Give_f`** — it clamps, has an `a` (armour) case,
+  defaults a missing amount to full, and selects the weapon it gives; id sets
+  the field to `atoi(argv[2])` (0 when missing) and only ORs the weapon bit.
 
 ## Projection and spans (2026-09-25, branch `quake/w2b`)
 

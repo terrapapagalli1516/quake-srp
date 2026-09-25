@@ -4,15 +4,13 @@
 //! Source: `WinQuake/console.c` — `Con_Print`, `Con_DrawInput`, `Con_DrawConsole`,
 //! `Con_DrawNotify`.
 
-use crate::draw::{
-    draw_char_scaled, draw_string_scaled, fill_rect, HUD_TRANSPARENT, HUD_VIRT_W, MENU_VIRT_H,
-};
+use crate::draw::{draw_char_scaled, draw_string_scaled, fill_rect, screen_2d, Screen2d};
 use crate::menu::realtime_blink_bit;
 use crate::render::Image;
 
 /// Draw the notify lines (`bprint`/`sprint`, Con_DrawNotify): stacked from
-/// the very top of the 320x200 virtual screen (`v = 0`), each character at
-/// `(x+1)<<3`, scaled to the framebuffer.
+/// the very top of the [`screen_2d`] screen (`v = 0`), each character at
+/// `(x+1)<<3`.
 pub fn draw_notify(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
@@ -22,7 +20,7 @@ pub fn draw_notify(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let scale = image.w as f32 / HUD_VIRT_W;
+    let scale = screen_2d(image.w, image.h).scale;
     let mut vy = 0.0;
     for line in lines {
         draw_string_scaled(image, conchars, 8.0, vy, line, scale, 0.0, 0.0, palette);
@@ -39,9 +37,16 @@ pub fn draw_notify(
 /// is the same bounded-history idea with an owned [`VecDeque`]).
 pub const CONSOLE_SCROLLBACK_CAP: usize = 200;
 
-/// `con_linewidth` (console.c `Con_CheckResize`: `(vid.width >> 3) - 2`) for
-/// the 320-wide virtual screen the console and the notify lines are drawn on.
+/// `con_linewidth` (console.c `Con_CheckResize`: `(vid.width >> 3) - 2`) on a
+/// 320-wide screen: where [`ConCursor`] starts.
 pub const CON_LINEWIDTH: usize = (320 >> 3) - 2;
+
+/// `con_linewidth` for a `vid_w x vid_h` framebuffer: `(vid.width >> 3) - 2`
+/// of its [`screen_2d`] screen — 38 at 320 wide, 118 at 960 (38 in every mode
+/// under the "scaled 2-D" extra).
+pub fn con_linewidth(vid_w: usize, vid_h: usize) -> usize {
+    ((screen_2d(vid_w, vid_h).w >> 3) - 2).max(1) as usize
+}
 
 /// One step of `Con_Print` on the console text buffer (see [`ConCursor`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,28 +61,49 @@ pub enum ConOp {
 }
 
 /// `Con_Print`'s cursor (console.c): `con_x`, the column the next character
-/// goes to (0 = a new line starts with it), and the pending `\r`. Text is laid
-/// into [`CON_LINEWIDTH`]-wide lines: a word that would cross the edge starts a
+/// goes to (0 = a new line starts with it), the pending `\r`, and
+/// `con_linewidth` ([`CON_LINEWIDTH`] until [`ConCursor::set_width`]). Text is
+/// laid into `con_linewidth`-wide lines: a word that would cross the edge starts a
 /// new line (one longer than a line runs on until its remainder fits the next
 /// line), `\n` ends the line and `\r` returns to its start. The console scrollback and the notify
 /// lines are the same text in the C (one buffer, `con->text`).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ConCursor {
     con_x: usize,
     cr: bool,
+    width: usize,
+}
+
+impl Default for ConCursor {
+    fn default() -> Self {
+        ConCursor { con_x: 0, cr: false, width: CON_LINEWIDTH }
+    }
 }
 
 impl ConCursor {
+    /// `con_linewidth`: the width text is laid out at.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// `Con_CheckResize`'s new `con_linewidth` (at least 1); the text already
+    /// laid out is the caller's to cut ([`truncate_line`]).
+    pub fn set_width(&mut self, width: usize) {
+        self.width = width.max(1);
+        self.con_x = self.con_x.min(self.width - 1);
+    }
+
     /// `Con_Print(txt)`: hand each buffer operation to `buf`, in order.
     pub fn print(&mut self, txt: &str, mut buf: impl FnMut(ConOp)) {
+        let width = self.width;
         let b = txt.as_bytes();
         for i in 0..b.len() {
             let c = b[i];
             // count word length: `txt[l] <= ' '` on a (signed) char, so a
             // high-bit byte ends a word too.
-            let l = b[i..].iter().take(CON_LINEWIDTH).take_while(|&&ch| (ch as i8) > b' ' as i8).count();
+            let l = b[i..].iter().take(width).take_while(|&&ch| (ch as i8) > b' ' as i8).count();
             // word wrap
-            if l != CON_LINEWIDTH && self.con_x + l > CON_LINEWIDTH {
+            if l != width && self.con_x + l > width {
                 self.con_x = 0;
             }
             if self.cr {
@@ -96,7 +122,7 @@ impl ConCursor {
                 _ => {
                     buf(ConOp::Char(c));
                     self.con_x += 1;
-                    if self.con_x >= CON_LINEWIDTH {
+                    if self.con_x >= width {
                         self.con_x = 0;
                     }
                 }
@@ -105,16 +131,21 @@ impl ConCursor {
     }
 }
 
+/// `Con_CheckResize` keeps the first `min(old, new)` columns of each line.
+pub fn truncate_line(line: &mut String, width: usize) {
+    if let Some((i, _)) = line.char_indices().nth(width) {
+        line.truncate(i);
+    }
+}
+
 /// The maximum length of the console input line (characters). Quake's
 /// `key_lines` buffer is `MAXCMDLINE = 256`; we cap a little lower and never let
 /// a runaway paste/hold grow the `String` without bound.
 pub const CONSOLE_INPUT_CAP: usize = 256;
 
-/// The fraction of the framebuffer height the console panel covers when open.
-/// Quake slides the console down (`scr_con_current`); a fixed top 60% is a
-/// faithful-enough stand-in for the fully-dropped console and keeps the draw
-/// allocation-light and deterministic (no per-frame slide state to advance).
-const CONSOLE_HEIGHT_FRAC: f32 = 0.6;
+/// `scr_conspeed` (screen.c, "300"): how fast the console slides, in screen
+/// rows per second of `host_frametime`.
+const SCR_CONSPEED: f32 = 300.0;
 
 /// `Con_DrawInput` (console.c) stamps `10 + ((int)(realtime*con_cursorspeed) & 1)`
 /// at the edit position: conchars cell 10 is blank and 11 is the block cursor.
@@ -150,6 +181,10 @@ pub struct Console {
     /// The current input line (the text after the `]` prompt), without the
     /// prompt or the cursor. Capped at [`CONSOLE_INPUT_CAP`] characters.
     input: String,
+    /// `scr_con_current` (screen.c): how many 2-D screen rows the console
+    /// covers now — it slides toward half the screen while open and back to
+    /// nothing when closed ([`Console::slide`]).
+    current: f32,
 }
 
 impl Default for Console {
@@ -166,6 +201,7 @@ impl Console {
             lines: std::collections::VecDeque::new(),
             cursor: ConCursor::default(),
             input: String::new(),
+            current: 0.0,
         }
     }
 
@@ -173,7 +209,48 @@ impl Console {
     /// does not clear the scrollback or input — the panel slides back over the
     /// history it had.
     pub fn toggle(&mut self) {
+        // Con_ToggleConsole_f: closing it (key_dest back to the game) clears
+        // any typing (`key_lines[edit_line][1] = 0`).
+        if self.open {
+            self.input.clear();
+        }
         self.open = !self.open;
+    }
+
+    /// `SCR_SetUpToDrawConsole` (screen.c): `Con_CheckResize` for the
+    /// screen's width, then slide the console toward its
+    /// height — half the 2-D screen while it is open (`scr_conlines =
+    /// vid.height/2`), none when closed — by `scr_conspeed * host_frametime`
+    /// rows, stopping there. A `vid_w x vid_h` framebuffer; `frametime` 0 (a
+    /// frozen frame) leaves it where it is.
+    pub fn slide(&mut self, frametime: f32, vid_w: usize, vid_h: usize) {
+        // Con_CheckResize: a new con_linewidth keeps each line's first columns.
+        let width = con_linewidth(vid_w, vid_h);
+        if width != self.cursor.width() {
+            for line in self.lines.iter_mut() {
+                truncate_line(line, width);
+            }
+            self.cursor.set_width(width);
+        }
+        let sc = screen_2d(vid_w, vid_h);
+        let conlines = if self.open { (sc.h / 2) as f32 } else { 0.0 };
+        let step = SCR_CONSPEED * frametime.max(0.0);
+        if conlines < self.current {
+            self.current = (self.current - step).max(conlines);
+        } else if conlines > self.current {
+            self.current = (self.current + step).min(conlines);
+        }
+    }
+
+    /// `scr_con_current`: the 2-D screen rows the console covers now.
+    pub fn current(&self) -> f32 {
+        self.current
+    }
+
+    /// Put the console where [`Console::slide`] would leave it at `lines`
+    /// rows (tests, and a host that wants it down at once).
+    pub fn set_current(&mut self, lines: f32) {
+        self.current = lines.max(0.0);
     }
 
     /// Append one printable character to the input line, ignoring control
@@ -274,25 +351,83 @@ impl Console {
     }
 }
 
-/// Draw the drop-down console over `image`, a port of `Con_DrawConsole` /
-/// `Con_DrawInput`. When the console is closed this is a no-op (draws nothing).
+/// `VERSION` (quakedef.h) as `Draw_ConsoleBackground` prints it, `"%4.2f"`.
+const CON_VERSION: &str = "1.09";
+
+/// `Draw_ConsoleBackground` (draw.c): the bottom `lines` rows of `conback`
+/// stretched over the top `lines` rows of the 2-D screen `sc` (row `y` shows
+/// conback row `(vid.height - lines + y)*200/vid.height`, columns stepped in
+/// 16.16 fixed point when the screen is not 320 wide), with the version
+/// number stamped into the pic first (`Draw_CharToConback`: each lit conchars
+/// texel `t` becomes `0x60 + t`). The version is the DOS build's — the plain
+/// `"%4.2f"` at conback (320-43, 186); WinQuake's Windows build wrote
+/// "(WinQuake) 1.09" further left and id's Linux build (the oracle's)
+/// "(Linux Quake 1.30) 1.09". Missing or malformed pics leave the rows black.
+fn draw_console_background(
+    image: &mut Image,
+    sc: Screen2d,
+    lines: i32,
+    conback: Option<&crate::wad::Qpic>,
+    conchars: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+) {
+    let rows = sc.px(lines).clamp(0, image.h as i64) as usize;
+    let pic = conback.filter(|p| p.width == 320 && p.height == 200 && p.data.len() >= 320 * 200);
+    let Some(pic) = pic else {
+        fill_rect(image, 0, 0, image.w as i64, rows as i64, palette[0]);
+        return;
+    };
+    let mut data = pic.data[..320 * 200].to_vec();
+    if let Some(cc) = conchars.filter(|c| c.width == 128 && c.height == 128 && c.data.len() >= 128 * 128) {
+        let dest = 320 - 43 + 320 * 186;
+        for (i, ch) in CON_VERSION.bytes().enumerate() {
+            let (row, col) = ((ch >> 4) as usize, (ch & 15) as usize);
+            let src = (row << 10) + (col << 3);
+            for line in 0..8 {
+                for x in 0..8 {
+                    let t = cc.data[src + line * 128 + x];
+                    if t != 0 {
+                        data[dest + (i << 3) + line * 320 + x] = 0x60u8.wrapping_add(t);
+                    }
+                }
+            }
+        }
+    }
+    // The conback column of every 2-D screen column (memcpy at 320 wide, else
+    // `fstep = 320*0x10000/vid.conwidth` stepping from 0).
+    let fstep = (320i64 << 16) / sc.w.max(1) as i64;
+    let src_col: Vec<usize> = (0..sc.w as i64).map(|x| (((x * fstep) >> 16) as usize).min(319)).collect();
+    let inv = 1.0 / sc.scale;
+    let cols: Vec<usize> =
+        (0..image.w).map(|px| src_col[((px as f32 * inv) as usize).min(src_col.len() - 1)]).collect();
+    let height = sc.h.max(1) as i64;
+    for py in 0..rows {
+        let y = ((py as f32 * inv) as i64).min(lines as i64 - 1);
+        let v = (((height - lines as i64 + y) * 200 / height).clamp(0, 199)) as usize;
+        let srow = &data[v * 320..v * 320 + 320];
+        let row = &mut image.rgb[py * image.w..(py + 1) * image.w];
+        for (out, &sx) in row.iter_mut().zip(&cols) {
+            *out = palette[srow[sx] as usize];
+        }
+    }
+}
+
+/// Draw the drop-down console over `image` at its current height
+/// ([`Console::slide`]), a port of `SCR_DrawConsole` -> `Con_DrawConsole`
+/// (console.c) and `Con_DrawInput`. Draws nothing while the console is up
+/// (`scr_con_current` 0).
 ///
-/// When open it paints, in order:
-///  1. the `conback` background ([`crate::wad::Qpic`], a 320x200 console picture)
-///     stretched across the **top [`CONSOLE_HEIGHT_FRAC`]** of the frame. A
-///     missing `conback` falls back to a dark fill rectangle so the panel is
-///     always visible.
-///  2. the last few scrollback lines, drawn bottom-up just above the input line,
-///     via [`draw_string`](crate::draw::draw_string) in the conchars font.
-///  3. the input line as `"]" + input` plus the flashing cursor glyph
-///     ([`console_cursor_glyph`]: cells 10/11 toggling at 4 Hz on `realtime`,
-///     the C's unclamped wall clock).
+/// On the [`screen_2d`] screen, `lines = (int)scr_con_current` rows:
+///  1. `Draw_ConsoleBackground(lines)` ([`draw_console_background`]);
+///  2. the text: `rows = (lines-16)>>3` lines ending with the current one,
+///     from `y = lines - 16 - rows*8`, each `con_linewidth = (vid.width>>3) - 2`
+///     characters at `x = (col+1)*8`;
+///  3. while it is open (`key_dest == key_console`), the input line at
+///     `lines - 16`: the `]` prompt, the typing and the cursor cell
+///     [`console_cursor_glyph`] at the edit position (the end of the line —
+///     this console has no cursor keys), prestepped when it passes the width.
 ///
-/// Text is drawn at the same conchars scale the menu uses
-/// (`scale = framebuffer_height / 200`, the 320x200 virtual canvas), so the font
-/// is legible at any framebuffer size. A missing `conchars` skips all text (the
-/// background still draws). Every blit is bounds-clipped; nothing panics on a
-/// short/empty pic or a tiny framebuffer.
+/// A missing `conchars` skips the text; every write is clipped.
 pub fn draw_console(
     image: &mut Image,
     console: &Console,
@@ -301,100 +436,45 @@ pub fn draw_console(
     palette: &[[u8; 3]; 256],
     realtime: f64,
 ) {
-    if !console.open || image.w == 0 || image.h == 0 {
+    if image.w == 0 || image.h == 0 {
         return;
     }
-
-    // The panel covers the top CONSOLE_HEIGHT_FRAC of the framebuffer.
-    let panel_h = ((image.h as f32 * CONSOLE_HEIGHT_FRAC).round() as usize)
-        .clamp(1, image.h);
-
-    // 1. Background. The conback is a 320x200 QPIC; stretch its FULL extent into
-    //    the panel rectangle (its own aspect is ignored — Quake also stretches
-    //    conback to the console width). A missing/short conback => a dark fill.
-    let drew_back = match conback {
-        Some(pic) if pic.width > 0 && pic.height > 0 => {
-            let pw = pic.width as usize;
-            let ph = pic.height as usize;
-            if pic.data.len() < pw.saturating_mul(ph) {
-                false
-            } else {
-                // The source column of every framebuffer column, once.
-                let cols: Vec<usize> =
-                    (0..image.w).map(|px| ((px * pw) / image.w.max(1)).min(pw - 1)).collect();
-                for py in 0..panel_h {
-                    // Map this panel row back to a source texel row (nearest).
-                    let sy = (py * ph) / panel_h.max(1);
-                    let sy = sy.min(ph - 1);
-                    let srow = &pic.data[sy * pw..sy * pw + pw];
-                    let row = &mut image.rgb[py * image.w..(py + 1) * image.w];
-                    for (out, &sx) in row.iter_mut().zip(&cols) {
-                        let texel = srow[sx];
-                        // conback is fully opaque; index 255 stays transparent
-                        // to be safe (matches the other blits).
-                        if texel != HUD_TRANSPARENT {
-                            *out = palette[texel as usize];
-                        }
-                    }
-                }
-                true
+    let sc = screen_2d(image.w, image.h);
+    let lines = (console.current as i32).min(sc.h);
+    if lines <= 0 {
+        return;
+    }
+    draw_console_background(image, sc, lines, conback, conchars, palette);
+    let Some(cc) = conchars else { return };
+    let linewidth = ((sc.w >> 3) - 2).max(1) as usize;
+    let glyph = |image: &mut Image, col: usize, y: i32, c: u8| {
+        if c != b' ' {
+            draw_char_scaled(image, cc, ((col + 1) * 8) as f32, y as f32, c, sc.scale, 0.0, 0.0, palette);
+        }
+    };
+    // The text, ending with con_current (the last line); lines above the
+    // first are the ring's blank ones.
+    let rows = (lines - 16) >> 3;
+    let mut y = lines - 16 - (rows << 3);
+    let n = console.lines.len() as i64;
+    for i in (n - rows.max(0) as i64)..n {
+        if i >= 0 {
+            // Con_Print stores bytes; a line holds them as chars 0..=255.
+            for (col, c) in console.lines[i as usize].chars().take(linewidth).enumerate() {
+                glyph(image, col, y, c as u32 as u8);
             }
         }
-        _ => false,
-    };
-    if !drew_back {
-        // Dark fill fallback so the panel is always visible without a conback.
-        fill_rect(image, 0, 0, image.w as i64, panel_h as i64, [10, 10, 14]);
+        y += 8;
     }
-
-    // 2 + 3. Text. Without conchars there is nothing to draw the font with.
-    let Some(cc) = conchars else { return };
-
-    // Scale the conchars to the framebuffer the same way the menu does: the
-    // 320x200 virtual canvas mapped by the HEIGHT, so an 8px glyph stays 8 real
-    // px at 320x200 and scales up with a larger frame.
-    let scale = (image.h as f32 / MENU_VIRT_H).max(1.0);
-    let glyph = 8.0 * scale; // one conchars cell, in framebuffer pixels
-    let line_step = glyph; // one text row, in framebuffer pixels
-
-    // The input line sits at the BOTTOM of the panel, with a small margin so the
-    // descender isn't clipped by the panel edge.
-    let margin_x = (8.0 * scale).round();
-    let input_y = (panel_h as f32 - line_step - 2.0 * scale).max(0.0);
-
-    // 3. The input line: "]" + input + the flashing cursor. Drawn directly in
-    //    framebuffer pixels (scale folded into the position + the glyph block).
-    let prompt = format!("]{}", console.input());
-    draw_string_scaled(image, cc, 0.0, 0.0, &prompt, scale, margin_x, input_y, palette);
-    // Con_DrawInput: text[key_linepos] = 10 + ((int)(realtime*con_cursorspeed)&1)
-    // — the cursor cell sits at the edit position (the end of the line: this
-    // console has no cursor keys) and alternates blank/block at 4 Hz.
-    let cursor_col = prompt.chars().count() as f32; // 8 virtual px per char
-    let glyph = console_cursor_glyph(realtime);
-    draw_char_scaled(image, cc, cursor_col * 8.0, 0.0, glyph, scale, margin_x, input_y, palette);
-
-    // 2. Scrollback: the lines just above the input, drawn bottom-up. How many
-    //    rows fit between the top margin and the input line.
-    let top_margin = (2.0 * scale).round();
-    let avail = (input_y - top_margin).max(0.0);
-    let rows = (avail / line_step).floor() as usize;
-    if rows == 0 {
-        return;
-    }
-    // Take the last `rows` scrollback lines and stack them so the newest sits
-    // directly above the input line.
-    let total = console.lines.len();
-    let start = total.saturating_sub(rows);
-    for (i, line) in console.lines.iter().skip(start).enumerate() {
-        // i = 0 is the OLDEST of the shown rows (highest up); the newest sits
-        // just above the input line.
-        let shown = total - start; // number of lines we'll actually draw
-        let row_from_bottom = (shown - 1 - i) as f32; // 0 = closest to input
-        let y = input_y - line_step * (row_from_bottom + 1.0);
-        if y < top_margin - line_step {
-            continue;
+    // Con_DrawInput: only while typing is possible.
+    if console.open {
+        let mut text: Vec<u8> = std::iter::once(b']').chain(console.input.chars().map(|c| c as u32 as u8)).collect();
+        let linepos = text.len();
+        text.push(console_cursor_glyph(realtime));
+        let start = if linepos >= linewidth { 1 + linepos - linewidth } else { 0 };
+        for (col, &c) in text[start..].iter().take(linewidth).enumerate() {
+            glyph(image, col, lines - 16, c);
         }
-        draw_string_scaled(image, cc, 0.0, 0.0, line, scale, margin_x, y, palette);
     }
 }
 
@@ -556,56 +636,123 @@ mod tests {
     }
 
     #[test]
-    fn console_toggle_flips_open() {
+    fn console_toggle_flips_open_and_closing_clears_the_typing() {
         let mut c = Console::new();
         assert!(!c.open);
         c.toggle();
         assert!(c.open, "toggle opens");
+        c.putchar('g');
         c.toggle();
         assert!(!c.open, "toggle closes");
+        // Con_ToggleConsole_f: key_lines[edit_line][1] = 0.
+        assert_eq!(c.input(), "", "closing clears the input line");
     }
 
     #[test]
-    fn draw_console_closed_is_a_noop_open_draws() {
+    fn con_linewidth_is_the_screen_width_in_characters_less_two() {
+        // Con_CheckResize: (vid.width >> 3) - 2, on the 2-D screen.
+        assert_eq!(con_linewidth(320, 200), 38);
+        assert_eq!(con_linewidth(960, 600), 118);
+        {
+            let _extra = crate::draw::Scaled2dGuard::set(true);
+            assert_eq!(con_linewidth(960, 600), 38, "the extra's 320-wide screen");
+        }
+        // A new width cuts the old lines and lays new text at it.
+        let mut c = Console::new();
+        // Con_Print re-counts the word from every character: the 50-character
+        // word fits until 13 in, where its 37-character rest no longer does.
+        c.println("x".repeat(50));
+        assert_eq!(c.lines().collect::<Vec<_>>(), ["x".repeat(13), "x".repeat(37)]);
+        c.slide(0.0, 960, 600);
+        c.println("x".repeat(60));
+        assert_eq!(c.lines().last(), Some("x".repeat(60).as_str()), "118 columns now");
+        c.slide(0.0, 160, 200);
+        assert!(c.lines().all(|l| l.chars().count() <= 18), "cut to (160>>3)-2");
+    }
+
+    #[test]
+    fn console_slides_at_scr_conspeed_to_half_the_screen() {
+        // SCR_SetUpToDrawConsole: scr_conlines = vid.height/2 while open,
+        // scr_con_current moves scr_conspeed (300) * host_frametime toward it.
+        let mut c = Console::new();
+        c.slide(0.1, 320, 200);
+        assert_eq!(c.current(), 0.0, "closed stays up");
+        c.toggle();
+        c.slide(0.1, 320, 200);
+        assert_eq!(c.current(), 30.0);
+        c.slide(0.0, 320, 200);
+        assert_eq!(c.current(), 30.0, "a frozen frame does not move it");
+        for _ in 0..3 {
+            c.slide(0.1, 320, 200);
+        }
+        assert_eq!(c.current(), 100.0, "stops at half the screen");
+        c.toggle();
+        c.slide(0.1, 320, 200);
+        assert_eq!(c.current(), 70.0, "closing slides it back up");
+        // id's own pixels in every mode: half of a 600-line screen.
+        let mut big = Console::new();
+        big.toggle();
+        for _ in 0..20 {
+            big.slide(0.1, 960, 600);
+        }
+        assert_eq!(big.current(), 300.0);
+    }
+
+    #[test]
+    fn draw_console_is_con_drawconsole() {
         let pal = ramp_palette();
         let cc = lit_conchars();
         let conback = solid_pic(320, 200, 5); // opaque index-5 background
-
         let bg = [9u8, 9, 9];
-        // Closed: draws nothing.
+        // All the way up: draws nothing.
         let mut c = Console::new();
         let mut img = Image::new(320, 200, bg);
         let before = img.rgb.clone();
         draw_console(&mut img, &c, Some(&conback), Some(&cc), &pal, 0.0);
-        assert_eq!(img.rgb, before, "a closed console draws nothing");
+        assert_eq!(img.rgb, before, "a console that is up draws nothing");
 
-        // Open: the panel background paints index-5 across the TOP region.
+        // Down 100 rows (half of 200).
         c.toggle();
+        c.set_current(100.0);
         c.println("hello console");
         for ch in "god".chars() {
             c.putchar(ch);
         }
         draw_console(&mut img, &c, Some(&conback), Some(&cc), &pal, 0.0);
-        assert_ne!(img.rgb, before, "an open console draws pixels");
-        // A pixel in the top-left of the panel must be the conback colour (5).
-        assert_eq!(img.rgb[2 * img.w + 2], pal[5], "the conback background paints at the top");
-        // A pixel BELOW the panel (bottom of the frame) is untouched.
-        let bottom = (img.h - 1) * img.w + 2;
-        assert_eq!(img.rgb[bottom], bg, "below the panel is untouched");
+        assert_eq!(img.rgb[2 * 320 + 2], pal[5], "the conback at the top");
+        assert_eq!(img.rgb[99 * 320 + 2], pal[5], "down to row 99");
+        assert_eq!(img.rgb[100 * 320 + 2], bg, "nothing below the console");
+        // rows = (100-16)>>3 = 10 text lines from y = 100-16-80 = 4: the last
+        // ("hello console") at y 76, its first character at x = (0+1)*8.
+        assert_eq!(img.rgb[76 * 320 + 8], pal[3], "text line at (8, 76)");
+        assert_eq!(img.rgb[76 * 320 + 7], pal[5], "nothing left of column 1");
+        // The input line at lines - 16 = 84: ']' at x 8, "god" after it.
+        assert_eq!(img.rgb[84 * 320 + 8], pal[3], "input line at (8, 84)");
+        // The version number is stamped into the pic at (277, 186):
+        // conback row 186 shows at screen row 86 of a 100-row console.
+        assert_eq!(img.rgb[86 * 320 + 277], pal[0x60 + 3], "Draw_CharToConback's 0x60 + texel");
+
+        // Closed but still sliding up: the background and text, no input line.
+        c.toggle();
+        let mut img2 = Image::new(320, 200, bg);
+        draw_console(&mut img2, &c, Some(&conback), Some(&cc), &pal, 0.0);
+        assert_eq!(img2.rgb[84 * 320 + 8], pal[5], "no input line once closed");
+        assert_eq!(img2.rgb[76 * 320 + 8], pal[3], "the text still shows");
     }
 
     #[test]
-    fn draw_console_missing_conback_fills_dark_no_panic() {
+    fn draw_console_missing_pics_no_panic() {
         let pal = ramp_palette();
         let cc = lit_conchars();
         let bg = [200u8, 200, 200];
         let mut c = Console::new();
         c.toggle();
+        c.set_current(100.0);
         c.println("text");
         let mut img = Image::new(320, 200, bg);
-        // Missing conback => a dark fill rectangle, not a panic, not the bg.
+        // Missing conback => the rows fill black (index 0), not a panic.
         draw_console(&mut img, &c, None, Some(&cc), &pal, 0.0);
-        assert_ne!(img.rgb[2 * img.w + 2], bg, "missing conback still fills the panel");
+        assert_eq!(img.rgb[2 * img.w + 2], pal[0], "missing conback still fills the panel");
 
         // Missing conchars => the background still draws, text is skipped, no panic.
         let conback = solid_pic(320, 200, 5);

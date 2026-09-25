@@ -302,8 +302,10 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // while open — matching Quake, where the menu and the drop-down console are
         // mutually exclusive via key_dest. It owns the keyboard while open. Uses the
         // active mode's palette and realtime for the input cursor flash
-        // (Con_DrawInput). A closed console draws nothing.
-        if a.console.open {
+        // (Con_DrawInput). SCR_SetUpToDrawConsole slides it first: down to half
+        // the screen while open, back up when closed (drawn until it is gone).
+        a.console.slide(dt, w, h);
+        if a.console.current() > 0.0 {
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
                     render::draw_console(
@@ -635,11 +637,10 @@ mod tests {
         step(0.0);
         let on = grab();
         assert_ne!(off, on, "wasm_showfps draws");
-        // " 60 FPS" at virtual x 256..312, y 144..152 (viewsize 100: sb_lines
-        // 48), scaled by w/320 from the bottom.
-        let s = w as f64 / 320.0;
-        let (x0, x1) = ((256.0 * s) as usize, (312.0 * s) as usize);
-        let (y0, y1) = (h - (56.0 * s) as usize, h - (48.0 * s) as usize);
+        // " 60 FPS" at x w-64..w-8, y h-56..h-48 (viewsize 100: sb_lines 48):
+        // the 2-D layer 1:1 as id draws it (the scaled-2-D extra is off).
+        let (x0, x1) = (w - 64, w - 8);
+        let (y0, y1) = (h - 56, h - 48);
         for (i, (a, b)) in off.chunks_exact(4).zip(on.chunks_exact(4)).enumerate() {
             if a != b {
                 let (x, y) = (i % w, i / w);
