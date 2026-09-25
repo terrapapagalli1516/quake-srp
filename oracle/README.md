@@ -408,13 +408,16 @@ scenario's shots, before the branch -> after.
 | centerprint 1/3/5 lines, expired (4) | 91.6 -> 100 | 3.8 -> 100 | 2.7 -> 100 |
 | notify lines (1) | 98.6 -> 100 | 3.8 -> 100 | 2.6 -> 100 |
 | console sliding, down, typing (3) | 36.7 -> 99.1 | 4.8 -> 98.2 | 2.8 -> 97.3 |
+| console scrolled back by PgUp/PgDn, 4 and 2 lines (2; `quake/polish4b`, before it no backscroll) | 98.4 -> 99.2 | 98.5 -> 99.0 | 98.6 -> 98.9 |
 | intermission, also at viewsize 50 (2) | 100 -> 100 | 0.1 -> 100 | 0.0 -> 100 |
 | finale mid-reveal, later (2) | 85.7 -> 100 | 0.6 -> 100 | 0.0 -> 100 |
 | menus: main (2), single player / load (3), save, multiplayer | 98.3 -> 99.6 -> 100 | 43.8 -> 99.9 -> 100 | 47.1 -> 99.95 -> 100 |
 | menus: options, customize, video (3) | 95.4 -> 95.5 | 41.5 -> 98.8 | 44.7 -> 99.5 |
+| menus: Multiplayer > Setup — on Accept, colours stepped, typing the host name, the player's name (4; `quake/polish4b`, before it no Setup) | 77.3 -> 100 | 93.6 -> 100 | 97.1 -> 100 |
 | menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
 | quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
 | pause: the plaque and "player paused the game", unpaused (2; `quake/timedemo`, before it no `pause`) | 100 | 100 | 100 |
+| menu over the disconnected console: main, options (2; `quake/polish4b`) | 41.5 -> 99.4 / 98.9 | 29.8 -> 99.4 / 99.3 | 27.7 -> 99.4 / 99.3 |
 
 The before column is `bbfc6bc` with the same harness. The fixes, one commit
 each (`AUDIT.md`, "The 2-D layer"): the ammo counts 4 px left; a "quake-rs" label
@@ -427,7 +430,16 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
 
 **What is left, and why**
 
-- *Console* (400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
+- *Menu over the disconnected console* (`quake/polish4b`, scenario
+  `menu_disconnected`: a `playdemo` that cannot open its file disconnects,
+  the console is forced up, Escape brings up the menu): `M_Draw` draws the
+  menu over `Draw_ConsoleBackground (vid.height)` while `scr_con_current` is
+  non-zero, not over the faded screen; the port faded the console text
+  (41.5% before). What is left is the console's version stamp (below) and,
+  on Options, its Web extras row. `oracle.c` shoots a composited frame that
+  renders no view (disconnected) as the screen stands.
+- *Console* (and `console_scroll`, the menu over the disconnected console:
+  400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
   string stamped on the conback. id's Linux build (the oracle) writes "(Linux
   Quake 1.30) 1.09"; the port writes what the DOS build writes, "1.09", at the
   same place — it matches the tail of the oracle's string pixel for pixel. The

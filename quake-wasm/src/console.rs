@@ -1,32 +1,34 @@
 //! The drop-down console's key half — console.c's `Con_ToggleConsole_f` and
-//! keys.c's `Key_Console` (typing, backspace, enter): the exports the page
-//! routes the keyboard to while the console is down. Submitted lines run
+//! keys.c's `Key_Console` (typing, backspace, enter), which `Key_Event`
+//! ([`crate::input::key_event`]) hands the console's keys to; plus the
+//! exports automation types into the console with. Submitted lines run
 //! through [`execute_console_command`].
 
-use crate::app::{ensure_app, APP};
+use quake_rs::keys::{K_BACKSPACE, K_ENTER};
+
+use crate::app::{ensure_app, App, APP};
 use crate::host_cmd::execute_console_command;
+
+/// `Key_Console`: a key the console has the keyboard for (Shift applied),
+/// `text` the character it types — history, Tab completion over this port's
+/// commands and cvars ([`crate::host_cmd::complete`]), the scrollback on the
+/// 2-D screen's height. Returns the line Enter submitted, for the caller to
+/// execute once the App borrow ends.
+pub(crate) fn key_console(a: &mut App, key: u8, text: Option<u8>) -> Option<String> {
+    let vid_h = quake_rs::draw::screen_2d(a.render_w, a.render_h).h.max(0) as usize;
+    a.console.key(key, text, vid_h, crate::host_cmd::complete)
+}
 
 // --- drop-down console: toggle / typing / execution exports (the `~` key) ---
 
-/// Toggle the drop-down console (the `~` / backtick key, Quake's
-/// `Con_ToggleConsole_f`). Opening slides the panel down over whatever is
-/// playing; closing slides it back. While open the console owns the keyboard.
-/// Disconnected, with the console covering the screen, it brings up the main
-/// menu instead (`M_Menu_Main_f`: there is no game to go back to).
+/// `Con_ToggleConsole_f` — what the console key's `toggleconsole` binding
+/// runs (the page sends the key through `key_event`): the console slides
+/// down over whatever is playing, or back up. With nothing playing
+/// (disconnected, the console covering the screen) closing it brings up the
+/// main menu instead: there is no game to go back to.
 #[no_mangle]
 pub extern "C" fn console_toggle() {
-    // Con_ToggleConsole_f: `memset (con_times, 0, sizeof(con_times))` too —
-    // the notify lines are gone after the console goes down or up.
-    ensure_app(|a| {
-        if a.disconnected && (a.console.open || !a.menu.visible) {
-            if a.console.open {
-                a.toggle_console();
-            }
-            a.menu.open();
-        } else {
-            a.toggle_console();
-        }
-    });
+    ensure_app(App::toggle_console);
 }
 
 /// `1` when the console is open (capturing the keyboard), else `0`. The page
@@ -38,10 +40,11 @@ pub extern "C" fn console_visible() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.console_has_keys() as i32).unwrap_or(0))
 }
 
-/// Append one typed character to the console input line. `code` is a Unicode
-/// scalar value (the page passes `key.charCodeAt(0)` / `key.codePointAt(0)`).
-/// Non-printable codes, the backtick/tilde (the toggle key), and anything while
-/// the console is closed are ignored. A no-op once the input line is full.
+/// Type one character into the console input line (automation: the page
+/// sends keys through `key_event`). `code` is a Unicode scalar value; only
+/// printable ASCII types (`Key_Console`: 32..127) — the backtick/tilde (the
+/// toggle key) not either, nor anything while the console does not have the
+/// keyboard. A no-op once the input line is full.
 #[no_mangle]
 pub extern "C" fn console_char(code: u32) {
     ensure_app(|a| {
@@ -56,20 +59,21 @@ pub extern "C" fn console_char(code: u32) {
     });
 }
 
-/// Delete the last character of the console input line (Backspace). A no-op when
-/// the console is closed or the line is empty.
+/// Backspace in the console (`Key_Console`). A no-op when the console does
+/// not have the keyboard or the line is empty.
 #[no_mangle]
 pub extern "C" fn console_backspace() {
     ensure_app(|a| {
         if a.console_has_keys() {
-            a.console.backspace();
+            let _ = key_console(a, K_BACKSPACE, None);
         }
     });
 }
 
-/// Submit the console input line (Enter): echo it into the scrollback and
-/// execute it against the live game. A no-op when the console is closed or the
-/// line is blank. The command may swap the level (`map`) and close the console.
+/// Enter in the console (`Key_Console`): echo the line into the scrollback
+/// and execute it against the live game. A no-op when the console does not
+/// have the keyboard. The command may swap the level (`map`) and close the
+/// console.
 #[no_mangle]
 pub extern "C" fn console_enter() {
     // Take the line under the borrow, then execute it (execute_console_command
@@ -78,7 +82,7 @@ pub extern "C" fn console_enter() {
         c.borrow_mut()
             .as_mut()
             .filter(|a| a.console_has_keys())
-            .and_then(|a| a.console.take_input())
+            .and_then(|a| key_console(a, K_ENTER, None))
     });
     if let Some(line) = line {
         execute_console_command(&line);
@@ -262,6 +266,105 @@ mod tests {
         menu_select();
         assert_eq!((menu_visible(), console_visible()), (0, 1));
         assert!(walk_mut(|w| w.notify.visible(w.host_time).is_empty()));
+    }
+
+    /// Final review (UI): Key_Console's history, Tab completion and
+    /// scrollback, through Key_Event as the page sends them. Up/Down walk the
+    /// lines entered; Tab completes a command (Cmd_CompleteCommand) and else
+    /// a cvar (Cvar_CompleteVariable) with a space after it; PgUp/PgDn move
+    /// con_backscroll; Home and End are no console keys, so id's Key_Event
+    /// runs their bindings (End: centerview) instead of scrolling; a
+    /// character outside ASCII types nothing.
+    #[test]
+    fn console_history_completion_and_backscroll_through_key_event() {
+        use crate::app::boot;
+        use crate::input::{key_event, press};
+        use crate::test_util::close_menu;
+        use quake_rs::keys::{K_DOWNARROW, K_END, K_ENTER, K_PGUP, K_TAB, K_UPARROW};
+        assert_eq!(boot(), 1);
+        close_menu();
+        let typ = |s: &str| {
+            for b in s.bytes() {
+                key_event(i32::from(b), 1, i32::from(b));
+                key_event(i32::from(b), 0, 0);
+            }
+        };
+        let input = || APP.with(|c| c.borrow().as_ref().unwrap().console.input().to_string());
+        press(b'`');
+        typ("echo one");
+        press(K_ENTER);
+        typ("echo two");
+        press(K_ENTER);
+        press(K_UPARROW);
+        assert_eq!(input(), "echo two");
+        press(K_UPARROW);
+        assert_eq!(input(), "echo one");
+        press(K_DOWNARROW);
+        press(K_DOWNARROW);
+        assert_eq!(input(), "");
+        typ("tim");
+        press(K_TAB);
+        assert_eq!(input(), "timedemo ", "a command");
+        press(K_UPARROW);
+        press(K_DOWNARROW);
+        typ("vi");
+        press(K_TAB);
+        assert_eq!(input(), "viewsize ", "else a cvar");
+        typ("110");
+        press(K_ENTER);
+        assert_eq!(crate::vid::viewsize(), 110.0, "the completed line runs");
+        typ("s");
+        press(K_TAB);
+        assert_eq!(input(), "sizedown ", "the command id registered last comes first");
+        press(K_UPARROW);
+        press(K_DOWNARROW);
+        typ("wasm_h");
+        press(K_TAB);
+        assert_eq!(input(), "wasm_help ");
+        press(K_UPARROW);
+        press(K_DOWNARROW);
+        key_event(i32::from(b'e'), 1, 0xe9); // é
+        key_event(i32::from(b'e'), 0, 0);
+        assert_eq!(input(), "", "non-ASCII types nothing");
+        // Scrollback: enough lines to scroll, then PgUp; End is centerview's.
+        for i in 0..40 {
+            execute_console_command(&format!("echo {i}"));
+        }
+        let back = || APP.with(|c| c.borrow().as_ref().unwrap().console.backscroll());
+        press(K_PGUP);
+        press(K_PGUP);
+        assert_eq!(back(), 4);
+        walk_pitch_drift(false);
+        press(K_END);
+        assert_eq!(back(), 4, "End is not Key_Console's in id's routing");
+        assert!(walk_pitch_drift(true), "it ran its binding, centerview");
+        execute_console_command("echo new");
+        assert_eq!(back(), 0, "a print shows the bottom again");
+    }
+
+    /// Set (`set` false: clear) or read the walk's pitch drift flag.
+    fn walk_pitch_drift(read: bool) -> bool {
+        crate::test_util::walk_mut(|w| {
+            if !read {
+                w.pitch_drift = false;
+                w.pitch_vel = 0.0;
+            }
+            w.pitch_drift
+        })
+    }
+
+    /// Every command Tab completes to is one this console runs.
+    #[test]
+    fn every_completion_is_a_command_the_console_knows() {
+        use crate::app::boot;
+        use crate::test_util::close_menu;
+        for name in crate::host_cmd::COMMANDS {
+            assert_eq!(boot(), 1);
+            close_menu();
+            execute_console_command(name);
+            let last = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
+            assert_ne!(last, Some(format!("unknown command: {name}")), "{name}");
+        }
     }
 
     #[test]

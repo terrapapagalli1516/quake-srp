@@ -125,6 +125,10 @@ SCENARIOS: dict[str, list] = {
     "console": [("frames", 1), ("cmd", "clear"), ("print", "Some console text"), ("print", "a second line"),
                 ("console",), ("frames", 2), ("shot", "sliding"), ("frames", 10), ("shot", "down"),
                 ("type", "noclip"), ("frames", 1), ("shot", "typed")],
+    # Key_Console's PgUp/PgDn: con_backscroll 2 lines a press
+    "console_scroll": [("frames", 1), ("cmd", "clear")] + [("print", f"scrollback line {i}") for i in range(40)]
+    + [("console",), ("frames", 10), ("key", "PGUP"), ("key", "PGUP"), ("frames", 1), ("shot", "up4"),
+       ("key", "PGDN"), ("frames", 1), ("shot", "up2")],
     "intermission": [("frames", 1), ("intermission", 1, 75, ""), ("frames", 2), ("shot", "stats"),
                      ("viewsize", 50), ("frames", 2), ("shot", "stats_v50")],
     "finale": [("frames", 1), ("intermission", 2, 75,
@@ -157,6 +161,23 @@ SCENARIOS: dict[str, list] = {
     "menu_quit": [("frames", 1), ("key", "ESCAPE"), ("key", "UPARROW"), ("key", "ENTER"), ("quitmsg", 4),
                   ("frames", 1), ("shot", "quit"), ("quitmsg", 6), ("frames", 1), ("shot", "quit6"),
                   ("key", "n"), ("frames", 1), ("shot", "back")],
+    # Multiplayer > Setup (M_Setup_Draw / M_Setup_Key): on Accept Changes,
+    # the colours stepped (pants 3, shirt 13: the player preview translated),
+    # typing in the host name, then the player's name. (Accept itself stuffs
+    # `name`/`color` behind the rest of id's script, so it is not shot.)
+    "menu_setup": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "ENTER"),
+                   ("key", "DOWNARROW"), ("key", "DOWNARROW"), ("key", "ENTER"), ("frames", 1), ("shot", "setup"),
+                   ("key", "UPARROW"), ("key", "RIGHTARROW"), ("key", "RIGHTARROW"), ("key", "RIGHTARROW"),
+                   ("key", "UPARROW"), ("key", "LEFTARROW"), ("frames", 1), ("shot", "colors"),
+                   ("key", "UPARROW"), ("key", "UPARROW"), ("key", "a"), ("key", "b"), ("frames", 1),
+                   ("shot", "hostname"), ("key", "DOWNARROW"), ("key", "BACKSPACE"), ("key", "BACKSPACE"),
+                   ("frames", 1), ("shot", "name")],
+    # disconnected (a playdemo that cannot open its file: CL_Disconnect), the
+    # console forced up: M_Draw puts the menu over Draw_ConsoleBackground
+    # (vid.height), not over the faded screen
+    "menu_disconnected": [("frames", 1), ("cmd", "playdemo nosuch"), ("frames", 2), ("key", "ESCAPE"),
+                          ("frames", 1), ("shot", "main"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
+                          ("key", "ENTER"), ("frames", 1), ("shot", "options")],
 }
 
 

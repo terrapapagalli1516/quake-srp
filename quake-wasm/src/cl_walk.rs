@@ -70,9 +70,11 @@ mod tests {
     /// ~frame 34.
     #[test]
     fn new_game_first_frames_render_a_settled_player_no_pop() {
-        // The browser path: attract demo + menu, then Single Player > New Game.
+        // The browser path: the attract demo, a key for the menu, then Single
+        // Player > New Game.
         assert_eq!(boot_attract(), 1);
         step(1.0 / 60.0); // an attract-demo frame, like the live page
+        crate::input::press(b' '); // any key during the demo: the menu
         menu_select(); // Main: Single Player
         menu_select(); // SP: New Game -> builds the start-map walk, closes menu
 

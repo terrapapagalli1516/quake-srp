@@ -2,9 +2,13 @@
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/console.c` — `Con_Print`, `Con_DrawInput`, `Con_DrawConsole`,
-//! `Con_DrawNotify`.
+//! `Con_DrawNotify`; `WinQuake/keys.c` — `Key_Console`, the line editing.
 
 use crate::draw::{draw_char_scaled, draw_string_scaled, fill_rect, screen_2d, Screen2d};
+use crate::keys::{
+    K_BACKSPACE, K_DOWNARROW, K_END, K_ENTER, K_HOME, K_LEFTARROW, K_MWHEELDOWN, K_MWHEELUP,
+    K_PGDN, K_PGUP, K_TAB, K_UPARROW,
+};
 use crate::menu::realtime_blink_bit;
 use crate::render::Image;
 use std::collections::VecDeque;
@@ -33,10 +37,11 @@ pub fn draw_notify(
 // Drop-down console
 // ---------------------------------------------------------------------------
 
-/// The maximum number of scrollback lines the console retains; older lines drop
-/// off the top once this is exceeded (Quake's `con_text` is a fixed ring — this
-/// is the same bounded-history idea with an owned [`VecDeque`]).
-pub const CONSOLE_SCROLLBACK_CAP: usize = 200;
+/// `CON_TEXTSIZE` (console.c): the console text ring's bytes. It holds
+/// `con_totallines = CON_TEXTSIZE / con_linewidth` lines — 431 on a 320-wide
+/// screen, 138 at 960 — and so does the scrollback here, the oldest line
+/// dropping off the top ([`Console::totallines`]).
+pub const CON_TEXTSIZE: usize = 16384;
 
 /// `con_linewidth` (console.c `Con_CheckResize`: `(vid.width >> 3) - 2`) on a
 /// 320-wide screen: where [`ConCursor`] starts.
@@ -232,10 +237,14 @@ pub fn truncate_line(line: &mut String, width: usize) {
     }
 }
 
-/// The maximum length of the console input line (characters). Quake's
-/// `key_lines` buffer is `MAXCMDLINE = 256`; we cap a little lower and never let
-/// a runaway paste/hold grow the `String` without bound.
-pub const CONSOLE_INPUT_CAP: usize = 256;
+/// The most characters the input line takes: keys.c's `key_lines[][MAXCMDLINE]`
+/// (256) holds the `]` prompt, the typing and its terminator, and a key is
+/// typed only `if (key_linepos < MAXCMDLINE-1)`.
+pub const CONSOLE_INPUT_CAP: usize = 256 - 2;
+
+/// keys.c's command history: `key_lines[32]`, a ring the input line is one
+/// slot of.
+const KEY_LINES: usize = 32;
 
 /// `scr_conspeed` (screen.c, "300"): how fast the console slides, in screen
 /// rows per second of `host_frametime`.
@@ -267,14 +276,22 @@ pub struct Console {
     /// Whether the console is dropped down (drawn + capturing the keyboard).
     pub open: bool,
     /// Scrollback history, oldest first: the `con->text` rows [`Console::print`]
-    /// lays text into. Capped at [`CONSOLE_SCROLLBACK_CAP`]; pushing past the
-    /// cap drops the oldest line.
+    /// lays text into, at most [`Console::totallines`] of them; pushing past
+    /// that drops the oldest line.
     lines: std::collections::VecDeque<String>,
     /// `Con_Print`'s position in the last line.
     cursor: ConCursor,
-    /// The current input line (the text after the `]` prompt), without the
-    /// prompt or the cursor. Capped at [`CONSOLE_INPUT_CAP`] characters.
-    input: String,
+    /// keys.c `key_lines`: the ring of command lines (the text after the `]`
+    /// prompt) — the one being typed is `key_lines[edit_line]`, the others
+    /// are the history. Each at most [`CONSOLE_INPUT_CAP`] characters.
+    key_lines: [String; KEY_LINES],
+    /// keys.c `edit_line`: the slot being typed.
+    edit_line: usize,
+    /// keys.c `history_line`: the slot Up/Down last brought back.
+    history_line: usize,
+    /// console.c `con_backscroll`: how many lines up from the bottom the text
+    /// shows (PgUp/PgDn; any print puts it back to 0).
+    backscroll: usize,
     /// `scr_con_current` (screen.c): how many 2-D screen rows the console
     /// covers now — it slides toward half the screen while open and back to
     /// nothing when closed ([`Console::slide`]).
@@ -301,7 +318,10 @@ impl Console {
             open: false,
             lines: std::collections::VecDeque::new(),
             cursor: ConCursor::default(),
-            input: String::new(),
+            key_lines: Default::default(),
+            edit_line: 0,
+            history_line: 0,
+            backscroll: 0,
             current: 0.0,
             forced_up: false,
             unnotified: String::new(),
@@ -315,7 +335,7 @@ impl Console {
         // Con_ToggleConsole_f: closing it (key_dest back to the game) clears
         // any typing (`key_lines[edit_line][1] = 0`).
         if self.open {
-            self.input.clear();
+            self.key_lines[self.edit_line].clear();
         }
         // It also zeroes con_times: nothing printed so far becomes a notify
         // line (the host clears the mode's notify lines).
@@ -337,6 +357,12 @@ impl Console {
                 truncate_line(line, width);
             }
             self.cursor.set_width(width);
+            // The ring holds con_totallines of the new width (the newest
+            // kept), and the text shows from the bottom again.
+            while self.lines.len() > self.totallines() {
+                self.lines.pop_front();
+            }
+            self.backscroll = 0;
         }
         let sc = screen_2d(vid_w, vid_h);
         if self.forced_up {
@@ -365,52 +391,145 @@ impl Console {
         self.current = lines.max(0.0);
     }
 
-    /// Append one printable character to the input line, ignoring control
-    /// characters and the backtick/tilde (which toggle the console, never type).
-    /// A no-op once the input reaches [`CONSOLE_INPUT_CAP`] characters.
+    /// Append one character to the input line, as `Key_Console` types a key:
+    /// printable ASCII only (`key >= 32 && key <= 127`, so nothing else), and
+    /// never the backtick/tilde (the toggle key's, which `Key_Event` never
+    /// hands the console). A no-op once the input reaches
+    /// [`CONSOLE_INPUT_CAP`] characters.
     pub fn putchar(&mut self, c: char) {
-        // Only printable ASCII (and any other non-control char) is accepted; the
-        // backtick and tilde are the toggle key and must never enter the buffer.
-        if c == '`' || c == '~' || c.is_control() {
+        if c == '`' || c == '~' || !(' '..='~').contains(&c) {
             return;
         }
-        if self.input.chars().count() >= CONSOLE_INPUT_CAP {
-            return;
+        self.type_char(c as u8);
+    }
+
+    /// `Key_Console`'s last branch: the key goes at the end of the line while
+    /// it has room (`key_linepos < MAXCMDLINE-1`).
+    fn type_char(&mut self, c: u8) {
+        let line = &mut self.key_lines[self.edit_line];
+        if line.len() < CONSOLE_INPUT_CAP {
+            line.push(c as char);
         }
-        self.input.push(c);
     }
 
     /// Delete the last character of the input line (backspace). A no-op on an
     /// empty line.
     pub fn backspace(&mut self) {
-        self.input.pop();
+        self.key_lines[self.edit_line].pop();
     }
 
     /// The current input line (without the prompt), for the host to inspect.
     pub fn input(&self) -> &str {
-        &self.input
+        &self.key_lines[self.edit_line]
     }
 
-    /// Take the entered command line: echo `"]" + line` into the scrollback,
-    /// clear the input, and return the line for the host to execute. Returns
-    /// `None` (drawing nothing into the scrollback) when the input is blank, so
-    /// pressing Enter on an empty line is a harmless no-op.
-    pub fn take_input(&mut self) -> Option<String> {
-        let line = std::mem::take(&mut self.input);
-        if line.trim().is_empty() {
-            return None;
+    /// `con_totallines`: the lines the text ring holds at this width,
+    /// `CON_TEXTSIZE / con_linewidth`.
+    pub fn totallines(&self) -> usize {
+        CON_TEXTSIZE / self.cursor.width().max(1)
+    }
+
+    /// `con_backscroll`: the lines the text is scrolled up from the bottom.
+    pub fn backscroll(&self) -> usize {
+        self.backscroll
+    }
+
+    /// `Key_Console` (keys.c): a key down the console has the keyboard for,
+    /// Shift applied (`keyshift[]`), with `text` the character it types (if
+    /// any; the host passes only printable ASCII, as the C's `key >= 32 &&
+    /// key <= 127`). `vid_h` is the 2-D screen's height (`vid.height`), which
+    /// bounds the scrollback; `complete` is `Cmd_CompleteCommand` then
+    /// `Cvar_CompleteVariable` for Tab.
+    ///
+    /// - Enter submits the line: echoed into the scrollback with its `]`
+    ///   prompt (`Con_Printf ("%s\n", key_lines[edit_line])`, an empty line
+    ///   too), kept in the 32-line history (`edit_line` moves on), and
+    ///   returned for the host to execute (`Cbuf_AddText`);
+    /// - Tab completes the whole line as a command or cvar name, and a space
+    ///   after it (`"map "`), when one starts with it;
+    /// - Backspace and Left take back the last character;
+    /// - Up and Down walk the history, skipping empty lines (Down past the
+    ///   newest gives an empty line back);
+    /// - PgUp/PgDn (and the mouse wheel) scroll the text 2 lines,
+    ///   `con_backscroll` bounded by `con_totallines - (vid.height>>3) - 1`;
+    ///   Home/End go to the top/bottom (unreachable in id's routing: they are
+    ///   no console keys, so `Key_Event` runs their bindings);
+    /// - a printable key types `text`. Every other key does nothing.
+    pub fn key(
+        &mut self,
+        key: u8,
+        text: Option<u8>,
+        vid_h: usize,
+        complete: impl Fn(&str) -> Option<String>,
+    ) -> Option<String> {
+        let edit = self.edit_line;
+        let max_back = (self.totallines() as i64 - (vid_h as i64 >> 3) - 1).max(0) as usize;
+        match key {
+            K_ENTER => {
+                let line = self.key_lines[edit].clone();
+                self.println(format!("]{line}"));
+                self.edit_line = (edit + 1) % KEY_LINES;
+                self.history_line = self.edit_line;
+                self.key_lines[self.edit_line].clear();
+                return Some(line);
+            }
+            K_TAB => {
+                if let Some(cmd) = complete(&self.key_lines[edit]) {
+                    let mut line = cmd;
+                    line.push(' ');
+                    line.truncate(CONSOLE_INPUT_CAP);
+                    self.key_lines[edit] = line;
+                }
+            }
+            K_BACKSPACE | K_LEFTARROW => {
+                self.key_lines[edit].pop();
+            }
+            K_UPARROW => {
+                loop {
+                    self.history_line = (self.history_line + KEY_LINES - 1) % KEY_LINES;
+                    if self.history_line == edit || !self.key_lines[self.history_line].is_empty() {
+                        break;
+                    }
+                }
+                if self.history_line == edit {
+                    self.history_line = (edit + 1) % KEY_LINES;
+                }
+                self.key_lines[edit] = self.key_lines[self.history_line].clone();
+            }
+            K_DOWNARROW => {
+                if self.history_line == edit {
+                    return None;
+                }
+                loop {
+                    self.history_line = (self.history_line + 1) % KEY_LINES;
+                    if self.history_line == edit || !self.key_lines[self.history_line].is_empty() {
+                        break;
+                    }
+                }
+                if self.history_line == edit {
+                    self.key_lines[edit].clear();
+                } else {
+                    self.key_lines[edit] = self.key_lines[self.history_line].clone();
+                }
+            }
+            K_PGUP | K_MWHEELUP => self.backscroll = (self.backscroll + 2).min(max_back),
+            K_PGDN | K_MWHEELDOWN => self.backscroll = self.backscroll.saturating_sub(2),
+            K_HOME => self.backscroll = max_back,
+            K_END => self.backscroll = 0,
+            _ => {
+                if let Some(c) = text {
+                    self.type_char(c);
+                }
+            }
         }
-        // Echo the command into the scrollback with the `]` prompt, exactly as
-        // Quake's `Con_Printf` shows the line the player just submitted.
-        self.println(format!("]{line}"));
-        Some(line)
+        None
     }
 
     /// `Con_Print(txt)` (console.c): lay `txt` into the scrollback, word-wrapped
     /// at [`CON_LINEWIDTH`] ([`ConCursor`]). Text without a final `\n` leaves
     /// the line open, so the next print continues it (a pickup's `sprint`
     /// fragments join on one line). The oldest line drops once the history
-    /// exceeds [`CONSOLE_SCROLLBACK_CAP`]. The notify lines are the same text
+    /// exceeds [`Console::totallines`]. The notify lines are the same text
     /// in the C (`con_times` stamps the console's own lines), so it is also
     /// kept for them ([`Console::take_unnotified`]): "Saving game to s0.sav..."
     /// after a menu save shows over the game.
@@ -422,11 +541,14 @@ impl Console {
     /// [`Console::print`] for text the notify lines already have (what the
     /// game printed through [`ConNotify::print`]): the scrollback only.
     pub fn print_notified(&mut self, txt: &str) {
+        // Con_Print: `con_backscroll = 0` — new text shows.
+        self.backscroll = 0;
+        let cap = self.totallines();
         let lines = &mut self.lines;
         self.cursor.print(txt, |op| match op {
             ConOp::Linefeed => {
                 lines.push_back(String::new());
-                while lines.len() > CONSOLE_SCROLLBACK_CAP {
+                while lines.len() > cap {
                     lines.pop_front();
                 }
             }
@@ -540,6 +662,23 @@ fn draw_console_background(
     }
 }
 
+/// `Draw_ConsoleBackground (vid.height)`: the console background over the
+/// whole 2-D screen, no text — what `M_Draw` puts under the menu while the
+/// console is out (`scr_con_current`, e.g. forced up with nothing playing),
+/// in place of the fade.
+pub fn draw_console_background_full(
+    image: &mut Image,
+    conback: Option<&crate::wad::Qpic>,
+    conchars: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let sc = screen_2d(image.w, image.h);
+    draw_console_background(image, sc, sc.h, conback, conchars, palette);
+}
+
 /// Draw the drop-down console over `image` at its current height
 /// ([`Console::slide`]), a port of `SCR_DrawConsole` -> `Con_DrawConsole`
 /// (console.c) and `Con_DrawInput`. Draws nothing while the console is up
@@ -580,11 +719,11 @@ pub fn draw_console(
             draw_char_scaled(image, cc, ((col + 1) * 8) as f32, y as f32, c, sc.scale, 0.0, 0.0, palette);
         }
     };
-    // The text, ending with con_current (the last line); lines above the
-    // first are the ring's blank ones.
+    // The text, ending with con_current (the last line) less con_backscroll;
+    // lines above the first are the ring's blank ones.
     let rows = (lines - 16) >> 3;
     let mut y = lines - 16 - (rows << 3);
-    let n = console.lines.len() as i64;
+    let n = console.lines.len() as i64 - console.backscroll as i64;
     for i in (n - rows.max(0) as i64)..n {
         if i >= 0 {
             // Con_Print stores bytes; a line holds them as chars 0..=255.
@@ -597,7 +736,7 @@ pub fn draw_console(
     // Con_DrawInput: only while typing is possible (`key_dest ==
     // key_console`, or the console forced up).
     if console.open || console.forced_up {
-        let mut text: Vec<u8> = std::iter::once(b']').chain(console.input.chars().map(|c| c as u32 as u8)).collect();
+        let mut text: Vec<u8> = std::iter::once(b']').chain(console.input().chars().map(|c| c as u32 as u8)).collect();
         let linepos = text.len();
         text.push(console_cursor_glyph(realtime));
         let start = if linepos >= linewidth { 1 + linepos - linewidth } else { 0 };
@@ -610,6 +749,7 @@ pub fn draw_console(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::K_INS;
     use crate::render::fixtures::{ramp_palette, solid_pic};
 
     /// CENSUS L11: Con_Print lays text into 38-column console lines (word
@@ -698,47 +838,198 @@ mod tests {
         assert_eq!(c.input(), "");
         c.backspace();
         assert_eq!(c.input(), "");
-        // The input length is capped.
+        // Only ASCII types (Key_Console: key >= 32 && key <= 127).
+        for ch in ['é', 'ß', '€', '\u{7f}'] {
+            c.putchar(ch);
+        }
+        assert_eq!(c.input(), "", "non-ASCII is ignored");
+        // The input length is capped (MAXCMDLINE 256: prompt, 254, NUL).
         for _ in 0..(CONSOLE_INPUT_CAP + 50) {
             c.putchar('x');
         }
-        assert_eq!(c.input().chars().count(), CONSOLE_INPUT_CAP, "input length is capped");
+        assert_eq!(c.input().chars().count(), 254, "input length is capped");
+    }
+
+    /// `Key_Console` on a 200-line screen with nothing to complete.
+    fn key(c: &mut Console, key: u8, text: Option<u8>) -> Option<String> {
+        c.key(key, text, 200, |_| None)
+    }
+
+    /// Type `s` and press Enter.
+    fn submit(c: &mut Console, s: &str) {
+        for ch in s.bytes() {
+            key(c, ch, Some(ch));
+        }
+        key(c, K_ENTER, None);
     }
 
     #[test]
-    fn console_take_input_returns_and_clears_and_echoes() {
+    fn key_console_enter_submits_and_echoes_the_line() {
         let mut c = Console::new();
-        for ch in "give h 100".chars() {
-            c.putchar(ch);
+        for ch in "give h 100x".bytes() {
+            key(&mut c, ch, Some(ch));
         }
-        let before = c.line_count();
-        let got = c.take_input();
-        assert_eq!(got.as_deref(), Some("give h 100"), "take_input returns the line");
-        assert_eq!(c.input(), "", "take_input clears the input line");
-        assert_eq!(c.line_count(), before + 1, "the submitted line is echoed to scrollback");
-        // A blank line is a no-op: nothing returned, nothing echoed.
-        let n = c.line_count();
-        assert_eq!(c.take_input(), None, "blank input returns None");
-        assert_eq!(c.line_count(), n, "blank input echoes nothing");
-        for ch in "   ".chars() {
-            c.putchar(ch);
+        key(&mut c, K_LEFTARROW, None); // Left arrow takes a character back too
+        assert_eq!(c.input(), "give h 100");
+        let got = key(&mut c, K_ENTER, None);
+        assert_eq!(got.as_deref(), Some("give h 100"), "Enter returns the line");
+        assert_eq!(c.input(), "", "and starts a new one");
+        assert_eq!(c.lines().collect::<Vec<_>>(), ["]give h 100"], "echoed with its prompt");
+        // An empty line echoes its prompt as id's does, and runs nothing.
+        assert_eq!(key(&mut c, K_ENTER, None).as_deref(), Some(""));
+        assert_eq!(c.lines().nth(1), Some("]"));
+        // A key that types nothing is ignored.
+        key(&mut c, K_TAB, None);
+        key(&mut c, K_INS, None);
+        assert_eq!(c.input(), "");
+    }
+
+    /// Key_Console's history: `key_lines[32]`, Up walks back over the
+    /// non-empty lines (wrapping to the oldest slot when there are none
+    /// older), Down forward, past the newest to an empty line; Enter keeps a
+    /// line in the ring.
+    #[test]
+    fn up_and_down_walk_the_32_line_history() {
+        let mut c = Console::new();
+        key(&mut c, K_DOWNARROW, None);
+        assert_eq!(c.input(), "", "Down with no history: nothing");
+        for line in ["god", "", "noclip", "map e1m2"] {
+            submit(&mut c, line);
         }
-        assert_eq!(c.take_input(), None, "whitespace-only input returns None");
-        assert_eq!(c.line_count(), n);
+        for x in b"typ".iter() {
+            key(&mut c, *x, Some(*x));
+        }
+        key(&mut c, K_UPARROW, None);
+        assert_eq!(c.input(), "map e1m2", "Up: the last line, the typing replaced");
+        key(&mut c, K_UPARROW, None);
+        assert_eq!(c.input(), "noclip");
+        key(&mut c, K_UPARROW, None);
+        assert_eq!(c.input(), "god", "the empty line is skipped");
+        key(&mut c, K_UPARROW, None);
+        assert_eq!(c.input(), "", "no older line: the slot after edit_line (empty)");
+        key(&mut c, K_DOWNARROW, None);
+        assert_eq!(c.input(), "god");
+        key(&mut c, K_DOWNARROW, None);
+        key(&mut c, K_DOWNARROW, None);
+        assert_eq!(c.input(), "map e1m2");
+        key(&mut c, K_DOWNARROW, None);
+        assert_eq!(c.input(), "", "past the newest: an empty line");
+        key(&mut c, K_DOWNARROW, None);
+        assert_eq!(c.input(), "", "and Down stays there");
+        // A line brought back and submitted is the newest.
+        key(&mut c, K_UPARROW, None);
+        key(&mut c, K_UPARROW, None);
+        assert_eq!(key(&mut c, K_ENTER, None).as_deref(), Some("noclip"));
+        key(&mut c, K_UPARROW, None);
+        assert_eq!(c.input(), "noclip");
+        // The ring holds 32 slots, one being typed: 31 lines back at most.
+        let mut c = Console::new();
+        for i in 0..40 {
+            submit(&mut c, &format!("echo {i}"));
+        }
+        for _ in 0..31 {
+            key(&mut c, K_UPARROW, None);
+        }
+        assert_eq!(c.input(), "echo 9", "the oldest kept");
+        key(&mut c, K_UPARROW, None);
+        assert_eq!(c.input(), "echo 9", "and Up stays there (the slot after edit_line)");
+    }
+
+    /// Tab: Cmd_CompleteCommand, then Cvar_CompleteVariable, on the whole
+    /// line; a match replaces it with the name and a space.
+    #[test]
+    fn tab_completes_a_command_then_a_cvar() {
+        let complete = |p: &str| -> Option<String> {
+            if p.is_empty() {
+                return None;
+            }
+            ["map", "god"].iter().chain(["viewsize"].iter()).find(|n| n.starts_with(p)).map(|n| n.to_string())
+        };
+        let mut c = Console::new();
+        for ch in b"ma" {
+            c.key(*ch, Some(*ch), 200, complete);
+        }
+        c.key(K_TAB, None, 200, complete);
+        assert_eq!(c.input(), "map ");
+        for ch in b"e1m2" {
+            c.key(*ch, Some(*ch), 200, complete);
+        }
+        c.key(K_TAB, None, 200, complete);
+        assert_eq!(c.input(), "map e1m2", "no name starts with the whole line: nothing");
+        let mut c = Console::new();
+        c.key(b'v', Some(b'v'), 200, complete);
+        c.key(K_TAB, None, 200, complete);
+        assert_eq!(c.input(), "viewsize ");
+        let mut c = Console::new();
+        c.key(K_TAB, None, 200, complete);
+        assert_eq!(c.input(), "", "an empty line completes to nothing");
+    }
+
+    /// PgUp/PgDn: con_backscroll in steps of 2, bounded by con_totallines -
+    /// (vid.height>>3) - 1; any print puts it back to 0; the text drawn is
+    /// that many lines up.
+    #[test]
+    fn pgup_and_pgdn_scroll_the_text_back() {
+        let pal = ramp_palette();
+        let cc = lit_conchars();
+        let mut c = Console::new();
+        c.toggle();
+        c.set_current(100.0);
+        for i in 0..60 {
+            c.println(format!("line {i}"));
+        }
+        key(&mut c, K_PGUP, None);
+        key(&mut c, K_MWHEELUP, None);
+        assert_eq!(c.backscroll(), 4);
+        key(&mut c, K_PGDN, None);
+        assert_eq!(c.backscroll(), 2);
+        // The bottom text row (y 76 on a 100-row console) now shows the line
+        // two up: draw it and the unscrolled console and compare with the
+        // row two above.
+        let draw = |c: &Console| {
+            let mut img = Image::new(320, 200, [0, 0, 0]);
+            draw_console(&mut img, c, None, Some(&cc), &pal, 0.0);
+            img.rgb
+        };
+        let scrolled = draw(&c);
+        let mut plain = Console::new();
+        plain.toggle();
+        plain.set_current(100.0);
+        for i in 0..58 {
+            plain.println(format!("line {i}"));
+        }
+        assert_eq!(scrolled, draw(&plain), "two lines up");
+        // Bounded: 431 lines (320 wide) - 25 rows - 1.
+        for _ in 0..300 {
+            key(&mut c, K_PGUP, None);
+        }
+        assert_eq!(c.backscroll(), 431 - 25 - 1);
+        c.key(K_PGUP, None, 600, |_| None);
+        assert_eq!(c.backscroll(), 431 - 75 - 1, "a taller screen shows more, scrolls less");
+        key(&mut c, K_PGDN, None);
+        assert_eq!(c.backscroll(), 431 - 75 - 3);
+        c.println("new text");
+        assert_eq!(c.backscroll(), 0, "Con_Print: con_backscroll = 0");
+        for _ in 0..3 {
+            key(&mut c, K_PGDN, None);
+        }
+        assert_eq!(c.backscroll(), 0, "not below the bottom");
     }
 
     #[test]
     fn console_println_caps_the_scrollback() {
         let mut c = Console::new();
-        // Push well past the cap; the history must never exceed it.
-        for i in 0..(CONSOLE_SCROLLBACK_CAP * 2) {
+        // Push well past the cap; the history must never exceed it:
+        // con_totallines = CON_TEXTSIZE / con_linewidth, 431 at 320 wide.
+        for i in 0..1000 {
             c.println(format!("line {i}"));
         }
-        assert_eq!(
-            c.line_count(),
-            CONSOLE_SCROLLBACK_CAP,
-            "scrollback is capped at CONSOLE_SCROLLBACK_CAP"
-        );
+        assert_eq!(c.line_count(), 431, "scrollback is the ring's con_totallines");
+        assert_eq!(c.lines().next(), Some("line 569"), "the newest kept");
+        // Con_CheckResize: 960 wide holds 16384 / 118 = 138.
+        c.slide(0.0, 960, 600);
+        assert_eq!(c.line_count(), 138);
+        assert_eq!(c.lines().last(), Some("line 999"));
         // A multi-line message counts as multiple lines (split on '\n').
         let mut c2 = Console::new();
         c2.println("a\nb\nc");

@@ -8,7 +8,7 @@ use crate::menu::{
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
     BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_RIGHT,
     BIND_IMPULSE_0, BIND_KLOOK, BIND_MLOOK, BIND_PAUSE, BIND_SHOWSCORES, BIND_SIZEDOWN,
-    BIND_SIZEUP, BIND_SPEED, BIND_STRAFE,
+    BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, BIND_TOGGLECONSOLE,
 };
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
@@ -37,7 +37,71 @@ pub const K_END: u8 = 152;
 pub const K_MOUSE1: u8 = 200;
 pub const K_MOUSE2: u8 = 201;
 pub const K_MOUSE3: u8 = 202;
+pub const K_MWHEELUP: u8 = 239;
+pub const K_MWHEELDOWN: u8 = 240;
 pub const K_PAUSE: u8 = 255;
+
+/// keys.c's `consolekeys[]` (`Key_Init`): the keys the console keeps for
+/// itself while it has the keyboard — 32..127 but the toggle keys `` ` `` and
+/// `~`, Enter, Tab, the arrows, Backspace (127), PgUp/PgDn, Shift and the
+/// mouse wheel. Every other key goes to its binding even with the console
+/// down (so Home/End reach `centerview`, not `Key_Console`'s scrolling).
+pub fn consolekey(k: u8) -> bool {
+    matches!(
+        k,
+        32..=127
+            | K_ENTER
+            | K_TAB
+            | K_LEFTARROW
+            | K_RIGHTARROW
+            | K_UPARROW
+            | K_DOWNARROW
+            | K_PGUP
+            | K_PGDN
+            | K_SHIFT
+            | K_MWHEELUP
+            | K_MWHEELDOWN
+    ) && k != b'`'
+        && k != b'~'
+}
+
+/// keys.c's `menubound[]`: Escape and F1..F12, the only keys whose bindings
+/// run while the menu has the keyboard (Escape is handled before the
+/// bindings anyway, so no key can take the menu away).
+pub fn menubound(k: u8) -> bool {
+    k == K_ESCAPE || (K_F1..=K_F12).contains(&k)
+}
+
+/// keys.c's `keyshift[]`: what a key types with Shift held — the US layout
+/// id's `Key_Init` spells out (letters upper-case, the digit row's symbols,
+/// the punctuation pairs); every other key is itself.
+pub fn keyshift(k: u8) -> u8 {
+    match k {
+        b'a'..=b'z' => k - b'a' + b'A',
+        b'1' => b'!',
+        b'2' => b'@',
+        b'3' => b'#',
+        b'4' => b'$',
+        b'5' => b'%',
+        b'6' => b'^',
+        b'7' => b'&',
+        b'8' => b'*',
+        b'9' => b'(',
+        b'0' => b')',
+        b'-' => b'_',
+        b'=' => b'+',
+        b',' => b'<',
+        b'.' => b'>',
+        b'/' => b'?',
+        b';' => b':',
+        b'\'' => b'"',
+        b'[' => b'{',
+        b']' => b'}',
+        b'`' => b'~',
+        b'\\' => b'|',
+        _ => k,
+    }
+}
 
 /// `Key_KeynumToString` (keys.c): printable ASCII (33..=126) is the character
 /// itself (lowercase, as `Key_Event` delivers it); the named specials come from
@@ -69,6 +133,8 @@ pub fn keynum_to_string(keynum: u8) -> String {
         K_MOUSE1 => "MOUSE1",
         K_MOUSE2 => "MOUSE2",
         K_MOUSE3 => "MOUSE3",
+        K_MWHEELUP => "MWHEELUP",
+        K_MWHEELDOWN => "MWHEELDOWN",
         K_PAUSE => "PAUSE",
         f @ K_F1..=K_F12 => return format!("F{}", f - K_F1 + 1),
         _ => "UNKNOWN",
@@ -116,6 +182,8 @@ pub(crate) fn default_bindings() -> [Option<u8>; 256] {
     bind(K_MOUSE3, BIND_MLOOK);
     bind(K_INS, BIND_KLOOK);
     bind(K_PAUSE, BIND_PAUSE);
+    bind(b'~', BIND_TOGGLECONSOLE);
+    bind(b'`', BIND_TOGGLECONSOLE);
     // This port's established layout (overrides default.cfg's a=+lookup,
     // d=+moveup; w/s were unbound there):
     bind(b'w', BIND_FORWARD);
@@ -157,6 +225,32 @@ mod tests {
     #[test]
     fn pause_is_bound_to_pause_as_in_default_cfg() {
         assert_eq!(default_bindings()[K_PAUSE as usize], Some(BIND_PAUSE as u8));
+    }
+
+    #[test]
+    fn the_console_key_is_toggleconsole_as_in_default_cfg() {
+        let b = default_bindings();
+        assert_eq!(b[b'`' as usize], Some(BIND_TOGGLECONSOLE as u8));
+        assert_eq!(b[b'~' as usize], Some(BIND_TOGGLECONSOLE as u8));
+    }
+
+    /// Key_Init's tables: what the console keeps, what the menu lets through,
+    /// what Shift types.
+    #[test]
+    fn key_init_tables_are_ids() {
+        for k in 32..=127u8 {
+            assert_eq!(consolekey(k), k != b'`' && k != b'~', "{k}");
+        }
+        for k in [K_ENTER, K_TAB, K_UPARROW, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW, K_PGUP, K_PGDN, K_SHIFT, K_MWHEELUP, K_MWHEELDOWN] {
+            assert!(consolekey(k), "{k}");
+        }
+        for k in [K_ESCAPE, K_HOME, K_END, K_DEL, K_INS, K_CTRL, K_ALT, K_F1, K_MOUSE1, K_PAUSE, 0] {
+            assert!(!consolekey(k), "{k}");
+        }
+        assert!(menubound(K_ESCAPE) && menubound(K_F1) && menubound(K_F12));
+        assert!(!menubound(b'`') && !menubound(K_ENTER) && !menubound(K_MOUSE1));
+        assert_eq!((keyshift(b'a'), keyshift(b'2'), keyshift(b'`'), keyshift(b'\\')), (b'A', b'@', b'~', b'|'));
+        assert_eq!((keyshift(b'A'), keyshift(K_ENTER), keyshift(K_UPARROW)), (b'A', K_ENTER, K_UPARROW));
     }
 
     #[test]

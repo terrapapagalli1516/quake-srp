@@ -59,7 +59,9 @@
      a little air; --chrome-h: the bezel and a 16px gutter each side), and
      never smaller than 640x480 (the page scrolls instead). WinQuake draws the
      status bar and menus 1:1 in every mode, so at the default 960x600 they
-     are 320 wide: in a fixed 640x480 box they came out a third of the size. */
+     are 320 wide: in a fixed 640x480 box they came out a third of the size.
+     fitCanvas() then snaps that box (see there): pixelated scaling by a
+     factor just past a whole number doubles a column here and there. */
   canvas { --chrome-v:168px; --chrome-h:56px;
     image-rendering:pixelated; background:#000;
     width:max(640px, min(100vw - var(--chrome-h), (100vh - var(--chrome-v)) * 4 / 3));
@@ -162,7 +164,7 @@
           <div id="bootMsg">fetching engine…</div>
           <div id="bootBar"><div id="bootFill"></div></div>
         </div>
-        <div id="play" class="hidden">click (or press Enter) to play &nbsp;·&nbsp; mouse = look, WASD = move</div>
+        <div id="play" class="hidden">click (or press Enter) to start &nbsp;·&nbsp; then press any key for the menu</div>
       </div>
       <div id="lockChip" class="chip">click to capture mouse</div>
       <div id="fsHint" class="chip">Esc = menu &nbsp;·&nbsp; F = leave fullscreen</div>
@@ -203,6 +205,7 @@
     <div class="col">
       <h2>Interface</h2>
       <div class="keys">
+        <span class="k">any key</span><span>the menu, while a demo plays</span>
         <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
         <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
@@ -225,7 +228,8 @@
       <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
       <code>kill</code><span>respawn</span>
       <code>wasm_showfps 1</code><span>the Web extras (not in id's Quake, all off by default): <code>wasm_uncapped</code> lifts the 72 fps cap, <code>wasm_showfps</code> shows the frame rate, <code>wasm_exactpersp</code> draws walls with exact perspective (also on Options &gt; Web extras)</span>
-      <code>help</code><span>everything else (<code>echo</code>, <code>clear</code>, …)</span>
+      <code>help</code><span>id's Help/Ordering screen</span>
+      <code>wasm_help</code><span>this port's list of console commands (<code>echo</code>, <code>clear</code>, the demo commands, …)</span>
     </div>
   </details>
 
@@ -283,13 +287,14 @@ function hideOverlayForever() {
   overlay.classList.add('hidden');
 }
 function startFromOverlay() {
-  // The first gesture: unlock audio with it and reveal the attract loop (demo +
-  // menu) that boot_attract() already has running under the scrim. No pointer
-  // lock here — the attract menu is keyboard-driven; the mouse is captured
-  // later, by a canvas click in walk mode.
+  // The first gesture: unlock audio with it and reveal the attract loop that
+  // boot_attract() already has running under the scrim — id's demos, with no
+  // menu until a key (keys.c: during demo playback most keys bring up the
+  // main menu). No pointer lock here — the menu is keyboard-driven; the mouse
+  // is captured later, by a canvas click in walk mode.
   unlockAudio();
   hideOverlayForever();
-  statusEl.textContent = 'attract loop — ↑/↓ + Enter drive the menu · New Game to play';
+  statusEl.textContent = 'attract loop — press any key for the menu · Single Player > New Game to play';
 }
 
 // Physical punctuation/digit keys, KeyboardEvent.code -> unshifted US-ASCII
@@ -335,124 +340,84 @@ function quakeKey(e) {
   return null;
 }
 
+// Is the Customize-controls screen waiting for a key (menu.c bind_grab)?
+function bindGrabbing() { return !!(exp && exp.menu_bind_grabbing && exp.menu_bind_grabbing()); }
+// The character a key typed on the player's keyboard layout, for the console
+// and the Setup name fields (0: none — a named key, or a shortcut chord).
+function typedChar(e) {
+  if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return 0;
+  return e.key.codePointAt(0);
+}
+// One key event into the engine: keys.c's Key_Event decides, as in id's
+// Quake, whether it goes to the menu, the console or its binding.
+function keyEvent(qk, down, ch) { if (exp && exp.key_event) exp.key_event(qk, down ? 1 : 0, ch || 0); }
+
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
   // --- First-gesture overlay. While the click-to-play prompt is up, Enter or
   //     Space starts exactly like a click (one gesture: unlock audio + reveal
-  //     the attract loop). Routed FIRST so Enter can't also drive the attract
-  //     menu underneath. Only the ready prompt accepts it, not the boot panel.
+  //     the attract loop). Routed FIRST so the key can't also reach the game
+  //     underneath. Only the ready prompt accepts it, not the boot panel.
   if (!firstGestureDone && readyToPlay && (k === 'enter' || k === ' ')) {
     startFromOverlay();
     e.preventDefault();
     return;
   }
+  if (!exp) return;
 
-  // --- Drop-down console. The ~ / backtick key TOGGLES it (and never types the
-  //     ~ into the line). The console has TOP priority over the menu: while it's
-  //     open it owns the whole keyboard — printable keys type into the input
-  //     line, Backspace edits, Enter executes, and Escape/~ close it. Every key
-  //     here is swallowed so it can't also drive gameplay OR the menu.
-  if ((e.code === 'Backquote' || k === '`' || k === '~') && exp && exp.console_toggle) {
-    exp.console_toggle();
-    e.preventDefault();
-    return;
-  }
-  if (consoleVisible()) {
-    // PAUSE is no console key (keys.c consolekeys): its binding, default.cfg's
-    // "pause", runs with the console down too.
-    if (e.key === 'Pause') { if (!e.repeat) exp.key_down?.(255); e.preventDefault(); return; }
-    if (k === 'escape')    { exp.console_toggle();   e.preventDefault(); return; }
-    if (k === 'backspace') { exp.console_backspace?.(); e.preventDefault(); return; }
-    if (k === 'enter')     { exp.console_enter?.();   e.preventDefault(); return; }
-    // A printable key is a single-character e.key (letters, digits, space,
-    // punctuation). Send its code point to the console; multi-char keys
-    // (Arrow*, Shift, Tab, …) are swallowed without typing anything.
-    if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && exp.console_char) {
-      exp.console_char(e.key.codePointAt(0));
-    }
-    e.preventDefault();
-    return;
-  }
-
-  // --- Customize-controls bind grab: while the Keys screen waits for a key
-  //     (menu.c bind_grab), EVERY key — including Escape (cancel), Tab, arrows,
-  //     Enter — is the key being defined, so route it raw to the engine before
-  //     the Esc menu handling below can steal it (M_Keys_Key's grab branch
-  //     runs before the normal switch in the C too).
-  if (menuVisible() && exp && exp.menu_bind_grabbing && exp.menu_bind_grabbing()) {
-    const bq = quakeKey(e);
-    if (bq !== null && exp.menu_bind_key) exp.menu_bind_key(bq);
-    e.preventDefault();
-    return;
-  }
-
-  // --- Main menu navigation. Escape reaches the menu (default.cfg's
-  //     "togglemenu": opens it from the game, backs out within it). Tab is
-  //     default.cfg's +showscores and goes to the engine below like any bound
-  //     key. When the menu is up, Arrow Up/Down move the cursor, Enter selects —
-  //     and we DON'T let those keys also drive the game (no movement/turn while
-  //     navigating the menu). Esc ignores autorepeat, as Key_Event does: with
-  //     Esc keyboard-locked in fullscreen a held Esc (the browser's way out)
-  //     must not flicker the menu while the browser counts to two seconds.
-  if (k === 'escape' && exp && exp.menu_cancel) {
+  // --- Escape. Key_Event's own rules (the menu's Escape, else togglemenu),
+  //     sent from here because the browser reserves Esc around pointer lock
+  //     and fullscreen: see escKeyMenu. Autorepeat ignored, as Key_Event does
+  //     (a held Esc is the browser's way out of fullscreen).
+  if (k === 'escape') {
     if (!e.repeat) escKeyMenu();
     e.preventDefault();
     return;
   }
-  if (menuVisible()) {
-    if (!e.repeat && (k === 'arrowup') && exp.menu_up)       { exp.menu_up();     e.preventDefault(); return; }
-    if (!e.repeat && (k === 'arrowdown') && exp.menu_down)   { exp.menu_down();   e.preventDefault(); return; }
-    // Left/Right adjust the highlighted Options row (Screen size = viewsize /
-    // Brightness / Mouse speed / Volume) one step PER KEY PRESS (the !e.repeat
-    // guard matches up/down/enter and stops a held key from racing a slider end
-    // to end). menu_left/right move the line on the Load/Save/Keys/Video screens
-    // (the C pairs LEFT with UP there) and are no-ops elsewhere. Enter on a
-    // Video Options mode resizes the framebuffer engine-side; the render loop
-    // notices the new width()/height() and re-fits the canvas.
-    if (!e.repeat && (k === 'arrowleft')  && exp.menu_left)  { exp.menu_left();  e.preventDefault(); return; }
-    if (!e.repeat && (k === 'arrowright') && exp.menu_right) { exp.menu_right(); e.preventDefault(); return; }
-    if (!e.repeat && (k === 'enter') && exp.menu_select)     { exp.menu_select(); e.preventDefault(); return; }
-    // Backspace/Del clear the highlighted binding on the Customize-controls
-    // screen (M_Keys_Key K_BACKSPACE/K_DEL; engine-gated no-op elsewhere).
-    if (!e.repeat && (k === 'backspace' || k === 'delete') && exp.menu_backspace) {
-      exp.menu_backspace(); e.preventDefault(); return;
-    }
-    // Y/N answer the Quit confirm prompt (M_Quit_Key; no-ops off that screen).
-    if (!e.repeat && k === 'y' && exp.menu_quit_yes) { exp.menu_quit_yes(); e.preventDefault(); return; }
-    if (!e.repeat && k === 'n' && exp.menu_quit_no)  { exp.menu_quit_no();  e.preventDefault(); return; }
-    // Swallow the other gameplay keys so the world stays idle behind the menu.
-    if (MOVE_KEYS.includes(k)) { e.preventDefault(); return; }
+
+  // --- F: the page's fullscreen toggle (not id's: default.cfg leaves F
+  //     unbound), while the game has the keyboard. In the live game the key
+  //     still reaches the engine for a player who bound it; during demo
+  //     playback it does not, where any key raises the menu.
+  const gameHasKeys = !menuVisible() && !consoleVisible();
+  if (k === 'f' && gameHasKeys) {
+    toggleFullscreen();
+    if (!inWalkMode()) { e.preventDefault(); return; }
   }
 
-  if (k === 'f') toggleFullscreen();
-  // Every other game key goes to the engine by Quake keynum: the bindings
-  // table (keys.c keybindings, editable in Options > Customize controls) turns
-  // held keys into +forward/+back/+moveleft/+moveright/+jump/+attack/+speed/
-  // +lookup/+lookdown/turns each frame (CL_BaseMove/CL_AdjustAngles port), and
-  // key presses into commands — the digit row's "impulse 1".."impulse 8"
-  // (weapon select) by physical key (e.code), so Shift+digit and non-US
-  // layouts select weapons too.
-  // The !e.repeat gate mirrors Key_Event's autorepeat ignore; held-state
-  // movement needs only the first down (keyup clears it).
+  // --- Every key by Quake keynum, autorepeats included (Key_Event ignores
+  //     them but for Backspace), with the character it typed: the menu
+  //     (arrows, Enter, Y/N, a key to bind, a name to type), the console
+  //     (typing, Enter, Tab, history, PgUp/PgDn) or the game's bindings
+  //     (keys.c keybindings, editable in Options > Customize controls:
+  //     +forward.., the digit row's "impulse 1".."impulse 8" by physical key,
+  //     so Shift+digit and non-US layouts select weapons too, and the console
+  //     key's "toggleconsole").
   const qk = quakeKey(e);
-  if (!e.repeat && qk !== null && exp && exp.key_down) exp.key_down(qk);
-  // Stop the browser's own use of the movement keys (Space/arrows scroll) and
-  // of Tab (focus moves).
-  if (MOVE_KEYS.includes(k) || k === 'tab') e.preventDefault();
+  if (qk !== null) keyEvent(qk, true, typedChar(e));
+  // Keep the browser's own use of these keys away: Space/arrows scroll, Tab
+  // moves focus, and while the menu or console has the keyboard, typing must
+  // not start the browser's quick-find (' and /) or page scrolling.
+  if (MOVE_KEYS.includes(k) || k === 'tab' || k === 'backspace' || qk === 96
+      || (!gameHasKeys && qk !== null && !e.ctrlKey && !e.metaKey)) e.preventDefault();
 });
 addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
   // Key-ups are delivered unconditionally (even while the menu/console own the
   // keyboard) so a key released behind an overlay can never stick held.
   const qk = quakeKey(e);
-  if (qk !== null && exp && exp.key_up) exp.key_up(qk);
+  if (qk !== null) keyEvent(qk, false, 0);
   // A focused <button>/<summary> fires its click on the Space KEYUP — swallow
   // the game keys' keyup so jumping can never re-trigger the last clicked
   // control (the click handlers also blur(); this is the backstop), and a
   // held-then-released arrow can't scroll either.
   if (MOVE_KEYS.includes(k)) e.preventDefault();
 });
+// A key released while the window was elsewhere never comes up here: on
+// losing the keyboard, vid_win.c's ClearAllStates (every key up, repeats
+// cleared), so nothing stays held.
+addEventListener('blur', () => { if (exp && exp.key_clear_states) exp.key_clear_states(); });
 
 // No UI control may KEEP focus after a click: a focused button re-triggers on
 // Space/Enter (the 🔊 sound toggle was the known offender — every jump replayed
@@ -511,8 +476,11 @@ const ESC_PAIR_MS = 300;
 function escKeyMenu() {
   escKeyAt = performance.now();
   if (escLocked && escKeyAt - lockLossMenuAt < ESC_PAIR_MS) return;
-  exp.menu_cancel();            // opens the menu when hidden, else backs out
+  escPress();
 }
+// Escape through Key_Event: the menu's Escape (backs out a screen; Main closes
+// it), or outside the menu togglemenu (the menu opens; the console goes up).
+function escPress() { keyEvent(27, true, 0); keyEvent(27, false, 0); }
 function lockEscape() {
   const kb = navigator.keyboard;
   if (!kb || typeof kb.lock !== 'function') return Promise.resolve(false);
@@ -561,7 +529,7 @@ document.getElementById('demoBtn').addEventListener('click', () => {
   statusEl.textContent = 'loading demo1 (e1m3)…';
   setTimeout(() => {
     exp.boot_demo();
-    statusEl.textContent = "playing demo1 — id's recorded e1m3 run (demo2 and demo3 follow)";
+    statusEl.textContent = "playing demo1 — id's recorded e1m3 run (demo2 and demo3 follow) · any key for the menu";
   }, 30);
 });
 
@@ -1081,16 +1049,20 @@ canvas.addEventListener('mousedown', (e) => {
     // behaviour (inWalkMode() defaults true).
     if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
   }
-  // While locked the buttons are K_MOUSE1/2/3 (in_win.c: left, right,
-  // middle), through the bindings like any key — default.cfg: MOUSE1
-  // +attack, MOUSE2 +forward, MOUSE3 +mlook (rebindable in Options >
-  // Customize controls).
-  else if (MOUSE_KEYNUMS[e.button] && exp && exp.key_down) { exp.key_down(MOUSE_KEYNUMS[e.button]); }
+  // The buttons are K_MOUSE1/2/3 (in_win.c: left, right, middle), keys like
+  // any other: while the mouse is captured they reach their bindings —
+  // default.cfg: MOUSE1 +attack, MOUSE2 +forward, MOUSE3 +mlook — and while
+  // Customize controls waits for a key they are the key to bind (M_Keys_Key),
+  // as in id's.
+  if (MOUSE_KEYNUMS[e.button] && (locked() || bindGrabbing())) {
+    keyEvent(MOUSE_KEYNUMS[e.button], true, 0);
+    e.preventDefault();
+  }
   dragging = true;
 });
 addEventListener('mouseup', (e) => {
   dragging = false;
-  if (MOUSE_KEYNUMS[e.button] && exp && exp.key_up) exp.key_up(MOUSE_KEYNUMS[e.button]);
+  if (MOUSE_KEYNUMS[e.button]) keyEvent(MOUSE_KEYNUMS[e.button], false, 0);
 });
 // The right button is MOUSE2 in the game, not the browser's context menu.
 canvas.addEventListener('contextmenu', e => e.preventDefault());
@@ -1113,9 +1085,9 @@ document.addEventListener('pointerlockchange', () => {
     expectUnlock = false;
     const pairsWithEscKey = escLocked && performance.now() - escKeyAt < ESC_PAIR_MS;
     if (!pageInitiated && !pairsWithEscKey && inWalkMode() && !menuVisible()
-        && !consoleVisible() && exp && exp.menu_cancel) {
+        && !consoleVisible() && exp) {
       lockLossMenuAt = performance.now();
-      exp.menu_cancel();    // menu_cancel OPENS the menu when it is hidden
+      escPress();           // togglemenu: the menu opens
     }
     // Leaving pointer lock is this port's "+mlook released": the engine applies
     // lookspring there (IN_MLookUp -> V_StartPitchDrift when the Options toggle
@@ -1415,8 +1387,8 @@ async function main() {
 
   setStatus('booting: parsing pak0.pak, loading the attract demo…');
   await new Promise(r => setTimeout(r, 30));
-  // Quake boots into the ATTRACT loop: the main menu drawn over a PLAYING demo.
-  // boot_attract starts demo playback with the menu open; if the demo can't be
+  // Quake boots into the ATTRACT loop: quake.rc's demos, a key for the menu.
+  // boot_attract starts the attract demos with no menu; if the demo can't be
   // built it falls back to boot() (menu over e1m1), so this is always non-zero
   // when the pak loaded. The walk/demo buttons below still call boot()/boot_demo().
   if (!exp.boot_attract()) { setStatus('boot_attract() failed'); return; }
@@ -1441,17 +1413,49 @@ async function main() {
   // largest 4:3 box the window fits, see the canvas rule) does not follow it,
   // so a larger backing store just gives a crisper pixel-upscale.
   let W = 0, H = 0;
+  // The canvas box, snapped. The CSS rule gives the largest 4:3 box the
+  // window fits; with image-rendering:pixelated a box a little wider than the
+  // framebuffer (976 px for 960 columns at 1440x900) doubles one column in
+  // ~60, which bands the menu's checkerboard fade and the 1:1 text, and a
+  // box narrower than it drops whole columns out of that text. So, in device
+  // pixels per framebuffer column (s):
+  //   - s at or up to 1/8 past a whole number k: the box is exactly k columns
+  //     per framebuffer column (every column k pixels wide; the picture
+  //     gives up at most a ninth of its width for it);
+  //   - s below 1 (a window narrower than the framebuffer): the natural box,
+  //     smoothed (image-rendering:auto) — no column is dropped, the text is
+  //     a little soft;
+  //   - otherwise (1.27 at 1920x1080): the natural box, pixelated, as before.
+  // Rows are another matter: the 16:10 framebuffer is shown at 4:3, 1.2 rows
+  // per column's worth (a 1996 monitor's stretch), so every fifth row is one
+  // pixel taller whatever the box.
+  const SNAP = 1 / 8;
+  function fitCanvas() {
+    canvas.style.width = canvas.style.height = canvas.style.imageRendering = '';
+    const natural = parseFloat(getComputedStyle(canvas).width);
+    const dpr = window.devicePixelRatio || 1;
+    const s = natural * dpr / W;
+    if (!(s > 0)) return;
+    let width = natural;
+    if (s >= 1 && s - Math.floor(s) <= SNAP * Math.floor(s)) width = Math.floor(s) * W / dpr;
+    else if (s < 1) canvas.style.imageRendering = 'auto';
+    canvas.style.width = width + 'px';
+    canvas.style.height = width * 3 / 4 + 'px';
+  }
   function syncCanvasSize() {
     const w = exp.width(), h = exp.height();
     if (w === W && h === H) return;
     W = w; H = h;
     canvas.width = W; canvas.height = H;
+    fitCanvas();   // the snap depends on W
     // The resolution just changed (boot, or a Video Options mode): persist
     // it so a reload comes back at the same size. This is the single choke point
     // for every resolution change, so it captures menu picks and restores alike.
     saveResolution(W, H);
   }
   syncCanvasSize();
+  addEventListener('resize', fitCanvas);
+  document.addEventListener('fullscreenchange', fitCanvas);
   // The presented frame: an ImageData built straight over the framebuffer in
   // wasm memory, so presenting is one putImageData with no copy into a
   // JS-side ImageData first. Rebuilt when the bytes move: a memory.grow
@@ -1509,7 +1513,7 @@ async function main() {
     // Load/Save just opened (a key this refresh): rescan before it draws.
     scanSavesOnMenuEntry();
     // Movement/turn/attack all flow from the held-key states the keydown/keyup
-    // handlers fed the engine (key_down/key_up by Quake keynum): each step
+    // handlers fed the engine (key_event by Quake keynum): each step
     // derives the move from the BINDINGS table (CL_BaseMove/CL_AdjustAngles),
     // so Options > Customize controls really rebinds, Always Run really swaps
     // cl_forwardspeed, and the menu/console gate gameplay engine-side.

@@ -1079,9 +1079,10 @@ mod tests {
     #[test]
     fn poll_menu_sound_serves_the_real_wavs_and_respects_audio_gate() {
         assert_eq!(boot_attract(), 1);
+        crate::menu::menu_cancel(); // Escape: the menu over the demo
         set_audio_ready(1);
         MENU_SND_QUEUE.with(|q| q.borrow_mut().clear());
-        drain_menu_sounds(); // flush whatever boot queued (the open's menu2)
+        drain_menu_sounds(); // flush whatever the open queued (menu2)
 
         // A cursor move queues misc/menu1.wav — the exact pak bytes.
         menu_down();

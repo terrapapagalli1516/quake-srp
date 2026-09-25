@@ -3,7 +3,8 @@
 
   1. ONE-GESTURE START — the click-to-play scrim appears only before the first
      user gesture ever; that click (or Enter/Space) unlocks audio AND reveals
-     the running attract loop, and the scrim never covers the canvas again
+     the running attract loop — id's demos, no menu until a key (the gesture
+     itself is not one) — and the scrim never covers the canvas again
      (attract->walk->demo transitions included).
   2. ESC vs POINTER LOCK — losing the pointer lock without the page asking
      (the browser's reserved Esc, simulated via document.exitPointerLock())
@@ -16,6 +17,11 @@
      walk mode with no menu/console up; never in attract/demo/locked states.
   5. KEYBOARD-ONLY PLAY — arrows move the camera and Ctrl fires (+attack)
      without the pointer ever being locked.
+  6. THE CANVAS BOX — at 1440x900 the 960-wide framebuffer gets a 960x720
+     box (a whole pixel per column: the 976 the window fits doubled one
+     column in 60), at 1920x1080 the natural 1216x912 (1.27 is no near
+     whole number), at 1024x768 an 800x600 box drawn smooth (a pixelated
+     shrink drops columns).
 
 Headless fullscreen is approximate: the F/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
@@ -82,8 +88,10 @@ with sync_playwright() as p:
     })""")
     check("one click: scrim gone", s["hidden"])
     check("one click: audio unlocked", s["audio"] == "running", s["audio"])
-    check("one click: attract revealed (menu over demo)",
-          s["menu"] == 1 and s["walk"] == 0)
+    check("one click: attract revealed (the demo, no menu)",
+          s["menu"] == 0 and s["walk"] == 0)
+    check("the prompt says a key brings the menu",
+          "any key for the menu" in pg.evaluate("document.getElementById('play').textContent"))
     # Mode transitions never resurrect the scrim.
     pg.locator("#walkBtn").click(); time.sleep(0.3)
     pg.locator("#demoBtn").click(); time.sleep(0.3)
@@ -108,10 +116,13 @@ with sync_playwright() as p:
         audio: audioCtx ? audioCtx.state : 'none',
         menu: exp.menu_visible(),
     })""")
-    check("Enter starts: scrim gone + audio unlocked + attract menu up",
-          s["hidden"] and s["audio"] == "running" and s["menu"] == 1, str(s))
+    check("Enter starts: scrim gone + audio unlocked, the demo with no menu",
+          s["hidden"] and s["audio"] == "running" and s["menu"] == 0, str(s))
     check("no capture chip in attract mode",
           pg.evaluate("!lockChip.classList.contains('show')"))
+    # Then any key during the demo brings up the menu (Key_Event).
+    pg.keyboard.press("Enter")
+    check("a key during the demo brings up the menu", pg.evaluate("exp.menu_visible()") == 1)
 
     # (3a) Space/arrows over the attract MENU: swallowed, never scroll.
     # (Scroll checks compare the DELTA across the key presses — Playwright's
@@ -185,10 +196,10 @@ with sync_playwright() as p:
     pg.evaluate("""() => {
         window._real = exp; window._atk = [];
         exp = { ...window._real };
-        // Merged input path: Ctrl is K_CTRL(133) through the BINDINGS table
-        // (default.cfg: ctrl = +attack, rebindable) — spy key_down/key_up.
-        exp.key_down = k => { if (k === 133) window._atk.push(1); return window._real.key_down(k); };
-        exp.key_up   = k => { if (k === 133) window._atk.push(0); return window._real.key_up(k); };
+        // Merged input path: Ctrl is K_CTRL(133) through Key_Event and the
+        // BINDINGS table (default.cfg: ctrl = +attack, rebindable) — spy
+        // key_event's downs and ups.
+        exp.key_event = (k, d, c) => { if (k === 133) window._atk.push(d); return window._real.key_event(k, d, c); };
     }""")
     pg.keyboard.down("Control"); time.sleep(0.15); pg.keyboard.up("Control")
     atk = pg.evaluate("window._atk")
@@ -291,6 +302,22 @@ with sync_playwright() as p:
     else:
         print("SKIP fullscreen checks (headless refused requestFullscreen) — "
               "covered by the manual test script")
+
+    # (6) The canvas box (fitCanvas): the largest 4:3 box the window fits,
+    # snapped to a whole number of pixels per framebuffer column when it is
+    # at most 1/8 past one (no doubled column in the pixelated upscale),
+    # smoothed when it is narrower than the framebuffer (no dropped column).
+    box = lambda: pg.evaluate("""(() => { const c = document.getElementById('c');
+        return [parseFloat(c.style.width), parseFloat(c.style.height),
+                getComputedStyle(c).imageRendering, exp.width()]; })()""")
+    for (vw, vh), want in [((1440, 900), (960, 720, "pixelated")),
+                           ((1920, 1080), (1216, 912, "pixelated")),
+                           ((1024, 768), (800, 600, "auto"))]:
+        pg.set_viewport_size({"width": vw, "height": vh})
+        time.sleep(0.3)
+        b = box()
+        check(f"{vw}x{vh}: the {b[3]}-wide framebuffer in a {want[0]}x{want[1]} box, {want[2]}",
+              b[3] == 960 and (round(b[0]), round(b[1]), b[2]) == want, str(b))
 
     check("no console errors", not errs, str(errs[-5:]))
     br.close()

@@ -1,8 +1,9 @@
 #!/usr/bin/env -S uv run --with playwright --script
 """Verify the full menu is LIVE end-to-end in headless Chromium:
 
-  1. boot lands in the attract menu; arrow navigation queues real menu sounds
-     (the window.__menuSounds counter increments);
+  1. boot lands in the attract demo with no menu; a key brings the menu up;
+     arrow navigation queues real menu sounds (the window.__menuSounds
+     counter increments);
   2. every Main row responds: Single Player (Load list + the Save no-game
      gate), Multiplayer (screen opens, Esc returns), Options, Help, Quit (N
      backs out);
@@ -84,8 +85,12 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('overlay').click()")
     time.sleep(0.4)
 
-    # 1. Attract boot: the menu is open over the demo; arrows queue menu1.
-    check("attract boot lands in the menu", vis() == 1 and scr() == MAIN)
+    # 1. Attract boot: the demo plays with no menu (key_dest starts at
+    #    key_game); any key brings up the main menu (Key_Event during demo
+    #    playback); arrows queue menu1.
+    check("attract boot: the demo, no menu", vis() == 0)
+    key("Space")
+    check("a key brings up the main menu", vis() == 1 and scr() == MAIN)
     snd0 = pg.evaluate("window.__menuSounds")
     key("ArrowDown"); key("ArrowUp")
     time.sleep(0.4)
@@ -113,6 +118,14 @@ with sync_playwright() as p:
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_multi.png"))
     key("ArrowDown"); key("Enter")
     check("Multiplayer Enter responds in place (no net)", scr() == MULTI)
+    # Setup (row 2) is M_Menu_Setup_f: its own screen; type into the name and
+    # step a colour, then Escape back without accepting.
+    key("ArrowDown"); key("Enter")
+    check("Multiplayer > Setup opens", scr() == 11)
+    key("ArrowUp", 3); key("Backspace"); key("x"); key("ArrowDown"); key("ArrowRight")
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_setup.png"))
+    key("Escape")
+    check("Esc on Setup returns to Multiplayer", scr() == MULTI)
     key("Escape")
     check("Esc on Multiplayer returns to Main", scr() == MAIN)
 
@@ -123,6 +136,11 @@ with sync_playwright() as p:
     key("ArrowRight", 2); key("Escape")
     key("ArrowDown", 1); key("Enter")   # Main still on Help (row 3): Quit
     check("Quit raises the confirm prompt", scr() == QUIT)
+    # M_Quit_Key answers only y/Y and n/N/Esc: Enter and the console key do
+    # nothing (the console key over the menu is M_Keydown's, not a console).
+    key("Enter"); key("`")
+    check("Enter and ` leave the Quit prompt up",
+          scr() == QUIT and vis() == 1 and pg.evaluate("exp.console_visible()") == 0)
     key("n")
     check("N answers the Quit prompt", scr() == MAIN and vis() == 1)
 
@@ -190,6 +208,15 @@ with sync_playwright() as p:
     key("Escape")
     check("Escape cancels the grab on the Keys screen",
           pg.evaluate("exp.menu_bind_grabbing()") == 0 and scr() == KEYS)
+    # The mouse buttons are keys to bind (K_MOUSE1..3): the page forwards a
+    # click while the grab waits ("change weapon", row 1: one key, so the
+    # grab adds MOUSE2 to it without unbinding '/').
+    key("ArrowUp"); key("Enter")
+    pg.locator("#c").click(button="right")
+    time.sleep(0.1)
+    check("a right click is the key a grab binds (MOUSE2)",
+          pg.evaluate("exp.menu_bind_grabbing()") == 0 and scr() == KEYS and vis() == 1)
+    key("ArrowDown")
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_keys.png"))
     key("Escape")
     check("Esc on Keys returns to Options", scr() == OPTIONS)

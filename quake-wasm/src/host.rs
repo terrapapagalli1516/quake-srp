@@ -243,11 +243,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // pop the Help/Ordering menu (the shareware episode-end "order Quake"
         // pitch). The walk raised the flag during its step; the menu (owned
         // here, at the App level) opens on the Help screen for the next frame.
-        if let Some(wk) = a.walk.as_mut() {
-            if wk.pending_sellscreen {
-                wk.pending_sellscreen = false;
-                a.menu.open_help();
-            }
+        if a.walk.as_mut().is_some_and(|wk| std::mem::take(&mut wk.pending_sellscreen)) {
+            a.m_menu_help();
         }
 
         // The wasm_showfps extra (off by default): QuakeWorld draws it with the
@@ -292,15 +289,31 @@ pub extern "C" fn step(dt: f32) -> i32 {
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
-                    render::draw_menu(
-                        img,
-                        &a.menu,
-                        &a.menu_pics,
-                        a.conchars.as_ref(),
-                        a.clock,
-                        a.realtime,
-                        palette,
-                    );
+                    // M_Draw: over the console background while the console
+                    // is out (scr_con_current: forced up, disconnected),
+                    // else over the faded screen.
+                    if a.console.current() > 0.0 {
+                        render::draw_menu_over_console(
+                            img,
+                            &a.menu,
+                            &a.menu_pics,
+                            a.conchars.as_ref(),
+                            a.conback.as_ref(),
+                            a.clock,
+                            a.realtime,
+                            palette,
+                        );
+                    } else {
+                        render::draw_menu(
+                            img,
+                            &a.menu,
+                            &a.menu_pics,
+                            a.conchars.as_ref(),
+                            a.clock,
+                            a.realtime,
+                            palette,
+                        );
+                    }
                 }
             }
         }

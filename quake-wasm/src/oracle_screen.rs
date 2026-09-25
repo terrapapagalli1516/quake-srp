@@ -24,7 +24,7 @@
 //! | `impulse N` | queue an impulse with the next move |
 //! | `console` | `console_toggle` |
 //! | `type TEXT` | type TEXT into the console (no Enter: `key ENTER` submits it) |
-//! | `key NAME` | a key press routed as `web/index.html` routes it (ESCAPE, ENTER, UPARROW, ...) |
+//! | `key NAME` | a key press, down and up, through `Key_Event` (`key_event`) as the C's `oracle_key` (ESCAPE, ENTER, UPARROW, a, ...) |
 //! | `showscores 0\|1` | hold / release Tab (`+showscores`) |
 //! | `centerprint TEXT` | a QuakeC centerprint (`\n` = newline) |
 //! | `print TEXT` | a QuakeC print (`\n` = newline): the notify lines and the console |
@@ -39,14 +39,10 @@ use std::cell::Cell;
 use quake_rs::render::Image;
 
 use crate::app::{boot, ensure_app, APP};
-use crate::console::{console_char, console_enter, console_toggle};
+use crate::console::{console_char, console_toggle};
 use crate::host::step;
 use crate::host_cmd::execute_console_command;
-use crate::input::{key_down, key_up};
-use crate::menu::{
-    menu_cancel, menu_down, menu_left, menu_quit_no, menu_quit_yes, menu_right, menu_select,
-    menu_up,
-};
+use crate::input::key_event;
 use crate::vid::set_resolution;
 
 thread_local! {
@@ -64,67 +60,38 @@ fn blank_view(mut view: Image, palette: &[[u8; 3]; 256]) -> Image {
     view
 }
 
-/// keys.c's key names for the keys a script presses.
+/// keys.c's key names (`Key_StringToKeynum`) for the keys a script presses:
+/// a single character is itself, lower case.
 fn keynum(name: &str) -> Option<i32> {
-    Some(match name.to_ascii_uppercase().as_str() {
-        "TAB" => 9,
-        "ENTER" => 13,
-        "ESCAPE" => 27,
-        "SPACE" => 32,
-        "BACKSPACE" => 127,
-        "UPARROW" => 128,
-        "DOWNARROW" => 129,
-        "LEFTARROW" => 130,
-        "RIGHTARROW" => 131,
-        "PAUSE" => 255,
-        s if s.len() == 1 => s.to_ascii_lowercase().as_bytes()[0] as i32,
+    use quake_rs::keys::*;
+    Some(i32::from(match name.to_ascii_uppercase().as_str() {
+        "TAB" => K_TAB,
+        "ENTER" => K_ENTER,
+        "ESCAPE" => K_ESCAPE,
+        "SPACE" => K_SPACE,
+        "BACKSPACE" => K_BACKSPACE,
+        "UPARROW" => K_UPARROW,
+        "DOWNARROW" => K_DOWNARROW,
+        "LEFTARROW" => K_LEFTARROW,
+        "RIGHTARROW" => K_RIGHTARROW,
+        "SHIFT" => K_SHIFT,
+        "DEL" => K_DEL,
+        "PGUP" => K_PGUP,
+        "PGDN" => K_PGDN,
+        "HOME" => K_HOME,
+        "END" => K_END,
+        "PAUSE" => K_PAUSE,
+        s if s.len() == 1 => s.to_ascii_lowercase().as_bytes()[0],
         _ => return None,
-    })
+    }))
 }
 
-/// A key press as `web/index.html` routes it: to the console while it is
-/// down, else to the menu's exports while the menu is up (Escape opens it),
-/// else through the bindings.
+/// A key press, down and up, through `Key_Event` — what the C's
+/// `oracle_key` does.
 fn press(name: &str) {
-    let (console, menu) = APP.with(|c| {
-        let b = c.borrow();
-        let a = b.as_ref().expect("the app is booted");
-        (a.console.open, a.menu.visible)
-    });
-    let upper = name.to_ascii_uppercase();
-    if console {
-        match upper.as_str() {
-            "ESCAPE" => console_toggle(),
-            "ENTER" => console_enter(),
-            _ => {
-                if let Some(k) = keynum(name).filter(|k| (32..127).contains(k)) {
-                    console_char(k as u32);
-                }
-            }
-        }
-        return;
-    }
-    if upper == "ESCAPE" {
-        menu_cancel();
-        return;
-    }
-    if menu {
-        match upper.as_str() {
-            "UPARROW" => menu_up(),
-            "DOWNARROW" => menu_down(),
-            "LEFTARROW" => menu_left(),
-            "RIGHTARROW" => menu_right(),
-            "ENTER" => menu_select(),
-            "Y" => menu_quit_yes(),
-            "N" => menu_quit_no(),
-            _ => {}
-        }
-        return;
-    }
-    if let Some(k) = keynum(name) {
-        key_down(k);
-        key_up(k);
-    }
+    let k = keynum(name).unwrap_or_else(|| panic!("unknown key {name}"));
+    key_event(k, 1, 0);
+    key_event(k, 0, 0);
 }
 
 fn unescape(s: &str) -> String {

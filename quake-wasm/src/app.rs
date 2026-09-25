@@ -49,10 +49,10 @@ pub(crate) struct App {
     /// 0 = walk, 1 = demo.
     pub(crate) mode: u8,
     /// The main-menu engine. Lives at the App level (mode-independent) so it can
-    /// overlay WHATEVER is playing — the walk OR the attract demo. Quake boots
-    /// INTO the menu over the playing attract demo; while `menu.visible`,
-    /// gameplay input is gated (the world still idles) and the `step` dispatcher
-    /// overlays `draw_menu` on the finished frame.
+    /// overlay WHATEVER is playing — the walk OR the attract demo (any key
+    /// during demo playback brings it up, as in Quake); while `menu.visible`,
+    /// gameplay input is gated (single player pauses) and the `step`
+    /// dispatcher overlays `draw_menu` on the finished frame.
     pub(crate) menu: Menu,
     /// The menu's plaque/title/list/cursor pics, loaded once on first boot from
     /// the pak (they are mode-independent). `None` until `ensure_menu_assets`
@@ -122,6 +122,29 @@ pub(crate) struct App {
     /// `gfx/palette.lmp`, for what is drawn with no level loaded (the
     /// disconnected screen's console and menu). Loaded with the menu assets.
     pub(crate) palette: Option<[[u8; 3]; 256]>,
+    /// keys.c `key_repeats[256]`: key downs since each key's last up; a
+    /// second down is the keyboard's autorepeat, which `Key_Event` ignores
+    /// (Backspace and Pause aside).
+    pub(crate) key_repeats: [u8; 256],
+    /// keys.c `shift_down`: Shift is held, so a key types its `keyshift[]`.
+    pub(crate) shift_down: bool,
+    /// menu.c `m_save_demonum`: `cls.demonum` as the menu came up from
+    /// outside it (`M_Menu_Main_f` switches the demo loop off while the menu
+    /// is up; `M_Main_Key`'s Escape puts it back). 0 at start, a C static.
+    pub(crate) m_save_demonum: i32,
+}
+
+/// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
+/// and the console's open flags ([`App::key_dest`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyDest {
+    /// `key_game`: keys go to their bindings (with nothing playing, the
+    /// console keys type into the forced-up console).
+    Game,
+    /// `key_console`: the console is down.
+    Console,
+    /// `key_menu`: the menu is up.
+    Menu,
 }
 
 impl App {
@@ -174,6 +197,56 @@ impl App {
         self.console.open || (self.disconnected && !self.menu.visible)
     }
 
+    /// `key_dest`: the console while it is down, else the menu while it is
+    /// up, else the game. (The two are never both open by a key: the console
+    /// key goes to the menu's own keys while the menu is up.)
+    pub(crate) fn key_dest(&self) -> KeyDest {
+        if self.console.open {
+            KeyDest::Console
+        } else if self.menu.visible {
+            KeyDest::Menu
+        } else {
+            KeyDest::Game
+        }
+    }
+
+    /// `M_Menu_Main_f` (menu.c): the main menu opens on its kept cursor
+    /// (`key_dest = key_menu`), and — coming from outside the menu — the demo
+    /// loop stops while it is up (`m_save_demonum = cls.demonum; cls.demonum
+    /// = -1`): the demo playing goes on to its end, and then the client
+    /// disconnects instead of playing the next.
+    pub(crate) fn m_menu_main(&mut self) {
+        if !self.menu.visible {
+            self.m_save_demonum = self.cls.demonum;
+            self.cls.demonum = -1;
+        }
+        self.console.open = false;
+        self.menu.open();
+    }
+
+    /// `M_Menu_Help_f` (menu.c; the `help` command and `svc_sellscreen`):
+    /// the Help/Ordering screen on its first page, the menu taking the
+    /// keyboard (`key_dest = key_menu`). The demo loop is untouched.
+    pub(crate) fn m_menu_help(&mut self) {
+        self.console.open = false;
+        self.menu.open_help();
+    }
+
+    /// `M_ToggleMenu_f` (menu.c), what Escape does outside the menu and the
+    /// `togglemenu` command: over the game the main menu opens; with the
+    /// console down, the console goes up (`Con_ToggleConsole_f`); within the
+    /// menu a submenu returns to Main and Main closes (without `M_Main_Key`'s
+    /// demo-loop resume).
+    pub(crate) fn m_toggle_menu(&mut self) {
+        match self.key_dest() {
+            KeyDest::Menu => {
+                let _ = self.menu.toggle();
+            }
+            KeyDest::Console => self.toggle_console(),
+            KeyDest::Game => self.m_menu_main(),
+        }
+    }
+
     /// `cls.demoplayback`: a demo is the active mode.
     pub(crate) fn demoplayback(&self) -> bool {
         self.mode == 1 && self.demo.is_some()
@@ -211,12 +284,20 @@ impl App {
         mode.or(if self.disconnected { self.palette.as_ref() } else { None })
     }
 
-    /// `Con_ToggleConsole_f` (console.c): the console goes down or up, the
-    /// typing is cleared on the way up, and `con_times` is zeroed — nothing
-    /// printed so far shows as a notify line afterwards. The `~` key and
-    /// Options > "Go to console" (M_Options_Key) both run it.
+    /// `Con_ToggleConsole_f` (console.c): the console goes down, or up — the
+    /// typing cleared — or, with nothing playing (disconnected), the main
+    /// menu comes up in its place (there is no game to go back to); and
+    /// `con_times` is zeroed — nothing printed so far shows as a notify line
+    /// afterwards. The console key's `toggleconsole` binding and Options >
+    /// "Go to console" (M_Options_Key) run it.
     pub(crate) fn toggle_console(&mut self) {
-        self.console.toggle();
+        if self.console.open && self.disconnected {
+            self.console.open = false;
+            self.m_menu_main();
+            let _ = self.console.take_unnotified();
+        } else {
+            self.console.toggle();
+        }
         if let Some(w) = self.walk.as_mut() {
             w.notify.clear();
         }
@@ -326,6 +407,8 @@ fn load_menu_pics(
         menudot,
         help,
         textbox: std::array::from_fn(|i| lmp(quake_rs::menu::TEXTBOX_PICS[i])),
+        bigbox: lmp("gfx/bigbox.lmp"),
+        menuplyr: lmp("gfx/menuplyr.lmp"),
     };
 
     // conchars is a raw 128x128 byte block (TYP_MIPTEX, no QPIC header) inside
@@ -421,6 +504,9 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 cls: Cls::default(),
                 disconnected: false,
                 palette: None,
+                key_repeats: [0; 256],
+                shift_down: false,
+                m_save_demonum: 0,
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
@@ -457,7 +543,7 @@ pub extern "C" fn boot() -> i32 {
             // cvars/keybindings (they're host state), so re-booting must not
             // wipe them.
             a.menu.reset_boot();
-            a.menu.open();
+            a.m_menu_main();
             // PRESERVE the player's chosen resolution across the re-boot: keep the
             // current framebuffer size (the source of truth) and point the fresh
             // menu's current video mode at it, instead of snapping back to DEFAULT.
@@ -507,12 +593,12 @@ fn start_attract_loop(a: &mut App) -> bool {
     a.demoplayback()
 }
 
-/// Boot into the ATTRACT loop: start recorded-demo playback (demo1.dem) with the
-/// main menu OPEN over it — exactly how Quake boots (the menu draws on top of the
-/// playing demo, the "attract" screen). The page calls this on load instead of
-/// [`boot`]. Returns 1 when the demo built (menu over the playing demo), or 0 when
-/// it could not — in which case we fall back to [`boot`] so the user still lands
-/// on a menu over *something* (e1m1) rather than a blank screen.
+/// Boot into the ATTRACT loop, as Quake starts: quake.rc's `startdemos demo1
+/// demo2 demo3` plays with no menu (`key_dest` starts at `key_game`), and any
+/// key brings the main menu up (`Key_Event` during demo playback). The page
+/// calls this on load instead of [`boot`]. Returns 1 when the demo built, or 0
+/// when it could not — in which case we fall back to [`boot`] so the user still
+/// lands on a menu over *something* (e1m1) rather than a blank screen.
 #[no_mangle]
 pub extern "C" fn boot_attract() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode
@@ -524,15 +610,13 @@ pub extern "C" fn boot_attract() -> i32 {
         a.ensure_menu_assets();
         built = start_attract_loop(a);
         if built {
-            // The menu overlays the PLAYING attract demo. Navigation-only reset
-            // (options/bindings survive a re-entry to the attract loop). PRESERVE
-            // the chosen resolution (keep the live framebuffer) and sync the
-            // menu's current video mode to it. On the very first load the
-            // framebuffer is at DEFAULT; the page then restores any saved
-            // resolution over it.
-            // The page's load is the program start: every cursor 0.
+            // The page's load is the program start: the menu closed, every
+            // cursor 0 (navigation only: options/bindings survive a re-entry
+            // to the attract loop). PRESERVE the chosen resolution (keep the
+            // live framebuffer) and sync the menu's current video mode to it.
+            // On the very first load the framebuffer is at DEFAULT; the page
+            // then restores any saved resolution over it.
             a.menu.reset_boot();
-            a.menu.open();
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
     });
@@ -732,40 +816,126 @@ mod tests {
         }
         assert_eq!(maps[0], maps[3], "demo1 again after demo3");
         assert!(maps[0] != maps[1] && maps[1] != maps[2], "three different recordings: {maps:?}");
-        assert_eq!(menu_visible(), 1, "the menu stays up over the loop");
+        assert_eq!(menu_visible(), 0, "no menu over the loop");
     }
 
+    /// Final review (UI): Quake starts with `key_dest = key_game` — the
+    /// attract demo plays with no menu — and during demo playback a console
+    /// key (Key_Event: `cls.demoplayback && consolekeys[key] && key_dest ==
+    /// key_game`) brings the main menu up; Escape too (M_ToggleMenu_f). The
+    /// mouse buttons and the F-keys are no console keys: they don't.
     #[test]
-    fn boot_attract_starts_demo_with_menu_open() {
-        // boot_attract is how the page boots: the recorded demo plays with the
-        // main menu OPEN over it (Quake's attract loop). The embedded pak ships
-        // demo1.dem, so this builds the demo (returns 1) and lands in demo mode
-        // with the menu visible.
+    fn boot_attract_plays_the_demo_and_a_key_brings_up_the_menu() {
+        use quake_rs::keys::{K_ENTER, K_F1, K_MOUSE1};
         assert_eq!(boot_attract(), 1, "attract built the demo from the embedded pak");
         let (mode, has_walk, has_demo, vis) = app_state();
         assert_eq!(mode, 1, "attract boots into demo mode");
         assert!(has_demo, "the demo was built");
         assert!(!has_walk, "no walk is built for the attract demo");
-        assert!(vis, "the menu is open over the playing demo");
-        assert_eq!(menu_visible(), 1, "menu_visible reflects the App-level menu");
-
-        // Stepping advances the demo (its frame index moves) WHILE the menu stays
-        // open over it — the menu does not freeze the demo behind it.
-        let idx_before = APP.with(|c| c.borrow().as_ref().unwrap().demo.as_ref().unwrap().idx);
-        for _ in 0..40 {
+        assert!(!vis, "no menu: key_dest starts at key_game");
+        let idx = || APP.with(|c| c.borrow().as_ref().unwrap().demo.as_ref().unwrap().idx);
+        let idx_before = idx();
+        for _ in 0..20 {
             step(0.05);
         }
-        let idx_after = APP.with(|c| c.borrow().as_ref().unwrap().demo.as_ref().unwrap().idx);
-        assert_ne!(idx_before, idx_after, "the attract demo keeps playing behind the menu");
+        assert_ne!(idx_before, idx(), "the demo plays");
+        for k in [K_MOUSE1, K_F1 + 4] {
+            crate::input::press(k);
+            assert_eq!(menu_visible(), 0, "key {k} is no console key");
+        }
+        for k in [b'x', b' ', K_ENTER, b'1'] {
+            crate::input::press(k);
+            assert_eq!(menu_visible(), 1, "key {k} brings up the menu");
+            assert_eq!(menu_screen(), render::MenuScreen::Main);
+            menu_cancel();
+            assert_eq!(menu_visible(), 0);
+        }
+        menu_cancel();
+        assert_eq!(menu_visible(), 1, "Escape too");
+        // The demo goes on playing behind the menu.
+        let idx_before = idx();
+        for _ in 0..20 {
+            step(0.05);
+        }
+        assert_ne!(idx_before, idx(), "the attract demo keeps playing behind the menu");
         assert_eq!(menu_visible(), 1, "the menu remains open over the demo");
+    }
+
+    /// M_Menu_Main_f: `m_save_demonum = cls.demonum; cls.demonum = -1` — the
+    /// menu stops the attract loop: the demo playing ends in CL_Disconnect
+    /// (the console covers the screen, the menu over it, drawn over the
+    /// console background as M_Draw does with `scr_con_current`), and
+    /// M_Main_Key's Escape puts the loop back and plays its next demo. Closed
+    /// before the demo ends, the loop just goes on.
+    #[test]
+    fn the_menu_stops_the_attract_loop_until_escape() {
+        assert_eq!(boot_attract(), 1);
+        let demonum = || APP.with(|c| c.borrow().as_ref().unwrap().cls.demonum);
+        let to_end = || {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let d = b.as_mut().unwrap().demo.as_mut().unwrap();
+                d.idx = d.demo.frames.len() - 1;
+            })
+        };
+        assert_eq!(demonum(), 1, "demo1 plays, demos[1] next");
+        crate::input::press(b'm');
+        assert_eq!(demonum(), -1, "the menu switched the loop off");
+        // Closed again before the demo ends: the loop is back, untouched.
+        menu_cancel();
+        assert_eq!((menu_visible(), demonum()), (0, 1));
+        // Up again, and the demo ends under it: disconnected, not demo2.
+        crate::input::press(b'm');
+        to_end();
+        step(0.05);
+        let (mode, has_walk, has_demo, vis) = app_state();
+        assert_eq!((mode, has_walk, has_demo, vis), (1, false, false, true), "disconnected, menu up");
+        let (disconnected, console) = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.disconnected, a.console.current())
+        });
+        assert!(disconnected);
+        let h = APP.with(|c| c.borrow().as_ref().unwrap().render_h) as f32;
+        assert_eq!(console, h, "con_forcedup behind the menu");
+        // M_Draw with scr_con_current: the console background under the menu
+        // at full height, not the faded console text.
+        let fb = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let conback_only = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            let mut img = render::Image::new(a.render_w, a.render_h, [0, 0, 0]);
+            let pal = a.palette.as_ref().unwrap();
+            quake_rs::console::draw_console_background_full(&mut img, a.conback.as_ref(), a.conchars.as_ref(), pal);
+            img.rgb
+        });
+        let w = APP.with(|c| c.borrow().as_ref().unwrap().render_w);
+        let bottom = (h as usize - 1) * w;
+        assert!(
+            (0..w).all(|x| fb[(bottom + x) * 4..(bottom + x) * 4 + 3] == conback_only[bottom + x]),
+            "the bottom row is the plain console background"
+        );
+        // Escape from Main: the loop back, its next demo plays.
+        menu_cancel();
+        assert_eq!(menu_visible(), 0);
+        let (map, n) = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.demo.as_ref().and_then(|d| d.demo.map_name().map(str::to_string)), a.cls.demonum)
+        });
+        assert!(map.is_some(), "a demo plays again");
+        assert_eq!(n, 2, "demos[1] (demo2) played");
     }
 
     #[test]
     fn boot_attract_new_game_switches_to_walk_with_menu_closed() {
-        // From the attract loop, Single Player > New Game starts a fresh walk on
-        // the start hub and closes the menu. Drive the same key path the page uses.
+        // From the attract loop, a key brings up the menu and Single Player >
+        // New Game starts a fresh walk on the start hub and closes the menu.
+        // Drive the same key path the page uses.
         assert_eq!(boot_attract(), 1);
-        assert_eq!(app_state(), (1, false, true, true), "attract: demo mode, menu open");
+        assert_eq!(app_state(), (1, false, true, false), "attract: demo mode, no menu");
+        crate::input::press(b'a');
+        assert_eq!(app_state(), (1, false, true, true), "a key: the menu");
 
         // Main screen cursor 0 = Single Player. Enter the SP submenu, then New Game
         // (its first item) is the default cursor 0 -> select.
@@ -803,6 +973,7 @@ mod tests {
 
         // Menu-driven New Game (Main > Single Player > New Game), the path the
         // page only sees as two opaque menu_select() calls.
+        menu_cancel(); // the menu over the demo
         menu_select();
         menu_select();
         assert_eq!(in_walk_mode(), 1, "New Game from the attract menu enters walk mode");
@@ -825,6 +996,7 @@ mod tests {
         for _ in 0..10 {
             step(0.05);
         }
+        menu_cancel(); // the menu over the demo
         let differ = APP.with(|c| {
             let mut b = c.borrow_mut();
             let a = b.as_mut().unwrap();

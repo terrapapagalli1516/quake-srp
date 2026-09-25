@@ -1,4 +1,5 @@
-//! The menus: main, single player, load/save, options, keys, video, help, quit.
+//! The menus: main, single player, load/save, multiplayer and its setup,
+//! options, keys, video, help, quit.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/menu.c` — the `M_*_Draw` / `M_*_Key` pairs, `M_Print`,
@@ -8,7 +9,10 @@ use crate::draw::{
     blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, screen_2d,
     MENU_VIRT_W,
 };
-use crate::keys::{default_bindings, keynum_to_string, K_ESCAPE};
+use crate::keys::{
+    default_bindings, keynum_to_string, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE,
+    K_LEFTARROW, K_RIGHTARROW, K_UPARROW,
+};
 use crate::render::Image;
 use crate::screen::{center_string_top, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 
@@ -152,7 +156,8 @@ pub struct WebExtra {
     /// Its row label, right-justified to the Options label column like id's.
     pub label: &'static str,
     /// The two bronze help lines shown under the list while its row is
-    /// highlighted (a third names the console variable).
+    /// highlighted (a third names the console variable), at most
+    /// [`EXTRAS_NOTE_COLS`] characters so they clear the plaque.
     pub help: [&'static str; 2],
     /// Its one-line summary in the console's `help`.
     pub summary: &'static str,
@@ -180,14 +185,14 @@ pub const WEB_EXTRAS: [WebExtra; 4] = [
         extra: Extra::ExactPersp,
         cvar: "wasm_exactpersp",
         label: "     Exact perspective",
-        help: ["Perspective exact at every pixel,", "not id's 16-pixel spans"],
+        help: ["Perspective exact at each pixel,", "not id's 16-pixel spans"],
         summary: "exact persp.",
     },
     WebExtra {
         extra: Extra::Scaled2d,
         cvar: "wasm_scaled2d",
         label: "      Scaled 2-D layer",
-        help: ["Status bar, menus and text blown", "up from 320x200 to fill the screen"],
+        help: ["Status bar, menus and text blown", "up from 320x200 to full screen"],
         summary: "scaled 2-D layer",
     },
 ];
@@ -197,6 +202,22 @@ pub const WEB_EXTRAS: [WebExtra; 4] = [
 /// no net drivers, Enter on Join/New Game does nothing and the screen shows the
 /// "No Communications Available" line (`M_MultiPlayer_Draw`).
 const MULTIPLAYER_ITEMS: usize = 3;
+
+/// `NUM_SETUP_CMDS` (menu.c): Hostname, Your name, Shirt color, Pants color,
+/// Accept Changes; `setup_cursor_table` their rows' y.
+const NUM_SETUP_CMDS: usize = 5;
+const SETUP_CURSOR_TABLE: [f32; NUM_SETUP_CMDS] = [40.0, 56.0, 80.0, 104.0, 140.0];
+/// `setup_hostname` / `setup_myname` are `char[16]`: 15 characters.
+const SETUP_NAME_MAX: usize = 15;
+/// `TOP_RANGE` / `BOTTOM_RANGE` (render.h): the player skin's shirt and pants
+/// colour rows, 16 palette entries each, which `M_BuildTranslationTable`
+/// replaces.
+const TOP_RANGE: usize = 16;
+const BOTTOM_RANGE: usize = 96;
+/// `cl_name`'s default (cl_main.c `_cl_name "player"`).
+const CL_NAME_DEFAULT: &str = "player";
+/// `hostname`'s default (net_main.c `"UNNAMED"`).
+const HOSTNAME_DEFAULT: &str = "UNNAMED";
 
 /// `MAX_SAVEGAMES` (quakedef.h): the Load/Save menus list 12 slots.
 pub const MAX_SAVEGAMES: usize = 12;
@@ -270,6 +291,10 @@ pub const BIND_SHOWSCORES: usize = NUM_BINDNAMES + 2;
 pub const BIND_IMPULSE_0: usize = NUM_BINDNAMES + 3;
 /// `bind PAUSE "pause"` (default.cfg): `Host_Pause_f`.
 pub const BIND_PAUSE: usize = BIND_IMPULSE_0 + 9;
+/// `` bind ` "toggleconsole" `` and `bind ~ "toggleconsole"` (default.cfg):
+/// `Con_ToggleConsole_f`. A binding like any other, so the console key opens
+/// the console only where `Key_Event` runs bindings — not over the menu.
+pub const BIND_TOGGLECONSOLE: usize = BIND_PAUSE + 1;
 
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A
@@ -400,6 +425,10 @@ pub enum MenuScreen {
     /// net drivers — Join/New Game don't respond and the screen shows
     /// "No Communications Available".
     Multiplayer,
+    /// Multiplayer > Setup (`m_setup`): the host name, the player's name and
+    /// shirt/pants colours over the translated player preview, and Accept
+    /// Changes (`M_Setup_Draw` / `M_Setup_Key`).
+    Setup,
     /// The options submenu (`m_options`): the full 13-row layout
     /// ([`OPTIONS_ITEMS`]). Sliders + checkboxes are adjusted with left/right.
     Options,
@@ -434,6 +463,7 @@ impl MenuScreen {
             MenuScreen::SinglePlayer => SINGLEPLAYER_ITEMS,
             MenuScreen::Load | MenuScreen::Save => MAX_SAVEGAMES,
             MenuScreen::Multiplayer => MULTIPLAYER_ITEMS,
+            MenuScreen::Setup => NUM_SETUP_CMDS,
             MenuScreen::Options => OPTIONS_ITEMS,
             MenuScreen::Keys => NUM_BINDNAMES,
             MenuScreen::Video => RESOLUTION_PRESETS.len(),
@@ -500,8 +530,14 @@ pub enum MenuAction {
     NewGame,
     /// Backed out of a submenu to the main screen (Escape on a submenu).
     Back,
-    /// The menu just closed (Escape on the main screen, or confirmed Quit).
+    /// The menu just closed (a confirmed Quit, or "No" to a Quit prompt
+    /// raised over the game).
     Closed,
+    /// `M_Main_Key`'s Escape: the menu closed from the main screen. The host
+    /// puts the demo loop back (`cls.demonum = m_save_demonum`, which
+    /// `M_Menu_Main_f` switched off) and, with nothing playing, starts its
+    /// next demo (`CL_NextDemo`).
+    Resume,
     /// Options "Go to console": the host should close the menu and open the
     /// drop-down console (`m_state = m_none; Con_ToggleConsole_f()`).
     OpenConsole,
@@ -520,7 +556,7 @@ pub enum MenuAction {
 /// from Options lands on "Options" in the main menu, Load after a load opens
 /// on the slot just loaded. Load and Save share `load_cursor`. The Help and
 /// Quit screens have none. All are 0 at program start ([`Menu::reset_boot`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Cursors {
     /// `m_main_cursor`.
     main: usize,
@@ -542,6 +578,38 @@ struct Cursors {
     video: Option<usize>,
     /// PORT SCREEN: the Web extras page's, kept like `options_cursor`.
     extras: usize,
+    /// `setup_cursor`, which starts on Accept Changes (`int setup_cursor =
+    /// 4;`).
+    setup: usize,
+}
+
+impl Default for Cursors {
+    fn default() -> Self {
+        Cursors {
+            main: 0,
+            singleplayer: 0,
+            load: 0,
+            multiplayer: 0,
+            options: 0,
+            keys: 0,
+            video: None,
+            extras: 0,
+            setup: 4,
+        }
+    }
+}
+
+/// The Setup screen's edit state (menu.c `setup_hostname`, `setup_myname`,
+/// `setup_top`/`setup_bottom` and the `setup_old*` they started from), which
+/// `M_Menu_Setup_f` fills from the cvars each time the screen opens.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Setup {
+    hostname: String,
+    myname: String,
+    top: i32,
+    bottom: i32,
+    oldtop: i32,
+    oldbottom: i32,
 }
 
 /// The keyboard-driven main-menu engine: the visible flag, the current screen,
@@ -644,6 +712,15 @@ pub struct Menu {
     /// default. Like the Options cvars they survive navigation resets; unlike
     /// them no default.cfg line resets them.
     extras: Extras,
+    /// The Setup screen's fields while it is up.
+    setup: Setup,
+    /// The `_cl_name` cvar ("player"): the name Setup and the `name` command
+    /// set.
+    cl_name: String,
+    /// The `hostname` cvar ("UNNAMED").
+    hostname: String,
+    /// The `_cl_color` cvar: shirt * 16 + pants, each 0..=13.
+    cl_color: i32,
 }
 
 impl Default for Menu {
@@ -684,6 +761,10 @@ impl Menu {
             server_active: false,
             new_game_confirm: false,
             extras: Extras::default(),
+            setup: Setup::default(),
+            cl_name: CL_NAME_DEFAULT.to_string(),
+            hostname: HOSTNAME_DEFAULT.to_string(),
+            cl_color: 0,
         }
     }
 
@@ -763,6 +844,7 @@ impl Menu {
             MenuScreen::SinglePlayer => c.singleplayer,
             MenuScreen::Load | MenuScreen::Save => c.load,
             MenuScreen::Multiplayer => c.multiplayer,
+            MenuScreen::Setup => c.setup,
             MenuScreen::Options => c.options,
             MenuScreen::Keys => c.keys,
             MenuScreen::Video => c.video.unwrap_or(self.res_preset),
@@ -779,6 +861,7 @@ impl Menu {
             MenuScreen::SinglePlayer => c.singleplayer = i,
             MenuScreen::Load | MenuScreen::Save => c.load = i,
             MenuScreen::Multiplayer => c.multiplayer = i,
+            MenuScreen::Setup => c.setup = i,
             MenuScreen::Options => c.options = i,
             MenuScreen::Keys => c.keys = i,
             MenuScreen::Video => c.video = Some(i),
@@ -934,8 +1017,8 @@ impl Menu {
     /// * Video > row: apply the highlighted preset ([`MenuAction::ResolutionChanged`]).
     /// * Options > Web extras (port row): the Extras screen; Extras > row:
     ///   toggle that extra (menu2 + menu3, like an Options checkbox).
-    /// * Quit > Enter == "Yes": close the menu ([`MenuAction::Closed`]).
-    /// * Help: Enter is inert ([`MenuAction::None`]).
+    /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
+    ///   y/Y answers the prompt, [`Menu::keydown`]).
     pub fn select(&mut self) -> MenuAction {
         if self.new_game_confirm {
             return MenuAction::None; // SCR_ModalMessage ignores Enter.
@@ -1036,11 +1119,15 @@ impl Menu {
             MenuScreen::Multiplayer => {
                 // M_MultiPlayer_Key K_ENTER: m_entersound = true; items 0/1
                 // only open the net menu when a driver is available (none here,
-                // like a C build with no network) and item 2 (Setup) is not
-                // ported — so every item responds with the sound alone.
+                // like a C build with no network), so they respond with the
+                // sound alone; item 2 is M_Menu_Setup_f.
                 self.snd(MenuSound::Menu2);
+                if self.cursor() == 2 {
+                    self.open_setup();
+                }
                 MenuAction::None
             }
+            MenuScreen::Setup => self.setup_key(K_ENTER, None),
             MenuScreen::Options => match self.cursor() {
                 ROW_CONTROLS => {
                     // M_Menu_Keys_f
@@ -1112,15 +1199,207 @@ impl Menu {
                 self.adjust(1);
                 MenuAction::None
             }
-            MenuScreen::Help => MenuAction::None,
-            MenuScreen::Quit => {
-                // Enter == "Yes": Host_Quit_f. Here that closes the menu (quit to
-                // the attract loop). (The C's M_Quit_Key ignores Enter — only
-                // y/Y quits — but this port has always accepted Enter as Yes.)
-                self.close();
-                self.screen = MenuScreen::Main;
-                MenuAction::Closed
+            // M_Help_Key ignores Enter; so does M_Quit_Key, where only y/Y
+            // quit and n/N/Escape answer no.
+            MenuScreen::Help | MenuScreen::Quit => MenuAction::None,
+        }
+    }
+
+    /// `M_Keydown` (menu.c): a key press while the menu has the keyboard
+    /// (`key_dest == key_menu`), handed to the showing screen's `M_*_Key`.
+    /// `key` is the key number with Shift applied as `Key_Event` applies it
+    /// (`keyshift[]`). `text` is the character the key types, for the Setup
+    /// screen's name fields: the host passes the one its keyboard layout
+    /// produced, or `key` itself when printable (`M_Setup_Key`'s `k >= 32 &&
+    /// k <= 127`); `None` types nothing.
+    ///
+    /// Each screen's switch is id's: Escape backs out, the arrows move the
+    /// cursor (Load/Save/Keys pair LEFT with UP), Enter selects, Backspace and
+    /// Del unbind on Customize controls; while a key is being bound every key
+    /// goes to the grab (`M_Keys_Key`: Escape cancels, `` ` `` is refused); the
+    /// Quit prompt answers only y/Y (quit) and n/N/Escape (back); every other
+    /// key is ignored. (New Game's "Are you sure?" is `SCR_ModalMessage`,
+    /// which takes the keys before `Key_Event` routes them: [`Menu::modal_key`].)
+    pub fn keydown(&mut self, key: u8, text: Option<u8>) -> MenuAction {
+        if !self.visible {
+            return MenuAction::None; // m_none
+        }
+        if self.screen == MenuScreen::Keys && self.bind_grab {
+            self.bind_key(key);
+            return MenuAction::None;
+        }
+        if self.screen == MenuScreen::Setup {
+            return self.setup_key(key, text);
+        }
+        if self.screen == MenuScreen::Quit {
+            return match key {
+                K_ESCAPE | b'n' | b'N' => self.quit_back(),
+                b'y' | b'Y' => self.quit_yes(),
+                _ => MenuAction::None,
+            };
+        }
+        match key {
+            K_ESCAPE => self.cancel(),
+            K_UPARROW => {
+                self.move_cursor(-1);
+                MenuAction::None
             }
+            K_DOWNARROW => {
+                self.move_cursor(1);
+                MenuAction::None
+            }
+            K_LEFTARROW => {
+                self.adjust(-1);
+                MenuAction::None
+            }
+            K_RIGHTARROW => {
+                self.adjust(1);
+                MenuAction::None
+            }
+            K_ENTER => self.select(),
+            K_BACKSPACE | K_DEL => {
+                self.keys_backspace();
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// `M_Menu_Setup_f` (menu.c): the Setup screen, its fields filled from
+    /// the cvars (`_cl_name`, `hostname`, `_cl_color`), on its kept cursor.
+    fn open_setup(&mut self) {
+        let (top, bottom) = (self.cl_color >> 4, self.cl_color & 15);
+        self.setup = Setup {
+            hostname: self.hostname.clone(),
+            myname: self.cl_name.clone(),
+            top,
+            bottom,
+            oldtop: top,
+            oldbottom: bottom,
+        };
+        self.screen = MenuScreen::Setup;
+    }
+
+    /// `M_Setup_Key` (menu.c): Escape back to Multiplayer; Up/Down move the
+    /// cursor (menu1); Left/Right (menu3) and Enter step the shirt and pants
+    /// colours, wrapping 0..=13, on their rows; Enter on Accept Changes sets
+    /// what changed — `name` (`_cl_name`), `hostname`, `color` (`_cl_color`)
+    /// — and returns to Multiplayer; Backspace takes a character off the
+    /// host name or the player's name, and a printable key (`text`) types
+    /// one, up to 15.
+    fn setup_key(&mut self, key: u8, text: Option<u8>) -> MenuAction {
+        let row = self.cursor();
+        let step_colour = |m: &mut Menu, d: i32| {
+            m.snd(MenuSound::Menu3);
+            match row {
+                2 => m.setup.top += d,
+                3 => m.setup.bottom += d,
+                _ => {}
+            }
+        };
+        match key {
+            K_ESCAPE => {
+                // M_Menu_MultiPlayer_f (m_entersound).
+                self.screen = MenuScreen::Multiplayer;
+                self.snd(MenuSound::Menu2);
+                return MenuAction::Back;
+            }
+            K_UPARROW => self.move_cursor(-1),
+            K_DOWNARROW => self.move_cursor(1),
+            K_LEFTARROW | K_RIGHTARROW | K_ENTER if row < 2 => return MenuAction::None,
+            K_LEFTARROW => step_colour(self, -1),
+            K_RIGHTARROW => step_colour(self, 1),
+            K_ENTER if row < 4 => step_colour(self, 1),
+            K_ENTER => {
+                // setup_cursor == 4 (OK): `name "..."`, `hostname`, `color t b`
+                // for what changed; m_entersound; M_Menu_MultiPlayer_f.
+                self.set_name(&self.setup.myname.clone());
+                self.hostname = self.setup.hostname.clone();
+                if self.setup.top != self.setup.oldtop || self.setup.bottom != self.setup.oldbottom {
+                    self.set_color(self.setup.top, self.setup.bottom);
+                }
+                self.snd(MenuSound::Menu2);
+                self.screen = MenuScreen::Multiplayer;
+                return MenuAction::Back;
+            }
+            K_BACKSPACE => match row {
+                0 => {
+                    self.setup.hostname.pop();
+                }
+                1 => {
+                    self.setup.myname.pop();
+                }
+                _ => {}
+            },
+            _ => {
+                if let Some(c) = text {
+                    let field = match row {
+                        0 => Some(&mut self.setup.hostname),
+                        1 => Some(&mut self.setup.myname),
+                        _ => None,
+                    };
+                    if let Some(f) = field.filter(|f| f.len() < SETUP_NAME_MAX) {
+                        f.push(c as char);
+                    }
+                }
+            }
+        }
+        // The colours wrap: 14 is 0 again, -1 is 13.
+        let wrap = |v: i32| if v > 13 { 0 } else if v < 0 { 13 } else { v };
+        self.setup.top = wrap(self.setup.top);
+        self.setup.bottom = wrap(self.setup.bottom);
+        MenuAction::None
+    }
+
+    /// The `_cl_name` cvar: the player's name.
+    pub fn name(&self) -> &str {
+        &self.cl_name
+    }
+
+    /// `Host_Name_f`'s client half (`Cvar_Set ("_cl_name", newName)`): the
+    /// name, cut to 15 characters (`newName[15] = 0`).
+    pub fn set_name(&mut self, name: &str) {
+        self.cl_name = name.chars().take(SETUP_NAME_MAX).collect();
+    }
+
+    /// The `hostname` cvar.
+    pub fn hostname(&self) -> &str {
+        &self.hostname
+    }
+
+    /// Set the `hostname` cvar (`Cvar_Set`).
+    pub fn set_hostname(&mut self, name: &str) {
+        self.hostname = name.to_string();
+    }
+
+    /// The `_cl_color` cvar: shirt * 16 + pants.
+    pub fn color(&self) -> i32 {
+        self.cl_color
+    }
+
+    /// `Host_Color_f`'s client half: each colour `& 15`, at most 13, then
+    /// `_cl_color = top*16 + bottom`.
+    pub fn set_color(&mut self, top: i32, bottom: i32) {
+        let clamp = |c: i32| (c & 15).min(13);
+        self.cl_color = clamp(top) * 16 + clamp(bottom);
+    }
+
+    /// Set the `_cl_color` cvar's value as it is (`Cvar_Set`, no clamp).
+    pub fn set_color_value(&mut self, v: i32) {
+        self.cl_color = v;
+    }
+
+    /// `SCR_ModalMessage`'s key loop, New Game's "Are you sure?": while it is
+    /// up ([`Menu::new_game_confirm`]) it takes every key event before
+    /// `Key_Event` routes it (`key_count` below zero), and a key down of `y`
+    /// answers yes ([`MenuAction::NewGame`]), `n` or Escape no — by key
+    /// number (`key_lastpress`), so Shift makes no difference. Any other key
+    /// does nothing.
+    pub fn modal_key(&mut self, key: u8) -> MenuAction {
+        match key {
+            b'y' => self.quit_yes(),
+            b'n' | K_ESCAPE => self.quit_no(),
+            _ => MenuAction::None,
         }
     }
 
@@ -1134,7 +1413,7 @@ impl Menu {
     ///   [`MenuAction::Back`];
     /// * the Quit prompt answers "No" → restores the previous screen
     ///   ([`MenuAction::Back`]);
-    /// * the Main screen closes the menu ([`MenuAction::Closed`]).
+    /// * the Main screen closes the menu ([`MenuAction::Resume`]).
     pub fn cancel(&mut self) -> MenuAction {
         if !self.visible {
             return MenuAction::None;
@@ -1161,6 +1440,7 @@ impl Menu {
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
+            MenuScreen::Setup => self.setup_key(K_ESCAPE, None),
             MenuScreen::Load | MenuScreen::Save => {
                 // M_Load_Key / M_Save_Key K_ESCAPE -> M_Menu_SinglePlayer_f.
                 self.screen = MenuScreen::SinglePlayer;
@@ -1193,9 +1473,10 @@ impl Menu {
                 self.quit_back()
             }
             MenuScreen::Main => {
-                // M_Main_Key K_ESCAPE -> key_dest = key_game
+                // M_Main_Key K_ESCAPE -> key_dest = key_game (the host puts
+                // the demo loop back).
                 self.close();
-                MenuAction::Closed
+                MenuAction::Resume
             }
         }
     }
@@ -1306,6 +1587,10 @@ impl Menu {
             MenuScreen::Load | MenuScreen::Save | MenuScreen::Keys | MenuScreen::Video
         ) {
             self.move_cursor(step);
+            return;
+        }
+        if self.screen == MenuScreen::Setup {
+            let _ = self.setup_key(if step < 0 { K_LEFTARROW } else { K_RIGHTARROW }, None);
             return;
         }
         // The Extras rows are checkboxes: menu3, then flip regardless of the
@@ -1629,6 +1914,11 @@ pub struct MenuPics {
     pub help: [Option<crate::wad::Qpic>; NUM_HELP_PAGES],
     /// The `M_DrawTextBox` border pieces, in [`TEXTBOX_PICS`] order.
     pub textbox: [Option<crate::wad::Qpic>; 10],
+    /// `gfx/bigbox.lmp` — the frame around Setup's player preview.
+    pub bigbox: Option<crate::wad::Qpic>,
+    /// `gfx/menuplyr.lmp` — Setup's player preview, drawn through
+    /// `M_BuildTranslationTable`'s shirt and pants colours.
+    pub menuplyr: Option<crate::wad::Qpic>,
 }
 
 /// The pak pics `M_DrawTextBox` builds a box from, in [`MenuPics::textbox`]
@@ -1741,8 +2031,31 @@ pub fn draw_menu(
     draw_menu_inner(image, menu, pics, conchars, host_time, realtime, palette, true);
 }
 
+/// `M_Draw` while the console is out (`scr_con_current`, as when it is
+/// forced up with nothing playing): the menu over `Draw_ConsoleBackground
+/// (vid.height)` — the console's background over the whole screen, hiding
+/// its text — instead of over the faded screen.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_menu_over_console(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    conback: Option<&crate::wad::Qpic>,
+    host_time: f32,
+    realtime: f64,
+    palette: &[[u8; 3]; 256],
+) {
+    if !menu.visible {
+        return;
+    }
+    crate::console::draw_console_background_full(image, conback, conchars, palette);
+    draw_menu_inner(image, menu, pics, conchars, host_time, realtime, palette, false);
+}
+
 /// [`draw_menu`], with `fade` false for `M_Draw`'s `m_recursiveDraw` (the
-/// screen the Quit prompt rose over, drawn under it without a second fade).
+/// screen the Quit prompt rose over, drawn under it without a second fade)
+/// and for the menu over the console background.
 #[allow(clippy::too_many_arguments)]
 fn draw_menu_inner(
     image: &mut Image,
@@ -1767,9 +2080,8 @@ fn draw_menu_inner(
     let ox = ((sc.w - MENU_VIRT_W as i32) >> 1) as f32 * scale;
     let oy = 0.0;
 
-    // M_Draw: the game/demo underneath fades first (Draw_FadeScreen). (The
-    // C's other branch, the console background under a forced-up console,
-    // can't occur: this port's menu and console never share the screen.)
+    // M_Draw: the game/demo underneath fades first (Draw_FadeScreen); with
+    // the console out, draw_menu_over_console draws its background instead.
     if fade {
         fade_screen(image, palette);
     }
@@ -1844,6 +2156,12 @@ fn draw_menu_inner(
     // The port's Web extras page: a page of Options (same plaque + title).
     if menu.screen == MenuScreen::Extras {
         draw_extras_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+        return;
+    }
+
+    // M_Setup_Draw.
+    if menu.screen == MenuScreen::Setup {
+        draw_setup_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
         return;
     }
 
@@ -1982,21 +2300,27 @@ fn draw_options_screen(
     }
 }
 
-/// The Extras screen's layout, in `M_Keys_Draw`'s shape: a white header line
-/// at y=32, then the rows from y=48, 8 px apart, and the highlighted row's
-/// help lines from y=[`EXTRAS_HELP_Y`].
-const EXTRAS_HEADER_Y: f32 = 32.0;
-const EXTRAS_ROW_Y0: f32 = 48.0;
-const EXTRAS_HELP_Y: f32 = 88.0;
-/// The Extras header (`M_PrintWhite`, centred): what these rows are.
-const EXTRAS_HEADER: &str = "Web extras: not in id's Quake";
+/// The Extras screen's layout is `M_Options_Draw`'s: the rows from y=32, 8
+/// px apart (as Options' first rows), the labels at x=16, the checkboxes at
+/// x=220, the cursor at x=200. Under them, right of the plaque (`qplaque` is
+/// 32 wide at x=16), the notes: from x=[`EXTRAS_NOTE_X`], the white
+/// [`EXTRAS_HEADER`] at y=[`EXTRAS_HEADER_Y`] and the highlighted row's help
+/// lines from y=[`EXTRAS_HELP_Y`], at most [`EXTRAS_NOTE_COLS`] columns.
+const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
+const EXTRAS_NOTE_X: f32 = 64.0;
+const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
+const EXTRAS_HEADER_Y: f32 = 80.0;
+const EXTRAS_HELP_Y: f32 = 96.0;
+/// The Extras header (`M_PrintWhite`): what these rows are.
+const EXTRAS_HEADER: &str = "Not in id's Quake";
 
-/// Draw the port's Web extras screen in `M_Options_Draw`'s idiom: qplaque
-/// (drawn by the caller) and the `p_option` title (it is a page of Options),
-/// the [`EXTRAS_HEADER`] in white, then each extra as an Options checkbox row
-/// — the right-justified `M_Print` label at x=16, `M_DrawCheckbox`'s "on" /
-/// "off" at x=220, the 4 Hz flashing cursor at x=200 — and, under the list,
-/// the highlighted row's three bronze help lines, centred.
+/// Draw the port's Web extras screen as `M_Options_Draw` draws Options:
+/// qplaque (drawn by the caller) and the `p_option` title (it is a page of
+/// Options), each extra an Options checkbox row — the right-justified
+/// `M_Print` label at x=16, `M_DrawCheckbox`'s "on" / "off" at x=220, the
+/// 4 Hz flashing cursor at x=200 — and, under the rows and clear of the
+/// plaque, the [`EXTRAS_HEADER`] in white and the highlighted row's three
+/// bronze help lines.
 #[allow(clippy::too_many_arguments)]
 fn draw_extras_screen(
     image: &mut Image,
@@ -2014,10 +2338,6 @@ fn draw_extras_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     let Some(cc) = conchars else { return };
-    let centred = |s: &str| ((MENU_VIRT_W as i32 - s.len() as i32 * 8) / 2) as f32;
-    draw_string_scaled(
-        image, cc, centred(EXTRAS_HEADER), EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette,
-    );
     for (i, row) in WEB_EXTRAS.iter().enumerate() {
         let y = EXTRAS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
         m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy, palette);
@@ -2026,10 +2346,12 @@ fn draw_extras_screen(
     }
     let cy = EXTRAS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
+    draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette);
     if let Some(row) = WEB_EXTRAS.get(menu.cursor()) {
         for (i, line) in extras_help_lines(row).iter().enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
-            m_print(image, cc, centred(line), y, line, scale, ox, oy, palette);
+            let line = &line[..line.len().min(EXTRAS_NOTE_COLS)];
+            m_print(image, cc, EXTRAS_NOTE_X, y, line, scale, ox, oy, palette);
         }
     }
 }
@@ -2112,6 +2434,90 @@ fn draw_multiplayer_screen(
         let line = "No Communications Available";
         let cx = MENU_VIRT_W * 0.5 - (line.len() as f32 * 8.0) * 0.5;
         draw_string_scaled(image, cc, cx, 148.0, line, scale, ox, oy, palette);
+    }
+}
+
+/// `M_BuildTranslationTable (top, bottom)` (menu.c): the identity, with the
+/// shirt rows (`TOP_RANGE`) taken from colour row `top` and the pants rows
+/// (`BOTTOM_RANGE`) from `bottom` — backwards for the rows from 128 on ("the
+/// artists made some backwards ranges").
+fn build_translation_table(top: usize, bottom: usize) -> [u8; 256] {
+    let mut t: [u8; 256] = std::array::from_fn(|i| i as u8);
+    for j in 0..16 {
+        t[TOP_RANGE + j] = if top < 128 { top + j } else { top + 15 - j } as u8;
+        t[BOTTOM_RANGE + j] = if bottom < 128 { bottom + j } else { bottom + 15 - j } as u8;
+    }
+    t
+}
+
+/// Draw Multiplayer > Setup, a port of `M_Setup_Draw`: qplaque (drawn by the
+/// caller) and the `p_multi` title; "Hostname" and "Your name" with their
+/// fields in 16-column text boxes at (160, 32) and (160, 48); "Shirt color",
+/// "Pants color"; "Accept Changes" in a 14-column box at (64, 132); the
+/// `bigbox` frame at (160, 64) around the `menuplyr` preview at (172, 72),
+/// drawn through [`build_translation_table`] of the chosen colours
+/// (`M_DrawTransPicTranslate`); the flashing cursor at x 56 on the row's y
+/// (`setup_cursor_table`), and on a name row the text cursor (10/11 on the
+/// same 4 Hz) after its last character.
+#[allow(clippy::too_many_arguments)]
+fn draw_setup_screen(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    cursor_glyph: u8,
+    palette: &[[u8; 3]; 256],
+) {
+    if let Some(t) = &pics.p_multi {
+        let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+    }
+    let s = &menu.setup;
+    if let Some(cc) = conchars {
+        m_print(image, cc, 64.0, 40.0, "Hostname", scale, ox, oy, palette);
+    }
+    draw_text_box(image, pics, 160, 32, 16, 1, scale, ox, oy, palette);
+    if let Some(cc) = conchars {
+        m_print(image, cc, 168.0, 40.0, &s.hostname, scale, ox, oy, palette);
+        m_print(image, cc, 64.0, 56.0, "Your name", scale, ox, oy, palette);
+    }
+    draw_text_box(image, pics, 160, 48, 16, 1, scale, ox, oy, palette);
+    if let Some(cc) = conchars {
+        m_print(image, cc, 168.0, 56.0, &s.myname, scale, ox, oy, palette);
+        m_print(image, cc, 64.0, 80.0, "Shirt color", scale, ox, oy, palette);
+        m_print(image, cc, 64.0, 104.0, "Pants color", scale, ox, oy, palette);
+    }
+    draw_text_box(image, pics, 64, 140 - 8, 14, 1, scale, ox, oy, palette);
+    if let Some(cc) = conchars {
+        m_print(image, cc, 72.0, 140.0, "Accept Changes", scale, ox, oy, palette);
+    }
+    if let Some(p) = &pics.bigbox {
+        blit_qpic_at(image, p, 160.0, 64.0, scale, ox, oy, palette);
+    }
+    if let Some(p) = &pics.menuplyr {
+        let t = build_translation_table(s.top.max(0) as usize * 16, s.bottom.max(0) as usize * 16);
+        let data = p.data.iter().map(|&b| t[b as usize]).collect();
+        let translated = crate::wad::Qpic { width: p.width, height: p.height, data };
+        blit_qpic_at(image, &translated, 172.0, 72.0, scale, ox, oy, palette);
+    }
+    if let Some(cc) = conchars {
+        let row = menu.cursor().min(NUM_SETUP_CMDS - 1);
+        let y = SETUP_CURSOR_TABLE[row];
+        draw_char_scaled(image, cc, 56.0, y, cursor_glyph, scale, ox, oy, palette);
+        // 10 + ((int)(realtime*4)&1): the same blink as the 12/13 cursor.
+        let text_cursor = cursor_glyph - OPTIONS_CURSOR_BASE + 10;
+        let field = match row {
+            0 => Some(&s.hostname),
+            1 => Some(&s.myname),
+            _ => None,
+        };
+        if let Some(f) = field {
+            let x = 168.0 + 8.0 * f.len() as f32;
+            draw_char_scaled(image, cc, x, y, text_cursor, scale, ox, oy, palette);
+        }
     }
 }
 
@@ -2438,6 +2844,199 @@ mod tests {
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Multiplayer, 2));
     }
 
+    /// M_Menu_Setup_f / M_Setup_Key: Multiplayer's third row opens Setup on
+    /// Accept Changes (setup_cursor starts at 4) with the cvars' values; the
+    /// colours step and wrap 0..13; the names take up to 15 characters;
+    /// Accept sets name / hostname / color and returns to Multiplayer;
+    /// Escape returns without.
+    #[test]
+    fn setup_is_m_setup_key() {
+        use crate::keys::{K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW};
+        let mut m = Menu::new();
+        m.open();
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_ENTER, None); // Multiplayer
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_DOWNARROW, None);
+        m.take_sounds();
+        m.keydown(K_ENTER, None);
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Setup, 4), "on Accept Changes");
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+        assert_eq!((m.setup.hostname.as_str(), m.setup.myname.as_str()), ("UNNAMED", "player"));
+        // Colours: Pants right 3, Shirt left once (0 -> 13), Enter steps too.
+        m.keydown(K_UPARROW, None);
+        for _ in 0..3 {
+            m.keydown(K_RIGHTARROW, None);
+        }
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_LEFTARROW, None);
+        assert_eq!((m.setup.top, m.setup.bottom), (13, 3));
+        assert_eq!(m.take_sounds().last(), Some(&MenuSound::Menu3));
+        m.keydown(K_ENTER, None);
+        assert_eq!(m.setup.top, 0, "Enter on a colour row steps it (13 -> 0)");
+        m.keydown(K_LEFTARROW, None);
+        // The names: Left/Right/Enter do nothing there, Backspace takes one
+        // off, a character types, 15 at most.
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_UPARROW, None); // Hostname
+        m.take_sounds();
+        for k in [K_LEFTARROW, K_RIGHTARROW, K_ENTER] {
+            assert_eq!(m.keydown(k, None), MenuAction::None);
+        }
+        assert!(m.take_sounds().is_empty(), "nothing, not even a sound");
+        m.keydown(K_BACKSPACE, None);
+        for c in b"Dxxxxxxxxxxxxxx" {
+            m.keydown(*c, Some(*c));
+        }
+        assert_eq!(m.setup.hostname, "UNNAMEDxxxxxxxx", "D then 15 in all");
+        m.keydown(K_DOWNARROW, None); // Your name
+        for _ in 0..6 {
+            m.keydown(K_BACKSPACE, None);
+        }
+        for c in b"Ranger`" {
+            m.keydown(*c, Some(*c));
+        }
+        m.keydown(b'\t', None); // types nothing (no character)
+        assert_eq!(m.setup.myname, "Ranger`", "M_Setup_Key types any key 32..127");
+        // Escape: back to Multiplayer, nothing set.
+        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Back);
+        assert_eq!((m.screen(), m.name(), m.hostname(), m.color()), (MenuScreen::Multiplayer, "player", "UNNAMED", 0));
+        // Again, and Accept: the cursor kept on Your name, the fields refilled.
+        m.keydown(K_ENTER, None);
+        assert_eq!((m.cursor(), m.setup.myname.as_str()), (1, "player"));
+        for _ in 0..6 {
+            m.keydown(K_BACKSPACE, None);
+        }
+        for c in b"Ranger" {
+            m.keydown(*c, Some(*c));
+        }
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_RIGHTARROW, None); // shirt 1
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_LEFTARROW, None); // pants 13
+        m.keydown(K_DOWNARROW, None);
+        m.take_sounds();
+        assert_eq!(m.keydown(K_ENTER, None), MenuAction::Back);
+        assert_eq!((m.screen(), m.name(), m.color()), (MenuScreen::Multiplayer, "Ranger", 16 + 13));
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
+        // Host_Color_f clamps each to 13; the name is cut to 15.
+        m.set_color(15, 22);
+        assert_eq!(m.color(), 13 * 16 + 6);
+        m.set_name("a very long player name");
+        assert_eq!(m.name(), "a very long pla");
+    }
+
+    /// M_BuildTranslationTable: the identity but for the shirt (16..32) and
+    /// pants (96..112) rows, taken from the chosen colour rows — backwards
+    /// from row 128 on.
+    #[test]
+    fn translation_table_is_m_buildtranslationtable() {
+        let t = build_translation_table(3 * 16, 9 * 16);
+        assert_eq!(t[0], 0);
+        assert_eq!(t[255], 255);
+        assert_eq!((t[16], t[31]), (48, 63), "shirt: row 3 forwards");
+        assert_eq!((t[96], t[111]), (159, 144), "pants: row 9 (144) backwards");
+        assert_eq!((t[15], t[32], t[95], t[112]), (15, 32, 95, 112));
+        assert_eq!(build_translation_table(16, 96), std::array::from_fn(|i| i as u8), "the skin's own rows");
+    }
+
+    /// M_Setup_Draw: the preview is menuplyr through the colours, at
+    /// (172, 72); the text cursor follows the name on its row.
+    #[test]
+    fn setup_draws_the_translated_player() {
+        let pal = ramp_palette();
+        let mut m = Menu::new();
+        m.open();
+        m.set_color(3, 9);
+        m.set_cursor(1);
+        m.select(); // Multiplayer
+        m.set_cursor(2);
+        m.select(); // Setup
+        let mut data = vec![16u8, 96, 255, 7];
+        data.resize(4, 0);
+        let pics = MenuPics {
+            menuplyr: Some(Qpic { width: 4, height: 1, data }),
+            ..Default::default()
+        };
+        let mut img = Image::new(320, 200, [1, 2, 3]);
+        draw_menu(&mut img, &m, &pics, None, 0.0, 0.0, &pal);
+        let at = |x: usize| img.rgb[72 * 320 + x];
+        assert_eq!(at(172), pal[48], "shirt texel through row 3");
+        assert_eq!(at(173), pal[159], "pants texel through row 9, backwards");
+        assert_eq!(at(175), pal[7], "other colours untouched");
+        let faded = {
+            let mut i = Image::new(320, 200, [1, 2, 3]);
+            fade_screen(&mut i, &pal);
+            i.rgb[72 * 320 + 174]
+        };
+        assert_eq!(at(174), faded, "255 is transparent");
+    }
+
+    /// M_Keydown: each screen's M_*_Key switch, by key number.
+    #[test]
+    fn keydown_is_each_screens_m_key() {
+        use crate::keys::{K_BACKSPACE, K_DEL, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW};
+        let mut m = Menu::new();
+        assert_eq!(m.keydown(K_ENTER, None), MenuAction::None, "m_none: nothing");
+        m.open();
+        // Main: the arrows move, Left/Right/Tab/letters do nothing.
+        for k in [K_LEFTARROW, K_RIGHTARROW, b'\t', b'x', K_BACKSPACE] {
+            m.keydown(k, None);
+        }
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 0));
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_ENTER, None);
+        assert_eq!(m.screen(), MenuScreen::Options);
+        // Options: Right adjusts Screen size.
+        for _ in 0..3 {
+            m.keydown(K_DOWNARROW, None);
+        }
+        m.keydown(K_RIGHTARROW, None);
+        assert_eq!(m.viewsize(), VIEWSIZE_DEFAULT + VIEWSIZE_STEP);
+        // Customize controls: Left moves like Up; Del unbinds; during a grab
+        // every key is the grab's, Escape included.
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_UPARROW, None);
+        m.keydown(K_ENTER, None);
+        assert_eq!(m.screen(), MenuScreen::Keys);
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_LEFTARROW, None);
+        assert_eq!(m.cursor(), 0, "Left pairs with Up");
+        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_DOWNARROW, None); // jump
+        m.keydown(K_DEL, None);
+        assert_eq!(m.find_keys_for_command(BIND_JUMP), [None, None], "Del unbinds");
+        m.keydown(K_ENTER, None);
+        m.keydown(K_UPARROW, None);
+        assert_eq!(m.action_for_key(K_UPARROW), Some(BIND_JUMP), "the grab took the arrow");
+        assert_eq!(m.cursor(), BIND_JUMP, "and did not move");
+        m.keydown(K_ENTER, None);
+        m.keydown(K_ESCAPE, None);
+        assert_eq!((m.screen(), m.bind_grabbing()), (MenuScreen::Keys, false), "Escape ends the grab");
+        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Back);
+        assert_eq!(m.screen(), MenuScreen::Options);
+        // Main's Escape closes it and asks for the demo loop back.
+        m.keydown(K_ESCAPE, None);
+        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Resume);
+        assert!(!m.visible);
+        // SCR_ModalMessage: y by key number, n or Escape; nothing else.
+        m.open();
+        m.set_server_active(true);
+        m.set_cursor(0);
+        m.keydown(K_ENTER, None);
+        m.keydown(K_ENTER, None);
+        assert!(m.new_game_confirm());
+        assert_eq!(m.modal_key(K_ENTER), MenuAction::None);
+        assert_eq!(m.modal_key(b'Y'), MenuAction::None, "Shift is not applied");
+        assert!(m.new_game_confirm());
+        assert_eq!(m.modal_key(K_ESCAPE), MenuAction::None);
+        assert!(!m.new_game_confirm() && m.visible, "Escape: no, the menu stays");
+        m.keydown(K_ENTER, None);
+        assert_eq!(m.modal_key(b'y'), MenuAction::NewGame);
+    }
+
     #[test]
     fn a_closed_menu_reopens_on_m_main_cursor() {
         // Options > Go to console closes the menu (m_state = m_none); the next
@@ -2594,8 +3193,9 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
 
-        // Escape on Main closes the menu.
-        assert_eq!(m.cancel(), MenuAction::Closed);
+        // Escape on Main closes the menu (M_Main_Key: the host resumes the
+        // demo loop).
+        assert_eq!(m.cancel(), MenuAction::Resume);
         assert!(!m.visible);
 
         // Cancel on a hidden menu is a no-op.
@@ -2611,11 +3211,15 @@ mod tests {
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
-        // Re-raise it and answer "Yes" via select (Enter): closes the menu.
+        // Re-raise it: Enter does nothing (M_Quit_Key: only y/Y quit), 'y'
+        // closes the menu.
         m.set_cursor(4);
         m.select();
         assert_eq!(m.screen(), MenuScreen::Quit);
-        assert_eq!(m.select(), MenuAction::Closed, "Enter on the Quit prompt quits");
+        assert_eq!(m.select(), MenuAction::None, "Enter does not answer the Quit prompt");
+        assert_eq!(m.keydown(K_ENTER, None), MenuAction::None);
+        assert!(m.visible && m.screen() == MenuScreen::Quit);
+        assert_eq!(m.keydown(b'Y', Some(b'Y')), MenuAction::Closed, "Y quits");
         assert!(!m.visible);
 
         // Main item Multiplayer (item 1) opens the multiplayer screen
@@ -3351,7 +3955,7 @@ mod tests {
             assert!(w.cvar.starts_with("wasm_"), "{}: not an id name", w.cvar);
             assert_eq!(w.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", w.cvar);
             for line in extras_help_lines(w) {
-                assert!(line.len() <= 38, "{line:?} fits the 320-wide page");
+                assert!(line.len() <= EXTRAS_NOTE_COLS, "{line:?} fits right of the plaque");
             }
         }
     }
@@ -3395,42 +3999,44 @@ mod tests {
         assert_eq!(px(&img, 16 + 12 * 8, 136), pal[5], "'W' of Web extras, bronze, y=136");
         assert_eq!(px(&img, 16 + 21 * 8, 136), pal[5], "its 's' in the last label column");
 
-        // The Extras screen: plaque + OPTIONS title, a white header at y=32,
-        // the rows from y=48 (bronze labels, "off" at x=220), the cursor at
-        // x=200 while the 4 Hz blink shows it, the help lines under the list.
+        // The Extras screen, as M_Options_Draw: plaque + OPTIONS title, the
+        // rows from y=32 (bronze labels, "off" at x=220), the cursor at x=200
+        // while the 4 Hz blink shows it; under them, right of the plaque, the
+        // white header at y=80 and the row's help lines from y=96, at x=64.
         m.set_cursor(ROW_EXTRAS);
         m.select();
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
         assert_eq!(img.rgb[4 * 320 + 16], pal[9], "qplaque at (16,4)");
         assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
-        let hx = (320 - EXTRAS_HEADER.len() * 8) / 2;
-        assert_eq!(px(&img, hx, 32), pal[6], "the header is M_PrintWhite");
+        assert_eq!(px(&img, 64, 80), pal[6], "the header is M_PrintWhite");
         for (i, label) in WEB_EXTRAS.iter().map(|r| r.label).enumerate() {
-            let y = 48 + i * 8;
+            let y = 32 + i * 8;
             let first = label.bytes().position(|b| b != b' ').unwrap();
             assert_eq!(px(&img, 16 + first * 8, y), pal[5], "row {i} label bronze");
             assert_eq!(px(&img, 220, y), pal[5], "row {i} checkbox 'off' at x=220");
         }
-        assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        let help = WEB_EXTRAS[0].help;
-        let hx0 = (320 - help[0].len() * 8) / 2;
-        assert_eq!(px(&img, hx0, 88), pal[5], "row 0's help, bronze, from y=88");
+        assert_eq!(px(&img, 200, 32), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
+        assert_eq!(px(&img, 64, 96), pal[5], "row 0's help, bronze, from y=96");
+        // Nothing but the plaque in its columns: every note starts right of it.
+        for y in 30..200 {
+            for x in 16..48 {
+                assert_eq!(img.rgb[y * 320 + x], pal[if y < 148 { 9 } else { 0 }], "({x},{y})");
+            }
+        }
         // realtime 0.1: the blink is off (glyph 12, blank).
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.1, &pal);
-        assert_eq!(px(&img, 200, 48), pal[0], "the cursor blinks");
+        assert_eq!(px(&img, 200, 32), pal[0], "the cursor blinks");
         // "on" replaces "off" once toggled; the help follows the cursor.
         m.adjust(1);
         m.move_cursor(1);
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
-        assert_eq!(px(&img, 220 + 16, 48), pal[0], "\"on\" is two characters");
-        assert_eq!(px(&img, 220 + 16, 56), pal[5], "\"off\" is three");
-        let help1 = WEB_EXTRAS[1].help;
-        let hx1 = (320 - help1[0].len() * 8) / 2;
-        assert_eq!(px(&img, hx1, 88), pal[5], "row 1's help once the cursor moves");
-        assert_eq!(px(&img, 200, 56), pal[7], "the cursor on row 1");
+        assert_eq!(px(&img, 220 + 16, 32), pal[0], "\"on\" is two characters");
+        assert_eq!(px(&img, 220 + 16, 40), pal[5], "\"off\" is three");
+        assert_eq!(px(&img, 64, 96), pal[5], "row 1's help once the cursor moves");
+        assert_eq!(px(&img, 200, 40), pal[7], "the cursor on row 1");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, None, 0.0, 0.3, &pal);
@@ -3685,10 +4291,11 @@ mod tests {
         m.bind_key(K_ESCAPE);
         assert!(!m.bind_grabbing());
         assert_eq!(m.action_for_key(K_ESCAPE), None, "Escape never binds");
-        // The console key is refused too (the C's `k != '`'` check).
+        // The console key is refused too (the C's `k != '`'` check): it
+        // keeps default.cfg's toggleconsole.
         m.select();
         m.bind_key(b'`');
-        assert_eq!(m.action_for_key(b'`'), None, "backtick never binds");
+        assert_eq!(m.action_for_key(b'`'), Some(BIND_TOGGLECONSOLE), "backtick never binds");
 
         // cancel() during a grab also just ends the grab (screen stays).
         m.select();

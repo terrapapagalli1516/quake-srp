@@ -1,5 +1,6 @@
 //! Console commands — `Cmd_ExecuteString`'s dispatch (cmd.c) against the
-//! App: echo/clear/help, the viewsize cvar commands, the Web extras, `map`,
+//! App: echo/clear, `help` (the Help/Ordering screen), the viewsize cvar
+//! commands, the Web extras and the port's `wasm_help` list, `map`,
 //! save/load, `pause`, the demo commands (cl_demo.c's `playdemo`/`timedemo`,
 //! host_cmd.c's demo loop control `startdemos`/`demos`/`stopdemo`), and the
 //! cheats god/noclip/fly/kill/give/impulse, which act on the live
@@ -17,6 +18,33 @@ use crate::snd_dma;
 
 /// `MAX_DEMONAME` (client.h): a `cls.demos` slot holds 15 characters.
 const MAX_DEMONAME: usize = 16;
+
+/// The commands this console runs, in the order `Cmd_CompleteCommand` meets
+/// id's (`cmd_functions`: `Cmd_AddCommand` puts each in front, so the one
+/// registered last — `timedemo`, in `CL_Init` — comes first; `echo`, from
+/// `Cmd_Init`, last), then the port's own.
+pub(crate) const COMMANDS: &[&str] = &[
+    "timedemo", "playdemo", "impulse", "sizedown", "sizeup", "help", "clear", "stopdemo", "demos",
+    "startdemos", "give", "save", "load", "pause", "kill", "color", "noclip", "name", "map", "fly",
+    "god", "echo", "wasm_help",
+];
+
+/// The cvars this console reads and sets, in `cvar_vars` order (registered
+/// last, found first: `_cl_color` and `_cl_name` in `CL_Init`, `viewsize` in
+/// `SCR_Init`, `hostname` in `NET_Init`), then the Web extras' `wasm_*`.
+const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname"];
+
+/// `Cmd_CompleteCommand` then `Cvar_CompleteVariable` (cmd.c, cvar.c), what
+/// Tab in the console runs: the first command, else the first cvar, whose
+/// name starts with `partial` (case matters, `Q_strncmp`); nothing for an
+/// empty line.
+pub(crate) fn complete(partial: &str) -> Option<String> {
+    if partial.is_empty() {
+        return None;
+    }
+    let cvars = CVARS.iter().copied().chain(crate::extras::cvar_names());
+    COMMANDS.iter().copied().chain(cvars).find(|name| name.starts_with(partial)).map(str::to_string)
+}
 
 /// `Host_Startdemos_f`: `startdemos <demo> ...` sets the demo loop (at most
 /// [`MAX_DEMOS`]) and, with nothing running (`!sv.active &&
@@ -88,7 +116,7 @@ pub(crate) fn execute_console_command(line: &str) {
     let Some(&cmd) = argv.first() else { return };
     let cmd_lower = cmd.to_ascii_lowercase();
 
-    // Commands that don't need the walk: echo / clear / help / cmdlist.
+    // Commands that don't need the walk: echo / clear / help / wasm_help.
     match cmd_lower.as_str() {
         "clear" => {
             ensure_app(|a| a.console.clear());
@@ -103,9 +131,17 @@ pub(crate) fn execute_console_command(line: &str) {
             ensure_app(|a| a.console.println(text));
             return;
         }
-        "help" | "cmdlist" => {
+        // M_Menu_Help_f (menu.c registers it as `help`): the Help/Ordering
+        // screen, on its first page, with the keyboard (key_dest =
+        // key_menu: the console goes up).
+        "help" => {
+            ensure_app(App::m_menu_help);
+            return;
+        }
+        // Not id's: the port's command list (`help` is id's Help screen).
+        "wasm_help" => {
             ensure_app(|a| {
-                a.console.println("commands:");
+                a.console.println("this port's commands:");
                 a.console.println("  god noclip fly kill  pause");
                 a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
                 a.console.println("  impulse <n>   map <name>");
@@ -114,9 +150,67 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  stopdemo  demos  startdemos <d..>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
+                a.console.println("  wasm_help (this list)");
                 a.console.println("web extras (not id's; see Options):");
                 for line in crate::extras::help_lines() {
                     a.console.println(line);
+                }
+            });
+            return;
+        }
+        // Host_Name_f's client half: print, or set `_cl_name` (one argument,
+        // else the whole argument string; 15 characters). The server's side —
+        // renaming the connected player — is not done: the port's server
+        // connects the player as "player" (sv_main.rs).
+        "name" => {
+            ensure_app(|a| {
+                if argv.len() == 1 {
+                    a.console.println(format!("\"name\" is \"{}\"", a.menu.name()));
+                } else {
+                    // Cmd_Args, its quotes as Cmd_TokenizeString takes them.
+                    let args = line.trim_start()[cmd.len()..].trim();
+                    let name = if argv.len() == 2 { argv[1] } else { args };
+                    let name = name.strip_prefix('"').and_then(|n| n.strip_suffix('"')).unwrap_or(name);
+                    a.menu.set_name(name);
+                }
+            });
+            return;
+        }
+        // Host_Color_f's client half: print, or `_cl_color` from one colour
+        // (both) or two, each 0..13.
+        "color" => {
+            ensure_app(|a| {
+                if argv.len() == 1 {
+                    let c = a.menu.color();
+                    a.console.println(format!("\"color\" is \"{} {}\"", c >> 4, c & 15));
+                    a.console.println("color <0-13> [0-13]");
+                } else {
+                    let top = atoi(argv[1]);
+                    let bottom = if argv.len() == 2 { top } else { atoi(argv[2]) };
+                    a.menu.set_color(top, bottom);
+                }
+            });
+            return;
+        }
+        // Cvar_Command for the name/colour cvars and `hostname`: print the
+        // value, or set it from the first argument.
+        "hostname" | "_cl_name" | "_cl_color" => {
+            ensure_app(|a| {
+                let name = cmd_lower.as_str();
+                match argv.get(1) {
+                    None => {
+                        let v = match name {
+                            "hostname" => a.menu.hostname().to_string(),
+                            "_cl_name" => a.menu.name().to_string(),
+                            _ => a.menu.color().to_string(),
+                        };
+                        a.console.println(format!("\"{name}\" is \"{v}\""));
+                    }
+                    Some(v) => match name {
+                        "hostname" => a.menu.set_hostname(v),
+                        "_cl_name" => a.menu.set_name(v),
+                        _ => a.menu.set_color_value(v.parse::<f32>().unwrap_or(0.0) as i32),
+                    },
                 }
             });
             return;
@@ -225,6 +319,17 @@ pub(crate) fn execute_console_command(line: &str) {
     if !known {
         ensure_app(|a| a.console.println(format!("unknown command: {cmd}")));
     }
+}
+
+/// `atoi`: the leading integer of `s` (0 for none).
+fn atoi(s: &str) -> i32 {
+    let s = s.trim_start();
+    let end = s
+        .char_indices()
+        .take_while(|&(i, c)| c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+')))
+        .last()
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    s[..end].parse().unwrap_or(0)
 }
 
 /// A cvar value as the console prints it: `%f` with the trailing zeros (and a
@@ -370,13 +475,100 @@ mod tests {
         assert_eq!(extras(), 0);
         run_console_line("wasm_exactpersp 1");
         assert_eq!(extras(), 4);
-        run_console_line("help");
+        run_console_line("wasm_help");
         let help: Vec<String> = APP.with(|c| {
             c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
         });
         assert!(help.iter().any(|l| l == "  wasm_uncapped 0|1  no 72 fps cap"), "{help:?}");
         assert!(help.iter().any(|l| l == "  wasm_showfps 0|1   frame rate"), "{help:?}");
         assert!(help.iter().all(|l| l.len() <= 38), "fits a 320-wide console: {help:?}");
+    }
+
+    /// Final review (UI): Multiplayer > Setup through the keys (M_Setup_Key),
+    /// and the cvars it sets through the console: `name` / `color` (the
+    /// client halves of Host_Name_f / Host_Color_f) and `hostname`.
+    #[test]
+    fn setup_sets_the_name_and_colours_the_console_reads() {
+        use crate::input::{key_event, press};
+        use quake_rs::keys::{K_BACKSPACE, K_DOWNARROW, K_ENTER, K_ESCAPE, K_RIGHTARROW, K_SHIFT, K_UPARROW};
+        assert_eq!(boot(), 1); // the menu over e1m1, on Main
+        press(K_DOWNARROW);
+        press(K_ENTER); // Multiplayer
+        press(K_DOWNARROW);
+        press(K_DOWNARROW);
+        press(K_ENTER); // Setup, on Accept Changes
+        assert_eq!(crate::menu::menu_screen_id(), 11);
+        press(K_UPARROW);
+        press(K_UPARROW);
+        press(K_RIGHTARROW); // shirt 1
+        press(K_UPARROW); // Your name
+        for _ in 0..6 {
+            press(K_BACKSPACE);
+        }
+        key_event(i32::from(K_SHIFT), 1, 0);
+        press(b'r'); // keyshift: R
+        key_event(i32::from(K_SHIFT), 0, 0);
+        for b in b"anger" {
+            press(*b);
+        }
+        for _ in 0..3 {
+            press(K_DOWNARROW);
+        }
+        press(K_ENTER); // Accept Changes
+        assert_eq!(crate::menu::menu_screen_id(), 4, "back on Multiplayer");
+        press(K_ESCAPE);
+        press(K_ESCAPE);
+        console_toggle();
+        let last = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string).unwrap());
+        run_console_line("name");
+        assert_eq!(last(), "\"name\" is \"Ranger\"");
+        run_console_line("color");
+        let lines = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        assert_eq!(lines[lines.len() - 2..], ["\"color\" is \"1 0\"", "color <0-13> [0-13]"]);
+        run_console_line("color 4 15");
+        run_console_line("_cl_color");
+        assert_eq!(last(), "\"_cl_color\" is \"77\"", "4*16 + 13 (clamped)");
+        run_console_line("color 6");
+        run_console_line("_cl_color");
+        assert_eq!(last(), "\"_cl_color\" is \"102\"", "one colour is both");
+        run_console_line("name \"The Ranger\"");
+        run_console_line("_cl_name");
+        assert_eq!(last(), "\"_cl_name\" is \"The Ranger\"");
+        run_console_line("hostname");
+        assert_eq!(last(), "\"hostname\" is \"UNNAMED\"");
+        run_console_line("hostname quake-rs");
+        run_console_line("hostname");
+        assert_eq!(last(), "\"hostname\" is \"quake-rs\"");
+    }
+
+    /// Final review (UI): menu.c registers `help` as M_Menu_Help_f — the
+    /// Help/Ordering screen on its first page, the menu taking the keyboard
+    /// from the console — where the port printed its own command list; that
+    /// list is `wasm_help` now. `cmdlist` was the port's too: id has none.
+    #[test]
+    fn help_is_the_help_screen_and_wasm_help_the_ports_list() {
+        use crate::menu::{menu_right, menu_screen_id, menu_visible};
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("help");
+        assert_eq!((menu_visible(), menu_screen_id(), console_visible()), (1, 8, 0), "the Help screen");
+        menu_right();
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().menu.help_page()), 1);
+        menu_cancel(); // M_Help_Key K_ESCAPE -> M_Menu_Main_f
+        assert_eq!(menu_screen_id(), 0);
+        menu_cancel();
+        console_toggle();
+        run_console_line("help");
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().menu.help_page()), 0, "help_page = 0");
+        menu_cancel();
+        menu_cancel();
+        console_toggle();
+        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        run_console_line("wasm_help");
+        assert!(lines().iter().any(|l| l == "this port's commands:"), "{:?}", lines());
+        run_console_line("cmdlist");
+        assert_eq!(lines().last().map(String::as_str), Some("unknown command: cmdlist"));
     }
 
     // -----------------------------------------------------------------------

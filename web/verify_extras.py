@@ -107,6 +107,7 @@ with sync_playwright() as p:
     check("every extra is off by default", ext() == 0)
     check("nothing stored before a change",
           pg.evaluate("localStorage.getItem('quake-rs.extras')") is None)
+    key("Escape")                      # the menu over the attract demo
     key("ArrowDown", 2); key("Enter")
     check("Options opens", scr() == OPTIONS)
     key("ArrowUp")                     # up from row 0 wraps to the last row...
@@ -138,7 +139,14 @@ with sync_playwright() as p:
     for line in ["wasm_uncapped 1", "wasm_showfps 1"]:
         pg.keyboard.type(line); key("Enter")
     check("the wasm_* console commands set the same bits", ext() == 3)
-    pg.keyboard.type("wasm_uncapped 0"); key("Enter")
+    # Key_Console's history and Tab, through the page's keys: Up Up brings
+    # back "wasm_uncapped 1" (Backspace + 0 turns it off); Tab completes a
+    # cvar name ("wasm_ex" -> "wasm_exactpersp ").
+    key("ArrowUp", 2); key("Backspace"); pg.keyboard.type("0"); key("Enter")
+    check("Up walks the console history", ext() == 2)
+    pg.keyboard.type("wasm_ex"); key("Tab"); pg.keyboard.type("1"); key("Enter")
+    check("Tab completes the cvar name", ext() == 6)
+    pg.keyboard.type("wasm_exactpersp 0"); key("Enter")
     key("Backquote")
     check("wasm_uncapped 0", ext() == 2)
     frames(pg)

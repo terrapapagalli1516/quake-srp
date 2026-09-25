@@ -1,6 +1,6 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-09-25, after the overnight push (`quake/overnight` at `31775f5`). The
+Last updated 2026-09-25, after the overnight push (`quake/overnight`, final review fixes merged). The
 first section is where things stand; the second is what the night changed; the rest is
 the older history, kept as evidence, with superseded items marked.
 
@@ -18,9 +18,7 @@ the older history, kept as evidence, with superseded items marked.
 - **Two things for the user to decide:**
   1. Four control departures are still on by default (CENSUS.md, "Rule departures on by
      default"): mouse look held while the pointer is locked, WASD, `f` for fullscreen,
-     Space swimming up faster. And one kept on purpose by `quake/timedemo`: the attract
-     demos keep cycling behind the main menu, where id's menu stops the loop after the
-     current demo. Keep them as recorded exceptions, or make them extras?
+     Space swimming up faster. Keep them as recorded exceptions, or make them extras?
   2. The 72 fps cap is on by default, as in id's `Host_FilterTime`: a 144 Hz display runs
      at 72 fps, a 120 Hz one at 60 (every other refresh). It is faithful, and the chair
      kept it; "Uncapped framerate" in Web extras turns it off. Flagging it because it is
@@ -35,16 +33,24 @@ the older history, kept as evidence, with superseded items marked.
   measure, `timedemo demo1`, now runs in the port: natively it is 1.23–1.43x the speed of
   id's portable C at 320x200–960x600, and in the browser about as fast as id's C (0.91–1.05x).
   Details and caveats in `PERF_PLAN.md` (§10 for timedemo).
-- **Checks at `31775f5`** (run for this document): `cargo test --release` passes in both
-  crates, 587 + 1 + 8 in quake-rs and 126 in quake-wasm (1 ignored: the `oracle_screen`
+- **After `31775f5`, the final review's fixes** (AUDIT.md, "Final review fixes, engine side" /
+  "UI side"): dynamic lights on moved doors and lifts in world space as id's; views clamped
+  to id's `MAXWIDTH`x`MAXHEIGHT`; `setmodel` bounds (±16 alias, sprite halves); bad-map
+  hardening; boot into the attract demos with no menu (any key brings it up; the menu stops
+  the loop, `M_Menu_Main_f`); every key through keys.c's `Key_Event`; `help` is the Help
+  screen (`wasm_help` the port's list); console history, Tab completion, backscroll;
+  Multiplayer > Setup (its name does not yet reach the player's netname — the server
+  connects "player"); the canvas box snaps to whole pixels per column where close.
+- **Checks at the end** (run by the chair): `cargo test --release` passes in both
+  crates, 601 + 2 + 8 in quake-rs and 135 in quake-wasm (1 ignored: the `oracle_screen`
   harness). Goldens (`quaketool scene`, sha256 prefix): e1m1 `4807aaa1`, e1m2 `9ae2b478`,
   e1m3 `c65b7046`. The nine `web/verify_*.py` scripts pass (walk, ambient 13/13, demo
-  9/9, input 36/36, menu 61/61, save, loops 10/10, extras 40/40, timedemo 31/31; headless
+  11/11, input 41/41, menu 66/66, save, loops 10/10, extras 42/42, timedemo 32/32; headless
   Chromium, on a scratch copy of the page). `quaketool timedemo` draws demo1's 969 frames.
-- **Deployed.** When this was written, `http://localhost:8196/index.html` served the
-  `3ba835f` build (`miniserve -C`, from a work directory), from before the timedemo
-  merge. The final review of `3ba835f` reported no HIGH and four MED findings; they are
-  in the chair's ledger (row 28), not yet triaged into `AUDIT.md`.
+- **Deployed.** `http://localhost:8196/` serves the final build (`miniserve -C`, from
+  a work directory's `deploy`). Three
+  adversarial reviews ran on frozen trees; the last one's findings are fixed by the final
+  review fixes above.
 - **What is left:** `AUDIT.md`, "Open, as of 2026-09-25", one list. The largest items: no
   dynamic lights in demo playback, the departures above, and nothing measured on a real
   GPU browser or a real high-refresh display.

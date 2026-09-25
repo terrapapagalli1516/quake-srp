@@ -1902,12 +1902,178 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
   measured in the browser (headless Chromium, wasm): `map e1m2` 8–23 ms,
   `map e1m1` 6–10 ms, `playdemo demo2` 7–9 ms — so there is no loading
   moment to show it in.
-- Kept, not id's: **the menu does not stop the demo loop.** `M_Menu_Main_f`
-  saves `cls.demonum` and sets -1 while the menu is up, so in id's Quake the
-  demo playing when the menu opened is the last: at its end the client
-  disconnects and the menu sits over the console until it is closed. The
-  port boots with the menu open over the attract loop and keeps cycling
-  behind it (F15, left as it was).
+- ~~Kept, not id's: **the menu does not stop the demo loop.**~~ Fixed on
+  `quake/polish4b` ("Final review fixes, UI side"): the page boots into the
+  demos with no menu, and the menu stops the loop as `M_Menu_Main_f` does.
+
+## Final review fixes, UI side (2026-09-25, branch `quake/polish4b`)
+
+The final review's menu, console, keyboard and page findings, against
+`keys.c`, `menu.c`, `console.c`, `cmd.c`/`cvar.c` and `host.c`. One commit
+each; the C followed and the evidence are in the commit messages.
+
+- ✅ **Keys went where the page sent them, not where `Key_Event` sends
+  them** (MED). The page routed the keyboard itself: the console key opened
+  the console over the menu and over a key grab, Enter answered the Quit
+  prompt "yes", and the mouse buttons could not be bound. Every key now goes
+  through one export, `key_event(keynum, down, ch)` — keys.c's `Key_Event`
+  in `quake-wasm` `input.rs`, in id's order: New Game's `SCR_ModalMessage`
+  takes every key first (`y` / `n` / Escape by key number); autorepeat is
+  ignored but for Backspace and Pause; an unbound mouse button prints "MOUSE2
+  is unbound, hit F4 to set."; Escape is the menu's own Escape or
+  `M_ToggleMenu_f`; a key up releases its `+` binding wherever the keyboard
+  is; a key down runs its binding in the game, with the console down only
+  for the keys it does not keep (`consolekeys`: so Home/End reach
+  `centerview`, as in id), with the menu up only for Escape and F1–F12
+  (`menubound`); every other key, Shift applied (`keyshift[]`), goes to
+  `M_Keydown` (the engine's `Menu::keydown`, each screen's `M_*_Key`) or
+  `Key_Console` (`Console::key`). The console key is default.cfg's `bind `` ` ``
+  "toggleconsole"` (and `~`), a binding like any other (`BIND_TOGGLECONSOLE`):
+  over the menu it is `M_Keydown`'s, which ignores it, and during a key grab
+  `M_Keys_Key` refuses it and ends the grab. The Quit prompt is `M_Quit_Key`:
+  only y/Y quit, n/N/Escape go back, Enter and the rest do nothing. The page
+  forwards the mouse buttons (K_MOUSE1..3) while a key is being grabbed, so
+  Customize controls binds them as id's does. Losing the window's focus runs
+  vid_win.c's `ClearAllStates` (`key_clear_states`: nothing stays held). The
+  menu/console exports the tests and automation use (`menu_up`,
+  `menu_select`, `console_enter`, ...) are one key each through the same
+  path, and so is the 2-D oracle's `key` (the C's `oracle_key` is
+  `Key_Event` too). One platform choice: the page hands `Key_Event` the
+  character the player's keyboard layout typed (`ch`), which the console and
+  the Setup name fields insert; id's inserts the key number through its US
+  `keyshift[]` table, which the port still uses when the page gives none —
+  the same on a US layout, and a French or German player types what the
+  keys say. Tests `the_quit_prompt_takes_only_y_and_n`,
+  `the_console_key_over_the_menu_is_the_menus`,
+  `mouse_buttons_bind_on_customize_controls`,
+  `autorepeat_is_ignored_but_for_backspace`, `keydown_is_each_screens_m_key`,
+  `key_init_tables_are_ids`, `key_console_enter_submits_and_echoes_the_line`
+  (an empty Enter echoes `]` as id's); `web/verify_menu.py` (Enter and `` ` ``
+  leave the Quit prompt up; a right click is the key a grab binds). The 2-D
+  oracle is unchanged (every menu scenario 100%, as before).
+- ✅ **The page booted into the main menu over the attract demo, and the
+  demos cycled behind the menu** (MED). Quake starts with `key_dest =
+  key_game`: quake.rc's `startdemos demo1 demo2 demo3` plays with no menu,
+  and during demo playback a console key brings up the main menu
+  (`Key_Event`: `cls.demoplayback && down && consolekeys[key] && key_dest ==
+  key_game` → `M_ToggleMenu_f`; Escape too, the mouse buttons and F-keys
+  not). `M_Menu_Main_f` from outside the menu stops the loop
+  (`m_save_demonum = cls.demonum; cls.demonum = -1`): the demo playing goes
+  on to its end, then `Host_EndGame` disconnects instead of playing the next
+  — the console forced up, the menu over it — and `M_Main_Key`'s Escape puts
+  the loop back and, with nothing playing, starts its next demo
+  (`CL_NextDemo`). The port now does all of it (`App::m_menu_main`,
+  `MenuAction::Resume`, `boot_attract` leaves the menu closed); the page
+  keeps its click-to-start overlay (browsers need a gesture before they play
+  sound), which now says "then press any key for the menu", and the status
+  line and the help say so too. With the console out, `M_Draw` puts the menu
+  over `Draw_ConsoleBackground (vid.height)` instead of the fade
+  (`scr_con_current`), which the disconnected screen now shows
+  (`render::draw_menu_over_console`): the 2-D oracle's new
+  `menu_disconnected` scenario went 41.5 → 99.4% (320x200), 29.8 → 99.4
+  (640x400), 27.7 → 99.4 (960x600) — what is left is the console's version
+  stamp, as in the `console` scenario (`oracle.c` now shoots a frame that
+  renders no view). Tests `boot_attract_plays_the_demo_and_a_key_brings_up_the_menu`,
+  `the_menu_stops_the_attract_loop_until_escape`,
+  `attract_loop_cycles_demo1_demo2_demo3` (no menu over it); the verify
+  scripts that opened with "the attract menu" (`verify_demo`, `_input`,
+  `_menu`, `_extras`, `_timedemo`) now check that no menu is up at boot and
+  that a key brings it.
+- ✅ **`help` printed the port's command list** (MED). menu.c registers
+  `help` as `M_Menu_Help_f`: the Help/Ordering screen on its first page,
+  the menu taking the keyboard from the console (`App::m_menu_help`, which
+  `svc_sellscreen` runs too). The port's list moved to `wasm_help`, a
+  `wasm_` name like the extras' (not id's); `cmdlist`, which id never had,
+  is gone. The page's console drawer and README list both. Test
+  `help_is_the_help_screen_and_wasm_help_the_ports_list`.
+- ✅ **The console had no history, no Tab completion, no scrollback, and
+  typed any Unicode** (MED). `Key_Console` (keys.c) is now whole in the
+  engine's `Console::key`: `key_lines[32]` with `edit_line` / `history_line`
+  (Up walks back over the non-empty lines — at the oldest it stays, the slot
+  after `edit_line`; Down forward, past the newest to an empty line; Enter
+  echoes the line, even an empty one, and keeps it), Tab
+  (`Cmd_CompleteCommand` then `Cvar_CompleteVariable` on the whole line,
+  case-sensitive prefix, the name and a space: `"map "`) over this console's
+  commands in the order id's `cmd_functions` list meets them (registered
+  last, found first: `timedemo`, `playdemo`, `impulse`, `sizedown`, ... `echo`;
+  then `wasm_help`) and its cvars (`viewsize`, the `wasm_*` extras), PgUp/PgDn
+  (and the wheel keys) moving `con_backscroll` by 2 within `con_totallines -
+  (vid.height>>3) - 1`, any print (`Con_Print`) and a new console width
+  (`Con_CheckResize`) resetting it, `Con_DrawConsole` drawing that many lines
+  up; only ASCII 32..126 types (`key >= 32 && key <= 127`), 254 characters at
+  most (`MAXCMDLINE`). The scrollback keeps `con_totallines = CON_TEXTSIZE /
+  con_linewidth` lines as id's ring does (431 at 320 wide, 138 at 960; was a
+  flat 200). Home/End are Key_Console's too, but no console keys, so
+  `Key_Event` runs their bindings (End: `centerview`) as in id. Tests
+  `up_and_down_walk_the_32_line_history`, `tab_completes_a_command_then_a_cvar`,
+  `pgup_and_pgdn_scroll_the_text_back`,
+  `console_history_completion_and_backscroll_through_key_event`,
+  `every_completion_is_a_command_the_console_knows`; `web/verify_extras.py`
+  (Up Up and Tab through the page's keys). 2-D oracle, new scenario
+  `console_scroll` (PgUp twice, then PgDn): 98.4 → 99.2% at 320x200 (738 →
+  398 px, the version stamp left), 98.5 → 99.0 at 640x400, 98.6 → 98.9 at
+  960x600.
+- ✅ **Multiplayer > Setup did nothing** (MED). `M_Menu_Setup_f`,
+  `M_Setup_Draw` and `M_Setup_Key` are ported (`MenuScreen::Setup`): the
+  screen fills from the cvars when it opens (`hostname` "UNNAMED", `_cl_name`
+  "player", `_cl_color` 0) on `setup_cursor` (a static starting at 4, Accept
+  Changes); "Hostname" and "Your name" in 16-column text boxes with the text
+  cursor (10/11) after the name on its row, "Shirt color", "Pants color",
+  "Accept Changes" in its box, `gfx/bigbox.lmp` around `gfx/menuplyr.lmp`
+  drawn through `M_BuildTranslationTable(top*16, bottom*16)` (the shirt rows
+  16..31 and pants rows 96..111 taken from the chosen colour rows, backwards
+  from row 128 on — `M_DrawTransPicTranslate`); Up/Down (menu1), Left/Right
+  and Enter step the colours on their rows (menu3, wrapping 0..13), do
+  nothing on the name rows, Backspace and any key 32..127 edit the names
+  (15 characters), Accept sets what changed and returns to Multiplayer
+  (m_entersound), Escape returns without. The cvars live with the menu's;
+  the console reads and sets them as id's does: `name` / `color` (the
+  client halves of `Host_Name_f` / `Host_Color_f`: print, or set — 15
+  characters; each colour `& 15`, at most 13) and `hostname`, `_cl_name`,
+  `_cl_color` (`Cvar_Command`), all in Tab completion. Not done: the name
+  reaching the player's edict (`netname`, "player entered the game") — the
+  port's server connects the player as "player" (`Server::connect_client_inner`,
+  `server/`, another branch's), and `colormap` is never visible in single
+  player (CENSUS: no chase camera; bodies are coop-only). 2-D oracle, new
+  scenario `menu_setup` (on Accept Changes, the colours stepped, typing the
+  host name, then the name): 100% at 320x200, 640x400 and 960x600, the
+  translated preview included (before: Enter on Setup stayed on Multiplayer,
+  77.3 / 93.6 / 97.1%). Tests `setup_is_m_setup_key`,
+  `translation_table_is_m_buildtranslationtable`,
+  `setup_draws_the_translated_player`,
+  `setup_sets_the_name_and_colours_the_console_reads`; `web/verify_menu.py`
+  (Setup opens, Escape returns).
+- ✅ **The Web extras page's text ran under the plaque** (LOW; the port's
+  own page). Its white header and help lines were centred across the 320
+  columns, so they crossed `qplaque` (x 16..47). The page is now laid out as
+  `M_Options_Draw` lays out Options: the rows from y=32, 8 px apart, labels
+  right-justified from x=16, "on"/"off" at x=220, the cursor at x=200; under
+  them, starting at x=64 (clear of the plaque, as Setup's labels), the white
+  "Not in id's Quake" and the highlighted row's two help lines and its
+  console variable, each at most 32 columns (two help lines shortened).
+  Test `web_extras_screen_draws_in_the_options_idiom` (nothing but the plaque
+  in its columns). Screenshots, 1440x900, the scaled 2-D extra on and off:
+  `extras_{before,after}_scaled2d{1,0}.png` (not committed).
+- ✅ **The canvas box banded the pixelated picture** (LOW; the page). The
+  largest 4:3 box a 1440x900 window fits is 976 wide for the default 960
+  columns: with `image-rendering: pixelated` one column in ~60 was doubled,
+  which striped the menu's checkerboard fade and the 1:1 text; in windows
+  narrower than the framebuffer whole columns of 1:1 text were dropped. The
+  page's `fitCanvas()` now snaps the fitted box, in device pixels per
+  framebuffer column `s`: at most 1/8 past a whole number `k`, the box is
+  exactly `k` (960x720 at 1440x900; the picture gives up at most a ninth of
+  its width); below 1, the fitted box drawn smooth (`image-rendering:
+  auto`); otherwise the fitted box, pixelated as before (1216x912 at
+  1920x1080: 1.27 per column spreads its doubled columns evenly, one in
+  four, and smoothing would blur the whole 3-D view to hide it). It runs on
+  load, resize (so zoom and devicePixelRatio), fullscreen and every
+  resolution change. The rows cannot be made even: the 16:10 framebuffer
+  is shown at 4:3, 1.2 rows per column's width, every fifth row a pixel
+  taller. Measured over the Quit prompt's fade (screen columns that repeat
+  their neighbour): 1440x900, 16 of 977 → 0; 1920x1080, 256 of 1217 (as
+  before); 1024x768 no longer drops columns (smoothed). `web/verify_input.py`
+  checks the three boxes. Screenshots `box_{before,after}_{1440x900,1920x1080}.png`
+  and their zoomed crops (not committed).
 
 ## Final review fixes, engine side (2026-09-25, branch `quake/polish4a`)
 

@@ -5,7 +5,7 @@ source. No dependencies beyond the standard library, `#![forbid(unsafe_code)]`, 
 against the shareware data and against id's own renderer. It runs natively (the `quaketool`
 CLI) and in a web browser (WebAssembly, `<canvas>`, Web Audio).
 
-It plays the shareware episode in single player: the attract demos behind the main menu,
+It plays the shareware episode in single player: the attract demos (any key brings up the main menu),
 New Game into the `start` hub, the eight E1 maps with their monsters, doors, lifts,
 secrets and Chthon, death and respawn, intermission and finale screens, save and load, the
 Options menu, and the drop-down console. Multiplayer and netcode are out of scope.
@@ -138,9 +138,10 @@ departs from id's. The list is one table, `WEB_EXTRAS` in `quake-rs/src/menu.rs`
 
 ## How it is checked
 
-- **Tests.** `cargo test --release` in `quake-rs`: 587 library + 1 `quaketool` + 8
-  integration tests, no game data needed. In `quake-wasm`: 126 end-to-end tests against the
-  embedded shareware pak (plus one ignored harness, `oracle_screen`). All pass at `31775f5`.
+- **Tests.** `cargo test --release` in `quake-rs`: 601 library + 2 `quaketool` + 8
+  integration tests, no game data needed. In `quake-wasm`: 135 end-to-end tests against the
+  embedded shareware pak (plus one ignored harness, `oracle_screen`). All pass at the end of
+  the 2026-09-25 push (after the final review fixes).
 - **Golden renders.** `quaketool scene <pak> maps/e1mN.bsp out.ppm` for e1m1, e1m2, e1m3;
   the sha256 prefixes at `31775f5` are `4807aaa1`, `9ae2b478`, `c65b7046`. A change leaves
   them byte-identical, or it is a deliberate fidelity fix and `AUDIT.md` records the move

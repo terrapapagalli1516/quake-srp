@@ -1,8 +1,9 @@
 #!/usr/bin/env -S uv run --with playwright --script
 """Verify demo-playback parity end-to-end in headless Chromium:
 
-  1. the page boots into the attract demo and the FIRST rendered frames are
-     in-world (no void-camera intro — the signon gate);
+  1. the page boots into the attract demo with no menu (id's key_dest starts
+     at key_game) and the FIRST rendered frames are in-world (no void-camera
+     intro — the signon gate); a key brings up the menu, Escape closes it;
   2. recorded svc_sound one-shots actually PLAY through Web Audio during the
      attract loop (the page's __sndStats.plays counter);
   3. the recorded status bar is drawn: the bottom sbar band stays stable
@@ -82,14 +83,13 @@ with sync_playwright() as p:
 
     # 1. The attract demo starts in-world: the very first canvas frames carry a
     # real scene (the old signon void rendered ~1.2 s of black from a zeroed
-    # camera). Sample as early as possible after boot. The menu is up and
-    # Draw_FadeScreen keeps one pixel in four of the scene, so judge the rows
-    # between id's 320x200 menu (the top of the screen) and the status bar:
-    # a scene there is ~25% lit through the fade, the void 0%.
+    # camera). Sample as early as possible after boot, between the top of the
+    # screen and the status bar. No menu over it: Quake starts at key_game.
     first = pg.evaluate(GRAB)
     frac = nonblack_fraction(first, int(first["h"] * 0.4), int(first["h"] * 0.75)) if first else 0.0
     check("first rendered frame is in-world (no void intro)", frac > 0.15,
-          f"{frac:.0%} non-black under the fade")
+          f"{frac:.0%} non-black")
+    check("the attract demo plays with no menu", pg.evaluate("exp.menu_visible()") == 0)
 
     # 2. Recorded one-shot sounds fire through Web Audio. The page only builds
     # its AudioContext on a user gesture; create + resume it directly (the
@@ -107,6 +107,13 @@ with sync_playwright() as p:
             break
     check("recorded svc_sound one-shots play during the attract loop",
           plays > 0, f"{plays} plays")
+
+    # Any key during demo playback brings up the main menu (Key_Event); Escape
+    # on Main closes it and the demo view is bare again. (The overlay's first
+    # gesture is dismissed by a click, which is no key.)
+    pg.evaluate("document.getElementById('overlay').click()")
+    pg.keyboard.press("KeyA")
+    check("a key during the demo brings up the menu", pg.evaluate("exp.menu_visible()") == 1)
 
     # 3. Close the menu (Escape) so the bare demo view + sbar show, then prove
     # the status bar: the bottom band (the 24-row sbar strip) is drawn from the
