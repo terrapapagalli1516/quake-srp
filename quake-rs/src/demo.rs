@@ -324,6 +324,10 @@ pub struct EntSnapshot {
     pub num: i32,
     pub modelindex: usize,
     pub frame: i32,
+    /// `ent->skinnum`: the `U_SKIN` byte, else the baseline's skin
+    /// (CL_ParseUpdate / CL_ParseStatic) — e.g. yellow armour is armor.mdl
+    /// skin 1.
+    pub skin: i32,
     pub origin: [f32; 3],
     pub angles: [f32; 3],
     /// `ent->effects` (the `U_EFFECTS` byte). 0 when the update omitted it.
@@ -553,12 +557,14 @@ struct Entity {
     // Baseline (default state, restored when an update omits a field).
     base_modelindex: i32,
     base_frame: i32,
+    base_skin: i32,
     base_origin: [f32; 3],
     base_angles: [f32; 3],
     // Current state. A slot grown by `CL_EntityNum` but never spawned/updated
     // keeps `modelindex == 0` and is therefore invisible in the snapshot.
     modelindex: i32,
     frame: i32,
+    skin: i32,
     effects: i32,
     // Interpolation history (CL_ParseUpdate / CL_RelinkEntities):
     // `msg_origins[0]`/`msg_angles[0]` is the most recent server snapshot,
@@ -1058,6 +1064,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
             num: i as i32,
             modelindex: e.modelindex as usize,
             frame: e.frame,
+            skin: e.skin,
             origin,
             angles,
             effects: e.effects,
@@ -1075,6 +1082,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
             num: -1,
             modelindex: e.modelindex.max(0) as usize,
             frame: e.frame,
+            skin: e.skin,
             origin: e.msg_origins[0],
             angles,
             effects: e.effects,
@@ -1579,9 +1587,12 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
         let _ = r.read_byte(); // colormap — consumed, not rendered here
     }
 
-    if bits & U_SKIN != 0 {
-        let _ = r.read_byte(); // skin — consumed
-    }
+    // CL_ParseUpdate: `skin = U_SKIN ? MSG_ReadByte() : ent->baseline.skin`.
+    ent.skin = if bits & U_SKIN != 0 {
+        r.read_byte()
+    } else {
+        ent.base_skin
+    };
 
     // CL_ParseUpdate stores effects (or restores the baseline value); we keep
     // it so a front-end can drive dynamic lights / brightfield particles.
@@ -1663,7 +1674,7 @@ fn parse_baseline(r: &mut NetReader, ent: &mut Entity) {
     ent.base_modelindex = r.read_byte();
     ent.base_frame = r.read_byte();
     let _colormap = r.read_byte();
-    let _skin = r.read_byte();
+    ent.base_skin = r.read_byte();
     for i in 0..3 {
         ent.base_origin[i] = r.read_coord();
         ent.base_angles[i] = r.read_angle();
@@ -1679,6 +1690,7 @@ fn spawn_static(r: &mut NetReader) -> Entity {
     parse_baseline(r, &mut ent);
     ent.modelindex = ent.base_modelindex;
     ent.frame = ent.base_frame;
+    ent.skin = ent.base_skin; // CL_ParseStatic: skinnum = baseline.skin
     ent.effects = 0; // baseline.effects is always 0 (never read from stream)
     ent.msg_origins = [ent.base_origin, ent.base_origin];
     ent.msg_angles = [ent.base_angles, ent.base_angles];

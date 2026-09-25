@@ -238,7 +238,8 @@ pub(crate) fn step_demo(
                 // Demo entities carry their current animation frame from the net
                 // stream — use it so monsters in the demo are actually posed.
                 frame: e.frame.max(0) as usize,
-                skinnum: 0,
+                // R_AliasSetupSkin: `skinnum = currententity->skinnum`.
+                skinnum: e.skin,
             });
         } else if let Some(num) = d
             .demo
@@ -1019,6 +1020,25 @@ mod tests {
         assert_eq!(d.damage_blend, 0.0, "flash fully faded");
     }
 
+    /// CENSUS F14: entity skins come from U_SKIN, else the baseline's skin
+    /// (CL_ParseUpdate); yellow armour is armor.mdl skin 1 — demo2 and demo3
+    /// show one (demo1's stays out of sight).
+    #[test]
+    fn demo_skins_come_from_the_stream() {
+        let pak = pak().expect("pak");
+        for name in ["demo2.dem", "demo3.dem"] {
+            let demo = parse_demo(&pak.read_file(name).unwrap().unwrap()).unwrap();
+            let armor = demo.model_precache.iter().position(|m| m == "progs/armor.mdl");
+            let armor = armor.unwrap_or_else(|| panic!("{name} precaches armor.mdl"));
+            let yellow = demo
+                .frames
+                .iter()
+                .flat_map(|f| &f.entities)
+                .any(|e| e.modelindex == armor && e.skin == 1);
+            assert!(yellow, "{name} draws yellow armour (armor.mdl skin 1)");
+        }
+    }
+
     /// CENSUS F13: CL_RelinkEntities runs R_RocketTrail for model-flag trails in
     /// playback exactly as live: a recorded missile (progs/missile.mdl,
     /// EF_ROCKET) trails fire from its previous origin, one particle per 3
@@ -1035,6 +1055,7 @@ mod tests {
             num,
             modelindex: 2,
             frame: 0,
+            skin: 0,
             origin: [x, 0.0, 0.0],
             angles: [0.0; 3],
             effects: 0,
