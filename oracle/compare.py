@@ -154,6 +154,9 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     ]
     if ents:
         cmd += ["--ents", str(out / f"{case}.c.ents")]
+    # id's live dynamic lights (muzzle flashes, explosions: e.g. --c-cmd +attack)
+    for dl in meta.get("dlights", []):
+        cmd += ["--dlight", ",".join(repr(float(v)) for v in dl)]
     if args.viewmodel and meta["viewmodel"]["model"]:
         vm = meta["viewmodel"]
         cmd += ["--viewmodel", f'{vm["model"]}:{vm["frame"]}',
