@@ -58,9 +58,13 @@ impl Server {
         if self.run_sys("StartFrame", 0, 0).is_err() {
             think_errors += 1; // isolated; the interpreter was reset
         }
-        let n = self.vm.num_edicts();
-
-        for e in 0..n {
+        // `for (i=0 ; i<sv.num_edicts ; i++)`: the bound is re-read every
+        // iteration, so an edict spawned by an earlier think this frame (a
+        // missile, a gib) gets its physics on the frame it was spawned.
+        let mut next = 0;
+        while next < self.vm.num_edicts() {
+            let e = next;
+            next += 1;
             // edict 0 is the world; process every non-free edict, as the C does.
             let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
             if free {
@@ -880,8 +884,11 @@ impl Server {
             Err(_) => think_errors += 1, // isolated; the interpreter was reset
         }
 
-        let n = self.vm.num_edicts();
-        for e in 0..n {
+        // The bound is re-read every iteration, as in SV_Physics (see run_frame).
+        let mut next = 0;
+        while next < self.vm.num_edicts() {
+            let e = next;
+            next += 1;
             let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
             if free {
                 continue;
@@ -1537,6 +1544,58 @@ mod tests {
         server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
         (server, e)
+    }
+
+    #[test]
+    fn an_edict_spawned_by_a_think_moves_on_its_spawn_frame() {
+        // CENSUS L25: SV_Physics' loop re-reads sv.num_edicts every iteration,
+        // so a missile spawned by an earlier think gets its physics the same
+        // frame. The thinker's QC: e = spawn(); e.movetype = MOVETYPE_FLYMISSILE;
+        // e.velocity = '100 0 0'. After one 0.1 s frame it has moved 10 units.
+        let mut b = Builder::new();
+        b.entityfields = 32;
+        for (name, ty, ofs) in [("self", 4, 31), ("other", 4, 32), ("time", EV_FLOAT, 33), ("frametime", EV_FLOAT, 35)] {
+            b.add_global(name, ty, ofs);
+        }
+        for (name, ty, ofs) in [
+            ("classname", EV_STRING, 1), ("movetype", EV_FLOAT, 2), ("nextthink", EV_FLOAT, 3),
+            ("flags", EV_FLOAT, 4), ("velocity", 3, 5), ("origin", 3, 8), ("mins", 3, 11),
+            ("maxs", 3, 14), ("think", EV_FUNCTION, 17), ("solid", EV_FLOAT, 18),
+            ("absmin", 3, 19), ("absmax", 3, 22), ("size", 3, 25), ("groundentity", 4, 28),
+            ("owner", 4, 29),
+        ] {
+            b.add_field(name, ty, ofs);
+        }
+        let spawn = b.add_builtin("spawn", 14);
+        let (g_spawn, g_fmove, g_fvel, g_ptr, g_nine, g_vel) = (40i16, 41i16, 42i16, 43i16, 44i16, 45i16);
+        let st = |op: Op, a: i16, b: i16, c: i16| Statement { op: op as u16, a, b, c };
+        let spawner = b.add_function(
+            "spawner",
+            vec![
+                st(Op::Call0, g_spawn, 0, 0),
+                st(Op::Address, crate::progs::OFS_RETURN as i16, g_fmove, g_ptr),
+                st(Op::StorepF, g_nine, g_ptr, 0),
+                st(Op::Address, crate::progs::OFS_RETURN as i16, g_fvel, g_ptr),
+                st(Op::StorepV, g_vel, g_ptr, 0),
+                st(Op::Done, 0, 0, 0),
+            ],
+        );
+        let progs = Progs::parse(&b.build()).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        server.vm.set_gi(g_spawn as usize, spawn as i32);
+        server.vm.set_gi(g_fmove as usize, 2);
+        server.vm.set_gi(g_fvel as usize, 5);
+        server.vm.set_gf(g_nine as usize, MOVETYPE_FLYMISSILE as f32);
+        server.vm.set_gv(g_vel as usize, [100.0, 0.0, 0.0]);
+        let thinker = server.vm.spawn();
+        server.vm.ent_set_int(thinker, "think", spawner as i32);
+        server.vm.ent_set_float(thinker, "nextthink", server.time());
+        let n0 = server.vm.num_edicts();
+        server.run_frame(0.1).expect("frame");
+        let missile = n0 as i32; // appended by the think
+        assert_eq!(server.vm.ent_get_float(missile, "movetype"), MOVETYPE_FLYMISSILE as f32);
+        let x = server.vm.ent_get_vector(missile, "origin")[0];
+        assert!((x - 10.0).abs() < 1e-3, "moved on its spawn frame: x = {x}");
     }
 
     #[test]
