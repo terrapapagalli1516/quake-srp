@@ -895,6 +895,15 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
   - **Goldens** (640x400): e1m1 `bb64996e` → `2023d7d9` (5025 px, 1.96%),
     e1m2 `8186a64c` → `1ac070d0` (7612 px, 2.97%), e1m3 `f41e8b59` →
     `cc121e29` (5218 px, 2.04%) — texel steps inside 16-pixel segments.
+  - **Brush entities before the world.** id's bmodel faces are in the
+    world's edge list, so an item box or a door cuts the spans of the wall
+    behind it; the port now draws brush entities first, so they cut the
+    world's z-test runs too. e1m3's standard entity frame (the shells box):
+    99.94 → 99.98% against `--spans 16` (the wall right of the box had
+    16-pixel stripes); 61 views facing doors, plats and buttons on e1m1-e1m3
+    unchanged; the exact extra unchanged. Goldens (on the merged base with
+    the mip levels): e1m1 `74522852` → `4807aaa1` (288 px), e1m2 `8ce25660`
+    unchanged, e1m3 `ce0f5c89` → `3531e9cd` (13 px).
   - **Speed:** wasm world −17 to −24% at 1280x800 (demo1 4.37 → 3.59 ms,
     walk_e1m3 3.30 → 2.62), native world +30-40%; PERF_PLAN §6 has the table.
   - The old per-pixel perspective stays as an opt-in extra

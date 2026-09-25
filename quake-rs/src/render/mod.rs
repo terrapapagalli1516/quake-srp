@@ -717,16 +717,16 @@ pub fn render_scene(
     )
 }
 
-/// Render the full scene: the textured world, then each brush submodel
-/// (`bmodels`), then each alias model (`models`), and finally the optional
-/// first-person `viewmodel` — all sharing one z-buffer so every world/model
-/// piece occludes (and is occluded by) the others correctly.
+/// Render the full scene: the brush submodels (`bmodels`) and external item
+/// boxes, then the textured world, then each alias model (`models`), and
+/// finally the optional first-person `viewmodel` — all sharing one z-buffer so
+/// every world/model piece occludes (and is occluded by) the others correctly.
 ///
-/// Brush submodels are drawn *before* alias models, matching `render_scene`'s
-/// world-then-models ordering; correctness does not depend on the order because
-/// the shared depth buffer resolves visibility per pixel. Passing an empty
-/// `bmodels`/`external` slice and `None` `viewmodel` reproduces [`render_scene`]
-/// exactly.
+/// Visibility does not depend on the order (the shared depth buffer resolves it
+/// per pixel); the brush entities go first so that they cut the world's
+/// 16-pixel spans as id's edge list does (see the pass order below). Passing an
+/// empty `bmodels`/`external` slice and `None` `viewmodel` reproduces
+/// [`render_scene`] exactly.
 ///
 /// ## External brush models (item boxes)
 /// `external` is the set of standalone `b_*.bsp` item boxes — Quake's
@@ -873,9 +873,15 @@ pub fn render_scene_ext_sprited(
     // on (via `.then(..)`), so the shared render path never reads a clock. (On wasm,
     // where `Instant` is unavailable, only the opt-in benchmark build turns the
     // profiler on, after installing a JS clock via `set_render_stats_clock`.)
-    let tw = stats_on().then(StatInstant::now);
-    draw_world_textured(&mut image, &mut zbuf, bsp, cam, opts, palette, &turb, time, light_styles, dlights, colormap);
-    if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
+    //
+    // Brush entities first, then the world. The z-buffer makes visibility the
+    // same in any order, but id puts bmodel faces in the world's edge list, so
+    // a door or an item box in front of a wall cuts that wall's spans — and the
+    // 16-pixel span routines restart their grid where a run of passing z tests
+    // starts (`raster.rs`, `z_test_runs`). Drawn first, a bmodel cuts the
+    // world's runs as it cuts id's spans (the case that shows: e1m3's shells
+    // box). A world face in front of a bmodel does not cut its runs; no oracle
+    // view has shown that.
     let ts = stats_on().then(StatInstant::now);
     for bm in bmodels {
         // Inline submodels share the world `bsp`, so their surface blocks ARE cached.
@@ -899,6 +905,9 @@ pub fn render_scene_ext_sprited(
         draw_submodel(&mut image, &mut zbuf, ext.bsp, cam, opts, palette, 0, ext.origin, &turb, time, light_styles, &[], colormap, 0, false);
     }
     if let Some(t) = te { stat(|s| s.external_ns += t.elapsed().as_nanos() as u64); }
+    let tw = stats_on().then(StatInstant::now);
+    draw_world_textured(&mut image, &mut zbuf, bsp, cam, opts, palette, &turb, time, light_styles, dlights, colormap);
+    if let Some(t) = tw { stat(|s| s.world_ns += t.elapsed().as_nanos() as u64); }
     // The sky, span by span, now that every brush surface that can cover it has
     // been drawn (id: `D_DrawSkyScans8` inside `D_DrawSurfaces`, before entities).
     resolve_sky_spans(&mut image, &zbuf, bsp, palette);
