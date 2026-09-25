@@ -156,12 +156,14 @@ pub(crate) struct Walk {
     /// The top-left notify lines (`bprint`/`sprint` through Con_Print, shown by
     /// Con_DrawNotify), on the host clock.
     pub(crate) notify: ConNotify,
-    /// `cl.time`: accumulated game time (seconds), advanced by `dt` each
-    /// `step_walk` that runs the server. On a local server the C's
-    /// `CL_LerpPoint` snaps `cl.time` to the server's message time, so it stops
-    /// with the server while single player is paused behind the menu/console.
-    /// Drives the animated surfaces, light styles, particles, dlight decay, the
-    /// rotating pickups, the bob and the intermission sway.
+    /// `cl.time` (seconds). On a local server `CL_LerpPoint` snaps it to the
+    /// server's message time, `sv.time` after the frame's physics, so it is
+    /// the server's clock: about 1.2 s at a spawn (SV_SpawnServer's 1.0 + the
+    /// signon frames), the save's time after a load, and it stops with the
+    /// server while single player is paused behind the menu/console. Drives
+    /// the sky, liquids, underwater warp, texture/alias animation, light
+    /// styles, particles, dlight decay, the rotating pickups, the bob and the
+    /// intermission sway.
     pub(crate) clock: f32,
     /// Host time (seconds): advanced by every frame's `dt`, paused or not. The
     /// notify lines (Con_DrawNotify ages them in `realtime`) and the centerprint
@@ -638,6 +640,7 @@ pub(crate) fn assemble_walk(
     let pic_complete = lmp("gfx/complete.lmp");
     let pic_inter = lmp("gfx/inter.lmp");
     let pic_finale = lmp("gfx/finale.lmp");
+    let clock = server.time(); // cl.time = sv.time (see `Walk::clock`)
     Some(Walk {
         server,
         bsp,
@@ -681,7 +684,7 @@ pub(crate) fn assemble_walk(
         centerprint: None,
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
-        clock: 0.0,
+        clock,
         host_time: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),

@@ -606,6 +606,9 @@ mod tests {
 
         // ROUND-TRIP FIDELITY: the reloaded world equals the saved instant.
         assert_eq!(world_digest(), digest_saved, "load restored the saved world");
+        // cl.time is the loaded sv.time (not a clock restarted at 0).
+        let saved_time: f32 = text.lines().nth(20).unwrap().trim().parse().unwrap();
+        walk_mut(|w| assert_eq!((w.clock, w.server.time()), (saved_time, saved_time)));
 
         // 100 frames crash-free on the loaded world.
         for _ in 0..100 {

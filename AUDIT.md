@@ -762,6 +762,18 @@ C followed and the test are in the commit message.
   `warp_vrect_is_r_setupframes_warp_buffer_view`,
   `warp_stretches_the_warp_buffer_over_the_screen_view`,
   `underwater_view_renders_into_the_warp_buffer`. Goldens unchanged.
+- ✅ **The client clock is `cl.time`** — the live walk's `w.clock` started at
+  0 and counted `dt`, so the sky, liquids, underwater warp, texture/alias
+  animation and `R_AnimateLight`'s `(int)(cl.time*10)` ran about 1.2 s behind
+  id's (and reset to 0 at every changelevel, restart and load). On a local
+  server `CL_LerpPoint` snaps `cl.time` to the message time, `sv.time` after
+  the frame's physics: `w.clock` is now `server.time()` after every server
+  frame and at every walk build (spawn, changelevel, restart, load = the
+  save's time), and still stops behind the menu. Particles, dlights, beams,
+  the bob, rotating pickups and the intermission sway run on it too, as they
+  do on `cl.time` in the C. Tests `client_clock_is_the_server_clock`, and the
+  load in `save_load_round_trips_the_world_digest`. Demo playback already ran
+  on the recorded `cl.time`.
 
 ## LOW (27)
 

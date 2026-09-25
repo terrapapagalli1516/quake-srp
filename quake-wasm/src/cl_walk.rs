@@ -142,12 +142,10 @@ pub(crate) fn step_walk(
     // keeps going: the palette-shift fades (V_UpdatePalette), the centerprint
     // countdown and notify expiry, the ambient-sound ramps.
     let paused = menu_up;
-    // Guard against a non-finite/negative dt so the clocks only move forward.
+    // Guard against a non-finite/negative dt so the clock only moves forward.
+    // (cl.time, `w.clock`, follows the server's clock below.)
     if dt.is_finite() && dt > 0.0 {
         w.host_time += dt;
-        if !paused {
-            w.clock += dt;
-        }
     }
 
     // 1. Tick the live server with this frame's input. forwardmove/sidemove are
@@ -246,6 +244,9 @@ pub(crate) fn step_walk(
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
         let _ = w.server.client_frame(&cmd, dt);
+        // CL_LerpPoint on a local server: cl.time = the message time, sv.time
+        // after this frame's physics.
+        w.clock = w.server.time();
         apply_fixangle(w);
         parse_client_damage(w, before);
         // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
@@ -264,17 +265,16 @@ pub(crate) fn step_walk(
         match ev {
             quake_rs::server::SvcEvent::Intermission => {
                 // cl.intermission = 1; cl.completed_time = cl.time (cl_parse.c:939).
-                // On a local server cl.time tracks sv.time, which SV_SpawnServer
-                // starts at 1.0 — NOT this walk's clock (which starts at 0), so the
-                // overlay's minutes:seconds shows exactly what vanilla shows. (The
-                // demo parser latches mtime[0], also server time — the paths agree.)
+                // On a local server cl.time is sv.time (`Walk::clock`), which
+                // SV_SpawnServer starts at 1.0, so the overlay's minutes:seconds
+                // shows exactly what vanilla shows. (The demo parser latches
+                // mtime[0], also server time — the paths agree.)
                 w.intermission = 1;
                 w.completed_time = w.server.time();
             }
             quake_rs::server::SvcEvent::Finale(text) => {
                 // cl.intermission = 2 + SCR_CenterPrint (scr_centertime_start).
-                // completed_time = cl.time = sv.time, as above; finale_start stays
-                // in the walk clock — the reveal only uses the DIFFERENCE
+                // completed_time = cl.time = sv.time, as above; the reveal uses
                 // w.clock - finale_start (cl.time - scr_centertime_start in the C).
                 w.intermission = 2;
                 w.completed_time = w.server.time();
@@ -1591,5 +1591,33 @@ mod tests {
         assert_eq!(c, quake_rs::bsp::CONTENTS_EMPTY);
         let (a320, _) = frame_at(&mut w, above, 320, 200);
         assert!(a640 > 3 * a320, "above water: 640x400 renders at full size ({a640} vs {a320})");
+    }
+
+    /// cl.time is the server's clock: on a local server CL_LerpPoint snaps it
+    /// to the message time, sv.time after the frame's physics. So the sky,
+    /// liquids, the underwater warp and R_AnimateLight's `(int)(cl.time*10)`
+    /// start at SV_SpawnServer's 1.0 plus the signon frames, not at 0, stop
+    /// with the server behind the menu, and follow it across a restart and a
+    /// changelevel (a load: `save_load_round_trips_the_world_digest`).
+    #[test]
+    fn client_clock_is_the_server_clock() {
+        let mut w = build_walk().expect("e1m1 boots");
+        let t0 = w.server.time();
+        assert!(t0 > 1.0, "sv.time at spawn: 1.0 + the signon frames ({t0})");
+        assert_eq!(w.clock, t0, "the first frame draws at cl.time = sv.time");
+        for _ in 0..5 {
+            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+            assert_eq!(w.clock, w.server.time());
+        }
+        let t = w.clock;
+        let _ = step_walk(&mut w, 0.05, true, 320, 200); // paused behind the menu
+        assert_eq!((w.clock, w.server.time()), (t, t));
+        try_restart(&mut w);
+        assert_eq!(w.clock, w.server.time());
+        assert!(w.clock < t, "a restarted level's clock starts over");
+        try_changelevel(&mut w, "e1m2");
+        assert_eq!(w.map_name, "maps/e1m2.bsp");
+        assert_eq!(w.clock, w.server.time());
+        assert!(w.clock > 1.0 && w.clock < 2.0, "{}", w.clock);
     }
 }
