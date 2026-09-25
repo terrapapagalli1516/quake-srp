@@ -3,85 +3,8 @@
 //! routes the keyboard to while the console is down. Submitted lines run
 //! through [`execute_console_command`].
 
-use std::collections::VecDeque;
-
-use quake_rs::console::{ConCursor, ConOp};
-
 use crate::app::{ensure_app, APP};
 use crate::host_cmd::execute_console_command;
-
-/// `NUM_CON_TIMES` (console.c): the notify overlay shows the last 4 lines.
-const NUM_CON_TIMES: usize = 4;
-/// `con_notifytime` ("3"): seconds a notify line stays up.
-const CON_NOTIFYTIME: f32 = 3.0;
-
-/// The console text as the notify overlay sees it — `Con_Print` (console.c)
-/// laying printed text into `con_linewidth`-wide lines, word-wrapped
-/// ([`ConCursor`]), each line stamped with the time its first character
-/// arrived (`con_times`), and `Con_DrawNotify` showing the last
-/// [`NUM_CON_TIMES`] lines younger than `con_notifytime`. A line shows as soon
-/// as it starts (a print need not end in `\n`), blank lines included.
-///
-/// In the C the notify lines are the tail of the console's own text buffer:
-/// the same text also goes to the drop-down console's scrollback. The mode
-/// that printed it keeps it in [`ConNotify::take_printed`] until the host
-/// hands it to the App's console ([`Console::print`](quake_rs::console::Console::print)).
-#[derive(Default)]
-pub(crate) struct ConNotify {
-    /// The last console lines and their `con_times` stamps.
-    lines: VecDeque<(String, f32)>,
-    /// `Con_Print`'s position.
-    cursor: ConCursor,
-    /// Text printed since the host last took it for the console scrollback.
-    printed: String,
-}
-
-impl ConNotify {
-    /// `Con_Print(txt)` at clock `now`.
-    pub(crate) fn print(&mut self, txt: &str, now: f32) {
-        let lines = &mut self.lines;
-        self.cursor.print(txt, |op| match op {
-            ConOp::Linefeed => {
-                // Con_Linefeed, and "mark time for transparent overlay".
-                lines.push_back((String::new(), now));
-                while lines.len() > NUM_CON_TIMES {
-                    lines.pop_front();
-                }
-            }
-            ConOp::Unlinefeed => {
-                lines.pop_back(); // con_current--
-            }
-            ConOp::Char(c) => {
-                if let Some((line, _)) = lines.back_mut() {
-                    line.push(c as char);
-                }
-            }
-        });
-        self.printed.push_str(txt);
-    }
-
-    /// The text printed since the last call, for the console scrollback.
-    pub(crate) fn take_printed(&mut self) -> String {
-        std::mem::take(&mut self.printed)
-    }
-
-    /// `Con_DrawNotify`'s lines at clock `now`, top to bottom: the last
-    /// [`NUM_CON_TIMES`] console lines, skipping any older than
-    /// `con_notifytime`.
-    pub(crate) fn visible(&self, now: f32) -> Vec<&str> {
-        self.lines
-            .iter()
-            .filter(|(_, t)| now - t <= CON_NOTIFYTIME)
-            .map(|(l, _)| l.as_str())
-            .collect()
-    }
-
-    /// `Con_ClearNotify` (a level load): nothing is shown until new text. The
-    /// console keeps the text (and still gets what was printed).
-    pub(crate) fn clear(&mut self) {
-        self.lines.clear();
-    }
-}
 
 // --- drop-down console: toggle / typing / execution exports (the `~` key) ---
 
@@ -155,32 +78,6 @@ pub extern "C" fn console_enter() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// CENSUS L11: Con_Print lays text into 38-column console lines (word
-    /// wrapped, a line stamped when it starts) and Con_DrawNotify shows the
-    /// last 4 younger than con_notifytime — fragments join, blank lines count.
-    #[test]
-    fn notify_lines_follow_con_print() {
-        use super::ConNotify;
-        let mut n = ConNotify::default();
-        n.print("You receive ", 1.0);
-        n.print("25", 1.0);
-        assert_eq!(n.visible(1.0), ["You receive 25"], "a partial line already shows");
-        n.print(" health\n", 1.0);
-        assert_eq!(n.visible(1.0), ["You receive 25 health"]);
-        // 38 columns: the word that would cross the edge starts a new line.
-        n.print("aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd\n", 2.0);
-        assert_eq!(
-            n.visible(2.0),
-            ["You receive 25 health", "aaaaaaaaaa bbbbbbbbbb cccccccccc ", "dddddddddd"]
-        );
-        n.print("\n", 2.5); // a blank line takes a slot
-        n.print("last\n", 2.5);
-        assert_eq!(n.visible(2.5), ["aaaaaaaaaa bbbbbbbbbb cccccccccc ", "dddddddddd", "", "last"]);
-        assert_eq!(n.visible(5.2), ["", "last"], "con_notifytime 3 s from each line's start");
-        n.clear();
-        assert!(n.visible(5.2).is_empty());
-    }
 
     /// CENSUS L11 (the rest): Con_Print writes the console's text buffer, so
     /// what the game prints reaches the drop-down console's scrollback as

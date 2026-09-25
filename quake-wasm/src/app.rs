@@ -20,9 +20,9 @@ use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
 use quake_rs::server::Server;
 use quake_rs::tent::{BeamSegment, Beams};
 use quake_rs::wad::Qpic;
+use quake_rs::console::ConNotify;
 
 use crate::PAK;
-use crate::console::ConNotify;
 use crate::host::ShowFps;
 use crate::cl_walk::net_angle;
 use crate::input::{clamp_pitch, KeyMove};
