@@ -722,6 +722,16 @@ C followed and the test are in the commit message.
   `keybindings[]`; now the same `reset_nav()` as New Game. Test
   `load_keeps_every_option_and_binding` (the `viewsize 60`, `save t`, `load t`
   repro).
+- ✅ **Debug-build overflow on sliver alias triangles** (LOW) — after
+  `R_AliasClipTriangle` a sliver (d_xdenom of a few units under a long edge)
+  gets 1/z and light steps far out of `int` range. id's `(int)` gives
+  0x80000000 there (Rust's `as` saturated to 0x7FFFFFFF for positive ones) and
+  its `int` sums wrap; a debug build panicked in `scan_left_edge` (`d_zi +=`,
+  `d_light +=`). `polyse.rs` now converts with `c_ftoi` and wraps every step
+  sum and the subdivision midpoints like the C. Tests
+  `sliver_triangles_wrap_like_the_c_ints`, `float_to_int_is_x86s_not_rusts_saturation`;
+  the review's stress harness (4000 random gun/entity renders with overflow
+  checks) panicked at iteration 3068 before, none now. Goldens unchanged.
 
 ## LOW (27)
 
