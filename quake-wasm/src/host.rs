@@ -52,6 +52,55 @@ fn host_filter_time(realtime: f64, oldrealtime: &mut f64) -> Option<f32> {
     Some((elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
 }
 
+/// [`host_filter_time`], or — with the `wasm_uncapped` extra on (a departure,
+/// opt-in via Options > Web extras, default off) — the same frame without the
+/// 72 fps cap: every call runs, advancing the game by the time since the last
+/// frame under the same [0.001, 0.1] clamps. A 120/144 Hz display then runs
+/// one host frame per refresh, as the port did before it had the gate.
+fn host_frame_time(realtime: f64, oldrealtime: &mut f64, uncapped: bool) -> Option<f32> {
+    if !uncapped {
+        return host_filter_time(realtime, oldrealtime);
+    }
+    let elapsed = realtime - *oldrealtime;
+    *oldrealtime = realtime;
+    Some((elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
+}
+
+/// The `wasm_showfps` extra's measurement (a departure, opt-in via Options >
+/// Web extras, default off): QuakeWorld's `SCR_DrawFPS` counter. Every
+/// presented frame counts (`fps_count++`); once a second of `realtime` has
+/// passed since the window opened (`lastframetime`), the window's rate
+/// becomes the shown value (`lastfps`) and a new window opens. QW shows the
+/// raw count; this divides it by the window's length (at least 1 s, and up
+/// to a frame longer), so a steady 60 Hz reads 60 rather than 60/61.
+#[derive(Debug, Default)]
+pub(crate) struct ShowFps {
+    /// Frames presented in the current window (`fps_count`).
+    count: u32,
+    /// `realtime` when the window opened (`lastframetime`).
+    since: f64,
+    /// The rate drawn (`lastfps`); 0 until the first window closes.
+    shown: u32,
+}
+
+impl ShowFps {
+    /// One presented frame at `realtime`.
+    pub(crate) fn frame(&mut self, realtime: f64) {
+        self.count = self.count.saturating_add(1);
+        let window = realtime - self.since;
+        if window >= 1.0 {
+            self.shown = (self.count as f64 / window).round().min(9999.0) as u32;
+            self.count = 0;
+            self.since = realtime;
+        }
+    }
+
+    /// The frame rate to draw.
+    pub(crate) fn shown(&self) -> u32 {
+        self.shown
+    }
+}
+
 /// The finished RGB frame into the presented RGBA framebuffer (`vid.buffer`
 /// for the page's `ImageData`), each channel through its ramp when `ramps` is
 /// given ([`render::cshift_ramps`]: the cshifts, then gamma), alpha 255.
@@ -96,15 +145,22 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // `realtime += time`): it drives the flashing cursors, which keep
         // animating over a frozen frame.
         a.realtime += real_dt as f64;
+        let uncapped = a.menu.extras().uncapped;
         let dt = if real_dt == 0.0 {
             0.0
         } else {
-            match host_filter_time(a.realtime, &mut a.oldrealtime) {
+            match host_frame_time(a.realtime, &mut a.oldrealtime, uncapped) {
                 Some(frametime) => frametime,
                 None => return,
             }
         };
         ran = 1;
+        // Every presented real frame counts toward the wasm_showfps readout
+        // (counted whether or not it is shown, so switching it on reads true
+        // from the first second); the automation's frozen frames do not.
+        if real_dt > 0.0 {
+            a.show_fps.frame(a.realtime);
+        }
         bench::frame_begin();
         // host_time: the menudot spinner (mode-independent, like realtime).
         a.clock += dt;
@@ -177,6 +233,24 @@ pub extern "C" fn step(dt: f32) -> i32 {
             if wk.pending_sellscreen {
                 wk.pending_sellscreen = false;
                 a.menu.open_help();
+            }
+        }
+
+        // The wasm_showfps extra (off by default): QuakeWorld draws it with the
+        // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the
+        // console and M_Draw — so the menu's fade dims it) and not on the
+        // intermission/finale screens.
+        if a.menu.extras().show_fps {
+            let intermission = if a.mode == 1 {
+                a.demo.as_ref().and_then(|d| d.demo.frames.get(d.idx)).map(|f| f.intermission != 0)
+            } else {
+                a.walk.as_ref().map(|wk| wk.intermission != 0)
+            };
+            if let (Some(false), Some(img), Some(cc), Some(palette)) =
+                (intermission, img.as_mut(), a.conchars.as_ref(), a.active_palette())
+            {
+                let sb_lines = render::calc_refdef(w, h, viewsize, false).sb_lines;
+                render::draw_fps(img, cc, palette, a.show_fps.shown(), sb_lines);
             }
         }
 
@@ -454,6 +528,112 @@ mod tests {
         assert_eq!(step(0.0), 1);
         assert_eq!(step(0.0), 1);
         assert_eq!(clocks(), (host1, real1, walk1));
+    }
+
+    // -- Web extras: wasm_uncapped, wasm_showfps --------------------------------
+
+    #[test]
+    fn host_frame_time_uncapped_runs_every_refresh_with_the_same_clamps() {
+        // Off: exactly Host_FilterTime's gate.
+        for stamps in [[5.0, 10.0, 15.0], [13.0, 26.0, 40.0]] {
+            let (mut a, mut b) = (0.0, 0.0);
+            for t in stamps {
+                assert_eq!(host_frame_time(t / 1000.0, &mut a, false), host_filter_time(t / 1000.0, &mut b));
+                assert_eq!(a, b);
+            }
+        }
+        // On: every refresh runs, whatever the display, and the game clock
+        // sums to real time.
+        for hz in [60.0f64, 75.0, 120.0, 144.0, 165.0, 240.0] {
+            let (mut realtime, mut old, mut game) = (0.0f64, 0.0f64, 0.0f64);
+            for _ in 0..hz as usize * 2 {
+                realtime += (1.0 / hz) as f32 as f64;
+                let f = host_frame_time(realtime, &mut old, true);
+                game += f.expect("uncapped: every refresh is a host frame") as f64;
+            }
+            assert!((game - realtime).abs() < 1e-4, "{hz} Hz: game {game} vs real {realtime}");
+        }
+        // Host_FilterTime's clamps still hold: a hitch advances 0.1 s at most,
+        // and a sliver at least 1 ms.
+        let mut old = 0.0;
+        assert_eq!(host_frame_time(0.5, &mut old, true), Some(HOST_FRAMETIME_MAX));
+        assert_eq!(host_frame_time(0.5001, &mut old, true), Some(HOST_FRAMETIME_MIN));
+        assert_eq!(old, 0.5001);
+    }
+
+    #[test]
+    fn step_with_wasm_uncapped_runs_one_frame_per_refresh_and_off_restores_72() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        let walk_clock = || APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().clock);
+        let second_at_144hz = || (0..144).map(|_| step(1.0 / 144.0)).sum::<i32>();
+        assert_eq!(second_at_144hz(), 72, "default: id's 72 fps cap");
+        crate::menu::set_extras(1);
+        let w0 = walk_clock();
+        assert_eq!(second_at_144hz(), 144, "wasm_uncapped: every refresh");
+        assert!((walk_clock() - w0 - 1.0).abs() < 1e-3, "the world still advances 1 s a second");
+        crate::menu::set_extras(0);
+        assert_eq!(second_at_144hz(), 72, "off again: the cap is back");
+    }
+
+    #[test]
+    fn show_fps_measures_presented_frames_a_second() {
+        let run = |hz: f64, secs: usize, every: usize| {
+            let mut s = ShowFps::default();
+            let mut realtime = 0.0f64;
+            let mut shown = Vec::new();
+            for i in 1..=(hz as usize * secs) {
+                realtime += (1.0 / hz) as f32 as f64;
+                if i % every == 0 {
+                    s.frame(realtime);
+                    shown.push(s.shown());
+                }
+            }
+            shown
+        };
+        let at60 = run(60.0, 3, 1);
+        assert_eq!(at60[..59], [0; 59], "nothing to show before the first second");
+        assert!(at60[60..].iter().all(|&f| f == 60), "a steady 60: {at60:?}");
+        assert!(run(144.0, 3, 1)[150..].iter().all(|&f| f == 144), "uncapped 144 Hz");
+        assert!(run(144.0, 3, 2)[80..].iter().all(|&f| f == 72), "the cap's 72 at 144 Hz");
+        assert!(run(100.0, 3, 2)[60..].iter().all(|&f| f == 50), "the cap's 50 at 100 Hz");
+    }
+
+    #[test]
+    fn wasm_showfps_draws_the_rate_bottom_right_above_the_status_bar_only_when_on() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        for _ in 0..90 {
+            step(1.0 / 60.0);
+        }
+        let (w, h) = APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            assert_eq!(a.show_fps.shown(), 60, "60 Hz presents 60 frames a second");
+            (a.render_w, a.render_h)
+        });
+        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        // Frozen frames (dt = 0): only the readout can differ.
+        step(0.0);
+        let off = grab();
+        crate::menu::set_extras(2);
+        step(0.0);
+        let on = grab();
+        assert_ne!(off, on, "wasm_showfps draws");
+        // " 60 FPS" at virtual x 256..312, y 144..152 (viewsize 100: sb_lines
+        // 48), scaled by w/320 from the bottom.
+        let s = w as f64 / 320.0;
+        let (x0, x1) = ((256.0 * s) as usize, (312.0 * s) as usize);
+        let (y0, y1) = (h - (56.0 * s) as usize, h - (48.0 * s) as usize);
+        for (i, (a, b)) in off.chunks_exact(4).zip(on.chunks_exact(4)).enumerate() {
+            if a != b {
+                let (x, y) = (i % w, i / w);
+                assert!((x0..x1).contains(&x) && (y0..y1).contains(&y), "changed ({x},{y})");
+            }
+        }
+        crate::menu::set_extras(0);
+        step(0.0);
+        assert_eq!(grab(), off, "off again: id's frame, byte for byte");
     }
 
     #[test]

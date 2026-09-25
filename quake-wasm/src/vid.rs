@@ -90,6 +90,14 @@ pub extern "C" fn viewsize() -> f32 {
     })
 }
 
+/// Set the `viewsize` cvar, bounded to 30..=120 (the console's `viewsize n`):
+/// the page restoring the size it saved, as `Host_WriteConfiguration`'s
+/// config.cfg carries `viewsize` across sessions in id's Quake.
+#[no_mangle]
+pub extern "C" fn set_viewsize(v: f32) {
+    ensure_app(|a| a.menu.set_viewsize(v));
+}
+
 #[no_mangle]
 pub extern "C" fn framebuffer() -> *const u8 {
     APP.with(|c| {
@@ -126,6 +134,22 @@ mod tests {
     use crate::test_util::*;
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
+
+    #[test]
+    fn set_viewsize_restores_the_cvar_bounded_like_the_console() {
+        // The page's restore of the saved viewsize (config.cfg's archived
+        // cvar): bounded to 30..120 like `viewsize n`, survives a re-boot.
+        assert_eq!(viewsize(), render::VIEWSIZE_DEFAULT);
+        set_viewsize(90.0);
+        assert_eq!(viewsize(), 90.0);
+        set_viewsize(500.0);
+        assert_eq!(viewsize(), 120.0);
+        set_viewsize(f32::NAN);
+        assert_eq!(viewsize(), 30.0, "a non-number reads as 0 (atof), the minimum");
+        set_viewsize(110.0);
+        assert_eq!(boot(), 1);
+        assert_eq!(viewsize(), 110.0, "boot keeps it");
+    }
 
     #[test]
     fn clamp_resolution_clamps_into_envelope() {

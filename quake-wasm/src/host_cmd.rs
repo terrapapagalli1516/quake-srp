@@ -7,9 +7,10 @@ use quake_rs::bsp::Bsp;
 use quake_rs::dlight::DynamicLights;
 use quake_rs::particles::ParticleSystem;
 use quake_rs::progs::Progs;
+use quake_rs::render;
 use quake_rs::server::Server;
 
-use crate::app::{build_walk_map, ensure_app, spawn_view_angles, Walk};
+use crate::app::{build_walk_map, ensure_app, spawn_view_angles, App, Walk};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma::{bump_sound_generation, queue_static_sounds};
 
@@ -70,6 +71,13 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  save <name>   load <name>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
+                a.console.println("web extras (not id's; Options menu):");
+                let mut line = String::from(" ");
+                for (name, _) in WASM_EXTRAS {
+                    line.push(' ');
+                    line.push_str(name);
+                }
+                a.console.println(line + " [0|1]");
             });
             return;
         }
@@ -96,6 +104,13 @@ pub(crate) fn execute_console_command(line: &str) {
             return;
         }
         _ => {}
+    }
+
+    // The Web extras (Options > Web extras): the port's opt-in departures,
+    // under a `wasm_` prefix no id command or cvar uses.
+    if let Some(&(name, extra)) = WASM_EXTRAS.iter().find(|(n, _)| *n == cmd_lower) {
+        ensure_app(|a| wasm_extra_command(a, name, extra, argv.get(1).copied()));
+        return;
     }
 
     // `map <name>` rebuilds the walk on a new level; handle it specially because
@@ -145,6 +160,29 @@ pub(crate) fn execute_console_command(line: &str) {
     );
     if !known {
         ensure_app(|a| a.console.println(format!("unknown command: {cmd}")));
+    }
+}
+
+/// The Web extras' console commands, each switching one extra: no argument
+/// prints it the way `Cvar_Command` prints a cvar, one argument sets it
+/// (`atof(arg) != 0` is on). Exact perspective is left out of a build without
+/// it ([`render::EXTRAS_HAS_EXACTPERSP`]).
+const WASM_EXTRAS_ALL: [(&str, render::Extra); 3] = [
+    ("wasm_uncapped", render::Extra::Uncapped),
+    ("wasm_showfps", render::Extra::ShowFps),
+    ("wasm_exactpersp", render::Extra::ExactPersp),
+];
+const WASM_EXTRAS: &[(&str, render::Extra)] =
+    if render::EXTRAS_HAS_EXACTPERSP { &WASM_EXTRAS_ALL } else { WASM_EXTRAS_ALL.split_at(2).0 };
+
+/// Run one `wasm_*` extra command (see [`WASM_EXTRAS`]).
+fn wasm_extra_command(a: &mut App, name: &str, extra: render::Extra, arg: Option<&str>) {
+    match arg {
+        None => {
+            let on = a.menu.extras().get(extra) as u8;
+            a.console.println(format!("\"{name}\" is \"{on}\""));
+        }
+        Some(v) => a.menu.set_extra(extra, v.parse::<f32>().unwrap_or(0.0) != 0.0),
     }
 }
 
@@ -579,6 +617,40 @@ mod tests {
         key_down(i32::from(b'-'));
         key_up(i32::from(b'-'));
         assert_eq!(viewsize(), 110.0, "no binding runs while the menu is up");
+    }
+
+    #[test]
+    fn wasm_extra_commands_print_and_set_like_cvars() {
+        use crate::menu::extras;
+        let last_line = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
+        };
+        // No walk needed: they are host settings, like viewsize.
+        console_toggle();
+        assert_eq!(extras(), 0, "every extra starts off");
+        run_console_line("wasm_uncapped");
+        assert_eq!(last_line().as_deref(), Some("\"wasm_uncapped\" is \"0\""));
+        run_console_line("wasm_uncapped 1");
+        assert_eq!(extras(), 1);
+        run_console_line("WASM_SHOWFPS 1"); // Cmd_ExecuteString is case-blind
+        assert_eq!(extras(), 3);
+        run_console_line("wasm_showfps");
+        assert_eq!(last_line().as_deref(), Some("\"wasm_showfps\" is \"1\""));
+        run_console_line("wasm_uncapped 0");
+        run_console_line("wasm_showfps junk"); // atof("junk") = 0: off
+        assert_eq!(extras(), 0);
+        run_console_line("wasm_exactpersp 1");
+        assert_eq!(
+            extras(),
+            if render::EXTRAS_HAS_EXACTPERSP { 4 } else { 0 },
+            "exact perspective only where the renderer has it"
+        );
+        run_console_line("help");
+        let help: Vec<String> = APP.with(|c| {
+            c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
+        });
+        let help = help.join("\n");
+        assert!(help.contains("wasm_uncapped wasm_showfps"), "help lists them: {help}");
     }
 
     // -----------------------------------------------------------------------

@@ -68,17 +68,18 @@ pub(crate) mod fixtures;
 pub use crate::console::{draw_console, draw_notify, Console};
 pub use crate::draw::conchars_pic;
 pub use crate::menu::{
-    draw_menu, Menu, MenuAction, MenuPics, MenuScreen, MenuSound, BIND_ATTACK, BIND_BACK,
-    BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT, BIND_LOOKDOWN,
-    BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP, BIND_RIGHT,
-    BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, NEW_GAME_MAP, NUM_HELP_PAGES,
-    RESOLUTION_PRESETS,
+    draw_menu, Extra, Extras, Menu, MenuAction, MenuPics, MenuScreen, MenuSound, BIND_ATTACK,
+    BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
+    BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP,
+    BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, EXTRAS_HAS_EXACTPERSP,
+    NEW_GAME_MAP, NUM_HELP_PAGES, RESOLUTION_PRESETS,
 };
 pub use crate::sbar::{
     draw_finale_overlay, draw_hud_into, draw_intermission_overlay, Hud, IntermissionStats,
 };
 pub use crate::screen::{
-    calc_refdef, compose_view, draw_centerprint, ViewRect, SB_LINES_FULL, VIEWSIZE_DEFAULT,
+    calc_refdef, compose_view, draw_centerprint, draw_fps, ViewRect, SB_LINES_FULL,
+    VIEWSIZE_DEFAULT,
 };
 // The renderer's public API (its files are private).
 pub use alias::{ModelInstance, Viewmodel};
