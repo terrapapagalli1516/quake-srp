@@ -1100,7 +1100,10 @@ flat colour on both sides, and diffs the screens: 63 shots x 3 modes. Before
 the branch the shots' 2-D pixels matched 37-100% at 320x200 and 0-100% (mostly
 under 55%) at 640x400 and 960x600; after, 57 of 63 shots in each mode are
 exact and the other six are four explained residues (95.5-99.9%). Goldens unchanged
-(`959d0221`/`0cd18471`/`b63ae8b7`, 3-D only).
+(`959d0221`/`0cd18471`/`b63ae8b7`, 3-D only). (Two of the four residues, the
+new-weapon flash and Single Player after Load, were closed on `quake/polish2`; the
+other two, the conback's version string and the Video mode list, plus the Options
+page's Web extras row, are what `oracle/README.md` lists as left.)
 
 - ✅ **Ammo counts 4 px left** (`8b960c2`) — `Sbar_DrawCharacter` draws at
   `x + ((vid.width - 320)>>1) + 4` (sbar.c:293); the port's inventory counts
@@ -1541,8 +1544,8 @@ aside:
 - The live host hands `client_frame` an f32 `dt`, which the server widens;
   call `client_frame_f64` with `Host_FilterTime`'s double `host_frametime`, so
   `sv.time` adds exactly id's frame times.
-- `census_tests.rs`'s module doc says the tests are `#[ignore]`d; all twenty
-  run in the normal suite.
+- `census_tests.rs`'s module doc says the tests are `#[ignore]`d; all ten
+  (this line said twenty; the file has ten) run in the normal suite.
 - The page's sound law (not quake-wasm, but the same pass): `playRouted` /
   `spatializeDynLoop` clamp each side after the master volume (id clamps
   `leftvol`/`rightvol` at 255, `snd_mix.c`, then scales by `volume`), and
