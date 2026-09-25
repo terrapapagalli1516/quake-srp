@@ -21,8 +21,8 @@ use crate::input::{
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
 use crate::view::{
-    parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE,
-    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
+    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
 };
 
 /// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
@@ -83,7 +83,7 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     vm.ent_set_float(p, "dmg_save", 0.0);
     let byte = |f: f32| (f as i32) & 255;
     let pd = parse_damage(byte(save), byte(take), from, ent_origin, [w.pitch, w.yaw, 0.0]);
-    w.damage_blend = (w.damage_blend + pd.percent).clamp(0.0, 150.0);
+    w.damage_blend = cshift_add(w.damage_blend, pd.percent);
     w.damage_color = pd.color;
     w.v_dmg_roll = pd.roll;
     w.v_dmg_pitch = pd.pitch;
@@ -798,8 +798,9 @@ pub(crate) fn step_walk(
     //     last, matching software V_UpdatePalette's whole-screen palette shift
     //     (it tints the HUD, menu and console too — not the GL 3D-viewport-only
     //     behaviour).
-    w.damage_blend = (w.damage_blend - dt * 150.0).max(0.0);
-    w.bonus_blend = (w.bonus_blend - dt * BONUS_FADE).max(0.0);
+    let frametime = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+    w.damage_blend = cshift_drop(w.damage_blend, frametime, DAMAGE_FADE);
+    w.bonus_blend = cshift_drop(w.bonus_blend, frametime, BONUS_FADE);
     // V_CalcBlend order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let eye_contents = quake_rs::world::point_contents(&w.bsp, eye);
     // Underwater sine wobble (D_WarpScreen): when the eye is in water/slime/lava
@@ -1251,8 +1252,9 @@ mod tests {
             cshifts.iter().any(|&(c, pct)| c == [255, 0, 0] && pct > 0.0),
             "a red damage cshift: {cshifts:?}"
         );
-        // count = max(20*0.5, 10) = 10: percent 30, then one 0.05 s drop.
-        assert!((w.damage_blend - (30.0 - 0.05 * 150.0)).abs() < 1e-3, "{}", w.damage_blend);
+        // count = max(20*0.5, 10) = 10: percent 30, then one 0.05 s drop of 7.5,
+        // truncated like the C's int percent.
+        assert_eq!(w.damage_blend, 22.0);
         assert!(w.v_dmg_pitch > 5.0, "hit from the front pitches the view: {}", w.v_dmg_pitch);
         assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < crate::view::V_KICKTIME, "kick running");
         assert!(w.server.time() <= w.faceanimtime, "the pain face shows");

@@ -21,6 +21,27 @@ pub(crate) const BONUS_COLOR: [u8; 3] = [215, 186, 69];
 pub(crate) const BONUS_PERCENT: f32 = 50.0;
 /// V_UpdatePalette's bonus drop per second (`host_frametime*100`).
 pub(crate) const BONUS_FADE: f32 = 100.0;
+/// V_UpdatePalette's damage drop per second (`host_frametime*150`).
+pub(crate) const DAMAGE_FADE: f32 = 150.0;
+
+/// `cl.cshifts[CSHIFT_DAMAGE].percent += 3*count` then the 0..150 clamp
+/// (V_ParseDamage). `percent` is an `int` in the C (client.h `cshift_t`), so
+/// the float sum truncates back to a whole percent.
+pub(crate) fn cshift_add(percent: f32, add: f32) -> f32 {
+    ((percent + add) as i32).clamp(0, 150) as f32
+}
+
+/// V_UpdatePalette's per-frame drop, `percent -= host_frametime*rate; if
+/// (percent <= 0) percent = 0;` — on an `int`, so every frame truncates: the
+/// damage flash loses 3 a frame at 72 fps (not 2.08), the bonus flash 2.
+pub(crate) fn cshift_drop(percent: f32, frametime: f32, rate: f32) -> f32 {
+    let p = (percent - frametime * rate) as i32;
+    if p <= 0 {
+        0.0
+    } else {
+        p as f32
+    }
+}
 
 /// Run server-stuffed text (`svc_stufftext`: `Cbuf_AddText`, then
 /// `Cbuf_Execute` splits it into commands at `;` and newlines) for the only
@@ -99,6 +120,17 @@ pub(crate) fn parse_damage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cshift_percents_are_ints() {
+        // 150 at 72 fps: 150 - 2.083 = 147.9 -> 147 (the C's int), 3 a frame.
+        assert_eq!(cshift_drop(150.0, 1.0 / 72.0, DAMAGE_FADE), 147.0);
+        assert_eq!(cshift_drop(50.0, 1.0 / 72.0, BONUS_FADE), 48.0);
+        assert_eq!(cshift_drop(2.0, 1.0 / 72.0, DAMAGE_FADE), 0.0);
+        // count 10.5 -> 3*count 31.5 -> 31; the clamp at 150.
+        assert_eq!(cshift_add(0.0, 31.5), 31.0);
+        assert_eq!(cshift_add(140.0, 30.0), 150.0);
+    }
 
     #[test]
     fn item_gettime_stamps_only_newly_set_bits() {

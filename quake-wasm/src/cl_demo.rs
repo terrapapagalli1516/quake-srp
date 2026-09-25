@@ -17,8 +17,8 @@ use crate::snd_dma::{
 };
 use crate::vid::backtile_for;
 use crate::view::{
-    parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR, BONUS_FADE,
-    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
+    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
 };
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
@@ -107,7 +107,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize) {
     // the directional view kick from the recorded attack origin.
     for dmg in &damage {
         let pd = parse_damage(dmg.armor, dmg.blood, dmg.from, view_entity_origin, view_angles);
-        d.damage_blend = (d.damage_blend + pd.percent).clamp(0.0, 150.0);
+        d.damage_blend = cshift_add(d.damage_blend, pd.percent);
         d.damage_color = pd.color;
         d.v_dmg_roll = pd.roll;
         d.v_dmg_pitch = pd.pitch;
@@ -563,8 +563,8 @@ pub(crate) fn step_demo(
     // composited frame (HUD + menu + console), like the live walk.
     {
         let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-        d.damage_blend = (d.damage_blend - sdt * 150.0).max(0.0);
-        d.bonus_blend = (d.bonus_blend - sdt * BONUS_FADE).max(0.0);
+        d.damage_blend = cshift_drop(d.damage_blend, sdt, DAMAGE_FADE);
+        d.bonus_blend = cshift_drop(d.bonus_blend, sdt, BONUS_FADE);
     }
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
@@ -987,9 +987,9 @@ mod tests {
         let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
         assert_eq!(d.idx, 1, "advanced onto the damage frame");
         // count = max(10, blood*0.5) = 10 -> percent 30, faded by 0.05*150 =
-        // 7.5 within the same step (V_UpdatePalette) -> 22.5.
+        // 7.5 within the same step (V_UpdatePalette) -> 22 (the C's int).
         assert!(
-            (d.damage_blend - 22.5).abs() < 1e-3,
+            d.damage_blend == 22.0,
             "V_ParseDamage percent 3*count then dt*150 fade, got {}",
             d.damage_blend
         );
