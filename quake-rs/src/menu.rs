@@ -263,7 +263,7 @@ pub enum MenuScreen {
     /// The multiplayer submenu (`m_multiplayer`): Join / New Game / Setup over
     /// the `mp_menu` art. Netcode is out of scope, so — like the C with zero
     /// net drivers — Join/New Game don't respond and the screen shows
-    /// "No Communications Available" (plus a port-scope note line).
+    /// "No Communications Available".
     Multiplayer,
     /// The options submenu (`m_options`): the full 13-row layout
     /// ([`OPTIONS_ITEMS`]). Sliders + checkboxes are adjusted with left/right.
@@ -1688,7 +1688,7 @@ fn draw_load_save_screen(
 /// (16,4) (drawn by the caller), the `p_multi` title centered, the `mp_menu`
 /// 3-item list at (72,32), the animated menudot cursor at (54, 32 + cursor*20)
 /// — and, since no net driver exists (netcode is out of scope), the C's exact
-/// "No Communications Available" line at y=148, plus one port-scope note line.
+/// "No Communications Available" line at y=148.
 #[allow(clippy::too_many_arguments)]
 fn draw_multiplayer_screen(
     image: &mut Image,
@@ -1717,10 +1717,6 @@ fn draw_multiplayer_screen(
         let line = "No Communications Available";
         let cx = MENU_VIRT_W * 0.5 - (line.len() as f32 * 8.0) * 0.5;
         draw_string_scaled(image, cc, cx, 148.0, line, scale, ox, oy, palette);
-        // PORT NOTE (not in the C): say *why* — multiplayer is out of scope.
-        let note = "(multiplayer is not part of this port)";
-        let nx = (MENU_VIRT_W - note.len() as f32 * 8.0) * 0.5;
-        draw_string_scaled(image, cc, nx, 156.0, note, scale, ox, oy, palette);
     }
 }
 
