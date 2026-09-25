@@ -15,7 +15,7 @@ use super::{
     SOLID_TRIGGER,
 };
 use crate::math::{add as v_add, Vec3};
-use crate::vm::{HostTrace, Vm};
+use crate::vm::{EdictLeafs, HostTrace, Vm};
 
 // ---------------------------------------------------------------------------
 // Entity-aware move, impact, and trigger touching.
@@ -30,11 +30,12 @@ use crate::vm::{HostTrace, Vm};
 // structure). Brush-model rotation (the `QUAKE2` branch) is out of scope.
 // ---------------------------------------------------------------------------
 
-/// The bounds half of `SV_LinkEdict`: `absmin = origin + mins`,
-/// `absmax = origin + maxs`. (The C also inserted the edict into the area grid
-/// and touched triggers; neither is modelled here.) `pub(crate)` so the
-/// savegame loader (`save.rs`) can relink loaded edicts exactly as
-/// `Host_Loadgame_f` does (`SV_LinkEdict(ent, false)`).
+/// `SV_LinkEdict` without the area grid: the abs box (`absmin = origin +
+/// mins`, `absmax = origin + maxs`, widened below) and the PVS leaves
+/// (`SV_FindTouchedLeafs`, see [`find_touched_leafs`]). (The C also inserted
+/// the edict into the area grid and touched triggers; neither is modelled
+/// here.) `pub(crate)` so the savegame loader (`save.rs`) can relink loaded
+/// edicts exactly as `Host_Loadgame_f` does (`SV_LinkEdict(ent, false)`).
 pub(crate) fn link_edict(vm: &mut Vm, e: i32) {
     let origin = vm.ent_get_vector(e, "origin");
     let mins = vm.ent_get_vector(e, "mins");
@@ -58,6 +59,28 @@ pub(crate) fn link_edict(vm: &mut Vm, e: i32) {
     }
     vm.ent_set_vector(e, "absmin", absmin);
     vm.ent_set_vector(e, "absmax", absmax);
+    find_touched_leafs(vm, e, absmin, absmax);
+}
+
+/// The PVS half of `SV_LinkEdict` (world.c): `ent->num_leafs = 0; if
+/// (ent->v.modelindex) SV_FindTouchedLeafs (ent, sv.worldmodel->nodes);` —
+/// record up to [`MAX_ENT_LEAFS`] non-solid world leaves the abs box touches,
+/// which `SV_WriteEntitiesToClient` tests against the client's fat PVS. The C
+/// returns before this for the world and for a free edict, leaving their
+/// leaves as they were. Without a host (unit-test VMs) nothing is recorded.
+///
+/// [`MAX_ENT_LEAFS`]: crate::vm::MAX_ENT_LEAFS
+fn find_touched_leafs(vm: &mut Vm, e: i32, absmin: Vec3, absmax: Vec3) {
+    if e <= 0 || vm.is_free_edict(e) {
+        return;
+    }
+    let mut leafs = EdictLeafs::default();
+    if vm.ent_get_float(e, "modelindex") != 0.0 {
+        if let Some(host) = vm.host.as_deref() {
+            host.bsp().touched_leafs(absmin, absmax, &mut |leaf| leafs.push(leaf));
+        }
+    }
+    vm.set_edict_leafs(e, leafs);
 }
 
 /// The result of [`sv_move`]: a world-collision trace plus the edict that was

@@ -830,6 +830,46 @@ One line per fix; evidence and tests in the commit, the rows in `CENSUS.md`.
 - ✅ **L6 ED_Alloc / ED_Free** — `Vm::spawn` reuses a free slot only if it was freed in the first two seconds of server time or more than 0.5 s ago (`freetime`), so a missile spawned the frame another is removed never inherits its slot (no stray trail); `Vm::free_edict` clears only `ED_Free`'s fields (model, takedamage, modelindex, colormap, skin, frame, origin, angles, solid; nextthink -1) and keeps the rest, as id does. Tests `ed_alloc_waits_half_a_second_before_reusing_a_freed_slot`, `ed_free_clears_only_the_fields_the_c_clears`.
 - ✅ **F7 the player's name** — `connect_client_inner` sets up the client edict as `Host_Spawn_f` does before `ClientConnect`: `netname` "player" (cl_name), `team` 1 ((cl_color & 15) + 1), `colormap` = its edict number. Obituaries read "player was shot by a Grunt". Test `census_player_netname_is_player`.
 
+## Entity culling (PERF_PLAN C1; 2026-09-25, branch `quake/sim`)
+
+- ✅ **C1: the live client relinks only what the server sends** (`SV_WriteEntitiesToClient`,
+  `CL_RelinkEntities`). The port used to relink and draw every edict with a model, every frame.
+  That lit walls from behind (CENSUS L22), trailed and spun what nobody could see, and drew 98
+  alias models per frame on e1m3 for about 3 visible.
+  - Now `SV_LinkEdict` records the edict's leaves (`SV_FindTouchedLeafs`, at most
+    `MAX_ENT_LEAFS` = 16, front child first). `SV_FatPVS` unions the PVS of every leaf within 8
+    units of the player's `origin + view_ofs`. An entity is sent when it has a `modelindex`, a
+    non-empty `model` and a leaf in that set; the player is always sent. `step_walk` gives
+    `EF_*` lights, trails, `EF_ROTATE` and drawing only to those. An entity that drops out
+    loses its trail history, as `CL_ParseUpdate`'s forcelink restarts it.
+  - `PF_makestatic` marks the edict a static. id frees the edict into the signon; the port keeps
+    it, because edict numbering and savegames follow it. A static is never relinked. It is drawn
+    when a leaf of its `R_AddEfrags` box is in the PVS of the leaf holding the view origin
+    (`R_MarkLeaves`, not fattened), after the relinked entities, as `R_StoreEfrags` appends it.
+    The box is ±16 for alias models (`Mod_LoadAliasModel`'s "FIXME"), ±maxwidth/2 and
+    ±maxheight/2 for sprites, and the model's bounds for brush models.
+  - Evidence: frame hashes are identical on four bench workloads (PERF_PLAN C1). The goldens,
+    the simbench counts and the census output are unchanged. Tests:
+    - `an_entity_outside_the_fat_pvs_is_not_drawn_and_its_flash_lights_nothing`: L22, with a
+      control that the light would have lit the wall.
+    - `an_entity_in_view_is_drawn_and_its_flash_made`.
+    - `statics_draw_through_efrags_in_the_view_pvs`.
+    - `touched_leafs_*`, `edict_leafs_cap_at_max_ent_leafs`, `leaf_pvs_*`,
+      `fat_pvs_unions_the_leaves_within_8_units`.
+  - Accepted gaps:
+    - Statics use the edict's float origin and angles, not `svc_spawnstatic`'s coord and angle
+      bytes.
+    - `R_RecursiveWorldNode`'s frustum test on an efrag's leaf is left out.
+      `R_AliasCheckBBox` and the z-buffer hide the same pixels, unless a mesh reaches past its
+      efrag box.
+    - `SV_WriteEntitiesToClient`'s "packet overflow" cutoff (`MAX_DATAGRAM`) is not modelled.
+    - Demo statics are still drawn without the efrag test. The output is the same; only the cost
+      differs.
+    - The `quaketool scene` tool view draws every entity.
+  - Seen, not changed: the port's `SV_ClipToLinks` "points never interact" test uses
+    `maxs - mins` where the C reads `v.size`. The two differ only if QuakeC writes
+    `mins`/`maxs` without `setsize`.
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

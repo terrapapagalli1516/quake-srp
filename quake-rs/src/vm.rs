@@ -117,6 +117,40 @@ const RUNAWAY: u32 = 100_000;
 /// so a runaway `spawn()` loop fails cleanly instead of growing memory unbounded.
 pub const MAX_EDICTS: usize = 600;
 
+/// `MAX_ENT_LEAFS` (progs.h): how many BSP leaves `SV_FindTouchedLeafs`
+/// records for one edict. An entity touching more is known by its first 16
+/// only, so the server can miss it (a large door can vanish, as in id's game).
+pub const MAX_ENT_LEAFS: usize = 16;
+
+/// `edict_t.num_leafs` / `leafnums[]` (progs.h): the world leaves an edict
+/// touched when `SV_LinkEdict` last linked it (see
+/// [`crate::bsp::Bsp::touched_leafs`]). `SV_WriteEntitiesToClient` sends an
+/// entity only when one of them is in the client's fat PVS. Leaf numbers are
+/// `bsp.leafs` indices (the C stores them less one; the PVS bit is the same).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EdictLeafs {
+    num: u8,
+    leafnums: [u16; MAX_ENT_LEAFS],
+}
+
+impl EdictLeafs {
+    /// Record `leaf` unless all [`MAX_ENT_LEAFS`] slots are taken; returns
+    /// whether there is room for another (the walk stops when there is not).
+    pub fn push(&mut self, leaf: usize) -> bool {
+        let n = self.num as usize;
+        if n < MAX_ENT_LEAFS {
+            self.leafnums[n] = leaf.min(u16::MAX as usize) as u16;
+            self.num += 1;
+        }
+        (self.num as usize) < MAX_ENT_LEAFS
+    }
+
+    /// The recorded leaf numbers.
+    pub fn leafs(&self) -> &[u16] {
+        &self.leafnums[..self.num as usize]
+    }
+}
+
 /// One saved interpreter frame (`prstack_t`): where to resume and in which
 /// function, so `PR_LeaveFunction` can restore them.
 #[derive(Clone, Copy)]
@@ -168,6 +202,16 @@ pub struct Vm {
     /// (missing entries read as 0). `ED_Alloc` leaves a slot alone for 0.5 s
     /// after it was freed, except in the first two seconds of server time.
     edict_freetime: Vec<f32>,
+    /// `edict_t.num_leafs`/`leafnums` per edict, written by `SV_LinkEdict`
+    /// ([`Vm::set_edict_leafs`]); missing entries read as no leaves.
+    edict_leafs: Vec<EdictLeafs>,
+    /// The edicts `makestatic` turned into client statics. The C writes one
+    /// `svc_spawnstatic` into the signon and frees the edict, and the client
+    /// draws it through efrags (`R_AddEfrags` / `R_StoreEfrags`) and never
+    /// relinks it. The port keeps the edict (edict numbering and savegames
+    /// follow it) and marks it here, so the client can treat it as a static.
+    /// Missing entries read as not static; `ED_Alloc` and `ED_Free` clear it.
+    edict_static: Vec<bool>,
 
     // --- private execution state ---
     /// Call stack of saved caller frames (`pr_stack` / `pr_depth`).
@@ -221,6 +265,8 @@ impl Vm {
             sv_time: 0.0,
             stmt_count: 0,
             edict_freetime: Vec::new(),
+            edict_leafs: Vec::new(),
+            edict_static: Vec::new(),
             stack: Vec::new(),
             localstack: Vec::new(),
             xfunction: 0,
@@ -486,6 +532,9 @@ impl Vm {
         if let Some(free) = self.edict_free.get_mut(e) {
             *free = false;
         }
+        if let Some(st) = self.edict_static.get_mut(e) {
+            *st = false;
+        }
     }
 
     /// The first slot `ED_Alloc` may hand out: free, and either freed in the
@@ -561,10 +610,47 @@ impl Vm {
         self.ent_set_float(e, "nextthink", -1.0);
         let e = e as usize;
         self.edict_free[e] = true;
+        if let Some(st) = self.edict_static.get_mut(e) {
+            *st = false;
+        }
         if self.edict_freetime.len() <= e {
             self.edict_freetime.resize(e + 1, 0.0);
         }
         self.edict_freetime[e] = self.sv_time;
+    }
+
+    /// The world leaves edict `e` touched when it was last linked
+    /// (`ent->leafnums[0..num_leafs]`); empty for an edict never linked with a
+    /// model, or out of range.
+    pub fn edict_leafs(&self, e: i32) -> &[u16] {
+        usize::try_from(e).ok().and_then(|e| self.edict_leafs.get(e)).map_or(&[], |l| l.leafs())
+    }
+
+    /// Store edict `e`'s touched leaves (`SV_LinkEdict`). Negative `e` is ignored.
+    pub fn set_edict_leafs(&mut self, e: i32, leafs: EdictLeafs) {
+        let Ok(e) = usize::try_from(e) else { return };
+        if self.edict_leafs.len() <= e {
+            self.edict_leafs.resize(e + 1, EdictLeafs::default());
+        }
+        self.edict_leafs[e] = leafs;
+    }
+
+    /// Whether `makestatic` turned edict `e` into a client static.
+    pub fn is_static_edict(&self, e: i32) -> bool {
+        usize::try_from(e).ok().and_then(|e| self.edict_static.get(e)).copied().unwrap_or(false)
+    }
+
+    /// Mark edict `e` a client static (`PF_makestatic`). The world and negative
+    /// indices are ignored.
+    pub fn make_static(&mut self, e: i32) {
+        let Ok(e) = usize::try_from(e) else { return };
+        if e == 0 {
+            return;
+        }
+        if self.edict_static.len() <= e {
+            self.edict_static.resize(e + 1, false);
+        }
+        self.edict_static[e] = true;
     }
 
     /// Flat cell index for edict `e`, field `ofs`, or `None` if out of range.

@@ -123,6 +123,50 @@ pub(crate) fn client_items(w: &Walk) -> i32 {
 /// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
 type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32);
 
+/// What a static entity draws as, gathered before the camera is known.
+enum StaticDraw {
+    Alias(EntityDesc),
+    Brush(render::BModelInstance),
+    External(String, [f32; 3]),
+    Sprite(String, [f32; 3], usize),
+}
+
+/// A `makestatic` entity waiting for [`static_is_visible`]: what it draws as,
+/// and the box `R_AddEfrags` splits into leaves — `origin + model->mins` ..
+/// `origin + model->maxs`.
+struct StaticDesc {
+    draw: StaticDraw,
+    emins: [f32; 3],
+    emaxs: [f32; 3],
+}
+
+/// `model->mins`/`maxs` of an alias model: `Mod_LoadAliasModel` sets a fixed
+/// ±16 box ("FIXME: do this right").
+const ALIAS_MODEL_HALF: f32 = 16.0;
+
+/// Whether `R_StoreEfrags` reaches a static entity this frame: one of the
+/// non-solid leaves its box touches (`R_SplitEntityOnNode`) is in `view_pvs`,
+/// the PVS `R_MarkLeaves` marks from the view leaf. (The C also skips a leaf
+/// whose node box `R_RecursiveWorldNode` rejects against the frustum;
+/// `R_AliasCheckBBox` and the z-buffer hide whatever that would have hidden,
+/// barring a mesh that reaches past its efrag box.)
+fn static_is_visible(bsp: &Bsp, view_pvs: &[bool], emins: [f32; 3], emaxs: [f32; 3]) -> bool {
+    let mut seen = false;
+    bsp.touched_leafs(emins, emaxs, &mut |leaf| {
+        seen = view_pvs.get(leaf).copied().unwrap_or(false);
+        !seen
+    });
+    seen
+}
+
+/// Box `origin + mins` .. `origin + maxs`.
+fn offset_box(origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    (
+        [origin[0] + mins[0], origin[1] + mins[1], origin[2] + mins[2]],
+        [origin[0] + maxs[0], origin[1] + maxs[1], origin[2] + maxs[2]],
+    )
+}
+
 pub(crate) fn step_walk(
     w: &mut Walk,
     dt: f32,
@@ -401,10 +445,29 @@ pub(crate) fn step_walk(
         // distinct explosion queues separately at its own origin.
         queue_sounds(&w.pak, &te_sounds, w.player);
     }
+    // CL_RelinkEntities (cl_main.c) relinks only what the server sent this
+    // frame — SV_WriteEntitiesToClient's test: a model, and a leaf from the
+    // entity's last SV_LinkEdict in the fat PVS at the player's eye (the player
+    // is always sent) — and skips a slot whose model is null, which only the
+    // player's can be. Everything the client does with an entity (its EF_*
+    // lights, trails, spin and drawing) is gated on this; an entity out of the
+    // PVS cannot light the far side of a wall.
+    let mut relinked = w.server.entities_sent_to_client();
+    if w.server.vm.ent_get_float(w.player, "modelindex") == 0.0 {
+        if let Some(r) = usize::try_from(w.player).ok().and_then(|p| relinked.get_mut(p)) {
+            *r = false;
+        }
+    }
+    let is_relinked =
+        |e: i32| usize::try_from(e).ok().and_then(|e| relinked.get(e)).copied() == Some(true);
+
     // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from the
-    //     in-use edicts. The rand()&31 radius jitter is added here (entity_dlights
+    //     relinked edicts. The rand()&31 radius jitter is added here (entity_dlights
     //     stays a pure query). Then decay + retire the whole pool for this frame.
     for ed in w.server.entity_dlights() {
+        if !is_relinked(ed.key) {
+            continue;
+        }
         let jitter = w.prng.next_range(32) as f32;
         w.dlights.alloc(
             ed.key,
@@ -478,9 +541,22 @@ pub(crate) fn step_walk(
         w.trail_org
             .retain(|&e, _| !vm.edict_free.get(e as usize).copied().unwrap_or(true));
     }
+    // Static entities wait for the camera: R_StoreEfrags draws one when a leaf
+    // it touches is in the view's PVS (after the camera, below).
+    let mut statics: Vec<StaticDesc> = Vec::new();
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+            continue;
+        }
+        // A makestatic entity is a client static, never relinked: no trail, no
+        // spin, no EF_* light; drawn through its efrags.
+        let is_static = w.server.vm.is_static_edict(ent);
+        if !is_static && !is_relinked(ent) {
+            // Not sent this frame: CL_RelinkEntities nulls its model. When it
+            // is sent again CL_ParseUpdate forcelinks it to the new origin, so
+            // its trail restarts there.
+            w.trail_org.remove(&ent);
             continue;
         }
         // Render an entity only when it has a real modelindex — i.e. its QuakeC
@@ -502,7 +578,16 @@ pub(crate) fn step_walk(
                 // The entity's `frame` selects the alternate (+a..+j) texture cycle
                 // for activated buttons/doors (a pressed button shows its lit face).
                 let frame = w.server.vm.ent_get_float(ent, "frame") as i32;
-                bmodels.push(render::BModelInstance { model_index: idx, origin, frame });
+                let inst = render::BModelInstance { model_index: idx, origin, frame };
+                if is_static {
+                    // model->mins/maxs of "*N": the submodel's spread bounds.
+                    if let Some(m) = w.bsp.models.get(idx) {
+                        let (emins, emaxs) = offset_box(origin, m.mins, m.maxs);
+                        statics.push(StaticDesc { draw: StaticDraw::Brush(inst), emins, emaxs });
+                    }
+                } else {
+                    bmodels.push(inst);
+                }
             }
             continue;
         }
@@ -511,7 +596,17 @@ pub(crate) fn step_walk(
         if m.ends_with(".bsp") {
             if m != w.map_name {
                 let origin = w.server.vm.ent_get_vector(ent, "origin");
-                ext_descs.push((m, origin));
+                if is_static {
+                    // model->mins/maxs: the box's own model 0 bounds.
+                    let bounds = w.bmodel_cache.get(&m).and_then(|b| b.as_ref()?.models.first());
+                    if let Some(bm) = bounds {
+                        let (emins, emaxs) = offset_box(origin, bm.mins, bm.maxs);
+                        let draw = StaticDraw::External(m, origin);
+                        statics.push(StaticDesc { draw, emins, emaxs });
+                    }
+                } else {
+                    ext_descs.push((m, origin));
+                }
             }
             continue;
         }
@@ -520,7 +615,19 @@ pub(crate) fn step_walk(
         if m.ends_with(".spr") {
             let origin = w.server.vm.ent_get_vector(ent, "origin");
             let frame = w.server.vm.ent_get_float(ent, "frame").max(0.0) as usize;
-            sprite_descs.push((m, origin, frame));
+            if is_static {
+                // Mod_LoadSpriteModel: ±maxwidth/2 across, ±maxheight/2 up
+                // (integer halves).
+                if let Some(Some(spr)) = w.sprite_cache.get(&m) {
+                    let hw = (spr.header.width / 2) as f32;
+                    let hh = (spr.header.height / 2) as f32;
+                    let (emins, emaxs) = offset_box(origin, [-hw, -hw, -hh], [hw, hw, hh]);
+                    let draw = StaticDraw::Sprite(m, origin, frame);
+                    statics.push(StaticDesc { draw, emins, emaxs });
+                }
+            } else {
+                sprite_descs.push((m, origin, frame));
+            }
             continue;
         }
         if !m.ends_with(".mdl") {
@@ -529,6 +636,18 @@ pub(crate) fn step_walk(
         let origin = w.server.vm.ent_get_vector(ent, "origin");
         let frame = w.server.vm.ent_get_float(ent, "frame").max(0.0) as usize;
         let color = color_for_name(&m);
+        if is_static {
+            let angles = w.server.vm.ent_get_vector(ent, "angles");
+            let skin = w.server.vm.ent_get_float(ent, "skin").max(0.0) as i32;
+            let h = ALIAS_MODEL_HALF;
+            let (emins, emaxs) = offset_box(origin, [-h; 3], [h; 3]);
+            statics.push(StaticDesc {
+                draw: StaticDraw::Alias((m, origin, angles, frame, color, skin)),
+                emins,
+                emaxs,
+            });
+            continue;
+        }
         // The model header flags (rocket/grenade/gib/tracer trails + EF_ROTATE).
         let mflags = w
             .model_cache
@@ -681,6 +800,26 @@ pub(crate) fn step_walk(
             fov_deg: 90.0,
         }
     };
+    // R_MarkLeaves / R_StoreEfrags: the statics whose leaves the view's PVS
+    // (from the leaf holding r_refdef.vieworg, not fattened) reaches join the
+    // frame after the relinked entities, as they join cl_visedicts in the C.
+    if !statics.is_empty() {
+        let view_leaf = render::point_in_leaf(&w.bsp, cam.pos).unwrap_or(0);
+        let view_pvs = w.bsp.leaf_pvs(view_leaf);
+        for st in statics {
+            if !static_is_visible(&w.bsp, &view_pvs, st.emins, st.emaxs) {
+                continue;
+            }
+            match st.draw {
+                StaticDraw::Alias(d) => descs.push(d),
+                StaticDraw::Brush(b) => bmodels.push(b),
+                StaticDraw::External(name, origin) => ext_descs.push((name, origin)),
+                StaticDraw::Sprite(name, origin, frame) => {
+                    sprite_descs.push((name, origin, frame))
+                }
+            }
+        }
+    }
     let mut instances: Vec<ModelInstance> = descs
         .iter()
         .filter_map(|(name, origin, angles, frame, color, skin)| match w.model_cache.get(name) {
@@ -973,7 +1112,7 @@ pub(crate) fn step_walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{boot, boot_attract, build_walk, APP};
+    use crate::app::{boot, boot_attract, build_walk, build_walk_map, Walk, APP};
     use crate::console::{console_toggle, console_visible};
     use crate::host::step;
     use crate::menu::menu_select;
@@ -1544,5 +1683,165 @@ mod tests {
             );
         });
         walk_mut(|w| w.in_attack = false);
+    }
+
+    // -------------------------------------------------------------------
+    // C1: the client relinks only what SV_WriteEntitiesToClient sends, and
+    // draws statics through their efrags (R_StoreEfrags)
+    // -------------------------------------------------------------------
+
+    /// `PF_setorigin` through the engine's builtin: origin + SV_LinkEdict, so
+    /// the edict's PVS leaves follow it.
+    fn set_origin(w: &mut Walk, e: i32, org: [f32; 3]) {
+        let vm = &mut w.server.vm;
+        vm.set_gi(quake_rs::progs::OFS_PARM0, e);
+        vm.set_gv(quake_rs::progs::OFS_PARM1, org);
+        vm.argc = 2;
+        let f = vm.builtins[2];
+        f(vm).expect("setorigin");
+    }
+
+    /// Render the current state again without advancing anything (paused,
+    /// dt 0, the same rng draws): the frame, and how many alias models reached
+    /// the renderer.
+    fn rerender(w: &mut Walk, rng: quake_rs::particles::Lcg) -> (render::Image, u64) {
+        w.prng = rng;
+        render::render_stats_begin();
+        let (img, _) = step_walk(w, 0.0, true, 320, 200);
+        (img, render::render_stats_end().alias_models)
+    }
+
+    fn pixels_differing(a: &render::Image, b: &render::Image) -> usize {
+        a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count()
+    }
+
+    /// The start map facing north (yaw 90), settled; and the first alias-model
+    /// entity that is neither the player nor a static, to move around.
+    fn start_facing_north() -> (Walk, i32) {
+        let mut w = build_walk_map("maps/start.bsp").expect("start boots");
+        w.yaw = 90.0;
+        w.pitch = 0.0;
+        for _ in 0..10 {
+            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        }
+        let vm = &w.server.vm;
+        let e = (1..vm.num_edicts() as i32)
+            .find(|&e| {
+                e != w.player
+                    && !vm.is_free_edict(e)
+                    && !vm.is_static_edict(e)
+                    && vm.ent_string_ref(e, "model").ends_with(".mdl")
+            })
+            .expect("an alias-model entity");
+        (w, e)
+    }
+
+    /// C1 and CENSUS L22. An entity behind a wall, in a leaf outside the
+    /// player's fat PVS, is not sent (SV_WriteEntitiesToClient), so the client
+    /// neither draws it nor makes its EF_MUZZLEFLASH light — a light that would
+    /// otherwise brighten the near side of the wall (R_MarkLights marks by
+    /// plane distance and R_AddDynamicLights lights by |distance|, so a light
+    /// does reach through a wall).
+    #[test]
+    fn an_entity_outside_the_fat_pvs_is_not_drawn_and_its_flash_lights_nothing() {
+        use quake_rs::bsp::CONTENTS_SOLID;
+        let (mut w, e) = start_facing_north();
+        // The wall straight ahead, and open space 36 units behind it.
+        let (eye, _) = w.server.player_view();
+        let far = [eye[0], eye[1] + 3000.0, eye[2]];
+        let tr = quake_rs::world::trace_world(&w.bsp, eye, far, [0.0; 3], [0.0; 3]);
+        assert!(tr.fraction < 1.0, "a wall ahead");
+        let n = tr.plane_normal;
+        let behind = [tr.endpos[0] - n[0] * 36.0, tr.endpos[1] - n[1] * 36.0, tr.endpos[2] - n[2] * 36.0];
+        assert_ne!(quake_rs::world::point_contents(&w.bsp, behind), CONTENTS_SOLID, "open space behind");
+        set_origin(&mut w, e, behind);
+        w.server.vm.ent_set_vector(e, "angles", [0.0, 90.0, 0.0]); // facing away
+        assert!(!w.server.entities_sent_to_client()[e as usize], "behind the wall: not sent");
+
+        let rng = w.prng;
+        w.server.vm.ent_set_float(e, "effects", quake_rs::server::EF_MUZZLEFLASH as f32);
+        let (firing, firing_models) = rerender(&mut w, rng);
+        assert!(w.dlights.active().iter().all(|d| d.key() != e), "no light for an entity not sent");
+        w.server.vm.ent_set_float(e, "effects", 0.0);
+        let (quiet, quiet_models) = rerender(&mut w, rng);
+        assert_eq!(pixels_differing(&firing, &quiet), 0, "the flash behind the wall lights nothing");
+        let modelindex = w.server.vm.ent_get_float(e, "modelindex");
+        w.server.vm.ent_set_float(e, "modelindex", 0.0);
+        let (_, hidden_models) = rerender(&mut w, rng);
+        w.server.vm.ent_set_float(e, "modelindex", modelindex);
+        assert_eq!(firing_models, hidden_models, "not handed to the renderer");
+        assert_eq!(quiet_models, hidden_models);
+
+        // The control: the light CL_RelinkEntities makes for a sent entity
+        // (origin + 16 up + 18 forward, radius 200 before the rand()&31,
+        // minlight 32) does light the visible side of the wall.
+        let now = w.clock;
+        let muzzle = [behind[0], behind[1] + 18.0, behind[2] + 16.0];
+        w.dlights.alloc(e, muzzle, 200.0, now + 0.1, 0.0, 32.0, now);
+        let (lit, _) = rerender(&mut w, rng);
+        assert!(
+            pixels_differing(&lit, &quiet) > 100,
+            "the light, had it been made, reaches through the wall ({} px)",
+            pixels_differing(&lit, &quiet)
+        );
+    }
+
+    /// The other side of C1: the same entity in plain view is sent, drawn,
+    /// and its muzzle flash is made.
+    #[test]
+    fn an_entity_in_view_is_drawn_and_its_flash_made() {
+        let (mut w, e) = start_facing_north();
+        let (eye, _) = w.server.player_view();
+        set_origin(&mut w, e, [eye[0], eye[1] + 100.0, eye[2] - 20.0]);
+        assert!(w.server.entities_sent_to_client()[e as usize], "in view: sent");
+        let rng = w.prng;
+        w.server.vm.ent_set_float(e, "effects", quake_rs::server::EF_MUZZLEFLASH as f32);
+        let (shown, shown_models) = rerender(&mut w, rng);
+        assert!(w.dlights.active().iter().any(|d| d.key() == e), "its muzzle flash is made");
+        w.server.vm.ent_set_float(e, "effects", 0.0);
+        w.server.vm.ent_set_float(e, "modelindex", 0.0);
+        let (hidden, hidden_models) = rerender(&mut w, rng);
+        assert_eq!(shown_models, hidden_models + 1, "handed to the renderer");
+        assert!(pixels_differing(&shown, &hidden) > 0, "and drawn");
+    }
+
+    /// C1 for statics: `makestatic` entities are drawn when a leaf their box
+    /// touches (R_AddEfrags) is in the view's PVS (R_MarkLeaves), which on the
+    /// start map keeps some torches and drops others; the kept ones draw.
+    #[test]
+    fn statics_draw_through_efrags_in_the_view_pvs() {
+        let (mut w, _) = start_facing_north();
+        let (eye, _) = w.server.player_view();
+        let view_pvs = w.bsp.leaf_pvs(render::point_in_leaf(&w.bsp, eye).unwrap_or(0));
+        let vm = &w.server.vm;
+        let statics: Vec<i32> = (1..vm.num_edicts() as i32).filter(|&e| vm.is_static_edict(e)).collect();
+        let h = ALIAS_MODEL_HALF;
+        let visible: Vec<i32> = statics
+            .iter()
+            .copied()
+            .filter(|&e| {
+                let (lo, hi) = offset_box(vm.ent_get_vector(e, "origin"), [-h; 3], [h; 3]);
+                vm.ent_string_ref(e, "model").ends_with(".mdl") && static_is_visible(&w.bsp, &view_pvs, lo, hi)
+            })
+            .collect();
+        assert!(statics.len() > 30, "start's torches and flames are statics ({})", statics.len());
+        assert!(
+            !visible.is_empty() && visible.len() < statics.len(),
+            "some statics in the view's PVS, not all ({} of {})",
+            visible.len(),
+            statics.len()
+        );
+        assert!(
+            statics.iter().all(|&e| !w.server.entities_sent_to_client()[e as usize]),
+            "a static is never a sent entity"
+        );
+        let rng = w.prng;
+        let (shown, shown_models) = rerender(&mut w, rng);
+        for &e in &visible {
+            w.server.vm.ent_set_float(e, "modelindex", 0.0);
+        }
+        let (hidden, hidden_models) = rerender(&mut w, rng);
+        assert_eq!(shown_models, hidden_models + visible.len() as u64, "the visible statics reach the renderer");
+        assert!(pixels_differing(&shown, &hidden) > 0, "and draw");
     }
 }

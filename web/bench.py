@@ -443,7 +443,7 @@ SUBKEY = {" pvs": "world_pvs", " sort": "world_sort", " setup": "world_setup",
           " light": "world_light", " surf": "world_surf"}
 COUNTERS = ["faces_pvs_culled", "faces_frustum_culled", "faces_drawn", "world_tris", "world_px",
             "surf_hits", "surf_misses", "surf_rebakes", "surf_bypass_bakes", "sub_faces_drawn",
-            "surf_texels", "surfcache_kb"]
+            "surf_texels", "surfcache_kb", "alias_models", "alias_accepted", "alias_tris"]
 print(f"\nquake-rust browser bench — {len(wasm_bytes) / 1048576:.1f} MB wasm, frames={args.frames} "
       f"warmup={args.warmup}, dt=1/72, load {' '.join(results['load_before'])} -> "
       f"{' '.join(results['load_after'])}")

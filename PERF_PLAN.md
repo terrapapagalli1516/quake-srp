@@ -645,6 +645,36 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
 - **Risk:** low. The visible output should be unchanged, because a model outside the PVS is behind
   solid geometry. Verify with the goldens and hashes. The scene golden frames a monster, which must
   stay.
+- **Done** (branch `quake/sim`):
+  - `SV_LinkEdict` records up to 16 touched leaves per edict (`SV_FindTouchedLeafs`:
+    `Bsp::touched_leafs`, `Vm::edict_leafs`). `Server::entities_sent_to_client` is
+    `SV_WriteEntitiesToClient`'s test against `SV_FatPVS` at the player's `origin + view_ofs`.
+    `step_walk` relinks only those entities: their `EF_*` lights, trails, spin and drawing.
+  - `makestatic` marks the edict a client static; the port keeps the edict. A static is drawn
+    when one of its `R_AddEfrags` leaves is in the view leaf's PVS, after the relinked entities, as
+    `R_StoreEfrags` appends it. Demo playback is unchanged.
+  - `R_AliasCheckBBox` was already the first thing `draw_alias_model` does; nothing is
+    transformed before it.
+  - Counters, per frame at 320×200, native means over 720 frames. The new `alias_models`,
+    `alias_accepted` and `alias_tris` counters are in `RenderStats` and `bench.py`.
+    - walk_e1m3: 98 → 3.8 alias models handed to the renderer; 22.1 → 0.6 accepted by the bbox
+      test (4,482 → 83 triangles); 64.8 → 4.7 external-box bakes; 185 → 5 submodel faces.
+    - walk_e1m1: 29 → 0 models and 33 → 2 bakes.
+  - **Frame hashes are identical** on walk_e1m1, walk_e1m3, fire_e1m1 and demo1: 720 frames each
+    at 320×200, hashed every 30th. Nothing that was culled had been visible.
+  - Speed: wasm medians of two interleaved rounds, native in parentheses, ms.
+
+    | walk_e1m3 | 320×200 | 640×400 | 1280×800 |
+    |---|---|---|---|
+    | step | 1.57 → 1.33 (1.13 → 0.87) | 2.56 → 2.22 (1.95 → 1.58) | 6.37 → 5.80 (5.20 → 4.29) |
+    | render3d | 0.68 → 0.39 | 1.50 → 1.11 | 4.56 → 3.91 |
+
+    walk_e1m1 is within noise in wasm; native it is 4–7% faster.
+  - Cost: the sim phase gains about 0.05–0.08 ms in wasm. That is `SV_FindTouchedLeafs` on every
+    link, as the C pays, plus the fat PVS. It is not measurable natively.
+  - The simbench counts, the census output and the goldens are unchanged. The
+    `quaketool scene` tool view does not cull.
+  - The L22 test (CENSUS.md) and the accepted gaps are in `AUDIT.md`.
 
 **C2. Alias models via `D_PolysetDraw`.** *(faithful, re-baseline)*
 
@@ -850,8 +880,7 @@ means about 4–5 ms per frame, far inside a 60 Hz budget.
 - **Prototypes are evidence, not implementations.** The A1, B1 and B2 prototypes ran in a scratch
   copy, with atomic counters present. A1's prototype takes its gradients from one triangle and was
   checked for cracks only by counting background pixels on two frames.
-- **Estimates, not measurements:** the gains for A3 and C2, and C1's exact saving (I counted models
-  with an on-screen vertex; I did not measure the PVS pass).
+- **Estimates, not measurements:** the gains for A3 and C2. (C1's saving is measured; see C1.)
 - **Fidelity issues found, not fixed** (they belong in `AUDIT.md`):
   - A4: vrect and pixelAspect.
   - C2: alias models are not colormapped, and the code comment claims otherwise.

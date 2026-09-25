@@ -295,13 +295,27 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
 /// the remaining network / client-routing builtins that have no world effect in
-/// this headless server (`makestatic`, `setspawnparms`). (`stuffcmd` queues
+/// this headless server (`setspawnparms`). (`makestatic` marks the edict a
+/// client static via [`bi_makestatic`]; `stuffcmd` queues
 /// its text via [`crate::builtins::pf_stuffcmd`]; `sound` queues a
 /// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
 /// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
 /// [`bi_particle`]; the `Write*` family (#52..#59) feeds the per-buffer svc
 /// parsers in `msg.rs`.)
 fn bi_noop(_vm: &mut Vm) -> Result<()> {
+    Ok(())
+}
+
+/// `PF_makestatic` (#69): `void(entity e) makestatic`. The C writes an
+/// `svc_spawnstatic` (model, frame, colormap, skin, origin, angles) into the
+/// signon and frees the edict; the client then draws that snapshot as a
+/// static entity — through efrags on the leaves it touches, never relinked
+/// (no trails, no `EF_*` lights, no spin). The port keeps the edict alive
+/// (edict numbering and savegames follow it; see `CENSUS.md`) and marks it
+/// static ([`Vm::make_static`]) so the client draws it the static way.
+fn bi_makestatic(vm: &mut Vm) -> Result<()> {
+    let e = vm.arg_entity(0);
+    vm.make_static(e);
     Ok(())
 }
 
@@ -547,7 +561,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 46, bi_localcmd); // localcmd (honours restart / changelevel / map; else no-op)
     put(t, 67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
     put(t, 68, bi_precache_file); // precache_file
-    put(t, 69, bi_noop); // makestatic
+    put(t, 69, bi_makestatic); // makestatic (marks a client static)
     put(t, 70, bi_changelevel); // changelevel (records the deferred map swap)
     put(t, 72, bi_cvar_set); // cvar_set (honours "skill"; else benign no-op)
     put(t, 74, bi_ambientsound); // ambientsound (records a StaticSound loop)
