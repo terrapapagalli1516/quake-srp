@@ -16,7 +16,7 @@ use crate::app::Walk;
 /// console); the frame's sound calls are carried out.
 pub(crate) fn step_walk(
     w: &mut Walk,
-    dt: f32,
+    dt: f64,
     menu_up: bool,
     render_w: usize,
     render_h: usize,
@@ -710,6 +710,20 @@ mod tests {
         assert_eq!(w.map_name, "maps/e1m2.bsp");
         assert_eq!(w.clock, w.server.time());
         assert!(w.clock > 1.0 && w.clock < 2.0, "{}", w.clock);
+    }
+
+    /// The live host hands the server Host_FilterTime's double: `sv.time` (a
+    /// double) adds exactly `host_frametime`, as SV_Physics does, not the f32
+    /// the client frame times itself with.
+    #[test]
+    fn the_server_advances_by_the_hosts_double() {
+        let mut w = build_walk().expect("e1m1 boots");
+        let t0 = w.server.sv_time();
+        let _ = step_walk(&mut w, 1.0 / 72.0, false, 320, 200);
+        assert_eq!(w.server.sv_time(), t0 + 1.0 / 72.0);
+        assert_ne!(1.0 / 72.0, f64::from((1.0f64 / 72.0) as f32));
+        let _ = step_walk(&mut w, 0.05, true, 320, 200); // paused behind the menu
+        assert_eq!(w.server.sv_time(), t0 + 1.0 / 72.0);
     }
 
     // -------------------------------------------------------------------

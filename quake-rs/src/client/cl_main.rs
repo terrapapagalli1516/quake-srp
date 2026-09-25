@@ -169,7 +169,11 @@ pub fn offset_box(origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3]
     )
 }
 
-pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFrame {
+/// One live client frame (see the module doc) of `host_frametime` seconds —
+/// `Host_FilterTime`'s double, which the server's `sv.time` advances by
+/// exactly (`client_frame_f64`); the client's own timing takes it as an `f32`.
+pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    let dt = host_frametime as f32;
     let (render_w, render_h) = (vid.width, vid.height);
     let mut sound = Vec::new();
     // Con_CheckResize: the notify lines are laid out con_linewidth wide.
@@ -287,7 +291,7 @@ pub fn walk_frame(w: &mut Walk, dt: f32, menu_up: bool, vid: &Vid) -> ClientFram
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
-        let _ = w.server.client_frame(&cmd, dt);
+        let _ = w.server.client_frame_f64(&cmd, host_frametime);
         // CL_LerpPoint on a local server: cl.time = the message time, sv.time
         // after this frame's physics.
         w.clock = w.server.time();

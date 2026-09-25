@@ -20,13 +20,13 @@ use crate::snd_dma::{SND_QUEUE, STOP_SND_QUEUE};
 /// 72 fps cap: every call runs, advancing the game by the time since the last
 /// frame under the same [0.001, 0.1] clamps. A 120/144 Hz display then runs
 /// one host frame per refresh, as the port did before it had the gate.
-fn host_frame_time(realtime: f64, oldrealtime: &mut f64, uncapped: bool) -> Option<f32> {
+fn host_frame_time(realtime: f64, oldrealtime: &mut f64, uncapped: bool) -> Option<f64> {
     if !uncapped {
         return host_filter_time(realtime, oldrealtime);
     }
     let elapsed = realtime - *oldrealtime;
     *oldrealtime = realtime;
-    Some((elapsed as f32).clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
+    Some(elapsed.clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX))
 }
 
 /// The `wasm_showfps` extra's measurement (a departure, opt-in via Options >
@@ -109,7 +109,9 @@ pub extern "C" fn step(dt: f32) -> i32 {
         // animating over a frozen frame.
         a.realtime += real_dt as f64;
         let uncapped = a.menu.extras().uncapped;
-        let dt = if real_dt == 0.0 {
+        // `host_frametime`, the C's double: the server advances sv.time by it
+        // exactly; everything else here times itself with its f32.
+        let host_frametime = if real_dt == 0.0 {
             0.0
         } else {
             match host_frame_time(a.realtime, &mut a.oldrealtime, uncapped) {
@@ -117,6 +119,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
                 None => return,
             }
         };
+        let dt = host_frametime as f32;
         ran = 1;
         // Every presented real frame counts toward the wasm_showfps readout
         // (counted whether or not it is shown, so switching it on reads true
@@ -186,7 +189,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
         let frame = if a.mode == 1 {
             a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
         } else {
-            a.walk.as_mut().map(|wk| step_walk(wk, dt, gate_gameplay, w, h))
+            a.walk.as_mut().map(|wk| step_walk(wk, host_frametime, gate_gameplay, w, h))
         };
         let (mut img, cshifts) = match frame {
             Some((image, cshifts)) => (Some(image), cshifts),
@@ -412,7 +415,7 @@ mod tests {
             for _ in 0..hz as usize * 2 {
                 realtime += (1.0 / hz) as f32 as f64;
                 let f = host_frame_time(realtime, &mut old, true);
-                game += f.expect("uncapped: every refresh is a host frame") as f64;
+                game += f.expect("uncapped: every refresh is a host frame");
             }
             assert!((game - realtime).abs() < 1e-4, "{hz} Hz: game {game} vs real {realtime}");
         }

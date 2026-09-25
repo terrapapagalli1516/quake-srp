@@ -136,7 +136,7 @@ impl Host {
                         d.show_scores = km.showscores;
                     }
                 }
-                cl_demo::demo_frame(d, dt, false, &self.vid)
+                cl_demo::demo_frame(d, dt as f32, false, &self.vid)
             }
         })
     }

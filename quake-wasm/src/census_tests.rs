@@ -42,7 +42,7 @@ fn centre(w: &Walk, e: i32) -> [f32; 3] {
 }
 
 /// One walk frame; returns its colour shifts (`cl.cshifts`, in order).
-fn step(w: &mut Walk, dt: f32) -> Vec<([u8; 3], f32)> {
+fn step(w: &mut Walk, dt: f64) -> Vec<([u8; 3], f32)> {
     step_walk(w, dt, false, 320, 200).1
 }
 
