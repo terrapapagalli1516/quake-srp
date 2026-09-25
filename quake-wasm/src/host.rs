@@ -168,6 +168,17 @@ pub extern "C" fn step(dt: f32) -> i32 {
             Some((image, cshifts)) => (Some(image), cshifts),
             None => (None, Vec::new()),
         };
+        // Con_Print: the frame's prints (svc_print) reach the console
+        // scrollback too — the C keeps one text buffer, whose last lines are
+        // the notify lines the mode drew.
+        let printed = if a.mode == 1 {
+            a.demo.as_mut().map(|d| d.notify.take_printed())
+        } else {
+            a.walk.as_mut().map(|wk| wk.notify.take_printed())
+        };
+        if let Some(text) = printed.filter(|t| !t.is_empty()) {
+            a.console.print(&text);
+        }
 
         // svc_sellscreen (cl_parse.c): the C ran `Cmd_ExecuteString("help")` —
         // pop the Help/Ordering menu (the shareware episode-end "order Quake"
