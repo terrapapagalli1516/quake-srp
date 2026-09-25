@@ -164,6 +164,11 @@ pub struct Vm {
     /// benchmark to report VM workload per frame; not gameplay state.
     pub stmt_count: u64,
 
+    /// `edict_t.freetime` per edict: the `sv_time` of its last `ED_Free`
+    /// (missing entries read as 0). `ED_Alloc` leaves a slot alone for 0.5 s
+    /// after it was freed, except in the first two seconds of server time.
+    edict_freetime: Vec<f32>,
+
     // --- private execution state ---
     /// Call stack of saved caller frames (`pr_stack` / `pr_depth`).
     stack: Vec<Frame>,
@@ -215,6 +220,7 @@ impl Vm {
             host: None,
             sv_time: 0.0,
             stmt_count: 0,
+            edict_freetime: Vec::new(),
             stack: Vec::new(),
             localstack: Vec::new(),
             xfunction: 0,
@@ -482,20 +488,28 @@ impl Vm {
         }
     }
 
-    /// `ED_Alloc`: reuse the first free edict, or grow the array. The reused or
-    /// new edict is cleared and marked not-free. Returns its index.
-    ///
-    /// (The C `ED_Alloc` skips client slots and applies a `freetime` relaxation
-    /// policy that depends on `sv.time`; with no server time tracked here we use
-    /// the simpler "reuse any free slot, else grow" behaviour, which is the same
-    /// reuse-or-grow contract.)
+    /// The first slot `ED_Alloc` may hand out: free, and either freed in the
+    /// first two seconds of server time or more than 0.5 s ago ("the first
+    /// couple seconds of server time can involve a lot of freeing and
+    /// allocating, so relax the replacement policy"; otherwise wait "so the
+    /// client doesn't think the entity morphed", which would also draw a trail
+    /// from the old entity's spot to the new one). The world is never reused.
+    /// (The C also skips the client slots 1..maxclients; this port allocates
+    /// its player like any edict, see `Server::player`.)
+    fn reusable_slot(&self) -> Option<usize> {
+        (1..self.edict_free.len()).find(|&i| {
+            let freetime = self.edict_freetime.get(i).copied().unwrap_or(0.0);
+            self.edict_free[i] && (freetime < 2.0 || self.sv_time - freetime > 0.5)
+        })
+    }
+
+    /// `ED_Alloc`: reuse a free edict the replacement policy allows (see
+    /// [`Self::reusable_slot`]), or grow the array. The reused or new edict is
+    /// cleared and marked not-free (`ED_ClearEdict`). Returns its index.
     pub fn spawn(&mut self) -> i32 {
-        // Skip the world (edict 0) when looking for a free slot.
-        for i in 1..self.edict_free.len() {
-            if self.edict_free[i] {
-                self.clear_edict(i);
-                return i as i32;
-            }
+        if let Some(i) = self.reusable_slot() {
+            self.clear_edict(i);
+            return i as i32;
         }
         let i = self.edict_free.len();
         let ef = self.entityfields();
@@ -506,18 +520,16 @@ impl Vm {
     }
 
     /// `ED_Alloc` with id's hard [`MAX_EDICTS`] ceiling (the C
-    /// `Sys_Error("ED_Alloc: no free edicts")`). Reuses a free slot, else grows —
-    /// but returns `None` once every slot is in use AND the array is already at the
-    /// ceiling, so the QuakeC-reachable `PF_Spawn` surfaces a `run_error` instead of
-    /// growing memory without bound on a runaway `spawn()` loop. Engine-internal
-    /// spawns (the player, temp entities, the explosive box) use the infallible
-    /// [`spawn`](Self::spawn).
+    /// `Sys_Error("ED_Alloc: no free edicts")`). Reuses a slot like
+    /// [`Self::spawn`], else grows — but returns `None` once the array is
+    /// already at the ceiling, so the QuakeC-reachable `PF_Spawn` surfaces a
+    /// `run_error` instead of growing memory without bound on a runaway
+    /// `spawn()` loop. Engine-internal spawns (the player, temp entities, the
+    /// explosive box) use the infallible [`spawn`](Self::spawn).
     pub fn spawn_checked(&mut self) -> Option<i32> {
-        for i in 1..self.edict_free.len() {
-            if self.edict_free[i] {
-                self.clear_edict(i);
-                return Some(i as i32);
-            }
+        if let Some(i) = self.reusable_slot() {
+            self.clear_edict(i);
+            return Some(i as i32);
         }
         if self.edict_free.len() >= MAX_EDICTS {
             return None;
@@ -529,18 +541,30 @@ impl Vm {
         Some(i as i32)
     }
 
-    /// `ED_Free`: zero the edict's fields and mark it free. The world (edict 0)
-    /// and out-of-range indices are left untouched.
+    /// `ED_Free` (pr_edict.c): mark the edict free and clear exactly the fields
+    /// the C clears — `model`, `takedamage`, `modelindex`, `colormap`, `skin`,
+    /// `frame`, `origin`, `angles`, `solid` zeroed, `nextthink` = -1 — and
+    /// record `freetime = sv.time`. Every other field keeps its value, as in
+    /// id's game (QuakeC holding a reference to a removed entity still reads
+    /// its `classname`, `health`, ...). The world (edict 0) and out-of-range
+    /// indices are left untouched.
     pub fn free_edict(&mut self, e: i32) {
-        if e <= 0 {
+        if e <= 0 || e as usize >= self.edict_free.len() {
             return; // never free the world
         }
-        let e = e as usize;
-        if e >= self.edict_free.len() {
-            return;
+        for name in ["takedamage", "modelindex", "colormap", "skin", "frame", "solid"] {
+            self.ent_set_float(e, name, 0.0);
         }
-        self.clear_edict(e);
+        self.ent_set_int(e, "model", 0);
+        self.ent_set_vector(e, "origin", [0.0; 3]);
+        self.ent_set_vector(e, "angles", [0.0; 3]);
+        self.ent_set_float(e, "nextthink", -1.0);
+        let e = e as usize;
         self.edict_free[e] = true;
+        if self.edict_freetime.len() <= e {
+            self.edict_freetime.resize(e + 1, 0.0);
+        }
+        self.edict_freetime[e] = self.sv_time;
     }
 
     /// Flat cell index for edict `e`, field `ofs`, or `None` if out of range.

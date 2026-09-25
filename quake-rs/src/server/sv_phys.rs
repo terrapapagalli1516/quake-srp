@@ -1551,6 +1551,52 @@ mod tests {
     }
 
     #[test]
+    fn ed_alloc_waits_half_a_second_before_reusing_a_freed_slot() {
+        // CENSUS L6: ED_Alloc takes a free slot only if it was freed in the
+        // first two seconds of server time or more than 0.5 s ago, so a missile
+        // spawned the frame another is removed never inherits its slot (and
+        // the client never draws a trail from the old one to the new).
+        let (img, _touch_fn, _g_one, _g_flag) = touch_progs();
+        let mut server = Server::new(world_open_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        server.vm.sv_time = 1.5; // the relaxed first two seconds
+        let a = server.vm.spawn();
+        server.vm.free_edict(a);
+        assert_eq!(server.vm.spawn(), a, "freed at t 1.5: reused at once");
+        server.vm.sv_time = 10.0;
+        server.vm.free_edict(a);
+        let b = server.vm.spawn();
+        assert_ne!(b, a, "freed this frame: not reused");
+        server.vm.sv_time = 10.4;
+        assert_ne!(server.vm.spawn(), a, "0.4 s later: still not");
+        server.vm.sv_time = 10.6;
+        assert_eq!(server.vm.spawn(), a, "0.6 s later: reused");
+    }
+
+    #[test]
+    fn ed_free_clears_only_the_fields_the_c_clears() {
+        // ED_Free zeroes model/takedamage/modelindex/colormap/skin/frame/origin/
+        // angles/solid, sets nextthink -1 and freetime; everything else stays
+        // (QuakeC holding a reference to a removed entity still reads it).
+        let (img, _touch_fn, _g_one, _g_flag) = touch_progs();
+        let mut server = Server::new(world_open_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        let e = server.vm.spawn();
+        server.vm.ent_set_string(e, "classname", "missile");
+        server.vm.ent_set_string(e, "model", "progs/missile.mdl");
+        server.vm.ent_set_vector(e, "origin", [1.0, 2.0, 3.0]);
+        server.vm.ent_set_vector(e, "velocity", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_float(e, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_float(e, "nextthink", 5.0);
+        server.vm.free_edict(e);
+        assert!(server.vm.is_free_edict(e));
+        assert_eq!(server.vm.ent_get_string(e, "model"), "");
+        assert_eq!(server.vm.ent_get_vector(e, "origin"), [0.0; 3]);
+        assert_eq!(server.vm.ent_get_float(e, "solid"), 0.0);
+        assert_eq!(server.vm.ent_get_float(e, "nextthink"), -1.0);
+        assert_eq!(server.vm.ent_get_string(e, "classname"), "missile", "kept");
+        assert_eq!(server.vm.ent_get_vector(e, "velocity"), [100.0, 0.0, 0.0], "kept");
+    }
+
+    #[test]
     fn an_edict_spawned_by_a_think_moves_on_its_spawn_frame() {
         // CENSUS L25: SV_Physics' loop re-reads sv.num_edicts every iteration,
         // so a missile spawned by an earlier think gets its physics the same
