@@ -40,7 +40,25 @@ ported directly from the GPLv2 C source at [`id-Software/Quake`](https://github.
 | ↳ server→client messages | `sv_main.c`, `pr_cmds.c`, `cl_tent.c`, `cl_parse.c` | `server::msg` | ✅ sound / static-sound / particle / print queues; `Write*` → temp-entity decoder + `MSG_ALL` svc recogniser (intermission, finale) |
 | ↳ light styles | `pr_cmds.c`, `r_light.c` | `server::lightstyle` | ✅ `PF_lightstyle` table + `R_AnimateLight` scales (shared with demo playback) |
 | ↳ host commands | `host_cmd.c`, `sv_main.c` | `server::host` | ✅ skill, deferred `changelevel` / `restart`, `SV_SaveSpawnparms` + serverflags across levels, `Host_Kill_f`, signon frames |
-| Software renderer | `r_*.c`, `d_*.c` (semantics; rasteriser is from-scratch) | `render` | ✅ perspective-correct textured world, baked lightmaps + lit-surface cache (`d_surf.c`), dynamic lights w/ `R_MarkLights` BSP gating, animated styles, liquid/sky warp, alias/sprite/brush models, viewmodel, HUD + menus + console + intermission overlays |
+| Software renderer: `Image`, `Camera`, the `render_scene*` entry points (`R_RenderView`) | `r_main.c` | `render` (`render/mod.rs`) | ✅ perspective-correct textured world, baked lightmaps + lit-surface cache, dynamic lights w/ `R_MarkLights` BSP gating, animated styles, liquid/sky warp, alias/sprite/brush models, viewmodel |
+| ↳ head-bob, screen blends, gamma, gun placement | `view.c` | `render/view.rs` | ✅ |
+| ↳ world, inline submodels, `b_*.bsp` item boxes | `r_bsp.c` | `render/world.rs` | ✅ |
+| ↳ triangle rasterisers (the port's own, in place of the edge/span pipeline) | `r_edge.c`, `d_scan.c` | `render/raster.rs` | ✅ |
+| ↳ lightmaps, light styles, dynamic lights, `R_LightPoint` | `r_surf.c`, `r_light.c` | `render/light.rs` | ✅ |
+| ↳ face geometry, `R_TextureAnimation`, surface caches | `r_surf.c`, `d_surf.c` | `render/surf.rs` | ✅ |
+| ↳ liquid turbulence, `D_WarpScreen` | `d_scan.c` | `render/warp.rs` | ✅ |
+| ↳ scrolling sky | `r_sky.c`, `d_sky.c` | `render/sky.rs` | ✅ |
+| ↳ PVS, view frustum, near-plane clip | `model.c`, `r_main.c` | `render/vis.rs` | ✅ |
+| ↳ alias models + the weapon | `r_alias.c`, `r_aclip.c` | `render/alias.rs` | ✅ |
+| ↳ alias triangle filler | `d_polyse.c` | `render/polyse.rs` | ✅ |
+| ↳ sprites / particle drawing | `r_sprite.c` / `r_part.c` | `render/sprite.rs`, `render/part.rs` | ✅ |
+| ↳ render profiler | (the port's own) | `render/stats.rs` | ✅ |
+| 2-D primitives: pics, characters, fade, tile clear | `draw.c` | `draw` | ✅ |
+| Screen layout (`scr_viewsize` → view rect), centre print | `screen.c` | `screen` | ✅ |
+| Status bar, scoreboard, intermission + finale overlays | `sbar.c` | `sbar` | ✅ |
+| Menus (main, single player, load/save, options, keys, video, help, quit) | `menu.c` | `menu` | ✅ |
+| Key numbers, names, default binds | `keys.c` | `keys` | ✅ |
+| Drop-down console, notify lines | `console.c` | `console` | ✅ |
 | Particles + temp entities | `r_part.c`, `cl_tent.c` | `particles`, `tent`, `dlight` | ✅ trails/explosions/splashes + lightning-beam store and expansion |
 | Ambient sound | `snd_dma.c`, `snd_mem.c`, `pr_cmds.c` | `snd`, `server::msg` | ✅ `S_UpdateAmbientSounds` (leaf ambients, integer ramp at the 72 fps cap) + `PF_ambientsound` static loops + `GetWavinfo` cue-loop gate |
 | Little-endian byte reader, error type | (replaces `LittleLong`/`Sys_Error`) | `read`, `error` | ✅ scaffold |
