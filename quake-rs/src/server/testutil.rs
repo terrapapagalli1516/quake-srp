@@ -352,6 +352,7 @@ pub(super) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
     b.add_global("time", EV_FLOAT, 33);
     b.add_global("world", EV_ENTITY, 34);
     b.add_global("frametime", EV_FLOAT, 35);
+    b.add_global("force_retouch", EV_FLOAT, 36);
     let g_one = 40u16;
 
     // Fields the move/touch code reads.

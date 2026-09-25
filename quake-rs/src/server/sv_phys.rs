@@ -60,6 +60,9 @@ impl Server {
                 continue;
             }
             let ent = e as i32;
+            if !self.force_retouch_edict(ent, start_time) {
+                continue; // a retouch freed it
+            }
             let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
 
             // Isolate per-entity faults (e.g. a think hitting an unimplemented
@@ -74,6 +77,7 @@ impl Server {
             }
         }
 
+        self.decrement_force_retouch();
         // sv.time += host_frametime (end of SV_Physics).
         self.vm.gset_float("time", start_time + dt);
 
@@ -711,6 +715,36 @@ impl Server {
         }
     }
 
+    /// `SV_Physics`' `if (pr_global_struct->force_retouch) SV_LinkEdict (ent,
+    /// true); // force retouch even for stationary`, run on each live edict
+    /// before its physics. QC sets the global to 2 in `spawn_tdeath` (every
+    /// `PutClientInServer` and teleport) and `teleport_use`, so for two frames
+    /// everything relinks and touches the triggers it overlaps: a monster
+    /// standing in a door's trigger field opens it at the level start (e1m6,
+    /// e1m8), one standing on a teleport destination is telefragged, and a
+    /// monster in a just-enabled teleporter is sent through. SV_LinkEdict skips
+    /// the world, and a SOLID_NOT edict is relinked but touches nothing.
+    /// Returns whether `ent` is still live (a touch may free it).
+    fn force_retouch_edict(&mut self, ent: i32, sv_time: f32) -> bool {
+        if ent == 0 || self.vm.gget_float("force_retouch") == 0.0 {
+            return true;
+        }
+        link_edict(&mut self.vm, ent);
+        if self.vm.ent_get_float(ent, "solid") as i32 != SOLID_NOT {
+            touch_triggers(&mut self.vm, ent, sv_time);
+        }
+        !self.is_free(ent)
+    }
+
+    /// The end of `SV_Physics`: `if (pr_global_struct->force_retouch)
+    /// pr_global_struct->force_retouch--;`.
+    fn decrement_force_retouch(&mut self) {
+        let n = self.vm.gget_float("force_retouch");
+        if n != 0.0 {
+            self.vm.gset_float("force_retouch", n - 1.0);
+        }
+    }
+
     /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
     /// where the per-entity `gravity` field defaults to 1.0 when unset/zero.
     fn add_gravity(&mut self, ent: i32, dt: f32) {
@@ -844,6 +878,9 @@ impl Server {
                 continue;
             }
             let ent = e as i32;
+            if !self.force_retouch_edict(ent, start_time) {
+                continue; // a retouch freed it
+            }
 
             let result = if ent == self.player {
                 self.physics_client(ent, cmd, start_time, dt)
@@ -859,6 +896,8 @@ impl Server {
                 }
             }
         }
+
+        self.decrement_force_retouch();
 
         // SV_WriteClientdataToMessage (sv_main.c) runs SV_SetIdealPitch once per
         // client per frame, after physics: compute the slope-following auto-pitch
@@ -1485,6 +1524,47 @@ mod tests {
         server.vm.ent_set_vector(e, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(e, "maxs", [0.0, 0.0, 0.0]);
         (server, e)
+    }
+
+    #[test]
+    fn force_retouch_relinks_stationary_edicts_for_two_frames() {
+        // CENSUS F8: SV_Physics does SV_LinkEdict(ent, true) on every live edict
+        // while the QC force_retouch global is set, then decrements it. A
+        // stationary box inside a trigger is touched on exactly the two frames
+        // after spawn_tdeath's force_retouch = 2 — never without it — and a
+        // SOLID_NOT edict is relinked but touches nothing.
+        let (img, touch_fn, g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp(), progs).expect("server");
+        server.vm.set_gf(g_one, 1.0);
+        let still = server.vm.spawn();
+        server.vm.ent_set_float(still, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(still, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(still, "mins", [-16.0; 3]);
+        server.vm.ent_set_vector(still, "maxs", [16.0; 3]);
+        let trigger = server.vm.spawn();
+        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
+        server.vm.ent_set_vector(trigger, "origin", [100.0, 0.0, 0.0]);
+        server.vm.ent_set_vector(trigger, "mins", [-8.0; 3]);
+        server.vm.ent_set_vector(trigger, "maxs", [8.0; 3]);
+        link_edict(&mut server.vm, trigger);
+        let frame = |server: &mut Server| {
+            server.vm.gset_float("touched_flag", 0.0);
+            server.run_frame(0.1).expect("frame");
+            server.vm.gget_float("touched_flag")
+        };
+        assert_eq!(frame(&mut server), 0.0, "no force_retouch: a stationary edict touches nothing");
+        server.vm.gset_float("force_retouch", 2.0);
+        assert_eq!(frame(&mut server), 1.0, "first force_retouch frame");
+        assert_eq!(server.vm.gget_float("force_retouch"), 1.0);
+        assert_eq!(server.vm.ent_get_vector(still, "absmin"), [83.0, -17.0, -17.0], "relinked");
+        assert_eq!(frame(&mut server), 1.0, "second force_retouch frame");
+        assert_eq!(server.vm.gget_float("force_retouch"), 0.0);
+        assert_eq!(frame(&mut server), 0.0, "and then no more");
+        server.vm.ent_set_float(still, "solid", SOLID_NOT as f32);
+        server.vm.gset_float("force_retouch", 1.0);
+        assert_eq!(frame(&mut server), 0.0, "SOLID_NOT: SV_LinkEdict returns before SV_TouchLinks");
     }
 
     #[test]

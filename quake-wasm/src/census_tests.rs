@@ -193,18 +193,23 @@ fn census_bmodel_item_bounds_are_spread_once() {
 /// player's PutClientInServer -> spawn_tdeath sets `force_retouch = 2`, and
 /// SV_Physics does `if (pr_global_struct->force_retouch) SV_LinkEdict (ent,
 /// true)` for every edict for two frames. An ogre standing in e1m6's door *31
-/// trigger field therefore opens it at once (id's oracle: the door has moved 30
-/// units by sv.time 1.7). The port has no force_retouch; the door stays shut.
+/// (and *76) trigger field therefore opens it at once, and one in e1m8's *6;
+/// id's oracle has them fully open by sv.time 4.7 (*31 x -56, *76 x 56, *6
+/// y -72). The port had no force_retouch; the doors stayed shut.
 #[test]
-#[ignore = "census F8: force_retouch is not modelled (level-start doors stay shut)"]
 fn census_force_retouch_opens_e1m6_start_door() {
-    let mut w = build_walk_map("maps/e1m6.bsp").expect("e1m6 boots");
-    while w.server.time() < 1.7 {
-        step(&mut w, 0.1);
-    }
-    let door = find(&w, |w, e| w.server.vm.ent_get_string(e, "model") == "*31").expect("door *31");
-    let o = w.server.vm.ent_get_vector(door, "origin");
-    assert!(o[0].abs() > 1.0, "door *31 is opening by t=1.7 (id: x=-30), port origin {o:?}");
+    let door_at = |map: &str, model: &str| {
+        let mut w = build_walk_map(map).expect("map boots");
+        while w.server.time() < 4.7 {
+            step(&mut w, 0.1);
+        }
+        let door = find(&w, |w, e| w.server.vm.ent_get_string(e, "model") == model).expect("the door");
+        let o = w.server.vm.ent_get_vector(door, "origin");
+        o.map(|v| (v * 100.0).round() / 100.0 + 0.0) // movedir float noise; -0 -> 0
+    };
+    assert_eq!(door_at("maps/e1m6.bsp", "*31"), [-56.0, 0.0, 0.0], "e1m6 door *31 open");
+    assert_eq!(door_at("maps/e1m6.bsp", "*76"), [56.0, 0.0, 0.0], "e1m6 door *76 open");
+    assert_eq!(door_at("maps/e1m8.bsp", "*6"), [0.0, -72.0, 0.0], "e1m8 door *6 open");
 }
 
 /// CENSUS F6 (MED). Every pickup flashes the screen gold: the QC item touch
