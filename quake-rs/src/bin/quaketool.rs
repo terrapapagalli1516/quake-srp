@@ -2424,7 +2424,8 @@ mod tests {
         let (viewsize, refdef) = pov_screen(640, 400);
         assert_eq!(viewsize, 100.0);
         assert_eq!(refdef.sb_lines, 48);
-        assert_eq!(refdef.vrect, render::ViewRect { x: 0, y: 0, w: 640, h: 304 });
+        // id's 48-row bar in every mode (the "scaled 2-D" extra would make it 96).
+        assert_eq!(refdef.vrect, render::ViewRect { x: 0, y: 0, w: 640, h: 352 });
         assert_eq!(render::viewmodel_fudge(viewsize), 2.0, "V_CalcRefdef's fudge at 100");
     }
 }
