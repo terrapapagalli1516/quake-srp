@@ -434,6 +434,54 @@ Evidence: `web/verify_demo.py` (new permanent harness) 9/9 + verify_walk/
 verify_ambient green; 458 lib + 48 wasm tests; clippy 0/0; goldens
 byte-identical (scene renders no demos).
 
+## Options menu + screen framing (2026-09-25, branch `quake/options`)
+
+The user found the Options menu's cursor blinking too fast, and screen size
+seeming not to do the right thing. Both real, plus what they exposed:
+
+- ✅ **Cursor blink** — every 12/13 menu cursor blinked off the menudot frame
+  parity (10 Hz, host_time); the C is `12+((int)(realtime*4)&1)` (4 Hz, real
+  time). The console input cursor was 2 Hz; Con_DrawInput is
+  `10+((int)(realtime*con_cursorspeed)&1)`, speed 4. `step(dt)` now splits
+  the raw dt like Host_FilterTime (realtime += dt; host_time += min(dt, 0.1)).
+- ✅ **View framing (HIGH-visibility)** — the 3-D view was rendered full-screen
+  under a pasted-on status bar: horizon at y=100 instead of 76 at 320x200, 24%
+  of pixels drawn only to be covered. Now SCR_CalcRefdef + R_SetVrect
+  (`render::calc_refdef`): vrect above sb_lines, projection centred on it,
+  backtile border (`draw_tile_clear`, Draw_TileClear), sb_lines 48/24/0 gating
+  Sbar_DrawInventory / the status strip (death scoreboard still at 0),
+  intermission full screen, D_WarpScreen on the vrect only. Proven on e1m1:
+  the 100/110 views are the 120 view shifted up 24/12 rows, pixel for pixel.
+- ✅ **Screen size = viewsize** — the row had been repurposed to cycle render
+  resolutions. Now scr_viewsize (±10, 30..120, slider (v-30)/90), `sizeup` /
+  `sizedown` / `viewsize [n]` console commands, default.cfg's `+`/`=`/`-`
+  binds, `viewsize 100` on Reset. Resolution lives only in Video Options
+  (M_Video), where the preset list already was; localStorage restore intact.
+- ✅ **Viewmodel placement** — the gun hung at a hand-tuned offset (7 fwd, 1.5
+  right, 3.5 up, near clip 1) calibrated under the old framing; with the fixed
+  framing it showed ~3.6x id's gun. Now V_CalcRefdef's origin (forward bob +
+  the viewsize fudge +2/+1/+1/+0.5 at 100/110/90/80) and r_aclip.c's
+  ALIAS_Z_CLIP_PLANE 5: e1m1 shotgun IoU 0.92 vs an independent projection of
+  v_shot.mdl through R_ViewChanged's math.
+- ✅ **M_Draw / M_Print** — menus now Draw_FadeScreen the frame under them
+  (3-in-4 dither) and print in the bronze conchars half (c+128); M_PrintWhite
+  only where the C uses it (current video mode, "No Communications").
+- ✅ **Reset to defaults** — execs exactly default.cfg (binds + viewsize,
+  gamma, volume, sensitivity); no longer resets bgmvolume / Always Run /
+  m_pitch / lookspring / lookstrafe.
+- Open: the Video list is one column (the C's 3-wide grid with "Windowed" /
+  "Fullscreen" headers and T/D test/default keys is not modelled); the port's
+  2-D layer stays a scaled 320x200 screen (WinQuake draws it 1:1 at higher
+  modes, with a tiled strip beside a 320-wide sbar); pixel aspect stays square
+  (id's 320x200 uses pixelAspect 0.8333 for 4:3 CRTs).
+
+Evidence: 489 lib + 67 wasm tests (blink rates, refdef at 100/110/120/90/70/
+50/30 + intermission + scaled modes, tile/compose, sb_lines HUD gating, slider,
+binds, console commands, Video mode, e1m1 framing, fudge); clippy 0/0; all six
+verify_*.py green (verify_menu 60/60 incl. reload persistence); goldens
+byte-identical `fb14bd65`/`a6f98d8a`/`0211e6d4` (the scene camera has no
+status bar or viewmodel).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

@@ -16,7 +16,7 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
 > sound + the placed ambient loops and leaf ambients** (torch crackle, machine hums, wind and water), and reach the
 > exit to the **intermission stats screen** (Time / Secrets / Kills from the QC-placed camera) — through to the
 > **episode-end finale text** — with your inventory carried to the next map: the whole shareware episode. There's a
-> working **Options menu** (selectable resolution, mouse, volume) and a **drop-down console** (`~`) with
+> working **Options menu** (screen size, mouse, volume; resolution under Video Options) and a **drop-down console** (`~`) with
 > `god`/`noclip`/`fly`/`give`/`impulse`/`map`/`kill`. What it is *not*: multiplayer/netcode or save/load (out of
 > scope). Everything claimed below is real and tested: **458 engine + 48 wasm tests**, zero dependencies, no
 > `unsafe` in the engine, every layer checked against id's shareware `pak0.pak`, and renderer changes verified
@@ -57,8 +57,8 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   (`V_CalcBlend`: damage flash, underwater tint); a **status-bar HUD** and the **intermission/finale overlays**
   (`Sbar_IntermissionOverlay`, the 8-chars/sec finale text reveal).
 - **UI** — the **main menu** (`M_Menu_*`: plaque/title/list + animated cursor, rendered from the pak's `.lmp` pics)
-  with **Single Player → `start` hub**, a working **Options** screen (selectable render **resolution** + mouse +
-  volume), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
+  with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
+  volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
   `fly`/`give`/`impulse`/`map`/`kill`/`clear`. Boots into the menu **over the playing attract demo**.
 - **Sound** — the QuakeC `sound` + temp-entity sounds drive a queue the browser plays through Web Audio with
   **distance/stereo spatialization** relative to the player (samples resolved under the `sound/` pak dir); **placed

@@ -5,6 +5,21 @@ things stand" note — read it before continuing.
 
 ---
 
+## Options menu + screen framing (2026-09-25, branch `quake/options`)
+
+User-reported: Options cursor blinked too fast; Screen size seemed wrong.
+Fixed faithful to the C (details + evidence in AUDIT.md's section of the
+same name): 4 Hz realtime cursors (menu + console; `step(dt)` takes raw dt
+and splits it like Host_FilterTime); Screen size is `viewsize` again
+(30..120, `sizeup`/`sizedown`/`viewsize`, `-`/`=` binds) and the view is
+framed by SCR_CalcRefdef/R_SetVrect — ABOVE the status bar, backtile border
+below 100, sbar/inventory by sb_lines; resolution only in Video Options
+(localStorage persistence unchanged); the gun at V_CalcRefdef's origin with
+the alias clip plane; menus fade the frame and print bronze (M_Print); Reset
+to defaults = default.cfg only. Goldens unchanged.
+
+---
+
 ## Demo playback parity (2026-06-11, branch `ship/demo-parity`)
 
 User (twice): the attract demo must match the real game — sound, status bar,

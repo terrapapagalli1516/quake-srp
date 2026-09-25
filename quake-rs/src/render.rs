@@ -2504,6 +2504,7 @@ fn vview_lerp(a: &VView, b: &VView, alpha: f32) -> VView {
 /// Convenience wrapper: clip against the near plane into a fresh `Vec` (for cold
 /// paths and tests). The per-face hot paths call [`clip_poly_near_into`] with a
 /// reused scratch buffer instead.
+#[cfg(test)]
 fn clip_poly_near(input: &[VView]) -> Vec<VView> {
     let mut out = Vec::new();
     clip_poly_near_into(input, &mut out);
@@ -2515,6 +2516,13 @@ fn clip_poly_near(input: &[VView]) -> Vec<VView> {
 /// overwhelmingly common per-face call allocates nothing. The vertices written
 /// are byte-identical to the previous return-a-fresh-`Vec` version.
 fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
+    clip_poly_plane_into(input, NEAR_PLANE, out);
+}
+
+/// [`clip_poly_near_into`] against an arbitrary view-space plane `vz >= near`
+/// (the alias clip plane, `ALIAS_Z_CLIP_PLANE`, for the viewmodel). The same
+/// arithmetic: with `near == NEAR_PLANE` the output is byte-identical.
+fn clip_poly_plane_into(input: &[VView], near: f32, out: &mut Vec<VView>) {
     out.clear();
     let n = input.len();
     if n == 0 {
@@ -2523,7 +2531,7 @@ fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
     // Fast path: a polygon entirely in front of the near plane is copied
     // unchanged (same vertices, same order). This keeps the overwhelmingly
     // common case a verbatim copy, guaranteeing no rasteriser regression.
-    if input.iter().all(|v| v.vz > NEAR_PLANE) {
+    if input.iter().all(|v| v.vz > near) {
         out.extend_from_slice(input);
         return;
     }
@@ -2531,8 +2539,8 @@ fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
     for i in 0..n {
         let cur = &input[i];
         let next = &input[(i + 1) % n];
-        let cur_in = cur.vz > NEAR_PLANE;
-        let next_in = next.vz > NEAR_PLANE;
+        let cur_in = cur.vz > near;
+        let next_in = next.vz > near;
         if cur_in {
             out.push(*cur);
         }
@@ -2542,7 +2550,7 @@ fn clip_poly_near_into(input: &[VView], out: &mut Vec<VView>) {
         if cur_in != next_in {
             let denom = next.vz - cur.vz;
             if denom != 0.0 {
-                let alpha = (NEAR_PLANE - cur.vz) / denom;
+                let alpha = (near - cur.vz) / denom;
                 out.push(vview_lerp(cur, next, alpha));
             }
         }
@@ -4816,6 +4824,47 @@ pub fn draw_brush_bsp(
 pub struct Viewmodel<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub frame: usize,
+    /// Where V_CalcRefdef puts the gun (`view->origin`) relative to the
+    /// camera (`r_refdef.vieworg`), in world units: see
+    /// [`viewmodel_origin_ofs`]. The model is posed there with the view's
+    /// orientation.
+    pub origin_ofs: Vec3,
+}
+
+/// V_CalcRefdef's viewsize "fudge" (view.c): "fudge position around to keep
+/// amount of weapon visible roughly equal with different FOV" — the gun is
+/// raised 1 unit at viewsize 110, 2 at 100, 1 at 90 and 0.5 at 80 (exact
+/// compares on the cvar, as in the C), 0 otherwise.
+pub fn viewmodel_fudge(viewsize: f32) -> f32 {
+    if viewsize == 110.0 {
+        1.0
+    } else if viewsize == 100.0 {
+        2.0
+    } else if viewsize == 90.0 {
+        1.0
+    } else if viewsize == 80.0 {
+        0.5
+    } else {
+        0.0
+    }
+}
+
+/// The gun origin relative to the camera, as V_CalcRefdef builds it: both
+/// start at the entity origin + `viewheight` + the vertical bob (so those
+/// cancel), then the gun moves `forward * bob * 0.4` — `forward` from the
+/// player ENTITY's angles, whose pitch the server keeps at a third of the view
+/// pitch (SV_ClientThink `angles[PITCH] = -v_angle[PITCH]/3`) — and up by the
+/// viewsize fudge ([`viewmodel_fudge`]). (The C's 1/32 camera epsilon is not
+/// modelled here or on the camera.)
+pub fn viewmodel_origin_ofs(cam: &Camera, bob: f32, viewsize: f32) -> Vec3 {
+    let yaw = (cam.yaw as f64).to_radians();
+    let elev = (cam.pitch as f64 / 3.0).to_radians();
+    let f = (bob * 0.4) as f64;
+    [
+        (f * elev.cos() * yaw.cos()) as f32,
+        (f * elev.cos() * yaw.sin()) as f32,
+        (f * elev.sin()) as f32 + viewmodel_fudge(viewsize),
+    ]
 }
 
 /// A sprite-model entity to draw as a camera-facing billboard (Quake's
@@ -4834,15 +4883,16 @@ pub struct SpriteInstance<'a> {
 ///
 /// ## View anchoring
 /// Each model-space vertex `p` (decoded by [`mdl_vertex_model_space`]:
-/// `scale*v + scale_origin`) is mapped into the world *relative to the camera*
-/// rather than to a fixed world origin:
-/// `world_v = cam.pos + forward*(p[0] + FWD) + right*(-p[1] + RIGHT) + up*(p[2] + UP)`.
+/// `scale*v + scale_origin`) is posed at V_CalcRefdef's gun origin — the
+/// camera plus `origin_ofs` ([`viewmodel_origin_ofs`]: the forward bob term and
+/// the viewsize fudge) — with the view's orientation:
+/// `world_v = cam.pos + origin_ofs + forward*p[0] + right*(-p[1]) + up*p[2]`.
 /// The MDL forward axis (`+X`) maps to the camera's `forward`, the MDL `+Y` to
 /// the camera's *left* (hence the `-p[1]` on `right`), and `+Z` to `up`. The
-/// fixed `(FWD, RIGHT, UP)` offset nudges the gun forward, slightly right, and
-/// down so it sits at the lower-centre of the frame (Quake hangs the gun below
-/// and ahead of the eye). Because the basis is the *camera* basis, the gun turns
-/// and pitches with the view and never sits at a world position.
+/// `v_*.mdl` models are authored for exactly that pose (their vertices sit
+/// below and ahead of the eye); triangles nearer than `ALIAS_Z_CLIP_PLANE`
+/// (5 units) are clipped, as r_aclip.c does, so the grip is trimmed. Because
+/// the basis is the *camera* basis, the gun turns and pitches with the view.
 ///
 /// ## Always on top
 /// The viewmodel uses its **own** depth buffer (`vz` of its own triangles),
@@ -4858,7 +4908,7 @@ pub struct SpriteInstance<'a> {
 /// `s`-shift ([`mdl_skin_st`]); a skinless model (or an out-of-range stvert)
 /// falls back to a flat shaded grey. Lambert shading uses the same light vector.
 /// Every index goes through `.get()`; malformed data is skipped, never panicked
-/// on. A triangle is skipped whole if any vertex falls at/behind the near plane.
+/// on.
 #[allow(clippy::too_many_arguments)]
 fn draw_viewmodel(
     image: &mut Image,
@@ -4866,35 +4916,16 @@ fn draw_viewmodel(
     cam: &Camera,
     mdl: &crate::mdl::Mdl,
     frame: usize,
+    origin_ofs: Vec3,
     palette: &[[u8; 3]; 256],
     w: usize,
     h: usize,
 ) {
-    const NEAR: f32 = 1.0;
-    // The view-space offset (in MDL/world units) that hangs the gun at the eye,
-    // slightly right of and below centre, matching Quake's hand-held pose. These
-    // are added in the camera basis below (forward / right / up). Quake draws the
-    // viewmodel essentially AT the eye and lets the near plane CLIP the grip: the
-    // `v_*` weapon models span roughly model-X (forward) in [-14, +28] and
-    // model-Z (up) in [-12, 0] (below the eye). With the near-plane CLIPPING now
-    // in place (`clip_poly_near` below), the grip (model-X < 0, behind the eye)
-    // is trimmed at the plane while the barrel (0..28) extends forward — so the
-    // gun sits large at the lower-centre/right of the frame instead of being
-    // shoved 16..58 units ahead (the old +30 push made it look distant + tiny).
-    //
-    // `OFS_FORWARD` is a tiny positive nudge: it only keeps the grip from landing
-    // exactly on the near plane (a degenerate edge) — it does NOT push the gun
-    // away. `OFS_RIGHT` (negative -> camera right, since the gun is anchored with
-    // `-p[1]` on `right`) nudges it just right of centre; `OFS_UP` lifts the
-    // already-low (model-Z < 0) barrel up so the grip is clipped at the bottom
-    // edge rather than the whole gun falling off-screen.
-    //
-    // The placement is in *proportion* resolution-independent: focal length
-    // scales with the frame width and the screen centre with its size, so the
-    // gun keeps the same lower-centre fraction of the frame at any `w`/`h`.
-    const OFS_FORWARD: f32 = 7.0;
-    const OFS_RIGHT: f32 = 1.5;
-    const OFS_UP: f32 = 3.5;
+    // `ALIAS_Z_CLIP_PLANE` (r_local.h): alias-model triangles are clipped
+    // where they come nearer than 5 units to the eye (r_aclip.c). With the gun
+    // posed at V_CalcRefdef's origin (a hair above the eye) this trims the
+    // grip, exactly as the C shows the held weapon — only its forward part.
+    const ALIAS_Z_CLIP_PLANE: f32 = 5.0;
     if w == 0 || h == 0 {
         return;
     }
@@ -4911,6 +4942,8 @@ fn draw_viewmodel(
     };
 
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
+    // V_CalcRefdef's `view->origin`.
+    let gun = [cam.pos[0] + origin_ofs[0], cam.pos[1] + origin_ofs[1], cam.pos[2] + origin_ofs[2]];
 
     // The viewmodel carries only a `frame` (no group-anim time / skinnum), so it
     // poses at `time = 0` (first sub-pose of any group) with skin 0 — its prior
@@ -4947,16 +4980,14 @@ fn draw_viewmodel(
                 }
             };
             let p = mdl_vertex_model_space(header, tv);
-            // Anchor to the camera basis: +X -> forward, +Y -> left (so -Y on
-            // `right`), +Z -> up; plus the fixed lower-centre offset.
-            let fx = p[0] + OFS_FORWARD;
-            let rx = -p[1] + OFS_RIGHT;
-            let ux = p[2] + OFS_UP;
+            // Pose at the gun origin with the view's orientation: +X ->
+            // forward, +Y -> left (so -Y on `right`), +Z -> up.
+            let (fx, rx, ux) = (p[0], -p[1], p[2]);
             if let Some(wv) = world.get_mut(slot) {
                 *wv = [
-                    cam.pos[0] + forward[0] * fx + right[0] * rx + up[0] * ux,
-                    cam.pos[1] + forward[1] * fx + right[1] * rx + up[1] * ux,
-                    cam.pos[2] + forward[2] * fx + right[2] * rx + up[2] * ux,
+                    gun[0] + forward[0] * fx + right[0] * rx + up[0] * ux,
+                    gun[1] + forward[1] * fx + right[1] * rx + up[1] * ux,
+                    gun[2] + forward[2] * fx + right[2] * rx + up[2] * ux,
                 ];
             }
         }
@@ -5015,13 +5046,13 @@ fn draw_viewmodel(
                 };
             }
         }
-        let _ = NEAR; // the plane lives in `clip_poly_near` (`NEAR_PLANE`, == NEAR)
-        let poly = clip_poly_near(&vviews);
+        let mut poly = Vec::new();
+        clip_poly_plane_into(&vviews, ALIAS_Z_CLIP_PLANE, &mut poly);
         if poly.len() < 3 {
             continue; // wholly behind the eye -> nothing to draw
         }
 
-        // Project the clipped polygon to screen (every `vz >= NEAR` now).
+        // Project the clipped polygon to screen (every `vz >= 5` now).
         let proj: Vec<ProjT> = poly
             .iter()
             .map(|v| ProjT {
@@ -5301,7 +5332,7 @@ pub fn render_scene_ext_sprited(
     // The weapon viewmodel draws last, on top of the world and every model.
     let tv = stats_on().then(std::time::Instant::now);
     if let Some(vm) = viewmodel {
-        draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, palette, w, h);
+        draw_viewmodel(&mut image, &mut zbuf, cam, vm.mdl, vm.frame, vm.origin_ofs, palette, w, h);
     }
     if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     image
@@ -5802,6 +5833,193 @@ const HUD_VIRT_W: f32 = 320.0;
 /// rows of the 320x200 virtual screen).
 const HUD_BAR_H: f32 = 24.0;
 
+// ---------------------------------------------------------------------------
+// Screen layout: scr_viewsize -> the 3-D view rectangle + sb_lines
+// (SCR_CalcRefdef / R_SetVrect / Draw_TileClear)
+// ---------------------------------------------------------------------------
+
+/// `scr_viewsize` ("viewsize", screen.c: default "100", archived) and its
+/// bounds: SCR_CalcRefdef clamps it to 30..=120 and `M_AdjustSliders` /
+/// `sizeup` / `sizedown` move it in steps of 10. 100 is the full-width view
+/// above the full status bar; 110 drops the inventory strip; 120 drops the
+/// status bar entirely; below 100 the view shrinks, centred, inside a
+/// `backtile` border.
+pub const VIEWSIZE_DEFAULT: f32 = 100.0;
+pub const VIEWSIZE_MIN: f32 = 30.0;
+pub const VIEWSIZE_MAX: f32 = 120.0;
+pub const VIEWSIZE_STEP: f32 = 10.0;
+
+/// `sb_lines` for the full status bar: the 24-row `sbar` plus the 24-row
+/// `ibar` inventory strip (SCR_CalcRefdef's `24+16+8`).
+pub const SB_LINES_FULL: i32 = 48;
+
+/// A rectangle of the framebuffer, in pixels (`vrect_t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewRect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// What `SCR_CalcRefdef` works out each time the view changes: where the 3-D
+/// view goes (`r_refdef.vrect`) and how many status-bar lines are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refdef {
+    /// `r_refdef.vrect`: the 3-D view rectangle in framebuffer pixels. The
+    /// renderer draws into a `vrect.w x vrect.h` image with the projection
+    /// centred on it and `fov_x` spanning its width — R_ViewChanged's
+    /// `xcenter = vrect.width/2 + vrect.x`, `xscale = vrect.width / (2 tan(fov_x/2))`,
+    /// `yscale = xscale` (square pixels); the software renderer derives its
+    /// vertical extent from that, not from CalcFov's `fov_y`.
+    pub vrect: ViewRect,
+    /// `sb_lines` in the status bar's 320x200 virtual rows: 48 (sbar + inventory),
+    /// 24 (sbar only) or 0 (no status bar).
+    pub sb_lines: i32,
+}
+
+/// `SCR_CalcRefdef` + `R_SetVrect` (screen.c / r_main.c) for a `vid_w x vid_h`
+/// framebuffer: bound `viewsize` to 30..=120, pick `sb_lines` (an intermission
+/// is always full screen: `size = 120`), then size the view rectangle —
+/// `viewsize`% of the screen (100 at most), at least 96 wide, width a multiple
+/// of 8 and height even, never taller than the screen minus the status bar,
+/// centred horizontally on the screen and vertically in the space above the
+/// status bar.
+///
+/// The one adaptation: this port draws the 2-D layer (status bar, menus) as the
+/// 320x200 virtual screen scaled by `vid_w/320`, so the status bar the view must
+/// clear (`lineadj`) is `sb_lines` scaled to framebuffer rows — exactly the
+/// rows [`draw_hud_into`] paints. At 320x200 every number is the C's.
+///
+/// The arithmetic keeps the C's types: `size` is a `float`, the products are
+/// truncated to `int` (so e.g. 70% of 320 is `(int)(320 * 0.7f) = 224`, as an
+/// IEEE-single build computes it).
+pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> Refdef {
+    // SCR_CalcRefdef: bound viewsize (a non-number reads as the default).
+    let viewsize = if viewsize.is_finite() {
+        viewsize.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX)
+    } else {
+        VIEWSIZE_DEFAULT
+    };
+    // "intermission is always full screen"
+    let size = if intermission { 120.0 } else { viewsize };
+    let sb_lines = if size >= 120.0 {
+        0 // no status bar at all
+    } else if size >= 110.0 {
+        24 // no inventory
+    } else {
+        SB_LINES_FULL
+    };
+    // The status bar's framebuffer rows: draw_hud_into scales the 320-wide bar
+    // by vid_w/320 and bottom-anchors it, so it covers ceil(sb_lines * scale).
+    let vw = vid_w as i64;
+    let vh = vid_h as i64;
+    let scale = vid_w as f32 / HUD_VIRT_W;
+    let mut lineadj = ((sb_lines as f32 * scale).ceil() as i64).clamp(0, vh);
+
+    // R_SetVrect (r_main.c).
+    let mut size: f32 = if viewsize > 100.0 { 100.0 } else { viewsize };
+    if intermission {
+        size = 100.0;
+        lineadj = 0;
+    }
+    size /= 100.0;
+    let h = vh - lineadj;
+    let mut w = (vw as f32 * size) as i64;
+    if w < 96 {
+        size = (96.0 / vw.max(1) as f64) as f32;
+        w = 96; // min for icons
+    }
+    w &= !7;
+    let mut height = (vh as f32 * size) as i64;
+    if height > vh - lineadj {
+        height = vh - lineadj;
+    }
+    height &= !1;
+    // (A frame narrower than 96/8 px never occurs in the C; clamp so a tiny
+    // test framebuffer still yields an in-bounds rectangle.)
+    let w = w.clamp(0, vw);
+    let height = height.clamp(0, vh);
+    let x = ((vw - w) / 2).max(0);
+    let y = ((h - height) / 2).max(0);
+    Refdef {
+        vrect: ViewRect { x: x as usize, y: y as usize, w: w as usize, h: height as usize },
+        sb_lines,
+    }
+}
+
+/// `Draw_TileClear` (draw.c): fill the framebuffer rectangle `(x, y, w, h)` with
+/// the 64x64 `backtile` pic, tiled from the SCREEN origin (texel
+/// `(x mod 64, y mod 64)`), as SCR_UpdateScreen does under a view smaller than
+/// the screen. Like the rest of the 2-D layer the tile is the 320x200 virtual
+/// screen's, scaled by `vid_w/320` (nearest-neighbour). A missing or malformed
+/// `backtile` fills black; every write is clipped.
+pub fn draw_tile_clear(
+    image: &mut Image,
+    backtile: Option<&crate::wad::Qpic>,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    palette: &[[u8; 3]; 256],
+) {
+    let x1 = x.saturating_add(w).min(image.w);
+    let y1 = y.saturating_add(h).min(image.h);
+    if x >= x1 || y >= y1 {
+        return;
+    }
+    let tile = backtile.filter(|t| {
+        t.width > 0 && t.height > 0 && t.data.len() >= (t.width as usize) * (t.height as usize)
+    });
+    let scale = image.w as f32 / HUD_VIRT_W;
+    let inv = if scale.is_finite() && scale > 0.0 { 1.0 / scale } else { 1.0 };
+    for py in y..y1 {
+        let row = &mut image.rgb[py * image.w..py * image.w + image.w];
+        let Some(t) = tile else {
+            row[x..x1].fill([0, 0, 0]);
+            continue;
+        };
+        let (tw, th) = (t.width as usize, t.height as usize);
+        let ty = ((py as f32 * inv) as usize) % th;
+        let trow = &t.data[ty * tw..ty * tw + tw];
+        for (px, out) in row.iter_mut().enumerate().take(x1).skip(x) {
+            let tx = ((px as f32 * inv) as usize) % tw;
+            *out = palette[trow[tx] as usize];
+        }
+    }
+}
+
+/// Put the rendered 3-D `view` (a `vrect.w x vrect.h` image) into a
+/// `vid_w x vid_h` screen at `vrect`, with everything outside it tile-cleared
+/// ([`draw_tile_clear`] — SCR_UpdateScreen's `Draw_TileClear(0,0,vid.width,
+/// vid.height)` under the view). A view that already IS the whole screen
+/// (viewsize 120, an intermission) comes back untouched, at zero cost. The
+/// status bar is drawn over the result afterwards, as in the C.
+pub fn compose_view(
+    view: Image,
+    vrect: ViewRect,
+    vid_w: usize,
+    vid_h: usize,
+    backtile: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+) -> Image {
+    if vrect.x == 0 && vrect.y == 0 && view.w == vid_w && view.h == vid_h {
+        return view;
+    }
+    let mut img = Image::new(vid_w, vid_h, [0, 0, 0]);
+    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, vid_h, palette);
+    let cw = view.w.min(vid_w.saturating_sub(vrect.x));
+    for vy in 0..view.h {
+        let py = vrect.y + vy;
+        if py >= vid_h {
+            break;
+        }
+        let dst = py * vid_w + vrect.x;
+        img.rgb[dst..dst + cw].copy_from_slice(&view.rgb[vy * view.w..vy * view.w + cw]);
+    }
+    img
+}
+
 /// The Quake HUD overlay: the parsed `gfx.wad`, the screen palette, and the
 /// player stats to display. Built by the caller each frame from the player edict
 /// and the loaded `gfx.wad`; consumed by [`draw_hud_into`].
@@ -5855,6 +6073,10 @@ pub struct Hud<'a> {
     /// Force the scorebar + solo scoreboard (Tab "show scores"); the C also shows it
     /// whenever `cl.stats[STAT_HEALTH] <= 0`, which [`draw_hud_into`] handles directly.
     pub show_scores: bool,
+    /// `sb_lines` from [`calc_refdef`] (the viewsize): 48 draws the inventory
+    /// strip and the status bar, 24 the status bar alone, 0 neither — though
+    /// the death / Tab scoreboard still shows at 0, as in `Sbar_Draw`.
+    pub sb_lines: i32,
 }
 
 /// Blit one `Qpic` at virtual position `(vx, vy)` in 320x200 space, scaled by
@@ -6199,44 +6421,19 @@ pub fn conchars_pic(wad: &crate::wad::Wad2) -> Option<crate::wad::Qpic> {
     })
 }
 
-/// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
-/// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
-/// non-deathmatch path).
-///
-/// The whole bar is laid out in Quake's fixed 320x200 virtual space and scaled by
-/// `image.w / 320` (nearest-neighbour) so it spans the full framebuffer width,
-/// bottom-anchored. The *status area* is 48 virtual rows tall: the `ibar`
-/// inventory strip (320x24) sits in the 24 rows ABOVE the `sbar` (320x24)
-/// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
-/// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
-///
-/// Drawing order (mirrors `Sbar_Draw` → `Sbar_DrawInventory` then the sbar block):
-///  1. `ibar` strip, then on it: owned weapon icons (the selected one flashing its
-///     `inva*` frames), the four small ammo counts, keys/powerups, and sigils.
-///  2. `sbar` strip, then on it: the armour-type icon + armour number (left), the
-///     animated player face (centre, x=112), the health number, the ammo-type
-///     icon (x=224) and the current-ammo number (right).
-///
-/// Every pic is fetched via `wad.qpic(name).ok()` (and `conchars` via
-/// `lump_data`), so a `gfx.wad` missing any element degrades gracefully — that
-/// element just doesn't draw, never a panic and never an errored frame.
-pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
-    if image.w == 0 || image.h == 0 {
-        return;
-    }
-    // Scale the 320-wide virtual layout to the real framebuffer width.
-    let scale = image.w as f32 / HUD_VIRT_W;
-    if !scale.is_finite() || scale <= 0.0 {
-        return;
-    }
-    // Framebuffer y of virtual row 0 of the bar (top of the `sbar` strip); the
-    // 24-px sbar sits flush at the bottom, the ibar 24 rows above it (negative vy).
-    let vy_top = image.h as f32 - HUD_BAR_H * scale;
+/// `Sbar_DrawInventory` (sbar.c): the `ibar` strip in the 24 virtual rows above
+/// the status strip and, on it, the owned weapons, the four ammo counts, the
+/// keys/powerups and the sigils. Called by [`draw_hud_into`] only while
+/// `sb_lines > 24`. `scale` / `vy_top` are the bar's transform (see there).
+fn draw_sbar_inventory(
+    image: &mut Image,
+    hud: &Hud,
+    conchars: Option<&crate::wad::Qpic>,
+    scale: f32,
+    vy_top: f32,
+) {
     let wad = hud.wad;
     let pal = hud.palette;
-    let conchars = conchars_pic(wad);
-
-    // ----- Inventory bar (Sbar_DrawInventory) -------------------------------
     // The `ibar` strip in the 24 rows above the sbar: Sbar_DrawPic(0, -24, sb_ibar).
     blit_named(image, wad, "ibar", 0.0, -24.0, scale, vy_top, pal);
 
@@ -6264,7 +6461,7 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // the ibar, small gold digits. Sbar_DrawInventory formats "%3i" (right-justified
     // in 3 chars) and draws each non-space char via Sbar_DrawCharacter at
     // ((6*i+1..3)*8 - 2, -24) using glyph `18 + digit` (the gold conchars digits).
-    if let Some(cc) = &conchars {
+    if let Some(cc) = conchars {
         let counts = [hud.ammo_shells, hud.ammo_nails, hud.ammo_rockets, hud.ammo_cells];
         for (i, &count) in counts.iter().enumerate() {
             // "%3i": right-justified, blanks for leading zeros, clamped to >=0.
@@ -6295,6 +6492,55 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
             blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, scale, vy_top, pal);
         }
     }
+}
+
+/// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
+/// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
+/// non-deathmatch path).
+///
+/// The whole bar is laid out in Quake's fixed 320x200 virtual space and scaled by
+/// `image.w / 320` (nearest-neighbour) so it spans the full framebuffer width,
+/// bottom-anchored. The *status area* is 48 virtual rows tall: the `ibar`
+/// inventory strip (320x24) sits in the 24 rows ABOVE the `sbar` (320x24)
+/// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
+/// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
+///
+/// How much of it draws follows `hud.sb_lines` ([`calc_refdef`]): the inventory
+/// strip only above 24 lines, the status strip only above 0 — but the death /
+/// Tab scoreboard (`scorebar`) regardless, exactly like `Sbar_Draw`.
+///
+/// Drawing order (mirrors `Sbar_Draw` → `Sbar_DrawInventory` then the sbar block):
+///  1. `ibar` strip, then on it: owned weapon icons (the selected one flashing its
+///     `inva*` frames), the four small ammo counts, keys/powerups, and sigils.
+///  2. `sbar` strip, then on it: the armour-type icon + armour number (left), the
+///     animated player face (centre, x=112), the health number, the ammo-type
+///     icon (x=224) and the current-ammo number (right).
+///
+/// Every pic is fetched via `wad.qpic(name).ok()` (and `conchars` via
+/// `lump_data`), so a `gfx.wad` missing any element degrades gracefully — that
+/// element just doesn't draw, never a panic and never an errored frame.
+pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    // Scale the 320-wide virtual layout to the real framebuffer width.
+    let scale = image.w as f32 / HUD_VIRT_W;
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    // Framebuffer y of virtual row 0 of the bar (top of the `sbar` strip); the
+    // 24-px sbar sits flush at the bottom, the ibar 24 rows above it (negative vy).
+    let vy_top = image.h as f32 - HUD_BAR_H * scale;
+    let wad = hud.wad;
+    let pal = hud.palette;
+    let conchars = conchars_pic(wad);
+
+    // ----- Inventory bar (Sbar_DrawInventory) -------------------------------
+    // Sbar_Draw: `if (sb_lines > 24) Sbar_DrawInventory ();` — viewsize 110
+    // (sb_lines 24) keeps only the status strip, 120 (0) neither.
+    if hud.sb_lines > 24 {
+        draw_sbar_inventory(image, hud, conchars.as_ref(), scale, vy_top);
+    }
 
     // ----- Status bar (the sbar block of Sbar_Draw) -------------------------
     // When the player is dead (health <= 0) or holding Tab, the C replaces the whole
@@ -6305,6 +6551,10 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
         if let Some(cc) = &conchars {
             draw_solo_scoreboard(image, cc, hud, scale, vy_top, pal);
         }
+        return;
+    }
+    // `else if (sb_lines)`: no status strip at viewsize 120.
+    if hud.sb_lines <= 0 {
         return;
     }
 
@@ -6742,6 +6992,12 @@ pub const BIND_LOOKDOWN: usize = 12;
 pub const BIND_CENTERVIEW: usize = 13;
 pub const BIND_MOVEUP: usize = 16;
 pub const BIND_MOVEDOWN: usize = 17;
+/// Commands `default.cfg` binds that `M_Keys_Draw` doesn't list: they sit past
+/// the [`BINDNAMES`] rows, so Customize controls never shows them, but a
+/// rebind over their key or `Reset to defaults` treats them like any other
+/// binding. `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
+pub const BIND_SIZEUP: usize = NUM_BINDNAMES;
+pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
 /// the 128+ block. Only the keys a browser page can sensibly deliver are named
@@ -6823,6 +7079,9 @@ fn default_bindings() -> [Option<u8>; 256] {
     bind(K_END, BIND_CENTERVIEW);
     bind(b'z', BIND_LOOKDOWN);
     bind(K_SHIFT, BIND_SPEED);
+    bind(b'+', BIND_SIZEUP);
+    bind(b'=', BIND_SIZEUP);
+    bind(b'-', BIND_SIZEDOWN);
     bind(K_CTRL, BIND_ATTACK);
     bind(K_UPARROW, BIND_FORWARD);
     bind(K_DOWNARROW, BIND_BACK);
@@ -6841,19 +7100,15 @@ fn default_bindings() -> [Option<u8>; 256] {
     b
 }
 
-/// The selectable render-resolution presets the Options "Screen size" row cycles
-/// through, as `(width, height)` pairs. A consistent 16:10 ladder (each step
-/// +160w/+100h) from the fast `320x200` up to the host's `1280x800` clamp cap
-/// (`1_280*800` = the exact pixel budget). The engine *boots* at the host's chosen
-/// default (see wasm `DEFAULT_W`/`DEFAULT_H`), which must be one of these so the
-/// menu's Screen-size label can sync to it; higher presets render the 3-D scene at
-/// the larger size (the menu + HUD auto-scale to whatever framebuffer they're drawn
-/// into).
-///
-/// NOTE: this differs from id's `scr_viewsize` (30..120, which shrinks the 3-D
-/// viewport inside a fixed screen). Here the "Screen size" row instead cycles the
-/// engine's actual render resolution — the behaviour the host can really apply —
-/// while drawing a faithful slider whose knob tracks the preset's [0,1] fraction.
+/// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
+/// as `(width, height)` render resolutions — this port's `modelist`. A
+/// consistent 16:10 ladder (each step +160w/+100h) from the fast `320x200` up to
+/// the host's `1280x800` clamp cap (`1_280*800` = the exact pixel budget). The
+/// engine *boots* at the host's chosen default (see wasm `DEFAULT_W`/`DEFAULT_H`),
+/// which must be one of these so the list can mark the current mode; higher modes
+/// render the 3-D scene at the larger size (the menu + HUD auto-scale to whatever
+/// framebuffer they're drawn into). The Options "Screen size" row is id's
+/// `viewsize` (see [`calc_refdef`]), not the mode, exactly as in WinQuake.
 pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
     (320, 200),
     (480, 300),
@@ -6952,6 +7207,27 @@ const SLIDER_RANGE: usize = 10;
 /// virtual x=200 (`M_DrawCharacter(200, 32 + cursor*8, 12 + ...)`).
 const OPTIONS_CURSOR_BASE: u8 = 12;
 const OPTIONS_CURSOR_X: f32 = 200.0;
+
+/// `(int)(realtime*rate) & 1` — the C's cursor-flash bit, shared by the menu
+/// cursors (`rate` 4) and the console input cursor (`con_cursorspeed` 4). The C
+/// truncates the double product toward zero; `realtime` only grows, so a
+/// non-finite or non-positive clock is phase 0.
+fn realtime_blink_bit(realtime: f64, rate: f64) -> u8 {
+    if !realtime.is_finite() || realtime <= 0.0 {
+        return 0;
+    }
+    ((realtime * rate) as i64 & 1) as u8
+}
+
+/// The flashing menu cursor's conchars cell: `12 + ((int)(realtime*4) & 1)`,
+/// verbatim from every text menu that has one (`M_Options_Draw`,
+/// `M_Load_Draw`/`M_Save_Draw`, `M_Keys_Draw`, vid_win.c `VID_MenuDraw`). Glyph
+/// 12 is blank and 13 is the arrow, so the cursor is visible for a quarter
+/// second out of every half second: a 4 Hz toggle on REAL time. (The menudot
+/// spinner is the one menu animation on `host_time` — 10 Hz, see [`draw_menu`].)
+pub fn menu_cursor_glyph(realtime: f64) -> u8 {
+    OPTIONS_CURSOR_BASE + realtime_blink_bit(realtime, 4.0)
+}
 
 /// Which menu screen is showing. Mirrors the relevant `m_state` values from
 /// menu.c (`m_main`, `m_singleplayer`, `m_load`, `m_save`, `m_multiplayer`,
@@ -7078,14 +7354,12 @@ pub enum MenuAction {
     /// drop-down console (`m_state = m_none; Con_ToggleConsole_f()`).
     OpenConsole,
     /// Options "Reset to defaults": the host should reset the option cvars
-    /// (`exec default.cfg`). [`Menu::select`] already reset the in-menu values; the
-    /// host re-reads [`Menu::resolution`]/sensitivity/volume afterward.
+    /// (`exec default.cfg`). [`Menu::select`] already reset the in-menu values
+    /// (default.cfg's viewsize, gamma, volume, sensitivity and bindings); the
+    /// host reads them live each frame. The video mode is not in default.cfg.
     ResetDefaults,
-    /// The render resolution changed (Enter on the Options "Screen size" row falls
-    /// through to `M_AdjustSliders(1)`, which cycles the preset). The host must
-    /// reallocate its framebuffer to [`Menu::resolution`] — same as the
-    /// left/right-arrow path. Without this, Enter cycled the preset internally but
-    /// the host never resized, so the displayed size snapped back next frame.
+    /// Enter on a Video Options mode line (`VID_MenuKey` K_ENTER -> `VID_SetMode`):
+    /// the host must reallocate its framebuffer to [`Menu::resolution`].
     ResolutionChanged,
 }
 
@@ -7107,9 +7381,14 @@ pub struct Menu {
     screen: MenuScreen,
     /// The highlighted item index on the current screen (`0..item_count`).
     cursor: usize,
-    /// Index into [`RESOLUTION_PRESETS`] for the Options "Screen size" row
-    /// (0 = the fast 320x200 default). [`adjust`](Menu::adjust) cycles it.
+    /// Index into [`RESOLUTION_PRESETS`] of the live video mode (`vid_modenum`):
+    /// what the Video Options list marks as current and opens its cursor on.
+    /// The host keeps it synced to the real framebuffer
+    /// ([`sync_resolution`](Menu::sync_resolution)); Enter on the Video list sets it.
     res_preset: usize,
+    /// `viewsize` cvar (`scr_viewsize`), [`VIEWSIZE_MIN`]..=[`VIEWSIZE_MAX`]:
+    /// the host frames the 3-D view with it ([`calc_refdef`]).
+    viewsize: f32,
     /// `sensitivity` cvar (Mouse Speed), [`SENS_MIN`]..=[`SENS_MAX`].
     sensitivity: f32,
     /// `volume` cvar (Sound Volume), [`VOLUME_MIN`]..=[`VOLUME_MAX`]. The host maps
@@ -7180,6 +7459,7 @@ impl Menu {
             screen: MenuScreen::Main,
             cursor: 0,
             res_preset: 0,
+            viewsize: VIEWSIZE_DEFAULT,
             sensitivity: SENS_DEFAULT,
             volume: VOLUME_DEFAULT,
             gamma: GAMMA_DEFAULT,
@@ -7530,16 +7810,11 @@ impl Menu {
                 }
                 // Every other row: Enter latches m_entersound AND falls through
                 // to M_AdjustSliders(1) (its own menu3) — the C audibly plays
-                // BOTH. The Screen-size row resizes the framebuffer, so
-                // propagate that out to the host (the analog/checkbox rows
-                // return false -> None).
+                // BOTH. (Screen size is viewsize: the host reads it each frame.)
                 _ => {
                     self.snd(MenuSound::Menu2);
-                    if self.adjust(1) {
-                        MenuAction::ResolutionChanged
-                    } else {
-                        MenuAction::None
-                    }
+                    self.adjust(1);
+                    MenuAction::None
                 }
             },
             MenuScreen::Keys => {
@@ -7693,21 +7968,18 @@ impl Menu {
     /// porting `M_AdjustSliders` — plus the screens whose `M_*_Key` maps
     /// left/right onto cursor movement (`M_Load_Key`/`M_Save_Key`/`M_Keys_Key`
     /// pair LEFT with UP and RIGHT with DOWN; `VID_MenuKey` steps the mode line)
-    /// and Help paging.
-    ///
-    /// Returns `true` when the Screen-size row changed (so the host knows to
-    /// reallocate the framebuffer to [`resolution`](Menu::resolution)); `false`
-    /// otherwise.
-    pub fn adjust(&mut self, delta: i32) -> bool {
+    /// and Help paging. Nothing here changes the video mode: that is Enter on
+    /// the Video Options list ([`MenuAction::ResolutionChanged`]).
+    pub fn adjust(&mut self, delta: i32) {
         let step = delta.signum();
         if step == 0 {
-            return false;
+            return;
         }
         // M_Help_Key: RIGHT = next page, LEFT = previous page (the C handles
-        // left/right on Help identically to up/down). Not a resolution change.
+        // left/right on Help identically to up/down).
         if self.screen == MenuScreen::Help {
             self.page(step);
-            return false;
+            return;
         }
         // M_Load_Key / M_Save_Key / M_Keys_Key: LEFT pairs with UP and RIGHT
         // with DOWN (cursor movement, menu1 inside move_cursor). VID_MenuKey
@@ -7717,10 +7989,10 @@ impl Menu {
             MenuScreen::Load | MenuScreen::Save | MenuScreen::Keys | MenuScreen::Video
         ) {
             self.move_cursor(step);
-            return false;
+            return;
         }
         if self.screen != MenuScreen::Options {
-            return false;
+            return;
         }
         // M_AdjustSliders plays misc/menu3.wav unconditionally — even when the
         // cursor sits on an action row the switch below ignores.
@@ -7728,77 +8000,52 @@ impl Menu {
         let d = step as f32;
         match self.cursor {
             ROW_SCREENSIZE => {
-                // Cycle the resolution preset, wrapping both directions. (id's
-                // scr_viewsize is replaced by the engine's real render resolution.)
-                let n = RESOLUTION_PRESETS.len() as i32;
-                let next = (self.res_preset as i32 + step).rem_euclid(n);
-                let changed = next as usize != self.res_preset;
-                self.res_preset = next as usize;
-                changed
+                // scr_viewsize.value += dir * 10, clamped 30..=120.
+                self.viewsize =
+                    (self.viewsize + d * VIEWSIZE_STEP).clamp(VIEWSIZE_MIN, VIEWSIZE_MAX);
             }
             ROW_BRIGHTNESS => {
                 // v_gamma.value -= dir * 0.05 (LEFT brightens), clamp 0.5..=1.
                 self.gamma = (self.gamma - d * GAMMA_STEP).clamp(GAMMA_MIN, GAMMA_MAX);
-                false
             }
             ROW_MOUSESPEED => {
                 self.sensitivity =
                     (self.sensitivity + d * SENS_STEP).clamp(SENS_MIN, SENS_MAX);
-                false
             }
             ROW_CDVOLUME => {
                 self.bgm_volume = (self.bgm_volume + d * BGM_STEP).clamp(BGM_MIN, BGM_MAX);
-                false
             }
             ROW_SNDVOLUME => {
                 self.volume = (self.volume + d * VOLUME_STEP).clamp(VOLUME_MIN, VOLUME_MAX);
-                false
             }
             // Checkboxes ignore the direction and simply toggle (matches the C,
             // which flips the bool regardless of `dir`).
-            ROW_ALWAYSRUN => {
-                self.always_run = !self.always_run;
-                false
-            }
-            ROW_INVERTMOUSE => {
-                self.invert_mouse = !self.invert_mouse;
-                false
-            }
-            ROW_LOOKSPRING => {
-                self.lookspring = !self.lookspring;
-                false
-            }
-            ROW_LOOKSTRAFE => {
-                self.lookstrafe = !self.lookstrafe;
-                false
-            }
+            ROW_ALWAYSRUN => self.always_run = !self.always_run,
+            ROW_INVERTMOUSE => self.invert_mouse = !self.invert_mouse,
+            ROW_LOOKSPRING => self.lookspring = !self.lookspring,
+            ROW_LOOKSTRAFE => self.lookstrafe = !self.lookstrafe,
             // Action rows (Customize / Console / Defaults / Video): not adjustable.
-            _ => false,
+            _ => {}
         }
     }
 
-    /// Reset every Options cvar to its *port* default (`exec default.cfg`) — id's
-    /// values everywhere except Always Run, which resets to ON (this port's
-    /// default; see the field's DEVIATION note). The render resolution preset is
-    /// left to the host (the framebuffer is its own source of truth), matching
-    /// how a `default.cfg` would not change the live mode here. The key bindings
-    /// reset too — the C's `default.cfg` is mostly `bind` lines, re-executed
-    /// wholesale by this row.
+    /// "Reset to defaults" = `exec default.cfg`, and exactly what that file
+    /// sets: `unbindall` + its `bind` lines (the key table), and the four
+    /// "default cvars" at its end — `viewsize 100`, `gamma 1.0`, `volume 0.7`,
+    /// `sensitivity 3`. Nothing else: CD Music Volume, Always Run
+    /// (`cl_forwardspeed`), Invert Mouse (`m_pitch`), Lookspring and
+    /// Lookstrafe keep their values, as in WinQuake, and so does the video mode.
     pub fn reset_defaults(&mut self) {
-        self.sensitivity = SENS_DEFAULT;
-        self.volume = VOLUME_DEFAULT;
+        self.viewsize = VIEWSIZE_DEFAULT;
         self.gamma = GAMMA_DEFAULT;
-        self.bgm_volume = BGM_DEFAULT;
-        self.always_run = true;
-        self.invert_mouse = false;
-        self.lookspring = false;
-        self.lookstrafe = false;
+        self.volume = VOLUME_DEFAULT;
+        self.sensitivity = SENS_DEFAULT;
         self.bindings = default_bindings();
     }
 
-    /// The currently-selected render resolution `(width, height)` from the Options
-    /// "Screen size" row (defaults to `320x200`). The host sizes its framebuffer
-    /// to this.
+    /// The current video mode `(width, height)` ([`RESOLUTION_PRESETS`] entry
+    /// `res_preset`; `320x200` until the host syncs it). Enter on the Video
+    /// Options list changes it and the host resizes its framebuffer to it.
     pub fn resolution(&self) -> (i32, i32) {
         RESOLUTION_PRESETS
             .get(self.res_preset)
@@ -7806,8 +8053,8 @@ impl Menu {
             .unwrap_or(RESOLUTION_PRESETS[0])
     }
 
-    /// Point the Options "Screen size" row at the preset matching `(w, h)`, if one
-    /// exists (otherwise leave it). The host calls this with its *actual* render
+    /// Point the Video Options "current mode" at the preset matching `(w, h)`, if
+    /// one exists (otherwise leave it). The host calls this with its *actual* render
     /// size so the displayed value always tracks reality — the framebuffer is the
     /// single source of truth, and the label can never desync from it (e.g. after
     /// a boot / New Game / `map` that changed the render size independently).
@@ -7815,6 +8062,32 @@ impl Menu {
         if let Some(i) = RESOLUTION_PRESETS.iter().position(|&(pw, ph)| pw == w && ph == h) {
             self.res_preset = i;
         }
+    }
+
+    /// The `viewsize` cvar (`scr_viewsize`, 30..=120, default 100): the host
+    /// sizes the 3-D view and the status bar from it via [`calc_refdef`].
+    pub fn viewsize(&self) -> f32 {
+        self.viewsize
+    }
+
+    /// Set the `viewsize` cvar (the console's `viewsize <n>`), bounded to
+    /// 30..=120 as SCR_CalcRefdef bounds it (and writes back) on the next frame.
+    /// A non-number reads as 0 (`atof`), i.e. the minimum.
+    pub fn set_viewsize(&mut self, v: f32) {
+        let v = if v.is_finite() { v } else { 0.0 };
+        self.viewsize = v.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX);
+    }
+
+    /// `sizeup` (SCR_SizeUp_f): `viewsize += 10` (bounded as above). Bound to
+    /// `+` and `=` in default.cfg.
+    pub fn size_up(&mut self) {
+        self.set_viewsize(self.viewsize + VIEWSIZE_STEP);
+    }
+
+    /// `sizedown` (SCR_SizeDown_f): `viewsize -= 10` (bounded as above). Bound
+    /// to `-` in default.cfg.
+    pub fn size_down(&mut self) {
+        self.set_viewsize(self.viewsize - VIEWSIZE_STEP);
     }
 
     /// The Options "Mouse Speed" as a sensitivity multiplier the host applies to
@@ -8281,6 +8554,55 @@ fn draw_char_scaled(
     }
 }
 
+/// `M_Print` (menu.c): menu text in the conchars' second, bronze half — each
+/// character is drawn as cell `c + 128` — at virtual `(vx, vy)`, 8 px apart.
+/// (`M_PrintWhite` is plain [`draw_string_scaled`].) The menus print their
+/// labels, values and hints this way; white marks only the odd highlight (the
+/// current video mode, "No Communications Available").
+#[allow(clippy::too_many_arguments)]
+fn m_print(
+    image: &mut Image,
+    conchars: &crate::wad::Qpic,
+    vx: f32,
+    vy: f32,
+    text: &str,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+    palette: &[[u8; 3]; 256],
+) {
+    for (i, b) in text.bytes().enumerate() {
+        let x = vx + 8.0 * i as f32;
+        draw_char_scaled(image, conchars, x, vy, b.wrapping_add(128), scale, ox, oy, palette);
+    }
+}
+
+/// `Draw_FadeScreen` (draw.c), which `M_Draw` runs under every menu drawn over
+/// the game or a demo: three pixels in four go to palette index 0 in a fixed
+/// dither — row `y` keeps only the pixels with `x & 3 == (y & 1) << 1`. The
+/// pattern is laid on the 320x200 virtual screen, scaled like the rest of the
+/// 2-D layer (each virtual pixel a `scale x scale` block).
+pub fn fade_screen(image: &mut Image, palette: &[[u8; 3]; 256]) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let scale = (image.w as f32 / MENU_VIRT_W).min(image.h as f32 / MENU_VIRT_H);
+    let inv = if scale.is_finite() && scale > 0.0 { 1.0 / scale } else { 1.0 };
+    let black = palette[0];
+    // Virtual column of each framebuffer column, computed once.
+    let vcols: Vec<usize> = (0..image.w).map(|x| (x as f32 * inv) as usize).collect();
+    for y in 0..image.h {
+        let vy = (y as f32 * inv) as usize;
+        let t = (vy & 1) << 1;
+        let row = &mut image.rgb[y * image.w..(y + 1) * image.w];
+        for (px, &vx) in row.iter_mut().zip(vcols.iter()) {
+            if vx & 3 != t {
+                *px = black;
+            }
+        }
+    }
+}
+
 /// Draw a slider widget (`M_DrawSlider`) with its trough origin at virtual
 /// `(x, y)`: glyph 128 (left cap) at `x-8`, [`SLIDER_RANGE`] copies of glyph 129
 /// (middle) starting at `x`, glyph 130 (right cap) just past them, and the knob
@@ -8315,8 +8637,13 @@ fn draw_slider(
 /// The layout is Quake's fixed 320x200 virtual canvas, scaled to fit `image`
 /// (`scale = min(w/320, h/200)`) and centered, so it looks identical on the
 /// 320x200 wasm framebuffer (scale 1, no offset) and on the 640x400 PPM the tool
-/// writes (scale 2, centered). `time` is the game clock in seconds; the cursor
-/// frame is `(time * 10) as usize % 6` (`(int)(host_time*10) % 6`).
+/// writes (scale 2, centered).
+///
+/// Two clocks, exactly like the C: `host_time` (the clamped-frametime host
+/// clock) drives the animated menudot spinner, `(int)(host_time*10) % 6`
+/// (`M_Main_Draw` and friends); `realtime` (the unclamped wall clock) drives
+/// every flashing conchars cursor, `12 + ((int)(realtime*4) & 1)` — see
+/// [`menu_cursor_glyph`].
 ///
 /// Each pic is fetched from `pics` and skipped if absent (`None`) — a pak missing
 /// the menu art still renders the rest without panicking. `conchars`, when
@@ -8328,7 +8655,8 @@ pub fn draw_menu(
     menu: &Menu,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
-    time: f32,
+    host_time: f32,
+    realtime: f64,
     palette: &[[u8; 3]; 256],
 ) {
     if !menu.visible || image.w == 0 || image.h == 0 {
@@ -8345,13 +8673,21 @@ pub fn draw_menu(
     let ox = (image.w as f32 - MENU_VIRT_W * scale) * 0.5;
     let oy = (image.h as f32 - MENU_VIRT_H * scale) * 0.5;
 
+    // M_Draw: the game/demo underneath fades first (Draw_FadeScreen). (The
+    // C's other branch, the console background under a forced-up console,
+    // can't occur: this port's menu and console never share the screen.)
+    fade_screen(image, palette);
+
     // The animated cursor frame: (int)(host_time*10) % 6. Guard a non-finite /
     // negative clock so the index stays 0..6.
-    let frame = if time.is_finite() && time > 0.0 {
-        ((time * 10.0) as usize) % 6
+    let frame = if host_time.is_finite() && host_time > 0.0 {
+        ((host_time * 10.0) as usize) % 6
     } else {
         0
     };
+    // The flashing conchars cursor (Options / Load / Save / Keys / Video) runs
+    // on REAL time at 4 Hz, independent of the menudot's host_time spinner.
+    let cursor = menu_cursor_glyph(realtime);
 
     // The Help screen is a full-screen pic at (0,0); the Quit prompt is a small
     // text box; Load/Save/Keys/Video are a centered title + text rows with no
@@ -8367,15 +8703,15 @@ pub fn draw_menu(
             return;
         }
         MenuScreen::Load | MenuScreen::Save => {
-            draw_load_save_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            draw_load_save_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
             return;
         }
         MenuScreen::Keys => {
-            draw_keys_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            draw_keys_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
             return;
         }
         MenuScreen::Video => {
-            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
             return;
         }
         _ => {}
@@ -8391,7 +8727,7 @@ pub fn draw_menu(
     // the Main / SinglePlayer screens use their pre-baked list graphic. Branch the
     // whole body so each screen draws its own title + rows.
     if menu.screen == MenuScreen::Options {
-        draw_options_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+        draw_options_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
         return;
     }
 
@@ -8472,8 +8808,8 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
 /// Lookstrafe), and the flashing cursor glyph (12/13) at x=200 on the focused row.
 ///
 /// A missing `conchars` leaves the labels/widgets blank but still draws the title;
-/// nothing here panics. `frame` (the menudot animation frame) drives the cursor
-/// blink (glyph 12 vs 13) via its parity, so it animates with the same clock.
+/// nothing here panics. `cursor_glyph` is the flashing cursor's conchars cell
+/// this frame ([`menu_cursor_glyph`]: 12/13 on real time at 4 Hz).
 #[allow(clippy::too_many_arguments)]
 fn draw_options_screen(
     image: &mut Image,
@@ -8483,7 +8819,7 @@ fn draw_options_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     // The "OPTIONS" title plaque, centered like the other screens' titles.
@@ -8496,20 +8832,15 @@ fn draw_options_screen(
         // The labels.
         for (i, label) in OPTIONS_LABELS.iter().enumerate() {
             let ry = OPTIONS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
-            draw_string_scaled(image, cc, OPTIONS_LABEL_X, ry, label, scale, ox, oy, palette);
+            m_print(image, cc, OPTIONS_LABEL_X, ry, label, scale, ox, oy, palette);
         }
 
         // The analog widgets (M_DrawSlider) on the slider rows, each with its
         // cvar's [0,1] fraction.
         let slider_row = |row: usize| OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
-        // Screen size: the preset's fraction across RESOLUTION_PRESETS (the id
-        // engine uses (viewsize-30)/90; here we map the preset index instead).
-        let res_frac = if RESOLUTION_PRESETS.len() > 1 {
-            menu_res_fraction(menu)
-        } else {
-            0.0
-        };
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SCREENSIZE), res_frac, scale, ox, oy, palette);
+        // Screen size: r = (scr_viewsize - 30) / (120 - 30).
+        let size_frac = (menu.viewsize() - VIEWSIZE_MIN) / (VIEWSIZE_MAX - VIEWSIZE_MIN);
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SCREENSIZE), size_frac, scale, ox, oy, palette);
         // Brightness: r = (1 - gamma)/0.5.
         let bright_frac = (1.0 - menu.gamma()) / (GAMMA_MAX - GAMMA_MIN);
         draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_BRIGHTNESS), bright_frac, scale, ox, oy, palette);
@@ -8530,26 +8861,14 @@ fn draw_options_screen(
         ];
         for (row, on) in checks {
             let ry = OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
-            draw_string_scaled(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy, palette);
+            // M_DrawCheckbox: M_Print (x, y, "on" / "off").
+            m_print(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy, palette);
         }
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
         let cy = OPTIONS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
-        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-        draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_char, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
     }
-}
-
-/// The Screen-size slider's [0,1] fraction: the current preset index divided by
-/// the last index (so the first preset is 0.0 and the last is 1.0). This stands in
-/// for id's `(scr_viewsize - 30)/90`, since the row drives the render resolution.
-fn menu_res_fraction(menu: &Menu) -> f32 {
-    let last = (RESOLUTION_PRESETS.len() - 1).max(1) as f32;
-    let idx = RESOLUTION_PRESETS
-        .iter()
-        .position(|&p| p == menu.resolution())
-        .unwrap_or(0) as f32;
-    idx / last
 }
 
 /// Draw the Load or Save slot list, a port of `M_Load_Draw` / `M_Save_Draw`:
@@ -8567,7 +8886,7 @@ fn draw_load_save_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     let title = if menu.screen == MenuScreen::Save {
@@ -8584,11 +8903,10 @@ fn draw_load_save_screen(
             let ry = 32.0 + i as f32 * 8.0;
             let text = menu.save_comment(i);
             let row = if text.is_empty() { UNUSED_SLOT } else { text };
-            draw_string_scaled(image, cc, 16.0, ry, row, scale, ox, oy, palette);
+            m_print(image, cc, 16.0, ry, row, scale, ox, oy, palette);
         }
         let cy = 32.0 + menu.cursor as f32 * 8.0;
-        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-        draw_char_scaled(image, cc, 8.0, cy, cursor_char, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
 
@@ -8647,7 +8965,7 @@ fn draw_keys_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.ttl_cstm {
@@ -8655,30 +8973,31 @@ fn draw_keys_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     let Some(cc) = conchars else { return };
+    // Every string on this screen is M_Print (bronze).
     if menu.bind_grabbing() {
-        draw_string_scaled(
+        m_print(
             image, cc, 12.0, 32.0, "Press a key or button for this action", scale, ox, oy,
             palette,
         );
     } else {
-        draw_string_scaled(
+        m_print(
             image, cc, 18.0, 32.0, "Enter to change, backspace to clear", scale, ox, oy, palette,
         );
     }
     for (i, (_, label)) in BINDNAMES.iter().enumerate() {
         let y = 48.0 + 8.0 * i as f32;
-        draw_string_scaled(image, cc, 16.0, y, label, scale, ox, oy, palette);
+        m_print(image, cc, 16.0, y, label, scale, ox, oy, palette);
         let keys = menu.find_keys_for_command(i);
         match keys[0] {
-            None => draw_string_scaled(image, cc, 140.0, y, "???", scale, ox, oy, palette),
+            None => m_print(image, cc, 140.0, y, "???", scale, ox, oy, palette),
             Some(k0) => {
                 let name = keynum_to_string(k0);
-                draw_string_scaled(image, cc, 140.0, y, &name, scale, ox, oy, palette);
+                m_print(image, cc, 140.0, y, &name, scale, ox, oy, palette);
                 if let Some(k1) = keys[1] {
                     // M_Print (140 + x + 8, y, "or"); M_Print (140 + x + 32, ...).
                     let x = name.len() as f32 * 8.0;
-                    draw_string_scaled(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy, palette);
-                    draw_string_scaled(
+                    m_print(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy, palette);
+                    m_print(
                         image, cc, 140.0 + x + 32.0, y, &keynum_to_string(k1), scale, ox, oy,
                         palette,
                     );
@@ -8691,15 +9010,15 @@ fn draw_keys_screen(
         // M_DrawCharacter (130, 48 + keys_cursor*8, '=').
         draw_char_scaled(image, cc, 130.0, cy, b'=', scale, ox, oy, palette);
     } else {
-        let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-        draw_char_scaled(image, cc, 130.0, cy, cursor_char, scale, ox, oy, palette);
+        // M_DrawCharacter (130, 48 + keys_cursor*8, 12+((int)(realtime*4)&1)).
+        draw_char_scaled(image, cc, 130.0, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
 
 /// Draw the video-modes screen — this port's `VID_MenuDraw` (vid_win.c): the
 /// `vidmodes` title centered at y=4, one row per [`RESOLUTION_PRESETS`] entry
-/// from y=36 (the C lists `WIDTHxHEIGHT` mode descriptions and marks the
-/// current mode), the flashing cursor on the highlighted row, and hint lines.
+/// from y=36 (`WIDTHxHEIGHT`, bronze; the current mode white, as the C marks
+/// it), the flashing cursor on the highlighted row, and hint lines.
 /// Single column — the C's 3-wide grid exists to fit 15+ DOS modes; 7 presets
 /// fit one column.
 #[allow(clippy::too_many_arguments)]
@@ -8711,7 +9030,7 @@ fn draw_video_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    frame: usize,
+    cursor_glyph: u8,
     palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.vidmodes {
@@ -8719,27 +9038,25 @@ fn draw_video_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     let Some(cc) = conchars else { return };
+    // VID_MenuDraw prints every mode with M_Print (bronze) except the current
+    // one, which it prints with M_PrintWhite.
     let current = menu.resolution();
     for (i, &(w, h)) in RESOLUTION_PRESETS.iter().enumerate() {
         let y = 36.0 + 8.0 * i as f32;
-        let mut row = format!("{w}x{h}");
+        let row = format!("{w}x{h}");
         if (w, h) == current {
-            row.push_str("  (current)");
+            draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
+        } else {
+            m_print(image, cc, 16.0, y, &row, scale, ox, oy, palette);
         }
-        draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
     }
     let cy = 36.0 + menu.cursor as f32 * 8.0;
-    let cursor_char = OPTIONS_CURSOR_BASE + (frame & 1) as u8;
-    draw_char_scaled(image, cc, 8.0, cy, cursor_char, scale, ox, oy, palette);
+    draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
     // single column's foot.
     let hints_y = 36.0 + RESOLUTION_PRESETS.len() as f32 * 8.0 + 16.0;
-    draw_string_scaled(
-        image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy, palette,
-    );
-    draw_string_scaled(
-        image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy, palette,
-    );
+    m_print(image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy, palette);
+    m_print(image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy, palette);
 }
 
 /// Draw the Help/Ordering screen (`M_Help_Draw`): blit the current page pic
@@ -8819,9 +9136,19 @@ pub const CONSOLE_INPUT_CAP: usize = 256;
 /// allocation-light and deterministic (no per-frame slide state to advance).
 const CONSOLE_HEIGHT_FRAC: f32 = 0.6;
 
-/// The conchars cell index of the flashing input cursor glyph (Quake's
-/// `Con_DrawInput` draws character 11 when `(int)(realtime*con_cursorspeed) & 1`).
-const CONSOLE_CURSOR_CHAR: char = 11 as char;
+/// `Con_DrawInput` (console.c) stamps `10 + ((int)(realtime*con_cursorspeed) & 1)`
+/// at the edit position: conchars cell 10 is blank and 11 is the block cursor.
+const CONSOLE_CURSOR_BASE: u8 = 10;
+/// `con_cursorspeed` (console.c: `float con_cursorspeed = 4;`): the input cursor
+/// toggles 4 times per second of real time.
+const CON_CURSORSPEED: f64 = 4.0;
+
+/// The console input cursor's conchars cell this frame (`Con_DrawInput`):
+/// `10 + ((int)(realtime*con_cursorspeed) & 1)` — blank, then the block, each
+/// for a quarter second of REAL time.
+pub fn console_cursor_glyph(realtime: f64) -> u8 {
+    CONSOLE_CURSOR_BASE + realtime_blink_bit(realtime, CON_CURSORSPEED)
+}
 
 /// The Quake drop-down console: a panel slid over the top of the screen holding
 /// a capped scrollback history plus a single editable input line. Toggled with
@@ -8948,8 +9275,9 @@ impl Console {
 ///     always visible.
 ///  2. the last few scrollback lines, drawn bottom-up just above the input line,
 ///     via [`draw_string`] in the conchars font.
-///  3. the input line as `"]" + input` plus a blinking cursor glyph (conchars
-///     char 11, blinking at ~2 Hz off `time`).
+///  3. the input line as `"]" + input` plus the flashing cursor glyph
+///     ([`console_cursor_glyph`]: cells 10/11 toggling at 4 Hz on `realtime`,
+///     the C's unclamped wall clock).
 ///
 /// Text is drawn at the same conchars scale the menu uses
 /// (`scale = framebuffer_height / 200`, the 320x200 virtual canvas), so the font
@@ -8962,7 +9290,7 @@ pub fn draw_console(
     conback: Option<&crate::wad::Qpic>,
     conchars: Option<&crate::wad::Qpic>,
     palette: &[[u8; 3]; 256],
-    time: f32,
+    realtime: f64,
 ) {
     if !console.open || image.w == 0 || image.h == 0 {
         return;
@@ -9031,29 +9359,16 @@ pub fn draw_console(
     let margin_x = (8.0 * scale).round();
     let input_y = (panel_h as f32 - line_step - 2.0 * scale).max(0.0);
 
-    // 3. The input line: "]" + input + a blinking cursor (conchars char 11,
-    //    blinking at ~2 Hz). Drawn directly in framebuffer pixels (scale folded
-    //    into the position + the draw_string_scaled glyph block).
+    // 3. The input line: "]" + input + the flashing cursor. Drawn directly in
+    //    framebuffer pixels (scale folded into the position + the glyph block).
     let prompt = format!("]{}", console.input());
     draw_string_scaled(image, cc, 0.0, 0.0, &prompt, scale, margin_x, input_y, palette);
-    // The cursor follows the last typed character; blink ~2 Hz off `time`.
-    let cursor_on = !time.is_finite() || ((time * 2.0) as i64 & 1) == 0;
-    if cursor_on {
-        let cursor_col = prompt.chars().count() as f32; // 8 virtual px per char
-        let mut s = String::new();
-        s.push(CONSOLE_CURSOR_CHAR);
-        draw_string_scaled(
-            image,
-            cc,
-            cursor_col * 8.0,
-            0.0,
-            &s,
-            scale,
-            margin_x,
-            input_y,
-            palette,
-        );
-    }
+    // Con_DrawInput: text[key_linepos] = 10 + ((int)(realtime*con_cursorspeed)&1)
+    // — the cursor cell sits at the edit position (the end of the line: this
+    // console has no cursor keys) and alternates blank/block at 4 Hz.
+    let cursor_col = prompt.chars().count() as f32; // 8 virtual px per char
+    let glyph = console_cursor_glyph(realtime);
+    draw_char_scaled(image, cc, cursor_col * 8.0, 0.0, glyph, scale, margin_x, input_y, palette);
 
     // 2. Scrollback: the lines just above the input, drawn bottom-up. How many
     //    rows fit between the top margin and the input line.
@@ -11413,15 +11728,16 @@ mod tests {
     /// skin so it takes the textured path through `palette[7]`.
     fn viewmodel_mdl() -> crate::mdl::Mdl {
         use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
-        // Mirror the real `v_*` weapon layout: forward along model `+X`, thin in
-        // `+Y`, and sitting *below* the eye (model `Z < 0`, via `scale_origin`).
-        // So after the camera-anchor + lower-centre offset the gun lands in the
-        // lower half of the frame, like the shipping weapon models.
+        // Mirror the real `v_*` weapon layout: forward along model `+X`, and
+        // sitting *below* the eye (model `Z < 0`, via `scale_origin`), so posed
+        // at the gun origin it lands in the lower half of the frame, like the
+        // shipping weapon models. The triangle lies flat (a gun's top face): a
+        // vertical one through the eye's own column would be seen edge-on.
         let header = MdlHeader {
             ident: i32::from_le_bytes(*b"IDPO"),
             version: 6,
             scale: [1.0, 1.0, 1.0],
-            scale_origin: [10.0, 0.0, -10.0],
+            scale_origin: [10.0, -4.0, -10.0],
             boundingradius: 64.0,
             eyeposition: [0.0, 0.0, 0.0],
             numskins: 1,
@@ -11434,13 +11750,13 @@ mod tests {
             flags: 0,
             size: 1.0,
         };
-        // Decoded model space: X in [10, 26] (forward), Z in [-10, -2] (below the
-        // eye). With OFS_FORWARD = 30 every vertex sits well in front of the near
-        // plane at any yaw, so the triangle always rasterises.
+        // Decoded model space: X in [10, 26] (forward, clear of the 5-unit
+        // alias clip plane), Y in [-4, 4], Z = -10 (below the eye), so the
+        // triangle always rasterises.
         let verts = vec![
             TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
             TriVertex { v: [16, 0, 0], lightnormalindex: 0 },
-            TriVertex { v: [8, 0, 8], lightnormalindex: 0 },
+            TriVertex { v: [8, 8, 0], lightnormalindex: 0 },
         ];
         Mdl {
             header,
@@ -11461,7 +11777,7 @@ mod tests {
             frames: vec![Frame::Single(AliasFrame {
                 name: "v0".into(),
                 bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
-                bboxmax: TriVertex { v: [16, 0, 8], lightnormalindex: 0 },
+                bboxmax: TriVertex { v: [16, 8, 0], lightnormalindex: 0 },
                 verts,
             })],
         }
@@ -11521,7 +11837,7 @@ mod tests {
 
         let img_a = render_scene_ext(
             &bsp, &cam_a, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11530,7 +11846,7 @@ mod tests {
         );
         let img_b = render_scene_ext(
             &bsp, &cam_b, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11604,7 +11920,7 @@ mod tests {
 
         let with_gun = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11652,7 +11968,7 @@ mod tests {
         frameless.frames.clear();
         let img = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &frameless, frame: 0 }),
+            Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11668,7 +11984,7 @@ mod tests {
         // Must not panic.
         let _ = render_scene_ext(
             &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &bad, frame: 0 }),
+            Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -11677,21 +11993,21 @@ mod tests {
         );
     }
 
-    /// A viewmodel whose geometry deliberately *straddles* the near plane: in
-    /// model space its forward axis (`+X`) runs from well behind the eye to well
-    /// in front of it, so after the camera anchor + the small `OFS_FORWARD` the
-    /// grip end is behind `vz == NEAR` and the barrel end is in front — exactly
-    /// the authentic held-gun layout that the near-plane CLIP must handle.
+    /// A viewmodel whose geometry deliberately *straddles* the alias clip plane:
+    /// in model space its forward axis (`+X`) runs from well behind the eye to
+    /// well in front of it, so the grip end is nearer than `ALIAS_Z_CLIP_PLANE`
+    /// and the barrel end is beyond it — exactly the authentic held-gun layout
+    /// that the clip must handle.
     fn straddling_viewmodel_mdl() -> crate::mdl::Mdl {
         use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
         let header = MdlHeader {
             ident: i32::from_le_bytes(*b"IDPO"),
             version: 6,
             scale: [1.0, 1.0, 1.0],
-            // Model-X (forward) runs from -20 (grip, behind the eye after the
-            // small forward offset) to +20 (barrel, in front). Model-Z < 0 keeps
-            // it below the eye, like a real weapon.
-            scale_origin: [-20.0, 0.0, -8.0],
+            // Model-X (forward) runs from -20 (grip, behind the eye) to +20
+            // (barrel, in front). Model-Z < 0 keeps it below the eye, like a real
+            // weapon; flat, like `viewmodel_mdl`.
+            scale_origin: [-20.0, -4.0, -8.0],
             boundingradius: 64.0,
             eyeposition: [0.0, 0.0, 0.0],
             numskins: 1,
@@ -11704,11 +12020,12 @@ mod tests {
             flags: 0,
             size: 1.0,
         };
-        // Decoded model space: X in [-20, +20] (straddles the eye), Z in [-8, 0].
+        // Decoded model space: X in [-20, +20] (straddles the eye and the
+        // 5-unit clip plane), Y in [-4, 4], Z = -8.
         let verts = vec![
             TriVertex { v: [0, 0, 0], lightnormalindex: 0 },   // X=-20 (behind)
             TriVertex { v: [40, 0, 0], lightnormalindex: 0 },   // X=+20 (in front)
-            TriVertex { v: [20, 0, 8], lightnormalindex: 0 },   // X=0 (on the eye)
+            TriVertex { v: [20, 8, 0], lightnormalindex: 0 },   // X=0 (on the eye)
         ];
         Mdl {
             header,
@@ -11723,19 +12040,42 @@ mod tests {
             frames: vec![Frame::Single(AliasFrame {
                 name: "v0".into(),
                 bboxmin: TriVertex { v: [0, 0, 0], lightnormalindex: 0 },
-                bboxmax: TriVertex { v: [40, 0, 8], lightnormalindex: 0 },
+                bboxmax: TriVertex { v: [40, 8, 0], lightnormalindex: 0 },
                 verts,
             })],
         }
     }
 
     #[test]
+    fn viewmodel_origin_follows_v_calcrefdef() {
+        // The viewsize fudge: exact compares on the cvar, as in view.c.
+        assert_eq!(viewmodel_fudge(100.0), 2.0);
+        assert_eq!(viewmodel_fudge(110.0), 1.0);
+        assert_eq!(viewmodel_fudge(90.0), 1.0);
+        assert_eq!(viewmodel_fudge(80.0), 0.5);
+        for vs in [30.0, 50.0, 70.0, 120.0, 95.0] {
+            assert_eq!(viewmodel_fudge(vs), 0.0, "viewsize {vs}");
+        }
+        // No bob: the gun sits straight above the eye by the fudge (world Z).
+        let cam = Camera { pos: [0.0; 3], yaw: 37.0, pitch: 30.0, roll: 0.0, fov_deg: 90.0 };
+        assert_eq!(viewmodel_origin_ofs(&cam, 0.0, 100.0), [0.0, 0.0, 2.0]);
+        // Bob pushes it along the entity's facing (yaw, a third of the pitch)
+        // by 0.4 * bob.
+        let flat = Camera { pos: [0.0; 3], yaw: 90.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let o = viewmodel_origin_ofs(&flat, 5.0, 120.0);
+        assert!(o[0].abs() < 1e-5 && (o[1] - 2.0).abs() < 1e-5 && o[2].abs() < 1e-5, "{o:?}");
+        let up = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 90.0, roll: 0.0, fov_deg: 90.0 };
+        let o = viewmodel_origin_ofs(&up, 5.0, 120.0);
+        assert!((o[2] - 2.0 * 30f32.to_radians().sin()).abs() < 1e-5, "{o:?}");
+    }
+
+    #[test]
     fn viewmodel_straddling_near_plane_is_clipped_not_dropped() {
         // A viewmodel that crosses the near plane (part behind the eye, part in
         // front) must be CLIPPED — its front part still draws SOME pixels — rather
-        // than having every crossing triangle dropped whole (the old behaviour,
-        // which is exactly why `OFS_FORWARD` used to shove the gun far away). The
-        // render must not panic.
+        // than having every crossing triangle dropped whole (an old behaviour
+        // that once made this port shove the gun far away). The render must not
+        // panic.
         let bsp = demo_room();
         let mut pal = [[0u8; 3]; 256];
         pal[7] = [255, 255, 0]; // the viewmodel's pure-yellow skin (B == 0)
@@ -11746,7 +12086,7 @@ mod tests {
 
         let img = render_scene_ext(
             &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0 }),
+            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0] }),
             0.0,
             &[],
             &[],
@@ -12484,6 +12824,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -12536,6 +12877,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -12581,6 +12923,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
         assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
@@ -12860,6 +13203,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         draw_hud_into(&mut img, &hud);
 
@@ -12949,6 +13293,7 @@ mod tests {
             total_secrets: 0,
             level_name: "",
             show_scores: false,
+            sb_lines: SB_LINES_FULL,
         };
         // All face pics share index 70 here, so we can't distinguish quad vs health
         // by colour — instead assert the call path doesn't panic and a face drew.
@@ -13312,20 +13657,92 @@ mod tests {
     fn draw_menu_skips_missing_pics_without_panic() {
         let pal = ramp_palette();
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        let before = img.rgb.clone();
+        let mut faded = Image::new(320, 200, [9, 9, 9]);
+        fade_screen(&mut faded, &pal);
         let mut m = Menu::new();
         m.open();
-        // All pics absent: nothing should draw, and it must not panic.
+        // All pics absent: only M_Draw's Draw_FadeScreen shows, and no panic.
         let pics = MenuPics::default();
-        draw_menu(&mut img, &m, &pics, None, 0.3, &pal);
-        assert_eq!(img.rgb, before, "an all-empty MenuPics must leave the frame untouched");
+        draw_menu(&mut img, &m, &pics, None, 0.3, 0.0, &pal);
+        assert_eq!(img.rgb, faded.rgb, "an all-empty MenuPics draws only the fade");
 
-        // A hidden menu never draws.
+        // A hidden menu never draws (not even the fade).
         m.close();
+        let before = img.rgb.clone();
         let solid = solid_pic(64, 16, 7);
         let pics2 = MenuPics { mainmenu: Some(solid), ..Default::default() };
-        draw_menu(&mut img, &m, &pics2, None, 0.3, &pal);
+        draw_menu(&mut img, &m, &pics2, None, 0.3, 0.0, &pal);
         assert_eq!(img.rgb, before, "a hidden menu must not draw");
+    }
+
+    #[test]
+    fn fade_screen_blackens_three_pixels_in_four_like_draw_fadescreen() {
+        // Draw_FadeScreen: row y keeps only x & 3 == (y & 1) << 1; the rest go
+        // to palette index 0.
+        let mut pal = ramp_palette();
+        pal[0] = [1, 2, 3];
+        let keep = [200u8, 100, 50];
+        let mut img = Image::new(320, 200, keep);
+        fade_screen(&mut img, &pal);
+        for y in 0..200 {
+            for x in 0..320 {
+                let want = if x & 3 == (y & 1) << 1 { keep } else { pal[0] };
+                assert_eq!(img.rgb[y * 320 + x], want, "({x},{y})");
+            }
+        }
+        // Scaled 2-D layer: at 640x400 each virtual pixel is a 2x2 block.
+        let mut big = Image::new(640, 400, keep);
+        fade_screen(&mut big, &pal);
+        for &(x, y) in &[(0, 0), (1, 1), (4, 2), (5, 3), (2, 0), (0, 2), (639, 399)] {
+            let (vx, vy) = (x / 2, y / 2);
+            let want = if vx & 3 == (vy & 1) << 1 { keep } else { pal[0] };
+            assert_eq!(big.rgb[y * 640 + x], want, "({x},{y})");
+        }
+        let kept = big.rgb.iter().filter(|&&p| p == keep).count();
+        assert_eq!(kept, 640 * 400 / 4, "a quarter of the screen survives");
+        fade_screen(&mut Image::new(0, 0, keep), &pal);
+    }
+
+    #[test]
+    fn options_labels_are_m_print_bronze_and_the_current_video_mode_white() {
+        // M_Print draws cell c + 128 (the conchars' bronze half); M_PrintWhite
+        // the plain cell. A conchars whose bronze 'S' (211) is index 5 and
+        // plain 'S' (83) index 6 tells them apart on the Options "Screen size"
+        // label and on the Video list.
+        let pal = ramp_palette();
+        let mut data = vec![0u8; 128 * 128];
+        let mut fill = |cell: usize, idx: u8| {
+            let (cx, cy) = ((cell % 16) * 8, (cell / 16) * 8);
+            for y in 0..8 {
+                for x in 0..8 {
+                    data[(cy + y) * 128 + cx + x] = idx;
+                }
+            }
+        };
+        for c in 32..127usize {
+            fill(c, 6); // white half
+            fill(c + 128, 5); // bronze half
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+        // "           Screen size" at (16, 56): the 'S' is the 12th character.
+        let s_px = (56 + 3) * 320 + 16 + 11 * 8 + 3;
+        assert_eq!(img.rgb[s_px], pal[5], "Options labels are M_Print (bronze)");
+        // Video Options: the current mode white, the others bronze.
+        m.sync_resolution(640, 400);
+        m.cursor = ROW_VIDEO;
+        m.select();
+        let mut img = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+        let row_px = |row: usize| (36 + row * 8 + 3) * 320 + 16 + 3;
+        assert_eq!(img.rgb[row_px(2)], pal[6], "640x400 (current) is M_PrintWhite");
+        assert_eq!(img.rgb[row_px(0)], pal[5], "320x200 is M_Print");
+        assert_eq!(img.rgb[row_px(6)], pal[5], "1280x800 is M_Print");
     }
 
     #[test]
@@ -13340,7 +13757,7 @@ mod tests {
             mainmenu: Some(solid_pic(120, 80, 7)),
             ..Default::default()
         };
-        draw_menu(&mut img, &m, &pics, None, 0.0, &pal);
+        draw_menu(&mut img, &m, &pics, None, 0.0, 0.0, &pal);
         // At scale 1 on the 320x200 frame, virtual (72,32) maps to pixel (72,32).
         let idx = 32 * img.w + 72;
         assert_eq!(img.rgb[idx], pal[7], "the mainmenu pic must paint at (72,32)");
@@ -13364,12 +13781,94 @@ mod tests {
         // The cursor sits at (54, 32). frame = (time*10) % 6.
         let cursor_idx = 32 * 320 + 54;
         let mut img0 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img0, &m, &pics, None, 0.0, &pal); // frame 0 -> index 10
+        draw_menu(&mut img0, &m, &pics, None, 0.0, 0.0, &pal); // frame 0 -> index 10
         assert_eq!(img0.rgb[cursor_idx], pal[10]);
 
         let mut img1 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img1, &m, &pics, None, 0.35, &pal); // (3.5)->3 -> index 13
+        draw_menu(&mut img1, &m, &pics, None, 0.35, 0.0, &pal); // (3.5)->3 -> index 13
         assert_eq!(img1.rgb[cursor_idx], pal[13]);
+        // The spinner runs on host_time ONLY: realtime moving on (the flashing
+        // cursors' clock) leaves the menudot frame alone.
+        let mut img2 = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut img2, &m, &pics, None, 0.35, 7.3, &pal);
+        assert_eq!(img2.rgb[cursor_idx], pal[13], "menudot ignores realtime");
+    }
+
+    #[test]
+    fn menu_cursor_flashes_at_4hz_on_realtime() {
+        // M_Options_Draw & co: 12 + ((int)(realtime*4) & 1). Glyph 12 (blank)
+        // for the first quarter second, 13 (the arrow) for the next, and so on
+        // — 4 toggles per second, NOT the menudot's 10 Hz frame parity (the old
+        // bug: the cursor followed (int)(host_time*10) % 6 & 1, 2.5x too fast).
+        assert_eq!(menu_cursor_glyph(0.0), 12);
+        assert_eq!(menu_cursor_glyph(0.10), 12, "0.10 s: the 10 Hz parity would say 13");
+        assert_eq!(menu_cursor_glyph(0.24), 12);
+        assert_eq!(menu_cursor_glyph(0.25), 13);
+        assert_eq!(menu_cursor_glyph(0.49), 13);
+        assert_eq!(menu_cursor_glyph(0.50), 12);
+        assert_eq!(menu_cursor_glyph(0.75), 13);
+        // Count the toggles over one second sampled at 1 ms: exactly 4 edges
+        // (at 0.25/0.5/0.75/1.0), whatever the frame rate.
+        let mut edges = 0;
+        let mut prev = menu_cursor_glyph(0.0);
+        for ms in 1..=1000 {
+            let g = menu_cursor_glyph(ms as f64 / 1000.0);
+            if g != prev {
+                edges += 1;
+            }
+            prev = g;
+        }
+        assert_eq!(edges, 4, "the menu cursor toggles 4 times per real second");
+        // A garbage clock is phase 0, never a panic.
+        assert_eq!(menu_cursor_glyph(f64::NAN), 12);
+        assert_eq!(menu_cursor_glyph(-3.0), 12);
+    }
+
+    #[test]
+    fn console_cursor_flashes_at_con_cursorspeed_on_realtime() {
+        // Con_DrawInput: 10 + ((int)(realtime*con_cursorspeed) & 1), speed 4.
+        // (The port used to blink cell 11 at 2 Hz off the host clock.)
+        assert_eq!(console_cursor_glyph(0.0), 10, "cell 10 (blank) first");
+        assert_eq!(console_cursor_glyph(0.3), 11, "the block from 0.25 s");
+        assert_eq!(console_cursor_glyph(0.6), 10);
+        assert_eq!(console_cursor_glyph(0.8), 11);
+        let mut edges = 0;
+        let mut prev = console_cursor_glyph(0.0);
+        for ms in 1..=1000 {
+            let g = console_cursor_glyph(ms as f64 / 1000.0);
+            if g != prev {
+                edges += 1;
+            }
+            prev = g;
+        }
+        assert_eq!(edges, 4, "the console cursor toggles 4 times per real second");
+    }
+
+    #[test]
+    fn draw_menu_options_cursor_follows_realtime_not_host_time() {
+        // End to end through draw_menu: a conchars whose cell 13 is lit and
+        // cell 12 is blank (like id's), cursor on the Options top row at
+        // (200, 32). host_time is held where the OLD parity code would have
+        // shown the arrow (frame 1 = 0.1 s); only realtime decides.
+        let pal = ramp_palette();
+        let mut data = vec![0u8; 128 * 128];
+        for y in 0..8 {
+            for x in 0..8 {
+                data[y * 128 + 13 * 8 + x] = 3; // cell 13 = (13, 0)
+            }
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options, cursor row 0
+        let px = 32 * 320 + 200;
+        let mut off = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut off, &m, &MenuPics::default(), Some(&conchars), 0.1, 0.1, &pal);
+        assert_eq!(off.rgb[px], [0, 0, 0], "realtime 0.1 s: cursor phase blank");
+        let mut on = Image::new(320, 200, [0, 0, 0]);
+        draw_menu(&mut on, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.3, &pal);
+        assert_eq!(on.rgb[px], pal[3], "realtime 0.3 s: the arrow shows");
     }
 
     #[test]
@@ -13433,34 +13932,108 @@ mod tests {
     }
 
     #[test]
-    fn menu_adjust_cycles_resolution_preset() {
+    fn menu_screen_size_row_steps_viewsize_by_10_clamped_30_to_120() {
+        // M_AdjustSliders case 3: scr_viewsize += dir*10, clamped 30..=120 —
+        // the Screen size row is viewsize, NOT the video mode (the old port
+        // cycled render resolutions here; WinQuake keeps those in M_Video).
         let mut m = Menu::new();
         m.open();
         m.cursor = 2;
         m.select(); // -> Options
-        m.cursor = ROW_SCREENSIZE; // the Screen size row (3) holds the resolution.
+        m.cursor = ROW_SCREENSIZE;
         assert_eq!(m.screen(), MenuScreen::Options);
-        // Default is the fast 320x200 (preset index 0).
-        assert_eq!(m.resolution(), (320, 200));
-        // adjust(+1) advances to the next preset and the host-visible resolution
-        // follows. It returns `true` because the Screen-size row changed.
-        assert!(m.adjust(1), "advancing the Screen size row reports a change");
-        assert_eq!(m.resolution(), RESOLUTION_PRESETS[1]);
-        assert_eq!(m.resolution(), (480, 300));
-        // Walk through all presets and confirm it wraps back to 320x200.
-        for expect in [(640, 400), (800, 500), (960, 600), (1120, 700), (1280, 800), (320, 200)] {
-            assert!(m.adjust(1));
-            assert_eq!(m.resolution(), expect);
+        assert_eq!(m.viewsize(), 100.0, "default.cfg: viewsize 100");
+        let mode = m.resolution();
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 110.0);
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 120.0);
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 120.0, "clamped at 120 (no wrap)");
+        for expect in [110.0, 100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 30.0] {
+            m.adjust(-1);
+            assert_eq!(m.viewsize(), expect);
         }
-        // adjust(-1) cycles backward (wraps to the last preset from index 0).
-        assert!(m.adjust(-1));
-        assert_eq!(m.resolution(), (1280, 800));
-        // A zero delta is a no-op and reports no change.
-        assert!(!m.adjust(0));
-        assert_eq!(m.resolution(), (1280, 800));
-        // adjust only acts on the Options screen.
+        assert_eq!(m.resolution(), mode, "Screen size never touches the video mode");
+        // Enter falls through to M_AdjustSliders(1) (menu2 + menu3), no host action.
+        m.take_sounds();
+        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.viewsize(), 40.0);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
+        // A zero delta is a no-op; adjust only acts on the Options screen.
+        m.adjust(0);
+        assert_eq!(m.viewsize(), 40.0);
         m.cancel(); // -> Main
-        assert!(!m.adjust(1), "adjust is a no-op off the Options screen");
+        m.adjust(1);
+        assert_eq!(m.viewsize(), 40.0, "adjust is a no-op off the Options screen");
+        // Reset to defaults: default.cfg's `viewsize 100`.
+        m.reset_defaults();
+        assert_eq!(m.viewsize(), 100.0);
+    }
+
+    #[test]
+    fn options_screen_size_slider_tracks_viewsize() {
+        // M_Options_Draw: r = (scr_viewsize - 30) / (120 - 30); the knob (glyph
+        // 131) sits at 220 + 72*r on the Screen-size row (y = 56).
+        let pal = ramp_palette();
+        let mut data = vec![0u8; 128 * 128];
+        for y in 0..8 {
+            for x in 0..8 {
+                data[(8 * 8 + y) * 128 + 3 * 8 + x] = 3; // cell 131 = (3, 8)
+            }
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let mut m = Menu::new();
+        m.open();
+        m.cursor = 2;
+        m.select(); // -> Options
+        let knob_x = |m: &Menu| {
+            let mut img = Image::new(320, 200, [0, 0, 0]);
+            draw_menu(&mut img, m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+            (0..320).find(|&x| img.rgb[56 * 320 + x] == pal[3]).expect("knob drawn")
+        };
+        assert_eq!(knob_x(&m), 276, "viewsize 100: r = 70/90 -> 220 + 56");
+        m.set_viewsize(30.0);
+        assert_eq!(knob_x(&m), 220, "viewsize 30: the left end");
+        m.set_viewsize(120.0);
+        assert_eq!(knob_x(&m), 292, "viewsize 120: the right end");
+    }
+
+    #[test]
+    fn sizeup_sizedown_and_the_viewsize_cvar_bound_like_scr_calcrefdef() {
+        let mut m = Menu::new();
+        m.size_up();
+        assert_eq!(m.viewsize(), 110.0);
+        m.size_up();
+        m.size_up();
+        assert_eq!(m.viewsize(), 120.0, "sizeup stops at 120");
+        for _ in 0..20 {
+            m.size_down();
+        }
+        assert_eq!(m.viewsize(), 30.0, "sizedown stops at 30");
+        // The console can set any value in range (not just multiples of 10);
+        // out-of-range and garbage clamp like SCR_CalcRefdef's bound.
+        m.set_viewsize(55.0);
+        assert_eq!(m.viewsize(), 55.0);
+        m.size_up();
+        assert_eq!(m.viewsize(), 65.0);
+        m.set_viewsize(7.0);
+        assert_eq!(m.viewsize(), 30.0);
+        m.set_viewsize(1e9);
+        assert_eq!(m.viewsize(), 120.0);
+        m.set_viewsize(f32::NAN);
+        assert_eq!(m.viewsize(), 30.0, "atof garbage = 0 -> the minimum");
+        // default.cfg binds + and = to sizeup and - to sizedown, as ordinary
+        // (rebindable) bindings that Customize controls doesn't list.
+        let m = Menu::new();
+        assert_eq!(m.action_for_key(b'+'), Some(BIND_SIZEUP));
+        assert_eq!(m.action_for_key(b'='), Some(BIND_SIZEUP));
+        assert_eq!(m.action_for_key(b'-'), Some(BIND_SIZEDOWN));
+        // Customize controls (the BINDNAMES rows) never lists them.
+        let listed = (0..NUM_BINDNAMES).flat_map(|c| m.find_keys_for_command(c));
+        for k in listed.flatten() {
+            assert!(![b'+', b'=', b'-'].contains(&k), "key {k} is not a Keys-screen row");
+        }
     }
 
     #[test]
@@ -13474,10 +14047,9 @@ mod tests {
         m.cursor = ROW_MOUSESPEED;
         assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6);
         assert!((m.mouse_sensitivity() - 1.0).abs() < 1e-6, "default mouse is 1.0x");
-        // Decreasing clamps at SENS_MIN (1), never below — and the Screen-size
-        // change flag is false for non-resolution rows.
+        // Decreasing clamps at SENS_MIN (1), never below.
         for _ in 0..40 {
-            assert!(!m.adjust(-1), "mouse-row adjust never reports a resolution change");
+            m.adjust(-1);
         }
         assert!((m.sensitivity() - SENS_MIN).abs() < 1e-6);
         // Increasing clamps at SENS_MAX (11).
@@ -13529,7 +14101,7 @@ mod tests {
         let bg = [9u8, 9, 9];
         let mut img = Image::new(320, 200, bg);
         let before = img.rgb.clone();
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         // The Options screen must change pixels over the known background.
         assert_ne!(img.rgb, before, "the Options screen must draw something");
         // The title plaque (index 5) paints centered near the top: at virtual
@@ -13554,7 +14126,7 @@ mod tests {
         // scale 2): it must not panic and must draw the title + cursor scaled.
         let mut big = Image::new(640, 400, bg);
         let big_before = big.rgb.clone();
-        draw_menu(&mut big, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut big, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         assert_ne!(big.rgb, big_before, "the Options screen draws at 640x400 too");
         // At scale 2 the cursor's virtual (200,32) maps to pixel (400,64).
         let big_cursor_idx = 64 * big.w + 400;
@@ -13563,7 +14135,7 @@ mod tests {
         // Missing conchars leaves labels/widgets/cursor blank but still draws the
         // title; no panic.
         let mut img2 = Image::new(320, 200, bg);
-        draw_menu(&mut img2, &m, &pics, None, 0.0, &pal);
+        draw_menu(&mut img2, &m, &pics, None, 0.0, 0.0, &pal);
         assert_eq!(img2.rgb[title_idx], pal[5], "title still draws without conchars");
         assert_eq!(img2.rgb[cursor_idx], bg, "cursor needs conchars (blank without it)");
     }
@@ -13675,7 +14247,7 @@ mod tests {
         ] {
             m.cursor = row;
             assert_eq!(getter(&m), initial, "checkbox row {row} starts at its default");
-            assert!(!m.adjust(1), "a checkbox never reports a resolution change");
+            m.adjust(1);
             assert_eq!(getter(&m), !initial, "right toggles it");
             m.adjust(-1);
             assert_eq!(getter(&m), initial, "left toggles it back");
@@ -13694,20 +14266,38 @@ mod tests {
         assert_eq!(m.select(), MenuAction::OpenConsole);
         assert!(!m.visible, "Go to console closes the menu");
 
-        // Reset to defaults: from non-default values, Enter restores them.
+        // Reset to defaults: exec default.cfg restores what that file sets
+        // (viewsize/gamma/volume/sensitivity + the binds) and nothing else.
         m.open();
         m.cursor = 2;
         m.select(); // -> Options
         m.cursor = ROW_MOUSESPEED;
         m.adjust(1);
         m.adjust(1);
+        m.cursor = ROW_BRIGHTNESS;
+        m.adjust(1);
+        m.cursor = ROW_SNDVOLUME;
+        m.adjust(-1);
+        m.cursor = ROW_CDVOLUME;
+        m.adjust(-1);
         m.cursor = ROW_ALWAYSRUN;
         m.adjust(1); // toggles OFF (Always Run defaults on in this port)
+        m.cursor = ROW_INVERTMOUSE;
+        m.adjust(1);
+        m.cursor = ROW_LOOKSPRING;
+        m.adjust(1);
+        m.cursor = ROW_LOOKSTRAFE;
+        m.adjust(1);
         assert!(m.sensitivity() != SENS_DEFAULT && !m.always_run());
         m.cursor = ROW_DEFAULTS;
         assert_eq!(m.select(), MenuAction::ResetDefaults);
-        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "defaults restored");
-        assert!(m.always_run(), "Always Run resets to ON (the port default)");
+        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "sensitivity 3");
+        assert!((m.gamma() - GAMMA_DEFAULT).abs() < 1e-6, "gamma 1.0");
+        assert!((m.volume() - VOLUME_DEFAULT).abs() < 1e-6, "volume 0.7");
+        // default.cfg never touches these: they keep the player's values.
+        assert!((m.bgm_volume() - 0.9).abs() < 1e-6, "bgmvolume kept");
+        assert!(!m.always_run(), "cl_forwardspeed kept (Always Run stays off)");
+        assert!(m.invert_mouse() && m.lookspring() && m.lookstrafe(), "m_pitch/lookspring/lookstrafe kept");
 
         // Customize controls opens the Keys screen (M_Menu_Keys_f); Escape
         // returns to Options (M_Keys_Key K_ESCAPE -> M_Menu_Options_f).
@@ -13950,8 +14540,10 @@ mod tests {
         m.cursor = RESOLUTION_PRESETS.len() - 1;
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0);
-        assert!(!m.adjust(1), "video left/right move the line, not the framebuffer");
-        assert_eq!(m.cursor(), 1);
+        let mode = m.resolution();
+        m.adjust(1);
+        assert_eq!(m.cursor(), 1, "video left/right move the line");
+        assert_eq!(m.resolution(), mode, "...but only Enter sets the mode");
     }
 
     #[test]
@@ -14046,7 +14638,7 @@ mod tests {
         m.cursor = 2;
         m.select(); // Main > Options
         m.cursor = ROW_SCREENSIZE;
-        assert!(m.adjust(1)); // 320x200 -> 480x300
+        m.adjust(-1); // viewsize 100 -> 90
         m.cursor = ROW_BRIGHTNESS;
         m.adjust(1); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
         m.cursor = ROW_MOUSESPEED;
@@ -14084,7 +14676,7 @@ mod tests {
         assert!(!m.bind_grabbing(), "a pending bind grab is cancelled");
         assert!(m.take_sounds().is_empty(), "queued menu sounds are dropped");
         // ...but EVERY user choice survives.
-        assert_eq!(m.resolution(), (480, 300), "Screen size survives");
+        assert_eq!(m.viewsize(), 90.0, "Screen size (viewsize) survives");
         assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives");
         assert!((m.sensitivity() - 3.5).abs() < 1e-6, "Mouse speed survives");
         assert!((m.volume() - 0.6).abs() < 1e-6, "Sound volume survives");
@@ -14140,9 +14732,9 @@ mod tests {
             m.screen = screen;
             m.cursor = cursor;
             let mut img = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img, &m, &pics, None, 0.4, &pal); // no pics, no font
+            draw_menu(&mut img, &m, &pics, None, 0.4, 0.0, &pal); // no pics, no font
             let mut img2 = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img2, &m, &pics, Some(&conchars), 0.4, &pal);
+            draw_menu(&mut img2, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
             let inked = img2.rgb.iter().any(|&p| p != [9, 9, 9]);
             assert!(inked, "{screen:?} must draw its text rows with conchars present");
         }
@@ -14153,11 +14745,11 @@ mod tests {
         m.set_save_comments(comments);
         m.screen = MenuScreen::Load;
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
         m.screen = MenuScreen::Keys;
         m.bind_grab = true;
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
     }
 
     #[test]
@@ -14216,12 +14808,12 @@ mod tests {
         m.select(); // -> Help, page 0
         m.help_page = 2; // the page that has art
         let mut img = Image::new(320, 200, bg);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         assert_eq!(img.rgb[0], pal[6], "the help page pic must paint at (0,0)");
         // A missing page (page 0 here is None) draws nothing and never panics.
         m.help_page = 0;
         let mut img0 = Image::new(320, 200, bg);
-        draw_menu(&mut img0, &m, &pics, Some(&conchars), 0.0, &pal);
+        draw_menu(&mut img0, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
         assert_eq!(img0.rgb[0], bg, "a missing help page leaves the frame untouched");
 
         // Quit: the confirm box must paint (the dark box + the prompt text).
@@ -14231,14 +14823,14 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Quit);
         let mut imgq = Image::new(320, 200, bg);
         let before = imgq.rgb.clone();
-        draw_menu(&mut imgq, &m, &MenuPics::default(), Some(&conchars), 0.0, &pal);
+        draw_menu(&mut imgq, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
         assert_ne!(imgq.rgb, before, "the Quit prompt must draw something");
         // The dark box paints black inside its region (e.g. virtual (60,80)).
         let box_idx = 80 * imgq.w + 60;
         assert_eq!(imgq.rgb[box_idx], [0, 0, 0], "the Quit box is a dark fill");
         // Without conchars the box still paints (no panic).
         let mut imgq2 = Image::new(320, 200, bg);
-        draw_menu(&mut imgq2, &m, &MenuPics::default(), None, 0.0, &pal);
+        draw_menu(&mut imgq2, &m, &MenuPics::default(), None, 0.0, 0.0, &pal);
         assert_eq!(imgq2.rgb[box_idx], [0, 0, 0], "the Quit box paints without conchars");
     }
 
@@ -14982,5 +15574,216 @@ mod tests {
         bsp_b.faces.push(face_b.clone());
         let gb = face_geom_cached(&bsp_b, 0, &face_b);
         assert!(!gb.bad);
+    }
+
+    // -- SCR_CalcRefdef / R_SetVrect / Draw_TileClear / sb_lines -------------
+
+    fn vr(x: usize, y: usize, w: usize, h: usize) -> ViewRect {
+        ViewRect { x, y, w, h }
+    }
+
+    #[test]
+    fn calc_refdef_matches_the_c_at_320x200() {
+        // viewsize 100: the full width ABOVE the 48-line status bar — not a
+        // full-screen view with the bar pasted over its bottom (the old bug:
+        // horizon at y=100 instead of 76, 48 rows rendered only to be covered).
+        let r = calc_refdef(320, 200, 100.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 152), 48));
+        // 110: no inventory strip -> 24 lines, the view grows to 176.
+        let r = calc_refdef(320, 200, 110.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 176), 24));
+        // 120: no status bar at all -> the whole screen.
+        let r = calc_refdef(320, 200, 120.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 200), 0));
+        // 50: half size, centred horizontally on the screen and vertically in
+        // the 152 rows above the bar: x = (320-160)/2, y = (152-100)/2.
+        let r = calc_refdef(320, 200, 50.0, false);
+        assert_eq!((r.vrect, r.sb_lines), (vr(80, 26, 160, 100), 48));
+        // 30, the minimum: exactly the 96-wide "min for icons".
+        let r = calc_refdef(320, 200, 30.0, false);
+        assert_eq!(r.vrect, vr(112, 46, 96, 60));
+        // 70: (int)(320 * 0.7f) = 224 (& ~7 = 224), (int)(200 * 0.7f) = 140.
+        let r = calc_refdef(320, 200, 70.0, false);
+        assert_eq!(r.vrect, vr(48, 6, 224, 140));
+        // 90: 288x180 would overlap the bar -> clipped to the 152 rows above it.
+        let r = calc_refdef(320, 200, 90.0, false);
+        assert_eq!(r.vrect, vr(16, 0, 288, 152));
+    }
+
+    #[test]
+    fn calc_refdef_bounds_viewsize_and_goes_full_screen_for_intermission() {
+        // SCR_CalcRefdef clamps viewsize to 30..=120.
+        assert_eq!(calc_refdef(320, 200, 5.0, false), calc_refdef(320, 200, 30.0, false));
+        assert_eq!(calc_refdef(320, 200, 500.0, false), calc_refdef(320, 200, 120.0, false));
+        assert_eq!(calc_refdef(320, 200, f32::NAN, false), calc_refdef(320, 200, 100.0, false));
+        // "intermission is always full screen": any viewsize, no status bar.
+        for vs in [30.0, 50.0, 100.0, 110.0, 120.0] {
+            let r = calc_refdef(320, 200, vs, true);
+            assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 200), 0), "viewsize {vs}");
+        }
+    }
+
+    #[test]
+    fn calc_refdef_scales_the_status_bar_with_the_2d_layer() {
+        // The port's 2-D layer is the 320x200 screen scaled by w/320, so the
+        // view clears exactly the rows draw_hud_into paints: 48*scale.
+        assert_eq!(calc_refdef(960, 600, 100.0, false).vrect, vr(0, 0, 960, 456));
+        assert_eq!(calc_refdef(480, 300, 100.0, false).vrect, vr(0, 0, 480, 228));
+        assert_eq!(calc_refdef(1120, 700, 110.0, false).vrect, vr(0, 0, 1120, 616));
+        assert_eq!(calc_refdef(1280, 800, 120.0, false).vrect, vr(0, 0, 1280, 800));
+        // 960x600 at 50: 480x300 centred above the 144-row bar.
+        assert_eq!(calc_refdef(960, 600, 50.0, false).vrect, vr(240, 78, 480, 300));
+        // Every preset at every step stays inside the frame and above the bar.
+        for &(w, h) in RESOLUTION_PRESETS.iter() {
+            for step in 3..=12 {
+                let r = calc_refdef(w as usize, h as usize, step as f32 * 10.0, false);
+                let bar = (r.sb_lines as f32 * w as f32 / 320.0).ceil() as usize;
+                assert!(r.vrect.x + r.vrect.w <= w as usize);
+                assert!(r.vrect.y + r.vrect.h + bar <= h as usize, "{w}x{h} @ {step}0");
+                assert_eq!(r.vrect.w % 8, 0);
+                assert_eq!(r.vrect.h % 2, 0);
+            }
+        }
+        // A degenerate frame never panics or escapes the bounds.
+        let r = calc_refdef(8, 4, 30.0, false);
+        assert!(r.vrect.x + r.vrect.w <= 8 && r.vrect.y + r.vrect.h <= 4);
+        let _ = calc_refdef(0, 0, 100.0, false);
+    }
+
+    /// A 64x64 backtile whose texel (x, y) is palette index `(x + 64*y) % 251`,
+    /// so any sampling error shows up as the wrong colour.
+    fn test_backtile() -> Qpic {
+        let data = (0..64 * 64).map(|i| (i % 251) as u8).collect();
+        Qpic { width: 64, height: 64, data }
+    }
+
+    #[test]
+    fn draw_tile_clear_tiles_from_the_screen_origin() {
+        let pal = ramp_palette();
+        let tile = test_backtile();
+        let at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
+        // Scale 1 (320 wide): texel (x mod 64, y mod 64) — anchored at the
+        // SCREEN origin, not the rectangle's corner (Draw_TileClear's offsets).
+        let mut img = Image::new(320, 200, [7, 7, 7]);
+        draw_tile_clear(&mut img, Some(&tile), 70, 30, 100, 50, &pal);
+        assert_eq!(img.rgb[30 * 320 + 70], at(70, 30));
+        assert_eq!(img.rgb[79 * 320 + 169], at(169, 79));
+        assert_eq!(img.rgb[29 * 320 + 70], [7, 7, 7], "outside the rect untouched");
+        assert_eq!(img.rgb[30 * 320 + 170], [7, 7, 7], "outside the rect untouched");
+        // Scale 2 (640 wide): each texel covers 2x2 pixels, like the rest of
+        // the scaled 2-D layer.
+        let mut big = Image::new(640, 400, [7, 7, 7]);
+        draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400, &pal);
+        for &(x, y) in &[(0, 0), (1, 1), (129, 3), (300, 250), (639, 399)] {
+            assert_eq!(big.rgb[y * 640 + x], at(x / 2, y / 2), "({x},{y})");
+        }
+        // No tile: black, never a panic; an off-frame rect is a no-op.
+        let mut img2 = Image::new(32, 32, [7, 7, 7]);
+        draw_tile_clear(&mut img2, None, 0, 0, 32, 32, &pal);
+        assert!(img2.rgb.iter().all(|&p| p == [0, 0, 0]));
+        draw_tile_clear(&mut img2, Some(&tile), 40, 40, 10, 10, &pal);
+    }
+
+    #[test]
+    fn compose_view_places_the_view_inside_a_backtile_border() {
+        let pal = ramp_palette();
+        let tile = test_backtile();
+        // viewsize 50 at 320x200: a 160x100 view at (80, 26).
+        let r = calc_refdef(320, 200, 50.0, false);
+        let view = Image::new(r.vrect.w, r.vrect.h, [250, 1, 2]);
+        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), &pal);
+        assert_eq!((img.w, img.h), (320, 200));
+        let tile_at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
+        for y in 0..200 {
+            for x in 0..320 {
+                let inside = (80..240).contains(&x) && (26..126).contains(&y);
+                let want = if inside { [250, 1, 2] } else { tile_at(x, y) };
+                assert_eq!(img.rgb[y * 320 + x], want, "({x},{y})");
+            }
+        }
+        // A full-screen view (viewsize 120) passes through untouched.
+        let full = calc_refdef(320, 200, 120.0, false);
+        let view = Image::new(320, 200, [250, 1, 2]);
+        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal);
+        assert!(out.rgb.iter().all(|&p| p == [250, 1, 2]));
+    }
+
+    /// A gfx.wad with the three status-bar strips as solid colours: `sbar`
+    /// (index 1), `ibar` (2) and `scorebar` (3).
+    fn build_sbar_strips_wad() -> Wad2 {
+        let pics: Vec<(String, Vec<u8>)> = vec![
+            ("sbar".to_string(), qpic_payload(320, 24, 1)),
+            ("ibar".to_string(), qpic_payload(320, 24, 2)),
+            ("scorebar".to_string(), qpic_payload(320, 24, 3)),
+        ];
+        let mut payloads = Vec::new();
+        let mut offsets = Vec::new();
+        let mut pos = WADINFO_SIZE;
+        for (_, p) in &pics {
+            offsets.push(pos);
+            payloads.extend_from_slice(p);
+            pos += p.len();
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"WAD2");
+        bytes.extend_from_slice(&(pics.len() as i32).to_le_bytes());
+        bytes.extend_from_slice(&(pos as i32).to_le_bytes());
+        bytes.extend_from_slice(&payloads);
+        let mut dir = Vec::new();
+        for ((name, p), &off) in pics.iter().zip(offsets.iter()) {
+            push_lump(&mut dir, off as i32, p.len() as i32, name);
+        }
+        bytes.extend_from_slice(&dir);
+        Wad2::parse(bytes).expect("synthetic strips wad parses")
+    }
+
+    #[test]
+    fn draw_hud_follows_sb_lines_like_sbar_draw() {
+        let wad = build_sbar_strips_wad();
+        let pal = ramp_palette();
+        let fill = [42u8, 42, 42];
+        let draw = |sb_lines: i32, health: i32| {
+            let mut img = Image::new(320, 200, fill);
+            let hud = Hud {
+                wad: &wad,
+                palette: &pal,
+                health,
+                ammo: 0,
+                armor: 0,
+                items: 0,
+                weapon: 0,
+                ammo_shells: 0,
+                ammo_nails: 0,
+                ammo_rockets: 0,
+                ammo_cells: 0,
+                time: 0.0,
+                monsters: 0,
+                total_monsters: 0,
+                secrets: 0,
+                total_secrets: 0,
+                level_name: "",
+                show_scores: false,
+                sb_lines,
+            };
+            draw_hud_into(&mut img, &hud);
+            img
+        };
+        let ibar_row = 160 * 320 + 5; // inside rows 152..176
+        let sbar_row = 190 * 320 + 5; // inside rows 176..200
+        // 48 lines (viewsize <= 100): inventory strip over the status strip.
+        let img = draw(48, 100);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (pal[2], pal[1]));
+        assert_eq!(img.rgb[151 * 320 + 5], fill, "nothing above the 48 lines");
+        // 24 lines (viewsize 110): the status strip alone.
+        let img = draw(24, 100);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (fill, pal[1]));
+        // 0 lines (viewsize 120): no status bar at all.
+        let img = draw(0, 100);
+        assert!(img.rgb.iter().all(|&p| p == fill), "sb_lines 0 draws nothing");
+        // ...except the death scoreboard, which Sbar_Draw shows regardless.
+        let img = draw(0, 0);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (fill, pal[3]));
+        let img = draw(48, 0);
+        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (pal[2], pal[3]));
     }
 }
