@@ -253,8 +253,8 @@ with sync_playwright() as p:
           f"mean back to {lum3:.1f}")
 
     # ALWAYS RUN: displacement per second drops when it is toggled OFF (this
-    # port defaults it ON, and Reset to defaults above re-set it: 400 ->
-    # server-clamped 320 vs the 200 walk).
+    # port defaults it ON and the checkbox pass above left it on; Reset to
+    # defaults never touches it: 400 -> server-clamped 320 vs the 200 walk).
     # Turn the player 180 between runs (1125 counts * 0.16 deg) so each run
     # retraces the same free corridor instead of piling into a wall.
     turn_around = lambda: pg.evaluate("exp.mouse_move(1125, 0)")

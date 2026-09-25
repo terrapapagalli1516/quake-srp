@@ -7355,8 +7355,8 @@ pub enum MenuAction {
     OpenConsole,
     /// Options "Reset to defaults": the host should reset the option cvars
     /// (`exec default.cfg`). [`Menu::select`] already reset the in-menu values
-    /// (viewsize, gamma, volume, sensitivity, bindings, ...); the host reads them
-    /// live each frame. The video mode is not a default.cfg cvar and stays.
+    /// (default.cfg's viewsize, gamma, volume, sensitivity and bindings); the
+    /// host reads them live each frame. The video mode is not in default.cfg.
     ResetDefaults,
     /// Enter on a Video Options mode line (`VID_MenuKey` K_ENTER -> `VID_SetMode`):
     /// the host must reallocate its framebuffer to [`Menu::resolution`].
@@ -8029,22 +8029,17 @@ impl Menu {
         }
     }
 
-    /// Reset every Options cvar to its *port* default (`exec default.cfg`) — id's
-    /// values everywhere except Always Run, which resets to ON (this port's
-    /// default; see the field's DEVIATION note). `default.cfg` sets `viewsize
-    /// 100`. The video mode is not in `default.cfg`, so the live resolution
-    /// stays. The key bindings reset too — the C's `default.cfg` is mostly
-    /// `bind` lines, re-executed wholesale by this row.
+    /// "Reset to defaults" = `exec default.cfg`, and exactly what that file
+    /// sets: `unbindall` + its `bind` lines (the key table), and the four
+    /// "default cvars" at its end — `viewsize 100`, `gamma 1.0`, `volume 0.7`,
+    /// `sensitivity 3`. Nothing else: CD Music Volume, Always Run
+    /// (`cl_forwardspeed`), Invert Mouse (`m_pitch`), Lookspring and
+    /// Lookstrafe keep their values, as in WinQuake, and so does the video mode.
     pub fn reset_defaults(&mut self) {
         self.viewsize = VIEWSIZE_DEFAULT;
-        self.sensitivity = SENS_DEFAULT;
-        self.volume = VOLUME_DEFAULT;
         self.gamma = GAMMA_DEFAULT;
-        self.bgm_volume = BGM_DEFAULT;
-        self.always_run = true;
-        self.invert_mouse = false;
-        self.lookspring = false;
-        self.lookstrafe = false;
+        self.volume = VOLUME_DEFAULT;
+        self.sensitivity = SENS_DEFAULT;
         self.bindings = default_bindings();
     }
 
@@ -14271,20 +14266,38 @@ mod tests {
         assert_eq!(m.select(), MenuAction::OpenConsole);
         assert!(!m.visible, "Go to console closes the menu");
 
-        // Reset to defaults: from non-default values, Enter restores them.
+        // Reset to defaults: exec default.cfg restores what that file sets
+        // (viewsize/gamma/volume/sensitivity + the binds) and nothing else.
         m.open();
         m.cursor = 2;
         m.select(); // -> Options
         m.cursor = ROW_MOUSESPEED;
         m.adjust(1);
         m.adjust(1);
+        m.cursor = ROW_BRIGHTNESS;
+        m.adjust(1);
+        m.cursor = ROW_SNDVOLUME;
+        m.adjust(-1);
+        m.cursor = ROW_CDVOLUME;
+        m.adjust(-1);
         m.cursor = ROW_ALWAYSRUN;
         m.adjust(1); // toggles OFF (Always Run defaults on in this port)
+        m.cursor = ROW_INVERTMOUSE;
+        m.adjust(1);
+        m.cursor = ROW_LOOKSPRING;
+        m.adjust(1);
+        m.cursor = ROW_LOOKSTRAFE;
+        m.adjust(1);
         assert!(m.sensitivity() != SENS_DEFAULT && !m.always_run());
         m.cursor = ROW_DEFAULTS;
         assert_eq!(m.select(), MenuAction::ResetDefaults);
-        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "defaults restored");
-        assert!(m.always_run(), "Always Run resets to ON (the port default)");
+        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "sensitivity 3");
+        assert!((m.gamma() - GAMMA_DEFAULT).abs() < 1e-6, "gamma 1.0");
+        assert!((m.volume() - VOLUME_DEFAULT).abs() < 1e-6, "volume 0.7");
+        // default.cfg never touches these: they keep the player's values.
+        assert!((m.bgm_volume() - 0.9).abs() < 1e-6, "bgmvolume kept");
+        assert!(!m.always_run(), "cl_forwardspeed kept (Always Run stays off)");
+        assert!(m.invert_mouse() && m.lookspring() && m.lookstrafe(), "m_pitch/lookspring/lookstrafe kept");
 
         // Customize controls opens the Keys screen (M_Menu_Keys_f); Escape
         // returns to Options (M_Keys_Key K_ESCAPE -> M_Menu_Options_f).
