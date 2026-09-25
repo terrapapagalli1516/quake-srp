@@ -1724,12 +1724,9 @@ Quake's own demo and pause commands (CENSUS L12's pause half), against
   measured in the browser (headless Chromium, wasm): `map e1m2` 8–23 ms,
   `map e1m1` 6–10 ms, `playdemo demo2` 7–9 ms — so there is no loading
   moment to show it in.
-- Kept, not id's: **the menu does not stop the demo loop.** `M_Menu_Main_f`
-  saves `cls.demonum` and sets -1 while the menu is up, so in id's Quake the
-  demo playing when the menu opened is the last: at its end the client
-  disconnects and the menu sits over the console until it is closed. The
-  port boots with the menu open over the attract loop and keeps cycling
-  behind it (F15, left as it was).
+- ~~Kept, not id's: **the menu does not stop the demo loop.**~~ Fixed on
+  `quake/polish4b` ("Final review fixes, UI side"): the page boots into the
+  demos with no menu, and the menu stops the loop as `M_Menu_Main_f` does.
 
 ## Final review fixes, UI side (2026-09-25, branch `quake/polish4b`)
 
@@ -1776,6 +1773,34 @@ each; the C followed and the evidence are in the commit messages.
   (an empty Enter echoes `]` as id's); `web/verify_menu.py` (Enter and `` ` ``
   leave the Quit prompt up; a right click is the key a grab binds). The 2-D
   oracle is unchanged (every menu scenario 100%, as before).
+- ✅ **The page booted into the main menu over the attract demo, and the
+  demos cycled behind the menu** (MED). Quake starts with `key_dest =
+  key_game`: quake.rc's `startdemos demo1 demo2 demo3` plays with no menu,
+  and during demo playback a console key brings up the main menu
+  (`Key_Event`: `cls.demoplayback && down && consolekeys[key] && key_dest ==
+  key_game` → `M_ToggleMenu_f`; Escape too, the mouse buttons and F-keys
+  not). `M_Menu_Main_f` from outside the menu stops the loop
+  (`m_save_demonum = cls.demonum; cls.demonum = -1`): the demo playing goes
+  on to its end, then `Host_EndGame` disconnects instead of playing the next
+  — the console forced up, the menu over it — and `M_Main_Key`'s Escape puts
+  the loop back and, with nothing playing, starts its next demo
+  (`CL_NextDemo`). The port now does all of it (`App::m_menu_main`,
+  `MenuAction::Resume`, `boot_attract` leaves the menu closed); the page
+  keeps its click-to-start overlay (browsers need a gesture before they play
+  sound), which now says "then press any key for the menu", and the status
+  line and the help say so too. With the console out, `M_Draw` puts the menu
+  over `Draw_ConsoleBackground (vid.height)` instead of the fade
+  (`scr_con_current`), which the disconnected screen now shows
+  (`render::draw_menu_over_console`): the 2-D oracle's new
+  `menu_disconnected` scenario went 41.5 → 99.4% (320x200), 29.8 → 99.4
+  (640x400), 27.7 → 99.4 (960x600) — what is left is the console's version
+  stamp, as in the `console` scenario (`oracle.c` now shoots a frame that
+  renders no view). Tests `boot_attract_plays_the_demo_and_a_key_brings_up_the_menu`,
+  `the_menu_stops_the_attract_loop_until_escape`,
+  `attract_loop_cycles_demo1_demo2_demo3` (no menu over it); the verify
+  scripts that opened with "the attract menu" (`verify_demo`, `_input`,
+  `_menu`, `_extras`, `_timedemo`) now check that no menu is up at boot and
+  that a key brings it.
 
 ## LOW (27)
 

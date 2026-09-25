@@ -676,6 +676,13 @@ void Oracle_VidUpdate (void)
 		curshot++;
 		full_pending = false;
 	}
+// disconnected, no view is rendered (V_RenderView returns under
+// con_forcedup): a queued composited shot is this frame's screen as it is
+	else if (cls.state != ca_connected && curshot < numshots && shots[curshot].stage)
+	{
+		Oracle_Dump (&shots[curshot], 1);
+		curshot++;
+	}
 	Oracle_MaybeExit ();
 
 // timedemo: CL_FinishTimeDemo has printed its "frames / seconds / fps" line

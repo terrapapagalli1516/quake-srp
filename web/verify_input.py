@@ -3,7 +3,8 @@
 
   1. ONE-GESTURE START — the click-to-play scrim appears only before the first
      user gesture ever; that click (or Enter/Space) unlocks audio AND reveals
-     the running attract loop, and the scrim never covers the canvas again
+     the running attract loop — id's demos, no menu until a key (the gesture
+     itself is not one) — and the scrim never covers the canvas again
      (attract->walk->demo transitions included).
   2. ESC vs POINTER LOCK — losing the pointer lock without the page asking
      (the browser's reserved Esc, simulated via document.exitPointerLock())
@@ -82,8 +83,10 @@ with sync_playwright() as p:
     })""")
     check("one click: scrim gone", s["hidden"])
     check("one click: audio unlocked", s["audio"] == "running", s["audio"])
-    check("one click: attract revealed (menu over demo)",
-          s["menu"] == 1 and s["walk"] == 0)
+    check("one click: attract revealed (the demo, no menu)",
+          s["menu"] == 0 and s["walk"] == 0)
+    check("the prompt says a key brings the menu",
+          "any key for the menu" in pg.evaluate("document.getElementById('play').textContent"))
     # Mode transitions never resurrect the scrim.
     pg.locator("#walkBtn").click(); time.sleep(0.3)
     pg.locator("#demoBtn").click(); time.sleep(0.3)
@@ -108,10 +111,13 @@ with sync_playwright() as p:
         audio: audioCtx ? audioCtx.state : 'none',
         menu: exp.menu_visible(),
     })""")
-    check("Enter starts: scrim gone + audio unlocked + attract menu up",
-          s["hidden"] and s["audio"] == "running" and s["menu"] == 1, str(s))
+    check("Enter starts: scrim gone + audio unlocked, the demo with no menu",
+          s["hidden"] and s["audio"] == "running" and s["menu"] == 0, str(s))
     check("no capture chip in attract mode",
           pg.evaluate("!lockChip.classList.contains('show')"))
+    # Then any key during the demo brings up the menu (Key_Event).
+    pg.keyboard.press("Enter")
+    check("a key during the demo brings up the menu", pg.evaluate("exp.menu_visible()") == 1)
 
     # (3a) Space/arrows over the attract MENU: swallowed, never scroll.
     # (Scroll checks compare the DELTA across the key presses — Playwright's

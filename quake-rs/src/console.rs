@@ -553,6 +553,23 @@ fn draw_console_background(
     }
 }
 
+/// `Draw_ConsoleBackground (vid.height)`: the console background over the
+/// whole 2-D screen, no text — what `M_Draw` puts under the menu while the
+/// console is out (`scr_con_current`, e.g. forced up with nothing playing),
+/// in place of the fade.
+pub fn draw_console_background_full(
+    image: &mut Image,
+    conback: Option<&crate::wad::Qpic>,
+    conchars: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+) {
+    if image.w == 0 || image.h == 0 {
+        return;
+    }
+    let sc = screen_2d(image.w, image.h);
+    draw_console_background(image, sc, sc.h, conback, conchars, palette);
+}
+
 /// Draw the drop-down console over `image` at its current height
 /// ([`Console::slide`]), a port of `SCR_DrawConsole` -> `Con_DrawConsole`
 /// (console.c) and `Con_DrawInput`. Draws nothing while the console is up

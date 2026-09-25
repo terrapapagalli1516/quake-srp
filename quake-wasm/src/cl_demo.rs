@@ -823,7 +823,6 @@ mod tests {
             d.notify.visible(now).iter().map(|l| l.to_string()).collect::<Vec<_>>()
         });
         assert!(notified.is_empty(), "{notified:?}");
-        crate::menu::menu_cancel(); // the menu away (it does not stop the loop here)
         console_toggle();
         // Bad argument counts print the C's usage lines ("play", as id's).
         run_console_line("playdemo");
@@ -879,7 +878,6 @@ mod tests {
         use crate::host::step;
         use crate::menu::{menu_cancel, menu_visible};
         assert_eq!(boot_attract(), 1);
-        menu_cancel(); // close the attract menu
         console_toggle();
         run_console_line("stopdemo");
         step(0.05);
@@ -894,9 +892,9 @@ mod tests {
         let w = fb.len() / 4 / h;
         let bottom = &fb[(h - 1) * w * 4..];
         assert!(bottom.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]), "the conback reaches the bottom row");
-        // Esc (the page sends console_toggle while the console has the keys)
-        // brings up the menu over it; leaving the menu resumes the loop
-        // (M_Main_Key K_ESCAPE: CL_NextDemo with nothing playing).
+        // The console key (toggleconsole) brings up the menu over it; leaving
+        // the menu resumes the loop (M_Main_Key K_ESCAPE: CL_NextDemo with
+        // nothing playing).
         console_toggle();
         assert_eq!(menu_visible(), 1, "Con_ToggleConsole_f disconnected: M_Menu_Main_f");
         step(0.05);
@@ -928,7 +926,6 @@ mod tests {
         use crate::console::console_toggle;
         use crate::host::step;
         assert_eq!(boot_attract(), 1);
-        crate::menu::menu_cancel();
         console_toggle();
         crate::vid::set_resolution(320, 200);
         run_console_line("timedemo demo1");

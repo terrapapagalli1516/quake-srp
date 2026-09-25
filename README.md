@@ -7,8 +7,8 @@ BSP worlds, spawns maps by executing the real game logic, moves a player through
 physics, plays back recorded demos, renders the world with **baked lightmaps + textures + models**, and runs
 **interactively in a web browser** via WebAssembly.
 
-> **Honest framing.** This is a genuinely playable single-player port. It boots into the **Quake main menu drawn
-> over the attract demo**, New Game drops you in the **`start` skill/episode hub**, and you can walk, fight monsters
+> **Honest framing.** This is a genuinely playable single-player port. It boots into **id's attract demos** (any key
+> brings up the main menu), New Game drops you in the **`start` skill/episode hub**, and you can walk, fight monsters
 > that wake/chase/attack, take damage (with the red flash), **die and respawn** (the full QuakeC death chain,
 > proven end-to-end), switch weapons — **including the thunderbolt's rendered lightning** — pick up items +
 > ammo/health/explosive boxes, open doors, ride elevators, see blood/explosions/dynamic lights (gated by the real
@@ -62,7 +62,10 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   with **Single Player → `start` hub**, a working **Options** screen (screen size, mouse +
   volume; the render resolution under Video Options), and a `~` **drop-down console** (conback + conchars scrollback + input line) running `god`/`noclip`/
   `fly`/`give`/`impulse`/`map`/`kill`/`clear`, `pause` (the PAUSE key: id's plaque) and id's demo commands `playdemo`/`timedemo`/`stopdemo`/`startdemos`/`demos`.
-  Boots into the menu **over the playing attract demo** (quake.rc's `startdemos demo1 demo2 demo3`).
+  Boots as Quake does, into the **attract demos** (quake.rc's `startdemos demo1 demo2 demo3`) with no menu:
+  any key during a demo brings up the main menu, which stops the loop until it is closed (`M_Menu_Main_f`); the
+  page's click-to-start overlay is only the gesture browsers want before they play sound. Every key goes
+  through keys.c's `Key_Event`, so the menu, the console and the game split the keyboard as in id's Quake.
 - **Web extras** — the port is id's Quake by default (Always Run aside). Its departures are opt-in, all
   off by default, on one page: **Options > Web extras**, drawn like id's Options page, each also a
   `wasm_*` console variable (listed in `quake-wasm/src/extras.rs`): an **uncapped frame rate** (no

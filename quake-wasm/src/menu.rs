@@ -60,10 +60,12 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
         MenuAction::Resume => {
-            // M_Main_Key K_ESCAPE: with nothing playing, the loop's next demo
-            // (`if (cls.demonum != -1 && !cls.demoplayback && cls.state !=
+            // M_Main_Key K_ESCAPE: the demo loop back (`cls.demonum =
+            // m_save_demonum;`) and, with nothing playing, its next demo (`if
+            // (cls.demonum != -1 && !cls.demoplayback && cls.state !=
             // ca_connected) CL_NextDemo ();`).
-            if a.disconnected {
+            a.cls.demonum = a.m_save_demonum;
+            if a.cls.demonum != -1 && !a.demoplayback() && a.disconnected {
                 crate::cl_demo::cl_next_demo(a);
             }
         }
@@ -334,6 +336,7 @@ mod tests {
         // ATTRACT (demo) mode: no game running -> Save refuses to open.
         assert_eq!(boot_attract(), 1);
         step(0.05); // sync game_active (mode 1 -> false)
+        menu_cancel(); // Escape: the menu over the demo
         menu_select(); // Main item 0 -> SinglePlayer
         menu_down();
         menu_down(); // cursor 2 = Save

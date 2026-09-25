@@ -157,6 +157,12 @@ SCENARIOS: dict[str, list] = {
     "menu_quit": [("frames", 1), ("key", "ESCAPE"), ("key", "UPARROW"), ("key", "ENTER"), ("quitmsg", 4),
                   ("frames", 1), ("shot", "quit"), ("quitmsg", 6), ("frames", 1), ("shot", "quit6"),
                   ("key", "n"), ("frames", 1), ("shot", "back")],
+    # disconnected (a playdemo that cannot open its file: CL_Disconnect), the
+    # console forced up: M_Draw puts the menu over Draw_ConsoleBackground
+    # (vid.height), not over the faded screen
+    "menu_disconnected": [("frames", 1), ("cmd", "playdemo nosuch"), ("frames", 2), ("key", "ESCAPE"),
+                          ("frames", 1), ("shot", "main"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
+                          ("key", "ENTER"), ("frames", 1), ("shot", "options")],
 }
 
 

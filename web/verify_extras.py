@@ -107,6 +107,7 @@ with sync_playwright() as p:
     check("every extra is off by default", ext() == 0)
     check("nothing stored before a change",
           pg.evaluate("localStorage.getItem('quake-rs.extras')") is None)
+    key("Escape")                      # the menu over the attract demo
     key("ArrowDown", 2); key("Enter")
     check("Options opens", scr() == OPTIONS)
     key("ArrowUp")                     # up from row 0 wraps to the last row...

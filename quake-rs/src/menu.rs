@@ -1821,8 +1821,31 @@ pub fn draw_menu(
     draw_menu_inner(image, menu, pics, conchars, host_time, realtime, palette, true);
 }
 
+/// `M_Draw` while the console is out (`scr_con_current`, as when it is
+/// forced up with nothing playing): the menu over `Draw_ConsoleBackground
+/// (vid.height)` — the console's background over the whole screen, hiding
+/// its text — instead of over the faded screen.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_menu_over_console(
+    image: &mut Image,
+    menu: &Menu,
+    pics: &MenuPics,
+    conchars: Option<&crate::wad::Qpic>,
+    conback: Option<&crate::wad::Qpic>,
+    host_time: f32,
+    realtime: f64,
+    palette: &[[u8; 3]; 256],
+) {
+    if !menu.visible {
+        return;
+    }
+    crate::console::draw_console_background_full(image, conback, conchars, palette);
+    draw_menu_inner(image, menu, pics, conchars, host_time, realtime, palette, false);
+}
+
 /// [`draw_menu`], with `fade` false for `M_Draw`'s `m_recursiveDraw` (the
-/// screen the Quit prompt rose over, drawn under it without a second fade).
+/// screen the Quit prompt rose over, drawn under it without a second fade)
+/// and for the menu over the console background.
 #[allow(clippy::too_many_arguments)]
 fn draw_menu_inner(
     image: &mut Image,
@@ -1847,9 +1870,8 @@ fn draw_menu_inner(
     let ox = ((sc.w - MENU_VIRT_W as i32) >> 1) as f32 * scale;
     let oy = 0.0;
 
-    // M_Draw: the game/demo underneath fades first (Draw_FadeScreen). (The
-    // C's other branch, the console background under a forced-up console,
-    // can't occur: this port's menu and console never share the screen.)
+    // M_Draw: the game/demo underneath fades first (Draw_FadeScreen); with
+    // the console out, draw_menu_over_console draws its background instead.
     if fade {
         fade_screen(image, palette);
     }

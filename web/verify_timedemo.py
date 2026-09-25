@@ -2,7 +2,7 @@
 """Verify id's `timedemo` and `pause` end-to-end in headless Chromium,
 through the page's own keyboard path:
 
-  1. timedemo: Esc (the attract menu away), ~, `timedemo demo1`, Enter, ~ —
+  1. timedemo: ~, `timedemo demo1`, Enter, ~ —
      the page then runs host frames back to back (timedemo_running), shows
      the demo while it does, and the console gets CL_FinishTimeDemo's line
      "%i frames %5.1f seconds %5.1f fps": well formed, 969 frames (id's C
@@ -94,8 +94,7 @@ with sync_playwright() as p:
     key = lambda k, n=1: [pg.keyboard.press(k) or time.sleep(0.05) for _ in range(n)]
     running = lambda: pg.evaluate("exp.timedemo_running()")
 
-    key("Escape")                                  # the attract menu away
-    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    check("the attract demo plays with no menu", pg.evaluate("exp.menu_visible()") == 0)
     results = {}
     modes = os.environ.get("QUAKE_TIMEDEMO_RES", "960x600,640x400")
     for (w, h) in [tuple(int(v) for v in m.split("x")) for m in modes.split(",")]:

@@ -413,6 +413,7 @@ scenario's shots, before the branch -> after.
 | menus: help pages (2) | 100 -> 100 | 3.6 -> 100 | 1.0 -> 100 |
 | quit prompt (2 messages) and No (3) | 65.9 -> 100 | 43.8 -> 100 | 47.4 -> 100 |
 | pause: the plaque and "player paused the game", unpaused (2; `quake/timedemo`, before it no `pause`) | 100 | 100 | 100 |
+| menu over the disconnected console: main, options (2; `quake/polish4b`) | 41.5 -> 99.4 / 98.9 | 29.8 -> 99.4 / 99.3 | 27.7 -> 99.4 / 99.3 |
 
 The before column is `bbfc6bc` with the same harness. The fixes, one commit
 each (`AUDIT.md`, "The 2-D layer"): the ammo counts 4 px left; a "quake-rs" label
@@ -425,6 +426,14 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
 
 **What is left, and why**
 
+- *Menu over the disconnected console* (`quake/polish4b`, scenario
+  `menu_disconnected`: a `playdemo` that cannot open its file disconnects,
+  the console is forced up, Escape brings up the menu): `M_Draw` draws the
+  menu over `Draw_ConsoleBackground (vid.height)` while `scr_con_current` is
+  non-zero, not over the faded screen; the port faded the console text
+  (41.5% before). What is left is the console's version stamp (below) and,
+  on Options, its Web extras row. `oracle.c` shoots a composited frame that
+  renders no view (disconnected) as the screen stands.
 - *Console* (400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
   string stamped on the conback. id's Linux build (the oracle) writes "(Linux
   Quake 1.30) 1.09"; the port writes what the DOS build writes, "1.09", at the

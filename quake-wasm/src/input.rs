@@ -118,6 +118,8 @@ pub(crate) fn run_key_after(after: Option<KeyAfter>) {
 ///   "MOUSE2 is unbound, hit F4 to set.";
 /// - Escape is special, so no binding can take the menu away: in the menu it
 ///   is the screen's Escape (`M_Keydown`), elsewhere `M_ToggleMenu_f`;
+/// - during demo playback, with the game's keyboard, a console key (any
+///   printable key, Enter, Tab, the arrows, ...) brings up the main menu;
 /// - a key up releases its `+` binding wherever the keyboard is (so a key
 ///   released behind the menu or console never sticks);
 /// - a key down runs its binding where id's runs it — in the game (with
@@ -177,6 +179,11 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
     // key_dest.
     if !down {
         a.keys_held[k] = false;
+        return None;
+    }
+    // During demo playback, most keys bring up the main menu.
+    if a.demoplayback() && consolekey(key) && a.key_dest() == KeyDest::Game {
+        a.m_toggle_menu();
         return None;
     }
     let dest = a.key_dest();

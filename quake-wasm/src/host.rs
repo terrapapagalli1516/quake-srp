@@ -292,15 +292,31 @@ pub extern "C" fn step(dt: f32) -> i32 {
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             if let Some(img) = img.as_mut() {
                 if let Some(palette) = a.active_palette() {
-                    render::draw_menu(
-                        img,
-                        &a.menu,
-                        &a.menu_pics,
-                        a.conchars.as_ref(),
-                        a.clock,
-                        a.realtime,
-                        palette,
-                    );
+                    // M_Draw: over the console background while the console
+                    // is out (scr_con_current: forced up, disconnected),
+                    // else over the faded screen.
+                    if a.console.current() > 0.0 {
+                        render::draw_menu_over_console(
+                            img,
+                            &a.menu,
+                            &a.menu_pics,
+                            a.conchars.as_ref(),
+                            a.conback.as_ref(),
+                            a.clock,
+                            a.realtime,
+                            palette,
+                        );
+                    } else {
+                        render::draw_menu(
+                            img,
+                            &a.menu,
+                            &a.menu_pics,
+                            a.conchars.as_ref(),
+                            a.clock,
+                            a.realtime,
+                            palette,
+                        );
+                    }
                 }
             }
         }

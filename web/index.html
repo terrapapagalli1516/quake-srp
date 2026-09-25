@@ -162,7 +162,7 @@
           <div id="bootMsg">fetching engine…</div>
           <div id="bootBar"><div id="bootFill"></div></div>
         </div>
-        <div id="play" class="hidden">click (or press Enter) to play &nbsp;·&nbsp; mouse = look, WASD = move</div>
+        <div id="play" class="hidden">click (or press Enter) to start &nbsp;·&nbsp; then press any key for the menu</div>
       </div>
       <div id="lockChip" class="chip">click to capture mouse</div>
       <div id="fsHint" class="chip">Esc = menu &nbsp;·&nbsp; F = leave fullscreen</div>
@@ -203,6 +203,7 @@
     <div class="col">
       <h2>Interface</h2>
       <div class="keys">
+        <span class="k">any key</span><span>the menu, while a demo plays</span>
         <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
         <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
         <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
@@ -283,13 +284,14 @@ function hideOverlayForever() {
   overlay.classList.add('hidden');
 }
 function startFromOverlay() {
-  // The first gesture: unlock audio with it and reveal the attract loop (demo +
-  // menu) that boot_attract() already has running under the scrim. No pointer
-  // lock here — the attract menu is keyboard-driven; the mouse is captured
-  // later, by a canvas click in walk mode.
+  // The first gesture: unlock audio with it and reveal the attract loop that
+  // boot_attract() already has running under the scrim — id's demos, with no
+  // menu until a key (keys.c: during demo playback most keys bring up the
+  // main menu). No pointer lock here — the menu is keyboard-driven; the mouse
+  // is captured later, by a canvas click in walk mode.
   unlockAudio();
   hideOverlayForever();
-  statusEl.textContent = 'attract loop — ↑/↓ + Enter drive the menu · New Game to play';
+  statusEl.textContent = 'attract loop — press any key for the menu · Single Player > New Game to play';
 }
 
 // Physical punctuation/digit keys, KeyboardEvent.code -> unshifted US-ASCII
@@ -524,7 +526,7 @@ document.getElementById('demoBtn').addEventListener('click', () => {
   statusEl.textContent = 'loading demo1 (e1m3)…';
   setTimeout(() => {
     exp.boot_demo();
-    statusEl.textContent = "playing demo1 — id's recorded e1m3 run (demo2 and demo3 follow)";
+    statusEl.textContent = "playing demo1 — id's recorded e1m3 run (demo2 and demo3 follow) · any key for the menu";
   }, 30);
 });
 
@@ -1382,8 +1384,8 @@ async function main() {
 
   setStatus('booting: parsing pak0.pak, loading the attract demo…');
   await new Promise(r => setTimeout(r, 30));
-  // Quake boots into the ATTRACT loop: the main menu drawn over a PLAYING demo.
-  // boot_attract starts demo playback with the menu open; if the demo can't be
+  // Quake boots into the ATTRACT loop: quake.rc's demos, a key for the menu.
+  // boot_attract starts the attract demos with no menu; if the demo can't be
   // built it falls back to boot() (menu over e1m1), so this is always non-zero
   // when the pak loaded. The walk/demo buttons below still call boot()/boot_demo().
   if (!exp.boot_attract()) { setStatus('boot_attract() failed'); return; }

@@ -1,8 +1,9 @@
 #!/usr/bin/env -S uv run --with playwright --script
 """Verify the full menu is LIVE end-to-end in headless Chromium:
 
-  1. boot lands in the attract menu; arrow navigation queues real menu sounds
-     (the window.__menuSounds counter increments);
+  1. boot lands in the attract demo with no menu; a key brings the menu up;
+     arrow navigation queues real menu sounds (the window.__menuSounds
+     counter increments);
   2. every Main row responds: Single Player (Load list + the Save no-game
      gate), Multiplayer (screen opens, Esc returns), Options, Help, Quit (N
      backs out);
@@ -84,8 +85,12 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('overlay').click()")
     time.sleep(0.4)
 
-    # 1. Attract boot: the menu is open over the demo; arrows queue menu1.
-    check("attract boot lands in the menu", vis() == 1 and scr() == MAIN)
+    # 1. Attract boot: the demo plays with no menu (key_dest starts at
+    #    key_game); any key brings up the main menu (Key_Event during demo
+    #    playback); arrows queue menu1.
+    check("attract boot: the demo, no menu", vis() == 0)
+    key("Space")
+    check("a key brings up the main menu", vis() == 1 and scr() == MAIN)
     snd0 = pg.evaluate("window.__menuSounds")
     key("ArrowDown"); key("ArrowUp")
     time.sleep(0.4)
