@@ -16,9 +16,10 @@ use crate::screen::{center_string_top, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_
 // Main menu (a port of menu.c: M_Main_Draw/_Key, M_SinglePlayer_Draw/_Key)
 // ---------------------------------------------------------------------------
 //
-// Quake boots INTO this menu (the id logo over the demo loop). It is drawn in the
-// SAME 320x200 virtual space `menu.c` uses, on top of the finished game frame,
-// with index-255 transparent blits. Navigation is keyboard-only: up/down move a
+// Quake boots INTO this menu (the id logo over the demo loop). It is drawn with
+// `menu.c`'s coordinates, centred across the top of the screen as `M_DrawPic`
+// centres it, on top of the finished game frame, with index-255 transparent
+// blits. Navigation is keyboard-only: up/down move a
 // 6-frame animated cursor, Enter selects, Escape backs out (or, on the main
 // screen, closes the menu).
 //
@@ -143,8 +144,9 @@ pub const BIND_IMPULSE_0: usize = NUM_BINDNAMES + 3;
 /// the host's `1280x800` clamp cap (`1_280*800` = the exact pixel budget). The
 /// engine *boots* at the host's chosen default (see wasm `DEFAULT_W`/`DEFAULT_H`),
 /// which must be one of these so the list can mark the current mode; higher modes
-/// render the 3-D scene at the larger size (the menu + HUD auto-scale to whatever
-/// framebuffer they're drawn into). The Options "Screen size" row is id's
+/// render the 3-D scene at the larger size and, as in WinQuake, draw the menu and
+/// HUD at their own pixel size (the "scaled 2-D" extra,
+/// [`crate::draw::set_scaled_2d`], blows them up instead). The Options "Screen size" row is id's
 /// `viewsize` (see [`calc_refdef`](crate::screen::calc_refdef)), not the mode, exactly as in WinQuake.
 pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
     (320, 200),

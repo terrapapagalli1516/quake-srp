@@ -47,8 +47,8 @@ pub struct Refdef {
     /// `yscale = xscale` (square pixels); the software renderer derives its
     /// vertical extent from that, not from CalcFov's `fov_y`.
     pub vrect: ViewRect,
-    /// `sb_lines` in the status bar's 320x200 virtual rows: 48 (sbar + inventory),
-    /// 24 (sbar only) or 0 (no status bar).
+    /// `sb_lines` in 2-D screen rows ([`crate::draw::screen_2d`]): 48 (sbar +
+    /// inventory), 24 (sbar only) or 0 (no status bar).
     pub sb_lines: i32,
 }
 

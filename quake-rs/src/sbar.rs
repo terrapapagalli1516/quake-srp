@@ -24,8 +24,8 @@ use crate::screen::draw_center_string_revealed;
 // This port keeps the same virtual coordinates Quake uses. The caller hands us a
 // [`Hud`] holding a borrow of the parsed `gfx.wad`, the palette, and the three
 // integer stats read off the player edict; [`draw_hud_into`] then blits the bar
-// scaled to the actual framebuffer width and bottom-anchored, so a 320, 480, or
-// 640-wide frame all get a full-width bar.
+// 320 wide at the bottom centre of the screen, backtile either side on a wider
+// one, as Sbar_Draw does (or blown up with the "scaled 2-D" extra).
 //
 // Integration choice (lowest churn): the HUD is a *separate* `pub fn
 // draw_hud_into(image, hud)` the scene callers invoke on the returned `Image`,
