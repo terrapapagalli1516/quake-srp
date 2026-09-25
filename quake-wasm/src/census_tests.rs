@@ -219,7 +219,6 @@ fn census_player_netname_is_player() {
 /// e.g. switching away from the rocket launcher (or while holding fire with
 /// the nailgun/thunderbolt).
 #[test]
-#[ignore = "census F4: impulses pressed during a weapon cooldown are dropped"]
 fn census_weapon_switch_survives_the_cooldown() {
     let mut w = build_walk().expect("e1m1 boots");
     for _ in 0..5 {
