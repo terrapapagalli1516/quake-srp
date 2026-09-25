@@ -354,8 +354,9 @@ fn blit_named(
 }
 
 /// Stamp one console-font glyph (`conchars` cell `ch`) at virtual `(vx, vy)` in
-/// 320x200 bar space, scaled/anchored exactly like [`blit_qpic`] — a port of
-/// `Sbar_DrawCharacter`'s `Draw_Character`.
+/// 320x200 bar space, scaled/anchored exactly like [`blit_qpic`] — the
+/// `Draw_Character` under `Sbar_DrawString` and `Sbar_DrawCharacter` (whose
+/// callers add its `+ 4`).
 ///
 /// `conchars` is the raw 128x128 atlas wrapped as a [`crate::wad::Qpic`]
 /// (`width = height = 128`), a 16x16 grid of 8x8 glyphs; byte `ch`'s glyph sits at
@@ -441,9 +442,11 @@ fn draw_sbar_inventory(
                 if c == b' ' {
                     continue;
                 }
-                // Gold digit glyph 18 + (c - '0'); x = (6*i + 1 + j)*8 - 2, y = -24.
+                // Gold digit glyph 18 + (c - '0'); x = (6*i + 1 + j)*8 - 2, y = -24,
+                // and Sbar_DrawCharacter (sbar.c:293) draws 4 pixels right of
+                // its x: `Draw_Character (x + ((vid.width - 320)>>1) + 4, ...)`.
                 let glyph = 18 + (c - b'0');
-                let vx = ((6 * i + 1 + j) as f32) * 8.0 - 2.0;
+                let vx = ((6 * i + 1 + j) as f32) * 8.0 - 2.0 + 4.0;
                 draw_sbar_char(image, cc, glyph, vx, -24.0, scale, vy_top, pal);
             }
         }
@@ -1500,6 +1503,13 @@ mod tests {
             .filter(|&(x, y)| img.rgb[y * 320 + x] == [95, 95, 95])
             .count();
         assert!(count_px > 0, "small ammo counts drew on the ibar");
+        // "100" shells: the first digit at (6*0+1)*8 - 2, plus Sbar_DrawCharacter's 4.
+        let first_x = (152..176)
+            .flat_map(|y| (0..320).map(move |x| (x, y)))
+            .filter(|&(x, y)| img.rgb[y * 320 + x] == [95, 95, 95])
+            .map(|(x, _)| x)
+            .min();
+        assert_eq!(first_x, Some(10), "the shells count starts at x = 8 - 2 + 4");
 
         // A sigil (index 90) drew near the right edge of the ibar (x≈288).
         let sigil_px = (160..176)
