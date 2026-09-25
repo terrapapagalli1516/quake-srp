@@ -5,39 +5,44 @@
 //! The particle simulation itself is [`crate::particles`].
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image, Projection};
+use super::{Camera, Image};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
-/// against the shared `zbuf`, porting the visible result of Quake's software
-/// `R_DrawParticles` (`d_*.c`).
+/// against the shared `zbuf`: id's `D_DrawParticle` (`d_part.c`, the portable
+/// C of `d_parta.s`) with `R_DrawParticles`' projection (`r_part.c`) and the
+/// constants `D_ViewChanged` derives from the view (`d_modech.c`).
 ///
-/// Each particle is `(world_pos, palette index)`. The projection matches every
-/// other pass in this module (and [`render_scene_ext`](super::render_scene_ext), whose buffer this shares):
-/// `rel = p - cam.pos`; the forward depth `vz = dot(rel, forward)` is the z-test
-/// key; a particle at or behind the near plane (`vz <= NEAR`) is skipped; the
-/// screen position is `sx = cx + xscale*dot(rel,right)/vz`,
-/// `sy = cy - yscale*dot(rel,up)/vz` ([`Projection`](super::Projection):
-/// `yscale = xscale * pixel_aspect`, as `R_DrawParticles`' `r_pup` is `vup`
-/// scaled by `yscaleshrink`). The square stays square in pixels whatever the
-/// aspect, as `D_DrawParticle`'s is below `pixelAspect` 1.4.
+/// Each particle is `(world_pos, palette index)`, drawn in slice order (a
+/// later one wins a tie, as id's list order does). `w`/`h` is the view,
+/// `r_refdef.vrect` (the image is the view alone, so `vrect.x = vrect.y = 0`).
+/// Per particle, as the C:
+/// - `transformed = (local·vright*xscaleshrink, local·vup*yscaleshrink,
+///   local·vpn)` with `local = p - r_origin` (`R_DrawParticles` scales
+///   `r_pright`/`r_pup` by the SHRUNK scales, `R_ViewChanged`:
+///   `xscaleshrink = (vrect.width-6)/horizontalFieldOfView`, `yscaleshrink =
+///   xscaleshrink*pixelAspect` — 3 px nearer the centre at the edge of a
+///   320-wide view than the walls' `xscale`); dropped when `transformed[2] <
+///   PARTICLE_Z_CLIP` (8).
+/// - `zi = 1/transformed[2]`, `u = (int)(xcenter + zi*transformed[0] + 0.5)`,
+///   `v = (int)(ycenter - zi*transformed[1] + 0.5)` with `xcenter =
+///   vrect.width/2 - 0.5` (`XCENTERING`); the whole particle is dropped unless
+///   `vrecty <= v <= d_vrectbottom_particle` and `vrectx <= u <=
+///   d_vrectright_particle` (the view less `d_pix_max`, so a square never
+///   crosses the edge).
+/// - `izi = (int)(zi*0x8000)`, `pix = izi >> d_pix_shift` clamped to
+///   `[d_pix_min, d_pix_max]` (`d_pix_min = max(1, width/320)`, `d_pix_max =
+///   (int)(width/80 + 0.5)`, `d_pix_shift = 8 - (int)(width/320 + 0.5)`: at
+///   320 wide a particle is `256/z` pixels, 1 to 4).
+/// - a `pix` wide, `pix << d_y_aspect_shift` tall block from `(u, v)` right
+///   and down (`d_y_aspect_shift` = 1 only when `pixelAspect > 1.4`), each
+///   pixel written where `pz <= izi`, id's test on its z-buffer of
+///   `(int)(1/z * 0x8000)`, which writes `izi`. The port's buffer holds depth,
+///   so the stored `izi` is recomputed from it the same way, and a particle
+///   stores its own depth: its `izi` comes back exactly. Particles of a burst
+///   often share an `izi`; the later one in the list wins those ties, as in
+///   the C (a float depth test would let the nearer one win).
 ///
-/// A particle is drawn as a `pix`x`pix` filled square whose side scales
-/// **continuously** with `1/z`, porting `R_DrawParticles`/`D_DrawParticle`
-/// (`d_part.c`): the C computes `izi = zi*0x8000` (`zi = 1/z`),
-/// `pix = izi >> d_pix_shift`, then clamps to `[d_pix_min, d_pix_max]`. The
-/// resolution-derived constants are `d_pix_min = max(1, width/320)`,
-/// `d_pix_max = round(width/80)`, `d_pix_shift = 8 - round(width/320)`
-/// (`d_modech.c`). We reproduce that same continuous ramp (rather than a
-/// 2-bucket step) so a particle grows smoothly as it nears the eye and shrinks to
-/// the minimum size far away. For every covered pixel the existing z-buffer test
-/// is reused: the pixel is written only when `vz < zbuf[idx]` (strictly nearer),
-/// and the depth is written so later, nearer geometry can still overdraw it.
-/// Off-screen pixels are clipped by the loop bounds; the colour is
-/// `palette[color]`.
-///
-/// SAFETY: `w`/`h` of `0`, non-finite projections, and out-of-range indices are
-/// all guarded; the only direct indexing is into the freshly-sized framebuffers,
-/// where the index is provably in bounds.
+/// Degenerate sizes and non-finite projections draw nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_particles(
     image: &mut Image,
@@ -49,74 +54,107 @@ pub fn draw_particles(
     h: usize,
     pixel_aspect: f32,
 ) {
-    const NEAR: f32 = 1.0;
+    /// `d_iface.h`: particles nearer than this are not drawn.
+    const PARTICLE_Z_CLIP: f32 = 8.0;
     if w == 0 || h == 0 || particles.is_empty() {
         return;
     }
 
     let (forward, right, up) = cam.basis();
-    let Projection { cx, cy, xscale: focal, yscale } = Projection::new(cam, w, h, pixel_aspect);
-
-    // Resolution-scaled particle-size clamp, ported from `D_DrawParticle` /
-    // `d_modech.c`. Quake authored its `0x8000`/`d_pix_shift` ramp against a
-    // 320-wide virtual screen; at a render width `w` the bounds scale the same
-    // way: `d_pix_min = max(1, w/320)`, `d_pix_max = round(w/80)`. We size the
-    // continuous ramp from the projected world extent (`focal/vz`) — exactly the
-    // `zi`-proportional growth the C produced — and clamp to those bounds.
-    let d_pix_min: i64 = ((w as f32 / 320.0) as i64).max(1);
-    let d_pix_max: i64 = (w as f32 / 80.0 + 0.5).floor() as i64;
-    let d_pix_max = d_pix_max.max(d_pix_min);
+    let proj = ParticleProjection::new(cam, w, h, pixel_aspect);
+    // R_DrawParticles: r_pright = vright*xscaleshrink, r_pup = vup*yscaleshrink.
+    let pright = [right[0] * proj.xscaleshrink, right[1] * proj.xscaleshrink, right[2] * proj.xscaleshrink];
+    let pup = [up[0] * proj.yscaleshrink, up[1] * proj.yscaleshrink, up[2] * proj.yscaleshrink];
+    let rows_shift = proj.y_aspect_shift;
 
     for &(p, color) in particles {
-        let rel = sub(p, cam.pos);
-        let vz = dot(rel, forward);
-        if vz <= NEAR {
-            // At/behind the near plane: skip (matches the world/model near clip).
+        let local = sub(p, cam.pos);
+        let t = [dot(local, pright), dot(local, pup), dot(local, forward)];
+        if t[2] < PARTICLE_Z_CLIP {
+            continue; // (a NaN depth fails the finite test below)
+        }
+        let zi = 1.0 / t[2];
+        let fu = proj.xcenter + zi * t[0] + 0.5;
+        let fv = proj.ycenter - zi * t[1] + 0.5;
+        if !(fu.is_finite() && fv.is_finite()) {
             continue;
         }
-        let vx = dot(rel, right);
-        let vy = dot(rel, up);
-        let sx = cx + focal * vx / vz;
-        let sy = cy - yscale * vy / vz;
-        if !(sx.is_finite() && sy.is_finite()) {
+        // (int) truncates toward zero, as `as` does for in-range values.
+        let (u, v) = (fu as i64, fv as i64);
+        if v > proj.vrectbottom_particle || u > proj.vrectright_particle || v < 0 || u < 0 {
             continue;
         }
-
-        // Continuous 1/z size ramp (D_DrawParticle): the projected on-screen size
-        // of a ~1-unit particle is `focal/vz`; this grows smoothly as the particle
-        // nears the eye. Clamp to the resolution-scaled `[d_pix_min, d_pix_max]`.
-        let pix = (focal / vz).round() as i64;
-        let pix = pix.clamp(d_pix_min, d_pix_max);
-
+        let izi = zbuf_izi(zi);
+        let pix = (izi >> proj.pix_shift).clamp(proj.pix_min, proj.pix_max);
         let rgb = palette[color as usize];
-
-        // Draw a `pix`x`pix` square. The C anchors the square at `(u,v)` and
-        // extends right/down; we centre it on the projected point (`half` each
-        // way) so growth stays symmetric about the particle. `half = (pix-1)/2`
-        // gives a `pix`-wide span (pix=1 -> single pixel, pix=3 -> 3x3, …).
-        let half: i64 = (pix - 1) / 2;
-
-        // Centre pixel + a square around it, each pixel z-tested.
-        let cx_px = sx.floor() as i64;
-        let cy_px = sy.floor() as i64;
-        for py in (cy_px - half)..=(cy_px + half) {
-            if py < 0 || py >= h as i64 {
-                continue;
-            }
-            for px in (cx_px - half)..=(cx_px + half) {
-                if px < 0 || px >= w as i64 {
-                    continue;
-                }
-                let idx = (py as usize) * w + (px as usize);
-                if let Some(z) = zbuf.get_mut(idx) {
-                    if vz < *z {
-                        *z = vz;
-                        if let Some(dst) = image.rgb.get_mut(idx) {
-                            *dst = rgb;
-                        }
+        for row in 0..(pix << rows_shift) {
+            let base = (v + row) as usize * w + u as usize;
+            for i in 0..pix as usize {
+                let idx = base + i;
+                if let (Some(z), Some(dst)) = (zbuf.get_mut(idx), image.rgb.get_mut(idx)) {
+                    // if (pz[i] <= izi) { pz[i] = izi; pdest[i] = color; }
+                    if zbuf_izi(1.0 / *z) <= izi {
+                        *z = t[2];
+                        *dst = rgb;
                     }
                 }
             }
+        }
+    }
+}
+
+/// `izi = (int)(zi * 0x8000)`: `D_DrawParticle`'s 1/z as its z-buffer holds
+/// it (an empty pixel's infinite depth gives 0, id's cleared buffer).
+fn zbuf_izi(zi: f32) -> i64 {
+    (zi * 32768.0) as i64
+}
+
+/// What `R_ViewChanged` (`r_main.c`) and `D_ViewChanged` (`d_modech.c`)
+/// derive from the view for `D_DrawParticle`, for a `w x h` view at the
+/// origin of its own image.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ParticleProjection {
+    /// `xcenter = vrect.width*XCENTERING + vrect.x - 0.5`, likewise `ycenter`.
+    pub xcenter: f32,
+    pub ycenter: f32,
+    /// `(vrect.width-6) / horizontalFieldOfView`, and that times `pixelAspect`.
+    pub xscaleshrink: f32,
+    pub yscaleshrink: f32,
+    pub pix_min: i64,
+    pub pix_max: i64,
+    pub pix_shift: u32,
+    pub y_aspect_shift: u32,
+    /// `vrectright - d_pix_max`, `vrectbottom - (d_pix_max << d_y_aspect_shift)`:
+    /// the last column/row a particle may start on.
+    pub vrectright_particle: i64,
+    pub vrectbottom_particle: i64,
+}
+
+impl ParticleProjection {
+    pub(crate) fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> Self {
+        let (wf, hf) = (w as f32, h as f32);
+        // horizontalFieldOfView = 2*tan(fov_x/2), a float; a degenerate fov
+        // falls back to ~90 degrees as `Projection` does.
+        let hfov = (2.0 * (cam.fov_deg as f64 * 0.5).to_radians().tan()) as f32;
+        let hfov = if hfov.abs() < 2e-6 { 2.0 } else { hfov };
+        let xscaleshrink = (w as i64 - 6) as f32 / hfov;
+        let pix_min = (w as i64 / 320).max(1);
+        let pix_max = ((wf / 80.0 + 0.5) as i64).max(1);
+        // d_pix_shift = 8 - (int)(width/320 + 0.5); negative (a view over
+        // 2720 wide) would be undefined in the C.
+        let pix_shift = (8 - (wf / 320.0 + 0.5) as i64).max(0) as u32;
+        let y_aspect_shift = u32::from(pixel_aspect > 1.4);
+        ParticleProjection {
+            xcenter: wf * 0.5 - 0.5,
+            ycenter: hf * 0.5 - 0.5,
+            xscaleshrink,
+            yscaleshrink: xscaleshrink * pixel_aspect,
+            pix_min,
+            pix_max,
+            pix_shift,
+            y_aspect_shift,
+            vrectright_particle: w as i64 - pix_max,
+            vrectbottom_particle: h as i64 - (pix_max << y_aspect_shift),
         }
     }
 }
@@ -156,8 +194,9 @@ mod tests {
     #[test]
     fn draw_particles_places_rows_by_the_pixel_aspect() {
         // R_DrawParticles projects with r_pup = vup * yscaleshrink: at 320x200 a
-        // particle 30 units above the axis at depth 100 sits 160*30/100 = 48 rows
-        // above the centre with square pixels, 40 at id's 4:3 aspect 0.8333.
+        // particle 30 units above the axis at depth 100 sits 157*30/100 = 47.1
+        // rows above ycenter 99.5 with square pixels (v = (int)52.9), 39.25 at
+        // id's 4:3 aspect 0.8333 (v = (int)60.75).
         let (w, h) = (320usize, 200usize);
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let mut pal = [[0u8, 0, 0]; 256];
@@ -173,6 +212,100 @@ mod tests {
         let (x2, y2) = row_of(200.0 / 320.0 * 4.0 / 3.0);
         assert_eq!(x1, x2, "the aspect never moves a particle sideways");
         assert_eq!((y1, y2), (52, 60));
+    }
+
+    /// Where and how big `draw_particles` draws one particle alone: the
+    /// painted pixels' bounding box `(x0, y0, x1, y1)` inclusive, or None.
+    fn particle_box(w: usize, h: usize, p: Vec3, aspect: f32) -> Option<(usize, usize, usize, usize)> {
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let mut pal = [[0u8, 0, 0]; 256];
+        pal[42] = [200, 50, 30];
+        let mut img = Image::new(w, h, [0, 0, 0]);
+        let mut zbuf = vec![f32::INFINITY; w * h];
+        draw_particles(&mut img, &mut zbuf, &cam, &[(p, 42)], &pal, w, h, aspect);
+        let px: Vec<(usize, usize)> =
+            (0..w * h).filter(|&i| img.rgb[i] == [200, 50, 30]).map(|i| (i % w, i / w)).collect();
+        let (x0, y0) = (px.iter().map(|p| p.0).min()?, px.iter().map(|p| p.1).min()?);
+        let (x1, y1) = (px.iter().map(|p| p.0).max()?, px.iter().map(|p| p.1).max()?);
+        assert_eq!(px.len(), (x1 - x0 + 1) * (y1 - y0 + 1), "a particle is a solid block");
+        Some((x0, y0, x1, y1))
+    }
+
+    #[test]
+    fn particles_project_with_r_main_c_xscaleshrink() {
+        // R_ViewChanged: xscaleshrink = (vrect.width-6)/horizontalFieldOfView,
+        // 314/2 = 157 at 320 wide and fov 90 (the walls' xscale is 160).
+        // D_DrawParticle: u = (int)(xcenter + zi*x*xscaleshrink + 0.5), xcenter
+        // 159.5. A particle 95 units right at depth 100: 159.5 + 149.15 + 0.5
+        // -> column 309 (xscale would give 312); 95 up: 99.5 - 149.15 + 0.5 <
+        // 0, dropped; 60 up: 99.5 - 94.2 + 0.5 -> row 5 (xscale: 4).
+        let right = [100.0, -95.0, 0.0];
+        assert_eq!(particle_box(320, 200, right, 1.0).map(|b| (b.0, b.1)), Some((309, 100)));
+        let left = [100.0, 95.0, 0.0];
+        assert_eq!(particle_box(320, 200, left, 1.0).map(|b| (b.0, b.1)), Some((10, 100)));
+        assert_eq!(particle_box(320, 200, [100.0, 0.0, 60.0], 1.0).map(|b| (b.0, b.1)), Some((160, 5)));
+        assert_eq!(particle_box(320, 200, [100.0, 0.0, 95.0], 1.0), None);
+        let p = ParticleProjection::new(
+            &Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 }, 320, 200, 0.8333333);
+        assert!((p.xscaleshrink - 157.0).abs() < 1e-3 && (p.yscaleshrink - 157.0 * 0.8333333).abs() < 1e-3);
+        assert_eq!((p.xcenter, p.ycenter), (159.5, 99.5));
+    }
+
+    #[test]
+    fn particle_size_is_d_part_cs_izi_shift() {
+        // pix = ((int)(zi*0x8000) >> d_pix_shift) clamped to [d_pix_min,
+        // d_pix_max], drawn from (u, v) right and down. 320 wide: shift 7,
+        // [1, 4]: depth 100 -> 327>>7 = 2; 64 -> 4; 30 -> 8, clamped to 4; 300
+        // -> 0, clamped to 1.
+        let at = |w: usize, h: usize, z: f32| {
+            particle_box(w, h, [z, 0.0, 0.0], 1.0).map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+        };
+        assert_eq!(at(320, 200, 100.0), Some((160, 100, 2, 2)));
+        assert_eq!(at(320, 200, 64.0), Some((160, 100, 4, 4)));
+        assert_eq!(at(320, 200, 30.0), Some((160, 100, 4, 4)));
+        assert_eq!(at(320, 200, 300.0), Some((160, 100, 1, 1)));
+        // 640 wide: shift 6, [2, 8]: depth 100 -> 327>>6 = 5; 1000 -> 0 -> 2.
+        assert_eq!(at(640, 400, 100.0), Some((320, 200, 5, 5)));
+        assert_eq!(at(640, 400, 1000.0), Some((320, 200, 2, 2)));
+        // 960 wide: shift 5, [3, 12].
+        assert_eq!(at(960, 600, 100.0), Some((480, 300, 10, 10)));
+    }
+
+    #[test]
+    fn particles_obey_d_part_cs_clip_and_edges() {
+        // PARTICLE_Z_CLIP: nothing nearer than 8 units.
+        assert_eq!(particle_box(320, 200, [7.9, 0.0, 0.0], 1.0), None);
+        assert!(particle_box(320, 200, [8.0, 0.0, 0.0], 1.0).is_some());
+        // d_vrectright_particle = 320 - d_pix_max (4): a particle starting on
+        // column 317 is dropped whole, not clipped to the edge; 316 is drawn.
+        // Column u = (int)(160 + 1.57*y): y = 100 -> 317; y = 99 -> 315.43 -> 315.
+        assert_eq!(particle_box(320, 200, [100.0, -100.0, 0.0], 1.0), None);
+        assert_eq!(particle_box(320, 200, [100.0, -99.0, 0.0], 1.0).map(|b| b.0), Some(315));
+        // pixelAspect over 1.4 doubles the rows (d_y_aspect_shift).
+        let tall = particle_box(320, 200, [100.0, 0.0, 0.0], 1.5).unwrap();
+        assert_eq!((tall.2 - tall.0 + 1, tall.3 - tall.1 + 1), (2, 4));
+    }
+
+    #[test]
+    fn particles_tie_on_d_part_cs_quantized_1_over_z() {
+        // Two particles on one pixel whose izi = (int)(0x8000/z) is equal
+        // (depths 150 and 150.1: both 218): the later one in the list wins, as
+        // id's `pz <= izi`; one nearer by a whole izi step wins from anywhere.
+        let (w, h) = (320usize, 200usize);
+        let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let mut pal = [[0u8, 0, 0]; 256];
+        pal[1] = [255, 0, 0];
+        pal[2] = [0, 255, 0];
+        let centre = |parts: &[(Vec3, u8)]| {
+            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut zbuf = vec![f32::INFINITY; w * h];
+            draw_particles(&mut img, &mut zbuf, &cam, parts, &pal, w, h, 1.0);
+            img.rgb[100 * w + 160]
+        };
+        assert_eq!((zbuf_izi(1.0 / 150.0), zbuf_izi(1.0 / 150.1)), (218, 218));
+        assert_eq!(centre(&[([150.0, 0.0, 0.0], 1), ([150.1, 0.0, 0.0], 2)]), [0, 255, 0]);
+        assert_eq!(centre(&[([150.1, 0.0, 0.0], 1), ([150.0, 0.0, 0.0], 2)]), [0, 255, 0]);
+        assert_eq!(centre(&[([140.0, 0.0, 0.0], 1), ([150.0, 0.0, 0.0], 2)]), [255, 0, 0]);
     }
 
     #[test]

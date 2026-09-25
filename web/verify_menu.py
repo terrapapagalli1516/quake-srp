@@ -116,11 +116,12 @@ with sync_playwright() as p:
     key("Escape")
     check("Esc on Multiplayer returns to Main", scr() == MAIN)
 
-    # 2c. Help pages; Quit prompt answers N.
-    key("ArrowDown", 3); key("Enter")
+    # 2c. Help pages; Quit prompt answers N. (Every menu keeps its own cursor,
+    # menu.c's m_main_cursor & co: Esc from Multiplayer left Main on row 1.)
+    key("ArrowDown", 2); key("Enter")
     check("Help opens", scr() == HELP)
     key("ArrowRight", 2); key("Escape")
-    key("ArrowDown", 4); key("Enter")
+    key("ArrowDown", 1); key("Enter")   # Main still on Help (row 3): Quit
     check("Quit raises the confirm prompt", scr() == QUIT)
     key("n")
     check("N answers the Quit prompt", scr() == MAIN and vis() == 1)
@@ -210,9 +211,9 @@ with sync_playwright() as p:
     key("Escape")
     check("Esc on Video returns to Options", scr() == OPTIONS)
 
-    # Go to console (row 1) opens the drop-down console. (Esc from Video put
-    # the Options cursor back on row 0.)
-    key("ArrowDown", 1)
+    # Go to console (row 1) opens the drop-down console. (Esc from Video left
+    # options_cursor on Video Options, row 12: down past Web extras wraps to 1.)
+    key("ArrowDown", 3)
     key("Enter")
     check("Go to console opens the console",
           pg.evaluate("exp.console_visible()") == 1 and vis() == 0)
@@ -244,8 +245,9 @@ with sync_playwright() as p:
     lum2 = pg.evaluate(grab_lum)
     check("gamma 0.6 visibly brightens the frame", lum2 > lum1 * 1.10,
           f"mean {lum1:.1f} -> {lum2:.1f}")
-    key("Escape"); key("ArrowDown", 2); key("Enter")
-    key("ArrowDown", 4); key("ArrowLeft", 8)
+    # The menu reopens on "Options", and Options on Brightness (kept cursors).
+    key("Escape"); key("Enter")
+    key("ArrowLeft", 8)
     key("Escape"); key("Escape")
     time.sleep(0.3)
     lum3 = pg.evaluate(grab_lum)
@@ -265,8 +267,8 @@ with sync_playwright() as p:
         x1, y1 = pg.evaluate("[exp.listener_x(), exp.listener_y()]")
         return ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
     d_run = walk_dist(1.0)
-    key("Escape"); key("ArrowDown", 2); key("Enter")
-    key("ArrowDown", 8); key("ArrowRight")        # Always Run off
+    key("Escape"); key("Enter")                   # Options, on Brightness (4)
+    key("ArrowDown", 4); key("ArrowRight")        # Always Run off
     key("Escape"); key("Escape")
     turn_around()
     d_walk = walk_dist(1.0)
@@ -278,8 +280,8 @@ with sync_playwright() as p:
     pg.evaluate("exp.mouse_move(0, 300)")
     p1 = pg.evaluate("exp.player_pitch()")
     check("mouse-down looks down by default", p1 > p0, f"{p0:.1f} -> {p1:.1f}")
-    key("Escape"); key("ArrowDown", 2); key("Enter")
-    key("ArrowDown", 9); key("ArrowRight")        # Invert Mouse on
+    key("Escape"); key("Enter")                   # Options, on Always Run (8)
+    key("ArrowDown"); key("ArrowRight")           # Invert Mouse on
     key("Escape"); key("Escape")
     pg.evaluate("exp.mouse_move(0, 300)")
     p2 = pg.evaluate("exp.player_pitch()")
@@ -288,8 +290,8 @@ with sync_playwright() as p:
     # LOOKSPRING: pointer unlock recentres the pitch (the page calls
     # pointer_unlocked from pointerlockchange; headless can't lock, so drive
     # the same hook directly).
-    key("Escape"); key("ArrowDown", 2); key("Enter")
-    key("ArrowDown", 10); key("ArrowRight")       # Lookspring on
+    key("Escape"); key("Enter")                   # Options, on Invert Mouse (9)
+    key("ArrowDown"); key("ArrowRight")           # Lookspring on
     key("Escape"); key("Escape")
     pg.evaluate("exp.mouse_move(0, -400)")        # look well off-centre
     # (Invert Mouse is still ON from the previous check, so the sign is
@@ -302,8 +304,8 @@ with sync_playwright() as p:
           f"{pp:.1f} -> {pr:.1f}")
 
     # REBIND: Customize controls really rebinds +forward (row 3) to 'o'.
-    key("Escape"); key("ArrowDown", 2); key("Enter")
-    key("Enter")                                  # Customize controls
+    key("Escape"); key("Enter")                   # Options, on Lookspring (10)
+    key("ArrowDown", 4); key("Enter")             # past Web extras to Customize controls
     key("ArrowDown", 3); key("Enter")             # grab on +forward
     pg.keyboard.press("o"); time.sleep(0.1)
     check("the grab bound the new key", pg.evaluate("exp.menu_bind_grabbing()") == 0)
@@ -317,7 +319,7 @@ with sync_playwright() as p:
     check("the old key was unbound by the two-key rule", d_old < 20, f"{d_old:.0f}u")
 
     # SAVE opens in-game; Enter emits SaveSlot (host no-op) and closes.
-    key("Escape"); key("Enter")                   # menu -> SinglePlayer
+    key("Escape"); key("ArrowUp", 2); key("Enter")  # Main (on Options) -> SinglePlayer
     key("ArrowDown", 2); key("Enter")
     check("Save opens with a game running", scr() == SAVE)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_save.png"))

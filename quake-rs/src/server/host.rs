@@ -100,13 +100,6 @@ pub(super) fn set_sv_gravity(v: f32) {
     SV_GRAVITY_CVAR.with(|g| g.set(v));
 }
 
-/// Back to the default "800" for a fresh server. The C cvar outlives a map,
-/// but id1's worldspawn sets it on every map, so this only matters to progs
-/// that never set it (the synthetic test progs).
-pub(super) fn reset_sv_gravity() {
-    set_sv_gravity(SV_GRAVITY);
-}
-
 // ---------------------------------------------------------------------------
 // Deferred level change (PF_changelevel).
 //
@@ -314,8 +307,8 @@ impl Server {
             buttons: 0,
             impulse: 0,
         };
-        let _ = self.client_frame(&cmd, SETTLE_FRAMETIME);
-        let _ = self.client_frame(&cmd, SETTLE_FRAMETIME);
+        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
+        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
     }
 
     /// `SV_SaveSpawnparms` for the local client: set the QuakeC `self` global to

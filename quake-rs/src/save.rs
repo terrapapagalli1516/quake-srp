@@ -488,8 +488,8 @@ impl Server {
         // fprintf (f, "%s\n", sv.name);
         out.push_str(&self.map_name);
         out.push('\n');
-        // fprintf (f, "%f\n", sv.time);
-        out.push_str(&fmt_f(self.time()));
+        // fprintf (f, "%f\n", sv.time); -- sv.time is a double
+        out.push_str(&format!("{:.6}", self.sv_time()));
         out.push('\n');
         // the 64 light styles ("m" when the C's sv.lightstyles[i] is NULL).
         for i in 0..MAX_LIGHTSTYLES {
@@ -655,10 +655,11 @@ impl Server {
             server.vm.edict_fields.truncate(n * ef);
         }
 
-        // sv.time = time; (the globals block may have set the `time` global
-        // already — the header value is authoritative, exactly like the C
-        // assigning sv.time after the loop.)
-        server.vm.gset_float("time", sg.time);
+        // sv.time = time; (`float time`, read by fscanf "%f": the double
+        // clock restarts from that float. The globals block may have set the
+        // `time` global already; the port sets it to the header's value, the
+        // float every `pr_global_struct->time = sv.time` would store.)
+        server.set_sv_time(f64::from(sg.time));
 
         // svs.clients->spawn_parms[i] = spawn_parms[i];
         server.client_spawn_parms = sg.spawn_parms;
@@ -1026,7 +1027,7 @@ mod tests {
         let mut s = server_with(rich_progs());
         s.set_map_name("maps/e1m3.bsp"); // qualified form normalises to bare
         s.set_skill(2.0);
-        s.vm.gset_float("time", 33.5);
+        s.set_sv_time(33.5);
         s.client_spawn_parms[0] = 1.0;
         s.client_spawn_parms[3] = 25.0;
         push_lightstyle(0, "m".into());
@@ -1187,6 +1188,8 @@ mod tests {
         s.set_map_name("e1m1");
         let p = s.vm.spawn();
         s.vm.ent_set_string(p, "classname", "player");
+        let saved = 1_234.567_890_123_f64;
+        s.set_sv_time(saved);
         let text = s.write_savegame();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "5", "version line");
@@ -1197,7 +1200,14 @@ mod tests {
         }
         assert_eq!(lines[18], "1", "current_skill (default medium)");
         assert_eq!(lines[19], "e1m1", "sv.name");
-        assert!(lines[20].contains('.'), "sv.time is %f");
+        // fprintf("%f\n", sv.time) of the double (the float would print
+        // 1234.567871).
+        assert_eq!(lines[20], "1234.567890", "sv.time is %f of the double");
+        // Host_Loadgame_f reads it with fscanf("%f") into `float time`, and
+        // `sv.time = time`: the clock restarts from that float.
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &text).expect("loads");
+        assert_eq!(s2.sv_time(), f64::from(saved as f32));
+        assert_eq!(s2.vm.gget_float("time"), saved as f32, "the QC global is its float");
         // 64 lightstyles then the globals block opener.
         assert_eq!(lines[21 + MAX_LIGHTSTYLES], "{", "globals block after styles");
     }

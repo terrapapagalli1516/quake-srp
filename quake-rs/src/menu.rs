@@ -513,8 +513,37 @@ pub enum MenuAction {
     ResolutionChanged,
 }
 
+/// menu.c's cursors: one file static per menu, never reset on entering its
+/// screen (no `M_Menu_*_f` touches one), so each menu keeps its place: Escape
+/// from Options lands on "Options" in the main menu, Load after a load opens
+/// on the slot just loaded. Load and Save share `load_cursor`. The Help and
+/// Quit screens have none. All are 0 at program start ([`Menu::reset_nav`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Cursors {
+    /// `m_main_cursor`.
+    main: usize,
+    /// `m_singleplayer_cursor`.
+    singleplayer: usize,
+    /// `load_cursor`, the Load and Save screens'.
+    load: usize,
+    /// `m_multiplayer_cursor`.
+    multiplayer: usize,
+    /// `options_cursor`.
+    options: usize,
+    /// `keys_cursor`.
+    keys: usize,
+    /// `vid_line` (vid_dos.c / vid_win.c, a static that keeps its place too).
+    /// id's starts on the list's first line, which is the live mode in a
+    /// default DOS setup; the port's list is its own, so the first visit opens
+    /// on the live mode ([`Menu::res_preset`]) and later ones where the player
+    /// left it. None until that first visit.
+    video: Option<usize>,
+    /// PORT SCREEN: the Web extras page's, kept like `options_cursor`.
+    extras: usize,
+}
+
 /// The keyboard-driven main-menu engine: the visible flag, the current screen,
-/// and the cursor index within it. A port of menu.c's `m_state` + the
+/// and each screen's cursor. A port of menu.c's `m_state` + the
 /// `m_*_cursor` globals, scoped to an instance rather than file-statics.
 ///
 /// The host calls [`open`](Menu::open)/[`close`](Menu::close)/[`toggle`](Menu::toggle)
@@ -529,8 +558,9 @@ pub struct Menu {
     pub visible: bool,
     /// The screen currently displayed.
     screen: MenuScreen,
-    /// The highlighted item index on the current screen (`0..item_count`).
-    cursor: usize,
+    /// Each screen's cursor (menu.c's `m_main_cursor`, `options_cursor`, ...),
+    /// kept while the player visits other screens.
+    cursors: Cursors,
     /// Index into [`RESOLUTION_PRESETS`] of the live video mode (`vid_modenum`):
     /// what the Video Options list marks as current and opens its cursor on.
     /// The host keeps it synced to the real framebuffer
@@ -628,7 +658,7 @@ impl Menu {
         Menu {
             visible: false,
             screen: MenuScreen::Main,
-            cursor: 0,
+            cursors: Cursors::default(),
             res_preset: 0,
             viewsize: VIEWSIZE_DEFAULT,
             sensitivity: SENS_DEFAULT,
@@ -722,9 +752,37 @@ impl Menu {
         self.screen
     }
 
-    /// The highlighted item index on the current screen.
+    /// The highlighted item index on the current screen (0 on Help and Quit,
+    /// which have none).
     pub fn cursor(&self) -> usize {
-        self.cursor
+        let c = &self.cursors;
+        match self.screen {
+            MenuScreen::Main => c.main,
+            MenuScreen::SinglePlayer => c.singleplayer,
+            MenuScreen::Load | MenuScreen::Save => c.load,
+            MenuScreen::Multiplayer => c.multiplayer,
+            MenuScreen::Options => c.options,
+            MenuScreen::Keys => c.keys,
+            MenuScreen::Video => c.video.unwrap_or(self.res_preset),
+            MenuScreen::Extras => c.extras,
+            MenuScreen::Help | MenuScreen::Quit => 0,
+        }
+    }
+
+    /// Put the current screen's cursor on item `i` (no-op on Help and Quit).
+    fn set_cursor(&mut self, i: usize) {
+        let c = &mut self.cursors;
+        match self.screen {
+            MenuScreen::Main => c.main = i,
+            MenuScreen::SinglePlayer => c.singleplayer = i,
+            MenuScreen::Load | MenuScreen::Save => c.load = i,
+            MenuScreen::Multiplayer => c.multiplayer = i,
+            MenuScreen::Options => c.options = i,
+            MenuScreen::Keys => c.keys = i,
+            MenuScreen::Video => c.video = Some(i),
+            MenuScreen::Extras => c.extras = i,
+            MenuScreen::Help | MenuScreen::Quit => {}
+        }
     }
 
     /// The current Help page index (`0..NUM_HELP_PAGES`).
@@ -732,26 +790,26 @@ impl Menu {
         self.help_page
     }
 
-    /// Open the menu on the main screen (`M_Menu_Main_f`): show it and reset to the
-    /// top-level screen with the cursor on the first item. Plays the enter sound
-    /// (`m_entersound = true` in the C).
+    /// Open the menu on the main screen (`M_Menu_Main_f`): show it on the
+    /// top-level screen, its cursor where the player left it (`m_main_cursor`).
+    /// Plays the enter sound (`m_entersound = true` in the C).
     pub fn open(&mut self) {
         self.visible = true;
         self.screen = MenuScreen::Main;
-        self.cursor = 0;
         self.bind_grab = false;
         self.snd(MenuSound::Menu2);
     }
 
-    /// Close the menu (`key_dest = key_game`). Leaves the screen/cursor as they
-    /// were so a later `open` resets them.
+    /// Close the menu (`key_dest = key_game`). Leaves the screen and cursors as
+    /// they were; a later `open` returns to the main screen.
     pub fn close(&mut self) {
         self.visible = false;
     }
 
     /// Reset the menu's NAVIGATION to boot state — closed, on the Main screen,
-    /// cursor on the first item, no Help page / Quit return / bind grab, queued
-    /// sounds dropped — while KEEPING every user choice: the Options cvars
+    /// every menu's cursor on its first item (menu.c's statics at program
+    /// start), no Help page / Quit return / bind grab, queued sounds dropped —
+    /// while KEEPING every user choice: the Options cvars
     /// (Screen size, gamma, sensitivity, volume, CD volume, Always Run, Invert
     /// Mouse, lookspring, lookstrafe), the Web extras and the whole key-bindings table. In
     /// WinQuake a map start / New Game only restarts the server: cvars and
@@ -763,10 +821,14 @@ impl Menu {
     /// Load/Save slot comments (`set_save_comments`) and the game-active gate
     /// (refreshed every `step`) — survive too: they reflect engine state, not
     /// navigation.
+    ///
+    /// The cursors are a program start's: in the C a `map`, New Game or load
+    /// keeps them, but the host's boot shares this reset (see AUDIT.md,
+    /// "Second review fixes").
     pub fn reset_nav(&mut self) {
         self.visible = false;
         self.screen = MenuScreen::Main;
-        self.cursor = 0;
+        self.cursors = Cursors::default();
         self.help_page = 0;
         self.quit_prev = MenuScreen::Main;
         self.bind_grab = false;
@@ -782,7 +844,6 @@ impl Menu {
         self.visible = true;
         self.screen = MenuScreen::Help;
         self.help_page = 0;
-        self.cursor = 0;
         self.bind_grab = false;
         self.snd(MenuSound::Menu2);
     }
@@ -800,7 +861,6 @@ impl Menu {
         } else if self.screen != MenuScreen::Main {
             // M_ToggleMenu_f -> M_Menu_Main_f (m_entersound = true).
             self.screen = MenuScreen::Main;
-            self.cursor = 0;
             self.bind_grab = false;
             self.snd(MenuSound::Menu2);
             MenuAction::Back
@@ -832,21 +892,20 @@ impl Menu {
         }
         let n = self.screen.item_count();
         if n == 0 {
-            self.cursor = 0;
             return;
         }
         // Every M_*_Key cursor move plays misc/menu1.wav.
         self.snd(MenuSound::Menu1);
         let n_i = n as i32;
         // Wrap into 0..n even for large / negative deltas.
-        let next = (self.cursor as i32 + delta).rem_euclid(n_i);
-        self.cursor = next as usize;
+        let next = (self.cursor() as i32 + delta).rem_euclid(n_i);
+        self.set_cursor(next as usize);
     }
 
     /// Activate the highlighted item (Enter / `K_ENTER`).
     ///
     /// * Main > Single Player / Multiplayer / Options / Help: switch screen,
-    ///   cursor reset ([`MenuAction::None`]).
+    ///   on that screen's own cursor ([`MenuAction::None`]).
     /// * Main > Quit: raise the Quit confirm prompt ([`MenuAction::None`]).
     /// * SinglePlayer > New Game: [`MenuAction::NewGame`] and close the menu.
     /// * SinglePlayer > Load / Save: open the slot lists (`M_Menu_Load_f` /
@@ -878,29 +937,25 @@ impl Menu {
             MenuScreen::Main => {
                 // M_Main_Key K_ENTER: m_entersound = true for every item.
                 self.snd(MenuSound::Menu2);
-                match self.cursor {
+                match self.cursor() {
                     0 => {
                         // M_Menu_SinglePlayer_f
                         self.screen = MenuScreen::SinglePlayer;
-                        self.cursor = 0;
                         MenuAction::None
                     }
                     1 => {
                         // M_Menu_MultiPlayer_f
                         self.screen = MenuScreen::Multiplayer;
-                        self.cursor = 0;
                         MenuAction::None
                     }
                     2 => {
                         // M_Menu_Options_f
                         self.screen = MenuScreen::Options;
-                        self.cursor = 0;
                         MenuAction::None
                     }
                     3 => {
                         // M_Menu_Help_f
                         self.screen = MenuScreen::Help;
-                        self.cursor = 0;
                         self.help_page = 0;
                         MenuAction::None
                     }
@@ -912,7 +967,7 @@ impl Menu {
                     _ => MenuAction::None,
                 }
             }
-            MenuScreen::SinglePlayer => match self.cursor {
+            MenuScreen::SinglePlayer => match self.cursor() {
                 0 => {
                     // New Game: `if (sv.active) if (!SCR_ModalMessage("Are
                     // you sure you want to\nstart a new game?\n")) break;` —
@@ -928,7 +983,6 @@ impl Menu {
                     // closes before M_Draw can fire it — silent.)
                     self.close();
                     self.screen = MenuScreen::Main;
-                    self.cursor = 0;
                     MenuAction::NewGame
                 }
                 1 => {
@@ -936,7 +990,6 @@ impl Menu {
                     // slot comments are whatever set_save_comments put there).
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Load;
-                    self.cursor = 0;
                     MenuAction::None
                 }
                 2 => {
@@ -948,7 +1001,6 @@ impl Menu {
                     self.snd(MenuSound::Menu2);
                     if self.game_active {
                         self.screen = MenuScreen::Save;
-                        self.cursor = 0;
                     }
                     MenuAction::None
                 }
@@ -957,23 +1009,21 @@ impl Menu {
             MenuScreen::Load => {
                 // M_Load_Key K_ENTER: menu2 first, then return unless loadable.
                 self.snd(MenuSound::Menu2);
-                if !self.slot_loadable(self.cursor) {
+                if !self.slot_loadable(self.cursor()) {
                     return MenuAction::None;
                 }
                 // m_state = m_none; key_dest = key_game; Cbuf "load sN".
-                let slot = self.cursor;
+                let slot = self.cursor();
                 self.close();
                 self.screen = MenuScreen::Main;
-                self.cursor = 0;
                 MenuAction::LoadSlot(slot)
             }
             MenuScreen::Save => {
                 // M_Save_Key K_ENTER (no sound in the C): m_state = m_none;
                 // key_dest = key_game; Cbuf "save sN".
-                let slot = self.cursor;
+                let slot = self.cursor();
                 self.close();
                 self.screen = MenuScreen::Main;
-                self.cursor = 0;
                 MenuAction::SaveSlot(slot)
             }
             MenuScreen::Multiplayer => {
@@ -984,29 +1034,28 @@ impl Menu {
                 self.snd(MenuSound::Menu2);
                 MenuAction::None
             }
-            MenuScreen::Options => match self.cursor {
+            MenuScreen::Options => match self.cursor() {
                 ROW_CONTROLS => {
                     // M_Menu_Keys_f
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Keys;
-                    self.cursor = 0;
                     self.bind_grab = false;
                     MenuAction::None
                 }
                 ROW_VIDEO => {
-                    // M_Menu_Video_f: open the mode list with the cursor on the
-                    // current mode (vid_win.c keeps vid_line on the live mode).
+                    // M_Menu_Video_f: the mode list, on vid_line (the live mode
+                    // on the first visit; see `Cursors::video`).
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Video;
-                    self.cursor = self.res_preset.min(RESOLUTION_PRESETS.len() - 1);
+                    let line = self.cursor().min(RESOLUTION_PRESETS.len() - 1);
+                    self.set_cursor(line);
                     MenuAction::None
                 }
                 ROW_EXTRAS => {
                     // PORT ROW: open the Web extras screen, entered like
-                    // M_Menu_Video_f (m_entersound) with the cursor on top.
+                    // M_Menu_Video_f (m_entersound), on its own kept cursor.
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Extras;
-                    self.cursor = 0;
                     MenuAction::None
                 }
                 ROW_CONSOLE => {
@@ -1035,9 +1084,9 @@ impl Menu {
                 // M_Keys_Key K_ENTER: menu2; unbind first when the row already
                 // shows two keys, then grab the next key.
                 self.snd(MenuSound::Menu2);
-                let keys = self.find_keys_for_command(self.cursor);
+                let keys = self.find_keys_for_command(self.cursor());
                 if keys[1].is_some() {
-                    self.unbind_command(self.cursor);
+                    self.unbind_command(self.cursor());
                 }
                 self.bind_grab = true;
                 MenuAction::None
@@ -1046,7 +1095,7 @@ impl Menu {
                 // VID_MenuKey K_ENTER: menu1 (NOT menu2) + VID_SetMode on the
                 // highlighted mode line.
                 self.snd(MenuSound::Menu1);
-                self.res_preset = self.cursor.min(RESOLUTION_PRESETS.len() - 1);
+                self.res_preset = self.cursor().min(RESOLUTION_PRESETS.len() - 1);
                 MenuAction::ResolutionChanged
             }
             MenuScreen::Extras => {
@@ -1063,7 +1112,6 @@ impl Menu {
                 // y/Y quits — but this port has always accepted Enter as Yes.)
                 self.close();
                 self.screen = MenuScreen::Main;
-                self.cursor = 0;
                 MenuAction::Closed
             }
         }
@@ -1103,21 +1151,18 @@ impl Menu {
             | MenuScreen::Help => {
                 // M_*_Key K_ESCAPE -> M_Menu_Main_f (m_entersound = true).
                 self.screen = MenuScreen::Main;
-                self.cursor = 0;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
             MenuScreen::Load | MenuScreen::Save => {
                 // M_Load_Key / M_Save_Key K_ESCAPE -> M_Menu_SinglePlayer_f.
                 self.screen = MenuScreen::SinglePlayer;
-                self.cursor = 0;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
             MenuScreen::Keys => {
                 // M_Keys_Key K_ESCAPE -> M_Menu_Options_f (m_entersound).
                 self.screen = MenuScreen::Options;
-                self.cursor = 0;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
@@ -1125,7 +1170,6 @@ impl Menu {
                 // VID_MenuKey K_ESCAPE: menu1, then M_Menu_Options_f (menu2).
                 self.snd(MenuSound::Menu1);
                 self.screen = MenuScreen::Options;
-                self.cursor = 0;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
@@ -1133,7 +1177,6 @@ impl Menu {
                 // M_Menu_Options_f (menu2), back on the row that opened it —
                 // the C's options_cursor is a static that keeps its place.
                 self.screen = MenuScreen::Options;
-                self.cursor = ROW_EXTRAS;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
@@ -1184,7 +1227,6 @@ impl Menu {
             self.new_game_confirm = false;
             self.close();
             self.screen = MenuScreen::Main;
-            self.cursor = 0;
             return MenuAction::NewGame;
         }
         if self.screen != MenuScreen::Quit {
@@ -1192,7 +1234,6 @@ impl Menu {
         }
         self.close();
         self.screen = MenuScreen::Main;
-        self.cursor = 0;
         MenuAction::Closed
     }
 
@@ -1264,7 +1305,7 @@ impl Menu {
         // direction, like M_AdjustSliders' checkbox cases.
         if self.screen == MenuScreen::Extras {
             self.snd(MenuSound::Menu3);
-            if let Some(e) = WEB_EXTRAS.get(self.cursor).map(|w| w.extra) {
+            if let Some(e) = WEB_EXTRAS.get(self.cursor()).map(|w| w.extra) {
                 let on = self.extras.get(e);
                 self.extras.set(e, !on);
             }
@@ -1277,7 +1318,7 @@ impl Menu {
         // cursor sits on an action row the switch below ignores.
         self.snd(MenuSound::Menu3);
         let d = step as f32;
-        match self.cursor {
+        match self.cursor() {
             ROW_SCREENSIZE => {
                 // scr_viewsize.value += dir * 10, clamped 30..=120.
                 self.viewsize =
@@ -1460,7 +1501,7 @@ impl Menu {
         }
         self.snd(MenuSound::Menu1);
         if keynum != K_ESCAPE && keynum != b'`' {
-            let cmd = self.cursor.min(NUM_BINDNAMES - 1);
+            let cmd = self.cursor().min(NUM_BINDNAMES - 1);
             self.bindings[keynum as usize] = Some(cmd as u8);
         }
         self.bind_grab = false;
@@ -1475,7 +1516,7 @@ impl Menu {
             return;
         }
         self.snd(MenuSound::Menu2);
-        self.unbind_command(self.cursor.min(NUM_BINDNAMES - 1));
+        self.unbind_command(self.cursor().min(NUM_BINDNAMES - 1));
     }
 
     /// The [`BINDNAMES`] command index bound to `keynum`, if any — the host's
@@ -1826,7 +1867,7 @@ fn draw_menu_inner(
 
     // The animated cursor at (54, 32 + cursor*20).
     if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
-        let cy = 32.0 + menu.cursor as f32 * 20.0;
+        let cy = 32.0 + menu.cursor() as f32 * 20.0;
         blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
     }
 }
@@ -1929,7 +1970,7 @@ fn draw_options_screen(
         }
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
-        let cy = OPTIONS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
+        let cy = OPTIONS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
         draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
@@ -1976,9 +2017,9 @@ fn draw_extras_screen(
         let on = checkbox_text(menu.extras.get(row.extra));
         m_print(image, cc, OPTIONS_WIDGET_X, y, on, scale, ox, oy, palette);
     }
-    let cy = EXTRAS_ROW_Y0 + menu.cursor as f32 * OPTIONS_ROW_STEP;
+    let cy = EXTRAS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
-    if let Some(row) = WEB_EXTRAS.get(menu.cursor) {
+    if let Some(row) = WEB_EXTRAS.get(menu.cursor()) {
         for (i, line) in extras_help_lines(row).iter().enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
             m_print(image, cc, centred(line), y, line, scale, ox, oy, palette);
@@ -2026,7 +2067,7 @@ fn draw_load_save_screen(
             let row = if text.is_empty() { UNUSED_SLOT } else { text };
             m_print(image, cc, 16.0, ry, row, scale, ox, oy, palette);
         }
-        let cy = 32.0 + menu.cursor as f32 * 8.0;
+        let cy = 32.0 + menu.cursor() as f32 * 8.0;
         draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
@@ -2056,7 +2097,7 @@ fn draw_multiplayer_screen(
         blit_qpic_at(image, l, 72.0, 32.0, scale, ox, oy, palette);
     }
     if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
-        let cy = 32.0 + menu.cursor as f32 * 20.0;
+        let cy = 32.0 + menu.cursor() as f32 * 20.0;
         blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
     }
     if let Some(cc) = conchars {
@@ -2122,7 +2163,7 @@ fn draw_keys_screen(
             }
         }
     }
-    let cy = 48.0 + menu.cursor as f32 * 8.0;
+    let cy = 48.0 + menu.cursor() as f32 * 8.0;
     if menu.bind_grabbing() {
         // M_DrawCharacter (130, 48 + keys_cursor*8, '=').
         draw_char_scaled(image, cc, 130.0, cy, b'=', scale, ox, oy, palette);
@@ -2167,7 +2208,7 @@ fn draw_video_screen(
             m_print(image, cc, 16.0, y, &row, scale, ox, oy, palette);
         }
     }
-    let cy = 36.0 + menu.cursor as f32 * 8.0;
+    let cy = 36.0 + menu.cursor() as f32 * 8.0;
     draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
     // single column's foot.
@@ -2322,6 +2363,164 @@ mod tests {
 
     // -- main menu (Menu engine + draw_menu + draw_string) ------------------
 
+    /// Press Down `n` times.
+    fn down(m: &mut Menu, n: usize) {
+        for _ in 0..n {
+            m.move_cursor(1);
+        }
+    }
+
+    #[test]
+    fn each_menu_keeps_its_cursor_like_menu_cs_statics() {
+        // menu.c: m_main_cursor, m_singleplayer_cursor, options_cursor, ... are
+        // file statics no M_Menu_*_f resets, so Escape from Options lands on
+        // "Options" and every screen reopens where the player left it.
+        let mut m = Menu::new();
+        m.open();
+        down(&mut m, 2);
+        m.select(); // Options
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, 0), "first visit: row 0");
+        down(&mut m, 5);
+        m.cancel();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 2), "Escape lands on Options");
+        m.select();
+        assert_eq!(m.cursor(), 5, "options_cursor kept");
+        // Customize controls: keys_cursor, and back on Customize.
+        m.move_cursor(-5);
+        m.select();
+        assert_eq!(m.screen(), MenuScreen::Keys);
+        down(&mut m, 4);
+        m.cancel();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_CONTROLS));
+        m.select();
+        assert_eq!(m.cursor(), 4, "keys_cursor kept");
+        m.cancel();
+        // Web extras: its own cursor, kept like options_cursor.
+        m.move_cursor(-1); // row 0 -> 13, Web extras
+        m.select();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Extras, 0));
+        m.move_cursor(1);
+        m.cancel();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_EXTRAS));
+        m.select();
+        assert_eq!(m.cursor(), 1, "the Extras cursor kept");
+        m.cancel();
+        m.cancel();
+        // Single Player > Load: load_cursor, shared with Save.
+        m.move_cursor(-2);
+        m.select();
+        m.move_cursor(1);
+        m.select();
+        assert_eq!(m.screen(), MenuScreen::Load);
+        down(&mut m, 3);
+        m.cancel();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::SinglePlayer, 1), "back on Load");
+        m.set_game_active(true);
+        m.move_cursor(1);
+        m.select();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Save, 3), "Save shares load_cursor");
+        m.cancel();
+        m.cancel();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 0));
+        // Multiplayer: m_multiplayer_cursor.
+        m.move_cursor(1);
+        m.select();
+        m.move_cursor(2);
+        m.cancel();
+        m.select();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Multiplayer, 2));
+    }
+
+    #[test]
+    fn a_closed_menu_reopens_on_m_main_cursor() {
+        // Options > Go to console closes the menu (m_state = m_none); the next
+        // M_Menu_Main_f shows the main menu on "Options", and Options on the
+        // console row, as in the C.
+        let mut m = Menu::new();
+        m.open();
+        down(&mut m, 2);
+        m.select();
+        m.move_cursor(ROW_CONSOLE as i32);
+        assert_eq!(m.select(), MenuAction::OpenConsole);
+        assert!(!m.visible);
+        m.toggle();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 2));
+        m.select();
+        assert_eq!(m.cursor(), ROW_CONSOLE);
+        // Loading a slot closes the menu too; Load reopens on that slot.
+        let mut m = Menu::new();
+        m.set_save_comment(4, "start".into());
+        m.open();
+        m.select(); // Single Player
+        m.move_cursor(1);
+        m.select(); // Load
+        down(&mut m, 4);
+        assert_eq!(m.select(), MenuAction::LoadSlot(4));
+        m.open();
+        assert_eq!(m.cursor(), 0);
+        m.select();
+        assert_eq!(m.cursor(), 1, "Single Player on Load");
+        m.select();
+        assert_eq!(m.cursor(), 4, "Load on the slot just loaded");
+    }
+
+    #[test]
+    fn help_starts_on_page_0_and_quit_returns_to_the_screens_cursor() {
+        // M_Menu_Help_f sets help_page = 0; M_Menu_Quit_f touches no cursor.
+        let mut m = Menu::new();
+        m.open();
+        m.move_cursor(3);
+        m.select();
+        m.page(1);
+        m.page(1);
+        assert_eq!(m.help_page(), 2);
+        m.cancel();
+        assert_eq!(m.cursor(), 3, "back on Help");
+        m.select();
+        assert_eq!(m.help_page(), 0, "help_page = 0");
+        m.cancel();
+        m.move_cursor(-1);
+        m.select(); // Options
+        down(&mut m, 7);
+        m.open_quit();
+        assert_eq!(m.cursor(), 0, "the prompt has no cursor");
+        m.quit_no();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, 7));
+    }
+
+    #[test]
+    fn video_opens_on_the_live_mode_then_keeps_vid_line() {
+        let mut m = Menu::new();
+        m.sync_resolution(RESOLUTION_PRESETS[4].0, RESOLUTION_PRESETS[4].1);
+        m.open();
+        m.move_cursor(2);
+        m.select();
+        m.move_cursor(ROW_VIDEO as i32);
+        m.select();
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Video, 4), "first visit: the live mode");
+        m.move_cursor(-3);
+        m.cancel();
+        m.sync_resolution(RESOLUTION_PRESETS[6].0, RESOLUTION_PRESETS[6].1);
+        m.select();
+        assert_eq!(m.cursor(), 1, "vid_line keeps its place");
+    }
+
+    #[test]
+    fn reset_nav_is_a_program_start_for_the_cursors() {
+        let mut m = Menu::new();
+        m.open();
+        down(&mut m, 2);
+        m.select();
+        down(&mut m, 5);
+        m.cancel();
+        m.reset_nav();
+        m.open();
+        assert_eq!(m.cursor(), 0);
+        down(&mut m, 2);
+        m.select();
+        assert_eq!(m.cursor(), 0);
+    }
+
     #[test]
     fn menu_move_cursor_wraps_within_each_screen() {
         let mut m = Menu::new();
@@ -2340,7 +2539,7 @@ mod tests {
         assert_eq!(m.cursor(), 4);
 
         // On the single-player screen the wrap is modulo 3.
-        m.cursor = 0;
+        m.set_cursor(0);
         let action = m.select(); // Main>Single Player
         assert_eq!(action, MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
@@ -2349,7 +2548,7 @@ mod tests {
             assert_eq!(m.cursor(), expect);
         }
         // A large delta still wraps correctly.
-        m.cursor = 0;
+        m.set_cursor(0);
         m.move_cursor(7); // 7 % 3 = 1
         assert_eq!(m.cursor(), 1);
         m.move_cursor(-7); // back to 0
@@ -2362,13 +2561,13 @@ mod tests {
         m.open();
 
         // Main > Single Player goes to the submenu, no host action.
-        m.cursor = 0;
+        m.set_cursor(0);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
         assert!(m.visible);
 
         // SinglePlayer > New Game returns NewGame and closes the menu.
-        m.cursor = 0;
+        m.set_cursor(0);
         assert_eq!(m.select(), MenuAction::NewGame);
         assert!(!m.visible);
 
@@ -2389,7 +2588,7 @@ mod tests {
 
         // Quit (item 4 on Main) raises the confirm prompt (does NOT close yet).
         m.open();
-        m.cursor = 4;
+        m.set_cursor(4);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Quit, "Quit raises the confirm prompt");
         assert!(m.visible);
@@ -2398,7 +2597,7 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
         // Re-raise it and answer "Yes" via select (Enter): closes the menu.
-        m.cursor = 4;
+        m.set_cursor(4);
         m.select();
         assert_eq!(m.screen(), MenuScreen::Quit);
         assert_eq!(m.select(), MenuAction::Closed, "Enter on the Quit prompt quits");
@@ -2408,7 +2607,7 @@ mod tests {
         // (M_Menu_MultiPlayer_f); Enter there does nothing (no net drivers,
         // like the C), and Escape returns to Main.
         m.open();
-        m.cursor = 1;
+        m.set_cursor(1);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Multiplayer, "item 1 enters Multiplayer");
         assert!(m.visible);
@@ -2418,7 +2617,7 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Main);
 
         // Help (item 3) now opens the Help screen.
-        m.cursor = 3;
+        m.set_cursor(3);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Help, "item 3 enters Help");
         assert_eq!(m.help_page(), 0, "Help opens on page 0");
@@ -2429,7 +2628,7 @@ mod tests {
 
         // Main item 2 (Options) switches to the Options screen.
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Options, "item 2 enters Options");
         assert!(m.visible);
@@ -2497,7 +2696,7 @@ mod tests {
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
@@ -2506,7 +2705,7 @@ mod tests {
         assert_eq!(img.rgb[s_px], pal[5], "Options labels are M_Print (bronze)");
         // Video Options: the current mode white, the others bronze.
         m.sync_resolution(640, 400);
-        m.cursor = ROW_VIDEO;
+        m.set_cursor(ROW_VIDEO);
         m.select();
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
@@ -2611,7 +2810,7 @@ mod tests {
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options, cursor row 0
         let px = 32 * 320 + 200;
         let mut off = Image::new(320, 200, [0, 0, 0]);
@@ -2629,7 +2828,7 @@ mod tests {
         let mut m = Menu::new();
         m.open();
         // Main > Options (cursor 2) switches to the Options screen, no host action.
-        m.cursor = 2;
+        m.set_cursor(2);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Options);
         assert_eq!(m.cursor(), 0, "entering Options resets the cursor to the top row");
@@ -2660,9 +2859,9 @@ mod tests {
         // cycled render resolutions here; WinQuake keeps those in M_Video).
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
-        m.cursor = ROW_SCREENSIZE;
+        m.set_cursor(ROW_SCREENSIZE);
         assert_eq!(m.screen(), MenuScreen::Options);
         assert_eq!(m.viewsize(), 100.0, "default.cfg: viewsize 100");
         let mode = m.resolution();
@@ -2707,7 +2906,7 @@ mod tests {
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
         let knob_x = |m: &Menu| {
             let mut img = Image::new(320, 200, [0, 0, 0]);
@@ -2762,11 +2961,11 @@ mod tests {
     fn menu_adjust_clamps_mouse_and_volume() {
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
 
         // Mouse Speed row: default sensitivity 3 -> 1.0x multiplier.
-        m.cursor = ROW_MOUSESPEED;
+        m.set_cursor(ROW_MOUSESPEED);
         assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6);
         assert!((m.mouse_sensitivity() - 1.0).abs() < 1e-6, "default mouse is 1.0x");
         // Decreasing clamps at SENS_MIN (1), never below.
@@ -2782,7 +2981,7 @@ mod tests {
         assert!(m.mouse_sensitivity() > 1.0, "max sensitivity is more than default");
 
         // Sound Volume row: default 0.7.
-        m.cursor = ROW_SNDVOLUME;
+        m.set_cursor(ROW_SNDVOLUME);
         assert!((m.volume() - VOLUME_DEFAULT).abs() < 1e-6, "default volume is 0.7");
         for _ in 0..40 {
             m.adjust(-1);
@@ -2809,7 +3008,7 @@ mod tests {
 
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
         assert_eq!(m.screen(), MenuScreen::Options);
 
@@ -2912,7 +3111,7 @@ mod tests {
         // 13 + Web extras) and wrap.
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
         assert_eq!(MenuScreen::Options.item_count(), 14);
         assert_eq!(m.cursor(), 0);
@@ -2924,7 +3123,7 @@ mod tests {
         assert!(seen.iter().all(|&v| v), "every Options row must be reachable");
         assert_eq!(m.cursor(), 0, "a full lap returns to row 0");
         // A big positive delta wraps modulo 14.
-        m.cursor = 0;
+        m.set_cursor(0);
         m.move_cursor(43); // 43 % 14 = 1
         assert_eq!(m.cursor(), 1);
     }
@@ -2933,12 +3132,12 @@ mod tests {
     fn options_sliders_and_checkboxes_adjust_per_row() {
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
 
         // Brightness (gamma) row: matching the C `v_gamma -= dir*0.05`, RIGHT
         // brightens (gamma DOWN toward 0.5), LEFT dims (gamma UP toward 1.0).
-        m.cursor = ROW_BRIGHTNESS;
+        m.set_cursor(ROW_BRIGHTNESS);
         assert!((m.gamma() - GAMMA_DEFAULT).abs() < 1e-6);
         for _ in 0..40 {
             m.adjust(1);
@@ -2950,7 +3149,7 @@ mod tests {
         assert!((m.gamma() - GAMMA_MAX).abs() < 1e-6, "left clamps gamma at 1.0 (dimmest)");
 
         // CD Music Volume row: 0..=1.
-        m.cursor = ROW_CDVOLUME;
+        m.set_cursor(ROW_CDVOLUME);
         for _ in 0..40 {
             m.adjust(-1);
         }
@@ -2968,7 +3167,7 @@ mod tests {
             (ROW_LOOKSPRING, Menu::lookspring, false),
             (ROW_LOOKSTRAFE, Menu::lookstrafe, false),
         ] {
-            m.cursor = row;
+            m.set_cursor(row);
             assert_eq!(getter(&m), initial, "checkbox row {row} starts at its default");
             m.adjust(1);
             assert_eq!(getter(&m), !initial, "right toggles it");
@@ -2981,38 +3180,38 @@ mod tests {
     fn options_enter_actions_console_defaults_and_stubs() {
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
 
         // Go to console: closes the menu, returns OpenConsole.
-        m.cursor = ROW_CONSOLE;
+        m.set_cursor(ROW_CONSOLE);
         assert_eq!(m.select(), MenuAction::OpenConsole);
         assert!(!m.visible, "Go to console closes the menu");
 
         // Reset to defaults: exec default.cfg restores what that file sets
         // (viewsize/gamma/volume/sensitivity + the binds) and nothing else.
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
-        m.cursor = ROW_MOUSESPEED;
+        m.set_cursor(ROW_MOUSESPEED);
         m.adjust(1);
         m.adjust(1);
-        m.cursor = ROW_BRIGHTNESS;
+        m.set_cursor(ROW_BRIGHTNESS);
         m.adjust(1);
-        m.cursor = ROW_SNDVOLUME;
+        m.set_cursor(ROW_SNDVOLUME);
         m.adjust(-1);
-        m.cursor = ROW_CDVOLUME;
+        m.set_cursor(ROW_CDVOLUME);
         m.adjust(-1);
-        m.cursor = ROW_ALWAYSRUN;
+        m.set_cursor(ROW_ALWAYSRUN);
         m.adjust(1); // toggles OFF (Always Run defaults on in this port)
-        m.cursor = ROW_INVERTMOUSE;
+        m.set_cursor(ROW_INVERTMOUSE);
         m.adjust(1);
-        m.cursor = ROW_LOOKSPRING;
+        m.set_cursor(ROW_LOOKSPRING);
         m.adjust(1);
-        m.cursor = ROW_LOOKSTRAFE;
+        m.set_cursor(ROW_LOOKSTRAFE);
         m.adjust(1);
         assert!(m.sensitivity() != SENS_DEFAULT && !m.always_run());
-        m.cursor = ROW_DEFAULTS;
+        m.set_cursor(ROW_DEFAULTS);
         assert_eq!(m.select(), MenuAction::ResetDefaults);
         assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "sensitivity 3");
         assert!((m.gamma() - GAMMA_DEFAULT).abs() < 1e-6, "gamma 1.0");
@@ -3024,7 +3223,7 @@ mod tests {
 
         // Customize controls opens the Keys screen (M_Menu_Keys_f); Escape
         // returns to Options (M_Keys_Key K_ESCAPE -> M_Menu_Options_f).
-        m.cursor = ROW_CONTROLS;
+        m.set_cursor(ROW_CONTROLS);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Keys, "Customize controls enters Keys");
         assert_eq!(m.cancel(), MenuAction::Back);
@@ -3032,7 +3231,7 @@ mod tests {
 
         // Video Options opens the mode list (M_Menu_Video_f) with the cursor on
         // the current preset; Escape returns to Options (VID_MenuKey K_ESCAPE).
-        m.cursor = ROW_VIDEO;
+        m.set_cursor(ROW_VIDEO);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Video, "Video Options enters the mode list");
         assert_eq!(m.cursor(), m.res_preset, "video cursor starts on the current mode");
@@ -3041,7 +3240,7 @@ mod tests {
 
         // Enter on an analog row nudges it right (the C falls through to
         // M_AdjustSliders(1)).
-        m.cursor = ROW_SNDVOLUME;
+        m.set_cursor(ROW_SNDVOLUME);
         let before = m.volume();
         m.select();
         assert!(m.volume() > before, "Enter on Sound Volume nudges it up");
@@ -3055,9 +3254,9 @@ mod tests {
         assert_eq!(m.extras(), Extras::default(), "every extra defaults off");
         assert_eq!(m.extras().bits(), 0);
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
-        m.cursor = ROW_EXTRAS;
+        m.set_cursor(ROW_EXTRAS);
         m.take_sounds();
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Extras, "Web extras opens its screen");
@@ -3068,7 +3267,7 @@ mod tests {
         // with menu2 + menu3, like an Options checkbox row.
         let rows = &WEB_EXTRAS;
         for (i, e) in rows.iter().map(|r| r.extra).enumerate() {
-            m.cursor = i;
+            m.set_cursor(i);
             assert!(!m.extras().get(e));
             m.adjust(1);
             assert!(m.extras().get(e), "right turns {e:?} on");
@@ -3084,7 +3283,7 @@ mod tests {
         assert_eq!(m.extras(), Extras::default());
 
         // The cursor wraps over this build's rows (menu1 per move).
-        m.cursor = 0;
+        m.set_cursor(0);
         m.move_cursor(-1);
         assert_eq!(m.cursor(), rows.len() - 1, "up from the top wraps to the last row");
         m.move_cursor(1);
@@ -3093,7 +3292,7 @@ mod tests {
 
         // Escape: back to Options on the Web extras row (options_cursor keeps
         // its place in the C), with m_entersound.
-        m.cursor = 1;
+        m.set_cursor(1);
         m.adjust(1); // Show FPS on
         m.take_sounds();
         assert_eq!(m.cancel(), MenuAction::Back);
@@ -3102,7 +3301,7 @@ mod tests {
 
         // They are not default.cfg cvars: Reset to defaults keeps them, and
         // so does a navigation reset (re-boot / New Game).
-        m.cursor = ROW_DEFAULTS;
+        m.set_cursor(ROW_DEFAULTS);
         assert_eq!(m.select(), MenuAction::ResetDefaults);
         assert!(m.extras().show_fps, "Reset to defaults leaves the extras alone");
         m.reset_nav();
@@ -3173,7 +3372,7 @@ mod tests {
         // right-justified with id's labels ("Web extras" ends at x=184).
         let mut m = Menu::new();
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select();
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.0, &pal);
@@ -3184,7 +3383,7 @@ mod tests {
         // The Extras screen: plaque + OPTIONS title, a white header at y=32,
         // the rows from y=48 (bronze labels, "off" at x=220), the cursor at
         // x=200 while the 4 Hz blink shows it, the help lines under the list.
-        m.cursor = ROW_EXTRAS;
+        m.set_cursor(ROW_EXTRAS);
         m.select();
         let mut img = Image::new(320, 200, [0, 0, 0]);
         draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
@@ -3228,7 +3427,7 @@ mod tests {
         let mut m = Menu::new();
         m.open();
         // Main > Help.
-        m.cursor = 3;
+        m.set_cursor(3);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Help);
         assert_eq!(m.help_page(), 0);
@@ -3272,19 +3471,19 @@ mod tests {
         m.move_cursor(-1);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu1, MenuSound::Menu1]);
         // Entering a submenu plays menu2 (M_Main_Key K_ENTER latches it).
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         // Left/right adjust plays menu3 (M_AdjustSliders' unconditional
         // S_LocalSound) — even when the cursor sits on an action row.
-        m.cursor = ROW_SNDVOLUME;
+        m.set_cursor(ROW_SNDVOLUME);
         m.adjust(-1);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3]);
-        m.cursor = ROW_CONTROLS;
+        m.set_cursor(ROW_CONTROLS);
         m.adjust(1);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3], "menu3 plays on action rows too");
         // Enter on a slider row: m_entersound (menu2) AND M_AdjustSliders' menu3.
-        m.cursor = ROW_BRIGHTNESS;
+        m.set_cursor(ROW_BRIGHTNESS);
         m.select();
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
         // Escape back to Main: M_Menu_Main_f latches menu2.
@@ -3292,10 +3491,10 @@ mod tests {
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         // Going to the console CLOSES the menu — the C's latched entersound
         // never fires (M_Draw stops running): silent.
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options (menu2)
         m.take_sounds();
-        m.cursor = ROW_CONSOLE;
+        m.set_cursor(ROW_CONSOLE);
         assert_eq!(m.select(), MenuAction::OpenConsole);
         assert_eq!(m.take_sounds(), vec![], "closing into the console is silent");
         // The sample names match S_LocalSound's literals.
@@ -3319,14 +3518,14 @@ mod tests {
         // Item 2 = Save: REFUSED while no game is running (M_Menu_Save_f's
         // `if (!sv.active) return`). The entersound was latched before the
         // early return, so menu2 still plays.
-        m.cursor = 2;
+        m.set_cursor(2);
         m.take_sounds();
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer, "Save refuses without a game");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
 
         // Item 1 = Load (M_Menu_Load_f) opens with all slots unused.
-        m.cursor = 1;
+        m.set_cursor(1);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Load);
         for i in 0..MAX_SAVEGAMES {
@@ -3341,7 +3540,7 @@ mod tests {
         }
         m.adjust(-1);
         assert_eq!(m.cursor(), 2);
-        m.cursor = MAX_SAVEGAMES - 1;
+        m.set_cursor(MAX_SAVEGAMES - 1);
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0, "load cursor wraps over MAX_SAVEGAMES");
         // Enter on an unused slot: menu2 plays but nothing happens — the C's
@@ -3359,7 +3558,7 @@ mod tests {
         m.set_save_comments(comments);
         assert!(m.slot_loadable(2));
         assert!(!m.slot_loadable(3));
-        m.cursor = 2;
+        m.set_cursor(2);
         m.take_sounds();
         assert_eq!(m.select(), MenuAction::LoadSlot(2));
         assert!(!m.visible, "a real load closes the menu (m_state = m_none)");
@@ -3368,7 +3567,7 @@ mod tests {
         // Escape on Load returns to SinglePlayer (M_Load_Key K_ESCAPE).
         m.open();
         m.select(); // -> SinglePlayer (cursor 0)
-        m.cursor = 1;
+        m.set_cursor(1);
         m.select(); // -> Load
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
@@ -3377,10 +3576,10 @@ mod tests {
         // highlighted slot, closes the menu, and is SILENT (M_Save_Key K_ENTER
         // plays nothing).
         m.set_game_active(true);
-        m.cursor = 2;
+        m.set_cursor(2);
         assert_eq!(m.select(), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Save);
-        m.cursor = 5;
+        m.set_cursor(5);
         m.take_sounds();
         assert_eq!(m.select(), MenuAction::SaveSlot(5));
         assert!(!m.visible, "Save Enter closes the menu like the C");
@@ -3395,9 +3594,9 @@ mod tests {
         let mut m = Menu::new();
         m.sync_resolution(RESOLUTION_PRESETS[2].0, RESOLUTION_PRESETS[2].1);
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
-        m.cursor = ROW_VIDEO;
+        m.set_cursor(ROW_VIDEO);
         m.select(); // -> Video
         assert_eq!(m.screen(), MenuScreen::Video);
         assert_eq!(m.cursor(), 2, "cursor opens on the current mode");
@@ -3413,7 +3612,7 @@ mod tests {
         );
         assert_eq!(m.screen(), MenuScreen::Video, "the mode list stays up after applying");
         // The cursor wraps over the preset list; left/right also step it.
-        m.cursor = RESOLUTION_PRESETS.len() - 1;
+        m.set_cursor(RESOLUTION_PRESETS.len() - 1);
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0);
         let mode = m.resolution();
@@ -3440,16 +3639,16 @@ mod tests {
 
         // Navigate Main > Options > Customize controls.
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select();
-        m.cursor = ROW_CONTROLS;
+        m.set_cursor(ROW_CONTROLS);
         m.select();
         assert_eq!(m.screen(), MenuScreen::Keys);
         assert!(!m.bind_grabbing());
 
         // Enter on "+attack" (row 0, already two keys: CTRL + MOUSE1): the C
         // unbinds first, then grabs.
-        m.cursor = BIND_ATTACK;
+        m.set_cursor(BIND_ATTACK);
         m.take_sounds();
         assert_eq!(m.select(), MenuAction::None);
         assert!(m.bind_grabbing(), "Enter starts the bind grab");
@@ -3484,7 +3683,7 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Keys, "Esc in grab stays on Keys");
 
         // Backspace unbinds the highlighted command (menu2).
-        m.cursor = BIND_FORWARD;
+        m.set_cursor(BIND_FORWARD);
         m.take_sounds();
         m.keys_backspace();
         assert_eq!(m.find_keys_for_command(BIND_FORWARD), [None, None]);
@@ -3542,27 +3741,27 @@ mod tests {
         let mut m = Menu::new();
         m.open();
         // Change every class of user choice through the real menu paths.
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // Main > Options
-        m.cursor = ROW_SCREENSIZE;
+        m.set_cursor(ROW_SCREENSIZE);
         m.adjust(-1); // viewsize 100 -> 90
-        m.cursor = ROW_BRIGHTNESS;
+        m.set_cursor(ROW_BRIGHTNESS);
         m.adjust(1); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
-        m.cursor = ROW_MOUSESPEED;
+        m.set_cursor(ROW_MOUSESPEED);
         m.adjust(1); // sensitivity 3 -> 3.5
-        m.cursor = ROW_SNDVOLUME;
+        m.set_cursor(ROW_SNDVOLUME);
         m.adjust(-1); // volume 0.7 -> 0.6
-        m.cursor = ROW_CDVOLUME;
+        m.set_cursor(ROW_CDVOLUME);
         m.adjust(-1); // bgmvolume 1.0 -> 0.9
         for row in [ROW_ALWAYSRUN, ROW_INVERTMOUSE, ROW_LOOKSPRING, ROW_LOOKSTRAFE] {
-            m.cursor = row;
+            m.set_cursor(row);
             m.adjust(1); // toggles flip regardless of direction (Always Run: on -> OFF)
         }
         // Rebind through the real grab path: Options > Customize controls,
         // Enter on "change weapon" (one key bound, '/' — no unbind-first), 'j'.
-        m.cursor = ROW_CONTROLS;
+        m.set_cursor(ROW_CONTROLS);
         m.select(); // -> Keys
-        m.cursor = BIND_CHANGEWEAPON;
+        m.set_cursor(BIND_CHANGEWEAPON);
         m.select(); // starts the grab
         m.bind_key(b'j');
         assert_eq!(m.action_for_key(b'j'), Some(BIND_CHANGEWEAPON));
@@ -3624,7 +3823,7 @@ mod tests {
             (MenuScreen::Video, 2),
         ] {
             m.screen = screen;
-            m.cursor = cursor;
+            m.set_cursor(cursor);
             let mut img = Image::new(320, 200, [9, 9, 9]);
             draw_menu(&mut img, &m, &pics, None, 0.4, 0.0, &pal); // no pics, no font
             let mut img2 = Image::new(320, 200, [9, 9, 9]);
@@ -3651,7 +3850,7 @@ mod tests {
         let mut m = Menu::new();
         m.open();
         // Raise from Main via select.
-        m.cursor = 4;
+        m.set_cursor(4);
         m.select();
         assert_eq!(m.screen(), MenuScreen::Quit);
         // No (escape) restores Main.
@@ -3659,7 +3858,7 @@ mod tests {
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
         // Raise again, Yes closes the menu.
-        m.cursor = 4;
+        m.set_cursor(4);
         m.select();
         assert_eq!(m.quit_yes(), MenuAction::Closed);
         assert!(!m.visible);
@@ -3667,7 +3866,7 @@ mod tests {
         // The prompt remembers a NON-Main origin (open_quit from Options -> No
         // restores Options).
         m.open();
-        m.cursor = 2;
+        m.set_cursor(2);
         m.select(); // -> Options
         m.open_quit();
         assert_eq!(m.screen(), MenuScreen::Quit);
@@ -3698,7 +3897,7 @@ mod tests {
         let pics = MenuPics { help, ..Default::default() };
         let mut m = Menu::new();
         m.open();
-        m.cursor = 3;
+        m.set_cursor(3);
         m.select(); // -> Help, page 0
         m.help_page = 2; // the page that has art
         let mut img = Image::new(320, 200, bg);
@@ -3713,7 +3912,7 @@ mod tests {
         // Quit (M_Quit_Draw): M_DrawTextBox (56, 76, 24, 4) from the box_*
         // pics and quit message msgNumber at (64, 84..108) in M_Print's bronze.
         m.open();
-        m.cursor = 4;
+        m.set_cursor(4);
         m.select(); // -> Quit
         assert_eq!(m.screen(), MenuScreen::Quit);
         m.set_quit_message(4);

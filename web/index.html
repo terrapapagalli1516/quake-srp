@@ -786,12 +786,15 @@ function drainGameSounds() {
       oz: exp.sound_origin_z(), vol: exp.sound_volume(), atten: exp.sound_attenuation(),
       view: typeof exp.sound_is_view_entity === 'function' && !!exp.sound_is_view_entity(),
     } : null;
-    // S_StartSound picks (and so overrides) the channel before it tests
-    // audibility: an inaudible sound still ends its key's loop, then drops.
-    if (sp && sp.gain <= 0.02) { stopKey(ent, chan); continue; }
     const kkey = ent + ':' + chan;
     const seq = (keySeq.get(kkey) || 0) + 1;
     if (chan > 0) keySeq.set(kkey, seq);
+    // S_StartSound picks (and so overrides) the channel before it tests
+    // audibility: an inaudible sound still ends its key's sound, then drops.
+    // That is the one playing (stopKey) or one whose first decode is still
+    // pending: the keySeq bump above stops that from starting after it (a
+    // door hum would otherwise start after its own stop sound, and loop).
+    if (sp && sp.gain <= 0.02) { stopKey(ent, chan); continue; }
     const gen = typeof exp.sound_generation === 'function' ? exp.sound_generation() : 0;
     const ptr = exp.sound_ptr();
     const view = new Uint8Array(exp.memory.buffer, ptr, len);
@@ -1207,7 +1210,9 @@ const savEncoder = new TextEncoder();
 // mirror localStorage. For each console-slot key s0..s11, hand the stored
 // .sav text to the engine (sav_alloc scratch) and let menu_set_save_comment
 // extract + assign the comment; absent/blocked slots are marked unused with
-// an empty buffer. Runs at boot and after every persisted save.
+// an empty buffer. This is M_ScanSaves: it runs at boot, after every
+// persisted save, and whenever the menu opens Load or Save
+// (scanSavesOnMenuEntry: M_Menu_Load_f / M_Menu_Save_f rescan each time).
 function refreshSaveComments() {
   if (!exp || typeof exp.menu_set_save_comment !== 'function'
            || typeof exp.sav_alloc !== 'function') return;
@@ -1226,6 +1231,18 @@ function refreshSaveComments() {
     exp.sav_alloc(0);              // empty scratch = unused slot
     exp.menu_set_save_comment(i);
   }
+}
+
+// M_Menu_Load_f / M_Menu_Save_f call M_ScanSaves every time the screen opens.
+// The page sees the menu's screen through menu_visible/menu_screen_id and
+// rescans when it enters Load (2) or Save (3), before the frame that draws it.
+let lastMenuScreen = -1;
+function scanSavesOnMenuEntry() {
+  if (!exp || typeof exp.menu_screen_id !== 'function'
+           || typeof exp.menu_visible !== 'function') return;
+  const sid = exp.menu_visible() ? exp.menu_screen_id() : -1;
+  if ((sid === 2 || sid === 3) && sid !== lastMenuScreen) refreshSaveComments();
+  lastMenuScreen = sid;
 }
 
 function drainSaves() {
@@ -1366,6 +1383,8 @@ async function main() {
   restoreResolution();
   // ...and the saved Screen size + Web extras (the engine clamps both).
   restorePrefs();
+  // The Load/Save slot listings from localStorage (M_ScanSaves).
+  refreshSaveComments();
 
   // An opaque canvas (the framebuffer's alpha is always 255): the browser
   // composites it without blending. `?lowlatency` in the URL also asks for a
@@ -1420,6 +1439,8 @@ async function main() {
     // advancing the game by that time, at most 0.1 s (so a hitch or a
     // backgrounded tab can't lurch the world).
     const dt = Math.max(0, (now - last) / 1000); last = now;
+    // Load/Save just opened (a key this refresh): rescan before it draws.
+    scanSavesOnMenuEntry();
     // Movement/turn/attack all flow from the held-key states the keydown/keyup
     // handlers fed the engine (key_down/key_up by Quake keynum): each step
     // derives the move from the BINDINGS table (CL_BaseMove/CL_AdjustAngles),

@@ -285,13 +285,20 @@ pub struct Vm {
     /// Taken out and restored around each use via [`Vm::with_host`] so a builtin
     /// can mutate both the host and the rest of the VM without a borrow clash.
     pub host: Option<Box<dyn Host>>,
-    /// Frame-start server time (`sv.time`), set once per frame by the Server. The
-    /// monster-locomotion builtins (`walkmove`/`movetogoal` -> `sv_movestep` /
-    /// `sv_step_direction`) need it for the relink trigger touches: world.c
-    /// SV_TouchLinks sets `time = sv.time` before each touch, but during a monster
-    /// think the `time` global holds the clamped thinktime, so reading it here
-    /// would skew touch timers up to one frame. This field carries the true sv.time.
-    pub sv_time: f32,
+    /// `sv.time`, the server clock: a `double` in id's `server_t` (server.h),
+    /// advanced by `SV_Physics`' `sv.time += host_frametime` at the end of each
+    /// frame (1.0 at spawn, the save's time after a load). QuakeC sees it
+    /// through the `time` global, a float: each `pr_global_struct->time =
+    /// sv.time` stores `sv_time as f32`. It lives on the VM because
+    /// `ED_Alloc`/`ED_Free` (freetime) and the monster-locomotion builtins
+    /// (`walkmove`/`movetogoal`'s relink touches: world.c SV_TouchLinks sets
+    /// `time = sv.time`, not the clamped thinktime the global holds during a
+    /// monster think) read it. [`crate::server::Server::time`] is its float.
+    pub sv_time: f64,
+    /// `host_frametime` (host.c, a `double`) of the server frame running: the
+    /// think-due and pusher tests compare floats against `sv.time +
+    /// host_frametime` in double.
+    pub host_frametime: f64,
 
     /// Monotonic count of QuakeC statements executed across this VM's lifetime
     /// (one per `execute` loop iteration). A free running total used by the sim
@@ -367,6 +374,7 @@ impl Vm {
             trace: false,
             host: None,
             sv_time: 0.0,
+            host_frametime: 0.0,
             stmt_count: 0,
             edict_freetime: Vec::new(),
             edict_leafs: Vec::new(),
@@ -715,7 +723,8 @@ impl Vm {
     fn reusable_slot(&self) -> Option<usize> {
         (1..self.edict_free.len()).find(|&i| {
             let freetime = self.edict_freetime.get(i).copied().unwrap_or(0.0);
-            self.edict_free[i] && (freetime < 2.0 || self.sv_time - freetime > 0.5)
+            // sv.time - e->freetime: a double minus a float.
+            self.edict_free[i] && (freetime < 2.0 || self.sv_time - f64::from(freetime) > 0.5)
         })
     }
 
@@ -784,7 +793,7 @@ impl Vm {
         if self.edict_freetime.len() <= e {
             self.edict_freetime.resize(e + 1, 0.0);
         }
-        self.edict_freetime[e] = self.sv_time;
+        self.edict_freetime[e] = self.sv_time as f32; // ed->freetime = sv.time (a float)
     }
 
     /// The world leaves edict `e` touched when it was last linked
