@@ -764,6 +764,12 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
     ms, 640×400 2.17 / 4.92 → 1.55 / 2.75, 1280×800 5.37 / 8.91 → 4.97 /
     7.40; walk_e1m3 320×200 2.80 → 1.28, 640×400 3.78 → 2.32, 1280×800 7.09
     → 5.78. demo1 moves within noise.
+  - Wasm (`web/bench.py --build`, two runs each, step median / p95 at 640×400,
+    median at 1280×800): walk_e1m3 3.42–3.60 / 4.60–4.86 → 2.62–2.78 /
+    3.49–3.63 ms, 7.50–7.74 → 6.58–6.85 (the external boxes' uncached bakes
+    0.81 → 0.08 ms); fire_e1m1 2.09–2.27 / 4.05–4.18 → 1.72–2.07 / 2.73–3.17,
+    5.67–5.94 → 5.37–5.75; walk_e1m1 p95 3.41–3.59 → 2.70–2.94; demo1 within
+    noise.
   - `QUAKE_DLIGHT=eye` on e1m1 at 1280×800 (w1 left it at ~14 ms): radius 350
     14.1–15.1 → 10.0–13.9 → 7.4–9.1 ms, radius 200 12.1–12.7 → 8.0–8.5 —
     the unlit frame is 8.2–8.6.
