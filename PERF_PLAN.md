@@ -283,6 +283,40 @@ The fidelity classes are:
   - Near-degenerate polygons: guard on the gradient determinant.
   - The goldens will move by a handful of pixels. Record the count in `AUDIT.md`.
 - **This is a stepping stone to A3.** A1 is contained and measured; A3 is the faithful endpoint.
+- **Done** (branch `quake/w1`): `scan_poly` walks each clipped polygon row by row under id's fill
+  rule (pixel centre, top-left, half-open). The span loops in `raster_poly_cached`,
+  `raster_poly_tex` and `raster_poly_flat` cover the cached, turb, sky, per-pixel and flat faces.
+  A `Span` is the place for 16-pixel subdivision. The gradients are not solved from a vertex
+  triple; they are `D_CalcGradients`' analytic planes (`PolyGrads::for_plane`), with s and t
+  relative to the eye and f64 steps: the absolute-s f32 interpolation misplaced ~0.3% of texels.
+  - **Speed,** A/B against A0 in one sitting, median ms (load 3.5–5):
+
+    | workload | wasm 640×400 world / step | wasm 1280×800 world / step | native 1280×800 world / step |
+    |---|---|---|---|
+    | demo1 | 3.58 → 1.37 / 5.70 → 3.25 | 12.34 → 4.27 / 19.35 → 10.67 | 6.33 → 3.16 / 11.80 → 8.27 |
+    | walk_e1m1 | 1.99 → 0.98 / 4.03 → 3.08 | 7.86 → 3.57 / 14.21 → 9.81 | 4.21 → 2.68 / 9.27 → 7.93 |
+    | fire_e1m1 | 2.35 → 1.14 / 4.61 → 3.66 | 9.69 → 3.88 / 16.81 → 10.62 | 4.97 → 2.87 / 10.52 → 8.53 |
+    | walk_e1m3 | 2.25 → 1.02 / 6.23 → 4.78 | 8.25 → 3.53 / 16.88 → 11.58 | 4.53 → 2.85 / 11.76 → 10.17 |
+
+    wasm demo1 at 1280×800: step p95 24.7 → 13.4 ms. The submodel pass moves by at most
+    ±0.06 ms at the median, and its p95 drops.
+  - **Pixels:** the goldens move by 151, 709 and 729 pixels, all at texel boundaries; the old
+    renderer was the inexact one. Background pixels over 288 oracle views go from 35 to 0.
+    `AUDIT.md` has the hashes and the evidence.
+  - **Oracle,** the 16 standard rows (`compare.py --modes world`, 4 maps; id as shipped, and id
+    at mip 0 + exact perspective):
+
+    | config | e1m1 | e1m2 | e1m3 | e1m7 |
+    |---|---|---|---|---|
+    | 320×200 as shipped | 84.76 → 84.74 | 64.07 → 64.06 | 65.83 → 65.88 | 75.65 → 75.62 |
+    | 320×200 mip 0 + exact | 95.63 → 95.61 | 97.41 → 97.40 | 98.39 → 98.50 | 98.68 → 98.66 |
+    | 640×480 as shipped | 90.79 → 90.84 | 78.19 → 78.28 | 90.74 → 90.73 | 94.55 → 94.58 |
+    | 640×480 mip 0 + exact | 95.89 → 95.93 | 97.48 → 97.58 | 98.27 → 98.51 | 98.75 → 98.80 |
+
+    Seven rows fall by 0.01–0.03 points: single boundary pixels where the old rounding agreed
+    with id's. Over 144 views per configuration the mean rises: 79.873 → 79.907, 97.682 →
+    97.760, 90.636 → 90.774 and 97.611 → 97.801. At 640×480 with mip 0 + exact, all 144
+    views improve.
 
 **A2. Dynamically lit surfaces through the surface cache.** *(faithful)*
 

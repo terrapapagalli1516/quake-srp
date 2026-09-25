@@ -561,6 +561,50 @@ numbers are exact-palette-index match %. Classes refer to `oracle/README.md`.
   Accepted gap: 85–100 Hz displays get half their rate (the C gate needs two
   vsyncs there).
 
+## World pass: polygon spans (2026-09-25, branch `quake/w1`, PERF_PLAN A0–A2)
+
+- ✅ **A1: faces scan-converted as polygons.** Each clipped world, submodel
+  and external-box face was fan-triangulated and each triangle's bounding box
+  walked with an inside test, its s/z and t/z interpolated per triangle from
+  the vertices (absolute s, thousands of texels, in f32). Now every face is one
+  polygon walked row by row (`raster.rs`: `scan_poly`, `raster_poly_cached`,
+  `raster_poly_tex`, `raster_poly_flat`):
+  - **Fill rule = id's:** pixel centres, left and top edges inclusive, right
+    and bottom exclusive (`R_EmitEdge` takes rows `ceil(v0)..ceil(v1)-1`,
+    `R_GenerateSpans` columns `ceil(u_l)..ceil(u_r)-1`). Every edge's
+    crossing is computed from its top endpoint, and a near-clipped edge's new
+    vertex from its inside endpoint, so two faces sharing an edge get the
+    same bits.
+  - **Gradients = `D_CalcGradients`:** 1/z from the face plane over the eye's
+    distance to it (`R_RenderFace`), s/z and t/z from the view-space texinfo
+    axes, with s and t relative to the eye's (`sadjust`/`tadjust`); f64
+    accumulators; the cached span loop takes the texel as `D_DrawSpans8` does
+    (`(int)(sdivz*z) + sadjust`, `>> 16`).
+  - **Goldens:** e1m1 `5b29abb8` → `bb64996e` (151 px, 0.059%), e1m2
+    `a833cbac` → `8186a64c` (709 px, 0.28%), e1m3 `e3d873f0` → `f41e8b59`
+    (729 px, 0.28%). All are interior texel-boundary pixels: none sits next to
+    a colour edge, and there are 0 background pixels before and after. Against
+    an exact reference (f64 perspective per pixel) the old renderer was wrong
+    on 149 / 731 / 722 of those pixels and the new one on 6 / 34 / 13, so the
+    moves remove the old f32 rounding.
+  - **Cracks:** over 144 oracle views (8 maps × 6 yaws × 3 pitches), the old
+    renderer left 5 background pixels at 320×200 and 30 at 640×480; the new one
+    leaves 0 at both.
+  - **Oracle,** mean exact% over those 144 views, old → new: 320×200
+    79.873 → 79.907 (118 views better, 23 worse), with id at mip 0 + exact
+    perspective 97.682 → 97.760 (139 better, 5 worse); 640×480 90.636 →
+    90.774 (138 / 6), and 97.611 → 97.801 (144 / 0).
+  - **Open:** the 16 standard rows (`compare.py` world, 320×200 and 640×480,
+    id as shipped and mip 0 + exact) rise on 9 rows and fall by 0.01–0.03
+    points on 7 (e1m1 84.76 → 84.74, e1m7 75.65 → 75.62, …; PERF_PLAN A1
+    has the table). The lost pixels are single pixels at texel boundaries
+    (some exactly on one, at these axis-aligned start views) and face edges,
+    where the port's and id's float rounding fall on different sides. The old
+    port's rounding agreed with id's more often on these views, but not on
+    average. Tried without effect: floor versus 16.16 texel arithmetic, vertex
+    versus plane gradients, f32 versus f64 divides, an id-style float camera
+    basis.
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (SV_TryUnstick/WallFriction, force_retouch, sky case-sensitivity, affine span subdivision [= the perf item], TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled.

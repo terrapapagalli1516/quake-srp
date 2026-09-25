@@ -11,8 +11,8 @@ use super::light::{
     any_dlight_reaches, face_lightmap_dyn, mark_dlights, DLIGHT_BITS_SCRATCH, LIGHTSTYLES,
 };
 use super::raster::{
-    hash_color, raster_triangle, raster_triangle_cached, raster_triangle_tex, ProjT, Projected,
-    SurfaceMode,
+    hash_color, raster_poly_cached, raster_poly_flat, raster_poly_tex, PolyGrads, ProjT,
+    ScreenProj, SurfaceMode,
 };
 use super::sky::{SkySpans, SkyView, SKY_SPANS_SCRATCH};
 use super::stats::{stat, stats_on, StatInstant};
@@ -22,6 +22,21 @@ use super::surf::{
 };
 use super::vis::{clip_poly_near_into, compute_visible_faces, Frustum, VView};
 use super::warp::TurbTable;
+
+/// A face's [`PolyGrads`] from its plane (`bsp.planes[face.planenum]`, not
+/// side-flipped: flipping the normal and the distance together changes
+/// nothing) and texinfo, seen from `eye` in the face's model space. `None` for
+/// a missing plane or an eye on the plane (the face is edge-on).
+fn face_grads(
+    bsp: &Bsp,
+    face: &crate::bsp::DFace,
+    view: &ScreenProj,
+    eye: Vec3,
+    ti: Option<&crate::bsp::TexInfo>,
+) -> Option<PolyGrads> {
+    let plane = usize::try_from(face.planenum).ok().and_then(|pi| bsp.planes.get(pi))?;
+    PolyGrads::for_plane(view, eye, plane.normal, plane.dist, ti)
+}
 
 /// The textured world pass, factored out of [`render_bsp_textured`](super::render_bsp_textured) so it can
 /// share an image + z-buffer with the alias-model pass (see [`render_scene`](super::render_scene)).
@@ -66,6 +81,7 @@ pub(super) fn draw_world_textured(
     } else {
         (cx as f64 / tan_half) as f32
     };
+    let view = ScreenProj { forward, right, up, cx, cy, focal };
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
     // Sub-phase profiling: accumulate ns into locals (cheap), flush to RenderStats
@@ -243,24 +259,21 @@ pub(super) fn draw_world_textured(
             SurfKind::Sky => SurfaceMode::Sky { view: sky_view, defer: Some((&sky_spans, face_index as u32 + 1)) },
         };
 
-        // Build the view-space polygon (vx,vy,vz,s,t per world vertex), then clip
-        // it against the near plane. A face fully in front is returned unchanged
-        // (no regression); a face fully behind yields < 3 verts and is skipped;
-        // a straddling face is clipped to `vz == NEAR` and rasterised normally.
+        // The face plane's screen gradients of 1/z, s/z, t/z (`D_CalcGradients`).
+        let Some(grads) = face_grads(bsp, face, &view, cam.pos, ti) else {
+            continue;
+        };
+        // Build the view-space polygon — only the outline, so its vertices carry
+        // no (s,t) — then clip it against the near plane. A face fully in front
+        // is returned unchanged; a face fully behind yields < 3 verts and is
+        // skipped; a straddling face is clipped to `vz == NEAR`.
         views.clear();
         for v in world_poly {
             let rel = sub(*v, cam.pos);
             let vz = dot(rel, forward);
             let vx = dot(rel, right);
             let vy = dot(rel, up);
-            let (s, t) = match ti {
-                Some(ti) => (
-                    v[0] * ti.vecs[0][0] + v[1] * ti.vecs[0][1] + v[2] * ti.vecs[0][2] + ti.vecs[0][3],
-                    v[0] * ti.vecs[1][0] + v[1] * ti.vecs[1][1] + v[2] * ti.vecs[1][2] + ti.vecs[1][3],
-                ),
-                None => (0.0, 0.0),
-            };
-            views.push(VView { vx, vy, vz, s, t });
+            views.push(VView { vx, vy, vz, s: 0.0, t: 0.0 });
         }
         clip_poly_near_into(&views, &mut clipped);
         if clipped.len() < 3 {
@@ -268,13 +281,7 @@ pub(super) fn draw_world_textured(
         }
         proj.clear();
         for vv in &clipped {
-            proj.push(ProjT {
-                x: cx + focal * vv.vx / vv.vz,
-                y: cy - focal * vv.vy / vv.vz,
-                vz: vv.vz,
-                s: vv.s,
-                t: vv.t,
-            });
+            proj.push(ProjT { x: cx + focal * vv.vx / vv.vz, y: cy - focal * vv.vy / vv.vz });
         }
 
         let lambert = dot(normal, light_dir).max(0.0);
@@ -283,12 +290,11 @@ pub(super) fn draw_world_textured(
         match tex {
             Some(mt) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 let (tw, th) = (mt.width as usize, mt.height as usize);
-                let v0 = proj[0];
                 // Lit SURFACE CACHE (Quake d_surf.c): a lightmapped wall with a
                 // colormap and no reaching dynamic light bakes texture*lightmap*
                 // colormap into a per-surface block ONCE, then reads one byte per
                 // pixel. Turb/sky/dynamically-lit/colormap-less surfaces keep the
-                // per-pixel path (raster_triangle_tex).
+                // per-pixel path (raster_poly_tex).
                 stat(|s| { s.faces_drawn += 1; s.world_tris += (proj.len() - 2) as u64; });
                 let _t_s = prof.then(StatInstant::now);
                 let surf = if matches!(mode, SurfaceMode::Normal) {
@@ -309,22 +315,14 @@ pub(super) fn draw_world_textured(
                 match surf {
                     Some((block, bw, bh, tmins)) => {
                         stat(|s| s.surf_hits += 1);
-                        for i in 1..proj.len() - 1 {
-                            raster_triangle_cached(
-                                image, zbuf, v0, proj[i], proj[i + 1], &block, bw, bh, tmins,
-                                palette,
-                            );
-                        }
+                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette);
                     }
                     None => {
                         stat(|s| s.surf_misses += 1);
-                        for i in 1..proj.len() - 1 {
-                            raster_triangle_tex(
-                                image, zbuf, v0, proj[i], proj[i + 1],
-                                &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
-                                colormap,
-                            );
-                        }
+                        raster_poly_tex(
+                            image, zbuf, &proj, &grads, &mt.pixels, tw, th, palette, shade,
+                            lightmap.as_ref(), mode, colormap,
+                        );
                     }
                 }
             }
@@ -347,14 +345,10 @@ pub(super) fn draw_world_textured(
                             (base[2] * 255.0).clamp(0.0, 255.0) as u8,
                         ];
                         let one = [0u8];
-                        let v0 = proj[0];
-                        for i in 1..proj.len() - 1 {
-                            raster_triangle_tex(
-                                image, zbuf, v0, proj[i], proj[i + 1],
-                                &one, 1, 1, &pal1, shade, Some(&lm), SurfaceMode::Normal,
-                                colormap,
-                            );
-                        }
+                        raster_poly_tex(
+                            image, zbuf, &proj, &grads, &one, 1, 1, &pal1, shade, Some(&lm),
+                            SurfaceMode::Normal, colormap,
+                        );
                     }
                     None => {
                         let color = [
@@ -362,13 +356,7 @@ pub(super) fn draw_world_textured(
                             (base[1] * shade * 255.0).clamp(0.0, 255.0) as u8,
                             (base[2] * shade * 255.0).clamp(0.0, 255.0) as u8,
                         ];
-                        let p0 = Projected { x: proj[0].x, y: proj[0].y, depth: proj[0].vz };
-                        for i in 1..proj.len() - 1 {
-                            let p1 = Projected { x: proj[i].x, y: proj[i].y, depth: proj[i].vz };
-                            let p2 =
-                                Projected { x: proj[i + 1].x, y: proj[i + 1].y, depth: proj[i + 1].vz };
-                            raster_triangle(image, zbuf, p0, p1, p2, color);
-                        }
+                        raster_poly_flat(image, zbuf, &proj, &grads, color);
                     }
                 }
             }
@@ -490,6 +478,7 @@ pub(super) fn draw_submodel(
     } else {
         (cx as f64 / tan_half) as f32
     };
+    let view = ScreenProj { forward, right, up, cx, cy, focal };
     let (light_dir, _l) = normalize([0.3, 0.5, 1.0]);
 
     // Submodel face range: [firstface, firstface + numfaces). Negative counts
@@ -601,36 +590,20 @@ pub(super) fn draw_submodel(
             SurfKind::Sky => SurfaceMode::Sky { view: SkyView::new(forward, right, up, w, h, time), defer: None },
         };
 
-        // Build the view-space polygon from the SHIFTED vertices (for vx/vy/vz)
-        // but with (s,t) from the LOCAL (pre-shift) vertex, then near-clip it.
-        // A length mismatch between the shifted and local polygons is treated as
-        // a malformed face and skips it (matching the old defensive break).
+        // The face plane's gradients, in the model's LOCAL frame, where Quake
+        // maps a bmodel's (s,t) and where the eye sits at `cam.pos - origin`
+        // (`R_DrawBrushModel`'s `modelorg`; the view basis is the world's).
+        let Some(grads) = face_grads(bsp, face, &view, sub(cam.pos, origin), ti) else {
+            continue;
+        };
+        // The outline from the SHIFTED vertices, then near-clipped.
         views.clear();
-        let mut bad = false;
-        for (vi, vw) in world_poly.iter().enumerate() {
+        for vw in world_poly.iter() {
             let rel = sub(*vw, cam.pos);
             let vz = dot(rel, forward);
             let vx = dot(rel, right);
             let vy = dot(rel, up);
-            // (s,t) from the local (pre-shift) vertex coordinate.
-            let vl = match local_poly.get(vi) {
-                Some(v) => *v,
-                None => {
-                    bad = true;
-                    break;
-                }
-            };
-            let (s, t) = match ti {
-                Some(ti) => (
-                    vl[0] * ti.vecs[0][0] + vl[1] * ti.vecs[0][1] + vl[2] * ti.vecs[0][2] + ti.vecs[0][3],
-                    vl[0] * ti.vecs[1][0] + vl[1] * ti.vecs[1][1] + vl[2] * ti.vecs[1][2] + ti.vecs[1][3],
-                ),
-                None => (0.0, 0.0),
-            };
-            views.push(VView { vx, vy, vz, s, t });
-        }
-        if bad {
-            continue;
+            views.push(VView { vx, vy, vz, s: 0.0, t: 0.0 });
         }
         clip_poly_near_into(&views, &mut clipped);
         if clipped.len() < 3 {
@@ -638,13 +611,7 @@ pub(super) fn draw_submodel(
         }
         proj.clear();
         for vv in &clipped {
-            proj.push(ProjT {
-                x: cx + focal * vv.vx / vv.vz,
-                y: cy - focal * vv.vy / vv.vz,
-                vz: vv.vz,
-                s: vv.s,
-                t: vv.t,
-            });
+            proj.push(ProjT { x: cx + focal * vv.vx / vv.vz, y: cy - focal * vv.vy / vv.vz });
         }
 
         let lambert = dot(normal, light_dir).max(0.0);
@@ -653,7 +620,6 @@ pub(super) fn draw_submodel(
         match tex {
             Some(mt) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 let (tw, th) = (mt.width as usize, mt.height as usize);
-                let v0 = proj[0];
                 stat(|s| { s.sub_faces_drawn += 1; s.sub_tris += (proj.len() - 2) as u64; });
                 // Lit SURFACE CACHE for submodels (doors/plats/buttons) — same as the
                 // world pass. Gated on `ent_frame == 0`: an ACTIVATED brush entity
@@ -677,22 +643,14 @@ pub(super) fn draw_submodel(
                 match surf {
                     Some((block, bw, bh, tmins)) => {
                         stat(|s| s.sub_surf_hits += 1);
-                        for i in 1..proj.len() - 1 {
-                            raster_triangle_cached(
-                                image, zbuf, v0, proj[i], proj[i + 1], &block, bw, bh, tmins,
-                                palette,
-                            );
-                        }
+                        raster_poly_cached(image, zbuf, &proj, &grads, &block, bw, bh, tmins, palette);
                     }
                     None => {
                         stat(|s| s.sub_surf_misses += 1);
-                        for i in 1..proj.len() - 1 {
-                            raster_triangle_tex(
-                                image, zbuf, v0, proj[i], proj[i + 1],
-                                &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), mode,
-                                colormap,
-                            );
-                        }
+                        raster_poly_tex(
+                            image, zbuf, &proj, &grads, &mt.pixels, tw, th, palette, shade,
+                            lightmap.as_ref(), mode, colormap,
+                        );
                     }
                 }
             }
@@ -712,14 +670,10 @@ pub(super) fn draw_submodel(
                             (base[2] * 255.0).clamp(0.0, 255.0) as u8,
                         ];
                         let one = [0u8];
-                        let v0 = proj[0];
-                        for i in 1..proj.len() - 1 {
-                            raster_triangle_tex(
-                                image, zbuf, v0, proj[i], proj[i + 1],
-                                &one, 1, 1, &pal1, shade, Some(&lm), SurfaceMode::Normal,
-                                colormap,
-                            );
-                        }
+                        raster_poly_tex(
+                            image, zbuf, &proj, &grads, &one, 1, 1, &pal1, shade, Some(&lm),
+                            SurfaceMode::Normal, colormap,
+                        );
                     }
                     None => {
                         let color = [
@@ -727,13 +681,7 @@ pub(super) fn draw_submodel(
                             (base[1] * shade * 255.0).clamp(0.0, 255.0) as u8,
                             (base[2] * shade * 255.0).clamp(0.0, 255.0) as u8,
                         ];
-                        let p0 = Projected { x: proj[0].x, y: proj[0].y, depth: proj[0].vz };
-                        for i in 1..proj.len() - 1 {
-                            let p1 = Projected { x: proj[i].x, y: proj[i].y, depth: proj[i].vz };
-                            let p2 =
-                                Projected { x: proj[i + 1].x, y: proj[i + 1].y, depth: proj[i + 1].vz };
-                            raster_triangle(image, zbuf, p0, p1, p2, color);
-                        }
+                        raster_poly_flat(image, zbuf, &proj, &grads, color);
                     }
                 }
             }
@@ -793,7 +741,7 @@ pub struct ExternalBModel<'a> {
 ///
 /// This is the standalone-bsp counterpart to the world-submodel path. It reuses
 /// the exact same brush-face machinery as [`draw_submodel`] (texinfo (s,t) build,
-/// near-clip via [`clip_poly_near`], perspective projection, fan rasterise with
+/// near-clip via [`clip_poly_near_into`](super::vis::clip_poly_near_into), perspective projection, the polygon span raster with
 /// the bsp's **own** miptextures, the static/multi-style lightmap via
 /// [`face_lightmap_dyn`], and the per-pixel z-test) — only the source bsp differs,
 /// so there is no duplicated rasteriser. Because these little boxes carry their

@@ -1,10 +1,14 @@
-//! The triangle rasterisers that fill brush-model faces.
+//! The rasterisers that fill brush-model faces.
 //!
 //! The port's own design, standing where id's edge/span pipeline is (`r_edge.c`,
-//! `d_scan.c`'s `D_DrawSpans8`): flat, textured (perspective-correct, lightmapped,
-//! turb and sky modes) and surface-cached triangles sharing one z-buffer.
+//! `d_edge.c`'s `D_CalcGradients`, `d_scan.c`'s `D_DrawSpans8`): each clipped
+//! face is scan-converted as one convex polygon, row by row, into spans — flat,
+//! textured (perspective-correct, lightmapped, turb and sky modes) or
+//! surface-cached — sharing one z-buffer. The flat bounding-box triangle
+//! ([`raster_triangle`]) remains for the untextured debug renderer.
 
 use super::Image;
+use crate::math::Vec3;
 use super::light::{colormap_row, LightMap, COLORMAP_LEN};
 use super::sky::{sky_texel_view, SkySpans, SkyView};
 use super::stats::stat;
@@ -154,7 +158,7 @@ pub(super) fn raster_triangle(
     }
 }
 
-/// How the per-pixel `(s,t)` -> texel step of [`raster_triangle_tex`] behaves.
+/// How the per-pixel `(s,t)` -> texel step of [`raster_poly_tex`] behaves.
 ///
 /// `Normal` is the existing wall path (optional lightmap). `Turb` and `Sky`
 /// drive the animated special-surface sampling above; both are unlit (Quake never
@@ -173,12 +177,20 @@ pub(super) enum SurfaceMode<'a> {
     Sky { view: SkyView, defer: Option<(&'a std::cell::RefCell<SkySpans>, u32)> },
 }
 
-/// A projected vertex carrying texture coordinates for perspective-correct
-/// sampling. `vz` is forward depth (used linearly for the z-buffer, to stay
-/// consistent with the flat path); `s`/`t` are Quake surface texel coordinates
-/// (they also index the face lightmap, which shares the texinfo axes).
+/// A projected polygon vertex: screen `x`/`y`, where pixel `(px, py)`'s centre
+/// is `(px + 0.5, py + 0.5)`. The rasterisers take only the OUTLINE from the
+/// polygon; `1/z`, `s/z` and `t/z` come from the face plane ([`PolyGrads`]).
 #[derive(Clone, Copy)]
 pub(super) struct ProjT {
+    pub(super) x: f32,
+    pub(super) y: f32,
+}
+
+/// A synthetic polygon vertex with its depth and texel coordinates, for tests
+/// that have no face plane: see [`PolyGrads::from_vertices`] and [`outline`].
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) struct AttrVert {
     pub(super) x: f32,
     pub(super) y: f32,
     pub(super) vz: f32,
@@ -186,16 +198,336 @@ pub(super) struct ProjT {
     pub(super) t: f32,
 }
 
-/// Perspective-correct textured triangle. `pixels` is `tw * th` palette indices.
-/// The z-buffer uses linearly-interpolated `vz` (matching [`raster_triangle`]),
-/// while `s`/`t` are interpolated with perspective correction (`s/z`, `1/z`).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn raster_triangle_tex(
+/// The screen outline of synthetic vertices.
+#[cfg(test)]
+pub(super) fn outline(verts: &[AttrVert]) -> Vec<ProjT> {
+    verts.iter().map(|v| ProjT { x: v.x, y: v.y }).collect()
+}
+
+// ---------------------------------------------------------------------------
+// The polygon span walker (world, submodel and external brush faces)
+// ---------------------------------------------------------------------------
+//
+// Each clipped face is scan-converted ONCE, as the convex polygon it is, row by
+// row — the shape of id's `R_ScanEdges`/`D_DrawSpans8` pipeline, minus the edge
+// sorting (the port keeps its z-buffer for visibility, so faces are still drawn
+// independently, front to back).
+//
+// FILL RULE (one rule, for every brush pass): a pixel belongs to a polygon iff
+// its CENTRE `(px + 0.5, py + 0.5)` lies inside it, half-open on the right and
+// bottom — `x_left <= cx < x_right` on a row, `y_top <= cy < y_bottom` for an
+// edge to cross that row. This is id's rule: `R_EmitEdge` takes rows
+// `ceil(v0) ..= ceil(v1) - 1` and `R_GenerateSpans` columns `ceil(u_left) ..
+// ceil(u_right)`, with id's pixel centres on the integers (`xcenter = w/2 -
+// 0.5`). Two faces that share an edge therefore split the pixels on it with no
+// crack and no double draw — PROVIDED both compute the same crossing: every
+// edge's crossing is computed from its TOP endpoint to its BOTTOM one (by y),
+// so the two faces, which walk a shared edge in opposite directions, get the
+// same bits (and `clip_poly_near_into` makes a near-clipped shared edge's new
+// vertex the same in both faces, for the same reason).
+
+/// A screen-plane linear function `a(x, y) = o + dx*x + dy*y` over the
+/// continuous screen coordinates — one of `D_CalcGradients`' three planes
+/// (`d_ziorigin`/`d_zistepu`/`d_zistepv` and the `s/z`, `t/z` pairs).
+#[derive(Clone, Copy)]
+struct Linear {
+    o: f64,
+    dx: f64,
+    dy: f64,
+}
+
+impl Linear {
+    #[inline]
+    fn at(&self, x: f64, y: f64) -> f64 {
+        self.o + self.dx * x + self.dy * y
+    }
+}
+
+/// The projection a face's gradients are taken in: the view basis (`vright`,
+/// `vup`, `vpn`), the screen centre and the focal length, as the brush passes
+/// project a vertex: `x = cx + focal*vx/vz`, `y = cy - focal*vy/vz`.
+#[derive(Clone, Copy)]
+pub(super) struct ScreenProj {
+    pub(super) forward: Vec3,
+    pub(super) right: Vec3,
+    pub(super) up: Vec3,
+    pub(super) cx: f32,
+    pub(super) cy: f32,
+    pub(super) focal: f32,
+}
+
+/// A face's screen-plane gradients of `1/z`, `s/z` and `t/z`, with `s`/`t`
+/// relative to the eye's, plus the eye's `(s, t)` to add back: what
+/// `D_CalcGradients` (`d_sdivz*`, `d_tdivz*`, `sadjust`, `tadjust`) and
+/// `R_RenderFace` (`d_zi*`) leave for `D_DrawSpans8`.
+///
+/// The split at the eye is id's: `(s - s_eye)/z` is the texinfo axis dotted
+/// with the view ray — about one texel per unit anywhere on screen — while an
+/// absolute `s/z` carries the texture offset and the map coordinate (thousands
+/// of texels) into every step's rounding.
+#[derive(Clone, Copy)]
+pub(super) struct PolyGrads {
+    zi: Linear,
+    sz: Linear,
+    tz: Linear,
+    st_eye: [f64; 2],
+}
+
+/// An eye within this distance of a face's plane sees it edge-on: no pixel.
+const MIN_PLANE_DIST: f64 = 1e-6;
+
+impl PolyGrads {
+    /// The gradients of the face on the plane `normal . p = dist` with texinfo
+    /// `ti` (none: `s = t = 0`), seen from `eye` — all in the face's model space
+    /// (a brush entity passes the eye minus its origin). Analytic, as id derives
+    /// them: `1/z` from the view-space normal over the eye's distance to the
+    /// plane (`R_RenderFace`'s `distinv`), `s/z` and `t/z` from the view-space
+    /// texinfo axes (`D_CalcGradients`' `TransformVector`), in f64. `None` when
+    /// the eye is on the plane.
+    pub(super) fn for_plane(
+        view: &ScreenProj,
+        eye: Vec3,
+        normal: Vec3,
+        dist: f32,
+        ti: Option<&crate::bsp::TexInfo>,
+    ) -> Option<PolyGrads> {
+        let d3 = |a: [f64; 3], b: Vec3| a[0] * b[0] as f64 + a[1] * b[1] as f64 + a[2] * b[2] as f64;
+        let as64 = |v: Vec3| [v[0] as f64, v[1] as f64, v[2] as f64];
+        // TransformVector: into (right, up, forward) components.
+        let tv = |v: [f64; 3]| [d3(v, view.right), d3(v, view.up), d3(v, view.forward)];
+        let eye64 = as64(eye);
+        let (cx, cy) = (view.cx as f64, view.cy as f64);
+        let inv_focal = 1.0 / view.focal as f64;
+        // A view-space vector `p` gives the screen plane `p . (x', y', 1)` with
+        // `x' = (x - cx)/focal`, `y' = (cy - y)/focal` (the ray through (x, y)).
+        let plane = |p: [f64; 3], scale: f64| {
+            let dx = p[0] * inv_focal * scale;
+            let dy = -p[1] * inv_focal * scale;
+            Linear { o: p[2] * scale - cx * dx - cy * dy, dx, dy }
+        };
+        let denom = dist as f64 - d3(eye64, normal);
+        if denom.is_nan() || denom.abs() < MIN_PLANE_DIST {
+            return None;
+        }
+        let zi = plane(tv(as64(normal)), 1.0 / denom);
+        let (sz, tz, st_eye) = match ti {
+            Some(ti) => {
+                let axis = |k: usize| [ti.vecs[k][0] as f64, ti.vecs[k][1] as f64, ti.vecs[k][2] as f64];
+                let st = |k: usize| {
+                    let a = axis(k);
+                    a[0] * eye64[0] + a[1] * eye64[1] + a[2] * eye64[2] + ti.vecs[k][3] as f64
+                };
+                (plane(tv(axis(0)), 1.0), plane(tv(axis(1)), 1.0), [st(0), st(1)])
+            }
+            None => {
+                let zero = Linear { o: 0.0, dx: 0.0, dy: 0.0 };
+                (zero, zero, [0.0, 0.0])
+            }
+        };
+        Some(PolyGrads { zi, sz, tz, st_eye })
+    }
+
+    /// The same gradients recovered from synthetic vertices (their `vz`, and
+    /// `s`/`t` taken as absolute: `st_eye` is zero) — the unit tests' polygons,
+    /// which have no plane. Solved on the vertex triple of LARGEST area, the
+    /// best-conditioned choice. `None` when that triple is degenerate (below
+    /// [`MIN_TRIPLE_AREA2`]) or a vertex is not finite or not in front of the eye.
+    #[cfg(test)]
+    pub(super) fn from_vertices(poly: &[AttrVert]) -> Option<PolyGrads> {
+        let n = poly.len();
+        if n < 3 {
+            return None;
+        }
+        let area2 = |i: usize, j: usize, k: usize| -> f64 {
+            let (a, b, c) = (&poly[i], &poly[j], &poly[k]);
+            let (x1, y1) = (b.x as f64 - a.x as f64, b.y as f64 - a.y as f64);
+            let (x2, y2) = (c.x as f64 - a.x as f64, c.y as f64 - a.y as f64);
+            (x1 * y2 - x2 * y1).abs()
+        };
+        let mut best = (0, 1, 2);
+        let mut best_a = area2(0, 1, 2);
+        for i in 0..n {
+            for j in i + 1..n {
+                for k in j + 1..n {
+                    let a = area2(i, j, k);
+                    if a > best_a {
+                        best_a = a;
+                        best = (i, j, k);
+                    }
+                }
+            }
+        }
+        // A NaN area (a non-finite vertex) is not finite.
+        if !best_a.is_finite() || best_a < MIN_TRIPLE_AREA2 {
+            return None;
+        }
+        let (a, b, c) = (&poly[best.0], &poly[best.1], &poly[best.2]);
+        if a.vz <= 0.0 || b.vz <= 0.0 || c.vz <= 0.0 {
+            return None;
+        }
+        let (ax, ay) = (a.x as f64, a.y as f64);
+        let (x1, y1) = (b.x as f64 - ax, b.y as f64 - ay);
+        let (x2, y2) = (c.x as f64 - ax, c.y as f64 - ay);
+        let inv_det = 1.0 / (x1 * y2 - x2 * y1);
+        // Per-vertex attributes: 1/z, s/z, t/z.
+        let attr = |v: &AttrVert| -> [f64; 3] {
+            let zi = 1.0 / v.vz as f64;
+            [zi, v.s as f64 * zi, v.t as f64 * zi]
+        };
+        let (fa, fb, fc) = (attr(a), attr(b), attr(c));
+        let lin = |k: usize| -> Linear {
+            let (f1, f2) = (fb[k] - fa[k], fc[k] - fa[k]);
+            let dx = (f1 * y2 - f2 * y1) * inv_det;
+            let dy = (f2 * x1 - f1 * x2) * inv_det;
+            Linear { o: fa[k] - dx * ax - dy * ay, dx, dy }
+        };
+        Some(PolyGrads { zi: lin(0), sz: lin(1), tz: lin(2), st_eye: [0.0, 0.0] })
+    }
+}
+
+/// One span of a polygon: pixels `x0..x1` of row `y`, with `1/z`, `s/z` and
+/// `t/z` (eye-relative) at the centre of pixel `x0` and their per-pixel steps —
+/// `D_DrawSpans8`'s `zi`/`sdivz`/`tdivz` and `d_zistepu`/`d_sdivzstepu`/
+/// `d_tdivzstepu`. The span loops step each with one add per pixel, in f64 (the
+/// same cost as f32 in wasm, and no drift worth a texel across 1280 pixels);
+/// the start is evaluated from the planes per span. This is where
+/// `D_DrawSpans16`'s 16-pixel subdivision would go (divide at the segment ends,
+/// step `s`/`t` affinely between).
+#[derive(Clone, Copy)]
+struct Span {
+    y: usize,
+    x0: usize,
+    x1: usize,
+    zi: f64,
+    sz: f64,
+    tz: f64,
+    dzi: f64,
+    dsz: f64,
+    dtz: f64,
+}
+
+/// Below this |2 x area| (in square pixels) even the best vertex triple of a
+/// polygon is degenerate: an edge-on sliver that covers (next to) no pixel
+/// centre, whose gradients would be noise ([`PolyGrads::from_vertices`]).
+#[cfg(test)]
+const MIN_TRIPLE_AREA2: f64 = 1e-6;
+
+/// Scan-convert the convex screen polygon `poly` (either winding) under the fill
+/// rule above, clipped to the `w`x`h` screen, calling `f` once per non-empty
+/// span with the accumulators from `grads`.
+///
+/// Each row's `[x_left, x_right)` is the min/max crossing of the edges that
+/// straddle the row's centre line; a convex polygon has exactly two (a top
+/// vertex row gives an empty span, horizontal edges never cross). The polygon
+/// is the clipped face `draw_world_textured` built, so this is `O(rows x edges)`
+/// setup plus the pixels themselves — no bounding box, no inside test.
+fn scan_poly(poly: &[ProjT], w: usize, h: usize, grads: &PolyGrads, mut f: impl FnMut(Span)) {
+    let n = poly.len();
+    if n < 3 || w == 0 || h == 0 {
+        return;
+    }
+    let mut ymin = f64::INFINITY;
+    let mut ymax = f64::NEG_INFINITY;
+    for v in poly {
+        if !(v.x.is_finite() && v.y.is_finite()) {
+            return;
+        }
+        ymin = ymin.min(v.y as f64);
+        ymax = ymax.max(v.y as f64);
+    }
+    // Rows whose centre `py + 0.5` is in [ymin, ymax).
+    let py0 = (ymin - 0.5).ceil().max(0.0) as usize;
+    let py1 = ((ymax - 0.5).ceil().min(h as f64)).max(0.0) as usize;
+    let (dzi, dsz, dtz) = (grads.zi.dx, grads.sz.dx, grads.tz.dx);
+    for py in py0..py1 {
+        let cy = py as f64 + 0.5;
+        let mut xl = f64::INFINITY;
+        let mut xr = f64::NEG_INFINITY;
+        for i in 0..n {
+            let (p, q) = (&poly[i], &poly[if i + 1 == n { 0 } else { i + 1 }]);
+            // Canonical direction: top (smaller y) to bottom; horizontal: skip.
+            let (top, bot) = if p.y < q.y {
+                (p, q)
+            } else if q.y < p.y {
+                (q, p)
+            } else {
+                continue;
+            };
+            let (ty, by) = (top.y as f64, bot.y as f64);
+            if cy < ty || cy >= by {
+                continue;
+            }
+            let slope = (bot.x as f64 - top.x as f64) / (by - ty);
+            let x = top.x as f64 + (cy - ty) * slope;
+            xl = xl.min(x);
+            xr = xr.max(x);
+        }
+        // No crossing leaves (+inf, -inf); a top vertex row, a single point.
+        if xl >= xr {
+            continue;
+        }
+        // Columns whose centre `px + 0.5` is in [xl, xr).
+        let x0 = (xl - 0.5).ceil().max(0.0) as usize;
+        let x1 = ((xr - 0.5).ceil().min(w as f64)).max(0.0) as usize;
+        if x0 >= x1 {
+            continue;
+        }
+        let cx = x0 as f64 + 0.5;
+        f(Span {
+            y: py,
+            x0,
+            x1,
+            zi: grads.zi.at(cx, cy),
+            sz: grads.sz.at(cx, cy),
+            tz: grads.tz.at(cx, cy),
+            dzi,
+            dsz,
+            dtz,
+        });
+    }
+}
+
+/// A flat-coloured polygon (textureless faces): the span walker with the
+/// z test and write only.
+pub(super) fn raster_poly_flat(
     image: &mut Image,
     zbuf: &mut [f32],
-    v0: ProjT,
-    v1: ProjT,
-    v2: ProjT,
+    poly: &[ProjT],
+    grads: &PolyGrads,
+    color: [u8; 3],
+) {
+    let (w, h) = (image.w, image.h);
+    if zbuf.len() < w * h || image.rgb.len() < w * h {
+        return;
+    }
+    scan_poly(poly, w, h, grads, |sp| {
+        let row = sp.y * w;
+        let zrow = &mut zbuf[row + sp.x0..row + sp.x1];
+        let crow = &mut image.rgb[row + sp.x0..row + sp.x1];
+        let mut zi = sp.zi;
+        for (zc, c) in zrow.iter_mut().zip(crow.iter_mut()) {
+            if zi > 0.0 {
+                let depth = (1.0 / zi) as f32;
+                if depth < *zc {
+                    *zc = depth;
+                    *c = color;
+                }
+            }
+            zi += sp.dzi;
+        }
+    });
+}
+
+/// Perspective-correct textured polygon, the per-pixel path: turb, sky, walls
+/// without a baked surface block (no colormap, or no lightmap). `pixels` is
+/// `tw * th` palette indices. Every pixel pays the texture sample, the lightmap
+/// factor and the colormap row (see [`raster_poly_cached`] for the cached walls).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn raster_poly_tex(
+    image: &mut Image,
+    zbuf: &mut [f32],
+    poly: &[ProjT],
+    grads: &PolyGrads,
     pixels: &[u8],
     tw: usize,
     th: usize,
@@ -205,134 +537,92 @@ pub(super) fn raster_triangle_tex(
     mode: SurfaceMode,
     colormap: Option<&[u8]>,
 ) {
-    let w = image.w;
-    let h = image.h;
+    let (w, h) = (image.w, image.h);
     if w == 0 || h == 0 || tw == 0 || th == 0 || pixels.len() < tw * th {
+        return;
+    }
+    if zbuf.len() < w * h || image.rgb.len() < w * h {
         return;
     }
     // Only use a correctly-sized colormap; a malformed one falls back to the
     // linear multiply (never reads out of bounds).
     let colormap = colormap.filter(|cm| cm.len() >= COLORMAP_LEN);
-    let min_xf = v0.x.min(v1.x).min(v2.x);
-    let max_xf = v0.x.max(v1.x).max(v2.x);
-    let min_yf = v0.y.min(v1.y).min(v2.y);
-    let max_yf = v0.y.max(v1.y).max(v2.y);
-    if !(min_xf.is_finite() && max_xf.is_finite() && min_yf.is_finite() && max_yf.is_finite()) {
-        return;
-    }
-    let min_x = min_xf.floor().max(0.0) as i64;
-    let max_x = max_xf.ceil().min((w as i64 - 1) as f32) as i64;
-    let min_y = min_yf.floor().max(0.0) as i64;
-    let max_y = max_yf.ceil().min((h as i64 - 1) as f32) as i64;
-    if min_x > max_x || min_y > max_y {
-        return;
-    }
-    let area = edge(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y);
-    if area.abs() < 1e-6 {
-        return;
-    }
-    let inv_area = 1.0 / area;
-    let (iz0, iz1, iz2) = (1.0 / v0.vz, 1.0 / v1.vz, 1.0 / v2.vz);
-    let (soz0, soz1, soz2) = (v0.s * iz0, v1.s * iz1, v2.s * iz2);
-    let (toz0, toz1, toz2) = (v0.t * iz0, v1.t * iz1, v2.t * iz2);
-    // The barycentric weights are LINEAR in the pixel position, so step them
-    // incrementally (3 adds/pixel) instead of three full `edge()` cross-products
-    // per pixel — the classic span-rasteriser speedup Quake's D_DrawSpans used.
-    // `w_i` is recomputed exactly via `edge()` at each ROW START (so drift never
-    // accumulates across rows), then advanced by `dw_i_dx` across the row. The
-    // accumulation differs from a per-pixel recompute by at most a few ULPs over a
-    // row, which can only flip the inside-test on a sub-pixel sliver at a triangle
-    // edge — visually identical.
-    let dw0dx = -(v2.y - v1.y) * inv_area;
-    let dw1dx = -(v0.y - v2.y) * inv_area;
-    let dw2dx = -(v1.y - v0.y) * inv_area;
+    let st_eye = grads.st_eye;
     // A deferred sky face records its pixels instead of drawing them (one
-    // borrow per triangle).
+    // borrow per polygon).
     let mut sky_defer = match mode {
         SurfaceMode::Sky { defer: Some((cell, key)), .. } => Some((cell.borrow_mut(), key)),
         _ => None,
     };
-
-    for py in min_y..=max_y {
-        let sy = py as f32 + 0.5;
-        let sx0 = min_x as f32 + 0.5;
-        let mut w0 = edge(v1.x, v1.y, v2.x, v2.y, sx0, sy) * inv_area;
-        let mut w1 = edge(v2.x, v2.y, v0.x, v0.y, sx0, sy) * inv_area;
-        let mut w2 = edge(v0.x, v0.y, v1.x, v1.y, sx0, sy) * inv_area;
-        for px in min_x..=max_x {
-            // A labelled block so the early-outs can `break 'pixel` to the per-pixel
-            // weight step below (a `continue` would skip the increment and desync).
+    scan_poly(poly, w, h, grads, |sp| {
+        let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
+        for px in sp.x0..sp.x1 {
+            // A labelled block so the early-outs still reach the accumulator
+            // step below.
             'pixel: {
-            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                break 'pixel;
-            }
-            // Perspective-correct depth (1/z interpolation, then invert), matching
-            // Quake's `zi`-keyed z-buffer and the flat path. `inv_z` is reused for
-            // the s/t perspective divide below, so this costs nothing extra.
-            let inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
-            if inv_z <= 0.0 {
-                break 'pixel;
-            }
-            let depth = 1.0 / inv_z;
-            let idx = (py as usize) * w + (px as usize);
-            let zc = match zbuf.get_mut(idx) {
-                Some(z) => z,
-                None => break 'pixel,
-            };
-            if depth >= *zc {
-                break 'pixel;
-            }
-            // Perspective divide reuses `depth` (= 1/inv_z) as a multiply instead of
-            // two more reciprocals — the affine numerators times 1/z. (Differs from
-            // `/inv_z` by at most a ULP, which never crosses a texel boundary.)
-            let s = (w0 * soz0 + w1 * soz1 + w2 * soz2) * depth;
-            let t = (w0 * toz0 + w1 * toz1 + w2 * toz2) * depth;
+                // 1/z is positive inside a polygon in front of the eye; guard
+                // the rounding at a near-clipped edge.
+                if zi <= 0.0 {
+                    break 'pixel;
+                }
+                let z = 1.0 / zi;
+                let depth = z as f32;
+                let idx = sp.y * w + px;
+                let zc = &mut zbuf[idx];
+                if depth >= *zc {
+                    break 'pixel;
+                }
+                // The perspective divide, then the eye's (s,t) added back
+                // (id's sadjust/tadjust).
+                let s = (sz * z + st_eye[0]) as f32;
+                let t = (tz * z + st_eye[1]) as f32;
 
-            // Resolve the palette index and per-pixel brightness per surface
-            // mode. Liquids/sky are fullbright (brightness 1.0, no lightmap);
-            // walls keep the lightmap-or-`shade` brightness.
-            let (texel, brightness) = match mode {
-                SurfaceMode::Normal => {
-                    let tx = (s as i64).rem_euclid(tw as i64) as usize;
-                    let ty = (t as i64).rem_euclid(th as i64) as usize;
-                    let p = match pixels.get(ty * tw + tx) {
-                        Some(&p) => p as usize,
-                        None => break 'pixel,
-                    };
-                    // A baked lightmap (indexed by the same surface (s,t), which
-                    // shares the texinfo axes) replaces the flat Lambert `shade`.
-                    let b = match lightmap {
-                        Some(lm) => lm.factor_at(s, t),
-                        None => shade,
-                    };
-                    (p, b)
-                }
-                SurfaceMode::Turb { turb, time } => {
-                    // SIN-warp the (s,t) before the (tiling) wrap; unlit.
-                    let (s2, t2) = warp_st(turb, s, t, time);
-                    let tx = s2.rem_euclid(tw as i32) as usize;
-                    let ty = t2.rem_euclid(th as i32) as usize;
-                    let p = match pixels.get(ty * tw + tx) {
-                        Some(&p) => p as usize,
-                        None => break 'pixel,
-                    };
-                    (p, 1.0)
-                }
-                SurfaceMode::Sky { view, .. } => {
-                    if let Some((spans, key)) = sky_defer.as_mut() {
-                        // Drawn later, span by span (`resolve_sky_spans`).
-                        *zc = depth;
-                        spans.record(idx, py as usize, *key, depth);
-                        break 'pixel;
+                // Resolve the palette index and per-pixel brightness per surface
+                // mode. Liquids/sky are fullbright (brightness 1.0, no lightmap);
+                // walls keep the lightmap-or-`shade` brightness.
+                let (texel, brightness) = match mode {
+                    SurfaceMode::Normal => {
+                        let tx = (s as i64).rem_euclid(tw as i64) as usize;
+                        let ty = (t as i64).rem_euclid(th as i64) as usize;
+                        let p = match pixels.get(ty * tw + tx) {
+                            Some(&p) => p as usize,
+                            None => break 'pixel,
+                        };
+                        // A baked lightmap (indexed by the same surface (s,t),
+                        // which shares the texinfo axes) replaces the flat
+                        // Lambert `shade`.
+                        let b = match lightmap {
+                            Some(lm) => lm.factor_at(s, t),
+                            None => shade,
+                        };
+                        (p, b)
                     }
-                    // Project the pixel's VIEW DIRECTION onto the scrolling sky
-                    // dome (`D_Sky_uv_To_st`) — the sky does not use wall (s,t).
-                    // id passes the integer pixel `(u,v)`; unlit.
-                    (sky_texel_view(pixels, tw, px as i32, py as i32, &view) as usize, 1.0)
-                }
-            };
-            *zc = depth;
-            if let Some(p) = image.rgb.get_mut(idx) {
+                    SurfaceMode::Turb { turb, time } => {
+                        // SIN-warp the (s,t) before the (tiling) wrap; unlit.
+                        let (s2, t2) = warp_st(turb, s, t, time);
+                        let tx = s2.rem_euclid(tw as i32) as usize;
+                        let ty = t2.rem_euclid(th as i32) as usize;
+                        let p = match pixels.get(ty * tw + tx) {
+                            Some(&p) => p as usize,
+                            None => break 'pixel,
+                        };
+                        (p, 1.0)
+                    }
+                    SurfaceMode::Sky { view, .. } => {
+                        if let Some((spans, key)) = sky_defer.as_mut() {
+                            // Drawn later, span by span (`resolve_sky_spans`).
+                            *zc = depth;
+                            spans.record(idx, sp.y, *key, depth);
+                            break 'pixel;
+                        }
+                        // Project the pixel's VIEW DIRECTION onto the scrolling
+                        // sky dome (`D_Sky_uv_To_st`) — the sky does not use wall
+                        // (s,t). id passes the integer pixel `(u,v)`; unlit.
+                        (sky_texel_view(pixels, tw, px as i32, sp.y as i32, &view) as usize, 1.0)
+                    }
+                };
+                *zc = depth;
+                let p = &mut image.rgb[idx];
                 match colormap {
                     // Quake's exact software shading: pick a colormap ROW from
                     // the brightness, then index the colormap to get a PALETTE
@@ -363,139 +653,78 @@ pub(super) fn raster_triangle_tex(
                         ];
                     }
                 }
-            }
             } // 'pixel
-            // Step the barycentric weights one pixel across the row (always, even on
-            // an early-out, so the running values stay in sync with `px`).
-            w0 += dw0dx;
-            w1 += dw1dx;
-            w2 += dw2dx;
+            zi += sp.dzi;
+            sz += sp.dsz;
+            tz += sp.dtz;
         }
-    }
+    });
 }
 
-/// Fast rasteriser for a wall whose lit+colormapped surface block is already baked
-/// (see [`face_surf_block`](super::surf::face_surf_block)) — Quake's `D_DrawSpans` over a cached surface. Same
-/// perspective-correct projection, incremental-edge stepping, near-clip handling
-/// and z-test as [`raster_triangle_tex`], but the inner pixel is ONE block read
-/// (the texture, lightmap and colormap are already folded into the block) plus a
-/// palette lookup, instead of a texture sample + bilinear lightmap + colormap row
-/// + colormap index per pixel. This is the warm-frame hot path for static walls.
+/// A wall whose lit+colormapped surface block is already baked (see
+/// [`face_surf_block`](super::surf::face_surf_block)) — `D_DrawSpans8` over a
+/// cached surface. The inner pixel is ONE block read (texture, lightmap and
+/// colormap are folded into the block) plus a palette lookup; the z test and
+/// write stay. This is the warm-frame hot path for walls.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn raster_triangle_cached(
+pub(super) fn raster_poly_cached(
     image: &mut Image,
     zbuf: &mut [f32],
-    v0: ProjT,
-    v1: ProjT,
-    v2: ProjT,
+    poly: &[ProjT],
+    grads: &PolyGrads,
     block: &[u8],
     bw: usize,
     bh: usize,
     texmins: [f32; 2],
     palette: &[[u8; 3]; 256],
 ) {
-    let w = image.w;
-    let h = image.h;
+    let (w, h) = (image.w, image.h);
     if w == 0 || h == 0 || bw == 0 || bh == 0 || block.len() < bw.saturating_mul(bh) {
         return;
     }
-    let min_xf = v0.x.min(v1.x).min(v2.x);
-    let max_xf = v0.x.max(v1.x).max(v2.x);
-    let min_yf = v0.y.min(v1.y).min(v2.y);
-    let max_yf = v0.y.max(v1.y).max(v2.y);
-    if !(min_xf.is_finite() && max_xf.is_finite() && min_yf.is_finite() && max_yf.is_finite()) {
+    if zbuf.len() < w * h || image.rgb.len() < w * h {
         return;
     }
-    let min_x = min_xf.floor().max(0.0) as i64;
-    let max_x = max_xf.ceil().min((w as i64 - 1) as f32) as i64;
-    let min_y = min_yf.floor().max(0.0) as i64;
-    let max_y = max_yf.ceil().min((h as i64 - 1) as f32) as i64;
-    if min_x > max_x || min_y > max_y {
-        return;
-    }
-    let area = edge(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y);
-    if area.abs() < 1e-6 {
-        return;
-    }
-    let inv_area = 1.0 / area;
-    let (iz0, iz1, iz2) = (1.0 / v0.vz, 1.0 / v1.vz, 1.0 / v2.vz);
-    let (soz0, soz1, soz2) = (v0.s * iz0, v1.s * iz1, v2.s * iz2);
-    let (toz0, toz1, toz2) = (v0.t * iz0, v1.t * iz1, v2.t * iz2);
-    let dw0dx = -(v2.y - v1.y) * inv_area;
-    let dw1dx = -(v0.y - v2.y) * inv_area;
-    let dw2dx = -(v1.y - v0.y) * inv_area;
-    // Per-pixel-x derivatives of the perspective accumulators. `inv_z`, `s/z` and
-    // `t/z` are each EXACTLY linear in screen x (they are linear combinations of the
-    // barycentric weights, which themselves step by `dw*dx` per pixel), so they can
-    // be advanced with a single add per pixel instead of re-dotting the three weights
-    // every pixel — removing ~9 multiplies/pixel. We still step w0/w1/w2 for the
-    // edge inside-test. (Additive accumulation differs from the per-pixel re-dot by
-    // a few ULPs across a span — the same negligible drift class as the incremental
-    // edge stepping; verified to leave the world render essentially unchanged.)
-    let dinvz = iz0 * dw0dx + iz1 * dw1dx + iz2 * dw2dx;
-    let dsoz = soz0 * dw0dx + soz1 * dw1dx + soz2 * dw2dx;
-    let dtoz = toz0 * dw0dx + toz1 * dw1dx + toz2 * dw2dx;
+    let st_eye = grads.st_eye;
     let (bw_i, bh_i) = (bw as i64, bh as i64);
-
-    // Local written-pixel tally (overdraw metric), folded into the profiler ONCE at
-    // the end so the hot loop never touches a thread-local.
+    // `D_DrawSpans8`'s 16.16 texel arithmetic: `z = 0x10000 / zi`, then
+    // `s = (int)(sdivz * z) + sadjust` — the eye-relative part truncated toward
+    // zero, the eye's block coordinate `sadjust` rounded — and the texel
+    // `s >> 16`. In f64, so the texel is the exact perspective one up to id's
+    // own 1/65536 steps. (The z-buffer's `z * 2^-16` is a power-of-two scale:
+    // bit-identical to `1.0 / zi`, which the other span loops store.)
+    let sadjust = ((st_eye[0] - texmins[0] as f64) * 65536.0 + 0.5).floor() as i64;
+    let tadjust = ((st_eye[1] - texmins[1] as f64) * 65536.0 + 0.5).floor() as i64;
+    // Local written-pixel tally (overdraw metric), folded into the profiler ONCE
+    // at the end so the hot loop never touches a thread-local.
     let mut drawn = 0u64;
-    // min_x/max_x are clamped to 0..w and min_y/max_y to 0..h above, so every row's
-    // [xa, xb] slice of the framebuffer and z-buffer is provably in bounds. Taking a
-    // per-row &mut slice and indexing it with the LOCAL offset `px - xa` lets the
-    // compiler drop the per-pixel bounds checks the old `get_mut(idx)` paid on every
-    // covered pixel — the span-oriented access Quake's D_DrawSpans used. The texel
-    // read still clamps (block extent is independent of the screen rect). Output is
-    // identical: same pixels, same values, same z-writes.
-    let xa = min_x as usize;
-    let xb = max_x as usize;
-    let span = xb - xa + 1;
-    for py in min_y..=max_y {
-        let sy = py as f32 + 0.5;
-        let sx0 = xa as f32 + 0.5;
-        let mut w0 = edge(v1.x, v1.y, v2.x, v2.y, sx0, sy) * inv_area;
-        let mut w1 = edge(v2.x, v2.y, v0.x, v0.y, sx0, sy) * inv_area;
-        let mut w2 = edge(v0.x, v0.y, v1.x, v1.y, sx0, sy) * inv_area;
-        // Row-start perspective accumulators (exact dot at the first pixel of the
-        // row; stepped by the derivatives after each pixel).
-        let mut inv_z = w0 * iz0 + w1 * iz1 + w2 * iz2;
-        let mut soz = w0 * soz0 + w1 * soz1 + w2 * soz2;
-        let mut toz = w0 * toz0 + w1 * toz1 + w2 * toz2;
-        let row = (py as usize) * w;
-        let zrow = &mut zbuf[row + xa..row + xa + span];
-        let crow = &mut image.rgb[row + xa..row + xa + span];
-        for k in 0..span {
-            'pixel: {
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                    break 'pixel;
+    scan_poly(poly, w, h, grads, |sp| {
+        let row = sp.y * w;
+        // Per-span row slices: in bounds by the span's screen clip, so the loop
+        // indexes them without per-pixel bounds checks.
+        let zrow = &mut zbuf[row + sp.x0..row + sp.x1];
+        let crow = &mut image.rgb[row + sp.x0..row + sp.x1];
+        let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
+        for (zc, c) in zrow.iter_mut().zip(crow.iter_mut()) {
+            if zi > 0.0 {
+                let z = 65536.0 / zi;
+                let depth = (z * (1.0 / 65536.0)) as f32;
+                if depth < *zc {
+                    // Nearest surface texel within the block extent (the block is
+                    // 1:1 with surface texels at mip 0). The clamp keeps a texel
+                    // read in the block, as `bbextents` does in id's span loop.
+                    let bx = ((((sz * z) as i64) + sadjust) >> 16).clamp(0, bw_i - 1) as usize;
+                    let by = ((((tz * z) as i64) + tadjust) >> 16).clamp(0, bh_i - 1) as usize;
+                    *zc = depth;
+                    *c = palette[block[by * bw + bx] as usize];
+                    drawn += 1;
                 }
-                if inv_z <= 0.0 {
-                    break 'pixel;
-                }
-                let depth = 1.0 / inv_z;
-                let zc = &mut zrow[k];
-                if depth >= *zc {
-                    break 'pixel;
-                }
-                let s = soz * depth;
-                let t = toz * depth;
-                // Nearest surface texel within the block extent (the block is 1:1
-                // with surface texels at mip 0).
-                let bx = ((s - texmins[0]) as i64).clamp(0, bw_i - 1) as usize;
-                let by = ((t - texmins[1]) as i64).clamp(0, bh_i - 1) as usize;
-                let pal_idx = block[by * bw + bx] as usize;
-                *zc = depth;
-                crow[k] = palette[pal_idx];
-                drawn += 1;
             }
-            w0 += dw0dx;
-            w1 += dw1dx;
-            w2 += dw2dx;
-            inv_z += dinvz;
-            soz += dsoz;
-            toz += dtoz;
+            zi += sp.dzi;
+            sz += sp.dsz;
+            tz += sp.dtz;
         }
-    }
+    });
     stat(|s| s.world_pixels += drawn);
 }
 
@@ -540,11 +769,13 @@ mod tests {
         let render = |colormap: Option<&[u8]>| {
             let mut img = Image::new(w, h, [0, 0, 0]);
             let mut zb = vec![f32::INFINITY; w * h];
-            let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
-            raster_triangle_tex(
-                &mut img, &mut zb, v0, v1, v2,
+            let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
+            let tri = [v0, v1, v2];
+            let g = PolyGrads::from_vertices(&tri).expect("triangle");
+            raster_poly_tex(
+                &mut img, &mut zb, &outline(&tri), &g,
                 &pixels, 1, 1, &pal, shade, None, SurfaceMode::Normal,
                 colormap,
             );
@@ -603,11 +834,13 @@ mod tests {
         let (w, h) = (16usize, 16usize);
         let mut img = Image::new(w, h, [0, 0, 0]);
         let mut zb = vec![f32::INFINITY; w * h];
-        let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-        let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-        let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
-        raster_triangle_tex(
-            &mut img, &mut zb, v0, v1, v2,
+        let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+        let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+        let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
+        let tri = [v0, v1, v2];
+        let g = PolyGrads::from_vertices(&tri).expect("triangle");
+        raster_poly_tex(
+            &mut img, &mut zb, &outline(&tri), &g,
             &pixels, 64, 64, &pal, 1.0, None,
             SurfaceMode::Turb { turb: &turb, time: 0.0 },
             Some(&cm),
@@ -617,5 +850,198 @@ mod tests {
         for p in &drawn {
             assert_eq!(*p, [TEXEL, TEXEL, TEXEL], "turb must store the raw texel, no colormap");
         }
+    }
+
+    // -- The polygon span walker's fill rule --------------------------------
+
+    /// Coverage mask of `poly` under the span walker's fill rule: 1 where the
+    /// polygon draws (fresh z-buffer, so nothing is z-rejected).
+    fn coverage(poly: &[AttrVert], w: usize, h: usize) -> Vec<u8> {
+        let mut img = Image::new(w, h, [0, 0, 0]);
+        let mut zb = vec![f32::INFINITY; w * h];
+        if let Some(g) = PolyGrads::from_vertices(poly) {
+            raster_poly_flat(&mut img, &mut zb, &outline(poly), &g, [255, 255, 255]);
+        }
+        img.rgb.iter().map(|p| (p[0] == 255) as u8).collect()
+    }
+
+    fn pv(x: f32, y: f32, vz: f32) -> AttrVert {
+        AttrVert { x, y, vz, s: 0.0, t: 0.0 }
+    }
+
+    /// A tiny deterministic generator (no deps): coordinates with fractions.
+    struct Lcg(u64);
+    impl Lcg {
+        fn f(&mut self, lo: f32, hi: f32) -> f32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lo + (hi - lo) * ((self.0 >> 40) as f32 / (1u64 << 24) as f32)
+        }
+    }
+
+    /// No crack, no double draw: a convex polygon cut into a fan of pieces
+    /// around an interior point — every shared edge walked in opposite
+    /// directions by its two pieces — is covered exactly once per pixel, and
+    /// exactly where the whole polygon is. Random vertices, including ones off
+    /// screen, many trials.
+    #[test]
+    fn shared_edges_split_pixels_exactly_once() {
+        let (w, h) = (48usize, 40usize);
+        let mut rng = Lcg(0x5eed);
+        for trial in 0..300 {
+            // A convex polygon: points on an ellipse at sorted random angles.
+            let n = 3 + (trial % 6);
+            let (cx, cy) = (rng.f(-8.0, 56.0), rng.f(-8.0, 48.0));
+            let (rx, ry) = (rng.f(2.0, 40.0), rng.f(2.0, 40.0));
+            let mut angles: Vec<f32> = (0..n).map(|_| rng.f(0.0, std::f32::consts::TAU)).collect();
+            angles.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // A plane in view space: 1/z linear over the screen, positive here.
+            // (|x|, |y| < 100 here, so 1/z >= 0.03 - 0.02 > 0: in front of the eye.)
+            let (za, zb, zc) = (rng.f(0.03, 0.2), rng.f(-1e-4, 1e-4), rng.f(-1e-4, 1e-4));
+            let on_plane = |x: f32, y: f32| pv(x, y, 1.0 / (za + zb * x + zc * y));
+            let poly: Vec<AttrVert> =
+                angles.iter().map(|a| on_plane(cx + rx * a.cos(), cy + ry * a.sin())).collect();
+            let whole = coverage(&poly, w, h);
+            // Fan pieces around the centroid.
+            let (mut sx, mut sy) = (0.0, 0.0);
+            for v in &poly {
+                sx += v.x / n as f32;
+                sy += v.y / n as f32;
+            }
+            let c = on_plane(sx, sy);
+            let mut sum = vec![0u8; w * h];
+            for i in 0..n {
+                let piece = [c, poly[i], poly[(i + 1) % n]];
+                for (s, p) in sum.iter_mut().zip(coverage(&piece, w, h)) {
+                    *s += p;
+                }
+            }
+            for (k, (&s, &wh)) in sum.iter().zip(&whole).enumerate() {
+                assert!(s <= 1, "trial {trial}: pixel {k} drawn {s} times (double draw)");
+                // A sliver piece may be dropped by the determinant guard only
+                // if it covers no pixel centre; so the pieces tile the whole.
+                assert_eq!(s, wh, "trial {trial}: pixel {k} pieces {s} vs whole {wh} (crack)");
+            }
+        }
+    }
+
+    /// Pixel centres exactly on an edge go to one side: the left and top edges
+    /// are inclusive, the right and bottom exclusive (id's `R_EmitEdge` /
+    /// `R_GenerateSpans` rule).
+    #[test]
+    fn fill_rule_is_top_left_half_open() {
+        let (w, h) = (8usize, 8usize);
+        // A square whose edges run exactly through pixel centres: x in [2.5, 5.5),
+        // y in [1.5, 4.5) -> columns 2..=4, rows 1..=3.
+        let sq = [pv(2.5, 1.5, 1.0), pv(5.5, 1.5, 1.0), pv(5.5, 4.5, 1.0), pv(2.5, 4.5, 1.0)];
+        let cov = coverage(&sq, w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let want = (2..=4).contains(&x) && (1..=3).contains(&y);
+                assert_eq!(cov[y * w + x] == 1, want, "pixel ({x},{y})");
+            }
+        }
+        // The same square in the other winding covers the same pixels.
+        let rev: Vec<AttrVert> = sq.iter().rev().copied().collect();
+        assert_eq!(coverage(&rev, w, h), cov);
+    }
+
+    /// The degenerate guard: a zero-area polygon draws nothing and a
+    /// non-finite vertex is rejected without panicking.
+    #[test]
+    fn degenerate_polygons_draw_nothing() {
+        let (w, h) = (8usize, 8usize);
+        let line = [pv(0.0, 0.0, 1.0), pv(4.0, 4.0, 1.0), pv(8.0, 8.0, 1.0)];
+        assert!(coverage(&line, w, h).iter().all(|&c| c == 0));
+        let bad = [pv(0.0, 0.0, 1.0), pv(f32::NAN, 4.0, 1.0), pv(8.0, 0.0, 1.0)];
+        assert!(coverage(&bad, w, h).iter().all(|&c| c == 0));
+        let inf = [pv(0.0, 0.0, 1.0), pv(f32::INFINITY, 4.0, 1.0), pv(8.0, 0.0, 1.0)];
+        assert!(coverage(&inf, w, h).iter().all(|&c| c == 0));
+    }
+
+    /// The gradients reproduce the vertices' perspective attributes: a
+    /// polygon's s/t at a pixel centre match the exact perspective-correct
+    /// value, whichever vertex triple the solve picked.
+    #[test]
+    fn gradients_are_perspective_correct() {
+        // Four view-space points on the plane vz = 6 + 0.5*vx + 0.3*vy.
+        let focal = 16.0f32;
+        let pts = [(-3.0f32, -2.0f32), (5.0, -2.5), (6.0, 4.0), (-4.0, 3.0)]
+            .map(|(vx, vy)| (vx, vy, 6.0 + 0.5 * vx + 0.3 * vy));
+        // s = 10*vx + 3, t = 7*vy - 1 (affine in world space, as texinfo is).
+        let poly: Vec<AttrVert> = pts
+            .iter()
+            .map(|&(vx, vy, vz)| AttrVert {
+                x: 16.0 + focal * vx / vz,
+                y: 16.0 - focal * vy / vz,
+                vz,
+                s: 10.0 * vx + 3.0,
+                t: 7.0 * vy - 1.0,
+            })
+            .collect();
+        let g = PolyGrads::from_vertices(&poly).expect("well-conditioned quad");
+        let mut checked = 0;
+        scan_poly(&outline(&poly), 32, 32, &g, |sp| {
+            let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
+            for px in sp.x0..sp.x1 {
+                // The view ray through this pixel centre hits the plane through
+                // the four points; recover (vx, vy, vz) from 1/z exactly.
+                let z = 1.0 / zi;
+                let focal = focal as f64;
+                let vx = (px as f64 + 0.5 - 16.0) * z / focal;
+                let vy = (16.0 - (sp.y as f64 + 0.5)) * z / focal;
+                assert!((sz * z - (10.0 * vx + 3.0)).abs() < 1e-4, "s at ({px},{})", sp.y);
+                assert!((tz * z - (7.0 * vy - 1.0)).abs() < 1e-4, "t at ({px},{})", sp.y);
+                checked += 1;
+                zi += sp.dzi;
+                sz += sp.dsz;
+                tz += sp.dtz;
+            }
+        });
+        assert!(checked > 20, "the quad covers pixels");
+    }
+
+    /// `PolyGrads::for_plane` (the analytic `D_CalcGradients`) reproduces, at
+    /// the projection of points on the plane, their exact 1/z and texinfo (s,t)
+    /// — for a world face and for a brush-entity face in its local frame.
+    #[test]
+    fn plane_gradients_match_projected_points() {
+        use crate::math::{cross, dot, normalize};
+        let cam = crate::render::Camera::looking_at([10.0, -20.0, 30.0], [200.0, 50.0, -10.0], 90.0);
+        let (forward, right, up) = cam.basis();
+        let (cx, cy, focal) = (160.0f32, 100.0f32, 160.0f32);
+        let view = ScreenProj { forward, right, up, cx, cy, focal };
+        let (n, _) = normalize([0.3, -0.5, 0.8]);
+        let dist = 40.0f32;
+        let ti = crate::bsp::TexInfo {
+            vecs: [[1.0, 0.0, 0.0, 5.5], [0.0, 0.7, 0.7, -3.0]],
+            miptex: 0,
+            flags: 0,
+        };
+        let (u, _) = normalize(cross(n, [0.0, 0.0, 1.0]));
+        let v = cross(n, u);
+        for origin in [[0.0f32; 3], [64.0, -32.0, 8.0]] {
+            // The model's frame: the plane and texinfo are local; the eye too.
+            let eye = [cam.pos[0] - origin[0], cam.pos[1] - origin[1], cam.pos[2] - origin[2]];
+            let g = PolyGrads::for_plane(&view, eye, n, dist, Some(&ti)).expect("eye off the plane");
+            for (a, b) in [(0.0f32, 0.0f32), (150.0, 20.0), (-80.0, 90.0), (300.0, -120.0)] {
+                let p = [n[0] * dist + a * u[0] + b * v[0], n[1] * dist + a * u[1] + b * v[1], n[2] * dist + a * u[2] + b * v[2]];
+                let rel = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+                let (vx, vy, vz) = (dot(rel, right), dot(rel, up), dot(rel, forward));
+                if vz <= 1.0 {
+                    continue;
+                }
+                let (x, y) = ((cx + focal * vx / vz) as f64, (cy - focal * vy / vz) as f64);
+                let zi = g.zi.at(x, y);
+                let s = g.sz.at(x, y) / zi + g.st_eye[0];
+                let t = g.tz.at(x, y) / zi + g.st_eye[1];
+                let want_s = (p[0] * 1.0 + 5.5) as f64;
+                let want_t = (p[1] * 0.7 + p[2] * 0.7 - 3.0) as f64;
+                assert!((zi * vz as f64 - 1.0).abs() < 1e-4, "1/z at ({a},{b}): {zi} vs {}", 1.0 / vz);
+                assert!((s - want_s).abs() < 2e-3, "s at ({a},{b}): {s} vs {want_s}");
+                assert!((t - want_t).abs() < 2e-3, "t at ({a},{b}): {t} vs {want_t}");
+            }
+        }
+        // An eye on the plane sees it edge-on: no gradients.
+        assert!(PolyGrads::for_plane(&view, [5.0, 7.0, 40.0], [0.0, 0.0, 1.0], 40.0, None).is_none());
     }
 }

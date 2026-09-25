@@ -294,7 +294,7 @@ mod tests {
     use super::*;
     use crate::math::{cross, normalize};
     use crate::render::fixtures::synthetic_sky_pixels;
-    use crate::render::raster::{raster_triangle_tex, ProjT, SurfaceMode};
+    use crate::render::raster::{outline, raster_poly_tex, AttrVert, PolyGrads, SurfaceMode};
 
     #[test]
     fn sky_sampler_renders_nonbackground_and_animates() {
@@ -326,11 +326,13 @@ mod tests {
             let mut zb = vec![f32::INFINITY; w * h];
             // The (s,t) here are IGNORED by the sky path (it uses the view ray),
             // but a covering triangle is still needed to rasterise the screen area.
-            let v0 = ProjT { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v1 = ProjT { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
-            let v2 = ProjT { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
-            raster_triangle_tex(
-                &mut img, &mut zb, v0, v1, v2,
+            let v0 = AttrVert { x: 0.0, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 0.0, t: 0.0 };
+            let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
+            let tri = [v0, v1, v2];
+            let g = PolyGrads::from_vertices(&tri).expect("triangle");
+            raster_poly_tex(
+                &mut img, &mut zb, &outline(&tri), &g,
                 &pixels, 256, 128, &pal, 1.0, None,
                 SurfaceMode::Sky { view, defer: None },
                 None,
