@@ -14,7 +14,8 @@
 //! `Host_Loadgame_f` shares `COM_Parse` / `ED_ParseEdict`.
 
 use super::host::{set_skill_value, skill_value};
-use super::{cvar_value, snapshot_lightstyles, Server, SpawnReport, SETTLE_FRAMETIME};
+use super::pr_cmds::cvar_value;
+use super::{snapshot_lightstyles, Server, SpawnReport, SETTLE_FRAMETIME};
 use crate::math::Vec3;
 use crate::progs::EType;
 use crate::Result;

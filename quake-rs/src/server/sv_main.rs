@@ -18,9 +18,10 @@
 use super::host::{reset_changelevel, reset_restart, reset_skill};
 use super::lightstyle::reset_lightstyles;
 use super::msg::{reset_svc_recognizer, take_svc_events};
+use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
 use super::{
-    install_engine_builtins, parm_global_name, Server, WorldModel, FL_CLIENT, MOVETYPE_NONE,
+    parm_global_name, Server, WorldModel, FL_CLIENT, MOVETYPE_NONE,
     MOVETYPE_WALK, NUM_SPAWN_PARMS, SOLID_NOT, SOLID_SLIDEBOX,
 };
 use crate::bsp::Bsp;

@@ -11,9 +11,10 @@
 //! As in id's tree, the trace these steps are made of — `SV_Move` — is not
 //! here but in world.c's port, [`super::sv_world`].
 
+use super::pr_cmds::bi_changeyaw;
 use super::sv_world::{link_edict, sv_move, touch_triggers};
 use super::{
-    bi_changeyaw, CONTENTS_EMPTY, CONTENTS_SOLID, FL_FLY, FL_ONGROUND, FL_PARTIALGROUND, FL_SWIM,
+    CONTENTS_EMPTY, CONTENTS_SOLID, FL_FLY, FL_ONGROUND, FL_PARTIALGROUND, FL_SWIM,
 };
 use crate::math::{add as v_add, Vec3};
 use crate::vm::Vm;
