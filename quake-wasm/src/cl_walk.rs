@@ -10,6 +10,10 @@ use quake_rs::mdl::Mdl;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::server::UserCmd;
 use quake_rs::tent::BeamModel;
+use quake_rs::client::view::{
+    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
+};
 
 use crate::app::{color_for_name, Walk};
 use crate::bench::{self, Phase};
@@ -20,10 +24,6 @@ use crate::input::{
 };
 use crate::snd_dma::{queue_sounds, update_ambient_channels, Listener, LISTENER};
 use crate::vid::backtile_for;
-use crate::view::{
-    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
-    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
-};
 
 /// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
 /// (`((int)f*256/360) & 255`) then `MSG_ReadAngle` (`MSG_ReadChar() *
@@ -1415,7 +1415,7 @@ mod tests {
         // truncated like the C's int percent.
         assert_eq!(w.damage_blend, 22.0);
         assert!(w.v_dmg_pitch > 5.0, "hit from the front pitches the view: {}", w.v_dmg_pitch);
-        assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < crate::view::V_KICKTIME, "kick running");
+        assert!(w.v_dmg_time > 0.0 && w.v_dmg_time < quake_rs::client::view::V_KICKTIME, "kick running");
         assert!(w.server.time() <= w.faceanimtime, "the pain face shows");
     }
 

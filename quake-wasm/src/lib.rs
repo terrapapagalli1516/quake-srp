@@ -30,7 +30,6 @@
 //! | `savegame`  | host_cmd.c `Host_Savegame_f`/`_Loadgame_f` | save/load over the page's localStorage        |
 //! | `snd_dma`   | snd_dma.c                               | sound queues for the page's Web Audio            |
 //! | `vid`       | vid_win.c, screen.c                     | resolution, framebuffer, viewsize, backtile      |
-//! | `view`      | view.c                                  | `V_ParseDamage`, the damage kick (live + demo)   |
 //! | `bench`     | —                                       | `--features bench` frame-phase timers            |
 //!
 //! Tests live with the code they exercise; `test_util` holds the fixtures
@@ -76,7 +75,6 @@ mod menu;
 mod savegame;
 mod snd_dma;
 mod vid;
-mod view;
 #[cfg(test)]
 mod test_util;
 

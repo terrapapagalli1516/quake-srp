@@ -7,6 +7,10 @@
 use quake_rs::particles::ParticleSystem;
 use quake_rs::render::{self, Camera, ModelInstance, Viewmodel};
 use quake_rs::tent::BeamModel;
+use quake_rs::client::view::{
+    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
+};
 
 use crate::app::DemoPlay;
 use crate::bench::{self, Phase};
@@ -16,10 +20,6 @@ use crate::snd_dma::{
     push_stop_sounds, queue_sounds, update_ambient_channels, Listener, LISTENER,
 };
 use crate::vid::backtile_for;
-use crate::view::{
-    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
-    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
-};
 
 /// Spawn the recorded effects of demo frame `idx` into the live particle pool
 /// exactly ONCE: a frame rendered across several steps (small `dt`) must not
@@ -589,7 +589,7 @@ mod tests {
     };
     use crate::test_util::*;
     use crate::vid::{DEFAULT_H, DEFAULT_W};
-    use crate::view::V_KICKPITCH;
+    use quake_rs::client::view::V_KICKPITCH;
 
     #[test]
     fn step_demo_shows_the_last_frame_before_looping() {
@@ -1094,7 +1094,7 @@ mod tests {
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
         let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
         assert!((d.bonus_blend - (50.0 - 0.05 * 100.0)).abs() < 1e-3, "{}", d.bonus_blend);
-        assert_eq!(cshifts, vec![(crate::view::BONUS_COLOR, d.bonus_blend)], "the bonus cshift");
+        assert_eq!(cshifts, vec![(quake_rs::client::view::BONUS_COLOR, d.bonus_blend)], "the bonus cshift");
 
         let pak = pak().expect("pak");
         let real = parse_demo(&pak.read_file("demo1.dem").unwrap().unwrap()).unwrap();

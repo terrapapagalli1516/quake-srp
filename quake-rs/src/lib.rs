@@ -64,5 +64,7 @@ pub mod dlight;
 pub mod demo;
 pub mod snd;
 
+pub mod client;
+
 pub use error::{QError, Result};
 pub use math::Vec3;
