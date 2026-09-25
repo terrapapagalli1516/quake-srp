@@ -763,7 +763,7 @@ fn alias_clip_triangle(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_alias_model(
     image: &mut Image,
-    zbuf: &mut [f32],
+    zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
     opts: &RenderOptions,
@@ -898,7 +898,7 @@ pub struct Viewmodel<'a> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_viewmodel(
     image: &mut Image,
-    zbuf: &mut [f32],
+    zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
     opts: &RenderOptions,

@@ -227,9 +227,9 @@ Both counts come from scratch-instrumented builds, not from the committed harnes
 
 | mechanism | WinQuake (C) | port | consequence (measured) |
 |---|---|---|---|
-| world visibility and overdraw | `r_edge.c` (`R_ScanEdges` / `R_GenerateSpans`): edge-sorted spans, each pixel drawn once, **no z test** | fan triangles; bounding-box barycentric raster (`raster_triangle_cached` / `_tex`); f32 z test and write on every pixel; centroid sort of all world faces every frame | 3.8–5.2× screen visits; ~25% of inside pixels are z-rejected |
+| world visibility and overdraw | `r_edge.c` (`R_ScanEdges` / `R_GenerateSpans`): edge-sorted spans, each pixel drawn once, **no z test** | fan triangles; bounding-box barycentric raster (`raster_triangle_cached` / `_tex`); f32 z test and write on every pixel; centroid sort of all world faces every frame | 3.8–5.2× screen visits; ~25% of inside pixels are z-rejected (A1 done: spans; A3 done: as the C) |
 | perspective | `D_DrawSpans16` (asm; `d_subdiv16` defaults to 1): one divide per 16 px, affine between | one divide per inside pixel | not the wasm bottleneck. The 16-px prototype gave no wasm gain (native −15%) |
-| z-buffer | 16-bit 1/z (`d_pzbuffer`), written by `D_DrawZSpans`, only **tested** by entities, **never cleared** | f32 depth cleared every frame; the RGB image is also cleared every frame | 0.39 ms per frame at 1280×800 for allocation and clear |
+| z-buffer | 16-bit 1/z (`d_pzbuffer`), written by `D_DrawZSpans`, only **tested** by entities, **never cleared** | f32 depth cleared every frame; the RGB image is also cleared every frame | 0.39 ms per frame at 1280×800 for allocation and clear (A3 done: as the C) |
 | framebuffer and palette | 8-bit indices. Cshift and gamma are a **256-entry** palette operation (`V_UpdatePalette` ramps, then `VID_ShiftPalette`) | `[u8;3]` RGB per pixel; `apply_blend` does float math per pixel per channel; pack uses 4 `Vec::push` per pixel | blend 11.9 ms, pack 2.3 ms at 1280×800 |
 | surface cache | `D_CacheSurface` at `D_MipLevelForScale`'s mip (4 levels; `basemip` 1, 0.4, 0.2). A fixed, LRU-rover cache of `SURFCACHE_SIZE_AT_320X200` (600 KB) + 3 B/px above 64,000 px. Lit surfaces rebuilt with `R_AddDynamicLights` | mip 0 only; one unbounded block per face; lit faces bypass the cache into `raster_triangle_tex`: bilinear lightmap + `colormap_row` on every **screen pixel** | the firing and explosion spikes above; lighting per pixel, not per texel |
 | 3-D viewport | `R_SetVrect`: at viewsize 100, the vrect height is vid.height − `sb_lines` (48 of 200 lines). `R_ViewChanged`: `yscale = xscale · pixelAspect` (0.833 at 16:10) | full-height render with the sbar painted over the bottom 24%. Square-pixel projection, then **presented** at 4:3 (AUDIT H6) | 24% of 3-D pixels are thrown away. The horizon sits too low, and the world is stretched 1.2× vertically (see A4) |
@@ -390,6 +390,39 @@ The fidelity classes are:
   becomes 1.0×, plus the clears and the z tests go away.
 - **Risk: high.** It is a rewrite of the core pass, and it re-baselines the goldens.
 - **Do it after A1, A2 and A4 have landed.** Their gains do not depend on it.
+- **Done** (branch `quake/edge`, `render/edge.rs`; `AUDIT.md`, "World pass: id's edge
+  renderer"): `R_RecursiveWorldNode` with keys and `R_MarkLeaves`, `R_RenderFace` /
+  `R_ClipEdge` / `R_EmitEdge` with the edge cache, the brush entities through
+  `R_DrawSubmodelPolygons` / `R_DrawSolidClippedSubmodelPolygons`, `R_ScanEdges` with
+  `R_LeadingEdge`'s key and 1/z sort, `D_DrawSurfaces` with `D_DrawZSpans`, and the
+  entities against the 16-bit z-buffer. The polygon walker was kept behind a switch for the
+  A/B below, then deleted (byte-identical).
+  - **Speed,** A/B in one sitting (the tree before A3, exported, against this branch),
+    two rounds, `bench.py --build --native`, median of the per-round medians, ms, load
+    1.7–2.1. "brush" is world + submodel + external: the edge renderer books the brush
+    entities' edge setup under submodel and draws their spans with the world's.
+
+    | workload | wasm 640×400 step med / p95 | wasm 1280×800 step med / p95 | wasm 1280×800 brush med | native 1280×800 step med |
+    |---|---|---|---|---|
+    | demo1 | 1.88 / 2.36 → 1.29 / 1.63 | 5.66 / 6.79 → 4.11 / 4.63 | 3.58 → 2.44 | 6.02 → 2.77 |
+    | walk_e1m1 | 1.37 / 2.07 → 0.92 / 1.34 | 4.37 / 5.84 → 3.21 / 3.98 | 2.78 → 2.01 | 4.97 → 2.13 |
+    | fire_e1m1 | 1.23 / 1.86 → 0.93 / 1.34 | 4.31 / 5.64 → 3.28 / 4.05 | 2.74 → 2.02 | 4.81 → 2.36 |
+    | walk_e1m3 | 1.44 / 1.74 → 1.09 / 1.31 | 4.51 / 5.11 → 3.47 / 4.02 | 2.79 → 2.13 | 4.82 → 2.33 |
+
+    Wasm whole frame −23 to −33% at the median and −21 to −36% at p95; the brush pass
+    −22 to −39% (−26 to −39% at 640×400); native −43 to −57% per frame and −56 to −66%
+    for the brush pass. The estimate was −20–35% of the world pass. The native gain is
+    larger because the polygon walker's per-pixel z test (one divide per pixel, w2b's
+    native regression, §6) is gone; in wasm the frame's other phases stay. Warm frame
+    against id's own renderer (`compare.py --bench 100`, world only): 0.30–0.34× id's
+    time at 320×200, 0.37–0.45× at 640×480, 0.43–0.51× at 1280×1024 (the polygon walker
+    in the same sitting: 0.48–0.81×, 0.75–1.32×, 1.06–1.94×).
+  - **Where the wasm world pass goes now** (native 1280×800, e1m1 `scene`): the world
+    walk to edges 0.25 ms, the scan 0.63 ms, `D_DrawSurfaces` 1.46 ms.
+  - **Fidelity:** 372 oracle cases 99.798 → 99.833% mean, none worse by more than one
+    pixel; e1m2 99.21 → 99.94 (the face 733 quirk); entity pixels 100% everywhere; 144
+    brush-entity views 94.35 → 99.37. Goldens: e1m3 `3531e9cd` → `1867f5a7` (150 px),
+    e1m1 and e1m2 unchanged.
 
 **A4. The 3-D viewport above the status bar, with Quake's pixel aspect.** *(faithful)*
 
@@ -853,7 +886,8 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
   Wasm world −16 to −23%, step −5 to −13% (the same as before the merge). **Native is the other
   way:** world +30-40%. Of four structures tried, a depth pass into a row buffer and then the
   texels was the fastest natively (−10% against exact) but +8% in wasm; the shipped one is the
-  fastest in wasm. Not understood; the browser is the target.
+  fastest in wasm. Not understood; the browser is the target. (Gone with A3: id's spans need no
+  z test, and the native frame is −43 to −57%.)
 - **`wasm-opt -O3`** (binaryen v132 via `bunx -p binaryen`):
   - identical hashes; step −2 to −5% (demo1 1280×800: 19.6 → 18.7 ms);
   - 640 KB smaller: code 773 → 662 KB, and the name section is stripped.
@@ -940,7 +974,8 @@ means about 4–5 ms per frame, far inside a 60 Hz budget.
 - **Prototypes are evidence, not implementations.** The A1, B1 and B2 prototypes ran in a scratch
   copy, with atomic counters present. A1's prototype takes its gradients from one triangle and was
   checked for cracks only by counting background pixels on two frames.
-- **Estimates, not measurements:** the gains for A3 and C2. (C1's saving is measured; see C1.)
+- **Estimates, not measurements:** the gain for C2. (C1's and A3's savings are measured; see
+  C1 and A3.)
 - **Fidelity issues found, not fixed** (they belong in `AUDIT.md`):
   - A4: vrect and pixelAspect.
   - C2: alias models are not colormapped, and the code comment claims otherwise.

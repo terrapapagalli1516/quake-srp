@@ -47,8 +47,9 @@ physics, plays back recorded demos, renders the world with **baked lightmaps + t
   (`traceline`→QuakeC `T_Damage`, player damage + **death → corpse physics → respawn**, proven through the real
   QuakeC chain); **`changelevel`** with inventory carried across maps (`SetChangeParms`/`DecodeLevelParms`) and the
   **intermission/finale flow** (the MSG_ALL `svc_intermission`/`svc_finale` stream from QC's `execute_changelevel`).
-- **Renderer** — a from-scratch software rasteriser (z-buffer, backface cull, perspective-correct textures, PVS
-  culling, **near-plane polygon clipping**): **the full Quake lighting model** — baked BSP lightmaps + **dynamic
+- **Renderer** — id's **edge-sorted span renderer** for the world and brush models (`r_edge.c`: the BSP walked
+  front to back into one edge list, each pixel drawn once, a 16-bit 1/z buffer for the entities; PVS and
+  frustum culling, 16-pixel perspective spans, mip levels): **the full Quake lighting model** — baked BSP lightmaps + **dynamic
   lights** (`R_AddDynamicLights`, gated by the **`R_MarkLights` BSP recursion** so light never crosses solid
   planes) + **animated light styles** (`R_AnimateLight`: flickering torches); **alias-model frame animation** +
   skins; brush submodels + **external `b_*.bsp` brush-model items** (explosive boxes, ammo/health boxes); turbulent
@@ -150,14 +151,13 @@ QUAKE_BENCH=30 QUAKE_RES=1920x1080 \
 **Relative cost is the meaningful part — absolute ms swings several-fold with host
 load** (an idle machine measured e1m1 @1080p ~33 ms; under load the same binary measured
 ~91 ms). Always A/B two builds in one sitting. The shape: the **world (BSP wall) pass
-dominates** (~75–85% of the frame) and scales ~linearly with pixel count; after
-front-to-back ordering the **overdraw is ~1.2×** (culling near-optimal — the world pass is
-essentially per-pixel-shading bound).
+dominates** and scales ~linearly with pixel count; with id's edge-sorted spans it draws
+**each pixel once**, with no z test and nothing cleared (PERF_PLAN A3).
 
-Key optimisations (all in `render.rs` / `vm.rs` / `server.rs`): a **lit surface cache**
+Key optimisations (in `render/` / `vm.rs` / `server.rs`): a **lit surface cache**
 (Quake's `d_surf.c` — bake texture × lightmap × colormap per surface once, then one
-byte/pixel), **front-to-back** face ordering (kills overdraw via the z-test),
-incremental-edge + linear-stepped perspective in the rasteriser, an **O(1) field-offset
+byte/pixel), id's **edge-sorted span renderer** (`r_edge.c`: no overdraw, no z test),
+16-pixel perspective spans with integer steps in between, an **O(1) field-offset
 cache** in the VM, and an **abs-box broadphase** in `sv_move` (the ~25× sim speedup on
 dense maps). See `AUDIT.md` for the per-change ledger and `STATUS.md` for current WIP +
 the honest perf scorecard.
