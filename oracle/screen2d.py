@@ -149,7 +149,9 @@ SCENARIOS: dict[str, list] = {
 
 
 def c_lines(steps, out: Path, name: str) -> list[str]:
+    # cl_forwardspeed/cl_backspeed 400: Always Run, the port's one default departure
     lines = ["oracle_exit 0", "oracle_stage 1", f"oracle_blank {BLANK}", "crosshair 0", "viewsize 100",
+             "cl_forwardspeed 400", "cl_backspeed 400",
              "map e1m1"] + ["wait"] * 20
     for st in steps:
         op, args = st[0], st[1:]

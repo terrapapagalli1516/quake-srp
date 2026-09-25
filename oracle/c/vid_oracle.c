@@ -43,6 +43,7 @@ void M_DrawPic (int x, int y, qpic_t *pic);
 void M_Menu_Options_f (void);
 extern void (*vid_menudrawfn)(void);
 extern void (*vid_menukeyfn)(int key);
+extern cvar_t bgmvolume, volume;
 
 // The video menu: the title every id driver's VID_MenuDraw starts with
 // (vid_win.c, vid_dos.c), and Escape back to Options as their VID_MenuKey
@@ -116,6 +117,11 @@ void	VID_Init (unsigned char *palette)
 
 	VID_SetPalette (palette);
 	vid_menudrawfn = Oracle_VidMenuDraw;
+	// snd_null.c defines the two volume cvars but, having no S_Init, never
+	// registers them: the Options sliders would read 0 instead of their
+	// defaults (0.7, 1) that snd_dma.c's S_Init registers
+	Cvar_RegisterVariable (&bgmvolume);
+	Cvar_RegisterVariable (&volume);
 	vid_menukeyfn = Oracle_VidMenuKey;
 	Oracle_Init ();
 }
