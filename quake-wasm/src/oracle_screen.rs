@@ -23,7 +23,7 @@
 //! | `serverflags N` | the `serverflags` global |
 //! | `impulse N` | queue an impulse with the next move |
 //! | `console` | `console_toggle` |
-//! | `type TEXT` | type TEXT into the console and press Enter |
+//! | `type TEXT` | type TEXT into the console (no Enter: `key ENTER` submits it) |
 //! | `key NAME` | a key press routed as `web/index.html` routes it (ESCAPE, ENTER, UPARROW, ...) |
 //! | `showscores 0\|1` | hold / release Tab (`+showscores`) |
 //! | `centerprint TEXT` | a QuakeC centerprint (`\n` = newline) |
@@ -194,7 +194,6 @@ fn run(script: &str) {
                 for ch in rest.chars() {
                     console_char(ch as u32);
                 }
-                console_enter();
             }
             "key" => press(rest),
             "showscores" => ensure_app(|a| a.keys_held[9] = num(0) != 0.0),

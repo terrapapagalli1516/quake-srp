@@ -61,7 +61,8 @@ ALL_WEAPONS = (IT_AXE | IT_SHOTGUN | IT_SUPER_SHOTGUN | IT_NAILGUN | IT_SUPER_NA
 # ---------------------------------------------------------------------------
 # Scenarios: lists of abstract steps, each played on both sides.
 #   ("viewsize", n) ("frames", n) ("field", name, *vals) ("serverflags", n)
-#   ("impulse", n) ("console",) ("type", text) ("key", NAME) ("showscores", 0|1)
+#   ("impulse", n) ("console",) ("type", text: typed into the console, no Enter)
+#   ("key", NAME) ("showscores", 0|1)
 #   ("centerprint", text) ("print", text) ("intermission", n, t, text)
 #   ("faceanim",) ("cmd", line) ("shot", name)
 # Every scenario starts on e1m1 after 20 frames (the console has retracted), at viewsize 100.
@@ -120,7 +121,7 @@ SCENARIOS: dict[str, list] = {
                ("frames", 1), ("shot", "lines")],
     "console": [("frames", 1), ("cmd", "clear"), ("print", "Some console text"), ("print", "a second line"),
                 ("console",), ("frames", 2), ("shot", "sliding"), ("frames", 10), ("shot", "down"),
-                ("type", "god"), ("frames", 1), ("shot", "typed")],
+                ("type", "noclip"), ("frames", 1), ("shot", "typed")],
     "intermission": [("frames", 1), ("intermission", 1, 75, ""), ("frames", 2), ("shot", "stats")],
     "finale": [("frames", 1), ("intermission", 2, 75,
                                 "As the corpse of the monstrous entity\\nChthon sinks back into the lava whence\\n"
@@ -173,7 +174,9 @@ def c_lines(steps, out: Path, name: str) -> list[str]:
         elif op == "console":
             lines.append("toggleconsole")
         elif op == "type":
-            lines += [f"oracle_key {'SPACE' if ch == ' ' else ch}" for ch in args[0]] + ["oracle_key ENTER"]
+            # no Enter: a line id's console submits goes to the END of the command
+            # buffer (Cbuf_AddText), behind the rest of this script
+            lines += [f"oracle_key {'SPACE' if ch == ' ' else ch}" for ch in args[0]]
         elif op == "key":
             lines.append(f"oracle_key {args[0]}")
         elif op == "showscores":
