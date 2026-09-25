@@ -2104,7 +2104,12 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         - instances.len() - externals.len() - sprites.len();
 
     let render_once = || {
-        let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel { mdl, frame: *frame });
+        let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel {
+            mdl,
+            frame: *frame,
+            // The view is full-frame (id at viewsize 120, the oracle default): no fudge, no bob.
+            origin_ofs: render::viewmodel_origin_ofs(&cam, 0.0, 120.0),
+        });
         render::render_scene_ext_sprited(
             &bsp, &cam, w, h, &palette, &instances, &bmodels, &externals, viewmodel, time, &[], &[],
             &light_styles, colormap.as_deref(), &sprites,
