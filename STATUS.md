@@ -5,6 +5,21 @@ things stand" note — read it before continuing.
 
 ---
 
+## The world through id's edge renderer (2026-09-25, branch `quake/edge`)
+
+PERF_PLAN A3: the world and the brush entities are drawn as WinQuake draws
+them (`render/edge.rs`): the BSP walked front to back into one edge list,
+spans per scanline for the nearest surface, each pixel drawn once with no z
+test, the 16-bit 1/z left for the entities (details in AUDIT.md's section of
+the same name). Default on; `RenderOptions::edges` / `quaketool view --edges`
+/ `QUAKE_EDGES` keep the polygon walker for A/B. Oracle: 372 cases, none
+worse by more than a pixel, e1m2 99.21 -> 99.94 (id's face-733 mip quirk now
+reproduced), entity pixels 100% everywhere, brush-entity views 94.35 ->
+99.37. Wasm frame −23 to −33% (p95 −21 to −36%), native −43 to −57%. e1m3
+golden `3531e9cd` -> `1867f5a7` (150 px).
+
+---
+
 ## Projection and spans (2026-09-25, branch `quake/w2b`)
 
 The 3-D view as DOS/Windows players saw it (details in AUDIT.md's section of

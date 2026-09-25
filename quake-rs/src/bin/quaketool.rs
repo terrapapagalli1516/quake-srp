@@ -1939,6 +1939,11 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             "  surf cache: {} true-hits, {} cached-rebakes (warm: should be ~0), {} external-bypass-bakes (expected, cheap)",
             st.surf_cache_hits, st.surf_baked, st.surf_bypass_baked,
         );
+        let _ = writeln!(
+            o,
+            "  edge renderer: {} edges, {} surfaces, {} spans (id's pools: r_maxedges 2400, r_maxsurfs 800)",
+            st.edges_emitted, st.surfs_emitted, st.spans_emitted,
+        );
         return Ok(Out::Text(o));
     }
 

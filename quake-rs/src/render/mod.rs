@@ -1,15 +1,14 @@
-//! A from-scratch software rasteriser driven by the parsed BSP data.
+//! The software renderer: id's WinQuake 3-D view, driven by the parsed BSP data.
 //!
-//! This is **not** a port of Quake's asm-heavy `d_*.c` span renderer (the
-//! original `WinQuake` software pipeline walked the BSP front-to-back, built
-//! edge tables, and emitted affine-textured spans via hand-tuned x86). Instead
-//! this module is a small, self-contained, allocation-light triangle
-//! rasteriser written purely against the *parsed* [`Bsp`] lump records produced
-//! by [`crate::bsp`]: it reconstructs each face polygon from the
-//! surfedge/edge/vertex tables, transforms it into camera space, perspective
-//! projects it, fan-triangulates, and fills triangles with barycentric
-//! coverage plus a per-pixel depth buffer. Shading is a flat per-face Lambert
-//! term over a stable per-surface hue — no palette, no lightmaps, no textures.
+//! The world and the brush entities go through a port of id's edge-sorted span
+//! renderer (`edge`: `r_bsp.c`, `r_draw.c`, `r_edge.c`, `d_edge.c`) — the BSP
+//! walked front to back into one edge list, spans emitted per scanline for the
+//! nearest surface, each pixel drawn once over the surface cache with
+//! `D_DrawSpans16`, and a 16-bit 1/z buffer left for the entities: alias
+//! models (`D_PolysetDraw`), sprites and particles. The port's earlier world
+//! pass, each face scan-converted as a polygon against an f32 z-buffer, is kept
+//! behind [`RenderOptions::edges`] for A/B (`world`, `raster`). [`render_bsp`]
+//! is a flat-shaded triangle debug view with no textures or lightmaps.
 //!
 //! Design goals, in priority order:
 //!  * **Memory safety.** No `unsafe` (the crate is `#![forbid(unsafe_code)]`),
@@ -30,8 +29,9 @@
 //!
 //! This file keeps `r_main.c`'s share: [`Image`], [`Camera`], the flat
 //! [`render_bsp`] and the `render_scene*` entry points (`R_RenderView`). The rest
-//! follows id's files: `view` (view.c), `world` (r_bsp.c), `raster` (the
-//! triangle fillers), `light` (r_light.c, `R_BuildLightMap`), `surf` (r_surf.c,
+//! follows id's files: `view` (view.c), `edge` (r_bsp.c, r_draw.c, r_edge.c,
+//! d_edge.c), `world` (the polygon walker's brush passes), `raster` (the span
+//! routines and the polygon fillers), `light` (r_light.c, `R_BuildLightMap`), `surf` (r_surf.c,
 //! d_surf.c), `warp` (d_scan.c's turbulence), `sky` (r_sky.c, d_sky.c), `vis`
 //! (PVS, frustum, near clip), `alias` (r_alias.c, r_aclip.c), `polyse`
 //! (d_polyse.c), `sprite` (r_sprite.c), `part` (r_part.c), `stats` (the
@@ -364,7 +364,8 @@ pub struct RenderOptions {
     /// every face and brush-entity face clipped into one edge list, spans
     /// emitted per scanline for the nearest surface, each pixel drawn once
     /// with no z test, and the 16-bit `1/z` of each (`d_pzbuffer`) left for
-    /// the entities to test — or the port's earlier polygon walker (`false`):
+    /// the entities to test (the default) — or the port's earlier polygon
+    /// walker (`false`, kept for A/B):
     /// faces front to back against an f32 z-buffer, the entities testing
     /// that depth.
     pub edges: bool,
@@ -404,7 +405,7 @@ pub struct ScreenPlace {
 
 impl Default for RenderOptions {
     fn default() -> RenderOptions {
-        RenderOptions { pixel_aspect: 1.0, screen: None, exact_perspective: false, edges: false }
+        RenderOptions { pixel_aspect: 1.0, screen: None, exact_perspective: false, edges: true }
     }
 }
 
