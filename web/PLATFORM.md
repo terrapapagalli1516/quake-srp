@@ -29,9 +29,13 @@ keydown/mouse ──KEY/MOUSE records──▶ ring ─▶ fd_read(0) ─▶ Key
                                             (the program is blocked here, in
                                              Atomics.wait, between frames)
 requestAnimationFrame
+  poll the gamepad; if it changed,
+  GAMEPAD ─────────────────────────▶ ring ─▶ fd_read(0) ─▶ kept for the frame
   TICK(seq, dt) ───────────────────▶ ring ─▶ fd_read(0) returns the tick
-  spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime, the
-                                             client frame, menu, console, blend, pack
+  spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime,
+                                             IN_Commands (the pad's keys), the
+                                             client frame (IN_JoyMove), menu,
+                                             console, blend, pack
                                              fd_write(1): FRAME ─▶ pixels copied into a
                                                                    free frame slot
                                                           sounds, LISTENER, STATE ─▶ kept
@@ -92,6 +96,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
 | 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize |
+| 10 | GAMEPAD | `connected u8`, `standard u8`, `buttons u8`, `0 u8`, `pressed u32` (bit per button), `axes f32×6` (a standard pad: the sticks, then the triggers' values): the pad's state, polled each refresh before the tick and sent when it changed ("Input", below) |
 
 A record whose payload is shorter than its kind's reads the missing fields as
 zeros, and an unknown kind is skipped, so either side can grow a record.
@@ -113,6 +118,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 11 | LOCAL_SOUND | `id u32`: `S_LocalSound` (menu clicks) and `play` |
 | 12 | REPLY | `id u32`, `value f64`, then UTF-8 text |
 | 13 | BENCH | `f64` per value (`--features bench`; names from the `bench_names` call) |
+| 14 | RUMBLE | `strong f32`, `weak f32`, `ms u32`: the pad's two motors (2026's `joy_rumble`) |
 
 A turn's records end with its `SYNC`. After a frame the sound records come in
 causal order: `GENERATION` (with the new level's `AMBIENT`s) first, then
@@ -212,6 +218,88 @@ bindings, and the port's departures, which the profiles **Classic** and
 with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
 reload); the checks that pin id's behaviour open the page as `?classic`,
 and `bench.py` does too, so its frames hash as `quaketool play`'s.
+
+## Input
+
+The page sends what the player does as it happens; the program decides what
+it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
+
+- **Keys by their place.** A key is its place on the keyboard (`KeyboardEvent.code`:
+  letters, digits and punctuation as the US key in that place), as WinQuake's
+  keys were scancodes (`scantokey`). So WASD walks on AZERTY or Dvorak too,
+  `bind` names a place, and a key's release matches its press whatever Shift
+  did in between; what the layout typed goes with the key (`ch`) for the
+  console and the name fields. A key `code` does not name falls back to
+  `key`. (`verify_input.py`: AZERTY's key in W's place is `w` in the game and
+  types `z` in the console; letters used to follow the layout, `z`.)
+- **The raw mouse.** The pointer lock asks for `unadjustedMovement`
+  (Chromium's raw input, on Windows, macOS and ChromeOS): id's
+  `IN_StartupMouse` switched Windows' pointer acceleration off while the game
+  ran, so a count was always the same turn. Refused (Linux, Firefox), the
+  plain lock, at once and from then on (Chromium refuses a burst of lock
+  requests). Each `mousemove` is a `MOUSE` record; a browser that coalesces
+  samples into one event per refresh sums their movement into it, so every
+  count arrives, and the program adds each as it comes: the turn per count
+  is the same at any frame rate (`mouse_turns_the_same_at_60_and_480_hz`).
+  `pointerrawupdate` would deliver samples sooner within a refresh, but the
+  frame starts at the refresh either way, so it would not show them sooner.
+- **The gamepad.** The Gamepad API has no events for a pad's state, so the
+  page polls `navigator.getGamepads()` once per refresh, just before the tick
+  (as late as the frame allows), and sends a `GAMEPAD` record when the state
+  changed: the first connected pad with the standard mapping, else the first
+  connected. The program keeps it, and the host frame the tick runs reads it
+  as id's joystick: `IN_Commands` (buttons as `JOY1`.., `AUX5`.., the D-pad as
+  the hat's `AUX29`..`AUX32`) and `IN_JoyMove`; quake-rs
+  `client/in_win.rs` has the mapping from a standard pad to winmm's axes and
+  buttons. Classic reads it only after `joystick 1` (id's default is 0); the
+  2026 profile's pad is a twin-stick layout of `bind` lines and `joy*`
+  settings, with its buttons as the menu's keys (`joy_menukeys`). A pad's
+  button also takes the click-to-play scrim away (a browser may not count it
+  as the gesture audio needs: then the first click or key starts the sound).
+- **Rumble** (2026, `joy_rumble`): a `RUMBLE` record after a frame in which
+  the player took damage (its strength from `V_ParseDamage`'s count) or fired
+  a heavy weapon; the page plays it on the pad's `vibrationActuator`
+  (`"dual-rumble"`, Chromium) or `hapticActuators[0].pulse` (Firefox, where
+  enabled).
+
+`web/verify_gamepad.py` drives all of it with a synthetic pad (the scrim, the
+menus, a walk, a turn, the rocket's kick and its blast's rumble, an unplugged
+pad, Classic's `joystick 0` and `1`): 20/20 in headless Chromium and Firefox.
+The synthetic pad stands in for the browsers' own Gamepad API; no real pad
+was tried.
+
+**Latency.** `web/latency.py` measures from each input event's `timeStamp`
+(when the browser got it, so the wait for the refresh counts; a pad's
+`timestamp`) to the `putImageData` of the first frame that consumed it, live
+game, 2026 profile at 960×600, keys pressed, the mouse dragged and the right
+stick moved at random moments for 15 s each (median / p95, ms; in brackets
+the event's wait for its handler; a 16-core desktop, load 4–8):
+
+| | key | mouse | pad | the frame (tick to present) |
+|---|---|---|---|---|
+| Chromium, 60 Hz rAF | 13.2 / 20.9 [0.3] | 11.9 / 20.5 [7.2] | 12.5 / 17.2 [8.9] | 4.1 / 5.8 |
+| Chromium, 240 Hz emulated | 6.9 / 14.8 [2.0] | — | 4.2 / 5.5 [1.0] | 3.4 / 4.6 |
+| Firefox, 60 Hz rAF | 13.7 / 17.7 [0.1] | 11.5 / 20.2 [7.0] | 11.8 / 16.9 [8.1] | 4.2 / 5.9 |
+
+At 60 Hz an event waits on average half a refresh for the tick that takes
+it, then the frame's 4 ms: 12–13 ms to the canvas, whatever the input. The
+mouse's wait is in its dispatch (browsers deliver `mousemove` with the
+refresh), a key's after it; the pad's is the poll's. At an emulated 240 Hz
+(the page's loop paused and a 4.17 ms timer driving `quake.tick`, since
+headless browsers refresh at 60 Hz) the pad, polled just before each tick,
+takes 4.2 ms, one frame; a key 6.9 ms, with a tail where the browser held a
+task behind its own 60 Hz frame after the input, which a real 240 Hz refresh
+would not (the mouse is left out: its events still come at 60 Hz). Firefox's
+240 Hz run lost most of its key presses to its test driver and is not in the
+table. What none of this sees: from `putImageData` to light (the compositor
+and the display: a refresh or two, one less with `?lowlatency` where it
+works), and a device's own latency (USB polling, the browser's gamepad
+poll).
+
+Nothing cheap is left in the page: keys and mouse go to the program when
+they happen and it applies them at once, the pad is read as late as the
+tick, and the frame is presented in the refresh that ticked. What would cut
+more is the browser's (`?lowlatency`, below) or the frame's own time.
 
 ## Sound
 
@@ -403,7 +491,10 @@ Kept, same meaning: it asks for a `desynchronized` 2-D canvas, which can skip
 a compositor frame where the browser supports it (Chrome on Windows and
 ChromeOS), at the risk of tearing. The frame still arrives inside the
 refresh that ticked, so the hint matters exactly as much as before. Off by
-default, and not verifiable headless.
+default, and not verifiable headless. It stays off in 2026 too: it would save up to a
+refresh (2 ms at 480 Hz, 17 ms at 60) only where the browser supports it,
+and risks tearing there — an unverifiable change to every frame's look is
+not one to make by default. A player who wants it opens the page as `?lowlatency`.
 
 ## Browser support
 
