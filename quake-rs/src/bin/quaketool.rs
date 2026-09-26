@@ -34,6 +34,8 @@ use quake_rs::wad::{self, Wad2};
 mod census;
 #[path = "quaketool/play.rs"]
 mod play;
+#[path = "quaketool/sound.rs"]
+mod sound;
 #[path = "quaketool/timedemo.rs"]
 mod timedemo;
 
@@ -83,6 +85,8 @@ fn main() {
         "census" => need(rest, 1, cmd).and_then(|a| census::cmd_census(&a[0], &a[1..]).map(Out::Text)),
         "play" => need(rest, 2, cmd).and_then(|a| play::cmd_play(&a[0], &a[1], &a[2..]).map(Out::Text)),
         "timedemo" => need(rest, 2, cmd).and_then(|a| timedemo::cmd_timedemo(&a[0], &a[1], &a[2..]).map(Out::Text)),
+        "sound" => need(rest, 3, cmd).and_then(|a| sound::cmd_sound(&a[0], &a[1], &a[2], &a[3..]).map(Out::Text)),
+        "sndscript" => need(rest, 3, cmd).and_then(|a| sound::cmd_sndscript(&a[0], &a[1], &a[2], &a[3..]).map(Out::Text)),
         "sim" => need(rest, 2, cmd).and_then(|a| {
             cmd_sim(&a[0], &a[1], a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5))
         }),
@@ -151,7 +155,9 @@ fn usage() {
          \tquaketool census-edicts <pak> <map> <t1,t2,..>  dump live edicts at server times (oracle_edicts format)\n\
          \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX]\n\
          \t                               run the browser's game client natively (quake_rs::client), frame hashes as web/bench.py\n\
-         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n"
+         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n\
+         \tquaketool sound <pak> <demo> <out.wav> [--rate HZ] [--classic] [--fps F] [--trace FILE]  a demo's sound through the engine's mixer, as a .wav\n\
+         \tquaketool sndscript <pak> <script> <out.raw> --rate HZ [--fixes] [--trace FILE]  a sound-oracle script through the port (oracle/sound.py)\n"
     );
 }
 
