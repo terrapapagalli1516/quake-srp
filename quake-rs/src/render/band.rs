@@ -117,6 +117,49 @@ impl<'a> Band<'a> {
     }
 }
 
+/// The renderer's thread count as a setting: [`Threads::Auto`] takes what
+/// the platform offers, [`Threads::Count`] exactly that many. The frame is
+/// the same either way; only its time changes. A host resolves it against
+/// what it has — `std::thread::available_parallelism` natively, the page's
+/// worker pool in the browser — and hands the count to
+/// [`Renderer::set_threads`](super::Renderer::set_threads) each frame. As a
+/// cvar (`r_threads`), 0 is `Auto`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Threads {
+    /// As many as the platform offers.
+    #[default]
+    Auto,
+    /// This many (1: the calling thread alone).
+    Count(usize),
+}
+
+impl Threads {
+    /// The count to draw with on a platform offering `available` threads (at
+    /// least 1 either way).
+    #[must_use]
+    pub fn resolve(self, available: usize) -> usize {
+        match self {
+            Threads::Auto => available.max(1),
+            Threads::Count(n) => n.max(1),
+        }
+    }
+
+    /// The setting a cvar value names: 0 (or anything below 1) is `Auto`.
+    #[must_use]
+    pub fn from_cvar(value: f32) -> Threads {
+        if value >= 1.0 { Threads::Count(value as usize) } else { Threads::Auto }
+    }
+
+    /// The cvar value naming this setting (0 for `Auto`).
+    #[must_use]
+    pub fn cvar(self) -> usize {
+        match self {
+            Threads::Auto => 0,
+            Threads::Count(n) => n,
+        }
+    }
+}
+
 /// How many threads draw a frame: 1 draws on the calling thread alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Workers {
@@ -235,6 +278,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_threads_setting_resolves_against_what_the_platform_offers() {
+        assert_eq!(Threads::default(), Threads::Auto);
+        assert_eq!(Threads::Auto.resolve(8), 8);
+        assert_eq!(Threads::Auto.resolve(0), 1, "no threads offered: the calling thread");
+        assert_eq!(Threads::Count(3).resolve(8), 3, "a count is taken as it is");
+        assert_eq!(Threads::Count(0).resolve(8), 1);
+        assert_eq!((Threads::from_cvar(0.0), Threads::from_cvar(-2.0)), (Threads::Auto, Threads::Auto));
+        assert_eq!(Threads::from_cvar(4.0), Threads::Count(4));
+        assert_eq!((Threads::Auto.cvar(), Threads::Count(4).cvar()), (0, 4));
+    }
 
     #[test]
     fn bands_cover_the_view_once_in_order() {
