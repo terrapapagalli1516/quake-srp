@@ -18,6 +18,7 @@
 //! | [`view`]     | view.c                            | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times (the renderer's half of view.c is `render`'s) |
 //! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
+//! | [`lerpmove`] | (QuakeSpasm's `r_lerpmove`)       | the 2026 extra: monsters glide between their steps ([`lerpmove::LerpMove`]) |
 //!
 //! ## What a frame takes and gives
 //!
@@ -42,6 +43,7 @@ pub mod cl_main;
 pub mod cl_tent;
 pub mod host;
 pub mod host_cmd;
+pub mod lerpmove;
 pub mod view;
 
 use std::cell::Cell;
@@ -60,6 +62,7 @@ use crate::stepping::{Stepping, Tick72};
 use crate::tent::{BeamSegment, Beams};
 use crate::wad::Qpic;
 use cl_input::{clamp_pitch, KeyMove};
+use lerpmove::{LerpMove, StepGlides};
 
 // ---------------------------------------------------------------------------
 // The client state
@@ -144,6 +147,12 @@ pub struct Walk {
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
     pub stepping: Stepping,
+    /// How monsters are drawn between their steps ([`LerpMove`], `r_lerpmove`):
+    /// Classic unless the host turns the extra on. Set by the host each
+    /// frame, like `stepping`.
+    pub lerpmove: LerpMove,
+    /// The monsters' glides while [`LerpMove::Smooth`] is on.
+    pub glides: StepGlides,
     /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
     /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
     /// mouse X away from yaw). Drained into the next UserCmd then cleared.
@@ -358,6 +367,11 @@ pub struct DemoPlay {
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
+    /// How the recorded monsters are drawn between their steps
+    /// ([`LerpMove`]), set by the host each frame like `stepping`.
+    pub lerpmove: LerpMove,
+    /// The recorded monsters' glides while [`LerpMove::Smooth`] is on.
+    pub glides: StepGlides,
     /// Each relinked entity's origin as last rendered (CL_RelinkEntities'
     /// `oldorg`), keyed by entity number, for the model-flag trails; an entity
     /// missing from a frame is forgotten (its next sighting is a forcelink).
@@ -433,6 +447,8 @@ impl DemoPlay {
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
             stepping: Stepping::Classic,
+            lerpmove: LerpMove::Classic,
+            glides: StepGlides::default(),
             trail_org: HashMap::new(),
             tracercount: 0,
             demonum: 0,
@@ -554,6 +570,8 @@ pub fn assemble_walk(
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
         stepping: Stepping::Classic,
+        lerpmove: LerpMove::Classic,
+        glides: StepGlides::default(),
         clock,
         host_time: 0.0,
         host_clock: 0.0,

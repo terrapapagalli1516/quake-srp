@@ -22,6 +22,7 @@ use crate::wad::Qpic;
 
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host_cmd::IT_INVISIBILITY;
+use super::lerpmove::LerpMove;
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
@@ -311,7 +312,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
         d.view.time = d.time as f32;
     } else {
         let frac = cl_lerp_point(&mut d.time, [f64::from(f.time), f64::from(f.prev_time)]);
-        cl_relink_entities(d, frac, first_read);
+        cl_relink_entities(d, frac, first_read, d.lerpmove);
     }
     // R_DrawParticles and the stair smoothing step by `cl.time - cl.oldtime`.
     let cl_frametime = (d.time - d.oldtime) as f32;
@@ -372,7 +373,8 @@ pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid
     spawn_demo_frame_effects(d, d.idx, now, &mut sound);
     d.oldtime = f64::from(oldtime);
     d.time = f64::from(now);
-    cl_relink_entities(d, 1.0, first_read);
+    // No glides either: a timedemo stays id's measure.
+    cl_relink_entities(d, 1.0, first_read, LerpMove::Classic);
     Some(render_demo_frame(d, frametime, now - oldtime, menu_up, vid, sound))
 }
 
@@ -479,7 +481,8 @@ fn lerp_angles(from: [f32; 3], to: [f32; 3], frac: f32) -> [f32; 3] {
 /// `U_NOLERP` entity is drawn where the message put it in the frame that
 /// reads it, and lerps from the message before in the frames after — id's
 /// monsters (`U_NOLERP`) jump a message ahead for one frame and fall back.
-fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize) {
+/// With [`LerpMove::Smooth`] (the 2026 extra) they glide instead.
+fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: LerpMove) {
     let frames = &d.demo.frames;
     let f = &frames[d.idx];
     let read = first_read..=d.idx;
@@ -512,10 +515,17 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize) {
     let rotates = |modelindex: usize| {
         d.models.get(modelindex).and_then(Option::as_ref).is_some_and(|m| m.header.flags & crate::demo::EF_ROTATE != 0)
     };
+    let smooth = lerpmove == LerpMove::Smooth;
     v.entities.clear();
     for e in &f.entities {
         let mut drawn = *e;
-        if e.num >= 0 {
+        if smooth && e.step && e.num >= 0 {
+            // r_lerpmove (the 2026 extra): a monster is relinked where its
+            // message put it (no U_NOLERP jump back), and glides from step
+            // to step where it is drawn.
+            let glide = d.glides.draw(e.num, e.modelindex, e.origin, e.angles, d.time);
+            (drawn.origin, drawn.angles) = (glide.origin, glide.angles);
+        } else if e.num >= 0 {
             (drawn.origin, drawn.angles) = relink(e, frac, forced(e));
         }
         // Rotate binary objects locally. (A static is never relinked in id's;
@@ -524,6 +534,11 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize) {
             drawn.angles[1] = bobjrotate;
         }
         v.entities.push(drawn);
+    }
+    if smooth {
+        d.glides.end_frame();
+    } else {
+        d.glides.clear();
     }
 }
 
@@ -1137,6 +1152,28 @@ mod tests {
         assert!(xs[read + 1].1 < 2.0, "the next frame falls back to lerping from 0: {xs:?}");
     }
 
+    /// With `r_lerpmove` the same monster glides forward every frame
+    /// instead (the 2026 extra; `client::lerpmove`).
+    #[test]
+    fn with_lerpmove_a_nolerp_entity_glides() {
+        let step = |time: f32, x: f32, prev_x: f32| DemoFrame {
+            time,
+            prev_time: time - 0.1,
+            entities: vec![EntSnapshot { forcelink: true, step: true, ..moved(5, prev_x, x) }],
+            ..Default::default()
+        };
+        let mut d = playback(vec![step(1.0, 0.0, 0.0), step(1.1, 8.0, 0.0), step(1.2, 16.0, 8.0), step(1.3, 24.0, 16.0)]);
+        d.lerpmove = LerpMove::Smooth;
+        let mut xs = Vec::new();
+        // (Frame 29 would pass the last message: the port's loop wrap.)
+        for _ in 0..28 {
+            render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+            xs.push(d.view.entities[0].origin[0]);
+        }
+        let first = xs.iter().position(|&x| x > 0.0).expect("it moves");
+        assert!(xs[first..].windows(2).all(|w| w[1] > w[0]), "forward every frame: {xs:?}");
+    }
+
     #[test]
     fn ef_rotate_models_spin_to_100_times_the_clock() {
         use crate::mdl::MdlHeader;
@@ -1167,10 +1204,10 @@ mod tests {
         let spinner = Mdl { header, skins: Vec::new(), stverts: Vec::new(), triangles: Vec::new(), frames: Vec::new() };
         d.models = vec![None, Some(spinner)];
         d.time = 1.5;
-        cl_relink_entities(&mut d, 1.0, 0);
+        cl_relink_entities(&mut d, 1.0, 0, LerpMove::Classic);
         assert_eq!(d.view.entities[0].angles[1], crate::math::anglemod(150.0));
         d.models = Vec::new();
-        cl_relink_entities(&mut d, 1.0, 0);
+        cl_relink_entities(&mut d, 1.0, 0, LerpMove::Classic);
         assert_eq!(d.view.entities[0].angles[1], 30.0, "no EF_ROTATE: the recorded yaw");
     }
 
