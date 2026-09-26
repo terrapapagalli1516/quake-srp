@@ -826,23 +826,26 @@ mod tests {
     }
 
     #[test]
-    fn random_is_in_unit_interval_and_deterministic() {
-        let mut vm = bare_vm();
-        // Many draws all land in the CLOSED [0,1] (PF_random divides by 0x7fff, so
-        // 1.0 is attainable); the sequence is reproducible within a run because the
-        // LCG is process-global and stepped deterministically.
-        let mut seen_distinct = false;
-        let mut last = -1.0f32;
-        for _ in 0..1000 {
-            pf_random(&mut vm).expect("random");
-            let r = vm.gf(OFS_RETURN);
-            assert!((0.0..=1.0).contains(&r), "random() = {r} out of [0,1]");
-            if r != last && last >= 0.0 {
-                seen_distinct = true;
-            }
-            last = r;
+    fn random_is_in_unit_interval_and_draws_from_the_vms_streams() {
+        fn draw(vm: &mut Vm) -> f32 {
+            pf_random(vm).expect("random");
+            vm.gf(OFS_RETURN)
         }
-        assert!(seen_distinct, "random() should produce varied values");
+        // Many draws all land in the CLOSED [0,1] (PF_random divides by 0x7fff,
+        // so 1.0 is attainable), and they vary.
+        let (mut a, mut b) = (bare_vm(), bare_vm());
+        let seq: Vec<f32> = (0..1000).map(|_| draw(&mut a)).collect();
+        assert!(seq.iter().all(|r| (0.0..=1.0).contains(r)), "random() out of [0,1]");
+        assert!(seq.windows(2).any(|w| w[0] != w[1]), "random() should produce varied values");
+        // Each VM has fresh streams of its own: another draws the same numbers,
+        // whatever ran before it.
+        let again: Vec<f32> = (0..1000).map(|_| draw(&mut b)).collect();
+        assert_eq!(seq, again, "a fresh VM repeats the sequence");
+        // Handed one session's streams, two VMs continue one sequence.
+        let session = std::rc::Rc::new(crate::qrand::QRand::new());
+        a.set_rand(std::rc::Rc::clone(&session));
+        b.set_rand(session);
+        assert_eq!([draw(&mut a), draw(&mut b)], [seq[0], seq[1]], "one shared sequence");
     }
 
     #[test]
