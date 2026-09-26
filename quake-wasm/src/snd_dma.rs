@@ -30,6 +30,14 @@
 //!   device's rate with [`quake_rs::snd::Fixes::ALL`]. A new mode, or a
 //!   device rate learned late, makes a new mixer; the level's placed sounds
 //!   are registered with it again.
+//! - **The CD** ([`CdAudio`], `cd_win.c`'s state) is fed by the same queue:
+//!   the client's [`SoundCall::Cd`]s and the `cd` command go to it instead
+//!   of the mixer, and every mix brings its level up to `bgmvolume`
+//!   (`CDAudio_Update`). It plays beside the mix, as a drive did: the loop
+//!   sends its state to the page ([`Audio::cd_state`], a `Cd` record), and
+//!   the page plays the player's own file for the track. The disc is the
+//!   tracks the page says it has (`-cdtracks`); without them there is no
+//!   drive, as with id's `cd_null.c`.
 //!
 //! [`App`]: crate::app::App
 //! [`Cvars::sound`]: quake_rs::cvar::Cvars::sound
@@ -37,6 +45,7 @@
 use std::cell::RefCell;
 use std::fmt::Write as _;
 
+use quake_rs::cd_audio::{CdAudio, CdState, Disc};
 use quake_rs::client::{Listener, SoundCall};
 use quake_rs::pak::Pak;
 use quake_rs::server::StaticSound;
@@ -56,6 +65,8 @@ enum Request {
     Client(SoundCall),
     /// `S_Play`: the `play` command's samples.
     Play(Vec<String>),
+    /// `CD_f`: the `cd` command's arguments (`cd` first).
+    CdCommand(Vec<String>),
 }
 
 thread_local! {
@@ -88,6 +99,13 @@ pub(crate) fn play(_pak: &Pak, calls: Vec<SoundCall>) {
 pub(crate) fn s_play(names: &[&str]) {
     let names = names.iter().map(|n| n.to_string()).collect();
     PENDING.with(|p| p.borrow_mut().push(Request::Play(names)));
+}
+
+/// `CD_f`, the `cd` command (`argv[0]` is `cd`): carried out by the CD at the
+/// loop's next mix, its lines on the console.
+pub(crate) fn cd_command(argv: &[&str]) {
+    let argv = argv.iter().map(|a| a.to_string()).collect();
+    PENDING.with(|p| p.borrow_mut().push(Request::CdCommand(argv)));
 }
 
 /// The listener pose as of the last client frame's `S_Update`.
@@ -177,6 +195,8 @@ pub(crate) struct Audio {
     start: u32,
     cleared: bool,
     pcm: Vec<i16>,
+    /// The CD player, beside the mixer.
+    cd: CdAudio,
 }
 
 impl Default for Audio {
@@ -205,7 +225,19 @@ impl Audio {
             start: 0,
             cleared: false,
             pcm: Vec::new(),
+            cd: CdAudio::new(None),
         }
+    }
+
+    /// `CDAudio_Init`: a drive with the player's music in it (`None`: no
+    /// music, no drive).
+    pub(crate) fn set_disc(&mut self, disc: Option<Disc>) {
+        self.cd = CdAudio::new(disc);
+    }
+
+    /// What the CD plays, for the page; `None` without a drive.
+    pub(crate) fn cd_state(&self) -> Option<CdState> {
+        self.cd.has_drive().then(|| self.cd.state())
     }
 
     /// The page's audio started or stopped (`AudioReady`), on a device at
@@ -274,6 +306,8 @@ impl Audio {
         for r in requests {
             self.request(pak, r);
         }
+        // CDAudio_Update: the drive's level follows the slider.
+        ensure_app(|a| self.cd.update(&mut a.settings.cvars.bgmvolume));
         let mixer = self.mixer.as_mut().expect("made above");
         for sample in menu_sounds() {
             mixer.local_sound(pak, sample);
@@ -318,6 +352,12 @@ impl Audio {
                     }
                     SoundCall::Stop(s) => self.stats.stops = self.stats.stops.wrapping_add(s.len() as u32),
                     SoundCall::Update { .. } => {}
+                    SoundCall::Cd(c) => {
+                        let mut con = Vec::new();
+                        self.cd.call(*c, &mut con);
+                        print_lines(con);
+                        return;
+                    }
                 }
                 mixer.run(pak, std::slice::from_ref(&call));
             }
@@ -325,6 +365,11 @@ impl Audio {
                 for name in names {
                     mixer.play(pak, &name);
                 }
+            }
+            Request::CdCommand(argv) => {
+                let mut con = Vec::new();
+                self.cd.command(&argv.iter().map(String::as_str).collect::<Vec<_>>(), &mut con);
+                print_lines(con);
             }
         }
     }
@@ -373,6 +418,46 @@ impl Audio {
             }
             _ => None,
         }
+    }
+}
+
+impl Audio {
+    /// The CD's automation calls — `cd_state`, and `cd_ended <serial>`, the
+    /// page's word that a track played to its end (MCI's notify) — or `None`
+    /// for a call that is not one.
+    pub(crate) fn cd_call(&mut self, line: &str) -> Option<(f64, String)> {
+        match line.split_whitespace().next()? {
+            "cd_state" => {
+                let s = self.cd.state();
+                let tracks: Vec<String> = self.cd.tracks().iter().map(u8::to_string).collect();
+                let text = format!(
+                    "drive={} serial={} track={} looping={} mode={:?} volume={:.3} tracks={}",
+                    u8::from(self.cd.has_drive()),
+                    s.serial,
+                    s.track,
+                    u8::from(s.looping),
+                    s.mode,
+                    s.volume,
+                    tracks.join(",")
+                );
+                Some((f64::from(s.track), text))
+            }
+            "cd_ended" => {
+                let serial = line.split_whitespace().nth(1).and_then(|n| n.parse().ok()).unwrap_or(u32::MAX);
+                let mut con = Vec::new();
+                self.cd.track_ended(serial, &mut con);
+                print_lines(con);
+                Some((0.0, String::new()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Lines for the console (`Con_Printf` from the sound's side of the loop).
+fn print_lines(lines: Vec<String>) {
+    if !lines.is_empty() {
+        ensure_app(|a| lines.into_iter().for_each(|l| a.console.println(l)));
     }
 }
 

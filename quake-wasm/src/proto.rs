@@ -34,6 +34,7 @@
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
 //! | 14 | `Pcm` | `start u32` (the pair it plays at, in the `AudioClock`'s count), `rate u32`, `flags u32` (1: silence what was mixed ahead first, `S_ClearBuffer`), then 16-bit stereo pairs: what the mixer painted this tick, for the page's ring |
 //! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
+//! | 16 | `Cd` | `serial u32` (a new value: play `track` from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes (only with a disc: the player's music) |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
@@ -173,6 +174,7 @@ const OUT_REPLY: u8 = 12;
 const OUT_BENCH: u8 = 13;
 const OUT_PCM: u8 = 14;
 const OUT_AUDIO: u8 = 15;
+const OUT_CD: u8 = 16;
 
 /// `Frame` pixel formats. Only RGBA8 exists today: the engine composes the
 /// screen in RGB (PERF_PLAN B5). An 8-bit indexed format plus its palette is
@@ -232,6 +234,9 @@ pub(crate) enum Msg<'a> {
     /// bytes.
     Pcm { start: u32, rate: u32, flags: u32, pairs: &'a [u8] },
     Audio(AudioCounts),
+    /// The CD player's state ([`quake_rs::cd_audio::CdState`]): the page
+    /// plays the player's file for the track, beside the sound ring.
+    Cd(quake_rs::cd_audio::CdState),
 }
 
 /// Little-endian field writer for a message's fixed part.
@@ -252,6 +257,10 @@ impl Fields {
         self
     }
     fn i32(mut self, v: i32) -> Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    fn f32(mut self, v: f32) -> Self {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
@@ -283,6 +292,15 @@ impl Msg<'_> {
                 f.u32(c.rate).u32(c.mode).u32(c.starts).u32(c.local).u32(c.stops).u32(c.clears).u32(c.painted).0,
                 &[],
             ),
+            Msg::Cd(cd) => {
+                use quake_rs::cd_audio::CdMode;
+                let mode = match cd.mode {
+                    CdMode::Stopped => 0,
+                    CdMode::Playing => 1,
+                    CdMode::Paused => 2,
+                };
+                (OUT_CD, f.u32(cd.serial).u8(cd.track).u8(u8::from(cd.looping)).u8(mode).u8(0).f32(cd.volume).0, &[])
+            }
         }
     }
 
@@ -368,6 +386,7 @@ impl Record {
     pub(crate) const REPLY: u8 = OUT_REPLY;
     pub(crate) const PCM: u8 = OUT_PCM;
     pub(crate) const AUDIO: u8 = OUT_AUDIO;
+    pub(crate) const CD: u8 = OUT_CD;
 
     /// Split a stdout byte stream into records.
     pub(crate) fn split(mut bytes: &[u8]) -> Vec<Record> {
@@ -474,5 +493,16 @@ mod tests {
         let c = AudioCounts { rate: 48000, mode: 1, starts: 2, local: 3, stops: 0, clears: 1, painted: 7 };
         assert_eq!(size(Msg::Audio(c)), 28);
         assert_eq!(size(Msg::State { flags: 0, menu_screen: 0, pixel_size: 0 }), 12);
+        let cd = quake_rs::cd_audio::CdState {
+            serial: 3,
+            track: 6,
+            looping: true,
+            mode: quake_rs::cd_audio::CdMode::Paused,
+            volume: 0.5,
+        };
+        let mut out = Vec::new();
+        Msg::Cd(cd).write_to(&mut out).unwrap();
+        assert_eq!(&out[..8], &[16, 0, 0, 0, 12, 0, 0, 0]);
+        assert_eq!(&out[8..], &[3, 0, 0, 0, 6, 1, 2, 0, 0, 0, 0, 0x3f]);
     }
 }

@@ -127,6 +127,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 13 | BENCH | `f64` per value (`--features bench`; names from the `bench_names` call) |
 | 14 | PCM | `start u32` (the pair of the ring's clock it plays at), `rate u32`, `flags u32` (1: silence the ring first, `S_ClearBuffer`), then 16-bit stereo pairs. Copied into the sound ring by `wasi.js`, never posted |
 | 15 | AUDIO | `rate u32`, `mode u32` (0 Classic, 1 2026), then counts: `starts`, `local`, `stops`, `clears`, `painted` (u32 each) |
+| 16 | CD | `serial u32` (a new value: play the track from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes, and only with a disc ("CD music") |
 
 A turn's records end with its `SYNC`. A tick's `PCM` comes before its
 `FRAME`, so the samples reach the ring before the pixels are copied.
@@ -178,7 +179,10 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **The pak is a file.** The page downloads `id1/pak0.pak` beside
   `quake.wasm` and hands it to the worker's file system; the program opens it
   with `Pak::open` (as `quaketool` does) and reads each lump on demand, so no
-  copy of the archive lives in the program's memory. Measured against the
+  copy of the archive lives in the program's memory. It reads through id's
+  search path (`quake_rs::common`: `pak0.pak`, `pak1.pak`, … over the game
+  directory's loose files, the last pack searched first), so a player's own
+  `pak1.pak` is one more file ("Your files"). Measured against the
   same program with the pak embedded (`include_bytes!` and
   `Pak::from_static`, the old page's way), six loads each on a local server:
   navigation to the first frame 169–328 ms from the file, 167–330 ms
@@ -186,8 +190,8 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   file, 191–214 MB embedded (the embedded pak lives in the module's bytes and
   in the linear memory). Besides, an engine update no longer re-downloads
   18 MB, the build needs no game data, and a player's own `pak1.pak` can be
-  one more file (a later change: the worker cannot take files once running,
-  so it would be added before start, or the worker restarted).
+  one more file (the worker cannot take files once running, so the page
+  restarts the game to add one: "Your files").
 - **Saves and settings go through `std::fs`.** `save s0` writes
   `id1/s0.sav` (`Host_Savegame_f`), the Load and Save menus list the slots
   from the files (`M_ScanSaves`, when they open), and `config.cfg` holds the
@@ -204,6 +208,92 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   written — and removes the keys.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
+
+## Your files
+
+A player who owns Quake (the Steam, GOG and CD versions all ship id's
+original `id1/pak0.pak` and `id1/pak1.pak`) adds their files, and plays the
+registered game — episodes 2–4 — with their CD soundtrack.
+
+- **Adding.** Drop the files, or the whole Quake folder, anywhere on the
+  page, or pick them with the drawer's line ("Own Quake? …"). The page takes
+  `pak1.pak`, a `pak0.pak` that is not id's shareware one (the same file
+  in every 1.06 copy: recognised by `COM_LoadPackFile`'s count and CRC, 339
+  and 32981, and skipped), and CD tracks as files, `track02.ogg`… (the
+  track number from the name: `track02`, `Track 2`, a leading `02`; any
+  format the browser can play). It checks a pak as `COM_LoadPackFile` reads
+  one — the `PACK` header, a directory inside the file of at most 2048
+  entries, each inside the file — and says what it left out and why.
+- **Keeping.** A pak goes into the game directory, the IndexedDB store the
+  program's files live in (`id1/pak1.pak`), and so to the worker's file
+  system at every start; the music goes to a store of its own (`music`,
+  keyed by track), which the worker never sees: the page hands the program
+  the list of tracks (`-cdtracks 2,3,…`, "CD music") and plays a track's
+  file when the program asks for it. The files stay in this browser until
+  removed (the drawer's "remove them").
+- **Restarting.** The worker takes its files before it starts, so adding
+  or removing files reloads the page: the engine and `pak0.pak` come from
+  the HTTP cache, the saves and settings from storage. (A reload asks for
+  the click that starts audio again; adding files is rare enough.)
+- **The program decides**, as id's did: `COM_CheckRegistered` compares
+  `gfx/pop.lmp` with the table in `common.c` ("Playing registered
+  version." on the console, the `registered` cvar the QuakeC's episode gates
+  read), and refuses a modified game without it ("You must have the
+  registered version to use modified games") or a `pop.lmp` that is not
+  id's ("Corrupted data file."); `PR_LoadProgs` refuses a `progs.dat` made
+  against other system globals; and the port refuses one that calls
+  builtins id's engine never had. A refusal ends the program before it
+  starts, its message on stderr; if it came with files just added, the page
+  takes them out again, restarts, and shows the message in the drawer.
+- **Not supported, and why.** The 2021 re-release's files
+  (`rerelease/id1/pak0.pak`) are a different game build: its `progs.dat`
+  calls the new engine's builtins by name (numbered `#0`, resolved at load),
+  which the port does not have and will not fake — the port plays id's 1996
+  WinQuake. The page leaves out anything under a `rerelease/` folder and
+  says to use the `id1/` files beside it; a re-release pak dropped on its
+  own reaches the program, which refuses it (a modified game, or its
+  progs). Mission packs and mods (`-game`, `-hipnotic`, more paks) are out
+  of the port's scope; the page takes `pak0.pak` and `pak1.pak` only.
+
+`verify_content.py` checks it all with synthesized data: a `pak1.pak` made
+from `common.c`'s `pop[]` table and the shareware `maps/e1m1.bsp` copied as
+`maps/e2m1.bsp`, and generated tones as tracks 2, 3 and 6.
+
+## CD music
+
+In 1996 Quake's music was the CD's own audio tracks, which the drive played
+beside the game's mix, never through it: the engine only told the drive
+"track N, looping", and the drive played it at its level. The port keeps
+that split.
+
+- **The program** asks where id's client asked (`quake_rs::cd_audio`,
+  `cd_win.c`'s state): every level's signon (`svc_cdtrack`, the
+  worldspawn's `sounds`: e1m1 is track 6, the start map 4), the QuakeC's
+  intermission track 3 and episode-end track 2, a demo's (its header line
+  forces one: id's `demo1` plays track 2 all through the attract loop), and
+  `svc_setpause` pauses it. The same track asked for again goes on; another
+  stops it and starts from the top. The `cd` command is id's (`cd play N`,
+  `loop`, `stop`, `pause`, `resume`, `remap`, `info`, …). The drive's
+  state goes to the page in a `CD` record when it changes.
+- **The level** is `bgmvolume` (Options > CD Music Volume) as id's DOS
+  driver set it, `(int)(bgmvolume * 255)`; WinQuake's MCI could not set a
+  CD's level, so there the slider only switched the music off and on. Both
+  profiles: a CD playing is id's behaviour, so Classic plays the player's
+  music too.
+- **The page** plays the track's file in an `<audio>` element (streamed:
+  a seven-minute track is not decoded whole into memory), through a gain
+  node (the level) into the page's AudioContext, beside the worklet that
+  plays the program's mix: it starts with the first click, as the game's
+  sound does, and a hidden tab pauses it with the game (WinQuake paused the
+  CD when it lost the screen). A looping track loops in the element; a
+  track played once reports its end (the `cd_ended` call: MCI's notify).
+- **Without music** there is no drive: no `-cdtracks`, no `CD` records,
+  nothing in the program changes (id's `cd_null.c`, which the C oracle is
+  built with). The `cd` command says "No CD in player.".
+
+The checks read the drive through `quake.cd.state()` (what the program
+asked for; the element's time, loop and level; the output's RMS) and the
+`cd_state` call.
 
 ## Settings, and how the page shows the picture
 

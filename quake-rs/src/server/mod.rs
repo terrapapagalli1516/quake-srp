@@ -200,7 +200,7 @@ pub struct WorldModel {
     /// [`Outbox`]). It lives here, on the [`Host`], because that is what a
     /// builtin can reach ([`Vm::with_host`]).
     outbox: Outbox,
-    /// The `skill` and `sv_gravity` cvars (see [`ServerCvars`]).
+    /// The `skill`, `sv_gravity` and `registered` cvars (see [`ServerCvars`]).
     cvars: ServerCvars,
 }
 
@@ -245,6 +245,7 @@ impl WorldModel {
     /// interactive engines (wasm, quaketool) pass `Some(pak)`; tests pass
     /// `None` and keep the zero-box fallback.
     pub fn with_pak(bsp: Bsp, pak: Option<crate::pak::Pak>) -> WorldModel {
+        let registered = pak.as_ref().is_some_and(crate::common::is_registered);
         let mut w = WorldModel {
             bsp,
             precache_models: vec![String::new()],
@@ -252,7 +253,7 @@ impl WorldModel {
             pak,
             model_bounds: std::collections::HashMap::new(),
             outbox: Outbox::default(),
-            cvars: ServerCvars::default(),
+            cvars: ServerCvars { registered, ..ServerCvars::default() },
         };
         // Slot 1 is the world brush model. id used the map name; "*0" is the
         // submodel-0 (worldspawn) reference and is what setmodel resolves.
