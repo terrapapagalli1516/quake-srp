@@ -12,6 +12,10 @@
 // The worker's own event loop never runs again once the program starts (it
 // never returns), so nothing can reach it by postMessage after `init`:
 // everything the page sends goes through the shared ring.
+//
+// A program built for wasm32-wasip1-threads imports a shared `env.memory`
+// and `wasi.thread-spawn`: each of its threads runs in another worker
+// running this file (`threads` below).
 'use strict';
 
 // --- Shared memory layout (web/PLATFORM.md, "Shared memory") -------------
@@ -56,6 +60,8 @@ let ctl, ring;                           // views on the shared control block an
 let slots = null, slotBytes = 0, slotsGen = 0;
 
 onmessage = async (e) => {
+  if (e.data.t === 'hello') { postMessage({ t: 'ready' }); return; }   // a thread worker, made
+  if (e.data.t === 'thread') { runThread(e.data); return; }
   if (e.data.t !== 'init') return;
   const { wasm, shared, files, args } = e.data;
   ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
@@ -68,8 +74,12 @@ onmessage = async (e) => {
     finish(3, 'compile: ' + err);
     return;
   }
-  const inst = await WebAssembly.instantiate(module, { wasi_snapshot_preview1: imports(module, args) });
-  memory = inst.exports.memory;
+  const shared_memory = importedMemory(new Uint8Array(wasm));
+  if (WebAssembly.Module.imports(module).some(i => i.module === 'wasi' && i.name === 'thread-spawn')) {
+    await threads.start(module, shared_memory);
+  }
+  const inst = await WebAssembly.instantiate(module, importObject(module, args, shared_memory));
+  memory = shared_memory || inst.exports.memory;
   Atomics.store(ctl, C.RUN, 1);
   try {
     inst.exports._start();
@@ -252,19 +262,110 @@ function freeSlot(bytes) {
   return -1;
 }
 
-// stderr: the program's own messages, a line at a time to the page's console.
+// stderr: the program's own messages, a line at a time to the page's console
+// (from a thread, to this worker's console: its parent never reads again).
 const stderr = {
   text: '',
   write(src, n) {
     this.text += new TextDecoder().decode(u8().slice(src, src + n));
     let nl;
     while ((nl = this.text.indexOf('\n')) >= 0) {
-      postMessage({ t: 'log', text: this.text.slice(0, nl) });
+      this.line(this.text.slice(0, nl));
       this.text = this.text.slice(nl + 1);
     }
   },
-  flush() { if (this.text) postMessage({ t: 'log', text: this.text }); this.text = ''; },
+  line(text) {
+    if (threads.self) console.log(`[quake thread ${threads.self}]`, text);
+    else postMessage({ t: 'log', text });
+  },
+  flush() { if (this.text) this.line(this.text); this.text = ''; },
 };
+
+// --- Threads (wasm32-wasip1-threads) ------------------------------------------
+// Each thread is a worker running this file, on the program's shared memory:
+// `thread-spawn` hands one the thread's start argument, and it calls the
+// module's `wasi_thread_start`. The workers are made before the program
+// starts (a worker made while its parent is blocked may never start) and
+// reused as threads end; `busy` marks the ones running a thread. A thread
+// has the clocks, randomness, sleep and stderr; the files, stdin and stdout
+// are the main program's. A thread cannot spawn threads yet.
+const threads = {
+  pool: [],
+  busy: null,
+  module: null,
+  memory: null,
+  next: 1,                 // thread ids (the main thread is 0)
+  self: 0,                 // in a thread's worker: its id
+  async start(module, memory) {
+    const n = Math.max(2, Math.min(16, navigator.hardwareConcurrency || 4));
+    this.busy = new Int32Array(new SharedArrayBuffer(4 * n));
+    this.module = module;
+    this.memory = memory;
+    await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
+      const w = new Worker(self.location.href);
+      w.onmessage = (e) => { if (e.data.t === 'ready') resolve(); };
+      w.onerror = (e) => reject(new Error('a thread worker failed: ' + e.message));
+      w.postMessage({ t: 'hello' });
+      this.pool.push(w);
+    })));
+  },
+  // wasi.thread-spawn: a positive thread id, or a negative errno.
+  spawn(arg) {
+    for (let i = 0; i < this.pool.length; i++) {
+      if (Atomics.compareExchange(this.busy, i, 0, 1) === 0) {
+        const tid = this.next++;
+        this.pool[i].postMessage({ t: 'thread', module: this.module, memory: this.memory,
+                                   tid, arg, busy: this.busy, slot: i });
+        return tid;
+      }
+    }
+    return -6;                                   // EAGAIN: every worker is busy
+  },
+};
+
+// In a thread's worker: run the thread, then free the worker for the next.
+async function runThread({ module, memory: mem, tid, arg, busy, slot }) {
+  memory = mem;
+  threads.self = tid;
+  try {
+    const inst = await WebAssembly.instantiate(module, importObject(module, [], mem));
+    inst.exports.wasi_thread_start(tid, arg);
+  } catch (err) {
+    if (!(err instanceof Exit)) console.error(`[quake thread ${tid}]`, err);
+  }
+  stderr.flush();
+  Atomics.store(busy, slot, 0);
+}
+
+// A module's imported `env.memory`, made shared with the limits the module
+// declares (the JS API does not tell them, so they come from the import
+// section), or null when it defines its own memory.
+function importedMemory(bytes) {
+  let i = 8;
+  const leb = () => { let r = 0, sh = 0, b; do { b = bytes[i++]; r += (b & 0x7f) * 2 ** sh; sh += 7; } while (b & 0x80); return r; };
+  const name = () => { const n = leb(); i += n; return new TextDecoder().decode(bytes.subarray(i - n, i)); };
+  while (i < bytes.length) {
+    const id = bytes[i++], size = leb(), end = i + size;
+    if (id === 2) {                               // the import section
+      for (let n = leb(); n > 0; n--) {
+        const mod = name(), field = name(), kind = bytes[i++];
+        if (kind === 0) leb();                                   // a function: its type
+        else if (kind === 1) { i++; if (bytes[i++] & 1) leb(); leb(); }   // a table
+        else if (kind === 3) i += 2;                             // a global
+        else if (kind === 4) { i++; leb(); }                     // a tag
+        else if (kind === 2) {                                   // a memory
+          const flags = bytes[i++], min = leb(), max = flags & 1 ? leb() : undefined;
+          if (mod === 'env' && field === 'memory') {
+            return new WebAssembly.Memory({ initial: min, maximum: max, shared: !!(flags & 2) });
+          }
+        }
+      }
+      return null;
+    }
+    i = end;
+  }
+  return null;
+}
 
 // --- The file system ---------------------------------------------------------
 // One directory tree in memory, keyed by relative path ("id1/s0.sav"); a
@@ -308,6 +409,15 @@ function writeFilestat(buf, type, size) {
 }
 
 // --- The imports ---------------------------------------------------------------
+// Everything the module imports: WASI's functions, and for a threads build
+// its shared memory and `thread-spawn`.
+function importObject(module, args, sharedMemory) {
+  const obj = { wasi_snapshot_preview1: imports(module, args) };
+  if (sharedMemory) obj.env = { memory: sharedMemory };
+  obj.wasi = { 'thread-spawn': threads.self ? () => -52 : (arg) => threads.spawn(arg) };
+  return obj;
+}
+
 function imports(module, args) {
   const argv = ['quake', ...(args || [])];
   const enc = new TextEncoder();

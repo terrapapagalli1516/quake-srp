@@ -12,6 +12,12 @@ license = "GPL-2.0-or-later"
 name = "quake"
 path = "src/main.rs"
 
+# A std::thread round trip for the WASI host (wasm32-wasip1-threads):
+# web/verify_threads.py.
+[[bin]]
+name = "threadcheck"
+path = "src/bin/threadcheck.rs"
+
 # The engine, unchanged.
 [dependencies]
 quake-rs = { path = "../quake-rs" }

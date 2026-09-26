@@ -197,16 +197,32 @@ assumes the page mixes.
 
 ## Threads
 
-Not used yet, and not precluded. A later change can build for
-`wasm32-wasip1-threads`: the module then imports a shared `env.memory` and
-`wasi.thread-spawn`, and each spawned thread is another worker running
-`wasi.js` in a thread mode (instantiate the same module on the same memory,
-call `wasi_thread_start(tid, arg)`), with `std::thread` and its futexes
-working as wasm atomics. The main program already runs in a worker, where
-blocking is allowed. The ring, the frame slots and the file system are the
-host's and would stay with the main worker (the file system would need to be
-shared, or the threads kept away from `std::fs`). A shared memory would also
-let the page read frames straight out of the program's memory, saving the
+The game does not use threads yet; the host is ready for them, and a check
+proves it. A program built for `wasm32-wasip1-threads` imports a shared
+`env.memory` and `wasi.thread-spawn`. `wasi.js` then:
+
+- makes the shared memory with the limits the module's import section
+  declares (the JS API does not tell them, so `importedMemory` reads them);
+- before the program starts, makes a pool of thread workers (as many as
+  `navigator.hardwareConcurrency`, 2–16), each another instance of
+  `wasi.js` — a worker made after its parent has blocked may never start;
+- answers `thread-spawn` by handing a free worker the module, the memory,
+  a thread id and the start argument; the worker calls
+  `wasi_thread_start` and marks itself free when the thread ends. `std`'s
+  futexes are wasm atomics on the shared memory, so `join`, `Mutex` and
+  channels need nothing more from the host.
+
+A thread has the clocks, randomness, sleep and stderr (to its worker's
+console: the parent never reads messages again). The files, stdin and
+stdout stay the main program's, and a thread cannot spawn threads yet.
+
+`web/verify_threads.py` builds `quake-wasm`'s `threadcheck`
+(`src/bin/threadcheck.rs`: four `std::thread::scope` threads sum their part
+of 1..4,000,000, a spawned thread answers over a channel) and runs it in the
+host: it passes in headless Chromium and Firefox. The game itself also runs
+as a `wasm32-wasip1-threads` build (shared memory, no threads spawned):
+`verify_walk.py` and `verify_demo.py` pass on it. With a shared memory the
+page could read frames straight out of the program's memory, saving the
 worker-side copy measured below.
 
 ## Measurements
