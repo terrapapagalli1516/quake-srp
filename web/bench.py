@@ -126,17 +126,24 @@ BENCH_JS = r"""
   function isWalk(wl) {
     return wl.startsWith('walk_') || wl.startsWith('fire_') || wl.startsWith('quad_');
   }
-  // Boot a workload with calls (a stock build; start() in bench.rs).
+  // Boot a workload with calls (a stock build), exactly as start() in
+  // bench.rs does: the console lines are typed into the console.
   async function startWorkload(wl) {
     const q = quake.call;
+    const type = async (line) => {
+      q('console_toggle');
+      for (const ch of line) q('console_char', ch.charCodeAt(0));
+      q('console_enter');
+      if (await q('console_visible')) await q('console_toggle');
+    };
     if (wl === 'attract') return await q('boot_attract') === 1;
     if (wl === 'demo1') return await q('boot_demo') === 1;
     if (!isWalk(wl)) return false;
     const map = wl.slice(5);
     if (await q('boot') !== 1) return false;
-    if (map !== 'e1m1') await q('exec', 'map', map);
+    if (map !== 'e1m1') await type('map ' + map);
     if (await q('menu_visible')) await q('menu_cancel');
-    if (wl.startsWith('quad_')) await q('exec', 'impulse', 255);
+    if (wl.startsWith('quad_')) await type('impulse 255');
     return await q('in_walk_mode') === 1 && !(await q('menu_visible'));
   }
   // The fixed-step run: one frame per rAF, dt = cfg.dt, timed per phase.
