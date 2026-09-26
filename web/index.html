@@ -2,15 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- viewport-fit=cover: on a phone the picture runs under the notch; the
+     touch controls keep to the safe area (touch.js). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="Quake (1996), faithfully ported to dependency-free safe Rust and compiled to WebAssembly — play the shareware episode in your browser.">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0b0907">
 <title>quake-rs · Quake in safe-Rust WebAssembly</title>
-<!-- Favicon: the Quake 'Q' — a bronze ring, open at the bottom, with the
-     hanging nail through the gap. 16x16 PNG, generated offline, inlined as a
-     data: URI so the page stays a single dependency-free file. -->
-<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAgElEQVR42mNgAAIRAZ7/2PDJyXZgjEueAZtmmCZ0vKJEB4wxDMGnGSYO04zNEAZsmnE5GZshDLj8e2NDFgpGN4SgAciGYHMFigG4nI7NAHRDqGMAzBD0ECbaC9gkyDYAWRJXDGA1AJvphKIQwwCYInwG4E3KxMYCdQ3Al52J0QwAuN2fliv1Rl0AAAAASUVORK5CYII=">
+<!-- Installable (Add to Home Screen): the manifest, and iOS's own tags. The
+     icons are original pixel art (web/icons/make_icons.py), not id's; the
+     favicon is the 32-pixel one, inlined so it costs no request. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="quake-rs">
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAABn0lEQVR42o1WMU5EQQilNLqxMMYY4wk2Jl7Aeuut9zp2ew97Gw9g4iW8gaWNtY5hw+e/BwwJxYT/hwc8YJDLizOQ26sNK2vRK/6inaVpHfThb0Npej0PkezXDjC47K2bXqa+1GkBf+HTfwSd/OqFh+tzL5yN0CdpsqpGd/cblXGe0qsHCb9xTs36x/5OATQIMGeaVRVNCTT3h3UFsCB8ctjXEwcAzoF797+OWwgi7IalTKeVY+4ftyuAmokVyRk/4L4BcBBhipZG4y61C+y+B/BB8F0kmZkI3f9534dBhKNp4cAjQ2eBdQDw5RR2qBQBhu4zBkeQksz1w9Z/v18ZoGhpqfsLAIZ1FcXwAMxlME2hTPsAxcwQ1nqSCw48yd1GKyZo0QchB5giKFM/RAFjyDiE1uMqymac6T9fdkPenh9BDk83Q6ZvqoQPOvQzA2TWGUam24PFkVmvV5j0RQthzPR07cAyzYxmT1DBKnwSTmI2GrN5UO8M0s9P5mn44MRlWoyU5loXD7t6H+24X+1F/ZU2ZHi6tEmGXxdfp/BU/gA63kmGJJT9zAAAAABJRU5ErkJggg==">
+<!-- The service worker (offline, and cross-origin isolation where the
+     server sends no headers) registers itself; main() waits for it. -->
+<script src="sw.js"></script>
 <style>
   /* Palette: Quake's bronze/rust on near-black — restrained, no kitsch. */
   :root {
@@ -140,12 +151,8 @@
     margin:10px 0 4px 8px; }
   #drawer .aside { max-width:640px; margin:14px auto 0; font-size:12px; color:var(--faint); }
 
-  #touchNote { display:none; margin:12px 0 0; width:0; min-width:100%; box-sizing:border-box; padding:8px 14px;
-    border:1px solid #4a2317; border-radius:3px; background:#180e09; color:#c98f6f;
-    font-size:12.5px; }
-  /* Small/touch screens: the game needs a keyboard + mouse — say so, and shrink
-     the 4:3 box (same aspect math as above) so the page never breaks. */
-  @media (pointer:coarse), (max-width:699px) { #touchNote { display:block; } }
+  /* A narrow window: shrink the 4:3 box (same aspect math as above) so the
+     page never breaks. (A touch screen gets touch.js's layout instead.) */
   @media (max-width:699px) {
     canvas { width:calc(100vw - 32px); height:auto; aspect-ratio:4 / 3; }
     #play { font-size:13px; }
@@ -177,8 +184,6 @@
         <button id="keysBtn" class="link" aria-expanded="false" aria-controls="drawer">keys</button>
       </span>
     </div>
-    <div id="touchNote">quake-rs needs a keyboard and a mouse — open it on a desktop to play.
-      (The attract demos play fine on this device.)</div>
   </main>
 
   <div id="drawer" hidden>
@@ -271,7 +276,8 @@ const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDI
 const OUT = { FRAME: 1, SYNC: 2, STATE: 3, SAMPLE: 4, SOUND: 5, STOP_SOUND: 6, STATIC_SOUND: 7,
               AMBIENT: 8, LISTENER: 9, GENERATION: 10, LOCAL_SOUND: 11, REPLY: 12, BENCH: 13 };
 // State flags (the STATE record).
-const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, FKEY: 64 };
+const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, FKEY: 64,
+             TOUCH: 128, ASK: 256, PAUSED: 512 };
 
 let worker = null, ctl = null, ring = null;
 // The frame slots the worker made (it makes a larger set when a frame
@@ -280,6 +286,8 @@ let frameSlots = null, slotBytes = 0, slotsGen = 0;
 let exp = null;                    // the automation proxy (window.quake.call by name), set once running
 // The program's UI state as of its last turn (the STATE record).
 const gameState = { flags: 0, menuScreen: 0, pixelSize: 0 };
+// touch.js, on a touch screen: { state() on every STATE record, rumble() }.
+let touch = null;
 
 // Is the in-game menu up (capturing keyboard)?
 function menuVisible() { return !!(gameState.flags & ST.MENU); }
@@ -369,6 +377,7 @@ function handleOutput(b) {
         gameState.pixelSize = len >= 12 ? u32(p + 8) : 0;
         if (nativePixel() !== native) fitCanvas();
         syncLockChip();
+        if (touch) touch.state();
         break;
       }
       case OUT.SAMPLE: onSample(u32(p), b.slice(p + 4, p + len)); break;
@@ -674,8 +683,7 @@ document.addEventListener('fullscreenchange', () => {
 // Starting a session from a button is a real gesture: unlock audio with it and
 // retire the click-to-play scrim in the same go — ONE gesture does everything
 // (on touch devices requestPointerLock fails silently, so a scrim that waited
-// for a lock would sit over the demo forever; the touchNote promises demo
-// playback works there). Capturing the mouse stays a plain canvas click away,
+// for a lock would sit over the demo forever). Capturing the mouse stays a plain canvas click away,
 // invited by the #lockChip whenever unlocked walk mode would use it.
 document.getElementById('walkBtn').addEventListener('click', () => {
   if (!readyToPlay) return;
@@ -1331,10 +1339,15 @@ async function download(urls) {
 }
 
 async function main() {
+  // The service worker first (sw.js): the first visit's downloads go
+  // through it (and are kept), and on a server without the isolation
+  // headers it reloads the page under itself, which adds them.
+  if (window.quakeServiceWorker) await window.quakeServiceWorker;
   // SharedArrayBuffer needs a cross-origin isolated page: the server must
-  // send COOP/COEP (web/PLATFORM.md, "Serving").
+  // send COOP/COEP (web/PLATFORM.md, "Serving"), or the service worker.
   if (!self.crossOriginIsolated || typeof SharedArrayBuffer !== 'function') {
-    throw new Error('this page needs cross-origin isolation — serve it with the headers '
+    const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) ? ' (on iOS: 15.2 or later, over https)' : '';
+    throw new Error('this page needs cross-origin isolation' + ios + ' — serve it over https or localhost, with the headers '
       + '"Cross-Origin-Opener-Policy: same-origin" and "Cross-Origin-Embedder-Policy: require-corp"');
   }
   quake.startedAt = performance.now();
@@ -1447,8 +1460,9 @@ function fitCanvas() {
 function pictureBox() {
   if (document.fullscreenElement === wrap) return { w: innerWidth, h: innerHeight };
   const cs = getComputedStyle(canvas);
-  const ch = parseFloat(cs.getPropertyValue('--chrome-h')) || 34;
-  const cv = parseFloat(cs.getPropertyValue('--chrome-v')) || 84;
+  // (0 is a size: touch.js's layout has no chrome.)
+  const px = (name, dflt) => { const v = parseFloat(cs.getPropertyValue(name)); return Number.isFinite(v) ? v : dflt; };
+  const ch = px('--chrome-h', 34), cv = px('--chrome-v', 84);
   return { w: Math.max(320, innerWidth - ch), h: Math.max(200, innerHeight - cv) };
 }
 // Tell the program the box in device pixels (the Window record): with
@@ -1626,6 +1640,30 @@ const quake = window.quake = {
            get dynLoops() { return dynLoops; }, get dynShots() { return dynShots; },
            get playingByKey() { return playingByKey; } },
 };
+
+// ===========================================================================
+// Touch screens: web/touch.js, loaded only where there is one (a coarse
+// pointer: phones and tablets) or with `?touch` in the address. It gets the
+// page's entry points below and nothing else (PLATFORM.md, "Touch").
+// ===========================================================================
+function startTouch() {
+  if (!new URLSearchParams(location.search).has('touch') && !matchMedia('(pointer: coarse)').matches) return;
+  const s = document.createElement('script');
+  s.src = 'touch.js';
+  s.onload = () => {
+    touch = window.QuakeTouch.attach({
+      wrap, canvas, overlay, state: gameState, ST,
+      started: () => firstGestureDone,        // the "tap to start" is gone
+      key: keyEvent,                          // a KEY record: Key_Event
+      look: mouseMove,                        // a MOUSE record: IN_MouseMove
+      call: callLine,                         // a CALL: automation.rs
+      unlockAudio, audio: () => audioCtx,
+      frameSize: () => [W, H],                // the presented frame's pixels
+    });
+  };
+  document.head.appendChild(s);
+}
+startTouch();
 
 main().catch(e => {
   // file:// can't fetch the engine or run a worker in most browsers — say how
