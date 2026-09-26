@@ -151,16 +151,12 @@ impl RenderStats {
 }
 
 /// The profiler a [`Renderer`](super::Renderer) owns: the counters while it
-/// is on, and the clock its phase timers read.
+/// is on. Its phase timers read `std::time::Instant` (in the browser, WASI's
+/// `clock_time_get`: the worker's `performance.now()`).
 #[derive(Default)]
 pub(super) struct Profiler {
     /// The counters, `Some` while profiling.
     stats: Option<RenderStats>,
-    /// A monotonic milliseconds source for the phase timers (e.g. the
-    /// browser's `performance.now()`), for targets where
-    /// `std::time::Instant` is unavailable (`wasm32-unknown-unknown` panics on
-    /// it). `None` uses `Instant`.
-    clock: Option<fn() -> f64>,
 }
 
 impl Profiler {
@@ -172,11 +168,6 @@ impl Profiler {
     /// Turn profiling off and return what it counted (zeros if it was off).
     pub(super) fn end(&mut self) -> RenderStats {
         self.stats.take().unwrap_or(RenderStats::ZERO)
-    }
-
-    /// Install (or clear) the phase timers' clock.
-    pub(super) fn set_clock(&mut self, clock: Option<fn() -> f64>) {
-        self.clock = clock;
     }
 
     /// Whether the profiler is counting.
@@ -193,10 +184,10 @@ impl Profiler {
         }
     }
 
-    /// A profiler for a band's passes: on if this one is, with this one's
-    /// clock, its counters at zero ([`Profiler::absorb`] adds them back).
+    /// A profiler for a band's passes: on if this one is, its counters at
+    /// zero ([`Profiler::absorb`] adds them back).
     pub(super) fn for_band(&self) -> Profiler {
-        Profiler { stats: self.stats.map(|_| RenderStats::ZERO), clock: self.clock }
+        Profiler { stats: self.stats.map(|_| RenderStats::ZERO) }
     }
 
     /// Add what a band's profiler ([`Profiler::for_band`]) counted.
@@ -209,34 +200,7 @@ impl Profiler {
     /// A timestamp for a phase timer, only while profiling (so the game never
     /// reads a clock).
     #[inline]
-    pub(super) fn now(&self) -> Option<StatInstant> {
-        self.on().then(|| StatInstant::now(self.clock))
-    }
-}
-
-/// A profiler timestamp: `std::time::Instant`, or a reading of the clock
-/// installed by [`Renderer::set_stats_clock`](super::Renderer::set_stats_clock).
-/// Only constructed while profiling.
-#[derive(Clone, Copy)]
-pub(super) enum StatInstant {
-    Std(std::time::Instant),
-    Ms(fn() -> f64, f64),
-}
-
-impl StatInstant {
-    pub(super) fn now(clock: Option<fn() -> f64>) -> StatInstant {
-        match clock {
-            Some(clock) => StatInstant::Ms(clock, clock()),
-            None => StatInstant::Std(std::time::Instant::now()),
-        }
-    }
-
-    pub(super) fn elapsed(&self) -> std::time::Duration {
-        match *self {
-            StatInstant::Std(t) => t.elapsed(),
-            StatInstant::Ms(clock, t0) => {
-                std::time::Duration::from_nanos(((clock() - t0).max(0.0) * 1.0e6) as u64)
-            }
-        }
+    pub(super) fn now(&self) -> Option<std::time::Instant> {
+        self.on().then(std::time::Instant::now)
     }
 }

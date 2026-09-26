@@ -56,7 +56,7 @@ pub(crate) fn frame_end(_renderer: Option<&mut quake_rs::render::Renderer>) {
 }
 
 /// Before a tick's frame: the running workload's scripted input
-/// ([`workload`]).
+/// (`workload`).
 #[inline(always)]
 pub(crate) fn before_frame() {
     #[cfg(feature = "bench")]
@@ -116,7 +116,6 @@ alias_models,alias_accepted,alias_tris,bands,band_threads";
         }
         ACC.with(|a| *a.borrow_mut() = [0.0; N_PHASES]);
         if let Some(r) = renderer {
-            r.set_stats_clock(Some(now_ms));
             r.stats_begin();
         }
         LAST.with(|l| l.set(now_ms()));
