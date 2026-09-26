@@ -21,7 +21,10 @@
 //! default, bench.py's 60 + 600), so the native client's frames can be
 //! compared with the browser's byte for byte; `--ppm PREFIX` also writes those
 //! frames as `PREFIX-<workload>-<W>x<H>-<frame>.ppm`. Each run ends with a
-//! tally of the sound calls its frames made.
+//! tally of the sound calls its frames made. `--trace PATH` writes, for each
+//! demo frame, what `CL_RelinkEntities` drew — the clocks, the view angles,
+//! the view entity, `cl.velocity` and every relinked entity — as the records
+//! of the oracle's `oracle_trace` (`oracle/demo_lerp.py` compares the two).
 //!
 //! Several workloads and resolutions run in `bench.py`'s order (each workload
 //! at each resolution) in one host, as the page runs them: QuakeC's
@@ -172,8 +175,9 @@ impl Host {
 }
 
 pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<String, String> {
-    // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX].
+    // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX] [--trace PATH].
     let (mut frames, mut res, mut every, mut ppm) = (660u32, "320x200".to_string(), 30u32, None);
+    let mut trace: Option<String> = None;
     let mut i = 0;
     while i < rest.len() {
         let val = |i: usize| rest.get(i + 1).ok_or_else(|| format!("{} needs a value", rest[i]));
@@ -188,6 +192,10 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
             }
             "--ppm" => {
                 ppm = Some(val(i)?.clone());
+                i += 1;
+            }
+            "--trace" => {
+                trace = Some(val(i)?.clone());
                 i += 1;
             }
             n => frames = n.parse().map_err(|_| format!("unknown argument {n:?}"))?,
@@ -215,6 +223,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     };
     let mut rgba: Vec<u8> = Vec::new();
     let mut o = String::new();
+    let (mut trace_out, mut traced) = (String::new(), 0usize);
 
     for workload in workloads.split(',') {
         let _ = writeln!(o, "{workload}");
@@ -244,6 +253,9 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 }
                 let mut sound = Vec::new();
                 let Some(frame) = host.step(DT, &mut sound) else { continue };
+                if let (Some(_), Some(Mode::Demo(d))) = (&trace, host.mode.as_ref()) {
+                    trace_frame(&mut trace_out, &mut traced, d);
+                }
                 tally.add(&sound);
                 tally.add(&frame.sound);
                 // V_UpdatePalette + VID_ShiftPalette: the cshifts and gamma as
@@ -280,5 +292,32 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
             );
         }
     }
+    if let Some(path) = &trace {
+        std::fs::write(path, &trace_out).map_err(|e| format!("cannot write {path}: {e}"))?;
+    }
     Ok(o)
+}
+
+/// One `--trace` record, the `traced`-th: the frame's clocks, what
+/// `CL_RelinkEntities` drew for the camera, and each relinked entity
+/// (statics are never relinked).
+fn trace_frame(out: &mut String, traced: &mut usize, d: &DemoPlay) {
+    let f = &d.demo.frames[d.idx];
+    let v = &d.view;
+    let _ = writeln!(
+        out,
+        "F {} t={:.17} old={:.17} m0={} m1={} ang={} {} {} vorg={} {} {} vel={} {} {}",
+        *traced, d.time, d.oldtime, f.time, f.prev_time, v.view_angles[0], v.view_angles[1], v.view_angles[2],
+        v.view_entity_origin[0], v.view_entity_origin[1], v.view_entity_origin[2],
+        v.velocity[0], v.velocity[1], v.velocity[2],
+    );
+    *traced += 1;
+    for e in v.entities.iter().filter(|e| e.num >= 0) {
+        let model = d.demo.model_precache.get(e.modelindex).map_or("", String::as_str);
+        let _ = writeln!(
+            out,
+            "E {} {model} {} {} {} {} {} {} {}",
+            e.num, e.origin[0], e.origin[1], e.origin[2], e.angles[0], e.angles[1], e.angles[2], e.frame
+        );
+    }
 }

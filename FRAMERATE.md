@@ -19,9 +19,11 @@ rerun the measurement. (Branch `q26/framerate`, 2026-09-26.)
   becomes reachable), everything that falls flew higher and further (grenades
   landed 23 units further), bonus flashes lasted a third as long and damage
   flashes half, a slow gib trailed 7 times as much blood and a grenade twice
-  the smoke, demos moved their camera 58 times a second on a 480 Hz display,
-  riders bounced off lifts, and clocks that add a frame at a time in `f32`
-  ran 5.5% fast an hour in (they stop at 18 hours).
+  the smoke, riders bounced off lifts, and clocks that add a frame at a time
+  in `f32` ran 5.5% fast an hour in (they stop at 18 hours). (Demos moved
+  their camera 58 times a second on a 480 Hz display: the port's Classic
+  playback, not id's, whose client interpolates at any rate — fixed in
+  Classic on `q26/lerp`.)
 - **Fixed, in the uncapped path only** (`Stepping::Uncapped`; Classic, the
   72 fps gate, is byte-identical): all of the above. Every quantity the
   harness measures now matches 72 Hz within a stated tolerance, and every
@@ -54,7 +56,6 @@ covering the same time does in id's game:
 | damage and bonus flashes | `int` percents lose a truncation every frame: at least 1 a frame | id's drop per whole 1/72 s tick (`Tick72`) | `client::view::fade_cshifts` |
 | trails (rockets, grenades, gibs, tracers) | `R_RocketTrail` drops at least one particle a frame | the particles one 72 Hz frame would drop at the entity's speed, spread evenly, the spacing carried from frame to frame | `particles::ParticleSystem::spawn_trail` |
 | `host_time` (notify, centre prints), pushers' `ltime` | `f32 += dt` | kept beside a double (`advance_clock`) | `client::cl_main`, `server::sv_phys` |
-| demo playback | the port shows each recorded message until the next | drawn between messages as id's `CL_LerpPoint` does: POV, velocity, entities; angles the short way; no blend across a teleport; at most 0.1 s | `client::cl_demo::demo_view` |
 | the gate | `Host_FilterTime` without its cap clamps a frame under 1 ms up to 1 ms, so past 1000 Hz the game outran the clock | `host_filter_time_display`: id's gate with the cap at 1000 fps; a closer refresh skips | `client::host` |
 
 What needed nothing: QuakeC thinks (`SV_RunThink` runs each at its own
@@ -63,7 +64,10 @@ every rate — the grunt's fight is identical), pushers' paths (`SV_Physics_Push
 moves them exactly to their think times), everything drawn from `cl.time`
 (view bob and roll, light styles, sky and water, the intermission sway),
 linear fades (the view kick, dlights, stair smoothing, the punch angle),
-and the ambient sounds, which already step in 1/72 s ticks (`snd.rs`).
+the ambient sounds, which already step in 1/72 s ticks (`snd.rs`), and demo
+playback: id's `CL_LerpPoint` draws every frame between the two newest
+recorded messages at any rate (`client::cl_demo::demo_frame`; the port's
+Classic playback did not until `q26/lerp`).
 
 Tried and dropped (return on complexity): the exponential particle
 velocities (`pt_explode`'s `vel += vel·dvel`) and the ground and water
@@ -120,10 +124,10 @@ higher rate, or a fixed offset under the size of a frame's travel.
   in `f32`) freezes after 18 hours at 480 Hz; the platform's to move to a
   double.
 - **Classic, found on the way:** id's client interpolates demo playback at
-  any rate (`CL_LerpPoint`); the port's Classic path shows each recorded
-  message until the next (58 camera moves a second where id's would show 72).
-  Unchanged here, as the brief asks; for the chair to judge against the
-  oracle.
+  any rate (`CL_LerpPoint`); the port's Classic path showed each recorded
+  message until the next (58 camera moves a second where id's show one a
+  frame). Fixed on `q26/lerp`, frame for frame against id's client
+  (`oracle/demo_lerp.py`).
 
 ## The tables
 
@@ -314,8 +318,13 @@ the last column is `--check`'s tolerance. 72 Hz is the reference (id's code at
 
 | quantity | 72 (id) | 60 | 144 | 240 | 480 | jitter | tolerance |
 |---|---|---|---|---|---|---|---|
-| camera moves a second (/s) | 58.40 | 57.55 → 58.65 (+0.250) | 58.43 → 140.7 (+82.25) | 58.44 → 234.3 (+175.9) | 58.45 → 468.4 (+410.0) | 58.30 → 138.0 (+79.59) | — |
-| demo message at 20 s | 1204.0 | 1204.0 → 1204.0 (0) | 1205.0 → 1205.0 (+1.0) | 1205.0 → 1205.0 (+1.0) | 1205.0 → 1205.0 (+1.0) | 1205.0 → 1205.0 (+1.0) | ±2.0 |
+| camera moves a second (/s) | 70.35 | 58.65 → 58.65 (−11.70) | 140.6 → 140.6 (+70.30) | 234.3 → 234.3 (+164.0) | 468.4 → 468.4 (+398.1) | 138.0 → 138.0 (+67.70) | — |
+| demo message at 20 s | 242.0 | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | ±2.0 |
+
+(Since `q26/lerp` the demo plays as id's client does, one recorded message
+at a time, drawn between the two newest at every rate: the camera moves in
+every frame the recorded player moves, and a message is a real message, not
+one of the port's old 60 Hz sub-frames.)
 
 ## Budget
 
@@ -370,7 +379,6 @@ test: `server::sv_phys::tests::uncapped_frames_jump_and_bounce_like_72_hz`
 (a jump and a bounce: apex to 0.05 units, landing to a 72 Hz frame),
 `client::view::tests::uncapped_flashes_fade_like_72_hz`,
 `particles::tests::uncapped_trails_are_as_dense_as_72_hz`,
-`client::cl_demo::tests::demo_view_blends_toward_the_next_message`,
 `client::host::tests::host_filter_time_display_runs_every_refresh_and_never_outruns_the_clock`
 and `stepping::tests`. Each also shows id's per-frame code failing the
 comparison, so the tests have teeth.

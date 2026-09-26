@@ -1166,7 +1166,6 @@ fn demo(c: &Ctx) -> Vec<Measure> {
     quake_rs::server::reset_random();
     let mut d: DemoPlay = cl_demo::build_demo_n(c.pak.clone(), 0, &mut Vec::new()).expect("demo1");
     d.stepping = c.stepping;
-    let lerp = c.stepping == Stepping::Uncapped;
     let mut clock = FrameClock::new(c.rate, c.stepping);
     let (mut t, mut moves, mut last) = (0.0f64, 0usize, ([0.0f32; 3], [0.0f32; 3]));
     while t < 20.0 {
@@ -1175,8 +1174,7 @@ fn demo(c: &Ctx) -> Vec<Measure> {
         let frame = cl_demo::demo_frame(&mut d, dt as f32, false, &VID);
         render::recycle_image(frame.image);
         // The POV the frame drew.
-        let v = cl_demo::demo_view(&d.demo.frames, d.idx, d.elapsed, lerp);
-        let pov = (v.view_origin, v.view_angles);
+        let pov = (d.view.view_origin, d.view.view_angles);
         if pov != last {
             moves += 1;
         }

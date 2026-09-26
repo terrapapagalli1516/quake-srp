@@ -279,19 +279,30 @@ pub struct DemoPlay {
     /// instead of through id's no-overbright colormap shading.
     pub colormap: Option<Vec<u8>>,
     pub colors: Vec<[u8; 3]>,
-    pub elapsed: f32,
+    /// `cl.time`: the client's clock, which `demo_frame` advances by the host
+    /// frame time and `CL_LerpPoint` keeps between the two newest messages
+    /// read (a double, as in client.h).
+    pub time: f64,
+    /// `cl.oldtime`: `cl.time` before this frame advanced it (the particles
+    /// and the stair smoothing step by `cl.time - cl.oldtime`).
+    pub oldtime: f64,
+    /// The newest recorded message read (`cl.mtime[0]`'s): an index into
+    /// `demo.frames`.
     pub idx: usize,
+    /// What this frame's `CL_RelinkEntities` drew: the clock, the camera and
+    /// every entity between the two newest messages.
+    pub view: cl_demo::DemoView,
     /// Live particles replayed from the recorded `svc_particle` / temp-entity
-    /// stream: each frame's effects are spawned ONCE when playback advances onto
+    /// stream: each message's effects are spawned ONCE, in the frame that reads
     /// it, then the pool is aged under gravity and drawn into the scene (sharing
     /// its z-buffer) — so the demo shows blood, gunshot puffs and explosions just
     /// like [`walk_frame`](cl_main::walk_frame) does for live play.
     pub particles: ParticleSystem,
     /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
     pub prng: Lcg,
-    /// The frame index whose effects were last spawned, so a frame rendered for
-    /// several steps spawns its bursts only on the step that ADVANCES onto it
-    /// (never re-spawning while it lingers). `usize::MAX` = "none spawned yet".
+    /// The message whose effects were last spawned, so each message's bursts
+    /// spawn once, in the frame that reads it. `usize::MAX` = "none read yet"
+    /// (the first frame of playback).
     pub last_spawned_idx: usize,
     /// The beam temp-entity slots (`cl_beams`) replayed from the recorded
     /// `TE_LIGHTNING1/2/3` / `TE_BEAM` stream; expanded into bolt-model
@@ -395,8 +406,10 @@ impl DemoPlay {
             sprites: Vec::new(),
             colormap: None,
             colors: Vec::new(),
-            elapsed: 0.0,
+            time: 0.0,
+            oldtime: 0.0,
             idx: 0,
+            view: cl_demo::DemoView::default(),
             particles: ParticleSystem::new(),
             prng: Lcg::new(0x9E37_79B9),
             last_spawned_idx: usize::MAX,
