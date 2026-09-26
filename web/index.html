@@ -1191,7 +1191,8 @@ const storage = {
   },
   put(path, data) {
     if (this.fallback) {
-      localStorage.setItem(FILE_PREFIX + path, new TextDecoder().decode(data));
+      try { localStorage.setItem(FILE_PREFIX + path, new TextDecoder().decode(data)); }
+      catch (e) { return Promise.reject(e); }
       return Promise.resolve();
     }
     return new Promise((resolve, reject) => {
@@ -1202,7 +1203,7 @@ const storage = {
     });
   },
   remove(path) {
-    if (this.fallback) { localStorage.removeItem(FILE_PREFIX + path); return Promise.resolve(); }
+    if (this.fallback) { try { localStorage.removeItem(FILE_PREFIX + path); } catch (e) {} return Promise.resolve(); }
     return new Promise(resolve => {
       const tx = this.db.transaction('files', 'readwrite');
       tx.objectStore('files').delete(path);
