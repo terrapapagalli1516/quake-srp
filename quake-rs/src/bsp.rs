@@ -15,7 +15,7 @@
 //! applied here: this loader returns the raw decoded disk records, leaving
 //! interpretation to higher layers. The one exception is the submodel bound
 //! spread (`Mod_LoadSubmodels` widens `mins`/`maxs` by a pixel) — see
-//! [`DModel::read`] — which is applied at decode time so `setmodel`-style
+//! `DModel::read` — which is applied at decode time so `setmodel`-style
 //! placement matches the C.
 
 use crate::error::{QError, Result};
@@ -391,7 +391,7 @@ pub struct MipTex {
     /// (`mt->offsets[r_drawsurf.surfmip]`). All empty when any level lies outside
     /// the lump (or in synthetic textures); see [`MipTex::mip`].
     pub mips: [Vec<u8>; MIPLEVELS - 1],
-    /// Animation sequencing (`texture_t.anim_*`), filled by [`sequence_anims`]
+    /// Animation sequencing (`texture_t.anim_*`), filled by `sequence_anims`
     /// after all miptex are loaded. `None` for a non-animated texture (a name
     /// not beginning with `+`). When `Some`, the renderer cycles frames by time
     /// like `R_TextureAnimation`.

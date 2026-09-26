@@ -104,7 +104,7 @@ pub struct Sprite {
     pub frames: Vec<Frame>,
 }
 
-/// Read one `dspriteframe_t` (origin[2] i32, width i32, height i32) followed by
+/// Read one `dspriteframe_t` (`origin[2]` i32, `width` i32, `height` i32) followed by
 /// `width * height` pixel bytes. Mirrors `Mod_LoadSpriteFrame` in `model.c`.
 fn read_sprite_frame(r: &mut Reader) -> Result<SpriteFrame> {
     // dspriteframe_t { int origin[2]; int width; int height; }

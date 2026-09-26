@@ -152,7 +152,7 @@ SCENARIOS: dict[str, list] = {
                      ("key", "ENTER"), ("frames", 1), ("shot", "options"),
                      ("key", "ENTER"), ("frames", 1), ("shot", "keys"),
                      # Video Options is row 12 on both sides; UP from row 0 wraps
-                     # to the port's 14th row (Web extras) but id's 13th (Video)
+                     # to the port's 14th row (Classic / 2026) but id's 13th (Video)
                      ("key", "ESCAPE")] + [("key", "DOWNARROW")] * 12
                     + [("key", "ENTER"), ("frames", 1), ("shot", "video")],
     "menu_help": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),

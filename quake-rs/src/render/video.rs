@@ -102,7 +102,7 @@ impl FovMode {
     }
 }
 
-/// The port's video cvars ([module docs](self)). [`Default`] is
+/// The port's video cvars (the module docs). [`Default`] is
 /// [`VideoCvars::CLASSIC`], id's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VideoCvars {

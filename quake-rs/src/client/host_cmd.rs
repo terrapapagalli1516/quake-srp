@@ -123,7 +123,7 @@ pub fn run_game_command(
 
 /// Port of `Host_Give_f` for the single-player items we support: a letter
 /// argument grants ammo/health/armour; a digit 1..8 grants that weapon (setting
-/// the `items` bit and selecting it). `n` (argv[2]) is the amount; ammo/health
+/// the `items` bit and selecting it). `n` (`argv[2]`) is the amount; ammo/health
 /// default to a full amount when omitted. All values clamp to sane caps.
 fn run_give_command(w: &mut Walk, argv: &[&str], out: &mut Vec<String>) {
     let what = match argv.get(1) {

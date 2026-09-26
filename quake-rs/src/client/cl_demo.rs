@@ -297,7 +297,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut 
 /// reads recorded messages until one is newer than `cl.time` (spawning each
 /// one's effects as it is read); `CL_LerpPoint` and `CL_RelinkEntities` draw
 /// the camera and every entity between the two newest messages
-/// ([`cl_relink_entities`]); then the frame is drawn ([`render_demo_frame`]).
+/// (`cl_relink_entities`); then the frame is drawn (`render_demo_frame`).
 /// So the view moves every frame at any frame rate, a message interval
 /// behind the recording. After the last message it loops to the first (the
 /// host normally starts the next demo instead, `CL_NextDemo`).

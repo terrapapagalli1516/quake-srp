@@ -296,7 +296,7 @@ pub(crate) fn blit_qpic_at(
 /// `(c % 16, c / 16)`, i.e. source pixel `(8*(c%16), 8*(c/16))`). Each character of
 /// `text` is stamped 8 virtual pixels apart starting at virtual `(x, y)` in
 /// 320x200 space, scaled by `scale` and offset by `(ox, oy)` framebuffer pixels —
-/// the same transform [`blit_qpic_at`] uses, so font text lines up with the menu
+/// the same transform `blit_qpic_at` uses, so font text lines up with the menu
 /// pics.
 ///
 /// Glyph index 0 (the transparent "space" cell whose texels are palette index 0)

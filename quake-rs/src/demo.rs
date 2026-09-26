@@ -351,9 +351,9 @@ pub struct EntSnapshot {
 /// every visible entity, and the one-shot effect events the server
 /// multiplexed into the block.
 ///
-/// `particles` are the `svc_particle` ([`SVC_PARTICLE`]) bursts decoded from
+/// `particles` are the `svc_particle` (`SVC_PARTICLE`) bursts decoded from
 /// `R_ParseParticleEffect` (one per message); `temp_entities` are the
-/// `svc_temp_entity` ([`SVC_TEMP_ENTITY`]) effects (gunshot/explosion/spike
+/// `svc_temp_entity` (`SVC_TEMP_ENTITY`) effects (gunshot/explosion/spike
 /// impacts) decoded from `CL_ParseTEnt`. A front-end replays each ONCE, in
 /// the frame that reads the message (`CL_GetMessage`), through the same
 /// [`crate::particles::ParticleSystem`] the live walk uses — so the recorded

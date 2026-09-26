@@ -243,7 +243,7 @@ with sync_playwright() as p:
     check("Esc on Video returns to Options", scr() == OPTIONS)
 
     # Go to console (row 1) opens the drop-down console. (Esc from Video left
-    # options_cursor on Video Options, row 12: down past Web extras wraps to 1.)
+    # options_cursor on Video Options, row 12: down past Classic / 2026 wraps to 1.)
     key("ArrowDown", 3)
     key("Enter")
     check("Go to console opens the console",
@@ -336,7 +336,7 @@ with sync_playwright() as p:
 
     # REBIND: Customize controls really rebinds +forward (row 3) to 'o'.
     key("Escape"); key("Enter")                   # Options, on Lookspring (10)
-    key("ArrowDown", 4); key("Enter")             # past Web extras to Customize controls
+    key("ArrowDown", 4); key("Enter")             # past Classic / 2026 to Customize controls
     key("ArrowDown", 3); key("Enter")             # grab on +forward
     pg.keyboard.press("o"); time.sleep(0.1)
     check("the grab bound the new key", pg.evaluate("exp.menu_bind_grabbing()") == 0)

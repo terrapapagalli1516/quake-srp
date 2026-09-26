@@ -91,7 +91,7 @@ pub(crate) fn finish_host_error(a: &mut App) {
 }
 
 /// `CL_PlayDemo_f` after its argument check: disconnect, print
-/// "Playing demo from <name>.", and start the demo — or print "ERROR:
+/// `"Playing demo from <name>."`, and start the demo — or print "ERROR:
 /// couldn't open." and stop the demo loop (`cls.demonum = -1`), staying
 /// disconnected. `timedemo` builds it for [`step_timedemo`]. True when it
 /// plays.

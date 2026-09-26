@@ -322,8 +322,9 @@ pub(crate) fn key_clear_states() {
 }
 
 /// 1 when the engine currently believes Quake keynum `keynum` is held — a
-/// read-only verification/debug call (like [`menu_screen_id`]). The browser
-/// harness uses it to prove the page's `e.code` punctuation mapping keeps
+/// read-only verification/debug call (like
+/// [`menu_screen_id`](crate::menu::menu_screen_id)). The browser harness
+/// uses it to prove the page's `e.code` punctuation mapping keeps
 /// key-down/key-up SYMMETRIC under Shift (press ',', add Shift, release ','
 /// must clear keynum 44, even though the release reports `key == '<'` —
 /// the C's scancode semantics, in_win.c `scantokey`).

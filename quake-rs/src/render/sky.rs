@@ -99,9 +99,10 @@ impl SkyView {
 /// `D_Sky_uv_To_st` (d_sky.c): the 16.16 sky coordinates for screen pixel
 /// `(u,v)` — build the ray `4096*vpn + wu*vright + wv*vup` (screen offsets from
 /// the integer centre scaled by `8192/longest`), squash it vertically
-/// (`end[2] *= 3`), normalise, then `s = (skytime*skyspeed + 6*(SKYSIZE/2-1)*end[0])
-/// * 0x10000` and the same for `t` with `end[1]`. Float math as the C (`wu`/`wv`
-/// computed in double, stored to float; `VectorNormalize` multiplies by `1/length`).
+/// (`end[2] *= 3`), normalise, then
+/// `s = (skytime*skyspeed + 6*(SKYSIZE/2-1)*end[0]) * 0x10000` and the same
+/// for `t` with `end[1]`. Float math as the C (`wu`/`wv` computed in double,
+/// stored to float; `VectorNormalize` multiplies by `1/length`).
 #[inline]
 fn sky_uv_to_st(u: i32, v: i32, sky: &SkyView) -> (i32, i32) {
     let longest = if sky.longest > 0.0 { sky.longest as f64 } else { 1.0 };

@@ -77,7 +77,7 @@ impl BarXf {
 /// and the loaded `gfx.wad`; consumed by [`draw_hud_into`].
 ///
 /// The `wad` borrow carries an explicit lifetime `'a` so the caller can
-/// keep one parsed [`Wad2`] alive and lend it per frame without cloning.
+/// keep one parsed [`Wad2`](crate::wad::Wad2) alive and lend it per frame without cloning.
 pub struct Hud<'a> {
     /// The parsed `gfx.wad`, which holds the `sbar`/`ibar`/`num_*`/`anum_*`/face/
     /// weapon/item/ammo/armor pics and the `conchars` font.

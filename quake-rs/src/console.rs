@@ -145,7 +145,7 @@ const CON_NOTIFYTIME: f32 = 3.0;
 /// laying printed text into `con_linewidth`-wide lines, word-wrapped
 /// ([`ConCursor`]), each line stamped with the time its first character
 /// arrived (`con_times`), and `Con_DrawNotify` showing the last
-/// [`NUM_CON_TIMES`] lines younger than `con_notifytime`. A line shows as soon
+/// `NUM_CON_TIMES` lines younger than `con_notifytime`. A line shows as soon
 /// as it starts (a print need not end in `\n`), blank lines included.
 ///
 /// In the C the notify lines are the tail of the console's own text buffer:
@@ -201,7 +201,7 @@ impl ConNotify {
     }
 
     /// `Con_DrawNotify`'s lines at clock `now`, top to bottom: the last
-    /// [`NUM_CON_TIMES`] console lines, skipping any older than
+    /// `NUM_CON_TIMES` console lines, skipping any older than
     /// `con_notifytime`.
     pub fn visible(&self, now: f32) -> Vec<&str> {
         self.lines
@@ -682,7 +682,7 @@ pub fn draw_console_background_full(
 /// (`scr_con_current` 0).
 ///
 /// On the [`screen_2d`] screen, `lines = (int)scr_con_current` rows:
-///  1. `Draw_ConsoleBackground(lines)` ([`draw_console_background`]);
+///  1. `Draw_ConsoleBackground(lines)` (`draw_console_background`);
 ///  2. the text: `rows = (lines-16)>>3` lines ending with the current one,
 ///     from `y = lines - 16 - rows*8`, each `con_linewidth = (vid.width>>3) - 2`
 ///     characters at `x = (col+1)*8`;

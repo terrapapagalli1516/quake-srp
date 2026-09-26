@@ -105,7 +105,8 @@ pub(crate) struct App {
     /// (`Con_DrawInput`, `con_cursorspeed` 4).
     pub(crate) realtime: f64,
     /// `oldrealtime` (host.c): `realtime` when the last host frame ran —
-    /// [`host_filter_time`]'s gate measures the time since then.
+    /// [`host_filter_time`](quake_rs::client::host::host_filter_time)'s gate
+    /// measures the time since then.
     pub(crate) oldrealtime: f64,
     /// Current render resolution (runtime; defaults to [`DEFAULT_W`] x
     /// [`DEFAULT_H`]): the size of the frames the scene renders.
@@ -115,8 +116,9 @@ pub(crate) struct App {
     /// page asked for them.
     pub(crate) present: Present,
     /// The page-held key states by Quake keynum (keys.c `keydown[256]`), fed by
-    /// [`key_down`]/[`key_up`]. Mode-independent (held keys survive a level
-    /// change) and consulted through the menu's binding table each `step`.
+    /// [`key_down`](crate::input::key_down)/[`key_up`](crate::input::key_up).
+    /// Mode-independent (held keys survive a level change) and consulted
+    /// through the menu's binding table each `step`.
     pub(crate) keys_held: [bool; 256],
     /// The gamma the current [`App::gamma_table`] was built for (V_CheckGamma's
     /// `oldgammavalue`): the table rebuilds only when the menu's `v_gamma`
@@ -480,7 +482,7 @@ pub(crate) fn build_demo() -> Option<DemoPlay> {
     build_demo_n(0)
 }
 
-/// `playdemo` of [`DEMOS`](cl_demo::DEMOS)`[demonum % 3]` from the embedded pak
+/// `playdemo` of [`DEMOS`](cl_demo::DEMOS)`[demonum % 3]` from the game's search path
 /// ([`quake_rs::client::cl_demo::build_demo_n`]), its sound calls carried out.
 #[cfg(test)]
 pub(crate) fn build_demo_n(demonum: usize) -> Option<DemoPlay> {
@@ -491,7 +493,7 @@ pub(crate) fn build_demo_n(demonum: usize) -> Option<DemoPlay> {
     demo
 }
 
-/// The demo file `name` from the embedded pak — for `playdemo`
+/// The demo file `name` from the game's search path — for `playdemo`
 /// ([`cl_demo::build_demo`]) or for `timedemo`
 /// ([`cl_demo::build_timedemo`]) — its sound calls carried out.
 pub(crate) fn build_demo_file(name: &str, timedemo: bool) -> Option<DemoPlay> {
