@@ -35,9 +35,9 @@
 // Around them: a prompt to turn the phone sideways, fullscreen and a
 // landscape lock where the browser allows (Android), the screen kept awake
 // in a game (Screen Wake Lock), audio resumed by any touch (iOS suspends
-// it), and a live game paused under its menu when the page is hidden, until
-// the player is back in the game. Haptics: rumble(), a hook for the
-// gamepad's rumble events.
+// it), and (2026) a live game paused under its menu when the page is
+// hidden, until the player is back in the game. Haptics: rumble(), a hook
+// for the gamepad's rumble events.
 (function () {
   'use strict';
 
@@ -339,16 +339,21 @@
     }
   }
 
-  // The page hidden (another app, the lock button): a live game pauses
-  // (id's `pause`, its plaque) under its menu, and going back to the game
-  // resumes it; the sound stops until the page is back.
+  // The page hidden (another app, the lock button): with the touch
+  // controls (2026) a live game pauses (id's `pause`, its plaque) under its
+  // menu, and going back to the game resumes it. (In Classic the game only
+  // stops getting ticks, as on a desktop.) The sound stops until the page
+  // is back.
   function onVisibility() {
     const ctx = host.audio();
     if (document.hidden) {
       releaseAll();
       closeKeyboard();
-      if (has(host.ST.WALK) && !has(host.ST.PAUSED)) { call('exec pause'); autoPaused = true; }
-      if (mode === 'play' || mode === 'game') press(K.ESCAPE);   // togglemenu: the menu opens
+      if (has(host.ST.WALK) && has(host.ST.TOUCH) && !has(host.ST.PAUSED)) {
+        call('exec pause');
+        autoPaused = true;
+        if (mode === 'play') press(K.ESCAPE);   // togglemenu: the menu opens
+      }
       if (ctx && ctx.state === 'running') ctx.suspend().catch(() => {});
     } else {
       if (ctx) ctx.resume().catch(() => {});
