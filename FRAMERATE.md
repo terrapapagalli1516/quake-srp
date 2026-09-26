@@ -449,14 +449,13 @@ page a second of 1/480 s steps of the attract demo with `wasm_uncapped 1`
 presents 480 frames, all different (102 before: the camera moved only on the
 demo's 60 Hz messages), the live walk 480 of 480, with no console errors.
 
-`r_lerpmove` (`q26/lerp`) is handed the same way, from wherever the page
-keeps the setting (the settings work: on in the 2026 profile, off in
-Classic); a timedemo ignores it:
+`r_lerpmove` (`q26/lerp`) is wired in the shell: the `r_lerpmove 0|1`
+console cvar (`App::lerpmove`, 0 — Classic — by default) is handed to the
+walk and the demo each frame in `host::step`, beside `viewsize` and the
+renderer's threads (a timedemo ignores it). The settings work folds it into
+the 2026 profile:
 
 ```rust
-use quake_rs::client::lerpmove::LerpMove;
-
-let lerpmove = if on { LerpMove::Smooth } else { LerpMove::Classic };
-wk.lerpmove = lerpmove; // beside wk.stepping
-d.lerpmove = lerpmove;  // beside d.stepping
+wk.lerpmove = a.lerpmove; // quake_rs::client::lerpmove::LerpMove::{Classic, Smooth}
+d.lerpmove = a.lerpmove;
 ```

@@ -144,6 +144,10 @@ pub(crate) struct App {
     /// to whichever game's renderer draws it (`host::step`). The pixels are
     /// the same for any count.
     pub(crate) render_threads: render::Threads,
+    /// How the monsters are drawn between their steps (the `r_lerpmove`
+    /// cvar, `client::lerpmove::LerpMove`; Classic, id's, by default):
+    /// handed to whichever game draws, each frame (`host::step`).
+    pub(crate) lerpmove: quake_rs::client::lerpmove::LerpMove,
     /// The threads the host offers the program: the page's pool of thread
     /// workers plus the program's own (`-hwthreads`, from `wasi.js`), else
     /// `std::thread::available_parallelism`; 1 without threads.
@@ -532,6 +536,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 shift_down: false,
                 m_save_demonum: 0,
                 render_threads: render::Threads::Auto,
+                lerpmove: quake_rs::client::lerpmove::LerpMove::Classic,
                 hw_threads: 1,
                 video: render::VideoCvars::CLASSIC,
             });

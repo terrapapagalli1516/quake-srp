@@ -10,6 +10,7 @@
 
 use quake_rs::client::cl_demo::MAX_DEMOS;
 use quake_rs::client::host_cmd::run_game_command;
+use quake_rs::client::lerpmove::LerpMove;
 
 use crate::app::{build_walk_map, ensure_app, App};
 use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error};
@@ -34,7 +35,7 @@ pub(crate) const COMMANDS: &[&str] = &[
 /// last, found first: `_cl_color` and `_cl_name` in `CL_Init`, `viewsize` in
 /// `SCR_Init`, `hostname` in `NET_Init`), then the port's `_vid_resolution`
 /// (`config.cfg`'s video mode) and the Web extras' `wasm_*`.
-const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname", "_vid_resolution", "r_threads"];
+const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname", "_vid_resolution", "r_threads", "r_lerpmove"];
 
 /// `Cmd_CompleteCommand` then `Cvar_CompleteVariable` (cmd.c, cvar.c), what
 /// Tab in the console runs: the first command, else the first cvar, whose
@@ -157,6 +158,21 @@ pub(crate) fn execute_console_command(line: &str) {
             });
             return;
         }
+        // Not id's: QuakeSpasm's `r_lerpmove`, the monsters gliding between
+        // their steps (`client::lerpmove`); 0, id's, by default.
+        "r_lerpmove" => {
+            ensure_app(|a| match argv.get(1) {
+                None => {
+                    let on = u8::from(a.lerpmove == LerpMove::Smooth);
+                    a.console.println(format!("\"r_lerpmove\" is \"{on}\""));
+                }
+                Some(v) => {
+                    let on = v.parse::<f32>().unwrap_or(0.0) != 0.0;
+                    a.lerpmove = if on { LerpMove::Smooth } else { LerpMove::Classic };
+                }
+            });
+            return;
+        }
         // Not id's: the port's command list (`help` is id's Help screen).
         "wasm_help" => {
             ensure_app(|a| {
@@ -170,6 +186,7 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
                 a.console.println("  r_threads <n> (0: all the host offers)");
+                a.console.println("  r_lerpmove 0|1 (monsters glide between steps)");
                 a.console.println("  wasm_help (this list)");
                 a.console.println("web extras (not id's; see Options):");
                 for line in crate::extras::help_lines() {
@@ -514,6 +531,34 @@ mod tests {
         assert_eq!(boot(), 1);
         step(0.0);
         assert_eq!(threads(), 3);
+    }
+
+    #[test]
+    fn r_lerpmove_is_a_cvar_every_frame_hands_the_client() {
+        let last_line = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
+        };
+        let lerpmove = || walk_mut(|w| w.lerpmove);
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("r_lerpmove");
+        assert_eq!(last_line().as_deref(), Some("\"r_lerpmove\" is \"0\""), "off by default (Classic)");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Classic);
+        run_console_line("r_lerpmove 1");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth);
+        console_toggle();
+        // A game the host builds afresh draws with it from its first frame.
+        assert_eq!(boot(), 1);
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth);
+        close_menu();
+        console_toggle();
+        run_console_line("r_lerpmove 0");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Classic);
     }
 
     #[test]

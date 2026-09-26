@@ -164,11 +164,13 @@ pub(crate) fn step(dt: f32) -> i32 {
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;
+            wk.lerpmove = a.lerpmove;
             wk.renderer.set_threads(threads);
         }
         if let Some(d) = a.demo.as_mut() {
             d.renderer.set_threads(threads);
             d.viewsize = viewsize;
+            d.lerpmove = a.lerpmove;
             // +showscores only reaches the game while it owns the keyboard.
             d.show_scores = km.showscores && !gate_gameplay;
         }
@@ -190,6 +192,7 @@ pub(crate) fn step(dt: f32) -> i32 {
                 host_end_game(a);
                 if let Some(d) = a.demo.as_mut() {
                     d.viewsize = viewsize;
+                    d.lerpmove = a.lerpmove;
                     d.show_scores = km.showscores && !gate_gameplay;
                 }
             }
