@@ -890,6 +890,71 @@ mod tests {
         assert_eq!(wm.model_bbox("progs/missing.mdl"), None, "id would Sys_Error; a zero box");
     }
 
+    // ------------------------------------------------------ typed entity fields
+
+    /// server.h's numbers, both ways; a number no constant has is `Other`.
+    #[test]
+    fn movetype_and_solid_are_server_h_numbers() {
+        assert_eq!(MoveType::from_code(4), MoveType::Step);
+        assert_eq!(MoveType::from_code(10), MoveType::Bounce);
+        assert_eq!(MoveType::from_code(11), MoveType::Other(11));
+        assert_eq!(Solid::from_code(4), Solid::Bsp);
+        assert_eq!(Solid::from_code(-1), Solid::Other(-1));
+        for code in -2..14 {
+            assert_eq!(MoveType::from_code(code).code(), code);
+            assert_eq!(Solid::from_code(code).code(), code);
+        }
+    }
+
+    #[test]
+    fn entflags_are_ids_bit_arithmetic() {
+        let f = EntFlags::ONGROUND | EntFlags::CLIENT;
+        assert_eq!(f.bits(), 512 | 8);
+        assert!(f.contains(EntFlags::ONGROUND) && !f.contains(EntFlags::ONGROUND | EntFlags::FLY));
+        assert!(f.intersects(EntFlags::ONGROUND | EntFlags::FLY));
+        assert_eq!(f.without(EntFlags::ONGROUND), EntFlags::CLIENT); // flags & ~FL_ONGROUND
+        assert_eq!(f.with(EntFlags::GODMODE).bits(), 512 | 8 | 64); // flags | FL_GODMODE
+        assert_eq!(f.toggled(EntFlags::CLIENT), EntFlags::ONGROUND); // flags ^ FL_CLIENT
+    }
+
+    /// The typed accessors read the float field as id's `(int)` cast and
+    /// write back the float of the number, through the resolved handles.
+    #[test]
+    fn typed_fields_are_the_float_fields_through_ids_int_cast() {
+        let mut b = Builder::new();
+        b.entityfields = 4;
+        b.add_field("movetype", EV_FLOAT, 1);
+        b.add_field("solid", EV_FLOAT, 2);
+        b.add_field("flags", EV_FLOAT, 3);
+        let progs = crate::progs::Progs::parse(&b.build()).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+        let vm = &mut server.vm;
+        let e = vm.spawn();
+        vm.ent_set_float(e, "movetype", 4.0);
+        vm.ent_set_float(e, "solid", 3.9); // (int)3.9 == SOLID_SLIDEBOX
+        vm.ent_set_float(e, "flags", 520.0);
+        assert_eq!(vm.movetype(e), MoveType::Step);
+        assert_eq!(vm.solid(e), Solid::SlideBox);
+        assert_eq!(vm.flags(e), EntFlags::ONGROUND | EntFlags::CLIENT);
+        vm.set_movetype(e, MoveType::Other(12));
+        vm.set_solid(e, Solid::Trigger);
+        vm.set_flags(e, vm.flags(e).without(EntFlags::ONGROUND));
+        assert_eq!(
+            (vm.ent_get_float(e, "movetype"), vm.ent_get_float(e, "solid"), vm.ent_get_float(e, "flags")),
+            (12.0, 1.0, 8.0)
+        );
+    }
+
+    /// `Server::drain_output` hands over what the QuakeC printed, once.
+    #[test]
+    fn drain_output_takes_the_vm_output_log() {
+        let progs = crate::progs::Progs::parse(&Builder::new().build()).expect("parse");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+        server.vm.print("You got the shotgun\n");
+        assert_eq!(server.drain_output(), "You got the shotgun\n");
+        assert_eq!(server.drain_output(), "");
+    }
+
     // -------------------------------------------------------- world / builtins
 
     #[test]

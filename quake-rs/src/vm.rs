@@ -2078,6 +2078,25 @@ mod tests {
         assert_eq!(vm.glob_float(vm.go.force_retouch), 0.0);
     }
 
+    /// `GlobalOfs::parms` is `parm1`..`parm16` in order, and names that are
+    /// not Rust fields (`self`, `StartFrame`) resolve by their QuakeC name.
+    #[test]
+    fn global_handles_resolve_parms_in_order_and_qc_names() {
+        let mut b = Builder::new();
+        for i in 0..16u16 {
+            let s_name = b.intern(&format!("parm{}", i + 1));
+            b.globaldefs.push(Def { type_: 2, ofs: 40 + i, s_name });
+        }
+        for (name, ofs) in [("self", 30u16), ("StartFrame", 31)] {
+            let s_name = b.intern(name);
+            b.globaldefs.push(Def { type_: 6, ofs, s_name });
+        }
+        let vm = Vm::load(&b.build()).expect("load");
+        let parms: Vec<_> = vm.go().parms().iter().map(|g| g.ofs()).collect();
+        assert_eq!(parms, (40..56).map(Some).collect::<Vec<_>>());
+        assert_eq!((vm.go().self_.ofs(), vm.go().start_frame.ofs()), (Some(30), Some(31)));
+    }
+
     #[test]
     fn test_edict_store_load_via_address_and_storep() {
         // entityfields = 4. main:
