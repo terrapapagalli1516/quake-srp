@@ -440,6 +440,7 @@ mod tests {
     fn load_keeps_every_option_and_binding() {
         use crate::menu::{menu_bind_key, menu_down, menu_right, menu_select, menu_up};
         assert_eq!(boot(), 1); // menu open on Main
+        crate::test_util::use_2026(); // Always Run on, to toggle off
         set_resolution(320, 200);
         // Options through the real menu exports: Brightness and Always Run.
         menu_down();
@@ -475,13 +476,13 @@ mod tests {
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            let m = &a.menu;
+            let (m, s) = (&a.menu, &a.settings);
             assert!(!m.visible && !a.console.open, "the loaded game plays");
-            assert_eq!(m.viewsize(), 60.0, "Screen size survives load");
-            assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives load");
-            assert!(!m.always_run(), "Always Run (off) survives load");
+            assert_eq!(s.cvars.viewsize, 60.0, "Screen size survives load");
+            assert!((s.cvars.gamma - 0.95).abs() < 1e-6, "Brightness survives load");
+            assert!(!s.cvars.always_run(), "Always Run (off) survives load");
             assert_eq!(
-                m.action_for_key(b'j'),
+                s.binds.command(b'j'),
                 Some(render::BIND_JUMP),
                 "rebind survives load"
             );

@@ -11,20 +11,19 @@
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/cl_demo.c`.
 
-use std::borrow::Cow;
-
 use crate::bsp::Bsp;
-use crate::demo::{parse_demo, DemoFrame, EntSnapshot};
+use crate::demo::{parse_demo, EntSnapshot};
 use crate::mdl::Mdl;
+use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{ParticleSystem, TrailHead, TrailStep};
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
-use crate::stepping::Stepping;
 use crate::tent::BeamModel;
 use crate::wad::Qpic;
 
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host_cmd::IT_INVISIBILITY;
+use super::lerpmove::LerpMove;
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
@@ -71,38 +70,34 @@ pub fn build_demo_n(pak: Pak, demonum: usize, sound: &mut Vec<SoundCall>) -> Opt
 /// `playdemo <name>`'s load (`CL_PlayDemo_f`, and the first `CL_GetMessage`s
 /// that read its signon): the demo file `name` (with its extension, as
 /// `COM_FOpenFile` takes it; [`default_extension`]) from `pak`, its world
-/// and models, played back smoothly — interpolated between the recorded
-/// messages as `CL_RelinkEntities` does ([`demo_frame`]). `None` when the
-/// file is missing or unplayable (the C prints "ERROR: couldn't open.").
+/// and models, one frame per recorded message, played back as id's client
+/// does — drawn between the two newest messages ([`demo_frame`]). `None` when
+/// the file is missing or unplayable (the C prints "ERROR: couldn't open.").
 /// The demo's sounds start through `sound` ([`SoundCall::StopAll`], then the
 /// signon's static loops).
 pub fn build_demo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
-    build_demo_with(pak, name, sound, |bytes, rotating| {
-        crate::demo::parse_demo_interpolated(bytes, 60.0, rotating).ok()
-    })
+    build_demo_with(pak, name, sound, |bytes| parse_demo(bytes).ok())
 }
 
-/// `timedemo <name>`'s load (`CL_TimeDemo_f`): as [`build_demo`], but one
-/// frame per recorded message, each at the message's own time with no
-/// interpolation — what `CL_LerpPoint` gives while `cls.timedemo` is set
-/// ([`crate::demo::parse_demo_timedemo`]). Played by [`timedemo_frame`].
+/// `timedemo <name>`'s load (`CL_TimeDemo_f`): as [`build_demo`], without the
+/// frame of the closing `svc_disconnect` ([`crate::demo::parse_demo_timedemo`]).
+/// Played by [`timedemo_frame`], one message a frame, each drawn at its own
+/// time with no interpolation — what `CL_LerpPoint` gives while
+/// `cls.timedemo` is set.
 pub fn build_timedemo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
-    build_demo_with(pak, name, sound, |bytes, rotating| {
-        crate::demo::parse_demo_timedemo(bytes, rotating).ok()
-    })
+    build_demo_with(pak, name, sound, |bytes| crate::demo::parse_demo_timedemo(bytes).ok())
 }
 
 /// The shared load of [`build_demo`] / [`build_timedemo`]: `parse` turns the
-/// demo's bytes and the set of `EF_ROTATE` model indices into the frames.
+/// demo's bytes into its messages.
 fn build_demo_with(
     pak: Pak,
     name: &str,
     sound: &mut Vec<SoundCall>,
-    parse: impl Fn(&[u8], &[usize]) -> Option<crate::demo::Demo>,
+    parse: impl Fn(&[u8]) -> Option<crate::demo::Demo>,
 ) -> Option<DemoPlay> {
     let read = |n: &str| pak.read_file(n).ok().flatten();
-    let demo_bytes = read(name)?;
-    let demo = parse_demo(&demo_bytes).ok()?;
+    let demo = parse(&read(name)?)?;
     let map = demo.map_name()?.to_string();
     let bsp = Bsp::parse(&read(&map)?).ok()?;
     let palette = render::parse_palette(&read("gfx/palette.lmp")?)?;
@@ -128,30 +123,17 @@ fn build_demo_with(
     if demo.frames.is_empty() {
         return None;
     }
-    // Re-parse for playback (`parse`): with inter-frame interpolation —
-    // smooth 60 fps playback instead of the choppy 10 Hz keyframes
-    // (CL_LerpPoint) — or a timedemo's one frame per message, plus EF_ROTATE
-    // spin for any model whose header flags it (rotating pickups). The set of
-    // rotating model indices is derived from the just-loaded MDL headers.
-    let rotating: Vec<usize> = models
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| {
-            m.as_ref()
-                .filter(|md| md.header.flags & crate::demo::EF_ROTATE != 0)
-                .map(|_| i)
-        })
-        .collect();
-    let demo = parse(&demo_bytes, &rotating)?;
-    if demo.frames.is_empty() {
-        return None;
-    }
     // Demo committed (nothing below fails): tear down the previous level/mode's
     // looping audio and register the demo signon's `svc_spawnstaticsound` loops
     // (CL_ParseStaticSound ran these on the live client during demo playback
     // too — the e1m3 demo has its own torches).
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(demo.static_sounds.clone()));
+    // The signon's svc_cdtrack: the CD plays the level's track, or the one
+    // the demo forces.
+    if let Some(track) = demo.cdtrack {
+        sound.push(SoundCall::Cd(CdCall::cdtrack(demo_cd_track(&demo, track))));
+    }
     // The overlay assets for a recorded intermission/finale (each optional —
     // a demo without one never touches them).
     let gfx_wad = read("gfx.wad").and_then(|b| crate::wad::Wad2::parse(b).ok());
@@ -178,25 +160,37 @@ fn build_demo_with(
     Some(d)
 }
 
-/// Spawn the recorded effects of demo frame `idx` into the live particle pool
-/// exactly ONCE: a frame rendered across several steps (small `dt`) must not
-/// re-spawn its bursts each step. `d.last_spawned_idx` records the most recently
-/// spawned frame; this is a no-op when it already equals `idx`.
+/// The track `CL_ParseServerMessage` hands `CDAudio_Play` for a recorded
+/// `svc_cdtrack` of `track` while a demo plays: `(byte)cls.forcetrack` when
+/// the demo forces one (id's demo1: track 2), else the recorded track.
+fn demo_cd_track(demo: &crate::demo::Demo, track: u8) -> u8 {
+    if demo.forcetrack == -1 {
+        track
+    } else {
+        demo.forcetrack as u8
+    }
+}
+
+/// `CL_ParseServerMessage`'s client-side effects of recorded message `idx`,
+/// in the frame that reads it, exactly ONCE: `d.last_spawned_idx` records the
+/// most recently read message; this is a no-op when it already equals `idx`.
+/// `now` is `cl.time` as the message is read: the particles' and beams'
+/// lifetimes, the pain face and the item get-times start from it.
 ///
 /// Each `svc_particle` burst replays through [`ParticleSystem::spawn_burst`],
 /// except the explosion sentinel (`count >= 1024`, the demo parser's mapping of
 /// the net `count == 255`) which routes to [`ParticleSystem::spawn_explosion`]
 /// for the 1024-particle fiery burst. Each temp entity replays through the same
 /// [`spawn_temp_entity`] mapping the live walk uses (explosion / impact / splash).
-/// The frame's recorded server `time` is the absolute clock for particle
-/// lifetimes (`spawn_*` set `die = now + life`).
-fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundCall>) {
+/// (`spawn_*` set `die = now + life`.)
+fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut Vec<SoundCall>) {
     if d.last_spawned_idx == idx {
         return; // already spawned this frame's effects; don't double-spawn
     }
     d.last_spawned_idx = idx;
     let Some(frame) = d.demo.frames.get(idx) else { return };
-    let now = frame.time;
+    // CL_ParseClientdata's item get-times.
+    stamp_item_gettime(&mut d.cl_items, &mut d.item_gettime, frame.client.items, now);
     // The frame borrows `d.demo`; copy the small effect records out so we can
     // call &mut self spawn methods on `d.particles` without aliasing `d`.
     let bursts = frame.particles.clone();
@@ -207,6 +201,10 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
     let prints = frame.prints.clone();
     let centerprints = frame.centerprints.clone();
     let bonus = frame.stufftext.iter().any(|t| stufftext_bonus_flash(t));
+    let cdtrack = frame.cdtrack.map(|t| demo_cd_track(&d.demo, t));
+    // svc_setpause: cl.paused against the message before.
+    let was_paused = idx.checked_sub(1).and_then(|i| d.demo.frames.get(i)).is_some_and(|f| f.paused);
+    let pause = (frame.paused != was_paused).then_some(frame.paused);
     let view_entity_origin = frame.view_entity_origin;
     let view_angles = frame.view_angles;
     for b in &bursts {
@@ -260,6 +258,13 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
     // svc_stopsound: hand the (entity, channel) stops to the sound layer (the
     // page stop()s its registered source for that key, S_StopSound).
     sound.push(SoundCall::Stop(stops));
+    // svc_cdtrack and svc_setpause: CDAudio_Play, CDAudio_Pause/_Resume.
+    if let Some(track) = cdtrack {
+        sound.push(SoundCall::Cd(CdCall::cdtrack(track)));
+    }
+    if let Some(paused) = pause {
+        sound.push(SoundCall::Cd(if paused { CdCall::Pause } else { CdCall::Resume }));
+    }
     // svc_damage (V_ParseDamage, view.c): bump the damage cshift and compute
     // the directional view kick from the recorded attack origin.
     for dmg in &damage {
@@ -287,61 +292,82 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, sound: &mut Vec<SoundC
     }
 }
 
-/// One host frame of demo playback: the recorded clock advances by `dt` and
-/// playback moves on to the message it has reached (spawning the effects of
-/// every message passed on the way), then the frame is drawn
-/// ([`render_demo_frame`]). After the last frame it loops to the first (the
+/// One host frame of demo playback, as id's `CL_ReadFromServer` runs it for a
+/// demo: `cl.time` advances by the host frame time `dt`; `CL_GetMessage`
+/// reads recorded messages until one is newer than `cl.time` (spawning each
+/// one's effects as it is read); `CL_LerpPoint` and `CL_RelinkEntities` draw
+/// the camera and every entity between the two newest messages
+/// ([`cl_relink_entities`]); then the frame is drawn ([`render_demo_frame`]).
+/// So the view moves every frame at any frame rate, a message interval
+/// behind the recording. After the last message it loops to the first (the
 /// host normally starts the next demo instead, `CL_NextDemo`).
+///
+/// One departure, at the first frame: id's `CL_ClearState` zeroes `cl.time`
+/// after `CL_ReadFromServer` has advanced it, so id's first frame starts from
+/// 0 where this one starts from `dt`. Both are more than 0.1 s before a real
+/// demo's first message, where `CL_LerpPoint` snaps the clock.
 pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> ClientFrame {
     let mut sound = Vec::new();
     // Con_CheckResize: the notify lines are laid out con_linewidth wide.
     d.notify.check_resize(vid.width, vid.height);
     let n = d.demo.frames.len();
-    let t0 = d.demo.frames[0].time;
-    d.elapsed += dt;
-    // Wrap BEFORE advancing: only loop back to frame 0 once we were already
-    // sitting on the last frame on a prior step and time has run past it. This
-    // defers the reset by one step so frames[n-1] is rendered (displayed for its
-    // dt) before we snap back to the start — the previous code reset to 0 the
-    // instant `idx` reached n-1, so the final frame was never shown.
-    if d.idx + 1 >= n {
-        d.idx = 0;
-        d.elapsed = 0.0;
-        // Looping restarts the recorded effect stream: drop every live particle
-        // and beam and forget what was spawned so the replay from frame 0 is
-        // identical to the first pass (no stale explosions/bolts carried across
-        // the wrap). The per-POV view state resets too: damage flash/kick,
-        // notify + centerprint text, and the stair-smoothing accumulator (their
-        // expiries live on the recorded clock, which just jumped back to t0).
-        d.particles = ParticleSystem::new();
-        d.trail_org.clear();
-        d.beams.clear();
-        d.last_spawned_idx = usize::MAX;
-        d.damage_blend = 0.0;
-        d.bonus_blend = 0.0;
-        d.faceanimtime = 0.0;
-        d.cl_items = d.demo.frames[0].client.items; // unflashed (DemoPlay::new)
-        d.item_gettime = [0.0; 32];
-        d.v_dmg_time = 0.0;
-        d.centerprint = None;
-        d.notify.clear();
-        d.oldz = f32::NAN;
+    let dt64 = if dt.is_finite() { f64::from(dt.max(0.0)) } else { 0.0 };
+    let started = d.last_spawned_idx != usize::MAX;
+    if started && d.idx + 1 >= n && d.time + dt64 > f64::from(d.demo.frames[d.idx].time) {
+        // The last message has been drawn and the clock has run past it: play
+        // the recording again from its first message, as a fresh playback
+        // whose clock starts at 0 (the host normally plays the next demo).
+        restart_playback(d);
+    } else {
+        // CL_ReadFromServer: `cl.oldtime = cl.time; cl.time += host_frametime`.
+        d.oldtime = d.time;
+        d.time += dt64;
     }
-    // Advance to the frame matching the recorded server time. Stop at the last
-    // frame (n-1); the wrap above handles looping on the FOLLOWING step. Spawn
-    // the recorded effects of EACH frame we newly advance onto (a large dt can
-    // step over several frames at once; missing one would drop its explosion).
-    while d.idx + 1 < n && (d.demo.frames[d.idx + 1].time - t0) <= d.elapsed {
+    // CL_GetMessage: the first frame has the signon's last message (the
+    // first update); then a message is read whenever `cl.time` has passed
+    // the newest one (`cl.time <= cl.mtime[0]`: "don't need another yet").
+    let first_read = if d.last_spawned_idx == usize::MAX { 0 } else { d.idx + 1 };
+    spawn_demo_frame_effects(d, d.idx, d.time as f32, &mut sound);
+    while d.idx + 1 < n && d.time > f64::from(d.demo.frames[d.idx].time) {
         d.idx += 1;
-        spawn_demo_frame_effects(d, d.idx, &mut sound);
+        spawn_demo_frame_effects(d, d.idx, d.time as f32, &mut sound);
     }
-    // Also spawn the landing frame's effects when we first arrive on it without
-    // the while-loop running (e.g. the very first step lands on frame 0, or a
-    // tiny dt holds us on the same frame the wrap reset us to). `last_spawned_idx`
-    // guards against re-spawning while a frame lingers across several steps.
-    spawn_demo_frame_effects(d, d.idx, &mut sound);
-    let lerp = d.stepping == Stepping::Uncapped;
-    render_demo_frame(d, dt, dt, lerp, menu_up, vid, sound)
+    let f = &d.demo.frames[d.idx];
+    if f.disconnect {
+        // Host_EndGame: the demo is over, and the frame leaves before
+        // CL_RelinkEntities — what id draws (under the loading plaque, which
+        // the port does not draw) is the last frame's view at the new clock.
+        d.view.time = d.time as f32;
+    } else {
+        let frac = cl_lerp_point(&mut d.time, [f64::from(f.time), f64::from(f.prev_time)]);
+        cl_relink_entities(d, frac, first_read, d.lerpmove);
+    }
+    // R_DrawParticles and the stair smoothing step by `cl.time - cl.oldtime`.
+    let cl_frametime = (d.time - d.oldtime) as f32;
+    render_demo_frame(d, dt, cl_frametime, menu_up, vid, sound)
+}
+
+/// The port's loop wrap ([`demo_frame`]): the playback starts over at its
+/// first message with the clock at 0 and every per-playback effect, message
+/// and view state reset, so the replay is identical to the first pass (no
+/// stale explosions or bolts carried across the wrap).
+fn restart_playback(d: &mut DemoPlay) {
+    d.idx = 0;
+    d.time = 0.0;
+    d.oldtime = 0.0;
+    d.particles = ParticleSystem::new();
+    d.trail_org.clear();
+    d.beams.clear();
+    d.last_spawned_idx = usize::MAX;
+    d.damage_blend = 0.0;
+    d.bonus_blend = 0.0;
+    d.faceanimtime = 0.0;
+    d.cl_items = d.demo.frames[0].client.items; // unflashed (DemoPlay::new)
+    d.item_gettime = [0.0; 32];
+    d.v_dmg_time = 0.0;
+    d.centerprint = None;
+    d.notify.clear();
+    d.oldz = f32::NAN;
 }
 
 /// One host frame of `timedemo` (`cls.timedemo`): `CL_GetMessage` reads
@@ -349,11 +375,12 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
 /// `CL_TimeDemo_f` ran in — reads the whole signon and the message after the
 /// one that completed it (frames 0 and 1 here), every later frame the next
 /// message; each is drawn at its own time (`CL_LerpPoint` snaps `cl.time` to
-/// `mtime[0]`). `frametime` is the host frame's `host_frametime` (the view
-/// kick, the palette-shift fades, the stair smoothing and the sound ramps run
-/// on it); the particles move by `cl.time - cl.oldtime`, the recorded time
-/// between the two messages. `None` when there is no next message: the demo
-/// has ended (its `svc_disconnect`, `Host_EndGame`, or the file running out,
+/// `mtime[0]`, frac 1: nothing is interpolated). `frametime` is the host
+/// frame's `host_frametime` (the view kick, the palette-shift fades and the
+/// sound ramps run on it); the particles and the stair smoothing move by
+/// `cl.time - cl.oldtime`, the recorded time between the two messages.
+/// `None` when there is no next message: the demo has ended (its
+/// `svc_disconnect`, `Host_EndGame`, or the file running out,
 /// `CL_StopPlayback`) and this frame draws nothing — the host finishes the
 /// timedemo ([`TimeDemoClock::finish`]). Built by [`build_timedemo`].
 pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid) -> Option<ClientFrame> {
@@ -362,117 +389,206 @@ pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid
     let n = d.demo.frames.len();
     let first = d.last_spawned_idx == usize::MAX;
     if first {
-        spawn_demo_frame_effects(d, 0, &mut sound);
+        spawn_demo_frame_effects(d, 0, d.demo.frames[0].time, &mut sound);
     }
     if d.idx + 1 >= n {
         return None;
     }
+    let first_read = if first { 0 } else { d.idx + 1 };
     let oldtime = d.demo.frames[d.idx].time;
     d.idx += 1;
-    spawn_demo_frame_effects(d, d.idx, &mut sound);
-    let cl_frametime = d.demo.frames[d.idx].time - oldtime;
-    Some(render_demo_frame(d, frametime, cl_frametime, false, menu_up, vid, sound))
+    let now = d.demo.frames[d.idx].time;
+    spawn_demo_frame_effects(d, d.idx, now, &mut sound);
+    d.oldtime = f64::from(oldtime);
+    d.time = f64::from(now);
+    // No glides either: a timedemo stays id's measure.
+    cl_relink_entities(d, 1.0, first_read, LerpMove::Classic);
+    Some(render_demo_frame(d, frametime, now - oldtime, menu_up, vid, sound))
 }
 
-/// What a demo frame draws that moves between messages: the client clock
-/// (`cl.time`), the recorded POV and the entities.
-pub struct DemoView<'a> {
+// ---------------------------------------------------------------------------
+// CL_LerpPoint, CL_RelinkEntities (cl_main.c): the frame between two messages
+// ---------------------------------------------------------------------------
+
+/// What a demo frame draws that moves between messages — `CL_RelinkEntities`'
+/// output: the client clock, the camera and the entities.
+#[derive(Clone, Debug, Default)]
+pub struct DemoView {
+    /// `cl.time` as the frame draws it (after `CL_LerpPoint`).
     pub time: f32,
+    /// The relinked view entity's origin raised by `cl.viewheight`: the eye
+    /// before `V_CalcRefdef`'s bob and stair smoothing.
     pub view_origin: [f32; 3],
+    /// The relinked view entity's origin.
     pub view_entity_origin: [f32; 3],
+    /// `cl.viewangles`, lerped between the recorded angles (`cls.demoplayback`).
     pub view_angles: [f32; 3],
     /// `cl.velocity` (the bob and the strafe lean).
     pub velocity: [f32; 3],
-    pub entities: Cow<'a, [EntSnapshot]>,
+    /// The entities drawn: relinked ones where `CL_RelinkEntities` put them
+    /// (`origin`, `angles`), statics as recorded.
+    pub entities: Vec<EntSnapshot>,
 }
 
-/// The view of message `idx` of `frames` with the demo clock at `elapsed`
-/// seconds past the first message. Classic draws the message's own (the
-/// port's playback shows each message until the next is due). With `lerp`,
-/// the uncapped client's: `CL_LerpPoint` and `CL_RelinkEntities` blend it
-/// toward the next message by how far the clock has got between the two —
-/// the POV, its velocity and every entity in both (angles the short way
-/// round, and no blend across a move of 100 units or more on any axis, id's
-/// teleport test) — so a 60 Hz recording moves smoothly at any display rate.
-/// As in `CL_LerpPoint`, the blend spans at most the last 0.1 s before the
-/// next message.
-pub fn demo_view(frames: &[DemoFrame], idx: usize, elapsed: f32, lerp: bool) -> DemoView<'_> {
-    let f = &frames[idx];
-    let own = DemoView {
-        time: f.time,
-        view_origin: f.view_origin,
-        view_entity_origin: f.view_entity_origin,
-        view_angles: f.view_angles,
-        velocity: f.client.velocity,
-        entities: Cow::Borrowed(&f.entities),
-    };
-    let Some(next) = frames.get(idx + 1).filter(|n| lerp && f.intermission == 0 && n.intermission == 0) else {
-        return own;
-    };
-    let t1 = f.time.max(next.time - 0.1);
-    if next.time <= t1 {
-        return own;
+/// `CL_LerpPoint`: how far the frame at `cl.time` (`*time`) lies between the
+/// two newest messages, `mtime` = `cl.mtime[0..1]`, as a fraction 0..=1. A
+/// gap over 0.1 s ("dropped packet, or start of demo") counts as its last
+/// 0.1 s; a clock more than 1% outside the interval is pulled back to its
+/// nearer end, which is what keeps `cl.time` on the messages' clock (at the
+/// start of a demo, it jumps to 0.1 s before the first message). The
+/// arithmetic is the C's: `f` and the fraction are floats, the clocks
+/// doubles. (id's `cl_nolerp`, `cls.timedemo` and `sv.active` cases, which
+/// return 1, are [`timedemo_frame`]'s and the live walk's.)
+pub fn cl_lerp_point(time: &mut f64, mtime: [f64; 2]) -> f32 {
+    let mut f = (mtime[0] - mtime[1]) as f32;
+    if f == 0.0 {
+        *time = mtime[0];
+        return 1.0;
     }
-    let clock = (frames[0].time + elapsed).clamp(f.time, next.time);
-    let frac = ((clock - t1) / (next.time - t1)).clamp(0.0, 1.0);
-    // CL_RelinkEntities: `if (delta[j] > 100 || delta[j] < -100) f = 1;`
-    // ("assume a teleportation, not a motion") — here, stay put until the
-    // next message shows the new place.
-    let teleport = |a: [f32; 3], b: [f32; 3]| (0..3).any(|i| (b[i] - a[i]).abs() > 100.0);
-    let blend = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
-        if teleport(a, b) {
-            a
-        } else {
-            std::array::from_fn(|i| a[i] + frac * (b[i] - a[i]))
+    let mut mtime1 = mtime[1];
+    if f64::from(f) > 0.1 {
+        // dropped packet, or start of demo
+        mtime1 = mtime[0] - 0.1;
+        f = 0.1;
+    }
+    let frac = ((*time - mtime1) / f64::from(f)) as f32;
+    if frac < 0.0 {
+        if frac < -0.01 {
+            *time = mtime1;
         }
-    };
-    let turn = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
-        std::array::from_fn(|i| {
-            let d = b[i] - a[i];
-            let d = if d > 180.0 { d - 360.0 } else if d < -180.0 { d + 360.0 } else { d };
-            a[i] + frac * d
-        })
-    };
-    let entities = f
-        .entities
-        .iter()
-        .map(|e| match next.entities.iter().find(|n| e.num >= 0 && n.num == e.num) {
-            Some(n) if !teleport(e.origin, n.origin) => {
-                EntSnapshot { origin: blend(e.origin, n.origin), angles: turn(e.angles, n.angles), ..*e }
-            }
-            _ => *e,
-        })
-        .collect();
-    DemoView {
-        time: clock,
-        view_origin: blend(f.view_origin, next.view_origin),
-        view_entity_origin: blend(f.view_entity_origin, next.view_entity_origin),
-        view_angles: turn(f.view_angles, next.view_angles),
-        velocity: std::array::from_fn(|i| f.client.velocity[i] + frac * (next.client.velocity[i] - f.client.velocity[i])),
-        entities: Cow::Owned(entities),
+        0.0
+    } else if frac > 1.0 {
+        if frac > 1.01 {
+            *time = mtime[0];
+        }
+        1.0
+    } else {
+        frac
     }
 }
 
-/// Draw demo frame `d.idx` (its effects already spawned): the recorded POV's
+/// `CL_RelinkEntities`' move of one entity to `frac` of the way from the
+/// previous message's position to this one's: straight to this message's
+/// when `forcelink` is set, and also when any axis moved more than 100
+/// units ("assume a teleportation, not a motion"); the angles the short way
+/// round. The arithmetic is the C's (`msg_origins[1] + f*delta`).
+pub fn relink(e: &EntSnapshot, frac: f32, forcelink: bool) -> ([f32; 3], [f32; 3]) {
+    if forcelink {
+        return (e.origin, e.angles);
+    }
+    let delta: [f32; 3] = std::array::from_fn(|j| e.origin[j] - e.prev_origin[j]);
+    #[expect(clippy::manual_range_contains, reason = "id's `delta[j] > 100 || delta[j] < -100`")]
+    let f = if delta.iter().any(|&d| d > 100.0 || d < -100.0) { 1.0 } else { frac };
+    let origin = std::array::from_fn(|j| e.prev_origin[j] + f * delta[j]);
+    (origin, lerp_angles(e.prev_angles, e.angles, f))
+}
+
+/// The angle lerp of `CL_RelinkEntities` (the entities' and the demo
+/// camera's): each axis turns the short way round, its difference folded
+/// into -180..180 before the fraction.
+fn lerp_angles(from: [f32; 3], to: [f32; 3], frac: f32) -> [f32; 3] {
+    std::array::from_fn(|j| {
+        let mut d = to[j] - from[j];
+        if d > 180.0 {
+            d -= 360.0;
+        } else if d < -180.0 {
+            d += 360.0;
+        }
+        from[j] + frac * d
+    })
+}
+
+/// `CL_RelinkEntities` for demo playback (`cls.demoplayback`): the frame's
+/// `cl.velocity`, `cl.viewangles`, the view entity and every entity of the
+/// newest message, `frac` of the way from the message before, into
+/// `d.view`; `EF_ROTATE` models spin to `anglemod(100*cl.time)`.
+///
+/// `ent->forcelink` is set by the update of any message this frame read, the
+/// ones from `first_read` to `d.idx` (none when `first_read > d.idx`), and
+/// cleared once the entity is drawn. So a message's first-sighted or
+/// `U_NOLERP` entity is drawn where the message put it in the frame that
+/// reads it, and lerps from the message before in the frames after — id's
+/// monsters (`U_NOLERP`) jump a message ahead for one frame and fall back.
+/// With [`LerpMove::Smooth`] (the 2026 extra) they glide instead.
+fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: LerpMove) {
+    let frames = &d.demo.frames;
+    let f = &frames[d.idx];
+    let read = first_read..=d.idx;
+    let earlier = first_read..d.idx;
+    // ent->forcelink as the reads left it: set by any update read this frame.
+    let forced = |e: &EntSnapshot| {
+        read.contains(&d.idx)
+            && (e.forcelink
+                || earlier.clone().any(|k| frames[k].entities.iter().any(|x| x.num == e.num && x.forcelink)))
+    };
+    let view_forced = read.clone().any(|k| frames[k].view_forcelink);
+
+    let v = &mut d.view;
+    v.time = d.time as f32;
+    // "interpolate player info": a plain lerp, no teleport test.
+    v.velocity = std::array::from_fn(|i| f.prev_velocity[i] + frac * (f.client.velocity[i] - f.prev_velocity[i]));
+    // cls.demoplayback: "interpolate the angles".
+    v.view_angles = lerp_angles(f.prev_view_angles, f.view_angles, frac);
+    let view_entity = EntSnapshot {
+        origin: f.view_entity_origin,
+        prev_origin: f.view_prev_origin,
+        ..EntSnapshot::default()
+    };
+    v.view_entity_origin = relink(&view_entity, frac, view_forced).0;
+    v.view_origin = v.view_entity_origin;
+    v.view_origin[2] += f.viewheight;
+
+    // bobjrotate = anglemod(100*cl.time), the double product made a float.
+    let bobjrotate = crate::math::anglemod((100.0 * d.time) as f32);
+    let rotates = |modelindex: usize| {
+        d.models.get(modelindex).and_then(Option::as_ref).is_some_and(|m| m.header.flags & crate::demo::EF_ROTATE != 0)
+    };
+    let smooth = lerpmove == LerpMove::Smooth;
+    v.entities.clear();
+    for e in &f.entities {
+        let mut drawn = *e;
+        if smooth && e.step && e.num >= 0 {
+            // r_lerpmove (the 2026 extra): a monster is relinked where its
+            // message put it (no U_NOLERP jump back), and glides from step
+            // to step where it is drawn.
+            let glide = d.glides.draw(e.num, e.modelindex, e.origin, e.angles, d.time);
+            (drawn.origin, drawn.angles) = (glide.origin, glide.angles);
+        } else if e.num >= 0 {
+            (drawn.origin, drawn.angles) = relink(e, frac, forced(e));
+        }
+        // Rotate binary objects locally. (A static is never relinked in id's;
+        // no id1 static spins.)
+        if rotates(e.modelindex) {
+            drawn.angles[1] = bobjrotate;
+        }
+        v.entities.push(drawn);
+    }
+    if smooth {
+        d.glides.end_frame();
+    } else {
+        d.glides.clear();
+    }
+}
+
+/// Draw the frame `CL_RelinkEntities` left in `d.view` (the newest message,
+/// `d.idx`, read and its effects spawned): the recorded POV's
 /// `V_CalcRefdef`, `S_Update`, the 3-D view and `SCR_UpdateScreen`'s 2-D
 /// layer. `dt` is `host_frametime`; `cl_frametime` is `cl.time - cl.oldtime`,
-/// the particles' step (the two are the same frame time in ordinary
-/// playback). `lerp` draws the uncapped client's view between messages
-/// ([`demo_view`]; never in a timedemo, whose frames are one message each).
+/// the particles' and the stair smoothing's step (the two are the same frame
+/// time in ordinary playback).
 fn render_demo_frame(
     d: &mut DemoPlay,
     dt: f32,
     cl_frametime: f32,
-    lerp: bool,
     menu_up: bool,
     vid: &Vid,
     mut sound: Vec<SoundCall>,
 ) -> ClientFrame {
     let (render_w, render_h) = (vid.width, vid.height);
+    // What moves — the clock, the POV, the entities — as the relink left it
+    // (taken for the frame, so `d` stays free to mutate; put back at the end).
+    let v = std::mem::take(&mut d.view);
     let f = &d.demo.frames[d.idx];
-    // What moves — the clock, the POV, the entities: the message's own, or
-    // (uncapped) CL_LerpPoint's view between it and the next.
-    let v = demo_view(&d.demo.frames, d.idx, d.elapsed, lerp);
 
     // CL_RelinkEntities' model-flag trails (R_RocketTrail from the entity's
     // previous origin: rocket/lavaball fire, grenade smoke, gib blood, zombie
@@ -572,8 +688,6 @@ fn render_demo_frame(
     }
     // The recorded per-client state (svc_clientdata) drives V_CalcRefdef.
     let client = f.client;
-    // CL_ParseClientdata's item get-times on the recorded clock.
-    stamp_item_gettime(&mut d.cl_items, &mut d.item_gettime, client.items, f.time);
     let cam = if f.intermission != 0 {
         // V_CalcIntermissionRefdef (view.c): a recorded intermission renders
         // with the forced v_idlescale=1 idle sway (V_AddIdle, stock
@@ -602,12 +716,14 @@ fn render_demo_frame(
         let mut eye = v.view_origin; // view entity origin + recorded viewheight
         eye[2] += bob;
         // Stair-step smoothing (V_CalcRefdef ~960): the same port as
-        // walk_frame's, driven by the recorded onground flag + the raw view
-        // entity origin z.
+        // walk_frame's, driven by the recorded onground flag + the relinked
+        // view entity origin z, stepping by `steptime = cl.time - cl.oldtime`
+        // (0 if negative).
         let origin_z = v.view_entity_origin[2];
         let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        let steptime = if cl_frametime.is_finite() { cl_frametime.max(0.0) } else { 0.0 };
         if d.oldz.is_finite() && client.onground && origin_z - d.oldz > 0.0 {
-            d.oldz += sdt * 80.0;
+            d.oldz += steptime * 80.0;
             if d.oldz > origin_z {
                 d.oldz = origin_z;
             }
@@ -758,6 +874,10 @@ fn render_demo_frame(
         d.renderer.render_into(&scene, &mut img);
         lap(Phase::Render3d);
     }
+    // V_RenderView: the crosshair over the view, before the 2-D layer.
+    if let Some(cc) = d.conchars.as_ref().filter(|_| d.crosshair) {
+        render::draw_crosshair(&mut img, cc, &vrect);
+    }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
@@ -886,6 +1006,7 @@ fn render_demo_frame(
         shifts.push(cs);
     }
     lap(Phase::Hud2d);
+    d.view = v;
     ClientFrame { image: img, cshifts: shifts, sound }
 }
 
@@ -937,42 +1058,205 @@ impl TimeDemoClock {
 mod tests {
     use super::*;
 
-    /// Uncapped playback draws between messages as `CL_LerpPoint` does; Classic
-    /// (and a timedemo) draws each message's own view.
-    #[test]
-    fn demo_view_blends_toward_the_next_message() {
-        let ent = |num, x: f32, yaw| EntSnapshot {
-            num,
-            modelindex: 1,
-            frame: 0,
-            skin: 0,
-            origin: [x, 0.0, 0.0],
-            angles: [0.0, yaw, 0.0],
-            effects: 0,
+    use crate::demo::{Demo, DemoFrame};
+
+    /// A playback of `frames` over the test room, with no assets.
+    fn playback(frames: Vec<DemoFrame>) -> DemoPlay {
+        let demo = Demo {
+            level_name: "test".into(),
+            static_sounds: Vec::new(),
+            model_precache: vec![String::new(), "maps/test.bsp".into()],
+            sound_precache: Vec::new(),
+            viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
+            frames,
         };
-        let mut a = DemoFrame { time: 1.0, view_origin: [0.0, 0.0, 22.0], view_angles: [0.0, 350.0, 0.0], ..Default::default() };
-        a.entities = vec![ent(1, 0.0, 350.0), ent(2, 0.0, 0.0), ent(3, 5.0, 0.0)];
-        let mut b = DemoFrame { time: 1.05, view_origin: [10.0, 0.0, 22.0], view_angles: [0.0, 10.0, 0.0], ..Default::default() };
-        // Entity 1 moves 10 units and turns through north; 2 teleports; 3 is gone.
-        b.entities = vec![ent(1, 10.0, 10.0), ent(2, 150.0, 0.0)];
-        let frames = [a, b];
-        // The clock at 1.025, halfway (`elapsed` counts from the first message).
-        let v = demo_view(&frames, 0, 0.025, true);
-        assert!((v.time - 1.025).abs() < 1e-6);
-        assert!((v.view_origin[0] - 5.0).abs() < 1e-4);
-        assert!((v.view_angles[1] - 360.0).abs() < 1e-3, "the short way round: {}", v.view_angles[1]);
-        assert!((v.entities[0].origin[0] - 5.0).abs() < 1e-4 && (v.entities[0].angles[1] - 360.0).abs() < 1e-3);
-        assert_eq!(v.entities[1].origin[0], 0.0, "a teleport does not blend");
-        assert_eq!(v.entities[2].origin[0], 5.0, "an entity the next message lacks stays put");
-        let own = demo_view(&frames, 0, 0.025, false);
-        assert_eq!((own.time, own.view_origin[0], own.entities[0].origin[0]), (1.0, 0.0, 0.0));
-        // A gap past 0.1 s blends over its last 0.1 s only (dropped packets).
-        let late = [
-            DemoFrame { time: 1.0, ..Default::default() },
-            DemoFrame { time: 1.5, view_origin: [10.0, 0.0, 0.0], ..Default::default() },
-        ];
-        assert_eq!(demo_view(&late, 0, 0.2, true).view_origin[0], 0.0);
-        assert!((demo_view(&late, 0, 0.45, true).view_origin[0] - 5.0).abs() < 1e-3);
+        let pak = crate::pak::Pak::from_bytes("t".into(), {
+            let mut img = b"PACK".to_vec();
+            img.extend_from_slice(&12i32.to_le_bytes());
+            img.extend_from_slice(&0i32.to_le_bytes());
+            img
+        })
+        .unwrap();
+        DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo)
+    }
+
+    const VID: Vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+
+    /// Entity `num` moved from `from` to `to` (x) this message.
+    fn moved(num: i32, from: f32, to: f32) -> EntSnapshot {
+        EntSnapshot { num, modelindex: 1, origin: [to, 0.0, 0.0], prev_origin: [from, 0.0, 0.0], ..Default::default() }
+    }
+
+    #[test]
+    fn cl_lerp_point_is_ids() {
+        let lerp = |time: f64, mtime: [f64; 2]| {
+            let mut t = time;
+            (cl_lerp_point(&mut t, mtime), t)
+        };
+        // Zero interval: snap to mtime[0] (frac 1).
+        assert_eq!(lerp(1.7, [2.0, 2.0]), (1.0, 2.0));
+        // Halfway through a 0.1 s interval; its ends.
+        let mt = [1.6, 1.5];
+        assert!((lerp(1.55, mt).0 - 0.5).abs() < 1e-5);
+        assert_eq!(lerp(1.5, mt), (0.0, 1.5));
+        assert_eq!(lerp(1.6, mt), (1.0, 1.6));
+        // Out of range: clamped; pulled back to the nearer end when more than
+        // 1% out (the frac is the float of the double division).
+        assert_eq!(lerp(1.4995, mt), (0.0, 1.4995));
+        assert_eq!(lerp(1.4, mt), (0.0, 1.5));
+        assert_eq!(lerp(1.6005, mt), (1.0, 1.6005));
+        assert_eq!(lerp(1.7, mt), (1.0, 1.6));
+        // A gap over 0.1 s is its last 0.1 s ("dropped packet, or start of
+        // demo"): the start of a demo jumps to 0.1 s before its first message.
+        let big = [5.0, 4.0];
+        assert!((lerp(4.95, big).0 - 0.5).abs() < 1e-4);
+        assert_eq!(lerp(0.0, big), (0.0, 4.9));
+    }
+
+    #[test]
+    fn relink_lerps_snaps_teleports_and_honours_forcelink() {
+        let e = moved(1, 0.0, 10.0);
+        assert_eq!(relink(&e, 0.5, false).0, [5.0, 0.0, 0.0]);
+        assert_eq!(relink(&e, 0.5, true).0, [10.0, 0.0, 0.0], "forcelink: where the message put it");
+        // More than 100 units on an axis is a teleport: straight to the new
+        // place (f = 1); exactly 100 still lerps.
+        assert_eq!(relink(&moved(1, 0.0, 150.0), 0.25, false).0, [150.0, 0.0, 0.0]);
+        assert_eq!(relink(&moved(1, 0.0, 100.0), 0.5, false).0, [50.0, 0.0, 0.0]);
+        // The angles turn the short way round: 350 -> 10 through 360.
+        let turn = EntSnapshot { angles: [0.0, 10.0, 0.0], prev_angles: [0.0, 350.0, 0.0], ..Default::default() };
+        assert!((relink(&turn, 0.5, false).1[1] - 360.0).abs() < 1e-4);
+        let back = EntSnapshot { angles: [0.0, 350.0, 0.0], prev_angles: [0.0, 10.0, 0.0], ..Default::default() };
+        assert!(relink(&back, 0.5, false).1[1].abs() < 1e-4);
+    }
+
+    /// id's `CL_ReadFromServer` at 72 Hz over messages 0.1 s apart: the clock
+    /// reads a message as soon as it has passed the newest one, and draws the
+    /// camera, the velocity and the entities between the two newest.
+    #[test]
+    fn demo_frame_reads_ahead_and_draws_between_the_two_newest_messages() {
+        let msg = |time: f32, prev_time: f32, x: f32, prev_x: f32| DemoFrame {
+            time,
+            prev_time,
+            view_entity_origin: [x, 0.0, 0.0],
+            view_prev_origin: [prev_x, 0.0, 0.0],
+            viewheight: 22.0,
+            view_angles: [0.0, 10.0, 0.0],
+            prev_view_angles: [0.0, 350.0, 0.0],
+            prev_velocity: [0.0; 3],
+            client: crate::demo::DemoClientData { velocity: [100.0, 0.0, 0.0], ..Default::default() },
+            entities: vec![moved(5, prev_x, x)],
+            ..Default::default()
+        };
+        let mut d = playback(vec![msg(1.0, 0.9, 0.0, 0.0), msg(1.1, 1.0, 10.0, 0.0), msg(1.2, 1.1, 20.0, 10.0)]);
+        // The first frame starts more than 0.1 s before the first message:
+        // CL_LerpPoint pulls the clock to 0.1 s before it (frac 0).
+        render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+        assert_eq!((d.idx, d.time), (0, 0.9));
+        // Seven 1/72 s frames later the clock (0.997) has not passed message 0.
+        for _ in 0..7 {
+            render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+        }
+        assert_eq!(d.idx, 0);
+        // The next frame (1.008) passes it: message 1 is read, and the frame
+        // draws 8% of the way from message 0 to 1.
+        render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+        assert_eq!(d.idx, 1);
+        let frac = ((d.time - 1.0) / 0.1) as f32;
+        assert!(frac > 0.0 && frac < 0.2, "{frac}");
+        let v = &d.view;
+        assert!((v.view_entity_origin[0] - 10.0 * frac).abs() < 1e-3);
+        assert!((v.view_origin[2] - 22.0).abs() < 1e-6, "the eye is raised by the view height");
+        assert!((v.entities[0].origin[0] - 10.0 * frac).abs() < 1e-3);
+        assert!((v.velocity[0] - 100.0 * frac).abs() < 1e-3);
+        let yaw = (v.view_angles[1] - 350.0 - 20.0 * frac).abs();
+        assert!(yaw < 1e-3, "the recorded angles turn the short way: {:?}", v.view_angles);
+        // Every frame moves the view: the next one is further along.
+        let x = v.view_entity_origin[0];
+        render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+        assert!(d.view.view_entity_origin[0] > x);
+    }
+
+    /// `U_NOLERP` (id's monsters): drawn where the message put them in the
+    /// frame that reads it, then lerped from the message before until the
+    /// next one — id's step jumps a message ahead for a frame.
+    #[test]
+    fn a_nolerp_entity_snaps_in_the_reading_frame_then_lerps() {
+        let step = |time: f32, x: f32, prev_x: f32| DemoFrame {
+            time,
+            prev_time: time - 0.1,
+            entities: vec![EntSnapshot { forcelink: true, step: true, ..moved(5, prev_x, x) }],
+            ..Default::default()
+        };
+        let mut d = playback(vec![step(1.0, 0.0, 0.0), step(1.1, 8.0, 0.0), step(1.2, 16.0, 8.0)]);
+        let mut xs = Vec::new();
+        for _ in 0..16 {
+            render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+            xs.push((d.idx, d.view.entities[0].origin[0]));
+        }
+        let read = xs.iter().position(|&(idx, _)| idx == 1).expect("message 1 is read");
+        assert_eq!(xs[read].1, 8.0, "the reading frame draws the new step");
+        assert!(xs[read + 1].1 < 2.0, "the next frame falls back to lerping from 0: {xs:?}");
+    }
+
+    /// With `r_lerpmove` the same monster glides forward every frame
+    /// instead (the 2026 extra; `client::lerpmove`).
+    #[test]
+    fn with_lerpmove_a_nolerp_entity_glides() {
+        let step = |time: f32, x: f32, prev_x: f32| DemoFrame {
+            time,
+            prev_time: time - 0.1,
+            entities: vec![EntSnapshot { forcelink: true, step: true, ..moved(5, prev_x, x) }],
+            ..Default::default()
+        };
+        let mut d = playback(vec![step(1.0, 0.0, 0.0), step(1.1, 8.0, 0.0), step(1.2, 16.0, 8.0), step(1.3, 24.0, 16.0)]);
+        d.lerpmove = LerpMove::Smooth;
+        let mut xs = Vec::new();
+        // (Frame 29 would pass the last message: the port's loop wrap.)
+        for _ in 0..28 {
+            render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+            xs.push(d.view.entities[0].origin[0]);
+        }
+        let first = xs.iter().position(|&x| x > 0.0).expect("it moves");
+        assert!(xs[first..].windows(2).all(|w| w[1] > w[0]), "forward every frame: {xs:?}");
+    }
+
+    #[test]
+    fn ef_rotate_models_spin_to_100_times_the_clock() {
+        use crate::mdl::MdlHeader;
+        let mut d = playback(vec![DemoFrame {
+            time: 1.5,
+            prev_time: 1.5,
+            entities: vec![EntSnapshot { num: 2, modelindex: 1, angles: [0.0, 30.0, 0.0], ..Default::default() }],
+            ..Default::default()
+        }]);
+        // Only the header's flags matter to the relink.
+        let header = MdlHeader {
+            ident: 0,
+            version: 6,
+            scale: [1.0; 3],
+            scale_origin: [0.0; 3],
+            boundingradius: 0.0,
+            eyeposition: [0.0; 3],
+            numskins: 0,
+            skinwidth: 0,
+            skinheight: 0,
+            numverts: 0,
+            numtris: 0,
+            numframes: 0,
+            synctype: 0,
+            flags: crate::demo::EF_ROTATE,
+            size: 0.0,
+        };
+        let spinner = Mdl { header, skins: Vec::new(), stverts: Vec::new(), triangles: Vec::new(), frames: Vec::new() };
+        d.models = vec![None, Some(spinner)];
+        d.time = 1.5;
+        cl_relink_entities(&mut d, 1.0, 0, LerpMove::Classic);
+        assert_eq!(d.view.entities[0].angles[1], crate::math::anglemod(150.0));
+        d.models = Vec::new();
+        cl_relink_entities(&mut d, 1.0, 0, LerpMove::Classic);
+        assert_eq!(d.view.entities[0].angles[1], 30.0, "no EF_ROTATE: the recorded yaw");
     }
 
     #[test]
@@ -985,6 +1269,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![frame(1.0), frame(1.1), frame(1.1), frame(1.3)],
         };
         let pak = crate::pak::Pak::from_bytes("t".into(), {
@@ -995,7 +1281,7 @@ mod tests {
         })
         .unwrap();
         let mut d = DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo);
-        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
+        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
         // The first frame (CL_TimeDemo_f's) reads through the second message;
         // the time between messages is not what moves playback on.
         let mut shown = Vec::new();

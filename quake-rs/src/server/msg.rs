@@ -617,9 +617,9 @@ enum MsgParse {
     /// `svc_finale`/`svc_cutscene` read; awaiting the `WriteString` payload.
     /// `cutscene` says which event to emit.
     AwaitString { cutscene: bool },
-    /// `svc_cdtrack` read; the next N `WriteByte`s (track, looptrack) are its
-    /// payload and must not be mistaken for command bytes.
-    SkipBytes(u8),
+    /// `svc_cdtrack` read; the next two `WriteByte`s are its payload (the
+    /// track, once read, then `looptrack`), not command bytes.
+    CdTrack(Option<u8>),
 }
 
 /// One recognised server command, surfaced to the front-end the way the
@@ -639,6 +639,11 @@ pub enum SvcEvent {
     /// `svc_sellscreen` (33): the shareware "order the full game" pitch — the C ran
     /// `Cmd_ExecuteString("help")`, i.e. opened the Help/Ordering pages.
     SellScreen,
+    /// `svc_cdtrack` (32) + two bytes: `cl.cdtrack`, `cl.looptrack` — the
+    /// client's `CDAudio_Play (cdtrack, true)`. The QuakeC sends the
+    /// intermission's track 3 (`execute_changelevel`) and the finale's 2
+    /// (`ExitIntermission`); a level's own comes with its signon.
+    CdTrack { track: u8, looptrack: u8 },
 }
 
 impl Outbox {
@@ -662,7 +667,7 @@ impl Outbox {
             }
             SVC_FINALE => MsgParse::AwaitString { cutscene: false },
             SVC_CUTSCENE => MsgParse::AwaitString { cutscene: true },
-            SVC_CDTRACK => MsgParse::SkipBytes(2),
+            SVC_CDTRACK => MsgParse::CdTrack(None),
             SVC_SELLSCREEN => {
                 self.svc_events.push(SvcEvent::SellScreen);
                 MsgParse::Command
@@ -700,8 +705,13 @@ impl Outbox {
                 }
                 MsgParse::Command
             }
-            MsgParse::SkipBytes(n) => match w {
-                MsgWrite::Byte(_) if n > 1 => MsgParse::SkipBytes(n - 1),
+            MsgParse::CdTrack(track) => match (w, track) {
+                // MSG_WriteByte stores the float's (int) as a byte.
+                (MsgWrite::Byte(v), None) => MsgParse::CdTrack(Some(v as i32 as u8)),
+                (MsgWrite::Byte(v), Some(track)) => {
+                    self.svc_events.push(SvcEvent::CdTrack { track, looptrack: v as i32 as u8 });
+                    MsgParse::Command
+                }
                 _ => MsgParse::Command,
             },
         };
@@ -1276,7 +1286,10 @@ mod tests {
         write_byte(&mut server, MSG_ALL, 2.0);
         write_byte(&mut server, MSG_ALL, 3.0);
         write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
-        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
+        assert_eq!(
+            server.drain_svc_events(),
+            vec![SvcEvent::CdTrack { track: 2, looptrack: 3 }, SvcEvent::Intermission]
+        );
     }
 
     #[test]

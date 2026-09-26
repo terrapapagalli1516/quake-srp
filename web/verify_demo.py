@@ -4,12 +4,14 @@
   1. the page boots into the attract demo with no menu (id's key_dest starts
      at key_game) and the FIRST rendered frames are in-world (no void-camera
      intro — the signon gate); a key brings up the menu, Escape closes it;
-  2. recorded svc_sound one-shots actually PLAY through Web Audio during the
-     attract loop (the page's __sndStats.plays counter);
+  2. recorded svc_sound one-shots start in id's mixer during the attract loop
+     (the program's counts, window.__sndStats), and the page's AudioWorklet
+     plays what it paints: sound, not silence;
   3. the recorded status bar is drawn: the bottom sbar band stays stable
      across frames while the 3-D scene above it changes (the camera is moving);
-  4. the (entity, channel) stop/override plumbing is wired (the page keeps
-     its source registry, and id's demos send no STOP_SOUND record);
+  4. id's demos send no svc_stopsound (the mixer counted no S_StopSound),
+     and the mixer holds the recorded sounds on their (entity, channel)
+     keys;
   5. no console errors; a screenshot is saved for visual gun/sbar inspection.
 
 Usage: verify_demo.py [webdir]   (defaults to the repo's web/; pass a deploy
@@ -79,23 +81,27 @@ with sync_playwright() as p:
           f"{frac:.0%} non-black")
     check("the attract demo plays with no menu", pg.evaluate("exp.menu_visible()") == 0)
 
-    # 2. Recorded one-shot sounds fire through Web Audio. The page only builds
-    # its AudioContext on a user gesture; create + resume it directly (the
-    # autoplay flag lets resume() succeed) — the page's next refresh tells the
-    # program audio is running, and it starts sending the recorded svc_sound
-    # events.
+    # 2. Recorded one-shot sounds start in the program's mixer. The page only
+    # builds its AudioContext on a user gesture; create + resume it directly
+    # (the autoplay flag lets resume() succeed) — the page's next refresh
+    # attaches the worklet, which plays the ring the program paints.
     pg.evaluate("""() => {
         audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
         return audioCtx.resume();
     }""")
-    plays = 0
+    pg.wait_for_function("quake.audio.ring().running && quake.audio.ring().worklet", timeout=10000)
+    pg.evaluate("quake.audio.resetPeak()")
+    starts0 = pg.evaluate("window.__sndStats.starts")
+    starts = starts0
     for _ in range(20):   # demo1 averages ~6 recorded sounds/sec
         time.sleep(0.5)
-        plays = pg.evaluate("window.__sndStats ? window.__sndStats.plays : -1")
-        if plays and plays > 0:
+        starts = pg.evaluate("window.__sndStats.starts")
+        if starts > starts0:
             break
-    check("recorded svc_sound one-shots play during the attract loop",
-          plays > 0, f"{plays} plays")
+    check("recorded svc_sound one-shots start during the attract loop",
+          starts > starts0, f"S_StartSound {starts0} -> {starts}")
+    peak = pg.evaluate("quake.audio.ring().peak")
+    check("the worklet plays what the mixer paints (sound, not silence)", peak > 500, f"peak {peak}")
 
     # Any key during demo playback brings up the main menu (Key_Event); Escape
     # on Main closes it and the demo view is bare again. (The overlay's first
@@ -147,18 +153,13 @@ with sync_playwright() as p:
     pg.screenshot(path=shot)
     print("screenshot:", shot)
 
-    # 4. The stop/override plumbing is wired: the page's stop path exists, and
-    # no STOP_SOUND record came (id's demos send no svc_stopsound — engine-
-    # asserted — so there is none to carry).
-    plumbing = pg.evaluate("""() => ({
-        haveStops: typeof quake.audio.stopKey === 'function',
-        stopRecords: window.__sndStats.stopRecords || 0,
-        registry: quake.audio.playingByKey instanceof Map,
-    })""")
-    check("the stop path is present", plumbing["haveStops"])
-    check("no stop records (id demos send none)", plumbing["stopRecords"] == 0,
-          str(plumbing["stopRecords"]))
-    check("page keeps the (entity,channel) source registry", plumbing["registry"])
+    # 4. No svc_stopsound in id's demos (engine-asserted), so the mixer
+    # counted none; the recorded sounds sit on their (entity, channel) keys.
+    stops = pg.evaluate("window.__sndStats.stops")
+    check("no S_StopSound (id demos send no svc_stopsound)", stops == 0, str(stops))
+    keyed = [l.split() for l in pg.evaluate("quake.text('snd_channels')").splitlines()]
+    keyed = [(f[1], f[7], f[8]) for f in keyed if 4 <= int(f[0]) < 12]
+    check("the mixer holds the recorded sounds on their keys", bool(keyed), str(keyed[:4]))
 
     check("no console errors", not errs, str(errs[-5:]))
     br.close()

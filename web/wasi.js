@@ -4,8 +4,9 @@
 // events into a shared ring (Atomics.wait wakes the read), and what the
 // program writes to stdout comes back to the page — each frame's pixels into
 // shared frame slots the page presents from (or, when the program's memory
-// is shared, the frame's place in it), everything else (sounds, UI
-// state, answers to calls) as one message per turn. Files are a small
+// is shared, the frame's place in it), its sound into a shared ring the
+// page's AudioWorklet plays, everything else (UI state, the sound's counts,
+// answers to calls) as one message per turn. Files are a small
 // in-memory file system the page filled from its storage; what the program
 // writes goes back to the page to keep. web/PLATFORM.md has the protocol and
 // the shared-memory layout; quake-wasm/src/proto.rs is the program's side.
@@ -43,10 +44,15 @@ const C = {
 const CTL_BYTES = 256;
 const RING_BYTES = 1 << 16;              // the input ring, after the control block
 const SLOTS = 3;                         // frame slots (triple buffering), and the program's ring
+// The sound ring (web/PLATFORM.md, "Sound"): made by the page, written here,
+// played by the page's AudioWorklet. The control block's Int32 fields:
+const A = { POS: 0, WRITE: 1, RATE: 2, UNDER: 3, PLAYED: 4, CLEARS: 5, PEAK: 6, QUANTA: 7 };
+const AUDIO_CTL_BYTES = 64, RING_PAIRS = 16384;
 
 // --- Protocol constants (quake-wasm/src/proto.rs) ---------------------------
-const IN_END = 8;
-const OUT_FRAME = 1, OUT_SYNC = 2, OUT_FRAME_AT = 16;
+const IN_END = 8, IN_AUDIO_WAKE = 11;
+const OUT_FRAME = 1, OUT_SYNC = 2, OUT_PCM = 14, OUT_FRAME_AT = 17;
+const PCM_CLEAR = 1;
 
 // --- WASI errno values (wasi_snapshot_preview1) ------------------------------
 const E = { SUCCESS: 0, BADF: 8, EXIST: 20, INVAL: 28, ISDIR: 31, NOENT: 44, NOSYS: 52, NOTDIR: 54, SPIPE: 70 };
@@ -67,9 +73,10 @@ onmessage = async (e) => {
   if (e.data.t === 'hello') { postMessage({ t: 'ready' }); return; }   // a thread worker, made
   if (e.data.t === 'thread') { runThread(e.data); return; }
   if (e.data.t !== 'init') return;
-  const { wasm, shared, files, args } = e.data;
+  const { wasm, shared, audio: audioShared, files, args } = e.data;
   ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
+  if (audioShared) sound.init(audioShared);
   for (const [path, data] of files) fs.files.set(path, { data, size: data.length });
   let module;
   try {
@@ -133,6 +140,7 @@ function iovecs(iovs, n) {
 // hands it one as soon as the ring is empty, instead of blocking.
 const stdin = {
   pendingEnd: null,                      // the End record still to hand out
+  pendingWake: null,                     // an AudioWake still to hand out (sound.wake)
   read(dst, cap) {
     for (;;) {
       const w = Atomics.load(ctl, C.IN_WRITE), r = Atomics.load(ctl, C.IN_READ);
@@ -146,27 +154,82 @@ const stdin = {
         Atomics.store(ctl, C.IN_READ, (r + n) | 0);
         return n;
       }
-      if (this.pendingEnd) {
-        const n = Math.min(this.pendingEnd.length, cap);
-        u8().set(this.pendingEnd.subarray(0, n), dst);
-        this.pendingEnd = n < this.pendingEnd.length ? this.pendingEnd.subarray(n) : null;
+      for (const k of ['pendingEnd', 'pendingWake']) {
+        const b = this[k];
+        if (!b) continue;
+        const n = Math.min(b.length, cap);
+        u8().set(b.subarray(0, n), dst);
+        this[k] = n < b.length ? b.subarray(n) : null;
         return n;
       }
-      Atomics.wait(ctl, C.IN_WRITE, w);
+      if (Atomics.wait(ctl, C.IN_WRITE, w, sound.wakeMs()) === 'timed-out') this.pendingWake = sound.wake();
     }
+  },
+};
+
+// --- The sound ring ------------------------------------------------------------
+// A PCM record's samples go straight from the program's memory into the
+// ring, at the pairs its `start` names; the ring's WRITE then says how far
+// they reach. A record that asks for it (S_ClearBuffer) silences the ring
+// first: what was mixed ahead of the device before a level change.
+const sound = {
+  ctl: null, data: null,                 // the control block and the ring's bytes
+  at: 0,                                 // the byte the next sample byte goes to
+  start: 0, bytes: 0,                    // the current record's first pair, and its bytes so far
+  init(sab) {
+    this.ctl = new Int32Array(sab, 0, AUDIO_CTL_BYTES / 4);
+    this.data = new Uint8Array(sab, AUDIO_CTL_BYTES, RING_PAIRS * 4);
+  },
+  begin(start, rate, flags) {
+    if (!this.ctl) return;
+    if (flags & PCM_CLEAR) { this.data.fill(0); Atomics.add(this.ctl, A.CLEARS, 1); }
+    if (Atomics.load(this.ctl, A.RATE) !== rate) Atomics.store(this.ctl, A.RATE, rate);
+    this.start = start; this.bytes = 0;
+    this.at = (start & (RING_PAIRS - 1)) * 4;
+  },
+  write(src) {
+    if (!this.ctl) return;
+    for (let i = 0; i < src.length;) {
+      const k = Math.min(src.length - i, this.data.length - this.at);
+      this.data.set(src.subarray(i, i + k), this.at);
+      this.at = (this.at + k) % this.data.length;
+      i += k;
+    }
+    this.bytes += src.length;
+  },
+  end() {
+    if (this.ctl) Atomics.store(this.ctl, A.WRITE, (this.start + (this.bytes >> 2)) | 0);
+  },
+  // Between the page's ticks the program waits in a read; while the
+  // worklet plays, the read wakes every WAKE_MS and hands it an AUDIO_WAKE
+  // with the device's position, so it mixes again (id's S_ExtraUpdate): the
+  // ring stays fed whatever the display's refresh does.
+  WAKE_MS: 8,
+  quanta: -1,
+  wakeMs() { return this.ctl && Atomics.load(this.ctl, A.RATE) ? this.WAKE_MS : Infinity; },
+  wake() {
+    if (!this.ctl) return null;
+    const q = Atomics.load(this.ctl, A.QUANTA);
+    if (q === this.quanta) return null;        // the worklet is not playing
+    this.quanta = q;
+    const rec = new Uint8Array(8);
+    rec[0] = IN_AUDIO_WAKE; rec[2] = 4;
+    new DataView(rec.buffer).setUint32(4, Atomics.load(this.ctl, A.POS) >>> 0, true);
+    return rec;
   },
 };
 
 // --- stdout: the program's records ------------------------------------------
 // A streaming parser, since a record can span writes: a FRAME's pixels (an
 // indexed frame's palette first) go straight from the program's memory into
-// a free frame slot; a FRAME_AT says where a frame lies in the program's
-// shared memory, and the page reads it there; every other record is kept,
-// and the lot goes to the page as one message at each Sync.
+// a free frame slot, a PCM record's samples into the sound ring; a FRAME_AT
+// says where a frame lies in the program's shared memory, and the page reads
+// it there; every other record is kept, and the lot goes to the page as one
+// message at each Sync.
 const stdout = {
   head: new Uint8Array(8), headN: 0,     // the record header being read
   kind: 0, left: 0,                      // the current record, and its bytes still to come
-  fixed: new Uint8Array(16), fixedN: 0,  // a FRAME's (8) or FRAME_AT's (16) fixed fields
+  fixed: new Uint8Array(16), fixedN: 0,  // a FRAME's (8), PCM's (12) or FRAME_AT's (16) fixed fields
   slot: -1, slotAt: 0,                   // where a FRAME's pixels are going
   batch: new Uint8Array(1 << 16), batchN: 0,
 
@@ -182,12 +245,13 @@ const stdout = {
         this.kind = this.head[0];
         this.left = new DataView(this.head.buffer).getUint32(4, true);
         this.fixedN = 0; this.slot = -1;
-        if (this.kind !== OUT_FRAME && this.kind !== OUT_FRAME_AT) this.keep(this.head, 0, 8);
+        if (this.kind !== OUT_FRAME && this.kind !== OUT_PCM && this.kind !== OUT_FRAME_AT) this.keep(this.head, 0, 8);
         if (this.left === 0) this.done();
         continue;
       }
       const k = Math.min(this.left, n - i);
       if (this.kind === OUT_FRAME) this.framePart(m, src + i, k);
+      else if (this.kind === OUT_PCM) this.pcmPart(m, src + i, k);
       else if (this.kind === OUT_FRAME_AT) this.fixedPart(m, src + i, k, 16);
       else this.keep(m, src + i, k);
       this.left -= k; i += k;
@@ -229,6 +293,19 @@ const stdout = {
     }
   },
 
+  // Some of a PCM record's payload: its 12 fixed bytes, then samples.
+  pcmPart(m, at, k) {
+    if (this.fixedN < 12) {
+      const f = this.fixedPart(m, at, k, 12);
+      at += f; k -= f;
+      if (this.fixedN === 12) {
+        const d = new DataView(this.fixed.buffer);
+        sound.begin(d.getUint32(0, true) | 0, d.getUint32(4, true), d.getUint32(8, true));
+      }
+    }
+    if (k > 0) sound.write(m.subarray(at, at + k));
+  },
+
   // Whether the page wants this frame copied. It always does while the
   // program waits for its ticks (the page is waiting for the frame). A
   // timedemo's frames come faster than any display: one the page has not yet
@@ -246,6 +323,8 @@ const stdout = {
       publish(this.slot, f, 0, 0, 0);
     } else if (this.kind === OUT_FRAME_AT) {
       this.frameAt(new DataView(this.fixed.buffer));
+    } else if (this.kind === OUT_PCM) {
+      sound.end();
     } else if (this.kind === OUT_SYNC) {
       this.sync();
     }

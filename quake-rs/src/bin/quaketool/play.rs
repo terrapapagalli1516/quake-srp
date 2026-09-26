@@ -6,8 +6,8 @@
 //! The same [`quake_rs::client`] frames the page runs (`walk_frame`,
 //! `demo_frame`), driven the way `web/bench.py` drives the page, one host
 //! frame per 1/72 s through `Host_FilterTime`, with the page's screen (its 4:3
-//! display, no Web extras) and the host's defaults (the default bindings and
-//! viewsize, the menu and console closed); each finished frame is presented
+//! display) and the Classic profile's settings (id's bindings and viewsize,
+//! every departure off, the menu and console closed); each finished frame is presented
 //! as the page presents it — through the `cl.cshifts` + gamma ramps into RGBA
 //! (`VID_ShiftPalette`). Workloads, as in `web/bench.py`:
 //!
@@ -23,7 +23,10 @@
 //! default, bench.py's 60 + 600), so the native client's frames can be
 //! compared with the browser's byte for byte; `--ppm PREFIX` also writes those
 //! frames as `PREFIX-<workload>-<W>x<H>-<frame>.ppm`. Each run ends with a
-//! tally of the sound calls its frames made.
+//! tally of the sound calls its frames made. `--trace PATH` writes, for each
+//! demo frame, what `CL_RelinkEntities` drew — the clocks, the view angles,
+//! the view entity, `cl.velocity` and every relinked entity — as the records
+//! of the oracle's `oracle_trace` (`oracle/demo_lerp.py` compares the two).
 //!
 //! Several workloads and resolutions run in `bench.py`'s order (each workload
 //! at each resolution) in one host, as the page runs them: the host hands
@@ -42,6 +45,7 @@ use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPl
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render;
+use quake_rs::settings::{Profile, Settings};
 
 use super::video::VideoArgs;
 
@@ -92,6 +96,9 @@ impl SoundTally {
                 SoundCall::StopAll => self.stop_all += 1,
                 SoundCall::Static(s) => self.static_loops += s.len(),
                 SoundCall::Update { .. } => self.updates += 1,
+                // The CD's calls are not the mixer's: the tally stays the
+                // sound layer's.
+                SoundCall::Cd(_) => {}
             }
         }
     }
@@ -107,11 +114,11 @@ fn fnv(rgba: &[u8]) -> u32 {
     h
 }
 
-/// The page's host, for as long as the runs last: its clocks, its menu (at
-/// the defaults, closed) and the game it is running.
+/// The page's host, for as long as the runs last: its clocks, its settings
+/// (Classic's) and the game it is running.
 struct Host {
     pak: Pak,
-    menu: render::Menu,
+    settings: Settings,
     keys: [bool; 256],
     /// `host_basepal`, the palette `VID_SetPalette` loads (`gfx/palette.lmp`).
     palette: render::Palette,
@@ -134,8 +141,9 @@ impl Host {
     fn step(&mut self, raw_dt: f32, sound: &mut Vec<SoundCall>) -> Option<ClientFrame> {
         self.realtime += raw_dt as f64;
         let dt = host_filter_time(self.realtime, &mut self.oldrealtime)?;
-        let km = cl_input::derive_key_move(&self.menu, &self.keys);
-        let viewsize = self.menu.viewsize();
+        let s = &self.settings;
+        let km = cl_input::derive_key_move(&s.cvars, &s.binds, &self.keys);
+        let viewsize = s.cvars.viewsize;
         Some(match self.mode.as_mut()? {
             Mode::Walk(wk) => {
                 wk.key_move = km;
@@ -198,8 +206,9 @@ impl Host {
 
 pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<String, String> {
     // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX]
-    // [video options].
+    // [--trace PATH] [video options].
     let (mut frames, mut res, mut every, mut ppm) = (660u32, "320x200".to_string(), 30u32, None);
+    let mut trace: Option<String> = None;
     let mut video = VideoArgs::default();
     let mut i = 0;
     while i < rest.len() {
@@ -221,6 +230,10 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 ppm = Some(val(i)?.clone());
                 i += 1;
             }
+            "--trace" => {
+                trace = Some(val(i)?.clone());
+                i += 1;
+            }
             n => frames = n.parse().map_err(|_| format!("unknown argument {n:?}"))?,
         }
         i += 1;
@@ -239,10 +252,10 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
         .flatten()
         .and_then(|b| render::parse_palette(&b))
         .ok_or("gfx/palette.lmp is missing or short")?;
-    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars };
+    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars, mip: render::MipCvars::DEFAULT };
     let mut host = Host {
         pak,
-        menu: render::Menu::new(),
+        settings: Settings::new(Profile::Classic),
         keys: [false; 256],
         palette,
         gamma: render::build_gamma_table(1.0),
@@ -256,6 +269,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     };
     let mut rgba: Vec<u8> = Vec::new();
     let mut o = String::new();
+    let (mut trace_out, mut traced) = (String::new(), 0usize);
 
     for workload in workloads.split(',') {
         let _ = writeln!(o, "{workload}");
@@ -285,6 +299,9 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 }
                 let mut sound = Vec::new();
                 let Some(frame) = host.step(DT, &mut sound) else { continue };
+                if let (Some(_), Some(Mode::Demo(d))) = (&trace, host.mode.as_ref()) {
+                    trace_frame(&mut trace_out, &mut traced, d);
+                }
                 tally.add(&sound);
                 tally.add(&frame.sound);
                 // V_UpdatePalette + VID_ShiftPalette: the frame's palette (its
@@ -315,5 +332,32 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
             );
         }
     }
+    if let Some(path) = &trace {
+        std::fs::write(path, &trace_out).map_err(|e| format!("cannot write {path}: {e}"))?;
+    }
     Ok(o)
+}
+
+/// One `--trace` record, the `traced`-th: the frame's clocks, what
+/// `CL_RelinkEntities` drew for the camera, and each relinked entity
+/// (statics are never relinked).
+fn trace_frame(out: &mut String, traced: &mut usize, d: &DemoPlay) {
+    let f = &d.demo.frames[d.idx];
+    let v = &d.view;
+    let _ = writeln!(
+        out,
+        "F {} t={:.17} old={:.17} m0={} m1={} ang={} {} {} vorg={} {} {} vel={} {} {}",
+        *traced, d.time, d.oldtime, f.time, f.prev_time, v.view_angles[0], v.view_angles[1], v.view_angles[2],
+        v.view_entity_origin[0], v.view_entity_origin[1], v.view_entity_origin[2],
+        v.velocity[0], v.velocity[1], v.velocity[2],
+    );
+    *traced += 1;
+    for e in v.entities.iter().filter(|e| e.num >= 0) {
+        let model = d.demo.model_precache.get(e.modelindex).map_or("", String::as_str);
+        let _ = writeln!(
+            out,
+            "E {} {model} {} {} {} {} {} {} {}",
+            e.num, e.origin[0], e.origin[1], e.origin[2], e.angles[0], e.angles[1], e.angles[2], e.frame
+        );
+    }
 }

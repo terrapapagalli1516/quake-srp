@@ -9,7 +9,7 @@ through the page's own keyboard path:
      "%i frames %5.1f seconds %5.1f fps": well formed, 969 frames (id's C
      draws 969 for demo1), a plausible rate that agrees with frames/seconds.
      The attract loop's next demo plays afterwards, under the 72 fps cap
-     again. Run at 960x600 (the page's default) and 640x400 (or the modes in
+     again. Run in the Classic profile (`?classic`), at 960x600 (its mode) and 640x400 (or the modes in
      QUAKE_TIMEDEMO_RES, e.g. "320x200,640x400,960x600"); the lines are
      printed (PERF_PLAN.md's browser numbers). Screenshot:
      verify_timedemo.png (mid-run).
@@ -69,7 +69,9 @@ SAME = """([a, b]) => {
 }"""
 
 def boot_page(pg):
-    pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
+    # Classic: id's 72 fps cap to come back to, id's keys, the 2-D layer 1:1
+    # (the plaque is read at id's coordinates).
+    pg.goto(f"http://127.0.0.1:{PORT}/index.html?classic", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     pg.evaluate("document.getElementById('overlay').click()")   # the first gesture
     time.sleep(0.3)
@@ -162,10 +164,10 @@ with sync_playwright() as p:
     check("'player paused the game' (SV_BroadcastPrintf)",
           "player paused the game" in pg.evaluate(CONSOLE))
     l0 = listener()
-    pg.keyboard.down("w")
+    pg.keyboard.down("ArrowUp")
     time.sleep(1.0)
     check("+forward held a second while paused: nothing moves", listener() == l0, f"{l0} -> {listener()}")
-    pg.keyboard.up("w")
+    pg.keyboard.up("ArrowUp")
     time.sleep(3.2)                                # the notify line expires (con_notifytime 3)
     pg.evaluate(GRAB, "_p1")
     time.sleep(0.5)
@@ -175,9 +177,9 @@ with sync_playwright() as p:
     time.sleep(0.3)
     check("PAUSE again: the plaque is gone", not plaque_up())
     check("'player unpaused the game'", "player unpaused the game" in pg.evaluate(CONSOLE))
-    pg.keyboard.down("w")
+    pg.keyboard.down("ArrowUp")
     time.sleep(0.7)
-    pg.keyboard.up("w")
+    pg.keyboard.up("ArrowUp")
     check("+forward moves the player again", listener() != l0, f"{l0} -> {listener()}")
     # PAUSE is no console key: it pauses with the console down too.
     key("Backquote")

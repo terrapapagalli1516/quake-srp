@@ -17,6 +17,7 @@
 //! | [`crc`]     | `crc.c`                 | CRC-16/CCITT (XMODEM) used for PAK integrity |
 //! | [`wad`]     | `wad.c`, `wad.h`        | WAD2 archive (gfx.wad: pics, palette, fonts) |
 //! | [`pak`]     | `common.c`              | PAK archive (pak0.pak / pak1.pak)            |
+//! | [`common`]  | `common.c`              | the search path, the registered game check   |
 //! | [`bsp`]     | `bspfile.h`, `model.c`  | BSP version 29 map loader                    |
 //! | [`mdl`]     | `modelgen.h`, `model.c` | MDL alias (animated) model loader            |
 //! | [`spr`]     | `spritegn.h`, `model.c` | SPR sprite loader                            |
@@ -39,6 +40,7 @@ pub mod math;
 pub mod crc;
 pub mod wad;
 pub mod pak;
+pub mod common;
 pub mod bsp;
 pub mod mdl;
 pub mod spr;
@@ -59,11 +61,15 @@ pub mod draw;
 pub mod screen;
 pub mod sbar;
 pub mod keys;
+pub mod cvar;
+pub mod cmd;
+pub mod settings;
 pub mod menu;
 pub mod console;
 pub mod dlight;
 pub mod demo;
 pub mod snd;
+pub mod cd_audio;
 pub mod stepping;
 
 pub mod client;

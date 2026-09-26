@@ -2,6 +2,9 @@
 //! [--check]` — does the game play the same at every display rate?
 //! `quaketool framerate <pak> --budget [--res WxH,...]` — what a frame of it
 //! costs at 480 Hz.
+//! `quaketool framerate <pak> --lerpmove [--rates LIST] [--strip DIR]` — how
+//! smoothly the monsters' steps are drawn, Classic and with `r_lerpmove`
+//! ([`LerpMove`]; "Monsters between their steps" below).
 //!
 //! Each scenario is a scripted piece of play on the shareware maps — a jump,
 //! a fall, a grenade, a lift, a damage flash, a demo — run through the same
@@ -25,6 +28,7 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use quake_rs::client::host::{host_filter_time_display, host_filter_time_uncapped};
+use quake_rs::client::lerpmove::LerpMove;
 use quake_rs::client::{cl_demo, cl_main, host_cmd, DemoPlay, Phase, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
 use quake_rs::particles::ParticleKind;
@@ -35,7 +39,7 @@ use quake_rs::vm::Vm;
 use quake_rs::world;
 
 /// The screen the scenarios draw (small: they measure the game, not pixels).
-const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
+const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
 
 // QuakeC constants (defs.qc).
 const FL_GODMODE: i32 = 64;
@@ -1165,7 +1169,6 @@ fn clocks(c: &Ctx) -> Vec<Measure> {
 fn demo(c: &Ctx) -> Vec<Measure> {
     let mut d: DemoPlay = cl_demo::build_demo_n(c.pak.clone(), 0, &mut Vec::new()).expect("demo1");
     d.stepping = c.stepping;
-    let lerp = c.stepping == Stepping::Uncapped;
     let mut clock = FrameClock::new(c.rate, c.stepping);
     let (mut t, mut moves, mut last) = (0.0f64, 0usize, ([0.0f32; 3], [0.0f32; 3]));
     while t < 20.0 {
@@ -1174,14 +1177,267 @@ fn demo(c: &Ctx) -> Vec<Measure> {
         let frame = cl_demo::demo_frame(&mut d, dt as f32, false, &VID);
         render::recycle_image(frame.image);
         // The POV the frame drew.
-        let v = cl_demo::demo_view(&d.demo.frames, d.idx, d.elapsed, lerp);
-        let pov = (v.view_origin, v.view_angles);
+        let pov = (d.view.view_origin, d.view.view_angles);
         if pov != last {
             moves += 1;
         }
         last = pov;
     }
     vec![m("camera moves a second", "/s", moves as f64 / t, f64::NAN), m("demo message at 20 s", "", d.idx as f64, 2.0)]
+}
+
+// ---------------------------------------------------------------------------
+// Monsters between their steps: Classic and r_lerpmove
+// ---------------------------------------------------------------------------
+
+/// One step mover over a run: per frame, where the server (or the newest
+/// message) has it, and where the frame drew it.
+#[derive(Default)]
+struct StepTrack {
+    server: Vec<[f32; 3]>,
+    drawn: Vec<[f32; 3]>,
+}
+
+/// How smoothly a set of step movers was drawn, over the frames in which
+/// each was walking (it moved within 0.1 s before the frame and within 0.1 s
+/// after).
+struct Motion {
+    /// Of those frames, the share in which the drawn monster moved (%).
+    moving: f64,
+    /// The per-frame drawn move's spread: standard deviation over mean (0:
+    /// the same move every frame; Classic's one step in N frames: sqrt(N-1)).
+    spread: f64,
+    /// The largest drawn move in one frame (units).
+    largest: f64,
+    /// How far behind the server's position it was drawn, on average (units).
+    lag: f64,
+}
+
+/// A row of the `--lerpmove` table: its name and what it reads off a [`Motion`].
+type MotionRow = (&'static str, fn(&Motion) -> f64);
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f64 {
+    f64::from((0..3).map(|i| (a[i] - b[i]) * (a[i] - b[i])).sum::<f32>().sqrt())
+}
+
+fn motion(tracks: &[StepTrack], hz: f64) -> Motion {
+    let k = (0.1 * hz).ceil() as usize + 1;
+    let (mut n, mut moved, mut lag, mut largest) = (0usize, 0usize, 0.0, 0.0f64);
+    let mut moves = Vec::new();
+    for t in tracks {
+        for f in k..t.server.len().saturating_sub(k) {
+            let walking = t.server[f - k] != t.server[f] && t.server[f] != t.server[f + k];
+            let step = dist(t.drawn[f], t.drawn[f - 1]);
+            if !walking || step > 100.0 {
+                continue;
+            }
+            n += 1;
+            moved += usize::from(step > 1e-3);
+            largest = largest.max(step);
+            lag += dist(t.drawn[f], t.server[f]);
+            moves.push(step);
+        }
+    }
+    let mean = moves.iter().sum::<f64>() / moves.len().max(1) as f64;
+    let var = moves.iter().map(|m| (m - mean) * (m - mean)).sum::<f64>() / moves.len().max(1) as f64;
+    let n = n.max(1) as f64;
+    Motion { moving: 100.0 * moved as f64 / n, spread: var.sqrt() / mean.max(1e-9), largest, lag: lag / n }
+}
+
+/// e1m1's patrolling grunt (on `t16`/`t17`), or its first-room grunt woken
+/// and charging the player: `secs` of the live game at `rate` drawn with
+/// `lerpmove`, each frame's server origin and drawn origin of every step
+/// mover drawn (with the extra off, the two are the same). `each` sees
+/// every frame's image (the strip).
+fn live_steps(pak: &Pak, rate: Rate, workload: &str, secs: f64, vid: Vid, lerpmove: LerpMove, mut each: impl FnMut(&render::Image)) -> Vec<StepTrack> {
+    let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
+    let mut s = Sim::new(pak, "e1m1", rate, stepping);
+    s.w.lerpmove = lerpmove;
+    if workload == "knock" {
+        // The first-room grunt, asleep, thrown up and sideways as a rocket
+        // would: SV_Physics_Step moves it every frame until it lands.
+        let g = s
+            .find("monster_army")
+            .into_iter()
+            .find(|&g| s.w.server.vm.ent_get_vector(g, "origin")[..2] == [0.0, 576.0])
+            .expect("e1m1's first-room grunt");
+        let go = s.vm().ent_get_vector(g, "origin");
+        s.place([go[0] + 192.0, go[1], go[2]], 180.0);
+        let vm = s.vm();
+        vm.ent_set_vector(g, "velocity", [0.0, -150.0, 300.0]);
+        let flags = vm.ent_get_float(g, "flags") as i32 & !FL_ONGROUND;
+        vm.ent_set_float(g, "flags", flags as f32);
+    } else if workload == "charge" {
+        let g = s
+            .find("monster_army")
+            .into_iter()
+            .find(|&g| s.w.server.vm.ent_get_vector(g, "origin")[..2] == [0.0, 576.0])
+            .expect("e1m1's first-room grunt");
+        let go = s.vm().ent_get_vector(g, "origin");
+        // Off its axis, so it runs across the view (SV_NewChaseDir goes
+        // diagonally first).
+        s.place([go[0] + 224.0, go[1] + 40.0, go[2]], 190.0);
+        let p = s.player();
+        let vm = s.vm();
+        vm.ent_set_int(g, "enemy", p);
+        call_qc_with(vm, "FoundTarget", g, 0, p);
+    } else {
+        // Watch the patrol (along y = 2048, x 1232 to 880) from the north.
+        s.place([1164.0, 2236.0, -210.0], 270.0);
+    }
+    let mut tracks: std::collections::BTreeMap<i32, StepTrack> = std::collections::BTreeMap::new();
+    let end = s.t + secs;
+    let mut frames = 0usize;
+    while s.t < end - 1e-9 {
+        let dt = s.clock.next();
+        let frame = cl_main::walk_frame(&mut s.w, dt, false, &vid);
+        s.t += dt;
+        each(&frame.image);
+        render::recycle_image(frame.image);
+        let vm = &s.w.server.vm;
+        for e in 0..vm.num_edicts() as i32 {
+            if vm.is_free_edict(e) || vm.ent_get_float(e, "movetype") != MOVETYPE_STEP {
+                continue;
+            }
+            let origin = vm.ent_get_vector(e, "origin");
+            let drawn = match lerpmove {
+                LerpMove::Smooth => match s.w.glides.drawn(e) {
+                    Some(p) => p.origin,
+                    None => continue, // not drawn this frame
+                },
+                LerpMove::Classic => origin,
+            };
+            let t = tracks.entry(e).or_default();
+            // A track is one unbroken run of frames.
+            if t.server.len() + 1 < frames {
+                *t = StepTrack::default();
+            }
+            t.server.resize(frames, origin);
+            t.drawn.resize(frames, drawn);
+            t.server.push(origin);
+            t.drawn.push(drawn);
+        }
+        frames += 1;
+    }
+    tracks.into_values().filter(|t| t.server.len() == frames).collect()
+}
+
+/// demo1's first `secs` at `rate`, drawn with `lerpmove`: each frame's newest
+/// message position and drawn origin of every recorded step mover.
+fn demo_steps(pak: &Pak, rate: Rate, lerpmove: LerpMove, secs: f64) -> Vec<StepTrack> {
+    let mut d: DemoPlay = cl_demo::build_demo_n(pak.clone(), 0, &mut Vec::new()).expect("demo1");
+    d.lerpmove = lerpmove;
+    let mut clock = FrameClock::new(rate, Stepping::Uncapped);
+    let mut tracks: std::collections::BTreeMap<i32, StepTrack> = std::collections::BTreeMap::new();
+    let (mut t, mut frames) = (0.0, 0usize);
+    while t < secs {
+        let dt = clock.next();
+        t += dt;
+        render::recycle_image(cl_demo::demo_frame(&mut d, dt as f32, false, &VID).image);
+        let msg = &d.demo.frames[d.idx];
+        for e in d.view.entities.iter().filter(|e| e.step && e.num >= 0) {
+            let Some(m) = msg.entities.iter().find(|m| m.num == e.num) else { continue };
+            let tr = tracks.entry(e.num).or_default();
+            if tr.server.len() + 1 < frames {
+                *tr = StepTrack::default();
+            }
+            tr.server.resize(frames, m.origin);
+            tr.drawn.resize(frames, e.origin);
+            tr.server.push(m.origin);
+            tr.drawn.push(e.origin);
+        }
+        frames += 1;
+    }
+    tracks.into_values().filter(|t| t.server.len() >= frames / 4).collect()
+}
+
+/// `--lerpmove`: per workload and rate, how the monsters' steps are drawn —
+/// Classic (where the server or the newest message has them; in a demo,
+/// id's relink with its `U_NOLERP` jump) → with `r_lerpmove`; `--strip DIR`
+/// also writes frames ([`write_strip`]).
+fn lerpmove_report(pak: &Pak, rates: &[Rate], strip: Option<&str>) -> Result<String, String> {
+    let mut o = String::new();
+    let hz = |r: Rate| match r {
+        Rate::Hz(h) => f64::from(h),
+        Rate::Jitter => 144.0,
+    };
+    let workloads = ["patrol", "charge", "knock", "demo1"];
+    for w in workloads {
+        let what = match w {
+            "patrol" => "e1m1's patrolling grunt walking its path (6 s)",
+            "charge" => "e1m1's first-room grunt woken 228 units away: runs, fights (6 s)",
+            "knock" => "the same grunt asleep, thrown up and sideways: moved every frame in the air (1.5 s)",
+            _ => "demo1's first 20 s: every recorded monster (U_NOLERP)",
+        };
+        let _ = writeln!(o, "{w} — {what}");
+        let _ = write!(o, "  {:<44}", "quantity (Classic → r_lerpmove)");
+        for &r in rates {
+            let _ = write!(o, " {:>17}", r.label());
+        }
+        let _ = writeln!(o);
+        let cells: Vec<(Motion, Motion)> = rates
+            .iter()
+            .map(|&r| {
+                if w == "demo1" {
+                    (motion(&demo_steps(pak, r, LerpMove::Classic, 20.0), hz(r)), motion(&demo_steps(pak, r, LerpMove::Smooth, 20.0), hz(r)))
+                } else {
+                    let secs = if w == "knock" { 1.5 } else { 6.0 };
+                    let tracks = live_steps(pak, r, w, secs, VID, LerpMove::Smooth, |_| {});
+                    let classic: Vec<StepTrack> =
+                        tracks.iter().map(|t| StepTrack { server: t.server.clone(), drawn: t.server.clone() }).collect();
+                    (motion(&classic, hz(r)), motion(&tracks, hz(r)))
+                }
+            })
+            .collect();
+        let rows: [MotionRow; 4] = [
+            ("frames it is drawn moving, walking (%)", |m| m.moving),
+            ("spread of the per-frame move (sd/mean)", |m| m.spread),
+            ("largest move in one frame (u)", |m| m.largest),
+            ("drawn behind the server, mean (u)", |m| m.lag),
+        ];
+        for (name, get) in rows {
+            let _ = write!(o, "  {name:<44}");
+            for (c, sm) in &cells {
+                let _ = write!(o, " {:>17}", format!("{} → {}", fmt(get(c)), fmt(get(sm))));
+            }
+            let _ = writeln!(o);
+        }
+        let _ = writeln!(o);
+    }
+    if let Some(dir) = strip {
+        write_strip(pak, dir)?;
+        let _ = writeln!(o, "wrote {dir}/charge-{{classic,lerpmove}}-00..23.ppm");
+    }
+    Ok(o)
+}
+
+/// `--strip DIR`: one step's worth of frames at 240 Hz — 24, 0.1 s — of the
+/// charging grunt crossing the doorway, 0.4 s after it wakes, drawn Classic
+/// and with `r_lerpmove`, as 640x400 PPMs `DIR/charge-<classic|lerpmove>-NN.ppm`.
+fn write_strip(pak: &Pak, dir: &str) -> Result<(), String> {
+    const FRAMES: usize = 24;
+    let vid = Vid { width: 640, height: 400, ..VID };
+    let palette = pak
+        .read_file("gfx/palette.lmp")
+        .ok()
+        .flatten()
+        .and_then(|b| render::parse_palette(&b))
+        .ok_or("gfx/palette.lmp is missing or short")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    for (workload, from) in [("charge", 0.4)] {
+        let first = (from * 240.0) as usize;
+        for (mode, lerpmove) in [("classic", LerpMove::Classic), ("lerpmove", LerpMove::Smooth)] {
+            let (mut n, mut written) = (0usize, Ok(()));
+            live_steps(pak, Rate::Hz(240), workload, from + 0.11, vid, lerpmove, |img| {
+                if (first..first + FRAMES).contains(&n) && written.is_ok() {
+                    written = img.to_rgb(&palette).write_ppm(&format!("{dir}/{workload}-{mode}-{:02}.ppm", n - first));
+                }
+                n += 1;
+            });
+            written.map_err(|e| format!("cannot write the strip: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,6 +1470,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let mut rates = vec![Rate::Hz(60), Rate::Hz(144), Rate::Hz(240), Rate::Hz(480), Rate::Jitter];
     let (mut only, mut markdown, mut check) = (None::<Vec<String>>, false, false);
     let (mut budget, mut res) = (false, "1280x800,1280x1024".to_string());
+    let (mut lerpmove, mut strip) = (false, None::<String>);
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -1230,6 +1487,11 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             "--markdown" => markdown = true,
             "--check" => check = true,
             "--budget" => budget = true,
+            "--lerpmove" => lerpmove = true,
+            "--strip" => {
+                strip = Some(rest.get(i + 1).ok_or("--strip needs a directory")?.clone());
+                i += 1;
+            }
             "--res" => {
                 res = rest.get(i + 1).ok_or("--res needs WxH[,WxH...]")?.clone();
                 i += 1;
@@ -1243,6 +1505,11 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     if budget {
         let sizes = res.split(',').map(|r| super::parse_res(r, render::VideoCvars::CLASSIC)).collect::<Result<Vec<_>, _>>()?;
         return Ok(frame_budget(&pak, &sizes));
+    }
+    if lerpmove {
+        rates.retain(|r| matches!(r, Rate::Hz(_)));
+        rates.insert(0, Rate::Hz(72));
+        return lerpmove_report(&pak, &rates, strip.as_deref());
     }
 
     let mut o = String::new();

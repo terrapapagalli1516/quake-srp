@@ -44,8 +44,10 @@ Threads: a `wasm32-wasip1-threads` build draws its 3-D view on the host's
 thread workers (`r_threads`, 0 = as many as the host offers: PLATFORM.md,
 "Threads"). `--threads 1,2,4,8` runs every workload and size at each count
 (the program's `r_threads`), and `--build --threads-build` builds the bench
-program for that target. `--video modern` sets the Hor+ and hires video
-cvars first (`set_video`), which sizes past 1280x800 need. The frames are the
+program for that target. The page runs the Classic profile (`?classic`: id's
+game, the frames `quaketool play` hashes); `--video modern` switches to the
+2026 profile's native picture first (`set_video`: square pixels, Hor+, sizes
+past 1280x800), each --res then the size of the window it fills. The frames are the
 same at every count, but the runs of one page share the game's random stream
 (QuakeC's `random()`), so to compare hashes across counts run each count in
 a page of its own (one invocation per `--threads` value, the same workloads).
@@ -117,8 +119,7 @@ if args.build:
                    cwd=wasm_crate, check=True)
     WEB = os.path.join(wasm_crate, "target", "bench-web")
     os.makedirs(os.path.join(WEB, "id1"), exist_ok=True)
-    for f in ("index.html", "wasi.js"):
-        shutil.copy(os.path.join(HERE, f), WEB)
+    isolated.copy_page(WEB)
     shutil.copy(os.path.join(wasm_crate, f"target/bench/{target}/release/quake.wasm"), WEB)
     pak = os.path.join(WEB, "id1", "pak0.pak")
     if not os.path.exists(pak):
@@ -172,12 +173,18 @@ BENCH_JS = r"""
   window.__benchRun = async (cfg) => {
     quake.pause();
     await new Promise(r => setTimeout(r, 100));   // let the page's in-flight frame drain
-    // The video cvars (they bound set_resolution) and the renderer's threads.
+    // The picture (set_video: `modern` is the 2026 profile's native picture,
+    // sized as a window of cfg.w x cfg.h device pixels at one pixel a pixel;
+    // else a video mode) and the renderer's threads.
     if (cfg.video) await quake.call('set_video', cfg.video);
     if (cfg.threads !== null) await quake.call('exec', 'r_threads ' + cfg.threads);
+    const setSize = async () => {
+      if (cfg.video === 'modern') { await quake.call('set_window', cfg.w, cfg.h); await quake.call('step', 0); }
+      else await quake.call('set_resolution', cfg.w, cfg.h);
+    };
     // One frozen frame at the run's size first: the worker's frame slots
     // grow to fit it now, not on the run's first (hashed) frame.
-    await quake.call('set_resolution', cfg.w, cfg.h);
+    await setSize();
     quake.tick(0);
     await new Promise(r => setTimeout(r, 100));
     const names = (await quake.text('bench_names')).split(',').filter(Boolean);
@@ -190,7 +197,7 @@ BENCH_JS = r"""
     const ok = bench ? await quake.call('bench_start', cfg.workload) === 1 : await startWorkload(cfg.workload);
     if (!ok) return { error: 'workload failed to boot: ' + cfg.workload };
     hideOverlayForever();   // the click-to-play scrim
-    await quake.call('set_resolution', cfg.w, cfg.h);
+    await setSize();
     const [W, H] = [await quake.call('width'), await quake.call('height')];
     const cols = { raf: [], wait: [], copy: [], put: [], js: [], step: [] };
     for (const n of names) cols[n] = [];
@@ -291,7 +298,11 @@ with sync_playwright() as p:
         errs = []
         pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-        pg.goto(f"http://127.0.0.1:{args.port}/index.html{args.query}", wait_until="load")
+        # The Classic profile: id's game, whose frames `quaketool play`
+        # hashes natively (`--video modern` then switches the picture);
+        # --query adds to it.
+        query = "?classic" + args.query.replace("?", "&", 1)
+        pg.goto(f"http://127.0.0.1:{args.port}/index.html{query}", wait_until="load")
         pg.wait_for_function("window.quake && quake.ready", timeout=120000)
         pg.wait_for_function("quake.firstFrameAt > 0", timeout=60000)
         pg.add_script_tag(content=BENCH_JS)

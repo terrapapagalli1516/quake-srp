@@ -10,7 +10,7 @@ mod tests {
 
     use crate::app::{build_walk_map, Walk};
     use crate::cl_walk::step_walk;
-    use crate::snd_dma::{set_audio_ready, SND_QUEUE};
+    use crate::snd_dma::{clear_pending, pending_starts};
 
     /// `FL_GODMODE` (server.h), what `Host_God_f` toggles.
     const FL_GODMODE: i32 = 64;
@@ -52,7 +52,7 @@ mod tests {
     }
 
     fn frame(w: &mut Walk) {
-        let _ = step_walk(w, 0.1, false, 320, 200);
+        let _ = step_walk(w, 0.1, false, &crate::vid::mode_vid(320, 200));
     }
 
     fn state(w: &Walk, e: i32) -> f32 {
@@ -108,13 +108,11 @@ mod tests {
         // electricity"). Three shocks kill him (skill 1: boss_awake gives him
         // 3 health), and the exit leads to the episode finale.
         let mut w = build_walk_map("maps/e1m7.bsp").expect("e1m7 boots from the embedded pak");
-        set_audio_ready(1);
         let start = w.server.vm.ent_get_vector(w.player, "origin");
         let boss = find_all(&w, "classname", "monster_boss")[0];
         let event = find_all(&w, "classname", "event_lightning")[0];
         let electrodes = find_all(&w, "target", "lightning");
         assert_eq!(electrodes.len(), 2, "two electrode doors target \"lightning\"");
-        let power_wav = w.pak.read_file("sound/misc/power.wav").ok().flatten().expect("power.wav");
         // Host_God_f: Chthon's lava balls must not end the run.
         let flags = w.server.vm.ent_get_float(w.player, "flags") as i32 | FL_GODMODE;
         w.server.vm.ent_set_float(w.player, "flags", flags as f32);
@@ -163,7 +161,7 @@ mod tests {
             let span = length(sub(p2, p1));
 
             // The lightning button (t14 -> event_lightning -> lightning_use).
-            SND_QUEUE.with(|q| q.borrow_mut().clear());
+            clear_pending();
             let health_before = w.server.vm.ent_get_float(boss, "health");
             let b14 = button(&w, "t14");
             step_on_button(&mut w, b14);
@@ -202,10 +200,10 @@ mod tests {
                     w.pitch = (-to[2]).atan2(to[0].hypot(to[1])).to_degrees();
                     pin(&mut w, [eye[0], eye[1], eye[2] - 22.0]); // view_ofs '0 0 22'
                     let (rng, beams) = (w.prng, w.beams.clone());
-                    let (with_bolt, _) = step_walk(&mut w, 0.0, false, 640, 400);
+                    let (with_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(640, 400));
                     w.prng = rng;
                     w.beams.clear();
-                    let (without_bolt, _) = step_walk(&mut w, 0.0, false, 640, 400);
+                    let (without_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(640, 400));
                     w.beams = beams;
                     let diff = with_bolt.pixels.iter().zip(&without_bolt.pixels).filter(|(a, b)| a != b).count();
                     assert!(diff > 2000, "the bolt across the pit changes {diff} pixels");
@@ -224,8 +222,7 @@ mod tests {
                 matches!(w.model_cache.get("progs/bolt3.mdl"), Some(Some(_))),
                 "TE_LIGHTNING3 loaded progs/bolt3.mdl"
             );
-            let powered = SND_QUEUE
-                .with(|q| q.borrow().iter().any(|(bytes, p)| *bytes == power_wav && p.entity() == event));
+            let powered = pending_starts().iter().any(|(e, _)| e.sample == "misc/power.wav" && e.entity == event);
             assert!(powered, "shock {shock}: misc/power.wav played from event_lightning");
             assert_eq!(
                 w.server.vm.ent_get_float(boss, "health"),

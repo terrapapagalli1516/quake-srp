@@ -23,11 +23,11 @@ use crate::input::{
 };
 use crate::menu::{
     extras, menu_backspace, menu_bind_grabbing, menu_bind_key, menu_cancel, menu_down, menu_left,
-    menu_quit_no, menu_quit_yes, menu_right, menu_screen_id, menu_select, menu_up, menu_visible,
-    set_extras,
+    menu_point, menu_quit_no, menu_quit_yes, menu_right, menu_screen_id, menu_select, menu_tap, menu_up,
+    menu_visible, set_extras,
 };
 use crate::snd_dma::{listener, sound_generation, volume};
-use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, viewsize, width};
+use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, set_window, viewsize, width};
 
 /// An answer: a number, and text for the calls that read some.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,7 +64,7 @@ fn done(f: impl FnOnce()) -> Answer {
 /// resolved against what the host offers).
 fn render_threads() -> i32 {
     let mut n = 1;
-    crate::app::ensure_app(|a| n = a.render_threads.resolve(a.hw_threads));
+    crate::app::ensure_app(|a| n = a.settings.cvars.threads.resolve(a.hw_threads));
     n as i32
 }
 
@@ -86,6 +86,12 @@ pub(crate) fn call(line: &str) -> Answer {
         "boot_attract" => boot_attract().into(),
         "in_walk_mode" => in_walk_mode().into(),
         "timedemo_running" => timedemo_running().into(),
+        // The game's files: registered (1) or shareware (0), and the search
+        // path (`path`'s lines).
+        "content" => Answer {
+            value: f64::from(u8::from(crate::common::registered())),
+            text: crate::common::path_lines().join("\n"),
+        },
         // One host frame outside the page's refresh (automation: `dt` 0 is
         // the frozen frame); its picture is not sent.
         "step" => step(real(0)).into(),
@@ -93,6 +99,8 @@ pub(crate) fn call(line: &str) -> Answer {
         "width" => width().into(),
         "height" => height().into(),
         "set_resolution" => done(|| set_resolution(int(0), int(1))),
+        // The page's box in device pixels (what its `Window` record says).
+        "set_window" => done(|| set_window(f(0) as u32, f(1) as u32)),
         "set_video" => crate::vid::set_video(rest).into(),
         "render_threads" => render_threads().into(),
         "viewsize" => viewsize().into(),
@@ -109,6 +117,7 @@ pub(crate) fn call(line: &str) -> Answer {
         "pointer_unlocked" => done(pointer_unlocked),
         "look" => done(|| look(real(0), real(1))),
         "player_pitch" => player_pitch().into(),
+        "player_field" => player_field(rest.trim()).into(),
         "mouse_sensitivity" => mouse_sensitivity().into(),
         "set_move" => done(|| set_move(real(0), real(1))),
         "set_attack" => done(|| set_attack(int(0))),
@@ -128,6 +137,10 @@ pub(crate) fn call(line: &str) -> Answer {
         "menu_bind_grabbing" => menu_bind_grabbing().into(),
         "menu_bind_key" => done(|| menu_bind_key(int(0))),
         "menu_screen_id" => menu_screen_id().into(),
+        // A finger on the menu (the touch controls): the frame pixel it
+        // lifted from, or the one it is on.
+        "menu_tap" => menu_tap(real(0), real(1)).into(),
+        "menu_point" => menu_point(real(0), real(1)).into(),
         "menu_visible" => menu_visible().into(),
         // (Checks.) Forget a Load/Save slot's listing, as if M_ScanSaves
         // had found no file: opening Load or Save must list it again.
@@ -141,6 +154,13 @@ pub(crate) fn call(line: &str) -> Answer {
         "console_backspace" => done(console_backspace),
         "console_enter" => done(console_enter),
         "console_text" => Answer { value: 0.0, text: console_text() },
+        // The settings: a cvar's value (its number, and its text), the
+        // profile, and config.cfg's text for them now.
+        "cvar" => cvar_value(rest.trim()),
+        "profile" => text_answer(|a| a.settings.profile.name().to_string()),
+        // The live game's map (`maps/e1m1.bsp`; empty with none).
+        "map_name" => text_answer(|a| a.walk.as_ref().filter(|_| a.mode == 0).map(|w| w.map_name.clone()).unwrap_or_default()),
+        "config_text" => text_answer(|a| a.settings.config_text()),
         // A console line, as if typed and entered (`Cmd_ExecuteString`).
         "exec" => done(|| execute_console_command(rest)),
         // Sound.
@@ -194,6 +214,30 @@ fn setpos(origin: [f32; 3]) -> i32 {
         }
     });
     moved
+}
+
+/// An answer read off the App: `f`'s text (empty before the App exists).
+fn text_answer(f: impl FnOnce(&crate::app::App) -> String) -> Answer {
+    let text = APP.with(|c| c.borrow().as_ref().map(f)).unwrap_or_default();
+    Answer { value: 0.0, text }
+}
+
+/// A float field of the player's edict in the live game, by name (`health`,
+/// `ammo_shells`, `weapon`; 0 with no game): what the checks read the
+/// game's state back through.
+fn player_field(name: &str) -> f32 {
+    APP.with(|c| {
+        let b = c.borrow();
+        let w = b.as_ref().and_then(|a| a.walk.as_ref());
+        w.map_or(0.0, |w| w.server.vm.ent_get_float(w.player, name))
+    })
+}
+
+/// Cvar `name`'s value: its text, and its number (`NaN` for no such cvar).
+fn cvar_value(name: &str) -> Answer {
+    let Some(var) = quake_rs::cvar::find(name) else { return f64::NAN.into() };
+    let text = APP.with(|c| c.borrow().as_ref().map(|a| var.get(&a.settings.cvars))).unwrap_or_default();
+    Answer { value: text.parse().unwrap_or(f64::NAN), text }
 }
 
 /// Blank slot `slot`'s listing in the Load/Save menus.
@@ -254,7 +298,13 @@ mod tests {
         assert_eq!(call("viewsize").value, 70.0);
         call("exec echo hello there");
         assert!(call("console_text").text.contains("hello there\n"));
+        call("exec vid_pixelsize 3");
+        assert_eq!((call("cvar vid_pixelsize").value, call("cvar vid_pixelsize").text.as_str()), (3.0, "3"));
+        assert!(call("cvar nosuch").value.is_nan());
+        assert_eq!(call("profile").text, "classic", "the tests start in Classic");
+        assert!(call("config_text").text.contains("vid_pixelsize \"3\"\n"));
         assert!(call("no_such_call").value.is_nan());
+        assert_eq!(call("player_field health").value, 100.0, "the booted walk's player");
         assert!(call("").value.is_nan());
     }
 

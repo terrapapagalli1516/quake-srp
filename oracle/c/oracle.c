@@ -48,6 +48,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      per-pixel perspective (an attribution experiment, not id)
 //   oracle_bench n                     (a cvar) render each shot n more times first and report
 //                                      the warm ms/frame (renderer only)
+//   oracle_trace path [frames]         write one record per rendered frame to path: the client
+//                                      clocks, the view angles, the view entity's origin,
+//                                      cl.velocity and every relinked entity (demo_lerp.py
+//                                      compares demo playback); quit after `frames` records
 //
 // The 2-D layer (oracle/screen2d.py drives these; see oracle/README.md):
 //   oracle_blank idx                   (a cvar, default -1 = off) fill the 3-D view rectangle
@@ -400,8 +404,32 @@ static void Oracle_Key_f (void)
 	Key_Event (k, false);
 }
 
+// oracle_trace path [frames] -- one record per rendered frame, written as
+// R_RenderView starts (after CL_RelinkEntities and V_CalcRefdef): an "F" line
+// with the clocks (cl.time, cl.oldtime, and cl.mtime[0..1] as CL_LerpPoint
+// left them), cl.viewangles, the view entity's relinked origin and
+// cl.velocity, then an "E" line per entity on cl_visedicts (its number, -1
+// for a temp entity; model; origin; angles; frame).
+static FILE	*trace_file;
+static int	trace_left = -1;
+static int	trace_count;
+
+static void Oracle_Trace_f (void)
+{
+	if (Cmd_Argc () < 2)
+	{
+		Con_Printf ("oracle_trace path [frames]\n");
+		return;
+	}
+	trace_file = fopen (Cmd_Argv (1), "w");
+	if (!trace_file)
+		Sys_Error ("oracle_trace: cannot write %s", Cmd_Argv (1));
+	trace_left = Cmd_Argc () > 2 ? Q_atoi (Cmd_Argv (2)) : -1;
+}
+
 void Oracle_Init (void)
 {
+	Cmd_AddCommand ("oracle_trace", Oracle_Trace_f);
 	Cmd_AddCommand ("oracle_field", Oracle_Field_f);
 	Cmd_AddCommand ("oracle_global", Oracle_Global_f);
 	Cmd_AddCommand ("oracle_centerprint", Oracle_CenterPrint_f);
@@ -621,10 +649,42 @@ static void Oracle_Blank (void)
 		memset (vid.buffer + y*vid.rowbytes + scr_vrect.x, (int)oracle_blank.value & 255, scr_vrect.width);
 }
 
+static void Oracle_TraceFrame (void)
+{
+	int			i, num;
+	entity_t	*e, *view;
+
+	if (!trace_file)
+		return;
+	view = &cl_entities[cl.viewentity];
+	fprintf (trace_file, "F %d t=%.17g old=%.17g m0=%.17g m1=%.17g ang=%.9g %.9g %.9g"
+		" vorg=%.9g %.9g %.9g vel=%.9g %.9g %.9g\n",
+		trace_count, cl.time, cl.oldtime, cl.mtime[0], cl.mtime[1],
+		cl.viewangles[0], cl.viewangles[1], cl.viewangles[2],
+		view->origin[0], view->origin[1], view->origin[2],
+		cl.velocity[0], cl.velocity[1], cl.velocity[2]);
+	for (i=0 ; i<cl_numvisedicts ; i++)
+	{
+		e = cl_visedicts[i];
+		num = (e >= cl_entities && e < cl_entities + MAX_EDICTS) ? (int)(e - cl_entities) : -1;
+		fprintf (trace_file, "E %d %s %.9g %.9g %.9g %.9g %.9g %.9g %d\n", num, Oracle_ModelName (e),
+			e->origin[0], e->origin[1], e->origin[2], e->angles[0], e->angles[1], e->angles[2],
+			e->frame);
+	}
+	trace_count++;
+	if (trace_left > 0 && trace_count >= trace_left)
+	{
+		fclose (trace_file);
+		trace_file = NULL;
+		Sys_Quit ();
+	}
+}
+
 void __wrap_R_RenderView (void)
 {
 	vec3_t	gunofs;
 
+	Oracle_TraceFrame ();
 	active = NULL;
 	natural_time = cl.time;
 	VectorCopy (r_refdef.vieworg, natural_org);

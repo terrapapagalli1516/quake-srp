@@ -308,14 +308,16 @@ impl<'a> NetReader<'a> {
 // Public data types consumed by the renderer
 // ---------------------------------------------------------------------------
 
-/// A renderable snapshot of one entity at one demo frame.
+/// One entity as a message leaves it (`entity_t` after `CL_ParseUpdate`).
 ///
-/// `origin`/`angles` are the *interpolated* render values (`ent->origin` /
-/// `ent->angles` after `CL_RelinkEntities`), already lerped between the two most
-/// recent server snapshots by the message-time fraction. `effects` is the
-/// entity-effects byte (`ent->effects`, the `U_EFFECTS` field) so a front-end
-/// can drive dynamic lights / brightfield particles exactly like the live walk.
-#[derive(Clone, Copy)]
+/// `origin`/`angles` are where this message put it (`msg_origins[0]`,
+/// `msg_angles[0]`) and `prev_origin`/`prev_angles` where the message before
+/// did (`[1]`): the client's `CL_RelinkEntities` draws it between the two
+/// (`client::cl_demo`), and a relinked copy carries the drawn origin and
+/// angles in `origin`/`angles`. `effects` is the entity-effects byte
+/// (`ent->effects`, the `U_EFFECTS` field) so a front-end can drive dynamic
+/// lights / brightfield particles exactly like the live walk.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct EntSnapshot {
     /// The entity number (`cl_entities[num]`), or -1 for a static entity
     /// (`cl_static_entities`, never relinked — no trails). A front-end keys
@@ -332,16 +334,28 @@ pub struct EntSnapshot {
     pub angles: [f32; 3],
     /// `ent->effects` (the `U_EFFECTS` byte). 0 when the update omitted it.
     pub effects: i32,
+    /// `msg_origins[1]` / `msg_angles[1]`: where the previous message had it
+    /// (the same as `origin`/`angles` for a first sighting or a static).
+    pub prev_origin: [f32; 3],
+    pub prev_angles: [f32; 3],
+    /// This message's update set `ent->forcelink` (a first sighting, a null
+    /// model, or `U_NOLERP`): the first relink after it draws the entity at
+    /// `origin` instead of lerping.
+    pub forcelink: bool,
+    /// The update carried `U_NOLERP`: the server moves the entity in steps
+    /// (`MOVETYPE_STEP` — the monsters).
+    pub step: bool,
 }
 
-/// One playback frame: the camera, every visible entity, and the one-shot
-/// effect events the server multiplexed into this block.
+/// One recorded message (a demo block) as it leaves the client: the camera,
+/// every visible entity, and the one-shot effect events the server
+/// multiplexed into the block.
 ///
 /// `particles` are the `svc_particle` ([`SVC_PARTICLE`]) bursts decoded from
 /// `R_ParseParticleEffect` (one per message); `temp_entities` are the
 /// `svc_temp_entity` ([`SVC_TEMP_ENTITY`]) effects (gunshot/explosion/spike
-/// impacts) decoded from `CL_ParseTEnt`. A front-end replays each ONCE, on the
-/// step that advances playback onto this frame, through the same
+/// impacts) decoded from `CL_ParseTEnt`. A front-end replays each ONCE, in
+/// the frame that reads the message (`CL_GetMessage`), through the same
 /// [`crate::particles::ParticleSystem`] the live walk uses — so the recorded
 /// demo shows blood, gunshot puffs and explosions exactly like live play.
 ///
@@ -350,16 +364,39 @@ pub struct EntSnapshot {
 /// them into a [`crate::tent::Beams`] store (the `CL_ParseBeam` slot list) and
 /// expands the live beams into bolt-model instances each frame
 /// (`CL_UpdateTEnts`).
+///
+/// The camera, the player's velocity and every entity are recorded as the
+/// message leaves them, with what the message before left (the `prev_*`
+/// fields, [`EntSnapshot::prev_origin`]): `CL_RelinkEntities` draws the
+/// client between the two (`client::cl_demo`).
 #[derive(Default)]
 pub struct DemoFrame {
+    /// `cl.mtime[0]`: the server time of this message (`svc_time`).
     pub time: f32,
+    /// `cl.mtime[1]`: the server time of the message before (0 until two
+    /// have arrived).
+    pub prev_time: f32,
+    /// The message's own eye: `view_entity_origin` raised by `viewheight`.
     pub view_origin: [f32; 3],
+    /// `cl.mviewangles[0]`: the camera angles recorded with this message.
     pub view_angles: [f32; 3],
-    /// The view entity's raw origin (`cl_entities[cl.viewentity].origin` — the
-    /// pre-`viewheight` base of `view_origin`). `CL_UpdateTEnts` re-anchors a
-    /// beam owned by the view entity to THIS each frame, so the recorded
-    /// player's thunderbolt tracks them between beam refreshes.
+    /// `cl.mviewangles[1]`: the angles recorded with the message before.
+    pub prev_view_angles: [f32; 3],
+    /// The view entity's origin this message (`msg_origins[0]` of
+    /// `cl_entities[cl.viewentity]`, the pre-`viewheight` base of the eye).
+    /// Relinked, it is what `CL_UpdateTEnts` re-anchors a beam owned by the
+    /// view entity to each frame, so the recorded player's thunderbolt tracks
+    /// them between beam refreshes.
     pub view_entity_origin: [f32; 3],
+    /// The view entity's `msg_origins[1]`.
+    pub view_prev_origin: [f32; 3],
+    /// The view entity's update set `ent->forcelink` (see [`EntSnapshot::forcelink`]).
+    pub view_forcelink: bool,
+    /// `cl.viewheight` (`svc_clientdata`'s `SU_VIEWHEIGHT`).
+    pub viewheight: f32,
+    /// `cl.mvelocity[1]`: the player's velocity in the message before
+    /// ([`DemoClientData::velocity`] is this message's).
+    pub prev_velocity: [f32; 3],
     pub entities: Vec<EntSnapshot>,
     /// `svc_particle` bursts fired during this frame's message block.
     pub particles: Vec<ParticleBurst>,
@@ -418,6 +455,12 @@ pub struct DemoFrame {
     /// player paused) — `SCR_DrawPause` shows the plaque during playback.
     /// id's shipped demos carry none.
     pub paused: bool,
+    /// A recorded `svc_cdtrack` in this block (`cl.cdtrack`), after the
+    /// signon's ([`Demo::cdtrack`]); id's demos carry none.
+    pub cdtrack: Option<u8>,
+    /// The block ends with `svc_disconnect` (`Host_EndGame`): the demo is
+    /// over, and the frame that reads it leaves before `CL_RelinkEntities`.
+    pub disconnect: bool,
 }
 
 /// The `cl.stats[]` subset `Sbar_IntermissionOverlay` (and the solo scoreboard)
@@ -474,9 +517,9 @@ pub struct DemoClientData {
     /// `cl.punchangle` — the weapon-fire view kick, added to the view angles by
     /// V_CalcRefdef every frame (NOT interpolated between messages).
     pub punchangle: [f32; 3],
-    /// `cl.velocity` — the player velocity, interpolated between the two most
-    /// recent messages (`cl.mvelocity[1] -> [0]`) by the snapshot fraction
-    /// exactly like CL_RelinkEntities. Drives V_CalcBob + the strafe roll.
+    /// `cl.mvelocity[0]` — the player velocity this message. The client lerps
+    /// `cl.velocity` from [`DemoFrame::prev_velocity`] to it, as
+    /// CL_RelinkEntities does; it drives V_CalcBob + the strafe roll.
     pub velocity: [f32; 3],
     /// `cl.stats[STAT_HEALTH]` (always sent; a short).
     pub health: i32,
@@ -540,6 +583,13 @@ pub struct Demo {
     /// client did on connect. Volume/attenuation are decoded back to the
     /// QuakeC domain (`byte/255`, `byte/64`) like `S_StaticSound` does.
     pub static_sounds: Vec<StaticSound>,
+    /// `cls.forcetrack`: the header line's CD track (`CL_PlayDemo_f` reads
+    /// it; -1 none). While a demo plays, every `svc_cdtrack` plays this
+    /// track instead of the recorded one — id's demo1 forces track 2.
+    pub forcetrack: i32,
+    /// The signon's `svc_cdtrack` track (`cl.cdtrack`), which the client
+    /// asks the CD for as playback starts; `None` if the signon had none.
+    pub cdtrack: Option<u8>,
     pub frames: Vec<DemoFrame>,
 }
 
@@ -572,19 +622,22 @@ struct Entity {
     effects: i32,
     // Interpolation history (CL_ParseUpdate / CL_RelinkEntities):
     // `msg_origins[0]`/`msg_angles[0]` is the most recent server snapshot,
-    // `[1]` the one before it. The render `origin`/`angles` are lerped between
-    // them by the message-time fraction. We DON'T keep a separate `origin`
-    // field — the snapshot computes it via [`lerp_origin`]/[`lerp_angles`].
+    // `[1]` the one before it. Both go into the frame ([`EntSnapshot`]); the
+    // client draws the entity between them (`client::cl_demo`).
     msg_origins: [[f32; 3]; 2],
     msg_angles: [[f32; 3]; 2],
     /// `ent->msgtime` — the `cl.mtime[0]` at which this entity was last updated.
     /// An entity whose `msgtime` falls behind `mtime[0]` went silent and is
     /// culled (its model dropped), matching CL_RelinkEntities.
     msgtime: f32,
-    /// `ent->forcelink` — set when there was no previous frame to lerp from
-    /// (first sighting, null-model hack, or `U_NOLERP`). Forces the render
-    /// state straight to `msg_origins[0]` with no interpolation.
+    /// `ent->forcelink` as this block's update set it (false when the block
+    /// did not update the entity): no previous message to lerp from (first
+    /// sighting, the null-model hack), or `U_NOLERP`. The first relink after
+    /// the update draws the entity at `msg_origins[0]`.
     forcelink: bool,
+    /// The latest update carried `U_NOLERP`: id's server moves the entity in
+    /// steps (`MOVETYPE_STEP`, SV_WriteEntitiesToClient).
+    nolerp: bool,
     /// True once this slot has been spawned (baseline) or updated at least
     /// once. A grown-but-never-touched slot stays invisible.
     active: bool,
@@ -609,7 +662,6 @@ struct ClientState {
     /// demo blocks (`CL_GetMessage` shifts `[0]`→`[1]` and reads the new `[0]`
     /// from the block header). The render camera lerps between them.
     mviewangles: [[f32; 3]; 2],
-    time: f32,
     /// `cl.mtime[0]`/`[1]` — the server times of the two most recent
     /// `svc_time` messages. `svc_time` shifts `[0]`→`[1]` then reads the new
     /// `[0]`; the interpolation fraction is `(t - mtime[1])/(mtime[0]-mtime[1])`.
@@ -671,6 +723,10 @@ struct ClientState {
     finale_start: f32,
     /// `cl.paused` — `svc_setpause`'s byte.
     paused: bool,
+    /// `svc_cdtrack`'s track, read since the last snapshot.
+    pending_cdtrack: Option<u8>,
+    /// The last `svc_cdtrack` read before drawing began: the signon's.
+    signon_cdtrack: Option<u8>,
 }
 
 impl ClientState {
@@ -687,7 +743,6 @@ impl ClientState {
             viewheight: DEFAULT_VIEWHEIGHT,
             view_angles: [0.0; 3],
             mviewangles: [[0.0; 3]; 2],
-            time: 0.0,
             mtime: [0.0; 2],
             pending_particles: Vec::new(),
             pending_tents: Vec::new(),
@@ -712,6 +767,8 @@ impl ClientState {
             finale_text: String::new(),
             finale_start: 0.0,
             paused: false,
+            pending_cdtrack: None,
+            signon_cdtrack: None,
         }
     }
 
@@ -728,7 +785,6 @@ impl ClientState {
         self.mtime = [0.0; 2];
         self.mviewangles = [[0.0; 3]; 2];
         self.view_angles = [0.0; 3];
-        self.time = 0.0;
         // A fresh server clears any effects half-collected for the previous
         // level (CL_ClearState wipes the client-side effect pools too).
         self.pending_particles.clear();
@@ -790,16 +846,16 @@ enum ParseFlow {
 
 /// Parse a Quake `.dem` file from memory and replay it into [`Demo`].
 ///
-/// This is the *keyframe* stream: exactly one [`DemoFrame`] per server message
-/// block **once the signon completes** (the first entity fast-update; blocks
-/// before it are the signon — serverinfo/baselines/statics — during which the
-/// C never draws, so no frames are emitted and playback starts in-world rather
-/// than on a zeroed void camera). Each frame holds the authoritative
-/// post-message state (interpolation fraction `frac == 1`, i.e. every entity
-/// at its newest snapshot) with the stale-entity cull from `CL_RelinkEntities`
-/// applied — entities that went silent in the latest message stop rendering
-/// instead of lingering. For smooth (non-choppy) playback that lerps between
-/// snapshots, use [`parse_demo_interpolated`].
+/// One [`DemoFrame`] per server message block **once the signon completes**
+/// (the first entity fast-update; blocks before it are the signon —
+/// serverinfo/baselines/statics — during which the C never draws, so no
+/// frames are emitted and playback starts in-world rather than on a zeroed
+/// void camera). Each frame holds the client state the message leaves —
+/// every entity with its last two positions, the camera angles and the
+/// player's velocity with the previous message's — with the stale-entity
+/// cull from `CL_RelinkEntities` applied: entities that went silent in the
+/// message stop rendering instead of lingering. The client draws each frame
+/// of playback between two messages (`client::cl_demo`).
 ///
 /// Framing (`CL_PlayDemo_f` + `CL_GetMessage`): an ASCII CD-track integer
 /// followed by `'\n'`, then a sequence of blocks, each
@@ -809,117 +865,52 @@ enum ParseFlow {
 /// A malformed or truncated demo produces a short/empty frame list or an
 /// `Err`, never a panic.
 pub fn parse_demo(bytes: &[u8]) -> Result<Demo> {
-    // Keyframe emission: one frame per block at frac == 1 (cl.time == mtime[0]),
-    // with no model-flag knowledge (no EF_ROTATE spin in the raw keyframe).
-    parse_demo_with(bytes, |cl, _prev_mtime0, frames| {
-        cl.time = cl.mtime[0];
-        frames.push(snapshot(cl, 1.0, &|_| false));
-    })
-    .map(|(demo, _)| demo)
+    parse_demo_with(bytes).map(|(demo, _)| demo)
 }
 
-/// Parse a `.dem` file for `timedemo` (`CL_TimeDemo_f`): the keyframe stream
-/// of [`parse_demo`] — one [`DemoFrame`] per message once the signon
-/// completes, every entity at its newest snapshot and `cl.time` the
-/// message's time, as `CL_LerpPoint` gives while `cls.timedemo` is set — with
-/// the `EF_ROTATE` spin of [`parse_demo_interpolated`] (`rotating_models`).
-/// `CL_GetMessage` meters out one message per host frame in a timedemo, so a
-/// frame here is a host frame there. The message holding the demo's closing
-/// `svc_disconnect` ends playback (`Host_EndGame`) in the frame that reads
-/// it, which draws nothing: it has no frame here (a stream that simply runs
-/// out ends the same way, `CL_StopPlayback`, a frame after its last message).
-pub fn parse_demo_timedemo(bytes: &[u8], rotating_models: &[usize]) -> Result<Demo> {
-    let is_rotating = |m: usize| rotating_models.contains(&m);
-    let (mut demo, disconnected) = parse_demo_with(bytes, |cl, _prev_mtime0, frames| {
-        cl.time = cl.mtime[0];
-        frames.push(snapshot(cl, 1.0, &is_rotating));
-    })?;
+/// Parse a `.dem` file for `timedemo` (`CL_TimeDemo_f`): [`parse_demo`]'s
+/// frames, one per message. `CL_GetMessage` meters out one message per host
+/// frame in a timedemo, so a frame here is a host frame there. The message
+/// holding the demo's closing `svc_disconnect` ends playback (`Host_EndGame`)
+/// in the frame that reads it, which draws nothing: it has no frame here (a
+/// stream that simply runs out ends the same way, `CL_StopPlayback`, a frame
+/// after its last message).
+pub fn parse_demo_timedemo(bytes: &[u8]) -> Result<Demo> {
+    let (mut demo, disconnected) = parse_demo_with(bytes)?;
     if disconnected {
         demo.frames.pop(); // the closing svc_disconnect's block
     }
     Ok(demo)
 }
 
-/// Parse a `.dem` file into a *smooth* frame stream by interpolating between the
-/// recorded 10 Hz server snapshots, exactly like `CL_RelinkEntities` does every
-/// display frame: entity origins/angles and the demo camera are lerped between
-/// the two most recent snapshots by the message-time fraction
-/// (`CL_LerpPoint`), with teleport detection (>100 unit jumps snap) and
-/// shortest-arc angle wrap. Roughly `fps` frames are produced per real second
-/// of demo time (clamped to at least one per block), turning the choppy 10 Hz
-/// capture into fluid motion.
-///
-/// `rotating_models` is the set of `modelindex` values whose loaded MDL carries
-/// the `EF_ROTATE` header flag (bonus pickups). For each such entity the yaw is
-/// forced to `anglemod(100*time)` so it spins during playback. The demo parser
-/// cannot read MDL headers itself (it has no model loader), so the caller
-/// supplies this set after precaching the models; pass an empty slice to skip
-/// the spin.
-pub fn parse_demo_interpolated(
-    bytes: &[u8],
-    fps: f32,
-    rotating_models: &[usize],
-) -> Result<Demo> {
-    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 60.0 };
-    let is_rotating = |m: usize| rotating_models.contains(&m);
-
-    parse_demo_with(bytes, |cl, prev_mtime0, frames| {
-        let mtime = cl.mtime;
-        let interval = mtime[0] - prev_mtime0;
-        // A zero or negative interval (first frame, or no svc_time advance this
-        // block) yields a single snapshot at frac == 1.
-        if interval <= 0.0 {
-            cl.time = mtime[0];
-            frames.push(snapshot(cl, 1.0, &is_rotating));
-            return;
+/// `CL_PlayDemo_f`'s reading of the header line into `cls.forcetrack`: each
+/// byte a digit (`c - '0'`, whatever it is), a `-` anywhere negates.
+fn parse_forcetrack(line: &[u8]) -> i32 {
+    let mut neg = false;
+    let mut track = 0i32;
+    for &c in line {
+        if c == b'-' {
+            neg = true;
+        } else {
+            track = track.wrapping_mul(10).wrapping_add(i32::from(c) - i32::from(b'0'));
         }
-        // CL_LerpPoint clamps gaps > 0.1s (dropped packet / start of demo) to a
-        // 0.1s window, so the engine only ever interpolates over the last 0.1s
-        // before mtime[0]. We sweep cl.time across exactly that window
-        // [mtime[0]-window, mtime[0]] to avoid emitting a flood of degenerate
-        // frac==0 frames on a big gap, while still producing smooth motion.
-        let window = interval.min(0.1);
-        let steps = ((window * fps).round() as i32).max(1);
-        // The effect events (particles/tents) live on the FIRST sub-frame only
-        // (snapshot drains them), so later sub-frames of this block are empty —
-        // matching one effect-burst per server message.
-        for s in 1..=steps {
-            let t = mtime[0] - window + window * (s as f32 / steps as f32);
-            cl.time = t;
-            let frac = lerp_point(mtime, t);
-            frames.push(snapshot(cl, frac, &is_rotating));
-        }
-    })
-    .map(|(demo, _)| demo)
+    }
+    if neg { -track } else { track }
 }
 
-/// Shared demo replay core: parse the framing + every message block, calling
-/// `emit` once per block (after a world exists) to turn the current client
-/// state into zero or more [`DemoFrame`]s. `emit` receives the client state,
-/// the `mtime[0]` value from *before* this block (the start of the
-/// interpolation interval), and the output frame list. Also returns whether
-/// the stream ended on an `svc_disconnect` whose block went through `emit`
-/// (rather than running out, or disconnecting before the signon completed).
-fn parse_demo_with(
-    bytes: &[u8],
-    mut emit: impl FnMut(&mut ClientState, f32, &mut Vec<DemoFrame>),
-) -> Result<(Demo, bool)> {
+/// Shared demo replay core: parse the framing + every message block, taking a
+/// [`snapshot`] after each once drawing has begun. Also returns whether the
+/// stream ended on an `svc_disconnect` whose block has a frame (rather than
+/// running out, or disconnecting before the signon completed).
+fn parse_demo_with(bytes: &[u8]) -> Result<(Demo, bool)> {
     // --- Skip the CD-track header line: digits/'-' up to and including '\n'.
     // CL_PlayDemo_f reads bytes until '\n'. If there is no newline at all the
     // file is not a demo.
-    let mut pos = 0usize;
-    let mut found_newline = false;
-    while pos < bytes.len() {
-        let b = bytes[pos];
-        pos += 1;
-        if b == b'\n' {
-            found_newline = true;
-            break;
-        }
-    }
-    if !found_newline {
+    let Some(newline) = bytes.iter().position(|&b| b == b'\n') else {
         return Err(QError::invalid("demo: missing CD-track header newline"));
-    }
+    };
+    let forcetrack = parse_forcetrack(&bytes[..newline]);
+    let mut pos = newline + 1;
 
     let mut cl = ClientState::new();
     let mut frames: Vec<DemoFrame> = Vec::new();
@@ -976,10 +967,11 @@ fn parse_demo_with(
         // shift happens BEFORE parsing the message body, exactly as in C.)
         cl.mviewangles[1] = cl.mviewangles[0];
         cl.mviewangles[0] = block_angles;
-
-        // Remember the previous server time so the interpolation path can sweep
-        // cl.time across this block's [mtime[1], mtime[0]] interval.
-        let prev_mtime0 = cl.mtime[0];
+        // A frame's forcelink flags are the ones this block's updates set
+        // (a block without svc_time keeps the entities it does not update).
+        for e in &mut cl.entities {
+            e.forcelink = false;
+        }
 
         // Parse the message, updating client state (this may advance mtime via
         // svc_time, set up entity msg history, etc.).
@@ -994,7 +986,7 @@ fn parse_demo_with(
         // events into the frame and clears them, so the next block starts
         // collecting from empty.
         if cl.have_serverinfo && cl.signon_complete {
-            emit(&mut cl, prev_mtime0, &mut frames);
+            frames.push(snapshot(&mut cl));
         } else {
             // Before drawing starts no frame is emitted, so any stray effect
             // events parsed in a signon block would otherwise leak into the
@@ -1011,12 +1003,19 @@ fn parse_demo_with(
             cl.pending_prints.clear();
             cl.pending_centerprints.clear();
             cl.pending_stufftext.clear();
+            // The first level's signon track is the demo's own; a later
+            // level's waits for that level's first frame.
+            if frames.is_empty() {
+                cl.signon_cdtrack = cl.pending_cdtrack.take().or(cl.signon_cdtrack);
+            }
         }
 
         if let ParseFlow::Stop = flow {
-            // The svc_disconnect block went through `emit` above if drawing
-            // had begun.
+            // The svc_disconnect block has a frame if drawing had begun.
             disconnected = cl.have_serverinfo && cl.signon_complete;
+            if let Some(last) = frames.last_mut().filter(|_| disconnected) {
+                last.disconnect = true;
+            }
             break;
         }
     }
@@ -1027,6 +1026,8 @@ fn parse_demo_with(
         model_precache: cl.model_precache,
         sound_precache: cl.sound_precache,
         static_sounds: cl.static_sounds,
+        forcetrack,
+        cdtrack: cl.signon_cdtrack,
         frames,
     };
     Ok((demo, disconnected))
@@ -1034,43 +1035,25 @@ fn parse_demo_with(
 
 /// Build a [`DemoFrame`] from the current client state.
 ///
-/// `view_origin = entities[viewentity].origin` with `+viewheight` on Z; the
-/// entity list is every regular entity with `modelindex > 0` plus every static.
+/// The view entity's two positions and `viewheight` give the camera; the
+/// entity list is every regular entity with `modelindex > 0` that this
+/// message updated, plus every static — each as the message leaves it
+/// (`msg_origins[0..1]`, `msg_angles[0..1]`, `forcelink`), for the client's
+/// `CL_RelinkEntities` to draw between.
 ///
 /// The per-frame effect events (`svc_particle` / `svc_temp_entity`) collected
 /// since the last snapshot are *moved* out of the client state into the frame
 /// (leaving the pending lists empty), so each [`DemoFrame`] owns exactly the
 /// effects of its own message block and the next block starts fresh.
-///
-/// `frac` is the message-time interpolation fraction (`CL_LerpPoint`'s result,
-/// 0..=1): 0 puts every entity at the *older* snapshot, 1 at the most recent.
-/// `is_rotating` answers, for a given `modelindex`, whether the model carries
-/// the `EF_ROTATE` header flag (bonus pickups that spin); only the front-end
-/// knows the loaded MDL's flags, so this is supplied by the caller. The
-/// authoritative keyframe stream (`parse_demo`) passes `frac == 1` and a
-/// closure that always returns `false`.
-fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool) -> DemoFrame {
-    // bobjrotate = anglemod(100*cl.time): the spin angle shared by every
-    // EF_ROTATE model this frame.
-    let bobjrotate = crate::math::anglemod(100.0 * cl.time);
-
-    // --- Camera: in demo playback the recorded angles drive the view, lerped
-    // between mviewangles[1] and mviewangles[0] (CL_RelinkEntities). The view
-    // origin tracks the (lerped) view entity origin + the view height.
-    let mut view_origin = [0.0f32; 3];
-    if let Some(ve) = cl.entities.get(cl.viewentity) {
-        // The view entity is interpolated like any other entity.
-        view_origin = if ve.forcelink {
-            ve.msg_origins[0]
-        } else {
-            lerp_origin(ve.msg_origins[1], ve.msg_origins[0], frac)
-        };
-    }
-    // The raw (pre-viewheight) view entity origin — what CL_UpdateTEnts
-    // re-anchors the view entity's own beam start to each frame.
-    let view_entity_origin = view_origin;
+fn snapshot(cl: &mut ClientState) -> DemoFrame {
+    // --- Camera: the view entity (cl_entities[cl.viewentity]) is relinked
+    // like any other entity; the eye is its origin raised by the view height.
+    let (view_entity_origin, view_prev_origin, view_forcelink) = cl
+        .entities
+        .get(cl.viewentity)
+        .map_or(([0.0; 3], [0.0; 3], true), |ve| (ve.msg_origins[0], ve.msg_origins[1], ve.forcelink));
+    let mut view_origin = view_entity_origin;
     view_origin[2] += cl.viewheight;
-    let view_angles = lerp_angles(cl.mviewangles[1], cl.mviewangles[0], frac);
 
     let mut entities: Vec<EntSnapshot> = Vec::new();
     for (i, e) in cl.entities.iter().enumerate() {
@@ -1089,42 +1072,35 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
         if e.msgtime != cl.mtime[0] {
             continue;
         }
-
-        let (origin, mut angles) = relink_lerp(e, frac);
-
-        // Rotate binary objects (bonus pickups) locally: EF_ROTATE forces the
-        // yaw to anglemod(100*time) every frame, overriding the interpolated
-        // value. The model flag is resolved by the caller from the loaded MDL.
-        if is_rotating(e.modelindex as usize) {
-            angles[1] = bobjrotate;
-        }
-
         entities.push(EntSnapshot {
             num: i as i32,
             modelindex: e.modelindex as usize,
             frame: e.frame,
             skin: e.skin,
-            origin,
-            angles,
+            origin: e.msg_origins[0],
+            angles: e.msg_angles[0],
             effects: e.effects,
+            prev_origin: e.msg_origins[1],
+            prev_angles: e.msg_angles[1],
+            forcelink: e.forcelink,
+            step: e.nolerp,
         });
     }
     for e in &cl.statics {
         // Statics are always emitted (they were spawned with a model) and never
-        // move, so their lerp is a no-op; still honour EF_ROTATE for rotating
-        // static pickups.
-        let mut angles = e.msg_angles[0];
-        if is_rotating(e.modelindex.max(0) as usize) {
-            angles[1] = bobjrotate;
-        }
+        // move (num -1: the client never lerps them).
         entities.push(EntSnapshot {
             num: -1,
             modelindex: e.modelindex.max(0) as usize,
             frame: e.frame,
             skin: e.skin,
             origin: e.msg_origins[0],
-            angles,
+            angles: e.msg_angles[0],
             effects: e.effects,
+            prev_origin: e.msg_origins[0],
+            prev_angles: e.msg_angles[0],
+            forcelink: true,
+            step: false,
         });
     }
 
@@ -1140,21 +1116,17 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
     let centerprints = std::mem::take(&mut cl.pending_centerprints);
     let stufftext = std::mem::take(&mut cl.pending_stufftext);
 
-    // "interpolate player info" (CL_RelinkEntities): cl.velocity lerps between
-    // the two most recent messages' mvelocity by the same fraction as the
-    // entities (a plain lerp — no teleport guard, exactly the C). punchangle is
-    // NOT interpolated; the latest clientdata value applies as-is.
-    let velocity = [
-        cl.mvelocity[1][0] + frac * (cl.mvelocity[0][0] - cl.mvelocity[1][0]),
-        cl.mvelocity[1][1] + frac * (cl.mvelocity[0][1] - cl.mvelocity[1][1]),
-        cl.mvelocity[1][2] + frac * (cl.mvelocity[0][2] - cl.mvelocity[1][2]),
-    ];
-
     DemoFrame {
-        time: cl.time,
+        time: cl.mtime[0],
+        prev_time: cl.mtime[1],
         view_origin,
+        view_angles: cl.mviewangles[0],
+        prev_view_angles: cl.mviewangles[1],
         view_entity_origin,
-        view_angles,
+        view_prev_origin,
+        view_forcelink,
+        viewheight: cl.viewheight,
+        prev_velocity: cl.mvelocity[1],
         entities,
         particles,
         temp_entities,
@@ -1171,7 +1143,7 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
             inwater: cl.inwater,
             idealpitch: cl.idealpitch,
             punchangle: cl.punchangle,
-            velocity,
+            velocity: cl.mvelocity[0],
             health: cl.stats[STAT_HEALTH],
             ammo: cl.stats[STAT_AMMO],
             armor: cl.stats[STAT_ARMOR],
@@ -1194,93 +1166,15 @@ fn snapshot(cl: &mut ClientState, frac: f32, is_rotating: &dyn Fn(usize) -> bool
             total_secrets: cl.stats[STAT_TOTALSECRETS],
         },
         paused: cl.paused,
+        cdtrack: cl.pending_cdtrack.take(),
+        disconnect: false,
     }
 }
 
-/// `CL_LerpPoint` — the fraction of the way `cl.time` lies between the two most
-/// recent server message times (`mtime[1]` → `mtime[0]`), clamped to 0..=1.
-///
-/// Mirrors `cl_main.c`: a zero interval (or a back-end that disables lerp)
-/// returns 1 with `cl.time` snapped to `mtime[0]`; a gap larger than 0.1 s
-/// (dropped packet / start of demo) is treated as a 0.1 s interval. We do NOT
-/// model `cl_nolerp`/`timedemo`/`sv.active` (no live back-end here); the keyframe
-/// path forces `frac == 1` explicitly instead.
-fn lerp_point(mtime: [f32; 2], time: f32) -> f32 {
-    let mut f = mtime[0] - mtime[1];
-    if f == 0.0 {
-        return 1.0;
-    }
-    let m1 = if f > 0.1 {
-        // Dropped packet or start of demo: clamp the interval to 0.1 s.
-        f = 0.1;
-        mtime[0] - 0.1
-    } else {
-        mtime[1]
-    };
-    let frac = (time - m1) / f;
-    frac.clamp(0.0, 1.0)
-}
-
-/// Linear interpolation of an origin vector by `frac`, with the teleport guard
-/// from `CL_RelinkEntities`: if any axis moved more than 100 units between the
-/// two snapshots, snap (`frac == 1`) instead of lerping (assume a teleport).
-fn lerp_origin(from: [f32; 3], to: [f32; 3], frac: f32) -> [f32; 3] {
-    let mut f = frac;
-    for j in 0..3 {
-        let delta = to[j] - from[j];
-        // Kept as the literal C expression `delta > 100 || delta < -100` from
-        // CL_RelinkEntities for faithfulness (not the equivalent range form).
-        #[allow(clippy::manual_range_contains)]
-        if delta > 100.0 || delta < -100.0 {
-            f = 1.0; // teleport, not motion
-        }
-    }
-    [
-        from[0] + f * (to[0] - from[0]),
-        from[1] + f * (to[1] - from[1]),
-        from[2] + f * (to[2] - from[2]),
-    ]
-}
-
-/// Angular interpolation by `frac` with the shortest-arc wraparound from
-/// `CL_RelinkEntities`: each axis delta is folded into (-180, 180] before
-/// lerping so the spin takes the short way around.
-fn lerp_angles(from: [f32; 3], to: [f32; 3], frac: f32) -> [f32; 3] {
-    let mut out = [0.0f32; 3];
-    for j in 0..3 {
-        let mut d = to[j] - from[j];
-        if d > 180.0 {
-            d -= 360.0;
-        } else if d < -180.0 {
-            d += 360.0;
-        }
-        out[j] = from[j] + frac * d;
-    }
-    out
-}
-
-/// Compute one entity's interpolated `(origin, angles)` exactly like
-/// `CL_RelinkEntities`: a `forcelink` entity snaps to its newest snapshot
-/// (`msg_origins[0]`/`msg_angles[0]`), otherwise it lerps from `[1]` to `[0]`
-/// by `frac` with the teleport guard and the shortest-arc angle wrap.
-fn relink_lerp(e: &Entity, frac: f32) -> ([f32; 3], [f32; 3]) {
-    if e.forcelink {
-        (e.msg_origins[0], e.msg_angles[0])
-    } else {
-        (
-            lerp_origin(e.msg_origins[1], e.msg_origins[0], frac),
-            lerp_angles(e.msg_angles[1], e.msg_angles[0], frac),
-        )
-    }
-}
-
-/// `bobjrotate = anglemod(100*time)` — the yaw of every `EF_ROTATE` bonus
-/// pickup at the given demo `time`, exactly as `CL_RelinkEntities` computes it.
-///
-/// A front-end that loads the MDL headers can apply this directly to any entity
-/// whose model carries the `EF_ROTATE` flag (see [`EF_ROTATE`]); the
-/// [`parse_demo_interpolated`] path applies it automatically given the set of
-/// rotating `modelindex`es.
+/// `bobjrotate = anglemod(100*cl.time)` — the yaw of every `EF_ROTATE` bonus
+/// pickup at the given client `time`, exactly as `CL_RelinkEntities`
+/// computes it (the live walk's and the demo's relink both apply it to every
+/// entity whose model carries the flag, [`EF_ROTATE`]).
 pub fn rotate_yaw(time: f32) -> f32 {
     crate::math::anglemod(100.0 * time)
 }
@@ -1536,8 +1430,13 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_CDTRACK => {
-                let _ = r.read_byte();
-                let _ = r.read_byte();
+                // cl.cdtrack, cl.looptrack: CDAudio_Play ((byte)cl.cdtrack, true)
+                // (or the forced track) — the client replays it with the frame.
+                let track = r.read_byte();
+                let _looptrack = r.read_byte();
+                if track >= 0 {
+                    cl.pending_cdtrack = Some(track as u8);
+                }
             }
 
             SVC_FINALE | SVC_CUTSCENE => {
@@ -1683,19 +1582,19 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
         ent.base_angles[2]
     };
 
-    // U_NOLERP forces the relink (no bytes consumed): the entity teleported and
-    // must not be lerped from its previous position.
-    if bits & U_NOLERP != 0 {
-        forcelink = true;
-    }
-
+    // No update last message: copy the new snapshot into BOTH history slots so
+    // the lerp is a no-op (the entity simply appears at [0]).
     if forcelink {
-        // No update last message: copy the new snapshot into BOTH history
-        // slots so the lerp is a no-op (the entity simply appears at [0]).
         ent.msg_origins[1] = ent.msg_origins[0];
         ent.msg_angles[1] = ent.msg_angles[0];
     }
-    ent.forcelink = forcelink;
+    // U_NOLERP (a MOVETYPE_STEP entity, "don't mess up the step animation")
+    // sets only `ent->forcelink`: the history keeps the previous message, so
+    // the relink right after this update draws [0], and any later frame
+    // before the next message lerps from [1] again (CL_RelinkEntities clears
+    // forcelink once it has drawn the entity).
+    ent.nolerp = bits & U_NOLERP != 0;
+    ent.forcelink = forcelink || ent.nolerp;
 
     cl.entities[idx] = ent;
     Ok(())
@@ -2110,6 +2009,15 @@ mod tests {
         // Reading past the end yields the sentinels and sets bad.
         assert_eq!(r.read_byte(), -1);
         assert!(r.bad);
+    }
+
+    /// `CL_PlayDemo_f`'s header line: id's demo1 starts `2\n` (the attract
+    /// loop's forced CD track), demo2 and demo3 `-1\n` (none).
+    #[test]
+    fn the_header_line_is_the_forced_cd_track() {
+        assert_eq!([parse_forcetrack(b"2"), parse_forcetrack(b"-1"), parse_forcetrack(b"11"), parse_forcetrack(b"")], [2, -1, 11, 0]);
+        let demo = parse_demo(b"-1\n").unwrap();
+        assert_eq!((demo.forcetrack, demo.cdtrack), (-1, None));
     }
 
     /// The coord/angle quantization is lossy but the spec values must be exact.
@@ -2594,6 +2502,16 @@ mod tests {
         w_coord(msg, o[2]);
     }
 
+    /// An update of entity `num` at `o` with U_NOLERP (a MOVETYPE_STEP mover).
+    fn w_update_nolerp(msg: &mut Vec<u8>, num: i32, o: [f32; 3]) {
+        let bits = U_ORIGIN1 | U_ORIGIN2 | U_ORIGIN3 | U_NOLERP;
+        w_byte(msg, 0x80 | bits);
+        w_byte(msg, num);
+        for c in o {
+            w_coord(msg, c);
+        }
+    }
+
     /// A baseline for entity `num`: model `model`, at origin (0,0,0).
     fn w_baseline(msg: &mut Vec<u8>, num: i32, model: i32) {
         w_byte(msg, SVC_SPAWNBASELINE);
@@ -2609,54 +2527,6 @@ mod tests {
     }
 
     // ----------------------- pure helper tests -------------------------------
-
-    #[test]
-    fn lerp_point_matches_cl_lerppoint() {
-        // Zero interval -> snap to mtime[0] (frac 1).
-        assert_eq!(lerp_point([2.0, 2.0], 2.0), 1.0);
-
-        // Normal 0.1s interval, cl.time exactly at the midpoint -> 0.5.
-        let mt = [1.6, 1.5];
-        assert!((lerp_point(mt, 1.55) - 0.5).abs() < 1e-6);
-        // At the start of the interval -> 0; at the end -> 1.
-        assert_eq!(lerp_point(mt, 1.5), 0.0);
-        assert_eq!(lerp_point(mt, 1.6), 1.0);
-        // Clamped below 0 and above 1.
-        assert_eq!(lerp_point(mt, 1.4), 0.0);
-        assert_eq!(lerp_point(mt, 1.7), 1.0);
-
-        // A gap > 0.1s is treated as a 0.1s interval ending at mtime[0]
-        // (dropped packet / start of demo): mtime[1] is effectively
-        // mtime[0]-0.1, so cl.time at mtime[0]-0.05 is the midpoint.
-        let big = [5.0, 4.0]; // 1.0s gap
-        assert!((lerp_point(big, 4.95) - 0.5).abs() < 1e-4);
-        assert_eq!(lerp_point(big, 4.90), 0.0); // clamps at the 0.1s window start
-    }
-
-    #[test]
-    fn lerp_origin_interpolates_and_snaps_on_teleport() {
-        // Small motion: linear interpolation by frac.
-        let mid = lerp_origin([0.0, 0.0, 0.0], [10.0, 20.0, 40.0], 0.5);
-        assert_eq!(mid, [5.0, 10.0, 20.0]);
-
-        // A jump > 100 units on ANY axis is assumed a teleport: f forced to 1,
-        // so the result snaps to the destination regardless of frac.
-        let tele = lerp_origin([0.0, 0.0, 0.0], [0.0, 0.0, 200.0], 0.25);
-        assert_eq!(tele, [0.0, 0.0, 200.0], "teleport snaps to destination");
-        // Exactly 100 is NOT a teleport (C uses strict > 100).
-        let edge = lerp_origin([0.0, 0.0, 0.0], [100.0, 0.0, 0.0], 0.5);
-        assert_eq!(edge, [50.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn lerp_angles_takes_the_short_way_around() {
-        // 350 -> 10 should go the short way (+20 through 360), not -340.
-        let a = lerp_angles([350.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
-        assert!((a[0] - 360.0).abs() < 1e-4, "midpoint is 360==0, got {}", a[0]);
-        // 10 -> 350 is the short way the other direction (-20).
-        let b = lerp_angles([10.0, 0.0, 0.0], [350.0, 0.0, 0.0], 0.5);
-        assert!((b[0] - 0.0).abs() < 1e-4, "midpoint is 0, got {}", b[0]);
-    }
 
     #[test]
     fn rotate_yaw_is_anglemod_of_100t() {
@@ -2728,11 +2598,10 @@ mod tests {
     }
 
     #[test]
-    fn interpolation_produces_intermediate_positions() {
-        // Entity 2 is at x=0 in block 1 and x=80 in block 2 (an 80-unit move,
-        // under the 100-unit teleport threshold, so it lerps). The interpolated
-        // stream emits sub-frames between the snapshots; the midpoint frame must
-        // show the entity roughly halfway (x ~= 40), proving the lerp ran.
+    fn each_message_records_the_last_two_positions() {
+        // Entity 2 is at x=0 in block 1 and x=80 in block 2: block 2's frame
+        // carries both (msg_origins[1] and [0]) for the client to lerp
+        // between, and the message times (mtime[1], mtime[0]).
         let file = two_block_demo(
             1.4,
             [0.0; 3],
@@ -2748,29 +2617,33 @@ mod tests {
                 w_update(b, 2, [80.0, 0.0, 0.0], 0.0, 0);
             },
         );
+        let demo = parse_demo(&file).expect("parse");
+        let f = demo.frames.last().expect("a frame");
+        // (Block 1's svc_time comes before its serverinfo, whose CL_ClearState
+        // zeroes the message times.)
+        assert_eq!((f.time, f.prev_time), (1.5, 0.0));
+        let e = f.entities.iter().find(|e| e.num == 2).expect("entity 2");
+        assert_eq!((e.origin[0], e.prev_origin[0], e.forcelink, e.step), (80.0, 0.0, false, false));
+    }
 
-        // 20 fps over a 0.1s interval -> ~2 sub-frames for block 2.
-        let demo = parse_demo_interpolated(&file, 20.0, &[]).expect("parse");
-        // Collect the x-position of entity 2 (model 5) across all frames.
-        let xs: Vec<f32> = demo
-            .frames
-            .iter()
-            .filter_map(|f| f.entities.iter().find(|e| e.modelindex == 5))
-            .map(|e| e.origin[0])
-            .collect();
-        assert!(!xs.is_empty(), "entity should render across the interpolation");
-        // Some frame must land strictly between the two snapshots (0 < x < 80),
-        // which only happens if interpolation occurred (a keyframe-only stream
-        // would jump 0 -> 80 with nothing in between).
-        assert!(
-            xs.iter().any(|&x| x > 1.0 && x < 79.0),
-            "expected an interpolated mid position, got xs = {xs:?}"
+    #[test]
+    fn nolerp_forcelinks_but_keeps_the_previous_position() {
+        // CL_ParseUpdate: U_NOLERP sets ent->forcelink without the history
+        // copy, so the message before stays in msg_origins[1].
+        let file = two_block_demo(
+            1.4,
+            [0.0; 3],
+            |b| {
+                w_baseline(b, 2, 5);
+                w_update_nolerp(b, 2, [0.0, 0.0, 0.0]);
+            },
+            1.5,
+            [0.0; 3],
+            |b| w_update_nolerp(b, 2, [8.0, 0.0, 0.0]),
         );
-        // And a frame must reach the final snapshot position.
-        assert!(
-            xs.iter().any(|&x| (x - 80.0).abs() < 1e-3),
-            "expected the final snapshot position 80, got xs = {xs:?}"
-        );
+        let demo = parse_demo(&file).expect("parse");
+        let e = demo.frames.last().unwrap().entities.iter().find(|e| e.num == 2).copied().unwrap();
+        assert_eq!((e.origin[0], e.prev_origin[0], e.forcelink, e.step), (8.0, 0.0, true, true));
     }
 
     #[test]
@@ -2805,52 +2678,6 @@ mod tests {
             frame.view_angles, [10.0, 20.0, 30.0],
             "recorded camera angles drive the view; svc_setangle is ignored"
         );
-    }
-
-    #[test]
-    fn ef_rotate_model_spins_during_interpolated_playback() {
-        // A rotating pickup (model 7) should have its yaw forced to
-        // anglemod(100*time) regardless of the recorded angle, when the caller
-        // marks model 7 as EF_ROTATE.
-        let file = two_block_demo(
-            1.4,
-            [0.0; 3],
-            |b| {
-                w_baseline(b, 2, 7);
-                w_update(b, 2, [0.0, 0.0, 0.0], 0.0, 0);
-            },
-            1.5,
-            [0.0; 3],
-            |b| {
-                // Recorded yaw is 0, but EF_ROTATE must override it with the spin.
-                w_update(b, 2, [0.0, 0.0, 0.0], 0.0, 0);
-            },
-        );
-
-        // With model 7 declared as a rotator, the final block-2 frame is at
-        // cl.time == 1.5, so yaw == anglemod(100*1.5) == anglemod(150) == 150.
-        let demo = parse_demo_interpolated(&file, 10.0, &[7]).expect("parse");
-        let frame = demo.frames.last().expect("a frame");
-        let ent = frame
-            .entities
-            .iter()
-            .find(|e| e.modelindex == 7)
-            .expect("rotating pickup renders");
-        assert_eq!(
-            ent.angles[1],
-            crate::math::anglemod(100.0 * 1.5),
-            "EF_ROTATE forces yaw to anglemod(100*time)"
-        );
-
-        // Without the EF_ROTATE declaration the recorded yaw (0) is kept.
-        let demo2 = parse_demo_interpolated(&file, 10.0, &[]).expect("parse");
-        let frame2 = demo2.frames.last().expect("a frame");
-        let ent2 = frame2
-            .entities
-            .iter()
-            .find(|e| e.modelindex == 7)
-            .expect("pickup renders");
-        assert_eq!(ent2.angles[1], 0.0, "no EF_ROTATE => recorded yaw kept");
     }
 
     #[test]
@@ -3231,9 +3058,9 @@ mod tests {
         assert_eq!(c.weapon_model, 0);
         assert_eq!(c.health, 100);
         assert!(!c.onground && !c.inwater);
-        // mvelocity[0] reset to 0; the keyframe (frac == 1) shows the new
-        // snapshot even though mvelocity[1] kept the previous value.
-        assert_eq!(c.velocity, [0.0; 3], "frac == 1 -> newest velocity");
+        // mvelocity[0] reset to 0 (the frame's velocity) while mvelocity[1]
+        // kept the previous value (its prev_velocity).
+        assert_eq!(c.velocity, [0.0; 3], "the newest velocity");
         let f = demo.frames.last().unwrap();
         assert_eq!(f.view_origin[2], DEFAULT_VIEWHEIGHT, "viewheight reset");
     }
@@ -3362,12 +3189,12 @@ mod tests {
         // The keyframe stream: the signon-completing message, the 3 after it,
         // the time-less print, and the closing svc_disconnect's block.
         assert_eq!(parse_demo(&file).unwrap().frames.len(), 6);
-        let td = parse_demo_timedemo(&file, &[]).unwrap();
+        let td = parse_demo_timedemo(&file).unwrap();
         let times: Vec<f32> = td.frames.iter().map(|f| f.time).collect();
         // A message without svc_time is its own frame, at the time it keeps.
         assert_eq!(times, [1.0, 1.1, 1.1, 1.2, 1.3], "the disconnect's frame is gone");
         assert_eq!(td.frames[2].prints, ["a reliable message\n"]);
         // A stream that just runs out keeps its last message.
-        assert_eq!(parse_demo_timedemo(&timed_demo(4, false), &[]).unwrap().frames.len(), 5);
+        assert_eq!(parse_demo_timedemo(&timed_demo(4, false)).unwrap().frames.len(), 5);
     }
 }

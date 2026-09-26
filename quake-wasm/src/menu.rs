@@ -39,11 +39,12 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
         MenuAction::LoadSlot(i) => return Some(MenuDeferred::Load(i)),
         MenuAction::ResolutionChanged => {
             // Enter on a Video Options mode line (VID_MenuKey K_ENTER ->
-            // VID_SetMode): the framebuffer takes the new (clamped) size; the
-            // page notices the new width()/height(), re-fits the canvas and
-            // persists it.
-            let (rw, rh) = a.menu.resolution();
-            let (w, h) = clamp_resolution(rw, rh);
+            // VID_SetMode): the menu set `_vid_resolution` (and native
+            // resolution off); the framebuffer takes the new (clamped) size at
+            // once, and the page notices the new frame size and re-fits the
+            // canvas.
+            let (rw, rh) = a.settings.cvars.vid_resolution;
+            let (w, h) = clamp_resolution(i32::from(rw), i32::from(rh));
             a.set_render_size(w, h);
         }
         MenuAction::OpenConsole => {
@@ -54,9 +55,9 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
             }
         }
         MenuAction::ResetDefaults => {
-            // Options "Reset to defaults": select() reset the in-menu cvars
-            // (viewsize/sensitivity/volume/... are read live each frame); the
-            // video mode is not a default.cfg cvar and stays.
+            // Options "Reset to defaults": select() ran the profile's
+            // default.cfg on the settings (read live each frame); the video
+            // mode is not a default.cfg cvar and stays.
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
         MenuAction::Resume => {
@@ -202,11 +203,51 @@ pub(crate) fn menu_bind_key(keynum: i32) {
     press(keynum as u8);
 }
 
+// --- taps: the page's touch controls (web/touch.js) ---------------------------
+
+/// The menu's layout point under pixel `(x, y)` of the frame on screen (what
+/// the last frame drew: its size, and the 2-D scale it drew with).
+fn layout_point(a: &App, x: f32, y: f32) -> (f32, f32) {
+    quake_rs::menu::menu_layout_point(a.render_w, a.render_h, x, y)
+}
+
+/// A finger touched the frame at pixel `(x, y)` and lifted without moving
+/// ([`quake_rs::menu::Menu::tap`]): the cursor goes to the row there and,
+/// where a tap acts, its key goes through `Key_Event` as a key press would.
+/// 1 when the tap was on the menu's list (or Help's page), else 0; a no-op
+/// with the menu hidden.
+pub(crate) fn menu_tap(x: f32, y: f32) -> i32 {
+    let tapped = APP.with(|c| {
+        let mut b = c.borrow_mut();
+        let a = b.as_mut()?;
+        let (mx, my) = layout_point(a, x, y);
+        let on = a.menu.item_at(mx, my).is_some() || a.menu.screen() == render::MenuScreen::Help;
+        Some((a.menu.tap(mx, my, &a.settings), on))
+    });
+    let Some((key, on)) = tapped else { return 0 };
+    if let Some(k) = key {
+        menu_press(k);
+    }
+    i32::from(on)
+}
+
+/// A finger on (or dragged over) the frame at pixel `(x, y)`: the cursor
+/// follows it from row to row ([`quake_rs::menu::Menu::point`]). 1 on a row.
+pub(crate) fn menu_point(x: f32, y: f32) -> i32 {
+    APP.with(|c| {
+        c.borrow_mut().as_mut().map_or(0, |a| {
+            let (mx, my) = layout_point(a, x, y);
+            i32::from(a.menu.point(mx, my))
+        })
+    })
+}
+
 /// The menu screen currently showing, as a stable id — the page's `State`
 /// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
-/// 10 the port's Web extras, 11 Multiplayer > Setup.
+/// 10 the port's settings page (Options > Classic / 2026), 11 Multiplayer >
+/// Setup.
 pub(crate) fn menu_screen_id() -> i32 {
     APP.with(|c| {
         c.borrow()
@@ -229,19 +270,26 @@ pub(crate) fn menu_screen_id() -> i32 {
     })
 }
 
-// --- Web extras: the port's opt-in departures (Options > Web extras) --------
+// --- the four first departures as bits (the checks' shorthand) --------------
 
-/// The Web extras as bits — 1 `wasm_uncapped`, 2 `wasm_showfps`,
-/// 4 `wasm_exactpersp` ([`render::Extras::bits`]); 0 (all off, id's Quake)
-/// by default. `config.cfg` keeps them across sessions ([`crate::config`]).
+/// The four settings that were the port's first "Web extras", as the bits
+/// the browser checks and the benchmark read and set them by: 1
+/// `wasm_uncapped`, 2 `wasm_showfps`, 4 `wasm_exactpersp`, 8 `wasm_scaled2d`.
 pub(crate) fn extras() -> i32 {
-    APP.with(|c| c.borrow().as_ref().map(|a| a.menu.extras().bits() as i32).unwrap_or(0))
+    APP.with(|c| {
+        c.borrow().as_ref().map_or(0, |a| {
+            let s = &a.settings.cvars;
+            i32::from(s.uncapped) | i32::from(s.show_fps) << 1 | i32::from(s.exact_persp) << 2 | i32::from(s.scaled_2d) << 3
+        })
+    })
 }
 
-/// Set the Web extras from [`extras`]' bits (automation). Unknown bits are
-/// ignored.
+/// Set the four settings from [`extras`]' bits; other bits are ignored.
 pub(crate) fn set_extras(bits: i32) {
-    ensure_app(|a| a.menu.set_extras(render::Extras::from_bits(bits as u32)));
+    ensure_app(|a| {
+        let s = &mut a.settings.cvars;
+        (s.uncapped, s.show_fps, s.exact_persp, s.scaled_2d) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+    });
 }
 
 /// 1 when the menu is currently visible (capturing input), else 0. The page
@@ -290,6 +338,29 @@ mod tests {
         });
         assert!(!vis, "'y' closes the menu");
         assert_eq!(map, render::NEW_GAME_MAP, "and starts the start hub");
+    }
+
+    /// The touch controls' taps, in frame pixels: an item of a picture list
+    /// acts on the first tap; on a text list the first tap points and the
+    /// second acts, through the same keys as the keyboard's.
+    #[test]
+    fn taps_open_options_and_flip_always_run() {
+        assert_eq!(boot(), 1);
+        set_resolution(640, 400); // 1:1, the menu's x 0 at 160
+        assert_eq!(menu_tap(160.0 + 100.0, 32.0 + 2.5 * 20.0), 1, "Main's item 2");
+        assert_eq!(menu_screen(), render::MenuScreen::Options);
+        let run = || APP.with(|c| c.borrow().as_ref().unwrap().settings.cvars.always_run());
+        let (before, always_run_row) = (run(), 32.0 + 8.5 * 8.0);
+        assert_eq!(menu_tap(260.0, always_run_row), 1);
+        assert_eq!(run(), before, "the first tap points");
+        assert_eq!(menu_tap(260.0, always_run_row), 1);
+        assert_ne!(run(), before, "the second flips it");
+        assert_eq!(menu_point(260.0, 32.0 + 3.5 * 8.0), 1, "a finger on Screen size");
+        assert_eq!(menu_tap(100.0, 190.0), 0, "under the list");
+        menu_cancel();
+        menu_cancel();
+        assert_eq!(menu_visible(), 0);
+        assert_eq!(menu_tap(260.0, 82.0), 0, "a closed menu takes no tap");
     }
 
     #[test]
@@ -360,34 +431,40 @@ mod tests {
     }
 
     #[test]
-    fn web_extras_screen_toggles_through_the_exports() {
+    fn classic_2026_switches_the_profile_and_its_page_each_setting() {
+        use quake_rs::settings::{Profile, Settings};
+        let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
-        assert_eq!(extras(), 0, "every extra defaults off");
+        assert_eq!(settings(), Settings::new(Profile::Classic), "the tests start in Classic");
         menu_down();
         menu_down();
         menu_select(); // -> Options
         for _ in 0..13 {
-            menu_down(); // the port's row 13, Web extras
+            menu_down(); // the port's row 13, Classic / 2026
         }
+        menu_right();
+        assert_eq!(settings(), Settings::new(Profile::Modern), "right: every setting to 2026's");
+        menu_left();
+        assert_eq!(settings().profile, Profile::Classic, "left: back");
         menu_select();
-        assert_eq!(menu_screen_id(), 10, "Web extras opens its screen");
+        assert_eq!(menu_screen_id(), 10, "Enter opens the settings page");
+        menu_down();
         menu_right(); // Uncapped framerate
         assert_eq!(extras(), 1);
         menu_down();
-        menu_select(); // Enter toggles Show FPS
-        assert_eq!(extras(), 3);
-        menu_left(); // left toggles too
-        assert_eq!(extras(), 1);
+        menu_down();
+        menu_right(); // Pixel size: auto -> 1
+        assert_eq!(settings().cvars.pixel_size, 1);
         menu_cancel();
         assert_eq!(menu_screen_id(), 5, "Esc returns to Options");
-        menu_select(); // ...on the Web extras row
+        menu_select(); // ...on its row
         assert_eq!(menu_screen_id(), 10);
-        // The page's restore; unknown bits are dropped.
+        // The checks' shorthand for the first four; other bits are dropped.
         set_extras(-1);
         assert_eq!(extras(), 15);
         set_extras(0);
         assert_eq!(extras(), 0);
-        // They survive a re-boot (reset_nav) like the Options cvars.
+        // They survive a re-boot (reset_nav): they are the App's.
         set_extras(2);
         assert_eq!(boot(), 1);
         assert_eq!(extras(), 2);
@@ -397,6 +474,7 @@ mod tests {
     fn keys_screen_rebinds_forward_through_the_exports() {
         reset_queue();
         assert_eq!(boot(), 1);
+        use_2026(); // WASD, Always Run
         // Navigate: Options -> Customize controls (row 0).
         menu_down();
         menu_down();

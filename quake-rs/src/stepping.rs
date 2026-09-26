@@ -23,8 +23,9 @@
 //!   `host_time`, pushers' `ltime`), kept exact beside a double.
 //! - **Trails** (`particles::ParticleSystem::spawn_trail`): laid as densely
 //!   as id's are at 72 Hz.
-//! - **Demo playback** (`client::cl_demo::demo_view`): drawn between the
-//!   recorded messages, as id's `CL_LerpPoint` does.
+//!
+//! (Demo playback needs nothing here: id's client draws it between the
+//! recorded messages at any frame rate, `client::cl_demo::demo_frame`.)
 //!
 //! [`Stepping::Classic`], the default, is id's per-frame code unchanged: with
 //! the 72 fps gate on it is WinQuake.

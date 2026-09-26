@@ -128,6 +128,87 @@ impl Default for Fixes {
     }
 }
 
+/// Which mixer the player hears: the typed setting a platform (and the
+/// settings' profiles) choose with. Each mode is a rate, a set of [`Fixes`]
+/// and a mix-ahead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoundMode {
+    /// id's mixer as WinQuake ran it: [`Fixes::NONE`], at id's
+    /// `desired_speed` of 11025 Hz (the platform reconstructs that for its
+    /// device, as a sound card's DAC and output filter did), mixing
+    /// `_snd_mixahead`'s default 0.1 s ahead.
+    Classic,
+    /// The 2026 mixer: [`Fixes::ALL`], at the device's own rate (id's
+    /// algorithms at `-sspeed` rate: point-resampled 8-bit samples, id's
+    /// spatialization), mixing [`MODERN_MIXAHEAD`] ahead.
+    #[default]
+    Modern,
+}
+
+/// The 2026 mixer's `_snd_mixahead`: how far ahead of the device it mixes.
+/// A sound starts this long after its frame at the least (plus the device's
+/// own output latency). It must outlast the time between two host frames
+/// plus the device's callback, or the device runs dry: 50 ms holds at 30 fps
+/// and above (`web/verify_ambient.py` counts the device's underruns).
+pub const MODERN_MIXAHEAD: f32 = 0.05;
+
+/// id's `desired_speed` (snd_dma.c): the rate WinQuake asked its sound
+/// device for.
+pub const ID_RATE: u32 = 11025;
+
+impl SoundMode {
+    /// The fixes this mode mixes with.
+    pub fn fixes(self) -> Fixes {
+        match self {
+            SoundMode::Classic => Fixes::NONE,
+            SoundMode::Modern => Fixes::ALL,
+        }
+    }
+
+    /// The rate to mix at for a device playing `device_rate` (0: unknown,
+    /// taken as 48000).
+    pub fn rate(self, device_rate: u32) -> u32 {
+        match self {
+            SoundMode::Classic => ID_RATE,
+            SoundMode::Modern if device_rate == 0 => 48000,
+            SoundMode::Modern => device_rate,
+        }
+    }
+
+    /// `_snd_mixahead`, in seconds.
+    pub fn mixahead(self) -> f32 {
+        match self {
+            SoundMode::Classic => 0.1,
+            SoundMode::Modern => MODERN_MIXAHEAD,
+        }
+    }
+
+    /// Its name, as a console or a menu prints it.
+    pub fn name(self) -> &'static str {
+        match self {
+            SoundMode::Classic => "classic",
+            SoundMode::Modern => "2026",
+        }
+    }
+
+    /// The mode a console argument names (`classic`/`0`, `2026`/`1`).
+    pub fn parse(s: &str) -> Option<SoundMode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "classic" | "id" | "0" => Some(SoundMode::Classic),
+            "2026" | "modern" | "1" => Some(SoundMode::Modern),
+            _ => None,
+        }
+    }
+
+    /// A mixer in this mode for a device at `device_rate`, its samples read
+    /// from `pak`: `S_Init` with the mode's rate, fixes and `_snd_mixahead`.
+    pub fn mixer(self, pak: &Pak, device_rate: u32) -> Mixer {
+        let mut m = Mixer::new(pak, self.rate(device_rate), self.fixes());
+        m.cvars.mixahead = self.mixahead();
+        m
+    }
+}
+
 /// `snd_dma.c`'s cvars that change what the mixer does (`bgmvolume`,
 /// `bgmbuffer`, `precache` and `snd_show` have nothing to do here).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -253,6 +334,12 @@ pub struct Mixer {
     pub(super) paint: PaintState,
     /// Seconds not yet ramped under [`Fixes::ambient_steps`].
     ambient_clock: f64,
+    /// `S_StopAllSounds (true)`'s `S_ClearBuffer` is due: the platform's
+    /// output buffer, whose mixed-ahead samples should fall silent
+    /// ([`Mixer::take_clear`]).
+    clear: bool,
+    /// `S_Play`'s `static int hash`: the entity number of the next `play`.
+    play_hash: i32,
 }
 
 impl Mixer {
@@ -274,6 +361,8 @@ impl Mixer {
             rand: CRand(1),
             paint: PaintState::new(),
             ambient_clock: 0.0,
+            clear: false,
+            play_hash: 345,
         };
         for (ch, name) in AMBIENT_SAMPLES.iter().enumerate() {
             if let Some(name) = name {
@@ -327,6 +416,8 @@ impl Mixer {
                 SoundCall::Update { listener, leaf_ambient, frametime } => {
                     self.update(listener, *leaf_ambient, f64::from(*frametime));
                 }
+                // The CD plays beside the mix, never through it.
+                SoundCall::Cd(_) => {}
             }
         }
     }
@@ -436,6 +527,24 @@ impl Mixer {
         self.start_sound(pak, &ev);
     }
 
+    /// `S_Play` (the `play` command): `name` (`.wav` added when it has no
+    /// extension) from the listener's position on a fresh entity number, at
+    /// full volume and attenuation 1: centred and unattenuated there.
+    pub fn play(&mut self, pak: &Pak, name: &str) {
+        let sample = if name.contains('.') { name.to_string() } else { format!("{name}.wav") };
+        let ev = SoundEvent {
+            entity: self.play_hash,
+            channel: 0,
+            sound_index: -1,
+            sample,
+            origin: self.listener_origin,
+            volume: 1.0,
+            attenuation: 1.0,
+        };
+        self.play_hash += 1;
+        self.start_sound(pak, &ev);
+    }
+
     /// `SND_PickChannel`: the dynamic channel a new sound takes. The same
     /// entity's sound on the same channel is always replaced (channel 0
     /// never overrides; -1 matches any); otherwise the sound closest to its
@@ -516,6 +625,14 @@ impl Mixer {
         self.total_channels = FIRST_STATIC;
         self.channels.fill(Channel::default());
         self.ambient_clock = 0.0;
+        self.clear = true;
+    }
+
+    /// Whether `S_StopAllSounds` has asked, since the last call, for what was
+    /// already mixed ahead to be silenced (`S_ClearBuffer`: id zeroes its DMA
+    /// buffer; here the buffer is the platform's).
+    pub fn take_clear(&mut self) -> bool {
+        std::mem::take(&mut self.clear)
     }
 
     // -----------------------------------------------------------------------
@@ -970,6 +1087,41 @@ mod tests {
             m.start_sound(&p, &event(1, chan, "t/beep.wav", [0.0; 3]));
         }
         assert_eq!(paint(&mut m, 1)[0], i16::MAX, "3 x 15872 clamps");
+    }
+
+    #[test]
+    fn the_modes_are_ids_mixer_at_11025_and_the_2026_one_at_the_device_rate() {
+        let p = test_pak();
+        let classic = SoundMode::Classic.mixer(&p, 48000);
+        assert_eq!((classic.rate(), classic.fixes, classic.cvars.mixahead), (11025, Fixes::NONE, 0.1));
+        let modern = SoundMode::Modern.mixer(&p, 44100);
+        assert_eq!((modern.rate(), modern.fixes, modern.cvars.mixahead), (44100, Fixes::ALL, MODERN_MIXAHEAD));
+        assert_eq!(SoundMode::Modern.rate(0), 48000, "an unknown device");
+        assert_eq!(SoundMode::default(), SoundMode::Modern);
+        for m in [SoundMode::Classic, SoundMode::Modern] {
+            assert_eq!(SoundMode::parse(m.name()), Some(m));
+        }
+        assert_eq!(SoundMode::parse("x"), None);
+    }
+
+    #[test]
+    fn stop_all_asks_once_for_the_output_buffer_to_be_cleared() {
+        let (_p, mut m) = mixer(Fixes::NONE);
+        assert!(m.take_clear(), "S_Init's S_StopAllSounds (true)");
+        assert!(!m.take_clear(), "once");
+        m.stop_all_sounds();
+        assert!(m.take_clear());
+    }
+
+    #[test]
+    fn play_starts_a_sample_at_the_listener_on_a_fresh_entity_each_time() {
+        let (p, mut m) = mixer(Fixes::NONE);
+        let far = Listener { pos: [500.0, 0.0, 0.0], ..listener() };
+        m.update(&far, None, 1.0 / 72.0);
+        m.play(&p, "t/beep");
+        m.play(&p, "t/beep.wav");
+        let busy: Vec<_> = m.channels().map(|c| (c.entnum, c.leftvol, c.rightvol)).collect();
+        assert_eq!(busy, [(345, 255, 255), (346, 255, 255)], "centred, full, on S_Play's hash");
     }
 
     #[test]

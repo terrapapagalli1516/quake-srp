@@ -17,7 +17,8 @@
      walk mode with no menu/console up; never in attract/demo/locked states.
   5. KEYBOARD-ONLY PLAY — arrows move the camera and Ctrl fires (+attack)
      without the pointer ever being locked.
-  6. THE CANVAS BOX — at 1440x900 the 960-wide framebuffer gets a 960x720
+  6. THE CANVAS BOX (Classic: a video mode in the 4:3 box; the 2026 profile
+     fills the window, verify_settings.py) — at 1440x900 the 960-wide framebuffer gets a 960x720
      box (a whole pixel per column: the 1088 the window fits would double
      one column in 7), at 1920x1080 the natural 1328x996 (1.38 is no near
      whole number), at 1024x768 a 912x684 box drawn smooth (a pixelated
@@ -318,10 +319,14 @@ with sync_playwright() as p:
         print("SKIP fullscreen checks (headless refused requestFullscreen) — "
               "covered by the manual test script")
 
-    # (6) The canvas box (fitCanvas): the largest 4:3 box the window fits,
-    # snapped to a whole number of pixels per framebuffer column when it is
-    # at most 1/6 past one (no doubled column in the pixelated upscale),
-    # smoothed when it is narrower than the framebuffer (no dropped column).
+    # (6) The canvas box (fitCanvas) for a video mode — the Classic profile
+    # (the 2026 profile fills the window: verify_settings.py): the largest
+    # 4:3 box the window fits, snapped to a whole number of pixels per
+    # framebuffer column when it is at most 1/6 past one (no doubled column
+    # in the pixelated upscale), smoothed when it is narrower than the
+    # framebuffer (no dropped column).
+    pg.evaluate("quake.callLine('exec profile classic')")
+    pg.wait_for_function("!(quake.state.flags & 32)", timeout=5000)
     box = lambda: pg.evaluate("""(async () => { const c = document.getElementById('c');
         return [parseFloat(c.style.width), parseFloat(c.style.height),
                 getComputedStyle(c).imageRendering, await exp.width()]; })()""")

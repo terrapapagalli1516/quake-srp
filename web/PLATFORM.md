@@ -2,7 +2,7 @@
 
 The browser build is an ordinary Rust program. `quake-wasm` builds a binary,
 `quake.wasm` (`wasm32-wasip1`), with a `fn main()` that reads the page's
-events from stdin, writes each frame's picture and sounds to stdout, and
+events from stdin, writes each frame's picture and sound to stdout, and
 keeps its saves and `config.cfg` through `std::fs`. It has no exports beyond
 WASI's `_start`, no imports beyond what `std` asks of WASI, and
 `#![forbid(unsafe_code)]`. The page is a small WASI host around it.
@@ -12,8 +12,8 @@ There are three pieces:
 | file | runs in | what it does |
 |---|---|---|
 | `quake-wasm/` → `quake.wasm` | a Web Worker | the game: `sys::run`, a host frame per tick (`quake-wasm/src/sys.rs`); the records it reads and writes (`proto.rs`) |
-| `web/wasi.js` | the same Worker | the WASI host: stdin from a shared ring, stdout into shared frame slots (or, the threads build, the frames left where they lie in the program's shared memory) and one message per turn, an in-memory file system, the clocks |
-| `web/index.html` | the page | the canvas and the display's DAC (WebGL2, else a 2-D canvas), keyboard and mouse, Web Audio, IndexedDB, and the display's refresh, which it hands the program as ticks |
+| `web/wasi.js` | the same Worker | the WASI host: stdin from a shared ring, stdout into shared frame slots (or, the threads build, the frames left where they lie in the program's shared memory), a sound ring, and one message per turn, an in-memory file system, the clocks |
+| `web/index.html` | the page | the canvas and the display's DAC (WebGL2, else a 2-D canvas), keyboard and mouse, the audio device (an AudioWorklet playing the program's samples), IndexedDB, and the display's refresh, which it hands the program as ticks |
 
 The rest of this file is the design, the protocol, what it measured against
 the page it replaced (the wasm cdylib with ~84 `#[no_mangle]` exports the
@@ -29,22 +29,29 @@ keydown/mouse ──KEY/MOUSE records──▶ ring ─▶ fd_read(0) ─▶ Key
                                             (the program is blocked here, in
                                              Atomics.wait, between frames)
 requestAnimationFrame
-  TICK(seq, dt) ───────────────────▶ ring ─▶ fd_read(0) returns the tick
+  AUDIO_CLOCK, TICK(seq, dt) ──────▶ ring ─▶ fd_read(0) returns the tick
   spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime, the
                                              client frame, menu, console: an 8-bit
-                                             frame and its palette (V_UpdatePalette)
-                                             fd_write(1): FRAME ─▶ copied into a free
+                                             frame and its palette (V_UpdatePalette);
+                                             id's mixer paints to the clock + mix-ahead
+                                             fd_write(1): PCM ─▶ samples copied into the
+                                                                 sound ring
+                                                          FRAME ─▶ copied into a free
                                                                    frame slot, or
                                                           FRAME_AT ─▶ where it lies in
                                                                    shared memory
-                                                          sounds, LISTENER, STATE ─▶ kept
+                                                          AUDIO, STATE ─▶ kept
                                                           SYNC ─▶ ACK = seq, notify;
                                                                   post the kept records
   the newest frame to the GPU (indices
   + palette, WebGL2) and drawn, or its
   RGBA through putImageData
-message event: sounds → Web Audio,
-  STATE → the page's UI, REPLY → calls
+message event: STATE → the page's UI,
+  REPLY → calls, AUDIO → counts
+                                    (between ticks, every 8 ms while the
+                                     worklet plays: AUDIO_WAKE ─▶ the mixer
+                                     tops the ring up, PCM)
+AudioWorklet (audio thread): plays the sound ring, moves its clock
 ```
 
 - **The program waits in a read.** Between frames `sys::run` is blocked
@@ -92,10 +99,13 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 3 | MOUSE | `dx f32`, `dy f32` (raw `movementX`/`movementY`) |
 | 4 | CLEAR_KEYS | — (window blur: `ClearAllStates`) |
 | 5 | POINTER_UNLOCKED | — (the port's `+mlook` release: lookspring) |
-| 6 | AUDIO_READY | `ready u8` |
+| 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
-| 9 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
+| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize |
+| 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
+| 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
+| 12 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
 
 A record whose payload is shorter than its kind's reads the missing fields as
 zeros, and an unknown kind is skipped, so either side can grow a record.
@@ -106,7 +116,10 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 |---|---|---|
 | 1 | FRAME | `w u16`, `h u16`, `format u8` (0 RGBA8, 1 INDEXED8), `0 ×3`, then for INDEXED8 the palette (256 × RGBA), then the pixels (4 bytes each, or one palette index) |
 | 2 | SYNC | `seq u32` (last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
-| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo), `menu_screen i32` |
+| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
+| 4–11 | — | retired: the sound records of the page's own mixing, before the program mixed |
+
+| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen, 128 touch controls (`in_touch`), 256 the menu asks y or n, 512 the live game is paused), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
 | 4 | SAMPLE | `id u32`, a RIFF/WAV (each distinct sample once, by content) |
 | 5 | SOUND | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `entity i32`, `channel i32`, `view u32`, `loop_start f32`, `loop_end f32` |
 | 6 | STOP_SOUND | `entity i32`, `channel i32` |
@@ -117,17 +130,17 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 11 | LOCAL_SOUND | `id u32`: `S_LocalSound` (menu clicks) and `play` |
 | 12 | REPLY | `id u32`, `value f64`, then UTF-8 text |
 | 13 | BENCH | `f64` per value (`--features bench`; names from the `bench_names` call) |
-| 16 | FRAME_AT | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, ring slot `slot`, its pixels and palette at those addresses (`-sharedframes`) |
+| 14 | PCM | `start u32` (the pair of the ring's clock it plays at), `rate u32`, `flags u32` (1: silence the ring first, `S_ClearBuffer`), then 16-bit stereo pairs. Copied into the sound ring by `wasi.js`, never posted |
+| 15 | AUDIO | `rate u32`, `mode u32` (0 Classic, 1 2026), then counts: `starts`, `local`, `stops`, `clears`, `painted` (u32 each) |
+| 16 | CD | `serial u32` (a new value: play the track from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes, and only with a disc ("CD music") |
+| 17 | FRAME_AT | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, ring slot `slot`, its pixels and palette at those addresses (`-sharedframes`) |
 
-A turn's records end with its `SYNC`. After a frame the sound records come in
-causal order: `GENERATION` (with the new level's `AMBIENT`s) first, then
-`LISTENER`, the one-shots, stops, local sounds, and the level's placed loops,
-so every sound is spatialized against this frame's listener and nothing
-queued after a level change is stopped by it.
+A turn's records end with its `SYNC`. A tick's `PCM` comes before its
+`FRAME`, so the samples reach the ring before the pixels are copied.
 
 ## Shared memory
 
-Two `SharedArrayBuffer`s:
+Three `SharedArrayBuffer`s:
 
 - **Control and ring** (`CTL_BYTES` 256 + 64 KB, made by the page). The
   control block is an `Int32Array`: `IN_WRITE`/`IN_READ` (the ring's byte
@@ -163,6 +176,16 @@ Two `SharedArrayBuffer`s:
   a frame's memory is written, or handed back, only while no one reads it.
   No frame slots, and no copy in the worker. A grown memory reaches the page
   as a fresh `memory.buffer`.
+- **The sound ring** (64 bytes + 16384 stereo pairs of 16 bits, made by the
+  page, handed to the worker and to the AudioWorklet). Its control block is
+  an `Int32Array`: `POS` (the pair the device plays next — the clock the
+  program mixes ahead of), `WRITE` (where the program's samples reach),
+  `RATE` (their rate), `UNDER` (quanta the worklet played short once the
+  program had written anything), `PLAYED`, `CLEARS`, `PEAK` (the loudest
+  sample played since the page last reset it), `QUANTA`. Samples go in at
+  `start & 16383`; the worklet plays pair `POS` when `0 < WRITE - POS <=
+  16384`, silence otherwise. The same table is at the top of `wasi.js` and
+  in the page's sound section.
 
 ## Presentation
 
@@ -267,7 +290,10 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **The pak is a file.** The page downloads `id1/pak0.pak` beside
   `quake.wasm` and hands it to the worker's file system; the program opens it
   with `Pak::open` (as `quaketool` does) and reads each lump on demand, so no
-  copy of the archive lives in the program's memory. Measured against the
+  copy of the archive lives in the program's memory. It reads through id's
+  search path (`quake_rs::common`: `pak0.pak`, `pak1.pak`, … over the game
+  directory's loose files, the last pack searched first), so a player's own
+  `pak1.pak` is one more file ("Your files"). Measured against the
   same program with the pak embedded (`include_bytes!` and
   `Pak::from_static`, the old page's way), six loads each on a local server:
   navigation to the first frame 169–328 ms from the file, 167–330 ms
@@ -275,14 +301,14 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   file, 191–214 MB embedded (the embedded pak lives in the module's bytes and
   in the linear memory). Besides, an engine update no longer re-downloads
   18 MB, the build needs no game data, and a player's own `pak1.pak` can be
-  one more file (a later change: the worker cannot take files once running,
-  so it would be added before start, or the worker restarted).
+  one more file (the worker cannot take files once running, so the page
+  restarts the game to add one: "Your files").
 - **Saves and settings go through `std::fs`.** `save s0` writes
   `id1/s0.sav` (`Host_Savegame_f`), the Load and Save menus list the slots
   from the files (`M_ScanSaves`, when they open), and `config.cfg` holds the
-  video mode, `viewsize` and the Web extras (`config.rs`,
-  `Host_WriteConfiguration`), written when one of them changes and exec'd at
-  startup as quake.rc does. When a written file is closed, `wasi.js` sends it
+  settings the id way (`config.rs`, `Host_WriteConfiguration`): the profile,
+  then the `bind` lines and archived cvars that differ from it, written when
+  one of them changes and exec'd at startup as quake.rc does. When a written file is closed, `wasi.js` sends it
   to the page, which keeps it in IndexedDB (`quake-rs`, store `files`, keyed
   by path) and hands every kept file back at the next start. Without
   IndexedDB the page falls back to localStorage (`quake-rs.file.<path>`).
@@ -294,23 +320,193 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
 
+## Your files
+
+A player who owns Quake (the Steam, GOG and CD versions all ship id's
+original `id1/pak0.pak` and `id1/pak1.pak`) adds their files, and plays the
+registered game — episodes 2–4 — with their CD soundtrack.
+
+- **Adding.** Drop the files, or the whole Quake folder, anywhere on the
+  page, or pick them with the drawer's line ("Own Quake? …"). The page takes
+  `pak1.pak`, a `pak0.pak` that is not id's shareware one (the same file
+  in every 1.06 copy: recognised by `COM_LoadPackFile`'s count and CRC, 339
+  and 32981, and skipped), and CD tracks as files, `track02.ogg`… (the
+  track number from the name: `track02`, `Track 2`, a leading `02`; any
+  format the browser can play). It checks a pak as `COM_LoadPackFile` reads
+  one — the `PACK` header, a directory inside the file of at most 2048
+  entries, each inside the file — and says what it left out and why.
+- **Keeping.** A pak goes into the game directory, the IndexedDB store the
+  program's files live in (`id1/pak1.pak`), and so to the worker's file
+  system at every start; the music goes to a store of its own (`music`,
+  keyed by track), which the worker never sees: the page hands the program
+  the list of tracks (`-cdtracks 2,3,…`, "CD music") and plays a track's
+  file when the program asks for it. The files stay in this browser until
+  removed (the drawer's "remove them").
+- **Restarting.** The worker takes its files before it starts, so adding
+  or removing files reloads the page: the engine and `pak0.pak` come from
+  the HTTP cache, the saves and settings from storage. (A reload asks for
+  the click that starts audio again; adding files is rare enough.)
+- **The program decides**, as id's did: `COM_CheckRegistered` compares
+  `gfx/pop.lmp` with the table in `common.c` ("Playing registered
+  version." on the console, the `registered` cvar the QuakeC's episode gates
+  read), and refuses a modified game without it ("You must have the
+  registered version to use modified games") or a `pop.lmp` that is not
+  id's ("Corrupted data file."); `PR_LoadProgs` refuses a `progs.dat` made
+  against other system globals; and the port refuses one that calls
+  builtins id's engine never had. A refusal ends the program before it
+  starts, its message on stderr; if it came with files just added, the page
+  takes them out again, restarts, and shows the message in the drawer.
+- **Not supported, and why.** The 2021 re-release's files
+  (`rerelease/id1/pak0.pak`) are a different game build: its `progs.dat`
+  calls the new engine's builtins by name (numbered `#0`, resolved at load),
+  which the port does not have and will not fake — the port plays id's 1996
+  WinQuake. The page leaves out anything under a `rerelease/` folder and
+  says to use the `id1/` files beside it; a re-release pak dropped on its
+  own reaches the program, which refuses it (a modified game, or its
+  progs). Mission packs and mods (`-game`, `-hipnotic`, more paks) are out
+  of the port's scope; the page takes `pak0.pak` and `pak1.pak` only.
+
+`verify_content.py` checks it all with synthesized data: a `pak1.pak` made
+from `common.c`'s `pop[]` table and the shareware `maps/e1m1.bsp` copied as
+`maps/e2m1.bsp`, and generated tones as tracks 2, 3 and 6.
+
+## CD music
+
+In 1996 Quake's music was the CD's own audio tracks, which the drive played
+beside the game's mix, never through it: the engine only told the drive
+"track N, looping", and the drive played it at its level. The port keeps
+that split.
+
+- **The program** asks where id's client asked (`quake_rs::cd_audio`,
+  `cd_win.c`'s state): every level's signon (`svc_cdtrack`, the
+  worldspawn's `sounds`: e1m1 is track 6, the start map 4), the QuakeC's
+  intermission track 3 and episode-end track 2, a demo's (its header line
+  forces one: id's `demo1` plays track 2 all through the attract loop), and
+  `svc_setpause` pauses it. The same track asked for again goes on; another
+  stops it and starts from the top. The `cd` command is id's (`cd play N`,
+  `loop`, `stop`, `pause`, `resume`, `remap`, `info`, …). The drive's
+  state goes to the page in a `CD` record when it changes.
+- **The level** is `bgmvolume` (Options > CD Music Volume) as id's DOS
+  driver set it, `(int)(bgmvolume * 255)`; WinQuake's MCI could not set a
+  CD's level, so there the slider only switched the music off and on. Both
+  profiles: a CD playing is id's behaviour, so Classic plays the player's
+  music too.
+- **The page** plays the track's file in an `<audio>` element (streamed:
+  a seven-minute track is not decoded whole into memory), through a gain
+  node (the level) into the page's AudioContext, beside the worklet that
+  plays the program's mix: it starts with the first click, as the game's
+  sound does, and a hidden tab pauses it with the game (WinQuake paused the
+  CD when it lost the screen). A looping track loops in the element; a
+  track played once reports its end (the `cd_ended` call: MCI's notify).
+- **Without music** there is no drive: no `-cdtracks`, no `CD` records,
+  nothing in the program changes (id's `cd_null.c`, which the C oracle is
+  built with). The `cd` command says "No CD in player.".
+
+The checks read the drive through `quake.cd.state()` (what the program
+asked for; the element's time, loop and level; the output's RMS) and the
+`cd_state` call.
+
+## Settings, and how the page shows the picture
+
+Every setting is the program's (`quake_rs::settings`: id's cvars and key
+bindings, and the port's departures, which the profiles **Classic** and
+**2026** switch). The page needs three of them, and hears them in the
+`STATE` record:
+
+- **Native resolution** (`vid_native`, 2026). The page sends its box for the
+  picture in device pixels (`WINDOW`); the program renders the box divided by
+  a whole pixel size (`vid_pixelsize`: 1..4, or Auto, the smallest that
+  keeps the frame within a 1080p frame's pixels) and says the size in
+  `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
+  pixels wide and `H x pixel_size` tall (`fitCanvas`), `image-rendering:
+  pixelated`, so every picture pixel is a whole square of screen pixels at
+  the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the
+  picture is the video mode (`_vid_resolution`, Options > Video Options)
+  in the largest 4:3 box the window fits, as before.
+- **F toggles fullscreen** (`vid_fkey`, 2026; id's `default.cfg` leaves F
+  unbound).
+- **The profile from the address.** `?classic` and `?2026` add `+profile
+  classic` / `+profile 2026` to the program's command line (`wasi.js` hands
+  it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
+  switch as the menu's, so it sticks.
+
+`verify_settings.py` checks all of it in the browser (the window filled
+with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
+reload); the checks that pin id's behaviour open the page as `?classic`,
+and `bench.py` does too, so its frames hash as `quaketool play`'s.
+
 ## Sound
 
-The program decides what plays (`snd_dma.rs`, `quake_rs::snd`: channel
-choice and override, the loop windows, the ambient ramps); the page mixes it
-with Web Audio as before, one source per sound, the same pan law, the same
-per-frame re-spatialization. What changed is only the channel: the page used
-to poll ~30 exports each frame; now it handles the records above as they
-come, and samples cross once. The page remembers the current level's loops,
-so audio that starts later (the first click) still gets them.
+The program mixes, as WinQuake did: id's `snd_dma.c`, `snd_mix.c` and
+`snd_mem.c`, ported as `quake_rs::snd::Mixer`, run in the worker
+(`quake-wasm/src/snd_dma.rs` is the device behind it, `snd_win.c`'s part).
+The page only plays what it paints.
 
-**Engine PCM later.** A later change will mix in the program (id's
-`snd_mix.c`) and feed an AudioWorklet. The protocol has room for it: a record
-of PCM frames per turn, or — better, because the worklet runs on its own
-clock — a third `SharedArrayBuffer` ring the worker's `fd_write` of a
-dedicated file descriptor (or a record kind) fills and the worklet drains.
-Either way the program stays a writer of bytes; nothing in this design
-assumes the page mixes.
+- **Samples out.** After every tick the program runs the frame's sound calls
+  through the mixer, then `S_Update_`: it paints from where it left off to
+  the ring's play position plus `_snd_mixahead`, and writes that as a `PCM`
+  record. `wasi.js` copies the samples straight into the sound ring (no
+  message to the page). An AudioWorklet on the page's AudioContext plays the
+  ring and moves its `POS`.
+- **The clock** is `POS`, the device's own: the page sends it before every
+  tick (`AUDIO_CLOCK`). Between ticks, while the worklet plays, `wasi.js`
+  wakes the program every 8 ms with an `AUDIO_WAKE`, and it mixes again —
+  id's `S_ExtraUpdate`, so the ring stays fed whatever the display does. If
+  the device overtakes the mixer (a level load, a stall), the mixer skips to
+  it, as `S_Update_` did; the worklet plays silence for what was missing and
+  counts an underrun.
+- **Before the first click** (browsers start an AudioContext suspended until
+  a gesture) the page moves `POS` on itself in real time, at most 0.1 s a
+  refresh: the mixer runs unheard, as a sound card's DMA ran whether a
+  speaker was on or not, so nothing queues up to play at once when sound
+  starts (the old page had to drop sounds until then). The first gesture
+  (the overlay, a button, the canvas, F) creates or resumes the context and
+  attaches the worklet (its module is a string in `index.html`, loaded from a
+  `blob:` URL: no extra file to deploy); `AUDIO_READY` tells the program it
+  runs and at what rate.
+- **Level changes.** `S_StopAllSounds` asks for `S_ClearBuffer`: the next
+  `PCM` carries the clear flag and `wasi.js` zeroes the ring, so what was
+  mixed ahead of the old level falls silent at once.
+- **Menu and pause** are id's: `S_Update` runs every host frame whatever has
+  the keyboard, so the level's loops and ambients play on under the menu and
+  over a paused game (a test in `snd_dma.rs`); the menu's clicks are
+  `S_LocalSound`s through the mixer.
+- **A hidden tab** stops the game (no refreshes, no ticks). The page
+  suspends the AudioContext with it and resumes it when the tab comes back,
+  so the sound stops and goes on where the game does.
+
+**Classic and 2026.** The setting is `snd_modern` (`Cvars::sound`, a
+`quake_rs::snd::SoundMode`; "Full-rate sound" on the Classic / 2026 page),
+a departure: off in the Classic profile, on in 2026. Classic
+is id's mixer as written (`Fixes::NONE`) at id's `desired_speed`, 11025 Hz,
+mixing id's 0.1 s ahead. The 2026 mixer (`Fixes::ALL`: the loop seam, exact
+resampling steps, the ambient ramp at any frame rate, `S_StopSound`'s range;
+`AUDIT.md`) runs at the device's own rate, 0.05 s ahead. A change of mode
+makes a new mixer (the ring is cleared, the level's placed sounds are
+registered again).
+
+**Classic's 11025 Hz on a 48 kHz device.** The worklet reconstructs it: a
+windowed sinc (Blackman, 16 input samples, 256 phases) band-limited at
+5.5 kHz, as a sound card's DAC and output filter reconstructed id's 11025 Hz
+for its speakers. Chosen over an AudioContext created at 11025 Hz (the
+browser resampling it) because the filter is then the same in every browser
+and explicit here, the context never has to be re-created — which can need a
+new gesture in Safari — when the mode changes, and a context at 11025 Hz is
+not guaranteed everywhere. The 2026 mixer's samples play pair for pair: its
+character is id's point resampling at the device's rate (what `-sspeed 48000`
+gave), images and all.
+
+**Latency** (headless Chromium, the attract demo, 20 s per mode): the ring's
+lead — how far ahead of the device the program has mixed, which is how long
+a sound started now waits — is at the mix-ahead between wakes: 2026 p1 39,
+median 50, max 50 ms; Classic p1 89, median 100 ms. The context adds its own
+`baseLatency` + `outputLatency`: 10.7 + 40 ms headless (a real device's
+differ). No underruns in either mode (also none at a 30 ms mix-ahead; at
+20 ms the headless device ran dry 281 times in 20 s: its callbacks take
+larger bites), nor in `verify_loops.py`'s 40 s. The checks read the ring
+(`quake.audio.ring()`: its position, lead, underruns, loudest sample) and
+the mixer (`snd_stats`, `snd_channels`: every channel's sample, volumes,
+position and key).
 
 ## Threads
 
@@ -433,7 +629,7 @@ rest of the turn, and waking the worker.
 |---|---|---|---|
 | pixels into the slot (worker) | 0.07 | 0.19 | 0.24 |
 | slot into the ImageData (page) | 0.06 | 0.18 | 0.25 |
-| sounds, listener, state, `postMessage` | 0.02–0.05 | 0.02–0.05 | 0.02–0.05 |
+| sounds, listener, state, `postMessage` (the page's own mixing then) | 0.02–0.05 | 0.02–0.05 | 0.02–0.05 |
 | waking the worker | < 0.05 | < 0.05 | < 0.05 |
 
 So a frame costs about 0.15 / 0.4 / 0.5 ms more end to end, and the page's
@@ -481,6 +677,161 @@ as before. Off by default, and not verifiable headless: there it holds the
 refresh near 60 Hz, so input to present measured 12–16 ms at the median
 with it (old page and new, WebGL2 and 2-D alike) against 2–3 ms without.
 
+## Touch
+
+On a touch screen (a coarse primary pointer; `?touch` forces it on a
+desktop) the page loads `web/touch.js` and hands it a few entry points
+(`startTouch` in index.html: the KEY and MOUSE records, `callLine`, the
+State, the audio unlock); a desktop never loads it. It switches the page to
+a touch layout — the picture fills the screen, under a phone's notch too
+(`viewport-fit=cover`), and the controls keep to the safe area — and shows
+what the game's State calls for:
+
+| state | on screen |
+|---|---|
+| the live game, `in_touch` on (2026) | a stick wherever the left thumb lands (the left 45%); look by dragging anywhere else; FIRE (hold; dragging it aims too), JUMP, WEAPON (`impulse 10`, the next weapon owned), MENU |
+| the live game, `in_touch` off (Classic) | MENU only: id's game has no touch controls, but a phone must never be left without a way back to the menu |
+| a demo (the attract loop) | MENU; a tap anywhere is Escape, as any key is during id's demo playback |
+| the menu | taps on the menu itself; BACK (Escape); YES / NO when it asks (STATE 256) |
+| the console (Options > Go to console) | KEYBOARD (a tap on the console too), TAB, ▲ (the previous line); BACK closes it; a drag scrolls (PgUp/PgDn) |
+
+**What a finger sends.** The stick is the client's analog move
+(`set_move fwd side`: `in_fwd`/`in_side`, full speed at 56 CSS px of
+thumb, a 12% dead zone, at most once a display frame); FIRE and JUMP hold
+`set_attack`/`set_jump`; WEAPON is `set_impulse 10`. These bypass the key
+bindings on purpose: a touch button is its action, whatever the player
+bound. Look is the MOUSE record, IN_MouseMove's input, 2 counts per CSS
+pixel: 0.32° a pixel at the default Mouse Speed, so Options > Mouse Speed
+and Invert Mouse apply, and `freelook` (on in 2026) is what makes a
+vertical drag pitch. `in_touchaccel` (console, 0..4, default 0) turns a
+fast drag up to 1 + that many times as far (full at 2 px/ms). Escape,
+Tab, y/n and the typed characters are KEY records through `Key_Event`.
+
+**The menu by tapping.** The page does not guess items from pixels: it
+maps the finger to a frame pixel through the canvas's box and asks the
+program (`menu_tap x y`, and `menu_point x y` while a finger drags), and
+the engine's menu (`Menu::tap`, quake-rs `menu.rs`, "Taps") finds the row
+from the same constants its `draw_*` functions draw with and answers with
+the key a player would press: Enter on a picture list's item (Main,
+Single Player, Multiplayer: 20-line items, a fingertip) at once; on a text
+list (8-line rows: 10–13 CSS px on a phone) a first tap moves the cursor
+and a second on the highlighted row acts — Enter, or left/right of an
+Options slider's knob; Help pages by halves. A drag moves the cursor with
+the finger without acting, which is the easy way onto a small row.
+
+**The phone's keyboard.** KEYBOARD focuses a hidden text field (in the
+tap's own handler, the only way iOS shows its keyboard); what the field
+receives becomes KEY records (printable ASCII as its keynum with the typed
+character; Enter; a deleted zero-width sentinel is Backspace; Android's
+composed words when they end), and its key events never reach the page's
+own keyboard handler. Multiplayer > Setup's name rows get the same button.
+
+**Around the controls.** Held upright, a prompt asks for landscape (a tap
+dismisses it). The first tap ("tap to start") also asks for fullscreen and
+`screen.orientation.lock('landscape')` where the browser has them
+(Android; a fullscreen button stays while not fullscreen). During a game a
+Screen Wake Lock keeps the display on. Every touch resumes audio if the
+browser suspended it (iOS "interrupts" it in the background). When the
+page is hidden the audio is suspended, and with the touch controls on (not
+in Classic, where the game only stops getting ticks, as on a desktop) a
+live game pauses (`pause`, id's plaque; STATE 512) under its menu; back in
+the game — the menu closed, by the player — the pause ends. Haptics:
+`QuakeTouch.rumble(weak, strong, ms)` takes the Gamepad API's dual-rumble
+magnitudes and buzzes `navigator.vibrate` (Android; iOS Safari has none)
+for longer the stronger it is; nothing calls it yet — it is the hook for
+the `input` agent's gamepad rumble events (damage, heavy weapons).
+
+**Phones.** On an iPhone in landscape (844×390 CSS px, devicePixelRatio 3,
+so a 2532×1170 box) Auto picks a pixel size of 2 with the single-threaded
+build: a 1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px,
+finer than the eye resolves at arm's length), and the scaled 2-D layer at
+2×. What that costs, measured on a desktop, not on a phone
+(`bench.py --video modern`, one thread, headless Chromium on an 8-core desktop CPU
+under load 6, median page ms per frame, demo1 / walk_e1m1): 1266×585
+4.4 / 4.7, a 2400×1080 Android at 2.6 (1200×540) 3.8 / 4.2, and the same
+iPhone at a pixel size of 1 (2532×1170) 16.0 / 17.8. A recent iPhone's
+fast core is about this one's by the published single-thread scores (a
+mid-range Android's about 0.4 of it), so the chosen size should fit
+Safari's 60 Hz on one core with room to spare, and a mid-range phone
+should manage 60 Hz — estimates, not runs. Decided: no phone rule in Auto.
+The single-threaded build, the default deploy, gives a phone the 2×2
+pixel above; the threads build offers `hardwareConcurrency` threads, and
+Auto's budget grows with them (4 and up: twice the pixels), so a 6-core
+phone would get the 1×1 picture, 3.4× the pixels, drawn in equal row
+bands on unequal cores (a phone's efficiency cores take ~3× as long, and
+every band waits for the slowest): hotter and not smoother. For a phone,
+deploy the single-threaded build, or set `vid_pixelsize 2`. (Open: a
+phone-aware thread offer in wasi.js — the `present`/`platform` side.)
+iOS Safari: `SharedArrayBuffer` needs iOS 15.2 and https (the page says so
+when it is missing); rAF runs at 60 Hz (Safari's default even on 120 Hz
+screens), 30 Hz in Low Power Mode; Web Audio follows the silent switch;
+the Screen Wake Lock needs iOS 16.4 (18.4 in a home-screen app). Memory:
+the single-threaded build's memory grows as the game needs it (the pak
+stays outside it, "Files"); the threads build declares a shared memory of
+up to 1 GiB (16384 pages), which a browser reserves up front for a
+shared memory — the kind of reservation iOS has refused in other wasm
+games, one more reason to give a phone the single-threaded build.
+
+## Offline and install
+
+**Install.** `manifest.webmanifest` (`display: fullscreen`, landscape,
+standalone as the fallback) and iOS's `apple-mobile-web-app-*` tags make
+the page an app on the home screen: on iOS that is the only fullscreen a
+page gets, and it is how an iPhone should run it. The icons are
+original pixel art (`web/icons/make_icons.py`, standard library only, a
+torch flame on stone; not id's logo or any of its art), their subject
+inside the middle 80% circle so launchers may mask them; the page's
+favicon is the 32-pixel one, inlined.
+
+**The service worker** (`web/sw.js`, one file: loaded by the page it
+registers itself). What it answers:
+
+- **the pak, cache first**: `id1/*.pak` from the cache once kept, else the
+  network, kept as it streams to the page. id's shareware data never
+  changes; bumping `DATA_CACHE` refetches it.
+- **everything else, network first**: the page, `wasi.js`, `touch.js`,
+  `quake.wasm`, the manifest and icons come from the network and are kept;
+  when the network fails, from what was kept. So online a player always
+  runs what is deployed — an update takes effect at the next load, with
+  nothing to version or bump — and offline, what they last played. The
+  page's small files are kept at install, because the first visit's page
+  loaded before the worker existed.
+- **nothing marked `no-store`**, which `isolated.py` sends: the checks
+  leave no 19 MB copies in the browser profiles (verify_touch.py serves
+  without it to check offline play).
+
+The worker takes over at once (`skipWaiting`, `clients.claim`): with the
+page's files from the network there is no old cache to keep an open page
+consistent with. The page waits for it before downloading (`main` awaits
+`window.quakeServiceWorker`, at most 3 s, once: after that the page is
+already controlled), so the first visit's downloads go through it and are
+kept — offline works after one visit — at the cost of the worker's
+install on that first visit. A reload finds the pak locally: no 18 MB
+download, the "fast reloads". Measured on a local server (the same page
+with and without `sw.js`, three fresh profiles each, navigation to the
+first frame): the first visit 263–283 ms against 180–246 ms; a reload's
+downloads 74–92 ms against 47–75 ms from the HTTP cache. So on a local
+network the worker costs a few tens of milliseconds; its point is a
+phone's network, where the pak is 18 MB and the HTTP cache may not keep
+it, and no network at all. Trade-off accepted: on a network
+that hangs rather than fails, network-first waits for it; and a load that
+lost the network half-way could pair a new page with a kept older engine.
+
+**Isolation on any host** (the coi-serviceworker technique). Every answer
+the worker gives carries COOP `same-origin`, COEP `require-corp` and CORP
+`same-origin`. A server that sends the headers loses nothing. On one that
+cannot (GitHub Pages, a plain static host), the first load is not
+isolated; the page registers the worker, waits for it and reloads once
+(a sessionStorage flag stops a loop where a browser ignores the headers),
+and the reloaded page is isolated. Costs: the first visit loads twice; it
+needs service workers (not Firefox's private windows); a page on http
+other than localhost gets neither; and a hard reload, which bypasses the
+worker, is not isolated, so it reloads once more (not verified: headless
+Chromium's cache-ignoring reload bypasses the worker for that second load
+too). Checked in headless Chromium (verify_touch.py, 8.); Safari and iOS
+honour worker-supplied isolation headers by their documentation, not by a
+run here.
+
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
@@ -497,8 +848,8 @@ checked: Safari, iOS, Firefox's WebGL2 (its headless build has none; its
 refusal of shared views is emulated, `verify_present.py`'s staging copy), a
 GPU driving a real high-refresh display. From the platforms' documentation, not from a
 run: Safari has `SharedArrayBuffer` under COOP/COEP since 15.2 (iOS 15.2),
-with `Atomics.wait` in workers; iOS has no pointer lock, and the page already
-says it needs a keyboard and a mouse. The program's own memory no longer
+with `Atomics.wait` in workers; iOS has no pointer lock, and a phone plays
+with the touch controls ("Touch"). The program's own memory no longer
 holds the 18 MB pak, which helps where wasm memory is tight (iOS).
 
 ## Build, serve, deploy
@@ -513,24 +864,34 @@ cd quake-wasm && cargo build --release --target wasm32-wasip1-threads  # the ren
 Either `quake.wasm` runs in the same page; the threads build's is under
 `target/wasm32-wasip1-threads/release/`.
 
-**A deploy dir** holds four things:
+**A deploy dir** holds the page's files (`isolated.PAGE_FILES`), the engine
+and the pak:
 
 ```
 deploy/index.html          web/index.html
 deploy/wasi.js             web/wasi.js
+deploy/touch.js            web/touch.js           (touch screens only)
+deploy/sw.js               web/sw.js              (offline, isolation anywhere)
+deploy/manifest.webmanifest  web/manifest.webmanifest
+deploy/icons/*.png         web/icons/icon-192.png, icon-512.png, apple-touch-icon.png
 deploy/quake.wasm          quake-wasm/target/wasm32-wasip1/release/quake.wasm
 deploy/id1/pak0.pak        quake-data/ID1/PAK0.PAK (lower-case name)
 ```
 
 ```sh
-mkdir -p deploy/id1
-cp web/index.html web/wasi.js deploy/
+mkdir -p deploy/id1 deploy/icons
+cp web/index.html web/wasi.js web/touch.js web/sw.js web/manifest.webmanifest deploy/
+cp web/icons/icon-192.png web/icons/icon-512.png web/icons/apple-touch-icon.png deploy/icons/
 cp quake-wasm/target/wasm32-wasip1/release/quake.wasm deploy/
 cp quake-data/ID1/PAK0.PAK deploy/id1/pak0.pak
 ```
 
-**Serve** with the two cross-origin isolation headers (without them the page
-says so and stops):
+(`isolated.copy_page(dir)` copies the page's files; `bench.py --build` uses
+it.) A deploy without `sw.js` still plays, but the page's `<script>` for it
+answers 404, which the checks count as a console error.
+
+**Serve** with the two cross-origin isolation headers (without them, and
+without the service worker, the page says so and stops):
 
 ```sh
 miniserve -C -p 8196 \
@@ -538,7 +899,13 @@ miniserve -C -p 8196 \
   --header "Cross-Origin-Embedder-Policy:require-corp" deploy
 ```
 
-Any static server works if it sends those headers. `web/isolated.py` is the
+Any static server works if it sends those headers, and one that cannot
+works through the service worker, after one reload ("Offline and install").
+Either way the page must be a secure context — https, or localhost — for
+`SharedArrayBuffer` and service workers alike: a phone reaching the server
+by name over plain http (`http://<host>:8196`) gets neither, so serve
+it over https (an https reverse proxy, for one, gives the server an https name).
+`web/isolated.py` is the
 checks' server; `uv run web/bench.py DEPLOYDIR` and
 `QUAKE_VERIFY_PORT=… uv run --with playwright web/verify_walk.py DEPLOYDIR`
 take a deploy dir, and `bench.py --build` assembles one under
