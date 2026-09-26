@@ -146,8 +146,11 @@ impl Workers {
     /// Cut `whole` (an `h`-row view) into bands and run `draw` on each, on
     /// up to [`Workers::threads`] threads, the calling thread one of them.
     /// Each thread starts from `init()` (its own counters, say) and the
-    /// values come back in thread order. With one thread, one band: `draw`
-    /// on the calling thread.
+    /// values come back, the calling thread's first. With one thread, one
+    /// band: `draw` on the calling thread. The threads take the bands from
+    /// one queue, so a thread the system will not start (no threads on this
+    /// target, say) only leaves its share to the others: the frame is drawn
+    /// whatever the count.
     pub(super) fn run<T, I, D>(self, whole: Band, h: usize, init: I, draw: D) -> Vec<T>
     where
         T: Send,
@@ -171,7 +174,8 @@ impl Workers {
             t
         };
         std::thread::scope(|s| {
-            let helpers: Vec<_> = (1..threads).map(|_| s.spawn(work)).collect();
+            let helpers: Vec<_> =
+                (1..threads).filter_map(|_| std::thread::Builder::new().spawn_scoped(s, work).ok()).collect();
             let mut out = vec![work()];
             // A worker that panicked panics the frame, as one thread would.
             out.extend(helpers.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))));
@@ -195,17 +199,20 @@ where
         f(0, dst);
         return;
     }
+    // One run a thread, taken from a queue (see `Workers::run`: a thread that
+    // does not start leaves its run to the others).
     let per = rows.div_ceil(threads);
-    let mut runs = dst.chunks_mut(per * dst_row).enumerate();
-    let first = runs.next();
+    let queue = Mutex::new(dst.chunks_mut(per * dst_row).enumerate());
+    let work = || loop {
+        let Some((i, d)) = queue.lock().unwrap_or_else(PoisonError::into_inner).next() else { break };
+        f(i * per, d);
+    };
     std::thread::scope(|s| {
-        for (i, d) in runs {
-            let f = &f;
-            s.spawn(move || f(i * per, d));
+        for _ in 1..threads {
+            // A thread that would not start is no loss: the queue is drained below.
+            let _ = std::thread::Builder::new().spawn_scoped(s, work);
         }
-        if let Some((_, d)) = first {
-            f(0, d);
-        }
+        work();
     });
 }
 
