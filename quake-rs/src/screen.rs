@@ -197,19 +197,45 @@ pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool,
     set_vrect(w as i64, h as i64, viewsize, lineadj, intermission)
 }
 
-/// Put the rendered 3-D `view` (a `vrect.w x vrect.h` image) into a
-/// `vid_w x vid_h` screen at `vrect`, with everything outside it tile-cleared
-/// ([`draw_tile_clear`] — SCR_UpdateScreen's `Draw_TileClear(0,0,vid.width,
-/// vid.height)` under the view). A view that already IS the whole screen
-/// (viewsize 120, an intermission) comes back untouched, at zero cost. The
+/// A `vid_w x vid_h` screen with everything outside the view rectangle
+/// `vrect` tile-cleared ([`draw_tile_clear`] — SCR_UpdateScreen's
+/// `Draw_TileClear(0,0,vid.width,vid.height)` under the view) and the
+/// rectangle itself left for the view to be drawn into
+/// ([`Renderer::render_into`](crate::render::Renderer::render_into)). The
 /// status bar is drawn over the result afterwards, as in the C.
 ///
-/// Every screen pixel is written exactly once — the tile only goes where the
-/// view does not, the four bands around it — so the screen is a spare frame
-/// buffer left uncleared ([`Image::reused_uncleared`]), and the view's own
-/// buffer goes back to the pool ([`crate::render::recycle_image`]). The view
-/// is copied in runs of rows on up to `threads` threads (the renderer's
-/// count; the bytes are the same for any).
+/// The tile only goes where the view does not — the four bands around it —
+/// so, the view drawn, every screen pixel is written exactly once: the
+/// screen is a spare frame buffer left uncleared ([`Image::reused_uncleared`]).
+pub fn screen_with_backtile(
+    vrect: ViewRect,
+    vid_w: usize,
+    vid_h: usize,
+    backtile: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+) -> Image {
+    let mut img = Image::reused_uncleared(vid_w, vid_h);
+    // The rectangle the view covers, clipped to the screen: [x0, x1) x [y0, y1).
+    let x0 = vrect.x.min(vid_w);
+    let x1 = x0 + vrect.w.min(vid_w - x0);
+    let y0 = vrect.y.min(vid_h);
+    let y1 = y0 + vrect.h.min(vid_h - y0);
+    // The tile everywhere else: above, below, then either side.
+    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, y0, palette);
+    draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1, palette);
+    draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0, palette);
+    draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0, palette);
+    img
+}
+
+/// Put a rendered 3-D `view` (a `vrect.w x vrect.h` image) into a
+/// `vid_w x vid_h` screen at `vrect`, with everything outside it tile-cleared
+/// ([`screen_with_backtile`]). A view that already IS the whole screen
+/// (viewsize 120, an intermission) comes back untouched, at zero cost. The
+/// view is copied in runs of rows on up to `threads` threads (the bytes are
+/// the same for any), and its buffer goes back to the pool
+/// ([`crate::render::recycle_image`]). The client draws its view straight into
+/// the screen instead; this is for a view drawn apart.
 pub fn compose_view(
     view: Image,
     vrect: ViewRect,
@@ -222,27 +248,8 @@ pub fn compose_view(
     if vrect.x == 0 && vrect.y == 0 && view.w == vid_w && view.h == vid_h {
         return view;
     }
-    let mut img = Image::reused_uncleared(vid_w, vid_h);
-    // The rectangle the view covers, clipped to the screen: [x0, x1) x [y0, y1).
-    let x0 = vrect.x.min(vid_w);
-    let x1 = x0 + view.w.min(vid_w - x0);
-    let y0 = vrect.y.min(vid_h);
-    let y1 = y0 + view.h.min(vid_h - y0);
-    // The tile everywhere else: above, below, then either side.
-    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, y0, palette);
-    draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1, palette);
-    draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0, palette);
-    draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0, palette);
-    let (cw, vw) = (x1 - x0, view.w);
-    if cw > 0 {
-        let screen_rows = &mut img.rgb[y0 * vid_w..y1 * vid_w];
-        let view_rows = &view.rgb[..(y1 - y0) * vw];
-        crate::render::map_rows(threads, y1 - y0, screen_rows, vid_w, view_rows, vw, |dst, src| {
-            for (d, s) in dst.chunks_mut(vid_w).zip(src.chunks(vw)) {
-                d[x0..x0 + cw].copy_from_slice(&s[..cw]);
-            }
-        });
-    }
+    let mut img = screen_with_backtile(ViewRect { w: view.w, h: view.h, ..vrect }, vid_w, vid_h, backtile, palette);
+    img.blit(&view, vrect.x, vrect.y, threads);
     crate::render::recycle_image(view);
     img
 }

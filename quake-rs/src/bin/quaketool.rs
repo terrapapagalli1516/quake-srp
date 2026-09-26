@@ -2346,7 +2346,10 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             wopts.screen = Some(render::ScreenPlace { x: r.x, y: r.y, vid_w: w, vid_h: h });
             let scene = render::Scene { width: r.w, height: r.h, options: wopts, ..scene };
             let view = renderer.render(&scene);
-            return renderer.warp(view, w, h, time, video.cvars.hires);
+            let mut screen = render::Image::new(w, h, [0, 0, 0]);
+            let full = render::ViewRect { x: 0, y: 0, w, h };
+            renderer.warp_into(view, &mut screen, full, time, video.cvars.hires);
+            return screen;
         }
         renderer.render(&scene)
     };

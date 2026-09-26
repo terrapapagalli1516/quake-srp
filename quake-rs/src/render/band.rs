@@ -24,31 +24,44 @@
 use std::ops::Range;
 use std::sync::{Mutex, PoisonError};
 
-/// Rows `y0..y0 + rows` of a `w`-wide view: their pixels and their 16-bit
-/// `1/z`, borrowed from the frame so that bands can be drawn at once.
+/// Rows `y0..` of a `w`-wide view: their pixels and their 16-bit `1/z`,
+/// borrowed from the frame so that bands can be drawn at once. The pixels
+/// are the view's own rows, or the rows of the screen it is drawn straight
+/// into (`stride` pixels a row, the view's the `x0..x0 + w` of each).
 pub(super) struct Band<'a> {
     w: usize,
     y0: usize,
     rgb: &'a mut [[u8; 3]],
+    stride: usize,
+    x0: usize,
     z: &'a mut [i16],
 }
 
 impl<'a> Band<'a> {
-    /// The whole of a `w`-wide view as one band.
+    /// The whole of a `w`-wide view as one band: its pixels `rgb` and its
+    /// `1/z` `z`, row after row.
     pub(super) fn whole(w: usize, rgb: &'a mut [[u8; 3]], z: &'a mut [i16]) -> Band<'a> {
-        let n = rgb.len().min(z.len());
-        Band { w, y0: 0, rgb: &mut rgb[..n], z: &mut z[..n] }
+        let n = rgb.len().min(z.len()) / w.max(1) * w;
+        Band { w, y0: 0, rgb: &mut rgb[..n], stride: w, x0: 0, z: &mut z[..n] }
+    }
+
+    /// The whole of a `w`-wide view drawn into its place on a screen: `rows`
+    /// are the screen's rows the view covers, `stride` pixels each, the view
+    /// at column `x0` of them (`x0 + w <= stride`); `z` its `1/z`.
+    pub(super) fn placed(w: usize, rows: &'a mut [[u8; 3]], stride: usize, x0: usize, z: &'a mut [i16]) -> Band<'a> {
+        let h = (rows.len() / stride.max(1)).min(z.len() / w.max(1));
+        Band { w, y0: 0, rgb: &mut rows[..h * stride], stride, x0, z: &mut z[..h * w] }
     }
 
     /// `self` cut into bands of `rows` rows (the last one shorter).
     pub(super) fn split(self, rows: usize) -> Vec<Band<'a>> {
-        let (w, y0) = (self.w, self.y0);
-        let chunk = rows.max(1) * w.max(1);
+        let (w, y0, stride, x0) = (self.w, self.y0, self.stride, self.x0);
+        let rows = rows.max(1);
         self.rgb
-            .chunks_mut(chunk)
-            .zip(self.z.chunks_mut(chunk))
+            .chunks_mut(rows * stride.max(1))
+            .zip(self.z.chunks_mut(rows * w.max(1)))
             .enumerate()
-            .map(|(i, (rgb, z))| Band { w, y0: y0 + i * rows.max(1), rgb, z })
+            .map(|(i, (rgb, z))| Band { w, y0: y0 + i * rows, rgb, stride, x0, z })
             .collect()
     }
 
@@ -61,14 +74,14 @@ impl<'a> Band<'a> {
     /// The view rows this band holds.
     #[inline]
     pub(super) fn rows(&self) -> Range<usize> {
-        self.y0..self.y0 + self.rgb.len() / self.w.max(1)
+        self.y0..self.y0 + self.z.len() / self.w.max(1)
     }
 
     /// The view-linear pixel indices (`v * w + u`) this band holds.
     #[inline]
     pub(super) fn indices(&self) -> Range<usize> {
         let first = self.y0 * self.w;
-        first..first + self.rgb.len()
+        first..first + self.z.len()
     }
 
     /// Row `v`'s pixels `u..u + n` and their `1/z`, if `v` is in the band
@@ -76,12 +89,12 @@ impl<'a> Band<'a> {
     #[inline]
     pub(super) fn span(&mut self, u: usize, v: usize, n: usize) -> Option<(&mut [[u8; 3]], &mut [i16])> {
         let row = v.checked_sub(self.y0)?;
-        let start = row * self.w + u;
-        let end = start + n;
-        if end > self.rgb.len() || u + n > self.w {
+        let z = row * self.w + u;
+        if z + n > self.z.len() || u + n > self.w {
             return None;
         }
-        Some((&mut self.rgb[start..end], &mut self.z[start..end]))
+        let p = row * self.stride + self.x0 + u;
+        Some((self.rgb.get_mut(p..p + n)?, &mut self.z[z..z + n]))
     }
 
     /// The pixel and `1/z` at view-linear index `idx` (`v * w + u`), if the
@@ -89,7 +102,13 @@ impl<'a> Band<'a> {
     #[inline]
     pub(super) fn at(&mut self, idx: usize) -> Option<(&mut [u8; 3], &mut i16)> {
         let i = idx.checked_sub(self.y0 * self.w)?;
-        Some((self.rgb.get_mut(i)?, self.z.get_mut(i)?))
+        let z = self.z.get_mut(i)?;
+        let p = if self.stride == self.w && self.x0 == 0 {
+            i
+        } else {
+            i / self.w * self.stride + self.x0 + i % self.w
+        };
+        Some((self.rgb.get_mut(p)?, z))
     }
 }
 
@@ -156,33 +175,48 @@ impl Workers {
     }
 }
 
-/// Run `f` on matching runs of rows of `dst` and `src` — `dst_row` and
-/// `src_row` elements a row, `rows` rows in all — on up to `threads` threads,
-/// the calling thread one of them: the per-row maps that end a frame (the
-/// RGBA pack, the view's copy into the screen), each output row a function
-/// of its input row alone, so any split gives the same bytes.
+/// Run `f` on runs of rows of `dst` — `dst_row` elements a row, `rows` rows
+/// in all — on up to `threads` threads, the calling thread one of them: the
+/// per-row maps that end a frame (the RGBA pack, the view's copy into the
+/// screen, the underwater warp), each output row a function of its place
+/// alone, so any split gives the same bytes. `f` gets the run's first row.
+pub(crate) fn for_rows<D, F>(threads: usize, rows: usize, dst: &mut [D], dst_row: usize, f: F)
+where
+    D: Send,
+    F: Fn(usize, &mut [D]) + Sync,
+{
+    let threads = threads.clamp(1, rows.max(1));
+    if threads == 1 || dst_row == 0 {
+        f(0, dst);
+        return;
+    }
+    let per = rows.div_ceil(threads);
+    let mut runs = dst.chunks_mut(per * dst_row).enumerate();
+    let first = runs.next();
+    std::thread::scope(|s| {
+        for (i, d) in runs {
+            let f = &f;
+            s.spawn(move || f(i * per, d));
+        }
+        if let Some((_, d)) = first {
+            f(0, d);
+        }
+    });
+}
+
+/// [`for_rows`] with a source row for each output row: `f` gets matching
+/// runs of `dst` and `src` (`src_row` elements a row).
 pub(crate) fn map_rows<D, S, F>(threads: usize, rows: usize, dst: &mut [D], dst_row: usize, src: &[S], src_row: usize, f: F)
 where
     D: Send,
     S: Sync,
     F: Fn(&mut [D], &[S]) + Sync,
 {
-    let threads = threads.clamp(1, rows.max(1));
-    let per = rows.div_ceil(threads).max(1);
-    let (dst_chunk, src_chunk) = ((per * dst_row).max(1), (per * src_row).max(1));
-    if threads == 1 {
-        f(dst, src);
-        return;
-    }
-    let mut runs = dst.chunks_mut(dst_chunk).zip(src.chunks(src_chunk));
-    let first = runs.next();
-    std::thread::scope(|s| {
-        for (d, r) in runs {
-            s.spawn(|| f(d, r));
-        }
-        if let Some((d, r)) = first {
-            f(d, r);
-        }
+    for_rows(threads, rows, dst, dst_row, |row0, d| {
+        let n = d.len() / dst_row.max(1);
+        let start = (row0 * src_row).min(src.len());
+        let end = ((row0 + n) * src_row).min(src.len());
+        f(d, &src[start..end]);
     });
 }
 
@@ -221,6 +255,50 @@ mod tests {
         assert_eq!(rgb[8], [5; 3]);
         assert_eq!(rgb.iter().filter(|p| **p != [0; 3]).count(), 3);
         assert_eq!(z.iter().filter(|v| **v == 9).count(), 2);
+    }
+
+    #[test]
+    fn a_placed_band_writes_the_view_into_its_place_on_the_screen() {
+        // A 3x4 view at column 2 of a 7-wide screen, from screen row 1.
+        let (w, h, stride) = (3usize, 4usize, 7usize);
+        let mut screen = vec![[0u8; 3]; stride * 6];
+        let mut z = vec![0i16; w * h];
+        let bands = Band::placed(w, &mut screen[stride..(1 + h) * stride], stride, 2, &mut z).split(3);
+        assert_eq!(bands.iter().map(Band::rows).collect::<Vec<_>>(), [0..3, 3..4]);
+        for mut band in bands {
+            for v in band.rows() {
+                let (px, _) = band.span(0, v, w).expect("the row");
+                px.fill([1 + v as u8; 3]);
+            }
+            let (px, zz) = band.at(band.indices().end - 1).expect("the band's last pixel");
+            *px = [9; 3];
+            *zz = 9;
+        }
+        for (i, p) in screen.iter().enumerate() {
+            let (row, col) = (i / stride, i % stride);
+            let want = match (row, col) {
+                (3 | 4, 4) => 9, // each band's last pixel
+                (1..=4, 2..=4) => row as u8,
+                _ => 0,
+            };
+            assert_eq!(p[0], want, "screen ({col}, {row})");
+        }
+        assert_eq!(z.iter().filter(|v| **v == 9).count(), 2);
+    }
+
+    #[test]
+    fn rows_are_mapped_once_whatever_the_thread_count() {
+        let (w, h) = (5usize, 23usize);
+        let src: Vec<u16> = (0..w * h).map(|i| i as u16).collect();
+        for threads in [1, 2, 4, 30] {
+            let mut dst = vec![0u32; w * 2 * h];
+            map_rows(threads, h, &mut dst, 2 * w, &src, w, |d, s| {
+                for (o, x) in d.chunks_mut(2).zip(s) {
+                    o.fill(u32::from(*x) + 1);
+                }
+            });
+            assert!(dst.iter().enumerate().all(|(i, v)| *v as usize == i / 2 + 1), "{threads} threads");
+        }
     }
 
     #[test]

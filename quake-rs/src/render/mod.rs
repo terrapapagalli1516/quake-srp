@@ -42,7 +42,7 @@ use crate::math::{cross, dot, normalize, sub, Vec3};
 use alias::{prepare_alias_model, prepare_viewmodel, AliasDraw};
 use raster::{hash_color, raster_triangle, Projected};
 use sprite::draw_sprites;
-use warp::{apply_warp, TurbTable};
+use warp::TurbTable;
 
 mod view;
 mod band;
@@ -77,7 +77,7 @@ pub use crate::sbar::{
     draw_finale_overlay, draw_hud_into, draw_intermission_overlay, Hud, IntermissionStats,
 };
 pub use crate::screen::{
-    calc_refdef, compose_view, draw_centerprint, draw_fps, draw_pause, vid_aspect, ViewRect,
+    calc_refdef, compose_view, draw_centerprint, draw_fps, draw_pause, screen_with_backtile, vid_aspect, ViewRect,
     SB_LINES_FULL, VIEWSIZE_DEFAULT,
 };
 // The renderer's public API (its files are private).
@@ -144,6 +144,23 @@ impl Image {
         if let Some(p) = self.rgb.get_mut(idx) {
             *p = c;
         }
+    }
+
+    /// Copy `view` into this image with its top-left corner at `(x, y)`, as
+    /// far as it fits, in runs of rows on up to `threads` threads.
+    pub(crate) fn blit(&mut self, view: &Image, x: usize, y: usize, threads: usize) {
+        let (sw, sh) = (self.w, self.h);
+        let (x0, y0) = (x.min(sw), y.min(sh));
+        let (cw, ch) = (view.w.min(sw - x0), view.h.min(sh - y0));
+        if cw == 0 || ch == 0 || self.rgb.len() < sw * sh || view.rgb.len() < view.w * view.h {
+            return;
+        }
+        let vw = view.w;
+        map_rows(threads, ch, &mut self.rgb[y0 * sw..(y0 + ch) * sw], sw, &view.rgb[..ch * vw], vw, |dst, src| {
+            for (d, s) in dst.chunks_mut(sw).zip(src.chunks(vw)) {
+                d[x0..x0 + cw].copy_from_slice(&s[..cw]);
+            }
+        });
     }
 
     /// Write the image as a binary (P6) PPM file.
@@ -970,24 +987,51 @@ impl Renderer {
         let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
         // The frame's pixels, on a spare buffer (see [`recycle_image`]).
         let mut image = Image::reused_uncleared(w, h);
+        self.draw(scene, w, h, &mut image.rgb, w, 0);
+        image
+    }
+
+    /// [`Renderer::render`] straight into `screen`, at the view's place on it
+    /// (`scene.options.screen`'s corner; the whole of `screen` without one),
+    /// as id's `R_RenderView` draws into `vid.buffer`: no view image, no copy.
+    /// The view's rectangle is written whole; the rest of the screen is left
+    /// as it was. A view that does not fit in `screen` (never the client's)
+    /// is drawn apart and copied in as far as it fits.
+    pub fn render_into(&mut self, scene: &Scene, screen: &mut Image) {
+        let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
+        let (x, y) = scene.options.screen.map_or((0, 0), |p| (p.x, p.y));
+        let sw = screen.w;
+        let fits = x + w <= sw && y + h <= screen.h && screen.rgb.len() >= sw.saturating_mul(screen.h);
+        if fits {
+            self.draw(scene, w, h, &mut screen.rgb[y * sw..(y + h) * sw], sw, x);
+        } else {
+            let view = self.render(scene);
+            screen.blit(&view, x, y, self.threads());
+            recycle_image(view);
+        }
+    }
+
+    /// The frame of `scene`, `w x h` (already clamped), into `rows`: `stride`
+    /// pixels a row, the view at column `x0` of each. What the whole frame
+    /// decides is done first — the world's edges, spans and surfaces (the
+    /// surface cache filled), the entities up to their rasterisers — and then
+    /// every band of the view draws from it, on the renderer's threads.
+    fn draw(&mut self, scene: &Scene, w: usize, h: usize, rows: &mut [[u8; 3]], stride: usize, x0: usize) {
         if w == 0 || h == 0 {
-            return image;
+            return;
         }
         if self.map != Some(MapShape::of(scene.world)) {
             self.begin_map(scene.world);
         }
         self.zbuf.resize(w.saturating_mul(h), 0);
         let frame = Frame::new(scene, w, h);
-        // What the whole frame decides first: the world's edges, spans and
-        // surfaces (the surface cache filled), the entities up to their
-        // rasterisers. Then every band of the view draws from them.
         let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut self.prof) else {
-            return image;
+            return;
         };
         let entities = Entities::prepare(&frame, &mut self.prof);
         let t = self.prof.now();
         let (edge, prof, workers) = (&self.edge, &self.prof, self.workers);
-        let whole = band::Band::whole(w, &mut image.rgb, &mut self.zbuf);
+        let whole = band::Band::placed(w, rows, stride, x0, &mut self.zbuf);
         let bands = workers.run(whole, h, || prof.for_band(), |band, prof| {
             let tw = prof.now();
             let drawn = edge.draw_band(band, &frame, &world);
@@ -1012,7 +1056,6 @@ impl Renderer {
                 s.band_threads += threads;
             });
         }
-        image
     }
 
     /// How many threads draw a frame (1, the default: the calling thread
@@ -1037,10 +1080,18 @@ impl Renderer {
 
     /// `D_WarpScreen` (`d_scan.c`), for an underwater frame: `view`, rendered
     /// at the warp rectangle ([`crate::screen::warp_vrect`]), wobbled and
-    /// stretched over the screen's `out_w x out_h` view rectangle at `clock`.
-    /// With the hires extra (`hires`) the wobble is scaled to the view.
-    pub fn warp(&mut self, view: Image, out_w: usize, out_h: usize, clock: f32, hires: bool) -> Image {
-        apply_warp(&mut self.warp, view, out_w, out_h, clock, hires)
+    /// stretched over the rectangle `at` of `screen` at `clock`, on the
+    /// renderer's threads. With the hires extra (`hires`) the wobble is scaled
+    /// to the view. The view's buffer goes back to the frame pool.
+    pub fn warp_into(&mut self, view: Image, screen: &mut Image, at: ViewRect, clock: f32, hires: bool) {
+        let (sw, threads) = (screen.w, self.threads());
+        let (x0, y0) = (at.x.min(sw), at.y.min(screen.h));
+        let (w, h) = (at.w.min(sw - x0), at.h.min(screen.h - y0));
+        if let Some(rows) = screen.rgb.get_mut(y0 * sw..(y0 + h) * sw) {
+            let target = warp::WarpTarget { rows, stride: sw, x0, w, h };
+            warp::warp_screen(&mut self.warp, &view, target, clock, hires, threads);
+        }
+        recycle_image(view);
     }
 }
 
@@ -1544,6 +1595,38 @@ mod tests {
             r.set_threads(threads);
             assert!(r.render(&scene).rgb == one.rgb, "{threads} threads");
             assert!(r.render(&scene).rgb == one.rgb, "{threads} threads, warm");
+        }
+    }
+
+    #[test]
+    fn a_view_drawn_into_its_place_on_the_screen_is_the_view_drawn_apart() {
+        // render_into draws a bordered view (column 13, row 7 of a 200x150
+        // screen) straight into the screen, as render draws it on its own,
+        // and leaves the rest of the screen alone; a view past the screen's
+        // edge is copied in as far as it fits.
+        let bsp = special_surface_room();
+        let pal = fixtures::ramp_palette();
+        let mdl = fixtures::tiny_mdl();
+        let cam = Camera::looking_at([-200.0, -150.0, 60.0], [0.0, 0.0, 0.0], 90.0);
+        let models = [ModelInstance::with_frame(&mdl, [-80.0, 0.0, 0.0], 30.0, 0, [200, 40, 40])];
+        let particles: Vec<(Vec3, u8)> = (0..100).map(|i| ([-120.0 + 2.0 * i as f32, 0.0, 20.0], 77)).collect();
+        let (vw, vh) = (161, 117);
+        let place = |x, y| RenderOptions { screen: Some(ScreenPlace { x, y, vid_w: 200, vid_h: 150 }), ..RenderOptions::default() };
+        let scene = |x, y| Scene { time: 0.7, models: &models, particles: &particles, options: place(x, y), ..Scene::new(&bsp, cam, vw, vh, &pal) };
+        for threads in [1, 4] {
+            let mut r = Renderer::new();
+            r.set_threads(threads);
+            for (x, y) in [(13, 7), (100, 90)] {
+                let apart = render_once(&scene(x, y));
+                let mut screen = Image::new(200, 150, [1, 2, 3]);
+                r.render_into(&scene(x, y), &mut screen);
+                for (i, p) in screen.rgb.iter().enumerate() {
+                    let (u, v) = (i % 200, i / 200);
+                    let inside = (x..x + vw).contains(&u) && (y..y + vh).contains(&v);
+                    let want = if inside { apart.rgb[(v - y) * vw + (u - x)] } else { [1, 2, 3] };
+                    assert_eq!(*p, want, "{threads} threads, view at ({x}, {y}), pixel ({u}, {v})");
+                }
+            }
         }
     }
 
