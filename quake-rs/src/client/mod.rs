@@ -72,6 +72,9 @@ pub struct Walk {
     /// A second copy of the map BSP for rendering (the server owns its own copy
     /// inside the world host).
     pub bsp: Bsp,
+    /// The renderer drawing `bsp` (begun on it: `R_NewMap` whenever `bsp`
+    /// changes), with its caches, z-buffer and video cvars.
+    pub renderer: render::Renderer,
     pub palette: [[u8; 3]; 256],
     /// The parsed `gfx.wad` (sbar + digit pics) for the status-bar HUD overlay,
     /// or `None` if the archive lacked/could not parse it. Parsed once at boot so
@@ -252,6 +255,8 @@ pub struct Walk {
 /// Recorded-demo playback state.
 pub struct DemoPlay {
     pub bsp: Bsp,
+    /// The renderer drawing `bsp` (begun on it), as [`Walk::renderer`].
+    pub renderer: render::Renderer,
     pub palette: [[u8; 3]; 256],
     pub demo: Demo,
     /// The archive, kept open so the recorded `svc_sound` one-shots can load
@@ -369,8 +374,11 @@ impl DemoPlay {
         // CL_ReadFromServer, before the first CL_LerpPoint, so their items
         // are stamped at about host_frametime and never flash.
         let cl_items = demo.frames.first().map_or(0, |f| f.client.items);
+        let mut renderer = render::Renderer::new();
+        renderer.begin_map(&bsp);
         DemoPlay {
             bsp,
+            renderer,
             palette,
             demo,
             pak,
@@ -477,9 +485,12 @@ pub fn assemble_walk(
     // CL_ClearState + the signon's clientdata: what the player spawns with,
     // unflashed (`view::stamp_item_gettime`).
     let cl_items = cl_main::server_items(&server, player);
+    let mut renderer = render::Renderer::new();
+    renderer.begin_map(&bsp);
     Some(Walk {
         server,
         bsp,
+        renderer,
         palette,
         gfx_wad,
         colormap,
@@ -558,6 +569,9 @@ pub struct Vid {
     /// 16-pixel spans (`D_DrawSpans16`): the web port's `wasm_exactpersp`
     /// extra, off in id's Quake.
     pub exact_perspective: bool,
+    /// The port's video cvars (Hor+, views past id's largest mode): Classic
+    /// in id's Quake.
+    pub video: render::VideoCvars,
 }
 
 /// How the renderer draws the 3-D view `vrect` of the frame `vid` describes:
@@ -565,12 +579,15 @@ pub struct Vid {
 /// 0.8333 at every 16:10 mode shown at 4:3), which `R_ViewChanged` folds into
 /// the projection so the world is not stretched by the display; where the
 /// view sits on that screen (`D_Sky_uv_To_st` centres the sky on the screen);
-/// and the renderer extra, off unless the platform switched it on.
+/// the video cvars, and id's `d_mipscale`/`d_mipcap`; and the renderer extra,
+/// off unless the platform switched it on.
 pub fn render_options(vrect: &render::ViewRect, vid: &Vid) -> render::RenderOptions {
     render::RenderOptions {
         pixel_aspect: render::vid_aspect(vid.width, vid.height, vid.display_aspect),
         screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: vid.width, vid_h: vid.height }),
         exact_perspective: vid.exact_perspective,
+        video: vid.video,
+        mip: render::MipCvars::DEFAULT,
     }
 }
 

@@ -638,16 +638,28 @@ fn render_demo_frame(
     let eye_contents = crate::world::point_contents(&d.bsp, cam.pos);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0)
+        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0, vid.video.hires)
     } else {
         vrect
     };
-    let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, f.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &render_options(&rvrect, vid));
+    let scene = render::Scene {
+        colormap: d.colormap.as_deref(),
+        time: f.time,
+        light_styles: &demo_styles,
+        bmodels: &bmodels,
+        models: &owned,
+        sprites: &sprite_insts,
+        particles: &parts,
+        viewmodel,
+        options: render_options(&rvrect, vid),
+        ..render::Scene::new(&d.bsp, cam, rvrect.w, rvrect.h, &d.palette)
+    };
+    let view = d.renderer.render(&scene);
     lap(Phase::Render3d);
     // D_WarpScreen: stretched over the screen's view rectangle while it
     // wobbles — the warp applies to the 3-D view FIRST; the content tint joins
     // the deferred whole-screen blend below (V_UpdatePalette order).
-    let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, f.time) } else { view };
+    let view = if dowarp { d.renderer.warp(view, vrect.w, vrect.h, f.time, vid.video.hires) } else { view };
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img =
         render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette);
@@ -855,7 +867,7 @@ mod tests {
         })
         .unwrap();
         let mut d = DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo);
-        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false };
+        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
         // The first frame (CL_TimeDemo_f's) reads through the second message;
         // the time between messages is not what moves playback on.
         let mut shown = Vec::new();

@@ -954,12 +954,25 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let eye_contents = crate::world::point_contents(&w.bsp, eye);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission)
+        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, vid.video.hires)
     } else {
         vrect
     };
-    let view =
-        render::render_scene_ext_sprited(&w.bsp, &cam, rvrect.w, rvrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites, &render_options(&rvrect, vid));
+    let scene = render::Scene {
+        colormap: w.colormap.as_deref(),
+        time: w.clock,
+        light_styles: &light_styles,
+        dlights: &active_dlights,
+        bmodels: &bmodels,
+        external: &external,
+        models: &instances,
+        sprites: &sprites,
+        particles: &parts,
+        viewmodel,
+        options: render_options(&rvrect, vid),
+        ..render::Scene::new(&w.bsp, cam, rvrect.w, rvrect.h, &w.palette)
+    };
+    let view = w.renderer.render(&scene);
     lap(Phase::Render3d);
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
@@ -979,7 +992,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Underwater sine wobble (D_WarpScreen): the warp buffer's view, stretched
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
-    let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, w.clock) } else { view };
+    let view = if dowarp { w.renderer.warp(view, vrect.w, vrect.h, w.clock, vid.video.hires) } else { view };
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
     let view = view_hook(view, &w.palette);
