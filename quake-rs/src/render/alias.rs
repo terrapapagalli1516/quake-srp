@@ -906,7 +906,7 @@ static R_AVERTEXNORMALS: [[f32; 3]; 162] = [
 /// Quake's `cl.viewent`, which V_CalcRefdef puts at the eye plus the bob and
 /// viewsize fudge (`origin_ofs`) with CalcGunAngle's `angles`, drawn by
 /// `R_DrawViewModel` through the ordinary alias pipeline. See
-/// [`draw_viewmodel`].
+/// [`Scene::viewmodel`](super::Scene::viewmodel).
 ///
 /// `frame` selects the pose (an out-of-range frame draws frame 0, as
 /// `R_AliasSetupFrame` does, see [`mdl_frame_verts`]). The model is borrowed

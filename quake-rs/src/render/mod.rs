@@ -192,15 +192,16 @@ impl Image {
 // z-buffer `d_pzbuffer`, `r_warpbuffer` — and draws into them every frame. The
 // z-buffer is the [`Renderer`]'s. The port's frame is an `Image` returned by
 // value, so the rest is a small per-thread pool: the host hands a presented
-// frame back ([`recycle_image`]) and the next frame's view
-// ([`Renderer::render`]), composed screen ([`compose_view`]) and warp
-// snapshot ([`Renderer::warp`]) reuse the allocations. It is the host's frame
-// allocator, not renderer state: every reuse writes every pixel
+// frame back ([`recycle_image`]) and the next frame's screen
+// ([`screen_with_backtile`], [`compose_view`]) and any view drawn apart (the
+// warp buffer's, [`Renderer::render`]) reuse the allocations. It is the
+// host's frame allocator, not renderer state: every reuse writes every pixel
 // ([`Image::reused_uncleared`]), so nothing drawn depends on it, and only the
-// thread that runs the frame loop takes from it.
+// thread that runs the frame loop takes from it (the renderer's threads draw
+// into buffers they are lent).
 
-/// Spare frame buffers kept: one frame's view, composed screen and warp
-/// snapshot.
+/// Spare frame buffers kept: one frame's screen, a view drawn apart, and a
+/// spare.
 const SPARE_FRAMES: usize = 3;
 
 thread_local! {
@@ -1126,8 +1127,11 @@ impl<'a> Entities<'a> {
     fn draw(&self, band: &mut band::Band, frame: &Frame, prof: &mut stats::Profiler) {
         let palette = frame.scene.palette;
         let ta = prof.now();
-        for m in &self.models {
-            m.draw(&mut polyse::PolyFramebuffer::new(band, palette));
+        if !self.models.is_empty() {
+            let mut fb = polyse::PolyFramebuffer::new(band, palette);
+            for m in &self.models {
+                m.draw(&mut fb);
+            }
         }
         if let Some(t) = ta { prof.add(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
         let tp = prof.now();

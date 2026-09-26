@@ -175,7 +175,7 @@ pub const WARP_HEIGHT: usize = 200;
 ///
 /// With the hires extra (`hires`, [`VideoCvars::hires`](crate::render::VideoCvars))
 /// there is no warp buffer: the underwater view is rendered at the screen's
-/// view rectangle, as above water, and [`Renderer::warp`](crate::render::Renderer::warp)
+/// view rectangle, as above water, and [`Renderer::warp_into`](crate::render::Renderer::warp_into)
 /// scales the wobble to it — at 4K id's buffer would be blown up twelve times.
 pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool, hires: bool) -> ViewRect {
     let (viewsize, _, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);

@@ -4,7 +4,7 @@
 //! after the edge scan. `R_ScanEdges` leaves every pixel of the view in
 //! exactly one span, and after it every pass writes pixels through the
 //! z-buffer: the world's spans (`D_DrawSurfaces`, `D_DrawZSpans`), then the
-//! alias models, sprites, particles and gun, each testing and writing
+//! alias models, particles, sprites and gun, each testing and writing
 //! `d_pzbuffer`. So the view is cut into bands of whole rows, and each band
 //! runs the same passes, in id's order, on the pixels in its rows only. Every
 //! pixel then sees the same writes in the same order as in one pass over the
@@ -15,11 +15,16 @@
 //! surface cache (`D_CacheSurface`), the alias models' vertices and clipping,
 //! the particles' projection — is done once, before the bands, and handed to
 //! them read-only. One thread is the same code with one band, drawn on the
-//! calling thread.
+//! calling thread. A band's pixels are the view's own rows or, drawn straight
+//! into the screen, the screen's rows under the view ([`Band::placed`]).
 //!
 //! The threads are `std::thread::scope`'s, spawned for the bands of a frame
 //! and joined before [`Renderer::render`](super::Renderer::render) returns:
-//! they borrow the frame, and nothing outlives it.
+//! they borrow the frame, and nothing outlives it. That is the one way safe
+//! Rust lends a frame's buffers to other threads; a pool of threads kept
+//! across frames would need the frame's data owned or `'static`. A spawn
+//! costs about 10 µs natively (0.15 ms a frame for 16 threads), against
+//! milliseconds of pixels at the sizes where threads pay.
 
 use std::ops::Range;
 use std::sync::{Mutex, PoisonError};
