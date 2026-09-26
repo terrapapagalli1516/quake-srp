@@ -1,203 +1,248 @@
 # quake-rs
 
-The engine crate of quake-rust: a Rust port of id Software's *Quake* (1996) for single
-player, ported from id's GPLv2 WinQuake C source
-([`id-Software/Quake`](https://github.com/id-Software/Quake)). A library (`quake_rs`) plus
-the `quaketool` CLI. Only the standard library; `#![forbid(unsafe_code)]` on the library,
-the tool and the integration tests.
+The engine of [quake-rust](../README.md), as a Rust library. It holds the game's systems:
+- id's file formats;
+- QuakeC;
+- the server;
+- the client;
+- the software renderer;
+- the status bar, menus and console;
+- the settings;
+- id's sound mixer.
 
-It holds the whole game except the platform:
-- the file system and file formats;
-- the QuakeC VM and builtins;
-- the server (spawn, physics, collision, AI, combat, changelevel, intermission,
-  savegames);
-- the software renderer, which draws on any number of threads;
-- the 2-D layer (status bar, menus, console);
-- the game client (the live frame and demo playback);
-- the console's commands and variables, and the Classic and 2026 profiles;
-- id's sound mixer and the CD player's state.
+It is ported from id's GPLv2 WinQuake C source
+([`id-Software/Quake`](https://github.com/id-Software/Quake)), one module per id file where
+that fits. It uses only the standard library, has `#![forbid(unsafe_code)]`, and ships a
+command-line tool, `quaketool`. A host supplies the rest; see [Not here](#not-here).
 
-The platform owns the window or canvas, reading input, the audio device and the disk. The
-browser's platform is `../quake-wasm` (a WASI program; `../web/PLATFORM.md`), and
-`quaketool play` runs the same client natively. Not here: multiplayer and netcode. The
-faithfulness ledger is `../AUDIT.md`.
+## Using it
 
-## Modules
+A host (a platform) drives the game one frame at a time. It hands in the frame's length,
+the player's input and the screen's size. It gets back three things:
+- an 8-bit image;
+- the frame's colour shifts (damage, pickups, underwater, powerups). The host combines them
+  with id's base palette and gamma into the palette it shows the image through;
+- the frame's sound calls, which it feeds to id's mixer.
 
-Every module in `src/`, with the id source it ports. Modules are named after id's files
-where one file maps to one module; the port's own modules say so.
+The browser build and `quaketool play` are two such hosts.
+[`examples/one_second.rs`](examples/one_second.rs) is a third, as a short program. It
+starts a game on E1M1, walks forward firing for one second, and saves what the player saw
+and heard:
+
+```sh
+cargo run --release --example one_second -- ../quake-data/ID1/PAK0.PAK target/e1m1.ppm target/e1m1.wav
+```
+
+The WAV runs a little over a second, because the mixer paints slightly ahead of the clock
+as id's does. The core of the example, with the setup and the file writing left out:
+
+```rust
+// A game on e1m1: server, client and renderer, owned by one value.
+let mut walk = host_cmd::build_walk_map(pak.clone(), "maps/e1m1.bsp", &Rc::new(QRand::new()), &mut sound)
+    .ok_or("maps/e1m1.bsp would not load")?;
+let mut mixer = Mixer::new(&pak, RATE, Fixes::NONE);
+mixer.run(&pak, &sound); // the level's own sounds, from loading it
+
+for n in 1..=72 {
+    walk.in_fwd = 1.0; // "forward" and "fire" held, as keys or a pad would
+    walk.in_attack = true;
+    let frame = cl_main::walk_frame(&mut walk, FRAME, false, &vid);
+
+    // Sound: the frame's calls into id's mixer, then paint up to "now".
+    mixer.run(&pak, &frame.sound);
+    let now = (f64::from(n) * FRAME * f64::from(RATE)) as i64;
+    let pairs = mixer.samples_ahead(now, BUFFER_PAIRS);
+    let at = pcm.len();
+    pcm.resize(at + 2 * pairs, 0);
+    mixer.paint(&mut pcm[at..]);
+
+    last = Some(frame);
+}
+let frame = last.ok_or("no frame")?;
+
+// Picture: the 8-bit frame through its palette (id's VID_SetPalette: the
+// base palette, this frame's colour shifts, then gamma).
+let palette = FramePalette::new(&base_palette, &frame.cshifts, &gamma);
+render::pack_rgba(&frame.image, &palette, &mut rgba, 1);
+```
+
+`walk_frame` runs one of id's host frames, in id's order:
+1. the client builds the move from the held keys, the mouse and the pad (`CL_BaseMove`);
+2. the server runs its frame (`SV_Physics`, the QuakeC thinks and touches) and writes
+   its messages;
+3. the client reads them, relinks the entities (`CL_RelinkEntities`) and places the
+   camera (`V_CalcRefdef`);
+4. the renderer draws the view, and the 2-D layer draws the status bar and centre prints
+   over it.
+
+The host then draws the menu or the console on top, when either is open (`menu`,
+`console`). A demo takes the server's place with `cl_demo::demo_frame`.
+
+## How it is organised
+
+The crate is roughly layered, from id's files up to the client, which drives the rest:
+
+```
+client       client, demo, particles, tent, dlight     the live frame, demos, effects, the host clock
+settings     cvar, cmd, settings, stepping             variables, commands, the Classic and 2026 profiles
+sound        snd, cd_audio                             id's mixer and the CD player's state
+2-D          draw, screen, sbar, menu, console, keys   the status bar, menus, console, key bindings
+renderer     render                                    the 3-D view, on any number of threads
+server       server, world, save                       physics, collision, monsters, savegames
+QuakeC       progs, vm, builtins                       the program, the interpreter, the builtins
+formats      pak, common, wad, bsp, mdl, spr           the search path and id's file formats
+```
+
+State belongs to values: `Server`, `Walk` (a live game), `DemoPlay`, `Renderer`, `Mixer`
+and `Settings`. Two games or two tests never share it, and because the renderer's state is
+in `Renderer`, it can draw on several threads. What is still thread-local is small: a pool
+of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace counter in
+`world`, and two test hooks (a benchmark timer and the 2-D oracle's harness).
+[CODE_PLAN.md](../CODE_PLAN.md) tracks them.
+
+### Modules, with the id source each one ports
+
+**Formats**
 
 | module | id's C | what |
 |---|---|---|
-| `math` | `mathlib.c` | vectors, matrices, angles, `BoxOnPlaneSide` |
-| `crc` | `crc.c` | CRC-16/CCITT (the PAK check) |
-| `read`, `error` | (`LittleLong`, `Sys_Error`) | the bounds-checked little-endian reader, the error type |
-| `pak` | `common.c` | PAK archives (`COM_LoadPackFile`), opened as files and read on demand, each one element of the search path |
-| `common` | `common.c`, `pr_edict.c` | the search path (`COM_InitFilesystem`, `COM_AddGameDirectory`, `COM_FindFile`), `COM_CheckRegistered` and `pop[]`, `com_modified`, `path`; `PR_LoadProgs`' checks |
-| `wad` | `wad.c` | WAD2 archives (`gfx.wad`: palette, pics, fonts) |
-| `bsp` | `bspfile.h`, `model.c` | BSP v29 maps, with the mip levels and `Mod_DecompressVis` |
-| `mdl` | `modelgen.h`, `model.c` | alias models |
-| `spr` | `spritegn.h`, `model.c` | sprites |
-| `progs` | `pr_comp.h`, `progs.h`, `pr_edict.c` | the `progs.dat` format, opcodes decoded once at load (`Op`), and a disassembler |
-| `vm` | `pr_exec.c`, `pr_edict.c` | the QuakeC interpreter, edicts and strings; entity fields and globals through handles resolved once per progs (`Vm::fo`, `Vm::go`); private state behind accessors |
-| `vm::print` | `pr_exec.c`, `pr_edict.c` | `PR_RunError`'s report: `PR_PrintStatement`, `PR_StackTrace`, `ED_Print` |
-| `builtins` | `pr_cmds.c` | the builtins that need no map: maths, strings, prints, `spawn`/`remove`/`find`, `random`, `stuffcmd` |
-| `qrand` | (libc `rand`) | the session's two random streams, QuakeC's `random()` and `SV_NewChaseDir`'s, carried across level loads |
-| `world` | `world.c`, `sv_phys.c` | BSP hull traces (`SV_RecursiveHullCheck`), the box hull, point contents, and the world-only slide move (`ClipVelocity`, `SV_FlyMove`) the `walk` tool uses |
-| `server` (`server/mod.rs`) | `server.h` | the `Server`: a VM with the engine builtins over a loaded map, and its reports; `MoveType`, `Solid`, `EntFlags` |
-| `server::sv_main` | `sv_main.c` | `SV_SpawnServer`, `SV_ConnectClient` (with `Host_Spawn_f`), `SV_CleanupEnts`, `SV_FatPVS` and which entities the client is sent, entity dynamic lights |
-| `server::pr_edict` | `pr_edict.c`, `common.c` | `ED_LoadFromFile` and the entity-text parsers |
-| `server::pr_cmds` | `pr_cmds.c` | the builtins that touch the world (`setmodel`, `traceline`, `droptofloor`, `aim`, `checkclient`, `findradius`, …) and the `pr_builtin[]` install |
-| `server::sv_phys` | `sv_phys.c` | `SV_Physics`: thinks, every movetype, pushers, the player's move; the uncapped gravity lead |
-| `server::sv_user` | `sv_user.c` | `SV_ClientThink`, friction and acceleration, swimming, `SV_SetIdealPitch` |
-| `server::sv_world` | `world.c` | `SV_Move` against the world and every solid edict, `SV_LinkEdict`, touching, `SV_Impact` |
-| `server::sv_move` | `sv_move.c` | monster movement: `SV_movestep`, `SV_NewChaseDir`, `SV_MoveToGoal`, `SV_CheckBottom` |
-| `server::msg` | `sv_main.c`, `pr_cmds.c`, `cl_parse.c` | the server-to-client messages without a network: the `Outbox` the builtins write into (sounds, particles, prints, temp entities), the `Write*` builtins parsed per buffer |
-| `server::lightstyle` | `pr_cmds.c`, `r_light.c` | `PF_lightstyle`'s table and `R_AnimateLight`'s scales |
-| `server::host` | `host_cmd.c`, `sv_main.c` | `ServerCvars` (`skill`, `sv_gravity`), the deferred `changelevel`/`restart`, spawn parms and serverflags, `Host_Kill_f`, the signon settle frames |
-| `save` | `host_cmd.c` | savegames: `Host_Savegame_f`'s `.sav` text and `Host_Loadgame_f`'s parse |
-| `demo` | `cl_demo.c`, `cl_parse.c`, `protocol.h` | the `.dem` framing and the network-message decoder, one frame per message with the state `CL_RelinkEntities` reads |
-| `particles` | `r_part.c` | the particle spawners and their motion |
-| `tent` | `cl_tent.c` | beams: `CL_ParseBeam`'s slots and `CL_UpdateTEnts`' bolt pieces |
-| `dlight` | `cl_main.c` | the dynamic-light pool: `CL_AllocDlight`, `CL_DecayLights` |
-| `stepping` | (the port's own) | `Stepping::Classic` or `Uncapped`: how a host frame of any length steps what drifts with the frame rate (`../FRAMERATE.md`) |
-| `snd` (`snd/mod.rs`) | `snd_dma.c`, `snd_mix.c`, `snd_mem.c` | id's mixer: `SoundMode` (Classic at 11025 Hz, or the 2026 mixer) and `Fixes` |
-| `snd::dma` | `snd_dma.c` | the `Mixer`: the channel table, `S_StartSound` (`SND_PickChannel`, `SND_Spatialize`), `S_StaticSound`, `S_StopSound`, `S_Update` with the leaf ambients, `S_Update_`'s mix-ahead |
-| `snd::mix` | `snd_mix.c` | `S_PaintChannels`, `SND_PaintChannelFrom8`/`16`, the scale table, `S_TransferStereo16` |
-| `snd::mem` | `snd_mem.c` | `GetWavinfo`, `S_LoadSound` + `ResampleSfx`, the `known_sfx` table |
-| `cd_audio` | `cd_win.c`, `cd_audio.c` | the CD player's state: `CDAudio_Play`/`Stop`/`Pause`/`Resume`, `CD_f`, the end-of-track notify; the level from DOS `cd_audio.c` |
-| `render` (`render/mod.rs`) | `r_main.c` | the 3-D view: `Renderer` (all its state: edges, caches, z-buffer, warp, threads) and `Scene` (id's `refdef_t` plus the entity lists), `R_ViewChanged`, `Image<u8>` frames of palette indices |
-| `render::edge` | `r_bsp.c`, `r_draw.c`, `r_edge.c`, `d_edge.c` | the world and brush models: the BSP walk, edge clipping and the edge cache, `R_ScanEdges`, `D_DrawSurfaces`, the 16-bit z-buffer |
-| `render::band` | (the port's own) | the view in row bands on several threads after the edge scan, each band through id's passes in id's order: the same pixels for any thread count |
-| `render::raster` | `d_edge.c`, `d_draw16.s`, `d_scan.c` | the span routines: `D_CalcGradients`, `D_DrawSpans16`, `Turbulent8`; the exact-perspective setting |
-| `render::surf` | `r_surf.c`, `d_surf.c` | `R_TextureAnimation`, mip selection (`D_MipLevelForScale`), the surface cache (`D_CacheSurface`) |
-| `render::light` | `r_surf.c`, `r_light.c` | `R_BuildLightMap`, `R_AddDynamicLights`, `R_MarkLights`, `R_LightPoint` |
-| `render::sky` | `r_sky.c`, `d_sky.c` | the two-layer sky and its 32-pixel spans |
-| `render::warp` | `d_scan.c`, `r_main.c` | liquid turbulence and the underwater `D_WarpScreen` |
-| `render::alias` | `r_alias.c`, `r_aclip.c`, `r_main.c` | alias models and the gun: setup, lighting, bbox test, clipping |
-| `render::polyse` | `d_polyse.c` | `D_PolysetDraw`, the affine triangle filler |
-| `render::sprite` | `r_sprite.c`, `d_sprite.c` | sprites |
-| `render::part` | `r_part.c`, `d_part.c` | drawing particles (`D_DrawParticle`) |
-| `render::view` | `view.c` | `V_CalcBob`, the palette-shift ramps and gamma (`V_UpdatePalette`) as a `FramePalette`, `pack_rgba`, the gun's placement |
-| `render::video` | (the port's own) | `VideoCvars`: views past id's 1280x1024 (`hires`) and Hor+ (`FovMode`); both off is Classic |
-| `render::vis` | `model.c` | `Mod_PointInLeaf` |
-| `render::world` | `r_main.c`, `d_edge.c` | the brush entities handed to the renderer, a face's gradients |
-| `render::stats` | (the port's own; id has `r_speeds`) | per-phase timers and counters, off unless asked for |
-| `render::fixtures`, `server::testutil` | — | test fixtures (test builds only) |
-| `draw` | `draw.c` | pics, characters, strings, fade, tile clear; the scaled 2-D layer's whole scale |
-| `screen` | `screen.c` | `SCR_CalcRefdef` (the view rectangle from `viewsize`), the composed frame, centre prints, the pause plaque |
-| `sbar` | `sbar.c` | status bar, inventory, scoreboards, intermission and finale overlays |
-| `menu` | `menu.c`, `vid_win.c` | every menu, the "Classic / 2026" settings page (`SETTING_ROWS`), and taps (`Menu::tap`) |
-| `keys` | `keys.c`, `default.cfg` | key numbers and names, and `Bindings`: `default.cfg`'s, the 2026 WASD and gamepad layouts, `bind` lines |
-| `console` | `console.c` | the drop-down console, `Con_Print`, the notify lines, history and completion |
-| `cvar` | `cvar.c` | `Cvars`, every console variable as a typed field, and `CVARS`, the console's table of them (names, archive flags, the departures) |
-| `cmd` | `cmd.c`, `common.c` | the command buffer's line splitting, `Cmd_TokenizeString` / `COM_Parse`, and the command table type |
-| `settings` | (`config.cfg`) | the host session's settings (cvars and bindings), the Classic and 2026 profiles, and `config.cfg` as `Host_WriteConfiguration` writes it |
-| `client` (`client/mod.rs`) | `client.h` | the game client's state (`Walk`, `DemoPlay`, `Vid`) and a frame's output (`ClientFrame`: the image, the frame palette, the sound calls) |
-| `client::cl_main` | `cl_main.c`, `cl_parse.c`, `view.c`, `screen.c` | the live frame: the move into the server, the client side of the messages, `CL_RelinkEntities`, `V_CalcRefdef`, the screen |
-| `client::cl_demo` | `cl_demo.c`, `cl_parse.c`, `view.c` | demo playback (`CL_ReadFromServer`, `CL_LerpPoint`, `CL_RelinkEntities`), the attract loop, and `timedemo` |
-| `client::cl_tent` | `cl_tent.c`, `cl_main.c` | temp-entity effects and trails |
-| `client::cl_input` | `cl_input.c` | the move from the held keys and the mouse (`CL_BaseMove`, `CL_AdjustAngles`, `+mlook`) |
-| `client::in_win` | `in_win.c` | the joystick: `IN_StartupJoystick`, `Joy_AdvancedUpdate_f`, `IN_Commands`, `IN_JoyMove`; the 2026 pad's dead zone, curve, menu keys and rumble |
-| `client::lerpmove` | (QuakeSpasm's `r_lerpmove`) | `r_lerpmove`: step movers glide between their steps (a 2026 setting) |
-| `client::view` | `view.c` | `V_ParseDamage`, the view kick, `V_BonusFlash_f`, the colour shifts' fades |
-| `client::host` | `host.c` | `Host_FilterTime` (the 72 fps gate, and the uncapped one), `Host_Error` |
-| `client::host_cmd` | `host_cmd.c` | `map`, `changelevel`, `restart`, loading a save, and the cheats (`god`, `noclip`, `fly`, `kill`, `give`, `impulse`) |
-| `bin/quaketool/` | — | the CLI below: `main.rs` (the command table), `assets`, `render`, `sim`, `census`, `play`, `timedemo`, `sound`, `framerate`, `video`, `entities` |
+| `read`, `error`, `crc` | `LittleLong`, `Sys_Error`, `crc.c` | bounds-checked little-endian reads, the error type, CRC-16 |
+| `pak`, `common` | `common.c` | pak archives, the search path (`COM_FindFile`), `COM_CheckRegistered` |
+| `wad` | `wad.c` | `gfx.wad`: small pictures (mostly the status bar's) and the console font |
+| `bsp`, `mdl`, `spr` | `bspfile.h`, `model.c` | maps (with vis decompression), alias models, sprites |
+| `math` | `mathlib.c` | vectors, angles, `BoxOnPlaneSide` |
 
-The crate is about 70,600 lines of Rust including its test modules. `cargo test --release`
-runs 707 library, 6 `quaketool`, 8 integration tests and 1 doctest, none needing game
-data. `../quake-wasm` adds 172 end-to-end tests against the real shareware pak.
+**QuakeC**
 
-## Checked against the shareware data
+| module | id's C | what |
+|---|---|---|
+| `progs` | `pr_comp.h`, `pr_edict.c` | `progs.dat`, opcodes decoded once at load, a disassembler |
+| `vm`, `vm::print` | `pr_exec.c`, `pr_edict.c` | the interpreter, edicts and strings; `PR_RunError`'s stack trace |
+| `builtins` | `pr_cmds.c` | the builtins that need no map |
+| `qrand` | libc `rand` | the session's random streams |
 
-What `quaketool` prints for id's shareware `pak0.pak` (re-run on 2026-09-26):
+**Server**
 
-- **PAK and CRC:** `quaketool ls` reports `339 files, dir crc 0x80d5, stock pak0`, id's
-  `PAK0_COUNT` 339 and `PAK0_CRC` 32981.
-- **BSP and MDL:** `e1m1.bsp` has 7,358 vertices and 5,516 faces; `player.mdl` 212 vertices
-  and 408 triangles.
-- **QuakeC:** `quaketool dis progs.dat` disassembles 2,091 functions and 20,940 statements.
-- **Server:** `quaketool sim progs.dat e1m1.bsp 20` finds the floor 24 units below the spawn,
-  spawns 336 entities from 369 blocks (33 skill-inhibited, 0 errors), leaves 163 live edicts
-  after the lights remove themselves, and fires 450 thinks in 20 frames.
-- **Player:** `quaketool playtest pak0.pak maps/e1m1.bsp` spawns the player with id's
-  loadout (health 100, `items=0x1101`, shotgun, 25 shells) and runs 1040 units down the
-  entrance hall in 40 frames.
-- **Scene:** `quaketool scene` draws 29 alias models on e1m1 and 50 on `start`; it is the
-  golden-render tool (`../README.md`, "How Classic is proven").
-- **Demo:** `quaketool demo pak0.pak demo1.dem out` reads 972 server frames of id's demo1 on
-  e1m3 and renders them.
+| module | id's C | what |
+|---|---|---|
+| `server` | `server.h` | `Server`, and typed entity fields (`MoveType`, `Solid`, `EntFlags`) |
+| `server::sv_main` | `sv_main.c` | spawning a map, connecting the player, which entities the client is sent |
+| `server::sv_phys`, `sv_user` | `sv_phys.c`, `sv_user.c` | thinks, every move type, pushers; the player's move, friction, swimming |
+| `server::sv_world`, `world` | `world.c` | hull traces, `SV_Move` against the world and every solid, touching |
+| `server::sv_move` | `sv_move.c` | monster movement |
+| `server::pr_cmds`, `pr_edict` | `pr_cmds.c`, `pr_edict.c` | the builtins that touch the world, loading entities from a map |
+| `server::msg`, `lightstyle`, `host` | `sv_main.c`, `pr_cmds.c`, `host_cmd.c` | the messages to the client, light styles, level changes and settings |
+| `save` | `host_cmd.c` | savegames, in id's text format |
 
-## Runs in the browser
+**Client**
 
-The library builds for `wasm32-wasip1` and `wasm32-wasip1-threads` unchanged. It reads
-files through `std::fs` (the pak on demand, through the search path), draws 8-bit frames
-and paints PCM, and it starts render threads with `std::thread::scope`. A thread that
-will not start leaves its rows to the others, so a build without threads draws the same
-frames. `../quake-wasm` is the WASI program around it: events on stdin, frames and sound
-on stdout, saves and `config.cfg` as files. It has no exports, no dependencies and no
-`unsafe`.
+| module | id's C | what |
+|---|---|---|
+| `client` | `client.h` | `Walk`, `DemoPlay`, `Vid`, and a frame's output, `ClientFrame` |
+| `client::cl_main`, `cl_demo` | `cl_main.c`, `cl_demo.c`, `cl_parse.c` | the live frame; demo playback with id's interpolation; `timedemo` |
+| `client::cl_input`, `in_win` | `cl_input.c`, `in_win.c` | the move from keys and mouse; the joystick |
+| `client::view` | `view.c` | the damage kick and the colour shifts (damage, bonus flash) and their fades |
+| `client::host`, `host_cmd` | `host.c`, `host_cmd.c` | `Host_FilterTime`, `Host_Error`; `map`, `load`, the cheats |
+| `client::lerpmove` | QuakeSpasm's `r_lerpmove` | monsters glide between steps (2026) |
+| `client::cl_tent`, `tent`, `particles`, `dlight` | `cl_tent.c`, `r_part.c`, `cl_main.c` | beams, temp entities, trails, particles, dynamic lights |
+| `demo` | `cl_demo.c`, `cl_parse.c` | `.dem` framing and the message decoder |
+| `stepping` | the port's | what the uncapped frame steps so it plays like 72 Hz (see [FRAMERATE.md](../FRAMERATE.md)) |
 
-## Design
+**Renderer**
 
-1. **No dependencies.** Only `std`; builds offline.
-2. **`#![forbid(unsafe_code)]`.** id's C casts file buffers onto structs; here every field is
-   read through a bounds-checked reader, so a bad file is an error, not undefined behaviour.
-3. **Little-endian everywhere** through `from_le_bytes`, so it is right on any host.
-4. **Classic is id's.** Where the port's behaviour could differ from id's, it follows
-   the C, and the doc comments name the C function. Every deliberate departure is a
-   setting (`cvar::CVARS` marks them), off in the Classic profile
-   (`../AUDIT.md`, "The profiles and the departures").
-5. **State lives with its owner.** The renderer, the server, the mixer and the host
-   session own their state, so the renderer can run on several threads and the tests
-   are isolated by construction. The thread-locals that remain are listed in
-   `../CODE_PLAN.md`.
+| module | id's C | what |
+|---|---|---|
+| `render` | `r_main.c` | `Renderer` (all its state), `Scene` (id's `refdef_t`), `Image` of palette indices |
+| `render::edge` | `r_bsp.c`, `r_edge.c`, `r_draw.c`, `d_edge.c` | the BSP walk, edge clipping, `R_ScanEdges`, the z-buffer |
+| `render::band` | the port's | the view in row bands on several threads, each through id's passes in id's order |
+| `render::raster`, `surf`, `light` | `d_scan.c`, `d_draw16.s`, `r_surf.c`, `d_surf.c`, `r_light.c` | 16-pixel perspective spans, mip levels, the surface cache, lightmaps and dynamic lights |
+| `render::sky`, `warp` | `r_sky.c`, `d_sky.c`, `d_scan.c` | the two-layer sky, liquids, the underwater wobble |
+| `render::alias`, `polyse`, `sprite`, `part` | `r_alias.c`, `d_polyse.c`, `r_sprite.c`, `d_part.c` | models and the gun, the affine triangle filler, sprites, particles |
+| `render::view` | `view.c` | view bob, the gun's placement, the frame's palette (`V_UpdatePalette` into `FramePalette`), packing to RGBA |
+| `render::video` | the port's | past id's 1280x1024 limit, and wider views on wide screens (2026) |
+| `render::world`, `vis`, `stats` | `r_main.c`, `model.c` | brush entities, `Mod_PointInLeaf`, timers |
 
-## Build and test
+**2-D, sound, settings**
+
+| module | id's C | what |
+|---|---|---|
+| `draw`, `screen`, `sbar` | `draw.c`, `screen.c`, `sbar.c` | pics and text, the view rectangle and the composed screen, the status bar |
+| `menu`, `console`, `keys` | `menu.c`, `console.c`, `keys.c` | every menu (and the Classic / 2026 page), the console, key bindings |
+| `snd::dma`, `snd::mix`, `snd::mem` | `snd_dma.c`, `snd_mix.c`, `snd_mem.c` | id's mixer: channels, spatialization, painting, resampling |
+| `cd_audio` | `cd_win.c` | which CD track plays; the host plays it |
+| `cvar`, `cmd`, `settings` | `cvar.c`, `cmd.c` | typed console variables, the command table, profiles and `config.cfg` |
+
+`src/bin/quaketool/` is the CLI. The test fixtures (`render::fixtures`, `server::testutil`)
+exist only in test builds.
+
+## Design choices
+
+- **Only `std`.** It builds offline, and there is no dependency to update.
+- **No `unsafe`.** id's C casts file buffers onto structs. Here every field goes through a
+  bounds-checked reader, so a damaged file is an error, not undefined behaviour. The same
+  rule holds in the browser build, which is why it is a WASI program with no exports of its
+  own.
+- **id's shape where it matters.** The edge-sorted renderer, the span loops and the
+  QuakeC dispatch keep the structure of id's code on purpose: that is what makes the pixels
+  and the game state come out identical. Doc comments name the C function each piece
+  ports, and explain any departure.
+- **Every departure is a setting.** Anything that differs from id's game is a typed field
+  in `cvar::Cvars`, or a key binding in `keys::Bindings`, and the Classic profile turns it
+  off. [AUDIT.md](../AUDIT.md) lists them all.
+- **The same result on any machine.** The renderer draws the same pixels on 1 thread or
+  16. In 2026, the game steps anything that would otherwise drift with the frame rate, so
+  high frame rates play like id's 72.
+
+## Testing
 
 ```sh
-cargo build --release            # the library and quaketool
-cargo test --release             # 707 + 6 + 8 + 1 tests, no game data needed
+cargo test --release                   # no game data needed
 cargo run --release --bin quaketool -- --help
 ```
 
-The tests use synthetic assets (`../gen_samples.py`, `../gen_progs.py` generate them), so
-the suite runs without a copy of Quake.
+The tests build their own maps, models, paks and QuakeC programs in Rust (for example
+`tests/integration.rs` and `render::fixtures`), so they run without a copy of Quake.
+`../gen_samples.py` and `../gen_progs.py` write similar files to disk, for trying
+`quaketool` by hand. Two other places test against the real shareware pak:
+- `../quake-wasm`'s end-to-end tests;
+- `../oracle/classic_check.py`, which compares Classic with id's own C (see the
+  [top-level README](../README.md#proof)).
 
-## `quaketool`
+## quaketool
 
-`quaketool --help` lists every command with its arguments. They are one table
-(`src/bin/quaketool/main.rs`, `COMMANDS`), which drives both the dispatch and the help.
-By area:
+`quaketool --help` lists every command with its arguments. One table,
+`src/bin/quaketool/main.rs`'s `COMMANDS`, drives both the dispatch and the help.
 
 - **id's files:** `info`, `ls`, `cat`, `bsp`, `map`, `mdl`, `spr`, `wad`, `dis`, `run`.
-- **The renderer:** `render`, `render-demo`, `menu`, `scene` (the goldens), `view` (one
-  exact view, for the C oracle), `shot` (the game screen at any size and video setting).
-- **The server, headless:** `sim`, `simbench`, `playtest`, `changelevel`, `walk`,
-  `demo`, `census`, `census-edicts`.
-- **The game as the page runs it:** `play` (the browser's client, with frame hashes),
-  `timedemo`, `sound` and `sndscript` (the mixer), `framerate` (60–480 Hz against 72).
+- **Rendering:**
+  - `scene`: the reference renders;
+  - `view`: one exact view, for id's renderer to match;
+  - `shot`: the game screen at any size and video setting;
+  - `render`, `render-demo`, `menu`.
+- **The game, headless:** `sim`, `simbench`, `playtest`, `walk`, `demo`, `changelevel`,
+  `census`, `census-edicts`.
+- **The game as the browser runs it:**
+  - `play`: frame hashes;
+  - `timedemo`: id's benchmark;
+  - `sound`, `sndscript`: the mixer to WAV;
+  - `framerate --check`: gameplay at high frame rates, compared with 72 Hz.
 
-Several take `[video options]` (`--video classic|modern`, `--hires`, `--fov-mode`,
-`--display`, `--scaled2d`, `--threads N`); `--threads` never changes a pixel. `scene`
-takes `QUAKE_BENCH=<iterations>`, `QUAKE_RES=WxH` and `QUAKE_DLIGHT=x,y,z,r|eye[:r]` for
-timing and for injecting a dynamic light. `view` takes the oracle's options
-(`../oracle/README.md`). `play` prints the same frame hashes as `../web/bench.py
---hash-every N`.
+## Not here
 
-## Not here, on purpose
+- **Multiplayer and netcode.** The server and client talk in the same process.
+- **The host's part.** A host supplies:
+  - the frame loop, which calls `client::host`'s 72 fps gate;
+  - routing keys to the game, the menu or the console (`Key_Event`);
+  - running console commands and acting on menu choices;
+  - reading and writing saves and `config.cfg`;
+  - showing the frame and playing the PCM.
 
-- **Multiplayer and netcode** (`net_*.c`): the server and client talk in-process.
-- **The platform:** the window, input devices, the audio device, the disk. The engine
-  paints PCM for the caller and names the CD track to play. The page plays the player's
-  own track files.
-- **`zone.c`:** Rust ownership replaces the allocator.
+  The browser's host is `../quake-wasm` (see [web/PLATFORM.md](../web/PLATFORM.md)).
+  Moving more of this into an engine-owned `Host` is on [CODE_PLAN.md](../CODE_PLAN.md)'s
+  list.
+- **`zone.c`.** Ownership replaces id's allocator.
 
-What is still unlike id's game is listed in `../AUDIT.md`, "Open, as of 2026-09-26".
+## License
 
-## Licensing
-
-The original Quake source is © 1996–1997 id Software, under the GNU General Public License v2.
-This port is a derivative work, so GPL-2.0-or-later. Game data (`.pak` files) is not included
-and not covered by the GPL.
+The Quake source is © 1996–1997 id Software, under the GNU GPL v2. This port is a
+derivative work, so GPL-2.0-or-later. Game data is not included.
