@@ -1,11 +1,15 @@
-//! Player input — in_win.c (`IN_MouseMove`) and keys.c's `Key_Event`: what
-//! the page's key and mouse records do. Every key goes through [`key_event`],
-//! which hands it to the menu, the console or its binding as id's does; the
-//! per-frame `KeyMove` the held bindings feed (cl_input.c's `CL_BaseMove`/
-//! `CL_AdjustAngles`) is [`quake_rs::client::cl_input`]'s.
+//! Player input — in_win.c (`IN_MouseMove`, and the host side of the
+//! joystick: `IN_Commands`, `IN_JoyMove`) and keys.c's `Key_Event`: what the
+//! page's key, mouse and gamepad records do. Every key goes through
+//! [`key_event`], which hands it to the menu, the console or its binding as
+//! id's does; the per-frame `KeyMove` the held bindings feed (cl_input.c's
+//! `CL_BaseMove`/`CL_AdjustAngles`) is [`quake_rs::client::cl_input`]'s, and
+//! the pad as winmm's joystick is [`quake_rs::client::in_win`]'s.
 
 use quake_rs::client::cl_input::{clamp_pitch, V_CENTERSPEED};
+use quake_rs::client::in_win::{Held, Joystick, Pad, PadKeys, Rumble};
 use quake_rs::client::Walk;
+use quake_rs::render::MenuScreen;
 use quake_rs::keys::{
     consolekey, keynum_to_string, keyshift, menubound, Binding, BIND_CENTERVIEW, BIND_CHANGEWEAPON,
     BIND_IMPULSE_0, BIND_MLOOK, BIND_PAUSE, BIND_SIZEDOWN, BIND_SIZEUP, BIND_STRAFE, BIND_TOGGLECONSOLE,
@@ -397,6 +401,128 @@ pub(crate) fn pointer_unlocked() {
             start_pitch_drift(w);
         }
     });
+}
+
+// --- in_win.c's joystick: the page's gamepad --------------------------------
+
+/// The gamepad's host state: in_win.c's joystick ([`Joystick`]: its reading,
+/// `IN_Commands`' keys, `IN_JoyMove`'s axis maps) and the 2026 rumble's.
+#[derive(Debug, Default)]
+pub(crate) struct PadHost {
+    pub(crate) joy: Joystick,
+    /// Rumbles for the loop to send with this frame (`Rumble` records).
+    rumbles: Vec<Rumble>,
+    /// The pad was read (`joystick` on, a pad there) as of the last frame:
+    /// the page rumbles the pad, else a phone's vibration.
+    pub(crate) pad_read: bool,
+    /// The player's `punchangle` pitch as the last frame left it: a weapon's
+    /// kick makes it jump down, and the rumble takes that as a shot.
+    punch: f32,
+}
+
+impl PadHost {
+    /// The frame's rumbles, for the loop to send.
+    pub(crate) fn take_rumbles(&mut self) -> Vec<Rumble> {
+        std::mem::take(&mut self.rumbles)
+    }
+}
+
+/// The page's reading of the pad, each display refresh (the `Gamepad`
+/// record; `None`: no pad connected).
+pub(crate) fn gamepad(pad: Option<Pad>) {
+    ensure_app(|a| {
+        a.pad.joy.set_pad(pad);
+        joy_prints(a);
+    });
+}
+
+/// The joystick's `Con_Printf`s ("joystick detected") to the console.
+fn joy_prints(a: &mut App) {
+    for text in a.pad.joy.take_prints() {
+        a.console.print(&text);
+    }
+}
+
+/// Where the pad's keys go now (for the 2026 `joy_menukeys`): the menu's,
+/// unless a key is being bound (it is the key to bind), or a yes/no
+/// prompt's.
+fn pad_keys(a: &App) -> PadKeys {
+    let menu = &a.menu;
+    if a.key_dest() != KeyDest::Menu || menu.bind_grabbing() {
+        PadKeys::Game
+    } else if menu.new_game_confirm() || menu.screen() == MenuScreen::Quit {
+        PadKeys::YesNo
+    } else {
+        PadKeys::Menu
+    }
+}
+
+/// `IN_Commands` (host.c runs it after `Host_FilterTime`, before the
+/// frame's commands and move): the pad's buttons and hat that changed, each
+/// through `Key_Event` as its `JOY`/`AUX` key — or, in a menu with
+/// `joy_menukeys`, as the keyboard key the menu knows.
+pub(crate) fn in_commands() {
+    let mut events = Vec::new();
+    ensure_app(|a| {
+        let dest = pad_keys(a);
+        events = a.pad.joy.commands(&a.settings.cvars.joy, dest);
+    });
+    for (key, down) in events {
+        key_event(i32::from(key), i32::from(down), 0);
+    }
+}
+
+/// `IN_JoyMove` for the live game's frame of `frametime` seconds (after
+/// `CL_BaseMove`'s keys are in `key_move`): the pad's walk and strafe join
+/// the frame's move, its turn and look the view angles (the pitch bounded
+/// as `IN_JoyMove` bounds it). Gated behind the menu and the console like
+/// the mouse, where id's turned the view behind the menu.
+pub(crate) fn in_joy_move(a: &mut App, frametime: f64, gated: bool) {
+    if a.mode != 0 || a.walk.is_none() {
+        return;
+    }
+    let held = Held {
+        speed: a.walk.as_ref().is_some_and(|w| w.key_move.speed),
+        strafe: a.settings.binds.held(BIND_STRAFE, &a.keys_held),
+        mlook: mouse_look(a),
+    };
+    let m = a.pad.joy.joy_move(&a.settings.cvars, a.settings.profile, held, frametime as f32);
+    joy_prints(a);
+    let Some(w) = a.walk.as_mut().filter(|_| !gated) else { return };
+    w.key_move.fwd += m.forward;
+    w.key_move.side += m.side;
+    w.yaw += m.yaw;
+    w.pitch = clamp_pitch(w.pitch + m.pitch);
+    if m.stop_drift {
+        // V_StopPitchDrift.
+        w.pitch_drift = false;
+        w.pitch_vel = 0.0;
+    }
+}
+
+/// The 2026 rumble (`joy_rumble`) after a live frame: on the damage the
+/// frame's `V_ParseDamage` counted, and on a weapon's kick (the player's
+/// `punchangle` pitch jumping down) with a heavy weapon up. The page plays
+/// it on the pad while the pad is read ([`PadHost::pad_read`]), else on a
+/// phone's vibration with the touch controls.
+pub(crate) fn rumble_after_frame(a: &mut App) {
+    let strength = a.settings.cvars.joy.rumble;
+    a.pad.pad_read = a.pad.joy.active(&a.settings.cvars.joy);
+    let Some(w) = a.walk.as_mut().filter(|_| a.mode == 0) else { return };
+    let damage = std::mem::take(&mut w.damage_count);
+    let vm = &w.server.vm;
+    let punch = vm.ent_vec(w.player, vm.fo.punchangle)[0];
+    let kicked = punch < a.pad.punch;
+    a.pad.punch = punch;
+    if strength <= 0.0 {
+        return;
+    }
+    if damage > 0.0 {
+        a.pad.rumbles.push(Rumble::damage(damage, strength));
+    }
+    if kicked && let Some(r) = Rumble::shot(vm.ent_float(w.player, vm.fo.weapon) as i32, strength) {
+        a.pad.rumbles.push(r);
+    }
 }
 
 /// The player's current look pitch in degrees (+down, Quake convention) — a
@@ -834,6 +960,160 @@ mod tests {
             step(0.05);
         }
         assert!(player_pitch() < -30.0, "mlook motion stops the drift");
+    }
+
+    /// A standard pad (17 buttons) with `pressed` and `axes`.
+    fn pad(pressed: u32, axes: [f32; 6]) -> Option<Pad> {
+        Some(Pad { standard: true, num_buttons: 17, pressed, axes })
+    }
+
+    /// The page's refresh with the pad in this state: its reading, then a
+    /// host frame.
+    fn pad_frame(pressed: u32, axes: [f32; 6]) {
+        gamepad(pad(pressed, axes));
+        step(1.0 / 60.0);
+    }
+
+    fn yaw() -> f32 {
+        walk_mut(|w| w.yaw)
+    }
+
+    /// Classic is id's: `joystick 0` reads no pad; with `joystick 1` the
+    /// left stick is a 1996 joystick (X turns, Y walks) and the buttons are
+    /// id's unbound JOY/AUX keys.
+    #[test]
+    fn classic_reads_the_pad_only_with_joystick_1_as_ids_joystick() {
+        use quake_rs::keys::K_JOY1;
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        let yaw0 = yaw();
+        for _ in 0..3 {
+            pad_frame(1, [1.0, -1.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+        assert_eq!((yaw(), key_is_down(i32::from(K_JOY1))), (yaw0, 0), "joystick 0: nothing");
+        let lines = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>())
+        };
+        assert!(lines().iter().any(|l| l == "joystick detected"), "IN_StartupJoystick's line");
+        crate::host_cmd::execute_console_command("joystick 1");
+        pad_frame(1, [1.0, -1.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(yaw() < yaw0, "X right turns right");
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 200.0, "Y up walks at cl_forwardspeed");
+        assert!(lines().iter().any(|l| l == "JOY1 is unbound, hit F4 to set."), "A is JOY1, unbound in default.cfg");
+        pad_frame(0, [0.0; 6]);
+    }
+
+    /// The 2026 pad: the left stick walks, the right stick turns, the right
+    /// trigger fires (`AUX8` `+attack`) — and a rocket's kick rumbles, as
+    /// does damage.
+    #[test]
+    fn the_2026_pad_walks_turns_fires_and_rumbles() {
+        use quake_rs::keys::K_AUX1;
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        use_2026();
+        pad_frame(0, [0.0; 6]);
+        let (x0, y0, yaw0) = (listener().pos[0], listener().pos[1], yaw());
+        for _ in 0..30 {
+            pad_frame(0, [0.0, -1.0, 0.3, 0.0, 0.0, 0.0]);
+        }
+        let dist = ((listener().pos[0] - x0).powi(2) + (listener().pos[1] - y0).powi(2)).sqrt();
+        assert!(dist > 100.0, "the left stick walks ({dist:.1}u)");
+        assert!(yaw() < yaw0, "the right stick turns right");
+        let take = || APP.with(|c| c.borrow_mut().as_mut().unwrap().pad.take_rumbles());
+        take();
+        let p = walk_mut(|w| w.player);
+        walk_mut(|w| w.server.vm.ent_set_float(p, "dmg_take", 20.0));
+        pad_frame(0, [0.0; 6]);
+        let hurt = take();
+        assert_eq!(hurt, [Rumble::damage(10.0, 1.0)], "V_ParseDamage's count 10");
+        walk_mut(|w| w.next_impulse = 9); // every weapon
+        pad_frame(0, [0.0; 6]);
+        key_down(i32::from(b'7'));
+        key_up(i32::from(b'7'));
+        for _ in 0..30 {
+            pad_frame(0, [0.0; 6]);
+        }
+        assert_eq!(player_field("weapon") as i32, IT_RL);
+        take();
+        pad_frame(1 << 7, [0.0; 6]);
+        assert_eq!(key_is_down(i32::from(K_AUX1 + 7)), 1, "RT is AUX8, +attack");
+        for _ in 0..5 {
+            pad_frame(1 << 7, [0.0; 6]);
+        }
+        pad_frame(0, [0.0; 6]);
+        let shots = take();
+        assert!(shots.contains(&Rumble::shot(IT_RL, 1.0).unwrap()), "the rocket's kick: {shots:?}");
+        let pad_read = || APP.with(|c| c.borrow().as_ref().unwrap().pad.pad_read);
+        assert!(pad_read(), "the pad is read: the page rumbles it");
+        // With the pad not read, the rumble still comes, for a phone.
+        crate::host_cmd::execute_console_command("joystick 0");
+        walk_mut(|w| w.server.vm.ent_set_float(p, "dmg_take", 20.0));
+        pad_frame(0, [0.0; 6]);
+        assert_eq!((take().len(), pad_read()), (1, false), "joystick 0: a phone's vibration");
+        crate::host_cmd::execute_console_command("joy_rumble 0");
+        walk_mut(|w| w.server.vm.ent_set_float(p, "dmg_take", 20.0));
+        pad_frame(0, [0.0; 6]);
+        assert!(take().is_empty(), "joy_rumble 0: none");
+    }
+
+    /// The 2026 pad in the menus (`joy_menukeys`): Start opens the menu
+    /// (`togglemenu`), the D-pad moves, A enters, B backs out and closes it.
+    #[test]
+    fn the_2026_pad_works_the_menus() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        use_2026();
+        let rest = [0.0; 6];
+        let press = |bit: u32| {
+            pad_frame(1 << bit, rest);
+            pad_frame(0, rest);
+        };
+        press(9); // Start
+        assert_eq!((menu_visible(), crate::menu::menu_screen_id()), (1, 0), "Start: the main menu");
+        let cursor = || APP.with(|c| c.borrow().as_ref().unwrap().menu.cursor());
+        let at = cursor();
+        press(13); // D-pad down
+        assert_eq!(cursor(), at + 1, "the D-pad moves the cursor");
+        press(12); // up
+        press(0); // A: Enter on Single Player
+        assert_eq!(crate::menu::menu_screen_id(), 1, "A enters");
+        press(1); // B: Escape
+        assert_eq!((menu_visible(), crate::menu::menu_screen_id()), (1, 0), "B backs out");
+        press(1);
+        assert_eq!(menu_visible(), 0, "and closes the menu");
+        // A pressed in the game comes up as JOY1 though the menu is up by then.
+        pad_frame(1 | 1 << 9, rest); // A and Start down in the game: Start opens the menu
+        pad_frame(0, rest);
+        assert_eq!(key_is_down(i32::from(quake_rs::keys::K_JOY1)), 0, "nothing stays held");
+        press(1);
+    }
+
+    /// The mouse turns as far for the same motion at any refresh rate:
+    /// IN_MouseMove adds each record's counts as they come, however the
+    /// page splits them into events and frames.
+    #[test]
+    fn mouse_turns_the_same_at_60_and_480_hz() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        use_2026();
+        let turn = |hz: u32, per_frame: u32| {
+            walk_mut(|w| w.yaw = 0.0);
+            for _ in 0..hz {
+                for _ in 0..per_frame {
+                    mouse_move(480.0 / (hz * per_frame) as f32, 0.0);
+                }
+                step(1.0 / hz as f32);
+            }
+            yaw()
+        };
+        let (at60, at480, at480_split) = (turn(60, 1), turn(480, 1), turn(480, 3));
+        assert!((at60 - at480).abs() < 1e-3 && (at480 - at480_split).abs() < 1e-3, "{at60} {at480} {at480_split}");
+        assert!((at60 + 480.0 * 0.16).abs() < 1e-2, "0.16° a count at sensitivity 3: {at60}");
     }
 
     #[test]

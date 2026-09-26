@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 15] = [
+pub const SETTING_ROWS: [SettingRow; 17] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -204,6 +204,18 @@ pub const SETTING_ROWS: [SettingRow; 15] = [
         cvar: "in_touch",
         label: "        Touch controls",
         help: ["On a touch screen: a stick, look", "by dragging, fire, jump, weapon"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joystick",
+        label: "               Gamepad",
+        help: ["Twin sticks: left moves, right", "looks; RT fires, Start = menu"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joy_rumble",
+        label: "                Rumble",
+        help: ["The pad, or a phone, shakes when", "you are hit or a big gun fires"],
         kind: RowKind::Toggle,
     },
 ];
@@ -2260,13 +2272,21 @@ fn draw_options_screen(
 /// px apart, the labels at x=16, the values at x=220, the cursor at x=200.
 /// Under them the notes, from x=[`EXTRAS_NOTE_X`] (right of the plaque,
 /// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
-/// the list and the highlighted row's help lines under it, at most
-/// [`EXTRAS_NOTE_COLS`] columns.
+/// the list — right under it once the rows leave no room for the gap in the
+/// 200-line screen (17 rows do not) — and the highlighted row's help lines
+/// right under the header, at most [`EXTRAS_NOTE_COLS`] columns.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 const EXTRAS_NOTE_X: f32 = 64.0;
 const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
-const EXTRAS_HEADER_Y: f32 = EXTRAS_ROW_Y0 + (SETTING_ROWS.len() + 1) as f32 * OPTIONS_ROW_STEP;
-const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + 2.0 * OPTIONS_ROW_STEP;
+const EXTRAS_LIST_END: f32 = EXTRAS_ROW_Y0 + SETTING_ROWS.len() as f32 * OPTIONS_ROW_STEP;
+/// The header and the three help lines.
+const EXTRAS_NOTES_H: f32 = 4.0 * OPTIONS_ROW_STEP;
+const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTES_H <= 200.0 {
+    EXTRAS_LIST_END + OPTIONS_ROW_STEP
+} else {
+    EXTRAS_LIST_END
+};
+const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + OPTIONS_ROW_STEP;
 /// The page's header (`M_PrintWhite`): what these rows are.
 const EXTRAS_HEADER: &str = "Not in id's Quake";
 
@@ -3930,8 +3950,14 @@ mod tests {
             }
         }
         // Every departure has its row, but Always Run's two speeds (id's own
-        // Options row).
-        for c in cvar::CVARS.iter().filter(|c| c.departure && !c.name.starts_with("cl_") || c.name == "cl_jumpswim") {
+        // Options row) and the pad's layout under the Gamepad row (id's
+        // advanced configuration and the port's stick shaping and menu keys,
+        // tuned on the console as id's joy* were).
+        let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
+        let listed = |c: &&cvar::Cvar| {
+            c.departure && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim"
+        };
+        for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);
         }
         assert_eq!(MenuScreen::Extras.item_count(), SETTING_ROWS.len());
@@ -3982,7 +4008,7 @@ mod tests {
         // The settings page, as M_Options_Draw: plaque + OPTIONS title, the
         // rows from y=32 (bronze labels, values at x=220), the cursor at x=200
         // while the 4 Hz blink shows it; under them, right of the plaque, the
-        // white header a row below the list and the row's help lines under it,
+        // white header a row below the list and the row's help lines right under it,
         // at x=64.
         m.set_cursor(ROW_PROFILE);
         m.select(&mut s);
@@ -3990,7 +4016,7 @@ mod tests {
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
         assert_eq!(img.rgb[4 * 320 + 16], pal[9], "qplaque at (16,4)");
         assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
-        let header_y = 32 + (SETTING_ROWS.len() + 1) * 8;
+        let header_y = EXTRAS_HEADER_Y as usize;
         assert_eq!(px(&img, 64, header_y), pal[6], "the header is M_PrintWhite");
         for (i, row) in SETTING_ROWS.iter().enumerate() {
             let y = 32 + i * 8;
@@ -3999,7 +4025,7 @@ mod tests {
             assert_eq!(px(&img, 220, y), pal[5], "row {i}'s value at x=220");
         }
         assert_eq!(px(&img, 200, 32), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 0's help, bronze, under the header");
+        assert_eq!(px(&img, 64, header_y + 8), pal[5], "row 0's help, bronze, under the header");
         // Nothing but the plaque in its columns: every note starts right of it.
         for y in 30..200 {
             for x in 16..48 {
@@ -4018,7 +4044,7 @@ mod tests {
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
         assert_eq!(px(&img, 220 + 16, 40), pal[0], "\"on\" is two characters");
         assert_eq!(px(&img, 220 + 16, 48), pal[5], "\"off\" is three");
-        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 2's help once the cursor moves");
+        assert_eq!(px(&img, 64, header_y + 8), pal[5], "row 2's help once the cursor moves");
         assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 2");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, [0, 0, 0]);

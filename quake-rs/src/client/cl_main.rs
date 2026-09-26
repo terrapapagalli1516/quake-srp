@@ -85,6 +85,7 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     let byte = |f: f32| (f as i32) & 255;
     let pd = parse_damage(byte(save), byte(take), from, ent_origin, [w.pitch, w.yaw, 0.0]);
     w.damage_blend = cshift_add(w.damage_blend, pd.percent);
+    w.damage_count += pd.percent / 3.0;
     w.damage_color = pd.color;
     w.v_dmg_roll = pd.roll;
     w.v_dmg_pitch = pd.pitch;

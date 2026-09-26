@@ -20,6 +20,7 @@
 //! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into |
 //! | 10 | `AudioClock` | `pos u32`: the sample pairs the page's audio device has played (a wrapping count; the page sends it before each `Tick`) |
 //! | 11 | `AudioWake` | `pos u32`: the same, from the host between ticks while the device plays: mix now (`S_ExtraUpdate`) |
+//! | 20 | `Gamepad` | `connected u8`, `standard u8`, `buttons u8`, `0 u8`, `pressed u32`, `axes f32×6`: the pad's state, polled each display refresh ([`quake_rs::client::in_win::Pad`]) |
 //!
 //! **Out** (program → host), an 8-byte header `[kind u8][0 u8 ×3][len u32]`
 //! and `len` payload bytes:
@@ -35,11 +36,14 @@
 //! | 14 | `Pcm` | `start u32` (the pair it plays at, in the `AudioClock`'s count), `rate u32`, `flags u32` (1: silence what was mixed ahead first, `S_ClearBuffer`), then 16-bit stereo pairs: what the mixer painted this tick, for the page's ring |
 //! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
 //! | 16 | `Cd` | `serial u32` (a new value: play `track` from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes (only with a disc: the player's music) |
+//! | 20 | `Rumble` | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read, rumble it; 0: a phone's vibration): the 2026 `joy_rumble` |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
 
 use std::io::{self, Read, Write};
+
+use quake_rs::client::in_win::{Pad, Rumble, JOY_MAX_AXES};
 
 /// Input record kinds.
 const IN_TICK: u8 = 1;
@@ -53,6 +57,7 @@ const IN_END: u8 = 8;
 const IN_WINDOW: u8 = 9;
 const IN_AUDIO_CLOCK: u8 = 10;
 const IN_AUDIO_WAKE: u8 = 11;
+const IN_GAMEPAD: u8 = 20;
 
 /// One event from the host.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +89,8 @@ pub(crate) enum Event {
     End,
     /// The page's box for the picture, in device pixels.
     Window { w: u32, h: u32 },
+    /// The pad's state this refresh; `None`: no pad is connected.
+    Gamepad(Option<Pad>),
     /// A record this program does not know (skipped, for forward
     /// compatibility with a newer page).
     Unknown(u8),
@@ -127,9 +134,24 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
         }
         IN_END => Event::End,
         IN_WINDOW => Event::Window { w: p.u32(), h: p.u32() },
+        IN_GAMEPAD => Event::Gamepad(read_pad(&mut p)),
         other => Event::Unknown(other),
     };
     Ok(Some(ev))
+}
+
+/// A `Gamepad` record's pad: `None` when it says none is connected.
+fn read_pad(p: &mut Payload) -> Option<Pad> {
+    let connected = p.u8() != 0;
+    let standard = p.u8() != 0;
+    let num_buttons = p.u8().min(32);
+    p.skip(1);
+    let pressed = p.u32();
+    let mut axes = [0.0; JOY_MAX_AXES];
+    for a in &mut axes {
+        *a = p.f32();
+    }
+    connected.then_some(Pad { standard, num_buttons, pressed, axes })
 }
 
 /// A little-endian reader over one record's payload. A short payload reads
@@ -175,6 +197,7 @@ const OUT_BENCH: u8 = 13;
 const OUT_PCM: u8 = 14;
 const OUT_AUDIO: u8 = 15;
 const OUT_CD: u8 = 16;
+const OUT_RUMBLE: u8 = 20;
 
 /// `Frame` pixel formats. Only RGBA8 exists today: the engine composes the
 /// screen in RGB (PERF_PLAN B5). An 8-bit indexed format plus its palette is
@@ -237,6 +260,8 @@ pub(crate) enum Msg<'a> {
     /// The CD player's state ([`quake_rs::cd_audio::CdState`]): the page
     /// plays the player's file for the track, beside the sound ring.
     Cd(quake_rs::cd_audio::CdState),
+    /// A rumble, and whether the pad is read (else a phone vibrates).
+    Rumble { rumble: Rumble, pad: bool },
 }
 
 /// Little-endian field writer for a message's fixed part.
@@ -300,6 +325,9 @@ impl Msg<'_> {
                     CdMode::Paused => 2,
                 };
                 (OUT_CD, f.u32(cd.serial).u8(cd.track).u8(u8::from(cd.looping)).u8(mode).u8(0).f32(cd.volume).0, &[])
+            }
+            Msg::Rumble { rumble: r, pad } => {
+                (OUT_RUMBLE, f.f32(r.strong).f32(r.weak).u32(r.ms).u32(u32::from(pad)).0, &[])
             }
         }
     }
@@ -367,6 +395,16 @@ pub(crate) mod encode {
     pub(crate) fn audio_wake(pos: u32) -> Vec<u8> {
         record(super::IN_AUDIO_WAKE, &pos.to_le_bytes())
     }
+    /// A `Gamepad` record: `None` is "no pad connected".
+    pub(crate) fn gamepad(pad: Option<quake_rs::client::in_win::Pad>) -> Vec<u8> {
+        let p = pad.unwrap_or_default();
+        let mut v = vec![pad.is_some() as u8, p.standard as u8, p.num_buttons, 0];
+        v.extend_from_slice(&p.pressed.to_le_bytes());
+        for a in p.axes {
+            v.extend_from_slice(&a.to_le_bytes());
+        }
+        record(super::IN_GAMEPAD, &v)
+    }
 }
 
 /// A decoded output record (tests and the native twin read the program's
@@ -423,6 +461,9 @@ mod tests {
         stream.extend(encode::audio_ready(true, 48000));
         stream.extend(encode::audio_clock(4096));
         stream.extend(encode::audio_wake(4200));
+        let pad = Pad { standard: true, num_buttons: 17, pressed: 0b101, axes: [0.5, -1.0, 0.0, 0.25, 1.0, 0.0] };
+        stream.extend(encode::gamepad(Some(pad)));
+        stream.extend(encode::gamepad(None));
         stream.extend(encode::end());
         let mut r = &stream[..];
         let mut got = Vec::new();
@@ -439,6 +480,8 @@ mod tests {
                 Event::AudioReady { running: true, rate: 48000 },
                 Event::AudioClock(4096),
                 Event::AudioWake(4200),
+                Event::Gamepad(Some(pad)),
+                Event::Gamepad(None),
                 Event::End,
             ]
         );
@@ -504,5 +547,6 @@ mod tests {
         Msg::Cd(cd).write_to(&mut out).unwrap();
         assert_eq!(&out[..8], &[16, 0, 0, 0, 12, 0, 0, 0]);
         assert_eq!(&out[8..], &[3, 0, 0, 0, 6, 1, 2, 0, 0, 0, 0, 0x3f]);
+        assert_eq!(size(Msg::Rumble { rumble: Rumble { strong: 1.0, weak: 0.5, ms: 200 }, pad: true }), 16);
     }
 }
