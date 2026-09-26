@@ -1,63 +1,255 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-09-25, after the overnight push (`quake/overnight`, final review fixes merged). The
-first section is where things stand; the second is what the night changed; the rest is
-the older history, kept as evidence, with superseded items marked.
+Last updated 2026-09-26, after the 2026 push (`quake/2026`). The first section is where
+things stand. The second is what the day changed, branch by branch. Then how to work
+here, and the older history, kept as evidence, with superseded items marked.
 
 ---
 
 ## Where things stand
 
-- **What it is.** The shareware episode plays in the browser and natively, single player,
-  as id's WinQuake plays it: attract demos, New Game, E1M1–E1M8 with Chthon, death and
-  respawn, intermission and finale, save and load, Options, the console. `README.md` says
-  how to run it.
-- **The rule** is faithful to WinQuake by default, Always Run the only intended default
-  departure, everything else an opt-in Web extra (four exist: uncapped framerate, show FPS,
-  exact perspective, scaled 2-D layer).
-- **Two things for the user to decide:**
-  1. Four control departures are still on by default (CENSUS.md, "Rule departures on by
-     default"): mouse look held while the pointer is locked, WASD, `f` for fullscreen,
-     Space swimming up faster. Keep them as recorded exceptions, or make them extras?
-  2. The 72 fps cap is on by default, as in id's `Host_FilterTime`: a 144 Hz display runs
-     at 72 fps, a 120 Hz one at 60 (every other refresh). It is faithful, and the chair
-     kept it; "Uncapped framerate" in Web extras turns it off. Flagging it because it is
-     the one faithful change most likely to feel like a regression.
-- **Measured against id.** id's WinQuake renderer, built headless from the C (`oracle/`),
-  matches the port on 99.91–99.98% of pixels in the four standard views against id's x86
-  16-pixel spans, 100.00% at the page's 4:3 aspect, entity pixels 100%. The 2-D layer
-  matches id's composited screen except three explained residues (`oracle/README.md`).
-  The gameplay census found 18 HIGH/MED differences; all are fixed (`CENSUS.md`).
-- **Speed.** In the browser (headless Chromium, wasm), id's demo1 at 1280x800 takes 4.5 ms
-  a frame, from 22.6 ms at the start of the night (median; p95 33.1 → 5.0 ms). id's own
-  measure, `timedemo demo1`, now runs in the port: natively it is 1.23–1.43x the speed of
-  id's portable C at 320x200–960x600, and in the browser about as fast as id's C (0.91–1.05x).
-  Details and caveats in `PERF_PLAN.md` (§10 for timedemo).
-- **After `31775f5`, the final review's fixes** (AUDIT.md, "Final review fixes, engine side" /
-  "UI side"): dynamic lights on moved doors and lifts in world space as id's; views clamped
-  to id's `MAXWIDTH`x`MAXHEIGHT`; `setmodel` bounds (±16 alias, sprite halves); bad-map
-  hardening; boot into the attract demos with no menu (any key brings it up; the menu stops
-  the loop, `M_Menu_Main_f`); every key through keys.c's `Key_Event`; `help` is the Help
-  screen (`wasm_help` the port's list); console history, Tab completion, backscroll;
-  Multiplayer > Setup (its name does not yet reach the player's netname — the server
-  connects "player"); the canvas box snaps to whole pixels per column where close.
-- **Checks at the end** (run by the chair): `cargo test --release` passes in both
-  crates, 601 + 2 + 8 in quake-rs and 135 in quake-wasm (1 ignored: the `oracle_screen`
-  harness). Goldens (`quaketool scene`, sha256 prefix): e1m1 `4807aaa1`, e1m2 `9ae2b478`,
-  e1m3 `c65b7046`. The nine `web/verify_*.py` scripts pass (walk, ambient 13/13, demo
-  11/11, input 41/41, menu 66/66, save, loops 10/10, extras 42/42, timedemo 32/32; headless
-  Chromium, on a scratch copy of the page). `quaketool timedemo` draws demo1's 969 frames.
-- **Deployed.** `http://localhost:8196/` serves the final build (`miniserve -C`, from
-  a work directory's `deploy`). Three
-  adversarial reviews ran on frozen trees; the last one's findings are fixed by the final
-  review fixes above.
-- **What is left:** `AUDIT.md`, "Open, as of 2026-09-25", one list. The largest items: no
-  dynamic lights in demo playback, the departures above, and nothing measured on a real
-  GPU browser or a real high-refresh display.
+- **What it is.** A Rust port of id's WinQuake. It runs in the browser, as a WASI program
+  in a Web Worker, and natively through `quaketool`. It plays the shareware episode in
+  single player: attract demos, New Game, E1M1–E1M8 with Chthon, death and respawn,
+  intermission and finale, save and load, the menus, the console. With the player's own
+  `pak1.pak` it plays the registered game. `README.md` says how to build, serve and play
+  it.
+- **The rules** (the user's, 2026-09-26, in priority order):
+  1. zero dependencies;
+  2. no `unsafe`;
+  3. Classic = id's, proven for anything touched;
+  4. the default is the best "software-rendered Quake, in 2026": palette-true, crisp
+     texels, never filtered, and playing well from 60 to 480 Hz with no 72 fps cap;
+  5. showcase-quality code.
+
+  Where the rules stand today:
+  - Every crate and binary is `#![forbid(unsafe_code)]`, with only `std` and no
+    dependencies. The page is plain JS/HTML.
+  - Every departure from id's game is a setting. The **Classic** profile turns them all
+    off; **2026**, the default, turns most on (`AUDIT.md`, "The profiles and the
+    departures").
+- **What works in 2026, beyond id's game.** Each of these is off in Classic:
+  - no frame cap, with the game stepped to play as at 72 Hz from 60 to 480 Hz;
+  - native resolution in whole pixels (Auto pixel size), Hor+ widescreen, and a 2-D
+    layer blown up by a whole number;
+  - smooth monster movement and the crosshair;
+  - WASD, mouse look and Always Run;
+  - id's mixer at the device's rate with four bugs fixed;
+  - a twin-stick gamepad with rumble, and touch controls on phones.
+
+  **In every profile:**
+  - the renderer draws on every core, byte-identical at any thread count;
+  - 8-bit frames, presented through WebGL2 or a 2-D canvas;
+  - id's mixer in an AudioWorklet;
+  - saves and `config.cfg` as files in IndexedDB;
+  - install to the home screen and play offline;
+  - a player's own `pak1.pak` and CD tracks;
+  - QuakeC errors end the game as id's `Host_Error` does.
+- **Measured** (on `244bcd5` plus this branch's docs):
+  - **Classic:** `uv run oracle/classic_check.py` prints ALL PASS. That covers the
+    goldens `4807aaa1` / `9ae2b478` / `c65b7046`, 42 play hashes and tallies, the
+    timedemo counts, the census and id's edicts on nine maps, the eight 3-D oracle rows
+    at 100.00%, 146 2-D shots at their recorded match, demo playback against id's client
+    over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
+  - **Tests:** `cargo test --release` gives 707 library + 6 `quaketool` + 8
+    integration + 1 doctest in quake-rs, and 172 in quake-wasm (1 ignored: the 2-D
+    oracle's harness).
+  - **Clippy:** 0 warnings in both crates.
+  - **Browser checks:** the 15 `web/verify_*.py` checks pass in headless Chromium
+    (today's run). The 14 page checks ran on both builds' deploy dirs;
+    `verify_threads` builds its own program. One check fails on the threads build
+    only: `verify_touch`'s "the picture fills the screen" reads the canvas before the
+    first frame has sized it (37/38; "What is left"). The branches also ran most checks
+    in headless Firefox.
+  - **Frame rate:** `quaketool framerate --check` passes: 22 scenarios, uncapped at
+    60–480 Hz against 72.
+  - **Speed:** `timedemo demo1` in Classic natively is 1.35–1.44x id's portable C. In
+    2026 video on 8 threads it runs 689 / 455 / 210 fps at 1080p / 1440p / 4K. In the
+    browser a 1440p frame takes 3.3 ms on the threads build on the GPU (`README.md`,
+    "Numbers"; `PERF_PLAN.md` §11).
+- **Not verified:**
+  - a real browser on a real display: every browser check ran headless, on a
+    desktop GPU at best;
+  - Safari and iOS (Playwright's WebKit would not start here);
+  - a real phone (the phone checks emulate one; real-phone speed at pixel size 1 on the
+    threads build is unknown);
+  - a real 120–480 Hz display;
+  - real pointer lock (headless Chromium's lock jumps the pitch to −70);
+  - a real gamepad (emulated);
+  - Esc under the Keyboard Lock API;
+  - sound by ear (only its counters, samples and the C oracle).
+- **Deployed.** The chair serves the threads build of the final tree over https on the
+  private network, from its ledger's deploy dir (the ledger has the address). `README.md`
+  describes serving generically.
+- **What is left.** `AUDIT.md`, "Open, as of 2026-09-26", is the one list. The closing
+  review's ranked next steps:
+  1. old-era names (`wasm_*` cvars, `MenuScreen::Extras`, `EXTRAS_*`; renaming needs
+     `config.cfg` aliases);
+  2. rustfmt and edition 2024 for quake-rs (CODE_PLAN W0a);
+  3. 12 rustdoc warnings and dead public functions in `server/` and the VM;
+  4. 16 thread-locals left;
+  5. on a phone, the touch buttons overlap the ammo count;
+  6. in 2026, Video Options shows 960x600 as current and a pick silently turns Native
+     resolution off; the menu's fade dither is a fine screen-door under a 4–6x menu;
+  7. no `version` command, and `disconnect` does not end the game.
+
+  Also: `verify_touch.py` checks the canvas size at `ready`, before the first frame
+  sized it, so it fails on the threads build. The canvas is right 0.5 s later on both
+  builds; the check should wait for it. The structural work is `CODE_PLAN.md`'s menu:
+  W0a/W0b, R1, R6, R8, R9, R11, and the engine-owned `Host` session (§7).
+
+---
+
+## 2026-09-26: the 2026 push
+
+the user's brief:
+- **Extremely important:** zero dependencies, no `unsafe`, and identical to id with
+  every feature off.
+- **Beyond that:** "the most amazing experience ever of an idealized version of
+  software-rendered Quake (but in 2026)" by default, textures never smoothed.
+- **The ideas list:** do every idea on it but a fixed 72 Hz simulation with interpolated
+  rendering ("sounds like a degradation").
+- **Frame rate:** the game should run well independently of it, up to a 480 Hz
+  monitor.
+- **The code:** it matters, as a showcase.
+
+The chair ran 17 agents, at most 4 at a time, one branch each. It merged them into
+`quake/2026` (from `quake/overnight` @ `3866e1b`) after a full check each time. Its
+ledger is a `PLAN.md` outside this repository; each
+merge message summarises its branch. In merge order:
+
+- **rustcheck** (`638571c`): `CODE_PLAN.md`, a measured plan for showcase-quality Rust
+  (edition 2024 is a one-line change; W0a/W0b mechanical windows; refactors R1–R11).
+- **hires** (`4ecb848`): the renderer at 2026 sizes. Edge `u` in 44.20 so nothing wraps
+  past 2048 columns; particles and the underwater warp in proportion; Hor+; `quaketool
+  shot`. Classic byte-identical.
+- **audio, part 1** (`7bb709f`): id's `snd_dma.c`/`snd_mix.c`/`snd_mem.c` in the engine
+  (`snd::Mixer`, no globals), sample-exact against id's C built headless
+  (`oracle/sound.py`, 28/28). The 2026 mixer fixes four faults.
+- **framerate** (`5360411`): `Stepping::Uncapped`. Jumps, flashes, trails and clocks
+  land on id's 72 Hz values at 60–480 Hz; `quaketool framerate --check`, 22 scenarios;
+  `FRAMERATE.md`. It found the Classic demo bug that `lerp` fixed.
+- **platform** (`a50d8d7`): the browser build as a plain Rust program. `fn main` runs in
+  a Web Worker (`wasm32-wasip1`, edition 2024, `forbid(unsafe_code)`, no exports),
+  reading events on stdin and writing frames and sound on stdout. The pak and saves go
+  through `std::fs` over IndexedDB. The host can run threads. The nine checks pass in
+  Chromium and Firefox.
+- **multicore** (`a2c2944`): the renderer owns its state (CODE_PLAN R3: `Renderer`,
+  `Scene`, `begin_map`, no thread-locals) and draws a frame in row bands on N threads,
+  byte-identical at any N. The browser gets threads through pooled workers; `r_threads`.
+- **server** (`d5db64a`): server state out of thread-locals (R2: `Outbox`,
+  `ServerCvars`, `QRand`). QuakeC errors end the game as id's `Host_Error` does
+  (`PR_RunError`'s report, `error`/`objerror`; CENSUS L16).
+- **settings** (`efa3bc7`, seam `207eee1`): one typed settings value (`cvar.rs`,
+  `settings.rs`), a command table (`cmd.rs`) and `Bindings` (R4). The Classic and 2026
+  profiles; `config.cfg` as id's writes it (a profile line plus the diffs); `?classic` /
+  `?2026`; `oracle/classic_check.py`.
+- **lerp** (`61008e1`, merged into settings): Classic demo playback is id's
+  `CL_LerpPoint`, frame for frame (`oracle/demo_lerp.py`, 17,500 frames against id's
+  client). The port had played pre-cut 60 Hz sub-frames. `r_lerpmove` smooths monsters
+  in 2026.
+- **audio, part 2** (`9e86bf7`): the browser plays the engine's mixer. The worker paints
+  into a shared ring that an AudioWorklet plays; the page's Web Audio mixing is gone.
+  `snd_modern` is the 2026 departure.
+- **mobile** (`d24ff57`): touch controls (`web/touch.js`, `in_touch`), menus that answer
+  taps (`Menu::tap`), pause when hidden. The PWA manifest and service worker give
+  offline play and isolation headers on hosts without them; `verify_touch`.
+- **content** (`2b0e970`): id's search path (`common.rs`: `pak0`..`pakN` over loose
+  files) and `COM_CheckRegistered`. The player can drop in their own `pak1.pak`; the
+  2021 re-release is refused with a reason. CD music plays from the player's tracks
+  (`cd_audio.rs`); `verify_content`.
+- **tool** (`4f43321`): `quaketool` as one directory with one `Command` table driving
+  dispatch and `--help` (R7), and `Box<dyn Error>`; output byte-identical.
+- **input** (`877a339`): id's `in_win.c` joystick in Classic, the 2026 twin-stick pad
+  with rumble, raw mouse (`unadjustedMovement`), WASD by physical key (AZERTY works);
+  `web/latency.py`.
+- **present** (`1139ab1`): PERF_PLAN B5 in full. Frames are palette indices with the
+  palette applied at presentation. WebGL2 is the DAC (an `R8UI` texture and a 256x1
+  palette), with a 2-D canvas fallback. The threads build's frames are read where they
+  lie in shared memory. Page frame at 1440p on 8 threads: 10.6 → 3.4 ms.
+- **vm** (`ea13e24`): R5, typed entity fields (`MoveType`, `Solid`, `EntFlags`), with
+  every engine read through resolved handles and `Option` for sentinels. R10: opcodes
+  decoded at load, `Vm` private, `intern` de-duplicated, the output log drained.
+  simbench −7%.
+- **review** (`244bcd5`): the closing review on a frozen tree. It found no rule breaks
+  and made five small fixes (the status line, dead `Pak::from_static`, the profiler's
+  clock hook, stale docs and rustdoc, the crate's front page), and left the ranked list
+  above.
+- **docs** (this branch): README, STATUS, AUDIT (one open list, the departures table),
+  quake-rs/README, CODE_PLAN, PERF_PLAN and the oracle's README made current.
+
+**Start → end.**
+- The goldens did not move: `4807aaa1` / `9ae2b478` / `c65b7046`.
+- Tests: 601 + 2 + 8 → 707 + 6 + 8 (+1 doctest) in quake-rs; 135 → 172 in quake-wasm.
+- Source: quake-rs 60.3k → 70.6k lines; quake-wasm 10.3k → 12.8k; the page's JS and
+  HTML 1.6k → 3.9k.
+- The two decisions the overnight push left for the user are settled by the profiles:
+  - the four control departures are 2026 settings, and Classic has `default.cfg`'s
+    bindings;
+  - the 72 fps cap is Classic's alone.
+
+## How to work here
+
+- **The rules come first.** The five above; where a rule and a nice idea clash, the rule
+  wins.
+- **Prove Classic.** After any change, run `uv run oracle/classic_check.py`. A change
+  that moves an identity value on purpose is a fidelity change: re-record with
+  `--record --note "..."` and record the move in `AUDIT.md`, with its evidence.
+- **Faithful first, in Classic.** Read id's C for the thing you are changing (the
+  WinQuake tree is at `quake-c/WinQuake`)
+  and name the C function in the doc comment. A change that departs from id is a new
+  setting: a `departure` in `quake_rs::cvar::CVARS`, off in `Cvars::classic`, and on in
+  `Cvars::modern` if it belongs in 2026. Add a row to AUDIT's departures table.
+- **New code** follows `CODE_PLAN.md` §4: no new `thread_local!` or `static` state; at
+  most 7 parameters; settings as typed fields; entity fields through `vm.fo()`;
+  `#[expect(…, reason)]`, not `#[allow]`.
+- **Benchmarks:** A/B two builds in one sitting and note the load; absolute milliseconds
+  swing 2–3x with what else is running.
+- **The web scripts need their `--with` flags:** `uv run --with playwright
+  web/verify_walk.py DEPLOYDIR` (`verify_settings.py` also `--with pillow`). Plain `uv
+  run web/x.py` ignores the shebang's flags and fails. Parallel runs take
+  `QUAKE_VERIFY_PORT` so they don't collide. The scripts write screenshots into the
+  directory they serve, so point them at a scratch deploy dir.
+- **Commits:** only this project's files — the repo root has unrelated files; never
+  `git add` broadly. Never commit game data or a built `quake.wasm`.
+
+## Quick commands
+
+From the repository root:
+
+```bash
+# tests and lints
+(cd quake-rs && cargo test --release && cargo clippy --release --all-targets)
+(cd quake-wasm && cargo test --release && cargo clippy --release --all-targets)
+
+# Classic's proof (goldens, play hashes, timedemo, census, edicts, and id's C: 3-D, 2-D, demos, sound)
+uv run oracle/classic_check.py
+
+# the uncapped game against 72 Hz
+quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check
+
+# the browser build, a deploy dir, a check, and a server
+(cd quake-wasm && cargo build --release --target wasm32-wasip1-threads)
+D=$HOME/quake-web
+(cd web && uv run python -c "import isolated; isolated.copy_page('$D')")
+cp quake-wasm/target/wasm32-wasip1-threads/release/quake.wasm "$D/"
+mkdir -p "$D/id1" && cp quake-data/ID1/PAK0.PAK "$D/id1/pak0.pak"
+QUAKE_VERIFY_PORT=8561 uv run --with playwright web/verify_walk.py "$D"
+miniserve -C -p 8080 --index index.html --header "Cross-Origin-Opener-Policy:same-origin" --header "Cross-Origin-Embedder-Policy:require-corp" "$D"
+
+# benchmark: the page in headless Chromium plus a native twin (bench.py --help)
+uv run --with playwright web/bench.py --build --native
+```
 
 ---
 
 ## 2026-09-25: the overnight push
+
+*As it was on 2026-09-25. Since 2026-09-26 the rule is Classic and 2026 profiles, not
+"faithful by default plus opt-in Web extras". The Web extras are settings in the 2026
+profile. The browser build is a WASI program: the pak is a file, not embedded; the
+engine mixes the sound, not Web Audio; saves are files, not localStorage. The top of
+this file is current.*
 
 the user's brief: faithful by default (only Always Run departs; anything
 else becomes an opt-in extra), three bugs they had noticed (Chthon has no electricity; the
@@ -168,49 +360,6 @@ AUDIT.md with its pixel count: `fb14bd65` / `a6f98d8a` / `0211e6d4` at the start
 **Tests.** 475 library + 8 integration and 64 quake-wasm tests at the start; 587 + 1 + 8
 and 126 at `31775f5`.
 
-## How to work here
-
-- **Measure, don't claim.** After any renderer change, re-render the three goldens
-  (`quaketool scene <pak> maps/e1mN.bsp out.ppm`, sha256) and, for a fidelity change, run
-  `uv run oracle/compare.py`; record every golden move in `AUDIT.md` with its pixel count.
-  "Byte-identical" means the goldens and the `bench.py --hash-every` / `quaketool play
-  --hash-every` frame hashes did not move.
-- **Faithful first.** Read id's C for the thing you are changing (the WinQuake tree is at
-  `quake-c/WinQuake`) and name the C
-  function in the doc comment. A change that departs from id belongs in the Web extras.
-- **Benchmarks:** A/B two builds in one sitting and note the load; absolute milliseconds
-  swing 2–3x with what else is running.
-- **The web scripts need playwright:** `uv run --with playwright web/<script>.py` (their
-  shebang carries `--with playwright`; plain `uv run web/bench.py` fails). Parallel runs
-  take `QUAKE_VERIFY_PORT` so they don't collide.
-- **Commits:** only this project's files — the repo root has unrelated files; never
-  `git add` broadly. The built `web/quake_wasm.wasm` is gitignored (it embeds the pak);
-  the verify scripts write their screenshots into the web dir they serve, so point them at
-  a scratch copy unless you mean to update the committed ones.
-
-## Quick commands
-
-From the repository root:
-
-```bash
-# tests (quake-rs: no game data; quake-wasm: the embedded shareware pak)
-(cd quake-rs && cargo test --release)      # 587 lib + 1 bin + 8 integration
-(cd quake-wasm && cargo test --release)    # 126 (+1 ignored harness)
-
-# goldens (needs the pak): sha256 prefixes 4807aaa1 / 9ae2b478 / c65b7046 at 31775f5
-Q=quake-rs/target/release/quaketool PAK=quake-data/ID1/PAK0.PAK
-for m in e1m1 e1m2 e1m3; do $Q scene $PAK maps/$m.bsp /tmp/$m.ppm >/dev/null; sha256sum /tmp/$m.ppm; done
-
-# the browser's client natively, frame hashes as bench.py prints them
-$Q play $PAK demo1,walk_e1m1 --res 320x200,640x400 --hash-every 30
-
-# benchmark (the page in headless Chromium + a native twin)
-uv run --with playwright web/bench.py --build --native
-
-# wasm build + serve
-(cd quake-wasm && cargo build --release --target wasm32-unknown-unknown)
-cp quake-wasm/target/wasm32-unknown-unknown/release/quake_wasm.wasm web/ && miniserve -C -p 8196 web
-```
 
 ---
 
@@ -575,7 +724,7 @@ client TOSS physics arm — both fixed (details in the ship-push section).
 
 ## Known-deferred items (LOW severity, documented in AUDIT.md)
 
-*As of 2026-06-11. The current list is `AUDIT.md`, "Open, as of 2026-09-25"; the
+*As of 2026-06-11. The current list is `AUDIT.md`, "Open, as of 2026-09-26"; the
 marks added below say what happened to each since.*
 
 All previous HIGH/MED deferred items (lightning beams, R_MarkLights gating,
