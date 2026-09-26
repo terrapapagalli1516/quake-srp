@@ -875,7 +875,7 @@ impl Server {
     /// [`Server::paused`] itself: the local client reads it the same frame.
     pub fn pause(&mut self) {
         self.paused = !self.paused;
-        let name = if self.player > 0 { self.vm.ent_str(self.player, self.vm.fo().netname).to_string() } else { String::new() };
+        let name = self.player.map(|p| self.vm.ent_str(p, self.vm.fo().netname).to_string()).unwrap_or_default();
         let what = if self.paused { "paused" } else { "unpaused" };
         if let Some(o) = self.outbox() {
             o.print(false, format!("{name} {what} the game\n"));

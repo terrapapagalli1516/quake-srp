@@ -503,7 +503,7 @@ pub fn build_walk_savegame(
     // edicts -> sv.time/spawn_parms. No entrance script, no signon settle.
     let mut server =
         Server::load_savegame(sim_bsp, progs, Some(pak.clone()), rand, text).map_err(|e| e.to_string())?;
-    let player = server.player_edict();
+    let player = server.player_edict().ok_or_else(|| "savegame has no player edict".to_string())?;
     // Host_Spawn_f names the client edict (`netname = host_client->name`) only
     // for a fresh spawn: a loaded game keeps the save's. Saves the port wrote
     // before it did that (2026-09-25) carry an empty netname, which read

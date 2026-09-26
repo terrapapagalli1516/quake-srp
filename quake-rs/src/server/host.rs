@@ -166,13 +166,11 @@ impl Server {
     /// is returned, and the level does not come up. The golden `scene` tool
     /// never connects a client, so this does not affect golden renders.
     pub fn run_signon_frames(&mut self) -> Result<()> {
-        let (yaw, pitch) = if self.player >= 0 {
-            let ang = self.vm.ent_vec(self.player, self.vm.fo().angles);
-            let vang = self.vm.ent_vec(self.player, self.vm.fo().v_angle);
+        let (yaw, pitch) = self.player.map_or((0.0, 0.0), |p| {
+            let ang = self.vm.ent_vec(p, self.vm.fo().angles);
+            let vang = self.vm.ent_vec(p, self.vm.fo().v_angle);
             (ang[1], vang[0])
-        } else {
-            (0.0, 0.0)
-        };
+        });
         let cmd = UserCmd {
             forwardmove: 0.0,
             sidemove: 0.0,
@@ -201,12 +199,12 @@ impl Server {
     /// this never panics. Returns `[0.0; 16]` when no client has connected, and
     /// the program error if `SetChangeParms` fails (id's `Host_Error`).
     pub fn save_spawn_parms(&mut self) -> Result<[f32; NUM_SPAWN_PARMS]> {
-        if self.player < 0 {
+        let Some(player) = self.player else {
             return Ok([0.0; NUM_SPAWN_PARMS]);
-        }
+        };
         // SetChangeParms writes parm1..parm16 from the player's live fields
         // (self = the player edict, other = world).
-        self.run_sys(SysFn::SetChangeParms, self.player, 0)?;
+        self.run_sys(SysFn::SetChangeParms, player, 0)?;
         Ok(self.vm.go().parms().map(|g| self.vm.glob_float(g)))
     }
 
@@ -332,10 +330,9 @@ impl Server {
     /// or no connected client). A QuakeC fault surfaces as `Err` (interpreter
     /// already reset), matching the other system entry points.
     pub fn client_kill(&mut self) -> Result<bool> {
-        let player = self.player;
-        if player < 0 || self.is_free(player) {
+        let Some(player) = self.live_player() else {
             return Ok(false);
-        }
+        };
         if self.vm.ent_float(player, self.vm.fo().health) <= 0.0 {
             return Ok(false); // "Can't suicide -- allready dead!"
         }

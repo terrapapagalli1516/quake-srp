@@ -326,9 +326,9 @@ pub struct DemoPlay {
     /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
     pub prng: Lcg,
     /// The message whose effects were last spawned, so each message's bursts
-    /// spawn once, in the frame that reads it. `usize::MAX` = "none read yet"
-    /// (the first frame of playback).
-    pub last_spawned_idx: usize,
+    /// spawn once, in the frame that reads it; `None` until the first frame of
+    /// playback reads one.
+    pub last_spawned_idx: Option<usize>,
     /// The beam temp-entity slots (`cl_beams`) replayed from the recorded
     /// `TE_LIGHTNING1/2/3` / `TE_BEAM` stream; expanded into bolt-model
     /// instances each frame like the live walk. Cleared on the demo loop wrap.
@@ -453,7 +453,7 @@ impl DemoPlay {
             view: cl_demo::DemoView::default(),
             particles: ParticleSystem::new(),
             prng: Lcg::new(0x9E37_79B9),
-            last_spawned_idx: usize::MAX,
+            last_spawned_idx: None,
             beams: Beams::new(),
             beam_scratch: Vec::new(),
             gfx_wad: None,

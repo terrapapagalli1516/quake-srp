@@ -627,17 +627,10 @@ impl Server {
         // Re-identify the player edict (see the PORT NOTE above). The C's
         // CL_EstablishConnection/Host_Reconnect_f path runs Host_Spawn_f with
         // sv.loadgame set: no entrance script, no signon settle frames.
-        server.player = -1;
-        for e in 1..server.vm.num_edicts() {
-            let ent = e as i32;
-            if !server.vm.is_free_edict(ent)
-                && server.vm.ent_str(ent, server.vm.fo().classname) == "player"
-            {
-                server.player = ent;
-                break;
-            }
-        }
-        if server.player < 0 {
+        let vm = &server.vm;
+        server.player =
+            vm.live_edicts().find(|&ent| ent > 0 && vm.ent_str(ent, vm.fo().classname) == "player");
+        if server.player.is_none() {
             return Err(QError::invalid("savegame has no player edict"));
         }
 
@@ -978,7 +971,7 @@ mod tests {
             "ev_field re-bound by name"
         );
         assert!(s2.vm.is_free_edict(e2), "the freed slot stays free");
-        assert_eq!(s2.player_edict(), e3, "player re-identified by classname");
+        assert_eq!(s2.player_edict(), Some(e3), "player re-identified by classname");
         assert_eq!(s2.vm.ent_get_float(e3, "health"), 87.0);
     }
 

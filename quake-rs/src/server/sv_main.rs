@@ -102,7 +102,7 @@ impl Server {
         Ok(Server {
             vm,
             entities,
-            player: -1,
+            player: None,
             lightstyles: std::array::from_fn(|_| String::new()),
             map_name: String::new(),
             client_spawn_parms: [0.0; NUM_SPAWN_PARMS],
@@ -202,7 +202,7 @@ impl Server {
     ) -> Result<i32> {
         // Reserve a fresh edict (the first free slot after spawn_entities).
         let ent = self.vm.spawn();
-        self.player = ent;
+        self.player = Some(ent);
         // Host_Spawn_f sets up the cleared client edict before ClientConnect:
         // `colormap = NUM_FOR_EDICT(ent)`, `team = (colors & 15) + 1` (cl_color
         // "0") and `netname = host_client->name` (cl_name "player") — the
@@ -302,19 +302,17 @@ impl Server {
         let n = vm.num_edicts();
         let mut sent = vec![false; n];
         let clent = self.player;
-        let pvs = if clent > 0 {
+        let pvs = clent.and_then(|clent| {
             let org = vm.ent_vec(clent, vm.fo().origin);
             let ofs = vm.ent_vec(clent, vm.fo().view_ofs);
             self.fat_pvs([org[0] + ofs[0], org[1] + ofs[1], org[2] + ofs[2]])
-        } else {
-            None
-        };
+        });
         for (e, slot) in sent.iter_mut().enumerate().skip(1) {
             let ent = e as i32;
             if vm.is_free_edict(ent) || vm.is_static_edict(ent) {
                 continue;
             }
-            if ent == clent {
+            if Some(ent) == clent {
                 *slot = true;
                 continue;
             }
@@ -494,7 +492,7 @@ mod tests {
         prime_player_globals(&mut server, g_const100, g_origin);
 
         let p = server.connect_client().expect("connect");
-        assert_eq!(server.player_edict(), p);
+        assert_eq!(server.player_edict(), Some(p));
         assert_eq!(server.player_health(), 100.0, "PutClientInServer set health");
 
         // The QuakeC spawn set origin to (0,0,40); give it a player box.
@@ -637,7 +635,7 @@ mod tests {
         let p = server
             .connect_client_with_parms(parms)
             .expect("connect with parms");
-        assert_eq!(server.player_edict(), p);
+        assert_eq!(server.player_edict(), Some(p));
 
         // The parm1 global holds the value we passed in...
         assert_eq!(

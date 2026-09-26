@@ -580,7 +580,7 @@ pub struct Server {
     /// [`Host`] trait has no entity-text accessor and we never `unsafe`-downcast,
     /// so the server keeps its own copy.)
     entities: String,
-    /// The local client's edict index, or `-1` if no client has connected.
+    /// The local client's edict index, `None` until a client connects.
     ///
     /// SIMPLIFICATION (documented): canonical Quake reserves edict 1 for the
     /// first client in `SV_SpawnServer` (`sv.num_edicts = maxclients+1`) and
@@ -590,7 +590,7 @@ pub struct Server {
     /// Single-player QuakeC keys off `self`, not a hardcoded edict number, so the
     /// game logic is unaffected. Single client only; no netcode.
     /// (`pub(crate)`: the savegame loader re-identifies the player edict.)
-    pub(crate) player: i32,
+    pub(crate) player: Option<i32>,
     /// The map's animated light-style patterns (`sv.lightstyles[64]`), owned by
     /// the server. The `lightstyle()` builtin sends its writes to the outbox;
     /// the server applies them to this field after each QuakeC execution window
@@ -709,35 +709,36 @@ impl Server {
         self.vm.live_edicts().count()
     }
 
-    /// The local player's edict index, or `-1` if no client has connected.
-    pub fn player_edict(&self) -> i32 {
+    /// The local player's edict index, `None` until a client connects.
+    pub fn player_edict(&self) -> Option<i32> {
         self.player
+    }
+
+    /// The player's edict while it is in use (not freed).
+    fn live_player(&self) -> Option<i32> {
+        self.player.filter(|&p| !self.vm.is_free_edict(p))
     }
 
     /// Convenience: the player's `health` field (for a HUD / verification). 0.0
     /// when no client is connected.
     pub fn player_health(&self) -> f32 {
-        if self.player < 0 {
-            0.0
-        } else {
-            self.vm.ent_float(self.player, self.vm.fo().health)
-        }
+        self.player.map_or(0.0, |p| self.vm.ent_float(p, self.vm.fo().health))
     }
 
     /// The player's view: `(eye, v_angle)` where `eye = origin + view_ofs`
     /// (defaulting `view_ofs` to `(0,0,22)` when the QuakeC left it unset) and
     /// `v_angle` is `[pitch, yaw, roll]`. Both are zero when no client exists.
     pub fn player_view(&self) -> ([f32; 3], [f32; 3]) {
-        if self.player < 0 {
+        let Some(p) = self.player else {
             return ([0.0; 3], [0.0; 3]);
-        }
-        let origin = self.vm.ent_vec(self.player, self.vm.fo().origin);
-        let mut ofs = self.vm.ent_vec(self.player, self.vm.fo().view_ofs);
+        };
+        let origin = self.vm.ent_vec(p, self.vm.fo().origin);
+        let mut ofs = self.vm.ent_vec(p, self.vm.fo().view_ofs);
         if ofs == [0.0, 0.0, 0.0] {
             ofs = [0.0, 0.0, DEFAULT_VIEWHEIGHT];
         }
         let eye = [origin[0] + ofs[0], origin[1] + ofs[1], origin[2] + ofs[2]];
-        let v_angle = self.vm.ent_vec(self.player, self.vm.fo().v_angle);
+        let v_angle = self.vm.ent_vec(p, self.vm.fo().v_angle);
         (eye, v_angle)
     }
 
@@ -778,21 +779,13 @@ impl Server {
     /// attack bit copied from the last usercmd; `weapon`/`ammo_shells` are the
     /// QuakeC inventory fields the shotgun path reads/decrements.
     pub fn player_attack_state(&self) -> (f32, f32, f32) {
-        if self.player < 0 {
+        let Some(p) = self.player else {
             return (0.0, 0.0, 0.0);
-        }
-        let button0 = self.vm.ent_float(self.player, self.vm.fo().button0);
-        let weapon = self.vm.ent_float(self.player, self.vm.fo().weapon);
-        let ammo_shells = self.vm.ent_float(self.player, self.vm.fo().ammo_shells);
+        };
+        let button0 = self.vm.ent_float(p, self.vm.fo().button0);
+        let weapon = self.vm.ent_float(p, self.vm.fo().weapon);
+        let ammo_shells = self.vm.ent_float(p, self.vm.fo().ammo_shells);
         (button0, weapon, ammo_shells)
-    }
-
-    /// True if edict `e` is free (removed) or out of range.
-    fn is_free(&self, e: i32) -> bool {
-        if e < 0 {
-            return true;
-        }
-        self.vm.is_free_edict(e)
     }
 }
 

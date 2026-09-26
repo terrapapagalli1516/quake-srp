@@ -167,10 +167,10 @@ fn build_demo_with(
 /// [`spawn_temp_entity`] mapping the live walk uses (explosion / impact / splash).
 /// (`spawn_*` set `die = now + life`.)
 fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut Vec<SoundCall>) {
-    if d.last_spawned_idx == idx {
+    if d.last_spawned_idx == Some(idx) {
         return; // already spawned this frame's effects; don't double-spawn
     }
-    d.last_spawned_idx = idx;
+    d.last_spawned_idx = Some(idx);
     let Some(frame) = d.demo.frames.get(idx) else { return };
     // CL_ParseClientdata's item get-times.
     stamp_item_gettime(&mut d.cl_items, &mut d.item_gettime, frame.client.items, now);
@@ -284,7 +284,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     d.notify.check_resize(vid.width, vid.height);
     let n = d.demo.frames.len();
     let dt64 = if dt.is_finite() { f64::from(dt.max(0.0)) } else { 0.0 };
-    let started = d.last_spawned_idx != usize::MAX;
+    let started = d.last_spawned_idx.is_some();
     if started && d.idx + 1 >= n && d.time + dt64 > f64::from(d.demo.frames[d.idx].time) {
         // The last message has been drawn and the clock has run past it: play
         // the recording again from its first message, as a fresh playback
@@ -298,7 +298,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     // CL_GetMessage: the first frame has the signon's last message (the
     // first update); then a message is read whenever `cl.time` has passed
     // the newest one (`cl.time <= cl.mtime[0]`: "don't need another yet").
-    let first_read = if d.last_spawned_idx == usize::MAX { 0 } else { d.idx + 1 };
+    let first_read = if d.last_spawned_idx.is_none() { 0 } else { d.idx + 1 };
     spawn_demo_frame_effects(d, d.idx, d.time as f32, &mut sound);
     while d.idx + 1 < n && d.time > f64::from(d.demo.frames[d.idx].time) {
         d.idx += 1;
@@ -330,7 +330,7 @@ fn restart_playback(d: &mut DemoPlay) {
     d.particles = ParticleSystem::new();
     d.trail_org.clear();
     d.beams.clear();
-    d.last_spawned_idx = usize::MAX;
+    d.last_spawned_idx = None;
     d.damage_blend = 0.0;
     d.bonus_blend = 0.0;
     d.faceanimtime = 0.0;
@@ -359,7 +359,7 @@ pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid
     let mut sound = Vec::new();
     d.notify.check_resize(vid.width, vid.height);
     let n = d.demo.frames.len();
-    let first = d.last_spawned_idx == usize::MAX;
+    let first = d.last_spawned_idx.is_none();
     if first {
         spawn_demo_frame_effects(d, 0, d.demo.frames[0].time, &mut sound);
     }

@@ -225,7 +225,7 @@ fn track_pushers(server: &Server, run: &mut Run) {
 }
 
 fn frame(server: &mut Server, pak: &Pak, run: &mut Run, cmd: &UserCmd) {
-    let player = server.player_edict();
+    let player = server.player_edict().unwrap_or(-1); // the census connects one first
     let before = server.vm.ent_get_vector(player, "origin");
     let fix = server.vm.ent_get_float(player, "fixangle");
     if fix != 0.0 {
@@ -281,7 +281,7 @@ fn drain(server: &mut Server, pak: &Pak, run: &mut Run) {
 }
 
 fn idle(server: &mut Server, pak: &Pak, run: &mut Run, secs: f32, buttons: i32) {
-    let player = server.player_edict();
+    let player = server.player_edict().unwrap_or(-1); // the census connects one first
     let va = server.vm.ent_get_vector(player, "v_angle");
     let cmd = UserCmd { yaw: va[1], pitch: va[0], buttons, ..Default::default() };
     for _ in 0..(f64::from(secs) / DT).round() as usize {
@@ -602,7 +602,7 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
         let press = |server: &mut Server, run: &mut Run, b: i32| {
             let f = server.vm.ent_get_int(b, "touch") as usize;
             let c = center(server, b);
-            let p = server.player_edict();
+            let p = server.player_edict().unwrap_or(-1); // the census connects one first
             set_origin(server, p, c);
             let _ = call_fnum(server, f, b, p, &[]);
             frame(server, pak, run, &UserCmd::default());

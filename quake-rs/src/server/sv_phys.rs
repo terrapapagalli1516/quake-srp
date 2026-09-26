@@ -763,7 +763,7 @@ impl Server {
         if self.vm.solid(ent) != Solid::Not {
             touch_triggers(&mut self.vm, ent, sv_time);
         }
-        !self.is_free(ent)
+        !self.vm.is_free_edict(ent)
     }
 
     /// The end of `SV_Physics`: `if (pr_global_struct->force_retouch)
@@ -811,7 +811,7 @@ impl Server {
         let led = vel[2];
         self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
         mv(self);
-        if !self.is_free(ent) {
+        if !self.vm.is_free_edict(ent) {
             let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
             if vel[2] == led {
                 vel[2] -= lead;
@@ -956,9 +956,9 @@ impl Server {
         // PlayerPreThink (WaterMove's drag, PlayerJump) acting on the
         // ALREADY-accelerated velocity.
         self.vm.set_glob_float(self.vm.go().time, start_time);
-        if self.player >= 0 && !self.is_free(self.player) {
-            self.apply_usercmd_to_edict(self.player, cmd);
-            self.client_think(self.player, cmd, dt);
+        if let Some(player) = self.live_player() {
+            self.apply_usercmd_to_edict(player, cmd);
+            self.client_think(player, cmd, dt);
         }
 
         // Let the progs know a new frame has started (self/other = world,
@@ -983,7 +983,7 @@ impl Server {
                 continue; // a retouch freed it
             }
 
-            let fired = if ent == self.player {
+            let fired = if Some(ent) == self.player {
                 self.physics_client(ent, start_time, dt)?
             } else {
                 let movetype = self.vm.movetype(ent);
@@ -998,8 +998,8 @@ impl Server {
         // SV_WriteClientdataToMessage (sv_main.c) runs SV_SetIdealPitch once per
         // client per frame, after physics: compute the slope-following auto-pitch
         // the QuakeC view code centres toward when you walk up/down stairs.
-        if self.player >= 0 && !self.vm.is_free_edict(self.player) {
-            self.set_ideal_pitch(self.player);
+        if let Some(player) = self.live_player() {
+            self.set_ideal_pitch(player);
         }
 
         self.end_physics_frame(host_frametime);
@@ -1028,7 +1028,7 @@ impl Server {
         // (air_finished, lava damage, IntermissionThink) could fire a frame early.
         self.vm.set_glob_float(self.vm.go().time, start_time);
         self.run_sys(SysFn::PlayerPreThink, ent, 0)?;
-        if self.is_free(ent) {
+        if self.vm.is_free_edict(ent) {
             return Ok(false);
         }
 
@@ -1114,7 +1114,7 @@ impl Server {
             }
         }
 
-        if self.is_free(ent) {
+        if self.vm.is_free_edict(ent) {
             return Ok(fired);
         }
 
@@ -1122,7 +1122,7 @@ impl Server {
         // trigger fields (the C does this inside SV_LinkEdict during the move;
         // here the move's link is bounds-only, so we touch triggers explicitly).
         touch_triggers(&mut self.vm, ent, start_time);
-        if self.is_free(ent) {
+        if self.vm.is_free_edict(ent) {
             return Ok(fired);
         }
 
@@ -1227,7 +1227,7 @@ impl Server {
             // touch on world contact too (mover with no touch is a no-op).
             if trace.ent >= 0 {
                 sv_impact(&mut self.vm, ent, trace.ent, sv_time);
-                if self.is_free(ent) {
+                if self.vm.is_free_edict(ent) {
                     break; // removed by the impact function
                 }
             }
