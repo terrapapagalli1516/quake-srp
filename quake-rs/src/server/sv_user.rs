@@ -14,9 +14,7 @@
 //! `sv_phys.rs`.
 
 use super::sv_world::sv_move;
-use super::{
-    Server, UserCmd, FL_ONGROUND, FL_WATERJUMP, MOVETYPE_NOCLIP, MOVETYPE_NONE, MOVETYPE_WALK,
-};
+use super::{EntFlags, MoveType, Server, UserCmd};
 use crate::math::{angle_vectors, Vec3};
 
 // Player-movement cvars (sv_user.c defaults). This engine has no console-cvar
@@ -51,13 +49,13 @@ impl Server {
         /// `sv_idealpitchscale` default ("0.8").
         const SV_IDEALPITCHSCALE: f32 = 0.8;
 
-        if (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND == 0 {
+        if !self.vm.flags(ent).contains(EntFlags::ONGROUND) {
             return;
         }
 
-        let origin = self.vm.ent_get_vector(ent, "origin");
-        let view_ofs = self.vm.ent_get_vector(ent, "view_ofs");
-        let yaw = self.vm.ent_get_vector(ent, "angles")[crate::math::YAW];
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let view_ofs = self.vm.ent_vec(ent, self.vm.fo().view_ofs);
+        let yaw = self.vm.ent_vec(ent, self.vm.fo().angles)[crate::math::YAW];
         let angleval = f64::from(yaw) * std::f64::consts::PI * 2.0 / 360.0;
         let sinval = angleval.sin() as f32;
         let cosval = angleval.cos() as f32;
@@ -97,14 +95,14 @@ impl Server {
         }
 
         if dir == 0.0 {
-            self.vm.ent_set_float(ent, "idealpitch", 0.0);
+            self.vm.set_ent_float(ent, self.vm.fo().idealpitch, 0.0);
             return;
         }
         if steps < 2 {
             return;
         }
         self.vm
-            .ent_set_float(ent, "idealpitch", -dir * SV_IDEALPITCHSCALE);
+            .set_ent_float(ent, self.vm.fo().idealpitch, -dir * SV_IDEALPITCHSCALE);
     }
 
     /// `SV_ReadClientMove` (sv_user.c): copy this frame's [`UserCmd`] onto the
@@ -118,15 +116,15 @@ impl Server {
         // v_angle before PreThink so weapon aim is correct (client_think later
         // re-derives it from the same cmd during the move).
         self.vm
-            .ent_set_vector(ent, "v_angle", [cmd.pitch, cmd.yaw, 0.0]);
+            .set_ent_vec(ent, self.vm.fo().v_angle, [cmd.pitch, cmd.yaw, 0.0]);
         self.vm
-            .ent_set_float(ent, "button0", (cmd.buttons & 1) as f32);
+            .set_ent_float(ent, self.vm.fo().button0, (cmd.buttons & 1) as f32);
         self.vm
-            .ent_set_float(ent, "button2", ((cmd.buttons & 2) >> 1) as f32);
+            .set_ent_float(ent, self.vm.fo().button2, ((cmd.buttons & 2) >> 1) as f32);
         // The C only assigns impulse when the byte is non-zero (a 0 impulse means
         // "no command this frame"); the QuakeC clears it when it runs it.
         if cmd.impulse != 0 {
-            self.vm.ent_set_float(ent, "impulse", cmd.impulse as f32);
+            self.vm.set_ent_float(ent, self.vm.fo().impulse, cmd.impulse as f32);
         }
     }
 
@@ -136,17 +134,17 @@ impl Server {
     /// acceleration (airborne). This sets `velocity`; the actual position move
     /// happens afterward in [`Self::walk_move`] / [`Self::player_fly_move`].
     pub(super) fn client_think(&mut self, ent: i32, cmd: &UserCmd, dt: f32) {
-        if self.vm.ent_get_float(ent, "movetype") as i32 == MOVETYPE_NONE {
+        if self.vm.movetype(ent) == MoveType::None {
             return;
         }
 
-        let on_ground = (self.vm.ent_get_float(ent, "flags") as i32) & FL_ONGROUND != 0;
+        let on_ground = self.vm.flags(ent).contains(EntFlags::ONGROUND);
 
         // DropPunchAngle: decay the view kick toward zero.
         self.drop_punch_angle(ent, dt);
 
         // if dead, behave differently (no movement)
-        if self.vm.ent_get_float(ent, "health") <= 0.0 {
+        if self.vm.ent_float(ent, self.vm.fo().health) <= 0.0 {
             return;
         }
 
@@ -159,16 +157,16 @@ impl Server {
         // angles show 1/3 the (punch-adjusted) pitch and all the yaw; ROLL leans
         // into a sidestep so the model/view banks. A QuakeC-forced `fixangle`
         // (e.g. after a teleport) overrides only the pitch/yaw, not the roll.
-        let fixangle = self.vm.ent_get_float(ent, "fixangle");
+        let fixangle = self.vm.ent_float(ent, self.vm.fo().fixangle);
 
         // v_angle field = [pitch, yaw, roll] from the incoming command (the C
         // SV_ReadClientMove writes this before SV_ClientThink).
         self.vm
-            .ent_set_vector(ent, "v_angle", [cmd.pitch, cmd.yaw, 0.0]);
+            .set_ent_vec(ent, self.vm.fo().v_angle, [cmd.pitch, cmd.yaw, 0.0]);
 
         // Local v_angle including the punch kick (the C `VectorAdd` into a temp;
         // the stored v_angle field is NOT modified by the punch).
-        let punchangle = self.vm.ent_get_vector(ent, "punchangle");
+        let punchangle = self.vm.ent_vec(ent, self.vm.fo().punchangle);
         let v_angle_kick = [
             cmd.pitch + punchangle[crate::math::PITCH],
             cmd.yaw + punchangle[crate::math::YAW],
@@ -178,14 +176,14 @@ impl Server {
         // angles[ROLL] = V_CalcRoll(current angles, velocity) * 4 — read the
         // PRE-update angles + velocity, exactly as the C does before assigning
         // pitch/yaw.
-        let cur_angles = self.vm.ent_get_vector(ent, "angles");
-        let velocity = self.vm.ent_get_vector(ent, "velocity");
+        let cur_angles = self.vm.ent_vec(ent, self.vm.fo().angles);
+        let velocity = self.vm.ent_vec(ent, self.vm.fo().velocity);
         let roll = v_calc_roll(cur_angles, velocity) * 4.0;
 
         if fixangle == 0.0 {
-            self.vm.ent_set_vector(
+            self.vm.set_ent_vec(
                 ent,
-                "angles",
+                self.vm.fo().angles,
                 [
                     -v_angle_kick[crate::math::PITCH] / 3.0,
                     v_angle_kick[crate::math::YAW],
@@ -196,8 +194,8 @@ impl Server {
             // Honour the forced pitch/yaw but still bank the roll, then clear the
             // flag (SV_WriteClientdata).
             self.vm
-                .ent_set_vector(ent, "angles", [cur_angles[0], cur_angles[1], roll]);
-            self.vm.ent_set_float(ent, "fixangle", 0.0);
+                .set_ent_vec(ent, self.vm.fo().angles, [cur_angles[0], cur_angles[1], roll]);
+            self.vm.set_ent_float(ent, self.vm.fo().fixangle, 0.0);
         }
 
         // SV_ClientThink: waist-deep in water (and not noclip) -> swim, then
@@ -205,29 +203,29 @@ impl Server {
         // `waterlevel` is the prior frame's check_water value (the WALK arm runs
         // check_water AFTER client_think), matching id's two-pass phasing where
         // SV_RunClients precedes SV_Physics.
-        let movetype = self.vm.ent_get_float(ent, "movetype") as i32;
+        let movetype = self.vm.movetype(ent);
         // SV_WaterJump (sv_user.c:414): a QuakeC-set climb-out (FL_WATERJUMP, from
         // CheckWaterJump) forces a horizontal launch toward movedir until the
         // timer expires or you leave the water — checked before the swim/air move.
-        let flags = self.vm.ent_get_float(ent, "flags") as i32;
-        if flags & FL_WATERJUMP != 0 {
+        let flags = self.vm.flags(ent);
+        if flags.contains(EntFlags::WATERJUMP) {
             self.water_jump(ent);
             return;
         }
-        let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
-        if movetype != MOVETYPE_NOCLIP && waterlevel >= 2 {
+        let waterlevel = self.vm.ent_float(ent, self.vm.fo().waterlevel) as i32;
+        if movetype != MoveType::NoClip && waterlevel >= 2 {
             self.water_move(ent, cmd, dt);
             return;
         }
 
         // SV_AirMove: wishvel from forward/side and the look angles.
-        let angles = self.vm.ent_get_vector(ent, "angles");
+        let angles = self.vm.ent_vec(ent, self.vm.fo().angles);
         let (forward, right, _up) = crate::math::angle_vectors(angles);
         let mut fmove = cmd.forwardmove;
         let smove = cmd.sidemove;
 
         // hack to not let you back into the teleporter you just left.
-        let teleport_time = self.vm.ent_get_float(ent, "teleport_time");
+        let teleport_time = self.vm.ent_float(ent, self.vm.fo().teleport_time);
         // sv.time < sv_player->v.teleport_time: a double against a float.
         if self.sv_time() < f64::from(teleport_time) && fmove < 0.0 {
             fmove = 0.0;
@@ -240,7 +238,7 @@ impl Server {
         ];
 
         // (movetype was read above for the water-move dispatch.)
-        if movetype != MOVETYPE_WALK {
+        if movetype != MoveType::Walk {
             wishvel[2] = cmd.upmove;
         } else {
             wishvel[2] = 0.0;
@@ -254,9 +252,9 @@ impl Server {
             wishspeed = SV_MAXSPEED;
         }
 
-        if movetype == MOVETYPE_NOCLIP {
+        if movetype == MoveType::NoClip {
             // noclip: velocity follows the wish directly.
-            self.vm.ent_set_vector(ent, "velocity", wishvel);
+            self.vm.set_ent_vec(ent, self.vm.fo().velocity, wishvel);
         } else if on_ground {
             self.user_friction(ent, dt);
             self.accelerate(ent, wishdir, wishspeed, dt);
@@ -280,7 +278,7 @@ impl Server {
     /// so this buoyant motion survives the frame.
     fn water_move(&mut self, ent: i32, cmd: &UserCmd, dt: f32) {
         // AngleVectors(v_angle) — NOTE v_angle, not the AirMove `angles`.
-        let v_angle = self.vm.ent_get_vector(ent, "v_angle");
+        let v_angle = self.vm.ent_vec(ent, self.vm.fo().v_angle);
         let (forward, right, _up) = angle_vectors(v_angle);
         let mut wishvel = [
             forward[0] * cmd.forwardmove + right[0] * cmd.sidemove,
@@ -301,12 +299,12 @@ impl Server {
         wishspeed *= 0.7;
 
         // Water friction: full 3-D speed, sv_friction, no edgefriction trace.
-        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         let speed = crate::math::length(vel);
         let newspeed = if speed != 0.0 {
             let ns = (speed - dt * speed * SV_FRICTION).max(0.0);
             vel = crate::math::scale(vel, ns / speed);
-            self.vm.ent_set_vector(ent, "velocity", vel);
+            self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
             ns
         } else {
             0.0
@@ -328,7 +326,7 @@ impl Server {
         for i in 0..3 {
             vel[i] += accelspeed * wishdir[i];
         }
-        self.vm.ent_set_vector(ent, "velocity", vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
     }
 
     /// `SV_WaterJump` (sv_user.c:307): while FL_WATERJUMP is set (QuakeC's
@@ -336,24 +334,24 @@ impl Server {
     /// `movedir` so the player is thrown up onto the ledge; clear the flag once
     /// the timer expires (`sv.time > teleport_time`) or the player left the water.
     fn water_jump(&mut self, ent: i32) {
-        let teleport_time = self.vm.ent_get_float(ent, "teleport_time");
-        let waterlevel = self.vm.ent_get_float(ent, "waterlevel") as i32;
+        let teleport_time = self.vm.ent_float(ent, self.vm.fo().teleport_time);
+        let waterlevel = self.vm.ent_float(ent, self.vm.fo().waterlevel) as i32;
         if self.sv_time() > f64::from(teleport_time) || waterlevel == 0 {
-            let flags = self.vm.ent_get_float(ent, "flags") as i32;
-            self.vm.ent_set_float(ent, "flags", (flags & !FL_WATERJUMP) as f32);
-            self.vm.ent_set_float(ent, "teleport_time", 0.0);
+            let flags = self.vm.flags(ent);
+            self.vm.set_flags(ent, flags.without(EntFlags::WATERJUMP));
+            self.vm.set_ent_float(ent, self.vm.fo().teleport_time, 0.0);
         }
-        let movedir = self.vm.ent_get_vector(ent, "movedir");
-        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let movedir = self.vm.ent_vec(ent, self.vm.fo().movedir);
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         vel[0] = movedir[0];
         vel[1] = movedir[1];
-        self.vm.ent_set_vector(ent, "velocity", vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
     }
 
     /// `SV_UserFriction` (sv_user.c): bleed off horizontal speed, with extra
     /// friction (`edgefriction`) when the leading edge hangs over a dropoff.
     fn user_friction(&mut self, ent: i32, dt: f32) {
-        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         let speed = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
         if speed == 0.0 {
             return;
@@ -362,8 +360,8 @@ impl Server {
         // If the leading edge is over a dropoff, increase friction. The C traces
         // a *point* (mins=maxs=0) 34 units down, 16 units ahead, from the bottom
         // of the player box, ignoring the player.
-        let origin = self.vm.ent_get_vector(ent, "origin");
-        let pmins = self.vm.ent_get_vector(ent, "mins");
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let pmins = self.vm.ent_vec(ent, self.vm.fo().mins);
         let start = [
             origin[0] + vel[0] / speed * 16.0,
             origin[1] + vel[1] / speed * 16.0,
@@ -393,13 +391,13 @@ impl Server {
         newspeed /= speed;
 
         vel = crate::math::scale(vel, newspeed);
-        self.vm.ent_set_vector(ent, "velocity", vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
     }
 
     /// `SV_Accelerate` (sv_user.c): push velocity toward `wishdir` up to
     /// `wishspeed` by at most `sv_accelerate * dt * wishspeed` this tick.
     fn accelerate(&mut self, ent: i32, wishdir: Vec3, wishspeed: f32, dt: f32) {
-        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         let currentspeed = crate::math::dot(vel, wishdir);
         let addspeed = wishspeed - currentspeed;
         if addspeed <= 0.0 {
@@ -412,7 +410,7 @@ impl Server {
         for i in 0..3 {
             vel[i] += accelspeed * wishdir[i];
         }
-        self.vm.ent_set_vector(ent, "velocity", vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
     }
 
     /// `SV_AirAccelerate` (sv_user.c): like `SV_Accelerate` but the *target*
@@ -422,7 +420,7 @@ impl Server {
     fn air_accelerate(&mut self, ent: i32, wishveloc: Vec3, dt: f32) {
         let (dir, wishspeed) = crate::math::normalize(wishveloc);
         let wishspd = if wishspeed > 30.0 { 30.0 } else { wishspeed };
-        let mut vel = self.vm.ent_get_vector(ent, "velocity");
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         // The C uses `wishveloc` (the normalized vector, since VectorNormalize
         // wrote it in place) for the dot and the add.
         let currentspeed = crate::math::dot(vel, dir);
@@ -438,20 +436,20 @@ impl Server {
         for i in 0..3 {
             vel[i] += accelspeed * dir[i];
         }
-        self.vm.ent_set_vector(ent, "velocity", vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
     }
 
     /// `DropPunchAngle` (sv_user.c): decay the view-kick vector by `10*dt` units
     /// of length toward zero.
     fn drop_punch_angle(&mut self, ent: i32, dt: f32) {
-        let punch = self.vm.ent_get_vector(ent, "punchangle");
+        let punch = self.vm.ent_vec(ent, self.vm.fo().punchangle);
         let (dir, mut len) = crate::math::normalize(punch);
         len -= 10.0 * dt;
         if len < 0.0 {
             len = 0.0;
         }
         self.vm
-            .ent_set_vector(ent, "punchangle", crate::math::scale(dir, len));
+            .set_ent_vec(ent, self.vm.fo().punchangle, crate::math::scale(dir, len));
     }
 }
 
@@ -515,10 +513,9 @@ mod tests {
         server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
         server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
         server.vm.ent_set_vector(p, "velocity", [200.0, 0.0, 0.0]);
-        let flags = server.vm.ent_get_float(p, "flags") as i32;
+        let flags = server.vm.flags(p);
         server
-            .vm
-            .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+            .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
 
         // No movement input -> friction only.
         let cmd = UserCmd::default();
@@ -532,10 +529,9 @@ mod tests {
             (v[0] * v[0] + v[1] * v[1]).sqrt()
         };
         // Re-plant on the ground (the move may clear ONGROUND) and tick again.
-        let flags = server.vm.ent_get_float(p, "flags") as i32;
+        let flags = server.vm.flags(p);
         server
-            .vm
-            .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+            .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
         server.client_frame(&cmd, 0.1).expect("frame2");
         let speed2 = {
             let v = server.vm.ent_get_vector(p, "velocity");
@@ -625,10 +621,9 @@ mod tests {
         };
 
         // First tick: velocity gains a +X component (accelerate toward wishdir).
-        let flags = server.vm.ent_get_float(p, "flags") as i32;
+        let flags = server.vm.flags(p);
         server
-            .vm
-            .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+            .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
         server.client_frame(&cmd, 0.1).expect("frame");
         let v1 = server.vm.ent_get_vector(p, "velocity");
         assert!(
@@ -638,10 +633,9 @@ mod tests {
 
         // Many ticks: horizontal speed never exceeds sv_maxspeed.
         for _ in 0..40 {
-            let flags = server.vm.ent_get_float(p, "flags") as i32;
+            let flags = server.vm.flags(p);
             server
-                .vm
-                .ent_set_float(p, "flags", (flags | FL_ONGROUND) as f32);
+                .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
             server.client_frame(&cmd, 0.1).expect("frame");
             let v = server.vm.ent_get_vector(p, "velocity");
             let hspeed = (v[0] * v[0] + v[1] * v[1]).sqrt();

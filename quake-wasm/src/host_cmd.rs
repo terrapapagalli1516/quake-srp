@@ -487,10 +487,13 @@ fn run_map_command(name: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quake_rs::client::host_cmd::{
-        try_changelevel, try_restart, FL_GODMODE, IT_SHOTGUN, MOVETYPE_FLY, MOVETYPE_NOCLIP,
-        MOVETYPE_WALK,
-    };
+    use quake_rs::client::host_cmd::{try_changelevel, try_restart, IT_SHOTGUN};
+    use quake_rs::server::{EntFlags, MoveType};
+
+    const FL_GODMODE: i32 = EntFlags::GODMODE.bits();
+    const MOVETYPE_WALK: f32 = MoveType::Walk.code() as f32;
+    const MOVETYPE_FLY: f32 = MoveType::Fly.code() as f32;
+    const MOVETYPE_NOCLIP: f32 = MoveType::NoClip.code() as f32;
 
     use crate::app::{boot, player_start, APP};
     use crate::console::{console_toggle, console_visible};

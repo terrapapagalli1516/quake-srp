@@ -13,9 +13,7 @@
 
 use super::pr_cmds::bi_changeyaw;
 use super::sv_world::{link_edict, sv_move, touch_triggers};
-use super::{
-    CONTENTS_EMPTY, CONTENTS_SOLID, FL_FLY, FL_ONGROUND, FL_PARTIALGROUND, FL_SWIM,
-};
+use super::{EntFlags, CONTENTS_EMPTY, CONTENTS_SOLID};
 use crate::math::{add as v_add, Vec3};
 use crate::vm::Vm;
 use crate::world;
@@ -132,10 +130,10 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     let oldorg = vm.ent_vec(ent, vm.fo().origin);
     let ent_mins = vm.ent_vec(ent, vm.fo().mins);
     let ent_maxs = vm.ent_vec(ent, vm.fo().maxs);
-    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
+    let flags = vm.flags(ent);
 
     // Flying / swimming monsters don't step up.
-    if flags & (FL_SWIM | FL_FLY) != 0 {
+    if flags.intersects(EntFlags::SWIM | EntFlags::FLY) {
         let enemy = vm.ent_int(ent, vm.fo().enemy);
         // Try one move with vertical motion, then one without.
         for i in 0..2 {
@@ -153,7 +151,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             let tr = sv_move(vm, oldorg, neworg, ent_mins, ent_maxs, ent, false, false);
             if tr.fraction == 1.0 {
                 // A swim monster that would leave water cannot make this move.
-                if flags & FL_SWIM != 0 {
+                if flags.contains(EntFlags::SWIM) {
                     let c = vm
                         .with_host(|_vm, h| h.point_contents(tr.endpos))
                         .unwrap_or(CONTENTS_SOLID);
@@ -202,7 +200,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     }
     if tr.fraction == 1.0 {
         // No floor in the step envelope.
-        if flags & FL_PARTIALGROUND != 0 {
+        if flags.contains(EntFlags::PARTIALGROUND) {
             // The monster had the ground pulled out; let it fall.
             vm.set_ent_vec(ent, vm.fo().origin, v_add(oldorg, mov));
             if relink {
@@ -211,8 +209,8 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                 let time = vm.sv_time() as f32; // SV_TouchLinks uses sv.time, not the per-think time global
                 touch_triggers(vm, ent, time);
             }
-            let flags = vm.ent_float(ent, vm.fo().flags) as i32;
-            vm.set_ent_float(ent, vm.fo().flags, (flags & !FL_ONGROUND) as f32);
+            let flags = vm.flags(ent);
+            vm.set_flags(ent, flags.without(EntFlags::ONGROUND));
             return true;
         }
         return false; // walked off an edge
@@ -223,7 +221,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
     vm.set_ent_vec(ent, vm.fo().origin, tr.endpos);
 
     if !sv_check_bottom(vm, ent) {
-        if flags & FL_PARTIALGROUND != 0 {
+        if flags.contains(EntFlags::PARTIALGROUND) {
             // Floor mostly pulled out: keep correcting (accept the move).
             if relink {
                 link_edict(vm, ent);
@@ -238,10 +236,10 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
         return false;
     }
 
-    if flags & FL_PARTIALGROUND != 0 {
+    if flags.contains(EntFlags::PARTIALGROUND) {
         // Back on solid ground: clear the partial-ground flag.
-        let flags = vm.ent_float(ent, vm.fo().flags) as i32;
-        vm.set_ent_float(ent, vm.fo().flags, (flags & !FL_PARTIALGROUND) as f32);
+        let flags = vm.flags(ent);
+        vm.set_flags(ent, flags.without(EntFlags::PARTIALGROUND));
     }
     // groundentity = the edict we landed on (world = 0, an entity = its index;
     // a clear-but-landed trace resolves ent to 0/the world via MoveTrace).
@@ -303,8 +301,8 @@ pub fn sv_step_direction(vm: &mut Vm, ent: i32, yaw: f32, dist: f32) -> bool {
 /// `SV_FixCheckBottom` (sv_move.c ~267): mark `ent` `FL_PARTIALGROUND` so the
 /// next [`sv_movestep`] tolerates a missing standing position.
 fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
-    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
-    vm.set_ent_float(ent, vm.fo().flags, (flags | FL_PARTIALGROUND) as f32);
+    let flags = vm.flags(ent);
+    vm.set_flags(ent, flags.with(EntFlags::PARTIALGROUND));
 }
 
 
@@ -434,8 +432,8 @@ pub fn sv_move_to_goal(vm: &mut Vm, dist: f32) {
     let ent = vm.glob_int(vm.go().self_);
     let goal = vm.ent_int(ent, vm.fo().goalentity);
 
-    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
-    if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+    let flags = vm.flags(ent);
+    if !flags.intersects(EntFlags::ONGROUND | EntFlags::FLY | EntFlags::SWIM) {
         vm.ret_float(0.0);
         return;
     }
@@ -467,8 +465,8 @@ pub(super) fn bi_walkmove(vm: &mut Vm) -> Result<()> {
     let yaw = vm.arg_float(0);
     let dist = vm.arg_float(1);
 
-    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
-    if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
+    let flags = vm.flags(ent);
+    if !flags.intersects(EntFlags::ONGROUND | EntFlags::FLY | EntFlags::SWIM) {
         vm.ret_float(0.0);
         return Ok(());
     }

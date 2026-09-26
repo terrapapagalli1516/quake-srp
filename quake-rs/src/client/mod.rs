@@ -516,7 +516,7 @@ pub fn net_angle(f: f32) -> f32 {
 /// `info_player_start2` once a rune is held, or `testplayerstart`. Read after
 /// the connect, before the settle frames.
 pub fn spawn_view_angles(server: &Server, player: i32) -> (f32, f32) {
-    let a = server.vm.ent_get_vector(player, "angles");
+    let a = server.vm.ent_vec(player, server.vm.fo().angles);
     (net_angle(a[1]), clamp_pitch(net_angle(a[0])))
 }
 

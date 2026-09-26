@@ -60,7 +60,7 @@ use std::collections::HashMap;
 use crate::bsp::Bsp;
 use crate::math::Vec3;
 use crate::stepping::Stepping;
-use crate::vm::{Host, HostTrace, Vm};
+use crate::vm::{Glb, GlobalOfs, Host, HostTrace, Vm};
 use crate::Result;
 
 mod host;
@@ -98,46 +98,251 @@ pub(crate) mod testutil;
 // Quake constants used by the server (server.h / sv_phys.c / pr_cmds.c).
 // ---------------------------------------------------------------------------
 
-// Movetypes (server.h).
-const MOVETYPE_NONE: i32 = 0;
-const MOVETYPE_WALK: i32 = 3;
-const MOVETYPE_STEP: i32 = 4;
-const MOVETYPE_FLY: i32 = 5;
-const MOVETYPE_TOSS: i32 = 6;
-const MOVETYPE_PUSH: i32 = 7;
-const MOVETYPE_NOCLIP: i32 = 8;
-const MOVETYPE_FLYMISSILE: i32 = 9;
-const MOVETYPE_BOUNCE: i32 = 10;
+/// Declares a server.h constant set QuakeC keeps in a float field as an enum
+/// with an `Other` arm, decoded as id's `(int)` casts read the field.
+macro_rules! qc_enum {
+    ($(#[$doc:meta])* $name:ident { $($(#[$vdoc:meta])* $variant:ident = $code:literal,)* }) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $($(#[$vdoc])* $variant,)*
+            /// A value no server.h constant has (QuakeC may store anything).
+            Other(i32),
+        }
 
-// Entity flags (server.h).
-const FL_ONGROUND: i32 = 512;
-const FL_ITEM: i32 = 256;
-const FL_CLIENT: i32 = 8;
-const FL_FLY: i32 = 1;
-const FL_SWIM: i32 = 2;
-/// `FL_WATERJUMP` — set on a player climbing out of water (server.h). The
-/// water-jump/water-move paths are out of scope here, but we honour the flag by
-/// keeping the player out of the normal walk path (matching the C order).
-const FL_WATERJUMP: i32 = 2048;
-/// `FL_MONSTER` (server.h): set on AI-driven entities (grunts, dogs, …). Read by
-/// the monster-movement builtins so non-monster callers are unaffected.
-#[allow(dead_code)]
-const FL_MONSTER: i32 = 32;
-/// `FL_PARTIALGROUND` (server.h): set by `SV_FixCheckBottom` when a monster has
-/// no clean standing position (e.g. a bridge pulled out underneath it). It lets
-/// [`sv_movestep`] keep moving / fall instead of refusing every step.
-const FL_PARTIALGROUND: i32 = 1024;
-/// `FL_INWATER` (server.h): set while a monster's box is in water. Unused by the
-/// walking path but defined for completeness with the C flag set.
-#[allow(dead_code)]
-const FL_INWATER: i32 = 16;
+        impl $name {
+            /// The constant `code` names, or `Other(code)`.
+            pub const fn from_code(code: i32) -> $name {
+                match code {
+                    $($code => $name::$variant,)*
+                    other => $name::Other(other),
+                }
+            }
 
-// Solid types (server.h). SOLID_NOT/SOLID_TRIGGER do not block a move.
-const SOLID_NOT: i32 = 0;
-const SOLID_TRIGGER: i32 = 1;
-const SOLID_BBOX: i32 = 2;
-const SOLID_SLIDEBOX: i32 = 3;
-const SOLID_BSP: i32 = 4;
+            /// The number QuakeC sees.
+            pub const fn code(self) -> i32 {
+                match self {
+                    $($name::$variant => $code,)*
+                    $name::Other(code) => code,
+                }
+            }
+        }
+    };
+}
+
+qc_enum!(
+    /// An edict's `movetype` (server.h `MOVETYPE_*`): which of `SV_Physics`'
+    /// movers runs it.
+    ///
+    /// QuakeC keeps it in a float. It decodes as `(int)ent->v.movetype`, the
+    /// cast `SV_Physics_Client`'s switch makes; id's other tests compare the
+    /// float with the constant (`ent->v.movetype == MOVETYPE_PUSH`), and the
+    /// two agree on every value QuakeC stores, the constants themselves (a
+    /// fractional movetype would read as its truncation here).
+    MoveType {
+        /// `MOVETYPE_NONE`: never moves (thinks only).
+        None = 0,
+        /// `MOVETYPE_ANGLENOCLIP`: defined by server.h, used by nothing.
+        AngleNoClip = 1,
+        /// `MOVETYPE_ANGLECLIP`: defined by server.h, used by nothing.
+        AngleClip = 2,
+        /// `MOVETYPE_WALK`: a player on foot (gravity, friction, steps).
+        Walk = 3,
+        /// `MOVETYPE_STEP`: a monster, moved by its AI in steps (gravity only
+        /// when off the ground).
+        Step = 4,
+        /// `MOVETYPE_FLY`: no gravity.
+        Fly = 5,
+        /// `MOVETYPE_TOSS`: gravity, stops dead on a floor (gibs, the dead).
+        Toss = 6,
+        /// `MOVETYPE_PUSH`: a brush mover (doors, plats) that pushes others.
+        Push = 7,
+        /// `MOVETYPE_NOCLIP`: flies through everything.
+        NoClip = 8,
+        /// `MOVETYPE_FLYMISSILE`: `FLY`, clipping against monsters with a
+        /// fattened box (`MOVE_MISSILE`).
+        FlyMissile = 9,
+        /// `MOVETYPE_BOUNCE`: `TOSS` that bounces (grenades).
+        Bounce = 10,
+    }
+);
+
+qc_enum!(
+    /// An edict's `solid` (server.h `SOLID_*`): what it is to a trace. It
+    /// decodes as `(int)ent->v.solid`, like [`MoveType`] (id compares the
+    /// float, which agrees on every constant).
+    Solid {
+        /// `SOLID_NOT`: no interaction with other objects.
+        Not = 0,
+        /// `SOLID_TRIGGER`: touch on edge, but not blocking.
+        Trigger = 1,
+        /// `SOLID_BBOX`: touch on edge, block.
+        BBox = 2,
+        /// `SOLID_SLIDEBOX`: touch on edge, but not an onground (monsters,
+        /// the player).
+        SlideBox = 3,
+        /// `SOLID_BSP`: bsp clip, touch on edge, block.
+        Bsp = 4,
+    }
+);
+
+/// An edict's `flags` (server.h `FL_*`): a bit-set QuakeC keeps in a float,
+/// which id's C reads through `(int)ent->v.flags` and writes back as the
+/// float of the new int.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EntFlags(i32);
+
+impl EntFlags {
+    /// `FL_FLY`: a flying monster (no gravity, no steps).
+    pub const FLY: EntFlags = EntFlags(1);
+    /// `FL_SWIM`: a swimming monster (stays in water).
+    pub const SWIM: EntFlags = EntFlags(2);
+    /// `FL_CONVEYOR`: defined by server.h, used by nothing.
+    pub const CONVEYOR: EntFlags = EntFlags(4);
+    /// `FL_CLIENT`: a player's edict (what `checkclient` and the monsters'
+    /// `FindTarget` look for).
+    pub const CLIENT: EntFlags = EntFlags(8);
+    /// `FL_INWATER`: a monster's box is in water.
+    pub const INWATER: EntFlags = EntFlags(16);
+    /// `FL_MONSTER`: AI-driven; missiles clip it with a fattened box.
+    pub const MONSTER: EntFlags = EntFlags(32);
+    /// `FL_GODMODE`: `god` is on.
+    pub const GODMODE: EntFlags = EntFlags(64);
+    /// `FL_NOTARGET`: `notarget` is on.
+    pub const NOTARGET: EntFlags = EntFlags(128);
+    /// `FL_ITEM`: an item (gets an extra-large bbox to be touched).
+    pub const ITEM: EntFlags = EntFlags(256);
+    /// `FL_ONGROUND`: standing on something.
+    pub const ONGROUND: EntFlags = EntFlags(512);
+    /// `FL_PARTIALGROUND`: not all corners are valid (`SV_FixCheckBottom`), so
+    /// [`sv_movestep`] lets it move or fall instead of refusing every step.
+    pub const PARTIALGROUND: EntFlags = EntFlags(1024);
+    /// `FL_WATERJUMP`: a player jumping out of water.
+    pub const WATERJUMP: EntFlags = EntFlags(2048);
+    /// `FL_JUMPRELEASED`: the player let go of jump (for jump debouncing).
+    pub const JUMPRELEASED: EntFlags = EntFlags(4096);
+
+    /// The flags of the int `bits`.
+    pub const fn from_bits(bits: i32) -> EntFlags {
+        EntFlags(bits)
+    }
+
+    /// The int QuakeC's float holds.
+    pub const fn bits(self) -> i32 {
+        self.0
+    }
+
+    /// Whether every flag of `other` is set.
+    pub const fn contains(self, other: EntFlags) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether any flag of `other` is set.
+    pub const fn intersects(self, other: EntFlags) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// These flags and `other`'s (`flags | FL_X`).
+    pub const fn with(self, other: EntFlags) -> EntFlags {
+        EntFlags(self.0 | other.0)
+    }
+
+    /// These flags less `other`'s (`flags & ~FL_X`).
+    pub const fn without(self, other: EntFlags) -> EntFlags {
+        EntFlags(self.0 & !other.0)
+    }
+
+    /// These flags with `other`'s flipped (`flags ^ FL_X`).
+    pub const fn toggled(self, other: EntFlags) -> EntFlags {
+        EntFlags(self.0 ^ other.0)
+    }
+}
+
+impl std::ops::BitOr for EntFlags {
+    type Output = EntFlags;
+
+    fn bitor(self, other: EntFlags) -> EntFlags {
+        self.with(other)
+    }
+}
+
+/// The entity fields the engine reads as server.h types, through the handles
+/// resolved at load ([`Vm::fo`]).
+impl Vm {
+    /// Edict `e`'s `movetype`.
+    pub fn movetype(&self, e: i32) -> MoveType {
+        MoveType::from_code(self.ent_float(e, self.fo().movetype) as i32)
+    }
+
+    /// Set edict `e`'s `movetype`.
+    pub fn set_movetype(&mut self, e: i32, movetype: MoveType) {
+        self.set_ent_float(e, self.fo().movetype, movetype.code() as f32);
+    }
+
+    /// Edict `e`'s `solid`.
+    pub fn solid(&self, e: i32) -> Solid {
+        Solid::from_code(self.ent_float(e, self.fo().solid) as i32)
+    }
+
+    /// Set edict `e`'s `solid`.
+    pub fn set_solid(&mut self, e: i32, solid: Solid) {
+        self.set_ent_float(e, self.fo().solid, solid.code() as f32);
+    }
+
+    /// Edict `e`'s `flags`.
+    pub fn flags(&self, e: i32) -> EntFlags {
+        EntFlags::from_bits(self.ent_float(e, self.fo().flags) as i32)
+    }
+
+    /// Set edict `e`'s `flags`.
+    pub fn set_flags(&mut self, e: i32, flags: EntFlags) {
+        self.set_ent_float(e, self.fo().flags, flags.bits() as f32);
+    }
+}
+
+/// The QuakeC functions the engine calls, each named by a global
+/// (`pr_global_struct->StartFrame`, progdefs.h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SysFn {
+    StartFrame,
+    PlayerPreThink,
+    PlayerPostThink,
+    ClientKill,
+    ClientConnect,
+    PutClientInServer,
+    SetNewParms,
+    SetChangeParms,
+}
+
+impl SysFn {
+    /// Its name, which is also its global's.
+    fn name(self) -> &'static str {
+        match self {
+            SysFn::StartFrame => "StartFrame",
+            SysFn::PlayerPreThink => "PlayerPreThink",
+            SysFn::PlayerPostThink => "PlayerPostThink",
+            SysFn::ClientKill => "ClientKill",
+            SysFn::ClientConnect => "ClientConnect",
+            SysFn::PutClientInServer => "PutClientInServer",
+            SysFn::SetNewParms => "SetNewParms",
+            SysFn::SetChangeParms => "SetChangeParms",
+        }
+    }
+
+    /// The global holding it.
+    fn global(self, go: &GlobalOfs) -> Glb {
+        match self {
+            SysFn::StartFrame => go.start_frame,
+            SysFn::PlayerPreThink => go.player_pre_think,
+            SysFn::PlayerPostThink => go.player_post_think,
+            SysFn::ClientKill => go.client_kill,
+            SysFn::ClientConnect => go.client_connect,
+            SysFn::PutClientInServer => go.put_client_in_server,
+            SysFn::SetNewParms => go.set_new_parms,
+            SysFn::SetChangeParms => go.set_change_parms,
+        }
+    }
+}
 
 /// `CONTENTS_SOLID` / `CONTENTS_EMPTY` (bsp.h): the two point-contents values
 /// [`sv_check_bottom`] and [`sv_movestep`] test against (re-stated here so the
@@ -163,9 +368,9 @@ const DEFAULT_VIEWHEIGHT: f32 = 22.0;
 pub const NUM_SPAWN_PARMS: usize = 16;
 
 /// The QuakeC global name for spawn parm index `i` (`0..NUM_SPAWN_PARMS`):
-/// `parm1`..`parm16`. The C `pr_global_struct->parm1..16` are the 16 floats
-/// `SetChangeParms` writes and `DecodeLevelParms` reads back across a level
-/// change.
+/// `parm1`..`parm16`, for the tests' progs (the engine reads them through
+/// [`GlobalOfs::parms`]).
+#[cfg(test)]
 fn parm_global_name(i: usize) -> String {
     format!("parm{}", i + 1)
 }
@@ -496,7 +701,7 @@ impl Server {
     /// would, the QuakeC `time` global to its float).
     pub fn set_sv_time(&mut self, t: f64) {
         self.vm.set_sv_time(t);
-        self.vm.gset_float("time", t as f32);
+        self.vm.set_glob_float(self.vm.go().time, t as f32);
     }
 
     /// The number of live (not-free) edicts, including the world (edict 0).
@@ -515,7 +720,7 @@ impl Server {
         if self.player < 0 {
             0.0
         } else {
-            self.vm.ent_get_float(self.player, "health")
+            self.vm.ent_float(self.player, self.vm.fo().health)
         }
     }
 
@@ -526,37 +731,37 @@ impl Server {
         if self.player < 0 {
             return ([0.0; 3], [0.0; 3]);
         }
-        let origin = self.vm.ent_get_vector(self.player, "origin");
-        let mut ofs = self.vm.ent_get_vector(self.player, "view_ofs");
+        let origin = self.vm.ent_vec(self.player, self.vm.fo().origin);
+        let mut ofs = self.vm.ent_vec(self.player, self.vm.fo().view_ofs);
         if ofs == [0.0, 0.0, 0.0] {
             ofs = [0.0, 0.0, DEFAULT_VIEWHEIGHT];
         }
         let eye = [origin[0] + ofs[0], origin[1] + ofs[1], origin[2] + ofs[2]];
-        let v_angle = self.vm.ent_get_vector(self.player, "v_angle");
+        let v_angle = self.vm.ent_vec(self.player, self.vm.fo().v_angle);
         (eye, v_angle)
     }
 
-    /// Resolve a named *system* QuakeC function (`StartFrame`, `PlayerPreThink`,
-    /// …). These are stored in like-named globals (`pr_global_struct->X`); prefer
-    /// the function index in that global, fall back to a by-name lookup. Returns
-    /// `None` when the program defines neither.
-    fn sys_function(&self, name: &str) -> Option<usize> {
-        let g = self.vm.gget_int(name);
+    /// Resolve a *system* QuakeC function (`StartFrame`, `PlayerPreThink`, …):
+    /// the function number in its like-named global (`pr_global_struct->X`),
+    /// read at the call as id's does; for a progs that leaves the global unset
+    /// (the tests'), the function of that name. `None` when there is neither.
+    fn sys_function(&self, f: SysFn) -> Option<usize> {
+        let g = self.vm.glob_int(f.global(self.vm.go()));
         if g > 0 && (g as usize) < self.vm.progs().functions.len() {
             return Some(g as usize);
         }
-        self.vm.progs().find_function(name)
+        self.vm.progs().find_function(f.name())
     }
 
     /// Execute a system QuakeC function with `self = self_e`, `other = other_e`.
     /// Returns `Ok(true)` if it existed and ran, `Ok(false)` if absent, and the
     /// program error if it failed (the VM has halted: see [`Vm::execute`]).
-    fn run_sys(&mut self, name: &str, self_e: i32, other_e: i32) -> Result<bool> {
-        let Some(f) = self.sys_function(name) else {
+    fn run_sys(&mut self, sys: SysFn, self_e: i32, other_e: i32) -> Result<bool> {
+        let Some(f) = self.sys_function(sys) else {
             return Ok(false);
         };
-        self.vm.gset_int("self", self_e);
-        self.vm.gset_int("other", other_e);
+        self.vm.set_glob_int(self.vm.go().self_, self_e);
+        self.vm.set_glob_int(self.vm.go().other, other_e);
         self.vm.execute(f)?;
         Ok(true)
     }
@@ -576,9 +781,9 @@ impl Server {
         if self.player < 0 {
             return (0.0, 0.0, 0.0);
         }
-        let button0 = self.vm.ent_get_float(self.player, "button0");
-        let weapon = self.vm.ent_get_float(self.player, "weapon");
-        let ammo_shells = self.vm.ent_get_float(self.player, "ammo_shells");
+        let button0 = self.vm.ent_float(self.player, self.vm.fo().button0);
+        let weapon = self.vm.ent_float(self.player, self.vm.fo().weapon);
+        let ammo_shells = self.vm.ent_float(self.player, self.vm.fo().ammo_shells);
         (button0, weapon, ammo_shells)
     }
 

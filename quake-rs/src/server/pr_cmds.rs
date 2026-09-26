@@ -26,7 +26,7 @@ use super::msg::{
 use super::pr_edict::parse_float;
 use super::sv_move::{bi_checkbottom, bi_movetogoal, bi_walkmove};
 use super::sv_world::{link_edict, sv_move};
-use super::{FL_CLIENT, FL_ONGROUND, SOLID_NOT, SV_MAXVELOCITY};
+use super::{EntFlags, Solid, SV_MAXVELOCITY};
 use crate::math::{add as v_add, angle_vectors, sub as v_sub, Vec3};
 use crate::vm::{Builtin, Vm};
 use crate::Result;
@@ -44,7 +44,7 @@ use crate::Result;
 fn bi_setorigin(vm: &mut Vm) -> Result<()> {
     let e = vm.arg_entity(0);
     let o = vm.arg_vector(1);
-    vm.ent_set_vector(e, "origin", o);
+    vm.set_ent_vec(e, vm.fo().origin, o);
     link_edict(vm, e);
     Ok(())
 }
@@ -64,9 +64,9 @@ fn bi_setsize(vm: &mut Vm) -> Result<()> {
 /// `SetMinMaxSize` (pr_cmds.c): set `mins`/`maxs`/`size` then relink. Rotation
 /// is disabled in the C (`rotate = false; // FIXME`), so we copy directly.
 fn set_min_max_size(vm: &mut Vm, e: i32, min: Vec3, max: Vec3) {
-    vm.ent_set_vector(e, "mins", min);
-    vm.ent_set_vector(e, "maxs", max);
-    vm.ent_set_vector(e, "size", v_sub(max, min));
+    vm.set_ent_vec(e, vm.fo().mins, min);
+    vm.set_ent_vec(e, vm.fo().maxs, max);
+    vm.set_ent_vec(e, vm.fo().size, v_sub(max, min));
     link_edict(vm, e);
 }
 
@@ -81,7 +81,7 @@ fn bi_setmodel(vm: &mut Vm) -> Result<()> {
 
     // model field = the string_t of the argument (the C did `m - pr_strings`,
     // i.e. it kept the same string_t). Re-intern to be safe across heaps.
-    vm.ent_set_string(e, "model", &m);
+    vm.set_ent_string(e, vm.fo().model, &m);
 
     // modelindex = host.precache_model(m); also fetch its bounds if it's a
     // brush submodel. Take the host only briefly (no execute() inside).
@@ -93,7 +93,7 @@ fn bi_setmodel(vm: &mut Vm) -> Result<()> {
         })
         .unwrap_or((0, None));
 
-    vm.ent_set_float(e, "modelindex", idx as f32);
+    vm.set_ent_float(e, vm.fo().modelindex, idx as f32);
 
     // SetMinMaxSize(e, mod->mins, mod->maxs); `if (!mod)` the C used a zero
     // box (here also a model the host could not resolve: no pak in tests).
@@ -138,9 +138,9 @@ fn bi_precache_file(vm: &mut Vm) -> Result<()> {
 fn bi_makevectors(vm: &mut Vm) -> Result<()> {
     let angles = vm.arg_vector(0);
     let (forward, right, up) = angle_vectors(angles);
-    vm.gset_vector("v_forward", forward);
-    vm.gset_vector("v_right", right);
-    vm.gset_vector("v_up", up);
+    vm.set_glob_vec(vm.go().v_forward, forward);
+    vm.set_glob_vec(vm.go().v_right, right);
+    vm.set_glob_vec(vm.go().v_up, up);
     Ok(())
 }
 
@@ -164,16 +164,16 @@ fn bi_traceline(vm: &mut Vm) -> Result<()> {
     // not be inside with_host.
     let tr = sv_move(vm, v1, v2, [0.0; 3], [0.0; 3], ignore, nomonsters, false);
 
-    vm.gset_float("trace_allsolid", tr.allsolid as i32 as f32);
-    vm.gset_float("trace_startsolid", tr.startsolid as i32 as f32);
-    vm.gset_float("trace_fraction", tr.fraction);
-    vm.gset_float("trace_inwater", tr.inwater as i32 as f32);
-    vm.gset_float("trace_inopen", tr.inopen as i32 as f32);
-    vm.gset_vector("trace_endpos", tr.endpos);
-    vm.gset_vector("trace_plane_normal", tr.plane_normal);
-    vm.gset_float("trace_plane_dist", tr.plane_dist);
+    vm.set_glob_float(vm.go().trace_allsolid, tr.allsolid as i32 as f32);
+    vm.set_glob_float(vm.go().trace_startsolid, tr.startsolid as i32 as f32);
+    vm.set_glob_float(vm.go().trace_fraction, tr.fraction);
+    vm.set_glob_float(vm.go().trace_inwater, tr.inwater as i32 as f32);
+    vm.set_glob_float(vm.go().trace_inopen, tr.inopen as i32 as f32);
+    vm.set_glob_vec(vm.go().trace_endpos, tr.endpos);
+    vm.set_glob_vec(vm.go().trace_plane_normal, tr.plane_normal);
+    vm.set_glob_float(vm.go().trace_plane_dist, tr.plane_dist);
     // trace_ent = the hit edict; a clear move (ent == -1) resolves to the world.
-    vm.gset_int("trace_ent", if tr.ent < 0 { 0 } else { tr.ent });
+    vm.set_glob_int(vm.go().trace_ent, if tr.ent < 0 { 0 } else { tr.ent });
     Ok(())
 }
 
@@ -192,11 +192,11 @@ fn bi_pointcontents(vm: &mut Vm) -> Result<()> {
 /// on (the world or a solid bmodel such as a platform), and returns 1; otherwise
 /// returns 0.
 fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
-    let ent = vm.gget_int("self");
+    let ent = vm.glob_int(vm.go().self_);
 
-    let origin = vm.ent_get_vector(ent, "origin");
-    let mins = vm.ent_get_vector(ent, "mins");
-    let maxs = vm.ent_get_vector(ent, "maxs");
+    let origin = vm.ent_vec(ent, vm.fo().origin);
+    let mins = vm.ent_vec(ent, vm.fo().mins);
+    let maxs = vm.ent_vec(ent, vm.fo().maxs);
     let end: Vec3 = [origin[0], origin[1], origin[2] - 256.0];
 
     // PF_droptofloor (pr_cmds.c) uses the ENTITY-AWARE SV_Move (not the
@@ -207,14 +207,14 @@ fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
     if tr.fraction == 1.0 || tr.allsolid {
         vm.ret_float(0.0);
     } else {
-        vm.ent_set_vector(ent, "origin", tr.endpos);
+        vm.set_ent_vec(ent, vm.fo().origin, tr.endpos);
         link_edict(vm, ent);
-        let flags = vm.ent_get_float(ent, "flags") as i32;
-        vm.ent_set_float(ent, "flags", (flags | FL_ONGROUND) as f32);
+        let flags = vm.flags(ent);
+        vm.set_flags(ent, flags.with(EntFlags::ONGROUND));
         // groundentity = EDICT_TO_PROG(trace.ent): the resolved edict it rests
         // on (0 = world, >0 = that edict). The hit branch only runs when
         // fraction < 1, so trace.ent is never the "nothing hit" sentinel (-1).
-        vm.ent_set_int(ent, "groundentity", tr.ent.max(0));
+        vm.set_ent_int(ent, vm.fo().groundentity, tr.ent.max(0));
         vm.ret_float(1.0);
     }
     Ok(())
@@ -268,11 +268,11 @@ fn bi_cvar_set(vm: &mut Vm) -> Result<()> {
 /// `yaw_speed`. A faithful port of the C (which converted this from QuakeC for
 /// speed); harmless for non-monster entities (`yaw_speed == 0` => no turn).
 pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
-    let ent = vm.gget_int("self");
-    let angles = vm.ent_get_vector(ent, "angles");
+    let ent = vm.glob_int(vm.go().self_);
+    let angles = vm.ent_vec(ent, vm.fo().angles);
     let current = crate::math::anglemod(angles[1]);
-    let ideal = vm.ent_get_float(ent, "ideal_yaw");
-    let speed = vm.ent_get_float(ent, "yaw_speed");
+    let ideal = vm.ent_float(ent, vm.fo().ideal_yaw);
+    let speed = vm.ent_float(ent, vm.fo().yaw_speed);
 
     if current == ideal {
         return Ok(());
@@ -295,7 +295,7 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 
     let new_yaw = crate::math::anglemod(current + move_);
     let new_angles = [angles[0], new_yaw, angles[2]];
-    vm.ent_set_vector(ent, "angles", new_angles);
+    vm.set_ent_vec(ent, vm.fo().angles, new_angles);
     Ok(())
 }
 
@@ -343,7 +343,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
     let ent = vm.arg_entity(0);
     // arg 1 (speed) is read but unused by PF_aim — the QC applies it to the shot.
 
-    let v_forward = vm.gget_vector("v_forward");
+    let v_forward = vm.glob_vec(vm.go().v_forward);
     let origin = vm.ent_vec(ent, vm.fo().origin);
     let mut start = origin;
     start[2] += 20.0;
@@ -431,10 +431,10 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
     let mut player = 0i32;
     for e in 1..vm.num_edicts() {
         let ent = e as i32;
-        if vm.is_free_edict(e as i32) {
+        if vm.is_free_edict(ent) {
             continue;
         }
-        if (vm.ent_float(ent, vm.fo().flags) as i32) & FL_CLIENT != 0
+        if vm.flags(ent).contains(EntFlags::CLIENT)
             && vm.ent_float(ent, vm.fo().health) > 0.0
         {
             player = ent;
@@ -485,10 +485,10 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
     // Scan edicts 1..num_edicts (the C started at NEXT_EDICT(sv.edicts)).
     for e in 1..n {
         let ei = e as i32;
-        if vm.is_free_edict(e as i32) {
+        if vm.is_free_edict(ei) {
             continue;
         }
-        if vm.ent_float(ei, vm.fo().solid) as i32 == SOLID_NOT {
+        if vm.solid(ei) == Solid::Not {
             continue;
         }
         let origin = vm.ent_vec(ei, vm.fo().origin);

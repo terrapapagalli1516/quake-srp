@@ -275,7 +275,7 @@ impl Server {
             // medium=1, hard/nightmare>=2). `current_skill` is the live `skill`
             // cvar ([`super::ServerCvars`]) — a difficulty portal's
             // `cvar_set("skill", N)` changes which monsters/items this filter keeps.
-            let spawnflags = self.vm.ent_get_float(ent, "spawnflags") as i32;
+            let spawnflags = self.vm.ent_float(ent, self.vm.fo().spawnflags) as i32;
             let deathmatch = cvar_value(&self.cvars(), "deathmatch") != 0.0;
             let current_skill = self.skill();
             let inhibited = if deathmatch {
@@ -292,7 +292,7 @@ impl Server {
             }
 
             // classname -> spawn function.
-            let classname = self.vm.ent_get_string(ent, "classname");
+            let classname = self.vm.ent_str(ent, self.vm.fo().classname).to_string();
             if classname.is_empty() {
                 // C: "No classname" -> free and continue.
                 self.vm.free_edict(ent);
@@ -309,9 +309,9 @@ impl Server {
 
             // self = ent, other = world, time = current; then execute. The host
             // is PRESENT here (we are not inside with_host).
-            self.vm.gset_int("self", ent);
-            self.vm.gset_int("other", 0);
-            self.vm.gset_float("time", time);
+            self.vm.set_glob_int(self.vm.go().self_, ent);
+            self.vm.set_glob_int(self.vm.go().other, 0);
+            self.vm.set_glob_float(self.vm.go().time, time);
 
             // A spawn function's error is Host_Error: the load ends there.
             self.vm.execute(func)?;

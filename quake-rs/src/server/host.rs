@@ -20,7 +20,7 @@
 
 use std::rc::Rc;
 
-use super::{parm_global_name, Outbox, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
+use super::{Outbox, Server, SysFn, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
 use crate::qrand::QRand;
 use crate::vm::Vm;
 use crate::Result;
@@ -167,8 +167,8 @@ impl Server {
     /// never connects a client, so this does not affect golden renders.
     pub fn run_signon_frames(&mut self) -> Result<()> {
         let (yaw, pitch) = if self.player >= 0 {
-            let ang = self.vm.ent_get_vector(self.player, "angles");
-            let vang = self.vm.ent_get_vector(self.player, "v_angle");
+            let ang = self.vm.ent_vec(self.player, self.vm.fo().angles);
+            let vang = self.vm.ent_vec(self.player, self.vm.fo().v_angle);
             (ang[1], vang[0])
         } else {
             (0.0, 0.0)
@@ -197,21 +197,17 @@ impl Server {
     /// `PR_ExecuteProgram(SetChangeParms)`, then copy `parm1..16` into
     /// `client->spawn_parms`. If the progs lacks `SetChangeParms` (a minimal mod)
     /// the run is a no-op and the *current* parm globals are returned unchanged;
-    /// a missing individual parm global reads as `0.0` (`gget_float`), so this
-    /// never panics. Returns `[0.0; 16]` when no client has connected, and
+    /// a missing individual parm global reads as `0.0` ([`Vm::glob_float`]), so
+    /// this never panics. Returns `[0.0; 16]` when no client has connected, and
     /// the program error if `SetChangeParms` fails (id's `Host_Error`).
     pub fn save_spawn_parms(&mut self) -> Result<[f32; NUM_SPAWN_PARMS]> {
-        let mut parms = [0.0f32; NUM_SPAWN_PARMS];
         if self.player < 0 {
-            return Ok(parms);
+            return Ok([0.0; NUM_SPAWN_PARMS]);
         }
         // SetChangeParms writes parm1..parm16 from the player's live fields
         // (self = the player edict, other = world).
-        self.run_sys("SetChangeParms", self.player, 0)?;
-        for (i, p) in parms.iter_mut().enumerate() {
-            *p = self.vm.gget_float(&parm_global_name(i));
-        }
-        Ok(parms)
+        self.run_sys(SysFn::SetChangeParms, self.player, 0)?;
+        Ok(self.vm.go().parms().map(|g| self.vm.glob_float(g)))
     }
 
     /// Read the `serverflags` QuakeC global (the episode rune `SERVERFLAG_*`
@@ -221,7 +217,7 @@ impl Server {
     /// outgoing server and writes it into the incoming one with
     /// [`Self::set_serverflags`] so the runes are not lost each level.
     pub fn serverflags(&self) -> f32 {
-        self.vm.gget_float("serverflags")
+        self.vm.glob_float(self.vm.go().serverflags)
     }
 
     /// `SV_SpawnServer`'s `pr_global_struct->serverflags = svs.serverflags`: set
@@ -230,7 +226,7 @@ impl Server {
     /// progs lacks it. See [`Self::serverflags`].
     pub fn set_serverflags(&mut self, flags: f32) {
         self.svs_serverflags = flags;
-        self.vm.gset_float("serverflags", flags);
+        self.vm.set_glob_float(self.vm.go().serverflags, flags);
     }
 
     /// `svs.serverflags`: the rune bits this level was entered with — what a
@@ -340,13 +336,13 @@ impl Server {
         if player < 0 || self.is_free(player) {
             return Ok(false);
         }
-        if self.vm.ent_get_float(player, "health") <= 0.0 {
+        if self.vm.ent_float(player, self.vm.fo().health) <= 0.0 {
             return Ok(false); // "Can't suicide -- allready dead!"
         }
         // pr_global_struct->time = sv.time; self = sv_player; run ClientKill.
         let t = self.time();
-        self.vm.gset_float("time", t);
-        self.run_sys("ClientKill", player, 0)?;
+        self.vm.set_glob_float(self.vm.go().time, t);
+        self.run_sys(SysFn::ClientKill, player, 0)?;
         Ok(true)
     }
 }
@@ -356,7 +352,7 @@ mod tests {
     use super::*;
     use crate::progs::{Op, Progs, Statement, OFS_PARM0};
     use crate::server::testutil::*;
-    use crate::server::FL_ONGROUND;
+    use crate::server::EntFlags;
 
     #[test]
     fn run_signon_frames_settles_the_spawned_player_before_frame_zero() {
@@ -391,8 +387,8 @@ mod tests {
         // fall velocity, box bottom resting on the floor (origin.z ~ 24).
         let org = server.vm.ent_get_vector(p, "origin");
         let vel = server.vm.ent_get_vector(p, "velocity");
-        let flags = server.vm.ent_get_float(p, "flags") as i32;
-        assert!(flags & FL_ONGROUND != 0, "player is on the ground at frame 0");
+        let flags = server.vm.flags(p);
+        assert!(flags.contains(EntFlags::ONGROUND), "player is on the ground at frame 0");
         assert_eq!(vel[2], 0.0, "no residual fall velocity at frame 0");
         assert!(
             (23.0..=25.0).contains(&org[2]),

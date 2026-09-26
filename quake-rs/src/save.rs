@@ -471,9 +471,9 @@ impl Server {
         // (SV_SendServerinfo sends sv.edicts->v.message); the kill stats are
         // the killed_monsters/total_monsters progs globals (the client stats
         // mirror them via svc_updatestat).
-        let levelname = self.vm.ent_get_string(0, "message");
-        let kills = self.vm.gget_float("killed_monsters") as i32;
-        let total = self.vm.gget_float("total_monsters") as i32;
+        let levelname = self.vm.ent_str(0, self.vm.fo().message).to_string();
+        let kills = self.vm.glob_float(self.vm.go().killed_monsters) as i32;
+        let total = self.vm.glob_float(self.vm.go().total_monsters) as i32;
         out.push_str(&savegame_comment(&levelname, kills, total));
         out.push('\n');
         // for (...) fprintf (f, "%f\n", svs.clients->spawn_parms[i]);
@@ -631,7 +631,7 @@ impl Server {
         for e in 1..server.vm.num_edicts() {
             let ent = e as i32;
             if !server.vm.is_free_edict(ent)
-                && server.vm.ent_string_ref(ent, "classname") == "player"
+                && server.vm.ent_str(ent, server.vm.fo().classname) == "player"
             {
                 server.player = ent;
                 break;

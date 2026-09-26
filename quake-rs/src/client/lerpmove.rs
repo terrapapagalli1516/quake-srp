@@ -51,11 +51,6 @@ pub enum LerpMove {
     Smooth,
 }
 
-/// `MOVETYPE_STEP` (server.h), an entity's `movetype` as the float QuakeC
-/// holds: the monsters, which the server moves only in their thinks (and
-/// `SV_Physics_Step` while airborne), and flags `U_NOLERP` for the client.
-pub const MOVETYPE_STEP: f32 = 4.0;
-
 /// A glide's length: id1's monsters step every 0.1 s (their think).
 pub const GLIDE: f32 = 0.1;
 

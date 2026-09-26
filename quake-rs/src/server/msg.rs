@@ -162,9 +162,9 @@ pub struct StaticSound {
 /// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
 /// `SV_StartSound`/`PF_ambientsound` wrote for the emission coordinate.
 fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
-    let origin = vm.ent_get_vector(e, "origin");
-    let mins = vm.ent_get_vector(e, "mins");
-    let maxs = vm.ent_get_vector(e, "maxs");
+    let origin = vm.ent_vec(e, vm.fo().origin);
+    let mins = vm.ent_vec(e, vm.fo().mins);
+    let maxs = vm.ent_vec(e, vm.fo().maxs);
     [
         origin[0] + 0.5 * (mins[0] + maxs[0]),
         origin[1] + 0.5 * (mins[1] + maxs[1]),
@@ -875,7 +875,7 @@ impl Server {
     /// [`Server::paused`] itself: the local client reads it the same frame.
     pub fn pause(&mut self) {
         self.paused = !self.paused;
-        let name = if self.player > 0 { self.vm.ent_get_string(self.player, "netname") } else { String::new() };
+        let name = if self.player > 0 { self.vm.ent_str(self.player, self.vm.fo().netname).to_string() } else { String::new() };
         let what = if self.paused { "paused" } else { "unpaused" };
         if let Some(o) = self.outbox() {
             o.print(false, format!("{name} {what} the game\n"));

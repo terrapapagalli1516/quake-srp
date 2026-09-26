@@ -17,7 +17,8 @@ use crate::pak::Pak;
 use crate::particles::ParticleSystem;
 use crate::progs::Progs;
 use crate::qrand::QRand;
-use crate::server::Server;
+use crate::server::{EntFlags, MoveType, Server};
+use crate::vm::Fld;
 
 use super::cl_input::clamp_pitch;
 use super::cl_main::client_items;
@@ -39,11 +40,6 @@ pub const MAX_CELLS: f32 = 100.0;
 pub const IT_SHOTGUN: i32 = 1; // bit for weapon 2 base; weapon d>=2 is IT_SHOTGUN<<(d-2)
 pub const IT_AXE: i32 = 4096;
 pub const IT_INVISIBILITY: i32 = 1 << 19; // Ring of Shadows (524288)
-pub const FL_GODMODE: i32 = 64;
-pub const FL_ONGROUND: i32 = 512;
-pub const MOVETYPE_WALK: f32 = 3.0;
-pub const MOVETYPE_FLY: f32 = 5.0;
-pub const MOVETYPE_NOCLIP: f32 = 8.0;
 
 /// Run a command that acts on the live player edict, pushing any output lines
 /// into `out`. `cmd` is already lowercased; `argv[0]` is the command itself.
@@ -60,9 +56,9 @@ pub fn run_game_command(
     match cmd {
         // Host_God_f: flags ^= FL_GODMODE.
         "god" => {
-            let flags = w.server.vm.ent_get_float(player, "flags") as i32 ^ FL_GODMODE;
-            w.server.vm.ent_set_float(player, "flags", flags as f32);
-            out.push(if flags & FL_GODMODE != 0 {
+            let flags = w.server.vm.flags(player).toggled(EntFlags::GODMODE);
+            w.server.vm.set_flags(player, flags);
+            out.push(if flags.contains(EntFlags::GODMODE) {
                 "godmode ON".into()
             } else {
                 "godmode OFF".into()
@@ -70,23 +66,21 @@ pub fn run_game_command(
         }
         // Host_Noclip_f: movetype toggles WALK <-> NOCLIP.
         "noclip" => {
-            let mt = w.server.vm.ent_get_float(player, "movetype");
-            if mt != MOVETYPE_NOCLIP {
-                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_NOCLIP);
+            if w.server.vm.movetype(player) != MoveType::NoClip {
+                w.server.vm.set_movetype(player, MoveType::NoClip);
                 out.push("noclip ON".into());
             } else {
-                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_WALK);
+                w.server.vm.set_movetype(player, MoveType::Walk);
                 out.push("noclip OFF".into());
             }
         }
         // Host_Fly_f: movetype toggles WALK <-> FLY.
         "fly" => {
-            let mt = w.server.vm.ent_get_float(player, "movetype");
-            if mt != MOVETYPE_FLY {
-                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_FLY);
+            if w.server.vm.movetype(player) != MoveType::Fly {
+                w.server.vm.set_movetype(player, MoveType::Fly);
                 out.push("flymode ON".into());
             } else {
-                w.server.vm.ent_set_float(player, "movetype", MOVETYPE_WALK);
+                w.server.vm.set_movetype(player, MoveType::Walk);
                 out.push("flymode OFF".into());
             }
         }
@@ -137,19 +131,20 @@ fn run_give_command(w: &mut Walk, argv: &[&str], out: &mut Vec<String>) {
     // The amount (argv[2]); None => use the per-field default below.
     let amount = argv.get(2).and_then(|s| s.parse::<f32>().ok());
 
-    let mut set = |field: &str, val: f32, cap: f32, label: &str, out: &mut Vec<String>| {
+    let fo = *w.server.vm.fo();
+    let mut set = |field: Fld, val: f32, cap: f32, label: &str, out: &mut Vec<String>| {
         let v = val.clamp(0.0, cap);
-        w.server.vm.ent_set_float(player, field, v);
+        w.server.vm.set_ent_float(player, field, v);
         out.push(format!("gave {label} {v:.0}"));
     };
 
     match c0 {
-        'h' => set("health", amount.unwrap_or(MAX_HEALTH), MAX_HEALTH, "health", out),
-        'a' => set("armorvalue", amount.unwrap_or(MAX_ARMOR), MAX_ARMOR, "armor", out),
-        's' => set("ammo_shells", amount.unwrap_or(MAX_SHELLS), MAX_SHELLS, "shells", out),
-        'n' => set("ammo_nails", amount.unwrap_or(MAX_NAILS), MAX_NAILS, "nails", out),
-        'r' => set("ammo_rockets", amount.unwrap_or(MAX_ROCKETS), MAX_ROCKETS, "rockets", out),
-        'c' => set("ammo_cells", amount.unwrap_or(MAX_CELLS), MAX_CELLS, "cells", out),
+        'h' => set(fo.health, amount.unwrap_or(MAX_HEALTH), MAX_HEALTH, "health", out),
+        'a' => set(fo.armorvalue, amount.unwrap_or(MAX_ARMOR), MAX_ARMOR, "armor", out),
+        's' => set(fo.ammo_shells, amount.unwrap_or(MAX_SHELLS), MAX_SHELLS, "shells", out),
+        'n' => set(fo.ammo_nails, amount.unwrap_or(MAX_NAILS), MAX_NAILS, "nails", out),
+        'r' => set(fo.ammo_rockets, amount.unwrap_or(MAX_ROCKETS), MAX_ROCKETS, "rockets", out),
+        'c' => set(fo.ammo_cells, amount.unwrap_or(MAX_CELLS), MAX_CELLS, "cells", out),
         '1'..='8' => {
             // Weapon select/grant. Weapon 1 = axe (its own high bit); weapons
             // 2..8 are IT_SHOTGUN << (d-2), exactly as Host_Give_f does
@@ -160,10 +155,10 @@ fn run_give_command(w: &mut Walk, argv: &[&str], out: &mut Vec<String>) {
             } else {
                 IT_SHOTGUN << (d - 2)
             };
-            let items = w.server.vm.ent_get_float(player, "items") as i32 | bit;
-            w.server.vm.ent_set_float(player, "items", items as f32);
+            let items = w.server.vm.ent_float(player, w.server.vm.fo().items) as i32 | bit;
+            w.server.vm.set_ent_float(player, w.server.vm.fo().items, items as f32);
             // Select it: the QuakeC `weapon` field is the active weapon bit.
-            w.server.vm.ent_set_float(player, "weapon", bit as f32);
+            w.server.vm.set_ent_float(player, w.server.vm.fo().weapon, bit as f32);
             out.push(format!("gave weapon {d}"));
         }
         _ => out.push(format!("give: unknown item '{what}'")),
@@ -514,8 +509,8 @@ pub fn build_walk_savegame(
     // before it did that (2026-09-25) carry an empty netname, which read
     // "  was shot by a Grunt" until the next level; give them the name
     // Host_Spawn_f would have (cl_name's "player").
-    if server.vm.ent_get_string(player, "netname").is_empty() {
-        server.vm.ent_set_string(player, "netname", "player");
+    if server.vm.ent_str(player, server.vm.fo().netname).to_string().is_empty() {
+        server.vm.set_ent_string(player, server.vm.fo().netname, "player");
     }
 
     // The save's spawn parms are the level-ENTRY parms (svs.clients->
@@ -530,7 +525,7 @@ pub fn build_walk_savegame(
     // client to correct it"); restoring v_angle directly gives back the exact
     // view the player saved with, roll-free here too (this shell has no
     // persistent roll state).
-    let v_angle = server.vm.ent_get_vector(player, "v_angle");
+    let v_angle = server.vm.ent_vec(player, server.vm.fo().v_angle);
     let yaw = v_angle[1];
     let pitch = clamp_pitch(v_angle[0]);
 

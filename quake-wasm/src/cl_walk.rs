@@ -28,7 +28,8 @@ mod tests {
         client_items, client_punchangle, offset_box, pushed_dlights, static_is_visible,
         ALIAS_MODEL_HALF,
     };
-    use quake_rs::client::host_cmd::{try_changelevel, try_restart, FL_ONGROUND};
+    use quake_rs::client::host_cmd::{try_changelevel, try_restart};
+    use quake_rs::server::EntFlags;
     use quake_rs::client::net_angle;
     use quake_rs::tent::BeamModel;
 
@@ -144,9 +145,8 @@ mod tests {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
             let w = a.walk.as_ref().unwrap();
-            let flags = w.server.vm.ent_get_float(w.player, "flags") as i32;
             let vel = w.server.vm.ent_get_vector(w.player, "velocity");
-            assert!(flags & FL_ONGROUND != 0, "player on the ground at frame 0");
+            assert!(w.server.vm.flags(w.player).contains(EntFlags::ONGROUND), "player on the ground at frame 0");
             assert_eq!(vel[2], 0.0, "no residual fall velocity at frame 0");
             w.server.player_view().0
         });

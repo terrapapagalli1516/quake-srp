@@ -145,8 +145,9 @@ impl Glb {
     }
 }
 
-/// The QuakeC name of a [`FieldOfs`] member: its identifier, or the literal
-/// given for one that is a Rust keyword.
+/// The QuakeC name of a [`FieldOfs`] or [`GlobalOfs`] member: its
+/// identifier, or the literal given for one whose QuakeC name is not a Rust
+/// field name (a keyword, a capital).
 macro_rules! qc_name {
     ($name:ident) => {
         stringify!($name)
@@ -156,30 +157,34 @@ macro_rules! qc_name {
     };
 }
 
-/// Declares [`FieldOfs`]: one [`Fld`] per named field, resolved by name.
-macro_rules! field_ofs {
-    ($($name:ident $(= $qc:literal)?),* $(,)?) => {
-        /// `entvars_t` (progdefs.h): every engine-visible entity field, resolved by
-        /// name once, when the progs is loaded ([`Vm::new`]), plus `gravity`, which
-        /// `SV_AddGravity` finds with `GetEdictFieldValue`. id's engine reads these
-        /// as struct members at offsets fixed by the id1 progs; the port looks them
-        /// up by name so any progs works, and this table spares the hot paths a hash
-        /// of the name on every access (PERF_PLAN D2).
+/// Declares a table of handles resolved by name when the progs loads: one
+/// `$handle` per member, looked up with `Progs::$lookup`.
+macro_rules! resolved_by_name {
+    ($(#[$doc:meta])* $table:ident of $handle:ident by $lookup:ident:
+     $($name:ident $(= $qc:literal)?),* $(,)?) => {
+        $(#[$doc])*
         #[derive(Clone, Copy, Debug, Default)]
-        pub struct FieldOfs {
-            $(pub $name: Fld,)*
+        pub struct $table {
+            $(pub $name: $handle,)*
         }
 
-        impl FieldOfs {
-            /// Resolve every field of `progs` by name.
-            pub fn resolve(progs: &Progs) -> FieldOfs {
-                FieldOfs { $($name: Fld(progs.field_offset(qc_name!($name $($qc)?))),)* }
+        impl $table {
+            /// Resolve every member in `progs` by name.
+            pub fn resolve(progs: &Progs) -> $table {
+                $table { $($name: $handle(progs.$lookup(qc_name!($name $($qc)?))),)* }
             }
         }
     };
 }
 
-field_ofs!(
+resolved_by_name!(
+    /// `entvars_t` (progdefs.h): every engine-visible entity field, resolved by
+    /// name once, when the progs is loaded ([`Vm::new`]), plus `gravity`, which
+    /// `SV_AddGravity` finds with `GetEdictFieldValue`. id's engine reads these
+    /// as struct members at offsets fixed by the id1 progs; the port looks them
+    /// up by name so any progs works, and this table spares the hot paths a hash
+    /// of the name on every access (PERF_PLAN D2).
+    FieldOfs of Fld by field_offset:
     modelindex, absmin, absmax, ltime, movetype, solid, origin, oldorigin, velocity, angles,
     avelocity, punchangle, classname, model, frame, skin, effects, mins, maxs, size, touch,
     use_ = "use", think, blocked, nextthink, groundentity, health, frags, weapon, weaponmodel,
@@ -191,28 +196,33 @@ field_ofs!(
     noise, noise1, noise2, noise3, gravity,
 );
 
-/// The `globalvars_t` (progdefs.h) globals the per-frame server paths touch,
-/// resolved by name at progs load like [`FieldOfs`].
-#[derive(Clone, Copy, Debug, Default)]
-pub struct GlobalOfs {
-    pub self_: Glb,
-    pub other: Glb,
-    pub time: Glb,
-    pub frametime: Glb,
-    pub force_retouch: Glb,
-}
+resolved_by_name!(
+    /// `globalvars_t` (progdefs.h): every global the engine reads or writes,
+    /// resolved by name at progs load like [`FieldOfs`] — the parameter
+    /// block's `self`/`other`/`time`, the level counters, the spawn parms,
+    /// `makevectors`' and `traceline`'s results, and the functions the
+    /// engine calls (`StartFrame`, `PlayerPreThink`, ...).
+    GlobalOfs of Glb by global_offset:
+    self_ = "self", other, world, time, frametime, force_retouch, mapname, deathmatch, coop,
+    teamplay, serverflags, total_secrets, total_monsters, found_secrets, killed_monsters,
+    parm1, parm2, parm3, parm4, parm5, parm6, parm7, parm8, parm9, parm10, parm11, parm12,
+    parm13, parm14, parm15, parm16, v_forward, v_up, v_right, trace_allsolid, trace_startsolid,
+    trace_fraction, trace_endpos, trace_plane_normal, trace_plane_dist, trace_ent, trace_inopen,
+    trace_inwater, msg_entity, main, start_frame = "StartFrame",
+    player_pre_think = "PlayerPreThink", player_post_think = "PlayerPostThink",
+    client_kill = "ClientKill", client_connect = "ClientConnect",
+    put_client_in_server = "PutClientInServer", client_disconnect = "ClientDisconnect",
+    set_new_parms = "SetNewParms", set_change_parms = "SetChangeParms",
+);
 
 impl GlobalOfs {
-    /// Resolve the globals of `progs` by name.
-    pub fn resolve(progs: &Progs) -> GlobalOfs {
-        let g = |name| Glb(progs.global_offset(name));
-        GlobalOfs {
-            self_: g("self"),
-            other: g("other"),
-            time: g("time"),
-            frametime: g("frametime"),
-            force_retouch: g("force_retouch"),
-        }
+    /// The spawn parms `parm1`..`parm16`, in order (`NUM_SPAWN_PARMS`).
+    pub fn parms(&self) -> [Glb; 16] {
+        [
+            self.parm1, self.parm2, self.parm3, self.parm4, self.parm5, self.parm6, self.parm7,
+            self.parm8, self.parm9, self.parm10, self.parm11, self.parm12, self.parm13,
+            self.parm14, self.parm15, self.parm16,
+        ]
     }
 }
 
@@ -361,18 +371,6 @@ pub struct Vm {
     xfunction: usize,
     /// Current statement index (`pr_xstatement`).
     xstatement: usize,
-
-    // --- cached well-known defs for OP_STATE (resolved once in `new`) ---
-    /// Global cell holding the current `self` entity.
-    g_self: Option<usize>,
-    /// Global cell holding the current `time` float.
-    g_time: Option<usize>,
-    /// Entity field offset of `frame`.
-    f_frame: Option<usize>,
-    /// Entity field offset of `think`.
-    f_think: Option<usize>,
-    /// Entity field offset of `nextthink`.
-    f_nextthink: Option<usize>,
 }
 
 impl Vm {
@@ -382,13 +380,6 @@ impl Vm {
     pub fn new(progs: Progs) -> Vm {
         let globals = progs.globals.clone();
         let strings = progs.strings.clone();
-
-        // Resolve the OP_STATE well-known globals/fields once, by name.
-        let g_self = progs.find_global("self").map(|d| d.ofs as usize);
-        let g_time = progs.find_global("time").map(|d| d.ofs as usize);
-        let f_frame = progs.find_field("frame").map(|d| d.ofs as usize);
-        let f_think = progs.find_field("think").map(|d| d.ofs as usize);
-        let f_nextthink = progs.find_field("nextthink").map(|d| d.ofs as usize);
 
         let fo = FieldOfs::resolve(&progs);
         let go = GlobalOfs::resolve(&progs);
@@ -418,11 +409,6 @@ impl Vm {
             localstack: Vec::new(),
             xfunction: 0,
             xstatement: 0,
-            g_self,
-            g_time,
-            f_frame,
-            f_think,
-            f_nextthink,
         };
 
         // Edict 0 is the world. ED_ClearEdict zeroes its fields; it is not free.
@@ -632,6 +618,12 @@ impl Vm {
     pub fn ent_str(&self, e: i32, f: Fld) -> &str {
         string_in(&self.strings, self.ent_int(e, f))
     }
+    /// Intern `value` and store its `string_t` in string field `f` of edict
+    /// `e` (dropped for a missing field).
+    pub fn set_ent_string(&mut self, e: i32, f: Fld, value: &str) {
+        let s = self.intern(value);
+        self.set_ent_int(e, f, s);
+    }
     /// Read global `g` as a float.
     pub fn glob_float(&self, g: Glb) -> f32 {
         g.ofs().map(|o| self.gf(o)).unwrap_or(0.0)
@@ -700,8 +692,7 @@ impl Vm {
     }
     /// Intern `value` and store its `string_t` in entity field `name`.
     pub fn ent_set_string(&mut self, e: i32, name: &str, value: &str) {
-        let s = self.intern(value);
-        self.ent_set_int(e, name, s);
+        self.set_ent_string(e, self.fld(name), value);
     }
 
     /// Read global `name` as a float.
@@ -1731,13 +1722,10 @@ impl Vm {
     /// missing from this program, treat STATE as a no-op (the C unconditionally
     /// dereferences them).
     fn do_state(&mut self, st: Statement) -> Result<()> {
-        let (Some(g_self), Some(g_time), Some(f_frame), Some(f_think), Some(f_nextthink)) = (
-            self.g_self,
-            self.g_time,
-            self.f_frame,
-            self.f_think,
-            self.f_nextthink,
-        ) else {
+        let (fo, go) = (&self.fo, &self.go);
+        let (Some(g_self), Some(g_time), Some(f_frame), Some(f_think), Some(f_nextthink)) =
+            (go.self_.ofs(), go.time.ofs(), fo.frame.ofs(), fo.think.ofs(), fo.nextthink.ofs())
+        else {
             return Ok(()); // missing defs: no-op
         };
 

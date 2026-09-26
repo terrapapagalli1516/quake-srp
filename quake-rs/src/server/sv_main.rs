@@ -19,10 +19,7 @@
 
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
-use super::{
-    parm_global_name, Server, WorldModel, FL_CLIENT, MOVETYPE_NONE, MOVETYPE_PUSH,
-    MOVETYPE_WALK, NUM_SPAWN_PARMS, SOLID_BSP, SOLID_NOT, SOLID_SLIDEBOX,
-};
+use super::{EntFlags, MoveType, Server, Solid, SysFn, WorldModel, NUM_SPAWN_PARMS};
 use std::collections::HashMap;
 
 use crate::bsp::{Bsp, CONTENTS_SOLID};
@@ -96,11 +93,11 @@ impl Server {
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.
         vm.set_sv_time(1.0);
-        vm.gset_float("time", 1.0);
+        vm.set_glob_float(vm.go().time, 1.0);
         // mapname / world entity defaults are best-effort: only set if present.
-        vm.gset_int("world", 0);
-        vm.gset_int("self", 0);
-        vm.gset_int("other", 0);
+        vm.set_glob_int(vm.go().world, 0);
+        vm.set_glob_int(vm.go().self_, 0);
+        vm.set_glob_int(vm.go().other, 0);
 
         Ok(Server {
             vm,
@@ -134,12 +131,12 @@ impl Server {
     pub fn set_map_name(&mut self, name: &str) {
         let bare = name.trim_start_matches("maps/").trim_end_matches(".bsp").to_string();
         let full = format!("maps/{bare}.bsp");
-        self.vm.ent_set_string(0, "model", &full);
-        self.vm.ent_set_float(0, "modelindex", 1.0); // the world model
-        self.vm.ent_set_float(0, "solid", SOLID_BSP as f32);
-        self.vm.ent_set_float(0, "movetype", MOVETYPE_PUSH as f32);
+        self.vm.set_ent_string(0, self.vm.fo().model, &full);
+        self.vm.set_ent_float(0, self.vm.fo().modelindex, 1.0); // the world model
+        self.vm.set_solid(0, Solid::Bsp);
+        self.vm.set_movetype(0, MoveType::Push);
         let s = self.vm.intern(&bare);
-        self.vm.gset_int("mapname", s);
+        self.vm.set_glob_int(self.vm.go().mapname, s);
         // sv.name (strcpy(sv.name, server) in SV_SpawnServer): kept for the
         // savegame header's mapname line (Host_Savegame_f writes sv.name).
         self.map_name = bare;
@@ -152,8 +149,10 @@ impl Server {
     /// loadout), then `ClientConnect`, then `PutClientInServer` (the QuakeC sets
     /// `origin` from `info_player_start`, plus `health`/`model`/`items`/
     /// `view_ofs`). Marks the edict a walking client (`MOVETYPE_WALK`,
-    /// `SOLID_SLIDEBOX`), records the view entity, links it into the world, and
-    /// returns its index. QuakeC faults are caught and surfaced, not panicked.
+    /// `SOLID_SLIDEBOX`), links it into the world, and returns its index.
+    /// QuakeC faults are caught and surfaced, not panicked.
+    /// (The C's `svc_setview` names the client's view entity; the port's client
+    /// knows its player edict directly.)
     ///
     /// SINGLE-CLIENT SIMPLIFICATION: the C copies the parm globals into the
     /// `client_t.spawn_parms` after `SetNewParms` and copies them back before
@@ -165,7 +164,7 @@ impl Server {
         // (shotgun + axe, 100 health), then they pass straight to
         // PutClientInServer (single-client identity copy).
         self.connect_client_inner(|s, ent| {
-            s.run_sys("SetNewParms", ent, 0)?;
+            s.run_sys(SysFn::SetNewParms, ent, 0)?;
             Ok(())
         })
     }
@@ -182,11 +181,11 @@ impl Server {
     /// saved `spawn_parms` back into `pr_global_struct->parm1..16` before calling
     /// `PutClientInServer`. Returns the player edict index. QuakeC faults are
     /// caught and surfaced, not panicked; a missing parm global is a silent
-    /// no-op (`gset_float`).
+    /// no-op ([`Vm::set_glob_float`]).
     pub fn connect_client_with_parms(&mut self, parms: [f32; NUM_SPAWN_PARMS]) -> Result<i32> {
         self.connect_client_inner(move |s, _ent| {
-            for (i, v) in parms.iter().enumerate() {
-                s.vm.gset_float(&parm_global_name(i), *v);
+            for (g, v) in s.vm.go().parms().into_iter().zip(parms) {
+                s.vm.set_glob_float(g, v);
             }
             Ok(())
         })
@@ -196,7 +195,7 @@ impl Server {
     /// reserve the player edict, default its physics fields, run `setup_parms`
     /// (the only step that differs — fresh `SetNewParms` vs. restoring saved
     /// parms), then `ClientConnect` + `PutClientInServer`, re-assert physics,
-    /// record the view entity, mark `FL_CLIENT`, and link into the world.
+    /// mark `FL_CLIENT`, and link into the world.
     fn connect_client_inner(
         &mut self,
         setup_parms: impl FnOnce(&mut Self, i32) -> Result<()>,
@@ -208,18 +207,16 @@ impl Server {
         // `colormap = NUM_FOR_EDICT(ent)`, `team = (colors & 15) + 1` (cl_color
         // "0") and `netname = host_client->name` (cl_name "player") — the
         // subject of "player entered the game" and every obituary.
-        self.vm.ent_set_float(ent, "colormap", ent as f32);
-        self.vm.ent_set_float(ent, "team", 1.0);
-        self.vm.ent_set_string(ent, "netname", "player");
+        self.vm.set_ent_float(ent, self.vm.fo().colormap, ent as f32);
+        self.vm.set_ent_float(ent, self.vm.fo().team, 1.0);
+        self.vm.set_ent_string(ent, self.vm.fo().netname, "player");
 
         // Default the engine-managed physics fields before the script runs, so a
         // minimal mod that only sets health/origin still yields a walking client
         // (the C `SV_SpawnServer` set up the client slot likewise). The QuakeC
         // PutClientInServer normally sets these too.
-        self.vm
-            .ent_set_float(ent, "movetype", MOVETYPE_WALK as f32);
-        self.vm
-            .ent_set_float(ent, "solid", SOLID_SLIDEBOX as f32);
+        self.vm.set_movetype(ent, MoveType::Walk);
+        self.vm.set_solid(ent, Solid::SlideBox);
 
         // Establish parm1..parm16 (fresh loadout, or restored saved parms).
         setup_parms(self, ent)?;
@@ -227,34 +224,23 @@ impl Server {
         // SV_ConnectClient (sv_main.c): copy the parm globals into the client's
         // spawn_parms right after SetNewParms (or the restored carried set).
         // These are the level-ENTRY parms `Host_Savegame_f` writes into a save.
-        for (i, p) in self.client_spawn_parms.iter_mut().enumerate() {
-            *p = self.vm.gget_float(&parm_global_name(i));
-        }
+        self.client_spawn_parms = self.vm.go().parms().map(|g| self.vm.glob_float(g));
 
         // ClientConnect then PutClientInServer (the C runs both with self=player).
-        self.run_sys("ClientConnect", ent, 0)?;
-        self.run_sys("PutClientInServer", ent, 0)?;
+        self.run_sys(SysFn::ClientConnect, ent, 0)?;
+        self.run_sys(SysFn::PutClientInServer, ent, 0)?;
 
         // Re-assert the engine-managed physics fields if the mod cleared them.
-        if self.vm.ent_get_float(ent, "movetype") as i32 == MOVETYPE_NONE {
-            self.vm
-                .ent_set_float(ent, "movetype", MOVETYPE_WALK as f32);
+        if self.vm.movetype(ent) == MoveType::None {
+            self.vm.set_movetype(ent, MoveType::Walk);
         }
-        if self.vm.ent_get_float(ent, "solid") as i32 == SOLID_NOT {
-            self.vm
-                .ent_set_float(ent, "solid", SOLID_SLIDEBOX as f32);
+        if self.vm.solid(ent) == Solid::Not {
+            self.vm.set_solid(ent, Solid::SlideBox);
         }
-
-        // Record the view entity (what the client looks through). NOTE: real
-        // progs.dat has no `viewentity` global, so this write is a no-op there;
-        // client identity is carried by the FL_CLIENT flag below instead.
-        self.vm.gset_float("viewentity", ent as f32);
 
         // Mark the edict a client (FL_CLIENT). The C engine sets this when a
         // client connects; monster AI's FindTarget / checkclient look for it.
-        let flags = self.vm.ent_get_float(ent, "flags") as i32;
-        self.vm
-            .ent_set_float(ent, "flags", (flags | FL_CLIENT) as f32);
+        self.vm.set_flags(ent, self.vm.flags(ent).with(EntFlags::CLIENT));
 
         // Link into the collision world so absmin/absmax are valid.
         link_edict(&mut self.vm, ent);
@@ -485,15 +471,15 @@ mod tests {
         server.set_map_name("e1m1");
         assert_eq!(server.vm.ent_get_string(0, "model"), "maps/e1m1.bsp");
         assert_eq!(server.vm.ent_get_float(0, "modelindex"), 1.0);
-        assert_eq!(server.vm.ent_get_float(0, "solid"), SOLID_BSP as f32);
-        assert_eq!(server.vm.ent_get_float(0, "movetype"), MOVETYPE_PUSH as f32);
+        assert_eq!(server.vm.solid(0), Solid::Bsp);
+        assert_eq!(server.vm.movetype(0), MoveType::Push);
         // Its SV_Physics_Pusher pass is inert, and a player still stands on it.
         let p = server.connect_client().expect("connect");
         for _ in 0..10 {
             server.client_frame(&UserCmd::default(), 0.1).expect("frame");
         }
         assert_eq!(server.vm.ent_get_vector(0, "origin"), [0.0; 3]);
-        assert!(server.vm.ent_get_float(p, "flags") as i32 & super::super::FL_ONGROUND != 0);
+        assert!(server.vm.flags(p).contains(EntFlags::ONGROUND));
     }
 
     #[test]

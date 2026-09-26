@@ -10,10 +10,7 @@
 //! The BSP hull traces underneath (`SV_RecursiveHullCheck`, the box hull,
 //! point contents) are the crate's `world.rs`; this module adds the edicts.
 
-use super::{
-    CONTENTS_SOLID, FL_ITEM, FL_MONSTER, SOLID_BBOX, SOLID_BSP, SOLID_NOT, SOLID_SLIDEBOX,
-    SOLID_TRIGGER,
-};
+use super::{EntFlags, Solid, CONTENTS_SOLID};
 use crate::math::{add as v_add, Vec3};
 use crate::vm::{EdictLeafs, HostTrace, Vm};
 
@@ -45,8 +42,8 @@ pub(crate) fn link_edict(vm: &mut Vm, e: i32) {
     // SV_LinkEdict expands the abs box so tangent boxes still register as
     // touching: items get a generous ±15 on X/Y (easier pickups), everything
     // else ±1 on all axes (movement is clipped an epsilon shy of the surface).
-    let flags = vm.ent_float(e, vm.fo().flags) as i32;
-    if flags & FL_ITEM != 0 {
+    let flags = vm.flags(e);
+    if flags.contains(EntFlags::ITEM) {
         absmin[0] -= 15.0;
         absmin[1] -= 15.0;
         absmax[0] += 15.0;
@@ -236,11 +233,11 @@ pub fn sv_move(
                 break;
             }
 
-            let solid = vm.ent_float(ei, vm.fo().solid) as i32;
+            let solid = vm.solid(ei);
 
             // MOVE_NOMONSTERS: clip only against the world + SOLID_BSP bmodels;
             // skip every box entity (monsters, items, and the player itself).
-            if nomonsters && solid != SOLID_BSP {
+            if nomonsters && solid != Solid::Bsp {
                 continue;
             }
 
@@ -306,14 +303,14 @@ pub fn sv_move(
             // detonate when they land NEAR a monster. Non-monster entities and
             // the world keep the move's own `mins`/`maxs`.
             let (clip_mins, clip_maxs) =
-                if missile && (vm.ent_float(ei, vm.fo().flags) as i32) & FL_MONSTER != 0 {
+                if missile && vm.flags(ei).contains(EntFlags::MONSTER) {
                     ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0])
                 } else {
                     (mins, maxs)
                 };
 
             let tr = match solid {
-                SOLID_BSP => {
+                Solid::Bsp => {
                     // model "*N" -> submodel index N. Borrow the name (no per-clip
                     // String allocation); the &str borrow ends with this expression.
                     let idx = vm
@@ -327,7 +324,7 @@ pub fn sv_move(
                         None => continue, // SOLID_BSP without a valid "*N" model
                     }
                 }
-                SOLID_BBOX | SOLID_SLIDEBOX => {
+                Solid::BBox | Solid::SlideBox => {
                     let ent_mins = vm.ent_vec(ei, vm.fo().mins);
                     let ent_maxs = vm.ent_vec(ei, vm.fo().maxs);
                     crate::world::clip_box(
@@ -335,7 +332,7 @@ pub fn sv_move(
                     )
                 }
                 // SOLID_NOT and SOLID_TRIGGER do not block a move.
-                _ => continue,
+                Solid::Not | Solid::Trigger | Solid::Other(_) => continue,
             };
 
             // Adopt this entity's trace when it stops earlier, is all-solid, or
@@ -406,7 +403,7 @@ fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
     if touch <= 0 || (touch as usize) >= vm.progs().functions.len() {
         return; // no touch function (the C `if (e->v.touch ...)`)
     }
-    if vm.ent_float(toucher, vm.fo().solid) as i32 == SOLID_NOT {
+    if vm.solid(toucher) == Solid::Not {
         return;
     }
     vm.set_glob_int(vm.go().self_, toucher);
@@ -440,10 +437,10 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
         if ei == mover {
             continue; // the C `if (touch == ent) continue;`
         }
-        if vm.is_free_edict(e as i32) {
+        if vm.is_free_edict(ei) {
             continue;
         }
-        if vm.ent_float(ei, vm.fo().solid) as i32 != SOLID_TRIGGER {
+        if vm.solid(ei) != Solid::Trigger {
             continue;
         }
         let touch = vm.ent_int(ei, vm.fo().touch);
@@ -474,7 +471,7 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
         if vm.is_free_edict(t) {
             continue;
         }
-        if vm.ent_float(t, vm.fo().solid) as i32 != SOLID_TRIGGER {
+        if vm.solid(t) != Solid::Trigger {
             continue;
         }
         let touch = vm.ent_int(t, vm.fo().touch);
@@ -567,7 +564,7 @@ mod tests {
         server.vm.ent_set_vector(mover, "absmax", [16.0, 16.0, 16.0]);
 
         let trigger = server.vm.spawn();
-        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.set_solid(trigger, Solid::Trigger);
         server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
         server.vm.ent_set_vector(trigger, "absmin", [-8.0, -8.0, -8.0]);
         server.vm.ent_set_vector(trigger, "absmax", [8.0, 8.0, 8.0]);
@@ -593,9 +590,9 @@ mod tests {
         server.vm.gset_float("time", 42.0); // stale
 
         let e1 = server.vm.spawn();
-        server.vm.ent_set_float(e1, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(e1, Solid::BBox);
         let e2 = server.vm.spawn();
-        server.vm.ent_set_float(e2, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(e2, Solid::BBox);
         server.vm.ent_set_int(e2, "touch", touch_fn as i32);
 
         let sv_time = 7.25;
@@ -622,7 +619,7 @@ mod tests {
 
         // The blocker entity.
         let blocker = server.vm.spawn();
-        server.vm.ent_set_float(blocker, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(blocker, Solid::BBox);
         server.vm.ent_set_vector(blocker, "origin", [100.0, 0.0, 0.0]);
         server.vm.ent_set_vector(blocker, "mins", [-16.0, -16.0, -16.0]);
         server.vm.ent_set_vector(blocker, "maxs", [16.0, 16.0, 16.0]);
@@ -641,7 +638,7 @@ mod tests {
         );
 
         assert!(tr.fraction < 1.0, "the move was clipped, got {}", tr.fraction);
-        assert_eq!(tr.ent, blocker, "the SOLID_BBOX edict was the blocker");
+        assert_eq!(tr.ent, blocker, "the Solid::BBox edict was the blocker");
         assert!(tr.endpos[0] < 84.0, "stopped before the box, got {}", tr.endpos[0]);
     }
 
@@ -656,7 +653,7 @@ mod tests {
         let mut server = Server::new(world_open_bsp(), progs).expect("server");
 
         let blocker = server.vm.spawn();
-        server.vm.ent_set_float(blocker, "solid", SOLID_SLIDEBOX as f32);
+        server.vm.set_solid(blocker, Solid::SlideBox);
         server.vm.ent_set_vector(blocker, "origin", [100.0, 0.0, 0.0]);
         server.vm.ent_set_vector(blocker, "mins", [-16.0, -16.0, -16.0]);
         server.vm.ent_set_vector(blocker, "maxs", [16.0, 16.0, 16.0]);
@@ -686,7 +683,7 @@ mod tests {
         let mut server = Server::new(world_open_bsp(), progs).expect("server");
 
         let blocker = server.vm.spawn();
-        server.vm.ent_set_float(blocker, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(blocker, Solid::BBox);
         server.vm.ent_set_vector(blocker, "origin", [100.0, 0.0, 0.0]);
         server.vm.ent_set_vector(blocker, "mins", [-16.0, -16.0, -16.0]);
         server.vm.ent_set_vector(blocker, "maxs", [16.0, 16.0, 16.0]);
@@ -719,13 +716,13 @@ mod tests {
         // relevant predicate is ent_get_int(ignore, "owner") == blocker.
         let mut server = Server::new(world_open_bsp(), progs).expect("server");
         let shooter = server.vm.spawn();
-        server.vm.ent_set_float(shooter, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(shooter, Solid::BBox);
         server.vm.ent_set_vector(shooter, "origin", [50.0, 0.0, 0.0]);
         server.vm.ent_set_vector(shooter, "mins", [-16.0, -16.0, -16.0]);
         server.vm.ent_set_vector(shooter, "maxs", [16.0, 16.0, 16.0]);
 
         let missile = server.vm.spawn();
-        server.vm.ent_set_float(missile, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(missile, Solid::BBox);
         // The missile's owner is the shooter: don't clip against the owner.
         server.vm.ent_set_int(missile, "owner", shooter);
 
@@ -749,7 +746,7 @@ mod tests {
         let mut server2 = Server::new(world_open_bsp(), progs2).expect("server");
         let shooter2 = server2.vm.spawn();
         let missile2 = server2.vm.spawn();
-        server2.vm.ent_set_float(missile2, "solid", SOLID_BBOX as f32);
+        server2.vm.set_solid(missile2, Solid::BBox);
         server2.vm.ent_set_vector(missile2, "origin", [100.0, 0.0, 0.0]);
         server2.vm.ent_set_vector(missile2, "mins", [-16.0, -16.0, -16.0]);
         server2.vm.ent_set_vector(missile2, "maxs", [16.0, 16.0, 16.0]);
@@ -775,7 +772,7 @@ mod tests {
         let mut server3 = Server::new(world_open_bsp(), progs3).expect("server");
         let shooter3 = server3.vm.spawn();
         let other = server3.vm.spawn();
-        server3.vm.ent_set_float(other, "solid", SOLID_BBOX as f32);
+        server3.vm.set_solid(other, Solid::BBox);
         server3.vm.ent_set_vector(other, "origin", [100.0, 0.0, 0.0]);
         server3.vm.ent_set_vector(other, "mins", [-16.0, -16.0, -16.0]);
         server3.vm.ent_set_vector(other, "maxs", [16.0, 16.0, 16.0]);
@@ -810,8 +807,8 @@ mod tests {
         // the +-15 expanded box (20 - 15 = 5 <= the monster's own +5 half-width).
         let mut server = Server::new(world_open_bsp(), progs).expect("server");
         let monster = server.vm.spawn();
-        server.vm.ent_set_float(monster, "solid", SOLID_SLIDEBOX as f32);
-        server.vm.ent_set_float(monster, "flags", FL_MONSTER as f32);
+        server.vm.set_solid(monster, Solid::SlideBox);
+        server.vm.set_flags(monster, EntFlags::MONSTER);
         server.vm.ent_set_vector(monster, "origin", [100.0, 20.0, 0.0]);
         server.vm.ent_set_vector(monster, "mins", [-5.0, -5.0, -5.0]);
         server.vm.ent_set_vector(monster, "maxs", [5.0, 5.0, 5.0]);
@@ -862,7 +859,7 @@ mod tests {
         let progs = Progs::parse(&img).expect("parse");
         let mut server = Server::new(world_open_bsp(), progs).expect("server");
         let item = server.vm.spawn();
-        server.vm.ent_set_float(item, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(item, Solid::BBox);
         // No FL_MONSTER flag set.
         server.vm.ent_set_vector(item, "origin", [100.0, 20.0, 0.0]);
         server.vm.ent_set_vector(item, "mins", [-5.0, -5.0, -5.0]);
@@ -898,13 +895,13 @@ mod tests {
 
         // The passedict / mover: a real box (size[0] = 32 != 0).
         let mover = server.vm.spawn();
-        server.vm.ent_set_float(mover, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(mover, Solid::BBox);
         server.vm.ent_set_vector(mover, "mins", [-16.0, -16.0, -16.0]);
         server.vm.ent_set_vector(mover, "maxs", [16.0, 16.0, 16.0]);
 
         // A point-sized blocker (mins == maxs, so size[0] == 0) in the path.
         let point = server.vm.spawn();
-        server.vm.ent_set_float(point, "solid", SOLID_BBOX as f32);
+        server.vm.set_solid(point, Solid::BBox);
         server.vm.ent_set_vector(point, "origin", [100.0, 0.0, 0.0]);
         server.vm.ent_set_vector(point, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(point, "maxs", [0.0, 0.0, 0.0]);
@@ -958,7 +955,7 @@ mod tests {
 
         // The trigger, overlapping the mover.
         let trigger = server.vm.spawn();
-        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.set_solid(trigger, Solid::Trigger);
         server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
         server.vm.ent_set_vector(trigger, "absmin", [-8.0, -8.0, -8.0]);
         server.vm.ent_set_vector(trigger, "absmax", [8.0, 8.0, 8.0]);
@@ -985,7 +982,7 @@ mod tests {
         server.vm.ent_set_vector(mover, "absmax", [16.0, 16.0, 16.0]);
 
         let trigger = server.vm.spawn();
-        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.set_solid(trigger, Solid::Trigger);
         server.vm.ent_set_int(trigger, "touch", touch_fn as i32);
         server.vm.ent_set_vector(trigger, "absmin", [500.0, 500.0, 500.0]);
         server.vm.ent_set_vector(trigger, "absmax", [532.0, 532.0, 532.0]);

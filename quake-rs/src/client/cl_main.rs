@@ -14,7 +14,8 @@ use crate::mdl::Mdl;
 use crate::particles::{TrailHead, TrailStep};
 use crate::stepping::advance_clock;
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
-use crate::server::UserCmd;
+use crate::server::{EntFlags, MoveType, UserCmd};
+use crate::vm::{Fld, Glb};
 use crate::tent::BeamModel;
 
 use super::cl_input::{
@@ -22,8 +23,8 @@ use super::cl_input::{
 };
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host::host_error;
-use super::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
-use super::lerpmove::{LerpMove, MOVETYPE_STEP};
+use super::host_cmd::{try_changelevel, try_restart, IT_INVISIBILITY};
+use super::lerpmove::LerpMove;
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
@@ -42,13 +43,13 @@ use super::{
 /// CL_AdjustAngles clamps it on the next move.
 fn apply_fixangle(w: &mut Walk) {
     let p = w.player;
-    if p < 0 || w.server.vm.ent_get_float(p, "fixangle") == 0.0 {
+    if p < 0 || w.server.vm.ent_float(p, w.server.vm.fo().fixangle) == 0.0 {
         return;
     }
-    let a = w.server.vm.ent_get_vector(p, "angles");
+    let a = w.server.vm.ent_vec(p, w.server.vm.fo().angles);
     w.pitch = clamp_pitch(net_angle(a[0]));
     w.yaw = net_angle(a[1]);
-    w.server.vm.ent_set_float(p, "fixangle", 0.0);
+    w.server.vm.set_ent_float(p, w.server.vm.fo().fixangle, 0.0);
 }
 
 /// `SV_WriteClientdataToMessage`'s svc_damage (sv_main.c) read by the client's
@@ -63,24 +64,24 @@ fn apply_fixangle(w: &mut Walk) {
 fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     let p = w.player;
     let vm = &mut w.server.vm;
-    let take = vm.ent_get_float(p, "dmg_take");
-    let save = vm.ent_get_float(p, "dmg_save");
+    let take = vm.ent_float(p, vm.fo().dmg_take);
+    let save = vm.ent_float(p, vm.fo().dmg_save);
     if take == 0.0 && save == 0.0 {
         return;
     }
-    let mut other = vm.ent_get_int(p, "dmg_inflictor");
+    let mut other = vm.ent_int(p, vm.fo().dmg_inflictor);
     if other < 0 || other as usize >= vm.num_edicts() {
         other = 0;
     }
     let (o, mins, maxs) = (
-        vm.ent_get_vector(other, "origin"),
-        vm.ent_get_vector(other, "mins"),
-        vm.ent_get_vector(other, "maxs"),
+        vm.ent_vec(other, vm.fo().origin),
+        vm.ent_vec(other, vm.fo().mins),
+        vm.ent_vec(other, vm.fo().maxs),
     );
     let coord = |i: usize| ((o[i] + 0.5 * (mins[i] + maxs[i])) * 8.0) as i32 as i16 as f32 / 8.0;
     let from = [coord(0), coord(1), coord(2)];
-    vm.ent_set_float(p, "dmg_take", 0.0);
-    vm.ent_set_float(p, "dmg_save", 0.0);
+    vm.set_ent_float(p, vm.fo().dmg_take, 0.0);
+    vm.set_ent_float(p, vm.fo().dmg_save, 0.0);
     let byte = |f: f32| (f as i32) & 255;
     let pd = parse_damage(byte(save), byte(take), from, ent_origin, [w.pitch, w.yaw, 0.0]);
     w.damage_blend = cshift_add(w.damage_blend, pd.percent);
@@ -106,7 +107,7 @@ pub fn pushed_dlights(
 /// byte — so the shotgun's -2 kick reads -2, then -1 while DropPunchAngle eases
 /// the server's value back, then 0: whole-degree steps, not a smooth ease.
 pub fn client_punchangle(w: &Walk) -> [f32; 3] {
-    let p = w.server.vm.ent_get_vector(w.player, "punchangle");
+    let p = w.server.vm.ent_vec(w.player, w.server.vm.fo().punchangle);
     p.map(|v| (v as i32) as i8 as f32)
 }
 
@@ -122,7 +123,7 @@ pub fn client_items(w: &Walk) -> i32 {
 /// [`client_items`] for a `server` and `player` not yet in a [`Walk`] (a
 /// level being assembled).
 pub fn server_items(server: &crate::server::Server, player: i32) -> i32 {
-    (server.vm.ent_get_float(player, "items") as i32) | ((server.serverflags() as i32) << 28)
+    (server.vm.ent_float(player, server.vm.fo().items) as i32) | ((server.serverflags() as i32) << 28)
 }
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
@@ -313,7 +314,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // paused it waits: the C's SV_ReadClientMove still stores it on the
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
-        let before = w.server.vm.ent_get_vector(w.player, "origin");
+        let before = w.server.vm.ent_vec(w.player, w.server.vm.fo().origin);
         if let Err(e) = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping) {
             // Host_Error longjmps out of the host frame: none of this frame's
             // messages reach the client.
@@ -491,7 +492,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // lights, trails, spin and drawing) is gated on this; an entity out of the
     // PVS cannot light the far side of a wall.
     let mut relinked = w.server.entities_sent_to_client();
-    if w.server.vm.ent_get_float(w.player, "modelindex") == 0.0 {
+    if w.server.vm.ent_float(w.player, w.server.vm.fo().modelindex) == 0.0 {
         if let Some(r) = usize::try_from(w.player).ok().and_then(|p| relinked.get_mut(p)) {
             *r = false;
         }
@@ -546,12 +547,12 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
 
     // The player's first-person weapon viewmodel ("progs/v_shot.mdl" etc.) lives
     // on the `weaponmodel` field (separate from `model`); cache it like any MDL.
-    let weapon_name = w.server.vm.ent_get_string(w.player, "weaponmodel");
+    let weapon_name = w.server.vm.ent_str(w.player, w.server.vm.fo().weaponmodel).to_string();
     if weapon_name.ends_with(".mdl") && !w.model_cache.contains_key(&weapon_name) {
         let parsed = w.pak.read_file(&weapon_name).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
         w.model_cache.insert(weapon_name.clone(), parsed);
     }
-    let weapon_frame = w.server.vm.ent_get_float(w.player, "weaponframe").max(0.0) as usize;
+    let weapon_frame = w.server.vm.ent_float(w.player, w.server.vm.fo().weaponframe).max(0.0) as usize;
 
     // 4. Gather the visible entities (owned descriptors, so the cache borrow for
     //    rendering doesn't clash with reading the server). Skip the player's own
@@ -587,7 +588,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let smooth = w.lerpmove == LerpMove::Smooth;
     for e in 0..n {
         let ent = e as i32;
-        if ent == w.player || w.server.vm.is_free_edict(e as i32) {
+        if ent == w.player || w.server.vm.is_free_edict(ent) {
             continue;
         }
         // A makestatic entity is a client static, never relinked: no trail, no
@@ -722,7 +723,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // r_lerpmove (the 2026 extra): a monster glides between its steps
         // where it is drawn; its trail and everything else keep the server's
         // origin.
-        let (origin, angles) = if smooth && w.server.vm.ent_float(ent, w.server.vm.fo().movetype) == MOVETYPE_STEP {
+        let (origin, angles) = if smooth && w.server.vm.movetype(ent) == MoveType::Step {
             let model = w.server.vm.ent_float(ent, w.server.vm.fo().modelindex) as usize;
             let drawn = w.glides.draw(ent, model, origin, angles, f64::from(w.clock));
             (drawn.origin, drawn.angles)
@@ -763,13 +764,13 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // and froze the player MOVETYPE_NONE, which SV_ClientThink early-outs on,
         // so the spot's angles survive the per-frame mouse v_angle updates.
         (
-            w.server.vm.ent_get_vector(w.player, "origin"),
-            w.server.vm.ent_get_vector(w.player, "angles"),
+            w.server.vm.ent_vec(w.player, w.server.vm.fo().origin),
+            w.server.vm.ent_vec(w.player, w.server.vm.fo().angles),
         )
     } else {
         w.server.player_view()
     };
-    let vel = w.server.vm.ent_get_vector(w.player, "velocity");
+    let vel = w.server.vm.ent_vec(w.player, w.server.vm.fo().velocity);
     let speed_xy = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
     let bob = render::view_bob(speed_xy, w.clock);
 
@@ -800,8 +801,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // units and catch up at 80 u/s, so climbing stairs glides instead of jolting
         // up each 16/18-unit step. The delta is relative to the raw origin Z (bob
         // layered on top); on first frame / not-climbing, oldz tracks origin exactly.
-        let origin_z = w.server.vm.ent_get_vector(w.player, "origin")[2];
-        let onground = (w.server.vm.ent_get_float(w.player, "flags") as i32) & FL_ONGROUND != 0;
+        let origin_z = w.server.vm.ent_vec(w.player, w.server.vm.fo().origin)[2];
+        let onground = w.server.vm.flags(w.player).contains(EntFlags::ONGROUND);
         // `steptime = cl.time - cl.oldtime`: nothing while the server is
         // paused (behind the menu, or by `pause`), so the eye stays put.
         let steptime = if paused { 0.0 } else { dt.max(0.0) };
@@ -838,7 +839,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // plus the svc_damage kick (decaying over v_kicktime by host_frametime),
         // plus the punchangle's roll component; the dead-view tilt (80°)
         // overrides when the player is dead.
-        let body_angles = w.server.vm.ent_get_vector(w.player, "angles");
+        let body_angles = w.server.vm.ent_vec(w.player, w.server.vm.fo().angles);
         let mut roll = crate::server::v_calc_roll(body_angles, vel) + punch[2];
         let mut kick_pitch = 0.0;
         if w.v_dmg_time > 0.0 {
@@ -848,7 +849,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 w.v_dmg_time -= if dt.is_finite() { dt.max(0.0) } else { 0.0 };
             }
         }
-        if w.server.vm.ent_get_float(w.player, "health") <= 0.0 {
+        if w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0 {
             roll = 80.0; // dead view angle (replaces, per V_CalcViewRoll)
         }
         Camera {
@@ -902,7 +903,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // thunderbolt) is re-anchored to the player's CURRENT origin first. Gated
     // on any_live so the common no-beam frame pays one boolean scan.
     if w.beams.any_live(now) {
-        let player_org = w.server.vm.ent_get_vector(w.player, "origin");
+        let player_org = w.server.vm.ent_vec(w.player, w.server.vm.fo().origin);
         w.beams.update(now, w.player, player_org, &mut w.prng, &mut w.beam_scratch);
         for seg in &w.beam_scratch {
             // CL_NewTempEntity memsets the entity: frame 0, skin 0. A `None`
@@ -946,8 +947,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // death-cam, and stays visible while invisible. The intermission camera also
     // hides it (V_CalcIntermissionRefdef: `view->model = NULL`).
     let hide_gun = intermission
-        || w.server.vm.ent_get_float(w.player, "health") <= 0.0
-        || (w.server.vm.ent_get_float(w.player, "items") as i32) & IT_INVISIBILITY != 0;
+        || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
+        || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
     let viewmodel = if hide_gun {
         None
     } else {
@@ -1069,7 +1070,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         shifts.push((BONUS_COLOR, w.bonus_blend));
     }
     // Powerup tint (Quad=blue, Biosuit=green, Ring=gray, Pentagram=yellow).
-    if let Some(cs) = render::powerup_cshift(w.server.vm.ent_get_float(w.player, "items") as i32) {
+    if let Some(cs) = render::powerup_cshift(w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) {
         shifts.push(cs);
     }
     // V_UpdatePalette (software view.c): the cshift is a whole-PALETTE shift run
@@ -1097,14 +1098,15 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                     if let Some(wad) = w.gfx_wad.as_ref() {
                         // Counts from the QuakeC globals the engine's
                         // SV_UpdateStats reads (same source as the Tab scoreboard).
-                        let gcount = |g: &str| w.server.vm.gget_float(g) as i32;
+                        let (vm, go) = (&w.server.vm, w.server.vm.go());
+                        let gcount = |g: Glb| vm.glob_float(g) as i32;
                         let stats = render::IntermissionStats {
                             // cl.completed_time is an int in the C: whole seconds.
                             completed_time: w.completed_time as i32,
-                            secrets: gcount("found_secrets"),
-                            total_secrets: gcount("total_secrets"),
-                            monsters: gcount("killed_monsters"),
-                            total_monsters: gcount("total_monsters"),
+                            secrets: gcount(go.found_secrets),
+                            total_secrets: gcount(go.total_secrets),
+                            monsters: gcount(go.killed_monsters),
+                            total_monsters: gcount(go.total_monsters),
                         };
                         render::draw_intermission_overlay(
                             &mut img,
@@ -1136,34 +1138,35 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             }
         }
     } else if let Some(wad) = w.gfx_wad.as_ref() {
-        let stat = |f: &str| w.server.vm.ent_get_float(w.player, f) as i32;
+        let (vm, fo, go) = (&w.server.vm, w.server.vm.fo(), w.server.vm.go());
+        let stat = |f: Fld| vm.ent_float(w.player, f) as i32;
         // Solo-scoreboard counts come from the QuakeC globals the engine's
         // SV_UpdateStats reads; the level name is worldspawn's `message` (edict 0).
-        let gcount = |g: &str| w.server.vm.gget_float(g) as i32;
-        let level_name = w.server.vm.ent_get_string(0, "message");
+        let gcount = |g: Glb| vm.glob_float(g) as i32;
+        let level_name = vm.ent_str(0, fo.message).to_string();
         let hud = render::Hud {
             wad,
             palette: &w.palette,
-            health: stat("health"),
+            health: stat(fo.health),
             // The active weapon's ammo (W_SetCurrentAmmo keeps `currentammo` in
             // sync with the weapon), not always shells — sbar.c draws currentammo.
-            ammo: stat("currentammo"),
-            armor: stat("armorvalue"),
+            ammo: stat(fo.currentammo),
+            armor: stat(fo.armorvalue),
             items: client_items(w),
-            weapon: stat("weapon"),
-            ammo_shells: stat("ammo_shells"),
-            ammo_nails: stat("ammo_nails"),
-            ammo_rockets: stat("ammo_rockets"),
-            ammo_cells: stat("ammo_cells"),
+            weapon: stat(fo.weapon),
+            ammo_shells: stat(fo.ammo_shells),
+            ammo_nails: stat(fo.ammo_nails),
+            ammo_rockets: stat(fo.ammo_rockets),
+            ammo_cells: stat(fo.ammo_cells),
             // Sbar_SoloScoreboard shows cl.time — the SERVER clock (epoch 1.0,
             // SV_SpawnServer), not this walk's 0-based clock, matching what the
             // intermission overlay's completed_time latches.
             time: w.server.time(),
             item_gettime: Some(&w.item_gettime),
-            monsters: gcount("killed_monsters"),
-            total_monsters: gcount("total_monsters"),
-            secrets: gcount("found_secrets"),
-            total_secrets: gcount("total_secrets"),
+            monsters: gcount(go.killed_monsters),
+            total_monsters: gcount(go.total_monsters),
+            secrets: gcount(go.found_secrets),
+            total_secrets: gcount(go.total_secrets),
             level_name: &level_name,
             // `+showscores` held (Tab); the dead-player branch (health <= 0)
             // inside draw_hud_into handles the death scoreboard.

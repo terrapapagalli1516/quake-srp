@@ -69,29 +69,17 @@ pub(crate) fn var_string(vm: &Vm, first: usize) -> String {
 /// `v_forward`, `v_right`, `v_up`.
 ///
 /// The C unconditionally dereferences `pr_global_struct->v_forward` etc.; we
-/// resolve those globals by name. If a build's program does not define one of
-/// them, that component is silently skipped (a no-op), since there is nowhere
-/// to write it. The math matches `AngleVectors` exactly via
-/// [`crate::math::angle_vectors`].
+/// write through the handles resolved at load ([`Vm::go`]). If a build's
+/// program does not define one of them, that component is silently skipped
+/// (a no-op), since there is nowhere to write it. The math matches
+/// `AngleVectors` exactly via [`crate::math::angle_vectors`].
 fn pf_makevectors(vm: &mut Vm) -> Result<()> {
     let angles = vm.arg_vector(0);
     let (forward, right, up) = crate::math::angle_vectors(angles);
-
-    // Resolve each destination global by name; copy out the offset before the
-    // mutable borrow so we don't hold an immutable borrow of `vm.progs()`.
-    let of_forward = vm.progs().find_global("v_forward").map(|d| d.ofs as usize);
-    let of_right = vm.progs().find_global("v_right").map(|d| d.ofs as usize);
-    let of_up = vm.progs().find_global("v_up").map(|d| d.ofs as usize);
-
-    if let Some(o) = of_forward {
-        vm.set_gv(o, forward);
-    }
-    if let Some(o) = of_right {
-        vm.set_gv(o, right);
-    }
-    if let Some(o) = of_up {
-        vm.set_gv(o, up);
-    }
+    let go = *vm.go();
+    vm.set_glob_vec(go.v_forward, forward);
+    vm.set_glob_vec(go.v_right, right);
+    vm.set_glob_vec(go.v_up, up);
     Ok(())
 }
 
