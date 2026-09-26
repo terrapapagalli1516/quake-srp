@@ -16,6 +16,10 @@ asked for):
   5. A LOST PAD — unplugged with the trigger held, nothing stays held.
   6. CLASSIC (`?classic`) — id's `joystick 0` reads no pad; after `joystick
      1` the left stick is id's joystick (Y walks).
+  7. PAD AND TOUCH (`?touch`: the touch controls, `navigator.vibrate`
+     recorded) — a rumble goes to whichever was used last, never both: the
+     pad after a pad button, the phone's vibration after a touch, and the
+     phone when the pad is not read.
 
 Usage: verify_gamepad.py [webdir]   (a deploy dir, PLATFORM.md: index.html,
 wasi.js, quake.wasm, id1/pak0.pak). $QUAKE_BROWSER=firefox for Firefox.
@@ -54,6 +58,14 @@ FAKE_PAD = r"""
 
 A, B, X, Y, LB, RB, LT, RT, BACK, START = range(10)
 DUP, DDOWN, DLEFT, DRIGHT = 12, 13, 14, 15
+
+# A finger's tap on the screen's corner (a touch pointer, as a phone sends).
+TOUCH_TAP = r"""() => {
+    const at = document.getElementById('c').getBoundingClientRect();
+    const ev = (type) => new PointerEvent(type, { pointerType: 'touch', clientX: at.x + 5, clientY: at.y + 5 });
+    dispatchEvent(ev('pointerdown'));
+    dispatchEvent(ev('pointerup'));
+}"""
 
 passed, failed = 0, 0
 
@@ -195,6 +207,30 @@ with sync_playwright() as p:
     press(pg, A)
     check("   A is JOY1, unbound in default.cfg", "JOY1 is unbound" in pg.evaluate("quake.text('console_text')"))
     check("no page errors (Classic)", not errs, str(errs[-3:]))
+    pg.close()
+
+    # ---- a touch screen with a pad: the rumble goes to the one in use ----------
+    pg, errs = boot_page(br, "?touch")
+    pg.evaluate("window.__vibes = []; navigator.vibrate = (ms) => { __vibes.push(ms); return true; }")
+    pg.wait_for_function("window.QuakeTouch !== undefined", timeout=10000)
+    pg.evaluate("hideOverlayForever()")
+    call(pg, "boot")
+    call(pg, "menu_cancel")
+    time.sleep(0.5)
+    press(pg, X)                    # the pad is used (X is unbound in 2026)
+    pg.evaluate("__rumbles.length = 0; __vibes.length = 0; onRumble(0.6, 0.3, 200, true)")
+    got = pg.evaluate("[__rumbles.length, __vibes.length]")
+    check("7. pad used last: the pad rumbles, the phone does not", got == [1, 0], str(got))
+    pg.evaluate(TOUCH_TAP)
+    pg.evaluate("__rumbles.length = 0; __vibes.length = 0; onRumble(0.6, 0.3, 200, true)")
+    got = pg.evaluate("[__rumbles.length, __vibes.slice()]")
+    check("   the screen touched since: the phone vibrates, the pad does not",
+          got[0] == 0 and len(got[1]) == 1 and got[1][0] > 0, str(got))
+    press(pg, X)
+    pg.evaluate("__rumbles.length = 0; __vibes.length = 0; onRumble(0.6, 0.3, 200, false)")
+    got = pg.evaluate("[__rumbles.length, __vibes.length]")
+    check("   the pad not read (joystick 0): the phone", got == [0, 1], str(got))
+    check("no page errors (touch)", not errs, str(errs[-3:]))
     pg.close()
     br.close()
 httpd.shutdown()

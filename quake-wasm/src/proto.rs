@@ -35,7 +35,7 @@
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
 //! | 14 | `Pcm` | `start u32` (the pair it plays at, in the `AudioClock`'s count), `rate u32`, `flags u32` (1: silence what was mixed ahead first, `S_ClearBuffer`), then 16-bit stereo pairs: what the mixer painted this tick, for the page's ring |
 //! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
-//! | 16 | `Rumble` | `strong f32`, `weak f32`, `ms u32`: the pad's two motors (the 2026 `joy_rumble`) |
+//! | 16 | `Rumble` | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read, rumble it; 0: a phone's vibration): the 2026 `joy_rumble` |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
@@ -217,6 +217,13 @@ pub(crate) const STATE_TIMEDEMO: u32 = 16;
 pub(crate) const STATE_NATIVE: u32 = 32;
 /// `vid_fkey`: the page's `f` toggles fullscreen.
 pub(crate) const STATE_FKEY: u32 = 64;
+/// `in_touch`: on a touch screen, the page shows its touch controls for play.
+pub(crate) const STATE_TOUCH: u32 = 128;
+/// The menu waits for y or n (the Quit prompt, New Game's question): a touch
+/// screen offers them as buttons.
+pub(crate) const STATE_ASK: u32 = 256;
+/// The live game is paused (`pause`, `sv.paused`).
+pub(crate) const STATE_PAUSED: u32 = 512;
 
 /// `Pcm` flags: silence what was mixed ahead before these samples
 /// (`S_ClearBuffer`).
@@ -248,7 +255,8 @@ pub(crate) enum Msg<'a> {
     /// bytes.
     Pcm { start: u32, rate: u32, flags: u32, pairs: &'a [u8] },
     Audio(AudioCounts),
-    Rumble(Rumble),
+    /// A rumble, and whether the pad is read (else a phone vibrates).
+    Rumble { rumble: Rumble, pad: bool },
 }
 
 /// Little-endian field writer for a message's fixed part.
@@ -304,7 +312,9 @@ impl Msg<'_> {
                 f.u32(c.rate).u32(c.mode).u32(c.starts).u32(c.local).u32(c.stops).u32(c.clears).u32(c.painted).0,
                 &[],
             ),
-            Msg::Rumble(r) => (OUT_RUMBLE, f.f32(r.strong).f32(r.weak).u32(r.ms).0, &[]),
+            Msg::Rumble { rumble: r, pad } => {
+                (OUT_RUMBLE, f.f32(r.strong).f32(r.weak).u32(r.ms).u32(u32::from(pad)).0, &[])
+            }
         }
     }
 
@@ -511,6 +521,6 @@ mod tests {
         let c = AudioCounts { rate: 48000, mode: 1, starts: 2, local: 3, stops: 0, clears: 1, painted: 7 };
         assert_eq!(size(Msg::Audio(c)), 28);
         assert_eq!(size(Msg::State { flags: 0, menu_screen: 0, pixel_size: 0 }), 12);
-        assert_eq!(size(Msg::Rumble(Rumble { strong: 1.0, weak: 0.5, ms: 200 })), 12);
+        assert_eq!(size(Msg::Rumble { rumble: Rumble { strong: 1.0, weak: 0.5, ms: 200 }, pad: true }), 16);
     }
 }

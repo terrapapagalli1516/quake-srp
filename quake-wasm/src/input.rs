@@ -412,6 +412,9 @@ pub(crate) struct PadHost {
     pub(crate) joy: Joystick,
     /// Rumbles for the loop to send with this frame (`Rumble` records).
     rumbles: Vec<Rumble>,
+    /// The pad was read (`joystick` on, a pad there) as of the last frame:
+    /// the page rumbles the pad, else a phone's vibration.
+    pub(crate) pad_read: bool,
     /// The player's `punchangle` pitch as the last frame left it: a weapon's
     /// kick makes it jump down, and the rumble takes that as a shot.
     punch: f32,
@@ -497,21 +500,21 @@ pub(crate) fn in_joy_move(a: &mut App, frametime: f64, gated: bool) {
     }
 }
 
-/// The 2026 pad's rumble (`joy_rumble`) after a live frame: on the damage
-/// the frame's `V_ParseDamage` counted, and on a weapon's kick (the
-/// player's `punchangle` pitch jumping down) with a heavy weapon up. Only
-/// while the pad is read (`joystick`), so a pad lying by the keyboard stays
-/// quiet.
+/// The 2026 rumble (`joy_rumble`) after a live frame: on the damage the
+/// frame's `V_ParseDamage` counted, and on a weapon's kick (the player's
+/// `punchangle` pitch jumping down) with a heavy weapon up. The page plays
+/// it on the pad while the pad is read ([`PadHost::pad_read`]), else on a
+/// phone's vibration with the touch controls.
 pub(crate) fn rumble_after_frame(a: &mut App) {
     let strength = a.settings.cvars.joy.rumble;
-    let active = strength > 0.0 && a.pad.joy.active(&a.settings.cvars.joy);
+    a.pad.pad_read = a.pad.joy.active(&a.settings.cvars.joy);
     let Some(w) = a.walk.as_mut().filter(|_| a.mode == 0) else { return };
     let damage = std::mem::take(&mut w.damage_count);
     let vm = &w.server.vm;
     let punch = vm.ent_vec(w.player, vm.fo.punchangle)[0];
     let kicked = punch < a.pad.punch;
     a.pad.punch = punch;
-    if !active {
+    if strength <= 0.0 {
         return;
     }
     if damage > 0.0 {
@@ -1043,6 +1046,13 @@ mod tests {
         pad_frame(0, [0.0; 6]);
         let shots = take();
         assert!(shots.contains(&Rumble::shot(IT_RL, 1.0).unwrap()), "the rocket's kick: {shots:?}");
+        let pad_read = || APP.with(|c| c.borrow().as_ref().unwrap().pad.pad_read);
+        assert!(pad_read(), "the pad is read: the page rumbles it");
+        // With the pad not read, the rumble still comes, for a phone.
+        crate::host_cmd::execute_console_command("joystick 0");
+        walk_mut(|w| w.server.vm.ent_set_float(p, "dmg_take", 20.0));
+        pad_frame(0, [0.0; 6]);
+        assert_eq!((take().len(), pad_read()), (1, false), "joystick 0: a phone's vibration");
         crate::host_cmd::execute_console_command("joy_rumble 0");
         walk_mut(|w| w.server.vm.ent_set_float(p, "dmg_take", 20.0));
         pad_frame(0, [0.0; 6]);

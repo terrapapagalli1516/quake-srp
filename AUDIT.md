@@ -2561,11 +2561,12 @@ its host side `quake-wasm/src/input.rs`; the page polls the Gamepad API
   keyboard and no key is being bound; a key comes up as what it went down
   as), `joy_rumble 1` (damage: `V_ParseDamage`'s count; firing the super
   shotgun, grenade or rocket launcher, the lightning gun per bolt: the
-  player's `punchangle` kick). Bindings (`Bindings::with_gamepad`): A and LT
+  player's `punchangle` kick; on a phone without a pad in use,
+  `navigator.vibrate` through the touch controls). Bindings (`Bindings::with_gamepad`): A and LT
   `+jump`, RT `+attack`, B and D-pad down `+movedown`, D-pad up `+moveup`,
   Y, RB and D-pad right `impulse 10`, LB and D-pad left `impulse 12`, Back
   `+showscores`, Start `togglemenu`, L3 `+speed`. Options' settings page:
-  Gamepad (`joystick`) and Pad rumble (`joy_rumble`); the layout's cvars are
+  Gamepad (`joystick`) and Rumble (`joy_rumble`); the layout's cvars are
   the console's, as id's were. With `+strafe` held the right stick strafes
   the wrong way (id's one `joysidesensitivity` serves both a side axis and a
   turn axis that strafes); not fixed.
@@ -2590,3 +2591,35 @@ its host side `quake-wasm/src/input.rs`; the page polls the Gamepad API
 - **Proof:** `oracle/classic_check.py` ALL PASS; `web/verify_gamepad.py`
   20/20 and the other page checks in headless Chromium and Firefox; no real
   pad or real 240/480 Hz display was tried.
+
+## Touch, install and offline (2026-09-26, branch `q26/mobile`)
+
+A phone plays the page with touch controls (`web/touch.js`), installs it to
+the home screen and plays it offline (`web/sw.js`); `web/PLATFORM.md`,
+"Touch" and "Offline and install", has the design. What that changed
+against id's WinQuake:
+
+- **`in_touch`** (`Cvars::touch`) is a departure, on in 2026, off in
+  Classic: the touch controls for play. The settings page's last row,
+  "Touch controls". `in_touchaccel` (look acceleration, console only,
+  default 0) reads nothing in the game, so it is no departure. Classic on a
+  touch screen keeps only a MENU button and the tappable menu, so a phone
+  is never stranded; Classic on a desktop is untouched (touch.js is not
+  even loaded).
+- **The menu answers taps** (`Menu::tap` / `point` / `item_at`, quake-rs
+  `menu.rs`, "Taps"): the port's input path, not id's. A tap becomes the
+  key id's menu already takes (`M_Keydown` through `Key_Event`), so no
+  screen does anything a key could not. Its rows are the draw code's: the
+  list origins became named constants (`PIC_ROW_Y0`, `SLOT_ROW_Y0`,
+  `KEYS_ROW_Y0`, `VIDEO_ROW_Y0`, ...) and the Options sliders one
+  `options_slider` function, which the drawing now uses too — pixels
+  unchanged (`screen2d` 146 values match; `classic_check.py` ALL PASS). A
+  test draws every list and checks the cursor is where a tap finds it.
+- **The State record** gains three flags: 128 `in_touch`, 256 the menu
+  asks y/n (Quit, New Game's question), 512 the live game is paused.
+- **Hidden page, 2026 with touch:** the live game pauses (`pause`, id's
+  plaque and its "paused the game" line) under the menu, and unpauses when
+  the player is back in the game. Classic only stops getting ticks, as
+  every browser page does when hidden.
+- `player_field NAME` (automation): a read-only call the checks read the
+  player's edict through.

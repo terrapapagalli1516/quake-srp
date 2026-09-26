@@ -203,6 +203,45 @@ pub(crate) fn menu_bind_key(keynum: i32) {
     press(keynum as u8);
 }
 
+// --- taps: the page's touch controls (web/touch.js) ---------------------------
+
+/// The menu's layout point under pixel `(x, y)` of the frame on screen (what
+/// the last frame drew: its size, and the 2-D scale it drew with).
+fn layout_point(a: &App, x: f32, y: f32) -> (f32, f32) {
+    quake_rs::menu::menu_layout_point(a.render_w, a.render_h, x, y)
+}
+
+/// A finger touched the frame at pixel `(x, y)` and lifted without moving
+/// ([`quake_rs::menu::Menu::tap`]): the cursor goes to the row there and,
+/// where a tap acts, its key goes through `Key_Event` as a key press would.
+/// 1 when the tap was on the menu's list (or Help's page), else 0; a no-op
+/// with the menu hidden.
+pub(crate) fn menu_tap(x: f32, y: f32) -> i32 {
+    let tapped = APP.with(|c| {
+        let mut b = c.borrow_mut();
+        let a = b.as_mut()?;
+        let (mx, my) = layout_point(a, x, y);
+        let on = a.menu.item_at(mx, my).is_some() || a.menu.screen() == render::MenuScreen::Help;
+        Some((a.menu.tap(mx, my, &a.settings), on))
+    });
+    let Some((key, on)) = tapped else { return 0 };
+    if let Some(k) = key {
+        menu_press(k);
+    }
+    i32::from(on)
+}
+
+/// A finger on (or dragged over) the frame at pixel `(x, y)`: the cursor
+/// follows it from row to row ([`quake_rs::menu::Menu::point`]). 1 on a row.
+pub(crate) fn menu_point(x: f32, y: f32) -> i32 {
+    APP.with(|c| {
+        c.borrow_mut().as_mut().map_or(0, |a| {
+            let (mx, my) = layout_point(a, x, y);
+            i32::from(a.menu.point(mx, my))
+        })
+    })
+}
+
 /// The menu screen currently showing, as a stable id — the page's `State`
 /// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
@@ -299,6 +338,29 @@ mod tests {
         });
         assert!(!vis, "'y' closes the menu");
         assert_eq!(map, render::NEW_GAME_MAP, "and starts the start hub");
+    }
+
+    /// The touch controls' taps, in frame pixels: an item of a picture list
+    /// acts on the first tap; on a text list the first tap points and the
+    /// second acts, through the same keys as the keyboard's.
+    #[test]
+    fn taps_open_options_and_flip_always_run() {
+        assert_eq!(boot(), 1);
+        set_resolution(640, 400); // 1:1, the menu's x 0 at 160
+        assert_eq!(menu_tap(160.0 + 100.0, 32.0 + 2.5 * 20.0), 1, "Main's item 2");
+        assert_eq!(menu_screen(), render::MenuScreen::Options);
+        let run = || APP.with(|c| c.borrow().as_ref().unwrap().settings.cvars.always_run());
+        let (before, always_run_row) = (run(), 32.0 + 8.5 * 8.0);
+        assert_eq!(menu_tap(260.0, always_run_row), 1);
+        assert_eq!(run(), before, "the first tap points");
+        assert_eq!(menu_tap(260.0, always_run_row), 1);
+        assert_ne!(run(), before, "the second flips it");
+        assert_eq!(menu_point(260.0, 32.0 + 3.5 * 8.0), 1, "a finger on Screen size");
+        assert_eq!(menu_tap(100.0, 190.0), 0, "under the list");
+        menu_cancel();
+        menu_cancel();
+        assert_eq!(menu_visible(), 0);
+        assert_eq!(menu_tap(260.0, 82.0), 0, "a closed menu takes no tap");
     }
 
     #[test]

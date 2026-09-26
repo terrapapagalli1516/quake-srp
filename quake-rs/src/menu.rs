@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 16] = [
+pub const SETTING_ROWS: [SettingRow; 17] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -201,6 +201,12 @@ pub const SETTING_ROWS: [SettingRow; 16] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
+        cvar: "in_touch",
+        label: "        Touch controls",
+        help: ["On a touch screen: a stick, look", "by dragging, fire, jump, weapon"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
         cvar: "joystick",
         label: "               Gamepad",
         help: ["Twin sticks: left moves, right", "looks; RT fires, Start = menu"],
@@ -208,8 +214,8 @@ pub const SETTING_ROWS: [SettingRow; 16] = [
     },
     SettingRow {
         cvar: "joy_rumble",
-        label: "            Pad rumble",
-        help: ["The pad shakes when you are hit", "and when heavy weapons fire"],
+        label: "                Rumble",
+        help: ["The pad, or a phone, shakes when", "you are hit or a big gun fires"],
         kind: RowKind::Toggle,
     },
 ];
@@ -386,6 +392,23 @@ const SLIDER_RANGE: usize = 10;
 /// virtual x=200 (`M_DrawCharacter(200, 32 + cursor*8, 12 + ...)`).
 const OPTIONS_CURSOR_BASE: u8 = 12;
 const OPTIONS_CURSOR_X: f32 = 200.0;
+
+// --- where the lists are (menu.c's draw coordinates): the drawing and a tap
+//     ([`Menu::tap`]) read the same numbers. -----------------------------------
+
+/// The picture lists (`mainmenu`, `sp_menu`, `mp_menu`) at y=32, an item
+/// every 20 lines (`M_DrawTransPic (72, 32, ...)`, the menudot at
+/// `54, 32 + cursor*20`).
+const PIC_ROW_Y0: f32 = 32.0;
+const PIC_ROW_STEP: f32 = 20.0;
+/// A text list's rows are a conchars line apart.
+const TEXT_ROW_STEP: f32 = 8.0;
+/// `M_Load_Draw` / `M_Save_Draw`: the slots from y=32.
+const SLOT_ROW_Y0: f32 = 32.0;
+/// `M_Keys_Draw`: the bindings from y=48.
+const KEYS_ROW_Y0: f32 = 48.0;
+/// The port's video mode list from y=36.
+const VIDEO_ROW_Y0: f32 = 36.0;
 
 /// `(int)(realtime*rate) & 1` — the C's cursor-flash bit, shared by the menu
 /// cursors (`rate` 4) and the console input cursor (`con_cursorspeed` 4). The C
@@ -751,6 +774,11 @@ impl Menu {
     /// The New Game "Are you sure?" modal is up (see [`Menu::quit_yes`]).
     pub fn new_game_confirm(&self) -> bool {
         self.new_game_confirm
+    }
+
+    /// The menu waits for y or n: the Quit prompt, or New Game's question.
+    pub fn asks_yes_no(&self) -> bool {
+        self.visible && (self.screen == MenuScreen::Quit || self.new_game_confirm)
     }
 
     /// Set the 12 Load/Save slot comments (`M_ScanSaves`' `m_filenames`): the
@@ -1619,6 +1647,135 @@ impl Menu {
 
 }
 
+// ---------------------------------------------------------------------------
+// Taps: the menu under a finger (PORT, not in id's Quake)
+// ---------------------------------------------------------------------------
+//
+// id's menus are driven by keys, and a phone has none. The page's touch
+// controls (quake-wasm's `web/touch.js`) hand the menu the point a finger
+// touched, in the menu's own layout ([`menu_layout_point`]), and the menu
+// answers with the key a player would press there. The rows are where the
+// `draw_*` functions draw them, from the same constants, so a tap and the
+// picture cannot disagree; and a tap changes nothing a key could not, since
+// its key goes through `Key_Event` and `M_Keydown` like any other.
+
+/// Where a screen's rows are, top to bottom, in the menu's layout.
+#[derive(Debug, Clone, Copy)]
+enum RowLayout {
+    /// `count` rows `step` apart from `y0`, each owning its `step` lines.
+    Even { y0: f32, step: f32, count: usize },
+    /// Text lines drawn at these `y`s (`setup_cursor_table`), each owning
+    /// the lines within `reach` of its middle.
+    Table { ys: &'static [f32], reach: f32 },
+}
+
+impl RowLayout {
+    /// The row that owns line `y`.
+    fn row_at(self, y: f32) -> Option<usize> {
+        match self {
+            RowLayout::Even { y0, step, count } => {
+                let row = ((y - y0) / step).floor();
+                (row >= 0.0 && row < count as f32).then_some(row as usize)
+            }
+            RowLayout::Table { ys, reach } => {
+                ys.iter().position(|&top| (y - (top + TEXT_ROW_STEP / 2.0)).abs() <= reach)
+            }
+        }
+    }
+}
+
+impl MenuScreen {
+    /// Its rows, as its `draw_*` function lays them out; `None` for Help and
+    /// the Quit prompt, which have no list.
+    fn rows(self) -> Option<RowLayout> {
+        let even = |y0, step| Some(RowLayout::Even { y0, step, count: self.item_count() });
+        match self {
+            MenuScreen::Main | MenuScreen::SinglePlayer | MenuScreen::Multiplayer => {
+                even(PIC_ROW_Y0, PIC_ROW_STEP)
+            }
+            MenuScreen::Options | MenuScreen::Extras => even(OPTIONS_ROW_Y0, OPTIONS_ROW_STEP),
+            MenuScreen::Load | MenuScreen::Save => even(SLOT_ROW_Y0, TEXT_ROW_STEP),
+            MenuScreen::Keys => even(KEYS_ROW_Y0, TEXT_ROW_STEP),
+            MenuScreen::Video => even(VIDEO_ROW_Y0, TEXT_ROW_STEP),
+            MenuScreen::Setup => Some(RowLayout::Table { ys: &SETUP_CURSOR_TABLE, reach: TEXT_ROW_STEP }),
+            MenuScreen::Help | MenuScreen::Quit => None,
+        }
+    }
+
+    /// A picture list, whose 20-line items a finger hits the first time.
+    fn has_pic_rows(self) -> bool {
+        matches!(self, MenuScreen::Main | MenuScreen::SinglePlayer | MenuScreen::Multiplayer)
+    }
+}
+
+impl Menu {
+    /// The row of the showing screen at point `(x, y)` of the menu's layout
+    /// ([`menu_layout_point`]): none off the 320-wide menu, past its list,
+    /// on a screen without one, while New Game asks its question, or with
+    /// the menu closed.
+    pub fn item_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.visible || self.new_game_confirm || !(0.0..MENU_VIRT_W).contains(&x) {
+            return None;
+        }
+        self.screen.rows()?.row_at(y)
+    }
+
+    /// A finger on `(x, y)`, or dragged across it: the cursor moves to the
+    /// row there as the arrows would move it (menu1). True on a row.
+    pub fn point(&mut self, x: f32, y: f32) -> bool {
+        let Some(row) = self.item_at(x, y).filter(|_| !self.bind_grab) else {
+            return false;
+        };
+        if row != self.cursor() {
+            self.snd(MenuSound::Menu1);
+            self.set_cursor(row);
+        }
+        true
+    }
+
+    /// A tap at `(x, y)` of the menu's layout: the key it presses, which the
+    /// host runs through `Key_Event` as the page's keys run.
+    ///
+    /// - A picture list (Main, Single Player, Multiplayer) acts on the first
+    ///   tap: its 20-line items are a finger's size. The cursor moves to the
+    ///   item, and the key is Enter.
+    /// - A text list's 8-line rows are smaller than a fingertip on a phone,
+    ///   so it takes two: the first tap moves the cursor ([`Menu::point`]),
+    ///   and a tap on the highlighted row acts on it — Enter, or on an
+    ///   Options slider left or right of its knob (on the label, nothing).
+    /// - Help: the left half pages back, the right half on.
+    /// - Nothing while the menu wants y or n (the Quit prompt, New Game's
+    ///   question: the page offers them as buttons) or a key to bind.
+    pub fn tap(&mut self, x: f32, y: f32, s: &Settings) -> Option<u8> {
+        if !self.visible || self.new_game_confirm || self.bind_grab {
+            return None;
+        }
+        if self.screen == MenuScreen::Help {
+            let back = x < MENU_VIRT_W / 2.0;
+            return (0.0..MENU_VIRT_W).contains(&x).then_some(if back { K_LEFTARROW } else { K_RIGHTARROW });
+        }
+        let row = self.item_at(x, y)?;
+        if self.screen.has_pic_rows() {
+            self.set_cursor(row);
+            return Some(K_ENTER);
+        }
+        if row != self.cursor() {
+            self.point(x, y);
+            return None;
+        }
+        let slider = options_slider(row, &s.cvars).filter(|_| self.screen == MenuScreen::Options);
+        match slider {
+            // M_DrawSlider's left cap is one character left of the trough.
+            Some(_) if x < OPTIONS_WIDGET_X - 8.0 => None,
+            Some(frac) => {
+                let knob = OPTIONS_WIDGET_X + slider_knob_offset(frac) + TEXT_ROW_STEP / 2.0;
+                Some(if x < knob { K_LEFTARROW } else { K_RIGHTARROW })
+            }
+            None => Some(K_ENTER),
+        }
+    }
+}
+
 /// The slider knob's virtual-x offset, in pixels, from the trough's drawing
 /// origin `x` (`M_DrawSlider`): the knob (glyph 131) sits at
 /// `(SLIDER_RANGE-1)*8 * range`, with `range` clamped to `[0,1]`. So fraction 0
@@ -1837,6 +1994,23 @@ pub fn draw_menu_over_console(
     draw_menu_inner(image, menu, settings, pics, conchars, clock, palette, false);
 }
 
+/// Where the menu sits on a `w x h` framebuffer: framebuffer pixels per menu
+/// pixel ([`screen_2d`]) and the x of the menu's left edge. M_DrawPic /
+/// M_DrawCharacter draw at `x + ((vid.width - 320)>>1)`, y as given: the
+/// 320-wide menu centred across the top of the 2-D screen.
+fn menu_origin(w: usize, h: usize) -> (f32, f32) {
+    let sc = screen_2d(w, h);
+    (sc.scale, ((sc.w - MENU_VIRT_W as i32) >> 1) as f32 * sc.scale)
+}
+
+/// PORT: the point of the menu's layout (menu.c's coordinates, what
+/// [`Menu::tap`] takes) under pixel `(x, y)` of a `w x h` frame: where the
+/// drawing put it ([`menu_origin`]), undone.
+pub fn menu_layout_point(w: usize, h: usize, x: f32, y: f32) -> (f32, f32) {
+    let (scale, ox) = menu_origin(w, h);
+    ((x - ox) / scale, y / scale)
+}
+
 /// [`draw_menu`], with `fade` false for `M_Draw`'s `m_recursiveDraw` (the
 /// screen the Quit prompt rose over, drawn under it without a second fade)
 /// and for the menu over the console background.
@@ -1855,14 +2029,10 @@ fn draw_menu_inner(
     if !menu.visible || image.w == 0 || image.h == 0 {
         return;
     }
-    // M_DrawPic / M_DrawCharacter: `x + ((vid.width - 320)>>1)`, y as given —
-    // the 320-wide menu centred across the top of the 2-D screen.
-    let sc = screen_2d(image.w, image.h);
-    let scale = sc.scale;
+    let (scale, ox) = menu_origin(image.w, image.h);
     if !scale.is_finite() || scale <= 0.0 {
         return;
     }
-    let ox = ((sc.w - MENU_VIRT_W as i32) >> 1) as f32 * scale;
     let oy = 0.0;
 
     // M_Draw: the game/demo underneath fades first (Draw_FadeScreen); with
@@ -1972,12 +2142,12 @@ fn draw_menu_inner(
     }
     if let Some(l) = list {
         // M_DrawTransPic (72, 32, ...).
-        blit_qpic_at(image, l, 72.0, 32.0, scale, ox, oy, palette);
+        blit_qpic_at(image, l, 72.0, PIC_ROW_Y0, scale, ox, oy, palette);
     }
 
     // The animated cursor at (54, 32 + cursor*20).
     if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
-        let cy = 32.0 + menu.cursor() as f32 * 20.0;
+        let cy = PIC_ROW_Y0 + menu.cursor() as f32 * PIC_ROW_STEP;
         blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
     }
 }
@@ -2013,6 +2183,22 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
     "         Video Options",
     "        Classic / 2026",
 ];
+
+/// The slider on Options row `row` (`M_Options_Draw`'s `r` for each
+/// `M_DrawSlider`), for the five slider rows: Screen size `(scr_viewsize -
+/// 30) / (120 - 30)`, Brightness `(1 - gamma) / 0.5`, Mouse Speed
+/// `(sensitivity - 1) / 10`, CD Music Volume `bgmvolume`, Sound Volume
+/// `volume`.
+fn options_slider(row: usize, c: &crate::cvar::Cvars) -> Option<f32> {
+    Some(match row {
+        ROW_SCREENSIZE => (c.viewsize - VIEWSIZE_MIN) / (VIEWSIZE_MAX - VIEWSIZE_MIN),
+        ROW_BRIGHTNESS => (1.0 - c.gamma) / (GAMMA_MAX - GAMMA_MIN),
+        ROW_MOUSESPEED => (c.sensitivity - SENS_MIN) / (SENS_MAX - SENS_MIN),
+        ROW_CDVOLUME => c.bgmvolume,
+        ROW_SNDVOLUME => c.volume,
+        _ => return None,
+    })
+}
 
 /// Draw the Options submenu, a faithful port of `M_Options_Draw`: the `p_option`
 /// title plaque centered at the top, the 13 right-justified labels at x=16 (8 px
@@ -2052,21 +2238,13 @@ fn draw_options_screen(
 
         // The analog widgets (M_DrawSlider) on the slider rows, each with its
         // cvar's [0,1] fraction.
-        let slider_row = |row: usize| OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
-        // Screen size: r = (scr_viewsize - 30) / (120 - 30).
         let c = &settings.cvars;
-        let size_frac = (c.viewsize - VIEWSIZE_MIN) / (VIEWSIZE_MAX - VIEWSIZE_MIN);
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SCREENSIZE), size_frac, scale, ox, oy, palette);
-        // Brightness: r = (1 - gamma)/0.5.
-        let bright_frac = (1.0 - c.gamma) / (GAMMA_MAX - GAMMA_MIN);
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_BRIGHTNESS), bright_frac, scale, ox, oy, palette);
-        // Mouse Speed: r = (sensitivity - 1)/10.
-        let mouse_frac = (c.sensitivity - SENS_MIN) / (SENS_MAX - SENS_MIN);
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_MOUSESPEED), mouse_frac, scale, ox, oy, palette);
-        // CD Music Volume: r = bgmvolume.
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_CDVOLUME), c.bgmvolume, scale, ox, oy, palette);
-        // Sound Volume: r = volume.
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SNDVOLUME), c.volume, scale, ox, oy, palette);
+        for row in 0..OPTIONS_ITEMS {
+            if let Some(frac) = options_slider(row, c) {
+                let ry = OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
+                draw_slider(image, cc, OPTIONS_WIDGET_X, ry, frac, scale, ox, oy, palette);
+            }
+        }
 
         // The checkbox rows (M_DrawCheckbox -> "on"/"off").
         let checks = [
@@ -2094,13 +2272,20 @@ fn draw_options_screen(
 /// px apart, the labels at x=16, the values at x=220, the cursor at x=200.
 /// Under them the notes, from x=[`EXTRAS_NOTE_X`] (right of the plaque,
 /// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
-/// the list and the highlighted row's help lines right under it (16 rows
-/// leave no room for a second gap in the 200-line screen), at most
-/// [`EXTRAS_NOTE_COLS`] columns.
+/// the list — right under it once the rows leave no room for the gap in the
+/// 200-line screen (17 rows do not) — and the highlighted row's help lines
+/// right under the header, at most [`EXTRAS_NOTE_COLS`] columns.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 const EXTRAS_NOTE_X: f32 = 64.0;
 const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
-const EXTRAS_HEADER_Y: f32 = EXTRAS_ROW_Y0 + (SETTING_ROWS.len() + 1) as f32 * OPTIONS_ROW_STEP;
+const EXTRAS_LIST_END: f32 = EXTRAS_ROW_Y0 + SETTING_ROWS.len() as f32 * OPTIONS_ROW_STEP;
+/// The header and the three help lines.
+const EXTRAS_NOTES_H: f32 = 4.0 * OPTIONS_ROW_STEP;
+const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTES_H <= 200.0 {
+    EXTRAS_LIST_END + OPTIONS_ROW_STEP
+} else {
+    EXTRAS_LIST_END
+};
 const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + OPTIONS_ROW_STEP;
 /// The page's header (`M_PrintWhite`): what these rows are.
 const EXTRAS_HEADER: &str = "Not in id's Quake";
@@ -2182,12 +2367,12 @@ fn draw_load_save_screen(
     }
     if let Some(cc) = conchars {
         for i in 0..MAX_SAVEGAMES {
-            let ry = 32.0 + i as f32 * 8.0;
+            let ry = SLOT_ROW_Y0 + i as f32 * TEXT_ROW_STEP;
             let text = menu.save_comment(i);
             let row = if text.is_empty() { UNUSED_SLOT } else { text };
             m_print(image, cc, 16.0, ry, row, scale, ox, oy, palette);
         }
-        let cy = 32.0 + menu.cursor() as f32 * 8.0;
+        let cy = SLOT_ROW_Y0 + menu.cursor() as f32 * TEXT_ROW_STEP;
         draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     }
 }
@@ -2214,10 +2399,10 @@ fn draw_multiplayer_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     if let Some(l) = &pics.mp_menu {
-        blit_qpic_at(image, l, 72.0, 32.0, scale, ox, oy, palette);
+        blit_qpic_at(image, l, 72.0, PIC_ROW_Y0, scale, ox, oy, palette);
     }
     if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
-        let cy = 32.0 + menu.cursor() as f32 * 20.0;
+        let cy = PIC_ROW_Y0 + menu.cursor() as f32 * PIC_ROW_STEP;
         blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
     }
     if let Some(cc) = conchars {
@@ -2348,7 +2533,7 @@ fn draw_keys_screen(
         );
     }
     for (i, (_, label)) in BINDNAMES.iter().enumerate() {
-        let y = 48.0 + 8.0 * i as f32;
+        let y = KEYS_ROW_Y0 + TEXT_ROW_STEP * i as f32;
         m_print(image, cc, 16.0, y, label, scale, ox, oy, palette);
         let keys = binds.find_keys_for_command(i);
         match keys[0] {
@@ -2368,7 +2553,7 @@ fn draw_keys_screen(
             }
         }
     }
-    let cy = 48.0 + menu.cursor() as f32 * 8.0;
+    let cy = KEYS_ROW_Y0 + menu.cursor() as f32 * TEXT_ROW_STEP;
     if menu.bind_grabbing() {
         // M_DrawCharacter (130, 48 + keys_cursor*8, '=').
         draw_char_scaled(image, cc, 130.0, cy, b'=', scale, ox, oy, palette);
@@ -2405,7 +2590,7 @@ fn draw_video_screen(
     // one, which it prints with M_PrintWhite.
     let current = menu.resolution();
     for (i, &(w, h)) in RESOLUTION_PRESETS.iter().enumerate() {
-        let y = 36.0 + 8.0 * i as f32;
+        let y = VIDEO_ROW_Y0 + TEXT_ROW_STEP * i as f32;
         let row = format!("{w}x{h}");
         if (w, h) == current {
             draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
@@ -2413,11 +2598,11 @@ fn draw_video_screen(
             m_print(image, cc, 16.0, y, &row, scale, ox, oy, palette);
         }
     }
-    let cy = 36.0 + menu.cursor() as f32 * 8.0;
+    let cy = VIDEO_ROW_Y0 + menu.cursor() as f32 * TEXT_ROW_STEP;
     draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
     // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
     // single column's foot.
-    let hints_y = 36.0 + RESOLUTION_PRESETS.len() as f32 * 8.0 + 16.0;
+    let hints_y = VIDEO_ROW_Y0 + RESOLUTION_PRESETS.len() as f32 * TEXT_ROW_STEP + 16.0;
     m_print(image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy, palette);
     m_print(image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy, palette);
 }
@@ -3831,7 +4016,7 @@ mod tests {
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
         assert_eq!(img.rgb[4 * 320 + 16], pal[9], "qplaque at (16,4)");
         assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
-        let header_y = 32 + (SETTING_ROWS.len() + 1) * 8;
+        let header_y = EXTRAS_HEADER_Y as usize;
         assert_eq!(px(&img, 64, header_y), pal[6], "the header is M_PrintWhite");
         for (i, row) in SETTING_ROWS.iter().enumerate() {
             let y = 32 + i * 8;
@@ -4393,5 +4578,155 @@ mod tests {
         // "No" goes back to the menu it rose over.
         assert_eq!(m.quit_no(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
+    }
+
+    // -- taps (PORT: the page's touch controls) --------------------------------
+
+    /// The menu open on `screen`, its sounds drained.
+    fn menu_on(screen: MenuScreen) -> Menu {
+        let mut m = Menu::new();
+        m.open();
+        m.screen = screen;
+        m.take_sounds();
+        m
+    }
+
+    /// The middle of `screen`'s row `row`, in the menu's layout.
+    fn row_middle(screen: MenuScreen, row: usize) -> f32 {
+        match screen.rows().expect("a list") {
+            RowLayout::Even { y0, step, .. } => y0 + (row as f32 + 0.5) * step,
+            RowLayout::Table { ys, .. } => ys[row] + TEXT_ROW_STEP / 2.0,
+        }
+    }
+
+    #[test]
+    fn a_tap_finds_the_row_the_cursor_is_drawn_on() {
+        // For every list, the cursor drawn on row i (a conchars glyph, or the
+        // menudot on the picture lists) lights lines of its column that a tap
+        // there finds as row i, and none that it finds as another row.
+        let pal = ramp_palette();
+        let conchars = test_conchars();
+        let mut pics = MenuPics::default();
+        for d in &mut pics.menudot {
+            *d = Some(solid_pic(8, 16, 7));
+        }
+        let s = Settings::default();
+        let screens = [
+            (MenuScreen::Main, 56, pal[7]),
+            (MenuScreen::SinglePlayer, 56, pal[7]),
+            (MenuScreen::Multiplayer, 56, pal[7]),
+            (MenuScreen::Options, 202, pal[3]),
+            (MenuScreen::Extras, 202, pal[3]),
+            (MenuScreen::Load, 10, pal[3]),
+            (MenuScreen::Save, 10, pal[3]),
+            (MenuScreen::Keys, 132, pal[3]),
+            (MenuScreen::Video, 10, pal[3]),
+            (MenuScreen::Setup, 58, pal[3]),
+        ];
+        for (screen, x, lit) in screens {
+            let mut m = menu_on(screen);
+            for row in 0..screen.item_count() {
+                m.set_cursor(row);
+                let mut img = Image::new(320, 200, [9, 9, 9]);
+                draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
+                let rows: Vec<usize> = (0..200)
+                    .filter(|&y| img.rgb[y * 320 + x] == lit)
+                    .filter_map(|y| m.item_at(x as f32, y as f32 + 0.5))
+                    .collect();
+                assert!(!rows.is_empty(), "{screen:?} row {row}: the cursor is on a row");
+                assert!(rows.iter().all(|&r| r == row), "{screen:?} row {row}: drawn over rows {rows:?}");
+                assert_eq!(m.item_at(160.0, row_middle(screen, row)), Some(row));
+            }
+            let past = row_middle(screen, screen.item_count() - 1) + 20.0;
+            assert_eq!(m.item_at(160.0, past), None, "{screen:?}: past the list");
+            assert_eq!(m.item_at(-1.0, row_middle(screen, 0)), None, "{screen:?}: left of the menu");
+            assert_eq!(m.item_at(320.0, row_middle(screen, 0)), None, "{screen:?}: right of it");
+        }
+        for screen in [MenuScreen::Help, MenuScreen::Quit] {
+            assert_eq!(menu_on(screen).item_at(160.0, 40.0), None, "{screen:?} has no list");
+        }
+        let mut closed = menu_on(MenuScreen::Main);
+        closed.close();
+        assert_eq!(closed.item_at(160.0, row_middle(MenuScreen::Main, 0)), None);
+    }
+
+    #[test]
+    fn a_picture_list_acts_on_the_first_tap() {
+        let s = Settings::default();
+        let mut m = menu_on(MenuScreen::Main);
+        assert_eq!(m.tap(160.0, row_middle(MenuScreen::Main, 2), &s), Some(K_ENTER));
+        assert_eq!(m.cursor(), 2, "on Options");
+        assert!(m.take_sounds().is_empty(), "no menu1: the key's Enter plays menu2");
+        let mut s = Settings::default();
+        assert_eq!(m.keydown(K_ENTER, None, &mut s), MenuAction::None);
+        assert_eq!(m.screen(), MenuScreen::Options);
+        assert_eq!(m.tap(160.0, 10.0, &s), None, "the title is no item");
+    }
+
+    #[test]
+    fn a_text_list_takes_a_tap_to_point_and_one_to_act() {
+        let mut s = Settings::default();
+        s.cvars.set_always_run(false);
+        let mut m = menu_on(MenuScreen::Options);
+        let run = row_middle(MenuScreen::Options, ROW_ALWAYSRUN);
+        assert_eq!(m.tap(100.0, run, &s), None, "the first tap points");
+        assert_eq!((m.cursor(), m.take_sounds()), (ROW_ALWAYSRUN, vec![MenuSound::Menu1]));
+        assert_eq!(m.tap(100.0, run, &s), Some(K_ENTER), "the second acts");
+        m.keydown(K_ENTER, None, &mut s);
+        assert!(s.cvars.always_run(), "Enter on a checkbox flips it");
+
+        // A slider: left or right of its knob, nothing on its label.
+        let vol = row_middle(MenuScreen::Options, ROW_SNDVOLUME);
+        m.point(100.0, vol);
+        s.cvars.volume = 0.7; // the knob at 220 + 72*0.7
+        assert_eq!(m.tap(100.0, vol, &s), None, "the label");
+        assert_eq!(m.tap(230.0, vol, &s), Some(K_LEFTARROW));
+        assert_eq!(m.tap(300.0, vol, &s), Some(K_RIGHTARROW));
+        m.keydown(K_LEFTARROW, None, &mut s);
+        assert!((s.cvars.volume - 0.6).abs() < 1e-6);
+
+        // The settings page and Load: Enter on the highlighted row.
+        let mut m = menu_on(MenuScreen::Extras);
+        let touch = SETTING_ROWS.iter().position(|r| r.cvar == "in_touch").unwrap();
+        let y = row_middle(MenuScreen::Extras, touch);
+        assert_eq!((m.tap(100.0, y, &s), m.tap(100.0, y, &s)), (None, Some(K_ENTER)));
+        let mut m = menu_on(MenuScreen::Load);
+        assert_eq!(m.tap(100.0, row_middle(MenuScreen::Load, 0), &s), Some(K_ENTER), "already on slot 0");
+    }
+
+    #[test]
+    fn help_pages_by_half_and_questions_and_grabs_take_no_tap() {
+        let s = Settings::default();
+        let mut m = menu_on(MenuScreen::Help);
+        assert_eq!(m.tap(40.0, 100.0, &s), Some(K_LEFTARROW), "back");
+        assert_eq!(m.tap(280.0, 100.0, &s), Some(K_RIGHTARROW), "on");
+        assert_eq!(m.tap(-10.0, 100.0, &s), None, "off the page");
+
+        let mut m = menu_on(MenuScreen::Quit);
+        assert!(m.asks_yes_no());
+        assert_eq!(m.tap(160.0, 90.0, &s), None, "y or n: the page's buttons");
+        let mut m = menu_on(MenuScreen::SinglePlayer);
+        m.new_game_confirm = true;
+        assert!(m.asks_yes_no());
+        assert_eq!(m.tap(160.0, row_middle(MenuScreen::SinglePlayer, 0), &s), None);
+        assert!(!menu_on(MenuScreen::Main).asks_yes_no());
+
+        let mut m = menu_on(MenuScreen::Keys);
+        m.bind_grab = true;
+        let y = row_middle(MenuScreen::Keys, 3);
+        assert_eq!((m.tap(100.0, y, &s), m.point(100.0, y)), (None, false), "a tap is no key to bind");
+        assert_eq!(m.cursor(), 0);
+    }
+
+    #[test]
+    fn a_frame_pixel_is_the_menu_point_the_drawing_put_there() {
+        // id's 1:1 layout, centred: 640x400 puts the menu's x 0 at 160.
+        assert_eq!(menu_layout_point(640, 400, 160.0 + 72.0, 32.0), (72.0, 32.0));
+        let _scaled = crate::draw::Scaled2dGuard::set(true);
+        // Scaled 2-D: 1280x800 is 4x, the menu fills the width.
+        assert_eq!(menu_layout_point(1280, 800, 288.0, 128.0), (72.0, 32.0));
+        // A phone's 1266x585 frame: 2x (585/200 = 2.9), the 633-wide 2-D
+        // screen puts the menu at (633 - 320) / 2 = 156, 312 pixels in.
+        assert_eq!(menu_layout_point(1266, 585, 312.0 + 200.0, 100.0), (100.0, 50.0));
     }
 }

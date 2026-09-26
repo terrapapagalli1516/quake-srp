@@ -113,8 +113,7 @@ if args.build:
                    cwd=wasm_crate, check=True)
     WEB = os.path.join(wasm_crate, "target", "bench-web")
     os.makedirs(os.path.join(WEB, "id1"), exist_ok=True)
-    for f in ("index.html", "wasi.js"):
-        shutil.copy(os.path.join(HERE, f), WEB)
+    isolated.copy_page(WEB)
     shutil.copy(os.path.join(wasm_crate, f"target/bench/{target}/release/quake.wasm"), WEB)
     pak = os.path.join(WEB, "id1", "pak0.pak")
     if not os.path.exists(pak):
