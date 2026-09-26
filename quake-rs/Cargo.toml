@@ -14,7 +14,7 @@ authors = ["Ported from id Software's Quake (GPLv2) by Claude"]
 
 [[bin]]
 name = "quaketool"
-path = "src/bin/quaketool.rs"
+path = "src/bin/quaketool/main.rs"
 
 [lib]
 name = "quake_rs"

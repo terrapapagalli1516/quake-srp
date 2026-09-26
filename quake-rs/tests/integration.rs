@@ -3,6 +3,8 @@
 //! format loaders. These complement the in-module unit tests, which work purely
 //! in memory.
 
+#![forbid(unsafe_code)]
+
 use quake_rs::bsp::Bsp;
 use quake_rs::crc;
 use quake_rs::pak::Pak;
