@@ -40,6 +40,8 @@ use crate::Result;
 pub struct Outbox {
     /// `svc_sound`s ([`Server::drain_sounds`]).
     sounds: Vec<SoundEvent>,
+    /// The signon's `svc_spawnstaticsound`s ([`Server::drain_static_sounds`]).
+    static_sounds: Vec<StaticSound>,
 }
 
 impl Server {
@@ -105,10 +107,10 @@ pub struct SoundEvent {
 // (snd_dma.c) then allocated a PERSISTENT looping channel re-spatialized every
 // frame. These are the torch crackles / wind / hums placed by the QuakeC at
 // level spawn. Like the one-shot queue above, this headless server has no
-// netcode, so each `ambientsound()` is recorded as a [`StaticSound`] in a
-// process-wide thread-local list that [`Server::drain_static_sounds`] hands to
-// the front-end ONCE (the front-end keeps the loops alive itself, mirroring how
-// the signon packet was sent once at connect).
+// netcode, so each `ambientsound()` is recorded as a [`StaticSound`] in the
+// outbox, which [`Server::drain_static_sounds`] hands to the front-end ONCE
+// (the front-end keeps the loops alive itself, mirroring how the signon packet
+// was sent once at connect).
 // ---------------------------------------------------------------------------
 
 /// One placed looping ambient sound — the `svc_spawnstaticsound` payload the C
@@ -133,24 +135,6 @@ pub struct StaticSound {
     /// Attenuation in `0.0..=4.0`, quantized through the wire byte
     /// (`trunc(atten*64)/64`; `ATTN_STATIC` = 3 survives exactly).
     pub attenuation: f32,
-}
-
-thread_local! {
-    /// Process-wide (per-thread) registry [`bi_ambientsound`] pushes to and
-    /// [`Server::drain_static_sounds`] takes. See the module note above; the
-    /// thread-local reasoning mirrors [`SOUND_EVENTS`] exactly.
-    static STATIC_SOUNDS: std::cell::RefCell<Vec<StaticSound>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a placed static sound onto the thread-local registry.
-fn push_static_sound(ev: StaticSound) {
-    STATIC_SOUNDS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every registered static sound.
-pub(super) fn take_static_sounds() -> Vec<StaticSound> {
-    STATIC_SOUNDS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
@@ -885,13 +869,14 @@ pub(super) fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
 
     let vol_byte = (volume * 255.0).clamp(0.0, 255.0) as u8;
     let atten_byte = (attenuation * 64.0).clamp(0.0, 255.0) as u8;
-    push_static_sound(StaticSound {
+    let ev = StaticSound {
         origin: pos,
         sound_index,
         sample,
         volume: vol_byte as f32 / 255.0,
         attenuation: atten_byte as f32 / 64.0,
-    });
+    };
+    send(vm, |o| o.static_sounds.push(ev));
     Ok(())
 }
 
@@ -938,10 +923,9 @@ impl Server {
     /// level's worldspawn registers them all during `spawn_entities`, so a
     /// front-end drains ONCE after the level builds and keeps the loops alive
     /// itself — mirroring how the C wrote them once into the signon packet and
-    /// `S_StaticSound` kept a persistent channel. Thread-local like
-    /// [`Server::drain_sounds`]: call on the thread that spawned the level.
+    /// `S_StaticSound` kept a persistent channel.
     pub fn drain_static_sounds(&mut self) -> Vec<StaticSound> {
-        take_static_sounds()
+        self.take_outbox(|o| &mut o.static_sounds)
     }
 
     /// Take and clear the queued on-screen messages (`centerprint`/`sprint`/

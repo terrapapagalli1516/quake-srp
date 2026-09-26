@@ -179,9 +179,6 @@ pub fn build_walk_map(pak: Pak, map: &str, sound: &mut Vec<SoundCall>) -> Option
     // Pass the pak so external brush-model item boxes (b_*.bsp) collide + take
     // damage (the explosive box becomes shootable).
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).ok()?;
-    // Discard any static-sound registrations a previously FAILED spawn left in
-    // the thread-local registry, so this level's drain below is exactly its own.
-    let _ = server.drain_static_sounds();
     // SV_SpawnServer set world.model + the mapname global before loading the
     // entities (the QuakeC episode-end finale check reads world.model).
     server.set_map_name(map);
@@ -277,9 +274,6 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     // global.
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
-    // Discard stale static-sound registrations (a previously failed spawn's)
-    // so the drain after spawn_entities is exactly this level's.
-    let _ = ns.drain_static_sounds();
     if ns.spawn_entities().is_err() {
         return;
     }
@@ -380,9 +374,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     ns.set_map_name(&w.map_name);
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
-    // Static-loop bookkeeping mirrors try_changelevel: discard stale
-    // registrations, spawn, capture this (re)load's own.
-    let _ = ns.drain_static_sounds();
+    // Static loops as in try_changelevel: spawn, then capture this (re)load's.
     if ns.spawn_entities().is_err() {
         return;
     }

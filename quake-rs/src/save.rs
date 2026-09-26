@@ -578,10 +578,6 @@ impl Server {
         // so the skill-flag entity filter matches the save's world exactly.
         server.set_skill(sg.skill as f32);
         server.set_map_name(&sg.map_name);
-        // Discard static-sound registrations a previously FAILED build left in
-        // the per-thread registry, so the host's post-load drain is exactly
-        // this level's (same discipline as the front-end's other build paths).
-        let _ = server.drain_static_sounds();
         server.spawn_entities()?;
 
         // load the light styles (all 64 lines overwrite sv.lightstyles).
