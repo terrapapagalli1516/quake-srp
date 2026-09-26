@@ -680,7 +680,7 @@ mod tests {
         let _ = b.add_function(
             "main",
             vec![Statement {
-                op: Op::Done as u16,
+                op: Op::Done,
                 a: 0,
                 b: 0,
                 c: 0,
@@ -711,7 +711,7 @@ mod tests {
         let _ = b.add_function(
             "main",
             vec![Statement {
-                op: Op::Done as u16,
+                op: Op::Done,
                 a: 0,
                 b: 0,
                 c: 0,

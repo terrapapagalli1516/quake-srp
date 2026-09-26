@@ -890,7 +890,7 @@ mod tests {
         let g_tmp = 42u16;
 
         let done = || Statement {
-            op: Op::Done as u16,
+            op: Op::Done,
             a: 0,
             b: 0,
             c: 0,
@@ -904,13 +904,13 @@ mod tests {
             "PlayerPreThink",
             vec![
                 Statement {
-                    op: Op::LoadF as u16,
+                    op: Op::LoadF,
                     a: SELF as i16,
                     b: g_fimpulse as i16,
                     c: g_tmp as i16,
                 },
                 Statement {
-                    op: Op::StoreF as u16,
+                    op: Op::StoreF,
                     a: g_tmp as i16,
                     b: g_seen as i16,
                     c: 0,

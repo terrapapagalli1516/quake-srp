@@ -508,7 +508,7 @@ mod tests {
         b.add_field("health", EV_FLOAT, 23);
 
         let done = || Statement {
-            op: Op::Done as u16,
+            op: Op::Done,
             a: 0,
             b: 0,
             c: 0,
@@ -527,13 +527,13 @@ mod tests {
             "ClientKill",
             vec![
                 Statement {
-                    op: Op::StoreS as u16,
+                    op: Op::StoreS,
                     a: g_str as i16,
                     b: OFS_PARM0 as i16,
                     c: 0,
                 },
                 Statement {
-                    op: Op::Call1 as u16,
+                    op: Op::Call1,
                     a: g_fn as i16,
                     b: 0,
                     c: 0,

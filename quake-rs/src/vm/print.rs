@@ -11,12 +11,12 @@ use std::fmt::Write as _;
 
 use super::Vm;
 use crate::error::ProgramError;
-use crate::progs::{string_in, Def, Op, Statement, DEF_SAVEGLOBAL};
+use crate::progs::{string_in, Def, Op, Statement, DEF_SAVEGLOBAL, OP_MAX};
 
 /// `pr_opnames[]` (pr_exec.c): id's opcode names, as `PR_PrintStatement`
 /// prints them. The disassembler has its own ([`Op::mnemonic`]): `DIV_F` and
 /// `LOAD_F` where id says `DIV` and `INDIRECT`.
-const PR_OPNAMES: [&str; Op::BitOr as usize + 1] = [
+const PR_OPNAMES: [&str; OP_MAX as usize + 1] = [
     "DONE", "MUL_F", "MUL_V", "MUL_FV", "MUL_VF", "DIV", "ADD_F", "ADD_V", "SUB_F", "SUB_V",
     "EQ_F", "EQ_V", "EQ_S", "EQ_E", "EQ_FNC", "NE_F", "NE_V", "NE_S", "NE_E", "NE_FNC", "LE",
     "GE", "LT", "GT", "INDIRECT", "INDIRECT", "INDIRECT", "INDIRECT", "INDIRECT", "INDIRECT",
@@ -119,7 +119,7 @@ impl Vm {
     /// the one that failed — the opcode, then its operands with their values.
     pub(crate) fn print_statement(&self, st: &Statement) -> String {
         let mut out = String::new();
-        if let Some(name) = PR_OPNAMES.get(usize::from(st.op)) {
+        if let Some(name) = PR_OPNAMES.get(usize::from(st.op.code())) {
             out.push_str(name);
             out.push(' ');
             for _ in name.len()..10 {
@@ -128,12 +128,15 @@ impl Vm {
         }
         // The operands are global offsets, except the branch distances.
         let g = |x: i16| usize::from(x as u16);
-        let op = Op::from_u16(st.op);
-        if matches!(op, Some(Op::If | Op::Ifnot)) {
+        if matches!(st.op, Op::If | Op::Ifnot) {
             let _ = write!(out, "{}branch {}", self.global_string(g(st.a)), st.b);
-        } else if op == Some(Op::Goto) {
+        } else if st.op == Op::Goto {
             let _ = write!(out, "branch {}", st.a);
-        } else if st.op.wrapping_sub(Op::StoreF as u16) < 6 {
+        } else if matches!(
+            // `(unsigned)(s->op - OP_STORE_F) < 6`: the six STORE_*s.
+            st.op,
+            Op::StoreF | Op::StoreV | Op::StoreS | Op::StoreEnt | Op::StoreFld | Op::StoreFnc
+        ) {
             out.push_str(&self.global_string(g(st.a)));
             out.push_str(&self.global_string_no_contents(g(st.b)));
         } else {
@@ -203,10 +206,10 @@ mod tests {
 
     #[test]
     fn opnames_are_ids() {
-        assert_eq!(PR_OPNAMES[Op::DivF as usize], "DIV");
-        assert_eq!(PR_OPNAMES[Op::LoadV as usize], "INDIRECT");
-        assert_eq!(PR_OPNAMES[Op::Address as usize], "ADDRESS");
-        assert_eq!(PR_OPNAMES[Op::BitOr as usize], "BITOR");
+        assert_eq!(PR_OPNAMES[usize::from(Op::DivF.code())], "DIV");
+        assert_eq!(PR_OPNAMES[usize::from(Op::LoadV.code())], "INDIRECT");
+        assert_eq!(PR_OPNAMES[usize::from(Op::Address.code())], "ADDRESS");
+        assert_eq!(PR_OPNAMES[usize::from(Op::BitOr.code())], "BITOR");
     }
 
     #[test]

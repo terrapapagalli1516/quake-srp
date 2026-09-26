@@ -1532,13 +1532,13 @@ mod tests {
             "do_think",
             vec![
                 Statement {
-                    op: Op::StoreF as u16,
+                    op: Op::StoreF,
                     a: g_one as i16,
                     b: g_flag as i16,
                     c: 0,
                 },
                 Statement {
-                    op: Op::Done as u16,
+                    op: Op::Done,
                     a: 0,
                     b: 0,
                     c: 0,
@@ -1684,7 +1684,7 @@ mod tests {
         }
         let spawn = b.add_builtin("spawn", 14);
         let (g_spawn, g_fmove, g_fvel, g_ptr, g_nine, g_vel) = (40i16, 41i16, 42i16, 43i16, 44i16, 45i16);
-        let st = |op: Op, a: i16, b: i16, c: i16| Statement { op: op as u16, a, b, c };
+        let st = |op: Op, a: i16, b: i16, c: i16| Statement { op, a, b, c };
         let spawner = b.add_function(
             "spawner",
             vec![
@@ -1727,8 +1727,8 @@ mod tests {
         b.add_function(
             "StartFrame",
             vec![
-                Statement { op: Op::StoreF as u16, a: 33, b: 40, c: 0 },
-                Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+                Statement { op: Op::StoreF, a: 33, b: 40, c: 0 },
+                Statement { op: Op::Done, a: 0, b: 0, c: 0 },
             ],
         );
         let progs = Progs::parse(&b.build()).expect("parse");
@@ -1759,8 +1759,8 @@ mod tests {
             b.add_function(
                 name,
                 vec![
-                    Statement { op: Op::StoreF as u16, a: 33, b: dst, c: 0 },
-                    Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+                    Statement { op: Op::StoreF, a: 33, b: dst, c: 0 },
+                    Statement { op: Op::Done, a: 0, b: 0, c: 0 },
                 ],
             );
         }
@@ -1828,8 +1828,8 @@ mod tests {
         // nextthink = sv.time + 0.05 leaves `time` = its thinktime (SV_RunThink);
         // PreThink must still read sv.time.
         let record_time = vec![
-            Statement { op: Op::StoreF as u16, a: 33, b: 56, c: 0 }, // prethink_time = time
-            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            Statement { op: Op::StoreF, a: 33, b: 56, c: 0 }, // prethink_time = time
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ];
         let (img, c100, org) = player_progs_with_prethink(record_time);
         let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
@@ -1918,8 +1918,8 @@ mod tests {
             b.add_field(name, ty, ofs);
         }
         // bad_touch calls the function in global 40, which holds 0.
-        let call_null = Statement { op: Op::Call0 as u16, a: 40, b: 0, c: 0 };
-        let done = Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 };
+        let call_null = Statement { op: Op::Call0, a: 40, b: 0, c: 0 };
+        let done = Statement { op: Op::Done, a: 0, b: 0, c: 0 };
         let bad_touch = b.add_function("bad_touch", vec![call_null, done]);
         let mut server = Server::new(world_open_bsp(), Progs::parse(&b.build()).expect("parse")).expect("server");
 

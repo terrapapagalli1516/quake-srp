@@ -1201,14 +1201,12 @@ impl Vm {
             let c = st.c as usize;
 
             if self.trace {
-                let mn = Op::from_u16(st.op).map(|o| o.mnemonic()).unwrap_or("<bad>");
+                let mn = st.op.mnemonic();
                 self.output
                     .push_str(&format!("{s:5}: {mn} a={} b={} c={}\n", st.a, st.b, st.c));
             }
 
-            let op = Op::from_u16(st.op)
-                .ok_or_else(|| self.run_error(format!("bad opcode {}", st.op)))?;
-
+            let op = st.op;
             match op {
                 // ------------------------------------------------- arithmetic
                 Op::AddF => {
@@ -1453,21 +1451,21 @@ impl Vm {
                 // ----------------------------------------------------- branches
                 Op::Ifnot => {
                     if self.cell_i(a)? == 0 {
-                        s = jump(s, st.b, self).0;
-                        // jump returns the new s already accounting for the loop
-                        // s++ (we apply b-1 and let s++ re-add). Set 'first' so
-                        // the loop does NOT pre-increment again.
+                        s = self.jump(s, st.b);
+                        // jump returns the target itself (the C's `s += b - 1`
+                        // then `s++`); set `first` so the loop does NOT
+                        // pre-increment again.
                         first = true;
                     }
                 }
                 Op::If => {
                     if self.cell_i(a)? != 0 {
-                        s = jump(s, st.b, self).0;
+                        s = self.jump(s, st.b);
                         first = true;
                     }
                 }
                 Op::Goto => {
-                    s = jump(s, st.a, self).0;
+                    s = self.jump(s, st.a);
                     first = true;
                 }
 
@@ -1535,8 +1533,19 @@ impl Vm {
                 Op::State => {
                     self.do_state(st)?;
                 }
+
+                Op::Invalid(code) => return Err(self.run_error(format!("bad opcode {code}"))),
             }
         }
+    }
+
+    /// The statement a branch at `s` lands on. The C does `s += offset - 1`
+    /// and then `s++` at the top of the loop; this returns the target `s +
+    /// offset` itself (the caller sets `first` so the loop's pre-increment is
+    /// skipped). A target before statement 0 becomes one past the end, which
+    /// the next fetch reports as a clean `run_error`.
+    fn jump(&self, s: usize, offset: i16) -> usize {
+        s.checked_add_signed(isize::from(offset)).unwrap_or(self.progs.statements.len())
     }
 
     /// `OP_STATE`: set `self.nextthink = time + 0.1`, `self.frame = a`,
@@ -1566,21 +1575,6 @@ impl Vm {
     }
 }
 
-/// Compute the new statement index for a branch. The C does `s += offset - 1`
-/// and then `s++` at the top of the loop; we return the target index
-/// `s + offset` directly (callers set `first = true` so the loop's pre-increment
-/// is skipped). The target is range-checked against the statement table.
-fn jump(s: usize, offset: i16, vm: &Vm) -> (usize, ()) {
-    // s as i64 + offset. Negative offsets jump backward (loops).
-    let target = s as i64 + offset as i64;
-    if target < 0 {
-        // Will fail the bounds check on the next fetch; clamp to a sentinel that
-        // is guaranteed out of range so the loop reports a clean run_error.
-        return (vm.progs.statements.len(), ());
-    }
-    (target as usize, ())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1592,7 +1586,7 @@ mod tests {
 
     fn ser_stmt(s: &Statement) -> Vec<u8> {
         let mut v = Vec::new();
-        v.extend_from_slice(&s.op.to_le_bytes());
+        v.extend_from_slice(&s.op.code().to_le_bytes());
         v.extend_from_slice(&s.a.to_le_bytes());
         v.extend_from_slice(&s.b.to_le_bytes());
         v.extend_from_slice(&s.c.to_le_bytes());
@@ -1743,10 +1737,10 @@ mod tests {
         let g_sub = 13usize;
         let g_mul = 14usize;
         let stmts = vec![
-            Statement { op: Op::AddF as u16, a: g_a as i16, b: g_b as i16, c: g_add as i16 },
-            Statement { op: Op::SubF as u16, a: g_a as i16, b: g_b as i16, c: g_sub as i16 },
-            Statement { op: Op::MulF as u16, a: g_a as i16, b: g_b as i16, c: g_mul as i16 },
-            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            Statement { op: Op::AddF, a: g_a as i16, b: g_b as i16, c: g_add as i16 },
+            Statement { op: Op::SubF, a: g_a as i16, b: g_b as i16, c: g_sub as i16 },
+            Statement { op: Op::MulF, a: g_a as i16, b: g_b as i16, c: g_mul as i16 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ];
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();
@@ -1774,12 +1768,12 @@ mod tests {
         // 4: goto -4 (back to 0)    GOTO a=-4
         // 5: done                   DONE
         let stmts = vec![
-            Statement { op: Op::Le as u16, a: g_i as i16, b: g_five as i16, c: g_cmp as i16 },
-            Statement { op: Op::Ifnot as u16, a: g_cmp as i16, b: 4, c: 0 },
-            Statement { op: Op::AddF as u16, a: g_sum as i16, b: g_i as i16, c: g_sum as i16 },
-            Statement { op: Op::AddF as u16, a: g_i as i16, b: g_one as i16, c: g_i as i16 },
-            Statement { op: Op::Goto as u16, a: -4, b: 0, c: 0 },
-            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            Statement { op: Op::Le, a: g_i as i16, b: g_five as i16, c: g_cmp as i16 },
+            Statement { op: Op::Ifnot, a: g_cmp as i16, b: 4, c: 0 },
+            Statement { op: Op::AddF, a: g_sum as i16, b: g_i as i16, c: g_sum as i16 },
+            Statement { op: Op::AddF, a: g_i as i16, b: g_one as i16, c: g_i as i16 },
+            Statement { op: Op::Goto, a: -4, b: 0, c: 0 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ];
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();
@@ -1806,12 +1800,12 @@ mod tests {
         let dbl_first = b.statements.len() as i32;
         let dbl_name = b.intern("dbl");
         b.statements.push(Statement {
-            op: Op::AddF as u16,
+            op: Op::AddF,
             a: RESERVED_OFS as i16,
             b: RESERVED_OFS as i16,
             c: OFS_RETURN as i16,
         });
-        b.statements.push(Statement { op: Op::Done as u16, a: OFS_RETURN as i16, b: 0, c: 0 });
+        b.statements.push(Statement { op: Op::Done, a: OFS_RETURN as i16, b: 0, c: 0 });
         b.functions.push(Function {
             first_statement: dbl_first,
             parm_start: RESERVED_OFS as i32,
@@ -1833,26 +1827,26 @@ mod tests {
         let main_name = b.intern("main");
         b.statements.push(Statement {
             // STORE_F g_input -> OFS_PARM0
-            op: Op::StoreF as u16,
+            op: Op::StoreF,
             a: g_input as i16,
             b: OFS_PARM0 as i16,
             c: 0,
         });
         b.statements.push(Statement {
             // CALL1 with function operand at g_func
-            op: Op::Call1 as u16,
+            op: Op::Call1,
             a: g_func as i16,
             b: 0,
             c: 0,
         });
         b.statements.push(Statement {
             // STORE_F OFS_RETURN -> g_result
-            op: Op::StoreF as u16,
+            op: Op::StoreF,
             a: OFS_RETURN as i16,
             b: g_result as i16,
             c: 0,
         });
-        b.statements.push(Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 });
+        b.statements.push(Statement { op: Op::Done, a: 0, b: 0, c: 0 });
         b.functions.push(Function {
             first_statement: main_first,
             parm_start: RESERVED_OFS as i32,
@@ -1927,10 +1921,10 @@ mod tests {
         b.entityfields = 4;
         let (g_ent, g_field, g_ptr, g_val, g_loaded) = (10usize, 11usize, 12usize, 13usize, 14usize);
         let stmts = vec![
-            Statement { op: Op::Address as u16, a: g_ent as i16, b: g_field as i16, c: g_ptr as i16 },
-            Statement { op: Op::StorepF as u16, a: g_val as i16, b: g_ptr as i16, c: 0 },
-            Statement { op: Op::LoadF as u16, a: g_ent as i16, b: g_field as i16, c: g_loaded as i16 },
-            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            Statement { op: Op::Address, a: g_ent as i16, b: g_field as i16, c: g_ptr as i16 },
+            Statement { op: Op::StorepF, a: g_val as i16, b: g_ptr as i16, c: 0 },
+            Statement { op: Op::LoadF, a: g_ent as i16, b: g_field as i16, c: g_loaded as i16 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ];
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();
@@ -1963,7 +1957,7 @@ mod tests {
         let mut b = Builder::new();
         b.entityfields = 3;
         // No statements needed; just exercise the edict runtime.
-        let _main = add_function(&mut b, "main", vec![Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 }]);
+        let _main = add_function(&mut b, "main", vec![Statement { op: Op::Done, a: 0, b: 0, c: 0 }]);
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
 
@@ -1986,7 +1980,7 @@ mod tests {
     fn test_runaway_loop_errors_not_panics() {
         // goto self forever -> runaway loop guard fires as an Err.
         let mut b = Builder::new();
-        let stmts = vec![Statement { op: Op::Goto as u16, a: 0, b: 0, c: 0 }];
+        let stmts = vec![Statement { op: Op::Goto, a: 0, b: 0, c: 0 }];
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
@@ -2005,8 +1999,8 @@ mod tests {
         let (g, f, file) = (b.intern("g"), b.intern("f"), b.intern("demo.qc"));
         b.globaldefs.push(Def { type_: EType::Function as u16, ofs: 30, s_name: g });
         b.globaldefs.push(Def { type_: EType::Function as u16, ofs: 31, s_name: f });
-        let call = |a| Statement { op: Op::Call0 as u16, a, b: 0, c: 0 };
-        let done = Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 };
+        let call = |a| Statement { op: Op::Call0, a, b: 0, c: 0 };
+        let done = Statement { op: Op::Done, a: 0, b: 0, c: 0 };
         let main = add_function(&mut b, "main", vec![call(30), done]);
         let helper = add_function(&mut b, "helper", vec![call(31), done]);
         let ok = add_function(&mut b, "ok", vec![done]);
@@ -2038,12 +2032,28 @@ mod tests {
     fn test_bad_opcode_errors() {
         let mut b = Builder::new();
         // opcode 9999 is invalid.
-        let stmts = vec![Statement { op: 9999, a: 0, b: 0, c: 0 }];
+        let stmts = vec![Statement { op: Op::Invalid(9999), a: 0, b: 0, c: 0 }];
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
         let err = vm.execute(main).unwrap_err();
         assert!(matches!(err, QError::Program(e) if e.message == "bad opcode 9999"));
+    }
+
+    /// The opcodes are decoded at load, but a bad one faults only when it
+    /// runs (id's `default:` arm): a program that jumps over it is fine.
+    #[test]
+    fn a_bad_opcode_that_never_runs_is_harmless() {
+        let mut b = Builder::new();
+        let stmts = vec![
+            Statement { op: Op::Goto, a: 2, b: 0, c: 0 },
+            Statement { op: Op::Invalid(9999), a: 0, b: 0, c: 0 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
+        ];
+        let main = add_function(&mut b, "main", stmts);
+        let mut vm = Vm::load(&b.build()).expect("a bad opcode loads");
+        assert_eq!(vm.progs.statements[1].op, Op::Invalid(9999));
+        vm.execute(main).expect("jumped over");
     }
 
     #[test]
@@ -2053,8 +2063,8 @@ mod tests {
         b.entityfields = 2;
         let (g_ptr, g_val) = (10usize, 11usize);
         let stmts = vec![
-            Statement { op: Op::StorepF as u16, a: g_val as i16, b: g_ptr as i16, c: 0 },
-            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            Statement { op: Op::StorepF, a: g_val as i16, b: g_ptr as i16, c: 0 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ];
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();
@@ -2067,7 +2077,7 @@ mod tests {
     #[test]
     fn test_string_intern_and_get() {
         let mut b = Builder::new();
-        let _ = add_function(&mut b, "main", vec![Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 }]);
+        let _ = add_function(&mut b, "main", vec![Statement { op: Op::Done, a: 0, b: 0, c: 0 }]);
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
         let s = vm.intern("hello");
@@ -2082,8 +2092,8 @@ mod tests {
         let mut b = Builder::new();
         let (g_a, g_b, g_c) = (10usize, 11usize, 12usize);
         let stmts = vec![
-            Statement { op: Op::EqS as u16, a: g_a as i16, b: g_b as i16, c: g_c as i16 },
-            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            Statement { op: Op::EqS, a: g_a as i16, b: g_b as i16, c: g_c as i16 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ];
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();

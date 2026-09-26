@@ -136,7 +136,7 @@ mod tests {
         use crate::server::testutil::{floor_bsp, player_progs_with_prethink, prime_player_globals};
         use crate::server::Server;
         // PlayerPreThink calls the function in global 57, which holds 0.
-        let call_null = Statement { op: Op::Call0 as u16, a: 57, b: 0, c: 0 };
+        let call_null = Statement { op: Op::Call0, a: 57, b: 0, c: 0 };
         let (img, g_const100, g_origin) = player_progs_with_prethink(vec![call_null]);
         let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
         prime_player_globals(&mut server, g_const100, g_origin);

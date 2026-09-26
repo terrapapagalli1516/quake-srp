@@ -539,8 +539,8 @@ mod tests {
         // main: CALLn at g_func (=60), then DONE returning OFS_RETURN unchanged.
         let g_func = 60i16;
         let stmts = [
-            Statement { op: call_op as u16, a: g_func, b: 0, c: 0 },
-            Statement { op: Op::Done as u16, a: OFS_RETURN as i16, b: 0, c: 0 },
+            Statement { op: call_op, a: g_func, b: 0, c: 0 },
+            Statement { op: Op::Done, a: OFS_RETURN as i16, b: 0, c: 0 },
         ];
         let main = Function {
             first_statement: 0,
@@ -570,7 +570,7 @@ mod tests {
 
         let ser_stmt = |s: &Statement| {
             let mut v = Vec::new();
-            v.extend_from_slice(&s.op.to_le_bytes());
+            v.extend_from_slice(&s.op.code().to_le_bytes());
             v.extend_from_slice(&s.a.to_le_bytes());
             v.extend_from_slice(&s.b.to_le_bytes());
             v.extend_from_slice(&s.c.to_le_bytes());

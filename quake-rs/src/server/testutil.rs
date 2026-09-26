@@ -16,7 +16,7 @@ const HEADER_SIZE: usize = 60;
 
 fn ser_stmt(s: &Statement) -> Vec<u8> {
     let mut v = Vec::new();
-    v.extend_from_slice(&s.op.to_le_bytes());
+    v.extend_from_slice(&s.op.code().to_le_bytes());
     v.extend_from_slice(&s.a.to_le_bytes());
     v.extend_from_slice(&s.b.to_le_bytes());
     v.extend_from_slice(&s.c.to_le_bytes());
@@ -317,13 +317,13 @@ pub(crate) fn marker_progs() -> (Vec<u8>, usize, usize) {
         "marker",
         vec![
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: g_one as i16,
                 b: g_flag as i16,
                 c: 0,
             },
             Statement {
-                op: Op::Done as u16,
+                op: Op::Done,
                 a: 0,
                 b: 0,
                 c: 0,
@@ -377,13 +377,13 @@ pub(crate) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
         "do_touch",
         vec![
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: g_one as i16,
                 b: g_flag as i16,
                 c: 0,
             },
             Statement {
-                op: Op::Done as u16,
+                op: Op::Done,
                 a: 0,
                 b: 0,
                 c: 0,
@@ -471,7 +471,7 @@ pub(crate) fn floor_bsp() -> Bsp {
 /// Returns `(image, g_const100_ofs, g_origin_vec_ofs)` so the test can place
 /// the `100.0` float and the `(0,0,40)` vector the spawn function stores.
 pub(crate) fn player_progs() -> (Vec<u8>, usize, usize) {
-    player_progs_with_prethink(vec![Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 }])
+    player_progs_with_prethink(vec![Statement { op: Op::Done, a: 0, b: 0, c: 0 }])
 }
 
 /// [`player_progs`] with `prethink` as the body of `PlayerPreThink` (the global
@@ -530,7 +530,7 @@ pub(crate) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, 
 
     // Empty system functions (DONE only).
     let done = || Statement {
-        op: Op::Done as u16,
+        op: Op::Done,
         a: 0,
         b: 0,
         c: 0,
@@ -556,28 +556,28 @@ pub(crate) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, 
         vec![
             // ptr = ADDRESS(self, f_health)
             Statement {
-                op: Op::Address as u16,
+                op: Op::Address,
                 a: 31, // self entity global
                 b: g_fhealth as i16,
                 c: g_ptr as i16,
             },
             // *ptr = const100
             Statement {
-                op: Op::StorepF as u16,
+                op: Op::StorepF,
                 a: g_const100 as i16,
                 b: g_ptr as i16,
                 c: 0,
             },
             // ptr = ADDRESS(self, f_origin)
             Statement {
-                op: Op::Address as u16,
+                op: Op::Address,
                 a: 31,
                 b: g_forigin as i16,
                 c: g_ptr as i16,
             },
             // *ptr = origin_const (vector)
             Statement {
-                op: Op::StorepV as u16,
+                op: Op::StorepV,
                 a: g_origin as i16,
                 b: g_ptr as i16,
                 c: 0,
@@ -684,7 +684,7 @@ pub(crate) fn attack_progs() -> (Vec<u8>, usize) {
 
     // Empty connect/frame system functions.
     let done = || Statement {
-        op: Op::Done as u16,
+        op: Op::Done,
         a: 0,
         b: 0,
         c: 0,
@@ -716,55 +716,55 @@ pub(crate) fn attack_progs() -> (Vec<u8>, usize) {
         "PlayerPostThink",
         vec![
             Statement {
-                op: Op::LoadF as u16,
+                op: Op::LoadF,
                 a: SELF as i16,
                 b: G_FBUTTON0 as i16,
                 c: G_BTN as i16,
             },
             Statement {
-                op: Op::Ifnot as u16,
+                op: Op::Ifnot,
                 a: G_BTN as i16,
                 b: 8,
                 c: 0,
             },
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: G_ONE as i16,
                 b: G_FIRED as i16,
                 c: 0,
             },
             Statement {
-                op: Op::StoreEnt as u16,
+                op: Op::StoreEnt,
                 a: SELF as i16,
                 b: parm0,
                 c: 0,
             },
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: G_CHAN as i16,
                 b: parm1,
                 c: 0,
             },
             Statement {
-                op: Op::StoreS as u16,
+                op: Op::StoreS,
                 a: G_SAMPLE as i16,
                 b: parm2,
                 c: 0,
             },
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: G_VOL as i16,
                 b: parm3,
                 c: 0,
             },
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: G_ATTEN as i16,
                 b: parm4,
                 c: 0,
             },
             Statement {
-                op: Op::Call5 as u16,
+                op: Op::Call5,
                 a: G_SNDFUNC as i16,
                 b: 0,
                 c: 0,
@@ -840,7 +840,7 @@ pub(crate) fn changelevel_progs() -> (Vec<u8>, usize, usize) {
     b.add_field("health", EV_FLOAT, 23);
 
     let done = || Statement {
-        op: Op::Done as u16,
+        op: Op::Done,
         a: 0,
         b: 0,
         c: 0,
@@ -850,7 +850,7 @@ pub(crate) fn changelevel_progs() -> (Vec<u8>, usize, usize) {
         "SetChangeParms",
         vec![
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: g_const as i16,
                 b: 70, // parm1 global ofs
                 c: 0,
@@ -864,7 +864,7 @@ pub(crate) fn changelevel_progs() -> (Vec<u8>, usize, usize) {
         "PutClientInServer",
         vec![
             Statement {
-                op: Op::StoreF as u16,
+                op: Op::StoreF,
                 a: 70, // parm1 global ofs
                 b: g_decoded as i16,
                 c: 0,

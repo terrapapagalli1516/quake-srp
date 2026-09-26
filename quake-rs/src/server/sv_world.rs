@@ -541,8 +541,8 @@ mod tests {
         let touch_fn = b.add_function(
             "record_time",
             vec![
-                Statement { op: Op::StoreF as u16, a: g_time as i16, b: g_flag as i16, c: 0 },
-                Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+                Statement { op: Op::StoreF, a: g_time as i16, b: g_flag as i16, c: 0 },
+                Statement { op: Op::Done, a: 0, b: 0, c: 0 },
             ],
         );
 

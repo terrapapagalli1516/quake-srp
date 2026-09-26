@@ -85,137 +85,103 @@ impl EType {
     }
 }
 
-/// A bytecode instruction (`enum` in `pr_comp.h`), in exact ordinal order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum Op {
-    Done = 0,
-    MulF,
-    MulV,
-    MulFV,
-    MulVF,
-    DivF,
-    AddF,
-    AddV,
-    SubF,
-    SubV,
-    EqF,
-    EqV,
-    EqS,
-    EqE,
-    EqFnc,
-    NeF,
-    NeV,
-    NeS,
-    NeE,
-    NeFnc,
-    Le,
-    Ge,
-    Lt,
-    Gt,
-    LoadF,
-    LoadV,
-    LoadS,
-    LoadEnt,
-    LoadFld,
-    LoadFnc,
-    Address,
-    StoreF,
-    StoreV,
-    StoreS,
-    StoreEnt,
-    StoreFld,
-    StoreFnc,
-    StorepF,
-    StorepV,
-    StorepS,
-    StorepEnt,
-    StorepFld,
-    StorepFnc,
-    Return,
-    NotF,
-    NotV,
-    NotS,
-    NotEnt,
-    NotFnc,
-    If,
-    Ifnot,
-    Call0,
-    Call1,
-    Call2,
-    Call3,
-    Call4,
-    Call5,
-    Call6,
-    Call7,
-    Call8,
-    State,
-    Goto,
-    And,
-    Or,
-    BitAnd,
-    BitOr,
+/// Declares [`Op`] from one list of `pr_comp.h`'s opcodes, in their ordinal
+/// order, each with its disassembler mnemonic: the enum, the decode table
+/// ([`Op::from_code`]), the mnemonics ([`Op::mnemonic`]) and the encode
+/// ([`Op::code`]) all come from the same list, so they cannot disagree.
+macro_rules! opcodes {
+    ($($op:ident $mnemonic:literal),* $(,)?) => {
+        /// A bytecode instruction (the opcode `enum` in `pr_comp.h`), decoded
+        /// once, when the progs is loaded ([`Progs::parse`]), so the
+        /// interpreter matches on it directly.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Op {
+            $($op,)*
+            /// A number no `pr_comp.h` opcode has. It loads, and faults only
+            /// if it runs, as in id's `PR_ExecuteProgram` (its `default:`
+            /// arm, `PR_RunError ("Bad opcode %i")`).
+            Invalid(u16),
+        }
+
+        /// A fieldless twin of [`Op`]'s named opcodes: its discriminants count
+        /// from 0 in declaration order, which makes them the `pr_comp.h`
+        /// ordinals ([`Op::code`]).
+        #[derive(Clone, Copy)]
+        #[repr(u16)]
+        enum Ordinal {
+            $($op,)*
+        }
+
+        /// The named opcodes by ordinal: `OP_TABLE[n]` is opcode `n`.
+        const OP_TABLE: &[Op] = &[$(Op::$op,)*];
+
+        /// The disassembler's mnemonic of each named opcode, by ordinal.
+        const OP_NAMES: &[&str] = &[$($mnemonic,)*];
+
+        impl Op {
+            /// The opcode's number in a `dstatement_t` (its `pr_comp.h` ordinal).
+            pub const fn code(self) -> u16 {
+                match self {
+                    $(Op::$op => Ordinal::$op as u16,)*
+                    Op::Invalid(code) => code,
+                }
+            }
+        }
+    };
 }
 
+opcodes!(
+    Done "DONE", MulF "MUL_F", MulV "MUL_V", MulFV "MUL_FV", MulVF "MUL_VF", DivF "DIV_F",
+    AddF "ADD_F", AddV "ADD_V", SubF "SUB_F", SubV "SUB_V",
+    EqF "EQ_F", EqV "EQ_V", EqS "EQ_S", EqE "EQ_E", EqFnc "EQ_FNC",
+    NeF "NE_F", NeV "NE_V", NeS "NE_S", NeE "NE_E", NeFnc "NE_FNC",
+    Le "LE", Ge "GE", Lt "LT", Gt "GT",
+    LoadF "LOAD_F", LoadV "LOAD_V", LoadS "LOAD_S", LoadEnt "LOAD_ENT", LoadFld "LOAD_FLD",
+    LoadFnc "LOAD_FNC", Address "ADDRESS",
+    StoreF "STORE_F", StoreV "STORE_V", StoreS "STORE_S", StoreEnt "STORE_ENT",
+    StoreFld "STORE_FLD", StoreFnc "STORE_FNC",
+    StorepF "STOREP_F", StorepV "STOREP_V", StorepS "STOREP_S", StorepEnt "STOREP_ENT",
+    StorepFld "STOREP_FLD", StorepFnc "STOREP_FNC",
+    Return "RETURN", NotF "NOT_F", NotV "NOT_V", NotS "NOT_S", NotEnt "NOT_ENT", NotFnc "NOT_FNC",
+    If "IF", Ifnot "IFNOT",
+    Call0 "CALL0", Call1 "CALL1", Call2 "CALL2", Call3 "CALL3", Call4 "CALL4", Call5 "CALL5",
+    Call6 "CALL6", Call7 "CALL7", Call8 "CALL8",
+    State "STATE", Goto "GOTO", And "AND", Or "OR", BitAnd "BITAND", BitOr "BITOR",
+);
+
 /// Highest valid opcode ordinal (`OP_BITOR`).
-pub const OP_MAX: u16 = Op::BitOr as u16;
+pub const OP_MAX: u16 = Op::BitOr.code();
 
 impl Op {
-    /// Decode an opcode ordinal, or `None` if out of range.
-    pub fn from_u16(v: u16) -> Option<Op> {
-        if v > OP_MAX {
-            return None;
-        }
-        // Safe: `Op` is `#[repr(u16)]` with contiguous discriminants 0..=OP_MAX,
-        // and we just bounds-checked v — but we avoid `unsafe`, so map explicitly.
-        Some(OP_TABLE[v as usize])
+    /// Decode an opcode number: the named opcode, or [`Op::Invalid`].
+    pub fn from_code(code: u16) -> Op {
+        OP_TABLE.get(usize::from(code)).copied().unwrap_or(Op::Invalid(code))
     }
 
-    /// Mnemonic used by the disassembler.
+    /// Mnemonic used by the disassembler (`<bad op>` for an invalid one).
     pub fn mnemonic(self) -> &'static str {
-        OP_NAMES[self as usize]
+        match self {
+            Op::Invalid(_) => "<bad op>",
+            op => OP_NAMES.get(usize::from(op.code())).copied().unwrap_or("<bad op>"),
+        }
     }
 
     /// Number of call arguments for an `OP_CALLn`, else `None`.
     pub fn call_argc(self) -> Option<usize> {
-        let v = self as u16;
-        if (Op::Call0 as u16..=Op::Call8 as u16).contains(&v) {
-            Some((v - Op::Call0 as u16) as usize)
-        } else {
-            None
+        match self {
+            Op::Call0 | Op::Call1 | Op::Call2 | Op::Call3 | Op::Call4 | Op::Call5 | Op::Call6
+            | Op::Call7 | Op::Call8 => Some(usize::from(self.code() - Op::Call0.code())),
+            _ => None,
         }
     }
 }
 
-// A contiguous table so `from_u16` needs no `unsafe` transmute.
-const OP_TABLE: [Op; (OP_MAX + 1) as usize] = [
-    Op::Done, Op::MulF, Op::MulV, Op::MulFV, Op::MulVF, Op::DivF, Op::AddF, Op::AddV,
-    Op::SubF, Op::SubV, Op::EqF, Op::EqV, Op::EqS, Op::EqE, Op::EqFnc, Op::NeF, Op::NeV,
-    Op::NeS, Op::NeE, Op::NeFnc, Op::Le, Op::Ge, Op::Lt, Op::Gt, Op::LoadF, Op::LoadV,
-    Op::LoadS, Op::LoadEnt, Op::LoadFld, Op::LoadFnc, Op::Address, Op::StoreF, Op::StoreV,
-    Op::StoreS, Op::StoreEnt, Op::StoreFld, Op::StoreFnc, Op::StorepF, Op::StorepV,
-    Op::StorepS, Op::StorepEnt, Op::StorepFld, Op::StorepFnc, Op::Return, Op::NotF,
-    Op::NotV, Op::NotS, Op::NotEnt, Op::NotFnc, Op::If, Op::Ifnot, Op::Call0, Op::Call1,
-    Op::Call2, Op::Call3, Op::Call4, Op::Call5, Op::Call6, Op::Call7, Op::Call8,
-    Op::State, Op::Goto, Op::And, Op::Or, Op::BitAnd, Op::BitOr,
-];
-
-const OP_NAMES: [&str; (OP_MAX + 1) as usize] = [
-    "DONE", "MUL_F", "MUL_V", "MUL_FV", "MUL_VF", "DIV_F", "ADD_F", "ADD_V", "SUB_F",
-    "SUB_V", "EQ_F", "EQ_V", "EQ_S", "EQ_E", "EQ_FNC", "NE_F", "NE_V", "NE_S", "NE_E",
-    "NE_FNC", "LE", "GE", "LT", "GT", "LOAD_F", "LOAD_V", "LOAD_S", "LOAD_ENT",
-    "LOAD_FLD", "LOAD_FNC", "ADDRESS", "STORE_F", "STORE_V", "STORE_S", "STORE_ENT",
-    "STORE_FLD", "STORE_FNC", "STOREP_F", "STOREP_V", "STOREP_S", "STOREP_ENT",
-    "STOREP_FLD", "STOREP_FNC", "RETURN", "NOT_F", "NOT_V", "NOT_S", "NOT_ENT",
-    "NOT_FNC", "IF", "IFNOT", "CALL0", "CALL1", "CALL2", "CALL3", "CALL4", "CALL5",
-    "CALL6", "CALL7", "CALL8", "STATE", "GOTO", "AND", "OR", "BITAND", "BITOR",
-];
-
-/// One bytecode statement (`dstatement_t`, 8 bytes). `a`/`b`/`c` are global slot
-/// offsets for most ops, and signed jump offsets for `IF`/`IFNOT`/`GOTO`.
+/// One bytecode statement (`dstatement_t`, 8 bytes on disk), its opcode
+/// decoded at load. `a`/`b`/`c` are global slot offsets for most ops, and
+/// signed jump offsets for `IF`/`IFNOT`/`GOTO`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Statement {
-    pub op: u16,
+    pub op: Op,
     pub a: i16,
     pub b: i16,
     pub c: i16,
@@ -349,7 +315,7 @@ impl Progs {
         let mut statements = Vec::with_capacity(n.min(bytes.len() / STATEMENT_SIZE));
         for _ in 0..n {
             statements.push(Statement {
-                op: r.u16()?,
+                op: Op::from_code(r.u16()?),
                 a: r.i16()?,
                 b: r.i16()?,
                 c: r.i16()?,
@@ -507,11 +473,9 @@ impl Progs {
         let mut s = start;
         while s < self.statements.len() {
             let st = self.statements[s];
-            let mn = Op::from_u16(st.op)
-                .map(|o| o.mnemonic())
-                .unwrap_or("<bad op>");
+            let mn = st.op.mnemonic();
             let _ = writeln!(out, "  {s:5}: {mn:<10} a={} b={} c={}", st.a, st.b, st.c);
-            if matches!(Op::from_u16(st.op), Some(Op::Done) | Some(Op::Return)) {
+            if matches!(st.op, Op::Done | Op::Return) {
                 break;
             }
             s += 1;
@@ -574,20 +538,24 @@ mod tests {
     fn opcode_table_is_consistent() {
         // Round-trip every opcode through its ordinal.
         for v in 0..=OP_MAX {
-            let op = Op::from_u16(v).expect("valid op");
-            assert_eq!(op as u16, v);
+            let op = Op::from_code(v);
+            assert!(!matches!(op, Op::Invalid(_)), "opcode {v} is named");
+            assert_eq!(op.code(), v);
         }
-        assert!(Op::from_u16(OP_MAX + 1).is_none());
+        assert_eq!(Op::from_code(OP_MAX + 1), Op::Invalid(OP_MAX + 1));
+        assert_eq!(Op::Invalid(9999).code(), 9999);
+        assert_eq!(Op::Invalid(9999).mnemonic(), "<bad op>");
+        assert_eq!(Op::DivF.mnemonic(), "DIV_F");
         // Spot-check a few well-known ordinals against pr_comp.h.
-        assert_eq!(Op::Done as u16, 0);
-        assert_eq!(Op::AddF as u16, 6);
-        assert_eq!(Op::Le as u16, 20);
-        assert_eq!(Op::Address as u16, 30);
-        assert_eq!(Op::Return as u16, 43);
-        assert_eq!(Op::If as u16, 49);
-        assert_eq!(Op::Call0 as u16, 51);
-        assert_eq!(Op::Goto as u16, 61);
-        assert_eq!(Op::BitOr as u16, 65);
+        assert_eq!(Op::Done.code(), 0);
+        assert_eq!(Op::AddF.code(), 6);
+        assert_eq!(Op::Le.code(), 20);
+        assert_eq!(Op::Address.code(), 30);
+        assert_eq!(Op::Return.code(), 43);
+        assert_eq!(Op::If.code(), 49);
+        assert_eq!(Op::Call0.code(), 51);
+        assert_eq!(Op::Goto.code(), 61);
+        assert_eq!(Op::BitOr.code(), 65);
         assert_eq!(Op::Call3.call_argc(), Some(3));
         assert_eq!(Op::AddF.call_argc(), None);
     }
@@ -625,8 +593,8 @@ mod tests {
         };
 
         let statements = [
-            Statement { op: Op::AddF as u16, a: 28, b: 29, c: 30 },
-            Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 },
+            Statement { op: Op::AddF, a: 28, b: 29, c: 30 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ];
         // a float global "x" at offset 28 (type 2 == ev_float)
         let globaldefs = [Def { type_: 2, ofs: 28, s_name: name_x }];
@@ -637,7 +605,7 @@ mod tests {
         // layout: header, then sections in order
         fn ser_stmt(s: &Statement) -> Vec<u8> {
             let mut v = Vec::new();
-            v.extend_from_slice(&s.op.to_le_bytes());
+            v.extend_from_slice(&s.op.code().to_le_bytes());
             v.extend_from_slice(&s.a.to_le_bytes());
             v.extend_from_slice(&s.b.to_le_bytes());
             v.extend_from_slice(&s.c.to_le_bytes());
@@ -695,7 +663,7 @@ mod tests {
         let p = Progs::parse(&img).expect("parse");
         assert_eq!(p.version, PROG_VERSION);
         assert_eq!(p.statements.len(), 2);
-        assert_eq!(p.statements[0].op, Op::AddF as u16);
+        assert_eq!(p.statements[0].op, Op::AddF);
         assert_eq!(p.functions.len(), 2);
         assert_eq!(p.find_function("main"), Some(1));
         assert_eq!(p.string(p.functions[1].s_name), "main");
