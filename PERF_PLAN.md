@@ -61,7 +61,7 @@ Elsewhere, from the branch reports below:
 | B2 | palette shift as `V_UpdatePalette`'s ramps | done (`quake/perf-b`), id's truncation |
 | B3 | keep the frame buffers | done (`quake/perf-b`) |
 | B4 | HUD, menu and console blits by rows | done (`quake/perf-b`) |
-| B5 | the 8-bit framebuffer | **open** (what it would take: B5 below) |
+| B5 | the 8-bit framebuffer | done (`q26/present`): frames are palette indices, the palette applied at presentation, WebGL2 the DAC (B5 below) |
 | B6 | present from wasm memory | done (`quake/host`); `?lowlatency` opt-in |
 | C1 | cull entities as the server does | done (`quake/sim`); also fixed CENSUS L22 |
 | C2 | alias models through `D_PolysetDraw` | done (`quake/fid1`, as a fidelity fix) |
@@ -72,7 +72,7 @@ Elsewhere, from the branch reports below:
 | D3 | the pak as one static slice | done (`quake/host`) |
 | D4 | compressed, streamed delivery | compression and streaming done (`quake/host`); **open:** the pak split out of the wasm, `wasm-opt` |
 
-**Still open or unmeasured:** B5; D4's pak split and `wasm-opt`; C4 (not worth it now);
+**Still open or unmeasured:** D4's pak split and `wasm-opt`; C4 (not worth it now);
 real GPU browsers, Firefox, Safari, phones and a real 120/144 Hz display (§9); the page's
 sound cost (the bench runs with audio locked).
 
@@ -331,10 +331,10 @@ Both counts come from scratch-instrumented builds, not from the committed harnes
 | entity field access | direct `entvars_t` struct members | `ent_get_*(ent, "name")`: a `HashMap<String>` SipHash lookup per field per entity (D2 done: resolved once per progs) | about 3% of the frame on e1m3; most of sim |
 
 The port column is the baseline's. Every row has since been done the C's way (the item
-table at the top) except three: the framebuffer is still RGB, with the palette shift and
-gamma applied once in the pack (B5 open); the surface cache keeps a block per face and
+table at the top) except two: the surface cache keeps a block per face and
 mip level with no fixed-size pool like id's (its resident size is measured under A5);
-and the external boxes still bypass it (C4, now 2 faces a frame). The underwater view renders into id's 320×200
+and the external boxes still bypass it (C4, now 2 faces a frame). The framebuffer is
+8-bit since B5, the palette shift and gamma applied to the palette. The underwater view renders into id's 320×200
 warp buffer since `quake/polish`, and the warp keeps its tables since `quake/polish3`.
 
 ---
@@ -737,6 +737,18 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
     the palette, so they should not move. Frame fills, the view→screen copy and the warp move a
     third of the bytes. Do it after A1 (it rewrites the world writers anyway), as one mechanical
     sweep behind a byte-identity check of the goldens and the bench hashes.
+- **Done** (branch `q26/present`, 2026-09-26), as described: `render::Image` is
+  `Image<u8>`, palette indices, and every writer stores the index it already had
+  (the 2-D layer and `Hud` no longer take the palette). `FramePalette` is
+  `V_UpdatePalette`'s shifted, gamma'd palette; `pack_rgba` maps a pixel through it
+  with one 4-byte store (the 2-D canvas's path, quaketool's PPMs and hashes). The
+  colours with no index (a skinless model's debug colour, the linear shading of
+  colormap-less synthetic scenes, textureless test faces) take the nearest palette
+  entry. Byte-identical: goldens, and `quaketool play --hash-every` over 28 runs
+  including the Quad's shift. Native timedemo demo1 1280×800 on one thread: 285–300
+  → 346–356 fps. In the page the frame goes to WebGL2 as an `R8UI` texture plus a
+  256×1 palette (web/PLATFORM.md, "Presentation"): demo1 at 2560×1440 on 8 threads,
+  page frame 10.6 → 3.4 ms on a desktop GPU.
 
 **B6. Present path in the page.** *(neutral; lands with D because it touches index.html)*
 

@@ -12,8 +12,8 @@ There are three pieces:
 | file | runs in | what it does |
 |---|---|---|
 | `quake-wasm/` → `quake.wasm` | a Web Worker | the game: `sys::run`, a host frame per tick (`quake-wasm/src/sys.rs`); the records it reads and writes (`proto.rs`) |
-| `web/wasi.js` | the same Worker | the WASI host: stdin from a shared ring, stdout into shared frame slots and one message per turn, an in-memory file system, the clocks |
-| `web/index.html` | the page | the canvas, keyboard and mouse, Web Audio, IndexedDB, and the display's refresh, which it hands the program as ticks |
+| `web/wasi.js` | the same Worker | the WASI host: stdin from a shared ring, stdout into shared frame slots (or, the threads build, the frames left where they lie in the program's shared memory) and one message per turn, an in-memory file system, the clocks |
+| `web/index.html` | the page | the canvas and the display's DAC (WebGL2, else a 2-D canvas), keyboard and mouse, Web Audio, IndexedDB, and the display's refresh, which it hands the program as ticks |
 
 The rest of this file is the design, the protocol, what it measured against
 the page it replaced (the wasm cdylib with ~84 `#[no_mangle]` exports the
@@ -31,14 +31,18 @@ keydown/mouse ──KEY/MOUSE records──▶ ring ─▶ fd_read(0) ─▶ Key
 requestAnimationFrame
   TICK(seq, dt) ───────────────────▶ ring ─▶ fd_read(0) returns the tick
   spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime, the
-                                             client frame, menu, console, blend, pack
-                                             fd_write(1): FRAME ─▶ pixels copied into a
-                                                                   free frame slot
+                                             client frame, menu, console: an 8-bit
+                                             frame and its palette (V_UpdatePalette)
+                                             fd_write(1): FRAME ─▶ copied into a free
+                                                                   frame slot, or
+                                                          FRAME_AT ─▶ where it lies in
+                                                                   shared memory
                                                           sounds, LISTENER, STATE ─▶ kept
                                                           SYNC ─▶ ACK = seq, notify;
                                                                   post the kept records
-  copy the newest slot into the
-  canvas's ImageData, putImageData
+  the newest frame to the GPU (indices
+  + palette, WebGL2) and drawn, or its
+  RGBA through putImageData
 message event: sounds → Web Audio,
   STATE → the page's UI, REPLY → calls
 ```
@@ -91,6 +95,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 6 | AUDIO_READY | `ready u8` |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
+| 9 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
 
 A record whose payload is shorter than its kind's reads the missing fields as
 zeros, and an unknown kind is skipped, so either side can grow a record.
@@ -99,7 +104,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 
 | kind | record | payload |
 |---|---|---|
-| 1 | FRAME | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 ×3`, the pixels |
+| 1 | FRAME | `w u16`, `h u16`, `format u8` (0 RGBA8, 1 INDEXED8), `0 ×3`, then for INDEXED8 the palette (256 × RGBA), then the pixels (4 bytes each, or one palette index) |
 | 2 | SYNC | `seq u32` (last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
 | 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo), `menu_screen i32` |
 | 4 | SAMPLE | `id u32`, a RIFF/WAV (each distinct sample once, by content) |
@@ -112,6 +117,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 11 | LOCAL_SOUND | `id u32`: `S_LocalSound` (menu clicks) and `play` |
 | 12 | REPLY | `id u32`, `value f64`, then UTF-8 text |
 | 13 | BENCH | `f64` per value (`--features bench`; names from the `bench_names` call) |
+| 16 | FRAME_AT | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, ring slot `slot`, its pixels and palette at those addresses (`-sharedframes`) |
 
 A turn's records end with its `SYNC`. After a frame the sound records come in
 causal order: `GENERATION` (with the new level's `AMBIENT`s) first, then
@@ -130,8 +136,10 @@ Two `SharedArrayBuffer`s:
   consumed), `SYNCS` (turns so far), `LATEST`/`FRAMES`/`READING`/`SHOWN`/
   `SLOTS_GEN` (the frame slots), `RUN` (starting, running, exited,
   crashed), `WAIT` (whether the program waits for ticks), and each slot's
-  width, height and format. The same table is at the top of `wasi.js` and of
-  the page's script.
+  width, height and format, and where its frame is (`SLOT_SRC`: the frame
+  slots, or the program's memory at `SLOT_ADDR`, its palette at
+  `SLOT_PAL`). The same table is at the top of `wasi.js` and of the page's
+  script.
 - **Frame slots**: three, made by the worker as large as the largest frame
   so far. The worker writes a frame into a slot that is neither the newest
   (`LATEST`) nor the one the page is reading (`READING`), then publishes it;
@@ -140,7 +148,110 @@ Two `SharedArrayBuffer`s:
   resolution) gets a new set, which the worker sends the page and numbers in
   `SLOTS_GEN`; the page presents nothing until it holds the set `SLOTS_GEN`
   names, so the frame shows one refresh later. No resolution limit lives in
-  the host, and at the default 960×600 the slots take 6.9 MB.
+  the host, and at the default 960×600 the slots take 1.7 MB (indexed
+  frames; 6.9 MB RGBA).
+- **In place** (the threads build): the program's own memory is a shared
+  `WebAssembly.Memory`, so `wasi.js` passes `-sharedframes` and sends the
+  page the memory, and the program leaves each frame where it drew it,
+  saying where in a `FRAME_AT` (`quake-wasm/src/present.rs`). It keeps its
+  last three frames, a ring: each frame takes the next slot, and the buffer
+  it replaces goes back to the renderer's frame pool. The page claims the
+  newest as before; the host lets a `FRAME_AT` return only once the page is
+  not reading the ring's next slot (`Atomics.wait` on `READING`, which the
+  page notifies when it lets go). The page can only claim the newest frame,
+  so once a frame is published nothing can start reading the slot after it:
+  a frame's memory is written, or handed back, only while no one reads it.
+  No frame slots, and no copy in the worker. A grown memory reaches the page
+  as a fresh `memory.buffer`.
+
+## Presentation
+
+The program draws 8-bit frames, a palette index a pixel, as Quake's
+`vid.buffer` holds them, and `V_UpdatePalette` sets the palette they are
+shown through each frame (the cshifts, then gamma: the renderer's
+`FramePalette`). The page is the display's DAC:
+
+- **WebGL2** (on a GPU): the page asks for `INDEXED8` (`PRESENT`). The
+  frame goes up as an `R8UI` texture and the palette as a 256×1 `RGBA8`
+  one, straight from the shared view where the browser takes one (Chromium
+  does; else through one copy into a staging buffer, the smallest copy that
+  works: a byte a pixel, 0.06 / 0.25 / 0.56 ms at 1280×800 / 1440p / 4K
+  here, the upload after it no slower), and a fragment shader draws each pixel as
+  `texelFetch(palette, texelFetch(frame, p).r)` — exact integers, no
+  filtering, blending, dithering or colour conversion, so the canvas holds
+  exactly the RGBA the program's own pack would. No RGBA pack runs in the
+  program, and a palette shift costs 1 KB.
+- **2-D canvas** (no WebGL2 — headless Firefox —, a WebGL2 drawn by the CPU,
+  or `?canvas2d`): the page asks for `RGBA8`; the program packs its frame
+  through the palette on the renderer's threads (`render::pack_rgba`, one
+  4-byte store a pixel), and the page copies it into an `ImageData` for
+  `putImageData`, which takes no shared memory.
+
+A WebGL2 drawn by the CPU (SwiftShader, llvmpipe: the renderer string says
+so) costs more than the 2-D canvas's copy — headless Chromium's
+SwiftShader, demo1 at 2560×1440 on 8 threads: a page frame of 23.7 ms
+against 7.2 — so the page takes the 2-D canvas there (`?webgl` takes WebGL2
+anyway). A lost WebGL context (a GPU reset) is waited out: nothing is drawn
+until the browser restores it, then the textures are made again and the next
+frame shows; the game runs on. A context that never comes back leaves the
+canvas blank until a reload (the 2-D canvas cannot take over a canvas that
+had a WebGL context).
+
+**The same pixels.** `web/verify_present.py` reads the canvas back
+(`quake.readback()`: `readPixels` of the last frame drawn again, or
+`getImageData`) and compares its hash with the program's RGBA for the same
+frame (the `frame_hash` call) in the attract demo, the live walk, the Quad's
+cshift, underwater (the warp and the water's shift), the menu's fade, the
+console and at gamma 0.7, with WebGL2 (the shared views and the staging
+copy, and after a lost and restored context) and with the 2-D canvas: equal
+everywhere, in headless Chromium (SwiftShader and the GPU) and Firefox (the
+2-D canvas; its headless build has no WebGL2). Natively, `quaketool play
+--hash-every` over 28 runs (seven workloads at three Classic sizes, the
+Quad's shift among them; 1080p modern on 8 threads; 1440p with the scaled
+2-D layer) prints the same hashes as before the renderer went 8-bit
+(`d5db64a`), and the goldens are unchanged.
+
+**Measured.** `bench.py --video modern --threads 1,8`, demo1, the threads
+build's bench program before (`d5db64a`: RGB frames packed to RGBA, copied
+into a frame slot, copied out, `putImageData`) and after, in one sitting on
+a 16-thread desktop (load 4–8), headless Chromium on a desktop GPU
+(`QUAKE_GPU=1`: the integrated GPU through ANGLE on GL), uncapped rAF; median ms.
+The host frame is the program's (`step`); the page frame is the rAF period,
+everything the browser does for the frame included:
+
+| | host frame before → after | page frame before → after (WebGL2) | after, 2-D canvas |
+|---|---|---|---|
+| 1280×800, 1 thread | 4.94 → 3.16 | 6.85 → 3.83 | 4.43 |
+| 1920×1080, 1 thread | 8.72 → 5.65 | 11.71 → 6.43 | 8.26 |
+| 2560×1440, 1 thread | 14.35 → 9.11 | 20.50 → 10.17 | 14.77 |
+| 3840×2160, 1 thread | 29.45 → 19.20 | 41.87 → 20.70 | 30.05 |
+| 1280×800, 8 threads | 2.06 → 1.32 | 3.75 → 1.72 | 2.58 |
+| 1920×1080, 8 threads | 2.99 → 1.99 | 6.13 → 2.58 | 4.53 |
+| 2560×1440, 8 threads | 4.67 → 2.87 | 10.62 → 3.42 | 7.61 |
+| 3840×2160, 8 threads | 8.94 → 4.97 | 21.66 → 6.06 | 13.73 |
+
+At 8 threads the page used to add 1.7 / 3.1 / 6.0 / 12.7 ms to the host
+frame (the worker's copy into a slot, the page's copy out, `putImageData`,
+and the RGBA the program packed); with WebGL2 it adds 0.4 / 0.6 / 0.6 /
+1.1 ms (the page's own time, `js - wait`, is 0.2–0.6 ms: the uploads and the
+draw call; the rest is the browser's). A frame in place costs the worker
+0.1 ms where it cost ~3 ms at 1440p. The host frame itself shrank too: no
+RGBA pack (0.8 ms at 1440p, 2.0 at 4K, on 8 threads), and the renderer
+stores a byte a pixel instead of three. So 1440p on 8 threads fits a
+240 Hz refresh (4.2 ms) and 1280×800 a 480 Hz one (2.1 ms), on an integrated GPU.
+The 2-D canvas gains from the same program changes but still pays its two
+copies and `putImageData`. On headless Chromium's software GL (SwiftShader,
+no `QUAKE_GPU`) the 2-D canvas is the page's choice: page frame at 8 threads
+3.91 / 6.44 / 10.45 / 21.03 before, 2.82 / 4.74 / 7.19 / 13.39 after
+(WebGL2 forced, `?webgl`: 7.21 / 13.45 / 23.65 / 47.05 — the CPU drawing
+the textures). The single-thread build (`wasm32-wasip1`, indexed frames
+copied through the slots), GPU, page frame: 6.24 → 3.73, 11.28 → 6.74,
+20.01 → 10.12 at 1280×800, 1920×1080, 2560×1440.
+
+Input to present (`bench.py --latency 20`: the live walk uncapped, keys at
+random moments, to the present of the first frame that consumed each; GPU,
+8 threads, median / p95 ms): 1280×800 3.92 / 6.40 → 1.83 / 4.37;
+2560×1440 10.49 / 12.00 → 3.16 / 4.42.
 
 ## Files
 
@@ -256,8 +367,8 @@ headless Chromium on a 16-thread desktop (load 2.6 → 6.2), median ms:
 walk_e1m1 is alike (2560×1440: render3d 9.87 → 3.10 ms). At 8 threads the
 host frame is half the page's: the frame's pixels into the shared slot,
 the page's copy out and `putImageData` (0.9 ms each at 1440p) are one
-thread's. With the threads build's shared memory the page could read the
-frame straight out of the program's memory. The frames are the same at
+thread's. With the threads build's shared memory the page now reads the
+frame where it lies ("Shared memory", "Presentation"). The frames are the same at
 every count: `bench.py --hash-every 30` over fire_e1m1, walk_e1m3 and demo1
 at 1920×1080 prints the same hashes at 1 and 8 threads (one page per count:
 a page's runs share QuakeC's random stream).
@@ -350,18 +461,11 @@ the pak. The renderer process's memory (PSS, attract demo running) was
 it, where the old page held the pak twice (the module's bytes and its linear
 memory). "Files" above has the pak's own comparison.
 
-**Presentation.** The brief's idea — an 8-bit frame plus its palette, with
-the GPU doing the VGA DAC in WebGL2 — needs the renderer to write palette
-indices, and it composes RGB today (PERF_PLAN B5), so frames are RGBA. For
-RGBA, WebGL2 measured worse where it could be measured: Chromium accepts a
-shared view in `texSubImage2D` (so the page's copy could go) and draws it
-byte-exact with `texelFetch`, but headless Chromium's software GL took
-0.58 ms to upload and draw a 960×600 frame against 0.23 ms for copy plus
-`putImageData`, and headless Firefox has no WebGL2 at all. The page keeps the
-2-D canvas. With B5 the case changes: a quarter of the bytes through both
-copies and no pack in the program (0.47 ms at 1280×800), which would make
-this design cheaper per frame than the old one; the `FRAME` record's
-`format` byte is there for it.
+**Presentation.** At the port, frames were RGB and the page kept the 2-D
+canvas: for RGBA, headless Chromium's software GL took 0.58 ms to upload and
+draw a 960×600 frame against 0.23 ms for copy plus `putImageData`. The
+renderer has since gone 8-bit (PERF_PLAN B5) and the page presents through
+WebGL2 on a GPU: "Presentation" above has the design and its measurements.
 
 **Verdict.** Equal frames, equal host frame time and startup, similar memory,
 and a sub-millisecond hand-off per frame that the 8-bit framebuffer would cut
@@ -369,22 +473,29 @@ by three quarters. Not clearly worse, so everything was ported.
 
 ## `?lowlatency`
 
-Kept, same meaning: it asks for a `desynchronized` 2-D canvas, which can skip
-a compositor frame where the browser supports it (Chrome on Windows and
-ChromeOS), at the risk of tearing. The frame still arrives inside the
-refresh that ticked, so the hint matters exactly as much as before. Off by
-default, and not verifiable headless.
+Kept, same meaning: it asks for a `desynchronized` canvas (WebGL2's or the
+2-D one), which can skip a compositor frame where the browser supports it
+(Chrome on Windows and ChromeOS), at the risk of tearing. The frame still
+arrives inside the refresh that ticked, so the hint matters exactly as much
+as before. Off by default, and not verifiable headless: there it holds the
+refresh near 60 Hz, so input to present measured 12–16 ms at the median
+with it (old page and new, WebGL2 and 2-D alike) against 2–3 ms without.
 
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
 `Atomics.wait` in a worker. Checked here: headless Chromium (the nine
-checks, `verify_threads.py` and the benchmark) and headless Firefox 155 (the
-nine checks with `QUAKE_BROWSER=firefox`, `verify_extras.py` skipping its
-Keyboard Lock half, which Firefox has no API for; `verify_threads.py`).
+checks, `verify_present.py`, `verify_threads.py` and the benchmark) and
+headless Firefox 155 (the nine checks and `verify_present.py` with
+`QUAKE_BROWSER=firefox`, `verify_extras.py` skipping its Keyboard Lock half,
+which Firefox has no API for; `verify_threads.py`); each on both builds.
+WebGL2 is optional: without it the page presents through the 2-D canvas.
 Playwright's WebKit would not start here (missing system
-libraries). Not checked: Safari, iOS, a real GPU, a real high-refresh
-display. From the platforms' documentation, not from a
+libraries). A GPU is checked through headless Chromium (`QUAKE_GPU=1`: the
+local GPU, ANGLE on GL; `verify_present.py` and the benchmark). Not
+checked: Safari, iOS, Firefox's WebGL2 (its headless build has none; its
+refusal of shared views is emulated, `verify_present.py`'s staging copy), a
+GPU driving a real high-refresh display. From the platforms' documentation, not from a
 run: Safari has `SharedArrayBuffer` under COOP/COEP since 15.2 (iOS 15.2),
 with `Atomics.wait` in workers; iOS has no pointer lock, and the page already
 says it needs a keyboard and a mouse. The program's own memory no longer
