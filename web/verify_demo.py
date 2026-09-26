@@ -31,9 +31,7 @@ def check(name, ok, detail=""):
 
 GRAB = """() => {
     const c = document.getElementById('c');
-    const g = c.getContext('2d'); if (!g) return null;
-    return { w: c.width, h: c.height,
-             data: Array.from(g.getImageData(0, 0, c.width, c.height).data) };
+    return { w: c.width, h: c.height, data: Array.from(quake.readback()) };
 }"""
 
 def nonblack_fraction(f, y0=0, y1=None):

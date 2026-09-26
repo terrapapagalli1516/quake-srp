@@ -55,6 +55,18 @@ def port(default):
     return int(os.environ.get("QUAKE_VERIFY_PORT", str(default)))
 
 
+def gpu_flags():
+    """Chromium's flags for the machine's GPU when $QUAKE_GPU is set (1:
+    ANGLE on GL/EGL, as Chrome on Linux; `vulkan`: ANGLE on Vulkan). Headless
+    Chromium otherwise draws WebGL and composites in software (SwiftShader),
+    which is correct but says little about a real browser's speed."""
+    gpu = os.environ.get("QUAKE_GPU", "")
+    if not gpu:
+        return []
+    angle = "vulkan" if gpu == "vulkan" else "gl-egl"
+    return ["--enable-gpu", "--use-gl=angle", f"--use-angle={angle}", "--ignore-gpu-blocklist"]
+
+
 def launch(p, args=()):
     """A headless browser: Chromium, or the one $QUAKE_BROWSER names
     (`firefox`, `webkit`; Playwright's builds). Chromium's command-line
@@ -62,7 +74,7 @@ def launch(p, args=()):
     `--autoplay-policy=no-user-gesture-required` as a preference."""
     name = os.environ.get("QUAKE_BROWSER", "chromium")
     if name == "chromium":
-        return p.chromium.launch(headless=True, args=list(args))
+        return p.chromium.launch(headless=True, args=list(args) + gpu_flags())
     prefs = {"media.autoplay.default": 0, "media.autoplay.blocking_policy": 0} if name == "firefox" else None
     kw = {"firefox_user_prefs": prefs} if prefs else {}
     return getattr(p, name).launch(headless=True, **kw)

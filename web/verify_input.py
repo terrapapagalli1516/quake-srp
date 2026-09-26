@@ -194,7 +194,7 @@ with sync_playwright() as p:
     # pointer is never locked through any of it.
     grab = """() => {
         const c = document.getElementById('c');
-        return Array.from(c.getContext('2d').getImageData(0,0,c.width,c.height).data);
+        return Array.from(quake.readback());
     }"""
     before = pg.evaluate(grab)
     pg.keyboard.down("ArrowUp")

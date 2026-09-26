@@ -26,8 +26,7 @@ fails = []
 
 GRAB = """() => {
     const c = document.getElementById('c');
-    const g = c.getContext('2d'); if (!g) return null;
-    return Array.from(g.getImageData(0,0,c.width,c.height).data);
+    return Array.from(quake.readback());
 }"""
 
 

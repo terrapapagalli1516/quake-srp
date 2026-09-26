@@ -260,10 +260,13 @@ const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
 // The control block's fields (Int32 indexes; wasi.js has the same table).
 const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, READING: 6,
-            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19 };
+            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19,
+            SLOT_SRC: 20, SLOT_ADDR: 23, SLOT_PAL: 26 };
 const CTL_BYTES = 256, RING_BYTES = 1 << 16;
 // Record kinds, in (IN_*) and out (OUT_*).
-const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7 };
+const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7, PRESENT: 9 };
+// Frame formats (the FRAME record's, and what PRESENT asks for).
+const FORMAT = { RGBA8: 0, INDEXED8: 1 };
 const OUT = { FRAME: 1, SYNC: 2, STATE: 3, SAMPLE: 4, SOUND: 5, STOP_SOUND: 6, STATIC_SOUND: 7,
               AMBIENT: 8, LISTENER: 9, GENERATION: 10, LOCAL_SOUND: 11, REPLY: 12, BENCH: 13 };
 // State flags (the STATE record).
@@ -344,6 +347,7 @@ function onWorkerMessage(e) {
   const m = e.data;
   if (m.t === 'out') handleOutput(new Uint8Array(m.bytes));
   else if (m.t === 'slots') { frameSlots = m.frames; slotBytes = m.slotBytes; slotsGen = m.gen; }
+  else if (m.t === 'memory') programMemory = m.memory;
   else if (m.t === 'fs') storage.apply(m);
   else if (m.t === 'log') console.log('[quake]', m.text);
   else if (m.t === 'exit') gameExited(m);
@@ -1344,6 +1348,10 @@ async function main() {
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
   Atomics.store(ctl, C.LATEST, -1);
   Atomics.store(ctl, C.READING, -1);
+  // How the page shows frames, said before the program's first tick, so
+  // every frame comes as the presenter takes it.
+  presenter = makePresenter();
+  sendRecord(IN.PRESENT, new Uint8Array([presenter.format]));
   worker = new Worker('wasi.js');
   worker.onmessage = onWorkerMessage;
   worker.onerror = (e) => { setStatus('error: ' + e.message); };
@@ -1382,7 +1390,7 @@ async function main() {
 // Presentation: a tick per display refresh, the program's frame in the
 // same refresh
 // ===========================================================================
-let ctx = null, W = 0, H = 0, frameImg = null;
+let W = 0, H = 0;
 // The canvas box, snapped. The CSS rule gives the largest 4:3 box the
 // window fits; with image-rendering:pixelated a box a little wider than the
 // framebuffer (976 px for 960 columns at 1440x900) doubles one column in
@@ -1419,38 +1427,267 @@ document.addEventListener('fullscreenchange', fitCanvas);
 
 // The newest complete frame into the canvas, if there is one the page has
 // not shown. The slot is claimed first (READING), so the program writes its
-// next frames into the other two (triple buffering). Nothing is shown while
-// the worker's newest set of slots has not reached the page yet (the first
+// next frames elsewhere: into the other two frame slots, or (a frame in the
+// program's shared memory) into its ring's other slots — wasi.js holds the
+// program off the slot the page is reading. Nothing is shown while the
+// worker's newest set of frame slots has not reached the page yet (the first
 // frame, a larger resolution). Returns timings for the benchmark: the copy
-// out of shared memory, and putImageData.
+// out of shared memory (none when the presenter takes the shared view), and
+// the upload and draw.
 let framesShown = 0;
 function present() {
   const n = Atomics.load(ctl, C.FRAMES);
   if (n === framesShown || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) return null;
   let s;
   do { s = Atomics.load(ctl, C.LATEST); Atomics.store(ctl, C.READING, s); } while (Atomics.load(ctl, C.LATEST) !== s);
-  if (s < 0 || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) { Atomics.store(ctl, C.READING, -1); return null; }
+  if (s < 0 || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) { release(); return null; }
   framesShown = Atomics.load(ctl, C.FRAMES);
   Atomics.store(ctl, C.SHOWN, framesShown);
   if (!quake.firstFrameAt) quake.firstFrameAt = performance.now();
-  const w = Atomics.load(ctl, C.SLOT_W + s), h = Atomics.load(ctl, C.SLOT_H + s);
-  if (w !== W || h !== H) {
+  const frame = claimedFrame(s);
+  if (!frame) { release(); return null; }
+  if (frame.w !== W || frame.h !== H) {
     // The render resolution changed (boot, a Video Options mode): the
     // backing store follows; the CSS box does not, so a larger framebuffer
     // just gives a crisper pixel-upscale.
-    W = w; H = h;
+    W = frame.w; H = frame.h;
     canvas.width = W; canvas.height = H;
-    frameImg = new ImageData(W, H);
+    presenter.resize(W, H);
     fitCanvas();
   }
-  const t0 = performance.now();
-  // putImageData takes no shared memory: one copy out of the slot.
-  frameImg.data.set(new Uint8Array(frameSlots, s * slotBytes, W * H * 4));
+  return presenter.draw(frame, release);
+}
+
+// The page is done reading the claimed frame: the program may reuse it.
+function release() {
   Atomics.store(ctl, C.READING, -1);
+  Atomics.notify(ctl, C.READING);
+}
+
+// The frame in slot `s`: its size, format, and views of its pixels and (an
+// indexed frame) palette — in the worker's frame slots, or where it lies in
+// the program's shared memory. Null when that memory is not (yet) the page's.
+function claimedFrame(s) {
+  const w = Atomics.load(ctl, C.SLOT_W + s), h = Atomics.load(ctl, C.SLOT_H + s);
+  const indexed = Atomics.load(ctl, C.SLOT_F + s) === FORMAT.INDEXED8;
+  const bytes = w * h * (indexed ? 1 : 4);
+  if (Atomics.load(ctl, C.SLOT_SRC + s) === 1) {
+    const at = Atomics.load(ctl, C.SLOT_ADDR + s) >>> 0, pal = Atomics.load(ctl, C.SLOT_PAL + s) >>> 0;
+    const buf = programBuffer(Math.max(at + bytes, indexed ? pal + 1024 : 0));
+    if (!buf) return null;
+    return { w, h, indexed, pixels: new Uint8Array(buf, at, bytes), palette: indexed ? new Uint8Array(buf, pal, 1024) : null };
+  }
+  const at = s * slotBytes, palBytes = indexed ? 1024 : 0;
+  return { w, h, indexed, pixels: new Uint8Array(frameSlots, at + palBytes, bytes),
+           palette: indexed ? new Uint8Array(frameSlots, at, 1024) : null };
+}
+
+// The program's shared memory, at least `end` bytes of it: a grown memory
+// is seen through a fresh `buffer`.
+let programMemory = null, programBuf = null;
+function programBuffer(end) {
+  if (!programMemory) return null;
+  if (!programBuf || programBuf.byteLength < end) programBuf = programMemory.buffer;
+  return programBuf.byteLength >= end ? programBuf : null;
+}
+
+// --- Presenters: the display's DAC --------------------------------------------
+// The program draws 8-bit frames, a palette index a pixel, and V_UpdatePalette
+// sets the 256 colours they are shown through (quake-wasm/src/present.rs).
+// WebGL2 is the DAC: the frame goes up as an R8UI texture and the palette as
+// a 256x1 one, and a fragment shader looks each pixel up with texelFetch —
+// exact integers, no filtering, blending or colour conversion, so the canvas
+// holds exactly the RGBA the program's own pack would give. Without a WebGL2
+// on a GPU (or with ?canvas2d) a 2-D canvas takes the program's RGBA through
+// putImageData. `format` is what the presenter asks the program for.
+
+// A presenter's use of a view on shared memory: straight to the API when it
+// takes one (Chromium's WebGL2 does), else through a copy into `staging`
+// (a browser whose WebGL refuses shared views; not one checked here: headless
+// Firefox has no WebGL2). Returns the time the copy took.
+function viaStaging(p, view, use) {
+  if (p.sharedOk) {
+    try { use(view); return 0; } catch (e) { p.sharedOk = false; console.info('[quake] shared views refused; copying frames:', e.message); }
+  }
+  const t0 = performance.now();
+  if (!p.staging || p.staging.length < view.length) p.staging = new Uint8Array(view.length);
+  const copy = p.staging.subarray(0, view.length);
+  copy.set(view);
   const t1 = performance.now();
-  ctx.putImageData(frameImg, 0, 0);
-  const t2 = performance.now();
-  return { copy: t1 - t0, put: t2 - t1 };
+  use(copy);
+  return t1 - t0;
+}
+
+const GL_VERTEX = `#version 300 es
+// A triangle covering the viewport.
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+// The frame's row 0 is its top; the viewport's is its bottom.
+const GL_INDEXED = `#version 300 es
+precision highp float;
+precision highp int;
+uniform highp usampler2D u_frame;
+uniform highp sampler2D u_palette;
+out vec4 color;
+void main() {
+  ivec2 size = textureSize(u_frame, 0), at = ivec2(gl_FragCoord.xy);
+  uint i = texelFetch(u_frame, ivec2(at.x, size.y - 1 - at.y), 0).r;
+  color = texelFetch(u_palette, ivec2(int(i), 0), 0);
+}`;
+
+class GlPresenter {
+  // A WebGL2 presenter on `canvas`, or null when there is no WebGL2 — or
+  // when it is drawn by the CPU, unless `always`: a software WebGL
+  // (SwiftShader, llvmpipe) costs more than the 2-D canvas's copy (headless
+  // Chromium's SwiftShader, demo1 at 2560x1440 on 8 threads: a page frame
+  // of 23.7 ms against 7.2 through putImageData; a GPU's, 3.4). Deciding
+  // leaves the canvas with a WebGL2 context, so the test uses a canvas of
+  // its own.
+  static create(canvas, lowLatency, always) {
+    if (!always && GlPresenter.software()) return null;
+    const gl = canvas.getContext('webgl2', {
+      alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false,
+      preserveDrawingBuffer: false, desynchronized: lowLatency, powerPreference: 'high-performance',
+    });
+    if (!gl) return null;
+    const p = new GlPresenter(canvas, gl);
+    return p.init() ? p : null;
+  }
+  // Whether this browser's WebGL2 is drawn by the CPU (false without one:
+  // then create finds no context either).
+  static software() {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    if (!gl) return false;
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    const renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return /swiftshader|llvmpipe|softpipe|software|basic render/i.test(renderer);
+  }
+  constructor(canvas, gl) {
+    this.canvas = canvas; this.gl = gl;
+    this.format = FORMAT.INDEXED8;
+    this.sharedOk = true; this.staging = null;
+    this.lost = false; this.last = null;       // the last frame drawn: {w, h}
+    // A lost context (a GPU reset) comes back with nothing: draw nothing
+    // until then, and rebuild. The frames keep coming meanwhile.
+    canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.lost = true; });
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.lost = false;
+      if (this.init() && W) this.resize(W, H);
+    });
+  }
+  // The program and textures (again after a lost context). False when the
+  // shaders will not build.
+  init() {
+    const gl = this.gl;
+    const program = (fs) => {
+      const p = gl.createProgram();
+      for (const [type, src] of [[gl.VERTEX_SHADER, GL_VERTEX], [gl.FRAGMENT_SHADER, fs]]) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        gl.attachShader(p, s);
+      }
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { console.warn('[quake] WebGL2 program:', gl.getProgramInfoLog(p)); return null; }
+      return p;
+    };
+    this.program = program(GL_INDEXED);
+    if (!this.program) return false;
+    gl.useProgram(this.program);
+    gl.uniform1i(gl.getUniformLocation(this.program, 'u_frame'), 0);
+    gl.uniform1i(gl.getUniformLocation(this.program, 'u_palette'), 1);
+    gl.bindVertexArray(gl.createVertexArray());
+    gl.disable(gl.DITHER);
+    gl.disable(gl.BLEND);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    this.palette = this.texture(1, gl.RGBA8, 256, 1);
+    this.frameTex = null;
+    return true;
+  }
+  // A `w x h` texture of `internal` format on texture unit `unit`.
+  texture(unit, internal, w, h) {
+    const gl = this.gl, t = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  // The frame's size changed: a new frame texture, the viewport.
+  resize(w, h) {
+    if (this.lost) return;
+    const gl = this.gl;
+    if (this.frameTex) gl.deleteTexture(this.frameTex);
+    this.frameTex = this.texture(0, gl.R8UI, w, h);
+    gl.viewport(0, 0, w, h);
+  }
+  // Upload `frame` (indexed: this presenter asks for no other) and draw it;
+  // `done()` once its bytes are copied (the program may reuse them).
+  // Returns {copy, put}.
+  draw(frame, done) {
+    if (this.lost || !frame.indexed) { done(); return { copy: 0, put: 0 }; }
+    const gl = this.gl, t0 = performance.now();
+    gl.activeTexture(gl.TEXTURE1);
+    let copy = viaStaging(this, frame.palette, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, v));
+    gl.activeTexture(gl.TEXTURE0);
+    copy += viaStaging(this, frame.pixels, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.w, frame.h, gl.RED_INTEGER, gl.UNSIGNED_BYTE, v));
+    done();
+    this.last = { w: frame.w, h: frame.h };
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    return { copy, put: performance.now() - t0 - copy };
+  }
+  // The canvas's pixels, RGBA from the top row down: the last frame drawn
+  // again (the drawing buffer is not kept past its present) and read back.
+  readback() {
+    if (this.lost || !this.last) return new Uint8Array(0);
+    const gl = this.gl, { w, h } = this.last;
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const up = new Uint8Array(w * h * 4), out = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, up);
+    for (let y = 0; y < h; y++) out.set(up.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+    return out;
+  }
+}
+
+class CanvasPresenter {
+  constructor(canvas, lowLatency) {
+    // An opaque canvas (the frame's alpha is always 255): the browser
+    // composites it without blending.
+    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: lowLatency });
+    this.format = FORMAT.RGBA8;
+    this.img = null;
+  }
+  resize(w, h) { this.img = new ImageData(w, h); }
+  // putImageData takes no shared memory: one copy out of it. (RGBA frames:
+  // this presenter asks for no other.)
+  draw(frame, done) {
+    if (frame.indexed) { done(); return { copy: 0, put: 0 }; }
+    const t0 = performance.now();
+    this.img.data.set(frame.pixels);
+    done();
+    const t1 = performance.now();
+    this.ctx.putImageData(this.img, 0, 0);
+    return { copy: t1 - t0, put: performance.now() - t1 };
+  }
+  readback() { return this.img ? this.ctx.getImageData(0, 0, this.img.width, this.img.height).data : new Uint8ClampedArray(0); }
+}
+
+// The presenter for this page: WebGL2's on a GPU, else the 2-D canvas's
+// (always with ?canvas2d; ?webgl takes a software WebGL2 too).
+// `?lowlatency` also asks for a desynchronized canvas, which can skip a
+// frame of compositor latency where the browser supports it (Chrome on
+// Windows / ChromeOS) at the risk of tearing; off by default, and not
+// verifiable in headless Chromium.
+let presenter = null;
+function makePresenter() {
+  const params = new URLSearchParams(location.search);
+  const lowLatency = params.has('lowlatency');
+  return (!params.has('canvas2d') && GlPresenter.create(canvas, lowLatency, params.has('webgl')))
+    || new CanvasPresenter(canvas, lowLatency);
 }
 
 // Wait for the program's answer to tick `seq` — a spin, since the main
@@ -1477,13 +1714,6 @@ let tickSeq = 0, lastTick = null, pendingTick = 0;
 // on the next refresh instead).
 const WAIT_MS = 30;
 function startPresenting() {
-  // An opaque canvas (the framebuffer's alpha is always 255): the browser
-  // composites it without blending. `?lowlatency` in the URL also asks for a
-  // desynchronized canvas, which can skip a frame of compositor latency where
-  // the browser supports it (Chrome on Windows / ChromeOS) at the risk of
-  // tearing; off by default, and not verifiable in headless Chromium.
-  const LOW_LATENCY = new URLSearchParams(location.search).has('lowlatency');
-  ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
   lastTick = performance.now();
   requestAnimationFrame(frame);
 }
@@ -1552,9 +1782,19 @@ const quake = window.quake = {
     const p = present();
     return { ok, wait: t1 - t0, copy: p ? p.copy : 0, put: p ? p.put : 0, presented: !!p };
   },
-  // The canvas's pixels (the presented frame), and its FNV-1a hash over
-  // 32-bit words — what `quaketool play --hash-every` prints natively.
-  pixels() { return frameImg ? frameImg.data : new Uint8ClampedArray(0); },
+  // The canvas's pixels, read back from it (RGBA, top row first), and their
+  // FNV-1a hash over 32-bit words — what `quaketool play --hash-every`
+  // prints natively and the program's `frame_hash` call answers.
+  readback(x = 0, y = 0, w = W, h = H) {
+    const all = presenter ? presenter.readback() : new Uint8Array(0);
+    if (x === 0 && y === 0 && w === W && h === H) return all;
+    const out = new Uint8Array(w * h * 4);
+    for (let r = 0; r < h; r++) out.set(all.subarray(((y + r) * W + x) * 4, ((y + r) * W + x + w) * 4), r * w * 4);
+    return out;
+  },
+  pixels() { return this.readback(); },
+  presenter: () => presenter ? { format: presenter.format, gl: presenter instanceof GlPresenter,
+                                 sharedViews: !!presenter.sharedOk, inPlace: !!programMemory } : null,
   frameHash() {
     const d = this.pixels();
     const u = new Uint32Array(d.buffer, d.byteOffset, d.length >> 2);

@@ -59,7 +59,7 @@ LINE = re.compile(r"^(-?\d+) frames +(\d+\.\d) seconds +(\d+\.\d) fps$")
 CONSOLE = "() => quake.text('console_text')"
 GRAB = """name => {
     const c = document.getElementById('c');
-    window[name] = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    window[name] = quake.readback();
 }"""
 SAME = """([a, b]) => {
     const A = window[a], B = window[b];
@@ -149,8 +149,7 @@ with sync_playwright() as p:
     time.sleep(0.5)
     W, H = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     x0, y0 = (W - pw) // 2, (H - 48 - ph) // 2
-    PLAQUE = """([x0, y0, w, h]) => Array.from(document.getElementById('c').getContext('2d')
-        .getImageData(x0, y0, w, h).data)"""
+    PLAQUE = """([x0, y0, w, h]) => Array.from(quake.readback(x0, y0, w, h))"""
     def plaque_up():
         px = pg.evaluate(PLAQUE, [x0, y0, pw, ph])
         return all(px[4 * i:4 * i + 3] == list(pal[3 * t:3 * t + 3]) for i, t in enumerate(texels))
