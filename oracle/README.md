@@ -563,3 +563,19 @@ The recorded list is `oracle/classic_expected.txt`, with a note for each
 recording (first on `a50d8d7`, the settings branch's base). A change that
 moves an identity value on purpose is re-recorded with `--record --note`,
 and says so where the fidelity change is recorded (AUDIT.md).
+
+**Last run** (branch `q26/settings` at `11850b9`, after merging the
+multicore renderer, 2026-09-26; the tools' outputs were kept beside the
+report):
+
+```
+PASS  goldens      0.1 s  3 values match
+PASS  play        14.6 s  42 values match
+PASS  timedemo     5.1 s  3 values match
+PASS  census       1.5 s  1 values match
+PASS  edicts       2.2 s  9 values match
+PASS  oracle       0.6 s  8 values match
+PASS  screen2d    11.8 s  146 values match
+PASS  sound        2.6 s  0 values match
+ALL PASS
+```
