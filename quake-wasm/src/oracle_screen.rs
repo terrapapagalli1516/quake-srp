@@ -51,13 +51,17 @@ thread_local! {
 }
 
 /// The live frame's view hook ([`quake_rs::client::set_view_hook`]): the 3-D
-/// view as one flat colour while a script asks for it (the C oracle's
-/// `oracle_blank` fills `scr_vrect` the same way).
-fn blank_view(mut view: Image, palette: &[[u8; 3]; 256]) -> Image {
+/// view — `vrect` of the screen — as one flat colour while a script asks for
+/// it (the C oracle's `oracle_blank` fills `scr_vrect` the same way).
+fn blank_view(screen: &mut Image, vrect: quake_rs::render::ViewRect, palette: &[[u8; 3]; 256]) {
     if let Some(idx) = BLANK.with(Cell::get) {
-        view.rgb.fill(palette[idx as usize]);
+        let (sw, c) = (screen.w, palette[idx as usize]);
+        for row in screen.rgb.chunks_mut(sw.max(1)).skip(vrect.y).take(vrect.h) {
+            if let Some(px) = row.get_mut(vrect.x..vrect.x + vrect.w) {
+                px.fill(c);
+            }
+        }
     }
-    view
 }
 
 /// keys.c's key names (`Key_StringToKeynum`) for the keys a script presses:

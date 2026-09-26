@@ -203,33 +203,72 @@ assumes the page mixes.
 
 ## Threads
 
-The game does not use threads yet; the host is ready for them, and a check
-proves it. A program built for `wasm32-wasip1-threads` imports a shared
-`env.memory` and `wasi.thread-spawn`. `wasi.js` then:
+A program built for `wasm32-wasip1-threads` imports a shared `env.memory` and
+`wasi.thread-spawn`, and the game's renderer then draws each frame's 3-D view
+on several threads (quake-rs `render/band.rs`: row bands after the edge scan,
+the same pixels for any count). `wasi.js`:
 
 - makes the shared memory with the limits the module's import section
   declares (the JS API does not tell them, so `importedMemory` reads them);
 - before the program starts, makes a pool of thread workers (as many as
   `navigator.hardwareConcurrency`, 2–16), each another instance of
   `wasi.js` — a worker made after its parent has blocked may never start;
-- answers `thread-spawn` by handing a free worker the module, the memory,
-  a thread id and the start argument; the worker calls
-  `wasi_thread_start` and marks itself free when the thread ends. `std`'s
-  futexes are wasm atomics on the shared memory, so `join`, `Mutex` and
-  channels need nothing more from the host.
+- answers `thread-spawn` by claiming a free worker. Its first thread goes
+  by message (the module, the memory, the thread id and start argument);
+  the worker instantiates the module once, calls `wasi_thread_start`, marks
+  itself free when the thread ends and then waits, with `Atomics.wait`, on
+  its own slot of a shared `jobs` array (`[seq, tid, arg]`). A later
+  `thread-spawn` writes the thread there, bumps `seq` and wakes it: a thread
+  costs a wake-up, not a message and an instantiation. `std`'s futexes are
+  wasm atomics on the shared memory, so `join`, `Mutex` and channels need
+  nothing more from the host. With every worker busy it answers EAGAIN;
+- passes the program `-hwthreads N`, the threads it may count on
+  (`hardwareConcurrency`, at most the pool plus its own). If the pool cannot
+  be made, the program runs alone (`-hwthreads 1`).
 
 A thread has the clocks, randomness, sleep and stderr (to its worker's
 console: the parent never reads messages again). The files, stdin and
 stdout stay the main program's, and a thread cannot spawn threads yet.
 
+**The renderer's threads** are the cvar `r_threads` (quake-wasm `App::
+render_threads`, the typed `quake_rs::render::Threads`): 0, the default,
+takes every thread the host offers (`-hwthreads`; a `wasm32-wasip1` build,
+without threads, gets 1), n takes n. `host::step` hands the resolved count
+to the renderer of whichever game draws the frame, every frame, so each
+`Walk` and `DemoPlay` the host builds (a boot, a load, the attract loop's
+next demo) draws with it from its first frame. A spawn the host refuses
+(more threads asked than workers) leaves its bands to the threads that did
+start, so any count draws the frame. The `render_threads` call reports the
+resolved count. The RGBA pack runs on the same threads.
+
+**Measured.** `threadcheck`'s rounds of seven scoped threads (a round:
+spawn, run, join) take 25 µs with the workers kept, against 214 µs when
+each thread instantiated the module afresh. The game, bench build
+(`bench.py --build --threads-build --video modern --threads 1,2,4,8`), demo1,
+headless Chromium on a 16-thread desktop (load 2.6 → 6.2), median ms:
+
+| | render3d 1 / 2 / 4 / 8 threads | host frame 1 / 8 | page's frame (`js`) 1 / 8 |
+|---|---|---|---|
+| 1280×800 | 4.14 / 2.83 / 2.30 / 1.82 | 4.80 / 2.18 | 6.11 / 3.47 |
+| 1920×1080 | 7.43 / 4.96 / 3.56 / 2.92 | 8.57 / 3.50 | 11.19 / 6.20 |
+| 2560×1440 | 12.34 / 7.55 / 5.39 / 4.22 | 14.47 / 5.21 | 19.07 / 9.89 |
+
+walk_e1m1 is alike (2560×1440: render3d 9.87 → 3.10 ms). At 8 threads the
+host frame is half the page's: the frame's pixels into the shared slot,
+the page's copy out and `putImageData` (0.9 ms each at 1440p) are one
+thread's. With the threads build's shared memory the page could read the
+frame straight out of the program's memory. The frames are the same at
+every count: `bench.py --hash-every 30` over fire_e1m1, walk_e1m3 and demo1
+at 1920×1080 prints the same hashes at 1 and 8 threads (one page per count:
+a page's runs share QuakeC's random stream).
+
 `web/verify_threads.py` builds `quake-wasm`'s `threadcheck`
 (`src/bin/threadcheck.rs`: four `std::thread::scope` threads sum their part
-of 1..4,000,000, a spawned thread answers over a channel) and runs it in the
-host: it passes in headless Chromium and Firefox. The game itself also runs
-as a `wasm32-wasip1-threads` build (shared memory, no threads spawned):
-`verify_walk.py` and `verify_demo.py` pass on it. With a shared memory the
-page could read frames straight out of the program's memory, saving the
-worker-side copy measured below.
+of 1..4,000,000, a spawned thread answers over a channel, then 200 rounds
+of seven scoped threads reuse the workers) and runs it in the host: it
+passes in headless Chromium and Firefox (a round 25 and 37 µs). The nine
+page checks pass on the threads build as on `wasm32-wasip1`'s (Chromium;
+walk and demo in Firefox too).
 
 ## Measurements
 
@@ -356,8 +395,12 @@ holds the 18 MB pak, which helps where wasm memory is tight (iOS).
 **Build:**
 
 ```sh
-cd quake-wasm && cargo build --release --target wasm32-wasip1
+cd quake-wasm && cargo build --release --target wasm32-wasip1          # draws on one thread
+cd quake-wasm && cargo build --release --target wasm32-wasip1-threads  # the renderer's threads ("Threads")
 ```
+
+Either `quake.wasm` runs in the same page; the threads build's is under
+`target/wasm32-wasip1-threads/release/`.
 
 **A deploy dir** holds four things:
 

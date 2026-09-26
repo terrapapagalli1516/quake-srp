@@ -75,10 +75,15 @@ onmessage = async (e) => {
     return;
   }
   const shared_memory = importedMemory(new Uint8Array(wasm));
+  let argv = args || [];
   if (WebAssembly.Module.imports(module).some(i => i.module === 'wasi' && i.name === 'thread-spawn')) {
-    await threads.start(module, shared_memory);
+    // Without its thread workers the program still runs, on its own thread
+    // (a `thread-spawn` then answers EAGAIN, and quake.wasm draws alone).
+    await threads.start(module, shared_memory).catch((err) => threads.abandon(err));
+    // The threads it may use: the pool's and its own (quake-wasm's main.rs).
+    argv = [...argv, '-hwthreads', String(threads.offer())];
   }
-  const inst = await WebAssembly.instantiate(module, importObject(module, args, shared_memory));
+  const inst = await WebAssembly.instantiate(module, importObject(module, argv, shared_memory));
   memory = shared_memory || inst.exports.memory;
   Atomics.store(ctl, C.RUN, 1);
   try {
@@ -286,12 +291,20 @@ const stderr = {
 // `thread-spawn` hands one the thread's start argument, and it calls the
 // module's `wasi_thread_start`. The workers are made before the program
 // starts (a worker made while its parent is blocked may never start) and
-// reused as threads end; `busy` marks the ones running a thread. A thread
-// has the clocks, randomness, sleep and stderr; the files, stdin and stdout
-// are the main program's. A thread cannot spawn threads yet.
+// reused as threads end; `busy` marks the ones running a thread. A worker
+// instantiates the module once, on its first thread, and then waits on its
+// own slot of `jobs` (`[seq, tid, arg]`) with Atomics.wait: a later
+// `thread-spawn` writes the thread there and bumps `seq`, so a program that
+// starts threads every frame (the renderer's bands) costs a wake-up per
+// thread, not a message and an instantiation. A thread has the clocks,
+// randomness, sleep and stderr; the files, stdin and stdout are the main
+// program's. A thread cannot spawn threads yet.
+const JOB = 3;                  // Int32s per worker in `jobs`: seq, tid, arg
 const threads = {
   pool: [],
   busy: null,
+  jobs: null,
+  started: [],             // per worker: has it had its first thread (and an instance)?
   module: null,
   memory: null,
   next: 1,                 // thread ids (the main thread is 0)
@@ -299,6 +312,8 @@ const threads = {
   async start(module, memory) {
     const n = Math.max(2, Math.min(16, navigator.hardwareConcurrency || 4));
     this.busy = new Int32Array(new SharedArrayBuffer(4 * n));
+    this.jobs = new Int32Array(new SharedArrayBuffer(4 * JOB * n));
+    this.started = new Array(n).fill(false);
     this.module = module;
     this.memory = memory;
     await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
@@ -309,13 +324,32 @@ const threads = {
       this.pool.push(w);
     })));
   },
+  // The pool could not be made: none of it is used.
+  abandon(err) {
+    console.warn('[quake] no thread workers, the program runs alone:', err);
+    for (const w of this.pool) w.terminate();
+    this.pool = [];
+  },
+  // The threads the program may count on: this machine's, at most the pool
+  // plus the program's own.
+  offer() {
+    return Math.max(1, Math.min(navigator.hardwareConcurrency || 1, this.pool.length + 1));
+  },
   // wasi.thread-spawn: a positive thread id, or a negative errno.
   spawn(arg) {
     for (let i = 0; i < this.pool.length; i++) {
       if (Atomics.compareExchange(this.busy, i, 0, 1) === 0) {
         const tid = this.next++;
-        this.pool[i].postMessage({ t: 'thread', module: this.module, memory: this.memory,
-                                   tid, arg, busy: this.busy, slot: i });
+        if (!this.started[i]) {
+          this.started[i] = true;
+          this.pool[i].postMessage({ t: 'thread', module: this.module, memory: this.memory,
+                                     tid, arg, busy: this.busy, jobs: this.jobs, slot: i });
+        } else {
+          Atomics.store(this.jobs, JOB * i + 1, tid);
+          Atomics.store(this.jobs, JOB * i + 2, arg);
+          Atomics.add(this.jobs, JOB * i, 1);
+          Atomics.notify(this.jobs, JOB * i);
+        }
         return tid;
       }
     }
@@ -323,18 +357,35 @@ const threads = {
   },
 };
 
-// In a thread's worker: run the thread, then free the worker for the next.
-async function runThread({ module, memory: mem, tid, arg, busy, slot }) {
+// In a thread's worker: instantiate the module, run the thread, free the
+// worker, and wait for the next thread `spawn` puts in this worker's slot.
+async function runThread({ module, memory: mem, tid, arg, busy, jobs, slot }) {
   memory = mem;
-  threads.self = tid;
+  let inst;
   try {
-    const inst = await WebAssembly.instantiate(module, importObject(module, [], mem));
-    inst.exports.wasi_thread_start(tid, arg);
+    inst = await WebAssembly.instantiate(module, importObject(module, [], mem));
   } catch (err) {
-    if (!(err instanceof Exit)) console.error(`[quake thread ${tid}]`, err);
+    console.error('[quake thread] instantiate', err);
+    Atomics.store(busy, slot, 0);
+    return;
   }
-  stderr.flush();
-  Atomics.store(busy, slot, 0);
+  let seq = Atomics.load(jobs, JOB * slot);
+  for (;;) {
+    threads.self = tid;
+    try {
+      inst.exports.wasi_thread_start(tid, arg);
+    } catch (err) {
+      if (!(err instanceof Exit)) console.error(`[quake thread ${tid}]`, err);
+    }
+    stderr.flush();
+    Atomics.store(busy, slot, 0);
+    // The next thread: `spawn` stores it and bumps `seq` (a thread handed
+    // over between the store above and this wait finds `seq` moved).
+    Atomics.wait(jobs, JOB * slot, seq);
+    seq = Atomics.load(jobs, JOB * slot);
+    tid = Atomics.load(jobs, JOB * slot + 1);
+    arg = Atomics.load(jobs, JOB * slot + 2);
+  }
 }
 
 // A module's imported `env.memory`, made shared with the limits the module

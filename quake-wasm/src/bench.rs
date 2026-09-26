@@ -32,11 +32,12 @@
 /// A frame phase, in execution order; see the module table.
 pub(crate) use quake_rs::client::Phase;
 
-/// Start a frame's timers (the top of `step`).
+/// Start a frame's timers (the top of `step`), and the render profiler of the
+/// renderer that will draw it.
 #[inline(always)]
-pub(crate) fn frame_begin() {
+pub(crate) fn frame_begin(_renderer: Option<&mut quake_rs::render::Renderer>) {
     #[cfg(feature = "bench")]
-    imp::frame_begin();
+    imp::frame_begin(_renderer);
 }
 
 /// Charge the time since the previous lap to `phase`.
@@ -46,11 +47,12 @@ pub(crate) fn lap(_phase: Phase) {
     imp::lap(_phase);
 }
 
-/// Close the frame (the end of `step`): latch its phase times and render stats.
+/// Close the frame (the end of `step`): latch its phase times and the render
+/// stats of the renderer that drew it.
 #[inline(always)]
-pub(crate) fn frame_end() {
+pub(crate) fn frame_end(_renderer: Option<&mut quake_rs::render::Renderer>) {
     #[cfg(feature = "bench")]
-    imp::frame_end();
+    imp::frame_end(_renderer);
 }
 
 /// Before a tick's frame: the running workload's scripted input
@@ -89,7 +91,7 @@ world,submodel,external,alias,particle,sprite,viewmodel,\
 world_pvs,world_sort,world_setup,world_light,world_surf,\
 faces_pvs_culled,faces_frustum_culled,faces_drawn,world_tris,world_px,surf_hits,surf_misses,\
 surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds,surf_texels,surfcache_kb,\
-alias_models,alias_accepted,alias_tris";
+alias_models,alias_accepted,alias_tris,bands,band_threads";
 
     /// The benchmark clock, in milliseconds since the first read: `Instant`,
     /// which on WASI is `clock_time_get` — the worker's `performance.now()`.
@@ -104,16 +106,19 @@ alias_models,alias_accepted,alias_tris";
         static ON: Cell<bool> = const { Cell::new(false) };
         static LAST: Cell<f64> = const { Cell::new(0.0) };
         static ACC: RefCell<[f64; N_PHASES]> = const { RefCell::new([0.0; N_PHASES]) };
-        static DONE: RefCell<([f64; N_PHASES], RenderStats)> =
-            RefCell::new(([0.0; N_PHASES], RenderStats::default()));
+        static DONE: RefCell<([f64; N_PHASES], RenderStats, usize)> =
+            RefCell::new(([0.0; N_PHASES], RenderStats::default(), 0));
     }
 
-    pub(super) fn frame_begin() {
+    pub(super) fn frame_begin(renderer: Option<&mut render::Renderer>) {
         if !ON.with(|c| c.get()) {
             return;
         }
         ACC.with(|a| *a.borrow_mut() = [0.0; N_PHASES]);
-        render::render_stats_begin();
+        if let Some(r) = renderer {
+            r.set_stats_clock(Some(now_ms));
+            r.stats_begin();
+        }
         LAST.with(|l| l.set(now_ms()));
     }
 
@@ -126,19 +131,19 @@ alias_models,alias_accepted,alias_tris";
         ACC.with(|a| a.borrow_mut()[phase as usize] += dt);
     }
 
-    pub(super) fn frame_end() {
+    pub(super) fn frame_end(renderer: Option<&mut render::Renderer>) {
         if !ON.with(|c| c.get()) {
             return;
         }
-        let stats = render::render_stats_end();
+        let (stats, cache) = renderer.map_or((RenderStats::default(), 0), |r| (r.stats_end(), r.surface_cache_usage().0));
         let acc = ACC.with(|a| *a.borrow());
-        DONE.with(|d| *d.borrow_mut() = (acc, stats));
+        DONE.with(|d| *d.borrow_mut() = (acc, stats, cache));
     }
 
-    /// Enable (1) or disable (0) the timers. Enabling installs the clock the
-    /// engine's `RenderStats` phase timers read.
+    /// Enable (1) or disable (0) the timers. (Each frame installs the clock
+    /// the engine's `RenderStats` phase timers read on the renderer drawing
+    /// it: [`frame_begin`].)
     pub(crate) fn bench_enable(on: i32) {
-        render::set_render_stats_clock(if on != 0 { Some(now_ms) } else { None });
         quake_rs::client::set_lap_hook(if on != 0 { Some(lap) } else { None });
         ON.with(|c| c.set(on != 0));
     }
@@ -155,7 +160,7 @@ alias_models,alias_accepted,alias_tris";
     /// phases, a count for the counters.
     pub(crate) fn values() -> Vec<f64> {
         DONE.with(|d| {
-            let (ph, s) = &*d.borrow();
+            let (ph, s, cache) = &*d.borrow();
             let ms = |ns: u64| ns as f64 / 1.0e6;
             let mut v = ph.to_vec();
             v.extend([
@@ -183,12 +188,15 @@ alias_models,alias_accepted,alias_tris";
                 s.sub_faces_drawn as f64,
                 s.sub_lm_builds as f64,
                 s.surf_texels_baked as f64,
-                // The surface cache resident after the frame (read now: the
-                // next frame has not run yet).
-                render::surface_cache_usage().0 as f64 / 1024.0,
+                // The surface cache resident after the frame.
+                *cache as f64 / 1024.0,
                 s.alias_models as f64,
                 s.alias_accepted as f64,
                 s.alias_tris as f64,
+                // The renderer's banded passes: their wall time, and the
+                // threads that drew them.
+                ms(s.bands_ns),
+                s.band_threads as f64,
             ]);
             v
         })

@@ -36,6 +36,16 @@ wasm/native ratio. Workloads (all at dt = 1/72):
 A bench build boots each workload in the program (`bench_start`) and scripts
 the walk's input there; a stock build gets the same boot and input as calls.
 
+Threads: a `wasm32-wasip1-threads` build draws its 3-D view on the host's
+thread workers (`r_threads`, 0 = as many as the host offers: PLATFORM.md,
+"Threads"). `--threads 1,2,4,8` runs every workload and size at each count
+(the program's `r_threads`), and `--build --threads-build` builds the bench
+program for that target. `--video modern` sets the Hor+ and hires video
+cvars first (`set_video`), which sizes past 1280x800 need. The frames are the
+same at every count, but the runs of one page share the game's random stream
+(QuakeC's `random()`), so to compare hashes across counts run each count in
+a page of its own (one invocation per `--threads` value, the same workloads).
+
 Usage:
   uv run web/bench.py --build                 # build the bench wasm, run the default set
   uv run web/bench.py WEBDIR                  # benchmark the page in WEBDIR (PLATFORM.md's deploy dir)
@@ -83,6 +93,11 @@ ap.add_argument("--latency", type=float, default=0.0,
 ap.add_argument("--hash-every", type=int, default=0)
 ap.add_argument("--json", help="write every raw per-frame series here")
 ap.add_argument("--port", type=int, default=isolated.port(8230))
+ap.add_argument("--threads", default="",
+                help="comma list of r_threads values to run each workload at (0 = all the host offers)")
+ap.add_argument("--threads-build", action="store_true",
+                help="with --build: build for wasm32-wasip1-threads (the renderer's threads)")
+ap.add_argument("--video", default="", help="classic or modern: the video cvars to run with (set_video)")
 ap.add_argument("--vsync", action="store_true",
                 help="keep Chromium's 60 Hz rAF cap (default: uncapped, so `raf` shows browser cost)")
 args = ap.parse_args()
@@ -90,14 +105,15 @@ args = ap.parse_args()
 # --- assemble the web dir ---------------------------------------------------
 if args.build:
     wasm_crate = os.path.join(PROJ, "quake-wasm")
-    subprocess.run(["cargo", "build", "--release", "--target", "wasm32-wasip1",
+    target = "wasm32-wasip1-threads" if args.threads_build else "wasm32-wasip1"
+    subprocess.run(["cargo", "build", "--release", "--target", target, "--bin", "quake",
                     "--features", "bench", "--target-dir", "target/bench"],
                    cwd=wasm_crate, check=True)
     WEB = os.path.join(wasm_crate, "target", "bench-web")
     os.makedirs(os.path.join(WEB, "id1"), exist_ok=True)
     for f in ("index.html", "wasi.js"):
         shutil.copy(os.path.join(HERE, f), WEB)
-    shutil.copy(os.path.join(wasm_crate, "target/bench/wasm32-wasip1/release/quake.wasm"), WEB)
+    shutil.copy(os.path.join(wasm_crate, f"target/bench/{target}/release/quake.wasm"), WEB)
     pak = os.path.join(WEB, "id1", "pak0.pak")
     if not os.path.exists(pak):
         os.symlink(os.path.join(PROJ, "quake-data", "ID1", "PAK0.PAK"), pak)
@@ -150,6 +166,9 @@ BENCH_JS = r"""
   window.__benchRun = async (cfg) => {
     quake.pause();
     await new Promise(r => setTimeout(r, 100));   // let the page's in-flight frame drain
+    // The video cvars (they bound set_resolution) and the renderer's threads.
+    if (cfg.video) await quake.call('set_video', cfg.video);
+    if (cfg.threads !== null) await quake.call('exec', 'r_threads ' + cfg.threads);
     // One frozen frame at the run's size first: the worker's frame slots
     // grow to fit it now, not on the run's first (hashed) frame.
     await quake.call('set_resolution', cfg.w, cfg.h);
@@ -206,7 +225,8 @@ BENCH_JS = r"""
       cols.step.push(step);
     }
     if (!bench) delete cols.step;
-    return { W, H, cols, hashes, bench, isolated: self.crossOriginIsolated };
+    const threads = await quake.call('render_threads');
+    return { W, H, cols, hashes, bench, threads, isolated: self.crossOriginIsolated };
   };
 })();
 """
@@ -252,6 +272,7 @@ flags = ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"]
 if not args.vsync:
     flags += ["--disable-frame-rate-limit", "--disable-gpu-vsync"]
 workloads = [w for w in args.workloads.split(",") if w]
+thread_counts = [int(t) for t in args.threads.split(",") if t] or [None]
 resolutions = [tuple(int(v) for v in r.split("x")) for r in args.res.split(",") if r]
 results = {"wasm": [], "native": [], "startup": {}, "live": {}, "latency": {}, "profiles": {}}
 results["load_before"] = open("/proc/loadavg").read().split()[:3] if os.path.exists("/proc/loadavg") else []
@@ -288,29 +309,28 @@ with sync_playwright() as p:
     if not st["isolated"]:
         print("WARNING: page not cross-origin isolated")
 
-    for wl in workloads:
-        for (w, h) in resolutions:
-            cdp = None
-            if args.profile:
-                cdp = pg.context.new_cdp_session(pg)
-                cdp.send("Profiler.enable")
-                cdp.send("Profiler.setSamplingInterval", {"interval": 100})
-                cdp.send("Profiler.start")
-            r = pg.evaluate("cfg => window.__benchRun(cfg)", {
-                "workload": wl, "w": w, "h": h, "dt": 1 / 72, "warmup": args.warmup,
-                "frames": args.frames, "hashEvery": args.hash_every})
-            if cdp is not None:
-                prof = cdp.send("Profiler.stop")["profile"]
-                results["profiles"][f"{wl}@{w}x{h}"] = summarize_profile(prof)
-                cdp.detach()
-            if "error" in r:
-                print("ERROR:", r["error"])
-                continue
-            r.update({"side": "wasm", "workload": wl, "w": r["W"], "h": r["H"]})
-            results["wasm"].append(r)
-            key = "step" if "step" in r["cols"] else "wait"
-            print(f"  wasm {wl} {r['W']}x{r['H']}: {key} median {med(r['cols'][key]):.2f} ms",
-                  file=sys.stderr)
+    for t, wl, (w, h) in [(t, wl, r) for t in thread_counts for wl in workloads for r in resolutions]:
+        cdp = None
+        if args.profile:
+            cdp = pg.context.new_cdp_session(pg)
+            cdp.send("Profiler.enable")
+            cdp.send("Profiler.setSamplingInterval", {"interval": 100})
+            cdp.send("Profiler.start")
+        r = pg.evaluate("cfg => window.__benchRun(cfg)", {
+            "workload": wl, "w": w, "h": h, "dt": 1 / 72, "warmup": args.warmup,
+            "frames": args.frames, "hashEvery": args.hash_every, "threads": t, "video": args.video})
+        if cdp is not None:
+            prof = cdp.send("Profiler.stop")["profile"]
+            results["profiles"][f"{wl}@{w}x{h}"] = summarize_profile(prof)
+            cdp.detach()
+        if "error" in r:
+            print("ERROR:", r["error"])
+            continue
+        r.update({"side": "wasm", "workload": wl, "w": r["W"], "h": r["H"]})
+        results["wasm"].append(r)
+        key = "step" if "step" in r["cols"] else "wait"
+        print(f"  wasm {wl} {r['W']}x{r['H']} on {r['threads']} thread(s): {key} median "
+              f"{med(r['cols'][key]):.2f} ms", file=sys.stderr)
 
     if args.live > 0:
         lp, lerrs = fresh_page()
@@ -374,14 +394,14 @@ results["load_after"] = open("/proc/loadavg").read().split()[:3] if os.path.exis
 
 # --- report -------------------------------------------------------------------
 ROWS = ["step", "input", "sim", "render3d", "world", " pvs", " sort", " setup", " light",
-        " surf", "submodel", "external", "alias", "particle", "sprite", "viewmodel", "post3d",
+        " surf", "submodel", "external", "alias", "particle", "sprite", "viewmodel", "bands", "post3d",
         "hud2d", "menu", "console", "blend", "pack", "wait", "copy", "put", "js", "raf"]
 # Indented rows are world-pass sub-phases (" setup" includes the raster itself).
 SUBKEY = {" pvs": "world_pvs", " sort": "world_sort", " setup": "world_setup",
           " light": "world_light", " surf": "world_surf"}
 COUNTERS = ["faces_pvs_culled", "faces_frustum_culled", "faces_drawn", "world_tris", "world_px",
             "surf_hits", "surf_misses", "surf_rebakes", "surf_bypass_bakes", "sub_faces_drawn",
-            "surf_texels", "surfcache_kb", "alias_models", "alias_accepted", "alias_tris"]
+            "surf_texels", "surfcache_kb", "alias_models", "alias_accepted", "alias_tris", "band_threads"]
 print(f"\nquake-rust browser bench — {len(wasm_bytes) / 1048576:.1f} MB wasm, frames={args.frames} "
       f"warmup={args.warmup}, dt=1/72, load {' '.join(results['load_before'])} -> "
       f"{' '.join(results['load_after'])}")
@@ -394,7 +414,8 @@ for wl in workloads:
     runs = [r for r in results["wasm"] if r["workload"] == wl]
     if not runs:
         continue
-    head = f"\n{wl:<11}" + "".join(f"| {r['w']}x{r['h']:<5} med   p95  nat  x " for r in runs)
+    label = lambda r: f"{r['w']}x{r['h']}" + (f"/{r['threads']}t" if r.get("threads") else "")
+    head = f"\n{wl:<11}" + "".join(f"| {label(r):<14} med p95 nat x " for r in runs)
     print(head)
     for row in ROWS:
         key = SUBKEY.get(row, row)

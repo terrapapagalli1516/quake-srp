@@ -47,6 +47,30 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
     (cw as usize, ch as usize)
 }
 
+/// [`clamp_resolution`], or with the hires video cvar ([`render::VideoCvars::hires`])
+/// the renderer's own limit, [`render::HIRES_MAXWIDTH`] x [`render::HIRES_MAXHEIGHT`].
+pub(crate) fn clamp_resolution_for(w: i32, h: i32, video: render::VideoCvars) -> (usize, usize) {
+    if !video.hires {
+        return clamp_resolution(w, h);
+    }
+    let (mw, mh) = video.max_view_size();
+    (w.clamp(MIN_W, mw as i32) as usize, h.clamp(MIN_H, mh as i32) as usize)
+}
+
+/// Set the video cvars (`classic` or `modern`: Hor+ and views past id's
+/// 1280x1024): the frames are drawn with them, and a larger mode can be set.
+/// For the checks and the benchmark (the `set_video` call); the page offers
+/// no such setting yet. Returns 1 for a known name.
+pub(crate) fn set_video(name: &str) -> i32 {
+    let video = match name.trim() {
+        "classic" => render::VideoCvars::CLASSIC,
+        "modern" => render::VideoCvars::MODERN,
+        _ => return 0,
+    };
+    ensure_app(|a| a.video = video);
+    1
+}
+
 /// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). Each
 /// `Frame` record carries it, and the page resizes its canvas backing store +
 /// ImageData when it changes (e.g. after the Options menu picks a different
@@ -67,8 +91,8 @@ pub(crate) fn height() -> i32 {
 /// the scene at it. The menu + HUD are drawn at their own pixel size, as in
 /// WinQuake (blown up to the framebuffer with the [`set_scaled_2d`] extra).
 pub(crate) fn set_resolution(w: i32, h: i32) {
-    let (cw, ch) = clamp_resolution(w, h);
     ensure_app(|a| {
+        let (cw, ch) = clamp_resolution_for(w, h, a.video);
         a.set_render_size(cw, ch);
         // Keep the Video Options "current mode" pointing at the new size too, so
         // a programmatic set (e.g. the page restoring a saved resolution on load)
@@ -87,13 +111,15 @@ pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 /// The screen the client frames draw ([`Vid`]): the mode, shown at the page's
 /// [`DISPLAY_ASPECT`] (which `vid.aspect` folds into the projection so the
 /// world is not stretched by the 4:3 display), with the renderer's Web extra
-/// (Options > Web extras, `wasm_exactpersp`; [`crate::extras::extras`]).
+/// (Options > Web extras, `wasm_exactpersp`; [`crate::extras::extras`]) and
+/// the App's video cvars ([`crate::extras::video`]).
 pub(crate) fn vid(render_w: usize, render_h: usize) -> Vid {
     Vid {
         width: render_w,
         height: render_h,
         display_aspect: DISPLAY_ASPECT,
         exact_perspective: crate::extras::extras().exact_persp,
+        video: crate::extras::video(),
     }
 }
 
