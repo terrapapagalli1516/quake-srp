@@ -2333,3 +2333,20 @@ and the monsters without id's `U_NOLERP` behaviour.
   The uncapped path (`Stepping::Uncapped`) needs nothing of its own for
   demos any more: `quaketool framerate` measures 70.4 camera moves a second
   at 72 Hz (id's: every frame the recorded player moves) and 468 at 480 Hz.
+
+**The 2026 extra on the same branch: `r_lerpmove`** (`client::lerpmove`,
+`LerpMove::Classic` by default and in Classic; the settings work turns it on
+in the 2026 profile). id's monsters step every 0.1 s (their thinks) and are
+drawn where each step put them; with `LerpMove::Smooth` a step mover
+(`MOVETYPE_STEP` live, `U_NOLERP` in a demo) glides from where it is drawn
+to its new place over 0.1 s, or over one frame when the server moves it
+every frame (airborne, pushed), turning the short way, and snaps on a new
+sighting, a new model, a move over 100 units on an axis and a clock that goes
+back. In a demo it is relinked where its message put it (QuakeSpasm's `f = 1`
+for its step movers), so id's `U_NOLERP` jump goes too. Only where the model
+is drawn changes (lights, sound and the box are the server's; no id1 monster
+model has a trail flag), and animation frames are not blended. Departure, off in Classic; the goldens, the walk and
+demo hashes and timedemo are unchanged by it. Measured in `FRAMERATE.md`
+("Monsters between their steps"): at 240 Hz a walking grunt is drawn moving
+in 99.8% of frames (Classic 4.2%), its largest move in a frame 0.17 units
+(4.1), half a step behind the server on average.

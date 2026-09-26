@@ -326,6 +326,44 @@ at a time, drawn between the two newest at every rate: the camera moves in
 every frame the recorded player moves, and a message is a real message, not
 one of the port's old 60 Hz sub-frames.)
 
+## Monsters between their steps (`r_lerpmove`, `q26/lerp`)
+
+id's server moves a monster (`MOVETYPE_STEP`) only in its think, every
+0.1 s, and the client draws it where the last step put it: at 240 Hz it
+stands still for 23 frames and jumps in the 24th, beside a camera that moves
+every frame. The 2026 extra `client::lerpmove::LerpMove::Smooth` (off in
+Classic; QuakeSpasm's `r_lerpmove`) draws it gliding from step to step, over
+0.1 s from where it is drawn when the step comes (one frame for a mover the
+server moves every frame); the module doc says why that rule and not
+QuakeSpasm's own. Animation frames are not blended.
+
+`quaketool framerate <pak> --lerpmove`, native, 2026-09-26: over the frames
+in which a monster was walking (it moved within 0.1 s before and after),
+Classic → `r_lerpmove`. Demos are id's relink in Classic (its `U_NOLERP`
+jump a message ahead and back: the 25-unit moves).
+
+| workload | quantity | 72 | 60 | 144 | 240 | 480 |
+|---|---|---|---|---|---|---|
+| patrol (e1m1's grunt on its path) | frames drawn moving (%) | 13.7 → 99.2 | 16.5 → 99.1 | 6.8 → 99.7 | 4.2 → 99.8 | 2.1 → 99.9 |
+| | spread of the per-frame move (sd/mean) | 2.87 → 0.56 | 2.58 → 0.53 | 4.20 → 0.56 | 5.42 → 0.52 | 7.72 → 0.51 |
+| | largest move in a frame (u) | 4.11 → 0.59 | 4.11 → 0.69 | 4.11 → 0.29 | 4.11 → 0.17 | 4.11 → 0.09 |
+| | behind the server, mean (u) | 0 → 1.13 | 0 → 1.15 | 0 → 1.05 | 0 → 1.04 | 0 → 1.02 |
+| charge (the first-room grunt woken) | frames drawn moving (%) | 13.3 → 100 | 16.0 → 100 | 6.6 → 100 | 3.9 → 100 | 2.0 → 100 |
+| | spread of the per-frame move | 2.63 → 0.26 | 2.37 → 0.25 | 3.88 → 0.25 | 5.08 → 0.23 | 7.26 → 0.23 |
+| | largest move in a frame (u) | 15.0 → 2.13 | 15.0 → 2.81 | 15.0 → 1.06 | 15.0 → 0.64 | 15.0 → 0.32 |
+| | behind the server, mean (u) | 0 → 6.27 | 0 → 6.41 | 0 → 5.86 | 0 → 5.68 | 0 → 5.56 |
+| knock (thrown: moved every frame) | behind the server, mean (u) | 0 → 2.06 | 0 → 2.54 | 0 → 1.07 | 0 → 0.64 | 0 → 0.32 |
+| demo1 (every recorded monster) | spread of the per-frame move | 1.62 → 0.97 | 1.49 → 0.96 | 2.32 → 0.94 | 3.03 → 0.93 | 4.32 → 0.92 |
+| | largest move in a frame (u) | 24.9 → 3.38 | 26.0 → 4.36 | 24.9 → 1.75 | 24.5 → 1.02 | 24.3 → 0.52 |
+| | behind the newest message, mean (u) | 2.11 → 3.54 | 1.92 → 3.64 | 2.48 → 3.37 | 2.65 → 3.30 | 2.76 → 3.24 |
+
+The price is the glide itself: a monster is drawn on average half a step
+behind where the server has it (1 unit walking, 6 running), for at most
+0.1 s; its box, its shots and everything else are the server's. The spread
+left is the monsters' own: their steps are of different lengths (a patrol's
+1–4 units, a run's 8–15). `--strip DIR` writes a 240 Hz step of the charging
+grunt, Classic and with the extra, as frames.
+
 ## Budget
 
 `quaketool framerate <pak> --budget --res 640x400,1280x800,1280x1024`, native
@@ -368,6 +406,7 @@ cd quake-rs && cargo build --release
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --check     # fail if an uncapped value leaves its tolerance
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --only jump,flash --rates 144,480
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --budget --res 1280x800
+./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --lerpmove  # monsters between steps (5 s)
 ```
 
 Each scenario restarts the process's random sequences (`server::reset_random`)
@@ -409,3 +448,15 @@ pass, `verify_extras` (42/42) and `verify_demo` (11/11) pass, and in the real
 page a second of 1/480 s steps of the attract demo with `wasm_uncapped 1`
 presents 480 frames, all different (102 before: the camera moved only on the
 demo's 60 Hz messages), the live walk 480 of 480, with no console errors.
+
+`r_lerpmove` (`q26/lerp`) is handed the same way, from wherever the page
+keeps the setting (the settings work: on in the 2026 profile, off in
+Classic); a timedemo ignores it:
+
+```rust
+use quake_rs::client::lerpmove::LerpMove;
+
+let lerpmove = if on { LerpMove::Smooth } else { LerpMove::Classic };
+wk.lerpmove = lerpmove; // beside wk.stepping
+d.lerpmove = lerpmove;  // beside d.stepping
+```
