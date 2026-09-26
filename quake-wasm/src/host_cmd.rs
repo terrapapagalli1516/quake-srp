@@ -39,10 +39,11 @@ const fn c(name: &'static str, help: &'static str, run: fn(&Args)) -> ConsoleCom
 
 /// The commands this console runs, in the order `Cmd_CompleteCommand` meets
 /// id's (`cmd_functions`: `Cmd_AddCommand` puts each in front, so the one
-/// registered last — `timedemo`, in `CL_Init` — comes first; `play`, from
-/// `S_Init`, after `CL_Init`'s; `echo` and `exec`, from `Cmd_Init`, last),
-/// then the port's own.
+/// registered last — `joyadvancedupdate`, in `IN_Init`, then `timedemo`, in
+/// `CL_Init` — comes first; `play`, from `S_Init`, after `CL_Init`'s; `echo`
+/// and `exec`, from `Cmd_Init`, last), then the port's own.
 pub(crate) const COMMANDS: &[ConsoleCommand] = &[
+    c("joyadvancedupdate", "re-read the joy* axis maps", cmd_joyadvancedupdate),
     c("timedemo", "timedemo <demo>  time a demo", cmd_timedemo),
     c("playdemo", "playdemo <demo>", cmd_playdemo),
     c("impulse", "impulse <n>", cmd_game),
@@ -119,6 +120,17 @@ fn cvar_command(args: &Args) -> bool {
 }
 
 // --- the commands -----------------------------------------------------------
+
+/// `Joy_AdvancedUpdate_f` (in_win.c): make the joystick's axis maps from the
+/// `joyadvanced` and `joyadvaxis*` cvars now (a change to them waits for it).
+fn cmd_joyadvancedupdate(_: &Args) {
+    ensure_app(|a| {
+        a.pad.joy.advanced_update(&a.settings.cvars.joy);
+        for text in a.pad.joy.take_prints() {
+            a.console.print(&text);
+        }
+    });
+}
 
 /// `Cmd_Echo_f`: the arguments, separated by spaces.
 fn cmd_echo(args: &Args) {

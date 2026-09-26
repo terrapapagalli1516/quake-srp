@@ -161,6 +161,9 @@ pub(crate) struct App {
     /// `std::thread::available_parallelism`; 1 without threads. The
     /// `r_threads` setting resolves against it each frame.
     pub(crate) hw_threads: usize,
+    /// The gamepad: in_win.c's joystick state and the 2026 rumble's
+    /// ([`crate::input::PadHost`]).
+    pub(crate) pad: crate::input::PadHost,
 }
 
 /// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
@@ -543,6 +546,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 shift_down: false,
                 m_save_demonum: 0,
                 hw_threads: 1,
+                pad: crate::input::PadHost::default(),
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {

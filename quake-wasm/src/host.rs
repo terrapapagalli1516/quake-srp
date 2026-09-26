@@ -122,7 +122,7 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 pub(crate) fn step(dt: f32) -> i32 {
     // Guard a non-finite / negative dt so both clocks only move forward.
     let real_dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
-    let mut ran = 0;
+    let mut gated = None;
     ensure_app(|a| {
         // Advance realtime every call, even a skipped one (Host_FilterTime's
         // `realtime += time`): it drives the flashing cursors, which keep
@@ -131,14 +131,15 @@ pub(crate) fn step(dt: f32) -> i32 {
         let gate = FrameGate::new(a.settings.cvars.uncapped, a.cls.timedemo);
         // `host_frametime`, the C's double: the server advances sv.time by it
         // exactly; everything else here times itself with its f32.
-        let host_frametime = if real_dt == 0.0 {
-            0.0
-        } else {
-            match gate.frame_time(a.realtime, &mut a.oldrealtime) {
-                Some(frametime) => frametime,
-                None => return,
-            }
-        };
+        let frametime = if real_dt == 0.0 { Some(0.0) } else { gate.frame_time(a.realtime, &mut a.oldrealtime) };
+        gated = frametime.map(|t| (gate, t));
+    });
+    let Some((gate, host_frametime)) = gated else { return 0 };
+    // IN_Commands: the pad's buttons through Key_Event, before the frame's
+    // commands and move, as host.c orders them.
+    crate::input::in_commands();
+    let mut ran = 0;
+    ensure_app(|a| {
         let stepping = gate.stepping();
         let dt = host_frametime as f32;
         ran = 1;
@@ -196,6 +197,8 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.stepping = stepping;
             wk.renderer.set_threads(threads);
         }
+        // CL_SendCmd's IN_Move: the pad's IN_JoyMove joins the keys' move.
+        crate::input::in_joy_move(a, host_frametime, gate_gameplay);
         if let Some(d) = a.demo.as_mut() {
             d.renderer.set_threads(threads);
             d.viewsize = viewsize;
@@ -235,6 +238,7 @@ pub(crate) fn step(dt: f32) -> i32 {
                 a.walk.as_mut().map(|wk| step_walk(wk, host_frametime, gate_gameplay, &vid))
             };
         }
+        crate::input::rumble_after_frame(a);
         let (mut img, cshifts) = match frame {
             Some((image, cshifts)) => (Some(image), cshifts),
             // Disconnected (con_forcedup): no view — V_RenderView draws

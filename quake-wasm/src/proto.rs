@@ -18,6 +18,7 @@
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
 //! | 8 | `End` | — (the host's "nothing more is queued", the answer to a polling `Sync`) |
 //! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into |
+//! | 10 | `Gamepad` | `connected u8`, `standard u8`, `buttons u8`, `0 u8`, `pressed u32`, `axes f32×6`: the pad's state, polled each display refresh ([`quake_rs::client::in_win::Pad`]) |
 //!
 //! **Out** (program → host), an 8-byte header `[kind u8][0 u8 ×3][len u32]`
 //! and `len` payload bytes:
@@ -37,11 +38,14 @@
 //! | 11 | `LocalSound` | `id u32` (`S_LocalSound`: the menu's clicks) |
 //! | 12 | `Reply` | `id u32`, `value f64`, then UTF-8 text (the answer to a `Call`) |
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
+//! | 14 | `Rumble` | `strong f32`, `weak f32`, `ms u32`: the pad's two motors (the 2026 `joy_rumble`) |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
 
 use std::io::{self, Read, Write};
+
+use quake_rs::client::in_win::{Pad, Rumble, JOY_MAX_AXES};
 
 /// Input record kinds.
 const IN_TICK: u8 = 1;
@@ -53,6 +57,7 @@ const IN_AUDIO_READY: u8 = 6;
 const IN_CALL: u8 = 7;
 const IN_END: u8 = 8;
 const IN_WINDOW: u8 = 9;
+const IN_GAMEPAD: u8 = 10;
 
 /// One event from the host.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +83,8 @@ pub(crate) enum Event {
     End,
     /// The page's box for the picture, in device pixels.
     Window { w: u32, h: u32 },
+    /// The pad's state this refresh; `None`: no pad is connected.
+    Gamepad(Option<Pad>),
     /// A record this program does not know (skipped, for forward
     /// compatibility with a newer page).
     Unknown(u8),
@@ -115,9 +122,24 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
         }
         IN_END => Event::End,
         IN_WINDOW => Event::Window { w: p.u32(), h: p.u32() },
+        IN_GAMEPAD => Event::Gamepad(read_pad(&mut p)),
         other => Event::Unknown(other),
     };
     Ok(Some(ev))
+}
+
+/// A `Gamepad` record's pad: `None` when it says none is connected.
+fn read_pad(p: &mut Payload) -> Option<Pad> {
+    let connected = p.u8() != 0;
+    let standard = p.u8() != 0;
+    let num_buttons = p.u8().min(32);
+    p.skip(1);
+    let pressed = p.u32();
+    let mut axes = [0.0; JOY_MAX_AXES];
+    for a in &mut axes {
+        *a = p.f32();
+    }
+    connected.then_some(Pad { standard, num_buttons, pressed, axes })
 }
 
 /// A little-endian reader over one record's payload. A short payload reads
@@ -168,6 +190,7 @@ const OUT_LOCAL_SOUND: u8 = 11;
 const OUT_REPLY: u8 = 12;
 #[cfg(feature = "bench")]
 const OUT_BENCH: u8 = 13;
+const OUT_RUMBLE: u8 = 14;
 
 /// `Frame` pixel formats. Only RGBA8 exists today: the engine composes the
 /// screen in RGB (PERF_PLAN B5). An 8-bit indexed format plus its palette is
@@ -224,6 +247,7 @@ pub(crate) enum Msg<'a> {
     Reply { id: u32, value: f64, text: &'a str },
     #[cfg(feature = "bench")]
     Bench(&'a [f64]),
+    Rumble(Rumble),
 }
 
 /// Little-endian field writer for a message's fixed part.
@@ -298,6 +322,7 @@ impl Msg<'_> {
             Msg::Reply { id, value, text } => (OUT_REPLY, f.u32(id).f64(value).0, text.as_bytes()),
             #[cfg(feature = "bench")]
             Msg::Bench(values) => (OUT_BENCH, values.iter().fold(f, |f, &v| f.f64(v)).0, &[]),
+            Msg::Rumble(r) => (OUT_RUMBLE, f.f32(r.strong).f32(r.weak).u32(r.ms).0, &[]),
         }
     }
 
@@ -356,6 +381,16 @@ pub(crate) mod encode {
     pub(crate) fn audio_ready(on: bool) -> Vec<u8> {
         record(super::IN_AUDIO_READY, &[on as u8])
     }
+    /// A `Gamepad` record: `None` is "no pad connected".
+    pub(crate) fn gamepad(pad: Option<quake_rs::client::in_win::Pad>) -> Vec<u8> {
+        let p = pad.unwrap_or_default();
+        let mut v = vec![pad.is_some() as u8, p.standard as u8, p.num_buttons, 0];
+        v.extend_from_slice(&p.pressed.to_le_bytes());
+        for a in p.axes {
+            v.extend_from_slice(&a.to_le_bytes());
+        }
+        record(super::IN_GAMEPAD, &v)
+    }
 }
 
 /// A decoded output record (tests and the native twin read the program's
@@ -411,6 +446,9 @@ mod tests {
         stream.extend(encode::mouse(-3.0, 2.5));
         stream.extend(encode::call(9, "menu_visible"));
         stream.extend(encode::audio_ready(true));
+        let pad = Pad { standard: true, num_buttons: 17, pressed: 0b101, axes: [0.5, -1.0, 0.0, 0.25, 1.0, 0.0] };
+        stream.extend(encode::gamepad(Some(pad)));
+        stream.extend(encode::gamepad(None));
         stream.extend(encode::end());
         let mut r = &stream[..];
         let mut got = Vec::new();
@@ -425,6 +463,8 @@ mod tests {
                 Event::Mouse { dx: -3.0, dy: 2.5 },
                 Event::Call { id: 9, line: "menu_visible".into() },
                 Event::AudioReady(true),
+                Event::Gamepad(Some(pad)),
+                Event::Gamepad(None),
                 Event::End,
             ]
         );
@@ -490,5 +530,6 @@ mod tests {
             56
         );
         assert_eq!(size(Msg::State { flags: 0, menu_screen: 0, pixel_size: 0 }), 12);
+        assert_eq!(size(Msg::Rumble(Rumble { strong: 1.0, weak: 0.5, ms: 200 })), 12);
     }
 }

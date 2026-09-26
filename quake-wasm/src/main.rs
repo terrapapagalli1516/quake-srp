@@ -36,7 +36,7 @@
 //! | `cl_walk`   | cl_main.c                               | `step_walk`: `client::cl_main::walk_frame` on the page's `Vid`, its sound calls to `snd_dma`; the live game's end-to-end tests |
 //! | `cl_demo`   | cl_demo.c                               | `step_demo`: `client::cl_demo::demo_frame` likewise; the playback tests |
 //! | `cl_tent`   | cl_tent.c                               | (tests only) Chthon's lightning end to end       |
-//! | `input`     | in_win.c, keys.c `Key_Event`            | mouse look, every key through `Key_Event` (the moves: `client::cl_input`) |
+//! | `input`     | in_win.c, keys.c `Key_Event`            | mouse look, every key through `Key_Event`, the gamepad's `IN_Commands`/`IN_JoyMove` and rumble (the moves: `client::cl_input`; the pad as a joystick: `client::in_win`) |
 //! | `menu`      | menu.c `M_Keydown`                      | the menu's keys and the actions they return      |
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle and typing                        |
 //! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | the console's command table, `Cvar_Command`, `bind`, `map` (the loads and cheats: `client::host_cmd`) |
@@ -121,7 +121,14 @@ fn main() -> ExitCode {
         eprintln!("quake: {e}");
         return ExitCode::FAILURE;
     }
-    app::ensure_app(|a| a.hw_threads = hw_threads());
+    // IN_StartupJoystick's `-nojoy`: no pad is ever read.
+    let nojoy = std::env::args().any(|a| a == "-nojoy");
+    app::ensure_app(|a| {
+        a.hw_threads = hw_threads();
+        if nojoy {
+            a.pad.joy.set_nojoy();
+        }
+    });
     // stdout goes through a buffer the size of a turn's small records, so
     // a turn reaches the host in a few writes; a frame's pixels pass
     // straight through it.
