@@ -1,8 +1,103 @@
 # Faithfulness Audit — Rust port vs id's original C
 
 The ledger of every difference found between the port and id's WinQuake C, and what was
-done about it, with the evidence. Newest work is at the bottom; this top part is the way
-in: an index of the 2026-09-25 sections, then everything still open, in one list.
+done about it, with the evidence. Newest work is at the bottom. This top part is the way
+in:
+
+1. the two profiles, and every departure the 2026 profile makes, as one table;
+2. an index of the 2026-09-26 and 2026-09-25 sections;
+3. everything still open, in one list.
+
+## The profiles and the departures
+
+Since 2026-09-26 every departure from id's game is a setting. `quake_rs::cvar::CVARS`
+marks each one `departure`, and two profiles switch them all at once
+(`quake_rs::settings`):
+
+- **Classic** has every departure off and `default.cfg`'s bindings. It is WinQuake:
+  frames, game state and timing, proven by `uv run oracle/classic_check.py`
+  (`oracle/README.md`, "Classic").
+- **2026** is the default: an idealized software-rendered Quake on a 2026 machine.
+
+To switch, use Options > "Classic / 2026" (←/→; Enter lists every row), the console's
+`profile classic|2026`, or the page's `?classic` / `?2026`. Each row can also be set
+alone, on that settings page or as its console variable. Switching profile resets the
+departures and the bindings, and keeps id's own settings (Screen size, Brightness,
+the volumes, the mouse).
+
+| departure | setting (settings page row) | 2026 | why |
+|---|---|---|---|
+| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`) | `wasm_uncapped` (Uncapped framerate) | on | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). |
+| The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion) | `vid_native` (Native resolution), `vid_pixelsize` (Pixel size) | on, Auto | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. Auto picks the smallest size that keeps a frame within 1920x1080 pixels times the whole square root of the render threads. ("High resolutions and Hor+") |
+| Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
+| The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits | `wasm_scaled2d` (Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. |
+| Monsters glide between their 0.1 s steps (QuakeSpasm's `r_lerpmove`) | `r_lerpmove` (Smooth monsters) | on | At high refresh rates a stepping monster visibly jumps ten times a second. ("Demo playback between messages") |
+| id's crosshair (`V_RenderView`'s `+`) | `crosshair` (Crosshair) | on (id: 0) | Mouse aiming. |
+| Mouse look without holding `+mlook` | `freelook` (Mouse look) | on | How mouse play works today; `+mlook` still works in both profiles. |
+| Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | on (id: 200) | |
+| WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the profile's bindings (`Bindings::with_wasd`) | on | |
+| Jump also swims up (`upmove`), on top of QuakeC's own swim | `cl_jumpswim` (Space swims up) | on | With WASD, `d` no longer swims up. |
+| `f` toggles fullscreen | `vid_fkey` (F for fullscreen) | on | `default.cfg` leaves `f` unbound. |
+| id's mixer at the device's rate with four of its faults fixed: the click at a loop's restart, 48 kHz pitch 1.4% flat, ambient fades stalling above 100 fps, `S_StopSound`'s channel range | `snd_modern` (Full-rate sound) | on | Classic is id's mixer as written, at 11025 Hz. ("The engine's own mixer") |
+| Touch controls on a touch screen (stick, look by dragging, fire, jump, weapon), and the live game pauses when the page is hidden | `in_touch` (Touch controls) | on | Phones. Classic on a touch screen keeps a MENU button and the tappable menu. ("Touch, install and offline") |
+| A gamepad as a twin-stick pad: in_win.c's advanced joystick layout (`joystick 1`, `joyadvanced 1`, the axis maps and sensitivities), a round dead zone, a look curve, the pad in the menus, and the 2026 pad bindings | `joystick` (Gamepad), `joyadv*`, `joy*sensitivity`, `joy*threshold`, `joy_deadzone`, `joy_exponent`, `joy_menukeys` | on | id's `joystick 0` reads no pad. ("Input") |
+| Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Rumble) | on | |
+| QuakeWorld's frame-rate readout | `wasm_showfps` (Show FPS) | off | Clutter. |
+| Exact perspective at every pixel | `wasm_exactpersp` (Exact perspective) | off | id's 16-pixel spans are part of the look. |
+
+**The same in both profiles** (id's behaviour, or the platform's, not a departure):
+- Raw mouse (`unadjustedMovement`): id's `IN_StartupMouse` switched pointer acceleration
+  off.
+- Keys by their physical place: id's scancodes.
+- `r_threads`: the pixels are the same for any thread count.
+- On a touch screen the menus answer taps (a tap becomes a key id's menu takes).
+- QuakeC errors end the game: id's `Host_Error`.
+- The CD plays the player's own tracks (`cd_win.c`; with none there is no drive, as
+  `cd_null.c`).
+- A player's own `pak1.pak` goes through id's search path.
+- Classic's joystick has a few small departures of its own ("Input").
+
+The names still carry the old era: `wasm_*` for four of the cvars, `MenuScreen::Extras`
+and `EXTRAS_*` in the menu code. Renaming them needs `config.cfg` aliases (Open, "Code").
+
+## The 2026-09-26 sections
+
+The 2026 push, in merge order. Each section names its branch; the merge message on
+`quake/2026` summarises it too (`STATUS.md`, "2026-09-26: the 2026 push").
+
+- **The engine's own mixer** (`q26/audio`): `snd_dma.c`, `snd_mix.c` and `snd_mem.c`
+  in the engine, sample-exact against id's C; the 2026 mixer's four fixes; the browser
+  plays it through an AudioWorklet.
+- **The browser as a WASI program** (`q26/platform`): saves and `config.cfg` as files;
+  `play`; `S_StopAllSounds` in call order; each level's placed loops.
+- **High resolutions and Hor+** (`q26/hires`): 44.20 edge `u` past 2048 columns;
+  particles and the underwater warp in proportion; Hor+.
+- **Demo playback between messages** (`q26/lerp`): Classic demos drawn as id's
+  `CL_LerpPoint` draws them (a Classic fix); `r_lerpmove`.
+- **QuakeC errors end the game** (`q26/server`): `PR_RunError`'s report, `Host_Error`,
+  `error`/`objerror` (CENSUS L16).
+- **Settings and profiles** (`q26/settings`): Classic's controls are id's; `+mlook`; the
+  crosshair; `config.cfg` as id's; one command table; the profiles.
+- **Input** (`q26/input`): id's joystick; the 2026 pad; keys by place; raw mouse;
+  latency.
+- **Touch, install and offline** (`q26/mobile`): `in_touch`; tappable menus; pause when
+  hidden.
+- **The player's own Quake** (`q26/content`): the search path; `COM_CheckRegistered`;
+  CD audio.
+
+Without a section here, because they did not change what Classic draws or does (each was
+checked against the goldens, the play hashes and the census):
+- `q26/framerate`: the uncapped stepping; `FRAMERATE.md`.
+- `q26/multicore`: the renderer owns its state and draws on N threads, byte-identical
+  at any N; `web/PLATFORM.md` "Threads", `PERF_PLAN.md` §11.
+- `q26/present`: 8-bit frames with the palette applied at presentation; `PERF_PLAN.md`
+  B5, `web/PLATFORM.md` "Presentation".
+- `q26/vm`: typed entity fields, a private VM, opcodes decoded at load; it also closed
+  two open items, the string heap growing and the output log never drained;
+  `CODE_PLAN.md` R5 and R10.
+- `q26/tool`: quaketool as one directory, with byte-identical output.
+- `q26/rustcheck`: `CODE_PLAN.md`.
+- `q26/review`: five small fixes; `STATUS.md`.
 
 ## The 2026-09-25 sections
 
@@ -35,8 +130,8 @@ In file order (roughly merge order). Each names its branch; the merge message on
   WinQuake draws it; id's console; the DOS quit prompt; status-bar and centre-print offsets.
 - **Projection and spans** (`quake/w2b`) — the pixel aspect in the projection (the world
   was 1.2x tall); `D_DrawSpans16`; the sky centred on the screen; `wasm_exactpersp`.
-- **Web extras: the opt-in departures** (`quake/extras`) — the Web extras page; `viewsize`
-  persists; Esc in fullscreen.
+- **Web extras: the opt-in departures** (`quake/extras`) — the Web extras page (since
+  2026-09-26 the "Classic / 2026" settings page); `viewsize` persists; Esc in fullscreen.
 - **Entity culling and resolved fields** (`quake/sim`) — `SV_WriteEntitiesToClient`'s PVS
   test and efrag statics (CENSUS L22: flashes lit walls through walls); fields resolved
   once per progs.
@@ -49,42 +144,65 @@ In file order (roughly merge order). Each names its branch; the merge message on
   a mover's stop sound survives the sound cap; console prints reach the notify lines;
   menu and console key routing; old saves' player name; the warp keeps its tables; demo
   particles fall by `sv_gravity`; the canvas is the largest 4:3 box.
-- **Demo commands, timedemo, pause** (`quake/timedemo`, merged last) — `playdemo`,
-  `stopdemo`, `startdemos`, `demos` and the disconnected state; `timedemo` with id's frame
-  counts; `pause` and `SCR_DrawPause`; why there is no loading plaque.
+- **Demo commands, timedemo, pause** (`quake/timedemo`) — `playdemo`, `stopdemo`,
+  `startdemos`, `demos` and the disconnected state; `timedemo` with id's frame counts;
+  `pause` and `SCR_DrawPause`; why there is no loading plaque.
+- **Final review fixes, UI side** (`quake/polish4b`) — every key through `Key_Event`; boot
+  into the attract demos, the menu stops the loop (`M_Menu_Main_f`); `help` is the Help
+  screen; console history, completion and backscroll; Multiplayer > Setup.
+- **Final review fixes, engine side** (`quake/polish4a`) — dynamic lights on moved brush
+  models in world space; views clamped to `MAXWIDTH`x`MAXHEIGHT` (since 2026-09-26 only
+  in Classic); `setmodel`'s alias and sprite boxes (CENSUS L10); malformed-map hardening.
 
 Without a section here: the census itself (`CENSUS.md`), the oracle (`oracle/README.md`),
 the performance plan (`PERF_PLAN.md`), and the structure-only branches — the render,
 server and quake-wasm splits and the move of the game client into `quake_rs::client` —
 which were byte-identical (STATUS.md).
 
-## Open, as of 2026-09-25
+## Open, as of 2026-09-26
 
-Everything known to differ from id's WinQuake, or not yet checked, gathered from the
-sections below, `CENSUS.md`, `oracle/README.md` and `PERF_PLAN.md`, one line each with
-where it came from. Items marked *(2026-06)* were not re-checked on 2026-09-25.
+Everything known to differ from id's WinQuake in Classic, or not yet checked, gathered
+from the sections below, `CENSUS.md`, `oracle/README.md`, `FRAMERATE.md`, `PERF_PLAN.md`
+and the closing review of 2026-09-26. One line each, with where it came from. Items
+marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-09-25 or
+2026-09-26, and say where.
 
-**Decisions, not work**
-- Four control departures are on by default: mouse look held while the pointer is locked,
-  WASD over `default.cfg`'s `a`/`d`, `f` for fullscreen, Space adding swim-up speed
-  (CENSUS, "Rule departures on by default").
-- Kept on purpose: the main menu does not stop the attract loop; id's `M_Menu_Main_f`
-  sets `cls.demonum = -1`, so its demo loop ends with the current demo (timedemo, "Kept,
-  not id's").
+**Closed since the 2026-09-25 list**
+- ~~Four control departures on by default (mouse look held while the pointer is locked,
+  WASD, `f` for fullscreen, Space adding swim-up speed)~~: Classic has `default.cfg`'s
+  bindings and none of them; 2026 has each as a named setting (settings).
+- ~~The main menu does not stop the attract loop~~: it does, as `M_Menu_Main_f`
+  (polish4b; the 2026-09-25 list missed it).
+- ~~`setmodel` gives alias and sprite models a zero box~~: id's box (polish4a, CENSUS L10).
+- ~~`objerror`/`error` do not end the game~~: they do, through `Host_Error`, and so does
+  any QuakeC runtime error (server, CENSUS L16).
+- ~~The browser console has no `d_mipscale`/`d_mipcap`~~ (settings).
+- ~~The framebuffer is RGB, not 8-bit (PERF_PLAN B5)~~: 8-bit, with the palette applied
+  at presentation (present).
+- ~~`Vm::intern` never de-duplicates and `vm.output` is never drained~~ (vm, `d63a0b4`,
+  `267fb8c`).
+- ~~`quake-rs/src/lib.rs`'s crate doc describes only the file loaders~~ (review,
+  `5af262e`); ~~`render/surf.rs`'s `mipadjust` comment is backwards~~ (docs).
+- ~~Static sounds of one sample are separate Web Audio sources; the page plays at most
+  16 one-shots a frame~~: the page no longer mixes; id's mixer runs in the program
+  (audio).
+- ~~CD audio is not modelled~~: `cd_win.c` with the player's own tracks (content).
 
 **Game and client**
-- Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12, `t` messagemode (CENSUS L12; its
-  `pause` half is done). No loading plaque, on purpose: loads finish inside a frame
-  (timedemo).
+- Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12, `t` `messagemode`, the `zoom_in`
+  alias (CENSUS L12; its `pause` half is done). No loading plaque, on purpose: loads finish
+  inside a frame (timedemo).
+- Console commands id has and the port does not: `version`, `disconnect` (it does not end
+  the game), and among others `alias`, `wait`, `playvol`, `soundlist` (review; the
+  port's 34 are in `wasm_help`).
+- Multiplayer > Setup's name does not reach the player's edict: the server connects
+  "player" (polish4b).
 - `pause`: the `pausable` and `showpause` cvars (id's defaults, both 1, are what the port
   does) and `VID_HandlePause` are not modelled; `timedemo` sets `cls.timedemo` only when
   the demo opens, where id's sets it anyway (timedemo).
 - `give` is not `Host_Give_f`: it clamps, has an armour case, fills a missing amount, and
   selects the weapon (CENSUS L13).
 - No pitch drift on slopes: `cl.idealpitch` is fixed at 0 (CENSUS L3).
-- `setmodel` on an alias or sprite model sets a zero box (id: ±16, the sprite's size); no
-  shareware effect found (CENSUS L10).
-- `objerror`/`error` do not end the game as `Host_Error` does (CENSUS L16).
 - `makestatic` keeps the edict (id frees it into the signon); nothing visible (CENSUS L17).
 - `checkclient` traces a line of sight instead of using the 0.1 s client PVS (CENSUS L19).
 - The gibbed player's head leaves no blood trail: the client skips the player's edict
@@ -94,17 +212,31 @@ where it came from. Items marked *(2026-06)* were not re-checked on 2026-09-25.
 - The player connects at `sv.time` 1.2, id's signon at about 1.4 (fix-server, F8).
 - A stuffed `bf` runs in the same host frame; id's `Cbuf_Execute` runs it one frame later
   (fix-client, F6; accepted).
-- The 72 fps gate gives an 85–100 Hz display half its rate, as id's would (host; accepted).
+- A QuakeC error while a NEW game comes up (`build_walk_map`, `build_walk_savegame`)
+  returns without id's report; no shareware map raises one (server).
+- `setmodel` copies the model's name into the string heap, where id keeps the QuakeC
+  string; nothing reads the difference (vm).
+- The 72 fps gate gives an 85–100 Hz display half its rate, as id's would (host;
+  Classic only since 2026-09-26).
 - Console `kill` drains only a pending restart, not a same-frame changelevel (2026-06).
 - `quaketool`'s walk paths skip the signon settle frames, to keep their output stable
   (2026-06, deliberate).
+
+**Input**
+- Classic's joystick departs from in_win.c in small ways: `IN_Commands` keys the newest
+  reading (id's, the frame before); a pad that goes away lets its held keys go; the pad's
+  turn is gated behind the menu and console; "joystick detected" prints when a pad first
+  shows itself (input).
+- With `+strafe` held, the 2026 pad's right stick strafes the wrong way (id's one
+  `joysidesensitivity` serves both axes; input, not fixed).
 
 **Demo playback**
 - No dynamic lights in demo playback: explosions and rockets light nothing (Round 4;
   fix-client F13).
 - Demo statics are drawn without the efrag test (same pixels, more work) (sim).
 - The loop wrap keeps the ambient ramp warm where id restarts it from 0 (2026-06,
-  deliberate; not re-checked since the loop moved to `CL_NextDemo` on `quake/timedemo`).
+  deliberate; not re-checked since the loop moved to `CL_NextDemo` on `quake/timedemo`
+  and the mixer into the engine on `q26/audio`).
 
 **Renderer**
 - A map with no lighting lump renders lit; id draws it fullbright. Test maps only (fid1).
@@ -123,21 +255,39 @@ where it came from. Items marked *(2026-06)* were not re-checked on 2026-09-25.
   instead of squeezed through id's aspect (polish; w2b).
 - `CL_UpdateTEnts`' `MAX_VISEDICTS` half-cap and its index clobber (undefined in the C)
   are not modelled (ship push, deliberate).
-- Architecture, not pixels: the framebuffer is RGB, not 8-bit (PERF_PLAN B5); the surface
-  cache has no fixed-size pool; external `b_*.bsp` boxes bypass it (PERF_PLAN C4).
+- The surface cache has no fixed-size pool; external `b_*.bsp` boxes bypass it
+  (PERF_PLAN C4). Architecture, not pixels.
+- Kept, id's: at high resolutions the maps' sub-pixel gaps (T-junctions) show the
+  background on about one pixel every 40 frames at 4K (hires).
+
+**The 2026 profile** (not Classic; what the port's own departures still leave)
+- Uncapped, a few per-frame roundings in id's code still drift with the frame rate:
+  ground friction and acceleration (2–3 units over a run, 5% of a slide), swimming (2–3%
+  over a second), QuakeC timers a frame rounds up (lava burns 4% faster at 480 Hz, a
+  fall-damage threshold 4.5 units lower), pusher think transitions; air control is not
+  measured (`FRAMERATE.md`, "What is left").
+- In 2026, Video Options shows 960x600 as the current mode, and picking a mode silently
+  turns Native resolution off (review).
+- The menu's fade dither is one screen pixel under a 4–6x menu, so it reads as a fine
+  screen-door (review).
+- On a phone the JUMP and FIRE buttons overlap the status bar's ammo count (review).
 
 **Menus**
 - Video Options lists the port's modes in one column, not `VID_MenuDraw`'s grid with its
   test/default keys (options).
-- The browser console has no `d_mipscale`/`d_mipcap` (w2a).
 
 **Sound**
-- ~~Static sounds of one sample are separate Web Audio sources~~ and ~~the page plays at
-  most 16 one-shots a frame~~: gone with the page's mixing — id's mixer runs in the
-  program and the page plays its samples ("The engine's own mixer", below).
 - The client hands `S_StartSound` the QuakeC volume in live play, not the wire byte over
   255 id's client sees (a volume can differ by one step of 255); temp-entity sounds use
   entity 0 where `CL_ParseTEnt` uses -1 (nothing audible) (audio).
+- The mixer does not model `GetSoundtime`'s chop after 2^30 pairs (`paintedtime` is
+  64-bit), `snd_show`, `soundlist`/`soundinfo` or `playvol` (audio).
+
+**Files and the command line**
+- Not modelled: `-game`, `-rogue`/`-hipnotic`, `-path`, `-cachedir`, `proghack`,
+  `cmdline`, the CD's eject and `MCI_NOTIFY_FAILURE`. A `progs.dat` with builtins id's
+  engine never had (the 2021 re-release's) is refused at startup, where id's would run
+  until the first call (content).
 
 **Older LOW tail** *(2026-05/06, not re-checked)*: `PF_particle`'s byte count and
 direction quantising; `clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s
@@ -145,21 +295,30 @@ integer abs; `OP_ADDRESS`'s world guard; `AngleVectors` in f64; `ST_RAND` syncba
 tracer parity; sky-name case; `push_entity`'s trigger order against `SV_Impact`; sprite
 group syncbase (Round 2, Round 5).
 
-**Tooling and docs**
+**Code** (the closing review's ranked list; `CODE_PLAN.md` has the plan)
+- Old-era names: the `wasm_*` cvars (`wasm_uncapped`, `wasm_showfps`,
+  `wasm_exactpersp`, `wasm_scaled2d`, `wasm_help`), `MenuScreen::Extras`, `EXTRAS_*`
+  and the `extras` automation calls. Renaming needs `config.cfg` aliases.
+- rustfmt and edition: 117 files are not rustfmt-clean, and quake-rs is still on edition
+  2021 (CODE_PLAN W0a).
+- 12 rustdoc warnings in `server/` and the VM, and dead public functions (`Vm::global_ofs`,
+  `Vm::ret_int`, `sound_names` in `server/mod.rs`).
+- 16 `thread_local!` blocks remain (from 39), among them `FILES`/`GAMEDIR` in
+  `quake-wasm/src/common.rs` and the scaled 2-D layer's `SCALED_2D` in `draw.rs`.
+
+**Tooling**
 - `quaketool view --vrect` draws an underwater view unwarped, so the warp below viewsize
   120 is not compared (polish2).
 - The oracle harness hands the port light styles 0.1 s off at settle ≥ 3 on e1m1
   (oracle README); sprites and the intermission were never compared.
-- `render/surf.rs`'s `mipadjust` comment has the direction backwards (polish2; still so).
-- `quake-rs/src/lib.rs`'s crate doc still describes only the file-format loaders (found
-  while writing these docs).
-- Engineering: `Vm::intern` never de-duplicates and `vm.output` is never drained in the
-  browser build; both grow for a level's life (CENSUS).
 
 **Not verified**
-- Esc under the Keyboard Lock API in a real fullscreen browser (extras; headless has none).
-- Anything on a real GPU browser, Firefox, Safari, a phone, or a real 120/144 Hz display
-  (PERF_PLAN §9).
+- A real browser on a real display: every browser check ran headless (Chromium, and
+  Firefox for most), on a desktop GPU at best. Not tried: Safari and iOS (WebKit
+  would not start here), a real phone, a real 120–480 Hz display, real pointer-lock
+  behaviour (headless Chromium's lock jumps the pitch), a real gamepad (the checks emulate
+  the Gamepad API), and Esc under the Keyboard Lock API in fullscreen.
+- Sound was checked by its counters, samples and the C oracle, never by ear.
 
 ---
 
@@ -476,6 +635,10 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 - sbar: health/armor/ammo big-number x positions diverge from sbar.c
 - sbar: scorebar / solo scoreboard on death + intermission/finale overlays not drawn
 
+## LOW (27)
+
+Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (~~SV_TryUnstick/WallFriction~~ (✅ Round 2), ~~force_retouch~~ (✅ CENSUS F8, `quake/fix-server`), sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled. The current list is "Open, as of 2026-09-26" at the top.
+
 ## Wave 2 — DONE
 
 1. ✅ **Particle/TE spawn-wiring** (`8bda8cb`) — rocket/grenade/gib/tracer trails per model flags; TE_LAVASPLASH/TELEPORT/TAREXPLOSION/EXPLOSION2 routed (TAREXPLOSION split out of the dlight group).
@@ -484,7 +647,7 @@ Also fixed this session (was a separate reported bug, not in the audit): the
 4. ✅ **Stereo pan law** (`web`) — linear 1±dot with full near-side gain.
 5. ✅ **`svc_particle`** → R_RunParticleEffect (not the rocket explosion).
 
-## Still open (as of 2026-06; superseded by "Open, as of 2026-09-25" at the top)
+## Still open (as of 2026-06; superseded by "Open, as of 2026-09-26" at the top)
 
 All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 (see the session entry below). The remaining tail, all LOW / niche:
@@ -2218,6 +2381,9 @@ sound playing on under the menu and over `pause` as id's `S_Update` does.
   at 16 bits after `volume`. Not modelled: `S_ClearBuffer` (the platform owns the
   output buffer), `GetSoundtime`'s chop after 2^30 pairs (`paintedtime` is 64-bit),
   `snd_show`, `soundlist`/`soundinfo`, `play`/`playvol`, CD audio.
+  *Since, on this branch: `play` is `S_Play` (`Mixer::play`), and `S_ClearBuffer`
+  reaches the platform (`Mixer::take_clear`, the PCM record's clear flag). CD
+  audio came with `q26/content` (below).*
 - Port-side notes: the client's temp-entity sounds use entity 0 where
   `CL_ParseTEnt` uses -1 (no audible difference: neither is the view entity
   and channel 0 never overrides); the live path hands `S_StartSound` the
@@ -2246,6 +2412,8 @@ the measurements. What that moved that id's game has an opinion on:
   quits), exec'd at startup before the attract loop, values unquoted (this
   console has no `COM_Parse`). Key bindings and the other Options cvars are
   not archived yet, as the page never kept them. Tests in `config.rs`.
+  *Since `q26/settings` (below): `bind` lines and every archived cvar, read
+  through `COM_Parse`, after a `profile` line.*
 - ✅ **`play`** (`S_Play`): each named sample (`.wav` added without an
   extension) as a local sound; the page's sound button runs `play
   items/r_item1.wav`. Test `play_queues_each_named_sample_as_a_local_sound`.
@@ -2262,13 +2430,9 @@ the measurements. What that moved that id's game has an opinion on:
   the new page keeps each level's loop records and starts those, once each
   (Firefox found them started twice).
 
-## LOW (27)
-
-Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (~~SV_TryUnstick/WallFriction~~ (✅ Round 2), ~~force_retouch~~ (✅ CENSUS F8, `quake/fix-server`), sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled. The current list is "Open, as of 2026-09-25" at the top.
-
 ## High resolutions and Hor+ (2026-09-26, branch `q26/hires`)
 
-Two video cvars, `render::VideoCvars` (per-thread, like `d_mipscale`; `render::set_video_cvars`).
+Two video cvars, `render::VideoCvars` (per-thread, like `d_mipscale`; `render::set_video_cvars`). *Since `q26/multicore` (R3) both are per frame, in the frame's `RenderOptions::video` and the client's `Vid::video`, and the settings set them from `vid_native` and `fov_adapt`.*
 Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` across the view.
 
 | cvar | what it changes when on | status |
@@ -2318,6 +2482,9 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   40 frames at 4K. id's; left alone.
 - **Not measured:** the page (quake-wasm and web/ do not set the cvars yet), GPU browsers,
   phones.
+- *Since `q26/settings`: the 2026 profile turns both on in the page (`vid_native` sets
+  `hires`, `fov_adapt` sets Hor+); Classic keeps both off. The page's speed at these sizes
+  is in `web/PLATFORM.md` ("Threads", "Presentation") and `PERF_PLAN.md` §11.*
 
 ## Demo playback between messages: id's CL_LerpPoint in Classic (2026-09-26, branch `q26/lerp`)
 
@@ -2419,8 +2586,8 @@ demo loop and drops to the console. Every profile now does that; it is id's, not
   `Host_Error: Program error` to the console text and stops every sound
   (`CL_Disconnect`'s `S_StopAllSounds`); `walk_frame` shows the disconnected screen from
   then on and sets `Walk::host_error` for the host, which drops the walk, sets
-  `cls.demonum = -1` and brings the console down (the shell's side: not wired yet, see the
-  branch report). A changelevel, restart or `kill` whose QuakeC fails ends the game the
+  `cls.demonum = -1` and brings the console down (the shell's side:
+  `finish_host_error`, wired at the merge, `d5db64a`). A changelevel, restart or `kill` whose QuakeC fails ends the game the
   same way; a missing or corrupt map still leaves the level running (the port's degrade).
 - ✅ **`error` and `objerror` (CENSUS L16).** id prints `======SERVER ERROR in <function>:`
   (or `OBJECT ERROR`) and the text, dumps `self` (`ED_Print`), and calls `Host_Error`
@@ -2511,7 +2678,8 @@ settings live in one typed value the host owns (`quake_rs::settings`), and
   2026, `Classic` — id's mixer at 11025 Hz — in Classic), on the settings page
   as "Full-rate sound"; the sound device reads it at every mix.
 - **Not done / slots:** `input`'s raw mouse and gamepad become a departure in
-  `Cvars` (on in `Cvars::modern`) when they land. id's F-key
+  `Cvars` (on in `Cvars::modern`) when they land. *(They landed: the 2026 pad is
+  departures, "Input" below; the raw mouse is id's feel, in both profiles.)* id's F-key
   shortcuts (F1–F12), `messagemode` and the `zoom_in` alias are still not
   bound (CENSUS L12).
 
