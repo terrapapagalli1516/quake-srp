@@ -6,11 +6,10 @@ use quake_rs::render;
 
 use crate::app::{Walk, APP};
 use crate::console::{console_char, console_enter};
-use crate::snd_dma::{set_audio_ready, SND_QUEUE};
 
 /// Build a synthetic PACK image holding the given (name, contents) files, so
-/// `queue_sounds` can resolve real bytes for hand-crafted sound names without
-/// depending on the embedded pak's contents.
+/// a test can hand the client files of its own without depending on the
+/// shareware pak's contents.
 pub(crate) fn build_test_pak(files: &[(&str, &[u8])]) -> Pak {
     let mut contents = Vec::new();
     let mut positions = Vec::new();
@@ -39,9 +38,9 @@ pub(crate) fn build_test_pak(files: &[(&str, &[u8])]) -> Pak {
     Pak::from_bytes("test".into(), img).expect("synthetic pak")
 }
 
+/// Forget the sound calls waiting for the mixer (`snd_dma`).
 pub(crate) fn reset_queue() {
-    SND_QUEUE.with(|q| q.borrow_mut().clear());
-    set_audio_ready(1); // audio running so queue_sounds enqueues
+    crate::snd_dma::clear_pending();
 }
 
 /// Read a player-edict float field from the live walk (0.0 if no walk).

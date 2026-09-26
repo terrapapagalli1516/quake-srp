@@ -14,9 +14,11 @@
 //! | 3 | `Mouse` | `dx f32`, `dy f32` (raw `movementX`/`movementY` counts) |
 //! | 4 | `ClearKeys` | — (the window lost the keyboard) |
 //! | 5 | `PointerUnlocked` | — |
-//! | 6 | `AudioReady` | `ready u8` |
+//! | 6 | `AudioReady` | `ready u8`, `0 u8 ×3`, `rate u32` (the device's sample rate; 0 unknown) |
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
 //! | 8 | `End` | — (the host's "nothing more is queued", the answer to a polling `Sync`) |
+//! | 10 | `AudioClock` | `pos u32`: the sample pairs the page's audio device has played (a wrapping count; the page sends it before each `Tick`) |
+//! | 11 | `AudioWake` | `pos u32`: the same, from the host between ticks while the device plays: mix now (`S_ExtraUpdate`) |
 //!
 //! **Out** (program → host), an 8-byte header `[kind u8][0 u8 ×3][len u32]`
 //! and `len` payload bytes:
@@ -26,16 +28,11 @@
 //! | 1 | `Frame` | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 u8 ×3`, then the pixels |
 //! | 2 | `Sync` | `seq u32` (the last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
 //! | 3 | `State` | `flags u32` ([`STATE_MENU`] …), `menu_screen i32` |
-//! | 4 | `Sample` | `id u32`, then the RIFF/WAV bytes (sent once per distinct sample) |
-//! | 5 | `Sound` | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `entity i32`, `channel i32`, `view u32`, `loop_start f32`, `loop_end f32` |
-//! | 6 | `StopSound` | `entity i32`, `channel i32` |
-//! | 7 | `StaticSound` | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `loop_start f32`, `loop_end f32` |
-//! | 8 | `Ambient` | `channel u32`, `id u32`, `loop_start f32`, `loop_end f32` |
-//! | 9 | `Listener` | `origin f32×3`, `forward f32×3`, `right f32×3`, `ambient f32×4`, `volume f32` |
-//! | 10 | `Generation` | `generation u32` (every looping and playing sound stops: `S_StopAllSounds`) |
-//! | 11 | `LocalSound` | `id u32` (`S_LocalSound`: the menu's clicks) |
+//! | 4–11 | — | (retired: the sound records of the page's own mixing) |
 //! | 12 | `Reply` | `id u32`, `value f64`, then UTF-8 text (the answer to a `Call`) |
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
+//! | 14 | `Pcm` | `start u32` (the pair it plays at, in the `AudioClock`'s count), `rate u32`, `flags u32` (1: silence what was mixed ahead first, `S_ClearBuffer`), then 16-bit stereo pairs: what the mixer painted this tick, for the page's ring |
+//! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
@@ -51,6 +48,8 @@ const IN_POINTER_UNLOCKED: u8 = 5;
 const IN_AUDIO_READY: u8 = 6;
 const IN_CALL: u8 = 7;
 const IN_END: u8 = 8;
+const IN_AUDIO_CLOCK: u8 = 10;
+const IN_AUDIO_WAKE: u8 = 11;
 
 /// One event from the host.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,8 +67,14 @@ pub(crate) enum Event {
     ClearKeys,
     /// The pointer lock ended (the port's `+mlook` release).
     PointerUnlocked,
-    /// The page's audio output is running (or stopped).
-    AudioReady(bool),
+    /// The page's audio output is running (or stopped), on a device at `rate`
+    /// Hz (0: not known yet).
+    AudioReady { running: bool, rate: u32 },
+    /// The sample pairs the page's audio device has played (wrapping).
+    AudioClock(u32),
+    /// The same between ticks, from the host while the device plays: time
+    /// to mix again.
+    AudioWake(u32),
     /// An automation call, answered by a [`Msg::Reply`] with the same `id`.
     Call { id: u32, line: String },
     /// The host has nothing more queued (the answer to a polling sync).
@@ -104,7 +109,13 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
         IN_MOUSE => Event::Mouse { dx: p.f32(), dy: p.f32() },
         IN_CLEAR_KEYS => Event::ClearKeys,
         IN_POINTER_UNLOCKED => Event::PointerUnlocked,
-        IN_AUDIO_READY => Event::AudioReady(p.u8() != 0),
+        IN_AUDIO_READY => {
+            let running = p.u8() != 0;
+            p.skip(3);
+            Event::AudioReady { running, rate: p.u32() }
+        }
+        IN_AUDIO_CLOCK => Event::AudioClock(p.u32()),
+        IN_AUDIO_WAKE => Event::AudioWake(p.u32()),
         IN_CALL => {
             let id = p.u32();
             Event::Call { id, line: String::from_utf8_lossy(p.rest()).into_owned() }
@@ -152,17 +163,11 @@ impl Payload<'_> {
 const OUT_FRAME: u8 = 1;
 const OUT_SYNC: u8 = 2;
 const OUT_STATE: u8 = 3;
-const OUT_SAMPLE: u8 = 4;
-const OUT_SOUND: u8 = 5;
-const OUT_STOP_SOUND: u8 = 6;
-const OUT_STATIC_SOUND: u8 = 7;
-const OUT_AMBIENT: u8 = 8;
-const OUT_LISTENER: u8 = 9;
-const OUT_GENERATION: u8 = 10;
-const OUT_LOCAL_SOUND: u8 = 11;
 const OUT_REPLY: u8 = 12;
 #[cfg(feature = "bench")]
 const OUT_BENCH: u8 = 13;
+const OUT_PCM: u8 = 14;
+const OUT_AUDIO: u8 = 15;
 
 /// `Frame` pixel formats. Only RGBA8 exists today: the engine composes the
 /// screen in RGB (PERF_PLAN B5). An 8-bit indexed format plus its palette is
@@ -180,21 +185,21 @@ pub(crate) const STATE_BIND_GRAB: u32 = 8;
 /// A `timedemo` is running: frames come back to back, not per refresh.
 pub(crate) const STATE_TIMEDEMO: u32 = 16;
 
-/// A sound's placement, as `S_StartSound` gave it (the fields the page's
-/// `SND_Spatialize` needs every frame).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Placement {
-    pub(crate) origin: [f32; 3],
-    pub(crate) volume: f32,
-    pub(crate) attenuation: f32,
-}
+/// `Pcm` flags: silence what was mixed ahead before these samples
+/// (`S_ClearBuffer`).
+pub(crate) const PCM_CLEAR: u32 = 1;
 
-/// The loop window of a sample, in seconds (`cue` chunk); `start < 0` for a
-/// one-shot.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct LoopWindow {
-    pub(crate) start: f32,
-    pub(crate) end: f32,
+/// The sound device's counts (the `Audio` record).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioCounts {
+    pub(crate) rate: u32,
+    /// 0 Classic, 1 2026.
+    pub(crate) mode: u32,
+    pub(crate) starts: u32,
+    pub(crate) local: u32,
+    pub(crate) stops: u32,
+    pub(crate) clears: u32,
+    pub(crate) painted: u32,
 }
 
 /// One message to the host.
@@ -203,17 +208,13 @@ pub(crate) enum Msg<'a> {
     Frame { w: u16, h: u16, format: u8, pixels: &'a [u8] },
     Sync { seq: u32, wait: bool },
     State { flags: u32, menu_screen: i32 },
-    Sample { id: u32, wav: &'a [u8] },
-    Sound { id: u32, at: Placement, entity: i32, channel: i32, view: bool, window: LoopWindow },
-    StopSound { entity: i32, channel: i32 },
-    StaticSound { id: u32, at: Placement, window: LoopWindow },
-    Ambient { channel: u32, id: u32, window: LoopWindow },
-    Listener { origin: [f32; 3], forward: [f32; 3], right: [f32; 3], ambient: [f32; 4], volume: f32 },
-    Generation(u32),
-    LocalSound { id: u32 },
     Reply { id: u32, value: f64, text: &'a str },
     #[cfg(feature = "bench")]
     Bench(&'a [f64]),
+    /// A tick's samples: `pairs` is the 16-bit stereo pairs as little-endian
+    /// bytes.
+    Pcm { start: u32, rate: u32, flags: u32, pairs: &'a [u8] },
+    Audio(AudioCounts),
 }
 
 /// Little-endian field writer for a message's fixed part.
@@ -237,22 +238,9 @@ impl Fields {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
-    fn f32(mut self, v: f32) -> Self {
-        self.0.extend_from_slice(&v.to_le_bytes());
-        self
-    }
-    fn f32s(self, vs: &[f32]) -> Self {
-        vs.iter().fold(self, |s, &v| s.f32(v))
-    }
     fn f64(mut self, v: f64) -> Self {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
-    }
-    fn at(self, p: Placement) -> Self {
-        self.f32s(&p.origin).f32(p.volume).f32(p.attenuation)
-    }
-    fn window(self, w: LoopWindow) -> Self {
-        self.f32(w.start).f32(w.end)
     }
 }
 
@@ -267,25 +255,15 @@ impl Msg<'_> {
             }
             Msg::Sync { seq, wait } => (OUT_SYNC, f.u32(seq).u8(wait as u8).0, &[]),
             Msg::State { flags, menu_screen } => (OUT_STATE, f.u32(flags).i32(menu_screen).0, &[]),
-            Msg::Sample { id, wav } => (OUT_SAMPLE, f.u32(id).0, wav),
-            Msg::Sound { id, at, entity, channel, view, window } => (
-                OUT_SOUND,
-                f.u32(id).at(at).i32(entity).i32(channel).u32(view as u32).window(window).0,
-                &[],
-            ),
-            Msg::StopSound { entity, channel } => (OUT_STOP_SOUND, f.i32(entity).i32(channel).0, &[]),
-            Msg::StaticSound { id, at, window } => (OUT_STATIC_SOUND, f.u32(id).at(at).window(window).0, &[]),
-            Msg::Ambient { channel, id, window } => (OUT_AMBIENT, f.u32(channel).u32(id).window(window).0, &[]),
-            Msg::Listener { origin, forward, right, ambient, volume } => (
-                OUT_LISTENER,
-                f.f32s(&origin).f32s(&forward).f32s(&right).f32s(&ambient).f32(volume).0,
-                &[],
-            ),
-            Msg::Generation(g) => (OUT_GENERATION, f.u32(g).0, &[]),
-            Msg::LocalSound { id } => (OUT_LOCAL_SOUND, f.u32(id).0, &[]),
             Msg::Reply { id, value, text } => (OUT_REPLY, f.u32(id).f64(value).0, text.as_bytes()),
             #[cfg(feature = "bench")]
             Msg::Bench(values) => (OUT_BENCH, values.iter().fold(f, |f, &v| f.f64(v)).0, &[]),
+            Msg::Pcm { start, rate, flags, pairs } => (OUT_PCM, f.u32(start).u32(rate).u32(flags).0, pairs),
+            Msg::Audio(c) => (
+                OUT_AUDIO,
+                f.u32(c.rate).u32(c.mode).u32(c.starts).u32(c.local).u32(c.stops).u32(c.clears).u32(c.painted).0,
+                &[],
+            ),
         }
     }
 
@@ -336,8 +314,16 @@ pub(crate) mod encode {
     pub(crate) fn end() -> Vec<u8> {
         record(super::IN_END, &[])
     }
-    pub(crate) fn audio_ready(on: bool) -> Vec<u8> {
-        record(super::IN_AUDIO_READY, &[on as u8])
+    pub(crate) fn audio_ready(on: bool, rate: u32) -> Vec<u8> {
+        let mut p = vec![on as u8, 0, 0, 0];
+        p.extend_from_slice(&rate.to_le_bytes());
+        record(super::IN_AUDIO_READY, &p)
+    }
+    pub(crate) fn audio_clock(pos: u32) -> Vec<u8> {
+        record(super::IN_AUDIO_CLOCK, &pos.to_le_bytes())
+    }
+    pub(crate) fn audio_wake(pos: u32) -> Vec<u8> {
+        record(super::IN_AUDIO_WAKE, &pos.to_le_bytes())
     }
 }
 
@@ -355,11 +341,9 @@ impl Record {
     pub(crate) const FRAME: u8 = OUT_FRAME;
     pub(crate) const SYNC: u8 = OUT_SYNC;
     pub(crate) const STATE: u8 = OUT_STATE;
-    pub(crate) const SAMPLE: u8 = OUT_SAMPLE;
     pub(crate) const REPLY: u8 = OUT_REPLY;
-    pub(crate) const GENERATION: u8 = OUT_GENERATION;
-    pub(crate) const AMBIENT: u8 = OUT_AMBIENT;
-    pub(crate) const LISTENER: u8 = OUT_LISTENER;
+    pub(crate) const PCM: u8 = OUT_PCM;
+    pub(crate) const AUDIO: u8 = OUT_AUDIO;
 
     /// Split a stdout byte stream into records.
     pub(crate) fn split(mut bytes: &[u8]) -> Vec<Record> {
@@ -393,7 +377,9 @@ mod tests {
         stream.extend(encode::key(b'w', true, 'w' as u32));
         stream.extend(encode::mouse(-3.0, 2.5));
         stream.extend(encode::call(9, "menu_visible"));
-        stream.extend(encode::audio_ready(true));
+        stream.extend(encode::audio_ready(true, 48000));
+        stream.extend(encode::audio_clock(4096));
+        stream.extend(encode::audio_wake(4200));
         stream.extend(encode::end());
         let mut r = &stream[..];
         let mut got = Vec::new();
@@ -407,7 +393,9 @@ mod tests {
                 Event::Key { keynum: b'w', down: true, ch: 'w' as u32 },
                 Event::Mouse { dx: -3.0, dy: 2.5 },
                 Event::Call { id: 9, line: "menu_visible".into() },
-                Event::AudioReady(true),
+                Event::AudioReady { running: true, rate: 48000 },
+                Event::AudioClock(4096),
+                Event::AudioWake(4200),
                 Event::End,
             ]
         );
@@ -452,26 +440,15 @@ mod tests {
 
     #[test]
     fn sound_records_have_the_documented_sizes() {
-        let at = Placement { origin: [1.0, 2.0, 3.0], volume: 1.0, attenuation: 1.0 };
-        let window = LoopWindow { start: -1.0, end: 0.0 };
         let size = |m: Msg| {
             let mut out = Vec::new();
             m.write_to(&mut out).unwrap();
             out.len() - 8
         };
-        assert_eq!(size(Msg::Sound { id: 1, at, entity: 2, channel: 3, view: false, window }), 44);
-        assert_eq!(size(Msg::StaticSound { id: 1, at, window }), 32);
-        assert_eq!(size(Msg::Ambient { channel: 0, id: 1, window }), 16);
-        assert_eq!(
-            size(Msg::Listener {
-                origin: [0.0; 3],
-                forward: [0.0; 3],
-                right: [0.0; 3],
-                ambient: [0.0; 4],
-                volume: 0.7
-            }),
-            56
-        );
+        let pairs = [1u8, 0, 2, 0, 3, 0, 4, 0];
+        assert_eq!(size(Msg::Pcm { start: 5, rate: 11025, flags: PCM_CLEAR, pairs: &pairs }), 12 + 8);
+        let c = AudioCounts { rate: 48000, mode: 1, starts: 2, local: 3, stops: 0, clears: 1, painted: 7 };
+        assert_eq!(size(Msg::Audio(c)), 28);
         assert_eq!(size(Msg::State { flags: 0, menu_screen: 0 }), 8);
     }
 }

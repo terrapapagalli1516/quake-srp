@@ -233,7 +233,7 @@
 <script>
 // The page is a small host for the game, which runs as a program in a Web
 // Worker (wasi.js runs quake.wasm there). The page owns what a browser
-// program cannot: the canvas, the keyboard and mouse, Web Audio, the
+// program cannot: the canvas, the keyboard and mouse, the audio device, the
 // storage the program's files live in, and the display's refresh, which it
 // hands the program as ticks. web/PLATFORM.md has the design, the protocol
 // and the measurements.
@@ -263,9 +263,8 @@ const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, REA
             RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19 };
 const CTL_BYTES = 256, RING_BYTES = 1 << 16;
 // Record kinds, in (IN_*) and out (OUT_*).
-const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7 };
-const OUT = { FRAME: 1, SYNC: 2, STATE: 3, SAMPLE: 4, SOUND: 5, STOP_SOUND: 6, STATIC_SOUND: 7,
-              AMBIENT: 8, LISTENER: 9, GENERATION: 10, LOCAL_SOUND: 11, REPLY: 12, BENCH: 13 };
+const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7, AUDIO_CLOCK: 10 };
+const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15 };
 // State flags (the STATE record).
 const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16 };
 
@@ -358,28 +357,11 @@ function handleOutput(b) {
         gameState.flags = u32(p); gameState.menuScreen = i32(p + 4);
         syncLockChip();
         break;
-      case OUT.SAMPLE: onSample(u32(p), b.slice(p + 4, p + len)); break;
-      case OUT.SOUND:
-        onSound({ id: u32(p), ox: f32(p + 4), oy: f32(p + 8), oz: f32(p + 12), vol: f32(p + 16),
-                  atten: f32(p + 20), ent: i32(p + 24), chan: i32(p + 28), view: u32(p + 32) !== 0,
-                  ls: f32(p + 36), le: f32(p + 40) });
-        break;
-      case OUT.STOP_SOUND:
-        window.__sndStats.stopRecords = (window.__sndStats.stopRecords || 0) + 1;
-        stopKey(i32(p), i32(p + 4));
-        break;
-      case OUT.STATIC_SOUND:
-        onStaticSound({ id: u32(p), ox: f32(p + 4), oy: f32(p + 8), oz: f32(p + 12), vol: f32(p + 16),
-                        atten: f32(p + 20), ls: f32(p + 24), le: f32(p + 28) });
-        break;
-      case OUT.AMBIENT: onAmbient({ ch: u32(p), id: u32(p + 4), ls: f32(p + 8), le: f32(p + 12) }); break;
-      case OUT.LISTENER: {
-        const v = []; for (let k = 0; k < 14; k++) v.push(f32(p + 4 * k));
-        onListener(v);
+      case OUT.AUDIO: {
+        const v = []; for (let k = 0; k < 7; k++) v.push(u32(p + 4 * k));
+        onAudioCounts(v);
         break;
       }
-      case OUT.GENERATION: onGeneration(u32(p)); break;
-      case OUT.LOCAL_SOUND: onLocalSound(u32(p)); break;
       case OUT.REPLY: {
         const pc = pendingCalls.get(u32(p));
         if (pc) {
@@ -781,15 +763,140 @@ canvas.addEventListener('mousemove', e => {
 });
 
 // ===========================================================================
-// Sound: Web Audio plays what the program's snd_dma decides
+// Sound: the program mixes (id's mixer, in the worker); an AudioWorklet
+// plays what it painted
 // ===========================================================================
-// The program sends each distinct sample once (SAMPLE: id + WAV bytes),
-// then names it: one-shots (SOUND), stops (STOP_SOUND), the menu's clicks
-// (LOCAL_SOUND), a level's placed loops (STATIC_SOUND) and its two leaf
-// ambients (AMBIENT), a GENERATION for each level change (S_StopAllSounds),
-// and the listener and the ambient levels every frame (LISTENER).
+// The program paints 16-bit stereo into a shared ring (a Pcm record each
+// tick, which wasi.js copies in); the worklet below plays it at the
+// device's rate and moves the ring's play position (POS), the device clock
+// the program mixes ahead of: the page hands it to the program before every
+// tick (AUDIO_CLOCK). Until the AudioContext runs (the first click) — and
+// in a tab hidden while it ran — the page moves POS on itself in real time,
+// so the mixer plays on unheard and nothing waits to play at once when
+// sound starts, as a sound card's DMA ran whether a speaker was on or not.
+// web/PLATFORM.md, "Sound", has the ring's layout.
+const A = { POS: 0, WRITE: 1, RATE: 2, UNDER: 3, PLAYED: 4, CLEARS: 5, PEAK: 6, QUANTA: 7 };
+const AUDIO_CTL_BYTES = 64, RING_PAIRS = 16384;
+let audioShared = null, actl = null;     // the ring: made in main(), shared with wasi.js and the worklet
 let audioCtx = null;
-let audioReadySent = null;       // the running state the program last heard
+let audioNode = null, audioGraph = null; // the worklet node, and its setup under way
+let audioReadySent = '';                 // the running state and rate the program last heard
+
+// The worklet: plays the ring at the device's rate. A ring at another rate
+// (Classic mixes at id's 11025 Hz) is reconstructed band-limited — a
+// windowed sinc, 16 input samples wide, tabulated at 256 phases — as a
+// sound card's DAC and output filter reconstructed id's 11025 Hz; the ring
+// at the device's own rate (the 2026 mixer) plays sample for sample. Missing
+// samples (the program late: a level load, a stall) play as silence and
+// count as an underrun once the program has written anything.
+const WORKLET = `
+const A = ${JSON.stringify(A)}, RING_PAIRS = ${RING_PAIRS}, MASK = RING_PAIRS - 1;
+const TAPS = 16, HALF = 8, PHASES = 256;
+function kernel() {
+  const t = new Float32Array(PHASES * TAPS);
+  for (let p = 0; p < PHASES; p++) {
+    let sum = 0;
+    for (let k = 0; k < TAPS; k++) {
+      const x = k - (HALF - 1) - p / PHASES;            // input sample - output time
+      const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+      const w = Math.abs(x) >= HALF ? 0 : 0.42 + 0.5 * Math.cos(Math.PI * x / HALF) + 0.08 * Math.cos(2 * Math.PI * x / HALF);
+      sum += t[p * TAPS + k] = sinc * w;
+    }
+    for (let k = 0; k < TAPS; k++) t[p * TAPS + k] /= sum;
+  }
+  return t;
+}
+class QuakeRing extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const sab = options.processorOptions.sab;
+    this.ctl = new Int32Array(sab, 0, 16);
+    this.d = new Int16Array(sab, ${AUDIO_CTL_BYTES}, RING_PAIRS * 2);
+    this.frac = 0;
+    this.table = null;
+  }
+  process(inputs, outputs) {
+    const L = outputs[0][0], R = outputs[0][1] || L, n = L.length, ctl = this.ctl, d = this.d;
+    const rate = Atomics.load(ctl, A.RATE), write = Atomics.load(ctl, A.WRITE);
+    Atomics.add(ctl, A.QUANTA, 1);
+    if (!rate) { L.fill(0); R.fill(0); return true; }
+    const has = (p) => { const a = (write - p) | 0; return a > 0 && a <= RING_PAIRS; };
+    let pos = Atomics.load(ctl, A.POS), moved = 0, short = 0, peak = 0;
+    if (rate === sampleRate) {
+      for (let i = 0; i < n; i++, pos = (pos + 1) | 0) {
+        if (has(pos)) { const j = (pos & MASK) * 2; L[i] = d[j] / 32768; R[i] = d[j + 1] / 32768; }
+        else { L[i] = R[i] = 0; short++; }
+      }
+      moved = n;
+    } else {
+      const step = rate / sampleRate, sinc = step < 1;
+      const tab = sinc ? (this.table || (this.table = kernel())) : null;
+      let f = this.frac;
+      for (let i = 0; i < n; i++) {
+        let l = 0, r = 0;
+        if (!has(pos)) short++;
+        if (sinc) {
+          const base = ((f * PHASES) | 0) * TAPS;
+          for (let k = 0; k < TAPS; k++) {
+            const p = (pos - (HALF - 1) + k) | 0;
+            if (has(p)) { const j = (p & MASK) * 2, c = tab[base + k]; l += d[j] * c; r += d[j + 1] * c; }
+          }
+        } else {
+          const p1 = (pos + 1) | 0;
+          if (has(pos)) { const j = (pos & MASK) * 2; l += d[j] * (1 - f); r += d[j + 1] * (1 - f); }
+          if (has(p1)) { const j = (p1 & MASK) * 2; l += d[j] * f; r += d[j + 1] * f; }
+        }
+        L[i] = l / 32768; R[i] = r / 32768;
+        f += step;
+        const whole = Math.floor(f);
+        f -= whole; pos = (pos + whole) | 0; moved += whole;
+      }
+      this.frac = f;
+    }
+    for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(L[i]), Math.abs(R[i]));
+    Atomics.add(ctl, A.POS, moved);
+    Atomics.add(ctl, A.PLAYED, n - short);
+    if (short && write !== 0) Atomics.add(ctl, A.UNDER, 1);
+    const pk = Math.round(peak * 32768);
+    if (pk > Atomics.load(ctl, A.PEAK)) Atomics.store(ctl, A.PEAK, pk);
+    return true;
+  }
+}
+registerProcessor('quake-ring', QuakeRing);
+`;
+
+// The worklet on whatever AudioContext there is (the page's, or one a check
+// made): once.
+function ensureAudioGraph() {
+  if (!audioCtx || audioNode || audioGraph || !audioShared || !audioCtx.audioWorklet) return;
+  const url = URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }));
+  audioGraph = audioCtx.audioWorklet.addModule(url).then(() => {
+    audioNode = new AudioWorkletNode(audioCtx, 'quake-ring', {
+      numberOfInputs: 0, outputChannelCount: [2], processorOptions: { sab: audioShared } });
+    audioNode.connect(audioCtx.destination);
+  }).catch(e => console.warn('[quake] no audio worklet:', e));
+}
+function audioRunning() { return !!(audioCtx && audioCtx.state === 'running'); }
+// The worklet moves the ring's clock only while its context runs.
+function workletPlays() { return audioRunning() && !!audioNode; }
+
+// The device clock while the worklet does not move it: real time at the
+// ring's rate (at most 0.1 s a refresh, Host_FilterTime's clamp: a tab back
+// from hiding picks up where it stopped, as the game does).
+let audioT = null, audioFrac = 0;
+function advanceAudioClock(ms) {
+  if (!actl) return;
+  const rate = Atomics.load(actl, A.RATE);
+  if (workletPlays() || !rate) { audioFrac = 0; return; }
+  audioFrac += Math.min(Math.max(ms, 0), 100) / 1000 * rate;
+  const whole = Math.floor(audioFrac);
+  audioFrac -= whole;
+  if (whole) Atomics.add(actl, A.POS, whole);
+}
+function sendAudioClock() {
+  if (actl) sendRecord(IN.AUDIO_CLOCK, fields(4, d => d.setUint32(0, Atomics.load(actl, A.POS) >>> 0, true)));
+}
+
 // The sound button: unlock audio with the click and play a test sample
 // (S_Play: `play items/r_item1.wav`).
 sndBtn.addEventListener('click', () => {
@@ -807,16 +914,16 @@ sndBtn.addEventListener('click', () => {
 // context actually reports 'running', 🔊 after. Cheap (touches the DOM only on
 // a state flip) so the render loop can poll it every frame, which also catches
 // resume paths outside our handlers (e.g. headless test harnesses). The
-// program hears the same flip (AUDIO_READY: it queues no sounds before it,
-// so no backlog plays all at once when audio starts), and the level's loops
-// start then.
+// program hears the state and the device's rate (AUDIO_READY): the 2026
+// mixer runs at that rate.
 let sndShown = null;
 function updateSndUI() {
-  const on = !!(audioCtx && audioCtx.state === 'running');
-  if (on !== audioReadySent) {
-    audioReadySent = on;
-    sendRecord(IN.AUDIO_READY, new Uint8Array([on ? 1 : 0]));
-    if (on) startLevelLoops();
+  ensureAudioGraph();
+  const on = audioRunning();
+  const ready = `${on}:${audioCtx ? audioCtx.sampleRate : 0}`;
+  if (ready !== audioReadySent
+      && sendRecord(IN.AUDIO_READY, fields(8, d => { d.setUint8(0, on ? 1 : 0); d.setUint32(4, audioCtx ? audioCtx.sampleRate : 0, true); }))) {
+    audioReadySent = ready;
   }
   if (on === sndShown) return;
   sndShown = on;
@@ -824,333 +931,47 @@ function updateSndUI() {
   sndBtn.classList.toggle('on', on);
 }
 updateSndUI();
-function audioRunning() { return !!(audioCtx && audioCtx.state === 'running'); }
 
-// The listener pose and levels of the program's last frame (LISTENER):
-// origin, forward, right, the four ambient levels, the master volume.
-const listener = { x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: 0, rx: 0, ry: 0, rz: 0, ambient: [0, 0, 0, 0], volume: 1 };
-
-// Spatialize a sound the way Quake's SND_Spatialize does: fall off with
-// distance, pan left/right by where the source sits relative to where the
-// listener faces. Returns {gain, pan} in [0,1] / [-1,1].
-//
-//   distance gain = max(0, 1 - dist * attenuation / 1000) * volume
-//   pan           = clamp(dot(normalize(source - listener), right), -1, 1)
-//
-// attenuation 0 => no falloff (full volume everywhere, e.g. some pickups). At
-// attenuation 1 a source ~1000 units away is silent; point-blank is full volume.
-const ATTEN_SCALE = 1000;
-function spatialGain(ox, oy, oz, vol, atten) {
-  const dx = ox - listener.x, dy = oy - listener.y, dz = oz - listener.z;
-  const dist = Math.hypot(dx, dy, dz);
-  let gain = vol;
-  if (atten > 0) gain = Math.max(0, 1 - dist * atten / ATTEN_SCALE) * vol;
-  // attenuation 0 => audible everywhere at full `vol`.
-  let pan = 0;
-  if (dist > 1e-3) {
-    pan = (dx * listener.rx + dy * listener.ry + dz * listener.rz) / dist;   // dot(normalize(d), right)
-    if (pan < -1) pan = -1; else if (pan > 1) pan = 1;
+// A hidden tab stops the game (no refreshes, no ticks): its sound stops with
+// it, and goes on where it stopped when the tab comes back.
+let audioHidden = false;
+document.addEventListener('visibilitychange', () => {
+  if (!audioCtx) return;
+  if (document.hidden && audioCtx.state === 'running') {
+    audioHidden = true;
+    audioCtx.suspend().catch(() => {});
+  } else if (!document.hidden && audioHidden) {
+    audioHidden = false;
+    audioCtx.resume().catch(() => {});
   }
-  return { gain, pan };
-}
-// SND_Spatialize (snd_dma.c:407-412): a sound from the listener's OWN view
-// entity (the player) always plays at full volume on both channels with no
-// distance falloff or pan.
-function spatialize(p) { return p.view ? { gain: p.vol, pan: 0 } : spatialGain(p.ox, p.oy, p.oz, p.vol, p.atten); }
+});
 
-// The master volume from the Options menu, clamped to [0,1] so a bad value
-// can't blow up the gain graph.
-function masterVolume() { const v = listener.volume; return (v >= 0 && v <= 1) ? v : 1.0; }
-
-// The samples by id, each decoded once: the same SFX (gunshots, footsteps,
-// door hums…) fires over and over, and decodeAudioData is async and costs
-// real time, so every play after the first reuses the AudioBuffer.
-const samples = new Map();       // id -> { bytes, buffer, waiting: [cb] }
-function onSample(id, bytes) { samples.set(id, { bytes, buffer: null, waiting: null }); }
-// Decode sample `id` (once), then cb(buffer).
-function withBuffer(id, cb) {
-  const s = samples.get(id);
-  if (!s || !audioCtx) return;
-  if (s.buffer) { cb(s.buffer); return; }
-  if (s.waiting) { s.waiting.push(cb); return; }
-  s.waiting = [cb];
-  audioCtx.decodeAudioData(s.bytes.slice().buffer).then(buf => {
-    s.buffer = buf;
-    const w = s.waiting; s.waiting = null;
-    for (const f of w) f(buf);
-  }).catch(() => { s.waiting = null; });
-}
-// Playing one-shot sources keyed by their (entity, channel) pair —
-// SND_PickChannel's override key (snd_dma.c:354-390). A NEW sound on the same
-// entity + non-zero channel STOPS the source it replaces ("always override
-// sound from same entity"; channel 0 = CHAN_AUTO never overrides and is never
-// keyed), and an svc_stopsound (S_StopSound) stops the keyed source.
-const playingByKey = new Map();
-// Evidence/debug counters (read by the verify scripts; no UI).
-window.__sndStats = { plays: 0, stops: 0 };
-
-function registerSource(src, ent, chan) {
-  if (typeof ent !== 'number' || !(chan > 0)) return; // channel 0 never keyed
-  const key = ent + ':' + chan;
-  const prev = playingByKey.get(key);
-  if (prev) { try { prev.stop(); } catch (e) {} window.__sndStats.stops++; }
-  playingByKey.set(key, src);
-  src.onended = () => { if (playingByKey.get(key) === src) playingByKey.delete(key); };
-}
-
-// A one-shot: routed through its side gains, keyed for override, and — like
-// every channel in S_Update — re-spatialized each frame from its origin.
-function playBuffer(buf, p) {
-  if (p.ls >= 0) { playDynLoop(buf, p); return; }
-  const s = audioCtx.createBufferSource();
-  s.buffer = buf;
-  const nodes = playRouted(s, spatialize(p));
-  registerSource(s, p.ent, p.chan);
-  if (nodes) {
-    const l = { src: s, lg: nodes.lg, rg: nodes.rg, lp: p };
-    dynShots.push(l);
-    const keyed = s.onended;
-    s.onended = () => { dynShots = dynShots.filter(x => x !== l); if (keyed) keyed(); };
-  }
-  s.start();
-  window.__sndStats.plays++;
-}
-
-// A one-shot whose sample has a `cue ` loop point loops, as SND_PaintChannels
-// does, until a later sound on its (entity, channel) overrides it (door, lift
-// and train hums until their stop sound) or all sounds stop (level change).
-let dynLoops = [];       // {src, lg, rg, lp}
-// Playing one-shots with their spatial params (playBuffer), re-spatialized
-// every frame like the loops.
-let dynShots = [];       // {src, lg, rg, lp}
-function stereoGains(src) {
-  const lg = audioCtx.createGain(); lg.gain.value = 0;
-  const rg = audioCtx.createGain(); rg.gain.value = 0;
-  if (typeof audioCtx.createChannelMerger === 'function') {
-    const m = audioCtx.createChannelMerger(2);
-    src.connect(lg); lg.connect(m, 0, 0);
-    src.connect(rg); rg.connect(m, 0, 1);
-    m.connect(audioCtx.destination);
-  } else {
-    src.connect(lg); lg.connect(audioCtx.destination); // mono fallback
-  }
-  return { lg, rg };
-}
-function playDynLoop(buf, p) {
-  const src = makeLoopSource(buf, p.ls, p.le);
-  const l = { src, ...stereoGains(src), lp: p };
-  dynLoops.push(l);
-  spatializeLoop(l);
-  registerSource(src, p.ent, p.chan);
-  const keyed = src.onended;
-  src.onended = () => { dynLoops = dynLoops.filter(x => x !== l); if (keyed) keyed(); };
-  src.start();
-  window.__sndStats.plays++;
-  window.__sndStats.loops = (window.__sndStats.loops || 0) + 1;
-}
-function spatializeLoop(l) {
-  const [lv, rv] = sideGains(spatialize(l.lp), masterVolume());
-  l.lg.gain.value = lv;
-  l.rg.gain.value = rv;
-}
-
-// SND_PickChannel's override without a new source: stop what plays on the key.
-function stopKey(ent, chan) {
-  if (!(chan > 0)) return;
-  const key = ent + ':' + chan;
-  const prev = playingByKey.get(key);
-  if (prev) {
-    try { prev.stop(); } catch (e) {}
-    playingByKey.delete(key);
-    window.__sndStats.stops++;
-  }
-}
-// Latest sound issued per (entity, channel): an async first decode starts its
-// source only if no newer sound took the key meanwhile (else the stop sound of
-// a short door travel could land before the hum and leave it looping).
-const keySeq = new Map();
-
-// A one-shot from the program (SOUND): p = {id, ox, oy, oz, vol, atten, ent,
-// chan, view, ls, le}; ls < 0 for a sample without a loop point.
-function onSound(p) {
-  if (!audioRunning()) return;
-  const kkey = p.ent + ':' + p.chan;
-  const seq = (keySeq.get(kkey) || 0) + 1;
-  if (p.chan > 0) keySeq.set(kkey, seq);
-  // S_StartSound picks (and so overrides) the channel before it tests
-  // audibility: an inaudible sound still ends its key's sound, then drops.
-  // That is the one playing (stopKey) or one whose first decode is still
-  // pending: the keySeq bump above stops that from starting after it (a
-  // door hum would otherwise start after its own stop sound, and loop).
-  if (spatialize(p).gain <= 0.02) { stopKey(p.ent, p.chan); return; }
-  const gen = loopGen;
-  withBuffer(p.id, buf => {
-    // Unless the key was overridden or the level changed while decoding.
-    if (p.chan > 0 && keySeq.get(kkey) !== seq) return;
-    if (loopGen !== gen) return;
-    playBuffer(buf, p);
-  });
-}
-
-// The menu's local sounds (menu.c S_LocalSound: misc/menu1.wav on cursor
-// moves, menu2 on enter/select, menu3 on slider adjusts) and `play`'s:
-// S_LocalSound is a view-entity sound — full volume, centred, no distance
-// falloff (snd_dma.c) — so each plays at gain 1 / pan 0, which the master
-// volume still scales. window.__menuSounds counts them (verification).
+// The sound device's counts (the program's Audio record, every tick). The
+// checks read them: window.__menuSounds is the menu's clicks.
+const soundStats = { rate: 0, mode: 0, starts: 0, local: 0, stops: 0, clears: 0, painted: 0 };
+window.__sndStats = soundStats;
 window.__menuSounds = 0;
-function onLocalSound(id) {
-  if (!audioRunning()) return;
-  window.__menuSounds++;
-  withBuffer(id, buf => {
-    const src = audioCtx.createBufferSource();
-    src.buffer = buf;
-    playRouted(src, { gain: 1, pan: 0 });
-    src.start();
-  });
+function onAudioCounts(v) {
+  [soundStats.rate, soundStats.mode, soundStats.starts, soundStats.local, soundStats.stops,
+   soundStats.clears, soundStats.painted] = v;
+  window.__menuSounds = soundStats.local;
 }
 
-// SND_Spatialize's per-side volumes, then the master volume: leftvol =
-// vol*(1-dot), rightvol = vol*(1+dot) (distance-attenuated), each clamped at
-// 255 — full — by the mixer (snd_mix.c SND_PaintChannelFrom8/16) BEFORE
-// S_TransferPaintBuffer scales the mix by `volume`. So a near source panned
-// hard reaches full volume times the master on its side, never more (clamping
-// after the master made it up to 1/volume louder: 1.43x at the default 0.7).
-function sideGains(sp, master) {
-  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
-  return [clamp01(sp.gain * (1 - sp.pan)) * master, clamp01(sp.gain * (1 + sp.pan)) * master];
-}
-
-// Wire a decoded BufferSource to the destination through Quake's
-// SND_Spatialize pan law (snd_dma.c): LINEAR left/right volumes (sideGains) —
-// so the near side reaches FULL gain (not the equal-power -3 dB centre a
-// StereoPanner gives). The mono source feeds two gains into a stereo merger,
-// which are returned ({lg, rg}) for the per-frame re-spatialization.
-function playRouted(src, sp) {
-  const master = masterVolume();
-  if (typeof audioCtx.createChannelMerger === 'function') {
-    const [lv, rv] = sideGains(sp, master);
-    const nodes = stereoGains(src);
-    nodes.lg.gain.value = lv;
-    nodes.rg.gain.value = rv;
-    return nodes;
-  }
-  // No channel merger available: fall back to a centred mono gain.
-  const g = audioCtx.createGain();
-  g.gain.value = Math.min(1, sp.gain) * master;
-  src.connect(g);
-  g.connect(audioCtx.destination);
-  return null;
-}
-
-// --- Looping ambient audio --------------------------------------------------
-// Two kinds of persistent loops, both engine-driven:
-//  * PLACED static sounds (QuakeC ambientsound(): torch crackle, machine hum) —
-//    each gets a looping source whose L/R gains are recomputed EVERY frame
-//    from the live listener pose through the same spatialGain law the
-//    one-shots use (SND_Spatialize runs every frame on static channels in
-//    the C).
-//  * The 2 automatic LEAF ambients (water wash / sky wind) — the engine ramps
-//    their volumes from the view leaf's ambient_level bytes
-//    (S_UpdateAmbientSounds); each frame's level goes into a centred gain
-//    node (the C sets leftvol = rightvol, no pan).
-// A GENERATION (every level/mode change) stops and drops every loop and
-// every playing sound; the new level's STATIC_SOUND/AMBIENT records rebuild
-// the loops. The level's loops are remembered, so audio that starts later
-// (the first gesture) still gets them.
-let staticLoops = [];    // {src, lg, rg, p}
-let ambientLoops = [];   // {src, g, ch}
-let loopGen = null;      // the current generation
-let levelLoops = { statics: [], ambients: [] };   // this generation's, started or not
-
-function stopAllLoops() {
-  for (const l of staticLoops)  { try { l.src.stop(); } catch (e) {} }
-  for (const l of ambientLoops) { try { l.src.stop(); } catch (e) {} }
-  staticLoops = []; ambientLoops = [];
-  // S_StopAllSounds stops the dynamic channels too: every one-shot and every
-  // looping one (a door hum must not carry into the next level).
-  for (const s of playingByKey.values()) { try { s.stop(); } catch (e) {} }
-  for (const l of dynLoops) { try { l.src.stop(); } catch (e) {} }
-  for (const l of dynShots) { try { l.src.stop(); } catch (e) {} }
-  playingByKey.clear(); dynLoops = []; dynShots = []; keySeq.clear();
-}
-function onGeneration(g) {
-  stopAllLoops();
-  loopGen = g;
-  levelLoops = { statics: [], ambients: [] };
-}
-
-// A looping source restarting at the WAV's cue-chunk loop window (seconds,
-// engine-parsed — sample-rate independent, so decodeAudioData resampling is
-// harmless). loopEnd 0 / past-the-end = loop to the buffer's end.
-function makeLoopSource(buf, ls, le) {
-  const src = audioCtx.createBufferSource();
-  src.buffer = buf;
-  src.loop = true;
-  if (ls > 0) src.loopStart = ls;
-  if (le > 0 && le < buf.duration) src.loopEnd = le;
-  return src;
-}
-
-function onStaticSound(p) {
-  levelLoops.statics.push(p);
-  if (audioRunning()) startStatic(p);
-}
-function onAmbient(a) {
-  levelLoops.ambients.push(a);
-  if (audioRunning()) startAmbient(a);
-}
-// Audio just started: this level's loops that arrived before it could.
-// (Each starts once: a record may also have found audio already running
-// before the page noticed the flip.)
-function startLevelLoops() {
-  for (const p of levelLoops.statics) startStatic(p);
-  for (const a of levelLoops.ambients) startAmbient(a);
-}
-// Decode is async: a loop only starts if its level is still current.
-function startStatic(p) {
-  if (p.started) return;
-  p.started = true;
-  const myGen = loopGen;
-  withBuffer(p.id, buf => {
-    if (loopGen !== myGen) return;
-    const src = makeLoopSource(buf, p.ls, p.le);
-    const l = { src, ...stereoGains(src), lp: p };
-    spatializeLoop(l);
-    staticLoops.push(l);
-    src.start();
-  });
-}
-// An ambient channel's loop runs at gain 0 until the view leaf says otherwise.
-function startAmbient(a) {
-  if (a.started) return;
-  a.started = true;
-  const myGen = loopGen;
-  withBuffer(a.id, buf => {
-    if (loopGen !== myGen) return;
-    const src = makeLoopSource(buf, a.ls, a.le);
-    const g = audioCtx.createGain(); g.gain.value = 0;
-    src.connect(g); g.connect(audioCtx.destination);   // centred, no pan
-    ambientLoops.push({ src, g, ch: a.ch });
-    src.start();
-  });
-}
-
-// S_Update: every channel re-spatialized from this frame's listener.
-function onListener(v) {
-  listener.x = v[0]; listener.y = v[1]; listener.z = v[2];
-  listener.fx = v[3]; listener.fy = v[4]; listener.fz = v[5];
-  listener.rx = v[6]; listener.ry = v[7]; listener.rz = v[8];
-  listener.ambient = v.slice(9, 13);
-  listener.volume = v[13];
-  if (!audioRunning()) return;
-  const master = masterVolume();
-  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
-  for (const l of staticLoops) spatializeLoop(l);
-  // Looping one-shots (door/lift/train hums) and the playing one-shots.
-  for (const l of dynLoops) spatializeLoop(l);
-  for (const l of dynShots) spatializeLoop(l);
-  // Leaf ambients: engine-ramped volume, both channels equal.
-  for (const l of ambientLoops) l.g.gain.value = clamp01(listener.ambient[l.ch] * master);
+// The ring's state now: what the worklet has done, and how far ahead of the
+// device the program has painted (lead: a sound started now plays that much
+// later, plus the context's own output latency).
+function ringState() {
+  if (!actl) return null;
+  const rate = Atomics.load(actl, A.RATE), pos = Atomics.load(actl, A.POS), write = Atomics.load(actl, A.WRITE);
+  return {
+    rate, pos, write,
+    leadMs: rate ? ((write - pos) | 0) / rate * 1000 : 0,
+    underruns: Atomics.load(actl, A.UNDER), played: Atomics.load(actl, A.PLAYED) >>> 0,
+    clears: Atomics.load(actl, A.CLEARS), quanta: Atomics.load(actl, A.QUANTA), peak: Atomics.load(actl, A.PEAK),
+    baseLatencyMs: audioCtx && audioCtx.baseLatency ? audioCtx.baseLatency * 1000 : 0,
+    outputLatencyMs: audioCtx && audioCtx.outputLatency ? audioCtx.outputLatency * 1000 : 0,
+    running: audioRunning(), worklet: !!audioNode,
+  };
 }
 
 // ===========================================================================
@@ -1340,6 +1161,8 @@ async function main() {
   setStatus('starting the engine…');
 
   const shared = new SharedArrayBuffer(CTL_BYTES + RING_BYTES);
+  audioShared = new SharedArrayBuffer(AUDIO_CTL_BYTES + RING_PAIRS * 4);
+  actl = new Int32Array(audioShared, 0, AUDIO_CTL_BYTES / 4);
   ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
   Atomics.store(ctl, C.LATEST, -1);
@@ -1348,7 +1171,7 @@ async function main() {
   worker.onmessage = onWorkerMessage;
   worker.onerror = (e) => { setStatus('error: ' + e.message); };
   const fileList = [['id1/pak0.pak', pak], ...files];
-  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, files: fileList },
+  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList },
                      [wasm.buffer, pak.buffer]);
 
   // Up when the program's startup (quake.rc: config.cfg, the attract demos)
@@ -1490,6 +1313,9 @@ function startPresenting() {
 function frame(now) {
   requestAnimationFrame(frame);
   updateSndUI();
+  advanceAudioClock(audioT === null ? 0 : now - audioT);
+  audioT = now;
+  if (quake.audioLead && actl) quake.audioLead.push(ringState().leadMs);
   if (quake.paused || Atomics.load(ctl, C.RUN) !== 1) return;
   // One tick in flight: a refresh that finds the last one unanswered posts
   // none (its time goes to the next tick's dt). The tick carries the RAW
@@ -1508,6 +1334,7 @@ function frame(now) {
     lastTick = now;
     pendingTick = ++tickSeq;
     if (quake.latency) { inFlightTimes = inFlightTimes.concat(inputTimes); inputTimes = []; }
+    sendAudioClock();
     sendTick(pendingTick, dt);
     posted = true;
   }
@@ -1530,6 +1357,7 @@ const quake = window.quake = {
   ready: false,
   paused: false,
   latency: null,             // an array to collect input->present times into
+  audioLead: null,           // an array to collect the ring's lead (ms) into, a refresh at a time
   live: null,                // an array to collect the page loop's per-refresh times into
   onBench: null,             // (values) per frame, --features bench builds
   state: gameState,
@@ -1546,6 +1374,8 @@ const quake = window.quake = {
   tick(dt) {
     const t0 = performance.now();
     pendingTick = ++tickSeq;
+    advanceAudioClock(dt * 1000);
+    sendAudioClock();
     sendTick(pendingTick, dt);
     const ok = waitAck(pendingTick, 5000);
     const t1 = performance.now();
@@ -1568,10 +1398,13 @@ const quake = window.quake = {
     const f = files.find(([p]) => p === path);
     return f ? new TextDecoder().decode(f[1]) : null;
   }),
-  // The sound path's entry points, for checks that feed it records.
-  audio: { onSample, onSound, onLocalSound, stopKey, listener, masterVolume, sideGains,
-           get dynLoops() { return dynLoops; }, get dynShots() { return dynShots; },
-           get playingByKey() { return playingByKey; } },
+  // The sound device, for the checks: the ring (ringState), the program's
+  // counts (stats), the worklet's loudest sample since the last reset.
+  audio: {
+    ring: ringState,
+    stats: soundStats,
+    resetPeak() { if (actl) Atomics.store(actl, A.PEAK, 0); },
+  },
 };
 
 main().catch(e => {

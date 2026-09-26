@@ -1,26 +1,25 @@
 #!/usr/bin/env -S uv run --with playwright --script
-"""Verify looping one-shots (CENSUS F9) end-to-end in headless Chromium, on id's
-own demo1:
+"""Verify looping one-shots (CENSUS F9) end to end in headless Chromium, on id's
+own demo1, through id's mixer in the program and the page's AudioWorklet:
 
-  1. a door "moving" sample (doors/stndr1.wav, recorded at demo t 18.2 s on
-     entity 26, CHAN_VOICE) plays as a LOOPING source from its `cue ` point —
-     GetWavinfo + SND_PaintChannels — and is re-spatialized every frame from
-     its fixed origin like the C channel;
-  2. the door's stop sound on the same (entity, channel) (doors/stndr2.wav,
-     t 19.0 s) overrides it: SND_PickChannel ends the loop, nothing hums on;
-  3. an INAUDIBLE sound on the key of a hum whose first decode is still
-     pending ends it too (S_StartSound picks the channel before the
-     audibility test): fed to the page's sound path as SAMPLE and SOUND
-     records would be (quake.audio.onSample / onSound), the hum never starts
-     (and, as a control, the same hum alone does);
-  4. a one-shot's sides are clamped at full before the master volume
-     (snd_mix.c) and it is re-spatialized every frame (S_Update);
-  5. no console errors.
+  1. a door "moving" sample (doors/stndr1.wav on entity 26, CHAN_VOICE)
+     plays on a dynamic channel, and the door's stop sound on the same
+     (entity, channel) (doors/stndr2.wav) takes the channel from it:
+     SND_PickChannel's override ends the hum;
+  2. the train's hum (plats/train1.wav on entity 195, from demo t ~21 s)
+     LOOPS from its `cue ` point lap after lap — GetWavinfo +
+     SND_PaintChannels restart it, so its position falls back and its end
+     moves on — re-spatialized every frame from the train as it and the
+     recorded camera move (S_Update), until the train's stop sound
+     (plats/train2.wav, t ~38.7 s) overrides it;
+  3. meanwhile the worklet plays the ring without running dry, and what it
+     plays is sound;
+  4. no console errors.
 
 Usage: verify_loops.py [webdir]   (defaults to the repo's web/; pass a deploy
 dir — PLATFORM.md).
 """
-import sys
+import sys, time
 from playwright.sync_api import sync_playwright
 import isolated
 
@@ -35,6 +34,18 @@ def check(name, ok, detail=""):
     if ok: passed += 1
     else: failed += 1
 
+def channels(pg):
+    """The mixer's channels: index, sample, left, right, master, pos, end, entity, channel."""
+    out = []
+    for line in pg.evaluate("quake.text('snd_channels')").splitlines():
+        f = line.split()
+        out.append({"i": int(f[0]), "sample": f[1], "left": int(f[2]), "right": int(f[3]),
+                    "pos": int(f[5]), "end": int(f[6]), "ent": int(f[7]), "chan": int(f[8])})
+    return out
+
+DOOR, DOOR_STOP, DOOR_KEY = "doors/stndr1.wav", "doors/stndr2.wav", (26, 2)
+TRAIN, TRAIN_STOP, TRAIN_KEY = "plats/train1.wav", "plats/train2.wav", (195, 2)
+
 with sync_playwright() as p:
     br = isolated.launch(p, [
         "--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
@@ -44,118 +55,55 @@ with sync_playwright() as p:
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready", timeout=60000)
-    # The attract demo is running behind the menu; start audio (headless has
-    # no gesture, the autoplay flag lets resume() succeed).
+    # The attract demo is running; start audio (headless has no gesture, the
+    # autoplay flag lets resume() succeed).
     pg.evaluate("""() => {
         audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
         return audioCtx.resume();
     }""")
+    pg.wait_for_function("quake.audio.ring().running && quake.audio.ring().worklet", timeout=10000)
+    u0 = pg.evaluate("quake.audio.ring().underruns")
+    pg.evaluate("quake.audio.resetPeak()")
 
-    # 1. The first loop of demo1 (t 18.2 s).
-    pg.wait_for_function("window.__sndStats && (window.__sndStats.loops || 0) >= 1", timeout=60000)
-    s1 = pg.evaluate("""() => ({
-        n: dynLoops.length,
-        looping: dynLoops.every(l => l.src.loop === true && l.src.loopStart >= 0),
-        keyed: dynLoops.some(l => [...playingByKey.values()].includes(l.src)),
-        // The live L/R gains follow the C law from the loop's fixed origin.
-        lawHolds: dynLoops.every(l => {
-            const p = l.lp, L = quake.audio.listener;
-            const dx = p.ox - L.x, dy = p.oy - L.y, dz = p.oz - L.z;
-            const dist = Math.hypot(dx, dy, dz);
-            let pan = 0;
-            if (dist > 1e-3) {
-                pan = (dx * L.rx + dy * L.ry + dz * L.rz) / dist;
-                pan = Math.min(1, Math.max(-1, pan));
-            }
-            // Each side clamped at full BEFORE the master volume (snd_mix.c).
-            const g = Math.max(0, 1 - dist * p.atten / 1000) * p.vol, m = masterVolume();
-            return Math.abs(l.lg.gain.value - Math.min(1, Math.max(0, g * (1 - pan))) * m) < 0.05
-                && Math.abs(l.rg.gain.value - Math.min(1, Math.max(0, g * (1 + pan))) * m) < 0.05;
-        }),
-    })""")
-    check("a door hum plays as a looping source", s1["n"] >= 1 and s1["looping"], str(s1))
-    check("the loop is keyed on its (entity, channel)", s1["keyed"])
-    check("its gains follow the C pan/distance law", s1["lawHolds"])
+    # Watch the mixer's channels every 50 ms until the train has stopped.
+    looks = []                 # (key, sample, channel dict) per look
+    deadline = time.time() + 75
+    train_done = False
+    while time.time() < deadline and not train_done:
+        for c in channels(pg):
+            looks.append(((c["ent"], c["chan"]), c["sample"], c))
+        seen = [s for k, s, _ in looks if k == TRAIN_KEY]
+        train_done = TRAIN in seen and seen[-1] == TRAIN_STOP
+        time.sleep(0.05)
 
-    # 2. The stop sound (t 19.0 s) overrides it.
-    stops0 = pg.evaluate("window.__sndStats.stops")
-    pg.wait_for_function("dynLoops.length === 0", timeout=10000)
-    stops1 = pg.evaluate("window.__sndStats.stops")
-    check("the door's stop sound ends the loop", stops1 > stops0, f"stops {stops0} -> {stops1}")
+    def on(key):
+        return [(s, c) for k, s, c in looks if k == key]
 
-    # 3. An inaudible override while the hum's first decode is pending. Feed
-    #    the page's sound path what the program would send: a looping,
-    #    never-decoded 8-bit sample (SAMPLE) played on entity 900 channel 2 at
-    #    the listener (SOUND), then (unless `alone`) a sound on the same key
-    #    10000 units away (gain 0). Let the decode land, and see whether the
-    #    hum started.
-    wav = """(n) => {
-        const wav = new Uint8Array(44 + n);
-        const dv = new DataView(wav.buffer);
-        const tag = (o, s) => { for (let i = 0; i < 4; i++) wav[o + i] = s.charCodeAt(i); };
-        tag(0, 'RIFF'); dv.setUint32(4, 36 + n, true); tag(8, 'WAVE');
-        tag(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
-        dv.setUint16(22, 1, true); dv.setUint32(24, 11025, true); dv.setUint32(28, 11025, true);
-        dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
-        tag(36, 'data'); dv.setUint32(40, n, true);
-        for (let i = 0; i < n; i++) wav[44 + i] = 128 + ((Math.random() * 64) | 0) - 32;  // unique: never cached
-        return wav;
-    }"""
-    pg.evaluate(f"window._wav = {wav}")
-    hum = """async (alone) => {
-        const A = quake.audio, L = A.listener;
-        const id = 900000 + ((Math.random() * 1e6) | 0);   // a sample id the program never sends
-        A.onSample(id, _wav(2000));
-        const base = { id, oy: L.y, oz: L.z, vol: 1, atten: 1, ent: 900, chan: 2, view: false, ls: 0, le: 0 };
-        A.onSound({ ...base, ox: L.x });
-        if (!alone) A.onSound({ ...base, ox: L.x + 10000 });
-        await new Promise(r => setTimeout(r, 1500));
-        const started = A.dynLoops.some(l => l.src === A.playingByKey.get('900:2'));
-        A.stopKey(900, 2);
-        return started;
-    }"""
-    check("control: a lone hum on a fresh sample starts once decoded", pg.evaluate(hum, True))
-    check("an inaudible sound on its key keeps a pending hum from starting", not pg.evaluate(hum, False))
+    # 1. The door: its hum, then its stop sound on the same key.
+    door = on(DOOR_KEY)
+    names = [s for s, _ in door]
+    check("a door hum plays on a dynamic channel", DOOR in names
+          and all(4 <= c["i"] < 12 for s, c in door if s == DOOR), str(sorted(set(names))))
+    check("the door's stop sound takes its (entity, channel)", DOOR in names and DOOR_STOP in names
+          and names.index(DOOR_STOP) > names.index(DOOR), "")
 
-    # 4. A one-shot (no cue point) 50 units to the listener's right, fed the
-    #    same way: each side is clamped at full BEFORE the master volume
-    #    (snd_mix.c clamps leftvol/rightvol at 255, S_TransferPaintBuffer then
-    #    scales by `volume`), so its near side is the master volume, not full;
-    #    and S_Update re-spatializes it every frame from its origin while the
-    #    recorded player moves on.
-    shot = """async () => {
-        const A = quake.audio, L = A.listener;
-        const id = 900000 + ((Math.random() * 1e6) | 0);
-        A.onSample(id, _wav(22050));
-        const o = [L.x + 50 * L.rx, L.y + 50 * L.ry, L.z + 50 * L.rz];
-        const before = A.dynShots.length;
-        A.onSound({ id, ox: o[0], oy: o[1], oz: o[2], vol: 1, atten: 1, ent: 901, chan: 0,
-                    view: false, ls: -1, le: 0 });
-        for (let i = 0; i < 40 && A.dynShots.length === before; i++) await new Promise(r => setTimeout(r, 25));
-        const l = A.dynShots[A.dynShots.length - 1];
-        if (!l || l.lp.ox !== o[0]) return { ok: false };
-        const first = [l.lg.gain.value, l.rg.gain.value];
-        const lx0 = [L.x, L.y];
-        await new Promise(r => setTimeout(r, 700));
-        const law = () => {
-            const dx = o[0] - L.x, dy = o[1] - L.y, dz = o[2] - L.z;
-            const dist = Math.hypot(dx, dy, dz);
-            const pan = Math.min(1, Math.max(-1, (dx * L.rx + dy * L.ry + dz * L.rz) / dist));
-            const g = Math.max(0, 1 - dist / 1000), m = A.masterVolume();
-            return [Math.min(1, g * (1 - pan)) * m, Math.min(1, g * (1 + pan)) * m];
-        };
-        const now = [l.lg.gain.value, l.rg.gain.value], want = law();
-        const moved = Math.hypot(L.x - lx0[0], L.y - lx0[1]);
-        l.src.stop();
-        return { ok: true, first, master: A.masterVolume(), now, want, moved };
-    }"""
-    r = pg.evaluate(shot)
-    check("a one-shot is tracked for re-spatialization", r["ok"], str(r))
-    if r["ok"]:
-        check("its near side is clamped before the master volume (right = volume, not 1)",
-              abs(r["first"][1] - r["master"]) < 0.02 and r["first"][0] < 0.05 and r["master"] < 1, str(r))
-        check("it is re-spatialized each frame from its origin as the player moves",
-              r["moved"] > 1 and all(abs(a - b) < 0.03 for a, b in zip(r["now"], r["want"])), str(r))
+    # 2. The train's hum loops, follows the train, and its stop sound ends it.
+    hum = [c for s, c in on(TRAIN_KEY) if s == TRAIN]
+    laps = sum(1 for a, b in zip(hum, hum[1:]) if b["pos"] < a["pos"])
+    ends = sorted({c["end"] for c in hum})
+    check("the train's hum loops from its cue point", laps >= 2 and len(ends) >= 3,
+          f"{len(hum)} looks, {laps} laps, {len(ends)} ends")
+    vols = {(c["left"], c["right"]) for c in hum}
+    check("re-spatialized from the train as it and the camera move", len(vols) >= 5, f"{len(vols)} volume pairs")
+    names = [s for s, _ in on(TRAIN_KEY)]
+    check("the train's stop sound ends the loop", train_done and names[-1] == TRAIN_STOP
+          and TRAIN not in names[names.index(TRAIN_STOP):], "")
+
+    # 3. The ring all along.
+    u1 = pg.evaluate("quake.audio.ring().underruns")
+    peak = pg.evaluate("quake.audio.ring().peak")
+    check("the worklet never ran dry meanwhile", u1 == u0, f"+{u1 - u0}")
+    check("what it played is sound", peak > 500, f"peak {peak}")
 
     check("no console errors", not errs, str(errs[-5:]))
     br.close()

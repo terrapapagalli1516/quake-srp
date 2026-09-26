@@ -48,8 +48,6 @@ pub(crate) fn step_timedemo(
 
 /// `S_StopAllSounds (true)`: every sound, the loops and ambients included.
 fn stop_all_sounds() {
-    crate::snd_dma::SND_QUEUE.with(|q| q.borrow_mut().clear());
-    crate::snd_dma::STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     if let Some(pak) = crate::common::pak() {
         crate::snd_dma::play(&pak, vec![SoundCall::StopAll]);
     }
@@ -179,10 +177,7 @@ mod tests {
 
     use crate::app::build_demo;
     use crate::common::pak;
-    use crate::snd_dma::{
-        poll_sound, set_audio_ready, sound_channel, sound_entity, sound_is_view_entity,
-        sound_volume, SND_QUEUE,
-    };
+    use crate::snd_dma::pending_starts;
     use crate::test_util::*;
     use crate::vid::{DEFAULT_H, DEFAULT_W};
     use quake_rs::client::view::V_KICKPITCH;
@@ -484,11 +479,11 @@ mod tests {
         }
     }
 
-    /// A recorded svc_sound event queues through the SAME `queue_sounds` path
-    /// live play uses — once per frame advance (the spawn guard), carrying its
-    /// (entity, channel) override key for the page registry.
+    /// A recorded svc_sound starts through the SAME sound calls live play
+    /// makes — once per frame advance (the spawn guard), with its volume and
+    /// (entity, channel) override key.
     #[test]
-    fn step_demo_queues_recorded_sounds_through_the_live_path() {
+    fn step_demo_starts_recorded_sounds_through_the_live_path() {
         use quake_rs::demo::{Demo, DemoFrame};
 
         let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
@@ -516,31 +511,21 @@ mod tests {
         let mut d = DemoPlay::new(build_test_pak(&[("sound/doors/x.wav", b"WAVE")]), render::demo_room(), [[0u8; 3]; 256], demo);
         d.prng = Lcg::new(1);
 
-        reset_queue(); // clears SND_QUEUE + marks audio ready
+        reset_queue();
         let _ = step_demo(&mut d, 0.05, false, 160, 100);
         assert_eq!(d.idx, 1, "advanced onto the sound frame");
-        assert_eq!(
-            SND_QUEUE.with(|q| q.borrow().len()),
-            1,
-            "the recorded svc_sound queued exactly once"
-        );
-        // Lingering on the same frame must not re-queue it.
+        assert_eq!(pending_starts().len(), 1, "the recorded svc_sound started exactly once");
+        // Lingering on the same frame must not start it again.
         let _ = step_demo(&mut d, 0.0001, false, 160, 100);
-        assert_eq!(SND_QUEUE.with(|q| q.borrow().len()), 1, "no re-queue while lingering");
+        let starts = pending_starts();
+        assert_eq!(starts.len(), 1, "no second start while lingering");
 
-        // The pop carries the spatial params + the (entity, channel) key.
-        let len = poll_sound();
-        assert!(len > 0, "WAV bytes loaded from the pak");
-        assert_eq!(sound_volume(), 0.5);
-        assert_eq!(sound_entity(), 5, "override key entity");
-        assert_eq!(sound_channel(), 2, "override key channel");
-        assert_eq!(
-            sound_is_view_entity(),
-            0,
-            "entity 5 is not the recorded view entity (1)"
-        );
-        SND_QUEUE.with(|q| q.borrow_mut().clear());
-        set_audio_ready(0);
+        // S_StartSound's arguments: the volume, the (entity, channel) key,
+        // and the recorded view entity (1), which entity 5 is not.
+        let (e, view) = &starts[0];
+        assert_eq!((e.volume, e.entity, e.channel, *view), (0.5, 5, 2, 1));
+        assert_eq!(e.sample, "doors/x.wav");
+        reset_queue();
     }
 
     /// A recorded svc_damage drives the SAME flash + view-kick math live play

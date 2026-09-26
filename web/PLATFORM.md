@@ -2,7 +2,7 @@
 
 The browser build is an ordinary Rust program. `quake-wasm` builds a binary,
 `quake.wasm` (`wasm32-wasip1`), with a `fn main()` that reads the page's
-events from stdin, writes each frame's picture and sounds to stdout, and
+events from stdin, writes each frame's picture and sound to stdout, and
 keeps its saves and `config.cfg` through `std::fs`. It has no exports beyond
 WASI's `_start`, no imports beyond what `std` asks of WASI, and
 `#![forbid(unsafe_code)]`. The page is a small WASI host around it.
@@ -13,7 +13,7 @@ There are three pieces:
 |---|---|---|
 | `quake-wasm/` → `quake.wasm` | a Web Worker | the game: `sys::run`, a host frame per tick (`quake-wasm/src/sys.rs`); the records it reads and writes (`proto.rs`) |
 | `web/wasi.js` | the same Worker | the WASI host: stdin from a shared ring, stdout into shared frame slots and one message per turn, an in-memory file system, the clocks |
-| `web/index.html` | the page | the canvas, keyboard and mouse, Web Audio, IndexedDB, and the display's refresh, which it hands the program as ticks |
+| `web/index.html` | the page | the canvas, keyboard and mouse, the audio device (an AudioWorklet playing the program's samples), IndexedDB, and the display's refresh, which it hands the program as ticks |
 
 The rest of this file is the design, the protocol, what it measured against
 the page it replaced (the wasm cdylib with ~84 `#[no_mangle]` exports the
@@ -29,18 +29,25 @@ keydown/mouse ──KEY/MOUSE records──▶ ring ─▶ fd_read(0) ─▶ Key
                                             (the program is blocked here, in
                                              Atomics.wait, between frames)
 requestAnimationFrame
-  TICK(seq, dt) ───────────────────▶ ring ─▶ fd_read(0) returns the tick
+  AUDIO_CLOCK, TICK(seq, dt) ──────▶ ring ─▶ fd_read(0) returns the tick
   spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime, the
-                                             client frame, menu, console, blend, pack
-                                             fd_write(1): FRAME ─▶ pixels copied into a
+                                             client frame, menu, console, blend, pack;
+                                             id's mixer paints to the clock + mix-ahead
+                                             fd_write(1): PCM ─▶ samples copied into the
+                                                                 sound ring
+                                                          FRAME ─▶ pixels copied into a
                                                                    free frame slot
-                                                          sounds, LISTENER, STATE ─▶ kept
+                                                          AUDIO, STATE ─▶ kept
                                                           SYNC ─▶ ACK = seq, notify;
                                                                   post the kept records
   copy the newest slot into the
   canvas's ImageData, putImageData
-message event: sounds → Web Audio,
-  STATE → the page's UI, REPLY → calls
+message event: STATE → the page's UI,
+  REPLY → calls, AUDIO → counts
+                                    (between ticks, every 8 ms while the
+                                     worklet plays: AUDIO_WAKE ─▶ the mixer
+                                     tops the ring up, PCM)
+AudioWorklet (audio thread): plays the sound ring, moves its clock
 ```
 
 - **The program waits in a read.** Between frames `sys::run` is blocked
@@ -88,9 +95,11 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 3 | MOUSE | `dx f32`, `dy f32` (raw `movementX`/`movementY`) |
 | 4 | CLEAR_KEYS | — (window blur: `ClearAllStates`) |
 | 5 | POINTER_UNLOCKED | — (the port's `+mlook` release: lookspring) |
-| 6 | AUDIO_READY | `ready u8` |
+| 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
+| 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
+| 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
 
 A record whose payload is shorter than its kind's reads the missing fields as
 zeros, and an unknown kind is skipped, so either side can grow a record.
@@ -102,26 +111,18 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 1 | FRAME | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 ×3`, the pixels |
 | 2 | SYNC | `seq u32` (last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
 | 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo), `menu_screen i32` |
-| 4 | SAMPLE | `id u32`, a RIFF/WAV (each distinct sample once, by content) |
-| 5 | SOUND | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `entity i32`, `channel i32`, `view u32`, `loop_start f32`, `loop_end f32` |
-| 6 | STOP_SOUND | `entity i32`, `channel i32` |
-| 7 | STATIC_SOUND | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `loop_start f32`, `loop_end f32` |
-| 8 | AMBIENT | `channel u32`, `id u32`, `loop_start f32`, `loop_end f32` |
-| 9 | LISTENER | `origin f32×3`, `forward f32×3`, `right f32×3`, `ambient f32×4`, `volume f32` |
-| 10 | GENERATION | `generation u32`: `S_StopAllSounds` (a level or mode change) |
-| 11 | LOCAL_SOUND | `id u32`: `S_LocalSound` (menu clicks) and `play` |
+| 4–11 | — | retired: the sound records of the page's own mixing, before the program mixed |
 | 12 | REPLY | `id u32`, `value f64`, then UTF-8 text |
 | 13 | BENCH | `f64` per value (`--features bench`; names from the `bench_names` call) |
+| 14 | PCM | `start u32` (the pair of the ring's clock it plays at), `rate u32`, `flags u32` (1: silence the ring first, `S_ClearBuffer`), then 16-bit stereo pairs. Copied into the sound ring by `wasi.js`, never posted |
+| 15 | AUDIO | `rate u32`, `mode u32` (0 Classic, 1 2026), then counts: `starts`, `local`, `stops`, `clears`, `painted` (u32 each) |
 
-A turn's records end with its `SYNC`. After a frame the sound records come in
-causal order: `GENERATION` (with the new level's `AMBIENT`s) first, then
-`LISTENER`, the one-shots, stops, local sounds, and the level's placed loops,
-so every sound is spatialized against this frame's listener and nothing
-queued after a level change is stopped by it.
+A turn's records end with its `SYNC`. A tick's `PCM` comes before its
+`FRAME`, so the samples reach the ring before the pixels are copied.
 
 ## Shared memory
 
-Two `SharedArrayBuffer`s:
+Three `SharedArrayBuffer`s:
 
 - **Control and ring** (`CTL_BYTES` 256 + 64 KB, made by the page). The
   control block is an `Int32Array`: `IN_WRITE`/`IN_READ` (the ring's byte
@@ -141,6 +142,16 @@ Two `SharedArrayBuffer`s:
   `SLOTS_GEN`; the page presents nothing until it holds the set `SLOTS_GEN`
   names, so the frame shows one refresh later. No resolution limit lives in
   the host, and at the default 960×600 the slots take 6.9 MB.
+- **The sound ring** (64 bytes + 16384 stereo pairs of 16 bits, made by the
+  page, handed to the worker and to the AudioWorklet). Its control block is
+  an `Int32Array`: `POS` (the pair the device plays next — the clock the
+  program mixes ahead of), `WRITE` (where the program's samples reach),
+  `RATE` (their rate), `UNDER` (quanta the worklet played short once the
+  program had written anything), `PLAYED`, `CLEARS`, `PEAK` (the loudest
+  sample played since the page last reset it), `QUANTA`. Samples go in at
+  `start & 16383`; the worklet plays pair `POS` when `0 < WRITE - POS <=
+  16384`, silence otherwise. The same table is at the top of `wasi.js` and
+  in the page's sound section.
 
 ## Files
 
@@ -185,21 +196,75 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 
 ## Sound
 
-The program decides what plays (`snd_dma.rs`, `quake_rs::snd`: channel
-choice and override, the loop windows, the ambient ramps); the page mixes it
-with Web Audio as before, one source per sound, the same pan law, the same
-per-frame re-spatialization. What changed is only the channel: the page used
-to poll ~30 exports each frame; now it handles the records above as they
-come, and samples cross once. The page remembers the current level's loops,
-so audio that starts later (the first click) still gets them.
+The program mixes, as WinQuake did: id's `snd_dma.c`, `snd_mix.c` and
+`snd_mem.c`, ported as `quake_rs::snd::Mixer`, run in the worker
+(`quake-wasm/src/snd_dma.rs` is the device behind it, `snd_win.c`'s part).
+The page only plays what it paints.
 
-**Engine PCM later.** A later change will mix in the program (id's
-`snd_mix.c`) and feed an AudioWorklet. The protocol has room for it: a record
-of PCM frames per turn, or — better, because the worklet runs on its own
-clock — a third `SharedArrayBuffer` ring the worker's `fd_write` of a
-dedicated file descriptor (or a record kind) fills and the worklet drains.
-Either way the program stays a writer of bytes; nothing in this design
-assumes the page mixes.
+- **Samples out.** After every tick the program runs the frame's sound calls
+  through the mixer, then `S_Update_`: it paints from where it left off to
+  the ring's play position plus `_snd_mixahead`, and writes that as a `PCM`
+  record. `wasi.js` copies the samples straight into the sound ring (no
+  message to the page). An AudioWorklet on the page's AudioContext plays the
+  ring and moves its `POS`.
+- **The clock** is `POS`, the device's own: the page sends it before every
+  tick (`AUDIO_CLOCK`). Between ticks, while the worklet plays, `wasi.js`
+  wakes the program every 8 ms with an `AUDIO_WAKE`, and it mixes again —
+  id's `S_ExtraUpdate`, so the ring stays fed whatever the display does. If
+  the device overtakes the mixer (a level load, a stall), the mixer skips to
+  it, as `S_Update_` did; the worklet plays silence for what was missing and
+  counts an underrun.
+- **Before the first click** (browsers start an AudioContext suspended until
+  a gesture) the page moves `POS` on itself in real time, at most 0.1 s a
+  refresh: the mixer runs unheard, as a sound card's DMA ran whether a
+  speaker was on or not, so nothing queues up to play at once when sound
+  starts (the old page had to drop sounds until then). The first gesture
+  (the overlay, a button, the canvas, F) creates or resumes the context and
+  attaches the worklet (its module is a string in `index.html`, loaded from a
+  `blob:` URL: no extra file to deploy); `AUDIO_READY` tells the program it
+  runs and at what rate.
+- **Level changes.** `S_StopAllSounds` asks for `S_ClearBuffer`: the next
+  `PCM` carries the clear flag and `wasi.js` zeroes the ring, so what was
+  mixed ahead of the old level falls silent at once.
+- **Menu and pause** are id's: `S_Update` runs every host frame whatever has
+  the keyboard, so the level's loops and ambients play on under the menu and
+  over a paused game (a test in `snd_dma.rs`); the menu's clicks are
+  `S_LocalSound`s through the mixer.
+- **A hidden tab** stops the game (no refreshes, no ticks). The page
+  suspends the AudioContext with it and resumes it when the tab comes back,
+  so the sound stops and goes on where the game does.
+
+**Classic and 2026.** The typed setting is `quake_rs::snd::SoundMode`
+(`App::sound_mode`; the automation call `sound_mode classic|2026`). Classic
+is id's mixer as written (`Fixes::NONE`) at id's `desired_speed`, 11025 Hz,
+mixing id's 0.1 s ahead. The 2026 mixer (`Fixes::ALL`: the loop seam, exact
+resampling steps, the ambient ramp at any frame rate, `S_StopSound`'s range;
+`AUDIT.md`) runs at the device's own rate, 0.05 s ahead. A change of mode
+makes a new mixer (the ring is cleared, the level's placed sounds are
+registered again).
+
+**Classic's 11025 Hz on a 48 kHz device.** The worklet reconstructs it: a
+windowed sinc (Blackman, 16 input samples, 256 phases) band-limited at
+5.5 kHz, as a sound card's DAC and output filter reconstructed id's 11025 Hz
+for its speakers. Chosen over an AudioContext created at 11025 Hz (the
+browser resampling it) because the filter is then the same in every browser
+and explicit here, the context never has to be re-created — which can need a
+new gesture in Safari — when the mode changes, and a context at 11025 Hz is
+not guaranteed everywhere. The 2026 mixer's samples play pair for pair: its
+character is id's point resampling at the device's rate (what `-sspeed 48000`
+gave), images and all.
+
+**Latency** (headless Chromium, the attract demo, 20 s per mode): the ring's
+lead — how far ahead of the device the program has mixed, which is how long
+a sound started now waits — is at the mix-ahead between wakes: 2026 p1 39,
+median 50, max 50 ms; Classic p1 89, median 100 ms. The context adds its own
+`baseLatency` + `outputLatency`: 10.7 + 40 ms headless (a real device's
+differ). No underruns in either mode (also none at a 30 ms mix-ahead; at
+20 ms the headless device ran dry 281 times in 20 s: its callbacks take
+larger bites), nor in `verify_loops.py`'s 40 s. The checks read the ring
+(`quake.audio.ring()`: its position, lead, underruns, loudest sample) and
+the mixer (`snd_stats`, `snd_channels`: every channel's sample, volumes,
+position and key).
 
 ## Threads
 
@@ -322,7 +387,7 @@ rest of the turn, and waking the worker.
 |---|---|---|---|
 | pixels into the slot (worker) | 0.07 | 0.19 | 0.24 |
 | slot into the ImageData (page) | 0.06 | 0.18 | 0.25 |
-| sounds, listener, state, `postMessage` | 0.02–0.05 | 0.02–0.05 | 0.02–0.05 |
+| sounds, listener, state, `postMessage` (the page's own mixing then) | 0.02–0.05 | 0.02–0.05 | 0.02–0.05 |
 | waking the worker | < 0.05 | < 0.05 | < 0.05 |
 
 So a frame costs about 0.15 / 0.4 / 0.5 ms more end to end, and the page's

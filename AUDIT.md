@@ -132,9 +132,12 @@ where it came from. Items marked *(2026-06)* were not re-checked on 2026-09-25.
 - The browser console has no `d_mipscale`/`d_mipcap` (w2a).
 
 **Sound**
-- Static sounds of one sample are separate Web Audio sources, where `S_Update` combines
-  them (and clamps the sum): several near torches are louder than id's (polish3; ship push).
-- The page plays at most 16 one-shots a frame; past that, keyed ones wait a frame (polish3).
+- ~~Static sounds of one sample are separate Web Audio sources~~ and ~~the page plays at
+  most 16 one-shots a frame~~: gone with the page's mixing — id's mixer runs in the
+  program and the page plays its samples ("The engine's own mixer", below).
+- The client hands `S_StartSound` the QuakeC volume in live play, not the wire byte over
+  255 id's client sees (a volume can differ by one step of 255); temp-entity sounds use
+  entity 0 where `CL_ParseTEnt` uses -1 (nothing audible) (audio).
 
 **Older LOW tail** *(2026-05/06, not re-checked)*: `PF_particle`'s byte count and
 direction quantising; `clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s
@@ -2177,9 +2180,16 @@ mix-ahead, `S_PaintChannels` with `SND_PaintChannelFrom8`/`16` and the scale
 table, `S_TransferStereo16`, `GetWavinfo`, `S_LoadSound` + `ResampleSfx`, and
 the cvars `volume`, `nosound`, `loadas8bit`, `ambient_level`, `ambient_fade`,
 `_snd_mixahead`. It takes the client's `SoundCall`s and paints 16-bit stereo
-PCM at the caller's rate. **The browser does not use it yet**: the page still
-mixes with Web Audio (the two "Sound" items in the Open list stand until the
-AudioWorklet wiring).
+PCM at the caller's rate. **The browser plays it**: the worker runs the mixer
+and paints into a shared ring an AudioWorklet plays; the page's own Web Audio
+mixing is gone (`web/PLATFORM.md`, "Sound"). Classic (`snd::SoundMode::Classic`)
+is id's mixer at 11025 Hz, reconstructed at the device's rate by the worklet
+as a sound card's DAC did; the 2026 default runs `Fixes::ALL` at the device's
+rate. What the page's mixing got wrong goes with it: one-sample statics are
+combined and their sum clamped as in `S_Update`, no cap on a frame's sounds,
+`SND_PickChannel`'s 8 channels (a ninth sound takes the one nearest its end,
+never the player's), the menu's clicks through `S_LocalSound`, and the level's
+sound playing on under the menu and over `pause` as id's `S_Update` does.
 
 - ✅ **Classic is id's, sample for sample.** `oracle/sound.py` runs id's C
   mixer (built headless, `oracle/build_sound.sh`) and the port on the same

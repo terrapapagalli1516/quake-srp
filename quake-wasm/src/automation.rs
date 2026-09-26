@@ -155,8 +155,25 @@ pub(crate) fn call(line: &str) -> Answer {
         "listener_right_x" => listener().right[0].into(),
         "listener_right_y" => listener().right[1].into(),
         "listener_right_z" => listener().right[2].into(),
+        // The mixer the player hears (quake_rs::snd::SoundMode): 0 Classic
+        // (id's at 11025 Hz), 1 the 2026 one; an argument (`classic`,
+        // `2026`) sets it first.
+        "sound_mode" => sound_mode(rest).into(),
         _ => bench_call(name, rest).unwrap_or_else(|| f64::NAN.into()),
     }
+}
+
+/// The mixer the player hears, set to `arg` first when it names one
+/// (`classic`/`0`, `2026`/`1`): 0 Classic, 1 2026.
+fn sound_mode(arg: &str) -> i32 {
+    let mut mode = quake_rs::snd::SoundMode::default();
+    crate::app::ensure_app(|a| {
+        if let Some(m) = quake_rs::snd::SoundMode::parse(arg) {
+            a.sound_mode = m;
+        }
+        mode = a.sound_mode;
+    });
+    i32::from(mode == quake_rs::snd::SoundMode::Modern)
 }
 
 /// Blank slot `slot`'s listing in the Load/Save menus.
@@ -217,6 +234,9 @@ mod tests {
         assert_eq!(call("viewsize").value, 70.0);
         call("exec echo hello there");
         assert!(call("console_text").text.contains("hello there\n"));
+        assert_eq!(call("sound_mode").value, 1.0, "the 2026 mixer by default");
+        assert_eq!(call("sound_mode classic").value, 0.0);
+        assert_eq!(call("sound_mode junk").value, 0.0, "unchanged by a name it does not know");
         assert!(call("no_such_call").value.is_nan());
         assert!(call("").value.is_nan());
     }
