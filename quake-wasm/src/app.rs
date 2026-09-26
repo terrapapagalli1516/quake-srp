@@ -1,9 +1,9 @@
 //! The shell's state and its boots — the [`App`] (host-level state that
 //! outlives a level: mode, menu, console, clocks, framebuffer, held keys)
 //! around the client it runs, the live [`Walk`] or the recorded [`DemoPlay`]
-//! ([`quake_rs::client`]); host.c's one-time asset loads, the embedded pak,
-//! the client's level loads with their sound calls carried out, and the
-//! `boot*` exports the page starts a mode with.
+//! ([`quake_rs::client`]); host.c's one-time asset loads, the client's level
+//! loads with their sound calls carried out, and the boots (quake.rc's
+//! attract loop at startup; the page's walk and demo buttons).
 
 use std::cell::RefCell;
 

@@ -1,5 +1,5 @@
-//! Player input — in_win.c (`IN_MouseMove`) and keys.c's `Key_Event`: the
-//! key/mouse exports the page calls. Every key goes through [`key_event`],
+//! Player input — in_win.c (`IN_MouseMove`) and keys.c's `Key_Event`: what
+//! the page's key and mouse records do. Every key goes through [`key_event`],
 //! which hands it to the menu, the console or its binding as id's does; the
 //! per-frame `KeyMove` the held bindings feed (cl_input.c's `CL_BaseMove`/
 //! `CL_AdjustAngles`) is [`quake_rs::client::cl_input`]'s.
@@ -256,8 +256,8 @@ pub(crate) fn key_event(keynum: i32, down: i32, ch: i32) {
     run_key_after(after);
 }
 
-/// A key press and release, as the automation's and tests' menu exports
-/// send them.
+/// A key press and release, as the automation's and tests' menu calls send
+/// them.
 pub(crate) fn press(key: u8) {
     key_event(key as i32, 1, 0);
     key_event(key as i32, 0, 0);
@@ -286,7 +286,7 @@ pub(crate) fn key_clear_states() {
 }
 
 /// 1 when the engine currently believes Quake keynum `keynum` is held — a
-/// read-only verification/debug export (like [`menu_screen_id`]). The browser
+/// read-only verification/debug call (like [`menu_screen_id`]). The browser
 /// harness uses it to prove the page's `e.code` punctuation mapping keeps
 /// key-down/key-up SYMMETRIC under Shift (press ',', add Shift, release ','
 /// must clear keynum 44, even though the release reports `key == '<'` —
@@ -373,7 +373,7 @@ pub(crate) fn pointer_unlocked() {
 }
 
 /// The player's current look pitch in degrees (+down, Quake convention) — a
-/// read-only verification/debug export (the browser checks Invert Mouse and
+/// read-only verification/debug call (the browser checks Invert Mouse and
 /// lookspring flip/centre the pitch through it). 0 when no walk is live.
 pub(crate) fn player_pitch() -> f32 {
     APP.with(|c| {

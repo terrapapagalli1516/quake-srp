@@ -195,11 +195,12 @@ alias_models,alias_accepted,alias_tris";
     }
 }
 
-/// The native half of `web/bench.py`: the SAME workloads, driven through the
-/// SAME exports the page calls, on the host CPU — so every browser phase has a
-/// native twin and the wasm/native ratio is per phase, not a guess.
+/// The native half of `web/bench.py`: the SAME workloads ([`workload`]),
+/// driven through the same functions, on the host CPU — so every browser
+/// phase has a native twin and the wasm/native ratio is per phase, not a
+/// guess.
 ///
-/// `cargo test --release --features bench --lib -- --ignored --nocapture native_bench`
+/// `cargo test --release --features bench -- --ignored --nocapture native_bench`
 /// Knobs (env): `QUAKE_BENCH_WORKLOADS` (comma list, default `demo1,walk_e1m1`),
 /// (`walk_<map>` / `fire_<map>` / `quad_<map>` = the scripted live walk, `fire_` with
 /// +attack held, `quad_` after `impulse 255` so the Quad's cshift is on),

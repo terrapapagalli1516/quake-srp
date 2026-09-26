@@ -1,7 +1,7 @@
 //! Video — the mode side of vid_win.c (`VID_SetMode`'s runtime resolution,
-//! clamped to a safe envelope; `vid.buffer` as the RGBA framebuffer export)
-//! and the bits of screen.c the page reads or both client frames share (the
-//! `viewsize` cvar, `Draw_TileClear`'s backtile).
+//! clamped to a safe envelope; `vid.buffer`, the RGBA framebuffer each
+//! `Frame` record carries) and the bits of screen.c both client frames share
+//! (the `viewsize` cvar, `Draw_TileClear`'s backtile).
 
 use quake_rs::client::Vid;
 use quake_rs::render;
@@ -10,9 +10,9 @@ use crate::app::{ensure_app, APP};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
-/// can mark it current). The page restores the player's *saved* resolution from
-/// `localStorage` over this on load, and Options > Video Options lets them change
-/// it at runtime; the chosen size now persists across boots / New Game / reloads. The
+/// can mark it current). `config.cfg` restores the player's *saved* resolution
+/// over this at startup, and Options > Video Options lets them change it at
+/// runtime; the chosen size persists across boots / New Game / reloads. The
 /// menu + HUD are drawn at their own pixel size, as WinQuake draws them in every
 /// mode, unless the [`set_scaled_2d`] extra blows them up.
 pub(crate) const DEFAULT_W: usize = 960;
@@ -47,10 +47,10 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
     (cw as usize, ch as usize)
 }
 
-/// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). The page
-/// reads this each frame and resizes its canvas backing store + ImageData when it
-/// changes (e.g. after the Options menu picks a different preset), and persists it
-/// to `localStorage` so the choice survives a reload.
+/// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). Each
+/// `Frame` record carries it, and the page resizes its canvas backing store +
+/// ImageData when it changes (e.g. after the Options menu picks a different
+/// preset); `config.cfg` keeps it across sessions.
 pub(crate) fn width() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_w as i32).unwrap_or(DEFAULT_W as i32))
 }

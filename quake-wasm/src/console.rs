@@ -19,7 +19,8 @@ pub(crate) fn key_console(a: &mut App, key: u8, text: Option<u8>) -> Option<Stri
     a.console.key(key, text, vid_h, crate::host_cmd::complete)
 }
 
-// --- drop-down console: toggle / typing / execution exports (the `~` key) ---
+// --- drop-down console: toggle / typing / execution (the `~` key; the
+// automation's calls) ---------------------------------------------------------
 
 /// `Con_ToggleConsole_f` — what the console key's `toggleconsole` binding
 /// runs (the page sends the key through `key_event`): the console slides

@@ -1,5 +1,5 @@
-//! The frame — host.c's `Host_Frame` as the `step` export the page calls
-//! once per display refresh: `Host_FilterTime`'s 72 fps gate, then the
+//! The frame — host.c's `Host_Frame` as `step`, which the program's loop
+//! runs once per display refresh (`sys`): `Host_FilterTime`'s 72 fps gate, then the
 //! active mode's client frame, then the rest of `SCR_UpdateScreen` (the menu
 //! and console overlays) and `V_UpdatePalette`: the cshifts and gamma as
 //! per-channel ramps the finished frame is packed through into the presented
@@ -110,10 +110,10 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 /// moves.
 ///
 /// While a `timedemo` runs every call is a host frame playing the next
-/// recorded message; the page then calls `step` back to back, each call's
-/// `dt` the previous call's own duration (see `web/index.html`), so
-/// `realtime` — the clock `CL_FinishTimeDemo` measures on — adds up the time
-/// the frames took and not the page's pauses between batches of them.
+/// recorded message; the program's loop then runs `step` back to back
+/// without waiting for the display, each call's `dt` the time since the last
+/// one started (`sys`), so `realtime` — the clock `CL_FinishTimeDemo`
+/// measures on — adds up the time the frames took.
 pub(crate) fn step(dt: f32) -> i32 {
     // Guard a non-finite / negative dt so both clocks only move forward.
     let real_dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };

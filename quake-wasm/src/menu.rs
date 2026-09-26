@@ -1,7 +1,7 @@
 //! Menu glue — what menu.c's `M_Keydown` asks of the host: the actions the
 //! engine's `Menu` returns (New Game, Video mode, Save/Load slot, Go to
 //! console, leaving the main menu) carried out against the App, and the menu
-//! key exports, each one key press through keys.c's `Key_Event`
+//! keys the automation calls press, each through keys.c's `Key_Event`
 //! ([`crate::input::key_event`]).
 
 use quake_rs::keys::{
@@ -85,15 +85,15 @@ pub(crate) fn run_menu_deferred(d: MenuDeferred) {
 }
 
 /// One key press (down + up) for the menu, when it is up: a no-op otherwise,
-/// so the page's legacy menu exports never reach the game's bindings.
+/// so the automation's menu calls never reach the game's bindings.
 fn menu_press(key: u8) {
     if APP.with(|c| c.borrow().as_ref().is_some_and(|a| a.menu.visible)) {
         press(key);
     }
 }
 
-// --- the menu's keys as exports (automation, tests: the page sends every key
-// through `key_event`) -------------------------------------------------------
+// --- the menu's keys for the automation's calls and the tests (the page sends
+// every key through `key_event`) ----------------------------------------------
 
 /// `K_UPARROW` in the menu (`M_*_Key`). No-op when the menu is hidden.
 pub(crate) fn menu_up() {
@@ -179,8 +179,8 @@ pub(crate) fn menu_backspace() {
 }
 
 /// 1 while the Keys screen is waiting for the next key to bind (`bind_grab`,
-/// menu.c). The page reads this to route the NEXT raw keypress to
-/// [`menu_bind_key`] instead of menu navigation.
+/// menu.c). The page hears it in the `State` record: a mouse click is then
+/// the key to bind (K_MOUSE1..3), even with the pointer free.
 pub(crate) fn menu_bind_grabbing() -> i32 {
     APP.with(|c| {
         c.borrow()
@@ -202,8 +202,8 @@ pub(crate) fn menu_bind_key(keynum: i32) {
     press(keynum as u8);
 }
 
-/// The menu screen currently showing, as a stable id — a read-only
-/// verification/debug export (the browser checks the screen transitions:
+/// The menu screen currently showing, as a stable id — the page's `State`
+/// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
 /// 10 the port's Web extras, 11 Multiplayer > Setup.
@@ -233,19 +233,19 @@ pub(crate) fn menu_screen_id() -> i32 {
 
 /// The Web extras as bits — 1 `wasm_uncapped`, 2 `wasm_showfps`,
 /// 4 `wasm_exactpersp` ([`render::Extras::bits`]); 0 (all off, id's Quake)
-/// by default. The page stores this in localStorage whenever it changes.
+/// by default. `config.cfg` keeps them across sessions ([`crate::config`]).
 pub(crate) fn extras() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.menu.extras().bits() as i32).unwrap_or(0))
 }
 
-/// Set the Web extras from [`extras`]' bits: the page restoring the saved
-/// choice after boot. Unknown bits are ignored.
+/// Set the Web extras from [`extras`]' bits (automation). Unknown bits are
+/// ignored.
 pub(crate) fn set_extras(bits: i32) {
     ensure_app(|a| a.menu.set_extras(render::Extras::from_bits(bits as u32)));
 }
 
 /// 1 when the menu is currently visible (capturing input), else 0. The page
-/// reads this to route Arrow/Enter keys to the menu vs. the game.
+/// hears it in the `State` record, for what its own keys and clicks do.
 pub(crate) fn menu_visible() -> i32 {
     APP.with(|c| {
         c.borrow()

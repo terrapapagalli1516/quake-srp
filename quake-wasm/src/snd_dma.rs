@@ -22,31 +22,24 @@ use quake_rs::snd::{
 use crate::app::{ensure_app, APP};
 use crate::common::pak;
 
-// --- sound: hand real Quake .wav bytes out of the pak for the page to play ---
+// --- sound: real Quake .wav bytes out of the pak, for the page to play ---
 
 thread_local! {
-    /// Scratch buffer the page reads via `sound_ptr` (for both the demo button
-    /// and the per-frame queue below).
-    static SND: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// WAV byte payloads for sounds fired this frame, awaiting playback, each
-    /// paired with the spatial params the page reads to position it.
+    /// paired with the spatial params the page positions it with.
     pub(crate) static SND_QUEUE: RefCell<Vec<(Vec<u8>, SndParams)>> = const { RefCell::new(Vec::new()) };
-    /// Spatial params of the entry the most recent `poll_sound` popped — the
-    /// page reads these via the `sound_origin_*`/`sound_volume`/`sound_attenuation`
-    /// exports after each non-zero `poll_sound`.
-    static SND_CUR: RefCell<SndParams> = const { RefCell::new(SndParams::zero()) };
     /// The current listener pose, refreshed by every client frame's `S_Update`: eye position plus
-    /// the forward and right unit vectors derived from the player's yaw. The page
-    /// reads these via `listener_*` exports to spatialize each sound.
+    /// the forward and right unit vectors derived from the player's yaw. The
+    /// page spatializes each sound against it (the `Listener` record).
     static LISTENER: RefCell<Listener> = const { RefCell::new(Listener::zero()) };
-    /// Whether the page's `AudioContext` is running yet. The page calls
-    /// `set_audio_ready(1)` once the context resumes (it starts suspended until a
-    /// user gesture). Until then `queue_sounds` drops sounds on the floor instead
+    /// Whether the page's `AudioContext` is running yet (the protocol's
+    /// `AudioReady`; it starts suspended until a user gesture). Until then
+    /// `queue_sounds` drops sounds on the floor instead
     /// of appending them every frame up to the 12-cap — otherwise a backlog of
     /// stale sounds from before audio started would all play at once when it does.
     static AUDIO_READY: RefCell<bool> = const { RefCell::new(false) };
     /// Pending menu `S_LocalSound`s (menu1/menu2/menu3), drained from the menu
-    /// by [`poll_menu_sound`]. Only fills while audio is ready (same
+    /// by [`take_menu_sounds`]. Only fills while audio is ready (same
     /// no-backlog rule as `queue_sounds`).
     static MENU_SND_QUEUE: RefCell<Vec<MenuSound>> = const { RefCell::new(Vec::new()) };
     /// The three menu WAV payloads, loaded from the pak once on first use and
@@ -102,6 +95,15 @@ fn queue_sounds(pak: &Pak, events: &[quake_rs::server::SoundEvent], view_entity:
     SND_QUEUE.with(|q| snd::queue_sounds(&mut q.borrow_mut(), pak, events, view_entity));
 }
 
+#[cfg(test)]
+thread_local! {
+    /// (Tests.) The pull interface the page used before the protocol: the
+    /// last popped sample's bytes, its params, and its loop window.
+    static SND: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static SND_CUR: RefCell<SndParams> = const { RefCell::new(SndParams::zero()) };
+    static SND_LOOP: RefCell<(f32, f32)> = const { RefCell::new((0.0, 0.0)) };
+}
+
 /// This frame's one-shots, in the order they were started: each sample's WAV
 /// bytes with its placement, `(entity, channel)` key and loop window (start
 /// -1.0 = a one-shot; otherwise the page loops the source from there).
@@ -134,11 +136,10 @@ pub(crate) fn poll_sound() -> i32 {
     }
 }
 
-/// Pop the next queued MENU sound (menu.c's `S_LocalSound` triggers: menu1 on
-/// cursor moves, menu2 on enter/select, menu3 on slider adjusts) into the
-/// shared sound scratch and return its WAV byte length (0 when none). The page
-/// polls this each frame alongside [`poll_sound`] and plays the bytes per
-/// `S_LocalSound` semantics (snd_dma.c: `S_StartSound(cl.viewentity, -1, sfx,
+/// (Tests.) Pop the next queued MENU sound (menu.c's `S_LocalSound`
+/// triggers: menu1 on cursor moves, menu2 on enter/select, menu3 on slider
+/// adjusts) into the scratch and return its WAV byte length (0 when none).
+/// The page plays each (`LocalSound`) per `S_LocalSound` semantics (snd_dma.c: `S_StartSound(cl.viewentity, -1, sfx,
 /// vec3_origin, 1, 1)` — full volume, centred, no distance falloff; the page's
 /// master volume still scales it, like the C mixer's `volume.value`). Works in
 /// EVERY mode (the menu overlays the attract demo too). While the page hasn't
@@ -211,8 +212,8 @@ fn next_menu_sound() -> Option<Vec<u8>> {
 
 /// Spatial params of the entry the most recent `poll_sound` popped. `origin_*`
 /// are the world emission point; `volume` is `0.0..=1.0`; `attenuation` is
-/// `0.0..=4.0` (0 = no falloff, audible everywhere). The page reads these after
-/// each non-zero `poll_sound` to compute distance gain and stereo pan.
+/// `0.0..=4.0` (0 = no falloff, audible everywhere): what the page computes
+/// distance gain and stereo pan from (tests read them after `poll_sound`).
 #[cfg(test)]
 pub(crate) fn sound_origin_x() -> f32 {
     SND_CUR.with(|p| p.borrow().origin[0])
@@ -267,7 +268,7 @@ thread_local! {
     /// | channel` (S_StopSound's arguments). Pushed by demo playback (the only
     /// current producer — live play's QuakeC stops loops by playing
     /// `misc/null.wav` on the same channel, which the override path handles);
-    /// drained by the page via [`poll_stop_sound`] each frame. NOTE: id's own
+    /// sent to the page each frame ([`take_stop_sounds`]). NOTE: id's own
     /// demo1/2/3 never send svc_stopsound (asserted by a wasm test), so for
     /// the shipped attract loop this stays empty — the plumbing exists for
     /// protocol completeness.
@@ -304,15 +305,11 @@ pub(crate) fn take_stop_sounds() -> Vec<(i32, i32)> {
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// Static sounds registered by the CURRENT level, awaiting page pickup via
-    /// `poll_static_sound`. NOT gated on `AUDIO_READY` (unlike the one-shot
-    /// queue): these are persistent registrations, not a backlog — the page
-    /// starts the loops whenever its AudioContext comes up.
+    /// Static sounds registered by the CURRENT level, to be sent to the page
+    /// ([`take_static_sounds`]). NOT gated on `AUDIO_READY` (unlike the
+    /// one-shot queue): these are persistent registrations, not a backlog —
+    /// the page starts the loops whenever its AudioContext comes up.
     static STATIC_QUEUE: RefCell<Vec<StaticLoop>> = const { RefCell::new(Vec::new()) };
-    /// Loop window of the entry the most recent `poll_static_sound` popped (or
-    /// `load_ambient_sound` loaded), for the `sound_loop_start`/`sound_loop_end`
-    /// exports. `(0, 0)` = loop the whole buffer.
-    static SND_LOOP: RefCell<(f32, f32)> = const { RefCell::new((0.0, 0.0)) };
     /// Bumped on every level/mode transition (boot, demo boot, New Game, `map`,
     /// changelevel, restart). The page compares it each frame and, on a change,
     /// stops + drops every looping source — the S_StopAllSounds half of a level
@@ -357,9 +354,10 @@ fn queue_static_sounds(pak: &Pak, statics: &[StaticSound]) {
     STATIC_QUEUE.with(|q| snd::queue_static_sounds(&mut q.borrow_mut(), pak, statics));
 }
 
-/// The current sound generation. The page reads this every frame; when it
-/// changes, every looping source (static + ambient) is stopped and rebuilt
-/// from the new level's registrations (see [`bump_sound_generation`]).
+/// The current sound generation. The loop sends it when it changes (the
+/// `Generation` record), and the page then stops every looping and playing
+/// source and rebuilds the loops from the new level's registrations (see
+/// [`bump_sound_generation`]).
 pub(crate) fn sound_generation() -> i32 {
     SOUND_GENERATION.with(|g| *g.borrow())
 }
@@ -370,12 +368,10 @@ pub(crate) fn take_static_sounds() -> Vec<StaticLoop> {
     STATIC_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
-/// (Tests.) Pop the next registered static (looping) sound into the scratch buffer and
-/// return its byte length (0 when none are pending). Mirrors `poll_sound`: the
-/// page reads the bytes via `sound_ptr()` and the spatial params via
-/// `sound_origin_*`/`sound_volume`/`sound_attenuation` (stashed exactly like a
-/// one-shot pop), plus the loop window via `sound_loop_start`/`sound_loop_end`
-/// — then starts a LOOPING source it re-spatializes every frame.
+/// (Tests.) Pop the next registered static (looping) sound into the scratch
+/// buffer and return its byte length (0 when none are pending), its params
+/// and loop window stashed like a one-shot pop's. The page starts a LOOPING
+/// source for each (`StaticSound`) and re-spatializes it every frame.
 #[cfg(test)]
 pub(crate) fn poll_static_sound() -> i32 {
     let next = STATIC_QUEUE.with(|q| {
