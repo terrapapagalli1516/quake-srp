@@ -1,0 +1,97 @@
+//! The video options `shot`, `timedemo` and `view` share: the port's video
+//! cvars ([`render::VideoCvars`]: Hor+ and hires), the display the frame is
+//! shown on (which with the mode's size gives `vid.aspect`), and the scaled
+//! 2-D layer.
+//!
+//! ```text
+//! --video classic|modern   both cvars at once: id's, or Hor+ and hires (default classic)
+//! --fov-mode classic|horplus  how `fov` meets the display's shape
+//! --hires 0|1              views past 1280x1024, particles and the warp at 320x200 proportions
+//! --display W:H|square     the display's width:height (square: the mode's own,
+//!                          square pixels); the default is the command's
+//! --scaled2d 0|1           the status bar, menus and console blown up from 320x200
+//! ```
+
+use quake_rs::render::{self, FovMode, VideoCvars};
+
+/// The parsed video options (see the module docs).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VideoArgs {
+    pub cvars: VideoCvars,
+    /// `--display`: `Some(None)` for `square`, `Some(Some(a))` for `W:H`.
+    display: Option<Option<f64>>,
+    scaled_2d: Option<bool>,
+}
+
+impl VideoArgs {
+    /// Take `flag val` if it is a video option: `Ok(true)` when it was.
+    pub fn parse(&mut self, flag: &str, val: &str) -> Result<bool, String> {
+        let bit = |v: &str| match v {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err(format!("{flag}: expected 0 or 1, got {v:?}")),
+        };
+        match flag {
+            "--video" => {
+                self.cvars = match val {
+                    "classic" => VideoCvars::CLASSIC,
+                    "modern" => VideoCvars::MODERN,
+                    _ => return Err(format!("--video: expected classic or modern, got {val:?}")),
+                }
+            }
+            "--fov-mode" => {
+                self.cvars.fov_mode = match val {
+                    "classic" => FovMode::Classic,
+                    "horplus" | "hor+" => FovMode::HorPlus,
+                    _ => return Err(format!("--fov-mode: expected classic or horplus, got {val:?}")),
+                }
+            }
+            "--hires" => self.cvars.hires = bit(val)?,
+            "--scaled2d" => self.scaled_2d = Some(bit(val)?),
+            "--display" => {
+                self.display = Some(if val == "square" {
+                    None
+                } else {
+                    let (a, b) = val.split_once(':').ok_or_else(|| format!("--display: expected W:H or square, got {val:?}"))?;
+                    let (a, b): (f64, f64) = (
+                        a.trim().parse().map_err(|_| format!("--display: bad width {a:?}"))?,
+                        b.trim().parse().map_err(|_| format!("--display: bad height {b:?}"))?,
+                    );
+                    if !(a > 0.0 && b > 0.0 && (a / b).is_finite()) {
+                        return Err(format!("--display: {val:?} is not a shape"));
+                    }
+                    Some(a / b)
+                })
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Set the cvars (and the scaled 2-D layer, if given) for this thread's
+    /// frames. Before `--res` is parsed: hires lifts its clamp.
+    pub fn apply(&self) {
+        render::set_video_cvars(self.cvars);
+        if let Some(on) = self.scaled_2d {
+            quake_rs::draw::set_scaled_2d(on);
+        }
+    }
+
+    /// The display aspect a `w x h` mode is shown at: `--display`, else
+    /// `default` (`None`: square pixels, the mode's own shape).
+    pub fn display_aspect(&self, w: usize, h: usize, default: Option<f64>) -> f64 {
+        match self.display.unwrap_or(default) {
+            Some(a) => a,
+            None => w as f64 / h.max(1) as f64,
+        }
+    }
+
+    /// A short tag for file names and reports: `classic`, `modern`, or the mix.
+    pub fn tag(&self) -> String {
+        match self.cvars {
+            VideoCvars::CLASSIC => "classic".into(),
+            VideoCvars::MODERN => "modern".into(),
+            v => format!("{}{}", if v.fov_mode == FovMode::HorPlus { "horplus" } else { "classicfov" }, if v.hires { "-hires" } else { "" }),
+        }
+    }
+}

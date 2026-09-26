@@ -217,19 +217,30 @@ pub(super) struct AliasView {
     pub(super) bottom: i32,
     transition: f32,
     resfudge: f32,
-    /// `scr_fov > 90`: R_DrawViewModel draws no gun.
-    fov_over_90: bool,
 }
 
 impl AliasView {
-    fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> AliasView {
+    /// The alias view of a `w x h` view drawn by `cam` (its field of view
+    /// the view's own) for the `fov` cvar `scr_fov`.
+    fn new(cam: &Camera, scr_fov: f32, w: usize, h: usize, pixel_aspect: f32) -> AliasView {
         let (vpn, vright, vup) = cam.basis();
         // R_ViewChanged: horizontalFieldOfView = 2*tan(fov_x/360*M_PI),
         // aliasxscale = vrect.width / it, aliasyscale = aliasxscale * pixelAspect.
         let hfov = (2.0 * (cam.fov_deg as f64 / 360.0 * std::f64::consts::PI).tan()) as f32;
         let hfov = if hfov.abs() > 1e-6 { hfov } else { 2.0 };
         let xscale = w as f32 / hfov;
-        let res_scale = ((w * h) as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov as f64);
+        // r_aliastransition's res_scale: sqrt(width*height / (320*152)) *
+        // (2 / horizontalFieldOfView). When Hor+ has widened the view
+        // (`fov_x` over `scr_fov`) it is the 4:3 view's it widens, the width
+        // `w * hfov(scr_fov) / hfov`: models are drawn at that view's size,
+        // so they change drawing path at the same distance.
+        let res_scale = if cam.fov_deg == scr_fov {
+            ((w * h) as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov as f64)
+        } else {
+            let hfov_ref = 2.0 * (scr_fov as f64 / 360.0 * std::f64::consts::PI).tan();
+            let w_ref = w as f64 * hfov_ref / hfov as f64;
+            (w_ref * h as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov_ref)
+        };
         AliasView {
             vpn,
             vright,
@@ -243,7 +254,6 @@ impl AliasView {
             bottom: h as i32,
             transition: (R_ALIASTRANSBASE as f64 * res_scale) as f32,
             resfudge: (R_ALIASTRANSADJ as f64 * res_scale) as f32,
-            fov_over_90: cam.fov_deg > 90.0,
         }
     }
 
@@ -766,6 +776,7 @@ pub(super) fn draw_alias_model(
     zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
+    scr_fov: f32,
     opts: &RenderOptions,
     inst: &ModelInstance,
     palette: &[[u8; 3]; 256],
@@ -777,7 +788,7 @@ pub(super) fn draw_alias_model(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
+    let view = AliasView::new(cam, scr_fov, image.w, image.h, opts.aspect());
     let ent = AliasEntity {
         mdl: inst.mdl,
         origin: inst.origin,
@@ -893,14 +904,16 @@ pub struct Viewmodel<'a> {
 /// `R_AliasDrawModel` as any alias model — never bbox-tested, so every
 /// triangle takes the clipping path (the grip nearer than `ALIAS_Z_CLIP_PLANE`
 /// is trimmed), and with its 1/z tripled so it wins the shared depth test
-/// against everything but a wall right against the eye. No gun at an fov over
-/// 90 (`r_fov_greater_than_90`).
+/// against everything but a wall right against the eye. No gun when the `fov`
+/// cvar, `scr_fov`, is over 90 (`r_fov_greater_than_90`) — the cvar, not the
+/// view's field of view, which Hor+ widens past 90 on a wide screen.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_viewmodel(
     image: &mut Image,
     zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
+    scr_fov: f32,
     opts: &RenderOptions,
     vm: &Viewmodel,
     palette: &[[u8; 3]; 256],
@@ -912,10 +925,10 @@ pub(super) fn draw_viewmodel(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
-    if view.fov_over_90 {
+    if scr_fov > 90.0 {
         return;
     }
+    let view = AliasView::new(cam, scr_fov, image.w, image.h, opts.aspect());
     let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
     // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
     let ent = AliasEntity {
@@ -1695,5 +1708,56 @@ mod tests {
         assert_eq!(setup.vertex_light(52), 8128 - 4096);
         // Normal 0 faces away (cos > 0): just the ambient.
         assert_eq!(setup.vertex_light(0), 8128);
+    }
+
+    #[test]
+    fn hor_plus_keeps_the_gun_at_the_4_3_size() {
+        // R_DrawViewModel tests the fov CVAR (r_fov_greater_than_90): Hor+
+        // widens a 16:9 view to 106 degrees and the gun stays, drawn as a 4:3
+        // screen of the same height draws it — the same size, and 24 columns
+        // further right in a view 48 wider. A Classic fov over 90 has no gun.
+        use crate::render::{FovMode, VideoCvars, VideoGuard};
+        let bsp = demo_room();
+        let mut pal = [[80u8; 3]; 256];
+        pal[7] = [255, 255, 0];
+        let gun = viewmodel_mdl();
+        let draw = |w: usize, h: usize, fov_deg: f32| {
+            let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg };
+            let vm = Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] };
+            let img = crate::render::render_scene_ext_sprited(
+                &bsp, &cam, w, h, &pal, &[], &[], &[], Some(vm), 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
+                &[], &RenderOptions::default(),
+            );
+            let gun_px: Vec<(usize, usize)> =
+                (0..w * h).filter(|&i| is_gun_pixel(img.rgb[i])).map(|i| (i % w, i / w)).collect();
+            let (x0, x1) = (gun_px.iter().map(|p| p.0).min(), gun_px.iter().map(|p| p.0).max());
+            let (y0, y1) = (gun_px.iter().map(|p| p.1).min(), gun_px.iter().map(|p| p.1).max());
+            Some((x0?, y0?, x1?, y1?))
+        };
+        let four_three = draw(144, 108, 90.0).expect("gun at 4:3");
+        let wide = {
+            let _g = VideoGuard::set(VideoCvars { fov_mode: FovMode::HorPlus, hires: false });
+            draw(192, 108, 90.0).expect("gun under Hor+ at 16:9")
+        };
+        assert_eq!(
+            (wide.0, wide.1, wide.2, wide.3),
+            (four_three.0 + 24, four_three.1, four_three.2 + 24, four_three.3),
+            "4:3 {four_three:?}, 16:9 {wide:?}"
+        );
+        assert_eq!(draw(192, 108, 100.0), None, "fov 100: no gun");
+    }
+
+    #[test]
+    fn hor_plus_keeps_the_4_3_alias_transition() {
+        // r_aliastransition scales with sqrt(width*height)/fov: under Hor+ a
+        // model changes drawing path at the distance the 4:3 view of the same
+        // height has, as it is drawn at that view's size.
+        let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let wide = Camera { fov_deg: crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0), ..cam };
+        let (a, b) = (AliasView::new(&wide, 90.0, 1920, 1080, 1.0), AliasView::new(&cam, 90.0, 1440, 1080, 1.0));
+        assert!((a.transition - b.transition).abs() < 1e-2 && (a.resfudge - b.resfudge).abs() < 1e-2);
+        assert!((a.xscale - b.xscale).abs() < 1e-2);
+        // id's own at 320x152: res_scale 1, transition 200.
+        assert_eq!(AliasView::new(&cam, 90.0, 320, 152, 1.0).transition, 200.0);
     }
 }

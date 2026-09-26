@@ -39,8 +39,8 @@ pub struct ViewRect {
 /// `vid.aspect` for a `vid_w x vid_h` mode displayed with the width:height
 /// ratio `display_aspect` — `vid_win.c`/`vid_x.c`'s
 /// `((float)vid.height / (float)vid.width) * (320.0 / 240.0)` when the display
-/// is a 4:3 monitor (`display_aspect` 4/3). It is the height of a displayed
-/// pixel over its width, the `pixelAspect` of `R_ViewChanged`
+/// is a 4:3 monitor (`display_aspect` 4/3). It is the width of a displayed
+/// pixel over its height, the `pixelAspect` of `R_ViewChanged`
 /// ([`RenderOptions::pixel_aspect`](crate::render::RenderOptions::pixel_aspect)):
 /// 0.8333 for 320x200 or 1280x800 on 4:3 (tall pixels), 1.0 for 640x480. The
 /// arithmetic is the C's: a float ratio times the double constant, stored to
@@ -172,9 +172,14 @@ pub const WARP_HEIGHT: usize = 200;
 /// narrows the buffer instead (`w = vid.width * 200 / vid.height`): the same
 /// picture, sampled a little coarser across (e.g. 266 columns for 4:3). At
 /// 16:10 and wider the C's aspect is `vid.aspect` itself and nothing differs.
+///
+/// With the hires extra ([`VideoCvars::hires`](crate::render::VideoCvars))
+/// there is no warp buffer: the underwater view is rendered at the screen's
+/// view rectangle, as above water, and [`apply_warp`](crate::render::apply_warp)
+/// scales the wobble to it — at 4K id's buffer would be blown up twelve times.
 pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> ViewRect {
     let (viewsize, _, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);
-    if vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT {
+    if (vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT) || crate::render::video_cvars().hires {
         return set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission);
     }
     let (mut w, mut h) = (vid_w as f32, vid_h as f32);
@@ -594,6 +599,17 @@ mod tests {
         // Taller (4:3): id squeezes 320x200 with its pixel aspect; the square-
         // pixel port keeps the shape instead (266 wide, &~7 -> 264).
         assert_eq!(warp_vrect(640, 480, 120.0, false), vr(1, 0, 264, 200));
+    }
+
+    #[test]
+    fn hires_renders_underwater_at_the_view_itself() {
+        // The hires extra has no warp buffer: the view rectangle, at any size.
+        let _hires = crate::render::VideoGuard::set(crate::render::VideoCvars::MODERN);
+        for (w, h) in [(320, 200), (960, 600), (1920, 1080), (3840, 2160)] {
+            for vs in [50.0, 100.0, 120.0] {
+                assert_eq!(warp_vrect(w, h, vs, false), calc_refdef(w, h, vs, false).vrect, "{w}x{h} @ {vs}");
+            }
+        }
     }
 
     #[test]
