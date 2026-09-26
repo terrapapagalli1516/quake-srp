@@ -2298,7 +2298,7 @@ and the monsters without id's `U_NOLERP` behaviour.
   `EF_ROTATE` at `anglemod(100*cl.time)`; `ent->forcelink` set by any update
   the frame read, cleared once drawn). Effects spawn when their message is
   read, at that `cl.time`; particles and the stair smoothing step by
-  `cl.time - cl.oldtime`. `oracle/demo_lerp.py` plays the attract loop from
+  `cl.time - cl.oldtime` (the smoothing stepped by the host frame time). `oracle/demo_lerp.py` plays the attract loop from
   boot in id's client (the oracle, new `oracle_trace`) and the port at 72 Hz:
   demo1, demo2, demo3 and demo1 again, 17,500 frames — the same number of
   frames per demo, `cl.time` identical in every frame, the camera angles and
@@ -2320,8 +2320,14 @@ and the monsters without id's `U_NOLERP` behaviour.
 - Departure, invisible: id's first frame of a demo starts `cl.time` at 0
   (`CL_ClearState` runs after the frame's increment), the port's at the
   frame time; `CL_LerpPoint` moves either to 0.1 s before the first message.
-- **Timedemo unchanged:** one message a frame at frac 1, as before (frame
-  counts 969 / 985 / 1090); it goes through the same relink at frac 1.
+- **Timedemo:** one message a frame at frac 1, as before (frame counts
+  969 / 985 / 1090), through the same relink. Hashed with a fixed host frame
+  time (the tool's is the wall clock, so its frames vary run to run), every
+  frame of the three is identical to before except where the stair smoothing
+  moves: id's `V_CalcRefdef` steps it by `steptime = cl.time - cl.oldtime`,
+  in a timedemo a message interval, where the port stepped it by the host
+  frame time. Fixed with the demo path; the view kick and the palette fades
+  stay on `host_frametime`, as id's.
 - `quaketool play demo1..3` hashes change (the frames are id's now); goldens
   and the walk workloads' hashes are unchanged, the sound tallies are the same.
   The uncapped path (`Stepping::Uncapped`) needs nothing of its own for
