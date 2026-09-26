@@ -34,6 +34,8 @@
 //! * All arithmetic is plain `f32`; there is no indexing that could be out of
 //!   bounds.
 
+use crate::stepping::{Stepping, ID_FRAMETIME};
+
 /// How a particle is animated each frame (the C `particle_t::type`,
 /// `ptype_t`). Only the four kinds this port spawns are modelled; the C had a
 /// couple more (`pt_static`, `pt_blob`, `pt_blob2`, `pt_grav`) that no spawn
@@ -175,6 +177,55 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 /// We mirror that with a `Vec` capped here, dropping any excess so a malicious /
 /// buggy QuakeC `count` cannot grow memory without bound.
 pub const MAX_PARTICLES: usize = 2048;
+
+/// Where an entity's trail has got to (`CL_RelinkEntities` keeps the origin
+/// as `oldorg`): its origin last frame, and — for the uncapped client — how
+/// far along its path the next particle falls ([`ParticleSystem::spawn_trail`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrailHead {
+    pub origin: [f32; 3],
+    pub carry: f32,
+}
+
+impl TrailHead {
+    /// A trail first seen at `origin`: it starts there (a forcelink draws no
+    /// trail), its first particle on that spot.
+    pub fn at(origin: [f32; 3]) -> TrailHead {
+        TrailHead { origin, carry: 0.0 }
+    }
+}
+
+/// The frame a trail is laid over: how it steps, its length `dt` and the
+/// time `now` the particles are born at (`cl.time`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrailStep {
+    pub stepping: Stepping,
+    pub dt: f32,
+    pub now: f32,
+}
+
+/// `R_RocketTrail`'s `VectorSubtract (end, start, vec); len =
+/// VectorNormalize (vec);`: the unit direction and the length.
+fn trail_path(start: [f32; 3], end: [f32; 3]) -> ([f32; 3], f32) {
+    let vec = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+    let len = (vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]).sqrt();
+    if len > 0.0 {
+        ([vec[0] / len, vec[1] / len, vec[2] / len], len)
+    } else {
+        (vec, len)
+    }
+}
+
+/// `R_RocketTrail`'s `dec`, the trail length each particle uses up, and the
+/// trail type: 3 units for `type < 128`, 1 for the `+128` types (then `type
+/// -= 128`).
+fn trail_step(ttype: i32) -> (f32, i32) {
+    if ttype < 128 {
+        (3.0, ttype)
+    } else {
+        (1.0, ttype - 128)
+    }
+}
 
 /// A tiny deterministic linear-congruential generator (the Numerical Recipes /
 /// glibc `TYPE_0` constants `a = 1103515245`, `c = 12345`, modulo `2^31` via the
@@ -618,20 +669,11 @@ impl ParticleSystem {
         rng: &mut Lcg,
     ) {
         // vec = end - start; len = |vec|; vec normalised.
-        let mut vec = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-        let mut len = (vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]).sqrt();
-        if len > 0.0 {
-            vec = [vec[0] / len, vec[1] / len, vec[2] / len];
-        }
+        let (vec, mut len) = trail_path(start, end);
         // The C `R_RocketTrail` walks `start` itself forward by `vec` each step;
         // we keep a local copy so the caller's `start` is untouched.
         let mut cur = start;
-
-        let (dec, ttype) = if ttype < 128 {
-            (3.0f32, ttype)
-        } else {
-            (1.0f32, ttype - 128)
-        };
+        let (dec, ttype) = trail_step(ttype);
 
         while len > 0.0 {
             len -= dec;
@@ -639,95 +681,155 @@ impl ParticleSystem {
             if self.particles.len() >= MAX_PARTICLES {
                 return;
             }
-
-            // Defaults shared by most cases: zero velocity, die = now + 2.
-            let mut velocity = [0.0f32, 0.0, 0.0];
-            let mut die = now + 2.0;
-            let color;
-            let kind;
-            let mut ramp = 0.0f32;
-
-            // Per-axis jitter helpers matching the C rand() expressions.
-            let jit6 = |rng: &mut Lcg| (rng.next_range(6) as i32 - 3) as f32; // rand()%6 - 3
-            let jit16 = |rng: &mut Lcg| ((rng.next_u32() & 15) as i32 - 8) as f32; // rand()&15 - 8
-
-            let mut origin = cur;
-
-            match ttype {
-                0 => {
-                    // rocket trail
-                    ramp = (rng.next_u32() & 3) as f32;
-                    color = RAMP3[(ramp as usize).min(RAMP3.len() - 1)];
-                    kind = ParticleKind::Fire;
-                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
-                }
-                1 => {
-                    // smoke
-                    ramp = ((rng.next_u32() & 3) + 2) as f32;
-                    color = RAMP3[(ramp as usize).min(RAMP3.len() - 1)];
-                    kind = ParticleKind::Fire;
-                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
-                }
-                2 => {
-                    // blood
-                    kind = ParticleKind::Grav;
-                    color = (67 + (rng.next_u32() & 3)) as u8;
-                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
-                }
-                3 | 5 => {
-                    // tracer1 / tracer2
-                    die = now + 0.5;
-                    kind = ParticleKind::Static;
-                    color = if ttype == 3 {
-                        (52 + ((*tracercount & 4) << 1)) as u8
-                    } else {
-                        (230 + ((*tracercount & 4) << 1)) as u8
-                    };
-                    let odd = *tracercount & 1;
-                    *tracercount = tracercount.wrapping_add(1);
-                    origin = cur;
-                    if odd != 0 {
-                        velocity = [30.0 * vec[1], 30.0 * -vec[0], 0.0];
-                    } else {
-                        velocity = [30.0 * -vec[1], 30.0 * vec[0], 0.0];
-                    }
-                }
-                4 => {
-                    // slight blood: like type 2 but advance an extra 3 units.
-                    kind = ParticleKind::Grav;
-                    color = (67 + (rng.next_u32() & 3)) as u8;
-                    origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
-                    len -= 3.0;
-                }
-                6 => {
-                    // voor trail
-                    color = (9 * 16 + 8 + (rng.next_u32() & 3)) as u8;
-                    kind = ParticleKind::Static;
-                    die = now + 0.3;
-                    origin = [cur[0] + jit16(rng), cur[1] + jit16(rng), cur[2] + jit16(rng)];
-                }
-                _ => {
-                    // Unknown type: the C `switch` would fall through with the
-                    // particle left at its defaults (vel 0, die +2) and color 0.
-                    // We mirror that as a harmless static particle so the pool
-                    // accounting (and RNG draw count) is unchanged.
-                    color = 0;
-                    kind = ParticleKind::Static;
-                }
+            self.trail_particle(cur, vec, ttype, tracercount, now, rng);
+            if ttype == 4 {
+                // slight blood: advance an extra 3 units.
+                len -= 3.0;
             }
 
-            self.particles.push(Particle {
-                origin,
-                velocity,
-                color,
-                die,
-                kind,
-                ramp,
-            });
-
-            // VectorAdd(start, vec, start): step the walk position forward.
+            // VectorAdd(start, vec, start): step the walk position forward
+            // (one unit: `vec` is the unit direction, so id's particles bunch
+            // at the start of each frame's stretch of trail).
             cur = [cur[0] + vec[0], cur[1] + vec[1], cur[2] + vec[2]];
         }
+    }
+
+    /// `CL_RelinkEntities`' trail for an entity that moved from `head` to `to`
+    /// over a frame of `step.dt`, stepped as `step.stepping` says; the head
+    /// moves on to `to`.
+    ///
+    /// Classic is id's [`spawn_rocket_trail`](Self::spawn_rocket_trail). Its
+    /// loop drops at least one particle a frame, however short the frame's
+    /// stretch of trail, so uncapped at 480 Hz a slow gib bleeds seven times
+    /// as densely as at 72 and a grenade smokes twice as thickly. Uncapped (the
+    /// port's own) lays the trail as densely as id's is at 72 Hz at the
+    /// entity's speed — the particles one 1/72 s frame's `R_RocketTrail` would
+    /// drop, spread evenly along the path — carrying the distance to the next
+    /// particle in the head from frame to frame.
+    pub fn spawn_trail(
+        &mut self,
+        head: &mut TrailHead,
+        to: [f32; 3],
+        ttype: i32,
+        step: TrailStep,
+        tracercount: &mut u32,
+        rng: &mut Lcg,
+    ) {
+        let from = std::mem::replace(&mut head.origin, to);
+        match step.stepping {
+            Stepping::Classic => self.spawn_rocket_trail(from, to, ttype, tracercount, step.now, rng),
+            Stepping::Uncapped => {
+                let (vec, len) = trail_path(from, to);
+                if !(len > 0.0 && step.dt > 0.0) {
+                    return;
+                }
+                let (dec, ttype) = trail_step(ttype);
+                let per_particle = if ttype == 4 { dec + 3.0 } else { dec };
+                // What a 72 Hz frame covers at this speed, and how many
+                // particles id's loop drops over it (at least one).
+                let len72 = len * ID_FRAMETIME / step.dt;
+                let spacing = len72 / (len72 / per_particle).ceil();
+                let mut d = head.carry;
+                while d < len {
+                    if self.particles.len() >= MAX_PARTICLES {
+                        break;
+                    }
+                    let cur = [from[0] + vec[0] * d, from[1] + vec[1] * d, from[2] + vec[2] * d];
+                    self.trail_particle(cur, vec, ttype, tracercount, step.now, rng);
+                    d += spacing;
+                }
+                head.carry = (d - len).max(0.0);
+            }
+        }
+    }
+
+    /// One particle of `R_RocketTrail`'s loop at `cur`, of trail type `ttype`
+    /// (after the `-128` adjust), the trail running along the unit `vec`.
+    fn trail_particle(
+        &mut self,
+        cur: [f32; 3],
+        vec: [f32; 3],
+        ttype: i32,
+        tracercount: &mut u32,
+        now: f32,
+        rng: &mut Lcg,
+    ) {
+        // Defaults shared by most cases: zero velocity, die = now + 2.
+        let mut velocity = [0.0f32, 0.0, 0.0];
+        let mut die = now + 2.0;
+        let color;
+        let kind;
+        let mut ramp = 0.0f32;
+
+        // Per-axis jitter helpers matching the C rand() expressions.
+        let jit6 = |rng: &mut Lcg| (rng.next_range(6) as i32 - 3) as f32; // rand()%6 - 3
+        let jit16 = |rng: &mut Lcg| ((rng.next_u32() & 15) as i32 - 8) as f32; // rand()&15 - 8
+
+        let mut origin = cur;
+
+        match ttype {
+            0 => {
+                // rocket trail
+                ramp = (rng.next_u32() & 3) as f32;
+                color = RAMP3[(ramp as usize).min(RAMP3.len() - 1)];
+                kind = ParticleKind::Fire;
+                origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
+            }
+            1 => {
+                // smoke
+                ramp = ((rng.next_u32() & 3) + 2) as f32;
+                color = RAMP3[(ramp as usize).min(RAMP3.len() - 1)];
+                kind = ParticleKind::Fire;
+                origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
+            }
+            2 | 4 => {
+                // blood; slight blood (4) is the same particle, laid sparser.
+                kind = ParticleKind::Grav;
+                color = (67 + (rng.next_u32() & 3)) as u8;
+                origin = [cur[0] + jit6(rng), cur[1] + jit6(rng), cur[2] + jit6(rng)];
+            }
+            3 | 5 => {
+                // tracer1 / tracer2
+                die = now + 0.5;
+                kind = ParticleKind::Static;
+                color = if ttype == 3 {
+                    (52 + ((*tracercount & 4) << 1)) as u8
+                } else {
+                    (230 + ((*tracercount & 4) << 1)) as u8
+                };
+                let odd = *tracercount & 1;
+                *tracercount = tracercount.wrapping_add(1);
+                if odd != 0 {
+                    velocity = [30.0 * vec[1], 30.0 * -vec[0], 0.0];
+                } else {
+                    velocity = [30.0 * -vec[1], 30.0 * vec[0], 0.0];
+                }
+            }
+            6 => {
+                // voor trail
+                color = (9 * 16 + 8 + (rng.next_u32() & 3)) as u8;
+                kind = ParticleKind::Static;
+                die = now + 0.3;
+                origin = [cur[0] + jit16(rng), cur[1] + jit16(rng), cur[2] + jit16(rng)];
+            }
+            _ => {
+                // Unknown type: the C `switch` would fall through with the
+                // particle left at its defaults (vel 0, die +2) and color 0.
+                // We mirror that as a harmless static particle so the pool
+                // accounting (and RNG draw count) is unchanged.
+                color = 0;
+                kind = ParticleKind::Static;
+            }
+        }
+
+        self.particles.push(Particle {
+            origin,
+            velocity,
+            color,
+            die,
+            kind,
+            ramp,
+        });
     }
 
     /// Advance every particle one frame and retire the expired ones, porting the
@@ -1377,6 +1479,35 @@ mod tests {
         assert_eq!(sys.len(), 5, "5-unit trail / 1-unit step = 5 particles");
         for p in sys.particles() {
             assert_eq!(p.kind, ParticleKind::Fire, "0+128 is still a type-0 fire trail");
+        }
+    }
+
+    /// Particles per 100 units a `ttype` trail lays behind something moving
+    /// at `speed` for a second of frames at `hz`, through `spawn_trail`.
+    fn trail_density(ttype: i32, speed: f32, hz: f32, stepping: Stepping) -> f32 {
+        let (mut rng, mut tc, mut head, mut n) = (Lcg::new(1), 0u32, TrailHead::at([0.0; 3]), 0);
+        let step = TrailStep { stepping, dt: 1.0 / hz, now: 0.0 };
+        for i in 1..=hz as usize {
+            let mut sys = ParticleSystem::new();
+            sys.spawn_trail(&mut head, [speed * i as f32 / hz, 0.0, 0.0], ttype, step, &mut tc, &mut rng);
+            n += sys.len();
+        }
+        100.0 * n as f32 / speed
+    }
+
+    /// Uncapped, a trail is as dense at 60, 144 and 480 Hz as id's is at
+    /// 72 (to 3%: a particle either end of the second); id's per-frame loop
+    /// at 480 Hz lays a slow gib's blood seven times as thickly.
+    #[test]
+    fn uncapped_trails_are_as_dense_as_72_hz() {
+        for (ttype, speed) in [(2, 150.0), (4, 150.0), (1, 600.0), (3, 600.0), (0, 1000.0), (128, 400.0)] {
+            let id = trail_density(ttype, speed, 72.0, Stepping::Classic);
+            for hz in [60.0, 144.0, 480.0] {
+                let d = trail_density(ttype, speed, hz, Stepping::Uncapped);
+                assert!((d - id).abs() <= 0.03 * id, "type {ttype} at {speed} u/s, {hz} Hz: {d} vs {id} /100u");
+            }
+            let classic = trail_density(ttype, speed, 480.0, Stepping::Classic);
+            assert!(classic > 1.1 * id, "type {ttype}: id's loop at 480 Hz lays {classic} vs {id}");
         }
     }
 

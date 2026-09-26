@@ -9,6 +9,7 @@
 //! Source: `WinQuake/view.c`.
 
 use crate::math::{angle_vectors, dot, normalize, Vec3};
+use crate::stepping::{Stepping, Tick72, ID_FRAMETIME};
 
 /// `v_kicktime` (view.c, default "0.5"): how long an svc_damage view kick lasts.
 pub const V_KICKTIME: f32 = 0.5;
@@ -45,6 +46,27 @@ pub fn cshift_drop(percent: f32, frametime: f32, rate: f32) -> f32 {
         0.0
     } else {
         p as f32
+    }
+}
+
+/// V_UpdatePalette's damage and bonus fades over a frame of `frametime`,
+/// stepped as `stepping` says. Classic: id's one [`cshift_drop`] a frame —
+/// which loses at least a whole percent every frame, so uncapped at 480 Hz
+/// the flashes fade two to three times as fast as at 72. Uncapped: one of
+/// id's 72 Hz drops per whole 1/72 s `clock` counts, so the flashes last as
+/// long as id's at any rate.
+pub fn fade_cshifts(damage: &mut f32, bonus: &mut f32, frametime: f32, stepping: Stepping, clock: &mut Tick72) {
+    match stepping {
+        Stepping::Classic => {
+            *damage = cshift_drop(*damage, frametime, DAMAGE_FADE);
+            *bonus = cshift_drop(*bonus, frametime, BONUS_FADE);
+        }
+        Stepping::Uncapped => {
+            for _ in 0..clock.ticks(frametime) {
+                *damage = cshift_drop(*damage, ID_FRAMETIME, DAMAGE_FADE);
+                *bonus = cshift_drop(*bonus, ID_FRAMETIME, BONUS_FADE);
+            }
+        }
     }
 }
 
@@ -145,6 +167,35 @@ mod tests {
         // count 10.5 -> 3*count 31.5 -> 31; the clamp at 150.
         assert_eq!(cshift_add(0.0, 31.5), 31.0);
         assert_eq!(cshift_add(140.0, 30.0), 150.0);
+    }
+
+    /// How long flashes starting at `damage` and `bonus` percent show at `hz`.
+    fn flash_frames(hz: f32, stepping: Stepping, damage: f32, bonus: f32) -> (f32, f32) {
+        let (mut d, mut b, mut clock) = (damage, bonus, Tick72::default());
+        let (mut td, mut tb, mut t) = (0.0, 0.0, 0.0);
+        while d > 0.0 || b > 0.0 {
+            fade_cshifts(&mut d, &mut b, 1.0 / hz, stepping, &mut clock);
+            t += 1.0 / hz;
+            td = if d > 0.0 { t } else { td };
+            tb = if b > 0.0 { t } else { tb };
+        }
+        (td, tb)
+    }
+
+    /// The uncapped fades last as id's do at 72 Hz, to one 72 Hz tick, at
+    /// 60, 144 and 480 Hz; id's per-frame fade does not (at 480 Hz a bonus
+    /// flash is gone in a third of the time).
+    #[test]
+    fn uncapped_flashes_fade_like_72_hz() {
+        let (d72, b72) = flash_frames(72.0, Stepping::Classic, 37.0, BONUS_PERCENT);
+        assert!((d72 - 12.0 / 72.0).abs() < 1e-4 && (b72 - 24.0 / 72.0).abs() < 1e-4, "{d72} {b72}");
+        for hz in [60.0, 144.0, 480.0] {
+            let (d, b) = flash_frames(hz, Stepping::Uncapped, 37.0, BONUS_PERCENT);
+            assert!((d - d72).abs() <= 1.0 / 72.0 + 1e-4, "{hz} Hz damage flash {d} vs {d72}");
+            assert!((b - b72).abs() <= 1.0 / 72.0 + 1e-4, "{hz} Hz bonus flash {b} vs {b72}");
+        }
+        let (_, b480) = flash_frames(480.0, Stepping::Classic, 37.0, BONUS_PERCENT);
+        assert!(b480 < b72 / 2.0, "id's per-frame fade at 480 Hz: {b480}");
     }
 
     #[test]

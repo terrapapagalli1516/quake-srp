@@ -11,6 +11,8 @@
 
 use crate::bsp::Bsp;
 use crate::mdl::Mdl;
+use crate::particles::{TrailHead, TrailStep};
+use crate::stepping::advance_clock;
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
 use crate::server::UserCmd;
 use crate::tent::BeamModel;
@@ -21,8 +23,8 @@ use super::cl_input::{
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
 use super::view::{
-    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
-    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
+    cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
     backtile_for, color_for_name, lap, net_angle, render_options, s_update, view_hook, ClientFrame,
@@ -199,7 +201,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Guard against a non-finite/negative dt so the clock only moves forward.
     // (cl.time, `w.clock`, follows the server's clock below.)
     if dt.is_finite() && dt > 0.0 {
-        w.host_time += dt;
+        advance_clock(w.stepping, &mut w.host_time, &mut w.host_clock, dt);
     }
 
     // 1. Tick the live server with this frame's input. forwardmove/sidemove are
@@ -297,7 +299,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
-        let _ = w.server.client_frame_f64(&cmd, host_frametime);
+        let _ = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping);
         // CL_LerpPoint on a local server: cl.time = the message time, sv.time
         // after this frame's physics.
         w.clock = w.server.time();
@@ -533,8 +535,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     // Projectile/gib trails to spawn this frame, collected here and emitted after
     // the loop (so we don't borrow w.particles/dlights while reading the server):
-    // (entity, old origin, new origin, R_RocketTrail type).
-    let mut trail_spawns: Vec<(i32, [f32; 3], [f32; 3], i32)> = Vec::new();
+    // (entity, new origin, R_RocketTrail type); the old origin is its trail head.
+    let mut trail_spawns: Vec<(i32, [f32; 3], i32)> = Vec::new();
     // External brush-model items (maps/b_*.bsp) as owned (name, origin) pairs; the
     // borrowing `ExternalBModel` list is built below, after the cache is final, so
     // the immutable cache borrow does not clash with reading the server here.
@@ -687,19 +689,20 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // R_RocketTrail: a model with a rocket/grenade/gib/tracer header flag
         // trails particles from its previous origin to here (CL_RelinkEntities).
         if let Some(ttype) = rocket_trail_type(mflags) {
-            let oldorg = *w.trail_org.get(&ent).unwrap_or(&origin);
-            trail_spawns.push((ent, oldorg, origin, ttype));
-            w.trail_org.insert(ent, origin);
+            w.trail_org.entry(ent).or_insert(TrailHead::at(origin));
+            trail_spawns.push((ent, origin, ttype));
         }
         descs.push((m, origin, angles, frame, color, skin));
     }
 
     // Emit the collected trails (after the entity loop to keep the borrows
-    // disjoint). spawn_rocket_trail steps from old->new origin; EF_ROCKET also
+    // disjoint). Each trails from its head to its new origin; EF_ROCKET also
     // flashes a small dynamic light at the rocket head.
-    for (ent, oldorg, neworg, ttype) in trail_spawns.drain(..) {
-        w.particles
-            .spawn_rocket_trail(oldorg, neworg, ttype, &mut w.tracercount, now, &mut w.prng);
+    let step = TrailStep { stepping: w.stepping, dt, now };
+    for (ent, neworg, ttype) in trail_spawns.drain(..) {
+        if let Some(head) = w.trail_org.get_mut(&ent) {
+            w.particles.spawn_trail(head, neworg, ttype, step, &mut w.tracercount, &mut w.prng);
+        }
         if ttype == 0 {
             w.dlights.alloc(ent, neworg, 200.0, now + 0.01, 0.0, 0.0, now);
         }
@@ -974,8 +977,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     //     finished screen goes through `render::cshift_ramps` last, so they
     //     tint the HUD, menu and console too, as the palette shift does.
     let frametime = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-    w.damage_blend = cshift_drop(w.damage_blend, frametime, DAMAGE_FADE);
-    w.bonus_blend = cshift_drop(w.bonus_blend, frametime, BONUS_FADE);
+    fade_cshifts(&mut w.damage_blend, &mut w.bonus_blend, frametime, w.stepping, &mut w.fade_clock);
     // Underwater sine wobble (D_WarpScreen): the warp buffer's view, stretched
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
