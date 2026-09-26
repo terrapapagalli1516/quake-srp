@@ -42,6 +42,8 @@ pub struct Outbox {
     sounds: Vec<SoundEvent>,
     /// The signon's `svc_spawnstaticsound`s ([`Server::drain_static_sounds`]).
     static_sounds: Vec<StaticSound>,
+    /// `svc_particle`s ([`Server::drain_particles`]).
+    particles: Vec<ParticleBurst>,
 }
 
 impl Server {
@@ -157,14 +159,10 @@ fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
 // into the per-client datagram; the client's `R_RunParticleEffect` then spawned
 // the actual particles into its `d_*` software renderer. This headless server
 // has no client, so — exactly like the sound queue above — each fired
-// `particle()` is captured as a [`ParticleBurst`] in a process-wide thread-local
-// queue that [`Server::drain_particles`] hands to a front-end. The front-end
+// `particle()` is captured as a [`ParticleBurst`] in the outbox, which
+// [`Server::drain_particles`] hands to a front-end. The front-end
 // (wasm/quaketool) owns the live [`crate::particles::ParticleSystem`] that turns
 // a drained burst into spawned points, ages them, and draws them into the scene.
-//
-// The reasoning for a `thread_local!` (rather than a field on `Server` or `Vm`)
-// is identical to the sound queue's: builtins are `fn(&mut Vm)` and cannot see
-// the `Server`, and `vm.rs` is off-limits, so the queue cannot hang off either.
 // ---------------------------------------------------------------------------
 
 /// One queued `particle()` burst — the engine `SV_StartParticle` payload,
@@ -185,24 +183,6 @@ pub struct ParticleBurst {
     pub color: u8,
     /// How many particles to spawn (clamped against the pool cap on spawn).
     pub count: i32,
-}
-
-thread_local! {
-    /// Process-wide (per-thread) queue [`bi_particle`] pushes to and
-    /// [`Server::drain_particles`] takes. See the module note above; mirrors the
-    /// [`SOUND_EVENTS`] queue exactly.
-    static PARTICLE_BURSTS: std::cell::RefCell<Vec<ParticleBurst>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a fired particle burst onto the thread-local queue.
-fn push_particle_burst(ev: ParticleBurst) {
-    PARTICLE_BURSTS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued particle burst.
-pub(super) fn take_particle_bursts() -> Vec<ParticleBurst> {
-    PARTICLE_BURSTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// A text message QuakeC asked to show the player: a `centerprint` (drawn
@@ -288,12 +268,8 @@ pub(super) fn bi_particle(vm: &mut Vm) -> Result<()> {
     let sent = (vm.arg_float(3) as i32 & 0xFF) as u8;
     let count = if sent == 255 { 1024 } else { sent as i32 };
 
-    push_particle_burst(ParticleBurst {
-        org,
-        dir,
-        color,
-        count,
-    });
+    let burst = ParticleBurst { org, dir, color, count };
+    send(vm, |o| o.particles.push(burst));
     Ok(())
 }
 
@@ -939,11 +915,9 @@ impl Server {
     /// last drain (`PF_particle` pushes; see [`ParticleBurst`]). A front-end
     /// calls this once per frame and replays each burst into its
     /// [`crate::particles::ParticleSystem`]; tests use it to assert an
-    /// explosion/spawn actually emitted particles. The queue is
-    /// process-/thread-local, so call this on the same thread that drove the
-    /// frame (mirrors [`Server::drain_sounds`]).
+    /// explosion/spawn actually emitted particles.
     pub fn drain_particles(&mut self) -> Vec<ParticleBurst> {
-        take_particle_bursts()
+        self.take_outbox(|o| &mut o.particles)
     }
 
     /// Take and clear the queued temp-entity events decoded from the QuakeC's
