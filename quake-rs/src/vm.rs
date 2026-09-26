@@ -29,9 +29,11 @@
 //!   pointer (`(byte*)&ed->v + ofs - (byte*)sv.edicts`) and round-trips
 //!   identically under our layout.
 //! * **Strings** are a `Vec<u8>` heap initialised from `progs.strings`.
-//!   [`Vm::intern`] appends `"s\0"` and returns the byte offset (a `string_t`);
-//!   [`Vm::get_string`] reads a NUL-terminated string from an offset.
+//!   [`Vm::intern`] appends `"s\0"` and returns the byte offset (a `string_t`),
+//!   once per distinct text; [`Vm::string`] reads a NUL-terminated string from
+//!   an offset.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{ProgramError, QError, Result};
@@ -288,6 +290,8 @@ pub struct Vm {
     edict_free: Vec<bool>,
     /// The string heap (`pr_strings`), initialised from `progs.strings`.
     strings: Vec<u8>,
+    /// Every text [`Vm::intern`] has appended to `strings`, and where.
+    interned: HashMap<Box<str>, i32>,
     /// Native builtin table; index 0 is reserved (`PF_Fixme`).
     builtins: Vec<Builtin>,
     /// What the QuakeC printed ([`Vm::print`]), until the host takes it
@@ -396,6 +400,7 @@ impl Vm {
             edict_fields: Vec::new(),
             edict_free: Vec::new(),
             strings,
+            interned: HashMap::new(),
             builtins: crate::builtins::default_builtins(),
             output: String::new(),
             argc: 0,
@@ -815,12 +820,24 @@ impl Vm {
 
     // ----------------------------------------------------------------- strings
 
-    /// Intern a Rust string: append `"s\0"` to the heap and return its byte
-    /// offset (a `string_t`).
+    /// Intern a Rust string: the `string_t` (byte offset) of `"s\0"` in the
+    /// heap, appended the first time this text is interned and shared after.
+    ///
+    /// id's C has no such heap: `ED_NewString` allocates on the hunk once per
+    /// entity-text value, and `ftos`/`vtos` write one static temp buffer, so a
+    /// level never grows it. Appending on every call, the port's heap grew by
+    /// every `ftos`, `vtos` and `setmodel` for a level's life; sharing the text
+    /// bounds it by the distinct strings. QuakeC compares strings by content
+    /// (`EQ_S`/`NE_S`/`NOT_S`) and the heap is never written in place, so a
+    /// shared offset reads exactly as a fresh copy would.
     pub fn intern(&mut self, s: &str) -> i32 {
+        if let Some(&ofs) = self.interned.get(s) {
+            return ofs;
+        }
         let ofs = self.strings.len() as i32;
         self.strings.extend_from_slice(s.as_bytes());
         self.strings.push(0);
+        self.interned.insert(s.into(), ofs);
         ofs
     }
 
@@ -2243,6 +2260,11 @@ mod tests {
         let mut vm = Vm::load(&img).expect("load");
         let s = vm.intern("hello");
         assert_eq!(vm.get_string(s), "hello");
+        // The same text again is the same string_t; the heap does not grow.
+        let len = vm.strings.len();
+        assert_eq!(vm.intern("hello"), s);
+        assert_eq!(vm.strings.len(), len);
+        assert_ne!(vm.intern("hello2"), s);
         // out-of-range string_t -> empty
         assert_eq!(vm.get_string(-5), "");
         assert_eq!(vm.get_string(1_000_000), "");
@@ -2251,6 +2273,7 @@ mod tests {
     #[test]
     fn test_eq_s_compares_string_contents() {
         let mut b = Builder::new();
+        let progs_foo = b.intern("foo"); // the progs' own "foo"
         let (g_a, g_b, g_c) = (10usize, 11usize, 12usize);
         let stmts = vec![
             Statement { op: Op::EqS, a: g_a as i16, b: g_b as i16, c: g_c as i16 },
@@ -2259,8 +2282,8 @@ mod tests {
         let main = add_function(&mut b, "main", stmts);
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
-        let sa = vm.intern("foo");
-        let sb = vm.intern("foo"); // distinct offset, same contents
+        let (sa, sb) = (vm.intern("foo"), progs_foo);
+        assert_ne!(sa, sb, "distinct offsets, same contents");
         vm.set_gi(g_a, sa);
         vm.set_gi(g_b, sb);
         vm.execute(main).expect("execute");
