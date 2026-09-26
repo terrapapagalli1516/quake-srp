@@ -11,6 +11,7 @@ uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-b
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
 uv run oracle/sound.py        # id's mixer against the port's, sample for sample: see "Sound"
+uv run oracle/classic_check.py  # all of Classic's proof in one run: see "Classic"
 ```
 
 Needs docker (for the build only), uv, cargo, and the shareware pak at
@@ -383,9 +384,11 @@ after the map loads:
   header). A test-only hook in `cl_walk.rs` paints the view the same flat colour,
   and each shot is handed the C frame's clocks (`realtime` for the flashing
   cursors, `host_time` for the menu's spinning dot, the finale's reveal time).
-- Both sides get the port's two input defaults: Always Run (`cl_forwardspeed
-  400`), and the WASD binds (`keys.rs`; so the Customize screen compares drawing,
-  not bindings).
+- The port runs its Classic profile (every departure off, id's
+  `default.cfg` bindings: `quake_rs::settings`), id's side its own defaults,
+  so the Options and Customize screens compare values and bindings too.
+  (Before the profiles both sides were given the port's two input defaults
+  then, Always Run and the WASD binds.)
 
 With the 3-D view one colour, what differs is the 2-D layer. `exact%` is over the
 whole screen; `2d exact%` over the pixels that are not the blank colour in either
@@ -437,7 +440,7 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   menu over `Draw_ConsoleBackground (vid.height)` while `scr_con_current` is
   non-zero, not over the faded screen; the port faded the console text
   (41.5% before). What is left is the console's version stamp (below) and,
-  on Options, its Web extras row. `oracle.c` shoots a composited frame that
+  on Options, its "Classic / 2026" row. `oracle.c` shoots a composited frame that
   renders no view (disconnected) as the screen stands.
 - *Console* (and `console_scroll`, the menu over the disconnected console:
   400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
@@ -457,7 +460,8 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   cursor (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...:
   Escape from Options lands on "Options"); the port's one cursor started every
   screen at its first row. Per-menu cursors since `quake/polish2`: 100%.
-- *Options* (291 px): the port's 14th row, Web extras (in the slot of the
+- *Options* (531 px; 291 while it read "Web extras"): the port's 14th row,
+  "Classic / 2026" with the profile printed at x=220 (in the slot of the
   `_WIN32` build's "Use Mouse"), which id's DOS/Linux list does not have. The
   `menu_options` scenario reaches Video Options with twelve DOWNs, not one UP,
   since UP from row 0 wraps to that 14th row in the port (it had been
@@ -530,3 +534,32 @@ ambient_fade` in extended precision; the scripts use frame times whose step
 is not within a hair of a whole number, where 64 and 80 bits could part),
 and `ResampleSfx`'s `stepscale` (above). The output stream skips a stretch
 the play position overtook (`S_Update_`'s "overshot" reset), on both sides.
+
+## Classic (`classic_check.py`)
+
+```sh
+uv run oracle/classic_check.py                        # ~40 s once built; exit 0 = Classic is id's
+uv run oracle/classic_check.py --only goldens,play    # some of it
+uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
+```
+
+The port's Classic profile (`quake_rs::settings`: every departure off, id's
+`default.cfg` bindings) must stay WinQuake. One command runs every check of
+that and writes a report (`oracle/build/classic-check/classic_check.txt`, next
+to each tool's own output):
+
+| check | what | against |
+|---|---|---|
+| `goldens` | `quaketool scene` of e1m1/e1m2/e1m3 | the sha256 prefixes `4807aaa1` / `9ae2b478` / `c65b7046` |
+| `play` | `quaketool play`: the browser's client frames natively, id's three demos and four scripted walks at 320x200, 640x400 and 960x600, a hash every 30 frames and the sound-call tallies | the recorded list |
+| `timedemo` | id's `timedemo` of demo1..3 at 320x200 and 640x400: the frame counts (969 for demo1, as id's C) | the recorded list |
+| `census` | `quaketool census`: all nine maps through the real QuakeC (the report, by hash) | the recorded list |
+| `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash | the recorded list |
+| `oracle` | `compare.py --aspect 0.8333333 --spans 16`: the eight standard rows | id's C: none below its recorded match (100.00%; e1m7 99.9969%, two pixels) |
+| `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic profile | id's C: no shot below its recorded `2d exact%` (the residues above) |
+| `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE` | id's C: every case sample-identical |
+
+The recorded list is `oracle/classic_expected.txt`, with a note for each
+recording (first on `a50d8d7`, the settings branch's base). A change that
+moves an identity value on purpose is re-recorded with `--record --note`,
+and says so where the fidelity change is recorded (AUDIT.md).

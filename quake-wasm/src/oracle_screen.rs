@@ -112,7 +112,7 @@ fn write_ppm(path: &str) {
 }
 
 fn run(script: &str) {
-    let mut clocks: Option<(f64, f32, f32, f32)> = None;
+    let mut clocks: Option<(f64, f64, f32, f32)> = None;
     for (n, raw) in script.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -121,11 +121,12 @@ fn run(script: &str) {
         let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
         let args: Vec<&str> = rest.split_whitespace().collect();
-        let num = |i: usize| -> f32 {
+        let num64 = |i: usize| -> f64 {
             args.get(i)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_else(|| panic!("line {}: `{line}` needs a number at {i}", n + 1))
         };
+        let num = |i: usize| num64(i) as f32;
         match cmd {
             "res" => set_resolution(num(0) as i32, num(1) as i32),
             "blank" => {
@@ -195,7 +196,9 @@ fn run(script: &str) {
                 let w = a.walk.as_mut().expect("a walk");
                 w.faceanimtime = w.server.time() + 0.2;
             }),
-            "clocks" => clocks = Some((num(0) as f64, num(1), num(2), num(3))),
+            // realtime and host_time are the C's doubles (the menu's clocks are
+            // doubles as id's), cl.time and the centre print's start floats.
+            "clocks" => clocks = Some((num64(0), num64(1), num(2), num(3))),
             "shot" => {
                 // The C's shot frame is a whole host frame (the one that ran
                 // `oracle_shot`): run one, then hand the port that frame's
@@ -206,7 +209,7 @@ fn run(script: &str) {
                         // Host_FilterTime measures from oldrealtime: move it along.
                         a.oldrealtime += realtime - a.realtime;
                         a.realtime = realtime;
-                        a.clock = f64::from(host_time);
+                        a.clock = host_time;
                         if let Some(w) = a.walk.as_mut() {
                             // The finale's reveal, as long into it as the C's.
                             w.finale_start = w.clock - (cltime - cstart);
