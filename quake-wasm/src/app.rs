@@ -122,6 +122,11 @@ pub(crate) struct App {
     /// `gfx/palette.lmp`, for what is drawn with no level loaded (the
     /// disconnected screen's console and menu). Loaded with the menu assets.
     pub(crate) palette: Option<[[u8; 3]; 256]>,
+    /// The `sv_gravity` cvar as the last server left it (800 until a map has
+    /// run; e1m8's worldspawn sets 100): id's cvar outlives the server, and
+    /// demo playback reads it ([`DemoPlay::sv_gravity`]). `CL_Disconnect`
+    /// takes it from the game it ends.
+    pub(crate) sv_gravity: f32,
     /// keys.c `key_repeats[256]`: key downs since each key's last up; a
     /// second down is the keyboard's autorepeat, which `Key_Event` ignores
     /// (Backspace and Pause aside).
@@ -504,6 +509,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 cls: Cls::default(),
                 disconnected: false,
                 palette: None,
+                sv_gravity: quake_rs::server::ServerCvars::default().sv_gravity,
                 key_repeats: [0; 256],
                 shift_down: false,
                 m_save_demonum: 0,
