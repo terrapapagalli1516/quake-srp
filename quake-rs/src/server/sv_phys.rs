@@ -13,7 +13,7 @@
 //! The collision queries are world.c's (`sv_world.rs`); the player's wish
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
-use super::host::{reset_changelevel, reset_restart, sv_gravity};
+use super::host::sv_gravity;
 use super::lightstyle::snapshot_lightstyles;
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
 use super::{
@@ -962,11 +962,10 @@ impl Server {
         if let Some(o) = self.outbox() {
             o.reset_parsers();
         }
-        // Drop any changelevel() / restart request a *prior* frame left unconsumed
-        // (a well-behaved front-end drains it immediately, but a stale request must
-        // never trigger a swap/respawn a frame late or against the wrong level).
-        reset_changelevel();
-        reset_restart();
+        // Drop any changelevel() / restart request a *prior* frame left untaken.
+        if let Some(o) = self.outbox() {
+            o.clear_requests();
+        }
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before this
         // frame's thinks (the host already consumed it via entity_dlights()).
         self.cleanup_ents();

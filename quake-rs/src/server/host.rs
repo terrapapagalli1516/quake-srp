@@ -19,7 +19,7 @@
 //! `Server` methods below.
 
 use super::lightstyle::{snapshot_lightstyles, LIGHTSTYLES, MAX_LIGHTSTYLES};
-use super::{parm_global_name, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
+use super::{parm_global_name, Outbox, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
 use crate::vm::Vm;
 use crate::Result;
 
@@ -105,46 +105,26 @@ pub(super) fn set_sv_gravity(v: f32) {
 // It guards against a double issue (`svs.changelevel_issued`) and merely defers:
 // `Cbuf_AddText("changelevel <map>")`, which `Host_Frame` processes AFTER the
 // current frame finishes. We mirror this precisely: the builtin only *records*
-// the requested map name in a thread-local; the front-end takes it after
+// the requested map name in the server's outbox; the front-end takes it after
 // `client_frame` returns (via [`Server::take_pending_changelevel`]) and performs
 // the swap itself, never inside the builtin call.
-//
-// The `thread_local!` choice is identical to the sound/particle/temp-entity
-// queues (`msg.rs`): builtins are `fn(&mut Vm)` and cannot see the `Server`, and
-// `vm.rs` is off-limits, so the deferred request cannot hang off either. Server
-// methods run on the same thread as the builtins, so a request a frame's QuakeC
-// fired is visible to `take_pending_changelevel` right after the frame.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// The map name requested by a deferred `changelevel()` this frame, or `None`.
-    /// First-writer-wins within a frame, mirroring the C `svs.changelevel_issued`
-    /// guard that drops a second `PF_changelevel` until the swap completes. Taken
-    /// (and cleared) by [`Server::take_pending_changelevel`]; reset in
-    /// [`Server::new`] so a stale request can never leak across servers.
-    static CHANGELEVEL_REQUEST: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
+impl Outbox {
+    /// Record a deferred level change to `map`. The first request wins until
+    /// the host takes it, as the C's `svs.changelevel_issued` guard drops a
+    /// second `PF_changelevel` until the swap completes.
+    fn request_changelevel(&mut self, map: String) {
+        self.changelevel.get_or_insert(map);
+    }
 
-/// Record a deferred level change to `map` (first-writer-wins this frame).
-fn push_changelevel(map: String) {
-    CHANGELEVEL_REQUEST.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.is_none() {
-            *c = Some(map);
-        }
-    });
-}
-
-/// Take and clear the deferred level-change request, if any.
-fn take_changelevel() -> Option<String> {
-    CHANGELEVEL_REQUEST.with(|c| c.borrow_mut().take())
-}
-
-/// Clear any pending level-change request (called from [`Server::new`] so a
-/// stale request from a prior server cannot leak into a fresh one).
-pub(super) fn reset_changelevel() {
-    CHANGELEVEL_REQUEST.with(|c| *c.borrow_mut() = None);
+    /// Drop a `changelevel` or `restart` a *prior* frame left untaken: a
+    /// well-behaved front-end takes it at once, but a stale request must
+    /// never swap or respawn a frame late or against the wrong level.
+    pub(super) fn clear_requests(&mut self) {
+        self.changelevel = None;
+        self.restart = false;
+    }
 }
 
 /// `PF_changelevel` (#70): `void(string s) changelevel`. The C looked up its
@@ -154,20 +134,8 @@ pub(super) fn reset_changelevel() {
 /// front-end performs the swap after the frame. Never swaps inline.
 pub(super) fn bi_changelevel(vm: &mut Vm) -> Result<()> {
     let map = vm.arg_string(0);
-    push_changelevel(map);
+    vm.with_host(|_, h| h.outbox().request_changelevel(map));
     Ok(())
-}
-
-thread_local! {
-    /// Set when QuakeC issues `localcmd("restart\n")` — the single-player respawn
-    /// path (a dead player who presses a button runs `client.qc`'s
-    /// `localcmd("restart\n")` to reload the current level with fresh entry parms).
-    /// Drained by [`Server::take_pending_restart`]; reset in [`Server::new`].
-    static RESTART_REQUEST: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
-}
-
-pub(super) fn reset_restart() {
-    RESTART_REQUEST.with(|c| *c.borrow_mut() = false);
 }
 
 /// `PF_localcmd` (#46): `void(string s) localcmd` — `Cbuf_AddText(s)`, i.e. QuakeC
@@ -181,17 +149,16 @@ pub(super) fn reset_restart() {
 pub(super) fn bi_localcmd(vm: &mut Vm) -> Result<()> {
     let cmd = vm.arg_string(0);
     let mut it = cmd.split_whitespace();
-    match it.next().map(|w| w.to_ascii_lowercase()).as_deref() {
-        Some("restart") => {
-            RESTART_REQUEST.with(|c| *c.borrow_mut() = true);
+    let word = it.next().map(str::to_ascii_lowercase);
+    let map = it.next().map(str::to_string);
+    vm.with_host(|_, h| {
+        let outbox = h.outbox();
+        match (word.as_deref(), map) {
+            (Some("restart"), _) => outbox.restart = true,
+            (Some("changelevel" | "map"), Some(map)) => outbox.request_changelevel(map),
+            _ => {} // other console text: benign no-op, as before.
         }
-        Some("changelevel") | Some("map") => {
-            if let Some(map) = it.next() {
-                push_changelevel(map.to_string());
-            }
-        }
-        _ => {} // other console text: benign no-op, as before.
-    }
+    });
     Ok(())
 }
 
@@ -241,8 +208,6 @@ pub(crate) fn restore_transports(snap: TransportSnapshot) {
     LIGHTSTYLES.with(|t| *t.borrow_mut() = snap.lightstyles);
     SKILL.with(|s| s.set(snap.skill));
     set_sv_gravity(snap.sv_gravity);
-    reset_changelevel();
-    reset_restart();
 }
 
 impl Server {
@@ -393,7 +358,7 @@ impl Server {
     /// client carrying its inventory. Mirrors the engine processing the deferred
     /// `changelevel <map>` console command after the frame.
     pub fn take_pending_changelevel(&mut self) -> Option<String> {
-        take_changelevel()
+        self.outbox()?.changelevel.take()
     }
 
     /// Take and clear a pending single-player respawn (`localcmd("restart")`). The
@@ -402,7 +367,7 @@ impl Server {
     /// not the dead player's state). Mirrors the engine running the deferred
     /// `restart` console command after the frame.
     pub fn take_pending_restart(&mut self) -> bool {
-        RESTART_REQUEST.with(|c| std::mem::replace(&mut *c.borrow_mut(), false))
+        self.take_outbox(|o| &mut o.restart)
     }
 
     /// `Host_Kill_f` (host_cmd.c): the `kill` console command — suicide via the
@@ -697,8 +662,8 @@ mod tests {
 
     #[test]
     fn fresh_server_clears_stale_changelevel_request() {
-        // A request left in the thread-local must not leak into a freshly built
-        // server (Server::new calls reset_changelevel).
+        // A request left in one server's outbox never reaches a freshly built
+        // server.
         let (img, _gc, _gd) = changelevel_progs();
         let progs = Progs::parse(&img).expect("parse");
         // Issue a request against one server...

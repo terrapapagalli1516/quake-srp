@@ -17,7 +17,7 @@
 //! sv_main.c's message senders (`SV_StartSound`, `SV_StartParticle`) live with
 //! the rest of the message side in `msg.rs`.
 
-use super::host::{reset_changelevel, reset_restart, reset_skill};
+use super::host::reset_skill;
 use super::lightstyle::reset_lightstyles;
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
@@ -89,14 +89,6 @@ impl Server {
         install_engine_builtins(&mut vm);
         vm.set_host(Box::new(WorldModel::with_pak(bsp, pak)));
 
-        // A deferred changelevel() request is per-thread and outlives a server;
-        // clear it so a request issued against a prior level can never leak into
-        // this fresh one (mirrors `svs.changelevel_issued = false` in
-        // SV_SpawnServer).
-        reset_changelevel();
-        // Likewise a pending localcmd("restart") respawn must not survive into a
-        // freshly spawned server.
-        reset_restart();
         // The light-style transport is also per-thread and outlives a server;
         // clear it so a prior level's patterns cannot leak before this level's
         // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of

@@ -55,6 +55,12 @@ pub struct Outbox {
     svc_events: Vec<SvcEvent>,
     /// `svc_stufftext`s, as `(client entity, text)` ([`Server::drain_stufftext`]).
     stufftext: Vec<(i32, String)>,
+    /// A `changelevel <map>` the QuakeC queued for the host's command buffer
+    /// (`PF_changelevel`, `localcmd`; [`Server::take_pending_changelevel`]).
+    pub(super) changelevel: Option<String>,
+    /// A `restart` the QuakeC queued for the host's command buffer
+    /// (`localcmd("restart\n")`; [`Server::take_pending_restart`]).
+    pub(super) restart: bool,
 }
 
 impl Server {
@@ -65,7 +71,7 @@ impl Server {
     }
 
     /// Take one of the outbox's queues, leaving it empty.
-    fn take_outbox<T: Default>(&mut self, queue: impl FnOnce(&mut Outbox) -> &mut T) -> T {
+    pub(super) fn take_outbox<T: Default>(&mut self, queue: impl FnOnce(&mut Outbox) -> &mut T) -> T {
         self.outbox().map(|o| std::mem::take(queue(o))).unwrap_or_default()
     }
 }
