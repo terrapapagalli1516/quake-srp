@@ -260,8 +260,8 @@ const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
 // The control block's fields (Int32 indexes; wasi.js has the same table).
 const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, READING: 6,
-            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18 };
-const CTL_BYTES = 256, RING_BYTES = 1 << 16, SLOTS = 3, SLOT_BYTES = 1280 * 800 * 4;
+            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19 };
+const CTL_BYTES = 256, RING_BYTES = 1 << 16;
 // Record kinds, in (IN_*) and out (OUT_*).
 const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7 };
 const OUT = { FRAME: 1, SYNC: 2, STATE: 3, SAMPLE: 4, SOUND: 5, STOP_SOUND: 6, STATIC_SOUND: 7,
@@ -269,7 +269,10 @@ const OUT = { FRAME: 1, SYNC: 2, STATE: 3, SAMPLE: 4, SOUND: 5, STOP_SOUND: 6, S
 // State flags (the STATE record).
 const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16 };
 
-let worker = null, ctl = null, ring = null, frameSlots = null;
+let worker = null, ctl = null, ring = null;
+// The frame slots the worker made (it makes a larger set when a frame
+// outgrows them, and sends it here): the buffer, each slot's size, which set.
+let frameSlots = null, slotBytes = 0, slotsGen = 0;
 let exp = null;                    // the automation proxy (window.quake.call by name), set once running
 // The program's UI state as of its last turn (the STATE record).
 const gameState = { flags: 0, menuScreen: 0 };
@@ -340,6 +343,7 @@ function call(name, ...args) { return callLine([name, ...args].join(' ')).then(r
 function onWorkerMessage(e) {
   const m = e.data;
   if (m.t === 'out') handleOutput(new Uint8Array(m.bytes));
+  else if (m.t === 'slots') { frameSlots = m.frames; slotBytes = m.slotBytes; slotsGen = m.gen; }
   else if (m.t === 'fs') storage.apply(m);
   else if (m.t === 'log') console.log('[quake]', m.text);
   else if (m.t === 'exit') gameExited(m);
@@ -1330,17 +1334,15 @@ async function main() {
   setStatus('starting the engine…');
 
   const shared = new SharedArrayBuffer(CTL_BYTES + RING_BYTES);
-  const frames = new SharedArrayBuffer(SLOTS * SLOT_BYTES);
   ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
-  frameSlots = frames;
   Atomics.store(ctl, C.LATEST, -1);
   Atomics.store(ctl, C.READING, -1);
   worker = new Worker('wasi.js');
   worker.onmessage = onWorkerMessage;
   worker.onerror = (e) => { setStatus('error: ' + e.message); };
   const fileList = [['id1/pak0.pak', pak], ...files];
-  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, frames, files: fileList },
+  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, files: fileList },
                      [wasm.buffer, pak.buffer]);
 
   // Up when the program's startup (quake.rc: config.cfg, the attract demos)
@@ -1411,14 +1413,17 @@ document.addEventListener('fullscreenchange', fitCanvas);
 
 // The newest complete frame into the canvas, if there is one the page has
 // not shown. The slot is claimed first (READING), so the program writes its
-// next frames into the other two (triple buffering). Returns timings for the
-// benchmark: the copy out of shared memory, and putImageData.
+// next frames into the other two (triple buffering). Nothing is shown while
+// the worker's newest set of slots has not reached the page yet (the first
+// frame, a larger resolution). Returns timings for the benchmark: the copy
+// out of shared memory, and putImageData.
 let framesShown = 0;
 function present() {
   const n = Atomics.load(ctl, C.FRAMES);
-  if (n === framesShown) return null;
+  if (n === framesShown || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) return null;
   let s;
   do { s = Atomics.load(ctl, C.LATEST); Atomics.store(ctl, C.READING, s); } while (Atomics.load(ctl, C.LATEST) !== s);
+  if (s < 0 || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) { Atomics.store(ctl, C.READING, -1); return null; }
   framesShown = Atomics.load(ctl, C.FRAMES);
   Atomics.store(ctl, C.SHOWN, framesShown);
   if (!quake.firstFrameAt) quake.firstFrameAt = performance.now();
@@ -1434,7 +1439,7 @@ function present() {
   }
   const t0 = performance.now();
   // putImageData takes no shared memory: one copy out of the slot.
-  frameImg.data.set(new Uint8Array(frameSlots, s * SLOT_BYTES, W * H * 4));
+  frameImg.data.set(new Uint8Array(frameSlots, s * slotBytes, W * H * 4));
   Atomics.store(ctl, C.READING, -1);
   const t1 = performance.now();
   ctx.putImageData(frameImg, 0, 0);

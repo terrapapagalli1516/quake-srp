@@ -121,22 +121,26 @@ queued after a level change is stopped by it.
 
 ## Shared memory
 
-Two `SharedArrayBuffer`s, made by the page and handed to the worker at start:
+Two `SharedArrayBuffer`s:
 
-- **Control and ring** (`CTL_BYTES` 256 + 64 KB). The control block is an
-  `Int32Array`: `IN_WRITE`/`IN_READ` (the ring's byte counters; the page
-  writes whole records and then moves `IN_WRITE`, so the program never sees
-  half a record), `ACK` (the last tick the program consumed), `SYNCS` (turns
-  so far), `LATEST`/`FRAMES`/`READING` (the frame slots), `RUN` (starting,
-  running, exited, crashed), `WAIT` (whether the program waits for ticks),
-  and each slot's width, height and format. The same table is at the top of
-  `wasi.js` and of the page's script.
-- **Frame slots**: three of 1280×800×4 bytes, the largest frame `vid.rs`
-  allows. The worker writes a frame into a slot that is neither the newest
+- **Control and ring** (`CTL_BYTES` 256 + 64 KB, made by the page). The
+  control block is an `Int32Array`: `IN_WRITE`/`IN_READ` (the ring's byte
+  counters; the page writes whole records and then moves `IN_WRITE`, so the
+  program never sees half a record), `ACK` (the last tick the program
+  consumed), `SYNCS` (turns so far), `LATEST`/`FRAMES`/`READING`/`SHOWN`/
+  `SLOTS_GEN` (the frame slots), `RUN` (starting, running, exited,
+  crashed), `WAIT` (whether the program waits for ticks), and each slot's
+  width, height and format. The same table is at the top of `wasi.js` and of
+  the page's script.
+- **Frame slots**: three, made by the worker as large as the largest frame
+  so far. The worker writes a frame into a slot that is neither the newest
   (`LATEST`) nor the one the page is reading (`READING`), then publishes it;
   the page claims `LATEST` in `READING` (re-checking it did not move) before
-  copying out. Untouched pages of a slot are never committed, so at 960×600
-  about 7 MB is resident.
+  copying out. A frame larger than the slots (the first one, or a higher
+  resolution) gets a new set, which the worker sends the page and numbers in
+  `SLOTS_GEN`; the page presents nothing until it holds the set `SLOTS_GEN`
+  names, so the frame shows one refresh later. No resolution limit lives in
+  the host, and at the default 960×600 the slots take 6.9 MB.
 
 ## Files
 

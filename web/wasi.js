@@ -30,11 +30,11 @@ const C = {
   SLOT_H: 12,
   SLOT_F: 15,
   SHOWN: 18,       // FRAMES as of the page's last present
+  SLOTS_GEN: 19,   // which set of frame slots LATEST and the SLOT_* fields are about
 };
 const CTL_BYTES = 256;
 const RING_BYTES = 1 << 16;              // the input ring, after the control block
 const SLOTS = 3;                         // frame slots (triple buffering)
-const SLOT_BYTES = 1280 * 800 * 4;       // the largest frame (vid.rs MAX_PIXELS, RGBA)
 
 // --- Protocol constants (quake-wasm/src/proto.rs) ---------------------------
 const IN_END = 8;
@@ -50,14 +50,16 @@ const RIGHT_FD_WRITE = 1n << 6n;
 class Exit { constructor(code) { this.code = code; } }
 
 let memory;                              // the program's WebAssembly.Memory
-let ctl, ring, slots;                    // views on the shared buffers
+let ctl, ring;                           // views on the shared control block and ring
+// The frame slots: made here, as large as the largest frame so far, and
+// made anew (and sent to the page) when a frame outgrows them.
+let slots = null, slotBytes = 0, slotsGen = 0;
 
 onmessage = async (e) => {
   if (e.data.t !== 'init') return;
-  const { wasm, shared, frames, files, args } = e.data;
+  const { wasm, shared, files, args } = e.data;
   ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
-  slots = new Uint8Array(frames);
   for (const [path, data] of files) fs.files.set(path, { data, size: data.length });
   let module;
   try {
@@ -182,11 +184,11 @@ const stdout = {
       const f = Math.min(8 - this.fixedN, k);
       this.fixed.set(m.subarray(at, at + f), this.fixedN);
       this.fixedN += f; at += f; k -= f;
-      if (this.fixedN === 8) this.slot = this.left - f <= SLOT_BYTES && this.wanted() ? freeSlot() : -1;
+      if (this.fixedN === 8) this.slot = this.wanted() ? freeSlot(this.left - f) : -1;
       this.slotAt = 0;
     }
     if (k > 0 && this.slot >= 0) {
-      slots.set(m.subarray(at, at + k), this.slot * SLOT_BYTES + this.slotAt);
+      slots.set(m.subarray(at, at + k), this.slot * slotBytes + this.slotAt);
       this.slotAt += k;
     }
   },
@@ -232,9 +234,19 @@ const stdout = {
   },
 };
 
-// A slot to write the next frame into: neither the newest frame (the page
-// may be about to present it) nor the one the page is presenting.
-function freeSlot() {
+// A slot to write the next frame (`bytes` long) into: neither the newest
+// frame (the page may be about to present it) nor the one the page is
+// presenting. A frame larger than the slots gets a new, larger set, which
+// goes to the page; until the page has it, it presents nothing (SLOTS_GEN).
+function freeSlot(bytes) {
+  if (bytes > slotBytes) {
+    slotBytes = Math.ceil(bytes / 65536) * 65536;
+    const frames = new SharedArrayBuffer(SLOTS * slotBytes);
+    slots = new Uint8Array(frames);
+    Atomics.store(ctl, C.LATEST, -1);
+    Atomics.store(ctl, C.SLOTS_GEN, ++slotsGen);
+    postMessage({ t: 'slots', frames, slotBytes, gen: slotsGen });
+  }
   const latest = Atomics.load(ctl, C.LATEST), reading = Atomics.load(ctl, C.READING);
   for (let s = 0; s < SLOTS; s++) if (s !== latest && s !== reading) return s;
   return -1;

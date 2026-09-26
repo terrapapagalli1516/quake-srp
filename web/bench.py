@@ -150,6 +150,11 @@ BENCH_JS = r"""
   window.__benchRun = async (cfg) => {
     quake.pause();
     await new Promise(r => setTimeout(r, 100));   // let the page's in-flight frame drain
+    // One frozen frame at the run's size first: the worker's frame slots
+    // grow to fit it now, not on the run's first (hashed) frame.
+    await quake.call('set_resolution', cfg.w, cfg.h);
+    quake.tick(0);
+    await new Promise(r => setTimeout(r, 100));
     const names = (await quake.text('bench_names')).split(',').filter(Boolean);
     const bench = names.length > 0;
     // Realign Host_FilterTime's gate: a refresh the page's loop skipped left
