@@ -6,7 +6,66 @@ Items are sized for one agent in 2–4 hours. They are ranked, and each one says
 touches and what it could collide with.
 
 Every item is a refactor. It must leave Classic byte-identical, and the **identity check**
-(§5, W0a.1) is how an item proves it.
+(§5, W0a.1) is how an item proves it. Since 2026-09-26 the identity check is
+`uv run oracle/classic_check.py` (`oracle/README.md`, "Classic"), which covers W0a.1's
+list and adds id's C.
+
+---
+
+## 0. Status (2026-09-26, end of the 2026 push)
+
+The rest of this file is the plan as written that morning on `3866e1b`; its line numbers
+are that tree's. Done since, each proven with the identity check:
+
+| item | done by | merge | the key commits |
+|---|---|---|---|
+| R2, server state out of thread-locals | `q26/server` | `d5db64a` | `e707de1`..`0f83e40` (`Outbox`), `f4c8fd8` (`ServerCvars`), `4dc6130` (`QRand`) |
+| R3, the renderer owns its state; `Scene` | `q26/multicore` | `a2c2944` | `35a862f` (`Renderer`, `Scene`, `begin_map`, no thread-locals), `f49e3c6` (row bands on N threads) |
+| R4, settings and commands in the engine | `q26/settings` | `efa3bc7` | `02a32ad` (`Cvars`, `CVARS`, `cmd.rs`, `Bindings`) |
+| R5, typed entity fields | `q26/vm` | `ea13e24` | `7bf7a3d` (`MoveType`, `Solid`, `EntFlags`, no by-name reads in engine code), `84d447d` (`Option` sentinels) |
+| R7, quaketool's shape | `q26/tool` | `4f43321` | `d3f0ad3`, `cff6c1d`, `9d7095e` (one `Command` table, `Box<dyn Error>`), `69eca1c` (`forbid(unsafe_code)` on the binary and the integration tests) |
+| R10, the VM's encapsulation and errors | `q26/vm`, `q26/server` | `ea13e24`, `d5db64a` | `9f2e847` (`Op` decoded at load), `99d95d1` (private `Vm`), `d63a0b4` (`intern` dedupe), `267fb8c` (output drained); `ff91bf2`, `b9a0986` (`QError::Program`: a QuakeC error ends the game as `Host_Error`) |
+
+Also done, outside the numbered items:
+
+- quake-wasm is a plain `fn main` WASI program on edition 2024 with
+  `#![forbid(unsafe_code)]` (`q26/platform`, `a50d8d7`). Every crate and binary now
+  forbids `unsafe` by attribute.
+- The crate docs and the Cargo `description` describe the whole engine (W0b.8's first
+  two bullets; `q26/review`, `5af262e`).
+- `cargo doc` is clean outside `server/` and the VM (part of W0b.7; `b9c8ae5`).
+- The `mipadjust` comment is fixed (W0b.8's last bullet; `q26/docs`).
+
+**What is left: the next session's menu.**
+
+- **W0a** (§5): pin the toolchain, edition 2024 for quake-rs, `rustfmt.toml` and one
+  format commit, and the `[lints]` tables.
+  - Nothing is pinned yet: there is no `rust-toolchain.toml`, and `rust-version` is still
+    1.74.
+  - quake-rs is on edition 2021.
+  - 117 files are not rustfmt-clean.
+- **W0b** (§5):
+  - the 12 rustdoc warnings left in `server/` and the VM;
+  - `missing_docs`, doctests (1 today);
+  - moving the big test modules out.
+- **R1**, the client frame, is the largest smell left. `walk_frame` is 1025 lines now
+  (968 at the recon), and the demo frame still repeats the relink, view, screen and
+  palette code.
+- **R6**, a model precache and one shared map.
+- **R8**, the menu's types. The closing review's first item belongs here: the old-era
+  names (`wasm_*` cvars, `MenuScreen::Extras`, `EXTRAS_*`, the `extras` automation
+  calls), renamed with `config.cfg` aliases.
+- **R9**, the module layout. Last, alone.
+- **R11**, a workspace.
+- **§7**, the engine-owned `Host` session: `Host_Frame`, `Cmd_ExecuteString` and
+  `Key_Event` still live in quake-wasm, and its end-to-end tests with them.
+- **Loose ends** from the closing review:
+  - 16 `thread_local!` blocks remain (from 39). Among them are `FILES`/`GAMEDIR` in
+    `quake-wasm/src/common.rs`, `SCALED_2D` in `draw.rs`, the view hook in
+    `client/mod.rs` and `recycle_image`'s pool in `render/mod.rs`.
+  - Dead public functions: `Vm::global_ofs`, `Vm::ret_int`, `sound_names` in
+    `server/mod.rs`.
+  - 32 `#[allow(clippy::too_many_arguments)]` (from 49).
 
 ---
 
@@ -338,7 +397,7 @@ and demos; the port has two copies.
   - timedemo frame counts;
   - the shell's end-to-end tests.
 
-### R2. Server state out of thread-locals. Value **high** · Risk medium · Size 1 window
+### R2. Server state out of thread-locals. **Done** (`q26/server`, `d5db64a`; §0)
 
 - **One `Outbox` for the transports.** Sounds, static sounds, particle bursts, messages,
   temp entities, svc events, stufftext, the changelevel/restart requests, and lightstyle
@@ -362,7 +421,7 @@ and demos; the port has two copies.
 - **Proof:** identity, a census diff of 0 new rows, tests. Tests stop depending on their
   order within a thread.
 
-### R3. The renderer owns its state; a `Scene` replaces the argument lists. Value **high** · Risk medium · Size 1–2 windows
+### R3. The renderer owns its state; a `Scene` replaces the argument lists. **Done** (`q26/multicore`, `a2c2944`; §0)
 
 - **A `Renderer` struct owns what is now in thread-locals:**
   - `EdgeState`;
@@ -385,7 +444,7 @@ and demos; the port has two copies.
 - **Conflicts:** `hires` now, `multicore` next, dithering in wave 3.
 - **Proof:** goldens, oracle rows 100.00%, identity.
 
-### R4. Settings and commands in the engine. Value **high** · Risk low–medium · Owner: the wave-2 `settings` agent
+### R4. Settings and commands in the engine. **Done** (`q26/settings`, `efa3bc7`; §0)
 
 These are the shape recommendations for that agent's work.
 - **A typed `Cvars` struct** (plus a name table for the console and `config.cfg`:
@@ -406,7 +465,7 @@ These are the shape recommendations for that agent's work.
   (`extras.rs`, `host_cmd.rs`).
 - **Proof:** identity, screen2d oracle, `verify_menu`/`verify_extras`.
 
-### R5. Typed entity fields. Value medium–high · Risk low · Size 1 window
+### R5. Typed entity fields. **Done** (`q26/vm`, `ea13e24`; §0)
 
 - **Enums and flags:** `MoveType` and `Solid` (each with an `Other(i32)` arm for the
   arbitrary values QC may write), and an `EntFlags(i32)` bit-set with `contains`.
@@ -432,7 +491,7 @@ These are the shape recommendations for that agent's work.
 - **Conflicts:** `client/`, `server/pr_cmds.rs` (setmodel), `render/world.rs`.
 - **Proof:** identity, tests.
 
-### R7. quaketool's shape. Value medium · Risk low · Size 1 window
+### R7. quaketool's shape. **Done** (`q26/tool`, `4f43321`; §0)
 
 - **One directory, one command table.** Move to `src/bin/quaketool/main.rs`, with
   modules `assets` (info, ls, cat, bsp, map, mdl, spr, wad, dis, run), `render` (render,
@@ -468,7 +527,7 @@ These are the shape recommendations for that agent's work.
 - **Conflicts:** every open branch, so run it when nothing else is open.
 - **Proof:** identity, tests.
 
-### R10. The VM's encapsulation and errors. Value medium · Risk medium · Size 1 window
+### R10. The VM's encapsulation and errors. **Done** (`q26/vm`, `ea13e24`, and `q26/server`, `d5db64a`; §0)
 
 - **Decode `Statement.op` into `Op` once, at load,** with an `Op::Invalid(u16)` arm so
   a bad opcode still errors only when it executes.
@@ -515,12 +574,18 @@ These structural issues are likely to survive the `platform` rewrite.
   Native tools can't run them, so `quaketool play` re-creates the host's defaults. The
   engine should own a `Host` session (`frame(dt, &Input) -> Frame`, with a small
   platform trait for storage and sound out); R4's tables are its first piece.
+  *Still so on 2026-09-26: the settings (R4) and `cmd.rs`'s table type are in the engine,
+  but the command table itself (`quake-wasm/src/host_cmd.rs` `COMMANDS`), `step` and
+  `Key_Event` are the shell's.*
 - **The engine's end-to-end tests live in the shell** (135 tests, because they need the
   embedded pak). They belong in `quake-rs/tests`, reading `../quake-data` and skipping
-  with a message when it is absent, as `oracle_screen` does.
+  with a message when it is absent, as `oracle_screen` does. *(172 on 2026-09-26; the
+  pak is a file now, read through the search path.)*
 - **Extras reach the renderer** through a per-frame thread-local copy
   (`quake-wasm/src/extras.rs`) and engine setters (`draw::set_scaled_2d`,
-  `render::set_mip_cvars`); R4 removes all three.
+  `render::set_mip_cvars`); R4 removes all three. *(Done but for one: `extras.rs` and
+  `set_mip_cvars` are gone, the mip and video settings reach the renderer per frame
+  through `Vid`, and `draw::set_scaled_2d` still sets a thread-local.)*
 
 ---
 
