@@ -15,6 +15,7 @@
 //! | [`cl_demo`]  | cl_demo.c, cl_parse.c, view.c     | `CL_PlayDemo_f`'s build, quake.rc's demo loop, [`cl_demo::demo_frame`]: the recorded stream rendered like live play |
 //! | [`cl_tent`]  | cl_tent.c, r_part.c               | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
 //! | [`cl_input`] | cl_input.c                        | [`cl_input::KeyMove`]: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
+//! | [`in_win`]   | in_win.c (the joystick)           | [`in_win::Joystick`]: a pad as winmm's joystick — `IN_Commands`' `JOY`/`AUX` keys, `IN_JoyMove`'s move and turn with the `joy*` cvars — and the 2026 pad's stick shaping, menu keys and rumble |
 //! | [`view`]     | view.c                            | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times (the renderer's half of view.c is `render`'s) |
 //! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
@@ -43,6 +44,7 @@ pub mod cl_main;
 pub mod cl_tent;
 pub mod host;
 pub mod host_cmd;
+pub mod in_win;
 pub mod view;
 
 use std::cell::Cell;
@@ -186,6 +188,10 @@ pub struct Walk {
     /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
     /// like the HUD's `time`): the status bar shows the pain face until then.
     pub faceanimtime: f32,
+    /// `V_ParseDamage`'s `count`s since the platform last took them: the 2026
+    /// pad's rumble on damage ([`in_win::Rumble::damage`]). Nothing in the
+    /// game reads it.
+    pub damage_count: f32,
     /// `cl.items` as last received and `cl.item_gettime[]` (CL_ParseClientdata,
     /// server clock): the new-weapon icon flash. A level start (CL_ClearState)
     /// seeds the items the player spawns with and zeroes the get-times, so
@@ -566,6 +572,7 @@ pub fn assemble_walk(
         v_dmg_roll: 0.0,
         v_dmg_pitch: 0.0,
         faceanimtime: 0.0,
+        damage_count: 0.0,
         cl_items,
         item_gettime: [0.0; 32],
         oldz: f32::NAN,

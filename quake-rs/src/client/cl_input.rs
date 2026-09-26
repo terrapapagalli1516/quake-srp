@@ -25,11 +25,11 @@ pub const SPEED: f32 = 320.0;
 // 400 run is 320 effective on the ground — exactly WinQuake (walk 200, run 320).
 
 /// `cl_sidespeed` ("350"): the strafe rate — NOT changed by Always Run.
-const CL_SIDESPEED: f32 = 350.0;
+pub const CL_SIDESPEED: f32 = 350.0;
 /// `cl_upspeed` ("200"): the swim up/down rate — NOT changed by Always Run.
 const CL_UPSPEED: f32 = 200.0;
 /// `cl_movespeedkey` ("2.0"): the `+speed` modifier multiplies every move.
-const CL_MOVESPEEDKEY: f32 = 2.0;
+pub const CL_MOVESPEEDKEY: f32 = 2.0;
 /// `cl_yawspeed` ("140") / `cl_pitchspeed` ("150"): keyboard turn/look rates in
 /// deg/sec (CL_AdjustAngles).
 pub const CL_YAWSPEED: f32 = 140.0;

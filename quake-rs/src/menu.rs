@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 12] = [
+pub const SETTING_ROWS: [SettingRow; 14] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -174,6 +174,18 @@ pub const SETTING_ROWS: [SettingRow; 12] = [
         cvar: "vid_fkey",
         label: "      F for fullscreen",
         help: ["The F key toggles fullscreen;", "id's Quake leaves F unbound"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joystick",
+        label: "               Gamepad",
+        help: ["Twin sticks: left moves, right", "looks; RT fires, Start = menu"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joy_rumble",
+        label: "            Pad rumble",
+        help: ["The pad shakes when you are hit", "and when heavy weapons fire"],
         kind: RowKind::Toggle,
     },
     SettingRow {
@@ -3740,8 +3752,14 @@ mod tests {
             }
         }
         // Every departure has its row, but Always Run's two speeds (id's own
-        // Options row).
-        for c in cvar::CVARS.iter().filter(|c| c.departure && !c.name.starts_with("cl_") || c.name == "cl_jumpswim") {
+        // Options row) and the pad's layout under the Gamepad row (id's
+        // advanced configuration and the port's stick shaping and menu keys,
+        // tuned on the console as id's joy* were).
+        let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
+        let listed = |c: &&cvar::Cvar| {
+            c.departure && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim"
+        };
+        for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);
         }
         assert_eq!(MenuScreen::Extras.item_count(), SETTING_ROWS.len());

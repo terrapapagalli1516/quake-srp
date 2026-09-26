@@ -18,10 +18,12 @@
 //! Two kinds of field. **id's cvars**, with id's defaults. And **the port's
 //! departures** from id's game, each marked [`Cvar::departure`], every one off
 //! in [`Cvars::classic`]; [`Cvars::modern`] is the 2026 profile
-//! ([`crate::settings::Profile`]). Three of id's own cvars are departures
+//! ([`crate::settings::Profile`]). Some of id's own cvars are departures
 //! too, where the 2026 profile gives them another default: `cl_forwardspeed`
-//! and `cl_backspeed` (Always Run) and `crosshair`.
+//! and `cl_backspeed` (Always Run), `crosshair`, and the joystick's
+//! (`joystick` and in_win.c's advanced configuration: the 2026 pad layout).
 
+use crate::client::in_win::JoyCvars;
 use crate::render::Threads;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 
@@ -119,6 +121,9 @@ pub struct Cvars {
     /// the platform offers). The pixels are the same for any count, so it is
     /// no departure.
     pub threads: Threads,
+    /// The joystick's: in_win.c's `joystick` and `joy*`, and the port's
+    /// `joy_*` (2026's pad layout, stick shaping, menu keys, rumble).
+    pub joy: JoyCvars,
 }
 
 impl Default for Cvars {
@@ -159,6 +164,7 @@ impl Cvars {
             jumpswim: false,
             fkey: false,
             threads: Threads::Auto,
+            joy: JoyCvars::classic(),
         }
     }
 
@@ -168,7 +174,8 @@ impl Cvars {
     /// layer at id's proportions, the crosshair, Always Run, mouse look,
     /// Space to swim up and `f` for fullscreen. Show FPS and exact
     /// perspective stay off: the readout is clutter, and id's 16-pixel spans
-    /// are part of the look.
+    /// are part of the look. A gamepad works as a modern twin-stick pad
+    /// ([`JoyCvars::modern`]).
     pub fn modern() -> Cvars {
         Cvars {
             cl_forwardspeed: 400.0,
@@ -181,6 +188,7 @@ impl Cvars {
             freelook: true,
             jumpswim: true,
             fkey: true,
+            joy: JoyCvars::modern(),
             ..Cvars::classic()
         }
     }
@@ -311,6 +319,44 @@ fn parse_mode(v: &str) -> Option<(u16, u16)> {
 /// The console's cvars, in `cvar_vars` order for completion (id's list
 /// finds the one registered last first; the port's own come after id's).
 pub const CVARS: &[Cvar] = &[
+    Cvar { name: "joywwhack2", archive: false, departure: false, help: "WingMan Warrior spinner curve",
+        get: |c| number_string(c.joy.wwhack2), set: |c, v| c.joy.wwhack2 = atof(v) },
+    Cvar { name: "joywwhack1", archive: false, departure: false, help: "WingMan Warrior U axis fix",
+        get: |c| number_string(c.joy.wwhack1), set: |c, v| c.joy.wwhack1 = atof(v) },
+    Cvar { name: "joyyawsensitivity", archive: true, departure: true, help: "joystick turn scale (sign: way)",
+        get: |c| number_string(c.joy.yaw_sensitivity), set: |c, v| c.joy.yaw_sensitivity = atof(v) },
+    Cvar { name: "joypitchsensitivity", archive: true, departure: true, help: "joystick look scale",
+        get: |c| number_string(c.joy.pitch_sensitivity), set: |c, v| c.joy.pitch_sensitivity = atof(v) },
+    Cvar { name: "joysidesensitivity", archive: true, departure: true, help: "joystick strafe scale",
+        get: |c| number_string(c.joy.side_sensitivity), set: |c, v| c.joy.side_sensitivity = atof(v) },
+    Cvar { name: "joyforwardsensitivity", archive: true, departure: true, help: "joystick walk scale",
+        get: |c| number_string(c.joy.forward_sensitivity), set: |c, v| c.joy.forward_sensitivity = atof(v) },
+    Cvar { name: "joyyawthreshold", archive: true, departure: true, help: "joystick turn dead zone",
+        get: |c| number_string(c.joy.yaw_threshold), set: |c, v| c.joy.yaw_threshold = atof(v) },
+    Cvar { name: "joypitchthreshold", archive: true, departure: true, help: "joystick look dead zone",
+        get: |c| number_string(c.joy.pitch_threshold), set: |c, v| c.joy.pitch_threshold = atof(v) },
+    Cvar { name: "joysidethreshold", archive: true, departure: true, help: "joystick strafe dead zone",
+        get: |c| number_string(c.joy.side_threshold), set: |c, v| c.joy.side_threshold = atof(v) },
+    Cvar { name: "joyforwardthreshold", archive: true, departure: true, help: "joystick walk dead zone",
+        get: |c| number_string(c.joy.forward_threshold), set: |c, v| c.joy.forward_threshold = atof(v) },
+    Cvar { name: "joyadvaxisv", archive: true, departure: true, help: "axis V: 1 fwd 2 look 3 side 4 turn",
+        get: |c| number_string(c.joy.advaxis[5]), set: |c, v| c.joy.advaxis[5] = atof(v) },
+    Cvar { name: "joyadvaxisu", archive: true, departure: true, help: "axis U: 1 fwd 2 look 3 side 4 turn",
+        get: |c| number_string(c.joy.advaxis[4]), set: |c, v| c.joy.advaxis[4] = atof(v) },
+    Cvar { name: "joyadvaxisr", archive: true, departure: true, help: "axis R: 1 fwd 2 look 3 side 4 turn",
+        get: |c| number_string(c.joy.advaxis[3]), set: |c, v| c.joy.advaxis[3] = atof(v) },
+    Cvar { name: "joyadvaxisz", archive: true, departure: true, help: "axis Z: 1 fwd 2 look 3 side 4 turn",
+        get: |c| number_string(c.joy.advaxis[2]), set: |c, v| c.joy.advaxis[2] = atof(v) },
+    Cvar { name: "joyadvaxisy", archive: true, departure: true, help: "axis Y: 1 fwd 2 look 3 side 4 turn",
+        get: |c| number_string(c.joy.advaxis[1]), set: |c, v| c.joy.advaxis[1] = atof(v) },
+    Cvar { name: "joyadvaxisx", archive: true, departure: true, help: "axis X: 1 fwd 2 look 3 side 4 turn",
+        get: |c| number_string(c.joy.advaxis[0]), set: |c, v| c.joy.advaxis[0] = atof(v) },
+    Cvar { name: "joyadvanced", archive: true, departure: true, help: "axis maps from joyadvaxis*",
+        get: |c| flag(c.joy.advanced), set: |c, v| c.joy.advanced = on(v) },
+    Cvar { name: "joyname", archive: false, departure: false, help: "the controller's name",
+        get: |c| c.joy.name.clone(), set: |c, v| c.joy.name = v.to_string() },
+    Cvar { name: "joystick", archive: true, departure: true, help: "use the joystick / gamepad",
+        get: |c| flag(c.joy.enabled), set: |c, v| c.joy.enabled = on(v) },
     Cvar { name: "_cl_color", archive: true, departure: false, help: "shirt*16 + pants colour",
         get: |c| c.cl_color.to_string(), set: |c, v| c.cl_color = atof(v) as i32 },
     Cvar { name: "_cl_name", archive: true, departure: false, help: "the player's name",
@@ -369,6 +415,14 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.fkey), set: |c, v| c.fkey = on(v) },
     Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
         get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
+    Cvar { name: "joy_deadzone", archive: true, departure: true, help: "round stick dead zone, 0 off",
+        get: |c| number_string(c.joy.deadzone), set: |c, v| c.joy.deadzone = atof(v) },
+    Cvar { name: "joy_exponent", archive: true, departure: true, help: "look stick curve, 1 straight",
+        get: |c| number_string(c.joy.exponent), set: |c, v| c.joy.exponent = atof(v) },
+    Cvar { name: "joy_menukeys", archive: true, departure: true, help: "pad A/B/D-pad work the menus",
+        get: |c| flag(c.joy.menu_keys), set: |c, v| c.joy.menu_keys = on(v) },
+    Cvar { name: "joy_rumble", archive: true, departure: true, help: "pad rumble strength, 0 off",
+        get: |c| number_string(c.joy.rumble), set: |c, v| c.joy.rumble = atof(v) },
 ];
 
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console
