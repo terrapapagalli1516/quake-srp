@@ -1626,7 +1626,8 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
     // frame is reproducible).
     let mut menu = render::Menu::new();
     menu.open();
-    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, 0.0, &palette);
+    let settings = quake_rs::settings::Settings::new(quake_rs::settings::Profile::Classic);
+    render::draw_menu(&mut img, &menu, &settings, &pics, conchars.as_ref(), render::MenuClock::default(), &palette);
 
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 

@@ -740,6 +740,10 @@ fn render_demo_frame(
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img =
         render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette);
+    // V_RenderView: the crosshair over the view, before the 2-D layer.
+    if let Some(cc) = d.conchars.as_ref().filter(|_| d.crosshair) {
+        render::draw_crosshair(&mut img, cc, &vrect, &d.palette);
+    }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game

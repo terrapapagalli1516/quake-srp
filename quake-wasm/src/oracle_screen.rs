@@ -206,7 +206,7 @@ fn run(script: &str) {
                         // Host_FilterTime measures from oldrealtime: move it along.
                         a.oldrealtime += realtime - a.realtime;
                         a.realtime = realtime;
-                        a.clock = host_time;
+                        a.clock = f64::from(host_time);
                         if let Some(w) = a.walk.as_mut() {
                             // The finale's reveal, as long into it as the C's.
                             w.finale_start = w.clock - (cltime - cstart);

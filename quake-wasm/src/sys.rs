@@ -30,12 +30,12 @@ use quake_rs::snd::SndParams;
 use crate::app::{boot_attract, APP};
 use crate::automation;
 use crate::cl_demo::timedemo_running;
-use crate::config::{exec_config, Archived};
+use crate::config::{exec_config, write_if_changed};
 use crate::host::step;
 use crate::input::{key_clear_states, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
-    read_event, Event, LoopWindow, Msg, Placement, FORMAT_RGBA8, STATE_BIND_GRAB, STATE_CONSOLE,
-    STATE_MENU, STATE_TIMEDEMO, STATE_WALK,
+    read_event, Event, LoopWindow, Msg, Placement, FORMAT_RGBA8, STATE_BIND_GRAB, STATE_CONSOLE, STATE_FKEY,
+    STATE_MENU, STATE_NATIVE, STATE_TIMEDEMO, STATE_WALK,
 };
 use crate::savegame::scan_saves;
 use crate::snd_dma;
@@ -69,11 +69,11 @@ struct Sys<W: Write> {
     /// Save opens.
     menu_screen: Option<i32>,
     /// `config.cfg` as last written or read.
-    config: Option<Archived>,
+    config: Option<String>,
     /// When the last frame started: a timedemo's frames time themselves.
     last_frame: Instant,
     /// The UI state the page last heard (`State`).
-    state: (u32, i32),
+    state: UiState,
 }
 
 impl<W: Write> Sys<W> {
@@ -86,7 +86,7 @@ impl<W: Write> Sys<W> {
             menu_screen: None,
             config: None,
             last_frame: Instant::now(),
-            state: (u32::MAX, 0),
+            state: (u32::MAX, 0, 0),
         }
     }
 
@@ -97,7 +97,7 @@ impl<W: Write> Sys<W> {
         self.config = exec_config();
         boot_attract();
         if self.config.is_none() {
-            self.config = Archived::current();
+            self.config = crate::config::current_text();
         }
         scan_saves();
     }
@@ -106,8 +106,8 @@ impl<W: Write> Sys<W> {
     /// next turn waits for a tick — and flush, so the host publishes it.
     fn end_turn(&mut self, wait: bool) -> io::Result<()> {
         self.state = ui_state();
-        let (flags, menu_screen) = self.state;
-        Msg::State { flags, menu_screen }.write_to(&mut self.out)?;
+        let (flags, menu_screen, pixel_size) = self.state;
+        Msg::State { flags, menu_screen, pixel_size }.write_to(&mut self.out)?;
         Msg::Sync { seq: self.ack, wait }.write_to(&mut self.out)?;
         self.out.flush()
     }
@@ -137,6 +137,7 @@ impl<W: Write> Sys<W> {
                 Event::ClearKeys => key_clear_states(),
                 Event::PointerUnlocked => pointer_unlocked(),
                 Event::AudioReady(on) => snd_dma::set_audio_ready(i32::from(on)),
+                Event::Window { w, h } => crate::vid::set_window(w, h),
                 Event::Call { id, line } => {
                     let answer = automation::call(&line);
                     Msg::Reply { id, value: answer.value, text: &answer.text }.write_to(&mut self.out)?;
@@ -161,7 +162,7 @@ impl<W: Write> Sys<W> {
         self.write_picture()?;
         self.write_sounds()?;
         crate::bench::write_values(&mut self.out)?;
-        Archived::write_if_changed(&mut self.config);
+        write_if_changed(&mut self.config);
         Ok(())
     }
 
@@ -255,19 +256,31 @@ impl<W: Write> Sys<W> {
 }
 
 /// What the page's own UI needs of the game (the `State` record): the
-/// flags, and the menu screen showing.
-fn ui_state() -> (u32, i32) {
+/// flags, the menu screen showing, and the pixel size of a native picture.
+type UiState = (u32, i32, u32);
+
+/// The [`UiState`] now.
+fn ui_state() -> UiState {
+    let (native, fkey, pixel_size) = APP.with(|c| {
+        c.borrow().as_ref().map_or((false, false, 0), |a| {
+            let native = crate::vid::native(a);
+            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w));
+            (native, a.settings.cvars.fkey, pixel)
+        })
+    });
     let flags = [
-        (crate::menu::menu_visible(), STATE_MENU),
-        (crate::console::console_visible(), STATE_CONSOLE),
-        (crate::app::in_walk_mode(), STATE_WALK),
-        (crate::menu::menu_bind_grabbing(), STATE_BIND_GRAB),
-        (timedemo_running(), STATE_TIMEDEMO),
+        (crate::menu::menu_visible() != 0, STATE_MENU),
+        (crate::console::console_visible() != 0, STATE_CONSOLE),
+        (crate::app::in_walk_mode() != 0, STATE_WALK),
+        (crate::menu::menu_bind_grabbing() != 0, STATE_BIND_GRAB),
+        (timedemo_running() != 0, STATE_TIMEDEMO),
+        (native, STATE_NATIVE),
+        (fkey, STATE_FKEY),
     ]
     .iter()
-    .filter(|(on, _)| *on != 0)
+    .filter(|(on, _)| *on)
     .fold(0, |f, (_, bit)| f | bit);
-    (flags, crate::menu::menu_screen_id())
+    (flags, crate::menu::menu_screen_id(), pixel_size)
 }
 
 /// A sound's placement for the page's `SND_Spatialize`.
@@ -283,7 +296,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{encode, Record};
+    use crate::proto::{encode, Record, STATE_FKEY, STATE_NATIVE};
 
     /// Run the program on `input` and split what it wrote.
     fn run_on(input: &[u8]) -> Vec<Record> {
@@ -347,15 +360,41 @@ mod tests {
     fn keys_reach_key_event_between_ticks() {
         let mut input = Vec::new();
         input.extend(encode::call(1, "boot"));
-        // Escape closes the menu (M_Main_Key), a held `w` is +forward.
+        // Escape closes the menu (M_Main_Key), a held up arrow is +forward.
         input.extend(encode::key(27, true, 0));
         input.extend(encode::key(27, false, 0));
-        input.extend(encode::key(b'w', true, 'w' as u32));
-        input.extend(encode::call(2, "key_is_down 119"));
+        input.extend(encode::key(quake_rs::keys::K_UPARROW, true, 0));
+        input.extend(encode::call(2, "key_is_down 128"));
         input.extend(encode::call(3, "menu_visible"));
         let recs = run_on(&input);
         let replies: Vec<f64> = recs.iter().filter(|r| r.kind == Record::REPLY).map(|r| r.f64_at(4)).collect();
         assert_eq!(replies, [1.0, 1.0, 0.0]);
+    }
+
+    /// The 2026 profile's native resolution through the protocol: the page's
+    /// `Window` in device pixels, the picture at a whole fraction of it (Auto:
+    /// the smallest pixel that keeps a 1080p frame's cost), and the `State`
+    /// that tells the page to fill its box with that pixel size. Classic
+    /// shows its video mode in the 4:3 box whatever the window.
+    #[test]
+    fn the_window_sets_a_native_picture_in_2026_and_nothing_in_classic() {
+        let frame_and_state = |profile: &str, win: (u32, u32)| {
+            let mut input = Vec::new();
+            input.extend(encode::call(1, &format!("exec profile {profile}")));
+            input.extend(encode::window(win.0, win.1));
+            input.extend(encode::tick(1, 0.0));
+            input.extend(encode::tick(2, 0.0));
+            let recs = run_on(&input);
+            let frame = recs.iter().rev().find(|r| r.kind == Record::FRAME).expect("a frame");
+            let (w, h) = (u16::from_le_bytes([frame.payload[0], frame.payload[1]]), u16::from_le_bytes([frame.payload[2], frame.payload[3]]));
+            let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
+            (w, h, state.u32_at(0) & (STATE_NATIVE | STATE_FKEY), state.u32_at(8))
+        };
+        assert_eq!(frame_and_state("2026", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_FKEY, 1));
+        assert_eq!(frame_and_state("2026", (3840, 2160)), (1920, 1080, STATE_NATIVE | STATE_FKEY, 2), "4K: 2x2 pixels");
+        assert_eq!(frame_and_state("2026", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_FKEY, 3), "5K: 3x3");
+        assert_eq!(frame_and_state("2026", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_FKEY, 1), "any aspect");
+        assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, 0, 0), "the mode, in the 4:3 box");
     }
 
     #[test]

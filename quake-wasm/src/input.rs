@@ -5,11 +5,12 @@
 //! `CL_AdjustAngles`) is [`quake_rs::client::cl_input`]'s.
 
 use quake_rs::client::cl_input::{clamp_pitch, V_CENTERSPEED};
+use quake_rs::client::Walk;
 use quake_rs::keys::{
-    consolekey, keynum_to_string, keyshift, menubound, K_BACKSPACE, K_ESCAPE, K_PAUSE, K_SHIFT,
+    consolekey, keynum_to_string, keyshift, menubound, Binding, BIND_CENTERVIEW, BIND_CHANGEWEAPON,
+    BIND_IMPULSE_0, BIND_MLOOK, BIND_PAUSE, BIND_SIZEDOWN, BIND_SIZEUP, BIND_STRAFE, BIND_TOGGLECONSOLE,
+    K_BACKSPACE, K_ESCAPE, K_PAUSE, K_SHIFT,
 };
-use quake_rs::menu::{BIND_IMPULSE_0, BIND_PAUSE, BIND_TOGGLECONSOLE};
-use quake_rs::render::{BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_SIZEDOWN, BIND_SIZEUP, BIND_STRAFE};
 
 use crate::app::{ensure_app, App, KeyDest, APP};
 use crate::menu::{apply_menu_action, run_menu_deferred, MenuDeferred};
@@ -151,7 +152,7 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
         if key != K_BACKSPACE && key != K_PAUSE && a.key_repeats[k] > 1 {
             return None; // ignore most autorepeats
         }
-        if key >= 200 && a.menu.action_for_key(key).is_none() {
+        if key >= 200 && a.settings.binds.get(key).is_none() {
             a.console.println(format!("{} is unbound, hit F4 to set.", keynum_to_string(key)));
         }
     }
@@ -164,7 +165,7 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
             return None;
         }
         if a.key_dest() == KeyDest::Menu {
-            let action = a.menu.keydown(K_ESCAPE, None);
+            let action = a.menu.keydown(K_ESCAPE, None, &mut a.settings);
             return apply_menu_action(a, action).map(KeyAfter::Menu);
         }
         a.m_toggle_menu();
@@ -173,8 +174,7 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
     // Key ups only release the `+` button commands (the `-` half), in every
     // key_dest.
     if !down {
-        a.keys_held[k] = false;
-        return None;
+        return key_up_binding(a, key);
     }
     // During demo playback, most keys bring up the main menu.
     if a.demoplayback() && consolekey(key) && a.key_dest() == KeyDest::Game {
@@ -189,8 +189,7 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
         KeyDest::Game => !a.disconnected || !consolekey(key),
     };
     if to_binding {
-        run_binding(a, key);
-        return None;
+        return run_binding(a, key);
     }
     let key = if a.shift_down { keyshift(key) } else { key };
     let text = match ch {
@@ -199,7 +198,7 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
     };
     match dest {
         KeyDest::Menu => {
-            let action = a.menu.keydown(key, text);
+            let action = a.menu.keydown(key, text, &mut a.settings);
             apply_menu_action(a, action).map(KeyAfter::Menu)
         }
         KeyDest::Game | KeyDest::Console => crate::console::key_console(a, key, text).map(KeyAfter::Console),
@@ -208,9 +207,13 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
 
 /// `Key_Event`'s command dispatch for a key down: `kb = keybindings[key]`.
 /// A `+` command is held until its key comes up (`keys_held`, the button
-/// state `CL_BaseMove` reads each frame); the rest run once, now.
-fn run_binding(a: &mut App, key: u8) {
-    let Some(cmd) = a.menu.action_for_key(key) else { return };
+/// state `CL_BaseMove` reads each frame); the rest run once, now. A binding
+/// to a console line comes back to be run once the App borrow ends.
+fn run_binding(a: &mut App, key: u8) -> Option<KeyAfter> {
+    let cmd = match a.settings.binds.get(key)? {
+        Binding::Command(cmd) => *cmd,
+        Binding::Line(line) => return Some(KeyAfter::Console(line.to_string())),
+    };
     a.keys_held[key as usize] = true;
     match cmd {
         // "impulse N" (IN_Impulse: `in_impulse = atoi(argv[1])`), sent with
@@ -223,20 +226,49 @@ fn run_binding(a: &mut App, key: u8) {
         }
         BIND_CENTERVIEW => {
             // "centerview" -> V_StartPitchDrift (view.c): seed the drift.
-            if let Some(w) = a.walk.as_mut()
-                && (!w.pitch_drift || w.pitch_vel == 0.0)
-            {
-                w.pitch_vel = V_CENTERSPEED;
-                w.pitch_drift = true;
+            if let Some(w) = a.walk.as_mut() {
+                start_pitch_drift(w);
             }
         }
         // default.cfg's `+`/`=` "sizeup" and `-` "sizedown" (SCR_SizeUp_f /
         // SCR_SizeDown_f): step the viewsize; the next frame reframes.
-        BIND_SIZEUP => a.menu.size_up(),
-        BIND_SIZEDOWN => a.menu.size_down(),
+        BIND_SIZEUP => a.settings.cvars.size_up(),
+        BIND_SIZEDOWN => a.settings.cvars.size_down(),
         BIND_PAUSE => crate::host_cmd::host_pause(a),
         BIND_TOGGLECONSOLE => a.toggle_console(),
         _ => {}
+    }
+    None
+}
+
+/// `Key_Event` for a key up: the key is released, so a `+` command it held
+/// is let go (`-cmd`) — `IN_MLookUp` re-levels the view with `lookspring`
+/// when mouse look ends with it — and a `+` console line runs its `-` half.
+fn key_up_binding(a: &mut App, key: u8) -> Option<KeyAfter> {
+    let was_held = std::mem::replace(&mut a.keys_held[key as usize], false);
+    match a.settings.binds.get(key)? {
+        Binding::Command(BIND_MLOOK) if was_held && !mouse_look(a) && a.settings.cvars.lookspring => {
+            if let Some(w) = a.walk.as_mut() {
+                start_pitch_drift(w);
+            }
+            None
+        }
+        Binding::Line(line) => line.strip_prefix('+').map(|rest| KeyAfter::Console(format!("-{rest}"))),
+        Binding::Command(_) => None,
+    }
+}
+
+/// `in_mlook`: mouse look is on — `+mlook` held, or the 2026 `freelook`
+/// holding it for good.
+fn mouse_look(a: &App) -> bool {
+    a.settings.cvars.freelook || a.settings.binds.held(BIND_MLOOK, &a.keys_held)
+}
+
+/// `V_StartPitchDrift` (view.c): seed the drift that re-levels the view.
+fn start_pitch_drift(w: &mut Walk) {
+    if !w.pitch_drift || w.pitch_vel == 0.0 {
+        w.pitch_vel = V_CENTERSPEED;
+        w.pitch_drift = true;
     }
 }
 
@@ -305,12 +337,12 @@ pub(crate) fn key_is_down(keynum: i32) -> i32 {
 
 /// Raw mouse deltas (browser `movementX`/`movementY` counts) — a port of
 /// IN_MouseMove (in_win.c): counts scale by the `sensitivity` cvar; mouse X
-/// turns yaw, OR strafes (`m_side`) while `lookstrafe` is on or `+strafe` is
-/// held; mouse Y drives pitch (sign = Invert Mouse, `m_pitch.value < 0`),
-/// clamped 80/-70, OR feeds forwardmove (`m_forward`) while `+strafe` holds it
-/// out of the pitch path. Mouse-look is permanent under pointer lock (`+mlook`
-/// held), so any motion stops an active pitch drift (V_StopPitchDrift). Gated
-/// behind the menu/console like `look`.
+/// turns yaw, OR strafes (`m_side`) while `+strafe` is held or `lookstrafe`
+/// is on in mouse look; in mouse look ([`mouse_look`]: `+mlook` held, or the
+/// 2026 `freelook`) mouse Y drives pitch (sign = Invert Mouse, `m_pitch.value
+/// < 0`), clamped 80/-70, and stops an active pitch drift (V_StopPitchDrift);
+/// otherwise — id's default, or with `+strafe` held — it feeds forwardmove
+/// (`m_forward`). Gated behind the menu/console like `look`.
 pub(crate) fn mouse_move(dx: f32, dy: f32) {
     ensure_app(|a| {
         if a.menu.visible || a.console.open {
@@ -321,29 +353,26 @@ pub(crate) fn mouse_move(dx: f32, dy: f32) {
         }
         // mouse_x *= sensitivity.value (the raw 1..11 cvar, like the C — the
         // 0.16/3 port calibration lives in M_YAW_PORT/M_PITCH_PORT).
-        let mx = dx * a.menu.sensitivity();
-        let my = dy * a.menu.sensitivity();
-        let strafe_held = a
-            .keys_held
-            .iter()
-            .enumerate()
-            .any(|(k, &h)| h && a.menu.action_for_key(k as u8) == Some(BIND_STRAFE));
-        let lookstrafe = a.menu.lookstrafe();
-        let invert = a.menu.invert_mouse();
+        let c = &a.settings.cvars;
+        let (mx, my) = (dx * c.sensitivity, dy * c.sensitivity);
+        let strafe_held = a.settings.binds.held(BIND_STRAFE, &a.keys_held);
+        let (lookstrafe, invert, mlook) = (c.lookstrafe, c.invert_mouse(), mouse_look(a));
         if let Some(w) = a.walk.as_mut() {
             // if (in_strafe || (lookstrafe && in_mlook)) sidemove += m_side*mx
-            // else viewangles[YAW] -= m_yaw*mx. (+mlook is always held here.)
-            if strafe_held || lookstrafe {
+            // else viewangles[YAW] -= m_yaw*mx.
+            if strafe_held || (lookstrafe && mlook) {
                 w.mouse_side += M_SIDE * mx;
             } else {
                 w.yaw -= M_YAW_PORT * mx;
             }
             // if (in_mlook) V_StopPitchDrift() — every mlook mouse move.
-            w.pitch_drift = false;
-            w.pitch_vel = 0.0;
+            if mlook {
+                w.pitch_drift = false;
+                w.pitch_vel = 0.0;
+            }
             // if (in_mlook && !in_strafe) pitch += m_pitch*my (clamped 80/-70)
             // else forwardmove -= m_forward*my.
-            if !strafe_held {
+            if mlook && !strafe_held {
                 let m_pitch = if invert { -M_PITCH_PORT } else { M_PITCH_PORT };
                 w.pitch = clamp_pitch(w.pitch + m_pitch * my);
             } else {
@@ -353,21 +382,19 @@ pub(crate) fn mouse_move(dx: f32, dy: f32) {
     });
 }
 
-/// The pointer lock was released. This port's `+mlook` is permanently held
-/// while the pointer is locked, so unlock IS the mlook release — the faithful
+/// The pointer lock was released. With `freelook` (2026) `+mlook` is held
+/// for as long as the pointer is locked, so unlock IS the mlook release — the
 /// `lookspring` trigger (`IN_MLookUp`, cl_input.c: when `+mlook` releases and
 /// `lookspring.value` is set, `V_StartPitchDrift()` re-centres the view).
+/// Without it (id's) the lock holds nothing, and mouse look ends with its key
+/// ([`key_up_binding`]).
 pub(crate) fn pointer_unlocked() {
     ensure_app(|a| {
-        if !a.menu.lookspring() {
+        if !(a.settings.cvars.freelook && a.settings.cvars.lookspring) {
             return;
         }
         if let Some(w) = a.walk.as_mut() {
-            // V_StartPitchDrift (view.c): seed pitchvel, clear nodrift.
-            if !w.pitch_drift || w.pitch_vel == 0.0 {
-                w.pitch_vel = V_CENTERSPEED;
-                w.pitch_drift = true;
-            }
+            start_pitch_drift(w);
         }
     });
 }
@@ -384,14 +411,13 @@ pub(crate) fn player_pitch() -> f32 {
     })
 }
 
-/// The Options "Mouse speed" as a sensitivity multiplier (default 1.0). The page
-/// multiplies its baseline look sensitivity by this. Reads from the App-level menu;
-/// 1.0 when the app has not been created yet.
+/// The Options "Mouse speed" as a multiplier of the default (`sensitivity`
+/// over default.cfg's 3; 1.0 before the App exists).
 pub(crate) fn mouse_sensitivity() -> f32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
-            .map(|a| a.menu.mouse_sensitivity())
+            .map(|a| a.settings.cvars.sensitivity / 3.0)
             .unwrap_or(1.0)
     })
 }
@@ -433,7 +459,7 @@ mod tests {
         let showscores = || APP.with(|c| {
             let a = c.borrow();
             let a = a.as_ref().unwrap();
-            derive_key_move(&a.menu, &a.keys_held).showscores
+            derive_key_move(&a.settings.cvars, &a.settings.binds, &a.keys_held).showscores
         });
         assert_eq!(boot(), 1);
         assert_eq!(menu_visible(), 1, "boot opens the menu over e1m1");
@@ -507,7 +533,7 @@ mod tests {
         press(b'`');
         assert_eq!(crate::menu::menu_bind_grabbing(), 0, "the grab ends");
         assert_eq!(crate::console::console_visible(), 0);
-        let bound = APP.with(|c| c.borrow().as_ref().unwrap().menu.action_for_key(b'`'));
+        let bound = APP.with(|c| c.borrow().as_ref().unwrap().settings.binds.command(b'`'));
         assert_eq!(bound, Some(BIND_TOGGLECONSOLE), "and the console key stays the console's");
         for _ in 0..3 {
             press(K_ESCAPE);
@@ -543,8 +569,8 @@ mod tests {
         key_event(i32::from(K_MOUSE3), 0, 0);
         let (jump, grab) = APP.with(|c| {
             let a = c.borrow();
-            let m = &a.as_ref().unwrap().menu;
-            (m.action_for_key(K_MOUSE3), m.bind_grabbing())
+            let a = a.as_ref().unwrap();
+            (a.settings.binds.command(K_MOUSE3), a.menu.bind_grabbing())
         });
         assert_eq!((jump, grab), (Some(quake_rs::render::BIND_JUMP), false), "MOUSE3 is now +jump");
         // Backspace on the "walk forward" row unbinds MOUSE2 with the rest.
@@ -653,9 +679,10 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
+        use_2026();
 
-        // Default binding: w = +forward at cl_forwardspeed 400 — Always Run
-        // defaults ON in this port (Menu's DEVIATION note).
+        // The 2026 binding: w = +forward at cl_forwardspeed 400 — Always Run
+        // on in the 2026 profile.
         key_down(i32::from(b'w'));
         step(0.05);
         let fwd_run = walk_mut(|w| w.key_move.fwd);
@@ -701,11 +728,39 @@ mod tests {
         assert_eq!(walk_mut(|w| w.key_move.fwd), 0.0, "key_up ends +forward");
     }
 
+    /// id's mouse (`freelook` off, Classic): mouse Y walks (`m_forward`) and
+    /// leaves the pitch alone; holding `+mlook` (`\\`, MOUSE3) looks; letting
+    /// it go with `lookspring` re-levels the view (`IN_MLookUp`) — and a
+    /// pointer unlock, which holds nothing here, does not.
+    #[test]
+    fn ids_mouse_walks_and_mlook_held_looks() {
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.pitch = 0.0);
+        mouse_move(0.0, -100.0);
+        assert_eq!(player_pitch(), 0.0, "no mouse look: the pitch stays");
+        assert_eq!(walk_mut(|w| w.mouse_fwd), 300.0, "forwardmove -= m_forward * my (sensitivity 3)");
+        key_down(i32::from(b'\\'));
+        mouse_move(0.0, 100.0);
+        assert!(player_pitch() > 0.0, "+mlook held: mouse-down looks down");
+        crate::host_cmd::execute_console_command("lookspring 1");
+        pointer_unlocked();
+        assert!(!walk_mut(|w| w.pitch_drift), "the unlock releases nothing without freelook");
+        key_up(i32::from(b'\\'));
+        assert!(walk_mut(|w| w.pitch_drift), "releasing +mlook with lookspring starts the drift");
+        for _ in 0..30 {
+            step(0.05);
+        }
+        assert!(player_pitch().abs() < 0.5, "and the view re-levels ({})", player_pitch());
+    }
+
     #[test]
     fn invert_mouse_flips_pitch_and_lookspring_recentres_on_unlock() {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
+        use_2026(); // freelook: the mouse looks while the pointer is locked
 
         // Mouse pulled down (positive movementY) looks DOWN (positive pitch).
         walk_mut(|w| w.pitch = 0.0);
@@ -764,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn lookstrafe_routes_mouse_x_to_sidemove() {
+    fn lookstrafe_routes_mouse_x_to_sidemove_in_mouse_look() {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
@@ -775,7 +830,8 @@ mod tests {
         assert!(walk_mut(|w| w.yaw) < yaw0, "mouse-right turns right (yaw -= m_yaw*mx)");
         assert_eq!(walk_mut(|w| w.mouse_side), 0.0);
 
-        // Lookstrafe ON (Options row 11): mouse X strafes instead.
+        // Lookstrafe ON (Options row 11): in mouse look, mouse X strafes
+        // instead (in_win.c: `lookstrafe.value && (in_mlook.state & 1)`).
         menu_cancel();
         menu_down();
         menu_down();
@@ -788,9 +844,14 @@ mod tests {
         menu_cancel();
         let yaw1 = walk_mut(|w| w.yaw);
         mouse_move(100.0, 0.0);
-        assert_eq!(walk_mut(|w| w.yaw), yaw1, "lookstrafe holds the yaw still");
+        assert!(walk_mut(|w| w.yaw) < yaw1, "without mouse look it still turns");
+        key_down(i32::from(b'\\')); // +mlook (default.cfg)
+        let yaw2 = walk_mut(|w| w.yaw);
+        mouse_move(100.0, 0.0);
+        assert_eq!(walk_mut(|w| w.yaw), yaw2, "lookstrafe in mouse look holds the yaw still");
         // sidemove += m_side * (mx * sensitivity 3) = 0.8 * 300 = 240.
         assert_eq!(walk_mut(|w| w.mouse_side), 240.0, "mouse X became sidemove units");
+        key_up(i32::from(b'\\'));
         // The accumulator drains into the next frame's cmd.
         step(0.05);
         assert_eq!(walk_mut(|w| w.mouse_side), 0.0, "step drained the strafe units");

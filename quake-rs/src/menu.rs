@@ -9,12 +9,23 @@ use crate::draw::{
     blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, screen_2d,
     MENU_VIRT_W,
 };
+use crate::cvar::{self, PIXEL_SIZE_MAX};
 use crate::keys::{
-    default_bindings, keynum_to_string, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE,
-    K_LEFTARROW, K_RIGHTARROW, K_UPARROW,
+    keynum_to_string, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW,
+    K_RIGHTARROW, K_UPARROW,
 };
 use crate::render::Image;
-use crate::screen::{center_string_top, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{center_string_top, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::settings::Settings;
+
+// The binding commands were the menu's before they were keys.c's; their
+// names stay reachable here.
+pub use crate::keys::{
+    BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_IMPULSE_0, BIND_JUMP,
+    BIND_KLOOK, BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MLOOK, BIND_MOVEDOWN, BIND_MOVELEFT,
+    BIND_MOVERIGHT, BIND_MOVEUP, BIND_PAUSE, BIND_RIGHT, BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP,
+    BIND_SPEED, BIND_STRAFE, BIND_TOGGLECONSOLE,
+};
 
 // ---------------------------------------------------------------------------
 // Main menu (a port of menu.c: M_Main_Draw/_Key, M_SinglePlayer_Draw/_Key)
@@ -47,8 +58,8 @@ const SINGLEPLAYER_ITEMS: usize = 3;
 /// 0 Customize controls, 1 Go to console, 2 Reset to defaults, 3 Screen size,
 /// 4 Brightness, 5 Mouse Speed, 6 CD Music Volume, 7 Sound Volume, 8 Always Run,
 /// 9 Invert Mouse, 10 Lookspring, 11 Lookstrafe, 12 Video Options. Row 13 is
-/// the port's "Web extras" ([`ROW_EXTRAS`]), in the slot the C's own `_WIN32`
-/// build gives its 14th row ("Use Mouse", y=136, `OPTIONS_ITEMS 14`).
+/// the port's "Classic / 2026" ([`ROW_PROFILE`]), in the slot the C's own
+/// `_WIN32` build gives its 14th row ("Use Mouse", y=136, `OPTIONS_ITEMS 14`).
 const OPTIONS_ITEMS: usize = 14;
 
 /// `OptionRow` — the stable index for each Options row (matches the C's
@@ -66,136 +77,163 @@ const ROW_INVERTMOUSE: usize = 9;
 const ROW_LOOKSPRING: usize = 10;
 const ROW_LOOKSTRAFE: usize = 11;
 const ROW_VIDEO: usize = 12;
-/// PORT ROW (not in id's Quake): "Web extras" opens [`MenuScreen::Extras`],
-/// the one home of this port's opt-in departures ([`Extras`]).
-const ROW_EXTRAS: usize = 13;
+/// PORT ROW (not in id's Quake): "Classic / 2026", the one switch between
+/// the profiles ([`crate::settings::Profile`]). Left and right flip it, as a
+/// checkbox; Enter opens [`MenuScreen::Extras`], the page of every setting
+/// the profiles switch.
+const ROW_PROFILE: usize = 13;
 
 // ---------------------------------------------------------------------------
-// Web extras: the port's opt-in departures from id's Quake
+// The 2026 settings page: every departure from id's Quake, one row each
 // ---------------------------------------------------------------------------
 
-/// The port's opt-in departures from id's Quake (Options > Web extras, and
-/// the `wasm_*` console commands). Every one defaults OFF: with all of them
-/// off the port behaves as id's Quake (Always Run aside). They are not cvars
-/// in default.cfg, so "Reset to defaults" leaves them alone; the page
-/// persists them in localStorage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Extras {
-    /// `wasm_uncapped`: run a host frame on every display refresh instead of
-    /// `Host_FilterTime`'s 72 fps cap (a 120/144 Hz display runs 120/144 fps).
-    pub uncapped: bool,
-    /// `wasm_showfps`: a frame-rate readout in conchars at the bottom right,
-    /// above the status bar (QuakeWorld's `SCR_DrawFPS`).
-    pub show_fps: bool,
-    /// `wasm_exactpersp`: textured walls and liquids with exact perspective
-    /// at every pixel instead of id's 16-pixel affine spans.
-    pub exact_persp: bool,
-    /// `wasm_scaled2d`: the 2-D layer (status bar, menus, console, text)
-    /// blown up from a 320x200 screen to fill the frame, instead of id's 1:1
-    /// pixels at every resolution ([`crate::draw::set_scaled_2d`]).
-    pub scaled_2d: bool,
-}
-
-/// One Web extra (a row of [`WEB_EXTRAS`]).
+/// What a row of the settings page shows and how left and right change it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Extra {
-    Uncapped,
-    ShowFps,
-    ExactPersp,
-    Scaled2d,
+pub enum RowKind {
+    /// The profile: `classic` / `2026`; any key flips it.
+    Profile,
+    /// A cvar that is on or off (`M_DrawCheckbox`); any key flips it.
+    Toggle,
+    /// `vid_pixelsize`: `auto`, then 1..=4; left and right step it.
+    PixelSize,
 }
 
-impl Extras {
-    /// The bits the page stores (the `extras`/`set_extras` exports):
-    /// 1 uncapped, 2 show FPS, 4 exact perspective, 8 scaled 2-D.
-    pub fn bits(self) -> u32 {
-        self.uncapped as u32
-            | (self.show_fps as u32) << 1
-            | (self.exact_persp as u32) << 2
-            | (self.scaled_2d as u32) << 3
-    }
-
-    /// The inverse of [`Extras::bits`]; unknown bits are ignored.
-    pub fn from_bits(bits: u32) -> Extras {
-        Extras {
-            uncapped: bits & 1 != 0,
-            show_fps: bits & 2 != 0,
-            exact_persp: bits & 4 != 0,
-            scaled_2d: bits & 8 != 0,
-        }
-    }
-
-    /// Whether `e` is on.
-    pub fn get(self, e: Extra) -> bool {
-        match e {
-            Extra::Uncapped => self.uncapped,
-            Extra::ShowFps => self.show_fps,
-            Extra::ExactPersp => self.exact_persp,
-            Extra::Scaled2d => self.scaled_2d,
-        }
-    }
-
-    /// Switch `e` on or off.
-    pub fn set(&mut self, e: Extra, on: bool) {
-        match e {
-            Extra::Uncapped => self.uncapped = on,
-            Extra::ShowFps => self.show_fps = on,
-            Extra::ExactPersp => self.exact_persp = on,
-            Extra::Scaled2d => self.scaled_2d = on,
-        }
-    }
-}
-
-/// One Web extra, as the Options > Web extras page and the console know it.
+/// One row of the settings page (Options > Classic / 2026, Enter).
 #[derive(Debug, Clone, Copy)]
-pub struct WebExtra {
-    /// The value it switches.
-    pub extra: Extra,
-    /// Its console variable (`wasm_*`, a name no id command or cvar uses).
+pub struct SettingRow {
+    /// The console variable it shows ([`crate::cvar::CVARS`]); `profile`
+    /// for the profile row, which is a command.
     pub cvar: &'static str,
-    /// Its row label, right-justified to the Options label column like id's.
+    /// Its label, right-justified to the Options label column like id's.
     pub label: &'static str,
-    /// The two bronze help lines shown under the list while its row is
+    /// The two bronze help lines shown under the list while it is
     /// highlighted (a third names the console variable), at most
     /// [`EXTRAS_NOTE_COLS`] characters so they clear the plaque.
     pub help: [&'static str; 2],
-    /// Its one-line summary in the console's `help`.
-    pub summary: &'static str,
+    pub kind: RowKind,
 }
 
-/// THE table of the port's opt-in extras, in Extras-page order: the page's
-/// rows and the console's `wasm_*` variables are both read from it, and
-/// their values are the menu's [`Extras`].
-pub const WEB_EXTRAS: [WebExtra; 4] = [
-    WebExtra {
-        extra: Extra::Uncapped,
+/// The settings page's rows, in order: the profile, then each departure the
+/// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
+pub const SETTING_ROWS: [SettingRow; 12] = [
+    SettingRow {
+        cvar: "profile",
+        label: "               Profile",
+        help: ["classic: id's Quake, every row", "off; 2026: the rows as shown"],
+        kind: RowKind::Profile,
+    },
+    SettingRow {
         cvar: "wasm_uncapped",
         label: "    Uncapped framerate",
         help: ["One frame every display refresh,", "past Quake's 72 fps cap"],
-        summary: "no 72 fps cap",
+        kind: RowKind::Toggle,
     },
-    WebExtra {
-        extra: Extra::ShowFps,
+    SettingRow {
+        cvar: "vid_native",
+        label: "     Native resolution",
+        help: ["Fill the window at its shape and", "your screen's pixels, not 4:3"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "vid_pixelsize",
+        label: "            Pixel size",
+        help: ["Screen pixels per game pixel;", "auto keeps the frame fast"],
+        kind: RowKind::PixelSize,
+    },
+    SettingRow {
+        cvar: "fov_adapt",
+        label: "        Widescreen FOV",
+        help: ["A wide screen sees more at the", "sides, not less above and below"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "wasm_scaled2d",
+        label: "      Scaled 2-D layer",
+        help: ["Status bar, menus and text at", "id's proportions, whole pixels"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "crosshair",
+        label: "             Crosshair",
+        help: ["id's own crosshair, a + at", "the centre of the view"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "freelook",
+        label: "            Mouse look",
+        help: ["The mouse looks around without", "holding +mlook (\\ or MOUSE3)"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "cl_jumpswim",
+        label: "        Space swims up",
+        help: ["Jump swims up in water faster", "than Quake's own swim stroke"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "vid_fkey",
+        label: "      F for fullscreen",
+        help: ["The F key toggles fullscreen;", "id's Quake leaves F unbound"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
         cvar: "wasm_showfps",
         label: "              Show FPS",
         help: ["Frames per second, bottom right,", "as QuakeWorld's show_fps drew it"],
-        summary: "frame rate",
+        kind: RowKind::Toggle,
     },
-    WebExtra {
-        extra: Extra::ExactPersp,
+    SettingRow {
         cvar: "wasm_exactpersp",
         label: "     Exact perspective",
         help: ["Perspective exact at each pixel,", "not id's 16-pixel spans"],
-        summary: "exact persp.",
-    },
-    WebExtra {
-        extra: Extra::Scaled2d,
-        cvar: "wasm_scaled2d",
-        label: "      Scaled 2-D layer",
-        help: ["Status bar, menus and text blown", "up from 320x200 to full screen"],
-        summary: "scaled 2-D layer",
+        kind: RowKind::Toggle,
     },
 ];
+
+impl SettingRow {
+    /// The value it shows at x=220.
+    pub fn value(&self, s: &Settings) -> String {
+        match self.kind {
+            RowKind::Profile => s.profile.name().to_string(),
+            RowKind::PixelSize => match s.cvars.pixel_size {
+                0 => "auto".to_string(),
+                n => n.to_string(),
+            },
+            RowKind::Toggle => {
+                let on = cvar::find(self.cvar).is_some_and(|c| c.get(&s.cvars) != "0");
+                checkbox_text(on).to_string()
+            }
+        }
+    }
+
+    /// Left (`step` -1) or right (+1) on it, as `M_AdjustSliders` does a
+    /// checkbox: a profile or a toggle flips whatever the direction, the pixel
+    /// size steps (auto, 1, 2, 3, 4, wrapping).
+    pub fn adjust(&self, s: &mut Settings, step: i32) {
+        match self.kind {
+            RowKind::Profile => s.set_profile(s.profile.toggled()),
+            RowKind::PixelSize => {
+                let n = i32::from(PIXEL_SIZE_MAX) + 1;
+                s.cvars.pixel_size = (i32::from(s.cvars.pixel_size) + step).rem_euclid(n) as u8;
+            }
+            RowKind::Toggle => {
+                if let Some(c) = cvar::find(self.cvar) {
+                    let on = c.get(&s.cvars) != "0";
+                    c.set(&mut s.cvars, if on { "0" } else { "1" });
+                }
+            }
+        }
+    }
+
+    /// Its console line, the third help line.
+    pub fn console_hint(&self) -> String {
+        match self.kind {
+            RowKind::Profile => "console: profile classic|2026".to_string(),
+            RowKind::PixelSize => format!("console: {} 0-{PIXEL_SIZE_MAX}", self.cvar),
+            RowKind::Toggle => format!("console: {} 0/1", self.cvar),
+        }
+    }
+}
 
 /// `MULTIPLAYER_ITEMS` (menu.c): the multiplayer menu has 3 entries (Join /
 /// New Game / Setup). Netcode is out of scope for this port, so like the C with
@@ -208,17 +246,12 @@ const MULTIPLAYER_ITEMS: usize = 3;
 const NUM_SETUP_CMDS: usize = 5;
 const SETUP_CURSOR_TABLE: [f32; NUM_SETUP_CMDS] = [40.0, 56.0, 80.0, 104.0, 140.0];
 /// `setup_hostname` / `setup_myname` are `char[16]`: 15 characters.
-const SETUP_NAME_MAX: usize = 15;
+const SETUP_NAME_MAX: usize = crate::cvar::NAME_MAX;
 /// `TOP_RANGE` / `BOTTOM_RANGE` (render.h): the player skin's shirt and pants
 /// colour rows, 16 palette entries each, which `M_BuildTranslationTable`
 /// replaces.
 const TOP_RANGE: usize = 16;
 const BOTTOM_RANGE: usize = 96;
-/// `cl_name`'s default (cl_main.c `_cl_name "player"`).
-const CL_NAME_DEFAULT: &str = "player";
-/// `hostname`'s default (net_main.c `"UNNAMED"`).
-const HOSTNAME_DEFAULT: &str = "UNNAMED";
-
 /// `MAX_SAVEGAMES` (quakedef.h): the Load/Save menus list 12 slots.
 pub const MAX_SAVEGAMES: usize = 12;
 /// The text `M_ScanSaves` (menu.c) puts in every slot without an `sN.sav` file.
@@ -251,51 +284,6 @@ pub const BINDNAMES: [(&str, &str); NUM_BINDNAMES] = [
 /// `NUMCOMMANDS` (menu.c): the bindnames row count.
 pub const NUM_BINDNAMES: usize = 18;
 
-/// Indices into [`BINDNAMES`] for the commands the host actually drives (the
-/// rest are list-only: `+mlook` is permanent under pointer lock and `+klook`
-/// has no effect without keyboard-look pitch — both still draw + rebind
-/// faithfully).
-pub const BIND_ATTACK: usize = 0;
-pub const BIND_CHANGEWEAPON: usize = 1;
-pub const BIND_JUMP: usize = 2;
-pub const BIND_FORWARD: usize = 3;
-pub const BIND_BACK: usize = 4;
-pub const BIND_LEFT: usize = 5;
-pub const BIND_RIGHT: usize = 6;
-pub const BIND_SPEED: usize = 7;
-pub const BIND_MOVELEFT: usize = 8;
-pub const BIND_MOVERIGHT: usize = 9;
-pub const BIND_STRAFE: usize = 10;
-pub const BIND_LOOKUP: usize = 11;
-pub const BIND_LOOKDOWN: usize = 12;
-pub const BIND_CENTERVIEW: usize = 13;
-/// `+mlook` / `+klook`: listed and bindable; mouse look is permanent under
-/// pointer lock here and keyboard look is not modelled, so holding them does
-/// nothing.
-pub const BIND_MLOOK: usize = 14;
-pub const BIND_KLOOK: usize = 15;
-pub const BIND_MOVEUP: usize = 16;
-pub const BIND_MOVEDOWN: usize = 17;
-/// Commands `default.cfg` binds that `M_Keys_Draw` doesn't list: they sit past
-/// the [`BINDNAMES`] rows, so Customize controls never shows them, but a
-/// rebind over their key or `Reset to defaults` treats them like any other
-/// binding. `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
-pub const BIND_SIZEUP: usize = NUM_BINDNAMES;
-pub const BIND_SIZEDOWN: usize = NUM_BINDNAMES + 1;
-/// `bind TAB "+showscores"` (default.cfg): `sb_showscores` while held, so
-/// `Sbar_Draw` shows the scorebar and `Sbar_SoloScoreboard`.
-pub const BIND_SHOWSCORES: usize = NUM_BINDNAMES + 2;
-/// `bind 0 "impulse 0"` .. `bind 8 "impulse 8"` (default.cfg): the command
-/// `"impulse N"` is `BIND_IMPULSE_0 + N` for N in 0..=8 (`"impulse 10"` is the
-/// listed [`BIND_CHANGEWEAPON`] row).
-pub const BIND_IMPULSE_0: usize = NUM_BINDNAMES + 3;
-/// `bind PAUSE "pause"` (default.cfg): `Host_Pause_f`.
-pub const BIND_PAUSE: usize = BIND_IMPULSE_0 + 9;
-/// `` bind ` "toggleconsole" `` and `bind ~ "toggleconsole"` (default.cfg):
-/// `Con_ToggleConsole_f`. A binding like any other, so the console key opens
-/// the console only where `Key_Event` runs bindings — not over the menu.
-pub const BIND_TOGGLECONSOLE: usize = BIND_PAUSE + 1;
-
 /// The video modes the Video Options screen (`M_Video` -> `VID_MenuDraw`) lists,
 /// as `(width, height)` render resolutions — this port's `modelist`. A
 /// consistent 16:10 ladder (each step +160w/+100h) from the fast `320x200` up to
@@ -322,13 +310,11 @@ pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
 const SENS_MIN: f32 = 1.0;
 const SENS_MAX: f32 = 11.0;
 const SENS_STEP: f32 = 0.5;
-const SENS_DEFAULT: f32 = 3.0;
 
 /// `volume` (Sound Volume): 0..=1, step 0.1; slider r = v. Default 0.7.
 const VOLUME_MIN: f32 = 0.0;
 const VOLUME_MAX: f32 = 1.0;
 const VOLUME_STEP: f32 = 0.1;
-const VOLUME_DEFAULT: f32 = 0.7;
 
 /// `v_gamma` (Brightness): 0.5..=1, step 0.05 (RIGHT brightens: the C does
 /// `v_gamma.value -= dir * 0.05`); slider r = (1 - v)/0.5. Default 1.0. LIVE:
@@ -338,17 +324,15 @@ const VOLUME_DEFAULT: f32 = 0.7;
 const GAMMA_MIN: f32 = 0.5;
 const GAMMA_MAX: f32 = 1.0;
 const GAMMA_STEP: f32 = 0.05;
-const GAMMA_DEFAULT: f32 = 1.0;
 
 /// `bgmvolume` (CD Music Volume): 0..=1, step 0.1; slider r = v. Default 1.0.
-/// The slider is live (stores the cvar, exposed via [`Menu::bgm_volume`]).
+/// The slider is live (stores the cvar, [`Cvars::bgmvolume`]).
 /// DEVIATION (scope): there is no CD audio device in this port, so no track
 /// ever plays at this volume — exactly like the C run without a CD, where the
 /// cvar still adjusts (cd_null.c).
 const BGM_MIN: f32 = 0.0;
 const BGM_MAX: f32 = 1.0;
 const BGM_STEP: f32 = 0.1;
-const BGM_DEFAULT: f32 = 1.0;
 
 /// `NUM_HELP_PAGES` (menu.c): the Help/Ordering screen pages through
 /// `gfx/help0.lmp`..`help5.lmp`.
@@ -467,7 +451,7 @@ impl MenuScreen {
             MenuScreen::Options => OPTIONS_ITEMS,
             MenuScreen::Keys => NUM_BINDNAMES,
             MenuScreen::Video => RESOLUTION_PRESETS.len(),
-            MenuScreen::Extras => WEB_EXTRAS.len(),
+            MenuScreen::Extras => SETTING_ROWS.len(),
             MenuScreen::Help | MenuScreen::Quit => 1,
         }
     }
@@ -616,6 +600,9 @@ struct Setup {
 /// and each screen's cursor. A port of menu.c's `m_state` + the
 /// `m_*_cursor` globals, scoped to an instance rather than file-statics.
 ///
+/// The menu edits the host's [`Settings`] (the cvars and key bindings its
+/// screens show) and owns none: the calls that change a setting take them.
+///
 /// The host calls [`open`](Menu::open)/[`close`](Menu::close)/[`toggle`](Menu::toggle)
 /// to show/hide it, [`move_cursor`](Menu::move_cursor) on up/down, and
 /// [`select`](Menu::select)/[`cancel`](Menu::cancel) on Enter/Escape; the returned
@@ -636,37 +623,6 @@ pub struct Menu {
     /// The host keeps it synced to the real framebuffer
     /// ([`sync_resolution`](Menu::sync_resolution)); Enter on the Video list sets it.
     res_preset: usize,
-    /// `viewsize` cvar (`scr_viewsize`), [`VIEWSIZE_MIN`]..=[`VIEWSIZE_MAX`]:
-    /// the host frames the 3-D view with it ([`calc_refdef`](crate::screen::calc_refdef)).
-    viewsize: f32,
-    /// `sensitivity` cvar (Mouse Speed), [`SENS_MIN`]..=[`SENS_MAX`].
-    sensitivity: f32,
-    /// `volume` cvar (Sound Volume), [`VOLUME_MIN`]..=[`VOLUME_MAX`]. The host maps
-    /// it to a 0.0..=1.0 master gain.
-    volume: f32,
-    /// `v_gamma` cvar (Brightness), [`GAMMA_MIN`]..=[`GAMMA_MAX`]. LIVE: the
-    /// host runs the presented frame through [`build_gamma_table`](crate::render::build_gamma_table) with this
-    /// (a byte-exact identity at the default 1.0).
-    gamma: f32,
-    /// `bgmvolume` cvar (CD Music Volume), [`BGM_MIN`]..=[`BGM_MAX`]. Live cvar;
-    /// no CD audio exists to play at it (see the [`BGM_DEFAULT`] DEVIATION note).
-    bgm_volume: f32,
-    /// `cl_forwardspeed > 200` (Always Run). LIVE: the host swaps
-    /// cl_forwardspeed/cl_backspeed 200 <-> 400 on it (M_AdjustSliders case 8).
-    /// DEVIATION: defaults ON in this port (id's default.cfg leaves
-    /// cl_forwardspeed at 200, i.e. off) — nobody wants to walk.
-    always_run: bool,
-    /// `m_pitch < 0` (Invert Mouse). LIVE: the host flips the mouse-pitch sign
-    /// (in_win.c IN_MouseMove: `cl.viewangles[PITCH] += m_pitch.value * mouse_y`).
-    invert_mouse: bool,
-    /// `lookspring` cvar. LIVE: the C re-centres pitch when `+mlook` releases
-    /// (`IN_MLookUp` -> `V_StartPitchDrift`, cl_input.c); this port's mouse-look
-    /// is permanent while the pointer is locked, so the host maps the mlook
-    /// RELEASE onto pointer-unlock (leaving pointer lock re-centres pitch).
-    lookspring: bool,
-    /// `lookstrafe` cvar. LIVE: while mouse-looking (always, under pointer
-    /// lock), mouse X becomes strafe instead of yaw (in_win.c IN_MouseMove).
-    lookstrafe: bool,
     /// The current Help page (`help_page`, `0..NUM_HELP_PAGES`).
     help_page: usize,
     /// Which screen the Quit prompt was raised from, restored on "No"
@@ -683,9 +639,6 @@ pub struct Menu {
     /// The Keys screen is waiting for the next key to bind (`bind_grab`,
     /// `M_Keys_Key`). The host routes raw keys to [`Menu::bind_key`] while set.
     bind_grab: bool,
-    /// `keybindings[256]` (keys.c), as keynum -> [`BINDNAMES`] index. The menu
-    /// owns the table; the host queries [`Menu::action_for_key`] to drive input.
-    bindings: [Option<u8>; 256],
     /// Queued `S_LocalSound`s (menu1/menu2/menu3), drained by
     /// [`Menu::take_sounds`]. Capped at [`MENU_SOUND_CAP`].
     sounds: Vec<MenuSound>,
@@ -708,19 +661,8 @@ pub struct Menu {
     /// Escape (no) answer it; the menu is not drawn, only the faded screen and
     /// the question.
     new_game_confirm: bool,
-    /// The port's opt-in departures (Options > Web extras), all off by
-    /// default. Like the Options cvars they survive navigation resets; unlike
-    /// them no default.cfg line resets them.
-    extras: Extras,
     /// The Setup screen's fields while it is up.
     setup: Setup,
-    /// The `_cl_name` cvar ("player"): the name Setup and the `name` command
-    /// set.
-    cl_name: String,
-    /// The `hostname` cvar ("UNNAMED").
-    hostname: String,
-    /// The `_cl_color` cvar: shirt * 16 + pants, each 0..=13.
-    cl_color: i32,
 }
 
 impl Default for Menu {
@@ -730,41 +672,25 @@ impl Default for Menu {
 }
 
 impl Menu {
-    /// A closed menu sitting on the main screen with the cursor on the first item,
-    /// with the Options cvars at their id defaults — except Always Run, which
-    /// this port defaults ON (see the field's DEVIATION note).
+    /// A closed menu sitting on the main screen with the cursor on the first item.
     pub fn new() -> Menu {
         Menu {
             visible: false,
             screen: MenuScreen::Main,
             cursors: Cursors::default(),
             res_preset: 0,
-            viewsize: VIEWSIZE_DEFAULT,
-            sensitivity: SENS_DEFAULT,
-            volume: VOLUME_DEFAULT,
-            gamma: GAMMA_DEFAULT,
-            bgm_volume: BGM_DEFAULT,
-            always_run: true,
-            invert_mouse: false,
-            lookspring: false,
-            lookstrafe: false,
             help_page: 0,
             quit_prev: MenuScreen::Main,
             quit_in_menus: true,
             quit_msg: 0,
             quit_rand: 1,
             bind_grab: false,
-            bindings: default_bindings(),
             sounds: Vec::new(),
             save_comments: Default::default(),
             game_active: false,
             server_active: false,
             new_game_confirm: false,
-            extras: Extras::default(),
             setup: Setup::default(),
-            cl_name: CL_NAME_DEFAULT.to_string(),
-            hostname: HOSTNAME_DEFAULT.to_string(),
-            cl_color: 0,
         }
     }
 
@@ -895,15 +821,9 @@ impl Menu {
     /// Quit return / bind grab, queued sounds dropped — while KEEPING every
     /// menu's cursor (menu.c's statics: a `map`, New Game, load or demo leaves
     /// them where they were; only a program start has them at 0,
-    /// [`Menu::reset_boot`]) and every user choice: the Options cvars
-    /// (Screen size, gamma, sensitivity, volume, CD volume, Always Run, Invert
-    /// Mouse, lookspring, lookstrafe), the Web extras and the whole key-bindings table. In
-    /// WinQuake a map start / New Game only restarts the server: cvars and
-    /// `keybindings[]` live in host state (persisted by
-    /// `Host_WriteConfiguration`) and are never reset by `map start`
-    /// (`M_SinglePlayer_Key`). The host calls this at every re-boot site that
-    /// used to rebuild the Menu wholesale, so "rebind keys, set Always Run,
-    /// then New Game" keeps the player's setup. The host-mirrored externals —
+    /// [`Menu::reset_boot`]). (The settings are the host's and a menu reset
+    /// cannot touch them: in WinQuake a map start / New Game only restarts
+    /// the server, and cvars and `keybindings[]` live on.) The host-mirrored externals —
     /// Load/Save slot comments (`set_save_comments`) and the game-active gate
     /// (refreshed every `step`) — survive too: they reflect engine state, not
     /// navigation.
@@ -1019,7 +939,7 @@ impl Menu {
     ///   toggle that extra (menu2 + menu3, like an Options checkbox).
     /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
     ///   y/Y answers the prompt, [`Menu::keydown`]).
-    pub fn select(&mut self) -> MenuAction {
+    pub fn select(&mut self, s: &mut Settings) -> MenuAction {
         if self.new_game_confirm {
             return MenuAction::None; // SCR_ModalMessage ignores Enter.
         }
@@ -1123,11 +1043,11 @@ impl Menu {
                 // sound alone; item 2 is M_Menu_Setup_f.
                 self.snd(MenuSound::Menu2);
                 if self.cursor() == 2 {
-                    self.open_setup();
+                    self.open_setup(s);
                 }
                 MenuAction::None
             }
-            MenuScreen::Setup => self.setup_key(K_ENTER, None),
+            MenuScreen::Setup => self.setup_key(K_ENTER, None, s),
             MenuScreen::Options => match self.cursor() {
                 ROW_CONTROLS => {
                     // M_Menu_Keys_f
@@ -1145,8 +1065,8 @@ impl Menu {
                     self.set_cursor(line);
                     MenuAction::None
                 }
-                ROW_EXTRAS => {
-                    // PORT ROW: open the Web extras screen, entered like
+                ROW_PROFILE => {
+                    // PORT ROW: open the settings page, entered like
                     // M_Menu_Video_f (m_entersound), on its own kept cursor.
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Extras;
@@ -1162,7 +1082,7 @@ impl Menu {
                     // Cbuf_AddText("exec default.cfg"): reset every option cvar
                     // (m_entersound plays — the menu stays up).
                     self.snd(MenuSound::Menu2);
-                    self.reset_defaults();
+                    s.reset_defaults();
                     MenuAction::ResetDefaults
                 }
                 // Every other row: Enter latches m_entersound AND falls through
@@ -1170,7 +1090,7 @@ impl Menu {
                 // BOTH. (Screen size is viewsize: the host reads it each frame.)
                 _ => {
                     self.snd(MenuSound::Menu2);
-                    self.adjust(1);
+                    self.adjust(1, s);
                     MenuAction::None
                 }
             },
@@ -1178,25 +1098,29 @@ impl Menu {
                 // M_Keys_Key K_ENTER: menu2; unbind first when the row already
                 // shows two keys, then grab the next key.
                 self.snd(MenuSound::Menu2);
-                let keys = self.find_keys_for_command(self.cursor());
+                let keys = s.binds.find_keys_for_command(self.cursor());
                 if keys[1].is_some() {
-                    self.unbind_command(self.cursor());
+                    s.binds.unbind_command(self.cursor());
                 }
                 self.bind_grab = true;
                 MenuAction::None
             }
             MenuScreen::Video => {
                 // VID_MenuKey K_ENTER: menu1 (NOT menu2) + VID_SetMode on the
-                // highlighted mode line.
+                // highlighted mode line. A mode is a size in the 4:3 box, so
+                // picking one leaves native resolution (`vid_native 0`).
                 self.snd(MenuSound::Menu1);
                 self.res_preset = self.cursor().min(RESOLUTION_PRESETS.len() - 1);
+                let (w, h) = RESOLUTION_PRESETS[self.res_preset];
+                s.cvars.vid_resolution = (w as u16, h as u16);
+                s.cvars.native = false;
                 MenuAction::ResolutionChanged
             }
             MenuScreen::Extras => {
                 // As an Options checkbox row: Enter latches m_entersound and
                 // falls through to the toggle (its own menu3).
                 self.snd(MenuSound::Menu2);
-                self.adjust(1);
+                self.adjust(1, s);
                 MenuAction::None
             }
             // M_Help_Key ignores Enter; so does M_Quit_Key, where only y/Y
@@ -1220,16 +1144,16 @@ impl Menu {
     /// Quit prompt answers only y/Y (quit) and n/N/Escape (back); every other
     /// key is ignored. (New Game's "Are you sure?" is `SCR_ModalMessage`,
     /// which takes the keys before `Key_Event` routes them: [`Menu::modal_key`].)
-    pub fn keydown(&mut self, key: u8, text: Option<u8>) -> MenuAction {
+    pub fn keydown(&mut self, key: u8, text: Option<u8>, s: &mut Settings) -> MenuAction {
         if !self.visible {
             return MenuAction::None; // m_none
         }
         if self.screen == MenuScreen::Keys && self.bind_grab {
-            self.bind_key(key);
+            self.bind_key(key, s);
             return MenuAction::None;
         }
         if self.screen == MenuScreen::Setup {
-            return self.setup_key(key, text);
+            return self.setup_key(key, text, s);
         }
         if self.screen == MenuScreen::Quit {
             return match key {
@@ -1249,16 +1173,16 @@ impl Menu {
                 MenuAction::None
             }
             K_LEFTARROW => {
-                self.adjust(-1);
+                self.adjust(-1, s);
                 MenuAction::None
             }
             K_RIGHTARROW => {
-                self.adjust(1);
+                self.adjust(1, s);
                 MenuAction::None
             }
-            K_ENTER => self.select(),
+            K_ENTER => self.select(s),
             K_BACKSPACE | K_DEL => {
-                self.keys_backspace();
+                self.keys_backspace(s);
                 MenuAction::None
             }
             _ => MenuAction::None,
@@ -1267,11 +1191,11 @@ impl Menu {
 
     /// `M_Menu_Setup_f` (menu.c): the Setup screen, its fields filled from
     /// the cvars (`_cl_name`, `hostname`, `_cl_color`), on its kept cursor.
-    fn open_setup(&mut self) {
-        let (top, bottom) = (self.cl_color >> 4, self.cl_color & 15);
+    fn open_setup(&mut self, s: &Settings) {
+        let (top, bottom) = (s.cvars.cl_color >> 4, s.cvars.cl_color & 15);
         self.setup = Setup {
-            hostname: self.hostname.clone(),
-            myname: self.cl_name.clone(),
+            hostname: s.cvars.hostname.clone(),
+            myname: s.cvars.cl_name.clone(),
             top,
             bottom,
             oldtop: top,
@@ -1287,7 +1211,7 @@ impl Menu {
     /// — and returns to Multiplayer; Backspace takes a character off the
     /// host name or the player's name, and a printable key (`text`) types
     /// one, up to 15.
-    fn setup_key(&mut self, key: u8, text: Option<u8>) -> MenuAction {
+    fn setup_key(&mut self, key: u8, text: Option<u8>, s: &mut Settings) -> MenuAction {
         let row = self.cursor();
         let step_colour = |m: &mut Menu, d: i32| {
             m.snd(MenuSound::Menu3);
@@ -1313,10 +1237,10 @@ impl Menu {
             K_ENTER => {
                 // setup_cursor == 4 (OK): `name "..."`, `hostname`, `color t b`
                 // for what changed; m_entersound; M_Menu_MultiPlayer_f.
-                self.set_name(&self.setup.myname.clone());
-                self.hostname = self.setup.hostname.clone();
+                s.cvars.set_name(&self.setup.myname);
+                s.cvars.hostname = self.setup.hostname.clone();
                 if self.setup.top != self.setup.oldtop || self.setup.bottom != self.setup.oldbottom {
-                    self.set_color(self.setup.top, self.setup.bottom);
+                    s.cvars.set_color(self.setup.top, self.setup.bottom);
                 }
                 self.snd(MenuSound::Menu2);
                 self.screen = MenuScreen::Multiplayer;
@@ -1349,44 +1273,6 @@ impl Menu {
         self.setup.top = wrap(self.setup.top);
         self.setup.bottom = wrap(self.setup.bottom);
         MenuAction::None
-    }
-
-    /// The `_cl_name` cvar: the player's name.
-    pub fn name(&self) -> &str {
-        &self.cl_name
-    }
-
-    /// `Host_Name_f`'s client half (`Cvar_Set ("_cl_name", newName)`): the
-    /// name, cut to 15 characters (`newName[15] = 0`).
-    pub fn set_name(&mut self, name: &str) {
-        self.cl_name = name.chars().take(SETUP_NAME_MAX).collect();
-    }
-
-    /// The `hostname` cvar.
-    pub fn hostname(&self) -> &str {
-        &self.hostname
-    }
-
-    /// Set the `hostname` cvar (`Cvar_Set`).
-    pub fn set_hostname(&mut self, name: &str) {
-        self.hostname = name.to_string();
-    }
-
-    /// The `_cl_color` cvar: shirt * 16 + pants.
-    pub fn color(&self) -> i32 {
-        self.cl_color
-    }
-
-    /// `Host_Color_f`'s client half: each colour `& 15`, at most 13, then
-    /// `_cl_color = top*16 + bottom`.
-    pub fn set_color(&mut self, top: i32, bottom: i32) {
-        let clamp = |c: i32| (c & 15).min(13);
-        self.cl_color = clamp(top) * 16 + clamp(bottom);
-    }
-
-    /// Set the `_cl_color` cvar's value as it is (`Cvar_Set`, no clamp).
-    pub fn set_color_value(&mut self, v: i32) {
-        self.cl_color = v;
     }
 
     /// `SCR_ModalMessage`'s key loop, New Game's "Are you sure?": while it is
@@ -1440,7 +1326,12 @@ impl Menu {
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
-            MenuScreen::Setup => self.setup_key(K_ESCAPE, None),
+            MenuScreen::Setup => {
+                // M_Setup_Key K_ESCAPE -> M_Menu_MultiPlayer_f (m_entersound).
+                self.screen = MenuScreen::Multiplayer;
+                self.snd(MenuSound::Menu2);
+                MenuAction::Back
+            }
             MenuScreen::Load | MenuScreen::Save => {
                 // M_Load_Key / M_Save_Key K_ESCAPE -> M_Menu_SinglePlayer_f.
                 self.screen = MenuScreen::SinglePlayer;
@@ -1568,7 +1459,7 @@ impl Menu {
     /// pair LEFT with UP and RIGHT with DOWN; `VID_MenuKey` steps the mode line)
     /// and Help paging. Nothing here changes the video mode: that is Enter on
     /// the Video Options list ([`MenuAction::ResolutionChanged`]).
-    pub fn adjust(&mut self, delta: i32) {
+    pub fn adjust(&mut self, delta: i32, s: &mut Settings) {
         let step = delta.signum();
         if step == 0 {
             return;
@@ -1590,16 +1481,15 @@ impl Menu {
             return;
         }
         if self.screen == MenuScreen::Setup {
-            let _ = self.setup_key(if step < 0 { K_LEFTARROW } else { K_RIGHTARROW }, None);
+            let _ = self.setup_key(if step < 0 { K_LEFTARROW } else { K_RIGHTARROW }, None, s);
             return;
         }
-        // The Extras rows are checkboxes: menu3, then flip regardless of the
-        // direction, like M_AdjustSliders' checkbox cases.
+        // The settings page's rows: menu3, then each row's own change (a
+        // checkbox flips regardless of the direction, like M_AdjustSliders').
         if self.screen == MenuScreen::Extras {
             self.snd(MenuSound::Menu3);
-            if let Some(e) = WEB_EXTRAS.get(self.cursor()).map(|w| w.extra) {
-                let on = self.extras.get(e);
-                self.extras.set(e, !on);
+            if let Some(row) = SETTING_ROWS.get(self.cursor()) {
+                row.adjust(s, step);
             }
             return;
         }
@@ -1610,60 +1500,49 @@ impl Menu {
         // cursor sits on an action row the switch below ignores.
         self.snd(MenuSound::Menu3);
         let d = step as f32;
+        let c = &mut s.cvars;
         match self.cursor() {
             ROW_SCREENSIZE => {
                 // scr_viewsize.value += dir * 10, clamped 30..=120.
-                self.viewsize =
-                    (self.viewsize + d * VIEWSIZE_STEP).clamp(VIEWSIZE_MIN, VIEWSIZE_MAX);
+                c.viewsize = (c.viewsize + d * VIEWSIZE_STEP).clamp(VIEWSIZE_MIN, VIEWSIZE_MAX);
             }
             ROW_BRIGHTNESS => {
                 // v_gamma.value -= dir * 0.05 (LEFT brightens), clamp 0.5..=1.
-                self.gamma = (self.gamma - d * GAMMA_STEP).clamp(GAMMA_MIN, GAMMA_MAX);
+                c.gamma = (c.gamma - d * GAMMA_STEP).clamp(GAMMA_MIN, GAMMA_MAX);
             }
             ROW_MOUSESPEED => {
-                self.sensitivity =
-                    (self.sensitivity + d * SENS_STEP).clamp(SENS_MIN, SENS_MAX);
+                c.sensitivity = (c.sensitivity + d * SENS_STEP).clamp(SENS_MIN, SENS_MAX);
             }
             ROW_CDVOLUME => {
-                self.bgm_volume = (self.bgm_volume + d * BGM_STEP).clamp(BGM_MIN, BGM_MAX);
+                c.bgmvolume = (c.bgmvolume + d * BGM_STEP).clamp(BGM_MIN, BGM_MAX);
             }
             ROW_SNDVOLUME => {
-                self.volume = (self.volume + d * VOLUME_STEP).clamp(VOLUME_MIN, VOLUME_MAX);
+                c.volume = (c.volume + d * VOLUME_STEP).clamp(VOLUME_MIN, VOLUME_MAX);
             }
             // Checkboxes ignore the direction and simply toggle (matches the C,
             // which flips the bool regardless of `dir`).
-            ROW_ALWAYSRUN => self.always_run = !self.always_run,
-            ROW_INVERTMOUSE => self.invert_mouse = !self.invert_mouse,
-            ROW_LOOKSPRING => self.lookspring = !self.lookspring,
-            ROW_LOOKSTRAFE => self.lookstrafe = !self.lookstrafe,
+            ROW_ALWAYSRUN => {
+                let on = c.always_run();
+                c.set_always_run(!on);
+            }
+            ROW_INVERTMOUSE => {
+                let on = c.invert_mouse();
+                c.set_invert_mouse(!on);
+            }
+            ROW_LOOKSPRING => c.lookspring = !c.lookspring,
+            ROW_LOOKSTRAFE => c.lookstrafe = !c.lookstrafe,
+            // PORT ROW: the profile flips, whatever the direction.
+            ROW_PROFILE => s.set_profile(s.profile.toggled()),
             // Action rows (Customize / Console / Defaults / Video): not adjustable.
             _ => {}
         }
     }
 
-    /// "Reset to defaults" = `exec default.cfg`, and exactly what that file
-    /// sets: `unbindall` + its `bind` lines (the key table), and the four
-    /// "default cvars" at its end — `viewsize 100`, `gamma 1.0`, `volume 0.7`,
-    /// `sensitivity 3`. Nothing else: CD Music Volume, Always Run
-    /// (`cl_forwardspeed`), Invert Mouse (`m_pitch`), Lookspring and
-    /// Lookstrafe keep their values, as in WinQuake, and so do the video mode and
-    /// the port's Web extras.
-    pub fn reset_defaults(&mut self) {
-        self.viewsize = VIEWSIZE_DEFAULT;
-        self.gamma = GAMMA_DEFAULT;
-        self.volume = VOLUME_DEFAULT;
-        self.sensitivity = SENS_DEFAULT;
-        self.bindings = default_bindings();
-    }
-
-    /// The current video mode `(width, height)` ([`RESOLUTION_PRESETS`] entry
-    /// `res_preset`; `320x200` until the host syncs it). Enter on the Video
-    /// Options list changes it and the host resizes its framebuffer to it.
+    /// The video mode the Video Options list marks current
+    /// ([`RESOLUTION_PRESETS`] entry `res_preset`; `320x200` until the host
+    /// syncs it, [`Menu::sync_resolution`]).
     pub fn resolution(&self) -> (i32, i32) {
-        RESOLUTION_PRESETS
-            .get(self.res_preset)
-            .copied()
-            .unwrap_or(RESOLUTION_PRESETS[0])
+        RESOLUTION_PRESETS.get(self.res_preset).copied().unwrap_or(RESOLUTION_PRESETS[0])
     }
 
     /// Point the Video Options "current mode" at the preset matching `(w, h)`, if
@@ -1675,103 +1554,6 @@ impl Menu {
         if let Some(i) = RESOLUTION_PRESETS.iter().position(|&(pw, ph)| pw == w && ph == h) {
             self.res_preset = i;
         }
-    }
-
-    /// The `viewsize` cvar (`scr_viewsize`, 30..=120, default 100): the host
-    /// sizes the 3-D view and the status bar from it via [`calc_refdef`](crate::screen::calc_refdef).
-    pub fn viewsize(&self) -> f32 {
-        self.viewsize
-    }
-
-    /// Set the `viewsize` cvar (the console's `viewsize <n>`), bounded to
-    /// 30..=120 as SCR_CalcRefdef bounds it (and writes back) on the next frame.
-    /// A non-number reads as 0 (`atof`), i.e. the minimum.
-    pub fn set_viewsize(&mut self, v: f32) {
-        let v = if v.is_finite() { v } else { 0.0 };
-        self.viewsize = v.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX);
-    }
-
-    /// `sizeup` (SCR_SizeUp_f): `viewsize += 10` (bounded as above). Bound to
-    /// `+` and `=` in default.cfg.
-    pub fn size_up(&mut self) {
-        self.set_viewsize(self.viewsize + VIEWSIZE_STEP);
-    }
-
-    /// `sizedown` (SCR_SizeDown_f): `viewsize -= 10` (bounded as above). Bound
-    /// to `-` in default.cfg.
-    pub fn size_down(&mut self) {
-        self.set_viewsize(self.viewsize - VIEWSIZE_STEP);
-    }
-
-    /// The Options "Mouse Speed" as a sensitivity multiplier the host applies to
-    /// its baseline look sensitivity. id's `sensitivity` defaults to 3, so we
-    /// normalise by [`SENS_DEFAULT`]: the out-of-the-box feel is unchanged (1.0x),
-    /// and the 1..=11 range maps to a `0.33..=3.67` multiplier.
-    pub fn mouse_sensitivity(&self) -> f32 {
-        self.sensitivity / SENS_DEFAULT
-    }
-
-    /// The Options "Sound Volume" as a `0.0..=1.0` master gain (the `volume` cvar
-    /// directly). Default 0.7.
-    pub fn volume(&self) -> f32 {
-        self.volume
-    }
-
-    /// The raw `sensitivity` cvar value (1..=11), for display/tests.
-    pub fn sensitivity(&self) -> f32 {
-        self.sensitivity
-    }
-
-    /// The `v_gamma` cvar (Brightness, 0.5..=1). The host runs the presented
-    /// frame through [`build_gamma_table`](crate::render::build_gamma_table) with this (identity at 1.0).
-    pub fn gamma(&self) -> f32 {
-        self.gamma
-    }
-
-    /// The `bgmvolume` cvar (CD Music Volume, 0..=1). Live cvar; no CD audio
-    /// exists to play at it (see the [`BGM_DEFAULT`] DEVIATION note).
-    pub fn bgm_volume(&self) -> f32 {
-        self.bgm_volume
-    }
-
-    /// Whether the "Always Run" checkbox is on (`cl_forwardspeed > 200`): the
-    /// host swaps cl_forwardspeed/cl_backspeed 200 <-> 400 on it.
-    pub fn always_run(&self) -> bool {
-        self.always_run
-    }
-
-    /// Whether the "Invert Mouse" checkbox is on (`m_pitch < 0`): the host
-    /// flips the mouse-pitch sign.
-    pub fn invert_mouse(&self) -> bool {
-        self.invert_mouse
-    }
-
-    /// Whether the "Lookspring" checkbox is on: pitch re-centres when mouse-look
-    /// disengages (pointer unlock in this port — see the field note).
-    pub fn lookspring(&self) -> bool {
-        self.lookspring
-    }
-
-    /// Whether the "Lookstrafe" checkbox is on: mouse X strafes instead of
-    /// turning while mouse-looking.
-    pub fn lookstrafe(&self) -> bool {
-        self.lookstrafe
-    }
-
-    /// The port's opt-in extras (Options > Web extras), all off by default.
-    pub fn extras(&self) -> Extras {
-        self.extras
-    }
-
-    /// Replace the extras wholesale (the page restoring its saved choice).
-    /// Exact perspective stays off in a build without it.
-    pub fn set_extras(&mut self, extras: Extras) {
-        self.extras = Extras::from_bits(extras.bits());
-    }
-
-    /// Switch one extra (its `wasm_*` console command).
-    pub fn set_extra(&mut self, e: Extra, on: bool) {
-        self.extras.set(e, on);
     }
 
     // --- key bindings (M_Keys_*, keys.c) -----------------------------------
@@ -1787,14 +1569,13 @@ impl Menu {
     /// menu1; Escape cancels and the console key (backtick) is refused; any
     /// other key binds to the highlighted command. Either way the grab ends.
     /// A no-op when not grabbing.
-    pub fn bind_key(&mut self, keynum: u8) {
+    pub fn bind_key(&mut self, keynum: u8, s: &mut Settings) {
         if !self.bind_grab {
             return;
         }
         self.snd(MenuSound::Menu1);
         if keynum != K_ESCAPE && keynum != b'`' {
-            let cmd = self.cursor().min(NUM_BINDNAMES - 1);
-            self.bindings[keynum as usize] = Some(cmd as u8);
+            s.binds.bind(keynum, self.cursor().min(NUM_BINDNAMES - 1));
         }
         self.bind_grab = false;
     }
@@ -1803,46 +1584,14 @@ impl Menu {
     /// menu2 and unbinds every key bound to the highlighted command. A no-op on
     /// any other screen (and while grabbing — the C's grab branch consumes the
     /// key as a BINDING first; the host routes it to [`bind_key`](Menu::bind_key)).
-    pub fn keys_backspace(&mut self) {
+    pub fn keys_backspace(&mut self, s: &mut Settings) {
         if self.screen != MenuScreen::Keys || self.bind_grab {
             return;
         }
         self.snd(MenuSound::Menu2);
-        self.unbind_command(self.cursor().min(NUM_BINDNAMES - 1));
+        s.binds.unbind_command(self.cursor().min(NUM_BINDNAMES - 1));
     }
 
-    /// The [`BINDNAMES`] command index bound to `keynum`, if any — the host's
-    /// per-keypress lookup (the inverse of the C consulting `keybindings[key]`
-    /// in `Key_Event`).
-    pub fn action_for_key(&self, keynum: u8) -> Option<usize> {
-        self.bindings[keynum as usize].map(|c| c as usize)
-    }
-
-    /// `M_FindKeysForCommand` (menu.c): the first two keys bound to `cmd`, in
-    /// keynum order (the C scans 0..256 ascending).
-    pub fn find_keys_for_command(&self, cmd: usize) -> [Option<u8>; 2] {
-        let mut out = [None; 2];
-        let mut n = 0;
-        for (k, b) in self.bindings.iter().enumerate() {
-            if *b == Some(cmd as u8) {
-                out[n] = Some(k as u8);
-                n += 1;
-                if n == 2 {
-                    break;
-                }
-            }
-        }
-        out
-    }
-
-    /// `M_UnbindCommand` (menu.c): clear every key bound to `cmd`.
-    pub fn unbind_command(&mut self, cmd: usize) {
-        for b in self.bindings.iter_mut() {
-            if *b == Some(cmd as u8) {
-                *b = None;
-            }
-        }
-    }
 }
 
 /// The slider knob's virtual-x offset, in pixels, from the trough's drawing
@@ -2019,16 +1768,26 @@ fn draw_slider(
 /// the menu art still renders the rest without panicking. `conchars` draws the
 /// text screens (Options, Keys, Load/Save, Quit); the Main and Single Player
 /// items come from the `mainmenu`/`sp_menu` graphics, exactly as in Quake.
+/// The values the screens show come from `settings`.
 pub fn draw_menu(
     image: &mut Image,
     menu: &Menu,
+    settings: &Settings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
-    host_time: f32,
-    realtime: f64,
+    clock: MenuClock,
     palette: &[[u8; 3]; 256],
 ) {
-    draw_menu_inner(image, menu, pics, conchars, host_time, realtime, palette, true);
+    draw_menu_inner(image, menu, settings, pics, conchars, clock, palette, true);
+}
+
+/// The menu's two clocks, host.c's doubles: `host_time` (the clamped frame
+/// times added up) turns the spinning dot, `realtime` (the wall clock) flashes
+/// the cursors.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MenuClock {
+    pub host_time: f64,
+    pub realtime: f64,
 }
 
 /// `M_Draw` while the console is out (`scr_con_current`, as when it is
@@ -2039,18 +1798,18 @@ pub fn draw_menu(
 pub fn draw_menu_over_console(
     image: &mut Image,
     menu: &Menu,
+    settings: &Settings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     conback: Option<&crate::wad::Qpic>,
-    host_time: f32,
-    realtime: f64,
+    clock: MenuClock,
     palette: &[[u8; 3]; 256],
 ) {
     if !menu.visible {
         return;
     }
     crate::console::draw_console_background_full(image, conback, conchars, palette);
-    draw_menu_inner(image, menu, pics, conchars, host_time, realtime, palette, false);
+    draw_menu_inner(image, menu, settings, pics, conchars, clock, palette, false);
 }
 
 /// [`draw_menu`], with `fade` false for `M_Draw`'s `m_recursiveDraw` (the
@@ -2060,13 +1819,14 @@ pub fn draw_menu_over_console(
 fn draw_menu_inner(
     image: &mut Image,
     menu: &Menu,
+    settings: &Settings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
-    host_time: f32,
-    realtime: f64,
+    clock: MenuClock,
     palette: &[[u8; 3]; 256],
     fade: bool,
 ) {
+    let (host_time, realtime) = (clock.host_time, clock.realtime);
     if !menu.visible || image.w == 0 || image.h == 0 {
         return;
     }
@@ -2120,7 +1880,7 @@ fn draw_menu_inner(
             if menu.quit_in_menus && menu.quit_prev != MenuScreen::Quit {
                 let mut under = menu.clone();
                 under.screen = menu.quit_prev;
-                draw_menu_inner(image, &under, pics, conchars, host_time, realtime, palette, false);
+                draw_menu_inner(image, &under, settings, pics, conchars, clock, palette, false);
             }
             draw_quit_screen(image, menu, pics, conchars, scale, ox, oy, palette);
             return;
@@ -2130,7 +1890,7 @@ fn draw_menu_inner(
             return;
         }
         MenuScreen::Keys => {
-            draw_keys_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+            draw_keys_screen(image, menu, &settings.binds, pics, conchars, scale, ox, oy, cursor, palette);
             return;
         }
         MenuScreen::Video => {
@@ -2150,12 +1910,12 @@ fn draw_menu_inner(
     // the Main / SinglePlayer screens use their pre-baked list graphic. Branch the
     // whole body so each screen draws its own title + rows.
     if menu.screen == MenuScreen::Options {
-        draw_options_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+        draw_options_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor, palette);
         return;
     }
     // The port's Web extras page: a page of Options (same plaque + title).
     if menu.screen == MenuScreen::Extras {
-        draw_extras_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+        draw_extras_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor, palette);
         return;
     }
 
@@ -2226,7 +1986,7 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
     "            Lookspring",
     "            Lookstrafe",
     "         Video Options",
-    "            Web extras",
+    "        Classic / 2026",
 ];
 
 /// Draw the Options submenu, a faithful port of `M_Options_Draw`: the `p_option`
@@ -2243,6 +2003,7 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
 fn draw_options_screen(
     image: &mut Image,
     menu: &Menu,
+    settings: &Settings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     scale: f32,
@@ -2268,31 +2029,35 @@ fn draw_options_screen(
         // cvar's [0,1] fraction.
         let slider_row = |row: usize| OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
         // Screen size: r = (scr_viewsize - 30) / (120 - 30).
-        let size_frac = (menu.viewsize() - VIEWSIZE_MIN) / (VIEWSIZE_MAX - VIEWSIZE_MIN);
+        let c = &settings.cvars;
+        let size_frac = (c.viewsize - VIEWSIZE_MIN) / (VIEWSIZE_MAX - VIEWSIZE_MIN);
         draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SCREENSIZE), size_frac, scale, ox, oy, palette);
         // Brightness: r = (1 - gamma)/0.5.
-        let bright_frac = (1.0 - menu.gamma()) / (GAMMA_MAX - GAMMA_MIN);
+        let bright_frac = (1.0 - c.gamma) / (GAMMA_MAX - GAMMA_MIN);
         draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_BRIGHTNESS), bright_frac, scale, ox, oy, palette);
         // Mouse Speed: r = (sensitivity - 1)/10.
-        let mouse_frac = (menu.sensitivity() - SENS_MIN) / (SENS_MAX - SENS_MIN);
+        let mouse_frac = (c.sensitivity - SENS_MIN) / (SENS_MAX - SENS_MIN);
         draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_MOUSESPEED), mouse_frac, scale, ox, oy, palette);
         // CD Music Volume: r = bgmvolume.
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_CDVOLUME), menu.bgm_volume(), scale, ox, oy, palette);
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_CDVOLUME), c.bgmvolume, scale, ox, oy, palette);
         // Sound Volume: r = volume.
-        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SNDVOLUME), menu.volume(), scale, ox, oy, palette);
+        draw_slider(image, cc, OPTIONS_WIDGET_X, slider_row(ROW_SNDVOLUME), c.volume, scale, ox, oy, palette);
 
         // The checkbox rows (M_DrawCheckbox -> "on"/"off").
         let checks = [
-            (ROW_ALWAYSRUN, menu.always_run()),
-            (ROW_INVERTMOUSE, menu.invert_mouse()),
-            (ROW_LOOKSPRING, menu.lookspring()),
-            (ROW_LOOKSTRAFE, menu.lookstrafe()),
+            (ROW_ALWAYSRUN, c.always_run()),
+            (ROW_INVERTMOUSE, c.invert_mouse()),
+            (ROW_LOOKSPRING, c.lookspring),
+            (ROW_LOOKSTRAFE, c.lookstrafe),
         ];
         for (row, on) in checks {
             let ry = OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
             // M_DrawCheckbox: M_Print (x, y, "on" / "off").
             m_print(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy, palette);
         }
+        // PORT ROW: the profile, printed as a checkbox's value is.
+        let ry = OPTIONS_ROW_Y0 + ROW_PROFILE as f32 * OPTIONS_ROW_STEP;
+        m_print(image, cc, OPTIONS_WIDGET_X, ry, settings.profile.name(), scale, ox, oy, palette);
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
         let cy = OPTIONS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
@@ -2300,31 +2065,32 @@ fn draw_options_screen(
     }
 }
 
-/// The Extras screen's layout is `M_Options_Draw`'s: the rows from y=32, 8
-/// px apart (as Options' first rows), the labels at x=16, the checkboxes at
-/// x=220, the cursor at x=200. Under them, right of the plaque (`qplaque` is
-/// 32 wide at x=16), the notes: from x=[`EXTRAS_NOTE_X`], the white
-/// [`EXTRAS_HEADER`] at y=[`EXTRAS_HEADER_Y`] and the highlighted row's help
-/// lines from y=[`EXTRAS_HELP_Y`], at most [`EXTRAS_NOTE_COLS`] columns.
+/// The settings page's layout is `M_Options_Draw`'s: the rows from y=32, 8
+/// px apart, the labels at x=16, the values at x=220, the cursor at x=200.
+/// Under them the notes, from x=[`EXTRAS_NOTE_X`] (right of the plaque,
+/// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
+/// the list and the highlighted row's help lines under it, at most
+/// [`EXTRAS_NOTE_COLS`] columns.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 const EXTRAS_NOTE_X: f32 = 64.0;
 const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
-const EXTRAS_HEADER_Y: f32 = 80.0;
-const EXTRAS_HELP_Y: f32 = 96.0;
-/// The Extras header (`M_PrintWhite`): what these rows are.
+const EXTRAS_HEADER_Y: f32 = EXTRAS_ROW_Y0 + (SETTING_ROWS.len() + 1) as f32 * OPTIONS_ROW_STEP;
+const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + 2.0 * OPTIONS_ROW_STEP;
+/// The page's header (`M_PrintWhite`): what these rows are.
 const EXTRAS_HEADER: &str = "Not in id's Quake";
 
-/// Draw the port's Web extras screen as `M_Options_Draw` draws Options:
-/// qplaque (drawn by the caller) and the `p_option` title (it is a page of
-/// Options), each extra an Options checkbox row — the right-justified
-/// `M_Print` label at x=16, `M_DrawCheckbox`'s "on" / "off" at x=220, the
-/// 4 Hz flashing cursor at x=200 — and, under the rows and clear of the
-/// plaque, the [`EXTRAS_HEADER`] in white and the highlighted row's three
-/// bronze help lines.
+/// Draw the settings page as `M_Options_Draw` draws Options: qplaque (drawn
+/// by the caller) and the `p_option` title (it is a page of Options), each
+/// [`SETTING_ROWS`] row an Options row — the right-justified `M_Print` label
+/// at x=16, its value at x=220 (`M_DrawCheckbox`'s "on" / "off" for a
+/// toggle), the 4 Hz flashing cursor at x=200 — and under the rows the
+/// [`EXTRAS_HEADER`] in white and the highlighted row's three bronze help
+/// lines.
 #[allow(clippy::too_many_arguments)]
 fn draw_extras_screen(
     image: &mut Image,
     menu: &Menu,
+    settings: &Settings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     scale: f32,
@@ -2338,16 +2104,15 @@ fn draw_extras_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
     }
     let Some(cc) = conchars else { return };
-    for (i, row) in WEB_EXTRAS.iter().enumerate() {
+    for (i, row) in SETTING_ROWS.iter().enumerate() {
         let y = EXTRAS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
         m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy, palette);
-        let on = checkbox_text(menu.extras.get(row.extra));
-        m_print(image, cc, OPTIONS_WIDGET_X, y, on, scale, ox, oy, palette);
+        m_print(image, cc, OPTIONS_WIDGET_X, y, &row.value(settings), scale, ox, oy, palette);
     }
     let cy = EXTRAS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
     draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette);
-    if let Some(row) = WEB_EXTRAS.get(menu.cursor()) {
+    if let Some(row) = SETTING_ROWS.get(menu.cursor()) {
         for (i, line) in extras_help_lines(row).iter().enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
             let line = &line[..line.len().min(EXTRAS_NOTE_COLS)];
@@ -2356,10 +2121,10 @@ fn draw_extras_screen(
     }
 }
 
-/// The three help lines under the Extras list for `row`: its two, then its
-/// console variable.
-fn extras_help_lines(row: &WebExtra) -> [String; 3] {
-    [row.help[0].to_string(), row.help[1].to_string(), format!("console: {} 0/1", row.cvar)]
+/// The three help lines under the settings page's list for `row`: its two,
+/// then its console line.
+fn extras_help_lines(row: &SettingRow) -> [String; 3] {
+    [row.help[0].to_string(), row.help[1].to_string(), row.console_hint()]
 }
 
 /// Draw the Load or Save slot list, a port of `M_Load_Draw` / `M_Save_Draw`:
@@ -2531,6 +2296,7 @@ fn draw_setup_screen(
 fn draw_keys_screen(
     image: &mut Image,
     menu: &Menu,
+    binds: &crate::keys::Bindings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     scale: f32,
@@ -2558,7 +2324,7 @@ fn draw_keys_screen(
     for (i, (_, label)) in BINDNAMES.iter().enumerate() {
         let y = 48.0 + 8.0 * i as f32;
         m_print(image, cc, 16.0, y, label, scale, ox, oy, palette);
-        let keys = menu.find_keys_for_command(i);
+        let keys = binds.find_keys_for_command(i);
         match keys[0] {
             None => m_print(image, cc, 140.0, y, "???", scale, ox, oy, palette),
             Some(k0) => {
@@ -2757,6 +2523,19 @@ fn draw_quit_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cvar::Cvars;
+    use crate::screen::VIEWSIZE_DEFAULT;
+    use crate::settings::{Profile, Settings};
+
+    /// default.cfg's `sensitivity 3`, `volume 0.7`, `gamma 1.0`.
+    const SENS_DEFAULT: f32 = 3.0;
+    const VOLUME_DEFAULT: f32 = 0.7;
+    const GAMMA_DEFAULT: f32 = 1.0;
+
+    /// The menu's clocks, `host_time` and `realtime`.
+    fn clock(host_time: f64, realtime: f64) -> MenuClock {
+        MenuClock { host_time, realtime }
+    }
     use crate::keys::{K_CTRL, K_MOUSE1, K_SHIFT, K_SPACE, K_UPARROW};
     use crate::render::fixtures::{ramp_palette, solid_pic};
     use crate::wad::Qpic;
@@ -2788,59 +2567,59 @@ mod tests {
         // menu.c: m_main_cursor, m_singleplayer_cursor, options_cursor, ... are
         // file statics no M_Menu_*_f resets, so Escape from Options lands on
         // "Options" and every screen reopens where the player left it.
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         down(&mut m, 2);
-        m.select(); // Options
+        m.select(&mut s); // Options
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, 0), "first visit: row 0");
         down(&mut m, 5);
         m.cancel();
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 2), "Escape lands on Options");
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), 5, "options_cursor kept");
         // Customize controls: keys_cursor, and back on Customize.
         m.move_cursor(-5);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.screen(), MenuScreen::Keys);
         down(&mut m, 4);
         m.cancel();
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_CONTROLS));
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), 4, "keys_cursor kept");
         m.cancel();
-        // Web extras: its own cursor, kept like options_cursor.
-        m.move_cursor(-1); // row 0 -> 13, Web extras
-        m.select();
+        // The settings page: its own cursor, kept like options_cursor.
+        m.move_cursor(-1); // row 0 -> 13, Classic / 2026
+        m.select(&mut s);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Extras, 0));
         m.move_cursor(1);
         m.cancel();
-        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_EXTRAS));
-        m.select();
-        assert_eq!(m.cursor(), 1, "the Extras cursor kept");
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_PROFILE));
+        m.select(&mut s);
+        assert_eq!(m.cursor(), 1, "the settings page's cursor kept");
         m.cancel();
         m.cancel();
         // Single Player > Load: load_cursor, shared with Save.
         m.move_cursor(-2);
-        m.select();
+        m.select(&mut s);
         m.move_cursor(1);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.screen(), MenuScreen::Load);
         down(&mut m, 3);
         m.cancel();
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::SinglePlayer, 1), "back on Load");
         m.set_game_active(true);
         m.move_cursor(1);
-        m.select();
+        m.select(&mut s);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Save, 3), "Save shares load_cursor");
         m.cancel();
         m.cancel();
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 0));
         // Multiplayer: m_multiplayer_cursor.
         m.move_cursor(1);
-        m.select();
+        m.select(&mut s);
         m.move_cursor(2);
         m.cancel();
-        m.select();
+        m.select(&mut s);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Multiplayer, 2));
     }
 
@@ -2852,78 +2631,81 @@ mod tests {
     #[test]
     fn setup_is_m_setup_key() {
         use crate::keys::{K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW};
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_ENTER, None); // Multiplayer
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_ENTER, None, &mut s); // Multiplayer
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_DOWNARROW, None, &mut s);
         m.take_sounds();
-        m.keydown(K_ENTER, None);
+        m.keydown(K_ENTER, None, &mut s);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Setup, 4), "on Accept Changes");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         assert_eq!((m.setup.hostname.as_str(), m.setup.myname.as_str()), ("UNNAMED", "player"));
         // Colours: Pants right 3, Shirt left once (0 -> 13), Enter steps too.
-        m.keydown(K_UPARROW, None);
+        m.keydown(K_UPARROW, None, &mut s);
         for _ in 0..3 {
-            m.keydown(K_RIGHTARROW, None);
+            m.keydown(K_RIGHTARROW, None, &mut s);
         }
-        m.keydown(K_UPARROW, None);
-        m.keydown(K_LEFTARROW, None);
+        m.keydown(K_UPARROW, None, &mut s);
+        m.keydown(K_LEFTARROW, None, &mut s);
         assert_eq!((m.setup.top, m.setup.bottom), (13, 3));
         assert_eq!(m.take_sounds().last(), Some(&MenuSound::Menu3));
-        m.keydown(K_ENTER, None);
+        m.keydown(K_ENTER, None, &mut s);
         assert_eq!(m.setup.top, 0, "Enter on a colour row steps it (13 -> 0)");
-        m.keydown(K_LEFTARROW, None);
+        m.keydown(K_LEFTARROW, None, &mut s);
         // The names: Left/Right/Enter do nothing there, Backspace takes one
         // off, a character types, 15 at most.
-        m.keydown(K_UPARROW, None);
-        m.keydown(K_UPARROW, None); // Hostname
+        m.keydown(K_UPARROW, None, &mut s);
+        m.keydown(K_UPARROW, None, &mut s); // Hostname
         m.take_sounds();
         for k in [K_LEFTARROW, K_RIGHTARROW, K_ENTER] {
-            assert_eq!(m.keydown(k, None), MenuAction::None);
+            assert_eq!(m.keydown(k, None, &mut s), MenuAction::None);
         }
         assert!(m.take_sounds().is_empty(), "nothing, not even a sound");
-        m.keydown(K_BACKSPACE, None);
+        m.keydown(K_BACKSPACE, None, &mut s);
         for c in b"Dxxxxxxxxxxxxxx" {
-            m.keydown(*c, Some(*c));
+            m.keydown(*c, Some(*c), &mut s);
         }
         assert_eq!(m.setup.hostname, "UNNAMEDxxxxxxxx", "D then 15 in all");
-        m.keydown(K_DOWNARROW, None); // Your name
+        m.keydown(K_DOWNARROW, None, &mut s); // Your name
         for _ in 0..6 {
-            m.keydown(K_BACKSPACE, None);
+            m.keydown(K_BACKSPACE, None, &mut s);
         }
         for c in b"Ranger`" {
-            m.keydown(*c, Some(*c));
+            m.keydown(*c, Some(*c), &mut s);
         }
-        m.keydown(b'\t', None); // types nothing (no character)
+        m.keydown(b'\t', None, &mut s); // types nothing (no character)
         assert_eq!(m.setup.myname, "Ranger`", "M_Setup_Key types any key 32..127");
         // Escape: back to Multiplayer, nothing set.
-        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Back);
-        assert_eq!((m.screen(), m.name(), m.hostname(), m.color()), (MenuScreen::Multiplayer, "player", "UNNAMED", 0));
+        assert_eq!(m.keydown(K_ESCAPE, None, &mut s), MenuAction::Back);
+        assert_eq!(
+            (m.screen(), s.cvars.cl_name.as_str(), s.cvars.hostname.as_str(), s.cvars.cl_color),
+            (MenuScreen::Multiplayer, "player", "UNNAMED", 0)
+        );
         // Again, and Accept: the cursor kept on Your name, the fields refilled.
-        m.keydown(K_ENTER, None);
+        m.keydown(K_ENTER, None, &mut s);
         assert_eq!((m.cursor(), m.setup.myname.as_str()), (1, "player"));
         for _ in 0..6 {
-            m.keydown(K_BACKSPACE, None);
+            m.keydown(K_BACKSPACE, None, &mut s);
         }
         for c in b"Ranger" {
-            m.keydown(*c, Some(*c));
+            m.keydown(*c, Some(*c), &mut s);
         }
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_RIGHTARROW, None); // shirt 1
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_LEFTARROW, None); // pants 13
-        m.keydown(K_DOWNARROW, None);
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_RIGHTARROW, None, &mut s); // shirt 1
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_LEFTARROW, None, &mut s); // pants 13
+        m.keydown(K_DOWNARROW, None, &mut s);
         m.take_sounds();
-        assert_eq!(m.keydown(K_ENTER, None), MenuAction::Back);
-        assert_eq!((m.screen(), m.name(), m.color()), (MenuScreen::Multiplayer, "Ranger", 16 + 13));
+        assert_eq!(m.keydown(K_ENTER, None, &mut s), MenuAction::Back);
+        assert_eq!((m.screen(), s.cvars.cl_name.as_str(), s.cvars.cl_color), (MenuScreen::Multiplayer, "Ranger", 16 + 13));
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         // Host_Color_f clamps each to 13; the name is cut to 15.
-        m.set_color(15, 22);
-        assert_eq!(m.color(), 13 * 16 + 6);
-        m.set_name("a very long player name");
-        assert_eq!(m.name(), "a very long pla");
+        s.cvars.set_color(15, 22);
+        assert_eq!(s.cvars.cl_color, 13 * 16 + 6);
+        s.cvars.set_name("a very long player name");
+        assert_eq!(s.cvars.cl_name, "a very long pla");
     }
 
     /// M_BuildTranslationTable: the identity but for the shirt (16..32) and
@@ -2945,13 +2727,13 @@ mod tests {
     #[test]
     fn setup_draws_the_translated_player() {
         let pal = ramp_palette();
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
-        m.set_color(3, 9);
+        s.cvars.set_color(3, 9);
         m.set_cursor(1);
-        m.select(); // Multiplayer
+        m.select(&mut s); // Multiplayer
         m.set_cursor(2);
-        m.select(); // Setup
+        m.select(&mut s); // Setup
         let mut data = vec![16u8, 96, 255, 7];
         data.resize(4, 0);
         let pics = MenuPics {
@@ -2959,7 +2741,7 @@ mod tests {
             ..Default::default()
         };
         let mut img = Image::new(320, 200, [1, 2, 3]);
-        draw_menu(&mut img, &m, &pics, None, 0.0, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
         let at = |x: usize| img.rgb[72 * 320 + x];
         assert_eq!(at(172), pal[48], "shirt texel through row 3");
         assert_eq!(at(173), pal[159], "pants texel through row 9, backwards");
@@ -2976,64 +2758,64 @@ mod tests {
     #[test]
     fn keydown_is_each_screens_m_key() {
         use crate::keys::{K_BACKSPACE, K_DEL, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW};
-        let mut m = Menu::new();
-        assert_eq!(m.keydown(K_ENTER, None), MenuAction::None, "m_none: nothing");
+        let (mut m, mut s) = (Menu::new(), Settings::default());
+        assert_eq!(m.keydown(K_ENTER, None, &mut s), MenuAction::None, "m_none: nothing");
         m.open();
         // Main: the arrows move, Left/Right/Tab/letters do nothing.
         for k in [K_LEFTARROW, K_RIGHTARROW, b'\t', b'x', K_BACKSPACE] {
-            m.keydown(k, None);
+            m.keydown(k, None, &mut s);
         }
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 0));
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_ENTER, None);
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_ENTER, None, &mut s);
         assert_eq!(m.screen(), MenuScreen::Options);
         // Options: Right adjusts Screen size.
         for _ in 0..3 {
-            m.keydown(K_DOWNARROW, None);
+            m.keydown(K_DOWNARROW, None, &mut s);
         }
-        m.keydown(K_RIGHTARROW, None);
-        assert_eq!(m.viewsize(), VIEWSIZE_DEFAULT + VIEWSIZE_STEP);
+        m.keydown(K_RIGHTARROW, None, &mut s);
+        assert_eq!(s.cvars.viewsize, VIEWSIZE_DEFAULT + VIEWSIZE_STEP);
         // Customize controls: Left moves like Up; Del unbinds; during a grab
         // every key is the grab's, Escape included.
-        m.keydown(K_UPARROW, None);
-        m.keydown(K_UPARROW, None);
-        m.keydown(K_UPARROW, None);
-        m.keydown(K_ENTER, None);
+        m.keydown(K_UPARROW, None, &mut s);
+        m.keydown(K_UPARROW, None, &mut s);
+        m.keydown(K_UPARROW, None, &mut s);
+        m.keydown(K_ENTER, None, &mut s);
         assert_eq!(m.screen(), MenuScreen::Keys);
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_LEFTARROW, None);
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_LEFTARROW, None, &mut s);
         assert_eq!(m.cursor(), 0, "Left pairs with Up");
-        m.keydown(K_DOWNARROW, None);
-        m.keydown(K_DOWNARROW, None); // jump
-        m.keydown(K_DEL, None);
-        assert_eq!(m.find_keys_for_command(BIND_JUMP), [None, None], "Del unbinds");
-        m.keydown(K_ENTER, None);
-        m.keydown(K_UPARROW, None);
-        assert_eq!(m.action_for_key(K_UPARROW), Some(BIND_JUMP), "the grab took the arrow");
+        m.keydown(K_DOWNARROW, None, &mut s);
+        m.keydown(K_DOWNARROW, None, &mut s); // jump
+        m.keydown(K_DEL, None, &mut s);
+        assert_eq!(s.binds.find_keys_for_command(BIND_JUMP), [None, None], "Del unbinds");
+        m.keydown(K_ENTER, None, &mut s);
+        m.keydown(K_UPARROW, None, &mut s);
+        assert_eq!(s.binds.command(K_UPARROW), Some(BIND_JUMP), "the grab took the arrow");
         assert_eq!(m.cursor(), BIND_JUMP, "and did not move");
-        m.keydown(K_ENTER, None);
-        m.keydown(K_ESCAPE, None);
+        m.keydown(K_ENTER, None, &mut s);
+        m.keydown(K_ESCAPE, None, &mut s);
         assert_eq!((m.screen(), m.bind_grabbing()), (MenuScreen::Keys, false), "Escape ends the grab");
-        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Back);
+        assert_eq!(m.keydown(K_ESCAPE, None, &mut s), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Options);
         // Main's Escape closes it and asks for the demo loop back.
-        m.keydown(K_ESCAPE, None);
-        assert_eq!(m.keydown(K_ESCAPE, None), MenuAction::Resume);
+        m.keydown(K_ESCAPE, None, &mut s);
+        assert_eq!(m.keydown(K_ESCAPE, None, &mut s), MenuAction::Resume);
         assert!(!m.visible);
         // SCR_ModalMessage: y by key number, n or Escape; nothing else.
         m.open();
         m.set_server_active(true);
         m.set_cursor(0);
-        m.keydown(K_ENTER, None);
-        m.keydown(K_ENTER, None);
+        m.keydown(K_ENTER, None, &mut s);
+        m.keydown(K_ENTER, None, &mut s);
         assert!(m.new_game_confirm());
         assert_eq!(m.modal_key(K_ENTER), MenuAction::None);
         assert_eq!(m.modal_key(b'Y'), MenuAction::None, "Shift is not applied");
         assert!(m.new_game_confirm());
         assert_eq!(m.modal_key(K_ESCAPE), MenuAction::None);
         assert!(!m.new_game_confirm() && m.visible, "Escape: no, the menu stays");
-        m.keydown(K_ENTER, None);
+        m.keydown(K_ENTER, None, &mut s);
         assert_eq!(m.modal_key(b'y'), MenuAction::NewGame);
     }
 
@@ -3042,51 +2824,51 @@ mod tests {
         // Options > Go to console closes the menu (m_state = m_none); the next
         // M_Menu_Main_f shows the main menu on "Options", and Options on the
         // console row, as in the C.
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         down(&mut m, 2);
-        m.select();
+        m.select(&mut s);
         m.move_cursor(ROW_CONSOLE as i32);
-        assert_eq!(m.select(), MenuAction::OpenConsole);
+        assert_eq!(m.select(&mut s), MenuAction::OpenConsole);
         assert!(!m.visible);
         m.toggle();
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Main, 2));
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), ROW_CONSOLE);
         // Loading a slot closes the menu too; Load reopens on that slot.
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.set_save_comment(4, "start".into());
         m.open();
-        m.select(); // Single Player
+        m.select(&mut s); // Single Player
         m.move_cursor(1);
-        m.select(); // Load
+        m.select(&mut s); // Load
         down(&mut m, 4);
-        assert_eq!(m.select(), MenuAction::LoadSlot(4));
+        assert_eq!(m.select(&mut s), MenuAction::LoadSlot(4));
         m.open();
         assert_eq!(m.cursor(), 0);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), 1, "Single Player on Load");
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), 4, "Load on the slot just loaded");
     }
 
     #[test]
     fn help_starts_on_page_0_and_quit_returns_to_the_screens_cursor() {
         // M_Menu_Help_f sets help_page = 0; M_Menu_Quit_f touches no cursor.
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.move_cursor(3);
-        m.select();
+        m.select(&mut s);
         m.page(1);
         m.page(1);
         assert_eq!(m.help_page(), 2);
         m.cancel();
         assert_eq!(m.cursor(), 3, "back on Help");
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.help_page(), 0, "help_page = 0");
         m.cancel();
         m.move_cursor(-1);
-        m.select(); // Options
+        m.select(&mut s); // Options
         down(&mut m, 7);
         m.open_quit();
         assert_eq!(m.cursor(), 0, "the prompt has no cursor");
@@ -3096,18 +2878,18 @@ mod tests {
 
     #[test]
     fn video_opens_on_the_live_mode_then_keeps_vid_line() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.sync_resolution(RESOLUTION_PRESETS[4].0, RESOLUTION_PRESETS[4].1);
         m.open();
         m.move_cursor(2);
-        m.select();
+        m.select(&mut s);
         m.move_cursor(ROW_VIDEO as i32);
-        m.select();
+        m.select(&mut s);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Video, 4), "first visit: the live mode");
         m.move_cursor(-3);
         m.cancel();
         m.sync_resolution(RESOLUTION_PRESETS[6].0, RESOLUTION_PRESETS[6].1);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), 1, "vid_line keeps its place");
     }
 
@@ -3116,28 +2898,28 @@ mod tests {
     /// ([`Menu::reset_boot`]).
     #[test]
     fn only_a_program_start_resets_the_cursors() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         down(&mut m, 2);
-        m.select();
+        m.select(&mut s);
         down(&mut m, 5);
         m.cancel();
         m.reset_nav();
         m.open();
         assert_eq!(m.cursor(), 2, "m_main_cursor kept");
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), 5, "options_cursor kept");
         m.reset_boot();
         m.open();
         assert_eq!(m.cursor(), 0);
         down(&mut m, 2);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.cursor(), 0);
     }
 
     #[test]
     fn menu_move_cursor_wraps_within_each_screen() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open(); // Main: 5 items.
         assert_eq!(m.screen(), MenuScreen::Main);
         assert_eq!(m.cursor(), 0);
@@ -3154,7 +2936,7 @@ mod tests {
 
         // On the single-player screen the wrap is modulo 3.
         m.set_cursor(0);
-        let action = m.select(); // Main>Single Player
+        let action = m.select(&mut s); // Main>Single Player
         assert_eq!(action, MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
         for expect in [1, 2, 0, 1] {
@@ -3171,23 +2953,23 @@ mod tests {
 
     #[test]
     fn menu_select_and_cancel_transitions() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
 
         // Main > Single Player goes to the submenu, no host action.
         m.set_cursor(0);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
         assert!(m.visible);
 
         // SinglePlayer > New Game returns NewGame and closes the menu.
         m.set_cursor(0);
-        assert_eq!(m.select(), MenuAction::NewGame);
+        assert_eq!(m.select(&mut s), MenuAction::NewGame);
         assert!(!m.visible);
 
         // Re-open: Escape on a submenu goes Back to Main (still visible).
         m.open();
-        m.select(); // -> SinglePlayer
+        m.select(&mut s); // -> SinglePlayer
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
@@ -3204,7 +2986,7 @@ mod tests {
         // Quit (item 4 on Main) raises the confirm prompt (does NOT close yet).
         m.open();
         m.set_cursor(4);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Quit, "Quit raises the confirm prompt");
         assert!(m.visible);
         // Escape ("No") backs out to the screen the prompt rose from (Main here).
@@ -3214,12 +2996,12 @@ mod tests {
         // Re-raise it: Enter does nothing (M_Quit_Key: only y/Y quit), 'y'
         // closes the menu.
         m.set_cursor(4);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.screen(), MenuScreen::Quit);
-        assert_eq!(m.select(), MenuAction::None, "Enter does not answer the Quit prompt");
-        assert_eq!(m.keydown(K_ENTER, None), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None, "Enter does not answer the Quit prompt");
+        assert_eq!(m.keydown(K_ENTER, None, &mut s), MenuAction::None);
         assert!(m.visible && m.screen() == MenuScreen::Quit);
-        assert_eq!(m.keydown(b'Y', Some(b'Y')), MenuAction::Closed, "Y quits");
+        assert_eq!(m.keydown(b'Y', Some(b'Y'), &mut s), MenuAction::Closed, "Y quits");
         assert!(!m.visible);
 
         // Main item Multiplayer (item 1) opens the multiplayer screen
@@ -3227,17 +3009,17 @@ mod tests {
         // like the C), and Escape returns to Main.
         m.open();
         m.set_cursor(1);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Multiplayer, "item 1 enters Multiplayer");
         assert!(m.visible);
-        assert_eq!(m.select(), MenuAction::None, "Join responds with no action (no net)");
+        assert_eq!(m.select(&mut s), MenuAction::None, "Join responds with no action (no net)");
         assert_eq!(m.screen(), MenuScreen::Multiplayer);
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
 
         // Help (item 3) now opens the Help screen.
         m.set_cursor(3);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Help, "item 3 enters Help");
         assert_eq!(m.help_page(), 0, "Help opens on page 0");
         assert!(m.visible);
@@ -3248,20 +3030,20 @@ mod tests {
         // Main item 2 (Options) switches to the Options screen.
         m.open();
         m.set_cursor(2);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Options, "item 2 enters Options");
         assert!(m.visible);
     }
 
     #[test]
     fn menu_toggle_open_back_close() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         // Hidden -> open on Main.
         assert_eq!(m.toggle(), MenuAction::None);
         assert!(m.visible);
         assert_eq!(m.screen(), MenuScreen::Main);
         // On a submenu, toggle backs out to Main.
-        m.select(); // Main>SinglePlayer
+        m.select(&mut s); // Main>SinglePlayer
         assert_eq!(m.toggle(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
@@ -3276,11 +3058,11 @@ mod tests {
         let mut img = Image::new(320, 200, [9, 9, 9]);
         let mut faded = Image::new(320, 200, [9, 9, 9]);
         fade_screen(&mut faded, &pal);
-        let mut m = Menu::new();
+        let (mut m, s) = (Menu::new(), Settings::default());
         m.open();
         // All pics absent: only M_Draw's Draw_FadeScreen shows, and no panic.
         let pics = MenuPics::default();
-        draw_menu(&mut img, &m, &pics, None, 0.3, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.3, 0.0), &pal);
         assert_eq!(img.rgb, faded.rgb, "an all-empty MenuPics draws only the fade");
 
         // A hidden menu never draws (not even the fade).
@@ -3288,7 +3070,7 @@ mod tests {
         let before = img.rgb.clone();
         let solid = solid_pic(64, 16, 7);
         let pics2 = MenuPics { mainmenu: Some(solid), ..Default::default() };
-        draw_menu(&mut img, &m, &pics2, None, 0.3, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics2, None, clock(0.3, 0.0), &pal);
         assert_eq!(img.rgb, before, "a hidden menu must not draw");
     }
 
@@ -3313,21 +3095,21 @@ mod tests {
             fill(c + 128, 5); // bronze half
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0), &pal);
         // "           Screen size" at (16, 56): the 'S' is the 12th character.
         let s_px = (56 + 3) * 320 + 16 + 11 * 8 + 3;
         assert_eq!(img.rgb[s_px], pal[5], "Options labels are M_Print (bronze)");
         // Video Options: the current mode white, the others bronze.
         m.sync_resolution(640, 400);
         m.set_cursor(ROW_VIDEO);
-        m.select();
+        m.select(&mut s);
         let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0), &pal);
         let row_px = |row: usize| (36 + row * 8 + 3) * 320 + 16 + 3;
         assert_eq!(img.rgb[row_px(2)], pal[6], "640x400 (current) is M_PrintWhite");
         assert_eq!(img.rgb[row_px(0)], pal[5], "320x200 is M_Print");
@@ -3338,7 +3120,7 @@ mod tests {
     fn draw_menu_draws_present_pics_over_background() {
         let pal = ramp_palette();
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        let mut m = Menu::new();
+        let (mut m, s) = (Menu::new(), Settings::default());
         m.open();
         // A present mainmenu graphic (opaque index 7 -> a non-background colour)
         // at (72,32) must change pixels there.
@@ -3346,7 +3128,7 @@ mod tests {
             mainmenu: Some(solid_pic(120, 80, 7)),
             ..Default::default()
         };
-        draw_menu(&mut img, &m, &pics, None, 0.0, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
         // At scale 1 on the 320x200 frame, virtual (72,32) maps to pixel (72,32).
         let idx = 32 * img.w + 72;
         assert_eq!(img.rgb[idx], pal[7], "the mainmenu pic must paint at (72,32)");
@@ -3358,7 +3140,7 @@ mod tests {
     #[test]
     fn draw_menu_cursor_frame_animates_with_time() {
         let pal = ramp_palette();
-        let mut m = Menu::new();
+        let (mut m, s) = (Menu::new(), Settings::default());
         m.open();
         // Distinct colours per cursor frame so we can detect which frame drew.
         let mut menudot: [Option<crate::wad::Qpic>; 6] = Default::default();
@@ -3370,16 +3152,16 @@ mod tests {
         // The cursor sits at (54, 32). frame = (time*10) % 6.
         let cursor_idx = 32 * 320 + 54;
         let mut img0 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img0, &m, &pics, None, 0.0, 0.0, &pal); // frame 0 -> index 10
+        draw_menu(&mut img0, &m, &s, &pics, None, clock(0.0, 0.0), &pal); // frame 0 -> index 10
         assert_eq!(img0.rgb[cursor_idx], pal[10]);
 
         let mut img1 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img1, &m, &pics, None, 0.35, 0.0, &pal); // (3.5)->3 -> index 13
+        draw_menu(&mut img1, &m, &s, &pics, None, clock(0.35, 0.0), &pal); // (3.5)->3 -> index 13
         assert_eq!(img1.rgb[cursor_idx], pal[13]);
         // The spinner runs on host_time ONLY: realtime moving on (the flashing
         // cursors' clock) leaves the menudot frame alone.
         let mut img2 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img2, &m, &pics, None, 0.35, 7.3, &pal);
+        draw_menu(&mut img2, &m, &s, &pics, None, clock(0.35, 7.3), &pal);
         assert_eq!(img2.rgb[cursor_idx], pal[13], "menudot ignores realtime");
     }
 
@@ -3427,16 +3209,16 @@ mod tests {
             }
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options, cursor row 0
+        m.select(&mut s); // -> Options, cursor row 0
         let px = 32 * 320 + 200;
         let mut off = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut off, &m, &MenuPics::default(), Some(&conchars), 0.1, 0.1, &pal);
+        draw_menu(&mut off, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.1, 0.1), &pal);
         assert_eq!(off.rgb[px], [0, 0, 0], "realtime 0.1 s: cursor phase blank");
         let mut on = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut on, &m, &MenuPics::default(), Some(&conchars), 0.0, 0.3, &pal);
+        draw_menu(&mut on, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.3), &pal);
         assert_eq!(on.rgb[px], pal[3], "realtime 0.3 s: the arrow shows");
     }
 
@@ -3444,11 +3226,11 @@ mod tests {
 
     #[test]
     fn menu_options_enter_from_main_and_back() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         // Main > Options (cursor 2) switches to the Options screen, no host action.
         m.set_cursor(2);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Options);
         assert_eq!(m.cursor(), 0, "entering Options resets the cursor to the top row");
         assert!(m.visible);
@@ -3476,39 +3258,39 @@ mod tests {
         // M_AdjustSliders case 3: scr_viewsize += dir*10, clamped 30..=120 —
         // the Screen size row is viewsize, NOT the video mode (the old port
         // cycled render resolutions here; WinQuake keeps those in M_Video).
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         m.set_cursor(ROW_SCREENSIZE);
         assert_eq!(m.screen(), MenuScreen::Options);
-        assert_eq!(m.viewsize(), 100.0, "default.cfg: viewsize 100");
+        assert_eq!(s.cvars.viewsize, 100.0, "default.cfg: viewsize 100");
         let mode = m.resolution();
-        m.adjust(1);
-        assert_eq!(m.viewsize(), 110.0);
-        m.adjust(1);
-        assert_eq!(m.viewsize(), 120.0);
-        m.adjust(1);
-        assert_eq!(m.viewsize(), 120.0, "clamped at 120 (no wrap)");
+        m.adjust(1, &mut s);
+        assert_eq!(s.cvars.viewsize, 110.0);
+        m.adjust(1, &mut s);
+        assert_eq!(s.cvars.viewsize, 120.0);
+        m.adjust(1, &mut s);
+        assert_eq!(s.cvars.viewsize, 120.0, "clamped at 120 (no wrap)");
         for expect in [110.0, 100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 30.0] {
-            m.adjust(-1);
-            assert_eq!(m.viewsize(), expect);
+            m.adjust(-1, &mut s);
+            assert_eq!(s.cvars.viewsize, expect);
         }
         assert_eq!(m.resolution(), mode, "Screen size never touches the video mode");
         // Enter falls through to M_AdjustSliders(1) (menu2 + menu3), no host action.
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::None);
-        assert_eq!(m.viewsize(), 40.0);
+        assert_eq!(m.select(&mut s), MenuAction::None);
+        assert_eq!(s.cvars.viewsize, 40.0);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
         // A zero delta is a no-op; adjust only acts on the Options screen.
-        m.adjust(0);
-        assert_eq!(m.viewsize(), 40.0);
+        m.adjust(0, &mut s);
+        assert_eq!(s.cvars.viewsize, 40.0);
         m.cancel(); // -> Main
-        m.adjust(1);
-        assert_eq!(m.viewsize(), 40.0, "adjust is a no-op off the Options screen");
+        m.adjust(1, &mut s);
+        assert_eq!(s.cvars.viewsize, 40.0, "adjust is a no-op off the Options screen");
         // Reset to defaults: default.cfg's `viewsize 100`.
-        m.reset_defaults();
-        assert_eq!(m.viewsize(), 100.0);
+        s.reset_defaults();
+        assert_eq!(s.cvars.viewsize, 100.0);
     }
 
     #[test]
@@ -3523,54 +3305,54 @@ mod tests {
             }
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
-        let knob_x = |m: &Menu| {
+        m.select(&mut s); // -> Options
+        let knob_x = |m: &Menu, s: &Settings| {
             let mut img = Image::new(320, 200, [0, 0, 0]);
-            draw_menu(&mut img, m, &MenuPics::default(), Some(&conchars), 0.0, 0.0, &pal);
+            draw_menu(&mut img, m, s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0), &pal);
             (0..320).find(|&x| img.rgb[56 * 320 + x] == pal[3]).expect("knob drawn")
         };
-        assert_eq!(knob_x(&m), 276, "viewsize 100: r = 70/90 -> 220 + 56");
-        m.set_viewsize(30.0);
-        assert_eq!(knob_x(&m), 220, "viewsize 30: the left end");
-        m.set_viewsize(120.0);
-        assert_eq!(knob_x(&m), 292, "viewsize 120: the right end");
+        assert_eq!(knob_x(&m, &s), 276, "viewsize 100: r = 70/90 -> 220 + 56");
+        s.cvars.set_viewsize(30.0);
+        assert_eq!(knob_x(&m, &s), 220, "viewsize 30: the left end");
+        s.cvars.set_viewsize(120.0);
+        assert_eq!(knob_x(&m, &s), 292, "viewsize 120: the right end");
     }
 
     #[test]
     fn sizeup_sizedown_and_the_viewsize_cvar_bound_like_scr_calcrefdef() {
-        let mut m = Menu::new();
-        m.size_up();
-        assert_eq!(m.viewsize(), 110.0);
-        m.size_up();
-        m.size_up();
-        assert_eq!(m.viewsize(), 120.0, "sizeup stops at 120");
+        let mut s = Settings::default();
+        s.cvars.size_up();
+        assert_eq!(s.cvars.viewsize, 110.0);
+        s.cvars.size_up();
+        s.cvars.size_up();
+        assert_eq!(s.cvars.viewsize, 120.0, "sizeup stops at 120");
         for _ in 0..20 {
-            m.size_down();
+            s.cvars.size_down();
         }
-        assert_eq!(m.viewsize(), 30.0, "sizedown stops at 30");
+        assert_eq!(s.cvars.viewsize, 30.0, "sizedown stops at 30");
         // The console can set any value in range (not just multiples of 10);
         // out-of-range and garbage clamp like SCR_CalcRefdef's bound.
-        m.set_viewsize(55.0);
-        assert_eq!(m.viewsize(), 55.0);
-        m.size_up();
-        assert_eq!(m.viewsize(), 65.0);
-        m.set_viewsize(7.0);
-        assert_eq!(m.viewsize(), 30.0);
-        m.set_viewsize(1e9);
-        assert_eq!(m.viewsize(), 120.0);
-        m.set_viewsize(f32::NAN);
-        assert_eq!(m.viewsize(), 30.0, "atof garbage = 0 -> the minimum");
+        s.cvars.set_viewsize(55.0);
+        assert_eq!(s.cvars.viewsize, 55.0);
+        s.cvars.size_up();
+        assert_eq!(s.cvars.viewsize, 65.0);
+        s.cvars.set_viewsize(7.0);
+        assert_eq!(s.cvars.viewsize, 30.0);
+        s.cvars.set_viewsize(1e9);
+        assert_eq!(s.cvars.viewsize, 120.0);
+        s.cvars.set_viewsize(f32::NAN);
+        assert_eq!(s.cvars.viewsize, 30.0, "atof garbage = 0 -> the minimum");
         // default.cfg binds + and = to sizeup and - to sizedown, as ordinary
         // (rebindable) bindings that Customize controls doesn't list.
-        let m = Menu::new();
-        assert_eq!(m.action_for_key(b'+'), Some(BIND_SIZEUP));
-        assert_eq!(m.action_for_key(b'='), Some(BIND_SIZEUP));
-        assert_eq!(m.action_for_key(b'-'), Some(BIND_SIZEDOWN));
+        let s = Settings::default();
+        assert_eq!(s.binds.command(b'+'), Some(BIND_SIZEUP));
+        assert_eq!(s.binds.command(b'='), Some(BIND_SIZEUP));
+        assert_eq!(s.binds.command(b'-'), Some(BIND_SIZEDOWN));
         // Customize controls (the BINDNAMES rows) never lists them.
-        let listed = (0..NUM_BINDNAMES).flat_map(|c| m.find_keys_for_command(c));
+        let listed = (0..NUM_BINDNAMES).flat_map(|c| s.binds.find_keys_for_command(c));
         for k in listed.flatten() {
             assert!(![b'+', b'=', b'-'].contains(&k), "key {k} is not a Keys-screen row");
         }
@@ -3578,38 +3360,38 @@ mod tests {
 
     #[test]
     fn menu_adjust_clamps_mouse_and_volume() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
 
         // Mouse Speed row: default sensitivity 3 -> 1.0x multiplier.
         m.set_cursor(ROW_MOUSESPEED);
-        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6);
-        assert!((m.mouse_sensitivity() - 1.0).abs() < 1e-6, "default mouse is 1.0x");
+        assert!((s.cvars.sensitivity - SENS_DEFAULT).abs() < 1e-6);
+        assert!(((s.cvars.sensitivity / 3.0) - 1.0).abs() < 1e-6, "default mouse is 1.0x");
         // Decreasing clamps at SENS_MIN (1), never below.
         for _ in 0..40 {
-            m.adjust(-1);
+            m.adjust(-1, &mut s);
         }
-        assert!((m.sensitivity() - SENS_MIN).abs() < 1e-6);
+        assert!((s.cvars.sensitivity - SENS_MIN).abs() < 1e-6);
         // Increasing clamps at SENS_MAX (11).
         for _ in 0..60 {
-            m.adjust(1);
+            m.adjust(1, &mut s);
         }
-        assert!((m.sensitivity() - SENS_MAX).abs() < 1e-6);
-        assert!(m.mouse_sensitivity() > 1.0, "max sensitivity is more than default");
+        assert!((s.cvars.sensitivity - SENS_MAX).abs() < 1e-6);
+        assert!((s.cvars.sensitivity / 3.0) > 1.0, "max sensitivity is more than default");
 
         // Sound Volume row: default 0.7.
         m.set_cursor(ROW_SNDVOLUME);
-        assert!((m.volume() - VOLUME_DEFAULT).abs() < 1e-6, "default volume is 0.7");
+        assert!((s.cvars.volume - VOLUME_DEFAULT).abs() < 1e-6, "default volume is 0.7");
         for _ in 0..40 {
-            m.adjust(-1);
+            m.adjust(-1, &mut s);
         }
-        assert!((m.volume() - VOLUME_MIN).abs() < 1e-6, "min volume is silent");
+        assert!((s.cvars.volume - VOLUME_MIN).abs() < 1e-6, "min volume is silent");
         for _ in 0..40 {
-            m.adjust(1);
+            m.adjust(1, &mut s);
         }
-        assert!((m.volume() - VOLUME_MAX).abs() < 1e-6, "max volume is full gain");
+        assert!((s.cvars.volume - VOLUME_MAX).abs() < 1e-6, "max volume is full gain");
     }
 
     #[test]
@@ -3625,10 +3407,10 @@ mod tests {
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
 
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         assert_eq!(m.screen(), MenuScreen::Options);
 
         // Only the title pic is present (the cursor is a conchars glyph now, drawn
@@ -3641,7 +3423,7 @@ mod tests {
         let bg = [9u8, 9, 9];
         let mut img = Image::new(320, 200, bg);
         let before = img.rgb.clone();
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
         // The Options screen must change pixels over the known background.
         assert_ne!(img.rgb, before, "the Options screen must draw something");
         // The title plaque (index 5) paints centered near the top: at virtual
@@ -3666,7 +3448,7 @@ mod tests {
         // scale 2): it must not panic and must draw the title + cursor scaled.
         let mut big = Image::new(640, 400, bg);
         let big_before = big.rgb.clone();
-        draw_menu(&mut big, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
+        draw_menu(&mut big, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
         assert_ne!(big.rgb, big_before, "the Options screen draws at 640x400 too");
         // At scale 2 the cursor's virtual (200,32) maps to pixel (400,64).
         let big_cursor_idx = 64 * big.w + 400;
@@ -3675,7 +3457,7 @@ mod tests {
         // Missing conchars leaves labels/widgets/cursor blank but still draws the
         // title; no panic.
         let mut img2 = Image::new(320, 200, bg);
-        draw_menu(&mut img2, &m, &pics, None, 0.0, 0.0, &pal);
+        draw_menu(&mut img2, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
         assert_eq!(img2.rgb[title_idx], pal[5], "title still draws without conchars");
         assert_eq!(img2.rgb[cursor_idx], bg, "cursor needs conchars (blank without it)");
     }
@@ -3728,10 +3510,10 @@ mod tests {
     fn options_cursor_wraps_over_all_fourteen_rows() {
         // The cursor must visit every one of the 14 OPTIONS_ITEMS rows (id's
         // 13 + Web extras) and wrap.
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         assert_eq!(MenuScreen::Options.item_count(), 14);
         assert_eq!(m.cursor(), 0);
         let mut seen = [false; OPTIONS_ITEMS];
@@ -3749,101 +3531,101 @@ mod tests {
 
     #[test]
     fn options_sliders_and_checkboxes_adjust_per_row() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
 
         // Brightness (gamma) row: matching the C `v_gamma -= dir*0.05`, RIGHT
         // brightens (gamma DOWN toward 0.5), LEFT dims (gamma UP toward 1.0).
         m.set_cursor(ROW_BRIGHTNESS);
-        assert!((m.gamma() - GAMMA_DEFAULT).abs() < 1e-6);
+        assert!((s.cvars.gamma - GAMMA_DEFAULT).abs() < 1e-6);
         for _ in 0..40 {
-            m.adjust(1);
+            m.adjust(1, &mut s);
         }
-        assert!((m.gamma() - GAMMA_MIN).abs() < 1e-6, "right clamps gamma at 0.5 (brightest)");
+        assert!((s.cvars.gamma - GAMMA_MIN).abs() < 1e-6, "right clamps gamma at 0.5 (brightest)");
         for _ in 0..40 {
-            m.adjust(-1);
+            m.adjust(-1, &mut s);
         }
-        assert!((m.gamma() - GAMMA_MAX).abs() < 1e-6, "left clamps gamma at 1.0 (dimmest)");
+        assert!((s.cvars.gamma - GAMMA_MAX).abs() < 1e-6, "left clamps gamma at 1.0 (dimmest)");
 
         // CD Music Volume row: 0..=1.
         m.set_cursor(ROW_CDVOLUME);
         for _ in 0..40 {
-            m.adjust(-1);
+            m.adjust(-1, &mut s);
         }
-        assert!((m.bgm_volume() - BGM_MIN).abs() < 1e-6);
+        assert!((s.cvars.bgmvolume - BGM_MIN).abs() < 1e-6);
         for _ in 0..40 {
-            m.adjust(1);
+            m.adjust(1, &mut s);
         }
-        assert!((m.bgm_volume() - BGM_MAX).abs() < 1e-6);
+        assert!((s.cvars.bgmvolume - BGM_MAX).abs() < 1e-6);
 
         // Checkboxes toggle regardless of direction (matches the C). Always Run
-        // starts ON (this port's default); the rest start off.
+        // starts ON (the 2026 profile's); the rest start off.
         for (row, getter, initial) in [
-            (ROW_ALWAYSRUN, Menu::always_run as fn(&Menu) -> bool, true),
-            (ROW_INVERTMOUSE, Menu::invert_mouse, false),
-            (ROW_LOOKSPRING, Menu::lookspring, false),
-            (ROW_LOOKSTRAFE, Menu::lookstrafe, false),
+            (ROW_ALWAYSRUN, Cvars::always_run as fn(&Cvars) -> bool, true),
+            (ROW_INVERTMOUSE, Cvars::invert_mouse, false),
+            (ROW_LOOKSPRING, |c: &Cvars| c.lookspring, false),
+            (ROW_LOOKSTRAFE, |c: &Cvars| c.lookstrafe, false),
         ] {
             m.set_cursor(row);
-            assert_eq!(getter(&m), initial, "checkbox row {row} starts at its default");
-            m.adjust(1);
-            assert_eq!(getter(&m), !initial, "right toggles it");
-            m.adjust(-1);
-            assert_eq!(getter(&m), initial, "left toggles it back");
+            assert_eq!(getter(&s.cvars), initial, "checkbox row {row} starts at its default");
+            m.adjust(1, &mut s);
+            assert_eq!(getter(&s.cvars), !initial, "right toggles it");
+            m.adjust(-1, &mut s);
+            assert_eq!(getter(&s.cvars), initial, "left toggles it back");
         }
     }
 
     #[test]
     fn options_enter_actions_console_defaults_and_stubs() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
 
         // Go to console: closes the menu, returns OpenConsole.
         m.set_cursor(ROW_CONSOLE);
-        assert_eq!(m.select(), MenuAction::OpenConsole);
+        assert_eq!(m.select(&mut s), MenuAction::OpenConsole);
         assert!(!m.visible, "Go to console closes the menu");
 
         // Reset to defaults: exec default.cfg restores what that file sets
         // (viewsize/gamma/volume/sensitivity + the binds) and nothing else.
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         m.set_cursor(ROW_MOUSESPEED);
-        m.adjust(1);
-        m.adjust(1);
+        m.adjust(1, &mut s);
+        m.adjust(1, &mut s);
         m.set_cursor(ROW_BRIGHTNESS);
-        m.adjust(1);
+        m.adjust(1, &mut s);
         m.set_cursor(ROW_SNDVOLUME);
-        m.adjust(-1);
+        m.adjust(-1, &mut s);
         m.set_cursor(ROW_CDVOLUME);
-        m.adjust(-1);
+        m.adjust(-1, &mut s);
         m.set_cursor(ROW_ALWAYSRUN);
-        m.adjust(1); // toggles OFF (Always Run defaults on in this port)
+        m.adjust(1, &mut s); // toggles OFF (Always Run defaults on in this port)
         m.set_cursor(ROW_INVERTMOUSE);
-        m.adjust(1);
+        m.adjust(1, &mut s);
         m.set_cursor(ROW_LOOKSPRING);
-        m.adjust(1);
+        m.adjust(1, &mut s);
         m.set_cursor(ROW_LOOKSTRAFE);
-        m.adjust(1);
-        assert!(m.sensitivity() != SENS_DEFAULT && !m.always_run());
+        m.adjust(1, &mut s);
+        assert!(s.cvars.sensitivity != SENS_DEFAULT && !s.cvars.always_run());
         m.set_cursor(ROW_DEFAULTS);
-        assert_eq!(m.select(), MenuAction::ResetDefaults);
-        assert!((m.sensitivity() - SENS_DEFAULT).abs() < 1e-6, "sensitivity 3");
-        assert!((m.gamma() - GAMMA_DEFAULT).abs() < 1e-6, "gamma 1.0");
-        assert!((m.volume() - VOLUME_DEFAULT).abs() < 1e-6, "volume 0.7");
+        assert_eq!(m.select(&mut s), MenuAction::ResetDefaults);
+        assert!((s.cvars.sensitivity - SENS_DEFAULT).abs() < 1e-6, "sensitivity 3");
+        assert!((s.cvars.gamma - GAMMA_DEFAULT).abs() < 1e-6, "gamma 1.0");
+        assert!((s.cvars.volume - VOLUME_DEFAULT).abs() < 1e-6, "volume 0.7");
         // default.cfg never touches these: they keep the player's values.
-        assert!((m.bgm_volume() - 0.9).abs() < 1e-6, "bgmvolume kept");
-        assert!(!m.always_run(), "cl_forwardspeed kept (Always Run stays off)");
-        assert!(m.invert_mouse() && m.lookspring() && m.lookstrafe(), "m_pitch/lookspring/lookstrafe kept");
+        assert!((s.cvars.bgmvolume - 0.9).abs() < 1e-6, "bgmvolume kept");
+        assert!(!s.cvars.always_run(), "cl_forwardspeed kept (Always Run stays off)");
+        assert!(s.cvars.invert_mouse() && s.cvars.lookspring && s.cvars.lookstrafe, "m_pitch/lookspring/lookstrafe kept");
 
         // Customize controls opens the Keys screen (M_Menu_Keys_f); Escape
         // returns to Options (M_Keys_Key K_ESCAPE -> M_Menu_Options_f).
         m.set_cursor(ROW_CONTROLS);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Keys, "Customize controls enters Keys");
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Options, "Esc on Keys returns to Options");
@@ -3851,7 +3633,7 @@ mod tests {
         // Video Options opens the mode list (M_Menu_Video_f) with the cursor on
         // the current preset; Escape returns to Options (VID_MenuKey K_ESCAPE).
         m.set_cursor(ROW_VIDEO);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Video, "Video Options enters the mode list");
         assert_eq!(m.cursor(), m.res_preset, "video cursor starts on the current mode");
         assert_eq!(m.cancel(), MenuAction::Back);
@@ -3860,108 +3642,113 @@ mod tests {
         // Enter on an analog row nudges it right (the C falls through to
         // M_AdjustSliders(1)).
         m.set_cursor(ROW_SNDVOLUME);
-        let before = m.volume();
-        m.select();
-        assert!(m.volume() > before, "Enter on Sound Volume nudges it up");
+        let before = s.cvars.volume;
+        m.select(&mut s);
+        assert!(s.cvars.volume > before, "Enter on Sound Volume nudges it up");
     }
 
-    // -- the port's Web extras ----------------------------------------------
+    // -- the port's settings: Classic / 2026 ---------------------------------
 
     #[test]
-    fn web_extras_default_off_toggle_like_checkboxes_and_back_out_to_their_row() {
-        let mut m = Menu::new();
-        assert_eq!(m.extras(), Extras::default(), "every extra defaults off");
-        assert_eq!(m.extras().bits(), 0);
+    fn classic_2026_flips_the_profile_and_its_page_changes_each_setting() {
+        let (mut m, mut s) = (Menu::new(), Settings::new(Profile::Classic));
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
-        m.set_cursor(ROW_EXTRAS);
+        m.select(&mut s); // -> Options
+        // Options' 14th row: left and right flip the profile (menu3), as a
+        // checkbox; Enter opens the page.
+        m.set_cursor(ROW_PROFILE);
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::None);
-        assert_eq!(m.screen(), MenuScreen::Extras, "Web extras opens its screen");
-        assert_eq!(m.cursor(), 0);
+        m.adjust(-1, &mut s);
+        assert_eq!(s, Settings::new(Profile::Modern), "every departure and key to 2026's");
+        m.adjust(1, &mut s);
+        assert_eq!(s, Settings::new(Profile::Classic), "and back: id's");
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 2]);
+        assert_eq!(m.select(&mut s), MenuAction::None);
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Extras, 0), "the page, on the profile row");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2], "entered with m_entersound");
 
-        // Checkbox rows: left and right both flip (menu3 each); Enter flips
-        // with menu2 + menu3, like an Options checkbox row.
-        let rows = &WEB_EXTRAS;
-        for (i, e) in rows.iter().map(|r| r.extra).enumerate() {
+        // Each toggle row flips its cvar whatever the direction; Enter too,
+        // with menu2 + menu3 like an Options checkbox row.
+        for (i, row) in SETTING_ROWS.iter().enumerate().filter(|(_, r)| r.kind == RowKind::Toggle) {
+            let c = cvar::find(row.cvar).unwrap();
             m.set_cursor(i);
-            assert!(!m.extras().get(e));
-            m.adjust(1);
-            assert!(m.extras().get(e), "right turns {e:?} on");
-            m.adjust(1);
-            assert!(!m.extras().get(e), "the direction is ignored: right again flips it off");
-            m.adjust(-1);
-            assert!(m.extras().get(e), "left flips it too");
+            assert_eq!(c.get(&s.cvars), "0", "{}: off in Classic", row.cvar);
+            m.adjust(1, &mut s);
+            assert_eq!((c.get(&s.cvars).as_str(), row.value(&s).as_str()), ("1", "on"), "right turns {} on", row.cvar);
+            m.adjust(1, &mut s);
+            assert_eq!(c.get(&s.cvars), "0", "the direction is ignored");
+            m.adjust(-1, &mut s);
+            assert_eq!(c.get(&s.cvars), "1", "left flips it too");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 3]);
-            m.select();
-            assert!(!m.extras().get(e), "Enter flips it");
+            m.select(&mut s);
+            assert_eq!(c.get(&s.cvars), "0", "Enter flips it");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
         }
-        assert_eq!(m.extras(), Extras::default());
-
-        // The cursor wraps over this build's rows (menu1 per move).
+        assert_eq!(s, Settings::new(Profile::Classic));
+        // The pixel size steps: auto, 1..4, and wraps.
+        let pixel = SETTING_ROWS.iter().position(|r| r.kind == RowKind::PixelSize).unwrap();
+        m.set_cursor(pixel);
+        assert_eq!(SETTING_ROWS[pixel].value(&s), "auto");
+        let steps: Vec<u8> = (0..6).map(|_| { m.adjust(1, &mut s); s.cvars.pixel_size }).collect();
+        assert_eq!(steps, [1, 2, 3, 4, 0, 1]);
+        m.adjust(-1, &mut s);
+        m.adjust(-1, &mut s);
+        assert_eq!((s.cvars.pixel_size, SETTING_ROWS[pixel].value(&s).as_str()), (4, "4"));
+        // The profile row is the Options row's switch.
         m.set_cursor(0);
+        m.select(&mut s);
+        assert_eq!((s.profile, s.cvars.pixel_size), (Profile::Modern, 0), "2026, its pixel size");
+
+        // The cursor wraps over the rows (menu1 per move).
+        m.take_sounds();
         m.move_cursor(-1);
-        assert_eq!(m.cursor(), rows.len() - 1, "up from the top wraps to the last row");
+        assert_eq!(m.cursor(), SETTING_ROWS.len() - 1, "up from the top wraps to the last row");
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu1; 2]);
 
-        // Escape: back to Options on the Web extras row (options_cursor keeps
-        // its place in the C), with m_entersound.
-        m.set_cursor(1);
-        m.adjust(1); // Show FPS on
+        // Escape: back to Options on its row, with m_entersound.
+        let show_fps = SETTING_ROWS.iter().position(|r| r.cvar == "wasm_showfps").unwrap();
+        m.set_cursor(show_fps);
+        m.adjust(1, &mut s);
         m.take_sounds();
         assert_eq!(m.cancel(), MenuAction::Back);
-        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_EXTRAS));
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_PROFILE));
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
 
-        // They are not default.cfg cvars: Reset to defaults keeps them, and
-        // so does a navigation reset (re-boot / New Game).
+        // They are not default.cfg's: Reset to defaults keeps them, and so
+        // does a navigation reset (re-boot / New Game).
         m.set_cursor(ROW_DEFAULTS);
-        assert_eq!(m.select(), MenuAction::ResetDefaults);
-        assert!(m.extras().show_fps, "Reset to defaults leaves the extras alone");
+        assert_eq!(m.select(&mut s), MenuAction::ResetDefaults);
+        assert!(s.cvars.show_fps, "Reset to defaults leaves the departures alone");
         m.reset_nav();
-        assert!(m.extras().show_fps, "reset_nav keeps them");
-
-        // The console commands' setter and the page's restore.
-        m.set_extra(Extra::Uncapped, true);
-        assert_eq!(m.extras().bits(), 0b011);
-        m.set_extras(Extras::default());
-        assert_eq!(m.extras(), Extras::default());
+        assert!(s.cvars.show_fps);
     }
 
     #[test]
-    fn web_extras_bits_round_trip() {
-        for bits in 0..16u32 {
-            let e = Extras::from_bits(bits);
-            assert_eq!(e.bits(), bits, "bits {bits:04b}");
-            let rows = [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp, Extra::Scaled2d];
-            for (i, x) in rows.into_iter().enumerate() {
-                assert_eq!(e.get(x), bits & (1 << i) != 0, "bit {i} is {x:?}");
+    fn the_settings_page_lists_every_departure_once_in_the_page_idiom() {
+        for row in &SETTING_ROWS {
+            if row.kind != RowKind::Profile {
+                let c = cvar::find(row.cvar).unwrap_or_else(|| panic!("{}: a cvar", row.cvar));
+                assert!(c.departure && c.archive, "{}: a departure, kept in config.cfg", row.cvar);
             }
-        }
-        assert_eq!(Extras::from_bits(0xffff_fff0), Extras::default(), "unknown bits are ignored");
-        assert_eq!(MenuScreen::Extras.item_count(), 4);
-    }
-
-    #[test]
-    fn web_extras_table_lists_each_extra_once_in_the_page_idiom() {
-        let extras: Vec<Extra> = WEB_EXTRAS.iter().map(|w| w.extra).collect();
-        assert_eq!(extras, [Extra::Uncapped, Extra::ShowFps, Extra::ExactPersp, Extra::Scaled2d], "bit order");
-        for w in &WEB_EXTRAS {
-            assert!(w.cvar.starts_with("wasm_"), "{}: not an id name", w.cvar);
-            assert_eq!(w.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", w.cvar);
-            for line in extras_help_lines(w) {
+            assert_eq!(row.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", row.cvar);
+            for line in extras_help_lines(row) {
                 assert!(line.len() <= EXTRAS_NOTE_COLS, "{line:?} fits right of the plaque");
             }
         }
+        // Every departure has its row, but Always Run's two speeds (id's own
+        // Options row).
+        for c in cvar::CVARS.iter().filter(|c| c.departure && !c.name.starts_with("cl_") || c.name == "cl_jumpswim") {
+            assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);
+        }
+        assert_eq!(MenuScreen::Extras.item_count(), SETTING_ROWS.len());
+        const _: () = assert!(EXTRAS_HELP_Y + 3.0 * 8.0 <= 200.0, "the help fits the 200-line menu screen");
     }
 
     #[test]
-    fn web_extras_screen_draws_in_the_options_idiom() {
+    fn the_settings_page_draws_in_the_options_idiom() {
         // Bronze (M_Print, c+128) is index 5, white (M_PrintWhite) index 6;
         // glyph 12 blank, 13 the cursor (index 7), as in id's conchars.
         let pal = ramp_palette();
@@ -3988,36 +3775,40 @@ mod tests {
         let px = |img: &Image, x: usize, y: usize| img.rgb[(y + 3) * 320 + x + 3];
 
         // Options: the port's row is the 14th, at y=136 (the C's _WIN32 row),
-        // right-justified with id's labels ("Web extras" ends at x=184).
-        let mut m = Menu::new();
+        // right-justified with id's labels ("Classic / 2026" ends at x=184),
+        // the profile at x=220.
+        let (mut m, mut s) = (Menu::new(), Settings::new(Profile::Classic));
         m.open();
         m.set_cursor(2);
-        m.select();
+        m.select(&mut s);
         let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.0, &pal);
-        assert_eq!(OPTIONS_LABELS[ROW_EXTRAS].len(), OPTIONS_LABELS[ROW_VIDEO].len());
-        assert_eq!(px(&img, 16 + 12 * 8, 136), pal[5], "'W' of Web extras, bronze, y=136");
-        assert_eq!(px(&img, 16 + 21 * 8, 136), pal[5], "its 's' in the last label column");
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.0), &pal);
+        assert_eq!(OPTIONS_LABELS[ROW_PROFILE].len(), OPTIONS_LABELS[ROW_VIDEO].len());
+        assert_eq!(px(&img, 16 + 8 * 8, 136), pal[5], "'C' of Classic / 2026, bronze, y=136");
+        assert_eq!(px(&img, 16 + 21 * 8, 136), pal[5], "its '6' in the last label column");
+        assert_eq!(px(&img, 220 + 6 * 8, 136), pal[5], "\"classic\" at x=220");
 
-        // The Extras screen, as M_Options_Draw: plaque + OPTIONS title, the
-        // rows from y=32 (bronze labels, "off" at x=220), the cursor at x=200
+        // The settings page, as M_Options_Draw: plaque + OPTIONS title, the
+        // rows from y=32 (bronze labels, values at x=220), the cursor at x=200
         // while the 4 Hz blink shows it; under them, right of the plaque, the
-        // white header at y=80 and the row's help lines from y=96, at x=64.
-        m.set_cursor(ROW_EXTRAS);
-        m.select();
+        // white header a row below the list and the row's help lines under it,
+        // at x=64.
+        m.set_cursor(ROW_PROFILE);
+        m.select(&mut s);
         let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
         assert_eq!(img.rgb[4 * 320 + 16], pal[9], "qplaque at (16,4)");
         assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
-        assert_eq!(px(&img, 64, 80), pal[6], "the header is M_PrintWhite");
-        for (i, label) in WEB_EXTRAS.iter().map(|r| r.label).enumerate() {
+        let header_y = 32 + (SETTING_ROWS.len() + 1) * 8;
+        assert_eq!(px(&img, 64, header_y), pal[6], "the header is M_PrintWhite");
+        for (i, row) in SETTING_ROWS.iter().enumerate() {
             let y = 32 + i * 8;
-            let first = label.bytes().position(|b| b != b' ').unwrap();
+            let first = row.label.bytes().position(|b| b != b' ').unwrap();
             assert_eq!(px(&img, 16 + first * 8, y), pal[5], "row {i} label bronze");
-            assert_eq!(px(&img, 220, y), pal[5], "row {i} checkbox 'off' at x=220");
+            assert_eq!(px(&img, 220, y), pal[5], "row {i}'s value at x=220");
         }
         assert_eq!(px(&img, 200, 32), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        assert_eq!(px(&img, 64, 96), pal[5], "row 0's help, bronze, from y=96");
+        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 0's help, bronze, under the header");
         // Nothing but the plaque in its columns: every note starts right of it.
         for y in 30..200 {
             for x in 16..48 {
@@ -4026,30 +3817,31 @@ mod tests {
         }
         // realtime 0.1: the blink is off (glyph 12, blank).
         let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.1, &pal);
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.1), &pal);
         assert_eq!(px(&img, 200, 32), pal[0], "the cursor blinks");
         // "on" replaces "off" once toggled; the help follows the cursor.
-        m.adjust(1);
+        m.move_cursor(1);
+        m.adjust(1, &mut s);
         m.move_cursor(1);
         let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &pics, Some(&cc), 0.0, 0.3, &pal);
-        assert_eq!(px(&img, 220 + 16, 32), pal[0], "\"on\" is two characters");
-        assert_eq!(px(&img, 220 + 16, 40), pal[5], "\"off\" is three");
-        assert_eq!(px(&img, 64, 96), pal[5], "row 1's help once the cursor moves");
-        assert_eq!(px(&img, 200, 40), pal[7], "the cursor on row 1");
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
+        assert_eq!(px(&img, 220 + 16, 40), pal[0], "\"on\" is two characters");
+        assert_eq!(px(&img, 220 + 16, 48), pal[5], "\"off\" is three");
+        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 2's help once the cursor moves");
+        assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 2");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &pics, None, 0.0, 0.3, &pal);
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.3), &pal);
         assert_eq!(img.rgb[4 * 320 + 100], pal[8]);
     }
 
     #[test]
     fn help_screen_pages_and_backs_out() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         // Main > Help.
         m.set_cursor(3);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Help);
         assert_eq!(m.help_page(), 0);
         // Right/up advance the page (page(+1) = next), wrapping at NUM_HELP_PAGES.
@@ -4083,7 +3875,7 @@ mod tests {
 
     #[test]
     fn menu_sounds_follow_the_c_triggers() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         // Opening latches m_entersound -> menu2.
         m.open();
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
@@ -4093,19 +3885,19 @@ mod tests {
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu1, MenuSound::Menu1]);
         // Entering a submenu plays menu2 (M_Main_Key K_ENTER latches it).
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         // Left/right adjust plays menu3 (M_AdjustSliders' unconditional
         // S_LocalSound) — even when the cursor sits on an action row.
         m.set_cursor(ROW_SNDVOLUME);
-        m.adjust(-1);
+        m.adjust(-1, &mut s);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3]);
         m.set_cursor(ROW_CONTROLS);
-        m.adjust(1);
+        m.adjust(1, &mut s);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3], "menu3 plays on action rows too");
         // Enter on a slider row: m_entersound (menu2) AND M_AdjustSliders' menu3.
         m.set_cursor(ROW_BRIGHTNESS);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
         // Escape back to Main: M_Menu_Main_f latches menu2.
         m.cancel();
@@ -4113,10 +3905,10 @@ mod tests {
         // Going to the console CLOSES the menu — the C's latched entersound
         // never fires (M_Draw stops running): silent.
         m.set_cursor(2);
-        m.select(); // -> Options (menu2)
+        m.select(&mut s); // -> Options (menu2)
         m.take_sounds();
         m.set_cursor(ROW_CONSOLE);
-        assert_eq!(m.select(), MenuAction::OpenConsole);
+        assert_eq!(m.select(&mut s), MenuAction::OpenConsole);
         assert_eq!(m.take_sounds(), vec![], "closing into the console is silent");
         // The sample names match S_LocalSound's literals.
         assert_eq!(MenuSound::Menu1.sample(), "misc/menu1.wav");
@@ -4132,22 +3924,22 @@ mod tests {
 
     #[test]
     fn load_save_screens_slots_gate_and_actions() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
-        m.select(); // -> SinglePlayer
+        m.select(&mut s); // -> SinglePlayer
 
         // Item 2 = Save: REFUSED while no game is running (M_Menu_Save_f's
         // `if (!sv.active) return`). The entersound was latched before the
         // early return, so menu2 still plays.
         m.set_cursor(2);
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer, "Save refuses without a game");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
 
         // Item 1 = Load (M_Menu_Load_f) opens with all slots unused.
         m.set_cursor(1);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Load);
         for i in 0..MAX_SAVEGAMES {
             assert!(!m.slot_loadable(i), "slot {i} must start unused");
@@ -4159,7 +3951,7 @@ mod tests {
             m.move_cursor(1);
             assert_eq!(m.cursor(), expect);
         }
-        m.adjust(-1);
+        m.adjust(-1, &mut s);
         assert_eq!(m.cursor(), 2);
         m.set_cursor(MAX_SAVEGAMES - 1);
         m.move_cursor(1);
@@ -4167,7 +3959,7 @@ mod tests {
         // Enter on an unused slot: menu2 plays but nothing happens — the C's
         // `if (!loadable[load_cursor]) return`.
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Load, "unused slot doesn't leave the screen");
         assert!(m.visible);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2], "Load Enter still plays menu2");
@@ -4181,15 +3973,15 @@ mod tests {
         assert!(!m.slot_loadable(3));
         m.set_cursor(2);
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::LoadSlot(2));
+        assert_eq!(m.select(&mut s), MenuAction::LoadSlot(2));
         assert!(!m.visible, "a real load closes the menu (m_state = m_none)");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
 
         // Escape on Load returns to SinglePlayer (M_Load_Key K_ESCAPE).
         m.open();
-        m.select(); // -> SinglePlayer (cursor 0)
+        m.select(&mut s); // -> SinglePlayer (cursor 0)
         m.set_cursor(1);
-        m.select(); // -> Load
+        m.select(&mut s); // -> Load
         assert_eq!(m.cancel(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
 
@@ -4198,11 +3990,11 @@ mod tests {
         // plays nothing).
         m.set_game_active(true);
         m.set_cursor(2);
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!(m.screen(), MenuScreen::Save);
         m.set_cursor(5);
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::SaveSlot(5));
+        assert_eq!(m.select(&mut s), MenuAction::SaveSlot(5));
         assert!(!m.visible, "Save Enter closes the menu like the C");
         assert_eq!(m.take_sounds(), vec![], "Save Enter is silent in the C");
 
@@ -4212,19 +4004,19 @@ mod tests {
 
     #[test]
     fn video_screen_lists_and_applies_presets() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.sync_resolution(RESOLUTION_PRESETS[2].0, RESOLUTION_PRESETS[2].1);
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         m.set_cursor(ROW_VIDEO);
-        m.select(); // -> Video
+        m.select(&mut s); // -> Video
         assert_eq!(m.screen(), MenuScreen::Video);
         assert_eq!(m.cursor(), 2, "cursor opens on the current mode");
         // Move to another mode and apply it: VID_MenuKey K_ENTER -> VID_SetMode.
         m.move_cursor(1);
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::ResolutionChanged);
+        assert_eq!(m.select(&mut s), MenuAction::ResolutionChanged);
         assert_eq!(m.resolution(), RESOLUTION_PRESETS[3]);
         assert_eq!(
             m.take_sounds(),
@@ -4237,33 +4029,33 @@ mod tests {
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0);
         let mode = m.resolution();
-        m.adjust(1);
+        m.adjust(1, &mut s);
         assert_eq!(m.cursor(), 1, "video left/right move the line");
         assert_eq!(m.resolution(), mode, "...but only Enter sets the mode");
     }
 
     #[test]
     fn keys_screen_lists_rebinds_and_unbinds() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         // The defaults include id's default.cfg keys and the port's WASD layout.
-        assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD));
-        assert_eq!(m.action_for_key(K_UPARROW), Some(BIND_FORWARD));
-        assert_eq!(m.action_for_key(K_MOUSE1), Some(BIND_ATTACK));
-        assert_eq!(m.action_for_key(K_CTRL), Some(BIND_ATTACK));
-        assert_eq!(m.action_for_key(K_SPACE), Some(BIND_JUMP));
-        assert_eq!(m.action_for_key(b'/'), Some(BIND_CHANGEWEAPON));
-        assert_eq!(m.action_for_key(b'c'), Some(BIND_MOVEDOWN));
-        assert_eq!(m.action_for_key(K_SHIFT), Some(BIND_SPEED));
+        assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
+        assert_eq!(s.binds.command(K_UPARROW), Some(BIND_FORWARD));
+        assert_eq!(s.binds.command(K_MOUSE1), Some(BIND_ATTACK));
+        assert_eq!(s.binds.command(K_CTRL), Some(BIND_ATTACK));
+        assert_eq!(s.binds.command(K_SPACE), Some(BIND_JUMP));
+        assert_eq!(s.binds.command(b'/'), Some(BIND_CHANGEWEAPON));
+        assert_eq!(s.binds.command(b'c'), Some(BIND_MOVEDOWN));
+        assert_eq!(s.binds.command(K_SHIFT), Some(BIND_SPEED));
         // find_keys_for_command returns up to two keys in keynum order
         // (M_FindKeysForCommand scans 0..256 ascending: 'w' = 119 < 128).
-        assert_eq!(m.find_keys_for_command(BIND_FORWARD), [Some(b'w'), Some(K_UPARROW)]);
+        assert_eq!(s.binds.find_keys_for_command(BIND_FORWARD), [Some(b'w'), Some(K_UPARROW)]);
 
         // Navigate Main > Options > Customize controls.
         m.open();
         m.set_cursor(2);
-        m.select();
+        m.select(&mut s);
         m.set_cursor(ROW_CONTROLS);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.screen(), MenuScreen::Keys);
         assert!(!m.bind_grabbing());
 
@@ -4271,34 +4063,34 @@ mod tests {
         // unbinds first, then grabs.
         m.set_cursor(BIND_ATTACK);
         m.take_sounds();
-        assert_eq!(m.select(), MenuAction::None);
+        assert_eq!(m.select(&mut s), MenuAction::None);
         assert!(m.bind_grabbing(), "Enter starts the bind grab");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         assert_eq!(
-            m.find_keys_for_command(BIND_ATTACK),
+            s.binds.find_keys_for_command(BIND_ATTACK),
             [None, None],
             "two-key rows unbind before grabbing"
         );
         // Deliver the grabbed key: 'x' binds to +attack, menu1 plays.
-        m.bind_key(b'x');
+        m.bind_key(b'x', &mut s);
         assert!(!m.bind_grabbing());
-        assert_eq!(m.action_for_key(b'x'), Some(BIND_ATTACK));
+        assert_eq!(s.binds.command(b'x'), Some(BIND_ATTACK));
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu1]);
 
         // Escape during a grab cancels without binding.
-        m.select();
+        m.select(&mut s);
         assert!(m.bind_grabbing());
-        m.bind_key(K_ESCAPE);
+        m.bind_key(K_ESCAPE, &mut s);
         assert!(!m.bind_grabbing());
-        assert_eq!(m.action_for_key(K_ESCAPE), None, "Escape never binds");
+        assert_eq!(s.binds.command(K_ESCAPE), None, "Escape never binds");
         // The console key is refused too (the C's `k != '`'` check): it
         // keeps default.cfg's toggleconsole.
-        m.select();
-        m.bind_key(b'`');
-        assert_eq!(m.action_for_key(b'`'), Some(BIND_TOGGLECONSOLE), "backtick never binds");
+        m.select(&mut s);
+        m.bind_key(b'`', &mut s);
+        assert_eq!(s.binds.command(b'`'), Some(BIND_TOGGLECONSOLE), "backtick never binds");
 
         // cancel() during a grab also just ends the grab (screen stays).
-        m.select();
+        m.select(&mut s);
         assert!(m.bind_grabbing());
         assert_eq!(m.cancel(), MenuAction::None);
         assert!(!m.bind_grabbing());
@@ -4307,18 +4099,18 @@ mod tests {
         // Backspace unbinds the highlighted command (menu2).
         m.set_cursor(BIND_FORWARD);
         m.take_sounds();
-        m.keys_backspace();
-        assert_eq!(m.find_keys_for_command(BIND_FORWARD), [None, None]);
-        assert_eq!(m.action_for_key(b'w'), None);
+        m.keys_backspace(&mut s);
+        assert_eq!(s.binds.find_keys_for_command(BIND_FORWARD), [None, None]);
+        assert_eq!(s.binds.command(b'w'), None);
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         // ...and left/right move the keys cursor like up/down (M_Keys_Key).
-        m.adjust(1);
+        m.adjust(1, &mut s);
         assert_eq!(m.cursor(), BIND_FORWARD + 1);
 
         // Reset to defaults re-execs default.cfg: the bindings come back.
-        m.reset_defaults();
-        assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD));
-        assert_eq!(m.action_for_key(b'x'), None, "custom binds reset too");
+        s.reset_defaults();
+        assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
+        assert_eq!(s.binds.command(b'x'), None, "custom binds reset too");
     }
 
     /// CENSUS L14: with a game running (`sv.active`), New Game asks
@@ -4326,30 +4118,30 @@ mod tests {
     /// only y (yes), n or Escape (no) answer; no leaves the Single Player menu.
     #[test]
     fn new_game_asks_first_while_a_game_runs() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
-        m.select(); // Main > Single Player
+        m.select(&mut s); // Main > Single Player
         assert_eq!(m.screen(), MenuScreen::SinglePlayer);
         m.set_server_active(true);
-        assert_eq!(m.select(), MenuAction::None, "asks instead of starting");
+        assert_eq!(m.select(&mut s), MenuAction::None, "asks instead of starting");
         assert!(m.new_game_confirm());
-        assert_eq!(m.select(), MenuAction::None, "Enter doesn't answer");
+        assert_eq!(m.select(&mut s), MenuAction::None, "Enter doesn't answer");
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0, "arrows don't move behind the modal");
         assert_eq!(m.cancel(), MenuAction::None, "Escape = no");
         assert!(!m.new_game_confirm() && m.visible);
         assert_eq!(m.screen(), MenuScreen::SinglePlayer, "no: back on Single Player");
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.quit_no(), MenuAction::None, "n = no");
         assert!(!m.new_game_confirm());
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.quit_yes(), MenuAction::NewGame, "y starts it");
         assert!(!m.visible && !m.new_game_confirm());
         // No game running (the attract loop): straight in, as before.
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
-        m.select();
-        assert_eq!(m.select(), MenuAction::NewGame);
+        m.select(&mut s);
+        assert_eq!(m.select(&mut s), MenuAction::NewGame);
     }
 
     /// The host's re-boot sites (boot / boot_demo / boot_attract / New Game /
@@ -4360,33 +4152,33 @@ mod tests {
     /// "rebind keys, set Always Run, then New Game" flow as a contract.
     #[test]
     fn reset_nav_keeps_user_choices_and_resets_navigation() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         // Change every class of user choice through the real menu paths.
         m.set_cursor(2);
-        m.select(); // Main > Options
+        m.select(&mut s); // Main > Options
         m.set_cursor(ROW_SCREENSIZE);
-        m.adjust(-1); // viewsize 100 -> 90
+        m.adjust(-1, &mut s); // viewsize 100 -> 90
         m.set_cursor(ROW_BRIGHTNESS);
-        m.adjust(1); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
+        m.adjust(1, &mut s); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
         m.set_cursor(ROW_MOUSESPEED);
-        m.adjust(1); // sensitivity 3 -> 3.5
+        m.adjust(1, &mut s); // sensitivity 3 -> 3.5
         m.set_cursor(ROW_SNDVOLUME);
-        m.adjust(-1); // volume 0.7 -> 0.6
+        m.adjust(-1, &mut s); // volume 0.7 -> 0.6
         m.set_cursor(ROW_CDVOLUME);
-        m.adjust(-1); // bgmvolume 1.0 -> 0.9
+        m.adjust(-1, &mut s); // bgmvolume 1.0 -> 0.9
         for row in [ROW_ALWAYSRUN, ROW_INVERTMOUSE, ROW_LOOKSPRING, ROW_LOOKSTRAFE] {
             m.set_cursor(row);
-            m.adjust(1); // toggles flip regardless of direction (Always Run: on -> OFF)
+            m.adjust(1, &mut s); // toggles flip regardless of direction (Always Run: on -> OFF)
         }
         // Rebind through the real grab path: Options > Customize controls,
         // Enter on "change weapon" (one key bound, '/' — no unbind-first), 'j'.
         m.set_cursor(ROW_CONTROLS);
-        m.select(); // -> Keys
+        m.select(&mut s); // -> Keys
         m.set_cursor(BIND_CHANGEWEAPON);
-        m.select(); // starts the grab
-        m.bind_key(b'j');
-        assert_eq!(m.action_for_key(b'j'), Some(BIND_CHANGEWEAPON));
+        m.select(&mut s); // starts the grab
+        m.bind_key(b'j', &mut s);
+        assert_eq!(s.binds.command(b'j'), Some(BIND_CHANGEWEAPON));
         // Host-mirrored externals: slot comments + the Save gate.
         let mut comments: [String; MAX_SAVEGAMES] = Default::default();
         comments[3] = "e1m1 quick".to_string();
@@ -4405,18 +4197,18 @@ mod tests {
         assert!(!m.bind_grabbing(), "a pending bind grab is cancelled");
         assert!(m.take_sounds().is_empty(), "queued menu sounds are dropped");
         // ...but EVERY user choice survives.
-        assert_eq!(m.viewsize(), 90.0, "Screen size (viewsize) survives");
-        assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives");
-        assert!((m.sensitivity() - 3.5).abs() < 1e-6, "Mouse speed survives");
-        assert!((m.volume() - 0.6).abs() < 1e-6, "Sound volume survives");
-        assert!((m.bgm_volume() - 0.9).abs() < 1e-6, "CD volume survives");
-        assert!(!m.always_run(), "Always Run (toggled off its on-default) survives");
-        assert!(m.invert_mouse(), "Invert Mouse survives");
-        assert!(m.lookspring(), "Lookspring survives");
-        assert!(m.lookstrafe(), "Lookstrafe survives");
-        assert_eq!(m.action_for_key(b'j'), Some(BIND_CHANGEWEAPON), "rebinds survive");
-        assert_eq!(m.action_for_key(K_SPACE), Some(BIND_JUMP), "seeded binds survive");
-        assert_eq!(m.action_for_key(b'w'), Some(BIND_FORWARD), "seeded binds survive");
+        assert_eq!(s.cvars.viewsize, 90.0, "Screen size (viewsize) survives");
+        assert!((s.cvars.gamma - 0.95).abs() < 1e-6, "Brightness survives");
+        assert!((s.cvars.sensitivity - 3.5).abs() < 1e-6, "Mouse speed survives");
+        assert!((s.cvars.volume - 0.6).abs() < 1e-6, "Sound volume survives");
+        assert!((s.cvars.bgmvolume - 0.9).abs() < 1e-6, "CD volume survives");
+        assert!(!s.cvars.always_run(), "Always Run (toggled off its on-default) survives");
+        assert!(s.cvars.invert_mouse(), "Invert Mouse survives");
+        assert!(s.cvars.lookspring, "Lookspring survives");
+        assert!(s.cvars.lookstrafe, "Lookstrafe survives");
+        assert_eq!(s.binds.command(b'j'), Some(BIND_CHANGEWEAPON), "rebinds survive");
+        assert_eq!(s.binds.command(K_SPACE), Some(BIND_JUMP), "seeded binds survive");
+        assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD), "seeded binds survive");
         assert_eq!(m.save_comment(3), "e1m1 quick", "host-set slot comments survive");
         assert!(m.slot_loadable(3));
         assert!(m.game_active, "the Save gate is host state, not navigation");
@@ -4436,7 +4228,7 @@ mod tests {
         let pal = ramp_palette();
         let pics = MenuPics::default();
         let conchars = test_conchars();
-        let mut m = Menu::new();
+        let (mut m, s) = (Menu::new(), Settings::default());
         m.open();
         for (screen, cursor) in [
             (MenuScreen::Multiplayer, 0),
@@ -4448,9 +4240,9 @@ mod tests {
             m.screen = screen;
             m.set_cursor(cursor);
             let mut img = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img, &m, &pics, None, 0.4, 0.0, &pal); // no pics, no font
+            draw_menu(&mut img, &m, &s, &pics, None, clock(0.4, 0.0), &pal); // no pics, no font
             let mut img2 = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img2, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
+            draw_menu(&mut img2, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0), &pal);
             let inked = img2.rgb.iter().any(|&p| p != [9, 9, 9]);
             assert!(inked, "{screen:?} must draw its text rows with conchars present");
         }
@@ -4461,20 +4253,20 @@ mod tests {
         m.set_save_comments(comments);
         m.screen = MenuScreen::Load;
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0), &pal);
         m.screen = MenuScreen::Keys;
         m.bind_grab = true;
         let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.4, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0), &pal);
     }
 
     #[test]
     fn quit_confirm_yes_no_flow() {
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         // Raise from Main via select.
         m.set_cursor(4);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.screen(), MenuScreen::Quit);
         // No (escape) restores Main.
         assert_eq!(m.quit_no(), MenuAction::Back);
@@ -4482,7 +4274,7 @@ mod tests {
         assert!(m.visible);
         // Raise again, Yes closes the menu.
         m.set_cursor(4);
-        m.select();
+        m.select(&mut s);
         assert_eq!(m.quit_yes(), MenuAction::Closed);
         assert!(!m.visible);
 
@@ -4490,7 +4282,7 @@ mod tests {
         // restores Options).
         m.open();
         m.set_cursor(2);
-        m.select(); // -> Options
+        m.select(&mut s); // -> Options
         m.open_quit();
         assert_eq!(m.screen(), MenuScreen::Quit);
         assert_eq!(m.cancel(), MenuAction::Back);
@@ -4518,25 +4310,25 @@ mod tests {
         let mut help: [Option<crate::wad::Qpic>; NUM_HELP_PAGES] = Default::default();
         help[2] = Some(solid_pic(320, 200, 6));
         let pics = MenuPics { help, ..Default::default() };
-        let mut m = Menu::new();
+        let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(3);
-        m.select(); // -> Help, page 0
+        m.select(&mut s); // -> Help, page 0
         m.help_page = 2; // the page that has art
         let mut img = Image::new(320, 200, bg);
-        draw_menu(&mut img, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
         assert_eq!(img.rgb[0], pal[6], "the help page pic must paint at (0,0)");
         // A missing page (page 0 here is None) draws nothing and never panics.
         m.help_page = 0;
         let mut img0 = Image::new(320, 200, bg);
-        draw_menu(&mut img0, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
+        draw_menu(&mut img0, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
         assert_eq!(img0.rgb[0], bg, "a missing help page leaves the frame untouched");
 
         // Quit (M_Quit_Draw): M_DrawTextBox (56, 76, 24, 4) from the box_*
         // pics and quit message msgNumber at (64, 84..108) in M_Print's bronze.
         m.open();
         m.set_cursor(4);
-        m.select(); // -> Quit
+        m.select(&mut s); // -> Quit
         assert_eq!(m.screen(), MenuScreen::Quit);
         m.set_quit_message(4);
         let mut pics = MenuPics::default();
@@ -4545,13 +4337,13 @@ mod tests {
             *slot = Some(solid_pic(w, 8, 20 + i as u8));
         }
         let mut imgq = Image::new(320, 200, bg);
-        draw_menu(&mut imgq, &m, &pics, Some(&conchars), 0.0, 0.0, &pal);
+        draw_menu(&mut imgq, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
         let at = |x: usize, y: usize| imgq.rgb[y * 320 + x];
         assert_eq!(at(56, 76), pal[20], "box_tl at (56, 76)");
         assert_eq!(at(56, 84), pal[21], "box_ml below it");
         assert_eq!(at(64, 76), pal[23], "box_tm from x 64");
         let mut bare = Image::new(320, 200, bg);
-        draw_menu(&mut bare, &m, &pics, None, 0.0, 0.0, &pal);
+        draw_menu(&mut bare, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
         assert_eq!(bare.rgb[84 * 320 + 64], pal[24], "box_mm on the first text row");
         assert_eq!(bare.rgb[92 * 320 + 64], pal[25], "box_mm2 from the second on");
         assert_eq!(bare.rgb[108 * 320 + 64], pal[25], "box_mm2 on the fourth");
@@ -4564,7 +4356,7 @@ mod tests {
         assert_eq!(at(1, 0), pal[0], "faded");
         // Without conchars the box still paints (no panic).
         let mut imgq2 = Image::new(320, 200, bg);
-        draw_menu(&mut imgq2, &m, &pics, None, 0.0, 0.0, &pal);
+        draw_menu(&mut imgq2, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
         assert_eq!(imgq2.rgb[76 * 320 + 56], pal[20], "the Quit box paints without conchars");
         // "No" goes back to the menu it rose over.
         assert_eq!(m.quit_no(), MenuAction::Back);

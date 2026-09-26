@@ -2,29 +2,49 @@
 //! clamped to a safe envelope; `vid.buffer`, the RGBA framebuffer each
 //! `Frame` record carries) and the bits of screen.c both client frames share
 //! (the `viewsize` cvar, `Draw_TileClear`'s backtile).
+//!
+//! Two ways to show the picture, as the settings say ([`quake_rs::cvar`]):
+//!
+//! - **A video mode in a 4:3 box** (`vid_native 0`, Classic): the mode
+//!   `_vid_resolution` (Options > Video Options), at most 1280x800, which the
+//!   page shows in the largest 4:3 box the window fits, as a 1996 monitor
+//!   showed WinQuake's 16:10 modes (so `vid.aspect` folds the stretch in).
+//! - **Native** (`vid_native 1`, 2026): the picture fills the page's box for
+//!   it (the `Window` record, in device pixels) at the box's own aspect, with
+//!   square pixels, [`pixel_size`] device pixels to one of the picture's; the
+//!   renderer's `hires` lets it past id's 1280x1024 and Hor+ (`fov_adapt`)
+//!   widens the view instead of squashing it.
 
 use quake_rs::client::Vid;
-use quake_rs::render;
+use quake_rs::cvar::Cvars;
+use quake_rs::render::{self, FovMode, MipCvars, VideoCvars};
 
-use crate::app::{ensure_app, APP};
+use crate::app::{ensure_app, App, APP};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
-/// can mark it current). `config.cfg` restores the player's *saved* resolution
-/// over this at startup, and Options > Video Options lets them change it at
-/// runtime; the chosen size persists across boots / New Game / reloads. The
-/// menu + HUD are drawn at their own pixel size, as WinQuake draws them in every
-/// mode, unless the [`set_scaled_2d`] extra blows them up.
+/// can mark it current): `_vid_resolution`'s default. The menu + HUD are drawn
+/// at their own pixel size, as WinQuake draws them in every mode, unless the
+/// scaled-2-D setting blows them up.
 pub(crate) const DEFAULT_W: usize = 960;
 pub(crate) const DEFAULT_H: usize = 600;
-/// Sane bounds for [`set_resolution`] (and the menu presets): the framebuffer is
-/// clamped to this envelope and its total pixel count capped so a runaway value
-/// cannot allocate gigabytes. `1280*800*4` bytes ≈ 4 MB is the upper bound.
+/// Sane bounds for a video mode ([`set_resolution`], `_vid_resolution`): the
+/// framebuffer is clamped to this envelope and its total pixel count capped
+/// so a runaway value cannot allocate gigabytes. `1280*800*4` bytes ≈ 4 MB is
+/// the upper bound.
 const MIN_W: i32 = 320;
 const MAX_W: i32 = 1280;
 const MIN_H: i32 = 200;
 const MAX_H: i32 = 800;
 const MAX_PIXELS: i32 = 1280 * 800;
+
+/// The most pixels an Auto pixel size ([`pixel_size`]) renders: a 1080p
+/// frame. The renderer costs about 2.8 ns a pixel natively on one core (a
+/// little more in the browser), so a frame this size is about 6 ms: 60-144
+/// Hz displays keep up, and a 4K or 5K screen gets 2x2 or 3x3 pixels instead
+/// of a frame four to seven times the cost. (When the renderer runs on
+/// several cores this can grow.)
+pub(crate) const AUTO_PIXEL_BUDGET: usize = 1920 * 1080;
 
 /// Clamp a requested `(w, h)` render resolution into the supported envelope:
 /// width `MIN_W..=MAX_W`, height `MIN_H..=MAX_H`, and the total pixel count capped
@@ -47,10 +67,61 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
     (cw as usize, ch as usize)
 }
 
-/// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). Each
-/// `Frame` record carries it, and the page resizes its canvas backing store +
-/// ImageData when it changes (e.g. after the Options menu picks a different
-/// preset); `config.cfg` keeps it across sessions.
+/// How many device pixels make one of the picture's in native mode: the
+/// setting's 1..=4, or for Auto (0) the smallest that keeps a `win_w x win_h`
+/// box's frame within [`AUTO_PIXEL_BUDGET`] (4 at most).
+pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32)) -> u32 {
+    let max = u32::from(quake_rs::cvar::PIXEL_SIZE_MAX);
+    match u32::from(cvars.pixel_size) {
+        0 => (1..=max)
+            .find(|p| (win_w / p) as usize * (win_h / p) as usize <= AUTO_PIXEL_BUDGET)
+            .unwrap_or(max),
+        n => n.min(max),
+    }
+}
+
+/// The picture's size for these settings: native, the page's box divided by
+/// the pixel size (at least 320x200, at most the renderer's hires limit);
+/// otherwise the video mode, clamped.
+pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>) -> (usize, usize) {
+    match window.filter(|_| cvars.native) {
+        Some(win) => {
+            let p = pixel_size(cvars, win);
+            let (w, h) = ((win.0 / p) as usize, (win.1 / p) as usize);
+            let (mw, mh) = (render::HIRES_MAXWIDTH, render::HIRES_MAXHEIGHT);
+            (w.clamp(MIN_W as usize, mw), h.clamp(MIN_H as usize, mh))
+        }
+        None => {
+            let (w, h) = cvars.vid_resolution;
+            clamp_resolution(i32::from(w), i32::from(h))
+        }
+    }
+}
+
+/// Whether the picture is shown native (the page fills its box, square
+/// pixels) rather than as a mode in a 4:3 box.
+pub(crate) fn native(a: &App) -> bool {
+    a.settings.cvars.native && a.window.is_some()
+}
+
+/// Once a frame, before the client frame: the framebuffer to the size the
+/// settings ask for, and the settings the engine still keeps per thread
+/// handed over — the renderer's video and mip cvars and the 2-D layer's
+/// scale. (When the renderer takes them per frame, in `Vid`, this is where
+/// they go instead.)
+pub(crate) fn apply_settings(a: &mut App) {
+    let (w, h) = picture_size(&a.settings.cvars, a.window);
+    a.set_render_size(w, h);
+    let c = &a.settings.cvars;
+    let fov_mode = if c.fov_adapt { FovMode::HorPlus } else { FovMode::Classic };
+    render::set_video_cvars(VideoCvars { fov_mode, hires: native(a) });
+    render::set_mip_cvars(MipCvars { mipscale: c.d_mipscale, mipcap: c.d_mipcap });
+    quake_rs::draw::set_scaled_2d(c.scaled_2d);
+    a.menu.sync_resolution(w as i32, h as i32);
+}
+
+/// The current render width in pixels. Each `Frame` record carries it, and
+/// the page resizes its canvas backing store + ImageData when it changes.
 pub(crate) fn width() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_w as i32).unwrap_or(DEFAULT_W as i32))
 }
@@ -59,76 +130,74 @@ pub(crate) fn height() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_h as i32).unwrap_or(DEFAULT_H as i32))
 }
 
-/// Set the render resolution at runtime, reallocating the framebuffer. The
-/// requested `(w, h)` is clamped to the supported envelope (width 320..=1280,
-/// height 200..=800, and total pixels <= 1_280*800 so a runaway can't OOM) via
-/// [`clamp_resolution`]; out-of-range input is clamped, never a panic. After this,
-/// `width()`/`height()` report the new (clamped) size and the next `step` renders
-/// the scene at it. The menu + HUD are drawn at their own pixel size, as in
-/// WinQuake (blown up to the framebuffer with the [`set_scaled_2d`] extra).
+/// Set a video mode, as Enter on a Video Options line does: `_vid_resolution`
+/// (clamped to the supported envelope, never a panic), shown in the 4:3 box —
+/// native resolution off — and the framebuffer reallocated at once, so
+/// `width()`/`height()` report the new size.
 pub(crate) fn set_resolution(w: i32, h: i32) {
     let (cw, ch) = clamp_resolution(w, h);
     ensure_app(|a| {
+        a.settings.cvars.vid_resolution = (cw as u16, ch as u16);
+        a.settings.cvars.native = false;
         a.set_render_size(cw, ch);
-        // Keep the Video Options "current mode" pointing at the new size too, so
-        // a programmatic set (e.g. the page restoring a saved resolution on load)
-        // doesn't leave the menu showing a stale mode.
+        // Keep the Video Options "current mode" pointing at the new size too.
         a.menu.sync_resolution(cw as i32, ch as i32);
     });
 }
 
-/// The width:height ratio the page DISPLAYS the canvas at, whatever its backing
-/// store: `web/index.html` shows it in a 640x480 box, and with `aspect-ratio:
-/// 4/3` in fullscreen and on narrow screens — as DOS and Windows Quake's modes
-/// filled a 4:3 monitor. Every resolution preset is 16:10, so its pixels are
-/// shown 1.2x taller than wide.
+/// The page's box for the picture, in device pixels (the `Window` record);
+/// native mode renders into it from the next frame.
+pub(crate) fn set_window(w: u32, h: u32) {
+    ensure_app(|a| a.window = (w > 0 && h > 0).then_some((w, h)));
+}
+
+/// The width:height ratio the page shows a video mode at, whatever its
+/// backing store: the largest 4:3 box the window fits, as DOS and Windows
+/// Quake's modes filled a 4:3 monitor. Every mode is 16:10, so its pixels are
+/// shown 1.2x taller than wide. (Native, the pixels are square.)
 pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 
-/// The screen the client frames draw ([`Vid`]): the mode, shown at the page's
-/// [`DISPLAY_ASPECT`] (which `vid.aspect` folds into the projection so the
-/// world is not stretched by the 4:3 display), with the renderer's Web extra
-/// (Options > Web extras, `wasm_exactpersp`; [`crate::extras::extras`]).
-pub(crate) fn vid(render_w: usize, render_h: usize) -> Vid {
-    Vid {
-        width: render_w,
-        height: render_h,
-        display_aspect: DISPLAY_ASPECT,
-        exact_perspective: crate::extras::extras().exact_persp,
-    }
+/// The screen the client frames draw ([`Vid`]): the picture's size, the
+/// aspect it is shown at (a mode's 4:3 box, or square pixels native; with the
+/// size it gives `vid.aspect`), and the exact-perspective setting.
+pub(crate) fn vid(a: &App) -> Vid {
+    let (w, h) = (a.render_w, a.render_h);
+    let display_aspect = if native(a) && h > 0 { w as f64 / h as f64 } else { DISPLAY_ASPECT };
+    Vid { width: w, height: h, display_aspect, exact_perspective: a.settings.cvars.exact_persp }
+}
+
+/// The [`Vid`] of a `w x h` video mode in the 4:3 box, id's spans: what a
+/// Classic frame draws.
+#[cfg(test)]
+pub(crate) fn mode_vid(w: usize, h: usize) -> Vid {
+    Vid { width: w, height: h, display_aspect: DISPLAY_ASPECT, exact_perspective: false }
 }
 
 /// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.
-/// Read-only, for the page/verification harness like [`volume`].
+/// Read-only, for the page/verification harness.
 pub(crate) fn viewsize() -> f32 {
     APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| a.menu.viewsize())
-            .unwrap_or(render::VIEWSIZE_DEFAULT)
+        c.borrow().as_ref().map(|a| a.settings.cvars.viewsize).unwrap_or(render::VIEWSIZE_DEFAULT)
     })
 }
 
-/// Set the `viewsize` cvar, bounded to 30..=120 (the console's `viewsize n`):
-/// the page restoring the size it saved, as `Host_WriteConfiguration`'s
-/// config.cfg carries `viewsize` across sessions in id's Quake.
+/// Set the `viewsize` cvar, bounded to 30..=120 (the console's `viewsize n`).
 pub(crate) fn set_viewsize(v: f32) {
-    ensure_app(|a| a.menu.set_viewsize(v));
+    ensure_app(|a| a.settings.cvars.set_viewsize(v));
 }
 
-/// The "scaled 2-D" extra (not id; off by default): `1` draws the status bar,
-/// menus, console and text as id's 320x200 screen blown up to fill the
-/// framebuffer, `0` at their own pixel size as WinQuake does in every mode
-/// ([`quake_rs::draw::set_scaled_2d`]). The Web extras row `wasm_scaled2d`
-/// (bit 8 of `extras`/`set_extras`) is the same switch: the menu holds the
-/// value and `host::step` applies it each frame; takes effect on the next frame.
+/// The scaled-2-D setting (`wasm_scaled2d`): `1` draws the status bar,
+/// menus, console and text on id's 320x200 screen at the largest whole
+/// multiple that fits, `0` at their own pixel size as WinQuake does in every
+/// mode. Takes effect on the next frame.
 pub(crate) fn set_scaled_2d(on: i32) {
-    ensure_app(|a| a.menu.set_extra(quake_rs::render::Extra::Scaled2d, on != 0));
+    ensure_app(|a| a.settings.cvars.scaled_2d = on != 0);
     quake_rs::draw::set_scaled_2d(on != 0);
 }
 
-/// `1` while the "scaled 2-D" extra is on ([`set_scaled_2d`]).
+/// `1` while the scaled-2-D setting is on ([`set_scaled_2d`]).
 pub(crate) fn scaled_2d() -> i32 {
-    quake_rs::draw::scaled_2d() as i32
+    APP.with(|c| c.borrow().as_ref().map_or(0, |a| a.settings.cvars.scaled_2d as i32))
 }
 
 #[cfg(test)]

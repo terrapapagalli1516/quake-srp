@@ -1,15 +1,16 @@
-//! Key numbers, their names, and the default bindings.
+//! Key numbers, their names, and the key bindings.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
-//! Source: `WinQuake/keys.h` / `keys.c` (`K_*`, `Key_KeynumToString`) and the
-//! binds of `default.cfg`.
-
-use crate::menu::{
-    BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT,
-    BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_RIGHT,
-    BIND_IMPULSE_0, BIND_KLOOK, BIND_MLOOK, BIND_PAUSE, BIND_SHOWSCORES, BIND_SIZEDOWN,
-    BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, BIND_TOGGLECONSOLE,
-};
+//! Source: `WinQuake/keys.h` / `keys.c` (`K_*`, `Key_KeynumToString`,
+//! `Key_StringToKeynum`, `keybindings[]` with `Key_SetBinding` and
+//! `Key_WriteBindings`) and the binds of `default.cfg`.
+//!
+//! id's `keybindings[256]` holds a command line per key. The port keeps a
+//! [`Binding`] per key: one of [`BIND_COMMANDS`], the commands the host runs
+//! itself (the moves `CL_BaseMove` reads every frame, the impulses, the view
+//! size, pause, the console), or any other console line, run through the
+//! console when the key goes down, as `Key_Event` puts it in the command
+//! buffer.
 
 /// Quake key numbers (keys.h): printable ASCII is itself; the special keys take
 /// the 128+ block. Only the keys a browser page can sensibly deliver are named
@@ -142,56 +143,290 @@ pub fn keynum_to_string(keynum: u8) -> String {
     .to_string()
 }
 
-/// The boot key bindings: id's `default.cfg` (from the pak) for every key the
-/// page delivers, PLUS this port's established WASD layout (the shareware
-/// `default.cfg` predates WASD — it binds `a` to `+lookup` and `d` to `+moveup`;
-/// this port has always shipped WASD movement, so WASD overrides those four,
-/// exactly as a player's `config.cfg` would).
-pub(crate) fn default_bindings() -> [Option<u8>; 256] {
-    let mut b: [Option<u8>; 256] = [None; 256];
-    let mut bind = |key: u8, cmd: usize| b[key as usize] = Some(cmd as u8);
-    // default.cfg (id, verbatim — the keys the page can deliver):
-    bind(K_ALT, BIND_STRAFE);
-    bind(b',', BIND_MOVELEFT);
-    bind(b'.', BIND_MOVERIGHT);
-    bind(K_DEL, BIND_LOOKDOWN);
-    bind(K_PGDN, BIND_LOOKUP);
-    bind(K_END, BIND_CENTERVIEW);
-    bind(b'z', BIND_LOOKDOWN);
-    bind(K_SHIFT, BIND_SPEED);
-    bind(b'+', BIND_SIZEUP);
-    bind(b'=', BIND_SIZEUP);
-    bind(b'-', BIND_SIZEDOWN);
-    bind(K_CTRL, BIND_ATTACK);
-    bind(K_UPARROW, BIND_FORWARD);
-    bind(K_DOWNARROW, BIND_BACK);
-    bind(K_LEFTARROW, BIND_LEFT);
-    bind(K_RIGHTARROW, BIND_RIGHT);
-    bind(K_SPACE, BIND_JUMP);
-    bind(K_ENTER, BIND_JUMP);
-    bind(K_TAB, BIND_SHOWSCORES);
-    // bind 1 "impulse 1" .. bind 8 "impulse 8", bind 0 "impulse 0" — by key
-    // NUMBER, so the digit row selects weapons whatever Shift or the layout.
-    for n in 0..=8u8 {
-        bind(b'0' + n, BIND_IMPULSE_0 + n as usize);
+/// `Key_StringToKeynum` (keys.c): a single character is itself (lower case,
+/// as `Key_Event` delivers letters, so `bind W` binds the key that types
+/// `w`); anything longer is one of the `keynames`, in any case — `SEMICOLON`
+/// for `;`, which would end a command line. `None`: not a key.
+pub fn string_to_keynum(s: &str) -> Option<u8> {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (None, _) => None,
+        (Some(c), None) => u8::try_from(c).ok().map(|k| k.to_ascii_lowercase()),
+        _ if s.eq_ignore_ascii_case("SEMICOLON") => Some(b';'),
+        _ => (0..=255u8).find(|&k| !(33..127).contains(&k) && keynum_to_string(k).eq_ignore_ascii_case(s)),
     }
-    bind(b'/', BIND_CHANGEWEAPON);
-    bind(K_MOUSE1, BIND_ATTACK);
-    bind(K_MOUSE2, BIND_FORWARD);
-    bind(b'\\', BIND_MLOOK);
-    bind(K_MOUSE3, BIND_MLOOK);
-    bind(K_INS, BIND_KLOOK);
-    bind(K_PAUSE, BIND_PAUSE);
-    bind(b'~', BIND_TOGGLECONSOLE);
-    bind(b'`', BIND_TOGGLECONSOLE);
-    // This port's established layout (overrides default.cfg's a=+lookup,
-    // d=+moveup; w/s were unbound there):
-    bind(b'w', BIND_FORWARD);
-    bind(b's', BIND_BACK);
-    bind(b'a', BIND_MOVELEFT);
-    bind(b'd', BIND_MOVERIGHT);
-    bind(b'c', BIND_MOVEDOWN);
-    b
+}
+
+// ---------------------------------------------------------------------------
+// What a key runs
+// ---------------------------------------------------------------------------
+
+/// The commands this port's bindings run themselves, by index: first the
+/// rows of menu.c's `bindnames` (what Customize controls lists, in its
+/// order), then the rest of what `default.cfg` binds that the port runs. A
+/// binding to anything else is a console line ([`Binding::Line`]).
+pub const BIND_COMMANDS: [&str; NUM_BIND_COMMANDS] = [
+    "+attack",
+    "impulse 10",
+    "+jump",
+    "+forward",
+    "+back",
+    "+left",
+    "+right",
+    "+speed",
+    "+moveleft",
+    "+moveright",
+    "+strafe",
+    "+lookup",
+    "+lookdown",
+    "centerview",
+    "+mlook",
+    "+klook",
+    "+moveup",
+    "+movedown",
+    "sizeup",
+    "sizedown",
+    "+showscores",
+    "impulse 0",
+    "impulse 1",
+    "impulse 2",
+    "impulse 3",
+    "impulse 4",
+    "impulse 5",
+    "impulse 6",
+    "impulse 7",
+    "impulse 8",
+    "pause",
+    "toggleconsole",
+];
+/// The number of [`BIND_COMMANDS`].
+pub const NUM_BIND_COMMANDS: usize = 32;
+
+/// Indices into [`BIND_COMMANDS`]: the `bindnames` rows (menu.c) first.
+pub const BIND_ATTACK: usize = 0;
+pub const BIND_CHANGEWEAPON: usize = 1;
+pub const BIND_JUMP: usize = 2;
+pub const BIND_FORWARD: usize = 3;
+pub const BIND_BACK: usize = 4;
+pub const BIND_LEFT: usize = 5;
+pub const BIND_RIGHT: usize = 6;
+pub const BIND_SPEED: usize = 7;
+pub const BIND_MOVELEFT: usize = 8;
+pub const BIND_MOVERIGHT: usize = 9;
+pub const BIND_STRAFE: usize = 10;
+pub const BIND_LOOKUP: usize = 11;
+pub const BIND_LOOKDOWN: usize = 12;
+pub const BIND_CENTERVIEW: usize = 13;
+/// `+mlook`: mouse look while held (`in_mlook`, cl_input.c); the 2026
+/// profile's `freelook` holds it for good while the pointer is locked.
+pub const BIND_MLOOK: usize = 14;
+/// `+klook`: listed and bindable; keyboard look is not modelled, so holding
+/// it does nothing.
+pub const BIND_KLOOK: usize = 15;
+pub const BIND_MOVEUP: usize = 16;
+pub const BIND_MOVEDOWN: usize = 17;
+/// What `default.cfg` binds that `M_Keys_Draw` doesn't list: past the
+/// `bindnames` rows, so Customize controls never shows them, but a rebind
+/// over their key or `Reset to defaults` treats them like any other.
+/// `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
+pub const BIND_SIZEUP: usize = 18;
+pub const BIND_SIZEDOWN: usize = 19;
+/// `bind TAB "+showscores"`: `sb_showscores` while held, so `Sbar_Draw`
+/// shows the scorebar and `Sbar_SoloScoreboard`.
+pub const BIND_SHOWSCORES: usize = 20;
+/// `bind 0 "impulse 0"` .. `bind 8 "impulse 8"`: `"impulse N"` is
+/// `BIND_IMPULSE_0 + N` for N in 0..=8 (`"impulse 10"` is the listed
+/// [`BIND_CHANGEWEAPON`] row).
+pub const BIND_IMPULSE_0: usize = 21;
+/// `bind PAUSE "pause"`: `Host_Pause_f`.
+pub const BIND_PAUSE: usize = 30;
+/// `` bind ` "toggleconsole" `` and `bind ~ "toggleconsole"`:
+/// `Con_ToggleConsole_f`. A binding like any other, so the console key
+/// opens the console only where `Key_Event` runs bindings — not over the
+/// menu.
+pub const BIND_TOGGLECONSOLE: usize = 31;
+
+/// A key's binding: `keybindings[key]`, a command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Binding {
+    /// One of [`BIND_COMMANDS`], by index: the host runs it itself.
+    Command(usize),
+    /// Any other command line, run through the console on a key down
+    /// (`Key_Event`'s `Cbuf_AddText (kb)`).
+    Line(Box<str>),
+}
+
+impl Binding {
+    /// The binding for command line `line` (`Key_SetBinding`): one of
+    /// [`BIND_COMMANDS`] when it is one (case aside, as `Cmd_ExecuteString`
+    /// compares names), else the line itself. An empty line is no binding.
+    pub fn parse(line: &str) -> Option<Binding> {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        Some(match BIND_COMMANDS.iter().position(|c| c.eq_ignore_ascii_case(line)) {
+            Some(i) => Binding::Command(i),
+            None => Binding::Line(line.into()),
+        })
+    }
+
+    /// The command line, as `bind` prints it and `config.cfg` keeps it.
+    pub fn text(&self) -> &str {
+        match self {
+            Binding::Command(i) => BIND_COMMANDS.get(*i).copied().unwrap_or(""),
+            Binding::Line(l) => l,
+        }
+    }
+}
+
+/// keys.c's `keybindings[256]`: what each key runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bindings {
+    keys: Vec<Option<Binding>>,
+}
+
+impl Default for Bindings {
+    /// No key bound (`unbindall`).
+    fn default() -> Self {
+        Bindings { keys: vec![None; 256] }
+    }
+}
+
+impl Bindings {
+    /// id's `default.cfg`: `unbindall`, then its `bind` lines for every key
+    /// the page can deliver whose command the port runs. (Not ported: the
+    /// function keys' shortcuts, `messagemode` on `t`, the `zoom_in` alias;
+    /// Escape's `togglemenu` is `Key_Event`'s own.)
+    pub fn default_cfg() -> Bindings {
+        let mut b = Bindings::default();
+        for (key, cmd) in [
+            (K_ALT, BIND_STRAFE),
+            (b',', BIND_MOVELEFT),
+            (b'.', BIND_MOVERIGHT),
+            (K_DEL, BIND_LOOKDOWN),
+            (K_PGDN, BIND_LOOKUP),
+            (K_END, BIND_CENTERVIEW),
+            (b'z', BIND_LOOKDOWN),
+            (b'a', BIND_LOOKUP),
+            (b'd', BIND_MOVEUP),
+            (b'c', BIND_MOVEDOWN),
+            (K_SHIFT, BIND_SPEED),
+            (K_CTRL, BIND_ATTACK),
+            (K_UPARROW, BIND_FORWARD),
+            (K_DOWNARROW, BIND_BACK),
+            (K_LEFTARROW, BIND_LEFT),
+            (K_RIGHTARROW, BIND_RIGHT),
+            (K_SPACE, BIND_JUMP),
+            (K_ENTER, BIND_JUMP),
+            (K_TAB, BIND_SHOWSCORES),
+            (b'/', BIND_CHANGEWEAPON),
+            (b'\\', BIND_MLOOK),
+            (K_PAUSE, BIND_PAUSE),
+            (b'~', BIND_TOGGLECONSOLE),
+            (b'`', BIND_TOGGLECONSOLE),
+            (b'+', BIND_SIZEUP),
+            (b'=', BIND_SIZEUP),
+            (b'-', BIND_SIZEDOWN),
+            (K_INS, BIND_KLOOK),
+            (K_MOUSE1, BIND_ATTACK),
+            (K_MOUSE2, BIND_FORWARD),
+            (K_MOUSE3, BIND_MLOOK),
+        ] {
+            b.bind(key, cmd);
+        }
+        // bind 1 "impulse 1" .. bind 8 "impulse 8", bind 0 "impulse 0" — by key
+        // NUMBER, so the digit row selects weapons whatever Shift or the layout.
+        for n in 0..=8u8 {
+            b.bind(b'0' + n, BIND_IMPULSE_0 + n as usize);
+        }
+        b
+    }
+
+    /// The WASD layout over these bindings: `w`/`s` forward and back, `a`/`d`
+    /// step left and right — in place of `default.cfg`'s `a` `+lookup` and
+    /// `d` `+moveup`, which mouse look and Space make unneeded. The 2026
+    /// profile's keys.
+    pub fn with_wasd(mut self) -> Bindings {
+        self.bind(b'w', BIND_FORWARD);
+        self.bind(b's', BIND_BACK);
+        self.bind(b'a', BIND_MOVELEFT);
+        self.bind(b'd', BIND_MOVERIGHT);
+        self
+    }
+
+    /// `keybindings[key]`.
+    pub fn get(&self, key: u8) -> Option<&Binding> {
+        self.keys[key as usize].as_ref()
+    }
+
+    /// The [`BIND_COMMANDS`] index `key` runs, if it runs one of them.
+    pub fn command(&self, key: u8) -> Option<usize> {
+        match self.get(key) {
+            Some(Binding::Command(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// `Key_SetBinding`: from now on `key` runs `binding` (`None`: nothing).
+    pub fn set(&mut self, key: u8, binding: Option<Binding>) {
+        self.keys[key as usize] = binding;
+    }
+
+    /// Bind `key` to command `cmd` of [`BIND_COMMANDS`].
+    pub fn bind(&mut self, key: u8, cmd: usize) {
+        self.set(key, Some(Binding::Command(cmd)));
+    }
+
+    /// `Key_Unbindall_f`.
+    pub fn unbind_all(&mut self) {
+        self.keys.fill(None);
+    }
+
+    /// Every bound key and its binding, by keynum.
+    pub fn iter(&self) -> impl Iterator<Item = (u8, &Binding)> {
+        self.keys.iter().enumerate().filter_map(|(k, b)| b.as_ref().map(|b| (k as u8, b)))
+    }
+
+    /// `M_FindKeysForCommand` (menu.c): the first two keys bound to `cmd`,
+    /// in keynum order (the C scans 0..256 ascending).
+    pub fn find_keys_for_command(&self, cmd: usize) -> [Option<u8>; 2] {
+        let mut out = [None; 2];
+        let keys = (0..=255u8).filter(|&k| self.command(k) == Some(cmd));
+        for (slot, k) in out.iter_mut().zip(keys) {
+            *slot = Some(k);
+        }
+        out
+    }
+
+    /// `M_UnbindCommand` (menu.c): clear every key bound to `cmd`.
+    pub fn unbind_command(&mut self, cmd: usize) {
+        for b in &mut self.keys {
+            if *b == Some(Binding::Command(cmd)) {
+                *b = None;
+            }
+        }
+    }
+
+    /// `CL_KeyState`'s "down" for command `cmd`: a held key runs it.
+    pub fn held(&self, cmd: usize, held: &[bool; 256]) -> bool {
+        held.iter().enumerate().any(|(k, &h)| h && self.command(k as u8) == Some(cmd))
+    }
+
+    /// `Key_WriteBindings`, as the lines that turn `base` into these
+    /// bindings: `bind "KEY" "command"` for each key bound otherwise than in
+    /// `base`, and `unbind "KEY"` for each key `base` binds and these do not.
+    pub fn write_changes(&self, base: &Bindings, out: &mut String) {
+        for k in 0..=255u8 {
+            match (self.get(k), base.get(k)) {
+                (Some(b), was) if was != Some(b) => {
+                    out.push_str(&format!("bind \"{}\" \"{}\"\n", keynum_to_string(k), b.text()));
+                }
+                (None, Some(_)) => out.push_str(&format!("unbind \"{}\"\n", keynum_to_string(k))),
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -213,25 +448,75 @@ mod tests {
     }
 
     #[test]
+    fn string_to_keynum_is_key_string_to_keynum() {
+        assert_eq!(string_to_keynum("a"), Some(b'a'));
+        assert_eq!(string_to_keynum("W"), Some(b'w'), "one character: the key that types it");
+        assert_eq!(string_to_keynum("/"), Some(b'/'));
+        assert_eq!(string_to_keynum("space"), Some(K_SPACE), "names in any case");
+        assert_eq!(string_to_keynum("MOUSE2"), Some(K_MOUSE2));
+        assert_eq!(string_to_keynum("F10"), Some(K_F1 + 9));
+        assert_eq!(string_to_keynum("SEMICOLON"), Some(b';'));
+        assert_eq!(string_to_keynum("PAUSE"), Some(K_PAUSE));
+        assert_eq!((string_to_keynum(""), string_to_keynum("NOSUCHKEY")), (None, None));
+        for k in (1..=255u8).filter(|&k| keynum_to_string(k) != "UNKNOWN" && k != b' ') {
+            assert_eq!(string_to_keynum(&keynum_to_string(k)), Some(k.to_ascii_lowercase()), "{k}");
+        }
+    }
+
+    #[test]
+    fn a_binding_is_a_known_command_or_a_console_line() {
+        assert_eq!(Binding::parse("+FORWARD"), Some(Binding::Command(BIND_FORWARD)));
+        assert_eq!(Binding::parse("impulse 3"), Some(Binding::Command(BIND_IMPULSE_0 + 3)));
+        assert_eq!(Binding::parse("god"), Some(Binding::Line("god".into())));
+        assert_eq!(Binding::parse(""), None);
+        assert_eq!(Binding::parse("god").unwrap().text(), "god");
+        assert_eq!(Binding::Command(BIND_PAUSE).text(), "pause");
+        for (i, c) in BIND_COMMANDS.iter().enumerate() {
+            assert_eq!(Binding::parse(c), Some(Binding::Command(i)));
+        }
+    }
+
+    #[test]
     fn default_cfg_binds_enter_mouse2_mlook_klook() {
-        let b = default_bindings();
-        assert_eq!(b[K_ENTER as usize], Some(BIND_JUMP as u8));
-        assert_eq!(b[K_MOUSE2 as usize], Some(BIND_FORWARD as u8));
-        assert_eq!(b[b'\\' as usize], Some(BIND_MLOOK as u8));
-        assert_eq!(b[K_MOUSE3 as usize], Some(BIND_MLOOK as u8));
-        assert_eq!(b[K_INS as usize], Some(BIND_KLOOK as u8));
+        let b = Bindings::default_cfg();
+        assert_eq!(b.command(K_ENTER), Some(BIND_JUMP));
+        assert_eq!(b.command(K_MOUSE2), Some(BIND_FORWARD));
+        assert_eq!(b.command(b'\\'), Some(BIND_MLOOK));
+        assert_eq!(b.command(K_MOUSE3), Some(BIND_MLOOK));
+        assert_eq!(b.command(K_INS), Some(BIND_KLOOK));
+    }
+
+    #[test]
+    fn default_cfg_is_ids_and_wasd_is_the_2026_layout() {
+        let id = Bindings::default_cfg();
+        assert_eq!((id.command(b'a'), id.command(b'd'), id.command(b'c')), (Some(BIND_LOOKUP), Some(BIND_MOVEUP), Some(BIND_MOVEDOWN)));
+        assert_eq!((id.get(b'w'), id.get(b's')), (None, None), "default.cfg leaves w and s unbound");
+        let wasd = id.clone().with_wasd();
+        assert_eq!(
+            [b'w', b's', b'a', b'd', b'c'].map(|k| wasd.command(k)),
+            [Some(BIND_FORWARD), Some(BIND_BACK), Some(BIND_MOVELEFT), Some(BIND_MOVERIGHT), Some(BIND_MOVEDOWN)]
+        );
+        let mut changes = String::new();
+        wasd.write_changes(&id, &mut changes);
+        assert_eq!(
+            changes,
+            "bind \"a\" \"+moveleft\"\nbind \"d\" \"+moveright\"\nbind \"s\" \"+back\"\nbind \"w\" \"+forward\"\n"
+        );
+        let mut changes = String::new();
+        id.write_changes(&wasd, &mut changes);
+        assert_eq!(changes, "bind \"a\" \"+lookup\"\nbind \"d\" \"+moveup\"\nunbind \"s\"\nunbind \"w\"\n");
     }
 
     #[test]
     fn pause_is_bound_to_pause_as_in_default_cfg() {
-        assert_eq!(default_bindings()[K_PAUSE as usize], Some(BIND_PAUSE as u8));
+        assert_eq!(Bindings::default_cfg().command(K_PAUSE), Some(BIND_PAUSE));
     }
 
     #[test]
     fn the_console_key_is_toggleconsole_as_in_default_cfg() {
-        let b = default_bindings();
-        assert_eq!(b[b'`' as usize], Some(BIND_TOGGLECONSOLE as u8));
-        assert_eq!(b[b'~' as usize], Some(BIND_TOGGLECONSOLE as u8));
+        let b = Bindings::default_cfg();
+        assert_eq!(b.command(b'`'), Some(BIND_TOGGLECONSOLE));
+        assert_eq!(b.command(b'~'), Some(BIND_TOGGLECONSOLE));
     }
 
     /// Key_Init's tables: what the console keeps, what the menu lets through,
@@ -255,15 +540,27 @@ mod tests {
 
     #[test]
     fn tab_shows_the_scores_as_in_default_cfg() {
-        assert_eq!(default_bindings()[K_TAB as usize], Some(BIND_SHOWSCORES as u8));
+        assert_eq!(Bindings::default_cfg().command(K_TAB), Some(BIND_SHOWSCORES));
     }
 
     #[test]
     fn digits_are_impulses_as_in_default_cfg() {
-        let b = default_bindings();
+        let b = Bindings::default_cfg();
         for n in 0..=8u8 {
-            assert_eq!(b[(b'0' + n) as usize], Some((BIND_IMPULSE_0 + n as usize) as u8));
+            assert_eq!(b.command(b'0' + n), Some(BIND_IMPULSE_0 + n as usize));
         }
-        assert_eq!(b[b'9' as usize], None, "default.cfg leaves 9 unbound");
+        assert_eq!(b.get(b'9'), None, "default.cfg leaves 9 unbound");
+    }
+
+    #[test]
+    fn find_and_unbind_by_command_as_menu_c() {
+        let mut b = Bindings::default_cfg();
+        assert_eq!(b.find_keys_for_command(BIND_JUMP), [Some(K_ENTER), Some(K_SPACE)]);
+        assert_eq!(b.find_keys_for_command(BIND_ATTACK), [Some(K_CTRL), Some(K_MOUSE1)]);
+        b.unbind_command(BIND_JUMP);
+        assert_eq!(b.find_keys_for_command(BIND_JUMP), [None, None]);
+        let mut held = [false; 256];
+        held[K_CTRL as usize] = true;
+        assert!(b.held(BIND_ATTACK, &held) && !b.held(BIND_FORWARD, &held));
     }
 }

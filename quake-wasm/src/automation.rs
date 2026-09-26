@@ -27,7 +27,7 @@ use crate::menu::{
     set_extras,
 };
 use crate::snd_dma::{listener, sound_generation, volume};
-use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, viewsize, width};
+use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, set_window, viewsize, width};
 
 /// An answer: a number, and text for the calls that read some.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +85,8 @@ pub(crate) fn call(line: &str) -> Answer {
         "width" => width().into(),
         "height" => height().into(),
         "set_resolution" => done(|| set_resolution(int(0), int(1))),
+        // The page's box in device pixels (what its `Window` record says).
+        "set_window" => done(|| set_window(f(0) as u32, f(1) as u32)),
         "viewsize" => viewsize().into(),
         "set_viewsize" => done(|| set_viewsize(real(0))),
         "scaled_2d" => scaled_2d().into(),

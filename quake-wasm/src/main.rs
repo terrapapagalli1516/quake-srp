@@ -8,7 +8,7 @@
 //! This crate is the platform layer — what id's source has in `sys_*.c`,
 //! `vid_*.c`, `snd_*.c` and `in_*.c`, plus the host state around the game:
 //! the [`App`](app::App) held in a `thread_local`, the protocol and the loop
-//! the page drives, the sound queues, the saves and the Web extras. The game
+//! the page drives, the sound queues, the saves and `config.cfg`. The game
 //! client itself — the live frame against the local server, demo playback,
 //! the level loads, the cheats — is [`quake_rs::client`], which native tools
 //! run too (`quaketool play`). Each client frame hands back a
@@ -30,20 +30,19 @@
 //! | `proto`     | —                                       | the records on stdin and stdout                  |
 //! | `automation`| —                                       | the protocol's calls: the page's buttons, the browser checks' hooks |
 //! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files |
-//! | `config`    | host.c `Host_WriteConfiguration`        | `config.cfg`: written on change, exec'd at startup |
-//! | `app`       | host.c, client.h                        | the `App` (host state around the client's `Walk`/`DemoPlay`), menu assets, the client's level loads with their sound calls carried out, the boots |
-//! | `host`      | host.c `Host_Frame`                     | `step`: the 72 fps gate (`wasm_uncapped`), the mode's client frame, the menu/console overlays, the fps readout, blend, gamma pack |
+//! | `config`    | host.c `Host_WriteConfiguration`        | `config.cfg`: the settings' changes, written on change, exec'd at startup |
+//! | `app`       | host.c, client.h                        | the `App` (host state around the client's `Walk`/`DemoPlay`: the settings, menu, console, clocks), menu assets, the client's level loads with their sound calls carried out, the boots |
+//! | `host`      | host.c `Host_Frame`                     | `step`: the frame gate (id's 72 fps, or every refresh stepped as 72 Hz runs), the mode's client frame, the menu/console overlays, the fps readout, blend, gamma pack |
 //! | `cl_walk`   | cl_main.c                               | `step_walk`: `client::cl_main::walk_frame` on the page's `Vid`, its sound calls to `snd_dma`; the live game's end-to-end tests |
 //! | `cl_demo`   | cl_demo.c                               | `step_demo`: `client::cl_demo::demo_frame` likewise; the playback tests |
 //! | `cl_tent`   | cl_tent.c                               | (tests only) Chthon's lightning end to end       |
 //! | `input`     | in_win.c, keys.c `Key_Event`            | mouse look, every key through `Key_Event` (the moves: `client::cl_input`) |
 //! | `menu`      | menu.c `M_Keydown`                      | the menu's keys and the actions they return      |
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle and typing                        |
-//! | `extras`    | —                                       | the Web extras' `wasm_*` cvars (values in the menu), the renderer's per-frame copy |
-//! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | console command dispatch, `map` (the loads and cheats: `client::host_cmd`) |
+//! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | the console's command table, `Cvar_Command`, `bind`, `map` (the loads and cheats: `client::host_cmd`) |
 //! | `savegame`  | host_cmd.c `Host_Savegame_f`/`_Loadgame_f`, menu.c `M_ScanSaves` | save/load as `.sav` files |
 //! | `snd_dma`   | snd_win.c                               | the client's sound calls carried out: the queues the loop sends, the ambient ramps (the channel and loop gates: `quake_rs::snd`) |
-//! | `vid`       | vid_win.c                               | resolution, framebuffer, viewsize, the client frames' `Vid` |
+//! | `vid`       | vid_win.c                               | the picture's size (a mode in a 4:3 box, or native), framebuffer, the client frames' `Vid` |
 //! | `bench`     | —                                       | `--features bench` frame-phase timers and workloads |
 //!
 //! Tests live with the code they exercise (the client's end-to-end tests
@@ -53,11 +52,13 @@
 //!
 //! ## Settings
 //!
-//! `config.cfg` in the game directory keeps the video mode
-//! (`_vid_resolution`), `viewsize` and the Web extras across sessions. The
-//! Web extras are the port's opt-in departures from id's Quake, all off by
-//! default, switched on Options > Web extras or by console command
-//! (`wasm_uncapped`, `wasm_showfps`, `wasm_exactpersp`, `wasm_scaled2d`).
+//! Every setting is in the App's [`quake_rs::settings::Settings`]: id's cvars
+//! and key bindings, and the port's departures from id's game, which two
+//! profiles switch — **2026**, the default, and **Classic**, WinQuake
+//! exactly (Options > "Classic / 2026", `profile classic|2026` on the
+//! console, `?classic` / `?2026` in the page's address). `config.cfg` in the
+//! game directory keeps the profile and whatever the player changed from
+//! it, the id way (`bind` lines and archived cvars).
 
 #![forbid(unsafe_code)]
 
@@ -71,7 +72,6 @@ mod cl_walk;
 mod common;
 mod config;
 mod console;
-mod extras;
 mod host;
 mod host_cmd;
 mod input;

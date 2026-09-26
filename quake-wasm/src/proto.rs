@@ -17,6 +17,7 @@
 //! | 6 | `AudioReady` | `ready u8` |
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
 //! | 8 | `End` | — (the host's "nothing more is queued", the answer to a polling `Sync`) |
+//! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into |
 //!
 //! **Out** (program → host), an 8-byte header `[kind u8][0 u8 ×3][len u32]`
 //! and `len` payload bytes:
@@ -25,7 +26,7 @@
 //! |---|---|---|
 //! | 1 | `Frame` | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 u8 ×3`, then the pixels |
 //! | 2 | `Sync` | `seq u32` (the last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
-//! | 3 | `State` | `flags u32` ([`STATE_MENU`] …), `menu_screen i32` |
+//! | 3 | `State` | `flags u32` ([`STATE_MENU`] …), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel; 0 in the 4:3 box) |
 //! | 4 | `Sample` | `id u32`, then the RIFF/WAV bytes (sent once per distinct sample) |
 //! | 5 | `Sound` | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `entity i32`, `channel i32`, `view u32`, `loop_start f32`, `loop_end f32` |
 //! | 6 | `StopSound` | `entity i32`, `channel i32` |
@@ -51,6 +52,7 @@ const IN_POINTER_UNLOCKED: u8 = 5;
 const IN_AUDIO_READY: u8 = 6;
 const IN_CALL: u8 = 7;
 const IN_END: u8 = 8;
+const IN_WINDOW: u8 = 9;
 
 /// One event from the host.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +76,8 @@ pub(crate) enum Event {
     Call { id: u32, line: String },
     /// The host has nothing more queued (the answer to a polling sync).
     End,
+    /// The page's box for the picture, in device pixels.
+    Window { w: u32, h: u32 },
     /// A record this program does not know (skipped, for forward
     /// compatibility with a newer page).
     Unknown(u8),
@@ -110,6 +114,7 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
             Event::Call { id, line: String::from_utf8_lossy(p.rest()).into_owned() }
         }
         IN_END => Event::End,
+        IN_WINDOW => Event::Window { w: p.u32(), h: p.u32() },
         other => Event::Unknown(other),
     };
     Ok(Some(ev))
@@ -179,6 +184,11 @@ pub(crate) const STATE_WALK: u32 = 4;
 pub(crate) const STATE_BIND_GRAB: u32 = 8;
 /// A `timedemo` is running: frames come back to back, not per refresh.
 pub(crate) const STATE_TIMEDEMO: u32 = 16;
+/// Native resolution (`vid_native`): the page fills its box with the frame,
+/// `pixel_size` device pixels to a frame pixel, instead of a 4:3 box.
+pub(crate) const STATE_NATIVE: u32 = 32;
+/// `vid_fkey`: the page's `f` toggles fullscreen.
+pub(crate) const STATE_FKEY: u32 = 64;
 
 /// A sound's placement, as `S_StartSound` gave it (the fields the page's
 /// `SND_Spatialize` needs every frame).
@@ -202,7 +212,7 @@ pub(crate) struct LoopWindow {
 pub(crate) enum Msg<'a> {
     Frame { w: u16, h: u16, format: u8, pixels: &'a [u8] },
     Sync { seq: u32, wait: bool },
-    State { flags: u32, menu_screen: i32 },
+    State { flags: u32, menu_screen: i32, pixel_size: u32 },
     Sample { id: u32, wav: &'a [u8] },
     Sound { id: u32, at: Placement, entity: i32, channel: i32, view: bool, window: LoopWindow },
     StopSound { entity: i32, channel: i32 },
@@ -266,7 +276,9 @@ impl Msg<'_> {
                 (OUT_FRAME, f.u16(w).u16(h).u8(format).u8(0).u16(0).0, pixels)
             }
             Msg::Sync { seq, wait } => (OUT_SYNC, f.u32(seq).u8(wait as u8).0, &[]),
-            Msg::State { flags, menu_screen } => (OUT_STATE, f.u32(flags).i32(menu_screen).0, &[]),
+            Msg::State { flags, menu_screen, pixel_size } => {
+                (OUT_STATE, f.u32(flags).i32(menu_screen).u32(pixel_size).0, &[])
+            }
             Msg::Sample { id, wav } => (OUT_SAMPLE, f.u32(id).0, wav),
             Msg::Sound { id, at, entity, channel, view, window } => (
                 OUT_SOUND,
@@ -322,6 +334,11 @@ pub(crate) mod encode {
         let mut p = vec![keynum, down as u8, 0, 0];
         p.extend_from_slice(&ch.to_le_bytes());
         record(super::IN_KEY, &p)
+    }
+    pub(crate) fn window(w: u32, h: u32) -> Vec<u8> {
+        let mut p = w.to_le_bytes().to_vec();
+        p.extend_from_slice(&h.to_le_bytes());
+        record(super::IN_WINDOW, &p)
     }
     pub(crate) fn mouse(dx: f32, dy: f32) -> Vec<u8> {
         let mut p = dx.to_le_bytes().to_vec();
@@ -472,6 +489,6 @@ mod tests {
             }),
             56
         );
-        assert_eq!(size(Msg::State { flags: 0, menu_screen: 0 }), 8);
+        assert_eq!(size(Msg::State { flags: 0, menu_screen: 0, pixel_size: 0 }), 12);
     }
 }

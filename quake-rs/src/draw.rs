@@ -78,11 +78,14 @@ impl Screen2d {
 
 /// The 2-D screen of a `vid_w x vid_h` framebuffer: the framebuffer itself at
 /// scale 1 (id), or with the "scaled 2-D" extra ([`set_scaled_2d`]) the
-/// largest scale at which a 320x200 screen fits, the layout then done on the
-/// framebuffer divided by it — 320x200 on every 16:10 mode.
+/// largest WHOLE scale at which a 320x200 screen fits, the layout then done
+/// on the framebuffer divided by it — 320x200 on every 16:10 mode, and on
+/// any other screen id's layout a little wider or taller than 320x200, so
+/// the status bar, menus and text keep id's proportions to the screen within
+/// a scale step, in pixels all the same size.
 pub fn screen_2d(vid_w: usize, vid_h: usize) -> Screen2d {
     if scaled_2d() {
-        let s = (vid_w as f32 / HUD_VIRT_W).min(vid_h as f32 / MENU_VIRT_H);
+        let s = (vid_w as f32 / HUD_VIRT_W).min(vid_h as f32 / MENU_VIRT_H).floor();
         if s.is_finite() && s > 1.0 {
             let w = ((vid_w as f32 / s).round() as i32).max(HUD_VIRT_W as i32);
             let h = ((vid_h as f32 / s).round() as i32).max(MENU_VIRT_H as i32);
@@ -689,7 +692,7 @@ mod tests {
         {
             let _extra = Scaled2dGuard::set(scaled);
             let under: Vec<[u8; 3]> = bytes(w as u32, w * h).iter().map(|&b| [b, 9, 9]).collect();
-            let scale = if scaled { (w as f32 / MENU_VIRT_W).min(h as f32 / MENU_VIRT_H).max(1.0) } else { 1.0 };
+            let scale = if scaled { (w as f32 / MENU_VIRT_W).min(h as f32 / MENU_VIRT_H).floor().max(1.0) } else { 1.0 };
             let inv = 1.0 / scale;
             let mut want = under.clone();
             for y in 0..h {
@@ -716,7 +719,8 @@ mod tests {
             for &(w, h) in &[(320, 200), (400, 300), (640, 400), (1120, 700), (1280, 800), (333, 211)] {
                 for &(x, y, rw, rh) in &[(0, 0, w, h), (5, 7, w / 3, h / 2), (w - 9, h - 4, 40, 40), (0, h / 2, w, 1)] {
                     let mut want = Image::new(w, h, [7, 7, 7]);
-                    let inv = if scaled { 1.0 / (w as f32 / HUD_VIRT_W) } else { 1.0 };
+                    let whole = (w as f32 / HUD_VIRT_W).min(h as f32 / MENU_VIRT_H).floor().max(1.0);
+                    let inv = if scaled { 1.0 / whole } else { 1.0 };
                     let (tw, th) = (t.width as usize, t.height as usize);
                     for py in y..(y + rh).min(h) {
                         for px in x..(x + rw).min(w) {

@@ -4,8 +4,8 @@
 //! The same [`quake_rs::client`] frames the page runs (`walk_frame`,
 //! `demo_frame`), driven the way `web/bench.py` drives the page, one host
 //! frame per 1/72 s through `Host_FilterTime`, with the page's screen (its 4:3
-//! display, no Web extras) and the host's defaults (the default bindings and
-//! viewsize, the menu and console closed); each finished frame is presented
+//! display) and the Classic profile's settings (id's bindings and viewsize,
+//! every departure off, the menu and console closed); each finished frame is presented
 //! as the page presents it — through the `cl.cshifts` + gamma ramps into RGBA
 //! (`VID_ShiftPalette`). Workloads, as in `web/bench.py`:
 //!
@@ -36,6 +36,7 @@ use quake_rs::client::host::host_filter_time;
 use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPlay, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
 use quake_rs::render;
+use quake_rs::settings::{Profile, Settings};
 
 /// The width:height ratio the browser page displays the frame at
 /// (quake-wasm's `vid::DISPLAY_ASPECT`).
@@ -99,11 +100,11 @@ fn fnv(rgba: &[u8]) -> u32 {
     h
 }
 
-/// The page's host, for as long as the runs last: its clocks, its menu (at
-/// the defaults, closed) and the game it is running.
+/// The page's host, for as long as the runs last: its clocks, its settings
+/// (Classic's) and the game it is running.
 struct Host {
     pak: Pak,
-    menu: render::Menu,
+    settings: Settings,
     keys: [bool; 256],
     gamma: [u8; 256],
     realtime: f64,
@@ -118,8 +119,9 @@ impl Host {
     fn step(&mut self, raw_dt: f32, sound: &mut Vec<SoundCall>) -> Option<ClientFrame> {
         self.realtime += raw_dt as f64;
         let dt = host_filter_time(self.realtime, &mut self.oldrealtime)?;
-        let km = cl_input::derive_key_move(&self.menu, &self.keys);
-        let viewsize = self.menu.viewsize();
+        let s = &self.settings;
+        let km = cl_input::derive_key_move(&s.cvars, &s.binds, &self.keys);
+        let viewsize = s.cvars.viewsize;
         Some(match self.mode.as_mut()? {
             Mode::Walk(wk) => {
                 wk.key_move = km;
@@ -205,7 +207,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false };
     let mut host = Host {
         pak,
-        menu: render::Menu::new(),
+        settings: Settings::new(Profile::Classic),
         keys: [false; 256],
         gamma: render::build_gamma_table(1.0),
         realtime: 0.0,

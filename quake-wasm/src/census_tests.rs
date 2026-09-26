@@ -43,7 +43,7 @@ fn centre(w: &Walk, e: i32) -> [f32; 3] {
 
 /// One walk frame; returns its colour shifts (`cl.cshifts`, in order).
 fn step(w: &mut Walk, dt: f64) -> Vec<([u8; 3], f32)> {
-    step_walk(w, dt, false, 320, 200).1
+    step_walk(w, dt, false, &crate::vid::mode_vid(320, 200)).1
 }
 
 fn angle_diff(a: f32, b: f32) -> f32 {
@@ -106,7 +106,7 @@ fn census_single_player_pauses_behind_the_menu() {
     }
     let t0 = w.server.time();
     for _ in 0..10 {
-        let _ = step_walk(&mut w, 0.1, true, 320, 200); // menu up
+        let _ = step_walk(&mut w, 0.1, true, &crate::vid::mode_vid(320, 200)); // menu up
     }
     assert_eq!(w.server.time(), t0, "sv.time must not advance while key_dest != key_game");
 }
@@ -301,13 +301,13 @@ fn census_rune_icons_reach_the_status_bar() {
     // Render the status bar before and after the pickup; the rune slot
     // (Sbar_DrawInventory: x = 320-32+i*8, y = -8 above the sbar, i.e. the
     // inventory strip's right end) changes when the icon is drawn.
-    let before = step_walk(&mut w, 0.0, false, 320, 200).0;
+    let before = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
     let p = w.player;
     let c = centre(&w, rune);
     set_origin(&mut w, p, c);
     step(&mut w, 0.1);
     assert_eq!(w.server.serverflags() as i32 & 1, 1, "sigil_touch set serverflags bit 0");
-    let after = step_walk(&mut w, 0.0, false, 320, 200).0;
+    let after = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
     // Sbar_DrawInventory draws sigil i with Sbar_DrawPic (320-32 + i*8, -16):
     // x 288.., y 200-24-16 = 160.. at 320x200 (viewsize 100: sb_lines 48, the
     // inventory strip is drawn). The rune-1 cell is 8x16.
@@ -396,7 +396,7 @@ fn census_pause_stops_the_game_and_shows_the_plaque() {
     let s0 = state();
     assert!(s0.3, "PAUSE: sv.paused");
     // +forward held for a second: nothing moves and no clock runs.
-    key_down(i32::from(b'w'));
+    key_down(i32::from(quake_rs::keys::K_UPARROW));
     for _ in 0..20 {
         host_step(0.05);
     }
@@ -437,7 +437,7 @@ fn census_pause_stops_the_game_and_shows_the_plaque() {
     let s1 = state();
     assert!(s1.0 > s0.0 && s1.2 > s0.2, "the clocks run again");
     assert!(s1.1 != s0.1, "+forward moves the player again");
-    key_up(i32::from(b'w'));
+    key_up(i32::from(quake_rs::keys::K_UPARROW));
     let text: Vec<String> =
         APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect());
     let said: Vec<&String> = text.iter().filter(|l| l.contains("the game")).collect();

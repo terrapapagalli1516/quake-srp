@@ -990,6 +990,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
     let mut img =
         render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &w.palette);
+    // V_RenderView: the crosshair over the view, before the 2-D layer.
+    if let Some(cc) = w.conchars.as_ref().filter(|_| w.crosshair) {
+        render::draw_crosshair(&mut img, cc, &vrect, &w.palette);
+    }
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
