@@ -23,6 +23,7 @@ use super::cl_input::{
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
+use super::lerpmove::{LerpMove, MOVETYPE_STEP};
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
@@ -581,6 +582,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Static entities wait for the camera: R_StoreEfrags draws one when a leaf
     // it touches is in the view's PVS (after the camera, below).
     let mut statics: Vec<StaticDesc> = Vec::new();
+    let smooth = w.lerpmove == LerpMove::Smooth;
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
@@ -715,7 +717,22 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             w.trail_org.entry(ent).or_insert(TrailHead::at(origin));
             trail_spawns.push((ent, origin, ttype));
         }
+        // r_lerpmove (the 2026 extra): a monster glides between its steps
+        // where it is drawn; its trail and everything else keep the server's
+        // origin.
+        let (origin, angles) = if smooth && w.server.vm.ent_float(ent, w.server.vm.fo.movetype) == MOVETYPE_STEP {
+            let model = w.server.vm.ent_float(ent, w.server.vm.fo.modelindex) as usize;
+            let drawn = w.glides.draw(ent, model, origin, angles, f64::from(w.clock));
+            (drawn.origin, drawn.angles)
+        } else {
+            (origin, angles)
+        };
         descs.push((m, origin, angles, frame, color, skin));
+    }
+    if smooth {
+        w.glides.end_frame();
+    } else {
+        w.glides.clear();
     }
 
     // Emit the collected trails (after the entity loop to keep the borrows

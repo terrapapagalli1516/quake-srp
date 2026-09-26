@@ -19,9 +19,11 @@ rerun the measurement. (Branch `q26/framerate`, 2026-09-26.)
   becomes reachable), everything that falls flew higher and further (grenades
   landed 23 units further), bonus flashes lasted a third as long and damage
   flashes half, a slow gib trailed 7 times as much blood and a grenade twice
-  the smoke, demos moved their camera 58 times a second on a 480 Hz display,
-  riders bounced off lifts, and clocks that add a frame at a time in `f32`
-  ran 5.5% fast an hour in (they stop at 18 hours).
+  the smoke, riders bounced off lifts, and clocks that add a frame at a time
+  in `f32` ran 5.5% fast an hour in (they stop at 18 hours). (Demos moved
+  their camera 58 times a second on a 480 Hz display: the port's Classic
+  playback, not id's, whose client interpolates at any rate — fixed in
+  Classic on `q26/lerp`.)
 - **Fixed, in the uncapped path only** (`Stepping::Uncapped`; Classic, the
   72 fps gate, is byte-identical): all of the above. Every quantity the
   harness measures now matches 72 Hz within a stated tolerance, and every
@@ -54,7 +56,6 @@ covering the same time does in id's game:
 | damage and bonus flashes | `int` percents lose a truncation every frame: at least 1 a frame | id's drop per whole 1/72 s tick (`Tick72`) | `client::view::fade_cshifts` |
 | trails (rockets, grenades, gibs, tracers) | `R_RocketTrail` drops at least one particle a frame | the particles one 72 Hz frame would drop at the entity's speed, spread evenly, the spacing carried from frame to frame | `particles::ParticleSystem::spawn_trail` |
 | `host_time` (notify, centre prints), pushers' `ltime` | `f32 += dt` | kept beside a double (`advance_clock`) | `client::cl_main`, `server::sv_phys` |
-| demo playback | the port shows each recorded message until the next | drawn between messages as id's `CL_LerpPoint` does: POV, velocity, entities; angles the short way; no blend across a teleport; at most 0.1 s | `client::cl_demo::demo_view` |
 | the gate | `Host_FilterTime` without its cap clamps a frame under 1 ms up to 1 ms, so past 1000 Hz the game outran the clock | `host_filter_time_display`: id's gate with the cap at 1000 fps; a closer refresh skips | `client::host` |
 
 What needed nothing: QuakeC thinks (`SV_RunThink` runs each at its own
@@ -63,7 +64,10 @@ every rate — the grunt's fight is identical), pushers' paths (`SV_Physics_Push
 moves them exactly to their think times), everything drawn from `cl.time`
 (view bob and roll, light styles, sky and water, the intermission sway),
 linear fades (the view kick, dlights, stair smoothing, the punch angle),
-and the ambient sounds, which already step in 1/72 s ticks (`snd.rs`).
+the ambient sounds, which already step in 1/72 s ticks (`snd.rs`), and demo
+playback: id's `CL_LerpPoint` draws every frame between the two newest
+recorded messages at any rate (`client::cl_demo::demo_frame`; the port's
+Classic playback did not until `q26/lerp`).
 
 Tried and dropped (return on complexity): the exponential particle
 velocities (`pt_explode`'s `vel += vel·dvel`) and the ground and water
@@ -120,10 +124,10 @@ higher rate, or a fixed offset under the size of a frame's travel.
   in `f32`) freezes after 18 hours at 480 Hz; the platform's to move to a
   double.
 - **Classic, found on the way:** id's client interpolates demo playback at
-  any rate (`CL_LerpPoint`); the port's Classic path shows each recorded
-  message until the next (58 camera moves a second where id's would show 72).
-  Unchanged here, as the brief asks; for the chair to judge against the
-  oracle.
+  any rate (`CL_LerpPoint`); the port's Classic path showed each recorded
+  message until the next (58 camera moves a second where id's show one a
+  frame). Fixed on `q26/lerp`, frame for frame against id's client
+  (`oracle/demo_lerp.py`).
 
 ## The tables
 
@@ -314,8 +318,51 @@ the last column is `--check`'s tolerance. 72 Hz is the reference (id's code at
 
 | quantity | 72 (id) | 60 | 144 | 240 | 480 | jitter | tolerance |
 |---|---|---|---|---|---|---|---|
-| camera moves a second (/s) | 58.40 | 57.55 → 58.65 (+0.250) | 58.43 → 140.7 (+82.25) | 58.44 → 234.3 (+175.9) | 58.45 → 468.4 (+410.0) | 58.30 → 138.0 (+79.59) | — |
-| demo message at 20 s | 1204.0 | 1204.0 → 1204.0 (0) | 1205.0 → 1205.0 (+1.0) | 1205.0 → 1205.0 (+1.0) | 1205.0 → 1205.0 (+1.0) | 1205.0 → 1205.0 (+1.0) | ±2.0 |
+| camera moves a second (/s) | 70.35 | 58.65 → 58.65 (−11.70) | 140.6 → 140.6 (+70.30) | 234.3 → 234.3 (+164.0) | 468.4 → 468.4 (+398.1) | 138.0 → 138.0 (+67.70) | — |
+| demo message at 20 s | 242.0 | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | ±2.0 |
+
+(Since `q26/lerp` the demo plays as id's client does, one recorded message
+at a time, drawn between the two newest at every rate: the camera moves in
+every frame the recorded player moves, and a message is a real message, not
+one of the port's old 60 Hz sub-frames.)
+
+## Monsters between their steps (`r_lerpmove`, `q26/lerp`)
+
+id's server moves a monster (`MOVETYPE_STEP`) only in its think, every
+0.1 s, and the client draws it where the last step put it: at 240 Hz it
+stands still for 23 frames and jumps in the 24th, beside a camera that moves
+every frame. The 2026 extra `client::lerpmove::LerpMove::Smooth` (off in
+Classic; QuakeSpasm's `r_lerpmove`) draws it gliding from step to step, over
+0.1 s from where it is drawn when the step comes (one frame for a mover the
+server moves every frame); the module doc says why that rule and not
+QuakeSpasm's own. Animation frames are not blended.
+
+`quaketool framerate <pak> --lerpmove`, native, 2026-09-26: over the frames
+in which a monster was walking (it moved within 0.1 s before and after),
+Classic → `r_lerpmove`. Demos are id's relink in Classic (its `U_NOLERP`
+jump a message ahead and back: the 25-unit moves).
+
+| workload | quantity | 72 | 60 | 144 | 240 | 480 |
+|---|---|---|---|---|---|---|
+| patrol (e1m1's grunt on its path) | frames drawn moving (%) | 13.7 → 99.2 | 16.5 → 99.1 | 6.8 → 99.7 | 4.2 → 99.8 | 2.1 → 99.9 |
+| | spread of the per-frame move (sd/mean) | 2.87 → 0.56 | 2.58 → 0.53 | 4.20 → 0.56 | 5.42 → 0.52 | 7.72 → 0.51 |
+| | largest move in a frame (u) | 4.11 → 0.59 | 4.11 → 0.69 | 4.11 → 0.29 | 4.11 → 0.17 | 4.11 → 0.09 |
+| | behind the server, mean (u) | 0 → 1.13 | 0 → 1.15 | 0 → 1.05 | 0 → 1.04 | 0 → 1.02 |
+| charge (the first-room grunt woken) | frames drawn moving (%) | 13.3 → 100 | 16.0 → 100 | 6.6 → 100 | 3.9 → 100 | 2.0 → 100 |
+| | spread of the per-frame move | 2.63 → 0.26 | 2.37 → 0.25 | 3.88 → 0.25 | 5.08 → 0.23 | 7.26 → 0.23 |
+| | largest move in a frame (u) | 15.0 → 2.13 | 15.0 → 2.81 | 15.0 → 1.06 | 15.0 → 0.64 | 15.0 → 0.32 |
+| | behind the server, mean (u) | 0 → 6.27 | 0 → 6.41 | 0 → 5.86 | 0 → 5.68 | 0 → 5.56 |
+| knock (thrown: moved every frame) | behind the server, mean (u) | 0 → 2.06 | 0 → 2.54 | 0 → 1.07 | 0 → 0.64 | 0 → 0.32 |
+| demo1 (every recorded monster) | spread of the per-frame move | 1.62 → 0.97 | 1.49 → 0.96 | 2.32 → 0.94 | 3.03 → 0.93 | 4.32 → 0.92 |
+| | largest move in a frame (u) | 24.9 → 3.38 | 26.0 → 4.36 | 24.9 → 1.75 | 24.5 → 1.02 | 24.3 → 0.52 |
+| | behind the newest message, mean (u) | 2.11 → 3.54 | 1.92 → 3.64 | 2.48 → 3.37 | 2.65 → 3.30 | 2.76 → 3.24 |
+
+The price is the glide itself: a monster is drawn on average half a step
+behind where the server has it (1 unit walking, 6 running), for at most
+0.1 s; its box, its shots and everything else are the server's. The spread
+left is the monsters' own: their steps are of different lengths (a patrol's
+1–4 units, a run's 8–15). `--strip DIR` writes a 240 Hz step of the charging
+grunt, Classic and with the extra, as frames.
 
 ## Budget
 
@@ -359,6 +406,7 @@ cd quake-rs && cargo build --release
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --check     # fail if an uncapped value leaves its tolerance
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --only jump,flash --rates 144,480
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --budget --res 1280x800
+./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --lerpmove  # monsters between steps (5 s)
 ```
 
 Each scenario restarts the process's random sequences (`server::reset_random`)
@@ -370,7 +418,6 @@ test: `server::sv_phys::tests::uncapped_frames_jump_and_bounce_like_72_hz`
 (a jump and a bounce: apex to 0.05 units, landing to a 72 Hz frame),
 `client::view::tests::uncapped_flashes_fade_like_72_hz`,
 `particles::tests::uncapped_trails_are_as_dense_as_72_hz`,
-`client::cl_demo::tests::demo_view_blends_toward_the_next_message`,
 `client::host::tests::host_filter_time_display_runs_every_refresh_and_never_outruns_the_clock`
 and `stepping::tests`. Each also shows id's per-frame code failing the
 comparison, so the tests have teeth.
@@ -401,3 +448,9 @@ pass, `verify_extras` (42/42) and `verify_demo` (11/11) pass, and in the real
 page a second of 1/480 s steps of the attract demo with `wasm_uncapped 1`
 presents 480 frames, all different (102 before: the camera moved only on the
 demo's 60 Hz messages), the live walk 480 of 480, with no console errors.
+
+`r_lerpmove` is a setting (`quake_rs::cvar::Cvars::lerpmove`, the console's
+`r_lerpmove 0|1`, Options > Classic / 2026 > "Smooth monsters"): off in the
+Classic profile, on in 2026, handed to the walk and the demo each frame in
+`host::step` beside `viewsize` and the renderer's threads (a timedemo ignores
+it).

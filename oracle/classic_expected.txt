@@ -2,6 +2,7 @@
 # recorded on quake/2026 @ a50d8d7 (the settings branch's base), 2026-09-26
 # screen2d re-recorded on q26/settings: the port side runs the Classic profile and id's side its own defaults; Options' port row is "Classic / 2026" with the profile at x=220 (531 px at 320x200 and 640x400, was 291 as "Web extras"; the disconnected Options 919 / 2108, was 686 / 1875); every other shot unchanged
 # server R2 (d5db64a): error/objerror as id's (CENSUS L16) — objerror frees self, so start.bsp's forced teleporter touch faults 1x not 3x and the shared random stream shifts for later maps; edicts vs id's C still 9/9
+# play: demo1..3's frame hashes re-recorded on q26/settings after merging q26/lerp, whose Classic demo playback draws between the recorded messages as id's CL_ReadFromServer/CL_LerpPoint do (it had shown each message's frame as it came); demo_lerp.py matches id's client over the whole loop (17,500 frames, clock identical, camera and entities within 2.5e-4); the demos' sound tallies and every walk/fire/quad hash unchanged
 census.report 855daa19919aff01
 edicts.e1m1 fea55149a7ee4427
 edicts.e1m2 5ff403cb869b3f72
@@ -23,23 +24,23 @@ oracle.e1m3_ents_320x200 100.0000
 oracle.e1m3_world_320x200 100.0000
 oracle.e1m7_ents_320x200 99.9969
 oracle.e1m7_world_320x200 99.9969
-play.demo1.320x200.hashes 3fd7cf5aa9f9fac8
+play.demo1.320x200.hashes b20c8b4df6407a31
 play.demo1.320x200.sound 4b6fbbe022ae404b
-play.demo1.640x400.hashes 74fdf33414fbff9e
+play.demo1.640x400.hashes 7fd3cfac381374e4
 play.demo1.640x400.sound 41ce0bfcc24841bb
-play.demo1.960x600.hashes c1a02eed8944d368
+play.demo1.960x600.hashes 10c47a8f39e2c6cb
 play.demo1.960x600.sound afd36cfccdc0a9de
-play.demo2.320x200.hashes 9bebd05c39c679f2
+play.demo2.320x200.hashes 47d9d83abc3ada85
 play.demo2.320x200.sound 7367d12be2d39e68
-play.demo2.640x400.hashes 8cf3e16db51db4f6
+play.demo2.640x400.hashes bb245a5f55abc67e
 play.demo2.640x400.sound 475bb934fb54cc1a
-play.demo2.960x600.hashes 4e9d52ecb0ac1581
+play.demo2.960x600.hashes 3740aefc4a8774fa
 play.demo2.960x600.sound f125bf0c8149c26a
-play.demo3.320x200.hashes cf8a68d2fbd970e2
+play.demo3.320x200.hashes 972b82f4d5ba979f
 play.demo3.320x200.sound 8cc28f6a4fe58706
-play.demo3.640x400.hashes fd86cf900026327e
+play.demo3.640x400.hashes 183797e96555eec9
 play.demo3.640x400.sound 82fd6ee15ef688da
-play.demo3.960x600.hashes 9ece44d87ea12141
+play.demo3.960x600.hashes 500e4b5645e55a97
 play.demo3.960x600.sound e2d0702c9af85aba
 play.fire_e1m1.320x200.hashes 8bb046aa7c207ecc
 play.fire_e1m1.320x200.sound d46a4e735a2b466e

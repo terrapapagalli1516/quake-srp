@@ -36,8 +36,6 @@ pub(crate) fn step_timedemo(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid
 
 /// `S_StopAllSounds (true)`: every sound, the loops and ambients included.
 fn stop_all_sounds() {
-    crate::snd_dma::SND_QUEUE.with(|q| q.borrow_mut().clear());
-    crate::snd_dma::STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     if let Some(pak) = crate::common::pak() {
         crate::snd_dma::play(&pak, vec![SoundCall::StopAll]);
     }
@@ -186,10 +184,7 @@ mod tests {
 
     use crate::app::build_demo;
     use crate::common::pak;
-    use crate::snd_dma::{
-        poll_sound, set_audio_ready, sound_channel, sound_entity, sound_is_view_entity,
-        sound_volume, SND_QUEUE,
-    };
+    use crate::snd_dma::pending_starts;
     use crate::test_util::*;
     use crate::vid::{DEFAULT_H, DEFAULT_W};
     use quake_rs::client::view::V_KICKPITCH;
@@ -298,9 +293,10 @@ mod tests {
             "the burst + 1024-particle explosion populate the pool (got {after_first})"
         );
 
-        // A tiny step that holds us on frame 1 must NOT re-spawn the explosion
-        // (the pool only shrinks as particles age — it never jumps back up).
-        let _ = step_demo(&mut d, 0.001, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
+        // A step that holds the clock on frame 1 (any later clock reads the
+        // next message: CL_GetMessage) must NOT re-spawn the explosion (the
+        // pool only shrinks as particles age — it never jumps back up).
+        let _ = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
         assert_eq!(d.idx, 1, "still on the effect frame");
         assert!(
             d.particles.len() <= after_first,
@@ -403,10 +399,11 @@ mod tests {
             d.beams.any_live(d.demo.frames[2].time),
             "beam still live on the last frame (t=0.10 < endtime 0.25)"
         );
-        // The NEXT (tiny) step triggers the deferred loop wrap: back to frame 0
-        // with the beam store cleared (no stale bolts carried into the replay;
-        // the tiny dt keeps playback ON frame 0, before the bolt re-spawns).
-        let _ = step_demo(&mut d, 0.001, false, &crate::vid::mode_vid(160, 100));
+        // The step that takes the clock past the last message triggers the
+        // deferred loop wrap: back to frame 0 with the beam store cleared (no
+        // stale bolts carried into the replay; the wrap's frame reads only
+        // frame 0, before the bolt re-spawns).
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 0, "playback wrapped");
         assert!(!d.beams.any_live(0.0), "the wrap cleared the beam store");
     }
@@ -491,11 +488,11 @@ mod tests {
         }
     }
 
-    /// A recorded svc_sound event queues through the SAME `queue_sounds` path
-    /// live play uses — once per frame advance (the spawn guard), carrying its
-    /// (entity, channel) override key for the page registry.
+    /// A recorded svc_sound starts through the SAME sound calls live play
+    /// makes — once per frame advance (the spawn guard), with its volume and
+    /// (entity, channel) override key.
     #[test]
-    fn step_demo_queues_recorded_sounds_through_the_live_path() {
+    fn step_demo_starts_recorded_sounds_through_the_live_path() {
         use quake_rs::demo::{Demo, DemoFrame};
 
         let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
@@ -523,31 +520,21 @@ mod tests {
         let mut d = DemoPlay::new(build_test_pak(&[("sound/doors/x.wav", b"WAVE")]), render::demo_room(), [[0u8; 3]; 256], demo);
         d.prng = Lcg::new(1);
 
-        reset_queue(); // clears SND_QUEUE + marks audio ready
+        reset_queue();
         let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 1, "advanced onto the sound frame");
-        assert_eq!(
-            SND_QUEUE.with(|q| q.borrow().len()),
-            1,
-            "the recorded svc_sound queued exactly once"
-        );
-        // Lingering on the same frame must not re-queue it.
+        assert_eq!(pending_starts().len(), 1, "the recorded svc_sound started exactly once");
+        // Lingering on the same frame must not start it again.
         let _ = step_demo(&mut d, 0.0001, false, &crate::vid::mode_vid(160, 100));
-        assert_eq!(SND_QUEUE.with(|q| q.borrow().len()), 1, "no re-queue while lingering");
+        let starts = pending_starts();
+        assert_eq!(starts.len(), 1, "no second start while lingering");
 
-        // The pop carries the spatial params + the (entity, channel) key.
-        let len = poll_sound();
-        assert!(len > 0, "WAV bytes loaded from the pak");
-        assert_eq!(sound_volume(), 0.5);
-        assert_eq!(sound_entity(), 5, "override key entity");
-        assert_eq!(sound_channel(), 2, "override key channel");
-        assert_eq!(
-            sound_is_view_entity(),
-            0,
-            "entity 5 is not the recorded view entity (1)"
-        );
-        SND_QUEUE.with(|q| q.borrow_mut().clear());
-        set_audio_ready(0);
+        // S_StartSound's arguments: the volume, the (entity, channel) key,
+        // and the recorded view entity (1), which entity 5 is not.
+        let (e, view) = &starts[0];
+        assert_eq!((e.volume, e.entity, e.channel, *view), (0.5, 5, 2, 1));
+        assert_eq!(e.sample, "doors/x.wav");
+        reset_queue();
     }
 
     /// A recorded svc_damage drives the SAME flash + view-kick math live play
@@ -643,14 +630,14 @@ mod tests {
             .and_then(|b| Mdl::parse(&b).ok())
             .expect("progs/missile.mdl parses");
         assert_ne!(rocket_trail_type(missile.header.flags), None, "missile.mdl carries EF_ROCKET");
+        // Each message's update puts it at x (a forcelink: no lerp).
         let ent = |num: i32, x: f32| EntSnapshot {
             num,
             modelindex: 2,
-            frame: 0,
-            skin: 0,
             origin: [x, 0.0, 0.0],
-            angles: [0.0; 3],
-            effects: 0,
+            prev_origin: [x, 0.0, 0.0],
+            forcelink: true,
+            ..EntSnapshot::default()
         };
         let frame = |t: f32, x: f32| DemoFrame {
             time: t,
@@ -1103,7 +1090,8 @@ mod tests {
         // A bit the recording gains later is stamped on its frame's clock.
         let got = d.demo.frames.iter().position(|f| f.client.items & !items0 != 0);
         if let Some(i) = got {
-            let dt = d.demo.frames[i].time - d.demo.frames[0].time;
+            // (Playback starts 0.1 s before the first message: CL_LerpPoint.)
+            let dt = d.demo.frames[i].time - d.demo.frames[0].time + 0.1;
             let _ = step_demo(&mut d, dt, false, &crate::vid::mode_vid(160, 100));
             assert!(!unflashed(&d), "frame {i}'s new item is stamped");
         }

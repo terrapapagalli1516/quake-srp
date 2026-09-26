@@ -24,7 +24,9 @@
 //! (`joystick` and in_win.c's advanced configuration: the 2026 pad layout).
 
 use crate::client::in_win::JoyCvars;
+use crate::client::lerpmove::LerpMove;
 use crate::render::Threads;
+use crate::snd::SoundMode;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 
 /// The port's pixel sizes for [`Cvars::pixel_size`]: 0 is Auto, 1..=4 a
@@ -117,6 +119,14 @@ pub struct Cvars {
     /// `vid_fkey`: `f` toggles fullscreen (the page's; `default.cfg` leaves
     /// `f` unbound).
     pub fkey: bool,
+    /// `r_lerpmove` (QuakeSpasm's name): monsters glide between their steps
+    /// ([`LerpMove::Smooth`]) instead of being drawn where each 0.1 s step put
+    /// them, as id's client does.
+    pub lerpmove: LerpMove,
+    /// `snd_modern`: which of id's mixers plays ([`SoundMode`]): the 2026 one
+    /// (its faults fixed, `snd::Fixes::ALL`, at the device's rate) instead
+    /// of id's as written at 11025 Hz.
+    pub sound: SoundMode,
     /// `r_threads`: how many threads draw the 3-D view (0: Auto, as many as
     /// the platform offers). The pixels are the same for any count, so it is
     /// no departure.
@@ -163,6 +173,8 @@ impl Cvars {
             freelook: false,
             jumpswim: false,
             fkey: false,
+            lerpmove: LerpMove::Classic,
+            sound: SoundMode::Classic,
             threads: Threads::Auto,
             joy: JoyCvars::classic(),
         }
@@ -171,8 +183,9 @@ impl Cvars {
     /// The 2026 profile's: an idealized software-rendered Quake on a 2026
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
-    /// layer at id's proportions, the crosshair, Always Run, mouse look,
-    /// Space to swim up and `f` for fullscreen. Show FPS and exact
+    /// layer at id's proportions, the crosshair, monsters that glide between
+    /// their steps, Always Run, mouse look, Space to swim up and `f` for
+    /// fullscreen. Show FPS and exact
     /// perspective stay off: the readout is clutter, and id's 16-pixel spans
     /// are part of the look. A gamepad works as a modern twin-stick pad
     /// ([`JoyCvars::modern`]).
@@ -189,6 +202,8 @@ impl Cvars {
             jumpswim: true,
             fkey: true,
             joy: JoyCvars::modern(),
+            lerpmove: LerpMove::Smooth,
+            sound: SoundMode::Modern,
             ..Cvars::classic()
         }
     }
@@ -413,6 +428,12 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.jumpswim), set: |c, v| c.jumpswim = on(v) },
     Cvar { name: "vid_fkey", archive: true, departure: true, help: "F toggles fullscreen",
         get: |c| flag(c.fkey), set: |c, v| c.fkey = on(v) },
+    Cvar { name: "r_lerpmove", archive: true, departure: true, help: "monsters glide between steps",
+        get: |c| flag(c.lerpmove == LerpMove::Smooth),
+        set: |c, v| c.lerpmove = if on(v) { LerpMove::Smooth } else { LerpMove::Classic } },
+    Cvar { name: "snd_modern", archive: true, departure: true, help: "2026 mixer: device rate, fixes",
+        get: |c| flag(c.sound == SoundMode::Modern),
+        set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
         get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
     Cvar { name: "joy_deadzone", archive: true, departure: true, help: "round stick dead zone, 0 off",

@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 14] = [
+pub const SETTING_ROWS: [SettingRow; 16] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -153,6 +153,12 @@ pub const SETTING_ROWS: [SettingRow; 14] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
+        cvar: "r_lerpmove",
+        label: "       Smooth monsters",
+        help: ["Monsters glide between their", "steps, not 10 jumps a second"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
         cvar: "crosshair",
         label: "             Crosshair",
         help: ["id's own crosshair, a + at", "the centre of the view"],
@@ -174,6 +180,12 @@ pub const SETTING_ROWS: [SettingRow; 14] = [
         cvar: "vid_fkey",
         label: "      F for fullscreen",
         help: ["The F key toggles fullscreen;", "id's Quake leaves F unbound"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "snd_modern",
+        label: "       Full-rate sound",
+        help: ["id's mixer at your device's rate", "and its bugs fixed (id: 11 kHz)"],
         kind: RowKind::Toggle,
     },
     SettingRow {
@@ -2082,13 +2094,14 @@ fn draw_options_screen(
 /// px apart, the labels at x=16, the values at x=220, the cursor at x=200.
 /// Under them the notes, from x=[`EXTRAS_NOTE_X`] (right of the plaque,
 /// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
-/// the list and the highlighted row's help lines under it, at most
+/// the list and the highlighted row's help lines right under it (16 rows
+/// leave no room for a second gap in the 200-line screen), at most
 /// [`EXTRAS_NOTE_COLS`] columns.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 const EXTRAS_NOTE_X: f32 = 64.0;
 const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
 const EXTRAS_HEADER_Y: f32 = EXTRAS_ROW_Y0 + (SETTING_ROWS.len() + 1) as f32 * OPTIONS_ROW_STEP;
-const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + 2.0 * OPTIONS_ROW_STEP;
+const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + OPTIONS_ROW_STEP;
 /// The page's header (`M_PrintWhite`): what these rows are.
 const EXTRAS_HEADER: &str = "Not in id's Quake";
 
@@ -3810,7 +3823,7 @@ mod tests {
         // The settings page, as M_Options_Draw: plaque + OPTIONS title, the
         // rows from y=32 (bronze labels, values at x=220), the cursor at x=200
         // while the 4 Hz blink shows it; under them, right of the plaque, the
-        // white header a row below the list and the row's help lines under it,
+        // white header a row below the list and the row's help lines right under it,
         // at x=64.
         m.set_cursor(ROW_PROFILE);
         m.select(&mut s);
@@ -3827,7 +3840,7 @@ mod tests {
             assert_eq!(px(&img, 220, y), pal[5], "row {i}'s value at x=220");
         }
         assert_eq!(px(&img, 200, 32), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 0's help, bronze, under the header");
+        assert_eq!(px(&img, 64, header_y + 8), pal[5], "row 0's help, bronze, under the header");
         // Nothing but the plaque in its columns: every note starts right of it.
         for y in 30..200 {
             for x in 16..48 {
@@ -3846,7 +3859,7 @@ mod tests {
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
         assert_eq!(px(&img, 220 + 16, 40), pal[0], "\"on\" is two characters");
         assert_eq!(px(&img, 220 + 16, 48), pal[5], "\"off\" is three");
-        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 2's help once the cursor moves");
+        assert_eq!(px(&img, 64, header_y + 8), pal[5], "row 2's help once the cursor moves");
         assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 2");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, [0, 0, 0]);

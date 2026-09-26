@@ -18,7 +18,7 @@ use quake_rs::wad::Qpic;
 
 use crate::common::pak;
 use crate::host::ShowFps;
-use crate::snd_dma::{self, SND_QUEUE, STOP_SND_QUEUE};
+use crate::snd_dma;
 use crate::vid::{DEFAULT_H, DEFAULT_W};
 
 pub(crate) use quake_rs::client::{DemoPlay, Walk};
@@ -562,10 +562,6 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
 
 /// Start interactive walk mode (e1m1). Returns 1 on success.
 pub(crate) fn boot() -> i32 {
-    // Clean slate: drop any sounds still queued from a previous mode so stale
-    // samples can't play after the switch (pending stop requests included).
-    SND_QUEUE.with(|q| q.borrow_mut().clear());
-    STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     let w = build_walk();
     let ok = w.is_some();
     ensure_app(|a| {
@@ -596,10 +592,6 @@ pub(crate) fn boot() -> i32 {
 /// Start recorded-demo playback at demo1.dem (e1m3); demo2 and demo3 follow
 /// (quake.rc's startdemos cycle, see [`DEMOS`](cl_demo::DEMOS)). Returns 1 on success.
 pub(crate) fn boot_demo() -> i32 {
-    // Clean slate: drop any sounds still queued from a previous mode
-    // (pending stop requests included).
-    SND_QUEUE.with(|q| q.borrow_mut().clear());
-    STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     let mut ok = false;
     ensure_app(|a| {
         a.ensure_menu_assets();
@@ -638,10 +630,6 @@ fn start_attract_loop(a: &mut App) -> bool {
 /// when it could not — in which case we fall back to [`boot`] so the user still
 /// lands on a menu over *something* (e1m1) rather than a blank screen.
 pub(crate) fn boot_attract() -> i32 {
-    // Clean slate: drop any sounds still queued from a previous mode
-    // (pending stop requests included).
-    SND_QUEUE.with(|q| q.borrow_mut().clear());
-    STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
     let mut built = false;
     ensure_app(|a| {
         a.ensure_menu_assets();

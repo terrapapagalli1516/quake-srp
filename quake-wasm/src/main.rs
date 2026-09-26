@@ -2,19 +2,20 @@
 //! events on stdin, the frames and sounds on stdout, the saves and
 //! `config.cfg` through `std::fs`. Built for `wasm32-wasip1`, it runs inside
 //! a Web Worker under `web/wasi.js`, a small WASI host that turns those calls
-//! into the page's canvas, Web Audio and storage (`web/PLATFORM.md`). Built
+//! into the page's canvas, audio device and storage (`web/PLATFORM.md`). Built
 //! natively, the same program runs on a pipe — which is how its tests run it.
 //!
 //! This crate is the platform layer — what id's source has in `sys_*.c`,
 //! `vid_*.c`, `snd_*.c` and `in_*.c`, plus the host state around the game:
 //! the [`App`](app::App) held in a `thread_local`, the protocol and the loop
-//! the page drives, the sound queues, the saves and `config.cfg`. The game
+//! the page drives, the sound device (id's mixer painting for the page's
+//! AudioWorklet), the saves and `config.cfg`. The game
 //! client itself — the live frame against the local server, demo playback,
 //! the level loads, the cheats — is [`quake_rs::client`], which native tools
 //! run too (`quaketool play`). Each client frame hands back a
 //! [`ClientFrame`](quake_rs::client::ClientFrame): the screen, its palette
 //! shifts, and the calls it made into the sound layer, which [`snd_dma`]
-//! carries out for the page.
+//! hands to id's mixer.
 //!
 //! No `unsafe`, no exports, no imports beyond what `std` asks of WASI, no
 //! dependencies.
@@ -26,7 +27,7 @@
 //!
 //! | module      | id counterpart                          | what                                             |
 //! |-------------|-----------------------------------------|--------------------------------------------------|
-//! | `sys`       | sys_win.c `main`                        | the loop: events in, a host frame per tick, frames and sounds out |
+//! | `sys`       | sys_win.c `main`                        | the loop: events in, a host frame per tick, frames and sound out |
 //! | `proto`     | —                                       | the records on stdin and stdout                  |
 //! | `automation`| —                                       | the protocol's calls: the page's buttons, the browser checks' hooks |
 //! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files (and `main`'s `-hwthreads`, the threads the host offers) |
@@ -41,7 +42,7 @@
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle and typing                        |
 //! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | the console's command table, `Cvar_Command`, `bind`, `map` (the loads and cheats: `client::host_cmd`) |
 //! | `savegame`  | host_cmd.c `Host_Savegame_f`/`_Loadgame_f`, menu.c `M_ScanSaves` | save/load as `.sav` files |
-//! | `snd_dma`   | snd_win.c                               | the client's sound calls carried out: the queues the loop sends, the ambient ramps (the channel and loop gates: `quake_rs::snd`) |
+//! | `snd_dma`   | snd_win.c                               | the sound device: the client's sound calls into id's mixer (`quake_rs::snd::Mixer`), mixed ahead of the page's audio clock into `Pcm` records for its ring and AudioWorklet; the mixer follows the `snd_modern` setting (Classic: id's at 11025 Hz; 2026: the device's rate) |
 //! | `vid`       | vid_win.c                               | the picture's size (a mode in a 4:3 box, or native), framebuffer, the client frames' `Vid` |
 //! | `bench`     | —                                       | `--features bench` frame-phase timers and workloads |
 //!

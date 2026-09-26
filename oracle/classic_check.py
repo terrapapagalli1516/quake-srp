@@ -32,6 +32,9 @@ Two kinds of check:
   - `screen2d`: `screen2d.py`, id's composited 2-D layer at 320x200 and
     640x400, the port in its Classic profile: no shot below its recorded
     `2d exact%` (the known residues, oracle/README.md, are recorded);
+  - `demolerp`: `demo_lerp.py`, id's client playing the attract loop (17,500
+    frames: demo1, demo2, demo3, demo1 again) against the port's, frame by
+    frame — the clock identical, the camera and every entity within 0.01;
   - `sound`: `sound.py`, id's mixer against the engine's `Fixes::NONE`
     mixer: every case sample-identical.
 
@@ -63,7 +66,7 @@ TIMEDEMO_RES = "320x200,640x400"
 # The server times of the edict dumps, and the 0.1 s frames id's oracle
 # waits for each after the last (the player connects at sv.time 1.2).
 EDICT_TIMES = [(1.7, 5), (4.7, 30), (10.7, 60)]
-CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "screen2d", "sound"]
+CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "screen2d", "demolerp", "sound"]
 
 
 def run(cmd, cwd=PROJECT, timeout=1800) -> str:
@@ -189,6 +192,17 @@ def check_screen2d(qt: Path, out: Path) -> dict:
     (out / "screen2d.txt").write_text(text)
     shots = json.loads((d / "summary.json").read_text())
     return {f"screen2d.{k}": f"{v['exact2d_pct']:.2f}" for k, v in shots.items()}
+
+
+def check_demolerp(qt: Path, out: Path) -> dict:
+    keep = out / "demo_lerp"
+    keep.mkdir(parents=True, exist_ok=True)
+    res = subprocess.run(["uv", "run", str(HERE / "demo_lerp.py"), "--quaketool", str(qt), "--keep", str(keep)],
+                         cwd=PROJECT, capture_output=True, text=True, timeout=1800)
+    (out / "demo_lerp.txt").write_text(res.stdout + res.stderr)
+    if res.returncode != 0 or "DIFFER" in res.stdout:
+        raise RuntimeError("demo_lerp.py: the port's demo playback left id's (see demo_lerp.txt)")
+    return {}
 
 
 def check_sound(qt: Path, out: Path) -> dict:

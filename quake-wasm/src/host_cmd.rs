@@ -597,6 +597,38 @@ mod tests {
     }
 
     #[test]
+    fn r_lerpmove_is_a_cvar_every_frame_hands_the_client() {
+        use quake_rs::client::lerpmove::LerpMove;
+        let last_line = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
+        };
+        let lerpmove = || walk_mut(|w| w.lerpmove);
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("r_lerpmove");
+        assert_eq!(last_line().as_deref(), Some("\"r_lerpmove\" is \"0\""), "off in Classic");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Classic);
+        run_console_line("r_lerpmove 1");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth);
+        console_toggle();
+        // A game the host builds afresh draws with it from its first frame.
+        assert_eq!(boot(), 1);
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth);
+        close_menu();
+        console_toggle();
+        run_console_line("r_lerpmove 0");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Classic);
+        run_console_line("profile 2026");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth, "on in 2026");
+    }
+
+    #[test]
     fn wasm_extra_commands_print_and_set_like_cvars() {
         use crate::menu::extras;
         let last_line = || {
