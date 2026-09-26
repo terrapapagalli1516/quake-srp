@@ -53,6 +53,8 @@ pub struct Outbox {
     temp_entities: Vec<TempEntityEvent>,
     /// `svc_*` commands those buffers completed ([`Server::drain_svc_events`]).
     svc_events: Vec<SvcEvent>,
+    /// `svc_stufftext`s, as `(client entity, text)` ([`Server::drain_stufftext`]).
+    stufftext: Vec<(i32, String)>,
 }
 
 impl Server {
@@ -240,6 +242,20 @@ pub(super) fn bi_sprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 1);
     vm.output.push_str(&s);
     send(vm, |o| o.print(false, s));
+    Ok(())
+}
+
+/// `PF_stuffcmd` (#21): `stuffcmd(client, text)` sends `svc_stufftext` to that
+/// client, whose command buffer runs it (`Cbuf_AddText`). Queued as
+/// `(entity, text)`; the front-end playing that client takes it with
+/// [`Server::drain_stufftext`]. The C's "Parm 0 not a client" `PR_RunError`
+/// for an entity outside `1..=maxclients` is left to the front-end, which
+/// only executes text sent to its own player. (id1 stuffs only `"bf\n"`, the
+/// bonus flash, from 16 sites: every item pickup and CheckPowerups.)
+pub(super) fn bi_stuffcmd(vm: &mut Vm) -> Result<()> {
+    let ent = vm.arg_entity(0);
+    let text = vm.arg_string(1);
+    send(vm, |o| o.stufftext.push((ent, text)));
     Ok(())
 }
 
@@ -910,6 +926,14 @@ impl Server {
     /// completed time, start the finale text reveal.
     pub fn drain_svc_events(&mut self) -> Vec<SvcEvent> {
         self.take_outbox(|o| &mut o.svc_events)
+    }
+
+    /// Take and clear the `stuffcmd` text the QuakeC sent since the last
+    /// drain, as `(client entity, text)`: the reliable `svc_stufftext`
+    /// messages whose text the client's command buffer runs (see
+    /// [`bi_stuffcmd`]).
+    pub fn drain_stufftext(&mut self) -> Vec<(i32, String)> {
+        self.take_outbox(|o| &mut o.stufftext)
     }
 
     /// `SV_StartSound` (sv_phys.c helper, via `world.c`): queue a sound emitted by

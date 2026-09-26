@@ -215,7 +215,7 @@ pub fn build_walk_map(pak: Pak, map: &str, sound: &mut Vec<SoundCall>) -> Option
     let _ = server.drain_temp_entities();
     let _ = server.drain_messages();
     let _ = server.drain_svc_events();
-    let _ = crate::builtins::take_stufftext();
+    let _ = server.drain_stufftext();
 
     assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, pitch)
 }
@@ -346,7 +346,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(statics));
     let _ = w.server.drain_svc_events();
-    let _ = crate::builtins::take_stufftext();
+    let _ = w.server.drain_stufftext();
 }
 
 /// Single-player respawn: reload the CURRENT level fresh and reconnect the player
@@ -421,7 +421,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(statics));
     let _ = w.server.drain_svc_events();
-    let _ = crate::builtins::take_stufftext();
+    let _ = w.server.drain_stufftext();
 }
 
 /// `Host_Loadgame_f`'s post-fopen half: parse the header, spawn the named map,
@@ -506,6 +506,6 @@ pub fn build_walk_savegame(pak: Pak, text: &str, sound: &mut Vec<SoundCall>) -> 
     let _ = w.server.drain_temp_entities();
     let _ = w.server.drain_messages();
     let _ = w.server.drain_svc_events();
-    let _ = crate::builtins::take_stufftext();
+    let _ = w.server.drain_stufftext();
     Ok(w)
 }

@@ -52,33 +52,6 @@ fn pf_debug_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-thread_local! {
-    /// The `svc_stufftext` text `stuffcmd` sent, as `(client entity, text)`,
-    /// until the front-end takes it — the client's reliable message the C
-    /// writes (`Host_ClientCommands`). Thread-local like the server's other
-    /// event queues (single-threaded VM).
-    static STUFFTEXT: std::cell::RefCell<Vec<(i32, String)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// `PF_stuffcmd` (#21): `stuffcmd(client, text)` sends `svc_stufftext` to that
-/// client, whose command buffer runs it (`Cbuf_AddText`). Queued as
-/// `(entity, text)`; the front-end playing that client takes it with
-/// [`take_stufftext`]. The C's "Parm 0 not a client" `PR_RunError` for an
-/// entity outside `1..=maxclients` is left to the front-end, which only
-/// executes text sent to its own player. (id1 stuffs only `"bf\n"`, the
-/// bonus flash, from 16 sites: every item pickup and CheckPowerups.)
-pub fn pf_stuffcmd(vm: &mut Vm) -> Result<()> {
-    let ent = vm.arg_entity(0);
-    let text = vm.arg_string(1);
-    STUFFTEXT.with(|q| q.borrow_mut().push((ent, text)));
-    Ok(())
-}
-
-/// Take and clear the queued `stuffcmd` text (see [`pf_stuffcmd`]).
-pub fn take_stufftext() -> Vec<(i32, String)> {
-    STUFFTEXT.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
 
 /// `PF_VarString(first)`: concatenate the string arguments from `first` to
 /// `pr_argc`. The C version uses a fixed 256-byte buffer; we build a `String`.
@@ -497,7 +470,7 @@ pub fn default_builtins() -> Vec<Builtin> {
         pf_find,        // 18  find
         pf_fixme,       // 19  precache_sound
         pf_fixme,       // 20  precache_model
-        pf_stuffcmd,    // 21  stuffcmd
+        pf_fixme,       // 21  stuffcmd      (network)
         pf_fixme,       // 22  findradius    (server world)
         pf_bprint,      // 23  bprint
         pf_sprint,      // 24  sprint

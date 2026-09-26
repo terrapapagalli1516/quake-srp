@@ -306,7 +306,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         apply_fixangle(w);
         parse_client_damage(w, before);
         // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
-        for (ent, text) in crate::builtins::take_stufftext() {
+        for (ent, text) in w.server.drain_stufftext() {
             if ent == w.player && stufftext_bonus_flash(&text) {
                 w.bonus_blend = BONUS_PERCENT;
             }
