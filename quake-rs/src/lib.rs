@@ -69,6 +69,7 @@ pub mod console;
 pub mod dlight;
 pub mod demo;
 pub mod snd;
+pub mod cd_audio;
 pub mod stepping;
 
 pub mod client;

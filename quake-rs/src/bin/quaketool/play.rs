@@ -96,6 +96,9 @@ impl SoundTally {
                 SoundCall::StopAll => self.stop_all += 1,
                 SoundCall::Static(s) => self.static_loops += s.len(),
                 SoundCall::Update { .. } => self.updates += 1,
+                // The CD's calls are not the mixer's: the tally stays the
+                // sound layer's.
+                SoundCall::Cd(_) => {}
             }
         }
     }
