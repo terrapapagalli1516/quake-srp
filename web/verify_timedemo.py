@@ -75,7 +75,7 @@ def boot_page(pg):
     time.sleep(0.3)
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
     errs = []
     ctx = br.new_context(viewport={"width": 820, "height": 560})

@@ -13,7 +13,7 @@ PORT = isolated.port(8143)
 httpd = isolated.serve(WEB, PORT)
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+    browser = isolated.launch(p, ["--no-sandbox"])
     page = browser.new_page(viewport={"width": 900, "height": 640})
     msgs = []
     page.on("console", lambda m: msgs.append(m.text))

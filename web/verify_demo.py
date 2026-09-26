@@ -57,7 +57,7 @@ def changed_fraction(a, b, y0, y1):
     return diff / max(1, total)
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox",
         # Let audioCtx.resume() succeed without a user gesture so the recorded
         # one-shots actually play under headless.

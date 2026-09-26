@@ -63,7 +63,7 @@ def boot_page(pg):
     pg.wait_for_function("window.quake && quake.ready", timeout=120000)
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox",
         # Let the single first gesture genuinely unlock audio under headless.
         "--autoplay-policy=no-user-gesture-required",
@@ -80,6 +80,8 @@ with sync_playwright() as p:
           pg.evaluate("!overlay.classList.contains('hidden')"))
     pg.locator("#wrap").screenshot(path=os.path.join(WEB, "verify_input_overlay.png"))
     pg.locator("#overlay").click()
+    # (Chromium's context runs as it is made; Firefox's resumes a moment later.)
+    pg.wait_for_function("audioCtx && audioCtx.state === 'running'", timeout=3000)
     s = pg.evaluate("""async () => ({
         hidden: overlay.classList.contains('hidden'),
         audio: audioCtx ? audioCtx.state : 'none',
@@ -114,6 +116,7 @@ with sync_playwright() as p:
 
     # (1) Enter is a first gesture too.
     pg.keyboard.press("Enter")
+    pg.wait_for_function("audioCtx && audioCtx.state === 'running'", timeout=3000)
     s = pg.evaluate("""async () => ({
         hidden: overlay.classList.contains('hidden'),
         audio: audioCtx ? audioCtx.state : 'none',

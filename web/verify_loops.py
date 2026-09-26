@@ -36,7 +36,7 @@ def check(name, ok, detail=""):
     else: failed += 1
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
     pg = br.new_page(viewport={"width": 820, "height": 540})
     errs = []

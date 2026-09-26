@@ -15,7 +15,7 @@ httpd = isolated.serve(WEB, PORT)
 fails = []
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=["--no-sandbox"])
+    br = isolated.launch(p, ["--no-sandbox"])
     pg = br.new_page(viewport={"width": 820, "height": 540})
     errs = []
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)

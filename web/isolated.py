@@ -9,6 +9,8 @@ cross-origin isolated, which its SharedArrayBuffers need (PLATFORM.md,
 A web directory holds index.html, wasi.js, quake.wasm and id1/pak0.pak;
 `webdir()` finds the one to serve: the script's argument, or `web/` itself
 (with the engine and the pak put in place by PLATFORM.md's deploy recipe).
+`launch()` starts the browser the checks run in: Chromium, or
+$QUAKE_BROWSER.
 """
 import functools
 import http.server
@@ -51,3 +53,16 @@ def webdir():
 def port(default):
     """The port: $QUAKE_VERIFY_PORT, else the script's default."""
     return int(os.environ.get("QUAKE_VERIFY_PORT", str(default)))
+
+
+def launch(p, args=()):
+    """A headless browser: Chromium, or the one $QUAKE_BROWSER names
+    (`firefox`, `webkit`; Playwright's builds). Chromium's command-line
+    `args` only go to Chromium; Firefox gets the equivalent of
+    `--autoplay-policy=no-user-gesture-required` as a preference."""
+    name = os.environ.get("QUAKE_BROWSER", "chromium")
+    if name == "chromium":
+        return p.chromium.launch(headless=True, args=list(args))
+    prefs = {"media.autoplay.default": 0, "media.autoplay.blocking_policy": 0} if name == "firefox" else None
+    kw = {"firefox_user_prefs": prefs} if prefs else {}
+    return getattr(p, name).launch(headless=True, **kw)

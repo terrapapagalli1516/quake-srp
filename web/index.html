@@ -1099,14 +1099,17 @@ function onAmbient(a) {
   levelLoops.ambients.push(a);
   if (audioRunning()) startAmbient(a);
 }
-// Audio just started: this level's loops, which arrived before it could.
+// Audio just started: this level's loops that arrived before it could.
+// (Each starts once: a record may also have found audio already running
+// before the page noticed the flip.)
 function startLevelLoops() {
-  if (staticLoops.length || ambientLoops.length) return;
   for (const p of levelLoops.statics) startStatic(p);
   for (const a of levelLoops.ambients) startAmbient(a);
 }
 // Decode is async: a loop only starts if its level is still current.
 function startStatic(p) {
+  if (p.started) return;
+  p.started = true;
   const myGen = loopGen;
   withBuffer(p.id, buf => {
     if (loopGen !== myGen) return;
@@ -1119,6 +1122,8 @@ function startStatic(p) {
 }
 // An ambient channel's loop runs at gain 0 until the view leaf says otherwise.
 function startAmbient(a) {
+  if (a.started) return;
+  a.started = true;
   const myGen = loopGen;
   withBuffer(a.id, buf => {
     if (loopGen !== myGen) return;

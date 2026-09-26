@@ -50,7 +50,7 @@ def check(name, ok, detail=""):
     else: failed += 1
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox",
         # Let audioCtx.resume() succeed without a user gesture so the menu
         # sound drain actually runs under headless.

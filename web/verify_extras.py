@@ -98,7 +98,7 @@ DIFF = """([a, b]) => {
 }"""
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
     errs = []
     ctx = br.new_context(viewport={"width": 820, "height": 560})
@@ -241,13 +241,20 @@ with sync_playwright() as p:
     key("Escape")
     pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     key("f")
+    has_kb = pg.evaluate("!!(navigator.keyboard && navigator.keyboard.lock)")
     try:
         pg.wait_for_function("!!document.fullscreenElement && escLocked", timeout=5000)
         fs = True
     except Exception:
         fs = False
-    check("F enters fullscreen and locks Esc", fs,
-          str(pg.evaluate("[!!document.fullscreenElement, escLocked, window.__kb]")))
+    if has_kb:
+        check("F enters fullscreen and locks Esc", fs,
+              str(pg.evaluate("[!!document.fullscreenElement, escLocked, window.__kb]")))
+    else:
+        print("SKIP keyboard-lock checks (this browser has no Keyboard Lock API; "
+              "the fallback below is its flow)")
+        if pg.evaluate("!!document.fullscreenElement"):
+            key("f")
     if fs:
         check("the lock asks for exactly Escape",
               pg.evaluate("JSON.stringify(window.__kb.locks)") == '[["Escape"]]')
@@ -308,7 +315,7 @@ with sync_playwright() as p:
         pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
         key("Escape")
         check("windowed: lock loss opens, the next Esc closes", vis() == 0)
-    else:
+    elif has_kb:
         print("SKIP keyboard-lock checks (headless refused fullscreen)")
 
     # Without the Keyboard Lock API (Firefox, Safari): the old hint and flow.
