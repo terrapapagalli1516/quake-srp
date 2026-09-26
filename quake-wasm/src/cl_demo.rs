@@ -298,9 +298,10 @@ mod tests {
             "the burst + 1024-particle explosion populate the pool (got {after_first})"
         );
 
-        // A tiny step that holds us on frame 1 must NOT re-spawn the explosion
-        // (the pool only shrinks as particles age — it never jumps back up).
-        let _ = step_demo(&mut d, 0.001, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
+        // A step that holds the clock on frame 1 (any later clock reads the
+        // next message: CL_GetMessage) must NOT re-spawn the explosion (the
+        // pool only shrinks as particles age — it never jumps back up).
+        let _ = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
         assert_eq!(d.idx, 1, "still on the effect frame");
         assert!(
             d.particles.len() <= after_first,
@@ -403,10 +404,11 @@ mod tests {
             d.beams.any_live(d.demo.frames[2].time),
             "beam still live on the last frame (t=0.10 < endtime 0.25)"
         );
-        // The NEXT (tiny) step triggers the deferred loop wrap: back to frame 0
-        // with the beam store cleared (no stale bolts carried into the replay;
-        // the tiny dt keeps playback ON frame 0, before the bolt re-spawns).
-        let _ = step_demo(&mut d, 0.001, false, &crate::vid::mode_vid(160, 100));
+        // The step that takes the clock past the last message triggers the
+        // deferred loop wrap: back to frame 0 with the beam store cleared (no
+        // stale bolts carried into the replay; the wrap's frame reads only
+        // frame 0, before the bolt re-spawns).
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 0, "playback wrapped");
         assert!(!d.beams.any_live(0.0), "the wrap cleared the beam store");
     }
@@ -643,14 +645,14 @@ mod tests {
             .and_then(|b| Mdl::parse(&b).ok())
             .expect("progs/missile.mdl parses");
         assert_ne!(rocket_trail_type(missile.header.flags), None, "missile.mdl carries EF_ROCKET");
+        // Each message's update puts it at x (a forcelink: no lerp).
         let ent = |num: i32, x: f32| EntSnapshot {
             num,
             modelindex: 2,
-            frame: 0,
-            skin: 0,
             origin: [x, 0.0, 0.0],
-            angles: [0.0; 3],
-            effects: 0,
+            prev_origin: [x, 0.0, 0.0],
+            forcelink: true,
+            ..EntSnapshot::default()
         };
         let frame = |t: f32, x: f32| DemoFrame {
             time: t,
@@ -1103,7 +1105,8 @@ mod tests {
         // A bit the recording gains later is stamped on its frame's clock.
         let got = d.demo.frames.iter().position(|f| f.client.items & !items0 != 0);
         if let Some(i) = got {
-            let dt = d.demo.frames[i].time - d.demo.frames[0].time;
+            // (Playback starts 0.1 s before the first message: CL_LerpPoint.)
+            let dt = d.demo.frames[i].time - d.demo.frames[0].time + 0.1;
             let _ = step_demo(&mut d, dt, false, &crate::vid::mode_vid(160, 100));
             assert!(!unflashed(&d), "frame {i}'s new item is stamped");
         }

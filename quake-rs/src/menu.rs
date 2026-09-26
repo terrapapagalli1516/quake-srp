@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 12] = [
+pub const SETTING_ROWS: [SettingRow; 13] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -150,6 +150,12 @@ pub const SETTING_ROWS: [SettingRow; 12] = [
         cvar: "wasm_scaled2d",
         label: "      Scaled 2-D layer",
         help: ["Status bar, menus and text at", "id's proportions, whole pixels"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "r_lerpmove",
+        label: "       Smooth monsters",
+        help: ["Monsters glide between their", "steps, not 10 jumps a second"],
         kind: RowKind::Toggle,
     },
     SettingRow {

@@ -333,6 +333,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
+    w.glides.clear();
     w.beams.clear();
     // Clear the on-screen text overlay on level load (SCR_BeginLoadingPlaque calls
     // Con_ClearNotify + scr_centertime_off=0): drop the half-built line AND the
@@ -442,6 +443,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     w.particles = ParticleSystem::new();
     w.dlights = DynamicLights::new();
     w.trail_org.clear();
+    w.glides.clear();
     w.beams.clear();
     w.notify.clear();
     w.centerprint = None;

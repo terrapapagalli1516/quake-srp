@@ -176,6 +176,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         let km = derive_key_move(&a.settings.cvars, &a.settings.binds, &a.keys_held);
         let viewsize = a.settings.cvars.viewsize;
         let crosshair = a.settings.cvars.crosshair;
+        let lerpmove = a.settings.cvars.lerpmove;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
         // last frame, CL_NextDemo plays the next of the `startdemos` loop
         // (quake.rc: demo1 demo2 demo3) — or, outside the loop, the client
@@ -194,6 +195,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.viewsize = viewsize;
             wk.crosshair = crosshair;
             wk.stepping = stepping;
+            wk.lerpmove = lerpmove;
             wk.renderer.set_threads(threads);
         }
         if let Some(d) = a.demo.as_mut() {
@@ -201,6 +203,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             d.viewsize = viewsize;
             d.crosshair = crosshair;
             d.stepping = stepping;
+            d.lerpmove = lerpmove;
             // +showscores only reaches the game while it owns the keyboard.
             d.show_scores = km.showscores && !gate_gameplay;
         }
@@ -224,6 +227,7 @@ pub(crate) fn step(dt: f32) -> i32 {
                     d.viewsize = viewsize;
                     d.crosshair = crosshair;
                     d.stepping = stepping;
+                    d.lerpmove = lerpmove;
                     d.show_scores = km.showscores && !gate_gameplay;
                 }
             }

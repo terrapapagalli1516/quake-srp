@@ -557,6 +557,7 @@ to each tool's own output):
 | `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash | the recorded list |
 | `oracle` | `compare.py --aspect 0.8333333 --spans 16`: the eight standard rows | id's C: none below its recorded match (100.00%; e1m7 99.9969%, two pixels) |
 | `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic profile | id's C: no shot below its recorded `2d exact%` (the residues above) |
+| `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame (below) | id's C: every demo MATCH |
 | `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE` | id's C: every case sample-identical |
 
 The recorded list is `oracle/classic_expected.txt`, with a note for each
@@ -564,18 +565,41 @@ recording (first on `a50d8d7`, the settings branch's base). A change that
 moves an identity value on purpose is re-recorded with `--record --note`,
 and says so where the fidelity change is recorded (AUDIT.md).
 
-**Last run** (branch `q26/settings` at `11850b9`, after merging the
-multicore renderer, 2026-09-26; the tools' outputs were kept beside the
-report):
+**Last run** (branch `q26/settings` after merging `quake/2026` at `207eee1`
+and `q26/lerp`, 2026-09-26; the tools' outputs were kept beside the report):
 
 ```
 PASS  goldens      0.1 s  3 values match
-PASS  play        14.6 s  42 values match
-PASS  timedemo     5.1 s  3 values match
-PASS  census       1.5 s  1 values match
-PASS  edicts       2.2 s  9 values match
+PASS  play        14.4 s  42 values match
+PASS  timedemo     4.3 s  3 values match
+PASS  census       1.3 s  1 values match
+PASS  edicts       1.9 s  9 values match
 PASS  oracle       0.6 s  8 values match
-PASS  screen2d    11.8 s  146 values match
-PASS  sound        2.6 s  0 values match
+PASS  screen2d     3.2 s  146 values match
+PASS  demolerp    19.8 s  0 values match
+PASS  sound        2.3 s  0 values match
 ALL PASS
 ```
+
+## Demo playback (`demo_lerp.py`)
+
+What id's client draws between two recorded messages (`CL_LerpPoint`,
+`CL_RelinkEntities`), frame by frame. The oracle plays the attract loop from
+boot with every host frame exactly the port's 1/72 s step (`-oracle_dt`),
+and `oracle_trace path [frames]` writes one record per rendered frame as
+`R_RenderView` starts: `cl.time`, `cl.oldtime`, `cl.mtime[0..1]` as
+`CL_LerpPoint` left them, `cl.viewangles`, the view entity's origin,
+`cl.velocity`, and every entity on `cl_visedicts` (number, model, origin,
+angles, frame). `quaketool play demo1 N --trace PATH` writes the same from
+the port's client; the script runs both, splits the traces at each demo's
+first frame and compares them.
+
+```sh
+uv run oracle/demo_lerp.py                  # demo1, demo2, demo3, demo1 again: 17,500 frames
+uv run oracle/demo_lerp.py --frames 2000 --keep DIR
+```
+
+Result (2026-09-26, `q26/lerp`): 17,500 frames over the whole loop, the
+same frame count per demo, `cl.time` identical in every frame, camera,
+velocity and every entity within 2.5e-4 (the oracle's x87 floats), the same
+entities everywhere.

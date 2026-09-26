@@ -14,10 +14,10 @@
 //!
 //! Switching profile resets the departures and the bindings to the new
 //! profile's and keeps id's own settings (Screen size, Brightness, the
-//! volumes, the mouse). What later agents' work adds takes a slot here: smooth
-//! step movement (`lerp`), raw mouse and gamepad (`input`) and the engine's
-//! own mixer with its fixes (`audio`, `snd::Fixes::ALL`) each become a
-//! departure field in [`Cvars`], on in [`Cvars::modern`].
+//! volumes, the mouse). What later agents' work adds takes a slot here, as
+//! smooth step movement (`r_lerpmove`) did: raw mouse and gamepad (`input`)
+//! and the engine's own mixer with its fixes (`audio`, `snd::Fixes::ALL`)
+//! each become a departure field in [`Cvars`], on in [`Cvars::modern`].
 //!
 //! **Persistence, the id way.** [`Settings::config_text`] is
 //! `Host_WriteConfiguration`'s `config.cfg`: `bind` lines and archived cvars,

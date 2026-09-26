@@ -2309,6 +2309,85 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
 - **Not measured:** the page (quake-wasm and web/ do not set the cvars yet), GPU browsers,
   phones.
 
+## Demo playback between messages: id's CL_LerpPoint in Classic (2026-09-26, branch `q26/lerp`)
+
+id's client draws demo playback between the two newest recorded messages in
+every frame, at any frame rate: `CL_ReadFromServer` advances `cl.time` by the
+host frame time, `CL_GetMessage` reads a message whenever `cl.time` has
+passed the newest (`cl.time <= cl.mtime[0]`: "don't need another message
+yet"), and `CL_RelinkEntities` puts the view entity, every entity,
+`cl.velocity` and (in `cls.demoplayback`) `cl.viewangles` at
+`CL_LerpPoint`'s fraction between `cl.mtime[1]` and `cl.mtime[0]`. The port
+pre-interpolated each message interval into 60 Hz sub-frames and showed the
+latest sub-frame due — 58 camera moves a second at 72 Hz, a sub-frame late,
+and the monsters without id's `U_NOLERP` behaviour.
+
+- ✅ **Fixed: Classic is id's, frame for frame.** The parser
+  (`demo::parse_demo`) keeps one frame per message with the client state id's
+  relink reads — each entity's `msg_origins[0..1]`, `msg_angles[0..1]` and
+  the `forcelink` its update set, `cl.mtime[0..1]`, `cl.mviewangles[0..1]`,
+  `cl.mvelocity[0..1]`, `cl.viewheight`, and whether the block ends the demo
+  (`svc_disconnect`). `client::cl_demo::demo_frame` runs `CL_ReadFromServer`
+  on them: the double clock, the read-ahead, `CL_LerpPoint` (the 0.1 s cap,
+  the pull back to the interval past 1%, which also starts a demo 0.1 s
+  before its first message) and `CL_RelinkEntities` (the >100-unit teleport
+  test, which goes straight to the new place; angles the short way;
+  `EF_ROTATE` at `anglemod(100*cl.time)`; `ent->forcelink` set by any update
+  the frame read, cleared once drawn). Effects spawn when their message is
+  read, at that `cl.time`; particles and the stair smoothing step by
+  `cl.time - cl.oldtime` (the smoothing stepped by the host frame time). `oracle/demo_lerp.py` plays the attract loop from
+  boot in id's client (the oracle, new `oracle_trace`) and the port at 72 Hz:
+  demo1, demo2, demo3 and demo1 again, 17,500 frames — the same number of
+  frames per demo, `cl.time` identical in every frame, the camera angles and
+  origin, `cl.velocity` and every entity within 2.5e-4 (x87 float noise), the
+  same entities in every frame.
+- **Two id quirks this brings, kept:** a message's `U_NOLERP` entities (the
+  `MOVETYPE_STEP` monsters) are drawn where it put them in the frame that
+  reads it and lerp from the message before in the frames after, so a
+  stepping monster jumps a message ahead for one frame and falls back
+  (`CL_ParseUpdate` sets `ent->forcelink` for `U_NOLERP` without copying the
+  history, and the relink clears it); and each demo opens with the camera
+  turning from the previous block's recorded angles (the signon's, 0) over
+  its first 0.1 s. Both are id's at 72 Hz.
+- The frame that reads a demo's closing `svc_disconnect` draws the last
+  frame's view at the new clock, as id's does before `Host_EndGame` leaves
+  the frame; id draws it under the loading plaque (`CL_NextDemo`'s
+  `SCR_BeginLoadingPlaque`), which the port does not draw (no loading plaque,
+  on purpose: the Open list).
+- Departure, invisible: id's first frame of a demo starts `cl.time` at 0
+  (`CL_ClearState` runs after the frame's increment), the port's at the
+  frame time; `CL_LerpPoint` moves either to 0.1 s before the first message.
+- **Timedemo:** one message a frame at frac 1, as before (frame counts
+  969 / 985 / 1090), through the same relink. Hashed with a fixed host frame
+  time (the tool's is the wall clock, so its frames vary run to run), every
+  frame of the three is identical to before except where the stair smoothing
+  moves: id's `V_CalcRefdef` steps it by `steptime = cl.time - cl.oldtime`,
+  in a timedemo a message interval, where the port stepped it by the host
+  frame time. Fixed with the demo path; the view kick and the palette fades
+  stay on `host_frametime`, as id's.
+- `quaketool play demo1..3` hashes change (the frames are id's now); goldens
+  and the walk workloads' hashes are unchanged, the sound tallies are the same.
+  The uncapped path (`Stepping::Uncapped`) needs nothing of its own for
+  demos any more: `quaketool framerate` measures 70.4 camera moves a second
+  at 72 Hz (id's: every frame the recorded player moves) and 468 at 480 Hz.
+
+**The 2026 extra on the same branch: `r_lerpmove`** (`client::lerpmove`,
+`LerpMove::Classic` by default and in Classic; the settings work turns it on
+in the 2026 profile). id's monsters step every 0.1 s (their thinks) and are
+drawn where each step put them; with `LerpMove::Smooth` a step mover
+(`MOVETYPE_STEP` live, `U_NOLERP` in a demo) glides from where it is drawn
+to its new place over 0.1 s, or over one frame when the server moves it
+every frame (airborne, pushed), turning the short way, and snaps on a new
+sighting, a new model, a move over 100 units on an axis and a clock that goes
+back. In a demo it is relinked where its message put it (QuakeSpasm's `f = 1`
+for its step movers), so id's `U_NOLERP` jump goes too. Only where the model
+is drawn changes (lights, sound and the box are the server's; no id1 monster
+model has a trail flag), and animation frames are not blended. Departure, off in Classic; the goldens, the walk and
+demo hashes and timedemo are unchanged by it. Measured in `FRAMERATE.md`
+("Monsters between their steps"): at 240 Hz a walking grunt is drawn moving
+in 99.8% of frames (Classic 4.2%), its largest move in a frame 0.17 units
+(4.1), half a step behind the server on average.
+
 ## QuakeC errors end the game (2026-09-26, branch `q26/server`)
 
 The client dropped the server frame's `Result` (`client/cl_main.rs:300`), and the server
@@ -2410,8 +2489,15 @@ settings live in one typed value the host owns (`quake_rs::settings`), and
   the census report and id's edicts diffed on nine maps all identical to
   `a50d8d7`; the oracle's eight rows as before; screen2d as before but the
   Options row above; the sound oracle 28/28.
-- **Not done / slots:** `lerp`'s smooth step movement, `input`'s raw mouse
-  and gamepad, and `audio`'s engine mixer (`snd::Fixes::ALL`) each become a
-  departure in `Cvars` (on in `Cvars::modern`) when they land. id's F-key
+- **`r_lerpmove`** (`lerp`'s smooth step movement) is a departure in
+  `Cvars` (`LerpMove::Smooth` in 2026, `Classic` in Classic), on the settings
+  page as "Smooth monsters". The merge of `q26/lerp` moved Classic's demo
+  playback to id's `CL_LerpPoint`: `classic_expected.txt`'s demo frame hashes
+  are re-recorded (the walks' and the demos' sound tallies unchanged), and
+  `classic_check.py` runs `demo_lerp.py` (id's client, frame by frame, the
+  whole attract loop: MATCH).
+- **Not done / slots:** `input`'s raw mouse and gamepad, and `audio`'s engine
+  mixer (`snd::Fixes::ALL`) each become a departure in `Cvars` (on in
+  `Cvars::modern`) when they land. id's F-key
   shortcuts (F1–F12), `messagemode` and the `zoom_in` alias are still not
   bound (CENSUS L12).

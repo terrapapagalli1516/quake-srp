@@ -22,6 +22,7 @@
 //! too, where the 2026 profile gives them another default: `cl_forwardspeed`
 //! and `cl_backspeed` (Always Run) and `crosshair`.
 
+use crate::client::lerpmove::LerpMove;
 use crate::render::Threads;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 
@@ -115,6 +116,10 @@ pub struct Cvars {
     /// `vid_fkey`: `f` toggles fullscreen (the page's; `default.cfg` leaves
     /// `f` unbound).
     pub fkey: bool,
+    /// `r_lerpmove` (QuakeSpasm's name): monsters glide between their steps
+    /// ([`LerpMove::Smooth`]) instead of being drawn where each 0.1 s step put
+    /// them, as id's client does.
+    pub lerpmove: LerpMove,
     /// `r_threads`: how many threads draw the 3-D view (0: Auto, as many as
     /// the platform offers). The pixels are the same for any count, so it is
     /// no departure.
@@ -158,6 +163,7 @@ impl Cvars {
             freelook: false,
             jumpswim: false,
             fkey: false,
+            lerpmove: LerpMove::Classic,
             threads: Threads::Auto,
         }
     }
@@ -165,8 +171,9 @@ impl Cvars {
     /// The 2026 profile's: an idealized software-rendered Quake on a 2026
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
-    /// layer at id's proportions, the crosshair, Always Run, mouse look,
-    /// Space to swim up and `f` for fullscreen. Show FPS and exact
+    /// layer at id's proportions, the crosshair, monsters that glide between
+    /// their steps, Always Run, mouse look, Space to swim up and `f` for
+    /// fullscreen. Show FPS and exact
     /// perspective stay off: the readout is clutter, and id's 16-pixel spans
     /// are part of the look.
     pub fn modern() -> Cvars {
@@ -181,6 +188,7 @@ impl Cvars {
             freelook: true,
             jumpswim: true,
             fkey: true,
+            lerpmove: LerpMove::Smooth,
             ..Cvars::classic()
         }
     }
@@ -367,6 +375,9 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.jumpswim), set: |c, v| c.jumpswim = on(v) },
     Cvar { name: "vid_fkey", archive: true, departure: true, help: "F toggles fullscreen",
         get: |c| flag(c.fkey), set: |c, v| c.fkey = on(v) },
+    Cvar { name: "r_lerpmove", archive: true, departure: true, help: "monsters glide between steps",
+        get: |c| flag(c.lerpmove == LerpMove::Smooth),
+        set: |c, v| c.lerpmove = if on(v) { LerpMove::Smooth } else { LerpMove::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
         get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
 ];

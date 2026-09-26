@@ -163,7 +163,7 @@ fn usage() {
          \tquaketool changelevel <pak> <map.bsp>  drive a player into the map's exit, swap to the next level, prove inventory carries\n\
          \tquaketool census <pak> [map ...]  headless faithfulness playthrough (start, e1m1..e1m8 by default)\n\
          \tquaketool census-edicts <pak> <map> <t1,t2,..>  dump live edicts at server times (oracle_edicts format)\n\
-         \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX] [video options] [--threads N]\n\
+         \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX] [--trace PATH] [video options] [--threads N]\n\
          \t                               run the browser's game client natively (quake_rs::client), frame hashes as web/bench.py\n\
          \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--video classic|modern] [--hires 0|1] [--fov-mode M] [--display W:H] [--scaled2d 0|1] [--threads N]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n\
          \tquaketool sound <pak> <demo> <out.wav> [--rate HZ] [--classic] [--fps F] [--trace FILE]  a demo's sound through the engine's mixer, as a .wav\n\
