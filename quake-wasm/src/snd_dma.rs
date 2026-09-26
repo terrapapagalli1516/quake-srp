@@ -593,6 +593,37 @@ mod tests {
         assert_eq!(got.len(), 2, "distinct channels of one entity stay separate");
     }
 
+    /// `play` (S_Play): each named sample, `.wav` added where the name has no
+    /// extension, as a local sound — and nothing while audio is down.
+    #[test]
+    fn play_queues_each_named_sample_as_a_local_sound() {
+        set_audio_ready(0);
+        crate::host_cmd::execute_console_command("play items/r_item1");
+        assert!(take_menu_sounds().is_empty(), "no sound while audio is down");
+        set_audio_ready(1);
+        crate::host_cmd::execute_console_command("play items/r_item1 misc/menu1.wav nosuch/sample");
+        let got = take_menu_sounds();
+        assert_eq!(got.len(), 2, "the two samples the pak has");
+        assert!(got.iter().all(|w| w.starts_with(b"RIFF")));
+        assert!(take_menu_sounds().is_empty(), "taken once");
+    }
+
+    /// `S_StopAllSounds` zeroes every channel, those started earlier in the
+    /// same frame too: a level change's `StopAll` drops what was queued
+    /// before it, and what the new level starts after it plays.
+    #[test]
+    fn stop_all_drops_the_sounds_queued_before_it_and_keeps_those_after() {
+        let pak = build_test_pak(&[("sound/a.wav", b"AAAA"), ("sound/b.wav", b"BBBB")]);
+        reset_queue();
+        let start = |vol| SoundCall::Start { events: vec![ev(2, 1, "a.wav", vol)], view_entity: -1 };
+        let generation = sound_generation();
+        play(&pak, vec![start(0.25), SoundCall::Stop(vec![(3, 1)]), SoundCall::StopAll, start(0.75)]);
+        assert_eq!(sound_generation(), generation.wrapping_add(1));
+        assert!(take_stop_sounds().is_empty(), "the stop went with the rest");
+        let queued: Vec<f32> = take_sounds().iter().map(|(_, p)| p.volume).collect();
+        assert_eq!(queued, [0.75], "only the sound started after the StopAll");
+    }
+
     #[test]
     fn queue_sounds_flags_view_entity() {
         let pak = build_test_pak(&[("sound/a.wav", b"AAAA"), ("sound/b.wav", b"BBBB")]);
