@@ -2,48 +2,36 @@
 """Boot walk mode (live server), close the menu, WALK, and prove the camera moved.
 
 Usage: verify_walk.py [webdir]   (defaults to this script's directory; pass a
-temp dir holding index.html + a freshly built quake_wasm.wasm to test changes
-without touching the deployed wasm)."""
-import functools, http.server, os, socketserver, sys, threading, time
+deploy dir — PLATFORM.md: index.html, wasi.js, a freshly built quake.wasm and
+id1/pak0.pak — to test changes without touching the deployed page)."""
+import os, time
 from playwright.sync_api import sync_playwright
+import isolated
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8161"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+WEB = isolated.webdir()
+PORT = isolated.port(8161)
+httpd = isolated.serve(WEB, PORT)
 
 fails = []
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=["--no-sandbox"])
+    br = isolated.launch(p, ["--no-sandbox"])
     pg = br.new_page(viewport={"width": 820, "height": 540})
     errs = []
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    # NB: `exp` is a top-level `let` (a global *binding*, not a window
-    # property), so probe it as a bare identifier — and the predicate must end
-    # in a BOOLEAN: a string predicate that evaluates to a function value makes
-    # Playwright *call* it (it would silently boot() the game from the waiter).
-    pg.wait_for_function(
-        "typeof exp !== 'undefined' && !!exp && typeof exp.boot === 'function'",
-        timeout=120000,
-    )
-    # ...and for main() to finish its boot sequence (otherwise its final
-    # 'ready' status write races the walk button's), so the run is ordered.
-    pg.wait_for_function(
-        "document.getElementById('status').textContent.includes('ready')",
-        timeout=30000,
-    )
+    # The game runs in a worker; the page's `quake.ready` is up once its
+    # startup ended (and main() wrote its 'ready' status, which would
+    # otherwise race the walk button's), so the run is ordered.
+    pg.wait_for_function("window.quake && quake.ready", timeout=120000)
     # Boot walk. boot() lands in the main menu (faithful boot experience), so
     # close it with Escape before walking — the menu gates gameplay input.
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg.keyboard.press("Escape")
-    pg.wait_for_function("!exp.menu_visible || !exp.menu_visible()", timeout=5000)
+    # `exp.name()` asks the program (a Promise: answered between two frames).
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     time.sleep(0.3)
 
     grab = """() => {
@@ -85,7 +73,7 @@ with sync_playwright() as p:
         fails.append(f"camera did not move (only {frac:.1%} of pixels changed)")
 
     # 3. The menu is really down and the walk is live.
-    menu_up = pg.evaluate("exp.menu_visible ? exp.menu_visible() : 0")
+    menu_up = pg.evaluate("exp.menu_visible()")
     if menu_up:
         fails.append("menu still up after Escape")
     print("status:", pg.eval_on_selector("#status", "e=>e.textContent"))

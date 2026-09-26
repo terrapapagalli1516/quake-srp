@@ -1,7 +1,7 @@
 //! Video — the mode side of vid_win.c (`VID_SetMode`'s runtime resolution,
-//! clamped to a safe envelope; `vid.buffer` as the RGBA framebuffer export)
-//! and the bits of screen.c the page reads or both client frames share (the
-//! `viewsize` cvar, `Draw_TileClear`'s backtile).
+//! clamped to a safe envelope; `vid.buffer`, the RGBA framebuffer each
+//! `Frame` record carries) and the bits of screen.c both client frames share
+//! (the `viewsize` cvar, `Draw_TileClear`'s backtile).
 
 use quake_rs::client::Vid;
 use quake_rs::render;
@@ -10,9 +10,9 @@ use crate::app::{ensure_app, APP};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
-/// can mark it current). The page restores the player's *saved* resolution from
-/// `localStorage` over this on load, and Options > Video Options lets them change
-/// it at runtime; the chosen size now persists across boots / New Game / reloads. The
+/// can mark it current). `config.cfg` restores the player's *saved* resolution
+/// over this at startup, and Options > Video Options lets them change it at
+/// runtime; the chosen size persists across boots / New Game / reloads. The
 /// menu + HUD are drawn at their own pixel size, as WinQuake draws them in every
 /// mode, unless the [`set_scaled_2d`] extra blows them up.
 pub(crate) const DEFAULT_W: usize = 960;
@@ -47,17 +47,15 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
     (cw as usize, ch as usize)
 }
 
-/// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). The page
-/// reads this each frame and resizes its canvas backing store + ImageData when it
-/// changes (e.g. after the Options menu picks a different preset), and persists it
-/// to `localStorage` so the choice survives a reload.
-#[no_mangle]
-pub extern "C" fn width() -> i32 {
+/// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). Each
+/// `Frame` record carries it, and the page resizes its canvas backing store +
+/// ImageData when it changes (e.g. after the Options menu picks a different
+/// preset); `config.cfg` keeps it across sessions.
+pub(crate) fn width() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_w as i32).unwrap_or(DEFAULT_W as i32))
 }
 /// The current render height in pixels (defaults to [`DEFAULT_H`] = 600).
-#[no_mangle]
-pub extern "C" fn height() -> i32 {
+pub(crate) fn height() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_h as i32).unwrap_or(DEFAULT_H as i32))
 }
 
@@ -68,8 +66,7 @@ pub extern "C" fn height() -> i32 {
 /// `width()`/`height()` report the new (clamped) size and the next `step` renders
 /// the scene at it. The menu + HUD are drawn at their own pixel size, as in
 /// WinQuake (blown up to the framebuffer with the [`set_scaled_2d`] extra).
-#[no_mangle]
-pub extern "C" fn set_resolution(w: i32, h: i32) {
+pub(crate) fn set_resolution(w: i32, h: i32) {
     let (cw, ch) = clamp_resolution(w, h);
     ensure_app(|a| {
         a.set_render_size(cw, ch);
@@ -102,8 +99,7 @@ pub(crate) fn vid(render_w: usize, render_h: usize) -> Vid {
 
 /// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.
 /// Read-only, for the page/verification harness like [`volume`].
-#[no_mangle]
-pub extern "C" fn viewsize() -> f32 {
+pub(crate) fn viewsize() -> f32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
@@ -115,8 +111,7 @@ pub extern "C" fn viewsize() -> f32 {
 /// Set the `viewsize` cvar, bounded to 30..=120 (the console's `viewsize n`):
 /// the page restoring the size it saved, as `Host_WriteConfiguration`'s
 /// config.cfg carries `viewsize` across sessions in id's Quake.
-#[no_mangle]
-pub extern "C" fn set_viewsize(v: f32) {
+pub(crate) fn set_viewsize(v: f32) {
     ensure_app(|a| a.menu.set_viewsize(v));
 }
 
@@ -126,26 +121,14 @@ pub extern "C" fn set_viewsize(v: f32) {
 /// ([`quake_rs::draw::set_scaled_2d`]). The Web extras row `wasm_scaled2d`
 /// (bit 8 of `extras`/`set_extras`) is the same switch: the menu holds the
 /// value and `host::step` applies it each frame; takes effect on the next frame.
-#[no_mangle]
-pub extern "C" fn set_scaled_2d(on: i32) {
+pub(crate) fn set_scaled_2d(on: i32) {
     ensure_app(|a| a.menu.set_extra(quake_rs::render::Extra::Scaled2d, on != 0));
     quake_rs::draw::set_scaled_2d(on != 0);
 }
 
 /// `1` while the "scaled 2-D" extra is on ([`set_scaled_2d`]).
-#[no_mangle]
-pub extern "C" fn scaled_2d() -> i32 {
+pub(crate) fn scaled_2d() -> i32 {
     quake_rs::draw::scaled_2d() as i32
-}
-
-#[no_mangle]
-pub extern "C" fn framebuffer() -> *const u8 {
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| a.fb.as_ptr())
-            .unwrap_or(std::ptr::null())
-    })
 }
 
 #[cfg(test)]

@@ -21,18 +21,20 @@ const MAX_DEMONAME: usize = 16;
 
 /// The commands this console runs, in the order `Cmd_CompleteCommand` meets
 /// id's (`cmd_functions`: `Cmd_AddCommand` puts each in front, so the one
-/// registered last — `timedemo`, in `CL_Init` — comes first; `echo`, from
-/// `Cmd_Init`, last), then the port's own.
+/// registered last — `timedemo`, in `CL_Init` — comes first; `play`, from
+/// `S_Init`, after `CL_Init`'s; `echo`, from `Cmd_Init`, last), then the
+/// port's own.
 pub(crate) const COMMANDS: &[&str] = &[
-    "timedemo", "playdemo", "impulse", "sizedown", "sizeup", "help", "clear", "stopdemo", "demos",
+    "timedemo", "playdemo", "impulse", "play", "sizedown", "sizeup", "help", "clear", "stopdemo", "demos",
     "startdemos", "give", "save", "load", "pause", "kill", "color", "noclip", "name", "map", "fly",
     "god", "echo", "wasm_help",
 ];
 
 /// The cvars this console reads and sets, in `cvar_vars` order (registered
 /// last, found first: `_cl_color` and `_cl_name` in `CL_Init`, `viewsize` in
-/// `SCR_Init`, `hostname` in `NET_Init`), then the Web extras' `wasm_*`.
-const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname"];
+/// `SCR_Init`, `hostname` in `NET_Init`), then the port's `_vid_resolution`
+/// (`config.cfg`'s video mode) and the Web extras' `wasm_*`.
+const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname", "_vid_resolution"];
 
 /// `Cmd_CompleteCommand` then `Cvar_CompleteVariable` (cmd.c, cvar.c), what
 /// Tab in the console runs: the first command, else the first cvar, whose
@@ -131,6 +133,11 @@ pub(crate) fn execute_console_command(line: &str) {
             ensure_app(|a| a.console.println(text));
             return;
         }
+        // S_Play (snd_dma.c): each named sample at the listener.
+        "play" => {
+            snd_dma::s_play(&argv[1..]);
+            return;
+        }
         // M_Menu_Help_f (menu.c registers it as `help`): the Help/Ordering
         // screen, on its first page, with the keyboard (key_dest =
         // key_menu: the console goes up).
@@ -213,6 +220,19 @@ pub(crate) fn execute_console_command(line: &str) {
                     },
                 }
             });
+            return;
+        }
+        // The port's archived video mode (`config.cfg`; id's archives
+        // `_vid_default_mode_win`, a mode number): `WxH`, clamped like a
+        // Video Options pick. No argument prints it.
+        "_vid_resolution" => {
+            match argv.get(1).and_then(|arg| arg.split_once('x')) {
+                Some((w, h)) => crate::vid::set_resolution(atoi(w), atoi(h)),
+                None => ensure_app(|a| {
+                    let v = format!("{}x{}", a.render_w, a.render_h);
+                    a.console.println(format!("\"_vid_resolution\" is \"{v}\""));
+                }),
+            }
             return;
         }
         // SCR_SizeUp_f / SCR_SizeDown_f: viewsize +/- 10 (SCR_CalcRefdef bounds
@@ -337,7 +357,7 @@ fn atoi(s: &str) -> i32 {
 /// STRING, which is whatever set it last: "100" from default.cfg, "55" typed,
 /// but "110.000000" after `Cvar_SetValue`'s `%f`. This port keeps no cvar
 /// strings, so it always prints the short form.)
-fn cvar_string(v: f32) -> String {
+pub(crate) fn cvar_string(v: f32) -> String {
     let s = format!("{v:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     s.to_string()
