@@ -236,11 +236,11 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     // building a brand-new Server would reset the global to 0 and lose the
     // collected runes, so we carry it forward onto the new level below.
     let serverflags = w.server.serverflags();
-    // Carry the chosen difficulty across the level change. `skill` is a
-    // thread-local that Server::with_pak resets to 1, so capture it from the
-    // OUTGOING server now and restore it on the new one below (the start hub's
-    // skill portal set it via cvar_set; without this the jump to e1m1 would
-    // silently revert to Normal). Mirrors how serverflags is carried.
+    // Carry the chosen difficulty (and sv_gravity, which id's cvar keeps too)
+    // across the level change. A new server starts with `skill` 1, so capture
+    // it from the OUTGOING server now and restore it on the new one below (the
+    // start hub's skill portal set it via cvar_set; without this the jump to
+    // e1m1 would silently revert to Normal). Mirrors how serverflags is carried.
     let skill = w.server.skill();
 
     let read = |n: &str| w.pak.read_file(n).ok().flatten();
@@ -274,6 +274,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     // global.
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
+    ns.set_sv_gravity(w.server.sv_gravity());
     if ns.spawn_entities().is_err() {
         return;
     }
@@ -374,6 +375,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     ns.set_map_name(&w.map_name);
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
+    ns.set_sv_gravity(w.server.sv_gravity());
     // Static loops as in try_changelevel: spawn, then capture this (re)load's.
     if ns.spawn_entities().is_err() {
         return;

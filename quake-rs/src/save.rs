@@ -48,8 +48,7 @@ use crate::bsp::Bsp;
 use crate::error::{QError, Result};
 use crate::progs::{EType, Progs};
 use crate::server::{
-    capture_transports, ed_new_string, link_edict, parse_float, parse_int, parse_vector,
-    restore_transports, Server, Tokenizer,
+    ed_new_string, link_edict, parse_float, parse_int, parse_vector, Server, Tokenizer,
     MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
 };
 use crate::vm::{Vm, MAX_EDICTS};
@@ -543,27 +542,14 @@ impl Server {
             )));
         }
 
-        // The build below resets/repopulates the per-thread transports the
-        // CALLER's still-running server also syncs from (the lightstyle table
-        // its next `run_frame` snapshots, the skill cell `cvar("skill")`
-        // reads). Capture them now and hand them back on ANY failure past
-        // this point: "the running game is left intact" (the module-doc
-        // deviation) must cover the shared transports, not just the caller's
-        // `Server` struct — without this, a rejected save's lightstyles and
-        // skill would bleed into the game that survived it.
-        let snapshot = capture_transports();
-        match Self::load_savegame_body(bsp, progs, pak, text, &sg) {
-            Ok(server) => Ok(server),
-            Err(e) => {
-                restore_transports(snapshot);
-                Err(e)
-            }
-        }
+        // Everything below builds a new server, with its own cvars, light
+        // styles and outbox: a failure drops it and leaves the caller's game
+        // as it was.
+        Self::load_savegame_body(bsp, progs, pak, text, &sg)
     }
 
-    /// The fallible body of [`Server::load_savegame`] (the C sequence, steps
-    /// 2–5, plus the player re-identification), split out so every error path
-    /// restores the caller's per-thread transports in exactly one place.
+    /// The rest of [`Server::load_savegame`]: the C sequence, steps 2–5, plus
+    /// the player re-identification.
     fn load_savegame_body(
         bsp: Bsp,
         progs: Progs,
@@ -1090,15 +1076,12 @@ mod tests {
         assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, "").is_err());
     }
 
-    /// A REJECTED load must leave the caller's per-thread transports alone:
-    /// `load_savegame` resets/overwrites the shared lightstyle table and skill
-    /// cell (via `with_pak` + the header styles) before the blocks can fail to
-    /// parse, and the surviving game's next `run_frame` re-syncs its
-    /// `lightstyles` from that table while `skill()` reads that cell — so
-    /// without the restore, a hostile save's styles/skill would bleed into
-    /// the game it failed to replace (review finding).
+    /// A REJECTED load must leave the caller's game alone: `load_savegame`
+    /// sets the header's skill and styles on the server it builds before the
+    /// blocks can fail to parse, and none of it may reach the surviving game
+    /// (a review finding when the two shared thread-locals).
     #[test]
-    fn failed_load_restores_the_callers_thread_state() {
+    fn failed_load_leaves_the_running_game_alone() {
         // A save whose header carries DIFFERENT styles (style 0 "zzz") and a
         // DIFFERENT skill (0) than the running game below, but whose blocks
         // are garbage so the load fails after the header is applied.

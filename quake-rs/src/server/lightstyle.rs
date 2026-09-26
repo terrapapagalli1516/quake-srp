@@ -181,7 +181,7 @@ mod tests {
         // Store a steady style 0 and a torch flicker at slot 3.
         call_lightstyle(&mut server, 0.0, "m");
         call_lightstyle(&mut server, 3.0, "mmnmmommommnonmmonqnmmo");
-        // A frame syncs the transport into the owned table (the production path).
+        // A frame applies the writes to the owned table (the production path).
         server.run_frame(0.1).expect("frame");
 
         assert_eq!(server.lightstyle(0), "m");

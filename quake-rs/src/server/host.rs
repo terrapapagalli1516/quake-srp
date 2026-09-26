@@ -1,98 +1,66 @@
-//! Host-side state around the server: the `skill` cvar, the deferred
-//! `changelevel` / `restart` commands, spawn parms and serverflags across a
-//! level change, `kill`, the signon settle frames, and the savegame loader's
-//! rollback of the per-thread transports.
+//! Host-side state around the server: the `skill` and `sv_gravity` cvars
+//! ([`ServerCvars`]), the deferred `changelevel` / `restart` commands, spawn
+//! parms and serverflags across a level change, `kill`, and the signon settle
+//! frames.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Sources:
 //! * `WinQuake/host_cmd.c` — `Host_Changelevel_f` / `Host_Restart_f` (the
 //!   console commands `PF_changelevel` / `PF_localcmd` defer through
 //!   `Cbuf_AddText`), `Host_Kill_f`, `Host_Spawn_f` / `Host_Begin_f` (the
-//!   signon frames), `Host_Loadgame_f` (what a failed load must leave intact).
+//!   signon frames).
 //! * `WinQuake/sv_main.c` — `SV_SaveSpawnparms`, and `SV_SpawnServer`'s
 //!   `skill` → `current_skill` rounding.
 //! * `WinQuake/pr_cmds.c` — `PF_changelevel`, `PF_localcmd`.
 //!
 //! This port has no console, command buffer or cvar registry, so the pieces of
-//! host state QuakeC can reach live in per-thread cells here, and the
-//! front-end (wasm shell, quaketool) plays `Host_Frame`'s part through the
-//! `Server` methods below.
+//! host state QuakeC can reach live on the server — the cvars on its world
+//! model, the commands in its [`Outbox`] — and the front-end (wasm shell,
+//! quaketool) plays `Host_Frame`'s part through the `Server` methods below.
 
 use super::{parm_global_name, Outbox, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
 use crate::vm::Vm;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
-// The `skill` cvar (host_cmd.c / sv_main.c `current_skill`).
-//
-// The original engine kept `skill` in the console-cvar registry and derived an
-// integer `current_skill = (int)(skill.value + 0.5)` clamped to 0..3 in
-// `SV_SpawnServer`. This headless port has no cvar subsystem and the `Vm` field
-// set is fixed (we must not extend it), so — exactly like the changelevel /
-// lightstyle transports — we hold the live skill value in a per-thread cell.
-// `PF_cvar("skill")` reads it, `PF_cvar_set("skill", N)` writes it (clamped),
-// and `ED_LoadFromFile` reads it to filter monsters/items by difficulty. The
-// difficulty portals in the start map are `trigger_setskill` entities whose
-// QuakeC `touch` calls `cvar_set("skill", N)`, so honouring `cvar_set` here is
-// what makes those portals actually change which entities spawn.
-//
-// THREAD-LOCAL (not a process-global atomic): a server session runs all its
-// QuakeC on one thread, so a `thread_local` is the correct scope AND keeps each
-// test thread isolated (the cell is the same shape as the sound/lightstyle/
-// changelevel transports — `msg.rs`, `lightstyle.rs`, and below).
+// The server's cvars.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// Live integer skill level (0=easy, 1=medium, 2=hard, 3=nightmare),
-    /// defaulting to 1 (single-player medium, matching the stock `skill` "1").
-    static SKILL: std::cell::Cell<i32> = const { std::cell::Cell::new(1) };
+/// The engine cvars the server's QuakeC reads (`PF_cvar`) and sets
+/// (`PF_cvar_set`) that the port gives a live value: `skill` and `sv_gravity`.
+///
+/// id kept them in the console's cvar registry, which outlives a server. The
+/// port has no registry yet (CODE_PLAN R4's typed `Cvars` will be it), so each
+/// server keeps its own on its world model, where the builtins reach them
+/// ([`crate::vm::Host::cvars`]); a new server starts from the defaults, and the
+/// front-end carries a value across a level change where it matters (the
+/// difficulty, [`Server::skill`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ServerCvars {
+    /// `current_skill` (sv_main.c): 0 easy, 1 medium, 2 hard, 3 nightmare. The
+    /// start map's difficulty portals (`trigger_setskill`) set it with
+    /// `cvar_set("skill", N)`, the spawn filter reads it, and `cvar("skill")`
+    /// returns it.
+    pub skill: i32,
+    /// `sv_gravity` (sv_phys.c, "800"). world.qc's `worldspawn` sets 100 on
+    /// e1m8 (Ziggurat Vertigo) and 800 on every other map; `SV_AddGravity`
+    /// and `SV_Physics_Step`'s landing-sound threshold read it.
+    pub sv_gravity: f32,
 }
 
-/// The `current_skill` value: the live [`SKILL`] read back as an int. Used by
-/// the spawn filter and by `cvar("skill")`.
-pub(super) fn skill_value() -> i32 {
-    SKILL.with(|s| s.get())
+impl Default for ServerCvars {
+    /// The cvars' defaults: `skill` "1" (single-player medium), `sv_gravity` "800".
+    fn default() -> Self {
+        ServerCvars { skill: 1, sv_gravity: SV_GRAVITY }
+    }
 }
 
-/// Set the skill level, clamped to `0..=3` exactly as `SV_SpawnServer` does
-/// (`current_skill = (int)(value + 0.5)`, then clamp). The input is the raw
-/// float a `cvar_set("skill", N)` would pass; we round it the way the C does.
-pub(super) fn set_skill_value(v: f32) {
-    // SV_SpawnServer: current_skill = (int)(skill.value + 0.5); clamp 0..3.
-    let s = ((v + 0.5) as i32).clamp(0, 3);
-    SKILL.with(|cell| cell.set(s));
-}
-
-/// Reset the skill to the default (1, medium). Called when a fresh server is
-/// built so a prior level's `cvar_set("skill", …)` cannot leak into the next
-/// (mirrors the per-thread reset of the changelevel / lightstyle transports).
-pub(super) fn reset_skill() {
-    SKILL.with(|s| s.set(1));
-}
-
-// ---------------------------------------------------------------------------
-// The `sv_gravity` cvar (sv_phys.c: `{"sv_gravity","800",false,true}`).
-//
-// QuakeC sets it: world.qc `worldspawn` does `cvar_set("sv_gravity", "100")`
-// on maps/e1m8.bsp (Ziggurat Vertigo) and `cvar_set("sv_gravity", "800")` on
-// every other map. `SV_AddGravity`, `SV_Physics_Step`'s landing-sound
-// threshold and the client's `R_DrawParticles` read `sv_gravity.value`. Held
-// in a per-thread cell for the same reasons as [`SKILL`].
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Live `sv_gravity` value, defaulting to the cvar's "800".
-    static SV_GRAVITY_CVAR: std::cell::Cell<f32> = const { std::cell::Cell::new(SV_GRAVITY) };
-}
-
-/// `sv_gravity.value`.
-pub(super) fn sv_gravity() -> f32 {
-    SV_GRAVITY_CVAR.with(|g| g.get())
-}
-
-/// `Cvar_Set("sv_gravity", …)` (the value already `atof`ed).
-pub(super) fn set_sv_gravity(v: f32) {
-    SV_GRAVITY_CVAR.with(|g| g.set(v));
+impl ServerCvars {
+    /// Set `skill` from a raw value the way `SV_SpawnServer` turns the cvar
+    /// into `current_skill`: `(int)(value + 0.5)`, clamped to `0..=3`.
+    pub fn set_skill(&mut self, value: f32) {
+        self.skill = ((value + 0.5) as i32).clamp(0, 3);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -159,51 +127,6 @@ pub(super) fn bi_localcmd(vm: &mut Vm) -> Result<()> {
         }
     });
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Per-thread transport capture/restore for the savegame loader.
-//
-// `Server::load_savegame` builds a THROWAWAY server (`with_pak` +
-// `spawn_entities`) before the `.sav` blocks have proven parseable, and that
-// build resets/repopulates the per-thread transports (the lightstyle table,
-// the skill cell) and queues spawn-time events (sounds, particles, svc
-// commands). On success the new server owns all of it; on FAILURE the caller
-// keeps its old `Server` — whose next `run_frame` re-syncs `lightstyles` from
-// the shared transport and whose `skill()` reads the shared cell — so a
-// rejected save would otherwise leak its lightstyles/skill into the running
-// game it was supposed to leave intact (save.rs's documented deviation from
-// the C's Sys_Error). The loader captures the persistent transports up front
-// and, on any error, restores them and discards the transient queues (the
-// same drop-the-spawn's-one-shots treatment every SUCCESSFUL build applies).
-// ---------------------------------------------------------------------------
-
-/// The persistent per-thread transports a savegame load clobbers, captured by
-/// [`crate::save`]'s loader before it spawns the throwaway server and handed
-/// back through [`restore_transports`] when the load fails.
-pub(crate) struct TransportSnapshot {
-    skill: i32,
-    sv_gravity: f32,
-}
-
-/// Capture the caller's per-thread transport state (see [`TransportSnapshot`]).
-pub(crate) fn capture_transports() -> TransportSnapshot {
-    TransportSnapshot {
-        skill: skill_value(),
-        sv_gravity: sv_gravity(),
-    }
-}
-
-/// Put the captured persistent transports back and discard everything the
-/// failed build queued, so the still-running game's next frame sees exactly
-/// the state it left behind. The transient queues are cleared rather than
-/// captured: the caller drains them at the end of every frame (and a load
-/// runs between frames), so "empty" IS the caller's state — replaying the
-/// failed spawn's one-shot sounds/particles/svc commands into the surviving
-/// game would be its own leak.
-pub(crate) fn restore_transports(snap: TransportSnapshot) {
-    SKILL.with(|s| s.set(snap.skill));
-    set_sv_gravity(snap.sv_gravity);
 }
 
 impl Server {
@@ -321,7 +244,7 @@ impl Server {
     /// a front-end reads it here to persist the player's choice across a
     /// changelevel (the constructor resets it to the medium default).
     pub fn skill(&self) -> i32 {
-        skill_value()
+        self.cvars().skill
     }
 
     /// Set the skill level from a raw value, normalised exactly as
@@ -330,21 +253,36 @@ impl Server {
     /// the persisted difficulty before [`Self::spawn_entities`], so the spawn
     /// filter inhibits the right monsters/items. See [`Self::skill`].
     pub fn set_skill(&mut self, value: f32) {
-        set_skill_value(value);
+        if let Some(c) = self.cvars_mut() {
+            c.set_skill(value);
+        }
     }
 
     /// The live `sv_gravity` cvar (800, or 100 on e1m8 — world.qc `worldspawn`).
     /// The client side reads it too: `R_DrawParticles`' particle gravity is
     /// `sv_gravity * 0.05`.
     pub fn sv_gravity(&self) -> f32 {
-        sv_gravity()
+        self.cvars().sv_gravity
     }
 
-    /// [`Self::sv_gravity`] with no server at hand: demo playback reads the
-    /// cvar too, and it holds what the last map's worldspawn set (the cvar
-    /// outlives the map, in the C as here).
-    pub fn sv_gravity_cvar() -> f32 {
-        sv_gravity()
+    /// Set the `sv_gravity` cvar: `Cvar_Set`, which id's cvar outlives the
+    /// map for — a front-end carries it to the next level's server as it
+    /// carries [`Self::skill`] (id1's worldspawn sets it on every map anyway).
+    pub fn set_sv_gravity(&mut self, value: f32) {
+        if let Some(c) = self.cvars_mut() {
+            c.sv_gravity = value;
+        }
+    }
+
+    /// This server's [`ServerCvars`] (the defaults if its world model were
+    /// taken away).
+    pub(super) fn cvars(&self) -> ServerCvars {
+        self.vm.host.as_deref().map(|h| *h.cvars()).unwrap_or_default()
+    }
+
+    /// This server's [`ServerCvars`], to set.
+    fn cvars_mut(&mut self) -> Option<&mut ServerCvars> {
+        self.vm.host.as_deref_mut().map(|h| h.cvars_mut())
     }
 
     /// Take (and clear) the deferred level-change request a `changelevel()`

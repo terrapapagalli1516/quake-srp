@@ -107,6 +107,11 @@ pub trait Host {
     /// host requests id's C wrote into `sv.datagram` and friends — for the
     /// server to hand to its host after the frame ([`crate::server::Outbox`]).
     fn outbox(&mut self) -> &mut crate::server::Outbox;
+    /// The engine cvars `PF_cvar` reads (`Cvar_VariableValue`) and
+    /// `PF_cvar_set` sets ([`crate::server::ServerCvars`]).
+    fn cvars(&self) -> &crate::server::ServerCvars;
+    /// [`Host::cvars`], to set.
+    fn cvars_mut(&mut self) -> &mut crate::server::ServerCvars;
 }
 
 /// An entity field resolved once by name: its cell offset within an edict, or

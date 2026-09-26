@@ -93,7 +93,7 @@ pub fn reset_random() {
     sv_move::reset_ai_rand();
 }
 
-pub(crate) use host::{capture_transports, restore_transports};
+pub use host::ServerCvars;
 pub(crate) use pr_edict::{ed_new_string, parse_float, parse_int, parse_vector, Tokenizer};
 pub(crate) use sv_world::link_edict;
 
@@ -206,6 +206,8 @@ pub struct WorldModel {
     /// [`Outbox`]). It lives here, on the [`Host`], because that is what a
     /// builtin can reach ([`Vm::with_host`]).
     outbox: Outbox,
+    /// The `skill` and `sv_gravity` cvars (see [`ServerCvars`]).
+    cvars: ServerCvars,
 }
 
 /// `mod->mins`/`maxs` of the model file `name` in `pak`, as `Mod_LoadModel`
@@ -256,6 +258,7 @@ impl WorldModel {
             pak,
             model_bounds: std::collections::HashMap::new(),
             outbox: Outbox::default(),
+            cvars: ServerCvars::default(),
         };
         // Slot 1 is the world brush model. id used the map name; "*0" is the
         // submodel-0 (worldspawn) reference and is what setmodel resolves.
@@ -355,6 +358,14 @@ impl Host for WorldModel {
     fn outbox(&mut self) -> &mut Outbox {
         &mut self.outbox
     }
+
+    fn cvars(&self) -> &ServerCvars {
+        &self.cvars
+    }
+
+    fn cvars_mut(&mut self) -> &mut ServerCvars {
+        &mut self.cvars
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,11 +393,11 @@ pub struct Server {
     /// (`pub(crate)`: the savegame loader re-identifies the player edict.)
     pub(crate) player: i32,
     /// The map's animated light-style patterns (`sv.lightstyles[64]`), owned by
-    /// the server. The `lightstyle()` builtin writes a thread-local transport;
-    /// the server syncs that into this field after each QuakeC execution window
+    /// the server. The `lightstyle()` builtin sends its writes to the outbox;
+    /// the server applies them to this field after each QuakeC execution window
     /// (`spawn_entities` / `run_frame`). `lightstyle_scales` reads it to produce
-    /// the per-style brightness scales the renderer applies each frame. Cleared in
-    /// [`Server::new`] so a changelevel re-populates it from the new worldspawn.
+    /// the per-style brightness scales the renderer applies each frame. Empty in
+    /// a new server, so a changelevel re-populates it from the new worldspawn.
     /// (`pub(crate)`: `Host_Loadgame_f` overwrites all 64 from the savegame.)
     pub(crate) lightstyles: [String; MAX_LIGHTSTYLES],
     /// `sv.name` (server.h): the bare map name (`"e1m1"`), recorded by

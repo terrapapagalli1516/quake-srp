@@ -13,7 +13,6 @@
 //! `save.rs` reuses the tokenizer and the epair parsers, as the C's
 //! `Host_Loadgame_f` shares `COM_Parse` / `ED_ParseEdict`.
 
-use super::host::{set_skill_value, skill_value};
 use super::pr_cmds::cvar_value;
 use super::{Server, SpawnReport, SETTLE_FRAMETIME};
 use crate::math::Vec3;
@@ -235,7 +234,8 @@ impl Server {
         // front-end set (or a portal's cvar_set) is rounded to the integer the
         // spawn filter compares against, and cvar("skill") reads back the
         // canonical value.
-        set_skill_value(skill_value() as f32);
+        let skill = self.skill();
+        self.set_skill(skill as f32);
 
         // The entity text was captured at construction (the host has no accessor
         // and we never downcast). Clone it so the tokenizer borrow does not pin
@@ -273,11 +273,11 @@ impl Server {
             // deathmatch, drop NOT_DEATHMATCH entities; otherwise drop the entity
             // whose NOT_<difficulty> flag matches the current skill (easy=0,
             // medium=1, hard/nightmare>=2). `current_skill` is the live `skill`
-            // cvar (see [`SKILL`]) — a difficulty portal's `cvar_set("skill", N)`
-            // changes which monsters/items this filter keeps.
+            // cvar ([`super::ServerCvars`]) — a difficulty portal's
+            // `cvar_set("skill", N)` changes which monsters/items this filter keeps.
             let spawnflags = self.vm.ent_get_float(ent, "spawnflags") as i32;
-            let deathmatch = cvar_value("deathmatch") != 0.0;
-            let current_skill = skill_value();
+            let deathmatch = cvar_value(&self.cvars(), "deathmatch") != 0.0;
+            let current_skill = self.skill();
             let inhibited = if deathmatch {
                 spawnflags & SPAWNFLAG_NOT_DEATHMATCH != 0
             } else {

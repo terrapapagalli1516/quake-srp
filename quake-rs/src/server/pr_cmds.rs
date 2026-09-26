@@ -16,7 +16,7 @@
 //! `changelevel` / `localcmd` in `host.rs`, `walkmove` / `movetogoal` /
 //! `checkbottom` in `sv_move.rs`.
 
-use super::host::{bi_changelevel, bi_localcmd, set_skill_value, set_sv_gravity, skill_value, sv_gravity};
+use super::host::{bi_changelevel, bi_localcmd, ServerCvars};
 use super::lightstyle::bi_lightstyle;
 use super::msg::{
     bi_ambientsound, bi_bprint, bi_centerprint, bi_particle, bi_sound, bi_sprint, bi_stuffcmd,
@@ -224,22 +224,22 @@ fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
 /// defaults; everything else is 0 (the C looked these up in the cvar registry).
 fn bi_cvar(vm: &mut Vm) -> Result<()> {
     let name = vm.arg_string(0);
-    let v = cvar_value(&name);
-    vm.ret_float(v);
+    let cvars = vm.host.as_deref().map(|h| *h.cvars()).unwrap_or_default();
+    vm.ret_float(cvar_value(&cvars, &name));
     Ok(())
 }
 
 /// The handful of cvar defaults the spawn/think code reads. Values match the
 /// stock `*.c` declarations (`deathmatch` "0"). `skill` and `sv_gravity` are
-/// the *live* values (see [`SKILL`]): `cvar_set("skill", N)` from a difficulty
-/// portal updates it and `cvar("skill")` reads it back, so the QuakeC sees the
-/// difficulty it selected (the old stub returned a constant 1.0 unconditionally).
-pub(super) fn cvar_value(name: &str) -> f32 {
+/// the server's *live* values ([`ServerCvars`]): `cvar_set("skill", N)` from a
+/// difficulty portal updates it and `cvar("skill")` reads it back, so the
+/// QuakeC sees the difficulty it selected.
+pub(super) fn cvar_value(cvars: &ServerCvars, name: &str) -> f32 {
     match name {
-        "sv_gravity" => sv_gravity(),
+        "sv_gravity" => cvars.sv_gravity,
         "sv_maxvelocity" => SV_MAXVELOCITY,
         "deathmatch" | "coop" | "teamplay" => 0.0,
-        "skill" => skill_value() as f32,
+        "skill" => cvars.skill as f32,
         _ => 0.0,
     }
 }
@@ -252,11 +252,15 @@ pub(super) fn cvar_value(name: &str) -> f32 {
 /// name is a benign no-op.
 fn bi_cvar_set(vm: &mut Vm) -> Result<()> {
     let name = vm.arg_string(0);
-    match name.as_str() {
-        "skill" => set_skill_value(parse_float(&vm.arg_string(1))),
-        "sv_gravity" => set_sv_gravity(parse_float(&vm.arg_string(1))),
-        _ => {}
-    }
+    let value = parse_float(&vm.arg_string(1));
+    vm.with_host(|_, h| {
+        let cvars = h.cvars_mut();
+        match name.as_str() {
+            "skill" => cvars.set_skill(value),
+            "sv_gravity" => cvars.sv_gravity = value,
+            _ => {}
+        }
+    });
     Ok(())
 }
 

@@ -13,7 +13,6 @@
 //! The collision queries are world.c's (`sv_world.rs`); the player's wish
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
-use super::host::sv_gravity;
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
 use super::{
     FrameReport, Server, UserCmd, CONTENTS_EMPTY,
@@ -555,7 +554,7 @@ impl Server {
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
             // hitsound = velocity[2] < sv_gravity * -0.1, sampled BEFORE gravity.
             let vel_z = self.vm.ent_vec(ent, self.vm.fo.velocity)[2];
-            let hitsound = vel_z < sv_gravity() * -0.1;
+            let hitsound = vel_z < self.sv_gravity() * -0.1;
 
             // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
             // SV_LinkEdict(ent, true). The C runs the full slide move (NOT a
@@ -811,7 +810,7 @@ impl Server {
     fn gravity_of(&self, ent: i32) -> f32 {
         let g = self.vm.ent_float(ent, self.vm.fo.gravity);
         let ent_gravity = if g != 0.0 { g } else { 1.0 };
-        ent_gravity * sv_gravity()
+        ent_gravity * self.sv_gravity()
     }
 
     /// How far the frame's move leads `ent`'s fall ([`Stepping::gravity_lead`]):
@@ -1919,17 +1918,18 @@ mod tests {
         // 100 gives -10, not -80.
         let (mut server, e) = toss_server();
         assert_eq!(server.sv_gravity(), 800.0, "the cvar's default");
-        super::super::host::set_sv_gravity(100.0);
+        server.set_sv_gravity(100.0);
         assert_eq!(server.sv_gravity(), 100.0);
         server.run_frame(0.1).expect("frame");
         let vz = server.vm.ent_get_vector(e, "velocity")[2];
         assert!((vz + 10.0).abs() < 1e-3, "sv_gravity 100: expected -10, got {vz}");
-        // The cvar outlives the map (SV_SpawnServer never touches it): the next
-        // server keeps 100 until its worldspawn sets it, as id1's does on
-        // every map (the census test that loads e1m5 after e1m8 relies on
-        // that cvar_set, not on a reset).
+        // The cvar outlives the map (SV_SpawnServer never touches it): the
+        // front-end hands it to the next server, which keeps 100 until its
+        // worldspawn sets it, as id1's does on every map.
         let (mut next, e2) = toss_server();
-        assert_eq!(next.sv_gravity(), 100.0, "a new map keeps the cvar");
+        assert_eq!(next.sv_gravity(), 800.0, "a server starts from the default");
+        next.set_sv_gravity(server.sv_gravity());
+        assert_eq!(next.sv_gravity(), 100.0, "the handed-over cvar");
         let name = next.vm.intern("sv_gravity");
         let val = next.vm.intern("800");
         next.vm.argc = 2;

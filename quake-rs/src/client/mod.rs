@@ -347,6 +347,12 @@ pub struct DemoPlay {
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
+    /// The `sv_gravity` cvar, which `R_DrawParticles` reads in playback too
+    /// (`grav = frametime * sv_gravity * 0.05`): 800, or what the last map the
+    /// host ran set it to (e1m8's worldspawn: 100; id's cvar outlives the map)
+    /// — the host sets it from its last server's
+    /// ([`crate::server::Server::sv_gravity`]), not the recording's.
+    pub sv_gravity: f32,
     /// Each relinked entity's origin as last rendered (CL_RelinkEntities'
     /// `oldorg`), keyed by entity number, for the model-flag trails; an entity
     /// missing from a frame is forgotten (its next sighting is a forcelink).
@@ -420,6 +426,7 @@ impl DemoPlay {
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
             stepping: Stepping::Classic,
+            sv_gravity: crate::server::ServerCvars::default().sv_gravity,
             trail_org: HashMap::new(),
             tracercount: 0,
             demonum: 0,
