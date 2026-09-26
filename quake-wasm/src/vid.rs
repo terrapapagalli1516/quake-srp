@@ -38,13 +38,20 @@ const MIN_H: i32 = 200;
 const MAX_H: i32 = 800;
 const MAX_PIXELS: i32 = 1280 * 800;
 
-/// The most pixels an Auto pixel size ([`pixel_size`]) renders: a 1080p
-/// frame. The renderer costs about 2.8 ns a pixel natively on one core (a
-/// little more in the browser), so a frame this size is about 6 ms: 60-144
-/// Hz displays keep up, and a 4K or 5K screen gets 2x2 or 3x3 pixels instead
-/// of a frame four to seven times the cost. (When the renderer runs on
-/// several cores this can grow.)
+/// The most pixels an Auto pixel size ([`pixel_size`]) renders on one
+/// thread: a 1080p frame. The renderer costs about 2.8 ns a pixel natively
+/// on one core (a little more in the browser), so a frame this size is about
+/// 6 ms: 60-144 Hz displays keep up, and a 4K or 5K screen gets 2x2 or 3x3
+/// pixels instead of a frame four to seven times the cost.
 pub(crate) const AUTO_PIXEL_BUDGET: usize = 1920 * 1080;
+
+/// [`AUTO_PIXEL_BUDGET`] for a renderer drawing on `threads` threads: times
+/// the whole square root of their number, as the row bands do not scale
+/// perfectly (demo1 at 1080p draws 3.5x as fast on 8 threads as on one):
+/// 1-3 threads a 1080p frame, 4-8 two (a 1440p screen at 1x1), 9-15 three.
+pub(crate) fn auto_pixel_budget(threads: usize) -> usize {
+    AUTO_PIXEL_BUDGET * threads.max(1).isqrt()
+}
 
 /// Clamp a requested `(w, h)` render resolution into the supported envelope:
 /// width `MIN_W..=MAX_W`, height `MIN_H..=MAX_H`, and the total pixel count capped
@@ -69,13 +76,13 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
 
 /// How many device pixels make one of the picture's in native mode: the
 /// setting's 1..=4, or for Auto (0) the smallest that keeps a `win_w x win_h`
-/// box's frame within [`AUTO_PIXEL_BUDGET`] (4 at most).
-pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32)) -> u32 {
+/// box's frame within [`auto_pixel_budget`] for the renderer's `threads` (4
+/// at most).
+pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32), threads: usize) -> u32 {
     let max = u32::from(quake_rs::cvar::PIXEL_SIZE_MAX);
+    let budget = auto_pixel_budget(threads);
     match u32::from(cvars.pixel_size) {
-        0 => (1..=max)
-            .find(|p| (win_w / p) as usize * (win_h / p) as usize <= AUTO_PIXEL_BUDGET)
-            .unwrap_or(max),
+        0 => (1..=max).find(|p| (win_w / p) as usize * (win_h / p) as usize <= budget).unwrap_or(max),
         n => n.min(max),
     }
 }
@@ -83,10 +90,10 @@ pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32)) -> u32 {
 /// The picture's size for these settings: native, the page's box divided by
 /// the pixel size (at least 320x200, at most the renderer's hires limit);
 /// otherwise the video mode, clamped.
-pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>) -> (usize, usize) {
+pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>, threads: usize) -> (usize, usize) {
     match window.filter(|_| cvars.native) {
         Some(win) => {
-            let p = pixel_size(cvars, win);
+            let p = pixel_size(cvars, win, threads);
             let (w, h) = ((win.0 / p) as usize, (win.1 / p) as usize);
             let (mw, mh) = (render::HIRES_MAXWIDTH, render::HIRES_MAXHEIGHT);
             (w.clamp(MIN_W as usize, mw), h.clamp(MIN_H as usize, mh))
@@ -96,6 +103,12 @@ pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>) -> (usize,
             clamp_resolution(i32::from(w), i32::from(h))
         }
     }
+}
+
+/// The threads the renderer draws with: `r_threads` against what the host
+/// offers.
+pub(crate) fn render_threads(a: &App) -> usize {
+    a.settings.cvars.threads.resolve(a.hw_threads)
 }
 
 /// Whether the picture is shown native (the page fills its box, square
@@ -108,7 +121,7 @@ pub(crate) fn native(a: &App) -> bool {
 /// settings ask for, and the 2-D layer's scale (a setting `draw` still keeps
 /// per thread). The renderer's settings go with the frame, in [`vid`].
 pub(crate) fn apply_settings(a: &mut App) {
-    let (w, h) = picture_size(&a.settings.cvars, a.window);
+    let (w, h) = picture_size(&a.settings.cvars, a.window, render_threads(a));
     a.set_render_size(w, h);
     quake_rs::draw::set_scaled_2d(a.settings.cvars.scaled_2d);
     a.menu.sync_resolution(w as i32, h as i32);
@@ -240,6 +253,27 @@ mod tests {
     use crate::host::step;
     use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
     use crate::test_util::*;
+
+    /// Auto picks the smallest whole pixel that keeps the frame within a
+    /// 1080p frame's pixels per whole square root of the renderer's threads;
+    /// a fixed size is what it says; Classic ignores the window.
+    #[test]
+    fn native_pictures_are_whole_fractions_of_the_window() {
+        let mut c = quake_rs::cvar::Cvars::modern();
+        let size = |c: &Cvars, win, threads| (picture_size(c, Some(win), threads), pixel_size(c, win, threads));
+        assert_eq!(size(&c, (1920, 1080), 1), ((1920, 1080), 1));
+        assert_eq!(size(&c, (2560, 1440), 1), ((1280, 720), 2), "1440p on one thread: 2x2");
+        assert_eq!(size(&c, (2560, 1440), 8), ((2560, 1440), 1), "and 1x1 on eight");
+        assert_eq!(size(&c, (3840, 2160), 8), ((1920, 1080), 2));
+        assert_eq!(size(&c, (7680, 4320), 1), ((1920, 1080), 4), "8K: at most 4x4");
+        assert_eq!(size(&c, (1000, 640), 1), ((1000, 640), 1), "any aspect");
+        assert_eq!(size(&c, (300, 150), 1), ((320, 200), 1), "at least 320x200");
+        c.pixel_size = 3;
+        assert_eq!(size(&c, (1920, 1080), 1), ((640, 360), 3));
+        c.native = false;
+        assert_eq!(picture_size(&c, Some((1920, 1080)), 1), (960, 600), "the mode");
+        assert_eq!((auto_pixel_budget(0), auto_pixel_budget(3), auto_pixel_budget(4)), (AUTO_PIXEL_BUDGET, AUTO_PIXEL_BUDGET, 2 * AUTO_PIXEL_BUDGET));
+    }
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
 

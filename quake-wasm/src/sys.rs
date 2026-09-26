@@ -269,7 +269,8 @@ fn ui_state() -> UiState {
     let (native, fkey, pixel_size) = APP.with(|c| {
         c.borrow().as_ref().map_or((false, false, 0), |a| {
             let native = crate::vid::native(a);
-            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w));
+            let threads = crate::vid::render_threads(a);
+            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w, threads));
             (native, a.settings.cvars.fkey, pixel)
         })
     });
@@ -394,14 +395,14 @@ mod tests {
 
     /// The 2026 profile's native resolution through the protocol: the page's
     /// `Window` in device pixels, the picture at a whole fraction of it (Auto:
-    /// the smallest pixel that keeps a 1080p frame's cost), and the `State`
-    /// that tells the page to fill its box with that pixel size. Classic
-    /// shows its video mode in the 4:3 box whatever the window.
+    /// the smallest pixel that keeps a 1080p frame's cost on one thread), and
+    /// the `State` that tells the page to fill its box with that pixel size.
+    /// Classic shows its video mode in the 4:3 box whatever the window.
     #[test]
     fn the_window_sets_a_native_picture_in_2026_and_nothing_in_classic() {
         let frame_and_state = |profile: &str, win: (u32, u32)| {
             let mut input = Vec::new();
-            input.extend(encode::call(1, &format!("exec profile {profile}")));
+            input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
             input.extend(encode::window(win.0, win.1));
             input.extend(encode::tick(1, 0.0));
             input.extend(encode::tick(2, 0.0));
