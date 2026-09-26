@@ -1,6 +1,31 @@
 # quake-rust — performance plan
 
-## Where it stands (2026-09-25, `3ba835f`)
+## Where it stands (2026-09-26, the 2026 push)
+
+The day's changes on top of 2026-09-25's (below):
+
+- **Multicore.** The renderer draws the 3-D view on every core, byte-identical at any
+  thread count (§11).
+- **B5.** Frames are 8-bit, and the page's WebGL2 applies the palette (B5 below).
+- **Platform.** The browser build is a WASI program in a worker, and the pak is a file
+  read on demand, not embedded (`web/PLATFORM.md`).
+- **Frame rate.** The 2026 profile has no 72 fps cap (`FRAMERATE.md`).
+
+In one line each (demo1; details and sittings in §11):
+
+- **Native, Classic, one thread:** `timedemo demo1` runs 2563 / 1113 / 617 fps at
+  320×200 / 640×400 / 960×600, against id's portable C at 1895 / 774 / 433 in the same
+  sitting (1.35–1.44x).
+- **Native, 2026 video:** `timedemo demo1` at 1920×1080 / 2560×1440 / 3840×2160 runs
+  208 / 120 / 54 fps on 1 thread, 689 / 455 / 210 on 8, and 682 / 450 / 224 on 16.
+- **Browser** (headless Chromium on a desktop GPU, demo1 at 2560×1440, the page's
+  frame): 3.42 ms on 8 threads, against 10.62 before B5 in the same sitting. On one
+  thread it is 10.17, against 20.50 (`web/PLATFORM.md`, "Presentation"). The closing
+  review measured 3.3 ms on the threads build and 10.8 on the single-thread build.
+- **Input to present:** 3.16 ms at 2560×1440, uncapped, down from 10.49
+  (`bench.py --latency`).
+
+## Where it stood (2026-09-25, `3ba835f`)
 
 **Before and after.** Wasm step median / p95 per frame, native median in parentheses, ms,
 headless Chromium, `uv run --with playwright web/bench.py --build --native`. *Before* is
@@ -67,14 +92,15 @@ Elsewhere, from the branch reports below:
 | C2 | alias models through `D_PolysetDraw` | done (`quake/fid1`, as a fidelity fix) |
 | C3 | the gun on the shared z-buffer, placed by `V_CalcRefdef` | done (`quake/options`, `quake/fid1`) |
 | C4 | cache the external boxes' surfaces | **not done**; after C1 and A5 walk_e1m3 bakes 2 box faces a frame (the `surf_bypa` counter), too little to matter |
-| D1 | `Host_FilterTime`'s 72 fps cap | done (`quake/host`); "Uncapped framerate" is a Web extra |
+| D1 | `Host_FilterTime`'s 72 fps cap | done (`quake/host`); since 2026-09-26 Classic's only: the 2026 profile runs uncapped (`wasm_uncapped`, `FRAMERATE.md`) |
 | D2 | resolve entity fields once | done (`quake/sim`) |
 | D3 | the pak as one static slice | done (`quake/host`) |
-| D4 | compressed, streamed delivery | compression and streaming done (`quake/host`); **open:** the pak split out of the wasm, `wasm-opt` |
+| D4 | compressed, streamed delivery | compression and streaming done (`quake/host`); the pak split out of the wasm done (`q26/platform`: `quake.wasm` is 1.3 MB, the pak a file read on demand, cached by the service worker); **open:** `wasm-opt` |
 
-**Still open or unmeasured:** D4's pak split and `wasm-opt`; C4 (not worth it now);
-real GPU browsers, Firefox, Safari, phones and a real 120/144 Hz display (§9); the page's
-sound cost (the bench runs with audio locked).
+**Still open or unmeasured:** D4's `wasm-opt`; C4 (not worth it now); a real browser on a
+real display (every measurement is headless Chromium, on a desktop GPU at best), Safari,
+phones and a real 120–480 Hz display (§9); the page's sound cost (the bench runs with
+audio locked).
 
 The rest of this file is the plan as written on branch `quake/perf`, with each item's
 outcome added under it by the branch that did it. Its numbers are the baseline's unless an
@@ -1096,7 +1122,9 @@ the projection, mostly because A3 was done as well.*
 - **Real GPU browsers.** Everything was measured in headless Chromium with software compositing on
   a loaded 16-core x86. I did not measure Firefox, Safari, a GPU-backed canvas (where
   `putImageData` is an upload), phones, or a real 120/144 Hz display. D1's gain is argued from
-  the code, not measured.
+  the code, not measured. *(2026-09-26: headless Chromium on a desktop GPU is measured
+  since `q26/present`, `QUAKE_GPU=1`, and Firefox runs the checks headless. A real display,
+  Safari and phones are still unmeasured.)*
 - **Prototypes are evidence, not implementations.** The A1, B1 and B2 prototypes ran in a scratch
   copy, with atomic counters present. A1's prototype takes its gradients from one triangle and was
   checked for cracks only by counting background pixels on two frames.
@@ -1163,3 +1191,72 @@ The port's native frame includes the RGBA pack the C does not have (6–8% of a 
 measured before the edge renderer). Before `quake/edge` (the polygon-span world pass, same
 harness): native 1678 / 530 / 249 fps against id's 1961 / 786 / 445 — the edge renderer took the
 port from 0.56–0.86x of id's C to 1.23–1.43x.
+
+---
+
+## 11. Every core (2026-09-26, branches `q26/multicore` and `q26/present`)
+
+id's renderer ran on one CPU. The port's draws a frame on as many threads as the platform
+offers, with the same pixels for any count (`render/band.rs`).
+
+- **What is done once.** The frame splits after the edge scan. What the whole frame
+  decides runs once, in id's order: the world walk and `R_ScanEdges`,
+  `D_DrawSurfaces`' per-surface setup with the surface cache filled, the alias models'
+  vertices, light and clipped triangles, and the particles' squares.
+- **What runs in bands.** The view is cut into bands of whole rows, four a thread,
+  handed out as threads come free. Each band runs the same passes in id's order on its
+  own rows: the world's spans and `D_DrawZSpans`, then the alias models, particles,
+  sprites and the gun, each through the 16-bit z-buffer. Every pixel sees the same writes
+  in the same order whichever thread draws its band, so the frame is the same for any
+  count.
+- **How the threads are made.** They are scoped threads (`std::thread::scope`), the only
+  safe way to lend a frame's buffers. A thread the system refuses leaves its bands to the
+  others, so a build without threads draws the same frame.
+- **The rest of the frame.** The underwater warp and the 2-D canvas's RGBA pack run in
+  row runs on the same threads.
+
+It rests on R3 (`CODE_PLAN.md`): the `Renderer` owns every cache and buffer that used
+to be a thread-local.
+
+**Identity.**
+- Natively, at 1, 2, 3 and 16 threads: the goldens, the `play` hashes (320×200 and
+  640×400 Classic, 1920×1080 2026 video), the timedemo frame counts, and `shot` at
+  1280×800 to 4K are byte-identical.
+- In the browser, `bench.py --hash-every 30` prints the same hashes at 1 and 8 threads.
+- A unit test draws a scene with every kind of entity at 1–16 threads.
+
+**Native** (`quaketool timedemo <pak> demo1 --res W×H --video modern --threads N`; the
+frame includes the RGBA pack). Median of three rounds, 2026-09-26 on `244bcd5`, the
+16-thread desktop at load 1–3, frames per second:
+
+| threads | 1920×1080 | 2560×1440 | 3840×2160 |
+|---|---:|---:|---:|
+| 1 | 208 | 120 | 54 |
+| 8 | 689 | 455 | 210 |
+| 16 | 682 | 450 | 224 |
+
+Eight threads give 3.3–3.9x. Sixteen (on 8 cores, 2 threads each) add nothing at 1080p and
+1440p and 7% at 4K. What stays serial (the edge scan, the surface-cache fills, the demo
+message) bounds it. The branch's own sitting on `a2c2944`, before B5, at 8 threads:
+1080p 163 → 610 fps, 1440p 97 → 385, 4K 45 → 173.
+
+**In the browser** (`bench.py --build --threads-build --video modern --threads 1,8`,
+demo1, headless Chromium).
+- The page's frame at 2560×1440 took 19.07 ms on one thread and 9.89 ms on 8
+  (`q26/multicore`, `web/PLATFORM.md` "Threads"). The copies around the frame then
+  dominated: 0.9 ms each at 1440p.
+- With B5 and the frames read where they lie in shared memory (`q26/present`, on the
+  local GPU), 8 threads take 3.42 ms, against 10.62 before, in one sitting
+  (`web/PLATFORM.md`, "Presentation").
+- The closing review, demo1 at 2560×1440 with pixel size 1, median page frame:
+
+  | build | on the GPU | software compositing |
+  |---|---:|---:|
+  | threads (16) | 3.3 ms | 5.4 ms |
+  | single-thread | 10.8 ms | 15.4 ms |
+
+**The knob.** `r_threads` (0, the default, is Auto: every thread the host offers). The
+page's host hands the program `-hwthreads` (its pool of workers plus one). The 2026
+profile's Auto pixel size grows its budget with the threads: a 1080p frame's pixels
+times the whole square root of the thread count, so 4–8 threads draw a 1440p screen at
+pixel size 1.
