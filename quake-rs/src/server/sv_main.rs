@@ -19,7 +19,6 @@
 
 use super::host::{reset_changelevel, reset_restart, reset_skill};
 use super::lightstyle::reset_lightstyles;
-use super::msg::{reset_message_parsers, take_svc_events};
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
 use super::{
@@ -98,10 +97,6 @@ impl Server {
         // Likewise a pending localcmd("restart") respawn must not survive into a
         // freshly spawned server.
         reset_restart();
-        // And a half-parsed message / queued MSG_ALL command (an intermission fired
-        // on the OLD level must never start one on this fresh server).
-        reset_message_parsers();
-        let _ = take_svc_events();
         // The light-style transport is also per-thread and outlives a server;
         // clear it so a prior level's patterns cannot leak before this level's
         // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of

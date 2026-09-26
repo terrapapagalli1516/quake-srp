@@ -46,6 +46,13 @@ pub struct Outbox {
     particles: Vec<ParticleBurst>,
     /// `svc_print`s and `svc_centerprint`s ([`Server::drain_messages`]).
     messages: Vec<GameMessage>,
+    /// Where the client's parse of each buffer the `Write*` builtins feed is
+    /// (one per [`MsgBuf`]); reset at the top of every server frame.
+    parsers: [MsgParse; 2],
+    /// Temp entities those buffers completed ([`Server::drain_temp_entities`]).
+    temp_entities: Vec<TempEntityEvent>,
+    /// `svc_*` commands those buffers completed ([`Server::drain_svc_events`]).
+    svc_events: Vec<SvcEvent>,
 }
 
 impl Server {
@@ -293,12 +300,8 @@ pub(super) fn bi_particle(vm: &mut Vm) -> Result<()> {
 // never swallow a write aimed at the other. The parsers are deliberately
 // total: an unknown command or TE type, or a write of the wrong kind, drops
 // the message in progress and goes back to reading command bytes rather than
-// guessing a length or panicking.
-//
-// A `thread_local!` for the same reason as the queues above: builtins are
-// `fn(&mut Vm)` and cannot see the `Server`. Server methods run on the same
-// thread as the builtins, so a frame's events are visible to the drains right
-// after it.
+// guessing a length or panicking. The parsers and what they complete live in
+// the outbox, like the queues above.
 // ---------------------------------------------------------------------------
 
 /// `MSG_BROADCAST` (pr_cmds.c `WriteDest`): `sv.datagram`, the unreliable
@@ -613,89 +616,54 @@ pub enum SvcEvent {
     SellScreen,
 }
 
-thread_local! {
-    /// One parser per [`MsgBuf`] (per-thread). Reset at the top of every
-    /// server frame and for a fresh server ([`reset_message_parsers`]).
-    static MSG_PARSE: std::cell::RefCell<[MsgParse; 2]> =
-        const { std::cell::RefCell::new([MsgParse::Command, MsgParse::Command]) };
-    /// Completed temp entities awaiting a [`Server::drain_temp_entities`].
-    /// Mirrors the [`SOUND_EVENTS`]/[`PARTICLE_BURSTS`] queues exactly.
-    static TEMP_ENTITIES: std::cell::RefCell<Vec<TempEntityEvent>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    /// Completed commands awaiting a [`Server::drain_svc_events`].
-    static SVC_EVENTS: std::cell::RefCell<Vec<SvcEvent>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a completed temp-entity event onto the thread-local queue.
-fn push_temp_entity(ev: TempEntityEvent) {
-    TEMP_ENTITIES.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued temp-entity event.
-pub(super) fn take_temp_entities() -> Vec<TempEntityEvent> {
-    TEMP_ENTITIES.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
-/// Push a completed server command onto the thread-local queue.
-fn push_svc_event(ev: SvcEvent) {
-    SVC_EVENTS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued server command.
-pub(super) fn take_svc_events() -> Vec<SvcEvent> {
-    SVC_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
-/// Put every buffer's parser back between commands, dropping any half-read
-/// message. Called at the start of each server frame (the C cleared its
-/// buffers once they were sent) so a partial message left by an errored think
-/// never bleeds into the next frame, and for a fresh server.
-pub(super) fn reset_message_parsers() {
-    MSG_PARSE.with(|s| *s.borrow_mut() = [MsgParse::Command, MsgParse::Command]);
-}
-
-/// A command byte read between commands: start its payload, or act on it.
-/// Unknown commands are skipped — the id1 progs only write the ones here.
-fn parse_command(value: f32) -> MsgParse {
-    let b = value as i32;
-    match if (0..=255).contains(&b) { b as u8 } else { 0 } {
-        SVC_TEMP_ENTITY => MsgParse::TempEntity(TeMsg::default()),
-        SVC_INTERMISSION => {
-            push_svc_event(SvcEvent::Intermission);
-            MsgParse::Command
-        }
-        SVC_FINALE => MsgParse::AwaitString { cutscene: false },
-        SVC_CUTSCENE => MsgParse::AwaitString { cutscene: true },
-        SVC_CDTRACK => MsgParse::SkipBytes(2),
-        SVC_SELLSCREEN => {
-            push_svc_event(SvcEvent::SellScreen);
-            MsgParse::Command
-        }
-        // Stat ticks: the front-end reads killed_monsters / found_secrets from
-        // the QuakeC globals (like the Tab scoreboard), so these single-byte
-        // commands need no event.
-        SVC_KILLEDMONSTER | SVC_FOUNDSECRET => MsgParse::Command,
-        _ => MsgParse::Command,
+impl Outbox {
+    /// Put every buffer's parser back between commands, dropping any half-read
+    /// message. Called at the start of each server frame (the C cleared its
+    /// buffers once they were sent) so a partial message left by an errored
+    /// think never bleeds into the next frame.
+    pub(super) fn reset_parsers(&mut self) {
+        self.parsers = Default::default();
     }
-}
 
-/// `MSG_Write*(WriteDest(), value)`: hand one write to the parser of the buffer
-/// `dest` names (a no-op for an unmodelled destination).
-fn msg_write(dest: i32, w: MsgWrite) {
-    let Some(buf) = write_dest(dest) else { return };
-    MSG_PARSE.with(|cell| {
-        let mut parsers = cell.borrow_mut();
-        let st = &mut parsers[buf as usize];
-        *st = match std::mem::take(st) {
+    /// A command byte read between commands: start its payload, or act on it.
+    /// Unknown commands are skipped — the id1 progs only write the ones here.
+    fn parse_command(&mut self, value: f32) -> MsgParse {
+        let b = value as i32;
+        match if (0..=255).contains(&b) { b as u8 } else { 0 } {
+            SVC_TEMP_ENTITY => MsgParse::TempEntity(TeMsg::default()),
+            SVC_INTERMISSION => {
+                self.svc_events.push(SvcEvent::Intermission);
+                MsgParse::Command
+            }
+            SVC_FINALE => MsgParse::AwaitString { cutscene: false },
+            SVC_CUTSCENE => MsgParse::AwaitString { cutscene: true },
+            SVC_CDTRACK => MsgParse::SkipBytes(2),
+            SVC_SELLSCREEN => {
+                self.svc_events.push(SvcEvent::SellScreen);
+                MsgParse::Command
+            }
+            // Stat ticks: the front-end reads killed_monsters / found_secrets from
+            // the QuakeC globals (like the Tab scoreboard), so these single-byte
+            // commands need no event.
+            SVC_KILLEDMONSTER | SVC_FOUNDSECRET => MsgParse::Command,
+            _ => MsgParse::Command,
+        }
+    }
+
+    /// `MSG_Write*(WriteDest(), value)`: hand one write to the parser of the
+    /// buffer `dest` names (a no-op for an unmodelled destination).
+    fn write(&mut self, dest: i32, w: MsgWrite) {
+        let Some(buf) = write_dest(dest) else { return };
+        let st = std::mem::take(&mut self.parsers[buf as usize]);
+        self.parsers[buf as usize] = match st {
             MsgParse::Command => match w {
-                MsgWrite::Byte(v) => parse_command(v),
+                MsgWrite::Byte(v) => self.parse_command(v),
                 _ => MsgParse::Command,
             },
             MsgParse::TempEntity(mut te) => match te.feed(&w) {
                 TeStep::More => MsgParse::TempEntity(te),
                 TeStep::Done(ev) => {
-                    push_temp_entity(ev);
+                    self.temp_entities.push(ev);
                     MsgParse::Command
                 }
                 TeStep::Drop => MsgParse::Command,
@@ -703,7 +671,7 @@ fn msg_write(dest: i32, w: MsgWrite) {
             MsgParse::AwaitString { cutscene } => {
                 // Anything but the string is out of step: drop the command.
                 if let MsgWrite::Str(text) = w {
-                    push_svc_event(if cutscene { SvcEvent::Cutscene(text) } else { SvcEvent::Finale(text) });
+                    self.svc_events.push(if cutscene { SvcEvent::Cutscene(text) } else { SvcEvent::Finale(text) });
                 }
                 MsgParse::Command
             }
@@ -712,45 +680,50 @@ fn msg_write(dest: i32, w: MsgWrite) {
                 _ => MsgParse::Command,
             },
         };
-    });
+    }
+}
+
+/// `MSG_Write*(WriteDest(), value)` from a builtin, into its server's outbox.
+fn msg_write(vm: &mut Vm, dest: i32, w: MsgWrite) {
+    send(vm, |o| o.write(dest, w));
 }
 
 /// `PF_WriteByte` (#52): `void(float to, float value)` —
 /// `MSG_WriteByte(WriteDest(), G_FLOAT(OFS_PARM1))`.
 pub(super) fn bi_writebyte(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteChar` (#53): one byte, like [`bi_writebyte`].
 pub(super) fn bi_writechar(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteShort` (#54): a 16-bit integer field.
 pub(super) fn bi_writeshort(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteLong` (#55): a 32-bit integer field (no message the progs write
 /// carries one; read like a short so the parser stays in step if one appears).
 pub(super) fn bi_writelong(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteCoord` (#56): a world coordinate.
 pub(super) fn bi_writecoord(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Coord(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Coord(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteAngle` (#57): `MSG_WriteAngle` writes one byte, so the parser
 /// reads it as one (no message the progs write carries an angle).
 pub(super) fn bi_writeangle(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
     Ok(())
 }
 
@@ -760,7 +733,8 @@ pub(super) fn bi_writeangle(vm: &mut Vm) -> Result<()> {
 pub(super) fn bi_writestring(vm: &mut Vm) -> Result<()> {
     let dest = vm.arg_float(0) as i32;
     if write_dest(dest).is_some() {
-        msg_write(dest, MsgWrite::Str(vm.arg_string(1)));
+        let text = vm.arg_string(1);
+        msg_write(vm, dest, MsgWrite::Str(text));
     }
     Ok(())
 }
@@ -772,7 +746,7 @@ pub(super) fn bi_writestring(vm: &mut Vm) -> Result<()> {
 /// the edict index (~0.0 for every real entity), collapsing all beams onto one
 /// slot.
 pub(super) fn bi_writeentity(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_entity(1) as f32));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_entity(1) as f32));
     Ok(())
 }
 
@@ -923,11 +897,9 @@ impl Server {
     /// MSG_ALL (Chthon's lightning), in the order they were written. A front-end
     /// calls this once per frame and maps each [`TempEntityEvent`] to the
     /// matching [`crate::particles::ParticleSystem`] effect or beam; tests
-    /// use it to assert a temp entity actually fired. The queue is
-    /// process-/thread-local, so call this on the same thread that drove the frame
-    /// (mirrors [`Server::drain_sounds`]/[`Server::drain_particles`]).
+    /// use it to assert a temp entity actually fired.
     pub fn drain_temp_entities(&mut self) -> Vec<TempEntityEvent> {
-        take_temp_entities()
+        self.take_outbox(|o| &mut o.temp_entities)
     }
 
     /// Take and clear the queued MSG_ALL server commands recognised from the
@@ -935,10 +907,9 @@ impl Server {
     /// (`svc_intermission` / `svc_finale` / `svc_cutscene` / `svc_sellscreen`).
     /// A front-end calls this once per frame and plays the client role of
     /// `CL_ParseServerMessage` (cl_parse.c): enter intermission mode, latch the
-    /// completed time, start the finale text reveal. Thread-local like
-    /// [`Server::drain_temp_entities`] — call it on the thread that drove the frame.
+    /// completed time, start the finale text reveal.
     pub fn drain_svc_events(&mut self) -> Vec<SvcEvent> {
-        take_svc_events()
+        self.take_outbox(|o| &mut o.svc_events)
     }
 
     /// `SV_StartSound` (sv_phys.c helper, via `world.c`): queue a sound emitted by
@@ -1196,15 +1167,11 @@ mod tests {
         server.vm.set_gf(OFS_PARM0 + 3, value);
         bi_writeshort(&mut server.vm).expect("bi_writeshort");
     }
-    /// A fresh server plus a cleared decoder/queue (the thread-locals persist
-    /// across tests on the same thread, so reset before each scenario).
+    /// A fresh server (with a fresh outbox) for a message scenario.
     fn te_server() -> Server {
         let (img, _sound_fn) = attack_progs();
         let progs = Progs::parse(&img).expect("parse");
-        let server = Server::new(floor_bsp(), progs).expect("server");
-        reset_message_parsers();
-        let _ = take_temp_entities(); // clear any residue from a prior test
-        server
+        Server::new(floor_bsp(), progs).expect("server")
     }
 
     #[test]
@@ -1238,13 +1205,9 @@ mod tests {
         server.vm.set_gi(OFS_PARM0 + 3, ofs);
         bi_writestring(&mut server.vm).expect("bi_writestring");
     }
-    /// A fresh server plus a cleared MSG_ALL recognizer/queue (thread-locals
-    /// persist across tests on one thread, so reset before each scenario).
+    /// A fresh server for a MSG_ALL scenario.
     fn svc_server() -> Server {
-        let server = te_server();
-        reset_message_parsers();
-        let _ = take_svc_events();
-        server
+        te_server()
     }
 
     #[test]
@@ -1322,7 +1285,6 @@ mod tests {
         // parses exactly like the datagram. Only MSG_BROADCAST temp entities
         // were decoded, so the bolt never reached the client.
         let mut server = svc_server();
-        let _ = take_temp_entities();
         write_chthon_bolt(&mut server, [-128.0, 64.0, -40.0], [960.0, 64.0, -40.0]);
         let evs = server.drain_temp_entities();
         assert_eq!(evs.len(), 1, "one temp entity from the reliable buffer");
@@ -1342,7 +1304,6 @@ mod tests {
         // arrive: neither message swallows the other's writes (the C's
         // sv.datagram and sv.reliable_datagram are separate buffers).
         let mut server = svc_server();
-        let _ = take_temp_entities();
         write_byte(&mut server, MSG_BROADCAST, SVC_TEMP_ENTITY as f32);
         write_byte(&mut server, MSG_BROADCAST, TE_EXPLOSION as f32);
         write_coord(&mut server, MSG_BROADCAST, 1.0);
@@ -1363,7 +1324,6 @@ mod tests {
         // svc_intermission/svc_sellscreen; and a bare svc_intermission on the
         // datagram is one (the client parses both buffers alike).
         let mut server = svc_server();
-        let _ = take_temp_entities();
         write_byte(&mut server, MSG_ALL, SVC_TEMP_ENTITY as f32);
         write_byte(&mut server, MSG_ALL, TE_EXPLOSION2 as f32);
         for v in [1.0, 2.0, 3.0] {
@@ -1401,15 +1361,12 @@ mod tests {
             server.drain_svc_events().is_empty(),
             "desynced finale dropped, stray string ignored"
         );
-        // A queued event from the OLD level must not leak across a new server
-        // (with_pak clears state + queue, mirroring reset_changelevel).
+        // A queued event from the OLD level cannot reach a new server: each
+        // has its own outbox.
         write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
-        let fresh = svc_server();
-        drop(fresh);
-        assert!(
-            take_svc_events().is_empty(),
-            "a fresh server cleared the queued events"
-        );
+        let mut fresh = svc_server();
+        assert!(fresh.drain_svc_events().is_empty(), "a fresh server has no queued events");
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
     }
 
     #[test]
@@ -1549,7 +1506,7 @@ mod tests {
         write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
         write_byte(&mut server, 0, TE_EXPLOSION as f32);
         write_coord(&mut server, 0, 1.0); // only one of three coords
-        reset_message_parsers(); // frame boundary
+        server.outbox().expect("outbox").reset_parsers(); // frame boundary
         // Continuing the old coords now must NOT complete a stale message.
         write_coord(&mut server, 0, 2.0);
         write_coord(&mut server, 0, 3.0);

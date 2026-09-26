@@ -19,10 +19,6 @@
 //! `Server` methods below.
 
 use super::lightstyle::{snapshot_lightstyles, LIGHTSTYLES, MAX_LIGHTSTYLES};
-use super::msg::{
-    reset_message_parsers,
-    take_svc_events, take_temp_entities,
-};
 use super::{parm_global_name, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
 use crate::vm::Vm;
 use crate::Result;
@@ -247,9 +243,6 @@ pub(crate) fn restore_transports(snap: TransportSnapshot) {
     set_sv_gravity(snap.sv_gravity);
     reset_changelevel();
     reset_restart();
-    reset_message_parsers();
-    let _ = take_temp_entities();
-    let _ = take_svc_events();
 }
 
 impl Server {
