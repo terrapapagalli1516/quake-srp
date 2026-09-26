@@ -88,6 +88,22 @@ pub(crate) fn cl_disconnect(a: &mut App) {
     a.disconnected = true;
 }
 
+/// The page's half of `Host_Error` (host.c), once the game has ended in one
+/// — a QuakeC runtime error ([`Walk::host_error`](quake_rs::client::Walk),
+/// set by the engine's `client::host::host_error`, which printed the report
+/// and stopped the sounds): the report into the console if the frame's text
+/// has not been taken yet, `CL_Disconnect`, and `cls.demonum = -1` so no demo
+/// loop starts; disconnected, the console covers the screen.
+pub(crate) fn finish_host_error(a: &mut App) {
+    let Some(w) = a.walk.as_mut().filter(|w| w.host_error.is_some()) else { return };
+    let printed = w.notify.take_printed();
+    if !printed.is_empty() {
+        a.console.print_notified(&printed);
+    }
+    cl_disconnect(a);
+    a.cls.demonum = -1;
+}
+
 /// `CL_PlayDemo_f` after its argument check: disconnect, print
 /// "Playing demo from <name>.", and start the demo — or print "ERROR:
 /// couldn't open." and stop the demo loop (`cls.demonum = -1`), staying

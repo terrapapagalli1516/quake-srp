@@ -44,6 +44,59 @@ mod tests {
     use crate::test_util::*;
     use crate::vid::set_resolution;
 
+    /// The console's scrollback, oldest first, without its blank lines.
+    fn console_lines() -> Vec<String> {
+        APP.with(|c| {
+            let b = c.borrow();
+            b.as_ref().unwrap().console.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
+        })
+    }
+
+    /// Whether the App still has a walk, whether it is disconnected, and
+    /// `cls.demonum`.
+    fn game_state() -> (bool, bool, i32) {
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.walk.is_some(), a.disconnected, a.cls.demonum)
+        })
+    }
+
+    /// Host_Error from a QuakeC runtime error in the live game (the frame's
+    /// Result was dropped, and the game went on): here `makevectors` (#1),
+    /// which PlayerPreThink calls every frame, made to fail. As in id's, the
+    /// report (the statement, the stack trace, the message) and
+    /// `Host_Error: Program error` reach the console, the walk is gone
+    /// (CL_Disconnect), and no demo loop starts (cls.demonum = -1).
+    #[test]
+    fn a_quakec_error_in_a_frame_ends_the_game_like_host_error() {
+        set_resolution(320, 200);
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.server.vm.builtins[1] = |vm| Err(vm.run_error("test fault")));
+        step(0.05);
+        assert_eq!(game_state(), (false, true, -1), "CL_Disconnect, cls.demonum = -1");
+        let lines = console_lines();
+        assert!(lines.iter().any(|l| l.ends_with(" : PlayerPreThink")), "the stack trace: {lines:?}");
+        assert_eq!(lines[lines.len() - 2..], ["test fault", "Host_Error: Program error"]);
+    }
+
+    /// The same from the console: `kill` runs ClientKill, whose first
+    /// `bprint` (#23) is made to fail.
+    #[test]
+    fn a_quakec_error_in_kill_ends_the_game_like_host_error() {
+        set_resolution(320, 200);
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.server.vm.builtins[23] = |vm| Err(vm.run_error("test fault")));
+        console_toggle();
+        run_console_line("kill");
+        assert_eq!(game_state(), (false, true, -1), "CL_Disconnect, cls.demonum = -1");
+        let lines = console_lines();
+        assert!(lines.iter().any(|l| l.ends_with(" : ClientKill")), "the stack trace: {lines:?}");
+        assert_eq!(lines[lines.len() - 2..], ["test fault", "Host_Error: Program error"]);
+    }
+
     /// Regression for the one-time texture/lighting "pops" in the first second of
     /// live play (two distinct root causes, both whole-view shimmers):
     ///
