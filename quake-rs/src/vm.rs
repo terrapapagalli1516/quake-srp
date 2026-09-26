@@ -313,7 +313,7 @@ pub struct Vm {
     trace: bool,
     /// The entity fields (`entvars_t`) resolved by name at load ([`Vm::fo`]).
     fo: FieldOfs,
-    /// The per-frame globals resolved by name at load ([`Vm::go`]).
+    /// The globals (`globalvars_t`) resolved by name at load ([`Vm::go`]).
     go: GlobalOfs,
     /// Optional engine host providing world services to the engine builtins.
     /// Taken out and restored around each use via [`Vm::with_host`] so a builtin
@@ -450,7 +450,8 @@ impl Vm {
         &self.fo
     }
 
-    /// The per-frame globals resolved at load ([`Vm::glob_float`] ...).
+    /// The globals (`globalvars_t`) resolved at load: read and write them
+    /// with [`Vm::glob_float`] and friends.
     pub fn go(&self) -> &GlobalOfs {
         &self.go
     }
@@ -482,8 +483,8 @@ impl Vm {
         self.stmt_count
     }
 
-    /// Record a per-statement trace into the output log (a debugging aid;
-    /// id's `pr_trace`, which `traceon` sets there).
+    /// Record a per-statement trace into the output log (a debugging aid,
+    /// id's `pr_trace`; the port's `traceon` builtin leaves it alone).
     pub fn set_trace(&mut self, on: bool) {
         self.trace = on;
     }
