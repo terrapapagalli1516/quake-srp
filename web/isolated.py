@@ -6,8 +6,9 @@ cross-origin isolated, which its SharedArrayBuffers need (PLATFORM.md,
     Cross-Origin-Opener-Policy: same-origin
     Cross-Origin-Embedder-Policy: require-corp
 
-A web directory holds index.html, wasi.js, quake.wasm and id1/pak0.pak;
-`webdir()` finds the one to serve: the script's argument, or `web/` itself
+A web directory holds the page (PAGE_FILES: `copy_page` puts them in
+place), quake.wasm and id1/pak0.pak; `webdir()` finds the one to serve:
+the script's argument, or `web/` itself
 (with the engine and the pak put in place by PLATFORM.md's deploy recipe).
 `launch()` starts the browser the checks run in: Chromium, or
 $QUAKE_BROWSER.
@@ -15,6 +16,7 @@ $QUAKE_BROWSER.
 import functools
 import http.server
 import os
+import shutil
 import socketserver
 import sys
 import threading
@@ -22,7 +24,8 @@ import threading
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
-                      ".wasm": "application/wasm", ".js": "text/javascript"}
+                      ".wasm": "application/wasm", ".js": "text/javascript",
+                      ".webmanifest": "application/manifest+json"}
 
     def end_headers(self):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
@@ -43,6 +46,20 @@ def serve(directory, port):
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
+
+
+# The page's own files, as a deploy dir holds them beside quake.wasm and
+# id1/pak0.pak (PLATFORM.md, "Build, serve, deploy").
+PAGE_FILES = ["index.html", "wasi.js", "touch.js", "sw.js", "manifest.webmanifest",
+              "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"]
+
+
+def copy_page(dest):
+    """Copy PAGE_FILES from web/ into the deploy dir `dest`."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for f in PAGE_FILES:
+        os.makedirs(os.path.dirname(os.path.join(dest, f)), exist_ok=True)
+        shutil.copy(os.path.join(here, f), os.path.join(dest, f))
 
 
 def webdir():
