@@ -124,6 +124,15 @@ pub struct Cvars {
     /// the platform offers). The pixels are the same for any count, so it is
     /// no departure.
     pub threads: Threads,
+    /// `in_touch`: on a touch screen, the page's touch controls for play —
+    /// a stick, look by dragging, fire, jump and next weapon (quake-wasm's
+    /// `web/touch.js`). id's Quake has none; without them a phone can only
+    /// open the menu, which stays tappable either way.
+    pub touch: bool,
+    /// `in_touchaccel`: how much a fast drag turns further than a slow one
+    /// of the same length (0: none, the view turns with the finger).
+    /// Nothing reads it but the touch controls, so it is no departure.
+    pub touch_accel: f32,
 }
 
 impl Default for Cvars {
@@ -165,6 +174,8 @@ impl Cvars {
             fkey: false,
             lerpmove: LerpMove::Classic,
             threads: Threads::Auto,
+            touch: false,
+            touch_accel: 0.0,
         }
     }
 
@@ -172,8 +183,8 @@ impl Cvars {
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
     /// layer at id's proportions, the crosshair, monsters that glide between
-    /// their steps, Always Run, mouse look, Space to swim up and `f` for
-    /// fullscreen. Show FPS and exact
+    /// their steps, Always Run, mouse look, Space to swim up, `f` for
+    /// fullscreen and touch controls on a phone. Show FPS and exact
     /// perspective stay off: the readout is clutter, and id's 16-pixel spans
     /// are part of the look.
     pub fn modern() -> Cvars {
@@ -189,6 +200,7 @@ impl Cvars {
             jumpswim: true,
             fkey: true,
             lerpmove: LerpMove::Smooth,
+            touch: true,
             ..Cvars::classic()
         }
     }
@@ -380,6 +392,10 @@ pub const CVARS: &[Cvar] = &[
         set: |c, v| c.lerpmove = if on(v) { LerpMove::Smooth } else { LerpMove::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
         get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
+    Cvar { name: "in_touch", archive: true, departure: true, help: "touch controls on a touch screen",
+        get: |c| flag(c.touch), set: |c, v| c.touch = on(v) },
+    Cvar { name: "in_touchaccel", archive: true, departure: false, help: "touch look acceleration, 0 none",
+        get: |c| number_string(c.touch_accel), set: |c, v| c.touch_accel = atof(v).clamp(0.0, 4.0) },
 ];
 
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console
