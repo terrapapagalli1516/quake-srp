@@ -654,15 +654,21 @@ fn render_demo_frame(
         options: render_options(&rvrect, vid),
         ..render::Scene::new(&d.bsp, cam, rvrect.w, rvrect.h, &d.palette)
     };
-    let view = d.renderer.render(&scene);
-    lap(Phase::Render3d);
-    // D_WarpScreen: stretched over the screen's view rectangle while it
-    // wobbles — the warp applies to the 3-D view FIRST; the content tint joins
-    // the deferred whole-screen blend below (V_UpdatePalette order).
-    let view = if dowarp { d.renderer.warp(view, vrect.w, vrect.h, f.time, vid.video.hires) } else { view };
+    // The screen, backtile around the view rectangle, and the view drawn
+    // straight into it — or, submerged, into the warp buffer and then
+    // D_WarpScreen'd over the rectangle while it wobbles: the warp applies to
+    // the 3-D view FIRST; the content tint joins the deferred whole-screen
+    // blend below (V_UpdatePalette order).
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
-    let mut img =
-        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette, d.renderer.threads());
+    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref(), &d.palette);
+    if dowarp {
+        let view = d.renderer.render(&scene);
+        lap(Phase::Render3d);
+        d.renderer.warp_into(view, &mut img, vrect, f.time, vid.video.hires);
+    } else {
+        d.renderer.render_into(&scene, &mut img);
+        lap(Phase::Render3d);
+    }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game

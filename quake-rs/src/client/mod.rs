@@ -726,9 +726,10 @@ thread_local! {
     static VIEW_HOOK: Cell<Option<ViewHook>> = const { Cell::new(None) };
 }
 
-/// A harness's last word on the finished 3-D view of a live frame, before the
-/// 2-D layer is drawn over it (see [`set_view_hook`]).
-pub type ViewHook = fn(render::Image, &[[u8; 3]; 256]) -> render::Image;
+/// A harness's last word on the finished 3-D view of a live frame — the
+/// screen and the view's rectangle on it — before the 2-D layer is drawn over
+/// it (see [`set_view_hook`]).
+pub type ViewHook = fn(&mut render::Image, render::ViewRect, &[[u8; 3]; 256]);
 
 /// Install (or clear) the [`ViewHook`]: the 2-D oracle harness (quake-wasm's
 /// `oracle_screen`) paints the view one flat colour, as the C oracle's
@@ -738,11 +739,11 @@ pub fn set_view_hook(hook: Option<ViewHook>) {
     VIEW_HOOK.with(|c| c.set(hook));
 }
 
-/// The 3-D view through the installed [`ViewHook`] (unchanged without one).
+/// The 3-D view at `vrect` of `screen` through the installed [`ViewHook`]
+/// (unchanged without one).
 #[inline]
-pub fn view_hook(view: render::Image, palette: &[[u8; 3]; 256]) -> render::Image {
-    match VIEW_HOOK.with(Cell::get) {
-        Some(hook) => hook(view, palette),
-        None => view,
+pub fn view_hook(screen: &mut render::Image, vrect: render::ViewRect, palette: &[[u8; 3]; 256]) {
+    if let Some(hook) = VIEW_HOOK.with(Cell::get) {
+        hook(screen, vrect, palette);
     }
 }
