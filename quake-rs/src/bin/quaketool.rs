@@ -34,8 +34,12 @@ use quake_rs::wad::{self, Wad2};
 mod census;
 #[path = "quaketool/play.rs"]
 mod play;
+#[path = "quaketool/shot.rs"]
+mod shot;
 #[path = "quaketool/timedemo.rs"]
 mod timedemo;
+#[path = "quaketool/video.rs"]
+mod video;
 
 /// What a command produced: text to print, or raw bytes (for `cat`).
 enum Out {
@@ -68,6 +72,7 @@ fn main() {
         "menu" => need(rest, 2, cmd).and_then(|a| cmd_menu(&a[0], &a[1])),
         "scene" => need(rest, 3, cmd).and_then(|a| cmd_scene(&a[0], &a[1], &a[2])),
         "view" => need(rest, 3, cmd).and_then(cmd_view),
+        "shot" => need(rest, 3, cmd).and_then(|a| shot::cmd_shot(a).map(Out::Text)),
         "walk" => need(rest, 3, cmd).and_then(|a| {
             cmd_walk(&a[0], &a[1], &a[2], a.get(3).and_then(|s| s.parse().ok()).unwrap_or(40))
         }),
@@ -142,6 +147,8 @@ fn usage() {
          \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
          \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
+         \tquaketool shot <pak> <map.bsp> <out.ppm> [--res WxH] [--zoom N] [--frames N] [--yaw Y] [--pitch P] [--origin x,y,z] [--viewsize V] [--fire N] [--video classic|modern] [--fov-mode classic|horplus] [--hires 0|1] [--display W:H|square] [--scaled2d 0|1]\n\
+         \t                               the game screen as a player sees it (view, gun, status bar) at any size and video setting\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
          \tquaketool playtest <pak> <map.bsp> [out.ppm]  spawn a player, walk forward, report state + render POV\n\
