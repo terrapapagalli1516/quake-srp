@@ -1,20 +1,26 @@
 #!/usr/bin/env -S uv run --with playwright --script
-"""Verify Options > Web extras, the settings the page keeps across reloads,
-and Esc in fullscreen, end-to-end in headless Chromium:
+"""Verify Options > Classic / 2026 and its settings page, the settings the
+page keeps across reloads, and Esc in fullscreen, end-to-end in headless
+Chromium. The page opens as `?classic` (every departure off, id's keys):
 
-  1. Options has a 14th row, "Web extras" (the port's), that opens the Extras
-     screen (menu_screen_id 10) with every extra off; left/right/Enter toggle,
-     Esc returns to Options; the wasm_* console commands set the same bits.
-     Screenshots: verify_extras_options.png, verify_extras.png (the screen),
-     verify_extras_fps.png (the readout).
+  1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
+     whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on),
+     Enter opens the settings page (menu_screen_id 10), whose rows switch
+     each setting (Uncapped framerate row 1, Show FPS row 10, Exact
+     perspective row 11: left/right/Enter), Esc returns to Options; the
+     wasm_* console variables set the same settings, with the console's
+     history and Tab completion. Screenshots: verify_extras_options.png,
+     verify_extras.png (the page), verify_extras_fps.png (the readout).
   2. wasm_uncapped through the real program: a second of 1/144 s steps runs
      72 host frames with the cap (id's), 144 without.
   3. On frozen frames: wasm_showfps changes only the box at the bottom
      right above the status bar, wasm_exactpersp redraws the walls, and
      switching either off restores id's frame byte for byte.
-  4. Persistence: the extras bits and viewsize (plus the resolution) survive
-     a reload through the program's config.cfg, which the page keeps.
-  5. Esc in fullscreen: F locks Escape (navigator.keyboard.lock(['Escape']),
+  4. Persistence: config.cfg keeps the profile and what differs from it
+     (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
+     `?classic`) comes back Classic with them.
+  5. Esc in fullscreen (with vid_fkey on: F is the page's fullscreen key in
+     2026 only): F locks Escape (navigator.keyboard.lock(['Escape']),
      spied) and the hint says to hold Esc; a tapped Esc toggles the menu, a
      held one (autorepeat) toggles it once; a locked Esc that the browser
      also reports as a pointer-lock loss counts once, in either order;
@@ -54,8 +60,8 @@ if (navigator.keyboard && navigator.keyboard.lock) {
 """
 NO_KB = "Object.defineProperty(Navigator.prototype, 'keyboard', { get: () => undefined });"
 
-def boot_page(pg):
-    pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
+def boot_page(pg, query="?classic"):
+    pg.goto(f"http://127.0.0.1:{PORT}/index.html{query}", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     pg.evaluate("document.getElementById('overlay').click()")   # the first gesture
     time.sleep(0.3)
@@ -112,41 +118,48 @@ with sync_playwright() as p:
     ext = lambda: pg.evaluate("exp.extras()")
     key = lambda k, n=1: [pg.keyboard.press(k) or time.sleep(0.06) for _ in range(n)]
 
-    # 1. The Extras screen, reached from Options' 14th row.
-    check("every extra is off by default", ext() == 0)
-    check("nothing stored before a change", pg.evaluate(CFG) is None)
+    # 1. Options' 14th row switches the profile; Enter opens the page.
+    prof = lambda: pg.evaluate("quake.text('profile')")
+    check("?classic: the Classic profile, every setting off", prof() == "classic" and ext() == 0)
+    frames(pg)
+    check("config.cfg keeps the profile the address chose",
+          cfg_has(pg, 'profile "classic"'), str(pg.evaluate(CFG)))
     key("Escape")                      # the menu over the attract demo
     key("ArrowDown", 2); key("Enter")
     check("Options opens", scr() == OPTIONS)
     key("ArrowUp")                     # up from row 0 wraps to the last row...
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_options.png"))
+    key("ArrowRight")
+    check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 9, str(ext()))
+    key("ArrowLeft")
+    check("left: back to Classic", prof() == "classic" and ext() == 0)
     key("Enter")
-    check("...which is Web extras: it opens the Extras screen", scr() == EXTRAS)
+    check("Enter opens the settings page", scr() == EXTRAS)
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras.png"))
-    key("ArrowRight")                  # Uncapped framerate
+    key("ArrowDown"); key("ArrowRight")    # row 1: Uncapped framerate
     check("Right toggles Uncapped framerate", ext() == 1)
-    key("ArrowDown"); key("Enter")     # Show FPS
+    key("ArrowDown", 9); key("Enter")      # row 10: Show FPS
     check("Enter toggles Show FPS", ext() == 3)
     key("ArrowLeft")
     check("Left toggles it back", ext() == 1)
-    key("ArrowUp"); key("ArrowLeft")
+    key("ArrowUp", 9); key("ArrowLeft")
     check("all off again", ext() == 0)
-    key("ArrowDown", 2); key("ArrowRight")   # Exact perspective
+    key("ArrowDown", 10); key("ArrowRight")  # row 11: Exact perspective
     check("Right toggles Exact perspective", ext() == 4)
-    key("ArrowLeft"); key("ArrowUp", 2)
+    key("ArrowLeft")
     check("...and back off", ext() == 0)
     key("Escape")
     check("Esc returns to Options", scr() == OPTIONS)
     key("Enter")
-    check("...on the Web extras row", scr() == EXTRAS)
+    check("...on the Classic / 2026 row", scr() == EXTRAS)
     key("Escape"); key("Escape"); key("Escape")
     check("Esc Esc Esc closes the menu", vis() == 0)
     key("Backquote")
     for line in ["wasm_uncapped 1", "wasm_showfps 1"]:
         pg.keyboard.type(line); key("Enter")
-    check("the wasm_* console commands set the same bits", ext() == 3)
+    check("the wasm_* console variables set the same settings", ext() == 3)
     # Key_Console's history and Tab, through the page's keys: Up Up brings
     # back "wasm_uncapped 1" (Backspace + 0 turns it off); Tab completes a
     # cvar name ("wasm_ex" -> "wasm_exactpersp ").
@@ -156,10 +169,11 @@ with sync_playwright() as p:
     check("Tab completes the cvar name", ext() == 6)
     pg.keyboard.type("wasm_exactpersp 0"); key("Enter")
     key("Backquote")
-    check("wasm_uncapped 0", ext() == 2)
+    check("wasm_exactpersp 0", ext() == 2)
     frames(pg)
-    check("config.cfg keeps the change", cfg_has(pg, "wasm_uncapped 0", "wasm_showfps 1"),
-          str(pg.evaluate(CFG)))
+    check("config.cfg keeps the change, and only what differs from Classic",
+          cfg_has(pg, 'profile "classic"', 'wasm_showfps "1"')
+          and "wasm_uncapped" not in (pg.evaluate(CFG) or ""), str(pg.evaluate(CFG)))
 
     # 2. wasm_uncapped through the real program, with the page's own ticks
     #    paused so they cannot interleave (the calls run back to back).
@@ -218,24 +232,29 @@ with sync_playwright() as p:
     pg.evaluate("exp.set_extras(2)")
     pg.evaluate("quake.resume()")
 
-    # 4. Persistence across a reload: extras, viewsize, resolution.
+    # 4. Persistence across a plain reload (no ?classic): the profile,
+    #    viewsize, the settings, the resolution.
     key("Minus", 2)                    # default.cfg: '-' is sizedown -> 80
     frames(pg)
-    check("viewsize and extras kept in config.cfg",
-          cfg_has(pg, "viewsize 80", "wasm_showfps 1", "wasm_uncapped 0"), str(pg.evaluate(CFG)))
+    check("viewsize and the settings kept in config.cfg",
+          cfg_has(pg, 'viewsize "80"', 'wasm_showfps "1"'), str(pg.evaluate(CFG)))
     pg.evaluate("exp.set_extras(3)")
     frames(pg)
-    cfg_has(pg, "wasm_uncapped 1", "wasm_showfps 1")
+    cfg_has(pg, 'wasm_uncapped "1"', 'wasm_showfps "1"')
     res0 = pg.evaluate("Promise.all([exp.width(), exp.height()])")
-    boot_page(pg)
-    check("the Web extras survive a reload", ext() == 3, str(ext()))
+    boot_page(pg, "")
+    check("a plain reload comes back Classic", prof() == "classic", prof())
+    check("the settings survive a reload", ext() == 3, str(ext()))
     check("Screen size (viewsize) survives a reload", pg.evaluate("exp.viewsize()") == 80)
     check("...and the resolution still does",
           pg.evaluate("Promise.all([exp.width(), exp.height()])") == res0)
     pg.evaluate("exp.set_extras(0); exp.set_viewsize(100)")
     frames(pg)
 
-    # 5. Esc in fullscreen with Escape keyboard-locked.
+    # 5. Esc in fullscreen with Escape keyboard-locked (vid_fkey: the page's
+    #    F, on in 2026, off in Classic as id's).
+    pg.evaluate("quake.callLine('exec vid_fkey 1')")
+    pg.wait_for_function("quake.state.flags & 64", timeout=5000)
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")
@@ -324,7 +343,7 @@ with sync_playwright() as p:
     pg2 = ctx2.new_page()
     pg2.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg2.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-    boot_page(pg2)
+    boot_page(pg2, "")   # the default, 2026: F is the fullscreen key
     pg2.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg2.keyboard.press("Escape")

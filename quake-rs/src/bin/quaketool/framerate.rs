@@ -35,7 +35,7 @@ use quake_rs::vm::Vm;
 use quake_rs::world;
 
 /// The screen the scenarios draw (small: they measure the game, not pixels).
-const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
+const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
 
 // QuakeC constants (defs.qc).
 const FL_GODMODE: i32 = 64;

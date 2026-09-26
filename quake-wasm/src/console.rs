@@ -320,12 +320,12 @@ mod tests {
     fn every_completion_is_a_command_the_console_knows() {
         use crate::app::boot;
         use crate::test_util::close_menu;
-        for name in crate::host_cmd::COMMANDS {
+        for name in crate::host_cmd::COMMANDS.iter().map(|c| c.name) {
             assert_eq!(boot(), 1);
             close_menu();
             execute_console_command(name);
             let last = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
-            assert_ne!(last, Some(format!("unknown command: {name}")), "{name}");
+            assert_ne!(last, Some(format!("Unknown command \"{name}\"")), "{name}");
         }
     }
 

@@ -68,7 +68,9 @@ with sync_playwright() as p:
     errs = []
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-    pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
+    # Classic (id's keys and 1:1 menus: the Load menu's rows are read at id's
+    # coordinates below); the migration at the end runs the default, 2026.
+    pg.goto(f"http://127.0.0.1:{PORT}/index.html?classic", wait_until="load")
     wait_ready(pg)
     if pg.evaluate(KEPT.format(KEY)) or pg.evaluate(KEPT.format(SLOT_KEY)):
         fails.append("a fresh browser context already keeps the saves")
@@ -76,9 +78,9 @@ with sync_playwright() as p:
     boot_walk(pg)
 
     # Walk ~2 s so the saved spot is visibly distinct from the spawn.
-    pg.keyboard.down("w")
+    pg.keyboard.down("ArrowUp")
     time.sleep(2.0)
-    pg.keyboard.up("w")
+    pg.keyboard.up("ArrowUp")
     time.sleep(0.4)
     f_saved = pg.evaluate(GRAB)
 
@@ -104,9 +106,9 @@ with sync_playwright() as p:
 
     # Keep playing: walk further so the live world diverges from the save.
     time.sleep(0.2)
-    pg.keyboard.down("w")
+    pg.keyboard.down("ArrowUp")
     time.sleep(2.5)
-    pg.keyboard.up("w")
+    pg.keyboard.up("ArrowUp")
     time.sleep(0.4)
     f_diverged = pg.evaluate(GRAB)
     d_walked = diff_frac(f_saved, f_diverged)
@@ -231,11 +233,15 @@ with sync_playwright() as p:
     moved = pg2.evaluate("quake.kept('id1/migrated.sav')") == saved_text
     cfg = pg2.evaluate("quake.kept('id1/config.cfg')") or ""
     left = pg2.evaluate("Object.keys(localStorage).filter(k => k.startsWith('quake-rs.'))")
-    settings = pg2.evaluate("Promise.all([exp.width(), exp.height(), exp.viewsize(), exp.extras()])")
+    settings = pg2.evaluate("""Promise.all([quake.text('profile'), quake.text('cvar', '_vid_resolution'),
+        exp.viewsize(), exp.extras()])""")
     print(f"migration: save moved {moved}; config.cfg {cfg.splitlines()[1:]}; keys left {left}; settings {settings}")
-    if not (moved and "_vid_resolution 640x400" in cfg and "wasm_showfps 1" in cfg and not left):
+    if not (moved and "_vid_resolution" in cfg and "640x400" in cfg and "wasm_showfps" in cfg and not left):
         fails.append("the localStorage saves and settings were not moved into the game directory")
-    if settings != [640, 400, 80, 2]:
+    # The player's choices kept (the mode, Screen size, Show FPS), and the
+    # 2026 defaults the old page's file restated as off (uncapped 1, scaled
+    # 2-D 8) on: extras 11.
+    if settings[1:] != ["640x400", 80, 11]:
         fails.append(f"the migrated settings did not apply: {settings}")
     boot_walk(pg2)
     console_line(pg2, "load migrated")

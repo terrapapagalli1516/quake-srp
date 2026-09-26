@@ -102,6 +102,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         display_aspect: video.display_aspect(w, h, None),
         exact_perspective: false,
         video: video.cvars,
+        mip: render::MipCvars::DEFAULT,
     };
     let gamma = render::build_gamma_table(1.0);
     let mut last = None;

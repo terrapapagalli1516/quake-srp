@@ -144,6 +144,9 @@ pub struct Walk {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
+    /// The `crosshair` cvar this frame: `V_RenderView` draws the `+` over
+    /// the finished view ([`render::draw_crosshair`]). Set like `viewsize`.
+    pub crosshair: bool,
     /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
@@ -357,6 +360,8 @@ pub struct DemoPlay {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
+    /// The `crosshair` cvar this frame (see `Walk::crosshair`).
+    pub crosshair: bool,
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
@@ -441,6 +446,7 @@ impl DemoPlay {
             centerprint: None,
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
+            crosshair: false,
             stepping: Stepping::Classic,
             sv_gravity: crate::server::ServerCvars::default().sv_gravity,
             trail_org: HashMap::new(),
@@ -566,6 +572,7 @@ pub fn assemble_walk(
         centerprint: None,
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
+        crosshair: false,
         stepping: Stepping::Classic,
         clock,
         host_time: 0.0,
@@ -610,6 +617,8 @@ pub struct Vid {
     /// The port's video cvars (Hor+, views past id's largest mode): Classic
     /// in id's Quake.
     pub video: render::VideoCvars,
+    /// id's `d_mipscale` / `d_mipcap` (`MipCvars::DEFAULT`, id's defaults).
+    pub mip: render::MipCvars,
 }
 
 /// How the renderer draws the 3-D view `vrect` of the frame `vid` describes:
@@ -625,7 +634,7 @@ pub fn render_options(vrect: &render::ViewRect, vid: &Vid) -> render::RenderOpti
         screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: vid.width, vid_h: vid.height }),
         exact_perspective: vid.exact_perspective,
         video: vid.video,
-        mip: render::MipCvars::DEFAULT,
+        mip: vid.mip,
     }
 }
 

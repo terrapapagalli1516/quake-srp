@@ -2343,3 +2343,75 @@ demo loop and drops to the console. Every profile now does that; it is id's, not
 - **Not id's:** a QuakeC error while `build_walk_map` / `build_walk_savegame` bring up a
   NEW game returns `None` / the error text without id's report (the host prints "map not
   found" or the text); no shareware map raises one (census: 0 spawn errors).
+
+## Settings and profiles: Classic and 2026 (2026-09-26, branch `q26/settings`)
+
+Every departure from id's game is a setting (`quake_rs::cvar::CVARS`, marked
+`departure`), and two profiles switch them: **Classic** (all off, id's
+`default.cfg` bindings) and **2026** (the default in the page). Options' 14th
+row is "Classic / 2026" (left/right switch it; Enter lists every setting),
+the console has `profile classic|2026`, the page `?classic` / `?2026`. The
+settings live in one typed value the host owns (`quake_rs::settings`), and
+`config.cfg` keeps them the id way. What that changed against id's WinQuake:
+
+- ✅ **Classic's controls are id's** (closes "Decisions, not work": the four
+  control departures, and Always Run). `default.cfg`'s bindings: `a`
+  `+lookup`, `d` `+moveup`, `c` `+movedown`, `w`/`s` unbound; `cl_forwardspeed`
+  / `cl_backspeed` 200; `f` unbound (the page's fullscreen key is
+  `vid_fkey`); `+jump` sets only `button2` (`cl_jumpswim` adds `upmove`); no
+  mouse look without `+mlook` (`freelook`). 2026 turns all six on.
+- ✅ **`+mlook` works** (`in_mlook`, cl_input.c/in_win.c): held (`\`, MOUSE3),
+  mouse Y looks and stops the pitch drift, else it walks (`m_forward`);
+  `lookstrafe` strafes only in mouse look; letting `+mlook` go with
+  `lookspring` re-levels the view (`IN_MLookUp`). Before, mouse look was
+  always on and `+mlook` did nothing. Test `ids_mouse_walks_and_mlook_held_looks`.
+- ✅ **`crosshair`** (view.c): `V_RenderView`'s conchars `+`, its cell's corner
+  at the view's centre, over the view and under the 2-D layer. Not drawn
+  before; off in Classic as id's default, on in 2026.
+- ✅ **`config.cfg` as `Host_WriteConfiguration` writes it**: `bind "KEY"
+  "command"` lines (`Key_WriteBindings`) and `name "value"` archived cvars
+  (`Cvar_WriteVariables`), read back through `Cmd_TokenizeString`/`COM_Parse`
+  (quotes, `//` comments) and `Cbuf_Execute`'s `;` split. It keeps a
+  `profile` line and only what differs from that profile's defaults (id's
+  lists every value; its defaults never changed after release — the port's
+  2026 defaults will, and a returning player should get them). A file from
+  before the profiles runs without the lines that only restate that page's
+  defaults. Tests in `config.rs`.
+- ✅ **The console's commands are one table** (`Cmd_AddCommand`): dispatch, Tab
+  completion and `wasm_help` read it. New from id: `bind` (`Key_Bind_f`: a
+  key's binding, or `bind KEY "command"`), `unbind`, `unbindall`, `exec`,
+  `togglemenu`, `toggleconsole`; a binding to any console line runs it on the
+  key down (`+` lines run their `-` half on the key up); the cvars
+  `cl_forwardspeed`, `cl_backspeed`, `m_pitch`, `lookspring`, `lookstrafe`,
+  `sensitivity`, `gamma`, `volume`, `bgmvolume`, `crosshair`, and
+  `d_mipscale` / `d_mipcap` (closes the Open item "The browser console has no
+  `d_mipscale`/`d_mipcap`"). An unknown command prints id's `Unknown command
+  "x"`. `stuffcmds`: the command line's `+` commands run after `config.cfg`.
+- ✅ **`host_time` is a double** in the shell, as host.c's: the menu's
+  spinning dot counts `(int)(host_time*10)` in double. The 2-D oracle
+  harness hands the port the C's `realtime` and `host_time` as doubles too.
+- **Options' port row** reads "Classic / 2026" with the profile at x=220 where
+  it read "Web extras": the `screen2d` residue on Options is 531 px (was 291)
+  at 320x200 and 640x400 (oracle/README.md). The C side of `screen2d.py` no
+  longer gets the port's Always Run and WASD: the port runs Classic.
+- **The scaled 2-D layer is at a whole scale** (`draw::screen_2d`): the
+  largest whole multiple of 320x200 that fits (3.5x at 1120x700 is 3x, 1.5x
+  at 480x300 1x), so every 2-D pixel is the same size. Only with
+  `wasm_scaled2d`, off in Classic.
+- **2026's picture** (`vid_native`): the page's box in device pixels over a
+  whole pixel size (Auto: the smallest that keeps a frame within 1920x1080
+  pixels), square pixels, the renderer's `hires` and Hor+ (`fov_adapt`), so
+  the window is filled at its own aspect; `wasm_uncapped` runs the frame
+  gate every refresh and steps the game with `Stepping::Uncapped`
+  (FRAMERATE.md).
+- **Proof of Classic:** `oracle/classic_check.py` (oracle/README.md,
+  "Classic"): goldens `4807aaa1` / `9ae2b478` / `c65b7046`, `quaketool play`
+  hashes and sound tallies (7 workloads x 3 sizes), timedemo frame counts,
+  the census report and id's edicts diffed on nine maps all identical to
+  `a50d8d7`; the oracle's eight rows as before; screen2d as before but the
+  Options row above; the sound oracle 28/28.
+- **Not done / slots:** `lerp`'s smooth step movement, `input`'s raw mouse
+  and gamepad, and `audio`'s engine mixer (`snd::Fixes::ALL`) each become a
+  departure in `Cvars` (on in `Cvars::modern`) when they land. id's F-key
+  shortcuts (F1–F12), `messagemode` and the `zoom_in` alias are still not
+  bound (CENSUS L12).

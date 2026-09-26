@@ -758,6 +758,10 @@ fn render_demo_frame(
         d.renderer.render_into(&scene, &mut img);
         lap(Phase::Render3d);
     }
+    // V_RenderView: the crosshair over the view, before the 2-D layer.
+    if let Some(cc) = d.conchars.as_ref().filter(|_| d.crosshair) {
+        render::draw_crosshair(&mut img, cc, &vrect, &d.palette);
+    }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
@@ -999,7 +1003,7 @@ mod tests {
         })
         .unwrap();
         let mut d = DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo);
-        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
+        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
         // The first frame (CL_TimeDemo_f's) reads through the second message;
         // the time between messages is not what moves playback on.
         let mut shown = Vec::new();

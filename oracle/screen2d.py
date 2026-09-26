@@ -185,12 +185,9 @@ SCENARIOS: dict[str, list] = {
 
 
 def c_lines(steps, out: Path, name: str) -> list[str]:
-    # cl_forwardspeed/cl_backspeed 400: Always Run, the port's one sanctioned default
-    # departure; the WASD binds are the port's default layout (keys.rs), so the
-    # Customize screen compares drawing, not bindings
+    # id's defaults (default.cfg): the port's side runs its Classic profile,
+    # every departure off and id's key bindings
     lines = ["oracle_exit 0", "oracle_stage 1", f"oracle_blank {BLANK}", "crosshair 0", "viewsize 100",
-             "cl_forwardspeed 400", "cl_backspeed 400", "bind w +forward", "bind s +back",
-             "bind a +moveleft", "bind d +moveright",
              "map e1m1"] + ["wait"] * 30
     for st in steps:
         op, args = st[0], st[1:]

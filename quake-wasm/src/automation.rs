@@ -27,7 +27,7 @@ use crate::menu::{
     set_extras,
 };
 use crate::snd_dma::{listener, sound_generation, volume};
-use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, viewsize, width};
+use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, set_window, viewsize, width};
 
 /// An answer: a number, and text for the calls that read some.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,7 +64,7 @@ fn done(f: impl FnOnce()) -> Answer {
 /// resolved against what the host offers).
 fn render_threads() -> i32 {
     let mut n = 1;
-    crate::app::ensure_app(|a| n = a.render_threads.resolve(a.hw_threads));
+    crate::app::ensure_app(|a| n = a.settings.cvars.threads.resolve(a.hw_threads));
     n as i32
 }
 
@@ -93,6 +93,8 @@ pub(crate) fn call(line: &str) -> Answer {
         "width" => width().into(),
         "height" => height().into(),
         "set_resolution" => done(|| set_resolution(int(0), int(1))),
+        // The page's box in device pixels (what its `Window` record says).
+        "set_window" => done(|| set_window(f(0) as u32, f(1) as u32)),
         "set_video" => crate::vid::set_video(rest).into(),
         "render_threads" => render_threads().into(),
         "viewsize" => viewsize().into(),
@@ -141,6 +143,11 @@ pub(crate) fn call(line: &str) -> Answer {
         "console_backspace" => done(console_backspace),
         "console_enter" => done(console_enter),
         "console_text" => Answer { value: 0.0, text: console_text() },
+        // The settings: a cvar's value (its number, and its text), the
+        // profile, and config.cfg's text for them now.
+        "cvar" => cvar_value(rest.trim()),
+        "profile" => text_answer(|a| a.settings.profile.name().to_string()),
+        "config_text" => text_answer(|a| a.settings.config_text()),
         // A console line, as if typed and entered (`Cmd_ExecuteString`).
         "exec" => done(|| execute_console_command(rest)),
         // Sound.
@@ -157,6 +164,19 @@ pub(crate) fn call(line: &str) -> Answer {
         "listener_right_z" => listener().right[2].into(),
         _ => bench_call(name, rest).unwrap_or_else(|| f64::NAN.into()),
     }
+}
+
+/// An answer read off the App: `f`'s text (empty before the App exists).
+fn text_answer(f: impl FnOnce(&crate::app::App) -> String) -> Answer {
+    let text = APP.with(|c| c.borrow().as_ref().map(f)).unwrap_or_default();
+    Answer { value: 0.0, text }
+}
+
+/// Cvar `name`'s value: its text, and its number (`NaN` for no such cvar).
+fn cvar_value(name: &str) -> Answer {
+    let Some(var) = quake_rs::cvar::find(name) else { return f64::NAN.into() };
+    let text = APP.with(|c| c.borrow().as_ref().map(|a| var.get(&a.settings.cvars))).unwrap_or_default();
+    Answer { value: text.parse().unwrap_or(f64::NAN), text }
 }
 
 /// Blank slot `slot`'s listing in the Load/Save menus.
@@ -217,6 +237,11 @@ mod tests {
         assert_eq!(call("viewsize").value, 70.0);
         call("exec echo hello there");
         assert!(call("console_text").text.contains("hello there\n"));
+        call("exec vid_pixelsize 3");
+        assert_eq!((call("cvar vid_pixelsize").value, call("cvar vid_pixelsize").text.as_str()), (3.0, "3"));
+        assert!(call("cvar nosuch").value.is_nan());
+        assert_eq!(call("profile").text, "classic", "the tests start in Classic");
+        assert!(call("config_text").text.contains("vid_pixelsize \"3\"\n"));
         assert!(call("no_such_call").value.is_nan());
         assert!(call("").value.is_nan());
     }

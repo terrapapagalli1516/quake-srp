@@ -506,7 +506,7 @@ pub(crate) fn volume() -> f32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
-            .map(|a| a.menu.volume())
+            .map(|a| a.settings.cvars.volume)
             .unwrap_or(1.0)
     })
 }

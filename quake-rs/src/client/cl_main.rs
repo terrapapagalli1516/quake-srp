@@ -1033,6 +1033,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
     view_hook(&mut img, vrect, &w.palette);
+    // V_RenderView: the crosshair over the view, before the 2-D layer.
+    if let Some(cc) = w.conchars.as_ref().filter(|_| w.crosshair) {
+        render::draw_crosshair(&mut img, cc, &vrect, &w.palette);
+    }
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {

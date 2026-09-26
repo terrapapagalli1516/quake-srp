@@ -7,10 +7,11 @@
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/cl_input.c`.
 
-use crate::menu::BIND_SHOWSCORES;
-use crate::render::{
-    Menu, BIND_ATTACK, BIND_BACK, BIND_FORWARD, BIND_JUMP, BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP,
-    BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP, BIND_RIGHT, BIND_SPEED, BIND_STRAFE,
+use crate::cvar::Cvars;
+use crate::keys::{
+    Bindings, BIND_ATTACK, BIND_BACK, BIND_FORWARD, BIND_JUMP, BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP,
+    BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP, BIND_RIGHT, BIND_SHOWSCORES, BIND_SPEED,
+    BIND_STRAFE,
 };
 
 /// The legacy analog `set_move`/`set_jump`/`set_movedown` scale (`sv_maxspeed`):
@@ -23,13 +24,6 @@ pub const SPEED: f32 = 320.0;
 // The server clamps wishspeed to sv_maxspeed (320, ported in server.rs), so a
 // 400 run is 320 effective on the ground — exactly WinQuake (walk 200, run 320).
 
-/// `cl_forwardspeed`/`cl_backspeed` ("200"): the walking forward/back rate. The
-/// Options "Always Run" toggle swaps them 200 <-> 400 (menu.c M_AdjustSliders
-/// case 8); the C sets both cvars to the same value there, so one pair suffices.
-/// Always Run defaults ON in this port (Menu's DEVIATION note), so the
-/// out-of-the-box rate is the 400 run (320 effective under sv_maxspeed).
-const CL_FORWARDSPEED_WALK: f32 = 200.0;
-const CL_FORWARDSPEED_RUN: f32 = 400.0;
 /// `cl_sidespeed` ("350"): the strafe rate — NOT changed by Always Run.
 const CL_SIDESPEED: f32 = 350.0;
 /// `cl_upspeed` ("200"): the swim up/down rate — NOT changed by Always Run.
@@ -76,39 +70,28 @@ pub struct KeyMove {
     pub showscores: bool,
 }
 
-/// Derive this frame's [`KeyMove`] from the page-held keys through the menu's
-/// binding table (keys.c `keybindings` consulted by `Key_Event`; move math per
-/// `CL_BaseMove` + `CL_AdjustAngles`).
-pub fn derive_key_move(menu: &Menu, held: &[bool; 256]) -> KeyMove {
+/// Derive this frame's [`KeyMove`] from the held keys through the bindings
+/// (keys.c `keybindings` consulted by `Key_Event`; move math per
+/// `CL_BaseMove` + `CL_AdjustAngles`, with `cl_forwardspeed`/`cl_backspeed`
+/// — Options > Always Run — from `cvars`).
+pub fn derive_key_move(cvars: &Cvars, binds: &Bindings, held: &[bool; 256]) -> KeyMove {
     // CL_KeyState: 1.0 while any key bound to `cmd` is held.
-    let st = |cmd: usize| -> f32 {
-        for (k, &h) in held.iter().enumerate() {
-            if h && menu.action_for_key(k as u8) == Some(cmd) {
-                return 1.0;
-            }
-        }
-        0.0
-    };
+    let st = |cmd: usize| -> f32 { f32::from(u8::from(binds.held(cmd, held))) };
     let speed = st(BIND_SPEED) > 0.0;
     let strafe = st(BIND_STRAFE) > 0.0;
-    // M_AdjustSliders case 8 ("always run") sets cl_forwardspeed AND
-    // cl_backspeed together, so one value serves both directions.
-    let fwdspeed = if menu.always_run() {
-        CL_FORWARDSPEED_RUN
-    } else {
-        CL_FORWARDSPEED_WALK
-    };
-    let mut fwd = fwdspeed * st(BIND_FORWARD) - fwdspeed * st(BIND_BACK);
+    let mut fwd = cvars.cl_forwardspeed * st(BIND_FORWARD) - cvars.cl_backspeed * st(BIND_BACK);
     let mut side = CL_SIDESPEED * (st(BIND_MOVERIGHT) - st(BIND_MOVELEFT));
     if strafe {
         // CL_BaseMove: with +strafe held the turn keys strafe instead.
         side += CL_SIDESPEED * (st(BIND_RIGHT) - st(BIND_LEFT));
     }
-    // +moveup or +jump push up (the port has always let Space double as swim-up
-    // in water; on land the ground move ignores upmove and +jump still jumps
-    // via button2), +movedown sinks — at cl_upspeed, NOT the run speed.
+    // +moveup pushes up, +movedown sinks — at cl_upspeed, NOT the run speed.
+    // With the port's `cl_jumpswim` +jump pushes up too (Space doubles as
+    // swim-up in water; on land the ground move ignores upmove and +jump
+    // still jumps via button2); id's +jump only sets button2.
     let jump = st(BIND_JUMP) > 0.0;
-    let mut up = CL_UPSPEED * (st(BIND_MOVEUP).max(st(BIND_JUMP)) - st(BIND_MOVEDOWN));
+    let rise = if cvars.jumpswim { st(BIND_MOVEUP).max(st(BIND_JUMP)) } else { st(BIND_MOVEUP) };
+    let mut up = CL_UPSPEED * (rise - st(BIND_MOVEDOWN));
     if speed {
         // CL_BaseMove: the speed key multiplies forward/side/up by
         // cl_movespeedkey.
