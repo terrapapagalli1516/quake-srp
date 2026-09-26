@@ -56,9 +56,9 @@ use quake_rs::spr::Sprite;
 use super::color_for_name;
 use crate::entities::player_start;
 use crate::video::VideoArgs;
-use crate::{parse_res, Out};
+use crate::{parse_res, CmdResult, Out};
 
-pub fn cmd_view(args: &[String]) -> Result<Out, String> {
+pub fn cmd_view(args: &[String]) -> CmdResult {
     use std::collections::HashMap;
 
     let (pak_path, map_name, out) = (&args[0], &args[1], &args[2]);
@@ -99,7 +99,7 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
                 let v: Vec<usize> = val.split(',').map(|p| p.trim().parse::<usize>()).collect::<Result<_, _>>()
                     .map_err(|_| format!("--vrect: expected x,y,w,h, got {val:?}"))?;
                 let [x, y, vw, vh] = v[..] else {
-                    return Err(format!("--vrect: expected 4 numbers, got {val:?}"));
+                    return Err(format!("--vrect: expected 4 numbers, got {val:?}").into());
                 };
                 vrect = Some((x, y, vw, vh));
             }
@@ -107,13 +107,13 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
                 opts.exact_perspective = match val.as_str() {
                     "0" => false,
                     "1" => true,
-                    _ => return Err(format!("--exactpersp: expected 0 or 1, got {val:?}")),
+                    _ => return Err(format!("--exactpersp: expected 0 or 1, got {val:?}").into()),
                 }
             }
             "--aspect" => {
                 opts.pixel_aspect = val.parse().map_err(|_| format!("--aspect: bad number {val:?}"))?;
                 if !(opts.pixel_aspect.is_finite() && opts.pixel_aspect > 0.0) {
-                    return Err(format!("--aspect: must be a positive number, got {val:?}"));
+                    return Err(format!("--aspect: must be a positive number, got {val:?}").into());
                 }
             }
             "--ents" => ents_path = Some(val.as_str()),
@@ -125,7 +125,7 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
                 let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
                     .map_err(|_| format!("--dlight: expected x,y,z,radius[,minlight], got {val:?}"))?;
                 if v.len() != 4 && v.len() != 5 {
-                    return Err(format!("--dlight: expected 4 or 5 numbers, got {val:?}"));
+                    return Err(format!("--dlight: expected 4 or 5 numbers, got {val:?}").into());
                 }
                 // Live for this frame (die far away, no decay); unowned.
                 let minlight = v.get(4).copied().unwrap_or(0.0);
@@ -142,7 +142,7 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
                 let x: f32 = val.parse().map_err(|_| format!("{flag}: bad number {val:?}"))?;
                 if flag == "--d-mipscale" { opts.mip.mipscale = x } else { opts.mip.mipcap = x }
             }
-            other => return Err(format!("view: unknown option {other:?}")),
+            other => return Err(format!("view: unknown option {other:?}").into()),
         }
         i += 2;
     }
@@ -154,22 +154,22 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
         (w, h) = parse_res(r, video.cvars)?;
     }
 
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let pak = Pak::open(pak_path)?;
     let read_pak = |name: &str| -> Result<Vec<u8>, String> {
         pak.read_file(name)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("{name} not found in {pak_path}"))
     };
     let bsp_bytes = read_pak(map_name)?;
-    let bsp = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?;
-    let bsp_sim = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?;
+    let bsp = Bsp::parse(&bsp_bytes)?;
+    let bsp_sim = Bsp::parse(&bsp_bytes)?;
     let palette = render::parse_palette(&read_pak("gfx/palette.lmp")?)
         .ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
     let colormap = pak.read_file("gfx/colormap.lmp").ok().flatten();
-    let progs = Progs::parse(&read_pak("progs.dat")?).map_err(|e| e.to_string())?;
-    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let progs = Progs::parse(&read_pak("progs.dat")?)?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone()))?;
     server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
-    server.spawn_entities().map_err(|e| e.to_string())?;
+    server.spawn_entities()?;
 
     // Default camera: the player start at the view height (DEFAULT_VIEWHEIGHT 22).
     let start = player_start(&bsp.entities);
@@ -202,7 +202,7 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
             let (Some(model), Some(ox), Some(oy), Some(oz), Some(ap), Some(ay), Some(ar), Some(fr), Some(sk)) =
                 (f.first(), num(1), num(2), num(3), num(4), num(5), num(6), num(7), num(8))
             else {
-                return Err(format!("{p}: malformed entity line {line:?}"));
+                return Err(format!("{p}: malformed entity line {line:?}").into());
             };
             let (model, org, ang) = (model.to_string(), [ox, oy, oz], [ap, ay, ar]);
             if let Some(n) = model.strip_prefix('*') {
@@ -256,7 +256,7 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
         Some(arg) => {
             let (name, frame) = arg.rsplit_once(':').unwrap_or((arg, "0"));
             let frame: usize = frame.parse().map_err(|_| format!("--viewmodel: bad frame in {arg:?}"))?;
-            Some((Mdl::parse(&read_pak(name)?).map_err(|e| e.to_string())?, frame))
+            Some((Mdl::parse(&read_pak(name)?)?, frame))
         }
         None => None,
     };
@@ -266,7 +266,7 @@ pub fn cmd_view(args: &[String]) -> Result<Out, String> {
     let (view_w, view_h) = match vrect {
         Some((x, y, vw, vh)) => {
             if vw == 0 || vh == 0 || x + vw > w || y + vh > h {
-                return Err(format!("--vrect: {vw}x{vh} at ({x}, {y}) is not inside the {w}x{h} screen"));
+                return Err(format!("--vrect: {vw}x{vh} at ({x}, {y}) is not inside the {w}x{h} screen").into());
             }
             opts.screen = Some(render::ScreenPlace { x, y, vid_w: w, vid_h: h });
             (vw, vh)

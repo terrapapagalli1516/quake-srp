@@ -17,7 +17,7 @@ use quake_rs::render::{self, Camera};
 use quake_rs::wad::Wad2;
 
 use crate::entities::player_start;
-use crate::{read, Out};
+use crate::{read, CmdResult, Out};
 
 pub mod scene;
 pub mod shot;
@@ -48,9 +48,9 @@ pub fn camera_for_bsp(b: &Bsp) -> Camera {
     Camera::looking_at(c, [c[0] + 1.0, c[1], c[2]], 90.0)
 }
 
-pub fn cmd_render(path: &str, out: &str, palette: Option<&str>) -> Result<Out, String> {
+pub fn cmd_render(path: &str, out: &str, palette: Option<&str>) -> CmdResult {
     let bytes = read(path)?;
-    let b = Bsp::parse(&bytes).map_err(|e| e.to_string())?;
+    let b = Bsp::parse(&bytes)?;
     let cam = camera_for_bsp(&b);
     let (img, mode) = match palette {
         Some(pp) => {
@@ -70,7 +70,7 @@ pub fn cmd_render(path: &str, out: &str, palette: Option<&str>) -> Result<Out, S
     )))
 }
 
-pub fn cmd_render_demo(out: &str) -> Result<Out, String> {
+pub fn cmd_render_demo(out: &str) -> CmdResult {
     let b = render::demo_room();
     // Inside the room, off a corner, looking toward the centre/pillar.
     let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
@@ -90,8 +90,8 @@ pub fn cmd_render_demo(out: &str) -> Result<Out, String> {
 /// any missing menu pic is skipped (the rest still draws), and if the POV cannot
 /// render the menu is drawn over a black frame instead so the command never fails
 /// just because the world didn't load.
-pub fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+pub fn cmd_menu(pak_path: &str, out: &str) -> CmdResult {
+    let pak = Pak::open(pak_path)?;
     let read = |n: &str| -> Result<Vec<u8>, String> {
         pak.read_file(n).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} not found"))
     };

@@ -9,7 +9,7 @@ use quake_rs::progs::Progs;
 use quake_rs::server::{Server, UserCmd};
 
 use crate::entities::{player_start, trigger_map_key};
-use crate::Out;
+use crate::{CmdResult, Out};
 
 /// `changelevel <pak> <map.bsp>`: boot the map, find its `trigger_changelevel`
 /// exit, drive the player onto it until the QuakeC `changelevel()` builtin fires
@@ -18,18 +18,18 @@ use crate::Out;
 /// level, and reconnect the client carrying its inventory. Reports the next map,
 /// the entities spawned there, and the player's weapon/items/health/armor BEFORE
 /// vs AFTER the swap to prove the inventory carried across.
-pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> CmdResult {
+    let pak = Pak::open(pak_path)?;
     let read = |n: &str| -> Result<Vec<u8>, String> {
         pak.read_file(n).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} not found"))
     };
-    let bsp_render = Bsp::parse(&read(map_name)?).map_err(|e| e.to_string())?;
-    let bsp_sim = Bsp::parse(&read(map_name)?).map_err(|e| e.to_string())?;
-    let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
+    let bsp_render = Bsp::parse(&read(map_name)?)?;
+    let bsp_sim = Bsp::parse(&read(map_name)?)?;
+    let progs = Progs::parse(&read("progs.dat")?)?;
 
-    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone()))?;
     server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
-    let rep = server.spawn_entities().map_err(|e| e.to_string())?;
+    let rep = server.spawn_entities()?;
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
     let mut o = String::new();
@@ -83,7 +83,7 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         }
     }
     let Some((trig, centre)) = trigger else {
-        return Err(format!("{map_name} has no trigger_changelevel"));
+        return Err(format!("{map_name} has no trigger_changelevel").into());
     };
     let trig_map = trigger_map_key(&bsp_render.entities);
     let _ = writeln!(
@@ -141,7 +141,8 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         return Err(format!(
             "player never triggered changelevel() (no request after {frames_driven} frames; nextmap global = {})",
             server.vm.gget_int("nextmap")
-        ));
+        )
+        .into());
     };
     let _ = writeln!(o, "  drove player into the exit ({frames_driven} frames)");
     // QuakeC stores the bare map name ("e1m2"); the BSP lives at "maps/<name>.bsp".
@@ -150,7 +151,7 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
     // Snapshot the inventory BEFORE the swap, then save the spawn parms (this runs
     // the QuakeC SetChangeParms, marshalling the player's state into parm1..16).
     let before = snapshot(&server);
-    let parms = server.save_spawn_parms().map_err(|e| e.to_string())?;
+    let parms = server.save_spawn_parms()?;
     let _ = writeln!(o, "  BEFORE swap: {}", fmt(&before));
     let _ = writeln!(
         o,
@@ -164,16 +165,16 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
     let next_bsp_path = format!("maps/{next_map_name}.bsp");
     let next_bytes = read(&next_bsp_path)
         .map_err(|e| format!("loading next map {next_bsp_path}: {e}"))?;
-    let next_bsp = Bsp::parse(&next_bytes).map_err(|e| e.to_string())?;
-    let next_progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
+    let next_bsp = Bsp::parse(&next_bytes)?;
+    let next_progs = Progs::parse(&read("progs.dat")?)?;
     // Carry the chosen difficulty across (a new server starts at skill 1) and
     // the session's random streams, as the client's changelevel does.
     let carry_skill = server.skill();
-    let mut next_server = Server::with_pak(next_bsp, next_progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let mut next_server = Server::with_pak(next_bsp, next_progs, Some(pak.clone()))?;
     next_server.set_rand(std::rc::Rc::clone(server.rand()));
     next_server.set_map_name(&next_map_name); // SV_SpawnServer for the swapped-to level
     next_server.set_skill(carry_skill as f32);
-    let next_rep = next_server.spawn_entities().map_err(|e| e.to_string())?;
+    let next_rep = next_server.spawn_entities()?;
     let next_player = next_server
         .connect_client_with_parms(parms)
         .map_err(|e| format!("connect_client_with_parms: {e}"))?;

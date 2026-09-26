@@ -21,19 +21,19 @@ use quake_rs::server::{Server, UserCmd};
 
 use crate::entities::player_start;
 use crate::render::color_for_name;
-use crate::{read, Out};
+use crate::{read, CmdResult, Out};
 
 pub mod changelevel;
 pub mod playtest;
 
-/// `sim <progs.dat> <map.bsp> [frames]` — the server without a client: a
+/// `sim <progs.dat> <bsp> [frames]` — the server without a client: a
 /// player-sized trace straight down from the start, the map's QuakeC entities
 /// spawned, then `frames` physics frames of 0.1 s.
-pub fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, String> {
+pub fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> CmdResult {
     let pbytes = read(progs_path)?;
-    let progs = quake_rs::progs::Progs::parse(&pbytes).map_err(|e| e.to_string())?;
+    let progs = quake_rs::progs::Progs::parse(&pbytes)?;
     let bbytes = read(bsp_path)?;
-    let bsp = Bsp::parse(&bbytes).map_err(|e| e.to_string())?;
+    let bsp = Bsp::parse(&bbytes)?;
 
     let mut o = String::new();
     let _ = writeln!(
@@ -67,13 +67,13 @@ pub fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, Str
     }
 
     // --- spawn the map's QuakeC entities ---
-    let mut server = Server::new(bsp, progs).map_err(|e| e.to_string())?;
+    let mut server = Server::new(bsp, progs)?;
     // SV_SpawnServer set sv.modelname/world.model/mapname before loading
     // entities; derive the bare name from the bsp file stem.
     if let Some(stem) = std::path::Path::new(bsp_path).file_stem().and_then(|s| s.to_str()) {
         server.set_map_name(stem);
     }
-    let rep = server.spawn_entities().map_err(|e| e.to_string())?;
+    let rep = server.spawn_entities()?;
     let _ = writeln!(
         o,
         "\nspawn: {} entity blocks -> {} spawned, {} inhibited (skill), {} no-spawn-fn",
@@ -89,7 +89,7 @@ pub fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, Str
     if frames > 0 {
         let mut total = 0usize;
         for _ in 0..frames {
-            let fr = server.run_frame_f64(0.1).map_err(|e| e.to_string())?;
+            let fr = server.run_frame_f64(0.1)?;
             total += fr.thinks_fired;
         }
         let _ = writeln!(
@@ -126,20 +126,20 @@ fn contents_name(c: i32) -> &'static str {
 /// VM-statement and BSP-trace counts come from free-running counters
 /// ([`quake_rs::vm::Vm::stmt_count`], [`quake_rs::world::trace_count`]) so the breakdown is
 /// exact, not sampled.
-pub fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, String> {
+pub fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> CmdResult {
     use std::time::Instant;
     let frames = frames.max(1);
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let pak = Pak::open(pak_path)?;
     let read = |n: &str| -> Result<Vec<u8>, String> {
         pak.read_file(n).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} not found"))
     };
-    let bsp_sim = Bsp::parse(&read(map_name)?).map_err(|e| e.to_string())?;
+    let bsp_sim = Bsp::parse(&read(map_name)?)?;
     let entities = bsp_sim.entities.clone();
-    let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
+    let progs = Progs::parse(&read("progs.dat")?)?;
 
-    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone()))?;
     server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
-    let rep = server.spawn_entities().map_err(|e| e.to_string())?;
+    let rep = server.spawn_entities()?;
     let _player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
     // Deterministic input: walk forward along the spawn yaw at full speed, the
@@ -211,27 +211,27 @@ pub fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, 
 /// one rendered PPM frame per step (`<prefix>_000.ppm`, …). Movement uses the
 /// world slide-move ([`quake_rs::world::walk_move`]) so the player follows walls
 /// and stops at them; the spawned `.mdl` entities are drawn into every frame.
-pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Result<Out, String> {
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> CmdResult {
+    let pak = Pak::open(pak_path)?;
     let read_pak = |name: &str| -> Result<Vec<u8>, String> {
         pak.read_file(name)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("{name} not found in {pak_path}"))
     };
     let bsp_bytes = read_pak(map_name)?;
-    let bsp = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?; // render + collision
-    let bsp_sim = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?; // moved into the server
+    let bsp = Bsp::parse(&bsp_bytes)?; // render + collision
+    let bsp_sim = Bsp::parse(&bsp_bytes)?; // moved into the server
     let palette = render::parse_palette(&read_pak("gfx/palette.lmp")?)
         .ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
-    let progs = Progs::parse(&read_pak("progs.dat")?).map_err(|e| e.to_string())?;
+    let progs = Progs::parse(&read_pak("progs.dat")?)?;
 
     let (spawn, ang) =
         player_start(&bsp.entities).ok_or_else(|| "map has no info_player_start".to_string())?;
 
     // Spawn entities and gather their MDL models (drawn at fixed positions).
-    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone()))?;
     server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
-    server.spawn_entities().map_err(|e| e.to_string())?;
+    server.spawn_entities()?;
     let mut model_cache: std::collections::HashMap<String, Option<Mdl>> =
         std::collections::HashMap::new();
     let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
@@ -319,20 +319,20 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
 /// per-frame entity snapshots, then draw the map + each entity's `.mdl` from the
 /// recorded viewpoint, one PPM per sampled server frame. `stride` 0 = auto-pick
 /// to emit ~120 frames.
-pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize) -> Result<Out, String> {
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize) -> CmdResult {
+    let pak = Pak::open(pak_path)?;
     let read_pak = |name: &str| -> Result<Vec<u8>, String> {
         pak.read_file(name)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("{name} not found in {pak_path}"))
     };
 
-    let demo = quake_rs::demo::parse_demo(&read_pak(demo_name)?).map_err(|e| e.to_string())?;
+    let demo = quake_rs::demo::parse_demo(&read_pak(demo_name)?)?;
     let map = demo
         .map_name()
         .ok_or_else(|| "demo has no world model (never received serverinfo)".to_string())?
         .to_string();
-    let bsp = Bsp::parse(&read_pak(&map)?).map_err(|e| e.to_string())?;
+    let bsp = Bsp::parse(&read_pak(&map)?)?;
     let palette = render::parse_palette(&read_pak("gfx/palette.lmp")?)
         .ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
 

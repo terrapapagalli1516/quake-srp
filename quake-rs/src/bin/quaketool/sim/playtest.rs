@@ -19,7 +19,7 @@ use quake_rs::wad::Wad2;
 
 use crate::entities::player_start;
 use crate::render::color_for_name;
-use crate::Out;
+use crate::{CmdResult, Out};
 
 /// The explosion sound a rocket/grenade/tarbaby temp entity plays (the C
 /// `cl_sfx_r_exp3` = `weapons/r_exp3.wav`).
@@ -79,19 +79,19 @@ fn spawn_temp_entity(
 
 /// Spawn a real player on a map, report its loadout, walk it forward, and render
 /// its point of view — the first-person gameplay milestone (#3).
-pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out, String> {
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdResult {
+    let pak = Pak::open(pak_path)?;
     let read = |n: &str| -> Result<Vec<u8>, String> {
         pak.read_file(n).map_err(|e| e.to_string())?.ok_or_else(|| format!("{n} not found"))
     };
-    let bsp_render = Bsp::parse(&read(map_name)?).map_err(|e| e.to_string())?;
-    let bsp_sim = Bsp::parse(&read(map_name)?).map_err(|e| e.to_string())?;
+    let bsp_render = Bsp::parse(&read(map_name)?)?;
+    let bsp_sim = Bsp::parse(&read(map_name)?)?;
     let palette = render::parse_palette(&read("gfx/palette.lmp")?).ok_or("bad palette")?;
-    let progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
+    let progs = Progs::parse(&read("progs.dat")?)?;
 
-    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone()))?;
     server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
-    let rep = server.spawn_entities().map_err(|e| e.to_string())?;
+    let rep = server.spawn_entities()?;
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
     // Live engine particles (the `particle()` builtin's effect) for this

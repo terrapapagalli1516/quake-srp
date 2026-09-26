@@ -28,43 +28,40 @@ use quake_rs::render::{self, Camera};
 use quake_rs::server::Server;
 
 use super::{camera_for_bsp, color_for_name};
-use crate::{parse_res, Out};
+use crate::{parse_res, CmdResult, Out};
 
 /// `scene`: parse a map from a PAK, spawn its QuakeC entities, and software-
 /// render the world plus every spawned entity's `.mdl` alias model at its world
 /// position, all sharing one z-buffer so models occlude correctly.
-pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> Result<Out, String> {
+pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> CmdResult {
     use std::collections::HashMap;
     // `[--threads N]`: the renderer's threads (the pixels are the same).
     let threads = match opts {
         [] => 1,
         [flag, n] if flag == "--threads" => n.parse().ok().filter(|&n| n > 0).ok_or("--threads: expected a count")?,
-        _ => return Err(format!("scene: unknown options {opts:?}")),
+        _ => return Err(format!("scene: unknown options {opts:?}").into()),
     };
 
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let pak = Pak::open(pak_path)?;
 
     // --- map BSP bytes from the pak (parsed twice: render + sim) ---
     let bsp_bytes = pak
-        .read_file(map_name)
-        .map_err(|e| e.to_string())?
+        .read_file(map_name)?
         .ok_or_else(|| format!("{map_name:?} not found in {pak_path}"))?;
-    let bsp_for_render = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?;
-    let bsp_for_sim = Bsp::parse(&bsp_bytes).map_err(|e| e.to_string())?;
+    let bsp_for_render = Bsp::parse(&bsp_bytes)?;
+    let bsp_for_sim = Bsp::parse(&bsp_bytes)?;
 
     // --- palette + progs from the pak (graceful errors, never panic) ---
     let pal_bytes = pak
-        .read_file("gfx/palette.lmp")
-        .map_err(|e| e.to_string())?
+        .read_file("gfx/palette.lmp")?
         .ok_or_else(|| format!("gfx/palette.lmp not found in {pak_path}"))?;
     let palette = render::parse_palette(&pal_bytes)
         .ok_or_else(|| format!("bad palette in {pak_path} (need >= 768 bytes)"))?;
 
     let progs_bytes = pak
-        .read_file("progs.dat")
-        .map_err(|e| e.to_string())?
+        .read_file("progs.dat")?
         .ok_or_else(|| format!("progs.dat not found in {pak_path}"))?;
-    let progs = Progs::parse(&progs_bytes).map_err(|e| e.to_string())?;
+    let progs = Progs::parse(&progs_bytes)?;
 
     // Camera from the player start (derived from the render BSP before sim).
     // Eye at the player spawn; we re-aim it at the nearest model once we know
@@ -73,9 +70,9 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
     let eye = base_cam.pos;
 
     // --- spawn the map's entities ---
-    let mut server = Server::with_pak(bsp_for_sim, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    let mut server = Server::with_pak(bsp_for_sim, progs, Some(pak.clone()))?;
     server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
-    let report = server.spawn_entities().map_err(|e| e.to_string())?;
+    let report = server.spawn_entities()?;
 
     // --- gather MDL instances from live edicts ---
     // Cache parsed models by in-pak name so each loads at most once.

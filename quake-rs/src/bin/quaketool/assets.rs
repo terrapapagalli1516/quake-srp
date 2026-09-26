@@ -14,10 +14,10 @@ use quake_rs::vm::Vm;
 use quake_rs::wad::{self, Wad2};
 
 use crate::entities::count_entity_classnames;
-use crate::{read, Out};
+use crate::{read, CmdResult, Out};
 
 /// `info`: sniff the magic and dispatch to the right summary.
-pub fn cmd_info(path: &str) -> Result<Out, String> {
+pub fn cmd_info(path: &str) -> CmdResult {
     let bytes = read(path)?;
     let mut magic = [0u8; 4];
     let n = bytes.len().min(4);
@@ -32,14 +32,14 @@ pub fn cmd_info(path: &str) -> Result<Out, String> {
             if bytes.len() >= 4 && i32::from_le_bytes(magic) == bsp::BSPVERSION {
                 cmd_bsp(path)
             } else {
-                Err(format!("unrecognized format (first bytes: {:02x?})", &bytes[..n]))
+                Err(format!("unrecognized format (first bytes: {:02x?})", &bytes[..n]).into())
             }
         }
     }
 }
 
-pub fn cmd_ls(path: &str) -> Result<Out, String> {
-    let pak = Pak::open(path).map_err(|e| e.to_string())?;
+pub fn cmd_ls(path: &str) -> CmdResult {
+    let pak = Pak::open(path)?;
     let mut o = String::new();
     let _ = writeln!(
         o,
@@ -58,18 +58,17 @@ pub fn cmd_ls(path: &str) -> Result<Out, String> {
     Ok(Out::Text(o))
 }
 
-pub fn cmd_cat(path: &str, name: &str) -> Result<Out, String> {
-    let pak = Pak::open(path).map_err(|e| e.to_string())?;
+pub fn cmd_cat(path: &str, name: &str) -> CmdResult {
+    let pak = Pak::open(path)?;
     let data = pak
-        .read_file(name)
-        .map_err(|e| e.to_string())?
+        .read_file(name)?
         .ok_or_else(|| format!("{name:?} not found in {path}"))?;
     Ok(Out::Bytes(data))
 }
 
-pub fn cmd_wad(path: &str) -> Result<Out, String> {
+pub fn cmd_wad(path: &str) -> CmdResult {
     let bytes = read(path)?;
-    let w = Wad2::parse(bytes).map_err(|e| e.to_string())?;
+    let w = Wad2::parse(bytes)?;
     let mut o = String::new();
     let _ = writeln!(o, "WAD2  {}  ({} lumps)", path, w.lumps().len());
     for l in w.lumps() {
@@ -98,9 +97,9 @@ fn typ_name(t: u8) -> &'static str {
     }
 }
 
-pub fn cmd_bsp(path: &str) -> Result<Out, String> {
+pub fn cmd_bsp(path: &str) -> CmdResult {
     let bytes = read(path)?;
-    let b = Bsp::parse(&bytes).map_err(|e| e.to_string())?;
+    let b = Bsp::parse(&bytes)?;
     let mut o = String::new();
     let _ = writeln!(o, "BSP v{}  {}", b.version, path);
     let _ = writeln!(o, "  planes       {}", b.planes.len());
@@ -150,9 +149,9 @@ pub fn cmd_bsp(path: &str) -> Result<Out, String> {
     Ok(Out::Text(o))
 }
 
-pub fn cmd_map(path: &str) -> Result<Out, String> {
+pub fn cmd_map(path: &str) -> CmdResult {
     let bytes = read(path)?;
-    let b = Bsp::parse(&bytes).map_err(|e| e.to_string())?;
+    let b = Bsp::parse(&bytes)?;
     if b.vertexes.is_empty() {
         return Err("BSP has no vertices to plot".into());
     }
@@ -195,9 +194,9 @@ pub fn cmd_map(path: &str) -> Result<Out, String> {
     Ok(Out::Text(o))
 }
 
-pub fn cmd_mdl(path: &str) -> Result<Out, String> {
+pub fn cmd_mdl(path: &str) -> CmdResult {
     let bytes = read(path)?;
-    let m = Mdl::parse(&bytes).map_err(|e| e.to_string())?;
+    let m = Mdl::parse(&bytes)?;
     let h = &m.header;
     let mut o = String::new();
     let _ = writeln!(o, "MDL  {}  (alias model, version {})", path, h.version);
@@ -237,9 +236,9 @@ pub fn cmd_mdl(path: &str) -> Result<Out, String> {
     Ok(Out::Text(o))
 }
 
-pub fn cmd_spr(path: &str) -> Result<Out, String> {
+pub fn cmd_spr(path: &str) -> CmdResult {
     let bytes = read(path)?;
-    let s = Sprite::parse(&bytes).map_err(|e| e.to_string())?;
+    let s = Sprite::parse(&bytes)?;
     let h = &s.header;
     let mut o = String::new();
     let _ = writeln!(o, "SPR  {}  (sprite, version {})", path, h.version);
@@ -273,9 +272,9 @@ fn spr_orient(t: i32) -> &'static str {
 
 // ---------------------------------------------------------------- QuakeC VM ---
 
-pub fn cmd_dis(path: &str) -> Result<Out, String> {
+pub fn cmd_dis(path: &str) -> CmdResult {
     let bytes = read(path)?;
-    let p = Progs::parse(&bytes).map_err(|e| e.to_string())?;
+    let p = Progs::parse(&bytes)?;
     let mut o = String::new();
     let _ = writeln!(
         o,
@@ -291,10 +290,10 @@ pub fn cmd_dis(path: &str) -> Result<Out, String> {
     Ok(Out::Text(o))
 }
 
-pub fn cmd_run(path: &str, func: &str) -> Result<Out, String> {
+pub fn cmd_run(path: &str, func: &str) -> CmdResult {
     let bytes = read(path)?;
-    let mut vm = Vm::load(&bytes).map_err(|e| e.to_string())?;
-    vm.call_by_name(func).map_err(|e| e.to_string())?;
+    let mut vm = Vm::load(&bytes)?;
+    vm.call_by_name(func)?;
     let mut o = String::new();
     if !vm.output.is_empty() {
         let _ = writeln!(o, "--- output ---");
