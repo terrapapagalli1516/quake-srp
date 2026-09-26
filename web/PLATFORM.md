@@ -91,6 +91,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 6 | AUDIO_READY | `ready u8` |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
+| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize |
 
 A record whose payload is shorter than its kind's reads the missing fields as
 zeros, and an unknown kind is skipped, so either side can grow a record.
@@ -101,7 +102,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 |---|---|---|
 | 1 | FRAME | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 ×3`, the pixels |
 | 2 | SYNC | `seq u32` (last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
-| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo), `menu_screen i32` |
+| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
 | 4 | SAMPLE | `id u32`, a RIFF/WAV (each distinct sample once, by content) |
 | 5 | SOUND | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `entity i32`, `channel i32`, `view u32`, `loop_start f32`, `loop_end f32` |
 | 6 | STOP_SOUND | `entity i32`, `channel i32` |
@@ -169,9 +170,9 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **Saves and settings go through `std::fs`.** `save s0` writes
   `id1/s0.sav` (`Host_Savegame_f`), the Load and Save menus list the slots
   from the files (`M_ScanSaves`, when they open), and `config.cfg` holds the
-  video mode, `viewsize` and the Web extras (`config.rs`,
-  `Host_WriteConfiguration`), written when one of them changes and exec'd at
-  startup as quake.rc does. When a written file is closed, `wasi.js` sends it
+  settings the id way (`config.rs`, `Host_WriteConfiguration`): the profile,
+  then the `bind` lines and archived cvars that differ from it, written when
+  one of them changes and exec'd at startup as quake.rc does. When a written file is closed, `wasi.js` sends it
   to the page, which keeps it in IndexedDB (`quake-rs`, store `files`, keyed
   by path) and hands every kept file back at the next start. Without
   IndexedDB the page falls back to localStorage (`quake-rs.file.<path>`).
@@ -182,6 +183,30 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   written — and removes the keys.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
+
+## Settings, and how the page shows the picture
+
+Every setting is the program's (`quake_rs::settings`: id's cvars and key
+bindings, and the port's departures, which the profiles **Classic** and
+**2026** switch). The page needs three of them, and hears them in the
+`STATE` record:
+
+- **Native resolution** (`vid_native`, 2026). The page sends its box for the
+  picture in device pixels (`WINDOW`); the program renders the box divided by
+  a whole pixel size (`vid_pixelsize`: 1..4, or Auto, the smallest that
+  keeps the frame within a 1080p frame's pixels) and says the size in
+  `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
+  pixels wide and `H x pixel_size` tall (`fitCanvas`), `image-rendering:
+  pixelated`, so every picture pixel is a whole square of screen pixels at
+  the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the
+  picture is the video mode (`_vid_resolution`, Options > Video Options)
+  in the largest 4:3 box the window fits, as before.
+- **F toggles fullscreen** (`vid_fkey`, 2026; id's `default.cfg` leaves F
+  unbound).
+- **The profile from the address.** `?classic` and `?2026` add `+profile
+  classic` / `+profile 2026` to the program's command line (`wasi.js` hands
+  it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
+  switch as the menu's, so it sticks.
 
 ## Sound
 

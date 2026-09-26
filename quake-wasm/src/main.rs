@@ -112,7 +112,8 @@ fn main() -> ExitCode {
     // a turn reaches the host in a few writes; a frame's pixels pass
     // straight through it.
     let out = BufWriter::with_capacity(64 * 1024, io::stdout().lock());
-    match sys::run(io::stdin().lock(), out) {
+    let command_line: Vec<String> = std::env::args().skip(1).collect();
+    match sys::run(io::stdin().lock(), out, &command_line) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("quake: {e}");

@@ -39,6 +39,24 @@ pub fn split_lines(text: &str) -> Vec<&str> {
     lines.into_iter().filter(|l| !l.trim().is_empty()).collect()
 }
 
+/// `Cmd_StuffCmds_f` (quake.rc's `stuffcmds`): the command line's `+`
+/// commands as console lines. The arguments are joined with spaces; each `+`
+/// starts a command that runs to the next `+` or `-` (so `quake -basedir .
+/// +map e1m1 +skill 2` gives `map e1m1 \n` and `skill 2\n`).
+pub fn stuff_cmds(args: &[String]) -> String {
+    let text = args.join(" ");
+    let mut build = String::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find('+') {
+        let command = &rest[start + 1..];
+        let end = command.find(['+', '-']).unwrap_or(command.len());
+        build.push_str(&command[..end]);
+        build.push('\n');
+        rest = &command[end..];
+    }
+    build
+}
+
 /// `COM_Parse`'s characters that are a token on their own.
 fn single_char_token(c: char) -> bool {
     matches!(c, '{' | '}' | ')' | '(' | '\'' | ':')
@@ -160,6 +178,14 @@ mod tests {
         assert_eq!(Args::tokenize("  ").argc(), 0);
         assert_eq!(Args::tokenize("map e1m1\nmap e1m2").all(), ["map", "e1m1"], "a line ends the command");
         assert_eq!(Args::tokenize("echo \"unterminated").all(), ["echo", "unterminated"]);
+    }
+
+    #[test]
+    fn stuffcmds_takes_the_plus_commands_of_the_command_line() {
+        let args = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(stuff_cmds(&args("-basedir . +profile classic +map e1m1")), "profile classic \nmap e1m1\n");
+        assert_eq!(stuff_cmds(&args("+map e1m1 -window")), "map e1m1 \n", "a - ends it, as id's");
+        assert_eq!(stuff_cmds(&[]), "");
     }
 
     #[test]
