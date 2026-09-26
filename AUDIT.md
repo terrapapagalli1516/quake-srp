@@ -2166,6 +2166,55 @@ pass on the default wasm.
   `with_pak` docs (server and world model) now say what the pak resolves
   since the `setmodel` fix above.
 
+## The engine's own mixer (2026-09-26, branch `q26/audio`)
+
+id's `snd_dma.c`, `snd_mix.c` and `snd_mem.c` are ported into the engine as
+`quake_rs::snd::Mixer` (`snd/dma.rs`, `mix.rs`, `mem.rs`): the channel table,
+`S_StartSound` with `SND_PickChannel` and `SND_Spatialize`, `S_StaticSound`
+and the combining of one sample's statics in `S_Update`, `S_StopSound`,
+`S_StopAllSounds`, `S_LocalSound`, `S_UpdateAmbientSounds`, `S_Update_`'s
+mix-ahead, `S_PaintChannels` with `SND_PaintChannelFrom8`/`16` and the scale
+table, `S_TransferStereo16`, `GetWavinfo`, `S_LoadSound` + `ResampleSfx`, and
+the cvars `volume`, `nosound`, `loadas8bit`, `ambient_level`, `ambient_fade`,
+`_snd_mixahead`. It takes the client's `SoundCall`s and paints 16-bit stereo
+PCM at the caller's rate. **The browser does not use it yet**: the page still
+mixes with Web Audio (the two "Sound" items in the Open list stand until the
+AudioWorklet wiring).
+
+- ✅ **Classic is id's, sample for sample.** `oracle/sound.py` runs id's C
+  mixer (built headless, `oracle/build_sound.sh`) and the port on the same
+  scripted calls at 11025/22050/44100/48000 Hz: 28 of 28 cases identical,
+  PCM and per-update channel trace (oracle/README.md, "Sound").
+- **Default-on departures** (`snd::Fixes::ALL`, the 2026 mixer; `Fixes::NONE`
+  is Classic). Each repairs a fault in id's code and leaves the character (8-bit
+  samples, point resampling, id's spatialization and attenuation):
+  - *loop seam*: `SND_PaintChannelFrom8` always paints from `paintbuffer[0]`,
+    so after a loop restart inside a paint pass the samples land over the
+    pass's start and the rest of the pass gets nothing from that channel — a
+    click on every lap of an ambient, torch or mover hum. Fixed: painted at
+    their offset (Quake II's fix).
+  - *exact resampling*: `ResampleSfx` steps in 8.8 fixed point; at 48 kHz that
+    is 58/256 for 58.8/256, every sound 1.4% flat with its last 1.4% cut.
+    Fixed: exact point-sampling steps. (Exact at 11025/22050/44100 either way.)
+  - *ambient steps*: the int `master_vol` moves by `host_frametime *
+    ambient_fade`, truncated: above ~100 fps the step is under 1 and the water
+    and wind never fade in. Fixed: the ramp runs in 1/72 s steps (id's at its
+    cap) at any frame rate.
+  - *stop range*: `S_StopSound` searches channels 0..7 (four of them ambients)
+    and misses the last four dynamic channels. Fixed: the eight dynamic ones.
+- Kept as id's: the paint passes of 512 pairs, `rand()` offsetting a sample
+  started twice in a frame (the MSVC runtime's generator, the mixer's own
+  sequence), `S_StartSound` comparing that offset with `end` (a time), clipping
+  at 16 bits after `volume`. Not modelled: `S_ClearBuffer` (the platform owns the
+  output buffer), `GetSoundtime`'s chop after 2^30 pairs (`paintedtime` is 64-bit),
+  `snd_show`, `soundlist`/`soundinfo`, `play`/`playvol`, CD audio.
+- Port-side notes: the client's temp-entity sounds use entity 0 where
+  `CL_ParseTEnt` uses -1 (no audible difference: neither is the view entity
+  and channel 0 never overrides); the live path hands `S_StartSound` the
+  QuakeC volume, not the wire byte over 255 the C client sees.
+- `quaketool sound <pak> <demo> <out.wav> [--classic] [--rate HZ]` renders a
+  demo's sound through the mixer natively.
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (~~SV_TryUnstick/WallFriction~~ (✅ Round 2), ~~force_retouch~~ (✅ CENSUS F8, `quake/fix-server`), sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled. The current list is "Open, as of 2026-09-25" at the top.

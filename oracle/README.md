@@ -10,6 +10,7 @@ oracle/build.sh               # once (~20 s, docker); again after editing oracle
 uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-by-side PNGs
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
+uv run oracle/sound.py        # id's mixer against the port's, sample for sample: see "Sound"
 ```
 
 Needs docker (for the build only), uv, cargo, and the shareware pak at
@@ -467,3 +468,65 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   Game question (it blocks in a key loop the null input driver never ends; its
   text goes through the fixed `center_string_top`), the attract demo's HUD (the
   same drawing code as the live one), the crosshair (off by default).
+
+## Sound (`sound.py`)
+
+id's mixer — `snd_dma.c`, `snd_mix.c`, `snd_mem.c` and `mathlib.c`'s
+`VectorNormalize`, unedited apart from the `id386` switch — built headless
+around `c/snd_oracle.c`, and the port's (`quake_rs::snd::Mixer`) run the
+same scripted calls; their PCM is compared sample for sample.
+
+```sh
+oracle/build_sound.sh              # once (~5 s, docker); sound.py also rebuilds when snd_oracle.c changes
+uv run oracle/sound.py             # 7 scenarios x 11025/22050/44100/48000: a table, exit 1 on any difference
+uv run oracle/sound.py --fixes     # plus how far the 2026 mixer (every snd::Fixes) departs from id's
+uv run oracle/sound.py --sse       # the C built with SSE2 floats (ORACLE_FPMATH=sse) instead of x87
+```
+
+**How.** `snd_oracle.c` supplies what the mixer calls: a fake DMA driver
+(a 32768-pair 16-bit stereo ring whose play position the script moves;
+`SNDDMA_Submit` appends every newly painted pair to the output), cvars
+(id's `Q_atof`), the pak, the cache, `cl.viewentity`, a listener leaf the
+script sets (`Mod_PointInLeaf`), and `rand` linked as `__wrap_rand`: the MSVC
+runtime's generator WinQuake.exe used (seed 1), which the port's mixer draws
+from too. A script (the commands are listed in `snd_oracle.c`'s header) is
+sound calls as `CL_ParseStartSoundPacket`/`CL_ParseStaticSound` make them
+(volume and attenuation as their wire bytes), the listener, its leaf, cvars,
+`update` (`S_Update`, then `S_Update_` mixing `_snd_mixahead` ahead of the
+play position) and `advance N` (the play position moves N pairs).
+`quaketool sndscript` runs the same script through the port. Both also write
+a trace: every sounding channel after each `update` (volumes, position, end).
+
+**Scenarios.** `oneshots` (sounds all around a turning listener: distance,
+pan, volume and attenuation bytes, the view entity, channel 0 and
+same-channel overrides, more sounds than the 8 dynamic channels, one sample
+twice in a frame, the 16-bit samples), `statics` (two levels of placed loops,
+combined, volumes past 255, a refused one-shot and a missing sample),
+`ambients` (leaf levels, `ambient_level`/`ambient_fade`, 72 and 60 fps, no
+leaf), `loops` (door and lift hums over many laps, stopped by their stop
+sounds; a 0.19 s stall that the play position overtakes), `stops`
+(`S_StopSound` over every dynamic channel, `stopall`, `_snd_mixahead`),
+`cvars` (`volume` past the clamp, `loadas8bit`, `nosound`), `soak` (a minute
+of everything at random).
+
+**Result (2026-09-26, x87 build).** Every scenario at every rate is
+identical: PCM and trace, 28 of 28 cases (20.8 M sample pairs). Against the
+SSE build the port stays identical at 11025/22050/44100 and at 48000 except
+where `ResampleSfx`'s `stepscale` rounds differently as a `float` (the x87
+build holds it in an 80-bit register; the port follows x87 with `f64`):
+there the traces of three 48 kHz cases differ, and the PCM of one. With `--fixes`, the 2026 mixer differs from
+id's where the fixes act: every sample at 48 kHz (exact resampling), and at
+id's rates on loop laps (the seam), in the ambient ramp at 60 fps, and in the
+`stops` scenario (`S_StopSound`'s range).
+
+**What the port has to do to match.** Mostly nothing beyond porting the C
+literally: every mixing step is integer. The float steps are the volume byte
+(`fvol*255`, an exact product on the x87, then truncated), `SND_Spatialize`
+(the x87 keeps the length, the dot product and the `(1 - dist) * (1 ± dot)`
+scale in extended precision and stores the scale as a `float` before its
+multiply; the port uses `f64` for the first and `f32` for the second, which
+the traces confirm), `S_UpdateAmbientSounds`' ramp (`host_frametime *
+ambient_fade` in extended precision; the scripts use frame times whose step
+is not within a hair of a whole number, where 64 and 80 bits could part),
+and `ResampleSfx`'s `stepscale` (above). The output stream skips a stretch
+the play position overtook (`S_Update_`'s "overshot" reset), on both sides.
