@@ -41,7 +41,7 @@ use super::light::{
 use super::raster::{
     hash_color, span_at, span_cached, span_tex, span_turb, BlockFixed, ScreenProj,
 };
-use super::sky::{draw_sky_span, sky_texture, SkyView};
+use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
 use super::stats::{stat, stats_on, StatInstant};
 use super::surf::{
     classify_surface, face_geom_cached, face_lightmap_world_cached, face_surf_block,
@@ -90,12 +90,17 @@ const BACKGROUND_ZI: f32 = -0.9;
 /// A BSP deeper than this is malformed (id's maps are a few dozen deep).
 const MAX_DEPTH: u32 = 1024;
 
-/// `edge_t` (`r_shared.h`). `u` is 12.20 fixed point, `ceil`-biased
+/// `edge_t` (`r_shared.h`). `u` is 20-bit fixed point, `ceil`-biased
 /// (`u * 0x100000 + 0xFFFFF`), so `u >> 20` is the first pixel right of it.
+/// id's is a 12.20 `int`, which wraps from 2048 pixels wide (the right edge
+/// is `(vid.width << 20) + 0xFFFFF`); here it is 44.20 in an `i64`, so any
+/// view width is drawn. The values are id's: up to 2047 wide nothing
+/// overflows an `int` (an edge that is stepped spans more than one row, so
+/// `|u_step|` is under the view's width), and the output is the same pixels.
 #[derive(Clone, Copy)]
 struct Edge {
-    u: i32,
-    u_step: i32,
+    u: i64,
+    u_step: i64,
     prev: u32,
     next: u32,
     /// The surface on the edge's left (it is that surface's trailing edge) and
@@ -244,8 +249,8 @@ struct EdgeState {
     fvrecty_adj: f32,
     fvrectright_adj: f32,
     fvrectbottom_adj: f32,
-    vrect_x_adj_shift20: i32,
-    vrectright_adj_shift20: i32,
+    vrect_x_adj_shift20: i64,
+    vrectright_adj_shift20: i64,
     vpn: Vec3,
     vright: Vec3,
     vup: Vec3,
@@ -382,6 +387,17 @@ fn c_ftoi(x: f64) -> i32 {
     }
 }
 
+/// [`c_ftoi`] widened for the edges' 44.20 `u` ([`Edge`]): truncation, the
+/// same value wherever id's `int` holds it, and id's 0x80000000 for a NaN.
+#[inline]
+fn c_ftoi64(x: f64) -> i64 {
+    if x.is_nan() {
+        i64::from(i32::MIN)
+    } else {
+        x as i64
+    }
+}
+
 /// `VectorNormalize` (mathlib.c), in floats.
 fn vector_normalize(v: Vec3) -> Vec3 {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -416,6 +432,7 @@ pub(super) fn render_edges(
     izbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
+    scr_fov: f32,
     opts: &RenderOptions,
     palette: &[[u8; 3]; 256],
     turb: &TurbTable,
@@ -427,10 +444,9 @@ pub(super) fn render_edges(
     external: &[ExternalBModel],
 ) {
     let (w, h) = (image.w, image.h);
-    // Nothing larger than id's MAXWIDTH x MAXHEIGHT: from 2048 wide the
-    // 12.20 fixed-point u of the view's right edge wraps an i32
-    // ([`super::MAXWIDTH`]; the caller clamps, this refuses).
-    if w == 0 || h == 0 || w > super::MAXWIDTH || h > super::MAXHEIGHT {
+    // Nothing larger than the largest view there is (8K; the caller clamps
+    // to the cvars' limit, this refuses what no setting allows).
+    if w == 0 || h == 0 || w > super::HIRES_MAXWIDTH || h > super::HIRES_MAXHEIGHT {
         return;
     }
     if izbuf.len() < w * h || image.rgb.len() < w * h {
@@ -438,7 +454,7 @@ pub(super) fn render_edges(
     }
     EDGE_STATE.with(|cell| {
         let mut st = cell.borrow_mut();
-        st.frame(image, izbuf, bsp, cam, opts, palette, turb, time, light_styles, dlights, colormap, bmodels, external);
+        st.frame(image, izbuf, bsp, cam, scr_fov, opts, palette, turb, time, light_styles, dlights, colormap, bmodels, external);
     });
 }
 
@@ -450,6 +466,7 @@ impl EdgeState {
         izbuf: &mut [i16],
         bsp: &Bsp,
         cam: &Camera,
+        scr_fov: f32,
         opts: &RenderOptions,
         palette: &[[u8; 3]; 256],
         turb: &TurbTable,
@@ -510,7 +527,7 @@ impl EdgeState {
         let t2 = lap();
         self.scan_edges();
         let t3 = lap();
-        self.draw_surfaces(image, izbuf, cam, opts, palette, turb, time, light_styles, colormap, &ents, &bits);
+        self.draw_surfaces(image, izbuf, cam, scr_fov, opts, palette, turb, time, light_styles, colormap, &ents, &bits);
         self.dlight_bits = bits;
         if prof {
             let t4 = lap();
@@ -603,7 +620,7 @@ impl EdgeState {
         self.fvrectright_adj = wf - 0.5;
         self.fvrectbottom_adj = hf - 0.5;
         self.vrect_x_adj_shift20 = (1 << 19) - 1;
-        self.vrectright_adj_shift20 = ((w as i32) << 20) + (1 << 19) - 1;
+        self.vrectright_adj_shift20 = ((w as i64) << 20) + (1 << 19) - 1;
         self.vpn = vpn;
         self.vright = vright;
         self.vup = vup;
@@ -957,7 +974,7 @@ impl EdgeState {
         if v < 0 || v2 < v || v2 as usize >= self.h {
             return; // cannot happen with a clamped projection; a NaN guard
         }
-        let mut eu = c_ftoi((u * 1_048_576.0 + 1_048_575.0) as f64);
+        let mut eu = c_ftoi64((u * 1_048_576.0 + 1_048_575.0) as f64);
         // avoid stepping off the edges of the screen
         if eu < self.vrect_x_adj_shift20 {
             eu = self.vrect_x_adj_shift20;
@@ -968,7 +985,7 @@ impl EdgeState {
         let e = self.edges.len() as u32;
         self.edges.push(Edge {
             u: eu,
-            u_step: c_ftoi((u_step * 1_048_576.0) as f64),
+            u_step: c_ftoi64((u_step * 1_048_576.0) as f64),
             prev: NONE,
             next: NONE,
             surfs,
@@ -1507,22 +1524,24 @@ impl EdgeState {
     /// `R_ScanEdges` (without its span-pool flush: the pool grows): every
     /// scanline's spans, from the edges `newedges` / `removeedges` hold.
     fn scan_edges(&mut self) {
-        let (w, h) = (self.w as i32, self.h as i32);
+        let h = self.h as i32;
         // clear active edges to just the background edges around the screen
-        let head_u = 0i32;
+        let head_u = 0i64;
         self.edges[EDGE_HEAD as usize] =
             Edge { u: head_u, u_step: 0, prev: NONE, next: EDGE_TAIL, surfs: [0, BACKGROUND], ..Edge::ZERO };
-        self.edge_head_u_shift20 = head_u >> 20;
-        let tail_u = (w << 20) + 0xFFFFF;
+        self.edge_head_u_shift20 = (head_u >> 20) as i32;
+        let tail_u = ((self.w as i64) << 20) + 0xFFFFF;
         self.edges[EDGE_TAIL as usize] =
             Edge { u: tail_u, u_step: 0, prev: EDGE_HEAD, next: EDGE_AFTERTAIL, surfs: [BACKGROUND, 0], ..Edge::ZERO };
-        self.edge_tail_u_shift20 = tail_u >> 20;
+        self.edge_tail_u_shift20 = (tail_u >> 20) as i32;
         // force a move
         self.edges[EDGE_AFTERTAIL as usize] =
             Edge { u: -1, u_step: 0, prev: EDGE_TAIL, next: EDGE_SENTINEL, ..Edge::ZERO };
-        // `2000 << 24` in a 32-bit int
+        // "make sure nothing sorts past this": id's `2000 << 24` (which wraps
+        // its int negative; neither value is ever compared, the tail stops
+        // every walk first)
         self.edges[EDGE_SENTINEL as usize] =
-            Edge { u: 2000i32.wrapping_mul(1 << 24), u_step: 0, prev: EDGE_AFTERTAIL, ..Edge::ZERO };
+            Edge { u: i64::MAX, u_step: 0, prev: EDGE_AFTERTAIL, ..Edge::ZERO };
         let bottom = h - 1;
         for iv in 0..bottom {
             self.scan_line(iv);
@@ -1698,7 +1717,7 @@ impl EdgeState {
         }
         if surf == self.surfs[BACKGROUND as usize].next {
             // emit a span (current top going away)
-            let iu = self.edges[edge as usize].u >> 20;
+            let iu = (self.edges[edge as usize].u >> 20) as i32;
             let last_u = self.surfs[surf as usize].last_u;
             if iu > last_u {
                 self.emit_span(surf, last_u, iu - last_u);
@@ -1771,7 +1790,7 @@ impl EdgeState {
         }
         if newtop {
             // emit a span (obscures current top)
-            let iu = edge_u >> 20;
+            let iu = (edge_u >> 20) as i32;
             let last_u = self.surfs[surf2 as usize].last_u;
             if iu > last_u {
                 self.emit_span(surf2, last_u, iu - last_u);
@@ -1799,6 +1818,7 @@ impl EdgeState {
         image: &mut Image,
         izbuf: &mut [i16],
         cam: &Camera,
+        scr_fov: f32,
         opts: &RenderOptions,
         palette: &[[u8; 3]; 256],
         turb: &TurbTable,
@@ -1813,7 +1833,7 @@ impl EdgeState {
         let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
         let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
         let mipview = MipView::new(xscale, yscale);
-        let sky_view = SkyView::new(vpn, vright, vup, w, h, opts.sky_centre(w, h), time);
+        let sky_view = SkyView::new(vpn, vright, vup, sky_dome_scale(w, h, scr_fov, cam.fov_deg), opts.sky_centre(w, h), time);
         let sky_tex = sky_texture(ents[0].bsp);
         let persp = opts.persp();
         let (light_dir, _) = normalize([0.3, 0.5, 1.0]);
@@ -2105,24 +2125,48 @@ mod tests {
     }
 
     #[test]
-    fn no_view_is_larger_than_id_maxwidth_by_maxheight() {
-        // r_shared.h's MAXWIDTH x MAXHEIGHT (1280 x 1024): from 2048 wide the
-        // right edge's 12.20 u, `(w << 20) + 0xFFFFF`, wraps an i32 and the
-        // scan indexed past its edges (a release panic). The entry clamps...
+    fn classic_views_are_at_most_id_maxwidth_by_maxheight() {
+        // r_shared.h's MAXWIDTH x MAXHEIGHT (1280 x 1024): Classic clamps to it,
+        // as id's drivers never set a larger mode.
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let wide = render(&cam, 2048, 400);
         assert_eq!((wide.w, wide.h), (1280, 400));
         assert_eq!(wide.rgb, render(&cam, 1280, 400).rgb, "drawn as id's widest mode");
         let tall = render(&cam, 320, 1100);
         assert_eq!((tall.w, tall.h), (320, 1024));
-        // ...and the edge renderer refuses what it cannot draw.
-        let mut image = Image { w: 2048, h: 8, rgb: vec![[1, 2, 3]; 2048 * 8] };
-        let mut z = vec![7i16; 2048 * 8];
+        // The edge renderer itself refuses only what no setting allows.
+        let (w, h) = (crate::render::HIRES_MAXWIDTH + 8, 2);
+        let mut image = Image { w, h, rgb: vec![[1, 2, 3]; w * h] };
+        let mut z = vec![7i16; w * h];
         render_edges(
-            &mut image, &mut z, &demo_room(), &cam, &RenderOptions::default(), &palette(), &TurbTable::new(),
-            0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None, &[], &[],
+            &mut image, &mut z, &demo_room(), &cam, 90.0, &RenderOptions::default(), &palette(),
+            &TurbTable::new(), 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None, &[], &[],
         );
         assert!(image.rgb.iter().all(|&p| p == [1, 2, 3]) && z.iter().all(|&v| v == 7));
+    }
+
+    #[test]
+    fn hires_draws_past_2048_wide_where_id_u_wraps() {
+        // With the hires extra the view is not clamped. From 2048 wide id's
+        // 12.20 `int` u wraps (the right edge `(w << 20) + 0xFFFFF`; the scan
+        // indexed past its edges, a release panic); the 44.20 u draws it. A
+        // view 4x as wide and tall as another shows the same picture at 4x:
+        // every 4x4 block of the big frame holds the small frame's pixel
+        // there, but for the pixels along an edge between two surfaces.
+        let _g = crate::render::VideoGuard::set(crate::render::VideoCvars {
+            hires: true,
+            ..crate::render::VideoCvars::CLASSIC
+        });
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let (w, h) = (640usize, 150usize);
+        let small = render(&cam, w, h);
+        let big = render(&cam, 4 * w, 4 * h);
+        assert_eq!((big.w, big.h), (2560, 600));
+        assert!(!big.rgb.contains(&palette()[R_CLEARCOLOR]), "the room covers the view: no background");
+        let differ = (0..h * w)
+            .filter(|&i| big.rgb[(4 * (i / w) + 2) * 4 * w + 4 * (i % w) + 2] != small.rgb[i])
+            .count();
+        assert!(differ * 100 < w * h, "{differ} of {} pixels differ", w * h);
     }
 
     #[test]

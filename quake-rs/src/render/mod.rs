@@ -58,6 +58,7 @@ mod polyse;
 mod sprite;
 mod part;
 mod stats;
+mod video;
 #[cfg(test)]
 pub(crate) mod fixtures;
 
@@ -90,30 +91,14 @@ pub use view::{
     viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
+pub use video::{
+    clamp_to_max, max_view_size, set_video_cvars, video_cvars, FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH,
+    MAXHEIGHT, MAXWIDTH,
+};
+#[cfg(test)]
+pub(crate) use video::VideoGuard;
 pub use warp::apply_warp;
 pub use world::{BModelInstance, ExternalBModel};
-
-// ---------------------------------------------------------------------------
-// The largest view
-// ---------------------------------------------------------------------------
-
-/// id's widest and tallest view (`r_shared.h`: `MAXWIDTH` 1280, `MAXHEIGHT`
-/// 1024): `vid_win.c` and `vid_ext.c` offer no larger mode, and the renderer
-/// sizes its tables by them (`newedges[MAXHEIGHT]`, `d_scantable`, the warp's
-/// `column[MAXWIDTH+AMP2*2]`). The edge renderer's 12.20 fixed-point u
-/// (`(vid.width << 20) + 0xFFFFF` for the right edge) wraps a 32-bit int from
-/// 2048 pixels wide, so a larger view is never drawn: [`render_scene_ext_sprited`]
-/// renders at most this size ([`clamp_to_max`]).
-pub const MAXWIDTH: usize = 1280;
-/// See [`MAXWIDTH`].
-pub const MAXHEIGHT: usize = 1024;
-
-/// `(w, h)` limited to id's largest view, [`MAXWIDTH`] x [`MAXHEIGHT`], as
-/// its video drivers never set a larger mode.
-#[must_use]
-pub fn clamp_to_max(w: usize, h: usize) -> (usize, usize) {
-    (w.min(MAXWIDTH), h.min(MAXHEIGHT))
-}
 
 // ---------------------------------------------------------------------------
 // Image
@@ -244,7 +229,9 @@ pub(crate) fn take_spare_rgb() -> Vec<[u8; 3]> {
 
 /// A pinhole camera positioned in Quake world space. `yaw` rotates about `+Z`
 /// (0 = facing `+X`, increasing toward `+Y`); `pitch` tilts the forward vector
-/// up/down. Both are in degrees, as is the horizontal field of view `fov_deg`.
+/// up/down. Both are in degrees, as is the horizontal field of view `fov_deg`
+/// (`scr_fov`: with [`FovMode::HorPlus`] the view's own is wider).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub pos: [f32; 3],
     pub yaw: f32,
@@ -859,9 +846,12 @@ pub fn render_scene_ext(
 /// against that buffer. Neither the image nor the z-buffer is cleared: the
 /// spans cover the view.
 ///
-/// The view is at most id's [`MAXWIDTH`] x [`MAXHEIGHT`]: a larger `w` or `h`
-/// is clamped ([`clamp_to_max`]), and the returned image's `w`/`h` say what
-/// was drawn.
+/// The view is at most [`max_view_size`] — id's [`MAXWIDTH`] x [`MAXHEIGHT`]
+/// in Classic: a larger `w` or `h` is clamped ([`clamp_to_max`]), and the
+/// returned image's `w`/`h` say what was drawn. The [`VideoCvars`] are read
+/// once, here: with [`FovMode::HorPlus`] every pass draws with the wider
+/// field of view it gives this screen, while `cam.fov_deg` stays `scr_fov`
+/// for what id tests on the cvar itself (no gun over 90, the sky's scale).
 #[allow(clippy::too_many_arguments)]
 pub fn render_scene_ext_sprited(
     bsp: &Bsp,
@@ -881,7 +871,8 @@ pub fn render_scene_ext_sprited(
     sprites: &[SpriteInstance],
     opts: &RenderOptions,
 ) -> Image {
-    // No mode is larger than id's (the edge renderer's fixed point needs it).
+    let video = video_cvars();
+    // No mode is larger than the cvars allow (id's, or 8K with hires).
     let (w, h) = clamp_to_max(w, h);
     // The frame's buffers, kept across frames (see [`recycle_image`]).
     let mut image = Image::reused_uncleared(w, h);
@@ -890,11 +881,16 @@ pub fn render_scene_ext_sprited(
     }
     let mut zbuf = ZBUF.with(|z| std::mem::take(&mut *z.borrow_mut()));
     zbuf.resize(w.saturating_mul(h), 0);
+    // R_ViewChanged's fov_x for this screen: scr_fov itself in Classic.
+    let scr_fov = cam.fov_deg;
+    let (screen_w, screen_h) = opts.screen.map_or((w, h), |s| (s.vid_w, s.vid_h));
+    let view_cam = Camera { fov_deg: video.fov_mode.fov_x(scr_fov, screen_w, screen_h, opts.aspect()), ..*cam };
+    let cam = &view_cam;
     // The turbulent SIN table for liquid warp.
     let turb = TurbTable::new();
     edge::render_edges(
-        &mut image, &mut zbuf, bsp, cam, opts, palette, &turb, time, light_styles, dlights, colormap, bmodels,
-        external,
+        &mut image, &mut zbuf, bsp, cam, scr_fov, opts, palette, &turb, time, light_styles, dlights, colormap,
+        bmodels, external,
     );
     // The entities: alias models, particles, sprites and the gun, each testing
     // (and writing) the world's 16-bit 1/z. Phase wall-timers: `StatInstant::now()`
@@ -911,7 +907,7 @@ pub fn render_scene_ext_sprited(
     // walls occlude them. (id draws them after the gun; with the gun's tripled
     // 1/z in the shared z-buffer the order only matters on exact ties.)
     let tp = stats_on().then(StatInstant::now);
-    draw_particles(&mut image, &mut zbuf, cam, particles, palette, w, h, opts.aspect());
+    part::draw_particles_sized(&mut image, &mut zbuf, cam, particles, palette, w, h, opts.aspect(), video.hires);
     if let Some(t) = tp { stat(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
     // Sprite-model entities (explosion flash, bubbles) — camera-facing billboards,
     // z-tested against the same buffer, drawn after models and before the viewmodel.
@@ -921,7 +917,7 @@ pub fn render_scene_ext_sprited(
     // The weapon: R_DrawViewModel, after the entities.
     let tv = stats_on().then(StatInstant::now);
     if let Some(vm) = viewmodel {
-        draw_viewmodel(&mut image, &mut zbuf, bsp, cam, opts, &vm, palette, dlights, light_styles, time, colormap);
+        draw_viewmodel(&mut image, &mut zbuf, bsp, cam, scr_fov, opts, &vm, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     ZBUF.with(|z| *z.borrow_mut() = zbuf);

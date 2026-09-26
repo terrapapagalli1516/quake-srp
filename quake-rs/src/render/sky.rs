@@ -33,7 +33,8 @@ pub(super) struct SkyView {
     half_w: i32,
     half_h: i32,
     /// `max(vrect.width, vrect.height)` — the `temp` normaliser in
-    /// `D_Sky_uv_To_st`: a fixed dome angle, independent of the render FOV.
+    /// `D_Sky_uv_To_st`: a fixed dome angle, independent of the render FOV
+    /// ([`sky_dome_scale`]).
     longest: f32,
     /// `skytime*skyspeed`, added to both `s` and `t` (`D_Sky_uv_To_st`).
     scroll: f32,
@@ -42,10 +43,31 @@ pub(super) struct SkyView {
     shift: i32,
 }
 
+/// `D_Sky_uv_To_st`'s `temp`, the dome's scale in pixels, for a `w x h` view
+/// drawn with the horizontal field of view `fov_x` for the `fov` cvar
+/// `scr_fov`: id's `max(vrect.width, vrect.height)` — at `fov 90` the dome's
+/// rays through the screen's columns are the view's own — whenever the two are
+/// the same (Classic, and Hor+ on a 4:3 screen). When Hor+ has widened the
+/// view the sky keeps the scale of the 4:3 view it widens,
+/// `w * tan(scr_fov/2) / tan(fov_x/2)` across, so it stays put against the
+/// walls as the view turns and only more of it shows at the sides.
+pub(super) fn sky_dome_scale(w: usize, h: usize, scr_fov: f32, fov_x: f32) -> f32 {
+    if fov_x == scr_fov {
+        return w.max(h) as f32;
+    }
+    let half_tan = |f: f32| (f as f64 * 0.5).to_radians().tan();
+    let ratio = half_tan(scr_fov) / half_tan(fov_x);
+    if !(ratio.is_finite() && ratio > 0.0) {
+        return w.max(h) as f32;
+    }
+    (w as f64 * ratio).max(h as f64) as f32
+}
+
 impl SkyView {
-    /// The sky state for a `w`x`h` view whose screen's centre is `centre` in
-    /// its own pixels ([`RenderOptions`](super::RenderOptions)`::sky_centre`),
-    /// at game `time`. `R_SetSkyFrame`
+    /// The sky state for a view whose dome scale is `longest` pixels
+    /// ([`sky_dome_scale`]) and whose screen's centre is `centre` in its own
+    /// pixels ([`RenderOptions`](super::RenderOptions)`::sky_centre`), at game
+    /// `time`. `R_SetSkyFrame`
     /// (r_sky.c): `skytime = cl.time - (int)(cl.time/temp)*temp` with
     /// `temp = SKYSIZE*s1*s2` = 512, where `s1`/`s2` are `iskyspeed` 8 and
     /// `iskyspeed2` 2 over their gcd.
@@ -53,8 +75,7 @@ impl SkyView {
         forward: Vec3,
         right: Vec3,
         up: Vec3,
-        w: usize,
-        h: usize,
+        longest: f32,
         centre: (i32, i32),
         time: f32,
     ) -> SkyView {
@@ -68,7 +89,7 @@ impl SkyView {
             up,
             half_w: centre.0,
             half_h: centre.1,
-            longest: w.max(h) as f32,
+            longest,
             scroll,
             shift: scroll as i32,
         }
@@ -224,7 +245,7 @@ mod tests {
             // right = forward x worldup, up = right x forward (orthonormal-ish).
             let (right, _) = normalize(cross(f, [0.0, 0.0, 1.0]));
             let (up, _) = normalize(cross(right, f));
-            SkyView::new(f, right, up, w, h, ((w as i32) >> 1, (h as i32) >> 1), time)
+            SkyView::new(f, right, up, w.max(h) as f32, ((w as i32) >> 1, (h as i32) >> 1), time)
         };
         // The view as D_DrawSurfaces draws a sky surface covering it: one span
         // per row (the sky uses the view ray, not a face's (s,t)).
@@ -281,10 +302,10 @@ mod tests {
     fn sky_view_front_layer_scrolls_twice_as_fast() {
         // R_SetSkyFrame + R_MakeSky: the whole sky scrolls skytime*8 texels
         // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top.
-        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, (160, 100), 1.6);
+        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 1.6);
         assert_eq!((v.scroll, v.shift), (12.8, 12));
         // skytime wraps at SKYSIZE*4*1 = 512 s.
-        let w = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320, 200, (160, 100), 513.0);
+        let w = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 513.0);
         assert_eq!((w.scroll, w.shift), (8.0, 8));
         // D_Sky_uv_To_st at the integer screen centre, looking along +X: the ray
         // is +X, so s = (scroll + 378) * 0x10000 and t = scroll * 0x10000.
@@ -302,7 +323,7 @@ mod tests {
         for (i, p) in pal.iter_mut().enumerate() {
             *p = [i as u8, 0, 0];
         }
-        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320, 200, (160, 100), 3.3);
+        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3);
         let (u0, row, n) = (17, 60, 40);
         let mut out = vec![[0u8; 3]; n as usize];
         draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v, &pal);
@@ -320,5 +341,16 @@ mod tests {
         }
         let got: Vec<u8> = out.iter().map(|p| p[0]).collect();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn the_dome_keeps_the_4_3_scale_under_hor_plus() {
+        // D_Sky_uv_To_st's temp: id's max(width, height) whenever the view's
+        // fov is the cvar's; Hor+ at 16:9 (fov_x 106.26 for fov 90) keeps the
+        // 1440 of the 4:3 screen of the same height.
+        assert_eq!(sky_dome_scale(320, 200, 90.0, 90.0), 320.0);
+        assert_eq!(sky_dome_scale(200, 320, 90.0, 90.0), 320.0);
+        let fov_x = crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0);
+        assert!((sky_dome_scale(1920, 1080, 90.0, fov_x) - 1440.0).abs() < 0.01);
     }
 }

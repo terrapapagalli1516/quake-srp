@@ -217,8 +217,6 @@ pub(super) struct AliasView {
     pub(super) bottom: i32,
     transition: f32,
     resfudge: f32,
-    /// `scr_fov > 90`: R_DrawViewModel draws no gun.
-    fov_over_90: bool,
 }
 
 impl AliasView {
@@ -243,7 +241,6 @@ impl AliasView {
             bottom: h as i32,
             transition: (R_ALIASTRANSBASE as f64 * res_scale) as f32,
             resfudge: (R_ALIASTRANSADJ as f64 * res_scale) as f32,
-            fov_over_90: cam.fov_deg > 90.0,
         }
     }
 
@@ -893,14 +890,16 @@ pub struct Viewmodel<'a> {
 /// `R_AliasDrawModel` as any alias model — never bbox-tested, so every
 /// triangle takes the clipping path (the grip nearer than `ALIAS_Z_CLIP_PLANE`
 /// is trimmed), and with its 1/z tripled so it wins the shared depth test
-/// against everything but a wall right against the eye. No gun at an fov over
-/// 90 (`r_fov_greater_than_90`).
+/// against everything but a wall right against the eye. No gun when the `fov`
+/// cvar, `scr_fov`, is over 90 (`r_fov_greater_than_90`) — the cvar, not the
+/// view's field of view, which Hor+ widens past 90 on a wide screen.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_viewmodel(
     image: &mut Image,
     zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
+    scr_fov: f32,
     opts: &RenderOptions,
     vm: &Viewmodel,
     palette: &[[u8; 3]; 256],
@@ -912,10 +911,10 @@ pub(super) fn draw_viewmodel(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
-    if view.fov_over_90 {
+    if scr_fov > 90.0 {
         return;
     }
+    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
     let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
     // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
     let ent = AliasEntity {
@@ -1695,5 +1694,42 @@ mod tests {
         assert_eq!(setup.vertex_light(52), 8128 - 4096);
         // Normal 0 faces away (cos > 0): just the ambient.
         assert_eq!(setup.vertex_light(0), 8128);
+    }
+
+    #[test]
+    fn hor_plus_keeps_the_gun_at_the_4_3_size() {
+        // R_DrawViewModel tests the fov CVAR (r_fov_greater_than_90): Hor+
+        // widens a 16:9 view to 106 degrees and the gun stays, drawn as a 4:3
+        // screen of the same height draws it — the same size, and 24 columns
+        // further right in a view 48 wider. A Classic fov over 90 has no gun.
+        use crate::render::{FovMode, VideoCvars, VideoGuard};
+        let bsp = demo_room();
+        let mut pal = [[80u8; 3]; 256];
+        pal[7] = [255, 255, 0];
+        let gun = viewmodel_mdl();
+        let draw = |w: usize, h: usize, fov_deg: f32| {
+            let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg };
+            let vm = Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] };
+            let img = crate::render::render_scene_ext_sprited(
+                &bsp, &cam, w, h, &pal, &[], &[], &[], Some(vm), 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
+                &[], &RenderOptions::default(),
+            );
+            let gun_px: Vec<(usize, usize)> =
+                (0..w * h).filter(|&i| is_gun_pixel(img.rgb[i])).map(|i| (i % w, i / w)).collect();
+            let (x0, x1) = (gun_px.iter().map(|p| p.0).min(), gun_px.iter().map(|p| p.0).max());
+            let (y0, y1) = (gun_px.iter().map(|p| p.1).min(), gun_px.iter().map(|p| p.1).max());
+            Some((x0?, y0?, x1?, y1?))
+        };
+        let four_three = draw(144, 108, 90.0).expect("gun at 4:3");
+        let wide = {
+            let _g = VideoGuard::set(VideoCvars { fov_mode: FovMode::HorPlus, hires: false });
+            draw(192, 108, 90.0).expect("gun under Hor+ at 16:9")
+        };
+        assert_eq!(
+            (wide.0, wide.1, wide.2, wide.3),
+            (four_three.0 + 24, four_three.1, four_three.2 + 24, four_three.3),
+            "4:3 {four_three:?}, 16:9 {wide:?}"
+        );
+        assert_eq!(draw(192, 108, 100.0), None, "fov 100: no gun");
     }
 }

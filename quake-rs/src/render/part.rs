@@ -53,6 +53,23 @@ pub fn draw_particles(
     h: usize,
     pixel_aspect: f32,
 ) {
+    draw_particles_sized(image, zbuf, cam, particles, palette, w, h, pixel_aspect, false);
+}
+
+/// [`draw_particles`], with id's particle sizes (`hires` false) or the hires
+/// extra's ([`ParticleProjection::new`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_particles_sized(
+    image: &mut Image,
+    zbuf: &mut [i16],
+    cam: &Camera,
+    particles: &[(Vec3, u8)],
+    palette: &[[u8; 3]; 256],
+    w: usize,
+    h: usize,
+    pixel_aspect: f32,
+    hires: bool,
+) {
     /// `d_iface.h`: particles nearer than this are not drawn.
     const PARTICLE_Z_CLIP: f32 = 8.0;
     if w == 0 || h == 0 || particles.is_empty() {
@@ -60,7 +77,7 @@ pub fn draw_particles(
     }
 
     let (forward, right, up) = cam.basis();
-    let proj = ParticleProjection::new(cam, w, h, pixel_aspect);
+    let proj = ParticleProjection::new(cam, w, h, pixel_aspect, hires);
     // R_DrawParticles: r_pright = vright*xscaleshrink, r_pup = vup*yscaleshrink.
     let pright = [right[0] * proj.xscaleshrink, right[1] * proj.xscaleshrink, right[2] * proj.xscaleshrink];
     let pup = [up[0] * proj.yscaleshrink, up[1] * proj.yscaleshrink, up[2] * proj.yscaleshrink];
@@ -84,7 +101,7 @@ pub fn draw_particles(
             continue;
         }
         let izi = zbuf_izi(zi);
-        let pix = (izi >> proj.pix_shift).clamp(proj.pix_min, proj.pix_max);
+        let pix = ((izi * proj.pix_mul) >> proj.pix_shift).clamp(proj.pix_min, proj.pix_max);
         let rgb = palette[color as usize];
         for row in 0..(pix << rows_shift) {
             let base = (v + row) as usize * w + u as usize;
@@ -123,6 +140,10 @@ pub(crate) struct ParticleProjection {
     pub yscaleshrink: f32,
     pub pix_min: i64,
     pub pix_max: i64,
+    /// A particle is `(izi * pix_mul) >> pix_shift` pixels (then clamped):
+    /// id's `izi >> d_pix_shift` (`pix_mul` 1), or the hires extra's
+    /// proportional size in 16.16 ([`ParticleProjection::new`]).
+    pub pix_mul: i64,
     pub pix_shift: u32,
     pub y_aspect_shift: u32,
     /// `vrectright - d_pix_max`, `vrectbottom - (d_pix_max << d_y_aspect_shift)`:
@@ -132,18 +153,43 @@ pub(crate) struct ParticleProjection {
 }
 
 impl ParticleProjection {
-    pub(crate) fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> Self {
+    /// `R_ViewChanged`'s and `D_ViewChanged`'s particle state for a `w x h`
+    /// view. `hires` (the hires extra, not id) sizes particles in proportion
+    /// to the view's scale instead of by id's `d_pix_*`.
+    ///
+    /// id's size is `izi >> d_pix_shift` with `d_pix_shift = 8 -
+    /// (int)(width/320 + 0.5)`: a halving per 320 pixels of width where the
+    /// width only adds 320 each time, so it is proportional only at 320 and
+    /// 640 wide — at 1280 a particle is twice the size, at 1920 five times, and
+    /// from 2720 wide the shift would go negative (undefined in the C) — while
+    /// the clamps `d_pix_min = width/320`, `d_pix_max = width/80` do scale.
+    /// Nearly every particle then sits at `d_pix_max`. The hires size keeps
+    /// 320x200's at every scale: `pix = izi * xscale / (160 * 128)`, clamped
+    /// to `[xscale/160, xscale/40 + 0.5]`, which is id's exactly at 320 and
+    /// 640 wide (`xscale` 160 and 320 at fov 90) and follows the world's own
+    /// projection at any other width, field of view or Hor+ widening.
+    pub(crate) fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32, hires: bool) -> Self {
         let (wf, hf) = (w as f32, h as f32);
         // horizontalFieldOfView = 2*tan(fov_x/2), a float; a degenerate fov
         // falls back to ~90 degrees as `Projection` does.
         let hfov = (2.0 * (cam.fov_deg as f64 * 0.5).to_radians().tan()) as f32;
         let hfov = if hfov.abs() < 2e-6 { 2.0 } else { hfov };
         let xscaleshrink = (w as i64 - 6) as f32 / hfov;
-        let pix_min = (w as i64 / 320).max(1);
-        let pix_max = ((wf / 80.0 + 0.5) as i64).max(1);
-        // d_pix_shift = 8 - (int)(width/320 + 0.5); negative (a view over
-        // 2720 wide) would be undefined in the C.
-        let pix_shift = (8 - (wf / 320.0 + 0.5) as i64).max(0) as u32;
+        let (pix_min, pix_max, pix_mul, pix_shift) = if hires {
+            // izi * xscale / 20480 as 16.16: xscale*65536/20480 = xscale*3.2.
+            let xscale = wf / hfov;
+            let pix_mul = ((xscale as f64 * 3.2).round() as i64).max(1);
+            let pix_min = ((xscale / 160.0) as i64).max(1);
+            let pix_max = ((xscale / 40.0 + 0.5) as i64).max(1);
+            (pix_min, pix_max, pix_mul, 16)
+        } else {
+            let pix_min = (w as i64 / 320).max(1);
+            let pix_max = ((wf / 80.0 + 0.5) as i64).max(1);
+            // d_pix_shift = 8 - (int)(width/320 + 0.5); negative (a view over
+            // 2720 wide) would be undefined in the C.
+            let pix_shift = (8 - (wf / 320.0 + 0.5) as i64).max(0) as u32;
+            (pix_min, pix_max, 1, pix_shift)
+        };
         let y_aspect_shift = u32::from(pixel_aspect > 1.4);
         ParticleProjection {
             xcenter: wf * 0.5 - 0.5,
@@ -152,6 +198,7 @@ impl ParticleProjection {
             yscaleshrink: xscaleshrink * pixel_aspect,
             pix_min,
             pix_max,
+            pix_mul,
             pix_shift,
             y_aspect_shift,
             vrectright_particle: w as i64 - pix_max,
@@ -247,7 +294,7 @@ mod tests {
         assert_eq!(particle_box(320, 200, [100.0, 0.0, 60.0], 1.0).map(|b| (b.0, b.1)), Some((160, 5)));
         assert_eq!(particle_box(320, 200, [100.0, 0.0, 95.0], 1.0), None);
         let p = ParticleProjection::new(
-            &Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 }, 320, 200, 0.8333333);
+            &Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 }, 320, 200, 0.8333333, false);
         assert!((p.xscaleshrink - 157.0).abs() < 1e-3 && (p.yscaleshrink - 157.0 * 0.8333333).abs() < 1e-3);
         assert_eq!((p.xcenter, p.ycenter), (159.5, 99.5));
     }
@@ -419,5 +466,35 @@ mod tests {
             with.rgb.contains(&[255, 0, 255]),
             "the particle's palette colour must appear in the frame"
         );
+    }
+
+    #[test]
+    fn hires_particles_keep_320x200_proportions() {
+        // id's izi >> d_pix_shift halves per 320 columns while the width only
+        // adds 320: the hires size is id's at 320 and 640 wide and in
+        // proportion everywhere else. At depth 100 (izi 327), fov 90:
+        let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let size = |w: usize, hires: bool| {
+            let p = ParticleProjection::new(&cam, w, w * 5 / 8, 1.0, hires);
+            ((327 * p.pix_mul) >> p.pix_shift).clamp(p.pix_min, p.pix_max)
+        };
+        for w in [320, 640] {
+            let (id, hi) = (ParticleProjection::new(&cam, w, 200, 1.0, false), ParticleProjection::new(&cam, w, 200, 1.0, true));
+            assert_eq!((hi.pix_min, hi.pix_max), (id.pix_min, id.pix_max), "{w}");
+            for izi in [0, 1, 100, 127, 128, 327, 1000, 4096] {
+                assert_eq!((izi * hi.pix_mul) >> hi.pix_shift, izi >> id.pix_shift, "{w} wide, izi {izi}");
+            }
+        }
+        // 320: 2; 640: 5; id's 1280 gives 327>>4 = 20 (clamped to 16), hires 10.
+        assert_eq!([size(320, true), size(640, true), size(1280, false), size(1280, true)], [2, 5, 16, 10]);
+        // 3840: id's shift would be -4 (clamped to 0 here), so 327 -> its max 48;
+        // hires 30, and a far one (depth 1000, izi 32) 3 -> the minimum 12.
+        assert_eq!((size(3840, false), size(3840, true)), (48, 30));
+        let p = ParticleProjection::new(&cam, 3840, 2160, 1.0, true);
+        assert_eq!(((32 * p.pix_mul) >> p.pix_shift).clamp(p.pix_min, p.pix_max), 12);
+        // Hor+ at 16:9 (fov_x 106.26): the 1440x1080 screen's sizes.
+        let wide = Camera { fov_deg: crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0), ..cam };
+        let (a, b) = (ParticleProjection::new(&wide, 1920, 1080, 1.0, true), ParticleProjection::new(&cam, 1440, 1080, 1.0, true));
+        assert_eq!((a.pix_min, a.pix_max, a.pix_mul, a.pix_shift), (b.pix_min, b.pix_max, b.pix_mul, b.pix_shift));
     }
 }
