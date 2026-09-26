@@ -156,9 +156,14 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **The pak is a file.** The page downloads `id1/pak0.pak` beside
   `quake.wasm` and hands it to the worker's file system; the program opens it
   with `Pak::open` (as `quaketool` does) and reads each lump on demand, so no
-  copy of the archive lives in the program's memory. Decided on the
-  measurements below: the same startup, about the same memory, an engine
-  update no longer re-downloads 18 MB, and a player's own `pak1.pak` can be
+  copy of the archive lives in the program's memory. Measured against the
+  same program with the pak embedded (`include_bytes!` and
+  `Pak::from_static`, the old page's way), six loads each on a local server:
+  navigation to the first frame 169–328 ms from the file, 167–330 ms
+  embedded, the same; the renderer process's memory 157–176 MB from the
+  file, 191–214 MB embedded (the embedded pak lives in the module's bytes and
+  in the linear memory). Besides, an engine update no longer re-downloads
+  18 MB, the build needs no game data, and a player's own `pak1.pak` can be
   one more file (a later change: the worker cannot take files once running,
   so it would be added before start, or the worker restarted).
 - **Saves and settings go through `std::fs`.** `save s0` writes
@@ -302,9 +307,9 @@ hand-off above, stretched a little by the longer frame period.
 old, 148–197 ms new. The download is `quake.wasm` 1.05 MB (0.35 MB gzip) plus
 `id1/pak0.pak` 17.8 MB, against an 18.9 MB wasm (8.5 MB gzip) that embedded
 the pak. The renderer process's memory (PSS, attract demo running) was
-155–157 MB old and 160–162 MB new: the worker's own heap and the pak held in
+155–157 MB old and 157–162 MB new: the worker's own heap and the pak held in
 it, where the old page held the pak twice (the module's bytes and its linear
-memory).
+memory). "Files" above has the pak's own comparison.
 
 **Presentation.** The brief's idea — an 8-bit frame plus its palette, with
 the GPU doing the VGA DAC in WebGL2 — needs the renderer to write palette
