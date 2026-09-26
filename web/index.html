@@ -683,8 +683,9 @@ document.addEventListener('fullscreenchange', () => {
 // Starting a session from a button is a real gesture: unlock audio with it and
 // retire the click-to-play scrim in the same go — ONE gesture does everything
 // (on touch devices requestPointerLock fails silently, so a scrim that waited
-// for a lock would sit over the demo forever). Capturing the mouse stays a plain canvas click away,
-// invited by the #lockChip whenever unlocked walk mode would use it.
+// for a lock would sit over the demo forever). Capturing the mouse stays a
+// plain canvas click away, invited by the #lockChip whenever unlocked walk
+// mode would use it.
 document.getElementById('walkBtn').addEventListener('click', () => {
   if (!readyToPlay) return;
   unlockAudio();

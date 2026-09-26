@@ -534,8 +534,14 @@ consistent with. The page waits for it before downloading (`main` awaits
 `window.quakeServiceWorker`, at most 3 s, once: after that the page is
 already controlled), so the first visit's downloads go through it and are
 kept — offline works after one visit — at the cost of the worker's
-install on that first visit (0.2 s here). A reload finds the pak locally:
-no 18 MB download, the "fast reloads". Trade-off accepted: on a network
+install on that first visit. A reload finds the pak locally: no 18 MB
+download, the "fast reloads". Measured on a local server (the same page
+with and without `sw.js`, three fresh profiles each, navigation to the
+first frame): the first visit 263–283 ms against 180–246 ms; a reload's
+downloads 74–92 ms against 47–75 ms from the HTTP cache. So on a local
+network the worker costs a few tens of milliseconds; its point is a
+phone's network, where the pak is 18 MB and the HTTP cache may not keep
+it, and no network at all. Trade-off accepted: on a network
 that hangs rather than fails, network-first waits for it; and a load that
 lost the network half-way could pair a new page with a kept older engine.
 
