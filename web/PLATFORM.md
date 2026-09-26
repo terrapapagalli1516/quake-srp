@@ -113,6 +113,16 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 2 | SYNC | `seq u32` (last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
 | 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
 | 4–11 | — | retired: the sound records of the page's own mixing, before the program mixed |
+
+| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen, 128 touch controls (`in_touch`), 256 the menu asks y or n, 512 the live game is paused), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
+| 4 | SAMPLE | `id u32`, a RIFF/WAV (each distinct sample once, by content) |
+| 5 | SOUND | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `entity i32`, `channel i32`, `view u32`, `loop_start f32`, `loop_end f32` |
+| 6 | STOP_SOUND | `entity i32`, `channel i32` |
+| 7 | STATIC_SOUND | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `loop_start f32`, `loop_end f32` |
+| 8 | AMBIENT | `channel u32`, `id u32`, `loop_start f32`, `loop_end f32` |
+| 9 | LISTENER | `origin f32×3`, `forward f32×3`, `right f32×3`, `ambient f32×4`, `volume f32` |
+| 10 | GENERATION | `generation u32`: `S_StopAllSounds` (a level or mode change) |
+| 11 | LOCAL_SOUND | `id u32`: `S_LocalSound` (menu clicks) and `play` |
 | 12 | REPLY | `id u32`, `value f64`, then UTF-8 text |
 | 13 | BENCH | `f64` per value (`--features bench`; names from the `bench_names` call) |
 | 14 | PCM | `start u32` (the pair of the ring's clock it plays at), `rate u32`, `flags u32` (1: silence the ring first, `S_ClearBuffer`), then 16-bit stereo pairs. Copied into the sound ring by `wasi.js`, never posted |
@@ -471,6 +481,161 @@ ChromeOS), at the risk of tearing. The frame still arrives inside the
 refresh that ticked, so the hint matters exactly as much as before. Off by
 default, and not verifiable headless.
 
+## Touch
+
+On a touch screen (a coarse primary pointer; `?touch` forces it on a
+desktop) the page loads `web/touch.js` and hands it a few entry points
+(`startTouch` in index.html: the KEY and MOUSE records, `callLine`, the
+State, the audio unlock); a desktop never loads it. It switches the page to
+a touch layout — the picture fills the screen, under a phone's notch too
+(`viewport-fit=cover`), and the controls keep to the safe area — and shows
+what the game's State calls for:
+
+| state | on screen |
+|---|---|
+| the live game, `in_touch` on (2026) | a stick wherever the left thumb lands (the left 45%); look by dragging anywhere else; FIRE (hold; dragging it aims too), JUMP, WEAPON (`impulse 10`, the next weapon owned), MENU |
+| the live game, `in_touch` off (Classic) | MENU only: id's game has no touch controls, but a phone must never be left without a way back to the menu |
+| a demo (the attract loop) | MENU; a tap anywhere is Escape, as any key is during id's demo playback |
+| the menu | taps on the menu itself; BACK (Escape); YES / NO when it asks (STATE 256) |
+| the console (Options > Go to console) | KEYBOARD (a tap on the console too), TAB, ▲ (the previous line); BACK closes it; a drag scrolls (PgUp/PgDn) |
+
+**What a finger sends.** The stick is the client's analog move
+(`set_move fwd side`: `in_fwd`/`in_side`, full speed at 56 CSS px of
+thumb, a 12% dead zone, at most once a display frame); FIRE and JUMP hold
+`set_attack`/`set_jump`; WEAPON is `set_impulse 10`. These bypass the key
+bindings on purpose: a touch button is its action, whatever the player
+bound. Look is the MOUSE record, IN_MouseMove's input, 2 counts per CSS
+pixel: 0.32° a pixel at the default Mouse Speed, so Options > Mouse Speed
+and Invert Mouse apply, and `freelook` (on in 2026) is what makes a
+vertical drag pitch. `in_touchaccel` (console, 0..4, default 0) turns a
+fast drag up to 1 + that many times as far (full at 2 px/ms). Escape,
+Tab, y/n and the typed characters are KEY records through `Key_Event`.
+
+**The menu by tapping.** The page does not guess items from pixels: it
+maps the finger to a frame pixel through the canvas's box and asks the
+program (`menu_tap x y`, and `menu_point x y` while a finger drags), and
+the engine's menu (`Menu::tap`, quake-rs `menu.rs`, "Taps") finds the row
+from the same constants its `draw_*` functions draw with and answers with
+the key a player would press: Enter on a picture list's item (Main,
+Single Player, Multiplayer: 20-line items, a fingertip) at once; on a text
+list (8-line rows: 10–13 CSS px on a phone) a first tap moves the cursor
+and a second on the highlighted row acts — Enter, or left/right of an
+Options slider's knob; Help pages by halves. A drag moves the cursor with
+the finger without acting, which is the easy way onto a small row.
+
+**The phone's keyboard.** KEYBOARD focuses a hidden text field (in the
+tap's own handler, the only way iOS shows its keyboard); what the field
+receives becomes KEY records (printable ASCII as its keynum with the typed
+character; Enter; a deleted zero-width sentinel is Backspace; Android's
+composed words when they end), and its key events never reach the page's
+own keyboard handler. Multiplayer > Setup's name rows get the same button.
+
+**Around the controls.** Held upright, a prompt asks for landscape (a tap
+dismisses it). The first tap ("tap to start") also asks for fullscreen and
+`screen.orientation.lock('landscape')` where the browser has them
+(Android; a fullscreen button stays while not fullscreen). During a game a
+Screen Wake Lock keeps the display on. Every touch resumes audio if the
+browser suspended it (iOS "interrupts" it in the background). When the
+page is hidden the audio is suspended, and with the touch controls on (not
+in Classic, where the game only stops getting ticks, as on a desktop) a
+live game pauses (`pause`, id's plaque; STATE 512) under its menu; back in
+the game — the menu closed, by the player — the pause ends. Haptics:
+`QuakeTouch.rumble(weak, strong, ms)` takes the Gamepad API's dual-rumble
+magnitudes and buzzes `navigator.vibrate` (Android; iOS Safari has none)
+for longer the stronger it is; nothing calls it yet — it is the hook for
+the `input` agent's gamepad rumble events (damage, heavy weapons).
+
+**Phones.** On an iPhone in landscape (844×390 CSS px, devicePixelRatio 3,
+so a 2532×1170 box) Auto picks a pixel size of 2 with the single-threaded
+build: a 1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px,
+finer than the eye resolves at arm's length), and the scaled 2-D layer at
+2×. What that costs, measured on a desktop, not on a phone
+(`bench.py --video modern`, one thread, headless Chromium on an 8-core desktop CPU
+under load 6, median page ms per frame, demo1 / walk_e1m1): 1266×585
+4.4 / 4.7, a 2400×1080 Android at 2.6 (1200×540) 3.8 / 4.2, and the same
+iPhone at a pixel size of 1 (2532×1170) 16.0 / 17.8. A recent iPhone's
+fast core is about this one's by the published single-thread scores (a
+mid-range Android's about 0.4 of it), so the chosen size should fit
+Safari's 60 Hz on one core with room to spare, and a mid-range phone
+should manage 60 Hz — estimates, not runs. Decided: no phone rule in Auto.
+The single-threaded build, the default deploy, gives a phone the 2×2
+pixel above; the threads build offers `hardwareConcurrency` threads, and
+Auto's budget grows with them (4 and up: twice the pixels), so a 6-core
+phone would get the 1×1 picture, 3.4× the pixels, drawn in equal row
+bands on unequal cores (a phone's efficiency cores take ~3× as long, and
+every band waits for the slowest): hotter and not smoother. For a phone,
+deploy the single-threaded build, or set `vid_pixelsize 2`. (Open: a
+phone-aware thread offer in wasi.js — the `present`/`platform` side.)
+iOS Safari: `SharedArrayBuffer` needs iOS 15.2 and https (the page says so
+when it is missing); rAF runs at 60 Hz (Safari's default even on 120 Hz
+screens), 30 Hz in Low Power Mode; Web Audio follows the silent switch;
+the Screen Wake Lock needs iOS 16.4 (18.4 in a home-screen app). Memory:
+the single-threaded build's memory grows as the game needs it (the pak
+stays outside it, "Files"); the threads build declares a shared memory of
+up to 1 GiB (16384 pages), which a browser reserves up front for a
+shared memory — the kind of reservation iOS has refused in other wasm
+games, one more reason to give a phone the single-threaded build.
+
+## Offline and install
+
+**Install.** `manifest.webmanifest` (`display: fullscreen`, landscape,
+standalone as the fallback) and iOS's `apple-mobile-web-app-*` tags make
+the page an app on the home screen: on iOS that is the only fullscreen a
+page gets, and it is how an iPhone should run it. The icons are
+original pixel art (`web/icons/make_icons.py`, standard library only, a
+torch flame on stone; not id's logo or any of its art), their subject
+inside the middle 80% circle so launchers may mask them; the page's
+favicon is the 32-pixel one, inlined.
+
+**The service worker** (`web/sw.js`, one file: loaded by the page it
+registers itself). What it answers:
+
+- **the pak, cache first**: `id1/*.pak` from the cache once kept, else the
+  network, kept as it streams to the page. id's shareware data never
+  changes; bumping `DATA_CACHE` refetches it.
+- **everything else, network first**: the page, `wasi.js`, `touch.js`,
+  `quake.wasm`, the manifest and icons come from the network and are kept;
+  when the network fails, from what was kept. So online a player always
+  runs what is deployed — an update takes effect at the next load, with
+  nothing to version or bump — and offline, what they last played. The
+  page's small files are kept at install, because the first visit's page
+  loaded before the worker existed.
+- **nothing marked `no-store`**, which `isolated.py` sends: the checks
+  leave no 19 MB copies in the browser profiles (verify_touch.py serves
+  without it to check offline play).
+
+The worker takes over at once (`skipWaiting`, `clients.claim`): with the
+page's files from the network there is no old cache to keep an open page
+consistent with. The page waits for it before downloading (`main` awaits
+`window.quakeServiceWorker`, at most 3 s, once: after that the page is
+already controlled), so the first visit's downloads go through it and are
+kept — offline works after one visit — at the cost of the worker's
+install on that first visit. A reload finds the pak locally: no 18 MB
+download, the "fast reloads". Measured on a local server (the same page
+with and without `sw.js`, three fresh profiles each, navigation to the
+first frame): the first visit 263–283 ms against 180–246 ms; a reload's
+downloads 74–92 ms against 47–75 ms from the HTTP cache. So on a local
+network the worker costs a few tens of milliseconds; its point is a
+phone's network, where the pak is 18 MB and the HTTP cache may not keep
+it, and no network at all. Trade-off accepted: on a network
+that hangs rather than fails, network-first waits for it; and a load that
+lost the network half-way could pair a new page with a kept older engine.
+
+**Isolation on any host** (the coi-serviceworker technique). Every answer
+the worker gives carries COOP `same-origin`, COEP `require-corp` and CORP
+`same-origin`. A server that sends the headers loses nothing. On one that
+cannot (GitHub Pages, a plain static host), the first load is not
+isolated; the page registers the worker, waits for it and reloads once
+(a sessionStorage flag stops a loop where a browser ignores the headers),
+and the reloaded page is isolated. Costs: the first visit loads twice; it
+needs service workers (not Firefox's private windows); a page on http
+other than localhost gets neither; and a hard reload, which bypasses the
+worker, is not isolated, so it reloads once more (not verified: headless
+Chromium's cache-ignoring reload bypasses the worker for that second load
+too). Checked in headless Chromium (verify_touch.py, 8.); Safari and iOS
+honour worker-supplied isolation headers by their documentation, not by a
+run here.
+
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
@@ -482,8 +647,8 @@ Playwright's WebKit would not start here (missing system
 libraries). Not checked: Safari, iOS, a real GPU, a real high-refresh
 display. From the platforms' documentation, not from a
 run: Safari has `SharedArrayBuffer` under COOP/COEP since 15.2 (iOS 15.2),
-with `Atomics.wait` in workers; iOS has no pointer lock, and the page already
-says it needs a keyboard and a mouse. The program's own memory no longer
+with `Atomics.wait` in workers; iOS has no pointer lock, and a phone plays
+with the touch controls ("Touch"). The program's own memory no longer
 holds the 18 MB pak, which helps where wasm memory is tight (iOS).
 
 ## Build, serve, deploy
@@ -498,24 +663,34 @@ cd quake-wasm && cargo build --release --target wasm32-wasip1-threads  # the ren
 Either `quake.wasm` runs in the same page; the threads build's is under
 `target/wasm32-wasip1-threads/release/`.
 
-**A deploy dir** holds four things:
+**A deploy dir** holds the page's files (`isolated.PAGE_FILES`), the engine
+and the pak:
 
 ```
 deploy/index.html          web/index.html
 deploy/wasi.js             web/wasi.js
+deploy/touch.js            web/touch.js           (touch screens only)
+deploy/sw.js               web/sw.js              (offline, isolation anywhere)
+deploy/manifest.webmanifest  web/manifest.webmanifest
+deploy/icons/*.png         web/icons/icon-192.png, icon-512.png, apple-touch-icon.png
 deploy/quake.wasm          quake-wasm/target/wasm32-wasip1/release/quake.wasm
 deploy/id1/pak0.pak        quake-data/ID1/PAK0.PAK (lower-case name)
 ```
 
 ```sh
-mkdir -p deploy/id1
-cp web/index.html web/wasi.js deploy/
+mkdir -p deploy/id1 deploy/icons
+cp web/index.html web/wasi.js web/touch.js web/sw.js web/manifest.webmanifest deploy/
+cp web/icons/icon-192.png web/icons/icon-512.png web/icons/apple-touch-icon.png deploy/icons/
 cp quake-wasm/target/wasm32-wasip1/release/quake.wasm deploy/
 cp quake-data/ID1/PAK0.PAK deploy/id1/pak0.pak
 ```
 
-**Serve** with the two cross-origin isolation headers (without them the page
-says so and stops):
+(`isolated.copy_page(dir)` copies the page's files; `bench.py --build` uses
+it.) A deploy without `sw.js` still plays, but the page's `<script>` for it
+answers 404, which the checks count as a console error.
+
+**Serve** with the two cross-origin isolation headers (without them, and
+without the service worker, the page says so and stops):
 
 ```sh
 miniserve -C -p 8196 \
@@ -523,7 +698,13 @@ miniserve -C -p 8196 \
   --header "Cross-Origin-Embedder-Policy:require-corp" deploy
 ```
 
-Any static server works if it sends those headers. `web/isolated.py` is the
+Any static server works if it sends those headers, and one that cannot
+works through the service worker, after one reload ("Offline and install").
+Either way the page must be a secure context — https, or localhost — for
+`SharedArrayBuffer` and service workers alike: a phone reaching the server
+by name over plain http (`http://<host>:8196`) gets neither, so serve
+it over https (an https reverse proxy, for one, gives the server an https name).
+`web/isolated.py` is the
 checks' server; `uv run web/bench.py DEPLOYDIR` and
 `QUAKE_VERIFY_PORT=… uv run --with playwright web/verify_walk.py DEPLOYDIR`
 take a deploy dir, and `bench.py --build` assembles one under

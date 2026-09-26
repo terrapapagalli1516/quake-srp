@@ -194,6 +194,13 @@ pub(crate) const STATE_TIMEDEMO: u32 = 16;
 pub(crate) const STATE_NATIVE: u32 = 32;
 /// `vid_fkey`: the page's `f` toggles fullscreen.
 pub(crate) const STATE_FKEY: u32 = 64;
+/// `in_touch`: on a touch screen, the page shows its touch controls for play.
+pub(crate) const STATE_TOUCH: u32 = 128;
+/// The menu waits for y or n (the Quit prompt, New Game's question): a touch
+/// screen offers them as buttons.
+pub(crate) const STATE_ASK: u32 = 256;
+/// The live game is paused (`pause`, `sv.paused`).
+pub(crate) const STATE_PAUSED: u32 = 512;
 
 /// `Pcm` flags: silence what was mixed ahead before these samples
 /// (`S_ClearBuffer`).
