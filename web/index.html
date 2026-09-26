@@ -34,19 +34,14 @@
     border:1px solid var(--edge); border-bottom-width:2px; border-radius:3px;
     background:#1a1510; color:#d6c9ae; font-size:11px; text-align:center; }
 
-  header { margin:26px 12px 14px; }
-  h1 { margin:0; font-size:21px; font-weight:600; letter-spacing:.45em; text-indent:.45em;
-    color:var(--bronze-hi); text-shadow:0 0 24px rgba(217,165,70,.28); }
-  h1 .sep { color:#7d5a1e; }
-  #tagline { margin:7px 0 0; color:var(--dim); font-size:13px; }
-
-  /* The bezel framing the game view (presentation only — #wrap inside it is the
-     fullscreen target and overlay anchor, untouched). */
-  #stage { display:inline-block; padding:10px; margin-top:6px;
-    background:linear-gradient(180deg,#17120b,#0f0c08);
-    border:1px solid #2e2417; border-radius:6px;
-    box-shadow:0 0 0 1px #000, 0 14px 44px rgba(0,0,0,.65), inset 0 1px 0 rgba(217,165,70,.06); }
-  #status { min-height:1.2em; margin:10px 0 2px; color:#a08c5a; font-size:13px; }
+  /* The page is the game: the view, one quiet line under it, and a drawer
+     with the reference. The body is a column centred in the window (the two
+     flexible spacers take whatever height is left, none once the drawer makes
+     the page taller than the window); #stage shrink-wraps the canvas so the
+     line under it is exactly as wide as the view. */
+  body { height:auto; min-height:100%; display:flex; flex-direction:column; align-items:center; }
+  body::before, body::after { content:''; flex:1 1 0; }
+  #stage { display:inline-block; margin-top:16px; text-align:left; }
   #wrap { position:relative; display:inline-block; }
   /* Quake's art + 3-D were authored for a 320x200 framebuffer shown on a 4:3
      monitor (non-square pixels, ~1.2x taller than wide). The render target is
@@ -54,15 +49,15 @@
      stretched vertically 1.2x exactly like a 1996 CRT. Without this the HUD
      digits/menu/world look horizontally over-wide ("squat").
      How big the box is is the monitor's business, not the engine's: it is the
-     largest 4:3 box the window fits under the header with the status line
-     still in view (--chrome-v: the header, the bezel and the status line, plus
-     a little air; --chrome-h: the bezel and a 16px gutter each side), and
+     largest 4:3 box the window fits with the line under it still in view
+     (--chrome-v: the top margin and that line, plus a little air; --chrome-h:
+     a 16px gutter each side), and
      never smaller than 640x480 (the page scrolls instead). WinQuake draws the
      status bar and menus 1:1 in every mode, so at the default 960x600 they
      are 320 wide: in a fixed 640x480 box they came out a third of the size.
      fitCanvas() then snaps that box (see there): pixelated scaling by a
      factor just past a whole number doubles a column here and there. */
-  canvas { --chrome-v:168px; --chrome-h:56px;
+  canvas { --chrome-v:84px; --chrome-h:34px;
     image-rendering:pixelated; background:#000;
     width:max(640px, min(100vw - var(--chrome-h), (100vh - var(--chrome-v)) * 4 / 3));
     height:auto; aspect-ratio:4 / 3;
@@ -109,53 +104,53 @@
   /* transient key hint on entering fullscreen */
   #fsHint { top:10px; left:50%; transform:translateX(-50%); }
 
-  #actions { margin:12px auto 2px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
-  button { font:inherit; font-size:12.5px; background:#191309; color:#cdbd9c;
-    border:1px solid #3c2f1d; border-radius:3px; padding:6px 14px; cursor:pointer;
-    transition:border-color .15s, color .15s, background .15s; }
-  button:hover { border-color:#7d5a1e; color:#e8d3a0; background:#211910; }
-  button:focus-visible { outline:2px solid var(--bronze); outline-offset:2px; }
-  #sndBtn.on { color:var(--bronze-hi); border-color:#7d5a1e; }
+  /* The line under the view: wordmark, status, three text buttons. width:0 +
+     min-width:100% keeps it from widening the shrink-wrapped #stage. */
+  #bar { width:0; min-width:100%; display:flex; flex-wrap:wrap; align-items:baseline;
+    gap:4px 18px; margin-top:9px; font-size:12.5px; }
+  #mark { font-size:12.5px; font-weight:600; letter-spacing:.35em; color:var(--bronze-hi); }
+  #mark .sep { color:#7d5a1e; }
+  #status { flex:1 1 12rem; min-width:0; color:#a08c5a; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; }
+  #barBtns { display:flex; gap:16px; }
+  button.link { font:inherit; font-size:12.5px; background:none; border:0; padding:0;
+    color:var(--dim); cursor:pointer; text-decoration:underline; text-decoration-color:transparent;
+    text-underline-offset:3px; transition:color .15s, text-decoration-color .15s; }
+  button.link:hover { color:var(--bronze-hi); text-decoration-color:currentColor; }
+  button.link:focus-visible { outline:2px solid var(--bronze); outline-offset:3px; border-radius:2px; }
+  button.link[aria-expanded="true"], #sndBtn.on { color:var(--bronze-hi); }
 
-  /* Controls reference: three compact key columns + a console drawer. */
-  #help { display:flex; gap:30px; justify-content:center; flex-wrap:wrap;
-    margin:20px auto 4px; max-width:920px; padding:0 14px; text-align:left; }
+  /* The drawer: controls reference, console commands, shortcuts, credit. */
+  #drawer { width:100%; box-sizing:border-box; max-width:920px; margin:22px auto 36px; padding:0 16px; text-align:left; }
+  #help { display:flex; gap:30px; justify-content:center; flex-wrap:wrap; }
   #help .col { flex:1 1 0; min-width:240px; max-width:330px; }
   #help h2 { font-size:11px; font-weight:600; letter-spacing:.25em; text-transform:uppercase;
     color:var(--bronze); margin:0 0 8px; padding-bottom:5px; border-bottom:1px solid var(--line); }
   .keys { display:grid; grid-template-columns:max-content 1fr; gap:6px 12px;
     font-size:12.5px; color:var(--dim); align-items:baseline; }
   .keys .k { text-align:right; color:var(--ink); white-space:nowrap; }
-  #conHelp { max-width:640px; margin:14px auto 0; padding:0 14px; text-align:left;
-    font-size:12.5px; color:var(--dim); }
+  #conHelp { max-width:640px; margin:18px auto 0; font-size:12.5px; color:var(--dim); }
   #conHelp summary { cursor:pointer; color:var(--ink); }
   #conHelp summary:hover { color:var(--bronze-hi); }
   .congrid { display:grid; grid-template-columns:max-content 1fr; gap:5px 16px;
     margin:10px 0 4px 8px; }
+  #drawer .aside { max-width:640px; margin:14px auto 0; font-size:12px; color:var(--faint); }
 
-  #touchNote { display:none; margin:14px auto 0; max-width:520px; padding:8px 14px;
+  #touchNote { display:none; margin:12px 0 0; width:0; min-width:100%; box-sizing:border-box; padding:8px 14px;
     border:1px solid #4a2317; border-radius:3px; background:#180e09; color:#c98f6f;
     font-size:12.5px; }
-  footer { margin:28px 12px 32px; color:var(--faint); font-size:11.5px; line-height:1.8; }
-  footer code { color:#9a7d45; }
-
   /* Small/touch screens: the game needs a keyboard + mouse — say so, and shrink
      the 4:3 box (same aspect math as above) so the page never breaks. */
   @media (pointer:coarse), (max-width:699px) { #touchNote { display:block; } }
   @media (max-width:699px) {
-    canvas { width:min(94vw, 640px); height:auto; aspect-ratio:4 / 3; }
+    canvas { width:calc(100vw - 32px); height:auto; aspect-ratio:4 / 3; }
     #play { font-size:13px; }
     .keys .k { text-align:left; }
   }
 </style>
 </head>
 <body>
-  <header>
-    <h1>QUAKE<span class="sep">·</span>RS</h1>
-    <p id="tagline">id Software's 1996 classic, ported to safe Rust — no GPU, no dependencies, software-rendered in your browser.</p>
-  </header>
-
-  <div id="stage">
+  <main id="stage">
     <div id="wrap">
       <canvas id="c"></canvas>
       <div id="overlay">
@@ -169,74 +164,72 @@
       <div id="lockChip" class="chip">click to capture mouse</div>
       <div id="fsHint" class="chip">Esc = menu &nbsp;·&nbsp; F = leave fullscreen</div>
     </div>
+    <div id="bar">
+      <span id="mark">QUAKE<span class="sep">·</span>RS</span>
+      <span id="status">loading…</span>
+      <span id="barBtns">
+        <button id="fs" class="link" title="fullscreen (F)">fullscreen</button>
+        <button id="sndBtn" class="link" title="play a test sound — in-game audio unlocks on your first click">sound off</button>
+        <button id="keysBtn" class="link" aria-expanded="false" aria-controls="drawer">keys</button>
+      </span>
+    </div>
+    <div id="touchNote">quake-rs needs a keyboard and a mouse — open it on a desktop to play.
+      (The attract demos play fine on this device.)</div>
+  </main>
+
+  <div id="drawer" hidden>
+    <section id="help">
+      <div class="col">
+        <h2>Move</h2>
+        <div class="keys">
+          <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>move / strafe</span>
+          <span class="k">mouse</span><span>look (click to lock; or click-drag)</span>
+          <span class="k"><kbd>←</kbd><kbd>→</kbd></span><span>turn</span>
+          <span class="k"><kbd>Space</kbd></span><span>jump / swim up</span>
+          <span class="k"><kbd>C</kbd></span><span>swim down</span>
+        </div>
+      </div>
+      <div class="col">
+        <h2>Fight</h2>
+        <div class="keys">
+          <span class="k">click</span><span>fire</span>
+          <span class="k"><kbd>Ctrl</kbd></span><span>fire (DOS-style — arrows + <kbd>Ctrl</kbd> play fine without capturing the mouse)</span>
+          <span class="k"><kbd>1</kbd>–<kbd>8</kbd></span><span>select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)</span>
+        </div>
+      </div>
+      <div class="col">
+        <h2>Interface</h2>
+        <div class="keys">
+          <span class="k">any key</span><span>the menu, while a demo plays</span>
+          <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
+          <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
+          <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
+          <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys, Web extras for the port's opt-in extras (all off by default)</span>
+          <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
+          <span class="k"><kbd>F</kbd></span><span>fullscreen</span>
+          <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
+        </div>
+      </div>
+    </section>
+
+    <details id="conHelp">
+      <summary>console commands — cheats &amp; level select (press <kbd>~</kbd>)</summary>
+      <div class="congrid">
+        <code>god</code><span>invulnerability</span>
+        <code>noclip</code><span>walk through walls</span>
+        <code>fly</code><span>fly mode</span>
+        <code>give a</code><span>full armor — also <code>h s n r c</code> for health/ammo, or <code>1</code>–<code>8</code> for a weapon (e.g. <code>give r 50</code>)</span>
+        <code>impulse 9</code><span>all weapons + ammo</span>
+        <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
+        <code>kill</code><span>respawn</span>
+        <code>wasm_showfps 1</code><span>the Web extras (not in id's Quake, all off by default): <code>wasm_uncapped</code> lifts the 72 fps cap, <code>wasm_showfps</code> shows the frame rate, <code>wasm_exactpersp</code> draws walls with exact perspective (also on Options &gt; Web extras)</span>
+        <code>help</code><span>id's Help/Ordering screen</span>
+        <code>wasm_help</code><span>this port's list of console commands (<code>echo</code>, <code>clear</code>, the demo commands, …)</span>
+      </div>
+    </details>
+    <p class="aside">Shortcuts: <button id="walkBtn" class="link">walk e1m1</button> · <button id="demoBtn" class="link">play demo1 (e1m3)</button></p>
+    <p class="aside">id Software's 1996 Quake, ported to Rust from its GPL source and software-rendered in your browser — no GPU, no dependencies. Shareware episode embedded.</p>
   </div>
-
-  <div id="status">loading…</div>
-
-  <div id="actions">
-    <button id="walkBtn">🚶 walk e1m1</button>
-    <button id="demoBtn">▶ play demo1 (e1m3)</button>
-    <button id="fs">⛶ fullscreen (F)</button>
-    <button id="sndBtn" title="play a test SFX — in-game audio unlocks on your first click">🔇 sound: off</button>
-  </div>
-
-  <div id="touchNote">quake-rs needs a keyboard and a mouse — open it on a desktop to play.
-    (▶ demo playback works fine on this device.)</div>
-
-  <section id="help">
-    <div class="col">
-      <h2>Move</h2>
-      <div class="keys">
-        <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>move / strafe</span>
-        <span class="k">mouse</span><span>look (click to lock; or click-drag)</span>
-        <span class="k"><kbd>←</kbd><kbd>→</kbd></span><span>turn</span>
-        <span class="k"><kbd>Space</kbd></span><span>jump / swim up</span>
-        <span class="k"><kbd>C</kbd></span><span>swim down</span>
-      </div>
-    </div>
-    <div class="col">
-      <h2>Fight</h2>
-      <div class="keys">
-        <span class="k">click</span><span>fire</span>
-        <span class="k"><kbd>Ctrl</kbd></span><span>fire (DOS-style — arrows + <kbd>Ctrl</kbd> play fine without capturing the mouse)</span>
-        <span class="k"><kbd>1</kbd>–<kbd>8</kbd></span><span>select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)</span>
-      </div>
-    </div>
-    <div class="col">
-      <h2>Interface</h2>
-      <div class="keys">
-        <span class="k">any key</span><span>the menu, while a demo plays</span>
-        <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
-        <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
-        <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
-        <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys, Web extras for the port's opt-in extras (all off by default)</span>
-        <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
-        <span class="k"><kbd>F</kbd></span><span>fullscreen</span>
-        <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
-      </div>
-    </div>
-  </section>
-
-  <details id="conHelp">
-    <summary>console commands — cheats &amp; level select (press <kbd>~</kbd>)</summary>
-    <div class="congrid">
-      <code>god</code><span>invulnerability</span>
-      <code>noclip</code><span>walk through walls</span>
-      <code>fly</code><span>fly mode</span>
-      <code>give a</code><span>full armor — also <code>h s n r c</code> for health/ammo, or <code>1</code>–<code>8</code> for a weapon (e.g. <code>give r 50</code>)</span>
-      <code>impulse 9</code><span>all weapons + ammo</span>
-      <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
-      <code>kill</code><span>respawn</span>
-      <code>wasm_showfps 1</code><span>the Web extras (not in id's Quake, all off by default): <code>wasm_uncapped</code> lifts the 72 fps cap, <code>wasm_showfps</code> shows the frame rate, <code>wasm_exactpersp</code> draws walls with exact perspective (also on Options &gt; Web extras)</span>
-      <code>help</code><span>id's Help/Ordering screen</span>
-      <code>wasm_help</code><span>this port's list of console commands (<code>echo</code>, <code>clear</code>, the demo commands, …)</span>
-    </div>
-  </details>
-
-  <footer>
-    <p>dependency-free, <code>#![forbid(unsafe_code)]</code> Rust engine compiled to WASM — the original software renderer, faithfully ported</p>
-    <p>GPLv2 heritage: built from id Software's released Quake source · shareware episode data embedded</p>
-  </footer>
 <script>
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('c');
@@ -454,6 +447,15 @@ function toggleFullscreen() {
   else wrap.requestFullscreen?.();
 }
 fsBtn.addEventListener('click', toggleFullscreen);
+// "keys" opens the drawer under the view: the controls, the console
+// commands, two shortcuts and the credit.
+const keysBtn = document.getElementById('keysBtn');
+const drawerEl = document.getElementById('drawer');
+keysBtn.addEventListener('click', () => {
+  drawerEl.hidden = !drawerEl.hidden;
+  keysBtn.setAttribute('aria-expanded', String(!drawerEl.hidden));
+  if (!drawerEl.hidden) drawerEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+});
 
 // --- Esc in fullscreen ---------------------------------------------------------
 // The browser RESERVES Esc: with the mouse captured the first Esc only releases
@@ -564,7 +566,7 @@ function updateSndUI() {
   const on = !!(audioCtx && audioCtx.state === 'running');
   if (on === sndShown) return;
   sndShown = on;
-  sndBtn.textContent = on ? '🔊 sound: on' : '🔇 sound: off';
+  sndBtn.textContent = on ? 'sound on' : 'sound off';
   sndBtn.classList.toggle('on', on);
 }
 updateSndUI();
@@ -1419,17 +1421,18 @@ async function main() {
   // ~60, which bands the menu's checkerboard fade and the 1:1 text, and a
   // box narrower than it drops whole columns out of that text. So, in device
   // pixels per framebuffer column (s):
-  //   - s at or up to 1/8 past a whole number k: the box is exactly k columns
+  //   - s at or up to 1/6 past a whole number k: the box is exactly k columns
   //     per framebuffer column (every column k pixels wide; the picture
-  //     gives up at most a ninth of its width for it);
+  //     gives up at most a seventh of its width for it — at 1440x900 the
+  //     window fits 1088 for 960 columns, which would double one in 7);
   //   - s below 1 (a window narrower than the framebuffer): the natural box,
   //     smoothed (image-rendering:auto) — no column is dropped, the text is
   //     a little soft;
-  //   - otherwise (1.27 at 1920x1080): the natural box, pixelated, as before.
+  //   - otherwise (1.38 at 1920x1080): the natural box, pixelated.
   // Rows are another matter: the 16:10 framebuffer is shown at 4:3, 1.2 rows
   // per column's worth (a 1996 monitor's stretch), so every fifth row is one
   // pixel taller whatever the box.
-  const SNAP = 1 / 8;
+  const SNAP = 1 / 6;
   function fitCanvas() {
     canvas.style.width = canvas.style.height = canvas.style.imageRendering = '';
     const natural = parseFloat(getComputedStyle(canvas).width);

@@ -18,9 +18,9 @@
   5. KEYBOARD-ONLY PLAY — arrows move the camera and Ctrl fires (+attack)
      without the pointer ever being locked.
   6. THE CANVAS BOX — at 1440x900 the 960-wide framebuffer gets a 960x720
-     box (a whole pixel per column: the 976 the window fits doubled one
-     column in 60), at 1920x1080 the natural 1216x912 (1.27 is no near
-     whole number), at 1024x768 an 800x600 box drawn smooth (a pixelated
+     box (a whole pixel per column: the 1088 the window fits would double
+     one column in 7), at 1920x1080 the natural 1328x996 (1.38 is no near
+     whole number), at 1024x768 a 912x684 box drawn smooth (a pixelated
      shrink drops columns).
 
 Headless fullscreen is approximate: the F/fullscreen checks are best-effort
@@ -43,6 +43,14 @@ httpd.daemon_threads = True
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 passed, failed = 0, 0
+def open_drawer(pg):
+    """The page's shortcuts and the console-command list live in the "keys"
+    drawer under the view; open it (once) before clicking them like a user."""
+    if pg.evaluate("document.getElementById('drawer').hidden"):
+        pg.locator("#keysBtn").click()
+        time.sleep(0.2)
+
+
 def check(name, ok, detail=""):
     global passed, failed
     print(("PASS" if ok else "FAIL"), name, detail)
@@ -93,6 +101,7 @@ with sync_playwright() as p:
     check("the prompt says a key brings the menu",
           "any key for the menu" in pg.evaluate("document.getElementById('play').textContent"))
     # Mode transitions never resurrect the scrim.
+    open_drawer(pg)
     pg.locator("#walkBtn").click(); time.sleep(0.3)
     pg.locator("#demoBtn").click(); time.sleep(0.3)
     check("walk->demo transitions keep the scrim hidden",
@@ -105,7 +114,10 @@ with sync_playwright() as p:
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     boot_page(pg)
 
-    # The scroll checks below are only load-bearing if the page CAN scroll.
+    # The scroll checks below are only load-bearing if the page CAN scroll:
+    # with the "keys" drawer shut the page is just the view, so show the
+    # drawer (without a click, which would be the first gesture).
+    pg.evaluate("document.getElementById('drawer').hidden = false")
     check("page is scrollable (scroll assertions meaningful)",
           pg.evaluate("document.documentElement.scrollHeight > innerHeight"))
 
@@ -134,6 +146,17 @@ with sync_playwright() as p:
     check("menu state: 10 Space + 10 arrows scroll nothing",
           pg.evaluate("scrollY") == sy)
 
+    # The "keys" button opens the drawer and, like every control, gives its
+    # focus back: Space must not toggle it shut again.
+    pg.evaluate("document.getElementById('drawer').hidden = true")
+    pg.locator("#keysBtn").click()
+    time.sleep(0.2)
+    check("keys button opens the drawer",
+          pg.evaluate("!document.getElementById('drawer').hidden"))
+    for _ in range(5):
+        pg.keyboard.press("Space")
+    check("drawer stays open through 5 Space presses (keys button blurred)",
+          pg.evaluate("!document.getElementById('drawer').hidden"))
     # Walk mode (boot lands in the menu); Esc — unlocked — closes it.
     pg.locator("#walkBtn").click()
     time.sleep(0.5)
@@ -305,14 +328,14 @@ with sync_playwright() as p:
 
     # (6) The canvas box (fitCanvas): the largest 4:3 box the window fits,
     # snapped to a whole number of pixels per framebuffer column when it is
-    # at most 1/8 past one (no doubled column in the pixelated upscale),
+    # at most 1/6 past one (no doubled column in the pixelated upscale),
     # smoothed when it is narrower than the framebuffer (no dropped column).
     box = lambda: pg.evaluate("""(() => { const c = document.getElementById('c');
         return [parseFloat(c.style.width), parseFloat(c.style.height),
                 getComputedStyle(c).imageRendering, exp.width()]; })()""")
     for (vw, vh), want in [((1440, 900), (960, 720, "pixelated")),
-                           ((1920, 1080), (1216, 912, "pixelated")),
-                           ((1024, 768), (800, 600, "auto"))]:
+                           ((1920, 1080), (1328, 996, "pixelated")),
+                           ((1024, 768), (912, 684, "auto"))]:
         pg.set_viewport_size({"width": vw, "height": vh})
         time.sleep(0.3)
         b = box()
