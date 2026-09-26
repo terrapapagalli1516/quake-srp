@@ -143,7 +143,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
         if real_dt > 0.0 {
             a.show_fps.frame(a.realtime);
         }
-        bench::frame_begin();
+        bench::frame_begin(active_renderer(a));
         // host_time: the menudot spinner (mode-independent, like realtime).
         a.clock += dt;
         let (w, h) = (a.render_w, a.render_h);
@@ -356,10 +356,20 @@ pub extern "C" fn step(dt: f32) -> i32 {
             render::recycle_image(img);
         }
         bench::lap(Phase::Pack);
-        bench::frame_end();
+        bench::frame_end(active_renderer(a));
         a.host_framecount += 1;
     });
     ran
+}
+
+/// The renderer of the game that draws this frame: the demo's in mode 1,
+/// else the walk's.
+fn active_renderer(a: &mut crate::app::App) -> Option<&mut render::Renderer> {
+    if a.mode == 1 {
+        a.demo.as_mut().map(|d| &mut d.renderer)
+    } else {
+        a.walk.as_mut().map(|w| &mut w.renderer)
+    }
 }
 
 #[cfg(test)]

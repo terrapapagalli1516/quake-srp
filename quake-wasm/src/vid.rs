@@ -97,6 +97,8 @@ pub(crate) fn vid(render_w: usize, render_h: usize) -> Vid {
         height: render_h,
         display_aspect: DISPLAY_ASPECT,
         exact_perspective: crate::extras::extras().exact_persp,
+        // The page does not offer the video cvars yet: id's.
+        video: quake_rs::render::VideoCvars::CLASSIC,
     }
 }
 
