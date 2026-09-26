@@ -2415,3 +2415,79 @@ settings live in one typed value the host owns (`quake_rs::settings`), and
   departure in `Cvars` (on in `Cvars::modern`) when they land. id's F-key
   shortcuts (F1–F12), `messagemode` and the `zoom_in` alias are still not
   bound (CENSUS L12).
+
+## Input: id's joystick, the 2026 gamepad, raw mouse, keys by place (2026-09-26, branch `q26/input`)
+
+What changed against id's WinQuake, and what the 2026 profile adds. The
+joystick is `quake-rs/src/client/in_win.rs` (the joystick half of in_win.c),
+its host side `quake-wasm/src/input.rs`; the page polls the Gamepad API
+(`web/PLATFORM.md`, "Input").
+
+- ✅ **id's joystick** (in_win.c): `IN_StartupJoystick` (detection, `-nojoy`),
+  `Joy_AdvancedUpdate_f` (`joyadvancedupdate`), `IN_Commands` (buttons as
+  `JOY1`–`JOY4` then `AUX5`.., the hat as `AUX29`–`AUX32`) and `IN_JoyMove`,
+  with every cvar at id's defaults: `joystick` (0: no pad is read, as id's),
+  `joyname`, `joyadvanced`, `joyadvaxisx`..`v`, the four thresholds and
+  sensitivities, `joywwhack1`/`2`. keys.c's `JOY`/`AUX` names bind. Before,
+  a gamepad did nothing. Tests `in_win.rs`, `classic_reads_the_pad_only_with_joystick_1_as_ids_joystick`.
+- **The pad as winmm saw it** is the port's choice (id's code saw whatever the
+  driver reported): a standard Gamepad API pad reads as an Xbox 360 pad
+  through winmm — X/Y the left stick, Z the triggers, R/U the right stick,
+  the D-pad the hat — except that the triggers are also buttons 7 and 8 (the
+  Gamepad API's order), so they can be bound. Table in `in_win.rs`.
+- **Departures in Classic's joystick, kept small on purpose:**
+  - `IN_Commands` keys the newest reading. id's keyed what `IN_JoyMove` read
+    the host frame before (a frame later); with `joystick 0` both key nothing.
+  - A pad that goes away, or `joystick 0`, lets every held pad key go (id's
+    kept the last read: a held button stayed held).
+  - The pad's turn and look are gated behind the menu and the console, as the
+    port gates the mouse; id's `IN_JoyMove` turned the view behind the menu.
+  - "joystick detected" prints when a pad first shows itself (a browser shows
+    none until a button is pressed), not at startup; "joystick not found"
+    never prints.
+  - id archives only `joystick`; the port also keeps the layout cvars in
+    `config.cfg` (departures are kept), so a player's layout lasts.
+- **Kept, id's:** a diagonal on the hat keys nothing (`dwPOV` is compared
+  with the four straight directions); an idle look axis with `lookspring 0`
+  stops the pitch drift every frame ("the lookspring bug" workaround), so
+  with a pad read, `centerview` is cancelled at once — in 2026 too, which is
+  why the 2026 pad does not bind `centerview`.
+- ✅ **The 2026 pad** (on by default): id's own advanced configuration as the
+  layout — `joystick 1`, `joyadvanced 1`, X side, Y forward, R look, U turn,
+  no thresholds, `joysidesensitivity 1` (strafe right is right),
+  `joyyawsensitivity -1.75` (245°/s at full tilt) — plus the port's
+  `joy_deadzone 0.2` (each stick's dead zone round, and rescaled from its
+  edge), `joy_exponent 2` (the look curve), `joy_menukeys 1` (A Enter — `y` on
+  a yes/no prompt — B and Start Escape, D-pad arrows, while the menu has the
+  keyboard and no key is being bound; a key comes up as what it went down
+  as), `joy_rumble 1` (damage: `V_ParseDamage`'s count; firing the super
+  shotgun, grenade or rocket launcher, the lightning gun per bolt: the
+  player's `punchangle` kick). Bindings (`Bindings::with_gamepad`): A and LT
+  `+jump`, RT `+attack`, B and D-pad down `+movedown`, D-pad up `+moveup`,
+  Y, RB and D-pad right `impulse 10`, LB and D-pad left `impulse 12`, Back
+  `+showscores`, Start `togglemenu`, L3 `+speed`. Options' settings page:
+  Gamepad (`joystick`) and Pad rumble (`joy_rumble`); the layout's cvars are
+  the console's, as id's were. With `+strafe` held the right stick strafes
+  the wrong way (id's one `joysidesensitivity` serves both a side axis and a
+  turn axis that strafes); not fixed.
+- ✅ **Keys by their place** (the page): letters are `KeyA`..`KeyZ` like the
+  digits and punctuation already were — id's scancodes (`scantokey`, a US
+  table). Before, letters followed the layout, so AZERTY's WASD was ZQSD in
+  2026 and `default.cfg`'s `a`/`d`/`z`/`c` moved. What the layout types
+  still goes to the console and the name fields (and AltGr now types there).
+  Firefox's quick-find no longer opens on `/` (`impulse 10`) or `'`.
+- ✅ **Raw mouse**: pointer lock asks for `unadjustedMovement` (Chromium's raw
+  input), falling back to the plain lock where refused (Linux). id's
+  `IN_StartupMouse` switched Windows' pointer acceleration off
+  (`newmouseparms {0, 0, 1}`), so this is id's feel, in both profiles. Every
+  count arrives (a coalesced event carries the sum of its samples) and the
+  turn per count is the same at any frame rate
+  (`mouse_turns_the_same_at_60_and_480_hz`).
+- **Latency** (`web/latency.py`, PLATFORM.md "Input"): from an event's
+  `timeStamp` to the canvas, 12–13 ms median at 60 Hz for a key, the mouse
+  or the pad (half a refresh's wait, then a 4 ms frame); at an emulated
+  240 Hz the pad, now polled just before each tick, 4.2 ms. `?lowlatency`
+  stays opt-in (unverifiable headless, may tear).
+- **Proof:** `oracle/classic_check.py` ALL PASS; `web/verify_gamepad.py`
+  20/20 and the other page checks in headless Chromium and Firefox; no real
+  pad or real 240/480 Hz display was tried.
