@@ -28,19 +28,18 @@ here (skipped with a note when the headless browser refuses) — see the manual
 test script in the session notes for the real-monitor pass.
 
 Usage: verify_input.py [webdir]   (defaults to this script's directory; pass a
-temp dir holding index.html + a freshly built quake_wasm.wasm to test changes
-without touching the deployed wasm).
-"""
-import functools, http.server, os, socketserver, sys, threading, time
-from playwright.sync_api import sync_playwright
+deploy dir — PLATFORM.md — to test changes without touching the deployed page).
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8171"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+`exp.name()` asks the program (a Promise, answered between two frames), so
+the checks await it.
+"""
+import os, sys, time
+from playwright.sync_api import sync_playwright
+import isolated
+
+WEB = isolated.webdir()
+PORT = isolated.port(8171)
+httpd = isolated.serve(WEB, PORT)
 
 passed, failed = 0, 0
 def open_drawer(pg):
@@ -58,18 +57,10 @@ def check(name, ok, detail=""):
     else: failed += 1
 
 def boot_page(pg):
-    """Load the page and wait for the ready prompt (exp built, attract booted)."""
+    """Load the page and wait for the ready prompt (the game running, the
+    attract loop booted)."""
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    # `exp` is a top-level `let` binding — probe as a bare identifier, ending in
-    # a boolean (a function-valued string predicate would get CALLED).
-    pg.wait_for_function(
-        "typeof exp !== 'undefined' && !!exp && typeof exp.boot === 'function'",
-        timeout=120000,
-    )
-    pg.wait_for_function(
-        "document.getElementById('status').textContent.includes('ready')",
-        timeout=30000,
-    )
+    pg.wait_for_function("window.quake && quake.ready", timeout=120000)
 
 with sync_playwright() as p:
     br = p.chromium.launch(headless=True, args=[
@@ -89,10 +80,10 @@ with sync_playwright() as p:
           pg.evaluate("!overlay.classList.contains('hidden')"))
     pg.locator("#wrap").screenshot(path=os.path.join(WEB, "verify_input_overlay.png"))
     pg.locator("#overlay").click()
-    s = pg.evaluate("""() => ({
+    s = pg.evaluate("""async () => ({
         hidden: overlay.classList.contains('hidden'),
         audio: audioCtx ? audioCtx.state : 'none',
-        menu: exp.menu_visible(), walk: exp.in_walk_mode(),
+        menu: await exp.menu_visible(), walk: await exp.in_walk_mode(),
     })""")
     check("one click: scrim gone", s["hidden"])
     check("one click: audio unlocked", s["audio"] == "running", s["audio"])
@@ -123,10 +114,10 @@ with sync_playwright() as p:
 
     # (1) Enter is a first gesture too.
     pg.keyboard.press("Enter")
-    s = pg.evaluate("""() => ({
+    s = pg.evaluate("""async () => ({
         hidden: overlay.classList.contains('hidden'),
         audio: audioCtx ? audioCtx.state : 'none',
-        menu: exp.menu_visible(),
+        menu: await exp.menu_visible(),
     })""")
     check("Enter starts: scrim gone + audio unlocked, the demo with no menu",
           s["hidden"] and s["audio"] == "running" and s["menu"] == 0, str(s))
@@ -161,9 +152,9 @@ with sync_playwright() as p:
     pg.locator("#walkBtn").click()
     time.sleep(0.5)
     pg.keyboard.press("Escape")
-    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     time.sleep(0.3)
-    check("walk mode entered (in_walk_mode)", pg.evaluate("exp.in_walk_mode() === 1"))
+    check("walk mode entered (in_walk_mode)", pg.evaluate("exp.in_walk_mode()") == 1)
     # (4) Chip: visible in unlocked walk mode with the menu down.
     pg.wait_for_function("lockChip.classList.contains('show')", timeout=5000)
     check("capture chip shows in unlocked walk mode", True)
@@ -213,20 +204,18 @@ with sync_playwright() as p:
                 if abs(before[i] - after[i]) > 12 or abs(before[i+1] - after[i+1]) > 12)
     check("arrows alone move the camera (keyboard play)",
           moved / max(1, npx) > 0.25, f"{moved/max(1,npx):.1%} px changed")
-    # Ctrl -> +attack: swap exp for a spy copy so set_attack calls are
-    # observable (wasm export properties are non-configurable, so a Proxy
-    # can't intercept them — a plain spread copy can).
+    # Ctrl -> +attack: spy on the page's keyEvent (the one door every key
+    # takes to the program) so Ctrl's press and release are observable.
     pg.evaluate("""() => {
-        window._real = exp; window._atk = [];
-        exp = { ...window._real };
+        window._real = keyEvent; window._atk = [];
         // Merged input path: Ctrl is K_CTRL(133) through Key_Event and the
         // BINDINGS table (default.cfg: ctrl = +attack, rebindable) — spy
-        // key_event's downs and ups.
-        exp.key_event = (k, d, c) => { if (k === 133) window._atk.push(d); return window._real.key_event(k, d, c); };
+        // its downs and ups.
+        keyEvent = (k, d, c) => { if (k === 133) window._atk.push(d ? 1 : 0); return window._real(k, d, c); };
     }""")
     pg.keyboard.down("Control"); time.sleep(0.15); pg.keyboard.up("Control")
     atk = pg.evaluate("window._atk")
-    pg.evaluate("exp = window._real")
+    pg.evaluate("keyEvent = window._real")
     check("Ctrl fires (+attack press/release)", atk == [1, 0], str(atk))
     check("pointer never locked during keyboard play",
           pg.evaluate("document.pointerLockElement === null"))
@@ -253,19 +242,19 @@ with sync_playwright() as p:
         # reserved Esc; simulated -- headless can't deliver a real lock-Esc)
         # opens the in-game menu.
         pg.evaluate("document.exitPointerLock()")
-        pg.wait_for_function("exp.menu_visible() === 1", timeout=5000)
+        pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
         check("Esc-driven lock loss opens the in-game menu", True)
         check("chip hides while the menu is up",
               pg.evaluate("!lockChip.classList.contains('show')"))
         pg.locator("#wrap").screenshot(path=os.path.join(WEB, "verify_input_menu.png"))
         # Plain Esc keydowns now navigate BACK in the menu (deliverable: no lock).
         pg.keyboard.press("Enter")    # Main > Single Player (submenu)
-        check("menu: Enter descends to a submenu", pg.evaluate("exp.menu_visible() === 1"))
+        check("menu: Enter descends to a submenu", pg.evaluate("exp.menu_visible()") == 1)
         pg.keyboard.press("Escape")   # submenu -> main screen (still visible)
         check("menu: Esc backs out of the submenu (menu still up)",
-              pg.evaluate("exp.menu_visible() === 1"))
+              pg.evaluate("exp.menu_visible()") == 1)
         pg.keyboard.press("Escape")   # main screen -> closed
-        pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+        pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
         check("menu: Esc on the main screen closes it", True)
         # No auto-grab: the pointer is still free; the chip invites the click.
         check("no auto re-lock after the menu closes",
@@ -278,20 +267,20 @@ with sync_playwright() as p:
                              timeout=5000)
         check("next canvas click re-captures the mouse", True)
         pg.evaluate("document.exitPointerLock()")
-        pg.wait_for_function("exp.menu_visible() === 1", timeout=5000)
+        pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
         pg.keyboard.press("Escape")   # leave the menu closed for the next phase
         time.sleep(0.3)
 
     # (3c) Console state: keys are owned by the console, and arrows can't scroll.
     pg.keyboard.press("`")
-    check("console opens", pg.evaluate("exp.console_visible() === 1"))
+    check("console opens", pg.evaluate("exp.console_visible()") == 1)
     sy = pg.evaluate("scrollY")
     for _ in range(10):
         pg.keyboard.press("ArrowDown")
         pg.keyboard.press("Space")
     check("console state: arrows/Space scroll nothing", pg.evaluate("scrollY") == sy)
     pg.keyboard.press("Escape")
-    check("Esc closes the console", pg.evaluate("exp.console_visible() === 0"))
+    check("Esc closes the console", pg.evaluate("exp.console_visible()") == 0)
 
     # (4b) Demo mode: chip hidden, scrim hidden, canvas clicks don't lock.
     pg.locator("#demoBtn").click()
@@ -301,11 +290,11 @@ with sync_playwright() as p:
     time.sleep(0.5)
     pg.locator("#c").click(position={"x": 320, "y": 240})
     time.sleep(0.5)
-    s = pg.evaluate("""() => ({
+    s = pg.evaluate("""async () => ({
         chip: lockChip.classList.contains('show'),
         scrim: !overlay.classList.contains('hidden'),
         locked: document.pointerLockElement !== null,
-        walk: exp.in_walk_mode(),
+        walk: await exp.in_walk_mode(),
     })""")
     check("demo mode: no chip, no scrim, canvas click does not lock",
           not s["chip"] and not s["scrim"] and not s["locked"] and s["walk"] == 0,
@@ -330,9 +319,9 @@ with sync_playwright() as p:
     # snapped to a whole number of pixels per framebuffer column when it is
     # at most 1/6 past one (no doubled column in the pixelated upscale),
     # smoothed when it is narrower than the framebuffer (no dropped column).
-    box = lambda: pg.evaluate("""(() => { const c = document.getElementById('c');
+    box = lambda: pg.evaluate("""(async () => { const c = document.getElementById('c');
         return [parseFloat(c.style.width), parseFloat(c.style.height),
-                getComputedStyle(c).imageRendering, exp.width()]; })()""")
+                getComputedStyle(c).imageRendering, await exp.width()]; })()""")
     for (vw, vh), want in [((1440, 900), (960, 720, "pixelated")),
                            ((1920, 1080), (1328, 996, "pixelated")),
                            ((1024, 768), (912, 684, "auto"))]:

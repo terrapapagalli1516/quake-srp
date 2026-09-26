@@ -82,7 +82,7 @@ mod imp {
 
     const N_PHASES: usize = 9;
 
-    /// Value names, in `bench_value` index order: the shell phases (ms), the
+    /// Value names, in [`values`] order: the shell phases (ms), the
     /// engine's render phases (ms), then the render counters.
     pub(crate) const NAMES: &str = "input,sim,render3d,post3d,hud2d,menu,console,blend,pack,\
 world,submodel,external,alias,particle,sprite,viewmodel,\
@@ -148,22 +148,17 @@ alias_models,alias_accepted,alias_tris";
         if !ON.with(|c| c.get()) {
             return Ok(());
         }
-        let n = NAMES.split(',').count() as i32;
-        let values: Vec<f64> = (0..n).map(bench_value).collect();
-        crate::proto::Msg::Bench(&values).write_to(out)
+        crate::proto::Msg::Bench(&values()).write_to(out)
     }
 
-    /// Value `i` of the last completed frame (ms for phases, a count for the
-    /// counters); `NaN` past the end.
-    pub(crate) fn bench_value(i: i32) -> f64 {
+    /// The last completed frame's values, in [`NAMES`] order: ms for the
+    /// phases, a count for the counters.
+    pub(crate) fn values() -> Vec<f64> {
         DONE.with(|d| {
             let (ph, s) = &*d.borrow();
             let ms = |ns: u64| ns as f64 / 1.0e6;
-            let i = i.max(0) as usize;
-            if i < N_PHASES {
-                return ph[i];
-            }
-            let rest = [
+            let mut v = ph.to_vec();
+            v.extend([
                 ms(s.world_ns),
                 ms(s.submodel_ns),
                 ms(s.external_ns),
@@ -194,8 +189,8 @@ alias_models,alias_accepted,alias_tris";
                 s.alias_models as f64,
                 s.alias_accepted as f64,
                 s.alias_tris as f64,
-            ];
-            rest.get(i - N_PHASES).copied().unwrap_or(f64::NAN)
+            ]);
+            v
         })
     }
 }
@@ -323,7 +318,7 @@ mod workload {
 
 #[cfg(all(test, feature = "bench"))]
 mod native {
-    use super::imp::{bench_enable, bench_value, NAMES};
+    use super::imp::{bench_enable, values, NAMES};
     use super::workload::{is_walk, start, walk_input};
     use crate::host::step;
     use crate::input::{look, set_attack, set_move};
@@ -364,8 +359,8 @@ mod native {
                     let total = t0.elapsed().as_secs_f64() * 1000.0;
                     if f >= warmup {
                         cols[0].push(total);
-                        for (i, c) in cols.iter_mut().skip(1).enumerate() {
-                            c.push(bench_value(i as i32));
+                        for (c, v) in cols.iter_mut().skip(1).zip(values()) {
+                            c.push(v);
                         }
                     }
                 }

@@ -1,73 +1,88 @@
 #!/usr/bin/env -S uv run --with playwright --script
 """Browser benchmark for the wasm build: where does a frame's time go?
 
-Boots the real page (index.html + quake_wasm.wasm) in headless Chromium, pauses
-the page's own requestAnimationFrame loop, and drives a DETERMINISTIC workload
-through the same exports the page calls, one frame per rAF at Quake's fixed
-1/72 s step (host_maxfps). Per frame it records:
+Boots the real page (index.html, wasi.js, quake.wasm, id1/pak0.pak) in
+headless Chromium, pauses the page's own ticks, and drives a DETERMINISTIC
+workload one frame per requestAnimationFrame at Quake's fixed 1/72 s step
+(host_maxfps), through the page's own tick and present (window.quake.tick).
+Per frame it records:
 
-  * JS side (any wasm build): `step` (the whole exp.step call), `copy` (the
-    img.data.set of the RGBA framebuffer), `put` (ctx.putImageData), `js`
-    (step+copy+put) and `raf` (the rAF-to-rAF period, which adds everything the
-    browser does per frame: paint, composite, GC);
-  * wasm side (a `--features bench` build, see quake-wasm/src/bench.rs): the
-    frame phases input/sim/render3d/post3d/hud2d/menu/console/blend/pack, the
-    engine RenderStats split of render3d (world/submodel/external/alias/particle/
-    sprite/viewmodel) and its counters (faces, pixels, surface-cache hits).
+  * page side (any build): `wait` (from posting the tick to the program's
+    answer: the worker's whole turn — the host frame, its picture into the
+    shared frame slot, its sounds), `copy` (the frame out of the shared slot
+    into the canvas's ImageData), `put` (ctx.putImageData), `js`
+    (wait+copy+put: the main thread's time for the frame) and `raf` (the
+    rAF-to-rAF period, which adds everything the browser does per frame);
+  * program side (a `--features bench` build, see quake-wasm/src/bench.rs):
+    the frame phases input/sim/render3d/post3d/hud2d/menu/console/blend/pack
+    (their sum is `step`, the host frame), the engine RenderStats split of
+    render3d (world/submodel/external/alias/particle/sprite/viewmodel) and its
+    counters (faces, pixels, surface-cache hits).
 
 and prints median / p95 per phase per resolution. `--native` runs the SAME
-workloads through the SAME exports natively (`native_bench` in bench.rs) so each
-phase gets a wasm/native ratio. Workloads (all at dt = 1/72):
+workloads natively (`native_bench` in bench.rs) so each phase gets a
+wasm/native ratio. Workloads (all at dt = 1/72):
 
-  attract    boot_attract(): demo1 (e1m3) playing under the main menu
-  demo1      boot_demo(): id's recorded e1m3 run, menu closed
-  walk_e1m1  boot() + Esc: live server, scripted look-around + run (walkInput below)
+  attract    boot_attract: demo1 (e1m3) playing, the attract loop
+  demo1      boot_demo: id's recorded e1m3 run, menu closed
+  walk_e1m1  boot + Esc: live server, scripted look-around + run (walk_input
+             in bench.rs)
   walk_e1m3  as walk_e1m1 after the console's `map e1m3` (the dense-sim map)
   fire_e1m1  walk_e1m1 with +attack held (muzzle-flash dynamic lights every shot)
   quad_e1m1  walk_e1m1 after the console's `impulse 255` (id's QuadCheat): the
              Quad's blue V_UpdatePalette cshift is on every frame (not in the
              default set; `--workloads quad_e1m1`)
 
+A bench build boots each workload in the program (`bench_start`) and scripts
+the walk's input there; a stock build gets the same boot and input as calls.
+
 Usage:
   uv run web/bench.py --build                 # build the bench wasm, run the default set
-  uv run web/bench.py WEBDIR                  # benchmark index.html + quake_wasm.wasm in WEBDIR
+  uv run web/bench.py WEBDIR                  # benchmark the page in WEBDIR (PLATFORM.md's deploy dir)
   options: --workloads demo1,walk_e1m1  --res 320x200,640x400,1280x800
            --frames 600 --warmup 60  --native  --profile  --live SECONDS
+           --latency SECONDS (input -> present in the page's own loop, at the
+           first --res)
            --hash-every N (framebuffer FNV hashes, to prove two builds render
-           identically)  --json OUT.json  --port 8230 (or QUAKE_VERIFY_PORT)
+           identically; `quaketool play --hash-every` prints the same natively)
+           --json OUT.json  --port 8230 (or QUAKE_VERIFY_PORT)
 
 Hashes: attract frames include the menu cursor, animated on the App clock,
 which also counts the page's own frames before the harness took over; prove
 build identity on the other workloads.
 
-Timer resolution: the server sends COOP/COEP so the page is cross-origin
-isolated and performance.now() is ~5 us, not the 100 us of a normal page.
-Headless Chromium composites in software: `put` and `raf - js` are indicative
-of the browser's share, not of a GPU-accelerated desktop browser.
+Timer resolution: the page is cross-origin isolated (it has to be, for its
+SharedArrayBuffers), so performance.now() is ~5 us, not the 100 us of a
+normal page. Headless Chromium composites in software: `put` and `raf - js`
+are indicative of the browser's share, not of a GPU-accelerated desktop
+browser.
 """
-import argparse, atexit, collections, functools, gzip, http.server, json, os, shutil
-import socketserver, statistics, subprocess, sys, tempfile, threading, time
+import argparse, collections, gzip, json, os, shutil, statistics, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import isolated  # noqa: E402
 
 ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-ap.add_argument("webdir", nargs="?", help="dir with index.html + quake_wasm.wasm (default: web/)")
+ap.add_argument("webdir", nargs="?", help="the deploy dir to serve (default: web/)")
 ap.add_argument("--build", action="store_true",
-                help="cargo-build the --features bench wasm and serve it from a temp dir")
+                help="cargo-build the --features bench program and serve it from quake-wasm/target/bench-web")
 ap.add_argument("--workloads", default="demo1,attract,walk_e1m1,fire_e1m1,walk_e1m3")
 ap.add_argument("--res", default="320x200,640x400,1280x800")
 ap.add_argument("--frames", type=int, default=600)
 ap.add_argument("--warmup", type=int, default=60)
 ap.add_argument("--native", action="store_true", help="also run the native twin (cargo test)")
-ap.add_argument("--profile", action="store_true", help="CDP CPU profile of each fixed run")
+ap.add_argument("--profile", action="store_true", help="CDP CPU profile of each fixed run (main thread)")
 ap.add_argument("--live", type=float, default=0.0,
                 help="also sample the page's OWN loop for N seconds (frame pacing; use "
                      "--vsync: uncapped headless rAF is not a display, and with the 72 fps "
                      "cap its rate follows the page's own work)")
+ap.add_argument("--latency", type=float, default=0.0,
+                help="also measure input -> present for N seconds of key presses in the live walk")
 ap.add_argument("--hash-every", type=int, default=0)
 ap.add_argument("--json", help="write every raw per-frame series here")
-ap.add_argument("--port", type=int, default=int(os.environ.get("QUAKE_VERIFY_PORT", "8230")))
+ap.add_argument("--port", type=int, default=isolated.port(8230))
 ap.add_argument("--vsync", action="store_true",
                 help="keep Chromium's 60 Hz rAF cap (default: uncapped, so `raf` shows browser cost)")
 args = ap.parse_args()
@@ -75,103 +90,30 @@ args = ap.parse_args()
 # --- assemble the web dir ---------------------------------------------------
 if args.build:
     wasm_crate = os.path.join(PROJ, "quake-wasm")
-    subprocess.run(["cargo", "build", "--release", "--target", "wasm32-unknown-unknown",
+    subprocess.run(["cargo", "build", "--release", "--target", "wasm32-wasip1",
                     "--features", "bench", "--target-dir", "target/bench"],
                    cwd=wasm_crate, check=True)
-    WEB = tempfile.mkdtemp(prefix="quake-bench-")
-    atexit.register(shutil.rmtree, WEB, True)
-    shutil.copy(os.path.join(HERE, "index.html"), WEB)
-    shutil.copy(os.path.join(wasm_crate, "target/bench/wasm32-unknown-unknown/release/quake_wasm.wasm"), WEB)
+    WEB = os.path.join(wasm_crate, "target", "bench-web")
+    os.makedirs(os.path.join(WEB, "id1"), exist_ok=True)
+    for f in ("index.html", "wasi.js"):
+        shutil.copy(os.path.join(HERE, f), WEB)
+    shutil.copy(os.path.join(wasm_crate, "target/bench/wasm32-wasip1/release/quake.wasm"), WEB)
+    pak = os.path.join(WEB, "id1", "pak0.pak")
+    if not os.path.exists(pak):
+        os.symlink(os.path.join(PROJ, "quake-data", "ID1", "PAK0.PAK"), pak)
 else:
     WEB = args.webdir or HERE
-wasm_path = os.path.join(WEB, "quake_wasm.wasm")
-wasm_bytes = open(wasm_path, "rb").read()
+wasm_bytes = open(os.path.join(WEB, "quake.wasm"), "rb").read()
+httpd = isolated.serve(WEB, args.port)
 
-
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def end_headers(self):
-        # Cross-origin isolation -> performance.now() at ~5 us resolution.
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
-        self.send_header("Cache-Control", "no-store")
-        super().end_headers()
-
-    def log_message(self, *a):
-        pass
-
-
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", args.port),
-                                        functools.partial(Handler, directory=WEB))
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
-
-# --- in-page instrumentation (runs before the page's own script) -------------
-INIT_JS = r"""
+# --- in-page instrumentation ---------------------------------------------------
+BENCH_JS = r"""
 (() => {
-  // 1. A gate on requestAnimationFrame: once __benchRAFPaused is set the page's
-  //    loop stops rescheduling itself and the harness drives frames instead.
-  const raf = window.requestAnimationFrame.bind(window);
-  window.__benchRAF = raf;
-  window.__benchRAFPaused = false;
-  window.requestAnimationFrame = (cb) => window.__benchRAFPaused ? 0 : raf(cb);
-  // 2. Startup timing + the bench build's clock import (quake_bench.now_ms). An
-  //    import the module does not declare is ignored, so the stock wasm loads too.
-  //    In live mode the exports are re-wrapped so step() is timed per call.
-  //    Both entry points are hooked: the page streams (instantiateStreaming,
-  //    whose start is the start of the download) and falls back to buffered
-  //    instantiate.
-  window.__startup = {};
-  window.__live = { step: [], put: [], raf: [], skipped: 0 };
-  const hook = (inst) => async function (src, imports) {
-    imports = Object.assign({}, imports || {});
-    imports.quake_bench = { now_ms: () => performance.now() };
-    window.__startup.instantiate_start = performance.now();
-    const r = await inst.call(WebAssembly, src, imports);
-    window.__startup.instantiate_end = performance.now();
-    const real = r.instance.exports;
-    const ex = Object.create(null);
-    for (const k of Object.keys(real)) ex[k] = real[k];
-    ex.boot_attract = function () {
-      const t0 = performance.now(); const v = real.boot_attract();
-      window.__startup.boot_attract_ms = performance.now() - t0; return v;
-    };
-    if (window.__benchLiveWrap) {
-      // Host_FilterTime's 72 fps cap: step() returns 0 on a refresh it skipped.
-      // Record only the frames that ran; count the skipped calls.
-      ex.step = function (dt) {
-        const t0 = performance.now(); const ran = real.step(dt);
-        if (ran === 0) { window.__live.skipped++; return ran; }
-        window.__live.step.push(performance.now() - t0);
-        window.__live.raf.push(t0);
-        return ran;
-      };
-    }
-    if (window.__startup.first_step === undefined) {
-      const s = ex.step;
-      ex.step = function (dt) {
-        if (window.__startup.first_step === undefined) window.__startup.first_step = performance.now();
-        return s(dt);
-      };
-    }
-    return { module: r.module, instance: { exports: ex } };
-  };
-  WebAssembly.instantiate = hook(WebAssembly.instantiate);
-  if (WebAssembly.instantiateStreaming) {
-    WebAssembly.instantiateStreaming = hook(WebAssembly.instantiateStreaming);
-  }
-  if (window.__benchLiveWrap) {
-    const put = CanvasRenderingContext2D.prototype.putImageData;
-    CanvasRenderingContext2D.prototype.putImageData = function (...a) {
-      const t0 = performance.now(); put.apply(this, a);
-      window.__live.put.push(performance.now() - t0);
-    };
-  }
-
-  // The live-walk input script (native twin: walk_input in quake-wasm/src/bench.rs),
-  // a 720-frame (10 s) cycle that looks everywhere and comes back: a slow 360 deg
-  // sweep in place, run forward 1 s, about-face, run back, about-face, idle.
-  // Returns [forward fraction, yaw degrees to turn RIGHT this frame].
+  // The live-walk input script for a stock build (a bench build runs the
+  // same script in the program: walk_input in quake-wasm/src/bench.rs), a
+  // 720-frame (10 s) cycle that looks everywhere and comes back: a slow 360
+  // deg sweep in place, run forward 1 s, about-face, run back, about-face,
+  // idle. Returns [forward fraction, yaw degrees to turn RIGHT this frame].
   function walkInput(f) {
     const ph = f % 720;
     if (ph < 360) return [0, 1];
@@ -181,96 +123,77 @@ INIT_JS = r"""
     if (ph < 648) return [0, 2.5];
     return [0, 0];
   }
-  // The live-walk workloads: walk_<map>, fire_<map> (+attack held) and
-  // quad_<map> (the Quad's cshift on).
   function isWalk(wl) {
     return wl.startsWith('walk_') || wl.startsWith('fire_') || wl.startsWith('quad_');
   }
-  // Boot a workload (native twin: start() in bench.rs).
-  function startWorkload(e, wl) {
-    if (wl === 'attract') return e.boot_attract() === 1;
-    if (wl === 'demo1') return e.boot_demo() === 1;
-    if (isWalk(wl)) {
-      const map = wl.slice(5);
-      if (e.boot() !== 1) return false;
-      if (map !== 'e1m1') {
-        e.console_toggle();
-        for (const ch of 'map ' + map) e.console_char(ch.charCodeAt(0));
-        e.console_enter();
-        if (e.console_visible()) e.console_toggle();
-      }
-      if (e.menu_visible()) e.menu_cancel();
-      if (wl.startsWith('quad_')) {
-        e.console_toggle();
-        for (const ch of 'impulse 255') e.console_char(ch.charCodeAt(0));
-        e.console_enter();
-        if (e.console_visible()) e.console_toggle();
-      }
-      return e.in_walk_mode() === 1 && !e.menu_visible();
-    }
-    return false;
+  // Boot a workload with calls (a stock build; start() in bench.rs).
+  async function startWorkload(wl) {
+    const q = quake.call;
+    if (wl === 'attract') return await q('boot_attract') === 1;
+    if (wl === 'demo1') return await q('boot_demo') === 1;
+    if (!isWalk(wl)) return false;
+    const map = wl.slice(5);
+    if (await q('boot') !== 1) return false;
+    if (map !== 'e1m1') await q('exec', 'map', map);
+    if (await q('menu_visible')) await q('menu_cancel');
+    if (wl.startsWith('quad_')) await q('exec', 'impulse', 255);
+    return await q('in_walk_mode') === 1 && !(await q('menu_visible'));
   }
-  function fnv(bytes) {   // FNV-1a over 32-bit words of an offset-0 RGBA buffer
-    const u = new Uint32Array(bytes.buffer, 0, bytes.length >> 2);
-    let h = 0x811c9dc5;
-    for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u[i], 0x01000193);
-    return (h >>> 0).toString(16).padStart(8, '0');
-  }
-
-  // 3. The fixed-step run: one frame per rAF, dt = cfg.dt, timed per phase.
+  // The fixed-step run: one frame per rAF, dt = cfg.dt, timed per phase.
   window.__benchRun = async (cfg) => {
-    const e = exp;   // the page's top-level `let exp` (a global binding)
-    window.__benchRAFPaused = true;
+    quake.pause();
     await new Promise(r => setTimeout(r, 100));   // let the page's in-flight frame drain
+    const names = (await quake.text('bench_names')).split(',').filter(Boolean);
+    const bench = names.length > 0;
     // Realign Host_FilterTime's gate: a refresh the page's loop skipped left
     // realtime ahead of the last frame, and that leftover would ride into the
     // first measured frame. One long step runs a frame and consumes it, so
-    // every measured step advances exactly cfg.dt (as before the 72 fps cap).
-    e.step(0.2);
-    if (!startWorkload(e, cfg.workload)) return { error: 'workload failed to boot: ' + cfg.workload };
-    if (typeof hideOverlayForever === 'function') hideOverlayForever();   // the click-to-play scrim
-    e.set_resolution(cfg.w, cfg.h);
-    const W = e.width(), H = e.height();
-    const canvas = document.getElementById('c');
-    const ctx = canvas.getContext('2d');
-    canvas.width = W; canvas.height = H;
-    const img = ctx.createImageData(W, H);
-    const bench = typeof e.bench_enable === 'function';
-    const names = bench ? new TextDecoder().decode(
-      new Uint8Array(e.memory.buffer, e.bench_names_ptr(), e.bench_names_len())).split(',') : [];
-    const cols = { raf: [], step: [], copy: [], put: [], js: [] };
+    // every measured step advances exactly cfg.dt.
+    await quake.call('step', 0.2);
+    const ok = bench ? await quake.call('bench_start', cfg.workload) === 1 : await startWorkload(cfg.workload);
+    if (!ok) return { error: 'workload failed to boot: ' + cfg.workload };
+    hideOverlayForever();   // the click-to-play scrim
+    await quake.call('set_resolution', cfg.w, cfg.h);
+    const [W, H] = [await quake.call('width'), await quake.call('height')];
+    const cols = { raf: [], wait: [], copy: [], put: [], js: [], step: [] };
     for (const n of names) cols[n] = [];
+    const values = [];
+    quake.onBench = v => values.push(v);
     const hashes = [];
-    if (bench) e.bench_enable(1);
+    if (bench) await quake.call('bench_enable', 1);
     const total = cfg.warmup + cfg.frames;
     let f = 0, last = -1;
     await new Promise(resolve => {
       function tick(ts) {
-        if (isWalk(cfg.workload)) {
+        if (!bench && isWalk(cfg.workload)) {
           const [fwd, turn] = walkInput(f);
-          e.set_move(fwd, 0); e.look(-turn, 0);
-          e.set_attack(cfg.workload.startsWith('fire_') ? 1 : 0);
+          quake.callLine(`set_move ${fwd} 0`); quake.callLine(`look ${-turn} 0`);
+          quake.callLine(`set_attack ${cfg.workload.startsWith('fire_') ? 1 : 0}`);
         }
-        const t0 = performance.now();
-        e.step(cfg.dt);
-        const t1 = performance.now();
-        img.data.set(new Uint8Array(e.memory.buffer, e.framebuffer(), W * H * 4));
-        const t2 = performance.now();
-        ctx.putImageData(img, 0, 0);
-        const t3 = performance.now();
+        const r = quake.tick(cfg.dt);
         if (f >= cfg.warmup) {
           cols.raf.push(last < 0 ? NaN : ts - last);
-          cols.step.push(t1 - t0); cols.copy.push(t2 - t1);
-          cols.put.push(t3 - t2); cols.js.push(t3 - t0);
-          for (let i = 0; i < names.length; i++) cols[names[i]].push(e.bench_value(i));
+          cols.wait.push(r.wait); cols.copy.push(r.copy);
+          cols.put.push(r.put); cols.js.push(r.wait + r.copy + r.put);
         }
-        if (cfg.hashEvery && f % cfg.hashEvery === 0) hashes.push(fnv(img.data));
+        if (cfg.hashEvery && f % cfg.hashEvery === 0) hashes.push(quake.frameHash());
         last = ts; f++;
-        if (f < total) window.__benchRAF(tick); else resolve();
+        if (f < total) requestAnimationFrame(tick); else resolve();
       }
-      window.__benchRAF(tick);
+      requestAnimationFrame(tick);
     });
-    if (bench) e.bench_enable(0);
+    if (bench) await quake.call('bench_enable', 0);
+    quake.onBench = null;
+    // The program's values, one BENCH record per frame after the warmup.
+    for (const v of values.slice(values.length - cfg.frames)) {
+      let step = 0;
+      for (let i = 0; i < names.length; i++) {
+        cols[names[i]].push(v[i]);
+        if (i < 9) step += v[i];                   // the nine frame phases
+      }
+      cols.step.push(step);
+    }
+    if (!bench) delete cols.step;
     return { W, H, cols, hashes, bench, isolated: self.crossOriginIsolated };
   };
 })();
@@ -289,35 +212,16 @@ def med(xs):
     return pct(xs, 50)
 
 
-def demangle(n):
-    """Legacy Rust mangling -> path (enough for a profile table)."""
-    if not n.startswith("_ZN"):
-        return n
-    s, i, parts = n[3:], 0, []
-    while i < len(s) and s[i].isdigit():
-        j = i
-        while s[j].isdigit():
-            j += 1
-        ln = int(s[i:j])
-        part = s[j:j + ln]
-        i = j + ln
-        if part.startswith("h") and len(part) == 17:
-            break
-        parts.append(part.replace("$LT$", "<").replace("$GT$", ">").replace("$u20$", " ")
-                     .replace("$u7b$", "{").replace("$u7d$", "}").replace("..", "::"))
-    return "::".join(parts)
-
-
 def summarize_profile(prof, top=22):
     nodes = {n["id"]: n for n in prof["nodes"]}
     parent = {c: n["id"] for n in prof["nodes"] for c in n.get("children", [])}
     cnt = collections.Counter(prof["samples"])
     selfc, incl = collections.Counter(), collections.Counter()
     for nid, c in cnt.items():
-        selfc[demangle(nodes[nid]["callFrame"]["functionName"] or "(anon)")] += c
+        selfc[nodes[nid]["callFrame"]["functionName"] or "(anon)"] += c
         seen, x = set(), nid
         while x is not None:
-            nm = demangle(nodes[x]["callFrame"]["functionName"] or "(anon)")
+            nm = nodes[x]["callFrame"]["functionName"] or "(anon)"
             if nm not in seen:
                 incl[nm] += c
                 seen.add(nm)
@@ -337,45 +241,40 @@ if not args.vsync:
     flags += ["--disable-frame-rate-limit", "--disable-gpu-vsync"]
 workloads = [w for w in args.workloads.split(",") if w]
 resolutions = [tuple(int(v) for v in r.split("x")) for r in args.res.split(",") if r]
-results = {"wasm": [], "native": [], "startup": {}, "live": {}, "profiles": {}}
-load = open("/proc/loadavg").read().split()[:3] if os.path.exists("/proc/loadavg") else []
-results["load_before"] = load
+results = {"wasm": [], "native": [], "startup": {}, "live": {}, "latency": {}, "profiles": {}}
+results["load_before"] = open("/proc/loadavg").read().split()[:3] if os.path.exists("/proc/loadavg") else []
 
 with sync_playwright() as p:
     br = p.chromium.launch(headless=True, args=flags)
 
-    def fresh_page(live_wrap=False):
+    def fresh_page():
         pg = br.new_page(viewport={"width": 1020, "height": 700})
         errs = []
         pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-        if live_wrap:
-            pg.add_init_script("window.__benchLiveWrap = true;")
-        pg.add_init_script(INIT_JS)
         pg.goto(f"http://127.0.0.1:{args.port}/index.html", wait_until="load")
-        pg.wait_for_function("typeof exp !== 'undefined' && !!exp && typeof exp.boot === 'function'",
-                             timeout=120000)
-        pg.wait_for_function("document.getElementById('status').textContent.includes('ready')",
-                             timeout=60000)
+        pg.wait_for_function("window.quake && quake.ready", timeout=120000)
+        pg.wait_for_function("quake.firstFrameAt > 0", timeout=60000)
+        pg.add_script_tag(content=BENCH_JS)
         return pg, errs
 
     pg, errs = fresh_page()
     st = pg.evaluate("""() => {
-        const s = window.__startup;
-        const r = performance.getEntriesByType('resource').find(e => e.name.endsWith('quake_wasm.wasm'));
-        return { fetch_ms: r ? r.responseEnd - r.startTime : null,
-                 // From the end of the download to an instantiated module (the
-                 // streaming path compiles during the download).
-                 instantiate_ms: r ? s.instantiate_end - r.responseEnd : null,
-                 boot_attract_ms: s.boot_attract_ms,
-                 nav_to_first_frame_ms: s.first_step,
+        const r = performance.getEntriesByType('resource');
+        const end = (name) => { const e = r.find(x => x.name.endsWith(name)); return e ? e.responseEnd : null; };
+        return { download_ms: quake.downloadedAt - quake.startedAt,
+                 wasm_end_ms: end('quake.wasm'), pak_end_ms: end('pak0.pak'),
+                 // From the end of the downloads to the program's first Sync:
+                 // the worker's compile + instantiate, quake.rc's startup.
+                 start_ms: quake.readyAt - quake.downloadedAt,
+                 nav_to_first_frame_ms: quake.firstFrameAt,
                  isolated: self.crossOriginIsolated }
     }""")
     st["wasm_mb"] = round(len(wasm_bytes) / 1048576, 2)
     st["wasm_gzip6_mb"] = round(len(gzip.compress(wasm_bytes, 6)) / 1048576, 2)
     results["startup"] = st
     if not st["isolated"]:
-        print("WARNING: page not cross-origin isolated; performance.now() is coarse (100 us)")
+        print("WARNING: page not cross-origin isolated")
 
     for wl in workloads:
         for (w, h) in resolutions:
@@ -397,23 +296,50 @@ with sync_playwright() as p:
                 continue
             r.update({"side": "wasm", "workload": wl, "w": r["W"], "h": r["H"]})
             results["wasm"].append(r)
-            print(f"  wasm {wl} {r['W']}x{r['H']}: step median {med(r['cols']['step']):.2f} ms",
+            key = "step" if "step" in r["cols"] else "wait"
+            print(f"  wasm {wl} {r['W']}x{r['H']}: {key} median {med(r['cols'][key]):.2f} ms",
                   file=sys.stderr)
 
     if args.live > 0:
-        lp, lerrs = fresh_page(live_wrap=True)
-        lp.evaluate("window.__live = { step: [], put: [], raf: [], skipped: 0 }")
+        lp, lerrs = fresh_page()
+        lp.evaluate("quake.live = []")
         time.sleep(args.live)
-        lv = lp.evaluate("window.__live")
-        st_ = lv["raf"]
-        gaps = [b - a for a, b in zip(st_, st_[1:])]
+        lv = lp.evaluate("quake.live")
+        shown = [x for x in lv if x["shown"]]
+        stamps = [x["t"] for x in shown]
+        gaps = [b - a for a, b in zip(stamps, stamps[1:])]
         results["live"] = {
-            "res": lp.evaluate("[exp.width(), exp.height()]"), "frames": len(st_),
+            "res": lp.evaluate("quake.size()"), "refreshes": len(lv), "frames": len(shown),
             "period_median": med(gaps), "period_p95": pct(gaps, 95), "period_p99": pct(gaps, 99),
-            "step_median": med(lv["step"]), "step_p95": pct(lv["step"], 95),
-            "put_median": med(lv["put"]), "long_frames_over_20ms": sum(1 for g in gaps if g > 20),
-            "skipped": lv.get("skipped", 0), "seconds": args.live,
+            "wait_median": med([x["wait"] for x in shown]), "wait_p95": pct([x["wait"] for x in shown], 95),
+            "put_median": med([x["put"] for x in shown]), "long_frames_over_20ms": sum(1 for g in gaps if g > 20),
+            "skipped": len(lv) - len(shown), "seconds": args.live,
         }
+        errs += lerrs
+        lp.close()
+
+    if args.latency > 0:
+        # The live walk, uncapped (a frame every refresh, so the 72 fps gate
+        # adds nothing), keys pressed at random moments: each event's time to
+        # the present of the first frame that consumed it.
+        lp, lerrs = fresh_page()
+        lp.evaluate("hideOverlayForever()")
+        lw, lh = resolutions[0]
+        lp.evaluate(f"quake.call('boot').then(() => quake.call('menu_cancel'))"
+                    f".then(() => quake.call('set_extras', 1)).then(() => quake.call('set_resolution', {lw}, {lh}))")
+        time.sleep(1.0)
+        lp.evaluate("quake.latency = []")
+        import random
+        rnd = random.Random(7)
+        t_end = time.time() + args.latency
+        while time.time() < t_end:
+            lp.keyboard.down("d")
+            time.sleep(rnd.uniform(0.02, 0.08))
+            lp.keyboard.up("d")
+            time.sleep(rnd.uniform(0.02, 0.08))
+        lat = lp.evaluate("quake.latency")
+        results["latency"] = {"res": [lw, lh], "events": len(lat), "median": med(lat), "p95": pct(lat, 95),
+                              "min": min(lat) if lat else float("nan"), "max": max(lat) if lat else float("nan")}
         errs += lerrs
         lp.close()
     br.close()
@@ -423,7 +349,7 @@ if args.native:
     env = dict(os.environ, QUAKE_BENCH_WORKLOADS=",".join(workloads),
                QUAKE_BENCH_RES=",".join(f"{w}x{h}" for w, h in resolutions),
                QUAKE_BENCH_FRAMES=str(args.frames), QUAKE_BENCH_WARMUP=str(args.warmup))
-    out = subprocess.run(["cargo", "test", "--release", "--features", "bench", "--lib", "--target-dir",
+    out = subprocess.run(["cargo", "test", "--release", "--features", "bench", "--target-dir",
                           "target/bench-native", "--", "--ignored", "--nocapture", "native_bench"],
                          cwd=os.path.join(PROJ, "quake-wasm"), env=env, capture_output=True, text=True)
     for line in out.stdout.splitlines():
@@ -437,7 +363,7 @@ results["load_after"] = open("/proc/loadavg").read().split()[:3] if os.path.exis
 # --- report -------------------------------------------------------------------
 ROWS = ["step", "input", "sim", "render3d", "world", " pvs", " sort", " setup", " light",
         " surf", "submodel", "external", "alias", "particle", "sprite", "viewmodel", "post3d",
-        "hud2d", "menu", "console", "blend", "pack", "copy", "put", "js", "raf"]
+        "hud2d", "menu", "console", "blend", "pack", "wait", "copy", "put", "js", "raf"]
 # Indented rows are world-pass sub-phases (" setup" includes the raster itself).
 SUBKEY = {" pvs": "world_pvs", " sort": "world_sort", " setup": "world_setup",
           " light": "world_light", " surf": "world_surf"}
@@ -448,10 +374,9 @@ print(f"\nquake-rust browser bench — {len(wasm_bytes) / 1048576:.1f} MB wasm, 
       f"warmup={args.warmup}, dt=1/72, load {' '.join(results['load_before'])} -> "
       f"{' '.join(results['load_after'])}")
 s = results["startup"]
-print(f"startup: fetch {s['fetch_ms']:.0f} ms (local), instantiated {s['instantiate_ms']:.0f} ms "
-      f"after the download, "
-      f"boot_attract {s['boot_attract_ms']:.0f} ms, navigation->first frame "
-      f"{s['nav_to_first_frame_ms']:.0f} ms; gzip -6 size {s['wasm_gzip6_mb']} MB")
+print(f"startup: download {s['download_ms']:.0f} ms (local; wasm and pak together), started "
+      f"{s['start_ms']:.0f} ms after it (compile, instantiate, quake.rc), navigation->first frame "
+      f"{s['nav_to_first_frame_ms']:.0f} ms; wasm gzip -6 {s['wasm_gzip6_mb']} MB")
 native_by = {(n["workload"], n["w"], n["h"]): n["values"] for n in results["native"]}
 for wl in workloads:
     runs = [r for r in results["wasm"] if r["workload"] == wl]
@@ -485,14 +410,20 @@ for wl in workloads:
 if results["live"]:
     lv = results["live"]
     print(f"\nlive page loop ({'uncapped rAF' if not args.vsync else '60 Hz rAF'}, attract at "
-          f"{lv['res'][0]}x{lv['res'][1]}, real dt): {lv['frames']} frames, period median "
-          f"{lv['period_median']:.2f} / p95 {lv['period_p95']:.2f} / p99 {lv['period_p99']:.2f} ms, "
-          f"step median {lv['step_median']:.2f} / p95 {lv['step_p95']:.2f}, put median "
-          f"{lv['put_median']:.2f}, frames >20 ms: {lv['long_frames_over_20ms']}; "
-          f"{lv['frames'] / lv['seconds']:.1f} host frames/s, {lv['skipped']} refreshes skipped "
-          f"by the 72 fps cap")
+          f"{lv['res'][0]}x{lv['res'][1]}, real dt): {lv['frames']} frames in {lv['refreshes']} refreshes, "
+          f"period median {lv['period_median']:.2f} / p95 {lv['period_p95']:.2f} / p99 "
+          f"{lv['period_p99']:.2f} ms, wait median {lv['wait_median']:.2f} / p95 {lv['wait_p95']:.2f}, "
+          f"put median {lv['put_median']:.2f}, frames >20 ms apart: {lv['long_frames_over_20ms']}; "
+          f"{lv['frames'] / lv['seconds']:.1f} frames/s, {lv['skipped']} refreshes without a new frame "
+          f"(the 72 fps cap)")
+if results["latency"]:
+    la = results["latency"]
+    print(f"\ninput -> present ({'uncapped rAF' if not args.vsync else '60 Hz rAF'}, live walk at "
+          f"{la['res'][0]}x{la['res'][1]}, wasm_uncapped): {la['events']} key events, median {la['median']:.2f} / p95 {la['p95']:.2f} "
+          f"ms (min {la['min']:.2f}, max {la['max']:.2f})")
 print("\nrows: ms per frame (median, p95); nat = native median of the same workload via "
-      "native_bench; x = wasm/native. raf - js = the browser's own per-frame work.")
+      "native_bench; x = wasm/native. step = the program's host frame (bench builds); wait = "
+      "tick to the program's answer; js = wait + copy + put; raf - js = the browser's own per-frame work.")
 if errs:
     print("page errors:", errs[-5:])
 if args.json:
