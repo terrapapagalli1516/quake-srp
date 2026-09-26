@@ -10,6 +10,8 @@
 //! --display W:H|square     the display's width:height (square: the mode's own,
 //!                          square pixels); the default is the command's
 //! --scaled2d 0|1           the status bar, menus and console blown up from 320x200
+//! --threads N              draw each frame's 3-D view on N threads (default 1;
+//!                          the pixels are the same for any N)
 //! ```
 
 use quake_rs::render::{FovMode, VideoCvars};
@@ -21,6 +23,8 @@ pub struct VideoArgs {
     /// `--display`: `Some(None)` for `square`, `Some(Some(a))` for `W:H`.
     display: Option<Option<f64>>,
     scaled_2d: Option<bool>,
+    /// `--threads`: the renderer's thread count (0: not given, 1).
+    threads: usize,
 }
 
 impl VideoArgs {
@@ -47,6 +51,9 @@ impl VideoArgs {
                 }
             }
             "--hires" => self.cvars.hires = bit(val)?,
+            "--threads" => {
+                self.threads = val.parse().ok().filter(|&n| n > 0).ok_or_else(|| format!("--threads: expected a count, got {val:?}"))?;
+            }
             "--scaled2d" => self.scaled_2d = Some(bit(val)?),
             "--display" => {
                 self.display = Some(if val == "square" {
@@ -75,6 +82,11 @@ impl VideoArgs {
         if let Some(on) = self.scaled_2d {
             quake_rs::draw::set_scaled_2d(on);
         }
+    }
+
+    /// How many threads draw a frame (`--threads`, default 1).
+    pub fn threads(&self) -> usize {
+        self.threads.max(1)
     }
 
     /// The display aspect a `w x h` mode is shown at: `--display`, else

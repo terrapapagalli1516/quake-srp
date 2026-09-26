@@ -5,6 +5,7 @@
 //! The particle simulation itself is [`crate::particles`].
 
 use crate::math::{dot, sub, Vec3};
+use super::band::Band;
 use super::{Camera, Image};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
@@ -53,36 +54,39 @@ pub fn draw_particles(
     h: usize,
     pixel_aspect: f32,
 ) {
-    draw_particles_sized(image, zbuf, cam, particles, palette, w, h, pixel_aspect, false);
+    let proj = ParticleProjection::new(cam, w, h, pixel_aspect, false);
+    let dots = project_particles(cam, &proj, particles, palette);
+    let n = w.saturating_mul(h).min(image.rgb.len());
+    draw_particle_dots(&mut Band::whole(w, &mut image.rgb[..n], zbuf), &dots);
 }
 
-/// [`draw_particles`], with id's particle sizes (`hires` false) or the hires
-/// extra's ([`ParticleProjection::new`]).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn draw_particles_sized(
-    image: &mut Image,
-    zbuf: &mut [i16],
+/// One particle as `D_DrawParticle` draws it: a `pix` wide, `rows` tall
+/// square from `(u, v)` right and down, at `izi`, in `rgb`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ParticleDot {
+    u: usize,
+    v: usize,
+    pix: usize,
+    rows: usize,
+    izi: i64,
+    rgb: [u8; 3],
+}
+
+/// `R_DrawParticles`' projection of `particles` (see [`draw_particles`]), in
+/// list order: the ones `D_DrawParticle` draws, as squares.
+pub(super) fn project_particles(
     cam: &Camera,
+    proj: &ParticleProjection,
     particles: &[(Vec3, u8)],
     palette: &[[u8; 3]; 256],
-    w: usize,
-    h: usize,
-    pixel_aspect: f32,
-    hires: bool,
-) {
+) -> Vec<ParticleDot> {
     /// `d_iface.h`: particles nearer than this are not drawn.
     const PARTICLE_Z_CLIP: f32 = 8.0;
-    if w == 0 || h == 0 || particles.is_empty() {
-        return;
-    }
-
     let (forward, right, up) = cam.basis();
-    let proj = ParticleProjection::new(cam, w, h, pixel_aspect, hires);
     // R_DrawParticles: r_pright = vright*xscaleshrink, r_pup = vup*yscaleshrink.
     let pright = [right[0] * proj.xscaleshrink, right[1] * proj.xscaleshrink, right[2] * proj.xscaleshrink];
     let pup = [up[0] * proj.yscaleshrink, up[1] * proj.yscaleshrink, up[2] * proj.yscaleshrink];
-    let rows_shift = proj.y_aspect_shift;
-
+    let mut dots = Vec::with_capacity(particles.len());
     for &(p, color) in particles {
         let local = sub(p, cam.pos);
         let t = [dot(local, pright), dot(local, pup), dot(local, forward)];
@@ -102,18 +106,39 @@ pub(super) fn draw_particles_sized(
         }
         let izi = zbuf_izi(zi);
         let pix = ((izi * proj.pix_mul) >> proj.pix_shift).clamp(proj.pix_min, proj.pix_max);
-        let rgb = palette[color as usize];
-        for row in 0..(pix << rows_shift) {
-            let base = (v + row) as usize * w + u as usize;
-            for i in 0..pix as usize {
-                let idx = base + i;
-                if let (Some(z), Some(dst)) = (zbuf.get_mut(idx), image.rgb.get_mut(idx)) {
+        dots.push(ParticleDot {
+            u: u as usize,
+            v: v as usize,
+            pix: pix as usize,
+            rows: (pix << proj.y_aspect_shift) as usize,
+            izi,
+            rgb: palette[color as usize],
+        });
+    }
+    dots
+}
+
+/// `D_DrawParticle` for `dots` in list order, the pixels in `band`'s rows:
+/// each pixel written where `pz <= izi` — the z-buffer is id's 16-bit
+/// `d_pzbuffer` as the edge renderer's `D_DrawZSpans` and the models left
+/// it, the short promoted to `int` for the compare — and `izi` stored,
+/// truncated to the short. Particles of a burst often share an `izi`; the
+/// later one in the list wins those ties, as in the C.
+pub(super) fn draw_particle_dots(band: &mut Band, dots: &[ParticleDot]) {
+    let w = band.width();
+    let own = band.indices();
+    for d in dots {
+        for row in 0..d.rows {
+            let base = (d.v + row) * w + d.u;
+            if base >= own.end || base + d.pix <= own.start {
+                continue; // another band's
+            }
+            for idx in base..base + d.pix {
+                if let Some((dst, z)) = band.at(idx) {
                     // if (pz[i] <= izi) { pz[i] = izi; pdest[i] = color; }
-                    // (id's d_pzbuffer: 16-bit, the short promoted to int
-                    // for the compare and truncated on the store.)
-                    if *z as i64 <= izi {
-                        *z = izi as i16;
-                        *dst = rgb;
+                    if *z as i64 <= d.izi {
+                        *z = d.izi as i16;
+                        *dst = d.rgb;
                     }
                 }
             }

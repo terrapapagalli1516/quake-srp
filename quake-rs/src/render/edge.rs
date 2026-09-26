@@ -44,11 +44,15 @@ use super::raster::{
 use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
 use super::stats::Profiler;
 use super::surf::{
-    classify_surface, face_world_poly, texture_animation, MipView, SurfKind, SurfaceCaches, SurfaceRequest,
+    classify_surface, face_world_poly, texture_animation, MipView, SurfBlock, SurfKind, SurfaceCaches,
+    SurfaceRequest,
 };
 use super::vis::point_in_leaf;
 use super::world::face_grads;
-use super::{Frame, Image, Projection};
+use super::band::Band;
+use super::raster::PolyGrads;
+use super::{Frame, Projection};
+use crate::bsp::MipTex;
 
 /// "No edge / no span / no surface" in the index links.
 const NONE: u32 = u32::MAX;
@@ -419,28 +423,23 @@ impl EdgeState {
         EdgeState::EMPTY
     }
 
-    /// Draw the world and the brush entities of `frame` into `image` as id
-    /// does (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`,
-    /// `R_ScanEdges` with `D_DrawSurfaces`), writing every pixel of the view
-    /// exactly once and the 16-bit `1/z` of each into `izbuf` (`d_pzbuffer`),
-    /// which the entity passes test against. The world is the one
-    /// [`EdgeState::begin_map`] was last called for.
-    pub(super) fn render(
+    /// The world and the brush entities of `frame` as id sorts them
+    /// (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`,
+    /// `R_ScanEdges`), and `D_DrawSurfaces`' choice for each surface that
+    /// owns a span — the surface cache consulted, any block baked — so that
+    /// [`EdgeState::draw_band`] can draw any rows of the view from them. The
+    /// world is the one [`EdgeState::begin_map`] was last called for. `None`
+    /// for a view larger than any setting allows (the caller clamps to the
+    /// cvars' limit; this refuses the 8K limit's past).
+    pub(super) fn build<'a>(
         &mut self,
-        image: &mut Image,
-        izbuf: &mut [i16],
-        frame: &Frame,
+        frame: &Frame<'_, 'a>,
         caches: &mut SurfaceCaches,
         prof: &mut Profiler,
-    ) {
-        let (w, h) = (image.w, image.h);
-        // Nothing larger than the largest view there is (8K; the caller clamps
-        // to the cvars' limit, this refuses what no setting allows).
+    ) -> Option<WorldDraw<'a>> {
+        let (w, h) = (frame.w, frame.h);
         if w == 0 || h == 0 || w > super::HIRES_MAXWIDTH || h > super::HIRES_MAXHEIGHT {
-            return;
-        }
-        if izbuf.len() < w * h || image.rgb.len() < w * h {
-            return;
+            return None;
         }
         let scene = frame.scene;
         let bsp = scene.world;
@@ -492,7 +491,7 @@ impl EdgeState {
         let t2 = lap();
         self.scan_edges();
         let t3 = lap();
-        self.draw_surfaces(image, izbuf, frame, caches, prof, &ents, &bits);
+        let world = self.prepare_surfaces(frame, caches, prof, &ents, &bits);
         self.dlight_bits = bits;
         if prof.on() {
             let t4 = lap();
@@ -504,7 +503,9 @@ impl EdgeState {
             prof.add(|s| {
                 // world = the whole pass but the brush entities' edge setup,
                 // which goes to `submodel` (their spans are drawn with the
-                // world's); `sort` = the world walk to edges, `setup` = the scan.
+                // world's); `sort` = the world walk to edges, `setup` = the scan,
+                // `surf` = D_DrawSurfaces (here its per-surface setup; the
+                // bands add their spans).
                 s.world_ns += t1 + (t4 - t2);
                 s.submodel_ns += t2 - t1;
                 s.world_sort_ns += t1;
@@ -517,6 +518,7 @@ impl EdgeState {
                 s.surfs_peak = s.surfs_peak.max(surfs);
             });
         }
+        Some(world)
     }
 
     /// `R_NewMap` for the edge renderer (`Mod_LoadBrushModel`,
@@ -1173,14 +1175,13 @@ impl EdgeState {
     }
 }
 
-/// What [`EdgeState::draw_face_spans`] reads besides the surface: the frame
+/// What [`EdgeState::prepare_face`] reads besides the surface: the frame
 /// and what `D_DrawSurfaces` sets up for it once.
 #[derive(Clone, Copy)]
 struct FacePass<'p, 's, 'a> {
     frame: &'p Frame<'s, 'a>,
     sview: &'p ScreenProj,
     mipview: &'p MipView,
-    persp: super::raster::Persp,
     ents: &'p [Ent<'a>],
     bits: &'p [u32],
     /// The port's flat shading direction, for a face with no lightmap.
@@ -1783,26 +1784,25 @@ impl EdgeState {
     // d_edge.c: the surfaces, span by span
     // -----------------------------------------------------------------------
 
-    /// `D_DrawSurfaces`: each surface's spans once, then their `1/z`
-    /// (`D_DrawZSpans`).
-    #[allow(clippy::too_many_arguments)]
-    fn draw_surfaces(
+    /// `D_DrawSurfaces`' per-surface setup: for each surface that owns a
+    /// span, how its spans are painted and its `1/z` plane, the surface cache
+    /// consulted and any block baked (`D_CacheSurface`) — everything the
+    /// bands need, decided once.
+    fn prepare_surfaces<'a>(
         &mut self,
-        image: &mut Image,
-        izbuf: &mut [i16],
-        frame: &Frame,
+        frame: &Frame<'_, 'a>,
         caches: &mut SurfaceCaches,
         prof: &mut Profiler,
-        ents: &[Ent],
+        ents: &[Ent<'a>],
         bits: &[u32],
-    ) {
+    ) -> WorldDraw<'a> {
         let (w, h) = (self.w, self.h);
         let (cam, opts, palette) = (&frame.cam, &frame.scene.options, frame.scene.palette);
         let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
         let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
         let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
         let mipview = MipView::new(xscale, yscale, opts.mip);
-        let sky_view = SkyView::new(
+        let sky = SkyView::new(
             vpn,
             vright,
             vup,
@@ -1811,89 +1811,48 @@ impl EdgeState {
             frame.scene.time,
         );
         let sky_tex = sky_texture(ents[0].bsp);
-        let persp = opts.persp();
         let (light_dir, _) = normalize([0.3, 0.5, 1.0]);
         let clear = palette[R_CLEARCOLOR];
-        let mut drawn = 0u64;
+        let pass = FacePass { frame, sview: &sview, mipview: &mipview, ents, bits, light_dir, clear };
         let mut faces = 0u64;
-        let spans_owned = std::mem::take(&mut self.spans);
-        let spans = &spans_owned;
-        let span_list = |head: u32| {
-            let mut p = head;
-            std::iter::from_fn(move || {
-                let sp = *spans.get(p as usize)?;
-                p = sp.pnext;
-                // clamp to the row (id's stepping keeps it there)
-                let u0 = sp.u.clamp(0, w as i32) as usize;
-                let u1 = (sp.u + sp.count).clamp(0, w as i32) as usize;
-                let v = sp.v.clamp(0, h as i32 - 1) as usize;
-                Some((u0, v, u1.saturating_sub(u0)))
-            })
-            .filter(|&(_, _, n)| n > 0)
-        };
-        for si in 1..self.surfs.len() {
+        let mut surfs = Vec::with_capacity(self.surfs.len());
+        for si in 0..self.surfs.len() {
             let s = self.surfs[si];
-            if s.spans == NONE {
+            if si == 0 || s.spans == NONE {
+                surfs.push(None);
                 continue;
             }
-            let (mut ziorigin, mut zistepu, mut zistepv) = (s.d_ziorigin, s.d_zistepu, s.d_zistepv);
-            if s.flags & SURF_DRAWBACKGROUND != 0 {
+            let (paint, zi) = if s.flags & SURF_DRAWBACKGROUND != 0 {
                 // the background: effectively at infinity
-                (ziorigin, zistepu, zistepv) = (BACKGROUND_ZI, 0.0, 0.0);
-                for (u, v, n) in span_list(s.spans) {
-                    image.rgb[v * w + u..v * w + u + n].fill(clear);
-                }
+                (Paint::Fill(clear), [BACKGROUND_ZI, 0.0, 0.0])
             } else {
                 faces += 1;
-                if s.flags & SURF_DRAWSKY != 0 {
-                    for (u, v, n) in span_list(s.spans) {
-                        let row = &mut image.rgb[v * w + u..v * w + u + n];
-                        match sky_tex {
-                            Some(mt) => draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &sky_view, palette),
-                            None => row.fill(clear),
-                        }
-                        drawn += n as u64;
-                    }
+                let paint = if s.flags & SURF_DRAWSKY != 0 {
+                    sky_tex.map_or(Paint::Fill(clear), Paint::Sky)
                 } else {
-                    let pass = FacePass { frame, sview: &sview, mipview: &mipview, persp, ents, bits, light_dir, clear };
-                    drawn += self.draw_face_spans(image, &s, &span_list, &pass, caches, prof);
-                }
-            }
-            // D_DrawZSpans
-            let izistep = c_ftoi((zistepu * 32768.0 * 65536.0) as f64);
-            for (u, v, n) in span_list(s.spans) {
-                let zi = (ziorigin + v as f32 * zistepv + u as f32 * zistepu) as f64;
-                let mut izi = c_ftoi(zi * 32768.0 * 65536.0);
-                for z in &mut izbuf[v * w + u..v * w + u + n] {
-                    *z = (izi >> 16) as i16;
-                    izi = izi.wrapping_add(izistep);
-                }
-            }
+                    self.prepare_face(&s, &pass, caches, prof)
+                };
+                (paint, [s.d_ziorigin, s.d_zistepu, s.d_zistepv])
+            };
+            surfs.push(Some(SurfDraw { paint, zi }));
         }
-        self.spans = spans_owned;
-        prof.add(|st| {
-            st.world_pixels += drawn;
-            st.faces_drawn += faces;
-        });
+        prof.add(|st| st.faces_drawn += faces);
+        WorldDraw { surfs, sky, persp: opts.persp() }
     }
 
-    /// One wall or liquid surface's spans (`D_DrawSurfaces`' turbulent and
-    /// cached branches, and the port's fallbacks for textureless or unlit
-    /// faces). Returns the pixels drawn.
-    fn draw_face_spans<I: Iterator<Item = (usize, usize, usize)>>(
+    /// How one wall or liquid surface is painted (`D_DrawSurfaces`' turbulent
+    /// and cached branches, and the port's fallbacks for textureless or unlit
+    /// faces), its lightmap built and its block baked or found in the cache.
+    fn prepare_face<'a>(
         &mut self,
-        image: &mut Image,
         s: &Surf,
-        span_list: &impl Fn(u32) -> I,
-        pass: &FacePass,
+        pass: &FacePass<'_, '_, 'a>,
         caches: &mut SurfaceCaches,
         prof: &mut Profiler,
-    ) -> u64 {
-        let FacePass { frame, sview, mipview, persp, ents, bits, light_dir, clear } = *pass;
+    ) -> Paint<'a> {
+        let FacePass { frame, sview, mipview, ents, bits, light_dir, clear } = *pass;
         let scene = frame.scene;
-        let (cam, palette, turb, time) = (&frame.cam, scene.palette, &frame.turb, scene.time);
-        let (light_styles, colormap) = (scene.light_styles, scene.colormap);
-        let w = self.w;
+        let (light_styles, colormap, time) = (scene.light_styles, scene.colormap, scene.time);
         let e = &ents[s.ent as usize];
         let bsp = e.bsp;
         let fi = s.face as usize;
@@ -1905,18 +1864,9 @@ impl EdgeState {
             let anim_mi = texture_animation(bsp, mi, e.frame, time);
             bsp.textures.get(anim_mi).and_then(|o| o.as_ref()).map(|mt| (anim_mi, mt))
         });
-        let mut drawn = 0u64;
-        let fill = |image: &mut Image, c: [u8; 3]| {
-            let mut n_all = 0u64;
-            for (u, v, n) in span_list(s.spans) {
-                image.rgb[v * w + u..v * w + u + n].fill(c);
-                n_all += n as u64;
-            }
-            n_all
-        };
         // The face's gradients from the eye in the model's frame.
-        let Some(grads) = face_grads(bsp, face, sview, sub(cam.pos, e.origin), ti) else {
-            return fill(image, clear);
+        let Some(grads) = face_grads(bsp, face, sview, sub(frame.cam.pos, e.origin), ti) else {
+            return Paint::Fill(clear);
         };
         let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
         let normal = super::surf::face_normal(bsp, face).unwrap_or([0.0, 0.0, 1.0]);
@@ -1935,14 +1885,8 @@ impl EdgeState {
         };
         match tex {
             Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
-                let (tw, th) = (mt.width as usize, mt.height as usize);
                 if turbulent {
-                    for (u, v, n) in span_list(s.spans) {
-                        let row = &mut image.rgb[v * w + u..v * w + u + n];
-                        span_turb(row, &span_at(&grads, u, v), &grads, &mt.pixels, tw, th, palette, turb, time, persp);
-                        drawn += n as u64;
-                    }
-                    return drawn;
+                    return Paint::Turb { grads, mt };
                 }
                 let block = match (lightmap.as_ref(), colormap) {
                     (Some(lm), Some(cm)) => {
@@ -1963,23 +1907,15 @@ impl EdgeState {
                     _ => None,
                 };
                 match block {
-                    Some(sb) => {
+                    Some(block) => {
                         prof.add(|st| st.surf_hits += 1);
-                        let g = grads.mip_scaled(sb.mip);
-                        let fx = BlockFixed::new(&g, sb.texmins, sb.bw, sb.bh);
-                        for (u, v, n) in span_list(s.spans) {
-                            let row = &mut image.rgb[v * w + u..v * w + u + n];
-                            span_cached(row, &span_at(&g, u, v), &fx, &sb.block, sb.bw, sb.bh, palette, persp);
-                            drawn += n as u64;
-                        }
+                        let grads = grads.mip_scaled(block.mip);
+                        let fixed = BlockFixed::new(&grads, block.texmins, block.bw, block.bh);
+                        Paint::Cached { grads, fixed, block }
                     }
                     None => {
                         prof.add(|st| st.surf_misses += 1);
-                        for (u, v, n) in span_list(s.spans) {
-                            let row = &mut image.rgb[v * w + u..v * w + u + n];
-                            span_tex(row, &span_at(&grads, u, v), &grads, &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), colormap);
-                            drawn += n as u64;
-                        }
+                        Paint::Texels { grads, texture: Some(mt), shade, lightmap }
                     }
                 }
             }
@@ -1989,17 +1925,74 @@ impl EdgeState {
                 let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
                 let base = hash_color(key);
                 let to8 = |c: f32| (c * 255.0).clamp(0.0, 255.0) as u8;
-                match lightmap.as_ref() {
-                    Some(lm) => {
-                        let mut pal1 = [[0u8; 3]; 256];
-                        pal1[0] = [to8(base[0]), to8(base[1]), to8(base[2])];
-                        for (u, v, n) in span_list(s.spans) {
-                            let row = &mut image.rgb[v * w + u..v * w + u + n];
-                            span_tex(row, &span_at(&grads, u, v), &grads, &[0u8], 1, 1, &pal1, shade, Some(lm), colormap);
-                            drawn += n as u64;
-                        }
+                match lightmap {
+                    Some(lm) => Paint::Flat { grads, colour: base.map(to8), shade, lightmap: lm },
+                    None => Paint::Fill(base.map(|c| to8(c * shade))),
+                }
+            }
+        }
+    }
+
+    /// `D_DrawSurfaces` and `D_DrawZSpans` for the rows of `band`: each
+    /// surface's spans in those rows, painted as [`EdgeState::build`] decided,
+    /// and their `1/z`. Returns the pixels drawn (the background's not
+    /// counted).
+    pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame, world: &WorldDraw) -> u64 {
+        let (w, h) = (self.w, self.h);
+        let rows = band.rows();
+        let scene = frame.scene;
+        let (palette, colormap, persp) = (scene.palette, scene.colormap, world.persp);
+        let mut drawn = 0u64;
+        for (si, draw) in world.surfs.iter().enumerate() {
+            let Some(SurfDraw { paint, zi: [ziorigin, zistepu, zistepv] }) = draw else { continue };
+            let izistep = c_ftoi((zistepu * 32768.0 * 65536.0) as f64);
+            // A surface's spans run bottom to top (each new one is pushed on
+            // its list): skip those below the band, stop above it.
+            let mut p = self.surfs[si].spans;
+            while let Some(sp) = self.spans.get(p as usize) {
+                p = sp.pnext;
+                // clamp to the row (id's stepping keeps it there)
+                let v = sp.v.clamp(0, h as i32 - 1) as usize;
+                if v >= rows.end {
+                    continue;
+                }
+                if v < rows.start {
+                    break;
+                }
+                let u = sp.u.clamp(0, w as i32) as usize;
+                let n = ((sp.u + sp.count).clamp(0, w as i32) as usize).saturating_sub(u);
+                let Some((row, zrow)) = band.span(u, v, n).filter(|_| n > 0) else { continue };
+                match paint {
+                    Paint::Fill(c) => row.fill(*c),
+                    Paint::Sky(mt) => {
+                        draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &world.sky, palette);
                     }
-                    None => drawn += fill(image, [to8(base[0] * shade), to8(base[1] * shade), to8(base[2] * shade)]),
+                    Paint::Turb { grads, mt } => {
+                        let (tw, th) = (mt.width as usize, mt.height as usize);
+                        span_turb(row, &span_at(grads, u, v), grads, &mt.pixels, tw, th, palette, &frame.turb, scene.time, persp);
+                    }
+                    Paint::Cached { grads, fixed, block } => {
+                        span_cached(row, &span_at(grads, u, v), fixed, &block.block, block.bw, block.bh, palette, persp);
+                    }
+                    Paint::Texels { grads, texture, shade, lightmap } => {
+                        let (pixels, tw, th) = texture.map_or((&[][..], 0, 0), |mt| (&mt.pixels[..], mt.width as usize, mt.height as usize));
+                        span_tex(row, &span_at(grads, u, v), grads, pixels, tw, th, palette, *shade, lightmap.as_ref(), colormap);
+                    }
+                    Paint::Flat { grads, colour, shade, lightmap } => {
+                        let mut pal1 = [[0u8; 3]; 256];
+                        pal1[0] = *colour;
+                        span_tex(row, &span_at(grads, u, v), grads, &[0u8], 1, 1, &pal1, *shade, Some(lightmap), colormap);
+                    }
+                }
+                if self.surfs[si].flags & SURF_DRAWBACKGROUND == 0 {
+                    drawn += n as u64;
+                }
+                // D_DrawZSpans
+                let zi = (ziorigin + v as f32 * zistepv + u as f32 * zistepu) as f64;
+                let mut izi = c_ftoi(zi * 32768.0 * 65536.0);
+                for z in zrow {
+                    *z = (izi >> 16) as i16;
+                    izi = izi.wrapping_add(izistep);
                 }
             }
         }
@@ -2007,12 +2000,49 @@ impl EdgeState {
     }
 }
 
+/// How `D_DrawSurfaces` paints one surface's spans, decided once a frame
+/// ([`EdgeState::build`]) so that a band only reads.
+enum Paint<'a> {
+    /// One colour: the background (`r_clearcolor`), a face seen edge-on, a
+    /// sky with no sky texture, or the port's flat colour for a textureless
+    /// face with no lightmap.
+    Fill([u8; 3]),
+    /// The two-layer sky (`D_DrawSkyScans8`).
+    Sky(&'a MipTex),
+    /// A liquid (`Turbulent8`), the raw texel.
+    Turb { grads: PolyGrads, mt: &'a MipTex },
+    /// A wall from its lit surface-cache block (`D_DrawSpans16`); the
+    /// gradients are the block's mip level's.
+    Cached { grads: PolyGrads, fixed: BlockFixed, block: SurfBlock },
+    /// A wall with no block, lit per pixel (no colormap, or a block past the
+    /// size cap — never in id's maps).
+    Texels { grads: PolyGrads, texture: Option<&'a MipTex>, shade: f32, lightmap: Option<LightMap<'a>> },
+    /// The port's flat colour for a textureless face with a lightmap (test
+    /// maps): a 1x1 texture of that colour, lit.
+    Flat { grads: PolyGrads, colour: [u8; 3], shade: f32, lightmap: LightMap<'a> },
+}
+
+/// One surface ready for the bands: its paint and its `1/z` plane
+/// (`d_ziorigin`, `d_zistepu`, `d_zistepv`).
+struct SurfDraw<'a> {
+    paint: Paint<'a>,
+    zi: [f32; 3],
+}
+
+/// The world's surfaces as the bands draw them ([`EdgeState::build`]):
+/// indexed like the edge state's surfaces, `None` for one without a span.
+pub(super) struct WorldDraw<'a> {
+    surfs: Vec<Option<SurfDraw<'a>>>,
+    sky: SkyView,
+    persp: super::raster::Persp,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::math::cross;
     use crate::render::fixtures::render_once;
-    use crate::render::{demo_room, recycle_image, Camera, Renderer, Scene, VideoCvars};
+    use crate::render::{demo_room, recycle_image, Camera, Image, Renderer, Scene, VideoCvars};
 
     fn palette() -> [[u8; 3]; 256] {
         let mut pal = [[0u8; 3]; 256];
@@ -2109,15 +2139,12 @@ mod tests {
         assert_eq!((tall.w, tall.h), (320, 1024));
         // The edge renderer itself refuses only what no setting allows.
         let (w, h) = (crate::render::HIRES_MAXWIDTH + 8, 2);
-        let mut image = Image { w, h, rgb: vec![[1, 2, 3]; w * h] };
-        let mut z = vec![7i16; w * h];
         let (world, pal) = (demo_room(), palette());
         let scene = Scene::new(&world, cam, w, h, &pal);
         let mut edge = EdgeState::new();
         edge.begin_map(&world);
         let (mut caches, mut prof) = (SurfaceCaches::default(), Profiler::default());
-        edge.render(&mut image, &mut z, &Frame::new(&scene, w, h), &mut caches, &mut prof);
-        assert!(image.rgb.iter().all(|&p| p == [1, 2, 3]) && z.iter().all(|&v| v == 7));
+        assert!(edge.build(&Frame::new(&scene, w, h), &mut caches, &mut prof).is_none());
     }
 
     #[test]

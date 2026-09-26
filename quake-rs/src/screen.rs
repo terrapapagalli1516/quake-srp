@@ -207,7 +207,9 @@ pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool,
 /// Every screen pixel is written exactly once — the tile only goes where the
 /// view does not, the four bands around it — so the screen is a spare frame
 /// buffer left uncleared ([`Image::reused_uncleared`]), and the view's own
-/// buffer goes back to the pool ([`crate::render::recycle_image`]).
+/// buffer goes back to the pool ([`crate::render::recycle_image`]). The view
+/// is copied in runs of rows on up to `threads` threads (the renderer's
+/// count; the bytes are the same for any).
 pub fn compose_view(
     view: Image,
     vrect: ViewRect,
@@ -215,6 +217,7 @@ pub fn compose_view(
     vid_h: usize,
     backtile: Option<&crate::wad::Qpic>,
     palette: &[[u8; 3]; 256],
+    threads: usize,
 ) -> Image {
     if vrect.x == 0 && vrect.y == 0 && view.w == vid_w && view.h == vid_h {
         return view;
@@ -230,10 +233,15 @@ pub fn compose_view(
     draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1, palette);
     draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0, palette);
     draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0, palette);
-    let cw = x1 - x0;
-    for (vy, py) in (y0..y1).enumerate() {
-        let dst = py * vid_w + x0;
-        img.rgb[dst..dst + cw].copy_from_slice(&view.rgb[vy * view.w..vy * view.w + cw]);
+    let (cw, vw) = (x1 - x0, view.w);
+    if cw > 0 {
+        let screen_rows = &mut img.rgb[y0 * vid_w..y1 * vid_w];
+        let view_rows = &view.rgb[..(y1 - y0) * vw];
+        crate::render::map_rows(threads, y1 - y0, screen_rows, vid_w, view_rows, vw, |dst, src| {
+            for (d, s) in dst.chunks_mut(vid_w).zip(src.chunks(vw)) {
+                d[x0..x0 + cw].copy_from_slice(&s[..cw]);
+            }
+        });
     }
     crate::render::recycle_image(view);
     img
@@ -618,7 +626,7 @@ mod tests {
         // viewsize 50 at 320x200: a 160x100 view at (80, 26).
         let r = calc_refdef(320, 200, 50.0, false);
         let view = Image::new(r.vrect.w, r.vrect.h, [250, 1, 2]);
-        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), &pal);
+        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), &pal, 1);
         assert_eq!((img.w, img.h), (320, 200));
         let tile_at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
         for y in 0..200 {
@@ -631,7 +639,7 @@ mod tests {
         // A full-screen view (viewsize 120) passes through untouched.
         let full = calc_refdef(320, 200, 120.0, false);
         let view = Image::new(320, 200, [250, 1, 2]);
-        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal);
+        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal, 1);
         assert!(out.rgb.iter().all(|&p| p == [250, 1, 2]));
     }
 
@@ -677,6 +685,7 @@ mod tests {
                     h,
                     t,
                     &pal,
+                    3,
                 );
                 assert_eq!((got.w, got.h), (w, h));
                 assert!(got.rgb == want, "{w}x{h} {vrect:?} tile {}", t.is_some());

@@ -7,7 +7,7 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
-use super::{Camera, Frame, Image};
+use super::{Camera, Frame};
 use super::light::{r_light_point, COLORMAP_LEN, LIGHTSTYLES};
 use super::polyse::PolyFramebuffer;
 use super::stats::Profiler;
@@ -562,21 +562,54 @@ fn alias_project(fv: &mut FinalVert, av: [f32; 3], view: &AliasView, ziscale: f6
     fv.v[1] = ((av[1] as f64 * view.yscale as f64 * zi as f64) + view.ycenter as f64) as i32;
 }
 
-/// Draw one alias entity: `R_AliasDrawModel` (r_alias.c). `trivial_accept`
-/// comes from [`alias_check_bbox`] (always 0 for the gun, which is never
-/// bbox-tested); the gun's 1/z is tripled (`ziscale * 3`) so it wins the depth
-/// test against anything but a wall right against the eye.
-#[allow(clippy::too_many_arguments)]
-fn alias_draw_model(
-    fb: &mut PolyFramebuffer,
+/// One triangle for `D_PolysetDraw`: its screen vertices, and whether it
+/// faces front (a back-facing seam vertex takes the skin's back half).
+#[derive(Clone, Copy)]
+struct PolyTri {
+    v: [FinalVert; 3],
+    facesfront: bool,
+}
+
+/// An alias model ready for the bands: `R_AliasDrawModel` up to the
+/// rasteriser — the skin, light and transform set up, every vertex
+/// transformed and projected, every triangle clipped to the view — so that a
+/// band only rasterises (`D_PolysetDraw`) what falls in its rows.
+pub(super) struct AliasDraw<'a> {
+    setup: AliasSetup<'a>,
+    /// The vertices `D_PolysetDrawFinalVerts` plots first (a subdivided model's;
+    /// those inside the view).
+    points: Vec<FinalVert>,
+    /// The triangles in id's order, a clipped one as its fan.
+    tris: Vec<PolyTri>,
+}
+
+impl AliasDraw<'_> {
+    /// `D_PolysetDraw` of the model into `fb`'s rows: the points, then the
+    /// triangles (those that can reach the rows).
+    pub(super) fn draw(&self, fb: &mut PolyFramebuffer) {
+        fb.draw_final_verts(&self.setup, &self.points);
+        for t in &self.tris {
+            if fb.touches(&t.v) {
+                fb.polyset_draw(&self.setup, t.v, t.facesfront);
+            }
+        }
+    }
+}
+
+/// `R_AliasDrawModel` (r_alias.c) up to the rasteriser: one alias entity's
+/// [`AliasDraw`]. `trivial_accept` comes from [`alias_check_bbox`] (always 0
+/// for the gun, which is never bbox-tested); the gun's 1/z is tripled
+/// (`ziscale * 3`) so it wins the depth test against anything but a wall
+/// right against the eye.
+fn alias_prepare<'a>(
     view: &AliasView,
-    ent: &AliasEntity,
+    ent: &AliasEntity<'a>,
     trivial_accept: i32,
     light: (i32, i32),
     viewmodel: bool,
     time: f32,
-    colormap: Option<&[u8]>,
-) {
+    colormap: Option<&'a [u8]>,
+) -> Option<AliasDraw<'a>> {
     let mdl = ent.mdl;
     let header = &mdl.header;
     // R_AliasSetupSkin: the entity's skin (a skin group animates by time).
@@ -585,9 +618,7 @@ fn alias_draw_model(
     let (transform, axes) = alias_setup_transform(view, header, ent, trivial_accept);
     let (r_ambientlight, r_shadelight, plightvec) = alias_setup_lighting(light.0, light.1, &axes);
     // R_AliasSetupFrame
-    let Some(verts) = mdl_frame_verts(mdl, ent.frame, time) else {
-        return;
-    };
+    let verts = mdl_frame_verts(mdl, ent.frame, time)?;
     let setup = AliasSetup {
         transform,
         r_ambientlight,
@@ -623,14 +654,19 @@ fn alias_draw_model(
         aux.push(av);
     }
     let vert = |i: i32| usize::try_from(i).ok().filter(|&i| i < fverts.len());
+    let mut points = Vec::new();
+    let mut tris = Vec::with_capacity(mdl.triangles.len());
     if trivial_accept != 0 {
-        // R_AliasPrepareUnclippedPoints
+        // R_AliasPrepareUnclippedPoints: D_PolysetDrawFinalVerts' points
+        // (those inside the view), then the triangles.
         if setup.subdiv {
-            fb.draw_final_verts(&setup, &fverts, view);
+            points.extend(fverts.iter().filter(|fv| {
+                fv.v[0] < view.right && fv.v[1] < view.bottom && fv.v[0] >= 0 && fv.v[1] >= 0
+            }));
         }
         for tri in &mdl.triangles {
             if let (Some(a), Some(b), Some(c)) = (vert(tri.vertindex[0]), vert(tri.vertindex[1]), vert(tri.vertindex[2])) {
-                fb.polyset_draw(&setup, [fverts[a], fverts[b], fverts[c]], tri.facesfront != 0);
+                tris.push(PolyTri { v: [fverts[a], fverts[b], fverts[c]], facesfront: tri.facesfront != 0 });
             }
         }
     } else {
@@ -647,12 +683,13 @@ fn alias_draw_model(
                 continue; // completely clipped
             }
             if any & (ALIAS_XY_CLIP_MASK | ALIAS_Z_CLIP) == 0 {
-                fb.polyset_draw(&setup, pfv, tri.facesfront != 0);
+                tris.push(PolyTri { v: pfv, facesfront: tri.facesfront != 0 });
             } else {
-                alias_clip_triangle(fb, &setup, view, pfv, [aux[a], aux[b], aux[c]], tri.facesfront != 0);
+                alias_clip_triangle(&mut tris, &setup, view, pfv, [aux[a], aux[b], aux[c]], tri.facesfront != 0);
             }
         }
     }
+    Some(AliasDraw { setup, points, tris })
 }
 
 /// A clipped-polygon vertex: the final vertex and its view-space position.
@@ -703,9 +740,10 @@ fn alias_clip_screen(a: &FinalVert, b: &FinalVert, axis: usize, bound: i32) -> F
 }
 
 /// `R_AliasClipTriangle` (r_aclip.c): clip a triangle that crosses the z
-/// plane or a view edge, clamp the result into the view, and draw it as a fan.
+/// plane or a view edge, clamp the result into the view, and add it to `tris`
+/// as a fan.
 fn alias_clip_triangle(
-    fb: &mut PolyFramebuffer,
+    tris: &mut Vec<PolyTri>,
     setup: &AliasSetup,
     view: &AliasView,
     pfv: [FinalVert; 3],
@@ -764,25 +802,25 @@ fn alias_clip_triangle(
         v.flags = 0;
     }
     for i in 1..poly.len().saturating_sub(1) {
-        fb.polyset_draw(setup, [poly[0].0, poly[i].0, poly[i + 1].0], facesfront);
+        tris.push(PolyTri { v: [poly[0].0, poly[i].0, poly[i + 1].0], facesfront });
     }
 }
 
-/// Draw one alias-model instance, as `R_DrawEntitiesOnList` does: the bounding
-/// box test (`R_AliasCheckBBox`), the light at the origin plus dynamic lights,
-/// then `R_AliasDrawModel`. The model shares the world's z-buffer.
-pub(super) fn draw_alias_model(
-    image: &mut Image,
-    zbuf: &mut [i16],
-    frame: &Frame,
-    inst: &ModelInstance,
+/// One alias-model instance as `R_DrawEntitiesOnList` draws it, up to the
+/// rasteriser: the bounding box test (`R_AliasCheckBBox`), the light at the
+/// origin plus dynamic lights, then `R_AliasDrawModel`'s setup
+/// ([`alias_prepare`]). `None` when it draws nothing. It shares the world's
+/// z-buffer.
+pub(super) fn prepare_alias_model<'a>(
+    frame: &Frame<'_, 'a>,
+    inst: &ModelInstance<'a>,
     prof: &mut Profiler,
-) {
-    if image.w == 0 || image.h == 0 {
-        return;
+) -> Option<AliasDraw<'a>> {
+    if frame.w == 0 || frame.h == 0 {
+        return None;
     }
     let scene = frame.scene;
-    let view = AliasView::new(&frame.cam, frame.scr_fov(), image.w, image.h, scene.options.aspect());
+    let view = AliasView::new(&frame.cam, frame.scr_fov(), frame.w, frame.h, scene.options.aspect());
     let ent = AliasEntity {
         mdl: inst.mdl,
         origin: inst.origin,
@@ -792,16 +830,13 @@ pub(super) fn draw_alias_model(
         color: inst.color,
     };
     prof.add(|s| s.alias_models += 1);
-    let Some(trivial_accept) = alias_check_bbox(&view, &ent) else {
-        return;
-    };
+    let trivial_accept = alias_check_bbox(&view, &ent)?;
     prof.add(|s| {
         s.alias_accepted += 1;
         s.alias_tris += inst.mdl.header.numtris.max(0) as u64;
     });
     let light = alias_entity_light(scene.world, inst.origin, scene.light_styles, scene.dlights, false);
-    let mut fb = PolyFramebuffer::new(image, zbuf, scene.palette);
-    alias_draw_model(&mut fb, &view, &ent, trivial_accept, light, false, scene.time, scene.colormap);
+    alias_prepare(&view, &ent, trivial_accept, light, false, scene.time, scene.colormap)
 }
 
 /// `r_avertexnormals` (anorms.h): the 162 precomputed vertex normals an MDL
@@ -892,7 +927,7 @@ pub struct Viewmodel<'a> {
     pub angles: Vec3,
 }
 
-/// Draw the first-person weapon — `R_DrawViewModel` (r_main.c): `cl.viewent`
+/// The first-person weapon up to the rasteriser — `R_DrawViewModel` (r_main.c): `cl.viewent`
 /// posed at V_CalcRefdef's gun origin (the camera plus `origin_ofs`, see
 /// [`viewmodel_origin_ofs`](super::view::viewmodel_origin_ofs)) facing along the view, lit by `R_LightPoint` at
 /// that origin (at least 24) plus dynamic lights, and drawn by the same
@@ -902,15 +937,12 @@ pub struct Viewmodel<'a> {
 /// against everything but a wall right against the eye. No gun when the `fov`
 /// cvar, `scr_fov`, is over 90 (`r_fov_greater_than_90`) — the cvar, not the
 /// view's field of view, which Hor+ widens past 90 on a wide screen.
-pub(super) fn draw_viewmodel(image: &mut Image, zbuf: &mut [i16], frame: &Frame, vm: &Viewmodel) {
-    if image.w == 0 || image.h == 0 {
-        return;
-    }
+pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -> Option<AliasDraw<'a>> {
     let (scene, cam, scr_fov) = (frame.scene, &frame.cam, frame.scr_fov());
-    if scr_fov > 90.0 {
-        return;
+    if frame.w == 0 || frame.h == 0 || scr_fov > 90.0 {
+        return None;
     }
-    let view = AliasView::new(cam, scr_fov, image.w, image.h, scene.options.aspect());
+    let view = AliasView::new(cam, scr_fov, frame.w, frame.h, scene.options.aspect());
     let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
     // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
     let ent = AliasEntity {
@@ -922,14 +954,13 @@ pub(super) fn draw_viewmodel(image: &mut Image, zbuf: &mut [i16], frame: &Frame,
         color: [180, 180, 180],
     };
     let light = alias_entity_light(scene.world, origin, scene.light_styles, scene.dlights, true);
-    let mut fb = PolyFramebuffer::new(image, zbuf, scene.palette);
-    alias_draw_model(&mut fb, &view, &ent, 0, light, true, scene.time, scene.colormap);
+    alias_prepare(&view, &ent, 0, light, true, scene.time, scene.colormap)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, Scene};
+    use crate::render::{demo_room, Image, Scene};
     use crate::render::fixtures::render_once;
     use crate::render::fixtures::tiny_mdl;
     use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;

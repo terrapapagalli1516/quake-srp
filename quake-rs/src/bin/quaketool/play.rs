@@ -114,6 +114,8 @@ struct Host {
     oldrealtime: f64,
     mode: Option<Mode>,
     vid: Vid,
+    /// The renderer threads each game draws with.
+    threads: usize,
 }
 
 impl Host {
@@ -136,6 +138,7 @@ impl Host {
                 if d.at_end() {
                     if let Some(next) = cl_demo::build_demo_n(self.pak.clone(), d.demonum + 1, sound) {
                         **d = next;
+                        d.renderer.set_threads(self.threads);
                         d.viewsize = viewsize;
                         d.show_scores = km.showscores;
                     }
@@ -163,10 +166,12 @@ impl Host {
                 let mut out = Vec::new();
                 host_cmd::run_game_command(&mut walk, "impulse", &["impulse", "255"], &mut out, sound);
             }
+            walk.renderer.set_threads(self.threads);
             Mode::Walk(Box::new(walk))
         } else if let Some(n) = workload.strip_prefix("demo").and_then(|n| n.parse::<usize>().ok()) {
-            let demo = cl_demo::build_demo_n(self.pak.clone(), n.max(1) - 1, sound)
+            let mut demo = cl_demo::build_demo_n(self.pak.clone(), n.max(1) - 1, sound)
                 .ok_or_else(|| format!("{workload} would not load"))?;
+            demo.renderer.set_threads(self.threads);
             Mode::Demo(Box::new(demo))
         } else {
             return Err(format!("unknown workload {workload:?} (walk_<map>, fire_<map>, quad_<map>, demo1..3)"));
@@ -222,6 +227,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
         oldrealtime: 0.0,
         mode: None,
         vid,
+        threads: video.threads(),
     };
     let mut rgba: Vec<u8> = Vec::new();
     let mut o = String::new();
@@ -259,13 +265,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 // V_UpdatePalette + VID_ShiftPalette: the cshifts and gamma as
                 // ramps the finished frame is packed through (a copy with neither).
                 let ramps = (!frame.cshifts.is_empty()).then(|| render::cshift_ramps(&frame.cshifts, &host.gamma));
-                rgba.clear();
-                for px in &frame.image.rgb {
-                    match &ramps {
-                        Some([r, g, b]) => rgba.extend_from_slice(&[r[px[0] as usize], g[px[1] as usize], b[px[2] as usize], 255]),
-                        None => rgba.extend_from_slice(&[px[0], px[1], px[2], 255]),
-                    }
-                }
+                render::pack_rgba(&frame.image, ramps.as_ref(), &mut rgba, host.threads);
                 if every > 0 && f % every == 0 {
                     hashes.push(format!("{:08x}", fnv(&rgba)));
                     if let Some(prefix) = &ppm {

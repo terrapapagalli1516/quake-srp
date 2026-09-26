@@ -26,7 +26,9 @@
 //! client's `lap`s: demo message and entities, 3-D view, post-3-D, 2-D, and
 //! the RGBA pack) and the 3-D view's (the world walk to edges, the edge
 //! scan, `D_DrawSurfaces` with the surface cache, alias models, particles,
-//! sprites, the gun). The profiled run is a little slower than the timed one.
+//! sprites, the gun; with `--threads` above 1 these add every thread's time,
+//! and the bands' wall time is printed beside them). The profiled run is a
+//! little slower than the timed one.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -75,11 +77,13 @@ struct Run {
     cache: (usize, usize),
 }
 
-/// One timedemo of `name` at `vid`, with the render profiler on if `profile`.
-fn run(pak: &Pak, name: &str, vid: &Vid, clock: &mut TimeDemoClock, rgba: &mut Vec<u8>, profile: bool) -> Option<Run> {
+/// One timedemo of `name` at `vid`, drawn on `threads` threads, with the
+/// render profiler on if `profile`.
+fn run(pak: &Pak, name: &str, vid: &Vid, threads: usize, clock: &mut TimeDemoClock, rgba: &mut Vec<u8>, profile: bool) -> Option<Run> {
     let gamma = render::build_gamma_table(1.0);
     let mut sound = Vec::new();
     let mut d = cl_demo::build_timedemo(pak.clone(), name, &mut sound)?;
+    d.renderer.set_threads(threads);
     if profile {
         d.renderer.stats_begin();
     }
@@ -99,14 +103,7 @@ fn run(pak: &Pak, name: &str, vid: &Vid, clock: &mut TimeDemoClock, rgba: &mut V
         // V_UpdatePalette + VID_ShiftPalette: the frame into RGBA through
         // the cshift ramps (a plain copy without any), as the page packs it.
         let ramps = (!frame.cshifts.is_empty()).then(|| render::cshift_ramps(&frame.cshifts, &gamma));
-        rgba.resize(frame.image.rgb.len() * 4, 255);
-        for (out, px) in rgba.chunks_exact_mut(4).zip(&frame.image.rgb) {
-            let c = match &ramps {
-                Some([r, g, b]) => [r[px[0] as usize], g[px[1] as usize], b[px[2] as usize]],
-                None => *px,
-            };
-            out[..3].copy_from_slice(&c);
-        }
+        render::pack_rgba(&frame.image, ramps.as_ref(), rgba, threads);
         render::recycle_image(frame.image);
         lap_hook(Phase::Pack);
         host_framecount += 1;
@@ -150,7 +147,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
         let _ = writeln!(o, "Playing demo from {name}.");
         let display_aspect = video.display_aspect(width, height, Some(DISPLAY_ASPECT));
         let vid = Vid { width, height, display_aspect, exact_perspective: false, video: video.cvars };
-        let Some(timed) = run(&pak, &name, &vid, &mut clock, &mut rgba, false) else {
+        let Some(timed) = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, false) else {
             let _ = writeln!(o, "ERROR: couldn't open.");
             return Ok(o);
         };
@@ -159,7 +156,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             LAPS.with(|l| *l.borrow_mut() = (None, [0.0; PHASES]));
             set_lap_hook(Some(lap_hook));
             let t0 = Instant::now();
-            let profiled = run(&pak, &name, &vid, &mut clock, &mut rgba, true);
+            let profiled = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, true);
             let total = t0.elapsed().as_secs_f64();
             set_lap_hook(None);
             let (frames, st, (bytes, blocks)) = match profiled {
@@ -191,6 +188,12 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
                 ns(st.particle_ns),
                 ns(st.sprite_ns),
                 ns(st.viewmodel_ns),
+            );
+            let _ = writeln!(
+                o,
+                "  bands: {:.3} ms wall per frame on {} thread(s) (the 3-D times above add every thread's)",
+                ns(st.bands_ns),
+                st.band_threads / frames as u64,
             );
             let per = |n: u64| n / frames as u64;
             let _ = writeln!(

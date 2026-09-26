@@ -201,3 +201,20 @@ pub(crate) fn test_backtile() -> Qpic {
     let data = (0..64 * 64).map(|i| (i % 251) as u8).collect();
     Qpic { width: 64, height: 64, data }
 }
+
+/// A trivial single-frame sprite: `wpx` x `hpx` pixels all `fill`, with a
+/// centred origin so the billboard straddles the projected point.
+pub(super) fn test_sprite(wpx: i32, hpx: i32, fill: u8) -> crate::spr::Sprite {
+    use crate::spr::{Frame, Sprite, SpriteFrame, SpriteHeader};
+    Sprite {
+        header: SpriteHeader {
+            ident: 0, version: 1, type_: 0, boundingradius: 0.0,
+            width: wpx, height: hpx, numframes: 1, beamlength: 0.0, synctype: 0,
+        },
+        frames: vec![Frame::Single(SpriteFrame {
+            origin: [-wpx / 2, hpx / 2], // centred
+            width: wpx, height: hpx,
+            pixels: vec![fill; (wpx * hpx) as usize],
+        })],
+    }
+}

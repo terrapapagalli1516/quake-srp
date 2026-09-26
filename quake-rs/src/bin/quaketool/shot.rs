@@ -17,7 +17,7 @@
 //!                    the underwater warp and tint
 //! --viewsize V       the `viewsize` cvar (default 100: the view above the full status bar)
 //! --fire N           hold +attack for the last N frames (muzzle flash, particles)
-//! plus the video options (`video.rs`): --video, --fov-mode, --hires, --display (default square), --scaled2d
+//! plus the video options (`video.rs`): --video, --fov-mode, --hires, --display (default square), --scaled2d, --threads
 //! ```
 
 use std::fmt::Write as _;
@@ -79,6 +79,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let mut sound = Vec::new();
     let mut wk = host_cmd::build_walk_map(pak, map, &mut sound).ok_or_else(|| format!("{map} would not load"))?;
     wk.viewsize = viewsize;
+    wk.renderer.set_threads(video.threads());
     if let Some(contents) = liquid {
         origin = Some(largest_leaf_centre(&wk.bsp, contents).ok_or_else(|| format!("{map} has no leaf of contents {contents}"))?);
     }

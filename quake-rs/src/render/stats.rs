@@ -87,6 +87,12 @@ pub struct RenderStats {
     pub spans_emitted: u64,
     pub edges_peak: u64,
     pub surfs_peak: u64,
+    /// The wall time of the frame's banded passes (the world's spans and the
+    /// entities, on every thread): with one thread their sum, with several
+    /// less — the timers above add each thread's time.
+    pub bands_ns: u64,
+    /// The threads that drew the bands, summed over the frames.
+    pub band_threads: u64,
 }
 
 impl RenderStats {
@@ -102,7 +108,46 @@ impl RenderStats {
         surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0, surf_texels_baked: 0,
         alias_models: 0, alias_accepted: 0, alias_tris: 0,
         edges_emitted: 0, surfs_emitted: 0, spans_emitted: 0, edges_peak: 0, surfs_peak: 0,
+        bands_ns: 0, band_threads: 0,
     };
+
+    /// Add `o`'s counts and times to these (the peaks as the larger).
+    fn merge(&mut self, o: &RenderStats) {
+        let RenderStats {
+            world_ns, submodel_ns, external_ns, alias_ns, particle_ns, sprite_ns, viewmodel_ns,
+            faces_total, faces_pvs_culled, faces_frustum_culled, faces_drawn, world_tris, world_pixels,
+            surf_hits, surf_misses, sub_faces_visited, sub_faces_drawn, sub_surf_hits, sub_surf_misses,
+            sub_tris, sub_lm_builds, world_pvs_ns, world_sort_ns, world_setup_ns, world_light_ns,
+            world_surf_ns, surf_cache_hits, surf_baked, surf_bypass_baked, surf_texels_baked,
+            alias_models, alias_accepted, alias_tris, edges_emitted, surfs_emitted, spans_emitted,
+            edges_peak, surfs_peak, bands_ns, band_threads,
+        } = *o;
+        for (sum, add) in [
+            (&mut self.world_ns, world_ns), (&mut self.submodel_ns, submodel_ns),
+            (&mut self.external_ns, external_ns), (&mut self.alias_ns, alias_ns),
+            (&mut self.particle_ns, particle_ns), (&mut self.sprite_ns, sprite_ns),
+            (&mut self.viewmodel_ns, viewmodel_ns), (&mut self.faces_total, faces_total),
+            (&mut self.faces_pvs_culled, faces_pvs_culled), (&mut self.faces_frustum_culled, faces_frustum_culled),
+            (&mut self.faces_drawn, faces_drawn), (&mut self.world_tris, world_tris),
+            (&mut self.world_pixels, world_pixels), (&mut self.surf_hits, surf_hits),
+            (&mut self.surf_misses, surf_misses), (&mut self.sub_faces_visited, sub_faces_visited),
+            (&mut self.sub_faces_drawn, sub_faces_drawn), (&mut self.sub_surf_hits, sub_surf_hits),
+            (&mut self.sub_surf_misses, sub_surf_misses), (&mut self.sub_tris, sub_tris),
+            (&mut self.sub_lm_builds, sub_lm_builds), (&mut self.world_pvs_ns, world_pvs_ns),
+            (&mut self.world_sort_ns, world_sort_ns), (&mut self.world_setup_ns, world_setup_ns),
+            (&mut self.world_light_ns, world_light_ns), (&mut self.world_surf_ns, world_surf_ns),
+            (&mut self.surf_cache_hits, surf_cache_hits), (&mut self.surf_baked, surf_baked),
+            (&mut self.surf_bypass_baked, surf_bypass_baked), (&mut self.surf_texels_baked, surf_texels_baked),
+            (&mut self.alias_models, alias_models), (&mut self.alias_accepted, alias_accepted),
+            (&mut self.alias_tris, alias_tris), (&mut self.edges_emitted, edges_emitted),
+            (&mut self.surfs_emitted, surfs_emitted), (&mut self.spans_emitted, spans_emitted),
+            (&mut self.bands_ns, bands_ns), (&mut self.band_threads, band_threads),
+        ] {
+            *sum += add;
+        }
+        self.edges_peak = self.edges_peak.max(edges_peak);
+        self.surfs_peak = self.surfs_peak.max(surfs_peak);
+    }
 }
 
 /// The profiler a [`Renderer`](super::Renderer) owns: the counters while it
@@ -145,6 +190,19 @@ impl Profiler {
     pub(super) fn add(&mut self, f: impl FnOnce(&mut RenderStats)) {
         if let Some(s) = self.stats.as_mut() {
             f(s);
+        }
+    }
+
+    /// A profiler for a band's passes: on if this one is, with this one's
+    /// clock, its counters at zero ([`Profiler::absorb`] adds them back).
+    pub(super) fn for_band(&self) -> Profiler {
+        Profiler { stats: self.stats.map(|_| RenderStats::ZERO), clock: self.clock }
+    }
+
+    /// Add what a band's profiler ([`Profiler::for_band`]) counted.
+    pub(super) fn absorb(&mut self, band: &Profiler) {
+        if let (Some(s), Some(b)) = (self.stats.as_mut(), band.stats.as_ref()) {
+            s.merge(b);
         }
     }
 

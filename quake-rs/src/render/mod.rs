@@ -39,12 +39,13 @@
 
 use crate::bsp::Bsp;
 use crate::math::{cross, dot, normalize, sub, Vec3};
-use alias::{draw_alias_model, draw_viewmodel};
+use alias::{prepare_alias_model, prepare_viewmodel, AliasDraw};
 use raster::{hash_color, raster_triangle, Projected};
 use sprite::draw_sprites;
 use warp::{apply_warp, TurbTable};
 
 mod view;
+mod band;
 mod edge;
 mod raster;
 mod light;
@@ -87,12 +88,13 @@ pub use sprite::SpriteInstance;
 pub use surf::MipCvars;
 pub use stats::RenderStats;
 pub use view::{
-    build_gamma_table, content_cshift, cshift_ramps, powerup_cshift, view_bob, viewmodel_angles,
+    build_gamma_table, content_cshift, cshift_ramps, pack_rgba, powerup_cshift, view_bob, viewmodel_angles,
     viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
 pub use video::{FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH};
 pub use world::{BModelInstance, ExternalBModel};
+pub(crate) use band::map_rows;
 
 // ---------------------------------------------------------------------------
 // Image
@@ -862,6 +864,8 @@ pub struct Renderer {
     /// `D_WarpScreen`'s tables, kept across underwater frames.
     warp: warp::WarpTables,
     prof: stats::Profiler,
+    /// How many threads draw a frame's bands.
+    workers: band::Workers,
 }
 
 /// A world's identity for [`Renderer`]'s per-map state: the sizes of what
@@ -905,6 +909,7 @@ impl Renderer {
             zbuf: Vec::new(),
             warp: warp::WarpTables::default(),
             prof: stats::Profiler::default(),
+            workers: band::Workers::default(),
         }
     }
 
@@ -973,37 +978,55 @@ impl Renderer {
         }
         self.zbuf.resize(w.saturating_mul(h), 0);
         let frame = Frame::new(scene, w, h);
-        self.edge.render(&mut image, &mut self.zbuf, &frame, &mut self.surfaces, &mut self.prof);
-        self.draw_entities(&mut image, &frame);
+        // What the whole frame decides first: the world's edges, spans and
+        // surfaces (the surface cache filled), the entities up to their
+        // rasterisers. Then every band of the view draws from them.
+        let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut self.prof) else {
+            return image;
+        };
+        let entities = Entities::prepare(&frame, &mut self.prof);
+        let t = self.prof.now();
+        let (edge, prof, workers) = (&self.edge, &self.prof, self.workers);
+        let whole = band::Band::whole(w, &mut image.rgb, &mut self.zbuf);
+        let bands = workers.run(whole, h, || prof.for_band(), |band, prof| {
+            let tw = prof.now();
+            let drawn = edge.draw_band(band, &frame, &world);
+            if let Some(tw) = tw {
+                let ns = tw.elapsed().as_nanos() as u64;
+                prof.add(|s| {
+                    s.world_ns += ns;
+                    s.world_surf_ns += ns;
+                });
+            }
+            prof.add(|s| s.world_pixels += drawn);
+            entities.draw(band, &frame, prof);
+        });
+        let threads = bands.len() as u64;
+        for b in &bands {
+            self.prof.absorb(b);
+        }
+        if let Some(t) = t {
+            let ns = t.elapsed().as_nanos() as u64;
+            self.prof.add(|s| {
+                s.bands_ns += ns;
+                s.band_threads += threads;
+            });
+        }
         image
     }
 
-    /// The entities against the world's 16-bit 1/z: alias models, sprites,
-    /// particles and the gun, each testing and writing it, with a phase timer
-    /// each while profiling.
-    fn draw_entities(&mut self, image: &mut Image, frame: &Frame) {
-        let scene = frame.scene;
-        let zbuf = &mut self.zbuf[..];
-        let prof = &mut self.prof;
-        let ta = prof.now();
-        for inst in scene.models {
-            draw_alias_model(image, zbuf, frame, inst, prof);
-        }
-        if let Some(t) = ta { prof.add(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
-        let tp = prof.now();
-        part::draw_particles_sized(
-            image, zbuf, &frame.cam, scene.particles, scene.palette, frame.w, frame.h, scene.options.aspect(),
-            scene.options.video.hires,
-        );
-        if let Some(t) = tp { prof.add(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
-        let tsp = prof.now();
-        draw_sprites(image, zbuf, frame);
-        if let Some(t) = tsp { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
-        let tv = prof.now();
-        if let Some(vm) = &scene.viewmodel {
-            draw_viewmodel(image, zbuf, frame, vm);
-        }
-        if let Some(t) = tv { prof.add(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
+    /// How many threads draw a frame (1, the default: the calling thread
+    /// alone). The frame is the same for any count; see `band.rs`.
+    #[must_use]
+    pub fn threads(&self) -> usize {
+        self.workers.threads()
+    }
+
+    /// Draw the frames from now on on `threads` threads (at least 1): the
+    /// calling thread and `threads - 1` more, spawned for each frame's bands
+    /// (`std::thread::scope`) and joined before [`Renderer::render`] returns.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.workers = band::Workers::new(threads);
     }
 
     /// The z-buffer the last frame left.
@@ -1018,6 +1041,55 @@ impl Renderer {
     /// With the hires extra (`hires`) the wobble is scaled to the view.
     pub fn warp(&mut self, view: Image, out_w: usize, out_h: usize, clock: f32, hires: bool) -> Image {
         apply_warp(&mut self.warp, view, out_w, out_h, clock, hires)
+    }
+}
+
+/// A frame's entities ready for the bands: `R_DrawEntitiesOnList`'s alias
+/// models, `R_DrawParticles`' particles and `R_DrawViewModel`'s gun, each up
+/// to its rasteriser (the sprites are cheap enough to set up per band).
+struct Entities<'a> {
+    models: Vec<AliasDraw<'a>>,
+    particles: Vec<part::ParticleDot>,
+    gun: Option<AliasDraw<'a>>,
+}
+
+impl<'a> Entities<'a> {
+    /// Everything about the frame's entities that does not depend on the
+    /// rows being drawn: the models' vertices, light and clipped triangles,
+    /// the particles' squares.
+    fn prepare(frame: &Frame<'_, 'a>, prof: &mut stats::Profiler) -> Entities<'a> {
+        let scene = frame.scene;
+        let models = scene.models.iter().filter_map(|inst| prepare_alias_model(frame, inst, prof)).collect();
+        let opts = &scene.options;
+        let proj = part::ParticleProjection::new(&frame.cam, frame.w, frame.h, opts.aspect(), opts.video.hires);
+        let particles = part::project_particles(&frame.cam, &proj, scene.particles, scene.palette);
+        let gun = scene.viewmodel.as_ref().and_then(|vm| prepare_viewmodel(frame, vm));
+        Entities { models, particles, gun }
+    }
+
+    /// The entities' pixels in `band`'s rows, against the world's 16-bit
+    /// 1/z, in id's order: the alias models, the particles, the sprites and
+    /// last the gun, each testing and writing the z-buffer (id draws the
+    /// particles after the gun; with the gun's tripled 1/z the order only
+    /// matters on exact ties). A phase timer each while profiling.
+    fn draw(&self, band: &mut band::Band, frame: &Frame, prof: &mut stats::Profiler) {
+        let palette = frame.scene.palette;
+        let ta = prof.now();
+        for m in &self.models {
+            m.draw(&mut polyse::PolyFramebuffer::new(band, palette));
+        }
+        if let Some(t) = ta { prof.add(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
+        let tp = prof.now();
+        part::draw_particle_dots(band, &self.particles);
+        if let Some(t) = tp { prof.add(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
+        let tsp = prof.now();
+        draw_sprites(band, frame);
+        if let Some(t) = tsp { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
+        let tv = prof.now();
+        if let Some(gun) = &self.gun {
+            gun.draw(&mut polyse::PolyFramebuffer::new(band, palette));
+        }
+        if let Some(t) = tv { prof.add(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     }
 }
 
@@ -1443,6 +1515,36 @@ mod tests {
         let cam = Camera::looking_at([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 90.0);
         // Must not panic.
         let _img = render_bsp(&bsp, &cam, 80, 60);
+    }
+
+    #[test]
+    fn every_thread_count_draws_the_same_frame() {
+        // The bands (band.rs) give each pixel its writes in the one-thread
+        // order: the world's spans (a liquid, the sky, dynamically lit walls),
+        // an alias model, particles, a sprite and the gun, at a size no band
+        // split divides evenly.
+        let bsp = special_surface_room();
+        let pal = fixtures::ramp_palette();
+        let (mdl, spr) = (fixtures::tiny_mdl(), fixtures::test_sprite(12, 12, 40));
+        let cam = Camera::looking_at([-200.0, -150.0, 60.0], [0.0, 0.0, 0.0], 90.0);
+        let models = [ModelInstance::with_frame(&mdl, [-80.0, 0.0, 0.0], 30.0, 0, [200, 40, 40])];
+        let particles: Vec<(Vec3, u8)> = (0..300)
+            .map(|i| ([-150.0 + i as f32, (i % 13) as f32 * 9.0 - 60.0, (i % 7) as f32 * 9.0], (i % 250) as u8))
+            .collect();
+        let sprites = [SpriteInstance { sprite: &spr, origin: [-60.0, 20.0, 10.0], frame: 0 }];
+        let gun = Viewmodel { mdl: &mdl, frame: 0, origin_ofs: [8.0, 0.0, -6.0], angles: [cam.pitch, cam.yaw, 0.0] };
+        let dlights = [crate::dlight::DynamicLight::new([0.0; 3], 250.0, f32::MAX, 0.0, 0.0, 0)];
+        let world = Scene { time: 1.3, dlights: &dlights, ..Scene::new(&bsp, cam, 211, 157, &pal) };
+        let scene = Scene { models: &models, particles: &particles, sprites: &sprites, viewmodel: Some(gun), ..world };
+        let one = render_once(&scene);
+        let differ = one.rgb.iter().zip(&render_once(&world).rgb).filter(|(a, b)| a != b).count();
+        assert!(differ > 200, "the entities show: {differ} pixels");
+        for threads in [2, 3, 7, 16] {
+            let mut r = Renderer::new();
+            r.set_threads(threads);
+            assert!(r.render(&scene).rgb == one.rgb, "{threads} threads");
+            assert!(r.render(&scene).rgb == one.rgb, "{threads} threads, warm");
+        }
     }
 
     #[test]

@@ -70,7 +70,7 @@ fn main() {
         "render" => need(rest, 2, cmd).and_then(|a| cmd_render(&a[0], &a[1], a.get(2).map(|s| s.as_str()))),
         "render-demo" => need(rest, 1, cmd).and_then(|a| cmd_render_demo(&a[0])),
         "menu" => need(rest, 2, cmd).and_then(|a| cmd_menu(&a[0], &a[1])),
-        "scene" => need(rest, 3, cmd).and_then(|a| cmd_scene(&a[0], &a[1], &a[2])),
+        "scene" => need(rest, 3, cmd).and_then(|a| cmd_scene(&a[0], &a[1], &a[2], &a[3..])),
         "view" => need(rest, 3, cmd).and_then(cmd_view),
         "shot" => need(rest, 3, cmd).and_then(|a| shot::cmd_shot(a).map(Out::Text)),
         "walk" => need(rest, 3, cmd).and_then(|a| {
@@ -144,10 +144,10 @@ fn usage() {
          \tquaketool render-demo <out.ppm>   render the built-in demo room\n\
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
-         \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
+         \tquaketool scene <pak> <map.bsp> <out.ppm> [--threads N]  render a map + its spawned MDL entities\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N] [--threads N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
-         \tquaketool shot <pak> <map.bsp> <out.ppm> [--res WxH] [--zoom N] [--frames N] [--yaw Y] [--pitch P] [--origin x,y,z] [--viewsize V] [--fire N] [--video classic|modern] [--fov-mode classic|horplus] [--hires 0|1] [--display W:H|square] [--scaled2d 0|1]\n\
+         \tquaketool shot <pak> <map.bsp> <out.ppm> [--res WxH] [--zoom N] [--frames N] [--yaw Y] [--pitch P] [--origin x,y,z] [--viewsize V] [--fire N] [--video classic|modern] [--fov-mode classic|horplus] [--hires 0|1] [--display W:H|square] [--scaled2d 0|1] [--threads N]\n\
          \t                               the game screen as a player sees it (view, gun, status bar) at any size and video setting\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -156,9 +156,9 @@ fn usage() {
          \tquaketool changelevel <pak> <map.bsp>  drive a player into the map's exit, swap to the next level, prove inventory carries\n\
          \tquaketool census <pak> [map ...]  headless faithfulness playthrough (start, e1m1..e1m8 by default)\n\
          \tquaketool census-edicts <pak> <map> <t1,t2,..>  dump live edicts at server times (oracle_edicts format)\n\
-         \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX]\n\
+         \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX] [video options] [--threads N]\n\
          \t                               run the browser's game client natively (quake_rs::client), frame hashes as web/bench.py\n\
-         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--video classic|modern] [--hires 0|1] [--fov-mode M] [--display W:H] [--scaled2d 0|1]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n"
+         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--video classic|modern] [--hires 0|1] [--fov-mode M] [--display W:H] [--scaled2d 0|1] [--threads N]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n"
     );
 }
 
@@ -1031,7 +1031,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let view = render::Renderer::new().render(&scene);
         let gfx_wad = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok());
         let backtile = gfx_wad.as_ref().and_then(|w| w.qpic("backtile").ok());
-        let mut img = render::compose_view(view, vrect, vid_w, vid_h, backtile.as_ref(), &palette);
+        let mut img = render::compose_view(view, vrect, vid_w, vid_h, backtile.as_ref(), &palette, 1);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the composed screen. If
@@ -1675,8 +1675,14 @@ fn color_for_name(name: &str) -> [u8; 3] {
 /// `scene`: parse a map from a PAK, spawn its QuakeC entities, and software-
 /// render the world plus every spawned entity's `.mdl` alias model at its world
 /// position, all sharing one z-buffer so models occlude correctly.
-fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
+fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> Result<Out, String> {
     use std::collections::HashMap;
+    // `[--threads N]`: the renderer's threads (the pixels are the same).
+    let threads = match opts {
+        [] => 1,
+        [flag, n] if flag == "--threads" => n.parse().ok().filter(|&n| n > 0).ok_or("--threads: expected a count")?,
+        _ => return Err(format!("scene: unknown options {opts:?}")),
+    };
 
     let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
 
@@ -1930,6 +1936,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
             .unwrap_or((640usize, 400usize));
         let scene = render::Scene { width: bw, height: bh, ..scene };
         let mut renderer = render::Renderer::new();
+        renderer.set_threads(threads);
         let _ = std::hint::black_box(renderer.render(&scene)); // warm the per-face caches
         let start = std::time::Instant::now();
         for _ in 0..iters {
@@ -1986,7 +1993,9 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         return Ok(Out::Text(o));
     }
 
-    let img = render::Renderer::new().render(&scene);
+    let mut renderer = render::Renderer::new();
+    renderer.set_threads(threads);
+    let img = renderer.render(&scene);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
@@ -2297,6 +2306,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
 
     let dowarp = quake_rs::world::point_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
     let mut renderer = render::Renderer::new();
+    renderer.set_threads(video.threads());
     let mut render_once = || {
         // cl.viewent as given (the oracle's), else V_CalcRefdef's for a still
         // player in a full-frame view (id at viewsize 120: no fudge, no bob).
