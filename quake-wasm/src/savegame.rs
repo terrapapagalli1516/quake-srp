@@ -148,7 +148,7 @@ pub(crate) fn do_load_command(name: Option<&str>) {
     }
 }
 
-/// `Host_Loadgame_f`'s post-fopen half on the embedded pak
+/// `Host_Loadgame_f`'s post-fopen half on the game's search path
 /// ([`quake_rs::client::host_cmd::build_walk_savegame`]), its sound calls
 /// carried out. Errors return the console message to print.
 fn build_walk_savegame(text: &str) -> Result<Walk, String> {

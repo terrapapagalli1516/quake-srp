@@ -3,7 +3,7 @@
 //! `SND_Spatialize`, `S_StaticSound`, `S_StopSound`, `S_StopAllSounds`,
 //! `S_LocalSound` — and `S_Update`: the leaf ambients
 //! (`S_UpdateAmbientSounds`), every channel re-spatialized, the static
-//! sounds of one sample combined. The painting is [`super::mix`]'s.
+//! sounds of one sample combined. The painting is `super::mix`'s.
 //!
 //! The C keeps all of this in globals (`channels[]`, `paintedtime`, the
 //! listener, the cvars); here it is one value, the [`Mixer`], owned by
@@ -18,7 +18,7 @@
 //! it stores it as a `float` decides some volumes by one step. The port
 //! follows the C as id's gcc-built oracle compiles it: `f64` where the x87
 //! keeps extended precision, `f32` where it stores a `float` (see
-//! [`normalize_x87`] and [`Mixer::spatialize`]).
+//! `normalize_x87` and `Mixer::spatialize`).
 //!
 //! **Classic and the fixes.** With [`Fixes::NONE`] the mixer is id's,
 //! sample for sample (`oracle/sound.py` checks it against id's C). The

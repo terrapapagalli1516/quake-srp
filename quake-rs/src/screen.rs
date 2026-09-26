@@ -206,7 +206,7 @@ pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool,
 ///
 /// The tile only goes where the view does not — the four bands around it —
 /// so, the view drawn, every screen pixel is written exactly once: the
-/// screen is a spare frame buffer left uncleared ([`Image::reused_uncleared`]).
+/// screen is a spare frame buffer left uncleared (`Image::reused_uncleared`).
 pub fn screen_with_backtile(
     vrect: ViewRect,
     vid_w: usize,
@@ -330,8 +330,9 @@ pub fn draw_centerprint(
     draw_center_string_revealed(image, conchars, text, -1);
 }
 
-/// EXTRA, not in id's Quake (Options > Web extras, `wasm_showfps`): the frame
-/// rate as QuakeWorld's `SCR_DrawFPS` (QW/client/screen.c) draws it —
+/// EXTRA, not in id's Quake (Options > Classic / 2026 > Show FPS,
+/// `wasm_showfps`): the frame rate as QuakeWorld's `SCR_DrawFPS`
+/// (QW/client/screen.c) draws it —
 /// `sprintf(st, "%3d FPS", lastfps)` in white conchars (`Draw_String`) at
 /// `x = vid.width - strlen(st)*8 - 8`, `y = vid.height - sb_lines - 8`: the
 /// bottom-right corner, just above the status bar. `fps` is the host's

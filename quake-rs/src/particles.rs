@@ -583,7 +583,7 @@ impl ParticleSystem {
     /// SAFETY/FAITHFULNESS: clamped against the remaining pool capacity. Note the
     /// degenerate cell at `(i,j)=(0,0)` produces a zero `dir` whose normalisation
     /// is the zero vector (the C `VectorNormalize` returns 0 length and leaves the
-    /// vector at 0,0,0 after the divide-by-`1/length`); [`normalize`] returns the
+    /// vector at 0,0,0 after the divide-by-`1/length`); `normalize` returns the
     /// zero vector for a zero input, matching that velocity of 0.
     pub fn spawn_teleport_splash(&mut self, org: [f32; 3], now: f32, rng: &mut Lcg) {
         let mut i = -16;

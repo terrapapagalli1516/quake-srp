@@ -983,13 +983,6 @@ impl Renderer {
         self.prof.end()
     }
 
-    /// Install (or clear) the profiler's clock: a monotonic milliseconds
-    /// source, for a target without `std::time::Instant` (the browser's
-    /// `performance.now()`). Only read while profiling.
-    pub fn set_stats_clock(&mut self, clock: Option<fn() -> f64>) {
-        self.prof.set_clock(clock);
-    }
-
     /// The bytes the lit-surface cache holds now (every baked block of every
     /// face at every mip level), and the number of blocks: the port's
     /// counterpart of id's fixed `D_SurfaceCacheForRes` pool, for measurement.

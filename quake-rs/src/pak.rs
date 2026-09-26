@@ -83,10 +83,6 @@ enum Source {
     File(PathBuf),
     /// Whole archive held in memory (tests and small paks).
     Memory(Vec<u8>),
-    /// Whole archive borrowed from a `'static` image (the browser build's
-    /// `include_bytes!` pak): never copied, so cloning the [`Pak`] handle
-    /// copies only its directory.
-    Static(&'static [u8]),
     /// Not an archive: the game directory's loose files, a search path's
     /// directory element (`searchpath_t` with no `pack`). `subdirs` is
     /// `static_registered`: `COM_FindFile` never reads a shareware game's
@@ -177,7 +173,7 @@ impl Pak {
     }
 
     /// Parse just the directory entries of an in-memory PAK image (the public,
-    /// CRC-free convenience over [`decode_directory`](Self::decode_directory)).
+    /// CRC-free convenience over `decode_directory`).
     pub fn parse_directory(file_bytes: &[u8]) -> Result<Vec<PakEntry>> {
         Ok(Self::decode_directory(file_bytes)?.0)
     }
@@ -190,20 +186,6 @@ impl Pak {
         let (entries, dir_crc) = Self::decode_directory(&bytes)?;
         Ok(Pak {
             source: Source::Memory(bytes),
-            entries,
-            name,
-            dir_crc,
-            next: None,
-        })
-    }
-
-    /// Build a [`Pak`] over a `'static` archive image without copying it (the
-    /// browser build embeds the shareware pak with `include_bytes!`). Entry
-    /// reads slice the image; a clone of the returned handle shares it.
-    pub fn from_static(name: String, bytes: &'static [u8]) -> Result<Pak> {
-        let (entries, dir_crc) = Self::decode_directory(bytes)?;
-        Ok(Pak {
-            source: Source::Static(bytes),
             entries,
             name,
             dir_crc,
@@ -348,7 +330,7 @@ impl Pak {
 
     /// Read the contents of one directory entry of this archive.
     ///
-    /// For a memory-backed (or static) archive this slices the retained
+    /// For a memory-backed archive this slices the retained
     /// buffer; for a file-backed archive it opens the file, seeks to
     /// `filepos`, and reads `filelen` bytes.
     pub fn read_entry(&self, e: &PakEntry) -> Result<Vec<u8>> {
@@ -369,7 +351,6 @@ impl Pak {
 
         let image: &[u8] = match &self.source {
             Source::Memory(bytes) => bytes,
-            Source::Static(bytes) => bytes,
             Source::File(path) => {
                 let mut file = File::open(path)?;
                 file.seek(SeekFrom::Start(e.filepos as u64))?;
@@ -520,36 +501,6 @@ mod tests {
 
         // Missing file: Ok(None), not an error.
         assert!(pak.read_file("nope.dat").unwrap().is_none());
-    }
-
-    #[test]
-    fn from_static_reads_like_from_bytes_and_clones_share_the_image() {
-        let files = sample_files();
-        let img: &'static [u8] = Box::leak(build_pack(&files).into_boxed_slice());
-        let owned = Pak::from_bytes("t.pak".into(), img.to_vec()).unwrap();
-        let pak = Pak::from_static("t.pak".into(), img).unwrap();
-        assert_eq!(pak.entries(), owned.entries());
-        assert_eq!(pak.dir_crc(), owned.dir_crc());
-        for (name, data) in &files {
-            assert_eq!(&pak.read_file(name).unwrap().expect("found"), data);
-        }
-        assert!(pak.read_file("nope.dat").unwrap().is_none());
-        // A clone is a handle onto the same image, not a copy of it.
-        let clone = pak.clone();
-        match (&pak.source, &clone.source) {
-            (Source::Static(a), Source::Static(b)) => {
-                assert!(std::ptr::eq(*a, *b) && std::ptr::eq(*a, img));
-            }
-            other => panic!("expected two static sources, got {other:?}"),
-        }
-        // The same bounds checks as the owned image.
-        let past_end = PakEntry {
-            name: "x".into(),
-            filepos: img.len() as i32 - 2,
-            filelen: 4,
-        };
-        assert!(pak.read_entry(&past_end).is_err());
-        assert!(Pak::from_static("bad".into(), b"NOPE").is_err());
     }
 
     #[test]

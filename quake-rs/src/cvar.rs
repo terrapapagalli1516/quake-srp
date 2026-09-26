@@ -47,8 +47,9 @@ pub struct Cvars {
     pub gamma: f32,
     /// `volume` (snd_dma.c): Sound Volume, 0..=1.
     pub volume: f32,
-    /// `bgmvolume` (snd_dma.c): CD Music Volume. There is no CD audio, as a
-    /// C build with `cd_null.c`: the slider moves a value nothing plays at.
+    /// `bgmvolume` (snd_dma.c): CD Music Volume, the level of the player's
+    /// own CD tracks ([`crate::cd_audio`]). With none added it is a value
+    /// nothing plays at, as in a C build with `cd_null.c`.
     pub bgmvolume: f32,
     /// `sensitivity` (in_win.c): Mouse Speed, 1..=11 on the slider.
     pub sensitivity: f32,

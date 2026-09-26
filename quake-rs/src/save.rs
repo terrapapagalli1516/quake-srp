@@ -461,7 +461,7 @@ impl Server {
     /// `current_skill`, `sv.name`, `sv.time`, 64 lightstyle lines (`"m"` for
     /// an unset style), the globals block, then one block per edict slot
     /// (free slots included, as empty `{}` blocks). The host decides where the
-    /// text goes (a file for the CLI, localStorage for the browser); the
+    /// text goes (a file natively, the page's storage in the browser); the
     /// engine API is text-out, exactly like the C is stdio-out.
     pub fn write_savegame(&self) -> String {
         let mut out = String::new();

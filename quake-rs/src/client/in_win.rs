@@ -506,7 +506,7 @@ impl Joystick {
     /// `IN_JoyMove`: the frame's joystick move and turn, for `frametime`
     /// (`host_frametime`) seconds with the keys `held`. The axis maps are
     /// made on the first call (`joy_advancedinit`), and again after a switch
-    /// of `profile`. Nothing without a reading ([`Joystick::read`]).
+    /// of `profile`. Nothing without a reading (`Joystick::read`).
     pub fn joy_move(&mut self, cvars: &Cvars, profile: Profile, held: Held, frametime: f32) -> JoyMove {
         let cv = &cvars.joy;
         if self.advanced_init != Some(profile) {

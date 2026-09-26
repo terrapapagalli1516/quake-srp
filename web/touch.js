@@ -361,10 +361,11 @@
     }
   }
 
-  // Haptics: the hook the gamepad's rumble events can call too (the `input`
-  // agent's damage and heavy-weapon rumble), with the Gamepad API's
-  // dual-rumble magnitudes. navigator.vibrate has no strength, so a
-  // stronger rumble buzzes longer. Android only: iOS Safari has no vibrate.
+  // Haptics: the hook the gamepad's rumble events can call too (the
+  // program's RUMBLE record: damage and the heavy weapons), with the
+  // Gamepad API's dual-rumble magnitudes. navigator.vibrate has no strength,
+  // so a stronger rumble buzzes longer. Android only: iOS Safari has no
+  // vibrate.
   function rumble(weak, strong, ms) {
     const s = Math.max(weak || 0, strong || 0);
     if (!navigator.vibrate || document.hidden || s < 0.1 || !(mode === 'play' || mode === 'game')) return;

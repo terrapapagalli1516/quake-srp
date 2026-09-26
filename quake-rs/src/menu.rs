@@ -108,7 +108,7 @@ pub struct SettingRow {
     pub label: &'static str,
     /// The two bronze help lines shown under the list while it is
     /// highlighted (a third names the console variable), at most
-    /// [`EXTRAS_NOTE_COLS`] characters so they clear the plaque.
+    /// `EXTRAS_NOTE_COLS` characters so they clear the plaque.
     pub help: [&'static str; 2],
     pub kind: RowKind,
 }
@@ -356,10 +356,9 @@ const GAMMA_MAX: f32 = 1.0;
 const GAMMA_STEP: f32 = 0.05;
 
 /// `bgmvolume` (CD Music Volume): 0..=1, step 0.1; slider r = v. Default 1.0.
-/// The slider is live (stores the cvar, [`Cvars::bgmvolume`]).
-/// DEVIATION (scope): there is no CD audio device in this port, so no track
-/// ever plays at this volume — exactly like the C run without a CD, where the
-/// cvar still adjusts (cd_null.c).
+/// The slider is live (stores the cvar, [`crate::cvar::Cvars::bgmvolume`]):
+/// the level of the player's own CD tracks ([`crate::cd_audio`]); without
+/// them nothing plays at it, as the C run without a CD (cd_null.c).
 const BGM_MIN: f32 = 0.0;
 const BGM_MAX: f32 = 1.0;
 const BGM_STEP: f32 = 0.1;
@@ -461,7 +460,7 @@ pub enum MenuScreen {
     /// Changes (`M_Setup_Draw` / `M_Setup_Key`).
     Setup,
     /// The options submenu (`m_options`): the full 13-row layout
-    /// ([`OPTIONS_ITEMS`]). Sliders + checkboxes are adjusted with left/right.
+    /// (`OPTIONS_ITEMS`). Sliders + checkboxes are adjusted with left/right.
     Options,
     /// The Customize-controls screen (`m_keys`): the [`BINDNAMES`] list with a
     /// cursor; Enter grabs the next key to rebind (`bind_grab`), Backspace/Del
@@ -789,9 +788,9 @@ impl Menu {
         self.save_comments = comments;
     }
 
-    /// Set one slot's comment (the host refreshes slots individually as the
-    /// page reads each stored savegame out of localStorage). Out-of-range is
-    /// ignored; an empty string marks the slot unused.
+    /// Set one slot's comment (`M_ScanSaves` for one `sN.sav`: the host reads
+    /// each save file's header). Out-of-range is ignored; an empty string
+    /// marks the slot unused.
     pub fn set_save_comment(&mut self, i: usize, comment: String) {
         if let Some(c) = self.save_comments.get_mut(i) {
             *c = comment;
@@ -1906,7 +1905,7 @@ fn m_print(
 /// Draw a slider widget (`M_DrawSlider`) with its trough origin at virtual
 /// `(x, y)`: glyph 128 (left cap) at `x-8`, [`SLIDER_RANGE`] copies of glyph 129
 /// (middle) starting at `x`, glyph 130 (right cap) just past them, and the knob
-/// (glyph 131) at `x + slider_knob_offset(range)`. `range` is the cvar's [0,1]
+/// (glyph 131) at `x + slider_knob_offset(range)`. `range` is the cvar's `0..=1`
 /// fraction (clamped inside [`slider_knob_offset`]).
 #[allow(clippy::too_many_arguments)]
 fn draw_slider(
@@ -2001,7 +2000,7 @@ fn menu_origin(w: usize, h: usize) -> (f32, f32) {
 
 /// PORT: the point of the menu's layout (menu.c's coordinates, what
 /// [`Menu::tap`] takes) under pixel `(x, y)` of a `w x h` frame: where the
-/// drawing put it ([`menu_origin`]), undone.
+/// drawing put it (`menu_origin`), undone.
 pub fn menu_layout_point(w: usize, h: usize, x: f32, y: f32) -> (f32, f32) {
     let (scale, ox) = menu_origin(w, h);
     ((x - ox) / scale, y / scale)

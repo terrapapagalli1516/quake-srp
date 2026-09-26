@@ -230,7 +230,7 @@ fn read_triangle(r: &mut Reader) -> Result<Triangle> {
     })
 }
 
-/// Read a `daliasframe_t` header (bboxmin, bboxmax, name[16]) plus `numverts`
+/// Read a `daliasframe_t` header (`bboxmin`, `bboxmax`, `name[16]`) plus `numverts`
 /// `trivertx_t`. Mirrors `Mod_LoadAliasFrame`.
 fn read_alias_frame(r: &mut Reader, numverts: usize) -> Result<AliasFrame> {
     let bboxmin = read_trivertex(r)?;

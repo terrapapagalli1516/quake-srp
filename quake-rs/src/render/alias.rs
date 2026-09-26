@@ -16,7 +16,7 @@ use super::stats::Profiler;
 // Alias (MDL) models rendered into the world scene
 // ---------------------------------------------------------------------------
 
-/// One alias model placed in the world: the parsed [`Mdl`] plus its world
+/// One alias model placed in the world: the parsed [`Mdl`](crate::mdl::Mdl) plus its world
 /// `origin`, `yaw` (degrees, rotation about `+Z`), the animation `frame` to
 /// pose, and a flat base `color`.
 ///
@@ -25,7 +25,7 @@ use super::stats::Profiler;
 /// ([`Scene::models`](super::Scene::models)) sharing the world's z-buffer, so
 /// models occlude — and are occluded by — BSP geometry correctly.
 ///
-/// `frame` selects which pose to draw (see [`mdl_frame_verts`]); an out-of-range
+/// `frame` selects which pose to draw (see `mdl_frame_verts`); an out-of-range
 /// frame resets to 0 (matching `R_AliasSetupFrame`), so any value is safe.
 ///
 /// `skinnum` is the per-entity skin index (`currententity->skinnum`): a model
@@ -88,7 +88,7 @@ impl<'a> ModelInstance<'a> {
     }
 }
 
-/// Resolve the vertices of pose `frame` at game `time` for an [`Mdl`], delegating
+/// Resolve the vertices of pose `frame` at game `time` for an [`Mdl`](crate::mdl::Mdl), delegating
 /// to [`crate::mdl::Mdl::frame_pose`] (the `R_AliasSetupFrame` port).
 ///
 /// `frame` (a `usize` here) is range-checked there: an out-of-range frame **resets
@@ -114,7 +114,7 @@ fn mdl_frame_verts(
 pub(super) const ALIAS_ONSEAM: i32 = 0x0020;
 
 /// A usable model skin: its palette-index pixels plus dimensions, borrowed from
-/// the [`Mdl`]. Resolved by [`mdl_skin`].
+/// the [`Mdl`](crate::mdl::Mdl). Resolved by [`mdl_skin`].
 struct ModelSkin<'a> {
     pixels: &'a [u8],
     width: usize,
@@ -901,7 +901,7 @@ static R_AVERTEXNORMALS: [[f32; 3]; 162] = [
     [-0.425325, -0.688191, -0.587785], [-0.587785, -0.425325, -0.688191], [-0.688191, -0.587785, -0.425325],
 ];
 
-/// The player's first-person weapon viewmodel: the parsed weapon [`Mdl`]
+/// The player's first-person weapon viewmodel: the parsed weapon [`Mdl`](crate::mdl::Mdl)
 /// (`progs/v_shot.mdl` and friends) plus the animation `frame` to pose.
 ///
 /// Unlike [`ModelInstance`], a viewmodel is placed relative to the camera:
@@ -911,7 +911,7 @@ static R_AVERTEXNORMALS: [[f32; 3]; 162] = [
 /// [`Scene::viewmodel`](super::Scene::viewmodel).
 ///
 /// `frame` selects the pose (an out-of-range frame draws frame 0, as
-/// `R_AliasSetupFrame` does, see [`mdl_frame_verts`]). The model is borrowed
+/// `R_AliasSetupFrame` does, see `mdl_frame_verts`). The model is borrowed
 /// so a cached `Mdl` backs it without cloning.
 #[derive(Clone, Copy)]
 pub struct Viewmodel<'a> {
