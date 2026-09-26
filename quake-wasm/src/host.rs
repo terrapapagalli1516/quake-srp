@@ -90,10 +90,10 @@ fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], ramps: Option<&[[u8; 256]; 3]>) 
 /// `host_frametime`) and draw it over `img` at its height.
 fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f32) {
     a.console.slide(dt, a.render_w, a.render_h);
-    if a.console.current() > 0.0 {
-        if let (Some(img), Some(palette)) = (img, a.active_palette()) {
-            render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
-        }
+    if a.console.current() > 0.0
+        && let (Some(img), Some(palette)) = (img, a.active_palette())
+    {
+        render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
     }
 }
 
@@ -286,33 +286,33 @@ pub(crate) fn step(dt: f32) -> i32 {
             // resolution (the framebuffer is the source of truth), so a boot /
             // New Game / `map` that changed the render size can't leave it stale.
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
-            if let Some(img) = img.as_mut() {
-                if let Some(palette) = a.active_palette() {
-                    // M_Draw: over the console background while the console
-                    // is out (scr_con_current: forced up, disconnected),
-                    // else over the faded screen.
-                    if a.console.current() > 0.0 {
-                        render::draw_menu_over_console(
-                            img,
-                            &a.menu,
-                            &a.menu_pics,
-                            a.conchars.as_ref(),
-                            a.conback.as_ref(),
-                            a.clock,
-                            a.realtime,
-                            palette,
-                        );
-                    } else {
-                        render::draw_menu(
-                            img,
-                            &a.menu,
-                            &a.menu_pics,
-                            a.conchars.as_ref(),
-                            a.clock,
-                            a.realtime,
-                            palette,
-                        );
-                    }
+            if let Some(img) = img.as_mut()
+                && let Some(palette) = a.active_palette()
+            {
+                // M_Draw: over the console background while the console
+                // is out (scr_con_current: forced up, disconnected),
+                // else over the faded screen.
+                if a.console.current() > 0.0 {
+                    render::draw_menu_over_console(
+                        img,
+                        &a.menu,
+                        &a.menu_pics,
+                        a.conchars.as_ref(),
+                        a.conback.as_ref(),
+                        a.clock,
+                        a.realtime,
+                        palette,
+                    );
+                } else {
+                    render::draw_menu(
+                        img,
+                        &a.menu,
+                        &a.menu_pics,
+                        a.conchars.as_ref(),
+                        a.clock,
+                        a.realtime,
+                        palette,
+                    );
                 }
             }
         }

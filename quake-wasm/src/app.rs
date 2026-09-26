@@ -355,10 +355,10 @@ pub(crate) fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
             }
             i += 4;
         }
-        if classname == "info_player_start" {
-            if let Some(o) = origin {
-                return Some((o, angle));
-            }
+        if classname == "info_player_start"
+            && let Some(o) = origin
+        {
+            return Some((o, angle));
         }
     }
     None

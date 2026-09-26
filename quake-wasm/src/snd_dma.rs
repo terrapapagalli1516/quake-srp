@@ -198,7 +198,7 @@ fn next_menu_sound() -> Option<Vec<u8>> {
         MenuSound::Menu3 => 2,
     };
     // Load-once cache: the C's S_PrecacheSound holds these three resident.
-    let bytes = MENU_WAVS.with(|w| {
+    MENU_WAVS.with(|w| {
         let mut w = w.borrow_mut();
         if w[slot].is_none() {
             // S_LoadSound: sprintf(namebuffer, "sound/%s", s->name).
@@ -206,8 +206,7 @@ fn next_menu_sound() -> Option<Vec<u8>> {
                 .and_then(|p| p.read_file(&format!("sound/{}", snd.sample())).ok().flatten());
         }
         w[slot].clone()
-    });
-    bytes
+    })
 }
 
 /// Spatial params of the entry the most recent `poll_sound` popped. `origin_*`

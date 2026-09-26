@@ -223,11 +223,11 @@ fn run_binding(a: &mut App, key: u8) {
         }
         BIND_CENTERVIEW => {
             // "centerview" -> V_StartPitchDrift (view.c): seed the drift.
-            if let Some(w) = a.walk.as_mut() {
-                if !w.pitch_drift || w.pitch_vel == 0.0 {
-                    w.pitch_vel = V_CENTERSPEED;
-                    w.pitch_drift = true;
-                }
+            if let Some(w) = a.walk.as_mut()
+                && (!w.pitch_drift || w.pitch_vel == 0.0)
+            {
+                w.pitch_vel = V_CENTERSPEED;
+                w.pitch_drift = true;
             }
         }
         // default.cfg's `+`/`=` "sizeup" and `-` "sizedown" (SCR_SizeUp_f /
