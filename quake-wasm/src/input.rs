@@ -33,8 +33,7 @@ const M_SIDE: f32 = 0.8;
 /// Y out of the pitch path (IN_MouseMove's else branch).
 const M_FORWARD: f32 = 1.0;
 
-#[no_mangle]
-pub extern "C" fn set_move(fwd: f32, side: f32) {
+pub(crate) fn set_move(fwd: f32, side: f32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.in_fwd = fwd;
@@ -44,8 +43,7 @@ pub extern "C" fn set_move(fwd: f32, side: f32) {
 }
 
 /// Set whether the attack button is held (drives the QuakeC weapon code).
-#[no_mangle]
-pub extern "C" fn set_attack(on: i32) {
+pub(crate) fn set_attack(on: i32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.in_attack = on != 0;
@@ -56,8 +54,7 @@ pub extern "C" fn set_attack(on: i32) {
 /// Set whether the jump key is held. Maps to UserCmd button bit 1 -> the
 /// player's `button2`, which the QuakeC PlayerJump reads to jump when on the
 /// ground (velocity_z = 270).
-#[no_mangle]
-pub extern "C" fn set_jump(on: i32) {
+pub(crate) fn set_jump(on: i32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.in_jump = on != 0;
@@ -68,8 +65,7 @@ pub extern "C" fn set_jump(on: i32) {
 /// Set whether the swim-DOWN key (`c`, the `+movedown` key) is held. Maps to a
 /// negative `UserCmd.upmove`, which `SV_WaterMove` reads to sink while waist-deep
 /// in water. Out of water it has no effect (the walk move ignores upmove).
-#[no_mangle]
-pub extern "C" fn set_movedown(on: i32) {
+pub(crate) fn set_movedown(on: i32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.in_down = on != 0;
@@ -80,8 +76,7 @@ pub extern "C" fn set_movedown(on: i32) {
 /// Queue a one-shot impulse for the next frame (e.g. weapon select: 1 = axe,
 /// 2 = shotgun, 3 = super shotgun, 4 = nailgun, ... — exactly the QuakeC
 /// `impulse` numbers). Applied to the next `step_walk` UserCmd then cleared.
-#[no_mangle]
-pub extern "C" fn set_impulse(n: i32) {
+pub(crate) fn set_impulse(n: i32) {
     ensure_app(|a| {
         if let Some(w) = a.walk.as_mut() {
             w.next_impulse = n;
@@ -252,8 +247,7 @@ fn run_binding(a: &mut App, key: u8) {
 /// text the console and the name fields insert. The page sends every key
 /// here, so the menu, the console and the game split the keyboard as id's
 /// does.
-#[no_mangle]
-pub extern "C" fn key_event(keynum: i32, down: i32, ch: i32) {
+pub(crate) fn key_event(keynum: i32, down: i32, ch: i32) {
     if !(0..256).contains(&keynum) {
         return;
     }
@@ -270,14 +264,12 @@ pub(crate) fn press(key: u8) {
 }
 
 /// A key down, by Quake keynum: [`key_event`] with no layout character.
-#[no_mangle]
-pub extern "C" fn key_down(keynum: i32) {
+pub(crate) fn key_down(keynum: i32) {
     key_event(keynum, 1, 0);
 }
 
 /// A key up, by Quake keynum: [`key_event`].
-#[no_mangle]
-pub extern "C" fn key_up(keynum: i32) {
+pub(crate) fn key_up(keynum: i32) {
     key_event(keynum, 0, 0);
 }
 
@@ -285,8 +277,7 @@ pub extern "C" fn key_up(keynum: i32) {
 /// the keyboard (a key released elsewhere never comes up here): an up for
 /// every key, so no `+` command stays held, then `Key_ClearStates` (the
 /// autorepeat counts; Shift is up).
-#[no_mangle]
-pub extern "C" fn key_clear_states() {
+pub(crate) fn key_clear_states() {
     ensure_app(|a| {
         a.keys_held = [false; 256];
         a.key_repeats = [0; 256];
@@ -300,8 +291,7 @@ pub extern "C" fn key_clear_states() {
 /// key-down/key-up SYMMETRIC under Shift (press ',', add Shift, release ','
 /// must clear keynum 44, even though the release reports `key == '<'` —
 /// the C's scancode semantics, in_win.c `scantokey`).
-#[no_mangle]
-pub extern "C" fn key_is_down(keynum: i32) -> i32 {
+pub(crate) fn key_is_down(keynum: i32) -> i32 {
     if !(0..256).contains(&keynum) {
         return 0;
     }
@@ -321,8 +311,7 @@ pub extern "C" fn key_is_down(keynum: i32) -> i32 {
 /// out of the pitch path. Mouse-look is permanent under pointer lock (`+mlook`
 /// held), so any motion stops an active pitch drift (V_StopPitchDrift). Gated
 /// behind the menu/console like `look`.
-#[no_mangle]
-pub extern "C" fn mouse_move(dx: f32, dy: f32) {
+pub(crate) fn mouse_move(dx: f32, dy: f32) {
     ensure_app(|a| {
         if a.menu.visible || a.console.open {
             return;
@@ -368,8 +357,7 @@ pub extern "C" fn mouse_move(dx: f32, dy: f32) {
 /// while the pointer is locked, so unlock IS the mlook release — the faithful
 /// `lookspring` trigger (`IN_MLookUp`, cl_input.c: when `+mlook` releases and
 /// `lookspring.value` is set, `V_StartPitchDrift()` re-centres the view).
-#[no_mangle]
-pub extern "C" fn pointer_unlocked() {
+pub(crate) fn pointer_unlocked() {
     ensure_app(|a| {
         if !a.menu.lookspring() {
             return;
@@ -387,8 +375,7 @@ pub extern "C" fn pointer_unlocked() {
 /// The player's current look pitch in degrees (+down, Quake convention) — a
 /// read-only verification/debug export (the browser checks Invert Mouse and
 /// lookspring flip/centre the pitch through it). 0 when no walk is live.
-#[no_mangle]
-pub extern "C" fn player_pitch() -> f32 {
+pub(crate) fn player_pitch() -> f32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
@@ -400,8 +387,7 @@ pub extern "C" fn player_pitch() -> f32 {
 /// The Options "Mouse speed" as a sensitivity multiplier (default 1.0). The page
 /// multiplies its baseline look sensitivity by this. Reads from the App-level menu;
 /// 1.0 when the app has not been created yet.
-#[no_mangle]
-pub extern "C" fn mouse_sensitivity() -> f32 {
+pub(crate) fn mouse_sensitivity() -> f32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
@@ -410,8 +396,7 @@ pub extern "C" fn mouse_sensitivity() -> f32 {
     })
 }
 
-#[no_mangle]
-pub extern "C" fn look(dyaw: f32, dpitch: f32) {
+pub(crate) fn look(dyaw: f32, dpitch: f32) {
     ensure_app(|a| {
         // While the menu OR console is up, Quake freezes the view (key_dest !=
         // key_game stops feeding mouse-look). Match that: ignore look input
@@ -432,7 +417,7 @@ mod tests {
     use crate::app::boot;
     use crate::host::step;
     use crate::menu::{menu_backspace, menu_cancel, menu_down, menu_right, menu_select, menu_visible};
-    use crate::snd_dma::{listener_x, listener_y};
+    use crate::snd_dma::listener;
     use crate::test_util::*;
 
     /// Second review: Key_Event hands a key down to its binding only where
@@ -684,11 +669,11 @@ mod tests {
 
         // The player really moves (the server clamps wishspeed to sv_maxspeed
         // 320, so 400 is 320 effective — exactly WinQuake's run).
-        let (x0, y0) = (listener_x(), listener_y());
+        let (x0, y0) = (listener().pos[0], listener().pos[1]);
         for _ in 0..20 {
             step(0.05);
         }
-        let dist = ((listener_x() - x0).powi(2) + (listener_y() - y0).powi(2)).sqrt();
+        let dist = ((listener().pos[0] - x0).powi(2) + (listener().pos[1] - y0).powi(2)).sqrt();
         assert!(dist > 100.0, "held +forward displaces the player (moved {dist:.1}u)");
 
         // Always Run (Options row 8) swaps cl_forwardspeed 400 -> 200.

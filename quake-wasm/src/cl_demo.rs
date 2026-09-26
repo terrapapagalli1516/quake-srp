@@ -50,7 +50,7 @@ pub(crate) fn step_timedemo(
 fn stop_all_sounds() {
     crate::snd_dma::SND_QUEUE.with(|q| q.borrow_mut().clear());
     crate::snd_dma::STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
-    if let Some(pak) = crate::app::pak() {
+    if let Some(pak) = crate::common::pak() {
         crate::snd_dma::play(&pak, vec![SoundCall::StopAll]);
     }
 }
@@ -162,8 +162,7 @@ pub(crate) fn host_end_game(a: &mut App) {
 /// `1` while a `timedemo` runs (`cls.timedemo`): the page then runs host
 /// frames back to back, a time slice's worth per animation frame, instead of
 /// one per refresh.
-#[no_mangle]
-pub extern "C" fn timedemo_running() -> i32 {
+pub(crate) fn timedemo_running() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.cls.timedemo as i32).unwrap_or(0))
 }
 
@@ -178,7 +177,8 @@ mod tests {
     use quake_rs::particles::Lcg;
     use quake_rs::server::{SoundEvent, TempEntityEvent};
 
-    use crate::app::{build_demo, pak};
+    use crate::app::build_demo;
+    use crate::common::pak;
     use crate::snd_dma::{
         poll_sound, set_audio_ready, sound_channel, sound_entity, sound_is_view_entity,
         sound_volume, SND_QUEUE,

@@ -1,7 +1,7 @@
 //! The drop-down console's key half — console.c's `Con_ToggleConsole_f` and
 //! keys.c's `Key_Console` (typing, backspace, enter), which `Key_Event`
 //! ([`crate::input::key_event`]) hands the console's keys to; plus the
-//! exports automation types into the console with. Submitted lines run
+//! calls automation types into the console with. Submitted lines run
 //! through [`execute_console_command`].
 
 use quake_rs::keys::{K_BACKSPACE, K_ENTER};
@@ -26,8 +26,7 @@ pub(crate) fn key_console(a: &mut App, key: u8, text: Option<u8>) -> Option<Stri
 /// down over whatever is playing, or back up. With nothing playing
 /// (disconnected, the console covering the screen) closing it brings up the
 /// main menu instead: there is no game to go back to.
-#[no_mangle]
-pub extern "C" fn console_toggle() {
+pub(crate) fn console_toggle() {
     ensure_app(App::toggle_console);
 }
 
@@ -35,8 +34,7 @@ pub extern "C" fn console_toggle() {
 /// reads this to route keys to the console instead of the game / menu.
 /// Disconnected, the console is forced up and takes the typing unless the
 /// menu is up (keys.c: `key_game` with `con_forcedup` goes to `Key_Console`).
-#[no_mangle]
-pub extern "C" fn console_visible() -> i32 {
+pub(crate) fn console_visible() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.console_has_keys() as i32).unwrap_or(0))
 }
 
@@ -45,8 +43,7 @@ pub extern "C" fn console_visible() -> i32 {
 /// printable ASCII types (`Key_Console`: 32..127) — the backtick/tilde (the
 /// toggle key) not either, nor anything while the console does not have the
 /// keyboard. A no-op once the input line is full.
-#[no_mangle]
-pub extern "C" fn console_char(code: u32) {
+pub(crate) fn console_char(code: u32) {
     ensure_app(|a| {
         if !a.console_has_keys() {
             return;
@@ -61,8 +58,7 @@ pub extern "C" fn console_char(code: u32) {
 
 /// Backspace in the console (`Key_Console`). A no-op when the console does
 /// not have the keyboard or the line is empty.
-#[no_mangle]
-pub extern "C" fn console_backspace() {
+pub(crate) fn console_backspace() {
     ensure_app(|a| {
         if a.console_has_keys() {
             let _ = key_console(a, K_BACKSPACE, None);
@@ -74,8 +70,7 @@ pub extern "C" fn console_backspace() {
 /// and execute it against the live game. A no-op when the console does not
 /// have the keyboard. The command may swap the level (`map`) and close the
 /// console.
-#[no_mangle]
-pub extern "C" fn console_enter() {
+pub(crate) fn console_enter() {
     // Take the line under the borrow, then execute it (execute_console_command
     // borrows the App again to touch the walk / open-state).
     let line = APP.with(|c| {
@@ -87,40 +82,6 @@ pub extern "C" fn console_enter() {
     if let Some(line) = line {
         execute_console_command(&line);
     }
-}
-
-thread_local! {
-    /// The scrollback as [`console_text_len`] last laid it out.
-    static CONSOLE_TEXT: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// A read-only verification export (like `key_is_down`): lay the console's
-/// scrollback out as text — one line per `\n`, a byte per character — and
-/// return its length; [`console_text_ptr`] points at it. The browser
-/// harnesses read what the game printed (the `timedemo` line, "player paused
-/// the game") through it.
-#[no_mangle]
-pub extern "C" fn console_text_len() -> i32 {
-    let text: Vec<u8> = APP.with(|c| {
-        let b = c.borrow();
-        let mut t = Vec::new();
-        if let Some(a) = b.as_ref() {
-            for line in a.console.lines() {
-                t.extend(line.chars().map(|ch| ch as u32 as u8));
-                t.push(b'\n');
-            }
-        }
-        t
-    });
-    let n = text.len() as i32;
-    CONSOLE_TEXT.with(|c| *c.borrow_mut() = text);
-    n
-}
-
-/// Pointer to the text [`console_text_len`] laid out.
-#[no_mangle]
-pub extern "C" fn console_text_ptr() -> *const u8 {
-    CONSOLE_TEXT.with(|c| c.borrow().as_ptr())
 }
 
 #[cfg(test)]
@@ -374,10 +335,8 @@ mod tests {
             a.console.println("first");
             a.console.println("second line");
         });
-        let n = console_text_len();
-        let text = CONSOLE_TEXT.with(|c| c.borrow().clone());
-        assert_eq!(n as usize, text.len());
-        assert_eq!(text, b"first\nsecond line\n");
+        let text = crate::automation::call("console_text").text;
+        assert_eq!(text, "first\nsecond line\n");
     }
 
     #[test]

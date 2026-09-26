@@ -114,8 +114,7 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 /// `dt` the previous call's own duration (see `web/index.html`), so
 /// `realtime` — the clock `CL_FinishTimeDemo` measures on — adds up the time
 /// the frames took and not the page's pauses between batches of them.
-#[no_mangle]
-pub extern "C" fn step(dt: f32) -> i32 {
+pub(crate) fn step(dt: f32) -> i32 {
     // Guard a non-finite / negative dt so both clocks only move forward.
     let real_dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
     let mut ran = 0;
