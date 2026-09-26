@@ -103,6 +103,10 @@ pub trait Host {
     /// The world BSP, so entity-aware moves can clip against both the map and
     /// (via the caller's edict data) other entities in one place.
     fn bsp(&self) -> &crate::bsp::Bsp;
+    /// What the builtins send out of the server — the message buffers and the
+    /// host requests id's C wrote into `sv.datagram` and friends — for the
+    /// server to hand to its host after the frame ([`crate::server::Outbox`]).
+    fn outbox(&mut self) -> &mut crate::server::Outbox;
 }
 
 /// An entity field resolved once by name: its cell offset within an edict, or

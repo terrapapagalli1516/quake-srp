@@ -1,5 +1,6 @@
-//! The server→client message side, with no network: the event queues and the
-//! `Write*` recognisers a front-end drains every frame.
+//! The server→client message side, with no network: the [`Outbox`] the
+//! builtins write into and the `Write*` recognisers a front-end drains every
+//! frame.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Sources:
@@ -13,31 +14,61 @@
 //!
 //! In the C each of these became bytes in a client datagram, the signon or the
 //! reliable buffer. This single-process server has no netcode, so each lands
-//! in a per-thread queue instead — [`SoundEvent`], [`StaticSound`],
+//! in the server's [`Outbox`] instead — [`SoundEvent`], [`StaticSound`],
 //! [`ParticleBurst`], [`GameMessage`], [`TempEntityEvent`], [`SvcEvent`] —
-//! which the `Server::drain_*` methods below hand to the front-end. Builtins
-//! are `fn(&mut Vm)` and cannot see the `Server`, hence `thread_local!`s; each
-//! section restates why.
+//! which the `Server::drain_*` methods below hand to the front-end.
 
 use super::Server;
 use crate::vm::Vm;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
-// Sound-event queue (PF_sound / PF_ambientsound).
+// The outbox.
+// ---------------------------------------------------------------------------
+
+/// Everything a server's QuakeC sent out of the server since the host last
+/// looked: what id's C wrote into the client's buffers (`sv.datagram`,
+/// `sv.reliable_datagram`, `sv.signon`, the client's `message`), and the
+/// console text it queued for the host.
+///
+/// One per server, on its [`super::WorldModel`]: the builtins are
+/// `fn(&mut Vm)` and reach it through [`Vm::with_host`] ([`Host::outbox`]);
+/// the server's physics writes it the same way, and the `Server::drain_*`
+/// methods empty it for the front-end. A new server starts with an empty one,
+/// so nothing one level queued can reach the next.
+#[derive(Debug, Default)]
+pub struct Outbox {
+    /// `svc_sound`s ([`Server::drain_sounds`]).
+    sounds: Vec<SoundEvent>,
+}
+
+impl Server {
+    /// This server's [`Outbox`]. Its world model always has one; `None` only
+    /// if the VM's host were taken away.
+    pub(super) fn outbox(&mut self) -> Option<&mut Outbox> {
+        self.vm.host.as_deref_mut().map(|h| h.outbox())
+    }
+
+    /// Take one of the outbox's queues, leaving it empty.
+    fn take_outbox<T: Default>(&mut self, queue: impl FnOnce(&mut Outbox) -> &mut T) -> T {
+        self.outbox().map(|o| std::mem::take(queue(o))).unwrap_or_default()
+    }
+}
+
+/// Put one more thing in the outbox of the server `vm` runs for, through its
+/// host (a bare VM, with no server, has nowhere to send it).
+fn send(vm: &mut Vm, put: impl FnOnce(&mut Outbox)) {
+    vm.with_host(|_, h| put(h.outbox()));
+}
+
+// ---------------------------------------------------------------------------
+// Sound events (PF_sound / SV_StartSound).
 //
 // The C `PF_sound` -> `SV_StartSound` wrote an `svc_sound` message into the
 // per-client datagram for the network layer to flush. This headless server has
-// no netcode, so instead each fired sound is captured as a [`SoundEvent`] in a
-// process-wide queue that [`Server::drain_sounds`] hands to whatever audio
-// front-end (or test) wants it.
-//
-// Builtins are `fn(&mut Vm)` and cannot see the `Server`, and the `Vm` type
-// lives in `vm.rs` (which this task may not edit), so the queue cannot hang off
-// either. A `thread_local!` `RefCell<Vec<SoundEvent>>` reached from `bi_sound`
-// is the cleanest spot that keeps the builtin signature intact. Server methods
-// run on the same thread as the builtins they invoke, so the events a frame's
-// QuakeC fires are visible to `drain_sounds` immediately afterward.
+// no netcode, so instead each fired sound is captured as a [`SoundEvent`] in
+// the outbox, which [`Server::drain_sounds`] hands to whatever audio front-end
+// (or test) wants it.
 // ---------------------------------------------------------------------------
 
 /// One queued sound emission — the engine `SV_StartSound` payload, captured for
@@ -64,23 +95,6 @@ pub struct SoundEvent {
     pub volume: f32,
     /// Attenuation in `0.0..=4.0` (0 = audible everywhere).
     pub attenuation: f32,
-}
-
-thread_local! {
-    /// Process-wide (per-thread) queue the sound builtins push to and
-    /// [`Server::drain_sounds`] takes. See the module note above.
-    static SOUND_EVENTS: std::cell::RefCell<Vec<SoundEvent>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a fired sound onto the thread-local queue.
-fn push_sound_event(ev: SoundEvent) {
-    SOUND_EVENTS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued sound event.
-pub(super) fn take_sound_events() -> Vec<SoundEvent> {
-    SOUND_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 // ---------------------------------------------------------------------------
@@ -831,15 +845,8 @@ pub(super) fn bi_sound(vm: &mut Vm) -> Result<()> {
     // when absent.
     let sound_index = lookup_sound_index(vm, &sample);
 
-    push_sound_event(SoundEvent {
-        entity,
-        channel,
-        sound_index,
-        sample,
-        origin,
-        volume,
-        attenuation,
-    });
+    let ev = SoundEvent { entity, channel, sound_index, sample, origin, volume, attenuation };
+    send(vm, |o| o.sounds.push(ev));
     Ok(())
 }
 
@@ -921,10 +928,9 @@ impl Server {
     /// Take and clear the queued sound events fired by the QuakeC since the last
     /// drain (`PF_sound`/`PF_ambientsound` pushes; see [`SoundEvent`]). A
     /// front-end calls this once per frame to play them; tests use it to assert
-    /// a weapon actually fired. The queue is process-/thread-local, so call this
-    /// on the same thread that drove the frame.
+    /// a weapon actually fired.
     pub fn drain_sounds(&mut self) -> Vec<SoundEvent> {
-        take_sound_events()
+        self.take_outbox(|o| &mut o.sounds)
     }
 
     /// Take and clear the placed looping ambient sounds the QuakeC registered
@@ -989,15 +995,11 @@ impl Server {
     pub(super) fn start_sound(&mut self, ent: i32, channel: i32, sample: &str, volume_byte: i32, attenuation: f32) {
         let origin = entity_sound_origin(&self.vm, ent);
         let sound_index = lookup_sound_index(&mut self.vm, sample);
-        push_sound_event(SoundEvent {
-            entity: ent,
-            channel,
-            sound_index,
-            sample: sample.to_string(),
-            origin,
-            volume: (volume_byte as f32) / 255.0,
-            attenuation,
-        });
+        let volume = (volume_byte as f32) / 255.0;
+        let ev = SoundEvent { entity: ent, channel, sound_index, sample: sample.to_string(), origin, volume, attenuation };
+        if let Some(o) = self.outbox() {
+            o.sounds.push(ev);
+        }
     }
 }
 

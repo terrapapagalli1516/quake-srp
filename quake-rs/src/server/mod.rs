@@ -74,7 +74,7 @@ mod sv_world;
 
 pub use lightstyle::{lightstyle_scales_at, MAX_LIGHTSTYLES};
 pub use msg::{
-    te_consts, GameMessage, ParticleBurst, SoundEvent, StaticSound, SvcEvent, TempEntityEvent,
+    te_consts, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticSound, SvcEvent, TempEntityEvent,
 };
 pub use pr_cmds::install_engine_builtins;
 pub use sv_main::{EntityDlight, EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH};
@@ -203,6 +203,10 @@ pub struct WorldModel {
     /// `"maps/b_explob.bsp"` -> `(0,0,0)..(32,32,64)`. Filled by
     /// [`precache_model`] so `setmodel` finds them.
     model_bounds: std::collections::HashMap<String, (Vec3, Vec3)>,
+    /// What this server's QuakeC sent out, until the server drains it (see
+    /// [`Outbox`]). It lives here, on the [`Host`], because that is what a
+    /// builtin can reach ([`Vm::with_host`]).
+    outbox: Outbox,
 }
 
 /// `mod->mins`/`maxs` of the model file `name` in `pak`, as `Mod_LoadModel`
@@ -252,6 +256,7 @@ impl WorldModel {
             precache_sounds: vec![String::new()],
             pak,
             model_bounds: std::collections::HashMap::new(),
+            outbox: Outbox::default(),
         };
         // Slot 1 is the world brush model. id used the map name; "*0" is the
         // submodel-0 (worldspawn) reference and is what setmodel resolves.
@@ -346,6 +351,10 @@ impl Host for WorldModel {
 
     fn bsp(&self) -> &Bsp {
         &self.bsp
+    }
+
+    fn outbox(&mut self) -> &mut Outbox {
+        &mut self.outbox
     }
 }
 
