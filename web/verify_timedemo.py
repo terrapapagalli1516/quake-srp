@@ -3,8 +3,9 @@
 through the page's own keyboard path:
 
   1. timedemo: ~, `timedemo demo1`, Enter, ~ —
-     the page then runs host frames back to back (timedemo_running), shows
-     the demo while it does, and the console gets CL_FinishTimeDemo's line
+     the program then runs host frames back to back (timedemo_running: it
+     polls for input instead of waiting for the page's ticks), the page
+     shows the demo while it does, and the console gets CL_FinishTimeDemo's line
      "%i frames %5.1f seconds %5.1f fps": well formed, 969 frames (id's C
      draws 969 for demo1), a plausible rate that agrees with frames/seconds.
      The attract loop's next demo plays afterwards, under the 72 fps cap
@@ -22,10 +23,11 @@ through the page's own keyboard path:
      the console down. Screenshot: verify_pause.png.
 
 Usage: verify_timedemo.py [webdir]   (defaults to this script's directory;
-pass a temp dir holding index.html + a freshly built quake_wasm.wasm.)
+pass a deploy dir — PLATFORM.md.)
 """
-import functools, http.server, os, re, socketserver, struct, sys, threading, time
+import os, re, struct, sys, time
 from playwright.sync_api import sync_playwright
+import isolated
 
 PAK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "quake-data", "ID1", "PAK0.PAK")
 
@@ -40,13 +42,9 @@ def pak_file(name):
             return data[fo:fo + fl]
     raise KeyError(name)
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8176"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+WEB = isolated.webdir()
+PORT = isolated.port(8176)
+httpd = isolated.serve(WEB, PORT)
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -57,11 +55,8 @@ def check(name, ok, detail=""):
 
 LINE = re.compile(r"^(-?\d+) frames +(\d+\.\d) seconds +(\d+\.\d) fps$")
 
-# The console scrollback (the console_text_* verification exports).
-CONSOLE = """() => {
-    const n = exp.console_text_len();
-    return new TextDecoder('latin1').decode(new Uint8Array(exp.memory.buffer, exp.console_text_ptr(), n));
-}"""
+# The console scrollback (the console_text call).
+CONSOLE = "() => quake.text('console_text')"
 GRAB = """name => {
     const c = document.getElementById('c');
     window[name] = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
@@ -75,10 +70,7 @@ SAME = """([a, b]) => {
 
 def boot_page(pg):
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    pg.wait_for_function(
-        "typeof exp !== 'undefined' && !!exp && typeof exp.boot === 'function'", timeout=120000)
-    pg.wait_for_function(
-        "document.getElementById('status').textContent.includes('ready')", timeout=30000)
+    pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     pg.evaluate("document.getElementById('overlay').click()")   # the first gesture
     time.sleep(0.3)
 
@@ -135,7 +127,12 @@ with sync_playwright() as p:
         check(f"{w}x{h}: 'Playing demo from demo1.dem.' before it",
               "Playing demo from demo1.dem." in text)
         check(f"{w}x{h}: the attract loop goes on", pg.evaluate("exp.in_walk_mode()") == 0)
-        capped = pg.evaluate("""() => { let n = 0; for (let i = 0; i < 144; i++) n += exp.step(1 / 144); return n; }""")
+        capped = pg.evaluate("""async () => {
+            quake.pause();
+            const ran = await Promise.all(Array.from({ length: 144 }, () => exp.step(1 / 144)));
+            quake.resume();
+            return ran.reduce((a, b) => a + b, 0);
+        }""")
         check(f"{w}x{h}: the 72 fps cap is back", 71 <= capped <= 73, str(capped))
     for (w, h), line in results.items():
         print(f"browser timedemo demo1 {w}x{h}: {line}")
@@ -147,16 +144,17 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")                                  # the boot menu away
-    pg.wait_for_function("!exp.menu_visible() && exp.in_walk_mode() === 1", timeout=5000)
+    pg.wait_for_function("Promise.all([exp.menu_visible(), exp.in_walk_mode()]).then(([m, w]) => !m && w === 1)",
+                         timeout=5000)
     time.sleep(0.5)
-    W, H = pg.evaluate("[exp.width(), exp.height()]")
+    W, H = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     x0, y0 = (W - pw) // 2, (H - 48 - ph) // 2
     PLAQUE = """([x0, y0, w, h]) => Array.from(document.getElementById('c').getContext('2d')
         .getImageData(x0, y0, w, h).data)"""
     def plaque_up():
         px = pg.evaluate(PLAQUE, [x0, y0, pw, ph])
         return all(px[4 * i:4 * i + 3] == list(pal[3 * t:3 * t + 3]) for i, t in enumerate(texels))
-    listener = lambda: pg.evaluate("[exp.listener_x(), exp.listener_y(), exp.listener_z()]")
+    listener = lambda: pg.evaluate("Promise.all([exp.listener_x(), exp.listener_y(), exp.listener_z()])")
     check("not paused: no plaque", not plaque_up())
     key("Pause")
     time.sleep(0.3)

@@ -119,6 +119,9 @@ pub(crate) fn call(line: &str) -> Answer {
         "menu_bind_key" => done(|| menu_bind_key(int(0))),
         "menu_screen_id" => menu_screen_id().into(),
         "menu_visible" => menu_visible().into(),
+        // (Checks.) Forget a Load/Save slot's listing, as if M_ScanSaves
+        // had found no file: opening Load or Save must list it again.
+        "menu_forget_save" => done(|| forget_save(int(0))),
         "extras" => extras().into(),
         "set_extras" => done(|| set_extras(int(0))),
         // The console.
@@ -143,6 +146,13 @@ pub(crate) fn call(line: &str) -> Answer {
         "listener_right_y" => listener().right[1].into(),
         "listener_right_z" => listener().right[2].into(),
         _ => bench_call(name, rest).unwrap_or_else(|| f64::NAN.into()),
+    }
+}
+
+/// Blank slot `slot`'s listing in the Load/Save menus.
+fn forget_save(slot: i32) {
+    if let Ok(slot) = usize::try_from(slot) {
+        crate::app::ensure_app(|a| a.menu.set_save_comment(slot, String::new()));
     }
 }
 

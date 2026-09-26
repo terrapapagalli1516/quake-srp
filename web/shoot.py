@@ -1,16 +1,16 @@
 #!/usr/bin/env -S uv run --with playwright --script
-"""Serve web/ locally, load it in headless chromium, walk forward, screenshot.
-Proves the quake-rs WASM build actually runs Quake in a browser."""
-import functools, http.server, os, socketserver, threading, time
-from playwright.sync_api import sync_playwright
+"""Serve a deploy dir (PLATFORM.md; default web/) locally, load it in headless
+chromium, walk forward, screenshot. Proves the quake-rs WASM build actually
+runs Quake in a browser.
 
-WEB = os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8143"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+Usage: shoot.py [webdir]"""
+import os, time
+from playwright.sync_api import sync_playwright
+import isolated
+
+WEB = isolated.webdir()
+PORT = isolated.port(8143)
+httpd = isolated.serve(WEB, PORT)
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -55,8 +55,9 @@ with sync_playwright() as p:
         page.locator("#c").screenshot(path=os.path.join(WEB, "browser_demo.png"))
         print("DEMO_SHOT_OK")
 
-        # Sound: decode a real Quake .wav via Web Audio (output is silent in
-        # headless, but a successful decode proves the audio path).
+        # Sound: the sound button plays a real Quake .wav (`play
+        # items/r_item1.wav`; output is silent in headless, but the status
+        # line proves the audio path ran).
         page.eval_on_selector("#sndBtn", "b => b.click()")
         time.sleep(1.0)
         print("sound_status:", page.eval_on_selector("#status", "e=>e.textContent"))

@@ -260,7 +260,7 @@ const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
 // The control block's fields (Int32 indexes; wasi.js has the same table).
 const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, READING: 6,
-            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15 };
+            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18 };
 const CTL_BYTES = 256, RING_BYTES = 1 << 16, SLOTS = 3, SLOT_BYTES = 1280 * 800 * 4;
 // Record kinds, in (IN_*) and out (OUT_*).
 const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7 };
@@ -1420,6 +1420,7 @@ function present() {
   let s;
   do { s = Atomics.load(ctl, C.LATEST); Atomics.store(ctl, C.READING, s); } while (Atomics.load(ctl, C.LATEST) !== s);
   framesShown = Atomics.load(ctl, C.FRAMES);
+  Atomics.store(ctl, C.SHOWN, framesShown);
   if (!quake.firstFrameAt) quake.firstFrameAt = performance.now();
   const w = Atomics.load(ctl, C.SLOT_W + s), h = Atomics.load(ctl, C.SLOT_H + s);
   if (w !== W || h !== H) {
@@ -1551,6 +1552,11 @@ const quake = window.quake = {
     return (h >>> 0).toString(16).padStart(8, '0');
   },
   size: () => [W, H],
+  // A kept file's text, as the page's storage holds it (null: none).
+  kept: (path) => storage.all().then(files => {
+    const f = files.find(([p]) => p === path);
+    return f ? new TextDecoder().decode(f[1]) : null;
+  }),
   // The sound path's entry points, for checks that feed it records.
   audio: { onSample, onSound, onLocalSound, stopKey, listener, masterVolume, sideGains,
            get dynLoops() { return dynLoops; }, get dynShots() { return dynShots; },

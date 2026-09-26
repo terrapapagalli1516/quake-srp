@@ -10,25 +10,23 @@ own demo1:
      t 19.0 s) overrides it: SND_PickChannel ends the loop, nothing hums on;
   3. an INAUDIBLE sound on the key of a hum whose first decode is still
      pending ends it too (S_StartSound picks the channel before the
-     audibility test): fed through drainGameSounds from a stand-in `exp`, the
-     hum never starts (and, as a control, the same hum alone does);
+     audibility test): fed to the page's sound path as SAMPLE and SOUND
+     records would be (quake.audio.onSample / onSound), the hum never starts
+     (and, as a control, the same hum alone does);
   4. a one-shot's sides are clamped at full before the master volume
      (snd_mix.c) and it is re-spatialized every frame (S_Update);
   5. no console errors.
 
-Usage: verify_loops.py [webdir]   (defaults to the repo's web/; pass a temp dir
-holding index.html + a freshly built quake_wasm.wasm).
+Usage: verify_loops.py [webdir]   (defaults to the repo's web/; pass a deploy
+dir — PLATFORM.md).
 """
-import functools, http.server, os, socketserver, sys, threading
+import sys
 from playwright.sync_api import sync_playwright
+import isolated
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8168"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+WEB = isolated.webdir()
+PORT = isolated.port(8168)
+httpd = isolated.serve(WEB, PORT)
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -45,7 +43,7 @@ with sync_playwright() as p:
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    pg.wait_for_function("typeof exp !== 'undefined' && exp && exp.boot", timeout=60000)
+    pg.wait_for_function("window.quake && quake.ready", timeout=60000)
     # The attract demo is running behind the menu; start audio (headless has
     # no gesture, the autoplay flag lets resume() succeed).
     pg.evaluate("""() => {
@@ -61,14 +59,12 @@ with sync_playwright() as p:
         keyed: dynLoops.some(l => [...playingByKey.values()].includes(l.src)),
         // The live L/R gains follow the C law from the loop's fixed origin.
         lawHolds: dynLoops.every(l => {
-            const p = l.lp;
-            const dx = p.ox - exp.listener_x(), dy = p.oy - exp.listener_y(),
-                  dz = p.oz - exp.listener_z();
+            const p = l.lp, L = quake.audio.listener;
+            const dx = p.ox - L.x, dy = p.oy - L.y, dz = p.oz - L.z;
             const dist = Math.hypot(dx, dy, dz);
             let pan = 0;
             if (dist > 1e-3) {
-                pan = (dx * exp.listener_right_x() + dy * exp.listener_right_y()
-                     + dz * exp.listener_right_z()) / dist;
+                pan = (dx * L.rx + dy * L.ry + dz * L.rz) / dist;
                 pan = Math.min(1, Math.max(-1, pan));
             }
             // Each side clamped at full BEFORE the master volume (snd_mix.c).
@@ -87,15 +83,14 @@ with sync_playwright() as p:
     stops1 = pg.evaluate("window.__sndStats.stops")
     check("the door's stop sound ends the loop", stops1 > stops0, f"stops {stops0} -> {stops1}")
 
-    # 3. An inaudible override while the hum's first decode is pending. The
-    #    page's drainGameSounds reads everything through `exp`; swap in a
-    #    stand-in for one synchronous drain: a looping, never-decoded 8-bit
-    #    WAV on entity 900 channel 2 at the listener, then (unless `alone`) a
-    #    sound on the same key 10000 units away (gain 0). Restore `exp`, let
-    #    the decode land, and see whether the hum started.
-    hum = """async (alone) => {
-        const real = exp;
-        const n = 2000, wav = new Uint8Array(44 + n);
+    # 3. An inaudible override while the hum's first decode is pending. Feed
+    #    the page's sound path what the program would send: a looping,
+    #    never-decoded 8-bit sample (SAMPLE) played on entity 900 channel 2 at
+    #    the listener (SOUND), then (unless `alone`) a sound on the same key
+    #    10000 units away (gain 0). Let the decode land, and see whether the
+    #    hum started.
+    wav = """(n) => {
+        const wav = new Uint8Array(44 + n);
         const dv = new DataView(wav.buffer);
         const tag = (o, s) => { for (let i = 0; i < 4; i++) wav[o + i] = s.charCodeAt(i); };
         tag(0, 'RIFF'); dv.setUint32(4, 36 + n, true); tag(8, 'WAVE');
@@ -104,25 +99,19 @@ with sync_playwright() as p:
         dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
         tag(36, 'data'); dv.setUint32(40, n, true);
         for (let i = 0; i < n; i++) wav[44 + i] = 128 + ((Math.random() * 64) | 0) - 32;  // unique: never cached
-        const q = alone ? [0] : [0, 10000];
-        let far = 0;
-        const L = () => [real.listener_x(), real.listener_y(), real.listener_z()];
-        exp = {
-            memory: { buffer: wav.buffer }, set_audio_ready: () => {},
-            poll_sound: () => q.length ? (far = q.shift(), wav.length) : 0,
-            sound_ptr: () => 0, sound_entity: () => 900, sound_channel: () => 2,
-            sound_loop_start: () => 0, sound_loop_end: () => 0,
-            sound_origin_x: () => L()[0] + far, sound_origin_y: () => L()[1], sound_origin_z: () => L()[2],
-            sound_volume: () => 1, sound_attenuation: () => 1, sound_is_view_entity: () => 0,
-            listener_x: () => real.listener_x(), listener_y: () => real.listener_y(),
-            listener_z: () => real.listener_z(), listener_right_x: () => real.listener_right_x(),
-            listener_right_y: () => real.listener_right_y(), listener_right_z: () => real.listener_right_z(),
-            sound_generation: () => real.sound_generation(),
-        };
-        try { drainGameSounds(); } finally { exp = real; }
+        return wav;
+    }"""
+    pg.evaluate(f"window._wav = {wav}")
+    hum = """async (alone) => {
+        const A = quake.audio, L = A.listener;
+        const id = 900000 + ((Math.random() * 1e6) | 0);   // a sample id the program never sends
+        A.onSample(id, _wav(2000));
+        const base = { id, oy: L.y, oz: L.z, vol: 1, atten: 1, ent: 900, chan: 2, view: false, ls: 0, le: 0 };
+        A.onSound({ ...base, ox: L.x });
+        if (!alone) A.onSound({ ...base, ox: L.x + 10000 });
         await new Promise(r => setTimeout(r, 1500));
-        const started = dynLoops.some(l => l.src === playingByKey.get('900:2'));
-        stopKey(900, 2);
+        const started = A.dynLoops.some(l => l.src === A.playingByKey.get('900:2'));
+        A.stopKey(900, 2);
         return started;
     }"""
     check("control: a lone hum on a fresh sample starts once decoded", pg.evaluate(hum, True))
@@ -135,52 +124,30 @@ with sync_playwright() as p:
     #    and S_Update re-spatializes it every frame from its origin while the
     #    recorded player moves on.
     shot = """async () => {
-        const real = exp;
-        const n = 22050, wav = new Uint8Array(44 + n);
-        const dv = new DataView(wav.buffer);
-        const tag = (o, s) => { for (let i = 0; i < 4; i++) wav[o + i] = s.charCodeAt(i); };
-        tag(0, 'RIFF'); dv.setUint32(4, 36 + n, true); tag(8, 'WAVE');
-        tag(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
-        dv.setUint16(22, 1, true); dv.setUint32(24, 11025, true); dv.setUint32(28, 11025, true);
-        dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
-        tag(36, 'data'); dv.setUint32(40, n, true);
-        for (let i = 0; i < n; i++) wav[44 + i] = 128 + ((Math.random() * 64) | 0) - 32;
-        const o = [real.listener_x() + 50 * real.listener_right_x(),
-                   real.listener_y() + 50 * real.listener_right_y(),
-                   real.listener_z() + 50 * real.listener_right_z()];
-        let q = 1;
-        exp = {
-            memory: { buffer: wav.buffer }, set_audio_ready: () => {}, volume: () => real.volume(),
-            poll_sound: () => q-- > 0 ? wav.length : 0,
-            sound_ptr: () => 0, sound_entity: () => 901, sound_channel: () => 0,
-            sound_loop_start: () => -1, sound_loop_end: () => 0,
-            sound_origin_x: () => o[0], sound_origin_y: () => o[1], sound_origin_z: () => o[2],
-            sound_volume: () => 1, sound_attenuation: () => 1, sound_is_view_entity: () => 0,
-            listener_x: () => real.listener_x(), listener_y: () => real.listener_y(),
-            listener_z: () => real.listener_z(), listener_right_x: () => real.listener_right_x(),
-            listener_right_y: () => real.listener_right_y(), listener_right_z: () => real.listener_right_z(),
-            sound_generation: () => real.sound_generation(),
-        };
-        const before = dynShots.length;
-        try { drainGameSounds(); } finally { exp = real; }
-        for (let i = 0; i < 40 && dynShots.length === before; i++) await new Promise(r => setTimeout(r, 25));
-        const l = dynShots[dynShots.length - 1];
+        const A = quake.audio, L = A.listener;
+        const id = 900000 + ((Math.random() * 1e6) | 0);
+        A.onSample(id, _wav(22050));
+        const o = [L.x + 50 * L.rx, L.y + 50 * L.ry, L.z + 50 * L.rz];
+        const before = A.dynShots.length;
+        A.onSound({ id, ox: o[0], oy: o[1], oz: o[2], vol: 1, atten: 1, ent: 901, chan: 0,
+                    view: false, ls: -1, le: 0 });
+        for (let i = 0; i < 40 && A.dynShots.length === before; i++) await new Promise(r => setTimeout(r, 25));
+        const l = A.dynShots[A.dynShots.length - 1];
         if (!l || l.lp.ox !== o[0]) return { ok: false };
         const first = [l.lg.gain.value, l.rg.gain.value];
-        const lx0 = [real.listener_x(), real.listener_y()];
+        const lx0 = [L.x, L.y];
         await new Promise(r => setTimeout(r, 700));
         const law = () => {
-            const dx = o[0] - exp.listener_x(), dy = o[1] - exp.listener_y(), dz = o[2] - exp.listener_z();
+            const dx = o[0] - L.x, dy = o[1] - L.y, dz = o[2] - L.z;
             const dist = Math.hypot(dx, dy, dz);
-            const pan = Math.min(1, Math.max(-1, (dx * exp.listener_right_x() + dy * exp.listener_right_y()
-                + dz * exp.listener_right_z()) / dist));
-            const g = Math.max(0, 1 - dist / 1000), m = masterVolume();
+            const pan = Math.min(1, Math.max(-1, (dx * L.rx + dy * L.ry + dz * L.rz) / dist));
+            const g = Math.max(0, 1 - dist / 1000), m = A.masterVolume();
             return [Math.min(1, g * (1 - pan)) * m, Math.min(1, g * (1 + pan)) * m];
         };
         const now = [l.lg.gain.value, l.rg.gain.value], want = law();
-        const moved = Math.hypot(real.listener_x() - lx0[0], real.listener_y() - lx0[1]);
+        const moved = Math.hypot(L.x - lx0[0], L.y - lx0[1]);
         l.src.stop();
-        return { ok: true, first, master: masterVolume(), now, want, moved };
+        return { ok: true, first, master: A.masterVolume(), now, want, moved };
     }"""
     r = pg.evaluate(shot)
     check("a one-shot is tracked for re-spatialization", r["ok"], str(r))

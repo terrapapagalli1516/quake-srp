@@ -29,6 +29,7 @@ const C = {
   SLOT_W: 9,       // + slot: width, height, format of each slot's frame
   SLOT_H: 12,
   SLOT_F: 15,
+  SHOWN: 18,       // FRAMES as of the page's last present
 };
 const CTL_BYTES = 256;
 const RING_BYTES = 1 << 16;              // the input ring, after the control block
@@ -181,13 +182,22 @@ const stdout = {
       const f = Math.min(8 - this.fixedN, k);
       this.fixed.set(m.subarray(at, at + f), this.fixedN);
       this.fixedN += f; at += f; k -= f;
-      if (this.fixedN === 8) this.slot = this.left - f <= SLOT_BYTES ? freeSlot() : -1;
+      if (this.fixedN === 8) this.slot = this.left - f <= SLOT_BYTES && this.wanted() ? freeSlot() : -1;
       this.slotAt = 0;
     }
     if (k > 0 && this.slot >= 0) {
       slots.set(m.subarray(at, at + k), this.slot * SLOT_BYTES + this.slotAt);
       this.slotAt += k;
     }
+  },
+
+  // Whether the page wants this frame. It always does while the program
+  // waits for its ticks (the page is waiting for the frame). A timedemo's
+  // frames come faster than any display: one the page has not yet shown
+  // the last of is rendered but not handed over (the old page likewise ran
+  // a slice of frames per refresh and presented the last).
+  wanted() {
+    return Atomics.load(ctl, C.WAIT) === 1 || Atomics.load(ctl, C.FRAMES) === Atomics.load(ctl, C.SHOWN);
   },
 
   // A record is complete.

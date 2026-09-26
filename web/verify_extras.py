@@ -7,13 +7,13 @@ and Esc in fullscreen, end-to-end in headless Chromium:
      Esc returns to Options; the wasm_* console commands set the same bits.
      Screenshots: verify_extras_options.png, verify_extras.png (the screen),
      verify_extras_fps.png (the readout).
-  2. wasm_uncapped through the real wasm: a second of 1/144 s steps presents
-     72 frames with the cap (id's), 144 without.
+  2. wasm_uncapped through the real program: a second of 1/144 s steps runs
+     72 host frames with the cap (id's), 144 without.
   3. On frozen frames: wasm_showfps changes only the box at the bottom
      right above the status bar, wasm_exactpersp redraws the walls, and
      switching either off restores id's frame byte for byte.
   4. Persistence: the extras bits and viewsize (plus the resolution) survive
-     a reload through localStorage.
+     a reload through the program's config.cfg, which the page keeps.
   5. Esc in fullscreen: F locks Escape (navigator.keyboard.lock(['Escape']),
      spied) and the hint says to hold Esc; a tapped Esc toggles the menu, a
      held one (autorepeat) toggles it once; a locked Esc that the browser
@@ -24,18 +24,15 @@ and Esc in fullscreen, end-to-end in headless Chromium:
      (tap reaches the page, hold leaves fullscreen) is NOT verified here.
 
 Usage: verify_extras.py [webdir]   (defaults to this script's directory; pass
-a temp dir holding index.html + a freshly built quake_wasm.wasm.)
+a deploy dir — PLATFORM.md.)
 """
-import functools, http.server, os, socketserver, sys, threading, time
+import os, sys, time
 from playwright.sync_api import sync_playwright
+import isolated
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8175"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+WEB = isolated.webdir()
+PORT = isolated.port(8175)
+httpd = isolated.serve(WEB, PORT)
 
 OPTIONS, EXTRAS = 5, 10
 
@@ -59,16 +56,28 @@ NO_KB = "Object.defineProperty(Navigator.prototype, 'keyboard', { get: () => und
 
 def boot_page(pg):
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    pg.wait_for_function(
-        "typeof exp !== 'undefined' && !!exp && typeof exp.boot === 'function'", timeout=120000)
-    pg.wait_for_function(
-        "document.getElementById('status').textContent.includes('ready')", timeout=30000)
+    pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     pg.evaluate("document.getElementById('overlay').click()")   # the first gesture
     time.sleep(0.3)
 
 def frames(pg, n=3):
     pg.evaluate(f"""() => new Promise(r => {{ let k = {n};
         const f = () => (--k > 0 ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); }})""")
+
+# A frozen frame (dt 0: the automation's frame, no clock moves), presented,
+# with the page's own ticks paused.
+FROZEN = "() => { quake.tick(0); quake.tick(0); }"
+
+# config.cfg as the page keeps it (the program writes it on the frame after
+# a change).
+CFG = "quake.kept('id1/config.cfg')"
+def cfg_has(pg, *lines):
+    try:
+        pg.wait_for_function(CFG + ".then(t => !!t && " + " && ".join(f"t.includes('{l}\\n')" for l in lines) + ")",
+                             timeout=5000)
+        return True
+    except Exception:
+        return False
 
 # Keep a canvas grab in the page as window[name].
 GRAB = """name => {
@@ -105,8 +114,7 @@ with sync_playwright() as p:
 
     # 1. The Extras screen, reached from Options' 14th row.
     check("every extra is off by default", ext() == 0)
-    check("nothing stored before a change",
-          pg.evaluate("localStorage.getItem('quake-rs.extras')") is None)
+    check("nothing stored before a change", pg.evaluate(CFG) is None)
     key("Escape")                      # the menu over the attract demo
     key("ArrowDown", 2); key("Enter")
     check("Options opens", scr() == OPTIONS)
@@ -150,17 +158,20 @@ with sync_playwright() as p:
     key("Backquote")
     check("wasm_uncapped 0", ext() == 2)
     frames(pg)
-    check("the page stored the change",
-          pg.evaluate("localStorage.getItem('quake-rs.extras')") == "2")
+    check("config.cfg keeps the change", cfg_has(pg, "wasm_uncapped 0", "wasm_showfps 1"),
+          str(pg.evaluate(CFG)))
 
-    # 2. wasm_uncapped through the real wasm (the page's rAF loop cannot
-    #    interleave inside one evaluate).
-    capped, uncapped = pg.evaluate("""() => {
-        const one = () => { let n = 0; for (let i = 0; i < 144; i++) n += exp.step(1 / 144); return n; };
-        const bits = exp.extras();
-        exp.set_extras(bits & ~1); const a = one();
-        exp.set_extras(bits | 1);  const b = one();
-        exp.set_extras(bits);
+    # 2. wasm_uncapped through the real program, with the page's own ticks
+    #    paused so they cannot interleave (the calls run back to back).
+    capped, uncapped = pg.evaluate("""async () => {
+        quake.pause();
+        const one = async () => (await Promise.all(Array.from({ length: 144 }, () => exp.step(1 / 144))))
+            .reduce((a, b) => a + b, 0);
+        const bits = await exp.extras();
+        exp.set_extras(bits & ~1); const a = await one();
+        exp.set_extras(bits | 1);  const b = await one();
+        await exp.set_extras(bits);
+        quake.resume();
         return [a, b];
     }""")
     check("144 Hz with id's cap: 72 frames a second", 71 <= capped <= 73, str(capped))
@@ -171,17 +182,16 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")                      # close the boot menu
-    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     time.sleep(1.5)                    # a full measuring window
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_fps.png"))
-    pg.evaluate("""() => { window._real = exp; exp = { ...window._real };
-                           exp.step = () => window._real.step(0); }""")
-    frames(pg)
+    pg.evaluate("quake.pause()")
+    pg.evaluate(FROZEN)
     pg.evaluate(GRAB, "_on")
-    pg.evaluate("window._real.set_extras(0)")
-    frames(pg)
+    pg.evaluate("exp.set_extras(0)")
+    pg.evaluate(FROZEN)
     pg.evaluate(GRAB, "_off")
-    w, h = pg.evaluate("[exp.width(), exp.height()]")
+    w, h = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     d = pg.evaluate(DIFF, ["_on", "_off"])
     # The 2-D layer is 1:1 as id draws it (the scaled-2-D extra is off):
     # " 60 FPS" at x w-64..w-8, y h-56..h-48 (viewsize 100: sb_lines 48).
@@ -190,37 +200,38 @@ with sync_playwright() as p:
         and d["y0"] >= box[2] and d["y1"] < box[3]
     check("the readout draws bottom right, above the status bar, and nowhere else",
           inside, f"{d}; box {box}")
-    pg.evaluate("window._real.set_extras(2)")
-    frames(pg)
+    pg.evaluate("exp.set_extras(2)")
+    pg.evaluate(FROZEN)
     pg.evaluate(GRAB, "_on2")
     check("on again: the same readout", pg.evaluate(DIFF, ["_on", "_on2"]) is None)
     # wasm_exactpersp: the walls change, and off is id's frame again.
-    pg.evaluate("window._real.set_extras(4)")
-    frames(pg)
+    pg.evaluate("exp.set_extras(4)")
+    pg.evaluate(FROZEN)
     pg.evaluate(GRAB, "_exact")
     d = pg.evaluate(DIFF, ["_off", "_exact"])
     check("wasm_exactpersp redraws the walls", d is not None and d["n"] > 1000, str(d))
-    pg.evaluate("window._real.set_extras(0)")
-    frames(pg)
+    pg.evaluate("exp.set_extras(0)")
+    pg.evaluate(FROZEN)
     pg.evaluate(GRAB, "_off2")
     check("...and off is id's spans again, byte for byte",
           pg.evaluate(DIFF, ["_off", "_off2"]) is None)
-    pg.evaluate("window._real.set_extras(2)")
-    pg.evaluate("exp = window._real")
+    pg.evaluate("exp.set_extras(2)")
+    pg.evaluate("quake.resume()")
 
     # 4. Persistence across a reload: extras, viewsize, resolution.
     key("Minus", 2)                    # default.cfg: '-' is sizedown -> 80
     frames(pg)
-    stored = pg.evaluate("""[localStorage.getItem('quake-rs.extras'),
-                             localStorage.getItem('quake-rs.viewsize')]""")
-    check("viewsize and extras stored", stored == ["2", "80"], str(stored))
+    check("viewsize and extras kept in config.cfg",
+          cfg_has(pg, "viewsize 80", "wasm_showfps 1", "wasm_uncapped 0"), str(pg.evaluate(CFG)))
     pg.evaluate("exp.set_extras(3)")
     frames(pg)
-    res0 = pg.evaluate("[exp.width(), exp.height()]")
+    cfg_has(pg, "wasm_uncapped 1", "wasm_showfps 1")
+    res0 = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     boot_page(pg)
     check("the Web extras survive a reload", ext() == 3, str(ext()))
     check("Screen size (viewsize) survives a reload", pg.evaluate("exp.viewsize()") == 80)
-    check("...and the resolution still does", pg.evaluate("[exp.width(), exp.height()]") == res0)
+    check("...and the resolution still does",
+          pg.evaluate("Promise.all([exp.width(), exp.height()])") == res0)
     pg.evaluate("exp.set_extras(0); exp.set_viewsize(100)")
     frames(pg)
 
@@ -228,7 +239,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")
-    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     key("f")
     try:
         pg.wait_for_function("!!document.fullscreenElement && escLocked", timeout=5000)
@@ -266,7 +277,7 @@ with sync_playwright() as p:
         time.sleep(0.4)
         check("Esc keydown then lock loss: one toggle (menu open)", vis() == 1)
         key("Escape")
-        pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+        pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
         pg.locator("#c").click()
         pg.wait_for_function("document.pointerLockElement === document.getElementById('c')",
                              timeout=5000)
@@ -294,7 +305,7 @@ with sync_playwright() as p:
         pg.wait_for_function("document.pointerLockElement === document.getElementById('c')",
                              timeout=5000)
         pg.evaluate("document.exitPointerLock()")
-        pg.wait_for_function("exp.menu_visible() === 1", timeout=5000)
+        pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
         key("Escape")
         check("windowed: lock loss opens, the next Esc closes", vis() == 0)
     else:
@@ -310,6 +321,10 @@ with sync_playwright() as p:
     pg2.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg2.keyboard.press("Escape")
+    # The page decides what F does from the game's state as the program last
+    # reported it: the Escape's own turn, a millisecond or two later (no
+    # player presses Esc and F closer than that; a script does).
+    time.sleep(0.1)
     pg2.keyboard.press("f")
     try:
         pg2.wait_for_function("!!document.fullscreenElement && fsHint.classList.contains('show')",

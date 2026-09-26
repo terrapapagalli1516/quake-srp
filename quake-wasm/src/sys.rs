@@ -8,11 +8,13 @@
 //! 1. writes the turn's `State` and a `Sync` (and flushes): the host
 //!    publishes everything since the last `Sync` to the page;
 //! 2. reads events, applying each as it comes (keys, mouse, automation
-//!    calls, each call answered at once with its own `Sync`), until the
-//!    next `Tick` — blocking in the host while there is none, which is
-//!    where the program waits for the display — or, while a `timedemo`
-//!    runs, until the host's `End` (the host answers a polling `Sync` at
-//!    once, so the demo runs frames back to back as `Host_Frame` does);
+//!    calls), until the next `Tick` — blocking in the host while there is
+//!    none, which is where the program waits for the display — or, while a
+//!    `timedemo` runs, until the host's `End` (the host answers a polling
+//!    `Sync` at once, so the demo runs frames back to back as `Host_Frame`
+//!    does). A call is answered at once in a turn of its own, and so is a
+//!    key that changed the page's UI state (the menu or the console opened,
+//!    say), so the page's view of it is never more than a moment old;
 //! 3. runs the host frame for the tick's `dt` ([`crate::host::step`]) and,
 //!    when one ran, writes its picture, its sounds and the listener.
 //!
@@ -70,6 +72,8 @@ struct Sys<W: Write> {
     config: Option<Archived>,
     /// When the last frame started: a timedemo's frames time themselves.
     last_frame: Instant,
+    /// The UI state the page last heard (`State`).
+    state: (u32, i32),
 }
 
 impl<W: Write> Sys<W> {
@@ -82,6 +86,7 @@ impl<W: Write> Sys<W> {
             menu_screen: None,
             config: None,
             last_frame: Instant::now(),
+            state: (u32::MAX, 0),
         }
     }
 
@@ -100,17 +105,9 @@ impl<W: Write> Sys<W> {
     /// Close the turn: the page's UI state, then `Sync` — `wait` when the
     /// next turn waits for a tick — and flush, so the host publishes it.
     fn end_turn(&mut self, wait: bool) -> io::Result<()> {
-        let flags = [
-            (crate::menu::menu_visible(), STATE_MENU),
-            (crate::console::console_visible(), STATE_CONSOLE),
-            (crate::app::in_walk_mode(), STATE_WALK),
-            (crate::menu::menu_bind_grabbing(), STATE_BIND_GRAB),
-            (timedemo_running(), STATE_TIMEDEMO),
-        ]
-        .iter()
-        .filter(|(on, _)| *on != 0)
-        .fold(0, |f, (_, bit)| f | bit);
-        Msg::State { flags, menu_screen: crate::menu::menu_screen_id() }.write_to(&mut self.out)?;
+        self.state = ui_state();
+        let (flags, menu_screen) = self.state;
+        Msg::State { flags, menu_screen }.write_to(&mut self.out)?;
         Msg::Sync { seq: self.ack, wait }.write_to(&mut self.out)?;
         self.out.flush()
     }
@@ -131,7 +128,10 @@ impl<W: Write> Sys<W> {
                 Event::End if polling => return Ok(Some(self.last_frame.elapsed().as_secs_f64())),
                 Event::End | Event::Unknown(_) => {}
                 Event::Key { keynum, down, ch } => {
-                    key_event(i32::from(keynum), i32::from(down), ch.min(i32::MAX as u32) as i32)
+                    key_event(i32::from(keynum), i32::from(down), ch.min(i32::MAX as u32) as i32);
+                    if ui_state() != self.state {
+                        self.end_turn(!polling)?;
+                    }
                 }
                 Event::Mouse { dx, dy } => mouse_move(dx, dy),
                 Event::ClearKeys => key_clear_states(),
@@ -254,6 +254,22 @@ impl<W: Write> Sys<W> {
     }
 }
 
+/// What the page's own UI needs of the game (the `State` record): the
+/// flags, and the menu screen showing.
+fn ui_state() -> (u32, i32) {
+    let flags = [
+        (crate::menu::menu_visible(), STATE_MENU),
+        (crate::console::console_visible(), STATE_CONSOLE),
+        (crate::app::in_walk_mode(), STATE_WALK),
+        (crate::menu::menu_bind_grabbing(), STATE_BIND_GRAB),
+        (timedemo_running(), STATE_TIMEDEMO),
+    ]
+    .iter()
+    .filter(|(on, _)| *on != 0)
+    .fold(0, |f, (_, bit)| f | bit);
+    (flags, crate::menu::menu_screen_id())
+}
+
 /// A sound's placement for the page's `SND_Spatialize`.
 fn placement(p: &SndParams) -> Placement {
     Placement { origin: p.origin, volume: p.volume, attenuation: p.attenuation }
@@ -340,6 +356,25 @@ mod tests {
         let recs = run_on(&input);
         let replies: Vec<f64> = recs.iter().filter(|r| r.kind == Record::REPLY).map(|r| r.f64_at(4)).collect();
         assert_eq!(replies, [1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_key_that_changes_the_ui_state_ends_a_turn_at_once() {
+        let mut input = Vec::new();
+        input.extend(encode::call(1, "boot"));
+        input.extend(encode::call(2, "menu_cancel"));
+        // `w` is +forward: nothing the page shows changes, no turn.
+        input.extend(encode::key(b'w', true, 'w' as u32));
+        input.extend(encode::key(b'w', false, 0));
+        // Escape opens the menu: its own turn, with the new state.
+        input.extend(encode::key(27, true, 0));
+        input.extend(encode::key(27, false, 0));
+        let recs = run_on(&input);
+        let states: Vec<u32> = recs.iter().filter(|r| r.kind == Record::STATE).map(|r| r.u32_at(0)).collect();
+        // Startup (the attract demo), the two calls' turns, Escape's.
+        assert_eq!(states.len(), 4, "{states:?}");
+        assert_eq!(states[2] & STATE_MENU, 0, "the menu closed by the call");
+        assert_eq!(states[3] & STATE_MENU, STATE_MENU, "Escape's turn: the menu is up");
     }
 
     #[test]
