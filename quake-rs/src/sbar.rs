@@ -27,11 +27,10 @@ use crate::screen::draw_center_string_revealed;
 // 320 wide at the bottom centre of the screen, backtile either side on a wider
 // one, as Sbar_Draw does (or blown up with the "scaled 2-D" extra).
 //
-// Integration choice (lowest churn): the HUD is a *separate* `pub fn
-// draw_hud_into(image, hud)` the scene callers invoke on the returned `Image`,
-// rather than a new parameter on `render_scene_ext`. This leaves the renderer's
-// signature — and every existing call site and test — untouched, so
-// `render_scene`/`render_scene_ext` draw no HUD and all prior tests stay green.
+// The HUD is a *separate* `pub fn draw_hud_into(image, hud)` the client calls
+// on the screen after the 3-D view is drawn into it, as `SCR_UpdateScreen`
+// calls `Sbar_Draw` after `V_RenderView`: the renderer (`render::Renderer`)
+// draws no HUD.
 //
 // Faithfulness/safety: every WAD pic is fetched with `wad.qpic(name).ok()`, so a
 // missing or malformed pic simply doesn't draw (never panics, never errors out

@@ -312,7 +312,7 @@ mod tests {
     use crate::test_util::*;
     use crate::vid::{height, set_resolution, width};
 
-    /// CENSUS L14 through the exports: with the walk running, Single Player >
+    /// CENSUS L14 through the host: with the walk running, Single Player >
     /// New Game asks first; 'n' keeps the game, 'y' starts the start hub.
     #[test]
     fn new_game_in_a_running_game_asks_first() {

@@ -304,10 +304,12 @@ impl MipView {
     }
 }
 
-/// `mipadjust` (`Mod_LoadTexinfo`, `model.c`): how many texels a world unit
-/// spans on this texinfo, in steps — the mean length of the two texture axes
-/// below 0.32 gives 4, below 0.49 3, below 0.99 2, else 1. A texture scaled up
-/// in the editor (short axes) drops to a coarser mip sooner.
+/// `mipadjust` (`Mod_LoadTexinfo`, `model.c`): about how many world units one
+/// texel spans on this texinfo, in steps — the mean length of the two texture
+/// axes (texels per unit) below 0.32 gives 4, below 0.49 3, below 0.99 2, else
+/// 1. It multiplies the scale `D_MipLevelForScale` compares, so a texture
+/// scaled up in the editor (short axes, big texels) keeps a finer mip level
+/// further away.
 pub(super) fn mipadjust(ti: &crate::bsp::TexInfo) -> f32 {
     let len = |k: usize| {
         let v = &ti.vecs[k];

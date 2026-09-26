@@ -6,14 +6,14 @@
 //!
 //! The same [`quake_rs::client`] code the page runs for the console's
 //! `timedemo` ([`cl_demo::build_timedemo`], [`cl_demo::timedemo_frame`],
-//! [`cl_demo::TimeDemoClock`]), with the page's screen (its 4:3 display, no
-//! Web extras) and the host's defaults (viewsize 100, the menu and console
+//! [`cl_demo::TimeDemoClock`]), with the page's Classic screen (its 4:3
+//! display, id's video) and the host's defaults (viewsize 100, the menu and console
 //! closed — `key_dest == key_game`, as `quake +timedemo demo1` runs it).
 //! `realtime` is the wall clock (`Sys_FloatTime`), read at the top of every
 //! host frame. A host frame is what the page's `step` does for a frame: the
 //! demo message, the 3-D view, the status bar and text, and the finished
-//! frame packed through the palette-shift ramps into RGBA as the page
-//! presents it; the sound calls are dropped (id's oracle runs with
+//! frame packed through the palette-shift ramps into RGBA as the page's 2-D
+//! canvas takes it (its WebGL2 path skips the pack); the sound calls are dropped (id's oracle runs with
 //! `snd_null`). It prints the numbers id's C prints for `timedemo demo1` run
 //! the same way (`oracle/build/quake-oracle -oracle_realtime -width W
 //! -height H +timedemo demo1`, see PERF_PLAN.md).

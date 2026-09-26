@@ -15,15 +15,15 @@
 //! | input    | `step` prologue: menu gate + bindings (`CL_BaseMove`)              |
 //! | sim      | walk: `SV_Physics` tick + client-side drains/effects/entity list;  |
 //! |          | demo: `CL_ReadFromServer` frame advance + effects + entity list    |
-//! | render3d | `R_RenderView` (`render_scene_ext_sprited`), split further by the  |
+//! | render3d | `R_RenderView` (`Renderer::render_into`), split further by the     |
 //! |          | engine's `RenderStats` into world/submodel/external/alias/… and    |
 //! |          | the world pass into pvs/sort/setup(+raster)/light/surf             |
 //! | post3d   | `D_WarpScreen`, the view composed into the screen, the cshifts     |
 //! | hud2d    | `Sbar_Draw` / intermission overlays + centerprint/notify           |
 //! | menu     | `M_Draw`                                                           |
 //! | console  | `Con_DrawConsole`                                                  |
-//! | blend    | `V_UpdatePalette`: the cshift + gamma ramps (256 entries each)     |
-//! | pack     | RGB -> RGBA through the ramps into the presented framebuffer       |
+//! | blend    | `V_UpdatePalette`: the cshifts + gamma over the frame palette      |
+//! | pack     | `VID_Update`: the 8-bit frame out (RGBA pack for a 2-D canvas)     |
 //!
 //! Timing never changes what is drawn: the laps only read the clock, and the
 //! engine's `RenderStats` counters are the same ones `quaketool`'s

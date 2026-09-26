@@ -515,8 +515,8 @@ pub enum MenuSound {
     Menu1,
     /// `misc/menu2.wav` — `m_entersound`: entering a screen / Enter select.
     /// (The C latches the flag and plays it on the next `M_Draw` so pic caching
-    /// can't stutter the sample; with pre-decoded Web Audio buffers that delay
-    /// is unnecessary, so this port queues it at the trigger — EXCEPT where the
+    /// can't stutter the sample; the port queues it at the trigger, the same
+    /// host frame as that draw in practice — EXCEPT where the
     /// menu closes before the next draw, where the C's latch never fires and we
     /// queue nothing.)
     Menu2,

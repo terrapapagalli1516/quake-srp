@@ -745,7 +745,8 @@ impl Listener {
 /// One call the client makes into the sound layer — snd_dma.c's entry
 /// points, and cd_audio.c's, which id's client called from the same places
 /// (`CL_ParseServerMessage`) — recorded in call order for the platform to
-/// carry out (the browser plays them through Web Audio). A frame's calls
+/// carry out (the browser's program hands them to the engine's mixer,
+/// [`crate::snd::Mixer`], and its CD player). A frame's calls
 /// come back in its [`ClientFrame`]; a level load makes them into a caller's
 /// `Vec`.
 #[derive(Clone, Debug)]
