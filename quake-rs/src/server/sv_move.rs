@@ -11,8 +11,6 @@
 //! As in id's tree, the trace these steps are made of — `SV_Move` — is not
 //! here but in world.c's port, [`super::sv_world`].
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use super::pr_cmds::bi_changeyaw;
 use super::sv_world::{link_edict, sv_move, touch_triggers};
 use super::{
@@ -309,27 +307,6 @@ fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
     vm.set_ent_float(ent, vm.fo.flags, (flags | FL_PARTIALGROUND) as f32);
 }
 
-/// A small deterministic LCG for the AI's `rand()&n` symmetry-breaking in
-/// chase-direction selection. The C used libc `rand()`; here a process-global
-/// LCG keeps chase behaviour varied yet reproducible across runs/tests.
-fn ai_rand() -> u32 {
-    let next = AI_RAND_SEED
-        .load(Ordering::Relaxed)
-        .wrapping_mul(1_103_515_245)
-        .wrapping_add(12_345);
-    AI_RAND_SEED.store(next, Ordering::Relaxed);
-    (next >> 16) & 0x7fff
-}
-
-/// [`ai_rand`]'s state; a fresh process starts it at [`AI_RAND_START`].
-static AI_RAND_SEED: AtomicU32 = AtomicU32::new(AI_RAND_START);
-const AI_RAND_START: u32 = 0x1234_5678;
-
-/// Restart [`ai_rand`]'s sequence from a fresh process's seed (see
-/// [`crate::server::reset_random`]).
-pub(super) fn reset_ai_rand() {
-    AI_RAND_SEED.store(AI_RAND_START, Ordering::Relaxed);
-}
 
 /// `SV_NewChaseDir` (sv_move.c ~283): pick a new movement direction for `actor`
 /// toward `enemy` and step that way.
@@ -383,7 +360,7 @@ pub fn sv_new_chase_dir(vm: &mut Vm, actor: i32, enemy: i32, dist: f32) {
     }
 
     // Try the other directions; randomly (or when Y dominates) swap the axes.
-    if (ai_rand() & 3) & 1 != 0 || deltay.abs() > deltax.abs() {
+    if (vm.rand().chase() & 3) & 1 != 0 || deltay.abs() > deltax.abs() {
         std::mem::swap(&mut d1, &mut d2);
     }
 
@@ -400,7 +377,7 @@ pub fn sv_new_chase_dir(vm: &mut Vm, actor: i32, enemy: i32, dist: f32) {
     }
 
     // Sweep every 45 degrees, in a randomly chosen order.
-    if ai_rand() & 1 != 0 {
+    if vm.rand().chase() & 1 != 0 {
         let mut tdir = 0.0;
         while tdir <= 315.0 {
             if tdir != turnaround && sv_step_direction(vm, actor, tdir, dist) {
@@ -471,7 +448,7 @@ pub fn sv_move_to_goal(vm: &mut Vm, dist: f32) {
 
     // Bump around: occasionally force a fresh chase direction.
     let ideal_yaw = vm.ent_float(ent, vm.fo.ideal_yaw);
-    if (ai_rand() & 3) == 1 || !sv_step_direction(vm, ent, ideal_yaw, dist) {
+    if (vm.rand().chase() & 3) == 1 || !sv_step_direction(vm, ent, ideal_yaw, dist) {
         sv_new_chase_dir(vm, ent, goal, dist);
     }
 }

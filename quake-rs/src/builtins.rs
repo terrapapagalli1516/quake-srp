@@ -23,7 +23,6 @@
 
 use crate::error::Result;
 use crate::vm::{Builtin, Vm};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 /// `PF_Fixme`: an unimplemented builtin. The C version calls `PR_RunError`
 /// (which `longjmp`s out of the interpreter); we return the equivalent `Err`.
@@ -98,50 +97,11 @@ fn pf_makevectors(vm: &mut Vm) -> Result<()> {
 
 // -------------------------------------------------------------------- #7 random
 
-/// Seed for the deterministic LCG backing [`pf_random`].
-///
-/// The C `PF_random` uses libc `rand()`, which is process-global, seeded once
-/// and unspecified across platforms. The [`Vm`] struct has a fixed field set we
-/// must not extend, so we keep the PRNG state in a process-global `AtomicU32`
-/// instead. This makes `random()` reproducible (it always starts from the same
-/// seed in a fresh process) without touching `Vm`.
-static RNG_STATE: AtomicU32 = AtomicU32::new(RNG_SEED);
-
-/// [`RNG_STATE`]'s value in a fresh process.
-const RNG_SEED: u32 = 0x1337_BEEF;
-
-/// Restart [`pf_random`]'s sequence from a fresh process's seed, so two
-/// runs in one process draw the same numbers (a harness comparing them:
-/// `quaketool framerate`).
-pub fn reset_random() {
-    RNG_STATE.store(RNG_SEED, Ordering::Relaxed);
-}
-
-/// Numerically-Recipes-style 32-bit LCG step (`x = x*1664525 + 1013904223`).
-fn lcg_next() -> u32 {
-    // fetch_update with wrapping arithmetic; never panics, lock-free.
-    let mut prev = RNG_STATE.load(Ordering::Relaxed);
-    loop {
-        let next = prev
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223);
-        match RNG_STATE.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return next,
-            Err(actual) => prev = actual,
-        }
-    }
-}
-
-/// `PF_random` (#7): `float() random`, a value in `[0, 1]`.
-///
-/// The C computes `(rand() & 0x7fff) / (float)0x7fff`, so the range is CLOSED
-/// `[0, 1]` — it returns exactly `1.0` when the masked bits are `0x7fff`. We match
-/// id exactly (divide by `0x7fff`, not `0x8000`) so endpoint-sensitive QuakeC
-/// behaves identically. Backed by the deterministic [`RNG_STATE`] LCG (in place of
-/// process-global `rand()`) so tests reproduce.
+/// `PF_random` (#7): `float() random`, a value in the closed `[0, 1]`
+/// (`(rand() & 0x7fff) / (float)0x7fff`), drawn from the host session's
+/// streams ([`crate::qrand::QRand::random`]) in place of libc's `rand()`.
 fn pf_random(vm: &mut Vm) -> Result<()> {
-    let bits = lcg_next() & 0x7fff;
-    let num = (bits as f32) / 32767.0; // 0x7fff -> closed [0,1], matching PF_random
+    let num = vm.rand().random();
     vm.ret_float(num);
     Ok(())
 }

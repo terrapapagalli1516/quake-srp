@@ -77,7 +77,9 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
     let mut sound = Vec::new();
-    let mut wk = host_cmd::build_walk_map(pak, map, &mut sound).ok_or_else(|| format!("{map} would not load"))?;
+    let rand = std::rc::Rc::new(quake_rs::qrand::QRand::new());
+    let mut wk =
+        host_cmd::build_walk_map(pak, map, &rand, &mut sound).ok_or_else(|| format!("{map} would not load"))?;
     wk.viewsize = viewsize;
     if let Some(contents) = liquid {
         origin = Some(largest_leaf_centre(&wk.bsp, contents).ok_or_else(|| format!("{map} has no leaf of contents {contents}"))?);

@@ -9,11 +9,14 @@
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/host_cmd.c`.
 
+use std::rc::Rc;
+
 use crate::bsp::Bsp;
 use crate::dlight::DynamicLights;
 use crate::pak::Pak;
 use crate::particles::ParticleSystem;
 use crate::progs::Progs;
+use crate::qrand::QRand;
 use crate::server::Server;
 
 use super::cl_input::clamp_pitch;
@@ -167,9 +170,11 @@ fn run_give_command(w: &mut Walk, argv: &[&str], out: &mut Vec<String>) {
 
 /// Build a live walk on `map` (a `maps/*.bsp` path in `pak`) — `Host_Map_f`'s
 /// `SV_SpawnServer` and the client's connect: the browser boots e1m1; New Game
-/// uses [`crate::render::NEW_GAME_MAP`] (the `start` hub). The level's sounds start
-/// through `sound` ([`SoundCall::StopAll`], then its placed loops).
-pub fn build_walk_map(pak: Pak, map: &str, sound: &mut Vec<SoundCall>) -> Option<Walk> {
+/// uses [`crate::render::NEW_GAME_MAP`] (the `start` hub). Its server draws
+/// from the host session's `rand` ([`Server::set_rand`]), and so do the level
+/// changes it makes. The level's sounds start through `sound`
+/// ([`SoundCall::StopAll`], then its placed loops).
+pub fn build_walk_map(pak: Pak, map: &str, rand: &Rc<QRand>, sound: &mut Vec<SoundCall>) -> Option<Walk> {
     let read = |n: &str| pak.read_file(n).ok().flatten();
     let bsp = Bsp::parse(&read(map)?).ok()?;
     let bsp_sim = Bsp::parse(&read(map)?).ok()?;
@@ -179,6 +184,7 @@ pub fn build_walk_map(pak: Pak, map: &str, sound: &mut Vec<SoundCall>) -> Option
     // Pass the pak so external brush-model item boxes (b_*.bsp) collide + take
     // damage (the explosive box becomes shootable).
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).ok()?;
+    server.set_rand(Rc::clone(rand));
     // SV_SpawnServer set world.model + the mapname global before loading the
     // entities (the QuakeC episode-end finale check reads world.model).
     server.set_map_name(map);
@@ -264,6 +270,8 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     let Ok(progs) = Progs::parse(&progs_bytes) else { return };
 
     let Ok(mut ns) = Server::with_pak(sim_bsp, progs, Some(w.pak.clone())) else { return };
+    // The host session's random streams continue into the new level.
+    ns.set_rand(Rc::clone(w.server.rand()));
     // SV_SpawnServer: world.model + the mapname global, before the entities load.
     ns.set_map_name(&map_file);
     // Restore the carried serverflags onto the new server BEFORE spawning its
@@ -371,6 +379,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     let Ok(progs) = Progs::parse(&progs_bytes) else { return };
 
     let Ok(mut ns) = Server::with_pak(sim_bsp, progs, Some(w.pak.clone())) else { return };
+    ns.set_rand(Rc::clone(w.server.rand()));
     // SV_SpawnServer: world.model + the mapname global, before the entities load.
     ns.set_map_name(&w.map_name);
     ns.set_serverflags(serverflags);
@@ -429,8 +438,14 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
 /// `Host_Loadgame_f`'s post-fopen half: parse the header, spawn the named map,
 /// and rebuild a [`Walk`] around [`Server::load_savegame`]'s reconstructed
 /// world. Errors return the console message to print (the C's where it has
-/// one); the caller leaves the current game untouched on `Err`.
-pub fn build_walk_savegame(pak: Pak, text: &str, sound: &mut Vec<SoundCall>) -> Result<Walk, String> {
+/// one); the caller leaves the current game untouched on `Err`. The loaded
+/// server draws from the host session's `rand`, like [`build_walk_map`]'s.
+pub fn build_walk_savegame(
+    pak: Pak,
+    text: &str,
+    rand: &Rc<QRand>,
+    sound: &mut Vec<SoundCall>,
+) -> Result<Walk, String> {
     use crate::save::{parse_savegame, SAVEGAME_VERSION};
 
     let sg = parse_savegame(text).map_err(|e| e.to_string())?;
@@ -454,7 +469,7 @@ pub fn build_walk_savegame(pak: Pak, text: &str, sound: &mut Vec<SoundCall>) -> 
     // run, rebuilding precaches; see save.rs) -> lightstyles -> globals ->
     // edicts -> sv.time/spawn_parms. No entrance script, no signon settle.
     let mut server =
-        Server::load_savegame(sim_bsp, progs, Some(pak.clone()), text).map_err(|e| e.to_string())?;
+        Server::load_savegame(sim_bsp, progs, Some(pak.clone()), rand, text).map_err(|e| e.to_string())?;
     let player = server.player_edict();
     // Host_Spawn_f names the client edict (`netname = host_client->name`) only
     // for a fresh spawn: a loaded game keeps the save's. Saves the port wrote

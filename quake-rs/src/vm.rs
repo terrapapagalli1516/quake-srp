@@ -32,9 +32,12 @@
 //!   [`Vm::intern`] appends `"s\0"` and returns the byte offset (a `string_t`);
 //!   [`Vm::get_string`] reads a NUL-terminated string from an offset.
 
+use std::rc::Rc;
+
 use crate::error::{QError, Result};
 use crate::math::Vec3;
 use crate::progs::{string_in, Op, Progs, Statement, MAX_PARMS, OFS_PARM0, OFS_RETURN};
+use crate::qrand::QRand;
 
 /// A native builtin. Reads its arguments and writes its return value through
 /// the `Vm` helpers (`arg_*` / `ret_*`), exactly like the C `builtin_t`.
@@ -328,6 +331,10 @@ pub struct Vm {
     /// follow it) and marks it here, so the client can treat it as a static.
     /// Missing entries read as not static; `ED_Alloc` and `ED_Free` clear it.
     edict_static: Vec<bool>,
+    /// The host session's random streams ([`QRand`]) that `random()` and the
+    /// monsters' chase directions draw from: a VM's own fresh ones until the
+    /// host hands it its session's ([`Vm::set_rand`]).
+    rand: Rc<QRand>,
 
     // --- private execution state ---
     /// Call stack of saved caller frames (`pr_stack` / `pr_depth`).
@@ -388,6 +395,7 @@ impl Vm {
             edict_freetime: Vec::new(),
             edict_leafs: Vec::new(),
             edict_static: Vec::new(),
+            rand: Rc::new(QRand::new()),
             stack: Vec::new(),
             localstack: Vec::new(),
             xfunction: 0,
@@ -414,6 +422,17 @@ impl Vm {
     /// Install the engine host (world services for the engine builtins).
     pub fn set_host(&mut self, host: Box<dyn Host>) {
         self.host = Some(host);
+    }
+
+    /// The random streams this VM draws from ([`QRand`]).
+    pub fn rand(&self) -> &Rc<QRand> {
+        &self.rand
+    }
+
+    /// Draw from `rand` from now on: the host session's streams, which it
+    /// hands to each new server so they continue across level loads.
+    pub fn set_rand(&mut self, rand: Rc<QRand>) {
+        self.rand = rand;
     }
 
     /// Run `f` with both `self` and the engine host borrowed mutably, by taking

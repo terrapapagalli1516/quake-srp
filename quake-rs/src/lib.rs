@@ -44,6 +44,7 @@ pub mod mdl;
 pub mod spr;
 
 pub mod progs;
+pub mod qrand;
 pub mod vm;
 pub mod builtins;
 

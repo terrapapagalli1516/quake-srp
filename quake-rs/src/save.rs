@@ -44,9 +44,12 @@
 //!   `PR_UglyValueString` writes them raw inside quotes and `COM_Parse`
 //!   truncates at the quote — same lossy behaviour as WinQuake).
 
+use std::rc::Rc;
+
 use crate::bsp::Bsp;
 use crate::error::{QError, Result};
 use crate::progs::{EType, Progs};
+use crate::qrand::QRand;
 use crate::server::{
     ed_new_string, link_edict, parse_float, parse_int, parse_vector, Server, Tokenizer,
     MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
@@ -527,11 +530,14 @@ impl Server {
     /// is re-identified by its `classname "player"` (set by
     /// `PutClientInServer` before the save). A save without one is rejected.
     /// Any error leaves the caller's current game untouched (this builds a
-    /// whole new `Server`).
+    /// whole new `Server`). The new server draws from the host session's
+    /// `rand` streams, as every server the session runs does
+    /// ([`Server::set_rand`]).
     pub fn load_savegame(
         bsp: Bsp,
         progs: Progs,
         pak: Option<crate::pak::Pak>,
+        rand: &Rc<QRand>,
         text: &str,
     ) -> Result<Server> {
         let sg = parse_savegame(text)?;
@@ -545,21 +551,16 @@ impl Server {
         // Everything below builds a new server, with its own cvars, light
         // styles and outbox: a failure drops it and leaves the caller's game
         // as it was.
-        Self::load_savegame_body(bsp, progs, pak, text, &sg)
+        let mut server = Server::with_pak(bsp, progs, pak)?;
+        server.set_rand(Rc::clone(rand));
+        Self::load_savegame_body(server, text, &sg)
     }
 
-    /// The rest of [`Server::load_savegame`]: the C sequence, steps 2–5, plus
-    /// the player re-identification.
-    fn load_savegame_body(
-        bsp: Bsp,
-        progs: Progs,
-        pak: Option<crate::pak::Pak>,
-        text: &str,
-        sg: &SaveGame,
-    ) -> Result<Server> {
+    /// The rest of [`Server::load_savegame`] on the fresh `server`: the C
+    /// sequence, steps 2–5, plus the player re-identification.
+    fn load_savegame_body(mut server: Server, text: &str, sg: &SaveGame) -> Result<Server> {
         // SV_SpawnServer (see the module doc: the map spawn functions DO run;
         // the save text then overwrites the world state they produced).
-        let mut server = Server::with_pak(bsp, progs, pak)?;
         // Cvar_SetValue ("skill", (float)current_skill) — before the spawn,
         // so the skill-flag entity filter matches the save's world exactly.
         server.set_skill(sg.skill as f32);
@@ -974,7 +975,7 @@ mod tests {
         // The freed slot is an empty block: "{\n}\n".
         assert!(text.contains("{\n}\n"), "free edict round-trips as {{}}");
 
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &text)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text)
             .expect("load_savegame");
         assert_eq!(s2.vm.num_edicts(), 4, "world + 3 slots, like the save");
         assert_eq!(s2.vm.ent_get_string(e1, "classname"), "monster_army");
@@ -1027,7 +1028,7 @@ mod tests {
         assert_eq!(sg.lightstyles[5], "jklmnopqrst");
         assert_eq!(sg.lightstyles[1], "m", "unset style writes the C's \"m\"");
 
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &text)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text)
             .expect("loads");
         assert_eq!(s2.skill(), 2);
         assert_eq!(s2.time(), 33.5);
@@ -1039,10 +1040,10 @@ mod tests {
     #[test]
     fn hostile_input_errors_cleanly_never_panics() {
         // Truncated header.
-        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, "5\n").is_err());
+        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), "5\n").is_err());
         // Wrong version: the C's message. (`.err()` not `.unwrap_err()`:
         // Server has no Debug impl.)
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &"4\n".repeat(90))
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &"4\n".repeat(90))
             .err()
             .expect("wrong version is rejected");
         assert!(err.to_string().contains("Savegame is version 4, not 5"), "{err}");
@@ -1054,13 +1055,13 @@ mod tests {
         let good = s.write_savegame();
         let sg = parse_savegame(&good).unwrap();
         let garbage = format!("{}not-a-brace", &good[..sg.blocks_ofs]);
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &garbage)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &garbage)
             .err()
             .expect("garbage blocks rejected");
         assert!(err.to_string().contains("First token isn't a brace"), "{err}");
         // A block cut off mid-pair: EOF without closing brace.
         let truncated = format!("{}{{\n\"classname\" ", &good[..sg.blocks_ofs]);
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &truncated)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &truncated)
             .err()
             .expect("truncated block rejected");
         assert!(err.to_string().contains("EOF without closing brace"), "{err}");
@@ -1068,12 +1069,12 @@ mod tests {
         let mut s2 = server_with(rich_progs());
         s2.set_map_name("e1m1");
         let no_player = s2.write_savegame();
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &no_player)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &no_player)
             .err()
             .expect("player-less save rejected");
         assert!(err.to_string().contains("no player edict"), "{err}");
         // Empty text.
-        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, "").is_err());
+        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), "").is_err());
     }
 
     /// A REJECTED load must leave the caller's game alone: `load_savegame`
@@ -1101,7 +1102,7 @@ mod tests {
         running.set_skill(2.0);
         running.lightstyles[0] = "abcdefg".into();
 
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &hostile)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &hostile)
             .err()
             .expect("garbage blocks rejected");
         assert!(err.to_string().contains("First token isn't a brace"), "{err}");
@@ -1129,7 +1130,7 @@ mod tests {
             1,
         );
         let doctored = format!("{}{}", &good[..sg.blocks_ofs], blocks);
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &doctored)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &doctored)
             .expect("unknown names degrade, not abort");
         assert!(s2.vm.output.contains("'bogus_global' is not a global"));
         assert!(s2.vm.output.contains("'bogus_field' is not a field"));
@@ -1146,7 +1147,7 @@ mod tests {
         s.vm.ent_set_int(p, "think", think);
         let good = s.write_savegame();
         let doctored = good.replace("monster_think", "no_such_function");
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &doctored)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &doctored)
             .expect("missing function degrades (C Host_Errors)");
         assert!(s2.vm.output.contains("Can't find function no_such_function"));
         assert_eq!(s2.vm.ent_get_int(p, "think"), 0, "pair skipped, field stays 0");
@@ -1175,7 +1176,7 @@ mod tests {
         assert_eq!(lines[20], "1234.567890", "sv.time is %f of the double");
         // Host_Loadgame_f reads it with fscanf("%f") into `float time`, and
         // `sv.time = time`: the clock restarts from that float.
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &text).expect("loads");
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text).expect("loads");
         assert_eq!(s2.sv_time(), f64::from(saved as f32));
         assert_eq!(s2.vm.gget_float("time"), saved as f32, "the QC global is its float");
         // 64 lightstyles then the globals block opener.

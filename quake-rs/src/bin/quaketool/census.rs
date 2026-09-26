@@ -38,10 +38,12 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use quake_rs::bsp::Bsp;
 use quake_rs::pak::Pak;
 use quake_rs::progs::{Progs, OFS_PARM0};
+use quake_rs::qrand::QRand;
 use quake_rs::server::{Server, SvcEvent, UserCmd};
 use quake_rs::vm::{Builtin, Vm};
 
@@ -343,7 +345,7 @@ fn drop_to_floor(server: &mut Server, e: i32) -> bool {
     vm.gf(quake_rs::progs::OFS_RETURN) != 0.0
 }
 
-fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Result<(), String> {
+fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mut String) -> Result<(), String> {
     let path = format!("maps/{map}.bsp");
     let bytes = pak.read_file(&path).map_err(|e| e.to_string())?.ok_or(format!("{path} not in pak"))?;
     let bsp = Bsp::parse(&bytes).map_err(|e| e.to_string())?;
@@ -370,6 +372,7 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, o: &mut String) -> Resul
 
     reset_logs();
     let mut server = Server::with_pak(bsp, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    server.set_rand(Rc::clone(rand));
     install_wrappers(&mut server.vm);
     server.set_map_name(&path);
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
@@ -811,8 +814,11 @@ pub fn cmd_census(pak_path: &str, maps: &[String]) -> Result<String, String> {
         ["start", "e1m1", "e1m2", "e1m3", "e1m4", "e1m5", "e1m6", "e1m7", "e1m8"].iter().map(|s| s.to_string()).collect();
     let maps = if maps.is_empty() { &default[..] } else { maps };
     let mut o = String::new();
+    // One session: every map's server draws from the same random streams, as
+    // id's all draw from one libc rand().
+    let rand = Rc::new(QRand::new());
     for m in maps {
-        if let Err(e) = census_map(&pak, &progs, m, &mut o) {
+        if let Err(e) = census_map(&pak, &progs, m, &rand, &mut o) {
             let _ = writeln!(o, "\n=== {m} ===\nFAILED: {e}");
         }
     }

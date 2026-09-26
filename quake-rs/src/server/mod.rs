@@ -84,14 +84,6 @@ pub use sv_move::{
 pub use sv_user::v_calc_roll;
 pub use sv_world::{probe_point_contents, sv_impact, sv_move, touch_triggers, MoveTrace};
 
-/// Restart the process-global random sequences — id's one `rand()`, here
-/// QuakeC's `random()` and the monsters' chase-direction draws — from a
-/// fresh process's seeds, so two runs in one process see the same numbers
-/// (`quaketool framerate` compares one scenario at several frame rates).
-pub fn reset_random() {
-    crate::builtins::reset_random();
-    sv_move::reset_ai_rand();
-}
 
 pub use host::ServerCvars;
 pub(crate) use pr_edict::{ed_new_string, parse_float, parse_int, parse_vector, Tokenizer};

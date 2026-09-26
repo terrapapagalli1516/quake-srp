@@ -1339,10 +1339,11 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         .map_err(|e| format!("loading next map {next_bsp_path}: {e}"))?;
     let next_bsp = Bsp::parse(&next_bytes).map_err(|e| e.to_string())?;
     let next_progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
-    // Carry the chosen difficulty across (skill is a thread-local that with_pak
-    // resets to 1) — captured before building next_server, restored after.
+    // Carry the chosen difficulty across (a new server starts at skill 1) and
+    // the session's random streams, as the client's changelevel does.
     let carry_skill = server.skill();
     let mut next_server = Server::with_pak(next_bsp, next_progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    next_server.set_rand(std::rc::Rc::clone(server.rand()));
     next_server.set_map_name(&next_map_name); // SV_SpawnServer for the swapped-to level
     next_server.set_skill(carry_skill as f32);
     let next_rep = next_server.spawn_entities().map_err(|e| e.to_string())?;

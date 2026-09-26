@@ -24,17 +24,21 @@
 //! tally of the sound calls its frames made.
 //!
 //! Several workloads and resolutions run in `bench.py`'s order (each workload
-//! at each resolution) in one host, as the page runs them: QuakeC's
-//! `random()` is process-global like id's `rand()`, so a run's shots and
-//! monsters depend on what ran before it. Between runs the host takes
-//! `bench.py`'s realigning `step(0.2)` on the previous game, and a walk
-//! workload boots e1m1 before the console's `map` (the page's `boot()`).
+//! at each resolution) in one host, as the page runs them: the host hands
+//! every server it runs its one [`QRand`], as id's servers all draw from one
+//! libc `rand()`, so a run's shots and monsters depend on what ran before it.
+//! Between runs the host takes `bench.py`'s realigning `step(0.2)` on the
+//! previous game, and a walk workload boots e1m1 before the console's `map`
+//! (the page's `boot()`). A demo falls its particles by the `sv_gravity` the
+//! last game left, as the page's do.
 
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use quake_rs::client::host::host_filter_time;
 use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPlay, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
+use quake_rs::qrand::QRand;
 use quake_rs::render;
 
 /// The width:height ratio the browser page displays the frame at
@@ -110,6 +114,10 @@ struct Host {
     oldrealtime: f64,
     mode: Option<Mode>,
     vid: Vid,
+    /// The session's random streams, handed to every server it runs.
+    rand: Rc<QRand>,
+    /// The `sv_gravity` cvar as the last game left it, for the demos.
+    sv_gravity: f32,
 }
 
 impl Host {
@@ -131,9 +139,11 @@ impl Host {
                 d.show_scores = km.showscores;
                 if d.at_end() {
                     if let Some(next) = cl_demo::build_demo_n(self.pak.clone(), d.demonum + 1, sound) {
+                        let sv_gravity = d.sv_gravity;
                         **d = next;
                         d.viewsize = viewsize;
                         d.show_scores = km.showscores;
+                        d.sv_gravity = sv_gravity;
                     }
                 }
                 cl_demo::demo_frame(d, dt as f32, false, &self.vid)
@@ -144,14 +154,17 @@ impl Host {
     /// Boot `workload` as `bench.py`'s `startWorkload` does.
     fn start(&mut self, workload: &str, sound: &mut Vec<SoundCall>) -> Result<(), String> {
         let is_walk = ["walk_", "fire_", "quad_"].iter().any(|p| workload.starts_with(p));
+        if let Some(Mode::Walk(wk)) = &self.mode {
+            self.sv_gravity = wk.server.sv_gravity();
+        }
         self.mode = Some(if is_walk {
             // boot(): e1m1; then the console's `map <map>` for another map.
             let e1m1 = "maps/e1m1.bsp";
-            let mut walk = host_cmd::build_walk_map(self.pak.clone(), e1m1, sound)
+            let mut walk = host_cmd::build_walk_map(self.pak.clone(), e1m1, &self.rand, sound)
                 .ok_or_else(|| format!("{e1m1} would not load"))?;
             let map = format!("maps/{}.bsp", &workload[5..]);
             if map != e1m1 {
-                walk = host_cmd::build_walk_map(self.pak.clone(), &map, sound)
+                walk = host_cmd::build_walk_map(self.pak.clone(), &map, &self.rand, sound)
                     .ok_or_else(|| format!("{map} would not load"))?;
             }
             if workload.starts_with("quad_") {
@@ -161,8 +174,9 @@ impl Host {
             }
             Mode::Walk(Box::new(walk))
         } else if let Some(n) = workload.strip_prefix("demo").and_then(|n| n.parse::<usize>().ok()) {
-            let demo = cl_demo::build_demo_n(self.pak.clone(), n.max(1) - 1, sound)
+            let mut demo = cl_demo::build_demo_n(self.pak.clone(), n.max(1) - 1, sound)
                 .ok_or_else(|| format!("{workload} would not load"))?;
+            demo.sv_gravity = self.sv_gravity;
             Mode::Demo(Box::new(demo))
         } else {
             return Err(format!("unknown workload {workload:?} (walk_<map>, fire_<map>, quad_<map>, demo1..3)"));
@@ -212,6 +226,8 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
         oldrealtime: 0.0,
         mode: None,
         vid,
+        rand: Rc::new(QRand::new()),
+        sv_gravity: quake_rs::server::ServerCvars::default().sv_gravity,
     };
     let mut rgba: Vec<u8> = Vec::new();
     let mut o = String::new();

@@ -18,7 +18,10 @@
 //! model, the commands in its [`Outbox`] — and the front-end (wasm shell,
 //! quaketool) plays `Host_Frame`'s part through the `Server` methods below.
 
+use std::rc::Rc;
+
 use super::{parm_global_name, Outbox, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
+use crate::qrand::QRand;
 use crate::vm::Vm;
 use crate::Result;
 
@@ -272,6 +275,20 @@ impl Server {
         if let Some(c) = self.cvars_mut() {
             c.sv_gravity = value;
         }
+    }
+
+    /// Draw from the host session's random streams ([`QRand`]) from now on.
+    /// A front-end hands each server it builds its session's, before
+    /// [`Self::spawn_entities`], so the streams continue across level loads
+    /// as id's one libc `rand()` does; a server it is not handed to draws
+    /// from fresh streams of its own.
+    pub fn set_rand(&mut self, rand: Rc<QRand>) {
+        self.vm.set_rand(rand);
+    }
+
+    /// The random streams this server draws from, to hand to the next one.
+    pub fn rand(&self) -> &Rc<QRand> {
+        self.vm.rand()
     }
 
     /// This server's [`ServerCvars`] (the defaults if its world model were
