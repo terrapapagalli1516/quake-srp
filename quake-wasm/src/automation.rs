@@ -155,8 +155,45 @@ pub(crate) fn call(line: &str) -> Answer {
         "listener_right_x" => listener().right[0].into(),
         "listener_right_y" => listener().right[1].into(),
         "listener_right_z" => listener().right[2].into(),
+        // The checks' view of the frame and a place to look from.
+        "frame_hash" => frame_hash(),
+        "setpos" => setpos([real(0), real(1), real(2)]).into(),
         _ => bench_call(name, rest).unwrap_or_else(|| f64::NAN.into()),
     }
+}
+
+/// The newest frame as the page should show it (RGBA, [`crate::present`]),
+/// hashed as the page's `frameHash` and `quaketool play --hash-every` hash
+/// theirs: FNV-1a over little-endian 32-bit words, as a number and as hex.
+fn frame_hash() -> Answer {
+    let rgba = APP.with(|c| c.borrow().as_ref().map(|a| a.present.rgba()).unwrap_or_default());
+    let h = rgba
+        .chunks_exact(4)
+        .fold(0x811c_9dc5u32, |h, w| (h ^ u32::from_le_bytes([w[0], w[1], w[2], w[3]])).wrapping_mul(0x0100_0193));
+    Answer { value: f64::from(h), text: format!("{h:08x}") }
+}
+
+/// The checks' `setpos x y z`: the live game's player moved there as
+/// QuakeC's `setorigin` would (`PF_setorigin`, builtin #2), in noclip so it
+/// stays — e.g. into e1m1's start pool (750 898 -354) for an underwater
+/// view. 1 when there is a live game to move.
+fn setpos(origin: [f32; 3]) -> i32 {
+    const MOVETYPE_NOCLIP: f32 = 8.0;
+    let mut moved = 0;
+    crate::app::ensure_app(|a| {
+        let Some(w) = a.walk.as_mut() else { return };
+        let (p, vm) = (w.player, &mut w.server.vm);
+        vm.ent_set_float(p, "movetype", MOVETYPE_NOCLIP);
+        vm.set_gi(quake_rs::progs::OFS_PARM0, p);
+        vm.set_gv(quake_rs::progs::OFS_PARM0 + 3, origin);
+        vm.argc = 2;
+        let setorigin = vm.builtins[2];
+        if setorigin(vm).is_ok() {
+            vm.ent_set_vector(p, "velocity", [0.0; 3]);
+            moved = 1;
+        }
+    });
+    moved
 }
 
 /// Blank slot `slot`'s listing in the Load/Save menus.
@@ -219,5 +256,17 @@ mod tests {
         assert!(call("console_text").text.contains("hello there\n"));
         assert!(call("no_such_call").value.is_nan());
         assert!(call("").value.is_nan());
+    }
+
+    #[test]
+    fn the_checks_read_the_frame_and_move_the_player() {
+        assert_eq!(call("boot").value, 1.0);
+        call("menu_cancel");
+        call("step 0");
+        let seen = call("frame_hash");
+        assert_eq!(seen.text, format!("{:08x}", seen.value as u32));
+        assert_eq!(call("setpos 750 898 -354").value, 1.0, "into e1m1's start pool");
+        call("step 0");
+        assert_ne!(call("frame_hash").text, seen.text, "the view moved underwater");
     }
 }

@@ -311,11 +311,11 @@ fn census_rune_icons_reach_the_status_bar() {
     // Sbar_DrawInventory draws sigil i with Sbar_DrawPic (320-32 + i*8, -16):
     // x 288.., y 200-24-16 = 160.. at 320x200 (viewsize 100: sb_lines 48, the
     // inventory strip is drawn). The rune-1 cell is 8x16.
-    let cell = |img: &render::Image| -> Vec<[u8; 3]> {
+    let cell = |img: &render::Image| -> Vec<u8> {
         let mut v = Vec::new();
         for y in 160..176 {
             for x in 288..296 {
-                v.push(img.rgb[y * img.w + x]);
+                v.push(img.pixels[y * img.w + x]);
             }
         }
         v
@@ -386,7 +386,7 @@ fn census_pause_stops_the_game_and_shows_the_plaque() {
             (w.server.time(), w.server.vm.ent_get_vector(w.player, "origin"), w.clock, w.server.paused)
         })
     };
-    let fb = || APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+    let fb = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
     let pause_key = || {
         key_down(255); // K_PAUSE
         key_up(255);

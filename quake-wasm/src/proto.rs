@@ -17,13 +17,14 @@
 //! | 6 | `AudioReady` | `ready u8` |
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
 //! | 8 | `End` | — (the host's "nothing more is queued", the answer to a polling `Sync`) |
+//! | 9 | `Present` | `format u8`: how the page shows frames ([`FORMAT_RGBA8`] or [`FORMAT_INDEXED8`]; RGBA until it says) |
 //!
 //! **Out** (program → host), an 8-byte header `[kind u8][0 u8 ×3][len u32]`
 //! and `len` payload bytes:
 //!
 //! | kind | message | payload |
 //! |---|---|---|
-//! | 1 | `Frame` | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 u8 ×3`, then the pixels |
+//! | 1 | `Frame` | `w u16`, `h u16`, `format u8`, `0 u8 ×3`, then for [`FORMAT_INDEXED8`] the palette (256 × RGBA), then the pixels |
 //! | 2 | `Sync` | `seq u32` (the last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
 //! | 3 | `State` | `flags u32` ([`STATE_MENU`] …), `menu_screen i32` |
 //! | 4 | `Sample` | `id u32`, then the RIFF/WAV bytes (sent once per distinct sample) |
@@ -36,6 +37,7 @@
 //! | 11 | `LocalSound` | `id u32` (`S_LocalSound`: the menu's clicks) |
 //! | 12 | `Reply` | `id u32`, `value f64`, then UTF-8 text (the answer to a `Call`) |
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
+//! | 16 | `FrameAt` | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, at those addresses ([`crate::present`]) |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
@@ -51,6 +53,7 @@ const IN_POINTER_UNLOCKED: u8 = 5;
 const IN_AUDIO_READY: u8 = 6;
 const IN_CALL: u8 = 7;
 const IN_END: u8 = 8;
+const IN_PRESENT: u8 = 9;
 
 /// One event from the host.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +77,9 @@ pub(crate) enum Event {
     Call { id: u32, line: String },
     /// The host has nothing more queued (the answer to a polling sync).
     End,
+    /// How the page shows the frames from now on: [`FORMAT_RGBA8`] or
+    /// [`FORMAT_INDEXED8`] (another value is RGBA).
+    Present(u8),
     /// A record this program does not know (skipped, for forward
     /// compatibility with a newer page).
     Unknown(u8),
@@ -110,6 +116,7 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
             Event::Call { id, line: String::from_utf8_lossy(p.rest()).into_owned() }
         }
         IN_END => Event::End,
+        IN_PRESENT => Event::Present(p.u8()),
         other => Event::Unknown(other),
     };
     Ok(Some(ev))
@@ -163,11 +170,14 @@ const OUT_LOCAL_SOUND: u8 = 11;
 const OUT_REPLY: u8 = 12;
 #[cfg(feature = "bench")]
 const OUT_BENCH: u8 = 13;
+const OUT_FRAME_AT: u8 = 16;
 
-/// `Frame` pixel formats. Only RGBA8 exists today: the engine composes the
-/// screen in RGB (PERF_PLAN B5). An 8-bit indexed format plus its palette is
-/// the natural next one, when the renderer writes palette indices.
+/// `Frame` pixel formats. RGBA8: four bytes a pixel, what a 2-D canvas
+/// takes. INDEXED8: the engine's own frame, a palette index a pixel, with the
+/// 256 colours (RGBA each) it is shown through — a quarter of the bytes, and
+/// the page's GPU is the DAC ([`crate::present`]).
 pub(crate) const FORMAT_RGBA8: u8 = 0;
+pub(crate) const FORMAT_INDEXED8: u8 = 1;
 
 /// `State` flag bits: what the page's own UI needs to know every turn.
 pub(crate) const STATE_MENU: u32 = 1;
@@ -200,7 +210,11 @@ pub(crate) struct LoopWindow {
 /// One message to the host.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Msg<'a> {
-    Frame { w: u16, h: u16, format: u8, pixels: &'a [u8] },
+    /// A frame's bytes: the palette (empty for RGBA) and the pixels.
+    Frame { w: u16, h: u16, format: u8, palette: &'a [u8], pixels: &'a [u8] },
+    /// A frame left where it lies in the program's shared memory: ring slot
+    /// `slot`, its pixels and palette at those addresses.
+    FrameAt { w: u16, h: u16, format: u8, slot: u8, pixels: u32, palette: u32 },
     Sync { seq: u32, wait: bool },
     State { flags: u32, menu_screen: i32 },
     Sample { id: u32, wav: &'a [u8] },
@@ -248,6 +262,10 @@ impl Fields {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
+    fn bytes(mut self, v: &[u8]) -> Self {
+        self.0.extend_from_slice(v);
+        self
+    }
     fn at(self, p: Placement) -> Self {
         self.f32s(&p.origin).f32(p.volume).f32(p.attenuation)
     }
@@ -262,8 +280,11 @@ impl Msg<'_> {
     fn parts(&self) -> (u8, Vec<u8>, &[u8]) {
         let f = Fields::default();
         match *self {
-            Msg::Frame { w, h, format, pixels } => {
-                (OUT_FRAME, f.u16(w).u16(h).u8(format).u8(0).u16(0).0, pixels)
+            Msg::Frame { w, h, format, palette, pixels } => {
+                (OUT_FRAME, f.u16(w).u16(h).u8(format).u8(0).u16(0).bytes(palette).0, pixels)
+            }
+            Msg::FrameAt { w, h, format, slot, pixels, palette } => {
+                (OUT_FRAME_AT, f.u16(w).u16(h).u8(format).u8(slot).u16(0).u32(pixels).u32(palette).0, &[])
             }
             Msg::Sync { seq, wait } => (OUT_SYNC, f.u32(seq).u8(wait as u8).0, &[]),
             Msg::State { flags, menu_screen } => (OUT_STATE, f.u32(flags).i32(menu_screen).0, &[]),
@@ -339,6 +360,9 @@ pub(crate) mod encode {
     pub(crate) fn audio_ready(on: bool) -> Vec<u8> {
         record(super::IN_AUDIO_READY, &[on as u8])
     }
+    pub(crate) fn present(format: u8) -> Vec<u8> {
+        record(super::IN_PRESENT, &[format])
+    }
 }
 
 /// A decoded output record (tests and the native twin read the program's
@@ -353,6 +377,7 @@ pub(crate) struct Record {
 #[cfg(test)]
 impl Record {
     pub(crate) const FRAME: u8 = OUT_FRAME;
+    pub(crate) const FRAME_AT: u8 = OUT_FRAME_AT;
     pub(crate) const SYNC: u8 = OUT_SYNC;
     pub(crate) const STATE: u8 = OUT_STATE;
     pub(crate) const SAMPLE: u8 = OUT_SAMPLE;
@@ -394,6 +419,7 @@ mod tests {
         stream.extend(encode::mouse(-3.0, 2.5));
         stream.extend(encode::call(9, "menu_visible"));
         stream.extend(encode::audio_ready(true));
+        stream.extend(encode::present(FORMAT_INDEXED8));
         stream.extend(encode::end());
         let mut r = &stream[..];
         let mut got = Vec::new();
@@ -408,6 +434,7 @@ mod tests {
                 Event::Mouse { dx: -3.0, dy: 2.5 },
                 Event::Call { id: 9, line: "menu_visible".into() },
                 Event::AudioReady(true),
+                Event::Present(FORMAT_INDEXED8),
                 Event::End,
             ]
         );
@@ -437,7 +464,7 @@ mod tests {
     fn messages_carry_their_length_and_trailing_bytes() {
         let px = [1u8, 2, 3, 255, 4, 5, 6, 255];
         let mut out = Vec::new();
-        Msg::Frame { w: 2, h: 1, format: FORMAT_RGBA8, pixels: &px }.write_to(&mut out).unwrap();
+        Msg::Frame { w: 2, h: 1, format: FORMAT_RGBA8, palette: &[], pixels: &px }.write_to(&mut out).unwrap();
         Msg::Reply { id: 3, value: 1.5, text: "ok" }.write_to(&mut out).unwrap();
         Msg::Sync { seq: 42, wait: true }.write_to(&mut out).unwrap();
         let recs = Record::split(&out);
@@ -448,6 +475,22 @@ mod tests {
         assert_eq!((recs[1].u32_at(0), recs[1].f64_at(4)), (3, 1.5));
         assert_eq!(&recs[1].payload[12..], b"ok");
         assert_eq!((recs[2].kind, recs[2].u32_at(0), recs[2].payload[4]), (Record::SYNC, 42, 1));
+    }
+
+    #[test]
+    fn frames_carry_their_palette_or_where_they_lie() {
+        let (palette, px) = ([7u8; 1024], [1u8, 2, 3, 4, 5, 6]);
+        let mut out = Vec::new();
+        Msg::Frame { w: 3, h: 2, format: FORMAT_INDEXED8, palette: &palette, pixels: &px }.write_to(&mut out).unwrap();
+        Msg::FrameAt { w: 3, h: 2, format: FORMAT_INDEXED8, slot: 2, pixels: 0x1234, palette: 0x5678 }
+            .write_to(&mut out)
+            .unwrap();
+        let recs = Record::split(&out);
+        assert_eq!((recs[0].kind, recs[0].payload[4], recs[0].payload.len()), (Record::FRAME, 1, 8 + 1024 + 6));
+        assert_eq!((&recs[0].payload[8..1032], &recs[0].payload[1032..]), (&palette[..], &px[..]));
+        assert_eq!((recs[1].kind, recs[1].payload.len()), (Record::FRAME_AT, 16));
+        assert_eq!(&recs[1].payload[..6], &[3, 0, 2, 0, 1, 2]);
+        assert_eq!((recs[1].u32_at(8), recs[1].u32_at(12)), (0x1234, 0x5678));
     }
 
     #[test]

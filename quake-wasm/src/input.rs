@@ -632,7 +632,7 @@ mod tests {
                 let b = c.borrow();
                 let a = b.as_ref().unwrap();
                 let rows = 24 * a.render_w / 320; // the status strip, scaled
-                a.fb[(a.render_h - rows) * a.render_w * 4..].to_vec()
+                a.present.rgba()[(a.render_h - rows) * a.render_w * 4..].to_vec()
             })
         };
         step(0.0);

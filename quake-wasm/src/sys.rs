@@ -34,7 +34,7 @@ use crate::config::{exec_config, Archived};
 use crate::host::step;
 use crate::input::{key_clear_states, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
-    read_event, Event, LoopWindow, Msg, Placement, FORMAT_RGBA8, STATE_BIND_GRAB, STATE_CONSOLE,
+    read_event, Event, LoopWindow, Msg, Placement, STATE_BIND_GRAB, STATE_CONSOLE,
     STATE_MENU, STATE_TIMEDEMO, STATE_WALK,
 };
 use crate::savegame::scan_saves;
@@ -137,6 +137,7 @@ impl<W: Write> Sys<W> {
                 Event::ClearKeys => key_clear_states(),
                 Event::PointerUnlocked => pointer_unlocked(),
                 Event::AudioReady(on) => snd_dma::set_audio_ready(i32::from(on)),
+                Event::Present(format) => crate::app::ensure_app(|a| a.present.set_format(format)),
                 Event::Call { id, line } => {
                     let answer = automation::call(&line);
                     Msg::Reply { id, value: answer.value, text: &answer.text }.write_to(&mut self.out)?;
@@ -177,14 +178,12 @@ impl<W: Write> Sys<W> {
         }
     }
 
-    /// `VID_Update`: the presented framebuffer.
+    /// `VID_Update`: the newest frame, as the page takes it ([`crate::present`]).
     fn write_picture(&mut self) -> io::Result<()> {
         let out = &mut self.out;
-        APP.with(|c| {
-            let b = c.borrow();
-            let Some(a) = b.as_ref() else { return Ok(()) };
-            let (w, h) = (a.render_w as u16, a.render_h as u16);
-            Msg::Frame { w, h, format: FORMAT_RGBA8, pixels: &a.fb }.write_to(out)
+        APP.with(|c| match c.borrow().as_ref().and_then(|a| a.present.msg()) {
+            Some(frame) => frame.write_to(out),
+            None => Ok(()),
         })
     }
 

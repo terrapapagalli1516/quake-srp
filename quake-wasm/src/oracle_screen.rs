@@ -51,12 +51,12 @@ thread_local! {
 }
 
 /// The live frame's view hook ([`quake_rs::client::set_view_hook`]): the 3-D
-/// view — `vrect` of the screen — as one flat colour while a script asks for
-/// it (the C oracle's `oracle_blank` fills `scr_vrect` the same way).
-fn blank_view(screen: &mut Image, vrect: quake_rs::render::ViewRect, palette: &[[u8; 3]; 256]) {
-    if let Some(idx) = BLANK.with(Cell::get) {
-        let (sw, c) = (screen.w, palette[idx as usize]);
-        for row in screen.rgb.chunks_mut(sw.max(1)).skip(vrect.y).take(vrect.h) {
+/// view — `vrect` of the screen — as one palette index while a script asks
+/// for it (the C oracle's `oracle_blank` fills `scr_vrect` the same way).
+fn blank_view(screen: &mut Image, vrect: quake_rs::render::ViewRect) {
+    if let Some(c) = BLANK.with(Cell::get) {
+        let sw = screen.w;
+        for row in screen.pixels.chunks_mut(sw.max(1)).skip(vrect.y).take(vrect.h) {
             if let Some(px) = row.get_mut(vrect.x..vrect.x + vrect.w) {
                 px.fill(c);
             }
@@ -106,7 +106,7 @@ fn write_ppm(path: &str) {
     let (w, h, fb) = APP.with(|c| {
         let b = c.borrow();
         let a = b.as_ref().expect("the app is booted");
-        (a.render_w, a.render_h, a.fb.clone())
+        (a.render_w, a.render_h, a.present.rgba())
     });
     let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
     for px in fb.chunks_exact(4) {

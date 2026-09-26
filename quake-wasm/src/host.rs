@@ -69,9 +69,9 @@ impl ShowFps {
 fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f32) {
     a.console.slide(dt, a.render_w, a.render_h);
     if a.console.current() > 0.0
-        && let (Some(img), Some(palette)) = (img, a.active_palette())
+        && let Some(img) = img
     {
-        render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
+        render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), a.realtime);
     }
 }
 
@@ -206,7 +206,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             // Disconnected (con_forcedup): no view — V_RenderView draws
             // nothing and the console covers the screen, the menu over it.
             None if a.disconnected && a.palette.is_some() => {
-                (Some(render::Image::new(w, h, [0, 0, 0])), Vec::new())
+                (Some(render::Image::new(w, h, 0)), Vec::new())
             }
             None => (None, Vec::new()),
         };
@@ -242,11 +242,9 @@ pub(crate) fn step(dt: f32) -> i32 {
             } else {
                 a.walk.as_ref().map(|wk| wk.intermission != 0)
             };
-            if let (Some(false), Some(img), Some(cc), Some(palette)) =
-                (intermission, img.as_mut(), a.conchars.as_ref(), a.active_palette())
-            {
+            if let (Some(false), Some(img), Some(cc)) = (intermission, img.as_mut(), a.conchars.as_ref()) {
                 let sb_lines = render::calc_refdef(w, h, viewsize, false).sb_lines;
-                render::draw_fps(img, cc, palette, a.show_fps.shown(), sb_lines);
+                render::draw_fps(img, cc, a.show_fps.shown(), sb_lines);
             }
         }
 
@@ -272,9 +270,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             // resolution (the framebuffer is the source of truth), so a boot /
             // New Game / `map` that changed the render size can't leave it stale.
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
-            if let Some(img) = img.as_mut()
-                && let Some(palette) = a.active_palette()
-            {
+            if let Some(img) = img.as_mut() {
                 // M_Draw: over the console background while the console
                 // is out (scr_con_current: forced up, disconnected),
                 // else over the faded screen.
@@ -287,7 +283,6 @@ pub(crate) fn step(dt: f32) -> i32 {
                         a.conback.as_ref(),
                         a.clock,
                         a.realtime,
-                        palette,
                     );
                 } else {
                     render::draw_menu(
@@ -297,7 +292,6 @@ pub(crate) fn step(dt: f32) -> i32 {
                         a.conchars.as_ref(),
                         a.clock,
                         a.realtime,
-                        palette,
                     );
                 }
             }
@@ -322,23 +316,19 @@ pub(crate) fn step(dt: f32) -> i32 {
             a.gamma_value = g;
             a.gamma_table = build_gamma_table(g);
         }
-        // The cshifts, then gamma, as per-channel ramps: the port's hardware-
-        // palette boundary (VID_ShiftPalette). The fully composited frame (3D +
-        // HUD + centerprint/notify + menu + console) maps through them as it
-        // becomes the presented RGBA, which is the C's whole-palette shift for
-        // every palette colour. No shift at gamma 1.0 (BuildGammaTable's
-        // identity) skips the lookups: the default presentation is a copy.
-        let ramps = if cshifts.is_empty() && a.gamma_value == 1.0 {
-            None
-        } else {
-            Some(render::cshift_ramps(&cshifts, &a.gamma_table))
-        };
+        // The cshifts, then gamma, over the palette: the frame's palette as
+        // VID_ShiftPalette hands it to the DAC. The fully composited 8-bit
+        // frame (3D + HUD + centerprint/notify + menu + console) is shown
+        // through it, which tints the whole screen as the C's shift does.
+        let palette = a.active_palette().map(|base| render::FramePalette::new(base, &cshifts, &a.gamma_table));
         bench::lap(Phase::Blend);
 
-        if let Some(img) = img {
-            render::pack_rgba(&img, ramps.as_ref(), &mut a.fb, threads);
-            // Presented: its buffer serves the next frame (render::recycle_image).
-            render::recycle_image(img);
+        // VID_Update: the frame to the page, as it asked for it (the
+        // RGBA pack, when it takes RGBA, runs on the renderer's threads).
+        match (img, palette) {
+            (Some(img), Some(palette)) => a.present.frame(img, &palette, threads),
+            (Some(img), None) => render::recycle_image(img),
+            (None, _) => {}
         }
         bench::lap(Phase::Pack);
         bench::frame_end(active_renderer(a));
@@ -516,7 +506,7 @@ mod tests {
             assert_eq!(a.show_fps.shown(), 60, "60 Hz presents 60 frames a second");
             (a.render_w, a.render_h)
         });
-        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         // Frozen frames (dt = 0): only the readout can differ.
         step(0.0);
         let off = grab();
@@ -550,11 +540,11 @@ mod tests {
             (a.render_w, a.render_h)
         });
         step(0.016);
-        let closed: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let closed: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         console_toggle();
         APP.with(|c| c.borrow_mut().as_mut().unwrap().console.println("test line"));
         step(0.016);
-        let open: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let open: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         assert_eq!(closed.len(), w * h * 4);
         assert_ne!(closed, open, "the open console changes the rendered frame");
         // Pixels in the very top row (the panel) are present (non-uniform / drawn).
@@ -567,7 +557,7 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
-        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         // dt=0 keeps the world/clock frozen, so back-to-back frames are
         // byte-identical and the ONLY variable below is the gamma LUT.
         step(0.0);

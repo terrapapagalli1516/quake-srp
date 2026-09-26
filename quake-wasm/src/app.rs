@@ -17,6 +17,7 @@ use quake_rs::wad::Qpic;
 
 use crate::common::pak;
 use crate::host::ShowFps;
+use crate::present::Present;
 use crate::snd_dma::{self, SND_QUEUE, STOP_SND_QUEUE};
 use crate::vid::{DEFAULT_H, DEFAULT_W};
 
@@ -90,11 +91,12 @@ pub(crate) struct App {
     /// [`host_filter_time`]'s gate measures the time since then.
     pub(crate) oldrealtime: f64,
     /// Current render resolution (runtime; defaults to [`DEFAULT_W`] x
-    /// [`DEFAULT_H`]). The scene renders at this size and the framebuffer is
-    /// `render_w * render_h * 4` RGBA bytes, reallocated whenever it changes.
+    /// [`DEFAULT_H`]): the size of the frames the scene renders.
     pub(crate) render_w: usize,
     pub(crate) render_h: usize,
-    pub(crate) fb: Vec<u8>, // RGBA, render_w*render_h*4
+    /// The frames handed to the page (`VID_Update`): the newest ones, as the
+    /// page asked for them.
+    pub(crate) present: Present,
     /// The page-held key states by Quake keynum (keys.c `keydown[256]`), fed by
     /// [`key_down`]/[`key_up`]. Mode-independent (held keys survive a level
     /// change) and consulted through the menu's binding table each `step`.
@@ -103,10 +105,9 @@ pub(crate) struct App {
     /// `oldgammavalue`): the table rebuilds only when the menu's `v_gamma`
     /// actually changes.
     pub(crate) gamma_value: f32,
-    /// The 256-entry gamma LUT (view.c `gammatable`), applied where the finished
-    /// frame is packed into the presented RGBA framebuffer — the port's
-    /// hardware-palette boundary (`VID_ShiftPalette`). Identity at gamma 1.0,
-    /// where the pack skips it entirely (byte-exact default).
+    /// The 256-entry gamma LUT (view.c `gammatable`), applied to the palette
+    /// each frame is shown through — the port's hardware-palette boundary
+    /// (`VID_ShiftPalette`). Identity at gamma 1.0 (byte-exact default).
     pub(crate) gamma_table: [u8; 256],
     /// The presented-frame counter behind the `wasm_showfps` extra.
     pub(crate) show_fps: ShowFps,
@@ -168,18 +169,11 @@ pub(crate) enum KeyDest {
 }
 
 impl App {
-    /// Resize the framebuffer to the (already-clamped) `(w, h)`, reallocating only
-    /// when the size actually changes. The new buffer is zero-filled; the next
-    /// `step` paints it.
+    /// Render the frames from the next `step` on at the (already-clamped)
+    /// `(w, h)`.
     pub(crate) fn set_render_size(&mut self, w: usize, h: usize) {
-        if self.render_w == w && self.render_h == h {
-            return;
-        }
         self.render_w = w;
         self.render_h = h;
-        // `w*h*4` is bounded by MAX_PIXELS*4 (~4 MB) after clamping, so this can't
-        // OOM; saturating_mul keeps us safe even if a caller bypassed the clamp.
-        self.fb = vec![0u8; w.saturating_mul(h).saturating_mul(4)];
     }
 
     /// Load the menu pics + conchars from the pak ONCE (they are mode-independent
@@ -518,7 +512,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 oldrealtime: 0.0,
                 render_w: DEFAULT_W,
                 render_h: DEFAULT_H,
-                fb: vec![0u8; DEFAULT_W * DEFAULT_H * 4],
+                present: Present::new(false),
                 keys_held: [false; 256],
                 gamma_value: 1.0,
                 gamma_table: build_gamma_table(1.0),
@@ -923,19 +917,19 @@ mod tests {
         assert_eq!(console, h, "con_forcedup behind the menu");
         // M_Draw with scr_con_current: the console background under the menu
         // at full height, not the faded console text.
-        let fb = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let fb = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         let conback_only = APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            let mut img = render::Image::new(a.render_w, a.render_h, [0, 0, 0]);
+            let mut img = render::Image::new(a.render_w, a.render_h, 0);
             let pal = a.palette.as_ref().unwrap();
-            quake_rs::console::draw_console_background_full(&mut img, a.conback.as_ref(), a.conchars.as_ref(), pal);
-            img.rgb
+            quake_rs::console::draw_console_background_full(&mut img, a.conback.as_ref(), a.conchars.as_ref());
+            img.to_rgb(pal).pixels
         });
         let w = APP.with(|c| c.borrow().as_ref().unwrap().render_w);
         let bottom = (h as usize - 1) * w;
         assert!(
-            (0..w).all(|x| fb[(bottom + x) * 4..(bottom + x) * 4 + 3] == conback_only[bottom + x]),
+            (0..w).all(|x| fb[(bottom + x) * 4..(bottom + x) * 4 + 3] == conback_only[bottom + x][..]),
             "the bottom row is the plain console background"
         );
         // Escape from Main: the loop back, its next demo plays.
@@ -977,7 +971,7 @@ mod tests {
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert!(a.fb.chunks_exact(4).all(|px| px[3] == 255), "the walk scene renders");
+            assert!(a.present.rgba().chunks_exact(4).all(|px| px[3] == 255), "the walk scene renders");
         });
 
         // Esc reopens the menu over the running walk (menu_cancel from key_game).
@@ -1030,10 +1024,10 @@ mod tests {
             // OFF and ON. (A tiny dt keeps both renders on the same frame.)
             let (plain, _) = step_demo(d, 0.0001, false, w, h);
             let (mut withm, _) = step_demo(d, 0.0001, false, w, h);
-            let pal = a.active_palette().expect("demo palette");
-            render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, a.realtime, pal);
+            render::draw_menu(
+&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, a.realtime);
             // The two frames are the same scene; only the menu overlay differs.
-            plain.rgb != withm.rgb
+            plain.pixels != withm.pixels
         });
         assert!(differ, "the menu overlay changes pixels on the demo frame");
     }

@@ -32,7 +32,8 @@
 //! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files (and `main`'s `-hwthreads`, the threads the host offers) |
 //! | `config`    | host.c `Host_WriteConfiguration`        | `config.cfg`: written on change, exec'd at startup |
 //! | `app`       | host.c, client.h                        | the `App` (host state around the client's `Walk`/`DemoPlay`), menu assets, the client's level loads with their sound calls carried out, the boots |
-//! | `host`      | host.c `Host_Frame`                     | `step`: the 72 fps gate (`wasm_uncapped`), the mode's client frame, the menu/console overlays, the fps readout, blend, gamma pack |
+//! | `host`      | host.c `Host_Frame`                     | `step`: the 72 fps gate (`wasm_uncapped`), the mode's client frame, the menu/console overlays, the fps readout, the frame's palette (`V_UpdatePalette`) |
+//! | `present`   | vid_win.c `VID_Update`, `VID_ShiftPalette` | the finished 8-bit frame to the page: indexed with its palette (the page's GPU is the DAC) or RGBA, copied or read where it lies |
 //! | `cl_walk`   | cl_main.c                               | `step_walk`: `client::cl_main::walk_frame` on the page's `Vid`, its sound calls to `snd_dma`; the live game's end-to-end tests |
 //! | `cl_demo`   | cl_demo.c                               | `step_demo`: `client::cl_demo::demo_frame` likewise; the playback tests |
 //! | `cl_tent`   | cl_tent.c                               | (tests only) Chthon's lightning end to end       |
@@ -76,6 +77,7 @@ mod host;
 mod host_cmd;
 mod input;
 mod menu;
+mod present;
 mod proto;
 mod savegame;
 mod snd_dma;
@@ -116,12 +118,21 @@ fn hw_threads() -> usize {
         .max(1)
 }
 
+/// `-sharedframes`: the host shares the program's memory with the page
+/// (`wasi.js`, a threads build), so the page reads each frame where it lies.
+fn shared_frames() -> bool {
+    std::env::args().any(|a| a == "-sharedframes")
+}
+
 fn main() -> ExitCode {
     if let Err(e) = common::init(&basedir()) {
         eprintln!("quake: {e}");
         return ExitCode::FAILURE;
     }
-    app::ensure_app(|a| a.hw_threads = hw_threads());
+    app::ensure_app(|a| {
+        a.hw_threads = hw_threads();
+        a.present = present::Present::new(shared_frames());
+    });
     // stdout goes through a buffer the size of a turn's small records, so
     // a turn reaches the host in a few writes; a frame's pixels pass
     // straight through it.

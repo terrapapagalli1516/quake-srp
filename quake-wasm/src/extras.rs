@@ -97,7 +97,7 @@ mod tests {
     /// One frozen frame (dt = 0) of the live game.
     fn frame() -> Vec<u8> {
         step(0.0);
-        APP.with(|c| c.borrow().as_ref().map(|a| a.fb.clone()).unwrap_or_default())
+        APP.with(|c| c.borrow().as_ref().map(|a| a.present.rgba()).unwrap_or_default())
     }
 
     fn menu_extras() -> render::Extras {

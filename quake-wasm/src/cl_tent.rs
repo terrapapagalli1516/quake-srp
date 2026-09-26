@@ -84,11 +84,11 @@ mod tests {
         panic!("button {b} never fired under the player");
     }
 
-    /// Write `img` as a binary PPM (the tests' dump format; convert to PNG
-    /// outside).
-    fn dump_ppm(path: &str, img: &quake_rs::render::Image) {
-        let mut buf = format!("P6\n{} {}\n255\n", img.w, img.h).into_bytes();
-        img.rgb.iter().for_each(|px| buf.extend_from_slice(px));
+    /// Write `img`'s palette indices as a binary greyscale PGM (the tests'
+    /// dump format; convert to PNG outside).
+    fn dump_pgm(path: &str, img: &quake_rs::render::Image) {
+        let mut buf = format!("P5\n{} {}\n255\n", img.w, img.h).into_bytes();
+        buf.extend_from_slice(&img.pixels);
         let _ = std::fs::write(path, buf);
     }
 
@@ -207,11 +207,11 @@ mod tests {
                     w.beams.clear();
                     let (without_bolt, _) = step_walk(&mut w, 0.0, false, 640, 400);
                     w.beams = beams;
-                    let diff = with_bolt.rgb.iter().zip(&without_bolt.rgb).filter(|(a, b)| a != b).count();
+                    let diff = with_bolt.pixels.iter().zip(&without_bolt.pixels).filter(|(a, b)| a != b).count();
                     assert!(diff > 2000, "the bolt across the pit changes {diff} pixels");
                     // QUAKE_DUMP_DIR=<dir>: keep the frame for eyeballing.
                     if let Ok(dir) = std::env::var("QUAKE_DUMP_DIR") {
-                        dump_ppm(&format!("{dir}/chthon-lightning.ppm"), &with_bolt);
+                        dump_pgm(&format!("{dir}/chthon-lightning.pgm"), &with_bolt);
                     }
                     pin(&mut w, keep.0);
                     (w.yaw, w.pitch) = (keep.1, keep.2);

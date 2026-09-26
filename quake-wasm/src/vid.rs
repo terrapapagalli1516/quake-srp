@@ -1,7 +1,8 @@
 //! Video — the mode side of vid_win.c (`VID_SetMode`'s runtime resolution,
-//! clamped to a safe envelope; `vid.buffer`, the RGBA framebuffer each
-//! `Frame` record carries) and the bits of screen.c both client frames share
-//! (the `viewsize` cvar, `Draw_TileClear`'s backtile).
+//! clamped to a safe envelope, the size of `vid.buffer`; the frame itself
+//! goes to the page through [`crate::present`]) and the bits of screen.c
+//! both client frames share (the `viewsize` cvar, `Draw_TileClear`'s
+//! backtile).
 
 use quake_rs::client::Vid;
 use quake_rs::render;
@@ -72,8 +73,8 @@ pub(crate) fn set_video(name: &str) -> i32 {
 }
 
 /// The current render width in pixels (defaults to [`DEFAULT_W`] = 960). Each
-/// `Frame` record carries it, and the page resizes its canvas backing store +
-/// ImageData when it changes (e.g. after the Options menu picks a different
+/// `Frame` record carries it, and the page resizes its canvas backing store
+/// and its presenter when it changes (e.g. after the Options menu picks a different
 /// preset); `config.cfg` keeps it across sessions.
 pub(crate) fn width() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_w as i32).unwrap_or(DEFAULT_W as i32))
@@ -83,7 +84,7 @@ pub(crate) fn height() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.render_h as i32).unwrap_or(DEFAULT_H as i32))
 }
 
-/// Set the render resolution at runtime, reallocating the framebuffer. The
+/// Set the render resolution at runtime (the next frame is drawn at it). The
 /// requested `(w, h)` is clamped to the supported envelope (width 320..=1280,
 /// height 200..=800, and total pixels <= 1_280*800 so a runaway can't OOM) via
 /// [`clamp_resolution`]; out-of-range input is clamped, never a panic. After this,
@@ -213,8 +214,8 @@ mod tests {
         assert_eq!(width(), DEFAULT_W as i32);
         assert_eq!(height(), DEFAULT_H as i32);
 
-        // A valid in-range resolution is applied verbatim; width()/height() follow
-        // and the framebuffer is exactly w*h*4 bytes.
+        // A valid in-range resolution is applied verbatim; width()/height()
+        // follow, and the next frame renders at it.
         set_resolution(640, 400);
         assert_eq!(width(), 640);
         assert_eq!(height(), 400);
@@ -223,11 +224,10 @@ mod tests {
             let a = b.as_ref().expect("app exists after set_resolution");
             assert_eq!(a.render_w, 640);
             assert_eq!(a.render_h, 400);
-            assert_eq!(a.fb.len(), 640 * 400 * 4, "framebuffer reallocated to 640*400*4");
         });
 
         // Out-of-range input is clamped, not panicked: a huge request lands within
-        // the envelope and the fb matches the clamped size.
+        // the envelope, and the render size is the clamped one.
         set_resolution(100000, 100000);
         let (w, h) = (width(), height());
         assert!((MIN_W..=MAX_W).contains(&w) && (MIN_H..=MAX_H).contains(&h));
@@ -235,7 +235,7 @@ mod tests {
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), (w as usize) * (h as usize) * 4);
+            assert_eq!((a.render_w, a.render_h), (w as usize, h as usize));
         });
 
         // Back to the boot default.
@@ -256,7 +256,7 @@ mod tests {
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), DEFAULT_W * DEFAULT_H * 4, "default fb is DEFAULT_W*DEFAULT_H*4");
+            assert_eq!(a.present.rgba().len(), DEFAULT_W * DEFAULT_H * 4, "default fb is DEFAULT_W*DEFAULT_H*4");
         });
 
         // Pick the largest preset (1280x800, > the 960x600 default), then render:
@@ -269,10 +269,10 @@ mod tests {
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), 1280 * 800 * 4, "step renders into the 1280*800 framebuffer");
+            assert_eq!(a.present.rgba().len(), 1280 * 800 * 4, "step renders into the 1280*800 framebuffer");
             // Every alpha byte is 255 (step pushes opaque RGBA), proving the whole
             // larger buffer was painted, not just the smaller default region.
-            assert!(a.fb.chunks_exact(4).all(|px| px[3] == 255), "full fb painted opaque");
+            assert!(a.present.rgba().chunks_exact(4).all(|px| px[3] == 255), "full fb painted opaque");
         });
     }
 
@@ -320,7 +320,7 @@ mod tests {
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            assert_eq!(a.fb.len(), 1120 * 700 * 4, "fb reallocated to the new mode");
+            assert_eq!((a.render_w, a.render_h), (1120, 700), "frames render at the new mode");
             assert_eq!(a.menu.resolution(), (1120, 700), "the list marks it current");
         });
         assert_eq!(viewsize(), 100.0, "the mode never touches viewsize");
@@ -334,7 +334,7 @@ mod tests {
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            let px = a.fb.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+            let px = a.present.rgba().chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
             (a.render_w, a.render_h, px)
         })
     }
