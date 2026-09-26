@@ -900,7 +900,7 @@ pub fn render_scene_ext_sprited(
     // JS clock via `set_render_stats_clock`.)
     let ta = stats_on().then(StatInstant::now);
     for inst in models {
-        draw_alias_model(&mut image, &mut zbuf, bsp, cam, opts, inst, palette, dlights, light_styles, time, colormap);
+        draw_alias_model(&mut image, &mut zbuf, bsp, cam, scr_fov, opts, inst, palette, dlights, light_styles, time, colormap);
     }
     if let Some(t) = ta { stat(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
     // Particles draw after the world/models, z-tested against the same buffer so

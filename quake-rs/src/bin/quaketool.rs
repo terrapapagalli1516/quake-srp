@@ -158,7 +158,7 @@ fn usage() {
          \tquaketool census-edicts <pak> <map> <t1,t2,..>  dump live edicts at server times (oracle_edicts format)\n\
          \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX]\n\
          \t                               run the browser's game client natively (quake_rs::client), frame hashes as web/bench.py\n\
-         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n"
+         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--video classic|modern] [--hires 0|1] [--fov-mode M] [--display W:H] [--scaled2d 0|1]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n"
     );
 }
 
@@ -2035,6 +2035,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
 ///                    passes id's `cl_dlights`, in slot order)
 /// --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
 /// --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
+/// --video, --fov-mode, --hires  the port's video cvars (`quaketool/video.rs`; default classic)
 /// ```
 ///
 /// The map's entities are still spawned (worldspawn's QuakeC sets the light-style
@@ -2084,12 +2085,18 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     let mut viewent: Option<[f32; 6]> = None;
     let mut dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
     let mut particles: Vec<([f32; 3], u8)> = Vec::new();
+    let mut video = video::VideoArgs::default();
+    let mut res: Option<&str> = None;
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
         let val = args.get(i + 1).ok_or_else(|| format!("{flag} needs a value"))?;
+        if video.parse(flag, val)? {
+            i += 2;
+            continue;
+        }
         match flag {
-            "--res" => (w, h) = parse_res(val)?,
+            "--res" => res = Some(val),
             "--origin" => origin = Some(parse_vec3(flag, val)?),
             "--angles" => angles = Some(parse_vec3(flag, val)?),
             "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
@@ -2146,6 +2153,12 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             other => return Err(format!("view: unknown option {other:?}")),
         }
         i += 2;
+    }
+    // The video cvars first: hires lifts --res's clamp. (`--display` is not
+    // used here: `--aspect` gives vid.aspect itself.)
+    video.apply();
+    if let Some(r) = res {
+        (w, h) = parse_res(r)?;
     }
 
     let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;

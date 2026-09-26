@@ -220,14 +220,27 @@ pub(super) struct AliasView {
 }
 
 impl AliasView {
-    fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> AliasView {
+    /// The alias view of a `w x h` view drawn by `cam` (its field of view
+    /// the view's own) for the `fov` cvar `scr_fov`.
+    fn new(cam: &Camera, scr_fov: f32, w: usize, h: usize, pixel_aspect: f32) -> AliasView {
         let (vpn, vright, vup) = cam.basis();
         // R_ViewChanged: horizontalFieldOfView = 2*tan(fov_x/360*M_PI),
         // aliasxscale = vrect.width / it, aliasyscale = aliasxscale * pixelAspect.
         let hfov = (2.0 * (cam.fov_deg as f64 / 360.0 * std::f64::consts::PI).tan()) as f32;
         let hfov = if hfov.abs() > 1e-6 { hfov } else { 2.0 };
         let xscale = w as f32 / hfov;
-        let res_scale = ((w * h) as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov as f64);
+        // r_aliastransition's res_scale: sqrt(width*height / (320*152)) *
+        // (2 / horizontalFieldOfView). When Hor+ has widened the view
+        // (`fov_x` over `scr_fov`) it is the 4:3 view's it widens, the width
+        // `w * hfov(scr_fov) / hfov`: models are drawn at that view's size,
+        // so they change drawing path at the same distance.
+        let res_scale = if cam.fov_deg == scr_fov {
+            ((w * h) as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov as f64)
+        } else {
+            let hfov_ref = 2.0 * (scr_fov as f64 / 360.0 * std::f64::consts::PI).tan();
+            let w_ref = w as f64 * hfov_ref / hfov as f64;
+            (w_ref * h as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov_ref)
+        };
         AliasView {
             vpn,
             vright,
@@ -763,6 +776,7 @@ pub(super) fn draw_alias_model(
     zbuf: &mut [i16],
     bsp: &Bsp,
     cam: &Camera,
+    scr_fov: f32,
     opts: &RenderOptions,
     inst: &ModelInstance,
     palette: &[[u8; 3]; 256],
@@ -774,7 +788,7 @@ pub(super) fn draw_alias_model(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
+    let view = AliasView::new(cam, scr_fov, image.w, image.h, opts.aspect());
     let ent = AliasEntity {
         mdl: inst.mdl,
         origin: inst.origin,
@@ -914,7 +928,7 @@ pub(super) fn draw_viewmodel(
     if scr_fov > 90.0 {
         return;
     }
-    let view = AliasView::new(cam, image.w, image.h, opts.aspect());
+    let view = AliasView::new(cam, scr_fov, image.w, image.h, opts.aspect());
     let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
     // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
     let ent = AliasEntity {
@@ -1731,5 +1745,19 @@ mod tests {
             "4:3 {four_three:?}, 16:9 {wide:?}"
         );
         assert_eq!(draw(192, 108, 100.0), None, "fov 100: no gun");
+    }
+
+    #[test]
+    fn hor_plus_keeps_the_4_3_alias_transition() {
+        // r_aliastransition scales with sqrt(width*height)/fov: under Hor+ a
+        // model changes drawing path at the distance the 4:3 view of the same
+        // height has, as it is drawn at that view's size.
+        let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let wide = Camera { fov_deg: crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0), ..cam };
+        let (a, b) = (AliasView::new(&wide, 90.0, 1920, 1080, 1.0), AliasView::new(&cam, 90.0, 1440, 1080, 1.0));
+        assert!((a.transition - b.transition).abs() < 1e-2 && (a.resfudge - b.resfudge).abs() < 1e-2);
+        assert!((a.xscale - b.xscale).abs() < 1e-2);
+        // id's own at 320x152: res_scale 1, transition 200.
+        assert_eq!(AliasView::new(&cam, 90.0, 320, 152, 1.0).transition, 200.0);
     }
 }
