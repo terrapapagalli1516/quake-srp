@@ -1,5 +1,7 @@
 //! `quaketool framerate <pak> [--rates LIST] [--only NAMES] [--markdown]
 //! [--check]` — does the game play the same at every display rate?
+//! `quaketool framerate <pak> --budget [--res WxH,...]` — what a frame of it
+//! costs at 480 Hz.
 //!
 //! Each scenario is a scripted piece of play on the shareware maps — a jump,
 //! a fall, a grenade, a lift, a damage flash, a demo — run through the same
@@ -18,10 +20,12 @@
 //! an uncapped value is further from the 72 Hz reference than the scenario's
 //! stated tolerance.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::time::Instant;
 
 use quake_rs::client::host::{host_filter_time_display, host_filter_time_uncapped};
-use quake_rs::client::{cl_demo, cl_main, host_cmd, DemoPlay, SoundCall, Vid, Walk};
+use quake_rs::client::{cl_demo, cl_main, host_cmd, DemoPlay, Phase, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
 use quake_rs::particles::ParticleKind;
 use quake_rs::progs::OFS_PARM0;
@@ -1210,6 +1214,7 @@ fn fmt(v: f64) -> String {
 pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> {
     let mut rates = vec![Rate::Hz(60), Rate::Hz(144), Rate::Hz(240), Rate::Hz(480), Rate::Jitter];
     let (mut only, mut markdown, mut check) = (None::<Vec<String>>, false, false);
+    let (mut budget, mut res) = (false, "1280x800,1280x1024".to_string());
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -1225,12 +1230,21 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             }
             "--markdown" => markdown = true,
             "--check" => check = true,
+            "--budget" => budget = true,
+            "--res" => {
+                res = rest.get(i + 1).ok_or("--res needs WxH[,WxH...]")?.clone();
+                i += 1;
+            }
             a => return Err(format!("unknown argument {a:?}")),
         }
         i += 1;
     }
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
+    if budget {
+        let sizes = res.split(',').map(super::parse_res).collect::<Result<Vec<_>, _>>()?;
+        return Ok(frame_budget(&pak, &sizes));
+    }
 
     let mut o = String::new();
     let mut failures = Vec::new();
@@ -1299,4 +1313,125 @@ fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown:
             let _ = writeln!(o, "  {name:<34} {:>9}{cells}", fmt(r.reference));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Budget: what a frame costs at 480 Hz
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The frame timer's state: the last lap's instant and each phase's
+    /// time this frame (s).
+    static LAPS: RefCell<(Option<Instant>, [f64; 4])> = const { RefCell::new((None, [0.0; 4])) };
+}
+
+/// The frame timer installed on the client (`client::set_lap_hook`): the
+/// client frames lap `Sim` (input, the server frame, the client side of its
+/// messages), `Render3d`, `Post3d` (warp, blends, compose) and `Hud2d`.
+fn lap(phase: Phase) {
+    let slot = match phase {
+        Phase::Sim => 0,
+        Phase::Render3d => 1,
+        Phase::Post3d => 2,
+        Phase::Hud2d => 3,
+        _ => return,
+    };
+    LAPS.with(|l| {
+        let mut l = l.borrow_mut();
+        let now = Instant::now();
+        if let Some(last) = l.0 {
+            l.1[slot] += (now - last).as_secs_f64();
+        }
+        l.0 = Some(now);
+    });
+}
+
+/// Start a frame's laps.
+fn lap_start() {
+    LAPS.with(|l| *l.borrow_mut() = (Some(Instant::now()), [0.0; 4]));
+}
+
+fn lap_times() -> [f64; 4] {
+    LAPS.with(|l| l.borrow().1)
+}
+
+/// The median and 95th percentile of `xs` (ms).
+fn median_p95(xs: &mut [f64]) -> (f64, f64) {
+    xs.sort_by(f64::total_cmp);
+    let at = |q: f64| xs[((xs.len() - 1) as f64 * q).round() as usize] * 1000.0;
+    (at(0.5), at(0.95))
+}
+
+/// `--budget [--res WxH,...]`: the native cost of a frame of the uncapped
+/// client at 480 Hz — the live game on e1m1 (bench.py's walk: a turn in
+/// place, runs, about-faces; the level's monsters awake) and demo1's
+/// playback — per phase, against the frame budgets of 480, 240 and 144 Hz.
+fn frame_budget(pak: &Pak, sizes: &[(usize, usize)]) -> String {
+    const FRAMES: usize = 2400;
+    let mut o = String::new();
+    let _ = writeln!(o, "per-frame cost at 480 Hz (Stepping::Uncapped), median / p95 ms over {FRAMES} frames");
+    let _ = writeln!(o, "  {:<22} {:>13} {:>13} {:>13} {:>13}   headroom at 480 / 240 / 144 Hz", "", "sim", "3-D view", "post + 2-D", "total");
+    quake_rs::client::set_lap_hook(Some(lap));
+    for &(w, h) in sizes {
+        let vid = Vid { width: w, height: h, ..VID };
+        for demo in [false, true] {
+            let mut phases: [Vec<f64>; 4] = Default::default();
+            let mut total = Vec::with_capacity(FRAMES);
+            let mut clock = FrameClock::new(Rate::Hz(480), Stepping::Uncapped);
+            let mut sim = (!demo).then(|| {
+                let mut s = Sim::new(pak, "e1m1", Rate::Hz(480), Stepping::Uncapped);
+                s.set_flag(FL_GODMODE, true);
+                s.set_flag(FL_NOTARGET, false);
+                s
+            });
+            let mut playback = demo.then(|| {
+                let mut d = cl_demo::build_demo_n(pak.clone(), 0, &mut Vec::new()).expect("demo1");
+                d.stepping = Stepping::Uncapped;
+                d
+            });
+            for f in 0..FRAMES {
+                let dt = clock.next();
+                lap_start();
+                let t0 = Instant::now();
+                let frame = if let Some(s) = sim.as_mut() {
+                    // bench.py's walk_input, at 480 Hz: a 10 s cycle.
+                    let (fwd, turn) = match (f * 72 / 480) % 720 {
+                        0..=359 => (0.0, 1.0),
+                        360..=431 | 504..=575 => (1.0, 0.0),
+                        432..=503 | 576..=647 => (0.0, 2.5),
+                        _ => (0.0, 0.0),
+                    };
+                    s.w.in_fwd = fwd;
+                    s.w.yaw -= turn * 72.0 / 480.0;
+                    cl_main::walk_frame(&mut s.w, dt, false, &vid)
+                } else {
+                    cl_demo::demo_frame(playback.as_mut().expect("demo"), dt as f32, false, &vid)
+                };
+                total.push(t0.elapsed().as_secs_f64());
+                for (p, t) in phases.iter_mut().zip(lap_times()) {
+                    p.push(t);
+                }
+                render::recycle_image(frame.image);
+            }
+            let cell = |xs: &mut Vec<f64>| {
+                let (m, p) = median_p95(xs);
+                format!("{m:5.2} / {p:5.2}")
+            };
+            let (m, _) = median_p95(&mut total.clone());
+            let what = format!("{w}x{h} {}", if demo { "demo1" } else { "e1m1 live" });
+            let _ = writeln!(
+                o,
+                "  {what:<22} {:>13} {:>13} {:>13} {:>13}   {:+.2} / {:+.2} / {:+.2}",
+                cell(&mut phases[0]),
+                cell(&mut phases[1]),
+                cell(&mut { phases[2].iter().zip(&phases[3]).map(|(a, b)| a + b).collect() }),
+                cell(&mut total),
+                1000.0 / 480.0 - m,
+                1000.0 / 240.0 - m,
+                1000.0 / 144.0 - m,
+            );
+        }
+    }
+    quake_rs::client::set_lap_hook(None);
+    o
 }
