@@ -455,6 +455,9 @@ pub struct DemoFrame {
     /// player paused) — `SCR_DrawPause` shows the plaque during playback.
     /// id's shipped demos carry none.
     pub paused: bool,
+    /// A recorded `svc_cdtrack` in this block (`cl.cdtrack`), after the
+    /// signon's ([`Demo::cdtrack`]); id's demos carry none.
+    pub cdtrack: Option<u8>,
     /// The block ends with `svc_disconnect` (`Host_EndGame`): the demo is
     /// over, and the frame that reads it leaves before `CL_RelinkEntities`.
     pub disconnect: bool,
@@ -580,6 +583,13 @@ pub struct Demo {
     /// client did on connect. Volume/attenuation are decoded back to the
     /// QuakeC domain (`byte/255`, `byte/64`) like `S_StaticSound` does.
     pub static_sounds: Vec<StaticSound>,
+    /// `cls.forcetrack`: the header line's CD track (`CL_PlayDemo_f` reads
+    /// it; -1 none). While a demo plays, every `svc_cdtrack` plays this
+    /// track instead of the recorded one — id's demo1 forces track 2.
+    pub forcetrack: i32,
+    /// The signon's `svc_cdtrack` track (`cl.cdtrack`), which the client
+    /// asks the CD for as playback starts; `None` if the signon had none.
+    pub cdtrack: Option<u8>,
     pub frames: Vec<DemoFrame>,
 }
 
@@ -713,6 +723,10 @@ struct ClientState {
     finale_start: f32,
     /// `cl.paused` — `svc_setpause`'s byte.
     paused: bool,
+    /// `svc_cdtrack`'s track, read since the last snapshot.
+    pending_cdtrack: Option<u8>,
+    /// The last `svc_cdtrack` read before drawing began: the signon's.
+    signon_cdtrack: Option<u8>,
 }
 
 impl ClientState {
@@ -753,6 +767,8 @@ impl ClientState {
             finale_text: String::new(),
             finale_start: 0.0,
             paused: false,
+            pending_cdtrack: None,
+            signon_cdtrack: None,
         }
     }
 
@@ -867,6 +883,21 @@ pub fn parse_demo_timedemo(bytes: &[u8]) -> Result<Demo> {
     Ok(demo)
 }
 
+/// `CL_PlayDemo_f`'s reading of the header line into `cls.forcetrack`: each
+/// byte a digit (`c - '0'`, whatever it is), a `-` anywhere negates.
+fn parse_forcetrack(line: &[u8]) -> i32 {
+    let mut neg = false;
+    let mut track = 0i32;
+    for &c in line {
+        if c == b'-' {
+            neg = true;
+        } else {
+            track = track.wrapping_mul(10).wrapping_add(i32::from(c) - i32::from(b'0'));
+        }
+    }
+    if neg { -track } else { track }
+}
+
 /// Shared demo replay core: parse the framing + every message block, taking a
 /// [`snapshot`] after each once drawing has begun. Also returns whether the
 /// stream ended on an `svc_disconnect` whose block has a frame (rather than
@@ -875,19 +906,11 @@ fn parse_demo_with(bytes: &[u8]) -> Result<(Demo, bool)> {
     // --- Skip the CD-track header line: digits/'-' up to and including '\n'.
     // CL_PlayDemo_f reads bytes until '\n'. If there is no newline at all the
     // file is not a demo.
-    let mut pos = 0usize;
-    let mut found_newline = false;
-    while pos < bytes.len() {
-        let b = bytes[pos];
-        pos += 1;
-        if b == b'\n' {
-            found_newline = true;
-            break;
-        }
-    }
-    if !found_newline {
+    let Some(newline) = bytes.iter().position(|&b| b == b'\n') else {
         return Err(QError::invalid("demo: missing CD-track header newline"));
-    }
+    };
+    let forcetrack = parse_forcetrack(&bytes[..newline]);
+    let mut pos = newline + 1;
 
     let mut cl = ClientState::new();
     let mut frames: Vec<DemoFrame> = Vec::new();
@@ -980,6 +1003,11 @@ fn parse_demo_with(bytes: &[u8]) -> Result<(Demo, bool)> {
             cl.pending_prints.clear();
             cl.pending_centerprints.clear();
             cl.pending_stufftext.clear();
+            // The first level's signon track is the demo's own; a later
+            // level's waits for that level's first frame.
+            if frames.is_empty() {
+                cl.signon_cdtrack = cl.pending_cdtrack.take().or(cl.signon_cdtrack);
+            }
         }
 
         if let ParseFlow::Stop = flow {
@@ -998,6 +1026,8 @@ fn parse_demo_with(bytes: &[u8]) -> Result<(Demo, bool)> {
         model_precache: cl.model_precache,
         sound_precache: cl.sound_precache,
         static_sounds: cl.static_sounds,
+        forcetrack,
+        cdtrack: cl.signon_cdtrack,
         frames,
     };
     Ok((demo, disconnected))
@@ -1136,6 +1166,7 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
             total_secrets: cl.stats[STAT_TOTALSECRETS],
         },
         paused: cl.paused,
+        cdtrack: cl.pending_cdtrack.take(),
         disconnect: false,
     }
 }
@@ -1399,8 +1430,13 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             }
 
             SVC_CDTRACK => {
-                let _ = r.read_byte();
-                let _ = r.read_byte();
+                // cl.cdtrack, cl.looptrack: CDAudio_Play ((byte)cl.cdtrack, true)
+                // (or the forced track) — the client replays it with the frame.
+                let track = r.read_byte();
+                let _looptrack = r.read_byte();
+                if track >= 0 {
+                    cl.pending_cdtrack = Some(track as u8);
+                }
             }
 
             SVC_FINALE | SVC_CUTSCENE => {
@@ -1973,6 +2009,15 @@ mod tests {
         // Reading past the end yields the sentinels and sets bad.
         assert_eq!(r.read_byte(), -1);
         assert!(r.bad);
+    }
+
+    /// `CL_PlayDemo_f`'s header line: id's demo1 starts `2\n` (the attract
+    /// loop's forced CD track), demo2 and demo3 `-1\n` (none).
+    #[test]
+    fn the_header_line_is_the_forced_cd_track() {
+        assert_eq!([parse_forcetrack(b"2"), parse_forcetrack(b"-1"), parse_forcetrack(b"11"), parse_forcetrack(b"")], [2, -1, 11, 0]);
+        let demo = parse_demo(b"-1\n").unwrap();
+        assert_eq!((demo.forcetrack, demo.cdtrack), (-1, None));
     }
 
     /// The coord/angle quantization is lossy but the spec values must be exact.

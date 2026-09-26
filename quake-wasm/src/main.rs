@@ -90,6 +90,8 @@ mod test_util;
 #[cfg(test)]
 #[path = "census_tests.rs"]
 mod census_tests;
+#[cfg(test)]
+mod content_tests;
 
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
@@ -118,14 +120,26 @@ fn hw_threads() -> usize {
 }
 
 fn main() -> ExitCode {
-    if let Err(e) = common::init(&basedir()) {
-        eprintln!("quake: {e}");
-        return ExitCode::FAILURE;
-    }
     // IN_StartupJoystick's `-nojoy`: no pad is ever read.
     let nojoy = std::env::args().any(|a| a == "-nojoy");
+    // COM_InitFilesystem: a Sys_Error here (a pack that is not one, a
+    // modified shareware game, a progs.dat this engine cannot run) ends the
+    // program before it starts, its message on stderr for the page to show.
+    let log = match common::init(&basedir()) {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("quake: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     app::ensure_app(|a| {
         a.hw_threads = hw_threads();
+        for line in log {
+            a.console.println(line);
+        }
+        // Not notify lines: the attract demo's signon ends in
+        // SCR_EndLoadingPlaque's Con_ClearNotify before anything is drawn.
+        let _ = a.console.take_unnotified();
         if nojoy {
             a.pad.joy.set_nojoy();
         }

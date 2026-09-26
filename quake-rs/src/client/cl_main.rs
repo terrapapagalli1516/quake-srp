@@ -10,6 +10,7 @@
 //! Source: `WinQuake/cl_main.c`, `cl_parse.c`, `cl_input.c`, `view.c`, `screen.c`.
 
 use crate::bsp::Bsp;
+use crate::cd_audio::CdCall;
 use crate::mdl::Mdl;
 use crate::particles::{TrailHead, TrailStep};
 use crate::stepping::advance_clock;
@@ -368,6 +369,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             crate::server::SvcEvent::SellScreen => {
                 // Cmd_ExecuteString("help"): the dispatcher opens the Help menu.
                 w.pending_sellscreen = true;
+            }
+            crate::server::SvcEvent::CdTrack { track, .. } => {
+                // CDAudio_Play ((byte)cl.cdtrack, true).
+                sound.push(SoundCall::Cd(CdCall::cdtrack(track)));
             }
         }
     }

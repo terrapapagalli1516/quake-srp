@@ -73,6 +73,8 @@ struct Sys<W: Write> {
     last_frame: Instant,
     /// The UI state the page last heard (`State`).
     state: UiState,
+    /// The CD's state the page last heard (`Cd`).
+    cd_sent: Option<quake_rs::cd_audio::CdState>,
 }
 
 impl<W: Write> Sys<W> {
@@ -86,14 +88,18 @@ impl<W: Write> Sys<W> {
             config: None,
             last_frame: Instant::now(),
             state: (u32::MAX, 0, 0),
+            cd_sent: None,
         }
     }
 
     /// `Host_Init`'s `quake.rc`: `exec config.cfg`, `stuffcmds` (the command
     /// line's `+` commands: the page's `?classic` is `+profile classic`), then
     /// `startdemos demo1 demo2 demo3` (the attract loop; a key brings up the
-    /// menu). The Load/Save listings are read once here too.
+    /// menu). The Load/Save listings are read once here too. `CDAudio_Init`
+    /// comes first: the disc is the tracks the command line names
+    /// (`-cdtracks`, the page's music files).
     fn host_init(&mut self, command_line: &[String]) {
+        self.audio.set_disc(quake_rs::cd_audio::Disc::from_args(command_line));
         // `config.cfg` as it stands after the exec, so the first frame writes
         // the file only when something since has changed a setting — the
         // command line's `profile` included, which then sticks, as a choice
@@ -151,7 +157,7 @@ impl<W: Write> Sys<W> {
                 Event::Gamepad(pad) => gamepad(pad),
                 Event::Call { id, line } => {
                     // The sound device's own calls, then the game's.
-                    let answer = match self.audio.call(&line) {
+                    let answer = match self.audio.cd_call(&line).or_else(|| self.audio.call(&line)) {
                         Some((value, text)) => automation::Answer { value, text },
                         None => automation::call(&line),
                     };
@@ -229,7 +235,16 @@ impl<W: Write> Sys<W> {
             clears: s.clears,
             painted: s.painted,
         };
-        Msg::Audio(counts).write_to(&mut self.out)
+        Msg::Audio(counts).write_to(&mut self.out)?;
+        // The CD's state when it changed: the page plays it beside the ring.
+        let cd = self.audio.cd_state();
+        if cd != self.cd_sent {
+            self.cd_sent = cd;
+            if let Some(cd) = cd {
+                Msg::Cd(cd).write_to(&mut self.out)?;
+            }
+        }
+        Ok(())
     }
 
     /// The frame's rumbles (the 2026 `joy_rumble`), for the pad or a phone.

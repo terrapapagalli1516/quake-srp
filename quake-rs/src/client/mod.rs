@@ -57,6 +57,7 @@ use crate::console::ConNotify;
 use crate::demo::Demo;
 use crate::dlight::DynamicLights;
 use crate::mdl::Mdl;
+use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{Lcg, ParticleSystem, TrailHead};
 use crate::render;
@@ -742,9 +743,11 @@ impl Listener {
 }
 
 /// One call the client makes into the sound layer — snd_dma.c's entry
-/// points — recorded in call order for the platform to carry out (the browser
-/// plays them through Web Audio). A frame's calls come back in its
-/// [`ClientFrame`]; a level load makes them into a caller's `Vec`.
+/// points, and cd_audio.c's, which id's client called from the same places
+/// (`CL_ParseServerMessage`) — recorded in call order for the platform to
+/// carry out (the browser plays them through Web Audio). A frame's calls
+/// come back in its [`ClientFrame`]; a level load makes them into a caller's
+/// `Vec`.
 #[derive(Clone, Debug)]
 pub enum SoundCall {
     /// `S_StartSound` for each event, in order. `view_entity` is the
@@ -764,6 +767,9 @@ pub enum SoundCall {
     /// the four ambient channels toward — the listener leaf's
     /// `ambient_level[]` (`None` outside the world) — over `frametime`.
     Update { listener: Listener, leaf_ambient: Option<[u8; NUM_AMBIENTS]>, frametime: f32 },
+    /// A call into the CD player (`CDAudio_Play`, `_Pause`, `_Resume`:
+    /// [`crate::cd_audio`]), which plays beside the mixer, not through it.
+    Cd(CdCall),
 }
 
 // ---------------------------------------------------------------------------

@@ -416,6 +416,8 @@ impl Mixer {
                 SoundCall::Update { listener, leaf_ambient, frametime } => {
                     self.update(listener, *leaf_ambient, f64::from(*frametime));
                 }
+                // The CD plays beside the mix, never through it.
+                SoundCall::Cd(_) => {}
             }
         }
     }
