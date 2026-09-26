@@ -149,6 +149,7 @@ mod tests {
             display_aspect: 4.0 / 3.0,
             exact_perspective: false,
             video: crate::render::VideoCvars::CLASSIC,
+            mip: crate::render::MipCvars::DEFAULT,
         };
 
         let frame = super::super::cl_main::walk_frame(&mut w, 0.1, false, &vid);

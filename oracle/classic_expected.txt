@@ -1,7 +1,8 @@
 # oracle/classic_check.py --record: the Classic identity list (see its doc).
 # recorded on quake/2026 @ a50d8d7 (the settings branch's base), 2026-09-26
 # screen2d re-recorded on q26/settings: the port side runs the Classic profile and id's side its own defaults; Options' port row is "Classic / 2026" with the profile at x=220 (531 px at 320x200 and 640x400, was 291 as "Web extras"; the disconnected Options 919 / 2108, was 686 / 1875); every other shot unchanged
-census.report f9072f88425bbd53
+# server R2 (d5db64a): error/objerror as id's (CENSUS L16) — objerror frees self, so start.bsp's forced teleporter touch faults 1x not 3x and the shared random stream shifts for later maps; edicts vs id's C still 9/9
+census.report 855daa19919aff01
 edicts.e1m1 fea55149a7ee4427
 edicts.e1m2 5ff403cb869b3f72
 edicts.e1m3 d510685451febfe5
