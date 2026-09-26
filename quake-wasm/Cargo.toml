@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Browser (WASI) shell for quake-rs: the game as a program the page hosts in a Web Worker"
 license = "GPL-2.0-or-later"
+default-run = "quake"
 
 # A plain program: `fn main()`, stdin/stdout and std::fs. Built for
 # `wasm32-wasip1`, it runs in `web/wasi.js`, a small WASI host in a Web Worker
