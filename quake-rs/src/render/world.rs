@@ -155,18 +155,18 @@ mod tests {
         // A submodel placed in front of the camera must add non-background
         // pixels relative to an empty bmodel list (the submodel becomes visible).
         let bsp = demo_room_with_submodel();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         // Look down +X from near the west wall.
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
-        let bg = [10u8, 10, 14];
+        let bg = 2u8; // r_clearcolor, the background
 
         let without = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         // Place the quad between the camera (-200) and the centre, facing it.
         let bmodels = [BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }];
         let with = render_once(&Scene { bmodels: &bmodels, ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
-        let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
-        let drawn_with = with.rgb.iter().filter(|&&p| p != bg).count();
+        let drawn_without = without.pixels.iter().filter(|&&p| p != bg).count();
+        let drawn_with = with.pixels.iter().filter(|&&p| p != bg).count();
         // The submodel quad sits at world x = -120, nearer than the world walls
         // behind it, so it must paint at least as many non-background pixels as
         // without it (it can only add coverage, never remove it). With near-plane
@@ -182,9 +182,9 @@ mod tests {
         // proves the submodel is rasterised and depth-tested, independent of how
         // much background the world fills.
         let changed = without
-            .rgb
+            .pixels
             .iter()
-            .zip(with.rgb.iter())
+            .zip(with.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "submodel changed no pixels (not drawn / fully occluded)");
@@ -195,13 +195,13 @@ mod tests {
         // An out-of-range model_index must draw nothing and not panic: the image
         // is byte-identical to passing an empty bmodel list.
         let bsp = demo_room_with_submodel();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         let empty = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         let oob = render_once(&Scene { bmodels: &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         assert_eq!(
-            empty.rgb, oob.rgb,
+            empty.pixels, oob.pixels,
             "out-of-range submodel index must be a no-op"
         );
     }
@@ -212,16 +212,16 @@ mod tests {
         // places: rendering it at one origin vs another changes pixels. This
         // proves the origin shift actually moves the geometry.
         let bsp = demo_room_with_submodel();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         let centered = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
         let shifted = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let changed = centered
-            .rgb
+            .pixels
             .iter()
-            .zip(shifted.rgb.iter())
+            .zip(shifted.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "moving the submodel origin should move its pixels");
@@ -239,7 +239,7 @@ mod tests {
             f.planenum = 30_000; // past planes
             f.texinfo = 30_000; // past texinfo
         }
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         // Must not panic; the corrupt face is simply skipped.
         let _img = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 80, 60, &pal) });
@@ -327,7 +327,7 @@ mod tests {
         // are rasterised at the entity origin and depth-tested against the world.
         let world = demo_room();
         let box_bsp = tiny_brush_bsp();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         // Look down +X from near the west wall; stand the box at world x = -120,
         // nearer than the +256 far wall, so it occludes geometry behind it.
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
@@ -337,9 +337,9 @@ mod tests {
 
         // The box is nearer than the far wall, so drawing it must CHANGE pixels.
         let changed = without
-            .rgb
+            .pixels
             .iter()
-            .zip(with.rgb.iter())
+            .zip(with.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "external brush bsp changed no pixels (not drawn)");
@@ -351,15 +351,15 @@ mod tests {
         // places: rendering it centred vs shifted +Y changes pixels.
         let world = demo_room();
         let box_bsp = tiny_brush_bsp();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         let centered = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
         let shifted = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 120.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
         let changed = centered
-            .rgb
+            .pixels
             .iter()
-            .zip(shifted.rgb.iter())
+            .zip(shifted.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "moving the external box origin should move its pixels");
@@ -371,7 +371,7 @@ mod tests {
         // must both draw nothing and never panic. The empty-bsp render must equal
         // the no-external render; the corrupt-face render must not panic.
         let world = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         // An empty bsp (no models, no faces) — like an unparseable box.
@@ -396,7 +396,7 @@ mod tests {
         let baseline = render_once(&Scene::new(&world, cam, 160, 120, &pal));
         let with_empty = render_once(&Scene { external: &[ExternalBModel { bsp: &empty, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
         assert_eq!(
-            baseline.rgb, with_empty.rgb,
+            baseline.pixels, with_empty.pixels,
             "an empty/missing external box must draw nothing"
         );
 

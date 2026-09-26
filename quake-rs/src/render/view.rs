@@ -7,7 +7,7 @@
 
 use crate::math::Vec3;
 use crate::sbar::{IT_INVISIBILITY, IT_INVULNERABILITY, IT_QUAD, IT_SUIT};
-use super::{Camera, Image};
+use super::{Camera, Image, Palette};
 
 /// Quake's `V_CalcBob` (view.c): the sinusoidal head-bob amount (world units) to
 /// add to the eye height while moving, so the view rocks up and down with each
@@ -86,10 +86,10 @@ pub fn powerup_cshift(items: i32) -> Option<([u8; 3], f32)> {
 /// infinity), and then becomes `gammatable[v]`. The C runs this over the
 /// 256 palette colours and hands the result to `VID_ShiftPalette`. A channel
 /// only ever depends on itself, so a palette colour looked up in these ramps
-/// channel by channel IS the C's shifted palette entry: the host packs the
-/// finished frame through them, which tints the whole screen (3-D view,
-/// status bar, menu, console) exactly as the palette shift does. No shifts
-/// and the identity gamma give the identity ramps.
+/// channel by channel IS the C's shifted palette entry ([`FramePalette`]),
+/// through which the whole screen is shown (3-D view, status bar, menu,
+/// console), exactly as the palette shift tints it. No shifts and the
+/// identity gamma give the identity ramps.
 pub fn cshift_ramps(shifts: &[([u8; 3], f32)], gamma: &[u8; 256]) -> [[u8; 256]; 3] {
     let mut ramps = [[0u8; 256]; 3];
     for (c, ramp) in ramps.iter_mut().enumerate() {
@@ -109,25 +109,46 @@ pub fn cshift_ramps(shifts: &[([u8; 3], f32)], gamma: &[u8; 256]) -> [[u8; 256];
     ramps
 }
 
-/// `VID_ShiftPalette` at the port's boundary: the finished screen `image`
-/// into `out` as RGBA (alpha 255) through the palette-shift ramps
-/// ([`cshift_ramps`]; `None`: a plain copy), row runs on up to `threads`
-/// threads. Each pixel is its own map, so the bytes are the same for any
-/// thread count.
-pub fn pack_rgba(image: &Image, ramps: Option<&[[u8; 256]; 3]>, out: &mut Vec<u8>, threads: usize) {
+/// The palette a frame is shown with, as the display's DAC holds it:
+/// `V_UpdatePalette` over `gfx/palette.lmp` — the frame's colour shifts, then
+/// gamma ([`cshift_ramps`]) — as handed to `VID_ShiftPalette`. 256 RGBA
+/// colours (alpha 255), the form presentation takes them in: 1024 bytes for
+/// a 256x1 texture, or one 4-byte store per pixel ([`pack_rgba`]).
+///
+/// A shifted colour is its base colour looked up channel by channel in the
+/// ramps, which is what the C computes for each of the 256 entries; the
+/// frame's pixels never change, only the palette they are shown through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramePalette(pub [[u8; 4]; 256]);
+
+impl FramePalette {
+    /// `V_UpdatePalette` for a frame: `base` through the cshifts `shifts` (in
+    /// `cl.cshifts` order) and the gamma table. No shifts at the identity
+    /// gamma leave `base` as it is.
+    #[must_use]
+    pub fn new(base: &Palette, shifts: &[([u8; 3], f32)], gamma: &[u8; 256]) -> FramePalette {
+        let [r, g, b] = cshift_ramps(shifts, gamma);
+        FramePalette(base.map(|[cr, cg, cb]| [r[usize::from(cr)], g[usize::from(cg)], b[usize::from(cb)], 255]))
+    }
+
+    /// The 256 colours as bytes, RGBA per entry.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 1024] {
+        std::array::from_fn(|i| self.0[i / 4][i % 4])
+    }
+}
+
+/// `VID_Update` through a DAC, in software: the finished 8-bit `image` into
+/// `out` as RGBA through `palette` — one 4-byte store per pixel, whatever
+/// the shifts — in row runs on up to `threads` threads. Each pixel is its own
+/// lookup, so the bytes are the same for any thread count.
+pub fn pack_rgba(image: &Image, palette: &FramePalette, out: &mut Vec<u8>, threads: usize) {
     let (w, h) = (image.w, image.h);
-    let n = w.saturating_mul(h).min(image.rgb.len());
+    let n = w.saturating_mul(h).min(image.pixels.len());
     out.resize(n * 4, 255);
-    super::band::map_rows(threads, h, out, w * 4, &image.rgb[..n], w, |out, rgb| match ramps {
-        None => {
-            for (o, px) in out.chunks_exact_mut(4).zip(rgb) {
-                o.copy_from_slice(&[px[0], px[1], px[2], 255]);
-            }
-        }
-        Some([r, g, b]) => {
-            for (o, px) in out.chunks_exact_mut(4).zip(rgb) {
-                o.copy_from_slice(&[r[px[0] as usize], g[px[1] as usize], b[px[2] as usize], 255]);
-            }
+    super::band::map_rows(threads, h, out, w * 4, &image.pixels[..n], w, |out, pixels| {
+        for (o, &px) in out.chunks_exact_mut(4).zip(pixels) {
+            o.copy_from_slice(&palette.0[usize::from(px)]);
         }
     });
 }
@@ -187,8 +208,8 @@ pub fn viewmodel_origin_ofs(gun_angles: Vec3, bob: f32, viewsize: f32) -> Vec3 {
 /// Build the 256-entry gamma LUT, a port of `BuildGammaTable` (view.c):
 /// `gammatable[i] = 255 * pow((i+0.5)/255.5, g) + 0.5`, clamped to `0..=255` —
 /// and the C's exact `g == 1.0` special case, a literal identity table (so the
-/// default gamma is BYTE-EXACT, not merely close). The host applies this where
-/// the finished frame becomes presented RGB, the same boundary as the C's
+/// default gamma is BYTE-EXACT, not merely close). The host applies it to the
+/// palette the frame is shown through ([`FramePalette`]), the C's
 /// `V_UpdatePalette` -> `VID_ShiftPalette` hardware-palette write (gamma there
 /// runs AFTER the cshift blend; the host matches that order). quaketool's PPM
 /// scene path never applies it (the C's default boot state), so the golden
@@ -251,6 +272,29 @@ mod tests {
         assert_eq!(content_cshift(crate::bsp::CONTENTS_SKY), Some(([130, 80, 50], 128.0)));
         assert_eq!(powerup_cshift(IT_QUAD | IT_INVULNERABILITY), Some(([0, 0, 255], 30.0)));
         assert_eq!(powerup_cshift(0), None);
+    }
+
+    /// The 8-bit frame shown through its palette is, byte for byte, the RGB
+    /// frame packed through the ramps channel by channel (the pack before
+    /// the frame went 8-bit), whatever the shifts and the gamma.
+    #[test]
+    fn the_palette_pack_is_the_rgb_frames_ramp_pack() {
+        let base: Palette = std::array::from_fn(|i| [i as u8, (i * 7 + 3) as u8, (255 - i) as u8]);
+        let image = Image { w: 16, h: 16, pixels: (0..=255u8).collect() };
+        let water = ([130, 80, 50], 128.0);
+        let quad = ([0, 0, 255], 30.0);
+        for (shifts, g) in [(vec![], 1.0), (vec![water], 1.0), (vec![water, ([255, 0, 0], 150.0), quad], 0.7)] {
+            let gamma = build_gamma_table(g);
+            let [r, gr, b] = cshift_ramps(&shifts, &gamma);
+            let old: Vec<u8> = image.to_rgb(&base).pixels.iter().flat_map(|p| [r[p[0] as usize], gr[p[1] as usize], b[p[2] as usize], 255]).collect();
+            for threads in [1, 3] {
+                let mut new = Vec::new();
+                pack_rgba(&image, &FramePalette::new(&base, &shifts, &gamma), &mut new, threads);
+                assert_eq!(new, old, "{} shifts, gamma {g}, {threads} threads", shifts.len());
+            }
+        }
+        let unshifted = FramePalette(base.map(|[r, g, b]| [r, g, b, 255]));
+        assert_eq!(FramePalette::new(&base, &[], &build_gamma_table(1.0)), unshifted, "no shift: VID_SetPalette's");
     }
 
     #[test]

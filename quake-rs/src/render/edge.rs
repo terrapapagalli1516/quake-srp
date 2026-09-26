@@ -39,7 +39,7 @@ use super::light::{
     any_dlight_reaches, face_lightmap_dyn, mark_dlights, mark_dlights_more, LightMap,
 };
 use super::raster::{
-    hash_color, span_at, span_cached, span_tex, span_turb, BlockFixed, ScreenProj,
+    hash_index, shade_index, span_at, span_cached, span_tex, span_turb, BlockFixed, ScreenProj,
 };
 use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
 use super::stats::Profiler;
@@ -86,7 +86,7 @@ const NOT_CACHEABLE: u32 = 0x7FFF_FFFF;
 /// `R_BmodelCheckBBox`'s "not in view".
 const BMODEL_FULLY_CLIPPED: u32 = 0x10;
 /// `r_clearcolor` (default 2): the background surface's palette index.
-const R_CLEARCOLOR: usize = 2;
+const R_CLEARCOLOR: u8 = 2;
 /// `D_DrawSurfaces`' background gradient: "effectively at infinity".
 const BACKGROUND_ZI: f32 = -0.9;
 /// A BSP deeper than this is malformed (id's maps are a few dozen deep).
@@ -1186,8 +1186,8 @@ struct FacePass<'p, 's, 'a> {
     bits: &'p [u32],
     /// The port's flat shading direction, for a face with no lightmap.
     light_dir: Vec3,
-    /// `r_clearcolor`'s colour.
-    clear: [u8; 3],
+    /// `r_clearcolor`'s palette index.
+    clear: u8,
 }
 
 /// `Mod_LoadFaces`' flags for a face: `SURF_PLANEBACK`, and `SURF_DRAWSKY` /
@@ -1797,7 +1797,7 @@ impl EdgeState {
         bits: &[u32],
     ) -> WorldDraw<'a> {
         let (w, h) = (self.w, self.h);
-        let (cam, opts, palette) = (&frame.cam, &frame.scene.options, frame.scene.palette);
+        let (cam, opts) = (&frame.cam, &frame.scene.options);
         let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
         let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
         let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
@@ -1812,7 +1812,7 @@ impl EdgeState {
         );
         let sky_tex = sky_texture(ents[0].bsp);
         let (light_dir, _) = normalize([0.3, 0.5, 1.0]);
-        let clear = palette[R_CLEARCOLOR];
+        let clear = R_CLEARCOLOR;
         let pass = FacePass { frame, sview: &sview, mipview: &mipview, ents, bits, light_dir, clear };
         let mut faces = 0u64;
         let mut surfs = Vec::with_capacity(self.surfs.len());
@@ -1921,13 +1921,13 @@ impl EdgeState {
             }
             _ => {
                 // The port's flat colour for a face without a texture (test
-                // maps): a 1x1 texture lit by the lightmap when there is one.
+                // maps): a palette index hashed from the texture, as a 1x1
+                // texture lit by the lightmap when there is one.
                 let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
-                let base = hash_color(key);
-                let to8 = |c: f32| (c * 255.0).clamp(0.0, 255.0) as u8;
+                let colour = hash_index(key);
                 match lightmap {
-                    Some(lm) => Paint::Flat { grads, colour: base.map(to8), shade, lightmap: lm },
-                    None => Paint::Fill(base.map(|c| to8(c * shade))),
+                    Some(lm) => Paint::Flat { grads, colour, shade, lightmap: lm },
+                    None => Paint::Fill(shade_index(scene.palette, colour, shade)),
                 }
             }
         }
@@ -1965,23 +1965,21 @@ impl EdgeState {
                 match paint {
                     Paint::Fill(c) => row.fill(*c),
                     Paint::Sky(mt) => {
-                        draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &world.sky, palette);
+                        draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &world.sky);
                     }
                     Paint::Turb { grads, mt } => {
                         let (tw, th) = (mt.width as usize, mt.height as usize);
-                        span_turb(row, &span_at(grads, u, v), grads, &mt.pixels, tw, th, palette, &frame.turb, scene.time, persp);
+                        span_turb(row, &span_at(grads, u, v), grads, &mt.pixels, tw, th, &frame.turb, scene.time, persp);
                     }
                     Paint::Cached { grads, fixed, block } => {
-                        span_cached(row, &span_at(grads, u, v), fixed, &block.block, block.bw, block.bh, palette, persp);
+                        span_cached(row, &span_at(grads, u, v), fixed, &block.block, block.bw, block.bh, persp);
                     }
                     Paint::Texels { grads, texture, shade, lightmap } => {
                         let (pixels, tw, th) = texture.map_or((&[][..], 0, 0), |mt| (&mt.pixels[..], mt.width as usize, mt.height as usize));
                         span_tex(row, &span_at(grads, u, v), grads, pixels, tw, th, palette, *shade, lightmap.as_ref(), colormap);
                     }
                     Paint::Flat { grads, colour, shade, lightmap } => {
-                        let mut pal1 = [[0u8; 3]; 256];
-                        pal1[0] = *colour;
-                        span_tex(row, &span_at(grads, u, v), grads, &[0u8], 1, 1, &pal1, *shade, Some(lightmap), colormap);
+                        span_tex(row, &span_at(grads, u, v), grads, std::slice::from_ref(colour), 1, 1, palette, *shade, Some(lightmap), colormap);
                     }
                 }
                 if self.surfs[si].flags & SURF_DRAWBACKGROUND == 0 {
@@ -2006,7 +2004,7 @@ enum Paint<'a> {
     /// One colour: the background (`r_clearcolor`), a face seen edge-on, a
     /// sky with no sky texture, or the port's flat colour for a textureless
     /// face with no lightmap.
-    Fill([u8; 3]),
+    Fill(u8),
     /// The two-layer sky (`D_DrawSkyScans8`).
     Sky(&'a MipTex),
     /// A liquid (`Turbulent8`), the raw texel.
@@ -2019,7 +2017,7 @@ enum Paint<'a> {
     Texels { grads: PolyGrads, texture: Option<&'a MipTex>, shade: f32, lightmap: Option<LightMap<'a>> },
     /// The port's flat colour for a textureless face with a lightmap (test
     /// maps): a 1x1 texture of that colour, lit.
-    Flat { grads: PolyGrads, colour: [u8; 3], shade: f32, lightmap: LightMap<'a> },
+    Flat { grads: PolyGrads, colour: u8, shade: f32, lightmap: LightMap<'a> },
 }
 
 /// One surface ready for the bands: its paint and its `1/z` plane
@@ -2073,9 +2071,9 @@ mod tests {
         let (w, h) = (160usize, 100usize);
         let (img, z) = render_z(&cam, w, h);
         let row = h / 2;
-        let (centre, side) = (img.rgb[row * w + w / 2], img.rgb[row * w + w / 2 + 40]);
+        let (centre, side) = (img.pixels[row * w + w / 2], img.pixels[row * w + w / 2 + 40]);
         assert_ne!(centre, side, "pillar and far wall are different surfaces");
-        assert!(![centre, side].contains(&palette()[R_CLEARCOLOR]), "both drawn");
+        assert!(![centre, side].contains(&R_CLEARCOLOR), "both drawn");
         assert_eq!(z[row * w + w / 2], (32768.0f64 / 168.0) as i16);
         assert_eq!(z[row * w + w / 2 + 40], (32768.0f64 / 456.0) as i16);
     }
@@ -2086,10 +2084,11 @@ mod tests {
         // overwritten everywhere.
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let fresh = render(&cam, 96, 64);
-        recycle_image(Image { w: 96, h: 64, rgb: vec![[1, 2, 3]; 96 * 64] });
+        let garbage = (0..=255u8).find(|v| !fresh.pixels.contains(v)).expect("an index the frame does not use");
+        recycle_image(Image { w: 96, h: 64, pixels: vec![garbage; 96 * 64] });
         let again = render(&cam, 96, 64);
-        assert_eq!(fresh.rgb, again.rgb);
-        assert!(!again.rgb.contains(&[1, 2, 3]));
+        assert_eq!(fresh.pixels, again.pixels);
+        assert!(!again.pixels.contains(&garbage));
     }
 
     #[test]
@@ -2098,7 +2097,7 @@ mod tests {
         // palette[2], and D_DrawZSpans' -0.9 "at infinity" 1/z.
         let cam = Camera::looking_at([-400.0, 0.0, 0.0], [-800.0, 0.0, 0.0], 90.0);
         let (img, z) = render_z(&cam, 64, 40);
-        assert!(img.rgb.iter().all(|&p| p == palette()[R_CLEARCOLOR]));
+        assert!(img.pixels.iter().all(|&p| p == R_CLEARCOLOR));
         let bg = ((-0.9f32 as f64 * 32768.0 * 65536.0) as i32 >> 16) as i16;
         assert!(z.iter().all(|&v| v == bg));
     }
@@ -2134,7 +2133,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let wide = render(&cam, 2048, 400);
         assert_eq!((wide.w, wide.h), (1280, 400));
-        assert_eq!(wide.rgb, render(&cam, 1280, 400).rgb, "drawn as id's widest mode");
+        assert_eq!(wide.pixels, render(&cam, 1280, 400).pixels, "drawn as id's widest mode");
         let tall = render(&cam, 320, 1100);
         assert_eq!((tall.w, tall.h), (320, 1024));
         // The edge renderer itself refuses only what no setting allows.
@@ -2166,9 +2165,9 @@ mod tests {
         let small = render(w, h);
         let big = render(4 * w, 4 * h);
         assert_eq!((big.w, big.h), (2560, 600));
-        assert!(!big.rgb.contains(&palette()[R_CLEARCOLOR]), "the room covers the view: no background");
+        assert!(!big.pixels.contains(&R_CLEARCOLOR), "the room covers the view: no background");
         let differ = (0..h * w)
-            .filter(|&i| big.rgb[(4 * (i / w) + 2) * 4 * w + 4 * (i % w) + 2] != small.rgb[i])
+            .filter(|&i| big.pixels[(4 * (i / w) + 2) * 4 * w + 4 * (i % w) + 2] != small.pixels[i])
             .count();
         assert!(differ * 100 < w * h, "{differ} of {} pixels differ", w * h);
     }
@@ -2218,7 +2217,7 @@ mod tests {
             bad.faces[fi].planenum = 9999;
             let mut gone = bsp.clone();
             gone.faces[fi].numedges = 0;
-            assert_eq!(draw(&bad).rgb, draw(&gone).rgb, "face {fi} is left out, the rest drawn");
+            assert_eq!(draw(&bad).pixels, draw(&gone).pixels, "face {fi} is left out, the rest drawn");
         }
     }
 

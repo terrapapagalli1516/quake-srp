@@ -88,7 +88,7 @@ pub use sprite::SpriteInstance;
 pub use surf::MipCvars;
 pub use stats::RenderStats;
 pub use view::{
-    build_gamma_table, content_cshift, cshift_ramps, pack_rgba, powerup_cshift, view_bob, viewmodel_angles,
+    build_gamma_table, content_cshift, cshift_ramps, pack_rgba, powerup_cshift, view_bob, viewmodel_angles, FramePalette,
     viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
@@ -101,39 +101,36 @@ pub(crate) use band::map_rows;
 // Image
 // ---------------------------------------------------------------------------
 
-/// A simple row-major RGB framebuffer. `rgb[y * w + x]` is the pixel at
-/// `(x, y)` with the origin at the top-left.
-pub struct Image {
+/// A row-major picture, `pixels[y * w + x]` the pixel at `(x, y)` with the
+/// origin at the top-left.
+///
+/// The frame the renderer and the 2-D layer draw is 8-bit, as Quake's
+/// `vid.buffer` is: `Image<u8>` (the default), each pixel a palette index.
+/// What an index looks like is decided only when the frame is presented,
+/// through the frame's palette — `VID_SetPalette`'s `gfx/palette.lmp` with
+/// `V_UpdatePalette`'s shifts and gamma ([`FramePalette`]) — as a VGA DAC
+/// does, so everything drawn is palette-true by construction. `Image<[u8;
+/// 3]>` is a true-colour picture: the flat debug view ([`render_bsp`]) and
+/// what a PPM holds ([`Image::to_rgb`], [`Image::write_ppm`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Image<P = u8> {
     pub w: usize,
     pub h: usize,
-    pub rgb: Vec<[u8; 3]>,
+    pub pixels: Vec<P>,
 }
 
-impl Image {
-    /// Allocate a `w * h` image filled with the background colour `bg`.
-    pub fn new(w: usize, h: usize, bg: [u8; 3]) -> Image {
+impl<P: Copy> Image<P> {
+    /// Allocate a `w * h` image filled with the background `bg`.
+    pub fn new(w: usize, h: usize, bg: P) -> Image<P> {
         // `w * h` could in principle overflow `usize` on absurd inputs; saturate
         // so we never wrap to a tiny allocation and then index past it.
         let count = w.saturating_mul(h);
-        Image {
-            w,
-            h,
-            rgb: vec![bg; count],
-        }
-    }
-
-    /// A `w * h` image on a spare frame buffer whose old pixels are LEFT IN
-    /// PLACE (only growth is filled, black): for a caller that writes every
-    /// pixel, so the clear would be wasted.
-    pub(crate) fn reused_uncleared(w: usize, h: usize) -> Image {
-        let mut rgb = take_spare_rgb();
-        rgb.resize(w.saturating_mul(h), [0, 0, 0]);
-        Image { w, h, rgb }
+        Image { w, h, pixels: vec![bg; count] }
     }
 
     /// Set the pixel at `(x, y)` to `c`. A bounds-checked no-op when the
     /// coordinate lies off-screen (including negative coordinates).
-    pub fn put(&mut self, x: i32, y: i32, c: [u8; 3]) {
+    pub fn put(&mut self, x: i32, y: i32, c: P) {
         if x < 0 || y < 0 {
             return;
         }
@@ -142,9 +139,20 @@ impl Image {
             return;
         }
         let idx = y * self.w + x;
-        if let Some(p) = self.rgb.get_mut(idx) {
+        if let Some(p) = self.pixels.get_mut(idx) {
             *p = c;
         }
+    }
+}
+
+impl Image {
+    /// A `w * h` frame on a spare frame buffer whose old pixels are LEFT IN
+    /// PLACE (only growth is filled, index 0): for a caller that writes every
+    /// pixel, so the clear would be wasted.
+    pub(crate) fn reused_uncleared(w: usize, h: usize) -> Image {
+        let mut pixels = take_spare_pixels();
+        pixels.resize(w.saturating_mul(h), 0);
+        Image { w, h, pixels }
     }
 
     /// Copy `view` into this image with its top-left corner at `(x, y)`, as
@@ -153,17 +161,26 @@ impl Image {
         let (sw, sh) = (self.w, self.h);
         let (x0, y0) = (x.min(sw), y.min(sh));
         let (cw, ch) = (view.w.min(sw - x0), view.h.min(sh - y0));
-        if cw == 0 || ch == 0 || self.rgb.len() < sw * sh || view.rgb.len() < view.w * view.h {
+        if cw == 0 || ch == 0 || self.pixels.len() < sw * sh || view.pixels.len() < view.w * view.h {
             return;
         }
         let vw = view.w;
-        map_rows(threads, ch, &mut self.rgb[y0 * sw..(y0 + ch) * sw], sw, &view.rgb[..ch * vw], vw, |dst, src| {
+        let rows = &mut self.pixels[y0 * sw..(y0 + ch) * sw];
+        map_rows(threads, ch, rows, sw, &view.pixels[..ch * vw], vw, |dst, src| {
             for (d, s) in dst.chunks_mut(sw).zip(src.chunks(vw)) {
                 d[x0..x0 + cw].copy_from_slice(&s[..cw]);
             }
         });
     }
 
+    /// The frame as true colour: every index through `palette`.
+    #[must_use]
+    pub fn to_rgb(&self, palette: &Palette) -> Image<[u8; 3]> {
+        Image { w: self.w, h: self.h, pixels: self.pixels.iter().map(|&i| palette[usize::from(i)]).collect() }
+    }
+}
+
+impl Image<[u8; 3]> {
     /// Write the image as a binary (P6) PPM file.
     pub fn write_ppm(&self, path: &str) -> std::io::Result<()> {
         use std::io::Write;
@@ -171,18 +188,22 @@ impl Image {
         let mut out = std::io::BufWriter::new(file);
         // P6 header: magic, width, height, maxval.
         out.write_all(format!("P6\n{} {}\n255\n", self.w, self.h).as_bytes())?;
-        // Pixel payload: 3 bytes per pixel, row-major. Build one flat buffer so
-        // we issue a single bulk write rather than a syscall per pixel.
-        let mut raw = Vec::with_capacity(self.rgb.len().saturating_mul(3));
-        for px in &self.rgb {
-            raw.push(px[0]);
-            raw.push(px[1]);
-            raw.push(px[2]);
-        }
+        // Pixel payload: 3 bytes per pixel, row-major, in one bulk write.
+        let raw: Vec<u8> = self.pixels.iter().flatten().copied().collect();
         out.write_all(&raw)?;
-        out.flush()?;
-        Ok(())
+        out.flush()
     }
+}
+
+/// The palette index of the colour in `palette` nearest `rgb` (squared
+/// distance; the first of equals). For the few colours the port is handed
+/// as RGB rather than as an index — a skinless model's debug colour, the
+/// linear shading of a scene without a colormap — neither of which id's data
+/// ever needs.
+#[must_use]
+pub fn nearest_index(palette: &Palette, rgb: [u8; 3]) -> u8 {
+    let dist = |c: &[u8; 3]| -> i32 { c.iter().zip(rgb).map(|(&a, b)| (i32::from(a) - i32::from(b)).pow(2)).sum() };
+    (0..=255u8).min_by_key(|&i| dist(&palette[usize::from(i)])).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -207,32 +228,33 @@ const SPARE_FRAMES: usize = 3;
 
 thread_local! {
     /// Pixel buffers of frames handed back by [`recycle_image`].
-    static SPARE_RGB: std::cell::RefCell<Vec<Vec<[u8; 3]>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SPARE_PIXELS: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Hand a finished frame's pixel buffer back so the next frame reuses it
 /// instead of allocating (the host calls this once the frame is presented).
 /// Nothing drawn depends on whether it is called.
 pub fn recycle_image(image: Image) {
-    recycle_rgb(image.rgb);
+    recycle_pixels(image.pixels);
 }
 
-/// [`recycle_image`] for a bare pixel buffer (the warp's snapshot).
-pub(crate) fn recycle_rgb(rgb: Vec<[u8; 3]>) {
-    if rgb.capacity() == 0 {
+/// [`recycle_image`] for a bare pixel buffer (the warp's snapshot, a
+/// presented frame's).
+pub fn recycle_pixels(pixels: Vec<u8>) {
+    if pixels.capacity() == 0 {
         return;
     }
-    SPARE_RGB.with(|s| {
+    SPARE_PIXELS.with(|s| {
         let mut s = s.borrow_mut();
         if s.len() < SPARE_FRAMES {
-            s.push(rgb);
+            s.push(pixels);
         }
     });
 }
 
 /// A spare pixel buffer (old contents and all), or an empty one.
-pub(crate) fn take_spare_rgb() -> Vec<[u8; 3]> {
-    SPARE_RGB.with(|s| s.borrow_mut().pop()).unwrap_or_default()
+pub(crate) fn take_spare_pixels() -> Vec<u8> {
+    SPARE_PIXELS.with(|s| s.borrow_mut().pop()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +509,7 @@ impl Projection {
 /// texinfo index when miptex is unavailable), modulated by a Lambert term
 /// `max(0.15, dot(normal, light_dir))` with `light_dir` normalised from
 /// `(0.3, 0.5, 1.0)`.
-pub fn render_bsp(bsp: &Bsp, cam: &Camera, w: usize, h: usize) -> Image {
+pub fn render_bsp(bsp: &Bsp, cam: &Camera, w: usize, h: usize) -> Image<[u8; 3]> {
     const NEAR: f32 = 1.0;
     let bg: [u8; 3] = [12, 12, 18];
     let mut image = Image::new(w, h, bg);
@@ -743,6 +765,11 @@ pub struct Scene<'a> {
     /// [`Renderer::render`] returns says what was drawn.
     pub width: usize,
     pub height: usize,
+    /// The palette the frame will be shown with (`gfx/palette.lmp`). The
+    /// renderer draws palette indices and consults it only for the colours
+    /// the port is handed as RGB: a skinless model's flat colour and the
+    /// linear shading of a scene without a colormap, each drawn as the
+    /// nearest palette entry ([`nearest_index`]).
     pub palette: &'a Palette,
     /// Quake's `gfx/colormap.lmp`: `64 * 256` bytes, 64 light rows of 256
     /// palette indices, row 0 brightest. With it a wall pixel is shaded as the
@@ -750,8 +777,9 @@ pub struct Scene<'a> {
     /// (`R_BuildLightMap`), `colormap[row*256 + texel]` is the palette index
     /// drawn — Quake's non-linear darkening, never brighter than the texel.
     /// Liquids and sky are fullbright, the raw texel. `None` (or one shorter
-    /// than `64*256`) keeps the port's older linear `palette[texel] *
-    /// brightness`, which the synthetic tests use.
+    /// than `64*256`) keeps the port's older linear shading, the palette
+    /// entry nearest `palette[texel] * brightness`, which the synthetic tests
+    /// use (id's Quake cannot start without the colormap).
     pub colormap: Option<&'a [u8]>,
     /// `cl.time` in seconds: the liquid turb (`Turbulent8`), the sky's
     /// two-layer scroll, animated wall textures (`R_TextureAnimation`) and
@@ -989,7 +1017,7 @@ impl Renderer {
         let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
         // The frame's pixels, on a spare buffer (see [`recycle_image`]).
         let mut image = Image::reused_uncleared(w, h);
-        self.draw(scene, w, h, &mut image.rgb, w, 0);
+        self.draw(scene, w, h, &mut image.pixels, w, 0);
         image
     }
 
@@ -1003,9 +1031,9 @@ impl Renderer {
         let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
         let (x, y) = scene.options.screen.map_or((0, 0), |p| (p.x, p.y));
         let sw = screen.w;
-        let fits = x + w <= sw && y + h <= screen.h && screen.rgb.len() >= sw.saturating_mul(screen.h);
+        let fits = x + w <= sw && y + h <= screen.h && screen.pixels.len() >= sw.saturating_mul(screen.h);
         if fits {
-            self.draw(scene, w, h, &mut screen.rgb[y * sw..(y + h) * sw], sw, x);
+            self.draw(scene, w, h, &mut screen.pixels[y * sw..(y + h) * sw], sw, x);
         } else {
             let view = self.render(scene);
             screen.blit(&view, x, y, self.threads());
@@ -1018,7 +1046,7 @@ impl Renderer {
     /// decides is done first — the world's edges, spans and surfaces (the
     /// surface cache filled), the entities up to their rasterisers — and then
     /// every band of the view draws from it, on the renderer's threads.
-    fn draw(&mut self, scene: &Scene, w: usize, h: usize, rows: &mut [[u8; 3]], stride: usize, x0: usize) {
+    fn draw(&mut self, scene: &Scene, w: usize, h: usize, rows: &mut [u8], stride: usize, x0: usize) {
         if w == 0 || h == 0 {
             return;
         }
@@ -1089,7 +1117,7 @@ impl Renderer {
         let (sw, threads) = (screen.w, self.threads());
         let (x0, y0) = (at.x.min(sw), at.y.min(screen.h));
         let (w, h) = (at.w.min(sw - x0), at.h.min(screen.h - y0));
-        if let Some(rows) = screen.rgb.get_mut(y0 * sw..(y0 + h) * sw) {
+        if let Some(rows) = screen.pixels.get_mut(y0 * sw..(y0 + h) * sw) {
             let target = warp::WarpTarget { rows, stride: sw, x0, w, h };
             warp::warp_screen(&mut self.warp, &view, target, clock, hires, threads);
         }
@@ -1115,7 +1143,7 @@ impl<'a> Entities<'a> {
         let models = scene.models.iter().filter_map(|inst| prepare_alias_model(frame, inst, prof)).collect();
         let opts = &scene.options;
         let proj = part::ParticleProjection::new(&frame.cam, frame.w, frame.h, opts.aspect(), opts.video.hires);
-        let particles = part::project_particles(&frame.cam, &proj, scene.particles, scene.palette);
+        let particles = part::project_particles(&frame.cam, &proj, scene.particles);
         let gun = scene.viewmodel.as_ref().and_then(|vm| prepare_viewmodel(frame, vm));
         Entities { models, particles, gun }
     }
@@ -1126,10 +1154,9 @@ impl<'a> Entities<'a> {
     /// particles after the gun; with the gun's tripled 1/z the order only
     /// matters on exact ties). A phase timer each while profiling.
     fn draw(&self, band: &mut band::Band, frame: &Frame, prof: &mut stats::Profiler) {
-        let palette = frame.scene.palette;
         let ta = prof.now();
         if !self.models.is_empty() {
-            let mut fb = polyse::PolyFramebuffer::new(band, palette);
+            let mut fb = polyse::PolyFramebuffer::new(band);
             for m in &self.models {
                 m.draw(&mut fb);
             }
@@ -1143,7 +1170,7 @@ impl<'a> Entities<'a> {
         if let Some(t) = tsp { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
         let tv = prof.now();
         if let Some(gun) = &self.gun {
-            gun.draw(&mut polyse::PolyFramebuffer::new(band, palette));
+            gun.draw(&mut polyse::PolyFramebuffer::new(band));
         }
         if let Some(t) = tv { prof.add(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
     }
@@ -1401,11 +1428,11 @@ mod tests {
         // demo_room has no inline textures, so the textured path must still draw
         // (via the flat fallback) rather than producing an empty frame.
         let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let img = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
-        let bg = [10u8, 10, 14];
-        assert!(img.rgb.iter().any(|&p| p != bg), "textured render drew nothing");
+        let bg = 2u8; // r_clearcolor, the background
+        assert!(img.pixels.iter().any(|&p| p != bg), "textured render drew nothing");
     }
 
     #[test]
@@ -1438,20 +1465,20 @@ mod tests {
 
     #[test]
     fn image_put_bounds_checking() {
-        let mut img = Image::new(4, 3, [0, 0, 0]);
+        let mut img = Image::new(4, 3, 0);
         // In range: sets the pixel.
-        img.put(1, 2, [10, 20, 30]);
-        assert_eq!(img.rgb[2 * 4 + 1], [10, 20, 30]);
+        img.put(1, 2, 10);
+        assert_eq!(img.pixels[2 * 4 + 1], 10);
 
         // Off-screen in every direction: all no-ops, no panic.
-        img.put(-1, 0, [1, 1, 1]);
-        img.put(0, -1, [1, 1, 1]);
-        img.put(4, 0, [1, 1, 1]); // x == w
-        img.put(0, 3, [1, 1, 1]); // y == h
-        img.put(100, 100, [1, 1, 1]);
+        img.put(-1, 0, 1);
+        img.put(0, -1, 1);
+        img.put(4, 0, 1); // x == w
+        img.put(0, 3, 1); // y == h
+        img.put(100, 100, 1);
 
         // The only non-background pixel should still be the one we set.
-        let nonblack = img.rgb.iter().filter(|p| **p != [0, 0, 0]).count();
+        let nonblack = img.pixels.iter().filter(|p| **p != 0).count();
         assert_eq!(nonblack, 1);
     }
 
@@ -1463,10 +1490,10 @@ mod tests {
 
         assert_eq!(img.w, 160);
         assert_eq!(img.h, 120);
-        assert_eq!(img.rgb.len(), 160 * 120);
+        assert_eq!(img.pixels.len(), 160 * 120);
 
         let bg = [12u8, 12, 18];
-        let drawn = img.rgb.iter().filter(|p| **p != bg).count();
+        let drawn = img.pixels.iter().filter(|p| **p != bg).count();
         // It must actually have rasterised geometry (walls + pillar), not just
         // background. A central interior view fills a large fraction of pixels.
         assert!(
@@ -1483,12 +1510,12 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let img = render_bsp(&bsp, &cam, 160, 120);
         let bg = [12u8, 12, 18];
-        let drawn = img.rgb.iter().filter(|p| **p != bg).count();
+        let drawn = img.pixels.iter().filter(|p| **p != bg).count();
         assert!(drawn > 0, "z-buffered render produced an image");
 
         // At least two distinct surface colours should appear (pillar vs walls),
         // proving the z-buffer let nearer geometry win over farther geometry.
-        let mut colors: Vec<[u8; 3]> = img.rgb.iter().filter(|p| **p != bg).copied().collect();
+        let mut colors: Vec<[u8; 3]> = img.pixels.iter().filter(|p| **p != bg).copied().collect();
         colors.sort();
         colors.dedup();
         assert!(
@@ -1505,7 +1532,7 @@ mod tests {
         // comes 1/6 closer to the centre row, so the 4:3 display (pixels 1.2x
         // taller than wide) shows its true shape.
         let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let (w, h) = (320usize, 200usize);
         let render = |pixel_aspect: f32| {
@@ -1514,13 +1541,13 @@ mod tests {
         // The pillar's face: the colour at the centre; its columns on the centre
         // row and its top row on the centre column.
         let extent = |img: &Image| {
-            let c = img.rgb[(h / 2) * w + w / 2];
-            let row: Vec<usize> = (0..w).filter(|&x| img.rgb[(h / 2) * w + x] == c).collect();
-            let top = (0..h).find(|&y| img.rgb[y * w + w / 2] == c).expect("pillar in view");
+            let c = img.pixels[(h / 2) * w + w / 2];
+            let row: Vec<usize> = (0..w).filter(|&x| img.pixels[(h / 2) * w + x] == c).collect();
+            let top = (0..h).find(|&y| img.pixels[y * w + w / 2] == c).expect("pillar in view");
             (row[0], row[row.len() - 1], h / 2 - top)
         };
         let square = render(1.0);
-        assert_eq!(square.rgb, render_once(&Scene::new(&bsp, cam, w, h, &pal)).rgb, "aspect 1 is the default");
+        assert_eq!(square.pixels, render_once(&Scene::new(&bsp, cam, w, h, &pal)).pixels, "aspect 1 is the default");
         let (l1, r1, up1) = extent(&square);
         let (l2, r2, up2) = extent(&render(crate::screen::vid_aspect(w, h, 4.0 / 3.0)));
         assert_eq!((l1, r1), (l2, r2), "the width does not change");
@@ -1550,7 +1577,7 @@ mod tests {
         let bsp = demo_room();
         let cam = Camera::looking_at([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 90.0);
         let img = render_bsp(&bsp, &cam, 0, 0);
-        assert_eq!(img.rgb.len(), 0);
+        assert_eq!(img.pixels.len(), 0);
     }
 
     #[test]
@@ -1593,13 +1620,13 @@ mod tests {
         let world = Scene { time: 1.3, dlights: &dlights, ..Scene::new(&bsp, cam, 211, 157, &pal) };
         let scene = Scene { models: &models, particles: &particles, sprites: &sprites, viewmodel: Some(gun), ..world };
         let one = render_once(&scene);
-        let differ = one.rgb.iter().zip(&render_once(&world).rgb).filter(|(a, b)| a != b).count();
+        let differ = one.pixels.iter().zip(&render_once(&world).pixels).filter(|(a, b)| a != b).count();
         assert!(differ > 200, "the entities show: {differ} pixels");
         for threads in [2, 3, 7, 16] {
             let mut r = Renderer::new();
             r.set_threads(threads);
-            assert!(r.render(&scene).rgb == one.rgb, "{threads} threads");
-            assert!(r.render(&scene).rgb == one.rgb, "{threads} threads, warm");
+            assert!(r.render(&scene).pixels == one.pixels, "{threads} threads");
+            assert!(r.render(&scene).pixels == one.pixels, "{threads} threads, warm");
         }
     }
 
@@ -1623,12 +1650,12 @@ mod tests {
             r.set_threads(threads);
             for (x, y) in [(13, 7), (100, 90)] {
                 let apart = render_once(&scene(x, y));
-                let mut screen = Image::new(200, 150, [1, 2, 3]);
+                let mut screen = Image::new(200, 150, 1);
                 r.render_into(&scene(x, y), &mut screen);
-                for (i, p) in screen.rgb.iter().enumerate() {
+                for (i, p) in screen.pixels.iter().enumerate() {
                     let (u, v) = (i % 200, i / 200);
                     let inside = (x..x + vw).contains(&u) && (y..y + vh).contains(&v);
-                    let want = if inside { apart.rgb[(v - y) * vw + (u - x)] } else { [1, 2, 3] };
+                    let want = if inside { apart.pixels[(v - y) * vw + (u - x)] } else { 1 };
                     assert_eq!(*p, want, "{threads} threads, view at ({x}, {y}), pixel ({u}, {v})");
                 }
             }
@@ -1650,10 +1677,10 @@ mod tests {
         let cold = Renderer::new().render(&scene);
         let mut r = Renderer::new();
         r.render(&scene);
-        assert_eq!(r.render(&scene).rgb, cold.rgb, "the second frame");
+        assert_eq!(r.render(&scene).pixels, cold.pixels, "the second frame");
         let other = demo_room();
         r.render(&Scene::new(&other, cam, 160, 120, &pal));
-        assert_eq!(r.render(&scene).rgb, cold.rgb, "after another map");
+        assert_eq!(r.render(&scene).pixels, cold.pixels, "after another map");
     }
 
     #[test]
@@ -1702,12 +1729,12 @@ mod tests {
         let a = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         let b = render_once(&Scene { time: 0.6, ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
-        let bg = [10u8, 10, 14];
+        let bg = 2u8; // r_clearcolor, the background
         assert!(
-            a.rgb.iter().any(|&p| p != bg),
+            a.pixels.iter().any(|&p| p != bg),
             "special-surface room rendered nothing"
         );
-        let changed = a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count();
+        let changed = a.pixels.iter().zip(b.pixels.iter()).filter(|(x, y)| x != y).count();
         assert!(
             changed > 0,
             "liquid/sky faces must animate between two game times"
@@ -1720,11 +1747,11 @@ mod tests {
         // take the Normal path and render IDENTICALLY at any time — the animation
         // never touches ordinary walls.
         let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let t0 = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         let t1 = render_once(&Scene { time: 9.5, ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
+        assert_eq!(t0.pixels, t1.pixels, "ordinary walls must not animate with time");
     }
 
     /// A [`demo_room`] whose FLOOR is a liquid (`*water1`) and CEILING is sky

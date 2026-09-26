@@ -160,16 +160,14 @@ const SKY_SPAN_MAX: i32 = 1 << SKY_SPAN_SHIFT;
 /// coordinates are exact at the span start and every 32 pixels, stepped by
 /// `(next - cur) >> 5` between; the last segment steps by an integer division
 /// over its `count - 1` so it ends exactly on the span's last pixel.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_sky_span(
-    out: &mut [[u8; 3]],
+    out: &mut [u8],
     u: i32,
     v: i32,
     count: i32,
     pixels: &[u8],
     tw: usize,
     view: &SkyView,
-    palette: &[[u8; 3]; 256],
 ) {
     let mut u = u;
     let mut count = count;
@@ -196,7 +194,7 @@ pub(super) fn draw_sky_span(
         }
         for _ in 0..spancount {
             if let Some(p) = out.next() {
-                *p = palette[sky_sample(pixels, tw, s, t, view.shift) as usize];
+                *p = sky_sample(pixels, tw, s, t, view.shift);
             }
             s = s.wrapping_add(sstep);
             t = t.wrapping_add(tstep);
@@ -230,12 +228,6 @@ mod tests {
         // (the sky is projected from the view ray, D_Sky_uv_To_st — not the wall
         // (s,t)).
         let pixels = synthetic_sky_pixels();
-        let mut pal = [[0u8; 3]; 256];
-        for (i, p) in pal.iter_mut().enumerate() {
-            // Map every index to a distinct, clearly non-zero colour so any
-            // sampled sky texel is visibly different from the [0,0,0] background.
-            *p = [(i as u8).max(1), 255u8.saturating_sub(i as u8), 128];
-        }
 
         let (w, h) = (48usize, 48usize);
         // Build a SkyView for a given look direction (forward), with an orthonormal
@@ -250,17 +242,17 @@ mod tests {
         // The view as D_DrawSurfaces draws a sky surface covering it: one span
         // per row (the sky uses the view ray, not a face's (s,t)).
         let render_at = |view: SkyView| {
-            let mut rgb = vec![[0u8; 3]; w * h]; // background = pure black
-            for (y, row) in rgb.chunks_mut(w).enumerate() {
-                draw_sky_span(row, 0, y as i32, w as i32, &pixels, 256, &view, &pal);
+            let mut frame = vec![0u8; w * h]; // background = index 0
+            for (y, row) in frame.chunks_mut(w).enumerate() {
+                draw_sky_span(row, 0, y as i32, w as i32, &pixels, 256, &view);
             }
-            rgb
+            frame
         };
         let a = render_at(make_view([1.0, 0.0, 0.0], 0.0)); // looking +X
         let b = render_at(make_view([1.0, 0.0, 0.0], 1.0));
 
         // (1) Non-background: the sky drew real texels (not a flat empty frame).
-        let drawn = a.iter().filter(|&&p| p != [0, 0, 0]).count();
+        let drawn = a.iter().filter(|&&p| p != 0).count();
         assert!(drawn > 0, "sky face rendered no pixels (should show the sky texture)");
 
         // (2) Animated: scrolling shifts the texels, so the two frames differ.
@@ -319,14 +311,10 @@ mod tests {
         // A 40-pixel span: exact at u0 and u0+32, stepped by (next-cur)>>5 in
         // between, then the 8-pixel tail stepped by division over 7.
         let pixels = synthetic_sky_pixels();
-        let mut pal = [[0u8; 3]; 256];
-        for (i, p) in pal.iter_mut().enumerate() {
-            *p = [i as u8, 0, 0];
-        }
         let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3);
         let (u0, row, n) = (17, 60, 40);
-        let mut out = vec![[0u8; 3]; n as usize];
-        draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v, &pal);
+        let mut out = vec![0u8; n as usize];
+        draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v);
         let (s0, t0) = sky_uv_to_st(u0, row, &v);
         let (s1, t1) = sky_uv_to_st(u0 + 32, row, &v);
         let (s2, t2) = sky_uv_to_st(u0 + 39, row, &v);
@@ -339,8 +327,7 @@ mod tests {
         for i in 0..8 {
             want.push(sky_sample(&pixels, 256, s1 + i * ss, t1 + i * ts, v.shift));
         }
-        let got: Vec<u8> = out.iter().map(|p| p[0]).collect();
-        assert_eq!(got, want);
+        assert_eq!(out, want);
     }
 
     #[test]

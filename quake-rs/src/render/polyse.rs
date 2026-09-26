@@ -6,7 +6,6 @@
 
 use super::alias::{AliasSetup, FinalVert, ALIAS_ONSEAM};
 use super::band::Band;
-use super::Palette;
 
 /// The sentinel `D_RasterizeAliasPolySmooth` stores in a span's `count`.
 const SPAN_END: i32 = -999_999;
@@ -85,7 +84,6 @@ fn c_ftoi(x: f64) -> i32 {
 pub(super) struct PolyFramebuffer<'b, 'a> {
     band: &'b mut Band<'a>,
     width: isize,
-    palette: &'b Palette,
     // D_PolysetSetUpForLineScan
     errorterm: i32,
     erroradjustup: i32,
@@ -130,12 +128,11 @@ pub(super) struct PolyFramebuffer<'b, 'a> {
 
 impl<'b, 'a> PolyFramebuffer<'b, 'a> {
     /// The rasteriser over `band`.
-    pub(super) fn new(band: &'b mut Band<'a>, palette: &'b Palette) -> PolyFramebuffer<'b, 'a> {
+    pub(super) fn new(band: &'b mut Band<'a>) -> PolyFramebuffer<'b, 'a> {
         let width = band.width() as isize;
         PolyFramebuffer {
             band,
             width,
-            palette,
             errorterm: 0,
             erroradjustup: 0,
             erroradjustdown: 0,
@@ -189,7 +186,7 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
         let z16 = zi >> 16;
         if z16 >= *z as i32 {
             *z = z16 as i16;
-            *p = if setup.skin.is_some() { self.palette[pal_index as usize] } else { setup.flat };
+            *p = if setup.skin.is_some() { pal_index } else { setup.flat };
         }
     }
 
@@ -709,10 +706,6 @@ mod tests {
     /// Fill one screen triangle through `D_PolysetDraw`'s edge walker with a 1x1
     /// skin of `texel` and light `light` at every vertex.
     fn polyset_fill(img: &mut Image, verts: [(i32, i32); 3], texel: u8, light: i32, cm: Option<&[u8]>) {
-        let mut pal = [[0u8; 3]; 256];
-        for (i, p) in pal.iter_mut().enumerate() {
-            *p = [i as u8, 0, 0];
-        }
         let skin = [texel];
         let setup = AliasSetup {
             transform: [[0.0; 4]; 3],
@@ -725,12 +718,12 @@ mod tests {
             skinwidth: 1,
             seamfixup: 0,
             colormap: cm,
-            flat: [0; 3],
+            flat: 0,
         };
         let fv = |(u, v): (i32, i32)| FinalVert { v: [u, v, 0, 0, light, 1 << 24], flags: 0 };
         let mut zbuf = vec![i16::MIN; img.w * img.h];
-        let mut band = Band::whole(img.w, &mut img.rgb, &mut zbuf);
-        let mut fb = PolyFramebuffer::new(&mut band, &pal);
+        let mut band = Band::whole(img.w, &mut img.pixels, &mut zbuf);
+        let mut fb = PolyFramebuffer::new(&mut band);
         fb.polyset_draw(&setup, [fv(verts[0]), fv(verts[1]), fv(verts[2])], true);
     }
 
@@ -740,22 +733,22 @@ mod tests {
         // pixels with no gap and no overlap, and nothing outside it: the fill
         // rule of D_RasterizeAliasPolySmooth (left edge in, right edge out, top
         // row in, bottom row out).
-        let count = |img: &Image| img.rgb.iter().filter(|p| p[0] != 0).count();
-        let mut a = Image::new(12, 12, [0, 0, 0]);
+        let count = |img: &Image| img.pixels.iter().filter(|&&p| p != 0).count();
+        let mut a = Image::new(12, 12, 0);
         polyset_fill(&mut a, [(2, 2), (10, 2), (10, 10)], 1, 0, None);
-        let mut b = Image::new(12, 12, [0, 0, 0]);
+        let mut b = Image::new(12, 12, 0);
         polyset_fill(&mut b, [(2, 2), (10, 10), (2, 10)], 2, 0, None);
         assert_eq!((count(&a), count(&b)), (36, 28));
         for y in 0..12 {
             for x in 0..12 {
                 let inside = (2..10).contains(&x) && (2..10).contains(&y);
-                let (pa, pb) = (a.rgb[y * 12 + x][0] != 0, b.rgb[y * 12 + x][0] != 0);
+                let (pa, pb) = (a.pixels[y * 12 + x] != 0, b.pixels[y * 12 + x] != 0);
                 assert_eq!(pa || pb, inside, "({x},{y})");
                 assert!(!(pa && pb), "overlap at ({x},{y})");
             }
         }
         // Back faces (d_xdenom >= 0) draw nothing.
-        let mut c = Image::new(12, 12, [0, 0, 0]);
+        let mut c = Image::new(12, 12, 0);
         polyset_fill(&mut c, [(2, 2), (10, 10), (10, 2)], 1, 0, None);
         assert_eq!(count(&c), 0);
     }
@@ -780,7 +773,6 @@ mod tests {
     /// walk's `d_zi += d_ziextrastep` then wraps (a debug build panicked here).
     #[test]
     fn sliver_triangles_wrap_like_the_c_ints() {
-        let pal = [[0u8; 3]; 256];
         let skin = [1u8; 4];
         let setup = AliasSetup {
             transform: [[0.0; 4]; 3],
@@ -793,15 +785,15 @@ mod tests {
             skinwidth: 2,
             seamfixup: 0,
             colormap: None,
-            flat: [0; 3],
+            flat: 0,
         };
         let (near, far) = (1 << 30, 1 << 20);
         let fv = |u: i32, v: i32, zi: i32| FinalVert { v: [u, v, 0, 0, 0x7F00, zi], flags: 0 };
         let tri = [fv(0, 0, near), fv(4, 200, near), fv(2, 101, far)];
-        let mut img = Image::new(8, 208, [0, 0, 0]);
+        let mut img = Image::new(8, 208, 0);
         let mut zbuf = vec![i16::MIN; img.w * img.h];
-        let mut band = Band::whole(img.w, &mut img.rgb, &mut zbuf);
-        let mut fb = PolyFramebuffer::new(&mut band, &pal);
+        let mut band = Band::whole(img.w, &mut img.pixels, &mut zbuf);
+        let mut fb = PolyFramebuffer::new(&mut band);
         fb.polyset_draw(&setup, tri, true);
         let t = f64::from(near - far);
         assert_eq!((fb.r_zistepx, fb.r_zistepy), (i32::MIN, c_ftoi(-t)));
@@ -819,9 +811,9 @@ mod tests {
                 cm[row * 256 + col] = if row == 40 && col == 10 { 77 } else { col as u8 };
             }
         }
-        let mut img = Image::new(8, 8, [0, 0, 0]);
+        let mut img = Image::new(8, 8, 0);
         polyset_fill(&mut img, [(0, 0), (8, 0), (8, 8)], 10, (40 << 8) + 0x7F, Some(&cm));
-        let drawn: Vec<u8> = img.rgb.iter().filter(|p| p[0] != 0).map(|p| p[0]).collect();
+        let drawn: Vec<u8> = img.pixels.iter().copied().filter(|&p| p != 0).collect();
         assert!(!drawn.is_empty());
         assert!(drawn.iter().all(|&i| i == 77), "{drawn:?}");
     }

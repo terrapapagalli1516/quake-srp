@@ -37,7 +37,8 @@ pub const MAXHEIGHT: usize = 1024;
 
 /// The largest view with [`VideoCvars::hires`]: 8K UHD, 7680x4320. Not a
 /// limit of the renderer's arithmetic (its edge `u` is 44.20 fixed point) but
-/// of memory: a frame is `w*h` RGB plus a 16-bit z-buffer, 166 MB here.
+/// of memory: a frame is `w*h` palette indices plus a 16-bit z-buffer, 100 MB
+/// here.
 pub const HIRES_MAXWIDTH: usize = 7680;
 /// See [`HIRES_MAXWIDTH`].
 pub const HIRES_MAXHEIGHT: usize = 4320;
@@ -210,7 +211,7 @@ mod tests {
         let wide = draw(192, 108, VideoCvars { fov_mode: FovMode::HorPlus, hires: false });
         let classic_wide = draw(192, 108, VideoCvars::CLASSIC);
         let same = |img: &crate::render::Image| {
-            (0..108 * 144).filter(|&i| img.rgb[(i / 144) * 192 + 24 + i % 144] == narrow.rgb[i]).count()
+            (0..108 * 144).filter(|&i| img.pixels[(i / 144) * 192 + 24 + i % 144] == narrow.pixels[i]).count()
         };
         assert!(same(&wide) * 100 >= 98 * 144 * 108, "{} of {}", same(&wide), 144 * 108);
         // Classic spreads fov 90 over the 192 columns: a different picture.

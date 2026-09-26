@@ -19,7 +19,6 @@ use std::collections::VecDeque;
 pub fn draw_notify(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
-    palette: &[[u8; 3]; 256],
     lines: &[&str],
 ) {
     if image.w == 0 || image.h == 0 {
@@ -28,7 +27,7 @@ pub fn draw_notify(
     let scale = screen_2d(image.w, image.h).scale;
     let mut vy = 0.0;
     for line in lines {
-        draw_string_scaled(image, conchars, 8.0, vy, line, scale, 0.0, 0.0, palette);
+        draw_string_scaled(image, conchars, 8.0, vy, line, scale, 0.0, 0.0);
         vy += 8.0;
     }
 }
@@ -619,12 +618,11 @@ fn draw_console_background(
     lines: i32,
     conback: Option<&crate::wad::Qpic>,
     conchars: Option<&crate::wad::Qpic>,
-    palette: &[[u8; 3]; 256],
 ) {
     let rows = sc.px(lines).clamp(0, image.h as i64) as usize;
     let pic = conback.filter(|p| p.width == 320 && p.height == 200 && p.data.len() >= 320 * 200);
     let Some(pic) = pic else {
-        fill_rect(image, 0, 0, image.w as i64, rows as i64, palette[0]);
+        fill_rect(image, 0, 0, image.w as i64, rows as i64, 0);
         return;
     };
     let mut data = pic.data[..320 * 200].to_vec();
@@ -655,9 +653,9 @@ fn draw_console_background(
         let y = ((py as f32 * inv) as i64).min(lines as i64 - 1);
         let v = (((height - lines as i64 + y) * 200 / height).clamp(0, 199)) as usize;
         let srow = &data[v * 320..v * 320 + 320];
-        let row = &mut image.rgb[py * image.w..(py + 1) * image.w];
+        let row = &mut image.pixels[py * image.w..(py + 1) * image.w];
         for (out, &sx) in row.iter_mut().zip(&cols) {
-            *out = palette[srow[sx] as usize];
+            *out = srow[sx];
         }
     }
 }
@@ -670,13 +668,12 @@ pub fn draw_console_background_full(
     image: &mut Image,
     conback: Option<&crate::wad::Qpic>,
     conchars: Option<&crate::wad::Qpic>,
-    palette: &[[u8; 3]; 256],
 ) {
     if image.w == 0 || image.h == 0 {
         return;
     }
     let sc = screen_2d(image.w, image.h);
-    draw_console_background(image, sc, sc.h, conback, conchars, palette);
+    draw_console_background(image, sc, sc.h, conback, conchars);
 }
 
 /// Draw the drop-down console over `image` at its current height
@@ -700,7 +697,6 @@ pub fn draw_console(
     console: &Console,
     conback: Option<&crate::wad::Qpic>,
     conchars: Option<&crate::wad::Qpic>,
-    palette: &[[u8; 3]; 256],
     realtime: f64,
 ) {
     if image.w == 0 || image.h == 0 {
@@ -711,12 +707,12 @@ pub fn draw_console(
     if lines <= 0 {
         return;
     }
-    draw_console_background(image, sc, lines, conback, conchars, palette);
+    draw_console_background(image, sc, lines, conback, conchars);
     let Some(cc) = conchars else { return };
     let linewidth = ((sc.w >> 3) - 2).max(1) as usize;
     let glyph = |image: &mut Image, col: usize, y: i32, c: u8| {
         if c != b' ' {
-            draw_char_scaled(image, cc, ((col + 1) * 8) as f32, y as f32, c, sc.scale, 0.0, 0.0, palette);
+            draw_char_scaled(image, cc, ((col + 1) * 8) as f32, y as f32, c, sc.scale, 0.0, 0.0);
         }
     };
     // The text, ending with con_current (the last line) less con_backscroll;
@@ -750,7 +746,7 @@ pub fn draw_console(
 mod tests {
     use super::*;
     use crate::keys::K_INS;
-    use crate::render::fixtures::{ramp_palette, solid_pic};
+    use crate::render::fixtures::solid_pic;
 
     /// CENSUS L11: Con_Print lays text into 38-column console lines (word
     /// wrapped, a line stamped when it starts) and Con_DrawNotify shows the
@@ -970,7 +966,6 @@ mod tests {
     /// that many lines up.
     #[test]
     fn pgup_and_pgdn_scroll_the_text_back() {
-        let pal = ramp_palette();
         let cc = lit_conchars();
         let mut c = Console::new();
         c.toggle();
@@ -987,9 +982,9 @@ mod tests {
         // two up: draw it and the unscrolled console and compare with the
         // row two above.
         let draw = |c: &Console| {
-            let mut img = Image::new(320, 200, [0, 0, 0]);
-            draw_console(&mut img, c, None, Some(&cc), &pal, 0.0);
-            img.rgb
+            let mut img = Image::new(320, 200, 0);
+            draw_console(&mut img, c, None, Some(&cc), 0.0);
+            img.pixels
         };
         let scrolled = draw(&c);
         let mut plain = Console::new();
@@ -1145,16 +1140,15 @@ mod tests {
 
     #[test]
     fn draw_console_is_con_drawconsole() {
-        let pal = ramp_palette();
         let cc = lit_conchars();
         let conback = solid_pic(320, 200, 5); // opaque index-5 background
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         // All the way up: draws nothing.
         let mut c = Console::new();
         let mut img = Image::new(320, 200, bg);
-        let before = img.rgb.clone();
-        draw_console(&mut img, &c, Some(&conback), Some(&cc), &pal, 0.0);
-        assert_eq!(img.rgb, before, "a console that is up draws nothing");
+        let before = img.pixels.clone();
+        draw_console(&mut img, &c, Some(&conback), Some(&cc), 0.0);
+        assert_eq!(img.pixels, before, "a console that is up draws nothing");
 
         // Down 100 rows (half of 200).
         c.toggle();
@@ -1163,52 +1157,51 @@ mod tests {
         for ch in "god".chars() {
             c.putchar(ch);
         }
-        draw_console(&mut img, &c, Some(&conback), Some(&cc), &pal, 0.0);
-        assert_eq!(img.rgb[2 * 320 + 2], pal[5], "the conback at the top");
-        assert_eq!(img.rgb[99 * 320 + 2], pal[5], "down to row 99");
-        assert_eq!(img.rgb[100 * 320 + 2], bg, "nothing below the console");
+        draw_console(&mut img, &c, Some(&conback), Some(&cc), 0.0);
+        assert_eq!(img.pixels[2 * 320 + 2], 5, "the conback at the top");
+        assert_eq!(img.pixels[99 * 320 + 2], 5, "down to row 99");
+        assert_eq!(img.pixels[100 * 320 + 2], bg, "nothing below the console");
         // rows = (100-16)>>3 = 10 text lines from y = 100-16-80 = 4: the last
         // ("hello console") at y 76, its first character at x = (0+1)*8.
-        assert_eq!(img.rgb[76 * 320 + 8], pal[3], "text line at (8, 76)");
-        assert_eq!(img.rgb[76 * 320 + 7], pal[5], "nothing left of column 1");
+        assert_eq!(img.pixels[76 * 320 + 8], 3, "text line at (8, 76)");
+        assert_eq!(img.pixels[76 * 320 + 7], 5, "nothing left of column 1");
         // The input line at lines - 16 = 84: ']' at x 8, "god" after it.
-        assert_eq!(img.rgb[84 * 320 + 8], pal[3], "input line at (8, 84)");
+        assert_eq!(img.pixels[84 * 320 + 8], 3, "input line at (8, 84)");
         // The version number is stamped into the pic at (277, 186):
         // conback row 186 shows at screen row 86 of a 100-row console.
-        assert_eq!(img.rgb[86 * 320 + 277], pal[0x60 + 3], "Draw_CharToConback's 0x60 + texel");
+        assert_eq!(img.pixels[86 * 320 + 277], 0x60 + 3, "Draw_CharToConback's 0x60 + texel");
 
         // Closed but still sliding up: the background and text, no input line.
         c.toggle();
         let mut img2 = Image::new(320, 200, bg);
-        draw_console(&mut img2, &c, Some(&conback), Some(&cc), &pal, 0.0);
-        assert_eq!(img2.rgb[84 * 320 + 8], pal[5], "no input line once closed");
-        assert_eq!(img2.rgb[76 * 320 + 8], pal[3], "the text still shows");
+        draw_console(&mut img2, &c, Some(&conback), Some(&cc), 0.0);
+        assert_eq!(img2.pixels[84 * 320 + 8], 5, "no input line once closed");
+        assert_eq!(img2.pixels[76 * 320 + 8], 3, "the text still shows");
     }
 
     #[test]
     fn draw_console_missing_pics_no_panic() {
-        let pal = ramp_palette();
         let cc = lit_conchars();
-        let bg = [200u8, 200, 200];
+        let bg = 200u8;
         let mut c = Console::new();
         c.toggle();
         c.set_current(100.0);
         c.println("text");
         let mut img = Image::new(320, 200, bg);
         // Missing conback => the rows fill black (index 0), not a panic.
-        draw_console(&mut img, &c, None, Some(&cc), &pal, 0.0);
-        assert_eq!(img.rgb[2 * img.w + 2], pal[0], "missing conback still fills the panel");
+        draw_console(&mut img, &c, None, Some(&cc), 0.0);
+        assert_eq!(img.pixels[2 * img.w + 2], 0, "missing conback still fills the panel");
 
         // Missing conchars => the background still draws, text is skipped, no panic.
         let conback = solid_pic(320, 200, 5);
         let mut img2 = Image::new(320, 200, bg);
-        draw_console(&mut img2, &c, Some(&conback), None, &pal, 0.0);
-        assert_eq!(img2.rgb[2 * img2.w + 2], pal[5], "background draws without conchars");
+        draw_console(&mut img2, &c, Some(&conback), None, 0.0);
+        assert_eq!(img2.pixels[2 * img2.w + 2], 5, "background draws without conchars");
 
         // A tiny framebuffer must not panic either.
         let mut tiny = Image::new(1, 1, bg);
-        draw_console(&mut tiny, &c, Some(&conback), Some(&cc), &pal, 0.0);
+        draw_console(&mut tiny, &c, Some(&conback), Some(&cc), 0.0);
         let mut zero = Image::new(0, 0, bg);
-        draw_console(&mut zero, &c, Some(&conback), Some(&cc), &pal, 0.0);
+        draw_console(&mut zero, &c, Some(&conback), Some(&cc), 0.0);
     }
 }

@@ -114,7 +114,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     }
     let frame = last.ok_or("no frame")?;
     // V_UpdatePalette + VID_ShiftPalette, as the page presents the frame.
-    let ramps = (!frame.cshifts.is_empty()).then(|| render::cshift_ramps(&frame.cshifts, &gamma));
+    let palette = render::FramePalette::new(&wk.palette, &frame.cshifts, &gamma);
     let img = &frame.image;
     let (ow, oh) = (img.w * zoom, img.h * zoom);
     let mut ppm = format!("P6\n{ow} {oh}\n255\n").into_bytes();
@@ -122,13 +122,10 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let mut row = Vec::with_capacity(ow * 3);
     for y in 0..img.h {
         row.clear();
-        for px in &img.rgb[y * img.w..(y + 1) * img.w] {
-            let c = match &ramps {
-                Some([r, g, b]) => [r[px[0] as usize], g[px[1] as usize], b[px[2] as usize]],
-                None => *px,
-            };
+        for &px in &img.pixels[y * img.w..(y + 1) * img.w] {
+            let [r, g, b, _] = palette.0[usize::from(px)];
             for _ in 0..zoom {
-                row.extend_from_slice(&c);
+                row.extend_from_slice(&[r, g, b]);
             }
         }
         for _ in 0..zoom {

@@ -916,7 +916,7 @@ mod tests {
         // first render populates the geom + lightmap caches; the second hits
         // them. The cached combine must be bit-identical, so the images match.
         let bsp = lightmapped_demo_room(100, 200);
-        let pal = [[180u8, 150, 90]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[1] = 0.5; // non-neutral -> owned combine -> cache used
@@ -930,20 +930,20 @@ mod tests {
 
         let frame1 = render(&styles); // populates caches
         let frame2 = render(&styles); // cache hits
-        assert_eq!(frame1.rgb, frame2.rgb, "cached frame must be pixel-identical to the first");
+        assert_eq!(frame1.pixels, frame2.pixels, "cached frame must be pixel-identical to the first");
 
         // A change in the style scale must change the cache key AND the pixels
         // (proving the cache is keyed on the scale, not stale).
         let frame_b = render(&styles_b);
         assert_ne!(
-            frame1.rgb, frame_b.rgb,
+            frame1.pixels, frame_b.pixels,
             "a different style scale must rebuild and produce different pixels"
         );
 
         // Re-render at the ORIGINAL scale: must again equal frame1 (the cache
         // correctly rebuilt back to the 0.5 key).
         let frame3 = render(&styles);
-        assert_eq!(frame1.rgb, frame3.rgb, "returning to the original key reproduces frame1");
+        assert_eq!(frame1.pixels, frame3.pixels, "returning to the original key reproduces frame1");
     }
 
     /// Give every face a plain (non-special) wall texture so the lit-surface cache
@@ -988,7 +988,7 @@ mod tests {
         let externals: Vec<ExternalBModel> =
             ext_bsps.iter().map(|b| ExternalBModel { bsp: b, origin: [-2.0, -2.0, 2.0] }).collect();
 
-        let pal = [[180u8, 150, 90]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let colormap = vec![0u8; COLORMAP_LEN]; // present -> the surf-cache path is active
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
@@ -1082,7 +1082,7 @@ mod tests {
         };
         let (unlit, st0) = render(&[]);
         let (lit, st) = render(std::slice::from_ref(&dl));
-        assert_ne!(lit.rgb, unlit.rgb, "the light must show");
+        assert_ne!(lit.pixels, unlit.pixels, "the light must show");
         // demo_room's walls whose texinfo maps them to a line (zero extent) have
         // no block at all (id's `D_SCAlloc` would `Sys_Error` on them); the light
         // must not send any other face to the per-pixel path.
@@ -1091,16 +1091,16 @@ mod tests {
         assert!(st.surf_baked > 0, "dlit faces are baked with the light");
         // Lit again: a dlit block is never reused (the light may have moved).
         let (lit2, st2) = render(std::slice::from_ref(&dl));
-        assert_eq!(lit2.rgb, lit.rgb);
+        assert_eq!(lit2.pixels, lit.pixels);
         assert_eq!(st2.surf_baked, st.surf_baked, "every dlit face rebakes every lit frame");
         // The light dies: exactly those entries rebuild, and the frame is unlit.
         let (after, st3) = render(&[]);
-        assert_eq!(after.rgb, unlit.rgb, "the light must not linger in the cache");
+        assert_eq!(after.pixels, unlit.pixels, "the light must not linger in the cache");
         assert_eq!(st3.surf_baked, st.surf_baked, "the dlit entries rebuild without the light");
         let (_, st4) = render(&[]);
         assert_eq!(st4.surf_baked, 0, "then the cache is warm again");
         // History-free: a cold cache draws the same lit frame.
-        assert_eq!(render_once(&scene(&world, cam, &pal, &cm, std::slice::from_ref(&dl))).rgb, lit.rgb);
+        assert_eq!(render_once(&scene(&world, cam, &pal, &cm, std::slice::from_ref(&dl))).pixels, lit.pixels);
     }
 
     /// `D_CacheSurface` keys a block on its texture (`cache->texture`): an
@@ -1134,9 +1134,9 @@ mod tests {
         let mut r = Renderer::new();
         let f0 = r.render(&scene(0.0));
         let f1 = r.render(&scene(0.2));
-        assert_ne!(f0.rgb, f1.rgb, "the animation's second frame must show");
-        assert_eq!(r.render(&scene(0.0)).rgb, f0.rgb, "and the first again");
-        assert_eq!(render_once(&scene(0.2)).rgb, f1.rgb, "a warm cache draws what a cold one does");
+        assert_ne!(f0.pixels, f1.pixels, "the animation's second frame must show");
+        assert_eq!(r.render(&scene(0.0)).pixels, f0.pixels, "and the first again");
+        assert_eq!(render_once(&scene(0.2)).pixels, f1.pixels, "a warm cache draws what a cold one does");
     }
 
     // -- Mip levels (D_MipLevelForScale, D_CacheSurface per miplevel) -------
@@ -1366,7 +1366,7 @@ mod tests {
         // never serves B's cached data for A's faces.
         let a = lightmapped_demo_room(100, 200);
         let b = lightmapped_demo_room(60, 240); // different lighting bytes
-        let pal = [[180u8, 150, 90]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[1] = 0.5;
@@ -1379,8 +1379,8 @@ mod tests {
         let a1 = render(&a);
         let b1 = render(&b); // R_NewMap for world B
         let a2 = render(&a); // must rebuild A's caches, not reuse B's
-        assert_eq!(a1.rgb, a2.rgb, "world A renders identically before and after world B");
-        assert_ne!(a1.rgb, b1.rgb, "and B is not A");
+        assert_eq!(a1.pixels, a2.pixels, "world A renders identically before and after world B");
+        assert_ne!(a1.pixels, b1.pixels, "and B is not A");
     }
 
     #[test]

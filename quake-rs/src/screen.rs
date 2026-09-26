@@ -212,7 +212,6 @@ pub fn screen_with_backtile(
     vid_w: usize,
     vid_h: usize,
     backtile: Option<&crate::wad::Qpic>,
-    palette: &[[u8; 3]; 256],
 ) -> Image {
     let mut img = Image::reused_uncleared(vid_w, vid_h);
     // The rectangle the view covers, clipped to the screen: [x0, x1) x [y0, y1).
@@ -221,10 +220,10 @@ pub fn screen_with_backtile(
     let y0 = vrect.y.min(vid_h);
     let y1 = y0 + vrect.h.min(vid_h - y0);
     // The tile everywhere else: above, below, then either side.
-    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, y0, palette);
-    draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1, palette);
-    draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0, palette);
-    draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0, palette);
+    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, y0);
+    draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1);
+    draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0);
+    draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0);
     img
 }
 
@@ -242,13 +241,12 @@ pub fn compose_view(
     vid_w: usize,
     vid_h: usize,
     backtile: Option<&crate::wad::Qpic>,
-    palette: &[[u8; 3]; 256],
     threads: usize,
 ) -> Image {
     if vrect.x == 0 && vrect.y == 0 && view.w == vid_w && view.h == vid_h {
         return view;
     }
-    let mut img = screen_with_backtile(ViewRect { w: view.w, h: view.h, ..vrect }, vid_w, vid_h, backtile, palette);
+    let mut img = screen_with_backtile(ViewRect { w: view.w, h: view.h, ..vrect }, vid_w, vid_h, backtile);
     img.blit(&view, vrect.x, vrect.y, threads);
     crate::render::recycle_image(view);
     img
@@ -279,7 +277,6 @@ pub(crate) fn center_string_top(vid_h: i32) -> i32 {
 pub fn draw_center_string_revealed(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
-    palette: &[[u8; 3]; 256],
     text: &str,
     remaining: i32,
 ) {
@@ -298,7 +295,7 @@ pub fn draw_center_string_revealed(
         // x = (vid.width - l*8)/2, an int.
         let vx = ((sc.w - l as i32 * 8) / 2) as f32;
         for (j, &c) in bytes[..l].iter().enumerate() {
-            draw_char_scaled(image, conchars, vx + j as f32 * 8.0, vy, c, sc.scale, 0.0, 0.0, palette);
+            draw_char_scaled(image, conchars, vx + j as f32 * 8.0, vy, c, sc.scale, 0.0, 0.0);
             if budget == 0 {
                 return; // `if (!remaining--) return;` — this char was the last.
             }
@@ -316,11 +313,11 @@ pub fn draw_center_string_revealed(
 /// its middle — `Draw_Pic ((vid.width - pic->width)/2, (vid.height - 48 -
 /// pic->height)/2, pic)`. (`Draw_Pic` copies every texel; the plaque has no
 /// transparent ones, so the see-through blit draws the same.)
-pub fn draw_pause(image: &mut Image, pic: &crate::wad::Qpic, palette: &[[u8; 3]; 256]) {
+pub fn draw_pause(image: &mut Image, pic: &crate::wad::Qpic) {
     let sc = screen_2d(image.w, image.h);
     let x = (sc.w - pic.width) / 2;
     let y = (sc.h - 48 - pic.height) / 2;
-    blit_qpic_at(image, pic, x as f32, y as f32, sc.scale, 0.0, 0.0, palette);
+    blit_qpic_at(image, pic, x as f32, y as f32, sc.scale, 0.0, 0.0);
 }
 
 /// Draw a `centerprint` message: `SCR_DrawCenterString` outside the finale
@@ -328,10 +325,9 @@ pub fn draw_pause(image: &mut Image, pic: &crate::wad::Qpic, palette: &[[u8; 3];
 pub fn draw_centerprint(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
-    palette: &[[u8; 3]; 256],
     text: &str,
 ) {
-    draw_center_string_revealed(image, conchars, palette, text, -1);
+    draw_center_string_revealed(image, conchars, text, -1);
 }
 
 /// EXTRA, not in id's Quake (Options > Web extras, `wasm_showfps`): the frame
@@ -344,7 +340,6 @@ pub fn draw_centerprint(
 pub fn draw_fps(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
-    palette: &[[u8; 3]; 256],
     fps: u32,
     sb_lines: i32,
 ) {
@@ -355,32 +350,31 @@ pub fn draw_fps(
     let st = format!("{fps:3} FPS");
     let x = sc.w - st.len() as i32 * 8 - 8;
     let y = sc.h - sb_lines.max(0) - 8;
-    draw_string_scaled(image, conchars, x as f32, y as f32, &st, sc.scale, 0.0, 0.0, palette);
+    draw_string_scaled(image, conchars, x as f32, y as f32, &st, sc.scale, 0.0, 0.0);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::menu::RESOLUTION_PRESETS;
-    use crate::render::fixtures::{ramp_palette, solid_conchars, solid_pic, test_backtile};
+    use crate::render::fixtures::{solid_conchars, solid_pic, test_backtile};
 
     #[test]
     fn the_pause_plaque_sits_where_scr_drawpause_puts_it() {
         // gfx/pause.lmp is 128x24: ((w - 128)/2, (h - 48 - 24)/2) in 2-D pixels.
-        let pal = ramp_palette();
         let pic = solid_pic(128, 24, 7);
         for (w, h, x, y, scale) in [(320, 200, 96, 64, 1), (640, 400, 256, 164, 1), (960, 600, 416, 264, 1)] {
-            let mut img = Image::new(w, h, [0, 0, 0]);
-            draw_pause(&mut img, &pic, &pal);
-            let lit: Vec<usize> = (0..w * h).filter(|&i| img.rgb[i] == pal[7]).collect();
+            let mut img = Image::new(w, h, 0);
+            draw_pause(&mut img, &pic);
+            let lit: Vec<usize> = (0..w * h).filter(|&i| img.pixels[i] == 7).collect();
             assert_eq!(lit.len(), 128 * 24 * scale * scale, "{w}x{h}");
             assert_eq!((lit[0] % w, lit[0] / w), (x, y), "{w}x{h}: top-left");
         }
         // The scaled-2-D extra lays it out on 320x200 and blows it up.
         let _g = crate::draw::Scaled2dGuard::set(true);
-        let mut img = Image::new(960, 600, [0, 0, 0]);
-        draw_pause(&mut img, &pic, &pal);
-        let lit: Vec<usize> = (0..960 * 600).filter(|&i| img.rgb[i] == pal[7]).collect();
+        let mut img = Image::new(960, 600, 0);
+        draw_pause(&mut img, &pic);
+        let lit: Vec<usize> = (0..960 * 600).filter(|&i| img.pixels[i] == 7).collect();
         assert_eq!(lit.len(), 128 * 24 * 9);
         assert_eq!((lit[0] % 960, lit[0] / 960), (96 * 3, 64 * 3));
     }
@@ -411,77 +405,74 @@ mod tests {
         assert_eq!(center_string_top(400), 139);
         assert_eq!(center_string_top(201), 70); // 70.35
         assert_eq!(center_string_top(480), 167); // 168 exactly -> 167
-        let pal = ramp_palette();
         let cc = solid_conchars();
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_centerprint(&mut img, &cc, &pal, "AB");
-        let lit = |y: usize| (0..320).any(|x| img.rgb[y * 320 + x] != [0, 0, 0]);
+        let mut img = Image::new(320, 200, 0);
+        draw_centerprint(&mut img, &cc, "AB");
+        let lit = |y: usize| (0..320).any(|x| img.pixels[y * 320 + x] != 0);
         let rows: Vec<usize> = (0..200).filter(|&y| lit(y)).collect();
         assert_eq!(rows, (69..=76).collect::<Vec<_>>(), "rows 69..=76");
         // (320 - 2*8)/2 = 152: the line centers on the screen.
-        assert_ne!(img.rgb[69 * 320 + 152], [0, 0, 0]);
-        assert_eq!(img.rgb[69 * 320 + 151], [0, 0, 0]);
+        assert_ne!(img.pixels[69 * 320 + 152], 0);
+        assert_eq!(img.pixels[69 * 320 + 151], 0);
     }
 
     #[test]
     fn finale_center_string_reveals_at_printspeed() {
         // SCR_DrawCenterString's finale reveal: remaining = 8 * elapsed, and the
         // post-decrement `if (!remaining--) return;` paints remaining+1 chars.
-        let pal = ramp_palette();
         let cc = solid_conchars();
         // "AB\nCD": 2 lines (<= 4) so the block starts at y = 200*0.35 = 70; each
         // 2-char line centers at vx = (320 - 16)/2 = 152.
         let text = "AB\nCD";
 
         // elapsed 0 -> remaining 0 -> exactly ONE char ('A') is painted.
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_finale_overlay(&mut img, Some(&cc), &pal, None, text, 0.0);
-        let px = |img: &Image, x: usize, y: usize| img.rgb[y * 320 + x];
-        assert_eq!(px(&img, 152 + 1, 70 + 1), [95, 95, 95], "first char visible at once");
-        assert_eq!(px(&img, 160 + 1, 70 + 1), [0, 0, 0], "second char not yet revealed");
-        assert_eq!(px(&img, 152 + 1, 78 + 1), [0, 0, 0], "second line not yet revealed");
+        let mut img = Image::new(320, 200, 0);
+        draw_finale_overlay(&mut img, Some(&cc), None, text, 0.0);
+        let px = |img: &Image, x: usize, y: usize| img.pixels[y * 320 + x];
+        assert_eq!(px(&img, 152 + 1, 70 + 1), 95, "first char visible at once");
+        assert_eq!(px(&img, 160 + 1, 70 + 1), 0, "second char not yet revealed");
+        assert_eq!(px(&img, 152 + 1, 78 + 1), 0, "second line not yet revealed");
 
         // elapsed 1s -> remaining 8 -> all four chars painted (budget exceeds text).
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_finale_overlay(&mut img, Some(&cc), &pal, None, text, 1.0);
-        assert_eq!(px(&img, 160 + 1, 70 + 1), [95, 95, 95], "line 1 fully revealed");
-        assert_eq!(px(&img, 160 + 1, 78 + 1), [95, 95, 95], "line 2 fully revealed");
+        let mut img = Image::new(320, 200, 0);
+        draw_finale_overlay(&mut img, Some(&cc), None, text, 1.0);
+        assert_eq!(px(&img, 160 + 1, 70 + 1), 95, "line 1 fully revealed");
+        assert_eq!(px(&img, 160 + 1, 78 + 1), 95, "line 2 fully revealed");
 
         // The finale plaque centers horizontally at y=16 (Sbar_FinaleOverlay).
         let plaque = Qpic { width: 100, height: 20, data: vec![52u8; 100 * 20] };
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_finale_overlay(&mut img, Some(&cc), &pal, Some(&plaque), "", 0.0);
-        assert_eq!(px(&img, 110 + 1, 16 + 1), [52, 52, 52], "finale.lmp centered at y=16");
-        assert_eq!(px(&img, 100, 16 + 1), [0, 0, 0], "left of the centered plaque is clear");
+        let mut img = Image::new(320, 200, 0);
+        draw_finale_overlay(&mut img, Some(&cc), Some(&plaque), "", 0.0);
+        assert_eq!(px(&img, 110 + 1, 16 + 1), 52, "finale.lmp centered at y=16");
+        assert_eq!(px(&img, 100, 16 + 1), 0, "left of the centered plaque is clear");
     }
 
     #[test]
     fn draw_fps_sits_bottom_right_above_the_status_bar_like_scr_drawfps() {
-        let pal = ramp_palette();
         let cc = solid_conchars();
-        let lit = pal[95];
+        let lit = 95u8;
         // " 60 FPS": x = 320 - 7*8 - 8 = 256 (a blank), '6' at 264; y = 200 -
         // sb_lines - 8.
         for (sb_lines, y) in [(48, 144usize), (24, 168), (0, 192)] {
-            let mut img = Image::new(320, 200, [0, 0, 0]);
-            draw_fps(&mut img, &cc, &pal, 60, sb_lines);
-            let px = |x: usize, y: usize| img.rgb[y * 320 + x];
+            let mut img = Image::new(320, 200, 0);
+            draw_fps(&mut img, &cc, 60, sb_lines);
+            let px = |x: usize, y: usize| img.pixels[y * 320 + x];
             assert_eq!(px(264, y), lit, "sb_lines {sb_lines}: '6' at (264, {y})");
             assert_eq!(px(311, y + 7), lit, "'S' ends at x=311 (8 px from the edge)");
-            assert_eq!(px(312, y), [0, 0, 0], "an 8 px margin on the right");
-            assert_eq!(px(263, y), [0, 0, 0], "%3d pads 60 with a blank");
-            assert_eq!(px(264, y - 1), [0, 0, 0], "one text row tall");
+            assert_eq!(px(312, y), 0, "an 8 px margin on the right");
+            assert_eq!(px(263, y), 0, "%3d pads 60 with a blank");
+            assert_eq!(px(264, y - 1), 0, "one text row tall");
             if y + 8 < 200 {
-                assert_eq!(px(264, y + 8), [0, 0, 0], "one text row tall");
+                assert_eq!(px(264, y + 8), 0, "one text row tall");
             }
         }
         // Three digits fill the pad; at 960x600 the 2-D layer stays 1:1, as
         // id draws it in every mode (the scaled-2-D extra is off).
-        let mut img = Image::new(960, 600, [0, 0, 0]);
-        draw_fps(&mut img, &cc, &pal, 144, 48);
-        let px = |x: usize, y: usize| img.rgb[y * 960 + x];
+        let mut img = Image::new(960, 600, 0);
+        draw_fps(&mut img, &cc, 144, 48);
+        let px = |x: usize, y: usize| img.pixels[y * 960 + x];
         assert_eq!(px(960 - 64, 600 - 56), lit, "'1' at (vid.width-64, vid.height-sb_lines-8)");
-        assert_eq!(px(960 - 65, 600 - 56), [0, 0, 0]);
+        assert_eq!(px(960 - 65, 600 - 56), 0);
     }
 
     #[test]
@@ -490,19 +481,18 @@ mod tests {
         // `remaining` is exactly 0 at the check — a budget that STARTS below
         // zero keeps decrementing past it and paints the WHOLE string. (An
         // early `remaining < 0 => return` would paint nothing.)
-        let pal = ramp_palette();
         let cc = solid_conchars();
-        let px = |img: &Image, x: usize, y: usize| img.rgb[y * 320 + x];
+        let px = |img: &Image, x: usize, y: usize| img.pixels[y * 320 + x];
 
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_center_string_revealed(&mut img, &cc, &pal, "AB\nCD", -1);
-        assert_eq!(px(&img, 160 + 1, 70 + 1), [95, 95, 95], "line 1 fully painted");
-        assert_eq!(px(&img, 160 + 1, 78 + 1), [95, 95, 95], "line 2 fully painted");
+        let mut img = Image::new(320, 200, 0);
+        draw_center_string_revealed(&mut img, &cc, "AB\nCD", -1);
+        assert_eq!(px(&img, 160 + 1, 70 + 1), 95, "line 1 fully painted");
+        assert_eq!(px(&img, 160 + 1, 78 + 1), 95, "line 2 fully painted");
 
         // i32::MIN paints everything too (and the decrement must not panic).
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_center_string_revealed(&mut img, &cc, &pal, "AB\nCD", i32::MIN);
-        assert_eq!(px(&img, 160 + 1, 78 + 1), [95, 95, 95], "i32::MIN = unlimited");
+        let mut img = Image::new(320, 200, 0);
+        draw_center_string_revealed(&mut img, &cc, "AB\nCD", i32::MIN);
+        assert_eq!(px(&img, 160 + 1, 78 + 1), 95, "i32::MIN = unlimited");
     }
 
     // -- SCR_CalcRefdef / R_SetVrect / Draw_TileClear / sb_lines -------------
@@ -628,26 +618,25 @@ mod tests {
 
     #[test]
     fn compose_view_places_the_view_inside_a_backtile_border() {
-        let pal = ramp_palette();
         let tile = test_backtile();
         // viewsize 50 at 320x200: a 160x100 view at (80, 26).
         let r = calc_refdef(320, 200, 50.0, false);
-        let view = Image::new(r.vrect.w, r.vrect.h, [250, 1, 2]);
-        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), &pal, 1);
+        let view = Image::new(r.vrect.w, r.vrect.h, 250);
+        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), 1);
         assert_eq!((img.w, img.h), (320, 200));
-        let tile_at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
+        let tile_at = |x: usize, y: usize| tile.data[(y % 64) * 64 + x % 64];
         for y in 0..200 {
             for x in 0..320 {
                 let inside = (80..240).contains(&x) && (26..126).contains(&y);
-                let want = if inside { [250, 1, 2] } else { tile_at(x, y) };
-                assert_eq!(img.rgb[y * 320 + x], want, "({x},{y})");
+                let want = if inside { 250 } else { tile_at(x, y) };
+                assert_eq!(img.pixels[y * 320 + x], want, "({x},{y})");
             }
         }
         // A full-screen view (viewsize 120) passes through untouched.
         let full = calc_refdef(320, 200, 120.0, false);
-        let view = Image::new(320, 200, [250, 1, 2]);
-        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal, 1);
-        assert!(out.rgb.iter().all(|&p| p == [250, 1, 2]));
+        let view = Image::new(320, 200, 250);
+        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), 1);
+        assert!(out.pixels.iter().all(|&p| p == 250));
     }
 
     #[test]
@@ -657,17 +646,16 @@ mod tests {
         // screen, the tile everywhere, the view copied over it) with garbage
         // in every spare buffer first, for every viewsize, a few sizes, with
         // and without a backtile, and views hanging off the screen.
-        let pal = ramp_palette();
         let tile = test_backtile();
         let reference = |view: &Image, vrect: ViewRect, w: usize, h: usize, t: Option<&Qpic>| {
-            let mut img = Image::new(w, h, [0, 0, 0]);
-            draw_tile_clear(&mut img, t, 0, 0, w, h, &pal);
+            let mut img = Image::new(w, h, 0);
+            draw_tile_clear(&mut img, t, 0, 0, w, h);
             for vy in 0..view.h {
                 for vx in 0..view.w {
-                    img.put((vrect.x + vx) as i32, (vrect.y + vy) as i32, view.rgb[vy * view.w + vx]);
+                    img.put((vrect.x + vx) as i32, (vrect.y + vy) as i32, view.pixels[vy * view.w + vx]);
                 }
             }
-            img.rgb
+            img.pixels
         };
         let mut cases = Vec::new();
         for &(w, h) in &[(320, 200), (640, 400), (1280, 800), (400, 300)] {
@@ -679,23 +667,22 @@ mod tests {
         cases.push((320, 200, ViewRect { x: 400, y: 10, w: 16, h: 16 }));
         cases.push((320, 200, ViewRect { x: 0, y: 0, w: 100, h: 300 }));
         for (i, &(w, h, vrect)) in cases.iter().enumerate() {
-            let view = Image::new(vrect.w, vrect.h, [250, (i % 7) as u8, 2]);
+            let view = Image::new(vrect.w, vrect.h, 250 - (i % 7) as u8);
             for t in [Some(&tile), None] {
                 for _ in 0..3 {
-                    crate::render::recycle_image(Image::new(w, h + 7, [1, 2, 3]));
+                    crate::render::recycle_image(Image::new(w, h + 7, 1));
                 }
                 let want = reference(&view, vrect, w, h, t);
                 let got = compose_view(
-                    Image { w: view.w, h: view.h, rgb: view.rgb.clone() },
+                    Image { w: view.w, h: view.h, pixels: view.pixels.clone() },
                     vrect,
                     w,
                     h,
                     t,
-                    &pal,
                     3,
                 );
                 assert_eq!((got.w, got.h), (w, h));
-                assert!(got.rgb == want, "{w}x{h} {vrect:?} tile {}", t.is_some());
+                assert!(got.pixels == want, "{w}x{h} {vrect:?} tile {}", t.is_some());
             }
         }
     }

@@ -101,9 +101,10 @@ fn run(pak: &Pak, name: &str, vid: &Vid, threads: usize, clock: &mut TimeDemoClo
             break clock.finish(host_framecount, realtime);
         };
         // V_UpdatePalette + VID_ShiftPalette: the frame into RGBA through
-        // the cshift ramps (a plain copy without any), as the page packs it.
-        let ramps = (!frame.cshifts.is_empty()).then(|| render::cshift_ramps(&frame.cshifts, &gamma));
-        render::pack_rgba(&frame.image, ramps.as_ref(), rgba, threads);
+        // its palette (the cshifts, then gamma), as the page's 2-D canvas
+        // presents it.
+        let palette = render::FramePalette::new(&d.palette, &frame.cshifts, &gamma);
+        render::pack_rgba(&frame.image, &palette, rgba, threads);
         render::recycle_image(frame.image);
         lap_hook(Phase::Pack);
         host_framecount += 1;

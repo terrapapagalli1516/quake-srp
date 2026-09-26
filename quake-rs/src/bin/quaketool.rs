@@ -1039,7 +1039,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let view = render::Renderer::new().render(&scene);
         let gfx_wad = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok());
         let backtile = gfx_wad.as_ref().and_then(|w| w.qpic("backtile").ok());
-        let mut img = render::compose_view(view, vrect, vid_w, vid_h, backtile.as_ref(), &palette, 1);
+        let mut img = render::compose_view(view, vrect, vid_w, vid_h, backtile.as_ref(), 1);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the composed screen. If
@@ -1049,7 +1049,6 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             let stat = |f: &str| server.vm.ent_get_float(player, f) as i32;
             let hud = render::Hud {
                 wad,
-                palette: &palette,
                 health: stat("health"),
                 ammo: stat("currentammo"),
                 armor: stat("armorvalue"),
@@ -1073,7 +1072,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             render::draw_hud_into(&mut img, &hud);
         }
 
-        img.write_ppm(path).map_err(|e| format!("write {path}: {e}"))?;
+        img.to_rgb(&palette).write_ppm(path).map_err(|e| format!("write {path}: {e}"))?;
         let _ = writeln!(
             o,
             "  rendered player POV -> {path}{}",
@@ -1531,7 +1530,7 @@ fn cmd_render(path: &str, out: &str, palette: Option<&str>) -> Result<Out, Strin
             let pbytes = read(pp)?;
             let pal = render::parse_palette(&pbytes)
                 .ok_or_else(|| format!("bad palette {pp} (need >= 768 bytes)"))?;
-            (render::Renderer::new().render(&render::Scene::new(&b, cam, 640, 400, &pal)), "textured")
+            (render::Renderer::new().render(&render::Scene::new(&b, cam, 640, 400, &pal)).to_rgb(&pal), "textured")
         }
         None => (render::render_bsp(&b, &cam, 640, 400), "flat-shaded"),
     };
@@ -1583,7 +1582,7 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
             let cam = camera_for_bsp(&b);
             (render::Renderer::new().render(&render::Scene::new(&b, cam, W, H, &palette)), "e1m1 POV")
         }
-        None => (render::Image::new(W, H, [0, 0, 0]), "black frame"),
+        None => (render::Image::new(W, H, 0), "black frame"),
     };
 
     // Load the menu pics from the pak's .lmp files (each optional) + conchars
@@ -1632,9 +1631,9 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
     // frame is reproducible).
     let mut menu = render::Menu::new();
     menu.open();
-    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, 0.0, &palette);
+    render::draw_menu(&mut img, &menu, &pics, conchars.as_ref(), 0.0, 0.0);
 
-    img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
+    img.to_rgb(&palette).write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
     let _ = writeln!(o, "drew the MAIN menu over the {bg} -> {out} ({}x{} PPM)", img.w, img.h);
@@ -2004,7 +2003,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> Resu
     let mut renderer = render::Renderer::new();
     renderer.set_threads(threads);
     let img = renderer.render(&scene);
-    img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
+    img.to_rgb(&palette).write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
     let _ = writeln!(
@@ -2354,7 +2353,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             wopts.screen = Some(render::ScreenPlace { x: r.x, y: r.y, vid_w: w, vid_h: h });
             let scene = render::Scene { width: r.w, height: r.h, options: wopts, ..scene };
             let view = renderer.render(&scene);
-            let mut screen = render::Image::new(w, h, [0, 0, 0]);
+            let mut screen = render::Image::new(w, h, 0);
             let full = render::ViewRect { x: 0, y: 0, w, h };
             renderer.warp_into(view, &mut screen, full, time, video.cvars.hires);
             return screen;
@@ -2371,7 +2370,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
         }
         (n, start.elapsed().as_secs_f64() * 1000.0 / n as f64)
     });
-    img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
+    img.to_rgb(&palette).write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
     let mut o = String::new();
     let _ = writeln!(
         o,
@@ -2480,7 +2479,7 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
         let cam = Camera::looking_at(eye, [eye[0] + forward[0], eye[1] + forward[1], eye[2]], 90.0);
         let img = renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
         let path = format!("{out_prefix}_{i:03}.ppm");
-        img.write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
+        img.to_rgb(&palette).write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
         frames += 1;
     }
 
@@ -2577,7 +2576,7 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
         };
         let img = renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
         let path = format!("{out_prefix}_{written:04}.ppm");
-        img.write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
+        img.to_rgb(&palette).write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
         written += 1;
     }
 

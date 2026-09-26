@@ -7,7 +7,7 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
-use super::{Camera, Frame};
+use super::{nearest_index, Camera, Frame};
 use super::light::{r_light_point, COLORMAP_LEN, LIGHTSTYLES};
 use super::polyse::PolyFramebuffer;
 use super::stats::Profiler;
@@ -50,6 +50,8 @@ pub struct ModelInstance<'a> {
     /// Entity roll (`angles[ROLL]`, degrees). `0.0` for upright models.
     pub roll: f32,
     pub frame: usize,
+    /// The flat colour of a model without a usable skin (never one of id's:
+    /// `Mod_LoadAliasModel` requires a skin), drawn as the nearest palette entry.
     pub color: [u8; 3],
     /// Per-entity skin index (`currententity->skinnum`); out-of-range -> 0.
     ///
@@ -285,8 +287,8 @@ struct AliasEntity<'a> {
     angles: Vec3,
     frame: usize,
     skinnum: i32,
-    /// The flat colour for a model without a usable skin (port fallback).
-    color: [u8; 3],
+    /// The flat palette index for a model without a usable skin (port fallback).
+    color: u8,
 }
 
 /// `R_ConcatTransforms` (mathlib.c).
@@ -522,7 +524,7 @@ pub(super) struct AliasSetup<'a> {
     pub(super) skinwidth: i32,
     pub(super) seamfixup: i32,
     pub(super) colormap: Option<&'a [u8]>,
-    pub(super) flat: [u8; 3],
+    pub(super) flat: u8,
 }
 
 impl AliasSetup<'_> {
@@ -827,7 +829,7 @@ pub(super) fn prepare_alias_model<'a>(
         angles: [inst.pitch, inst.yaw, inst.roll],
         frame: inst.frame,
         skinnum: inst.skinnum,
-        color: inst.color,
+        color: nearest_index(scene.palette, inst.color),
     };
     prof.add(|s| s.alias_models += 1);
     let trivial_accept = alias_check_bbox(&view, &ent)?;
@@ -951,7 +953,7 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
         angles: vm.angles,
         frame: vm.frame,
         skinnum: 0,
-        color: [180, 180, 180],
+        color: nearest_index(scene.palette, [180, 180, 180]),
     };
     let light = alias_entity_light(scene.world, origin, scene.light_styles, scene.dlights, true);
     alias_prepare(&view, &ent, 0, light, true, scene.time, scene.colormap)
@@ -960,7 +962,7 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, Image, Scene};
+    use crate::render::{demo_room, fixtures, Image, Palette, Scene};
     use crate::render::fixtures::render_once;
     use crate::render::fixtures::tiny_mdl;
     use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
@@ -970,7 +972,7 @@ mod tests {
         // A model placed in front of the camera must alter some pixels relative
         // to the world-only render.
         let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = fixtures::ramp_palette();
         // Look from the west wall toward the centre (down +X).
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let world_only = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
@@ -989,9 +991,9 @@ mod tests {
         let with_model = render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let changed = world_only
-            .rgb
+            .pixels
             .iter()
-            .zip(with_model.rgb.iter())
+            .zip(with_model.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "model in front of camera changed no pixels");
@@ -1195,9 +1197,9 @@ mod tests {
         // sampled rather than ignored.
         let bsp = demo_room();
 
-        // A palette where the skin's texel indices map to vivid, distinct colours
-        // unlikely to coincide with the flat instance colour after shading.
-        let mut pal = [[0u8; 3]; 256];
+        // Greys (the flat walls), and vivid, distinct colours for the skin's
+        // texel indices.
+        let mut pal = fixtures::ramp_palette();
         pal[1] = [255, 0, 0];
         pal[2] = [0, 255, 0];
         pal[3] = [0, 0, 255];
@@ -1234,22 +1236,16 @@ mod tests {
         let img_flat = render_once(&Scene { models: std::slice::from_ref(&inst_flat), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let changed = img_skin
-            .rgb
+            .pixels
             .iter()
-            .zip(img_flat.rgb.iter())
+            .zip(img_flat.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "skinned model should differ from flat-colour model");
 
-        // The skinned render must actually show one of the skin's palette colours
-        // somewhere (red/green/blue), confirming the skin pixels are sampled.
-        let shows_skin_color = img_skin.rgb.iter().any(|&p| {
-            // After Lambert shading the channel scales down, but a pure-channel
-            // skin colour stays a pure channel (the other two channels stay 0).
-            (p[0] > 0 && p[1] == 0 && p[2] == 0)
-                || (p[1] > 0 && p[0] == 0 && p[2] == 0)
-                || (p[2] > 0 && p[0] == 0 && p[1] == 0)
-        });
+        // The skinned render must actually show one of the skin's texels (no
+        // colormap: drawn raw), confirming the skin pixels are sampled.
+        let shows_skin_color = img_skin.pixels.iter().any(|p| [1, 2, 3].contains(p));
         assert!(shows_skin_color, "expected a sampled skin colour in the skinned render");
     }
 
@@ -1258,7 +1254,7 @@ mod tests {
         // A model without a skin must still draw (flat fallback), unchanged from
         // the pre-skin behaviour: placing it in front of the camera alters pixels.
         let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let world_only = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
 
@@ -1276,9 +1272,9 @@ mod tests {
         };
         let with_model = render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let changed = world_only
-            .rgb
+            .pixels
             .iter()
-            .zip(with_model.rgb.iter())
+            .zip(with_model.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "skinless model must still draw via the flat fallback");
@@ -1289,7 +1285,7 @@ mod tests {
         // Two instances differing only in `frame` must render differently when
         // the two frames carry distinct geometry.
         let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let mdl = two_frame_mdl();
 
@@ -1316,9 +1312,9 @@ mod tests {
         let img0 = render_once(&Scene { models: std::slice::from_ref(&inst0), ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let img1 = render_once(&Scene { models: std::slice::from_ref(&inst1), ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let changed = img0
-            .rgb
+            .pixels
             .iter()
-            .zip(img1.rgb.iter())
+            .zip(img1.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "different frames should produce different images");
@@ -1388,24 +1384,30 @@ mod tests {
         }
     }
 
-    /// True when a pixel looks like the viewmodel's skin: palette index 7 is set
-    /// to pure yellow `[255, 255, 0]` in these tests, and the only per-pixel
-    /// transform is a multiply by the (positive) Lambert `shade`. So a gun pixel
-    /// keeps `B == 0` with `R > 0` and `G > 0`, whereas `hash_color` walls (HSV
-    /// saturation 0.55) always have all three channels strictly positive and the
-    /// background `[10,10,14]` has `B != 0`.
-    fn is_gun_pixel(p: [u8; 3]) -> bool {
-        p[2] == 0 && p[0] > 0 && p[1] > 0
+    /// The viewmodel's skin texel ([`viewmodel_mdl`]): drawn raw (no colormap).
+    const GUN: u8 = 7;
+
+    /// The tests' palette: greys (index `i` is `[i, i, i]`, so the flat walls
+    /// shade to greys) with the gun's index a pure yellow no grey is near.
+    fn gun_palette() -> Palette {
+        let mut pal = fixtures::ramp_palette();
+        pal[usize::from(GUN)] = [255, 255, 0];
+        pal
+    }
+
+    /// True for a pixel of the viewmodel's skin.
+    fn is_gun_pixel(p: u8) -> bool {
+        p == GUN
     }
 
     /// The bounding box (min_x, min_y, max_x, max_y) of the pixels that differ
     /// from `bg`, plus their centroid. Returns `None` when nothing was drawn.
-    fn drawn_bbox(img: &Image, bg: [u8; 3]) -> Option<(usize, usize, usize, usize, f32, f32)> {
+    fn drawn_bbox(img: &Image, bg: u8) -> Option<(usize, usize, usize, usize, f32, f32)> {
         let (mut minx, mut miny, mut maxx, mut maxy) = (usize::MAX, usize::MAX, 0usize, 0usize);
         let (mut sx, mut sy, mut n) = (0f64, 0f64, 0u64);
         for y in 0..img.h {
             for x in 0..img.w {
-                if img.rgb[y * img.w + x] != bg {
+                if img.pixels[y * img.w + x] != bg {
                     minx = minx.min(x);
                     miny = miny.min(y);
                     maxx = maxx.max(x);
@@ -1430,9 +1432,8 @@ mod tests {
         // it is anchored to the view, not to a world position (which would swing
         // wildly across the frame, or vanish, as the camera turns).
         let bsp = demo_room();
-        let mut pal = [[0u8; 3]; 256];
-        pal[7] = [255, 255, 0]; // the viewmodel's skin colour (index 7), pure yellow
-        let bg = [10u8, 10, 14];
+        let pal = gun_palette();
+        let bg = 0u8;
         let (w, h) = (160usize, 120usize);
         let gun = viewmodel_mdl();
 
@@ -1446,9 +1447,9 @@ mod tests {
         // Isolate the gun pixels (its unique skin colour) in each frame.
         let gun_only = |img: &Image| {
             let mut g = Image::new(img.w, img.h, bg);
-            for i in 0..img.rgb.len() {
-                if is_gun_pixel(img.rgb[i]) {
-                    g.rgb[i] = [255, 255, 0];
+            for i in 0..img.pixels.len() {
+                if is_gun_pixel(img.pixels[i]) {
+                    g.pixels[i] = GUN;
                 }
             }
             g
@@ -1484,8 +1485,7 @@ mod tests {
         // geometry fills the same pixels. (A depth-tested-against-world gun would
         // be hidden by the near wall.)
         let bsp = demo_room();
-        let mut pal = [[80u8; 3]; 256]; // (walls use hash_color, not the palette)
-        pal[7] = [255, 255, 0]; // distinctive pure-yellow gun colour
+        let pal = gun_palette();
         let (w, h) = (160usize, 120usize);
         let gun = viewmodel_mdl();
 
@@ -1497,13 +1497,13 @@ mod tests {
 
         // Sanity: the wall actually fills the view (without the gun).
         let world = render_once(&Scene::new(&bsp, cam, w, h, &pal));
-        let bg = [10u8, 10, 14];
-        let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
+        let bg = 2u8; // r_clearcolor, the background
+        let wall_pixels = world.pixels.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
         // The wall must NOT itself produce gun-coloured pixels (so the assert
         // below truly measures the gun, not the wall).
         assert!(
-            !world.rgb.iter().any(|&p| is_gun_pixel(p)),
+            !world.pixels.iter().any(|&p| is_gun_pixel(p)),
             "wall-only render must not contain gun-coloured pixels"
         );
 
@@ -1511,14 +1511,14 @@ mod tests {
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
         // of the wall rather than being depth-occluded by it.
-        let shows_gun = with_gun.rgb.iter().any(|&p| is_gun_pixel(p));
+        let shows_gun = with_gun.pixels.iter().any(|&p| is_gun_pixel(p));
         assert!(shows_gun, "weapon viewmodel must draw on top of the wall directly ahead");
 
         // And it changed pixels relative to the wall-only render.
         let changed = world
-            .rgb
+            .pixels
             .iter()
-            .zip(with_gun.rgb.iter())
+            .zip(with_gun.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "viewmodel changed no pixels over the wall");
@@ -1529,7 +1529,7 @@ mod tests {
         // A weapon model with out-of-range triangle indices and no frames must be
         // skipped without panicking and without altering the frame.
         let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
+        let pal = fixtures::ramp_palette();
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
         // Frameless model -> draw_viewmodel returns early.
@@ -1537,7 +1537,7 @@ mod tests {
         frameless.frames.clear();
         let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
         let baseline = render_once(&Scene::new(&bsp, cam, 80, 60, &pal));
-        assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
+        assert_eq!(img.pixels, baseline.pixels, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
         let mut bad = viewmodel_mdl();
@@ -1607,9 +1607,8 @@ mod tests {
         // that once made this port shove the gun far away). The render must not
         // panic.
         let bsp = demo_room();
-        let mut pal = [[0u8; 3]; 256];
-        pal[7] = [255, 255, 0]; // the viewmodel's pure-yellow skin (B == 0)
-        let bg = [10u8, 10, 14];
+        let pal = gun_palette();
+        let bg = 2u8; // r_clearcolor, the background
         let (w, h) = (160usize, 120usize);
         let gun = straddling_viewmodel_mdl();
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
@@ -1618,7 +1617,7 @@ mod tests {
 
         // (a) it drew SOME gun pixels (not all-dropped). With the old whole-tri
         // drop, every straddling triangle vanished and this would be zero.
-        let gun_pixels = img.rgb.iter().filter(|&&p| is_gun_pixel(p)).count();
+        let gun_pixels = img.pixels.iter().filter(|&&p| is_gun_pixel(p)).count();
         assert!(
             gun_pixels > 0,
             "straddling viewmodel must be clipped and still draw pixels (got {gun_pixels})"
@@ -1656,7 +1655,7 @@ mod tests {
             skinwidth: 0,
             seamfixup: 0,
             colormap: None,
-            flat: [0; 3],
+            flat: 0,
         };
         // Normal 52 is +x, straight into the light: ambient - shadelight.
         assert_eq!(setup.vertex_light(52), 8128 - 4096);
@@ -1672,16 +1671,16 @@ mod tests {
         // further right in a view 48 wider. A Classic fov over 90 has no gun.
         use crate::render::{FovMode, RenderOptions, VideoCvars};
         let bsp = demo_room();
-        let mut pal = [[80u8; 3]; 256];
-        pal[7] = [255, 255, 0];
+        let pal = gun_palette();
         let gun = viewmodel_mdl();
-        let draw_as = |w: usize, h: usize, fov_deg: f32, video: VideoCvars| {
+        let draw_as
+ = |w: usize, h: usize, fov_deg: f32, video: VideoCvars| {
             let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg };
             let vm = Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] };
             let options = RenderOptions { video, ..RenderOptions::default() };
             let img = render_once(&Scene { viewmodel: Some(vm), options, ..Scene::new(&bsp, cam, w, h, &pal) });
             let gun_px: Vec<(usize, usize)> =
-                (0..w * h).filter(|&i| is_gun_pixel(img.rgb[i])).map(|i| (i % w, i / w)).collect();
+                (0..w * h).filter(|&i| is_gun_pixel(img.pixels[i])).map(|i| (i % w, i / w)).collect();
             let (x0, x1) = (gun_px.iter().map(|p| p.0).min(), gun_px.iter().map(|p| p.0).max());
             let (y0, y1) = (gun_px.iter().map(|p| p.1).min(), gun_px.iter().map(|p| p.1).max());
             Some((x0?, y0?, x1?, y1?))

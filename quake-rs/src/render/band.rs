@@ -36,37 +36,37 @@ use std::sync::{Mutex, PoisonError};
 pub(super) struct Band<'a> {
     w: usize,
     y0: usize,
-    rgb: &'a mut [[u8; 3]],
+    pixels: &'a mut [u8],
     stride: usize,
     x0: usize,
     z: &'a mut [i16],
 }
 
 impl<'a> Band<'a> {
-    /// The whole of a `w`-wide view as one band: its pixels `rgb` and its
-    /// `1/z` `z`, row after row.
-    pub(super) fn whole(w: usize, rgb: &'a mut [[u8; 3]], z: &'a mut [i16]) -> Band<'a> {
-        let n = rgb.len().min(z.len()) / w.max(1) * w;
-        Band { w, y0: 0, rgb: &mut rgb[..n], stride: w, x0: 0, z: &mut z[..n] }
+    /// The whole of a `w`-wide view as one band: its pixels (palette indices)
+    /// and its `1/z` `z`, row after row.
+    pub(super) fn whole(w: usize, pixels: &'a mut [u8], z: &'a mut [i16]) -> Band<'a> {
+        let n = pixels.len().min(z.len()) / w.max(1) * w;
+        Band { w, y0: 0, pixels: &mut pixels[..n], stride: w, x0: 0, z: &mut z[..n] }
     }
 
     /// The whole of a `w`-wide view drawn into its place on a screen: `rows`
     /// are the screen's rows the view covers, `stride` pixels each, the view
     /// at column `x0` of them (`x0 + w <= stride`); `z` its `1/z`.
-    pub(super) fn placed(w: usize, rows: &'a mut [[u8; 3]], stride: usize, x0: usize, z: &'a mut [i16]) -> Band<'a> {
+    pub(super) fn placed(w: usize, rows: &'a mut [u8], stride: usize, x0: usize, z: &'a mut [i16]) -> Band<'a> {
         let h = (rows.len() / stride.max(1)).min(z.len() / w.max(1));
-        Band { w, y0: 0, rgb: &mut rows[..h * stride], stride, x0, z: &mut z[..h * w] }
+        Band { w, y0: 0, pixels: &mut rows[..h * stride], stride, x0, z: &mut z[..h * w] }
     }
 
     /// `self` cut into bands of `rows` rows (the last one shorter).
     pub(super) fn split(self, rows: usize) -> Vec<Band<'a>> {
         let (w, y0, stride, x0) = (self.w, self.y0, self.stride, self.x0);
         let rows = rows.max(1);
-        self.rgb
+        self.pixels
             .chunks_mut(rows * stride.max(1))
             .zip(self.z.chunks_mut(rows * w.max(1)))
             .enumerate()
-            .map(|(i, (rgb, z))| Band { w, y0: y0 + i * rows, rgb, stride, x0, z })
+            .map(|(i, (pixels, z))| Band { w, y0: y0 + i * rows, pixels, stride, x0, z })
             .collect()
     }
 
@@ -92,20 +92,20 @@ impl<'a> Band<'a> {
     /// Row `v`'s pixels `u..u + n` and their `1/z`, if `v` is in the band
     /// (`u + n` at most the width).
     #[inline]
-    pub(super) fn span(&mut self, u: usize, v: usize, n: usize) -> Option<(&mut [[u8; 3]], &mut [i16])> {
+    pub(super) fn span(&mut self, u: usize, v: usize, n: usize) -> Option<(&mut [u8], &mut [i16])> {
         let row = v.checked_sub(self.y0)?;
         let z = row * self.w + u;
         if z + n > self.z.len() || u + n > self.w {
             return None;
         }
         let p = row * self.stride + self.x0 + u;
-        Some((self.rgb.get_mut(p..p + n)?, &mut self.z[z..z + n]))
+        Some((self.pixels.get_mut(p..p + n)?, &mut self.z[z..z + n]))
     }
 
     /// The pixel and `1/z` at view-linear index `idx` (`v * w + u`), if the
     /// band holds it.
     #[inline]
-    pub(super) fn at(&mut self, idx: usize) -> Option<(&mut [u8; 3], &mut i16)> {
+    pub(super) fn at(&mut self, idx: usize) -> Option<(&mut u8, &mut i16)> {
         let i = idx.checked_sub(self.y0 * self.w)?;
         let z = self.z.get_mut(i)?;
         let p = if self.stride == self.w && self.x0 == 0 {
@@ -113,7 +113,7 @@ impl<'a> Band<'a> {
         } else {
             i / self.w * self.stride + self.x0 + i % self.w
         };
-        Some((self.rgb.get_mut(p)?, z))
+        Some((self.pixels.get_mut(p)?, z))
     }
 }
 
@@ -294,9 +294,9 @@ mod tests {
     #[test]
     fn bands_cover_the_view_once_in_order() {
         let (w, h) = (7usize, 23usize);
-        let mut rgb = vec![[0u8; 3]; w * h];
+        let mut pixels = vec![0u8; w * h];
         let mut z = vec![0i16; w * h];
-        let bands = Band::whole(w, &mut rgb, &mut z).split(5);
+        let bands = Band::whole(w, &mut pixels, &mut z).split(5);
         let rows: Vec<Range<usize>> = bands.iter().map(Band::rows).collect();
         assert_eq!(rows, [0..5, 5..10, 10..15, 15..20, 20..23]);
         assert_eq!(bands[4].indices(), 140..161);
@@ -305,22 +305,22 @@ mod tests {
     #[test]
     fn a_band_reaches_only_its_own_pixels() {
         let (w, h) = (4usize, 6usize);
-        let mut rgb = vec![[0u8; 3]; w * h];
+        let mut pixels = vec![0u8; w * h];
         let mut z = vec![0i16; w * h];
-        let mut bands = Band::whole(w, &mut rgb, &mut z).split(2);
+        let mut bands = Band::whole(w, &mut pixels, &mut z).split(2);
         let b = &mut bands[1]; // rows 2..4
         assert!(b.span(0, 1, 4).is_none() && b.span(0, 4, 1).is_none());
         assert!(b.span(3, 2, 2).is_none(), "past the row's end");
         let (px, zz) = b.span(1, 3, 2).expect("in the band");
-        px.fill([9; 3]);
+        px.fill(9);
         zz.fill(9);
         assert!(b.at(7).is_none() && b.at(16).is_none());
-        *b.at(8).expect("row 2, column 0").0 = [5; 3];
+        *b.at(8).expect("row 2, column 0").0 = 5;
         drop(bands);
-        assert_eq!(rgb[3 * w + 1], [9; 3]);
-        assert_eq!(rgb[3 * w + 2], [9; 3]);
-        assert_eq!(rgb[8], [5; 3]);
-        assert_eq!(rgb.iter().filter(|p| **p != [0; 3]).count(), 3);
+        assert_eq!(pixels[3 * w + 1], 9);
+        assert_eq!(pixels[3 * w + 2], 9);
+        assert_eq!(pixels[8], 5);
+        assert_eq!(pixels.iter().filter(|p| **p != 0).count(), 3);
         assert_eq!(z.iter().filter(|v| **v == 9).count(), 2);
     }
 
@@ -328,17 +328,17 @@ mod tests {
     fn a_placed_band_writes_the_view_into_its_place_on_the_screen() {
         // A 3x4 view at column 2 of a 7-wide screen, from screen row 1.
         let (w, h, stride) = (3usize, 4usize, 7usize);
-        let mut screen = vec![[0u8; 3]; stride * 6];
+        let mut screen = vec![0u8; stride * 6];
         let mut z = vec![0i16; w * h];
         let bands = Band::placed(w, &mut screen[stride..(1 + h) * stride], stride, 2, &mut z).split(3);
         assert_eq!(bands.iter().map(Band::rows).collect::<Vec<_>>(), [0..3, 3..4]);
         for mut band in bands {
             for v in band.rows() {
                 let (px, _) = band.span(0, v, w).expect("the row");
-                px.fill([1 + v as u8; 3]);
+                px.fill(1 + v as u8);
             }
             let (px, zz) = band.at(band.indices().end - 1).expect("the band's last pixel");
-            *px = [9; 3];
+            *px = 9;
             *zz = 9;
         }
         for (i, p) in screen.iter().enumerate() {
@@ -348,7 +348,7 @@ mod tests {
                 (1..=4, 2..=4) => row as u8,
                 _ => 0,
             };
-            assert_eq!(p[0], want, "screen ({col}, {row})");
+            assert_eq!(*p, want, "screen ({col}, {row})");
         }
         assert_eq!(z.iter().filter(|v| **v == 9).count(), 2);
     }
@@ -372,24 +372,24 @@ mod tests {
     fn every_band_is_drawn_once_whatever_the_thread_count() {
         let (w, h) = (3usize, 37usize);
         for threads in [1, 2, 3, 8, 64] {
-            let mut rgb = vec![[0u8; 3]; w * h];
+            let mut pixels = vec![0u8; w * h];
             let mut z = vec![0i16; w * h];
             let counts = Workers::new(threads).run(
-                Band::whole(w, &mut rgb, &mut z),
+                Band::whole(w, &mut pixels, &mut z),
                 h,
                 || 0usize,
                 |band, n| {
                     for v in band.rows() {
                         if let Some((px, _)) = band.span(0, v, w) {
                             for p in px {
-                                p[0] += 1;
+                                *p += 1;
                             }
                         }
                     }
                     *n += band.rows().len();
                 },
             );
-            assert!(rgb.iter().all(|p| p[0] == 1), "{threads} threads");
+            assert!(pixels.iter().all(|&p| p == 1), "{threads} threads");
             assert_eq!(counts.iter().sum::<usize>(), h);
             assert_eq!(counts.len(), threads.min(h));
         }
