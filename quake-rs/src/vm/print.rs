@@ -53,12 +53,17 @@ impl Vm {
         console.push_str(&self.stack_trace());
         console.push_str(&message);
         console.push('\n');
-        ProgramError { function: self.function_name(self.xfunction).to_string(), message, console }
+        ProgramError { function: self.running_function().to_string(), message, console }
     }
 
     /// The name of function `f` (`""` for none or a bad number).
     pub(crate) fn function_name(&self, f: usize) -> &str {
         self.progs.functions.get(f).map_or("", |f| string_in(&self.strings, f.s_name))
+    }
+
+    /// The name of the QuakeC function running (`pr_xfunction->s_name`).
+    pub(crate) fn running_function(&self) -> &str {
+        self.function_name(self.xfunction)
     }
 
     /// `PR_ValueString` (pr_edict.c): a value of def type `type_` (its

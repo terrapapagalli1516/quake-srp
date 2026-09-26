@@ -584,6 +584,38 @@ mod tests {
     use crate::server::testutil::*;
     use crate::server::{Server, WorldModel};
 
+    // ------------------------------------------------------------ objerror
+
+    /// PF_objerror (pr_cmds.c) prints `======OBJECT ERROR in <function>:`, the
+    /// text and `ED_Print (self)`, frees `self`, and calls Host_Error — the
+    /// error start.bsp's unreachable teleporter raises in the census (L16).
+    #[test]
+    fn objerror_dumps_and_frees_self_then_is_host_error() {
+        let (img, _touch_fn, _g_one, _g_flag) = touch_progs();
+        let mut server = Server::new(empty_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        let e = server.vm.spawn();
+        // (classname is this progs' field def 0, which ED_Print's loop skips
+        // as id's does: `for (i=1 ; i<progs->numfielddefs ; i++)`.)
+        server.vm.ent_set_string(e, "classname", "trigger_teleport");
+        server.vm.ent_set_string(e, "model", "*9");
+        server.vm.ent_set_vector(e, "origin", [10.0, -20.5, 0.0]);
+        server.vm.gset_int("self", e);
+        let text = server.vm.intern("couldn't find target");
+        server.vm.argc = 1;
+        server.vm.set_gi(crate::progs::OFS_PARM0, text);
+        let Err(crate::QError::Program(err)) = (server.vm.builtins[11])(&mut server.vm) else {
+            panic!("objerror is Host_Error")
+        };
+        assert_eq!(
+            err.console,
+            format!(
+                "======OBJECT ERROR in :\ncouldn't find target\n\nEDICT {e}:\n\
+                 origin         ' 10.0 -20.5   0.0'\nmodel          *9\n"
+            )
+        );
+        assert!(server.vm.is_free_edict(e), "ED_Free (ed) before Host_Error");
+    }
+
     // ------------------------------------------------------------ cvar / skill
 
     #[test]

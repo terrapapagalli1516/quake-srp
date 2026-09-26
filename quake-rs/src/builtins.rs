@@ -21,7 +21,7 @@
 //! `ftos == #26`, `vtos == #27`, `rint == #36`, `fabs == #43`,
 //! `nextent == #47`, `vectoangles == #51`.
 
-use crate::error::Result;
+use crate::error::{ProgramError, Result};
 use crate::vm::{Builtin, Vm};
 
 /// `PF_Fixme`: an unimplemented builtin. The C version calls `PR_RunError`
@@ -125,21 +125,34 @@ fn pf_normalize(vm: &mut Vm) -> Result<()> {
 
 // ------------------------------------------------------------ #10/#11 error/objerror
 
-/// `PF_error` (#10): a TERMINAL program error. The C dumps `self` and calls
-/// `Host_Error`; we append the message to `output` and fault via `run_error`.
+/// `PF_error` (#10): `void(string s, ...) error`. id prints
+/// `======SERVER ERROR in <function>:` and the text, dumps `self`
+/// (`ED_Print`), and calls `Host_Error ("Program error")` — directly, not
+/// through `PR_RunError`, so with no statement or stack trace. The program
+/// error returned halts the VM like any other ([`Vm::execute`]).
 fn pf_error(vm: &mut Vm) -> Result<()> {
-    let s = var_string(vm, 0);
-    vm.output.push_str(&format!("======SERVER ERROR======\n{s}\n"));
-    Err(vm.run_error(format!("program error: {s}")))
+    Err(error_report(vm, "SERVER ERROR").into())
 }
 
-/// `PF_objerror` (#11): dumps `self`, frees it, then errors. The C frees the
-/// `self` edict before `Host_Error`; with no `self` plumbing required for the
-/// self-contained subset, we record the message and fault.
+/// `PF_objerror` (#11): as [`pf_error`], under `======OBJECT ERROR`, and
+/// `self` is freed (`ED_Free`) after its dump, before `Host_Error`.
 fn pf_objerror(vm: &mut Vm) -> Result<()> {
-    let s = var_string(vm, 0);
-    vm.output.push_str(&format!("======OBJECT ERROR======\n{s}\n"));
-    Err(vm.run_error(format!("object error: {s}")))
+    let report = error_report(vm, "OBJECT ERROR");
+    let ent = vm.glob_int(vm.go.self_);
+    vm.free_edict(ent);
+    Err(report.into())
+}
+
+/// What `PF_error`/`PF_objerror` print on the way to `Host_Error`:
+/// `======<kind> in <function>:`, the message, and `ED_Print (self)`. The
+/// text also goes to the dev log (`vm.output`), like `dprint`'s.
+fn error_report(vm: &mut Vm, kind: &str) -> ProgramError {
+    let message = var_string(vm, 0);
+    let function = vm.running_function().to_string();
+    let dump = vm.ed_print(vm.glob_int(vm.go.self_));
+    let console = format!("======{kind} in {function}:\n{message}\n{dump}");
+    vm.output.push_str(&console);
+    ProgramError { function, message, console }
 }
 
 // ------------------------------------------------------------------- #12 vlen
@@ -942,15 +955,18 @@ mod tests {
         vm.argc = 1;
         let s = vm.intern("boom");
         vm.set_gi(OFS_PARM0, s);
-        assert!(pf_error(&mut vm).is_err(), "error() must fault");
-        assert!(vm.output.contains("boom"));
+        // PF_error's banner and ED_Print (self): here the world, all zeros.
+        let banner = "======SERVER ERROR in :\nboom\n\nEDICT 0:\n";
+        let Err(crate::QError::Program(e)) = pf_error(&mut vm) else { panic!("error() must fault") };
+        assert_eq!((e.message.as_str(), e.console.as_str()), ("boom", banner));
+        assert!(vm.output.contains(banner));
 
         let mut vm = bare_vm();
         vm.argc = 1;
         let s = vm.intern("kaboom");
         vm.set_gi(OFS_PARM0, s);
-        assert!(pf_objerror(&mut vm).is_err(), "objerror() must fault");
-        assert!(vm.output.contains("kaboom"));
+        let Err(crate::QError::Program(e)) = pf_objerror(&mut vm) else { panic!("objerror() must fault") };
+        assert!(e.console.starts_with("======OBJECT ERROR in :\nkaboom\n"), "{e:?}");
     }
 
     #[test]
