@@ -53,8 +53,11 @@
 //!   of the VM for the duration of a single trace / contents query, never across
 //!   an [`Vm::execute`] call (which itself reaches the host via `with_host`).
 
+use std::collections::HashMap;
+
 use crate::bsp::Bsp;
 use crate::math::Vec3;
+use crate::stepping::Stepping;
 use crate::vm::{Host, HostTrace, Vm};
 use crate::{QError, Result};
 
@@ -80,6 +83,15 @@ pub use sv_move::{
 };
 pub use sv_user::v_calc_roll;
 pub use sv_world::{probe_point_contents, sv_impact, sv_move, touch_triggers, MoveTrace};
+
+/// Restart the process-global random sequences — id's one `rand()`, here
+/// QuakeC's `random()` and the monsters' chase-direction draws — from a
+/// fresh process's seeds, so two runs in one process see the same numbers
+/// (`quaketool framerate` compares one scenario at several frame rates).
+pub fn reset_random() {
+    crate::builtins::reset_random();
+    sv_move::reset_ai_rand();
+}
 
 pub(crate) use host::{capture_transports, restore_transports};
 pub(crate) use lightstyle::{push_lightstyle, snapshot_lightstyles};
@@ -393,6 +405,13 @@ pub struct Server {
     /// client follows it (`svc_setpause` sets `cl.paused` in the same host
     /// frame on a local server). `SV_SpawnServer` clears it.
     pub paused: bool,
+    /// How the frame running steps its integrators ([`Stepping`]): set by
+    /// [`Server::client_frame_stepped`] for the frame, as `host_frametime`
+    /// is; Classic (id's per-frame code) otherwise.
+    pub(crate) stepping: Stepping,
+    /// Each pusher's `ltime` to double precision, which the uncapped step
+    /// keeps it by (`sv_phys`'s `advance_ltime`).
+    pub(crate) ltime_exact: HashMap<i32, f64>,
 }
 
 /// The result of [`Server::spawn_entities`].

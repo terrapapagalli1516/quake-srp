@@ -11,6 +11,8 @@
 //! As in id's tree, the trace these steps are made of — `SV_Move` — is not
 //! here but in world.c's port, [`super::sv_world`].
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use super::pr_cmds::bi_changeyaw;
 use super::sv_world::{link_edict, sv_move, touch_triggers};
 use super::{
@@ -311,14 +313,22 @@ fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
 /// chase-direction selection. The C used libc `rand()`; here a process-global
 /// LCG keeps chase behaviour varied yet reproducible across runs/tests.
 fn ai_rand() -> u32 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static SEED: AtomicU32 = AtomicU32::new(0x1234_5678);
-    let next = SEED
+    let next = AI_RAND_SEED
         .load(Ordering::Relaxed)
         .wrapping_mul(1_103_515_245)
         .wrapping_add(12_345);
-    SEED.store(next, Ordering::Relaxed);
+    AI_RAND_SEED.store(next, Ordering::Relaxed);
     (next >> 16) & 0x7fff
+}
+
+/// [`ai_rand`]'s state; a fresh process starts it at [`AI_RAND_START`].
+static AI_RAND_SEED: AtomicU32 = AtomicU32::new(AI_RAND_START);
+const AI_RAND_START: u32 = 0x1234_5678;
+
+/// Restart [`ai_rand`]'s sequence from a fresh process's seed (see
+/// [`crate::server::reset_random`]).
+pub(super) fn reset_ai_rand() {
+    AI_RAND_SEED.store(AI_RAND_START, Ordering::Relaxed);
 }
 
 /// `SV_NewChaseDir` (sv_move.c ~283): pick a new movement direction for `actor`

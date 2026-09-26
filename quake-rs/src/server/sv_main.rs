@@ -26,9 +26,12 @@ use super::{
     parm_global_name, Server, WorldModel, FL_CLIENT, MOVETYPE_NONE, MOVETYPE_PUSH,
     MOVETYPE_WALK, NUM_SPAWN_PARMS, SOLID_BSP, SOLID_NOT, SOLID_SLIDEBOX,
 };
+use std::collections::HashMap;
+
 use crate::bsp::{Bsp, CONTENTS_SOLID};
 use crate::math::{angle_vectors, dot, Vec3};
 use crate::progs::Progs;
+use crate::stepping::Stepping;
 use crate::vm::Vm;
 use crate::Result;
 
@@ -134,6 +137,8 @@ impl Server {
             client_spawn_parms: [0.0; NUM_SPAWN_PARMS],
             svs_serverflags: 0.0, // Host_Map_f: "haven't completed an episode yet"
             paused: false,        // SV_SpawnServer: sv.paused = false
+            stepping: Stepping::Classic,
+            ltime_exact: HashMap::new(),
         })
     }
 

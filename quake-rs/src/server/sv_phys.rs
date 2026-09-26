@@ -24,6 +24,7 @@ use super::{
     MOVETYPE_TOSS, MOVETYPE_WALK, SOLID_BSP, SOLID_NOT, SOLID_TRIGGER, SV_MAXVELOCITY,
 };
 use crate::math::{add as v_add, angle_vectors, Vec3};
+use crate::stepping::{advance_clock, Stepping};
 use crate::world;
 use crate::Result;
 
@@ -229,8 +230,7 @@ impl Server {
     fn push_move(&mut self, pusher: i32, movetime: f32, sv_time: f32) -> Result<()> {
         let velocity = self.vm.ent_vec(pusher, self.vm.fo.velocity);
         if velocity[0] == 0.0 && velocity[1] == 0.0 && velocity[2] == 0.0 {
-            let lt = self.vm.ent_float(pusher, self.vm.fo.ltime);
-            self.vm.set_ent_float(pusher, self.vm.fo.ltime, lt + movetime);
+            self.advance_ltime(pusher, movetime);
             return Ok(());
         }
 
@@ -257,8 +257,7 @@ impl Server {
         let pushorig = self.vm.ent_vec(pusher, self.vm.fo.origin);
         self.vm
             .set_ent_vec(pusher, self.vm.fo.origin, v_add(pushorig, mov));
-        let lt = self.vm.ent_float(pusher, self.vm.fo.ltime);
-        self.vm.set_ent_float(pusher, self.vm.fo.ltime, lt + movetime);
+        self.advance_ltime(pusher, movetime);
         link_edict(&mut self.vm, pusher);
 
         // Collect entities to drag, moving each as we go (origin, saved-origin).
@@ -394,8 +393,7 @@ impl Server {
             // 2. Restore the pusher (origin, relink, roll back ltime).
             self.vm.set_ent_vec(pusher, self.vm.fo.origin, pushorig);
             link_edict(&mut self.vm, pusher);
-            let lt = self.vm.ent_float(pusher, self.vm.fo.ltime);
-            self.vm.set_ent_float(pusher, self.vm.fo.ltime, lt - movetime);
+            self.advance_ltime(pusher, -movetime);
 
             // 3. If the pusher has a "blocked" function, call it (self=pusher,
             //    other=blocker). Caught, never fatal.
@@ -417,6 +415,17 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    /// `pusher->v.ltime += by` (SV_PushMove), kept exact by the uncapped step
+    /// ([`advance_clock`]): a train's `ltime` runs with the level's clock, and
+    /// in f32 at 480 Hz it would be 5.5% fast an hour in, its moves ending
+    /// early and snapping onto their marks.
+    fn advance_ltime(&mut self, pusher: i32, by: f32) {
+        let mut ltime = self.vm.ent_float(pusher, self.vm.fo.ltime);
+        let exact = self.ltime_exact.entry(pusher).or_insert(0.0);
+        advance_clock(self.stepping, &mut ltime, exact, by);
+        self.vm.set_ent_float(pusher, self.vm.fo.ltime, ltime);
     }
 
     /// `SV_TestEntityPosition` (sv_phys.c): true when `ent`'s box overlaps solid
@@ -555,8 +564,11 @@ impl Server {
             // instead of accumulating downward speed forever.
             self.add_gravity(ent, dt);
             self.check_velocity(ent);
-            let mut steptrace: Option<MoveTrace> = None;
-            let _ = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
+            let lead = self.gravity_lead(ent, dt);
+            self.move_with_lead(ent, lead, |s| {
+                let mut steptrace: Option<MoveTrace> = None;
+                let _ = s.fly_move_core(ent, dt, sv_time, &mut steptrace);
+            });
 
             // SV_LinkEdict(ent, true) ends the freefall branch: it recomputes
             // absmin/absmax from the NEW origin AND trips triggers/pickups for the
@@ -598,7 +610,8 @@ impl Server {
         self.check_velocity(ent);
 
         // add gravity (not for FLY / FLYMISSILE)
-        if movetype != MOVETYPE_FLY && movetype != MOVETYPE_FLYMISSILE {
+        let falls = movetype != MOVETYPE_FLY && movetype != MOVETYPE_FLYMISSILE;
+        if falls {
             self.add_gravity(ent, dt);
         }
 
@@ -608,8 +621,12 @@ impl Server {
         self.vm
             .set_ent_vec(ent, self.vm.fo.angles, crate::math::mul_add(angles, dt, avel));
 
-        // move origin
-        let vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        // move origin (the uncapped step leads the fall: `gravity_lead`)
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let lead = if falls { self.gravity_lead(ent, dt) } else { 0.0 };
+        if lead != 0.0 {
+            vel[2] += lead;
+        }
         let move_ = crate::math::scale(vel, dt);
         let tr = self.push_entity(ent, move_, sv_time);
 
@@ -628,7 +645,13 @@ impl Server {
         }
 
         let backoff = if movetype == MOVETYPE_BOUNCE { 1.5 } else { 1.0 };
-        let vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        // The bounce takes the velocity the move was made with, lead and all,
+        // as the walk and step moves clip theirs: a 72 Hz frame that hits
+        // the floor mid-frame bounces with the speed of its end.
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        if lead != 0.0 {
+            vel[2] += lead;
+        }
         let new_vel = clip_velocity(vel, tr.plane_normal, backoff);
         self.vm.set_ent_vec(ent, self.vm.fo.velocity, new_vel);
 
@@ -778,17 +801,46 @@ impl Server {
     /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
     /// where the per-entity `gravity` field defaults to 1.0 when unset/zero.
     fn add_gravity(&mut self, ent: i32, dt: f32) {
-        let ent_gravity = {
-            let g = self.vm.ent_float(ent, self.vm.fo.gravity);
-            if g != 0.0 {
-                g
-            } else {
-                1.0
-            }
-        };
         let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
-        vel[2] -= ent_gravity * sv_gravity() * dt;
+        vel[2] -= self.gravity_of(ent) * dt;
         self.vm.set_ent_vec(ent, self.vm.fo.velocity, vel);
+    }
+
+    /// The pull `SV_AddGravity` applies to `ent`: `ent.gravity` (1 when unset)
+    /// times `sv_gravity`, in units/s².
+    fn gravity_of(&self, ent: i32) -> f32 {
+        let g = self.vm.ent_float(ent, self.vm.fo.gravity);
+        let ent_gravity = if g != 0.0 { g } else { 1.0 };
+        ent_gravity * sv_gravity()
+    }
+
+    /// How far the frame's move leads `ent`'s fall ([`Stepping::gravity_lead`]):
+    /// 0 in Classic, where the move is id's.
+    fn gravity_lead(&self, ent: i32, dt: f32) -> f32 {
+        self.stepping.gravity_lead(self.gravity_of(ent), dt)
+    }
+
+    /// Run `mv`, a frame's move after `SV_AddGravity`, with `lead` added to
+    /// the vertical velocity it moves by ([`Stepping::gravity_lead`]), then
+    /// take the lead back off — unless the move replaced the vertical
+    /// velocity (a floor, ceiling or slope clipped it, a stair step zeroed
+    /// it), in which case the move's velocity stands, as in id's.
+    fn move_with_lead(&mut self, ent: i32, lead: f32, mv: impl FnOnce(&mut Self)) {
+        if lead == 0.0 {
+            return mv(self);
+        }
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        vel[2] += lead;
+        let led = vel[2];
+        self.vm.set_ent_vec(ent, self.vm.fo.velocity, vel);
+        mv(self);
+        if !self.is_free(ent) {
+            let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+            if vel[2] == led {
+                vel[2] -= lead;
+                self.vm.set_ent_vec(ent, self.vm.fo.velocity, vel);
+            }
+        }
     }
 
     /// `SV_CheckVelocity` (sv_phys.c): clamp each velocity component to
@@ -879,6 +931,25 @@ impl Server {
     /// [`Server::client_frame`] with id's `double host_frametime`: `sv.time`
     /// (a double) advances by exactly it, as `SV_Physics` does.
     pub fn client_frame_f64(&mut self, cmd: &UserCmd, host_frametime: f64) -> Result<FrameReport> {
+        self.client_frame_stepped(cmd, host_frametime, Stepping::Classic)
+    }
+
+    /// [`Server::client_frame_f64`], its integrators stepped as `stepping`
+    /// says: [`Stepping::Uncapped`] is the uncapped host's frame, which plays
+    /// as a run of id's 1/72 s frames would.
+    pub fn client_frame_stepped(
+        &mut self,
+        cmd: &UserCmd,
+        host_frametime: f64,
+        stepping: Stepping,
+    ) -> Result<FrameReport> {
+        self.stepping = stepping;
+        let report = self.client_frame_inner(cmd, host_frametime);
+        self.stepping = Stepping::Classic;
+        report
+    }
+
+    fn client_frame_inner(&mut self, cmd: &UserCmd, host_frametime: f64) -> Result<FrameReport> {
         let dt = host_frametime as f32;
         self.vm.host_frametime = host_frametime;
         // host_frametime = dt; sv.time advances at the END of SV_Physics in the
@@ -1027,13 +1098,15 @@ impl Server {
                 // can deal lava/slime damage.
                 let in_water = self.check_water(ent);
                 let flags = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
-                if !in_water && flags & FL_WATERJUMP == 0 {
+                let falls = !in_water && flags & FL_WATERJUMP == 0;
+                if falls {
                     self.add_gravity(ent, dt);
                 }
                 // SV_CheckStuck: free the player from the clipping hull (and
                 // latch `oldorigin`) right before the walk move, as the C does.
                 self.check_stuck(ent);
-                self.walk_move(ent, start_time, dt);
+                let lead = if falls { self.gravity_lead(ent, dt) } else { 0.0 };
+                self.move_with_lead(ent, lead, |s| s.walk_move(ent, start_time, dt));
             }
             MOVETYPE_FLY => {
                 let (f, alive) = self.run_think(ent)?;
@@ -2312,5 +2385,75 @@ mod tests {
             "toss corpse falls instead of freezing mid-air: z = {}",
             org[2]
         );
+    }
+
+    // -------------------------------------------- stepping: plays like 72 Hz
+
+    /// A player on `floor_bsp` launched at 270 u/s (PlayerJump's impulse),
+    /// or a bouncing point thrown up at (100, 0, 300), stepped at `hz` until
+    /// it lands (or for 2 s): (apex, landing time, where it rests).
+    fn launch(hz: f64, stepping: Stepping, bounce: bool) -> (f32, f64, f32) {
+        let (img, g_const100, g_origin) = player_progs();
+        let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+        let p = server.connect_client().expect("connect");
+        let (e, z0) = if bounce {
+            let e = server.vm.spawn();
+            server.vm.ent_set_float(e, "movetype", MOVETYPE_BOUNCE as f32);
+            server.vm.ent_set_vector(e, "origin", [0.0, 0.0, 50.0]);
+            server.vm.ent_set_vector(e, "velocity", [100.0, 0.0, 300.0]);
+            server.vm.ent_set_vector(p, "origin", [-500.0, 0.0, 24.0]);
+            (e, 50.0)
+        } else {
+            server.vm.ent_set_float(p, "movetype", MOVETYPE_WALK as f32);
+            server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+            server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+            server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
+            server.vm.ent_set_vector(p, "velocity", [0.0, 0.0, 270.0]);
+            (p, 24.0)
+        };
+        let (mut apex, mut landed, mut t, mut vz) = (0.0f32, f64::NAN, 0.0f64, 1.0f32);
+        while t < 2.0 {
+            server.client_frame_stepped(&UserCmd::default(), 1.0 / hz, stepping).expect("frame");
+            t += 1.0 / hz;
+            apex = apex.max(server.vm.ent_get_vector(e, "origin")[2] - z0);
+            let on_ground = server.vm.ent_get_float(e, "flags") as i32 & FL_ONGROUND != 0;
+            // A bounce turns the fall around within the frame.
+            let (was, now) = (vz, server.vm.ent_get_vector(e, "velocity")[2]);
+            vz = now;
+            if landed.is_nan() && (on_ground || (was < 0.0 && now > 0.0)) {
+                landed = t;
+                if !bounce {
+                    break;
+                }
+            }
+        }
+        (apex, landed, server.vm.ent_get_vector(e, "origin")[0])
+    }
+
+    /// The uncapped step (`Stepping::Uncapped`) flies a jump and a bounce as
+    /// id's 72 Hz frames do, at 60, 144 and 480 Hz, where id's own code
+    /// stepped at those rates does not. Tolerances: the apex to 0.05 units;
+    /// the landing, sampled at frame ends, to one 72 Hz frame; where the
+    /// bouncer comes to rest to 3 units (it bounces off the floor at the
+    /// speed its landing frame ends with, which varies with the frame's
+    /// phase at any rate). FRAMERATE.md; `quaketool framerate --check` runs
+    /// the same comparison through the whole game on the shareware maps.
+    #[test]
+    fn uncapped_frames_jump_and_bounce_like_72_hz() {
+        for bounce in [false, true] {
+            let (apex72, land72, rest72) = launch(72.0, Stepping::Classic, bounce);
+            // v²/2g less the 72 Hz frame's half-step, v/144: 270 -> 43.70, 300 -> 54.17.
+            let expect = if bounce { 54.17 } else { 43.70 };
+            assert!((apex72 - expect).abs() < 0.05, "id's apex at 72 Hz: {apex72}");
+            for hz in [60.0, 144.0, 480.0] {
+                let (apex, land, rest) = launch(hz, Stepping::Uncapped, bounce);
+                assert!((apex - apex72).abs() < 0.05, "{hz} Hz apex {apex} vs {apex72}");
+                assert!((land - land72).abs() <= 1.0 / 72.0 + 1e-6, "{hz} Hz lands {land} vs {land72}");
+                assert!((rest - rest72).abs() < 3.0, "{hz} Hz rests at {rest} vs {rest72}");
+                let (classic, _, _) = launch(hz, Stepping::Classic, bounce);
+                assert!((classic - apex72).abs() > 0.3, "{hz} Hz: id's per-frame code drifts ({classic})");
+            }
+        }
     }
 }

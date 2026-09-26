@@ -32,6 +32,8 @@ use quake_rs::wad::{self, Wad2};
 
 #[path = "quaketool/census.rs"]
 mod census;
+#[path = "quaketool/framerate.rs"]
+mod framerate;
 #[path = "quaketool/play.rs"]
 mod play;
 #[path = "quaketool/shot.rs"]
@@ -92,6 +94,7 @@ fn main() {
         "timedemo" => need(rest, 2, cmd).and_then(|a| timedemo::cmd_timedemo(&a[0], &a[1], &a[2..]).map(Out::Text)),
         "sound" => need(rest, 3, cmd).and_then(|a| sound::cmd_sound(&a[0], &a[1], &a[2], &a[3..]).map(Out::Text)),
         "sndscript" => need(rest, 3, cmd).and_then(|a| sound::cmd_sndscript(&a[0], &a[1], &a[2], &a[3..]).map(Out::Text)),
+        "framerate" => need(rest, 1, cmd).and_then(|a| framerate::cmd_framerate(&a[0], &a[1..]).map(Out::Text)),
         "sim" => need(rest, 2, cmd).and_then(|a| {
             cmd_sim(&a[0], &a[1], a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5))
         }),
@@ -164,7 +167,8 @@ fn usage() {
          \t                               run the browser's game client natively (quake_rs::client), frame hashes as web/bench.py\n\
          \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--video classic|modern] [--hires 0|1] [--fov-mode M] [--display W:H] [--scaled2d 0|1]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n\
          \tquaketool sound <pak> <demo> <out.wav> [--rate HZ] [--classic] [--fps F] [--trace FILE]  a demo's sound through the engine's mixer, as a .wav\n\
-         \tquaketool sndscript <pak> <script> <out.raw> --rate HZ [--fixes] [--trace FILE]  a sound-oracle script through the port (oracle/sound.py)\n"
+         \tquaketool sndscript <pak> <script> <out.raw> --rate HZ [--fixes] [--trace FILE]  a sound-oracle script through the port (oracle/sound.py)\n\
+         \tquaketool framerate <pak> [--rates 60,144,240,480,jitter] [--only NAMES] [--markdown] [--check]\n\t                               play scripted scenarios at 72 Hz and each rate; how each quantity differs (FRAMERATE.md)\n"
     );
 }
 
