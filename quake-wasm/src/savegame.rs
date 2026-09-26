@@ -154,7 +154,7 @@ pub(crate) fn do_load_command(name: Option<&str>) {
 fn build_walk_savegame(text: &str) -> Result<Walk, String> {
     let pak = pak().ok_or_else(|| "Couldn't load map".to_string())?;
     let mut sound = Vec::new();
-    let walk = host_cmd::build_walk_savegame(pak.clone(), text, &mut sound);
+    let walk = host_cmd::build_walk_savegame(pak.clone(), text, &crate::app::session_rand(), &mut sound);
     snd_dma::play(&pak, sound);
     walk
 }

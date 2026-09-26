@@ -674,7 +674,7 @@ fn render_demo_frame(
     // client's own sv_gravity cvar in playback too — 800, or what the last map
     // played set it to (e1m8's worldspawn: 100), not the recording's.
     if cl_frametime.is_finite() && cl_frametime > 0.0 {
-        d.particles.integrate(cl_frametime, v.time, crate::server::Server::sv_gravity_cvar() * 0.05);
+        d.particles.integrate(cl_frametime, v.time, d.sv_gravity * 0.05);
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)

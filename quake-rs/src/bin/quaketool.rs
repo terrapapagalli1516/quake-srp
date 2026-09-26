@@ -528,8 +528,8 @@ fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, String>
     let rep = server.spawn_entities().map_err(|e| e.to_string())?;
     let _ = writeln!(
         o,
-        "\nspawn: {} entity blocks -> {} spawned, {} inhibited (skill), {} no-spawn-fn, {} spawn errors",
-        rep.total, rep.spawned, rep.inhibited, rep.no_spawn_function, rep.spawn_errors
+        "\nspawn: {} entity blocks -> {} spawned, {} inhibited (skill), {} no-spawn-fn",
+        rep.total, rep.spawned, rep.inhibited, rep.no_spawn_function
     );
     let _ = writeln!(o, "  live edicts: {}", server.live_entities());
     let _ = writeln!(o, "  top classnames spawned:");
@@ -540,15 +540,13 @@ fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> Result<Out, String>
     // --- tick physics ---
     if frames > 0 {
         let mut total = 0usize;
-        let mut errs = 0usize;
         for _ in 0..frames {
             let fr = server.run_frame_f64(0.1).map_err(|e| e.to_string())?;
             total += fr.thinks_fired;
-            errs += fr.think_errors;
         }
         let _ = writeln!(
             o,
-            "\nphysics: {frames} frames @ dt=0.1 -> time {:.1}s, {total} think calls fired, {errs} think errors (unimplemented builtins)",
+            "\nphysics: {frames} frames @ dt=0.1 -> time {:.1}s, {total} think calls fired",
             server.time()
         );
     }
@@ -1147,12 +1145,10 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
     let stmt0 = server.vm.stmt_count;
     quake_rs::world::reset_trace_count();
     let mut thinks = 0usize;
-    let mut think_errors = 0usize;
     let start = Instant::now();
     for _ in 0..frames {
         let fr = server.client_frame_f64(&cmd, DT).map_err(|e| format!("client_frame: {e}"))?;
         thinks += fr.thinks_fired;
-        think_errors += fr.think_errors;
     }
     let elapsed = start.elapsed();
     let stmts = server.vm.stmt_count.wrapping_sub(stmt0);
@@ -1181,11 +1177,10 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
     );
     let _ = writeln!(
         o,
-        "  per frame: {:.0} VM statements, {:.1} BSP traces, {:.1} thinks{}",
+        "  per frame: {:.0} VM statements, {:.1} BSP traces, {:.1} thinks",
         stmts as f64 / frames as f64,
         traces as f64 / frames as f64,
         thinks as f64 / frames as f64,
-        if think_errors > 0 { format!(" ({think_errors} think errors)") } else { String::new() },
     );
     let _ = writeln!(
         o,
@@ -1333,7 +1328,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
     // Snapshot the inventory BEFORE the swap, then save the spawn parms (this runs
     // the QuakeC SetChangeParms, marshalling the player's state into parm1..16).
     let before = snapshot(&server);
-    let parms = server.save_spawn_parms();
+    let parms = server.save_spawn_parms().map_err(|e| e.to_string())?;
     let _ = writeln!(o, "  BEFORE swap: {}", fmt(&before));
     let _ = writeln!(
         o,
@@ -1349,10 +1344,11 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         .map_err(|e| format!("loading next map {next_bsp_path}: {e}"))?;
     let next_bsp = Bsp::parse(&next_bytes).map_err(|e| e.to_string())?;
     let next_progs = Progs::parse(&read("progs.dat")?).map_err(|e| e.to_string())?;
-    // Carry the chosen difficulty across (skill is a thread-local that with_pak
-    // resets to 1) — captured before building next_server, restored after.
+    // Carry the chosen difficulty across (a new server starts at skill 1) and
+    // the session's random streams, as the client's changelevel does.
     let carry_skill = server.skill();
     let mut next_server = Server::with_pak(next_bsp, next_progs, Some(pak.clone())).map_err(|e| e.to_string())?;
+    next_server.set_rand(std::rc::Rc::clone(server.rand()));
     next_server.set_map_name(&next_map_name); // SV_SpawnServer for the swapped-to level
     next_server.set_skill(carry_skill as f32);
     let next_rep = next_server.spawn_entities().map_err(|e| e.to_string())?;

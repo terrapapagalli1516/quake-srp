@@ -13,9 +13,6 @@
 //! The collision queries are world.c's (`sv_world.rs`); the player's wish
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
-use super::host::{reset_changelevel, reset_restart, sv_gravity};
-use super::lightstyle::snapshot_lightstyles;
-use super::msg::reset_message_parsers;
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
 use super::{
     FrameReport, Server, UserCmd, CONTENTS_EMPTY,
@@ -50,26 +47,27 @@ impl Server {
         self.vm.set_glob_float(self.vm.go.frametime, dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
-        reset_message_parsers();
+        if let Some(o) = self.outbox() {
+            o.reset_parsers();
+        }
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before thinks.
         self.cleanup_ents();
         // (float)sv.time, what every `pr_global_struct->time = sv.time` stores.
         let start_time = self.time();
 
         let mut thinks_fired = 0usize;
-        let mut think_errors = 0usize;
         // SV_Physics always starts with StartFrame (self/other = world, time =
         // sv.time) — the spawn settle frames included, so QC's `skill`,
         // `teamplay` and `framecount` globals are set from the first frame.
+        // A program error anywhere in the frame ends it (id's Host_Error).
         self.vm.set_glob_float(self.vm.go.time, start_time);
-        if self.run_sys("StartFrame", 0, 0).is_err() {
-            think_errors += 1; // isolated; the interpreter was reset
-        }
+        self.run_sys("StartFrame", 0, 0)?;
         // `for (i=0 ; i<sv.num_edicts ; i++)`: the bound is re-read every
         // iteration, so an edict spawned by an earlier think this frame (a
         // missile, a gib) gets its physics on the frame it was spawned.
         let mut next = 0;
         while next < self.vm.num_edicts() {
+            self.check_halted()?;
             let e = next;
             next += 1;
             // edict 0 is the world; process every non-free edict, as the C does.
@@ -82,29 +80,19 @@ impl Server {
                 continue; // a retouch freed it
             }
             let movetype = self.vm.ent_float(ent, self.vm.fo.movetype) as i32;
-
-            // Isolate per-entity faults (e.g. a think hitting an unimplemented
-            // builtin): count it, reset the interpreter, and carry on — one bad
-            // entity must not abort the whole frame.
-            match self.process_entity(ent, movetype, start_time, dt) {
-                Ok(fired) => thinks_fired += fired as usize,
-                Err(_) => {
-                    think_errors += 1;
-                    self.vm.reset_execution();
-                }
-            }
+            thinks_fired += self.process_entity(ent, movetype, start_time, dt)? as usize;
         }
+        self.check_halted()?;
 
         self.decrement_force_retouch();
         self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
-        // sync any updates from the write transport into the owned table.
-        self.lightstyles = snapshot_lightstyles();
+        // apply those writes to the owned table.
+        self.apply_lightstyles();
 
         Ok(FrameReport {
             thinks_fired,
-            think_errors,
             time: self.time(),
         })
     }
@@ -122,8 +110,8 @@ impl Server {
     /// Process one live edict for a frame: per-movetype physics plus
     /// `SV_RunThink`. Returns whether a think fired. `run_think` returns
     /// `(fired, alive)`; physics runs whenever the entity is still alive,
-    /// independent of whether a think fired. Errors propagate so the caller can
-    /// isolate a faulting entity.
+    /// independent of whether a think fired. A program error propagates: it
+    /// ends the frame.
     fn process_entity(&mut self, ent: i32, movetype: i32, start_time: f32, dt: f32) -> Result<bool> {
         match movetype {
             MOVETYPE_PUSH => self.physics_pusher(ent, start_time, dt),
@@ -176,9 +164,8 @@ impl Server {
     ///
     /// Faithful to the C: the move time is clamped so the pusher never steps past
     /// its scheduled think, [`Self::push_move`] advances `ltime` (unless blocked),
-    /// and the think runs with `self = ent`, `other = world`. A QuakeC error in
-    /// the think is caught via `reset_execution` rather than aborting the host.
-    /// Returns whether the think fired.
+    /// and the think runs with `self = ent`, `other = world`. Returns whether
+    /// the think fired, or its program error.
     fn physics_pusher(&mut self, ent: i32, start_time: f32, dt: f32) -> Result<bool> {
         let oldltime = self.vm.ent_float(ent, self.vm.fo.ltime);
         let thinktime = self.vm.ent_float(ent, self.vm.fo.nextthink);
@@ -210,9 +197,7 @@ impl Server {
             let think = self.vm.ent_int(ent, self.vm.fo.think);
             if think > 0 {
                 fired = true;
-                if self.vm.execute(think as usize).is_err() {
-                    self.vm.reset_execution();
-                }
+                self.vm.execute(think as usize)?;
             }
         }
         Ok(fired)
@@ -225,8 +210,7 @@ impl Server {
     /// If a dragged entity ends up stuck (its box overlaps solid geometry after
     /// moving), the whole move is reverted — the pusher and every already-moved
     /// entity are restored to their saved origins — and the pusher's `blocked`
-    /// function is invoked (caught, never fatal). Otherwise the move stands and
-    /// `ltime` is advanced.
+    /// function is invoked. Otherwise the move stands and `ltime` is advanced.
     fn push_move(&mut self, pusher: i32, movetime: f32, sv_time: f32) -> Result<()> {
         let velocity = self.vm.ent_vec(pusher, self.vm.fo.velocity);
         if velocity[0] == 0.0 && velocity[1] == 0.0 && velocity[2] == 0.0 {
@@ -396,14 +380,12 @@ impl Server {
             self.advance_ltime(pusher, -movetime);
 
             // 3. If the pusher has a "blocked" function, call it (self=pusher,
-            //    other=blocker). Caught, never fatal.
+            //    other=blocker).
             let blocked = self.vm.ent_int(pusher, self.vm.fo.blocked);
             if blocked > 0 {
                 self.vm.set_glob_int(self.vm.go.self_, pusher);
                 self.vm.set_glob_int(self.vm.go.other, block);
-                if self.vm.execute(blocked as usize).is_err() {
-                    self.vm.reset_execution();
-                }
+                self.vm.execute(blocked as usize)?;
             }
 
             // 4. Move back every entity we already dragged (including the blocker
@@ -555,7 +537,7 @@ impl Server {
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
             // hitsound = velocity[2] < sv_gravity * -0.1, sampled BEFORE gravity.
             let vel_z = self.vm.ent_vec(ent, self.vm.fo.velocity)[2];
-            let hitsound = vel_z < sv_gravity() * -0.1;
+            let hitsound = vel_z < self.sv_gravity() * -0.1;
 
             // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
             // SV_LinkEdict(ent, true). The C runs the full slide move (NOT a
@@ -811,7 +793,7 @@ impl Server {
     fn gravity_of(&self, ent: i32) -> f32 {
         let g = self.vm.ent_float(ent, self.vm.fo.gravity);
         let ent_gravity = if g != 0.0 { g } else { 1.0 };
-        ent_gravity * sv_gravity()
+        ent_gravity * self.sv_gravity()
     }
 
     /// How far the frame's move leads `ent`'s fall ([`Stepping::gravity_lead`]):
@@ -958,12 +940,13 @@ impl Server {
         self.vm.set_glob_float(self.vm.go.frametime, dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
-        reset_message_parsers();
-        // Drop any changelevel() / restart request a *prior* frame left unconsumed
-        // (a well-behaved front-end drains it immediately, but a stale request must
-        // never trigger a swap/respawn a frame late or against the wrong level).
-        reset_changelevel();
-        reset_restart();
+        if let Some(o) = self.outbox() {
+            o.reset_parsers();
+        }
+        // Drop any changelevel() / restart request a *prior* frame left untaken.
+        if let Some(o) = self.outbox() {
+            o.clear_requests();
+        }
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before this
         // frame's thinks (the host already consumed it via entity_dlights()).
         self.cleanup_ents();
@@ -985,17 +968,15 @@ impl Server {
 
         // Let the progs know a new frame has started (self/other = world,
         // time = sv.time).
+        // A program error anywhere in the frame ends it (id's Host_Error).
         let mut thinks_fired = 0usize;
-        let mut think_errors = 0usize;
         self.vm.set_glob_float(self.vm.go.time, start_time);
-        match self.run_sys("StartFrame", 0, 0) {
-            Ok(_) => {}
-            Err(_) => think_errors += 1, // isolated; the interpreter was reset
-        }
+        self.run_sys("StartFrame", 0, 0)?;
 
         // The bound is re-read every iteration, as in SV_Physics (see run_frame).
         let mut next = 0;
         while next < self.vm.num_edicts() {
+            self.check_halted()?;
             let e = next;
             next += 1;
             let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
@@ -1007,20 +988,15 @@ impl Server {
                 continue; // a retouch freed it
             }
 
-            let result = if ent == self.player {
-                self.physics_client(ent, start_time, dt)
+            let fired = if ent == self.player {
+                self.physics_client(ent, start_time, dt)?
             } else {
                 let movetype = self.vm.ent_float(ent, self.vm.fo.movetype) as i32;
-                self.process_entity(ent, movetype, start_time, dt)
+                self.process_entity(ent, movetype, start_time, dt)?
             };
-            match result {
-                Ok(fired) => thinks_fired += fired as usize,
-                Err(_) => {
-                    think_errors += 1;
-                    self.vm.reset_execution();
-                }
-            }
+            thinks_fired += fired as usize;
         }
+        self.check_halted()?;
 
         self.decrement_force_retouch();
 
@@ -1041,12 +1017,11 @@ impl Server {
         self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
-        // sync any updates from the write transport into the owned table.
-        self.lightstyles = snapshot_lightstyles();
+        // apply those writes to the owned table.
+        self.apply_lightstyles();
 
         Ok(FrameReport {
             thinks_fired,
-            think_errors,
             time: self.time(),
         })
     }
@@ -1911,6 +1886,63 @@ mod tests {
         assert_eq!(frame(&mut server), 0.0, "SOLID_NOT: SV_LinkEdict returns before SV_TouchLinks");
     }
 
+    /// id's `PR_RunError` longjmps out of the whole frame to `Host_Error`: a
+    /// QuakeC error in a touch the physics runs (here a trigger `force_retouch`
+    /// relinks, `SV_TouchLinks`) ends the frame with that error, and the server
+    /// runs no more QuakeC — the next frame fails at once with the same error.
+    #[test]
+    fn a_touch_error_in_the_physics_ends_the_frame() {
+        let mut b = Builder::new();
+        b.entityfields = 32;
+        for (name, ty, ofs) in [
+            ("self", EV_ENTITY, 31),
+            ("other", EV_ENTITY, 32),
+            ("time", EV_FLOAT, 33),
+            ("world", EV_ENTITY, 34),
+            ("frametime", EV_FLOAT, 35),
+            ("force_retouch", EV_FLOAT, 36),
+        ] {
+            b.add_global(name, ty, ofs);
+        }
+        for (name, ty, ofs) in [
+            ("solid", EV_FLOAT, 2),
+            ("touch", EV_FUNCTION, 3),
+            ("origin", EV_VECTOR, 4),
+            ("mins", EV_VECTOR, 7),
+            ("maxs", EV_VECTOR, 10),
+            ("absmin", EV_VECTOR, 13),
+            ("absmax", EV_VECTOR, 16),
+            ("movetype", EV_FLOAT, 20),
+            ("size", EV_VECTOR, 26),
+        ] {
+            b.add_field(name, ty, ofs);
+        }
+        // bad_touch calls the function in global 40, which holds 0.
+        let call_null = Statement { op: Op::Call0 as u16, a: 40, b: 0, c: 0 };
+        let done = Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 };
+        let bad_touch = b.add_function("bad_touch", vec![call_null, done]);
+        let mut server = Server::new(world_open_bsp(), Progs::parse(&b.build()).expect("parse")).expect("server");
+
+        let mover = server.vm.spawn();
+        server.vm.ent_set_float(mover, "solid", SOLID_BBOX as f32);
+        server.vm.ent_set_vector(mover, "maxs", [16.0; 3]);
+        server.vm.ent_set_vector(mover, "mins", [-16.0; 3]);
+        let trigger = server.vm.spawn();
+        server.vm.ent_set_float(trigger, "solid", SOLID_TRIGGER as f32);
+        server.vm.ent_set_int(trigger, "touch", bad_touch as i32);
+        server.vm.ent_set_vector(trigger, "mins", [-8.0; 3]);
+        server.vm.ent_set_vector(trigger, "maxs", [8.0; 3]);
+        link_edict(&mut server.vm, trigger);
+        server.vm.gset_float("force_retouch", 1.0);
+
+        let t0 = server.sv_time();
+        let Err(crate::QError::Program(e)) = server.run_frame(0.1) else { panic!("the touch's error ends the frame") };
+        assert_eq!((e.function.as_str(), e.message.as_str()), ("bad_touch", "NULL function"));
+        assert_eq!(server.sv_time(), t0, "the frame never finished: sv.time did not advance");
+        let Err(crate::QError::Program(again)) = server.run_frame(0.1) else { panic!("a halted server runs nothing") };
+        assert_eq!(again, e);
+    }
+
     #[test]
     fn sv_gravity_cvar_drives_add_gravity() {
         // CENSUS F3: world.qc worldspawn does cvar_set("sv_gravity", "100") on
@@ -1918,17 +1950,18 @@ mod tests {
         // 100 gives -10, not -80.
         let (mut server, e) = toss_server();
         assert_eq!(server.sv_gravity(), 800.0, "the cvar's default");
-        super::super::host::set_sv_gravity(100.0);
+        server.set_sv_gravity(100.0);
         assert_eq!(server.sv_gravity(), 100.0);
         server.run_frame(0.1).expect("frame");
         let vz = server.vm.ent_get_vector(e, "velocity")[2];
         assert!((vz + 10.0).abs() < 1e-3, "sv_gravity 100: expected -10, got {vz}");
-        // The cvar outlives the map (SV_SpawnServer never touches it): the next
-        // server keeps 100 until its worldspawn sets it, as id1's does on
-        // every map (the census test that loads e1m5 after e1m8 relies on
-        // that cvar_set, not on a reset).
+        // The cvar outlives the map (SV_SpawnServer never touches it): the
+        // front-end hands it to the next server, which keeps 100 until its
+        // worldspawn sets it, as id1's does on every map.
         let (mut next, e2) = toss_server();
-        assert_eq!(next.sv_gravity(), 100.0, "a new map keeps the cvar");
+        assert_eq!(next.sv_gravity(), 800.0, "a server starts from the default");
+        next.set_sv_gravity(server.sv_gravity());
+        assert_eq!(next.sv_gravity(), 100.0, "the handed-over cvar");
         let name = next.vm.intern("sv_gravity");
         let val = next.vm.intern("800");
         next.vm.argc = 2;

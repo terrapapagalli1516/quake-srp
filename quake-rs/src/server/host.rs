@@ -1,103 +1,69 @@
-//! Host-side state around the server: the `skill` cvar, the deferred
-//! `changelevel` / `restart` commands, spawn parms and serverflags across a
-//! level change, `kill`, the signon settle frames, and the savegame loader's
-//! rollback of the per-thread transports.
+//! Host-side state around the server: the `skill` and `sv_gravity` cvars
+//! ([`ServerCvars`]), the deferred `changelevel` / `restart` commands, spawn
+//! parms and serverflags across a level change, `kill`, and the signon settle
+//! frames.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Sources:
 //! * `WinQuake/host_cmd.c` — `Host_Changelevel_f` / `Host_Restart_f` (the
 //!   console commands `PF_changelevel` / `PF_localcmd` defer through
 //!   `Cbuf_AddText`), `Host_Kill_f`, `Host_Spawn_f` / `Host_Begin_f` (the
-//!   signon frames), `Host_Loadgame_f` (what a failed load must leave intact).
+//!   signon frames).
 //! * `WinQuake/sv_main.c` — `SV_SaveSpawnparms`, and `SV_SpawnServer`'s
 //!   `skill` → `current_skill` rounding.
 //! * `WinQuake/pr_cmds.c` — `PF_changelevel`, `PF_localcmd`.
 //!
 //! This port has no console, command buffer or cvar registry, so the pieces of
-//! host state QuakeC can reach live in per-thread cells here, and the
-//! front-end (wasm shell, quaketool) plays `Host_Frame`'s part through the
-//! `Server` methods below.
+//! host state QuakeC can reach live on the server — the cvars on its world
+//! model, the commands in its [`Outbox`] — and the front-end (wasm shell,
+//! quaketool) plays `Host_Frame`'s part through the `Server` methods below.
 
-use super::lightstyle::{snapshot_lightstyles, LIGHTSTYLES, MAX_LIGHTSTYLES};
-use super::msg::{
-    reset_message_parsers, take_messages, take_particle_bursts,
-    take_sound_events, take_static_sounds, take_svc_events, take_temp_entities,
-};
-use super::{parm_global_name, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
+use std::rc::Rc;
+
+use super::{parm_global_name, Outbox, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
+use crate::qrand::QRand;
 use crate::vm::Vm;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
-// The `skill` cvar (host_cmd.c / sv_main.c `current_skill`).
-//
-// The original engine kept `skill` in the console-cvar registry and derived an
-// integer `current_skill = (int)(skill.value + 0.5)` clamped to 0..3 in
-// `SV_SpawnServer`. This headless port has no cvar subsystem and the `Vm` field
-// set is fixed (we must not extend it), so — exactly like the changelevel /
-// lightstyle transports — we hold the live skill value in a per-thread cell.
-// `PF_cvar("skill")` reads it, `PF_cvar_set("skill", N)` writes it (clamped),
-// and `ED_LoadFromFile` reads it to filter monsters/items by difficulty. The
-// difficulty portals in the start map are `trigger_setskill` entities whose
-// QuakeC `touch` calls `cvar_set("skill", N)`, so honouring `cvar_set` here is
-// what makes those portals actually change which entities spawn.
-//
-// THREAD-LOCAL (not a process-global atomic): a server session runs all its
-// QuakeC on one thread, so a `thread_local` is the correct scope AND keeps each
-// test thread isolated (the cell is the same shape as the sound/lightstyle/
-// changelevel transports — `msg.rs`, `lightstyle.rs`, and below).
+// The server's cvars.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// Live integer skill level (0=easy, 1=medium, 2=hard, 3=nightmare),
-    /// defaulting to 1 (single-player medium, matching the stock `skill` "1").
-    static SKILL: std::cell::Cell<i32> = const { std::cell::Cell::new(1) };
+/// The engine cvars the server's QuakeC reads (`PF_cvar`) and sets
+/// (`PF_cvar_set`) that the port gives a live value: `skill` and `sv_gravity`.
+///
+/// id kept them in the console's cvar registry, which outlives a server. The
+/// port has no registry yet (CODE_PLAN R4's typed `Cvars` will be it), so each
+/// server keeps its own on its world model, where the builtins reach them
+/// ([`crate::vm::Host::cvars`]); a new server starts from the defaults, and the
+/// front-end carries a value across a level change where it matters (the
+/// difficulty, [`Server::skill`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ServerCvars {
+    /// `current_skill` (sv_main.c): 0 easy, 1 medium, 2 hard, 3 nightmare. The
+    /// start map's difficulty portals (`trigger_setskill`) set it with
+    /// `cvar_set("skill", N)`, the spawn filter reads it, and `cvar("skill")`
+    /// returns it.
+    pub skill: i32,
+    /// `sv_gravity` (sv_phys.c, "800"). world.qc's `worldspawn` sets 100 on
+    /// e1m8 (Ziggurat Vertigo) and 800 on every other map; `SV_AddGravity`
+    /// and `SV_Physics_Step`'s landing-sound threshold read it.
+    pub sv_gravity: f32,
 }
 
-/// The `current_skill` value: the live [`SKILL`] read back as an int. Used by
-/// the spawn filter and by `cvar("skill")`.
-pub(super) fn skill_value() -> i32 {
-    SKILL.with(|s| s.get())
+impl Default for ServerCvars {
+    /// The cvars' defaults: `skill` "1" (single-player medium), `sv_gravity` "800".
+    fn default() -> Self {
+        ServerCvars { skill: 1, sv_gravity: SV_GRAVITY }
+    }
 }
 
-/// Set the skill level, clamped to `0..=3` exactly as `SV_SpawnServer` does
-/// (`current_skill = (int)(value + 0.5)`, then clamp). The input is the raw
-/// float a `cvar_set("skill", N)` would pass; we round it the way the C does.
-pub(super) fn set_skill_value(v: f32) {
-    // SV_SpawnServer: current_skill = (int)(skill.value + 0.5); clamp 0..3.
-    let s = ((v + 0.5) as i32).clamp(0, 3);
-    SKILL.with(|cell| cell.set(s));
-}
-
-/// Reset the skill to the default (1, medium). Called when a fresh server is
-/// built so a prior level's `cvar_set("skill", …)` cannot leak into the next
-/// (mirrors the per-thread reset of the changelevel / lightstyle transports).
-pub(super) fn reset_skill() {
-    SKILL.with(|s| s.set(1));
-}
-
-// ---------------------------------------------------------------------------
-// The `sv_gravity` cvar (sv_phys.c: `{"sv_gravity","800",false,true}`).
-//
-// QuakeC sets it: world.qc `worldspawn` does `cvar_set("sv_gravity", "100")`
-// on maps/e1m8.bsp (Ziggurat Vertigo) and `cvar_set("sv_gravity", "800")` on
-// every other map. `SV_AddGravity`, `SV_Physics_Step`'s landing-sound
-// threshold and the client's `R_DrawParticles` read `sv_gravity.value`. Held
-// in a per-thread cell for the same reasons as [`SKILL`].
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Live `sv_gravity` value, defaulting to the cvar's "800".
-    static SV_GRAVITY_CVAR: std::cell::Cell<f32> = const { std::cell::Cell::new(SV_GRAVITY) };
-}
-
-/// `sv_gravity.value`.
-pub(super) fn sv_gravity() -> f32 {
-    SV_GRAVITY_CVAR.with(|g| g.get())
-}
-
-/// `Cvar_Set("sv_gravity", …)` (the value already `atof`ed).
-pub(super) fn set_sv_gravity(v: f32) {
-    SV_GRAVITY_CVAR.with(|g| g.set(v));
+impl ServerCvars {
+    /// Set `skill` from a raw value the way `SV_SpawnServer` turns the cvar
+    /// into `current_skill`: `(int)(value + 0.5)`, clamped to `0..=3`.
+    pub fn set_skill(&mut self, value: f32) {
+        self.skill = ((value + 0.5) as i32).clamp(0, 3);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -109,46 +75,26 @@ pub(super) fn set_sv_gravity(v: f32) {
 // It guards against a double issue (`svs.changelevel_issued`) and merely defers:
 // `Cbuf_AddText("changelevel <map>")`, which `Host_Frame` processes AFTER the
 // current frame finishes. We mirror this precisely: the builtin only *records*
-// the requested map name in a thread-local; the front-end takes it after
+// the requested map name in the server's outbox; the front-end takes it after
 // `client_frame` returns (via [`Server::take_pending_changelevel`]) and performs
 // the swap itself, never inside the builtin call.
-//
-// The `thread_local!` choice is identical to the sound/particle/temp-entity
-// queues (`msg.rs`): builtins are `fn(&mut Vm)` and cannot see the `Server`, and
-// `vm.rs` is off-limits, so the deferred request cannot hang off either. Server
-// methods run on the same thread as the builtins, so a request a frame's QuakeC
-// fired is visible to `take_pending_changelevel` right after the frame.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// The map name requested by a deferred `changelevel()` this frame, or `None`.
-    /// First-writer-wins within a frame, mirroring the C `svs.changelevel_issued`
-    /// guard that drops a second `PF_changelevel` until the swap completes. Taken
-    /// (and cleared) by [`Server::take_pending_changelevel`]; reset in
-    /// [`Server::new`] so a stale request can never leak across servers.
-    static CHANGELEVEL_REQUEST: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
+impl Outbox {
+    /// Record a deferred level change to `map`. The first request wins until
+    /// the host takes it, as the C's `svs.changelevel_issued` guard drops a
+    /// second `PF_changelevel` until the swap completes.
+    fn request_changelevel(&mut self, map: String) {
+        self.changelevel.get_or_insert(map);
+    }
 
-/// Record a deferred level change to `map` (first-writer-wins this frame).
-fn push_changelevel(map: String) {
-    CHANGELEVEL_REQUEST.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.is_none() {
-            *c = Some(map);
-        }
-    });
-}
-
-/// Take and clear the deferred level-change request, if any.
-fn take_changelevel() -> Option<String> {
-    CHANGELEVEL_REQUEST.with(|c| c.borrow_mut().take())
-}
-
-/// Clear any pending level-change request (called from [`Server::new`] so a
-/// stale request from a prior server cannot leak into a fresh one).
-pub(super) fn reset_changelevel() {
-    CHANGELEVEL_REQUEST.with(|c| *c.borrow_mut() = None);
+    /// Drop a `changelevel` or `restart` a *prior* frame left untaken: a
+    /// well-behaved front-end takes it at once, but a stale request must
+    /// never swap or respawn a frame late or against the wrong level.
+    pub(super) fn clear_requests(&mut self) {
+        self.changelevel = None;
+        self.restart = false;
+    }
 }
 
 /// `PF_changelevel` (#70): `void(string s) changelevel`. The C looked up its
@@ -158,20 +104,8 @@ pub(super) fn reset_changelevel() {
 /// front-end performs the swap after the frame. Never swaps inline.
 pub(super) fn bi_changelevel(vm: &mut Vm) -> Result<()> {
     let map = vm.arg_string(0);
-    push_changelevel(map);
+    vm.with_host(|_, h| h.outbox().request_changelevel(map));
     Ok(())
-}
-
-thread_local! {
-    /// Set when QuakeC issues `localcmd("restart\n")` — the single-player respawn
-    /// path (a dead player who presses a button runs `client.qc`'s
-    /// `localcmd("restart\n")` to reload the current level with fresh entry parms).
-    /// Drained by [`Server::take_pending_restart`]; reset in [`Server::new`].
-    static RESTART_REQUEST: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
-}
-
-pub(super) fn reset_restart() {
-    RESTART_REQUEST.with(|c| *c.borrow_mut() = false);
 }
 
 /// `PF_localcmd` (#46): `void(string s) localcmd` — `Cbuf_AddText(s)`, i.e. QuakeC
@@ -185,75 +119,17 @@ pub(super) fn reset_restart() {
 pub(super) fn bi_localcmd(vm: &mut Vm) -> Result<()> {
     let cmd = vm.arg_string(0);
     let mut it = cmd.split_whitespace();
-    match it.next().map(|w| w.to_ascii_lowercase()).as_deref() {
-        Some("restart") => {
-            RESTART_REQUEST.with(|c| *c.borrow_mut() = true);
+    let word = it.next().map(str::to_ascii_lowercase);
+    let map = it.next().map(str::to_string);
+    vm.with_host(|_, h| {
+        let outbox = h.outbox();
+        match (word.as_deref(), map) {
+            (Some("restart"), _) => outbox.restart = true,
+            (Some("changelevel" | "map"), Some(map)) => outbox.request_changelevel(map),
+            _ => {} // other console text: benign no-op, as before.
         }
-        Some("changelevel") | Some("map") => {
-            if let Some(map) = it.next() {
-                push_changelevel(map.to_string());
-            }
-        }
-        _ => {} // other console text: benign no-op, as before.
-    }
+    });
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Per-thread transport capture/restore for the savegame loader.
-//
-// `Server::load_savegame` builds a THROWAWAY server (`with_pak` +
-// `spawn_entities`) before the `.sav` blocks have proven parseable, and that
-// build resets/repopulates the per-thread transports (the lightstyle table,
-// the skill cell) and queues spawn-time events (sounds, particles, svc
-// commands). On success the new server owns all of it; on FAILURE the caller
-// keeps its old `Server` — whose next `run_frame` re-syncs `lightstyles` from
-// the shared transport and whose `skill()` reads the shared cell — so a
-// rejected save would otherwise leak its lightstyles/skill into the running
-// game it was supposed to leave intact (save.rs's documented deviation from
-// the C's Sys_Error). The loader captures the persistent transports up front
-// and, on any error, restores them and discards the transient queues (the
-// same drop-the-spawn's-one-shots treatment every SUCCESSFUL build applies).
-// ---------------------------------------------------------------------------
-
-/// The persistent per-thread transports a savegame load clobbers, captured by
-/// [`crate::save`]'s loader before it spawns the throwaway server and handed
-/// back through [`restore_transports`] when the load fails.
-pub(crate) struct TransportSnapshot {
-    lightstyles: [String; MAX_LIGHTSTYLES],
-    skill: i32,
-    sv_gravity: f32,
-}
-
-/// Capture the caller's per-thread transport state (see [`TransportSnapshot`]).
-pub(crate) fn capture_transports() -> TransportSnapshot {
-    TransportSnapshot {
-        lightstyles: snapshot_lightstyles(),
-        skill: skill_value(),
-        sv_gravity: sv_gravity(),
-    }
-}
-
-/// Put the captured persistent transports back and discard everything the
-/// failed build queued, so the still-running game's next frame sees exactly
-/// the state it left behind. The transient queues are cleared rather than
-/// captured: the caller drains them at the end of every frame (and a load
-/// runs between frames), so "empty" IS the caller's state — replaying the
-/// failed spawn's one-shot sounds/particles/svc commands into the surviving
-/// game would be its own leak.
-pub(crate) fn restore_transports(snap: TransportSnapshot) {
-    LIGHTSTYLES.with(|t| *t.borrow_mut() = snap.lightstyles);
-    SKILL.with(|s| s.set(snap.skill));
-    set_sv_gravity(snap.sv_gravity);
-    reset_changelevel();
-    reset_restart();
-    reset_message_parsers();
-    let _ = take_sound_events();
-    let _ = take_static_sounds();
-    let _ = take_particle_bursts();
-    let _ = take_messages();
-    let _ = take_temp_entities();
-    let _ = take_svc_events();
 }
 
 impl Server {
@@ -286,11 +162,10 @@ impl Server {
     /// two ticks at [`SETTLE_FRAMETIME`], which settles any spawn drop up to
     /// ~24 units deterministically. The cmd carries the player's current view
     /// angles (the C never touches `v_angle` during signon) with zero
-    /// moves/buttons. Think faults are isolated by `client_frame`; a hard fault
-    /// is swallowed (a boot must not fail over a settle tick), matching
-    /// `spawn_entities`' own settle-frame handling. The golden `scene` tool
+    /// moves/buttons. A program error in them is `Host_Error`, as in id's: it
+    /// is returned, and the level does not come up. The golden `scene` tool
     /// never connects a client, so this does not affect golden renders.
-    pub fn run_signon_frames(&mut self) {
+    pub fn run_signon_frames(&mut self) -> Result<()> {
         let (yaw, pitch) = if self.player >= 0 {
             let ang = self.vm.ent_get_vector(self.player, "angles");
             let vang = self.vm.ent_get_vector(self.player, "v_angle");
@@ -307,8 +182,9 @@ impl Server {
             buttons: 0,
             impulse: 0,
         };
-        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
-        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
+        self.client_frame_f64(&cmd, SETTLE_FRAMETIME)?;
+        self.client_frame_f64(&cmd, SETTLE_FRAMETIME)?;
+        Ok(())
     }
 
     /// `SV_SaveSpawnparms` for the local client: set the QuakeC `self` global to
@@ -322,19 +198,20 @@ impl Server {
     /// `client->spawn_parms`. If the progs lacks `SetChangeParms` (a minimal mod)
     /// the run is a no-op and the *current* parm globals are returned unchanged;
     /// a missing individual parm global reads as `0.0` (`gget_float`), so this
-    /// never panics. Returns `[0.0; 16]` when no client has connected.
-    pub fn save_spawn_parms(&mut self) -> [f32; NUM_SPAWN_PARMS] {
+    /// never panics. Returns `[0.0; 16]` when no client has connected, and
+    /// the program error if `SetChangeParms` fails (id's `Host_Error`).
+    pub fn save_spawn_parms(&mut self) -> Result<[f32; NUM_SPAWN_PARMS]> {
         let mut parms = [0.0f32; NUM_SPAWN_PARMS];
         if self.player < 0 {
-            return parms;
+            return Ok(parms);
         }
         // SetChangeParms writes parm1..parm16 from the player's live fields
-        // (self = the player edict, other = world). A fault is caught by run_sys.
-        let _ = self.run_sys("SetChangeParms", self.player, 0);
+        // (self = the player edict, other = world).
+        self.run_sys("SetChangeParms", self.player, 0)?;
         for (i, p) in parms.iter_mut().enumerate() {
             *p = self.vm.gget_float(&parm_global_name(i));
         }
-        parms
+        Ok(parms)
     }
 
     /// Read the `serverflags` QuakeC global (the episode rune `SERVERFLAG_*`
@@ -371,7 +248,7 @@ impl Server {
     /// a front-end reads it here to persist the player's choice across a
     /// changelevel (the constructor resets it to the medium default).
     pub fn skill(&self) -> i32 {
-        skill_value()
+        self.cvars().skill
     }
 
     /// Set the skill level from a raw value, normalised exactly as
@@ -380,21 +257,50 @@ impl Server {
     /// the persisted difficulty before [`Self::spawn_entities`], so the spawn
     /// filter inhibits the right monsters/items. See [`Self::skill`].
     pub fn set_skill(&mut self, value: f32) {
-        set_skill_value(value);
+        if let Some(c) = self.cvars_mut() {
+            c.set_skill(value);
+        }
     }
 
     /// The live `sv_gravity` cvar (800, or 100 on e1m8 — world.qc `worldspawn`).
     /// The client side reads it too: `R_DrawParticles`' particle gravity is
     /// `sv_gravity * 0.05`.
     pub fn sv_gravity(&self) -> f32 {
-        sv_gravity()
+        self.cvars().sv_gravity
     }
 
-    /// [`Self::sv_gravity`] with no server at hand: demo playback reads the
-    /// cvar too, and it holds what the last map's worldspawn set (the cvar
-    /// outlives the map, in the C as here).
-    pub fn sv_gravity_cvar() -> f32 {
-        sv_gravity()
+    /// Set the `sv_gravity` cvar: `Cvar_Set`, which id's cvar outlives the
+    /// map for — a front-end carries it to the next level's server as it
+    /// carries [`Self::skill`] (id1's worldspawn sets it on every map anyway).
+    pub fn set_sv_gravity(&mut self, value: f32) {
+        if let Some(c) = self.cvars_mut() {
+            c.sv_gravity = value;
+        }
+    }
+
+    /// Draw from the host session's random streams ([`QRand`]) from now on.
+    /// A front-end hands each server it builds its session's, before
+    /// [`Self::spawn_entities`], so the streams continue across level loads
+    /// as id's one libc `rand()` does; a server it is not handed to draws
+    /// from fresh streams of its own.
+    pub fn set_rand(&mut self, rand: Rc<QRand>) {
+        self.vm.set_rand(rand);
+    }
+
+    /// The random streams this server draws from, to hand to the next one.
+    pub fn rand(&self) -> &Rc<QRand> {
+        self.vm.rand()
+    }
+
+    /// This server's [`ServerCvars`] (the defaults if its world model were
+    /// taken away).
+    pub(super) fn cvars(&self) -> ServerCvars {
+        self.vm.host.as_deref().map(|h| *h.cvars()).unwrap_or_default()
+    }
+
+    /// This server's [`ServerCvars`], to set.
+    fn cvars_mut(&mut self) -> Option<&mut ServerCvars> {
+        self.vm.host.as_deref_mut().map(|h| h.cvars_mut())
     }
 
     /// Take (and clear) the deferred level-change request a `changelevel()`
@@ -404,7 +310,7 @@ impl Server {
     /// client carrying its inventory. Mirrors the engine processing the deferred
     /// `changelevel <map>` console command after the frame.
     pub fn take_pending_changelevel(&mut self) -> Option<String> {
-        take_changelevel()
+        self.outbox()?.changelevel.take()
     }
 
     /// Take and clear a pending single-player respawn (`localcmd("restart")`). The
@@ -413,7 +319,7 @@ impl Server {
     /// not the dead player's state). Mirrors the engine running the deferred
     /// `restart` console command after the frame.
     pub fn take_pending_restart(&mut self) -> bool {
-        RESTART_REQUEST.with(|c| std::mem::replace(&mut *c.borrow_mut(), false))
+        self.take_outbox(|o| &mut o.restart)
     }
 
     /// `Host_Kill_f` (host_cmd.c): the `kill` console command — suicide via the
@@ -479,7 +385,7 @@ mod tests {
             "spawn floats above the floor (box bottom at z=16, floor at z=0)"
         );
 
-        server.run_signon_frames();
+        server.run_signon_frames().expect("signon frames");
 
         // Settled BEFORE the front-end's frame 0: on the ground, no residual
         // fall velocity, box bottom resting on the floor (origin.z ~ 24).
@@ -708,8 +614,8 @@ mod tests {
 
     #[test]
     fn fresh_server_clears_stale_changelevel_request() {
-        // A request left in the thread-local must not leak into a freshly built
-        // server (Server::new calls reset_changelevel).
+        // A request left in one server's outbox never reaches a freshly built
+        // server.
         let (img, _gc, _gd) = changelevel_progs();
         let progs = Progs::parse(&img).expect("parse");
         // Issue a request against one server...
@@ -737,12 +643,12 @@ mod tests {
         let mut server = Server::new(floor_bsp(), progs).expect("server");
 
         // No client yet -> all zeros, no panic.
-        assert_eq!(server.save_spawn_parms(), [0.0; NUM_SPAWN_PARMS]);
+        assert_eq!(server.save_spawn_parms().expect("no client"), [0.0; NUM_SPAWN_PARMS]);
 
         // Connect the player, set the constant SetChangeParms marshals into parm1.
         server.connect_client().expect("connect");
         server.vm.set_gf(g_const, 42.0);
-        let parms = server.save_spawn_parms();
+        let parms = server.save_spawn_parms().expect("SetChangeParms");
         assert_eq!(parms.len(), NUM_SPAWN_PARMS);
         assert_eq!(parms[0], 42.0, "SetChangeParms wrote parm1");
         assert_eq!(&parms[1..], &[0.0; NUM_SPAWN_PARMS - 1]);

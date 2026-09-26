@@ -2308,3 +2308,38 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   40 frames at 4K. id's; left alone.
 - **Not measured:** the page (quake-wasm and web/ do not set the cvars yet), GPU browsers,
   phones.
+
+## QuakeC errors end the game (2026-09-26, branch `q26/server`)
+
+The client dropped the server frame's `Result` (`client/cl_main.rs:300`), and the server
+isolated a failing think, touch, `blocked` or spawn function and carried on: a QuakeC
+runtime error vanished and the game went on. id's `PR_RunError` (pr_exec.c) prints the
+failing statement (`PR_PrintStatement`), a stack trace (`PR_StackTrace`) and the message,
+then `Host_Error ("Program error")` (host.c) shuts the server down, disconnects, stops the
+demo loop and drops to the console. Every profile now does that; it is id's, not an extra.
+
+- ✅ **The report, to the column.** `vm/print.rs` ports `PR_PrintStatement` (id's
+  `pr_opnames`, where the disassembler says `DIV_F`/`LOAD_F` id says `DIV`/`INDIRECT`),
+  `PR_GlobalString`, `PR_ValueString`, `PR_StackTrace` and `ED_Print`, padding included;
+  `a_program_error_is_pr_run_errors_report_and_halts_the_vm` pins the text.
+- ✅ **The longjmp.** The first error halts the VM: the QuakeC running, and whatever
+  called it through a builtin (a touch a `walkmove` fired), stops; the server frame or
+  level load returns the error; the server runs no more QuakeC. The census, a harness,
+  resumes the VM (`reset_execution`) and carries on, as before.
+- ✅ **Host_Error in the client.** `client::host::host_error` prints the report and
+  `Host_Error: Program error` to the console text and stops every sound
+  (`CL_Disconnect`'s `S_StopAllSounds`); `walk_frame` shows the disconnected screen from
+  then on and sets `Walk::host_error` for the host, which drops the walk, sets
+  `cls.demonum = -1` and brings the console down (the shell's side: not wired yet, see the
+  branch report). A changelevel, restart or `kill` whose QuakeC fails ends the game the
+  same way; a missing or corrupt map still leaves the level running (the port's degrade).
+- ✅ **`error` and `objerror` (CENSUS L16).** id prints `======SERVER ERROR in <function>:`
+  (or `OBJECT ERROR`) and the text, dumps `self` (`ED_Print`), and calls `Host_Error`
+  directly (no statement or trace); `objerror` frees `self` first. Both were `PR_RunError`s
+  with a banner of the port's own that left `self` alive. The census's forced touch of
+  start.bsp's unreachable teleporter now frees it: that map's census has 1 fault where it
+  had 3 (two fewer touches, frames, teleport sounds and splashes); every other map's
+  census is unchanged when run alone.
+- **Not id's:** a QuakeC error while `build_walk_map` / `build_walk_savegame` bring up a
+  NEW game returns `None` / the error text without id's report (the host prints "map not
+  found" or the text); no shareware map raises one (census: 0 spawn errors).

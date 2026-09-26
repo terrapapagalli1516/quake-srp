@@ -12,7 +12,7 @@ use quake_rs::client::cl_demo::MAX_DEMOS;
 use quake_rs::client::host_cmd::run_game_command;
 
 use crate::app::{build_walk_map, ensure_app, App};
-use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo};
+use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma;
 
@@ -341,6 +341,8 @@ pub(crate) fn execute_console_command(line: &str) {
         for line in out {
             a.console.println(line);
         }
+        // `kill`'s QuakeC can fail too: Host_Error's disconnect.
+        finish_host_error(a);
     });
 
     // An unrecognised command: report it. (Handled here so the borrow above can

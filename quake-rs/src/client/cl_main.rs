@@ -21,6 +21,7 @@ use super::cl_input::{
     clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
 };
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
+use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
@@ -171,10 +172,23 @@ pub fn offset_box(origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3]
     )
 }
 
+/// The frame of a game `Host_Error` has ended: nothing — the client is
+/// disconnected, and id's console covers the screen (`con_forcedup`) — and
+/// what it said to the sound layer.
+fn disconnected_frame(vid: &Vid, sound: Vec<SoundCall>) -> ClientFrame {
+    ClientFrame { image: render::Image::new(vid.width, vid.height, [0, 0, 0]), cshifts: Vec::new(), sound }
+}
+
 /// One live client frame (see the module doc) of `host_frametime` seconds —
 /// `Host_FilterTime`'s double, which the server's `sv.time` advances by
 /// exactly (`client_frame_f64`); the client's own timing takes it as an `f32`.
+/// A QuakeC error in the server's frame (or in a level change it makes) is
+/// `Host_Error`: [`host_error`] ends the game, and this frame and every later
+/// one is the disconnected screen, until the host drops the walk.
 pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    if w.host_error.is_some() {
+        return disconnected_frame(vid, Vec::new());
+    }
     let dt = host_frametime as f32;
     let (render_w, render_h) = (vid.width, vid.height);
     let mut sound = Vec::new();
@@ -299,14 +313,19 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
-        let _ = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping);
+        if let Err(e) = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping) {
+            // Host_Error longjmps out of the host frame: none of this frame's
+            // messages reach the client.
+            host_error(w, &e, &mut sound);
+            return disconnected_frame(vid, sound);
+        }
         // CL_LerpPoint on a local server: cl.time = the message time, sv.time
         // after this frame's physics.
         w.clock = w.server.time();
         apply_fixangle(w);
         parse_client_damage(w, before);
         // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
-        for (ent, text) in crate::builtins::take_stufftext() {
+        for (ent, text) in w.server.drain_stufftext() {
             if ent == w.player && stufftext_bonus_flash(&text) {
                 w.bonus_blend = BONUS_PERCENT;
             }
@@ -366,6 +385,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // pressed a button). Reload the current level with the entry inventory.
         // `else if` so a changelevel this frame takes precedence over a restart.
         try_restart(w, &mut sound);
+    }
+    if w.host_error.is_some() {
+        return disconnected_frame(vid, sound); // the new level's QuakeC failed
     }
 
     // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the

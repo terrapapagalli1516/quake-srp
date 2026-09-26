@@ -11,7 +11,7 @@ use quake_rs::client::host::{host_filter_time, host_filter_time_uncapped};
 
 use crate::app::ensure_app;
 use crate::bench::{self, Phase};
-use crate::cl_demo::{host_end_game, step_demo, step_timedemo};
+use crate::cl_demo::{finish_host_error, host_end_game, step_demo, step_timedemo};
 use crate::cl_walk::step_walk;
 
 /// [`host_filter_time`], or the same frame without the 72 fps cap — every
@@ -229,6 +229,8 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.walk.as_mut().is_some_and(|wk| std::mem::take(&mut wk.pending_sellscreen)) {
             a.m_menu_help();
         }
+        // A QuakeC error ended the game this frame: Host_Error's disconnect.
+        finish_host_error(a);
 
         // The wasm_showfps extra (off by default): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the

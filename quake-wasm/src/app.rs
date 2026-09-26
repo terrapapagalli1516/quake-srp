@@ -6,10 +6,12 @@
 //! attract loop at startup; the page's walk and demo buttons).
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use quake_rs::client::cl_demo::{TimeDemoClock, MAX_DEMOS};
 use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
+use quake_rs::qrand::QRand;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
 use quake_rs::wad::Qpic;
 
@@ -122,6 +124,11 @@ pub(crate) struct App {
     /// `gfx/palette.lmp`, for what is drawn with no level loaded (the
     /// disconnected screen's console and menu). Loaded with the menu assets.
     pub(crate) palette: Option<[[u8; 3]; 256]>,
+    /// The `sv_gravity` cvar as the last server left it (800 until a map has
+    /// run; e1m8's worldspawn sets 100): id's cvar outlives the server, and
+    /// demo playback reads it ([`DemoPlay::sv_gravity`]). `CL_Disconnect`
+    /// takes it from the game it ends.
+    pub(crate) sv_gravity: f32,
     /// keys.c `key_repeats[256]`: key downs since each key's last up; a
     /// second down is the keyboard's autorepeat, which `Key_Event` ignores
     /// (Backspace and Pause aside).
@@ -345,6 +352,16 @@ impl App {
 
 thread_local! {
     pub(crate) static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    /// The page's random streams ([`QRand`]): one for the page's whole run,
+    /// as id's host has one libc `rand()`, handed to every server the page
+    /// starts (a walk's level changes pass it on themselves). Beside [`APP`],
+    /// not in it, because the walks are built outside its borrow.
+    static SESSION_RAND: Rc<QRand> = Rc::new(QRand::new());
+}
+
+/// The page's [`QRand`] (see `SESSION_RAND`), for a server it builds.
+pub(crate) fn session_rand() -> Rc<QRand> {
+    SESSION_RAND.with(Rc::clone)
 }
 
 #[cfg(test)]
@@ -446,7 +463,7 @@ pub(crate) fn build_walk() -> Option<Walk> {
 pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
     let mut sound = Vec::new();
-    let walk = host_cmd::build_walk_map(pak.clone(), map, &mut sound);
+    let walk = host_cmd::build_walk_map(pak.clone(), map, &session_rand(), &mut sound);
     snd_dma::play(&pak, sound);
     walk
 }
@@ -510,6 +527,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 cls: Cls::default(),
                 disconnected: false,
                 palette: None,
+                sv_gravity: quake_rs::server::ServerCvars::default().sv_gravity,
                 key_repeats: [0; 256],
                 shift_down: false,
                 m_save_demonum: 0,

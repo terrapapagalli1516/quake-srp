@@ -379,9 +379,8 @@ pub fn sv_move(
 /// Saves the `self`/`other` globals, sets `time = current`, runs `e1.touch`
 /// (self=e1, other=e2) then `e2.touch` (self=e2, other=e1) — each only if that
 /// edict has a non-null `touch` and is not `SOLID_NOT` — then restores
-/// `self`/`other`. A faulting touch is isolated (the interpreter is reset) so
-/// one bad touch does not abort the caller, mirroring the per-entity
-/// robustness elsewhere in the server. The host must be PRESENT (this calls
+/// `self`/`other`. A failing touch halts the VM ([`Vm::execute`]); the frame
+/// running this physics ends on it. The host must be PRESENT (this calls
 /// `execute`); never invoke it from inside `with_host`.
 pub fn sv_impact(vm: &mut Vm, e1: i32, e2: i32, sv_time: f32) {
     let old_self = vm.glob_int(vm.go.self_);
@@ -401,8 +400,7 @@ pub fn sv_impact(vm: &mut Vm, e1: i32, e2: i32, sv_time: f32) {
 }
 
 /// Run `toucher`'s `touch` function with `self = toucher`, `other = with`, when
-/// `toucher` has a valid `touch` function and is not `SOLID_NOT`. A fault is
-/// caught and the interpreter reset (the entity's bad touch is isolated).
+/// `toucher` has a valid `touch` function and is not `SOLID_NOT`.
 fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
     let touch = vm.ent_int(toucher, vm.fo.touch);
     if touch <= 0 || (touch as usize) >= vm.progs.functions.len() {
@@ -413,9 +411,9 @@ fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
     }
     vm.set_glob_int(vm.go.self_, toucher);
     vm.set_glob_int(vm.go.other, with);
-    if vm.execute(touch as usize).is_err() {
-        vm.reset_execution();
-    }
+    // An error halts the VM; the frame that ran this physics ends on it
+    // (`Server::check_halted`), as id's longjmp ended it here.
+    let _ = vm.execute(touch as usize);
 }
 
 /// `SV_TouchLinks` for trigger fields (world.c ~258, the trigger half of
@@ -427,7 +425,8 @@ fn run_touch(vm: &mut Vm, toucher: i32, with: i32) {
 /// The overlap test reads the `absmin`/`absmax` fields the `setorigin`/`setsize`
 /// builtins maintain. Triggers to run are gathered into a `Vec` first (so the
 /// borrow of the edict array ends before any `execute`), then each is run with
-/// `self = trigger`, `other = mover`. A faulting trigger is isolated.
+/// `self = trigger`, `other = mover`. A failing touch halts the VM and ends
+/// the scan (the frame ends on it).
 pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
     // Gather first: collect the trigger edicts to fire so we don't execute
     // QuakeC while iterating (the touch could spawn/free edicts).
@@ -489,7 +488,7 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
         // rather than a stale think-time left in the `time` global.
         vm.set_glob_float(vm.go.time, sv_time);
         if vm.execute(touch as usize).is_err() {
-            vm.reset_execution();
+            break; // the VM halted: the frame ends on it (see run_touch)
         }
     }
     vm.set_glob_int(vm.go.self_, old_self);
