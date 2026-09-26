@@ -86,6 +86,12 @@ pub(crate) fn call(line: &str) -> Answer {
         "boot_attract" => boot_attract().into(),
         "in_walk_mode" => in_walk_mode().into(),
         "timedemo_running" => timedemo_running().into(),
+        // The game's files: registered (1) or shareware (0), and the search
+        // path (`path`'s lines).
+        "content" => Answer {
+            value: f64::from(u8::from(crate::common::registered())),
+            text: crate::common::path_lines().join("\n"),
+        },
         // One host frame outside the page's refresh (automation: `dt` 0 is
         // the frozen frame); its picture is not sent.
         "step" => step(real(0)).into(),

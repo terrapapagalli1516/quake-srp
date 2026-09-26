@@ -12,7 +12,9 @@
 //! ([`quake_rs::client::host_cmd`], which also holds the level swaps
 //! `changelevel` and `restart`).
 
+use quake_rs::cd_audio::CdCall;
 use quake_rs::client::cl_demo::MAX_DEMOS;
+use quake_rs::client::SoundCall;
 use quake_rs::client::host_cmd::run_game_command;
 use quake_rs::cmd::{self, Args, Command};
 use quake_rs::cvar::{self, CVARS};
@@ -46,6 +48,7 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("timedemo", "timedemo <demo>  time a demo", cmd_timedemo),
     c("playdemo", "playdemo <demo>", cmd_playdemo),
     c("impulse", "impulse <n>", cmd_game),
+    c("cd", "cd play|loop <track>, stop, pause, resume, info, ...", cmd_cd),
     c("play", "play <sound>", cmd_play),
     c("sizedown", "screen size -10", cmd_sizedown),
     c("sizeup", "screen size +10", cmd_sizeup),
@@ -70,6 +73,7 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("map", "map <name>", cmd_map),
     c("fly", "fly mode", cmd_game),
     c("god", "invulnerability", cmd_game),
+    c("path", "the search path", cmd_path),
     c("echo", "echo <text>", cmd_echo),
     c("exec", "exec <file>  run a file's lines", cmd_exec),
     c("profile", "profile classic|2026", cmd_profile),
@@ -105,7 +109,15 @@ pub(crate) fn execute_console_command(text: &str) {
 
 /// `Cvar_Command` (cvar.c): a cvar's name alone prints it, `"name" is
 /// "value"`; with an argument it sets it (`Cvar_Set`). False: no such cvar.
+/// `registered` is the file system's (`COM_CheckRegistered`), not a
+/// setting: it prints, and the port does not let the console set it (id's
+/// did; in a shareware game that only opened gates to maps it lacks).
 fn cvar_command(args: &Args) -> bool {
+    if args.argv(0).eq_ignore_ascii_case("registered") {
+        let value = u8::from(crate::common::registered());
+        ensure_app(|a| a.console.println(format!("\"registered\" is \"{value}\"")));
+        return true;
+    }
     let Some(var) = cvar::find(args.argv(0)) else { return false };
     ensure_app(|a| {
         if args.argc() == 1 {
@@ -161,6 +173,18 @@ fn cmd_exec(args: &Args) {
 /// S_Play (snd_dma.c): each named sample at the listener.
 fn cmd_play(args: &Args) {
     snd_dma::s_play(&args.all()[1..]);
+}
+
+/// `CD_f` (cd_win.c, registered by `CDAudio_Init`): the CD player's
+/// commands, carried out by the sound device's CD.
+fn cmd_cd(args: &Args) {
+    snd_dma::cd_command(&args.all());
+}
+
+/// `COM_Path_f`: the search path, a pack with its file count.
+fn cmd_path(_: &Args) {
+    let lines = crate::common::path_lines();
+    ensure_app(|a| lines.into_iter().for_each(|l| a.console.println(l)));
 }
 
 /// M_Menu_Help_f (menu.c registers it as `help`): the Help/Ordering screen,
@@ -425,7 +449,13 @@ pub(crate) fn host_pause(a: &mut App) {
         return;
     }
     match a.walk.as_mut().filter(|_| a.mode == 0) {
-        Some(w) => w.server.pause(),
+        Some(w) => {
+            w.server.pause();
+            // svc_setpause, read by the local client in the same frame:
+            // CDAudio_Pause / CDAudio_Resume.
+            let cd = if w.server.paused { CdCall::Pause } else { CdCall::Resume };
+            snd_dma::play(&w.pak, vec![SoundCall::Cd(cd)]);
+        }
         None => a.console.println("Can't \"pause\", not connected"),
     }
 }

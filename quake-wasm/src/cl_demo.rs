@@ -204,6 +204,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             // Three frames at t = 0, 1, 2.
             frames: vec![frame(0.0), frame(1.0), frame(2.0)],
         };
@@ -277,6 +279,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![plain(0.0), effect_frame, plain(0.10)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -365,6 +369,8 @@ mod tests {
             ],
             sound_precache: Vec::new(),
             viewentity: 1,
+            forcetrack: -1,
+            cdtrack: None,
             static_sounds: Vec::new(),
             frames: vec![plain(0.0), bolt_frame, plain(0.10)],
         };
@@ -515,6 +521,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 1,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![plain(0.0), sound_frame, plain(0.10)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[("sound/doors/x.wav", b"WAVE")]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -557,6 +565,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             // Trailing frames keep the fade-out steps below from wrapping the
             // loop (a wrap re-spawns the damage frame's events).
             frames: vec![plain(0.0), dmg_frame, plain(0.10), plain(1.0), plain(2.0)],
@@ -650,6 +660,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into(), "progs/missile.mdl".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![frame(0.0, 0.0), frame(0.05, 0.0), frame(0.10, 30.0), frame(1.0, 30.0)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -679,6 +691,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![plain(0.0), bf, plain(0.10), plain(1.0)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -1042,6 +1056,8 @@ mod tests {
                 model_precache: vec![String::new(), "maps/test.bsp".into()],
                 sound_precache: Vec::new(),
                 viewentity: 0,
+                forcetrack: -1,
+                cdtrack: None,
                 frames: vec![plain(0.0), puff, plain(0.10), plain(0.15)],
             };
             let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
