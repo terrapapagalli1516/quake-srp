@@ -131,7 +131,9 @@ def main():
     for p in (a.oracle, a.quaketool, PAK):
         if not p.exists():
             sys.exit(f"missing {p} (oracle/build.sh; cargo build --release in quake-rs; the pak)")
-    with tempfile.TemporaryDirectory(prefix="demo-lerp-", dir=a.keep) as tmp:
+    # id's -basedir: in the system's temp dir, never under --keep, because id's
+    # MAX_OSPATH is 128 and "<basedir>/id1/pak0.pak" overflows it in a deep checkout.
+    with tempfile.TemporaryDirectory(prefix="demo-lerp-") as tmp:
         out = a.keep.resolve() if a.keep else Path(tmp)
         out.mkdir(parents=True, exist_ok=True)
         base = Path(tmp) / "base"

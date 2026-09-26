@@ -6,7 +6,7 @@
 """The proof of Classic: every check that the port, with every departure off
 (the Classic profile), is still id's WinQuake — in one command.
 
-    uv run oracle/classic_check.py                 # everything (~3 min), a report
+    uv run oracle/classic_check.py                 # everything (about a minute once built), a report
     uv run oracle/classic_check.py --only play,goldens
     uv run oracle/classic_check.py --record        # rewrite oracle/classic_expected.txt
 

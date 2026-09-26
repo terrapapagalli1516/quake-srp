@@ -4,8 +4,9 @@
 //! (Copyright (C) 1996-1997 Id Software, Inc.).
 //!
 //! A WAD2 file is a flat archive of named "lumps". Quake ships `gfx.wad`, which
-//! holds the screen palette, the console character font (`conchars`), and the
-//! 2-D pictures (`qpic_t`) used by the HUD and menus. The on-disk layout is:
+//! holds the console character font (`conchars`) and small 2-D pictures
+//! (`qpic_t`), mostly the status bar's. (The palette is `gfx/palette.lmp`, a pak
+//! file.) The on-disk layout is:
 //!
 //! ```text
 //! wadinfo_t  (12 bytes)   identification[4] "WAD2", numlumps, infotableofs
