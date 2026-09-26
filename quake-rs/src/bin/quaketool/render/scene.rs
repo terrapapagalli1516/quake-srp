@@ -33,6 +33,9 @@ use crate::{parse_res, CmdResult, Out};
 /// `scene`: parse a map from a PAK, spawn its QuakeC entities, and software-
 /// render the world plus every spawned entity's `.mdl` alias model at its world
 /// position, all sharing one z-buffer so models occlude correctly.
+///
+/// These pixels are the goldens: keep the path to them verbatim (the module
+/// docs say why).
 pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> CmdResult {
     use std::collections::HashMap;
     // `[--threads N]`: the renderer's threads (the pixels are the same).
