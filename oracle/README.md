@@ -530,3 +530,26 @@ ambient_fade` in extended precision; the scripts use frame times whose step
 is not within a hair of a whole number, where 64 and 80 bits could part),
 and `ResampleSfx`'s `stepscale` (above). The output stream skips a stretch
 the play position overtook (`S_Update_`'s "overshot" reset), on both sides.
+
+## Demo playback (`demo_lerp.py`)
+
+What id's client draws between two recorded messages (`CL_LerpPoint`,
+`CL_RelinkEntities`), frame by frame. The oracle plays the attract loop from
+boot with every host frame exactly the port's 1/72 s step (`-oracle_dt`),
+and `oracle_trace path [frames]` writes one record per rendered frame as
+`R_RenderView` starts: `cl.time`, `cl.oldtime`, `cl.mtime[0..1]` as
+`CL_LerpPoint` left them, `cl.viewangles`, the view entity's origin,
+`cl.velocity`, and every entity on `cl_visedicts` (number, model, origin,
+angles, frame). `quaketool play demo1 N --trace PATH` writes the same from
+the port's client; the script runs both, splits the traces at each demo's
+first frame and compares them.
+
+```sh
+uv run oracle/demo_lerp.py                  # demo1, demo2, demo3, demo1 again: 17,500 frames
+uv run oracle/demo_lerp.py --frames 2000 --keep DIR
+```
+
+Result (2026-09-26, `q26/lerp`): 17,500 frames over the whole loop, the
+same frame count per demo, `cl.time` identical in every frame, camera,
+velocity and every entity within 2.5e-4 (the oracle's x87 floats), the same
+entities everywhere.
