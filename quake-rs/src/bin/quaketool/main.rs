@@ -23,6 +23,8 @@
 //! Output is buffered and written once, so piping into `head`/`less` (which
 //! closes the pipe early) exits cleanly instead of panicking on `BrokenPipe`.
 
+#![forbid(unsafe_code)]
+
 use std::error::Error;
 use std::fmt::Write as _;
 use std::io::Write as _;
