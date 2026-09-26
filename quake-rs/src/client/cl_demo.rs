@@ -749,7 +749,7 @@ fn render_demo_frame(
     // the 3-D view FIRST; the content tint joins the deferred whole-screen
     // blend below (V_UpdatePalette order).
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
-    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref(), &d.palette);
+    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
     if dowarp {
         let view = d.renderer.render(&scene);
         lap(Phase::Render3d);
@@ -776,7 +776,6 @@ fn render_demo_frame(
                     render::draw_intermission_overlay(
                         &mut img,
                         wad,
-                        &d.palette,
                         d.pic_complete.as_ref(),
                         d.pic_inter.as_ref(),
                         &stats,
@@ -786,7 +785,6 @@ fn render_demo_frame(
             2 => render::draw_finale_overlay(
                 &mut img,
                 d.conchars.as_ref(),
-                &d.palette,
                 d.pic_finale.as_ref(),
                 &f.finale_text,
                 v.time - f.finale_start,
@@ -794,7 +792,6 @@ fn render_demo_frame(
             _ => render::draw_finale_overlay(
                 &mut img,
                 d.conchars.as_ref(),
-                &d.palette,
                 None,
                 &f.finale_text,
                 v.time - f.finale_start,
@@ -810,7 +807,6 @@ fn render_demo_frame(
         // the recorded health hits 0, like Sbar_Draw's scoreboard flip.
         let hud = render::Hud {
             wad,
-            palette: &d.palette,
             health: client.health,
             ammo: client.ammo,
             armor: client.armor,
@@ -842,7 +838,7 @@ fn render_demo_frame(
     // view here — id's demos have none.)
     if f.paused && f.intermission == 0 {
         if let Some(pic) = d.pic_pause.as_ref() {
-            render::draw_pause(&mut img, pic, &d.palette);
+            render::draw_pause(&mut img, pic);
         }
     }
 
@@ -857,11 +853,11 @@ fn render_demo_frame(
     if !menu_up && f.intermission == 0 {
         if let Some(cc) = d.conchars.as_ref() {
             if let Some((text, _)) = &d.centerprint {
-                render::draw_centerprint(&mut img, cc, &d.palette, text);
+                render::draw_centerprint(&mut img, cc, text);
             }
             let lines = d.notify.visible(v.time);
             if !lines.is_empty() {
-                render::draw_notify(&mut img, cc, &d.palette, &lines);
+                render::draw_notify(&mut img, cc, &lines);
             }
         }
     }
