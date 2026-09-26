@@ -17,7 +17,7 @@
 //!                    the underwater warp and tint
 //! --viewsize V       the `viewsize` cvar (default 100: the view above the full status bar)
 //! --fire N           hold +attack for the last N frames (muzzle flash, particles)
-//! plus the video options (`video.rs`): --video, --fov-mode, --hires, --display (default square), --scaled2d
+//! plus the video options (`video.rs`): --video, --fov-mode, --hires, --display (default square), --scaled2d, --threads
 //! ```
 
 use std::fmt::Write as _;
@@ -72,7 +72,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         i += 2;
     }
     video.apply();
-    let (w, h) = super::parse_res(&res)?;
+    let (w, h) = super::parse_res(&res, video.cvars)?;
 
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
@@ -81,6 +81,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let mut wk =
         host_cmd::build_walk_map(pak, map, &rand, &mut sound).ok_or_else(|| format!("{map} would not load"))?;
     wk.viewsize = viewsize;
+    wk.renderer.set_threads(video.threads());
     if let Some(contents) = liquid {
         origin = Some(largest_leaf_centre(&wk.bsp, contents).ok_or_else(|| format!("{map} has no leaf of contents {contents}"))?);
     }
@@ -95,7 +96,13 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         wk.yaw = y;
     }
     wk.pitch = pitch;
-    let vid = Vid { width: w, height: h, display_aspect: video.display_aspect(w, h, None), exact_perspective: false };
+    let vid = Vid {
+        width: w,
+        height: h,
+        display_aspect: video.display_aspect(w, h, None),
+        exact_perspective: false,
+        video: video.cvars,
+    };
     let gamma = render::build_gamma_table(1.0);
     let mut last = None;
     for f in 0..frames.max(1) {

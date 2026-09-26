@@ -9,20 +9,21 @@
   3. demo<->walk mode transitions tear loops down the same way;
   4. no console errors anywhere.
 
-Usage: verify_ambient.py [webdir]   (defaults to the repo's web/; pass a temp
-dir holding index.html + a freshly built quake_wasm.wasm to test new exports
-without touching the deployed wasm).
-"""
-import functools, http.server, os, socketserver, sys, threading, time
-from playwright.sync_api import sync_playwright
+Usage: verify_ambient.py [webdir]   (defaults to the repo's web/; pass a
+deploy dir — PLATFORM.md — to test changes without touching the deployed
+page).
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8167"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+The page's loops are its own (`staticLoops`, `ambientLoops`, each with the
+placement `lp` the program sent); the listener is the page's copy of the
+program's last LISTENER record, the one the live gains were set from.
+"""
+import os, sys, time
+from playwright.sync_api import sync_playwright
+import isolated
+
+WEB = isolated.webdir()
+PORT = isolated.port(8167)
+httpd = isolated.serve(WEB, PORT)
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -32,7 +33,7 @@ def check(name, ok, detail=""):
     else: failed += 1
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox",
         # Let audioCtx.resume() succeed without a user gesture so the loop
         # graph actually runs under headless.
@@ -43,9 +44,7 @@ with sync_playwright() as p:
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    # NB: `exp` is a top-level `let` (a global *binding*, not a window
-    # property), so probe it as a bare identifier.
-    pg.wait_for_function("typeof exp !== 'undefined' && exp && exp.boot", timeout=60000)
+    pg.wait_for_function("window.quake && quake.ready", timeout=60000)
 
     # Count stop() calls on loop sources to PROVE teardown on level change.
     pg.evaluate("""() => {
@@ -66,33 +65,32 @@ with sync_playwright() as p:
     }""")
     time.sleep(2.5)  # frames tick; statics decode + start
 
-    state = pg.evaluate("""() => ({
+    state = pg.evaluate("""async () => ({
         ctx: audioCtx ? audioCtx.state : 'none',
-        gen: exp.sound_generation(),
+        gen: await exp.sound_generation(),
         statics: staticLoops.length,
         ambients: ambientLoops.length,
         ambChans: ambientLoops.map(l => l.ch).sort(),
         // Re-derive the C pan/distance law independently for every loop and
         // compare with the LIVE gain node values the page set this frame.
         lawHolds: staticLoops.length ? staticLoops.every(l => {
-            const dx = l.ox - exp.listener_x(), dy = l.oy - exp.listener_y(),
-                  dz = l.oz - exp.listener_z();
+            const L = quake.audio.listener, p = l.lp;
+            const dx = p.ox - L.x, dy = p.oy - L.y, dz = p.oz - L.z;
             const dist = Math.hypot(dx, dy, dz);
             let pan = 0;
             if (dist > 1e-3) {
-                pan = (dx * exp.listener_right_x() + dy * exp.listener_right_y()
-                     + dz * exp.listener_right_z()) / dist;
+                pan = (dx * L.rx + dy * L.ry + dz * L.rz) / dist;
                 pan = Math.min(1, Math.max(-1, pan));
             }
-            const mono = Math.max(0, 1 - dist * l.atten / 1000) * l.vol * masterVolume();
+            const mono = Math.max(0, 1 - dist * p.atten / 1000) * p.vol * masterVolume();
             const el = Math.min(1, Math.max(0, mono * (1 - pan)));
             const er = Math.min(1, Math.max(0, mono * (1 + pan)));
             return Math.abs(l.lg.gain.value - el) < 1e-4
                 && Math.abs(l.rg.gain.value - er) < 1e-4;
         }) : false,
         minDist: staticLoops.length ? Math.min(...staticLoops.map(l =>
-            Math.hypot(l.ox - exp.listener_x(), l.oy - exp.listener_y(),
-                       l.oz - exp.listener_z()))) : -1,
+            Math.hypot(l.lp.ox - quake.audio.listener.x, l.lp.oy - quake.audio.listener.y,
+                       l.lp.oz - quake.audio.listener.z))) : -1,
         looping: staticLoops.every(l => l.src.loop === true)
                  && ambientLoops.every(l => l.src.loop === true),
     })""")
@@ -108,19 +106,19 @@ with sync_playwright() as p:
     pg.evaluate("""() => {
         exp.console_toggle();
         for (const c of 'map e1m2') exp.console_char(c.codePointAt(0));
-        exp.console_enter();
+        return exp.console_enter();
     }""")
     time.sleep(2.5)
-    s2 = pg.evaluate("""() => ({
-        gen: exp.sound_generation(),
+    s2 = pg.evaluate("""async () => ({
+        gen: await exp.sound_generation(),
         statics: staticLoops.length,
         stopped: window._stopped,
         // e1m2's spawn hall is torch-lit: some loop is in earshot (its live
         // L/R gains are non-zero) right from the start.
         anyAudible: staticLoops.some(l => l.lg.gain.value > 0 || l.rg.gain.value > 0),
         minDist: staticLoops.length ? Math.min(...staticLoops.map(l =>
-            Math.hypot(l.ox - exp.listener_x(), l.oy - exp.listener_y(),
-                       l.oz - exp.listener_z()))) : -1,
+            Math.hypot(l.lp.ox - quake.audio.listener.x, l.lp.oy - quake.audio.listener.y,
+                       l.lp.oz - quake.audio.listener.z))) : -1,
     })""")
     check("changelevel bumps sound_generation", s2["gen"] != state["gen"],
           f"{state['gen']} -> {s2['gen']}")
@@ -138,8 +136,8 @@ with sync_playwright() as p:
     s2b = pg.evaluate("""() => ({
         anyAudible: staticLoops.some(l => l.lg.gain.value > 0 || l.rg.gain.value > 0),
         minDist: staticLoops.length ? Math.min(...staticLoops.map(l =>
-            Math.hypot(l.ox - exp.listener_x(), l.oy - exp.listener_y(),
-                       l.oz - exp.listener_z()))) : -1,
+            Math.hypot(l.lp.ox - quake.audio.listener.x, l.lp.oy - quake.audio.listener.y,
+                       l.lp.oz - quake.audio.listener.z))) : -1,
     })""")
     check("walking toward a torch makes its loop audible", s2b["anyAudible"],
           f"nearest loop {s2['minDist']:.0f}u -> {s2b['minDist']:.0f}u")
@@ -147,8 +145,8 @@ with sync_playwright() as p:
     # Mode transition (walk -> demo) tears down + rebuilds from the demo signon.
     pg.evaluate("document.getElementById('demoBtn').click()")
     time.sleep(2.5)
-    s3 = pg.evaluate("""() => ({
-        gen: exp.sound_generation(),
+    s3 = pg.evaluate("""async () => ({
+        gen: await exp.sound_generation(),
         statics: staticLoops.length,
         stopped: window._stopped,
     })""")

@@ -1,23 +1,32 @@
 [package]
 name = "quake-wasm"
 version = "0.1.0"
-edition = "2021"
-description = "Browser (WASM) shell for quake-rs: interactive walk rendered to a canvas"
+edition = "2024"
+description = "Browser (WASI) shell for quake-rs: the game as a program the page hosts in a Web Worker"
 license = "GPL-2.0-or-later"
+default-run = "quake"
 
-[lib]
-crate-type = ["cdylib"]
+# A plain program: `fn main()`, stdin/stdout and std::fs. Built for
+# `wasm32-wasip1`, it runs in `web/wasi.js`, a small WASI host in a Web Worker
+# (web/PLATFORM.md); built natively, the same program runs on a pipe.
+[[bin]]
+name = "quake"
+path = "src/main.rs"
 
-# The engine, unchanged. quake-wasm adds only a thin extern-C boundary; it is
-# itself `#![forbid(unsafe_code)]` — the only raw pointer is `Vec::as_ptr()`,
-# which is safe to *create*; JS does the linear-memory read.
+# A std::thread round trip for the WASI host (wasm32-wasip1-threads):
+# web/verify_threads.py.
+[[bin]]
+name = "threadcheck"
+path = "src/bin/threadcheck.rs"
+
+# The engine, unchanged.
 [dependencies]
 quake-rs = { path = "../quake-rs" }
 
 [features]
-# Opt-in per-phase frame timers for `web/bench.py` (see src/bench.rs). The build
-# imports a clock from the page (`quake_bench.now_ms`), which only the harness
-# supplies, so it is never the deployed wasm. Off by default: zero code.
+# Opt-in per-phase frame timers for `web/bench.py` (see src/bench.rs): each
+# frame's phase times ride out on the protocol's BENCH message. Off by
+# default: zero code.
 bench = []
 
 [profile.release]

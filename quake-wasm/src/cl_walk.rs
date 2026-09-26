@@ -659,9 +659,9 @@ mod tests {
             let setorigin = vm.builtins[2];
             setorigin(vm).expect("setorigin");
             vm.ent_set_vector(p, "velocity", [0.0; 3]);
-            render::render_stats_begin();
+            w.renderer.stats_begin();
             let (img, _) = step_walk(w, 0.0, false, rw, rh);
-            let px = render::render_stats_end().world_pixels;
+            let px = w.renderer.stats_end().world_pixels;
             let eye = [org[0], org[1], org[2] + 22.0];
             assert_eq!((img.w, img.h), (rw, rh));
             (px, quake_rs::world::point_contents(&w.bsp, eye))
@@ -750,9 +750,9 @@ mod tests {
     /// the renderer.
     fn rerender(w: &mut Walk, rng: quake_rs::particles::Lcg) -> (render::Image, u64) {
         w.prng = rng;
-        render::render_stats_begin();
+        w.renderer.stats_begin();
         let (img, _) = step_walk(w, 0.0, true, 320, 200);
-        (img, render::render_stats_end().alias_models)
+        (img, w.renderer.stats_end().alias_models)
     }
 
     fn pixels_differing(a: &render::Image, b: &render::Image) -> usize {

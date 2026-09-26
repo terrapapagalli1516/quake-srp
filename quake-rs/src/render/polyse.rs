@@ -4,8 +4,9 @@
 //! Source: `WinQuake/d_polyse.c` — `D_PolysetDraw`, `D_RasterizeAliasPolySmooth`,
 //! `D_PolysetCalcGradients`, `D_PolysetDrawSpans8`; `adivtab.h`.
 
-use super::Image;
-use super::alias::{AliasSetup, AliasView, FinalVert, ALIAS_ONSEAM};
+use super::alias::{AliasSetup, FinalVert, ALIAS_ONSEAM};
+use super::band::Band;
+use super::Palette;
 
 /// The sentinel `D_RasterizeAliasPolySmooth` stores in a span's `count`.
 const SPAN_END: i32 = -999_999;
@@ -74,13 +75,17 @@ fn c_ftoi(x: f64) -> i32 {
     }
 }
 
-/// The framebuffer side of `D_PolysetDraw` (d_polyse.c): the image, the shared
-/// z-buffer, and the rasteriser state the C keeps in globals.
-pub(super) struct PolyFramebuffer<'a> {
-    rgb: &'a mut [[u8; 3]],
-    zbuf: &'a mut [i16],
+/// The framebuffer side of `D_PolysetDraw` (d_polyse.c): a band of the view
+/// and its z-buffer, and the rasteriser state the C keeps in globals.
+///
+/// A triangle is walked whole, as id walks it — its edges, its span
+/// packages, every step — and only the pixels in the band's rows are
+/// written, so each band of a view draws exactly its share of what one pass
+/// over the whole view draws.
+pub(super) struct PolyFramebuffer<'b, 'a> {
+    band: &'b mut Band<'a>,
     width: isize,
-    palette: &'a [[u8; 3]; 256],
+    palette: &'b Palette,
     // D_PolysetSetUpForLineScan
     errorterm: i32,
     erroradjustup: i32,
@@ -123,13 +128,12 @@ pub(super) struct PolyFramebuffer<'a> {
     next_span: usize,
 }
 
-impl<'a> PolyFramebuffer<'a> {
-    pub(super) fn new(image: &'a mut Image, zbuf: &'a mut [i16], palette: &'a [[u8; 3]; 256]) -> PolyFramebuffer<'a> {
-        let width = image.w as isize;
-        let height = image.h;
+impl<'b, 'a> PolyFramebuffer<'b, 'a> {
+    /// The rasteriser over `band`.
+    pub(super) fn new(band: &'b mut Band<'a>, palette: &'b Palette) -> PolyFramebuffer<'b, 'a> {
+        let width = band.width() as isize;
         PolyFramebuffer {
-            rgb: &mut image.rgb,
-            zbuf,
+            band,
             width,
             palette,
             errorterm: 0,
@@ -167,8 +171,9 @@ impl<'a> PolyFramebuffer<'a> {
             d_lightextrastep: 0,
             d_zibasestep: 0,
             d_ziextrastep: 0,
-            // DPS_MAXSPANS: one package per scanline, plus the end marker.
-            spans: vec![SpanPackage::default(); height + 2],
+            // DPS_MAXSPANS: one package per scanline of a triangle, plus the
+            // end marker; grown as triangles need them.
+            spans: Vec::new(),
             next_span: 0,
         }
     }
@@ -176,16 +181,15 @@ impl<'a> PolyFramebuffer<'a> {
     /// The z test and write of one alias pixel: `D_PolysetDraw`'s
     /// `if ((lzi >> 16) >= *lpz) { *lpz = lzi >> 16; ... }` against id's
     /// 16-bit z-buffer of `(1/z * 0x8000 * 0x10000) >> 16`.
+    /// Only a pixel in the band's rows is touched.
     #[inline]
     fn plot(&mut self, idx: isize, zi: i32, pal_index: u8, setup: &AliasSetup) {
         let Ok(i) = usize::try_from(idx) else { return };
-        let Some(z) = self.zbuf.get_mut(i) else { return };
+        let Some((p, z)) = self.band.at(i) else { return };
         let z16 = zi >> 16;
         if z16 >= *z as i32 {
             *z = z16 as i16;
-            if let Some(p) = self.rgb.get_mut(i) {
-                *p = if setup.skin.is_some() { self.palette[pal_index as usize] } else { setup.flat };
-            }
+            *p = if setup.skin.is_some() { self.palette[pal_index as usize] } else { setup.flat };
         }
     }
 
@@ -204,14 +208,13 @@ impl<'a> PolyFramebuffer<'a> {
     }
 
     /// `D_PolysetDrawFinalVerts` (d_polyse.c): the vertices of a subdivided
-    /// model, drawn as points first.
-    pub(super) fn draw_final_verts(&mut self, setup: &AliasSetup, fverts: &[FinalVert], view: &AliasView) {
+    /// model, drawn as points first (those inside the view: the caller's
+    /// test, `R_AliasPrepareUnclippedPoints`).
+    pub(super) fn draw_final_verts(&mut self, setup: &AliasSetup, fverts: &[FinalVert]) {
         for fv in fverts {
-            if fv.v[0] < view.right && fv.v[1] < view.bottom && fv.v[0] >= 0 && fv.v[1] >= 0 {
-                let ptex = (fv.v[3] >> 16) as isize * setup.skinwidth as isize + (fv.v[2] >> 16) as isize;
-                let pix = Self::shade(setup, ptex, fv.v[4]);
-                self.plot(fv.v[1] as isize * self.width + fv.v[0] as isize, fv.v[5], pix, setup);
-            }
+            let ptex = (fv.v[3] >> 16) as isize * setup.skinwidth as isize + (fv.v[2] >> 16) as isize;
+            let pix = Self::shade(setup, ptex, fv.v[4]);
+            self.plot(fv.v[1] as isize * self.width + fv.v[0] as isize, fv.v[5], pix, setup);
         }
     }
 
@@ -338,18 +341,39 @@ impl<'a> PolyFramebuffer<'a> {
 
     /// The package for the current left-edge position.
     fn push_span(&mut self) {
-        if let Some(sp) = self.spans.get_mut(self.next_span) {
-            *sp = SpanPackage {
-                pdest: self.d_pdest,
-                count: self.d_aspancount,
-                ptex: self.d_ptex,
-                sfrac: self.d_sfrac,
-                tfrac: self.d_tfrac,
-                light: self.d_light,
-                zi: self.d_zi,
-            };
+        let sp = SpanPackage {
+            pdest: self.d_pdest,
+            count: self.d_aspancount,
+            ptex: self.d_ptex,
+            sfrac: self.d_sfrac,
+            tfrac: self.d_tfrac,
+            light: self.d_light,
+            zi: self.d_zi,
+        };
+        // The packages are written in order from 0 (`next_span` never skips
+        // one), so the next is at most one past the end.
+        match self.spans.get_mut(self.next_span) {
+            Some(slot) => *slot = sp,
+            None => self.spans.push(sp),
         }
         self.next_span += 1;
+    }
+
+    /// Whether any pixel of the triangle `v` can fall in the band: its
+    /// pixels lie between its vertices' rows and columns, so their view
+    /// indices lie between the top-left and bottom-right corners' (the
+    /// rasteriser's edges step between the vertices; a subdivided triangle's
+    /// points are midpoints of them). A triangle wholly outside is another
+    /// band's.
+    pub(super) fn touches(&self, v: &[FinalVert; 3]) -> bool {
+        let (mut umin, mut umax, mut vmin, mut vmax) = (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
+        for p in v {
+            let (u, row) = (i64::from(p.v[0]), i64::from(p.v[1]));
+            (umin, umax, vmin, vmax) = (umin.min(u), umax.max(u), vmin.min(row), vmax.max(row));
+        }
+        let w = self.width as i64;
+        let own = self.band.indices();
+        vmin * w + umin < own.end as i64 && vmax * w + umax >= own.start as i64
     }
 
     /// `D_PolysetScanLeftEdge` (d_polyse.c): walk `height` rows down the left
@@ -444,6 +468,8 @@ impl<'a> PolyFramebuffer<'a> {
     /// edge to the right one.
     fn draw_spans(&mut self, setup: &AliasSetup, start: usize) {
         let skinwidth = setup.skinwidth as isize;
+        let band = self.band.indices();
+        let (first, end) = (band.start as isize, band.end as isize);
         let mut k = start;
         loop {
             let Some(sp) = self.spans.get(k).copied() else { return };
@@ -455,7 +481,9 @@ impl<'a> PolyFramebuffer<'a> {
             } else {
                 self.d_aspancount += self.ubasestep;
             }
-            if lcount > 0 {
+            // A span wholly outside the band's rows writes nothing here: its
+            // pixels are another band's.
+            if lcount > 0 && sp.pdest < end && sp.pdest.saturating_add(lcount as isize) > first {
                 let (mut lpdest, mut lptex) = (sp.pdest, sp.ptex);
                 let (mut lsfrac, mut ltfrac, mut llight, mut lzi) = (sp.sfrac, sp.tfrac, sp.light, sp.zi);
                 for _ in 0..lcount {
@@ -661,6 +689,7 @@ static ADIVTAB: [(i32, i32); 1024] = [
 mod tests {
     use super::*;
     use crate::render::alias::ALIAS_ZISCALE;
+    use crate::render::Image;
     use crate::render::light::{COLORMAP_LEN, COLORMAP_ROWS};
 
     // -- Alias models: R_AliasSetupLighting + D_PolysetDraw --
@@ -700,7 +729,8 @@ mod tests {
         };
         let fv = |(u, v): (i32, i32)| FinalVert { v: [u, v, 0, 0, light, 1 << 24], flags: 0 };
         let mut zbuf = vec![i16::MIN; img.w * img.h];
-        let mut fb = PolyFramebuffer::new(img, &mut zbuf, &pal);
+        let mut band = Band::whole(img.w, &mut img.rgb, &mut zbuf);
+        let mut fb = PolyFramebuffer::new(&mut band, &pal);
         fb.polyset_draw(&setup, [fv(verts[0]), fv(verts[1]), fv(verts[2])], true);
     }
 
@@ -770,7 +800,8 @@ mod tests {
         let tri = [fv(0, 0, near), fv(4, 200, near), fv(2, 101, far)];
         let mut img = Image::new(8, 208, [0, 0, 0]);
         let mut zbuf = vec![i16::MIN; img.w * img.h];
-        let mut fb = PolyFramebuffer::new(&mut img, &mut zbuf, &pal);
+        let mut band = Band::whole(img.w, &mut img.rgb, &mut zbuf);
+        let mut fb = PolyFramebuffer::new(&mut band, &pal);
         fb.polyset_draw(&setup, tri, true);
         let t = f64::from(near - far);
         assert_eq!((fb.r_zistepx, fb.r_zistepy), (i32::MIN, c_ftoi(-t)));

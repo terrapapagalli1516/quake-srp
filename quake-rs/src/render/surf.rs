@@ -11,7 +11,8 @@ use super::light::{
     any_dlight_reaches, face_lightmap_dyn, LightMap, Luxels, COLORMAP_LEN,
     LIGHTSTYLES, STYLE_NONE,
 };
-use super::stats::stat;
+use super::stats::Profiler;
+use std::sync::Arc;
 
 /// Reconstruct a face's world-space polygon into `out`. Returns false if any
 /// index is out of range (the caller then skips the face). Mirrors the
@@ -159,93 +160,33 @@ pub(super) fn texture_animation(bsp: &Bsp, base_index: usize, ent_frame: i32, ti
     cur
 }
 
-/// Per-face STATIC geometry for the world model, computed once and reused every
-/// frame (the world model never moves): the polygon a face's lightmap extents
-/// come from (`CalcSurfaceExtents`), without the surfedge/edge/vertex walk every
-/// frame.
-#[derive(Clone)]
-pub(super) struct FaceGeom {
-    /// Reconstructed world-space polygon (the vertices/order `face_world_poly`
-    /// produces), empty when that fails. Behind an `Rc` so the per-frame cache
-    /// fetch is an O(1) refcount bump, not a deep `Vec` copy.
-    pub(super) poly: std::rc::Rc<Vec<Vec3>>,
-}
-
-/// The world-model static-geometry cache. Keyed by a cheap world fingerprint so
-/// it self-invalidates on a changelevel (face indices are meaningless after the
-/// BSP is swapped). `geoms[i]` is lazily filled the first time face `i` is
-/// reached.
-pub(super) struct GeomCache {
-    fingerprint: WorldFingerprint,
-    geoms: Vec<Option<FaceGeom>>,
-}
-
-/// A cheap identity for the loaded world. A changelevel always re-parses the BSP
-/// (new `faces`/`lighting`/… lengths AND a fresh `&Bsp` address), so a mismatch
-/// reliably means "different world -> the face-index-keyed caches are stale and
-/// must be cleared". We combine the `&Bsp` pointer with several lump lengths so
-/// the key changes if EITHER the address differs (the common case: a new map)
-/// OR the lengths differ (guards against an allocator reusing a freed address
-/// for a different-but-same-pointer Bsp). A face index is meaningless across a
-/// world swap, so any mismatch forces a full cache rebuild.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct WorldFingerprint {
-    ptr: usize,
-    faces_len: usize,
-    lighting_len: usize,
-    planes_len: usize,
-    vertexes_len: usize,
-}
-
-impl WorldFingerprint {
-    pub(super) fn of(bsp: &Bsp) -> WorldFingerprint {
-        WorldFingerprint {
-            ptr: bsp as *const Bsp as usize,
-            faces_len: bsp.faces.len(),
-            lighting_len: bsp.lighting.len(),
-            planes_len: bsp.planes.len(),
-            vertexes_len: bsp.vertexes.len(),
-        }
-    }
-}
-
-/// One cached face lightmap (Quake's `R_BuildLightMap` surface cache entry).
-///
-/// We cache ONLY the owned, combined-`f32` case (multi-style / non-neutral
-/// scale, and NOT touched by a dynamic light): a single steady style-0 face at
-/// neutral scale keeps borrowing the static bytes (no cache needed, already
-/// byte-identical). The stored `luxels` are the exact buffer
-/// `face_lightmap_dyn` produced, so reusing them is bit-for-bit identical to
-/// rebuilding.
+/// One cached lightmap (`R_BuildLightMap`'s blocklights for a face whose
+/// styles combine into owned luxels): the multi-style or non-neutral case,
+/// never touched by a dynamic light. A single steady style-0 face at neutral
+/// scale borrows the map's bytes instead and needs no entry. The stored
+/// `luxels` are the exact buffer `face_lightmap_dyn` produced, so reusing them
+/// is bit-for-bit a rebuild.
 #[derive(Clone)]
 struct LightCacheEntry {
     /// The resolved per-active-style SCALE values at build time (in stored slot
-    /// order). The cache is valid only while these are bit-identical — torches
+    /// order). The entry is valid only while these are bit-identical — torches
     /// animate at 10 Hz, so at 60 fps the scales are unchanged ~5/6 frames.
     style_scales: [f32; crate::bsp::MAXLIGHTMAPS],
     n_styles: usize,
-    /// The cached combined luxel grid (no dynamic light folded in — see the
-    /// "dlight_touched" gating in the wrapper).
+    /// The combined luxel grid (no dynamic light folded in: a dlit face is
+    /// rebuilt every frame and never stored).
     luxels: Vec<f32>,
     lmw: usize,
     lmh: usize,
     texmins: [f32; 2],
 }
 
-/// The lightmap surface cache, keyed by world fingerprint (so it clears on a
-/// changelevel) + per-face style scales (so it rebuilds when a torch ticks).
-pub(super) struct LightCache {
-    fingerprint: WorldFingerprint,
-    entries: Vec<Option<LightCacheEntry>>,
-}
-
-/// One cached lit SURFACE block (Quake's `d_surf.c` surface cache entry): the
-/// face's texture at one mip level with the lightmap shaded in AND resolved
-/// through the colormap to a final palette index, one byte per texel of that
-/// level. The rasteriser then reads a single byte per screen pixel (then one
-/// palette lookup) instead of sampling the texture, the lightmap and the
-/// colormap per pixel — all of that is a per-texel bake done ONCE and reused
-/// every frame.
+/// One lit SURFACE block (`d_surf.c`'s `surfcache_t`): the face's texture at
+/// one mip level with the lightmap shaded in AND resolved through the colormap
+/// to a final palette index, one byte per texel of that level. The span routine
+/// then reads a single byte per screen pixel (then one palette lookup) instead
+/// of sampling the texture, the lightmap and the colormap per pixel — all of
+/// that is a per-texel bake done ONCE and reused every frame.
 #[derive(Clone)]
 struct SurfCacheEntry {
     /// Active styles' resolved scale values at bake time (the cache key, same as the
@@ -258,48 +199,32 @@ struct SurfCacheEntry {
     /// Baked with dynamic light folded in (`cache->dlight`): never reused, so the
     /// first frame the light is gone rebuilds the block without it.
     dlight: bool,
-    /// Baked palette indices, `bw * bh`, row-major. `Rc` so a frame's draw clones
-    /// the handle (a refcount bump), not the (possibly large) buffer.
-    block: std::rc::Rc<Vec<u8>>,
+    /// Baked palette indices, `bw * bh`, row-major, shared with the frames that
+    /// draw it (an `Arc`, so handing a block to a pass is a refcount bump).
+    block: Arc<Vec<u8>>,
     bw: usize,
     bh: usize,
 }
 
-/// The world model's lit-surface cache: its [`WorldFingerprint`] identity plus
-/// one slot per face per mip level (`surface->cachespots[miplevel]`), each
-/// rebuilt when an animated style ticks. Held as a single [`SURF_CACHE`] slot —
-/// only the world `Bsp` is ever cached (external brush models bypass it), so it
-/// self-invalidates on a changelevel via the fingerprint/`n_faces` check; see
-/// [`face_surf_block`]. Unlike id's fixed-size cache with its LRU rover
-/// (`D_SCAlloc`), nothing is evicted until the level changes: eviction only ever
-/// costs id a rebake, never a different pixel.
-pub(super) struct SurfCache {
-    fingerprint: WorldFingerprint,
-    entries: Vec<[Option<SurfCacheEntry>; NUM_MIPS]>,
-}
-
-thread_local! {
-    /// Per-thread world static-geometry cache (one world at a time).
-    pub(super) static GEOM_CACHE: std::cell::RefCell<Option<GeomCache>> = const { std::cell::RefCell::new(None) };
-    /// Per-thread lightmap surface cache.
-    pub(super) static LIGHT_CACHE: std::cell::RefCell<Option<LightCache>> = const { std::cell::RefCell::new(None) };
-    /// Per-thread lit-surface (texel) cache for the world model (+ its inline
-    /// submodels, which share the world `Bsp`). External brush models bypass it
-    /// (they re-clone their `Bsp` every frame). See [`face_surf_block`].
-    pub(super) static SURF_CACHE: std::cell::RefCell<Option<SurfCache>> = const { std::cell::RefCell::new(None) };
-    /// The renderer's `d_mipscale` / `d_mipcap` (see [`set_mip_cvars`]).
-    static MIP_CVARS: std::cell::Cell<MipCvars> = const { std::cell::Cell::new(MipCvars::DEFAULT) };
-}
-
-/// The bytes the lit-surface cache holds now (every baked block of every face at
-/// every mip level), and the number of blocks: the port's counterpart of id's
-/// fixed `D_SurfaceCacheForRes` pool, for measurement.
-pub fn surface_cache_usage() -> (usize, usize) {
-    SURF_CACHE.with(|c| {
-        c.borrow().as_ref().map_or((0, 0), |sc| {
-            sc.entries.iter().flatten().flatten().fold((0, 0), |(bytes, n), e| (bytes + e.block.len(), n + 1))
-        })
-    })
+/// The world's per-face caches, the [`Renderer`](super::Renderer)'s: each is
+/// indexed by the world's face number, sized by [`SurfaceCaches::begin_map`]
+/// (`R_NewMap`) and filled the first time a face is drawn.
+///
+/// - the face's polygon (`CalcSurfaceExtents`' vertices), built once: the
+///   world never moves;
+/// - its combined lightmap while its light styles hold still;
+/// - its lit surface blocks, one per mip level (`surface->cachespots[miplevel]`,
+///   `D_CacheSurface`).
+///
+/// The inline brush models share the world's faces, and so its caches; the
+/// external `b_*.bsp` boxes bypass them. Unlike id's fixed-size surface cache
+/// with its LRU rover (`D_SCAlloc`), nothing is evicted until the map changes:
+/// eviction only ever costs id a rebake, never a different pixel.
+#[derive(Default)]
+pub(super) struct SurfaceCaches {
+    geoms: Vec<Option<Vec<Vec3>>>,
+    lights: Vec<Option<LightCacheEntry>>,
+    blocks: Vec<[Option<SurfCacheEntry>; NUM_MIPS]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -333,17 +258,6 @@ impl Default for MipCvars {
     }
 }
 
-/// Set `d_mipscale` / `d_mipcap` for the frames this thread renders from now on
-/// (the C reads the cvars in `D_SetupFrame`, every frame). The default is id's.
-pub fn set_mip_cvars(c: MipCvars) {
-    MIP_CVARS.with(|m| m.set(c));
-}
-
-/// The current `d_mipscale` / `d_mipcap`.
-pub fn mip_cvars() -> MipCvars {
-    MIP_CVARS.with(|m| m.get())
-}
-
 /// What `D_DrawSurfaces` needs to pick a surface's mip level, set up once per
 /// frame: `D_SetupFrame`'s `d_scalemip`/`d_minmip` and `D_ViewChanged`'s
 /// `scale_for_mip`.
@@ -356,9 +270,8 @@ pub(super) struct MipView {
 impl MipView {
     /// For a view projected with `x = cx + xscale*vx/vz`, `y = cy -
     /// yscale*vy/vz`: `scale_for_mip` is the larger scale (`xscale`, or
-    /// `yscale` when the pixels are taller than wide).
-    pub(super) fn new(xscale: f32, yscale: f32) -> MipView {
-        let cv = mip_cvars();
+    /// `yscale` when the pixels are taller than wide), under the cvars `cv`.
+    pub(super) fn new(xscale: f32, yscale: f32, cv: MipCvars) -> MipView {
         // d_minmip = d_mipcap.value (float to int truncates), clamped to 0..3.
         let minmip = (cv.mipcap as i32).clamp(0, NUM_MIPS as i32 - 1) as u32;
         MipView {
@@ -422,69 +335,153 @@ pub(super) fn mipadjust(ti: &crate::bsp::TexInfo) -> f32 {
 /// 256 texels a side, far below this.
 const SURF_BLOCK_MAX: usize = 1 << 20;
 
-/// A baked surface block ([`face_surf_block`]): the palette indices, `bw * bh`
-/// row-major, at mip level `mip`, whose texel `(i, j)` is the surface's
-/// `(texmins[0] + i, texmins[1] + j)` in that level's texels. The span walker
-/// reads it through gradients scaled to the level
+/// A baked surface block ([`SurfaceCaches::surface`]): the palette indices,
+/// `bw * bh` row-major, at mip level `mip`, whose texel `(i, j)` is the
+/// surface's `(texmins[0] + i, texmins[1] + j)` in that level's texels. The
+/// span walker reads it through gradients scaled to the level
 /// ([`PolyGrads::mip_scaled`](super::raster::PolyGrads::mip_scaled)), as
 /// `D_CalcGradients` scales its steps by `mipscale`.
 pub(super) struct SurfBlock {
-    pub(super) block: std::rc::Rc<Vec<u8>>,
+    pub(super) block: Arc<Vec<u8>>,
     pub(super) bw: usize,
     pub(super) bh: usize,
     pub(super) texmins: [f32; 2],
     pub(super) mip: u32,
 }
 
-/// Build (and cache) a face's lit+colormapped surface block at mip level
-/// `miplevel`: `D_CacheSurface`. Returns the block, or `None` (the caller keeps
-/// the per-pixel path) when there is no usable colormap, the texture is missing,
-/// or the block would be empty or exceed [`SURF_BLOCK_MAX`]. A texture without
-/// its levels 1..3 (the synthetic ones in tests) is baked at mip 0.
-///
-/// `tex_index` is the (animated) texture's index in `bsp.textures`, and `lm` the
-/// face's lightmap for this frame, dynamic lights included when `dlit` (a light
-/// reaches the face, [`any_dlight_reaches`]). A dynamically lit face is baked like
-/// any other — `R_BuildLightMap` runs `R_AddDynamicLights`, then `R_DrawSurface`
-/// — and its entry marked `dlight`, as the C marks `cache->dlight`: a dlit block
-/// is never a hit, so the light is rebaked every frame it is live and the first
-/// frame after it dies rebuilds the block without it. The hit test is the C's:
-/// same texture, same style values, no dlight now or at the bake — per face and
-/// mip level (`surface->cachespots[miplevel]`).
-///
-/// The bake is `R_DrawSurface`: the block is `extents >> miplevel` texels a side
-/// (`surfwidth`), made of one `16 >> miplevel` square per pair of lightmap
-/// columns and rows, each lit by `R_DrawSurfaceBlock8_mip0..3`'s integer
-/// interpolation ([`draw_surface_block`]).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn face_surf_block(
-    idx: usize,
+/// What `D_CacheSurface` is asked for: one face's texture, lit, at one mip
+/// level.
+pub(super) struct SurfaceRequest<'a> {
+    /// The face's number in the world, whose cache slot the block goes in, or
+    /// `None` for an external brush model's face (baked fresh, never cached:
+    /// its numbers are its own `b_*.bsp`'s).
+    pub(super) slot: Option<usize>,
+    pub(super) face: &'a crate::bsp::DFace,
+    /// The (animated) texture's index in `bsp.textures`, and the texture.
+    pub(super) texture: usize,
+    pub(super) mt: &'a crate::bsp::MipTex,
+    /// The face's lightmap for this frame, dynamic light included when `dlit`.
+    pub(super) lightmap: &'a LightMap<'a>,
+    pub(super) colormap: &'a [u8],
+    pub(super) light_styles: &'a [f32; LIGHTSTYLES],
+    /// A dynamic light reaches the face ([`any_dlight_reaches`]).
+    pub(super) dlit: bool,
+    pub(super) mip: u32,
+}
+
+impl SurfaceCaches {
+    /// `R_NewMap`: every cache empty, with a slot for each of the world's
+    /// `n_faces` faces.
+    pub(super) fn begin_map(&mut self, n_faces: usize) {
+        self.geoms.clear();
+        self.geoms.resize(n_faces, None);
+        self.lights.clear();
+        self.lights.resize(n_faces, None);
+        self.blocks.clear();
+        self.blocks.resize(n_faces, Default::default());
+    }
+
+    /// The bytes the lit-surface cache holds (every baked block of every face
+    /// at every mip level), and the number of blocks.
+    pub(super) fn usage(&self) -> (usize, usize) {
+        self.blocks.iter().flatten().flatten().fold((0, 0), |(bytes, n), e| (bytes + e.block.len(), n + 1))
+    }
+
+    /// Build (and cache) a face's lit+colormapped surface block at mip level
+    /// `req.mip`: `D_CacheSurface`. Returns the block, or `None` (the caller
+    /// keeps the per-pixel path) when there is no usable colormap, the texture
+    /// is missing, or the block would be empty or exceed [`SURF_BLOCK_MAX`]. A
+    /// texture without its levels 1..3 (the synthetic ones in tests) is baked
+    /// at mip 0.
+    ///
+    /// A dynamically lit face is baked like any other — `R_BuildLightMap` runs
+    /// `R_AddDynamicLights`, then `R_DrawSurface` — and its entry marked
+    /// `dlight`, as the C marks `cache->dlight`: a dlit block is never a hit,
+    /// so the light is rebaked every frame it is live and the first frame after
+    /// it dies rebuilds the block without it. The hit test is the C's: same
+    /// texture, same style values, no dlight now or at the bake — per face and
+    /// mip level (`surface->cachespots[miplevel]`).
+    ///
+    /// The bake is `R_DrawSurface`: the block is `extents >> miplevel` texels a
+    /// side (`surfwidth`), made of one `16 >> miplevel` square per pair of
+    /// lightmap columns and rows, each lit by `R_DrawSurfaceBlock8_mip0..3`'s
+    /// integer interpolation ([`draw_surface_block`]).
+    pub(super) fn surface(&mut self, req: &SurfaceRequest, prof: &mut Profiler) -> Option<SurfBlock> {
+        let (mt, lm) = (req.mt, req.lightmap);
+        if req.colormap.len() < COLORMAP_LEN {
+            return None;
+        }
+        let mip = if (req.mip as usize) < NUM_MIPS && mt.mip(req.mip as usize).is_some() { req.mip } else { 0 };
+        let tex = mt.mip(mip as usize)?;
+        let (smax, tmax) = ((mt.width as usize) >> mip, (mt.height as usize) >> mip);
+        // `surfwidth = extents[0] >> miplevel`; `extents = (lmw - 1) * 16`.
+        let bw = lm.lmw.saturating_sub(1).saturating_mul(16) >> mip;
+        let bh = lm.lmh.saturating_sub(1).saturating_mul(16) >> mip;
+        let total = bw.checked_mul(bh)?;
+        if smax == 0 || tmax == 0 || bw == 0 || bh == 0 || total > SURF_BLOCK_MAX {
+            return None;
+        }
+        let (scales, n_styles) = style_scales(req.face, req.light_styles);
+        // texturemins are whole multiples of 16, so `>> mip` is exact.
+        let texmins_i = [lm.texmins[0] as i32, lm.texmins[1] as i32];
+        let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
+        let bake = |prof: &mut Profiler| -> Arc<Vec<u8>> {
+            prof.add(|s| s.surf_texels_baked += total as u64);
+            let mut light = Vec::new();
+            lm.blocklights_into(&mut light);
+            let mut block = vec![0u8; total];
+            draw_surface_block(tex, smax, tmax, texmins_i, mip, &light, lm.lmw, req.colormap, &mut block, bw, bh);
+            Arc::new(block)
+        };
+        let made = |block| SurfBlock { block, bw, bh, texmins, mip };
+
+        // An external brush model's face (a `b_*.bsp` box): baked fresh every
+        // frame, never cached — its face numbers are its own bsp's. They are
+        // tiny (a 6-face box), so an unconditional bake is cheap.
+        let Some(slot) = req.slot else {
+            prof.add(|s| s.surf_bypass_baked += 1);
+            return Some(made(bake(prof)));
+        };
+        let spot = self.blocks.get_mut(slot).map(|spots| &mut spots[mip as usize]);
+        // HIT (`D_CacheSurface`): no dynamic light now or in the bake, same
+        // texture, same resolved style scales -> reuse the baked block.
+        if let Some(Some(e)) = spot.as_deref() {
+            if !req.dlit
+                && !e.dlight
+                && e.texture == req.texture
+                && e.n_styles == n_styles
+                && e.bw == bw
+                && e.bh == bh
+                && e.style_scales[..n_styles] == scales[..n_styles]
+            {
+                prof.add(|s| s.surf_cache_hits += 1);
+                return Some(made(e.block.clone()));
+            }
+        }
+        // MISS: bake and store, marked `dlight` when a light is folded in.
+        prof.add(|s| s.surf_baked += 1);
+        let block = bake(prof);
+        if let Some(e) = spot {
+            *e = Some(SurfCacheEntry {
+                style_scales: scales,
+                n_styles,
+                texture: req.texture,
+                dlight: req.dlit,
+                block: block.clone(),
+                bw,
+                bh,
+            });
+        }
+        Some(made(block))
+    }
+}
+
+/// The resolved scales of `face`'s active styles, in slot order, and how many
+/// there are: the surface and lightmap caches' key.
+fn style_scales(
     face: &crate::bsp::DFace,
-    tex_index: usize,
-    mt: &crate::bsp::MipTex,
-    lm: &LightMap,
-    colormap: &[u8],
-    fp: WorldFingerprint,
-    n_faces: usize,
     light_styles: &[f32; LIGHTSTYLES],
-    dlit: bool,
-    cache_surf: bool,
-    miplevel: u32,
-) -> Option<SurfBlock> {
-    if colormap.len() < COLORMAP_LEN {
-        return None;
-    }
-    let mip = if (miplevel as usize) < NUM_MIPS && mt.mip(miplevel as usize).is_some() { miplevel } else { 0 };
-    let tex = mt.mip(mip as usize)?;
-    let (smax, tmax) = ((mt.width as usize) >> mip, (mt.height as usize) >> mip);
-    // `surfwidth = extents[0] >> miplevel`; `extents = (lmw - 1) * 16`.
-    let bw = lm.lmw.saturating_sub(1).saturating_mul(16) >> mip;
-    let bh = lm.lmh.saturating_sub(1).saturating_mul(16) >> mip;
-    let total = bw.checked_mul(bh)?;
-    if smax == 0 || tmax == 0 || bw == 0 || bh == 0 || total > SURF_BLOCK_MAX {
-        return None;
-    }
-    // Cache key: the active styles' resolved scales (matching the lightmap cache).
+) -> ([f32; crate::bsp::MAXLIGHTMAPS], usize) {
     let mut scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
     let mut n_styles = 0usize;
     for &style in face.styles.iter() {
@@ -496,82 +493,16 @@ pub(super) fn face_surf_block(
         }
         n_styles += 1;
     }
+    (scales, n_styles)
+}
 
-    // texturemins are whole multiples of 16, so `>> mip` is exact.
-    let texmins_i = [lm.texmins[0] as i32, lm.texmins[1] as i32];
-    let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
-    let bake = || -> std::rc::Rc<Vec<u8>> {
-        stat(|s| s.surf_texels_baked += total as u64);
-        let mut light = Vec::new();
-        lm.blocklights_into(&mut light);
-        let mut block = vec![0u8; total];
-        draw_surface_block(tex, smax, tmax, texmins_i, mip, &light, lm.lmw, colormap, &mut block, bw, bh);
-        std::rc::Rc::new(block)
-    };
-    let made = |block| SurfBlock { block, bw, bh, texmins, mip };
-
-    // EXTERNAL brush models (the b_*.bsp ammo/health/explosive boxes) bypass the
-    // cache. The game clones each item's `Bsp` per visible instance every frame, so
-    // its `WorldFingerprint` (keyed on the `&Bsp` pointer) is different every frame
-    // and every instance — it could never produce a cache hit, and routing it
-    // through the shared slot would only evict the world's resident cache (the bug
-    // this guard prevents). They are tiny (a 6-face box) so an unconditional bake is
-    // cheap; bake fresh and return without touching SURF_CACHE.
-    if !cache_surf {
-        stat(|s| s.surf_bypass_baked += 1);
-        return Some(made(bake()));
+/// A face's polygon ([`face_world_poly`]), empty when it cannot be built.
+fn face_poly_or_empty(bsp: &Bsp, face: &crate::bsp::DFace) -> Vec<Vec3> {
+    let mut poly = Vec::new();
+    if !face_world_poly(bsp, face, &mut poly) {
+        poly.clear();
     }
-
-    // CACHED path — the world model and its inline submodels (doors/plats/buttons)
-    // all share the one world `Bsp`, so exactly one fingerprint is ever cached at a
-    // time. A single slot therefore suffices: it self-invalidates on a changelevel
-    // (the new world's `fp` / `n_faces` differ) and holds at most one world's worth
-    // of baked blocks, so memory never accumulates across levels.
-    SURF_CACHE.with(|c| {
-        let mut slot = c.borrow_mut();
-        let needs_reset = match slot.as_ref() {
-            Some(sc) => sc.fingerprint != fp || sc.entries.len() != n_faces,
-            None => true,
-        };
-        if needs_reset {
-            *slot = Some(SurfCache {
-                fingerprint: fp,
-                entries: vec![Default::default(); n_faces],
-            });
-        }
-        let sc = slot.as_mut().expect("just initialised");
-        let spot = sc.entries.get_mut(idx).map(|spots| &mut spots[mip as usize]);
-        // HIT (`D_CacheSurface`): no dynamic light now or in the bake, same
-        // texture, same resolved style scales -> reuse the baked block.
-        if let Some(Some(e)) = spot.as_deref() {
-            if !dlit
-                && !e.dlight
-                && e.texture == tex_index
-                && e.n_styles == n_styles
-                && e.bw == bw
-                && e.bh == bh
-                && e.style_scales[..n_styles] == scales[..n_styles]
-            {
-                stat(|s| s.surf_cache_hits += 1);
-                return Some(made(e.block.clone()));
-            }
-        }
-        // MISS: bake and store, marked `dlight` when a light is folded in.
-        stat(|s| s.surf_baked += 1);
-        let block = bake();
-        if let Some(e) = spot {
-            *e = Some(SurfCacheEntry {
-                style_scales: scales,
-                n_styles,
-                texture: tex_index,
-                dlight: dlit,
-                block: block.clone(),
-                bw,
-                bh,
-            });
-        }
-        Some(made(block))
-    })
+    poly
 }
 
 /// `R_DrawSurface` with `R_DrawSurfaceBlock8_mip0..3` (`r_surf.c`): fill `out`
@@ -650,182 +581,117 @@ pub(super) fn draw_surface_block(
     }
 }
 
-/// Compute (and cache) a world-model face's static geometry. Returns a clone of
-/// the cached [`FaceGeom`]. The cache is reset whenever the world fingerprint
-/// changes (changelevel). `face` must be the corresponding `bsp.faces[idx]`.
-pub(super) fn face_geom_cached(bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> FaceGeom {
-    let fp = WorldFingerprint::of(bsp);
-    GEOM_CACHE.with(|c| {
-        let mut slot = c.borrow_mut();
-        // (Re)initialise the cache on first use or a world change.
-        let needs_reset = match slot.as_ref() {
-            Some(gc) => gc.fingerprint != fp || gc.geoms.len() != bsp.faces.len(),
-            None => true,
-        };
-        if needs_reset {
-            *slot = Some(GeomCache {
-                fingerprint: fp,
-                geoms: vec![None; bsp.faces.len()],
-            });
-        }
-        let gc = slot.as_mut().expect("just initialised");
-        if let Some(existing) = gc.geoms.get(idx).and_then(|g| g.clone()) {
-            return existing;
-        }
-        // Build it once.
-        let mut poly: Vec<Vec3> = Vec::new();
-        if !face_world_poly(bsp, face, &mut poly) {
-            poly.clear();
-        }
-        let geom = FaceGeom { poly: std::rc::Rc::new(poly) };
-        if let Some(g) = gc.geoms.get_mut(idx) {
-            *g = Some(geom.clone());
-        }
-        geom
-    })
-}
-
-/// The lightmap for a world-model face, going through the surface cache.
-///
-/// Behaviour, by case:
-///  * **Static borrow** (`face_lightmap_dyn` returns `Luxels::Static`, the
-///    common steady style-0-at-neutral case) — returned as-is, no caching: it
-///    already borrows the BSP bytes and is byte-identical to before.
-///  * **Dynamic light reaches the face** — rebuilt EVERY frame via
-///    `face_lightmap_dyn` (dlights move). The result is NOT stored, and any
-///    previously cached entry for this face is dropped, so the dlight is never
-///    silently lost on a later frame.
-///  * **Owned combine, no dlight** (animated styles) — keyed by the resolved
-///    style scale values. On a hit with matching scales the cached `Vec<f32>` is
-///    cloned into a fresh `LightMap` (bit-identical to a rebuild — the combine
-///    is deterministic). On a miss it is rebuilt and stored.
-///
-/// The cache is reset on a world fingerprint change (changelevel), since it is
-/// keyed by face index.
-pub(super) fn face_lightmap_world_cached<'a>(
-    bsp: &'a Bsp,
-    idx: usize,
-    face: &crate::bsp::DFace,
-    world_poly: &[Vec3],
-    light_styles: &[f32; LIGHTSTYLES],
-    dlights: &[crate::dlight::DynamicLight],
-    // The face's `R_MarkLights` mask for this frame (see [`mark_dlights`]).
-    dlightbits: u32,
-) -> Option<LightMap<'a>> {
-    // Resolve the active styles' SCALE values (cache key) once.
-    let mut scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
-    let mut n_styles = 0usize;
-    for &style in face.styles.iter() {
-        if style == STYLE_NONE {
-            break;
-        }
-        scales[n_styles] = light_styles.get(style as usize).copied().unwrap_or(1.0);
-        n_styles += 1;
+impl SurfaceCaches {
+    /// A world face's polygon (`face_world_poly`, empty when that fails),
+    /// built the first time it is asked for: the world never moves. `face`
+    /// must be `bsp.faces[idx]`; `None` for a face number past the map begun.
+    /// ([`SurfaceCaches::world_lightmap`] reads the same slots.)
+    #[cfg(test)]
+    pub(super) fn geom(&mut self, bsp: &Bsp, idx: usize, face: &crate::bsp::DFace) -> Option<&[Vec3]> {
+        let slot = self.geoms.get_mut(idx)?;
+        Some(slot.get_or_insert_with(|| face_poly_or_empty(bsp, face)))
     }
 
-    let dlit = any_dlight_reaches(bsp, face, dlights, dlightbits);
-
-    let fp = WorldFingerprint::of(bsp);
-
-    if dlit {
-        // A dlight touches this face: rebuild every frame and DROP any cached
-        // entry (so we never reuse a stale, dlight-free buffer next frame, and
-        // never bake a moving dlight into the cache).
-        LIGHT_CACHE.with(|c| {
-            let mut slot = c.borrow_mut();
-            if let Some(lc) = slot.as_mut() {
-                if lc.fingerprint == fp {
-                    if let Some(e) = lc.entries.get_mut(idx) {
-                        *e = None;
-                    }
-                }
+    /// The lightmap of world face `idx` (`face` is `bsp.faces[idx]`) for this
+    /// frame's light styles and dynamic lights, through the lightmap cache.
+    ///
+    /// Behaviour, by case:
+    ///  * **Static borrow** (`face_lightmap_dyn` returns `Luxels::Static`, the
+    ///    common steady style-0-at-neutral case) — returned as-is, no caching:
+    ///    it already borrows the BSP bytes.
+    ///  * **Dynamic light reaches the face** — rebuilt EVERY frame (dlights
+    ///    move). The result is NOT stored, and any cached entry for this face
+    ///    is dropped, so the dlight is never silently lost on a later frame.
+    ///  * **Owned combine, no dlight** (animated styles) — keyed by the
+    ///    resolved style scale values. On a hit the cached luxels are cloned
+    ///    into a fresh `LightMap` (bit-identical to a rebuild: the combine is
+    ///    deterministic). On a miss it is rebuilt and stored.
+    pub(super) fn world_lightmap<'a>(
+        &mut self,
+        bsp: &'a Bsp,
+        idx: usize,
+        face: &crate::bsp::DFace,
+        light_styles: &[f32; LIGHTSTYLES],
+        dlights: &[crate::dlight::DynamicLight],
+        // The face's `R_MarkLights` mask for this frame (see [`mark_dlights`]).
+        dlightbits: u32,
+    ) -> Option<LightMap<'a>> {
+        let (scales, n_styles) = style_scales(face, light_styles);
+        let dlit = any_dlight_reaches(bsp, face, dlights, dlightbits);
+        let unkept;
+        let poly: &[Vec3] = match self.geoms.get_mut(idx) {
+            Some(slot) => slot.get_or_insert_with(|| face_poly_or_empty(bsp, face)),
+            None => {
+                unkept = face_poly_or_empty(bsp, face);
+                &unkept
             }
-        });
-        return face_lightmap_dyn(bsp, face, world_poly, light_styles, dlights, dlightbits);
-    }
-
-    // No dlight: try the cache.
-    let cached = LIGHT_CACHE.with(|c| {
-        let mut slot = c.borrow_mut();
-        let needs_reset = match slot.as_ref() {
-            Some(lc) => lc.fingerprint != fp || lc.entries.len() != bsp.faces.len(),
-            None => true,
         };
-        if needs_reset {
-            *slot = Some(LightCache {
-                fingerprint: fp,
-                entries: vec![None; bsp.faces.len()],
-            });
+        let entry = self.lights.get_mut(idx);
+        if dlit {
+            // A dlight touches this face: rebuild every frame and DROP any cached
+            // entry (so we never reuse a stale, dlight-free buffer next frame, and
+            // never bake a moving dlight into the cache).
+            if let Some(e) = entry {
+                *e = None;
+            }
+            return face_lightmap_dyn(bsp, face, poly, light_styles, dlights, dlightbits);
         }
-        let lc = slot.as_mut().expect("just initialised");
-        match lc.entries.get(idx).and_then(|e| e.as_ref()) {
-            Some(e)
-                if e.n_styles == n_styles
-                    && e.style_scales[..n_styles] == scales[..n_styles] =>
-            {
+        // No dlight: try the cache.
+        let entry = match entry {
+            Some(Some(e)) if e.n_styles == n_styles && e.style_scales[..n_styles] == scales[..n_styles] => {
                 // HIT: clone the stored combined luxels (deterministic build ->
                 // bit-identical to rebuilding).
-                Some(LightCacheEntry {
-                    style_scales: e.style_scales,
-                    n_styles: e.n_styles,
-                    luxels: e.luxels.clone(),
+                return Some(LightMap {
+                    luxels: Luxels::Owned(e.luxels.clone()),
                     lmw: e.lmw,
                     lmh: e.lmh,
                     texmins: e.texmins,
-                })
+                });
             }
-            _ => None,
-        }
-    });
-
-    if let Some(e) = cached {
-        return Some(LightMap {
-            luxels: Luxels::Owned(e.luxels),
-            lmw: e.lmw,
-            lmh: e.lmh,
-            texmins: e.texmins,
-        });
-    }
-
-    // MISS: build fresh (no dlights -> the result is the pure static/style
-    // combine), then cache it if it is the owned combine.
-    let built = face_lightmap_dyn(bsp, face, world_poly, light_styles, &[], 0)?;
-    if let Luxels::Owned(ref v) = built.luxels {
-        let mut style_scales = [0.0f32; crate::bsp::MAXLIGHTMAPS];
-        style_scales[..n_styles].copy_from_slice(&scales[..n_styles]);
-        let entry = LightCacheEntry {
-            style_scales,
-            n_styles,
-            luxels: v.clone(),
-            lmw: built.lmw,
-            lmh: built.lmh,
-            texmins: built.texmins,
+            e => e,
         };
-        LIGHT_CACHE.with(|c| {
-            let mut slot = c.borrow_mut();
-            if let Some(lc) = slot.as_mut() {
-                if lc.fingerprint == fp {
-                    if let Some(e) = lc.entries.get_mut(idx) {
-                        *e = Some(entry);
-                    }
-                }
-            }
-        });
+        // MISS: build fresh (no dlights -> the pure static/style combine), then
+        // cache it if it is the owned combine.
+        let built = face_lightmap_dyn(bsp, face, poly, light_styles, &[], 0)?;
+        if let (Luxels::Owned(v), Some(e)) = (&built.luxels, entry) {
+            *e = Some(LightCacheEntry {
+                style_scales: scales,
+                n_styles,
+                luxels: v.clone(),
+                lmw: built.lmw,
+                lmh: built.lmh,
+                texmins: built.texmins,
+            });
+        }
+        Some(built)
     }
-    Some(built)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dlight::DynamicLight;
-    use crate::render::{demo_room, render_scene_ext, Camera};
-    use crate::render::fixtures::{
-        lightmapped_demo_room, one_face_bsp_zplane, reset_render_caches, two_style_face_bsp,
-    };
+    use crate::render::{demo_room, Camera, Palette, Renderer, Scene};
+    use crate::render::fixtures::render_once;
+    use crate::render::fixtures::{lightmapped_demo_room, one_face_bsp_zplane, two_style_face_bsp};
     use crate::render::light::{ALL_DLIGHT_BITS, NEUTRAL_LIGHTSTYLE_SCALES};
-    use crate::render::stats::{render_stats_begin, render_stats_end};
     use crate::render::world::ExternalBModel;
+
+    /// Caches for `bsp` whose face 0 has the polygon `poly`: the fixtures'
+    /// faces are lit by a literal polygon, not their bsp's edges.
+    fn caches_with_poly(bsp: &Bsp, poly: &[Vec3]) -> SurfaceCaches {
+        let mut c = SurfaceCaches::default();
+        c.begin_map(bsp.faces.len());
+        c.geoms[0] = Some(poly.to_vec());
+        c
+    }
+
+    /// A profiler that is on.
+    fn counting() -> Profiler {
+        let mut p = Profiler::default();
+        p.begin();
+        p
+    }
 
     #[test]
     fn texture_animation_selects_frame_by_time() {
@@ -920,7 +786,6 @@ mod tests {
 
     #[test]
     fn lightmap_cache_returns_bit_identical_luxels_for_same_style_key() {
-        reset_render_caches();
         // A 2-style face: styles[0]=0 (steady), styles[1]=1 (animated). The owned
         // combine is cacheable (not a static borrow).
         let (bsp, face, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
@@ -928,10 +793,9 @@ mod tests {
         scales[1] = 0.5;
 
         // First call: MISS -> builds + caches. Second call (same key): HIT.
-        let first =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[], 0).expect("present");
-        let second =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &scales, &[], 0).expect("present");
+        let mut caches = caches_with_poly(&bsp, &poly);
+        let first = caches.world_lightmap(&bsp, 0, &face, &scales, &[], 0).expect("present");
+        let second = caches.world_lightmap(&bsp, 0, &face, &scales, &[], 0).expect("present");
 
         // The cached luxels must be BIT-identical to a fresh, cache-free build.
         let fresh = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[], 0).expect("present");
@@ -950,20 +814,18 @@ mod tests {
 
     #[test]
     fn lightmap_cache_rebuilds_when_style_key_changes() {
-        reset_render_caches();
         let (bsp, face, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
+        let mut caches = caches_with_poly(&bsp, &poly);
 
         // Build at scale 0.5, then again at scale 1.0 (a torch ticking). The
         // second result must reflect the NEW scale, not the stale cached one.
         let mut s_half = NEUTRAL_LIGHTSTYLE_SCALES;
         s_half[1] = 0.5;
-        let half =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_half, &[], 0).expect("present");
+        let half = caches.world_lightmap(&bsp, 0, &face, &s_half, &[], 0).expect("present");
 
         let mut s_full = NEUTRAL_LIGHTSTYLE_SCALES;
         s_full[1] = 1.0;
-        let full =
-            face_lightmap_world_cached(&bsp, 0, &face, &poly, &s_full, &[], 0).expect("present");
+        let full = caches.world_lightmap(&bsp, 0, &face, &s_full, &[], 0).expect("present");
 
         // Compare against fresh builds at each scale.
         let fresh_full = face_lightmap_dyn(&bsp, &face, &poly, &s_full, &[], 0).expect("present");
@@ -984,27 +846,24 @@ mod tests {
     }
 
     #[test]
-    fn lightmap_cache_invalidates_when_faces_len_changes() {
-        reset_render_caches();
+    fn lightmap_cache_is_emptied_by_begin_map() {
         // World A: a 2-style face, populate the cache for face 0.
         let (bsp_a, face_a, poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
         let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
         scales[1] = 0.5;
-        let _ = face_lightmap_world_cached(&bsp_a, 0, &face_a, &poly, &scales, &[], 0).expect("present");
+        let mut caches = caches_with_poly(&bsp_a, &poly);
+        let _ = caches.world_lightmap(&bsp_a, 0, &face_a, &scales, &[], 0).expect("present");
 
-        // World B: a DIFFERENT world with a different faces.len() and different
-        // lightmap bytes at face 0. The fingerprint mismatch must clear the
-        // (face-index-keyed) cache so face 0 is rebuilt from B's data, NOT served
-        // from A's stale entry.
+        // World B: a DIFFERENT world with different lightmap bytes at face 0.
+        // `R_NewMap` empties the (face-index-keyed) cache, so face 0 is rebuilt
+        // from B's data, NOT served from A's stale entry.
         let (mut bsp_b, face_b, poly_b) = two_style_face_bsp([0, 1, 255, 255], 40, 240);
-        // Make faces.len() differ from A (A had 1 face) so the fingerprint flips
-        // via the faces_len field as well as the &Bsp pointer.
         bsp_b.faces.push(face_b.clone());
         bsp_b.faces.push(face_b.clone());
-        assert_ne!(bsp_a.faces.len(), bsp_b.faces.len());
+        caches.begin_map(bsp_b.faces.len());
+        caches.geoms[0] = Some(poly_b.clone());
 
-        let got =
-            face_lightmap_world_cached(&bsp_b, 0, &face_b, &poly_b, &scales, &[], 0).expect("present");
+        let got = caches.world_lightmap(&bsp_b, 0, &face_b, &scales, &[], 0).expect("present");
         let fresh_b = face_lightmap_dyn(&bsp_b, &face_b, &poly_b, &scales, &[], 0).expect("present");
         match (&got.luxels, &fresh_b.luxels) {
             (Luxels::Owned(g), Luxels::Owned(fb)) => {
@@ -1020,7 +879,6 @@ mod tests {
 
     #[test]
     fn lightmap_cache_dlit_face_rebuilds_each_frame_and_keeps_dlight() {
-        reset_render_caches();
         // A single steady style-0 face at neutral scale -> normally a static
         // borrow (uncached). A reaching dlight must still produce the owned,
         // dlit buffer (NOT a cached static-only buffer) every call.
@@ -1029,12 +887,11 @@ mod tests {
 
         // First, populate any cache via a dlight-free neutral call (static borrow,
         // not cached). Then a reaching dlight: must own the buffer and brighten.
-        let _ = face_lightmap_world_cached(&bsp, 0, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0);
-        let lit = face_lightmap_world_cached(
-            &bsp, 0, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl),
-            ALL_DLIGHT_BITS,
-        )
-        .expect("present");
+        let mut caches = caches_with_poly(&bsp, &poly);
+        let _ = caches.world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0);
+        let lit = caches
+            .world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), ALL_DLIGHT_BITS)
+            .expect("present");
         assert!(matches!(lit.luxels, Luxels::Owned(_)), "a dlit face must own the dlit buffer");
         // Must match the direct (cache-free) dlit build exactly.
         let fresh = face_lightmap_dyn(
@@ -1058,30 +915,26 @@ mod tests {
         // style-animated world repeatedly and require byte-identical pixels. The
         // first render populates the geom + lightmap caches; the second hits
         // them. The cached combine must be bit-identical, so the images match.
-        reset_render_caches();
         let bsp = lightmapped_demo_room(100, 200);
         let pal = [[180u8, 150, 90]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[1] = 0.5; // non-neutral -> owned combine -> cache used
+        let mut styles_b = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles_b[1] = 1.0;
 
-        let render = |b: &Bsp| {
-            render_scene_ext(
-                b, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &styles, None,
-            )
+        let mut r = Renderer::new();
+        let mut render = |styles: &[f32; LIGHTSTYLES]| {
+            r.render(&Scene { light_styles: styles, ..Scene::new(&bsp, cam, 160, 120, &pal) })
         };
 
-        let frame1 = render(&bsp); // populates caches
-        let frame2 = render(&bsp); // cache hits
+        let frame1 = render(&styles); // populates caches
+        let frame2 = render(&styles); // cache hits
         assert_eq!(frame1.rgb, frame2.rgb, "cached frame must be pixel-identical to the first");
 
         // A change in the style scale must change the cache key AND the pixels
         // (proving the cache is keyed on the scale, not stale).
-        let mut styles_b = NEUTRAL_LIGHTSTYLE_SCALES;
-        styles_b[1] = 1.0;
-        let frame_b = render_scene_ext(
-            &bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &styles_b, None,
-        );
+        let frame_b = render(&styles_b);
         assert_ne!(
             frame1.rgb, frame_b.rgb,
             "a different style scale must rebuild and produce different pixels"
@@ -1089,7 +942,7 @@ mod tests {
 
         // Re-render at the ORIGINAL scale: must again equal frame1 (the cache
         // correctly rebuilt back to the 0.5 key).
-        let frame3 = render(&bsp);
+        let frame3 = render(&styles);
         assert_eq!(frame1.rgb, frame3.rgb, "returning to the original key reproduces frame1");
     }
 
@@ -1116,15 +969,14 @@ mod tests {
     #[test]
     fn external_models_bypass_and_dont_evict_world_surf_cache() {
         // REGRESSION (performance): external brush models (the b_*.bsp item boxes)
-        // re-clone their Bsp every frame, so each has a different WorldFingerprint
-        // every frame and every instance — they can NEVER hit the surface cache.
-        // They must therefore BYPASS it: routing them through the shared world slot
-        // would evict the world's resident cache and reintroduce the ~60ms/frame
-        // re-bake-everything cost. Here we warm the world cache, then render a frame
-        // containing MANY (26 > the old broken 24-slot LRU) distinct external models,
-        // and assert (a) the externals baked (went through the bypass, not the cache)
-        // and (b) the world cache is completely untouched afterwards.
-        reset_render_caches();
+        // have face numbers of their own bsp, not the world's — they can NEVER
+        // hit the world's surface cache. They must therefore BYPASS it: routing
+        // them through the world's slots would evict the world's resident blocks
+        // and reintroduce the ~60ms/frame re-bake-everything cost. Here we warm
+        // the world cache, then render a frame containing MANY (26 > the old
+        // broken 24-slot LRU) distinct external models, and assert (a) the
+        // externals baked (went through the bypass, not the cache) and (b) the
+        // world cache is completely untouched afterwards.
         let world = demo_room_with_walls(lightmapped_demo_room(100, 200));
         // 26 distinct external "boxes" (each a separate Bsp -> distinct fingerprint),
         // standing 2 units toward the camera's corner and 2 up from the world's
@@ -1141,19 +993,18 @@ mod tests {
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[1] = 0.5;
-        let render = |ext: &[ExternalBModel]| {
-            render_scene_ext(
-                &world, &cam, 160, 120, &pal, &[], &[], ext, None, 0.0, &[], &[], &styles,
-                Some(&colormap),
-            )
+        let mut r = Renderer::new();
+        let mut render = |ext: &[ExternalBModel]| {
+            r.stats_begin();
+            let scene = Scene { external: ext, light_styles: &styles, colormap: Some(&colormap), ..Scene::new(&world, cam, 160, 120, &pal) };
+            let _ = r.render(&scene);
+            r.stats_end()
         };
 
         let _ = render(&[]); // bake the world's surface blocks into the cache
 
         // Sanity: the world scene hits its warm cache (else the asserts below are vacuous).
-        render_stats_begin();
-        let _ = render(&[]);
-        let warm = render_stats_end();
+        let warm = render(&[]);
         assert!(
             warm.surf_cache_hits > 0 && warm.surf_baked == 0,
             "world scene must hit the warm surf cache (got {} hits, {} bakes)",
@@ -1166,9 +1017,7 @@ mod tests {
         // the boxes stand over the world's own walls, so some world faces are not
         // drawn at all), and the externals BAKE (proving they took the bypass
         // path, not the cache).
-        render_stats_begin();
-        let _ = render(&externals);
-        let with_ext = render_stats_end();
+        let with_ext = render(&externals);
         assert!(
             with_ext.surf_cache_hits > 0 && with_ext.surf_cache_hits <= world_hits,
             "the world's drawn faces must still hit while externals draw (got {} of {})",
@@ -1188,9 +1037,7 @@ mod tests {
         // THE GUARD: after that external-laden frame, the world cache is untouched —
         // a subsequent world-only frame still hits everything, zero re-bakes. (With
         // the old shared/LRU cache the externals would have evicted it -> re-bakes.)
-        render_stats_begin();
-        let _ = render(&[]);
-        let after = render_stats_end();
+        let after = render(&[]);
         assert_eq!(
             after.surf_baked, 0,
             "world cache was polluted/evicted by external models — {} faces re-baked \
@@ -1220,18 +1067,18 @@ mod tests {
     /// — never lingering — and a cold cache draws the same lit frame.
     #[test]
     fn dlit_faces_bake_through_the_surface_cache_and_rebuild_when_the_light_dies() {
-        reset_render_caches();
         let world = demo_room_with_walls(lightmapped_demo_room(40, 0));
         let (cm, pal) = ramp_colormap();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 300.0, f32::MAX, 0.0, 0.0, 0);
-        let render = |dls: &[DynamicLight]| {
-            render_stats_begin();
-            let img = render_scene_ext(
-                &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], dls,
-                &NEUTRAL_LIGHTSTYLE_SCALES, Some(&cm),
-            );
-            (img, render_stats_end())
+        fn scene<'a>(world: &'a Bsp, cam: Camera, pal: &'a Palette, cm: &'a [u8], dls: &'a [DynamicLight]) -> Scene<'a> {
+            Scene { dlights: dls, colormap: Some(cm), ..Scene::new(world, cam, 160, 120, pal) }
+        }
+        let mut r = Renderer::new();
+        let mut render = |dls: &[DynamicLight]| {
+            r.stats_begin();
+            let img = r.render(&scene(&world, cam, &pal, &cm, dls));
+            (img, r.stats_end())
         };
         let (unlit, st0) = render(&[]);
         let (lit, st) = render(std::slice::from_ref(&dl));
@@ -1253,8 +1100,7 @@ mod tests {
         let (_, st4) = render(&[]);
         assert_eq!(st4.surf_baked, 0, "then the cache is warm again");
         // History-free: a cold cache draws the same lit frame.
-        reset_render_caches();
-        assert_eq!(render(std::slice::from_ref(&dl)).0.rgb, lit.rgb);
+        assert_eq!(render_once(&scene(&world, cam, &pal, &cm, std::slice::from_ref(&dl))).rgb, lit.rgb);
     }
 
     /// `D_CacheSurface` keys a block on its texture (`cache->texture`): an
@@ -1263,7 +1109,6 @@ mod tests {
     #[test]
     fn animated_wall_texture_rebuilds_its_cached_block() {
         use crate::bsp::{MipTex, TexAnim};
-        reset_render_caches();
         let mut world = lightmapped_demo_room(40, 0);
         let mk = |name: &str, texel: u8, anim: TexAnim| {
             Some(MipTex {
@@ -1285,18 +1130,13 @@ mod tests {
         }
         let (cm, pal) = ramp_colormap();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let render = |time: f32| {
-            render_scene_ext(
-                &world, &cam, 160, 120, &pal, &[], &[], &[], None, time, &[], &[],
-                &NEUTRAL_LIGHTSTYLE_SCALES, Some(&cm),
-            )
-        };
-        let f0 = render(0.0);
-        let f1 = render(0.2);
+        let scene = |time| Scene { time, colormap: Some(&cm), ..Scene::new(&world, cam, 160, 120, &pal) };
+        let mut r = Renderer::new();
+        let f0 = r.render(&scene(0.0));
+        let f1 = r.render(&scene(0.2));
         assert_ne!(f0.rgb, f1.rgb, "the animation's second frame must show");
-        assert_eq!(render(0.0).rgb, f0.rgb, "and the first again");
-        reset_render_caches();
-        assert_eq!(render(0.2).rgb, f1.rgb, "a warm cache draws what a cold one does");
+        assert_eq!(r.render(&scene(0.0)).rgb, f0.rgb, "and the first again");
+        assert_eq!(render_once(&scene(0.2)).rgb, f1.rgb, "a warm cache draws what a cold one does");
     }
 
     // -- Mip levels (D_MipLevelForScale, D_CacheSurface per miplevel) -------
@@ -1305,20 +1145,16 @@ mod tests {
     /// never finer than `d_mipcap`.
     #[test]
     fn mip_level_for_scale_is_d_mip_level_for_scale() {
-        set_mip_cvars(MipCvars::DEFAULT);
-        let mv = MipView::new(160.0, 160.0);
+        let mv = MipView::new(160.0, 160.0, MipCvars::DEFAULT);
         let levels: Vec<u32> =
             [5.0, 1.0, 0.999, 0.4, 0.399, 0.2, 0.199, 0.0].iter().map(|&s| mv.level_for_scale(s)).collect();
         assert_eq!(levels, [0, 0, 1, 1, 2, 2, 3, 3]);
         // d_mipscale 0: every scale (>= 0) is mip 0.
-        set_mip_cvars(MipCvars { mipscale: 0.0, mipcap: 0.0 });
-        assert_eq!(MipView::new(160.0, 160.0).level_for_scale(0.0), 0);
+        let level = |mipscale, mipcap, scale| MipView::new(160.0, 160.0, MipCvars { mipscale, mipcap }).level_for_scale(scale);
+        assert_eq!(level(0.0, 0.0, 0.0), 0);
         // d_mipcap 2 (and 9, clamped to 3): never finer than that.
-        set_mip_cvars(MipCvars { mipscale: 1.0, mipcap: 2.0 });
-        assert_eq!(MipView::new(160.0, 160.0).level_for_scale(5.0), 2);
-        set_mip_cvars(MipCvars { mipscale: 1.0, mipcap: 9.0 });
-        assert_eq!(MipView::new(160.0, 160.0).level_for_scale(5.0), 3);
-        set_mip_cvars(MipCvars::DEFAULT);
+        assert_eq!(level(1.0, 2.0, 5.0), 2);
+        assert_eq!(level(1.0, 9.0, 5.0), 3);
     }
 
     /// `Mod_LoadTexinfo`'s `mipadjust` from the mean texture-axis length.
@@ -1340,7 +1176,7 @@ mod tests {
     /// scale_for_mip * mipadjust` through `D_MipLevelForScale`.
     #[test]
     fn the_level_comes_from_nearzi_scale_for_mip_and_mipadjust() {
-        let mv = MipView::new(100.0, 100.0);
+        let mv = MipView::new(100.0, 100.0, MipCvars::DEFAULT);
         let ti = crate::bsp::TexInfo { vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], miptex: 0, flags: 0 };
         // scale = (1/30) * 100 * 1 = 3.3 -> mip 0; at 10x the distance 0.33 -> mip 2.
         assert_eq!(mv.level_for_nearzi(1.0 / 30.0, &ti), 0);
@@ -1351,7 +1187,7 @@ mod tests {
         let big = crate::bsp::TexInfo { vecs: [[0.25, 0.0, 0.0, 0.0], [0.0, 0.25, 0.0, 0.0]], miptex: 0, flags: 0 };
         assert_eq!(mv.level_for_nearzi(1.0 / 300.0, &big), 0);
         // The larger of the two scales is scale_for_mip (pixels taller than wide).
-        assert_eq!(MipView::new(100.0, 300.0).level_for_nearzi(1.0 / 300.0, &ti), 0);
+        assert_eq!(MipView::new(100.0, 300.0, MipCvars::DEFAULT).level_for_nearzi(1.0 / 300.0, &ti), 0);
     }
 
     /// A 32x32 wall texture whose level `m` texels are all `10 * m + 1`.
@@ -1372,21 +1208,30 @@ mod tests {
     /// (`cachespots[miplevel]`) — going back to a level is a hit.
     #[test]
     fn surface_blocks_are_baked_and_cached_per_mip_level() {
-        reset_render_caches();
         let (cm, _) = ramp_colormap();
         let mt = leveled_miptex();
         // A 64x48-texel surface: 5x4 luxels, texturemins (-16, 32).
         let luxels = vec![128u8; 5 * 4];
         let lm = LightMap { luxels: Luxels::Static(&luxels), lmw: 5, lmh: 4, texmins: [-16.0, 32.0] };
         let (_bsp, face, _) = one_face_bsp_zplane(128);
-        let fp = WorldFingerprint::of(&_bsp);
         let styles = NEUTRAL_LIGHTSTYLE_SCALES;
-        let get = |mip: u32| {
-            face_surf_block(0, &face, 0, &mt, &lm, &cm, fp, 1, &styles, false, true, mip).expect("block")
+        let req = |slot, mt, mip| SurfaceRequest {
+            slot,
+            face: &face,
+            texture: 0,
+            mt,
+            lightmap: &lm,
+            colormap: &cm,
+            light_styles: &styles,
+            dlit: false,
+            mip,
         };
-        render_stats_begin();
+        let mut caches = SurfaceCaches::default();
+        caches.begin_map(1);
+        let mut prof = counting();
+        let mut get = |mip: u32, prof: &mut Profiler| caches.surface(&req(Some(0), &mt, mip), prof).expect("block");
         for mip in 0..4u32 {
-            let sb = get(mip);
+            let sb = get(mip, &mut prof);
             assert_eq!(sb.mip, mip);
             assert_eq!((sb.bw, sb.bh), (64 >> mip, 48 >> mip));
             assert_eq!(sb.texmins, [(-16 >> mip) as f32, (32 >> mip) as f32]);
@@ -1396,21 +1241,21 @@ mod tests {
             let want = (10 * mip + 1 + 3 * 31) as u8;
             assert!(sb.block.iter().all(|&p| p == want), "mip {mip}");
         }
-        let cold = render_stats_end();
+        let cold = prof.end();
         assert_eq!((cold.surf_baked, cold.surf_cache_hits), (4, 0));
         assert_eq!(cold.surf_texels_baked, 64 * 48 + 32 * 24 + 16 * 12 + 8 * 6);
-        render_stats_begin();
+        let mut prof = counting();
         for mip in [2u32, 0, 3, 1] {
-            let _ = get(mip);
+            let _ = get(mip, &mut prof);
         }
-        let warm = render_stats_end();
+        let warm = prof.end();
         assert_eq!((warm.surf_baked, warm.surf_cache_hits), (0, 4), "every level stays cached");
-        let (bytes, blocks) = surface_cache_usage();
+        let (bytes, blocks) = caches.usage();
         assert_eq!((bytes, blocks), (64 * 48 + 32 * 24 + 16 * 12 + 8 * 6, 4));
         // A texture without levels 1..3 is baked at mip 0 whatever is asked.
         let mut flat = leveled_miptex();
         flat.mips = Default::default();
-        let sb = face_surf_block(0, &face, 0, &flat, &lm, &cm, fp, 1, &styles, false, false, 2).expect("block");
+        let sb = caches.surface(&req(None, &flat, 2), &mut prof).expect("block");
         assert_eq!((sb.mip, sb.bw, sb.bh), (0, 64, 48));
     }
 
@@ -1476,20 +1321,30 @@ mod tests {
     /// reused (`cache->dlight`).
     #[test]
     fn dlit_faces_bake_at_their_mip_level_through_the_same_stepping() {
-        reset_render_caches();
         let (cm, _) = ramp_colormap();
         let mt = leveled_miptex();
-        let (bsp, face, _) = one_face_bsp_zplane(128);
-        let fp = WorldFingerprint::of(&bsp);
+        let (_bsp, face, _) = one_face_bsp_zplane(128);
         // A 64x48 surface whose luxels a light has pushed up unevenly.
         let luxels: Vec<f32> = (0..5 * 4).map(|i| 100.0 + 7.0 * i as f32 + (i % 3) as f32 / 256.0).collect();
         let lm = LightMap { luxels: Luxels::Owned(luxels), lmw: 5, lmh: 4, texmins: [-16.0, 32.0] };
         let mut light = Vec::new();
         lm.blocklights_into(&mut light);
-        render_stats_begin();
+        let req = |mip| SurfaceRequest {
+            slot: Some(0),
+            face: &face,
+            texture: 0,
+            mt: &mt,
+            lightmap: &lm,
+            colormap: &cm,
+            light_styles: &NEUTRAL_LIGHTSTYLE_SCALES,
+            dlit: true,
+            mip,
+        };
+        let mut caches = SurfaceCaches::default();
+        caches.begin_map(1);
+        let mut prof = counting();
         for mip in 0..4u32 {
-            let sb = face_surf_block(0, &face, 0, &mt, &lm, &cm, fp, 1, &NEUTRAL_LIGHTSTYLE_SCALES, true, true, mip)
-                .expect("block");
+            let sb = caches.surface(&req(mip), &mut prof).expect("block");
             let (bw, bh) = (64 >> mip, 48 >> mip);
             let mut want = vec![0u8; bw * bh];
             let level = mt.mip(mip as usize).expect("level");
@@ -1497,57 +1352,56 @@ mod tests {
             assert_eq!((sb.mip, sb.bw, sb.bh), (mip, bw, bh));
             assert_eq!(*sb.block, want, "mip {mip}");
             // Lit again: rebaked, never a hit.
-            let _ = face_surf_block(0, &face, 0, &mt, &lm, &cm, fp, 1, &NEUTRAL_LIGHTSTYLE_SCALES, true, true, mip);
+            let _ = caches.surface(&req(mip), &mut prof);
         }
-        let st = render_stats_end();
+        let st = prof.end();
         assert_eq!((st.surf_baked, st.surf_cache_hits), (8, 0));
     }
 
     #[test]
     fn world_render_unaffected_by_intervening_different_world() {
-        // Render world A, then a DIFFERENT world B (different geometry + lighting,
-        // which resets the face-index-keyed caches), then world A again. The two
-        // renders of A must be byte-identical — proving the changelevel
-        // invalidation never serves B's cached data for A's faces.
-        reset_render_caches();
+        // Render world A, then a DIFFERENT world B (the same shape, different
+        // lighting: a changelevel to it calls `begin_map`), then world A again.
+        // The two renders of A must be byte-identical — proving the renderer
+        // never serves B's cached data for A's faces.
         let a = lightmapped_demo_room(100, 200);
         let b = lightmapped_demo_room(60, 240); // different lighting bytes
         let pal = [[180u8, 150, 90]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[1] = 0.5;
-        let render = |bsp: &Bsp| {
-            render_scene_ext(
-                bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &styles, None,
-            )
+        let mut r = Renderer::new();
+        let mut render = |bsp: &Bsp| {
+            r.begin_map(bsp);
+            r.render(&Scene { light_styles: &styles, ..Scene::new(bsp, cam, 160, 120, &pal) })
         };
 
         let a1 = render(&a);
-        let _b = render(&b); // resets caches to world B
+        let b1 = render(&b); // R_NewMap for world B
         let a2 = render(&a); // must rebuild A's caches, not reuse B's
         assert_eq!(a1.rgb, a2.rgb, "world A renders identically before and after world B");
+        assert_ne!(a1.rgb, b1.rgb, "and B is not A");
     }
 
     #[test]
-    fn face_geom_cache_matches_uncached_build_and_invalidates() {
-        reset_render_caches();
+    fn face_geom_cache_matches_uncached_build_and_is_emptied_by_begin_map() {
         let (bsp, face, _poly) = two_style_face_bsp([0, 1, 255, 255], 100, 200);
-        // First call builds + caches; second returns the cached clone.
-        let g1 = face_geom_cached(&bsp, 0, &face);
-        let g2 = face_geom_cached(&bsp, 0, &face);
+        let mut caches = SurfaceCaches::default();
+        caches.begin_map(bsp.faces.len());
         // The cached poly must equal a direct face_world_poly reconstruction
         // (face_world_poly walks the BSP edge tables, so this — not the helper's
         // literal `poly` used for lightmap math — is the geometry the loop sees).
         let mut direct = Vec::new();
         assert!(face_world_poly(&bsp, &face, &mut direct));
-        assert_eq!(*g1.poly, direct);
-        assert_eq!(*g2.poly, direct);
-        // A different world (more faces) invalidates: still a correct rebuild.
+        assert_eq!(caches.geom(&bsp, 0, &face), Some(&direct[..]));
+        assert_eq!(caches.geom(&bsp, 0, &face), Some(&direct[..]), "the cached one");
+        assert_eq!(caches.geom(&bsp, bsp.faces.len(), &face), None, "no slot past the map's faces");
+        // A different world: begin_map empties it, and face 0 is B's.
         let (mut bsp_b, face_b, _polyb) = two_style_face_bsp([0, 255, 255, 255], 50, 50);
         bsp_b.faces.push(face_b.clone());
-        let gb = face_geom_cached(&bsp_b, 0, &face_b);
+        caches.begin_map(bsp_b.faces.len());
         let mut direct_b = Vec::new();
         assert!(face_world_poly(&bsp_b, &face_b, &mut direct_b));
-        assert_eq!(*gb.poly, direct_b);
+        assert_eq!(caches.geom(&bsp_b, 0, &face_b), Some(&direct_b[..]));
     }
 }

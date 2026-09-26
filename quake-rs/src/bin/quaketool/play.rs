@@ -1,5 +1,7 @@
 //! `quaketool play <pak> <workload[,workload...]> [frames] [--res WxH[,WxH...]]
-//! [--hash-every N] [--ppm PREFIX]` — the browser's game client, run natively.
+//! [--hash-every N] [--ppm PREFIX] [video options]` — the browser's game
+//! client, run natively. The video options are `shot`'s (`video.rs`: `--video
+//! modern` and friends; the display stays the page's 4:3).
 //!
 //! The same [`quake_rs::client`] frames the page runs (`walk_frame`,
 //! `demo_frame`), driven the way `web/bench.py` drives the page, one host
@@ -40,6 +42,8 @@ use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPl
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render;
+
+use super::video::VideoArgs;
 
 /// The width:height ratio the browser page displays the frame at
 /// (quake-wasm's `vid::DISPLAY_ASPECT`).
@@ -118,6 +122,8 @@ struct Host {
     rand: Rc<QRand>,
     /// The `sv_gravity` cvar as the last game left it, for the demos.
     sv_gravity: f32,
+    /// The renderer threads each game draws with.
+    threads: usize,
 }
 
 impl Host {
@@ -141,6 +147,7 @@ impl Host {
                     if let Some(next) = cl_demo::build_demo_n(self.pak.clone(), d.demonum + 1, sound) {
                         let sv_gravity = d.sv_gravity;
                         **d = next;
+                        d.renderer.set_threads(self.threads);
                         d.viewsize = viewsize;
                         d.show_scores = km.showscores;
                         d.sv_gravity = sv_gravity;
@@ -172,11 +179,13 @@ impl Host {
                 let mut out = Vec::new();
                 host_cmd::run_game_command(&mut walk, "impulse", &["impulse", "255"], &mut out, sound);
             }
+            walk.renderer.set_threads(self.threads);
             Mode::Walk(Box::new(walk))
         } else if let Some(n) = workload.strip_prefix("demo").and_then(|n| n.parse::<usize>().ok()) {
             let mut demo = cl_demo::build_demo_n(self.pak.clone(), n.max(1) - 1, sound)
                 .ok_or_else(|| format!("{workload} would not load"))?;
             demo.sv_gravity = self.sv_gravity;
+            demo.renderer.set_threads(self.threads);
             Mode::Demo(Box::new(demo))
         } else {
             return Err(format!("unknown workload {workload:?} (walk_<map>, fire_<map>, quad_<map>, demo1..3)"));
@@ -186,11 +195,17 @@ impl Host {
 }
 
 pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<String, String> {
-    // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX].
+    // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX]
+    // [video options].
     let (mut frames, mut res, mut every, mut ppm) = (660u32, "320x200".to_string(), 30u32, None);
+    let mut video = VideoArgs::default();
     let mut i = 0;
     while i < rest.len() {
         let val = |i: usize| rest.get(i + 1).ok_or_else(|| format!("{} needs a value", rest[i]));
+        if video.parse(&rest[i], val(i).map(String::as_str).unwrap_or(""))? {
+            i += 2;
+            continue;
+        }
         match rest[i].as_str() {
             "--res" => {
                 res = val(i)?.clone();
@@ -210,13 +225,13 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     }
     let mut sizes = Vec::new();
     for r in res.split(',') {
-        sizes.push(super::parse_res(r)?);
+        sizes.push(super::parse_res(r, video.cvars)?);
     }
 
     // The archive in memory, as the page embeds it.
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
-    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false };
+    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars };
     let mut host = Host {
         pak,
         menu: render::Menu::new(),
@@ -228,6 +243,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
         vid,
         rand: Rc::new(QRand::new()),
         sv_gravity: quake_rs::server::ServerCvars::default().sv_gravity,
+        threads: video.threads(),
     };
     let mut rgba: Vec<u8> = Vec::new();
     let mut o = String::new();
@@ -265,13 +281,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 // V_UpdatePalette + VID_ShiftPalette: the cshifts and gamma as
                 // ramps the finished frame is packed through (a copy with neither).
                 let ramps = (!frame.cshifts.is_empty()).then(|| render::cshift_ramps(&frame.cshifts, &host.gamma));
-                rgba.clear();
-                for px in &frame.image.rgb {
-                    match &ramps {
-                        Some([r, g, b]) => rgba.extend_from_slice(&[r[px[0] as usize], g[px[1] as usize], b[px[2] as usize], 255]),
-                        None => rgba.extend_from_slice(&[px[0], px[1], px[2], 255]),
-                    }
-                }
+                render::pack_rgba(&frame.image, ramps.as_ref(), &mut rgba, host.threads);
                 if every > 0 && f % every == 0 {
                     hashes.push(format!("{:08x}", fnv(&rgba)));
                     if let Some(prefix) = &ppm {

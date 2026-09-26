@@ -1,9 +1,9 @@
 //! The shell's state and its boots — the [`App`] (host-level state that
 //! outlives a level: mode, menu, console, clocks, framebuffer, held keys)
 //! around the client it runs, the live [`Walk`] or the recorded [`DemoPlay`]
-//! ([`quake_rs::client`]); host.c's one-time asset loads, the embedded pak,
-//! the client's level loads with their sound calls carried out, and the
-//! `boot*` exports the page starts a mode with.
+//! ([`quake_rs::client`]); host.c's one-time asset loads, the client's level
+//! loads with their sound calls carried out, and the boots (quake.rc's
+//! attract loop at startup; the page's walk and demo buttons).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,7 +15,7 @@ use quake_rs::qrand::QRand;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
 use quake_rs::wad::Qpic;
 
-use crate::PAK;
+use crate::common::pak;
 use crate::host::ShowFps;
 use crate::snd_dma::{self, SND_QUEUE, STOP_SND_QUEUE};
 use crate::vid::{DEFAULT_H, DEFAULT_W};
@@ -139,6 +139,19 @@ pub(crate) struct App {
     /// outside it (`M_Menu_Main_f` switches the demo loop off while the menu
     /// is up; `M_Main_Key`'s Escape puts it back). 0 at start, a C static.
     pub(crate) m_save_demonum: i32,
+    /// How many threads draw the 3-D view (the `r_threads` cvar; `Auto` by
+    /// default): resolved each frame against [`App::hw_threads`] and handed
+    /// to whichever game's renderer draws it (`host::step`). The pixels are
+    /// the same for any count.
+    pub(crate) render_threads: render::Threads,
+    /// The threads the host offers the program: the page's pool of thread
+    /// workers plus the program's own (`-hwthreads`, from `wasi.js`), else
+    /// `std::thread::available_parallelism`; 1 without threads.
+    pub(crate) hw_threads: usize,
+    /// The port's video cvars (Hor+, views past id's 1280x1024) the frames
+    /// are drawn with: Classic, id's, until a caller sets them
+    /// (`set_video`); they also set how large a mode `set_resolution` takes.
+    pub(crate) video: render::VideoCvars,
 }
 
 /// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
@@ -372,22 +385,15 @@ pub(crate) fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
             }
             i += 4;
         }
-        if classname == "info_player_start" {
-            if let Some(o) = origin {
-                return Some((o, angle));
-            }
+        if classname == "info_player_start"
+            && let Some(o) = origin
+        {
+            return Some((o, angle));
         }
     }
     None
 }
 
-/// The embedded pak as a borrowed handle: `from_static` slices the
-/// `include_bytes!` image in place, so a boot, a map load, a sound load and
-/// every `Pak` clone (Walk, DemoPlay, `Server::with_pak`) cost a directory
-/// parse, never an 18.7 MB copy.
-pub(crate) fn pak() -> Option<quake_rs::pak::Pak> {
-    quake_rs::pak::Pak::from_static("pak0.pak".into(), PAK).ok()
-}
 
 /// Load the main-menu pics from the pak's `.lmp` files (`Qpic::parse` on each)
 /// plus the `conchars` font atlas from `gfx.wad`. Every pic is optional: a pak
@@ -525,6 +531,9 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 key_repeats: [0; 256],
                 shift_down: false,
                 m_save_demonum: 0,
+                render_threads: render::Threads::Auto,
+                hw_threads: 1,
+                video: render::VideoCvars::CLASSIC,
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
@@ -539,8 +548,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
 // ---------------------------------------------------------------------------
 
 /// Start interactive walk mode (e1m1). Returns 1 on success.
-#[no_mangle]
-pub extern "C" fn boot() -> i32 {
+pub(crate) fn boot() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode so stale
     // samples can't play after the switch (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
@@ -574,8 +582,7 @@ pub extern "C" fn boot() -> i32 {
 
 /// Start recorded-demo playback at demo1.dem (e1m3); demo2 and demo3 follow
 /// (quake.rc's startdemos cycle, see [`DEMOS`](cl_demo::DEMOS)). Returns 1 on success.
-#[no_mangle]
-pub extern "C" fn boot_demo() -> i32 {
+pub(crate) fn boot_demo() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode
     // (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
@@ -617,8 +624,7 @@ fn start_attract_loop(a: &mut App) -> bool {
 /// calls this on load instead of [`boot`]. Returns 1 when the demo built, or 0
 /// when it could not — in which case we fall back to [`boot`] so the user still
 /// lands on a menu over *something* (e1m1) rather than a blank screen.
-#[no_mangle]
-pub extern "C" fn boot_attract() -> i32 {
+pub(crate) fn boot_attract() -> i32 {
     // Clean slate: drop any sounds still queued from a previous mode
     // (pending stop requests included).
     SND_QUEUE.with(|q| q.borrow_mut().clear());
@@ -652,8 +658,7 @@ pub extern "C" fn boot_attract() -> i32 {
 /// mouse only drives the camera in walk mode, so that is the only mode where a
 /// canvas click should capture it. Covers every walk-building path (boot /
 /// New Game / `map` console command), since each sets `mode = 0` with the walk.
-#[no_mangle]
-pub extern "C" fn in_walk_mode() -> i32 {
+pub(crate) fn in_walk_mode() -> i32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()

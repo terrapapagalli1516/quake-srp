@@ -287,7 +287,7 @@ def run_c(oracle: Path, pak: Path, res, steps, out: Path, name: str) -> dict:
 
 def build_harness() -> Path:
     env = dict(os.environ, CARGO_PROFILE_RELEASE_LTO="false", CARGO_PROFILE_RELEASE_CODEGEN_UNITS="16")
-    res = subprocess.run(["cargo", "test", "--release", "--lib", "--no-run", "--message-format=json"],
+    res = subprocess.run(["cargo", "test", "--release", "--bin", "quake", "--no-run", "--message-format=json"],
                          cwd=WASM, env=env, capture_output=True, text=True)
     if res.returncode != 0:
         sys.exit(f"building the harness failed:\n{res.stderr[-4000:]}")
@@ -296,7 +296,7 @@ def build_harness() -> Path:
             msg = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if msg.get("reason") == "compiler-artifact" and msg.get("executable") and msg["target"]["name"] == "quake_wasm":
+        if msg.get("reason") == "compiler-artifact" and msg.get("executable") and msg["target"]["name"] == "quake":
             return Path(msg["executable"])
     sys.exit("no test executable in cargo's output")
 

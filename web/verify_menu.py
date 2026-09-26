@@ -22,25 +22,24 @@
      (Shift+',' still strafes — keynum 44 — and a shifted release can't stick
      the key), and a re-boot / New Game keeps the live options + key rebinds
      (Menu::reset_nav resets navigation only);
-  6. the resolution picked in Video Options survives a page reload
-     (localStorage), and there are no console errors anywhere.
+  6. the resolution picked in Video Options survives a page reload (the
+     program's config.cfg, kept in the page's IndexedDB), and there are no
+     console errors anywhere.
 
-Usage: verify_menu.py [webdir]   (defaults to the repo's web/; pass a temp dir
-holding index.html + a freshly built quake_wasm.wasm to test new exports
-without touching the deployed wasm).
+Usage: verify_menu.py [webdir]   (defaults to the repo's web/; pass a deploy
+dir — PLATFORM.md — to test changes without touching the deployed page).
+
+`exp.name()` asks the program (a Promise, answered between two frames).
 """
-import functools, http.server, os, socketserver, sys, threading, time
+import os, sys, time
 from playwright.sync_api import sync_playwright
+import isolated
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8173"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+WEB = isolated.webdir()
+PORT = isolated.port(8173)
+httpd = isolated.serve(WEB, PORT)
 
-# menu_screen_id values (the wasm export's mapping).
+# menu_screen_id values (the `menu_screen_id` call's mapping).
 MAIN, SP, LOAD, SAVE, MULTI, OPTIONS, KEYS, VIDEO, HELP, QUIT = range(10)
 
 passed, failed = 0, 0
@@ -51,7 +50,7 @@ def check(name, ok, detail=""):
     else: failed += 1
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox",
         # Let audioCtx.resume() succeed without a user gesture so the menu
         # sound drain actually runs under headless.
@@ -62,9 +61,7 @@ with sync_playwright() as p:
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    pg.wait_for_function("typeof exp !== 'undefined' && exp && exp.boot", timeout=120000)
-    pg.wait_for_function(
-        "document.getElementById('status').textContent.includes('ready')", timeout=30000)
+    pg.wait_for_function("window.quake && quake.ready", timeout=120000)
 
     scr = lambda: pg.evaluate("exp.menu_screen_id()")
     vis = lambda: pg.evaluate("exp.menu_visible()")
@@ -230,10 +227,17 @@ with sync_playwright() as p:
     check("moving the line alone keeps the mode", pg.evaluate("exp.width()") == w0)
     key("Enter")
     time.sleep(0.2)
-    wv, hv = pg.evaluate("[exp.width(), exp.height()]")
+    wv, hv = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     check("Enter applies the highlighted mode", (wv, hv) == (800, 500), f"{w0} -> {wv}x{hv}")
-    check("the page persisted it",
-          pg.evaluate("localStorage.getItem('quake-rs.resolution')") == "800x500")
+    # The program writes config.cfg on the next frame (Host_WriteConfiguration)
+    # and the page keeps it.
+    try:
+        pg.wait_for_function("quake.kept('id1/config.cfg').then(t => !!t && t.includes('_vid_resolution 800x500'))",
+                             timeout=5000)
+        kept = True
+    except Exception:
+        kept = False
+    check("config.cfg keeps it", kept, str(pg.evaluate("quake.kept('id1/config.cfg')")))
     check("the mode never touches viewsize", pg.evaluate("exp.viewsize()") == 100)
     key("Escape")
     check("Esc on Video returns to Options", scr() == OPTIONS)
@@ -250,7 +254,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")           # close the boot menu
-    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     time.sleep(0.3)
 
     grab_lum = """() => {
@@ -288,10 +292,10 @@ with sync_playwright() as p:
     # retraces the same free corridor instead of piling into a wall.
     turn_around = lambda: pg.evaluate("exp.mouse_move(1125, 0)")
     def walk_dist(secs, keyname="w"):
-        x0, y0 = pg.evaluate("[exp.listener_x(), exp.listener_y()]")
+        x0, y0 = pg.evaluate("Promise.all([exp.listener_x(), exp.listener_y()])")
         pg.keyboard.down(keyname); time.sleep(secs); pg.keyboard.up(keyname)
         time.sleep(0.2)
-        x1, y1 = pg.evaluate("[exp.listener_x(), exp.listener_y()]")
+        x1, y1 = pg.evaluate("Promise.all([exp.listener_x(), exp.listener_y()])")
         return ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
     d_run = walk_dist(1.0)
     key("Escape"); key("Enter")                   # Options, on Brightness (4)
@@ -337,7 +341,7 @@ with sync_playwright() as p:
     pg.keyboard.press("o"); time.sleep(0.1)
     check("the grab bound the new key", pg.evaluate("exp.menu_bind_grabbing()") == 0)
     key("Escape"); key("Escape"); key("Escape")   # Keys -> Options -> Main -> closed
-    pg.wait_for_function("!exp.menu_visible()", timeout=5000)
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     turn_around()                                 # retrace the free corridor
     d_new = walk_dist(0.7, "o")
     time.sleep(0.9)                               # let friction stop the coast
@@ -345,13 +349,13 @@ with sync_playwright() as p:
     check("the rebound key walks forward", d_new > 80, f"{d_new:.0f}u")
     check("the old key was unbound by the two-key rule", d_old < 20, f"{d_old:.0f}u")
 
-    # SAVE opens in-game; Enter emits SaveSlot (host no-op) and closes.
+    # SAVE opens in-game; Enter saves to the slot (s0.sav) and closes.
     key("Escape"); key("ArrowUp", 2); key("Enter")  # Main (on Options) -> SinglePlayer
     key("ArrowDown", 2); key("Enter")
     check("Save opens with a game running", scr() == SAVE)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_menu_save.png"))
     key("Enter")
-    check("Save Enter closes the menu (SaveSlot no-op for now)", vis() == 0)
+    check("Save Enter closes the menu", vis() == 0)
 
     # 5. Review-fix regressions.
     # 5a. SHIFT-VARIANT PUNCTUATION: the page resolves punctuation keynums from
@@ -401,7 +405,7 @@ with sync_playwright() as p:
     check("New Game in a running game asks first (menu stays)",
           vis() == 1 and scr() == SP)
     key("y")                # "Are you sure?" -> y: start.bsp, menu closes
-    pg.wait_for_function("!exp.menu_visible()", timeout=15000)
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=15000)
     check("New Game keeps the Mouse speed cvar",
           abs(pg.evaluate("exp.mouse_sensitivity()") - sens_set) < 1e-5)
     check("New Game keeps viewsize", pg.evaluate("exp.viewsize()") == 90)
@@ -414,15 +418,13 @@ with sync_playwright() as p:
     check("'w' stays unbound (bindings aren't reseeded)", d_w2 < 20,
           f"{d_w2:.0f}u")
 
-    # 6. The Video Options mode survives a reload (the page's localStorage
-    #    restore runs before the first canvas sync).
+    # 6. The Video Options mode survives a reload (the program execs the
+    #    config.cfg it wrote, before its first frame).
     pg.reload(wait_until="load")
-    pg.wait_for_function("typeof exp !== 'undefined' && exp && exp.boot", timeout=120000)
-    pg.wait_for_function(
-        "document.getElementById('status').textContent.includes('ready')", timeout=30000)
+    pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     check("the Video Options mode survives a reload",
-          pg.evaluate("[exp.width(), exp.height()]") == [800, 500],
-          f"{pg.evaluate('[exp.width(), exp.height()]')}")
+          pg.evaluate("Promise.all([exp.width(), exp.height()])") == [800, 500],
+          f"{pg.evaluate('Promise.all([exp.width(), exp.height()])')}")
     check("...and the canvas backing store follows it",
           pg.evaluate("[document.getElementById('c').width, document.getElementById('c').height]")
           == [800, 500])

@@ -35,7 +35,7 @@ use quake_rs::vm::Vm;
 use quake_rs::world;
 
 /// The screen the scenarios draw (small: they measure the game, not pixels).
-const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false };
+const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
 
 // QuakeC constants (defs.qc).
 const FL_GODMODE: i32 = 64;
@@ -1241,7 +1241,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
     if budget {
-        let sizes = res.split(',').map(super::parse_res).collect::<Result<Vec<_>, _>>()?;
+        let sizes = res.split(',').map(|r| super::parse_res(r, render::VideoCvars::CLASSIC)).collect::<Result<Vec<_>, _>>()?;
         return Ok(frame_budget(&pak, &sizes));
     }
 

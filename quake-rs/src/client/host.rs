@@ -143,7 +143,13 @@ mod tests {
         let player = server.connect_client().expect("connect");
         let mut w = super::super::assemble_walk(palette_pak(), "maps/t.bsp".into(), server, player, [0.0; 16], floor_bsp(), 0.0, 0.0)
             .expect("walk");
-        let vid = super::super::Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false };
+        let vid = super::super::Vid {
+            width: 64,
+            height: 40,
+            display_aspect: 4.0 / 3.0,
+            exact_perspective: false,
+            video: crate::render::VideoCvars::CLASSIC,
+        };
 
         let frame = super::super::cl_main::walk_frame(&mut w, 0.1, false, &vid);
         assert_eq!(w.host_error.as_deref(), Some("Program error"));
