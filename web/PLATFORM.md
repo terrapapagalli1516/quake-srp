@@ -52,8 +52,8 @@ message event: sounds → Web Audio,
   through the ring.
 - **The page presents in the same refresh.** The refresh that posts a tick
   spins (the main thread may not `Atomics.wait`) until the program answers,
-  then presents. That keeps today's latency: the old page computed the frame
-  inside the refresh too. One tick is in flight at a time; a refresh that
+  then presents. That keeps the old page's timing, which computed the frame
+  inside the refresh; only the hand-off below is added. One tick is in flight at a time; a refresh that
   finds the last one unanswered posts none (its time goes into the next
   tick's `dt`) and presents whatever has come. The spin is bounded by 30 ms,
   so a level load or a long automation call does not freeze the page.
@@ -149,8 +149,9 @@ program's relative paths work as on disk (`common.rs`, `COM_InitFilesystem`):
 `id1/pak0.pak`, `id1/config.cfg`, `id1/s0.sav`… It implements what `std`
 imports (`path_open`, `fd_read`/`fd_write`/`fd_seek`/`fd_close`,
 `fd_filestat_get`, the prestat calls) plus `path_filestat_get`,
-`path_unlink_file`, `fd_readdir`-free directory checks and a few no-ops;
-anything else a newer `std` imports answers `ENOSYS` and is logged once.
+`path_unlink_file` and a few no-ops (a directory is any prefix of a file's
+path; there is no `fd_readdir`); anything else a newer `std` imports answers
+`ENOSYS` and is logged once.
 
 - **The pak is a file.** The page downloads `id1/pak0.pak` beside
   `quake.wasm` and hands it to the worker's file system; the program opens it
@@ -232,9 +233,12 @@ Headless Chromium on a 16-core Linux desktop, the old page (`3866e1b`,
 average 1.5–3.8). Absolute milliseconds swing with load; compare within a
 row.
 
-**The same frames.** `bench.py --hash-every 30` over demo1 and walk_e1m1 at
-640×400 and 1280×800 prints identical FNV hashes for every sampled frame
-(11 per run) in both pages, so the canvas bytes are the same.
+**The same frames.** `bench.py --hash-every 30` prints the FNV hash of every
+30th presented frame. Over demo1, walk_e1m1, walk_e1m3, fire_e1m1 and
+quad_e1m1 at 320×200 and 640×400 (22 hashes each), this page's hashes equal
+`quaketool play`'s natively, on the stock build and the bench build; demo1
+and walk_e1m1 at 640×400 and 1280×800 equal the old page's too. The canvas
+bytes are the same.
 
 **The same host frame.** The program's frame (the sum of its phase timers,
 bench builds; fixed dt 1/72, uncapped rAF, 600 frames after 60 warm-up,
@@ -245,8 +249,25 @@ median of two rounds, ms):
 | demo1 | 1.43 / 1.60 | 2.78 / 2.93 | 4.57 / 4.62 |
 | walk_e1m1 | 1.07 / 1.09 | 2.19 / 2.29 | 3.70 / 3.76 |
 
-Within the rounds' spread (±5%). At 60 Hz with the page's own loop, the
-1280×800 walk's frame measured 4.92 / 5.33 ms old and 4.87–5.20 ms new.
+Within 5%, but for demo1 at 640×400 (+12%, both rounds). At 60 Hz with the
+page's own loop, the 1280×800 walk's frame measured 4.92 / 5.33 ms old and
+4.87–5.20 ms new. The page's own loop paces the same: at 60 Hz both show a
+frame every refresh with none more than 20 ms apart, and in headless
+Chromium's uncapped refresh (about 92 Hz here, where the 72 fps gate runs
+every other one) the attract demo shows 47 frames a second old and 45 new.
+
+**Timedemo.** `timedemo demo1` in the page (`verify_timedemo.py`), two
+rounds each, fps:
+
+| | 320×200 | 640×400 | 960×600 |
+|---|---|---|---|
+| old | 2063 / 2028 | 752 / 739 | 376 / 357 |
+| new | 1983 / 1913 | 734 / 714 | 358 / 339 |
+
+3–5% fewer: each frame is still a turn (a polling read, a `SYNC`, a message
+to the page). The pixels of a frame the page has not shown the last of are
+not handed over (as the old page presented one frame per 12 ms slice);
+before that change the new page did 328 fps at 960×600.
 
 **The hand-off.** What the worker adds to each frame (non-bench build, 60 Hz,
 median ms): the program's pixels into the shared slot, the page's copy out of
@@ -313,10 +334,13 @@ default, and not verifiable headless.
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
-`Atomics.wait` in a worker. Checked here: headless Chromium (the nine checks
-and the benchmark) and headless Firefox 155 (boot, attract, walk, menu, keys;
-`web/verify_walk.py`-style smoke). Not checked: Safari, iOS, a real GPU, a
-real high-refresh display. From the platforms' documentation, not from a
+`Atomics.wait` in a worker. Checked here: headless Chromium (the nine
+checks, `verify_threads.py` and the benchmark) and headless Firefox 155 (the
+nine checks with `QUAKE_BROWSER=firefox`, `verify_extras.py` skipping its
+Keyboard Lock half, which Firefox has no API for; `verify_threads.py`).
+Playwright's WebKit would not start here (missing system
+libraries). Not checked: Safari, iOS, a real GPU, a real high-refresh
+display. From the platforms' documentation, not from a
 run: Safari has `SharedArrayBuffer` under COOP/COEP since 15.2 (iOS 15.2),
 with `Atomics.wait` in workers; iOS has no pointer lock, and the page already
 says it needs a keyboard and a mouse. The program's own memory no longer
