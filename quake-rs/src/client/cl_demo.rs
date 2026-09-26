@@ -662,7 +662,7 @@ fn render_demo_frame(
     let view = if dowarp { d.renderer.warp(view, vrect.w, vrect.h, f.time, vid.video.hires) } else { view };
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img =
-        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette);
+        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette, d.renderer.threads());
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game

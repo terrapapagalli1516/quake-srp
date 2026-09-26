@@ -1000,7 +1000,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // (SCR_UpdateScreen's Draw_TileClear), the status bar drawn over below.
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
     let mut img =
-        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &w.palette);
+        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &w.palette, w.renderer.threads());
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
