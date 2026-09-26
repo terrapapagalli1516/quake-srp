@@ -177,18 +177,6 @@ pub const SETTING_ROWS: [SettingRow; 14] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
-        cvar: "joystick",
-        label: "               Gamepad",
-        help: ["Twin sticks: left moves, right", "looks; RT fires, Start = menu"],
-        kind: RowKind::Toggle,
-    },
-    SettingRow {
-        cvar: "joy_rumble",
-        label: "            Pad rumble",
-        help: ["The pad shakes when you are hit", "and when heavy weapons fire"],
-        kind: RowKind::Toggle,
-    },
-    SettingRow {
         cvar: "wasm_showfps",
         label: "              Show FPS",
         help: ["Frames per second, bottom right,", "as QuakeWorld's show_fps drew it"],
@@ -198,6 +186,18 @@ pub const SETTING_ROWS: [SettingRow; 14] = [
         cvar: "wasm_exactpersp",
         label: "     Exact perspective",
         help: ["Perspective exact at each pixel,", "not id's 16-pixel spans"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joystick",
+        label: "               Gamepad",
+        help: ["Twin sticks: left moves, right", "looks; RT fires, Start = menu"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joy_rumble",
+        label: "            Pad rumble",
+        help: ["The pad shakes when you are hit", "and when heavy weapons fire"],
         kind: RowKind::Toggle,
     },
 ];

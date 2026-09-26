@@ -107,8 +107,10 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 /// [`host_filter_time`] decides whether a frame runs: at most 72 per second
 /// (see [`HOST_FRAME_TOLERANCE`](quake_rs::client::host::HOST_FRAME_TOLERANCE)), each advancing the game (world, demo,
 /// `host_time`) by the time since the last one, clamped to [0.001, 0.1].
-/// Returns 1 when a frame ran and the framebuffer holds it, 0 when the cap
-/// skipped this call (the page then has nothing new to present).
+/// A frame starts with `IN_Commands` (the gamepad's keys), and the live
+/// game's move takes `IN_JoyMove`'s. Returns 1 when a frame ran and the
+/// framebuffer holds it, 0 when the cap skipped this call (the page then has
+/// nothing new to present).
 ///
 /// `dt = 0` (or a non-finite / negative `dt`) is the tests' and automation's
 /// frozen frame: it always renders, and neither the gate nor the game clock
