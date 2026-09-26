@@ -42,8 +42,10 @@
 //! * The C `PF_*` builtins read/write the global block and edict array through
 //!   raw pointers and `longjmp`ed out of `PR_RunError` on a fault. Here every
 //!   builtin reaches the world via [`Vm::with_host`] and accesses fields/globals
-//!   *by name* through the bounds-checked [`Vm`] helpers; missing definitions are
-//!   no-ops rather than crashes, and a bad entity index simply does nothing.
+//!   through the handles resolved when the progs loaded ([`Vm::fo`], [`Vm::go`];
+//!   `movetype`/`solid`/`flags` as [`MoveType`]/[`Solid`]/[`EntFlags`]) and the
+//!   bounds-checked [`Vm`] helpers; missing definitions are no-ops rather than
+//!   crashes, and a bad entity index simply does nothing.
 //! * The tokenizer ([`Tokenizer`]) is a faithful transcription of `COM_Parse`
 //!   working over `&str` byte positions, so a malformed entity blob yields fewer
 //!   tokens rather than reading out of bounds.

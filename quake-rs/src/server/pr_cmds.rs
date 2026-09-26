@@ -34,8 +34,9 @@ use crate::Result;
 // ---------------------------------------------------------------------------
 // Engine builtins. Each is an `fn(&mut Vm) -> Result<()>`.
 //
-// Field/global access is by name through the Vm helpers. World services are
-// reached via `vm.with_host(...)`, which must NOT be held across `vm.execute`.
+// Fields and globals are read through the handles resolved at load (`vm.fo()`,
+// `vm.go()`). World services are reached via `vm.with_host(...)`, which must
+// NOT be held across `vm.execute`.
 // ---------------------------------------------------------------------------
 
 /// `PF_setorigin` (#2): `void(entity e, vector o) setorigin`. Sets the origin

@@ -656,6 +656,8 @@ impl Vm {
     }
 
     // --- by-name access: resolve the name, then the same code ----------------
+    // For tools and tests, and for names that come from data; the engine holds
+    // resolved handles ([`Vm::fo`], [`Vm::go`]).
 
     /// Read entity field `name` as a float (0.0 if the field is unknown).
     pub fn ent_get_float(&self, e: i32, name: &str) -> f32 {
