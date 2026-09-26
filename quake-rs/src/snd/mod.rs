@@ -21,7 +21,7 @@ pub mod webaudio;
 
 pub use dma::{
     AMBIENT_FADE_DEFAULT, AMBIENT_LEVEL_DEFAULT, AMBIENT_SAMPLES, AMBIENT_SKY, AMBIENT_WATER, ChannelState, Fixes,
-    MAX_CHANNELS, MAX_DYNAMIC_CHANNELS, Mixer, SoundCvars,
+    ID_RATE, MAX_CHANNELS, MAX_DYNAMIC_CHANNELS, MODERN_MIXAHEAD, Mixer, SoundCvars, SoundMode,
 };
 pub use mem::{LoadOptions, SfxCache, SfxData, WavInfo, load_sound, wav_info};
 pub use webaudio::{

@@ -25,7 +25,7 @@ use quake_rs::client::{Listener, SoundCall, Vid, cl_demo};
 use quake_rs::pak::Pak;
 use quake_rs::render;
 use quake_rs::server::{SoundEvent, StaticSound};
-use quake_rs::snd::{Fixes, Mixer};
+use quake_rs::snd::{Fixes, Mixer, SoundMode};
 
 /// The device ring's size in sample pairs (the oracle's fake DMA buffer):
 /// the most `S_Update_` mixes ahead.
@@ -60,14 +60,23 @@ pub fn cmd_sound(pak_path: &str, demo: &str, out_path: &str, rest: &[String]) ->
         }
         i += 1;
     }
-    let rate = rate.unwrap_or(if classic { 11025 } else { 48000 }).clamp(1000, 192_000);
-    let fixes = if classic { Fixes::NONE } else { Fixes::ALL };
+    let mode = if classic { SoundMode::Classic } else { SoundMode::Modern };
 
     let pak = open_pak(pak_path)?;
     let name = cl_demo::default_extension(demo, ".dem");
     let mut calls = Vec::new();
     let mut d = cl_demo::build_demo(pak.clone(), &name, &mut calls).ok_or_else(|| format!("{name}: couldn't open"))?;
-    let mut mixer = Mixer::new(&pak, rate, fixes);
+    // `--rate` is the device's: Classic mixes at id's 11025 whatever it is
+    // unless asked for another, the 2026 mixer at the device's.
+    let mut mixer = match rate {
+        Some(r) if classic => {
+            let mut m = Mixer::new(&pak, r.clamp(1000, 192_000), Fixes::NONE);
+            m.cvars.mixahead = mode.mixahead();
+            m
+        }
+        _ => mode.mixer(&pak, rate.unwrap_or(48000).clamp(1000, 192_000)),
+    };
+    let rate = mixer.rate();
     mixer.run(&pak, &calls);
     let mut starts = count_starts(&calls);
 
