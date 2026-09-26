@@ -571,10 +571,7 @@ impl Server {
         // load the edicts out of the savegame file: entnum -1 is the globals.
         let mut tok = Tokenizer::new(&text[sg.blocks_ofs..]);
         let mut entnum: i64 = -1;
-        loop {
-            let Some(open) = tok.next_token() else {
-                break; // end of file
-            };
+        while let Some(open) = tok.next_token() {
             if open != "{" {
                 return Err(QError::invalid("First token isn't a brace"));
             }
