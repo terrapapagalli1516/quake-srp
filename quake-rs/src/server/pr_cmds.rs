@@ -16,12 +16,12 @@
 //! `changelevel` / `localcmd` in `host.rs`, `walkmove` / `movetogoal` /
 //! `checkbottom` in `sv_move.rs`.
 
-use super::host::{bi_changelevel, bi_localcmd, set_skill_value, set_sv_gravity, skill_value, sv_gravity};
+use super::host::{bi_changelevel, bi_localcmd, ServerCvars};
 use super::lightstyle::bi_lightstyle;
 use super::msg::{
-    bi_ambientsound, bi_bprint, bi_centerprint, bi_particle, bi_sound, bi_sprint, bi_writeangle,
-    bi_writebyte, bi_writechar, bi_writecoord, bi_writeentity, bi_writelong, bi_writeshort,
-    bi_writestring,
+    bi_ambientsound, bi_bprint, bi_centerprint, bi_particle, bi_sound, bi_sprint, bi_stuffcmd,
+    bi_writeangle, bi_writebyte, bi_writechar, bi_writecoord, bi_writeentity, bi_writelong,
+    bi_writeshort, bi_writestring,
 };
 use super::pr_edict::parse_float;
 use super::sv_move::{bi_checkbottom, bi_movetogoal, bi_walkmove};
@@ -224,22 +224,22 @@ fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
 /// defaults; everything else is 0 (the C looked these up in the cvar registry).
 fn bi_cvar(vm: &mut Vm) -> Result<()> {
     let name = vm.arg_string(0);
-    let v = cvar_value(&name);
-    vm.ret_float(v);
+    let cvars = vm.host.as_deref().map(|h| *h.cvars()).unwrap_or_default();
+    vm.ret_float(cvar_value(&cvars, &name));
     Ok(())
 }
 
 /// The handful of cvar defaults the spawn/think code reads. Values match the
 /// stock `*.c` declarations (`deathmatch` "0"). `skill` and `sv_gravity` are
-/// the *live* values (see [`SKILL`]): `cvar_set("skill", N)` from a difficulty
-/// portal updates it and `cvar("skill")` reads it back, so the QuakeC sees the
-/// difficulty it selected (the old stub returned a constant 1.0 unconditionally).
-pub(super) fn cvar_value(name: &str) -> f32 {
+/// the server's *live* values ([`ServerCvars`]): `cvar_set("skill", N)` from a
+/// difficulty portal updates it and `cvar("skill")` reads it back, so the
+/// QuakeC sees the difficulty it selected.
+pub(super) fn cvar_value(cvars: &ServerCvars, name: &str) -> f32 {
     match name {
-        "sv_gravity" => sv_gravity(),
+        "sv_gravity" => cvars.sv_gravity,
         "sv_maxvelocity" => SV_MAXVELOCITY,
         "deathmatch" | "coop" | "teamplay" => 0.0,
-        "skill" => skill_value() as f32,
+        "skill" => cvars.skill as f32,
         _ => 0.0,
     }
 }
@@ -252,11 +252,15 @@ pub(super) fn cvar_value(name: &str) -> f32 {
 /// name is a benign no-op.
 fn bi_cvar_set(vm: &mut Vm) -> Result<()> {
     let name = vm.arg_string(0);
-    match name.as_str() {
-        "skill" => set_skill_value(parse_float(&vm.arg_string(1))),
-        "sv_gravity" => set_sv_gravity(parse_float(&vm.arg_string(1))),
-        _ => {}
-    }
+    let value = parse_float(&vm.arg_string(1));
+    vm.with_host(|_, h| {
+        let cvars = h.cvars_mut();
+        match name.as_str() {
+            "skill" => cvars.set_skill(value),
+            "sv_gravity" => cvars.sv_gravity = value,
+            _ => {}
+        }
+    });
     Ok(())
 }
 
@@ -299,7 +303,7 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 /// the remaining network / client-routing builtins that have no world effect in
 /// this headless server (`setspawnparms`). (`makestatic` marks the edict a
 /// client static via [`bi_makestatic`]; `stuffcmd` queues
-/// its text via [`crate::builtins::pf_stuffcmd`]; `sound` queues a
+/// its text via [`bi_stuffcmd`]; `sound` queues a
 /// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
 /// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
 /// [`bi_particle`]; the `Write*` family (#52..#59) feeds the per-buffer svc
@@ -534,7 +538,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(t, 17, bi_checkclient); // checkclient (line-of-sight to the player)
     put(t, 19, bi_precache_sound); // precache_sound
     put(t, 20, bi_precache_model); // precache_model
-    put(t, 21, crate::builtins::pf_stuffcmd); // stuffcmd -> svc_stufftext queue
+    put(t, 21, bi_stuffcmd); // stuffcmd -> svc_stufftext queue
     put(t, 22, bi_findradius); // findradius (chain of edicts within rad)
     put(t, 23, bi_bprint); // bprint -> on-screen notify line
     put(t, 24, bi_sprint); // sprint -> on-screen notify line
@@ -579,6 +583,38 @@ mod tests {
     use crate::progs::{Op, Progs, Statement, OFS_RETURN};
     use crate::server::testutil::*;
     use crate::server::{Server, WorldModel};
+
+    // ------------------------------------------------------------ objerror
+
+    /// PF_objerror (pr_cmds.c) prints `======OBJECT ERROR in <function>:`, the
+    /// text and `ED_Print (self)`, frees `self`, and calls Host_Error — the
+    /// error start.bsp's unreachable teleporter raises in the census (L16).
+    #[test]
+    fn objerror_dumps_and_frees_self_then_is_host_error() {
+        let (img, _touch_fn, _g_one, _g_flag) = touch_progs();
+        let mut server = Server::new(empty_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        let e = server.vm.spawn();
+        // (classname is this progs' field def 0, which ED_Print's loop skips
+        // as id's does: `for (i=1 ; i<progs->numfielddefs ; i++)`.)
+        server.vm.ent_set_string(e, "classname", "trigger_teleport");
+        server.vm.ent_set_string(e, "model", "*9");
+        server.vm.ent_set_vector(e, "origin", [10.0, -20.5, 0.0]);
+        server.vm.gset_int("self", e);
+        let text = server.vm.intern("couldn't find target");
+        server.vm.argc = 1;
+        server.vm.set_gi(crate::progs::OFS_PARM0, text);
+        let Err(crate::QError::Program(err)) = (server.vm.builtins[11])(&mut server.vm) else {
+            panic!("objerror is Host_Error")
+        };
+        assert_eq!(
+            err.console,
+            format!(
+                "======OBJECT ERROR in :\ncouldn't find target\n\nEDICT {e}:\n\
+                 origin         ' 10.0 -20.5   0.0'\nmodel          *9\n"
+            )
+        );
+        assert!(server.vm.is_free_edict(e), "ED_Free (ed) before Host_Error");
+    }
 
     // ------------------------------------------------------------ cvar / skill
 

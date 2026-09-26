@@ -9,7 +9,7 @@
 //! the real client on synthetic and on id's recorded demos.
 
 use quake_rs::client::cl_demo::{default_extension, demo_frame, timedemo_frame, MAX_DEMOS};
-use quake_rs::client::SoundCall;
+use quake_rs::client::{SoundCall, Vid};
 use quake_rs::render;
 
 use crate::app::{build_demo_file, App, DemoPlay, APP};
@@ -17,14 +17,8 @@ use crate::app::{build_demo_file, App, DemoPlay, APP};
 /// One frame of demo playback at `render_w x render_h`: the finished screen
 /// and its colour shifts (`cl.cshifts`, applied by the host after the menu and
 /// console); the frame's sound calls are carried out.
-pub(crate) fn step_demo(
-    d: &mut DemoPlay,
-    dt: f32,
-    menu_up: bool,
-    render_w: usize,
-    render_h: usize,
-) -> (render::Image, Vec<([u8; 3], f32)>) {
-    let frame = demo_frame(d, dt, menu_up, &crate::vid::vid(render_w, render_h));
+pub(crate) fn step_demo(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> (render::Image, Vec<([u8; 3], f32)>) {
+    let frame = demo_frame(d, dt, menu_up, vid);
     crate::snd_dma::play(&d.pak, frame.sound);
     (frame.image, frame.cshifts)
 }
@@ -32,16 +26,10 @@ pub(crate) fn step_demo(
 /// A finished screen and its colour shifts (`cl.cshifts`).
 type ShiftedFrame = (render::Image, Vec<([u8; 3], f32)>);
 
-/// One host frame of `timedemo` at `render_w x render_h` ([`timedemo_frame`]:
-/// the next recorded message, drawn), or `None` when the demo has ended.
-pub(crate) fn step_timedemo(
-    d: &mut DemoPlay,
-    frametime: f32,
-    menu_up: bool,
-    render_w: usize,
-    render_h: usize,
-) -> Option<ShiftedFrame> {
-    let frame = timedemo_frame(d, frametime, menu_up, &crate::vid::vid(render_w, render_h))?;
+/// One host frame of `timedemo` on `vid` ([`timedemo_frame`]: the next
+/// recorded message, drawn), or `None` when the demo has ended.
+pub(crate) fn step_timedemo(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid) -> Option<ShiftedFrame> {
+    let frame = timedemo_frame(d, frametime, menu_up, vid)?;
     crate::snd_dma::play(&d.pak, frame.sound);
     Some((frame.image, frame.cshifts))
 }
@@ -79,9 +67,27 @@ pub(crate) fn cl_disconnect(a: &mut App) {
     cl_stop_playback(a);
     a.cls.timedemo = false;
     a.demo = None;
-    a.walk = None;
+    if let Some(w) = a.walk.take() {
+        a.sv_gravity = w.server.sv_gravity();
+    }
     a.mode = 1;
     a.disconnected = true;
+}
+
+/// The page's half of `Host_Error` (host.c), once the game has ended in one
+/// — a QuakeC runtime error ([`Walk::host_error`](quake_rs::client::Walk),
+/// set by the engine's `client::host::host_error`, which printed the report
+/// and stopped the sounds): the report into the console if the frame's text
+/// has not been taken yet, `CL_Disconnect`, and `cls.demonum = -1` so no demo
+/// loop starts; disconnected, the console covers the screen.
+pub(crate) fn finish_host_error(a: &mut App) {
+    let Some(w) = a.walk.as_mut().filter(|w| w.host_error.is_some()) else { return };
+    let printed = w.notify.take_printed();
+    if !printed.is_empty() {
+        a.console.print_notified(&printed);
+    }
+    cl_disconnect(a);
+    a.cls.demonum = -1;
 }
 
 /// `CL_PlayDemo_f` after its argument check: disconnect, print
@@ -98,7 +104,8 @@ pub(crate) fn cl_play_demo(a: &mut App, arg: &str, timedemo: bool) -> bool {
         a.cls.demonum = -1;
         return false;
     };
-    d.viewsize = a.menu.viewsize();
+    d.viewsize = a.settings.cvars.viewsize;
+    d.sv_gravity = a.sv_gravity;
     a.demo = Some(d);
     a.mode = 1;
     a.disconnected = false;
@@ -208,7 +215,7 @@ mod tests {
         // (i.e. the value of `idx` chosen by step_demo for that frame).
         let mut shown = Vec::new();
         for _ in 0..5 {
-            let _img = step_demo(&mut d, 1.0, false, DEFAULT_W, DEFAULT_H);
+            let _img = step_demo(&mut d, 1.0, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
             shown.push(d.idx);
         }
 
@@ -278,7 +285,7 @@ mod tests {
         // Step 0.05s: lands on frame 1 (the effect frame). The burst (20) +
         // explosion (1024) particles populate the pool; after one tick of aging
         // the bulk of the 1024-particle explosion is still alive.
-        let _ = step_demo(&mut d, 0.05, false, DEFAULT_W, DEFAULT_H);
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
         assert_eq!(d.idx, 1, "advanced onto the effect frame");
         let after_first = d.particles.len();
         assert!(
@@ -286,9 +293,10 @@ mod tests {
             "the burst + 1024-particle explosion populate the pool (got {after_first})"
         );
 
-        // A tiny step that holds us on frame 1 must NOT re-spawn the explosion
-        // (the pool only shrinks as particles age — it never jumps back up).
-        let _ = step_demo(&mut d, 0.001, false, DEFAULT_W, DEFAULT_H);
+        // A step that holds the clock on frame 1 (any later clock reads the
+        // next message: CL_GetMessage) must NOT re-spawn the explosion (the
+        // pool only shrinks as particles age — it never jumps back up).
+        let _ = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
         assert_eq!(d.idx, 1, "still on the effect frame");
         assert!(
             d.particles.len() <= after_first,
@@ -301,7 +309,7 @@ mod tests {
         // carries no effects, so the pool is empty afterwards.
         let mut wrapped = false;
         for _ in 0..6 {
-            let _ = step_demo(&mut d, 0.05, false, DEFAULT_W, DEFAULT_H);
+            let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H));
             if d.idx == 0 {
                 wrapped = true;
                 break;
@@ -368,7 +376,7 @@ mod tests {
 
         // Advance onto the bolt frame: the recorded beam lands in the store and
         // the render expands it (75 units => 3 pieces at 0/30/60 along +x).
-        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 1, "advanced onto the bolt frame");
         assert!(d.beams.any_live(0.05), "recorded TE_LIGHTNING1 refreshed a beam");
         assert_eq!(d.beam_scratch.len(), 3, "75 units expand to 3 pieces");
@@ -376,14 +384,14 @@ mod tests {
 
         // A lingering step does NOT re-parse (last_spawned_idx guard) but the
         // beam stays live until its 0.2 s endtime.
-        let _ = step_demo(&mut d, 0.001, false, 160, 100);
+        let _ = step_demo(&mut d, 0.001, false, &crate::vid::mode_vid(160, 100));
         assert!(d.beams.any_live(0.05));
 
         // Advance to the LAST frame: at t=0.10 the beam (endtime 0.25) still
         // rides across frames — it is a client effect, not a per-frame one.
         let mut guard = 0;
         while d.idx != 2 {
-            let _ = step_demo(&mut d, 0.05, false, 160, 100);
+            let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
             guard += 1;
             assert!(guard < 10, "playback reaches the last frame");
         }
@@ -391,10 +399,11 @@ mod tests {
             d.beams.any_live(d.demo.frames[2].time),
             "beam still live on the last frame (t=0.10 < endtime 0.25)"
         );
-        // The NEXT (tiny) step triggers the deferred loop wrap: back to frame 0
-        // with the beam store cleared (no stale bolts carried into the replay;
-        // the tiny dt keeps playback ON frame 0, before the bolt re-spawns).
-        let _ = step_demo(&mut d, 0.001, false, 160, 100);
+        // The step that takes the clock past the last message triggers the
+        // deferred loop wrap: back to frame 0 with the beam store cleared (no
+        // stale bolts carried into the replay; the wrap's frame reads only
+        // frame 0, before the bolt re-spawns).
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 0, "playback wrapped");
         assert!(!d.beams.any_live(0.0), "the wrap cleared the beam store");
     }
@@ -512,11 +521,11 @@ mod tests {
         d.prng = Lcg::new(1);
 
         reset_queue();
-        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 1, "advanced onto the sound frame");
         assert_eq!(pending_starts().len(), 1, "the recorded svc_sound started exactly once");
         // Lingering on the same frame must not start it again.
-        let _ = step_demo(&mut d, 0.0001, false, 160, 100);
+        let _ = step_demo(&mut d, 0.0001, false, &crate::vid::mode_vid(160, 100));
         let starts = pending_starts();
         assert_eq!(starts.len(), 1, "no second start while lingering");
 
@@ -556,7 +565,7 @@ mod tests {
         d.damage_color = [0, 0, 0];
         d.prng = Lcg::new(1);
 
-        let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
+        let (_img, cshifts) = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 1, "advanced onto the damage frame");
         // count = max(10, blood*0.5) = 10 -> percent 30, faded by 0.05*150 =
         // 7.5 within the same step (V_UpdatePalette) -> 22 (the C's int).
@@ -585,7 +594,7 @@ mod tests {
 
         // The flash fades out over the following steps and the blend clears.
         for _ in 0..4 {
-            let _ = step_demo(&mut d, 0.05, false, 160, 100);
+            let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         }
         assert_eq!(d.damage_blend, 0.0, "flash fully faded");
     }
@@ -621,14 +630,14 @@ mod tests {
             .and_then(|b| Mdl::parse(&b).ok())
             .expect("progs/missile.mdl parses");
         assert_ne!(rocket_trail_type(missile.header.flags), None, "missile.mdl carries EF_ROCKET");
+        // Each message's update puts it at x (a forcelink: no lerp).
         let ent = |num: i32, x: f32| EntSnapshot {
             num,
             modelindex: 2,
-            frame: 0,
-            skin: 0,
             origin: [x, 0.0, 0.0],
-            angles: [0.0; 3],
-            effects: 0,
+            prev_origin: [x, 0.0, 0.0],
+            forcelink: true,
+            ..EntSnapshot::default()
         };
         let frame = |t: f32, x: f32| DemoFrame {
             time: t,
@@ -645,10 +654,10 @@ mod tests {
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
         d.models = vec![None, None, Some(missile)];
-        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 1);
         assert_eq!(d.particles.len(), 0, "first sighting: no trail");
-        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 2);
         assert_eq!(d.particles.len(), 10, "30 units of rocket trail, one per 3");
         // Along x = 0..30 (type 0 jitters each particle by rand()%6 - 3), far
@@ -673,7 +682,7 @@ mod tests {
             frames: vec![plain(0.0), bf, plain(0.10), plain(1.0)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
-        let (_img, cshifts) = step_demo(&mut d, 0.05, false, 160, 100);
+        let (_img, cshifts) = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert!((d.bonus_blend - (50.0 - 0.05 * 100.0)).abs() < 1e-3, "{}", d.bonus_blend);
         assert_eq!(cshifts, vec![(quake_rs::client::view::BONUS_COLOR, d.bonus_blend)], "the bonus cshift");
 
@@ -705,9 +714,9 @@ mod tests {
 
         // Status bar A/B: one step with the wad, then re-render the SAME frame
         // without it (dt == 0 holds the frame) — the sbar region must differ.
-        let (with_hud, _) = step_demo(&mut d, 0.016, false, 320, 200);
+        let (with_hud, _) = step_demo(&mut d, 0.016, false, &crate::vid::mode_vid(320, 200));
         d.gfx_wad = None;
-        let (without, _) = step_demo(&mut d, 0.0, false, 320, 200);
+        let (without, _) = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(320, 200));
         assert_eq!(with_hud.rgb.len(), without.rgb.len());
         // Quake's sbar is the bottom 24 rows of the 320x200 virtual screen.
         let bar_rows = 24usize;
@@ -729,9 +738,9 @@ mod tests {
     fn demo_loop_wrap_lands_on_the_in_world_first_frame() {
         let mut d = build_demo().expect("the embedded demo boots");
         let n = d.demo.frames.len();
-        let _ = step_demo(&mut d, 1.0e6, false, 160, 100);
+        let _ = step_demo(&mut d, 1.0e6, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, n - 1, "fast-forwarded to the last frame");
-        let (img, _) = step_demo(&mut d, 0.05, false, 160, 100);
+        let (img, _) = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 0, "the wrap landed back on frame 0");
         assert!(
             !d.demo.frames[0].entities.is_empty(),
@@ -997,11 +1006,11 @@ mod tests {
     #[test]
     fn a_recorded_svc_setpause_shows_the_plaque() {
         let mut d = build_demo().expect("the embedded demo boots");
-        let (plain, _) = step_demo(&mut d, 0.0, false, 320, 200);
+        let (plain, _) = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(320, 200));
         for f in d.demo.frames.iter_mut() {
             f.paused = true;
         }
-        let (paused, _) = step_demo(&mut d, 0.0, false, 320, 200);
+        let (paused, _) = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(320, 200));
         let changed: Vec<usize> = (0..320 * 200).filter(|&i| plain.rgb[i] != paused.rgb[i]).collect();
         assert!(changed.len() > 1000, "the plaque is drawn ({} px)", changed.len());
         assert!(
@@ -1014,12 +1023,13 @@ mod tests {
     /// client's own cvar in playback too (it was a constant 800 here): at the
     /// default a recorded svc_particle puff (pt_slowgrav, dir 0) leaves its
     /// first 0.05 s frame at vz -2; after e1m8 (worldspawn sets 100, and the
-    /// cvar outlives the map) at -0.25.
+    /// cvar outlives the map) at -0.25. The page keeps the cvar across the
+    /// disconnect that starts a demo (`App::sv_gravity`).
     #[test]
     fn demo_particles_fall_by_the_sv_gravity_cvar() {
         use quake_rs::demo::{Demo, DemoFrame};
         use quake_rs::server::ParticleBurst;
-        let vz = || {
+        let vz = |sv_gravity: f32| {
             let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
             let puff = DemoFrame {
                 time: 0.05,
@@ -1035,17 +1045,27 @@ mod tests {
                 frames: vec![plain(0.0), puff, plain(0.10), plain(0.15)],
             };
             let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
-            let _ = step_demo(&mut d, 0.05, false, 64, 40);
+            d.sv_gravity = sv_gravity;
+            let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(64, 40));
             assert_eq!(d.idx, 1);
             let v: Vec<f32> = d.particles.particles().iter().map(|p| p.velocity[2]).collect();
             assert!(!v.is_empty() && v.iter().all(|&z| z == v[0]), "{v:?}");
             v[0]
         };
-        let _ = crate::app::build_walk_map("maps/e1m1.bsp").expect("e1m1"); // sv_gravity 800
-        assert_eq!(vz(), -800.0 * 0.05 * 0.05);
-        let _ = crate::app::build_walk_map("maps/e1m8.bsp").expect("e1m8"); // sv_gravity 100
-        assert_eq!(vz(), -100.0 * 0.05 * 0.05);
-        let _ = crate::app::build_walk_map("maps/e1m1.bsp");
+        // What the page hands the demo: the last game's cvar, kept by CL_Disconnect.
+        let page_gravity_after = |map: &str| {
+            let w = crate::app::build_walk_map(map).expect("map boots");
+            let mut g = 0.0;
+            crate::app::ensure_app(|a| {
+                a.start_game(w);
+                cl_disconnect(a);
+                g = a.sv_gravity;
+            });
+            g
+        };
+        assert_eq!(vz(page_gravity_after("maps/e1m1.bsp")), -800.0 * 0.05 * 0.05);
+        assert_eq!(vz(page_gravity_after("maps/e1m8.bsp")), -100.0 * 0.05 * 0.05);
+        assert_eq!(page_gravity_after("maps/e1m1.bsp"), 800.0);
     }
 
     /// CENSUS F18 on the recorded stream: C's demo playback parses the signon
@@ -1060,18 +1080,19 @@ mod tests {
         assert_ne!(items0 & 1, 0, "demo1's player carries the shotgun");
         let unflashed = |d: &DemoPlay| d.item_gettime.iter().all(|&t| t == 0.0);
         assert_eq!(d.cl_items, items0);
-        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert!(unflashed(&d), "playback start");
-        let _ = step_demo(&mut d, 1.0e6, false, 160, 100);
-        let _ = step_demo(&mut d, 0.05, false, 160, 100);
+        let _ = step_demo(&mut d, 1.0e6, false, &crate::vid::mode_vid(160, 100));
+        let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100));
         assert_eq!(d.idx, 0, "wrapped");
         assert_eq!(d.cl_items, items0);
         assert!(unflashed(&d), "the loop wrap");
         // A bit the recording gains later is stamped on its frame's clock.
         let got = d.demo.frames.iter().position(|f| f.client.items & !items0 != 0);
         if let Some(i) = got {
-            let dt = d.demo.frames[i].time - d.demo.frames[0].time;
-            let _ = step_demo(&mut d, dt, false, 160, 100);
+            // (Playback starts 0.1 s before the first message: CL_LerpPoint.)
+            let dt = d.demo.frames[i].time - d.demo.frames[0].time + 0.1;
+            let _ = step_demo(&mut d, dt, false, &crate::vid::mode_vid(160, 100));
             assert!(!unflashed(&d), "frame {i}'s new item is stamped");
         }
     }

@@ -44,6 +44,7 @@ pub mod mdl;
 pub mod spr;
 
 pub mod progs;
+pub mod qrand;
 pub mod vm;
 pub mod builtins;
 
@@ -58,6 +59,9 @@ pub mod draw;
 pub mod screen;
 pub mod sbar;
 pub mod keys;
+pub mod cvar;
+pub mod cmd;
+pub mod settings;
 pub mod menu;
 pub mod console;
 pub mod dlight;
@@ -67,5 +71,5 @@ pub mod stepping;
 
 pub mod client;
 
-pub use error::{QError, Result};
+pub use error::{ProgramError, QError, Result};
 pub use math::Vec3;

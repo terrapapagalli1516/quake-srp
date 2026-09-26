@@ -1,17 +1,19 @@
 //! The shell's state and its boots — the [`App`] (host-level state that
-//! outlives a level: mode, menu, console, clocks, framebuffer, held keys)
+//! outlives a level: mode, settings, menu, console, clocks, framebuffer, held keys)
 //! around the client it runs, the live [`Walk`] or the recorded [`DemoPlay`]
 //! ([`quake_rs::client`]); host.c's one-time asset loads, the client's level
 //! loads with their sound calls carried out, and the boots (quake.rc's
 //! attract loop at startup; the page's walk and demo buttons).
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use quake_rs::client::cl_demo::{TimeDemoClock, MAX_DEMOS};
 use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
+use quake_rs::qrand::QRand;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
-use quake_rs::snd::SoundMode;
+use quake_rs::settings::{Profile, Settings};
 use quake_rs::wad::Qpic;
 
 use crate::common::pak;
@@ -22,6 +24,11 @@ use crate::vid::{DEFAULT_H, DEFAULT_W};
 pub(crate) use quake_rs::client::{DemoPlay, Walk};
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
+
+/// The profile a session starts in, before `config.cfg`: 2026. (The tests
+/// start in Classic: most of them pin id's game, and the ones about the 2026
+/// settings switch to it.)
+const START_PROFILE: Profile = if cfg!(test) { Profile::Classic } else { Profile::Modern };
 
 /// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop.
 pub(crate) const QUAKE_RC_DEMOS: [&str; 3] = ["demo1", "demo2", "demo3"];
@@ -49,6 +56,15 @@ pub(crate) struct App {
     pub(crate) demo: Option<DemoPlay>,
     /// 0 = walk, 1 = demo.
     pub(crate) mode: u8,
+    /// The session's settings: id's cvars and key bindings, with the port's
+    /// departures and the profile they came from (`quake_rs::settings`).
+    /// The menu, the console, the input and the frame all read and change
+    /// this one value; `config.cfg` keeps it.
+    pub(crate) settings: Settings,
+    /// The page's box for the picture in device pixels (the `Window` record:
+    /// its CSS size times `devicePixelRatio`), which `vid_native` renders
+    /// into. `None` until the page says (natively, in the tests).
+    pub(crate) window: Option<(u32, u32)>,
     /// The main-menu engine. Lives at the App level (mode-independent) so it can
     /// overlay WHATEVER is playing — the walk OR the attract demo (any key
     /// during demo playback brings it up, as in Quake); while `menu.visible`,
@@ -74,11 +90,13 @@ pub(crate) struct App {
     /// alongside the menu assets. `None` if the pak lacked it — `draw_console`
     /// then falls back to a dark fill.
     pub(crate) conback: Option<Qpic>,
-    /// `host_time` (host.c): the accumulated CLAMPED frame time (seconds) —
-    /// `step`'s `dt` after Host_FilterTime's 0.1 s cap — advanced every `step`
-    /// regardless of mode. Drives the menudot spinner (`(int)(host_time*10) % 6`
-    /// in `M_Main_Draw` and friends), which keeps turning over a frozen frame.
-    pub(crate) clock: f32,
+    /// `host_time` (host.c, a double): the accumulated CLAMPED frame time
+    /// (seconds) — `step`'s `dt` after Host_FilterTime's 0.1 s cap — advanced
+    /// every `step` regardless of mode. Drives the menudot spinner
+    /// (`(int)(host_time*10) % 6` in `M_Main_Draw` and friends), which keeps
+    /// turning over a frozen frame. A double as id's, so thousands of 480 Hz
+    /// frames add up without losing time.
+    pub(crate) clock: f64,
     /// `realtime` (host.c): the UNCLAMPED wall clock (seconds) — `step`'s raw
     /// `dt` summed, before Host_FilterTime caps the frame time. Drives every
     /// flashing cursor the C times on `realtime`: the menu cursors
@@ -123,6 +141,11 @@ pub(crate) struct App {
     /// `gfx/palette.lmp`, for what is drawn with no level loaded (the
     /// disconnected screen's console and menu). Loaded with the menu assets.
     pub(crate) palette: Option<[[u8; 3]; 256]>,
+    /// The `sv_gravity` cvar as the last server left it (800 until a map has
+    /// run; e1m8's worldspawn sets 100): id's cvar outlives the server, and
+    /// demo playback reads it ([`DemoPlay::sv_gravity`]). `CL_Disconnect`
+    /// takes it from the game it ends.
+    pub(crate) sv_gravity: f32,
     /// keys.c `key_repeats[256]`: key downs since each key's last up; a
     /// second down is the keyboard's autorepeat, which `Key_Event` ignores
     /// (Backspace and Pause aside).
@@ -133,23 +156,11 @@ pub(crate) struct App {
     /// outside it (`M_Menu_Main_f` switches the demo loop off while the menu
     /// is up; `M_Main_Key`'s Escape puts it back). 0 at start, a C static.
     pub(crate) m_save_demonum: i32,
-    /// How many threads draw the 3-D view (the `r_threads` cvar; `Auto` by
-    /// default): resolved each frame against [`App::hw_threads`] and handed
-    /// to whichever game's renderer draws it (`host::step`). The pixels are
-    /// the same for any count.
-    pub(crate) render_threads: render::Threads,
     /// The threads the host offers the program: the page's pool of thread
     /// workers plus the program's own (`-hwthreads`, from `wasi.js`), else
-    /// `std::thread::available_parallelism`; 1 without threads.
+    /// `std::thread::available_parallelism`; 1 without threads. The
+    /// `r_threads` setting resolves against it each frame.
     pub(crate) hw_threads: usize,
-    /// The port's video cvars (Hor+, views past id's 1280x1024) the frames
-    /// are drawn with: Classic, id's, until a caller sets them
-    /// (`set_video`); they also set how large a mode `set_resolution` takes.
-    pub(crate) video: render::VideoCvars,
-    /// Which mixer plays ([`SoundMode`]: id's at 11025 Hz, or the 2026 one
-    /// at the device's rate); the sound device follows it each tick
-    /// (`snd_dma`). A setting: the automation's `sound_mode` sets it.
-    pub(crate) sound_mode: SoundMode,
 }
 
 /// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
@@ -350,6 +361,16 @@ impl App {
 
 thread_local! {
     pub(crate) static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    /// The page's random streams ([`QRand`]): one for the page's whole run,
+    /// as id's host has one libc `rand()`, handed to every server the page
+    /// starts (a walk's level changes pass it on themselves). Beside [`APP`],
+    /// not in it, because the walks are built outside its borrow.
+    static SESSION_RAND: Rc<QRand> = Rc::new(QRand::new());
+}
+
+/// The page's [`QRand`] (see `SESSION_RAND`), for a server it builds.
+pub(crate) fn session_rand() -> Rc<QRand> {
+    SESSION_RAND.with(Rc::clone)
 }
 
 #[cfg(test)]
@@ -451,7 +472,7 @@ pub(crate) fn build_walk() -> Option<Walk> {
 pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
     let mut sound = Vec::new();
-    let walk = host_cmd::build_walk_map(pak.clone(), map, &mut sound);
+    let walk = host_cmd::build_walk_map(pak.clone(), map, &session_rand(), &mut sound);
     snd_dma::play(&pak, sound);
     walk
 }
@@ -495,6 +516,8 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 walk: None,
                 demo: None,
                 mode: 0,
+                settings: Settings::new(START_PROFILE),
+                window: None,
                 menu: Menu::new(),
                 menu_pics: MenuPics::default(),
                 conchars: None,
@@ -515,13 +538,11 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 cls: Cls::default(),
                 disconnected: false,
                 palette: None,
+                sv_gravity: quake_rs::server::ServerCvars::default().sv_gravity,
                 key_repeats: [0; 256],
                 shift_down: false,
                 m_save_demonum: 0,
-                render_threads: render::Threads::Auto,
                 hw_threads: 1,
-                video: render::VideoCvars::CLASSIC,
-                sound_mode: SoundMode::default(),
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
@@ -696,6 +717,7 @@ mod tests {
         // real export paths the page uses.
         reset_queue();
         assert_eq!(boot(), 1); // opens the menu on Main, cursor 0
+        use_2026(); // Always Run on, WASD
         menu_down();
         menu_down();
         menu_select(); // Main row 2 -> Options (cursor 0 = Customize controls)
@@ -717,10 +739,10 @@ mod tests {
         menu_bind_key(i32::from(b'j'));
         APP.with(|c| {
             let b = c.borrow();
-            let m = &b.as_ref().unwrap().menu;
-            assert!((m.gamma() - 0.95).abs() < 1e-6, "gamma set through the menu");
-            assert!(!m.always_run(), "Always Run toggled off through the menu");
-            assert_eq!(m.action_for_key(b'j'), Some(render::BIND_JUMP), "rebound");
+            let m = &b.as_ref().unwrap().settings;
+            assert!((m.cvars.gamma - 0.95).abs() < 1e-6, "gamma set through the menu");
+            assert!(!m.cvars.always_run(), "Always Run toggled off through the menu");
+            assert_eq!(m.binds.command(b'j'), Some(render::BIND_JUMP), "rebound");
         });
 
         // Re-boot the walk (the page's walk button): navigation comes back
@@ -728,14 +750,14 @@ mod tests {
         assert_eq!(boot(), 1);
         APP.with(|c| {
             let b = c.borrow();
-            let m = &b.as_ref().unwrap().menu;
-            assert!(m.visible, "boot reopens the menu");
-            assert_eq!(m.screen(), render::MenuScreen::Main, "navigation reset");
-            assert_eq!(m.cursor(), 0, "cursor reset");
-            assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives re-boot");
-            assert!(!m.always_run(), "Always Run (toggled off) survives re-boot");
+            let (menu, m) = (&b.as_ref().unwrap().menu, &b.as_ref().unwrap().settings);
+            assert!(menu.visible, "boot reopens the menu");
+            assert_eq!(menu.screen(), render::MenuScreen::Main, "navigation reset");
+            assert_eq!(menu.cursor(), 0, "cursor reset");
+            assert!((m.cvars.gamma - 0.95).abs() < 1e-6, "Brightness survives re-boot");
+            assert!(!m.cvars.always_run(), "Always Run (toggled off) survives re-boot");
             assert_eq!(
-                m.action_for_key(b'j'),
+                m.binds.command(b'j'),
                 Some(render::BIND_JUMP),
                 "key rebind survives re-boot"
             );
@@ -747,11 +769,11 @@ mod tests {
         assert_eq!(menu_visible(), 0, "New Game closes the menu");
         APP.with(|c| {
             let b = c.borrow();
-            let m = &b.as_ref().unwrap().menu;
-            assert!((m.gamma() - 0.95).abs() < 1e-6, "Brightness survives New Game");
-            assert!(!m.always_run(), "Always Run (toggled off) survives New Game");
+            let m = &b.as_ref().unwrap().settings;
+            assert!((m.cvars.gamma - 0.95).abs() < 1e-6, "Brightness survives New Game");
+            assert!(!m.cvars.always_run(), "Always Run (toggled off) survives New Game");
             assert_eq!(
-                m.action_for_key(b'j'),
+                m.binds.command(b'j'),
                 Some(render::BIND_JUMP),
                 "key rebind survives New Game"
             );
@@ -1004,10 +1026,11 @@ mod tests {
             let d = a.demo.as_mut().unwrap();
             // Render the current demo frame with a tiny dt twice; with the menu
             // OFF and ON. (A tiny dt keeps both renders on the same frame.)
-            let (plain, _) = step_demo(d, 0.0001, false, w, h);
-            let (mut withm, _) = step_demo(d, 0.0001, false, w, h);
+            let (plain, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h));
+            let (mut withm, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h));
             let pal = a.active_palette().expect("demo palette");
-            render::draw_menu(&mut withm, &a.menu, &a.menu_pics, a.conchars.as_ref(), a.clock, a.realtime, pal);
+            let clock = render::MenuClock { host_time: a.clock, realtime: a.realtime };
+            render::draw_menu(&mut withm, &a.menu, &a.settings, &a.menu_pics, a.conchars.as_ref(), clock, pal);
             // The two frames are the same scene; only the menu overlay differs.
             plain.rgb != withm.rgb
         });

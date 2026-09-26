@@ -18,6 +18,7 @@
 //! | [`view`]     | view.c                            | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times (the renderer's half of view.c is `render`'s) |
 //! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
+//! | [`lerpmove`] | (QuakeSpasm's `r_lerpmove`)       | the 2026 extra: monsters glide between their steps ([`lerpmove::LerpMove`]) |
 //!
 //! ## What a frame takes and gives
 //!
@@ -32,7 +33,8 @@
 //! change, and `S_Update`'s listener pose and ambient leaf. The level loads
 //! record the same calls into a caller's `Vec`. What else the host needs it
 //! reads off the state, as id's host reads `cl`: the printed text for its
-//! console ([`Walk::notify`]), `pending_sellscreen`, `intermission`. A
+//! console ([`Walk::notify`]), `pending_sellscreen`, `intermission`, and
+//! whether a QuakeC error ended the game ([`Walk::host_error`]). A
 //! platform may install frame timers ([`set_lap_hook`]) and a hook on the
 //! finished 3-D view ([`set_view_hook`]); none is installed by default.
 
@@ -42,6 +44,7 @@ pub mod cl_main;
 pub mod cl_tent;
 pub mod host;
 pub mod host_cmd;
+pub mod lerpmove;
 pub mod view;
 
 use std::cell::Cell;
@@ -60,6 +63,7 @@ use crate::stepping::{Stepping, Tick72};
 use crate::tent::{BeamSegment, Beams};
 use crate::wad::Qpic;
 use cl_input::{clamp_pitch, KeyMove};
+use lerpmove::{LerpMove, StepGlides};
 
 // ---------------------------------------------------------------------------
 // The client state
@@ -143,10 +147,19 @@ pub struct Walk {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
+    /// The `crosshair` cvar this frame: `V_RenderView` draws the `+` over
+    /// the finished view ([`render::draw_crosshair`]). Set like `viewsize`.
+    pub crosshair: bool,
     /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
     pub stepping: Stepping,
+    /// How monsters are drawn between their steps ([`LerpMove`], `r_lerpmove`):
+    /// Classic unless the host turns the extra on. Set by the host each
+    /// frame, like `stepping`.
+    pub lerpmove: LerpMove,
+    /// The monsters' glides while [`LerpMove::Smooth`] is on.
+    pub glides: StepGlides,
     /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
     /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
     /// mouse X away from yaw). Drained into the next UserCmd then cleared.
@@ -253,6 +266,13 @@ pub struct Walk {
     /// i.e. popped the Help/Ordering menu — the `step` dispatcher (which owns the
     /// menu) takes this flag and opens it.
     pub pending_sellscreen: bool,
+    /// `Host_Error`'s message once this game has ended in one — a QuakeC
+    /// runtime error: "Program error" ([`host::host_error`]). What id printed
+    /// on the way is already in [`Walk::notify`]'s printed text. The host does
+    /// the rest of `Host_Error`: `CL_Disconnect` (drop this walk, whose server
+    /// has shut down), `cls.demonum = -1`, and its console comes down over
+    /// the disconnected screen. [`cl_main::walk_frame`] runs nothing more.
+    pub host_error: Option<String>,
     /// `gfx/complete.lmp` — the "Level Complete" banner (Sbar_IntermissionOverlay).
     pub pic_complete: Option<Qpic>,
     /// `gfx/inter.lmp` — the Time/Secrets/Kills intermission plaque.
@@ -284,19 +304,30 @@ pub struct DemoPlay {
     /// instead of through id's no-overbright colormap shading.
     pub colormap: Option<Vec<u8>>,
     pub colors: Vec<[u8; 3]>,
-    pub elapsed: f32,
+    /// `cl.time`: the client's clock, which `demo_frame` advances by the host
+    /// frame time and `CL_LerpPoint` keeps between the two newest messages
+    /// read (a double, as in client.h).
+    pub time: f64,
+    /// `cl.oldtime`: `cl.time` before this frame advanced it (the particles
+    /// and the stair smoothing step by `cl.time - cl.oldtime`).
+    pub oldtime: f64,
+    /// The newest recorded message read (`cl.mtime[0]`'s): an index into
+    /// `demo.frames`.
     pub idx: usize,
+    /// What this frame's `CL_RelinkEntities` drew: the clock, the camera and
+    /// every entity between the two newest messages.
+    pub view: cl_demo::DemoView,
     /// Live particles replayed from the recorded `svc_particle` / temp-entity
-    /// stream: each frame's effects are spawned ONCE when playback advances onto
+    /// stream: each message's effects are spawned ONCE, in the frame that reads
     /// it, then the pool is aged under gravity and drawn into the scene (sharing
     /// its z-buffer) — so the demo shows blood, gunshot puffs and explosions just
     /// like [`walk_frame`](cl_main::walk_frame) does for live play.
     pub particles: ParticleSystem,
     /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
     pub prng: Lcg,
-    /// The frame index whose effects were last spawned, so a frame rendered for
-    /// several steps spawns its bursts only on the step that ADVANCES onto it
-    /// (never re-spawning while it lingers). `usize::MAX` = "none spawned yet".
+    /// The message whose effects were last spawned, so each message's bursts
+    /// spawn once, in the frame that reads it. `usize::MAX` = "none read yet"
+    /// (the first frame of playback).
     pub last_spawned_idx: usize,
     /// The beam temp-entity slots (`cl_beams`) replayed from the recorded
     /// `TE_LIGHTNING1/2/3` / `TE_BEAM` stream; expanded into bolt-model
@@ -349,9 +380,22 @@ pub struct DemoPlay {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
+    /// The `crosshair` cvar this frame (see `Walk::crosshair`).
+    pub crosshair: bool,
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
+    /// How the recorded monsters are drawn between their steps
+    /// ([`LerpMove`]), set by the host each frame like `stepping`.
+    pub lerpmove: LerpMove,
+    /// The recorded monsters' glides while [`LerpMove::Smooth`] is on.
+    pub glides: StepGlides,
+    /// The `sv_gravity` cvar, which `R_DrawParticles` reads in playback too
+    /// (`grav = frametime * sv_gravity * 0.05`): 800, or what the last map the
+    /// host ran set it to (e1m8's worldspawn: 100; id's cvar outlives the map)
+    /// — the host sets it from its last server's
+    /// ([`crate::server::Server::sv_gravity`]), not the recording's.
+    pub sv_gravity: f32,
     /// Each relinked entity's origin as last rendered (CL_RelinkEntities'
     /// `oldorg`), keyed by entity number, for the model-flag trails; an entity
     /// missing from a frame is forgotten (its next sighting is a forcelink).
@@ -403,8 +447,10 @@ impl DemoPlay {
             sprites: Vec::new(),
             colormap: None,
             colors: Vec::new(),
-            elapsed: 0.0,
+            time: 0.0,
+            oldtime: 0.0,
             idx: 0,
+            view: cl_demo::DemoView::default(),
             particles: ParticleSystem::new(),
             prng: Lcg::new(0x9E37_79B9),
             last_spawned_idx: usize::MAX,
@@ -427,7 +473,11 @@ impl DemoPlay {
             centerprint: None,
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
+            crosshair: false,
             stepping: Stepping::Classic,
+            lerpmove: LerpMove::Classic,
+            glides: StepGlides::default(),
+            sv_gravity: crate::server::ServerCvars::default().sv_gravity,
             trail_org: HashMap::new(),
             tracercount: 0,
             demonum: 0,
@@ -551,7 +601,10 @@ pub fn assemble_walk(
         centerprint: None,
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
+        crosshair: false,
         stepping: Stepping::Classic,
+        lerpmove: LerpMove::Classic,
+        glides: StepGlides::default(),
         clock,
         host_time: 0.0,
         host_clock: 0.0,
@@ -565,6 +618,7 @@ pub fn assemble_walk(
         finale_text: String::new(),
         finale_start: 0.0,
         pending_sellscreen: false,
+        host_error: None,
         pic_complete,
         pic_inter,
         pic_finale,
@@ -594,6 +648,8 @@ pub struct Vid {
     /// The port's video cvars (Hor+, views past id's largest mode): Classic
     /// in id's Quake.
     pub video: render::VideoCvars,
+    /// id's `d_mipscale` / `d_mipcap` (`MipCvars::DEFAULT`, id's defaults).
+    pub mip: render::MipCvars,
 }
 
 /// How the renderer draws the 3-D view `vrect` of the frame `vid` describes:
@@ -609,7 +665,7 @@ pub fn render_options(vrect: &render::ViewRect, vid: &Vid) -> render::RenderOpti
         screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: vid.width, vid_h: vid.height }),
         exact_perspective: vid.exact_perspective,
         video: vid.video,
-        mip: render::MipCvars::DEFAULT,
+        mip: vid.mip,
     }
 }
 

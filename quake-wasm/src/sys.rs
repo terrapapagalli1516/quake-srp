@@ -29,21 +29,22 @@ use std::time::Instant;
 use crate::app::{boot_attract, APP};
 use crate::automation;
 use crate::cl_demo::timedemo_running;
-use crate::config::{exec_config, Archived};
+use crate::config::{exec_config, write_if_changed};
 use crate::host::step;
 use crate::input::{key_clear_states, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
-    read_event, AudioCounts, Event, Msg, FORMAT_RGBA8, PCM_CLEAR, STATE_BIND_GRAB, STATE_CONSOLE, STATE_MENU,
-    STATE_TIMEDEMO, STATE_WALK,
+    read_event, AudioCounts, Event, Msg, FORMAT_RGBA8, PCM_CLEAR, STATE_BIND_GRAB, STATE_CONSOLE, STATE_FKEY,
+    STATE_MENU, STATE_NATIVE, STATE_TIMEDEMO, STATE_WALK,
 };
 use crate::savegame::scan_saves;
 use crate::snd_dma::Audio;
 
-/// Run the program: `quake.rc`'s startup, then turns until the host closes
-/// the input.
-pub(crate) fn run(mut input: impl Read, output: impl Write) -> io::Result<()> {
+/// Run the program: `quake.rc`'s startup (with the command line's `+`
+/// commands, `command_line` being the arguments after the program's name),
+/// then turns until the host closes the input.
+pub(crate) fn run(mut input: impl Read, output: impl Write, command_line: &[String]) -> io::Result<()> {
     let mut sys = Sys::new(output);
-    sys.host_init();
+    sys.host_init(command_line);
     loop {
         let polling = timedemo_running() == 1;
         sys.end_turn(!polling)?;
@@ -67,11 +68,11 @@ struct Sys<W: Write> {
     /// Save opens.
     menu_screen: Option<i32>,
     /// `config.cfg` as last written or read.
-    config: Option<Archived>,
+    config: Option<String>,
     /// When the last frame started: a timedemo's frames time themselves.
     last_frame: Instant,
     /// The UI state the page last heard (`State`).
-    state: (u32, i32),
+    state: UiState,
 }
 
 impl<W: Write> Sys<W> {
@@ -84,19 +85,23 @@ impl<W: Write> Sys<W> {
             menu_screen: None,
             config: None,
             last_frame: Instant::now(),
-            state: (u32::MAX, 0),
+            state: (u32::MAX, 0, 0),
         }
     }
 
-    /// `Host_Init`'s `quake.rc`: `exec config.cfg`, then `startdemos demo1
-    /// demo2 demo3` (the attract loop; a key brings up the menu). The
-    /// Load/Save listings are read once here too.
-    fn host_init(&mut self) {
-        self.config = exec_config();
+    /// `Host_Init`'s `quake.rc`: `exec config.cfg`, `stuffcmds` (the command
+    /// line's `+` commands: the page's `?classic` is `+profile classic`), then
+    /// `startdemos demo1 demo2 demo3` (the attract loop; a key brings up the
+    /// menu). The Load/Save listings are read once here too.
+    fn host_init(&mut self, command_line: &[String]) {
+        // `config.cfg` as it stands after the exec, so the first frame writes
+        // the file only when something since has changed a setting — the
+        // command line's `profile` included, which then sticks, as a choice
+        // made in the menu does.
+        crate::app::ensure_app(|_| {}); // the settings exist before quake.rc runs
+        self.config = exec_config().or_else(crate::config::current_text);
+        crate::host_cmd::execute_console_command(&quake_rs::cmd::stuff_cmds(command_line));
         boot_attract();
-        if self.config.is_none() {
-            self.config = Archived::current();
-        }
         scan_saves();
     }
 
@@ -104,8 +109,8 @@ impl<W: Write> Sys<W> {
     /// next turn waits for a tick — and flush, so the host publishes it.
     fn end_turn(&mut self, wait: bool) -> io::Result<()> {
         self.state = ui_state();
-        let (flags, menu_screen) = self.state;
-        Msg::State { flags, menu_screen }.write_to(&mut self.out)?;
+        let (flags, menu_screen, pixel_size) = self.state;
+        Msg::State { flags, menu_screen, pixel_size }.write_to(&mut self.out)?;
         Msg::Sync { seq: self.ack, wait }.write_to(&mut self.out)?;
         self.out.flush()
     }
@@ -142,6 +147,7 @@ impl<W: Write> Sys<W> {
                     self.write_sound(0.0)?;
                     self.out.flush()?;
                 }
+                Event::Window { w, h } => crate::vid::set_window(w, h),
                 Event::Call { id, line } => {
                     // The sound device's own calls, then the game's.
                     let answer = match self.audio.call(&line) {
@@ -174,7 +180,7 @@ impl<W: Write> Sys<W> {
         }
         self.write_picture()?;
         crate::bench::write_values(&mut self.out)?;
-        Archived::write_if_changed(&mut self.config);
+        write_if_changed(&mut self.config);
         Ok(())
     }
 
@@ -226,30 +232,59 @@ impl<W: Write> Sys<W> {
 }
 
 /// What the page's own UI needs of the game (the `State` record): the
-/// flags, and the menu screen showing.
-fn ui_state() -> (u32, i32) {
+/// flags, the menu screen showing, and the pixel size of a native picture.
+type UiState = (u32, i32, u32);
+
+/// The [`UiState`] now.
+fn ui_state() -> UiState {
+    let (native, fkey, pixel_size) = APP.with(|c| {
+        c.borrow().as_ref().map_or((false, false, 0), |a| {
+            let native = crate::vid::native(a);
+            let threads = crate::vid::render_threads(a);
+            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w, threads));
+            (native, a.settings.cvars.fkey, pixel)
+        })
+    });
     let flags = [
-        (crate::menu::menu_visible(), STATE_MENU),
-        (crate::console::console_visible(), STATE_CONSOLE),
-        (crate::app::in_walk_mode(), STATE_WALK),
-        (crate::menu::menu_bind_grabbing(), STATE_BIND_GRAB),
-        (timedemo_running(), STATE_TIMEDEMO),
+        (crate::menu::menu_visible() != 0, STATE_MENU),
+        (crate::console::console_visible() != 0, STATE_CONSOLE),
+        (crate::app::in_walk_mode() != 0, STATE_WALK),
+        (crate::menu::menu_bind_grabbing() != 0, STATE_BIND_GRAB),
+        (timedemo_running() != 0, STATE_TIMEDEMO),
+        (native, STATE_NATIVE),
+        (fkey, STATE_FKEY),
     ]
     .iter()
-    .filter(|(on, _)| *on != 0)
+    .filter(|(on, _)| *on)
     .fold(0, |f, (_, bit)| f | bit);
-    (flags, crate::menu::menu_screen_id())
+    (flags, crate::menu::menu_screen_id(), pixel_size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{encode, Record};
+    use crate::proto::{encode, Record, STATE_FKEY, STATE_NATIVE};
+
+    /// quake.rc's `stuffcmds`: the command line's `+profile 2026` (the
+    /// page's `?2026`; the tests start in Classic) runs after `config.cfg`,
+    /// and sticks — the first frame writes it. Without it nothing is written.
+    #[test]
+    fn the_command_line_runs_after_config_cfg_and_sticks() {
+        let cfg = || crate::common::read_file(crate::config::CONFIG_CFG).ok();
+        run(encode::tick(1, 0.0).as_slice(), &mut Vec::new(), &[]).unwrap();
+        assert_eq!(cfg(), None, "a first session with no change writes nothing");
+        APP.with(|c| *c.borrow_mut() = None);
+        let args = ["+profile".to_string(), "2026".to_string()];
+        run(encode::tick(1, 0.0).as_slice(), &mut Vec::new(), &args).unwrap();
+        APP.with(|c| assert_eq!(c.borrow().as_ref().unwrap().settings.profile, quake_rs::settings::Profile::Modern));
+        let text = String::from_utf8(cfg().expect("written")).unwrap();
+        assert_eq!(text, "// generated by quake, do not modify\nprofile \"2026\"\n");
+    }
 
     /// Run the program on `input` and split what it wrote.
     fn run_on(input: &[u8]) -> Vec<Record> {
         let mut out = Vec::new();
-        run(input, &mut out).expect("the program runs to the end of its input");
+        run(input, &mut out, &[]).expect("the program runs to the end of its input");
         Record::split(&out)
     }
 
@@ -274,17 +309,18 @@ mod tests {
         let (w, h) = (frames[0].payload[0] as usize | (frames[0].payload[1] as usize) << 8, 600);
         assert_eq!(w, 960);
         assert_eq!(frames[0].payload.len(), 8 + w * h * 4);
-        // The attract demo sounds: every tick's samples at the device's rate,
-        // from the device's position on (50 ms ahead of it, then a 60th of a
-        // second a tick), the first clearing the ring (S_Init).
+        // The attract demo sounds: every tick's samples — the tests' Classic
+        // profile: id's mixer at 11025 Hz whatever the device — from the
+        // device's position on (0.1 s ahead of it, then the ticks' worth),
+        // the first clearing the ring (S_Init).
         let pcm: Vec<&Record> = recs.iter().filter(|r| r.kind == Record::PCM).collect();
         assert_eq!(pcm.len(), 3);
         let fields = |r: &Record| (r.u32_at(0), r.u32_at(4), r.u32_at(8), (r.payload.len() - 12) / 4);
-        assert_eq!(fields(pcm[0]), (735, 44100, PCM_CLEAR, 2205));
-        assert_eq!(fields(pcm[1]), (735 + 2205, 44100, 0, 735));
-        assert_eq!(fields(pcm[2]), (735 + 2205 + 735, 44100, 0, 735));
+        assert_eq!(fields(pcm[0]), (735, 11025, PCM_CLEAR, 1102));
+        assert_eq!(fields(pcm[1]), (735 + 1102, 11025, 0, 735));
+        assert_eq!(fields(pcm[2]), (735 + 1102 + 735, 11025, 0, 735));
         let audio = recs.iter().rfind(|r| r.kind == Record::AUDIO).expect("the device's counts");
-        assert_eq!((audio.u32_at(0), audio.u32_at(4)), (44100, 1), "the 2026 mixer at the device's rate");
+        assert_eq!((audio.u32_at(0), audio.u32_at(4)), (11025, 0), "id's mixer in Classic");
     }
 
     #[test]
@@ -299,7 +335,7 @@ mod tests {
             .filter(|r| r.kind == Record::REPLY)
             .map(|r| String::from_utf8_lossy(&r.payload[12..]).into_owned())
             .collect();
-        assert!(texts[0].starts_with("rate=48000 mode=2026 "), "{}", texts[0]);
+        assert!(texts[0].starts_with("rate=11025 mode=classic "), "{}", texts[0]);
         assert!(texts[1].lines().all(|l| l.split(' ').count() == 9), "{}", texts[1]);
     }
 
@@ -327,15 +363,41 @@ mod tests {
     fn keys_reach_key_event_between_ticks() {
         let mut input = Vec::new();
         input.extend(encode::call(1, "boot"));
-        // Escape closes the menu (M_Main_Key), a held `w` is +forward.
+        // Escape closes the menu (M_Main_Key), a held up arrow is +forward.
         input.extend(encode::key(27, true, 0));
         input.extend(encode::key(27, false, 0));
-        input.extend(encode::key(b'w', true, 'w' as u32));
-        input.extend(encode::call(2, "key_is_down 119"));
+        input.extend(encode::key(quake_rs::keys::K_UPARROW, true, 0));
+        input.extend(encode::call(2, "key_is_down 128"));
         input.extend(encode::call(3, "menu_visible"));
         let recs = run_on(&input);
         let replies: Vec<f64> = recs.iter().filter(|r| r.kind == Record::REPLY).map(|r| r.f64_at(4)).collect();
         assert_eq!(replies, [1.0, 1.0, 0.0]);
+    }
+
+    /// The 2026 profile's native resolution through the protocol: the page's
+    /// `Window` in device pixels, the picture at a whole fraction of it (Auto:
+    /// the smallest pixel that keeps a 1080p frame's cost on one thread), and
+    /// the `State` that tells the page to fill its box with that pixel size.
+    /// Classic shows its video mode in the 4:3 box whatever the window.
+    #[test]
+    fn the_window_sets_a_native_picture_in_2026_and_nothing_in_classic() {
+        let frame_and_state = |profile: &str, win: (u32, u32)| {
+            let mut input = Vec::new();
+            input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
+            input.extend(encode::window(win.0, win.1));
+            input.extend(encode::tick(1, 0.0));
+            input.extend(encode::tick(2, 0.0));
+            let recs = run_on(&input);
+            let frame = recs.iter().rev().find(|r| r.kind == Record::FRAME).expect("a frame");
+            let (w, h) = (u16::from_le_bytes([frame.payload[0], frame.payload[1]]), u16::from_le_bytes([frame.payload[2], frame.payload[3]]));
+            let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
+            (w, h, state.u32_at(0) & (STATE_NATIVE | STATE_FKEY), state.u32_at(8))
+        };
+        assert_eq!(frame_and_state("2026", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_FKEY, 1));
+        assert_eq!(frame_and_state("2026", (3840, 2160)), (1920, 1080, STATE_NATIVE | STATE_FKEY, 2), "4K: 2x2 pixels");
+        assert_eq!(frame_and_state("2026", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_FKEY, 3), "5K: 3x3");
+        assert_eq!(frame_and_state("2026", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_FKEY, 1), "any aspect");
+        assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, 0, 0), "the mode, in the 4:3 box");
     }
 
     #[test]

@@ -7,29 +7,56 @@
 
 use quake_rs::render::{self, build_gamma_table};
 use quake_rs::client::cl_input::derive_key_move;
-use quake_rs::client::host::{host_filter_time, host_filter_time_uncapped};
+use quake_rs::client::host::{host_filter_time, host_filter_time_display, host_filter_time_uncapped};
+use quake_rs::stepping::Stepping;
 
 use crate::app::ensure_app;
 use crate::bench::{self, Phase};
-use crate::cl_demo::{host_end_game, step_demo, step_timedemo};
+use crate::cl_demo::{finish_host_error, host_end_game, step_demo, step_timedemo};
 use crate::cl_walk::step_walk;
 
-/// [`host_filter_time`], or the same frame without the 72 fps cap — every
-/// call runs, advancing the game by the time since the last frame under the
-/// same [0.001, 0.1] clamps ([`host_filter_time_uncapped`]) — while a
-/// `timedemo` runs (id's `cls.timedemo`), or with the `wasm_uncapped` extra on
-/// (a departure, opt-in via Options > Web extras, default off). A 120/144 Hz
-/// display then runs one host frame per refresh, as the port did before it
-/// had the gate.
-fn host_frame_time(realtime: f64, oldrealtime: &mut f64, uncapped: bool) -> Option<f64> {
-    if !uncapped {
-        return host_filter_time(realtime, oldrealtime);
-    }
-    Some(host_filter_time_uncapped(realtime, oldrealtime))
+/// How a host frame is gated and stepped: [`host_filter_time`]'s 72 fps cap
+/// with id's per-frame code (Classic); every call without the cap while a
+/// `timedemo` runs (id's `cls.timedemo`: [`host_filter_time_uncapped`]); or,
+/// with `wasm_uncapped` (the 2026 profile), a frame on every display refresh
+/// ([`host_filter_time_display`]) stepped as a run of id's 72 Hz frames
+/// ([`Stepping::Uncapped`], `FRAMERATE.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameGate {
+    Classic,
+    Timedemo,
+    Display,
 }
 
-/// The `wasm_showfps` extra's measurement (a departure, opt-in via Options >
-/// Web extras, default off): QuakeWorld's `SCR_DrawFPS` counter. Every
+impl FrameGate {
+    fn new(uncapped: bool, timedemo: bool) -> FrameGate {
+        match (timedemo, uncapped) {
+            (true, _) => FrameGate::Timedemo,
+            (false, true) => FrameGate::Display,
+            (false, false) => FrameGate::Classic,
+        }
+    }
+
+    /// The frame's `host_frametime`, or `None`: no frame this call.
+    fn frame_time(self, realtime: f64, oldrealtime: &mut f64) -> Option<f64> {
+        match self {
+            FrameGate::Classic => host_filter_time(realtime, oldrealtime),
+            FrameGate::Timedemo => Some(host_filter_time_uncapped(realtime, oldrealtime)),
+            FrameGate::Display => host_filter_time_display(realtime, oldrealtime),
+        }
+    }
+
+    /// How the game steps a frame of any length.
+    fn stepping(self) -> Stepping {
+        match self {
+            FrameGate::Display => Stepping::Uncapped,
+            FrameGate::Classic | FrameGate::Timedemo => Stepping::Classic,
+        }
+    }
+}
+
+/// The `wasm_showfps` measurement (a departure on Options > Classic / 2026's
+/// settings page, off in both profiles): QuakeWorld's `SCR_DrawFPS` counter. Every
 /// presented frame counts (`fps_count++`); once a second of `realtime` has
 /// passed since the window opened (`lastframetime`), the window's rate
 /// becomes the shown value (`lastfps`) and a new window opens. QW shows the
@@ -101,17 +128,18 @@ pub(crate) fn step(dt: f32) -> i32 {
         // `realtime += time`): it drives the flashing cursors, which keep
         // animating over a frozen frame.
         a.realtime += real_dt as f64;
-        let uncapped = a.menu.extras().uncapped || a.cls.timedemo;
+        let gate = FrameGate::new(a.settings.cvars.uncapped, a.cls.timedemo);
         // `host_frametime`, the C's double: the server advances sv.time by it
         // exactly; everything else here times itself with its f32.
         let host_frametime = if real_dt == 0.0 {
             0.0
         } else {
-            match host_frame_time(a.realtime, &mut a.oldrealtime, uncapped) {
+            match gate.frame_time(a.realtime, &mut a.oldrealtime) {
                 Some(frametime) => frametime,
                 None => return,
             }
         };
+        let stepping = gate.stepping();
         let dt = host_frametime as f32;
         ran = 1;
         // Every presented real frame counts toward the wasm_showfps readout
@@ -122,8 +150,11 @@ pub(crate) fn step(dt: f32) -> i32 {
         }
         bench::frame_begin(active_renderer(a));
         // host_time: the menudot spinner (mode-independent, like realtime).
-        a.clock += dt;
+        a.clock += host_frametime;
+        // The settings' picture size and the renderer's per-thread settings.
+        crate::vid::apply_settings(a);
         let (w, h) = (a.render_w, a.render_h);
+        let vid = crate::vid::vid(a);
         // While the menu OR console is up (key_dest != key_game) gameplay input is
         // gated and single player pauses (Host_ServerFrame skips SV_Physics); the
         // dispatcher owns that state, so it tells step_walk. The attract demo is
@@ -142,8 +173,10 @@ pub(crate) fn step(dt: f32) -> i32 {
         // Derive this frame's bindings-driven keyboard input (CL_BaseMove over
         // keys.c's keybindings) and hand it to the walk; step_walk zeroes it
         // while gameplay is gated.
-        let km = derive_key_move(&a.menu, &a.keys_held);
-        let viewsize = a.menu.viewsize();
+        let km = derive_key_move(&a.settings.cvars, &a.settings.binds, &a.keys_held);
+        let viewsize = a.settings.cvars.viewsize;
+        let crosshair = a.settings.cvars.crosshair;
+        let lerpmove = a.settings.cvars.lerpmove;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
         // last frame, CL_NextDemo plays the next of the `startdemos` loop
         // (quake.rc: demo1 demo2 demo3) — or, outside the loop, the client
@@ -152,23 +185,25 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.demoplayback() && !a.cls.timedemo && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
             host_end_game(a);
         }
-        // The renderer's options are built inside the client frame, under this
-        // borrow: hand it the menu's Web extras (wasm_exactpersp) first.
-        crate::extras::set_frame_extras(a.menu.extras(), a.video);
-        // The scaled-2-D extra is draw.rs state; the menu's value is the truth.
-        quake_rs::draw::set_scaled_2d(a.menu.extras().scaled_2d);
-        // The renderer's threads, to whichever game draws: every Walk and
-        // DemoPlay the host builds (a boot, a load, the attract loop's next
-        // demo) draws on the setting from its first frame.
-        let threads = a.render_threads.resolve(a.hw_threads);
+        // The renderer's threads (`r_threads` against what the host offers),
+        // to whichever game draws: every Walk and DemoPlay the host builds (a
+        // boot, a load, the attract loop's next demo) draws on the setting
+        // from its first frame.
+        let threads = a.settings.cvars.threads.resolve(a.hw_threads);
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;
+            wk.crosshair = crosshair;
+            wk.stepping = stepping;
+            wk.lerpmove = lerpmove;
             wk.renderer.set_threads(threads);
         }
         if let Some(d) = a.demo.as_mut() {
             d.renderer.set_threads(threads);
             d.viewsize = viewsize;
+            d.crosshair = crosshair;
+            d.stepping = stepping;
+            d.lerpmove = lerpmove;
             // +showscores only reaches the game while it owns the keyboard.
             d.show_scores = km.showscores && !gate_gameplay;
         }
@@ -185,20 +220,23 @@ pub(crate) fn step(dt: f32) -> i32 {
             // loop's next demo, if any, plays from this frame.
             let (framecount, realtime) = (a.host_framecount, a.realtime);
             a.cls.td.message(framecount, realtime);
-            frame = a.demo.as_mut().and_then(|d| step_timedemo(d, dt, gate_gameplay, w, h));
+            frame = a.demo.as_mut().and_then(|d| step_timedemo(d, dt, gate_gameplay, &vid));
             if frame.is_none() {
                 host_end_game(a);
                 if let Some(d) = a.demo.as_mut() {
                     d.viewsize = viewsize;
+                    d.crosshair = crosshair;
+                    d.stepping = stepping;
+                    d.lerpmove = lerpmove;
                     d.show_scores = km.showscores && !gate_gameplay;
                 }
             }
         }
         if frame.is_none() {
             frame = if a.mode == 1 {
-                a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, w, h))
+                a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, &vid))
             } else {
-                a.walk.as_mut().map(|wk| step_walk(wk, host_frametime, gate_gameplay, w, h))
+                a.walk.as_mut().map(|wk| step_walk(wk, host_frametime, gate_gameplay, &vid))
             };
         }
         let (mut img, cshifts) = match frame {
@@ -229,12 +267,14 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.walk.as_mut().is_some_and(|wk| std::mem::take(&mut wk.pending_sellscreen)) {
             a.m_menu_help();
         }
+        // A QuakeC error ended the game this frame: Host_Error's disconnect.
+        finish_host_error(a);
 
-        // The wasm_showfps extra (off by default): QuakeWorld draws it with the
+        // The wasm_showfps setting (off in both profiles): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the
         // console and M_Draw — so the menu's fade dims it) and not on the
         // intermission/finale screens.
-        if a.menu.extras().show_fps {
+        if a.settings.cvars.show_fps {
             let intermission = if a.mode == 1 {
                 a.demo.as_ref().and_then(|d| d.demo.frames.get(d.idx)).map(|f| f.intermission != 0)
             } else {
@@ -276,27 +316,12 @@ pub(crate) fn step(dt: f32) -> i32 {
                 // M_Draw: over the console background while the console
                 // is out (scr_con_current: forced up, disconnected),
                 // else over the faded screen.
+                let clock = render::MenuClock { host_time: a.clock, realtime: a.realtime };
+                let (menu, s, pics, cc) = (&a.menu, &a.settings, &a.menu_pics, a.conchars.as_ref());
                 if a.console.current() > 0.0 {
-                    render::draw_menu_over_console(
-                        img,
-                        &a.menu,
-                        &a.menu_pics,
-                        a.conchars.as_ref(),
-                        a.conback.as_ref(),
-                        a.clock,
-                        a.realtime,
-                        palette,
-                    );
+                    render::draw_menu_over_console(img, menu, s, pics, cc, a.conback.as_ref(), clock, palette);
                 } else {
-                    render::draw_menu(
-                        img,
-                        &a.menu,
-                        &a.menu_pics,
-                        a.conchars.as_ref(),
-                        a.clock,
-                        a.realtime,
-                        palette,
-                    );
+                    render::draw_menu(img, menu, s, pics, cc, clock, palette);
                 }
             }
         }
@@ -315,7 +340,7 @@ pub(crate) fn step(dt: f32) -> i32 {
 
         // V_UpdatePalette runs LAST in SCR_UpdateScreen. V_CheckGamma (view.c):
         // rebuild the gamma table only when the cvar actually changed.
-        let g = a.menu.gamma();
+        let g = a.settings.cvars.gamma;
         if g != a.gamma_value {
             a.gamma_value = g;
             a.gamma_table = build_gamma_table(g);
@@ -431,36 +456,90 @@ mod tests {
         assert_eq!(clocks(), (host1, real1, walk1));
     }
 
-    // -- Web extras: wasm_uncapped, wasm_showfps --------------------------------
+    // -- the frame gate: Classic, timedemo, wasm_uncapped; wasm_showfps -------
 
     #[test]
-    fn host_frame_time_uncapped_runs_every_refresh_with_the_same_clamps() {
-        // Off: exactly Host_FilterTime's gate.
+    fn the_frame_gate_is_ids_classic_and_every_refresh_uncapped() {
+        assert_eq!(FrameGate::new(false, false), FrameGate::Classic);
+        assert_eq!(FrameGate::new(true, true), FrameGate::Timedemo, "a timedemo runs back to back");
+        assert_eq!(FrameGate::new(true, false), FrameGate::Display);
+        assert_eq!(
+            [FrameGate::Classic, FrameGate::Timedemo, FrameGate::Display].map(FrameGate::stepping),
+            [Stepping::Classic, Stepping::Classic, Stepping::Uncapped],
+            "only the uncapped host steps the game as 72 Hz runs"
+        );
+        // Classic: exactly Host_FilterTime's gate.
         for stamps in [[5.0, 10.0, 15.0], [13.0, 26.0, 40.0]] {
             let (mut a, mut b) = (0.0, 0.0);
             for t in stamps {
                 let t = t / 1000.0;
-                assert_eq!(host_frame_time(t, &mut a, false), host_filter_time(t, &mut b));
+                assert_eq!(FrameGate::Classic.frame_time(t, &mut a), host_filter_time(t, &mut b));
                 assert_eq!(a, b);
             }
         }
-        // On: every refresh runs, whatever the display, and the game clock
-        // sums to real time.
-        for hz in [60.0f64, 75.0, 120.0, 144.0, 165.0, 240.0] {
+        // Uncapped: every refresh runs, whatever the display, and the game
+        // clock sums to real time.
+        for hz in [60.0f64, 75.0, 120.0, 144.0, 165.0, 240.0, 480.0] {
             let (mut realtime, mut old, mut game) = (0.0f64, 0.0f64, 0.0f64);
             for _ in 0..hz as usize * 2 {
                 realtime += (1.0 / hz) as f32 as f64;
-                let f = host_frame_time(realtime, &mut old, true);
+                let f = FrameGate::Display.frame_time(realtime, &mut old);
                 game += f.expect("uncapped: every refresh is a host frame");
             }
             assert!((game - realtime).abs() < 1e-4, "{hz} Hz: game {game} vs real {realtime}");
         }
-        // Host_FilterTime's clamps still hold: a hitch advances 0.1 s at most,
-        // and a sliver at least 1 ms.
+        // A hitch advances 0.1 s at most; a sliver under 1 ms waits for the
+        // next call rather than running ahead of the clock (a timedemo's
+        // frame is clamped up to 1 ms, as id's).
         let mut old = 0.0;
-        assert_eq!(host_frame_time(0.5, &mut old, true), Some(HOST_FRAMETIME_MAX));
-        assert_eq!(host_frame_time(0.5001, &mut old, true), Some(HOST_FRAMETIME_MIN));
+        assert_eq!(FrameGate::Display.frame_time(0.5, &mut old), Some(HOST_FRAMETIME_MAX));
+        assert_eq!(FrameGate::Display.frame_time(0.5001, &mut old), None);
+        assert_eq!(FrameGate::Timedemo.frame_time(0.5001, &mut old), Some(HOST_FRAMETIME_MIN));
         assert_eq!(old, 0.5001);
+    }
+
+    /// The 2026 profile in the frame: the game stepped as 72 Hz runs, the
+    /// renderer's Hor+ and hires with native resolution, the 2-D layer at a
+    /// whole scale, and id's crosshair — a `+` whose cell's corner is the
+    /// view's centre, over the view and under the rest (the fade of the menu
+    /// dims it); Classic is none of them.
+    #[test]
+    fn the_2026_profile_steps_uncapped_scales_2d_and_draws_the_crosshair() {
+        use quake_rs::render::FovMode;
+        let video_cvars = || APP.with(|c| crate::vid::vid(c.borrow().as_ref().unwrap()).video);
+        assert_eq!(boot(), 1);
+        close_menu();
+        step(0.0);
+        let stepping = || APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().stepping);
+        assert_eq!(stepping(), Stepping::Classic);
+        assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::Classic, false, false));
+        use_2026();
+        crate::vid::set_window(1600, 1000);
+        step(0.0);
+        assert_eq!(stepping(), Stepping::Uncapped);
+        assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::HorPlus, true, true));
+        let (w, h) = APP.with(|c| {
+            let b = c.borrow();
+            (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
+        });
+        assert_eq!((w, h), (1600, 1000), "native: the window's pixels");
+        let with = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        crate::host_cmd::execute_console_command("crosshair 0");
+        step(0.0);
+        let without = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        // The view above the scaled status bar (viewsize 100: 48 rows x 5).
+        let vrect = render::calc_refdef(w, h, 100.0, false).vrect;
+        let (cx, cy) = (vrect.x + vrect.w / 2, vrect.y + vrect.h / 2);
+        let differing: Vec<(usize, usize)> = (0..w * h)
+            .filter(|&i| with[i * 4..i * 4 + 3] != without[i * 4..i * 4 + 3])
+            .map(|i| (i % w, i / w))
+            .collect();
+        assert!(!differing.is_empty(), "the crosshair draws");
+        assert!(
+            differing.iter().all(|&(x, y)| (cx..cx + 40).contains(&x) && (cy..cy + 40).contains(&y)),
+            "only the + (a 2-D cell, scale 5, at the view's centre {cx},{cy}): {:?}",
+            &differing[..differing.len().min(8)]
+        );
     }
 
     #[test]

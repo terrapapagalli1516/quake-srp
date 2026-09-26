@@ -358,6 +358,24 @@ pub fn draw_fps(
     draw_string_scaled(image, conchars, x as f32, y as f32, &st, sc.scale, 0.0, 0.0, palette);
 }
 
+/// `V_RenderView`'s crosshair (view.c, with `crosshair 1`): the conchars `+`
+/// through `Draw_Character`, its cell's top-left corner at the centre of the
+/// view, `(scr_vrect.x + scr_vrect.width/2, scr_vrect.y + scr_vrect.height/2)`
+/// (`cl_crossx`/`cl_crossy`, id's offsets from there, are 0 and not
+/// modelled). `vrect` is in framebuffer pixels; the character is drawn on the
+/// 2-D layer's screen ([`screen_2d`]), so with the scaled 2-D extra it has
+/// that layer's size, at the same place.
+pub fn draw_crosshair(image: &mut Image, conchars: &crate::wad::Qpic, vrect: &ViewRect, palette: &[[u8; 3]; 256]) {
+    let sc = screen_2d(image.w, image.h);
+    if image.w == 0 || image.h == 0 || sc.scale.is_nan() || sc.scale <= 0.0 {
+        return;
+    }
+    let s = sc.scale.round().max(1.0) as usize;
+    let x = (vrect.x + vrect.w / 2) / s;
+    let y = (vrect.y + vrect.h / 2) / s;
+    draw_char_scaled(image, conchars, x as f32, y as f32, b'+', sc.scale, 0.0, 0.0, palette);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,12 +577,13 @@ mod tests {
         assert_eq!(calc_refdef(480, 300, 100.0, false).vrect, vr(0, 0, 480, 252));
         assert_eq!(calc_refdef(1120, 700, 110.0, false).vrect, vr(0, 0, 1120, 676));
         assert_eq!(calc_refdef(960, 600, 50.0, false).vrect, vr(240, 126, 480, 300));
-        // The "scaled 2-D" extra: the 320x200 screen scaled by w/320, so the
-        // view clears exactly the rows draw_hud_into paints: 48*scale.
+        // The "scaled 2-D" extra: the 320x200 screen scaled by the largest
+        // whole number that fits, so the view clears exactly the rows
+        // draw_hud_into paints: 48*scale (1.5x at 480x300 is 1x, 3.5x 3x).
         let _extra = crate::draw::Scaled2dGuard::set(true);
         assert_eq!(calc_refdef(960, 600, 100.0, false).vrect, vr(0, 0, 960, 456));
-        assert_eq!(calc_refdef(480, 300, 100.0, false).vrect, vr(0, 0, 480, 228));
-        assert_eq!(calc_refdef(1120, 700, 110.0, false).vrect, vr(0, 0, 1120, 616));
+        assert_eq!(calc_refdef(480, 300, 100.0, false).vrect, vr(0, 0, 480, 252));
+        assert_eq!(calc_refdef(1120, 700, 110.0, false).vrect, vr(0, 0, 1120, 628));
         assert_eq!(calc_refdef(1280, 800, 120.0, false).vrect, vr(0, 0, 1280, 800));
         // 960x600 at 50: 480x300 centred above the 144-row bar.
         assert_eq!(calc_refdef(960, 600, 50.0, false).vrect, vr(240, 78, 480, 300));
@@ -572,7 +591,7 @@ mod tests {
         for &(w, h) in RESOLUTION_PRESETS.iter() {
             for step in 3..=12 {
                 let r = calc_refdef(w as usize, h as usize, step as f32 * 10.0, false);
-                let bar = (r.sb_lines as f32 * w as f32 / 320.0).ceil() as usize;
+                let bar = (r.sb_lines as f32 * crate::draw::screen_2d(w as usize, h as usize).scale).ceil() as usize;
                 assert!(r.vrect.x + r.vrect.w <= w as usize);
                 assert!(r.vrect.y + r.vrect.h + bar <= h as usize, "{w}x{h} @ {step}0");
                 assert_eq!(r.vrect.w % 8, 0);
@@ -597,10 +616,11 @@ mod tests {
         assert_eq!(warp_vrect(640, 400, 100.0, false, false), vr(0, 0, 320, 176));
         // The "scaled 2-D" extra's bar is 48 rows of the 320x200 screen.
         let _extra = crate::draw::Scaled2dGuard::set(true);
-        // Every 16:10 preset renders underwater into the 320x200 screen's view
-        // rectangle (the status-bar lines scaled back by h / vid.height) —
-        // which D_WarpScreen stretches over the preset's own view rectangle.
-        for &(w, h) in RESOLUTION_PRESETS.iter() {
+        // Every 16:10 preset the extra draws at a whole multiple of 320x200
+        // renders underwater into the 320x200 screen's view rectangle (the
+        // status-bar lines scaled back by h / vid.height) — which D_WarpScreen
+        // stretches over the preset's own view rectangle.
+        for &(w, h) in RESOLUTION_PRESETS.iter().filter(|&&(w, _)| w % 320 == 0) {
             for step in 3..=12 {
                 let vs = step as f32 * 10.0;
                 let want = calc_refdef(320, 200, vs, false).vrect;

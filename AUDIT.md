@@ -2182,7 +2182,7 @@ the cvars `volume`, `nosound`, `loadas8bit`, `ambient_level`, `ambient_fade`,
 `_snd_mixahead`. It takes the client's `SoundCall`s and paints 16-bit stereo
 PCM at the caller's rate. **The browser plays it**: the worker runs the mixer
 and paints into a shared ring an AudioWorklet plays; the page's own Web Audio
-mixing is gone (`web/PLATFORM.md`, "Sound"). Classic (`snd::SoundMode::Classic`)
+mixing is gone (`web/PLATFORM.md`, "Sound"). Classic (`snd_modern 0`, `snd::SoundMode::Classic`)
 is id's mixer at 11025 Hz, reconstructed at the device's rate by the worklet
 as a sound card's DAC did; the 2026 default runs `Fixes::ALL` at the device's
 rate. What the page's mixing got wrong goes with it: one-sample statics are
@@ -2318,3 +2318,199 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   40 frames at 4K. id's; left alone.
 - **Not measured:** the page (quake-wasm and web/ do not set the cvars yet), GPU browsers,
   phones.
+
+## Demo playback between messages: id's CL_LerpPoint in Classic (2026-09-26, branch `q26/lerp`)
+
+id's client draws demo playback between the two newest recorded messages in
+every frame, at any frame rate: `CL_ReadFromServer` advances `cl.time` by the
+host frame time, `CL_GetMessage` reads a message whenever `cl.time` has
+passed the newest (`cl.time <= cl.mtime[0]`: "don't need another message
+yet"), and `CL_RelinkEntities` puts the view entity, every entity,
+`cl.velocity` and (in `cls.demoplayback`) `cl.viewangles` at
+`CL_LerpPoint`'s fraction between `cl.mtime[1]` and `cl.mtime[0]`. The port
+pre-interpolated each message interval into 60 Hz sub-frames and showed the
+latest sub-frame due — 58 camera moves a second at 72 Hz, a sub-frame late,
+and the monsters without id's `U_NOLERP` behaviour.
+
+- ✅ **Fixed: Classic is id's, frame for frame.** The parser
+  (`demo::parse_demo`) keeps one frame per message with the client state id's
+  relink reads — each entity's `msg_origins[0..1]`, `msg_angles[0..1]` and
+  the `forcelink` its update set, `cl.mtime[0..1]`, `cl.mviewangles[0..1]`,
+  `cl.mvelocity[0..1]`, `cl.viewheight`, and whether the block ends the demo
+  (`svc_disconnect`). `client::cl_demo::demo_frame` runs `CL_ReadFromServer`
+  on them: the double clock, the read-ahead, `CL_LerpPoint` (the 0.1 s cap,
+  the pull back to the interval past 1%, which also starts a demo 0.1 s
+  before its first message) and `CL_RelinkEntities` (the >100-unit teleport
+  test, which goes straight to the new place; angles the short way;
+  `EF_ROTATE` at `anglemod(100*cl.time)`; `ent->forcelink` set by any update
+  the frame read, cleared once drawn). Effects spawn when their message is
+  read, at that `cl.time`; particles and the stair smoothing step by
+  `cl.time - cl.oldtime` (the smoothing stepped by the host frame time). `oracle/demo_lerp.py` plays the attract loop from
+  boot in id's client (the oracle, new `oracle_trace`) and the port at 72 Hz:
+  demo1, demo2, demo3 and demo1 again, 17,500 frames — the same number of
+  frames per demo, `cl.time` identical in every frame, the camera angles and
+  origin, `cl.velocity` and every entity within 2.5e-4 (x87 float noise), the
+  same entities in every frame.
+- **Two id quirks this brings, kept:** a message's `U_NOLERP` entities (the
+  `MOVETYPE_STEP` monsters) are drawn where it put them in the frame that
+  reads it and lerp from the message before in the frames after, so a
+  stepping monster jumps a message ahead for one frame and falls back
+  (`CL_ParseUpdate` sets `ent->forcelink` for `U_NOLERP` without copying the
+  history, and the relink clears it); and each demo opens with the camera
+  turning from the previous block's recorded angles (the signon's, 0) over
+  its first 0.1 s. Both are id's at 72 Hz.
+- The frame that reads a demo's closing `svc_disconnect` draws the last
+  frame's view at the new clock, as id's does before `Host_EndGame` leaves
+  the frame; id draws it under the loading plaque (`CL_NextDemo`'s
+  `SCR_BeginLoadingPlaque`), which the port does not draw (no loading plaque,
+  on purpose: the Open list).
+- Departure, invisible: id's first frame of a demo starts `cl.time` at 0
+  (`CL_ClearState` runs after the frame's increment), the port's at the
+  frame time; `CL_LerpPoint` moves either to 0.1 s before the first message.
+- **Timedemo:** one message a frame at frac 1, as before (frame counts
+  969 / 985 / 1090), through the same relink. Hashed with a fixed host frame
+  time (the tool's is the wall clock, so its frames vary run to run), every
+  frame of the three is identical to before except where the stair smoothing
+  moves: id's `V_CalcRefdef` steps it by `steptime = cl.time - cl.oldtime`,
+  in a timedemo a message interval, where the port stepped it by the host
+  frame time. Fixed with the demo path; the view kick and the palette fades
+  stay on `host_frametime`, as id's.
+- `quaketool play demo1..3` hashes change (the frames are id's now); goldens
+  and the walk workloads' hashes are unchanged, the sound tallies are the same.
+  The uncapped path (`Stepping::Uncapped`) needs nothing of its own for
+  demos any more: `quaketool framerate` measures 70.4 camera moves a second
+  at 72 Hz (id's: every frame the recorded player moves) and 468 at 480 Hz.
+
+**The 2026 extra on the same branch: `r_lerpmove`** (`client::lerpmove`,
+`LerpMove::Classic` by default and in Classic; the settings work turns it on
+in the 2026 profile). id's monsters step every 0.1 s (their thinks) and are
+drawn where each step put them; with `LerpMove::Smooth` a step mover
+(`MOVETYPE_STEP` live, `U_NOLERP` in a demo) glides from where it is drawn
+to its new place over 0.1 s, or over one frame when the server moves it
+every frame (airborne, pushed), turning the short way, and snaps on a new
+sighting, a new model, a move over 100 units on an axis and a clock that goes
+back. In a demo it is relinked where its message put it (QuakeSpasm's `f = 1`
+for its step movers), so id's `U_NOLERP` jump goes too. Only where the model
+is drawn changes (lights, sound and the box are the server's; no id1 monster
+model has a trail flag), and animation frames are not blended. Departure, off in Classic; the goldens, the walk and
+demo hashes and timedemo are unchanged by it. Measured in `FRAMERATE.md`
+("Monsters between their steps"): at 240 Hz a walking grunt is drawn moving
+in 99.8% of frames (Classic 4.2%), its largest move in a frame 0.17 units
+(4.1), half a step behind the server on average.
+
+## QuakeC errors end the game (2026-09-26, branch `q26/server`)
+
+The client dropped the server frame's `Result` (`client/cl_main.rs:300`), and the server
+isolated a failing think, touch, `blocked` or spawn function and carried on: a QuakeC
+runtime error vanished and the game went on. id's `PR_RunError` (pr_exec.c) prints the
+failing statement (`PR_PrintStatement`), a stack trace (`PR_StackTrace`) and the message,
+then `Host_Error ("Program error")` (host.c) shuts the server down, disconnects, stops the
+demo loop and drops to the console. Every profile now does that; it is id's, not an extra.
+
+- ✅ **The report, to the column.** `vm/print.rs` ports `PR_PrintStatement` (id's
+  `pr_opnames`, where the disassembler says `DIV_F`/`LOAD_F` id says `DIV`/`INDIRECT`),
+  `PR_GlobalString`, `PR_ValueString`, `PR_StackTrace` and `ED_Print`, padding included;
+  `a_program_error_is_pr_run_errors_report_and_halts_the_vm` pins the text.
+- ✅ **The longjmp.** The first error halts the VM: the QuakeC running, and whatever
+  called it through a builtin (a touch a `walkmove` fired), stops; the server frame or
+  level load returns the error; the server runs no more QuakeC. The census, a harness,
+  resumes the VM (`reset_execution`) and carries on, as before.
+- ✅ **Host_Error in the client.** `client::host::host_error` prints the report and
+  `Host_Error: Program error` to the console text and stops every sound
+  (`CL_Disconnect`'s `S_StopAllSounds`); `walk_frame` shows the disconnected screen from
+  then on and sets `Walk::host_error` for the host, which drops the walk, sets
+  `cls.demonum = -1` and brings the console down (the shell's side: not wired yet, see the
+  branch report). A changelevel, restart or `kill` whose QuakeC fails ends the game the
+  same way; a missing or corrupt map still leaves the level running (the port's degrade).
+- ✅ **`error` and `objerror` (CENSUS L16).** id prints `======SERVER ERROR in <function>:`
+  (or `OBJECT ERROR`) and the text, dumps `self` (`ED_Print`), and calls `Host_Error`
+  directly (no statement or trace); `objerror` frees `self` first. Both were `PR_RunError`s
+  with a banner of the port's own that left `self` alive. The census's forced touch of
+  start.bsp's unreachable teleporter now frees it: that map's census has 1 fault where it
+  had 3 (two fewer touches, frames, teleport sounds and splashes); every other map's
+  census is unchanged when run alone.
+- **Not id's:** a QuakeC error while `build_walk_map` / `build_walk_savegame` bring up a
+  NEW game returns `None` / the error text without id's report (the host prints "map not
+  found" or the text); no shareware map raises one (census: 0 spawn errors).
+
+## Settings and profiles: Classic and 2026 (2026-09-26, branch `q26/settings`)
+
+Every departure from id's game is a setting (`quake_rs::cvar::CVARS`, marked
+`departure`), and two profiles switch them: **Classic** (all off, id's
+`default.cfg` bindings) and **2026** (the default in the page). Options' 14th
+row is "Classic / 2026" (left/right switch it; Enter lists every setting),
+the console has `profile classic|2026`, the page `?classic` / `?2026`. The
+settings live in one typed value the host owns (`quake_rs::settings`), and
+`config.cfg` keeps them the id way. What that changed against id's WinQuake:
+
+- ✅ **Classic's controls are id's** (closes "Decisions, not work": the four
+  control departures, and Always Run). `default.cfg`'s bindings: `a`
+  `+lookup`, `d` `+moveup`, `c` `+movedown`, `w`/`s` unbound; `cl_forwardspeed`
+  / `cl_backspeed` 200; `f` unbound (the page's fullscreen key is
+  `vid_fkey`); `+jump` sets only `button2` (`cl_jumpswim` adds `upmove`); no
+  mouse look without `+mlook` (`freelook`). 2026 turns all six on.
+- ✅ **`+mlook` works** (`in_mlook`, cl_input.c/in_win.c): held (`\`, MOUSE3),
+  mouse Y looks and stops the pitch drift, else it walks (`m_forward`);
+  `lookstrafe` strafes only in mouse look; letting `+mlook` go with
+  `lookspring` re-levels the view (`IN_MLookUp`). Before, mouse look was
+  always on and `+mlook` did nothing. Test `ids_mouse_walks_and_mlook_held_looks`.
+- ✅ **`crosshair`** (view.c): `V_RenderView`'s conchars `+`, its cell's corner
+  at the view's centre, over the view and under the 2-D layer. Not drawn
+  before; off in Classic as id's default, on in 2026.
+- ✅ **`config.cfg` as `Host_WriteConfiguration` writes it**: `bind "KEY"
+  "command"` lines (`Key_WriteBindings`) and `name "value"` archived cvars
+  (`Cvar_WriteVariables`), read back through `Cmd_TokenizeString`/`COM_Parse`
+  (quotes, `//` comments) and `Cbuf_Execute`'s `;` split. It keeps a
+  `profile` line and only what differs from that profile's defaults (id's
+  lists every value; its defaults never changed after release — the port's
+  2026 defaults will, and a returning player should get them). A file from
+  before the profiles runs without the lines that only restate that page's
+  defaults. Tests in `config.rs`.
+- ✅ **The console's commands are one table** (`Cmd_AddCommand`): dispatch, Tab
+  completion and `wasm_help` read it. New from id: `bind` (`Key_Bind_f`: a
+  key's binding, or `bind KEY "command"`), `unbind`, `unbindall`, `exec`,
+  `togglemenu`, `toggleconsole`; a binding to any console line runs it on the
+  key down (`+` lines run their `-` half on the key up); the cvars
+  `cl_forwardspeed`, `cl_backspeed`, `m_pitch`, `lookspring`, `lookstrafe`,
+  `sensitivity`, `gamma`, `volume`, `bgmvolume`, `crosshair`, and
+  `d_mipscale` / `d_mipcap` (closes the Open item "The browser console has no
+  `d_mipscale`/`d_mipcap`"). An unknown command prints id's `Unknown command
+  "x"`. `stuffcmds`: the command line's `+` commands run after `config.cfg`.
+- ✅ **`host_time` is a double** in the shell, as host.c's: the menu's
+  spinning dot counts `(int)(host_time*10)` in double. The 2-D oracle
+  harness hands the port the C's `realtime` and `host_time` as doubles too.
+- **Options' port row** reads "Classic / 2026" with the profile at x=220 where
+  it read "Web extras": the `screen2d` residue on Options is 531 px (was 291)
+  at 320x200 and 640x400 (oracle/README.md). The C side of `screen2d.py` no
+  longer gets the port's Always Run and WASD: the port runs Classic.
+- **The scaled 2-D layer is at a whole scale** (`draw::screen_2d`): the
+  largest whole multiple of 320x200 that fits (3.5x at 1120x700 is 3x, 1.5x
+  at 480x300 1x), so every 2-D pixel is the same size. Only with
+  `wasm_scaled2d`, off in Classic.
+- **2026's picture** (`vid_native`): the page's box in device pixels over a
+  whole pixel size (Auto: the smallest that keeps a frame within 1920x1080
+  pixels), square pixels, the renderer's `hires` and Hor+ (`fov_adapt`), so
+  the window is filled at its own aspect; `wasm_uncapped` runs the frame
+  gate every refresh and steps the game with `Stepping::Uncapped`
+  (FRAMERATE.md).
+- **Proof of Classic:** `oracle/classic_check.py` (oracle/README.md,
+  "Classic"): goldens `4807aaa1` / `9ae2b478` / `c65b7046`, `quaketool play`
+  hashes and sound tallies (7 workloads x 3 sizes), timedemo frame counts,
+  the census report and id's edicts diffed on nine maps all identical to
+  `a50d8d7`; the oracle's eight rows as before; screen2d as before but the
+  Options row above; the sound oracle 28/28.
+- **`r_lerpmove`** (`lerp`'s smooth step movement) is a departure in
+  `Cvars` (`LerpMove::Smooth` in 2026, `Classic` in Classic), on the settings
+  page as "Smooth monsters". The merge of `q26/lerp` moved Classic's demo
+  playback to id's `CL_LerpPoint`: `classic_expected.txt`'s demo frame hashes
+  are re-recorded (the walks' and the demos' sound tallies unchanged), and
+  `classic_check.py` runs `demo_lerp.py` (id's client, frame by frame, the
+  whole attract loop: MATCH).
+- **`snd_modern`** (`audio`'s 2026 mixer: `snd::Fixes::ALL` at the device's
+  rate) is a departure in `Cvars` (`Cvars::sound`: `SoundMode::Modern` in
+  2026, `Classic` — id's mixer at 11025 Hz — in Classic), on the settings page
+  as "Full-rate sound"; the sound device reads it at every mix.
+- **Not done / slots:** `input`'s raw mouse and gamepad become a departure in
+  `Cvars` (on in `Cvars::modern`) when they land. id's F-key
+  shortcuts (F1–F12), `messagemode` and the `zoom_in` alias are still not
+  bound (CENSUS L12).

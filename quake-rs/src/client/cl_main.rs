@@ -21,7 +21,9 @@ use super::cl_input::{
     clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
 };
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
+use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
+use super::lerpmove::{LerpMove, MOVETYPE_STEP};
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
@@ -171,10 +173,23 @@ pub fn offset_box(origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3]
     )
 }
 
+/// The frame of a game `Host_Error` has ended: nothing — the client is
+/// disconnected, and id's console covers the screen (`con_forcedup`) — and
+/// what it said to the sound layer.
+fn disconnected_frame(vid: &Vid, sound: Vec<SoundCall>) -> ClientFrame {
+    ClientFrame { image: render::Image::new(vid.width, vid.height, [0, 0, 0]), cshifts: Vec::new(), sound }
+}
+
 /// One live client frame (see the module doc) of `host_frametime` seconds —
 /// `Host_FilterTime`'s double, which the server's `sv.time` advances by
 /// exactly (`client_frame_f64`); the client's own timing takes it as an `f32`.
+/// A QuakeC error in the server's frame (or in a level change it makes) is
+/// `Host_Error`: [`host_error`] ends the game, and this frame and every later
+/// one is the disconnected screen, until the host drops the walk.
 pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    if w.host_error.is_some() {
+        return disconnected_frame(vid, Vec::new());
+    }
     let dt = host_frametime as f32;
     let (render_w, render_h) = (vid.width, vid.height);
     let mut sound = Vec::new();
@@ -299,14 +314,19 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
-        let _ = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping);
+        if let Err(e) = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping) {
+            // Host_Error longjmps out of the host frame: none of this frame's
+            // messages reach the client.
+            host_error(w, &e, &mut sound);
+            return disconnected_frame(vid, sound);
+        }
         // CL_LerpPoint on a local server: cl.time = the message time, sv.time
         // after this frame's physics.
         w.clock = w.server.time();
         apply_fixangle(w);
         parse_client_damage(w, before);
         // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
-        for (ent, text) in crate::builtins::take_stufftext() {
+        for (ent, text) in w.server.drain_stufftext() {
             if ent == w.player && stufftext_bonus_flash(&text) {
                 w.bonus_blend = BONUS_PERCENT;
             }
@@ -366,6 +386,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // pressed a button). Reload the current level with the entry inventory.
         // `else if` so a changelevel this frame takes precedence over a restart.
         try_restart(w, &mut sound);
+    }
+    if w.host_error.is_some() {
+        return disconnected_frame(vid, sound); // the new level's QuakeC failed
     }
 
     // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the
@@ -558,6 +581,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Static entities wait for the camera: R_StoreEfrags draws one when a leaf
     // it touches is in the view's PVS (after the camera, below).
     let mut statics: Vec<StaticDesc> = Vec::new();
+    let smooth = w.lerpmove == LerpMove::Smooth;
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
@@ -692,7 +716,22 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             w.trail_org.entry(ent).or_insert(TrailHead::at(origin));
             trail_spawns.push((ent, origin, ttype));
         }
+        // r_lerpmove (the 2026 extra): a monster glides between its steps
+        // where it is drawn; its trail and everything else keep the server's
+        // origin.
+        let (origin, angles) = if smooth && w.server.vm.ent_float(ent, w.server.vm.fo.movetype) == MOVETYPE_STEP {
+            let model = w.server.vm.ent_float(ent, w.server.vm.fo.modelindex) as usize;
+            let drawn = w.glides.draw(ent, model, origin, angles, f64::from(w.clock));
+            (drawn.origin, drawn.angles)
+        } else {
+            (origin, angles)
+        };
         descs.push((m, origin, angles, frame, color, skin));
+    }
+    if smooth {
+        w.glides.end_frame();
+    } else {
+        w.glides.clear();
     }
 
     // Emit the collected trails (after the entity loop to keep the borrows
@@ -1011,6 +1050,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
     view_hook(&mut img, vrect, &w.palette);
+    // V_RenderView: the crosshair over the view, before the 2-D layer.
+    if let Some(cc) = w.conchars.as_ref().filter(|_| w.crosshair) {
+        render::draw_crosshair(&mut img, cc, &vrect, &w.palette);
+    }
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {

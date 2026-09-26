@@ -13,7 +13,7 @@ with the level:
      (the torches among them) take the old ones' place;
   3. walking toward a torch makes its channel audible, and the worklet's
      output is sound, not silence;
-  4. Classic (`sound_mode classic`): id's mixer at 11025 Hz, which the
+  4. Classic (`snd_modern 0`): id's mixer at 11025 Hz, which the
      worklet reconstructs at the device's rate, the level's loops kept;
   5. demo<->walk mode transitions stop everything the same way;
   6. the ring's lead (how far ahead of the device the program has mixed: the
@@ -145,7 +145,7 @@ with sync_playwright() as p:
 
     # Classic: id's mixer at 11025 Hz, reconstructed at the device's rate.
     statics_before = stats(pg)["statics"]
-    pg.evaluate("quake.call('sound_mode', 'classic')")
+    pg.evaluate("quake.call('exec', 'snd_modern 0')")
     time.sleep(1.0)
     ra = pg.evaluate("quake.audio.ring()")
     pg.evaluate("quake.audio.resetPeak()")
@@ -159,7 +159,7 @@ with sync_playwright() as p:
     check("Classic: the worklet plays 11025 Hz at the device's rate",
           abs(ring_rate - 11025) < 600 and dev_rate > 30000 and rb["underruns"] == ra["underruns"],
           f"ring {ring_rate:.0f}/s, device {dev_rate:.0f}/s, underruns +{rb['underruns'] - ra['underruns']}")
-    pg.evaluate("quake.call('sound_mode', '2026')")
+    pg.evaluate("quake.call('exec', 'snd_modern 1')")
 
     # Mode transition (walk -> demo) stops everything the same way, and the
     # demo's signon registers its own loops.

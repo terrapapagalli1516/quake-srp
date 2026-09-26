@@ -52,7 +52,7 @@ mod tests {
     }
 
     fn frame(w: &mut Walk) {
-        let _ = step_walk(w, 0.1, false, 320, 200);
+        let _ = step_walk(w, 0.1, false, &crate::vid::mode_vid(320, 200));
     }
 
     fn state(w: &Walk, e: i32) -> f32 {
@@ -200,10 +200,10 @@ mod tests {
                     w.pitch = (-to[2]).atan2(to[0].hypot(to[1])).to_degrees();
                     pin(&mut w, [eye[0], eye[1], eye[2] - 22.0]); // view_ofs '0 0 22'
                     let (rng, beams) = (w.prng, w.beams.clone());
-                    let (with_bolt, _) = step_walk(&mut w, 0.0, false, 640, 400);
+                    let (with_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(640, 400));
                     w.prng = rng;
                     w.beams.clear();
-                    let (without_bolt, _) = step_walk(&mut w, 0.0, false, 640, 400);
+                    let (without_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(640, 400));
                     w.beams = beams;
                     let diff = with_bolt.rgb.iter().zip(&without_bolt.rgb).filter(|(a, b)| a != b).count();
                     assert!(diff > 2000, "the bolt across the pit changes {diff} pixels");

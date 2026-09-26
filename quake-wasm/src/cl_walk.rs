@@ -7,6 +7,7 @@
 //! the embedded shareware data.
 
 use quake_rs::client::cl_main::walk_frame;
+use quake_rs::client::Vid;
 use quake_rs::render;
 
 use crate::app::Walk;
@@ -14,14 +15,8 @@ use crate::app::Walk;
 /// One frame of the live walk at `render_w x render_h`: the finished screen
 /// and its colour shifts (`cl.cshifts`, applied by the host after the menu and
 /// console); the frame's sound calls are carried out.
-pub(crate) fn step_walk(
-    w: &mut Walk,
-    dt: f64,
-    menu_up: bool,
-    render_w: usize,
-    render_h: usize,
-) -> (render::Image, Vec<([u8; 3], f32)>) {
-    let frame = walk_frame(w, dt, menu_up, &crate::vid::vid(render_w, render_h));
+pub(crate) fn step_walk(w: &mut Walk, dt: f64, menu_up: bool, vid: &Vid) -> (render::Image, Vec<([u8; 3], f32)>) {
+    let frame = walk_frame(w, dt, menu_up, vid);
     crate::snd_dma::play(&w.pak, frame.sound);
     (frame.image, frame.cshifts)
 }
@@ -43,6 +38,59 @@ mod tests {
     use crate::menu::menu_select;
     use crate::test_util::*;
     use crate::vid::set_resolution;
+
+    /// The console's scrollback, oldest first, without its blank lines.
+    fn console_lines() -> Vec<String> {
+        APP.with(|c| {
+            let b = c.borrow();
+            b.as_ref().unwrap().console.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
+        })
+    }
+
+    /// Whether the App still has a walk, whether it is disconnected, and
+    /// `cls.demonum`.
+    fn game_state() -> (bool, bool, i32) {
+        APP.with(|c| {
+            let b = c.borrow();
+            let a = b.as_ref().unwrap();
+            (a.walk.is_some(), a.disconnected, a.cls.demonum)
+        })
+    }
+
+    /// Host_Error from a QuakeC runtime error in the live game (the frame's
+    /// Result was dropped, and the game went on): here `makevectors` (#1),
+    /// which PlayerPreThink calls every frame, made to fail. As in id's, the
+    /// report (the statement, the stack trace, the message) and
+    /// `Host_Error: Program error` reach the console, the walk is gone
+    /// (CL_Disconnect), and no demo loop starts (cls.demonum = -1).
+    #[test]
+    fn a_quakec_error_in_a_frame_ends_the_game_like_host_error() {
+        set_resolution(320, 200);
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.server.vm.builtins[1] = |vm| Err(vm.run_error("test fault")));
+        step(0.05);
+        assert_eq!(game_state(), (false, true, -1), "CL_Disconnect, cls.demonum = -1");
+        let lines = console_lines();
+        assert!(lines.iter().any(|l| l.ends_with(" : PlayerPreThink")), "the stack trace: {lines:?}");
+        assert_eq!(lines[lines.len() - 2..], ["test fault", "Host_Error: Program error"]);
+    }
+
+    /// The same from the console: `kill` runs ClientKill, whose first
+    /// `bprint` (#23) is made to fail.
+    #[test]
+    fn a_quakec_error_in_kill_ends_the_game_like_host_error() {
+        set_resolution(320, 200);
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.server.vm.builtins[23] = |vm| Err(vm.run_error("test fault")));
+        console_toggle();
+        run_console_line("kill");
+        assert_eq!(game_state(), (false, true, -1), "CL_Disconnect, cls.demonum = -1");
+        let lines = console_lines();
+        assert!(lines.iter().any(|l| l.ends_with(" : ClientKill")), "the stack trace: {lines:?}");
+        assert_eq!(lines[lines.len() - 2..], ["test fault", "Host_Error: Program error"]);
+    }
 
     /// Regression for the one-time texture/lighting "pops" in the first second of
     /// live play (two distinct root causes, both whole-view shimmers):
@@ -146,17 +194,17 @@ mod tests {
         let mut w = build_walk().expect("e1m1 walk boots from the embedded pak");
         // Let the spawn settle (telefrag effects, initial thinks).
         for _ in 0..10 {
-            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+            let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         }
         w.next_impulse = 9; // CheatCommand: all weapons + full cells
-        let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         w.next_impulse = 8; // select the thunderbolt
-        let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         // Hold fire across several frames (W_FireLightning re-broadcasts the
         // beam each weapon frame, exercising the same-entity slot REPLACEMENT).
         w.in_attack = true;
         for _ in 0..6 {
-            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+            let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         }
         assert!(
             w.beams.any_live(w.clock),
@@ -202,10 +250,10 @@ mod tests {
         // beam and once with the store cleared. The ONLY difference is the bolt
         // model pieces, so differing pixels prove the bolt drew into the scene.
         let rng = w.prng;
-        let (with_bolt, _) = step_walk(&mut w, 0.0, false, 320, 200);
+        let (with_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200));
         w.prng = rng;
         w.beams.clear();
-        let (without_bolt, _) = step_walk(&mut w, 0.0, false, 320, 200);
+        let (without_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200));
         let diff = with_bolt
             .rgb
             .iter()
@@ -312,7 +360,7 @@ mod tests {
     fn damage_in_god_mode_still_flashes_and_kicks() {
         let mut w = build_walk().expect("e1m1 boots");
         for _ in 0..3 {
-            step_walk(&mut w, 0.05, false, 320, 200);
+            step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         }
         let p = w.player;
         let flags = w.server.vm.ent_get_float(p, "flags") as i32;
@@ -326,7 +374,7 @@ mod tests {
         qc_damage(&mut w, p, src, 20.0);
         assert_eq!(w.server.vm.ent_get_float(p, "health"), 100.0, "god mode: no health lost");
         assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 20.0, "T_Damage counted the hit");
-        let (_, cshifts) = step_walk(&mut w, 0.05, false, 320, 200);
+        let (_, cshifts) = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 0.0, "sent and zeroed");
         assert!(
             cshifts.iter().any(|&(c, pct)| c == [255, 0, 0] && pct > 0.0),
@@ -347,7 +395,7 @@ mod tests {
     #[test]
     fn dlights_are_drawn_before_they_decay() {
         let mut w = build_walk().expect("e1m1 boots");
-        step_walk(&mut w, 0.05, false, 320, 200);
+        step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         let now = w.clock;
         w.dlights.alloc(0, [0.0; 3], 350.0, now + 0.5, 300.0, 0.0, now);
         w.dlights.alloc(0, [64.0, 0.0, 0.0], 200.0, now - 0.01, 0.0, 0.0, now);
@@ -355,7 +403,7 @@ mod tests {
         assert_eq!(drawn.len(), 1, "the dead light is not pushed");
         assert_eq!(drawn[0].radius, 350.0, "full radius on its first frame");
         let before = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
-        step_walk(&mut w, 0.05, false, 320, 200);
+        step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         let after = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
         assert!((before - after - 0.05 * 300.0).abs() < 1e-3, "{before} -> {after}");
     }
@@ -387,13 +435,13 @@ mod tests {
         let mut w = build_walk().expect("e1m1 boots");
         assert_ne!(client_items(&w) & 1, 0, "the player spawns with the shotgun (bit 0)");
         assert!(unflashed(&w), "new game");
-        step_walk(&mut w, 0.05, false, 320, 200);
+        step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         assert!(unflashed(&w), "the first frame stamps nothing");
         for _ in 0..30 {
-            step_walk(&mut w, 0.05, false, 320, 200);
+            step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         }
         w.next_impulse = 9; // every weapon
-        step_walk(&mut w, 0.05, false, 320, 200);
+        step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         let t1 = w.server.time();
         assert_eq!(w.item_gettime[4], t1, "the rocket launcher (bit 4) was just got");
         assert_eq!(w.item_gettime[0], 0.0, "the carried shotgun was never stamped");
@@ -401,19 +449,20 @@ mod tests {
         try_restart(&mut w, &mut Vec::new());
         assert!(unflashed(&w), "restart");
         w.next_impulse = 9;
-        step_walk(&mut w, 0.05, false, 320, 200);
+        step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         assert_ne!(w.item_gettime[4], 0.0, "got again after the restart");
         try_changelevel(&mut w, "e1m2", &mut Vec::new());
         assert_ne!(client_items(&w) & (1 << 4), 0, "the rocket launcher is carried");
         assert!(unflashed(&w), "changelevel");
-        step_walk(&mut w, 0.05, false, 320, 200);
+        step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         assert!(unflashed(&w));
 
         let text = w.server.write_savegame();
-        let mut l = quake_rs::client::host_cmd::build_walk_savegame(w.pak.clone(), &text, &mut Vec::new())
+        let rand = std::rc::Rc::clone(w.server.rand());
+        let mut l = quake_rs::client::host_cmd::build_walk_savegame(w.pak.clone(), &text, &rand, &mut Vec::new())
             .expect("the save loads");
         assert!(unflashed(&l), "load");
-        step_walk(&mut l, 0.05, false, 320, 200);
+        step_walk(&mut l, 0.05, false, &crate::vid::mode_vid(320, 200));
         assert!(unflashed(&l));
     }
 
@@ -444,7 +493,7 @@ mod tests {
     fn single_player_pause_freezes_the_world_but_not_the_host_clock() {
         let mut w = build_walk().expect("e1m1 boots");
         for _ in 0..3 {
-            step_walk(&mut w, 0.1, false, 320, 200);
+            step_walk(&mut w, 0.1, false, &crate::vid::mode_vid(320, 200));
         }
         w.particles.spawn_burst([0.0; 3], [0.0; 3], 73, 20, w.clock, &mut w.prng);
         w.centerprint = Some(("paused".into(), w.host_time + 2.0));
@@ -453,7 +502,7 @@ mod tests {
         let (sv0, cl0, parts0) = (w.server.time(), w.clock, w.particles.particles().len());
         let org0 = w.particles.particles()[0].origin;
         for _ in 0..25 {
-            step_walk(&mut w, 0.1, true, 320, 200); // menu up for 2.5 s
+            step_walk(&mut w, 0.1, true, &crate::vid::mode_vid(320, 200)); // menu up for 2.5 s
         }
         assert_eq!(w.server.time(), sv0, "sv.time stands still");
         assert_eq!(w.clock, cl0, "cl.time stands still");
@@ -462,7 +511,7 @@ mod tests {
         assert_eq!(w.next_impulse, 2, "the impulse waits for the server");
         assert!(w.centerprint.is_none(), "the centerprint timed out behind the menu");
         assert_eq!(w.damage_blend, 0.0, "the damage flash faded behind the menu");
-        step_walk(&mut w, 0.1, false, 320, 200);
+        step_walk(&mut w, 0.1, false, &crate::vid::mode_vid(320, 200));
         assert!(w.server.time() > sv0, "the game resumes when the menu closes");
         assert_eq!(w.next_impulse, 0, "and the waiting impulse is sent");
     }
@@ -527,9 +576,9 @@ mod tests {
         // intermission flag; the plaque/number region (virtual x>=160, y 56..160)
         // is 3-D view in one and Sbar_IntermissionOverlay in the other.
         let (with_overlay, without_overlay) = walk_mut(|w| {
-            let a = step_walk(w, 0.0, false, 320, 200).0;
+            let a = step_walk(w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
             w.intermission = 0;
-            let b = step_walk(w, 0.0, false, 320, 200).0;
+            let b = step_walk(w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
             w.intermission = 1;
             (a, b)
         });
@@ -647,7 +696,7 @@ mod tests {
     fn underwater_view_renders_into_the_warp_buffer() {
         use quake_rs::progs::OFS_PARM0;
         let mut w = build_walk().expect("e1m1 boots");
-        let _ = step_walk(&mut w, 0.05, false, 320, 200);
+        let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         let p = w.player;
         w.server.vm.ent_set_float(p, "movetype", 8.0); // MOVETYPE_NOCLIP: stays put
         let frame_at = |w: &mut Walk, org: [f32; 3], rw: usize, rh: usize| {
@@ -659,7 +708,7 @@ mod tests {
             setorigin(vm).expect("setorigin");
             vm.ent_set_vector(p, "velocity", [0.0; 3]);
             w.renderer.stats_begin();
-            let (img, _) = step_walk(w, 0.0, false, rw, rh);
+            let (img, _) = step_walk(w, 0.0, false, &crate::vid::mode_vid(rw, rh));
             let px = w.renderer.stats_end().world_pixels;
             let eye = [org[0], org[1], org[2] + 22.0];
             assert_eq!((img.w, img.h), (rw, rh));
@@ -699,11 +748,11 @@ mod tests {
         assert!(t0 > 1.0, "sv.time at spawn: 1.0 + the signon frames ({t0})");
         assert_eq!(w.clock, t0, "the first frame draws at cl.time = sv.time");
         for _ in 0..5 {
-            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+            let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
             assert_eq!(w.clock, w.server.time());
         }
         let t = w.clock;
-        let _ = step_walk(&mut w, 0.05, true, 320, 200); // paused behind the menu
+        let _ = step_walk(&mut w, 0.05, true, &crate::vid::mode_vid(320, 200)); // paused behind the menu
         assert_eq!((w.clock, w.server.time()), (t, t));
         try_restart(&mut w, &mut Vec::new());
         assert_eq!(w.clock, w.server.time());
@@ -721,10 +770,10 @@ mod tests {
     fn the_server_advances_by_the_hosts_double() {
         let mut w = build_walk().expect("e1m1 boots");
         let t0 = w.server.sv_time();
-        let _ = step_walk(&mut w, 1.0 / 72.0, false, 320, 200);
+        let _ = step_walk(&mut w, 1.0 / 72.0, false, &crate::vid::mode_vid(320, 200));
         assert_eq!(w.server.sv_time(), t0 + 1.0 / 72.0);
         assert_ne!(1.0 / 72.0, f64::from((1.0f64 / 72.0) as f32));
-        let _ = step_walk(&mut w, 0.05, true, 320, 200); // paused behind the menu
+        let _ = step_walk(&mut w, 0.05, true, &crate::vid::mode_vid(320, 200)); // paused behind the menu
         assert_eq!(w.server.sv_time(), t0 + 1.0 / 72.0);
     }
 
@@ -750,7 +799,7 @@ mod tests {
     fn rerender(w: &mut Walk, rng: quake_rs::particles::Lcg) -> (render::Image, u64) {
         w.prng = rng;
         w.renderer.stats_begin();
-        let (img, _) = step_walk(w, 0.0, true, 320, 200);
+        let (img, _) = step_walk(w, 0.0, true, &crate::vid::mode_vid(320, 200));
         (img, w.renderer.stats_end().alias_models)
     }
 
@@ -765,7 +814,7 @@ mod tests {
         w.yaw = 90.0;
         w.pitch = 0.0;
         for _ in 0..10 {
-            let _ = step_walk(&mut w, 0.05, false, 320, 200);
+            let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
         }
         let vm = &w.server.vm;
         let e = (1..vm.num_edicts() as i32)

@@ -6,8 +6,8 @@
 //! The same [`quake_rs::client`] frames the page runs (`walk_frame`,
 //! `demo_frame`), driven the way `web/bench.py` drives the page, one host
 //! frame per 1/72 s through `Host_FilterTime`, with the page's screen (its 4:3
-//! display, no Web extras) and the host's defaults (the default bindings and
-//! viewsize, the menu and console closed); each finished frame is presented
+//! display) and the Classic profile's settings (id's bindings and viewsize,
+//! every departure off, the menu and console closed); each finished frame is presented
 //! as the page presents it — through the `cl.cshifts` + gamma ramps into RGBA
 //! (`VID_ShiftPalette`). Workloads, as in `web/bench.py`:
 //!
@@ -23,21 +23,29 @@
 //! default, bench.py's 60 + 600), so the native client's frames can be
 //! compared with the browser's byte for byte; `--ppm PREFIX` also writes those
 //! frames as `PREFIX-<workload>-<W>x<H>-<frame>.ppm`. Each run ends with a
-//! tally of the sound calls its frames made.
+//! tally of the sound calls its frames made. `--trace PATH` writes, for each
+//! demo frame, what `CL_RelinkEntities` drew — the clocks, the view angles,
+//! the view entity, `cl.velocity` and every relinked entity — as the records
+//! of the oracle's `oracle_trace` (`oracle/demo_lerp.py` compares the two).
 //!
 //! Several workloads and resolutions run in `bench.py`'s order (each workload
-//! at each resolution) in one host, as the page runs them: QuakeC's
-//! `random()` is process-global like id's `rand()`, so a run's shots and
-//! monsters depend on what ran before it. Between runs the host takes
-//! `bench.py`'s realigning `step(0.2)` on the previous game, and a walk
-//! workload boots e1m1 before the console's `map` (the page's `boot()`).
+//! at each resolution) in one host, as the page runs them: the host hands
+//! every server it runs its one [`QRand`], as id's servers all draw from one
+//! libc `rand()`, so a run's shots and monsters depend on what ran before it.
+//! Between runs the host takes `bench.py`'s realigning `step(0.2)` on the
+//! previous game, and a walk workload boots e1m1 before the console's `map`
+//! (the page's `boot()`). A demo falls its particles by the `sv_gravity` the
+//! last game left, as the page's do.
 
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use quake_rs::client::host::host_filter_time;
 use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPlay, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
+use quake_rs::qrand::QRand;
 use quake_rs::render;
+use quake_rs::settings::{Profile, Settings};
 
 use super::video::VideoArgs;
 
@@ -103,17 +111,21 @@ fn fnv(rgba: &[u8]) -> u32 {
     h
 }
 
-/// The page's host, for as long as the runs last: its clocks, its menu (at
-/// the defaults, closed) and the game it is running.
+/// The page's host, for as long as the runs last: its clocks, its settings
+/// (Classic's) and the game it is running.
 struct Host {
     pak: Pak,
-    menu: render::Menu,
+    settings: Settings,
     keys: [bool; 256],
     gamma: [u8; 256],
     realtime: f64,
     oldrealtime: f64,
     mode: Option<Mode>,
     vid: Vid,
+    /// The session's random streams, handed to every server it runs.
+    rand: Rc<QRand>,
+    /// The `sv_gravity` cvar as the last game left it, for the demos.
+    sv_gravity: f32,
     /// The renderer threads each game draws with.
     threads: usize,
 }
@@ -124,8 +136,9 @@ impl Host {
     fn step(&mut self, raw_dt: f32, sound: &mut Vec<SoundCall>) -> Option<ClientFrame> {
         self.realtime += raw_dt as f64;
         let dt = host_filter_time(self.realtime, &mut self.oldrealtime)?;
-        let km = cl_input::derive_key_move(&self.menu, &self.keys);
-        let viewsize = self.menu.viewsize();
+        let s = &self.settings;
+        let km = cl_input::derive_key_move(&s.cvars, &s.binds, &self.keys);
+        let viewsize = s.cvars.viewsize;
         Some(match self.mode.as_mut()? {
             Mode::Walk(wk) => {
                 wk.key_move = km;
@@ -137,10 +150,12 @@ impl Host {
                 d.show_scores = km.showscores;
                 if d.at_end() {
                     if let Some(next) = cl_demo::build_demo_n(self.pak.clone(), d.demonum + 1, sound) {
+                        let sv_gravity = d.sv_gravity;
                         **d = next;
                         d.renderer.set_threads(self.threads);
                         d.viewsize = viewsize;
                         d.show_scores = km.showscores;
+                        d.sv_gravity = sv_gravity;
                     }
                 }
                 cl_demo::demo_frame(d, dt as f32, false, &self.vid)
@@ -151,14 +166,17 @@ impl Host {
     /// Boot `workload` as `bench.py`'s `startWorkload` does.
     fn start(&mut self, workload: &str, sound: &mut Vec<SoundCall>) -> Result<(), String> {
         let is_walk = ["walk_", "fire_", "quad_"].iter().any(|p| workload.starts_with(p));
+        if let Some(Mode::Walk(wk)) = &self.mode {
+            self.sv_gravity = wk.server.sv_gravity();
+        }
         self.mode = Some(if is_walk {
             // boot(): e1m1; then the console's `map <map>` for another map.
             let e1m1 = "maps/e1m1.bsp";
-            let mut walk = host_cmd::build_walk_map(self.pak.clone(), e1m1, sound)
+            let mut walk = host_cmd::build_walk_map(self.pak.clone(), e1m1, &self.rand, sound)
                 .ok_or_else(|| format!("{e1m1} would not load"))?;
             let map = format!("maps/{}.bsp", &workload[5..]);
             if map != e1m1 {
-                walk = host_cmd::build_walk_map(self.pak.clone(), &map, sound)
+                walk = host_cmd::build_walk_map(self.pak.clone(), &map, &self.rand, sound)
                     .ok_or_else(|| format!("{map} would not load"))?;
             }
             if workload.starts_with("quad_") {
@@ -171,6 +189,7 @@ impl Host {
         } else if let Some(n) = workload.strip_prefix("demo").and_then(|n| n.parse::<usize>().ok()) {
             let mut demo = cl_demo::build_demo_n(self.pak.clone(), n.max(1) - 1, sound)
                 .ok_or_else(|| format!("{workload} would not load"))?;
+            demo.sv_gravity = self.sv_gravity;
             demo.renderer.set_threads(self.threads);
             Mode::Demo(Box::new(demo))
         } else {
@@ -182,8 +201,9 @@ impl Host {
 
 pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<String, String> {
     // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX]
-    // [video options].
+    // [--trace PATH] [video options].
     let (mut frames, mut res, mut every, mut ppm) = (660u32, "320x200".to_string(), 30u32, None);
+    let mut trace: Option<String> = None;
     let mut video = VideoArgs::default();
     let mut i = 0;
     while i < rest.len() {
@@ -205,6 +225,10 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 ppm = Some(val(i)?.clone());
                 i += 1;
             }
+            "--trace" => {
+                trace = Some(val(i)?.clone());
+                i += 1;
+            }
             n => frames = n.parse().map_err(|_| format!("unknown argument {n:?}"))?,
         }
         i += 1;
@@ -217,20 +241,23 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     // The archive in memory, as the page embeds it.
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
-    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars };
+    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars, mip: render::MipCvars::DEFAULT };
     let mut host = Host {
         pak,
-        menu: render::Menu::new(),
+        settings: Settings::new(Profile::Classic),
         keys: [false; 256],
         gamma: render::build_gamma_table(1.0),
         realtime: 0.0,
         oldrealtime: 0.0,
         mode: None,
         vid,
+        rand: Rc::new(QRand::new()),
+        sv_gravity: quake_rs::server::ServerCvars::default().sv_gravity,
         threads: video.threads(),
     };
     let mut rgba: Vec<u8> = Vec::new();
     let mut o = String::new();
+    let (mut trace_out, mut traced) = (String::new(), 0usize);
 
     for workload in workloads.split(',') {
         let _ = writeln!(o, "{workload}");
@@ -260,6 +287,9 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 }
                 let mut sound = Vec::new();
                 let Some(frame) = host.step(DT, &mut sound) else { continue };
+                if let (Some(_), Some(Mode::Demo(d))) = (&trace, host.mode.as_ref()) {
+                    trace_frame(&mut trace_out, &mut traced, d);
+                }
                 tally.add(&sound);
                 tally.add(&frame.sound);
                 // V_UpdatePalette + VID_ShiftPalette: the cshifts and gamma as
@@ -290,5 +320,32 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
             );
         }
     }
+    if let Some(path) = &trace {
+        std::fs::write(path, &trace_out).map_err(|e| format!("cannot write {path}: {e}"))?;
+    }
     Ok(o)
+}
+
+/// One `--trace` record, the `traced`-th: the frame's clocks, what
+/// `CL_RelinkEntities` drew for the camera, and each relinked entity
+/// (statics are never relinked).
+fn trace_frame(out: &mut String, traced: &mut usize, d: &DemoPlay) {
+    let f = &d.demo.frames[d.idx];
+    let v = &d.view;
+    let _ = writeln!(
+        out,
+        "F {} t={:.17} old={:.17} m0={} m1={} ang={} {} {} vorg={} {} {} vel={} {} {}",
+        *traced, d.time, d.oldtime, f.time, f.prev_time, v.view_angles[0], v.view_angles[1], v.view_angles[2],
+        v.view_entity_origin[0], v.view_entity_origin[1], v.view_entity_origin[2],
+        v.velocity[0], v.velocity[1], v.velocity[2],
+    );
+    *traced += 1;
+    for e in v.entities.iter().filter(|e| e.num >= 0) {
+        let model = d.demo.model_precache.get(e.modelindex).map_or("", String::as_str);
+        let _ = writeln!(
+            out,
+            "E {} {model} {} {} {} {} {} {} {}",
+            e.num, e.origin[0], e.origin[1], e.origin[2], e.angles[0], e.angles[1], e.angles[2], e.frame
+        );
+    }
 }

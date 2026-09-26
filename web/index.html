@@ -70,7 +70,11 @@
      on a wide monitor). aspect-ratio:4/3 overrides the 16:10 backing store so the
      frame is presented exactly as Quake was meant to be seen. */
   #wrap:fullscreen { width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; background:#000; }
-  #wrap:fullscreen canvas { height:100vh; width:auto; aspect-ratio:4 / 3; }
+  #wrap:fullscreen canvas { height:100vh; width:auto; aspect-ratio:4 / 3; border:0; }
+  /* Native resolution (the 2026 profile, vid_native): the picture fills the
+     page's box for it at the box's own aspect — the window less the same
+     chrome, or the whole screen in fullscreen — and fitCanvas() sizes the
+     canvas to whole device pixels per picture pixel (see there). */
 
   /* Boot panel (inside the overlay): download progress -> instantiate -> boot. */
   #boot { width:min(420px, 82%); }
@@ -182,7 +186,7 @@
       <div class="col">
         <h2>Move</h2>
         <div class="keys">
-          <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>move / strafe</span>
+          <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>move / strafe (Classic: id's arrows and <kbd>,</kbd><kbd>.</kbd>)</span>
           <span class="k">mouse</span><span>look (click to lock; or click-drag)</span>
           <span class="k"><kbd>←</kbd><kbd>→</kbd></span><span>turn</span>
           <span class="k"><kbd>Space</kbd></span><span>jump / swim up</span>
@@ -204,9 +208,9 @@
           <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
           <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
           <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
-          <span class="k">Options</span><span>screen size, brightness, mouse, always run — Video Options for the resolution, Customize controls to rebind keys, Web extras for the port's opt-in extras (all off by default)</span>
+          <span class="k">Options</span><span>screen size, brightness, mouse, always run — Customize controls to rebind keys, Video Options for id's 4:3 modes, and <em>Classic / 2026</em>: ←/→ switches between id's WinQuake exactly and this port's 2026 settings, Enter lists each one (or open the page as <code>?classic</code> / <code>?2026</code>)</span>
           <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
-          <span class="k"><kbd>F</kbd></span><span>fullscreen</span>
+          <span class="k"><kbd>F</kbd></span><span>fullscreen (2026; Classic leaves F unbound, as id's)</span>
           <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
         </div>
       </div>
@@ -222,7 +226,7 @@
         <code>impulse 9</code><span>all weapons + ammo</span>
         <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
         <code>kill</code><span>respawn</span>
-        <code>wasm_showfps 1</code><span>the Web extras (not in id's Quake, all off by default): <code>wasm_uncapped</code> lifts the 72 fps cap, <code>wasm_showfps</code> shows the frame rate, <code>wasm_exactpersp</code> draws walls with exact perspective (also on Options &gt; Web extras)</span>
+        <code>profile classic</code><span>id's WinQuake exactly (every departure off, id's keys); <code>profile 2026</code> the port's settings, each also a variable (<code>wasm_showfps 1</code>, <code>vid_pixelsize 2</code>, …; Options &gt; Classic / 2026)</span>
         <code>help</code><span>id's Help/Ordering screen</span>
         <code>wasm_help</code><span>this port's list of console commands (<code>echo</code>, <code>clear</code>, the demo commands, …)</span>
       </div>
@@ -263,10 +267,10 @@ const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, REA
             RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19 };
 const CTL_BYTES = 256, RING_BYTES = 1 << 16;
 // Record kinds, in (IN_*) and out (OUT_*).
-const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7, AUDIO_CLOCK: 10 };
+const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7, WINDOW: 9, AUDIO_CLOCK: 10 };
 const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15 };
 // State flags (the STATE record).
-const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16 };
+const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, FKEY: 64 };
 
 let worker = null, ctl = null, ring = null;
 // The frame slots the worker made (it makes a larger set when a frame
@@ -274,7 +278,7 @@ let worker = null, ctl = null, ring = null;
 let frameSlots = null, slotBytes = 0, slotsGen = 0;
 let exp = null;                    // the automation proxy (window.quake.call by name), set once running
 // The program's UI state as of its last turn (the STATE record).
-const gameState = { flags: 0, menuScreen: 0 };
+const gameState = { flags: 0, menuScreen: 0, pixelSize: 0 };
 
 // Is the in-game menu up (capturing keyboard)?
 function menuVisible() { return !!(gameState.flags & ST.MENU); }
@@ -284,6 +288,11 @@ function consoleVisible() { return !!(gameState.flags & ST.CONSOLE); }
 function inWalkMode() { return !!(gameState.flags & ST.WALK); }
 // Is the Customize-controls screen waiting for a key (menu.c bind_grab)?
 function bindGrabbing() { return !!(gameState.flags & ST.BIND_GRAB); }
+// Native resolution (vid_native): device pixels per picture pixel, 0 when the
+// picture is a video mode shown in the 4:3 box.
+function nativePixel() { return (gameState.flags & ST.NATIVE) ? gameState.pixelSize : 0; }
+// Does F toggle fullscreen (vid_fkey; id's Quake leaves F unbound)?
+function fkeyFullscreen() { return !!(gameState.flags & ST.FKEY); }
 
 // --- Events into the input ring ------------------------------------------------
 // One record: [kind u8][0][len u16] then the payload. The ring only ever
@@ -353,10 +362,14 @@ function handleOutput(b) {
   for (let i = 0; i + 8 <= b.length;) {
     const kind = b[i], len = u32(i + 4), p = i + 8;
     switch (kind) {
-      case OUT.STATE:
+      case OUT.STATE: {
+        const native = nativePixel();
         gameState.flags = u32(p); gameState.menuScreen = i32(p + 4);
+        gameState.pixelSize = len >= 12 ? u32(p + 8) : 0;
+        if (nativePixel() !== native) fitCanvas();
         syncLockChip();
         break;
+      }
       case OUT.AUDIO: {
         const v = []; for (let k = 0; k < 7; k++) v.push(u32(p + 4 * k));
         onAudioCounts(v);
@@ -498,12 +511,12 @@ addEventListener('keydown', e => {
     return;
   }
 
-  // --- F: the page's fullscreen toggle (not id's: default.cfg leaves F
-  //     unbound), while the game has the keyboard. In the live game the key
-  //     still reaches the engine for a player who bound it; during demo
-  //     playback it does not, where any key raises the menu.
+  // --- F: the page's fullscreen toggle, with vid_fkey (the 2026 profile; id's
+  //     default.cfg leaves F unbound), while the game has the keyboard. In the
+  //     live game the key still reaches the engine for a player who bound it;
+  //     during demo playback it does not, where any key raises the menu.
   const gameHasKeys = !menuVisible() && !consoleVisible();
-  if (k === 'f' && gameHasKeys) {
+  if (k === 'f' && gameHasKeys && fkeyFullscreen()) {
     toggleFullscreen();
     if (!inWalkMode()) { e.preventDefault(); return; }
   }
@@ -1171,8 +1184,9 @@ async function main() {
   worker.onmessage = onWorkerMessage;
   worker.onerror = (e) => { setStatus('error: ' + e.message); };
   const fileList = [['id1/pak0.pak', pak], ...files];
-  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList },
+  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList, args: commandLine() },
                      [wasm.buffer, pak.buffer]);
+  sendWindow();
 
   // Up when the program's startup (quake.rc: config.cfg, the attract demos)
   // ends in its first Sync.
@@ -1227,6 +1241,18 @@ const SNAP = 1 / 6;
 function fitCanvas() {
   if (!W) return;
   canvas.style.width = canvas.style.height = canvas.style.imageRendering = '';
+  // Native resolution: the frame is the page's box in device pixels divided
+  // by a whole pixel size (the program's choice, the State record), so the
+  // canvas is exactly W x px device pixels wide: every picture pixel a
+  // px x px square of the screen's, never smoothed.
+  const px = nativePixel();
+  if (px) {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.width = (W * px / dpr) + 'px';
+    canvas.style.height = (H * px / dpr) + 'px';
+    canvas.style.imageRendering = 'pixelated';
+    return;
+  }
   const natural = parseFloat(getComputedStyle(canvas).width);
   const dpr = window.devicePixelRatio || 1;
   const s = natural * dpr / W;
@@ -1237,8 +1263,35 @@ function fitCanvas() {
   canvas.style.width = width + 'px';
   canvas.style.height = width * 3 / 4 + 'px';
 }
-addEventListener('resize', fitCanvas);
-document.addEventListener('fullscreenchange', fitCanvas);
+// The page's box for the picture in CSS pixels: the window less the chrome
+// (the canvas rule's --chrome-h/--chrome-v: the gutters and border, the top
+// margin and the line under the view), at least 320x200; in fullscreen, the
+// whole screen.
+function pictureBox() {
+  if (document.fullscreenElement === wrap) return { w: innerWidth, h: innerHeight };
+  const cs = getComputedStyle(canvas);
+  const ch = parseFloat(cs.getPropertyValue('--chrome-h')) || 34;
+  const cv = parseFloat(cs.getPropertyValue('--chrome-v')) || 84;
+  return { w: Math.max(320, innerWidth - ch), h: Math.max(200, innerHeight - cv) };
+}
+// Tell the program the box in device pixels (the Window record): with
+// native resolution it renders at that size over its pixel size.
+let windowSent = '';
+function sendWindow() {
+  const dpr = window.devicePixelRatio || 1, b = pictureBox();
+  const w = Math.floor(b.w * dpr), h = Math.floor(b.h * dpr);
+  if (w + 'x' + h === windowSent) return;
+  if (sendRecord(IN.WINDOW, fields(8, d => { d.setUint32(0, w, true); d.setUint32(4, h, true); }))) windowSent = w + 'x' + h;
+}
+// `?classic` / `?2026` in the address: the profile to switch to, as the
+// command line's `+profile` (run after config.cfg, like the menu's switch,
+// so it sticks).
+function commandLine() {
+  const q = new URLSearchParams(location.search);
+  return q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [];
+}
+addEventListener('resize', () => { sendWindow(); fitCanvas(); });
+document.addEventListener('fullscreenchange', () => { sendWindow(); fitCanvas(); });
 
 // The newest complete frame into the canvas, if there is one the page has
 // not shown. The slot is claimed first (READING), so the program writes its

@@ -22,8 +22,9 @@
 //!   device runs whether a speaker is on or not: no backlog of sounds waits
 //!   for the first click. With no clock at all (a native run on a pipe) the
 //!   loop's own frame times move it.
-//! - **Which mixer** is [`SoundMode`], the typed setting ([`App::sound_mode`],
-//!   the automation's `sound_mode`): Classic is id's mixer at id's
+//! - **Which mixer** is [`SoundMode`], the setting `snd_modern`
+//!   ([`Cvars::sound`], on in the 2026 profile), read at every mix: Classic
+//!   is id's mixer at id's
 //!   11025 Hz, which the worklet reconstructs at the device's rate as a
 //!   sound card's DAC and output filter did; the 2026 mixer runs at the
 //!   device's rate with [`quake_rs::snd::Fixes::ALL`]. A new mode, or a
@@ -31,7 +32,7 @@
 //!   are registered with it again.
 //!
 //! [`App`]: crate::app::App
-//! [`App::sound_mode`]: crate::app::App::sound_mode
+//! [`Cvars::sound`]: quake_rs::cvar::Cvars::sound
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -103,12 +104,12 @@ pub(crate) fn sound_generation() -> i32 {
 /// The Options "Volume" (`volume`, 0..1, default 0.7): the mixer's master
 /// volume. 1.0 before the App exists.
 pub(crate) fn volume() -> f32 {
-    APP.with(|c| c.borrow().as_ref().map(|a| a.menu.volume()).unwrap_or(1.0))
+    APP.with(|c| c.borrow().as_ref().map(|a| a.settings.cvars.volume).unwrap_or(1.0))
 }
 
-/// The mixer the player chose ([`SoundMode`]).
+/// The mixer the player chose: the `snd_modern` setting ([`SoundMode`]).
 fn sound_mode() -> SoundMode {
-    APP.with(|c| c.borrow().as_ref().map(|a| a.sound_mode).unwrap_or_default())
+    APP.with(|c| c.borrow().as_ref().map(|a| a.settings.cvars.sound).unwrap_or_default())
 }
 
 /// The menu's `S_LocalSound`s since the last frame (its clicks).
@@ -413,12 +414,20 @@ pub(crate) fn clear_pending() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quake_rs::bsp::Bsp;
+    use quake_rs::progs::Progs;
+    use quake_rs::server::Server;
     use quake_rs::snd::MODERN_MIXAHEAD;
 
     use crate::app::{boot, boot_attract, boot_demo};
     use crate::host::step;
     use crate::menu::menu_down;
     use crate::test_util::{close_menu, walk_mut};
+
+    /// The 2026 mixer (the tests start in the Classic profile).
+    fn modern() {
+        crate::host_cmd::execute_console_command("snd_modern 1");
+    }
 
     /// Split `snd_stats`'s text into (name, value) pairs.
     fn stats(audio: &Audio) -> std::collections::HashMap<String, String> {
@@ -446,6 +455,7 @@ mod tests {
         clear_pending();
         assert_eq!(boot(), 1);
         close_menu();
+        modern();
         let statics = pending_statics();
         assert!(statics.len() >= 5, "e1m1's placed loops wait for the mixer: {}", statics.len());
         let mut audio = Audio::new();
@@ -463,6 +473,7 @@ mod tests {
     fn the_page_clock_drives_the_mix_and_an_overtaken_mixer_skips_ahead() {
         assert_eq!(boot(), 1);
         close_menu();
+        modern();
         let mut audio = Audio::new();
         audio.clock(1000);
         let first = audio.frame(0.0).map(|p| (p.start, p.samples.len() / 2)).unwrap();
@@ -494,18 +505,20 @@ mod tests {
     fn classic_mixes_ids_mixer_at_11025_and_a_new_mode_keeps_the_levels_loops() {
         assert_eq!(boot(), 1);
         close_menu();
+        modern();
         let mut audio = Audio::new();
         audio.device(true, 44100);
         run_frames(&mut audio, 10, 1.0 / 72.0);
         let s = stats(&audio);
         assert_eq!((s["rate"].as_str(), s["mode"].as_str()), ("44100", "2026"), "the device's rate");
         let statics = s["statics"].clone();
-        ensure_app(|a| a.sound_mode = SoundMode::Classic);
+        crate::host_cmd::execute_console_command("snd_modern 0");
         let pcm = audio.frame(1.0 / 72.0).map(|p| (p.rate, p.clear)).unwrap();
         assert_eq!(pcm, (11025, true), "id's rate; the ring cleared for the new mixer");
+        assert_eq!(sound_mode(), SoundMode::Classic, "snd_modern 0 is the Classic mixer");
         let s = stats(&audio);
         assert_eq!((s["mode"].as_str(), s["statics"].clone()), ("classic", statics), "the loops came along");
-        ensure_app(|a| a.sound_mode = SoundMode::Modern);
+        crate::host_cmd::execute_console_command("snd_modern 1");
     }
 
     #[test]
@@ -573,5 +586,111 @@ mod tests {
         let pcm = run_frames(&mut audio, 36, 1.0 / 72.0);
         assert!(sounding(&audio) > 0 && pcm.iter().any(|&v| v != 0), "and over a paused game");
         assert!(stats(&audio)["painted"].parse::<u32>().unwrap() > before);
+    }
+
+    // The level data the mixer is handed: what the server registers and what
+    // the leafs carry (checked on the shareware maps).
+
+    /// Spawn a real map's entities on a live server and return the static
+    /// sounds its QuakeC registered (ambientsound() during spawn).
+    fn spawn_map_statics(map: &str) -> Vec<StaticSound> {
+        let pak = pak().expect("embedded pak");
+        let read = |n: &str| pak.read_file(n).ok().flatten();
+        let bsp = Bsp::parse(&read(map).expect("bsp")).expect("parse");
+        let progs = Progs::parse(&read("progs.dat").expect("progs")).expect("parse");
+        let mut server = Server::with_pak(bsp, progs, Some(pak.clone())).expect("server");
+        let _ = server.drain_static_sounds();
+        server.spawn_entities().expect("spawn");
+        let statics = server.drain_static_sounds();
+        // The registry drains once: a second drain is empty.
+        assert!(server.drain_static_sounds().is_empty());
+        statics
+    }
+
+    #[test]
+    fn e1m2_spawn_registers_fire_torch_static_sounds() {
+        // Ground truth: the medieval maps' wall torches run QuakeC's
+        // FireAmbient — `ambientsound(self.origin, "ambience/fire1.wav", 0.5,
+        // ATTN_STATIC)` — during spawn. e1m2 places 24 of them.
+        let statics = spawn_map_statics("maps/e1m2.bsp");
+        let fires: Vec<&StaticSound> = statics
+            .iter()
+            .filter(|s| s.sample == "ambience/fire1.wav")
+            .collect();
+        assert!(
+            fires.len() >= 20,
+            "e1m2's torches register ambience/fire1.wav loops (got {})",
+            fires.len()
+        );
+        for f in &fires {
+            // FireAmbient's exact arguments through the wire bytes:
+            // vol 0.5 -> 127/255, ATTN_STATIC 3 -> 192/64 = 3.0.
+            assert_eq!(f.volume, 127.0 / 255.0, "torch volume 0.5 (quantized)");
+            assert_eq!(f.attenuation, 3.0, "ATTN_STATIC");
+            assert!(
+                f.origin.iter().all(|c| c.abs() < 10000.0),
+                "plausible world position {:?}",
+                f.origin
+            );
+            assert!(f.sound_index >= 1, "fire1.wav resolved to a precache slot");
+        }
+        // The torches sit at DISTINCT places (each wall torch registers its own).
+        let mut pts: Vec<[i32; 3]> = fires
+            .iter()
+            .map(|f| [f.origin[0] as i32, f.origin[1] as i32, f.origin[2] as i32])
+            .collect();
+        pts.sort_unstable();
+        pts.dedup();
+        assert!(
+            pts.len() >= 20,
+            "torch loops are at distinct world positions (got {})",
+            pts.len()
+        );
+    }
+
+    #[test]
+    fn e1m1_spawn_registers_base_ambience_static_sounds() {
+        // e1m1 is a BASE map: no torches, but its light_fluoro fixtures hum
+        // (ambience/fl_hum1.wav) and its computers drone (ambience/comp1.wav),
+        // all at ATTN_STATIC — the level's actual placed soundscape.
+        let statics = spawn_map_statics("maps/e1m1.bsp");
+        assert!(
+            statics.iter().any(|s| s.sample == "ambience/fl_hum1.wav"),
+            "fluorescent hum registered"
+        );
+        assert!(
+            statics.iter().any(|s| s.sample == "ambience/comp1.wav"),
+            "computer drone registered"
+        );
+        assert!(statics.len() >= 10, "a full soundscape (got {})", statics.len());
+        for s in &statics {
+            assert_eq!(s.attenuation, 3.0, "every e1m1 ambient is ATTN_STATIC");
+            assert!(s.volume > 0.0 && s.volume <= 1.0);
+        }
+    }
+
+    #[test]
+    fn e1m1_leafs_carry_ambient_levels() {
+        // The dleaf_t ambient_level[NUM_AMBIENTS] bytes must survive the real
+        // map's parse: e1m1 has both water (slime pools) and open-sky areas, so
+        // SOME leafs carry non-zero water and sky levels for
+        // S_UpdateAmbientSounds to ramp toward.
+        let pak = pak().expect("embedded pak");
+        let bsp = Bsp::parse(
+            &pak.read_file("maps/e1m1.bsp").ok().flatten().expect("bsp"),
+        )
+        .expect("parse");
+        let water = bsp
+            .leafs
+            .iter()
+            .filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_WATER] > 0)
+            .count();
+        let sky = bsp
+            .leafs
+            .iter()
+            .filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_SKY] > 0)
+            .count();
+        assert!(water > 0, "some e1m1 leafs hear water ambience");
+        assert!(sky > 0, "some e1m1 leafs hear sky/wind ambience");
     }
 }

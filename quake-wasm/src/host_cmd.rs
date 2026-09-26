@@ -1,51 +1,386 @@
-//! Console commands — `Cmd_ExecuteString`'s dispatch (cmd.c) against the
-//! App: echo/clear, `help` (the Help/Ordering screen), the viewsize cvar
-//! commands, the Web extras and the port's `wasm_help` list, `map`,
-//! save/load, `pause`, the demo commands (cl_demo.c's `playdemo`/`timedemo`,
-//! host_cmd.c's demo loop control `startdemos`/`demos`/`stopdemo`), and the
-//! cheats god/noclip/fly/kill/give/impulse, which act on the live
+//! Console commands — cmd.c's `Cmd_ExecuteString` against the App. One
+//! table, [`COMMANDS`] (`Cmd_AddCommand`'s list, [`quake_rs::cmd`]), is what
+//! the console runs, what Tab completes and what `wasm_help` lists; a name
+//! that is no command is a cvar of the session's settings (`Cvar_Command`,
+//! [`quake_rs::cvar`]). The commands: echo/clear/exec, `help` (the
+//! Help/Ordering screen), the key bindings (`bind`, `unbind`, `unbindall`),
+//! the view size, `map`, save/load, `pause`, the demo commands (cl_demo.c's
+//! `playdemo`/`timedemo`, host_cmd.c's demo loop control
+//! `startdemos`/`demos`/`stopdemo`), the port's `profile` and `wasm_help`,
+//! and the cheats god/noclip/fly/kill/give/impulse, which act on the live
 //! [`Walk`](crate::app::Walk) through the client's host_cmd.c
 //! ([`quake_rs::client::host_cmd`], which also holds the level swaps
 //! `changelevel` and `restart`).
 
 use quake_rs::client::cl_demo::MAX_DEMOS;
 use quake_rs::client::host_cmd::run_game_command;
+use quake_rs::cmd::{self, Args, Command};
+use quake_rs::cvar::{self, CVARS};
+use quake_rs::keys::{self, Binding};
+use quake_rs::settings::Profile;
 
 use crate::app::{build_walk_map, ensure_app, App};
-use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo};
+use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma;
 
 /// `MAX_DEMONAME` (client.h): a `cls.demos` slot holds 15 characters.
 const MAX_DEMONAME: usize = 16;
 
+/// A console command of this port: its function takes the line's arguments
+/// and borrows the App itself (a level load must build the new walk outside
+/// the borrow).
+pub(crate) type ConsoleCommand = Command<fn(&Args)>;
+
+/// Declare a table row.
+const fn c(name: &'static str, help: &'static str, run: fn(&Args)) -> ConsoleCommand {
+    Command { name, help, run }
+}
+
 /// The commands this console runs, in the order `Cmd_CompleteCommand` meets
 /// id's (`cmd_functions`: `Cmd_AddCommand` puts each in front, so the one
 /// registered last — `timedemo`, in `CL_Init` — comes first; `play`, from
-/// `S_Init`, after `CL_Init`'s; `echo`, from `Cmd_Init`, last), then the
-/// port's own.
-pub(crate) const COMMANDS: &[&str] = &[
-    "timedemo", "playdemo", "impulse", "play", "sizedown", "sizeup", "help", "clear", "stopdemo", "demos",
-    "startdemos", "give", "save", "load", "pause", "kill", "color", "noclip", "name", "map", "fly",
-    "god", "echo", "wasm_help",
+/// `S_Init`, after `CL_Init`'s; `echo` and `exec`, from `Cmd_Init`, last),
+/// then the port's own.
+pub(crate) const COMMANDS: &[ConsoleCommand] = &[
+    c("timedemo", "timedemo <demo>  time a demo", cmd_timedemo),
+    c("playdemo", "playdemo <demo>", cmd_playdemo),
+    c("impulse", "impulse <n>", cmd_game),
+    c("play", "play <sound>", cmd_play),
+    c("sizedown", "screen size -10", cmd_sizedown),
+    c("sizeup", "screen size +10", cmd_sizeup),
+    c("help", "the Help screen", cmd_help),
+    c("togglemenu", "the menu", cmd_togglemenu),
+    c("clear", "clear the console", cmd_clear),
+    c("toggleconsole", "the console", cmd_toggleconsole),
+    c("unbindall", "unbind every key", cmd_unbindall),
+    c("unbind", "unbind <key>", cmd_unbind),
+    c("bind", "bind <key> [command]", cmd_bind),
+    c("stopdemo", "stop the demo", cmd_stopdemo),
+    c("demos", "back to the demo loop", cmd_demos),
+    c("startdemos", "startdemos <demo..>", cmd_startdemos),
+    c("give", "give <h|a|s|n|r|c|1-8> [n]", cmd_game),
+    c("save", "save <name>", cmd_save),
+    c("load", "load <name>", cmd_load),
+    c("pause", "pause the game", cmd_pause),
+    c("kill", "respawn", cmd_game),
+    c("color", "color <0-13> [0-13]", cmd_color),
+    c("noclip", "walk through walls", cmd_game),
+    c("name", "name <name>", cmd_name),
+    c("map", "map <name>", cmd_map),
+    c("fly", "fly mode", cmd_game),
+    c("god", "invulnerability", cmd_game),
+    c("echo", "echo <text>", cmd_echo),
+    c("exec", "exec <file>  run a file's lines", cmd_exec),
+    c("profile", "profile classic|2026", cmd_profile),
+    c("wasm_help", "wasm_help [name]  the lists", cmd_wasm_help),
 ];
-
-/// The cvars this console reads and sets, in `cvar_vars` order (registered
-/// last, found first: `_cl_color` and `_cl_name` in `CL_Init`, `viewsize` in
-/// `SCR_Init`, `hostname` in `NET_Init`), then the port's `_vid_resolution`
-/// (`config.cfg`'s video mode) and the Web extras' `wasm_*`.
-const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname", "_vid_resolution", "r_threads"];
 
 /// `Cmd_CompleteCommand` then `Cvar_CompleteVariable` (cmd.c, cvar.c), what
 /// Tab in the console runs: the first command, else the first cvar, whose
 /// name starts with `partial` (case matters, `Q_strncmp`); nothing for an
 /// empty line.
 pub(crate) fn complete(partial: &str) -> Option<String> {
-    if partial.is_empty() {
-        return None;
+    cmd::complete(COMMANDS, partial).or_else(|| cvar::complete(partial)).map(str::to_string)
+}
+
+/// `Cbuf_Execute` + `Cmd_ExecuteString`: run each command line of `text`
+/// (split at newlines and at `;` outside quotes) — its command from
+/// [`COMMANDS`], else `Cvar_Command` for a cvar, else `Unknown command "…"`.
+/// Nothing here panics on a bad or missing argument.
+pub(crate) fn execute_console_command(text: &str) {
+    for line in cmd::split_lines(text) {
+        let args = Args::tokenize(line);
+        if args.argc() == 0 {
+            continue;
+        }
+        if let Some(command) = cmd::find(COMMANDS, args.argv(0)) {
+            (command.run)(&args);
+        } else if !cvar_command(&args) {
+            let name = args.argv(0).to_string();
+            ensure_app(|a| a.console.println(format!("Unknown command \"{name}\"")));
+        }
     }
-    let cvars = CVARS.iter().copied().chain(crate::extras::cvar_names());
-    COMMANDS.iter().copied().chain(cvars).find(|name| name.starts_with(partial)).map(str::to_string)
+}
+
+/// `Cvar_Command` (cvar.c): a cvar's name alone prints it, `"name" is
+/// "value"`; with an argument it sets it (`Cvar_Set`). False: no such cvar.
+fn cvar_command(args: &Args) -> bool {
+    let Some(var) = cvar::find(args.argv(0)) else { return false };
+    ensure_app(|a| {
+        if args.argc() == 1 {
+            let value = var.get(&a.settings.cvars);
+            a.console.println(format!("\"{}\" is \"{value}\"", var.name));
+        } else {
+            var.set(&mut a.settings.cvars, args.argv(1));
+        }
+    });
+    true
+}
+
+// --- the commands -----------------------------------------------------------
+
+/// `Cmd_Echo_f`: the arguments, separated by spaces.
+fn cmd_echo(args: &Args) {
+    let text = args.all()[1..].join(" ");
+    ensure_app(|a| a.console.println(text));
+}
+
+/// `Con_Clear_f`.
+fn cmd_clear(_: &Args) {
+    ensure_app(|a| a.console.clear());
+}
+
+/// `Con_ToggleConsole_f`.
+fn cmd_toggleconsole(_: &Args) {
+    ensure_app(App::toggle_console);
+}
+
+/// `M_ToggleMenu_f`.
+fn cmd_togglemenu(_: &Args) {
+    ensure_app(App::m_toggle_menu);
+}
+
+/// `Cmd_Exec_f`: run a file of the game directory as console lines
+/// (`config.cfg`, say).
+fn cmd_exec(args: &Args) {
+    if args.argc() != 2 {
+        ensure_app(|a| a.console.println("exec <filename> : execute a script file"));
+        return;
+    }
+    let name = args.argv(1).to_string();
+    match crate::common::read_file(&name) {
+        Ok(bytes) => {
+            ensure_app(|a| a.console.println(format!("execing {name}")));
+            execute_console_command(&String::from_utf8_lossy(&bytes));
+        }
+        Err(_) => ensure_app(|a| a.console.println(format!("couldn't exec {name}"))),
+    }
+}
+
+/// S_Play (snd_dma.c): each named sample at the listener.
+fn cmd_play(args: &Args) {
+    snd_dma::s_play(&args.all()[1..]);
+}
+
+/// M_Menu_Help_f (menu.c registers it as `help`): the Help/Ordering screen,
+/// on its first page, with the keyboard (key_dest = key_menu: the console
+/// goes up).
+fn cmd_help(_: &Args) {
+    ensure_app(App::m_menu_help);
+}
+
+/// `SCR_SizeUp_f`: viewsize + 10.
+fn cmd_sizeup(_: &Args) {
+    ensure_app(|a| a.settings.cvars.size_up());
+}
+
+/// `SCR_SizeDown_f`: viewsize - 10.
+fn cmd_sizedown(_: &Args) {
+    ensure_app(|a| a.settings.cvars.size_down());
+}
+
+/// `Key_Bind_f` (keys.c): `bind <key>` prints the key's binding, `bind <key>
+/// <command>` binds it (a command of several words is quoted, as in id's).
+fn cmd_bind(args: &Args) {
+    ensure_app(|a| {
+        let c = args.argc();
+        if c != 2 && c != 3 {
+            a.console.println("bind <key> [command] : attach a command to a key");
+            return;
+        }
+        let Some(key) = keys::string_to_keynum(args.argv(1)) else {
+            a.console.println(format!("\"{}\" isn't a valid key", args.argv(1)));
+            return;
+        };
+        if c == 2 {
+            match a.settings.binds.get(key) {
+                Some(b) => a.console.println(format!("\"{}\" = \"{}\"", args.argv(1), b.text())),
+                None => a.console.println(format!("\"{}\" is not bound", args.argv(1))),
+            }
+            return;
+        }
+        a.settings.binds.set(key, Binding::parse(args.argv(2)));
+    });
+}
+
+/// `Key_Unbind_f`.
+fn cmd_unbind(args: &Args) {
+    ensure_app(|a| {
+        if args.argc() != 2 {
+            a.console.println("unbind <key> : remove commands from a key");
+            return;
+        }
+        match keys::string_to_keynum(args.argv(1)) {
+            Some(key) => a.settings.binds.set(key, None),
+            None => a.console.println(format!("\"{}\" isn't a valid key", args.argv(1))),
+        }
+    });
+}
+
+/// `Key_Unbindall_f`.
+fn cmd_unbindall(_: &Args) {
+    ensure_app(|a| a.settings.binds.unbind_all());
+}
+
+/// The port's `profile`: prints the profile, or switches to `classic`
+/// (every departure off, id's `default.cfg` keys) or `2026`
+/// ([`quake_rs::settings::Settings::set_profile`]).
+fn cmd_profile(args: &Args) {
+    ensure_app(|a| match args.argc() {
+        1 => a.console.println(format!("\"profile\" is \"{}\"", a.settings.profile.name())),
+        _ => match Profile::parse(args.argv(1)) {
+            Some(p) => a.settings.set_profile(p),
+            None => a.console.println("profile classic|2026 : id's Quake, or the 2026 settings"),
+        },
+    });
+}
+
+/// Host_Name_f's client half: print, or set `_cl_name` (one argument, else
+/// the whole argument string; 15 characters). The server's side — renaming
+/// the connected player — is not done: the port's server connects the
+/// player as "player" (sv_main.rs).
+fn cmd_name(args: &Args) {
+    ensure_app(|a| match args.argc() {
+        1 => a.console.println(format!("\"name\" is \"{}\"", a.settings.cvars.cl_name)),
+        2 => a.settings.cvars.set_name(args.argv(1)),
+        _ => a.settings.cvars.set_name(args.args()),
+    });
+}
+
+/// Host_Color_f's client half: print, or `_cl_color` from one colour (both)
+/// or two, each 0..13.
+fn cmd_color(args: &Args) {
+    ensure_app(|a| {
+        if args.argc() == 1 {
+            let c = a.settings.cvars.cl_color;
+            a.console.println(format!("\"color\" is \"{} {}\"", c >> 4, c & 15));
+            a.console.println("color <0-13> [0-13]");
+        } else {
+            let top = atoi(args.argv(1));
+            let bottom = if args.argc() == 2 { top } else { atoi(args.argv(2)) };
+            a.settings.cvars.set_color(top, bottom);
+        }
+    });
+}
+
+/// cl_demo.c's `CL_PlayDemo_f` (its usage line says "play", as the C's).
+fn cmd_playdemo(args: &Args) {
+    ensure_app(|a| {
+        if args.argc() != 2 {
+            a.console.println("play <demoname> : plays a demo");
+        } else {
+            cl_play_demo(a, args.argv(1), false);
+        }
+    });
+}
+
+/// cl_demo.c's `CL_TimeDemo_f`.
+fn cmd_timedemo(args: &Args) {
+    ensure_app(|a| {
+        if args.argc() != 2 {
+            a.console.println("timedemo <demoname> : gets demo speeds");
+        } else {
+            cl_timedemo(a, args.argv(1));
+        }
+    });
+}
+
+fn cmd_stopdemo(_: &Args) {
+    ensure_app(host_stopdemo);
+}
+
+fn cmd_demos(_: &Args) {
+    ensure_app(host_demos);
+}
+
+fn cmd_startdemos(args: &Args) {
+    ensure_app(|a| host_startdemos(a, &args.all()[1..]));
+}
+
+fn cmd_pause(_: &Args) {
+    ensure_app(host_pause);
+}
+
+/// `save`/`load` (Host_Savegame_f / Host_Loadgame_f): the C's `Cmd_Argc() !=
+/// 2` check covers extra arguments too, so a name only with exactly one.
+fn cmd_save(args: &Args) {
+    do_save_command((args.argc() == 2).then(|| args.argv(1)));
+}
+
+fn cmd_load(args: &Args) {
+    do_load_command((args.argc() == 2).then(|| args.argv(1)));
+}
+
+/// `map <name>` rebuilds the walk on a new level.
+fn cmd_map(args: &Args) {
+    run_map_command((args.argc() > 1).then(|| args.argv(1)));
+}
+
+/// The cheats and `impulse`, on the live player edict ("no active game"
+/// without a walk), through the client's host_cmd.c.
+fn cmd_game(args: &Args) {
+    let argv = args.all();
+    let verb = argv[0].to_ascii_lowercase();
+    ensure_app(|a| {
+        let Some(w) = a.walk.as_mut() else {
+            a.console.println("no active game");
+            return;
+        };
+        let (mut out, mut sound) = (Vec::new(), Vec::new());
+        run_game_command(w, &verb, &argv, &mut out, &mut sound);
+        snd_dma::play(&w.pak, sound);
+        for line in out {
+            a.console.println(line);
+        }
+        // `kill`'s QuakeC can fail too: Host_Error's disconnect.
+        finish_host_error(a);
+    });
+}
+
+/// The console's width in characters at 320 wide (`con_linewidth`): the
+/// lists below fit it.
+const LIST_WIDTH: usize = 38;
+
+/// Not id's (`help` is id's Help screen): this port's commands and the
+/// settings the profiles switch, from the tables; `wasm_help <name>` says
+/// what one command or cvar does.
+fn cmd_wasm_help(args: &Args) {
+    ensure_app(|a| {
+        if args.argc() > 1 {
+            let name = args.argv(1);
+            let line = match (cmd::find(COMMANDS, name), cvar::find(name)) {
+                (Some(c), _) => format!("{}: {}", c.name, c.help),
+                (None, Some(v)) => format!("{} \"{}\": {}", v.name, v.get(&a.settings.cvars), v.help),
+                (None, None) => format!("no command or cvar \"{name}\""),
+            };
+            a.console.println(line);
+            return;
+        }
+        a.console.println("commands (wasm_help <name> for one):");
+        for line in wrap(COMMANDS.iter().map(|c| c.name), LIST_WIDTH) {
+            a.console.println(line);
+        }
+        a.console.println(format!("settings, profile {} (classic|2026):", a.settings.profile.name()));
+        for v in CVARS.iter().filter(|v| v.departure) {
+            a.console.println(format!("  {} {}", v.name, v.get(&a.settings.cvars)));
+        }
+    });
+}
+
+/// `words` in lines of at most `width` characters, each indented two.
+fn wrap<'a>(words: impl Iterator<Item = &'a str>, width: usize) -> Vec<String> {
+    let mut lines = vec![String::from(" ")];
+    for w in words {
+        let line = lines.last_mut().expect("never empty");
+        if line.len() + 1 + w.len() > width {
+            lines.push(format!("  {w}"));
+        } else {
+            line.push(' ');
+            line.push_str(w);
+        }
+    }
+    lines
 }
 
 /// `Host_Startdemos_f`: `startdemos <demo> ...` sets the demo loop (at most
@@ -105,255 +440,6 @@ fn host_stopdemo(a: &mut App) {
     cl_disconnect(a);
 }
 
-// --- console command execution -------------------------------------------
-
-/// Parse `line` into whitespace argv and run the matching console command
-/// against the live [`Walk`], appending any output to the console scrollback.
-/// An empty line does nothing; an unknown command prints
-/// `"unknown command: <cmd>"`. Commands that touch the player edict guard on a
-/// live walk and print `"no active game"` when there is none. Nothing here
-/// panics on a bad/missing argument (all parsing uses `.ok()`/defaults).
-pub(crate) fn execute_console_command(line: &str) {
-    let argv: Vec<&str> = line.split_whitespace().collect();
-    let Some(&cmd) = argv.first() else { return };
-    let cmd_lower = cmd.to_ascii_lowercase();
-
-    // Commands that don't need the walk: echo / clear / help / wasm_help.
-    match cmd_lower.as_str() {
-        "clear" => {
-            ensure_app(|a| a.console.clear());
-            return;
-        }
-        "echo" => {
-            let text = if argv.len() > 1 {
-                argv[1..].join(" ")
-            } else {
-                String::new()
-            };
-            ensure_app(|a| a.console.println(text));
-            return;
-        }
-        // S_Play (snd_dma.c): each named sample at the listener.
-        "play" => {
-            snd_dma::s_play(&argv[1..]);
-            return;
-        }
-        // M_Menu_Help_f (menu.c registers it as `help`): the Help/Ordering
-        // screen, on its first page, with the keyboard (key_dest =
-        // key_menu: the console goes up).
-        "help" => {
-            ensure_app(App::m_menu_help);
-            return;
-        }
-        // Not id's: the renderer's threads, as a cvar (0: as many as the
-        // host offers; the pixels are the same for any count).
-        "r_threads" => {
-            ensure_app(|a| match argv.get(1) {
-                None => {
-                    let (n, now) = (a.render_threads.cvar(), a.render_threads.resolve(a.hw_threads));
-                    a.console.println(format!("\"r_threads\" is \"{n}\" ({now} of {} threads)", a.hw_threads));
-                }
-                Some(v) => a.render_threads = quake_rs::render::Threads::from_cvar(v.parse::<f32>().unwrap_or(0.0)),
-            });
-            return;
-        }
-        // Not id's: the port's command list (`help` is id's Help screen).
-        "wasm_help" => {
-            ensure_app(|a| {
-                a.console.println("this port's commands:");
-                a.console.println("  god noclip fly kill  pause");
-                a.console.println("  give <h|a|s|n|r|c|1-8> [n]");
-                a.console.println("  impulse <n>   map <name>");
-                a.console.println("  save <name>   load <name>");
-                a.console.println("  playdemo <name>  timedemo <name>");
-                a.console.println("  stopdemo  demos  startdemos <d..>");
-                a.console.println("  sizeup  sizedown  viewsize [n]");
-                a.console.println("  echo <text>   clear   help");
-                a.console.println("  r_threads <n> (0: all the host offers)");
-                a.console.println("  wasm_help (this list)");
-                a.console.println("web extras (not id's; see Options):");
-                for line in crate::extras::help_lines() {
-                    a.console.println(line);
-                }
-            });
-            return;
-        }
-        // Host_Name_f's client half: print, or set `_cl_name` (one argument,
-        // else the whole argument string; 15 characters). The server's side —
-        // renaming the connected player — is not done: the port's server
-        // connects the player as "player" (sv_main.rs).
-        "name" => {
-            ensure_app(|a| {
-                if argv.len() == 1 {
-                    a.console.println(format!("\"name\" is \"{}\"", a.menu.name()));
-                } else {
-                    // Cmd_Args, its quotes as Cmd_TokenizeString takes them.
-                    let args = line.trim_start()[cmd.len()..].trim();
-                    let name = if argv.len() == 2 { argv[1] } else { args };
-                    let name = name.strip_prefix('"').and_then(|n| n.strip_suffix('"')).unwrap_or(name);
-                    a.menu.set_name(name);
-                }
-            });
-            return;
-        }
-        // Host_Color_f's client half: print, or `_cl_color` from one colour
-        // (both) or two, each 0..13.
-        "color" => {
-            ensure_app(|a| {
-                if argv.len() == 1 {
-                    let c = a.menu.color();
-                    a.console.println(format!("\"color\" is \"{} {}\"", c >> 4, c & 15));
-                    a.console.println("color <0-13> [0-13]");
-                } else {
-                    let top = atoi(argv[1]);
-                    let bottom = if argv.len() == 2 { top } else { atoi(argv[2]) };
-                    a.menu.set_color(top, bottom);
-                }
-            });
-            return;
-        }
-        // Cvar_Command for the name/colour cvars and `hostname`: print the
-        // value, or set it from the first argument.
-        "hostname" | "_cl_name" | "_cl_color" => {
-            ensure_app(|a| {
-                let name = cmd_lower.as_str();
-                match argv.get(1) {
-                    None => {
-                        let v = match name {
-                            "hostname" => a.menu.hostname().to_string(),
-                            "_cl_name" => a.menu.name().to_string(),
-                            _ => a.menu.color().to_string(),
-                        };
-                        a.console.println(format!("\"{name}\" is \"{v}\""));
-                    }
-                    Some(v) => match name {
-                        "hostname" => a.menu.set_hostname(v),
-                        "_cl_name" => a.menu.set_name(v),
-                        _ => a.menu.set_color_value(v.parse::<f32>().unwrap_or(0.0) as i32),
-                    },
-                }
-            });
-            return;
-        }
-        // The port's archived video mode (`config.cfg`; id's archives
-        // `_vid_default_mode_win`, a mode number): `WxH`, clamped like a
-        // Video Options pick. No argument prints it.
-        "_vid_resolution" => {
-            match argv.get(1).and_then(|arg| arg.split_once('x')) {
-                Some((w, h)) => crate::vid::set_resolution(atoi(w), atoi(h)),
-                None => ensure_app(|a| {
-                    let v = format!("{}x{}", a.render_w, a.render_h);
-                    a.console.println(format!("\"_vid_resolution\" is \"{v}\""));
-                }),
-            }
-            return;
-        }
-        // SCR_SizeUp_f / SCR_SizeDown_f: viewsize +/- 10 (SCR_CalcRefdef bounds
-        // it to 30..120 on the next frame).
-        "sizeup" => {
-            ensure_app(|a| a.menu.size_up());
-            return;
-        }
-        "sizedown" => {
-            ensure_app(|a| a.menu.size_down());
-            return;
-        }
-        // The `viewsize` cvar (Cvar_Command): no argument prints it the C's way,
-        // one argument sets it (bounded like SCR_CalcRefdef).
-        "viewsize" => {
-            ensure_app(|a| match argv.get(1) {
-                None => {
-                    let v = a.menu.viewsize();
-                    a.console.println(format!("\"viewsize\" is \"{}\"", cvar_string(v)));
-                }
-                Some(arg) => a.menu.set_viewsize(arg.parse::<f32>().unwrap_or(0.0)),
-            });
-            return;
-        }
-        _ => {}
-    }
-
-    // The demo commands: cl_demo.c's CL_PlayDemo_f / CL_TimeDemo_f (the
-    // `Cmd_Argc() != 2` usage lines are the C's, "play" included) and
-    // host_cmd.c's demo loop control.
-    if cmd_lower == "pause" {
-        ensure_app(host_pause);
-        return;
-    }
-    if matches!(cmd_lower.as_str(), "playdemo" | "timedemo" | "stopdemo" | "startdemos" | "demos") {
-        ensure_app(|a| match cmd_lower.as_str() {
-            "playdemo" if argv.len() != 2 => a.console.println("play <demoname> : plays a demo"),
-            "playdemo" => {
-                cl_play_demo(a, argv[1], false);
-            }
-            "timedemo" if argv.len() != 2 => a.console.println("timedemo <demoname> : gets demo speeds"),
-            "timedemo" => cl_timedemo(a, argv[1]),
-            "stopdemo" => host_stopdemo(a),
-            "startdemos" => host_startdemos(a, &argv[1..]),
-            _ => host_demos(a),
-        });
-        return;
-    }
-
-    // The Web extras (`wasm_*`, not id's; all off by default): `extras.rs`.
-    let mut extra = false;
-    ensure_app(|a| extra = crate::extras::console_command(a, &argv));
-    if extra {
-        return;
-    }
-
-    // `map <name>` rebuilds the walk on a new level; handle it specially because
-    // it replaces the whole Walk (can't be done while holding a &mut to it).
-    if cmd_lower == "map" {
-        run_map_command(argv.get(1).copied());
-        return;
-    }
-
-    // `save`/`load` (Host_Savegame_f / Host_Loadgame_f): handled at this level
-    // because load replaces the whole Walk (via the page round-trip) and save
-    // runs guards that need the App, not just the walk. The C's Cmd_Argc()!=2
-    // check covers extra args too, so pass None unless exactly one argument.
-    if cmd_lower == "save" {
-        do_save_command(if argv.len() == 2 { Some(argv[1]) } else { None });
-        return;
-    }
-    if cmd_lower == "load" {
-        do_load_command(if argv.len() == 2 { Some(argv[1]) } else { None });
-        return;
-    }
-
-    // The remaining commands act on the live player edict. Run them under a
-    // single borrow; guard a missing walk with "no active game".
-    ensure_app(|a| {
-        let has_walk = a.walk.is_some();
-        if !has_walk {
-            a.console.println("no active game");
-            return;
-        }
-        // Split the borrow: the walk (player edict + vm) and the console output.
-        // Take the player index + a raw pointer-free reference via the App.
-        let mut out: Vec<String> = Vec::new();
-        if let Some(w) = a.walk.as_mut() {
-            let mut sound = Vec::new();
-            run_game_command(w, &cmd_lower, &argv, &mut out, &mut sound);
-            snd_dma::play(&w.pak, sound);
-        }
-        for line in out {
-            a.console.println(line);
-        }
-    });
-
-    // An unrecognised command: report it. (Handled here so the borrow above can
-    // finish first; run_game_command pushes nothing for an unknown verb.)
-    let known = matches!(
-        cmd_lower.as_str(),
-        "god" | "noclip" | "fly" | "kill" | "give" | "impulse"
-    );
-    if !known {
-        ensure_app(|a| a.console.println(format!("unknown command: {cmd}")));
-    }
-}
-
 /// `atoi`: the leading integer of `s` (0 for none).
 fn atoi(s: &str) -> i32 {
     let s = s.trim_start();
@@ -363,17 +449,6 @@ fn atoi(s: &str) -> i32 {
         .last()
         .map_or(0, |(i, c)| i + c.len_utf8());
     s[..end].parse().unwrap_or(0)
-}
-
-/// A cvar value as the console prints it: `%f` with the trailing zeros (and a
-/// bare trailing point) trimmed — `100`, `55.5`. (The C prints the cvar's
-/// STRING, which is whatever set it last: "100" from default.cfg, "55" typed,
-/// but "110.000000" after `Cvar_SetValue`'s `%f`. This port keeps no cvar
-/// strings, so it always prints the short form.)
-pub(crate) fn cvar_string(v: f32) -> String {
-    let s = format!("{v:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    s.to_string()
 }
 
 /// Run `map <name>`: build a fresh walk on `maps/<name>.bsp`. On success swap the
@@ -400,14 +475,9 @@ fn run_map_command(name: Option<&str>) {
             a.console.open = false;
             a.console.set_current(0.0);
             // Keep the menu closed too (a `map` from the console starts play).
-            // Navigation-only reset: the C's `map` command never resets cvars or
-            // keybindings, so the player's options and rebinds survive here too.
+            // Navigation-only reset: the settings are the App's and `map`
+            // leaves them alone, as the C's never resets cvars or keybindings.
             a.menu.reset_nav();
-            // Preserve the player's chosen render resolution across a `map` (the C
-            // keeps the video mode): the framebuffer is untouched, and we eagerly
-            // point the menu's current video mode at it — same as every other
-            // re-boot site — so the Video Options list is correct the instant the
-            // player opens it (not relying on the per-frame sync in step()).
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
         }
         None => a.console.println(format!("map not found: {name}")),
@@ -497,7 +567,7 @@ mod tests {
         APP.with(|c| c.borrow_mut().as_mut().unwrap().hw_threads = 6);
         console_toggle();
         run_console_line("r_threads");
-        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"0\" (6 of 6 threads)"));
+        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"0\""));
         step(0.0);
         assert_eq!(threads(), 6, "0: every thread the host offers");
         run_console_line("r_threads 0");
@@ -512,6 +582,38 @@ mod tests {
         assert_eq!(boot(), 1);
         step(0.0);
         assert_eq!(threads(), 3);
+    }
+
+    #[test]
+    fn r_lerpmove_is_a_cvar_every_frame_hands_the_client() {
+        use quake_rs::client::lerpmove::LerpMove;
+        let last_line = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
+        };
+        let lerpmove = || walk_mut(|w| w.lerpmove);
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("r_lerpmove");
+        assert_eq!(last_line().as_deref(), Some("\"r_lerpmove\" is \"0\""), "off in Classic");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Classic);
+        run_console_line("r_lerpmove 1");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth);
+        console_toggle();
+        // A game the host builds afresh draws with it from its first frame.
+        assert_eq!(boot(), 1);
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth);
+        close_menu();
+        console_toggle();
+        run_console_line("r_lerpmove 0");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Classic);
+        run_console_line("profile 2026");
+        step(0.0);
+        assert_eq!(lerpmove(), LerpMove::Smooth, "on in 2026");
     }
 
     #[test]
@@ -540,9 +642,9 @@ mod tests {
         let help: Vec<String> = APP.with(|c| {
             c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
         });
-        assert!(help.iter().any(|l| l == "  wasm_uncapped 0|1  no 72 fps cap"), "{help:?}");
-        assert!(help.iter().any(|l| l == "  wasm_showfps 0|1   frame rate"), "{help:?}");
-        assert!(help.iter().all(|l| l.len() <= 38), "fits a 320-wide console: {help:?}");
+        assert!(help.iter().any(|l| l == "  wasm_uncapped 0"), "{help:?}");
+        assert!(help.iter().any(|l| l == "  wasm_exactpersp 1"), "{help:?}");
+        assert!(help.iter().all(|l| l.len() <= LIST_WIDTH), "fits a 320-wide console: {help:?}");
     }
 
     /// Final review (UI): Multiplayer > Setup through the keys (M_Setup_Key),
@@ -627,9 +729,15 @@ mod tests {
         console_toggle();
         let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
         run_console_line("wasm_help");
-        assert!(lines().iter().any(|l| l == "this port's commands:"), "{:?}", lines());
+        assert!(lines().iter().any(|l| l == "commands (wasm_help <name> for one):"), "{:?}", lines());
+        assert!(lines().iter().all(|l| l.len() <= LIST_WIDTH), "fits a 320-wide console: {:?}", lines());
+        for c in COMMANDS {
+            assert!(lines().iter().any(|l| l.split(' ').any(|w| w == c.name)), "{} listed", c.name);
+        }
+        run_console_line("wasm_help bind");
+        assert_eq!(lines().last().map(String::as_str), Some("bind: bind <key> [command]"));
         run_console_line("cmdlist");
-        assert_eq!(lines().last().map(String::as_str), Some("unknown command: cmdlist"));
+        assert_eq!(lines().last().map(String::as_str), Some("Unknown command \"cmdlist\""));
     }
 
     // -----------------------------------------------------------------------

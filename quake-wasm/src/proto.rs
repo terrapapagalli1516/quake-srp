@@ -17,6 +17,7 @@
 //! | 6 | `AudioReady` | `ready u8`, `0 u8 ×3`, `rate u32` (the device's sample rate; 0 unknown) |
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
 //! | 8 | `End` | — (the host's "nothing more is queued", the answer to a polling `Sync`) |
+//! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into |
 //! | 10 | `AudioClock` | `pos u32`: the sample pairs the page's audio device has played (a wrapping count; the page sends it before each `Tick`) |
 //! | 11 | `AudioWake` | `pos u32`: the same, from the host between ticks while the device plays: mix now (`S_ExtraUpdate`) |
 //!
@@ -27,7 +28,7 @@
 //! |---|---|---|
 //! | 1 | `Frame` | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 u8 ×3`, then the pixels |
 //! | 2 | `Sync` | `seq u32` (the last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
-//! | 3 | `State` | `flags u32` ([`STATE_MENU`] …), `menu_screen i32` |
+//! | 3 | `State` | `flags u32` ([`STATE_MENU`] …), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel; 0 in the 4:3 box) |
 //! | 4–11 | — | (retired: the sound records of the page's own mixing) |
 //! | 12 | `Reply` | `id u32`, `value f64`, then UTF-8 text (the answer to a `Call`) |
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
@@ -48,6 +49,7 @@ const IN_POINTER_UNLOCKED: u8 = 5;
 const IN_AUDIO_READY: u8 = 6;
 const IN_CALL: u8 = 7;
 const IN_END: u8 = 8;
+const IN_WINDOW: u8 = 9;
 const IN_AUDIO_CLOCK: u8 = 10;
 const IN_AUDIO_WAKE: u8 = 11;
 
@@ -79,6 +81,8 @@ pub(crate) enum Event {
     Call { id: u32, line: String },
     /// The host has nothing more queued (the answer to a polling sync).
     End,
+    /// The page's box for the picture, in device pixels.
+    Window { w: u32, h: u32 },
     /// A record this program does not know (skipped, for forward
     /// compatibility with a newer page).
     Unknown(u8),
@@ -121,6 +125,7 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
             Event::Call { id, line: String::from_utf8_lossy(p.rest()).into_owned() }
         }
         IN_END => Event::End,
+        IN_WINDOW => Event::Window { w: p.u32(), h: p.u32() },
         other => Event::Unknown(other),
     };
     Ok(Some(ev))
@@ -184,6 +189,11 @@ pub(crate) const STATE_WALK: u32 = 4;
 pub(crate) const STATE_BIND_GRAB: u32 = 8;
 /// A `timedemo` is running: frames come back to back, not per refresh.
 pub(crate) const STATE_TIMEDEMO: u32 = 16;
+/// Native resolution (`vid_native`): the page fills its box with the frame,
+/// `pixel_size` device pixels to a frame pixel, instead of a 4:3 box.
+pub(crate) const STATE_NATIVE: u32 = 32;
+/// `vid_fkey`: the page's `f` toggles fullscreen.
+pub(crate) const STATE_FKEY: u32 = 64;
 
 /// `Pcm` flags: silence what was mixed ahead before these samples
 /// (`S_ClearBuffer`).
@@ -207,7 +217,7 @@ pub(crate) struct AudioCounts {
 pub(crate) enum Msg<'a> {
     Frame { w: u16, h: u16, format: u8, pixels: &'a [u8] },
     Sync { seq: u32, wait: bool },
-    State { flags: u32, menu_screen: i32 },
+    State { flags: u32, menu_screen: i32, pixel_size: u32 },
     Reply { id: u32, value: f64, text: &'a str },
     #[cfg(feature = "bench")]
     Bench(&'a [f64]),
@@ -254,7 +264,9 @@ impl Msg<'_> {
                 (OUT_FRAME, f.u16(w).u16(h).u8(format).u8(0).u16(0).0, pixels)
             }
             Msg::Sync { seq, wait } => (OUT_SYNC, f.u32(seq).u8(wait as u8).0, &[]),
-            Msg::State { flags, menu_screen } => (OUT_STATE, f.u32(flags).i32(menu_screen).0, &[]),
+            Msg::State { flags, menu_screen, pixel_size } => {
+                (OUT_STATE, f.u32(flags).i32(menu_screen).u32(pixel_size).0, &[])
+            }
             Msg::Reply { id, value, text } => (OUT_REPLY, f.u32(id).f64(value).0, text.as_bytes()),
             #[cfg(feature = "bench")]
             Msg::Bench(values) => (OUT_BENCH, values.iter().fold(f, |f, &v| f.f64(v)).0, &[]),
@@ -300,6 +312,11 @@ pub(crate) mod encode {
         let mut p = vec![keynum, down as u8, 0, 0];
         p.extend_from_slice(&ch.to_le_bytes());
         record(super::IN_KEY, &p)
+    }
+    pub(crate) fn window(w: u32, h: u32) -> Vec<u8> {
+        let mut p = w.to_le_bytes().to_vec();
+        p.extend_from_slice(&h.to_le_bytes());
+        record(super::IN_WINDOW, &p)
     }
     pub(crate) fn mouse(dx: f32, dy: f32) -> Vec<u8> {
         let mut p = dx.to_le_bytes().to_vec();
@@ -449,6 +466,6 @@ mod tests {
         assert_eq!(size(Msg::Pcm { start: 5, rate: 11025, flags: PCM_CLEAR, pairs: &pairs }), 12 + 8);
         let c = AudioCounts { rate: 48000, mode: 1, starts: 2, local: 3, stops: 0, clears: 1, painted: 7 };
         assert_eq!(size(Msg::Audio(c)), 28);
-        assert_eq!(size(Msg::State { flags: 0, menu_screen: 0 }), 8);
+        assert_eq!(size(Msg::State { flags: 0, menu_screen: 0, pixel_size: 0 }), 12);
     }
 }
