@@ -92,7 +92,7 @@ enum Source {
     /// `static_registered`: `COM_FindFile` never reads a shareware game's
     /// loose file whose name has a directory in it ("if not a registered
     /// version, don't ever go beyond base").
-    Dir { subdirs: bool },
+    Dir { path: PathBuf, subdirs: bool },
 }
 
 /// An opened PAK archive (the in-memory `pack_t`), or a directory of loose
@@ -317,7 +317,7 @@ impl Pak {
     /// game reads no loose file below the directory itself.
     pub fn directory(dir: &Path, registered: bool) -> Pak {
         Pak {
-            source: Source::Dir { subdirs: registered },
+            source: Source::Dir { path: dir.to_path_buf(), subdirs: registered },
             entries: Vec::new(),
             name: dir.to_string_lossy().into_owned(),
             dir_crc: 0,
@@ -405,13 +405,13 @@ impl Pak {
     /// a directory's loose file (`Sys_FileTime` finding it; a shareware game
     /// skips names below the directory).
     fn read_own(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        match self.source {
-            Source::Dir { subdirs } => {
+        match &self.source {
+            Source::Dir { path, subdirs } => {
                 if !subdirs && name.contains(['/', '\\']) {
                     return Ok(None);
                 }
                 // A file that cannot be read is one COM_FindFile did not find.
-                Ok(std::fs::read(Path::new(&self.name).join(name)).ok())
+                Ok(std::fs::read(path.join(name)).ok())
             }
             _ => match self.find(name) {
                 Some(e) => Ok(Some(self.read_entry(e)?)),

@@ -70,7 +70,8 @@ fn files() -> Option<&'static Filesystem> {
 #[cfg(test)]
 fn default_files() -> Option<Filesystem> {
     let pak = Pak::open(concat!(env!("CARGO_MANIFEST_DIR"), "/../quake-data/ID1/PAK0.PAK")).ok()?;
-    Some(Filesystem { files: pak, gamedir: default_gamedir(), registered: false, modified: false, log: Vec::new() })
+    // (The tests' game directory is each thread's own: `gamedir`.)
+    Some(Filesystem { files: pak, gamedir: PathBuf::from(GAMENAME), registered: false, modified: false, log: Vec::new() })
 }
 
 #[cfg(not(test))]

@@ -101,34 +101,39 @@ pub struct Filesystem {
 pub fn init_filesystem(basedir: &Path) -> Result<Filesystem, String> {
     let gamedir = basedir.join(GAMENAME);
     let mut log = Vec::new();
-    // COM_FindFile starts with static_registered = 1: COM_CheckRegistered's
-    // own search may find a loose gfx/pop.lmp.
-    let (files, modified) = add_game_directory(&gamedir, true, &mut log)?;
-    let registered = check_registered(&files, modified)?;
+    let packs = load_packs(&gamedir, &mut log)?;
+    // COM_LoadPackFile: any pack that is not the shareware pak0.
+    let modified = packs.iter().any(Pak::is_modified);
+    // COM_FindFile starts with static_registered = 1, so COM_CheckRegistered's
+    // own search may find a loose gfx/pop.lmp; every later search goes by its
+    // answer.
+    let registered = check_registered(&add_game_directory(&gamedir, &packs, true), modified)?;
     log.push(format!("Playing {} version.", if registered { "registered" } else { "shareware" }));
-    // The directory element takes the check's answer for every later search.
-    let (files, _) = add_game_directory(&gamedir, registered, &mut Vec::new())?;
+    let files = add_game_directory(&gamedir, &packs, registered);
     Ok(Filesystem { files, gamedir, registered, modified, log })
 }
 
-/// `COM_AddGameDirectory`: the directory itself on the path, then
-/// `pak0.pak`, `pak1.pak`, … in front of it until one does not open, each
-/// logged as `COM_LoadPackFile` logs it. Also returns `com_modified`: any
-/// pack whose file count or directory CRC is not the shareware `pak0.pak`'s.
-fn add_game_directory(dir: &Path, registered: bool, log: &mut Vec<String>) -> Result<(Pak, bool), String> {
-    let mut path = Pak::directory(dir, registered);
-    let mut modified = false;
+/// `COM_AddGameDirectory`'s loop: `pak0.pak`, `pak1.pak`, … in `dir` until
+/// one is not there, each opened and logged as `COM_LoadPackFile` does.
+fn load_packs(dir: &Path, log: &mut Vec<String>) -> Result<Vec<Pak>, String> {
+    let mut packs = Vec::new();
     for i in 0..MAX_PAKS {
         let file = dir.join(format!("pak{i}.pak"));
         if !file.is_file() {
             break; // COM_LoadPackFile: can't open, NULL: the search ends
         }
         let pack = Pak::open(&file).map_err(|e| load_pack_error(&file, &e))?;
-        modified |= pack.is_modified();
         log.push(format!("Added packfile {} ({} files)", file.display(), pack.entries().len()));
-        path = pack.over(path);
+        packs.push(pack);
     }
-    Ok((path, modified))
+    Ok(packs)
+}
+
+/// `COM_AddGameDirectory`'s search path: the directory itself, then `packs`
+/// in front of it in order, so the last is searched first. `registered` is
+/// `static_registered`, for the directory's loose files.
+fn add_game_directory(dir: &Path, packs: &[Pak], registered: bool) -> Pak {
+    packs.iter().cloned().fold(Pak::directory(dir, registered), |path, pack| pack.over(path))
 }
 
 /// `COM_LoadPackFile`'s `Sys_Error`s: not a pack, too many files (or, the
@@ -238,9 +243,8 @@ fn foreign_builtins(progs: &Progs) -> Vec<String> {
     progs
         .functions
         .iter()
-        .enumerate()
         .skip(1)
-        .filter_map(|(_, f)| {
+        .filter_map(|f| {
             let number = match f.builtin() {
                 Some(n) if n >= known => n,
                 None if f.first_statement == 0 => 0,
