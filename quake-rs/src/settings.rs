@@ -10,7 +10,8 @@
 //!   (`oracle/classic_check.py` proves it).
 //! - **2026** ([`Profile::Modern`], the default): the best experience of an
 //!   idealized software-rendered Quake in 2026 ([`Cvars::modern`]), with the
-//!   WASD layout ([`Bindings::with_wasd`]).
+//!   WASD layout ([`Bindings::with_wasd`]) and a gamepad layout
+//!   ([`Bindings::with_gamepad`]).
 //!
 //! Switching profile resets the departures and the bindings to the new
 //! profile's and keeps id's own settings (Screen size, Brightness, the
@@ -77,11 +78,12 @@ impl Profile {
         }
     }
 
-    /// The profile's bindings: `default.cfg`, with WASD in 2026.
+    /// The profile's bindings: `default.cfg`, with WASD and the gamepad
+    /// layout in 2026.
     pub fn bindings(self) -> Bindings {
         match self {
             Profile::Classic => Bindings::default_cfg(),
-            Profile::Modern => Bindings::default_cfg().with_wasd(),
+            Profile::Modern => Bindings::default_cfg().with_wasd().with_gamepad(),
         }
     }
 }

@@ -29,11 +29,15 @@ keydown/mouse ──KEY/MOUSE records──▶ ring ─▶ fd_read(0) ─▶ Key
                                             (the program is blocked here, in
                                              Atomics.wait, between frames)
 requestAnimationFrame
+  poll the gamepad; if it changed,
+  GAMEPAD ─────────────────────────▶ ring ─▶ fd_read(0) ─▶ kept for the frame
   AUDIO_CLOCK, TICK(seq, dt) ──────▶ ring ─▶ fd_read(0) returns the tick
-  spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime, the
-                                             client frame, menu, console: an 8-bit
-                                             frame and its palette (V_UpdatePalette);
-                                             id's mixer paints to the clock + mix-ahead
+  spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime,
+                                             IN_Commands (the pad's keys), the
+                                             client frame (IN_JoyMove), menu,
+                                             console: an 8-bit frame and its
+                                             palette (V_UpdatePalette); id's mixer
+                                             paints to the clock + mix-ahead
                                              fd_write(1): PCM ─▶ samples copied into the
                                                                  sound ring
                                                           FRAME ─▶ copied into a free
@@ -106,6 +110,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
 | 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
 | 12 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
+| 20 | GAMEPAD | `connected u8`, `standard u8`, `buttons u8`, `0 u8`, `pressed u32` (bit per button), `axes f32×6` (a standard pad: the sticks, then the triggers' values): the pad's state, polled each refresh before the tick and sent when it changed ("Input", below) |
 
 A record whose payload is shorter than its kind's reads the missing fields as
 zeros, and an unknown kind is skipped, so either side can grow a record.
@@ -134,6 +139,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 15 | AUDIO | `rate u32`, `mode u32` (0 Classic, 1 2026), then counts: `starts`, `local`, `stops`, `clears`, `painted` (u32 each) |
 | 16 | CD | `serial u32` (a new value: play the track from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes, and only with a disc ("CD music") |
 | 17 | FRAME_AT | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, ring slot `slot`, its pixels and palette at those addresses (`-sharedframes`) |
+| 20 | RUMBLE | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read): the pad's two motors, or a phone's vibration (2026's `joy_rumble`) |
 
 A turn's records end with its `SYNC`. A tick's `PCM` comes before its
 `FRAME`, so the samples reach the ring before the pixels are copied.
@@ -435,6 +441,95 @@ with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
 reload); the checks that pin id's behaviour open the page as `?classic`,
 and `bench.py` does too, so its frames hash as `quaketool play`'s.
 
+## Input
+
+The page sends what the player does as it happens; the program decides what
+it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
+
+- **Keys by their place.** A key is its place on the keyboard (`KeyboardEvent.code`:
+  letters, digits and punctuation as the US key in that place), as WinQuake's
+  keys were scancodes (`scantokey`). So WASD walks on AZERTY or Dvorak too,
+  `bind` names a place, and a key's release matches its press whatever Shift
+  did in between; what the layout typed goes with the key (`ch`) for the
+  console and the name fields. A key `code` does not name falls back to
+  `key`. (`verify_input.py`: AZERTY's key in W's place is `w` in the game and
+  types `z` in the console; letters used to follow the layout, `z`.)
+- **The raw mouse.** The pointer lock asks for `unadjustedMovement`
+  (Chromium's raw input, on Windows, macOS and ChromeOS): id's
+  `IN_StartupMouse` switched Windows' pointer acceleration off while the game
+  ran, so a count was always the same turn. Refused (Linux, Firefox), the
+  plain lock, at once and from then on (Chromium refuses a burst of lock
+  requests). Each `mousemove` is a `MOUSE` record; a browser that coalesces
+  samples into one event per refresh sums their movement into it, so every
+  count arrives, and the program adds each as it comes: the turn per count
+  is the same at any frame rate (`mouse_turns_the_same_at_60_and_480_hz`).
+  `pointerrawupdate` would deliver samples sooner within a refresh, but the
+  frame starts at the refresh either way, so it would not show them sooner.
+- **The gamepad.** The Gamepad API has no events for a pad's state, so the
+  page polls `navigator.getGamepads()` once per refresh, just before the tick
+  (as late as the frame allows), and sends a `GAMEPAD` record when the state
+  changed: the first connected pad with the standard mapping, else the first
+  connected. The program keeps it, and the host frame the tick runs reads it
+  as id's joystick: `IN_Commands` (buttons as `JOY1`.., `AUX5`.., the D-pad as
+  the hat's `AUX29`..`AUX32`) and `IN_JoyMove`; quake-rs
+  `client/in_win.rs` has the mapping from a standard pad to winmm's axes and
+  buttons. Classic reads it only after `joystick 1` (id's default is 0); the
+  2026 profile's pad is a twin-stick layout of `bind` lines and `joy*`
+  settings, with its buttons as the menu's keys (`joy_menukeys`). A pad's
+  button also takes the click-to-play scrim away (a browser may not count it
+  as the gesture audio needs: then the first click or key starts the sound).
+- **Rumble** (2026, `joy_rumble`): a `RUMBLE` record after a frame in which
+  the player took damage (its strength from `V_ParseDamage`'s count) or fired
+  a heavy weapon, saying whether the pad is read (`joystick`). The page plays
+  it on the pad's `vibrationActuator` (`"dual-rumble"`, Chromium) or
+  `hapticActuators[0].pulse` (Firefox, where enabled) — unless the pad is not
+  read, or the touch screen was touched since the pad was last used: then a
+  phone vibrates, through the touch controls' `rumble()` (`navigator.vibrate`,
+  in the game only; Android). Never both. On a device with both, the pad and
+  the touch controls otherwise just add up: the pad's move is `IN_JoyMove`'s,
+  the touch stick's the client's analog `set_move`, and neither holds the
+  other's keys.
+
+`web/verify_gamepad.py` drives all of it with a synthetic pad (the scrim, the
+menus, a walk, a turn, the rocket's kick and its blast's rumble, an unplugged
+pad, Classic's `joystick 0` and `1`, and on a touch page the rumble going to
+the pad or the phone, whichever was used last).
+The synthetic pad stands in for the browsers' own Gamepad API; no real pad
+was tried.
+
+**Latency.** `web/latency.py` measures from each input event's `timeStamp`
+(when the browser got it, so the wait for the refresh counts; a pad's
+`timestamp`) to the `putImageData` of the first frame that consumed it, live
+game, 2026 profile at 960×600, keys pressed, the mouse dragged and the right
+stick moved at random moments for 15 s each (median / p95, ms; in brackets
+the event's wait for its handler; a 16-core desktop, load 4–8):
+
+| | key | mouse | pad | the frame (tick to present) |
+|---|---|---|---|---|
+| Chromium, 60 Hz rAF | 13.2 / 20.9 [0.3] | 11.9 / 20.5 [7.2] | 12.5 / 17.2 [8.9] | 4.1 / 5.8 |
+| Chromium, 240 Hz emulated | 6.9 / 14.8 [2.0] | — | 4.2 / 5.5 [1.0] | 3.4 / 4.6 |
+| Firefox, 60 Hz rAF | 13.7 / 17.7 [0.1] | 11.5 / 20.2 [7.0] | 11.8 / 16.9 [8.1] | 4.2 / 5.9 |
+
+At 60 Hz an event waits on average half a refresh for the tick that takes
+it, then the frame's 4 ms: 12–13 ms to the canvas, whatever the input. The
+mouse's wait is in its dispatch (browsers deliver `mousemove` with the
+refresh), a key's after it; the pad's is the poll's. At an emulated 240 Hz
+(the page's loop paused and a 4.17 ms timer driving `quake.tick`, since
+headless browsers refresh at 60 Hz) the pad, polled just before each tick,
+takes 4.2 ms, one frame; a key 6.9 ms, with a tail where the browser held a
+task behind its own 60 Hz frame after the input, which a real 240 Hz refresh
+would not (the mouse is left out: its events still come at 60 Hz). Firefox's
+240 Hz run lost most of its key presses to its test driver and is not in the
+table. What none of this sees: from `putImageData` to light (the compositor
+and the display: a refresh or two, one less with `?lowlatency` where it
+works), and a device's own latency (USB polling, the browser's gamepad
+poll).
+
+Nothing cheap is left in the page: keys and mouse go to the program when
+they happen and it applies them at once, the pad is read as late as the
+tick, and the frame is presented in the refresh that ticked. What would cut
+more is the browser's (`?lowlatency`, below) or the frame's own time.
+
 ## Sound
 
 The program mixes, as WinQuake did: id's `snd_dma.c`, `snd_mix.c` and
@@ -675,7 +770,11 @@ Kept, same meaning: it asks for a `desynchronized` canvas (WebGL2's or the
 arrives inside the refresh that ticked, so the hint matters exactly as much
 as before. Off by default, and not verifiable headless: there it holds the
 refresh near 60 Hz, so input to present measured 12–16 ms at the median
-with it (old page and new, WebGL2 and 2-D alike) against 2–3 ms without.
+with it (old page and new, WebGL2 and 2-D alike) against 2–3 ms without. It
+stays off in 2026 too: it would save up to a refresh (2 ms at 480 Hz, 17 ms
+at 60) only where the browser supports it, and risks tearing there — an
+unverifiable change to every frame's look is not one to make by default. A
+player who wants it opens the page as `?lowlatency`.
 
 ## Touch
 

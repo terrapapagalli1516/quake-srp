@@ -31,7 +31,7 @@ use crate::automation;
 use crate::cl_demo::timedemo_running;
 use crate::config::{exec_config, write_if_changed};
 use crate::host::step;
-use crate::input::{key_clear_states, key_event, mouse_move, pointer_unlocked};
+use crate::input::{gamepad, key_clear_states, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
     read_event, AudioCounts, Event, Msg, PCM_CLEAR, STATE_ASK, STATE_BIND_GRAB, STATE_CONSOLE,
     STATE_FKEY, STATE_MENU, STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK,
@@ -155,6 +155,7 @@ impl<W: Write> Sys<W> {
                 }
                 Event::Window { w, h } => crate::vid::set_window(w, h),
                 Event::Present(format) => crate::app::ensure_app(|a| a.present.set_format(format)),
+                Event::Gamepad(pad) => gamepad(pad),
                 Event::Call { id, line } => {
                     // The sound device's own calls, then the game's.
                     let answer = match self.audio.cd_call(&line).or_else(|| self.audio.call(&line)) {
@@ -186,6 +187,7 @@ impl<W: Write> Sys<W> {
             return Ok(());
         }
         self.write_picture()?;
+        self.write_rumbles()?;
         crate::bench::write_values(&mut self.out)?;
         write_if_changed(&mut self.config);
         Ok(())
@@ -242,6 +244,13 @@ impl<W: Write> Sys<W> {
             }
         }
         Ok(())
+    }
+
+    /// The frame's rumbles (the 2026 `joy_rumble`), for the pad or a phone.
+    fn write_rumbles(&mut self) -> io::Result<()> {
+        let (mut rumbles, mut pad) = (Vec::new(), false);
+        crate::app::ensure_app(|a| (rumbles, pad) = (a.pad.take_rumbles(), a.pad.pad_read));
+        rumbles.into_iter().try_for_each(|rumble| Msg::Rumble { rumble, pad }.write_to(&mut self.out))
     }
 }
 
@@ -463,6 +472,27 @@ mod tests {
         assert_eq!(states.len(), 4, "{states:?}");
         assert_eq!(states[2] & STATE_MENU, 0, "the menu closed by the call");
         assert_eq!(states[3] & STATE_MENU, STATE_MENU, "Escape's turn: the menu is up");
+    }
+
+    /// The page's `Gamepad` records reach `IN_Commands` in the next host
+    /// frame: the 2026 pad's Start (`togglemenu`) opens the menu, and the
+    /// frame's `State` says so.
+    #[test]
+    fn a_gamepad_record_is_read_at_the_next_frame() {
+        use quake_rs::client::in_win::Pad;
+        let start = Pad { standard: true, num_buttons: 17, pressed: 1 << 9, axes: [0.0; 6] };
+        let mut input = Vec::new();
+        input.extend(encode::call(1, "boot"));
+        input.extend(encode::call(2, "menu_cancel"));
+        input.extend(encode::call(3, "exec profile 2026"));
+        input.extend(encode::gamepad(Some(start)));
+        input.extend(encode::tick(1, 1.0 / 60.0));
+        input.extend(encode::gamepad(None));
+        input.extend(encode::tick(2, 1.0 / 60.0));
+        let recs = run_on(&input);
+        let states: Vec<u32> = recs.iter().filter(|r| r.kind == Record::STATE).map(|r| r.u32_at(0)).collect();
+        assert_eq!(states[3] & STATE_MENU, 0, "no menu before the frame");
+        assert_eq!(states.last().map(|s| s & STATE_MENU), Some(STATE_MENU), "Start opened it: {states:?}");
     }
 
     #[test]

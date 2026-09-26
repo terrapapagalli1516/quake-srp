@@ -1,5 +1,5 @@
-//! The video options `shot`, `timedemo` and `view` share: the port's video
-//! cvars ([`render::VideoCvars`]: Hor+ and hires), the display the frame is
+//! The video options `shot`, `view`, `play` and `timedemo` share: the port's video
+//! cvars ([`VideoCvars`]: Hor+ and hires), the display the frame is
 //! shown on (which with the mode's size gives `vid.aspect`), and the scaled
 //! 2-D layer.
 //!
@@ -107,3 +107,13 @@ impl VideoArgs {
         }
     }
 }
+
+/// The options as `quaketool --help` lists them (the module docs say more).
+pub const HELP: &[(&str, &str)] = &[
+    ("--video classic|modern", "both cvars at once: id's, or Hor+ and hires (default classic)"),
+    ("--fov-mode classic|horplus", "how `fov` meets the display's shape"),
+    ("--hires 0|1", "views past 1280x1024, particles and the warp at 320x200 proportions"),
+    ("--display W:H|square", "the display's width:height (square: the mode's own); the default is the command's"),
+    ("--scaled2d 0|1", "the status bar, menus and console blown up from 320x200"),
+    ("--threads N", "draw each frame's 3-D view on N threads (default 1; the pixels are the same for any N)"),
+];

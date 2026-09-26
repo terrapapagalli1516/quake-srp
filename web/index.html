@@ -207,6 +207,7 @@
           <span class="k"><kbd>←</kbd><kbd>→</kbd></span><span>turn</span>
           <span class="k"><kbd>Space</kbd></span><span>jump / swim up</span>
           <span class="k"><kbd>C</kbd></span><span>swim down</span>
+          <span class="k">gamepad</span><span>2026: left stick moves, right stick looks, RT fires, A or LT jumps, bumpers change weapon, Start the menu (D-pad, A and B work it), Back the scores. Classic: id's joystick after <code>joystick 1</code> on the console. A browser sees a pad once a button is pressed</span>
         </div>
       </div>
       <div class="col">
@@ -277,7 +278,9 @@ const bootFill = document.getElementById('bootFill');
 const playEl = document.getElementById('play');
 const lockChip = document.getElementById('lockChip');
 const fsHint = document.getElementById('fsHint');
-const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
+// The keys whose browser default (scrolling, or a click on a focused button)
+// must never happen in the game, by Quake keynum: WASD, c, Space, the arrows.
+const MOVE_KEYNUMS = [119, 97, 115, 100, 99, 32, 128, 129, 130, 131];
 // MouseEvent.button -> Quake keynum (keys.h K_MOUSE1/2/3): left, middle, right.
 const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
@@ -293,10 +296,10 @@ const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, REA
 const CTL_BYTES = 256, RING_BYTES = 1 << 16;
 // Record kinds, in (IN_*) and out (OUT_*).
 const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7, WINDOW: 9, AUDIO_CLOCK: 10,
-             PRESENT: 12 };
+             PRESENT: 12, GAMEPAD: 20 };
 // Frame formats (the FRAME record's, and what PRESENT asks for).
 const FORMAT = { RGBA8: 0, INDEXED8: 1 };
-const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15, CD: 16 };
+const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15, CD: 16, RUMBLE: 20 };
 // State flags (the STATE record).
 const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, FKEY: 64,
              TOUCH: 128, ASK: 256, PAUSED: 512 };
@@ -347,13 +350,14 @@ function sendRecord(kind, payload) {
 }
 function fields(size, fill) { const b = new Uint8Array(size); fill(new DataView(b.buffer)); return b; }
 // One key event into the program: keys.c's Key_Event decides, as in id's
-// Quake, whether it goes to the menu, the console or its binding.
-function keyEvent(qk, down, ch) {
-  noteInput();
+// Quake, whether it goes to the menu, the console or its binding. `at` is the
+// event's timeStamp, for the latency measurement.
+function keyEvent(qk, down, ch, at) {
+  noteInput(at);
   sendRecord(IN.KEY, fields(8, d => { d.setUint8(0, qk); d.setUint8(1, down ? 1 : 0); d.setUint32(4, ch || 0, true); }));
 }
-function mouseMove(dx, dy) {
-  noteInput();
+function mouseMove(dx, dy, at) {
+  noteInput(at);
   sendRecord(IN.MOUSE, fields(8, d => { d.setFloat32(0, dx, true); d.setFloat32(4, dy, true); }));
 }
 function sendTick(seq, dt) {
@@ -426,6 +430,7 @@ function handleOutput(b) {
         if (quake.onBench) quake.onBench(v);
         break;
       }
+      case OUT.RUMBLE: onRumble(f32(p), f32(p + 4), u32(p + 8), len >= 16 && u32(p + 12) !== 0); break;
     }
     i = p + len;
   }
@@ -475,16 +480,21 @@ function startFromOverlay() {
   statusEl.textContent = 'attract loop — press any key for the menu · Single Player > New Game to play';
 }
 
-// Physical punctuation/digit keys, KeyboardEvent.code -> unshifted US-ASCII
-// keynum. WinQuake's Key_Event works on SCANCODES (in_win.c scantokey): the
-// ',' key is keynum ',' whether or not Shift is down, and a key's release
-// always matches its press. e.key instead shifts for punctuation ('<' for
-// Shift+','), which (a) made the seeded default.cfg layout unable to strafe
-// while running (+speed is Shift, so Shift+',' delivered unbound keynum 60)
-// and (b) could STICK a held key (press ',', add Shift, release ',' -> keyup
-// said '<', leaving keynum 44 held forever). Resolving these keys from
-// e.code restores the C's scancode semantics; letters are already
-// shift-stable via toLowerCase below.
+// Physical keys, KeyboardEvent.code -> the unshifted US-ASCII keynum of the
+// key in that place. WinQuake's Key_Event works on SCANCODES (in_win.c
+// scantokey, a US table): a key is its place on the keyboard, whatever the
+// layout types there, and its release always matches its press. So on AZERTY
+// the key where a US keyboard has W (labelled Z) is keynum 'w' and walks
+// forward in the 2026 WASD layout, and the digit row is 1..0 though it types
+// &é"'( unshifted; what the layout typed still goes with the key (typedChar),
+// for the console and the name fields. e.key instead follows the layout and
+// shifts punctuation ('<' for Shift+','), which (a) put WASD all over the
+// keyboard on AZERTY or Dvorak, (b) made the seeded default.cfg layout unable
+// to strafe while running (+speed is Shift, so Shift+',' delivered unbound
+// keynum 60) and (c) could STICK a held key (press ',', add Shift, release ','
+// -> keyup said '<', leaving keynum 44 held forever). Letters are KeyA..KeyZ
+// below; a key e.code does not name (or an empty code, as some virtual
+// keyboards send) falls back to e.key.
 const CODE_KEYNUMS = {
   Comma: 44, Period: 46, Slash: 47, Semicolon: 59, Quote: 39,
   BracketLeft: 91, BracketRight: 93, Backslash: 92, Backquote: 96,
@@ -499,6 +509,7 @@ const CODE_KEYNUMS = {
 function quakeKey(e) {
   const pc = CODE_KEYNUMS[e.code];
   if (pc !== undefined) return pc;
+  if (/^Key[A-Z]$/.test(e.code)) return e.code.charCodeAt(3) + 32;   // KeyW -> 'w'
   const k = e.key;
   if (k.length === 1) {
     const c = k.toLowerCase().charCodeAt(0);
@@ -519,9 +530,12 @@ function quakeKey(e) {
 }
 
 // The character a key typed on the player's keyboard layout, for the console
-// and the Setup name fields (0: none — a named key, or a shortcut chord).
+// and the Setup name fields (0: none — a named key, or a shortcut chord). AltGr
+// (reported as Ctrl+Alt on Windows) types characters on most layouts: '@' is
+// AltGr+Q on a German keyboard.
 function typedChar(e) {
-  if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return 0;
+  const altGr = typeof e.getModifierState === 'function' && e.getModifierState('AltGraph');
+  if (e.key.length !== 1 || e.metaKey || ((e.ctrlKey || e.altKey) && !altGr)) return 0;
   return e.key.codePointAt(0);
 }
 
@@ -554,7 +568,8 @@ addEventListener('keydown', e => {
   //     live game the key still reaches the engine for a player who bound it;
   //     during demo playback it does not, where any key raises the menu.
   const gameHasKeys = !menuVisible() && !consoleVisible();
-  if (k === 'f' && gameHasKeys && fkeyFullscreen()) {
+  const qk = quakeKey(e);
+  if (qk === 102 && gameHasKeys && fkeyFullscreen()) {   // the F key's place
     toggleFullscreen();
     if (!inWalkMode()) { e.preventDefault(); return; }
   }
@@ -567,25 +582,24 @@ addEventListener('keydown', e => {
   //     +forward.., the digit row's "impulse 1".."impulse 8" by physical key,
   //     so Shift+digit and non-US layouts select weapons too, and the console
   //     key's "toggleconsole").
-  const qk = quakeKey(e);
-  if (qk !== null) keyEvent(qk, true, typedChar(e));
+  if (qk !== null) keyEvent(qk, true, typedChar(e), e.timeStamp);
   // Keep the browser's own use of these keys away: Space/arrows scroll, Tab
-  // moves focus, and while the menu or console has the keyboard, typing must
-  // not start the browser's quick-find (' and /) or page scrolling.
-  if (MOVE_KEYS.includes(k) || k === 'tab' || k === 'backspace' || qk === 96
+  // moves focus, Firefox's quick-find opens on ' and / (the latter is
+  // default.cfg's "impulse 10"), and while the menu or console has the
+  // keyboard, typing must not scroll the page either.
+  if (MOVE_KEYNUMS.includes(qk) || qk === 9 || qk === 127 || qk === 96 || qk === 39 || qk === 47
       || (!gameHasKeys && qk !== null && !e.ctrlKey && !e.metaKey)) e.preventDefault();
 });
 addEventListener('keyup', e => {
-  const k = e.key.toLowerCase();
   // Key-ups are delivered unconditionally (even while the menu/console own the
   // keyboard) so a key released behind an overlay can never stick held.
   const qk = quakeKey(e);
-  if (qk !== null) keyEvent(qk, false, 0);
+  if (qk !== null) keyEvent(qk, false, 0, e.timeStamp);
   // A focused <button>/<summary> fires its click on the Space KEYUP — swallow
   // the game keys' keyup so jumping can never re-trigger the last clicked
   // control (the click handlers also blur(); this is the backstop), and a
   // held-then-released arrow can't scroll either.
-  if (MOVE_KEYS.includes(k)) e.preventDefault();
+  if (MOVE_KEYNUMS.includes(qk)) e.preventDefault();
 });
 // A key released while the window was elsewhere never comes up here: on
 // losing the keyboard, vid_win.c's ClearAllStates (every key up, repeats
@@ -727,7 +741,7 @@ canvas.addEventListener('mousedown', (e) => {
     // to aim — and the page's buttons stay one click away); closing the menu
     // re-captures on the next click, never automatically (browsers require the
     // gesture).
-    if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
+    if (inWalkMode() && !menuVisible() && !consoleVisible()) lockPointer();
   }
   // The buttons are K_MOUSE1/2/3 (in_win.c: left, right, middle), keys like
   // any other: while the mouse is captured they reach their bindings —
@@ -735,15 +749,37 @@ canvas.addEventListener('mousedown', (e) => {
   // Customize controls waits for a key they are the key to bind (M_Keys_Key),
   // as in id's.
   if (MOUSE_KEYNUMS[e.button] && (locked() || bindGrabbing())) {
-    keyEvent(MOUSE_KEYNUMS[e.button], true, 0);
+    keyEvent(MOUSE_KEYNUMS[e.button], true, 0, e.timeStamp);
     e.preventDefault();
   }
   dragging = true;
 });
 addEventListener('mouseup', (e) => {
   dragging = false;
-  if (MOUSE_KEYNUMS[e.button]) keyEvent(MOUSE_KEYNUMS[e.button], false, 0);
+  if (MOUSE_KEYNUMS[e.button]) keyEvent(MOUSE_KEYNUMS[e.button], false, 0, e.timeStamp);
 });
+// The raw mouse. id's IN_StartupMouse switched Windows' pointer acceleration
+// off while the game ran (newmouseparms {0, 0, 1}, unless -noforcemaccel), so
+// a count of mouse movement was always the same turn; `unadjustedMovement`
+// asks the browser for the same unaccelerated counts (Chromium: the OS's raw
+// input, on Windows, macOS and ChromeOS). Where it is refused
+// (NotSupportedError: Linux, Firefox, an older Chromium) the plain lock, at
+// once and from then on: Chromium refuses a burst of lock requests ("too many
+// in a short window"), so a refused option must not cost a second request
+// every time.
+let rawMouse = true;   // until the browser says it has no unadjusted movement
+function lockPointer() {
+  let p = null;
+  try { p = rawMouse ? canvas.requestPointerLock({ unadjustedMovement: true }) : canvas.requestPointerLock(); }
+  catch (err) { p = null; }
+  if (!p || typeof p.then !== 'function') return;   // an older browser: no promise, the option ignored
+  p.catch(err => {
+    if (!rawMouse || !err || err.name !== 'NotSupportedError') return;
+    rawMouse = false;
+    const q = canvas.requestPointerLock();
+    if (q && typeof q.catch === 'function') q.catch(() => {});
+  });
+}
 // The right button is MOUSE2 in the game, not the browser's context menu.
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 // The standard web-port Esc pattern. The browser RESERVES Esc while the
@@ -809,9 +845,90 @@ canvas.addEventListener('mousemove', e => {
   if (menuVisible() || consoleVisible()) return;
   // Raw movementX/Y counts: the engine's IN_MouseMove port applies the
   // sensitivity cvar, the Invert Mouse sign (m_pitch < 0), and the
-  // lookstrafe/+strafe routing.
-  if (locked() || dragging) mouseMove(e.movementX, e.movementY);
+  // lookstrafe/+strafe routing. Every count arrives: a browser that coalesces
+  // several samples into one event (Chromium and Firefox do, once per
+  // refresh) sums their movement into it, and the program adds each event as
+  // it comes, so the same motion turns as far at 60 Hz as at 480 Hz.
+  if (locked() || dragging) mouseMove(e.movementX, e.movementY, e.timeStamp);
 });
+
+// --- The gamepad ---------------------------------------------------------------
+// The Gamepad API has no events for a pad's state, so the page polls it once
+// per display refresh, just before the tick (frame(), below: as late as the
+// frame allows), and sends it when it changed. The program reads it in that
+// host frame as id's joystick: in_win.c's IN_Commands and IN_JoyMove
+// (quake-rs client/in_win.rs has how a pad reads as winmm's). The pad is the
+// first connected one with the standard mapping, else the first connected
+// (IN_StartupJoystick takes the first valid joystick); a browser shows a pad
+// only after one of its buttons is pressed.
+const PAD_BYTES = 32;
+let padIndex = -1, padLast = new Uint8Array(PAD_BYTES);
+// When the pad and the touch screen were last used: on a device with both,
+// the rumble goes to the one in the player's hands.
+let padUsedAt = -1, touchedAt = -1;
+addEventListener('pointerdown', e => { if (e.pointerType === 'touch') touchedAt = performance.now(); },
+                 { capture: true, passive: true });
+function activePad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let pad = null;
+  for (const p of pads) {
+    if (p && p.connected && (!pad || (p.mapping === 'standard' && pad.mapping !== 'standard'))) pad = p;
+  }
+  return pad;
+}
+// The GAMEPAD record (quake-wasm proto.rs): connected, standard, the button
+// count, the pressed buttons as bits, the axes; for a standard pad the two
+// triggers' values stand in axes 4 and 5.
+function padRecord(pad) {
+  if (!pad) return new Uint8Array(PAD_BYTES);
+  const standard = pad.mapping === 'standard', b = pad.buttons, a = pad.axes;
+  const n = Math.min(32, b.length);
+  let pressed = 0;
+  for (let i = 0; i < n; i++) if (b[i].pressed) pressed |= 1 << i;
+  const value = (i) => (b[i] ? b[i].value : 0);
+  const axes = standard ? [a[0], a[1], a[2], a[3], value(6), value(7)] : [a[0], a[1], a[2], a[3], a[4], a[5]];
+  return fields(PAD_BYTES, d => {
+    d.setUint8(0, 1); d.setUint8(1, standard ? 1 : 0); d.setUint8(2, n);
+    d.setUint32(4, pressed >>> 0, true);
+    axes.forEach((v, i) => d.setFloat32(8 + 4 * i, Number.isFinite(v) ? v : 0, true));
+  });
+}
+function pollGamepad() {
+  const pad = activePad();
+  padIndex = pad ? pad.index : -1;
+  const rec = padRecord(pad);
+  if (rec.every((v, i) => v === padLast[i])) return;
+  padLast = rec;
+  if (pad) { noteInput(pad.timestamp); padUsedAt = performance.now(); }
+  sendRecord(IN.GAMEPAD, rec);
+  // A pad's button is the first gesture too, for a player with only a pad: the
+  // scrim goes (though a browser may not count it as the activation that
+  // lets audio start: then the first click or key does).
+  const anyButton = (rec[4] | rec[5] | rec[6] | rec[7]) !== 0;
+  if (anyButton && !firstGestureDone && readyToPlay) startFromOverlay();
+}
+// The 2026 rumble (joy_rumble): the program says how strong and for how long,
+// on damage and on heavy-weapon fire, and whether the pad is read (`joystick`).
+// The pad plays it where the browser can (Chromium's vibrationActuator
+// "dual-rumble"; Firefox's hapticActuators pulse, where enabled) — unless the
+// touch screen was used since the pad, or no pad is read: then a phone
+// vibrates, through the touch controls (touch.js rumble(): navigator.vibrate,
+// in the game only). Never both.
+function onRumble(strong, weak, ms, padRead) {
+  const pad = padRead && padIndex >= 0 && navigator.getGamepads ? navigator.getGamepads()[padIndex] : null;
+  if (!pad || (touch && touchedAt > padUsedAt)) {
+    if (touch) touch.rumble(weak, strong, ms);
+    return;
+  }
+  const s = Math.min(1, Math.max(0, strong)), w = Math.min(1, Math.max(0, weak));
+  const act = pad.vibrationActuator;
+  if (act && typeof act.playEffect === 'function') {
+    const r = act.playEffect('dual-rumble', { startDelay: 0, duration: ms, strongMagnitude: s, weakMagnitude: w });
+    if (r && typeof r.catch === 'function') r.catch(() => {});
+  } else if (pad.hapticActuators && pad.hapticActuators[0] && typeof pad.hapticActuators[0].pulse === 'function') {
+    pad.hapticActuators[0].pulse(Math.max(s, w), ms);
+  }
+}
 
 // ===========================================================================
 // The CD: the program's CD player plays the player's track files beside the
@@ -2002,10 +2119,27 @@ function waitAck(seq, ms) {
 }
 
 // Input-to-present latency, measured when window.quake.latency is set: the
-// time from each key or mouse event to the present of the first frame
-// that consumed it.
+// time from each key, mouse or pad event — its timeStamp, when the browser
+// got it, so the wait for the next refresh counts — to the present of the
+// first frame that consumed it (web/latency.py).
 let inputTimes = [], inFlightTimes = [];
-function noteInput() { if (quake.latency) inputTimes.push(performance.now()); }
+function noteInput(at) {
+  if (!quake.latency) return;
+  const now = performance.now();
+  inputTimes.push(at > 0 ? at : now);
+  if (at > 0) quake.dispatch.push(now - at);   // the event's wait for the page's handler
+}
+// A tick is posted: the input sent so far is what its frame consumes.
+function latencyTick() {
+  if (quake.latency) { inFlightTimes = inFlightTimes.concat(inputTimes); inputTimes = []; }
+}
+// A frame is presented: the input its tick consumed is on the canvas.
+function latencyPresent() {
+  if (!quake.latency) return;
+  const t = performance.now();
+  for (const e of inFlightTimes) quake.latency.push(t - e);
+  inFlightTimes = [];
+}
 
 let tickSeq = 0, lastTick = null, pendingTick = 0;
 // The longest a refresh waits for its frame (the old page computed the
@@ -2039,7 +2173,8 @@ function frame(now) {
     const dt = Math.max(0, (now - lastTick) / 1000);
     lastTick = now;
     pendingTick = ++tickSeq;
-    if (quake.latency) { inFlightTimes = inFlightTimes.concat(inputTimes); inputTimes = []; }
+    pollGamepad();
+    latencyTick();
     sendAudioClock();
     sendTick(pendingTick, dt);
     posted = true;
@@ -2049,11 +2184,7 @@ function frame(now) {
   const t1 = performance.now();
   const shown = present();
   if (quake.live) quake.live.push({ t: now, wait: t1 - t0, shown: !!shown, copy: shown ? shown.copy : 0, put: shown ? shown.put : 0 });
-  if (shown && quake.latency) {
-    const t = performance.now();
-    for (const e of inFlightTimes) quake.latency.push(t - e);
-    inFlightTimes = [];
-  }
+  if (shown) latencyPresent();
 }
 
 // ===========================================================================
@@ -2063,6 +2194,7 @@ const quake = window.quake = {
   ready: false,
   paused: false,
   latency: null,             // an array to collect input->present times into
+  dispatch: [],              // ...and each input's wait for its handler (while latency is collected)
   audioLead: null,           // an array to collect the ring's lead (ms) into, a refresh at a time
   live: null,                // an array to collect the page loop's per-refresh times into
   onBench: null,             // (values) per frame, --features bench builds
@@ -2081,11 +2213,14 @@ const quake = window.quake = {
     const t0 = performance.now();
     pendingTick = ++tickSeq;
     advanceAudioClock(dt * 1000);
+    pollGamepad();
+    latencyTick();
     sendAudioClock();
     sendTick(pendingTick, dt);
     const ok = waitAck(pendingTick, 5000);
     const t1 = performance.now();
     const p = present();
+    if (p) latencyPresent();
     return { ok, wait: t1 - t0, copy: p ? p.copy : 0, put: p ? p.put : 0, presented: !!p };
   },
   // The canvas's pixels, read back from it (RGBA, top row first), and their

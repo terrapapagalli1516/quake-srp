@@ -23,6 +23,8 @@
      one column in 7), at 1920x1080 the natural 1328x996 (1.38 is no near
      whole number), at 1024x768 a 912x684 box drawn smooth (a pixelated
      shrink drops columns).
+  7. KEYS BY THEIR PLACE — an AZERTY key event (code KeyW, key 'z') is
+     keynum 'w' in the game (id's scancodes), and types 'z' in the console.
 
 Headless fullscreen is approximate: the F/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
@@ -338,6 +340,32 @@ with sync_playwright() as p:
         b = box()
         check(f"{vw}x{vh}: the {b[3]}-wide framebuffer in a {want[0]}x{want[1]} box, {want[2]}",
               b[3] == 960 and (round(b[0]), round(b[1]), b[2]) == want, str(b))
+
+    # (7) Keys by their place (KeyboardEvent.code), as id's keys were
+    # scancodes: on AZERTY the key in W's place types 'z' and is keynum 'w'
+    # (+forward in the 2026 WASD), while the console types what the layout
+    # typed. Synthetic events, since a headless browser has one layout.
+    pg.evaluate("quake.callLine('exec profile 2026')")
+    pg.evaluate("exp.boot().then(() => exp.menu_cancel())")
+    time.sleep(0.5)
+    azerty = lambda typ: pg.evaluate(
+        "t => dispatchEvent(new KeyboardEvent(t, { code: 'KeyW', key: 'z', bubbles: true, cancelable: true }))", typ)
+    azerty("keydown")
+    time.sleep(0.1)
+    held = [pg.evaluate("exp.key_is_down(119)"), pg.evaluate("exp.key_is_down(122)")]
+    azerty("keyup")
+    time.sleep(0.1)
+    check("AZERTY: the key in W's place is keynum w (+forward), not z",
+          held == [1, 0] and pg.evaluate("exp.key_is_down(119)") == 0, str(held))
+    pg.keyboard.press("Backquote")
+    pg.wait_for_function("exp.console_visible().then(v => v === 1)", timeout=5000)
+    azerty("keydown")
+    azerty("keyup")
+    pg.keyboard.press("Enter")
+    time.sleep(0.2)
+    check("AZERTY: in the console the same key types z",
+          'Unknown command "z"' in pg.evaluate("quake.text('console_text')"))
+    pg.keyboard.press("Backquote")
 
     check("no console errors", not errs, str(errs[-5:]))
     br.close()
