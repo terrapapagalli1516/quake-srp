@@ -1298,7 +1298,12 @@ fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown:
         let _ = writeln!(o, "|---|---|{}---|", "---|".repeat(rates.len()));
         for r in rows {
             let unit = if r.unit.is_empty() { String::new() } else { format!(" ({})", r.unit) };
-            let cells: Vec<String> = r.cells.iter().map(|&(a, b)| format!("{} → {}", fmt(a), fmt(b))).collect();
+            let delta = |v: f64| match v - r.reference {
+                d if d.is_nan() => String::new(),
+                d if d.abs() < 5e-4 => " (0)".into(),
+                d => format!(" ({}{})", if d > 0.0 { "+" } else { "−" }, fmt(d.abs())),
+            };
+            let cells: Vec<String> = r.cells.iter().map(|&(a, b)| format!("{} → {}{}", fmt(a), fmt(b), delta(b))).collect();
             let tol = if r.tolerance.is_nan() { "—".into() } else { format!("±{}", fmt(r.tolerance)) };
             let _ = writeln!(o, "| {}{unit} | {} | {} | {tol} |", r.name, fmt(r.reference), cells.join(" | "));
         }
