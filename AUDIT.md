@@ -2514,3 +2514,53 @@ settings live in one typed value the host owns (`quake_rs::settings`), and
   `Cvars` (on in `Cvars::modern`) when they land. id's F-key
   shortcuts (F1–F12), `messagemode` and the `zoom_in` alias are still not
   bound (CENSUS L12).
+
+## The player's own Quake: search path, registered game, CD music (2026-09-26, branch `q26/content`)
+
+The engine reads through id's search path (`quake_rs::common`, `pak.rs`), the
+registered game works from a player's own `pak1.pak`, and the CD plays the
+player's track files (`web/PLATFORM.md`, "Your files" and "CD music").
+
+- ✅ **The search path** (`COM_InitFilesystem`, `COM_AddGameDirectory`,
+  `COM_FindFile`): the game directory's loose files, then `pak0.pak`,
+  `pak1.pak`, … in front until one is missing, the last searched first; a
+  shareware game reads no loose file below the directory (`static_registered`).
+  `COM_LoadPackFile`'s "not a packfile" and `com_modified` (count and CRC against
+  339 / 32981), `COM_Path_f` (`path`). A `Pak` is one element with the rest of
+  the path behind it, so no engine signature changed.
+- ✅ **`COM_CheckRegistered`**: `gfx/pop.lmp` against `pop[]` (big-endian),
+  "Playing shareware/registered version." (and "Added packfile …") on the
+  console at startup, "Corrupted data file." and "You must have the registered
+  version to use modified games" as the program's exit. `cvar("registered")` is
+  the path's answer on every server (it was always 0): `trigger_onlyregistered`
+  opens start's episode gates, and e1m7's `ExitIntermission` takes the
+  registered finale text and goes on instead of the sell screen.
+- ✅ **CD audio** (was "not modelled"): `cd_win.c`'s `CDAudio_Play`/`Stop`/
+  `Pause`/`Resume`, `CD_f` (`cd`) and the end-of-track notify
+  (`quake_rs::cd_audio`), asked for where id's client asked: `svc_cdtrack` at every
+  signon (`sv.edicts->v.sounds`), the QuakeC's `SVC_CDTRACK` (now parsed, not
+  skipped), a demo's `cls.forcetrack` from its header line (demo1: 2), a demo's
+  and `pause`'s `svc_setpause`. Without the player's music there is no drive
+  (`cd_null.c`, as the C oracle): nothing changes, and `oracle/classic_check.py`
+  passes unchanged (the play tally and census report leave the CD's calls out).
+- **Decisions.** The level is DOS `cd_audio.c`'s (`(int)(bgmvolume*255)`,
+  `bgmvolume` held to 0..1 while there is a drive), not WinQuake's: MCI could not
+  set a CD's level, so `cd_win.c`'s `CDAudio_Update` snapped `bgmvolume` to 0 or
+  1 on any change (pausing or resuming the disc). The port's `registered` is
+  read-only on the console (id's could be set: in shareware that only opened
+  gates to maps it lacks). The port refuses at startup a `progs.dat` whose
+  builtins id's engine never had (past `pr_builtin[]`, or `#0` by name as the
+  2021 re-release's), where id's would run until the first call.
+  `PR_LoadProgs`'s `PROGHEADER_CRC` check (5927) is made once at startup.
+- **Checked against the C, not found:** the brief's "id hides the ordering screen
+  when registered" — WinQuake's (and QuakeWorld's) `M_Menu_Help_f` always pages
+  through `gfx/help0..5.lmp` (`NUM_HELP_PAGES` 6); only the DOS/Linux quit
+  screens differ by `registered`. What a registered pak changes there it changes
+  through the path (a `pak1.pak` lump overrides `pak0.pak`'s). `menu.c`'s other
+  `registered` use is the multiplayer game options' episode count (7 vs 2),
+  a menu the port does not have.
+- **Not modelled:** `-game`, `-rogue`/`-hipnotic`, `-path`, `-cachedir`,
+  `proghack`; `cmdline` (set to `com_cmdline` when registered); the CD's
+  `MCI_NOTIFY_FAILURE`/eject door; `CDAudio_Play`'s "Bad track number" (a
+  developer print). A track the player has no file for, within the disc's
+  range, is to the game a data track ("CDAudio: track N is not audio").

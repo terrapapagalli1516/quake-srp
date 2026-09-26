@@ -121,3 +121,62 @@ fn the_cd_plays_beside_the_mix_in_cd_records() {
     );
     assert!(cd_records(&input, &[]).is_empty(), "no music, no drive, no records");
 }
+
+/// Episode 1's end, registered: e1m7's exit plays the intermission's CD
+/// track 3, `ExitIntermission` (on `cvar("registered")`) shows the registered
+/// finale text with the finale's track 2, and the next press goes on to
+/// `start` where shareware gets the sell screen (`cl_walk`'s
+/// `e1m7_exit_reaches_the_shareware_finale_and_sellscreen`).
+#[test]
+fn e1m7_registered_goes_on_after_the_finale_with_the_cds_tracks() {
+    use quake_rs::client::cl_main::walk_frame;
+    let mut w = walk(registered_path(), "maps/e1m7.bsp").0.expect("e1m7");
+    let vid = crate::vid::mode_vid(320, 200);
+    let mut cds = Vec::new();
+    let mut frame = |w: &mut Walk| {
+        let f = walk_frame(w, 0.1, false, &vid);
+        cds.extend(cd_calls(&f.sound));
+        quake_rs::render::recycle_image(f.image);
+    };
+    let vm = &w.server.vm;
+    let exit = (0..vm.num_edicts() as i32)
+        .find(|&e| !vm.edict_free[e as usize] && vm.ent_get_string(e, "classname") == "trigger_changelevel")
+        .expect("e1m7's exit");
+    let (a, b) = (vm.ent_get_vector(exit, "absmin"), vm.ent_get_vector(exit, "absmax"));
+    let centre = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+    for _ in 0..40 {
+        let p = w.player;
+        w.server.vm.ent_set_vector(p, "origin", centre);
+        w.server.vm.ent_set_vector(p, "velocity", [0.0; 3]);
+        frame(&mut w);
+        if w.intermission != 0 {
+            break;
+        }
+    }
+    assert_eq!(w.intermission, 1);
+    w.in_attack = true;
+    for _ in 0..30 {
+        frame(&mut w);
+        if w.intermission == 2 {
+            break;
+        }
+    }
+    assert_eq!(w.intermission, 2);
+    assert!(w.finale_text.contains("A Rune of magic\npower lies at the end of each haunted"), "{:?}", w.finale_text);
+    w.in_attack = false;
+    for _ in 0..15 {
+        frame(&mut w);
+    }
+    w.in_attack = true;
+    for _ in 0..30 {
+        frame(&mut w);
+        if w.map_name != "maps/e1m7.bsp" {
+            break;
+        }
+    }
+    assert_eq!(w.map_name, "maps/start.bsp", "registered: on to the start map");
+    assert!(!w.pending_sellscreen, "no sell screen");
+    // The intermission's 3, the finale's 2, then start's own 4.
+    let tracks: Vec<u8> = cds.iter().map(|c| if let CdCall::Play { track, .. } = c { *track } else { 0 }).collect();
+    assert_eq!(tracks, [3, 2, 4]);
+}
