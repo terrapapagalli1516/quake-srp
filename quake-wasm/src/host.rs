@@ -1,5 +1,5 @@
-//! The frame — host.c's `Host_Frame` as the `step` export the page calls
-//! once per display refresh: `Host_FilterTime`'s 72 fps gate, then the
+//! The frame — host.c's `Host_Frame` as `step`, which the program's loop
+//! runs once per display refresh (`sys`): `Host_FilterTime`'s 72 fps gate, then the
 //! active mode's client frame, then the rest of `SCR_UpdateScreen` (the menu
 //! and console overlays) and `V_UpdatePalette`: the cshifts and gamma as
 //! per-channel ramps the finished frame is packed through into the presented
@@ -90,10 +90,10 @@ fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], ramps: Option<&[[u8; 256]; 3]>) 
 /// `host_frametime`) and draw it over `img` at its height.
 fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f32) {
     a.console.slide(dt, a.render_w, a.render_h);
-    if a.console.current() > 0.0 {
-        if let (Some(img), Some(palette)) = (img, a.active_palette()) {
-            render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
-        }
+    if a.console.current() > 0.0
+        && let (Some(img), Some(palette)) = (img, a.active_palette())
+    {
+        render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
     }
 }
 
@@ -110,12 +110,11 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 /// moves.
 ///
 /// While a `timedemo` runs every call is a host frame playing the next
-/// recorded message; the page then calls `step` back to back, each call's
-/// `dt` the previous call's own duration (see `web/index.html`), so
-/// `realtime` — the clock `CL_FinishTimeDemo` measures on — adds up the time
-/// the frames took and not the page's pauses between batches of them.
-#[no_mangle]
-pub extern "C" fn step(dt: f32) -> i32 {
+/// recorded message; the program's loop then runs `step` back to back
+/// without waiting for the display, each call's `dt` the time since the last
+/// one started (`sys`), so `realtime` — the clock `CL_FinishTimeDemo`
+/// measures on — adds up the time the frames took.
+pub(crate) fn step(dt: f32) -> i32 {
     // Guard a non-finite / negative dt so both clocks only move forward.
     let real_dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
     let mut ran = 0;
@@ -287,33 +286,33 @@ pub extern "C" fn step(dt: f32) -> i32 {
             // resolution (the framebuffer is the source of truth), so a boot /
             // New Game / `map` that changed the render size can't leave it stale.
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
-            if let Some(img) = img.as_mut() {
-                if let Some(palette) = a.active_palette() {
-                    // M_Draw: over the console background while the console
-                    // is out (scr_con_current: forced up, disconnected),
-                    // else over the faded screen.
-                    if a.console.current() > 0.0 {
-                        render::draw_menu_over_console(
-                            img,
-                            &a.menu,
-                            &a.menu_pics,
-                            a.conchars.as_ref(),
-                            a.conback.as_ref(),
-                            a.clock,
-                            a.realtime,
-                            palette,
-                        );
-                    } else {
-                        render::draw_menu(
-                            img,
-                            &a.menu,
-                            &a.menu_pics,
-                            a.conchars.as_ref(),
-                            a.clock,
-                            a.realtime,
-                            palette,
-                        );
-                    }
+            if let Some(img) = img.as_mut()
+                && let Some(palette) = a.active_palette()
+            {
+                // M_Draw: over the console background while the console
+                // is out (scr_con_current: forced up, disconnected),
+                // else over the faded screen.
+                if a.console.current() > 0.0 {
+                    render::draw_menu_over_console(
+                        img,
+                        &a.menu,
+                        &a.menu_pics,
+                        a.conchars.as_ref(),
+                        a.conback.as_ref(),
+                        a.clock,
+                        a.realtime,
+                        palette,
+                    );
+                } else {
+                    render::draw_menu(
+                        img,
+                        &a.menu,
+                        &a.menu_pics,
+                        a.conchars.as_ref(),
+                        a.clock,
+                        a.realtime,
+                        palette,
+                    );
                 }
             }
         }

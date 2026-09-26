@@ -11,20 +11,23 @@
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/cl_demo.c`.
 
+use std::borrow::Cow;
+
 use crate::bsp::Bsp;
-use crate::demo::parse_demo;
+use crate::demo::{parse_demo, DemoFrame, EntSnapshot};
 use crate::mdl::Mdl;
 use crate::pak::Pak;
-use crate::particles::ParticleSystem;
+use crate::particles::{ParticleSystem, TrailHead, TrailStep};
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
+use crate::stepping::Stepping;
 use crate::tent::BeamModel;
 use crate::wad::Qpic;
 
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host_cmd::IT_INVISIBILITY;
 use super::view::{
-    cshift_add, cshift_drop, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
-    BONUS_FADE, BONUS_PERCENT, DAMAGE_FADE, FACE_ANIM_TIME, V_KICKTIME,
+    cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
+    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
     backtile_for, color_for_name, lap, render_options, s_update, ClientFrame, DemoPlay, Listener,
@@ -337,7 +340,8 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     // tiny dt holds us on the same frame the wrap reset us to). `last_spawned_idx`
     // guards against re-spawning while a frame lingers across several steps.
     spawn_demo_frame_effects(d, d.idx, &mut sound);
-    render_demo_frame(d, dt, dt, menu_up, vid, sound)
+    let lerp = d.stepping == Stepping::Uncapped;
+    render_demo_frame(d, dt, dt, lerp, menu_up, vid, sound)
 }
 
 /// One host frame of `timedemo` (`cls.timedemo`): `CL_GetMessage` reads
@@ -367,24 +371,108 @@ pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid
     d.idx += 1;
     spawn_demo_frame_effects(d, d.idx, &mut sound);
     let cl_frametime = d.demo.frames[d.idx].time - oldtime;
-    Some(render_demo_frame(d, frametime, cl_frametime, menu_up, vid, sound))
+    Some(render_demo_frame(d, frametime, cl_frametime, false, menu_up, vid, sound))
+}
+
+/// What a demo frame draws that moves between messages: the client clock
+/// (`cl.time`), the recorded POV and the entities.
+pub struct DemoView<'a> {
+    pub time: f32,
+    pub view_origin: [f32; 3],
+    pub view_entity_origin: [f32; 3],
+    pub view_angles: [f32; 3],
+    /// `cl.velocity` (the bob and the strafe lean).
+    pub velocity: [f32; 3],
+    pub entities: Cow<'a, [EntSnapshot]>,
+}
+
+/// The view of message `idx` of `frames` with the demo clock at `elapsed`
+/// seconds past the first message. Classic draws the message's own (the
+/// port's playback shows each message until the next is due). With `lerp`,
+/// the uncapped client's: `CL_LerpPoint` and `CL_RelinkEntities` blend it
+/// toward the next message by how far the clock has got between the two —
+/// the POV, its velocity and every entity in both (angles the short way
+/// round, and no blend across a move of 100 units or more on any axis, id's
+/// teleport test) — so a 60 Hz recording moves smoothly at any display rate.
+/// As in `CL_LerpPoint`, the blend spans at most the last 0.1 s before the
+/// next message.
+pub fn demo_view(frames: &[DemoFrame], idx: usize, elapsed: f32, lerp: bool) -> DemoView<'_> {
+    let f = &frames[idx];
+    let own = DemoView {
+        time: f.time,
+        view_origin: f.view_origin,
+        view_entity_origin: f.view_entity_origin,
+        view_angles: f.view_angles,
+        velocity: f.client.velocity,
+        entities: Cow::Borrowed(&f.entities),
+    };
+    let Some(next) = frames.get(idx + 1).filter(|n| lerp && f.intermission == 0 && n.intermission == 0) else {
+        return own;
+    };
+    let t1 = f.time.max(next.time - 0.1);
+    if next.time <= t1 {
+        return own;
+    }
+    let clock = (frames[0].time + elapsed).clamp(f.time, next.time);
+    let frac = ((clock - t1) / (next.time - t1)).clamp(0.0, 1.0);
+    // CL_RelinkEntities: `if (delta[j] > 100 || delta[j] < -100) f = 1;`
+    // ("assume a teleportation, not a motion") — here, stay put until the
+    // next message shows the new place.
+    let teleport = |a: [f32; 3], b: [f32; 3]| (0..3).any(|i| (b[i] - a[i]).abs() > 100.0);
+    let blend = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
+        if teleport(a, b) {
+            a
+        } else {
+            std::array::from_fn(|i| a[i] + frac * (b[i] - a[i]))
+        }
+    };
+    let turn = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
+        std::array::from_fn(|i| {
+            let d = b[i] - a[i];
+            let d = if d > 180.0 { d - 360.0 } else if d < -180.0 { d + 360.0 } else { d };
+            a[i] + frac * d
+        })
+    };
+    let entities = f
+        .entities
+        .iter()
+        .map(|e| match next.entities.iter().find(|n| e.num >= 0 && n.num == e.num) {
+            Some(n) if !teleport(e.origin, n.origin) => {
+                EntSnapshot { origin: blend(e.origin, n.origin), angles: turn(e.angles, n.angles), ..*e }
+            }
+            _ => *e,
+        })
+        .collect();
+    DemoView {
+        time: clock,
+        view_origin: blend(f.view_origin, next.view_origin),
+        view_entity_origin: blend(f.view_entity_origin, next.view_entity_origin),
+        view_angles: turn(f.view_angles, next.view_angles),
+        velocity: std::array::from_fn(|i| f.client.velocity[i] + frac * (next.client.velocity[i] - f.client.velocity[i])),
+        entities: Cow::Owned(entities),
+    }
 }
 
 /// Draw demo frame `d.idx` (its effects already spawned): the recorded POV's
 /// `V_CalcRefdef`, `S_Update`, the 3-D view and `SCR_UpdateScreen`'s 2-D
 /// layer. `dt` is `host_frametime`; `cl_frametime` is `cl.time - cl.oldtime`,
 /// the particles' step (the two are the same frame time in ordinary
-/// playback).
+/// playback). `lerp` draws the uncapped client's view between messages
+/// ([`demo_view`]; never in a timedemo, whose frames are one message each).
 fn render_demo_frame(
     d: &mut DemoPlay,
     dt: f32,
     cl_frametime: f32,
+    lerp: bool,
     menu_up: bool,
     vid: &Vid,
     mut sound: Vec<SoundCall>,
 ) -> ClientFrame {
     let (render_w, render_h) = (vid.width, vid.height);
     let f = &d.demo.frames[d.idx];
+    // What moves — the clock, the POV, the entities: the message's own, or
+    // (uncapped) CL_LerpPoint's view between it and the next.
+    let v = demo_view(&d.demo.frames, d.idx, d.elapsed, lerp);
 
     // CL_RelinkEntities' model-flag trails (R_RocketTrail from the entity's
     // previous origin: rocket/lavaball fire, grenade smoke, gib blood, zombie
@@ -392,22 +480,23 @@ fn render_demo_frame(
     // entity's first sighting (forcelink) starts at its own origin, so an
     // entity absent from this frame is forgotten. Statics never trail.
     // (EF_ROCKET's dlight is not drawn: demo playback has no dlights yet.)
-    d.trail_org.retain(|num, _| f.entities.iter().any(|e| e.num == *num));
-    for e in &f.entities {
+    d.trail_org.retain(|num, _| v.entities.iter().any(|e| e.num == *num));
+    let step = TrailStep { stepping: d.stepping, dt, now: v.time };
+    for e in v.entities.iter() {
         if e.num < 0 {
             continue;
         }
         let flags = d.models.get(e.modelindex).and_then(|m| m.as_ref()).map_or(0, |m| m.header.flags);
         if let Some(ttype) = rocket_trail_type(flags) {
-            let oldorg = d.trail_org.insert(e.num, e.origin).unwrap_or(e.origin);
-            d.particles.spawn_rocket_trail(oldorg, e.origin, ttype, &mut d.tracercount, f.time, &mut d.prng);
+            let head = d.trail_org.entry(e.num).or_insert(TrailHead::at(e.origin));
+            d.particles.spawn_trail(head, e.origin, ttype, step, &mut d.tracercount, &mut d.prng);
         }
     }
 
     let mut owned: Vec<ModelInstance> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     let mut sprite_insts: Vec<render::SpriteInstance> = Vec::new();
-    for e in &f.entities {
+    for e in v.entities.iter() {
         if let Some(Some(mdl)) = d.models.get(e.modelindex) {
             owned.push(ModelInstance {
                 mdl,
@@ -454,11 +543,11 @@ fn render_demo_frame(
     // pieces, exactly like the live walk. The bolt models resolve through the
     // demo's PRECACHE table (the .dem signon lists progs/bolt*.mdl); a beam
     // owned by the recorded view entity tracks its per-frame origin.
-    if d.beams.any_live(f.time) {
+    if d.beams.any_live(v.time) {
         d.beams.update(
-            f.time,
+            v.time,
             d.demo.viewentity as i32,
-            f.view_entity_origin,
+            v.view_entity_origin,
             &mut d.prng,
             &mut d.beam_scratch,
         );
@@ -491,10 +580,10 @@ fn render_demo_frame(
         // cycle/level cvars) applied LIVE on top of the recorded (QC-placed)
         // camera angles — no bob, no punch, no kick, no stair smoothing.
         Camera {
-            pos: f.view_origin,
-            yaw: f.view_angles[1] + (f.time * 2.0).sin() * 0.3,
-            pitch: -(f.view_angles[0] + (f.time * 1.0).sin() * 0.3),
-            roll: f.view_angles[2] + (f.time * 0.5).sin() * 0.1,
+            pos: v.view_origin,
+            yaw: v.view_angles[1] + (v.time * 2.0).sin() * 0.3,
+            pitch: -(v.view_angles[0] + (v.time * 1.0).sin() * 0.3),
+            roll: v.view_angles[2] + (v.time * 0.5).sin() * 0.1,
             fov_deg: 90.0,
         }
     } else {
@@ -507,15 +596,15 @@ fn render_demo_frame(
         // the 1/32 anti-node-line epsilon is omitted, matching this port's
         // live walk. The listener pose below deliberately stays UNbobbed
         // (audio panning must not jitter with the head-bob), like walk_frame.
-        let vel = client.velocity;
+        let vel = v.velocity;
         let speed_xy = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
-        let bob = render::view_bob(speed_xy, f.time);
-        let mut eye = f.view_origin; // view entity origin + recorded viewheight
+        let bob = render::view_bob(speed_xy, v.time);
+        let mut eye = v.view_origin; // view entity origin + recorded viewheight
         eye[2] += bob;
         // Stair-step smoothing (V_CalcRefdef ~960): the same port as
         // walk_frame's, driven by the recorded onground flag + the raw view
         // entity origin z.
-        let origin_z = f.view_entity_origin[2];
+        let origin_z = v.view_entity_origin[2];
         let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         if d.oldz.is_finite() && client.onground && origin_z - d.oldz > 0.0 {
             d.oldz += sdt * 80.0;
@@ -536,9 +625,9 @@ fn render_demo_frame(
         // with the 80-degree dead view (the recorded viewangles[ROLL] and the
         // lean/kick are wiped — the C assigns viewangles[ROLL] = 80). The
         // punchangle adds AFTER, per the C's VectorAdd ordering.
-        let basis = [-f.view_angles[0], f.view_angles[1], 0.0];
+        let basis = [-v.view_angles[0], v.view_angles[1], 0.0];
         let mut roll_angle =
-            f.view_angles[2] + crate::server::v_calc_roll(basis, vel);
+            v.view_angles[2] + crate::server::v_calc_roll(basis, vel);
         let mut dmg_pitch = 0.0;
         if d.v_dmg_time > 0.0 {
             roll_angle += d.v_dmg_time / V_KICKTIME * d.v_dmg_roll;
@@ -550,9 +639,9 @@ fn render_demo_frame(
         }
         Camera {
             pos: eye,
-            yaw: f.view_angles[1] + client.punchangle[1],
+            yaw: v.view_angles[1] + client.punchangle[1],
             // QuakeC pitch is +down; the renderer's is +up.
-            pitch: -(f.view_angles[0] + dmg_pitch + client.punchangle[0]),
+            pitch: -(v.view_angles[0] + dmg_pitch + client.punchangle[0]),
             roll: roll_angle + client.punchangle[2],
             fov_deg: 90.0,
         }
@@ -562,10 +651,10 @@ fn render_demo_frame(
     // run drifts past water and open sky, and its placed torch loops pan with
     // the recorded view). Forward/right are the level yaw basis like walk_frame.
     {
-        let yaw_rad = (f.view_angles[1] as f64).to_radians();
+        let yaw_rad = (v.view_angles[1] as f64).to_radians();
         let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
         let listener = Listener {
-            pos: f.view_origin,
+            pos: v.view_origin,
             forward: [cy, sy, 0.0],
             right: [sy, -cy, 0.0],
         };
@@ -578,14 +667,14 @@ fn render_demo_frame(
     // here (empty; a deferred LOW).
     // R_DrawParticles' order, as in walk_frame: retire (`die < cl.time`), draw,
     // then move and ramp.
-    d.particles.retire(f.time);
+    d.particles.retire(v.time);
     let parts: Vec<([f32; 3], u8)> =
         d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
     // `grav = frametime * sv_gravity.value * 0.05`: R_DrawParticles reads the
     // client's own sv_gravity cvar in playback too — 800, or what the last map
     // played set it to (e1m8's worldspawn: 100), not the recording's.
     if cl_frametime.is_finite() && cl_frametime > 0.0 {
-        d.particles.integrate(cl_frametime, f.time, crate::server::Server::sv_gravity_cvar() * 0.05);
+        d.particles.integrate(cl_frametime, v.time, crate::server::Server::sv_gravity_cvar() * 0.05);
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
@@ -597,7 +686,7 @@ fn render_demo_frame(
         s[0] = 264.0 / 256.0;
         s
     } else {
-        crate::server::lightstyle_scales_at(&f.lightstyles, f.time)
+        crate::server::lightstyle_scales_at(&f.lightstyles, v.time)
     };
     // The first-person weapon viewmodel: SU_WEAPON is the model PRECACHE index
     // (`view->model = cl.model_precache[cl.stats[STAT_WEAPON]]`, V_CalcRefdef),
@@ -613,11 +702,11 @@ fn render_demo_frame(
         match d.models.get(client.weapon_model.max(0) as usize) {
             Some(Some(mdl)) => {
                 // V_CalcRefdef's gun origin from the recorded velocity's bob.
-                let vel = client.velocity;
-                let bob = render::view_bob((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), f.time);
+                let vel = v.velocity;
+                let bob = render::view_bob((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), v.time);
                 // CalcGunAngle: the recorded view (with the damage kick's
                 // pitch) before the punch, and the recorded roll.
-                let angles = render::viewmodel_angles(&cam, client.punchangle, f.view_angles[2]);
+                let angles = render::viewmodel_angles(&cam, client.punchangle, v.view_angles[2]);
                 Some(Viewmodel {
                     mdl,
                     frame: client.weaponframe.max(0) as usize,
@@ -644,7 +733,7 @@ fn render_demo_frame(
     };
     let scene = render::Scene {
         colormap: d.colormap.as_deref(),
-        time: f.time,
+        time: v.time,
         light_styles: &demo_styles,
         bmodels: &bmodels,
         models: &owned,
@@ -664,7 +753,7 @@ fn render_demo_frame(
     if dowarp {
         let view = d.renderer.render(&scene);
         lap(Phase::Render3d);
-        d.renderer.warp_into(view, &mut img, vrect, f.time, vid.video.hires);
+        d.renderer.warp_into(view, &mut img, vrect, v.time, vid.video.hires);
     } else {
         d.renderer.render_into(&scene, &mut img);
         lap(Phase::Render3d);
@@ -700,7 +789,7 @@ fn render_demo_frame(
                 &d.palette,
                 d.pic_finale.as_ref(),
                 &f.finale_text,
-                f.time - f.finale_start,
+                v.time - f.finale_start,
             ),
             _ => render::draw_finale_overlay(
                 &mut img,
@@ -708,7 +797,7 @@ fn render_demo_frame(
                 &d.palette,
                 None,
                 &f.finale_text,
-                f.time - f.finale_start,
+                v.time - f.finale_start,
             ),
         }
     } else if let Some(wad) = d.gfx_wad.as_ref() {
@@ -733,7 +822,7 @@ fn render_demo_frame(
             ammo_cells: client.cells,
             // The recorded server clock (cl.time) drives the weapon-flash
             // cycle + face animation, exactly what sbar.c reads.
-            time: f.time,
+            time: v.time,
             item_gettime: Some(&d.item_gettime),
             monsters: f.stats.monsters,
             total_monsters: f.stats.total_monsters,
@@ -741,7 +830,7 @@ fn render_demo_frame(
             total_secrets: f.stats.total_secrets,
             level_name: &d.demo.level_name,
             show_scores: d.show_scores,
-            face_pain: f.time <= d.faceanimtime,
+            face_pain: v.time <= d.faceanimtime,
             sb_lines: refdef.sb_lines,
         };
         render::draw_hud_into(&mut img, &hud);
@@ -761,7 +850,7 @@ fn render_demo_frame(
     // drawn through the same overlays live play uses, with the same key_dest +
     // intermission gating as walk_frame. Expiries live on the recorded clock.
     if let Some((_, exp)) = &d.centerprint {
-        if f.time >= *exp {
+        if v.time >= *exp {
             d.centerprint = None;
         }
     }
@@ -770,7 +859,7 @@ fn render_demo_frame(
             if let Some((text, _)) = &d.centerprint {
                 render::draw_centerprint(&mut img, cc, &d.palette, text);
             }
-            let lines = d.notify.visible(f.time);
+            let lines = d.notify.visible(v.time);
             if !lines.is_empty() {
                 render::draw_notify(&mut img, cc, &d.palette, &lines);
             }
@@ -785,8 +874,7 @@ fn render_demo_frame(
     // composited frame (HUD + menu + console), like the live walk.
     {
         let sdt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-        d.damage_blend = cshift_drop(d.damage_blend, sdt, DAMAGE_FADE);
-        d.bonus_blend = cshift_drop(d.bonus_blend, sdt, BONUS_FADE);
+        fade_cshifts(&mut d.damage_blend, &mut d.bonus_blend, sdt, d.stepping, &mut d.fade_clock);
     }
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {
@@ -852,6 +940,44 @@ impl TimeDemoClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Uncapped playback draws between messages as `CL_LerpPoint` does; Classic
+    /// (and a timedemo) draws each message's own view.
+    #[test]
+    fn demo_view_blends_toward_the_next_message() {
+        let ent = |num, x: f32, yaw| EntSnapshot {
+            num,
+            modelindex: 1,
+            frame: 0,
+            skin: 0,
+            origin: [x, 0.0, 0.0],
+            angles: [0.0, yaw, 0.0],
+            effects: 0,
+        };
+        let mut a = DemoFrame { time: 1.0, view_origin: [0.0, 0.0, 22.0], view_angles: [0.0, 350.0, 0.0], ..Default::default() };
+        a.entities = vec![ent(1, 0.0, 350.0), ent(2, 0.0, 0.0), ent(3, 5.0, 0.0)];
+        let mut b = DemoFrame { time: 1.05, view_origin: [10.0, 0.0, 22.0], view_angles: [0.0, 10.0, 0.0], ..Default::default() };
+        // Entity 1 moves 10 units and turns through north; 2 teleports; 3 is gone.
+        b.entities = vec![ent(1, 10.0, 10.0), ent(2, 150.0, 0.0)];
+        let frames = [a, b];
+        // The clock at 1.025, halfway (`elapsed` counts from the first message).
+        let v = demo_view(&frames, 0, 0.025, true);
+        assert!((v.time - 1.025).abs() < 1e-6);
+        assert!((v.view_origin[0] - 5.0).abs() < 1e-4);
+        assert!((v.view_angles[1] - 360.0).abs() < 1e-3, "the short way round: {}", v.view_angles[1]);
+        assert!((v.entities[0].origin[0] - 5.0).abs() < 1e-4 && (v.entities[0].angles[1] - 360.0).abs() < 1e-3);
+        assert_eq!(v.entities[1].origin[0], 0.0, "a teleport does not blend");
+        assert_eq!(v.entities[2].origin[0], 5.0, "an entity the next message lacks stays put");
+        let own = demo_view(&frames, 0, 0.025, false);
+        assert_eq!((own.time, own.view_origin[0], own.entities[0].origin[0]), (1.0, 0.0, 0.0));
+        // A gap past 0.1 s blends over its last 0.1 s only (dropped packets).
+        let late = [
+            DemoFrame { time: 1.0, ..Default::default() },
+            DemoFrame { time: 1.5, view_origin: [10.0, 0.0, 0.0], ..Default::default() },
+        ];
+        assert_eq!(demo_view(&late, 0, 0.2, true).view_origin[0], 0.0);
+        assert!((demo_view(&late, 0, 0.45, true).view_origin[0] - 5.0).abs() < 1e-3);
+    }
 
     #[test]
     fn timedemo_frame_reads_one_message_a_frame_from_the_second() {

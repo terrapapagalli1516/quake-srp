@@ -8,23 +8,19 @@
      attract loop (the page's __sndStats.plays counter);
   3. the recorded status bar is drawn: the bottom sbar band stays stable
      across frames while the 3-D scene above it changes (the camera is moving);
-  4. the (entity, channel) stop/override plumbing is wired (poll_stop_sound /
-     sound_entity / sound_channel exports exist and drain clean);
+  4. the (entity, channel) stop/override plumbing is wired (the page keeps
+     its source registry, and id's demos send no STOP_SOUND record);
   5. no console errors; a screenshot is saved for visual gun/sbar inspection.
 
-Usage: verify_demo.py [webdir]   (defaults to the repo's web/; pass a temp dir
-holding index.html + a freshly built quake_wasm.wasm to test changes without
-touching the deployed wasm)."""
-import functools, http.server, os, socketserver, sys, threading, time
+Usage: verify_demo.py [webdir]   (defaults to the repo's web/; pass a deploy
+dir — PLATFORM.md — to test changes without touching the deployed page)."""
+import os, sys, time
 from playwright.sync_api import sync_playwright
+import isolated
 
-WEB = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("QUAKE_VERIFY_PORT", "8169"))
-Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=WEB)
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-httpd = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+WEB = isolated.webdir()
+PORT = isolated.port(8169)
+httpd = isolated.serve(WEB, PORT)
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -61,7 +57,7 @@ def changed_fraction(a, b, y0, y1):
     return diff / max(1, total)
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=[
+    br = isolated.launch(p, [
         "--no-sandbox",
         # Let audioCtx.resume() succeed without a user gesture so the recorded
         # one-shots actually play under headless.
@@ -72,14 +68,8 @@ with sync_playwright() as p:
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
-    pg.wait_for_function(
-        "typeof exp !== 'undefined' && !!exp && typeof exp.boot === 'function'",
-        timeout=120000,
-    )
-    pg.wait_for_function(
-        "document.getElementById('status').textContent.includes('ready')",
-        timeout=30000,
-    )
+    pg.wait_for_function("window.quake && quake.ready", timeout=120000)
+    pg.wait_for_function("quake.firstFrameAt > 0", timeout=30000)
 
     # 1. The attract demo starts in-world: the very first canvas frames carry a
     # real scene (the old signon void rendered ~1.2 s of black from a zeroed
@@ -93,8 +83,9 @@ with sync_playwright() as p:
 
     # 2. Recorded one-shot sounds fire through Web Audio. The page only builds
     # its AudioContext on a user gesture; create + resume it directly (the
-    # autoplay flag lets resume() succeed) — drainGameSounds then marks audio
-    # ready and the wasm side starts queueing the recorded svc_sound events.
+    # autoplay flag lets resume() succeed) — the page's next refresh tells the
+    # program audio is running, and it starts sending the recorded svc_sound
+    # events.
     pg.evaluate("""() => {
         audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
         return audioCtx.resume();
@@ -125,7 +116,7 @@ with sync_playwright() as p:
     # too, so a pair of grabs that straddles a flash says nothing about the
     # bar: take up to four pairs and judge the steadiest.
     pg.keyboard.press("Escape")
-    pg.wait_for_function("!exp.menu_visible || !exp.menu_visible()", timeout=5000)
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
     time.sleep(0.3)
     best = None
     for _ in range(4):
@@ -135,7 +126,7 @@ with sync_playwright() as p:
         h = a["h"]
         # the sbar strip: id's 24 rows, or 24 of the 320x200 screen under the
         # "scaled 2-D" extra
-        scaled = pg.evaluate("exp.scaled_2d ? exp.scaled_2d() : 0")
+        scaled = pg.evaluate("exp.scaled_2d()")
         bar_h = max(1, round(h * 24 / 200)) if scaled else 24
         scene = changed_fraction(a, b, 0, int(h * 0.6))
         band = changed_fraction(a, b, h - bar_h, h)
@@ -158,20 +149,17 @@ with sync_playwright() as p:
     pg.screenshot(path=shot)
     print("screenshot:", shot)
 
-    # 4. The stop/override plumbing is wired: the exports exist, and the stop
-    # queue drains clean (id's demos send no svc_stopsound — engine-asserted —
-    # so it must be empty here).
+    # 4. The stop/override plumbing is wired: the page's stop path exists, and
+    # no STOP_SOUND record came (id's demos send no svc_stopsound — engine-
+    # asserted — so there is none to carry).
     plumbing = pg.evaluate("""() => ({
-        haveStops: typeof exp.poll_stop_sound === 'function',
-        haveKey: typeof exp.sound_entity === 'function'
-              && typeof exp.sound_channel === 'function',
-        drained: typeof exp.poll_stop_sound === 'function'
-              ? exp.poll_stop_sound() : -2,
-        registry: typeof playingByKey !== 'undefined',
+        haveStops: typeof quake.audio.stopKey === 'function',
+        stopRecords: window.__sndStats.stopRecords || 0,
+        registry: quake.audio.playingByKey instanceof Map,
     })""")
-    check("stop/override exports present", plumbing["haveStops"] and plumbing["haveKey"])
-    check("stop queue drains clean (id demos send none)", plumbing["drained"] == -1,
-          str(plumbing["drained"]))
+    check("the stop path is present", plumbing["haveStops"])
+    check("no stop records (id demos send none)", plumbing["stopRecords"] == 0,
+          str(plumbing["stopRecords"]))
     check("page keeps the (entity,channel) source registry", plumbing["registry"])
 
     check("no console errors", not errs, str(errs[-5:]))

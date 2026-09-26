@@ -228,9 +228,15 @@
       </div>
     </details>
     <p class="aside">Shortcuts: <button id="walkBtn" class="link">walk e1m1</button> · <button id="demoBtn" class="link">play demo1 (e1m3)</button></p>
-    <p class="aside">id Software's 1996 Quake, ported to Rust from its GPL source and software-rendered in your browser — no GPU, no dependencies. Shareware episode embedded.</p>
+    <p class="aside">id Software's 1996 Quake, ported to Rust from its GPL source and software-rendered in your browser — no GPU, no dependencies. Shareware episode included.</p>
   </div>
 <script>
+// The page is a small host for the game, which runs as a program in a Web
+// Worker (wasi.js runs quake.wasm there). The page owns what a browser
+// program cannot: the canvas, the keyboard and mouse, Web Audio, the
+// storage the program's files live in, and the display's refresh, which it
+// hands the program as ticks. web/PLATFORM.md has the design, the protocol
+// and the measurements.
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('c');
 const wrap = document.getElementById('wrap');
@@ -247,16 +253,162 @@ const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright
 // MouseEvent.button -> Quake keynum (keys.h K_MOUSE1/2/3): left, middle, right.
 const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
-// Is the in-game menu currently up (capturing keyboard)?
-function menuVisible() { return !!(exp && exp.menu_visible && exp.menu_visible()); }
-// Is the drop-down console currently open (top-priority keyboard owner)?
-function consoleVisible() { return !!(exp && exp.console_visible && exp.console_visible()); }
+// ===========================================================================
+// The host: shared memory, the worker, and the protocol (web/PLATFORM.md;
+// quake-wasm/src/proto.rs is the program's side, wasi.js the worker's).
+// ===========================================================================
+
+// The control block's fields (Int32 indexes; wasi.js has the same table).
+const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, READING: 6,
+            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19 };
+const CTL_BYTES = 256, RING_BYTES = 1 << 16;
+// Record kinds, in (IN_*) and out (OUT_*).
+const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7 };
+const OUT = { FRAME: 1, SYNC: 2, STATE: 3, SAMPLE: 4, SOUND: 5, STOP_SOUND: 6, STATIC_SOUND: 7,
+              AMBIENT: 8, LISTENER: 9, GENERATION: 10, LOCAL_SOUND: 11, REPLY: 12, BENCH: 13 };
+// State flags (the STATE record).
+const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16 };
+
+let worker = null, ctl = null, ring = null;
+// The frame slots the worker made (it makes a larger set when a frame
+// outgrows them, and sends it here): the buffer, each slot's size, which set.
+let frameSlots = null, slotBytes = 0, slotsGen = 0;
+let exp = null;                    // the automation proxy (window.quake.call by name), set once running
+// The program's UI state as of its last turn (the STATE record).
+const gameState = { flags: 0, menuScreen: 0 };
+
+// Is the in-game menu up (capturing keyboard)?
+function menuVisible() { return !!(gameState.flags & ST.MENU); }
+// Does the drop-down console have the keyboard?
+function consoleVisible() { return !!(gameState.flags & ST.CONSOLE); }
 // Is the live player-controlled walk the active mode (vs demo/attract playback)?
-// Feature-checked: an older wasm without the export reports mode "unknown" —
-// inWalkMode() then assumes walk so canvas clicks still capture the mouse (the
-// old behaviour), while the capture chip (which needs certainty) stays off.
-function walkModeKnown() { return !!(exp && typeof exp.in_walk_mode === 'function'); }
-function inWalkMode() { return walkModeKnown() ? !!exp.in_walk_mode() : true; }
+function inWalkMode() { return !!(gameState.flags & ST.WALK); }
+// Is the Customize-controls screen waiting for a key (menu.c bind_grab)?
+function bindGrabbing() { return !!(gameState.flags & ST.BIND_GRAB); }
+
+// --- Events into the input ring ------------------------------------------------
+// One record: [kind u8][0][len u16] then the payload. The ring only ever
+// holds whole records: the write index moves once the bytes are in.
+let inputDropped = 0;
+function sendRecord(kind, payload) {
+  if (!ctl) return false;
+  const n = 4 + payload.length;
+  const w = Atomics.load(ctl, C.IN_WRITE), r = Atomics.load(ctl, C.IN_READ);
+  if (RING_BYTES - ((w - r) | 0) < n) { inputDropped++; return false; }   // the program stopped reading
+  const rec = new Uint8Array(n);
+  rec[0] = kind; rec[2] = payload.length & 255; rec[3] = payload.length >> 8;
+  rec.set(payload, 4);
+  const at = w & (RING_BYTES - 1), first = Math.min(n, RING_BYTES - at);
+  ring.set(rec.subarray(0, first), at);
+  if (n > first) ring.set(rec.subarray(first), 0);
+  Atomics.store(ctl, C.IN_WRITE, (w + n) | 0);
+  Atomics.notify(ctl, C.IN_WRITE);
+  return true;
+}
+function fields(size, fill) { const b = new Uint8Array(size); fill(new DataView(b.buffer)); return b; }
+// One key event into the program: keys.c's Key_Event decides, as in id's
+// Quake, whether it goes to the menu, the console or its binding.
+function keyEvent(qk, down, ch) {
+  noteInput();
+  sendRecord(IN.KEY, fields(8, d => { d.setUint8(0, qk); d.setUint8(1, down ? 1 : 0); d.setUint32(4, ch || 0, true); }));
+}
+function mouseMove(dx, dy) {
+  noteInput();
+  sendRecord(IN.MOUSE, fields(8, d => { d.setFloat32(0, dx, true); d.setFloat32(4, dy, true); }));
+}
+function sendTick(seq, dt) {
+  sendRecord(IN.TICK, fields(12, d => { d.setUint32(0, seq, true); d.setFloat64(4, dt, true); }));
+}
+
+// --- Automation calls (the page's buttons, and the browser checks) -------------
+// A call line `name arg...` (quake-wasm/src/automation.rs); the answer comes
+// back in a REPLY record. `quake.call('menu_visible')` resolves to 1 or 0.
+let callSeq = 0;
+const pendingCalls = new Map();
+function callLine(line) {
+  return new Promise((resolve, reject) => {
+    if (!ctl || Atomics.load(ctl, C.RUN) > 1) { reject(new Error('the game is not running')); return; }
+    const id = ++callSeq;
+    pendingCalls.set(id, { resolve, reject });
+    const text = new TextEncoder().encode(line);
+    const payload = new Uint8Array(4 + text.length);
+    new DataView(payload.buffer).setUint32(0, id, true);
+    payload.set(text, 4);
+    if (!sendRecord(IN.CALL, payload)) { pendingCalls.delete(id); reject(new Error('input ring full')); }
+  });
+}
+function call(name, ...args) { return callLine([name, ...args].join(' ')).then(r => r.value); }
+
+// --- The program's output: one message per turn --------------------------------
+function onWorkerMessage(e) {
+  const m = e.data;
+  if (m.t === 'out') handleOutput(new Uint8Array(m.bytes));
+  else if (m.t === 'slots') { frameSlots = m.frames; slotBytes = m.slotBytes; slotsGen = m.gen; }
+  else if (m.t === 'fs') storage.apply(m);
+  else if (m.t === 'log') console.log('[quake]', m.text);
+  else if (m.t === 'exit') gameExited(m);
+}
+function handleOutput(b) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const f32 = (o) => dv.getFloat32(o, true), u32 = (o) => dv.getUint32(o, true), i32 = (o) => dv.getInt32(o, true);
+  for (let i = 0; i + 8 <= b.length;) {
+    const kind = b[i], len = u32(i + 4), p = i + 8;
+    switch (kind) {
+      case OUT.STATE:
+        gameState.flags = u32(p); gameState.menuScreen = i32(p + 4);
+        syncLockChip();
+        break;
+      case OUT.SAMPLE: onSample(u32(p), b.slice(p + 4, p + len)); break;
+      case OUT.SOUND:
+        onSound({ id: u32(p), ox: f32(p + 4), oy: f32(p + 8), oz: f32(p + 12), vol: f32(p + 16),
+                  atten: f32(p + 20), ent: i32(p + 24), chan: i32(p + 28), view: u32(p + 32) !== 0,
+                  ls: f32(p + 36), le: f32(p + 40) });
+        break;
+      case OUT.STOP_SOUND:
+        window.__sndStats.stopRecords = (window.__sndStats.stopRecords || 0) + 1;
+        stopKey(i32(p), i32(p + 4));
+        break;
+      case OUT.STATIC_SOUND:
+        onStaticSound({ id: u32(p), ox: f32(p + 4), oy: f32(p + 8), oz: f32(p + 12), vol: f32(p + 16),
+                        atten: f32(p + 20), ls: f32(p + 24), le: f32(p + 28) });
+        break;
+      case OUT.AMBIENT: onAmbient({ ch: u32(p), id: u32(p + 4), ls: f32(p + 8), le: f32(p + 12) }); break;
+      case OUT.LISTENER: {
+        const v = []; for (let k = 0; k < 14; k++) v.push(f32(p + 4 * k));
+        onListener(v);
+        break;
+      }
+      case OUT.GENERATION: onGeneration(u32(p)); break;
+      case OUT.LOCAL_SOUND: onLocalSound(u32(p)); break;
+      case OUT.REPLY: {
+        const pc = pendingCalls.get(u32(p));
+        if (pc) {
+          pendingCalls.delete(u32(p));
+          pc.resolve({ value: dv.getFloat64(p + 4, true), text: new TextDecoder().decode(b.subarray(p + 12, p + len)) });
+        }
+        break;
+      }
+      case OUT.BENCH: {
+        const v = []; for (let k = 0; k < len / 8; k++) v.push(dv.getFloat64(p + 8 * k, true));
+        if (quake.onBench) quake.onBench(v);
+        break;
+      }
+    }
+    i = p + len;
+  }
+}
+function gameExited(m) {
+  for (const pc of pendingCalls.values()) pc.reject(new Error('the game ended: ' + m.why));
+  pendingCalls.clear();
+  if (m.run !== 2) {
+    setStatus('the game stopped: ' + m.why);
+    console.error('[quake]', m.why);
+  }
+}
+
+// ===========================================================================
+// Input
+// ===========================================================================
 
 // --- First-gesture / overlay state. The full-canvas scrim exists for exactly
 // one job: capture the user's FIRST gesture ever (browsers gate audio behind
@@ -264,7 +416,7 @@ function inWalkMode() { return walkModeKnown() ? !!exp.in_walk_mode() : true; }
 // loop. After it, the scrim NEVER covers the canvas again; the only re-capture
 // prompt is the small non-blocking #lockChip during unlocked walk play.
 let firstGestureDone = false;   // a gesture happened; the scrim is gone for good
-let readyToPlay = false;        // main() finished booting (the prompt is up)
+let readyToPlay = false;        // the game is running (the prompt is up)
 
 function unlockAudio() {
   // Create/resume the AudioContext inside a user-gesture handler (required by
@@ -281,10 +433,10 @@ function hideOverlayForever() {
 }
 function startFromOverlay() {
   // The first gesture: unlock audio with it and reveal the attract loop that
-  // boot_attract() already has running under the scrim — id's demos, with no
-  // menu until a key (keys.c: during demo playback most keys bring up the
-  // main menu). No pointer lock here — the menu is keyboard-driven; the mouse
-  // is captured later, by a canvas click in walk mode.
+  // is already running under the scrim — id's demos, with no menu until a key
+  // (keys.c: during demo playback most keys bring up the main menu). No
+  // pointer lock here — the menu is keyboard-driven; the mouse is captured
+  // later, by a canvas click in walk mode.
   unlockAudio();
   hideOverlayForever();
   statusEl.textContent = 'attract loop — press any key for the menu · Single Player > New Game to play';
@@ -333,17 +485,12 @@ function quakeKey(e) {
   return null;
 }
 
-// Is the Customize-controls screen waiting for a key (menu.c bind_grab)?
-function bindGrabbing() { return !!(exp && exp.menu_bind_grabbing && exp.menu_bind_grabbing()); }
 // The character a key typed on the player's keyboard layout, for the console
 // and the Setup name fields (0: none — a named key, or a shortcut chord).
 function typedChar(e) {
   if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return 0;
   return e.key.codePointAt(0);
 }
-// One key event into the engine: keys.c's Key_Event decides, as in id's
-// Quake, whether it goes to the menu, the console or its binding.
-function keyEvent(qk, down, ch) { if (exp && exp.key_event) exp.key_event(qk, down ? 1 : 0, ch || 0); }
 
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
@@ -357,7 +504,7 @@ addEventListener('keydown', e => {
     e.preventDefault();
     return;
   }
-  if (!exp) return;
+  if (!readyToPlay) return;
 
   // --- Escape. Key_Event's own rules (the menu's Escape, else togglemenu),
   //     sent from here because the browser reserves Esc around pointer lock
@@ -410,7 +557,7 @@ addEventListener('keyup', e => {
 // A key released while the window was elsewhere never comes up here: on
 // losing the keyboard, vid_win.c's ClearAllStates (every key up, repeats
 // cleared), so nothing stays held.
-addEventListener('blur', () => { if (exp && exp.key_clear_states) exp.key_clear_states(); });
+addEventListener('blur', () => sendRecord(IN.CLEAR_KEYS, new Uint8Array(0)));
 
 // No UI control may KEEP focus after a click: a focused button re-triggers on
 // Space/Enter (the 🔊 sound toggle was the known offender — every jump replayed
@@ -518,524 +665,23 @@ document.addEventListener('fullscreenchange', () => {
 // playback works there). Capturing the mouse stays a plain canvas click away,
 // invited by the #lockChip whenever unlocked walk mode would use it.
 document.getElementById('walkBtn').addEventListener('click', () => {
-  if (!exp) return;
+  if (!readyToPlay) return;
   unlockAudio();
   hideOverlayForever();
-  exp.boot();
+  call('boot');
   statusEl.textContent = 'walking e1m1 — Esc closes the menu · click the view to capture the mouse · WASD to move';
 });
 document.getElementById('demoBtn').addEventListener('click', () => {
-  if (!exp) return;
+  if (!readyToPlay) return;
   unlockAudio();
   hideOverlayForever();
   statusEl.textContent = 'loading demo1 (e1m3)…';
-  setTimeout(() => {
-    exp.boot_demo();
+  call('boot_demo').then(() => {
     statusEl.textContent = "playing demo1 — id's recorded e1m3 run (demo2 and demo3 follow) · any key for the menu";
-  }, 30);
+  });
 });
 
-// Decode a real Quake .wav (from the pak, via WASM) and play it with Web Audio.
-let audioCtx = null;
-async function playSound() {
-  if (!exp || !exp.load_sound) return;
-  const len = exp.load_sound();
-  if (len <= 0) { statusEl.textContent = 'no sound data in pak'; return; }
-  const ptr = exp.sound_ptr();
-  const bytes = new Uint8Array(exp.memory.buffer, ptr, len).slice(); // copy out
-  try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') await audioCtx.resume();
-    const buf = await audioCtx.decodeAudioData(bytes.buffer);
-    const src = audioCtx.createBufferSource();
-    src.buffer = buf; src.connect(audioCtx.destination); src.start();
-    statusEl.textContent = `played Quake SFX — ${buf.duration.toFixed(2)}s @ ${buf.sampleRate}Hz`;
-  } catch (e) { statusEl.textContent = 'sound decode failed: ' + e; }
-  updateSndUI();
-}
-sndBtn.addEventListener('click', playSound);
-
-// --- Audio-unlock state. Browsers gate audio behind a user gesture: the
-// AudioContext is created/resumed on the first canvas or overlay click (and on
-// the 🔊 button itself). The button doubles as the visible state — 🔇 until the
-// context actually reports 'running', 🔊 after. Cheap (touches the DOM only on
-// a state flip) so the render loop can poll it every frame, which also catches
-// resume paths outside our handlers (e.g. headless test harnesses).
-let sndShown = null;
-function updateSndUI() {
-  const on = !!(audioCtx && audioCtx.state === 'running');
-  if (on === sndShown) return;
-  sndShown = on;
-  sndBtn.textContent = on ? 'sound on' : 'sound off';
-  sndBtn.classList.toggle('on', on);
-}
-updateSndUI();
-
-// Spatialize a queued sound the way Quake's SND_Spatialize does: fall off with
-// distance, pan left/right by where the source sits relative to where the
-// listener faces. Returns {gain, pan} in [0,1] / [-1,1], or null if we lack the
-// exports to do it (caller then plays flat).
-//
-//   distance gain = max(0, 1 - dist * attenuation / 1000) * volume
-//   pan           = clamp(dot(normalize(source - listener), right), -1, 1)
-//
-// attenuation 0 => no falloff (full volume everywhere, e.g. some pickups). At
-// attenuation 1 a source ~1000 units away is silent; point-blank is full volume.
-const ATTEN_SCALE = 1000;
-
-// The shared distance/pan law, applied to one-shots AND (every frame) to the
-// looping static sounds so both stay on exactly the same SND_Spatialize math.
-function spatialGain(ox, oy, oz, vol, atten) {
-  const lx = exp.listener_x(), ly = exp.listener_y(), lz = exp.listener_z();
-  const rx = exp.listener_right_x(), ry = exp.listener_right_y(), rz = exp.listener_right_z();
-
-  const dx = ox - lx, dy = oy - ly, dz = oz - lz;
-  const dist = Math.hypot(dx, dy, dz);
-
-  let gain = vol;
-  if (atten > 0) gain = Math.max(0, 1 - dist * atten / ATTEN_SCALE) * vol;
-  // attenuation 0 => audible everywhere at full `vol`.
-
-  let pan = 0;
-  if (dist > 1e-3) {
-    pan = (dx * rx + dy * ry + dz * rz) / dist;   // dot(normalize(d), right)
-    if (pan < -1) pan = -1; else if (pan > 1) pan = 1;
-  }
-  return { gain, pan };
-}
-
-function spatializeSound() {
-  // Need the full param + listener export set; otherwise signal "play flat".
-  const need = ['sound_origin_x','sound_origin_y','sound_origin_z','sound_volume',
-    'sound_attenuation','listener_x','listener_y','listener_z',
-    'listener_right_x','listener_right_y','listener_right_z'];
-  for (const fn of need) { if (typeof exp[fn] !== 'function') return null; }
-
-  const ox = exp.sound_origin_x(), oy = exp.sound_origin_y(), oz = exp.sound_origin_z();
-  const vol = exp.sound_volume();
-  const atten = exp.sound_attenuation();
-
-  // SND_Spatialize (snd_dma.c:407-412): a sound from the listener's OWN view
-  // entity (the player) always plays at full master volume on both channels
-  // with no distance falloff or pan. The page learns this via the
-  // sound_is_view_entity export (defaults to "not view entity" if absent).
-  if (typeof exp.sound_is_view_entity === 'function' && exp.sound_is_view_entity()) {
-    return { gain: vol, pan: 0 };
-  }
-
-  return spatialGain(ox, oy, oz, vol, atten);
-}
-
-// Decoded-WAV cache: the same SFX (gunshots, footsteps, door hums…) fires over
-// and over, and decodeAudioData is async + costs real time, so re-decoding every
-// play added latency and choppiness. Decode each distinct clip ONCE and replay the
-// cached AudioBuffer with zero decode hitch. Keyed by a 32-bit FNV-1a of the WAV
-// bytes plus its length (content hash — no collisions for Quake's ~50 SFX).
-const decodedSounds = new Map();
-function wavKey(bytes) {
-  let h = 0x811c9dc5 | 0;
-  for (let i = 0; i < bytes.length; i++) {
-    h ^= bytes[i];
-    h = Math.imul(h, 0x01000193);   // 32-bit FNV-1a
-  }
-  return (h >>> 0) + ':' + bytes.length;
-}
-// Playing one-shot sources keyed by their (entity, channel) pair —
-// SND_PickChannel's override key (snd_dma.c:354-390). A NEW sound on the same
-// entity + non-zero channel STOPS the source it replaces ("always override
-// sound from same entity"; channel 0 = CHAN_AUTO never overrides and is never
-// keyed), and an svc_stopsound (S_StopSound) stops the keyed source. id's own
-// demo1/2/3 never send svc_stopsound (engine-asserted), but the registry also
-// covers the channel-restart case across frames.
-const playingByKey = new Map();
-// Evidence/debug counters (read by the verify scripts; no UI).
-window.__sndStats = { plays: 0, stops: 0 };
-
-function registerSource(src, ent, chan) {
-  if (typeof ent !== 'number' || !(chan > 0)) return; // channel 0 never keyed
-  const key = ent + ':' + chan;
-  const prev = playingByKey.get(key);
-  if (prev) { try { prev.stop(); } catch (e) {} window.__sndStats.stops++; }
-  playingByKey.set(key, src);
-  src.onended = () => { if (playingByKey.get(key) === src) playingByKey.delete(key); };
-}
-
-function playBuffer(buf, sp, ent, chan, lp, pp) {
-  if (lp) { playDynLoop(buf, ent, chan, lp); return; }
-  const s = audioCtx.createBufferSource();
-  s.buffer = buf;
-  const nodes = playRouted(s, sp);
-  registerSource(s, ent, chan);
-  // S_Update re-spatializes every dynamic channel each frame from the origin
-  // S_StartSound gave it (snd_dma.c: "update spatialization for static and
-  // dynamic sounds"), one-shots included: turn, and a gunshot moves across.
-  if (nodes && pp) {
-    const l = { src: s, lg: nodes.lg, rg: nodes.rg, lp: pp };
-    dynShots.push(l);
-    const keyed = s.onended;
-    s.onended = () => { dynShots = dynShots.filter(x => x !== l); if (keyed) keyed(); };
-  }
-  s.start();
-  window.__sndStats.plays++;
-}
-
-// A one-shot whose sample has a `cue ` loop point loops, as SND_PaintChannels
-// does, until a later sound on its (entity, channel) overrides it (door, lift
-// and train hums until their stop sound) or all sounds stop (level change).
-// Like the C channel it is re-spatialized every frame from its fixed origin
-// (updateLoopingAudio). lp = {ls, le, ox, oy, oz, vol, atten, view}.
-let dynLoops = [];       // {src, lg, rg, lp}
-// Playing one-shots with their spatial params (playBuffer), re-spatialized
-// every frame like the loops.
-let dynShots = [];       // {src, lg, rg, lp}
-function playDynLoop(buf, ent, chan, lp) {
-  const src = makeLoopSource(buf, lp.ls, lp.le);
-  const lg = audioCtx.createGain(); lg.gain.value = 0;
-  const rg = audioCtx.createGain(); rg.gain.value = 0;
-  if (typeof audioCtx.createChannelMerger === 'function') {
-    const m = audioCtx.createChannelMerger(2);
-    src.connect(lg); lg.connect(m, 0, 0);
-    src.connect(rg); rg.connect(m, 0, 1);
-    m.connect(audioCtx.destination);
-  } else {
-    src.connect(lg); lg.connect(audioCtx.destination); // mono fallback
-  }
-  const l = { src, lg, rg, lp };
-  dynLoops.push(l);
-  spatializeDynLoop(l);
-  registerSource(src, ent, chan);
-  const keyed = src.onended;
-  src.onended = () => { dynLoops = dynLoops.filter(x => x !== l); if (keyed) keyed(); };
-  src.start();
-  window.__sndStats.plays++;
-  window.__sndStats.loops = (window.__sndStats.loops || 0) + 1;
-}
-function spatializeDynLoop(l) {
-  const p = l.lp;
-  // SND_Spatialize: the view entity is full volume, centred; else the law.
-  const sp = p.view ? { gain: p.vol, pan: 0 } : spatialGain(p.ox, p.oy, p.oz, p.vol, p.atten);
-  const [lv, rv] = sideGains(sp, masterVolume());
-  l.lg.gain.value = lv;
-  l.rg.gain.value = rv;
-}
-
-// SND_PickChannel's override without a new source: stop what plays on the key.
-function stopKey(ent, chan) {
-  if (!(chan > 0)) return;
-  const key = ent + ':' + chan;
-  const prev = playingByKey.get(key);
-  if (prev) {
-    try { prev.stop(); } catch (e) {}
-    playingByKey.delete(key);
-    window.__sndStats.stops++;
-  }
-}
-// Latest sound issued per (entity, channel): an async first decode starts its
-// source only if no newer sound took the key meanwhile (else the stop sound of
-// a short door travel could land before the hum and leave it looping).
-const keySeq = new Map();
-
-// Drain pending svc_stopsound stops (demo playback): poll_stop_sound() returns
-// the packed wire short (entity<<3 | channel), or -1 when empty; stop() the
-// registered source for that key — the Web Audio equivalent of S_StopSound
-// zeroing the channel's sfx.
-function drainStopSounds() {
-  if (!exp || typeof exp.poll_stop_sound !== 'function') return;
-  for (let guard = 0; guard < 16; guard++) {
-    const v = exp.poll_stop_sound();
-    if (v < 0) break;
-    const key = (v >> 3) + ':' + (v & 7);
-    const src = playingByKey.get(key);
-    if (src) {
-      try { src.stop(); } catch (e) {}
-      playingByKey.delete(key);
-      window.__sndStats.stops++;
-    }
-  }
-}
-
-// Play every gameplay sound the server queued this frame. poll_sound() pops one
-// WAV into shared memory and returns its length (0 when the queue is empty); we
-// hash it, decode (or reuse the cached buffer), read its spatial params, and play
-// via Web Audio through the distance gain + linear stereo-pan node graph.
-function drainGameSounds() {
-  if (!exp || !exp.poll_sound || !audioCtx || audioCtx.state !== 'running') return;
-  // LOW-10: tell the WASM side audio is live so queue_sounds starts enqueuing.
-  // Until this fires, queue_sounds drops sounds instead of letting a pre-audio
-  // backlog pile up to its cap and dump all at once now. Idempotent.
-  if (exp.set_audio_ready) exp.set_audio_ready(1);
-  for (let guard = 0; guard < 16; guard++) {
-    const len = exp.poll_sound();
-    if (len <= 0) break;
-    // Read spatial params right after the pop (poll_sound stashed them for the
-    // exports). null => fall back to flat full-volume centered playback.
-    const sp = spatializeSound();
-    // The (entity, channel) override key rides the same pop (0:0 when the
-    // exports are absent — never keyed).
-    const ent = typeof exp.sound_entity === 'function' ? exp.sound_entity() : 0;
-    const chan = typeof exp.sound_channel === 'function' ? exp.sound_channel() : 0;
-    // The sample's cue loop window (poll_sound): start < 0 = a one-shot.
-    const ls = typeof exp.sound_loop_start === 'function' ? exp.sound_loop_start() : -1;
-    // The channel's spatial params (S_StartSound's origin, volume,
-    // attenuation, view entity), which S_Update re-spatializes every frame.
-    const pp = sp ? {
-      ox: exp.sound_origin_x(), oy: exp.sound_origin_y(), oz: exp.sound_origin_z(),
-      vol: exp.sound_volume(), atten: exp.sound_attenuation(),
-      view: typeof exp.sound_is_view_entity === 'function' && !!exp.sound_is_view_entity(),
-    } : null;
-    const lp = ls >= 0 && pp ? { ...pp, ls, le: exp.sound_loop_end() } : null;
-    const kkey = ent + ':' + chan;
-    const seq = (keySeq.get(kkey) || 0) + 1;
-    if (chan > 0) keySeq.set(kkey, seq);
-    // S_StartSound picks (and so overrides) the channel before it tests
-    // audibility: an inaudible sound still ends its key's sound, then drops.
-    // That is the one playing (stopKey) or one whose first decode is still
-    // pending: the keySeq bump above stops that from starting after it (a
-    // door hum would otherwise start after its own stop sound, and loop).
-    if (sp && sp.gain <= 0.02) { stopKey(ent, chan); continue; }
-    const gen = typeof exp.sound_generation === 'function' ? exp.sound_generation() : 0;
-    const ptr = exp.sound_ptr();
-    const view = new Uint8Array(exp.memory.buffer, ptr, len);
-    const key = wavKey(view);
-    const cached = decodedSounds.get(key);
-    if (cached) {
-      playBuffer(cached, sp, ent, chan, lp, pp);   // already decoded — instant, no hitch
-      continue;
-    }
-    // First time for this clip: copy out of wasm memory, decode, cache, play —
-    // unless the key was overridden or the level changed while decoding.
-    const copy = view.slice();
-    audioCtx.decodeAudioData(copy.buffer).then(buf => {
-      decodedSounds.set(key, buf);
-      if (chan > 0 && keySeq.get(kkey) !== seq) return;
-      if (typeof exp.sound_generation === 'function' && exp.sound_generation() !== gen) return;
-      playBuffer(buf, sp, ent, chan, lp, pp);
-    }).catch(() => {});
-  }
-}
-
-// Play the menu's queued local sounds (menu.c S_LocalSound: misc/menu1.wav on
-// cursor moves, menu2 on enter/select, menu3 on slider adjusts). S_LocalSound
-// is a view-entity sound — full volume, centred, no distance falloff
-// (snd_dma.c) — so each plays through playRouted at gain 1 / pan 0, which the
-// master volume still scales. window.__menuSounds counts pops (verification).
-window.__menuSounds = 0;
-function drainMenuSounds() {
-  if (!exp || !exp.poll_menu_sound || !audioCtx || audioCtx.state !== 'running') return;
-  if (exp.set_audio_ready) exp.set_audio_ready(1);
-  for (let guard = 0; guard < 8; guard++) {
-    const len = exp.poll_menu_sound();
-    if (len <= 0) break;
-    window.__menuSounds++;
-    const view = new Uint8Array(exp.memory.buffer, exp.sound_ptr(), len);
-    decodeCached(view, buf => {
-      const src = audioCtx.createBufferSource();
-      src.buffer = buf;
-      playRouted(src, { gain: 1, pan: 0 });
-      src.start();
-    });
-  }
-}
-
-// SND_Spatialize's per-side volumes, then the master volume: leftvol =
-// vol*(1-dot), rightvol = vol*(1+dot) (distance-attenuated), each clamped at
-// 255 — full — by the mixer (snd_mix.c SND_PaintChannelFrom8/16) BEFORE
-// S_TransferPaintBuffer scales the mix by `volume`. So a near source panned
-// hard reaches full volume times the master on its side, never more (clamping
-// after the master made it up to 1/volume louder: 1.43x at the default 0.7).
-function sideGains(sp, master) {
-  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
-  return [clamp01(sp.gain * (1 - sp.pan)) * master, clamp01(sp.gain * (1 + sp.pan)) * master];
-}
-
-// Wire a decoded BufferSource to the destination. With spatial params we
-// reproduce Quake's SND_Spatialize pan law (snd_dma.c) exactly: LINEAR left/right
-// volumes (sideGains) — so the near side reaches FULL gain (not the equal-power
-// -3 dB centre a StereoPanner gives). The mono source feeds two gains into a
-// stereo merger, which are returned ({lg, rg}) for the per-frame
-// re-spatialization; null otherwise. With no params (sp == null), play flat
-// (full volume, centred).
-function playRouted(src, sp) {
-  const master = masterVolume();
-  if (!sp) {
-    const g = audioCtx.createGain();
-    g.gain.value = master;
-    src.connect(g);
-    g.connect(audioCtx.destination);
-    return;
-  }
-  // sp.gain = distance-attenuated volume; pan = dot(dir, listener right) in
-  // [-1,1] (left = -1). leftvol/rightvol are linear in the dot, like id.
-  if (typeof audioCtx.createChannelMerger === 'function') {
-    const [lv, rv] = sideGains(sp, master);
-    const lg = audioCtx.createGain(); lg.gain.value = lv;
-    const rg = audioCtx.createGain(); rg.gain.value = rv;
-    const merger = audioCtx.createChannelMerger(2);
-    src.connect(lg); lg.connect(merger, 0, 0);   // left channel
-    src.connect(rg); rg.connect(merger, 0, 1);   // right channel
-    merger.connect(audioCtx.destination);
-    return { lg, rg };
-  }
-  // No channel merger available: fall back to a centred mono gain.
-  const g = audioCtx.createGain();
-  g.gain.value = Math.min(1, sp.gain) * master;
-  src.connect(g);
-  g.connect(audioCtx.destination);
-  return null;
-}
-
-// --- Looping ambient audio --------------------------------------------------
-// Two kinds of persistent loops, both engine-driven:
-//  * PLACED static sounds (QuakeC ambientsound(): torch crackle, machine hum) —
-//    registered once per level via poll_static_sound; each gets a looping
-//    source whose L/R gains are recomputed EVERY frame from the live listener
-//    pose through the same spatialGain law the one-shots use (SND_Spatialize
-//    runs every frame on static channels in the C).
-//  * The 4 automatic LEAF ambients (water wash / sky wind) — the engine ramps
-//    their volumes from the view leaf's ambient_level bytes
-//    (S_UpdateAmbientSounds); we just copy ambient_gain(ch) into a centred
-//    gain node each frame (the C sets leftvol = rightvol, no pan).
-// sound_generation() bumps on every level/mode change (changelevel, restart,
-// walk<->demo): stop + drop every loop, then the new level's registrations
-// rebuild them. All loop exports are feature-checked so this page still works
-// against an older wasm without them.
-let staticLoops = [];    // {src, lg, rg, ox, oy, oz, vol, atten}
-let ambientLoops = [];   // {src, g, ch}
-let loopGen = null;      // last seen sound_generation()
-let ambientStarted = false;
-
-function haveLoopExports() {
-  const need = ['sound_generation','poll_static_sound','sound_loop_start',
-    'sound_loop_end','load_ambient_sound','ambient_gain','sound_ptr',
-    'sound_origin_x','sound_origin_y','sound_origin_z','sound_volume',
-    'sound_attenuation','listener_x','listener_y','listener_z',
-    'listener_right_x','listener_right_y','listener_right_z'];
-  for (const fn of need) { if (typeof exp[fn] !== 'function') return false; }
-  return true;
-}
-
-function stopAllLoops() {
-  for (const l of staticLoops)  { try { l.src.stop(); } catch (e) {} }
-  for (const l of ambientLoops) { try { l.src.stop(); } catch (e) {} }
-  staticLoops = []; ambientLoops = [];
-  ambientStarted = false;
-  // S_StopAllSounds stops the dynamic channels too: every one-shot and every
-  // looping one (a door hum must not carry into the next level).
-  for (const s of playingByKey.values()) { try { s.stop(); } catch (e) {} }
-  for (const l of dynLoops) { try { l.src.stop(); } catch (e) {} }
-  for (const l of dynShots) { try { l.src.stop(); } catch (e) {} }
-  playingByKey.clear(); dynLoops = []; dynShots = []; keySeq.clear();
-}
-
-// Decode WAV bytes through the shared content-hash cache, then cb(buffer).
-function decodeCached(view, cb) {
-  const key = wavKey(view);
-  const cached = decodedSounds.get(key);
-  if (cached) { cb(cached); return; }
-  const copy = view.slice();
-  audioCtx.decodeAudioData(copy.buffer).then(buf => {
-    decodedSounds.set(key, buf);
-    cb(buf);
-  }).catch(() => {});
-}
-
-// A looping source restarting at the WAV's cue-chunk loop window (seconds,
-// engine-parsed — sample-rate independent, so decodeAudioData resampling is
-// harmless). loopEnd 0 / past-the-end = loop to the buffer's end.
-function makeLoopSource(buf, ls, le) {
-  const src = audioCtx.createBufferSource();
-  src.buffer = buf;
-  src.loop = true;
-  if (ls > 0) src.loopStart = ls;
-  if (le > 0 && le < buf.duration) src.loopEnd = le;
-  return src;
-}
-
-// Register this level's placed static loops (queued engine-side at level
-// spawn). Decode is async: a loop only starts if the level generation it was
-// polled under is still current (no stale loop can start over a new level).
-function drainStaticLoops() {
-  for (let guard = 0; guard < 128; guard++) {
-    const len = exp.poll_static_sound();
-    if (len <= 0) break;
-    const ox = exp.sound_origin_x(), oy = exp.sound_origin_y(), oz = exp.sound_origin_z();
-    const vol = exp.sound_volume(), atten = exp.sound_attenuation();
-    const ls = exp.sound_loop_start(), le = exp.sound_loop_end();
-    const view = new Uint8Array(exp.memory.buffer, exp.sound_ptr(), len);
-    const myGen = loopGen;
-    decodeCached(view, buf => {
-      if (loopGen !== myGen) return;     // level changed while decoding
-      const src = makeLoopSource(buf, ls, le);
-      const lg = audioCtx.createGain(); lg.gain.value = 0;
-      const rg = audioCtx.createGain(); rg.gain.value = 0;
-      if (typeof audioCtx.createChannelMerger === 'function') {
-        const m = audioCtx.createChannelMerger(2);
-        src.connect(lg); lg.connect(m, 0, 0);
-        src.connect(rg); rg.connect(m, 0, 1);
-        m.connect(audioCtx.destination);
-      } else {
-        src.connect(lg); lg.connect(audioCtx.destination); // mono fallback
-      }
-      staticLoops.push({ src, lg, rg, ox, oy, oz, vol, atten });
-      src.start();
-    });
-  }
-}
-
-// Start the automatic ambient channel loops (S_Init loads water1 + wind2;
-// channels the engine reports empty — slime/lava — return length 0). They run
-// at gain 0 until the player's view leaf says otherwise.
-function startAmbientLoops() {
-  for (let ch = 0; ch < 4; ch++) {
-    const len = exp.load_ambient_sound(ch);
-    if (len <= 0) continue;
-    const ls = exp.sound_loop_start(), le = exp.sound_loop_end();
-    const view = new Uint8Array(exp.memory.buffer, exp.sound_ptr(), len);
-    const myGen = loopGen;
-    decodeCached(view, buf => {
-      if (loopGen !== myGen) return;
-      const src = makeLoopSource(buf, ls, le);
-      const g = audioCtx.createGain(); g.gain.value = 0;
-      src.connect(g); g.connect(audioCtx.destination);   // centred, no pan
-      ambientLoops.push({ src, g, ch });
-      src.start();
-    });
-  }
-}
-
-// Per-frame loop upkeep: react to a level change, pick up newly registered
-// statics, and recompute every loop's gain from the live listener/leaf state.
-function updateLoopingAudio() {
-  if (!exp || !audioCtx || audioCtx.state !== 'running' || !haveLoopExports()) return;
-
-  const gen = exp.sound_generation();
-  if (gen !== loopGen) {       // level/mode changed: silence the old world
-    stopAllLoops();
-    loopGen = gen;
-  }
-  drainStaticLoops();
-  if (!ambientStarted) { ambientStarted = true; startAmbientLoops(); }
-
-  const master = masterVolume();
-  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
-  // Statics: id's linear pan law, same as playRouted's one-shot path.
-  for (const l of staticLoops) {
-    const [lv, rv] = sideGains(spatialGain(l.ox, l.oy, l.oz, l.vol, l.atten), master);
-    l.lg.gain.value = lv;
-    l.rg.gain.value = rv;
-  }
-  // Looping one-shots (door/lift/train hums) and the playing one-shots: the
-  // same per-frame law (S_Update runs SND_Spatialize on every channel).
-  for (const l of dynLoops) spatializeDynLoop(l);
-  for (const l of dynShots) spatializeDynLoop(l);
-  // Leaf ambients: engine-ramped volume, both channels equal.
-  for (const l of ambientLoops) {
-    l.g.gain.value = clamp01(exp.ambient_gain(l.ch) * master);
-  }
-}
-
-let started = false, exp = null, dragging = false;
-
+let dragging = false;
 function locked() { return document.pointerLockElement === canvas; }
 
 canvas.addEventListener('mousedown', (e) => {
@@ -1047,8 +693,7 @@ canvas.addEventListener('mousedown', (e) => {
     // menu/console up. Demo/attract playback leaves the pointer free (nothing
     // to aim — and the page's buttons stay one click away); closing the menu
     // re-captures on the next click, never automatically (browsers require the
-    // gesture). An old wasm without in_walk_mode keeps the lock-anywhere
-    // behaviour (inWalkMode() defaults true).
+    // gesture).
     if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
   }
   // The buttons are K_MOUSE1/2/3 (in_win.c: left, right, middle), keys like
@@ -1087,14 +732,19 @@ document.addEventListener('pointerlockchange', () => {
     expectUnlock = false;
     const pairsWithEscKey = escLocked && performance.now() - escKeyAt < ESC_PAIR_MS;
     if (!pageInitiated && !pairsWithEscKey && inWalkMode() && !menuVisible()
-        && !consoleVisible() && exp) {
+        && !consoleVisible() && readyToPlay) {
       lockLossMenuAt = performance.now();
       escPress();           // togglemenu: the menu opens
+      // ...as the program's next STATE will say; until it does, the page
+      // knows it already (a second lock-loss event — headless Chromium
+      // sends one for a lock taken and dropped within a frame — must not
+      // toggle the menu shut again).
+      gameState.flags |= ST.MENU;
     }
     // Leaving pointer lock is this port's "+mlook released": the engine applies
     // lookspring there (IN_MLookUp -> V_StartPitchDrift when the Options toggle
     // is on), re-centring the view pitch.
-    if (exp && exp.pointer_unlocked) exp.pointer_unlocked();
+    sendRecord(IN.POINTER_UNLOCKED, new Uint8Array(0));
   }
   syncLockChip();
 });
@@ -1107,205 +757,520 @@ overlay.addEventListener('click', () => {
 
 // The non-blocking capture chip: visible only in UNLOCKED walk mode with no
 // menu/console up — exactly the one state where a canvas click would lock the
-// mouse. DOM is touched only on a state flip, so the render loop can sync it
-// every frame (the page can't otherwise observe menu-driven mode changes like
-// New Game). Needs in_walk_mode (certainty, not the inWalkMode() fallback):
-// with an older wasm the chip simply never shows.
+// mouse. DOM is touched only on a state flip, so every STATE record can sync
+// it (the page can't otherwise observe menu-driven mode changes like New
+// Game).
 let chipShown = null;
 function syncLockChip() {
-  const show = firstGestureDone && !locked() && walkModeKnown() && !!exp.in_walk_mode()
-    && !menuVisible() && !consoleVisible();
+  const show = firstGestureDone && !locked() && inWalkMode() && !menuVisible() && !consoleVisible();
   if (show === chipShown) return;
   chipShown = show;
   lockChip.classList.toggle('show', show);
 }
 
 canvas.addEventListener('mousemove', e => {
-  if (!exp) return;
+  if (!readyToPlay) return;
   // Freeze the view while the menu OR console is up (Quake stops feeding
   // mouse-look outside key_game). The engine enforces this too; this just
-  // avoids the call.
+  // avoids the event.
   if (menuVisible() || consoleVisible()) return;
-  if (locked() || dragging) {
-    // Raw movementX/Y counts: the engine's IN_MouseMove port applies the
-    // sensitivity cvar, the Invert Mouse sign (m_pitch < 0), and the
-    // lookstrafe/+strafe routing. (Fallback: an older wasm without
-    // mouse_move gets the previous fixed-sensitivity look call.)
-    if (exp.mouse_move) exp.mouse_move(e.movementX, e.movementY);
-    else if (exp.look) exp.look(-e.movementX * 0.16, e.movementY * 0.16);
-  }
+  // Raw movementX/Y counts: the engine's IN_MouseMove port applies the
+  // sensitivity cvar, the Invert Mouse sign (m_pitch < 0), and the
+  // lookstrafe/+strafe routing.
+  if (locked() || dragging) mouseMove(e.movementX, e.movementY);
 });
 
-// The master volume gain from the Options menu (default 1.0 if absent), clamped
-// to [0,1] so a bad export can't blow up the gain graph.
-function masterVolume() {
-  if (!exp || typeof exp.volume !== 'function') return 1.0;
-  const v = exp.volume();
-  return (v >= 0 && v <= 1) ? v : 1.0;
+// ===========================================================================
+// Sound: Web Audio plays what the program's snd_dma decides
+// ===========================================================================
+// The program sends each distinct sample once (SAMPLE: id + WAV bytes),
+// then names it: one-shots (SOUND), stops (STOP_SOUND), the menu's clicks
+// (LOCAL_SOUND), a level's placed loops (STATIC_SOUND) and its two leaf
+// ambients (AMBIENT), a GENERATION for each level change (S_StopAllSounds),
+// and the listener and the ambient levels every frame (LISTENER).
+let audioCtx = null;
+let audioReadySent = null;       // the running state the program last heard
+// The sound button: unlock audio with the click and play a test sample
+// (S_Play: `play items/r_item1.wav`).
+sndBtn.addEventListener('click', () => {
+  unlockAudio();
+  audioCtx.resume().then(() => {
+    updateSndUI();
+    callLine('exec play items/r_item1.wav');
+    statusEl.textContent = 'played Quake SFX — items/r_item1.wav';
+  }).catch(e => { statusEl.textContent = 'audio unavailable: ' + e; });
+});
+
+// --- Audio-unlock state. Browsers gate audio behind a user gesture: the
+// AudioContext is created/resumed on the first canvas or overlay click (and on
+// the 🔊 button itself). The button doubles as the visible state — 🔇 until the
+// context actually reports 'running', 🔊 after. Cheap (touches the DOM only on
+// a state flip) so the render loop can poll it every frame, which also catches
+// resume paths outside our handlers (e.g. headless test harnesses). The
+// program hears the same flip (AUDIO_READY: it queues no sounds before it,
+// so no backlog plays all at once when audio starts), and the level's loops
+// start then.
+let sndShown = null;
+function updateSndUI() {
+  const on = !!(audioCtx && audioCtx.state === 'running');
+  if (on !== audioReadySent) {
+    audioReadySent = on;
+    sendRecord(IN.AUDIO_READY, new Uint8Array([on ? 1 : 0]));
+    if (on) startLevelLoops();
+  }
+  if (on === sndShown) return;
+  sndShown = on;
+  sndBtn.textContent = on ? 'sound on' : 'sound off';
+  sndBtn.classList.toggle('on', on);
+}
+updateSndUI();
+function audioRunning() { return !!(audioCtx && audioCtx.state === 'running'); }
+
+// The listener pose and levels of the program's last frame (LISTENER):
+// origin, forward, right, the four ambient levels, the master volume.
+const listener = { x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: 0, rx: 0, ry: 0, rz: 0, ambient: [0, 0, 0, 0], volume: 1 };
+
+// Spatialize a sound the way Quake's SND_Spatialize does: fall off with
+// distance, pan left/right by where the source sits relative to where the
+// listener faces. Returns {gain, pan} in [0,1] / [-1,1].
+//
+//   distance gain = max(0, 1 - dist * attenuation / 1000) * volume
+//   pan           = clamp(dot(normalize(source - listener), right), -1, 1)
+//
+// attenuation 0 => no falloff (full volume everywhere, e.g. some pickups). At
+// attenuation 1 a source ~1000 units away is silent; point-blank is full volume.
+const ATTEN_SCALE = 1000;
+function spatialGain(ox, oy, oz, vol, atten) {
+  const dx = ox - listener.x, dy = oy - listener.y, dz = oz - listener.z;
+  const dist = Math.hypot(dx, dy, dz);
+  let gain = vol;
+  if (atten > 0) gain = Math.max(0, 1 - dist * atten / ATTEN_SCALE) * vol;
+  // attenuation 0 => audible everywhere at full `vol`.
+  let pan = 0;
+  if (dist > 1e-3) {
+    pan = (dx * listener.rx + dy * listener.ry + dz * listener.rz) / dist;   // dot(normalize(d), right)
+    if (pan < -1) pan = -1; else if (pan > 1) pan = 1;
+  }
+  return { gain, pan };
+}
+// SND_Spatialize (snd_dma.c:407-412): a sound from the listener's OWN view
+// entity (the player) always plays at full volume on both channels with no
+// distance falloff or pan.
+function spatialize(p) { return p.view ? { gain: p.vol, pan: 0 } : spatialGain(p.ox, p.oy, p.oz, p.vol, p.atten); }
+
+// The master volume from the Options menu, clamped to [0,1] so a bad value
+// can't blow up the gain graph.
+function masterVolume() { const v = listener.volume; return (v >= 0 && v <= 1) ? v : 1.0; }
+
+// The samples by id, each decoded once: the same SFX (gunshots, footsteps,
+// door hums…) fires over and over, and decodeAudioData is async and costs
+// real time, so every play after the first reuses the AudioBuffer.
+const samples = new Map();       // id -> { bytes, buffer, waiting: [cb] }
+function onSample(id, bytes) { samples.set(id, { bytes, buffer: null, waiting: null }); }
+// Decode sample `id` (once), then cb(buffer).
+function withBuffer(id, cb) {
+  const s = samples.get(id);
+  if (!s || !audioCtx) return;
+  if (s.buffer) { cb(s.buffer); return; }
+  if (s.waiting) { s.waiting.push(cb); return; }
+  s.waiting = [cb];
+  audioCtx.decodeAudioData(s.bytes.slice().buffer).then(buf => {
+    s.buffer = buf;
+    const w = s.waiting; s.waiting = null;
+    for (const f of w) f(buf);
+  }).catch(() => { s.waiting = null; });
+}
+// Playing one-shot sources keyed by their (entity, channel) pair —
+// SND_PickChannel's override key (snd_dma.c:354-390). A NEW sound on the same
+// entity + non-zero channel STOPS the source it replaces ("always override
+// sound from same entity"; channel 0 = CHAN_AUTO never overrides and is never
+// keyed), and an svc_stopsound (S_StopSound) stops the keyed source.
+const playingByKey = new Map();
+// Evidence/debug counters (read by the verify scripts; no UI).
+window.__sndStats = { plays: 0, stops: 0 };
+
+function registerSource(src, ent, chan) {
+  if (typeof ent !== 'number' || !(chan > 0)) return; // channel 0 never keyed
+  const key = ent + ':' + chan;
+  const prev = playingByKey.get(key);
+  if (prev) { try { prev.stop(); } catch (e) {} window.__sndStats.stops++; }
+  playingByKey.set(key, src);
+  src.onended = () => { if (playingByKey.get(key) === src) playingByKey.delete(key); };
 }
 
-// --- Render resolution persistence ----------------------------------------
-// The engine boots at its own default and clamps any request to its envelope
-// (320..1280 x 200..800). In-game, Options > Video Options sets it (WinQuake's
-// M_Video mode list) and it sticks within a session (boots/New Game preserve
-// it); here we ALSO persist the choice to localStorage so it survives a page
-// reload. Saved as a
-// "WxH" string; restored over the boot default on load.
-const RES_KEY = 'quake-rs.resolution';
-function saveResolution(w, h) {
-  try { localStorage.setItem(RES_KEY, w + 'x' + h); } catch (e) { /* private mode / blocked: ignore */ }
-}
-function restoreResolution() {
-  if (!exp || typeof exp.set_resolution !== 'function') return;
-  let saved = null;
-  try { saved = localStorage.getItem(RES_KEY); } catch (e) { return; }
-  const m = saved && /^(\d+)x(\d+)$/.exec(saved);
-  if (!m) return;
-  const w = parseInt(m[1], 10), h = parseInt(m[2], 10);
-  // Hand the raw size to the engine; it clamps to its supported envelope and
-  // syncs the Options label, so a stale/out-of-range value can never break boot.
-  if (w > 0 && h > 0) exp.set_resolution(w, h);
+// A one-shot: routed through its side gains, keyed for override, and — like
+// every channel in S_Update — re-spatialized each frame from its origin.
+function playBuffer(buf, p) {
+  if (p.ls >= 0) { playDynLoop(buf, p); return; }
+  const s = audioCtx.createBufferSource();
+  s.buffer = buf;
+  const nodes = playRouted(s, spatialize(p));
+  registerSource(s, p.ent, p.chan);
+  if (nodes) {
+    const l = { src: s, lg: nodes.lg, rg: nodes.rg, lp: p };
+    dynShots.push(l);
+    const keyed = s.onended;
+    s.onended = () => { dynShots = dynShots.filter(x => x !== l); if (keyed) keyed(); };
+  }
+  s.start();
+  window.__sndStats.plays++;
 }
 
-// --- Screen size + Web extras persistence ------------------------------------
-// Two more settings survive a reload the same way: `viewsize` (Options >
-// Screen size, `-`/`=`, the console — id's config.cfg archives it) and the
-// Web extras (Options > Web extras / the wasm_* commands: the port's opt-in
-// departures from id's Quake, all off by default), stored as the engine's
-// extras() bits. Restored after boot; saved when a frame shows them changed.
-// Feature-checked, so an older wasm without the exports just skips them.
-const VIEWSIZE_KEY = 'quake-rs.viewsize';
-const EXTRAS_KEY = 'quake-rs.extras';
-let savedViewsize = null, savedExtras = null;
-function storeGet(key) {
-  try { return localStorage.getItem(key); } catch (e) { return null; }
+// A one-shot whose sample has a `cue ` loop point loops, as SND_PaintChannels
+// does, until a later sound on its (entity, channel) overrides it (door, lift
+// and train hums until their stop sound) or all sounds stop (level change).
+let dynLoops = [];       // {src, lg, rg, lp}
+// Playing one-shots with their spatial params (playBuffer), re-spatialized
+// every frame like the loops.
+let dynShots = [];       // {src, lg, rg, lp}
+function stereoGains(src) {
+  const lg = audioCtx.createGain(); lg.gain.value = 0;
+  const rg = audioCtx.createGain(); rg.gain.value = 0;
+  if (typeof audioCtx.createChannelMerger === 'function') {
+    const m = audioCtx.createChannelMerger(2);
+    src.connect(lg); lg.connect(m, 0, 0);
+    src.connect(rg); rg.connect(m, 0, 1);
+    m.connect(audioCtx.destination);
+  } else {
+    src.connect(lg); lg.connect(audioCtx.destination); // mono fallback
+  }
+  return { lg, rg };
 }
-function storeSet(key, value) {
-  try { localStorage.setItem(key, String(value)); } catch (e) { /* private mode / blocked */ }
+function playDynLoop(buf, p) {
+  const src = makeLoopSource(buf, p.ls, p.le);
+  const l = { src, ...stereoGains(src), lp: p };
+  dynLoops.push(l);
+  spatializeLoop(l);
+  registerSource(src, p.ent, p.chan);
+  const keyed = src.onended;
+  src.onended = () => { dynLoops = dynLoops.filter(x => x !== l); if (keyed) keyed(); };
+  src.start();
+  window.__sndStats.plays++;
+  window.__sndStats.loops = (window.__sndStats.loops || 0) + 1;
 }
-function restorePrefs() {
-  if (!exp) return;
-  const vs = storeGet(VIEWSIZE_KEY);
-  if (vs !== null && /^\d+(\.\d+)?$/.test(vs) && typeof exp.set_viewsize === 'function') {
-    exp.set_viewsize(parseFloat(vs));       // the engine bounds it to 30..120
-  }
-  const ex = storeGet(EXTRAS_KEY);
-  if (ex !== null && /^\d+$/.test(ex) && typeof exp.set_extras === 'function') {
-    exp.set_extras(parseInt(ex, 10));       // unknown bits are ignored
-  }
-  savedViewsize = typeof exp.viewsize === 'function' ? exp.viewsize() : null;
-  savedExtras = typeof exp.extras === 'function' ? exp.extras() : null;
-}
-function syncPrefs() {
-  if (typeof exp.viewsize === 'function') {
-    const v = exp.viewsize();
-    if (v !== savedViewsize) { savedViewsize = v; storeSet(VIEWSIZE_KEY, v); }
-  }
-  if (typeof exp.extras === 'function') {
-    const x = exp.extras();
-    if (x !== savedExtras) { savedExtras = x; storeSet(EXTRAS_KEY, x); }
-  }
+function spatializeLoop(l) {
+  const [lv, rv] = sideGains(spatialize(l.lp), masterVolume());
+  l.lg.gain.value = lv;
+  l.rg.gain.value = rv;
 }
 
-// --- Savegame persistence (page-owned localStorage) -------------------------
-// The engine's console `save <name>` / `load <name>` commands speak .sav TEXT
-// (WinQuake's Host_Savegame_f format) through the wasm exports; the PAGE owns
-// where it persists. Each save lives under its own key
-// ('quake-rs.sav.' + filename, e.g. 'quake-rs.sav.fred.sav'); a mid-game save
-// is ~110 KB (measured on e1m2), so even 12 menu slots ≈ 1.3 MB of text
-// (≈2.7 MB as localStorage's UTF-16) — comfortably inside the ~5 MB quota.
-// All exports are feature-checked so the page still works with an older wasm.
-const SAVE_PREFIX = 'quake-rs.sav.';
-const savDecoder = new TextDecoder();
-const savEncoder = new TextEncoder();
+// SND_PickChannel's override without a new source: stop what plays on the key.
+function stopKey(ent, chan) {
+  if (!(chan > 0)) return;
+  const key = ent + ':' + chan;
+  const prev = playingByKey.get(key);
+  if (prev) {
+    try { prev.stop(); } catch (e) {}
+    playingByKey.delete(key);
+    window.__sndStats.stops++;
+  }
+}
+// Latest sound issued per (entity, channel): an async first decode starts its
+// source only if no newer sound took the key meanwhile (else the stop sound of
+// a short door travel could land before the hum and leave it looping).
+const keySeq = new Map();
 
-// Persist every save the engine queued this frame. poll_save() pops one into
-// linear memory and returns its text length (0 = none); a localStorage failure
-// (quota/private mode) is reported back so the console shows an error.
-// MERGE SEAM (Load/Save menu <- localStorage): the menu's 12 slot listings
-// mirror localStorage. For each console-slot key s0..s11, hand the stored
-// .sav text to the engine (sav_alloc scratch) and let menu_set_save_comment
-// extract + assign the comment; absent/blocked slots are marked unused with
-// an empty buffer. This is M_ScanSaves: it runs at boot, after every
-// persisted save, and whenever the menu opens Load or Save
-// (scanSavesOnMenuEntry: M_Menu_Load_f / M_Menu_Save_f rescan each time).
-function refreshSaveComments() {
-  if (!exp || typeof exp.menu_set_save_comment !== 'function'
-           || typeof exp.sav_alloc !== 'function') return;
-  for (let i = 0; i < 12; i++) {
-    let text = null;
-    try { text = localStorage.getItem(SAVE_PREFIX + 's' + i + '.sav'); } catch (e) {}
-    if (text !== null) {
-      const bytes = savEncoder.encode(text);
-      const ptr = exp.sav_alloc(bytes.length);
-      if (ptr) {
-        new Uint8Array(exp.memory.buffer, ptr, bytes.length).set(bytes);
-        exp.menu_set_save_comment(i);
-        continue;
+// A one-shot from the program (SOUND): p = {id, ox, oy, oz, vol, atten, ent,
+// chan, view, ls, le}; ls < 0 for a sample without a loop point.
+function onSound(p) {
+  if (!audioRunning()) return;
+  const kkey = p.ent + ':' + p.chan;
+  const seq = (keySeq.get(kkey) || 0) + 1;
+  if (p.chan > 0) keySeq.set(kkey, seq);
+  // S_StartSound picks (and so overrides) the channel before it tests
+  // audibility: an inaudible sound still ends its key's sound, then drops.
+  // That is the one playing (stopKey) or one whose first decode is still
+  // pending: the keySeq bump above stops that from starting after it (a
+  // door hum would otherwise start after its own stop sound, and loop).
+  if (spatialize(p).gain <= 0.02) { stopKey(p.ent, p.chan); return; }
+  const gen = loopGen;
+  withBuffer(p.id, buf => {
+    // Unless the key was overridden or the level changed while decoding.
+    if (p.chan > 0 && keySeq.get(kkey) !== seq) return;
+    if (loopGen !== gen) return;
+    playBuffer(buf, p);
+  });
+}
+
+// The menu's local sounds (menu.c S_LocalSound: misc/menu1.wav on cursor
+// moves, menu2 on enter/select, menu3 on slider adjusts) and `play`'s:
+// S_LocalSound is a view-entity sound — full volume, centred, no distance
+// falloff (snd_dma.c) — so each plays at gain 1 / pan 0, which the master
+// volume still scales. window.__menuSounds counts them (verification).
+window.__menuSounds = 0;
+function onLocalSound(id) {
+  if (!audioRunning()) return;
+  window.__menuSounds++;
+  withBuffer(id, buf => {
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    playRouted(src, { gain: 1, pan: 0 });
+    src.start();
+  });
+}
+
+// SND_Spatialize's per-side volumes, then the master volume: leftvol =
+// vol*(1-dot), rightvol = vol*(1+dot) (distance-attenuated), each clamped at
+// 255 — full — by the mixer (snd_mix.c SND_PaintChannelFrom8/16) BEFORE
+// S_TransferPaintBuffer scales the mix by `volume`. So a near source panned
+// hard reaches full volume times the master on its side, never more (clamping
+// after the master made it up to 1/volume louder: 1.43x at the default 0.7).
+function sideGains(sp, master) {
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  return [clamp01(sp.gain * (1 - sp.pan)) * master, clamp01(sp.gain * (1 + sp.pan)) * master];
+}
+
+// Wire a decoded BufferSource to the destination through Quake's
+// SND_Spatialize pan law (snd_dma.c): LINEAR left/right volumes (sideGains) —
+// so the near side reaches FULL gain (not the equal-power -3 dB centre a
+// StereoPanner gives). The mono source feeds two gains into a stereo merger,
+// which are returned ({lg, rg}) for the per-frame re-spatialization.
+function playRouted(src, sp) {
+  const master = masterVolume();
+  if (typeof audioCtx.createChannelMerger === 'function') {
+    const [lv, rv] = sideGains(sp, master);
+    const nodes = stereoGains(src);
+    nodes.lg.gain.value = lv;
+    nodes.rg.gain.value = rv;
+    return nodes;
+  }
+  // No channel merger available: fall back to a centred mono gain.
+  const g = audioCtx.createGain();
+  g.gain.value = Math.min(1, sp.gain) * master;
+  src.connect(g);
+  g.connect(audioCtx.destination);
+  return null;
+}
+
+// --- Looping ambient audio --------------------------------------------------
+// Two kinds of persistent loops, both engine-driven:
+//  * PLACED static sounds (QuakeC ambientsound(): torch crackle, machine hum) —
+//    each gets a looping source whose L/R gains are recomputed EVERY frame
+//    from the live listener pose through the same spatialGain law the
+//    one-shots use (SND_Spatialize runs every frame on static channels in
+//    the C).
+//  * The 2 automatic LEAF ambients (water wash / sky wind) — the engine ramps
+//    their volumes from the view leaf's ambient_level bytes
+//    (S_UpdateAmbientSounds); each frame's level goes into a centred gain
+//    node (the C sets leftvol = rightvol, no pan).
+// A GENERATION (every level/mode change) stops and drops every loop and
+// every playing sound; the new level's STATIC_SOUND/AMBIENT records rebuild
+// the loops. The level's loops are remembered, so audio that starts later
+// (the first gesture) still gets them.
+let staticLoops = [];    // {src, lg, rg, p}
+let ambientLoops = [];   // {src, g, ch}
+let loopGen = null;      // the current generation
+let levelLoops = { statics: [], ambients: [] };   // this generation's, started or not
+
+function stopAllLoops() {
+  for (const l of staticLoops)  { try { l.src.stop(); } catch (e) {} }
+  for (const l of ambientLoops) { try { l.src.stop(); } catch (e) {} }
+  staticLoops = []; ambientLoops = [];
+  // S_StopAllSounds stops the dynamic channels too: every one-shot and every
+  // looping one (a door hum must not carry into the next level).
+  for (const s of playingByKey.values()) { try { s.stop(); } catch (e) {} }
+  for (const l of dynLoops) { try { l.src.stop(); } catch (e) {} }
+  for (const l of dynShots) { try { l.src.stop(); } catch (e) {} }
+  playingByKey.clear(); dynLoops = []; dynShots = []; keySeq.clear();
+}
+function onGeneration(g) {
+  stopAllLoops();
+  loopGen = g;
+  levelLoops = { statics: [], ambients: [] };
+}
+
+// A looping source restarting at the WAV's cue-chunk loop window (seconds,
+// engine-parsed — sample-rate independent, so decodeAudioData resampling is
+// harmless). loopEnd 0 / past-the-end = loop to the buffer's end.
+function makeLoopSource(buf, ls, le) {
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.loop = true;
+  if (ls > 0) src.loopStart = ls;
+  if (le > 0 && le < buf.duration) src.loopEnd = le;
+  return src;
+}
+
+function onStaticSound(p) {
+  levelLoops.statics.push(p);
+  if (audioRunning()) startStatic(p);
+}
+function onAmbient(a) {
+  levelLoops.ambients.push(a);
+  if (audioRunning()) startAmbient(a);
+}
+// Audio just started: this level's loops that arrived before it could.
+// (Each starts once: a record may also have found audio already running
+// before the page noticed the flip.)
+function startLevelLoops() {
+  for (const p of levelLoops.statics) startStatic(p);
+  for (const a of levelLoops.ambients) startAmbient(a);
+}
+// Decode is async: a loop only starts if its level is still current.
+function startStatic(p) {
+  if (p.started) return;
+  p.started = true;
+  const myGen = loopGen;
+  withBuffer(p.id, buf => {
+    if (loopGen !== myGen) return;
+    const src = makeLoopSource(buf, p.ls, p.le);
+    const l = { src, ...stereoGains(src), lp: p };
+    spatializeLoop(l);
+    staticLoops.push(l);
+    src.start();
+  });
+}
+// An ambient channel's loop runs at gain 0 until the view leaf says otherwise.
+function startAmbient(a) {
+  if (a.started) return;
+  a.started = true;
+  const myGen = loopGen;
+  withBuffer(a.id, buf => {
+    if (loopGen !== myGen) return;
+    const src = makeLoopSource(buf, a.ls, a.le);
+    const g = audioCtx.createGain(); g.gain.value = 0;
+    src.connect(g); g.connect(audioCtx.destination);   // centred, no pan
+    ambientLoops.push({ src, g, ch: a.ch });
+    src.start();
+  });
+}
+
+// S_Update: every channel re-spatialized from this frame's listener.
+function onListener(v) {
+  listener.x = v[0]; listener.y = v[1]; listener.z = v[2];
+  listener.fx = v[3]; listener.fy = v[4]; listener.fz = v[5];
+  listener.rx = v[6]; listener.ry = v[7]; listener.rz = v[8];
+  listener.ambient = v.slice(9, 13);
+  listener.volume = v[13];
+  if (!audioRunning()) return;
+  const master = masterVolume();
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  for (const l of staticLoops) spatializeLoop(l);
+  // Looping one-shots (door/lift/train hums) and the playing one-shots.
+  for (const l of dynLoops) spatializeLoop(l);
+  for (const l of dynShots) spatializeLoop(l);
+  // Leaf ambients: engine-ramped volume, both channels equal.
+  for (const l of ambientLoops) l.g.gain.value = clamp01(listener.ambient[l.ch] * master);
+}
+
+// ===========================================================================
+// Storage: the program's files (the saves, config.cfg), kept in IndexedDB
+// ===========================================================================
+// The program writes its files through std::fs into the worker's file
+// system, which hands each written file here; they come back into the
+// worker's file system at the next start. The pak is not kept: it comes
+// from the server (and the HTTP cache) each start.
+const storage = {
+  db: null,
+  fallback: false,               // no IndexedDB: localStorage, text only
+  open() {
+    return new Promise(resolve => {
+      let req;
+      try { req = indexedDB.open('quake-rs', 1); } catch (e) { this.fallback = true; resolve(); return; }
+      req.onupgradeneeded = () => req.result.createObjectStore('files');
+      req.onsuccess = () => { this.db = req.result; resolve(); };
+      req.onerror = () => { this.fallback = true; resolve(); };
+    });
+  },
+  // Every kept file, as [path, Uint8Array] pairs.
+  async all() {
+    if (this.fallback) {
+      const out = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k.startsWith(FILE_PREFIX)) out.push([k.slice(FILE_PREFIX.length), new TextEncoder().encode(localStorage.getItem(k))]);
       }
+      return out;
     }
-    exp.sav_alloc(0);              // empty scratch = unused slot
-    exp.menu_set_save_comment(i);
-  }
-}
-
-// M_Menu_Load_f / M_Menu_Save_f call M_ScanSaves every time the screen opens.
-// The page sees the menu's screen through menu_visible/menu_screen_id and
-// rescans when it enters Load (2) or Save (3), before the frame that draws it.
-let lastMenuScreen = -1;
-function scanSavesOnMenuEntry() {
-  if (!exp || typeof exp.menu_screen_id !== 'function'
-           || typeof exp.menu_visible !== 'function') return;
-  const sid = exp.menu_visible() ? exp.menu_screen_id() : -1;
-  if ((sid === 2 || sid === 3) && sid !== lastMenuScreen) refreshSaveComments();
-  lastMenuScreen = sid;
-}
-
-function drainSaves() {
-  if (!exp || typeof exp.poll_save !== 'function') return;
-  for (let guard = 0; guard < 4; guard++) {
-    const len = exp.poll_save();
-    if (len <= 0) break;
-    const name = savDecoder.decode(
-      new Uint8Array(exp.memory.buffer, exp.save_name_ptr(), exp.save_name_len()));
-    const text = savDecoder.decode(
-      new Uint8Array(exp.memory.buffer, exp.save_text_ptr(), len));
-    try {
-      localStorage.setItem(SAVE_PREFIX + name, text);
-      refreshSaveComments();   // the Load/Save menu listings mirror storage
-    } catch (e) {
-      if (typeof exp.save_store_failed === 'function') exp.save_store_failed();
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction('files'), st = tx.objectStore('files');
+      const keys = st.getAllKeys(), vals = st.getAll();
+      tx.oncomplete = () => resolve(keys.result.map((k, i) => [k, new Uint8Array(vals.result[i])]));
+      tx.onerror = () => reject(tx.error);
+    });
+  },
+  put(path, data) {
+    if (this.fallback) {
+      try { localStorage.setItem(FILE_PREFIX + path, new TextDecoder().decode(data)); }
+      catch (e) { return Promise.reject(e); }
+      return Promise.resolve();
     }
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction('files', 'readwrite');
+      tx.objectStore('files').put(data, path);
+      tx.oncomplete = () => resolve();
+      tx.onerror = tx.onabort = () => reject(tx.error);
+    });
+  },
+  remove(path) {
+    if (this.fallback) { try { localStorage.removeItem(FILE_PREFIX + path); } catch (e) {} return Promise.resolve(); }
+    return new Promise(resolve => {
+      const tx = this.db.transaction('files', 'readwrite');
+      tx.objectStore('files').delete(path);
+      tx.oncomplete = tx.onerror = () => resolve();
+    });
+  },
+  // A file the program wrote or removed (wasi.js's 'fs' message).
+  apply(m) {
+    const done = m.op === 'write' ? this.put(m.path, m.data) : this.remove(m.path);
+    done.catch(e => {
+      // The C's "ERROR: couldn't open." came at the write; this failure
+      // comes after it, so it goes to the console on its own.
+      console.error('storage', e);
+      callLine('exec echo ERROR: couldn\'t keep ' + m.path + ' (storage full?)');
+    });
+  },
+};
+const FILE_PREFIX = 'quake-rs.file.';
+
+// The page kept its saves and three settings in localStorage before the
+// program had files (`quake-rs.sav.<name>`, `quake-rs.resolution`,
+// `quake-rs.viewsize`, `quake-rs.extras`): move them into the game
+// directory once — the saves as id1/<name>, the settings as the
+// config.cfg lines the program would have written — then drop the keys.
+async function migrateLocalStorage(have) {
+  const get = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const moved = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k.startsWith('quake-rs.sav.')) continue;
+      const path = 'id1/' + k.slice('quake-rs.sav.'.length);
+      if (!have.has(path) && !path.includes('..')) {
+        const data = new TextEncoder().encode(localStorage.getItem(k));
+        await storage.put(path, data);
+        have.set(path, data);
+      }
+      moved.push(k);
+    }
+  } catch (e) { return; }   // storage blocked: nothing to move
+  const res = get('quake-rs.resolution'), vs = get('quake-rs.viewsize'), ex = get('quake-rs.extras');
+  if (res !== null || vs !== null || ex !== null) {
+    if (!have.has('id1/config.cfg')) {
+      let cfg = '// generated by quake, do not modify\n';
+      if (res && /^\d+x\d+$/.test(res)) cfg += `_vid_resolution ${res}\n`;
+      if (vs && /^\d+(\.\d+)?$/.test(vs)) cfg += `viewsize ${vs}\n`;
+      if (ex && /^\d+$/.test(ex)) {
+        const bits = parseInt(ex, 10);
+        ['wasm_uncapped', 'wasm_showfps', 'wasm_exactpersp', 'wasm_scaled2d']
+          .forEach((name, i) => { cfg += `${name} ${bits >> i & 1}\n`; });
+      }
+      const data = new TextEncoder().encode(cfg);
+      await storage.put('id1/config.cfg', data);
+      have.set('id1/config.cfg', data);
+    }
+    moved.push('quake-rs.resolution', 'quake-rs.viewsize', 'quake-rs.extras');
   }
+  for (const k of moved) { try { localStorage.removeItem(k); } catch (e) {} }
 }
 
-// Hand a stored .sav back to the engine when it asks: write the text into the
-// wasm scratch (sav_alloc) and call load_game(); a missing key reports the C's
-// fopen failure via load_failed().
-function serviceLoadRequest() {
-  if (!exp || typeof exp.poll_load_request !== 'function') return;
-  const nameLen = exp.poll_load_request();
-  if (nameLen <= 0) return;
-  const name = savDecoder.decode(
-    new Uint8Array(exp.memory.buffer, exp.load_request_ptr(), nameLen));
-  let text = null;
-  try { text = localStorage.getItem(SAVE_PREFIX + name); } catch (e) { /* blocked */ }
-  if (text === null) { exp.load_failed(); return; }
-  const bytes = savEncoder.encode(text);
-  // sav_alloc fails closed (NULL) on a hostile length — a stored value far
-  // larger than any save the engine writes. Honour the rejection: copying
-  // bytes anyway would write through a pointer the engine never allocated.
-  const ptr = exp.sav_alloc(bytes.length);
-  if (!ptr) { exp.load_failed(); return; }
-  new Uint8Array(exp.memory.buffer, ptr, bytes.length).set(bytes);
-  exp.load_game();
-}
-
-// --- Loading ---------------------------------------------------------------
-// The .wasm embeds the shareware pak, so it's a ~19 MB download: stream it and
-// show real progress instead of a silent stall. Content-Length (when the server
-// sends it) drives a determinate bar; without it the bar goes indeterminate and
-// the MB counter still ticks. The boot panel and #status always agree.
+// ===========================================================================
+// Loading
+// ===========================================================================
+// The engine (quake.wasm, ~1 MB) and id's shareware pak (id1/pak0.pak,
+// 18.7 MB) download together: one progress bar for both. Content-Length
+// (when the server sends it) drives a determinate bar; without it the bar
+// goes indeterminate and the MB counter still ticks.
 const MB = (n) => (n / 1048576).toFixed(1);
 function setStatus(text) {
   statusEl.textContent = text;
@@ -1315,239 +1280,308 @@ function setProgress(received, total) {
   if (total > 0) {
     bootFill.classList.remove('indet');
     bootFill.style.width = Math.min(100, received / total * 100) + '%';
-    setStatus(`downloading engine… ${MB(received)} / ${MB(total)} MB`);
+    setStatus(`downloading… ${MB(received)} / ${MB(total)} MB`);
   } else {
     bootFill.classList.add('indet');   // size unknown: sweeping bar
-    setStatus(`downloading engine… ${MB(received)} MB`);
+    setStatus(`downloading… ${MB(received)} MB`);
   }
 }
-function downloadDone(bytes) {
-  bootFill.classList.remove('indet');
-  bootFill.style.width = '100%';
-  setStatus('instantiating ' + (bytes / 1048576 | 0) + ' MB WebAssembly…');
-}
-
-// Fetch and instantiate the engine. Streaming path: the body flows through a
-// byte-counting pass-through (the progress bar) straight into
-// instantiateStreaming, so the browser compiles the code section while the
-// pak-sized data section is still arriving and no JS copy of the 19 MB is
-// ever assembled. The counted stream is re-wrapped as an application/wasm
-// Response, so a server that labels .wasm with another MIME type (which
-// instantiateStreaming rejects) still works. Browsers without
-// instantiateStreaming / TransformStream take the buffered path.
-async function loadEngine() {
-  const resp = await fetch('quake_wasm.wasm');
-  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching quake_wasm.wasm');
+// Fetch several files with one progress bar; resolves to their bytes.
+async function download(urls) {
+  const resps = await Promise.all(urls.map(u => fetch(u)));
+  resps.forEach((r, i) => { if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + urls[i]); });
   // A compressed body's Content-Length is the compressed size, but the stream
   // yields decompressed bytes: no usable total, so show the MB counter only.
-  let total = resp.headers.get('Content-Encoding') ? 0
-    : parseInt(resp.headers.get('Content-Length') || '0', 10) || 0;
-  let received = 0;
-  const count = (n) => {
-    received += n;
-    // A compressing server reports the COMPRESSED size in Content-Length while
-    // the stream yields decompressed bytes — if the counter passes the claimed
-    // total, the total was a lie: fall back to the indeterminate display.
-    if (total > 0 && received > total) total = 0;
-    setProgress(received, total);
-  };
-  if (resp.body && typeof TransformStream === 'function'
-      && typeof WebAssembly.instantiateStreaming === 'function') {
-    const counted = resp.body.pipeThrough(new TransformStream({
-      transform(chunk, ctl) { count(chunk.byteLength); ctl.enqueue(chunk); },
-      flush() { downloadDone(received); },
-    }));
-    const wasm = new Response(counted, { headers: { 'Content-Type': 'application/wasm' } });
-    return (await WebAssembly.instantiateStreaming(wasm, {})).instance;
+  let total = 0;
+  for (const r of resps) {
+    const n = r.headers.get('Content-Encoding') ? 0 : parseInt(r.headers.get('Content-Length') || '0', 10);
+    total = n > 0 && total >= 0 ? total + n : -1;
   }
-  // Buffered fallback: read the body chunk by chunk (or in one go when it
-  // isn't streamable), then instantiate the assembled bytes.
-  let bytes;
-  if (resp.body && resp.body.getReader) {
-    const reader = resp.body.getReader();
-    const chunks = [];
+  total = Math.max(total, 0);
+  let received = 0;
+  return Promise.all(resps.map(async r => {
+    if (!r.body || !r.body.getReader) return new Uint8Array(await r.arrayBuffer());
+    const reader = r.body.getReader(), chunks = [];
+    let n = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      chunks.push(value);
-      count(value.byteLength);
+      chunks.push(value); n += value.byteLength; received += value.byteLength;
+      if (total > 0 && received > total) total = 0;   // the length was the compressed one
+      setProgress(received, total);
     }
-    bytes = new Uint8Array(received);
+    const bytes = new Uint8Array(n);
     let off = 0;
     for (const c of chunks) { bytes.set(c, off); off += c.byteLength; }
-  } else {
-    bytes = new Uint8Array(await resp.arrayBuffer());
-  }
-  downloadDone(bytes.byteLength);
-  await new Promise(r => setTimeout(r, 30));   // let the full bar paint before the compile
-  return (await WebAssembly.instantiate(bytes, {})).instance;
+    return bytes;
+  }));
 }
 
 async function main() {
-  const instance = await loadEngine();
-  exp = instance.exports;
+  // SharedArrayBuffer needs a cross-origin isolated page: the server must
+  // send COOP/COEP (web/PLATFORM.md, "Serving").
+  if (!self.crossOriginIsolated || typeof SharedArrayBuffer !== 'function') {
+    throw new Error('this page needs cross-origin isolation — serve it with the headers '
+      + '"Cross-Origin-Opener-Policy: same-origin" and "Cross-Origin-Embedder-Policy: require-corp"');
+  }
+  quake.startedAt = performance.now();
+  const [[wasm, pak], files] = await Promise.all([
+    download(['quake.wasm', 'id1/pak0.pak']),
+    (async () => {
+      await storage.open();
+      const have = new Map(await storage.all().catch(() => []));
+      await migrateLocalStorage(have);
+      return have;
+    })(),
+  ]);
+  quake.downloadedAt = performance.now();
+  bootFill.classList.remove('indet');
+  bootFill.style.width = '100%';
+  setStatus('starting the engine…');
 
-  setStatus('booting: parsing pak0.pak, loading the attract demo…');
-  await new Promise(r => setTimeout(r, 30));
-  // Quake boots into the ATTRACT loop: quake.rc's demos, a key for the menu.
-  // boot_attract starts the attract demos with no menu; if the demo can't be
-  // built it falls back to boot() (menu over e1m1), so this is always non-zero
-  // when the pak loaded. The walk/demo buttons below still call boot()/boot_demo().
-  if (!exp.boot_attract()) { setStatus('boot_attract() failed'); return; }
-  // Restore a previously-chosen resolution (if any) over the boot default, BEFORE
-  // the first canvas sync so it's created at the right backing-store size.
-  restoreResolution();
-  // ...and the saved Screen size + Web extras (the engine clamps both).
-  restorePrefs();
-  // The Load/Save slot listings from localStorage (M_ScanSaves).
-  refreshSaveComments();
+  const shared = new SharedArrayBuffer(CTL_BYTES + RING_BYTES);
+  ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
+  ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
+  Atomics.store(ctl, C.LATEST, -1);
+  Atomics.store(ctl, C.READING, -1);
+  worker = new Worker('wasi.js');
+  worker.onmessage = onWorkerMessage;
+  worker.onerror = (e) => { setStatus('error: ' + e.message); };
+  const fileList = [['id1/pak0.pak', pak], ...files];
+  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, files: fileList },
+                     [wasm.buffer, pak.buffer]);
 
+  // Up when the program's startup (quake.rc: config.cfg, the attract demos)
+  // ends in its first Sync.
+  await new Promise((resolve, reject) => {
+    const wait = () => {
+      const run = Atomics.load(ctl, C.RUN);
+      if (run > 1) reject(new Error('the engine stopped while starting'));
+      else if (Atomics.load(ctl, C.SYNCS) > 0) resolve();
+      else setTimeout(wait, 5);
+    };
+    wait();
+  });
+  quake.readyAt = performance.now();
+  // `exp.name(args)` is `quake.call('name', args)`: the old module's exports
+  // by name, now answered a turn later (a Promise).
+  exp = new Proxy({}, { get: (_, name) => typeof name === 'string' && name !== 'then'
+    ? (...args) => call(name, ...args) : undefined });
+
+  startPresenting();
+  // Ready: swap the overlay's boot panel for the click-to-play prompt — the
+  // page's ONE scrim appearance, retired forever by the first gesture.
+  bootEl.classList.add('hidden');
+  playEl.classList.remove('hidden');
+  readyToPlay = true;
+  quake.ready = true;
+  statusEl.textContent = 'ready — click to play';
+}
+
+// ===========================================================================
+// Presentation: a tick per display refresh, the program's frame in the
+// same refresh
+// ===========================================================================
+let ctx = null, W = 0, H = 0, frameImg = null;
+// The canvas box, snapped. The CSS rule gives the largest 4:3 box the
+// window fits; with image-rendering:pixelated a box a little wider than the
+// framebuffer (976 px for 960 columns at 1440x900) doubles one column in
+// ~60, which bands the menu's checkerboard fade and the 1:1 text, and a
+// box narrower than it drops whole columns out of that text. So, in device
+// pixels per framebuffer column (s):
+//   - s at or up to 1/6 past a whole number k: the box is exactly k columns
+//     per framebuffer column (every column k pixels wide; the picture
+//     gives up at most a seventh of its width for it — at 1440x900 the
+//     window fits 1088 for 960 columns, which would double one in 7);
+//   - s below 1 (a window narrower than the framebuffer): the natural box,
+//     smoothed (image-rendering:auto) — no column is dropped, the text is
+//     a little soft;
+//   - otherwise (1.38 at 1920x1080): the natural box, pixelated.
+// Rows are another matter: the 16:10 framebuffer is shown at 4:3, 1.2 rows
+// per column's worth (a 1996 monitor's stretch), so every fifth row is one
+// pixel taller whatever the box.
+const SNAP = 1 / 6;
+function fitCanvas() {
+  if (!W) return;
+  canvas.style.width = canvas.style.height = canvas.style.imageRendering = '';
+  const natural = parseFloat(getComputedStyle(canvas).width);
+  const dpr = window.devicePixelRatio || 1;
+  const s = natural * dpr / W;
+  if (!(s > 0)) return;
+  let width = natural;
+  if (s >= 1 && s - Math.floor(s) <= SNAP * Math.floor(s)) width = Math.floor(s) * W / dpr;
+  else if (s < 1) canvas.style.imageRendering = 'auto';
+  canvas.style.width = width + 'px';
+  canvas.style.height = width * 3 / 4 + 'px';
+}
+addEventListener('resize', fitCanvas);
+document.addEventListener('fullscreenchange', fitCanvas);
+
+// The newest complete frame into the canvas, if there is one the page has
+// not shown. The slot is claimed first (READING), so the program writes its
+// next frames into the other two (triple buffering). Nothing is shown while
+// the worker's newest set of slots has not reached the page yet (the first
+// frame, a larger resolution). Returns timings for the benchmark: the copy
+// out of shared memory, and putImageData.
+let framesShown = 0;
+function present() {
+  const n = Atomics.load(ctl, C.FRAMES);
+  if (n === framesShown || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) return null;
+  let s;
+  do { s = Atomics.load(ctl, C.LATEST); Atomics.store(ctl, C.READING, s); } while (Atomics.load(ctl, C.LATEST) !== s);
+  if (s < 0 || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) { Atomics.store(ctl, C.READING, -1); return null; }
+  framesShown = Atomics.load(ctl, C.FRAMES);
+  Atomics.store(ctl, C.SHOWN, framesShown);
+  if (!quake.firstFrameAt) quake.firstFrameAt = performance.now();
+  const w = Atomics.load(ctl, C.SLOT_W + s), h = Atomics.load(ctl, C.SLOT_H + s);
+  if (w !== W || h !== H) {
+    // The render resolution changed (boot, a Video Options mode): the
+    // backing store follows; the CSS box does not, so a larger framebuffer
+    // just gives a crisper pixel-upscale.
+    W = w; H = h;
+    canvas.width = W; canvas.height = H;
+    frameImg = new ImageData(W, H);
+    fitCanvas();
+  }
+  const t0 = performance.now();
+  // putImageData takes no shared memory: one copy out of the slot.
+  frameImg.data.set(new Uint8Array(frameSlots, s * slotBytes, W * H * 4));
+  Atomics.store(ctl, C.READING, -1);
+  const t1 = performance.now();
+  ctx.putImageData(frameImg, 0, 0);
+  const t2 = performance.now();
+  return { copy: t1 - t0, put: t2 - t1 };
+}
+
+// Wait for the program's answer to tick `seq` — a spin, since the main
+// thread may not block — for at most `ms`. True when it came.
+const pause = typeof Atomics.pause === 'function' ? () => Atomics.pause() : () => {};
+function waitAck(seq, ms) {
+  const until = performance.now() + ms;
+  while (((Atomics.load(ctl, C.ACK) - seq) | 0) < 0) {
+    if (Atomics.load(ctl, C.RUN) > 1 || performance.now() > until) return false;
+    pause();
+  }
+  return true;
+}
+
+// Input-to-present latency, measured when window.quake.latency is set: the
+// time from each key or mouse event to the present of the first frame
+// that consumed it.
+let inputTimes = [], inFlightTimes = [];
+function noteInput() { if (quake.latency) inputTimes.push(performance.now()); }
+
+let tickSeq = 0, lastTick = null, pendingTick = 0;
+// The longest a refresh waits for its frame (the old page computed the
+// frame inside the refresh, however long it took; past this the frame shows
+// on the next refresh instead).
+const WAIT_MS = 30;
+function startPresenting() {
   // An opaque canvas (the framebuffer's alpha is always 255): the browser
   // composites it without blending. `?lowlatency` in the URL also asks for a
   // desynchronized canvas, which can skip a frame of compositor latency where
   // the browser supports it (Chrome on Windows / ChromeOS) at the risk of
   // tearing; off by default, and not verifiable in headless Chromium.
   const LOW_LATENCY = new URLSearchParams(location.search).has('lowlatency');
-  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
-  // The render resolution is RUNTIME state: Options > Video Options can change
-  // it. Track the current backing-store size and re-fit the canvas whenever the
-  // engine reports a different width()/height(). The CSS display size (the
-  // largest 4:3 box the window fits, see the canvas rule) does not follow it,
-  // so a larger backing store just gives a crisper pixel-upscale.
-  let W = 0, H = 0;
-  // The canvas box, snapped. The CSS rule gives the largest 4:3 box the
-  // window fits; with image-rendering:pixelated a box a little wider than the
-  // framebuffer (976 px for 960 columns at 1440x900) doubles one column in
-  // ~60, which bands the menu's checkerboard fade and the 1:1 text, and a
-  // box narrower than it drops whole columns out of that text. So, in device
-  // pixels per framebuffer column (s):
-  //   - s at or up to 1/6 past a whole number k: the box is exactly k columns
-  //     per framebuffer column (every column k pixels wide; the picture
-  //     gives up at most a seventh of its width for it — at 1440x900 the
-  //     window fits 1088 for 960 columns, which would double one in 7);
-  //   - s below 1 (a window narrower than the framebuffer): the natural box,
-  //     smoothed (image-rendering:auto) — no column is dropped, the text is
-  //     a little soft;
-  //   - otherwise (1.38 at 1920x1080): the natural box, pixelated.
-  // Rows are another matter: the 16:10 framebuffer is shown at 4:3, 1.2 rows
-  // per column's worth (a 1996 monitor's stretch), so every fifth row is one
-  // pixel taller whatever the box.
-  const SNAP = 1 / 6;
-  function fitCanvas() {
-    canvas.style.width = canvas.style.height = canvas.style.imageRendering = '';
-    const natural = parseFloat(getComputedStyle(canvas).width);
-    const dpr = window.devicePixelRatio || 1;
-    const s = natural * dpr / W;
-    if (!(s > 0)) return;
-    let width = natural;
-    if (s >= 1 && s - Math.floor(s) <= SNAP * Math.floor(s)) width = Math.floor(s) * W / dpr;
-    else if (s < 1) canvas.style.imageRendering = 'auto';
-    canvas.style.width = width + 'px';
-    canvas.style.height = width * 3 / 4 + 'px';
-  }
-  function syncCanvasSize() {
-    const w = exp.width(), h = exp.height();
-    if (w === W && h === H) return;
-    W = w; H = h;
-    canvas.width = W; canvas.height = H;
-    fitCanvas();   // the snap depends on W
-    // The resolution just changed (boot, or a Video Options mode): persist
-    // it so a reload comes back at the same size. This is the single choke point
-    // for every resolution change, so it captures menu picks and restores alike.
-    saveResolution(W, H);
-  }
-  syncCanvasSize();
-  addEventListener('resize', fitCanvas);
-  document.addEventListener('fullscreenchange', fitCanvas);
-  // The presented frame: an ImageData built straight over the framebuffer in
-  // wasm memory, so presenting is one putImageData with no copy into a
-  // JS-side ImageData first. Rebuilt when the bytes move: a memory.grow
-  // detaches the old ArrayBuffer, and a resolution change reallocates the
-  // framebuffer (new pointer, new size).
-  let frameImg = null, frameBuf = null, framePtr = 0;
-  function frameImage() {
-    const buf = exp.memory.buffer, ptr = exp.framebuffer();
-    if (!frameImg || buf !== frameBuf || ptr !== framePtr
-        || frameImg.width !== W || frameImg.height !== H) {
-      frameImg = new ImageData(new Uint8ClampedArray(buf, ptr, W * H * 4), W, H);
-      frameBuf = buf; framePtr = ptr;
-    }
-    return frameImg;
-  }
-  // Ready: swap the overlay's boot panel for the click-to-play prompt — the
-  // page's ONE scrim appearance, retired forever by the first gesture.
-  bootEl.classList.add('hidden');
-  playEl.classList.remove('hidden');
-  readyToPlay = true;
-  statusEl.textContent = 'ready — click to play';
-
-  // timedemo (CL_TimeDemo_f): while cls.timedemo is set Host_FilterTime caps
-  // nothing and the C runs host frames back to back. The page cannot block,
-  // so it runs as many as fit in a time slice per animation frame — every one
-  // rendered, as a timedemo measures rendering — and presents the last. Each
-  // step() is handed the previous step's own duration as its dt (the first of
-  // a slice, the last one of the slice before), so the engine's realtime, the
-  // clock CL_FinishTimeDemo reads, adds up the time the frames took and not
-  // the browser's pauses between slices (presenting, events, waiting for the
-  // next animation frame).
-  const TIMEDEMO_SLICE_MS = 12;
-  let timedemoLastDur = 0;
-  function hostFrames(dt) {
-    if (!(exp.timedemo_running && exp.timedemo_running())) return exp.step(dt);
-    const t0 = performance.now();
-    let t = t0, d = timedemoLastDur;
-    do {
-      exp.step(d);
-      const t2 = performance.now();
-      d = (t2 - t) / 1000; t = t2;
-    } while (t - t0 < TIMEDEMO_SLICE_MS && exp.timedemo_running());
-    timedemoLastDur = d;
-    return 1;
-  }
-
-  let last = performance.now();
-  function frame(now) {
-    // The RAW elapsed time since the last rAF: the engine runs it through
-    // Host_FilterTime — all of it to `realtime` (the flashing menu/console
-    // cursors); a host frame only once 1/72 s has passed since the last one,
-    // advancing the game by that time, at most 0.1 s (so a hitch or a
-    // backgrounded tab can't lurch the world).
-    const dt = Math.max(0, (now - last) / 1000); last = now;
-    // Load/Save just opened (a key this refresh): rescan before it draws.
-    scanSavesOnMenuEntry();
-    // Movement/turn/attack all flow from the held-key states the keydown/keyup
-    // handlers fed the engine (key_event by Quake keynum): each step
-    // derives the move from the BINDINGS table (CL_BaseMove/CL_AdjustAngles),
-    // so Options > Customize controls really rebinds, Always Run really swaps
-    // cl_forwardspeed, and the menu/console gate gameplay engine-side.
-    // step() returns 0 when the 72 fps cap skipped this refresh: no new frame,
-    // nothing queued, nothing to present (an older wasm returns undefined).
-    if (hostFrames(dt) === 0) { requestAnimationFrame(frame); return; }
-    drainGameSounds();
-    drainStopSounds();
-    drainMenuSounds();
-    updateLoopingAudio();
-    updateSndUI();
-    syncLockChip();
-    drainSaves();          // persist any `save <name>` the console issued
-    syncPrefs();           // persist a changed Screen size / Web extras
-    serviceLoadRequest();  // answer any `load <name>` with the stored text
-
-    // The render resolution may have changed this frame (Video Options): re-fit the
-    // canvas + ImageData to the new size before blitting.
-    syncCanvasSize();
-    ctx.putImageData(frameImage(), 0, 0);
-    requestAnimationFrame(frame);
-  }
+  ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
+  lastTick = performance.now();
   requestAnimationFrame(frame);
 }
+function frame(now) {
+  requestAnimationFrame(frame);
+  updateSndUI();
+  if (quake.paused || Atomics.load(ctl, C.RUN) !== 1) return;
+  // One tick in flight: a refresh that finds the last one unanswered posts
+  // none (its time goes to the next tick's dt). The tick carries the RAW
+  // elapsed time since the last one: the engine runs it through
+  // Host_FilterTime — all of it to `realtime` (the flashing cursors); a host
+  // frame only once 1/72 s has passed since the last one (unless the
+  // uncapped extra is on), advancing the game by that time, at most 0.1 s.
+  // While a timedemo runs the program does not wait for ticks at all: its
+  // frames come back to back, and each refresh shows the newest.
+  // The refresh that posts a tick waits for its frame, as the old page
+  // computed its frame inside the refresh; a later refresh only shows what
+  // has come (a frame slower than WAIT_MS, a level load, a long call).
+  let posted = false;
+  if (((Atomics.load(ctl, C.ACK) - pendingTick) | 0) >= 0) {
+    const dt = Math.max(0, (now - lastTick) / 1000);
+    lastTick = now;
+    pendingTick = ++tickSeq;
+    if (quake.latency) { inFlightTimes = inFlightTimes.concat(inputTimes); inputTimes = []; }
+    sendTick(pendingTick, dt);
+    posted = true;
+  }
+  const t0 = performance.now();
+  if (posted && Atomics.load(ctl, C.WAIT) === 1) waitAck(pendingTick, WAIT_MS);
+  const t1 = performance.now();
+  const shown = present();
+  if (quake.live) quake.live.push({ t: now, wait: t1 - t0, shown: !!shown, copy: shown ? shown.copy : 0, put: shown ? shown.put : 0 });
+  if (shown && quake.latency) {
+    const t = performance.now();
+    for (const e of inFlightTimes) quake.latency.push(t - e);
+    inFlightTimes = [];
+  }
+}
+
+// ===========================================================================
+// window.quake: the page's automation surface (web/verify_*.py, bench.py)
+// ===========================================================================
+const quake = window.quake = {
+  ready: false,
+  paused: false,
+  latency: null,             // an array to collect input->present times into
+  live: null,                // an array to collect the page loop's per-refresh times into
+  onBench: null,             // (values) per frame, --features bench builds
+  state: gameState,
+  call,                      // call('menu_visible') -> Promise<number>
+  callLine,                  // callLine('exec map e1m2') -> Promise<{value, text}>
+  text: (name, ...args) => callLine([name, ...args].join(' ')).then(r => r.text),
+  send: sendRecord,
+  IN,
+  // The benchmark drives the frames itself: pause the page's own ticks, then
+  // one tick (fixed dt) per call, presented as the page presents. Returns
+  // the times: the wait for the program's frame, and the present.
+  pause() { this.paused = true; },
+  resume() { this.paused = false; lastTick = performance.now(); },
+  tick(dt) {
+    const t0 = performance.now();
+    pendingTick = ++tickSeq;
+    sendTick(pendingTick, dt);
+    const ok = waitAck(pendingTick, 5000);
+    const t1 = performance.now();
+    const p = present();
+    return { ok, wait: t1 - t0, copy: p ? p.copy : 0, put: p ? p.put : 0, presented: !!p };
+  },
+  // The canvas's pixels (the presented frame), and its FNV-1a hash over
+  // 32-bit words — what `quaketool play --hash-every` prints natively.
+  pixels() { return frameImg ? frameImg.data : new Uint8ClampedArray(0); },
+  frameHash() {
+    const d = this.pixels();
+    const u = new Uint32Array(d.buffer, d.byteOffset, d.length >> 2);
+    let h = 0x811c9dc5;
+    for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u[i], 0x01000193);
+    return (h >>> 0).toString(16).padStart(8, '0');
+  },
+  size: () => [W, H],
+  // A kept file's text, as the page's storage holds it (null: none).
+  kept: (path) => storage.all().then(files => {
+    const f = files.find(([p]) => p === path);
+    return f ? new TextDecoder().decode(f[1]) : null;
+  }),
+  // The sound path's entry points, for checks that feed it records.
+  audio: { onSample, onSound, onLocalSound, stopKey, listener, masterVolume, sideGains,
+           get dynLoops() { return dynLoops; }, get dynShots() { return dynShots; },
+           get playingByKey() { return playingByKey; } },
+};
+
 main().catch(e => {
-  // file:// can't fetch() the wasm in most browsers — say how to fix it rather
-  // than failing blank. Any other error lands here too, in red on the boot bar.
+  // file:// can't fetch the engine or run a worker in most browsers — say how
+  // to fix it rather than failing blank. Any other error lands here too, in
+  // red on the boot bar.
   const hint = location.protocol === 'file:'
-    ? ' — file:// pages can\'t fetch the engine; serve this folder over HTTP (e.g. `python3 -m http.server`) and reload'
+    ? ' — file:// pages can\'t fetch the engine; serve this folder over HTTP with the headers in web/PLATFORM.md and reload'
     : '';
-  setStatus('error: ' + e + hint);
+  setStatus('error: ' + (e && e.message || e) + hint);
   if (bootFill) bootFill.classList.add('fail');
   console.error(e);
 });

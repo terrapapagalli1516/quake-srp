@@ -54,6 +54,23 @@ pub fn host_filter_time_uncapped(realtime: f64, oldrealtime: &mut f64) -> f64 {
     elapsed.clamp(HOST_FRAMETIME_MIN, HOST_FRAMETIME_MAX)
 }
 
+/// The uncapped host's gate (the port's own): `Host_FilterTime` with its cap
+/// raised from 72 frames a second to the 1000 its lower clamp implies. A
+/// frame runs on every display refresh up to 1000 Hz; a call less than
+/// [`HOST_FRAMETIME_MIN`] after the last frame skips (`None`), leaving the
+/// time to the next, where [`host_filter_time_uncapped`] would run it and
+/// clamp it up to 1 ms — two refreshes 0.3 ms apart would advance the game
+/// 2 ms, and the game would run ahead of the clock. With the cap off the
+/// game advances exactly with real time between the clamps.
+pub fn host_filter_time_display(realtime: f64, oldrealtime: &mut f64) -> Option<f64> {
+    let elapsed = realtime - *oldrealtime;
+    if elapsed < HOST_FRAMETIME_MIN {
+        return None;
+    }
+    *oldrealtime = realtime;
+    Some(elapsed.min(HOST_FRAMETIME_MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +140,35 @@ mod tests {
             let real = stamps[*at.last().unwrap()] / 1000.0;
             assert!((game - real).abs() < 1e-3, "{hz} Hz: game {game} vs real {real}");
         }
+    }
+
+    #[test]
+    fn host_filter_time_display_runs_every_refresh_and_never_outruns_the_clock() {
+        // Every refresh from 30 to 480 Hz is a frame of exactly its interval.
+        for hz in [30.0, 60.0, 144.0, 240.0, 480.0] {
+            let (mut old, mut game) = (0.0f64, 0.0f64);
+            for i in 1..=(hz as usize) {
+                let dt = host_filter_time_display(i as f64 / hz, &mut old).expect("every refresh runs");
+                assert!((dt - 1.0 / hz).abs() < 1e-9, "{hz} Hz");
+                game += dt;
+            }
+            assert!((game - 1.0).abs() < 1e-9, "{hz} Hz: {game}");
+        }
+        // Refreshes 0.25..1.75 ms apart (past 1000 Hz on average): the
+        // uncapped timedemo gate clamps the short ones up and runs ahead of
+        // real time; the display gate skips them and keeps time.
+        let mut seed = 0x5eed_u32;
+        let (mut t, mut old_a, mut old_b, mut game_a, mut game_b) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for _ in 0..4000 {
+            t += 0.00025 + 0.0015 * lcg(&mut seed);
+            game_a += host_filter_time_uncapped(t, &mut old_a);
+            game_b += host_filter_time_display(t, &mut old_b).unwrap_or(0.0);
+        }
+        assert!(game_a > t * 1.1, "clamped up, the game outruns the clock: {game_a} vs {t}");
+        assert!((game_b - t).abs() < 0.002, "the display gate keeps time: {game_b} vs {t}");
+        // A hitch still costs what id's clamp costs: at most 0.1 s a frame.
+        let mut old = 0.0;
+        assert_eq!(host_filter_time_display(0.5, &mut old), Some(HOST_FRAMETIME_MAX));
     }
 
     /// `host_frametime` is the C's double — `realtime - oldrealtime`, clamped

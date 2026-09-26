@@ -132,7 +132,17 @@ fn pf_makevectors(vm: &mut Vm) -> Result<()> {
 /// must not extend, so we keep the PRNG state in a process-global `AtomicU32`
 /// instead. This makes `random()` reproducible (it always starts from the same
 /// seed in a fresh process) without touching `Vm`.
-static RNG_STATE: AtomicU32 = AtomicU32::new(0x1337_BEEF);
+static RNG_STATE: AtomicU32 = AtomicU32::new(RNG_SEED);
+
+/// [`RNG_STATE`]'s value in a fresh process.
+const RNG_SEED: u32 = 0x1337_BEEF;
+
+/// Restart [`pf_random`]'s sequence from a fresh process's seed, so two
+/// runs in one process draw the same numbers (a harness comparing them:
+/// `quaketool framerate`).
+pub fn reset_random() {
+    RNG_STATE.store(RNG_SEED, Ordering::Relaxed);
+}
 
 /// Numerically-Recipes-style 32-bit LCG step (`x = x*1664525 + 1013904223`).
 fn lcg_next() -> u32 {

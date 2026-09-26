@@ -53,9 +53,10 @@ use crate::demo::Demo;
 use crate::dlight::DynamicLights;
 use crate::mdl::Mdl;
 use crate::pak::Pak;
-use crate::particles::{Lcg, ParticleSystem};
+use crate::particles::{Lcg, ParticleSystem, TrailHead};
 use crate::render;
 use crate::server::{Server, SoundEvent, StaticSound};
+use crate::stepping::{Stepping, Tick72};
 use crate::tent::{BeamSegment, Beams};
 use crate::wad::Qpic;
 use cl_input::{clamp_pitch, KeyMove};
@@ -104,7 +105,7 @@ pub struct Walk {
     /// for R_RocketTrail (rockets/grenades/gibs trail from their old origin to the
     /// new one each frame). Defaults to the current origin the first time an
     /// entity is seen, so there's no spurious trail on spawn.
-    pub trail_org: HashMap<i32, [f32; 3]>,
+    pub trail_org: HashMap<i32, TrailHead>,
     /// Quake's `tracercount` (CL_RelinkEntities `static int`): alternates the
     /// tracer-trail offset direction; threaded across `spawn_rocket_trail` calls.
     pub tracercount: u32,
@@ -142,6 +143,10 @@ pub struct Walk {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
+    /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
+    /// code, unless the host runs uncapped. Set by the host each frame, like
+    /// `key_move`.
+    pub stepping: Stepping,
     /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
     /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
     /// mouse X away from yaw). Drained into the next UserCmd then cleared.
@@ -166,6 +171,9 @@ pub struct Walk {
     /// `cl.cshifts[CSHIFT_BONUS].percent`: the gold pickup flash a stuffed
     /// `bf` sets to 50 (V_BonusFlash_f), dropped `dt*100` per frame.
     pub bonus_blend: f32,
+    /// Counts the 1/72 s ticks the uncapped client fades the flashes by
+    /// ([`view::fade_cshifts`]).
+    pub fade_clock: Tick72,
     /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
     /// view kick of the last svc_damage, decaying over `v_kicktime`.
     pub v_dmg_time: f32,
@@ -206,6 +214,9 @@ pub struct Walk {
     /// `host_frametime`) expire on this clock, so they keep timing out behind the
     /// menu as in the C.
     pub host_time: f32,
+    /// `host_time` to double precision, which the uncapped client keeps it by
+    /// ([`crate::stepping::advance_clock`]).
+    pub host_clock: f64,
     /// Live engine particles (the `particle()` builtin's effect). Bursts the
     /// QuakeC fires each frame are drained into this pool, aged under gravity,
     /// and drawn into the scene sharing its z-buffer.
@@ -316,6 +327,9 @@ pub struct DemoPlay {
     /// `cl.cshifts[CSHIFT_BONUS].percent` for the recorded POV: a recorded
     /// `svc_stufftext "bf"` sets it to 50 (V_BonusFlash_f), faded `dt*100`.
     pub bonus_blend: f32,
+    /// Counts the 1/72 s ticks the uncapped client fades the flashes by
+    /// ([`view::fade_cshifts`]).
+    pub fade_clock: Tick72,
     /// `v_dmg_time` / `v_dmg_roll` / `v_dmg_pitch` (view.c): the directional
     /// view kick a recorded svc_damage applies, decaying over `v_kicktime`.
     pub v_dmg_time: f32,
@@ -335,10 +349,13 @@ pub struct DemoPlay {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
+    /// How this frame steps playback ([`Stepping`]), set by the host each
+    /// frame like `viewsize`.
+    pub stepping: Stepping,
     /// Each relinked entity's origin as last rendered (CL_RelinkEntities'
     /// `oldorg`), keyed by entity number, for the model-flag trails; an entity
     /// missing from a frame is forgotten (its next sighting is a forcelink).
-    pub trail_org: HashMap<i32, [f32; 3]>,
+    pub trail_org: HashMap<i32, TrailHead>,
     /// R_RocketTrail's `static int tracercount` for the demo's tracer trails.
     pub tracercount: u32,
     /// Which of [`DEMOS`](cl_demo::DEMOS) this is (the next one follows it, CL_NextDemo).
@@ -402,6 +419,7 @@ impl DemoPlay {
             damage_blend: 0.0,
             damage_color: [255, 0, 0],
             bonus_blend: 0.0,
+            fade_clock: Tick72::default(),
             v_dmg_time: 0.0,
             v_dmg_roll: 0.0,
             v_dmg_pitch: 0.0,
@@ -409,6 +427,7 @@ impl DemoPlay {
             centerprint: None,
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
+            stepping: Stepping::Classic,
             trail_org: HashMap::new(),
             tracercount: 0,
             demonum: 0,
@@ -521,6 +540,7 @@ pub fn assemble_walk(
         damage_blend: 0.0,
         damage_color: [255, 0, 0],
         bonus_blend: 0.0,
+        fade_clock: Tick72::default(),
         v_dmg_time: 0.0,
         v_dmg_roll: 0.0,
         v_dmg_pitch: 0.0,
@@ -531,8 +551,10 @@ pub fn assemble_walk(
         centerprint: None,
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
+        stepping: Stepping::Classic,
         clock,
         host_time: 0.0,
+        host_clock: 0.0,
         particles: ParticleSystem::new(),
         prng: Lcg::new(0x9E37_79B9),
         dlights: DynamicLights::new(),
