@@ -39,8 +39,8 @@ pub struct ViewRect {
 /// `vid.aspect` for a `vid_w x vid_h` mode displayed with the width:height
 /// ratio `display_aspect` — `vid_win.c`/`vid_x.c`'s
 /// `((float)vid.height / (float)vid.width) * (320.0 / 240.0)` when the display
-/// is a 4:3 monitor (`display_aspect` 4/3). It is the height of a displayed
-/// pixel over its width, the `pixelAspect` of `R_ViewChanged`
+/// is a 4:3 monitor (`display_aspect` 4/3). It is the width of a displayed
+/// pixel over its height, the `pixelAspect` of `R_ViewChanged`
 /// ([`RenderOptions::pixel_aspect`](crate::render::RenderOptions::pixel_aspect)):
 /// 0.8333 for 320x200 or 1280x800 on 4:3 (tall pixels), 1.0 for 640x480. The
 /// arithmetic is the C's: a float ratio times the double constant, stored to

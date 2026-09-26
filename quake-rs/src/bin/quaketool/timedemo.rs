@@ -188,6 +188,13 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
                 per(st.spans_emitted),
                 per(st.surf_texels_baked),
             );
+            // The background (r_clearcolor) where no surface covers the view:
+            // cracks and sparkles, or the eye outside the world. (demo1 has no
+            // intermission and no underwater frame, so every frame's view is
+            // the viewsize-100 rectangle.)
+            let vrect = render::calc_refdef(width, height, render::VIEWSIZE_DEFAULT, false).vrect;
+            let background = (frames as u64 * (vrect.w * vrect.h) as u64).saturating_sub(st.world_pixels);
+            let _ = writeln!(o, "  background pixels in all {frames} frames (if every frame is the viewsize-100 view): {background}");
             let (bytes, blocks) = render::surface_cache_usage();
             let _ = writeln!(o, "  surface cache at the end: {:.1} MB in {blocks} blocks", bytes as f64 / 1e6);
         }

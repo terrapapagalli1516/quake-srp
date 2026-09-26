@@ -332,8 +332,8 @@ impl Camera {
 /// port's opt-in extras. [`Default`] is id's `vid_null.c` view: square pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderOptions {
-    /// `vid.aspect`, which `R_ViewChanged` takes as `pixelAspect`: the height
-    /// of a displayed pixel over its width. 1.0 is square pixels. id's DOS and
+    /// `vid.aspect`, which `R_ViewChanged` takes as `pixelAspect`: the width
+    /// of a displayed pixel over its height. 1.0 is square pixels. id's DOS and
     /// Windows drivers set `(vid.height / vid.width) * (320/240)` — the mode is
     /// shown on a 4:3 monitor, so 320x200 has pixels 1.2x taller than wide and
     /// `vid.aspect` 0.8333 ([`crate::screen::vid_aspect`]). It scales every

@@ -2169,3 +2169,56 @@ pass on the default wasm.
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (~~SV_TryUnstick/WallFriction~~ (✅ Round 2), ~~force_retouch~~ (✅ CENSUS F8, `quake/fix-server`), sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled. The current list is "Open, as of 2026-09-25" at the top.
+
+## High resolutions and Hor+ (2026-09-26, branch `q26/hires`)
+
+Two video cvars, `render::VideoCvars` (per-thread, like `d_mipscale`; `render::set_video_cvars`).
+Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` across the view.
+
+| cvar | what it changes when on | status |
+|---|---|---|
+| `hires` | views up to 7680x4320 (`HIRES_MAXWIDTH`/`HEIGHT`); particle size `izi * xscale / 20480` clamped to `[xscale/160, xscale/40]` instead of `izi >> d_pix_shift`; the underwater view rendered at the view rectangle, not the 320x200 warp buffer, with `D_WarpScreen`'s sine scaled by `sqrt(w*h/(320*200))` | departure, off here; meant to be on by default in the page |
+| `fov_mode` `HorPlus` | `fov` is the horizontal field of view of a 4:3 screen of the same height; a wider SCREEN adds columns at the sides (16:9: 106.26 degrees for fov 90); 4:3 and narrower are Classic | departure, off here; meant to be on by default in the page |
+
+- ✅ **Classic unchanged.** Goldens `4807aaa1` / `9ae2b478` / `c65b7046`; oracle
+  (`--aspect 0.8333333 --spans 16`) 100.00% on the eight standard rows, entity pixels
+  100%; `quaketool play demo1,demo2,walk_e1m1,fire_e1m1,quad_e1m1,walk_e1m3 --res
+  320x200,640x400,1280x800 --hash-every 30` byte-identical to `3866e1b` (18 runs).
+- ✅ **Past 2048 wide.** id's edge `u` is 12.20 in an `int`; the right edge `(w << 20) +
+  0xFFFFF` wraps from 2048 wide. The port's `Edge::u`/`u_step` are 44.20 in an `i64`
+  with id's values wherever the `int` holds them (an edge that is stepped spans two or more
+  rows, so `|u_step| < w`). Every other table the C sizes by `MAXWIDTH`/`MAXHEIGHT` was
+  already a run-time `Vec` (`newedges`, `removeedges`, `DPS_MAXSPANS`, the warp's `rowptr`
+  and `column`, `intsintable`); `r_maxedges`/`r_maxsurfs`/`MAXSPANS` are growable, and demo1
+  at 3840x2160 peaks at 1112 edges and 392 surfaces (id's pools: 2400, 800), about what it
+  needs at 640x400 (950, 378). Texture, lightmap, sky and z fixed point are in texel or
+  1/z units, not screen columns.
+- ✅ **Hor+ details.** The screen, not the view rectangle, decides (id's own 320x152 view
+  above the status bar is wider than 4:3). `r_fov_greater_than_90` tests the cvar, so the
+  gun stays; `D_Sky_uv_To_st`'s `temp` and `r_aliastransition`'s `res_scale` use the 4:3
+  view that Hor+ widens, so the sky does not slide against the walls and models change
+  drawing path at the same distance. 1920x1080 Hor+ against 1440x1080 Classic on e1m2's start
+  (sky in view): the middle 1440 columns match on 99.94% of the view's pixels (the rest are
+  single pixels along edges, where the two views clip differently).
+- **Particles.** id's `d_pix_shift = 8 - (int)(width/320 + 0.5)` halves the size once per
+  320 columns while the width only grows by 320, so the size is right only at 320 and 640
+  wide: 2x at 1280, 5x at 1920, and a negative (undefined) shift from 2720. With hires the size
+  is id's at 320 and 640 and in proportion elsewhere; Classic keeps id's formula.
+- **Underwater.** id's sine is 3 screen pixels over a 128-pixel cycle at every resolution,
+  and the view comes from a buffer of at most 320x200. At 4K that is a 12x blow-up with a
+  faint shimmer; with hires it is 320x200's wobble at full resolution (id's to the pixel at
+  320x200).
+- **Kept as they are (the look, or already fine at 4K).** The 16-pixel perspective spans:
+  they differ from exact perspective on 8.84 / 1.20 / 0.20% of the pixels of an e1m1 view at
+  320x200 / 1280x800 / 3840x2400, so affine swim fades as the resolution grows.
+  Mip levels follow `xscale`, so 4K draws finer mips further out, as id's formula
+  intends. The 16-texel lightmap blocks, dlights (per luxel), the 128x128 sky layers, the
+  gun's affine texturing and palette banding are resolution-free and kept. The scaled 2-D
+  layer's non-integer scale (5.4x at 1080p) makes 2-D pixels 5 or 6 wide: barely visible,
+  left alone. Cracks and sparkles: the background (`r_clearcolor`) shows through on 0 / 2 /
+  6 / 16 / 24 pixels in all 969 frames of demo1 at 640x400 / 1280x800 / 1920x1080 /
+  2560x1600 / 3840x2160 (`quaketool timedemo --profile 1`), Hor+ or not: sub-pixel gaps in
+  the maps (T-junctions) that a finer pixel grid samples more often, about one pixel every
+  40 frames at 4K. id's; left alone.
+- **Not measured:** the page (quake-wasm and web/ do not set the cvars yet), GPU browsers,
+  phones.
