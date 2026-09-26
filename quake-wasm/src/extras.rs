@@ -52,8 +52,11 @@ pub(crate) fn help_lines() -> impl Iterator<Item = String> {
 }
 
 thread_local! {
-    static FRAME_EXTRAS: Cell<render::Extras> = const {
-        Cell::new(render::Extras { uncapped: false, show_fps: false, exact_persp: false, scaled_2d: false })
+    static FRAME_EXTRAS: Cell<(render::Extras, render::VideoCvars)> = const {
+        Cell::new((
+            render::Extras { uncapped: false, show_fps: false, exact_persp: false, scaled_2d: false },
+            render::VideoCvars::CLASSIC,
+        ))
     };
 }
 
@@ -62,12 +65,18 @@ thread_local! {
 /// be reached; `host::step` copies the menu's extras here ([`set_frame_extras`])
 /// before each frame.
 pub(crate) fn extras() -> render::Extras {
-    FRAME_EXTRAS.with(Cell::get)
+    FRAME_EXTRAS.with(Cell::get).0
 }
 
-/// Hand this frame's extras to the renderer (see [`extras`]).
-pub(crate) fn set_frame_extras(e: render::Extras) {
-    FRAME_EXTRAS.with(|c| c.set(e));
+/// The video cvars the frame being drawn is drawn with (the App's, copied
+/// with the extras).
+pub(crate) fn video() -> render::VideoCvars {
+    FRAME_EXTRAS.with(Cell::get).1
+}
+
+/// Hand this frame's extras and video cvars to the renderer (see [`extras`]).
+pub(crate) fn set_frame_extras(e: render::Extras, video: render::VideoCvars) {
+    FRAME_EXTRAS.with(|c| c.set((e, video)));
 }
 
 #[cfg(test)]

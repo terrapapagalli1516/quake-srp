@@ -91,7 +91,7 @@ world,submodel,external,alias,particle,sprite,viewmodel,\
 world_pvs,world_sort,world_setup,world_light,world_surf,\
 faces_pvs_culled,faces_frustum_culled,faces_drawn,world_tris,world_px,surf_hits,surf_misses,\
 surf_rebakes,surf_bypass_bakes,sub_faces_drawn,sub_lm_builds,surf_texels,surfcache_kb,\
-alias_models,alias_accepted,alias_tris";
+alias_models,alias_accepted,alias_tris,bands,band_threads";
 
     /// The benchmark clock, in milliseconds since the first read: `Instant`,
     /// which on WASI is `clock_time_get` — the worker's `performance.now()`.
@@ -193,6 +193,10 @@ alias_models,alias_accepted,alias_tris";
                 s.alias_models as f64,
                 s.alias_accepted as f64,
                 s.alias_tris as f64,
+                // The renderer's banded passes: their wall time, and the
+                // threads that drew them.
+                ms(s.bands_ns),
+                s.band_threads as f64,
             ]);
             v
         })

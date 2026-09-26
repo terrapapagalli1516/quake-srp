@@ -132,6 +132,19 @@ pub(crate) struct App {
     /// outside it (`M_Menu_Main_f` switches the demo loop off while the menu
     /// is up; `M_Main_Key`'s Escape puts it back). 0 at start, a C static.
     pub(crate) m_save_demonum: i32,
+    /// How many threads draw the 3-D view (the `r_threads` cvar; `Auto` by
+    /// default): resolved each frame against [`App::hw_threads`] and handed
+    /// to whichever game's renderer draws it (`host::step`). The pixels are
+    /// the same for any count.
+    pub(crate) render_threads: render::Threads,
+    /// The threads the host offers the program: the page's pool of thread
+    /// workers plus the program's own (`-hwthreads`, from `wasi.js`), else
+    /// `std::thread::available_parallelism`; 1 without threads.
+    pub(crate) hw_threads: usize,
+    /// The port's video cvars (Hor+, views past id's 1280x1024) the frames
+    /// are drawn with: Classic, id's, until a caller sets them
+    /// (`set_video`); they also set how large a mode `set_resolution` takes.
+    pub(crate) video: render::VideoCvars,
 }
 
 /// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
@@ -500,6 +513,9 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 key_repeats: [0; 256],
                 shift_down: false,
                 m_save_demonum: 0,
+                render_threads: render::Threads::Auto,
+                hw_threads: 1,
+                video: render::VideoCvars::CLASSIC,
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {

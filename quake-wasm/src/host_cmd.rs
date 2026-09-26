@@ -34,7 +34,7 @@ pub(crate) const COMMANDS: &[&str] = &[
 /// last, found first: `_cl_color` and `_cl_name` in `CL_Init`, `viewsize` in
 /// `SCR_Init`, `hostname` in `NET_Init`), then the port's `_vid_resolution`
 /// (`config.cfg`'s video mode) and the Web extras' `wasm_*`.
-const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname", "_vid_resolution"];
+const CVARS: &[&str] = &["_cl_color", "_cl_name", "viewsize", "hostname", "_vid_resolution", "r_threads"];
 
 /// `Cmd_CompleteCommand` then `Cvar_CompleteVariable` (cmd.c, cvar.c), what
 /// Tab in the console runs: the first command, else the first cvar, whose
@@ -145,6 +145,18 @@ pub(crate) fn execute_console_command(line: &str) {
             ensure_app(App::m_menu_help);
             return;
         }
+        // Not id's: the renderer's threads, as a cvar (0: as many as the
+        // host offers; the pixels are the same for any count).
+        "r_threads" => {
+            ensure_app(|a| match argv.get(1) {
+                None => {
+                    let (n, now) = (a.render_threads.cvar(), a.render_threads.resolve(a.hw_threads));
+                    a.console.println(format!("\"r_threads\" is \"{n}\" ({now} of {} threads)", a.hw_threads));
+                }
+                Some(v) => a.render_threads = quake_rs::render::Threads::from_cvar(v.parse::<f32>().unwrap_or(0.0)),
+            });
+            return;
+        }
         // Not id's: the port's command list (`help` is id's Help screen).
         "wasm_help" => {
             ensure_app(|a| {
@@ -157,6 +169,7 @@ pub(crate) fn execute_console_command(line: &str) {
                 a.console.println("  stopdemo  demos  startdemos <d..>");
                 a.console.println("  sizeup  sizedown  viewsize [n]");
                 a.console.println("  echo <text>   clear   help");
+                a.console.println("  r_threads <n> (0: all the host offers)");
                 a.console.println("  wasm_help (this list)");
                 a.console.println("web extras (not id's; see Options):");
                 for line in crate::extras::help_lines() {
@@ -471,6 +484,34 @@ mod tests {
         key_down(i32::from(b'-'));
         key_up(i32::from(b'-'));
         assert_eq!(viewsize(), 110.0, "no binding runs while the menu is up");
+    }
+
+    #[test]
+    fn r_threads_is_a_cvar_every_frame_hands_the_renderer() {
+        let last_line = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
+        };
+        let threads = || walk_mut(|w| w.renderer.threads());
+        assert_eq!(boot(), 1);
+        close_menu();
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().hw_threads = 6);
+        console_toggle();
+        run_console_line("r_threads");
+        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"0\" (6 of 6 threads)"));
+        step(0.0);
+        assert_eq!(threads(), 6, "0: every thread the host offers");
+        run_console_line("r_threads 0");
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().hw_threads = 1);
+        step(0.0);
+        assert_eq!(threads(), 1, "no threads offered: one");
+        run_console_line("r_threads 3");
+        step(0.0);
+        assert_eq!(threads(), 3);
+        console_toggle();
+        // A game the host builds afresh draws with it from its first frame.
+        assert_eq!(boot(), 1);
+        step(0.0);
+        assert_eq!(threads(), 3);
     }
 
     #[test]
