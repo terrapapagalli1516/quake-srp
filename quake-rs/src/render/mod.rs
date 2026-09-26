@@ -26,7 +26,8 @@
 //! ## Layout
 //!
 //! This file keeps `r_main.c`'s share: [`Image`], [`Camera`], the flat
-//! [`render_bsp`] and the `render_scene*` entry points (`R_RenderView`). The rest
+//! [`render_bsp`], and the [`Scene`] a [`Renderer`] draws (`R_RenderView`,
+//! `R_NewMap`). The rest
 //! follows id's files: `view` (view.c), `edge` (r_bsp.c, r_draw.c, r_edge.c,
 //! d_edge.c), `world` (the brush entities handed to it), `raster` (the span
 //! routines, d_scan.c), `light` (r_light.c, `R_BuildLightMap`), `surf` (r_surf.c,
@@ -41,8 +42,7 @@ use crate::math::{cross, dot, normalize, sub, Vec3};
 use alias::{draw_alias_model, draw_viewmodel};
 use raster::{hash_color, raster_triangle, Projected};
 use sprite::draw_sprites;
-use stats::{stat, stats_on, StatInstant};
-use warp::TurbTable;
+use warp::{apply_warp, TurbTable};
 
 mod view;
 mod edge;
@@ -84,20 +84,14 @@ pub use alias::{ModelInstance, Viewmodel};
 pub use light::{LIGHTSTYLES, NEUTRAL_LIGHTSTYLE_SCALES};
 pub use part::draw_particles;
 pub use sprite::SpriteInstance;
-pub use surf::{mip_cvars, set_mip_cvars, surface_cache_usage, MipCvars};
-pub use stats::{render_stats_begin, render_stats_end, set_render_stats_clock, RenderStats};
+pub use surf::MipCvars;
+pub use stats::RenderStats;
 pub use view::{
     build_gamma_table, content_cshift, cshift_ramps, powerup_cshift, view_bob, viewmodel_angles,
     viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
-pub use video::{
-    clamp_to_max, max_view_size, set_video_cvars, video_cvars, FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH,
-    MAXHEIGHT, MAXWIDTH,
-};
-#[cfg(test)]
-pub(crate) use video::VideoGuard;
-pub use warp::apply_warp;
+pub use video::{FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH};
 pub use world::{BModelInstance, ExternalBModel};
 
 // ---------------------------------------------------------------------------
@@ -177,12 +171,14 @@ impl Image {
 //
 // Quake allocates its frame buffers once per video mode — `vid.buffer`, the
 // z-buffer `d_pzbuffer`, `r_warpbuffer` — and draws into them every frame. The
-// port's frame is an `Image` returned by value, so the same effect is a small
-// per-thread pool: the host hands a presented frame back ([`recycle_image`])
-// and the next frame's view ([`render_scene_ext_sprited`]), composed screen
-// ([`compose_view`]) and warp snapshot ([`apply_warp`]) reuse the allocations.
-// It is purely an allocation cache — every reuse writes every pixel
-// ([`Image::reused_uncleared`]) — so nothing drawn depends on it.
+// z-buffer is the [`Renderer`]'s. The port's frame is an `Image` returned by
+// value, so the rest is a small per-thread pool: the host hands a presented
+// frame back ([`recycle_image`]) and the next frame's view
+// ([`Renderer::render`]), composed screen ([`compose_view`]) and warp
+// snapshot ([`Renderer::warp`]) reuse the allocations. It is the host's frame
+// allocator, not renderer state: every reuse writes every pixel
+// ([`Image::reused_uncleared`]), so nothing drawn depends on it, and only the
+// thread that runs the frame loop takes from it.
 
 /// Spare frame buffers kept: one frame's view, composed screen and warp
 /// snapshot.
@@ -191,11 +187,6 @@ const SPARE_FRAMES: usize = 3;
 thread_local! {
     /// Pixel buffers of frames handed back by [`recycle_image`].
     static SPARE_RGB: std::cell::RefCell<Vec<Vec<[u8; 3]>>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// id's z-buffer, `d_pzbuffer`: the 16-bit 1/z of every pixel of the view,
-    /// `(1/z * 0x8000 * 0x10000) >> 16` (larger is nearer). Never cleared:
-    /// every frame's world spans write all of it (`D_DrawZSpans`), and the
-    /// entities test and write it.
-    static ZBUF: std::cell::RefCell<Vec<i16>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Hand a finished frame's pixel buffer back so the next frame reuses it
@@ -328,8 +319,9 @@ impl Camera {
 // ---------------------------------------------------------------------------
 
 /// How a frame is drawn beyond what the [`Camera`] says: the refdef state
-/// `R_ViewChanged` (`r_main.c`) is handed besides the field of view, plus the
-/// port's opt-in extras. [`Default`] is id's `vid_null.c` view: square pixels.
+/// `R_ViewChanged` (`r_main.c`) is handed besides the field of view, the cvars
+/// the renderer reads each frame, and the port's opt-in extras. [`Default`] is
+/// id's `vid_null.c` view (square pixels) with id's cvars.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderOptions {
     /// `vid.aspect`, which `R_ViewChanged` takes as `pixelAspect`: the width
@@ -354,6 +346,12 @@ pub struct RenderOptions {
     /// (`D_DrawSpans16`, `Turbulent8`); that is the default. The browser's
     /// `wasm_exactpersp 1` sets this.
     pub exact_perspective: bool,
+    /// The port's video cvars: Hor+ and views past id's largest
+    /// ([`VideoCvars`]; Classic by default).
+    pub video: VideoCvars,
+    /// `d_mipscale` / `d_mipcap` (`D_SetupFrame` reads them every frame; id's
+    /// by default).
+    pub mip: MipCvars,
 }
 
 /// A view's place on the screen ([`RenderOptions::screen`]): its top-left
@@ -369,7 +367,13 @@ pub struct ScreenPlace {
 
 impl Default for RenderOptions {
     fn default() -> RenderOptions {
-        RenderOptions { pixel_aspect: 1.0, screen: None, exact_perspective: false }
+        RenderOptions {
+            pixel_aspect: 1.0,
+            screen: None,
+            exact_perspective: false,
+            video: VideoCvars::CLASSIC,
+            mip: MipCvars::DEFAULT,
+        }
     }
 }
 
@@ -681,247 +685,340 @@ pub fn parse_palette(bytes: &[u8]) -> Option<[[u8; 3]; 256]> {
     Some(pal)
 }
 
-/// Render `bsp` alone with its real miptextures sampled through `palette`
-/// (Quake's `gfx/palette.lmp`), at time 0 with neutral light styles and no
-/// colormap: the world pass of [`render_scene_ext_sprited`] with no entities.
-/// Faces whose texture has no inline pixels fall back to a flat hashed colour.
-pub fn render_bsp_textured(
-    bsp: &Bsp,
-    cam: &Camera,
-    w: usize,
-    h: usize,
-    palette: &[[u8; 3]; 256],
-) -> Image {
-    // Static (time 0) world: liquids/sky show their texture but do not advance.
-    render_scene_ext_sprited(
-        bsp, cam, w, h, palette, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[],
-        &RenderOptions::default(),
-    )
+// ---------------------------------------------------------------------------
+// The scene and the renderer (R_RenderView, R_NewMap)
+// ---------------------------------------------------------------------------
+
+/// A palette: 256 RGB colours (`gfx/palette.lmp`).
+pub type Palette = [[u8; 3]; 256];
+
+/// What one frame of the 3-D view shows: id's `refdef_t` (the view's size, its
+/// camera and `cl.time`) with the lists `R_RenderView` walks — the world, the
+/// brush entities, the alias models, the sprites, the particles and the gun —
+/// and the light the frame is lit by.
+///
+/// [`Scene::new`] is the world alone at time 0, lit by its static lightmaps;
+/// the rest is filled in with struct update syntax:
+///
+/// ```
+/// # use quake_rs::render::{demo_room, Camera, Renderer, Scene};
+/// let world = demo_room();
+/// let palette = [[128u8; 3]; 256];
+/// let camera = Camera::looking_at([0.0, -200.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+/// let scene = Scene { time: 1.5, ..Scene::new(&world, camera, 320, 200, &palette) };
+/// let view = Renderer::new().render(&scene);
+/// assert_eq!((view.w, view.h), (320, 200));
+/// ```
+#[derive(Clone, Copy)]
+pub struct Scene<'a> {
+    /// The world model (`cl.worldmodel`). Its faces are what the
+    /// [`Renderer`]'s per-map state is indexed by ([`Renderer::begin_map`]).
+    pub world: &'a Bsp,
+    /// The eye, and `scr_fov` as [`Camera::fov_deg`]: the view's own field of
+    /// view follows from it and the options' [`VideoCvars`] ([`FovMode::fov_x`]).
+    pub camera: Camera,
+    /// The view's size in pixels (`r_refdef.vrect`'s), at most the cvars'
+    /// [`VideoCvars::max_view_size`]: a larger one is clamped, and the image
+    /// [`Renderer::render`] returns says what was drawn.
+    pub width: usize,
+    pub height: usize,
+    pub palette: &'a Palette,
+    /// Quake's `gfx/colormap.lmp`: `64 * 256` bytes, 64 light rows of 256
+    /// palette indices, row 0 brightest. With it a wall pixel is shaded as the
+    /// software renderer shades it: the lightmap picks a row
+    /// (`R_BuildLightMap`), `colormap[row*256 + texel]` is the palette index
+    /// drawn — Quake's non-linear darkening, never brighter than the texel.
+    /// Liquids and sky are fullbright, the raw texel. `None` (or one shorter
+    /// than `64*256`) keeps the port's older linear `palette[texel] *
+    /// brightness`, which the synthetic tests use.
+    pub colormap: Option<&'a [u8]>,
+    /// `cl.time` in seconds: the liquid turb (`Turbulent8`), the sky's
+    /// two-layer scroll, animated wall textures (`R_TextureAnimation`) and
+    /// alias frame and skin groups all run on it. At 0 they show their first
+    /// frame.
+    pub time: f32,
+    /// The brightness of each light style (`d_lightstylevalue` / 256, `1.0`
+    /// normal), from [`crate::server::Server::lightstyle_scales`]
+    /// (`R_AnimateLight`): a face's lightmap is the sum of its up to four
+    /// styles' luxel blocks, each scaled by its value, before dynamic light is
+    /// added. [`NEUTRAL_LIGHTSTYLE_SCALES`] is the static style-0 lightmap.
+    pub light_styles: &'a [f32; LIGHTSTYLES],
+    /// The live dynamic lights (explosions, muzzle flashes, `EF_*` effects),
+    /// folded into every lightmapped face of the world and the inline brush
+    /// models they reach (`R_PushDlights`, `R_AddDynamicLights`), and into the
+    /// alias models' light. Empty leaves every face its static lightmap.
+    pub dlights: &'a [crate::dlight::DynamicLight],
+    /// The inline brush entities (doors, lifts, buttons: the world's own
+    /// `*N` models), put into the world's edge list at their origins
+    /// (`R_DrawBEntitiesOnList`).
+    pub bmodels: &'a [BModelInstance],
+    /// The standalone `b_*.bsp` item boxes (`misc_explobox`, the ammo and
+    /// health boxes): each borrows its own parsed [`Bsp`] and joins the edge
+    /// list after the inline models, as id's instanced brush models do. They
+    /// take their static lightmaps (id never marks them for dynamic light).
+    pub external: &'a [ExternalBModel<'a>],
+    /// The alias models (`cl_visedicts`' `mod_alias` entities), drawn after
+    /// the world against its z-buffer (`R_DrawEntitiesOnList`).
+    pub models: &'a [ModelInstance<'a>],
+    /// The sprite entities (`mod_sprite`: the explosion flash, bubbles),
+    /// z-tested after the alias models.
+    pub sprites: &'a [SpriteInstance<'a>],
+    /// The particles as `(world position, palette index)`, drawn after the
+    /// sprites against the same z-buffer (`R_DrawParticles`). id draws them
+    /// after the gun; with the gun's tripled 1/z the order only matters on
+    /// exact ties.
+    pub particles: &'a [(Vec3, u8)],
+    /// The first-person weapon, drawn last (`R_DrawViewModel`), or `None`.
+    pub viewmodel: Option<Viewmodel<'a>>,
+    /// The pixel aspect, the view's place on the screen, the cvars and the
+    /// renderer extras.
+    pub options: RenderOptions,
 }
 
-/// Render `bsp` with its real miptextures (as [`render_bsp_textured`]) and then
-/// draw each alias-model `instances` entry into the same image, sharing one
-/// z-buffer so models and world occlude one another correctly.
-///
-/// A thin wrapper over [`render_scene_ext`] with no brush submodels, no
-/// viewmodel, and a static (time 0) world; kept as a stable entry point.
-///
-/// At `time == 0` the animated special surfaces (liquids / sky) show their
-/// texture but do not advance; pass an advancing game time through
-/// [`render_scene_ext`] to make water ripple and sky scroll.
-pub fn render_scene(
-    bsp: &Bsp,
-    cam: &Camera,
-    w: usize,
-    h: usize,
-    palette: &[[u8; 3]; 256],
-    instances: &[ModelInstance],
-) -> Image {
-    render_scene_ext(
-        bsp,
-        cam,
-        w,
-        h,
-        palette,
-        instances,
-        &[],
-        &[],
-        None,
-        0.0,
-        &[],
-        &[],
-        &NEUTRAL_LIGHTSTYLE_SCALES,
-        None,
-    )
+impl<'a> Scene<'a> {
+    /// The world alone, seen by `camera` in a `width x height` view, at time
+    /// 0 with neutral light styles, no colormap and no entities.
+    pub fn new(world: &'a Bsp, camera: Camera, width: usize, height: usize, palette: &'a Palette) -> Scene<'a> {
+        Scene {
+            world,
+            camera,
+            width,
+            height,
+            palette,
+            colormap: None,
+            time: 0.0,
+            light_styles: &NEUTRAL_LIGHTSTYLE_SCALES,
+            dlights: &[],
+            bmodels: &[],
+            external: &[],
+            models: &[],
+            sprites: &[],
+            particles: &[],
+            viewmodel: None,
+            options: RenderOptions::default(),
+        }
+    }
 }
 
-/// Render the full scene as `R_RenderView` does: the world and every brush
-/// entity — the inline submodels (`bmodels`), then the external item boxes —
-/// through id's edge renderer (`edge.rs`: one edge list, each pixel of the view
-/// drawn once and its 16-bit 1/z written into `d_pzbuffer`), then the alias
-/// models (`models`) and the particles, each testing and writing that
-/// z-buffer, and last the optional first-person `viewmodel`. Passing an empty
-/// `bmodels`/`external` slice and `None` `viewmodel` reproduces
-/// [`render_scene`] exactly.
-///
-/// ## External brush models (item boxes)
-/// `external` is the set of standalone `b_*.bsp` item boxes — Quake's
-/// `misc_explobox` and the ammo/health pickup boxes (see [`ExternalBModel`]).
-/// Each entry borrows its own parsed [`Bsp`] and joins the edge list after the
-/// inline submodels (MODEL 0 at the item's origin), cut along the world's
-/// leaves and sorted with it as `R_DrawBEntitiesOnList` does. They are
-/// instanced models, which id never marks for dynamic lights, so they take
-/// their static (or fullbright) lightmap. An empty `external` slice draws
-/// nothing.
-///
-/// The `viewmodel`, when present, is drawn **last** (`R_DrawViewModel`,
-/// [`draw_viewmodel`]): Quake's `cl.viewent` at V_CalcRefdef's gun origin,
-/// drawn by the alias pipeline into the z-buffer with its 1/z tripled, so
-/// only a wall right against the eye can cover it.
-///
-/// `time` is `cl.time` in seconds: the liquid turb (`Turbulent8`'s 16.16
-/// `sintable`, built once per call and shared by the world and brush-submodel
-/// passes), the sky's two-layer scroll, animated wall textures
-/// (`R_TextureAnimation`) and alias frame/skin groups all run on it.
-///
-/// ## Particles
-/// `particles` is the frame's particle list (`R_DrawParticles`: explosions,
-/// spawns, blood), each a `(world_pos, palette index)` pair, drawn by
-/// `D_DrawParticle` against the same `d_pzbuffer` after the alias models and
-/// before the gun — so a particle behind a wall is hidden. (id draws them
-/// after the gun; with the gun's tripled 1/z the order only matters on exact
-/// ties.) An empty slice draws none. [`draw_particles`] is also public on its
-/// own, for tests of the projection and z test against a caller's buffer.
-///
-/// ## Dynamic lights
-/// `dlights` is the live set of [`crate::dlight::DynamicLight`]s (explosions,
-/// muzzle flashes, `EF_*` light effects). They are folded into each lightmapped
-/// world (and brush-submodel) face per `R_AddDynamicLights`: a light that
-/// reaches a face brightens its luxels, raising the per-pixel lightmap factor
-/// near the impact point. Sky and liquid faces are `TEX_SPECIAL` (fullbright, no
-/// lightmap) and are never dlit, matching the C. Passing an **empty** `dlights`
-/// slice leaves every face borrowing its static lightmap bytes, so the output is
-/// byte-identical to the pre-dlight renderer — which is why [`render_scene`] and
-/// the demo tests pass `&[]`.
-///
-/// ## Animated light styles
-/// `light_styles` is the per-style brightness scale (`[f32; 64]`, `1.0` ==
-/// normal), produced by [`crate::server::Server::lightstyle_scales`] from the
-/// map's flickering/pulsing patterns (`R_AnimateLight`). Each lightmapped face
-/// selects up to four styles via its `styles[0..3]` slots; the lightmap is the
-/// sum of each style's baked luxel block scaled by its `light_styles` value
-/// (`R_BuildLightMap`), computed BEFORE dynamic lights are added. Passing the
-/// neutral [`NEUTRAL_LIGHTSTYLE_SCALES`] (all `1.0`) reproduces the static
-/// style-0 lightmap byte-for-byte, which is what [`render_scene`] does — so the
-/// demo tests are unchanged. The animated front-ends pass the live scales each
-/// frame to make torches flicker and lights pulse.
-///
-/// ## Colormap (exact Quake shading)
-/// `colormap` is Quake's `gfx/colormap.lmp`: `64 * 256` bytes — 64 light rows of
-/// 256 palette indices each, row 0 brightest, row 63 darkest. When `Some`, a lit
-/// wall pixel is shaded the way the software renderer does: the per-pixel
-/// lightmap brightness selects a colormap ROW (`colormap_row`, ported from
-/// `R_BuildLightMap`'s bound/invert/shift), `colormap[row*256 + texel]` yields a
-/// PALETTE INDEX, and the final colour is `palette[that index]` — an index
-/// lookup that bakes Quake's non-linear darkening and CANNOT overbright past the
-/// base colour. Liquids and sky stay fullbright at row 0 (`colormap[texel]`).
-/// When `None`, the renderer keeps the legacy linear `palette[texel] *
-/// brightness` multiply byte-for-byte, so [`render_scene`] and every existing
-/// caller/test are unchanged. A colormap shorter than `64*256` bytes is ignored
-/// (treated as `None`) rather than read out of bounds.
-#[allow(clippy::too_many_arguments)]
-pub fn render_scene_ext(
-    bsp: &Bsp,
-    cam: &Camera,
+/// A frame as its passes see it: the [`Scene`] with its size clamped to the
+/// cvars' largest view and its camera's field of view the view's own
+/// (`R_ViewChanged`'s `fov_x`: Hor+ widens it).
+struct Frame<'s, 'a> {
+    scene: &'s Scene<'a>,
+    /// The view's camera: the scene's, with the view's field of view.
+    cam: Camera,
     w: usize,
     h: usize,
-    palette: &[[u8; 3]; 256],
-    models: &[ModelInstance],
-    bmodels: &[BModelInstance],
-    external: &[ExternalBModel],
-    viewmodel: Option<Viewmodel>,
-    time: f32,
-    particles: &[(Vec3, u8)],
-    dlights: &[crate::dlight::DynamicLight],
-    light_styles: &[f32; LIGHTSTYLES],
-    colormap: Option<&[u8]>,
-) -> Image {
-    // The 14-arg entry point every test / tool caller uses: no sprite entities,
-    // square pixels.
-    render_scene_ext_sprited(
-        bsp, cam, w, h, palette, models, bmodels, external, viewmodel, time, particles, dlights,
-        light_styles, colormap, &[], &RenderOptions::default(),
-    )
+    /// The liquids' `sintable` (`R_InitTurb`).
+    turb: TurbTable,
 }
 
-/// As [`render_scene_ext`], plus a list of camera-facing [`SpriteInstance`]s drawn
-/// (z-tested) after the alias models and before the viewmodel — Quake's
-/// `mod_sprite` entities (the `s_explod.spr` explosion flash, bubbles) — and the
-/// [`RenderOptions`] (pixel aspect, extras). An empty `sprites` slice and the
-/// default options are byte-identical to [`render_scene_ext`].
+impl<'s, 'a> Frame<'s, 'a> {
+    /// `scene` in a `w x h` view (already clamped to the cvars' largest).
+    fn new(scene: &'s Scene<'a>, w: usize, h: usize) -> Frame<'s, 'a> {
+        let opts = &scene.options;
+        let (screen_w, screen_h) = opts.screen.map_or((w, h), |s| (s.vid_w, s.vid_h));
+        let fov_x = opts.video.fov_mode.fov_x(scene.camera.fov_deg, screen_w, screen_h, opts.aspect());
+        let cam = Camera { fov_deg: fov_x, ..scene.camera };
+        Frame { scene, cam, w, h, turb: TurbTable::new() }
+    }
+
+    /// `scr_fov`, the cvar: what id tests on the cvar itself (no gun over 90,
+    /// the sky's scale), where the passes project with [`Frame::cam`]'s.
+    fn scr_fov(&self) -> f32 {
+        self.scene.camera.fov_deg
+    }
+}
+
+/// id's software renderer: everything it keeps between frames, owned.
 ///
-/// `R_RenderView_`: `R_EdgeDrawing` — the world and every brush entity through
-/// one edge list ([`edge`]), each pixel of the view drawn once and its `1/z`
-/// written into the never-cleared 16-bit `d_pzbuffer` — then the entities
-/// against that buffer. Neither the image nor the z-buffer is cleared: the
-/// spans cover the view.
+/// id keeps it in globals and in the model: the edge cache in `medge_t`, the
+/// leaf keys and visframes (`r_bsp.c`, `r_edge.c`), the surface cache
+/// (`d_surf.c`), `d_pzbuffer` and the warp tables. Here one value owns it all,
+/// so a frame's passes are handed exactly the state they use and a second
+/// renderer (or a second thread) can never see another's:
+/// [`Renderer::begin_map`] is `R_NewMap`, [`Renderer::render`] is
+/// `R_RenderView`. What a frame is drawn with — the cvars included — is the
+/// [`Scene`]'s, handed in each frame.
 ///
-/// The view is at most [`max_view_size`] — id's [`MAXWIDTH`] x [`MAXHEIGHT`]
-/// in Classic: a larger `w` or `h` is clamped ([`clamp_to_max`]), and the
-/// returned image's `w`/`h` say what was drawn. The [`VideoCvars`] are read
-/// once, here: with [`FovMode::HorPlus`] every pass draws with the wider
-/// field of view it gives this screen, while `cam.fov_deg` stays `scr_fov`
-/// for what id tests on the cvar itself (no gun over 90, the sky's scale).
-#[allow(clippy::too_many_arguments)]
-pub fn render_scene_ext_sprited(
-    bsp: &Bsp,
-    cam: &Camera,
-    w: usize,
-    h: usize,
-    palette: &[[u8; 3]; 256],
-    models: &[ModelInstance],
-    bmodels: &[BModelInstance],
-    external: &[ExternalBModel],
-    viewmodel: Option<Viewmodel>,
-    time: f32,
-    particles: &[(Vec3, u8)],
-    dlights: &[crate::dlight::DynamicLight],
-    light_styles: &[f32; LIGHTSTYLES],
-    colormap: Option<&[u8]>,
-    sprites: &[SpriteInstance],
-    opts: &RenderOptions,
-) -> Image {
-    let video = video_cvars();
-    // No mode is larger than the cvars allow (id's, or 8K with hires).
-    let (w, h) = clamp_to_max(w, h);
-    // The frame's buffers, kept across frames (see [`recycle_image`]).
-    let mut image = Image::reused_uncleared(w, h);
-    if w == 0 || h == 0 {
-        return image;
+/// The per-map state is indexed by the world's face, edge, node and leaf
+/// numbers, so it belongs to one world: call [`Renderer::begin_map`] whenever
+/// the world changes (a new map, a changelevel). A scene whose world has a
+/// different shape (a different count of faces, edges, nodes, leaves or
+/// lighting) than the one begun starts a new map itself, so a forgotten
+/// `begin_map` costs a cold cache, never a wrong pixel.
+pub struct Renderer {
+    /// The shape of the world [`Renderer::begin_map`] was called for.
+    map: Option<MapShape>,
+    /// The edge renderer's state (`r_bsp.c`, `r_draw.c`, `r_edge.c`).
+    edge: edge::EdgeState,
+    /// The world's per-face caches, the surface cache among them.
+    surfaces: surf::SurfaceCaches,
+    /// id's z-buffer, `d_pzbuffer`: the 16-bit 1/z of every pixel of the view,
+    /// `(1/z * 0x8000 * 0x10000) >> 16` (larger is nearer). Never cleared:
+    /// every frame's world spans write all of it (`D_DrawZSpans`), and the
+    /// entities test and write it.
+    zbuf: Vec<i16>,
+    /// `D_WarpScreen`'s tables, kept across underwater frames.
+    warp: warp::WarpTables,
+    prof: stats::Profiler,
+}
+
+/// A world's identity for [`Renderer`]'s per-map state: the sizes of what
+/// that state is indexed by. Not the world's address — a world is begun
+/// explicitly ([`Renderer::begin_map`]); this only catches a scene of a
+/// different world handed to a renderer that was not told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapShape {
+    faces: usize,
+    edges: usize,
+    nodes: usize,
+    leafs: usize,
+    lighting: usize,
+}
+
+impl MapShape {
+    fn of(world: &Bsp) -> MapShape {
+        MapShape {
+            faces: world.faces.len(),
+            edges: world.edges.len(),
+            nodes: world.nodes.len(),
+            leafs: world.leafs.len(),
+            lighting: world.lighting.len(),
+        }
     }
-    let mut zbuf = ZBUF.with(|z| std::mem::take(&mut *z.borrow_mut()));
-    zbuf.resize(w.saturating_mul(h), 0);
-    // R_ViewChanged's fov_x for this screen: scr_fov itself in Classic.
-    let scr_fov = cam.fov_deg;
-    let (screen_w, screen_h) = opts.screen.map_or((w, h), |s| (s.vid_w, s.vid_h));
-    let view_cam = Camera { fov_deg: video.fov_mode.fov_x(scr_fov, screen_w, screen_h, opts.aspect()), ..*cam };
-    let cam = &view_cam;
-    // The turbulent SIN table for liquid warp.
-    let turb = TurbTable::new();
-    edge::render_edges(
-        &mut image, &mut zbuf, bsp, cam, scr_fov, opts, palette, &turb, time, light_styles, dlights, colormap,
-        bmodels, external,
-    );
-    // The entities: alias models, particles, sprites and the gun, each testing
-    // (and writing) the world's 16-bit 1/z. Phase wall-timers: `StatInstant::now()`
-    // is only evaluated when the profiler is on (via `.then(..)`), so the shared
-    // render path never reads a clock. (On wasm, where `Instant` is unavailable,
-    // only the opt-in benchmark build turns the profiler on, after installing a
-    // JS clock via `set_render_stats_clock`.)
-    let ta = stats_on().then(StatInstant::now);
-    for inst in models {
-        draw_alias_model(&mut image, &mut zbuf, bsp, cam, scr_fov, opts, inst, palette, dlights, light_styles, time, colormap);
+}
+
+impl Default for Renderer {
+    fn default() -> Renderer {
+        Renderer::new()
     }
-    if let Some(t) = ta { stat(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
-    // Particles draw after the world/models, z-tested against the same buffer so
-    // walls occlude them. (id draws them after the gun; with the gun's tripled
-    // 1/z in the shared z-buffer the order only matters on exact ties.)
-    let tp = stats_on().then(StatInstant::now);
-    part::draw_particles_sized(&mut image, &mut zbuf, cam, particles, palette, w, h, opts.aspect(), video.hires);
-    if let Some(t) = tp { stat(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
-    // Sprite-model entities (explosion flash, bubbles) — camera-facing billboards,
-    // z-tested against the same buffer, drawn after models and before the viewmodel.
-    let tsp = stats_on().then(StatInstant::now);
-    draw_sprites(&mut image, &mut zbuf, cam, opts, sprites, palette, time, w, h);
-    if let Some(t) = tsp { stat(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
-    // The weapon: R_DrawViewModel, after the entities.
-    let tv = stats_on().then(StatInstant::now);
-    if let Some(vm) = viewmodel {
-        draw_viewmodel(&mut image, &mut zbuf, bsp, cam, scr_fov, opts, &vm, palette, dlights, light_styles, time, colormap);
+}
+
+impl Renderer {
+    /// A renderer with no map begun and the profiler off.
+    pub fn new() -> Renderer {
+        Renderer {
+            map: None,
+            edge: edge::EdgeState::new(),
+            surfaces: surf::SurfaceCaches::default(),
+            zbuf: Vec::new(),
+            warp: warp::WarpTables::default(),
+            prof: stats::Profiler::default(),
+        }
     }
-    if let Some(t) = tv { stat(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
-    ZBUF.with(|z| *z.borrow_mut() = zbuf);
-    image
+
+    /// `R_NewMap` (`r_misc.c`): forget everything kept for the last world and
+    /// size the per-map state for `world` — the edge cache, the visframes and
+    /// parents of its nodes and leaves, and the per-face caches, all at zero
+    /// as `Mod_LoadBrushModel` leaves them.
+    pub fn begin_map(&mut self, world: &Bsp) {
+        self.map = Some(MapShape::of(world));
+        self.edge.begin_map(world);
+        self.surfaces.begin_map(world.faces.len());
+    }
+
+    /// Turn the profiler on with its counters at zero: the frames drawn from
+    /// now on add into [`RenderStats`] until [`Renderer::stats_end`].
+    pub fn stats_begin(&mut self) {
+        self.prof.begin();
+    }
+
+    /// What the profiler counted since [`Renderer::stats_begin`]; it is off
+    /// again.
+    pub fn stats_end(&mut self) -> RenderStats {
+        self.prof.end()
+    }
+
+    /// Install (or clear) the profiler's clock: a monotonic milliseconds
+    /// source, for a target without `std::time::Instant` (the browser's
+    /// `performance.now()`). Only read while profiling.
+    pub fn set_stats_clock(&mut self, clock: Option<fn() -> f64>) {
+        self.prof.set_clock(clock);
+    }
+
+    /// The bytes the lit-surface cache holds now (every baked block of every
+    /// face at every mip level), and the number of blocks: the port's
+    /// counterpart of id's fixed `D_SurfaceCacheForRes` pool, for measurement.
+    #[must_use]
+    pub fn surface_cache_usage(&self) -> (usize, usize) {
+        self.surfaces.usage()
+    }
+
+    /// Draw `scene` as `R_RenderView` does: `R_EdgeDrawing` — the world and
+    /// every brush entity through one edge list (`edge.rs`), each pixel of the
+    /// view drawn once and its 1/z written into the never-cleared 16-bit
+    /// `d_pzbuffer` — then the alias models, the sprites and the particles,
+    /// each testing and writing that z-buffer, and last the gun
+    /// (`R_DrawViewModel`, its 1/z tripled so only a wall against the eye
+    /// covers it). Neither the image nor the z-buffer is cleared: the spans
+    /// cover the view.
+    ///
+    /// The view is at most [`VideoCvars::max_view_size`] — id's [`MAXWIDTH`] x
+    /// [`MAXHEIGHT`] in Classic: a larger scene is clamped, and the returned
+    /// image's `w`/`h` say what was drawn. With [`FovMode::HorPlus`] every
+    /// pass draws with the wider field of view it gives this screen, while
+    /// the scene's `camera.fov_deg` stays `scr_fov` for what id tests on the
+    /// cvar itself (no gun over 90, the sky's scale).
+    pub fn render(&mut self, scene: &Scene) -> Image {
+        // No mode is larger than the cvars allow (id's, or 8K with hires).
+        let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
+        // The frame's pixels, on a spare buffer (see [`recycle_image`]).
+        let mut image = Image::reused_uncleared(w, h);
+        if w == 0 || h == 0 {
+            return image;
+        }
+        if self.map != Some(MapShape::of(scene.world)) {
+            self.begin_map(scene.world);
+        }
+        self.zbuf.resize(w.saturating_mul(h), 0);
+        let frame = Frame::new(scene, w, h);
+        self.edge.render(&mut image, &mut self.zbuf, &frame, &mut self.surfaces, &mut self.prof);
+        self.draw_entities(&mut image, &frame);
+        image
+    }
+
+    /// The entities against the world's 16-bit 1/z: alias models, sprites,
+    /// particles and the gun, each testing and writing it, with a phase timer
+    /// each while profiling.
+    fn draw_entities(&mut self, image: &mut Image, frame: &Frame) {
+        let scene = frame.scene;
+        let zbuf = &mut self.zbuf[..];
+        let prof = &mut self.prof;
+        let ta = prof.now();
+        for inst in scene.models {
+            draw_alias_model(image, zbuf, frame, inst, prof);
+        }
+        if let Some(t) = ta { prof.add(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
+        let tp = prof.now();
+        part::draw_particles_sized(
+            image, zbuf, &frame.cam, scene.particles, scene.palette, frame.w, frame.h, scene.options.aspect(),
+            scene.options.video.hires,
+        );
+        if let Some(t) = tp { prof.add(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
+        let tsp = prof.now();
+        draw_sprites(image, zbuf, frame);
+        if let Some(t) = tsp { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
+        let tv = prof.now();
+        if let Some(vm) = &scene.viewmodel {
+            draw_viewmodel(image, zbuf, frame, vm);
+        }
+        if let Some(t) = tv { prof.add(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
+    }
+
+    /// The z-buffer the last frame left.
+    #[cfg(test)]
+    pub(crate) fn zbuf(&self) -> &[i16] {
+        &self.zbuf
+    }
+
+    /// `D_WarpScreen` (`d_scan.c`), for an underwater frame: `view`, rendered
+    /// at the warp rectangle ([`crate::screen::warp_vrect`]), wobbled and
+    /// stretched over the screen's `out_w x out_h` view rectangle at `clock`.
+    /// With the hires extra (`hires`) the wobble is scaled to the view.
+    pub fn warp(&mut self, view: Image, out_w: usize, out_h: usize, clock: f32, hires: bool) -> Image {
+        apply_warp(&mut self.warp, view, out_w, out_h, clock, hires)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1157,7 +1254,7 @@ pub fn demo_room() -> Bsp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::fixtures::{synthetic_liquid_pixels, synthetic_sky_pixels};
+    use crate::render::fixtures::{render_once, synthetic_liquid_pixels, synthetic_sky_pixels};
 
     #[test]
     fn palette_parsing() {
@@ -1178,7 +1275,7 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let img = render_bsp_textured(&bsp, &cam, 160, 120, &pal);
+        let img = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         let bg = [10u8, 10, 14];
         assert!(img.rgb.iter().any(|&p| p != bg), "textured render drew nothing");
     }
@@ -1284,10 +1381,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let (w, h) = (320usize, 200usize);
         let render = |pixel_aspect: f32| {
-            render_scene_ext_sprited(
-                &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES,
-                None, &[], &RenderOptions { pixel_aspect, ..Default::default() },
-            )
+            render_once(&Scene { options: RenderOptions { pixel_aspect, ..Default::default() }, ..Scene::new(&bsp, cam, w, h, &pal) })
         };
         // The pillar's face: the colour at the centre; its columns on the centre
         // row and its top row on the centre column.
@@ -1298,7 +1392,7 @@ mod tests {
             (row[0], row[row.len() - 1], h / 2 - top)
         };
         let square = render(1.0);
-        assert_eq!(square.rgb, render_scene(&bsp, &cam, w, h, &pal, &[]).rgb, "aspect 1 is the default");
+        assert_eq!(square.rgb, render_once(&Scene::new(&bsp, cam, w, h, &pal)).rgb, "aspect 1 is the default");
         let (l1, r1, up1) = extent(&square);
         let (l2, r2, up2) = extent(&render(crate::screen::vid_aspect(w, h, 4.0 / 3.0)));
         assert_eq!((l1, r1), (l2, r2), "the width does not change");
@@ -1352,17 +1446,24 @@ mod tests {
     }
 
     #[test]
-    fn render_scene_empty_matches_textured() {
-        // With no instances, render_scene must be pixel-for-pixel identical to
-        // render_bsp_textured (the world alone).
-        let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
-        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let baseline = render_bsp_textured(&bsp, &cam, 160, 120, &pal);
-        let scene = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        assert_eq!(scene.w, baseline.w);
-        assert_eq!(scene.h, baseline.h);
-        assert_eq!(scene.rgb, baseline.rgb, "empty scene must equal textured render");
+    fn a_warm_renderer_draws_what_a_cold_one_draws() {
+        // Everything a renderer keeps between frames is a cache of what the
+        // frame would compute anyway: the second frame of a renderer, and a
+        // frame after another map, are the first frame of a new one.
+        let bsp = fixtures::lightmapped_demo_room(100, 200);
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0; 3], 90.0);
+        let pal = fixtures::ramp_palette();
+        let cm: Vec<u8> = (0..light::COLORMAP_LEN).map(|i| (i % 256 + 3 * (i / 256)) as u8).collect();
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[1] = 0.5;
+        let scene = Scene { colormap: Some(&cm), light_styles: &styles, ..Scene::new(&bsp, cam, 160, 120, &pal) };
+        let cold = Renderer::new().render(&scene);
+        let mut r = Renderer::new();
+        r.render(&scene);
+        assert_eq!(r.render(&scene).rgb, cold.rgb, "the second frame");
+        let other = demo_room();
+        r.render(&Scene::new(&other, cam, 160, 120, &pal));
+        assert_eq!(r.render(&scene).rgb, cold.rgb, "after another map");
     }
 
     #[test]
@@ -1408,8 +1509,8 @@ mod tests {
         // enough for this assertion.)
         let cam = Camera::looking_at([0.0, 0.0, 100.0], [0.0, 0.0, -128.0], 90.0);
 
-        let a = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.6, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let a = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
+        let b = render_once(&Scene { time: 0.6, ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let bg = [10u8, 10, 14];
         assert!(
@@ -1431,12 +1532,9 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let t0 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
-        let t1 = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 9.5, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let t0 = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
+        let t1 = render_once(&Scene { time: 9.5, ..Scene::new(&bsp, cam, 160, 120, &pal) });
         assert_eq!(t0.rgb, t1.rgb, "ordinary walls must not animate with time");
-        // And it must equal the time-less render_scene wrapper.
-        let rs = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        assert_eq!(t0.rgb, rs.rgb, "render_scene must equal render_scene_ext(.., 0.0)");
     }
 
     /// A [`demo_room`] whose FLOOR is a liquid (`*water1`) and CEILING is sky

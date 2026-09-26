@@ -64,11 +64,25 @@ fn lap_hook(phase: Phase) {
     });
 }
 
-/// One timedemo of `name` at `vid`: `CL_FinishTimeDemo`'s line and the frame count.
-fn run(pak: &Pak, name: &str, vid: &Vid, clock: &mut TimeDemoClock, rgba: &mut Vec<u8>) -> Option<(String, i64)> {
+/// What one timedemo run gives.
+struct Run {
+    /// `CL_FinishTimeDemo`'s line.
+    line: String,
+    frames: i64,
+    /// What the render profiler counted, when it was on.
+    stats: Option<render::RenderStats>,
+    /// The surface cache at the end (bytes, blocks).
+    cache: (usize, usize),
+}
+
+/// One timedemo of `name` at `vid`, with the render profiler on if `profile`.
+fn run(pak: &Pak, name: &str, vid: &Vid, clock: &mut TimeDemoClock, rgba: &mut Vec<u8>, profile: bool) -> Option<Run> {
     let gamma = render::build_gamma_table(1.0);
     let mut sound = Vec::new();
     let mut d = cl_demo::build_timedemo(pak.clone(), name, &mut sound)?;
+    if profile {
+        d.renderer.stats_begin();
+    }
     let mut host_framecount: i64 = 0;
     clock.start(host_framecount);
     let t0 = Instant::now();
@@ -97,7 +111,8 @@ fn run(pak: &Pak, name: &str, vid: &Vid, clock: &mut TimeDemoClock, rgba: &mut V
         lap_hook(Phase::Pack);
         host_framecount += 1;
     };
-    Some((line, host_framecount))
+    let stats = profile.then(|| d.renderer.stats_end());
+    Some(Run { line, frames: host_framecount, stats, cache: d.renderer.surface_cache_usage() })
 }
 
 pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<String, String> {
@@ -120,7 +135,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
     video.apply();
     let mut sizes = Vec::new();
     for r in res.split(',') {
-        sizes.push(super::parse_res(r)?);
+        sizes.push(super::parse_res(r, video.cvars)?);
     }
 
     // The archive in memory, as the page embeds it.
@@ -134,21 +149,23 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
         // CL_PlayDemo_f, then CL_TimeDemo_f in host frame 0.
         let _ = writeln!(o, "Playing demo from {name}.");
         let display_aspect = video.display_aspect(width, height, Some(DISPLAY_ASPECT));
-        let vid = Vid { width, height, display_aspect, exact_perspective: false };
-        let Some((line, _)) = run(&pak, &name, &vid, &mut clock, &mut rgba) else {
+        let vid = Vid { width, height, display_aspect, exact_perspective: false, video: video.cvars };
+        let Some(timed) = run(&pak, &name, &vid, &mut clock, &mut rgba, false) else {
             let _ = writeln!(o, "ERROR: couldn't open.");
             return Ok(o);
         };
-        let _ = writeln!(o, "{width}x{height}: {line}");
+        let _ = writeln!(o, "{width}x{height}: {}", timed.line);
         if profile {
             LAPS.with(|l| *l.borrow_mut() = (None, [0.0; PHASES]));
             set_lap_hook(Some(lap_hook));
-            render::render_stats_begin();
             let t0 = Instant::now();
-            let frames = run(&pak, &name, &vid, &mut clock, &mut rgba).map_or(1, |(_, n)| n.max(1));
+            let profiled = run(&pak, &name, &vid, &mut clock, &mut rgba, true);
             let total = t0.elapsed().as_secs_f64();
-            let st = render::render_stats_end();
             set_lap_hook(None);
+            let (frames, st, (bytes, blocks)) = match profiled {
+                Some(r) => (r.frames.max(1), r.stats.unwrap_or_default(), r.cache),
+                None => (1, render::RenderStats::default(), (0, 0)),
+            };
             let laps = LAPS.with(|l| l.borrow().1);
             let ms = |s: f64| s * 1000.0 / frames as f64;
             let ns = |n: u64| n as f64 / 1e6 / frames as f64;
@@ -195,7 +212,6 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             let vrect = render::calc_refdef(width, height, render::VIEWSIZE_DEFAULT, false).vrect;
             let background = (frames as u64 * (vrect.w * vrect.h) as u64).saturating_sub(st.world_pixels);
             let _ = writeln!(o, "  background pixels in all {frames} frames (if every frame is the viewsize-100 view): {background}");
-            let (bytes, blocks) = render::surface_cache_usage();
             let _ = writeln!(o, "  surface cache at the end: {:.1} MB in {blocks} blocks", bytes as f64 / 1e6);
         }
     }

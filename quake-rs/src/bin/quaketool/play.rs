@@ -1,5 +1,7 @@
 //! `quaketool play <pak> <workload[,workload...]> [frames] [--res WxH[,WxH...]]
-//! [--hash-every N] [--ppm PREFIX]` — the browser's game client, run natively.
+//! [--hash-every N] [--ppm PREFIX] [video options]` — the browser's game
+//! client, run natively. The video options are `shot`'s (`video.rs`: `--video
+//! modern` and friends; the display stays the page's 4:3).
 //!
 //! The same [`quake_rs::client`] frames the page runs (`walk_frame`,
 //! `demo_frame`), driven the way `web/bench.py` drives the page, one host
@@ -36,6 +38,8 @@ use quake_rs::client::host::host_filter_time;
 use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPlay, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
 use quake_rs::render;
+
+use super::video::VideoArgs;
 
 /// The width:height ratio the browser page displays the frame at
 /// (quake-wasm's `vid::DISPLAY_ASPECT`).
@@ -172,11 +176,17 @@ impl Host {
 }
 
 pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<String, String> {
-    // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX].
+    // Options: [frames] [--res WxH[,WxH...]] [--hash-every N] [--ppm PREFIX]
+    // [video options].
     let (mut frames, mut res, mut every, mut ppm) = (660u32, "320x200".to_string(), 30u32, None);
+    let mut video = VideoArgs::default();
     let mut i = 0;
     while i < rest.len() {
         let val = |i: usize| rest.get(i + 1).ok_or_else(|| format!("{} needs a value", rest[i]));
+        if video.parse(&rest[i], val(i).map(String::as_str).unwrap_or(""))? {
+            i += 2;
+            continue;
+        }
         match rest[i].as_str() {
             "--res" => {
                 res = val(i)?.clone();
@@ -196,13 +206,13 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     }
     let mut sizes = Vec::new();
     for r in res.split(',') {
-        sizes.push(super::parse_res(r)?);
+        sizes.push(super::parse_res(r, video.cvars)?);
     }
 
     // The archive in memory, as the page embeds it.
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
-    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false };
+    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars };
     let mut host = Host {
         pak,
         menu: render::Menu::new(),

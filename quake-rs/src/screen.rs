@@ -173,13 +173,13 @@ pub const WARP_HEIGHT: usize = 200;
 /// picture, sampled a little coarser across (e.g. 266 columns for 4:3). At
 /// 16:10 and wider the C's aspect is `vid.aspect` itself and nothing differs.
 ///
-/// With the hires extra ([`VideoCvars::hires`](crate::render::VideoCvars))
+/// With the hires extra (`hires`, [`VideoCvars::hires`](crate::render::VideoCvars))
 /// there is no warp buffer: the underwater view is rendered at the screen's
-/// view rectangle, as above water, and [`apply_warp`](crate::render::apply_warp)
+/// view rectangle, as above water, and [`Renderer::warp`](crate::render::Renderer::warp)
 /// scales the wobble to it — at 4K id's buffer would be blown up twelve times.
-pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> ViewRect {
+pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool, hires: bool) -> ViewRect {
     let (viewsize, _, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);
-    if (vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT) || crate::render::video_cvars().hires {
+    if (vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT) || hires {
         return set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission);
     }
     let (mut w, mut h) = (vid_w as f32, vid_h as f32);
@@ -574,12 +574,12 @@ mod tests {
     fn warp_vrect_is_r_setupframes_warp_buffer_view() {
         // No larger than 320x200: the screen's own view rectangle (1:1 warp).
         for vs in [30.0, 50.0, 100.0, 110.0, 120.0] {
-            assert_eq!(warp_vrect(320, 200, vs, false), calc_refdef(320, 200, vs, false).vrect);
+            assert_eq!(warp_vrect(320, 200, vs, false, false), calc_refdef(320, 200, vs, false).vrect);
         }
         // id's 48-row bar on a 960x600 screen is (int)(48 * 200/600) = 16 rows
         // of the warp buffer.
-        assert_eq!(warp_vrect(960, 600, 100.0, false), vr(0, 0, 320, 184));
-        assert_eq!(warp_vrect(640, 400, 100.0, false), vr(0, 0, 320, 176));
+        assert_eq!(warp_vrect(960, 600, 100.0, false, false), vr(0, 0, 320, 184));
+        assert_eq!(warp_vrect(640, 400, 100.0, false, false), vr(0, 0, 320, 176));
         // The "scaled 2-D" extra's bar is 48 rows of the 320x200 screen.
         let _extra = crate::draw::Scaled2dGuard::set(true);
         // Every 16:10 preset renders underwater into the 320x200 screen's view
@@ -589,25 +589,24 @@ mod tests {
             for step in 3..=12 {
                 let vs = step as f32 * 10.0;
                 let want = calc_refdef(320, 200, vs, false).vrect;
-                assert_eq!(warp_vrect(w as usize, h as usize, vs, false), want, "{w}x{h} @ {vs}");
+                assert_eq!(warp_vrect(w as usize, h as usize, vs, false, false), want, "{w}x{h} @ {vs}");
             }
-            assert_eq!(warp_vrect(w as usize, h as usize, 50.0, true), vr(0, 0, 320, 200));
+            assert_eq!(warp_vrect(w as usize, h as usize, 50.0, true, false), vr(0, 0, 320, 200));
         }
-        assert_eq!(warp_vrect(960, 600, 50.0, false), vr(80, 26, 160, 100));
+        assert_eq!(warp_vrect(960, 600, 50.0, false, false), vr(80, 26, 160, 100));
         // Wider than 16:10: 320 wide, the height follows the mode (C's too).
-        assert_eq!(warp_vrect(1280, 600, 120.0, false), vr(0, 0, 320, 150));
+        assert_eq!(warp_vrect(1280, 600, 120.0, false, false), vr(0, 0, 320, 150));
         // Taller (4:3): id squeezes 320x200 with its pixel aspect; the square-
         // pixel port keeps the shape instead (266 wide, &~7 -> 264).
-        assert_eq!(warp_vrect(640, 480, 120.0, false), vr(1, 0, 264, 200));
+        assert_eq!(warp_vrect(640, 480, 120.0, false, false), vr(1, 0, 264, 200));
     }
 
     #[test]
     fn hires_renders_underwater_at_the_view_itself() {
         // The hires extra has no warp buffer: the view rectangle, at any size.
-        let _hires = crate::render::VideoGuard::set(crate::render::VideoCvars::MODERN);
         for (w, h) in [(320, 200), (960, 600), (1920, 1080), (3840, 2160)] {
             for vs in [50.0, 100.0, 120.0] {
-                assert_eq!(warp_vrect(w, h, vs, false), calc_refdef(w, h, vs, false).vrect, "{w}x{h} @ {vs}");
+                assert_eq!(warp_vrect(w, h, vs, false, true), calc_refdef(w, h, vs, false).vrect, "{w}x{h} @ {vs}");
             }
         }
     }

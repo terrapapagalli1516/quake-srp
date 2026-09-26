@@ -12,7 +12,7 @@
 //! --scaled2d 0|1           the status bar, menus and console blown up from 320x200
 //! ```
 
-use quake_rs::render::{self, FovMode, VideoCvars};
+use quake_rs::render::{FovMode, VideoCvars};
 
 /// The parsed video options (see the module docs).
 #[derive(Clone, Copy, Debug, Default)]
@@ -68,10 +68,10 @@ impl VideoArgs {
         Ok(true)
     }
 
-    /// Set the cvars (and the scaled 2-D layer, if given) for this thread's
-    /// frames. Before `--res` is parsed: hires lifts its clamp.
+    /// Set the scaled 2-D layer, if given, for this thread's frames. (The
+    /// video cvars go to the frames themselves: [`Vid::video`](quake_rs::client::Vid::video),
+    /// [`RenderOptions::video`](quake_rs::render::RenderOptions::video).)
     pub fn apply(&self) {
-        render::set_video_cvars(self.cvars);
         if let Some(on) = self.scaled_2d {
             quake_rs::draw::set_scaled_2d(on);
         }

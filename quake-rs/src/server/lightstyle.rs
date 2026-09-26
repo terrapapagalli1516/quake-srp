@@ -159,7 +159,7 @@ impl Server {
 
     /// `R_AnimateLight` (r_light.c): the per-style brightness scale at game `time`,
     /// one entry per `MAX_LIGHTSTYLES` style index, ready to pass to
-    /// [`crate::render::render_scene_ext`].
+    /// [`crate::render::Scene::light_styles`].
     ///
     /// For style `j` with pattern string of length `L`:
     /// * `L == 0` (unset) → scale `1.0` (the C `d_lightstylevalue = 256`, i.e.

@@ -7,9 +7,10 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
-use super::{Camera, Image, RenderOptions};
+use super::{Camera, Frame, Image};
 use super::light::{r_light_point, COLORMAP_LEN, LIGHTSTYLES};
 use super::polyse::PolyFramebuffer;
+use super::stats::Profiler;
 
 // ---------------------------------------------------------------------------
 // Alias (MDL) models rendered into the world scene
@@ -20,9 +21,9 @@ use super::polyse::PolyFramebuffer;
 /// pose, and a flat base `color`.
 ///
 /// Borrows the model so a single parsed `Mdl` (e.g. cached by name) can back
-/// many instances without cloning. Rendered by [`draw_alias_model`] /
-/// [`render_scene`](super::render_scene) sharing the world's z-buffer, so models occlude — and are
-/// occluded by — BSP geometry correctly.
+/// many instances without cloning. Rendered by `draw_alias_model`
+/// ([`Scene::models`](super::Scene::models)) sharing the world's z-buffer, so
+/// models occlude — and are occluded by — BSP geometry correctly.
 ///
 /// `frame` selects which pose to draw (see [`mdl_frame_verts`]); an out-of-range
 /// frame resets to 0 (matching `R_AliasSetupFrame`), so any value is safe.
@@ -34,7 +35,7 @@ use super::polyse::PolyFramebuffer;
 /// track per-entity skins.
 ///
 /// Group-frame (`ALIAS_GROUP`) and group-skin (`ALIAS_SKIN_GROUP`) animation is
-/// driven by the **scene `time`** passed to [`render_scene_ext`](super::render_scene_ext) (not a
+/// driven by the **scene `time`** ([`Scene::time`](super::Scene::time), not a
 /// per-instance field), so existing callers animate for free as game time
 /// advances. `R_AliasSetupFrame` / `R_AliasSetupSkin` select the sub-frame /
 /// sub-skin whose interval window contains that time.
@@ -770,25 +771,18 @@ fn alias_clip_triangle(
 /// Draw one alias-model instance, as `R_DrawEntitiesOnList` does: the bounding
 /// box test (`R_AliasCheckBBox`), the light at the origin plus dynamic lights,
 /// then `R_AliasDrawModel`. The model shares the world's z-buffer.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_alias_model(
     image: &mut Image,
     zbuf: &mut [i16],
-    bsp: &Bsp,
-    cam: &Camera,
-    scr_fov: f32,
-    opts: &RenderOptions,
+    frame: &Frame,
     inst: &ModelInstance,
-    palette: &[[u8; 3]; 256],
-    dlights: &[crate::dlight::DynamicLight],
-    light_styles: &[f32; LIGHTSTYLES],
-    time: f32,
-    colormap: Option<&[u8]>,
+    prof: &mut Profiler,
 ) {
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let view = AliasView::new(cam, scr_fov, image.w, image.h, opts.aspect());
+    let scene = frame.scene;
+    let view = AliasView::new(&frame.cam, frame.scr_fov(), image.w, image.h, scene.options.aspect());
     let ent = AliasEntity {
         mdl: inst.mdl,
         origin: inst.origin,
@@ -797,17 +791,17 @@ pub(super) fn draw_alias_model(
         skinnum: inst.skinnum,
         color: inst.color,
     };
-    super::stats::stat(|s| s.alias_models += 1);
+    prof.add(|s| s.alias_models += 1);
     let Some(trivial_accept) = alias_check_bbox(&view, &ent) else {
         return;
     };
-    super::stats::stat(|s| {
+    prof.add(|s| {
         s.alias_accepted += 1;
         s.alias_tris += inst.mdl.header.numtris.max(0) as u64;
     });
-    let light = alias_entity_light(bsp, inst.origin, light_styles, dlights, false);
-    let mut fb = PolyFramebuffer::new(image, zbuf, palette);
-    alias_draw_model(&mut fb, &view, &ent, trivial_accept, light, false, time, colormap);
+    let light = alias_entity_light(scene.world, inst.origin, scene.light_styles, scene.dlights, false);
+    let mut fb = PolyFramebuffer::new(image, zbuf, scene.palette);
+    alias_draw_model(&mut fb, &view, &ent, trivial_accept, light, false, scene.time, scene.colormap);
 }
 
 /// `r_avertexnormals` (anorms.h): the 162 precomputed vertex normals an MDL
@@ -882,6 +876,7 @@ static R_AVERTEXNORMALS: [[f32; 3]; 162] = [
 /// `frame` selects the pose (an out-of-range frame draws frame 0, as
 /// `R_AliasSetupFrame` does, see [`mdl_frame_verts`]). The model is borrowed
 /// so a cached `Mdl` backs it without cloning.
+#[derive(Clone, Copy)]
 pub struct Viewmodel<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub frame: usize,
@@ -907,28 +902,15 @@ pub struct Viewmodel<'a> {
 /// against everything but a wall right against the eye. No gun when the `fov`
 /// cvar, `scr_fov`, is over 90 (`r_fov_greater_than_90`) — the cvar, not the
 /// view's field of view, which Hor+ widens past 90 on a wide screen.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn draw_viewmodel(
-    image: &mut Image,
-    zbuf: &mut [i16],
-    bsp: &Bsp,
-    cam: &Camera,
-    scr_fov: f32,
-    opts: &RenderOptions,
-    vm: &Viewmodel,
-    palette: &[[u8; 3]; 256],
-    dlights: &[crate::dlight::DynamicLight],
-    light_styles: &[f32; LIGHTSTYLES],
-    time: f32,
-    colormap: Option<&[u8]>,
-) {
+pub(super) fn draw_viewmodel(image: &mut Image, zbuf: &mut [i16], frame: &Frame, vm: &Viewmodel) {
     if image.w == 0 || image.h == 0 {
         return;
     }
+    let (scene, cam, scr_fov) = (frame.scene, &frame.cam, frame.scr_fov());
     if scr_fov > 90.0 {
         return;
     }
-    let view = AliasView::new(cam, scr_fov, image.w, image.h, opts.aspect());
+    let view = AliasView::new(cam, scr_fov, image.w, image.h, scene.options.aspect());
     let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
     // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
     let ent = AliasEntity {
@@ -939,15 +921,16 @@ pub(super) fn draw_viewmodel(
         skinnum: 0,
         color: [180, 180, 180],
     };
-    let light = alias_entity_light(bsp, origin, light_styles, dlights, true);
-    let mut fb = PolyFramebuffer::new(image, zbuf, palette);
-    alias_draw_model(&mut fb, &view, &ent, 0, light, true, time, colormap);
+    let light = alias_entity_light(scene.world, origin, scene.light_styles, scene.dlights, true);
+    let mut fb = PolyFramebuffer::new(image, zbuf, scene.palette);
+    alias_draw_model(&mut fb, &view, &ent, 0, light, true, scene.time, scene.colormap);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, render_scene, render_scene_ext};
+    use crate::render::{demo_room, Scene};
+    use crate::render::fixtures::render_once;
     use crate::render::fixtures::tiny_mdl;
     use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
 
@@ -959,7 +942,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         // Look from the west wall toward the centre (down +X).
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
-        let world_only = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
+        let world_only = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
 
         let mdl = tiny_mdl();
         let inst = ModelInstance {
@@ -972,7 +955,7 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let with_model = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
+        let with_model = render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let changed = world_only
             .rgb
@@ -1202,7 +1185,7 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let img_skin = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst_skin));
+        let img_skin = render_once(&Scene { models: std::slice::from_ref(&inst_skin), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         // Same model/instance but with the skin stripped -> flat fallback path.
         let mut flat = skinned_mdl();
@@ -1217,7 +1200,7 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let img_flat = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst_flat));
+        let img_flat = render_once(&Scene { models: std::slice::from_ref(&inst_flat), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let changed = img_skin
             .rgb
@@ -1246,7 +1229,7 @@ mod tests {
         let bsp = demo_room();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
-        let world_only = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
+        let world_only = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
 
         let mut mdl = tiny_mdl();
         mdl.skins.clear(); // no usable skin -> flat path
@@ -1260,7 +1243,7 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let with_model = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
+        let with_model = render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let changed = world_only
             .rgb
             .iter()
@@ -1299,8 +1282,8 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let img0 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst0));
-        let img1 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst1));
+        let img0 = render_once(&Scene { models: std::slice::from_ref(&inst0), ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let img1 = render_once(&Scene { models: std::slice::from_ref(&inst1), ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let changed = img0
             .rgb
             .iter()
@@ -1426,24 +1409,8 @@ mod tests {
         let cam_a = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let cam_b = Camera { pos: [0.0, 0.0, 0.0], yaw: 137.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
-        let img_a = render_scene_ext(
-            &bsp, &cam_a, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_a.pitch, cam_a.yaw, 0.0] }),
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
-        let img_b = render_scene_ext(
-            &bsp, &cam_b, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_b.pitch, cam_b.yaw, 0.0] }),
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let img_a = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_a.pitch, cam_a.yaw, 0.0] }), ..Scene::new(&bsp, cam_a, w, h, &pal) });
+        let img_b = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_b.pitch, cam_b.yaw, 0.0] }), ..Scene::new(&bsp, cam_b, w, h, &pal) });
 
         // Isolate the gun pixels (its unique skin colour) in each frame.
         let gun_only = |img: &Image| {
@@ -1498,7 +1465,7 @@ mod tests {
         let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
         // Sanity: the wall actually fills the view (without the gun).
-        let world = render_scene_ext(&bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let world = render_once(&Scene::new(&bsp, cam, w, h, &pal));
         let bg = [10u8, 10, 14];
         let wall_pixels = world.rgb.iter().filter(|&&p| p != bg).count();
         assert!(wall_pixels > w * h / 2, "expected the wall to fill most of the view");
@@ -1509,15 +1476,7 @@ mod tests {
             "wall-only render must not contain gun-coloured pixels"
         );
 
-        let with_gun = render_scene_ext(
-            &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let with_gun = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
         // of the wall rather than being depth-occluded by it.
@@ -1535,18 +1494,6 @@ mod tests {
     }
 
     #[test]
-    fn viewmodel_none_matches_no_viewmodel() {
-        // Passing `None` for the viewmodel must be byte-identical to the prior
-        // behaviour (render_scene_ext with the trailing arg absent in spirit).
-        let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
-        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
-        let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
-        assert_eq!(a.rgb, b.rgb, "None viewmodel must equal render_scene");
-    }
-
-    #[test]
     fn viewmodel_tolerates_malformed_model() {
         // A weapon model with out-of-range triangle indices and no frames must be
         // skipped without panicking and without altering the frame.
@@ -1557,31 +1504,15 @@ mod tests {
         // Frameless model -> draw_viewmodel returns early.
         let mut frameless = viewmodel_mdl();
         frameless.frames.clear();
-        let img = render_scene_ext(
-            &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
-        let baseline = render_scene_ext(&bsp, &cam, 80, 60, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
+        let baseline = render_once(&Scene::new(&bsp, cam, 80, 60, &pal));
         assert_eq!(img.rgb, baseline.rgb, "frameless weapon must draw nothing");
 
         // Out-of-range triangle vertex index -> that triangle is skipped.
         let mut bad = viewmodel_mdl();
         bad.triangles = vec![crate::mdl::Triangle { facesfront: 1, vertindex: [0, 1, 9999] }];
         // Must not panic.
-        let _ = render_scene_ext(
-            &bsp, &cam, 80, 60, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let _ = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
     }
 
     /// A viewmodel whose geometry deliberately *straddles* the alias clip plane:
@@ -1652,15 +1583,7 @@ mod tests {
         let gun = straddling_viewmodel_mdl();
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
-        let img = render_scene_ext(
-            &bsp, &cam, w, h, &pal, &[], &[], &[],
-            Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }),
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
 
         // (a) it drew SOME gun pixels (not all-dropped). With the old whole-tri
         // drop, every straddling triangle vanished and this would be zero.
@@ -1716,29 +1639,26 @@ mod tests {
         // widens a 16:9 view to 106 degrees and the gun stays, drawn as a 4:3
         // screen of the same height draws it — the same size, and 24 columns
         // further right in a view 48 wider. A Classic fov over 90 has no gun.
-        use crate::render::{FovMode, VideoCvars, VideoGuard};
+        use crate::render::{FovMode, RenderOptions, VideoCvars};
         let bsp = demo_room();
         let mut pal = [[80u8; 3]; 256];
         pal[7] = [255, 255, 0];
         let gun = viewmodel_mdl();
-        let draw = |w: usize, h: usize, fov_deg: f32| {
+        let draw_as = |w: usize, h: usize, fov_deg: f32, video: VideoCvars| {
             let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg };
             let vm = Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] };
-            let img = crate::render::render_scene_ext_sprited(
-                &bsp, &cam, w, h, &pal, &[], &[], &[], Some(vm), 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
-                &[], &RenderOptions::default(),
-            );
+            let options = RenderOptions { video, ..RenderOptions::default() };
+            let img = render_once(&Scene { viewmodel: Some(vm), options, ..Scene::new(&bsp, cam, w, h, &pal) });
             let gun_px: Vec<(usize, usize)> =
                 (0..w * h).filter(|&i| is_gun_pixel(img.rgb[i])).map(|i| (i % w, i / w)).collect();
             let (x0, x1) = (gun_px.iter().map(|p| p.0).min(), gun_px.iter().map(|p| p.0).max());
             let (y0, y1) = (gun_px.iter().map(|p| p.1).min(), gun_px.iter().map(|p| p.1).max());
             Some((x0?, y0?, x1?, y1?))
         };
+        let draw = |w, h, fov_deg| draw_as(w, h, fov_deg, VideoCvars::CLASSIC);
         let four_three = draw(144, 108, 90.0).expect("gun at 4:3");
-        let wide = {
-            let _g = VideoGuard::set(VideoCvars { fov_mode: FovMode::HorPlus, hires: false });
-            draw(192, 108, 90.0).expect("gun under Hor+ at 16:9")
-        };
+        let hor_plus = VideoCvars { fov_mode: FovMode::HorPlus, hires: false };
+        let wide = draw_as(192, 108, 90.0, hor_plus).expect("gun under Hor+ at 16:9");
         assert_eq!(
             (wide.0, wide.1, wide.2, wide.3),
             (four_three.0 + 24, four_three.1, four_three.2 + 24, four_three.3),

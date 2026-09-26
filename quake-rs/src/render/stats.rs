@@ -1,20 +1,15 @@
 //! The render profiler: per-phase timers and counters for one frame.
 //!
-//! The port's own (id has `r_speeds`); off unless [`render_stats_begin`] turns it
-//! on, so the game pays nothing.
-
-thread_local! {
-    /// Granular render profiler (opt-in; see [`RenderStats`]). Off by default so the
-    /// shared render path pays nothing in the live game / wasm.
-    static RENDER_STATS: std::cell::RefCell<RenderStats> =
-        const { std::cell::RefCell::new(RenderStats::ZERO) };
-    static STATS_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
+//! The port's own (id has `r_speeds`); off unless
+//! [`Renderer::stats_begin`](super::Renderer::stats_begin) turns it on, so the
+//! game pays nothing. It is the [`Renderer`](super::Renderer)'s, like the rest
+//! of its state: every pass that counts is handed the [`Profiler`], so a pass
+//! running on another thread counts into its own and nothing is lost.
 
 /// Granular per-phase render profiler — phase wall-times (ns) plus face/triangle/
-/// pixel/cache counts for one [`render_scene_ext_sprited`](super::render_scene_ext_sprited) call. Populated only
-/// while profiling is enabled via [`render_stats_begin`]; every counter site is
-/// gated on the `STATS_ON` flag, so a normal (game/wasm) render touches none of it.
+/// pixel/cache counts, summed over the frames [`Renderer::render`](super::Renderer::render)
+/// draws while profiling is on ([`Renderer::stats_begin`](super::Renderer::stats_begin)); every counter
+/// site is gated on it, so a normal (game/wasm) render touches none of it.
 /// Use this to see WHERE a frame's time goes (which phase, overdraw, cache hit rate)
 /// when tuning performance.
 #[derive(Clone, Copy, Debug, Default)]
@@ -95,7 +90,7 @@ pub struct RenderStats {
 }
 
 impl RenderStats {
-    const ZERO: RenderStats = RenderStats {
+    pub(super) const ZERO: RenderStats = RenderStats {
         world_ns: 0, submodel_ns: 0, external_ns: 0, alias_ns: 0, particle_ns: 0,
         sprite_ns: 0, viewmodel_ns: 0, faces_total: 0, faces_pvs_culled: 0,
         faces_frustum_culled: 0, faces_drawn: 0, world_tris: 0, world_pixels: 0,
@@ -110,52 +105,60 @@ impl RenderStats {
     };
 }
 
-/// Enable the render profiler and clear its counters. The NEXT
-/// [`render_scene_ext_sprited`](super::render_scene_ext_sprited) accumulates into [`RenderStats`]; read + disable
-/// with [`render_stats_end`]. Intended for the `quaketool` benchmark, not the game.
-pub fn render_stats_begin() {
-    RENDER_STATS.with(|s| *s.borrow_mut() = RenderStats::ZERO);
-    STATS_ON.with(|c| c.set(true));
+/// The profiler a [`Renderer`](super::Renderer) owns: the counters while it
+/// is on, and the clock its phase timers read.
+#[derive(Default)]
+pub(super) struct Profiler {
+    /// The counters, `Some` while profiling.
+    stats: Option<RenderStats>,
+    /// A monotonic milliseconds source for the phase timers (e.g. the
+    /// browser's `performance.now()`), for targets where
+    /// `std::time::Instant` is unavailable (`wasm32-unknown-unknown` panics on
+    /// it). `None` uses `Instant`.
+    clock: Option<fn() -> f64>,
 }
 
-/// Read the accumulated [`RenderStats`] and disable the profiler.
-pub fn render_stats_end() -> RenderStats {
-    STATS_ON.with(|c| c.set(false));
-    RENDER_STATS.with(|s| *s.borrow())
-}
+impl Profiler {
+    /// Turn profiling on with every counter at zero.
+    pub(super) fn begin(&mut self) {
+        self.stats = Some(RenderStats::ZERO);
+    }
 
-/// Whether the render profiler is currently accumulating (cheap `Cell` read).
-#[inline]
-pub(super) fn stats_on() -> bool {
-    STATS_ON.with(|c| c.get())
-}
+    /// Turn profiling off and return what it counted (zeros if it was off).
+    pub(super) fn end(&mut self) -> RenderStats {
+        self.stats.take().unwrap_or(RenderStats::ZERO)
+    }
 
-/// Apply `f` to the live [`RenderStats`] iff profiling is on (no-op otherwise).
-#[inline]
-pub(super) fn stat(f: impl FnOnce(&mut RenderStats)) {
-    if stats_on() {
-        RENDER_STATS.with(|s| f(&mut s.borrow_mut()));
+    /// Install (or clear) the phase timers' clock.
+    pub(super) fn set_clock(&mut self, clock: Option<fn() -> f64>) {
+        self.clock = clock;
+    }
+
+    /// Whether the profiler is counting.
+    #[inline]
+    pub(super) fn on(&self) -> bool {
+        self.stats.is_some()
+    }
+
+    /// Apply `f` to the counters iff profiling is on (no-op otherwise).
+    #[inline]
+    pub(super) fn add(&mut self, f: impl FnOnce(&mut RenderStats)) {
+        if let Some(s) = self.stats.as_mut() {
+            f(s);
+        }
+    }
+
+    /// A timestamp for a phase timer, only while profiling (so the game never
+    /// reads a clock).
+    #[inline]
+    pub(super) fn now(&self) -> Option<StatInstant> {
+        self.on().then(|| StatInstant::now(self.clock))
     }
 }
 
-thread_local! {
-    /// Clock override for the [`RenderStats`] phase timers: a monotonic
-    /// milliseconds source (e.g. the browser's `performance.now()`), for targets
-    /// where `std::time::Instant` is unavailable (`wasm32-unknown-unknown` panics
-    /// on it). `None` (the default) uses `Instant`.
-    static STATS_CLOCK: std::cell::Cell<Option<fn() -> f64>> = const { std::cell::Cell::new(None) };
-}
-
-/// Install (or clear) the [`RenderStats`] timer clock — a monotonic milliseconds
-/// source. The wasm shell's opt-in benchmark build passes `performance.now()`
-/// here so [`render_stats_begin`] works in the browser; native callers never
-/// need it. Only read while profiling is on, so the game pays nothing.
-pub fn set_render_stats_clock(clock: Option<fn() -> f64>) {
-    STATS_CLOCK.with(|c| c.set(clock));
-}
-
 /// A profiler timestamp: `std::time::Instant`, or a reading of the clock
-/// installed by [`set_render_stats_clock`]. Only constructed while profiling.
+/// installed by [`Renderer::set_stats_clock`](super::Renderer::set_stats_clock).
+/// Only constructed while profiling.
 #[derive(Clone, Copy)]
 pub(super) enum StatInstant {
     Std(std::time::Instant),
@@ -163,8 +166,8 @@ pub(super) enum StatInstant {
 }
 
 impl StatInstant {
-    pub(super) fn now() -> StatInstant {
-        match STATS_CLOCK.with(|c| c.get()) {
+    pub(super) fn now(clock: Option<fn() -> f64>) -> StatInstant {
+        match clock {
             Some(clock) => StatInstant::Ms(clock, clock()),
             None => StatInstant::Std(std::time::Instant::now()),
         }

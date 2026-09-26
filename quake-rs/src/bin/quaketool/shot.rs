@@ -72,7 +72,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         i += 2;
     }
     video.apply();
-    let (w, h) = super::parse_res(&res)?;
+    let (w, h) = super::parse_res(&res, video.cvars)?;
 
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
@@ -93,7 +93,13 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         wk.yaw = y;
     }
     wk.pitch = pitch;
-    let vid = Vid { width: w, height: h, display_aspect: video.display_aspect(w, h, None), exact_perspective: false };
+    let vid = Vid {
+        width: w,
+        height: h,
+        display_aspect: video.display_aspect(w, h, None),
+        exact_perspective: false,
+        video: video.cvars,
+    };
     let gamma = render::build_gamma_table(1.0);
     let mut last = None;
     for f in 0..frames.max(1) {

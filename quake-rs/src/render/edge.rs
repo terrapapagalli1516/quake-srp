@@ -36,21 +36,19 @@
 use crate::bsp::{Bsp, DFace, TexInfo, CONTENTS_SOLID};
 use crate::math::{dot, normalize, sub, Vec3};
 use super::light::{
-    any_dlight_reaches, face_lightmap_dyn, mark_dlights, mark_dlights_more, LightMap, LIGHTSTYLES,
+    any_dlight_reaches, face_lightmap_dyn, mark_dlights, mark_dlights_more, LightMap,
 };
 use super::raster::{
     hash_color, span_at, span_cached, span_tex, span_turb, BlockFixed, ScreenProj,
 };
 use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
-use super::stats::{stat, stats_on, StatInstant};
+use super::stats::Profiler;
 use super::surf::{
-    classify_surface, face_geom_cached, face_lightmap_world_cached, face_surf_block,
-    face_world_poly, texture_animation, MipView, SurfKind, WorldFingerprint,
+    classify_surface, face_world_poly, texture_animation, MipView, SurfKind, SurfaceCaches, SurfaceRequest,
 };
 use super::vis::point_in_leaf;
-use super::warp::TurbTable;
-use super::world::{face_grads, BModelInstance, ExternalBModel};
-use super::{Camera, Image, Projection, RenderOptions};
+use super::world::face_grads;
+use super::{Frame, Image, Projection};
 
 /// "No edge / no span / no surface" in the index links.
 const NONE: u32 = u32::MAX;
@@ -205,12 +203,11 @@ struct Ent<'a> {
     dlights: &'a [crate::dlight::DynamicLight],
 }
 
-/// The renderer's state: what id keeps in globals and in the model (the edge
-/// cache in `medge_t`, leaf keys, visframes), kept across frames as the C
-/// keeps it, and the frame's buffers (reused).
-struct EdgeState {
-    /// The world these per-model arrays belong to.
-    world: Option<WorldFingerprint>,
+/// The edge renderer's state, the [`Renderer`](super::Renderer)'s: what id
+/// keeps in globals and in the model (the edge cache in `medge_t`, leaf keys,
+/// visframes), kept across frames as the C keeps it, and the frame's buffers
+/// (reused).
+pub(super) struct EdgeState {
     /// `r_framecount`.
     framecount: u32,
     /// `r_visframecount` and the leaf it was marked for (`r_oldviewleaf`).
@@ -299,7 +296,6 @@ struct EdgeState {
 
 impl EdgeState {
     const EMPTY: EdgeState = EdgeState {
-        world: None,
         framecount: 1,
         visframecount: 0,
         oldviewleaf: None,
@@ -372,10 +368,6 @@ impl EdgeState {
     };
 }
 
-thread_local! {
-    static EDGE_STATE: std::cell::RefCell<EdgeState> = const { std::cell::RefCell::new(EdgeState::EMPTY) };
-}
-
 /// `(int)` of a float as the x86 does it: truncation, and 0x80000000 for a
 /// NaN or a value out of range (Rust's `as` saturates).
 #[inline]
@@ -421,74 +413,47 @@ fn child_ref(c: i16) -> i32 {
     c as i32
 }
 
-/// Draw the world and the brush entities into `image` as id does
-/// (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`, `R_ScanEdges`
-/// with `D_DrawSurfaces`), writing every pixel of the view exactly once and
-/// the 16-bit `1/z` of each into `izbuf` (`d_pzbuffer`), which the entity
-/// passes test against.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_edges(
-    image: &mut Image,
-    izbuf: &mut [i16],
-    bsp: &Bsp,
-    cam: &Camera,
-    scr_fov: f32,
-    opts: &RenderOptions,
-    palette: &[[u8; 3]; 256],
-    turb: &TurbTable,
-    time: f32,
-    light_styles: &[f32; LIGHTSTYLES],
-    dlights: &[crate::dlight::DynamicLight],
-    colormap: Option<&[u8]>,
-    bmodels: &[BModelInstance],
-    external: &[ExternalBModel],
-) {
-    let (w, h) = (image.w, image.h);
-    // Nothing larger than the largest view there is (8K; the caller clamps
-    // to the cvars' limit, this refuses what no setting allows).
-    if w == 0 || h == 0 || w > super::HIRES_MAXWIDTH || h > super::HIRES_MAXHEIGHT {
-        return;
-    }
-    if izbuf.len() < w * h || image.rgb.len() < w * h {
-        return;
-    }
-    EDGE_STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
-        st.frame(image, izbuf, bsp, cam, scr_fov, opts, palette, turb, time, light_styles, dlights, colormap, bmodels, external);
-    });
-}
-
 impl EdgeState {
-    #[allow(clippy::too_many_arguments)]
-    fn frame(
+    /// A renderer's edge state before any map: everything at zero.
+    pub(super) fn new() -> EdgeState {
+        EdgeState::EMPTY
+    }
+
+    /// Draw the world and the brush entities of `frame` into `image` as id
+    /// does (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`,
+    /// `R_ScanEdges` with `D_DrawSurfaces`), writing every pixel of the view
+    /// exactly once and the 16-bit `1/z` of each into `izbuf` (`d_pzbuffer`),
+    /// which the entity passes test against. The world is the one
+    /// [`EdgeState::begin_map`] was last called for.
+    pub(super) fn render(
         &mut self,
         image: &mut Image,
         izbuf: &mut [i16],
-        bsp: &Bsp,
-        cam: &Camera,
-        scr_fov: f32,
-        opts: &RenderOptions,
-        palette: &[[u8; 3]; 256],
-        turb: &TurbTable,
-        time: f32,
-        light_styles: &[f32; LIGHTSTYLES],
-        dlights: &[crate::dlight::DynamicLight],
-        colormap: Option<&[u8]>,
-        bmodels: &[BModelInstance],
-        external: &[ExternalBModel],
+        frame: &Frame,
+        caches: &mut SurfaceCaches,
+        prof: &mut Profiler,
     ) {
-        let prof = stats_on();
-        let t0 = prof.then(StatInstant::now);
         let (w, h) = (image.w, image.h);
-        self.new_world(bsp);
-        self.setup_frame(cam, w, h, opts);
+        // Nothing larger than the largest view there is (8K; the caller clamps
+        // to the cvars' limit, this refuses what no setting allows).
+        if w == 0 || h == 0 || w > super::HIRES_MAXWIDTH || h > super::HIRES_MAXHEIGHT {
+            return;
+        }
+        if izbuf.len() < w * h || image.rgb.len() < w * h {
+            return;
+        }
+        let scene = frame.scene;
+        let bsp = scene.world;
+        let dlights = scene.dlights;
+        let t0 = prof.now();
+        self.setup_frame(frame);
         self.mark_leaves(bsp);
 
         // The frame's models: the world, then the brush entities in list order
         // (inline submodels, then the external boxes).
-        let mut ents: Vec<Ent> = Vec::with_capacity(1 + bmodels.len() + external.len());
+        let mut ents: Vec<Ent> = Vec::with_capacity(1 + scene.bmodels.len() + scene.external.len());
         ents.push(Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights });
-        for bm in bmodels {
+        for bm in scene.bmodels {
             if bm.model_index == 0 || bm.model_index >= bsp.models.len() {
                 continue;
             }
@@ -500,7 +465,7 @@ impl EdgeState {
             // so a moved door or lift is lit as if it had not moved, as in id.
             ents.push(Ent { bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights });
         }
-        for ext in external {
+        for ext in scene.external {
             if ext.bsp.models.is_empty() {
                 continue;
             }
@@ -527,16 +492,16 @@ impl EdgeState {
         let t2 = lap();
         self.scan_edges();
         let t3 = lap();
-        self.draw_surfaces(image, izbuf, cam, scr_fov, opts, palette, turb, time, light_styles, colormap, &ents, &bits);
+        self.draw_surfaces(image, izbuf, frame, caches, prof, &ents, &bits);
         self.dlight_bits = bits;
-        if prof {
+        if prof.on() {
             let t4 = lap();
             let (edges, surfs, spans) = (
                 self.edges.len() as u64 - FIRST_EDGE as u64,
                 self.surfs.len() as u64 - 2,
                 self.spans.len() as u64,
             );
-            stat(|s| {
+            prof.add(|s| {
                 // world = the whole pass but the brush entities' edge setup,
                 // which goes to `submodel` (their spans are drawn with the
                 // world's); `sort` = the world walk to edges, `setup` = the scan.
@@ -554,19 +519,10 @@ impl EdgeState {
         }
     }
 
-    /// Size the per-model arrays for a new world (`Mod_LoadBrushModel`,
-    /// `Mod_SetParent`): everything id keeps in the model starts at zero.
-    fn new_world(&mut self, bsp: &Bsp) {
-        let fp = WorldFingerprint::of(bsp);
-        if self.world == Some(fp)
-            && self.node_visframe.len() == bsp.nodes.len()
-            && self.leaf_visframe.len() == bsp.leafs.len()
-            && self.face_visframe.len() == bsp.faces.len()
-            && self.cachededgeoffset.len() == bsp.edges.len()
-        {
-            return;
-        }
-        self.world = Some(fp);
+    /// `R_NewMap` for the edge renderer (`Mod_LoadBrushModel`,
+    /// `Mod_SetParent`): size the per-model arrays for `bsp`, everything id
+    /// keeps in the model at zero, and forget the last view leaf.
+    pub(super) fn begin_map(&mut self, bsp: &Bsp) {
         self.oldviewleaf = None;
         self.node_visframe = vec![0; bsp.nodes.len()];
         self.leaf_visframe = vec![0; bsp.leafs.len()];
@@ -601,9 +557,10 @@ impl EdgeState {
 
     /// `R_ViewChanged`'s projection and clip planes, `R_SetupFrame`'s view and
     /// `R_TransformFrustum` / `R_SetUpFrustumIndexes`, for a `w x h` view.
-    fn setup_frame(&mut self, cam: &Camera, w: usize, h: usize, opts: &RenderOptions) {
+    fn setup_frame(&mut self, frame: &Frame) {
+        let (cam, w, h) = (&frame.cam, frame.w, frame.h);
         self.framecount = self.framecount.wrapping_add(1);
-        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
+        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, frame.scene.options.aspect());
         let (vpn, vright, vup) = cam.basis();
         self.w = w;
         self.h = h;
@@ -1216,6 +1173,22 @@ impl EdgeState {
     }
 }
 
+/// What [`EdgeState::draw_face_spans`] reads besides the surface: the frame
+/// and what `D_DrawSurfaces` sets up for it once.
+#[derive(Clone, Copy)]
+struct FacePass<'p, 's, 'a> {
+    frame: &'p Frame<'s, 'a>,
+    sview: &'p ScreenProj,
+    mipview: &'p MipView,
+    persp: super::raster::Persp,
+    ents: &'p [Ent<'a>],
+    bits: &'p [u32],
+    /// The port's flat shading direction, for a face with no lightmap.
+    light_dir: Vec3,
+    /// `r_clearcolor`'s colour.
+    clear: [u8; 3],
+}
+
 /// `Mod_LoadFaces`' flags for a face: `SURF_PLANEBACK`, and `SURF_DRAWSKY` /
 /// `SURF_DRAWTURB` from its texture's name.
 fn face_flags(bsp: &Bsp, face: &DFace) -> u8 {
@@ -1817,23 +1790,26 @@ impl EdgeState {
         &mut self,
         image: &mut Image,
         izbuf: &mut [i16],
-        cam: &Camera,
-        scr_fov: f32,
-        opts: &RenderOptions,
-        palette: &[[u8; 3]; 256],
-        turb: &TurbTable,
-        time: f32,
-        light_styles: &[f32; LIGHTSTYLES],
-        colormap: Option<&[u8]>,
+        frame: &Frame,
+        caches: &mut SurfaceCaches,
+        prof: &mut Profiler,
         ents: &[Ent],
         bits: &[u32],
     ) {
         let (w, h) = (self.w, self.h);
+        let (cam, opts, palette) = (&frame.cam, &frame.scene.options, frame.scene.palette);
         let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
         let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
         let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
-        let mipview = MipView::new(xscale, yscale);
-        let sky_view = SkyView::new(vpn, vright, vup, sky_dome_scale(w, h, scr_fov, cam.fov_deg), opts.sky_centre(w, h), time);
+        let mipview = MipView::new(xscale, yscale, opts.mip);
+        let sky_view = SkyView::new(
+            vpn,
+            vright,
+            vup,
+            sky_dome_scale(w, h, frame.scr_fov(), cam.fov_deg),
+            opts.sky_centre(w, h),
+            frame.scene.time,
+        );
         let sky_tex = sky_texture(ents[0].bsp);
         let persp = opts.persp();
         let (light_dir, _) = normalize([0.3, 0.5, 1.0]);
@@ -1879,10 +1855,8 @@ impl EdgeState {
                         drawn += n as u64;
                     }
                 } else {
-                    drawn += self.draw_face_spans(
-                        image, &s, &span_list, &sview, &mipview, cam, persp, palette, turb, time, light_styles,
-                        colormap, ents, bits, light_dir, clear,
-                    );
+                    let pass = FacePass { frame, sview: &sview, mipview: &mipview, persp, ents, bits, light_dir, clear };
+                    drawn += self.draw_face_spans(image, &s, &span_list, &pass, caches, prof);
                 }
             }
             // D_DrawZSpans
@@ -1897,7 +1871,7 @@ impl EdgeState {
             }
         }
         self.spans = spans_owned;
-        stat(|st| {
+        prof.add(|st| {
             st.world_pixels += drawn;
             st.faces_drawn += faces;
         });
@@ -1906,26 +1880,19 @@ impl EdgeState {
     /// One wall or liquid surface's spans (`D_DrawSurfaces`' turbulent and
     /// cached branches, and the port's fallbacks for textureless or unlit
     /// faces). Returns the pixels drawn.
-    #[allow(clippy::too_many_arguments)]
     fn draw_face_spans<I: Iterator<Item = (usize, usize, usize)>>(
         &mut self,
         image: &mut Image,
         s: &Surf,
         span_list: &impl Fn(u32) -> I,
-        sview: &ScreenProj,
-        mipview: &MipView,
-        cam: &Camera,
-        persp: super::raster::Persp,
-        palette: &[[u8; 3]; 256],
-        turb: &TurbTable,
-        time: f32,
-        light_styles: &[f32; LIGHTSTYLES],
-        colormap: Option<&[u8]>,
-        ents: &[Ent],
-        bits: &[u32],
-        light_dir: Vec3,
-        clear: [u8; 3],
+        pass: &FacePass,
+        caches: &mut SurfaceCaches,
+        prof: &mut Profiler,
     ) -> u64 {
+        let FacePass { frame, sview, mipview, persp, ents, bits, light_dir, clear } = *pass;
+        let scene = frame.scene;
+        let (cam, palette, turb, time) = (&frame.cam, scene.palette, &frame.turb, scene.time);
+        let (light_styles, colormap) = (scene.light_styles, scene.colormap);
         let w = self.w;
         let e = &ents[s.ent as usize];
         let bsp = e.bsp;
@@ -1959,10 +1926,9 @@ impl EdgeState {
         let lightmap: Option<LightMap> = if turbulent {
             None
         } else if s.ent == 0 {
-            let geom = face_geom_cached(bsp, fi, face);
-            face_lightmap_world_cached(bsp, fi, face, &geom.poly, light_styles, e.dlights, face_bits)
+            caches.world_lightmap(bsp, fi, face, light_styles, e.dlights, face_bits)
         } else if face_world_poly(bsp, face, &mut self.poly) {
-            stat(|st| st.sub_lm_builds += 1);
+            prof.add(|st| st.sub_lm_builds += 1);
             face_lightmap_dyn(bsp, face, &self.poly, light_styles, e.dlights, face_bits)
         } else {
             None
@@ -1980,19 +1946,25 @@ impl EdgeState {
                 }
                 let block = match (lightmap.as_ref(), colormap) {
                     (Some(lm), Some(cm)) => {
-                        let dlit = any_dlight_reaches(bsp, face, e.dlights, face_bits);
-                        // D_MipLevelForScale on the surface's nearest 1/z
-                        let mip = ti.map_or(0, |t| mipview.level_for_nearzi(s.nearzi, t));
-                        face_surf_block(
-                            fi, face, tex_index, mt, lm, cm, WorldFingerprint::of(bsp), bsp.faces.len(),
-                            light_styles, dlit, e.world_bsp, mip,
-                        )
+                        let req = SurfaceRequest {
+                            slot: e.world_bsp.then_some(fi),
+                            face,
+                            texture: tex_index,
+                            mt,
+                            lightmap: lm,
+                            colormap: cm,
+                            light_styles,
+                            dlit: any_dlight_reaches(bsp, face, e.dlights, face_bits),
+                            // D_MipLevelForScale on the surface's nearest 1/z
+                            mip: ti.map_or(0, |t| mipview.level_for_nearzi(s.nearzi, t)),
+                        };
+                        caches.surface(&req, prof)
                     }
                     _ => None,
                 };
                 match block {
                     Some(sb) => {
-                        stat(|st| st.surf_hits += 1);
+                        prof.add(|st| st.surf_hits += 1);
                         let g = grads.mip_scaled(sb.mip);
                         let fx = BlockFixed::new(&g, sb.texmins, sb.bw, sb.bh);
                         for (u, v, n) in span_list(s.spans) {
@@ -2002,7 +1974,7 @@ impl EdgeState {
                         }
                     }
                     None => {
-                        stat(|st| st.surf_misses += 1);
+                        prof.add(|st| st.surf_misses += 1);
                         for (u, v, n) in span_list(s.spans) {
                             let row = &mut image.rgb[v * w + u..v * w + u + n];
                             span_tex(row, &span_at(&grads, u, v), &grads, &mt.pixels, tw, th, palette, shade, lightmap.as_ref(), colormap);
@@ -2039,8 +2011,8 @@ impl EdgeState {
 mod tests {
     use super::*;
     use crate::math::cross;
-    use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
-    use crate::render::{demo_room, recycle_image, render_scene_ext_sprited, ZBUF};
+    use crate::render::fixtures::render_once;
+    use crate::render::{demo_room, recycle_image, Camera, Renderer, Scene, VideoCvars};
 
     fn palette() -> [[u8; 3]; 256] {
         let mut pal = [[0u8; 3]; 256];
@@ -2051,10 +2023,14 @@ mod tests {
     }
 
     fn render(cam: &Camera, w: usize, h: usize) -> Image {
-        render_scene_ext_sprited(
-            &demo_room(), cam, w, h, &palette(), &[], &[], &[], None, 0.0, &[], &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES, None, &[], &RenderOptions::default(),
-        )
+        render_once(&Scene::new(&demo_room(), *cam, w, h, &palette()))
+    }
+
+    /// [`render`], and the z-buffer the frame left.
+    fn render_z(cam: &Camera, w: usize, h: usize) -> (Image, Vec<i16>) {
+        let mut r = Renderer::new();
+        let img = r.render(&Scene::new(&demo_room(), *cam, w, h, &palette()));
+        (img, r.zbuf()[..w * h].to_vec())
     }
 
     #[test]
@@ -2065,16 +2041,13 @@ mod tests {
         // D_DrawZSpans put there (pillar 168 units ahead, far wall 456).
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let (w, h) = (160usize, 100usize);
-        let img = render(&cam, w, h);
+        let (img, z) = render_z(&cam, w, h);
         let row = h / 2;
         let (centre, side) = (img.rgb[row * w + w / 2], img.rgb[row * w + w / 2 + 40]);
         assert_ne!(centre, side, "pillar and far wall are different surfaces");
         assert!(![centre, side].contains(&palette()[R_CLEARCOLOR]), "both drawn");
-        ZBUF.with(|z| {
-            let z = z.borrow();
-            assert_eq!(z[row * w + w / 2], (32768.0f64 / 168.0) as i16);
-            assert_eq!(z[row * w + w / 2 + 40], (32768.0f64 / 456.0) as i16);
-        });
+        assert_eq!(z[row * w + w / 2], (32768.0f64 / 168.0) as i16);
+        assert_eq!(z[row * w + w / 2 + 40], (32768.0f64 / 456.0) as i16);
     }
 
     #[test]
@@ -2094,10 +2067,10 @@ mod tests {
         // Outside the room looking away from it: one background span per row,
         // palette[2], and D_DrawZSpans' -0.9 "at infinity" 1/z.
         let cam = Camera::looking_at([-400.0, 0.0, 0.0], [-800.0, 0.0, 0.0], 90.0);
-        let img = render(&cam, 64, 40);
+        let (img, z) = render_z(&cam, 64, 40);
         assert!(img.rgb.iter().all(|&p| p == palette()[R_CLEARCOLOR]));
         let bg = ((-0.9f32 as f64 * 32768.0 * 65536.0) as i32 >> 16) as i16;
-        ZBUF.with(|z| assert!(z.borrow()[..64 * 40].iter().all(|&v| v == bg)));
+        assert!(z.iter().all(|&v| v == bg));
     }
 
     #[test]
@@ -2105,8 +2078,8 @@ mod tests {
         // Straight at the pillar's -X face, 168 units ahead: `(int)(zi * 0x8000
         // * 0x10000) >> 16` = 32768/168 = 195 at the centre pixel.
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
-        let _ = render(&cam, 64, 40);
-        ZBUF.with(|z| assert_eq!(z.borrow()[20 * 64 + 32], (32768.0f64 / 168.0) as i16));
+        let (_, z) = render_z(&cam, 64, 40);
+        assert_eq!(z[20 * 64 + 32], (32768.0f64 / 168.0) as i16);
     }
 
     #[test]
@@ -2138,10 +2111,12 @@ mod tests {
         let (w, h) = (crate::render::HIRES_MAXWIDTH + 8, 2);
         let mut image = Image { w, h, rgb: vec![[1, 2, 3]; w * h] };
         let mut z = vec![7i16; w * h];
-        render_edges(
-            &mut image, &mut z, &demo_room(), &cam, 90.0, &RenderOptions::default(), &palette(),
-            &TurbTable::new(), 0.0, &NEUTRAL_LIGHTSTYLE_SCALES, &[], None, &[], &[],
-        );
+        let (world, pal) = (demo_room(), palette());
+        let scene = Scene::new(&world, cam, w, h, &pal);
+        let mut edge = EdgeState::new();
+        edge.begin_map(&world);
+        let (mut caches, mut prof) = (SurfaceCaches::default(), Profiler::default());
+        edge.render(&mut image, &mut z, &Frame::new(&scene, w, h), &mut caches, &mut prof);
         assert!(image.rgb.iter().all(|&p| p == [1, 2, 3]) && z.iter().all(|&v| v == 7));
     }
 
@@ -2153,14 +2128,16 @@ mod tests {
         // view 4x as wide and tall as another shows the same picture at 4x:
         // every 4x4 block of the big frame holds the small frame's pixel
         // there, but for the pixels along an edge between two surfaces.
-        let _g = crate::render::VideoGuard::set(crate::render::VideoCvars {
-            hires: true,
-            ..crate::render::VideoCvars::CLASSIC
-        });
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        let (world, pal) = (demo_room(), palette());
+        let options = crate::render::RenderOptions {
+            video: VideoCvars { hires: true, ..VideoCvars::CLASSIC },
+            ..Default::default()
+        };
+        let render = |w, h| render_once(&Scene { options, ..Scene::new(&world, cam, w, h, &pal) });
         let (w, h) = (640usize, 150usize);
-        let small = render(&cam, w, h);
-        let big = render(&cam, 4 * w, 4 * h);
+        let small = render(w, h);
+        let big = render(4 * w, 4 * h);
         assert_eq!((big.w, big.h), (2560, 600));
         assert!(!big.rgb.contains(&palette()[R_CLEARCOLOR]), "the room covers the view: no background");
         let differ = (0..h * w)
@@ -2207,10 +2184,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let pal = palette();
         let draw = |bsp: &Bsp| {
-            render_scene_ext_sprited(
-                bsp, &cam, 96, 64, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[],
-                &RenderOptions::default(),
-            )
+            render_once(&Scene::new(bsp, cam, 96, 64, &pal))
         };
         for fi in 0..n {
             let mut bad = bsp.clone();

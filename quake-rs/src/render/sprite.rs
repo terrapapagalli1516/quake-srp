@@ -5,7 +5,7 @@
 //! `WinQuake/d_sprite.c`.
 
 use crate::math::{dot, sub, Vec3};
-use super::{Camera, Image, Projection, RenderOptions};
+use super::{Frame, Image, Projection};
 
 /// A sprite-model entity to draw as a camera-facing billboard (Quake's
 /// `mod_sprite` entities: the `s_explod.spr` explosion flash, bubbles, etc.).
@@ -28,20 +28,11 @@ pub struct SpriteInstance<'a> {
 /// its 1/z, so nearer geometry wins.
 /// Oriented sprites fall back to the facing billboard (good enough for shareware).
 // Mirrors R_DrawSprite (r_sprite.c); the C reads globals (vid, r_refdef, cl.time)
-// that this port passes explicitly.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn draw_sprites(
-    image: &mut Image,
-    zbuf: &mut [i16],
-    cam: &Camera,
-    opts: &RenderOptions,
-    sprites: &[SpriteInstance],
-    palette: &[[u8; 3]; 256],
-    time: f32,
-    w: usize,
-    h: usize,
-) {
+// that this port reads from the frame.
+pub(super) fn draw_sprites(image: &mut Image, zbuf: &mut [i16], frame: &Frame) {
     const NEAR: f32 = 1.0;
+    let (cam, scene, w, h) = (&frame.cam, frame.scene, frame.w, frame.h);
+    let (opts, sprites, palette, time) = (&scene.options, scene.sprites, scene.palette, scene.time);
     if w == 0 || h == 0 || sprites.is_empty() {
         return;
     }
@@ -142,6 +133,14 @@ fn select_sprite_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::{Camera, Palette, Scene};
+
+    /// `draw_sprites` for one sprite seen by `cam`, into `img` and `zbuf`.
+    fn draw(img: &mut Image, zbuf: &mut [i16], cam: Camera, inst: &SpriteInstance, pal: &Palette) {
+        let world = crate::render::demo_room();
+        let scene = Scene { sprites: std::slice::from_ref(inst), ..Scene::new(&world, cam, img.w, img.h, pal) };
+        draw_sprites(img, zbuf, &Frame::new(&scene, img.w, img.h));
+    }
 
     /// Build a trivial single-frame sprite: `w`x`h` pixels all set to `fill`, with a
     /// centred origin so the billboard straddles the projected point.
@@ -173,7 +172,7 @@ mod tests {
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw(&mut img, &mut zbuf, cam, &inst, &pal);
         let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
         assert!(painted > 0, "a sprite in front must paint pixels");
         // (int)(1/100 * 0x8000 * 0x10000) >> 16 = 327.
@@ -191,7 +190,7 @@ mod tests {
         let pal = [[7u8, 7, 7]; 256];
         let spr = test_sprite(16, 16, 255);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw(&mut img, &mut zbuf, cam, &inst, &pal);
         assert!(img.rgb.iter().all(|&p| p == bg), "index-255 texels are transparent (nothing painted)");
         assert!(zbuf.iter().all(|&z| z == i16::MIN), "transparent sprite writes no depth");
     }
@@ -208,7 +207,7 @@ mod tests {
         pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw_sprites(&mut img, &mut zbuf, &cam, &RenderOptions::default(), std::slice::from_ref(&inst), &pal, 0.0, w, h);
+        draw(&mut img, &mut zbuf, cam, &inst, &pal);
         assert!(img.rgb.iter().all(|&p| p == bg), "a sprite behind a nearer wall is z-tested out");
     }
 }

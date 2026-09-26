@@ -210,8 +210,8 @@ impl ParticleProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, render_scene, render_scene_ext};
-    use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
+    use crate::render::{demo_room, Scene};
+    use crate::render::fixtures::render_once;
 
     // -- Engine particles (draw_particles: projection + z-test) ---------------
 
@@ -420,21 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn render_scene_empty_particles_matches_no_particles() {
-        // Passing an empty particle slice to render_scene_ext must reproduce the
-        // exact frame render_scene produces (no particles == no change).
-        let bsp = demo_room();
-        let cam = Camera::looking_at([0.0, 0.0, 0.0], [200.0, 0.0, 0.0], 90.0);
-        let pal = [[180u8, 180, 180]; 256];
-        let with_empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
-        let baseline = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        assert_eq!(
-            with_empty.rgb, baseline.rgb,
-            "render_scene_ext with an empty particle slice must equal render_scene"
-        );
-    }
-
-    #[test]
     fn render_scene_particles_paint_into_the_world_frame() {
         // A bright particle placed in the empty centre of demo_room (in front of
         // the camera, in clear air before the far wall) must change the rendered
@@ -443,24 +428,9 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let mut pal = [[60u8, 60, 60]; 256];
         pal[251] = [255, 0, 255]; // a vivid colour unlikely to match the walls
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let without = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         // A particle ~80 units in front of the camera (well before the +256 wall).
-        let with = render_scene_ext(
-            &bsp,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[],
-            &[],
-            None,
-            0.0,
-            &[([-120.0, 0.0, 0.0], 251)],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let with = render_once(&Scene { particles: &[([-120.0, 0.0, 0.0], 251)], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         assert_ne!(without.rgb, with.rgb, "a visible particle must change the frame");
         assert!(
             with.rgb.contains(&[255, 0, 255]),
