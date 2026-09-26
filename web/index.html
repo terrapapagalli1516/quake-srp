@@ -267,6 +267,13 @@
 // hands the program as ticks. web/PLATFORM.md has the design, the protocol
 // and the measurements.
 const statusEl = document.getElementById('status');
+// The status line's two resting states: id's demos running (the first
+// gesture reveals them), and a game being played (New Game, a load, the walk
+// button). The program's STATE record says which (ST.WALK), so the line
+// follows the game, not only the page's own buttons.
+const STATUS_ATTRACT = 'attract loop — press any key for the menu · Single Player > New Game to play';
+const statusPlaying = () => touch ? 'playing — the MENU button for the menu'
+                                  : 'playing — Esc for the menu · click the view to capture the mouse';
 const canvas = document.getElementById('c');
 const wrap = document.getElementById('wrap');
 const overlay = document.getElementById('overlay');
@@ -403,10 +410,11 @@ function handleOutput(b) {
     const kind = b[i], len = u32(i + 4), p = i + 8;
     switch (kind) {
       case OUT.STATE: {
-        const native = nativePixel();
+        const native = nativePixel(), walk = inWalkMode();
         gameState.flags = u32(p); gameState.menuScreen = i32(p + 4);
         gameState.pixelSize = len >= 12 ? u32(p + 8) : 0;
         if (nativePixel() !== native) fitCanvas();
+        if (inWalkMode() !== walk) syncStatus();
         syncLockChip();
         if (touch) touch.state();
         break;
@@ -477,7 +485,15 @@ function startFromOverlay() {
   // later, by a canvas click in walk mode.
   unlockAudio();
   hideOverlayForever();
-  statusEl.textContent = 'attract loop — press any key for the menu · Single Player > New Game to play';
+  statusEl.textContent = inWalkMode() ? statusPlaying() : STATUS_ATTRACT;
+}
+// A game started or ended (ST.WALK flipped): the playing line, or the
+// attract line again. Leaves alone a line a button set meanwhile (the demo
+// button's), and says nothing before the first gesture (the scrim's prompt).
+function syncStatus() {
+  if (!firstGestureDone) return;
+  if (inWalkMode()) statusEl.textContent = statusPlaying();
+  else if (statusEl.textContent === statusPlaying()) statusEl.textContent = STATUS_ATTRACT;
 }
 
 // Physical keys, KeyboardEvent.code -> the unshifted US-ASCII keynum of the
@@ -716,7 +732,7 @@ document.getElementById('walkBtn').addEventListener('click', () => {
   unlockAudio();
   hideOverlayForever();
   call('boot');
-  statusEl.textContent = 'walking e1m1 — Esc closes the menu · click the view to capture the mouse · WASD to move';
+  statusEl.textContent = statusPlaying();
 });
 document.getElementById('demoBtn').addEventListener('click', () => {
   if (!readyToPlay) return;
