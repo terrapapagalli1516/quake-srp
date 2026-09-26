@@ -153,6 +153,8 @@ pub(crate) fn call(line: &str) -> Answer {
         // profile, and config.cfg's text for them now.
         "cvar" => cvar_value(rest.trim()),
         "profile" => text_answer(|a| a.settings.profile.name().to_string()),
+        // The live game's map (`maps/e1m1.bsp`; empty with none).
+        "map_name" => text_answer(|a| a.walk.as_ref().filter(|_| a.mode == 0).map(|w| w.map_name.clone()).unwrap_or_default()),
         "config_text" => text_answer(|a| a.settings.config_text()),
         // A console line, as if typed and entered (`Cmd_ExecuteString`).
         "exec" => done(|| execute_console_command(rest)),
