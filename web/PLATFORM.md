@@ -208,6 +208,11 @@ bindings, and the port's departures, which the profiles **Classic** and
   it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
   switch as the menu's, so it sticks.
 
+`verify_settings.py` checks all of it in the browser (the window filled
+with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
+reload); the checks that pin id's behaviour open the page as `?classic`,
+and `bench.py` does too, so its frames hash as `quaketool play`'s.
+
 ## Sound
 
 The program decides what plays (`snd_dma.rs`, `quake_rs::snd`: channel

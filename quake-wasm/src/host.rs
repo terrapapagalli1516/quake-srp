@@ -55,8 +55,8 @@ impl FrameGate {
     }
 }
 
-/// The `wasm_showfps` extra's measurement (a departure, opt-in via Options >
-/// Web extras, default off): QuakeWorld's `SCR_DrawFPS` counter. Every
+/// The `wasm_showfps` measurement (a departure on Options > Classic / 2026's
+/// settings page, off in both profiles): QuakeWorld's `SCR_DrawFPS` counter. Every
 /// presented frame counts (`fps_count++`); once a second of `realtime` has
 /// passed since the window opened (`lastframetime`), the window's rate
 /// becomes the shown value (`lastfps`) and a new window opens. QW shows the

@@ -728,6 +728,24 @@ mod tests {
         assert_eq!(walk_mut(|w| w.key_move.fwd), 0.0, "key_up ends +forward");
     }
 
+    /// Space is `+jump` (`button2`: QuakeC's own swim stroke in water); with
+    /// the 2026 `cl_jumpswim` it swims up too (`upmove`, at `cl_upspeed`).
+    #[test]
+    fn space_swims_up_only_with_cl_jumpswim() {
+        use quake_rs::keys::K_SPACE;
+        assert_eq!(boot(), 1);
+        close_menu();
+        key_down(i32::from(K_SPACE));
+        step(0.0);
+        let classic = walk_mut(|w| (w.key_move.jump, w.key_move.up));
+        crate::host_cmd::execute_console_command("cl_jumpswim 1");
+        step(0.0);
+        let swim = walk_mut(|w| (w.key_move.jump, w.key_move.up));
+        key_up(i32::from(K_SPACE));
+        assert_eq!(classic, (true, 0.0), "id's: +jump alone");
+        assert_eq!(swim, (true, 200.0), "cl_jumpswim: and upmove");
+    }
+
     /// id's mouse (`freelook` off, Classic): mouse Y walks (`m_forward`) and
     /// leaves the pitch alone; holding `+mlook` (`\\`, MOUSE3) looks; letting
     /// it go with `lookspring` re-levels the view (`IN_MLookUp`) — and a

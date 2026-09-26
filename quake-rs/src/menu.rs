@@ -119,7 +119,7 @@ pub const SETTING_ROWS: [SettingRow; 12] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
-        help: ["classic: id's Quake, every row", "off; 2026: the rows as shown"],
+        help: ["Classic: id's Quake, every row", "off. 2026: the port's defaults"],
         kind: RowKind::Profile,
     },
     SettingRow {
@@ -430,10 +430,11 @@ pub enum MenuScreen {
     Help,
     /// The Quit confirmation prompt (`m_quit`): "Are you sure you want to quit?".
     Quit,
-    /// PORT SCREEN (not in id's Quake): Options > Web extras, the port's
-    /// opt-in departures ([`Extras`]) as on/off rows drawn in `M_Options_Draw`'s
-    /// idiom. Left/right/Enter toggle (`M_AdjustSliders`' checkbox rows);
-    /// Escape returns to Options on the Web extras row.
+    /// PORT SCREEN (not in id's Quake): Options > Classic / 2026, Enter: the
+    /// profile and every departure the profiles switch ([`SETTING_ROWS`]),
+    /// as rows drawn in `M_Options_Draw`'s idiom. Left/right/Enter change a
+    /// row (`M_AdjustSliders`' checkbox rows); Escape returns to Options on
+    /// its row.
     Extras,
 }
 
@@ -560,7 +561,7 @@ struct Cursors {
     /// on the live mode ([`Menu::res_preset`]) and later ones where the player
     /// left it. None until that first visit.
     video: Option<usize>,
-    /// PORT SCREEN: the Web extras page's, kept like `options_cursor`.
+    /// PORT SCREEN: the settings page's, kept like `options_cursor`.
     extras: usize,
     /// `setup_cursor`, which starts on Accept Changes (`int setup_cursor =
     /// 4;`).
@@ -935,8 +936,8 @@ impl Menu {
     /// * Keys > row: start the bind grab (`bind_grab`), unbinding first when the
     ///   row already shows two keys (`M_Keys_Key` K_ENTER).
     /// * Video > row: apply the highlighted preset ([`MenuAction::ResolutionChanged`]).
-    /// * Options > Web extras (port row): the Extras screen; Extras > row:
-    ///   toggle that extra (menu2 + menu3, like an Options checkbox).
+    /// * Options > Classic / 2026 (port row): the settings page; a row there:
+    ///   change it (menu2 + menu3, like an Options checkbox).
     /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
     ///   y/Y answers the prompt, [`Menu::keydown`]).
     pub fn select(&mut self, s: &mut Settings) -> MenuAction {
@@ -1901,7 +1902,7 @@ fn draw_menu_inner(
     }
 
     // The plaque is shared by the Main / SinglePlayer / Multiplayer / Options
-    // screens (M_DrawTransPic (16,4)), and the port's Extras page of Options.
+    // screens (M_DrawTransPic (16,4)), and the port's settings page of Options.
     if let Some(p) = &pics.qplaque {
         blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy, palette);
     }
@@ -1913,7 +1914,7 @@ fn draw_menu_inner(
         draw_options_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor, palette);
         return;
     }
-    // The port's Web extras page: a page of Options (same plaque + title).
+    // The port's settings page: a page of Options (same plaque + title).
     if menu.screen == MenuScreen::Extras {
         draw_extras_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor, palette);
         return;
@@ -3509,7 +3510,7 @@ mod tests {
     #[test]
     fn options_cursor_wraps_over_all_fourteen_rows() {
         // The cursor must visit every one of the 14 OPTIONS_ITEMS rows (id's
-        // 13 + Web extras) and wrap.
+        // 13 + Classic / 2026) and wrap.
         let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
