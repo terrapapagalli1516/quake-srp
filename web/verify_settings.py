@@ -25,6 +25,9 @@
      FPS) and get the 2026 defaults (uncapped, scaled 2-D).
 
 Screenshots (in the web dir): verify_settings_2026.png, verify_settings_classic.png.
+Also passes with QUAKE_BROWSER=firefox, whose headless build ignores the
+context's devicePixelRatio: section 2 is skipped there. Not verified: a real
+high-DPI screen, a GPU compositor, Safari.
 
 Usage: verify_settings.py [webdir]   (a deploy dir — PLATFORM.md.)
 """
@@ -187,22 +190,25 @@ with sync_playwright() as p:
     ctx = br.new_context(viewport={"width": 1280, "height": 800}, device_scale_factor=2)
     pg = page(ctx)
     boot(pg)
-    pg.evaluate("quake.callLine('exec r_threads 1')")
-    walk(pg)
-    pg.wait_for_function("document.getElementById('c').width === 1246", timeout=5000)
-    c = pg.evaluate(CANVAS)
-    check("dpr 2: a 2492x1432 box, Auto picks 2x2, a 1246x716 frame",
-          (c["w"], c["h"], c["px"], round(c["cssW"] * c["dpr"])) == (1246, 716, 2, 2492), str(c))
-    frames(pg)
-    bad = whole_pixels(pg, 2)
-    check("every frame pixel a whole 2x2 square of the screen", bad == 0, f"{bad} squares mixed")
-    pg.evaluate("quake.callLine('exec vid_pixelsize 3')")
-    pg.wait_for_function("document.getElementById('c').width === 830", timeout=5000)
-    frames(pg)
-    c = pg.evaluate(CANVAS)
-    bad = whole_pixels(pg, 3)
-    check("vid_pixelsize 3: an 830x477 frame, whole 3x3 squares",
-          (c["w"], c["h"], c["px"]) == (830, 477, 3) and bad == 0, f"{c}; {bad} mixed")
+    if pg.evaluate("devicePixelRatio") != 2:
+        print("SKIP the devicePixelRatio 2 checks (this browser ignores the context's device_scale_factor)")
+    else:
+        pg.evaluate("quake.callLine('exec r_threads 1')")
+        walk(pg)
+        pg.wait_for_function("document.getElementById('c').width === 1246", timeout=5000)
+        c = pg.evaluate(CANVAS)
+        check("dpr 2: a 2492x1432 box, Auto picks 2x2, a 1246x716 frame",
+              (c["w"], c["h"], c["px"], round(c["cssW"] * c["dpr"])) == (1246, 716, 2, 2492), str(c))
+        frames(pg)
+        bad = whole_pixels(pg, 2)
+        check("every frame pixel a whole 2x2 square of the screen", bad == 0, f"{bad} squares mixed")
+        pg.evaluate("quake.callLine('exec vid_pixelsize 3')")
+        pg.wait_for_function("document.getElementById('c').width === 830", timeout=5000)
+        frames(pg)
+        c = pg.evaluate(CANVAS)
+        bad = whole_pixels(pg, 3)
+        check("vid_pixelsize 3: an 830x477 frame, whole 3x3 squares",
+              (c["w"], c["h"], c["px"]) == (830, 477, 3) and bad == 0, f"{c}; {bad} mixed")
     ctx.close()
 
     # 4. ?classic is Classic, and it sticks.
