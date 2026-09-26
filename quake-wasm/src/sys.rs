@@ -35,7 +35,7 @@ use crate::host::step;
 use crate::input::{key_clear_states, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
     read_event, Event, LoopWindow, Msg, Placement, FORMAT_RGBA8, STATE_BIND_GRAB, STATE_CONSOLE, STATE_FKEY,
-    STATE_MENU, STATE_NATIVE, STATE_TIMEDEMO, STATE_WALK,
+    STATE_ASK, STATE_MENU, STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK,
 };
 use crate::savegame::scan_saves;
 use crate::snd_dma;
@@ -274,6 +274,12 @@ fn ui_state() -> UiState {
             (native, a.settings.cvars.fkey, pixel)
         })
     });
+    let (touch, ask, paused) = APP.with(|c| {
+        c.borrow().as_ref().map_or((false, false, false), |a| {
+            let paused = a.mode == 0 && a.walk.as_ref().is_some_and(|w| w.server.paused);
+            (a.settings.cvars.touch, a.menu.asks_yes_no(), paused)
+        })
+    });
     let flags = [
         (crate::menu::menu_visible() != 0, STATE_MENU),
         (crate::console::console_visible() != 0, STATE_CONSOLE),
@@ -282,6 +288,9 @@ fn ui_state() -> UiState {
         (timedemo_running() != 0, STATE_TIMEDEMO),
         (native, STATE_NATIVE),
         (fkey, STATE_FKEY),
+        (touch, STATE_TOUCH),
+        (ask, STATE_ASK),
+        (paused, STATE_PAUSED),
     ]
     .iter()
     .filter(|(on, _)| *on)
@@ -302,7 +311,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{encode, Record, STATE_FKEY, STATE_NATIVE};
+    use crate::proto::{encode, Record, STATE_ASK, STATE_FKEY, STATE_NATIVE, STATE_PAUSED, STATE_TOUCH};
 
     /// quake.rc's `stuffcmds`: the command line's `+profile 2026` (the
     /// page's `?2026`; the tests start in Classic) runs after `config.cfg`,
@@ -417,6 +426,29 @@ mod tests {
         assert_eq!(frame_and_state("2026", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_FKEY, 3), "5K: 3x3");
         assert_eq!(frame_and_state("2026", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_FKEY, 1), "any aspect");
         assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, 0, 0), "the mode, in the 4:3 box");
+    }
+
+    /// The flags the page's touch controls read: `in_touch` (on in 2026),
+    /// the menu waiting for y or n, the live game paused.
+    #[test]
+    fn the_state_says_touch_a_question_and_pause() {
+        let flags_after = |lines: &[&str]| {
+            let mut input = Vec::new();
+            for (id, line) in (1..).zip(lines) {
+                input.extend(encode::call(id, line));
+            }
+            input.extend(encode::tick(1, 0.0));
+            let recs = run_on(&input);
+            let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
+            state.u32_at(0) & (STATE_TOUCH | STATE_ASK | STATE_PAUSED)
+        };
+        assert_eq!(flags_after(&["exec profile 2026"]), STATE_TOUCH);
+        assert_eq!(flags_after(&["exec profile classic"]), 0);
+        assert_eq!(flags_after(&["boot", "menu_cancel", "exec pause"]), STATE_PAUSED);
+        assert_eq!(flags_after(&["exec pause"]), 0, "unpaused");
+        let quit = ["boot", "menu_up", "menu_select"];
+        assert_eq!(flags_after(&quit), STATE_ASK, "Main's last item, Quit, asks");
+        assert_eq!(flags_after(&["menu_quit_no"]), 0);
     }
 
     #[test]

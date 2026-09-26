@@ -23,8 +23,8 @@ use crate::input::{
 };
 use crate::menu::{
     extras, menu_backspace, menu_bind_grabbing, menu_bind_key, menu_cancel, menu_down, menu_left,
-    menu_quit_no, menu_quit_yes, menu_right, menu_screen_id, menu_select, menu_up, menu_visible,
-    set_extras,
+    menu_point, menu_quit_no, menu_quit_yes, menu_right, menu_screen_id, menu_select, menu_tap, menu_up,
+    menu_visible, set_extras,
 };
 use crate::snd_dma::{listener, sound_generation, volume};
 use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, set_window, viewsize, width};
@@ -130,6 +130,10 @@ pub(crate) fn call(line: &str) -> Answer {
         "menu_bind_grabbing" => menu_bind_grabbing().into(),
         "menu_bind_key" => done(|| menu_bind_key(int(0))),
         "menu_screen_id" => menu_screen_id().into(),
+        // A finger on the menu (the touch controls): the frame pixel it
+        // lifted from, or the one it is on.
+        "menu_tap" => menu_tap(real(0), real(1)).into(),
+        "menu_point" => menu_point(real(0), real(1)).into(),
         "menu_visible" => menu_visible().into(),
         // (Checks.) Forget a Load/Save slot's listing, as if M_ScanSaves
         // had found no file: opening Load or Save must list it again.
