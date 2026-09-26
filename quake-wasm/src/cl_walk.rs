@@ -76,6 +76,18 @@ mod tests {
         assert_eq!(lines[lines.len() - 2..], ["test fault", "Host_Error: Program error"]);
     }
 
+    /// The VM's output log (every print the QuakeC made, dprint's included)
+    /// is drained every frame, so it does not grow for a level's life.
+    #[test]
+    fn the_vm_output_log_is_drained_every_frame() {
+        set_resolution(320, 200);
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.server.vm.print("a line nobody reads\n"));
+        step(0.05);
+        assert_eq!(walk_mut(|w| w.server.vm.output().len()), 0);
+    }
+
     /// The same from the console: `kill` runs ClientKill, whose first
     /// `bprint` (#23) is made to fail.
     #[test]

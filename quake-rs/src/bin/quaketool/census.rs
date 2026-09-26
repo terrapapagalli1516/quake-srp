@@ -277,7 +277,7 @@ fn drain(server: &mut Server, pak: &Pak, run: &mut Run) {
     }
     run.particles += server.drain_particles().len();
     let _ = server.drain_static_sounds();
-    run.output.push_str(&server.vm.take_output());
+    run.output.push_str(&server.drain_output());
 }
 
 fn idle(server: &mut Server, pak: &Pak, run: &mut Run, secs: f32, buttons: i32) {

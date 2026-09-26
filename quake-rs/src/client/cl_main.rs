@@ -406,6 +406,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // 2a. Drain QuakeC's on-screen messages (centerprint / sprint / bprint) into
     //     the timed display state, and expire old ones on the host clock
     //     (the C times both off realtime / host_frametime, paused or not).
+    // The VM's output log repeats these and adds dprint's developer text:
+    // dropped, as id's `developer 0` does (Server::drain_output).
+    let _ = w.server.drain_output();
     for m in w.server.drain_messages() {
         if m.center {
             w.centerprint = Some((m.text, w.host_time + 2.0));

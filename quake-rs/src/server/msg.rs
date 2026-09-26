@@ -907,6 +907,18 @@ impl Server {
         self.take_outbox(|o| &mut o.messages)
     }
 
+    /// Take the VM's output log ([`Vm::take_output`]): everything the QuakeC
+    /// printed since the last drain — the `centerprint`/`sprint`/`bprint`
+    /// text [`Server::drain_messages`] also hands over, `dprint`'s developer
+    /// text, the `error`/`objerror` reports — and the console lines the
+    /// server printed while running it (`no precache: …`). The game shows
+    /// the messages and drops the rest, as id's does with `developer 0`;
+    /// the tools keep it. Whoever runs a server for long drains it, or it
+    /// grows for the level's life.
+    pub fn drain_output(&mut self) -> String {
+        self.vm.take_output()
+    }
+
     /// Take and clear the queued particle bursts fired by the QuakeC since the
     /// last drain (`PF_particle` pushes; see [`ParticleBurst`]). A front-end
     /// calls this once per frame and replays each burst into its
