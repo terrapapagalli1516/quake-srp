@@ -30,19 +30,12 @@ use quake_rs::spr::{Frame as SFrame, Sprite};
 use quake_rs::vm::Vm;
 use quake_rs::wad::{self, Wad2};
 
-#[path = "quaketool/census.rs"]
 mod census;
-#[path = "quaketool/framerate.rs"]
 mod framerate;
-#[path = "quaketool/play.rs"]
 mod play;
-#[path = "quaketool/shot.rs"]
 mod shot;
-#[path = "quaketool/sound.rs"]
 mod sound;
-#[path = "quaketool/timedemo.rs"]
 mod timedemo;
-#[path = "quaketool/video.rs"]
 mod video;
 
 /// What a command produced: text to print, or raw bytes (for `cat`).
