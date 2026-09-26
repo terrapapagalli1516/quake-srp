@@ -3,9 +3,9 @@
 `quake-wasm`'s `threadcheck` program, built for wasm32-wasip1-threads, runs
 in `wasi.js` on a shared `env.memory`; four `std::thread::scope` threads and
 a spawned one (a worker each, through `wasi.thread-spawn`) sum their parts
-and answer over a channel, and the main thread checks the lot (PLATFORM.md,
-"Threads"). The game itself does not use threads yet; this is the host's
-half, proven ahead of it.
+and answer over a channel, then 200 rounds of seven scoped threads reuse the
+host's workers the way the renderer does every frame, and the main thread
+checks the lot (PLATFORM.md, "Threads").
 
 Usage: verify_threads.py [threadcheck.wasm]   (default: builds it with cargo)
 """
