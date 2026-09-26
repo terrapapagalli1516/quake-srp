@@ -14,6 +14,7 @@
 use crate::bsp::Bsp;
 use crate::demo::{parse_demo, EntSnapshot};
 use crate::mdl::Mdl;
+use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{ParticleSystem, TrailHead, TrailStep};
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
@@ -128,6 +129,11 @@ fn build_demo_with(
     // too — the e1m3 demo has its own torches).
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(demo.static_sounds.clone()));
+    // The signon's svc_cdtrack: the CD plays the level's track, or the one
+    // the demo forces.
+    if let Some(track) = demo.cdtrack {
+        sound.push(SoundCall::Cd(CdCall::cdtrack(demo_cd_track(&demo, track))));
+    }
     // The overlay assets for a recorded intermission/finale (each optional —
     // a demo without one never touches them).
     let gfx_wad = read("gfx.wad").and_then(|b| crate::wad::Wad2::parse(b).ok());
@@ -152,6 +158,17 @@ fn build_demo_with(
     d.pic_finale = pic_finale;
     d.pic_pause = pic_pause;
     Some(d)
+}
+
+/// The track `CL_ParseServerMessage` hands `CDAudio_Play` for a recorded
+/// `svc_cdtrack` of `track` while a demo plays: `(byte)cls.forcetrack` when
+/// the demo forces one (id's demo1: track 2), else the recorded track.
+fn demo_cd_track(demo: &crate::demo::Demo, track: u8) -> u8 {
+    if demo.forcetrack == -1 {
+        track
+    } else {
+        demo.forcetrack as u8
+    }
 }
 
 /// `CL_ParseServerMessage`'s client-side effects of recorded message `idx`,
@@ -184,6 +201,10 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut 
     let prints = frame.prints.clone();
     let centerprints = frame.centerprints.clone();
     let bonus = frame.stufftext.iter().any(|t| stufftext_bonus_flash(t));
+    let cdtrack = frame.cdtrack.map(|t| demo_cd_track(&d.demo, t));
+    // svc_setpause: cl.paused against the message before.
+    let was_paused = idx.checked_sub(1).and_then(|i| d.demo.frames.get(i)).is_some_and(|f| f.paused);
+    let pause = (frame.paused != was_paused).then_some(frame.paused);
     let view_entity_origin = frame.view_entity_origin;
     let view_angles = frame.view_angles;
     for b in &bursts {
@@ -237,6 +258,13 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut 
     // svc_stopsound: hand the (entity, channel) stops to the sound layer (the
     // page stop()s its registered source for that key, S_StopSound).
     sound.push(SoundCall::Stop(stops));
+    // svc_cdtrack and svc_setpause: CDAudio_Play, CDAudio_Pause/_Resume.
+    if let Some(track) = cdtrack {
+        sound.push(SoundCall::Cd(CdCall::cdtrack(track)));
+    }
+    if let Some(paused) = pause {
+        sound.push(SoundCall::Cd(if paused { CdCall::Pause } else { CdCall::Resume }));
+    }
     // svc_damage (V_ParseDamage, view.c): bump the damage cshift and compute
     // the directional view kick from the recorded attack origin.
     for dmg in &damage {
@@ -837,7 +865,7 @@ fn render_demo_frame(
     // the 3-D view FIRST; the content tint joins the deferred whole-screen
     // blend below (V_UpdatePalette order).
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
-    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref(), &d.palette);
+    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
     if dowarp {
         let view = d.renderer.render(&scene);
         lap(Phase::Render3d);
@@ -848,7 +876,7 @@ fn render_demo_frame(
     }
     // V_RenderView: the crosshair over the view, before the 2-D layer.
     if let Some(cc) = d.conchars.as_ref().filter(|_| d.crosshair) {
-        render::draw_crosshair(&mut img, cc, &vrect, &d.palette);
+        render::draw_crosshair(&mut img, cc, &vrect);
     }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
@@ -868,7 +896,6 @@ fn render_demo_frame(
                     render::draw_intermission_overlay(
                         &mut img,
                         wad,
-                        &d.palette,
                         d.pic_complete.as_ref(),
                         d.pic_inter.as_ref(),
                         &stats,
@@ -878,7 +905,6 @@ fn render_demo_frame(
             2 => render::draw_finale_overlay(
                 &mut img,
                 d.conchars.as_ref(),
-                &d.palette,
                 d.pic_finale.as_ref(),
                 &f.finale_text,
                 v.time - f.finale_start,
@@ -886,7 +912,6 @@ fn render_demo_frame(
             _ => render::draw_finale_overlay(
                 &mut img,
                 d.conchars.as_ref(),
-                &d.palette,
                 None,
                 &f.finale_text,
                 v.time - f.finale_start,
@@ -902,7 +927,6 @@ fn render_demo_frame(
         // the recorded health hits 0, like Sbar_Draw's scoreboard flip.
         let hud = render::Hud {
             wad,
-            palette: &d.palette,
             health: client.health,
             ammo: client.ammo,
             armor: client.armor,
@@ -934,7 +958,7 @@ fn render_demo_frame(
     // view here — id's demos have none.)
     if f.paused && f.intermission == 0 {
         if let Some(pic) = d.pic_pause.as_ref() {
-            render::draw_pause(&mut img, pic, &d.palette);
+            render::draw_pause(&mut img, pic);
         }
     }
 
@@ -949,11 +973,11 @@ fn render_demo_frame(
     if !menu_up && f.intermission == 0 {
         if let Some(cc) = d.conchars.as_ref() {
             if let Some((text, _)) = &d.centerprint {
-                render::draw_centerprint(&mut img, cc, &d.palette, text);
+                render::draw_centerprint(&mut img, cc, text);
             }
             let lines = d.notify.visible(v.time);
             if !lines.is_empty() {
-                render::draw_notify(&mut img, cc, &d.palette, &lines);
+                render::draw_notify(&mut img, cc, &lines);
             }
         }
     }
@@ -1044,6 +1068,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames,
         };
         let pak = crate::pak::Pak::from_bytes("t".into(), {
@@ -1243,6 +1269,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![frame(1.0), frame(1.1), frame(1.1), frame(1.3)],
         };
         let pak = crate::pak::Pak::from_bytes("t".into(), {

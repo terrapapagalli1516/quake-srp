@@ -151,6 +151,17 @@
     margin:10px 0 4px 8px; }
   #drawer .aside { max-width:640px; margin:14px auto 0; font-size:12px; color:var(--faint); }
 
+  /* Your Quake: the drawer's line about the player's own files, and the
+     page-wide hint while files are dragged over it. */
+  #content { max-width:640px; margin:14px auto 0; font-size:12px; color:var(--faint); }
+  #content p { margin:0; }
+  #contentMsg { margin-top:6px !important; color:#c98f6f; }
+  #contentMsg.ok { color:#a08c5a; }
+  #dropHint { position:fixed; inset:10px; z-index:10; pointer-events:none;
+    display:flex; align-items:center; justify-content:center;
+    border:2px dashed var(--bronze); border-radius:6px; background:rgba(11,9,7,.72);
+    color:var(--bronze-hi); font-size:15px; letter-spacing:.05em; }
+
   /* A narrow window: shrink the 4:3 box (same aspect math as above) so the
      page never breaks. (A touch screen gets touch.js's layout instead.) */
   @media (max-width:699px) {
@@ -196,6 +207,7 @@
           <span class="k"><kbd>←</kbd><kbd>→</kbd></span><span>turn</span>
           <span class="k"><kbd>Space</kbd></span><span>jump / swim up</span>
           <span class="k"><kbd>C</kbd></span><span>swim down</span>
+          <span class="k">gamepad</span><span>2026: left stick moves, right stick looks, RT fires, A or LT jumps, bumpers change weapon, Start the menu (D-pad, A and B work it), Back the scores. Classic: id's joystick after <code>joystick 1</code> on the console. A browser sees a pad once a button is pressed</span>
         </div>
       </div>
       <div class="col">
@@ -236,9 +248,17 @@
         <code>wasm_help</code><span>this port's list of console commands (<code>echo</code>, <code>clear</code>, the demo commands, …)</span>
       </div>
     </details>
+    <section id="content">
+      <p id="contentLine">Own Quake? Add your copy's <code>id1/pak1.pak</code> for episodes 2–4, and its CD music
+        (<code>music/track02.ogg</code>…): drop the files, or the whole Quake folder, anywhere on this page, or
+        <button id="addBtn" class="link">choose files</button>. They stay in this browser.</p>
+      <p id="contentMsg" class="hidden"></p>
+      <input id="fileInput" type="file" multiple hidden>
+    </section>
     <p class="aside">Shortcuts: <button id="walkBtn" class="link">walk e1m1</button> · <button id="demoBtn" class="link">play demo1 (e1m3)</button></p>
     <p class="aside">id Software's 1996 Quake, ported to Rust from its GPL source and software-rendered in your browser — no GPU, no dependencies. Shareware episode included.</p>
   </div>
+<div id="dropHint" class="hidden">drop your Quake files — pak1.pak, the music</div>
 <script>
 // The page is a small host for the game, which runs as a program in a Web
 // Worker (wasi.js runs quake.wasm there). The page owns what a browser
@@ -258,7 +278,9 @@ const bootFill = document.getElementById('bootFill');
 const playEl = document.getElementById('play');
 const lockChip = document.getElementById('lockChip');
 const fsHint = document.getElementById('fsHint');
-const MOVE_KEYS = ['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','c'];
+// The keys whose browser default (scrolling, or a click on a focused button)
+// must never happen in the game, by Quake keynum: WASD, c, Space, the arrows.
+const MOVE_KEYNUMS = [119, 97, 115, 100, 99, 32, 128, 129, 130, 131];
 // MouseEvent.button -> Quake keynum (keys.h K_MOUSE1/2/3): left, middle, right.
 const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
@@ -269,11 +291,15 @@ const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
 // The control block's fields (Int32 indexes; wasi.js has the same table).
 const C = { IN_WRITE: 0, IN_READ: 1, ACK: 2, SYNCS: 3, LATEST: 4, FRAMES: 5, READING: 6,
-            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19 };
+            RUN: 7, WAIT: 8, SLOT_W: 9, SLOT_H: 12, SLOT_F: 15, SHOWN: 18, SLOTS_GEN: 19,
+            SLOT_SRC: 20, SLOT_ADDR: 23, SLOT_PAL: 26 };
 const CTL_BYTES = 256, RING_BYTES = 1 << 16;
 // Record kinds, in (IN_*) and out (OUT_*).
-const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7, WINDOW: 9, AUDIO_CLOCK: 10 };
-const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15 };
+const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDIO_READY: 6, CALL: 7, WINDOW: 9, AUDIO_CLOCK: 10,
+             PRESENT: 12, GAMEPAD: 20 };
+// Frame formats (the FRAME record's, and what PRESENT asks for).
+const FORMAT = { RGBA8: 0, INDEXED8: 1 };
+const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15, CD: 16, RUMBLE: 20 };
 // State flags (the STATE record).
 const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, FKEY: 64,
              TOUCH: 128, ASK: 256, PAUSED: 512 };
@@ -283,6 +309,7 @@ let worker = null, ctl = null, ring = null;
 // outgrows them, and sends it here): the buffer, each slot's size, which set.
 let frameSlots = null, slotBytes = 0, slotsGen = 0;
 let exp = null;                    // the automation proxy (window.quake.call by name), set once running
+let engineError = '';              // the program's last "quake: ..." line (the Sys_Error it stopped on)
 // The program's UI state as of its last turn (the STATE record).
 const gameState = { flags: 0, menuScreen: 0, pixelSize: 0 };
 // touch.js, on a touch screen: { state() on every STATE record, rumble() }.
@@ -323,13 +350,14 @@ function sendRecord(kind, payload) {
 }
 function fields(size, fill) { const b = new Uint8Array(size); fill(new DataView(b.buffer)); return b; }
 // One key event into the program: keys.c's Key_Event decides, as in id's
-// Quake, whether it goes to the menu, the console or its binding.
-function keyEvent(qk, down, ch) {
-  noteInput();
+// Quake, whether it goes to the menu, the console or its binding. `at` is the
+// event's timeStamp, for the latency measurement.
+function keyEvent(qk, down, ch, at) {
+  noteInput(at);
   sendRecord(IN.KEY, fields(8, d => { d.setUint8(0, qk); d.setUint8(1, down ? 1 : 0); d.setUint32(4, ch || 0, true); }));
 }
-function mouseMove(dx, dy) {
-  noteInput();
+function mouseMove(dx, dy, at) {
+  noteInput(at);
   sendRecord(IN.MOUSE, fields(8, d => { d.setFloat32(0, dx, true); d.setFloat32(4, dy, true); }));
 }
 function sendTick(seq, dt) {
@@ -360,8 +388,12 @@ function onWorkerMessage(e) {
   const m = e.data;
   if (m.t === 'out') handleOutput(new Uint8Array(m.bytes));
   else if (m.t === 'slots') { frameSlots = m.frames; slotBytes = m.slotBytes; slotsGen = m.gen; }
+  else if (m.t === 'memory') programMemory = m.memory;
   else if (m.t === 'fs') storage.apply(m);
-  else if (m.t === 'log') console.log('[quake]', m.text);
+  else if (m.t === 'log') {
+    console.log('[quake]', m.text);
+    if (m.text.startsWith('quake: ')) engineError = m.text.slice(7);   // a Sys_Error, before it exits
+  }
   else if (m.t === 'exit') gameExited(m);
 }
 function handleOutput(b) {
@@ -392,11 +424,13 @@ function handleOutput(b) {
         }
         break;
       }
+      case OUT.CD: onCdRecord(dv, p); break;
       case OUT.BENCH: {
         const v = []; for (let k = 0; k < len / 8; k++) v.push(dv.getFloat64(p + 8 * k, true));
         if (quake.onBench) quake.onBench(v);
         break;
       }
+      case OUT.RUMBLE: onRumble(f32(p), f32(p + 4), u32(p + 8), len >= 16 && u32(p + 12) !== 0); break;
     }
     i = p + len;
   }
@@ -446,16 +480,21 @@ function startFromOverlay() {
   statusEl.textContent = 'attract loop — press any key for the menu · Single Player > New Game to play';
 }
 
-// Physical punctuation/digit keys, KeyboardEvent.code -> unshifted US-ASCII
-// keynum. WinQuake's Key_Event works on SCANCODES (in_win.c scantokey): the
-// ',' key is keynum ',' whether or not Shift is down, and a key's release
-// always matches its press. e.key instead shifts for punctuation ('<' for
-// Shift+','), which (a) made the seeded default.cfg layout unable to strafe
-// while running (+speed is Shift, so Shift+',' delivered unbound keynum 60)
-// and (b) could STICK a held key (press ',', add Shift, release ',' -> keyup
-// said '<', leaving keynum 44 held forever). Resolving these keys from
-// e.code restores the C's scancode semantics; letters are already
-// shift-stable via toLowerCase below.
+// Physical keys, KeyboardEvent.code -> the unshifted US-ASCII keynum of the
+// key in that place. WinQuake's Key_Event works on SCANCODES (in_win.c
+// scantokey, a US table): a key is its place on the keyboard, whatever the
+// layout types there, and its release always matches its press. So on AZERTY
+// the key where a US keyboard has W (labelled Z) is keynum 'w' and walks
+// forward in the 2026 WASD layout, and the digit row is 1..0 though it types
+// &é"'( unshifted; what the layout typed still goes with the key (typedChar),
+// for the console and the name fields. e.key instead follows the layout and
+// shifts punctuation ('<' for Shift+','), which (a) put WASD all over the
+// keyboard on AZERTY or Dvorak, (b) made the seeded default.cfg layout unable
+// to strafe while running (+speed is Shift, so Shift+',' delivered unbound
+// keynum 60) and (c) could STICK a held key (press ',', add Shift, release ','
+// -> keyup said '<', leaving keynum 44 held forever). Letters are KeyA..KeyZ
+// below; a key e.code does not name (or an empty code, as some virtual
+// keyboards send) falls back to e.key.
 const CODE_KEYNUMS = {
   Comma: 44, Period: 46, Slash: 47, Semicolon: 59, Quote: 39,
   BracketLeft: 91, BracketRight: 93, Backslash: 92, Backquote: 96,
@@ -470,6 +509,7 @@ const CODE_KEYNUMS = {
 function quakeKey(e) {
   const pc = CODE_KEYNUMS[e.code];
   if (pc !== undefined) return pc;
+  if (/^Key[A-Z]$/.test(e.code)) return e.code.charCodeAt(3) + 32;   // KeyW -> 'w'
   const k = e.key;
   if (k.length === 1) {
     const c = k.toLowerCase().charCodeAt(0);
@@ -490,9 +530,12 @@ function quakeKey(e) {
 }
 
 // The character a key typed on the player's keyboard layout, for the console
-// and the Setup name fields (0: none — a named key, or a shortcut chord).
+// and the Setup name fields (0: none — a named key, or a shortcut chord). AltGr
+// (reported as Ctrl+Alt on Windows) types characters on most layouts: '@' is
+// AltGr+Q on a German keyboard.
 function typedChar(e) {
-  if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return 0;
+  const altGr = typeof e.getModifierState === 'function' && e.getModifierState('AltGraph');
+  if (e.key.length !== 1 || e.metaKey || ((e.ctrlKey || e.altKey) && !altGr)) return 0;
   return e.key.codePointAt(0);
 }
 
@@ -525,7 +568,8 @@ addEventListener('keydown', e => {
   //     live game the key still reaches the engine for a player who bound it;
   //     during demo playback it does not, where any key raises the menu.
   const gameHasKeys = !menuVisible() && !consoleVisible();
-  if (k === 'f' && gameHasKeys && fkeyFullscreen()) {
+  const qk = quakeKey(e);
+  if (qk === 102 && gameHasKeys && fkeyFullscreen()) {   // the F key's place
     toggleFullscreen();
     if (!inWalkMode()) { e.preventDefault(); return; }
   }
@@ -538,25 +582,24 @@ addEventListener('keydown', e => {
   //     +forward.., the digit row's "impulse 1".."impulse 8" by physical key,
   //     so Shift+digit and non-US layouts select weapons too, and the console
   //     key's "toggleconsole").
-  const qk = quakeKey(e);
-  if (qk !== null) keyEvent(qk, true, typedChar(e));
+  if (qk !== null) keyEvent(qk, true, typedChar(e), e.timeStamp);
   // Keep the browser's own use of these keys away: Space/arrows scroll, Tab
-  // moves focus, and while the menu or console has the keyboard, typing must
-  // not start the browser's quick-find (' and /) or page scrolling.
-  if (MOVE_KEYS.includes(k) || k === 'tab' || k === 'backspace' || qk === 96
+  // moves focus, Firefox's quick-find opens on ' and / (the latter is
+  // default.cfg's "impulse 10"), and while the menu or console has the
+  // keyboard, typing must not scroll the page either.
+  if (MOVE_KEYNUMS.includes(qk) || qk === 9 || qk === 127 || qk === 96 || qk === 39 || qk === 47
       || (!gameHasKeys && qk !== null && !e.ctrlKey && !e.metaKey)) e.preventDefault();
 });
 addEventListener('keyup', e => {
-  const k = e.key.toLowerCase();
   // Key-ups are delivered unconditionally (even while the menu/console own the
   // keyboard) so a key released behind an overlay can never stick held.
   const qk = quakeKey(e);
-  if (qk !== null) keyEvent(qk, false, 0);
+  if (qk !== null) keyEvent(qk, false, 0, e.timeStamp);
   // A focused <button>/<summary> fires its click on the Space KEYUP — swallow
   // the game keys' keyup so jumping can never re-trigger the last clicked
   // control (the click handlers also blur(); this is the backstop), and a
   // held-then-released arrow can't scroll either.
-  if (MOVE_KEYS.includes(k)) e.preventDefault();
+  if (MOVE_KEYNUMS.includes(qk)) e.preventDefault();
 });
 // A key released while the window was elsewhere never comes up here: on
 // losing the keyboard, vid_win.c's ClearAllStates (every key up, repeats
@@ -698,7 +741,7 @@ canvas.addEventListener('mousedown', (e) => {
     // to aim — and the page's buttons stay one click away); closing the menu
     // re-captures on the next click, never automatically (browsers require the
     // gesture).
-    if (inWalkMode() && !menuVisible() && !consoleVisible()) canvas.requestPointerLock?.();
+    if (inWalkMode() && !menuVisible() && !consoleVisible()) lockPointer();
   }
   // The buttons are K_MOUSE1/2/3 (in_win.c: left, right, middle), keys like
   // any other: while the mouse is captured they reach their bindings —
@@ -706,15 +749,37 @@ canvas.addEventListener('mousedown', (e) => {
   // Customize controls waits for a key they are the key to bind (M_Keys_Key),
   // as in id's.
   if (MOUSE_KEYNUMS[e.button] && (locked() || bindGrabbing())) {
-    keyEvent(MOUSE_KEYNUMS[e.button], true, 0);
+    keyEvent(MOUSE_KEYNUMS[e.button], true, 0, e.timeStamp);
     e.preventDefault();
   }
   dragging = true;
 });
 addEventListener('mouseup', (e) => {
   dragging = false;
-  if (MOUSE_KEYNUMS[e.button]) keyEvent(MOUSE_KEYNUMS[e.button], false, 0);
+  if (MOUSE_KEYNUMS[e.button]) keyEvent(MOUSE_KEYNUMS[e.button], false, 0, e.timeStamp);
 });
+// The raw mouse. id's IN_StartupMouse switched Windows' pointer acceleration
+// off while the game ran (newmouseparms {0, 0, 1}, unless -noforcemaccel), so
+// a count of mouse movement was always the same turn; `unadjustedMovement`
+// asks the browser for the same unaccelerated counts (Chromium: the OS's raw
+// input, on Windows, macOS and ChromeOS). Where it is refused
+// (NotSupportedError: Linux, Firefox, an older Chromium) the plain lock, at
+// once and from then on: Chromium refuses a burst of lock requests ("too many
+// in a short window"), so a refused option must not cost a second request
+// every time.
+let rawMouse = true;   // until the browser says it has no unadjusted movement
+function lockPointer() {
+  let p = null;
+  try { p = rawMouse ? canvas.requestPointerLock({ unadjustedMovement: true }) : canvas.requestPointerLock(); }
+  catch (err) { p = null; }
+  if (!p || typeof p.then !== 'function') return;   // an older browser: no promise, the option ignored
+  p.catch(err => {
+    if (!rawMouse || !err || err.name !== 'NotSupportedError') return;
+    rawMouse = false;
+    const q = canvas.requestPointerLock();
+    if (q && typeof q.catch === 'function') q.catch(() => {});
+  });
+}
 // The right button is MOUSE2 in the game, not the browser's context menu.
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 // The standard web-port Esc pattern. The browser RESERVES Esc while the
@@ -780,9 +845,180 @@ canvas.addEventListener('mousemove', e => {
   if (menuVisible() || consoleVisible()) return;
   // Raw movementX/Y counts: the engine's IN_MouseMove port applies the
   // sensitivity cvar, the Invert Mouse sign (m_pitch < 0), and the
-  // lookstrafe/+strafe routing.
-  if (locked() || dragging) mouseMove(e.movementX, e.movementY);
+  // lookstrafe/+strafe routing. Every count arrives: a browser that coalesces
+  // several samples into one event (Chromium and Firefox do, once per
+  // refresh) sums their movement into it, and the program adds each event as
+  // it comes, so the same motion turns as far at 60 Hz as at 480 Hz.
+  if (locked() || dragging) mouseMove(e.movementX, e.movementY, e.timeStamp);
 });
+
+// --- The gamepad ---------------------------------------------------------------
+// The Gamepad API has no events for a pad's state, so the page polls it once
+// per display refresh, just before the tick (frame(), below: as late as the
+// frame allows), and sends it when it changed. The program reads it in that
+// host frame as id's joystick: in_win.c's IN_Commands and IN_JoyMove
+// (quake-rs client/in_win.rs has how a pad reads as winmm's). The pad is the
+// first connected one with the standard mapping, else the first connected
+// (IN_StartupJoystick takes the first valid joystick); a browser shows a pad
+// only after one of its buttons is pressed.
+const PAD_BYTES = 32;
+let padIndex = -1, padLast = new Uint8Array(PAD_BYTES);
+// When the pad and the touch screen were last used: on a device with both,
+// the rumble goes to the one in the player's hands.
+let padUsedAt = -1, touchedAt = -1;
+addEventListener('pointerdown', e => { if (e.pointerType === 'touch') touchedAt = performance.now(); },
+                 { capture: true, passive: true });
+function activePad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let pad = null;
+  for (const p of pads) {
+    if (p && p.connected && (!pad || (p.mapping === 'standard' && pad.mapping !== 'standard'))) pad = p;
+  }
+  return pad;
+}
+// The GAMEPAD record (quake-wasm proto.rs): connected, standard, the button
+// count, the pressed buttons as bits, the axes; for a standard pad the two
+// triggers' values stand in axes 4 and 5.
+function padRecord(pad) {
+  if (!pad) return new Uint8Array(PAD_BYTES);
+  const standard = pad.mapping === 'standard', b = pad.buttons, a = pad.axes;
+  const n = Math.min(32, b.length);
+  let pressed = 0;
+  for (let i = 0; i < n; i++) if (b[i].pressed) pressed |= 1 << i;
+  const value = (i) => (b[i] ? b[i].value : 0);
+  const axes = standard ? [a[0], a[1], a[2], a[3], value(6), value(7)] : [a[0], a[1], a[2], a[3], a[4], a[5]];
+  return fields(PAD_BYTES, d => {
+    d.setUint8(0, 1); d.setUint8(1, standard ? 1 : 0); d.setUint8(2, n);
+    d.setUint32(4, pressed >>> 0, true);
+    axes.forEach((v, i) => d.setFloat32(8 + 4 * i, Number.isFinite(v) ? v : 0, true));
+  });
+}
+function pollGamepad() {
+  const pad = activePad();
+  padIndex = pad ? pad.index : -1;
+  const rec = padRecord(pad);
+  if (rec.every((v, i) => v === padLast[i])) return;
+  padLast = rec;
+  if (pad) { noteInput(pad.timestamp); padUsedAt = performance.now(); }
+  sendRecord(IN.GAMEPAD, rec);
+  // A pad's button is the first gesture too, for a player with only a pad: the
+  // scrim goes (though a browser may not count it as the activation that
+  // lets audio start: then the first click or key does).
+  const anyButton = (rec[4] | rec[5] | rec[6] | rec[7]) !== 0;
+  if (anyButton && !firstGestureDone && readyToPlay) startFromOverlay();
+}
+// The 2026 rumble (joy_rumble): the program says how strong and for how long,
+// on damage and on heavy-weapon fire, and whether the pad is read (`joystick`).
+// The pad plays it where the browser can (Chromium's vibrationActuator
+// "dual-rumble"; Firefox's hapticActuators pulse, where enabled) — unless the
+// touch screen was used since the pad, or no pad is read: then a phone
+// vibrates, through the touch controls (touch.js rumble(): navigator.vibrate,
+// in the game only). Never both.
+function onRumble(strong, weak, ms, padRead) {
+  const pad = padRead && padIndex >= 0 && navigator.getGamepads ? navigator.getGamepads()[padIndex] : null;
+  if (!pad || (touch && touchedAt > padUsedAt)) {
+    if (touch) touch.rumble(weak, strong, ms);
+    return;
+  }
+  const s = Math.min(1, Math.max(0, strong)), w = Math.min(1, Math.max(0, weak));
+  const act = pad.vibrationActuator;
+  if (act && typeof act.playEffect === 'function') {
+    const r = act.playEffect('dual-rumble', { startDelay: 0, duration: ms, strongMagnitude: s, weakMagnitude: w });
+    if (r && typeof r.catch === 'function') r.catch(() => {});
+  } else if (pad.hapticActuators && pad.hapticActuators[0] && typeof pad.hapticActuators[0].pulse === 'function') {
+    pad.hapticActuators[0].pulse(Math.max(s, w), ms);
+  }
+}
+
+// ===========================================================================
+// The CD: the program's CD player plays the player's track files beside the
+// sound ring (web/PLATFORM.md, "CD music")
+// ===========================================================================
+// In 1996 the CD played beside the game's mix, not through it: the engine
+// told the drive "track N, looping", and the drive played it at its own
+// level. Here the drive is an <audio> element on the player's file for the
+// track — streamed, so a seven-minute track is never decoded whole into
+// memory — through a gain node (the level) into the page's AudioContext,
+// beside the worklet: so it starts with the first click as the game's
+// sound does, and a hidden tab pauses it with the game, as WinQuake's
+// AppActivate paused the CD. The program sends the drive's state in a Cd
+// record whenever it changes; a new serial is a start from the top.
+const CD_MODE = { STOPPED: 0, PLAYING: 1, PAUSED: 2 };
+const cd = {
+  want: null,        // the last Cd record: { serial, track, looping, mode, volume }
+  el: null, gain: null, analyser: null,   // the drive, made on the first AudioContext
+  serial: -1,        // the start the element is playing
+  track: 0,          // the track whose file the element holds
+  url: null,         // its object URL
+  loading: false,
+  error: '',
+};
+function onCdRecord(dv, p) {
+  cd.want = { serial: dv.getUint32(p, true), track: dv.getUint8(p + 4), looping: !!dv.getUint8(p + 5),
+              mode: dv.getUint8(p + 6), volume: dv.getFloat32(p + 8, true) };
+  cdSync();
+}
+// The drive's element and nodes, once there is an AudioContext.
+function cdGraph() {
+  if (cd.el) return true;
+  if (!audioCtx) return false;
+  cd.el = new Audio();
+  cd.el.preload = 'auto';
+  // MCI's notify: a track that is not looping played to its end.
+  cd.el.addEventListener('ended', () => { if (!cd.el.loop) callLine('cd_ended ' + cd.serial).catch(() => {}); });
+  cd.el.addEventListener('error', () => {
+    if (!cd.url) return;
+    cd.error = `CD track ${cd.track}: this browser cannot play its file`;
+    contentShow(cd.error, false);
+  });
+  cd.gain = audioCtx.createGain();
+  cd.analyser = audioCtx.createAnalyser();
+  audioCtx.createMediaElementSource(cd.el).connect(cd.gain);
+  cd.gain.connect(audioCtx.destination);
+  cd.gain.connect(cd.analyser);
+  return true;
+}
+// Put the player's file for `track` in the drive.
+async function cdLoad(track) {
+  cd.loading = true;
+  try {
+    const blob = await storage.musicGet(track);
+    if (cd.url) URL.revokeObjectURL(cd.url);
+    cd.url = blob ? URL.createObjectURL(blob) : null;
+    cd.track = track;
+    if (cd.url) cd.el.src = cd.url; else cd.el.removeAttribute('src');
+  } finally {
+    cd.loading = false;
+  }
+  cdSync();
+}
+// Make the drive do what the program last said.
+function cdSync() {
+  const w = cd.want;
+  if (!w || !cdGraph()) return;
+  cd.gain.gain.value = w.volume;
+  cd.el.loop = w.looping;
+  if (cd.loading) return;
+  if (w.serial !== cd.serial && w.mode !== CD_MODE.STOPPED) {
+    // MCI_PLAY from the track's top.
+    if (w.track !== cd.track) { cdLoad(w.track); return; }
+    cd.serial = w.serial;
+    cd.el.currentTime = 0;
+  }
+  const play = w.mode === CD_MODE.PLAYING && w.serial === cd.serial && !document.hidden && !!cd.url;
+  if (play && cd.el.paused) cd.el.play().catch(e => { cd.error = String(e); });
+  else if (!play && !cd.el.paused) cd.el.pause();
+}
+document.addEventListener('visibilitychange', cdSync);
+// The drive's output level now (RMS of the analyser's window), for the checks.
+function cdLevel() {
+  if (!cd.analyser) return 0;
+  const a = new Float32Array(cd.analyser.fftSize);
+  cd.analyser.getFloatTimeDomainData(a);
+  let sum = 0;
+  for (const v of a) sum += v * v;
+  return Math.sqrt(sum / a.length);
+}
 
 // ===========================================================================
 // Sound: the program mixes (id's mixer, in the worker); an AudioWorklet
@@ -949,6 +1185,7 @@ function updateSndUI() {
   }
   if (on === sndShown) return;
   sndShown = on;
+  cdSync();   // the CD plays in the context that just started (or stops with it)
   sndBtn.textContent = on ? 'sound on' : 'sound off';
   sndBtn.classList.toggle('on', on);
 }
@@ -1009,8 +1246,13 @@ const storage = {
   open() {
     return new Promise(resolve => {
       let req;
-      try { req = indexedDB.open('quake-rs', 1); } catch (e) { this.fallback = true; resolve(); return; }
-      req.onupgradeneeded = () => req.result.createObjectStore('files');
+      try { req = indexedDB.open('quake-rs', 2); } catch (e) { this.fallback = true; resolve(); return; }
+      // 1: the game directory's files; 2: the player's CD tracks, kept apart
+      // (never handed to the worker: the page plays them a track at a time).
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        for (const name of ['files', 'music']) if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+      };
       req.onsuccess = () => { this.db = req.result; resolve(); };
       req.onerror = () => { this.fallback = true; resolve(); };
     });
@@ -1050,6 +1292,40 @@ const storage = {
     return new Promise(resolve => {
       const tx = this.db.transaction('files', 'readwrite');
       tx.objectStore('files').delete(path);
+      tx.oncomplete = tx.onerror = () => resolve();
+    });
+  },
+  // The CD's tracks: the music store's values are the player's files (Blobs),
+  // keyed by track number.
+  musicTracks() {
+    if (this.fallback || !this.db) return Promise.resolve([]);
+    return new Promise(resolve => {
+      const req = this.db.transaction('music').objectStore('music').getAllKeys();
+      req.onsuccess = () => resolve(req.result.map(Number).sort((a, b) => a - b));
+      req.onerror = () => resolve([]);
+    });
+  },
+  musicGet(track) {
+    if (this.fallback || !this.db) return Promise.resolve(null);
+    return new Promise(resolve => {
+      const req = this.db.transaction('music').objectStore('music').get(track);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  },
+  musicPut(track, blob) {
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction('music', 'readwrite');
+      tx.objectStore('music').put(blob, track);
+      tx.oncomplete = () => resolve();
+      tx.onerror = tx.onabort = () => reject(tx.error);
+    });
+  },
+  musicClear() {
+    if (this.fallback || !this.db) return Promise.resolve();
+    return new Promise(resolve => {
+      const tx = this.db.transaction('music', 'readwrite');
+      tx.objectStore('music').clear();
       tx.oncomplete = tx.onerror = () => resolve();
     });
   },
@@ -1106,6 +1382,249 @@ async function migrateLocalStorage(have) {
   }
   for (const k of moved) { try { localStorage.removeItem(k); } catch (e) {} }
 }
+
+// ===========================================================================
+// Your Quake: the player's own files (web/PLATFORM.md, "Your files")
+// ===========================================================================
+// A player who owns Quake adds id's files: id1/pak1.pak (episodes 2–4; a
+// registered id1/pak0.pak too, if it is not the shareware one) and the CD's
+// tracks as files (Steam and GOG ship them as music/track02.ogg…). They are
+// dropped anywhere on the page — files, or the whole Quake folder — or
+// chosen with the drawer's button. The page checks that a pak is a pak,
+// keeps it in the game directory the program reads (the `files` store: the
+// worker gets it at start), keeps the music in a store of its own (the
+// drive gets a track at a time), and restarts the game: a reload, since
+// the worker takes its files before it starts. The program then decides as
+// id's did (COM_CheckRegistered, PR_LoadProgs); if it will not start with
+// what was just added, the page takes that out again and says why.
+//
+// Not supported, by design: the 2021 re-release's files (rerelease/…:
+// its progs.dat needs its own engine's builtins, which the program refuses
+// by name), mods and mission packs (more paks, other game directories).
+const PAK0_COUNT = 339, PAK0_CRC = 32981, MAX_FILES_IN_PACK = 2048;
+const CONTENT_KEY = 'quake-rs.content';   // localStorage: { pending: [paths], note, ok }
+const MUSIC_TYPES = { ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg; codecs=opus', mp3: 'audio/mpeg',
+                      flac: 'audio/flac', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', webm: 'audio/webm' };
+const content = { paks: [], tracks: [], registered: null };
+const contentLine = document.getElementById('contentLine');
+const contentMsg = document.getElementById('contentMsg');
+const fileInput = document.getElementById('fileInput');
+const dropHint = document.getElementById('dropHint');
+const isPakPath = (p) => /^id1\/pak\d+\.pak$/.test(p);
+
+function contentNote() {
+  try { return JSON.parse(localStorage.getItem(CONTENT_KEY) || 'null'); } catch (e) { return null; }
+}
+function setContentNote(v) {
+  try { if (v) localStorage.setItem(CONTENT_KEY, JSON.stringify(v)); else localStorage.removeItem(CONTENT_KEY); } catch (e) {}
+}
+function contentShow(text, ok) {
+  contentMsg.textContent = text;
+  contentMsg.classList.toggle('hidden', !text);
+  contentMsg.classList.toggle('ok', !!ok);
+}
+
+// common.c's CRC (CRC_Init 0xffff, CCITT polynomial, MSB first).
+function crc16(bytes) {
+  let crc = 0xffff;
+  for (const b of bytes) {
+    crc ^= b << 8;
+    for (let i = 0; i < 8; i++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc;
+}
+
+// COM_LoadPackFile's reading of a pak's header and directory, and what the
+// program would refuse outright: { count, crc, names } or { error }.
+async function readPak(file) {
+  if (file.size < 12) return { error: 'too short to be a pak' };
+  const head = new DataView(await file.slice(0, 12).arrayBuffer());
+  if (String.fromCharCode(head.getUint8(0), head.getUint8(1), head.getUint8(2), head.getUint8(3)) !== 'PACK') {
+    return { error: 'not a pak file' };
+  }
+  const dirofs = head.getInt32(4, true), dirlen = head.getInt32(8, true);
+  const count = Math.floor(dirlen / 64);
+  if (dirofs < 12 || dirlen < 0 || dirofs + count * 64 > file.size) return { error: 'a damaged pak: its directory runs past the file' };
+  if (count > MAX_FILES_IN_PACK) return { error: `${count} files, and id's engine takes at most ${MAX_FILES_IN_PACK}` };
+  const dir = new Uint8Array(await file.slice(dirofs, dirofs + count * 64).arrayBuffer());
+  const dv = new DataView(dir.buffer), names = [], text = new TextDecoder();
+  for (let i = 0; i < count; i++) {
+    const raw = dir.subarray(i * 64, i * 64 + 56), end = raw.indexOf(0);
+    const name = text.decode(raw.subarray(0, end < 0 ? 56 : end));
+    const pos = dv.getInt32(i * 64 + 56, true), len = dv.getInt32(i * 64 + 60, true);
+    if (pos < 0 || len < 0 || pos + len > file.size) return { error: `a damaged pak: ${name} runs past the file` };
+    names.push(name);
+  }
+  return { count, crc: crc16(dir), names };
+}
+
+// The CD track a music file is, by its name (`track02.ogg`, `Track 2.mp3`,
+// `02 - Aftermath.flac`), or 0. Track 1 of Quake's CD is its data.
+function musicTrack(name) {
+  const ext = (name.match(/\.([a-z0-9]+)$/i) || [])[1];
+  if (!ext || !MUSIC_TYPES[ext.toLowerCase()]) return 0;
+  const m = /track\s*[-_ ]?0*(\d{1,2})(?!\d)/i.exec(name) || /^0*(\d{1,2})(?!\d)/.exec(name);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+// Sort what was dropped or chosen ({ file, path } each) into what to keep,
+// and say what was left out and why.
+async function planContent(items) {
+  const plan = { paks: [], music: new Map(), notes: [] };
+  let ignored = 0, rerelease = 0;
+  const probe = new Audio();
+  for (const { file, path } of items) {
+    const lower = path.toLowerCase(), base = lower.split('/').pop();
+    if (/(^|\/)rerelease\//.test(lower)) { rerelease++; continue; }
+    if (/^pak\d+\.pak$/.test(base)) {
+      if (base !== 'pak0.pak' && base !== 'pak1.pak') {
+        plan.notes.push(`${file.name}: only id's pak0.pak and pak1.pak are played (no mods or mission packs)`);
+        continue;
+      }
+      const pak = await readPak(file);
+      if (pak.error) { plan.notes.push(`${file.name}: ${pak.error}`); continue; }
+      if (base === 'pak0.pak' && pak.count === PAK0_COUNT && pak.crc === PAK0_CRC) {
+        plan.notes.push("pak0.pak is id's own, which the page already has");
+        continue;
+      }
+      plan.paks.push({ path: 'id1/' + base, file, pak });
+      continue;
+    }
+    const track = musicTrack(base);
+    if (track) {
+      const ext = base.split('.').pop();
+      if (track < 2) plan.notes.push(`${file.name}: track 1 is the CD's data; the music is tracks 2–11`);
+      else if (!probe.canPlayType(MUSIC_TYPES[ext])) plan.notes.push(`${file.name}: this browser cannot play .${ext}`);
+      else plan.music.set(track, file);
+      continue;
+    }
+    ignored++;
+  }
+  if (rerelease) {
+    plan.notes.push("left out the 2021 re-release's files (rerelease/): its progs.dat needs its own engine — this port plays id's 1996 id1 files, which Steam and GOG ship beside it");
+  }
+  if (ignored) plan.notes.push(`left out ${ignored} other file${ignored === 1 ? '' : 's'}`);
+  return plan;
+}
+
+// Keep what the plan says and restart the game with it.
+async function addContent(items) {
+  if (storage.fallback || !storage.db) { contentShow('your files need IndexedDB, which this browser does not offer here', false); return; }
+  contentShow('reading your files…', true);
+  const plan = await planContent(items);
+  if (!plan.paks.length && !plan.music.size) { contentShow(plan.notes.join('; ') || 'nothing to add', false); return; }
+  try {
+    for (const { path, file } of plan.paks) await storage.put(path, new Uint8Array(await file.arrayBuffer()));
+    for (const [track, file] of plan.music) await storage.musicPut(track, file);
+  } catch (e) {
+    contentShow('could not keep your files: ' + (e && e.message || e) + ' (storage full?)', false);
+    return;
+  }
+  const added = [...plan.paks.map(p => p.path.slice(4))];
+  if (plan.music.size) added.push(`${plan.music.size} CD track${plan.music.size === 1 ? '' : 's'}`);
+  setContentNote({ pending: plan.paks.map(p => p.path), note: ['added ' + added.join(' and '), ...plan.notes].join('; ') });
+  location.reload();
+}
+
+// Remove every file the player added, and restart.
+async function removeContent() {
+  for (const path of content.paks) await storage.remove(path);
+  await storage.musicClear();
+  setContentNote({ pending: [], note: 'removed your files: the shareware episode again', ok: true });
+  location.reload();
+}
+
+// After a start: the program's verdict on the files, and the drawer's line.
+async function contentStarted() {
+  const note = contentNote();
+  if (note && note.pending) setContentNote(null);
+  let text = '';
+  try { const r = await callLine('content'); content.registered = r.value === 1; text = r.text; } catch (e) {}
+  quake.contentPath = text;
+  const have = content.paks.length || content.tracks.length;
+  if (have) {
+    const what = content.registered ? 'registered Quake, episodes 1–4' : 'shareware Quake, episode 1';
+    const music = content.tracks.length ? `CD music: track${content.tracks.length === 1 ? '' : 's'} ${spans(content.tracks)}` : 'no CD music';
+    contentLine.innerHTML = `Your Quake: ${what} · ${music}. Drop more files to add them, or `
+      + '<button id="addBtn" class="link">choose files</button> · <button id="removeBtn" class="link">remove them</button>';
+    document.getElementById('addBtn').addEventListener('click', () => fileInput.click());
+    document.getElementById('removeBtn').addEventListener('click', removeContent);
+  }
+  if (note && note.note) contentShow(note.note, note.ok !== false && !note.error);
+}
+// 2,3,4,5,9 as "2–5, 9".
+function spans(ns) {
+  const out = [];
+  for (let i = 0; i < ns.length; i++) {
+    let j = i;
+    while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++;
+    out.push(j > i ? `${ns[i]}–${ns[j]}` : `${ns[i]}`);
+    i = j;
+  }
+  return out.join(', ');
+}
+
+// The program would not start. If it was with files just added, take them
+// out, keep its reason for the drawer, and start again without them; with
+// files added before, offer to remove them. True when the page restarts.
+async function contentRefused(e) {
+  const note = contentNote();
+  const why = engineError || (e && e.message) || String(e);
+  if (note && note.pending && note.pending.length) {
+    for (const path of note.pending) await storage.remove(path);
+    const names = note.pending.map(p => p.slice(4)).join(' and ');
+    setContentNote({ pending: [], note: `could not play with ${names}, so it is out again: ${why}`, error: true, ok: false });
+    location.reload();
+    return true;
+  }
+  if (content.paks.length && bootMsg) {
+    const btn = document.createElement('button');
+    btn.className = 'link';
+    btn.textContent = 'remove your Quake files and start again';
+    btn.addEventListener('click', removeContent);
+    bootMsg.after(btn);
+  }
+  return false;
+}
+
+// Dropped files and folders: every file under a dropped folder, with its path.
+async function droppedItems(dt) {
+  const entries = [...dt.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!entries.length) return [...dt.files].map(file => ({ file, path: file.name }));
+  const out = [];
+  const walk = async (entry) => {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      out.push({ file, path: entry.fullPath.replace(/^\//, '') });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const e of batch) await walk(e);
+      }
+    }
+  };
+  for (const e of entries) await walk(e);
+  return out;
+}
+let dragDepth = 0;
+const carriesFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+addEventListener('dragenter', e => { if (carriesFiles(e)) { dragDepth++; dropHint.classList.remove('hidden'); } });
+addEventListener('dragleave', e => { if (carriesFiles(e) && --dragDepth <= 0) { dragDepth = 0; dropHint.classList.add('hidden'); } });
+addEventListener('dragover', e => { if (carriesFiles(e)) e.preventDefault(); });
+addEventListener('drop', async e => {
+  if (!carriesFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  dropHint.classList.add('hidden');
+  addContent(await droppedItems(e.dataTransfer));
+});
+document.getElementById('addBtn').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  addContent([...fileInput.files].map(file => ({ file, path: file.webkitRelativePath || file.name })));
+  fileInput.value = '';
+});
 
 // ===========================================================================
 // Loading
@@ -1182,6 +1701,9 @@ async function main() {
       return have;
     })(),
   ]);
+  const tracks = await storage.musicTracks();
+  content.tracks = tracks;
+  content.paks = [...files.keys()].filter(isPakPath);
   quake.downloadedAt = performance.now();
   bootFill.classList.remove('indet');
   bootFill.style.width = '100%';
@@ -1194,12 +1716,19 @@ async function main() {
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
   Atomics.store(ctl, C.LATEST, -1);
   Atomics.store(ctl, C.READING, -1);
+  // How the page shows frames, said before the program's first tick, so
+  // every frame comes as the presenter takes it.
+  presenter = makePresenter();
+  sendRecord(IN.PRESENT, new Uint8Array([presenter.format]));
   worker = new Worker('wasi.js');
   worker.onmessage = onWorkerMessage;
   worker.onerror = (e) => { setStatus('error: ' + e.message); };
+  // The player's paks come after the server's pak0: one of their own by
+  // the same name takes its place. Theirs are handed over, not copied.
   const fileList = [['id1/pak0.pak', pak], ...files];
-  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList, args: commandLine() },
-                     [wasm.buffer, pak.buffer]);
+  const handed = [wasm.buffer, pak.buffer, ...[...files].filter(([p]) => isPakPath(p)).map(([, d]) => d.buffer)];
+  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList, args: commandLine(tracks) },
+                     handed);
   sendWindow();
 
   // Up when the program's startup (quake.rc: config.cfg, the attract demos)
@@ -1207,7 +1736,7 @@ async function main() {
   await new Promise((resolve, reject) => {
     const wait = () => {
       const run = Atomics.load(ctl, C.RUN);
-      if (run > 1) reject(new Error('the engine stopped while starting'));
+      if (run > 1) reject(new Error(engineError ? 'the game did not start: ' + engineError : 'the engine stopped while starting'));
       else if (Atomics.load(ctl, C.SYNCS) > 0) resolve();
       else setTimeout(wait, 5);
     };
@@ -1227,13 +1756,14 @@ async function main() {
   readyToPlay = true;
   quake.ready = true;
   statusEl.textContent = 'ready — click to play';
+  contentStarted();
 }
 
 // ===========================================================================
 // Presentation: a tick per display refresh, the program's frame in the
 // same refresh
 // ===========================================================================
-let ctx = null, W = 0, H = 0, frameImg = null;
+let W = 0, H = 0;
 // The canvas box, snapped. The CSS rule gives the largest 4:3 box the
 // window fits; with image-rendering:pixelated a box a little wider than the
 // framebuffer (976 px for 960 columns at 1440x900) doubles one column in
@@ -1301,47 +1831,279 @@ function sendWindow() {
 // `?classic` / `?2026` in the address: the profile to switch to, as the
 // command line's `+profile` (run after config.cfg, like the menu's switch,
 // so it sticks).
-function commandLine() {
+// The CD's tracks the player added: the disc in the program's drive
+// (`-cdtracks 2,3,…`, CDAudio_Init).
+function commandLine(tracks) {
   const q = new URLSearchParams(location.search);
-  return q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [];
+  const cdtracks = tracks && tracks.length ? ['-cdtracks', tracks.join(',')] : [];
+  return [...cdtracks, ...(q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [])];
 }
 addEventListener('resize', () => { sendWindow(); fitCanvas(); });
 document.addEventListener('fullscreenchange', () => { sendWindow(); fitCanvas(); });
 
 // The newest complete frame into the canvas, if there is one the page has
 // not shown. The slot is claimed first (READING), so the program writes its
-// next frames into the other two (triple buffering). Nothing is shown while
-// the worker's newest set of slots has not reached the page yet (the first
+// next frames elsewhere: into the other two frame slots, or (a frame in the
+// program's shared memory) into its ring's other slots — wasi.js holds the
+// program off the slot the page is reading. Nothing is shown while the
+// worker's newest set of frame slots has not reached the page yet (the first
 // frame, a larger resolution). Returns timings for the benchmark: the copy
-// out of shared memory, and putImageData.
+// out of shared memory (none when the presenter takes the shared view), and
+// the upload and draw.
 let framesShown = 0;
 function present() {
   const n = Atomics.load(ctl, C.FRAMES);
   if (n === framesShown || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) return null;
   let s;
   do { s = Atomics.load(ctl, C.LATEST); Atomics.store(ctl, C.READING, s); } while (Atomics.load(ctl, C.LATEST) !== s);
-  if (s < 0 || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) { Atomics.store(ctl, C.READING, -1); return null; }
+  if (s < 0 || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) { release(); return null; }
   framesShown = Atomics.load(ctl, C.FRAMES);
   Atomics.store(ctl, C.SHOWN, framesShown);
   if (!quake.firstFrameAt) quake.firstFrameAt = performance.now();
-  const w = Atomics.load(ctl, C.SLOT_W + s), h = Atomics.load(ctl, C.SLOT_H + s);
-  if (w !== W || h !== H) {
+  const frame = claimedFrame(s);
+  if (!frame) { release(); return null; }
+  if (frame.w !== W || frame.h !== H) {
     // The render resolution changed (boot, a Video Options mode): the
     // backing store follows; the CSS box does not, so a larger framebuffer
     // just gives a crisper pixel-upscale.
-    W = w; H = h;
+    W = frame.w; H = frame.h;
     canvas.width = W; canvas.height = H;
-    frameImg = new ImageData(W, H);
+    presenter.resize(W, H);
     fitCanvas();
   }
-  const t0 = performance.now();
-  // putImageData takes no shared memory: one copy out of the slot.
-  frameImg.data.set(new Uint8Array(frameSlots, s * slotBytes, W * H * 4));
+  return presenter.draw(frame, release);
+}
+
+// The page is done reading the claimed frame: the program may reuse it.
+function release() {
   Atomics.store(ctl, C.READING, -1);
+  Atomics.notify(ctl, C.READING);
+}
+
+// The frame in slot `s`: its size, format, and views of its pixels and (an
+// indexed frame) palette — in the worker's frame slots, or where it lies in
+// the program's shared memory. Null when that memory is not (yet) the page's.
+function claimedFrame(s) {
+  const w = Atomics.load(ctl, C.SLOT_W + s), h = Atomics.load(ctl, C.SLOT_H + s);
+  const indexed = Atomics.load(ctl, C.SLOT_F + s) === FORMAT.INDEXED8;
+  const bytes = w * h * (indexed ? 1 : 4);
+  if (Atomics.load(ctl, C.SLOT_SRC + s) === 1) {
+    const at = Atomics.load(ctl, C.SLOT_ADDR + s) >>> 0, pal = Atomics.load(ctl, C.SLOT_PAL + s) >>> 0;
+    const buf = programBuffer(Math.max(at + bytes, indexed ? pal + 1024 : 0));
+    if (!buf) return null;
+    return { w, h, indexed, pixels: new Uint8Array(buf, at, bytes), palette: indexed ? new Uint8Array(buf, pal, 1024) : null };
+  }
+  const at = s * slotBytes, palBytes = indexed ? 1024 : 0;
+  return { w, h, indexed, pixels: new Uint8Array(frameSlots, at + palBytes, bytes),
+           palette: indexed ? new Uint8Array(frameSlots, at, 1024) : null };
+}
+
+// The program's shared memory, at least `end` bytes of it: a grown memory
+// is seen through a fresh `buffer`.
+let programMemory = null, programBuf = null;
+function programBuffer(end) {
+  if (!programMemory) return null;
+  if (!programBuf || programBuf.byteLength < end) programBuf = programMemory.buffer;
+  return programBuf.byteLength >= end ? programBuf : null;
+}
+
+// --- Presenters: the display's DAC --------------------------------------------
+// The program draws 8-bit frames, a palette index a pixel, and V_UpdatePalette
+// sets the 256 colours they are shown through (quake-wasm/src/present.rs).
+// WebGL2 is the DAC: the frame goes up as an R8UI texture and the palette as
+// a 256x1 one, and a fragment shader looks each pixel up with texelFetch —
+// exact integers, no filtering, blending or colour conversion, so the canvas
+// holds exactly the RGBA the program's own pack would give. Without a WebGL2
+// on a GPU (or with ?canvas2d) a 2-D canvas takes the program's RGBA through
+// putImageData. `format` is what the presenter asks the program for.
+
+// A presenter's use of a view on shared memory: straight to the API when it
+// takes one (Chromium's WebGL2 does), else through a copy into `staging`
+// (a browser whose WebGL refuses shared views; not one checked here: headless
+// Firefox has no WebGL2). Returns the time the copy took.
+function viaStaging(p, view, use) {
+  if (p.sharedOk) {
+    try { use(view); return 0; } catch (e) { p.sharedOk = false; console.info('[quake] shared views refused; copying frames:', e.message); }
+  }
+  const t0 = performance.now();
+  if (!p.staging || p.staging.length < view.length) p.staging = new Uint8Array(view.length);
+  const copy = p.staging.subarray(0, view.length);
+  copy.set(view);
   const t1 = performance.now();
-  ctx.putImageData(frameImg, 0, 0);
-  const t2 = performance.now();
-  return { copy: t1 - t0, put: t2 - t1 };
+  use(copy);
+  return t1 - t0;
+}
+
+const GL_VERTEX = `#version 300 es
+// A triangle covering the viewport.
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+// The frame's row 0 is its top; the viewport's is its bottom.
+const GL_INDEXED = `#version 300 es
+precision highp float;
+precision highp int;
+uniform highp usampler2D u_frame;
+uniform highp sampler2D u_palette;
+out vec4 color;
+void main() {
+  ivec2 size = textureSize(u_frame, 0), at = ivec2(gl_FragCoord.xy);
+  uint i = texelFetch(u_frame, ivec2(at.x, size.y - 1 - at.y), 0).r;
+  color = texelFetch(u_palette, ivec2(int(i), 0), 0);
+}`;
+
+class GlPresenter {
+  // A WebGL2 presenter on `canvas`, or null when there is no WebGL2 — or
+  // when it is drawn by the CPU, unless `always`: a software WebGL
+  // (SwiftShader, llvmpipe) costs more than the 2-D canvas's copy (headless
+  // Chromium's SwiftShader, demo1 at 2560x1440 on 8 threads: a page frame
+  // of 23.7 ms against 7.2 through putImageData; a GPU's, 3.4). Deciding
+  // leaves the canvas with a WebGL2 context, so the test uses a canvas of
+  // its own.
+  static create(canvas, lowLatency, always) {
+    if (!always && GlPresenter.software()) return null;
+    const gl = canvas.getContext('webgl2', {
+      alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false,
+      preserveDrawingBuffer: false, desynchronized: lowLatency, powerPreference: 'high-performance',
+    });
+    if (!gl) return null;
+    const p = new GlPresenter(canvas, gl);
+    return p.init() ? p : null;
+  }
+  // Whether this browser's WebGL2 is drawn by the CPU (false without one:
+  // then create finds no context either).
+  static software() {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    if (!gl) return false;
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    const renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return /swiftshader|llvmpipe|softpipe|software|basic render/i.test(renderer);
+  }
+  constructor(canvas, gl) {
+    this.canvas = canvas; this.gl = gl;
+    this.format = FORMAT.INDEXED8;
+    this.sharedOk = true; this.staging = null;
+    this.lost = false; this.last = null;       // the last frame drawn: {w, h}
+    // A lost context (a GPU reset) comes back with nothing: draw nothing
+    // until then, and rebuild. The frames keep coming meanwhile.
+    canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.lost = true; });
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.lost = false;
+      if (this.init() && W) this.resize(W, H);
+    });
+  }
+  // The program and textures (again after a lost context). False when the
+  // shaders will not build.
+  init() {
+    const gl = this.gl;
+    const program = (fs) => {
+      const p = gl.createProgram();
+      for (const [type, src] of [[gl.VERTEX_SHADER, GL_VERTEX], [gl.FRAGMENT_SHADER, fs]]) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        gl.attachShader(p, s);
+      }
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { console.warn('[quake] WebGL2 program:', gl.getProgramInfoLog(p)); return null; }
+      return p;
+    };
+    this.program = program(GL_INDEXED);
+    if (!this.program) return false;
+    gl.useProgram(this.program);
+    gl.uniform1i(gl.getUniformLocation(this.program, 'u_frame'), 0);
+    gl.uniform1i(gl.getUniformLocation(this.program, 'u_palette'), 1);
+    gl.bindVertexArray(gl.createVertexArray());
+    gl.disable(gl.DITHER);
+    gl.disable(gl.BLEND);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    this.palette = this.texture(1, gl.RGBA8, 256, 1);
+    this.frameTex = null;
+    return true;
+  }
+  // A `w x h` texture of `internal` format on texture unit `unit`.
+  texture(unit, internal, w, h) {
+    const gl = this.gl, t = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  // The frame's size changed: a new frame texture, the viewport.
+  resize(w, h) {
+    if (this.lost) return;
+    const gl = this.gl;
+    if (this.frameTex) gl.deleteTexture(this.frameTex);
+    this.frameTex = this.texture(0, gl.R8UI, w, h);
+    gl.viewport(0, 0, w, h);
+  }
+  // Upload `frame` (indexed: this presenter asks for no other) and draw it;
+  // `done()` once its bytes are copied (the program may reuse them).
+  // Returns {copy, put}.
+  draw(frame, done) {
+    if (this.lost || !frame.indexed) { done(); return { copy: 0, put: 0 }; }
+    const gl = this.gl, t0 = performance.now();
+    gl.activeTexture(gl.TEXTURE1);
+    let copy = viaStaging(this, frame.palette, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, v));
+    gl.activeTexture(gl.TEXTURE0);
+    copy += viaStaging(this, frame.pixels, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.w, frame.h, gl.RED_INTEGER, gl.UNSIGNED_BYTE, v));
+    done();
+    this.last = { w: frame.w, h: frame.h };
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    return { copy, put: performance.now() - t0 - copy };
+  }
+  // The canvas's pixels, RGBA from the top row down: the last frame drawn
+  // again (the drawing buffer is not kept past its present) and read back.
+  readback() {
+    if (this.lost || !this.last) return new Uint8Array(0);
+    const gl = this.gl, { w, h } = this.last;
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const up = new Uint8Array(w * h * 4), out = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, up);
+    for (let y = 0; y < h; y++) out.set(up.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+    return out;
+  }
+}
+
+class CanvasPresenter {
+  constructor(canvas, lowLatency) {
+    // An opaque canvas (the frame's alpha is always 255): the browser
+    // composites it without blending.
+    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: lowLatency });
+    this.format = FORMAT.RGBA8;
+    this.img = null;
+  }
+  resize(w, h) { this.img = new ImageData(w, h); }
+  // putImageData takes no shared memory: one copy out of it. (RGBA frames:
+  // this presenter asks for no other.)
+  draw(frame, done) {
+    if (frame.indexed) { done(); return { copy: 0, put: 0 }; }
+    const t0 = performance.now();
+    this.img.data.set(frame.pixels);
+    done();
+    const t1 = performance.now();
+    this.ctx.putImageData(this.img, 0, 0);
+    return { copy: t1 - t0, put: performance.now() - t1 };
+  }
+  readback() { return this.img ? this.ctx.getImageData(0, 0, this.img.width, this.img.height).data : new Uint8ClampedArray(0); }
+}
+
+// The presenter for this page: WebGL2's on a GPU, else the 2-D canvas's
+// (always with ?canvas2d; ?webgl takes a software WebGL2 too).
+// `?lowlatency` also asks for a desynchronized canvas, which can skip a
+// frame of compositor latency where the browser supports it (Chrome on
+// Windows / ChromeOS) at the risk of tearing; off by default, and not
+// verifiable in headless Chromium.
+let presenter = null;
+function makePresenter() {
+  const params = new URLSearchParams(location.search);
+  const lowLatency = params.has('lowlatency');
+  return (!params.has('canvas2d') && GlPresenter.create(canvas, lowLatency, params.has('webgl')))
+    || new CanvasPresenter(canvas, lowLatency);
 }
 
 // Wait for the program's answer to tick `seq` — a spin, since the main
@@ -1357,10 +2119,27 @@ function waitAck(seq, ms) {
 }
 
 // Input-to-present latency, measured when window.quake.latency is set: the
-// time from each key or mouse event to the present of the first frame
-// that consumed it.
+// time from each key, mouse or pad event — its timeStamp, when the browser
+// got it, so the wait for the next refresh counts — to the present of the
+// first frame that consumed it (web/latency.py).
 let inputTimes = [], inFlightTimes = [];
-function noteInput() { if (quake.latency) inputTimes.push(performance.now()); }
+function noteInput(at) {
+  if (!quake.latency) return;
+  const now = performance.now();
+  inputTimes.push(at > 0 ? at : now);
+  if (at > 0) quake.dispatch.push(now - at);   // the event's wait for the page's handler
+}
+// A tick is posted: the input sent so far is what its frame consumes.
+function latencyTick() {
+  if (quake.latency) { inFlightTimes = inFlightTimes.concat(inputTimes); inputTimes = []; }
+}
+// A frame is presented: the input its tick consumed is on the canvas.
+function latencyPresent() {
+  if (!quake.latency) return;
+  const t = performance.now();
+  for (const e of inFlightTimes) quake.latency.push(t - e);
+  inFlightTimes = [];
+}
 
 let tickSeq = 0, lastTick = null, pendingTick = 0;
 // The longest a refresh waits for its frame (the old page computed the
@@ -1368,13 +2147,6 @@ let tickSeq = 0, lastTick = null, pendingTick = 0;
 // on the next refresh instead).
 const WAIT_MS = 30;
 function startPresenting() {
-  // An opaque canvas (the framebuffer's alpha is always 255): the browser
-  // composites it without blending. `?lowlatency` in the URL also asks for a
-  // desynchronized canvas, which can skip a frame of compositor latency where
-  // the browser supports it (Chrome on Windows / ChromeOS) at the risk of
-  // tearing; off by default, and not verifiable in headless Chromium.
-  const LOW_LATENCY = new URLSearchParams(location.search).has('lowlatency');
-  ctx = canvas.getContext('2d', { alpha: false, desynchronized: LOW_LATENCY });
   lastTick = performance.now();
   requestAnimationFrame(frame);
 }
@@ -1401,7 +2173,8 @@ function frame(now) {
     const dt = Math.max(0, (now - lastTick) / 1000);
     lastTick = now;
     pendingTick = ++tickSeq;
-    if (quake.latency) { inFlightTimes = inFlightTimes.concat(inputTimes); inputTimes = []; }
+    pollGamepad();
+    latencyTick();
     sendAudioClock();
     sendTick(pendingTick, dt);
     posted = true;
@@ -1411,11 +2184,7 @@ function frame(now) {
   const t1 = performance.now();
   const shown = present();
   if (quake.live) quake.live.push({ t: now, wait: t1 - t0, shown: !!shown, copy: shown ? shown.copy : 0, put: shown ? shown.put : 0 });
-  if (shown && quake.latency) {
-    const t = performance.now();
-    for (const e of inFlightTimes) quake.latency.push(t - e);
-    inFlightTimes = [];
-  }
+  if (shown) latencyPresent();
 }
 
 // ===========================================================================
@@ -1425,6 +2194,7 @@ const quake = window.quake = {
   ready: false,
   paused: false,
   latency: null,             // an array to collect input->present times into
+  dispatch: [],              // ...and each input's wait for its handler (while latency is collected)
   audioLead: null,           // an array to collect the ring's lead (ms) into, a refresh at a time
   live: null,                // an array to collect the page loop's per-refresh times into
   onBench: null,             // (values) per frame, --features bench builds
@@ -1443,16 +2213,29 @@ const quake = window.quake = {
     const t0 = performance.now();
     pendingTick = ++tickSeq;
     advanceAudioClock(dt * 1000);
+    pollGamepad();
+    latencyTick();
     sendAudioClock();
     sendTick(pendingTick, dt);
     const ok = waitAck(pendingTick, 5000);
     const t1 = performance.now();
     const p = present();
+    if (p) latencyPresent();
     return { ok, wait: t1 - t0, copy: p ? p.copy : 0, put: p ? p.put : 0, presented: !!p };
   },
-  // The canvas's pixels (the presented frame), and its FNV-1a hash over
-  // 32-bit words — what `quaketool play --hash-every` prints natively.
-  pixels() { return frameImg ? frameImg.data : new Uint8ClampedArray(0); },
+  // The canvas's pixels, read back from it (RGBA, top row first), and their
+  // FNV-1a hash over 32-bit words — what `quaketool play --hash-every`
+  // prints natively and the program's `frame_hash` call answers.
+  readback(x = 0, y = 0, w = W, h = H) {
+    const all = presenter ? presenter.readback() : new Uint8Array(0);
+    if (x === 0 && y === 0 && w === W && h === H) return all;
+    const out = new Uint8Array(w * h * 4);
+    for (let r = 0; r < h; r++) out.set(all.subarray(((y + r) * W + x) * 4, ((y + r) * W + x + w) * 4), r * w * 4);
+    return out;
+  },
+  pixels() { return this.readback(); },
+  presenter: () => presenter ? { format: presenter.format, gl: presenter instanceof GlPresenter,
+                                 sharedViews: !!presenter.sharedOk, inPlace: !!programMemory } : null,
   frameHash() {
     const d = this.pixels();
     const u = new Uint32Array(d.buffer, d.byteOffset, d.length >> 2);
@@ -1472,6 +2255,26 @@ const quake = window.quake = {
     ring: ringState,
     stats: soundStats,
     resetPeak() { if (actl) Atomics.store(actl, A.PEAK, 0); },
+  },
+  // The CD's drive, for the checks: what the program asked for, and what the
+  // element does (its time, whether it loops and plays, the level, and the
+  // output's RMS).
+  cd: {
+    state: () => ({
+      want: cd.want, serial: cd.serial, track: cd.track, error: cd.error,
+      playing: !!cd.el && !cd.el.paused, time: cd.el ? cd.el.currentTime : 0,
+      duration: cd.el ? cd.el.duration : 0, loop: !!cd.el && cd.el.loop,
+      gain: cd.gain ? cd.gain.gain.value : 0, level: cdLevel(),
+    }),
+  },
+  // The player's files, for the checks: add some ({ name, path, bytes } each,
+  // as if dropped), remove them all, and what the drawer shows.
+  content: {
+    add: (items) => addContent(items.map(({ name, path, bytes, type }) =>
+      ({ file: new File([bytes], name, { type: type || '' }), path: path || name }))),
+    remove: removeContent,
+    state: () => ({ ...content, line: contentLine.textContent.trim(), message: contentMsg.textContent,
+                    path: quake.contentPath || '' }),
   },
 };
 
@@ -1499,7 +2302,9 @@ function startTouch() {
 }
 startTouch();
 
-main().catch(e => {
+main().catch(async e => {
+  // Files just added that the game refused: out again, and say why.
+  if (await contentRefused(e)) return;
   // file:// can't fetch the engine or run a worker in most browsers — say how
   // to fix it rather than failing blank. Any other error lands here too, in
   // red on the boot bar.

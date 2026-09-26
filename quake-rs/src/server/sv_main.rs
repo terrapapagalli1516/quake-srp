@@ -142,6 +142,14 @@ impl Server {
         self.map_name = bare;
     }
 
+    /// `sv.edicts->v.sounds`: the worldspawn's `sounds` key, the CD track
+    /// `SV_SendServerinfo` sends every client that connects (`svc_cdtrack`,
+    /// the track twice), as `MSG_WriteByte` stores a float — its `(int)`, as
+    /// a byte.
+    pub fn cd_track(&self) -> u8 {
+        self.vm.ent_float(0, self.vm.fo().sounds) as i32 as u8
+    }
+
     /// Spawn the local player and run the connect/spawn entrance script.
     ///
     /// Mirrors `SV_ConnectClient` + `Host_Spawn_f`: reserve a fresh edict, make

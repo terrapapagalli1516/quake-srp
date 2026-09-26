@@ -234,13 +234,15 @@ fn bi_cvar(vm: &mut Vm) -> Result<()> {
 /// stock `*.c` declarations (`deathmatch` "0"). `skill` and `sv_gravity` are
 /// the server's *live* values ([`ServerCvars`]): `cvar_set("skill", N)` from a
 /// difficulty portal updates it and `cvar("skill")` reads it back, so the
-/// QuakeC sees the difficulty it selected.
+/// QuakeC sees the difficulty it selected. `registered` is the search path's
+/// (`COM_CheckRegistered`).
 pub(super) fn cvar_value(cvars: &ServerCvars, name: &str) -> f32 {
     match name {
         "sv_gravity" => cvars.sv_gravity,
         "sv_maxvelocity" => SV_MAXVELOCITY,
         "deathmatch" | "coop" | "teamplay" => 0.0,
         "skill" => cvars.skill as f32,
+        "registered" => f32::from(u8::from(cvars.registered)),
         _ => 0.0,
     }
 }
@@ -652,6 +654,28 @@ mod tests {
         // A non-skill cvar_set is a benign no-op (does not touch skill).
         bi_cvar_set_via(&mut server, "fraglimit", "20");
         assert_eq!(server.skill(), 2, "setting another cvar leaves skill alone");
+    }
+
+    /// `cvar("registered")`: the search path the server reads through is
+    /// registered — `gfx/pop.lmp` is id's (`COM_CheckRegistered`) — or not.
+    #[test]
+    fn cvar_registered_is_the_search_paths() {
+        let cvar = |pak: Option<crate::pak::Pak>| {
+            let (img, _marker, _g_one) = marker_progs();
+            let progs = Progs::parse(&img).expect("parse");
+            let mut server = Server::with_pak(bsp_with_entities("{ }"), progs, pak).expect("server");
+            let name = server.vm.intern("registered");
+            server.vm.set_gi(crate::progs::OFS_PARM0, name);
+            server.vm.call_builtin(45, 1).expect("cvar");
+            server.vm.gf(crate::progs::OFS_RETURN)
+        };
+        let pak = |files: &[(&str, &[u8])]| crate::pak::Pak::from_bytes("t".into(), crate::pak::write_pack(files)).ok();
+        assert_eq!(cvar(None), 0.0);
+        assert_eq!(cvar(pak(&[("maps/e1m1.bsp", b"")])), 0.0, "shareware");
+        let pop = crate::common::pop_lmp();
+        let pak0 = pak(&[("maps/e1m1.bsp", b"")]).unwrap();
+        let pak1 = pak(&[("gfx/pop.lmp", &pop)]).unwrap();
+        assert_eq!(cvar(Some(pak1.over(pak0))), 1.0, "pak1 with id's pop.lmp in front of pak0");
     }
 
     /// Helper: invoke the engine `cvar_set` builtin with two string args.

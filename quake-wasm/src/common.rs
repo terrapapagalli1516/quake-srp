@@ -1,24 +1,27 @@
-//! The file system — common.c's `COM_InitFilesystem`: the base directory
-//! (`-basedir`, default `.`), the game directory `id1` under it, and
-//! `pak0.pak` in that; `COM_WriteFile`/`COM_LoadFile` for the game's own
-//! files (the saves, `config.cfg`), which live in the game directory as in
-//! id's. All of it is `std::fs`: in the browser the WASI host in
-//! `web/wasi.js` serves the calls from the page's storage; natively they are
-//! the real disk.
+//! The file system — common.c's `COM_InitFilesystem` on this platform: the
+//! base directory (`-basedir`, default `.`), the game directory `id1` under
+//! it and id's search path through it ([`quake_rs::common`]: `pak0.pak`,
+//! the player's `pak1.pak` if they added it, the loose files), and
+//! `COM_WriteFile`/`COM_LoadFile` for the game's own files (the saves,
+//! `config.cfg`), which live in the game directory as in id's. All of it is
+//! `std::fs`: in the browser the WASI host in `web/wasi.js` serves the calls
+//! from the page's storage; natively they are the real disk.
 
 use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use quake_rs::common::{check_progs, init_filesystem, Filesystem};
 use quake_rs::pak::Pak;
 
 /// `GAMENAME` (quakedef.h): the game directory under the base directory.
-pub(crate) const GAMENAME: &str = "id1";
+pub(crate) const GAMENAME: &str = quake_rs::common::GAMENAME;
 
-/// The opened `pak0.pak`, set once by [`init`] (or, in tests, found next to
-/// the crate on first use).
-static PAK: OnceLock<Option<Pak>> = OnceLock::new();
+/// The search path and what `COM_CheckRegistered` found, set once by
+/// [`init`] (or, in tests, the shareware pak next to the crate on first
+/// use).
+static FILES: OnceLock<Option<Filesystem>> = OnceLock::new();
 
 thread_local! {
     /// `com_gamedir`. A thread-local so each test gets its own directory,
@@ -26,34 +29,53 @@ thread_local! {
     static GAMEDIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
-/// `COM_InitFilesystem` with the one search path the shareware game needs:
-/// `<basedir>/id1`, and `pak0.pak` in it (`COM_AddGameDirectory`), opened as
-/// `quaketool` opens it — the directory now, each file's bytes when they are
-/// read ([`Pak::open`]), so no copy of the archive lives in the program.
-pub(crate) fn init(basedir: &Path) -> Result<(), String> {
-    let gamedir = basedir.join(GAMENAME);
-    let pak_path = gamedir.join("pak0.pak");
-    let pak = Pak::open(&pak_path).map_err(|e| format!("couldn't open {}: {e}", pak_path.display()))?;
-    GAMEDIR.with(|g| *g.borrow_mut() = Some(gamedir));
-    // A second init (tests only) keeps the first pak: it is the same file.
-    let _ = PAK.set(Some(pak));
-    Ok(())
+/// `COM_InitFilesystem` and `COM_CheckRegistered`, then `PR_LoadProgs`'s
+/// checks of the game's `progs.dat`: the search path opened as `quaketool`
+/// opens a pak — each directory now, each file's bytes when it is read
+/// ([`Pak::open`]), so no copy of an archive lives in the program. Returns
+/// what id printed on the way (the packs, "Playing … version."); an `Err`
+/// is the `Sys_Error` the game stops with.
+pub(crate) fn init(basedir: &Path) -> Result<Vec<String>, String> {
+    let fs = init_filesystem(basedir)?;
+    check_progs(&fs.files)?;
+    let log = fs.log.clone();
+    GAMEDIR.with(|g| *g.borrow_mut() = Some(fs.gamedir.clone()));
+    // A second init (tests only) keeps the first path: it is the same files.
+    let _ = FILES.set(Some(fs));
+    Ok(log)
 }
 
-/// A handle on `pak0.pak` (its directory; entries read on demand), or
-/// `None` before [`init`]. Cloning copies the directory only.
+/// The search path's head (the directories; entries read on demand), or
+/// `None` before [`init`]. Cloning copies the first pack's directory only.
 pub(crate) fn pak() -> Option<Pak> {
-    PAK.get_or_init(default_pak).clone()
+    files().map(|f| f.files.clone())
 }
 
-/// The tests read the shareware pak where the repo keeps it.
+/// `static_registered`: the path holds id's `gfx/pop.lmp`.
+pub(crate) fn registered() -> bool {
+    files().is_some_and(|f| f.registered)
+}
+
+/// `COM_Path_f`'s lines (nothing before [`init`]).
+pub(crate) fn path_lines() -> Vec<String> {
+    files().map(|f| quake_rs::common::path_lines(&f.files)).unwrap_or_default()
+}
+
+fn files() -> Option<&'static Filesystem> {
+    FILES.get_or_init(default_files).as_ref()
+}
+
+/// The tests read the shareware pak where the repo keeps it, alone on the
+/// path (unregistered).
 #[cfg(test)]
-fn default_pak() -> Option<Pak> {
-    Pak::open(concat!(env!("CARGO_MANIFEST_DIR"), "/../quake-data/ID1/PAK0.PAK")).ok()
+fn default_files() -> Option<Filesystem> {
+    let pak = Pak::open(concat!(env!("CARGO_MANIFEST_DIR"), "/../quake-data/ID1/PAK0.PAK")).ok()?;
+    // (The tests' game directory is each thread's own: `gamedir`.)
+    Some(Filesystem { files: pak, gamedir: PathBuf::from(GAMENAME), registered: false, modified: false, log: Vec::new() })
 }
 
 #[cfg(not(test))]
-fn default_pak() -> Option<Pak> {
+fn default_files() -> Option<Filesystem> {
     None
 }
 
@@ -110,12 +132,15 @@ mod tests {
         assert!(pak.find("maps/e1m1.bsp").is_some());
         let palette = pak.read_file("gfx/palette.lmp").unwrap().unwrap();
         assert_eq!(palette.len(), 768);
+        assert!(!registered());
     }
 
     #[test]
-    fn init_needs_pak0_in_the_game_directory() {
-        let empty = gamedir();
+    fn init_needs_a_game_directory_with_ids_pak0() {
+        // An empty game directory: no pak0.pak, so no progs.dat on the path.
+        let empty = gamedir().join("empty-base");
+        std::fs::create_dir_all(empty.join(GAMENAME)).unwrap();
         let err = init(&empty).unwrap_err();
-        assert!(err.contains("pak0.pak"), "{err}");
+        assert_eq!(err, "PR_LoadProgs: couldn't load progs.dat");
     }
 }

@@ -8,11 +8,15 @@ workload one frame per requestAnimationFrame at Quake's fixed 1/72 s step
 Per frame it records:
 
   * page side (any build): `wait` (from posting the tick to the program's
-    answer: the worker's whole turn — the host frame, its picture into the
-    shared frame slot, its sounds), `copy` (the frame out of the shared slot
-    into the canvas's ImageData), `put` (ctx.putImageData), `js`
-    (wait+copy+put: the main thread's time for the frame) and `raf` (the
-    rAF-to-rAF period, which adds everything the browser does per frame);
+    answer: the worker's whole turn — the host frame, its picture into a
+    frame slot or left in place in shared memory, its sounds), `copy` (any
+    copy of the frame the page makes: into the 2-D canvas's ImageData, or
+    into a staging buffer where WebGL refuses a shared view; 0 when WebGL2
+    takes the shared view), `put` (putImageData, or WebGL2's texture uploads
+    and draw call — the GPU's own work is not in it), `js` (wait+copy+put:
+    the main thread's time for the frame) and `raf` (the rAF-to-rAF period,
+    which adds everything the browser does per frame, the GPU's included
+    when it is the bottleneck);
   * program side (a `--features bench` build, see quake-wasm/src/bench.rs):
     the frame phases input/sim/render3d/post3d/hud2d/menu/console/blend/pack
     (their sum is `step`, the host frame), the engine RenderStats split of
@@ -102,6 +106,8 @@ ap.add_argument("--threads-build", action="store_true",
 ap.add_argument("--video", default="", help="classic or modern: the video cvars to run with (set_video)")
 ap.add_argument("--vsync", action="store_true",
                 help="keep Chromium's 60 Hz rAF cap (default: uncapped, so `raf` shows browser cost)")
+ap.add_argument("--query", default="",
+                help="the page's query string, e.g. ?canvas2d (the 2-D presenter) or ?lowlatency")
 args = ap.parse_args()
 
 # --- assemble the web dir ---------------------------------------------------
@@ -285,7 +291,7 @@ results = {"wasm": [], "native": [], "startup": {}, "live": {}, "latency": {}, "
 results["load_before"] = open("/proc/loadavg").read().split()[:3] if os.path.exists("/proc/loadavg") else []
 
 with sync_playwright() as p:
-    br = p.chromium.launch(headless=True, args=flags)
+    br = p.chromium.launch(headless=True, args=flags + isolated.gpu_flags())
 
     def fresh_page():
         pg = br.new_page(viewport={"width": 1020, "height": 700})
@@ -293,8 +299,10 @@ with sync_playwright() as p:
         pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
         # The Classic profile: id's game, whose frames `quaketool play`
-        # hashes natively (`--video modern` then switches the picture).
-        pg.goto(f"http://127.0.0.1:{args.port}/index.html?classic", wait_until="load")
+        # hashes natively (`--video modern` then switches the picture);
+        # --query adds to it.
+        query = "?classic" + args.query.replace("?", "&", 1)
+        pg.goto(f"http://127.0.0.1:{args.port}/index.html{query}", wait_until="load")
         pg.wait_for_function("window.quake && quake.ready", timeout=120000)
         pg.wait_for_function("quake.firstFrameAt > 0", timeout=60000)
         pg.add_script_tag(content=BENCH_JS)
@@ -366,8 +374,9 @@ with sync_playwright() as p:
         lp, lerrs = fresh_page()
         lp.evaluate("hideOverlayForever()")
         lw, lh = resolutions[0]
+        video = f".then(() => quake.call('set_video', '{args.video}'))" if args.video else ""
         lp.evaluate(f"quake.call('boot').then(() => quake.call('menu_cancel'))"
-                    f".then(() => quake.call('set_extras', 1)).then(() => quake.call('set_resolution', {lw}, {lh}))")
+                    f".then(() => quake.call('set_extras', 1)){video}.then(() => quake.call('set_resolution', {lw}, {lh}))")
         time.sleep(1.0)
         lp.evaluate("quake.latency = []")
         import random
@@ -379,7 +388,7 @@ with sync_playwright() as p:
             lp.keyboard.up("d")
             time.sleep(rnd.uniform(0.02, 0.08))
         lat = lp.evaluate("quake.latency")
-        results["latency"] = {"res": [lw, lh], "events": len(lat), "median": med(lat), "p95": pct(lat, 95),
+        results["latency"] = {"res": lp.evaluate("quake.size()"), "events": len(lat), "median": med(lat), "p95": pct(lat, 95),
                               "min": min(lat) if lat else float("nan"), "max": max(lat) if lat else float("nan")}
         errs += lerrs
         lp.close()

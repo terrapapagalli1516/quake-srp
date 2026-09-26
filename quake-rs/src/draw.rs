@@ -108,7 +108,6 @@ pub fn draw_tile_clear(
     y: usize,
     w: usize,
     h: usize,
-    palette: &[[u8; 3]; 256],
 ) {
     let x1 = x.saturating_add(w).min(image.w);
     let y1 = y.saturating_add(h).min(image.h);
@@ -121,7 +120,7 @@ pub fn draw_tile_clear(
     let w = image.w;
     let Some(t) = tile else {
         for py in y..y1 {
-            image.rgb[py * w + x..py * w + x1].fill([0, 0, 0]);
+            image.pixels[py * w + x..py * w + x1].fill(0);
         }
         return;
     };
@@ -136,12 +135,12 @@ pub fn draw_tile_clear(
         let ty = ((py as f32 * inv) as usize) % th;
         match prev {
             Some((prev_py, prev_ty)) if prev_ty == ty => {
-                image.rgb.copy_within(prev_py * w + x..prev_py * w + x1, py * w + x);
+                image.pixels.copy_within(prev_py * w + x..prev_py * w + x1, py * w + x);
             }
             _ => {
                 let trow = &t.data[ty * tw..ty * tw + tw];
-                for (out, &tx) in image.rgb[py * w + x..py * w + x1].iter_mut().zip(&cols) {
-                    *out = palette[trow[tx] as usize];
+                for (out, &tx) in image.pixels[py * w + x..py * w + x1].iter_mut().zip(&cols) {
+                    *out = trow[tx];
                 }
             }
         }
@@ -151,7 +150,7 @@ pub fn draw_tile_clear(
 
 /// Fill the framebuffer rectangle `[x0, x1) x [y0, y1)` (any coordinates;
 /// clipped to the image) with `c`, a row slice at a time.
-pub(crate) fn fill_rect(image: &mut Image, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8; 3]) {
+pub(crate) fn fill_rect(image: &mut Image, x0: i64, y0: i64, x1: i64, y1: i64, c: u8) {
     let (w, h) = (image.w as i64, image.h as i64);
     let (x0, x1) = (x0.clamp(0, w) as usize, x1.clamp(0, w) as usize);
     let (y0, y1) = (y0.clamp(0, h) as usize, y1.clamp(0, h) as usize);
@@ -159,7 +158,7 @@ pub(crate) fn fill_rect(image: &mut Image, x0: i64, y0: i64, x1: i64, y1: i64, c
         return;
     }
     for py in y0..y1 {
-        if let Some(row) = image.rgb.get_mut(py * image.w + x0..py * image.w + x1) {
+        if let Some(row) = image.pixels.get_mut(py * image.w + x0..py * image.w + x1) {
             row.fill(c);
         }
     }
@@ -176,7 +175,6 @@ pub(crate) fn fill_rect(image: &mut Image, x0: i64, y0: i64, x1: i64, y1: i64, c
 /// clipping are worked out once per blit and each row is written as a slice
 /// (PERF_PLAN B4: a float mapping and a bounds-checked `put` per pixel made
 /// the status bar ~3x as expensive).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn blit_scaled(
     image: &mut Image,
     src: &[u8],
@@ -185,7 +183,6 @@ pub(crate) fn blit_scaled(
     (dst_x0, dst_y0, dst_w, dst_h): (i64, i64, i64, i64),
     inv_scale: f32,
     transparent: u8,
-    palette: &[[u8; 3]; 256],
 ) {
     let (iw, ih) = (image.w as i64, image.h as i64);
     // Destination columns on the image, then only while the source column is
@@ -212,11 +209,11 @@ pub(crate) fn blit_scaled(
         let row0 = (sy0 + sy) * stride + sx0;
         let Some(srow) = src.get(row0..row0 + sw) else { continue };
         let d0 = py as usize * image.w + x_start;
-        let Some(drow) = image.rgb.get_mut(d0..d0 + cols.len()) else { continue };
+        let Some(drow) = image.pixels.get_mut(d0..d0 + cols.len()) else { continue };
         for (out, &sx) in drow.iter_mut().zip(&cols) {
             let t = srow[sx];
             if t != transparent {
-                *out = palette[t as usize];
+                *out = t;
             }
         }
     }
@@ -258,7 +255,6 @@ pub(crate) const MENU_VIRT_H: f32 = 200.0;
 /// framebuffer pixel `(vx, vy)` — the case the 320x200 wasm framebuffer uses, so
 /// the menu coordinates from menu.c are used directly with no transform.
 // Mirrors Draw_Pic (draw.c); the C reads vid/draw globals passed explicitly here.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn blit_qpic_at(
     image: &mut Image,
     pic: &crate::wad::Qpic,
@@ -267,7 +263,6 @@ pub(crate) fn blit_qpic_at(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     if pic.width <= 0 || pic.height <= 0 || scale <= 0.0 {
         return;
@@ -291,7 +286,6 @@ pub(crate) fn blit_qpic_at(
         (dst_x0, dst_y0, dst_w, dst_h),
         inv_scale,
         HUD_TRANSPARENT,
-        palette,
     );
 }
 
@@ -320,9 +314,8 @@ pub fn draw_string(
     x: i32,
     y: i32,
     text: &str,
-    palette: &[[u8; 3]; 256],
 ) {
-    draw_string_scaled(image, conchars, x as f32, y as f32, text, 1.0, 0.0, 0.0, palette);
+    draw_string_scaled(image, conchars, x as f32, y as f32, text, 1.0, 0.0, 0.0);
 }
 
 /// The scaled/offset core of [`draw_string`]; the menu draw uses this to place
@@ -337,7 +330,6 @@ pub(crate) fn draw_string_scaled(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     if conchars.width <= 0 || conchars.height <= 0 || scale <= 0.0 {
         return;
@@ -356,7 +348,7 @@ pub(crate) fn draw_string_scaled(
         // hold palette-0 texels, so drawing them is a no-op anyway — but skipping
         // is cheaper and matches the menu's M_Print spacing.
         if ch != 0 && ch != b' ' {
-            stamp_glyph(image, conchars, ch, cell_w, cell_h, pen_vx, vy, scale, ox, oy, palette);
+            stamp_glyph(image, conchars, ch, cell_w, cell_h, pen_vx, vy, scale, ox, oy);
         }
         pen_vx += 8.0; // M_Print advances the pen 8 virtual px per character.
     }
@@ -382,7 +374,6 @@ fn stamp_glyph(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     let cw = conchars.width as usize;
     let cell_x = (num as usize % 16) * cell_w;
@@ -407,7 +398,7 @@ fn stamp_glyph(
                 continue;
             }
             let px = (ox + (vx + gx as f32) * scale).floor() as i64;
-            fill_rect(image, px, py, px + block, py + block, palette[texel as usize]);
+            fill_rect(image, px, py, px + block, py + block, texel);
         }
     }
 }
@@ -428,7 +419,6 @@ pub(crate) fn draw_char_scaled(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     if conchars.width <= 0 || conchars.height <= 0 || scale <= 0.0 {
         return;
@@ -439,7 +429,7 @@ pub(crate) fn draw_char_scaled(
     }
     let cell_w = (conchars.width / 16).max(1) as usize;
     let cell_h = (conchars.height / 16).max(1) as usize;
-    stamp_glyph(image, conchars, num, cell_w, cell_h, vx, vy, scale, ox, oy, palette);
+    stamp_glyph(image, conchars, num, cell_w, cell_h, vx, vy, scale, ox, oy);
 }
 
 /// `Draw_FadeScreen` (draw.c), which `M_Draw` runs under every menu drawn over
@@ -447,13 +437,13 @@ pub(crate) fn draw_char_scaled(
 /// dither — row `y` keeps only the pixels with `x & 3 == (y & 1) << 1`. The
 /// pattern is laid on the [`screen_2d`] pixels (the framebuffer's own unless
 /// the "scaled 2-D" extra blows each up to a `scale x scale` block).
-pub fn fade_screen(image: &mut Image, palette: &[[u8; 3]; 256]) {
+pub fn fade_screen(image: &mut Image) {
     if image.w == 0 || image.h == 0 {
         return;
     }
     let scale = screen_2d(image.w, image.h).scale;
     let inv = if scale.is_finite() && scale > 0.0 { 1.0 / scale } else { 1.0 };
-    let black = palette[0];
+    let black = 0;
     // Virtual column of each framebuffer column, computed once, and from it
     // the runs of columns a row keeps for each of the two patterns
     // (t = 0 on even virtual rows, 2 on odd): everything between them is
@@ -474,7 +464,7 @@ pub fn fade_screen(image: &mut Image, palette: &[[u8; 3]; 256]) {
     let runs = [keep_runs(0), keep_runs(2)];
     for y in 0..image.h {
         let vy = (y as f32 * inv) as usize;
-        let row = &mut image.rgb[y * image.w..(y + 1) * image.w];
+        let row = &mut image.pixels[y * image.w..(y + 1) * image.w];
         let mut x = 0;
         for &(a, b) in &runs[vy & 1] {
             row[x..a].fill(black);
@@ -487,47 +477,44 @@ pub fn fade_screen(image: &mut Image, palette: &[[u8; 3]; 256]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::fixtures::{ramp_palette, test_backtile};
+    use crate::render::fixtures::test_backtile;
 
     #[test]
     fn fade_screen_blackens_three_pixels_in_four_like_draw_fadescreen() {
         // Draw_FadeScreen: row y keeps only x & 3 == (y & 1) << 1; the rest go
         // to palette index 0.
-        let mut pal = ramp_palette();
-        pal[0] = [1, 2, 3];
-        let keep = [200u8, 100, 50];
+        let keep = 200u8;
         let mut img = Image::new(320, 200, keep);
-        fade_screen(&mut img, &pal);
+        fade_screen(&mut img);
         for y in 0..200 {
             for x in 0..320 {
-                let want = if x & 3 == (y & 1) << 1 { keep } else { pal[0] };
-                assert_eq!(img.rgb[y * 320 + x], want, "({x},{y})");
+                let want = if x & 3 == (y & 1) << 1 { keep } else { 0 };
+                assert_eq!(img.pixels[y * 320 + x], want, "({x},{y})");
             }
         }
         // id at 640x400: the same dither on the framebuffer's own pixels.
         let mut big = Image::new(640, 400, keep);
-        fade_screen(&mut big, &pal);
+        fade_screen(&mut big);
         for &(x, y) in &[(0, 0), (1, 1), (4, 2), (6, 3), (2, 0), (0, 2), (639, 399)] {
-            let want = if x & 3 == (y & 1) << 1 { keep } else { pal[0] };
-            assert_eq!(big.rgb[y * 640 + x], want, "({x},{y})");
+            let want = if x & 3 == (y & 1) << 1 { keep } else { 0 };
+            assert_eq!(big.pixels[y * 640 + x], want, "({x},{y})");
         }
         // The "scaled 2-D" extra at 640x400: each virtual pixel a 2x2 block.
         let _extra = Scaled2dGuard::set(true);
         let mut big = Image::new(640, 400, keep);
-        fade_screen(&mut big, &pal);
+        fade_screen(&mut big);
         for &(x, y) in &[(0, 0), (1, 1), (4, 2), (5, 3), (2, 0), (0, 2), (639, 399)] {
             let (vx, vy) = (x / 2, y / 2);
-            let want = if vx & 3 == (vy & 1) << 1 { keep } else { pal[0] };
-            assert_eq!(big.rgb[y * 640 + x], want, "({x},{y})");
+            let want = if vx & 3 == (vy & 1) << 1 { keep } else { 0 };
+            assert_eq!(big.pixels[y * 640 + x], want, "({x},{y})");
         }
-        let kept = big.rgb.iter().filter(|&&p| p == keep).count();
+        let kept = big.pixels.iter().filter(|&&p| p == keep).count();
         assert_eq!(kept, 640 * 400 / 4, "a quarter of the screen survives");
-        fade_screen(&mut Image::new(0, 0, keep), &pal);
+        fade_screen(&mut Image::new(0, 0, keep));
     }
 
     #[test]
     fn draw_string_writes_glyph_pixels() {
-        let pal = ramp_palette();
         // A 128x128 conchars where every texel is the lit index 3 EXCEPT the
         // space cell (byte 32 -> cell (0,2)) which stays at the transparent 0.
         // With an all-lit atlas, any non-space character stamps index-3 pixels.
@@ -540,18 +527,18 @@ mod tests {
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
 
-        let mut img = Image::new(64, 16, [0, 0, 0]);
-        draw_string(&mut img, &conchars, 0, 0, "A", &pal);
+        let mut img = Image::new(64, 16, 0);
+        draw_string(&mut img, &conchars, 0, 0, "A");
         // 'A' = byte 65 = cell (1, 4): source (8, 32). Its texels are lit (index 3),
         // stamped at the destination starting (0,0). So pixel (0,0) is index 3.
-        assert_eq!(img.rgb[0], pal[3], "the glyph's lit texel must paint");
+        assert_eq!(img.pixels[0], 3, "the glyph's lit texel must paint");
         // A space draws nothing past the first char; draw a string and confirm the
         // second char ('B') lands 8 px to the right.
-        let mut img2 = Image::new(64, 16, [0, 0, 0]);
-        draw_string(&mut img2, &conchars, 0, 0, " B", &pal);
+        let mut img2 = Image::new(64, 16, 0);
+        draw_string(&mut img2, &conchars, 0, 0, " B");
         // Space is skipped, 'B' starts at virtual x=8.
-        assert_eq!(img2.rgb[8], pal[3], "the second glyph must land 8px right");
-        assert_eq!(img2.rgb[0], [0, 0, 0], "a leading space must draw nothing");
+        assert_eq!(img2.pixels[8], 3, "the second glyph must land 8px right");
+        assert_eq!(img2.pixels[0], 0, "a leading space must draw nothing");
     }
 
     // -- the row-wise blits against the per-pixel loops they replaced --------
@@ -571,8 +558,7 @@ mod tests {
 
     /// The old `blit_qpic_at` / `sbar::blit_qpic` body: per pixel, float
     /// source mapping and a bounds-checked `put`.
-    #[allow(clippy::too_many_arguments)]
-    fn ref_blit(img: &mut Image, pic: &crate::wad::Qpic, x0: i64, y0: i64, scale: f32, t: u8, pal: &[[u8; 3]; 256]) {
+    fn ref_blit(img: &mut Image, pic: &crate::wad::Qpic, x0: i64, y0: i64, scale: f32, t: u8) {
         let (pw, ph) = (pic.width as usize, pic.height as usize);
         let dst_w = (pw as f32 * scale).round().max(1.0) as i64;
         let dst_h = (ph as f32 * scale).round().max(1.0) as i64;
@@ -591,7 +577,7 @@ mod tests {
                 }
                 let texel = pic.data[sy * pw + sx];
                 if texel != t {
-                    img.put(px as i32, py as i32, pal[texel as usize]);
+                    img.put(px as i32, py as i32, texel);
                 }
             }
         }
@@ -601,7 +587,6 @@ mod tests {
 
     #[test]
     fn blit_qpic_at_matches_the_per_pixel_blit() {
-        let pal = ramp_palette();
         let mut seed = 1;
         for &(pw, ph) in &[(1, 1), (7, 5), (24, 24), (33, 17), (320, 24)] {
             // Every fourth texel transparent.
@@ -619,17 +604,13 @@ mod tests {
                     (0.0, 0.0, 91.0, 57.0),
                 ] {
                     seed += 1;
-                    let under = bytes(seed, 97 * 61);
-                    let mut want = Image::new(97, 61, [0, 0, 0]);
-                    for (p, b) in want.rgb.iter_mut().zip(&under) {
-                        *p = [*b, 1, 2];
-                    }
-                    let mut got = Image { w: 97, h: 61, rgb: want.rgb.clone() };
+                    let mut want = Image { w: 97, h: 61, pixels: bytes(seed, 97 * 61) };
+                    let mut got = want.clone();
                     let x0 = (ox + vx * scale).floor() as i64;
                     let y0 = (oy + vy * scale).floor() as i64;
-                    ref_blit(&mut want, &pic, x0, y0, scale, HUD_TRANSPARENT, &pal);
-                    blit_qpic_at(&mut got, &pic, vx, vy, scale, ox, oy, &pal);
-                    assert!(got.rgb == want.rgb, "{pw}x{ph} scale {scale} at ({vx},{vy})+({ox},{oy})");
+                    ref_blit(&mut want, &pic, x0, y0, scale, HUD_TRANSPARENT);
+                    blit_qpic_at(&mut got, &pic, vx, vy, scale, ox, oy);
+                    assert!(got.pixels == want.pixels, "{pw}x{ph} scale {scale} at ({vx},{vy})+({ox},{oy})");
                 }
             }
         }
@@ -639,14 +620,13 @@ mod tests {
     fn glyph_stamping_matches_the_per_pixel_blocks() {
         // The old draw_string_scaled/draw_char_scaled inner loop: a
         // ceil(scale)-square of puts per lit texel, texels in row-major order.
-        let pal = ramp_palette();
         let conchars =
             crate::wad::Qpic { width: 128, height: 128, data: bytes(7, 128 * 128).iter().map(|b| b % 3).collect() };
         for &scale in &SCALES {
             for &(vx, vy, ox, oy) in &[(0.0, 0.0, 0.0, 0.0), (3.5, 2.25, 1.5, 0.5), (-12.0, -3.0, 0.0, 0.0), (70.0, 30.0, 2.0, 1.0)] {
                 let text = "Az 09~\x7f\u{1}";
-                let mut want = Image::new(120, 50, [9, 9, 9]);
-                let mut got = Image::new(120, 50, [9, 9, 9]);
+                let mut want = Image::new(120, 50, 9);
+                let mut got = Image::new(120, 50, 9);
                 let block = scale.ceil().max(1.0) as i64;
                 let mut pen = vx;
                 for ch in text.bytes() {
@@ -662,7 +642,7 @@ mod tests {
                                 let px = (ox + (pen + gx as f32) * scale).floor() as i64;
                                 for by in 0..block {
                                     for bx in 0..block {
-                                        want.put((px + bx) as i32, (py + by) as i32, pal[texel as usize]);
+                                        want.put((px + bx) as i32, (py + by) as i32, texel);
                                     }
                                 }
                             }
@@ -670,28 +650,26 @@ mod tests {
                     }
                     pen += 8.0;
                 }
-                draw_string_scaled(&mut got, &conchars, vx, vy, text, scale, ox, oy, &pal);
-                assert!(got.rgb == want.rgb, "string at scale {scale} ({vx},{vy})+({ox},{oy})");
+                draw_string_scaled(&mut got, &conchars, vx, vy, text, scale, ox, oy);
+                assert!(got.pixels == want.pixels, "string at scale {scale} ({vx},{vy})+({ox},{oy})");
                 // draw_char_scaled stamps the same cells, byte 0 and space included.
-                let mut one = Image::new(120, 50, [9, 9, 9]);
-                let mut two = Image::new(120, 50, [9, 9, 9]);
-                draw_char_scaled(&mut one, &conchars, vx, vy, b'Q', scale, ox, oy, &pal);
-                draw_string_scaled(&mut two, &conchars, vx, vy, "Q", scale, ox, oy, &pal);
-                assert!(one.rgb == two.rgb, "char at scale {scale}");
+                let mut one = Image::new(120, 50, 9);
+                let mut two = Image::new(120, 50, 9);
+                draw_char_scaled(&mut one, &conchars, vx, vy, b'Q', scale, ox, oy);
+                draw_string_scaled(&mut two, &conchars, vx, vy, "Q", scale, ox, oy);
+                assert!(one.pixels == two.pixels, "char at scale {scale}");
             }
         }
     }
 
     #[test]
     fn fade_screen_matches_the_per_pixel_dither_at_any_scale() {
-        let mut pal = ramp_palette();
-        pal[0] = [1, 2, 3];
         for (scaled, &(w, h)) in [false, true]
             .into_iter()
             .flat_map(|e| [(320, 200), (333, 211), (400, 300), (960, 600), (1120, 700), (1280, 800), (7, 3)].iter().map(move |r| (e, r)))
         {
             let _extra = Scaled2dGuard::set(scaled);
-            let under: Vec<[u8; 3]> = bytes(w as u32, w * h).iter().map(|&b| [b, 9, 9]).collect();
+            let under = bytes(w as u32, w * h);
             let scale = if scaled { (w as f32 / MENU_VIRT_W).min(h as f32 / MENU_VIRT_H).floor().max(1.0) } else { 1.0 };
             let inv = 1.0 / scale;
             let mut want = under.clone();
@@ -699,26 +677,25 @@ mod tests {
                 let t = (((y as f32 * inv) as usize) & 1) << 1;
                 for x in 0..w {
                     if ((x as f32 * inv) as usize) & 3 != t {
-                        want[y * w + x] = pal[0];
+                        want[y * w + x] = 0;
                     }
                 }
             }
-            let mut got = Image { w, h, rgb: under };
-            fade_screen(&mut got, &pal);
-            assert!(got.rgb == want, "{w}x{h} scaled {scaled}");
+            let mut got = Image { w, h, pixels: under };
+            fade_screen(&mut got);
+            assert!(got.pixels == want, "{w}x{h} scaled {scaled}");
         }
     }
 
     #[test]
     fn draw_tile_clear_matches_the_per_pixel_tile() {
-        let pal = ramp_palette();
         let tile = test_backtile();
         let odd = crate::wad::Qpic { width: 13, height: 7, data: bytes(3, 13 * 7) };
         for (scaled, t) in [(false, &tile), (false, &odd), (true, &tile), (true, &odd)] {
             let _extra = Scaled2dGuard::set(scaled);
             for &(w, h) in &[(320, 200), (400, 300), (640, 400), (1120, 700), (1280, 800), (333, 211)] {
                 for &(x, y, rw, rh) in &[(0, 0, w, h), (5, 7, w / 3, h / 2), (w - 9, h - 4, 40, 40), (0, h / 2, w, 1)] {
-                    let mut want = Image::new(w, h, [7, 7, 7]);
+                    let mut want = Image::new(w, h, 7);
                     let whole = (w as f32 / HUD_VIRT_W).min(h as f32 / MENU_VIRT_H).floor().max(1.0);
                     let inv = if scaled { 1.0 / whole } else { 1.0 };
                     let (tw, th) = (t.width as usize, t.height as usize);
@@ -726,12 +703,12 @@ mod tests {
                         for px in x..(x + rw).min(w) {
                             let tx = ((px as f32 * inv) as usize) % tw;
                             let ty = ((py as f32 * inv) as usize) % th;
-                            want.rgb[py * w + px] = pal[t.data[ty * tw + tx] as usize];
+                            want.pixels[py * w + px] = t.data[ty * tw + tx];
                         }
                     }
-                    let mut got = Image::new(w, h, [7, 7, 7]);
-                    draw_tile_clear(&mut got, Some(t), x, y, rw, rh, &pal);
-                    assert!(got.rgb == want.rgb, "{w}x{h} rect ({x},{y},{rw},{rh}) tile {}x{}", t.width, t.height);
+                    let mut got = Image::new(w, h, 7);
+                    draw_tile_clear(&mut got, Some(t), x, y, rw, rh);
+                    assert!(got.pixels == want.pixels, "{w}x{h} rect ({x},{y},{rw},{rh}) tile {}x{}", t.width, t.height);
                 }
             }
         }
@@ -739,34 +716,34 @@ mod tests {
 
     #[test]
     fn draw_tile_clear_tiles_from_the_screen_origin() {
-        let pal = ramp_palette();
-        let tile = test_backtile();
-        let at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
+        let tile
+ = test_backtile();
+        let at = |x: usize, y: usize| tile.data[(y % 64) * 64 + x % 64];
         // Scale 1 (320 wide): texel (x mod 64, y mod 64) — anchored at the
         // SCREEN origin, not the rectangle's corner (Draw_TileClear's offsets).
-        let mut img = Image::new(320, 200, [7, 7, 7]);
-        draw_tile_clear(&mut img, Some(&tile), 70, 30, 100, 50, &pal);
-        assert_eq!(img.rgb[30 * 320 + 70], at(70, 30));
-        assert_eq!(img.rgb[79 * 320 + 169], at(169, 79));
-        assert_eq!(img.rgb[29 * 320 + 70], [7, 7, 7], "outside the rect untouched");
-        assert_eq!(img.rgb[30 * 320 + 170], [7, 7, 7], "outside the rect untouched");
+        let mut img = Image::new(320, 200, 7);
+        draw_tile_clear(&mut img, Some(&tile), 70, 30, 100, 50);
+        assert_eq!(img.pixels[30 * 320 + 70], at(70, 30));
+        assert_eq!(img.pixels[79 * 320 + 169], at(169, 79));
+        assert_eq!(img.pixels[29 * 320 + 70], 7, "outside the rect untouched");
+        assert_eq!(img.pixels[30 * 320 + 170], 7, "outside the rect untouched");
         // 640 wide: id tiles every mode at the tile's own size ...
-        let mut big = Image::new(640, 400, [7, 7, 7]);
-        draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400, &pal);
+        let mut big = Image::new(640, 400, 7);
+        draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400);
         for &(x, y) in &[(0, 0), (1, 1), (129, 3), (300, 250), (639, 399)] {
-            assert_eq!(big.rgb[y * 640 + x], at(x, y), "({x},{y})");
+            assert_eq!(big.pixels[y * 640 + x], at(x, y), "({x},{y})");
         }
         // ... the "scaled 2-D" extra makes each texel 2x2 pixels, like the
         // rest of its 2-D layer.
         let _extra = Scaled2dGuard::set(true);
-        draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400, &pal);
+        draw_tile_clear(&mut big, Some(&tile), 0, 0, 640, 400);
         for &(x, y) in &[(0, 0), (1, 1), (129, 3), (300, 250), (639, 399)] {
-            assert_eq!(big.rgb[y * 640 + x], at(x / 2, y / 2), "({x},{y})");
+            assert_eq!(big.pixels[y * 640 + x], at(x / 2, y / 2), "({x},{y})");
         }
         // No tile: black, never a panic; an off-frame rect is a no-op.
-        let mut img2 = Image::new(32, 32, [7, 7, 7]);
-        draw_tile_clear(&mut img2, None, 0, 0, 32, 32, &pal);
-        assert!(img2.rgb.iter().all(|&p| p == [0, 0, 0]));
-        draw_tile_clear(&mut img2, Some(&tile), 40, 40, 10, 10, &pal);
+        let mut img2 = Image::new(32, 32, 7);
+        draw_tile_clear(&mut img2, None, 0, 0, 32, 32);
+        assert!(img2.pixels.iter().all(|&p| p == 0));
+        draw_tile_clear(&mut img2, Some(&tile), 40, 40, 10, 10);
     }
 }

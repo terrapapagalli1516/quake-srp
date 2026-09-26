@@ -3,7 +3,8 @@
 // read of stdin, so it is an ordinary `fn main()` loop: the page writes its
 // events into a shared ring (Atomics.wait wakes the read), and what the
 // program writes to stdout comes back to the page — each frame's pixels into
-// shared frame slots the page presents from, its sound into a shared ring the
+// shared frame slots the page presents from (or, when the program's memory
+// is shared, the frame's place in it), its sound into a shared ring the
 // page's AudioWorklet plays, everything else (UI state, the sound's counts,
 // answers to calls) as one message per turn. Files are a small
 // in-memory file system the page filled from its storage; what the program
@@ -36,10 +37,13 @@ const C = {
   SLOT_F: 15,
   SHOWN: 18,       // FRAMES as of the page's last present
   SLOTS_GEN: 19,   // which set of frame slots LATEST and the SLOT_* fields are about
+  SLOT_SRC: 20,    // + slot: 0 the frame is in the frame slots; 1 in the program's memory
+  SLOT_ADDR: 23,   // + slot: in the program's memory, where the pixels lie
+  SLOT_PAL: 26,    // + slot: ... and the palette (an indexed frame)
 };
 const CTL_BYTES = 256;
 const RING_BYTES = 1 << 16;              // the input ring, after the control block
-const SLOTS = 3;                         // frame slots (triple buffering)
+const SLOTS = 3;                         // frame slots (triple buffering), and the program's ring
 // The sound ring (web/PLATFORM.md, "Sound"): made by the page, written here,
 // played by the page's AudioWorklet. The control block's Int32 fields:
 const A = { POS: 0, WRITE: 1, RATE: 2, UNDER: 3, PLAYED: 4, CLEARS: 5, PEAK: 6, QUANTA: 7 };
@@ -47,7 +51,7 @@ const AUDIO_CTL_BYTES = 64, RING_PAIRS = 16384;
 
 // --- Protocol constants (quake-wasm/src/proto.rs) ---------------------------
 const IN_END = 8, IN_AUDIO_WAKE = 11;
-const OUT_FRAME = 1, OUT_SYNC = 2, OUT_PCM = 14;
+const OUT_FRAME = 1, OUT_SYNC = 2, OUT_PCM = 14, OUT_FRAME_AT = 17;
 const PCM_CLEAR = 1;
 
 // --- WASI errno values (wasi_snapshot_preview1) ------------------------------
@@ -83,6 +87,12 @@ onmessage = async (e) => {
   }
   const shared_memory = importedMemory(new Uint8Array(wasm));
   let argv = args || [];
+  if (shared_memory && shared_memory.buffer instanceof SharedArrayBuffer) {
+    // The page can read the program's memory: frames stay where the program
+    // drew them (FRAME_AT), and the page reads them there.
+    argv = [...argv, '-sharedframes'];
+    postMessage({ t: 'memory', memory: shared_memory });
+  }
   if (WebAssembly.Module.imports(module).some(i => i.module === 'wasi' && i.name === 'thread-spawn')) {
     // Without its thread workers the program still runs, on its own thread
     // (a `thread-spawn` then answers EAGAIN, and quake.wasm draws alone).
@@ -210,15 +220,17 @@ const sound = {
 };
 
 // --- stdout: the program's records ------------------------------------------
-// A streaming parser, since a record can span writes: a FRAME's pixels go
-// straight from the program's memory into a free frame slot, a PCM record's
-// samples into the sound ring; every other record is kept, and the lot goes
-// to the page as one message at each Sync.
+// A streaming parser, since a record can span writes: a FRAME's pixels (an
+// indexed frame's palette first) go straight from the program's memory into
+// a free frame slot, a PCM record's samples into the sound ring; a FRAME_AT
+// says where a frame lies in the program's shared memory, and the page reads
+// it there; every other record is kept, and the lot goes to the page as one
+// message at each Sync.
 const stdout = {
   head: new Uint8Array(8), headN: 0,     // the record header being read
   kind: 0, left: 0,                      // the current record, and its bytes still to come
-  fixed: new Uint8Array(12), fixedN: 0,  // a FRAME's w/h/format fields, a PCM's start/rate/flags
-  slot: -1, slotAt: 0,                   // where its pixels are going
+  fixed: new Uint8Array(16), fixedN: 0,  // a FRAME's (8), PCM's (12) or FRAME_AT's (16) fixed fields
+  slot: -1, slotAt: 0,                   // where a FRAME's pixels are going
   batch: new Uint8Array(1 << 16), batchN: 0,
 
   write(src, n) {
@@ -233,13 +245,14 @@ const stdout = {
         this.kind = this.head[0];
         this.left = new DataView(this.head.buffer).getUint32(4, true);
         this.fixedN = 0; this.slot = -1;
-        if (this.kind !== OUT_FRAME && this.kind !== OUT_PCM) this.keep(this.head, 0, 8);
+        if (this.kind !== OUT_FRAME && this.kind !== OUT_PCM && this.kind !== OUT_FRAME_AT) this.keep(this.head, 0, 8);
         if (this.left === 0) this.done();
         continue;
       }
       const k = Math.min(this.left, n - i);
       if (this.kind === OUT_FRAME) this.framePart(m, src + i, k);
       else if (this.kind === OUT_PCM) this.pcmPart(m, src + i, k);
+      else if (this.kind === OUT_FRAME_AT) this.fixedPart(m, src + i, k, 16);
       else this.keep(m, src + i, k);
       this.left -= k; i += k;
       if (this.left === 0) this.done();
@@ -257,12 +270,20 @@ const stdout = {
     this.batchN += k;
   },
 
-  // Some of a FRAME's payload: its 8 fixed bytes, then pixels.
+  // Up to `n` fixed bytes of a record's payload; returns how many of `k` it took.
+  fixedPart(m, at, k, n) {
+    const f = Math.min(Math.max(n - this.fixedN, 0), k);
+    this.fixed.set(m.subarray(at, at + f), this.fixedN);
+    this.fixedN += f;
+    return f;
+  },
+
+  // Some of a FRAME's payload: its 8 fixed bytes, then the palette (an
+  // indexed frame) and the pixels, into a frame slot.
   framePart(m, at, k) {
     if (this.fixedN < 8) {
-      const f = Math.min(8 - this.fixedN, k);
-      this.fixed.set(m.subarray(at, at + f), this.fixedN);
-      this.fixedN += f; at += f; k -= f;
+      const f = this.fixedPart(m, at, k, 8);
+      at += f; k -= f;
       if (this.fixedN === 8) this.slot = this.wanted() ? freeSlot(this.left - f) : -1;
       this.slotAt = 0;
     }
@@ -275,9 +296,8 @@ const stdout = {
   // Some of a PCM record's payload: its 12 fixed bytes, then samples.
   pcmPart(m, at, k) {
     if (this.fixedN < 12) {
-      const f = Math.min(12 - this.fixedN, k);
-      this.fixed.set(m.subarray(at, at + f), this.fixedN);
-      this.fixedN += f; at += f; k -= f;
+      const f = this.fixedPart(m, at, k, 12);
+      at += f; k -= f;
       if (this.fixedN === 12) {
         const d = new DataView(this.fixed.buffer);
         sound.begin(d.getUint32(0, true) | 0, d.getUint32(4, true), d.getUint32(8, true));
@@ -286,11 +306,11 @@ const stdout = {
     if (k > 0) sound.write(m.subarray(at, at + k));
   },
 
-  // Whether the page wants this frame. It always does while the program
-  // waits for its ticks (the page is waiting for the frame). A timedemo's
-  // frames come faster than any display: one the page has not yet shown
-  // the last of is rendered but not handed over (the old page likewise ran
-  // a slice of frames per refresh and presented the last).
+  // Whether the page wants this frame copied. It always does while the
+  // program waits for its ticks (the page is waiting for the frame). A
+  // timedemo's frames come faster than any display: one the page has not yet
+  // shown the last of is rendered but not copied over (the old page likewise
+  // ran a slice of frames per refresh and presented the last).
   wanted() {
     return Atomics.load(ctl, C.WAIT) === 1 || Atomics.load(ctl, C.FRAMES) === Atomics.load(ctl, C.SHOWN);
   },
@@ -300,16 +320,27 @@ const stdout = {
     this.headN = 0;
     if (this.kind === OUT_FRAME && this.slot >= 0) {
       const f = new DataView(this.fixed.buffer);
-      Atomics.store(ctl, C.SLOT_W + this.slot, f.getUint16(0, true));
-      Atomics.store(ctl, C.SLOT_H + this.slot, f.getUint16(2, true));
-      Atomics.store(ctl, C.SLOT_F + this.slot, f.getUint8(4));
-      Atomics.store(ctl, C.LATEST, this.slot);
-      Atomics.add(ctl, C.FRAMES, 1);
+      publish(this.slot, f, 0, 0, 0);
+    } else if (this.kind === OUT_FRAME_AT) {
+      this.frameAt(new DataView(this.fixed.buffer));
     } else if (this.kind === OUT_PCM) {
       sound.end();
     } else if (this.kind === OUT_SYNC) {
       this.sync();
     }
+  },
+
+  // A FRAME_AT: the frame lies in ring slot `slot` of the program's shared
+  // memory. Always published (it costs no copy, and the newest frame must
+  // be the ring's newest: a timedemo's unshown frames too), and the
+  // program's next frame takes the ring's next slot, so this returns only
+  // once the page is not reading that one (the page claims only the newest
+  // frame, so once this one is published it cannot start to).
+  frameAt(f) {
+    const slot = f.getUint8(5);
+    publish(slot, f, 1, f.getUint32(8, true), f.getUint32(12, true));
+    const next = (slot + 1) % SLOTS;
+    while (Atomics.load(ctl, C.READING) === next) Atomics.wait(ctl, C.READING, next, 50);
   },
 
   // A Sync: publish the turn — the batch to the page, the tick's ack, and
@@ -328,6 +359,20 @@ const stdout = {
     Atomics.notify(ctl, C.SYNCS);
   },
 };
+
+// Publish frame slot `slot` as the newest frame: its size and format (the
+// FRAME's fixed fields in `f`), where it is (`src` 0: the frame slots; 1: the
+// program's memory at `addr`, its palette at `pal`).
+function publish(slot, f, src, addr, pal) {
+  Atomics.store(ctl, C.SLOT_W + slot, f.getUint16(0, true));
+  Atomics.store(ctl, C.SLOT_H + slot, f.getUint16(2, true));
+  Atomics.store(ctl, C.SLOT_F + slot, f.getUint8(4));
+  Atomics.store(ctl, C.SLOT_SRC + slot, src);
+  Atomics.store(ctl, C.SLOT_ADDR + slot, addr | 0);
+  Atomics.store(ctl, C.SLOT_PAL + slot, pal | 0);
+  Atomics.store(ctl, C.LATEST, slot);
+  Atomics.add(ctl, C.FRAMES, 1);
+}
 
 // A slot to write the next frame (`bytes` long) into: neither the newest
 // frame (the page may be about to present it) nor the one the page is

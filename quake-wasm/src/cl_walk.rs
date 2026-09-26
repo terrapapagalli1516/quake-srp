@@ -155,7 +155,7 @@ mod tests {
         // bit-identical (the settle pop was exactly this eye motion leaking into
         // the first rendered frames)...
         step(1.0 / 60.0);
-        let mut prev: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let mut prev: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         let (w, h) = APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
@@ -177,7 +177,7 @@ mod tests {
             // 2-D layer 1:1 (a 48-row bar, so a 960x552 view at 960x600) and
             // per-texel relighting that tick touches ~2.4%. A 4% ceiling still
             // separates bug from animation with a wide margin both ways.
-            let fb: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+            let fb: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
             let nd = prev
                 .chunks_exact(4)
                 .zip(fb.chunks_exact(4))
@@ -267,9 +267,9 @@ mod tests {
         w.beams.clear();
         let (without_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200));
         let diff = with_bolt
-            .rgb
+            .pixels
             .iter()
-            .zip(without_bolt.rgb.iter())
+            .zip(without_bolt.pixels.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(
@@ -281,11 +281,10 @@ mod tests {
         // the real check).
         if let Ok(dir) = std::env::var("QUAKE_DUMP_BEAM") {
             for (img, name) in [(&with_bolt, "with-bolt"), (&without_bolt, "without-bolt")] {
-                let mut buf = format!("P6\n{} {}\n255\n", img.w, img.h).into_bytes();
-                for px in &img.rgb {
-                    buf.extend_from_slice(px);
-                }
-                let _ = std::fs::write(format!("{dir}/beam-{name}.ppm"), buf);
+                // The palette indices as greys (a PGM).
+                let mut buf = format!("P5\n{} {}\n255\n", img.w, img.h).into_bytes();
+                buf.extend_from_slice(&img.pixels);
+                let _ = std::fs::write(format!("{dir}/beam-{name}.pgm"), buf);
             }
         }
     }
@@ -345,7 +344,7 @@ mod tests {
             let a = b.as_ref().unwrap();
             let (w, h) = (a.render_w, a.render_h);
             let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
-            for px in a.fb.chunks(4).take(w * h) {
+            for px in a.present.rgba().chunks(4).take(w * h) {
                 out.extend_from_slice(&px[..3]);
             }
             let _ = std::fs::write(format!("{dir}/{name}.ppm"), out);
@@ -595,7 +594,7 @@ mod tests {
             (a, b)
         });
         let region_differs = (56..160).any(|y| {
-            (160..320).any(|x| with_overlay.rgb[y * 320 + x] != without_overlay.rgb[y * 320 + x])
+            (160..320).any(|x| with_overlay.pixels[y * 320 + x] != without_overlay.pixels[y * 320 + x])
         });
         assert!(region_differs, "the intermission overlay painted the stats region");
         dump_frame("intermission-e1m1");
@@ -812,7 +811,7 @@ mod tests {
     }
 
     fn pixels_differing(a: &render::Image, b: &render::Image) -> usize {
-        a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count()
+        a.pixels.iter().zip(b.pixels.iter()).filter(|(x, y)| x != y).count()
     }
 
     /// The start map facing north (yaw 90), settled; and the first alias-model

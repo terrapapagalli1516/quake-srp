@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 15] = [
+pub const SETTING_ROWS: [SettingRow; 17] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -204,6 +204,18 @@ pub const SETTING_ROWS: [SettingRow; 15] = [
         cvar: "in_touch",
         label: "        Touch controls",
         help: ["On a touch screen: a stick, look", "by dragging, fire, jump, weapon"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joystick",
+        label: "               Gamepad",
+        help: ["Twin sticks: left moves, right", "looks; RT fires, Start = menu"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "joy_rumble",
+        label: "                Rumble",
+        help: ["The pad, or a phone, shakes when", "you are hit or a big gun fires"],
         kind: RowKind::Toggle,
     },
 ];
@@ -1884,11 +1896,10 @@ fn m_print(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     for (i, b) in text.bytes().enumerate() {
         let x = vx + 8.0 * i as f32;
-        draw_char_scaled(image, conchars, x, vy, b.wrapping_add(128), scale, ox, oy, palette);
+        draw_char_scaled(image, conchars, x, vy, b.wrapping_add(128), scale, ox, oy);
     }
 }
 
@@ -1907,17 +1918,16 @@ fn draw_slider(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
-    draw_char_scaled(image, conchars, x - 8.0, y, SLIDER_LEFT_CHAR, scale, ox, oy, palette);
+    draw_char_scaled(image, conchars, x - 8.0, y, SLIDER_LEFT_CHAR, scale, ox, oy);
     for i in 0..SLIDER_RANGE {
         let cx = x + i as f32 * 8.0;
-        draw_char_scaled(image, conchars, cx, y, SLIDER_MID_CHAR, scale, ox, oy, palette);
+        draw_char_scaled(image, conchars, cx, y, SLIDER_MID_CHAR, scale, ox, oy);
     }
     let right_x = x + SLIDER_RANGE as f32 * 8.0;
-    draw_char_scaled(image, conchars, right_x, y, SLIDER_RIGHT_CHAR, scale, ox, oy, palette);
+    draw_char_scaled(image, conchars, right_x, y, SLIDER_RIGHT_CHAR, scale, ox, oy);
     let knob_x = x + slider_knob_offset(range);
-    draw_char_scaled(image, conchars, knob_x, y, SLIDER_KNOB_CHAR, scale, ox, oy, palette);
+    draw_char_scaled(image, conchars, knob_x, y, SLIDER_KNOB_CHAR, scale, ox, oy);
 }
 
 /// Draw the main menu (or single-player submenu) over `image`, a port of
@@ -1946,9 +1956,8 @@ pub fn draw_menu(
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     clock: MenuClock,
-    palette: &[[u8; 3]; 256],
 ) {
-    draw_menu_inner(image, menu, settings, pics, conchars, clock, palette, true);
+    draw_menu_inner(image, menu, settings, pics, conchars, clock, true);
 }
 
 /// The menu's two clocks, host.c's doubles: `host_time` (the clamped frame
@@ -1973,13 +1982,12 @@ pub fn draw_menu_over_console(
     conchars: Option<&crate::wad::Qpic>,
     conback: Option<&crate::wad::Qpic>,
     clock: MenuClock,
-    palette: &[[u8; 3]; 256],
 ) {
     if !menu.visible {
         return;
     }
-    crate::console::draw_console_background_full(image, conback, conchars, palette);
-    draw_menu_inner(image, menu, settings, pics, conchars, clock, palette, false);
+    crate::console::draw_console_background_full(image, conback, conchars);
+    draw_menu_inner(image, menu, settings, pics, conchars, clock, false);
 }
 
 /// Where the menu sits on a `w x h` framebuffer: framebuffer pixels per menu
@@ -2010,7 +2018,6 @@ fn draw_menu_inner(
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     clock: MenuClock,
-    palette: &[[u8; 3]; 256],
     fade: bool,
 ) {
     let (host_time, realtime) = (clock.host_time, clock.realtime);
@@ -2026,14 +2033,14 @@ fn draw_menu_inner(
     // M_Draw: the game/demo underneath fades first (Draw_FadeScreen); with
     // the console out, draw_menu_over_console draws its background instead.
     if fade {
-        fade_screen(image, palette);
+        fade_screen(image);
     }
 
     // SCR_ModalMessage's screen (scr_drawdialog: Sbar, Draw_FadeScreen,
     // SCR_DrawNotifyString) — the menu itself is not drawn.
     if menu.new_game_confirm {
         if let Some(cc) = conchars {
-            draw_notify_string(image, cc, NEW_GAME_CONFIRM, scale, palette);
+            draw_notify_string(image, cc, NEW_GAME_CONFIRM, scale);
         }
         return;
     }
@@ -2055,7 +2062,7 @@ fn draw_menu_inner(
     // before drawing the plaque.
     match menu.screen {
         MenuScreen::Help => {
-            draw_help_screen(image, menu, pics, scale, ox, oy, palette);
+            draw_help_screen(image, menu, pics, scale, ox, oy);
             return;
         }
         MenuScreen::Quit => {
@@ -2063,21 +2070,21 @@ fn draw_menu_inner(
             if menu.quit_in_menus && menu.quit_prev != MenuScreen::Quit {
                 let mut under = menu.clone();
                 under.screen = menu.quit_prev;
-                draw_menu_inner(image, &under, settings, pics, conchars, clock, palette, false);
+                draw_menu_inner(image, &under, settings, pics, conchars, clock, false);
             }
-            draw_quit_screen(image, menu, pics, conchars, scale, ox, oy, palette);
+            draw_quit_screen(image, menu, pics, conchars, scale, ox, oy);
             return;
         }
         MenuScreen::Load | MenuScreen::Save => {
-            draw_load_save_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+            draw_load_save_screen(image, menu, pics, conchars, scale, ox, oy, cursor);
             return;
         }
         MenuScreen::Keys => {
-            draw_keys_screen(image, menu, &settings.binds, pics, conchars, scale, ox, oy, cursor, palette);
+            draw_keys_screen(image, menu, &settings.binds, pics, conchars, scale, ox, oy, cursor);
             return;
         }
         MenuScreen::Video => {
-            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, cursor);
             return;
         }
         _ => {}
@@ -2086,32 +2093,32 @@ fn draw_menu_inner(
     // The plaque is shared by the Main / SinglePlayer / Multiplayer / Options
     // screens (M_DrawTransPic (16,4)), and the port's settings page of Options.
     if let Some(p) = &pics.qplaque {
-        blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy);
     }
 
     // The Options screen is laid out from text rows (it has no single list pic);
     // the Main / SinglePlayer screens use their pre-baked list graphic. Branch the
     // whole body so each screen draws its own title + rows.
     if menu.screen == MenuScreen::Options {
-        draw_options_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor, palette);
+        draw_options_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor);
         return;
     }
     // The port's settings page: a page of Options (same plaque + title).
     if menu.screen == MenuScreen::Extras {
-        draw_extras_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor, palette);
+        draw_extras_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor);
         return;
     }
 
     // M_Setup_Draw.
     if menu.screen == MenuScreen::Setup {
-        draw_setup_screen(image, menu, pics, conchars, scale, ox, oy, cursor, palette);
+        draw_setup_screen(image, menu, pics, conchars, scale, ox, oy, cursor);
         return;
     }
 
     // M_MultiPlayer_Draw: the C's exact layout, plus the line a netless build
     // shows.
     if menu.screen == MenuScreen::Multiplayer {
-        draw_multiplayer_screen(image, menu, pics, conchars, scale, ox, oy, frame, palette);
+        draw_multiplayer_screen(image, menu, pics, conchars, scale, ox, oy, frame);
         return;
     }
 
@@ -2126,17 +2133,17 @@ fn draw_menu_inner(
     if let Some(t) = title {
         // M_DrawPic ((320 - p->width)/2, 4, p).
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     if let Some(l) = list {
         // M_DrawTransPic (72, 32, ...).
-        blit_qpic_at(image, l, 72.0, PIC_ROW_Y0, scale, ox, oy, palette);
+        blit_qpic_at(image, l, 72.0, PIC_ROW_Y0, scale, ox, oy);
     }
 
     // The animated cursor at (54, 32 + cursor*20).
     if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
         let cy = PIC_ROW_Y0 + menu.cursor() as f32 * PIC_ROW_STEP;
-        blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
+        blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy);
     }
 }
 
@@ -2209,19 +2216,18 @@ fn draw_options_screen(
     ox: f32,
     oy: f32,
     cursor_glyph: u8,
-    palette: &[[u8; 3]; 256],
 ) {
     // The "OPTIONS" title plaque, centered like the other screens' titles.
     if let Some(t) = &pics.p_option {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
 
     if let Some(cc) = conchars {
         // The labels.
         for (i, label) in OPTIONS_LABELS.iter().enumerate() {
             let ry = OPTIONS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
-            m_print(image, cc, OPTIONS_LABEL_X, ry, label, scale, ox, oy, palette);
+            m_print(image, cc, OPTIONS_LABEL_X, ry, label, scale, ox, oy);
         }
 
         // The analog widgets (M_DrawSlider) on the slider rows, each with its
@@ -2230,7 +2236,7 @@ fn draw_options_screen(
         for row in 0..OPTIONS_ITEMS {
             if let Some(frac) = options_slider(row, c) {
                 let ry = OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
-                draw_slider(image, cc, OPTIONS_WIDGET_X, ry, frac, scale, ox, oy, palette);
+                draw_slider(image, cc, OPTIONS_WIDGET_X, ry, frac, scale, ox, oy);
             }
         }
 
@@ -2244,15 +2250,15 @@ fn draw_options_screen(
         for (row, on) in checks {
             let ry = OPTIONS_ROW_Y0 + row as f32 * OPTIONS_ROW_STEP;
             // M_DrawCheckbox: M_Print (x, y, "on" / "off").
-            m_print(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy, palette);
+            m_print(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy);
         }
         // PORT ROW: the profile, printed as a checkbox's value is.
         let ry = OPTIONS_ROW_Y0 + ROW_PROFILE as f32 * OPTIONS_ROW_STEP;
-        m_print(image, cc, OPTIONS_WIDGET_X, ry, settings.profile.name(), scale, ox, oy, palette);
+        m_print(image, cc, OPTIONS_WIDGET_X, ry, settings.profile.name(), scale, ox, oy);
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
         let cy = OPTIONS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
-        draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy);
     }
 }
 
@@ -2260,13 +2266,21 @@ fn draw_options_screen(
 /// px apart, the labels at x=16, the values at x=220, the cursor at x=200.
 /// Under them the notes, from x=[`EXTRAS_NOTE_X`] (right of the plaque,
 /// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
-/// the list and the highlighted row's help lines under it, at most
-/// [`EXTRAS_NOTE_COLS`] columns.
+/// the list — right under it once the rows leave no room for the gap in the
+/// 200-line screen (17 rows do not) — and the highlighted row's help lines
+/// right under the header, at most [`EXTRAS_NOTE_COLS`] columns.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 const EXTRAS_NOTE_X: f32 = 64.0;
 const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
-const EXTRAS_HEADER_Y: f32 = EXTRAS_ROW_Y0 + (SETTING_ROWS.len() + 1) as f32 * OPTIONS_ROW_STEP;
-const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + 2.0 * OPTIONS_ROW_STEP;
+const EXTRAS_LIST_END: f32 = EXTRAS_ROW_Y0 + SETTING_ROWS.len() as f32 * OPTIONS_ROW_STEP;
+/// The header and the three help lines.
+const EXTRAS_NOTES_H: f32 = 4.0 * OPTIONS_ROW_STEP;
+const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTES_H <= 200.0 {
+    EXTRAS_LIST_END + OPTIONS_ROW_STEP
+} else {
+    EXTRAS_LIST_END
+};
+const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + OPTIONS_ROW_STEP;
 /// The page's header (`M_PrintWhite`): what these rows are.
 const EXTRAS_HEADER: &str = "Not in id's Quake";
 
@@ -2288,26 +2302,25 @@ fn draw_extras_screen(
     ox: f32,
     oy: f32,
     cursor_glyph: u8,
-    palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.p_option {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     let Some(cc) = conchars else { return };
     for (i, row) in SETTING_ROWS.iter().enumerate() {
         let y = EXTRAS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
-        m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy, palette);
-        m_print(image, cc, OPTIONS_WIDGET_X, y, &row.value(settings), scale, ox, oy, palette);
+        m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy);
+        m_print(image, cc, OPTIONS_WIDGET_X, y, &row.value(settings), scale, ox, oy);
     }
     let cy = EXTRAS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
-    draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy, palette);
-    draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy, palette);
+    draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy);
+    draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy);
     if let Some(row) = SETTING_ROWS.get(menu.cursor()) {
         for (i, line) in extras_help_lines(row).iter().enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
             let line = &line[..line.len().min(EXTRAS_NOTE_COLS)];
-            m_print(image, cc, EXTRAS_NOTE_X, y, line, scale, ox, oy, palette);
+            m_print(image, cc, EXTRAS_NOTE_X, y, line, scale, ox, oy);
         }
     }
 }
@@ -2334,7 +2347,6 @@ fn draw_load_save_screen(
     ox: f32,
     oy: f32,
     cursor_glyph: u8,
-    palette: &[[u8; 3]; 256],
 ) {
     let title = if menu.screen == MenuScreen::Save {
         &pics.p_save
@@ -2343,17 +2355,17 @@ fn draw_load_save_screen(
     };
     if let Some(t) = title {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     if let Some(cc) = conchars {
         for i in 0..MAX_SAVEGAMES {
             let ry = SLOT_ROW_Y0 + i as f32 * TEXT_ROW_STEP;
             let text = menu.save_comment(i);
             let row = if text.is_empty() { UNUSED_SLOT } else { text };
-            m_print(image, cc, 16.0, ry, row, scale, ox, oy, palette);
+            m_print(image, cc, 16.0, ry, row, scale, ox, oy);
         }
         let cy = SLOT_ROW_Y0 + menu.cursor() as f32 * TEXT_ROW_STEP;
-        draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy);
     }
 }
 
@@ -2372,24 +2384,23 @@ fn draw_multiplayer_screen(
     ox: f32,
     oy: f32,
     frame: usize,
-    palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.p_multi {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     if let Some(l) = &pics.mp_menu {
-        blit_qpic_at(image, l, 72.0, PIC_ROW_Y0, scale, ox, oy, palette);
+        blit_qpic_at(image, l, 72.0, PIC_ROW_Y0, scale, ox, oy);
     }
     if let Some(dot) = pics.menudot.get(frame).and_then(|d| d.as_ref()) {
         let cy = PIC_ROW_Y0 + menu.cursor() as f32 * PIC_ROW_STEP;
-        blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy, palette);
+        blit_qpic_at(image, dot, 54.0, cy, scale, ox, oy);
     }
     if let Some(cc) = conchars {
         // M_PrintWhite ((320/2) - ((27*8)/2), 148, "No Communications Available").
         let line = "No Communications Available";
         let cx = MENU_VIRT_W * 0.5 - (line.len() as f32 * 8.0) * 0.5;
-        draw_string_scaled(image, cc, cx, 148.0, line, scale, ox, oy, palette);
+        draw_string_scaled(image, cc, cx, 148.0, line, scale, ox, oy);
     }
 }
 
@@ -2425,44 +2436,43 @@ fn draw_setup_screen(
     ox: f32,
     oy: f32,
     cursor_glyph: u8,
-    palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.p_multi {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     let s = &menu.setup;
     if let Some(cc) = conchars {
-        m_print(image, cc, 64.0, 40.0, "Hostname", scale, ox, oy, palette);
+        m_print(image, cc, 64.0, 40.0, "Hostname", scale, ox, oy);
     }
-    draw_text_box(image, pics, 160, 32, 16, 1, scale, ox, oy, palette);
+    draw_text_box(image, pics, 160, 32, 16, 1, scale, ox, oy);
     if let Some(cc) = conchars {
-        m_print(image, cc, 168.0, 40.0, &s.hostname, scale, ox, oy, palette);
-        m_print(image, cc, 64.0, 56.0, "Your name", scale, ox, oy, palette);
+        m_print(image, cc, 168.0, 40.0, &s.hostname, scale, ox, oy);
+        m_print(image, cc, 64.0, 56.0, "Your name", scale, ox, oy);
     }
-    draw_text_box(image, pics, 160, 48, 16, 1, scale, ox, oy, palette);
+    draw_text_box(image, pics, 160, 48, 16, 1, scale, ox, oy);
     if let Some(cc) = conchars {
-        m_print(image, cc, 168.0, 56.0, &s.myname, scale, ox, oy, palette);
-        m_print(image, cc, 64.0, 80.0, "Shirt color", scale, ox, oy, palette);
-        m_print(image, cc, 64.0, 104.0, "Pants color", scale, ox, oy, palette);
+        m_print(image, cc, 168.0, 56.0, &s.myname, scale, ox, oy);
+        m_print(image, cc, 64.0, 80.0, "Shirt color", scale, ox, oy);
+        m_print(image, cc, 64.0, 104.0, "Pants color", scale, ox, oy);
     }
-    draw_text_box(image, pics, 64, 140 - 8, 14, 1, scale, ox, oy, palette);
+    draw_text_box(image, pics, 64, 140 - 8, 14, 1, scale, ox, oy);
     if let Some(cc) = conchars {
-        m_print(image, cc, 72.0, 140.0, "Accept Changes", scale, ox, oy, palette);
+        m_print(image, cc, 72.0, 140.0, "Accept Changes", scale, ox, oy);
     }
     if let Some(p) = &pics.bigbox {
-        blit_qpic_at(image, p, 160.0, 64.0, scale, ox, oy, palette);
+        blit_qpic_at(image, p, 160.0, 64.0, scale, ox, oy);
     }
     if let Some(p) = &pics.menuplyr {
         let t = build_translation_table(s.top.max(0) as usize * 16, s.bottom.max(0) as usize * 16);
         let data = p.data.iter().map(|&b| t[b as usize]).collect();
         let translated = crate::wad::Qpic { width: p.width, height: p.height, data };
-        blit_qpic_at(image, &translated, 172.0, 72.0, scale, ox, oy, palette);
+        blit_qpic_at(image, &translated, 172.0, 72.0, scale, ox, oy);
     }
     if let Some(cc) = conchars {
         let row = menu.cursor().min(NUM_SETUP_CMDS - 1);
         let y = SETUP_CURSOR_TABLE[row];
-        draw_char_scaled(image, cc, 56.0, y, cursor_glyph, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, 56.0, y, cursor_glyph, scale, ox, oy);
         // 10 + ((int)(realtime*4)&1): the same blink as the 12/13 cursor.
         let text_cursor = cursor_glyph - OPTIONS_CURSOR_BASE + 10;
         let field = match row {
@@ -2472,7 +2482,7 @@ fn draw_setup_screen(
         };
         if let Some(f) = field {
             let x = 168.0 + 8.0 * f.len() as f32;
-            draw_char_scaled(image, cc, x, y, text_cursor, scale, ox, oy, palette);
+            draw_char_scaled(image, cc, x, y, text_cursor, scale, ox, oy);
         }
     }
 }
@@ -2494,40 +2504,37 @@ fn draw_keys_screen(
     ox: f32,
     oy: f32,
     cursor_glyph: u8,
-    palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.ttl_cstm {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     let Some(cc) = conchars else { return };
     // Every string on this screen is M_Print (bronze).
     if menu.bind_grabbing() {
         m_print(
             image, cc, 12.0, 32.0, "Press a key or button for this action", scale, ox, oy,
-            palette,
         );
     } else {
         m_print(
-            image, cc, 18.0, 32.0, "Enter to change, backspace to clear", scale, ox, oy, palette,
+            image, cc, 18.0, 32.0, "Enter to change, backspace to clear", scale, ox, oy,
         );
     }
     for (i, (_, label)) in BINDNAMES.iter().enumerate() {
         let y = KEYS_ROW_Y0 + TEXT_ROW_STEP * i as f32;
-        m_print(image, cc, 16.0, y, label, scale, ox, oy, palette);
+        m_print(image, cc, 16.0, y, label, scale, ox, oy);
         let keys = binds.find_keys_for_command(i);
         match keys[0] {
-            None => m_print(image, cc, 140.0, y, "???", scale, ox, oy, palette),
+            None => m_print(image, cc, 140.0, y, "???", scale, ox, oy),
             Some(k0) => {
                 let name = keynum_to_string(k0);
-                m_print(image, cc, 140.0, y, &name, scale, ox, oy, palette);
+                m_print(image, cc, 140.0, y, &name, scale, ox, oy);
                 if let Some(k1) = keys[1] {
                     // M_Print (140 + x + 8, y, "or"); M_Print (140 + x + 32, ...).
                     let x = name.len() as f32 * 8.0;
-                    m_print(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy, palette);
+                    m_print(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy);
                     m_print(
                         image, cc, 140.0 + x + 32.0, y, &keynum_to_string(k1), scale, ox, oy,
-                        palette,
                     );
                 }
             }
@@ -2536,10 +2543,10 @@ fn draw_keys_screen(
     let cy = KEYS_ROW_Y0 + menu.cursor() as f32 * TEXT_ROW_STEP;
     if menu.bind_grabbing() {
         // M_DrawCharacter (130, 48 + keys_cursor*8, '=').
-        draw_char_scaled(image, cc, 130.0, cy, b'=', scale, ox, oy, palette);
+        draw_char_scaled(image, cc, 130.0, cy, b'=', scale, ox, oy);
     } else {
         // M_DrawCharacter (130, 48 + keys_cursor*8, 12+((int)(realtime*4)&1)).
-        draw_char_scaled(image, cc, 130.0, cy, cursor_glyph, scale, ox, oy, palette);
+        draw_char_scaled(image, cc, 130.0, cy, cursor_glyph, scale, ox, oy);
     }
 }
 
@@ -2559,11 +2566,10 @@ fn draw_video_screen(
     ox: f32,
     oy: f32,
     cursor_glyph: u8,
-    palette: &[[u8; 3]; 256],
 ) {
     if let Some(t) = &pics.vidmodes {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
-        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy, palette);
+        blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     let Some(cc) = conchars else { return };
     // VID_MenuDraw prints every mode with M_Print (bronze) except the current
@@ -2573,18 +2579,18 @@ fn draw_video_screen(
         let y = VIDEO_ROW_Y0 + TEXT_ROW_STEP * i as f32;
         let row = format!("{w}x{h}");
         if (w, h) == current {
-            draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy, palette);
+            draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy);
         } else {
-            m_print(image, cc, 16.0, y, &row, scale, ox, oy, palette);
+            m_print(image, cc, 16.0, y, &row, scale, ox, oy);
         }
     }
     let cy = VIDEO_ROW_Y0 + menu.cursor() as f32 * TEXT_ROW_STEP;
-    draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy, palette);
+    draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy);
     // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
     // single column's foot.
     let hints_y = VIDEO_ROW_Y0 + RESOLUTION_PRESETS.len() as f32 * TEXT_ROW_STEP + 16.0;
-    m_print(image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy, palette);
-    m_print(image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy, palette);
+    m_print(image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy);
+    m_print(image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy);
 }
 
 /// Draw the Help/Ordering screen (`M_Help_Draw`): blit the current page pic
@@ -2597,10 +2603,9 @@ fn draw_help_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     if let Some(p) = pics.help.get(menu.help_page()).and_then(|p| p.as_ref()) {
-        blit_qpic_at(image, p, 0.0, 0.0, scale, ox, oy, palette);
+        blit_qpic_at(image, p, 0.0, 0.0, scale, ox, oy);
     }
 }
 
@@ -2615,7 +2620,6 @@ fn draw_notify_string(
     conchars: &crate::wad::Qpic,
     text: &str,
     scale: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     // vid.width / vid.height of the 2-D screen: the text is placed on it, not
     // on the menu's centred 320 columns.
@@ -2628,7 +2632,7 @@ fn draw_notify_string(
     for line in lines {
         let line = &line[..line.len().min(40)];
         let x = ((sc.w - line.len() as i32 * 8) / 2) as f32;
-        draw_string_scaled(image, conchars, x, y, line, scale, 0.0, 0.0, palette);
+        draw_string_scaled(image, conchars, x, y, line, scale, 0.0, 0.0);
         y += 8.0;
     }
 }
@@ -2649,11 +2653,10 @@ fn draw_text_box(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
     let mut put = |i: usize, cx: i32, cy: i32| {
         if let Some(p) = &pics.textbox[i] {
-            blit_qpic_at(image, p, cx as f32, cy as f32, scale, ox, oy, palette);
+            blit_qpic_at(image, p, cx as f32, cy as f32, scale, ox, oy);
         }
     };
     // left side
@@ -2701,12 +2704,11 @@ fn draw_quit_screen(
     scale: f32,
     ox: f32,
     oy: f32,
-    palette: &[[u8; 3]; 256],
 ) {
-    draw_text_box(image, pics, 56, 76, 24, 4, scale, ox, oy, palette);
+    draw_text_box(image, pics, 56, 76, 24, 4, scale, ox, oy);
     if let Some(cc) = conchars {
         for (i, line) in QUIT_MESSAGES[menu.quit_msg & 7].iter().enumerate() {
-            m_print(image, cc, 64.0, 84.0 + 8.0 * i as f32, line, scale, ox, oy, palette);
+            m_print(image, cc, 64.0, 84.0 + 8.0 * i as f32, line, scale, ox, oy);
         }
     }
 }
@@ -2728,7 +2730,7 @@ mod tests {
         MenuClock { host_time, realtime }
     }
     use crate::keys::{K_CTRL, K_MOUSE1, K_SHIFT, K_SPACE, K_UPARROW};
-    use crate::render::fixtures::{ramp_palette, solid_pic};
+    use crate::render::fixtures::solid_pic;
     use crate::wad::Qpic;
 
     /// A test conchars atlas where every glyph texel is the lit index 3 (except
@@ -2917,7 +2919,6 @@ mod tests {
     /// (172, 72); the text cursor follows the name on its row.
     #[test]
     fn setup_draws_the_translated_player() {
-        let pal = ramp_palette();
         let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         s.cvars.set_color(3, 9);
@@ -2931,16 +2932,16 @@ mod tests {
             menuplyr: Some(Qpic { width: 4, height: 1, data }),
             ..Default::default()
         };
-        let mut img = Image::new(320, 200, [1, 2, 3]);
-        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
-        let at = |x: usize| img.rgb[72 * 320 + x];
-        assert_eq!(at(172), pal[48], "shirt texel through row 3");
-        assert_eq!(at(173), pal[159], "pants texel through row 9, backwards");
-        assert_eq!(at(175), pal[7], "other colours untouched");
+        let mut img = Image::new(320, 200, 1);
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0));
+        let at = |x: usize| img.pixels[72 * 320 + x];
+        assert_eq!(at(172), 48, "shirt texel through row 3");
+        assert_eq!(at(173), 159, "pants texel through row 9, backwards");
+        assert_eq!(at(175), 7, "other colours untouched");
         let faded = {
-            let mut i = Image::new(320, 200, [1, 2, 3]);
-            fade_screen(&mut i, &pal);
-            i.rgb[72 * 320 + 174]
+            let mut i = Image::new(320, 200, 1);
+            fade_screen(&mut i);
+            i.pixels[72 * 320 + 174]
         };
         assert_eq!(at(174), faded, "255 is transparent");
     }
@@ -3245,24 +3246,23 @@ mod tests {
 
     #[test]
     fn draw_menu_skips_missing_pics_without_panic() {
-        let pal = ramp_palette();
-        let mut img = Image::new(320, 200, [9, 9, 9]);
-        let mut faded = Image::new(320, 200, [9, 9, 9]);
-        fade_screen(&mut faded, &pal);
+        let mut img = Image::new(320, 200, 9);
+        let mut faded = Image::new(320, 200, 9);
+        fade_screen(&mut faded);
         let (mut m, s) = (Menu::new(), Settings::default());
         m.open();
         // All pics absent: only M_Draw's Draw_FadeScreen shows, and no panic.
         let pics = MenuPics::default();
-        draw_menu(&mut img, &m, &s, &pics, None, clock(0.3, 0.0), &pal);
-        assert_eq!(img.rgb, faded.rgb, "an all-empty MenuPics draws only the fade");
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.3, 0.0));
+        assert_eq!(img.pixels, faded.pixels, "an all-empty MenuPics draws only the fade");
 
         // A hidden menu never draws (not even the fade).
         m.close();
-        let before = img.rgb.clone();
+        let before = img.pixels.clone();
         let solid = solid_pic(64, 16, 7);
         let pics2 = MenuPics { mainmenu: Some(solid), ..Default::default() };
-        draw_menu(&mut img, &m, &s, &pics2, None, clock(0.3, 0.0), &pal);
-        assert_eq!(img.rgb, before, "a hidden menu must not draw");
+        draw_menu(&mut img, &m, &s, &pics2, None, clock(0.3, 0.0));
+        assert_eq!(img.pixels, before, "a hidden menu must not draw");
     }
 
     #[test]
@@ -3271,7 +3271,6 @@ mod tests {
         // the plain cell. A conchars whose bronze 'S' (211) is index 5 and
         // plain 'S' (83) index 6 tells them apart on the Options "Screen size"
         // label and on the Video list.
-        let pal = ramp_palette();
         let mut data = vec![0u8; 128 * 128];
         let mut fill = |cell: usize, idx: u8| {
             let (cx, cy) = ((cell % 16) * 8, (cell / 16) * 8);
@@ -3290,27 +3289,26 @@ mod tests {
         m.open();
         m.set_cursor(2);
         m.select(&mut s); // -> Options
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0), &pal);
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
         // "           Screen size" at (16, 56): the 'S' is the 12th character.
         let s_px = (56 + 3) * 320 + 16 + 11 * 8 + 3;
-        assert_eq!(img.rgb[s_px], pal[5], "Options labels are M_Print (bronze)");
+        assert_eq!(img.pixels[s_px], 5, "Options labels are M_Print (bronze)");
         // Video Options: the current mode white, the others bronze.
         m.sync_resolution(640, 400);
         m.set_cursor(ROW_VIDEO);
         m.select(&mut s);
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0), &pal);
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
         let row_px = |row: usize| (36 + row * 8 + 3) * 320 + 16 + 3;
-        assert_eq!(img.rgb[row_px(2)], pal[6], "640x400 (current) is M_PrintWhite");
-        assert_eq!(img.rgb[row_px(0)], pal[5], "320x200 is M_Print");
-        assert_eq!(img.rgb[row_px(6)], pal[5], "1280x800 is M_Print");
+        assert_eq!(img.pixels[row_px(2)], 6, "640x400 (current) is M_PrintWhite");
+        assert_eq!(img.pixels[row_px(0)], 5, "320x200 is M_Print");
+        assert_eq!(img.pixels[row_px(6)], 5, "1280x800 is M_Print");
     }
 
     #[test]
     fn draw_menu_draws_present_pics_over_background() {
-        let pal = ramp_palette();
-        let mut img = Image::new(320, 200, [9, 9, 9]);
+        let mut img = Image::new(320, 200, 9);
         let (mut m, s) = (Menu::new(), Settings::default());
         m.open();
         // A present mainmenu graphic (opaque index 7 -> a non-background colour)
@@ -3319,18 +3317,17 @@ mod tests {
             mainmenu: Some(solid_pic(120, 80, 7)),
             ..Default::default()
         };
-        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0));
         // At scale 1 on the 320x200 frame, virtual (72,32) maps to pixel (72,32).
         let idx = 32 * img.w + 72;
-        assert_eq!(img.rgb[idx], pal[7], "the mainmenu pic must paint at (72,32)");
-        assert_ne!(img.rgb[idx], [9, 9, 9], "the pixel must differ from the background");
+        assert_eq!(img.pixels[idx], 7, "the mainmenu pic must paint at (72,32)");
+        assert_ne!(img.pixels[idx], 9, "the pixel must differ from the background");
         // A corner well outside the pic stays background.
-        assert_eq!(img.rgb[0], [9, 9, 9]);
+        assert_eq!(img.pixels[0], 9);
     }
 
     #[test]
     fn draw_menu_cursor_frame_animates_with_time() {
-        let pal = ramp_palette();
         let (mut m, s) = (Menu::new(), Settings::default());
         m.open();
         // Distinct colours per cursor frame so we can detect which frame drew.
@@ -3342,18 +3339,18 @@ mod tests {
 
         // The cursor sits at (54, 32). frame = (time*10) % 6.
         let cursor_idx = 32 * 320 + 54;
-        let mut img0 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img0, &m, &s, &pics, None, clock(0.0, 0.0), &pal); // frame 0 -> index 10
-        assert_eq!(img0.rgb[cursor_idx], pal[10]);
+        let mut img0 = Image::new(320, 200, 0);
+        draw_menu(&mut img0, &m, &s, &pics, None, clock(0.0, 0.0)); // frame 0 -> index 10
+        assert_eq!(img0.pixels[cursor_idx], 10);
 
-        let mut img1 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img1, &m, &s, &pics, None, clock(0.35, 0.0), &pal); // (3.5)->3 -> index 13
-        assert_eq!(img1.rgb[cursor_idx], pal[13]);
+        let mut img1 = Image::new(320, 200, 0);
+        draw_menu(&mut img1, &m, &s, &pics, None, clock(0.35, 0.0)); // (3.5)->3 -> index 13
+        assert_eq!(img1.pixels[cursor_idx], 13);
         // The spinner runs on host_time ONLY: realtime moving on (the flashing
         // cursors' clock) leaves the menudot frame alone.
-        let mut img2 = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img2, &m, &s, &pics, None, clock(0.35, 7.3), &pal);
-        assert_eq!(img2.rgb[cursor_idx], pal[13], "menudot ignores realtime");
+        let mut img2 = Image::new(320, 200, 0);
+        draw_menu(&mut img2, &m, &s, &pics, None, clock(0.35, 7.3));
+        assert_eq!(img2.pixels[cursor_idx], 13, "menudot ignores realtime");
     }
 
     #[test]
@@ -3392,7 +3389,6 @@ mod tests {
         // cell 12 is blank (like id's), cursor on the Options top row at
         // (200, 32). host_time is held where the OLD parity code would have
         // shown the arrow (frame 1 = 0.1 s); only realtime decides.
-        let pal = ramp_palette();
         let mut data = vec![0u8; 128 * 128];
         for y in 0..8 {
             for x in 0..8 {
@@ -3405,12 +3401,12 @@ mod tests {
         m.set_cursor(2);
         m.select(&mut s); // -> Options, cursor row 0
         let px = 32 * 320 + 200;
-        let mut off = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut off, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.1, 0.1), &pal);
-        assert_eq!(off.rgb[px], [0, 0, 0], "realtime 0.1 s: cursor phase blank");
-        let mut on = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut on, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.3), &pal);
-        assert_eq!(on.rgb[px], pal[3], "realtime 0.3 s: the arrow shows");
+        let mut off = Image::new(320, 200, 0);
+        draw_menu(&mut off, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.1, 0.1));
+        assert_eq!(off.pixels[px], 0, "realtime 0.1 s: cursor phase blank");
+        let mut on = Image::new(320, 200, 0);
+        draw_menu(&mut on, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.3));
+        assert_eq!(on.pixels[px], 3, "realtime 0.3 s: the arrow shows");
     }
 
     // -- options menu (MenuScreen::Options + adjust + draw) -----------------
@@ -3488,7 +3484,6 @@ mod tests {
     fn options_screen_size_slider_tracks_viewsize() {
         // M_Options_Draw: r = (scr_viewsize - 30) / (120 - 30); the knob (glyph
         // 131) sits at 220 + 72*r on the Screen-size row (y = 56).
-        let pal = ramp_palette();
         let mut data = vec![0u8; 128 * 128];
         for y in 0..8 {
             for x in 0..8 {
@@ -3501,9 +3496,9 @@ mod tests {
         m.set_cursor(2);
         m.select(&mut s); // -> Options
         let knob_x = |m: &Menu, s: &Settings| {
-            let mut img = Image::new(320, 200, [0, 0, 0]);
-            draw_menu(&mut img, m, s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0), &pal);
-            (0..320).find(|&x| img.rgb[56 * 320 + x] == pal[3]).expect("knob drawn")
+            let mut img = Image::new(320, 200, 0);
+            draw_menu(&mut img, m, s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
+            (0..320).find(|&x| img.pixels[56 * 320 + x] == 3).expect("knob drawn")
         };
         assert_eq!(knob_x(&m, &s), 276, "viewsize 100: r = 70/90 -> 220 + 56");
         s.cvars.set_viewsize(30.0);
@@ -3587,7 +3582,6 @@ mod tests {
 
     #[test]
     fn draw_menu_options_screen_draws_without_panic() {
-        let pal = ramp_palette();
         // A conchars atlas where every glyph texel is the lit index 3 (except the
         // byte-0 cell), so any drawn label/value paints index-3 pixels.
         let mut data = vec![3u8; 128 * 128];
@@ -3611,46 +3605,46 @@ mod tests {
             ..Default::default()
         };
 
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         let mut img = Image::new(320, 200, bg);
-        let before = img.rgb.clone();
-        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
+        let before = img.pixels.clone();
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0));
         // The Options screen must change pixels over the known background.
-        assert_ne!(img.rgb, before, "the Options screen must draw something");
+        assert_ne!(img.pixels, before, "the Options screen must draw something");
         // The title plaque (index 5) paints centered near the top: at virtual
         // (100, 4) with a 120-wide pic centered ((320-120)/2 = 100).
         let title_idx = 4 * img.w + 100;
-        assert_eq!(img.rgb[title_idx], pal[5], "the OPTIONS title must paint at the top");
+        assert_eq!(img.pixels[title_idx], 5, "the OPTIONS title must paint at the top");
         // The flashing cursor (conchars glyph 12/13, all-lit in this atlas -> index
         // 3) sits at virtual (200, 32) on the top row.
         let cursor_idx = 32 * img.w + 200;
-        assert_eq!(img.rgb[cursor_idx], pal[3], "the cursor glyph must paint at x=200 on the top row");
+        assert_eq!(img.pixels[cursor_idx], 3, "the cursor glyph must paint at x=200 on the top row");
         // A label glyph (index 3) paints on the first row at the label column x=16
         // (the "Customize controls" row is right-justified, so its first non-space
         // glyph lands a few cells in; check at x=48 which is inside the text).
         let label_idx = 32 * img.w + 48;
-        assert_eq!(img.rgb[label_idx], pal[3], "the first Options label must paint");
+        assert_eq!(img.pixels[label_idx], 3, "the first Options label must paint");
         // A slider on the Screen-size row (row 3, y=32+3*8=56): glyphs at x>=212
         // (the left cap is at 220-8=212). Check the left cap pixel.
         let slider_idx = 56 * img.w + 212;
-        assert_eq!(img.rgb[slider_idx], pal[3], "the Screen-size slider must paint at y=56");
+        assert_eq!(img.pixels[slider_idx], 3, "the Screen-size slider must paint at y=56");
 
         // The SAME screen also renders correctly at a LARGER framebuffer (640x400,
         // scale 2): it must not panic and must draw the title + cursor scaled.
         let mut big = Image::new(640, 400, bg);
-        let big_before = big.rgb.clone();
-        draw_menu(&mut big, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
-        assert_ne!(big.rgb, big_before, "the Options screen draws at 640x400 too");
+        let big_before = big.pixels.clone();
+        draw_menu(&mut big, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0));
+        assert_ne!(big.pixels, big_before, "the Options screen draws at 640x400 too");
         // At scale 2 the cursor's virtual (200,32) maps to pixel (400,64).
         let big_cursor_idx = 64 * big.w + 400;
-        assert_eq!(big.rgb[big_cursor_idx], pal[3], "cursor scales to (400,64) at 640x400");
+        assert_eq!(big.pixels[big_cursor_idx], 3, "cursor scales to (400,64) at 640x400");
 
         // Missing conchars leaves labels/widgets/cursor blank but still draws the
         // title; no panic.
         let mut img2 = Image::new(320, 200, bg);
-        draw_menu(&mut img2, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
-        assert_eq!(img2.rgb[title_idx], pal[5], "title still draws without conchars");
-        assert_eq!(img2.rgb[cursor_idx], bg, "cursor needs conchars (blank without it)");
+        draw_menu(&mut img2, &m, &s, &pics, None, clock(0.0, 0.0));
+        assert_eq!(img2.pixels[title_idx], 5, "title still draws without conchars");
+        assert_eq!(img2.pixels[cursor_idx], bg, "cursor needs conchars (blank without it)");
     }
 
     // -- new Options widgets / Help / Quit pure helpers ----------------------
@@ -3930,8 +3924,14 @@ mod tests {
             }
         }
         // Every departure has its row, but Always Run's two speeds (id's own
-        // Options row).
-        for c in cvar::CVARS.iter().filter(|c| c.departure && !c.name.starts_with("cl_") || c.name == "cl_jumpswim") {
+        // Options row) and the pad's layout under the Gamepad row (id's
+        // advanced configuration and the port's stick shaping and menu keys,
+        // tuned on the console as id's joy* were).
+        let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
+        let listed = |c: &&cvar::Cvar| {
+            c.departure && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim"
+        };
+        for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);
         }
         assert_eq!(MenuScreen::Extras.item_count(), SETTING_ROWS.len());
@@ -3942,7 +3942,6 @@ mod tests {
     fn the_settings_page_draws_in_the_options_idiom() {
         // Bronze (M_Print, c+128) is index 5, white (M_PrintWhite) index 6;
         // glyph 12 blank, 13 the cursor (index 7), as in id's conchars.
-        let pal = ramp_palette();
         let mut data = vec![0u8; 128 * 128];
         let mut fill = |cell: usize, idx: u8| {
             let (cx, cy) = ((cell % 16) * 8, (cell / 16) * 8);
@@ -3963,7 +3962,7 @@ mod tests {
             p_option: Some(solid_pic(120, 24, 8)),
             ..Default::default()
         };
-        let px = |img: &Image, x: usize, y: usize| img.rgb[(y + 3) * 320 + x + 3];
+        let px = |img: &Image, x: usize, y: usize| img.pixels[(y + 3) * 320 + x + 3];
 
         // Options: the port's row is the 14th, at y=136 (the C's _WIN32 row),
         // right-justified with id's labels ("Classic / 2026" ends at x=184),
@@ -3972,58 +3971,58 @@ mod tests {
         m.open();
         m.set_cursor(2);
         m.select(&mut s);
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.0), &pal);
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.0));
         assert_eq!(OPTIONS_LABELS[ROW_PROFILE].len(), OPTIONS_LABELS[ROW_VIDEO].len());
-        assert_eq!(px(&img, 16 + 8 * 8, 136), pal[5], "'C' of Classic / 2026, bronze, y=136");
-        assert_eq!(px(&img, 16 + 21 * 8, 136), pal[5], "its '6' in the last label column");
-        assert_eq!(px(&img, 220 + 6 * 8, 136), pal[5], "\"classic\" at x=220");
+        assert_eq!(px(&img, 16 + 8 * 8, 136), 5, "'C' of Classic / 2026, bronze, y=136");
+        assert_eq!(px(&img, 16 + 21 * 8, 136), 5, "its '6' in the last label column");
+        assert_eq!(px(&img, 220 + 6 * 8, 136), 5, "\"classic\" at x=220");
 
         // The settings page, as M_Options_Draw: plaque + OPTIONS title, the
         // rows from y=32 (bronze labels, values at x=220), the cursor at x=200
         // while the 4 Hz blink shows it; under them, right of the plaque, the
-        // white header a row below the list and the row's help lines under it,
+        // white header a row below the list and the row's help lines right under it,
         // at x=64.
         m.set_cursor(ROW_PROFILE);
         m.select(&mut s);
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
-        assert_eq!(img.rgb[4 * 320 + 16], pal[9], "qplaque at (16,4)");
-        assert_eq!(img.rgb[4 * 320 + 100], pal[8], "the OPTIONS title centred at y=4");
-        let header_y = 32 + (SETTING_ROWS.len() + 1) * 8;
-        assert_eq!(px(&img, 64, header_y), pal[6], "the header is M_PrintWhite");
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
+        assert_eq!(img.pixels[4 * 320 + 16], 9, "qplaque at (16,4)");
+        assert_eq!(img.pixels[4 * 320 + 100], 8, "the OPTIONS title centred at y=4");
+        let header_y = EXTRAS_HEADER_Y as usize;
+        assert_eq!(px(&img, 64, header_y), 6, "the header is M_PrintWhite");
         for (i, row) in SETTING_ROWS.iter().enumerate() {
             let y = 32 + i * 8;
             let first = row.label.bytes().position(|b| b != b' ').unwrap();
-            assert_eq!(px(&img, 16 + first * 8, y), pal[5], "row {i} label bronze");
-            assert_eq!(px(&img, 220, y), pal[5], "row {i}'s value at x=220");
+            assert_eq!(px(&img, 16 + first * 8, y), 5, "row {i} label bronze");
+            assert_eq!(px(&img, 220, y), 5, "row {i}'s value at x=220");
         }
-        assert_eq!(px(&img, 200, 32), pal[7], "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 0's help, bronze, under the header");
+        assert_eq!(px(&img, 200, 32), 7, "the cursor on row 0 at x=200 (realtime 0.3: on)");
+        assert_eq!(px(&img, 64, header_y + 8), 5, "row 0's help, bronze, under the header");
         // Nothing but the plaque in its columns: every note starts right of it.
         for y in 30..200 {
             for x in 16..48 {
-                assert_eq!(img.rgb[y * 320 + x], pal[if y < 148 { 9 } else { 0 }], "({x},{y})");
+                assert_eq!(img.pixels[y * 320 + x], if y < 148 { 9 } else { 0 }, "({x},{y})");
             }
         }
         // realtime 0.1: the blink is off (glyph 12, blank).
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.1), &pal);
-        assert_eq!(px(&img, 200, 32), pal[0], "the cursor blinks");
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.1));
+        assert_eq!(px(&img, 200, 32), 0, "the cursor blinks");
         // "on" replaces "off" once toggled; the help follows the cursor.
         m.move_cursor(1);
         m.adjust(1, &mut s);
         m.move_cursor(1);
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3), &pal);
-        assert_eq!(px(&img, 220 + 16, 40), pal[0], "\"on\" is two characters");
-        assert_eq!(px(&img, 220 + 16, 48), pal[5], "\"off\" is three");
-        assert_eq!(px(&img, 64, header_y + 16), pal[5], "row 2's help once the cursor moves");
-        assert_eq!(px(&img, 200, 48), pal[7], "the cursor on row 2");
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
+        assert_eq!(px(&img, 220 + 16, 40), 0, "\"on\" is two characters");
+        assert_eq!(px(&img, 220 + 16, 48), 5, "\"off\" is three");
+        assert_eq!(px(&img, 64, header_y + 8), 5, "row 2's help once the cursor moves");
+        assert_eq!(px(&img, 200, 48), 7, "the cursor on row 2");
         // Without conchars only the pics draw; nothing panics.
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.3), &pal);
-        assert_eq!(img.rgb[4 * 320 + 100], pal[8]);
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.3));
+        assert_eq!(img.pixels[4 * 320 + 100], 8);
     }
 
     #[test]
@@ -4416,7 +4415,6 @@ mod tests {
         // Every new screen draws with NO pics and no conchars (worst case), and
         // with conchars only (the text paths) — nothing may panic, and the text
         // screens must put ink on the frame.
-        let pal = ramp_palette();
         let pics = MenuPics::default();
         let conchars = test_conchars();
         let (mut m, s) = (Menu::new(), Settings::default());
@@ -4430,11 +4428,11 @@ mod tests {
         ] {
             m.screen = screen;
             m.set_cursor(cursor);
-            let mut img = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img, &m, &s, &pics, None, clock(0.4, 0.0), &pal); // no pics, no font
-            let mut img2 = Image::new(320, 200, [9, 9, 9]);
-            draw_menu(&mut img2, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0), &pal);
-            let inked = img2.rgb.iter().any(|&p| p != [9, 9, 9]);
+            let mut img = Image::new(320, 200, 9);
+            draw_menu(&mut img, &m, &s, &pics, None, clock(0.4, 0.0)); // no pics, no font
+            let mut img2 = Image::new(320, 200, 9);
+            draw_menu(&mut img2, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0));
+            let inked = img2.pixels.iter().any(|&p| p != 9);
             assert!(inked, "{screen:?} must draw its text rows with conchars present");
         }
         // A host-set slot comment replaces the UNUSED text without panicking,
@@ -4443,12 +4441,12 @@ mod tests {
         comments[0] = "a comment longer than the unused-slot text fits fine".into();
         m.set_save_comments(comments);
         m.screen = MenuScreen::Load;
-        let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0), &pal);
+        let mut img = Image::new(320, 200, 9);
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0));
         m.screen = MenuScreen::Keys;
         m.bind_grab = true;
-        let mut img = Image::new(320, 200, [9, 9, 9]);
-        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0), &pal);
+        let mut img = Image::new(320, 200, 9);
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.4, 0.0));
     }
 
     #[test]
@@ -4487,7 +4485,6 @@ mod tests {
 
     #[test]
     fn draw_help_and_quit_screens_without_panic() {
-        let pal = ramp_palette();
         let mut data = vec![3u8; 128 * 128];
         for y in 0..8 {
             for x in 0..8 {
@@ -4495,7 +4492,7 @@ mod tests {
             }
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
 
         // Help: a present page pic (index 6) at (0,0) must paint the top-left.
         let mut help: [Option<crate::wad::Qpic>; NUM_HELP_PAGES] = Default::default();
@@ -4507,13 +4504,13 @@ mod tests {
         m.select(&mut s); // -> Help, page 0
         m.help_page = 2; // the page that has art
         let mut img = Image::new(320, 200, bg);
-        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
-        assert_eq!(img.rgb[0], pal[6], "the help page pic must paint at (0,0)");
+        draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0));
+        assert_eq!(img.pixels[0], 6, "the help page pic must paint at (0,0)");
         // A missing page (page 0 here is None) draws nothing and never panics.
         m.help_page = 0;
         let mut img0 = Image::new(320, 200, bg);
-        draw_menu(&mut img0, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
-        assert_eq!(img0.rgb[0], bg, "a missing help page leaves the frame untouched");
+        draw_menu(&mut img0, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0));
+        assert_eq!(img0.pixels[0], bg, "a missing help page leaves the frame untouched");
 
         // Quit (M_Quit_Draw): M_DrawTextBox (56, 76, 24, 4) from the box_*
         // pics and quit message msgNumber at (64, 84..108) in M_Print's bronze.
@@ -4528,27 +4525,27 @@ mod tests {
             *slot = Some(solid_pic(w, 8, 20 + i as u8));
         }
         let mut imgq = Image::new(320, 200, bg);
-        draw_menu(&mut imgq, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
-        let at = |x: usize, y: usize| imgq.rgb[y * 320 + x];
-        assert_eq!(at(56, 76), pal[20], "box_tl at (56, 76)");
-        assert_eq!(at(56, 84), pal[21], "box_ml below it");
-        assert_eq!(at(64, 76), pal[23], "box_tm from x 64");
+        draw_menu(&mut imgq, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0));
+        let at = |x: usize, y: usize| imgq.pixels[y * 320 + x];
+        assert_eq!(at(56, 76), 20, "box_tl at (56, 76)");
+        assert_eq!(at(56, 84), 21, "box_ml below it");
+        assert_eq!(at(64, 76), 23, "box_tm from x 64");
         let mut bare = Image::new(320, 200, bg);
-        draw_menu(&mut bare, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
-        assert_eq!(bare.rgb[84 * 320 + 64], pal[24], "box_mm on the first text row");
-        assert_eq!(bare.rgb[92 * 320 + 64], pal[25], "box_mm2 from the second on");
-        assert_eq!(bare.rgb[108 * 320 + 64], pal[25], "box_mm2 on the fourth");
-        assert_eq!(at(64 + 12 * 16, 76), pal[27], "box_tr after 12 middle pieces");
-        assert_eq!(at(56, 116), pal[22], "box_bl under 4 rows");
+        draw_menu(&mut bare, &m, &s, &pics, None, clock(0.0, 0.0));
+        assert_eq!(bare.pixels[84 * 320 + 64], 24, "box_mm on the first text row");
+        assert_eq!(bare.pixels[92 * 320 + 64], 25, "box_mm2 from the second on");
+        assert_eq!(bare.pixels[108 * 320 + 64], 25, "box_mm2 on the fourth");
+        assert_eq!(at(64 + 12 * 16, 76), 27, "box_tr after 12 middle pieces");
+        assert_eq!(at(56, 116), 22, "box_bl under 4 rows");
         // The message over the box: every conchars cell but 0 is lit here,
         // and M_Print draws c + 128 — so the line's first cell paints.
-        assert_eq!(at(64, 84), pal[3], "the quit message at (64, 84)");
+        assert_eq!(at(64, 84), 3, "the quit message at (64, 84)");
         // The main menu it rose over is under it, faded once (1 in 4 kept).
-        assert_eq!(at(1, 0), pal[0], "faded");
+        assert_eq!(at(1, 0), 0, "faded");
         // Without conchars the box still paints (no panic).
         let mut imgq2 = Image::new(320, 200, bg);
-        draw_menu(&mut imgq2, &m, &s, &pics, None, clock(0.0, 0.0), &pal);
-        assert_eq!(imgq2.rgb[76 * 320 + 56], pal[20], "the Quit box paints without conchars");
+        draw_menu(&mut imgq2, &m, &s, &pics, None, clock(0.0, 0.0));
+        assert_eq!(imgq2.pixels[76 * 320 + 56], 20, "the Quit box paints without conchars");
         // "No" goes back to the menu it rose over.
         assert_eq!(m.quit_no(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
@@ -4578,7 +4575,6 @@ mod tests {
         // For every list, the cursor drawn on row i (a conchars glyph, or the
         // menudot on the picture lists) lights lines of its column that a tap
         // there finds as row i, and none that it finds as another row.
-        let pal = ramp_palette();
         let conchars = test_conchars();
         let mut pics = MenuPics::default();
         for d in &mut pics.menudot {
@@ -4586,25 +4582,25 @@ mod tests {
         }
         let s = Settings::default();
         let screens = [
-            (MenuScreen::Main, 56, pal[7]),
-            (MenuScreen::SinglePlayer, 56, pal[7]),
-            (MenuScreen::Multiplayer, 56, pal[7]),
-            (MenuScreen::Options, 202, pal[3]),
-            (MenuScreen::Extras, 202, pal[3]),
-            (MenuScreen::Load, 10, pal[3]),
-            (MenuScreen::Save, 10, pal[3]),
-            (MenuScreen::Keys, 132, pal[3]),
-            (MenuScreen::Video, 10, pal[3]),
-            (MenuScreen::Setup, 58, pal[3]),
+            (MenuScreen::Main, 56, 7),
+            (MenuScreen::SinglePlayer, 56, 7),
+            (MenuScreen::Multiplayer, 56, 7),
+            (MenuScreen::Options, 202, 3),
+            (MenuScreen::Extras, 202, 3),
+            (MenuScreen::Load, 10, 3),
+            (MenuScreen::Save, 10, 3),
+            (MenuScreen::Keys, 132, 3),
+            (MenuScreen::Video, 10, 3),
+            (MenuScreen::Setup, 58, 3),
         ];
         for (screen, x, lit) in screens {
             let mut m = menu_on(screen);
             for row in 0..screen.item_count() {
                 m.set_cursor(row);
-                let mut img = Image::new(320, 200, [9, 9, 9]);
-                draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0), &pal);
+                let mut img = Image::new(320, 200, 9);
+                draw_menu(&mut img, &m, &s, &pics, Some(&conchars), clock(0.0, 0.0));
                 let rows: Vec<usize> = (0..200)
-                    .filter(|&y| img.rgb[y * 320 + x] == lit)
+                    .filter(|&y| img.pixels[y * 320 + x] == lit)
                     .filter_map(|y| m.item_at(x as f32, y as f32 + 0.5))
                     .collect();
                 assert!(!rows.is_empty(), "{screen:?} row {row}: the cursor is on a row");

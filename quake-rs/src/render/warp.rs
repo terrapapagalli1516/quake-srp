@@ -38,7 +38,7 @@ pub(super) fn warp_screen(tables: &mut WarpTables, view: &Image, out: WarpTarget
 /// Where [`warp_screen`] writes: `w x h` pixels at column `x0` of `rows`,
 /// `stride` pixels a row (the screen's view rectangle, or an image of its own).
 pub(super) struct WarpTarget<'a> {
-    pub(super) rows: &'a mut [[u8; 3]],
+    pub(super) rows: &'a mut [u8],
     pub(super) stride: usize,
     pub(super) x0: usize,
     pub(super) w: usize,
@@ -66,9 +66,9 @@ fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f3
         return;
     }
     let rows = &mut rows[..out_h * stride];
-    if w == 0 || h == 0 || out_w == 0 || out_h == 0 || view.rgb.len() < w * h {
+    if w == 0 || h == 0 || out_w == 0 || out_h == 0 || view.pixels.len() < w * h {
         for row in rows.chunks_mut(stride) {
-            row[x0..x0 + out_w].fill([0, 0, 0]);
+            row[x0..x0 + out_w].fill(0);
         }
         return;
     }
@@ -83,7 +83,7 @@ fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f3
             let tv = sin[phase + v] as usize; // 0..2*amp
             for (u, px) in row[x0..x0 + out_w].iter_mut().enumerate() {
                 let tu = sin[phase + u] as usize; // 0..2*amp
-                *px = view.rgb[rowptr[v + tu] * w + column[tv + u]];
+                *px = view.pixels[rowptr[v + tu] * w + column[tv + u]];
             }
         }
     });
@@ -289,8 +289,8 @@ mod tests {
     /// `D_WarpScreen` at `scale` into an `out_w x out_h` image of its own,
     /// on fresh tables, on `threads` threads.
     fn warp_at(view: Image, out_w: usize, out_h: usize, clock: f32, scale: f64, threads: usize) -> Image {
-        let mut out = Image::new(out_w, out_h, [7, 7, 7]);
-        let target = WarpTarget { rows: &mut out.rgb, stride: out_w, x0: 0, w: out_w, h: out_h };
+        let mut out = Image::new(out_w, out_h, 7);
+        let target = WarpTarget { rows: &mut out.pixels, stride: out_w, x0: 0, w: out_w, h: out_h };
         warp_scaled(&mut WarpTables::default(), &view, target, clock, scale, threads);
         out
     }
@@ -300,13 +300,17 @@ mod tests {
         warp_at(view, out_w, out_h, clock, 1.0, 1)
     }
 
-    /// A `w x h` image whose pixel (x, y) is `[x, y, 0]`, to read back which
-    /// source pixel the warp chose.
-    fn coord_image(w: usize, h: usize) -> Image {
-        let mut img = Image::new(w, h, [0, 0, 0]);
+    /// The axes of [`coord_image`].
+    const X: usize = 0;
+    const Y: usize = 1;
+
+    /// A `w x h` image whose pixel (x, y) is its `axis` coordinate (mod 256),
+    /// to read back which source pixel the warp chose, one axis at a time.
+    fn coord_image(w: usize, h: usize, axis: usize) -> Image {
+        let mut img = Image::new(w, h, 0);
         for y in 0..h {
             for x in 0..w {
-                img.rgb[y * w + x] = [x as u8, y as u8, 0];
+                img.pixels[y * w + x] = [x, y][axis] as u8;
             }
         }
         img
@@ -331,13 +335,13 @@ mod tests {
         // turb = intsintable + phase. At phase 0, column 128 displaces its row
         // by intsintable[128] = 2 (a wrapped table would give 3).
         let (w, h) = (200usize, 40usize);
-        let img = apply_warp(coord_image(w, h), w, h, 0.0);
+        let img = apply_warp(coord_image(w, h, Y), w, h, 0.0);
         let rowptr = |i: usize| i * h / (h + 6);
         for v in 0..h {
-            assert_eq!(img.rgb[v * w + 128][1] as usize, rowptr(v + 2), "row {v}");
+            assert_eq!(img.pixels[v * w + 128] as usize, rowptr(v + 2), "row {v}");
         }
         // And column 0 (intsintable[0] = 3) for contrast.
-        assert_eq!(img.rgb[5 * w][1] as usize, rowptr(5 + 3));
+        assert_eq!(img.pixels[5 * w] as usize, rowptr(5 + 3));
     }
 
     #[test]
@@ -347,7 +351,8 @@ mod tests {
         // D_WarpScreen's sample, with the C's float row/column tables.
         let (w, h) = (320usize, 200usize);
         for (ow, oh, clock) in [(640usize, 400usize, 0.37f32), (960, 600, 5.0)] {
-            let out = apply_warp(coord_image(w, h), ow, oh, clock);
+            let out = apply_warp(coord_image(w, h, X), ow, oh, clock);
+            let out_y = apply_warp(coord_image(w, h, Y), ow, oh, clock);
             assert_eq!((out.w, out.h), (ow, oh));
             let (wr, hr) = (w as f32 / ow as f32, h as f32 / oh as f32);
             let phase = (clock as f64 * 20.0) as usize & 127;
@@ -357,18 +362,18 @@ mod tests {
                     let (tu, tv) = (t[phase + u] as usize, t[phase + v] as usize);
                     let row = ((v + tu) as f32 * hr * h as f32 / (h + 6) as f32) as usize;
                     let col = ((tv + u) as f32 * wr * w as f32 / (w + 6) as f32) as usize;
-                    let got = out.rgb[v * ow + u];
-                    // coord_image stores x mod 256 in channel 0.
-                    assert_eq!((got[0], got[1]), ((col & 255) as u8, row as u8), "({u},{v})");
+                    let got = (out.pixels[v * ow + u], out_y.pixels[v * ow + u]);
+                    // coord_image stores x mod 256.
+                    assert_eq!(got, ((col & 255) as u8, row as u8), "({u},{v})");
                 }
             }
         }
         // A 1:1 warp (a mode no larger than 320x200) is the integer-exact case.
-        let out = apply_warp(coord_image(w, h), w, h, 0.0);
-        assert_eq!(out.rgb[10 * w][1] as usize, (10 + 3) * h / (h + 6)); // turb[0] = 3
+        let out = apply_warp(coord_image(w, h, Y), w, h, 0.0);
+        assert_eq!(out.pixels[10 * w] as usize, (10 + 3) * h / (h + 6)); // turb[0] = 3
         // Degenerate sizes never panic.
-        assert_eq!(apply_warp(Image::new(0, 0, [0; 3]), 4, 4, 0.0).rgb.len(), 16);
-        assert!(apply_warp(coord_image(4, 4), 0, 0, 0.0).rgb.is_empty());
+        assert_eq!(apply_warp(Image::new(0, 0, 0), 4, 4, 0.0).pixels.len(), 16);
+        assert!(apply_warp(coord_image(4, 4, X), 0, 0, 0.0).pixels.is_empty());
     }
 
     /// The warp kept its tables across frames (second review: it allocated
@@ -377,7 +382,7 @@ mod tests {
     /// gave, reproduced here from the code before the change.
     #[test]
     fn warp_tables_kept_across_frames_change_nothing() {
-        fn per_frame(view: &Image, out_w: usize, out_h: usize, clock: f32) -> Vec<[u8; 3]> {
+        fn per_frame(view: &Image, out_w: usize, out_h: usize, clock: f32) -> Vec<u8> {
             let (w, h) = (view.w, view.h);
             let (wratio, hratio) = (w as f32 / out_w as f32, h as f32 / out_h as f32);
             let rowptr: Vec<usize> = (0..out_h + 6)
@@ -388,11 +393,11 @@ mod tests {
                 .collect();
             let phase = ((clock as f64 * 20.0) as i64 & 127) as usize;
             let sintable = intsintable(phase + out_w.max(out_h));
-            let mut out = vec![[0u8; 3]; out_w * out_h];
+            let mut out = vec![0u8; out_w * out_h];
             for v in 0..out_h {
                 for u in 0..out_w {
                     let (tu, tv) = (sintable[phase + u] as usize, sintable[phase + v] as usize);
-                    out[v * out_w + u] = view.rgb[rowptr[v + tu] * w + column[tv + u]];
+                    out[v * out_w + u] = view.pixels[rowptr[v + tu] * w + column[tv + u]];
                 }
             }
             out
@@ -407,10 +412,12 @@ mod tests {
             (320, 152, 960, 456, 1.6),
         ];
         for (w, h, ow, oh, clock) in frames {
-            let view = coord_image(w, h);
-            let want = per_frame(&view, ow, oh, clock);
-            let got = apply_warp(view, ow, oh, clock);
-            assert!(got.rgb == want, "{w}x{h} over {ow}x{oh} at {clock}");
+            for axis in [X, Y] {
+                let view = coord_image(w, h, axis);
+                let want = per_frame(&view, ow, oh, clock);
+                let got = apply_warp(view, ow, oh, clock);
+                assert!(got.pixels == want, "{w}x{h} over {ow}x{oh} at {clock}, axis {axis}");
+            }
         }
     }
 
@@ -459,12 +466,6 @@ mod tests {
         // every sampled index stays in bounds (no panic, no garbage).
         let turb = TurbTable::new();
         let pixels = synthetic_liquid_pixels();
-        // A palette that maps each index to a distinct grey so different texels
-        // give different colours.
-        let mut pal = [[0u8; 3]; 256];
-        for (i, p) in pal.iter_mut().enumerate() {
-            *p = [i as u8, i as u8, i as u8];
-        }
 
         // A surface spanning a range of (s,t) so the warp samples many texels.
         let (w, h) = (40usize, 40usize);
@@ -473,10 +474,10 @@ mod tests {
         let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
         let g = PolyGrads::from_vertices(&[v0, v1, v2]).expect("triangle");
         let render_at = |time: f32| {
-            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut img = Image::new(w, h, 0);
             for y in 0..h {
-                let row = &mut img.rgb[y * w..(y + 1) * w];
-                span_turb(row, &span_at(&g, 0, y), &g, &pixels, 64, 64, &pal, &turb, time, Persp::Exact);
+                let row = &mut img.pixels[y * w..(y + 1) * w];
+                span_turb(row, &span_at(&g, 0, y), &g, &pixels, 64, 64, &turb, time, Persp::Exact);
             }
             img
         };
@@ -484,17 +485,14 @@ mod tests {
         let b = render_at(0.5);
 
         // Animated: the two frames must differ somewhere.
-        let changed = a.rgb.iter().zip(b.rgb.iter()).filter(|(x, y)| x != y).count();
+        let changed = a.pixels.iter().zip(b.pixels.iter()).filter(|(x, y)| x != y).count();
         assert!(changed > 0, "turbulent surface must animate between two times");
 
-        // Every drawn pixel is a real palette colour (grey: all channels equal),
-        // proving the sample stayed in bounds (out-of-range would have continued).
-        assert!(
-            a.rgb.iter().any(|p| *p != [0, 0, 0]),
-            "turbulent surface drew nothing"
-        );
-        for p in a.rgb.iter().chain(b.rgb.iter()) {
-            assert!(p[0] == p[1] && p[1] == p[2], "sampled colour not a palette grey: {p:?}");
+        // Every drawn pixel is one of the texture's texels, proving the sample
+        // stayed in bounds (out-of-range would have continued).
+        assert!(a.pixels.iter().any(|&p| p != 0), "turbulent surface drew nothing");
+        for p in a.pixels.iter().chain(b.pixels.iter()) {
+            assert!(pixels.contains(p), "sampled index {p} is not a texel of the liquid");
         }
     }
 
@@ -506,21 +504,23 @@ mod tests {
         assert_eq!(warp_scale(320, 152), 1.0);
         assert_eq!(warp_scale(1280, 800), 4.0);
         assert!((warp_scale(3840, 2160) - 11.384).abs() < 1e-3);
-        let id = apply_warp(coord_image(320, 200), 320, 200, 2.7);
-        let hires = warp_at(coord_image(320, 200), 320, 200, 2.7, warp_scale(320, 200), 1);
-        assert!(id.rgb == hires.rgb);
+        for axis in [X, Y] {
+            let id = apply_warp(coord_image(320, 200, axis), 320, 200, 2.7);
+            let hires = warp_at(coord_image(320, 200, axis), 320, 200, 2.7, warp_scale(320, 200), 1);
+            assert!(id.pixels == hires.pixels);
+        }
         // At scale 4 (1280x800) the sine swings 0..24 rows over a 512-column
         // cycle: column u of output row v reads row rowptr[v + t[u]], t the
         // scaled table, and the swing is 4x id's.
         let (w, h) = (1280usize, 800usize);
-        let out = warp_at(coord_image(w, h), w, h, 0.0, 4.0, 1);
-        assert!(warp_at(coord_image(w, h), w, h, 0.0, 4.0, 5).rgb == out.rgb, "any thread count");
+        let out = warp_at(coord_image(w, h, Y), w, h, 0.0, 4.0, 1);
+        assert!(warp_at(coord_image(w, h, Y), w, h, 0.0, 4.0, 5).pixels == out.pixels, "any thread count");
         let mut t = Vec::new();
         extend_intsintable(&mut t, w, 4.0);
         assert_eq!((t.iter().min(), t.iter().max()), (Some(&0), Some(&23)));
         let rowptr = |i: usize| (i as f32 * h as f32 / (h + 24) as f32) as usize;
         for u in [0, 100, 128, 256, 511] {
-            assert_eq!(out.rgb[10 * w + u][1] as usize, rowptr(10 + t[u] as usize) & 255, "column {u}");
+            assert_eq!(out.pixels[10 * w + u] as usize, rowptr(10 + t[u] as usize) & 255, "column {u}");
         }
     }
 }

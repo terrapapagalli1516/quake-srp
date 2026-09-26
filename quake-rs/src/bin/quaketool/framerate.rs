@@ -1406,6 +1406,12 @@ fn lerpmove_report(pak: &Pak, rates: &[Rate], strip: Option<&str>) -> Result<Str
 fn write_strip(pak: &Pak, dir: &str) -> Result<(), String> {
     const FRAMES: usize = 24;
     let vid = Vid { width: 640, height: 400, ..VID };
+    let palette = pak
+        .read_file("gfx/palette.lmp")
+        .ok()
+        .flatten()
+        .and_then(|b| render::parse_palette(&b))
+        .ok_or("gfx/palette.lmp is missing or short")?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     for (workload, from) in [("charge", 0.4)] {
         let first = (from * 240.0) as usize;
@@ -1413,7 +1419,7 @@ fn write_strip(pak: &Pak, dir: &str) -> Result<(), String> {
             let (mut n, mut written) = (0usize, Ok(()));
             live_steps(pak, Rate::Hz(240), workload, from + 0.11, vid, lerpmove, |img| {
                 if (first..first + FRAMES).contains(&n) && written.is_ok() {
-                    written = img.write_ppm(&format!("{dir}/{workload}-{mode}-{:02}.ppm", n - first));
+                    written = img.to_rgb(&palette).write_ppm(&format!("{dir}/{workload}-{mode}-{:02}.ppm", n - first));
                 }
                 n += 1;
             });

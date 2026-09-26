@@ -96,6 +96,9 @@ impl SoundTally {
                 SoundCall::StopAll => self.stop_all += 1,
                 SoundCall::Static(s) => self.static_loops += s.len(),
                 SoundCall::Update { .. } => self.updates += 1,
+                // The CD's calls are not the mixer's: the tally stays the
+                // sound layer's.
+                SoundCall::Cd(_) => {}
             }
         }
     }
@@ -117,6 +120,8 @@ struct Host {
     pak: Pak,
     settings: Settings,
     keys: [bool; 256],
+    /// `host_basepal`, the palette `VID_SetPalette` loads (`gfx/palette.lmp`).
+    palette: render::Palette,
     gamma: [u8; 256],
     realtime: f64,
     oldrealtime: f64,
@@ -241,11 +246,18 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     // The archive in memory, as the page embeds it.
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
+    let palette = pak
+        .read_file("gfx/palette.lmp")
+        .ok()
+        .flatten()
+        .and_then(|b| render::parse_palette(&b))
+        .ok_or("gfx/palette.lmp is missing or short")?;
     let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars, mip: render::MipCvars::DEFAULT };
     let mut host = Host {
         pak,
         settings: Settings::new(Profile::Classic),
         keys: [false; 256],
+        palette,
         gamma: render::build_gamma_table(1.0),
         realtime: 0.0,
         oldrealtime: 0.0,
@@ -292,10 +304,10 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
                 }
                 tally.add(&sound);
                 tally.add(&frame.sound);
-                // V_UpdatePalette + VID_ShiftPalette: the cshifts and gamma as
-                // ramps the finished frame is packed through (a copy with neither).
-                let ramps = (!frame.cshifts.is_empty()).then(|| render::cshift_ramps(&frame.cshifts, &host.gamma));
-                render::pack_rgba(&frame.image, ramps.as_ref(), &mut rgba, host.threads);
+                // V_UpdatePalette + VID_ShiftPalette: the frame's palette (its
+                // cshifts, then gamma), which the 8-bit frame is shown through.
+                let palette = render::FramePalette::new(&host.palette, &frame.cshifts, &host.gamma);
+                render::pack_rgba(&frame.image, &palette, &mut rgba, host.threads);
                 if every > 0 && f % every == 0 {
                     hashes.push(format!("{:08x}", fnv(&rgba)));
                     if let Some(prefix) = &ppm {

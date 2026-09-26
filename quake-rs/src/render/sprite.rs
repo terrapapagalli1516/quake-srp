@@ -33,7 +33,7 @@ pub struct SpriteInstance<'a> {
 pub(super) fn draw_sprites(band: &mut Band, frame: &Frame) {
     const NEAR: f32 = 1.0;
     let (cam, scene, w, h) = (&frame.cam, frame.scene, frame.w, frame.h);
-    let (opts, sprites, palette, time) = (&scene.options, scene.sprites, scene.palette, scene.time);
+    let (opts, sprites, time) = (&scene.options, scene.sprites, scene.time);
     if w == 0 || h == 0 || sprites.is_empty() {
         return;
     }
@@ -102,7 +102,7 @@ pub(super) fn draw_sprites(band: &mut Band, frame: &Frame) {
                 // D_SpriteDrawSpans: `if (*pz <= (izi >> 16)) *pz = izi >> 16`.
                 if *z as i32 <= izi16 {
                     *z = izi16 as i16;
-                    *p = palette[texel as usize];
+                    *p = texel;
                 }
             }
         }
@@ -138,14 +138,14 @@ fn select_sprite_frame(
 mod tests {
     use super::*;
     use crate::render::fixtures::test_sprite;
-    use crate::render::{Camera, Image, Palette, Scene};
+    use crate::render::{Camera, Image, Scene};
 
     /// `draw_sprites` for one sprite seen by `cam`, into `img` and `zbuf`.
-    fn draw(img: &mut Image, zbuf: &mut [i16], cam: Camera, inst: &SpriteInstance, pal: &Palette) {
+    fn draw(img: &mut Image, zbuf: &mut [i16], cam: Camera, inst: &SpriteInstance) {
         let world = crate::render::demo_room();
-        let scene = Scene { sprites: std::slice::from_ref(inst), ..Scene::new(&world, cam, img.w, img.h, pal) };
+        let scene = Scene { sprites: std::slice::from_ref(inst), ..Scene::new(&world, cam, img.w, img.h, &[[0; 3]; 256]) };
         let frame = Frame::new(&scene, img.w, img.h);
-        draw_sprites(&mut Band::whole(img.w, &mut img.rgb, zbuf), &frame);
+        draw_sprites(&mut Band::whole(img.w, &mut img.pixels, zbuf), &frame);
     }
 
     #[test]
@@ -153,15 +153,13 @@ mod tests {
         // A facing sprite 100 units ahead projects near centre and paints its colour.
         let (w, h) = (80usize, 60usize);
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![i16::MIN; w * h];
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw(&mut img, &mut zbuf, cam, &inst, &pal);
-        let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
+        draw(&mut img, &mut zbuf, cam, &inst);
+        let painted = img.pixels.iter().filter(|&&p| p == 42).count();
         assert!(painted > 0, "a sprite in front must paint pixels");
         // (int)(1/100 * 0x8000 * 0x10000) >> 16 = 327.
         assert_eq!(zbuf.iter().copied().max().unwrap(), 327, "z holds the sprite's 1/z");
@@ -172,14 +170,13 @@ mod tests {
         // An all-255 sprite is fully transparent: nothing is painted.
         let (w, h) = (80usize, 60usize);
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![i16::MIN; w * h];
-        let pal = [[7u8, 7, 7]; 256];
         let spr = test_sprite(16, 16, 255);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw(&mut img, &mut zbuf, cam, &inst, &pal);
-        assert!(img.rgb.iter().all(|&p| p == bg), "index-255 texels are transparent (nothing painted)");
+        draw(&mut img, &mut zbuf, cam, &inst);
+        assert!(img.pixels.iter().all(|&p| p == bg), "index-255 texels are transparent (nothing painted)");
         assert!(zbuf.iter().all(|&z| z == i16::MIN), "transparent sprite writes no depth");
     }
 
@@ -188,14 +185,12 @@ mod tests {
         // A sprite at depth 100 behind a wall (the z-buffer holding depth 10's 1/z) is hidden.
         let (w, h) = (80usize, 60usize);
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![3276i16; w * h];
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[42] = [200, 50, 30];
         let spr = test_sprite(16, 16, 42);
         let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], frame: 0 };
-        draw(&mut img, &mut zbuf, cam, &inst, &pal);
-        assert!(img.rgb.iter().all(|&p| p == bg), "a sprite behind a nearer wall is z-tested out");
+        draw(&mut img, &mut zbuf, cam, &inst);
+        assert!(img.pixels.iter().all(|&p| p == bg), "a sprite behind a nearer wall is z-tested out");
     }
 }

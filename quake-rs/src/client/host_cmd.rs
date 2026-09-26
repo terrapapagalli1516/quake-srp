@@ -12,6 +12,7 @@
 use std::rc::Rc;
 
 use crate::bsp::Bsp;
+use crate::cd_audio::CdCall;
 use crate::dlight::DynamicLights;
 use crate::pak::Pak;
 use crate::particles::ParticleSystem;
@@ -210,6 +211,8 @@ pub fn build_walk_map(pak: Pak, map: &str, rand: &Rc<QRand>, sound: &mut Vec<Sou
     sound.push(SoundCall::StopAll);
     let statics = server.drain_static_sounds();
     sound.push(SoundCall::Static(statics));
+    // SV_SendServerinfo's svc_cdtrack: the level's CD track.
+    sound.push(SoundCall::Cd(CdCall::cdtrack(server.cd_track())));
     // Drop one-shot events the spawn + settle ticks queued, like the
     // changelevel/restart paths do (in the C the client misses signon-era
     // datagram sounds while not yet `spawned`; tick 2's are technically
@@ -367,6 +370,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     // ramp, captured above right after spawn_entities.
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(statics));
+    sound.push(SoundCall::Cd(CdCall::cdtrack(w.server.cd_track())));
     let _ = w.server.drain_svc_events();
     let _ = w.server.drain_stufftext();
 }
@@ -464,6 +468,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     // Stop the dead run's loops; restart the fresh level's (see try_changelevel).
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(statics));
+    sound.push(SoundCall::Cd(CdCall::cdtrack(w.server.cd_track())));
     let _ = w.server.drain_svc_events();
     let _ = w.server.drain_stufftext();
 }
@@ -551,6 +556,7 @@ pub fn build_walk_savegame(
     // (same treatment as every other walk-building path).
     sound.push(SoundCall::StopAll);
     sound.push(SoundCall::Static(statics));
+    sound.push(SoundCall::Cd(CdCall::cdtrack(w.server.cd_track())));
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();

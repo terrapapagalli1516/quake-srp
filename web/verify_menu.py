@@ -259,7 +259,7 @@ with sync_playwright() as p:
 
     grab_lum = """() => {
         const c = document.getElementById('c');
-        const d = c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+        const d = quake.readback();
         let s = 0, n = 0;
         for (let i = 0; i < d.length; i += 16) { s += d[i] + d[i+1] + d[i+2]; n += 3; }
         return s / n;

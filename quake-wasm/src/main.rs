@@ -33,11 +33,12 @@
 //! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files (and `main`'s `-hwthreads`, the threads the host offers) |
 //! | `config`    | host.c `Host_WriteConfiguration`        | `config.cfg`: the settings' changes, written on change, exec'd at startup |
 //! | `app`       | host.c, client.h                        | the `App` (host state around the client's `Walk`/`DemoPlay`: the settings, menu, console, clocks), menu assets, the client's level loads with their sound calls carried out, the boots |
-//! | `host`      | host.c `Host_Frame`                     | `step`: the frame gate (id's 72 fps, or every refresh stepped as 72 Hz runs), the mode's client frame, the menu/console overlays, the fps readout, blend, gamma pack |
+//! | `host`      | host.c `Host_Frame`                     | `step`: the frame gate (id's 72 fps, or every refresh stepped as 72 Hz runs), the mode's client frame, the menu/console overlays, the fps readout, the frame's palette (`V_UpdatePalette`) |
+//! | `present`   | vid_win.c `VID_Update`, `VID_ShiftPalette` | the finished 8-bit frame to the page: indexed with its palette (the page's GPU is the DAC) or RGBA, copied or read where it lies |
 //! | `cl_walk`   | cl_main.c                               | `step_walk`: `client::cl_main::walk_frame` on the page's `Vid`, its sound calls to `snd_dma`; the live game's end-to-end tests |
 //! | `cl_demo`   | cl_demo.c                               | `step_demo`: `client::cl_demo::demo_frame` likewise; the playback tests |
 //! | `cl_tent`   | cl_tent.c                               | (tests only) Chthon's lightning end to end       |
-//! | `input`     | in_win.c, keys.c `Key_Event`            | mouse look, every key through `Key_Event` (the moves: `client::cl_input`) |
+//! | `input`     | in_win.c, keys.c `Key_Event`            | mouse look, every key through `Key_Event`, the gamepad's `IN_Commands`/`IN_JoyMove` and rumble (the moves: `client::cl_input`; the pad as a joystick: `client::in_win`) |
 //! | `menu`      | menu.c `M_Keydown`                      | the menu's keys and the actions they return      |
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle and typing                        |
 //! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | the console's command table, `Cvar_Command`, `bind`, `map` (the loads and cheats: `client::host_cmd`) |
@@ -77,6 +78,7 @@ mod host;
 mod host_cmd;
 mod input;
 mod menu;
+mod present;
 mod proto;
 mod savegame;
 mod snd_dma;
@@ -90,6 +92,8 @@ mod test_util;
 #[cfg(test)]
 #[path = "census_tests.rs"]
 mod census_tests;
+#[cfg(test)]
+mod content_tests;
 
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
@@ -117,12 +121,38 @@ fn hw_threads() -> usize {
         .max(1)
 }
 
+/// `-sharedframes`: the host shares the program's memory with the page
+/// (`wasi.js`, a threads build), so the page reads each frame where it lies.
+fn shared_frames() -> bool {
+    std::env::args().any(|a| a == "-sharedframes")
+}
+
 fn main() -> ExitCode {
-    if let Err(e) = common::init(&basedir()) {
-        eprintln!("quake: {e}");
-        return ExitCode::FAILURE;
-    }
-    app::ensure_app(|a| a.hw_threads = hw_threads());
+    // IN_StartupJoystick's `-nojoy`: no pad is ever read.
+    let nojoy = std::env::args().any(|a| a == "-nojoy");
+    // COM_InitFilesystem: a Sys_Error here (a pack that is not one, a
+    // modified shareware game, a progs.dat this engine cannot run) ends the
+    // program before it starts, its message on stderr for the page to show.
+    let log = match common::init(&basedir()) {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("quake: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    app::ensure_app(|a| {
+        a.hw_threads = hw_threads();
+        a.present = present::Present::new(shared_frames());
+        for line in log {
+            a.console.println(line);
+        }
+        // Not notify lines: the attract demo's signon ends in
+        // SCR_EndLoadingPlaque's Con_ClearNotify before anything is drawn.
+        let _ = a.console.take_unnotified();
+        if nojoy {
+            a.pad.joy.set_nojoy();
+        }
+    });
     // stdout goes through a buffer the size of a turn's small records, so
     // a turn reaches the host in a few writes; a frame's pixels pass
     // straight through it.

@@ -15,6 +15,7 @@
 //! | [`cl_demo`]  | cl_demo.c, cl_parse.c, view.c     | `CL_PlayDemo_f`'s build, quake.rc's demo loop, [`cl_demo::demo_frame`]: the recorded stream rendered like live play |
 //! | [`cl_tent`]  | cl_tent.c, r_part.c               | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
 //! | [`cl_input`] | cl_input.c                        | [`cl_input::KeyMove`]: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
+//! | [`in_win`]   | in_win.c (the joystick)           | [`in_win::Joystick`]: a pad as winmm's joystick — `IN_Commands`' `JOY`/`AUX` keys, `IN_JoyMove`'s move and turn with the `joy*` cvars — and the 2026 pad's stick shaping, menu keys and rumble |
 //! | [`view`]     | view.c                            | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times (the renderer's half of view.c is `render`'s) |
 //! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
@@ -44,6 +45,7 @@ pub mod cl_main;
 pub mod cl_tent;
 pub mod host;
 pub mod host_cmd;
+pub mod in_win;
 pub mod lerpmove;
 pub mod view;
 
@@ -55,6 +57,7 @@ use crate::console::ConNotify;
 use crate::demo::Demo;
 use crate::dlight::DynamicLights;
 use crate::mdl::Mdl;
+use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{Lcg, ParticleSystem, TrailHead};
 use crate::render;
@@ -195,6 +198,10 @@ pub struct Walk {
     /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
     /// like the HUD's `time`): the status bar shows the pain face until then.
     pub faceanimtime: f32,
+    /// `V_ParseDamage`'s `count`s since the platform last took them: the 2026
+    /// pad's rumble on damage ([`in_win::Rumble::damage`]). Nothing in the
+    /// game reads it.
+    pub damage_count: f32,
     /// `cl.items` as last received and `cl.item_gettime[]` (CL_ParseClientdata,
     /// server clock): the new-weapon icon flash. A level start (CL_ClearState)
     /// seeds the items the player spawns with and zeroes the get-times, so
@@ -595,6 +602,7 @@ pub fn assemble_walk(
         v_dmg_roll: 0.0,
         v_dmg_pitch: 0.0,
         faceanimtime: 0.0,
+        damage_count: 0.0,
         cl_items,
         item_gettime: [0.0; 32],
         oldz: f32::NAN,
@@ -735,9 +743,11 @@ impl Listener {
 }
 
 /// One call the client makes into the sound layer — snd_dma.c's entry
-/// points — recorded in call order for the platform to carry out (the browser
-/// plays them through Web Audio). A frame's calls come back in its
-/// [`ClientFrame`]; a level load makes them into a caller's `Vec`.
+/// points, and cd_audio.c's, which id's client called from the same places
+/// (`CL_ParseServerMessage`) — recorded in call order for the platform to
+/// carry out (the browser plays them through Web Audio). A frame's calls
+/// come back in its [`ClientFrame`]; a level load makes them into a caller's
+/// `Vec`.
 #[derive(Clone, Debug)]
 pub enum SoundCall {
     /// `S_StartSound` for each event, in order. `view_entity` is the
@@ -757,6 +767,9 @@ pub enum SoundCall {
     /// the four ambient channels toward — the listener leaf's
     /// `ambient_level[]` (`None` outside the world) — over `frametime`.
     Update { listener: Listener, leaf_ambient: Option<[u8; NUM_AMBIENTS]>, frametime: f32 },
+    /// A call into the CD player (`CDAudio_Play`, `_Pause`, `_Resume`:
+    /// [`crate::cd_audio`]), which plays beside the mixer, not through it.
+    Cd(CdCall),
 }
 
 // ---------------------------------------------------------------------------
@@ -807,10 +820,10 @@ thread_local! {
 /// A harness's last word on the finished 3-D view of a live frame — the
 /// screen and the view's rectangle on it — before the 2-D layer is drawn over
 /// it (see [`set_view_hook`]).
-pub type ViewHook = fn(&mut render::Image, render::ViewRect, &[[u8; 3]; 256]);
+pub type ViewHook = fn(&mut render::Image, render::ViewRect);
 
 /// Install (or clear) the [`ViewHook`]: the 2-D oracle harness (quake-wasm's
-/// `oracle_screen`) paints the view one flat colour, as the C oracle's
+/// `oracle_screen`) paints the view one palette index, as the C oracle's
 /// `oracle_blank` fills `scr_vrect`, so a shot measures the 2-D layer alone.
 /// None is installed by default.
 pub fn set_view_hook(hook: Option<ViewHook>) {
@@ -820,8 +833,8 @@ pub fn set_view_hook(hook: Option<ViewHook>) {
 /// The 3-D view at `vrect` of `screen` through the installed [`ViewHook`]
 /// (unchanged without one).
 #[inline]
-pub fn view_hook(screen: &mut render::Image, vrect: render::ViewRect, palette: &[[u8; 3]; 256]) {
+pub fn view_hook(screen: &mut render::Image, vrect: render::ViewRect) {
     if let Some(hook) = VIEW_HOOK.with(Cell::get) {
-        hook(screen, vrect, palette);
+        hook(screen, vrect);
     }
 }

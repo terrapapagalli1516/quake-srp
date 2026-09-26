@@ -30,7 +30,8 @@ use crate::Result;
 // ---------------------------------------------------------------------------
 
 /// The engine cvars the server's QuakeC reads (`PF_cvar`) and sets
-/// (`PF_cvar_set`) that the port gives a live value: `skill` and `sv_gravity`.
+/// (`PF_cvar_set`) that the port gives a live value: `skill`, `sv_gravity`
+/// and `registered`.
 ///
 /// id kept them in the console's cvar registry, which outlives a server. The
 /// port has no registry yet (CODE_PLAN R4's typed `Cvars` will be it), so each
@@ -49,12 +50,20 @@ pub struct ServerCvars {
     /// e1m8 (Ziggurat Vertigo) and 800 on every other map; `SV_AddGravity`
     /// and `SV_Physics_Step`'s landing-sound threshold read it.
     pub sv_gravity: f32,
+    /// `registered` (common.c, "0"): `COM_CheckRegistered` set it at startup
+    /// from the search path, so a server takes it from the path it reads
+    /// ([`crate::common::is_registered`]). The QuakeC reads it with
+    /// `cvar("registered")`: `trigger_onlyregistered` (the start map's
+    /// episode gates) and `ExitIntermission` (episode 1's end: the next
+    /// episode, or the order screen).
+    pub registered: bool,
 }
 
 impl Default for ServerCvars {
-    /// The cvars' defaults: `skill` "1" (single-player medium), `sv_gravity` "800".
+    /// The cvars' defaults: `skill` "1" (single-player medium), `sv_gravity`
+    /// "800", `registered` "0".
     fn default() -> Self {
-        ServerCvars { skill: 1, sv_gravity: SV_GRAVITY }
+        ServerCvars { skill: 1, sv_gravity: SV_GRAVITY, registered: false }
     }
 }
 

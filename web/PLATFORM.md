@@ -12,8 +12,8 @@ There are three pieces:
 | file | runs in | what it does |
 |---|---|---|
 | `quake-wasm/` → `quake.wasm` | a Web Worker | the game: `sys::run`, a host frame per tick (`quake-wasm/src/sys.rs`); the records it reads and writes (`proto.rs`) |
-| `web/wasi.js` | the same Worker | the WASI host: stdin from a shared ring, stdout into shared frame slots and one message per turn, an in-memory file system, the clocks |
-| `web/index.html` | the page | the canvas, keyboard and mouse, the audio device (an AudioWorklet playing the program's samples), IndexedDB, and the display's refresh, which it hands the program as ticks |
+| `web/wasi.js` | the same Worker | the WASI host: stdin from a shared ring, stdout into shared frame slots (or, the threads build, the frames left where they lie in the program's shared memory), a sound ring, and one message per turn, an in-memory file system, the clocks |
+| `web/index.html` | the page | the canvas and the display's DAC (WebGL2, else a 2-D canvas), keyboard and mouse, the audio device (an AudioWorklet playing the program's samples), IndexedDB, and the display's refresh, which it hands the program as ticks |
 
 The rest of this file is the design, the protocol, what it measured against
 the page it replaced (the wasm cdylib with ~84 `#[no_mangle]` exports the
@@ -29,19 +29,27 @@ keydown/mouse ──KEY/MOUSE records──▶ ring ─▶ fd_read(0) ─▶ Key
                                             (the program is blocked here, in
                                              Atomics.wait, between frames)
 requestAnimationFrame
+  poll the gamepad; if it changed,
+  GAMEPAD ─────────────────────────▶ ring ─▶ fd_read(0) ─▶ kept for the frame
   AUDIO_CLOCK, TICK(seq, dt) ──────▶ ring ─▶ fd_read(0) returns the tick
-  spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime, the
-                                             client frame, menu, console, blend, pack;
-                                             id's mixer paints to the clock + mix-ahead
+  spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime,
+                                             IN_Commands (the pad's keys), the
+                                             client frame (IN_JoyMove), menu,
+                                             console: an 8-bit frame and its
+                                             palette (V_UpdatePalette); id's mixer
+                                             paints to the clock + mix-ahead
                                              fd_write(1): PCM ─▶ samples copied into the
                                                                  sound ring
-                                                          FRAME ─▶ pixels copied into a
-                                                                   free frame slot
+                                                          FRAME ─▶ copied into a free
+                                                                   frame slot, or
+                                                          FRAME_AT ─▶ where it lies in
+                                                                   shared memory
                                                           AUDIO, STATE ─▶ kept
                                                           SYNC ─▶ ACK = seq, notify;
                                                                   post the kept records
-  copy the newest slot into the
-  canvas's ImageData, putImageData
+  the newest frame to the GPU (indices
+  + palette, WebGL2) and drawn, or its
+  RGBA through putImageData
 message event: STATE → the page's UI,
   REPLY → calls, AUDIO → counts
                                     (between ticks, every 8 ms while the
@@ -101,6 +109,8 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize |
 | 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
 | 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
+| 12 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
+| 20 | GAMEPAD | `connected u8`, `standard u8`, `buttons u8`, `0 u8`, `pressed u32` (bit per button), `axes f32×6` (a standard pad: the sticks, then the triggers' values): the pad's state, polled each refresh before the tick and sent when it changed ("Input", below) |
 
 A record whose payload is shorter than its kind's reads the missing fields as
 zeros, and an unknown kind is skipped, so either side can grow a record.
@@ -109,7 +119,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 
 | kind | record | payload |
 |---|---|---|
-| 1 | FRAME | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 ×3`, the pixels |
+| 1 | FRAME | `w u16`, `h u16`, `format u8` (0 RGBA8, 1 INDEXED8), `0 ×3`, then for INDEXED8 the palette (256 × RGBA), then the pixels (4 bytes each, or one palette index) |
 | 2 | SYNC | `seq u32` (last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
 | 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
 | 4–11 | — | retired: the sound records of the page's own mixing, before the program mixed |
@@ -127,6 +137,9 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 13 | BENCH | `f64` per value (`--features bench`; names from the `bench_names` call) |
 | 14 | PCM | `start u32` (the pair of the ring's clock it plays at), `rate u32`, `flags u32` (1: silence the ring first, `S_ClearBuffer`), then 16-bit stereo pairs. Copied into the sound ring by `wasi.js`, never posted |
 | 15 | AUDIO | `rate u32`, `mode u32` (0 Classic, 1 2026), then counts: `starts`, `local`, `stops`, `clears`, `painted` (u32 each) |
+| 16 | CD | `serial u32` (a new value: play the track from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes, and only with a disc ("CD music") |
+| 17 | FRAME_AT | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, ring slot `slot`, its pixels and palette at those addresses (`-sharedframes`) |
+| 20 | RUMBLE | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read): the pad's two motors, or a phone's vibration (2026's `joy_rumble`) |
 
 A turn's records end with its `SYNC`. A tick's `PCM` comes before its
 `FRAME`, so the samples reach the ring before the pixels are copied.
@@ -142,8 +155,10 @@ Three `SharedArrayBuffer`s:
   consumed), `SYNCS` (turns so far), `LATEST`/`FRAMES`/`READING`/`SHOWN`/
   `SLOTS_GEN` (the frame slots), `RUN` (starting, running, exited,
   crashed), `WAIT` (whether the program waits for ticks), and each slot's
-  width, height and format. The same table is at the top of `wasi.js` and of
-  the page's script.
+  width, height and format, and where its frame is (`SLOT_SRC`: the frame
+  slots, or the program's memory at `SLOT_ADDR`, its palette at
+  `SLOT_PAL`). The same table is at the top of `wasi.js` and of the page's
+  script.
 - **Frame slots**: three, made by the worker as large as the largest frame
   so far. The worker writes a frame into a slot that is neither the newest
   (`LATEST`) nor the one the page is reading (`READING`), then publishes it;
@@ -152,7 +167,21 @@ Three `SharedArrayBuffer`s:
   resolution) gets a new set, which the worker sends the page and numbers in
   `SLOTS_GEN`; the page presents nothing until it holds the set `SLOTS_GEN`
   names, so the frame shows one refresh later. No resolution limit lives in
-  the host, and at the default 960×600 the slots take 6.9 MB.
+  the host, and at the default 960×600 the slots take 1.7 MB (indexed
+  frames; 6.9 MB RGBA).
+- **In place** (the threads build): the program's own memory is a shared
+  `WebAssembly.Memory`, so `wasi.js` passes `-sharedframes` and sends the
+  page the memory, and the program leaves each frame where it drew it,
+  saying where in a `FRAME_AT` (`quake-wasm/src/present.rs`). It keeps its
+  last three frames, a ring: each frame takes the next slot, and the buffer
+  it replaces goes back to the renderer's frame pool. The page claims the
+  newest as before; the host lets a `FRAME_AT` return only once the page is
+  not reading the ring's next slot (`Atomics.wait` on `READING`, which the
+  page notifies when it lets go). The page can only claim the newest frame,
+  so once a frame is published nothing can start reading the slot after it:
+  a frame's memory is written, or handed back, only while no one reads it.
+  No frame slots, and no copy in the worker. A grown memory reaches the page
+  as a fresh `memory.buffer`.
 - **The sound ring** (64 bytes + 16384 stereo pairs of 16 bits, made by the
   page, handed to the worker and to the AudioWorklet). Its control block is
   an `Int32Array`: `POS` (the pair the device plays next — the clock the
@@ -163,6 +192,95 @@ Three `SharedArrayBuffer`s:
   `start & 16383`; the worklet plays pair `POS` when `0 < WRITE - POS <=
   16384`, silence otherwise. The same table is at the top of `wasi.js` and
   in the page's sound section.
+
+## Presentation
+
+The program draws 8-bit frames, a palette index a pixel, as Quake's
+`vid.buffer` holds them, and `V_UpdatePalette` sets the palette they are
+shown through each frame (the cshifts, then gamma: the renderer's
+`FramePalette`). The page is the display's DAC:
+
+- **WebGL2** (on a GPU): the page asks for `INDEXED8` (`PRESENT`). The
+  frame goes up as an `R8UI` texture and the palette as a 256×1 `RGBA8`
+  one, straight from the shared view where the browser takes one (Chromium
+  does; else through one copy into a staging buffer, the smallest copy that
+  works: a byte a pixel, 0.06 / 0.25 / 0.56 ms at 1280×800 / 1440p / 4K
+  here, the upload after it no slower), and a fragment shader draws each pixel as
+  `texelFetch(palette, texelFetch(frame, p).r)` — exact integers, no
+  filtering, blending, dithering or colour conversion, so the canvas holds
+  exactly the RGBA the program's own pack would. No RGBA pack runs in the
+  program, and a palette shift costs 1 KB.
+- **2-D canvas** (no WebGL2 — headless Firefox —, a WebGL2 drawn by the CPU,
+  or `?canvas2d`): the page asks for `RGBA8`; the program packs its frame
+  through the palette on the renderer's threads (`render::pack_rgba`, one
+  4-byte store a pixel), and the page copies it into an `ImageData` for
+  `putImageData`, which takes no shared memory.
+
+A WebGL2 drawn by the CPU (SwiftShader, llvmpipe: the renderer string says
+so) costs more than the 2-D canvas's copy — headless Chromium's
+SwiftShader, demo1 at 2560×1440 on 8 threads: a page frame of 23.7 ms
+against 7.2 — so the page takes the 2-D canvas there (`?webgl` takes WebGL2
+anyway). A lost WebGL context (a GPU reset) is waited out: nothing is drawn
+until the browser restores it, then the textures are made again and the next
+frame shows; the game runs on. A context that never comes back leaves the
+canvas blank until a reload (the 2-D canvas cannot take over a canvas that
+had a WebGL context).
+
+**The same pixels.** `web/verify_present.py` reads the canvas back
+(`quake.readback()`: `readPixels` of the last frame drawn again, or
+`getImageData`) and compares its hash with the program's RGBA for the same
+frame (the `frame_hash` call) in the attract demo, the live walk, the Quad's
+cshift, underwater (the warp and the water's shift), the menu's fade, the
+console and at gamma 0.7, with WebGL2 (the shared views and the staging
+copy, and after a lost and restored context) and with the 2-D canvas: equal
+everywhere, in headless Chromium (SwiftShader and the GPU) and Firefox (the
+2-D canvas; its headless build has no WebGL2). Natively, `quaketool play
+--hash-every` over 28 runs (seven workloads at three Classic sizes, the
+Quad's shift among them; 1080p modern on 8 threads; 1440p with the scaled
+2-D layer) prints the same hashes as before the renderer went 8-bit
+(`d5db64a`), and the goldens are unchanged.
+
+**Measured.** `bench.py --video modern --threads 1,8`, demo1, the threads
+build's bench program before (`d5db64a`: RGB frames packed to RGBA, copied
+into a frame slot, copied out, `putImageData`) and after, in one sitting on
+a 16-thread desktop (load 4–8), headless Chromium on a desktop GPU
+(`QUAKE_GPU=1`: the integrated GPU through ANGLE on GL), uncapped rAF; median ms.
+The host frame is the program's (`step`); the page frame is the rAF period,
+everything the browser does for the frame included:
+
+| | host frame before → after | page frame before → after (WebGL2) | after, 2-D canvas |
+|---|---|---|---|
+| 1280×800, 1 thread | 4.94 → 3.16 | 6.85 → 3.83 | 4.43 |
+| 1920×1080, 1 thread | 8.72 → 5.65 | 11.71 → 6.43 | 8.26 |
+| 2560×1440, 1 thread | 14.35 → 9.11 | 20.50 → 10.17 | 14.77 |
+| 3840×2160, 1 thread | 29.45 → 19.20 | 41.87 → 20.70 | 30.05 |
+| 1280×800, 8 threads | 2.06 → 1.32 | 3.75 → 1.72 | 2.58 |
+| 1920×1080, 8 threads | 2.99 → 1.99 | 6.13 → 2.58 | 4.53 |
+| 2560×1440, 8 threads | 4.67 → 2.87 | 10.62 → 3.42 | 7.61 |
+| 3840×2160, 8 threads | 8.94 → 4.97 | 21.66 → 6.06 | 13.73 |
+
+At 8 threads the page used to add 1.7 / 3.1 / 6.0 / 12.7 ms to the host
+frame (the worker's copy into a slot, the page's copy out, `putImageData`,
+and the RGBA the program packed); with WebGL2 it adds 0.4 / 0.6 / 0.6 /
+1.1 ms (the page's own time, `js - wait`, is 0.2–0.6 ms: the uploads and the
+draw call; the rest is the browser's). A frame in place costs the worker
+0.1 ms where it cost ~3 ms at 1440p. The host frame itself shrank too: no
+RGBA pack (0.8 ms at 1440p, 2.0 at 4K, on 8 threads), and the renderer
+stores a byte a pixel instead of three. So 1440p on 8 threads fits a
+240 Hz refresh (4.2 ms) and 1280×800 a 480 Hz one (2.1 ms), on an integrated GPU.
+The 2-D canvas gains from the same program changes but still pays its two
+copies and `putImageData`. On headless Chromium's software GL (SwiftShader,
+no `QUAKE_GPU`) the 2-D canvas is the page's choice: page frame at 8 threads
+3.91 / 6.44 / 10.45 / 21.03 before, 2.82 / 4.74 / 7.19 / 13.39 after
+(WebGL2 forced, `?webgl`: 7.21 / 13.45 / 23.65 / 47.05 — the CPU drawing
+the textures). The single-thread build (`wasm32-wasip1`, indexed frames
+copied through the slots), GPU, page frame: 6.24 → 3.73, 11.28 → 6.74,
+20.01 → 10.12 at 1280×800, 1920×1080, 2560×1440.
+
+Input to present (`bench.py --latency 20`: the live walk uncapped, keys at
+random moments, to the present of the first frame that consumed each; GPU,
+8 threads, median / p95 ms): 1280×800 3.92 / 6.40 → 1.83 / 4.37;
+2560×1440 10.49 / 12.00 → 3.16 / 4.42.
 
 ## Files
 
@@ -178,7 +296,10 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **The pak is a file.** The page downloads `id1/pak0.pak` beside
   `quake.wasm` and hands it to the worker's file system; the program opens it
   with `Pak::open` (as `quaketool` does) and reads each lump on demand, so no
-  copy of the archive lives in the program's memory. Measured against the
+  copy of the archive lives in the program's memory. It reads through id's
+  search path (`quake_rs::common`: `pak0.pak`, `pak1.pak`, … over the game
+  directory's loose files, the last pack searched first), so a player's own
+  `pak1.pak` is one more file ("Your files"). Measured against the
   same program with the pak embedded (`include_bytes!` and
   `Pak::from_static`, the old page's way), six loads each on a local server:
   navigation to the first frame 169–328 ms from the file, 167–330 ms
@@ -186,8 +307,8 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   file, 191–214 MB embedded (the embedded pak lives in the module's bytes and
   in the linear memory). Besides, an engine update no longer re-downloads
   18 MB, the build needs no game data, and a player's own `pak1.pak` can be
-  one more file (a later change: the worker cannot take files once running,
-  so it would be added before start, or the worker restarted).
+  one more file (the worker cannot take files once running, so the page
+  restarts the game to add one: "Your files").
 - **Saves and settings go through `std::fs`.** `save s0` writes
   `id1/s0.sav` (`Host_Savegame_f`), the Load and Save menus list the slots
   from the files (`M_ScanSaves`, when they open), and `config.cfg` holds the
@@ -204,6 +325,92 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   written — and removes the keys.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
+
+## Your files
+
+A player who owns Quake (the Steam, GOG and CD versions all ship id's
+original `id1/pak0.pak` and `id1/pak1.pak`) adds their files, and plays the
+registered game — episodes 2–4 — with their CD soundtrack.
+
+- **Adding.** Drop the files, or the whole Quake folder, anywhere on the
+  page, or pick them with the drawer's line ("Own Quake? …"). The page takes
+  `pak1.pak`, a `pak0.pak` that is not id's shareware one (the same file
+  in every 1.06 copy: recognised by `COM_LoadPackFile`'s count and CRC, 339
+  and 32981, and skipped), and CD tracks as files, `track02.ogg`… (the
+  track number from the name: `track02`, `Track 2`, a leading `02`; any
+  format the browser can play). It checks a pak as `COM_LoadPackFile` reads
+  one — the `PACK` header, a directory inside the file of at most 2048
+  entries, each inside the file — and says what it left out and why.
+- **Keeping.** A pak goes into the game directory, the IndexedDB store the
+  program's files live in (`id1/pak1.pak`), and so to the worker's file
+  system at every start; the music goes to a store of its own (`music`,
+  keyed by track), which the worker never sees: the page hands the program
+  the list of tracks (`-cdtracks 2,3,…`, "CD music") and plays a track's
+  file when the program asks for it. The files stay in this browser until
+  removed (the drawer's "remove them").
+- **Restarting.** The worker takes its files before it starts, so adding
+  or removing files reloads the page: the engine and `pak0.pak` come from
+  the HTTP cache, the saves and settings from storage. (A reload asks for
+  the click that starts audio again; adding files is rare enough.)
+- **The program decides**, as id's did: `COM_CheckRegistered` compares
+  `gfx/pop.lmp` with the table in `common.c` ("Playing registered
+  version." on the console, the `registered` cvar the QuakeC's episode gates
+  read), and refuses a modified game without it ("You must have the
+  registered version to use modified games") or a `pop.lmp` that is not
+  id's ("Corrupted data file."); `PR_LoadProgs` refuses a `progs.dat` made
+  against other system globals; and the port refuses one that calls
+  builtins id's engine never had. A refusal ends the program before it
+  starts, its message on stderr; if it came with files just added, the page
+  takes them out again, restarts, and shows the message in the drawer.
+- **Not supported, and why.** The 2021 re-release's files
+  (`rerelease/id1/pak0.pak`) are a different game build: its `progs.dat`
+  calls the new engine's builtins by name (numbered `#0`, resolved at load),
+  which the port does not have and will not fake — the port plays id's 1996
+  WinQuake. The page leaves out anything under a `rerelease/` folder and
+  says to use the `id1/` files beside it; a re-release pak dropped on its
+  own reaches the program, which refuses it (a modified game, or its
+  progs). Mission packs and mods (`-game`, `-hipnotic`, more paks) are out
+  of the port's scope; the page takes `pak0.pak` and `pak1.pak` only.
+
+`verify_content.py` checks it all with synthesized data: a `pak1.pak` made
+from `common.c`'s `pop[]` table and the shareware `maps/e1m1.bsp` copied as
+`maps/e2m1.bsp`, and generated tones as tracks 2, 3 and 6.
+
+## CD music
+
+In 1996 Quake's music was the CD's own audio tracks, which the drive played
+beside the game's mix, never through it: the engine only told the drive
+"track N, looping", and the drive played it at its level. The port keeps
+that split.
+
+- **The program** asks where id's client asked (`quake_rs::cd_audio`,
+  `cd_win.c`'s state): every level's signon (`svc_cdtrack`, the
+  worldspawn's `sounds`: e1m1 is track 6, the start map 4), the QuakeC's
+  intermission track 3 and episode-end track 2, a demo's (its header line
+  forces one: id's `demo1` plays track 2 all through the attract loop), and
+  `svc_setpause` pauses it. The same track asked for again goes on; another
+  stops it and starts from the top. The `cd` command is id's (`cd play N`,
+  `loop`, `stop`, `pause`, `resume`, `remap`, `info`, …). The drive's
+  state goes to the page in a `CD` record when it changes.
+- **The level** is `bgmvolume` (Options > CD Music Volume) as id's DOS
+  driver set it, `(int)(bgmvolume * 255)`; WinQuake's MCI could not set a
+  CD's level, so there the slider only switched the music off and on. Both
+  profiles: a CD playing is id's behaviour, so Classic plays the player's
+  music too.
+- **The page** plays the track's file in an `<audio>` element (streamed:
+  a seven-minute track is not decoded whole into memory), through a gain
+  node (the level) into the page's AudioContext, beside the worklet that
+  plays the program's mix: it starts with the first click, as the game's
+  sound does, and a hidden tab pauses it with the game (WinQuake paused the
+  CD when it lost the screen). A looping track loops in the element; a
+  track played once reports its end (the `cd_ended` call: MCI's notify).
+- **Without music** there is no drive: no `-cdtracks`, no `CD` records,
+  nothing in the program changes (id's `cd_null.c`, which the C oracle is
+  built with). The `cd` command says "No CD in player.".
+
+The checks read the drive through `quake.cd.state()` (what the program
+asked for; the element's time, loop and level; the output's RMS) and the
+`cd_state` call.
 
 ## Settings, and how the page shows the picture
 
@@ -233,6 +440,95 @@ bindings, and the port's departures, which the profiles **Classic** and
 with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
 reload); the checks that pin id's behaviour open the page as `?classic`,
 and `bench.py` does too, so its frames hash as `quaketool play`'s.
+
+## Input
+
+The page sends what the player does as it happens; the program decides what
+it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
+
+- **Keys by their place.** A key is its place on the keyboard (`KeyboardEvent.code`:
+  letters, digits and punctuation as the US key in that place), as WinQuake's
+  keys were scancodes (`scantokey`). So WASD walks on AZERTY or Dvorak too,
+  `bind` names a place, and a key's release matches its press whatever Shift
+  did in between; what the layout typed goes with the key (`ch`) for the
+  console and the name fields. A key `code` does not name falls back to
+  `key`. (`verify_input.py`: AZERTY's key in W's place is `w` in the game and
+  types `z` in the console; letters used to follow the layout, `z`.)
+- **The raw mouse.** The pointer lock asks for `unadjustedMovement`
+  (Chromium's raw input, on Windows, macOS and ChromeOS): id's
+  `IN_StartupMouse` switched Windows' pointer acceleration off while the game
+  ran, so a count was always the same turn. Refused (Linux, Firefox), the
+  plain lock, at once and from then on (Chromium refuses a burst of lock
+  requests). Each `mousemove` is a `MOUSE` record; a browser that coalesces
+  samples into one event per refresh sums their movement into it, so every
+  count arrives, and the program adds each as it comes: the turn per count
+  is the same at any frame rate (`mouse_turns_the_same_at_60_and_480_hz`).
+  `pointerrawupdate` would deliver samples sooner within a refresh, but the
+  frame starts at the refresh either way, so it would not show them sooner.
+- **The gamepad.** The Gamepad API has no events for a pad's state, so the
+  page polls `navigator.getGamepads()` once per refresh, just before the tick
+  (as late as the frame allows), and sends a `GAMEPAD` record when the state
+  changed: the first connected pad with the standard mapping, else the first
+  connected. The program keeps it, and the host frame the tick runs reads it
+  as id's joystick: `IN_Commands` (buttons as `JOY1`.., `AUX5`.., the D-pad as
+  the hat's `AUX29`..`AUX32`) and `IN_JoyMove`; quake-rs
+  `client/in_win.rs` has the mapping from a standard pad to winmm's axes and
+  buttons. Classic reads it only after `joystick 1` (id's default is 0); the
+  2026 profile's pad is a twin-stick layout of `bind` lines and `joy*`
+  settings, with its buttons as the menu's keys (`joy_menukeys`). A pad's
+  button also takes the click-to-play scrim away (a browser may not count it
+  as the gesture audio needs: then the first click or key starts the sound).
+- **Rumble** (2026, `joy_rumble`): a `RUMBLE` record after a frame in which
+  the player took damage (its strength from `V_ParseDamage`'s count) or fired
+  a heavy weapon, saying whether the pad is read (`joystick`). The page plays
+  it on the pad's `vibrationActuator` (`"dual-rumble"`, Chromium) or
+  `hapticActuators[0].pulse` (Firefox, where enabled) — unless the pad is not
+  read, or the touch screen was touched since the pad was last used: then a
+  phone vibrates, through the touch controls' `rumble()` (`navigator.vibrate`,
+  in the game only; Android). Never both. On a device with both, the pad and
+  the touch controls otherwise just add up: the pad's move is `IN_JoyMove`'s,
+  the touch stick's the client's analog `set_move`, and neither holds the
+  other's keys.
+
+`web/verify_gamepad.py` drives all of it with a synthetic pad (the scrim, the
+menus, a walk, a turn, the rocket's kick and its blast's rumble, an unplugged
+pad, Classic's `joystick 0` and `1`, and on a touch page the rumble going to
+the pad or the phone, whichever was used last).
+The synthetic pad stands in for the browsers' own Gamepad API; no real pad
+was tried.
+
+**Latency.** `web/latency.py` measures from each input event's `timeStamp`
+(when the browser got it, so the wait for the refresh counts; a pad's
+`timestamp`) to the `putImageData` of the first frame that consumed it, live
+game, 2026 profile at 960×600, keys pressed, the mouse dragged and the right
+stick moved at random moments for 15 s each (median / p95, ms; in brackets
+the event's wait for its handler; a 16-core desktop, load 4–8):
+
+| | key | mouse | pad | the frame (tick to present) |
+|---|---|---|---|---|
+| Chromium, 60 Hz rAF | 13.2 / 20.9 [0.3] | 11.9 / 20.5 [7.2] | 12.5 / 17.2 [8.9] | 4.1 / 5.8 |
+| Chromium, 240 Hz emulated | 6.9 / 14.8 [2.0] | — | 4.2 / 5.5 [1.0] | 3.4 / 4.6 |
+| Firefox, 60 Hz rAF | 13.7 / 17.7 [0.1] | 11.5 / 20.2 [7.0] | 11.8 / 16.9 [8.1] | 4.2 / 5.9 |
+
+At 60 Hz an event waits on average half a refresh for the tick that takes
+it, then the frame's 4 ms: 12–13 ms to the canvas, whatever the input. The
+mouse's wait is in its dispatch (browsers deliver `mousemove` with the
+refresh), a key's after it; the pad's is the poll's. At an emulated 240 Hz
+(the page's loop paused and a 4.17 ms timer driving `quake.tick`, since
+headless browsers refresh at 60 Hz) the pad, polled just before each tick,
+takes 4.2 ms, one frame; a key 6.9 ms, with a tail where the browser held a
+task behind its own 60 Hz frame after the input, which a real 240 Hz refresh
+would not (the mouse is left out: its events still come at 60 Hz). Firefox's
+240 Hz run lost most of its key presses to its test driver and is not in the
+table. What none of this sees: from `putImageData` to light (the compositor
+and the display: a refresh or two, one less with `?lowlatency` where it
+works), and a device's own latency (USB polling, the browser's gamepad
+poll).
+
+Nothing cheap is left in the page: keys and mouse go to the program when
+they happen and it applies them at once, the pad is read as late as the
+tick, and the frame is presented in the refresh that ticked. What would cut
+more is the browser's (`?lowlatency`, below) or the frame's own time.
 
 ## Sound
 
@@ -362,8 +658,8 @@ headless Chromium on a 16-thread desktop (load 2.6 → 6.2), median ms:
 walk_e1m1 is alike (2560×1440: render3d 9.87 → 3.10 ms). At 8 threads the
 host frame is half the page's: the frame's pixels into the shared slot,
 the page's copy out and `putImageData` (0.9 ms each at 1440p) are one
-thread's. With the threads build's shared memory the page could read the
-frame straight out of the program's memory. The frames are the same at
+thread's. With the threads build's shared memory the page now reads the
+frame where it lies ("Shared memory", "Presentation"). The frames are the same at
 every count: `bench.py --hash-every 30` over fire_e1m1, walk_e1m3 and demo1
 at 1920×1080 prints the same hashes at 1 and 8 threads (one page per count:
 a page's runs share QuakeC's random stream).
@@ -456,18 +752,11 @@ the pak. The renderer process's memory (PSS, attract demo running) was
 it, where the old page held the pak twice (the module's bytes and its linear
 memory). "Files" above has the pak's own comparison.
 
-**Presentation.** The brief's idea — an 8-bit frame plus its palette, with
-the GPU doing the VGA DAC in WebGL2 — needs the renderer to write palette
-indices, and it composes RGB today (PERF_PLAN B5), so frames are RGBA. For
-RGBA, WebGL2 measured worse where it could be measured: Chromium accepts a
-shared view in `texSubImage2D` (so the page's copy could go) and draws it
-byte-exact with `texelFetch`, but headless Chromium's software GL took
-0.58 ms to upload and draw a 960×600 frame against 0.23 ms for copy plus
-`putImageData`, and headless Firefox has no WebGL2 at all. The page keeps the
-2-D canvas. With B5 the case changes: a quarter of the bytes through both
-copies and no pack in the program (0.47 ms at 1280×800), which would make
-this design cheaper per frame than the old one; the `FRAME` record's
-`format` byte is there for it.
+**Presentation.** At the port, frames were RGB and the page kept the 2-D
+canvas: for RGBA, headless Chromium's software GL took 0.58 ms to upload and
+draw a 960×600 frame against 0.23 ms for copy plus `putImageData`. The
+renderer has since gone 8-bit (PERF_PLAN B5) and the page presents through
+WebGL2 on a GPU: "Presentation" above has the design and its measurements.
 
 **Verdict.** Equal frames, equal host frame time and startup, similar memory,
 and a sub-millisecond hand-off per frame that the 8-bit framebuffer would cut
@@ -475,11 +764,17 @@ by three quarters. Not clearly worse, so everything was ported.
 
 ## `?lowlatency`
 
-Kept, same meaning: it asks for a `desynchronized` 2-D canvas, which can skip
-a compositor frame where the browser supports it (Chrome on Windows and
-ChromeOS), at the risk of tearing. The frame still arrives inside the
-refresh that ticked, so the hint matters exactly as much as before. Off by
-default, and not verifiable headless.
+Kept, same meaning: it asks for a `desynchronized` canvas (WebGL2's or the
+2-D one), which can skip a compositor frame where the browser supports it
+(Chrome on Windows and ChromeOS), at the risk of tearing. The frame still
+arrives inside the refresh that ticked, so the hint matters exactly as much
+as before. Off by default, and not verifiable headless: there it holds the
+refresh near 60 Hz, so input to present measured 12–16 ms at the median
+with it (old page and new, WebGL2 and 2-D alike) against 2–3 ms without. It
+stays off in 2026 too: it would save up to a refresh (2 ms at 480 Hz, 17 ms
+at 60) only where the browser supports it, and risks tearing there — an
+unverifiable change to every frame's look is not one to make by default. A
+player who wants it opens the page as `?lowlatency`.
 
 ## Touch
 
@@ -640,12 +935,17 @@ run here.
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
 `Atomics.wait` in a worker. Checked here: headless Chromium (the nine
-checks, `verify_threads.py` and the benchmark) and headless Firefox 155 (the
-nine checks with `QUAKE_BROWSER=firefox`, `verify_extras.py` skipping its
-Keyboard Lock half, which Firefox has no API for; `verify_threads.py`).
+checks, `verify_present.py`, `verify_threads.py` and the benchmark) and
+headless Firefox 155 (the nine checks and `verify_present.py` with
+`QUAKE_BROWSER=firefox`, `verify_extras.py` skipping its Keyboard Lock half,
+which Firefox has no API for; `verify_threads.py`); each on both builds.
+WebGL2 is optional: without it the page presents through the 2-D canvas.
 Playwright's WebKit would not start here (missing system
-libraries). Not checked: Safari, iOS, a real GPU, a real high-refresh
-display. From the platforms' documentation, not from a
+libraries). A GPU is checked through headless Chromium (`QUAKE_GPU=1`: the
+local GPU, ANGLE on GL; `verify_present.py` and the benchmark). Not
+checked: Safari, iOS, Firefox's WebGL2 (its headless build has none; its
+refusal of shared views is emulated, `verify_present.py`'s staging copy), a
+GPU driving a real high-refresh display. From the platforms' documentation, not from a
 run: Safari has `SharedArrayBuffer` under COOP/COEP since 15.2 (iOS 15.2),
 with `Atomics.wait` in workers; iOS has no pointer lock, and a phone plays
 with the touch controls ("Touch"). The program's own memory no longer

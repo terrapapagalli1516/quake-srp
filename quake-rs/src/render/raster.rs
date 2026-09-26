@@ -8,7 +8,7 @@
 //! bounding-box triangle ([`raster_triangle`]) is the untextured debug
 //! renderer's ([`super::render_bsp`]).
 
-use super::Image;
+use super::{nearest_index, Image, Palette};
 use crate::math::Vec3;
 use super::light::{colormap_row, LightMap, COLORMAP_LEN};
 use super::warp::{turb_phase, warp_st, TurbTable, TURB_COORD_MASK};
@@ -27,18 +27,35 @@ pub(super) struct Projected {
     pub(super) depth: f32,
 }
 
-/// Hash a (non-negative) surface index to a stable, reasonably saturated RGB
-/// base colour, so distinct textures/surfaces get distinct hues across runs.
-pub(super) fn hash_color(index: i64) -> [f32; 3] {
-    // A small integer hash (splitmix-ish) to spread adjacent indices apart.
+/// A small integer hash (splitmix-ish) of a surface index, spreading
+/// adjacent indices apart.
+fn surface_hash(index: i64) -> u64 {
     let mut h = (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     h ^= h >> 29;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    h ^= h >> 32;
+    h ^ (h >> 32)
+}
 
+/// Hash a (non-negative) surface index to a stable, reasonably saturated RGB
+/// base colour, so distinct textures/surfaces get distinct hues across runs
+/// (the true-colour debug view, [`super::render_bsp`]).
+pub(super) fn hash_color(index: i64) -> [f32; 3] {
     // Derive a hue in [0,1); keep saturation/value high but not blinding.
-    let hue = ((h & 0xFFFF) as f32) / 65536.0;
+    let hue = ((surface_hash(index) & 0xFFFF) as f32) / 65536.0;
     hsv_to_rgb(hue, 0.55, 0.95)
+}
+
+/// Hash a surface index to a stable palette index for a textureless face
+/// (test maps): one of the middle 192, so its shading shows either way.
+pub(super) fn hash_index(index: i64) -> u8 {
+    32 + (surface_hash(index.wrapping_add(1)) % 192) as u8
+}
+
+/// Palette index `index` shaded by `shade` the port's linear way: the
+/// palette entry nearest its colour times `shade` (textureless or
+/// colormap-less synthetic faces; id's walls go through the colormap).
+pub(super) fn shade_index(palette: &Palette, index: u8, shade: f32) -> u8 {
+    nearest_index(palette, palette[usize::from(index)].map(|v| (f32::from(v) * shade).clamp(0.0, 255.0) as u8))
 }
 
 /// Convert HSV (each in `[0,1]`) to linear-ish RGB in `[0,1]`.
@@ -70,7 +87,7 @@ fn edge(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
 /// coverage and per-pixel depth interpolation. `color` is the already-shaded
 /// 8-bit RGB for the whole triangle (flat shading).
 pub(super) fn raster_triangle(
-    image: &mut Image,
+    image: &mut Image<[u8; 3]>,
     zbuf: &mut [f32],
     v0: Projected,
     v1: Projected,
@@ -148,7 +165,7 @@ pub(super) fn raster_triangle(
             if let Some(z) = zbuf.get_mut(idx) {
                 if depth < *z {
                     *z = depth;
-                    if let Some(p) = image.rgb.get_mut(idx) {
+                    if let Some(p) = image.pixels.get_mut(idx) {
                         *p = color;
                     }
                 }
@@ -453,12 +470,11 @@ impl BlockFixed {
 /// first pixel, so it restarts wherever the surface comes out from behind a
 /// nearer one (`R_ScanEdges` cuts its spans there).
 fn span16_cached(
-    crow: &mut [[u8; 3]],
+    crow: &mut [u8],
     sp: &Span,
     fx: &BlockFixed,
     block: &[u8],
     bw: usize,
-    palette: &[[u8; 3]; 256],
 ) {
     let end = crow.len();
     let (s0, t0) = sp.st_at(0, fx.sadjust, fx.tadjust);
@@ -491,7 +507,7 @@ fn span16_cached(
         }
         for c in &mut crow[k0..k0 + n] {
             let texel = block.get((ta >> shift) as usize * bw + (sa >> shift) as usize);
-            *c = palette[texel.copied().unwrap_or(0) as usize];
+            *c = texel.copied().unwrap_or(0);
             sa += ds;
             ta += dt;
         }
@@ -528,14 +544,13 @@ fn turb_adjust(grads: &PolyGrads) -> (i64, i64) {
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn turb16_span(
-    crow: &mut [[u8; 3]],
+    crow: &mut [u8],
     sp: &Span,
     sadjust: i64,
     tadjust: i64,
     pixels: &[u8],
     tw: usize,
     th: usize,
-    palette: &[[u8; 3]; 256],
     turb: &TurbTable,
     phase: usize,
 ) {
@@ -563,7 +578,7 @@ fn turb16_span(
         for c in &mut crow[k0..k0 + n] {
             let (sturb, tturb) = turb.texel(phase, a, b);
             let texel = pixels.get(tturb.rem_euclid(th_i) as usize * tw + sturb.rem_euclid(tw_i) as usize);
-            *c = palette[texel.copied().unwrap_or(0) as usize];
+            *c = texel.copied().unwrap_or(0);
             a = a.wrapping_add(ss);
             b = b.wrapping_add(ts);
         }
@@ -600,19 +615,17 @@ pub(super) fn span_at(grads: &PolyGrads, u: usize, v: usize) -> Span {
 /// `(*d_drawspans)` on a surface-cache block: `D_DrawSpans16` (the default) or
 /// the port's exact-perspective extra (the texel of the exact perspective at
 /// every pixel), over one span.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn span_cached(
-    crow: &mut [[u8; 3]],
+    crow: &mut [u8],
     sp: &Span,
     fx: &BlockFixed,
     block: &[u8],
     bw: usize,
     bh: usize,
-    palette: &[[u8; 3]; 256],
     persp: Persp,
 ) {
     if persp == Persp::Spans16 {
-        span16_cached(crow, sp, fx, block, bw, palette);
+        span16_cached(crow, sp, fx, block, bw);
         return;
     }
     let (bw_i, bh_i) = (bw as i64, bh as i64);
@@ -623,7 +636,7 @@ pub(super) fn span_cached(
         let z = 65536.0 / zi;
         let bx = (((sz * z) as i64).wrapping_add(fx.sadjust) >> 16).clamp(0, bw_i - 1) as usize;
         let by = (((tz * z) as i64).wrapping_add(fx.tadjust) >> 16).clamp(0, bh_i - 1) as usize;
-        *c = palette[block[by * bw + bx] as usize];
+        *c = block[by * bw + bx];
         zi += sp.dzi;
         sz += sp.dsz;
         tz += sp.dtz;
@@ -634,13 +647,12 @@ pub(super) fn span_cached(
 /// perspective texel of every pixel, over one span of a liquid surface.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn span_turb(
-    crow: &mut [[u8; 3]],
+    crow: &mut [u8],
     sp: &Span,
     grads: &PolyGrads,
     pixels: &[u8],
     tw: usize,
     th: usize,
-    palette: &[[u8; 3]; 256],
     turb: &TurbTable,
     time: f32,
     persp: Persp,
@@ -650,7 +662,7 @@ pub(super) fn span_turb(
     }
     if persp == Persp::Spans16 {
         let (sadjust, tadjust) = turb_adjust(grads);
-        turb16_span(crow, sp, sadjust, tadjust, pixels, tw, th, palette, turb, turb_phase(time));
+        turb16_span(crow, sp, sadjust, tadjust, pixels, tw, th, turb, turb_phase(time));
         return;
     }
     let st_eye = grads.st_eye;
@@ -660,7 +672,7 @@ pub(super) fn span_turb(
         let (s2, t2) = warp_st(turb, (sz * z + st_eye[0]) as f32, (tz * z + st_eye[1]) as f32, time);
         let tx = s2.rem_euclid(tw as i32) as usize;
         let ty = t2.rem_euclid(th as i32) as usize;
-        *c = palette[pixels.get(ty * tw + tx).copied().unwrap_or(0) as usize];
+        *c = pixels.get(ty * tw + tx).copied().unwrap_or(0);
         zi += sp.dzi;
         sz += sp.dsz;
         tz += sp.dtz;
@@ -670,16 +682,17 @@ pub(super) fn span_turb(
 /// A wall with no surface-cache block (no colormap, no lightmap, or over the
 /// block size cap — never in id's maps), per pixel: the texel at the exact
 /// perspective, lit by the lightmap's factor (or `shade`) through the colormap
-/// row, or without a colormap the linear `palette[texel] * brightness`.
+/// row, or without a colormap the palette entry nearest the linear
+/// `palette[texel] * brightness` (synthetic scenes only).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn span_tex(
-    crow: &mut [[u8; 3]],
+    crow: &mut [u8],
     sp: &Span,
     grads: &PolyGrads,
     pixels: &[u8],
     tw: usize,
     th: usize,
-    palette: &[[u8; 3]; 256],
+    palette: &Palette,
     shade: f32,
     lightmap: Option<&LightMap>,
     colormap: Option<&[u8]>,
@@ -696,21 +709,14 @@ pub(super) fn span_tex(
         let t = (tz * z + st_eye[1]) as f32;
         let tx = (s as i64).rem_euclid(tw as i64) as usize;
         let ty = (t as i64).rem_euclid(th as i64) as usize;
-        let texel = pixels.get(ty * tw + tx).copied().unwrap_or(0) as usize;
+        let texel = pixels.get(ty * tw + tx).copied().unwrap_or(0);
         let brightness = match lightmap {
             Some(lm) => lm.factor_at(s, t),
             None => shade,
         };
         *c = match colormap {
-            Some(cm) => palette[cm[colormap_row(brightness) * 256 + texel] as usize],
-            None => {
-                let rgb = palette[texel];
-                [
-                    (rgb[0] as f32 * brightness).clamp(0.0, 255.0) as u8,
-                    (rgb[1] as f32 * brightness).clamp(0.0, 255.0) as u8,
-                    (rgb[2] as f32 * brightness).clamp(0.0, 255.0) as u8,
-                ]
-            }
+            Some(cm) => cm[colormap_row(brightness) * 256 + usize::from(texel)],
+            None => shade_index(palette, texel, brightness),
         };
         zi += sp.dzi;
         sz += sp.dsz;
@@ -726,11 +732,11 @@ mod tests {
     /// Draw `rows` of a `w`-wide image through `f`, one span per row from
     /// column `x0`, with the gradients `g` (the rows D_DrawSurfaces would get
     /// for a surface covering them).
-    fn spans(w: usize, h: usize, x0: usize, g: &PolyGrads, mut f: impl FnMut(&mut [[u8; 3]], &Span)) -> Image {
-        let mut img = Image::new(w, h, [0, 0, 0]);
+    fn spans(w: usize, h: usize, x0: usize, g: &PolyGrads, mut f: impl FnMut(&mut [u8], &Span)) -> Image {
+        let mut img = Image::new(w, h, 0);
         for y in 0..h {
             let sp = span_at(g, x0, y);
-            f(&mut img.rgb[y * w + x0..(y + 1) * w], &sp);
+            f(&mut img.pixels[y * w + x0..(y + 1) * w], &sp);
         }
         img
     }
@@ -772,9 +778,9 @@ mod tests {
         };
         // With the colormap: pixel = palette[colormap[row*256 + 200]].
         let want_index = ((TEXEL as usize + expected_row) % 256) as u8;
-        assert!(render(Some(&cm)).rgb.iter().all(|p| p[0] == want_index), "colormap path: palette index {want_index}");
-        // Without the colormap: the legacy linear multiply, exactly palette[200].
-        assert!(render(None).rgb.iter().all(|&p| p == [TEXEL; 3]), "None path is palette[texel]*brightness");
+        assert!(render(Some(&cm)).pixels.iter().all(|&p| p == want_index), "colormap path: palette index {want_index}");
+        // Without the colormap: the linear multiply's nearest entry, palette[200].
+        assert!(render(None).pixels.iter().all(|&p| p == TEXEL), "None path is palette[texel]*brightness");
         assert_ne!(want_index, TEXEL, "test ramp should remap the index at row 31");
     }
 
@@ -782,10 +788,6 @@ mod tests {
     /// — neither row 0 (the old overbright) nor any other row.
     #[test]
     fn turb_writes_the_raw_texel() {
-        let mut pal = [[0u8; 3]; 256];
-        for (i, p) in pal.iter_mut().enumerate() {
-            *p = [i as u8, i as u8, i as u8];
-        }
         const TEXEL: u8 = 77;
         // 64x64 so the Turb warp's index wrap is well-defined; fill with TEXEL.
         let pixels = vec![TEXEL; 64 * 64];
@@ -796,8 +798,8 @@ mod tests {
         let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 0.0 };
         let g = PolyGrads::from_vertices(&[v0, v1, v2]).expect("triangle");
         for persp in [Persp::Spans16, Persp::Exact] {
-            let img = spans(w, h, 0, &g, |row, sp| span_turb(row, sp, &g, &pixels, 64, 64, &pal, &turb, 0.0, persp));
-            assert!(img.rgb.iter().all(|&p| p == [TEXEL; 3]), "turb stores the raw texel ({persp:?})");
+            let img = spans(w, h, 0, &g, |row, sp| span_turb(row, sp, &g, &pixels, 64, 64, &turb, 0.0, persp));
+            assert!(img.pixels.iter().all(|&p| p == TEXEL), "turb stores the raw texel ({persp:?})");
         }
     }
 
@@ -814,10 +816,6 @@ mod tests {
         let (w, h) = (40usize, 8usize);
         let (bw, bh) = (256usize, 256usize);
         let block: Vec<u8> = (0..bw * bh).map(|i| ((i % bw) + 3 * (i / bw)) as u8).collect();
-        let mut pal = [[0u8; 3]; 256];
-        for (i, p) in pal.iter_mut().enumerate() {
-            *p = [i as u8, 0, 0];
-        }
         let v = |x: f32, y: f32, vz: f32, s: f32, t: f32| AttrVert { x, y, vz, s, t };
         let quad = [
             v(0.0, 0.0, zl, 20.3, 30.3),
@@ -827,8 +825,8 @@ mod tests {
         ];
         let g = PolyGrads::from_vertices(&quad).expect("quad");
         let fx = BlockFixed::new(&g, [0.0, 0.0], bw, bh);
-        let img = spans(w, h, start, &g, |row, sp| span_cached(row, sp, &fx, &block, bw, bh, &pal, persp));
-        img.rgb.iter().map(|p| p[0]).collect()
+        let img = spans(w, h, start, &g, |row, sp| span_cached(row, sp, &fx, &block, bw, bh, persp));
+        img.pixels
     }
 
     #[test]
@@ -894,12 +892,10 @@ mod tests {
         assert_eq!(sp.st_at(0, 5, -5), (i64::MAX.wrapping_add(5), i64::MIN.wrapping_add(-5)));
         let fx = BlockFixed { sadjust: 5, tadjust: -5, bbextents: (4 << 16) - 1, bbextentt: (4 << 16) - 1 };
         let block = [7u8; 16];
-        let mut pal = [[0u8; 3]; 256];
-        pal[7] = [1, 2, 3];
         for persp in [Persp::Spans16, Persp::Exact] {
-            let mut row = [[9u8; 3]; 20];
-            span_cached(&mut row, &sp, &fx, &block, 4, 4, &pal, persp);
-            assert!(row.iter().all(|&p| p == [1, 2, 3]), "{persp:?}: every pixel reads the block");
+            let mut row = [9u8; 20];
+            span_cached(&mut row, &sp, &fx, &block, 4, 4, persp);
+            assert!(row.iter().all(|&p| p == 7), "{persp:?}: every pixel reads the block");
         }
     }
 

@@ -22,7 +22,7 @@ use crate::screen::draw_center_string_revealed;
 // health, current ammo, and armour. The pics live in `gfx.wad` (a WAD2).
 //
 // This port keeps the same virtual coordinates Quake uses. The caller hands us a
-// [`Hud`] holding a borrow of the parsed `gfx.wad`, the palette, and the three
+// [`Hud`] holding a borrow of the parsed `gfx.wad` and the three
 // integer stats read off the player edict; [`draw_hud_into`] then blits the bar
 // 320 wide at the bottom centre of the screen, backtile either side on a wider
 // one, as Sbar_Draw does (or blown up with the "scaled 2-D" extra).
@@ -72,18 +72,16 @@ impl BarXf {
     }
 }
 
-/// The Quake HUD overlay: the parsed `gfx.wad`, the screen palette, and the
-/// player stats to display. Built by the caller each frame from the player edict
+/// The Quake HUD overlay: the parsed `gfx.wad` and the player stats to
+/// display. Built by the caller each frame from the player edict
 /// and the loaded `gfx.wad`; consumed by [`draw_hud_into`].
 ///
-/// The `wad`/`palette` borrows carry an explicit lifetime `'a` so the caller can
+/// The `wad` borrow carries an explicit lifetime `'a` so the caller can
 /// keep one parsed [`Wad2`] alive and lend it per frame without cloning.
 pub struct Hud<'a> {
     /// The parsed `gfx.wad`, which holds the `sbar`/`ibar`/`num_*`/`anum_*`/face/
     /// weapon/item/ammo/armor pics and the `conchars` font.
     pub wad: &'a crate::wad::Wad2,
-    /// The screen palette (`gfx/palette.lmp`), used to colour the pic texels.
-    pub palette: &'a [[u8; 3]; 256],
     /// Current player health, drawn as a big number on the left of the bar, and
     /// driving the face-frame bracket in [`Sbar_DrawFace`](draw_hud_into).
     pub health: i32,
@@ -147,7 +145,6 @@ fn blit_qpic(
     vx: f32,
     vy: f32,
     xf: BarXf,
-    palette: &[[u8; 3]; 256],
 ) {
     if pic.width <= 0 || pic.height <= 0 || xf.scale <= 0.0 {
         return;
@@ -173,7 +170,6 @@ fn blit_qpic(
         (dst_x0, dst_y0, dst_w, dst_h),
         inv_scale,
         HUD_TRANSPARENT,
-        palette,
     );
 }
 
@@ -194,7 +190,6 @@ fn draw_num(
     vy: f32,
     xf: BarXf,
     wad: &crate::wad::Wad2,
-    palette: &[[u8; 3]; 256],
     alt: bool,
 ) {
     // Render the magnitude; the HUD shows 0 for any negative stat.
@@ -227,7 +222,7 @@ fn draw_num(
         if let Ok(pic) = wad.qpic(name) {
             let w = pic.width.max(0) as f32;
             pen -= w;
-            blit_qpic(image, &pic, pen, vy, xf, palette);
+            blit_qpic(image, &pic, pen, vy, xf);
         } else {
             // Missing digit pic: still advance by a default 24-virtual slot so
             // the remaining digits keep their right-justified positions.
@@ -364,13 +359,12 @@ fn blit_named(
     vx: f32,
     vy: f32,
     xf: BarXf,
-    palette: &[[u8; 3]; 256],
 ) {
     if name.is_empty() {
         return;
     }
     if let Ok(pic) = wad.qpic(name) {
-        blit_qpic(image, &pic, vx, vy, xf, palette);
+        blit_qpic(image, &pic, vx, vy, xf);
     }
 }
 
@@ -395,7 +389,6 @@ fn draw_sbar_char(
     vx: f32,
     vy: f32,
     xf: BarXf,
-    palette: &[[u8; 3]; 256],
 ) {
     if conchars.width != 128 || conchars.height != 128 || conchars.data.len() < 128 * 128 {
         return;
@@ -416,7 +409,6 @@ fn draw_sbar_char(
         (dst_x0, dst_y0, dst_w, dst_h),
         inv_scale,
         0,
-        palette,
     );
 }
 
@@ -431,9 +423,8 @@ fn draw_sbar_inventory(
     xf: BarXf,
 ) {
     let wad = hud.wad;
-    let pal = hud.palette;
     // The `ibar` strip in the 24 rows above the sbar: Sbar_DrawPic(0, -24, sb_ibar).
-    blit_named(image, wad, "ibar", 0.0, -24.0, xf, pal);
+    blit_named(image, wad, "ibar", 0.0, -24.0, xf);
 
     // Weapon icons: for each owned weapon (items bit IT_SHOTGUN<<i, i=0..6), draw
     // `sb_weapons[flashon][i]` at Sbar_DrawPic(i*24, -16, ...): the `inva1..5_*`
@@ -442,7 +433,7 @@ fn draw_sbar_inventory(
     for i in 0..7 {
         if hud.items & (IT_SHOTGUN << i) != 0 {
             let name = weapon_icon_name(weapon_flashon(hud, i), i);
-            blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, xf, pal);
+            blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, xf);
         }
     }
 
@@ -465,7 +456,7 @@ fn draw_sbar_inventory(
                 // its x: `Draw_Character (x + ((vid.width - 320)>>1) + 4, ...)`.
                 let glyph = 18 + (c - b'0');
                 let vx = ((6 * i + 1 + j) as f32) * 8.0 - 2.0 + 4.0;
-                draw_sbar_char(image, cc, glyph, vx, -24.0, xf, pal);
+                draw_sbar_char(image, cc, glyph, vx, -24.0, xf);
             }
         }
     }
@@ -475,12 +466,12 @@ fn draw_sbar_inventory(
     // bits 1<<(28+i) at Sbar_DrawPic(320-32 + i*8, -16, ...).
     for (i, name) in SB_ITEM_NAMES.iter().enumerate() {
         if hud.items & (1 << (17 + i)) != 0 {
-            blit_named(image, wad, name, 192.0 + (i as f32) * 16.0, -16.0, xf, pal);
+            blit_named(image, wad, name, 192.0 + (i as f32) * 16.0, -16.0, xf);
         }
     }
     for (i, name) in SB_SIGIL_NAMES.iter().enumerate() {
         if hud.items & (1 << (28 + i)) != 0 {
-            blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, xf, pal);
+            blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, xf);
         }
     }
 }
@@ -523,7 +514,6 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
         return;
     }
     let wad = hud.wad;
-    let pal = hud.palette;
     let conchars = conchars_pic(wad);
 
     // Sbar_Draw: `if (sb_lines && vid.width > 320) Draw_TileClear (0,
@@ -532,7 +522,7 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     let sc = screen_2d(image.w, image.h);
     if hud.sb_lines > 0 && sc.w > HUD_VIRT_W as i32 {
         let y0 = sc.px(sc.h - hud.sb_lines).max(0) as usize;
-        draw_tile_clear(image, wad.qpic("backtile").ok().as_ref(), 0, y0, image.w, image.h - y0.min(image.h), pal);
+        draw_tile_clear(image, wad.qpic("backtile").ok().as_ref(), 0, y0, image.w, image.h - y0.min(image.h));
     }
 
     // ----- Inventory bar (Sbar_DrawInventory) -------------------------------
@@ -547,9 +537,9 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // status strip with the dark `scorebar` pic + the solo scoreboard
     // (Monsters/Secrets/Time/level), keeping the ibar above. (sbar.c:948-953.)
     if hud.health <= 0 || hud.show_scores {
-        blit_named(image, wad, "scorebar", 0.0, 0.0, xf, pal);
+        blit_named(image, wad, "scorebar", 0.0, 0.0, xf);
         if let Some(cc) = &conchars {
-            draw_solo_scoreboard(image, cc, hud, xf, pal);
+            draw_solo_scoreboard(image, cc, hud, xf);
         }
         return;
     }
@@ -559,7 +549,7 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     }
 
     // 1. Background strip (sbar, 320x24) at virtual (0,0).
-    blit_named(image, wad, "sbar", 0.0, 0.0, xf, pal);
+    blit_named(image, wad, "sbar", 0.0, 0.0, xf);
 
     // Armour field (Sbar_Draw, sbar.c:968-997). Under invulnerability the C draws a
     // gold "666" and the Pentagram-of-Protection disc over the armour slot and shows
@@ -567,17 +557,17 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // sb_armor[type])) keyed on IT_ARMOR3/2/1 plus the armour number at
     // Sbar_DrawNum(24, ..) — right edge virtual x=96, gold when <=25.
     if hud.items & IT_INVULNERABILITY != 0 {
-        draw_num(image, 666, 96.0, 0.0, xf, wad, pal, true);
-        blit_named(image, wad, "disc", 0.0, 0.0, xf, pal);
+        draw_num(image, 666, 96.0, 0.0, xf, wad, true);
+        blit_named(image, wad, "disc", 0.0, 0.0, xf);
     } else {
         if hud.items & IT_ARMOR3 != 0 {
-            blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, xf, pal);
+            blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, xf);
         } else if hud.items & IT_ARMOR2 != 0 {
-            blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, xf, pal);
+            blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, xf);
         } else if hud.items & IT_ARMOR1 != 0 {
-            blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, xf, pal);
+            blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, xf);
         }
-        draw_num(image, hud.armor, 96.0, 0.0, xf, wad, pal, hud.armor <= 25);
+        draw_num(image, hud.armor, 96.0, 0.0, xf, wad, hud.armor <= 25);
     }
 
     // Face (Sbar_DrawFace) at x=112, y=0. Powerup faces take priority in the C's
@@ -586,36 +576,36 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // with anim 1 (the pain face) while `cl.time <= cl.faceanimtime`.
     let inv_iv = IT_INVISIBILITY | IT_INVULNERABILITY;
     if hud.items & inv_iv == inv_iv {
-        blit_named(image, wad, FACE_INVIS_INVULN, 112.0, 0.0, xf, pal);
+        blit_named(image, wad, FACE_INVIS_INVULN, 112.0, 0.0, xf);
     } else if hud.items & IT_QUAD != 0 {
-        blit_named(image, wad, FACE_QUAD, 112.0, 0.0, xf, pal);
+        blit_named(image, wad, FACE_QUAD, 112.0, 0.0, xf);
     } else if hud.items & IT_INVISIBILITY != 0 {
-        blit_named(image, wad, FACE_INVIS, 112.0, 0.0, xf, pal);
+        blit_named(image, wad, FACE_INVIS, 112.0, 0.0, xf);
     } else if hud.items & IT_INVULNERABILITY != 0 {
-        blit_named(image, wad, FACE_INVULN, 112.0, 0.0, xf, pal);
+        blit_named(image, wad, FACE_INVULN, 112.0, 0.0, xf);
     } else {
         let names = if hud.face_pain { &FACE_PAIN_NAMES } else { &FACE_NAMES };
         let face = names[face_bracket(hud.health)];
-        blit_named(image, wad, face, 112.0, 0.0, xf, pal);
+        blit_named(image, wad, face, 112.0, 0.0, xf);
     }
 
     // Health number: Sbar_DrawNum(136, health, 3, health<=25) — right edge x=208.
-    draw_num(image, hud.health, 208.0, 0.0, xf, wad, pal, hud.health <= 25);
+    draw_num(image, hud.health, 208.0, 0.0, xf, wad, hud.health <= 25);
 
     // Ammo-type icon (Sbar_DrawPic(224, 0, sb_ammo[type])) by the active weapon's
     // ammo type, keyed on the items ammo bits IT_SHELLS/NAILS/ROCKETS/CELLS.
     if hud.items & IT_SHELLS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[0], 224.0, 0.0, xf, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[0], 224.0, 0.0, xf);
     } else if hud.items & IT_NAILS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[1], 224.0, 0.0, xf, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[1], 224.0, 0.0, xf);
     } else if hud.items & IT_ROCKETS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[2], 224.0, 0.0, xf, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[2], 224.0, 0.0, xf);
     } else if hud.items & IT_CELLS != 0 {
-        blit_named(image, wad, AMMO_ICON_NAMES[3], 224.0, 0.0, xf, pal);
+        blit_named(image, wad, AMMO_ICON_NAMES[3], 224.0, 0.0, xf);
     }
 
     // Current ammo number: Sbar_DrawNum(248, ammo, 3, ammo<=10) — right edge x=320.
-    draw_num(image, hud.ammo, 320.0, 0.0, xf, wad, pal, hud.ammo <= 10);
+    draw_num(image, hud.ammo, 320.0, 0.0, xf, wad, hud.ammo <= 10);
 }
 
 /// `Sbar_SoloScoreboard` (sbar.c:457): the single-player stats drawn over the
@@ -628,12 +618,11 @@ fn draw_solo_scoreboard(
     conchars: &crate::wad::Qpic,
     hud: &Hud,
     xf: BarXf,
-    pal: &[[u8; 3]; 256],
 ) {
     let draw = |image: &mut Image, vx: f32, vy: f32, s: &str| {
         for (i, &c) in s.as_bytes().iter().enumerate() {
             // Sbar_DrawString blits the raw ASCII glyph (space included, harmless).
-            draw_sbar_char(image, conchars, c, vx + (i as f32) * 8.0, vy, xf, pal);
+            draw_sbar_char(image, conchars, c, vx + (i as f32) * 8.0, vy, xf);
         }
     };
     draw(
@@ -692,7 +681,6 @@ pub struct IntermissionStats {
 fn intermission_number(
     image: &mut Image,
     wad: &crate::wad::Wad2,
-    palette: &[[u8; 3]; 256],
     num: i32,
     vx: f32,
     vy: f32,
@@ -711,7 +699,7 @@ fn intermission_number(
     for &c in shown {
         let name = if c == b'-' { "num_minus" } else { NUM_NAMES[(c - b'0') as usize] };
         if let Ok(pic) = wad.qpic(name) {
-            blit_qpic_at(image, &pic, x, vy, scale, ox, oy, palette);
+            blit_qpic_at(image, &pic, x, vy, scale, ox, oy);
         }
         x += 24.0; // the C steps a fixed 24 per digit slot
     }
@@ -731,7 +719,6 @@ fn intermission_number(
 pub fn draw_intermission_overlay(
     image: &mut Image,
     wad: &crate::wad::Wad2,
-    palette: &[[u8; 3]; 256],
     complete: Option<&crate::wad::Qpic>,
     inter: Option<&crate::wad::Qpic>,
     stats: &IntermissionStats,
@@ -744,11 +731,11 @@ pub fn draw_intermission_overlay(
 
     // Draw_Pic(64, 24, "gfx/complete.lmp") — the "Level Complete" banner.
     if let Some(pic) = complete {
-        blit_qpic_at(image, pic, 64.0, 24.0, scale, ox, oy, palette);
+        blit_qpic_at(image, pic, 64.0, 24.0, scale, ox, oy);
     }
     // Draw_TransPic(0, 56, "gfx/inter.lmp") — the Time/Secrets/Kills plaque.
     if let Some(pic) = inter {
-        blit_qpic_at(image, pic, 0.0, 56.0, scale, ox, oy, palette);
+        blit_qpic_at(image, pic, 0.0, 56.0, scale, ox, oy);
     }
 
     // Time: minutes right-justified at (160,64) over 3 slots, then num_colon at
@@ -759,30 +746,30 @@ pub fn draw_intermission_overlay(
     let t = stats.completed_time.max(0);
     let minutes = t / 60;
     let seconds = t - 60 * minutes;
-    intermission_number(image, wad, palette, minutes, 160.0, 64.0, 3, scale, ox, oy);
+    intermission_number(image, wad, minutes, 160.0, 64.0, 3, scale, ox, oy);
     if let Ok(pic) = wad.qpic("num_colon") {
-        blit_qpic_at(image, &pic, 234.0, 64.0, scale, ox, oy, palette);
+        blit_qpic_at(image, &pic, 234.0, 64.0, scale, ox, oy);
     }
     if let Ok(pic) = wad.qpic(NUM_NAMES[(seconds / 10) as usize]) {
-        blit_qpic_at(image, &pic, 246.0, 64.0, scale, ox, oy, palette);
+        blit_qpic_at(image, &pic, 246.0, 64.0, scale, ox, oy);
     }
     if let Ok(pic) = wad.qpic(NUM_NAMES[(seconds % 10) as usize]) {
-        blit_qpic_at(image, &pic, 266.0, 64.0, scale, ox, oy, palette);
+        blit_qpic_at(image, &pic, 266.0, 64.0, scale, ox, oy);
     }
 
     // Secrets: found at (160,104), num_slash at 232, total at 240.
-    intermission_number(image, wad, palette, stats.secrets, 160.0, 104.0, 3, scale, ox, oy);
+    intermission_number(image, wad, stats.secrets, 160.0, 104.0, 3, scale, ox, oy);
     if let Ok(pic) = wad.qpic("num_slash") {
-        blit_qpic_at(image, &pic, 232.0, 104.0, scale, ox, oy, palette);
+        blit_qpic_at(image, &pic, 232.0, 104.0, scale, ox, oy);
     }
-    intermission_number(image, wad, palette, stats.total_secrets, 240.0, 104.0, 3, scale, ox, oy);
+    intermission_number(image, wad, stats.total_secrets, 240.0, 104.0, 3, scale, ox, oy);
 
     // Monsters: killed at (160,144), num_slash at 232, total at 240.
-    intermission_number(image, wad, palette, stats.monsters, 160.0, 144.0, 3, scale, ox, oy);
+    intermission_number(image, wad, stats.monsters, 160.0, 144.0, 3, scale, ox, oy);
     if let Ok(pic) = wad.qpic("num_slash") {
-        blit_qpic_at(image, &pic, 232.0, 144.0, scale, ox, oy, palette);
+        blit_qpic_at(image, &pic, 232.0, 144.0, scale, ox, oy);
     }
-    intermission_number(image, wad, palette, stats.total_monsters, 240.0, 144.0, 3, scale, ox, oy);
+    intermission_number(image, wad, stats.total_monsters, 240.0, 144.0, 3, scale, ox, oy);
 }
 
 /// `Sbar_FinaleOverlay` (sbar.c) + the finale half of `SCR_DrawCenterString`
@@ -793,7 +780,6 @@ pub fn draw_intermission_overlay(
 pub fn draw_finale_overlay(
     image: &mut Image,
     conchars: Option<&crate::wad::Qpic>,
-    palette: &[[u8; 3]; 256],
     finale_pic: Option<&crate::wad::Qpic>,
     text: &str,
     elapsed: f32,
@@ -806,19 +792,18 @@ pub fn draw_finale_overlay(
     // Draw_TransPic((vid.width - pic->width)/2, 16, "gfx/finale.lmp").
     if let Some(pic) = finale_pic {
         let vx = ((sc.w - pic.width.max(0)) / 2) as f32;
-        blit_qpic_at(image, pic, vx, 16.0, sc.scale, 0.0, 0.0, palette);
+        blit_qpic_at(image, pic, vx, 16.0, sc.scale, 0.0, 0.0);
     }
     // scr_printspeed defaults to "8" (screen.c): 8 characters per second.
     if let Some(cc) = conchars {
         let remaining = (8.0 * elapsed.max(0.0)).min(9999.0) as i32;
-        draw_center_string_revealed(image, cc, palette, text, remaining);
+        draw_center_string_revealed(image, cc, text, remaining);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::fixtures::ramp_palette;
     use crate::screen::SB_LINES_FULL;
     use crate::wad::{Qpic, Wad2, CMP_NONE, LUMPINFO_SIZE, NAME_LEN, TYP_QPIC, WADINFO_SIZE};
 
@@ -900,7 +885,6 @@ mod tests {
         // blit_qpic a whole pic, both through draw::blit_scaled now; check
         // them against the per-pixel loops they replaced, at fractional
         // scales, clipped at every edge.
-        let pal = ramp_palette();
         let mut x = 12345u32;
         let mut next = || {
             x ^= x << 13;
@@ -914,8 +898,8 @@ mod tests {
             let inv = 1.0 / scale;
             for &(vx, vy, vy_top) in &[(0.0f32, 0.0f32, 40.0f32), (-3.0, -24.0, 50.5), (60.0, 2.0, 30.25), (70.0, 10.0, 61.0)] {
                 for ch in [0u8, 18, 27, 65, 255] {
-                    let mut want = Image::new(80, 64, [5, 5, 5]);
-                    let mut got = Image::new(80, 64, [5, 5, 5]);
+                    let mut want = Image::new(80, 64, 5);
+                    let mut got = Image::new(80, 64, 5);
                     let (cx, cy) = ((ch as usize % 16) * 8, (ch as usize / 16) * 8);
                     let x0 = (vx * scale).floor() as i64;
                     let y0 = (vy_top + vy * scale).floor() as i64;
@@ -926,16 +910,16 @@ mod tests {
                             if sx < 8 && sy < 8 {
                                 let t = atlas.data[(cy + sy) * 128 + cx + sx];
                                 if t != 0 {
-                                    want.put((x0 + dx) as i32, (y0 + dy) as i32, pal[t as usize]);
+                                    want.put((x0 + dx) as i32, (y0 + dy) as i32, t);
                                 }
                             }
                         }
                     }
-                    draw_sbar_char(&mut got, &atlas, ch, vx, vy, BarXf { scale, ox: 0.0, vy_top }, &pal);
-                    assert!(got.rgb == want.rgb, "glyph {ch} scale {scale} ({vx},{vy}) top {vy_top}");
+                    draw_sbar_char(&mut got, &atlas, ch, vx, vy, BarXf { scale, ox: 0.0, vy_top });
+                    assert!(got.pixels == want.pixels, "glyph {ch} scale {scale} ({vx},{vy}) top {vy_top}");
                 }
-                let mut want = Image::new(80, 64, [5, 5, 5]);
-                let mut got = Image::new(80, 64, [5, 5, 5]);
+                let mut want = Image::new(80, 64, 5);
+                let mut got = Image::new(80, 64, 5);
                 let x0 = (vx * scale).floor() as i64;
                 let y0 = (vy_top + vy * scale).floor() as i64;
                 let n = (24.0 * scale).round().max(1.0) as i64;
@@ -945,21 +929,20 @@ mod tests {
                         if sx < 24 && sy < 24 {
                             let t = pic.data[sy * 24 + sx];
                             if t != HUD_TRANSPARENT {
-                                want.put((x0 + dx) as i32, (y0 + dy) as i32, pal[t as usize]);
+                                want.put((x0 + dx) as i32, (y0 + dy) as i32, t);
                             }
                         }
                     }
                 }
-                blit_qpic(&mut got, &pic, vx, vy, BarXf { scale, ox: 0.0, vy_top }, &pal);
-                assert!(got.rgb == want.rgb, "pic scale {scale} ({vx},{vy}) top {vy_top}");
+                blit_qpic(&mut got, &pic, vx, vy, BarXf { scale, ox: 0.0, vy_top });
+                assert!(got.pixels == want.pixels, "pic scale {scale} ({vx},{vy}) top {vy_top}");
             }
         }
     }
 
     #[test]
     fn blit_qpic_respects_transparency_and_clips() {
-        let pal = ramp_palette();
-        let mut img = Image::new(8, 8, [0, 0, 0]);
+        let mut img = Image::new(8, 8, 0);
 
         // A 3x3 pic: corners opaque (index 5), centre transparent (255), with a
         // distinct opaque edge (index 9) we can detect after clipping.
@@ -969,58 +952,57 @@ mod tests {
         let pic = Qpic { width: 3, height: 3, data };
 
         // scale 1, no vertical offset (vy_top = 0), placed at virtual (0,0).
-        blit_qpic(&mut img, &pic, 0.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &pal);
+        blit_qpic(&mut img, &pic, 0.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 });
 
         // The centre texel was transparent: the background pixel is untouched.
-        assert_eq!(img.rgb[8 + 1], [0, 0, 0], "index-255 texel left bg unchanged");
+        assert_eq!(img.pixels[8 + 1], 0, "index-255 texel left bg unchanged");
         // An opaque corner drew palette index 5 -> [5,5,5].
-        assert_eq!(img.rgb[0], [5, 5, 5], "opaque corner blitted");
+        assert_eq!(img.pixels[0], 5, "opaque corner blitted");
         // The distinct bottom-right opaque texel drew index 9.
-        assert_eq!(img.rgb[2 * 8 + 2], [9, 9, 9], "distinct opaque texel blitted");
+        assert_eq!(img.pixels[2 * 8 + 2], 9, "distinct opaque texel blitted");
 
         // Clipping: blit the same pic so it overhangs the right/bottom edges. The
         // texels that fall off-screen must be silently dropped (no panic), and the
         // on-screen part must still draw.
-        let mut img2 = Image::new(8, 8, [0, 0, 0]);
+        let mut img2 = Image::new(8, 8, 0);
         // Place top-left at virtual (7,7): only the (0,0) texel is on-screen.
-        blit_qpic(&mut img2, &pic, 7.0, 7.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &pal);
-        assert_eq!(img2.rgb[7 * 8 + 7], [5, 5, 5], "on-screen overhang texel drew");
+        blit_qpic(&mut img2, &pic, 7.0, 7.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 });
+        assert_eq!(img2.pixels[7 * 8 + 7], 5, "on-screen overhang texel drew");
         // Nothing wrapped to row 0 / col 0 from the off-screen part.
-        let drawn = img2.rgb.iter().filter(|p| **p != [0, 0, 0]).count();
+        let drawn = img2.pixels.iter().filter(|p| **p != 0).count();
         assert_eq!(drawn, 1, "only the single on-screen overhang texel drew");
     }
 
     #[test]
     fn draw_num_right_justifies() {
         let wad = build_hud_wad();
-        let pal = ramp_palette();
 
         // Right edge at virtual x=72 (3 * 24px digits), vy_top=0, scale=1.
         // num pics are 24x24. A 3-digit value (e.g. 100) fills [0,72); the digit
         // region (x in [0,72), y in [0,24)) must have changed.
-        let mut img3 = Image::new(80, 24, [0, 0, 0]);
-        draw_num(&mut img3, 100, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, &pal, false);
+        let mut img3 = Image::new(80, 24, 0);
+        draw_num(&mut img3, 100, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, false);
         let changed_3: usize = (0..24)
             .flat_map(|y| (0..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img3.rgb[y * 80 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img3.pixels[y * 80 + x] != 0)
             .count();
         assert!(changed_3 > 0, "3-digit value changed pixels in the digit region");
 
         // A 1-digit value at the same right edge must occupy only the rightmost
         // 24px slot [48,72) and leave the left two slots [0,48) untouched, proving
         // right-justification (the units digit lands at the same right edge).
-        let mut img1 = Image::new(80, 24, [0, 0, 0]);
-        draw_num(&mut img1, 7, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, &pal, false);
+        let mut img1 = Image::new(80, 24, 0);
+        draw_num(&mut img1, 7, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, false);
         // Right slot [48,72) changed.
         let right_changed: usize = (0..24)
             .flat_map(|y| (48..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img1.rgb[y * 80 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img1.pixels[y * 80 + x] != 0)
             .count();
         assert!(right_changed > 0, "1-digit value drew in the rightmost slot");
         // Left two slots [0,48) untouched.
         let left_changed: usize = (0..24)
             .flat_map(|y| (0..48).map(move |x| (x, y)))
-            .filter(|&(x, y)| img1.rgb[y * 80 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img1.pixels[y * 80 + x] != 0)
             .count();
         assert_eq!(left_changed, 0, "1-digit value left the left slots blank (right-justified)");
 
@@ -1029,11 +1011,11 @@ mod tests {
         // there (num_7 = index 107, num_0 = index 100 — both non-transparent).
         let units_7: usize = (0..24)
             .flat_map(|y| (48..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img1.rgb[y * 80 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img1.pixels[y * 80 + x] != 0)
             .count();
         let units_100: usize = (0..24)
             .flat_map(|y| (48..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img3.rgb[y * 80 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img3.pixels[y * 80 + x] != 0)
             .count();
         assert_eq!(units_7, units_100, "units digit of 1- and 3-digit values align at the right edge");
     }
@@ -1045,25 +1027,24 @@ mod tests {
         // scale=2 => the units digit must end at pixel 144 (its 24-virtual = 48-px
         // cell spans px [96,144)), and nothing draws at/after px 144.
         let wad = build_hud_wad();
-        let pal = ramp_palette();
-        let mut img = Image::new(200, 48, [0, 0, 0]);
-        draw_num(&mut img, 7, 72.0, 0.0, BarXf { scale: 2.0, ox: 0.0, vy_top: 0.0 }, &wad, &pal, false);
+        let mut img = Image::new(200, 48, 0);
+        draw_num(&mut img, 7, 72.0, 0.0, BarXf { scale: 2.0, ox: 0.0, vy_top: 0.0 }, &wad, false);
 
         // Pixels exist in the cell [96,144); none at or past 144.
         let in_cell = (0..48)
             .flat_map(|y| (96..144).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 200 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img.pixels[y * 200 + x] != 0)
             .count();
         assert!(in_cell > 0, "scale=2 digit drew in the px[96,144) cell ending at the scaled right edge");
         let past_edge = (0..48)
             .flat_map(|y| (144..200).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 200 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img.pixels[y * 200 + x] != 0)
             .count();
         assert_eq!(past_edge, 0, "nothing drew past the scaled right edge px=144");
         // And it must NOT be jammed against px=72 (the old bug placed it there).
         let at_virtual_edge = (0..48)
             .flat_map(|y| (48..96).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 200 + x] != [0, 0, 0])
+            .filter(|&(x, y)| img.pixels[y * 200 + x] != 0)
             .count();
         assert_eq!(at_virtual_edge, 0, "digit must not sit at the unscaled px=72 edge (the old unit-mix bug)");
     }
@@ -1071,16 +1052,14 @@ mod tests {
     #[test]
     fn draw_hud_changes_bottom_strip_only() {
         let wad = build_hud_wad();
-        let pal = ramp_palette();
 
         // A solid-filled image; the HUD must change the bottom 24-virtual-row bar
         // but leave the top of the frame untouched. Use a 320-wide frame so
         // scale == 1 and the bar is exactly the bottom 24 rows.
-        let fill = [42u8, 42, 42];
+        let fill = 42u8;
         let mut img = Image::new(320, 200, fill);
         let hud = Hud {
             wad: &wad,
-            palette: &pal,
             health: 100,
             ammo: 25,
             armor: 50,
@@ -1106,14 +1085,14 @@ mod tests {
         // The top of the frame (well above the 24-px bar) is untouched.
         for y in 0..(200 - 24) {
             for x in 0..320 {
-                assert_eq!(img.rgb[y * 320 + x], fill, "row {y} col {x} above the bar must be untouched");
+                assert_eq!(img.pixels[y * 320 + x], fill, "row {y} col {x} above the bar must be untouched");
             }
         }
         // The bottom strip changed (the sbar background, index 1 -> [1,1,1],
         // covers the whole 320x24 bar).
         let changed_bottom: usize = (200 - 24..200)
             .flat_map(|y| (0..320).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] != fill)
+            .filter(|&(x, y)| img.pixels[y * 320 + x] != fill)
             .count();
         assert!(changed_bottom > 0, "the bottom strip changed under the HUD");
 
@@ -1121,7 +1100,7 @@ mod tests {
         // in the bar — proving health/ammo/armour numbers actually rendered.
         let has_digit = (200 - 24..200)
             .flat_map(|y| (0..320).map(move |x| (x, y)))
-            .any(|(x, y)| img.rgb[y * 320 + x][0] >= 100);
+            .any(|(x, y)| img.pixels[y * 320 + x] >= 100);
         assert!(has_digit, "at least one big-number digit drew over the bar");
     }
 
@@ -1130,12 +1109,10 @@ mod tests {
         // A 640-wide frame (scale 2): the bar must still bottom-anchor and span
         // the full width without panicking, leaving the top untouched.
         let wad = build_hud_wad();
-        let pal = ramp_palette();
-        let fill = [7u8, 7, 7];
+        let fill = 7u8;
         let mut img = Image::new(640, 400, fill);
         let hud = Hud {
             wad: &wad,
-            palette: &pal,
             health: 99,
             ammo: 100,
             armor: 0,
@@ -1161,11 +1138,11 @@ mod tests {
         // Bar height in pixels = 24 * (640/320) = 48; the top must be untouched.
         let bar_px = (24.0 * (640.0 / 320.0)) as usize; // 48
         for y in 0..(400 - bar_px) {
-            assert_eq!(img.rgb[y * 640], fill, "row {y} above the scaled bar untouched");
+            assert_eq!(img.pixels[y * 640], fill, "row {y} above the scaled bar untouched");
         }
         // Bottom row changed across a wide span (the scaled sbar covers it).
         let bottom = 399 * 640;
-        let bottom_changed = (0..640).filter(|&x| img.rgb[bottom + x] != fill).count();
+        let bottom_changed = (0..640).filter(|&x| img.pixels[bottom + x] != fill).count();
         assert!(bottom_changed > 320, "scaled sbar spans most of the 640-wide bottom row");
     }
 
@@ -1178,12 +1155,10 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // numlumps
         bytes.extend_from_slice(&(WADINFO_SIZE as i32).to_le_bytes());
         let wad = Wad2::parse(bytes).expect("empty wad parses");
-        let pal = ramp_palette();
-        let fill = [9u8, 9, 9];
+        let fill = 9u8;
         let mut img = Image::new(320, 200, fill);
         let hud = Hud {
             wad: &wad,
-            palette: &pal,
             health: 100,
             ammo: 50,
             armor: 25,
@@ -1205,7 +1180,7 @@ mod tests {
             face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
-        assert!(img.rgb.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
+        assert!(img.pixels.iter().all(|&p| p == fill), "missing pics leave the frame unchanged");
     }
 
     // -- Inventory bar / face / icons (Sbar_DrawInventory + Sbar_DrawFace) -----
@@ -1237,12 +1212,10 @@ mod tests {
         // < 10 cycles sb_weapons[flashon%5 + 2] (inva1..5), then inv2 for the
         // active weapon and inv for the rest. No get-times: settled.
         let wad = build_full_hud_wad();
-        let pal = ramp_palette();
         let mut gettime = [0.0f32; 32];
         gettime[4] = 10.0; // the rocket launcher (bit 4), got at t=10
         let hud = |time: f32, gt: Option<&'static [f32; 32]>| Hud {
             wad: &wad,
-            palette: &pal,
             health: 100,
             ammo: 0,
             armor: 0,
@@ -1282,9 +1255,8 @@ mod tests {
         // positions — minutes right-justified into 3 slots from x=160, colon at
         // 234, second digits at 246/266; secrets/monsters rows at y=104/144 with
         // num_slash at 232 and the totals from x=240.
-        let pal = ramp_palette();
         let wad = build_hud_wad();
-        let mut img = Image::new(320, 200, [0, 0, 0]);
+        let mut img = Image::new(320, 200, 0);
         let complete = Qpic { width: 192, height: 24, data: vec![50u8; 192 * 24] };
         let inter = Qpic { width: 160, height: 144, data: vec![51u8; 160 * 144] };
         let stats = IntermissionStats {
@@ -1294,29 +1266,29 @@ mod tests {
             monsters: 12,
             total_monsters: 45,
         };
-        draw_intermission_overlay(&mut img, &wad, &pal, Some(&complete), Some(&inter), &stats);
+        draw_intermission_overlay(&mut img, &wad, Some(&complete), Some(&inter), &stats);
 
-        let px = |x: usize, y: usize| img.rgb[y * 320 + x];
-        assert_eq!(px(64 + 5, 24 + 5), [50, 50, 50], "complete.lmp banner at (64,24)");
-        assert_eq!(px(5, 56 + 100), [51, 51, 51], "inter.lmp plaque at (0,56)");
+        let px = |x: usize, y: usize| img.pixels[y * 320 + x];
+        assert_eq!(px(64 + 5, 24 + 5), 50, "complete.lmp banner at (64,24)");
+        assert_eq!(px(5, 56 + 100), 51, "inter.lmp plaque at (0,56)");
         // Time 3:25 — "3" right-justified: x = 160 + 2*24 = 208 (num_3 = idx 103).
-        assert_eq!(px(208 + 2, 64 + 2), [103, 103, 103], "minutes digit 3 at x=208");
-        assert_eq!(px(234 + 2, 64 + 2), [140, 140, 140], "num_colon at x=234");
-        assert_eq!(px(246 + 2, 64 + 2), [102, 102, 102], "seconds tens 2 at x=246");
-        assert_eq!(px(266 + 2, 64 + 2), [105, 105, 105], "seconds units 5 at x=266");
+        assert_eq!(px(208 + 2, 64 + 2), 103, "minutes digit 3 at x=208");
+        assert_eq!(px(234 + 2, 64 + 2), 140, "num_colon at x=234");
+        assert_eq!(px(246 + 2, 64 + 2), 102, "seconds tens 2 at x=246");
+        assert_eq!(px(266 + 2, 64 + 2), 105, "seconds units 5 at x=266");
         // Secrets 3/7: found at x=208 (right-justified), slash 232, total at 288.
-        assert_eq!(px(208 + 2, 104 + 2), [103, 103, 103], "secrets found 3");
-        assert_eq!(px(232 + 2, 104 + 2), [141, 141, 141], "num_slash at x=232");
-        assert_eq!(px(240 + 2 * 24 + 2, 104 + 2), [107, 107, 107], "secrets total 7");
+        assert_eq!(px(208 + 2, 104 + 2), 103, "secrets found 3");
+        assert_eq!(px(232 + 2, 104 + 2), 141, "num_slash at x=232");
+        assert_eq!(px(240 + 2 * 24 + 2, 104 + 2), 107, "secrets total 7");
         // Monsters 12/45: two digits start at x = 160 + 24 = 184.
-        assert_eq!(px(184 + 2, 144 + 2), [101, 101, 101], "monsters tens 1 at x=184");
-        assert_eq!(px(208 + 2, 144 + 2), [102, 102, 102], "monsters units 2 at x=208");
-        assert_eq!(px(264 + 2, 144 + 2), [104, 104, 104], "total tens 4 at x=264");
-        assert_eq!(px(288 + 2, 144 + 2), [105, 105, 105], "total units 5 at x=288");
+        assert_eq!(px(184 + 2, 144 + 2), 101, "monsters tens 1 at x=184");
+        assert_eq!(px(208 + 2, 144 + 2), 102, "monsters units 2 at x=208");
+        assert_eq!(px(264 + 2, 144 + 2), 104, "total tens 4 at x=264");
+        assert_eq!(px(288 + 2, 144 + 2), 105, "total units 5 at x=288");
         // The (missing-pic) graceful path: no panic with both pics absent.
-        let mut img2 = Image::new(320, 200, [0, 0, 0]);
-        draw_intermission_overlay(&mut img2, &wad, &pal, None, None, &stats);
-        assert_eq!(px(208 + 2, 64 + 2), [103, 103, 103], "numbers still draw without pics");
+        let mut img2 = Image::new(320, 200, 0);
+        draw_intermission_overlay(&mut img2, &wad, None, None, &stats);
+        assert_eq!(px(208 + 2, 64 + 2), 103, "numbers still draw without pics");
     }
 
     #[test]
@@ -1325,14 +1297,13 @@ mod tests {
         // sb_nums[0][STAT_MINUS] — "num_minus" (index 142 in the test wad). -7
         // over 3 slots right-justifies like any 2-character number: the minus
         // lands at x = 160 + 24 = 184 and the digit at 208.
-        let pal = ramp_palette();
         let wad = build_hud_wad();
-        let mut img = Image::new(320, 200, [0, 0, 0]);
-        intermission_number(&mut img, &wad, &pal, -7, 160.0, 64.0, 3, 1.0, 0.0, 0.0);
-        let px = |x: usize, y: usize| img.rgb[y * 320 + x];
-        assert_eq!(px(160 + 2, 64 + 2), [0, 0, 0], "first slot empty (2-char number)");
-        assert_eq!(px(184 + 2, 64 + 2), [142, 142, 142], "minus glyph at x=184");
-        assert_eq!(px(208 + 2, 64 + 2), [107, 107, 107], "digit 7 at x=208");
+        let mut img = Image::new(320, 200, 0);
+        intermission_number(&mut img, &wad, -7, 160.0, 64.0, 3, 1.0, 0.0, 0.0);
+        let px = |x: usize, y: usize| img.pixels[y * 320 + x];
+        assert_eq!(px(160 + 2, 64 + 2), 0, "first slot empty (2-char number)");
+        assert_eq!(px(184 + 2, 64 + 2), 142, "minus glyph at x=184");
+        assert_eq!(px(208 + 2, 64 + 2), 107, "digit 7 at x=208");
     }
 
     /// A fuller synthetic `gfx.wad` adding the inventory-bar art the base
@@ -1434,12 +1405,10 @@ mod tests {
         // the 24-row sbar; a face must draw on the sbar; and the inventory elements
         // must appear at their sbar.c positions.
         let wad = build_full_hud_wad();
-        let pal = ramp_palette();
-        let fill = [42u8, 42, 42];
+        let fill = 42u8;
         let mut img = Image::new(320, 200, fill); // scale 1: bar = bottom 48 rows
         let hud = Hud {
             wad: &wad,
-            palette: &pal,
             health: 100,   // -> face1 (bracket 4)
             ammo: 25,
             armor: 80,
@@ -1471,14 +1440,14 @@ mod tests {
         let ibar_bg = ibar_rows
             .clone()
             .flat_map(|y| (0..320).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [2, 2, 2])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 2)
             .count();
         assert!(ibar_bg > 0, "ibar background fills the 24 rows above the sbar");
 
         // Rows above the whole 48-row status area (y < 152) stay the fill colour.
         for y in 0..152 {
             for x in 0..320 {
-                assert_eq!(img.rgb[y * 320 + x], fill, "row {y} col {x} above the status area untouched");
+                assert_eq!(img.pixels[y * 320 + x], fill, "row {y} col {x} above the status area untouched");
             }
         }
 
@@ -1486,41 +1455,41 @@ mod tests {
         // inv2_shotgun icon at x=0, y=-16 -> framebuffer rows ~160..176).
         let weapon_px = (160..176)
             .flat_map(|y| (0..24).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [60, 60, 60])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 60)
             .count();
         assert!(weapon_px > 0, "active weapon (inv2_*) icon drew on the ibar");
 
         // The face (index 70) drew at x=112 on the sbar (rows 176..200).
         let face_px = (176..200)
             .flat_map(|y| (112..136).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [70, 70, 70])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 70)
             .count();
         assert!(face_px > 0, "player face drew at x=112 on the sbar");
 
         // The armour-type icon (index 80) drew at x=0 on the sbar.
         let armor_icon = (176..200)
             .flat_map(|y| (0..24).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [80, 80, 80])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 80)
             .count();
         assert!(armor_icon > 0, "armour-type icon drew at x=0");
 
         // The ammo-type icon (index 85) drew at x=224 on the sbar.
         let ammo_icon = (176..200)
             .flat_map(|y| (224..248).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [85, 85, 85])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 85)
             .count();
         assert!(ammo_icon > 0, "ammo-type icon drew at x=224");
 
         // The small ammo counts (gold conchars digits, index 95) drew on the ibar.
         let count_px = ibar_rows
             .flat_map(|y| (0..320).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [95, 95, 95])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 95)
             .count();
         assert!(count_px > 0, "small ammo counts drew on the ibar");
         // "100" shells: the first digit at (6*0+1)*8 - 2, plus Sbar_DrawCharacter's 4.
         let first_x = (152..176)
             .flat_map(|y| (0..320).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [95, 95, 95])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 95)
             .map(|(x, _)| x)
             .min();
         assert_eq!(first_x, Some(10), "the shells count starts at x = 8 - 2 + 4");
@@ -1528,7 +1497,7 @@ mod tests {
         // A sigil (index 90) drew near the right edge of the ibar (x≈288).
         let sigil_px = (160..176)
             .flat_map(|y| (288..296).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [90, 90, 90])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 90)
             .count();
         assert!(sigil_px > 0, "sigil drew near the right edge of the ibar");
     }
@@ -1537,11 +1506,9 @@ mod tests {
     fn draw_hud_powerup_face_overrides_health_face() {
         // With quad active, Sbar_DrawFace draws the quad face regardless of health.
         let wad = build_full_hud_wad();
-        let pal = ramp_palette();
-        let mut img = Image::new(320, 200, [0u8, 0, 0]);
+        let mut img = Image::new(320, 200, 0u8);
         let hud = Hud {
             wad: &wad,
-            palette: &pal,
             health: 100,
             ammo: 0,
             armor: 0,
@@ -1567,7 +1534,7 @@ mod tests {
         draw_hud_into(&mut img, &hud);
         let face_px = (176..200)
             .flat_map(|y| (112..136).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.rgb[y * 320 + x] == [70, 70, 70])
+            .filter(|&(x, y)| img.pixels[y * 320 + x] == 70)
             .count();
         assert!(face_px > 0, "a powerup (quad) face drew at x=112");
     }
@@ -1577,12 +1544,10 @@ mod tests {
         // Sbar_DrawFace: `sb_faces[f][cl.time <= cl.faceanimtime]` — the pain
         // face of the health bracket right after a hit.
         let wad = build_full_hud_wad();
-        let pal = ramp_palette();
         let face = |face_pain: bool| {
-            let mut img = Image::new(320, 200, [0u8, 0, 0]);
+            let mut img = Image::new(320, 200, 0u8);
             let hud = Hud {
                 wad: &wad,
-                palette: &pal,
                 health: 45,
                 ammo: 0,
                 armor: 0,
@@ -1604,10 +1569,10 @@ mod tests {
                 face_pain,
             };
             draw_hud_into(&mut img, &hud);
-            img.rgb[188 * 320 + 124]
+            img.pixels[188 * 320 + 124]
         };
-        assert_eq!(face(false), [70, 70, 70], "the steady face");
-        assert_eq!(face(true), [71, 71, 71], "the pain face");
+        assert_eq!(face(false), 70, "the steady face");
+        assert_eq!(face(true), 71, "the pain face");
         assert_eq!(FACE_PAIN_NAMES[face_bracket(45)], "face_p3");
     }
 
@@ -1643,13 +1608,11 @@ mod tests {
     #[test]
     fn draw_hud_follows_sb_lines_like_sbar_draw() {
         let wad = build_sbar_strips_wad();
-        let pal = ramp_palette();
-        let fill = [42u8, 42, 42];
+        let fill = 42u8;
         let draw = |sb_lines: i32, health: i32| {
             let mut img = Image::new(320, 200, fill);
             let hud = Hud {
                 wad: &wad,
-                palette: &pal,
                 health,
                 ammo: 0,
                 armor: 0,
@@ -1677,18 +1640,18 @@ mod tests {
         let sbar_row = 190 * 320 + 5; // inside rows 176..200
         // 48 lines (viewsize <= 100): inventory strip over the status strip.
         let img = draw(48, 100);
-        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (pal[2], pal[1]));
-        assert_eq!(img.rgb[151 * 320 + 5], fill, "nothing above the 48 lines");
+        assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (2, 1));
+        assert_eq!(img.pixels[151 * 320 + 5], fill, "nothing above the 48 lines");
         // 24 lines (viewsize 110): the status strip alone.
         let img = draw(24, 100);
-        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (fill, pal[1]));
+        assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (fill, 1));
         // 0 lines (viewsize 120): no status bar at all.
         let img = draw(0, 100);
-        assert!(img.rgb.iter().all(|&p| p == fill), "sb_lines 0 draws nothing");
+        assert!(img.pixels.iter().all(|&p| p == fill), "sb_lines 0 draws nothing");
         // ...except the death scoreboard, which Sbar_Draw shows regardless.
         let img = draw(0, 0);
-        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (fill, pal[3]));
+        assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (fill, 3));
         let img = draw(48, 0);
-        assert_eq!((img.rgb[ibar_row], img.rgb[sbar_row]), (pal[2], pal[3]));
+        assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (2, 3));
     }
 }

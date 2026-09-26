@@ -29,10 +29,20 @@
 //! this port decodes every field explicitly through a [`Reader`], so a
 //! truncated or malformed archive yields an error instead of undefined
 //! behaviour.
+//!
+//! **The search path.** id's engine reads every game file through
+//! `com_searchpaths`, a list of `searchpath_t` elements — a pack, or a
+//! directory of loose files — searched first to last (`COM_FindFile`). A
+//! [`Pak`] is one such element with the rest of the list behind it
+//! ([`Pak::over`]): [`Pak::read_file`] looks in this element, then down the
+//! path. A lone archive is a path of one, so the engine, which only ever
+//! reads files by name, takes the whole search path wherever it took the
+//! shareware pak. [`crate::common`] builds id's path (`COM_AddGameDirectory`).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::{QError, Result};
 use crate::read::Reader;
@@ -77,17 +87,30 @@ enum Source {
     /// `include_bytes!` pak): never copied, so cloning the [`Pak`] handle
     /// copies only its directory.
     Static(&'static [u8]),
+    /// Not an archive: the game directory's loose files, a search path's
+    /// directory element (`searchpath_t` with no `pack`). `subdirs` is
+    /// `static_registered`: `COM_FindFile` never reads a shareware game's
+    /// loose file whose name has a directory in it ("if not a registered
+    /// version, don't ever go beyond base").
+    Dir { path: PathBuf, subdirs: bool },
 }
 
-/// An opened PAK archive (the in-memory `pack_t`).
+/// An opened PAK archive (the in-memory `pack_t`), or a directory of loose
+/// files — one element of the search path — with the rest of the path
+/// behind it.
 #[derive(Debug, Clone)]
 pub struct Pak {
     source: Source,
     entries: Vec<PakEntry>,
+    /// The archive's path (or label), or the directory's path.
     name: String,
     /// CRC-16/CCITT of the on-disk directory region, as `COM_LoadPackFile`
     /// computes to detect modified archives.
     dir_crc: u16,
+    /// The rest of the search path (`searchpath_t.next`), which
+    /// [`Pak::read_file`] looks in when this element has no such file.
+    /// Shared: a clone copies only this element's directory.
+    next: Option<Arc<Pak>>,
 }
 
 impl Pak {
@@ -170,6 +193,7 @@ impl Pak {
             entries,
             name,
             dir_crc,
+            next: None,
         })
     }
 
@@ -183,6 +207,7 @@ impl Pak {
             entries,
             name,
             dir_crc,
+            next: None,
         })
     }
 
@@ -252,16 +277,18 @@ impl Pak {
             entries,
             name,
             dir_crc,
+            next: None,
         })
     }
 
     /// The archive's name (file path for [`open`](Self::open), or the caller's
-    /// label for [`from_bytes`](Self::from_bytes)).
+    /// label for [`from_bytes`](Self::from_bytes)); a directory's path.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The parsed directory entries.
+    /// The parsed directory entries of this archive (none for a directory;
+    /// not the rest of the path's).
     pub fn entries(&self) -> &[PakEntry] {
         &self.entries
     }
@@ -278,12 +305,48 @@ impl Pak {
         self.entries.len() != PAK0_COUNT || self.dir_crc != PAK0_CRC
     }
 
-    /// Find an entry by exact name (`strcmp` semantics, as `COM_FindFile`).
+    /// Find an entry by exact name (`strcmp` semantics, as `COM_FindFile`)
+    /// in this archive's own directory.
     pub fn find(&self, name: &str) -> Option<&PakEntry> {
         self.entries.iter().find(|e| e.name == name)
     }
 
-    /// Read the contents of one directory entry.
+    /// A search path's directory element: the loose files under `dir`
+    /// (`COM_AddGameDirectory` puts the game directory itself on the path,
+    /// behind its paks). `registered` is `static_registered`: a shareware
+    /// game reads no loose file below the directory itself.
+    pub fn directory(dir: &Path, registered: bool) -> Pak {
+        Pak {
+            source: Source::Dir { path: dir.to_path_buf(), subdirs: registered },
+            entries: Vec::new(),
+            name: dir.to_string_lossy().into_owned(),
+            dir_crc: 0,
+            next: None,
+        }
+    }
+
+    /// Whether this element is a directory of loose files, not an archive.
+    pub fn is_directory(&self) -> bool {
+        matches!(self.source, Source::Dir { .. })
+    }
+
+    /// This element in front of the search path `rest` — `COM_AddGameDirectory`
+    /// linking each pack it loads to the head of `com_searchpaths`, so the
+    /// last added is searched first. Replaces whatever path this element had
+    /// behind it.
+    #[must_use]
+    pub fn over(mut self, rest: Pak) -> Pak {
+        self.next = Some(Arc::new(rest));
+        self
+    }
+
+    /// The search path from this element on, in search order (`path`,
+    /// `COM_Path_f`).
+    pub fn path(&self) -> impl Iterator<Item = &Pak> {
+        std::iter::successors(Some(self), |p| p.next.as_deref())
+    }
+
+    /// Read the contents of one directory entry of this archive.
     ///
     /// For a memory-backed (or static) archive this slices the retained
     /// buffer; for a file-backed archive it opens the file, seeks to
@@ -314,72 +377,86 @@ impl Pak {
                 file.read_exact(&mut out)?;
                 return Ok(out);
             }
+            Source::Dir { .. } => {
+                return Err(QError::invalid(format!("{} is a directory, not a pak", self.name)));
+            }
         };
         // slice_at bounds-checks filepos + filelen against the buffer.
         let slice = Reader::new(image).slice_at(filepos, filelen)?;
         Ok(slice.to_vec())
     }
 
-    /// Find a file by name and read its contents.
+    /// Find a file by name on the search path and read its contents
+    /// (`COM_FindFile` + `COM_LoadFile`): this element's, else the rest of
+    /// the path's.
     ///
-    /// Returns `Ok(None)` when the name is not present, mirroring the C
-    /// engine's "not found in this pack, try the next search path" behaviour.
+    /// Returns `Ok(None)` when no element has the name, as the C engine
+    /// fell through every search path to "can't find".
     pub fn read_file(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        match self.find(name) {
-            Some(e) => Ok(Some(self.read_entry(e)?)),
-            None => Ok(None),
+        for element in self.path() {
+            if let Some(bytes) = element.read_own(name)? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
+
+    /// This element's copy of `name`, if it has one: an archive's entry, or
+    /// a directory's loose file (`Sys_FileTime` finding it; a shareware game
+    /// skips names below the directory).
+    fn read_own(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        match &self.source {
+            Source::Dir { path, subdirs } => {
+                if !subdirs && name.contains(['/', '\\']) {
+                    return Ok(None);
+                }
+                // A file that cannot be read is one COM_FindFile did not find.
+                Ok(std::fs::read(path.join(name)).ok())
+            }
+            _ => match self.find(name) {
+                Some(e) => Ok(Some(self.read_entry(e)?)),
+                None => Ok(None),
+            },
         }
     }
+}
+
+/// A PACK image holding `files` (name, contents) in order: the 12-byte
+/// header, the contents back to back, then the directory — the layout id's
+/// `qfiles -pak` wrote. The tests' archives, and the synthetic registered
+/// `pak1.pak` of the checks (no game data in the repo). Names longer than
+/// the 55 characters a `name[56]` holds are cut.
+pub fn write_pack(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let contents_len: usize = files.iter().map(|(_, d)| d.len()).sum();
+    let dirofs = HEADER_SIZE + contents_len;
+    let dirlen = files.len() * DIRENTRY_SIZE;
+    let mut img = Vec::with_capacity(dirofs + dirlen);
+    img.extend_from_slice(b"PACK");
+    img.extend_from_slice(&(dirofs as i32).to_le_bytes());
+    img.extend_from_slice(&(dirlen as i32).to_le_bytes());
+    for (_, data) in files {
+        img.extend_from_slice(data);
+    }
+    let mut filepos = HEADER_SIZE;
+    for (name, data) in files {
+        let mut field = [0u8; NAME_SIZE];
+        let n = name.len().min(NAME_SIZE - 1);
+        field[..n].copy_from_slice(&name.as_bytes()[..n]);
+        img.extend_from_slice(&field);
+        img.extend_from_slice(&(filepos as i32).to_le_bytes());
+        img.extend_from_slice(&(data.len() as i32).to_le_bytes());
+        filepos += data.len();
+    }
+    img
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Build a NUL-padded `name[56]` field.
-    fn name56(s: &str) -> [u8; NAME_SIZE] {
-        let mut buf = [0u8; NAME_SIZE];
-        let b = s.as_bytes();
-        assert!(b.len() <= NAME_SIZE, "test name too long");
-        buf[..b.len()].copy_from_slice(b);
-        buf
-    }
-
-    /// Construct a synthetic PACK image with the given (name, contents) files.
-    ///
-    /// Layout: header (12) then file contents back-to-back, then the
-    /// directory. Returns the whole image.
+    /// A synthetic PACK image of `files` (see [`write_pack`]).
     fn build_pack(files: &[(&str, &[u8])]) -> Vec<u8> {
-        // Contents start right after the 12-byte header.
-        let mut contents = Vec::new();
-        let mut positions = Vec::new();
-        let mut cursor = HEADER_SIZE as i32;
-        for (_, data) in files {
-            positions.push((cursor, data.len() as i32));
-            contents.extend_from_slice(data);
-            cursor += data.len() as i32;
-        }
-
-        // Directory follows the contents.
-        let dirofs = HEADER_SIZE + contents.len();
-        let dirlen = files.len() * DIRENTRY_SIZE;
-
-        let mut dir = Vec::new();
-        for (i, (name, _)) in files.iter().enumerate() {
-            let (filepos, filelen) = positions[i];
-            dir.extend_from_slice(&name56(name));
-            dir.extend_from_slice(&filepos.to_le_bytes());
-            dir.extend_from_slice(&filelen.to_le_bytes());
-        }
-        assert_eq!(dir.len(), dirlen);
-
-        let mut img = Vec::new();
-        img.extend_from_slice(b"PACK");
-        img.extend_from_slice(&(dirofs as i32).to_le_bytes());
-        img.extend_from_slice(&(dirlen as i32).to_le_bytes());
-        img.extend_from_slice(&contents);
-        img.extend_from_slice(&dir);
-        img
+        write_pack(files)
     }
 
     fn sample_files() -> Vec<(&'static str, &'static [u8])> {
@@ -556,5 +633,36 @@ mod tests {
         };
         let pak = Pak::from_bytes("t.pak".into(), build_pack(&[("a", b"data")])).unwrap();
         assert!(pak.read_entry(&bogus).is_err());
+    }
+
+    /// `COM_FindFile` down a path: `pak1` over `pak0` over the directory. The
+    /// last pack added answers first, then the ones before it, then the loose
+    /// files.
+    #[test]
+    fn a_path_reads_each_name_from_its_first_element() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-pak-path");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("maps")).unwrap();
+        std::fs::write(dir.join("loose.cfg"), b"loose").unwrap();
+        std::fs::write(dir.join("maps/custom.bsp"), b"custom").unwrap();
+        std::fs::write(dir.join("progs.dat"), b"loose progs").unwrap();
+        let pak0 = Pak::from_bytes("pak0.pak".into(), build_pack(&[("progs.dat", b"id progs"), ("maps/e1m1.bsp", b"e1m1")])).unwrap();
+        let pak1 = Pak::from_bytes("pak1.pak".into(), build_pack(&[("maps/e1m1.bsp", b"patched"), ("maps/e2m1.bsp", b"e2m1")])).unwrap();
+        let read = |p: &Pak, n: &str| p.read_file(n).unwrap().map(|b| String::from_utf8(b).unwrap());
+        for registered in [false, true] {
+            let path = pak1.clone().over(pak0.clone().over(Pak::directory(&dir, registered)));
+            assert_eq!(read(&path, "maps/e1m1.bsp").as_deref(), Some("patched"), "pak1 before pak0");
+            assert_eq!(read(&path, "maps/e2m1.bsp").as_deref(), Some("e2m1"));
+            assert_eq!(read(&path, "progs.dat").as_deref(), Some("id progs"), "the packs before the loose files");
+            assert_eq!(read(&path, "loose.cfg").as_deref(), Some("loose"), "a loose file at the top");
+            assert_eq!(read(&path, "nowhere.dat"), None);
+            // static_registered: a shareware game never goes below the directory.
+            let custom = read(&path, "maps/custom.bsp");
+            assert_eq!(custom.as_deref(), registered.then_some("custom"), "registered {registered}");
+            let names: Vec<&str> = path.path().map(Pak::name).collect();
+            assert_eq!(names, ["pak1.pak", "pak0.pak", dir.to_str().unwrap()]);
+            assert!(path.path().last().unwrap().is_directory());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,6 +3,8 @@
 //! exercising the loader, interpreter, user-function calls, and builtins
 //! together (the in-module tests cover each piece individually).
 
+#![forbid(unsafe_code)]
+
 use quake_rs::progs::{OFS_PARM0, OFS_RETURN};
 use quake_rs::vm::Vm;
 

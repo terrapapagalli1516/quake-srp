@@ -159,7 +159,7 @@ mod tests {
         assert!(printed.contains("             : PlayerPreThink\n"), "the stack trace: {printed:?}");
         assert!(printed.ends_with("\nNULL function\nHost_Error: Program error\n"), "{printed:?}");
         assert!(matches!(frame.sound[..], [SoundCall::StopAll]), "CL_Disconnect stops every sound");
-        assert!(frame.image.rgb.iter().all(|&p| p == [0, 0, 0]), "the disconnected screen");
+        assert!(frame.image.pixels.iter().all(|&p| p == 0), "the disconnected screen");
 
         // The game is over: nothing more runs.
         let t = w.server.sv_time();

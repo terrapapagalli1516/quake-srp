@@ -81,7 +81,7 @@ second_at_144 = """async () => { quake.pause();
     quake.resume(); return n; }"""
 # A frozen frame with the page's ticks paused, its pixels kept as window[name].
 GRAB = """name => { quake.pause(); quake.tick(0); quake.tick(0);
-    const c = document.getElementById('c'); window[name] = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; }"""
+    window[name] = quake.readback(); }"""
 DIFF = """([a, b]) => { const A = window[a], B = window[b], w = document.getElementById('c').width;
     let n = 0, x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
     for (let i = 0; i < A.length; i += 4) if (A[i] !== B[i] || A[i + 1] !== B[i + 1] || A[i + 2] !== B[i + 2]) {

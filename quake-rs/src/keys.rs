@@ -38,6 +38,17 @@ pub const K_END: u8 = 152;
 pub const K_MOUSE1: u8 = 200;
 pub const K_MOUSE2: u8 = 201;
 pub const K_MOUSE3: u8 = 202;
+/// The joystick's first four buttons (keys.h `K_JOY1`..`K_JOY4`):
+/// in_win.c's `IN_Commands` keys button `i` < 4 as `K_JOY1 + i`.
+pub const K_JOY1: u8 = 203;
+pub const K_JOY4: u8 = 206;
+/// The "auxiliary" keys (keys.h `K_AUX1`..`K_AUX32`): `IN_Commands` keys
+/// button `i` >= 4 as `K_AUX1 + i` (so AUX1..AUX4 are never sent: the fifth
+/// button is AUX5), and the POV hat's four directions as `K_AUX29`..`K_AUX32`
+/// (forward, right, back, left).
+pub const K_AUX1: u8 = 207;
+pub const K_AUX29: u8 = 235;
+pub const K_AUX32: u8 = 238;
 pub const K_MWHEELUP: u8 = 239;
 pub const K_MWHEELDOWN: u8 = 240;
 pub const K_PAUSE: u8 = 255;
@@ -138,6 +149,8 @@ pub fn keynum_to_string(keynum: u8) -> String {
         K_MWHEELDOWN => "MWHEELDOWN",
         K_PAUSE => "PAUSE",
         f @ K_F1..=K_F12 => return format!("F{}", f - K_F1 + 1),
+        j @ K_JOY1..=K_JOY4 => return format!("JOY{}", j - K_JOY1 + 1),
+        a @ K_AUX1..=K_AUX32 => return format!("AUX{}", a - K_AUX1 + 1),
         _ => "UNKNOWN",
     }
     .to_string()
@@ -355,6 +368,50 @@ impl Bindings {
         self
     }
 
+    /// The 2026 profile's gamepad layout, as `bind` lines over id's joystick
+    /// keys (a standard pad's buttons are `IN_Commands`' keys:
+    /// [`crate::client::in_win`] has the mapping). The sticks are axes, not
+    /// keys (`joyadvanced` and its axis maps: left moves, right looks):
+    ///
+    /// | pad | key | binding |
+    /// |---|---|---|
+    /// | A, left trigger | JOY1, AUX7 | `+jump` |
+    /// | B | JOY2 | `+movedown` (swim down) |
+    /// | Y, right bumper, D-pad right | JOY4, AUX6, AUX30 | `impulse 10` (next weapon) |
+    /// | left bumper, D-pad left | AUX5, AUX32 | `impulse 12` (previous weapon) |
+    /// | right trigger | AUX8 | `+attack` |
+    /// | Back | AUX9 | `+showscores` |
+    /// | Start | AUX10 | `togglemenu` |
+    /// | left stick click | AUX11 | `+speed` |
+    /// | D-pad up / down | AUX29 / AUX31 | `+moveup` / `+movedown` |
+    ///
+    /// X, the right stick's click and the Guide button are left free. In the
+    /// menus the pad's A, B, Start and D-pad are Enter, Escape and the arrows
+    /// (`joy_menukeys`, the platform's), so these bindings are the game's.
+    pub fn with_gamepad(mut self) -> Bindings {
+        let (a, b, y) = (K_JOY1, K_JOY1 + 1, K_JOY1 + 3);
+        let aux = |n: u8| K_AUX1 + n - 1;
+        for (key, cmd) in [
+            (a, BIND_JUMP),
+            (aux(7), BIND_JUMP),
+            (b, BIND_MOVEDOWN),
+            (y, BIND_CHANGEWEAPON),
+            (aux(6), BIND_CHANGEWEAPON),
+            (aux(30), BIND_CHANGEWEAPON),
+            (aux(8), BIND_ATTACK),
+            (aux(9), BIND_SHOWSCORES),
+            (aux(11), BIND_SPEED),
+            (aux(29), BIND_MOVEUP),
+            (aux(31), BIND_MOVEDOWN),
+        ] {
+            self.bind(key, cmd);
+        }
+        for (key, line) in [(aux(5), "impulse 12"), (aux(32), "impulse 12"), (aux(10), "togglemenu")] {
+            self.set(key, Binding::parse(line));
+        }
+        self
+    }
+
     /// `keybindings[key]`.
     pub fn get(&self, key: u8) -> Option<&Binding> {
         self.keys[key as usize].as_ref()
@@ -445,6 +502,10 @@ mod tests {
         assert_eq!(keynum_to_string(K_DEL), "DEL");
         assert_eq!(keynum_to_string(K_PAUSE), "PAUSE");
         assert_eq!(keynum_to_string(0), "UNKNOWN");
+        // keys.c's keynames: JOY1..JOY4 at 203, AUX1..AUX32 at 207 (keys.h).
+        assert_eq!([K_JOY1, 204, K_JOY4].map(keynum_to_string), ["JOY1", "JOY2", "JOY4"]);
+        assert_eq!([K_AUX1, 211, K_AUX29, K_AUX32].map(keynum_to_string), ["AUX1", "AUX5", "AUX29", "AUX32"]);
+        assert_eq!((string_to_keynum("joy3"), string_to_keynum("AUX10")), (Some(205), Some(216)));
     }
 
     #[test]
@@ -505,6 +566,21 @@ mod tests {
         let mut changes = String::new();
         id.write_changes(&wasd, &mut changes);
         assert_eq!(changes, "bind \"a\" \"+lookup\"\nbind \"d\" \"+moveup\"\nunbind \"s\"\nunbind \"w\"\n");
+    }
+
+    /// default.cfg binds no joystick key (id's joystick users bound their
+    /// own); the 2026 pad layout binds them by the modern twin-stick habit.
+    #[test]
+    fn the_2026_pad_layout_binds_joy_and_aux_keys() {
+        let id = Bindings::default_cfg();
+        assert!((K_JOY1..=K_AUX32).all(|k| id.get(k).is_none()));
+        let pad = id.with_gamepad();
+        let aux = |n: u8| K_AUX1 + n - 1;
+        assert_eq!([K_JOY1, aux(7), aux(8), aux(6), aux(9)].map(|k| pad.command(k)),
+                   [Some(BIND_JUMP), Some(BIND_JUMP), Some(BIND_ATTACK), Some(BIND_CHANGEWEAPON), Some(BIND_SHOWSCORES)]);
+        assert_eq!(pad.get(aux(10)).map(Binding::text), Some("togglemenu"), "Start");
+        assert_eq!(pad.get(aux(5)).map(Binding::text), Some("impulse 12"), "LB: the previous weapon");
+        assert_eq!((pad.get(K_JOY1 + 2), pad.get(aux(12))), (None, None), "X and R3 free");
     }
 
     #[test]

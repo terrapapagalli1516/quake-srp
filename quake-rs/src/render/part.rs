@@ -43,25 +43,23 @@ use super::{Camera, Image};
 ///   list wins those ties, as in the C.
 ///
 /// Degenerate sizes and non-finite projections draw nothing.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_particles(
     image: &mut Image,
     zbuf: &mut [i16],
     cam: &Camera,
     particles: &[(Vec3, u8)],
-    palette: &[[u8; 3]; 256],
     w: usize,
     h: usize,
     pixel_aspect: f32,
 ) {
     let proj = ParticleProjection::new(cam, w, h, pixel_aspect, false);
-    let dots = project_particles(cam, &proj, particles, palette);
-    let n = w.saturating_mul(h).min(image.rgb.len());
-    draw_particle_dots(&mut Band::whole(w, &mut image.rgb[..n], zbuf), &dots);
+    let dots = project_particles(cam, &proj, particles);
+    let n = w.saturating_mul(h).min(image.pixels.len());
+    draw_particle_dots(&mut Band::whole(w, &mut image.pixels[..n], zbuf), &dots);
 }
 
 /// One particle as `D_DrawParticle` draws it: a `pix` wide, `rows` tall
-/// square from `(u, v)` right and down, at `izi`, in `rgb`.
+/// square from `(u, v)` right and down, at `izi`, in palette index `color`.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ParticleDot {
     u: usize,
@@ -69,7 +67,7 @@ pub(super) struct ParticleDot {
     pix: usize,
     rows: usize,
     izi: i64,
-    rgb: [u8; 3],
+    color: u8,
 }
 
 /// `R_DrawParticles`' projection of `particles` (see [`draw_particles`]), in
@@ -78,7 +76,6 @@ pub(super) fn project_particles(
     cam: &Camera,
     proj: &ParticleProjection,
     particles: &[(Vec3, u8)],
-    palette: &[[u8; 3]; 256],
 ) -> Vec<ParticleDot> {
     /// `d_iface.h`: particles nearer than this are not drawn.
     const PARTICLE_Z_CLIP: f32 = 8.0;
@@ -112,7 +109,7 @@ pub(super) fn project_particles(
             pix: pix as usize,
             rows: (pix << proj.y_aspect_shift) as usize,
             izi,
-            rgb: palette[color as usize],
+            color,
         });
     }
     dots
@@ -138,7 +135,7 @@ pub(super) fn draw_particle_dots(band: &mut Band, dots: &[ParticleDot]) {
                     // if (pz[i] <= izi) { pz[i] = izi; pdest[i] = color; }
                     if *z as i64 <= d.izi {
                         *z = d.izi as i16;
-                        *dst = d.rgb;
+                        *dst = d.color;
                     }
                 }
             }
@@ -248,17 +245,15 @@ mod tests {
         let w = 80usize;
         let h = 60usize;
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![i16::MIN; w * h];
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[42] = [200, 50, 30]; // the particle colour
 
-        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h, 1.0);
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], w, h, 1.0);
 
         // Some pixel changed to the particle colour, and the matching z-buffer
         // slot now holds the particle's 1/z: (int)(0x8000 / 100) = 327.
-        let painted = img.rgb.iter().filter(|&&p| p == [200, 50, 30]).count();
+        let painted = img.pixels.iter().filter(|&&p| p == 42).count();
         assert!(painted > 0, "a particle in front must paint at least one pixel");
         let nearest = zbuf.iter().copied().max().unwrap();
         assert_eq!(nearest, 327, "z-buffer holds the particle's 1/z");
@@ -272,13 +267,11 @@ mod tests {
         // id's 4:3 aspect 0.8333 (v = (int)60.75).
         let (w, h) = (320usize, 200usize);
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[42] = [200, 50, 30];
         let row_of = |aspect: f32| {
-            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut img = Image::new(w, h, 0);
             let mut zbuf = vec![i16::MIN; w * h];
-            draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 30.0], 42)], &pal, w, h, aspect);
-            let i = img.rgb.iter().position(|&p| p == [200, 50, 30]).expect("particle drawn");
+            draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 30.0], 42)], w, h, aspect);
+            let i = img.pixels.iter().position(|&p| p == 42).expect("particle drawn");
             (i % w, i / w)
         };
         let (x1, y1) = row_of(1.0);
@@ -291,13 +284,11 @@ mod tests {
     /// painted pixels' bounding box `(x0, y0, x1, y1)` inclusive, or None.
     fn particle_box(w: usize, h: usize, p: Vec3, aspect: f32) -> Option<(usize, usize, usize, usize)> {
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[42] = [200, 50, 30];
-        let mut img = Image::new(w, h, [0, 0, 0]);
+        let mut img = Image::new(w, h, 0);
         let mut zbuf = vec![0i16; w * h]; // id's d_pzbuffer: 0 = nothing nearer
-        draw_particles(&mut img, &mut zbuf, &cam, &[(p, 42)], &pal, w, h, aspect);
+        draw_particles(&mut img, &mut zbuf, &cam, &[(p, 42)], w, h, aspect);
         let px: Vec<(usize, usize)> =
-            (0..w * h).filter(|&i| img.rgb[i] == [200, 50, 30]).map(|i| (i % w, i / w)).collect();
+            (0..w * h).filter(|&i| img.pixels[i] == 42).map(|i| (i % w, i / w)).collect();
         let (x0, y0) = (px.iter().map(|p| p.0).min()?, px.iter().map(|p| p.1).min()?);
         let (x1, y1) = (px.iter().map(|p| p.0).max()?, px.iter().map(|p| p.1).max()?);
         assert_eq!(px.len(), (x1 - x0 + 1) * (y1 - y0 + 1), "a particle is a solid block");
@@ -366,19 +357,16 @@ mod tests {
         // id's `pz <= izi`; one nearer by a whole izi step wins from anywhere.
         let (w, h) = (320usize, 200usize);
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[1] = [255, 0, 0];
-        pal[2] = [0, 255, 0];
         let centre = |parts: &[(Vec3, u8)]| {
-            let mut img = Image::new(w, h, [0, 0, 0]);
+            let mut img = Image::new(w, h, 0);
             let mut zbuf = vec![0i16; w * h]; // id's d_pzbuffer: 0 = nothing nearer
-            draw_particles(&mut img, &mut zbuf, &cam, parts, &pal, w, h, 1.0);
-            img.rgb[100 * w + 160]
+            draw_particles(&mut img, &mut zbuf, &cam, parts, w, h, 1.0);
+            img.pixels[100 * w + 160]
         };
         assert_eq!((zbuf_izi(1.0 / 150.0), zbuf_izi(1.0 / 150.1)), (218, 218));
-        assert_eq!(centre(&[([150.0, 0.0, 0.0], 1), ([150.1, 0.0, 0.0], 2)]), [0, 255, 0]);
-        assert_eq!(centre(&[([150.1, 0.0, 0.0], 1), ([150.0, 0.0, 0.0], 2)]), [0, 255, 0]);
-        assert_eq!(centre(&[([140.0, 0.0, 0.0], 1), ([150.0, 0.0, 0.0], 2)]), [255, 0, 0]);
+        assert_eq!(centre(&[([150.0, 0.0, 0.0], 1), ([150.1, 0.0, 0.0], 2)]), 2);
+        assert_eq!(centre(&[([150.1, 0.0, 0.0], 1), ([150.0, 0.0, 0.0], 2)]), 2);
+        assert_eq!(centre(&[([140.0, 0.0, 0.0], 1), ([150.0, 0.0, 0.0], 2)]), 1);
     }
 
     #[test]
@@ -389,17 +377,15 @@ mod tests {
         let w = 80usize;
         let h = 60usize;
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![3276i16; w * h]; // a wall closer than the particle
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[42] = [200, 50, 30];
 
-        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], &pal, w, h, 1.0);
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 42)], w, h, 1.0);
 
         // Nothing painted: the wall occludes the particle.
         assert!(
-            img.rgb.iter().all(|&p| p == bg),
+            img.pixels.iter().all(|&p| p == bg),
             "a particle behind a nearer wall must be z-tested out (not drawn)"
         );
         // And the z-buffer is unchanged (still the wall depth).
@@ -414,14 +400,12 @@ mod tests {
         let w = 80usize;
         let h = 60usize;
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let mut img = Image::new(w, h, [9, 9, 9]);
+        let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![65i16; w * h]; // a wall FARTHER than the particle (depth 500)
-        let mut pal = [[0u8, 0, 0]; 256];
-        pal[7] = [10, 220, 40];
 
-        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 7)], &pal, w, h, 1.0);
+        draw_particles(&mut img, &mut zbuf, &cam, &[([100.0, 0.0, 0.0], 7)], w, h, 1.0);
 
-        let painted = img.rgb.iter().filter(|&&p| p == [10, 220, 40]).count();
+        let painted = img.pixels.iter().filter(|&&p| p == 7).count();
         assert!(painted > 0, "a particle nearer than the wall must paint");
         let nearest = zbuf.iter().copied().max().unwrap();
         assert_eq!(nearest, 327, "nearer particle writes its 1/z");
@@ -434,14 +418,13 @@ mod tests {
         let w = 40usize;
         let h = 30usize;
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let bg = [9u8, 9, 9];
+        let bg = 9u8;
         let mut img = Image::new(w, h, bg);
         let mut zbuf = vec![i16::MIN; w * h];
-        let pal = [[200u8, 200, 200]; 256];
 
         // -X is behind a camera looking down +X.
-        draw_particles(&mut img, &mut zbuf, &cam, &[([-100.0, 0.0, 0.0], 0)], &pal, w, h, 1.0);
-        assert!(img.rgb.iter().all(|&p| p == bg), "a particle behind the camera draws nothing");
+        draw_particles(&mut img, &mut zbuf, &cam, &[([-100.0, 0.0, 0.0], 0)], w, h, 1.0);
+        assert!(img.pixels.iter().all(|&p| p == bg), "a particle behind the camera draws nothing");
     }
 
     #[test]
@@ -456,9 +439,9 @@ mod tests {
         let without = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         // A particle ~80 units in front of the camera (well before the +256 wall).
         let with = render_once(&Scene { particles: &[([-120.0, 0.0, 0.0], 251)], ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        assert_ne!(without.rgb, with.rgb, "a visible particle must change the frame");
+        assert_ne!(without.pixels, with.pixels, "a visible particle must change the frame");
         assert!(
-            with.rgb.contains(&[255, 0, 255]),
+            with.pixels.contains(&251),
             "the particle's palette colour must appear in the frame"
         );
     }

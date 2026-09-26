@@ -20,13 +20,15 @@
 //! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into |
 //! | 10 | `AudioClock` | `pos u32`: the sample pairs the page's audio device has played (a wrapping count; the page sends it before each `Tick`) |
 //! | 11 | `AudioWake` | `pos u32`: the same, from the host between ticks while the device plays: mix now (`S_ExtraUpdate`) |
+//! | 12 | `Present` | `format u8`: how the page shows frames ([`FORMAT_RGBA8`] or [`FORMAT_INDEXED8`]; RGBA until it says) |
+//! | 20 | `Gamepad` | `connected u8`, `standard u8`, `buttons u8`, `0 u8`, `pressed u32`, `axes f32×6`: the pad's state, polled each display refresh ([`quake_rs::client::in_win::Pad`]) |
 //!
 //! **Out** (program → host), an 8-byte header `[kind u8][0 u8 ×3][len u32]`
 //! and `len` payload bytes:
 //!
 //! | kind | message | payload |
 //! |---|---|---|
-//! | 1 | `Frame` | `w u16`, `h u16`, `format u8` (0 = RGBA8), `0 u8 ×3`, then the pixels |
+//! | 1 | `Frame` | `w u16`, `h u16`, `format u8`, `0 u8 ×3`, then for [`FORMAT_INDEXED8`] the palette (256 × RGBA), then the pixels |
 //! | 2 | `Sync` | `seq u32` (the last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
 //! | 3 | `State` | `flags u32` ([`STATE_MENU`] …), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel; 0 in the 4:3 box) |
 //! | 4–11 | — | (retired: the sound records of the page's own mixing) |
@@ -34,11 +36,16 @@
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
 //! | 14 | `Pcm` | `start u32` (the pair it plays at, in the `AudioClock`'s count), `rate u32`, `flags u32` (1: silence what was mixed ahead first, `S_ClearBuffer`), then 16-bit stereo pairs: what the mixer painted this tick, for the page's ring |
 //! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
+//! | 16 | `Cd` | `serial u32` (a new value: play `track` from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes (only with a disc: the player's music) |
+//! | 17 | `FrameAt` | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, at those addresses ([`crate::present`]) |
+//! | 20 | `Rumble` | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read, rumble it; 0: a phone's vibration): the 2026 `joy_rumble` |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
 
 use std::io::{self, Read, Write};
+
+use quake_rs::client::in_win::{Pad, Rumble, JOY_MAX_AXES};
 
 /// Input record kinds.
 const IN_TICK: u8 = 1;
@@ -52,6 +59,8 @@ const IN_END: u8 = 8;
 const IN_WINDOW: u8 = 9;
 const IN_AUDIO_CLOCK: u8 = 10;
 const IN_AUDIO_WAKE: u8 = 11;
+const IN_PRESENT: u8 = 12;
+const IN_GAMEPAD: u8 = 20;
 
 /// One event from the host.
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +92,11 @@ pub(crate) enum Event {
     End,
     /// The page's box for the picture, in device pixels.
     Window { w: u32, h: u32 },
+    /// How the page shows the frames from now on: [`FORMAT_RGBA8`] or
+    /// [`FORMAT_INDEXED8`] (another value is RGBA).
+    Present(u8),
+    /// The pad's state this refresh; `None`: no pad is connected.
+    Gamepad(Option<Pad>),
     /// A record this program does not know (skipped, for forward
     /// compatibility with a newer page).
     Unknown(u8),
@@ -126,9 +140,25 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
         }
         IN_END => Event::End,
         IN_WINDOW => Event::Window { w: p.u32(), h: p.u32() },
+        IN_PRESENT => Event::Present(p.u8()),
+        IN_GAMEPAD => Event::Gamepad(read_pad(&mut p)),
         other => Event::Unknown(other),
     };
     Ok(Some(ev))
+}
+
+/// A `Gamepad` record's pad: `None` when it says none is connected.
+fn read_pad(p: &mut Payload) -> Option<Pad> {
+    let connected = p.u8() != 0;
+    let standard = p.u8() != 0;
+    let num_buttons = p.u8().min(32);
+    p.skip(1);
+    let pressed = p.u32();
+    let mut axes = [0.0; JOY_MAX_AXES];
+    for a in &mut axes {
+        *a = p.f32();
+    }
+    connected.then_some(Pad { standard, num_buttons, pressed, axes })
 }
 
 /// A little-endian reader over one record's payload. A short payload reads
@@ -173,11 +203,16 @@ const OUT_REPLY: u8 = 12;
 const OUT_BENCH: u8 = 13;
 const OUT_PCM: u8 = 14;
 const OUT_AUDIO: u8 = 15;
+const OUT_CD: u8 = 16;
+const OUT_FRAME_AT: u8 = 17;
+const OUT_RUMBLE: u8 = 20;
 
-/// `Frame` pixel formats. Only RGBA8 exists today: the engine composes the
-/// screen in RGB (PERF_PLAN B5). An 8-bit indexed format plus its palette is
-/// the natural next one, when the renderer writes palette indices.
+/// `Frame` pixel formats. RGBA8: four bytes a pixel, what a 2-D canvas
+/// takes. INDEXED8: the engine's own frame, a palette index a pixel, with the
+/// 256 colours (RGBA each) it is shown through — a quarter of the bytes, and
+/// the page's GPU is the DAC ([`crate::present`]).
 pub(crate) const FORMAT_RGBA8: u8 = 0;
+pub(crate) const FORMAT_INDEXED8: u8 = 1;
 
 /// `State` flag bits: what the page's own UI needs to know every turn.
 pub(crate) const STATE_MENU: u32 = 1;
@@ -222,7 +257,11 @@ pub(crate) struct AudioCounts {
 /// One message to the host.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Msg<'a> {
-    Frame { w: u16, h: u16, format: u8, pixels: &'a [u8] },
+    /// A frame's bytes: the palette (empty for RGBA) and the pixels.
+    Frame { w: u16, h: u16, format: u8, palette: &'a [u8], pixels: &'a [u8] },
+    /// A frame left where it lies in the program's shared memory: ring slot
+    /// `slot`, its pixels and palette at those addresses.
+    FrameAt { w: u16, h: u16, format: u8, slot: u8, pixels: u32, palette: u32 },
     Sync { seq: u32, wait: bool },
     State { flags: u32, menu_screen: i32, pixel_size: u32 },
     Reply { id: u32, value: f64, text: &'a str },
@@ -232,6 +271,11 @@ pub(crate) enum Msg<'a> {
     /// bytes.
     Pcm { start: u32, rate: u32, flags: u32, pairs: &'a [u8] },
     Audio(AudioCounts),
+    /// The CD player's state ([`quake_rs::cd_audio::CdState`]): the page
+    /// plays the player's file for the track, beside the sound ring.
+    Cd(quake_rs::cd_audio::CdState),
+    /// A rumble, and whether the pad is read (else a phone vibrates).
+    Rumble { rumble: Rumble, pad: bool },
 }
 
 /// Little-endian field writer for a message's fixed part.
@@ -255,8 +299,16 @@ impl Fields {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
+    fn f32(mut self, v: f32) -> Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
     fn f64(mut self, v: f64) -> Self {
         self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    fn bytes(mut self, v: &[u8]) -> Self {
+        self.0.extend_from_slice(v);
         self
     }
 }
@@ -267,8 +319,11 @@ impl Msg<'_> {
     fn parts(&self) -> (u8, Vec<u8>, &[u8]) {
         let f = Fields::default();
         match *self {
-            Msg::Frame { w, h, format, pixels } => {
-                (OUT_FRAME, f.u16(w).u16(h).u8(format).u8(0).u16(0).0, pixels)
+            Msg::Frame { w, h, format, palette, pixels } => {
+                (OUT_FRAME, f.u16(w).u16(h).u8(format).u8(0).u16(0).bytes(palette).0, pixels)
+            }
+            Msg::FrameAt { w, h, format, slot, pixels, palette } => {
+                (OUT_FRAME_AT, f.u16(w).u16(h).u8(format).u8(slot).u16(0).u32(pixels).u32(palette).0, &[])
             }
             Msg::Sync { seq, wait } => (OUT_SYNC, f.u32(seq).u8(wait as u8).0, &[]),
             Msg::State { flags, menu_screen, pixel_size } => {
@@ -283,6 +338,18 @@ impl Msg<'_> {
                 f.u32(c.rate).u32(c.mode).u32(c.starts).u32(c.local).u32(c.stops).u32(c.clears).u32(c.painted).0,
                 &[],
             ),
+            Msg::Cd(cd) => {
+                use quake_rs::cd_audio::CdMode;
+                let mode = match cd.mode {
+                    CdMode::Stopped => 0,
+                    CdMode::Playing => 1,
+                    CdMode::Paused => 2,
+                };
+                (OUT_CD, f.u32(cd.serial).u8(cd.track).u8(u8::from(cd.looping)).u8(mode).u8(0).f32(cd.volume).0, &[])
+            }
+            Msg::Rumble { rumble: r, pad } => {
+                (OUT_RUMBLE, f.f32(r.strong).f32(r.weak).u32(r.ms).u32(u32::from(pad)).0, &[])
+            }
         }
     }
 
@@ -349,6 +416,19 @@ pub(crate) mod encode {
     pub(crate) fn audio_wake(pos: u32) -> Vec<u8> {
         record(super::IN_AUDIO_WAKE, &pos.to_le_bytes())
     }
+    pub(crate) fn present(format: u8) -> Vec<u8> {
+        record(super::IN_PRESENT, &[format])
+    }
+    /// A `Gamepad` record: `None` is "no pad connected".
+    pub(crate) fn gamepad(pad: Option<quake_rs::client::in_win::Pad>) -> Vec<u8> {
+        let p = pad.unwrap_or_default();
+        let mut v = vec![pad.is_some() as u8, p.standard as u8, p.num_buttons, 0];
+        v.extend_from_slice(&p.pressed.to_le_bytes());
+        for a in p.axes {
+            v.extend_from_slice(&a.to_le_bytes());
+        }
+        record(super::IN_GAMEPAD, &v)
+    }
 }
 
 /// A decoded output record (tests and the native twin read the program's
@@ -363,11 +443,13 @@ pub(crate) struct Record {
 #[cfg(test)]
 impl Record {
     pub(crate) const FRAME: u8 = OUT_FRAME;
+    pub(crate) const FRAME_AT: u8 = OUT_FRAME_AT;
     pub(crate) const SYNC: u8 = OUT_SYNC;
     pub(crate) const STATE: u8 = OUT_STATE;
     pub(crate) const REPLY: u8 = OUT_REPLY;
     pub(crate) const PCM: u8 = OUT_PCM;
     pub(crate) const AUDIO: u8 = OUT_AUDIO;
+    pub(crate) const CD: u8 = OUT_CD;
 
     /// Split a stdout byte stream into records.
     pub(crate) fn split(mut bytes: &[u8]) -> Vec<Record> {
@@ -404,6 +486,10 @@ mod tests {
         stream.extend(encode::audio_ready(true, 48000));
         stream.extend(encode::audio_clock(4096));
         stream.extend(encode::audio_wake(4200));
+        stream.extend(encode::present(FORMAT_INDEXED8));
+        let pad = Pad { standard: true, num_buttons: 17, pressed: 0b101, axes: [0.5, -1.0, 0.0, 0.25, 1.0, 0.0] };
+        stream.extend(encode::gamepad(Some(pad)));
+        stream.extend(encode::gamepad(None));
         stream.extend(encode::end());
         let mut r = &stream[..];
         let mut got = Vec::new();
@@ -420,6 +506,9 @@ mod tests {
                 Event::AudioReady { running: true, rate: 48000 },
                 Event::AudioClock(4096),
                 Event::AudioWake(4200),
+                Event::Present(FORMAT_INDEXED8),
+                Event::Gamepad(Some(pad)),
+                Event::Gamepad(None),
                 Event::End,
             ]
         );
@@ -449,7 +538,7 @@ mod tests {
     fn messages_carry_their_length_and_trailing_bytes() {
         let px = [1u8, 2, 3, 255, 4, 5, 6, 255];
         let mut out = Vec::new();
-        Msg::Frame { w: 2, h: 1, format: FORMAT_RGBA8, pixels: &px }.write_to(&mut out).unwrap();
+        Msg::Frame { w: 2, h: 1, format: FORMAT_RGBA8, palette: &[], pixels: &px }.write_to(&mut out).unwrap();
         Msg::Reply { id: 3, value: 1.5, text: "ok" }.write_to(&mut out).unwrap();
         Msg::Sync { seq: 42, wait: true }.write_to(&mut out).unwrap();
         let recs = Record::split(&out);
@@ -460,6 +549,22 @@ mod tests {
         assert_eq!((recs[1].u32_at(0), recs[1].f64_at(4)), (3, 1.5));
         assert_eq!(&recs[1].payload[12..], b"ok");
         assert_eq!((recs[2].kind, recs[2].u32_at(0), recs[2].payload[4]), (Record::SYNC, 42, 1));
+    }
+
+    #[test]
+    fn frames_carry_their_palette_or_where_they_lie() {
+        let (palette, px) = ([7u8; 1024], [1u8, 2, 3, 4, 5, 6]);
+        let mut out = Vec::new();
+        Msg::Frame { w: 3, h: 2, format: FORMAT_INDEXED8, palette: &palette, pixels: &px }.write_to(&mut out).unwrap();
+        Msg::FrameAt { w: 3, h: 2, format: FORMAT_INDEXED8, slot: 2, pixels: 0x1234, palette: 0x5678 }
+            .write_to(&mut out)
+            .unwrap();
+        let recs = Record::split(&out);
+        assert_eq!((recs[0].kind, recs[0].payload[4], recs[0].payload.len()), (Record::FRAME, 1, 8 + 1024 + 6));
+        assert_eq!((&recs[0].payload[8..1032], &recs[0].payload[1032..]), (&palette[..], &px[..]));
+        assert_eq!((recs[1].kind, recs[1].payload.len()), (Record::FRAME_AT, 16));
+        assert_eq!(&recs[1].payload[..6], &[3, 0, 2, 0, 1, 2]);
+        assert_eq!((recs[1].u32_at(8), recs[1].u32_at(12)), (0x1234, 0x5678));
     }
 
     #[test]
@@ -474,5 +579,17 @@ mod tests {
         let c = AudioCounts { rate: 48000, mode: 1, starts: 2, local: 3, stops: 0, clears: 1, painted: 7 };
         assert_eq!(size(Msg::Audio(c)), 28);
         assert_eq!(size(Msg::State { flags: 0, menu_screen: 0, pixel_size: 0 }), 12);
+        let cd = quake_rs::cd_audio::CdState {
+            serial: 3,
+            track: 6,
+            looping: true,
+            mode: quake_rs::cd_audio::CdMode::Paused,
+            volume: 0.5,
+        };
+        let mut out = Vec::new();
+        Msg::Cd(cd).write_to(&mut out).unwrap();
+        assert_eq!(&out[..8], &[16, 0, 0, 0, 12, 0, 0, 0]);
+        assert_eq!(&out[8..], &[3, 0, 0, 0, 6, 1, 2, 0, 0, 0, 0, 0x3f]);
+        assert_eq!(size(Msg::Rumble { rumble: Rumble { strong: 1.0, weak: 0.5, ms: 200 }, pad: true }), 16);
     }
 }

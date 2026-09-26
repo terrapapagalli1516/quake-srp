@@ -270,6 +270,9 @@ fn drain(server: &mut Server, pak: &Pak, run: &mut Run) {
             SvcEvent::Finale(t) => format!("t={:.1} svc_finale {:?}", server.time(), t.chars().take(40).collect::<String>()),
             SvcEvent::Cutscene(t) => format!("t={:.1} svc_cutscene {t:?}", server.time()),
             SvcEvent::SellScreen => format!("t={:.1} svc_sellscreen", server.time()),
+            // The CD's track is the client's music, not the game's state: the
+            // report (and its recorded hash) leaves it out.
+            SvcEvent::CdTrack { .. } => continue,
         });
     }
     for te in server.drain_temp_entities() {

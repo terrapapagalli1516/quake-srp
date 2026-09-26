@@ -2055,28 +2055,28 @@ mod tests {
         }
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
-        assert_eq!(vm.fo.origin, vm.fld("origin"));
-        assert_eq!(vm.fo.origin.ofs(), Some(1));
-        assert_eq!(vm.fo.health, Fld::default(), "a field this progs lacks");
-        assert_eq!(vm.go.time.ofs(), Some(31));
-        assert_eq!(vm.go.force_retouch, Glb::default());
+        assert_eq!(vm.fo().origin, vm.fld("origin"));
+        assert_eq!(vm.fo().origin.ofs(), Some(1));
+        assert_eq!(vm.fo().health, Fld::default(), "a field this progs lacks");
+        assert_eq!(vm.go().time.ofs(), Some(31));
+        assert_eq!(vm.go().force_retouch, Glb::default());
 
         let e = vm.spawn();
-        vm.set_ent_vec(e, vm.fo.origin, [1.0, 2.0, 3.0]);
+        vm.set_ent_vec(e, vm.fo().origin, [1.0, 2.0, 3.0]);
         vm.ent_set_float(e, "solid", 4.0);
         vm.ent_set_string(e, "model", "progs/player.mdl");
         assert_eq!(vm.ent_get_vector(e, "origin"), [1.0, 2.0, 3.0]);
-        assert_eq!(vm.ent_float(e, vm.fo.solid), 4.0);
-        assert_eq!(vm.ent_str(e, vm.fo.model), "progs/player.mdl");
+        assert_eq!(vm.ent_float(e, vm.fo().solid), 4.0);
+        assert_eq!(vm.ent_str(e, vm.fo().model), "progs/player.mdl");
         let cells = vm.edict_fields.clone();
-        vm.set_ent_float(e, vm.fo.health, 9.0);
-        vm.set_ent_vec(e, vm.fo.velocity, [9.0; 3]);
+        vm.set_ent_float(e, vm.fo().health, 9.0);
+        vm.set_ent_vec(e, vm.fo().velocity, [9.0; 3]);
         assert_eq!(vm.edict_fields, cells, "writes to a missing field are dropped");
-        assert_eq!(vm.ent_float(e, vm.fo.health), 0.0);
-        assert_eq!(vm.ent_str(e, vm.fo.classname), "");
-        vm.set_glob_float(vm.go.time, 2.5);
+        assert_eq!(vm.ent_float(e, vm.fo().health), 0.0);
+        assert_eq!(vm.ent_str(e, vm.fo().classname), "");
+        vm.set_glob_float(vm.go().time, 2.5);
         assert_eq!(vm.gget_float("time"), 2.5);
-        assert_eq!(vm.glob_float(vm.go.force_retouch), 0.0);
+        assert_eq!(vm.glob_float(vm.go().force_retouch), 0.0);
     }
 
     /// `GlobalOfs::parms` is `parm1`..`parm16` in order, and names that are

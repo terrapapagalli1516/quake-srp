@@ -204,6 +204,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             // Three frames at t = 0, 1, 2.
             frames: vec![frame(0.0), frame(1.0), frame(2.0)],
         };
@@ -277,6 +279,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![plain(0.0), effect_frame, plain(0.10)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -365,6 +369,8 @@ mod tests {
             ],
             sound_precache: Vec::new(),
             viewentity: 1,
+            forcetrack: -1,
+            cdtrack: None,
             static_sounds: Vec::new(),
             frames: vec![plain(0.0), bolt_frame, plain(0.10)],
         };
@@ -515,6 +521,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 1,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![plain(0.0), sound_frame, plain(0.10)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[("sound/doors/x.wav", b"WAVE")]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -557,6 +565,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             // Trailing frames keep the fade-out steps below from wrapping the
             // loop (a wrap re-spawns the damage frame's events).
             frames: vec![plain(0.0), dmg_frame, plain(0.10), plain(1.0), plain(2.0)],
@@ -650,6 +660,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into(), "progs/missile.mdl".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![frame(0.0, 0.0), frame(0.05, 0.0), frame(0.10, 30.0), frame(1.0, 30.0)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -679,6 +691,8 @@ mod tests {
             model_precache: vec![String::new(), "maps/test.bsp".into()],
             sound_precache: Vec::new(),
             viewentity: 0,
+            forcetrack: -1,
+            cdtrack: None,
             frames: vec![plain(0.0), bf, plain(0.10), plain(1.0)],
         };
         let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
@@ -717,13 +731,13 @@ mod tests {
         let (with_hud, _) = step_demo(&mut d, 0.016, false, &crate::vid::mode_vid(320, 200));
         d.gfx_wad = None;
         let (without, _) = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(320, 200));
-        assert_eq!(with_hud.rgb.len(), without.rgb.len());
+        assert_eq!(with_hud.pixels.len(), without.pixels.len());
         // Quake's sbar is the bottom 24 rows of the 320x200 virtual screen.
         let bar_rows = 24usize;
         let diff = (0..320 * bar_rows)
             .filter(|i| {
-                let a = with_hud.rgb[(200 - bar_rows) * 320 + i];
-                let b = without.rgb[(200 - bar_rows) * 320 + i];
+                let a = with_hud.pixels[(200 - bar_rows) * 320 + i];
+                let b = without.pixels[(200 - bar_rows) * 320 + i];
                 a != b
             })
             .count();
@@ -747,14 +761,14 @@ mod tests {
             "frame 0 is the post-signon in-world frame"
         );
         let lit = img
-            .rgb
+            .pixels
             .iter()
-            .filter(|p| p[0] != 0 || p[1] != 0 || p[2] != 0)
+            .filter(|&&p| p != 0)
             .count();
         assert!(
-            lit * 2 > img.rgb.len(),
+            lit * 2 > img.pixels.len(),
             "the post-wrap frame renders a real scene ({lit}/{} lit)",
-            img.rgb.len()
+            img.pixels.len()
         );
     }
 
@@ -879,7 +893,7 @@ mod tests {
         let (cur, h, fb) = APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            (a.console.current(), a.render_h, a.fb.clone())
+            (a.console.current(), a.render_h, a.present.rgba())
         });
         assert_eq!(cur, h as f32, "the console is all the way down");
         // The conback is drawn over all of it: no black rows left.
@@ -892,7 +906,7 @@ mod tests {
         console_toggle();
         assert_eq!(menu_visible(), 1, "Con_ToggleConsole_f disconnected: M_Menu_Main_f");
         step(0.05);
-        let with_menu = APP.with(|c| c.borrow().as_ref().unwrap().fb.clone());
+        let with_menu = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         let changed = with_menu.chunks_exact(4).zip(fb.chunks_exact(4)).filter(|(a, b)| a != b).count();
         assert!(changed > 5000, "M_Draw puts the menu over the full console ({changed} px)");
         menu_cancel();
@@ -1011,7 +1025,7 @@ mod tests {
             f.paused = true;
         }
         let (paused, _) = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(320, 200));
-        let changed: Vec<usize> = (0..320 * 200).filter(|&i| plain.rgb[i] != paused.rgb[i]).collect();
+        let changed: Vec<usize> = (0..320 * 200).filter(|&i| plain.pixels[i] != paused.pixels[i]).collect();
         assert!(changed.len() > 1000, "the plaque is drawn ({} px)", changed.len());
         assert!(
             changed.iter().all(|&i| (96..224).contains(&(i % 320)) && (64..88).contains(&(i / 320))),
@@ -1042,6 +1056,8 @@ mod tests {
                 model_precache: vec![String::new(), "maps/test.bsp".into()],
                 sound_precache: Vec::new(),
                 viewentity: 0,
+                forcetrack: -1,
+                cdtrack: None,
                 frames: vec![plain(0.0), puff, plain(0.10), plain(0.15)],
             };
             let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);

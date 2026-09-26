@@ -88,7 +88,7 @@ def cfg_has(pg, *lines):
 # Keep a canvas grab in the page as window[name].
 GRAB = """name => {
     const c = document.getElementById('c');
-    window[name] = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    window[name] = quake.readback();
 }"""
 # The bounding box of the pixels where grabs a and b differ, or null.
 DIFF = """([a, b]) => {

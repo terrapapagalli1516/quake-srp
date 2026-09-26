@@ -1513,7 +1513,7 @@ mod tests {
         // with a bright light present. (The actual brightening of a lightmapped
         // surface is exercised by `dynamic_light_brightens_near_luxel_only`.)
         let bsp = demo_room();
-        let pal = [[180u8, 180, 180]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
 
         let base = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
@@ -1523,7 +1523,7 @@ mod tests {
         // faces and never panic.
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 600.0, 10.0, 0.0, 0.0, 0);
         let lit = render_once(&Scene { dlights: std::slice::from_ref(&dl), ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        assert_eq!(base.rgb, lit.rgb, "fullbright (lightmap-less) world must ignore dlights");
+        assert_eq!(base.pixels, lit.pixels, "fullbright (lightmap-less) world must ignore dlights");
     }
 
     // -- R_MarkLights BSP dlight gating (r_light.c) -------------------------
@@ -1771,7 +1771,7 @@ mod tests {
         // reach, i.e. visibly lit by the OLD proximity-only gating — must be
         // byte-identical to the unlit frame.
         let bsp = two_rooms_bsp();
-        let pal = [[128u8, 128, 128]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         // Above and behind the origin, looking down across both rooms.
         let cam = Camera::looking_at([0.0, -220.0, 260.0], [0.0, 0.0, 0.0], 90.0);
         let (w, h) = (200usize, 150usize);
@@ -1780,9 +1780,9 @@ mod tests {
         let dl = DynamicLight::new([40.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
         let lit = render_once(&Scene { dlights: std::slice::from_ref(&dl), ..Scene::new(&bsp, cam, w, h, &pal) });
 
-        let px = |img: &Image, p: Vec3| -> [u8; 3] {
+        let px = |img: &Image, p: Vec3| -> u8 {
             let (x, y) = project_px(&cam, w, h, p);
-            img.rgb[y * w + x]
+            img.pixels[y * w + x]
         };
 
         // Near floor under the light brightens.
@@ -1829,14 +1829,14 @@ mod tests {
         };
         bsp.models = vec![model(1, 2), model(0, 1)];
         let lift = [crate::render::BModelInstance { model_index: 1, origin: [0.0, 0.0, -64.0], frame: 0 }];
-        let pal = [[128u8, 128, 128]; 256];
+        let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([128.0, -200.0, 200.0], [128.0, 0.0, -64.0], 90.0);
         let (w, h) = (200usize, 150usize);
         let frame = |dl: &[DynamicLight]| {
             render_once(&Scene { bmodels: &lift, dlights: dl, ..Scene::new(&bsp, cam, w, h, &pal) })
         };
         let (x, y) = project_px(&cam, w, h, [128.0, 0.0, -64.0]);
-        let at = |img: &Image| img.rgb[y * w + x];
+        let at = |img: &Image| img.pixels[y * w + x];
         let dark = frame(&[]);
         let above_the_map = DynamicLight::new([128.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
         assert_ne!(at(&frame(&[above_the_map])), at(&dark), "lit as if it had not moved");

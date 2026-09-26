@@ -10,6 +10,7 @@
 //! Source: `WinQuake/cl_main.c`, `cl_parse.c`, `cl_input.c`, `view.c`, `screen.c`.
 
 use crate::bsp::Bsp;
+use crate::cd_audio::CdCall;
 use crate::mdl::Mdl;
 use crate::particles::{TrailHead, TrailStep};
 use crate::stepping::advance_clock;
@@ -85,6 +86,7 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     let byte = |f: f32| (f as i32) & 255;
     let pd = parse_damage(byte(save), byte(take), from, ent_origin, [w.pitch, w.yaw, 0.0]);
     w.damage_blend = cshift_add(w.damage_blend, pd.percent);
+    w.damage_count += pd.percent / 3.0;
     w.damage_color = pd.color;
     w.v_dmg_roll = pd.roll;
     w.v_dmg_pitch = pd.pitch;
@@ -178,7 +180,7 @@ pub fn offset_box(origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3]
 /// disconnected, and id's console covers the screen (`con_forcedup`) — and
 /// what it said to the sound layer.
 fn disconnected_frame(vid: &Vid, sound: Vec<SoundCall>) -> ClientFrame {
-    ClientFrame { image: render::Image::new(vid.width, vid.height, [0, 0, 0]), cshifts: Vec::new(), sound }
+    ClientFrame { image: render::Image::new(vid.width, vid.height, 0), cshifts: Vec::new(), sound }
 }
 
 /// One live client frame (see the module doc) of `host_frametime` seconds —
@@ -368,6 +370,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             crate::server::SvcEvent::SellScreen => {
                 // Cmd_ExecuteString("help"): the dispatcher opens the Help menu.
                 w.pending_sellscreen = true;
+            }
+            crate::server::SvcEvent::CdTrack { track, .. } => {
+                // CDAudio_Play ((byte)cl.cdtrack, true).
+                sound.push(SoundCall::Cd(CdCall::cdtrack(track)));
             }
         }
     }
@@ -1023,7 +1029,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // into the warp buffer for D_WarpScreen below. The status bar is drawn
     // over it later.
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
-    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref(), &w.palette);
+    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
     let warp_view = if dowarp {
         Some(w.renderer.render(&scene))
     } else {
@@ -1053,10 +1059,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
-    view_hook(&mut img, vrect, &w.palette);
+    view_hook(&mut img, vrect);
     // V_RenderView: the crosshair over the view, before the 2-D layer.
     if let Some(cc) = w.conchars.as_ref().filter(|_| w.crosshair) {
-        render::draw_crosshair(&mut img, cc, &vrect, &w.palette);
+        render::draw_crosshair(&mut img, cc, &vrect);
     }
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
@@ -1111,7 +1117,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                         render::draw_intermission_overlay(
                             &mut img,
                             wad,
-                            &w.palette,
                             w.pic_complete.as_ref(),
                             w.pic_inter.as_ref(),
                             &stats,
@@ -1121,7 +1126,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 2 => render::draw_finale_overlay(
                     &mut img,
                     w.conchars.as_ref(),
-                    &w.palette,
                     w.pic_finale.as_ref(),
                     &w.finale_text,
                     w.clock - w.finale_start,
@@ -1130,7 +1134,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 _ => render::draw_finale_overlay(
                     &mut img,
                     w.conchars.as_ref(),
-                    &w.palette,
                     None,
                     &w.finale_text,
                     w.clock - w.finale_start,
@@ -1146,7 +1149,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         let level_name = vm.ent_str(0, fo.message).to_string();
         let hud = render::Hud {
             wad,
-            palette: &w.palette,
             health: stat(fo.health),
             // The active weapon's ammo (W_SetCurrentAmmo keeps `currentammo` in
             // sync with the weapon), not always shells — sbar.c draws currentammo.
@@ -1181,7 +1183,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // whatever key_dest is (the menu draws over it).
     if cl_paused && w.intermission == 0 {
         if let Some(pic) = w.pic_pause.as_ref() {
-            render::draw_pause(&mut img, pic, &w.palette);
+            render::draw_pause(&mut img, pic);
         }
     }
 
@@ -1196,11 +1198,11 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     if !menu_up && w.intermission == 0 {
         if let Some(cc) = w.conchars.as_ref() {
             if let Some((text, _)) = &w.centerprint {
-                render::draw_centerprint(&mut img, cc, &w.palette, text);
+                render::draw_centerprint(&mut img, cc, text);
             }
             let lines = w.notify.visible(w.host_time);
             if !lines.is_empty() {
-                render::draw_notify(&mut img, cc, &w.palette, &lines);
+                render::draw_notify(&mut img, cc, &lines);
             }
         }
     }

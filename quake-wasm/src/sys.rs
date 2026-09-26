@@ -31,9 +31,9 @@ use crate::automation;
 use crate::cl_demo::timedemo_running;
 use crate::config::{exec_config, write_if_changed};
 use crate::host::step;
-use crate::input::{key_clear_states, key_event, mouse_move, pointer_unlocked};
+use crate::input::{gamepad, key_clear_states, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
-    read_event, AudioCounts, Event, Msg, FORMAT_RGBA8, PCM_CLEAR, STATE_ASK, STATE_BIND_GRAB, STATE_CONSOLE,
+    read_event, AudioCounts, Event, Msg, PCM_CLEAR, STATE_ASK, STATE_BIND_GRAB, STATE_CONSOLE,
     STATE_FKEY, STATE_MENU, STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK,
 };
 use crate::savegame::scan_saves;
@@ -73,6 +73,8 @@ struct Sys<W: Write> {
     last_frame: Instant,
     /// The UI state the page last heard (`State`).
     state: UiState,
+    /// The CD's state the page last heard (`Cd`).
+    cd_sent: Option<quake_rs::cd_audio::CdState>,
 }
 
 impl<W: Write> Sys<W> {
@@ -86,14 +88,18 @@ impl<W: Write> Sys<W> {
             config: None,
             last_frame: Instant::now(),
             state: (u32::MAX, 0, 0),
+            cd_sent: None,
         }
     }
 
     /// `Host_Init`'s `quake.rc`: `exec config.cfg`, `stuffcmds` (the command
     /// line's `+` commands: the page's `?classic` is `+profile classic`), then
     /// `startdemos demo1 demo2 demo3` (the attract loop; a key brings up the
-    /// menu). The Load/Save listings are read once here too.
+    /// menu). The Load/Save listings are read once here too. `CDAudio_Init`
+    /// comes first: the disc is the tracks the command line names
+    /// (`-cdtracks`, the page's music files).
     fn host_init(&mut self, command_line: &[String]) {
+        self.audio.set_disc(quake_rs::cd_audio::Disc::from_args(command_line));
         // `config.cfg` as it stands after the exec, so the first frame writes
         // the file only when something since has changed a setting — the
         // command line's `profile` included, which then sticks, as a choice
@@ -148,9 +154,11 @@ impl<W: Write> Sys<W> {
                     self.out.flush()?;
                 }
                 Event::Window { w, h } => crate::vid::set_window(w, h),
+                Event::Present(format) => crate::app::ensure_app(|a| a.present.set_format(format)),
+                Event::Gamepad(pad) => gamepad(pad),
                 Event::Call { id, line } => {
                     // The sound device's own calls, then the game's.
-                    let answer = match self.audio.call(&line) {
+                    let answer = match self.audio.cd_call(&line).or_else(|| self.audio.call(&line)) {
                         Some((value, text)) => automation::Answer { value, text },
                         None => automation::call(&line),
                     };
@@ -179,6 +187,7 @@ impl<W: Write> Sys<W> {
             return Ok(());
         }
         self.write_picture()?;
+        self.write_rumbles()?;
         crate::bench::write_values(&mut self.out)?;
         write_if_changed(&mut self.config);
         Ok(())
@@ -196,14 +205,12 @@ impl<W: Write> Sys<W> {
         }
     }
 
-    /// `VID_Update`: the presented framebuffer.
+    /// `VID_Update`: the newest frame, as the page takes it ([`crate::present`]).
     fn write_picture(&mut self) -> io::Result<()> {
         let out = &mut self.out;
-        APP.with(|c| {
-            let b = c.borrow();
-            let Some(a) = b.as_ref() else { return Ok(()) };
-            let (w, h) = (a.render_w as u16, a.render_h as u16);
-            Msg::Frame { w, h, format: FORMAT_RGBA8, pixels: &a.fb }.write_to(out)
+        APP.with(|c| match c.borrow().as_ref().and_then(|a| a.present.msg()) {
+            Some(frame) => frame.write_to(out),
+            None => Ok(()),
         })
     }
 
@@ -227,7 +234,23 @@ impl<W: Write> Sys<W> {
             clears: s.clears,
             painted: s.painted,
         };
-        Msg::Audio(counts).write_to(&mut self.out)
+        Msg::Audio(counts).write_to(&mut self.out)?;
+        // The CD's state when it changed: the page plays it beside the ring.
+        let cd = self.audio.cd_state();
+        if cd != self.cd_sent {
+            self.cd_sent = cd;
+            if let Some(cd) = cd {
+                Msg::Cd(cd).write_to(&mut self.out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The frame's rumbles (the 2026 `joy_rumble`), for the pad or a phone.
+    fn write_rumbles(&mut self) -> io::Result<()> {
+        let (mut rumbles, mut pad) = (Vec::new(), false);
+        crate::app::ensure_app(|a| (rumbles, pad) = (a.pad.take_rumbles(), a.pad.pad_read));
+        rumbles.into_iter().try_for_each(|rumble| Msg::Rumble { rumble, pad }.write_to(&mut self.out))
     }
 }
 
@@ -449,6 +472,27 @@ mod tests {
         assert_eq!(states.len(), 4, "{states:?}");
         assert_eq!(states[2] & STATE_MENU, 0, "the menu closed by the call");
         assert_eq!(states[3] & STATE_MENU, STATE_MENU, "Escape's turn: the menu is up");
+    }
+
+    /// The page's `Gamepad` records reach `IN_Commands` in the next host
+    /// frame: the 2026 pad's Start (`togglemenu`) opens the menu, and the
+    /// frame's `State` says so.
+    #[test]
+    fn a_gamepad_record_is_read_at_the_next_frame() {
+        use quake_rs::client::in_win::Pad;
+        let start = Pad { standard: true, num_buttons: 17, pressed: 1 << 9, axes: [0.0; 6] };
+        let mut input = Vec::new();
+        input.extend(encode::call(1, "boot"));
+        input.extend(encode::call(2, "menu_cancel"));
+        input.extend(encode::call(3, "exec profile 2026"));
+        input.extend(encode::gamepad(Some(start)));
+        input.extend(encode::tick(1, 1.0 / 60.0));
+        input.extend(encode::gamepad(None));
+        input.extend(encode::tick(2, 1.0 / 60.0));
+        let recs = run_on(&input);
+        let states: Vec<u32> = recs.iter().filter(|r| r.kind == Record::STATE).map(|r| r.u32_at(0)).collect();
+        assert_eq!(states[3] & STATE_MENU, 0, "no menu before the frame");
+        assert_eq!(states.last().map(|s| s & STATE_MENU), Some(STATE_MENU), "Start opened it: {states:?}");
     }
 
     #[test]
