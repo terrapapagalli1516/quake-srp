@@ -14,7 +14,6 @@
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
 use super::host::sv_gravity;
-use super::lightstyle::snapshot_lightstyles;
 use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
 use super::{
     FrameReport, Server, UserCmd, CONTENTS_EMPTY,
@@ -100,8 +99,8 @@ impl Server {
         self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
-        // sync any updates from the write transport into the owned table.
-        self.lightstyles = snapshot_lightstyles();
+        // apply those writes to the owned table.
+        self.apply_lightstyles();
 
         Ok(FrameReport {
             thinks_fired,
@@ -1043,8 +1042,8 @@ impl Server {
         self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
-        // sync any updates from the write transport into the owned table.
-        self.lightstyles = snapshot_lightstyles();
+        // apply those writes to the owned table.
+        self.apply_lightstyles();
 
         Ok(FrameReport {
             thinks_fired,

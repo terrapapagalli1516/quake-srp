@@ -18,7 +18,6 @@
 //! the rest of the message side in `msg.rs`.
 
 use super::host::reset_skill;
-use super::lightstyle::reset_lightstyles;
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
 use super::{
@@ -89,11 +88,6 @@ impl Server {
         install_engine_builtins(&mut vm);
         vm.set_host(Box::new(WorldModel::with_pak(bsp, pak)));
 
-        // The light-style transport is also per-thread and outlives a server;
-        // clear it so a prior level's patterns cannot leak before this level's
-        // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of
-        // sv.lightstyles).
-        reset_lightstyles();
         // The `skill` cvar is process-global (we have no cvar registry); reset it
         // to the single-player default (1, medium) for each fresh server so the
         // spawn filter is deterministic and a prior level's `cvar_set("skill", …)`

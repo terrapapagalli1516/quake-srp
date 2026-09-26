@@ -61,6 +61,9 @@ pub struct Outbox {
     /// A `restart` the QuakeC queued for the host's command buffer
     /// (`localcmd("restart\n")`; [`Server::take_pending_restart`]).
     pub(super) restart: bool,
+    /// `svc_lightstyle`s, `(style, pattern)`, not yet applied to the server's
+    /// table (`Server::apply_lightstyles`).
+    pub(super) lightstyles: Vec<(usize, String)>,
 }
 
 impl Server {

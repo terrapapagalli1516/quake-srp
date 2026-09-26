@@ -15,7 +15,7 @@
 
 use super::host::{set_skill_value, skill_value};
 use super::pr_cmds::cvar_value;
-use super::{snapshot_lightstyles, Server, SpawnReport, SETTLE_FRAMETIME};
+use super::{Server, SpawnReport, SETTLE_FRAMETIME};
 use crate::math::Vec3;
 use crate::progs::EType;
 use crate::Result;
@@ -326,8 +326,8 @@ impl Server {
         }
 
         // Worldspawn (and any other spawn function) may have called lightstyle();
-        // pull those patterns out of the write transport into the owned table.
-        self.lightstyles = snapshot_lightstyles();
+        // apply those patterns to the owned table.
+        self.apply_lightstyles();
 
         // SV_SpawnServer: "run two frames to allow everything to settle" with
         // host_frametime = 0.1. The first frame fires each entity's spawn-set

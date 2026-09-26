@@ -18,7 +18,6 @@
 //! front-end (wasm shell, quaketool) plays `Host_Frame`'s part through the
 //! `Server` methods below.
 
-use super::lightstyle::{snapshot_lightstyles, LIGHTSTYLES, MAX_LIGHTSTYLES};
 use super::{parm_global_name, Outbox, Server, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
 use crate::vm::Vm;
 use crate::Result;
@@ -183,7 +182,6 @@ pub(super) fn bi_localcmd(vm: &mut Vm) -> Result<()> {
 /// [`crate::save`]'s loader before it spawns the throwaway server and handed
 /// back through [`restore_transports`] when the load fails.
 pub(crate) struct TransportSnapshot {
-    lightstyles: [String; MAX_LIGHTSTYLES],
     skill: i32,
     sv_gravity: f32,
 }
@@ -191,7 +189,6 @@ pub(crate) struct TransportSnapshot {
 /// Capture the caller's per-thread transport state (see [`TransportSnapshot`]).
 pub(crate) fn capture_transports() -> TransportSnapshot {
     TransportSnapshot {
-        lightstyles: snapshot_lightstyles(),
         skill: skill_value(),
         sv_gravity: sv_gravity(),
     }
@@ -205,7 +202,6 @@ pub(crate) fn capture_transports() -> TransportSnapshot {
 /// failed spawn's one-shot sounds/particles/svc commands into the surviving
 /// game would be its own leak.
 pub(crate) fn restore_transports(snap: TransportSnapshot) {
-    LIGHTSTYLES.with(|t| *t.borrow_mut() = snap.lightstyles);
     SKILL.with(|s| s.set(snap.skill));
     set_sv_gravity(snap.sv_gravity);
 }

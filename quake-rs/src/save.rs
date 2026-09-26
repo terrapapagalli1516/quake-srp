@@ -49,7 +49,7 @@ use crate::error::{QError, Result};
 use crate::progs::{EType, Progs};
 use crate::server::{
     capture_transports, ed_new_string, link_edict, parse_float, parse_int, parse_vector,
-    push_lightstyle, restore_transports, snapshot_lightstyles, Server, Tokenizer,
+    restore_transports, Server, Tokenizer,
     MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
 };
 use crate::vm::{Vm, MAX_EDICTS};
@@ -581,12 +581,9 @@ impl Server {
         server.spawn_entities()?;
 
         // load the light styles (all 64 lines overwrite sv.lightstyles).
-        // Written to the thread-local transport too, so the per-frame
-        // `snapshot_lightstyles` sync cannot revert them to the spawn's set.
-        for (i, s) in sg.lightstyles.iter().enumerate() {
-            push_lightstyle(i, s.clone());
+        for (slot, s) in server.lightstyles.iter_mut().zip(&sg.lightstyles) {
+            slot.clone_from(s);
         }
-        server.lightstyles = snapshot_lightstyles();
 
         // load the edicts out of the savegame file: entnum -1 is the globals.
         let mut tok = Tokenizer::new(&text[sg.blocks_ofs..]);
@@ -1026,9 +1023,8 @@ mod tests {
         s.set_sv_time(33.5);
         s.client_spawn_parms[0] = 1.0;
         s.client_spawn_parms[3] = 25.0;
-        push_lightstyle(0, "m".into());
-        push_lightstyle(5, "jklmnopqrst".into());
-        s.lightstyles = snapshot_lightstyles();
+        s.lightstyles[0] = "m".into();
+        s.lightstyles[5] = "jklmnopqrst".into();
         // A player so the loader accepts the save.
         let p = s.vm.spawn();
         s.vm.ent_set_string(p, "classname", "player");
@@ -1109,8 +1105,7 @@ mod tests {
         let mut donor = server_with(rich_progs());
         donor.set_map_name("e1m2");
         donor.set_skill(0.0);
-        push_lightstyle(0, "zzz".into());
-        donor.lightstyles = snapshot_lightstyles();
+        donor.lightstyles[0] = "zzz".into();
         let dp = donor.vm.spawn();
         donor.vm.ent_set_string(dp, "classname", "player");
         let donor_text = donor.write_savegame();
@@ -1121,20 +1116,16 @@ mod tests {
         let mut running = server_with(rich_progs());
         running.set_map_name("e1m1");
         running.set_skill(2.0);
-        push_lightstyle(0, "abcdefg".into());
-        running.lightstyles = snapshot_lightstyles();
+        running.lightstyles[0] = "abcdefg".into();
 
         let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &hostile)
             .err()
             .expect("garbage blocks rejected");
         assert!(err.to_string().contains("First token isn't a brace"), "{err}");
 
-        // The shared transports still hold the RUNNING game's state…
-        assert_eq!(snapshot_lightstyles()[0], "abcdefg");
+        // The running game keeps its own state, through its next frame.
         assert_eq!(running.skill(), 2);
-        // …so the per-frame sync cannot revert its owned table to the failed
-        // load's set (this assignment is what run_frame does each tick).
-        running.lightstyles = snapshot_lightstyles();
+        running.run_frame(0.1).expect("frame");
         assert_eq!(running.lightstyle(0), "abcdefg");
     }
 

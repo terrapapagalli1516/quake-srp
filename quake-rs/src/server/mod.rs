@@ -94,7 +94,6 @@ pub fn reset_random() {
 }
 
 pub(crate) use host::{capture_transports, restore_transports};
-pub(crate) use lightstyle::{push_lightstyle, snapshot_lightstyles};
 pub(crate) use pr_edict::{ed_new_string, parse_float, parse_int, parse_vector, Tokenizer};
 pub(crate) use sv_world::link_edict;
 
