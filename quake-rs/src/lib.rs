@@ -1,26 +1,30 @@
 //! # quake-rs
 //!
-//! A faithful, memory-safe Rust port of the self-contained, verifiable
-//! subsystems of id Software's *Quake* (1996, GPLv2): the math library and the
-//! on-disk asset-format loaders.
+//! id Software's *Quake* (1996, GPLv2) in Rust, ported file by file from
+//! WinQuake's C: the file formats, the QuakeC virtual machine, the server,
+//! the game client, the software renderer, the 2-D layer and menus, the
+//! console and settings, and the sound mixer. The platforms drive it: this
+//! crate's `quaketool` runs it natively, and `quake-wasm` runs it in a
+//! browser as a WASI program.
 //!
-//! The original engine is ~100k lines of C (renderer, server, client, netcode,
-//! sound, QuakeC virtual machine). This crate ports the layers that are
-//! *tractable and checkable in isolation* — the foundation everything else
-//! sits on — and documents the rest as a roadmap (see `README.md`).
+//! With every extra off (the Classic profile) it is id's game — frames, game
+//! state and timing are checked against id's C (`oracle/`, the goldens, the
+//! census). The 2026 profile's departures are typed settings ([`cvar`],
+//! [`settings`]), each one a switch.
 //!
-//! ## What is ported here
+//! ## Layout
 //!
-//! | module      | from (C)                | what it is                                  |
-//! |-------------|-------------------------|---------------------------------------------|
-//! | [`math`]    | `mathlib.c`             | vec3 / matrix / angle math, `BoxOnPlaneSide` |
-//! | [`crc`]     | `crc.c`                 | CRC-16/CCITT (XMODEM) used for PAK integrity |
-//! | [`wad`]     | `wad.c`, `wad.h`        | WAD2 archive (gfx.wad: pics, palette, fonts) |
-//! | [`pak`]     | `common.c`              | PAK archive (pak0.pak / pak1.pak)            |
-//! | [`common`]  | `common.c`              | the search path, the registered game check   |
-//! | [`bsp`]     | `bspfile.h`, `model.c`  | BSP version 29 map loader                    |
-//! | [`mdl`]     | `modelgen.h`, `model.c` | MDL alias (animated) model loader            |
-//! | [`spr`]     | `spritegn.h`, `model.c` | SPR sprite loader                            |
+//! | modules | from (C) | what |
+//! |---|---|---|
+//! | [`pak`], [`common`], [`wad`], [`bsp`], [`mdl`], [`spr`], [`crc`] | `common.c`, `wad.c`, `model.c`, `crc.c` | the search path, the archives and the file formats |
+//! | [`progs`], [`vm`], [`builtins`] | `pr_*.c` | QuakeC: the program, the interpreter, the builtins |
+//! | [`server`], [`world`], [`save`] | `sv_*.c`, `world.c`, `host_cmd.c` | the server: physics, collision, savegames |
+//! | [`client`], [`demo`], [`particles`], [`tent`], [`dlight`], [`stepping`] | `cl_*.c`, `view.c`, `host.c` | the game client: the live frame, demos, effects, the host clock |
+//! | [`render`] | `r_*.c`, `d_*.c` | the software renderer |
+//! | [`draw`], [`screen`], [`sbar`], [`menu`], [`console`], [`keys`] | `draw.c`, `screen.c`, `sbar.c`, `menu.c`, `console.c`, `keys.c` | the 2-D layer and the keys |
+//! | [`cvar`], [`cmd`], [`settings`] | `cvar.c`, `cmd.c` | variables, commands, the Classic and 2026 profiles |
+//! | [`snd`], [`cd_audio`] | `snd_*.c`, `cd_win.c` | the sound mixer and the CD player |
+//! | [`math`], [`qrand`], [`read`], [`error`] | `mathlib.c` | math, the random streams, byte decoding, errors |
 //!
 //! ## Design notes
 //!

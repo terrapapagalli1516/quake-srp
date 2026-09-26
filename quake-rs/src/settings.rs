@@ -15,9 +15,9 @@
 //!
 //! Switching profile resets the departures and the bindings to the new
 //! profile's and keeps id's own settings (Screen size, Brightness, the
-//! volumes, the mouse). What later agents' work adds takes a slot here, as
-//! smooth step movement (`r_lerpmove`) and the 2026 mixer (`snd_modern`)
-//! did: raw mouse and gamepad (`input`) become a departure field in
+//! volumes, the mouse). A new departure takes a slot here, as smooth monster
+//! movement (`r_lerpmove`), the 2026 mixer (`snd_modern`), the touch
+//! controls (`in_touch`) and the pad (`joy_*`) did: a departure field in
 //! [`Cvars`], on in [`Cvars::modern`].
 //!
 //! **Persistence, the id way.** [`Settings::config_text`] is
