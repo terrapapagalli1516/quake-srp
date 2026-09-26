@@ -993,7 +993,7 @@ answers 404, which the checks count as a console error.
 without the service worker, the page says so and stops):
 
 ```sh
-miniserve -C -p 8196 \
+miniserve -C -p 8080 --index index.html \
   --header "Cross-Origin-Opener-Policy:same-origin" \
   --header "Cross-Origin-Embedder-Policy:require-corp" deploy
 ```
@@ -1001,14 +1001,13 @@ miniserve -C -p 8196 \
 Any static server works if it sends those headers, and one that cannot
 works through the service worker, after one reload ("Offline and install").
 Either way the page must be a secure context — https, or localhost — for
-`SharedArrayBuffer` and service workers alike: a phone reaching the server
-by name over plain http (`http://<host>:8196`) gets neither, so serve
-it over https (an https reverse proxy, for one, gives the server an https name).
-`web/isolated.py` is the
-checks' server; `uv run web/bench.py DEPLOYDIR` and
-`QUAKE_VERIFY_PORT=… uv run --with playwright web/verify_walk.py DEPLOYDIR`
-take a deploy dir, and `bench.py --build` assembles one under
-`quake-wasm/target/bench-web`.
+`SharedArrayBuffer` and service workers alike. A phone reaching the server
+by name over plain http gets neither, so serve it over https: any reverse
+proxy or tunnel that terminates TLS in front of the server works.
+`web/isolated.py` is the checks' server. `uv run --with playwright
+web/bench.py DEPLOYDIR` and `QUAKE_VERIFY_PORT=… uv run --with playwright
+web/verify_walk.py DEPLOYDIR` take a deploy dir, and `bench.py --build`
+assembles one under `quake-wasm/target/bench-web`.
 
 **Natively**, the same program runs on a pipe:
 `cargo run --release -- -basedir <dir with id1/pak0.pak>` reads the records

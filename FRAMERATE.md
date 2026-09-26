@@ -38,10 +38,11 @@ rerun the measurement. (Branch `q26/framerate`, 2026-09-26.)
 - **Budget:** natively, one core, at 1280x800 a live frame costs 1.6 ms
   (median; p95 2.4) — inside 480 Hz's 2.08 ms at the median — and a demo
   frame 2.2 ms. 1280x1024 and the extrapolated 1920x1080 (3.2 ms) fit 240 Hz
-  but not 480. Details under "Budget".
-- **Not yet in the browser:** the platform owns `quake-wasm`; the few
-  lines that switch the page's uncapped extra onto this path are under
-  "Wiring". Flipping the uncapped default is a later decision.
+  but not 480. Details under "Budget". On one thread, that is; the renderer
+  now draws on every core (`PERF_PLAN.md` §11).
+- **In the browser** since `q26/settings` (`02a32ad`): `wasm_uncapped` runs
+  this path in the page ("Wiring" below). The 2026 profile, the default, has
+  it on; Classic keeps id's 72 fps gate.
 
 ## How the uncapped step works
 
@@ -387,7 +388,11 @@ own work is not in it (packing the frame to RGBA, the page).
 - **1920x1080 is not measured:** the renderer stops at id's largest view,
   1280x1024 (`render::MAXWIDTH`, `MAXHEIGHT`). Scaled by the pixel count
   (2.03x 1280x800's), a live frame would take about 3.2 ms and a demo frame
-  4.3 ms: 240 Hz with a little room, not 480.
+  4.3 ms: 240 Hz with a little room, not 480. *(Since `q26/hires` the renderer
+  goes past 1280x1024, and since `q26/multicore` it draws on every core.
+  `timedemo demo1` at 1920x1080 with the 2026 video settings takes 4.8 ms a
+  frame on one thread and 1.45 ms on eight, which is inside 480 Hz's 2.08 ms
+  (`PERF_PLAN.md` §11).)*
 - **The simulation is cheap:** the server frame plus the client's side of
   its messages is 0.04–0.08 ms at 480 Hz; the frame is the renderer's.
 - id's own measure agrees: `quaketool timedemo <pak> demo1 --res
@@ -422,7 +427,12 @@ test: `server::sv_phys::tests::uncapped_frames_jump_and_bounce_like_72_hz`
 and `stepping::tests`. Each also shows id's per-frame code failing the
 comparison, so the tests have teeth.
 
-## Wiring (quake-wasm, for the chair)
+## Wiring (quake-wasm)
+
+*Done: `q26/settings` wired it as described below (`02a32ad`).
+`quake-wasm/src/host.rs` has a `FrameGate` that picks the gate and the
+`Stepping` from `wasm_uncapped`, and a timedemo keeps id's uncapped gate. The
+rest of this section is the note as the framerate branch left it.*
 
 `quake-wasm` is the platform branch's, so the page still runs its uncapped
 extra through id's per-frame code. Switching it over is three changes in

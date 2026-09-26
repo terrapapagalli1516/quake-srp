@@ -1,11 +1,17 @@
 # Faithfulness census — game and client (2026-09-25)
 
-**Status at `31775f5`:** all 18 HIGH and MED findings (F1–F18) are fixed, each by the
-commit named in its row. Of the 25 LOWs, 16 are fixed (L1 L2 L4–L9 L11 L14 L15 L18
-L20–L22 L24), two in part (L12: all but the F-keys and `t`; L25), and seven open (L3 L10
-L13 L16 L17 L19 L23), listed with the rest in `AUDIT.md`, "Open, as of 2026-09-25". The
-departures in "Rule departures on by default" below still wait for a decision. The text
-below is the census as written, with the fixes marked in its rows.
+**Status on 2026-09-26** (`quake/2026`): all 18 HIGH and MED findings (F1–F18) are
+fixed, each by the commit named in its row. Of the 25 LOWs:
+- 18 are fixed: L1 L2 L4–L11 L14–L16 L18 L20–L22 L24. L10 was fixed on `quake/polish4a`
+  and L16 on `q26/server`.
+- Two are fixed in part: L12 (all but the F-keys, `t` and `zoom_in`) and L25.
+- Five are open: L3 L13 L17 L19 L23. `AUDIT.md`, "Open, as of 2026-09-26", lists them
+  with the rest.
+
+The departures in "Rule departures on by default" below are settled: since
+`q26/settings` each is a setting of the 2026 profile, and the Classic profile has
+`default.cfg`'s bindings and none of them. The text below is the census as written on
+2026-09-25 at `31775f5`, with the fixes marked in its rows.
 
 A systematic sweep for bugs of the "Chthon has no electricity" kind: things a
 player of id's WinQuake would notice, found by method rather than by luck. This
@@ -75,7 +81,7 @@ evidence; anything marked *hunch* has none beyond reading.
 | L13 | `give` differs from `Host_Give_f`: sets `weapon` without `W_SetCurrentAmmo` (stale viewmodel/ammo), clamps, has an `a` case, prints. Cheat-only. | host_cmd.c; `run_give_command` |
 | L14 | ✅ fixed in d21a2b9. New Game while a game runs has no "Are you sure?" (`M_SinglePlayer_Key` → `SCR_ModalMessage`). | menu.c |
 | L15 | ✅ fixed: `misc/null.wav` queues and overrides, and an inaudible sound ends the sound on its (entity, channel), since d7583c6 (F9) — one whose first decode is still pending too since eddd9e0 (`quake/polish2`); each side clamped at full before the master volume, and one-shots re-spatialised every frame, on `quake/polish3` (`web/verify_loops.py` section 4). Sound: near-side gain clamped after the master volume (C clamps per side at 255 before `volume`) — up to 1.43× louder close and panned at volume 0.7; one-shots are not re-spatialised each frame; an inaudible new sound (gain ≤ 0.02) does not cut the old one on its (entity, channel); `misc/null.wav` never overrides. | snd_dma.c `SND_Spatialize`/`SND_PickChannel`; `web/index.html playRouted`, `queue_sounds` |
-| L16 | ⏸ left open on quake/fix-server: making `objerror`/`error` end the game (Host_Error) needs a disconnect-to-console path the browser shell does not have, for a teleporter no normal play reaches. `objerror`/`error` are non-fatal (C: `Host_Error`, which ends the game; `objerror` also frees `self`). The census hits one: start.bsp's `trigger_teleport` targeting `t11` (an 18-unit box at z −673..−655) points at an `info_null`, which removes itself at spawn → "couldn't find target"; id would drop to the console, the port carries on. Probably unreachable in normal play (*hunch* — the box sits far below the hub). | pr_cmds.c `PF_objerror`; `builtins::pf_objerror` |
+| L16 | ✅ fixed on `q26/server` (2026-09-26): `error` and `objerror` print id's banner and `ED_Print (self)`, `objerror` frees `self`, and `Host_Error` ends the game (AUDIT.md, "QuakeC errors end the game"). Was: ⏸ left open on quake/fix-server: making `objerror`/`error` end the game (Host_Error) needs a disconnect-to-console path the browser shell does not have, for a teleporter no normal play reaches. `objerror`/`error` are non-fatal (C: `Host_Error`, which ends the game; `objerror` also frees `self`). The census hits one: start.bsp's `trigger_teleport` targeting `t11` (an 18-unit box at z −673..−655) points at an `info_null`, which removes itself at spawn → "couldn't find target"; id would drop to the console, the port carries on. Probably unreachable in normal play (*hunch* — the box sits far below the hub). | pr_cmds.c `PF_objerror`; `builtins::pf_objerror` |
 | L17 | ⏸ left open on quake/fix-server: freeing the flames needs a static-entity list the renderer draws (cl_walk/render, other agents' files) and savegame handling, for no visible change. `makestatic` is a no-op: the 6–44 flames per map stay live edicts (C frees them after `svc_spawnstatic`). No visible effect; costs `MAX_EDICTS` headroom and savegame size. | pr_cmds.c `PF_makestatic`; `install_engine_builtins` #69 |
 | L18 | ✅ fixed in 0d7f01c. The world edict has `solid 0`/`movetype 0`; `SV_SpawnServer` sets `SOLID_BSP`/`MOVETYPE_PUSH`. The only progs reader (`ClientObituary`) also checks `attacker != world`: no effect found. | oracle edict diff (`worldspawn movetype 7/0 solid 4/0`); `Server::set_map_name` |
 | L19 | `checkclient` uses a line-of-sight trace, not the cached 0.1 s client PVS; `FindTarget` follows it with `visible()` so the result only differs by the PVS staleness. | pr_cmds.c `PF_checkclient`; `bi_checkclient` |
@@ -89,6 +95,10 @@ evidence; anything marked *hunch* has none beyond reading.
 Engineering, not faithfulness: `Vm::intern` never de-duplicates (every `setmodel`, `ftos`, `vtos` appends to the string heap) and `vm.output` collects every print and is never drained in the browser build — both grow for the life of a level (the VM is rebuilt on changelevel).
 
 ## Rule departures on by default (other than Always Run)
+
+*Settled on 2026-09-26 (`q26/settings`). Each is a setting of the 2026 profile:
+`freelook`, the WASD bindings, `vid_fkey`, `cl_jumpswim`. Classic has none of them
+(`AUDIT.md`, "The profiles and the departures").*
 
 The rule: faithful by default, Always Run the only default departure. These are
 deliberate, documented in code, and each needs the user's decision (make opt-in,

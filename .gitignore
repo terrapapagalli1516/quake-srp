@@ -2,7 +2,10 @@
 target/
 **/target/
 
-# Built WASM (regenerated from quake-wasm; also embeds copyrighted pak data)
+# The built program, if copied into web/ to serve it from there (web/PLATFORM.md,
+# "Build, serve, deploy"); the pak beside it is covered by *.pak below. The old
+# name, from before 2026-09-26, embedded the pak.
+web/quake.wasm
 web/quake_wasm.wasm
 
 # Copyrighted Quake game data — NEVER commit (shareware pak is freely
