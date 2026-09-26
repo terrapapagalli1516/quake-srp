@@ -111,6 +111,7 @@ pub(crate) fn call(line: &str) -> Answer {
         "pointer_unlocked" => done(pointer_unlocked),
         "look" => done(|| look(real(0), real(1))),
         "player_pitch" => player_pitch().into(),
+        "player_field" => player_field(rest.trim()).into(),
         "mouse_sensitivity" => mouse_sensitivity().into(),
         "set_move" => done(|| set_move(real(0), real(1))),
         "set_attack" => done(|| set_attack(int(0))),
@@ -174,6 +175,17 @@ pub(crate) fn call(line: &str) -> Answer {
 fn text_answer(f: impl FnOnce(&crate::app::App) -> String) -> Answer {
     let text = APP.with(|c| c.borrow().as_ref().map(f)).unwrap_or_default();
     Answer { value: 0.0, text }
+}
+
+/// A float field of the player's edict in the live game, by name (`health`,
+/// `ammo_shells`, `weapon`; 0 with no game): what the checks read the
+/// game's state back through.
+fn player_field(name: &str) -> f32 {
+    APP.with(|c| {
+        let b = c.borrow();
+        let w = b.as_ref().and_then(|a| a.walk.as_ref());
+        w.map_or(0.0, |w| w.server.vm.ent_get_float(w.player, name))
+    })
 }
 
 /// Cvar `name`'s value: its text, and its number (`NaN` for no such cvar).
@@ -247,6 +259,7 @@ mod tests {
         assert_eq!(call("profile").text, "classic", "the tests start in Classic");
         assert!(call("config_text").text.contains("vid_pixelsize \"3\"\n"));
         assert!(call("no_such_call").value.is_nan());
+        assert_eq!(call("player_field health").value, 100.0, "the booted walk's player");
         assert!(call("").value.is_nan());
     }
 }

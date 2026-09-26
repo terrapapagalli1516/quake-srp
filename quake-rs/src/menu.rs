@@ -183,12 +183,6 @@ pub const SETTING_ROWS: [SettingRow; 14] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
-        cvar: "in_touch",
-        label: "        Touch controls",
-        help: ["On a touch screen: a stick, look", "by dragging, fire, jump, weapon"],
-        kind: RowKind::Toggle,
-    },
-    SettingRow {
         cvar: "wasm_showfps",
         label: "              Show FPS",
         help: ["Frames per second, bottom right,", "as QuakeWorld's show_fps drew it"],
@@ -198,6 +192,12 @@ pub const SETTING_ROWS: [SettingRow; 14] = [
         cvar: "wasm_exactpersp",
         label: "     Exact perspective",
         help: ["Perspective exact at each pixel,", "not id's 16-pixel spans"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "in_touch",
+        label: "        Touch controls",
+        help: ["On a touch screen: a stick, look", "by dragging, fire, jump, weapon"],
         kind: RowKind::Toggle,
     },
 ];
