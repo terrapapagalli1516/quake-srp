@@ -110,8 +110,8 @@ impl Server {
     /// Process one live edict for a frame: per-movetype physics plus
     /// `SV_RunThink`. Returns whether a think fired. `run_think` returns
     /// `(fired, alive)`; physics runs whenever the entity is still alive,
-    /// independent of whether a think fired. Errors propagate so the caller can
-    /// isolate a faulting entity.
+    /// independent of whether a think fired. A program error propagates: it
+    /// ends the frame.
     fn process_entity(&mut self, ent: i32, movetype: i32, start_time: f32, dt: f32) -> Result<bool> {
         match movetype {
             MOVETYPE_PUSH => self.physics_pusher(ent, start_time, dt),
