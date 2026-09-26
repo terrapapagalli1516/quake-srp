@@ -44,6 +44,8 @@ pub struct Outbox {
     static_sounds: Vec<StaticSound>,
     /// `svc_particle`s ([`Server::drain_particles`]).
     particles: Vec<ParticleBurst>,
+    /// `svc_print`s and `svc_centerprint`s ([`Server::drain_messages`]).
+    messages: Vec<GameMessage>,
 }
 
 impl Server {
@@ -189,6 +191,7 @@ pub struct ParticleBurst {
 /// centered for a couple of seconds — level intros, "you need the silver key")
 /// or a `bprint`/`sprint` notify line (item pickups, etc.). Drained each frame by
 /// the front-end, which renders + times them out.
+#[derive(Debug, Clone, PartialEq)]
 pub struct GameMessage {
     /// True for `centerprint` (centered, transient); false for a notify line.
     pub center: bool,
@@ -196,22 +199,14 @@ pub struct GameMessage {
     pub text: String,
 }
 
-thread_local! {
-    // QuakeC print routing the front-end displays. Same single-threaded-VM
-    // rationale as the sound/particle/temp-entity queues above.
-    static MESSAGES: std::cell::RefCell<Vec<GameMessage>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn push_message(center: bool, text: String) {
-    if text.is_empty() {
-        return;
+impl Outbox {
+    /// Queue a print for the player (`svc_centerprint`, or `svc_print`'s notify
+    /// line); an empty one shows nothing, so it is dropped.
+    fn print(&mut self, center: bool, text: String) {
+        if !text.is_empty() {
+            self.messages.push(GameMessage { center, text });
+        }
     }
-    MESSAGES.with(|q| q.borrow_mut().push(GameMessage { center, text }));
-}
-
-pub(super) fn take_messages() -> Vec<GameMessage> {
-    MESSAGES.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// `PF_centerprint` (#73): show the (var-arg concatenated) message centered on
@@ -220,7 +215,7 @@ pub(super) fn take_messages() -> Vec<GameMessage> {
 pub(super) fn bi_centerprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 1);
     vm.output.push_str(&s);
-    push_message(true, s);
+    send(vm, |o| o.print(true, s));
     Ok(())
 }
 
@@ -228,7 +223,7 @@ pub(super) fn bi_centerprint(vm: &mut Vm) -> Result<()> {
 pub(super) fn bi_bprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 0);
     vm.output.push_str(&s);
-    push_message(false, s);
+    send(vm, |o| o.print(false, s));
     Ok(())
 }
 
@@ -237,7 +232,7 @@ pub(super) fn bi_bprint(vm: &mut Vm) -> Result<()> {
 pub(super) fn bi_sprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 1);
     vm.output.push_str(&s);
-    push_message(false, s);
+    send(vm, |o| o.print(false, s));
     Ok(())
 }
 
@@ -883,7 +878,9 @@ impl Server {
         self.paused = !self.paused;
         let name = if self.player > 0 { self.vm.ent_get_string(self.player, "netname") } else { String::new() };
         let what = if self.paused { "paused" } else { "unpaused" };
-        push_message(false, format!("{name} {what} the game\n"));
+        if let Some(o) = self.outbox() {
+            o.print(false, format!("{name} {what} the game\n"));
+        }
     }
 
     /// Take and clear the queued sound events fired by the QuakeC since the last
@@ -908,7 +905,7 @@ impl Server {
     /// `bprint`) the QuakeC emitted since the last drain. The front-end shows
     /// centered ones transiently and notify lines fading at the top.
     pub fn drain_messages(&mut self) -> Vec<GameMessage> {
-        take_messages()
+        self.take_outbox(|o| &mut o.messages)
     }
 
     /// Take and clear the queued particle bursts fired by the QuakeC since the
