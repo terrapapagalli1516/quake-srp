@@ -47,8 +47,10 @@
 //! * The tokenizer ([`Tokenizer`]) is a faithful transcription of `COM_Parse`
 //!   working over `&str` byte positions, so a malformed entity blob yields fewer
 //!   tokens rather than reading out of bounds.
-//! * Spawning catches a per-entity spawn-function error and continues, exactly
-//!   as the spec requires (the C aborted the host on the first `Host_Error`).
+//! * A QuakeC runtime error is id's `PR_RunError` → `Host_Error`: the first one
+//!   halts the VM ([`Vm::execute`]) and ends whatever the server was doing — a
+//!   frame, a level load — with that [`crate::QError::Program`] error, for the
+//!   front-end to end the game on.
 //! * The borrow discipline from `vm.rs` is respected: the host is only held out
 //!   of the VM for the duration of a single trace / contents query, never across
 //!   an [`Vm::execute`] call (which itself reaches the host via `with_host`).
@@ -59,7 +61,7 @@ use crate::bsp::Bsp;
 use crate::math::Vec3;
 use crate::stepping::Stepping;
 use crate::vm::{Host, HostTrace, Vm};
-use crate::{QError, Result};
+use crate::Result;
 
 mod host;
 mod lightstyle;
@@ -90,7 +92,7 @@ pub(crate) use pr_edict::{ed_new_string, parse_float, parse_int, parse_vector, T
 pub(crate) use sv_world::link_edict;
 
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 
 // ---------------------------------------------------------------------------
 // Quake constants used by the server (server.h / sv_phys.c / pr_cmds.c).
@@ -436,8 +438,6 @@ pub struct SpawnReport {
     pub inhibited: usize,
     /// Entities with a classname but no matching spawn function.
     pub no_spawn_function: usize,
-    /// Entities whose spawn function returned an error (caught, not fatal).
-    pub spawn_errors: usize,
     /// `(classname, count)` pairs, sorted by count descending then name.
     pub classnames: Vec<(String, usize)>,
 }
@@ -447,10 +447,6 @@ pub struct SpawnReport {
 pub struct FrameReport {
     /// Number of think functions that fired this frame.
     pub thinks_fired: usize,
-    /// Thinks that faulted (e.g. hit an unimplemented engine builtin). The
-    /// offending entity is isolated and the frame continues, mirroring the
-    /// per-entity robustness of the spawn loop.
-    pub think_errors: usize,
     /// The `time` global after the frame.
     pub time: f32,
 }
@@ -557,21 +553,23 @@ impl Server {
     }
 
     /// Execute a system QuakeC function with `self = self_e`, `other = other_e`.
-    /// Returns `Ok(true)` if it existed and ran, `Ok(false)` if absent. A program
-    /// fault is caught (`reset_execution`) and surfaced as `Err`, never panicked.
+    /// Returns `Ok(true)` if it existed and ran, `Ok(false)` if absent, and the
+    /// program error if it failed (the VM has halted: see [`Vm::execute`]).
     fn run_sys(&mut self, name: &str, self_e: i32, other_e: i32) -> Result<bool> {
         let Some(f) = self.sys_function(name) else {
             return Ok(false);
         };
         self.vm.gset_int("self", self_e);
         self.vm.gset_int("other", other_e);
-        if let Err(e) = self.vm.execute(f) {
-            self.vm.reset_execution();
-            return Err(crate::QError::invalid(format!(
-                "QuakeC error in {name}(): {e}"
-            )));
-        }
+        self.vm.execute(f)?;
         Ok(true)
+    }
+
+    /// The program error the VM halted on, as an `Err`, if it has: QuakeC
+    /// the physics ran outside a think (a touch, a pusher's `blocked`) failed,
+    /// and id's longjmp would have left the frame there.
+    fn check_halted(&self) -> Result<()> {
+        self.vm.halted().map_or(Ok(()), |e| Err(e.clone().into()))
     }
 
     /// The player's attack-relevant state for verification: `(button0, weapon,
@@ -597,12 +595,6 @@ impl Server {
     }
 }
 
-/// Build a [`QError`] for an unexpected server condition. (Currently unused on
-/// the happy path; kept so callers can surface a structured error if needed.)
-#[allow(dead_code)]
-fn server_error(msg: impl Into<String>) -> QError {
-    QError::invalid(msg.into())
-}
 
 // ---------------------------------------------------------------------------
 // Tests

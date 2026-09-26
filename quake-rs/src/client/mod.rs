@@ -32,7 +32,8 @@
 //! change, and `S_Update`'s listener pose and ambient leaf. The level loads
 //! record the same calls into a caller's `Vec`. What else the host needs it
 //! reads off the state, as id's host reads `cl`: the printed text for its
-//! console ([`Walk::notify`]), `pending_sellscreen`, `intermission`. A
+//! console ([`Walk::notify`]), `pending_sellscreen`, `intermission`, and
+//! whether a QuakeC error ended the game ([`Walk::host_error`]). A
 //! platform may install frame timers ([`set_lap_hook`]) and a hook on the
 //! finished 3-D view ([`set_view_hook`]); none is installed by default.
 
@@ -250,6 +251,13 @@ pub struct Walk {
     /// i.e. popped the Help/Ordering menu — the `step` dispatcher (which owns the
     /// menu) takes this flag and opens it.
     pub pending_sellscreen: bool,
+    /// `Host_Error`'s message once this game has ended in one — a QuakeC
+    /// runtime error: "Program error" ([`host::host_error`]). What id printed
+    /// on the way is already in [`Walk::notify`]'s printed text. The host does
+    /// the rest of `Host_Error`: `CL_Disconnect` (drop this walk, whose server
+    /// has shut down), `cls.demonum = -1`, and its console comes down over
+    /// the disconnected screen. [`cl_main::walk_frame`] runs nothing more.
+    pub host_error: Option<String>,
     /// `gfx/complete.lmp` — the "Level Complete" banner (Sbar_IntermissionOverlay).
     pub pic_complete: Option<Qpic>,
     /// `gfx/inter.lmp` — the Time/Secrets/Kills intermission plaque.
@@ -561,6 +569,7 @@ pub fn assemble_walk(
         finale_text: String::new(),
         finale_start: 0.0,
         pending_sellscreen: false,
+        host_error: None,
         pic_complete,
         pic_inter,
         pic_finale,

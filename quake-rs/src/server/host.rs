@@ -162,11 +162,10 @@ impl Server {
     /// two ticks at [`SETTLE_FRAMETIME`], which settles any spawn drop up to
     /// ~24 units deterministically. The cmd carries the player's current view
     /// angles (the C never touches `v_angle` during signon) with zero
-    /// moves/buttons. Think faults are isolated by `client_frame`; a hard fault
-    /// is swallowed (a boot must not fail over a settle tick), matching
-    /// `spawn_entities`' own settle-frame handling. The golden `scene` tool
+    /// moves/buttons. A program error in them is `Host_Error`, as in id's: it
+    /// is returned, and the level does not come up. The golden `scene` tool
     /// never connects a client, so this does not affect golden renders.
-    pub fn run_signon_frames(&mut self) {
+    pub fn run_signon_frames(&mut self) -> Result<()> {
         let (yaw, pitch) = if self.player >= 0 {
             let ang = self.vm.ent_get_vector(self.player, "angles");
             let vang = self.vm.ent_get_vector(self.player, "v_angle");
@@ -183,8 +182,9 @@ impl Server {
             buttons: 0,
             impulse: 0,
         };
-        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
-        let _ = self.client_frame_f64(&cmd, SETTLE_FRAMETIME);
+        self.client_frame_f64(&cmd, SETTLE_FRAMETIME)?;
+        self.client_frame_f64(&cmd, SETTLE_FRAMETIME)?;
+        Ok(())
     }
 
     /// `SV_SaveSpawnparms` for the local client: set the QuakeC `self` global to
@@ -198,19 +198,20 @@ impl Server {
     /// `client->spawn_parms`. If the progs lacks `SetChangeParms` (a minimal mod)
     /// the run is a no-op and the *current* parm globals are returned unchanged;
     /// a missing individual parm global reads as `0.0` (`gget_float`), so this
-    /// never panics. Returns `[0.0; 16]` when no client has connected.
-    pub fn save_spawn_parms(&mut self) -> [f32; NUM_SPAWN_PARMS] {
+    /// never panics. Returns `[0.0; 16]` when no client has connected, and
+    /// the program error if `SetChangeParms` fails (id's `Host_Error`).
+    pub fn save_spawn_parms(&mut self) -> Result<[f32; NUM_SPAWN_PARMS]> {
         let mut parms = [0.0f32; NUM_SPAWN_PARMS];
         if self.player < 0 {
-            return parms;
+            return Ok(parms);
         }
         // SetChangeParms writes parm1..parm16 from the player's live fields
-        // (self = the player edict, other = world). A fault is caught by run_sys.
-        let _ = self.run_sys("SetChangeParms", self.player, 0);
+        // (self = the player edict, other = world).
+        self.run_sys("SetChangeParms", self.player, 0)?;
         for (i, p) in parms.iter_mut().enumerate() {
             *p = self.vm.gget_float(&parm_global_name(i));
         }
-        parms
+        Ok(parms)
     }
 
     /// Read the `serverflags` QuakeC global (the episode rune `SERVERFLAG_*`
@@ -384,7 +385,7 @@ mod tests {
             "spawn floats above the floor (box bottom at z=16, floor at z=0)"
         );
 
-        server.run_signon_frames();
+        server.run_signon_frames().expect("signon frames");
 
         // Settled BEFORE the front-end's frame 0: on the ground, no residual
         // fall velocity, box bottom resting on the floor (origin.z ~ 24).
@@ -642,12 +643,12 @@ mod tests {
         let mut server = Server::new(floor_bsp(), progs).expect("server");
 
         // No client yet -> all zeros, no panic.
-        assert_eq!(server.save_spawn_parms(), [0.0; NUM_SPAWN_PARMS]);
+        assert_eq!(server.save_spawn_parms().expect("no client"), [0.0; NUM_SPAWN_PARMS]);
 
         // Connect the player, set the constant SetChangeParms marshals into parm1.
         server.connect_client().expect("connect");
         server.vm.set_gf(g_const, 42.0);
-        let parms = server.save_spawn_parms();
+        let parms = server.save_spawn_parms().expect("SetChangeParms");
         assert_eq!(parms.len(), NUM_SPAWN_PARMS);
         assert_eq!(parms[0], 42.0, "SetChangeParms wrote parm1");
         assert_eq!(&parms[1..], &[0.0; NUM_SPAWN_PARMS - 1]);

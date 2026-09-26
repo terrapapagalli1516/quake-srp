@@ -34,10 +34,12 @@
 
 use std::rc::Rc;
 
-use crate::error::{QError, Result};
+use crate::error::{ProgramError, QError, Result};
 use crate::math::Vec3;
 use crate::progs::{string_in, Op, Progs, Statement, MAX_PARMS, OFS_PARM0, OFS_RETURN};
 use crate::qrand::QRand;
+
+mod print;
 
 /// A native builtin. Reads its arguments and writes its return value through
 /// the `Vm` helpers (`arg_*` / `ret_*`), exactly like the C `builtin_t`.
@@ -335,6 +337,10 @@ pub struct Vm {
     /// monsters' chase directions draw from: a VM's own fresh ones until the
     /// host hands it its session's ([`Vm::set_rand`]).
     rand: Rc<QRand>,
+    /// The program error this VM halted on ([`Vm::execute`]): id's
+    /// `PR_RunError` ends the game, so the VM runs no more QuakeC once one has
+    /// happened, until a harness resumes it ([`Vm::reset_execution`]).
+    halted: Option<ProgramError>,
 
     // --- private execution state ---
     /// Call stack of saved caller frames (`pr_stack` / `pr_depth`).
@@ -396,6 +402,7 @@ impl Vm {
             edict_leafs: Vec::new(),
             edict_static: Vec::new(),
             rand: Rc::new(QRand::new()),
+            halted: None,
             stack: Vec::new(),
             localstack: Vec::new(),
             xfunction: 0,
@@ -978,20 +985,17 @@ impl Vm {
 
     // ----------------------------------------------------------------- errors
 
-    /// Build a `QError::Invalid` carrying the message plus the current function
-    /// and statement, mirroring `PR_RunError`'s diagnostics (without aborting).
+    /// `PR_RunError`: a runtime error raised at the current statement, as a
+    /// [`QError::Program`] carrying id's report (the statement, the stack
+    /// trace, the message). Returning it from a builtin or the interpreter
+    /// halts the VM ([`Vm::execute`]).
     pub fn run_error(&self, msg: impl Into<String>) -> QError {
-        let msg = msg.into();
-        let fname = self
-            .progs
-            .functions
-            .get(self.xfunction)
-            .map(|f| self.progs.string(f.s_name).to_string())
-            .unwrap_or_else(|| "<no function>".to_string());
-        QError::invalid(format!(
-            "program error in {fname}() @ statement {}: {msg}",
-            self.xstatement
-        ))
+        self.program_error(msg.into()).into()
+    }
+
+    /// The program error this VM halted on, if any (see [`Vm::execute`]).
+    pub fn halted(&self) -> Option<&ProgramError> {
+        self.halted.as_ref()
     }
 
     // ------------------------------------------------------- function frames
@@ -1103,20 +1107,45 @@ impl Vm {
         self.execute(fnum)
     }
 
-    /// `PR_ExecuteProgram`: run function `fnum` to completion, executing nested
-    /// calls and builtins, until it returns past the entry frame.
-    /// Reset the interpreter call/locals stacks to empty. The C `PR_RunError`
-    /// sets `pr_depth = 0` to abandon a faulted call chain; callers that catch a
-    /// top-level [`execute`](Self::execute) error and continue (e.g. the server
-    /// running per-entity thinks) must call this so the next call starts clean.
+    /// Resume after a program error: empty the call and locals stacks (the C
+    /// `PR_RunError` sets `pr_depth = 0`) and lift the halt. The game never
+    /// does this — in id's a program error ends it — but a harness that runs
+    /// QuakeC past an error (the census) does.
     pub fn reset_execution(&mut self) {
         self.stack.clear();
         self.localstack.clear();
         self.xfunction = 0;
         self.xstatement = 0;
+        self.halted = None;
     }
 
+    /// `PR_ExecuteProgram`: run function `fnum` to completion, executing nested
+    /// calls and builtins, until it returns past the entry frame.
+    ///
+    /// A runtime error is id's `PR_RunError`, which prints its report and
+    /// longjmps out of every running QuakeC function to `Host_Error`, ending
+    /// the game. Here the error (a [`QError::Program`]) is returned and the VM
+    /// halts on it: this call unwinds its frames and returns it, so does every
+    /// call it is nested in (through the builtin that made it), and every
+    /// later call returns it at once, as a shut-down server runs no more
+    /// QuakeC. The first error is the one reported.
     pub fn execute(&mut self, fnum: usize) -> Result<()> {
+        if let Some(e) = &self.halted {
+            return Err(e.clone().into());
+        }
+        let (depth, locals) = (self.stack.len(), self.localstack.len());
+        let Err(e) = self.run(fnum) else { return Ok(()) };
+        let e = match e {
+            QError::Program(e) => *e,
+            other => self.program_error(other.to_string()),
+        };
+        self.stack.truncate(depth);
+        self.localstack.truncate(locals);
+        Err(self.halted.get_or_insert(e).clone().into())
+    }
+
+    /// [`Vm::execute`]'s interpreter loop (`PR_ExecuteProgram`'s body).
+    fn run(&mut self, fnum: usize) -> Result<()> {
         if fnum == 0 || fnum >= self.progs.functions.len() {
             return Err(self.run_error(format!("NULL function (number {fnum})")));
         }
@@ -1473,6 +1502,11 @@ impl Vm {
                         }
                         let f = self.builtins[bi];
                         f(self)?;
+                        // QuakeC the builtin ran (a touch a walkmove fired)
+                        // failed: id's longjmp leaves this function too.
+                        if let Some(e) = &self.halted {
+                            return Err(e.clone().into());
+                        }
                         // builtin returns; continue with s++ as normal.
                     } else {
                         s = self.enter_function(fnum2)?;
@@ -1958,9 +1992,46 @@ mod tests {
         let mut vm = Vm::load(&img).expect("load");
         let err = vm.execute(main).unwrap_err();
         match err {
-            QError::Invalid(msg) => assert!(msg.contains("runaway"), "got: {msg}"),
-            other => panic!("expected Invalid, got {other:?}"),
+            QError::Program(e) => assert_eq!(e.message, "runaway loop error"),
+            other => panic!("expected a program error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_program_error_is_pr_run_errors_report_and_halts_the_vm() {
+        // main calls helper through global 30; helper calls the function in
+        // global 31, which holds 0: PR_RunError ("NULL function").
+        let mut b = Builder::new();
+        let (g, f, file) = (b.intern("g"), b.intern("f"), b.intern("demo.qc"));
+        b.globaldefs.push(Def { type_: EType::Function as u16, ofs: 30, s_name: g });
+        b.globaldefs.push(Def { type_: EType::Function as u16, ofs: 31, s_name: f });
+        let call = |a| Statement { op: Op::Call0 as u16, a, b: 0, c: 0 };
+        let done = Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 };
+        let main = add_function(&mut b, "main", vec![call(30), done]);
+        let helper = add_function(&mut b, "helper", vec![call(31), done]);
+        let ok = add_function(&mut b, "ok", vec![done]);
+        for i in [main, helper] {
+            b.functions[i].s_file = file;
+        }
+        let mut vm = Vm::load(&b.build()).expect("load");
+        vm.set_gi(30, helper as i32);
+
+        let Err(QError::Program(e)) = vm.execute(main) else { panic!("NULL function must fail") };
+        // PR_PrintStatement (the opcode to 10 columns and a space, each operand
+        // `ofs(name)value` to 20 and a space), PR_StackTrace (`%12s : %s`,
+        // innermost first, down to the entry frame's <NO FUNCTION>), the message.
+        assert_eq!(
+            e.console,
+            "CALL0      31(f)()              \n     demo.qc : helper\n     demo.qc : main\n<NO FUNCTION>\nNULL function\n"
+        );
+        assert_eq!((e.function.as_str(), e.message.as_str()), ("helper", "NULL function"));
+        // Halted: id's game is over, so nothing runs, until a harness resumes.
+        let Err(QError::Program(again)) = vm.execute(ok) else { panic!("a halted VM runs nothing") };
+        assert_eq!(again.message, "NULL function", "the first error is the one reported");
+        assert_eq!(vm.halted().map(|e| e.message.as_str()), Some("NULL function"));
+        vm.reset_execution();
+        vm.execute(ok).expect("resumed");
+        assert!(vm.halted().is_none());
     }
 
     #[test]
@@ -1972,7 +2043,7 @@ mod tests {
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
         let err = vm.execute(main).unwrap_err();
-        assert!(matches!(err, QError::Invalid(_)));
+        assert!(matches!(err, QError::Program(e) if e.message == "bad opcode 9999"));
     }
 
     #[test]

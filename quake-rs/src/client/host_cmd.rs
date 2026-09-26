@@ -21,7 +21,9 @@ use crate::server::Server;
 
 use super::cl_input::clamp_pitch;
 use super::cl_main::client_items;
+use super::host::host_error;
 use super::{assemble_walk, spawn_view_angles, SoundCall, Walk};
+use crate::QError;
 
 /// Sane upper bounds the `give` command clamps to, mirroring Quake's pickup
 /// caps (the player can't carry more than these).
@@ -104,7 +106,7 @@ pub fn run_game_command(
                 // "<netname> suicides" (drained into notify next frame).
             }
             Ok(false) => out.push("Can't suicide -- allready dead!".into()),
-            Err(e) => out.push(format!("kill failed: {e}")),
+            Err(e) => host_error(w, &e, sound), // ClientKill failed: Host_Error
         },
         // Queue a one-shot impulse (impulse 9 = the QuakeC give-all cheat).
         "impulse" => {
@@ -188,12 +190,14 @@ pub fn build_walk_map(pak: Pak, map: &str, rand: &Rc<QRand>, sound: &mut Vec<Sou
     // SV_SpawnServer set world.model + the mapname global before loading the
     // entities (the QuakeC episode-end finale check reads world.model).
     server.set_map_name(map);
+    // A QuakeC error from here on is Host_Error; the walk does not come up
+    // (the host's console gets no report yet: an open item).
     server.spawn_entities().ok()?;
     let player = server.connect_client().ok()?;
     let (yaw, pitch) = spawn_view_angles(&server, player);
     // Capture the level-entry spawn parms (the just-connected, full-state player) so
     // a single-player respawn can reload THIS level with them.
-    let entry_parms = server.save_spawn_parms();
+    let entry_parms = server.save_spawn_parms().ok()?;
     // The signon-sequence physics frames the C runs between PutClientInServer and
     // the first rendered frame (Host_Spawn_f/Host_Begin_f each precede an
     // SV_Physics tick before signon 4 re-enables drawing). Without them the
@@ -201,7 +205,7 @@ pub fn build_walk_map(pak: Pak, map: &str, rand: &Rc<QRand>, sound: &mut Vec<Sou
     // start map — falls to the floor ON SCREEN over the first frames: the
     // reported one-time texture/lighting "pop" (every surface resamples as the
     // eye drops). Frame 0 must render the settled WinQuake pose.
-    server.run_signon_frames();
+    server.run_signon_frames().ok()?;
 
     // The level is committed past this point (nothing below fails). Tear down
     // the previous level/mode's looping audio and register this level's placed
@@ -229,14 +233,18 @@ pub fn build_walk_map(pak: Pak, map: &str, rand: &Rc<QRand>, sound: &mut Vec<Sou
 
 /// Perform a deferred level transition: save the current player's spawn parms,
 /// load `next_map` and a fresh `progs.dat` from the open pak, spawn the new
-/// level's entities, and reconnect the client carrying its inventory. On any
-/// parse/spawn/connect failure the current level is left untouched (the guards
-/// below all early-`return` rather than panic), so a missing or corrupt next map
-/// is non-fatal — the player keeps playing the level they are on.
+/// level's entities, and reconnect the client carrying its inventory. On a
+/// parse failure the current level is left untouched (the guards below all
+/// early-`return` rather than panic), so a missing or corrupt next map is
+/// non-fatal — the player keeps playing the level they are on. A QuakeC error
+/// in either level's code is id's `Host_Error`: the game ends ([`host_error`]).
 pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>) {
     // Save the outgoing player's inventory into parm1..parm16 (SV_SaveSpawnparms
     // -> SetChangeParms). Done before we touch the old server's world.
-    let parms = w.server.save_spawn_parms();
+    let parms = match w.server.save_spawn_parms() {
+        Ok(parms) => parms,
+        Err(e) => return host_error(w, &e, sound),
+    };
     // Capture serverflags (the episode rune SERVERFLAG_* bits) from the OUTGOING
     // server. The C keeps these alive across SV_SpawnServer (svs.serverflags);
     // building a brand-new Server would reset the global to 0 and lose the
@@ -283,24 +291,32 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
     ns.set_sv_gravity(w.server.sv_gravity());
-    if ns.spawn_entities().is_err() {
-        return;
-    }
-    // Capture the new level's placed ambient loops now (registered during
-    // spawn_entities); committed to the sound layer only once the swap succeeds below.
-    let statics = ns.drain_static_sounds();
-    let Ok(player) = ns.connect_client_with_parms(parms) else { return };
-    let (yaw, pitch) = spawn_view_angles(&ns, player);
-    // The carried inventory at the start of the NEW level becomes its entry parms,
-    // so a respawn on this level restores the state the player arrived with.
-    let entry_parms = ns.save_spawn_parms();
-    // The C's signon physics frames (see build_walk_map): settle the arriving
-    // player onto the floor before the new level's frame 0 renders. Any events
-    // these ticks queue are dropped by the post-swap drains below (the C's
-    // client misses tick 1's datagram sounds while not yet `spawned`; tick 2's
-    // are technically deliverable there — dropping both is a deliberate,
-    // inaudible-on-id-maps simplification, identical across all three paths).
-    ns.run_signon_frames();
+    let up = (|| {
+        ns.spawn_entities()?;
+        // Capture the new level's placed ambient loops now (registered during
+        // spawn_entities); committed to the sound layer only once the swap
+        // succeeds below.
+        let statics = ns.drain_static_sounds();
+        let player = ns.connect_client_with_parms(parms)?;
+        let (yaw, pitch) = spawn_view_angles(&ns, player);
+        // The carried inventory at the start of the NEW level becomes its entry
+        // parms, so a respawn on this level restores the state the player
+        // arrived with.
+        let entry_parms = ns.save_spawn_parms()?;
+        // The C's signon physics frames (see build_walk_map): settle the
+        // arriving player onto the floor before the new level's frame 0
+        // renders. Any events these ticks queue are dropped by the post-swap
+        // drains below (the C's client misses tick 1's datagram sounds while
+        // not yet `spawned`; tick 2's are technically deliverable there —
+        // dropping both is a deliberate, inaudible-on-id-maps simplification,
+        // identical across all three paths).
+        ns.run_signon_frames()?;
+        Ok((statics, player, entry_parms, yaw, pitch))
+    })();
+    let (statics, player, entry_parms, yaw, pitch) = match up {
+        Ok(up) => up,
+        Err(e) => return load_failed(w, &e, sound),
+    };
 
     // Commit the swap. From here nothing can fail.
     w.server = ns;
@@ -358,13 +374,24 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     let _ = w.server.drain_stufftext();
 }
 
+/// A level change's new server failed with `e`: a QuakeC error is id's
+/// `Host_Error`, which ends the game ([`host_error`]); anything else (a map
+/// whose entities do not parse) leaves the current level running, the port's
+/// degrade for a bad map.
+fn load_failed(w: &mut Walk, e: &QError, sound: &mut Vec<SoundCall>) {
+    if matches!(e, QError::Program(_)) {
+        host_error(w, e, sound);
+    }
+}
+
 /// Single-player respawn: reload the CURRENT level fresh and reconnect the player
 /// with the level-ENTRY spawn parms (the state they arrived with). Ported from the
 /// engine running QuakeC's `localcmd("restart\n")` — a dead player who presses a
 /// button restarts the map. A dead player's own state is useless (health 0, dropped
 /// inventory), so `entry_parms` (captured at level entry) is what's restored,
 /// matching how `restart` works in id's single-player. A read/parse failure leaves
-/// the (dead) level running rather than crashing.
+/// the (dead) level running rather than crashing; a QuakeC error is
+/// `Host_Error` ([`host_error`]).
 pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     // Host_Restart_f -> SV_SpawnServer with NO SV_SaveSpawnparms: the level is
     // respawned with svs.serverflags, the runes held on ENTRY — a rune taken
@@ -385,16 +412,23 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
     ns.set_sv_gravity(w.server.sv_gravity());
-    // Static loops as in try_changelevel: spawn, then capture this (re)load's.
-    if ns.spawn_entities().is_err() {
-        return;
-    }
-    let statics = ns.drain_static_sounds();
-    let Ok(player) = ns.connect_client_with_parms(w.entry_parms) else { return };
-    let (yaw, pitch) = spawn_view_angles(&ns, player);
-    // The C's signon physics frames (see build_walk_map): settle the respawned
-    // player onto the floor before the restarted level's frame 0 renders.
-    ns.run_signon_frames();
+    let entry_parms = w.entry_parms;
+    let up = (|| {
+        // Static loops as in try_changelevel: spawn, then capture this (re)load's.
+        ns.spawn_entities()?;
+        let statics = ns.drain_static_sounds();
+        let player = ns.connect_client_with_parms(entry_parms)?;
+        let (yaw, pitch) = spawn_view_angles(&ns, player);
+        // The C's signon physics frames (see build_walk_map): settle the
+        // respawned player onto the floor before the restarted level's frame 0
+        // renders.
+        ns.run_signon_frames()?;
+        Ok((statics, player, yaw, pitch))
+    })();
+    let (statics, player, yaw, pitch) = match up {
+        Ok(up) => up,
+        Err(e) => return load_failed(w, &e, sound),
+    };
 
     // Commit the reload (nothing below can fail).
     w.server = ns;

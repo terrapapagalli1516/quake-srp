@@ -234,17 +234,11 @@ fn frame(server: &mut Server, pak: &Pak, run: &mut Run, cmd: &UserCmd) {
     if fix != 0.0 {
         run.fixangle_seen += 1;
     }
-    match server.client_frame_f64(cmd, DT) {
-        Ok(fr) => {
-            if fr.think_errors > 0 {
-                let tail: String = server.vm.output.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
-                run.think_errors.push(format!(
-                    "frame {} t={:.1}: {} think error(s); vm.output tail: {:?}",
-                    run.frames, fr.time, fr.think_errors, tail
-                ));
-            }
-        }
-        Err(e) => run.think_errors.push(format!("frame {}: client_frame Err {e}", run.frames)),
+    if let Err(e) = server.client_frame_f64(cmd, DT) {
+        // id's game would end here (Host_Error); the census records it and
+        // carries on.
+        run.think_errors.push(format!("frame {}: client_frame Err {e}", run.frames));
+        server.vm.reset_execution();
     }
     run.frames += 1;
     let after = server.vm.ent_get_vector(player, "origin");
@@ -398,7 +392,7 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
         }
     }
     let player = server.connect_client().map_err(|e| e.to_string())?;
-    server.run_signon_frames();
+    server.run_signon_frames().map_err(|e| e.to_string())?;
     let spawn_log: Vec<String> = LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
 
     let mut run = Run { pushers, ..Run::default() };
@@ -408,8 +402,8 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
     let _ = writeln!(o, "\n=== {map} ===");
     let _ = writeln!(
         o,
-        "spawn: {} blocks, {} spawned, {} inhibited (skill), {} no spawn function, {} spawn errors",
-        rep.total, rep.spawned, rep.inhibited, rep.no_spawn_function, rep.spawn_errors
+        "spawn: {} blocks, {} spawned, {} inhibited (skill), {} no spawn function",
+        rep.total, rep.spawned, rep.inhibited, rep.no_spawn_function
     );
     if !nofunc.is_empty() {
         let _ = writeln!(o, "  classnames with no spawn function: {}", nofunc.join(", "));
@@ -842,7 +836,7 @@ pub fn cmd_census_edicts(pak_path: &str, map: &str, times: &str) -> Result<Strin
     server.set_map_name(&path);
     server.spawn_entities().map_err(|e| e.to_string())?;
     let player = server.connect_client().map_err(|e| e.to_string())?;
-    server.run_signon_frames();
+    server.run_signon_frames().map_err(|e| e.to_string())?;
     let mut times: Vec<f32> = times.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let va = server.vm.ent_get_vector(player, "v_angle");

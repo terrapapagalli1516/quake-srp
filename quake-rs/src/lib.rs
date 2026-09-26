@@ -68,5 +68,5 @@ pub mod stepping;
 
 pub mod client;
 
-pub use error::{QError, Result};
+pub use error::{ProgramError, QError, Result};
 pub use math::Vec3;

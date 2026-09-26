@@ -225,8 +225,8 @@ fn bump_classname(counts: &mut Vec<(String, usize)>, classname: &str) {
 impl Server {
     /// `ED_LoadFromFile` (pr_edict.c): tokenize `bsp.entities`, spawn each
     /// entity, set its fields by name, and call its spawn function (named by
-    /// `classname`). Faithful to the C control flow, but a per-entity spawn
-    /// error is caught and counted rather than aborting the whole load.
+    /// `classname`). Faithful to the C control flow: a spawn function's program
+    /// error ends the load (id's `Host_Error`) and is returned.
     pub fn spawn_entities(&mut self) -> Result<SpawnReport> {
         // SV_SpawnServer: current_skill = (int)(skill.value + 0.5), clamped to
         // 0..3, then Cvar_SetValue("skill", current_skill). Re-normalise the live
@@ -313,16 +313,9 @@ impl Server {
             self.vm.gset_int("other", 0);
             self.vm.gset_float("time", time);
 
-            match self.vm.execute(func) {
-                Ok(()) => report.spawned += 1,
-                Err(_) => {
-                    // C aborted via Host_Error; we keep loading the rest, but
-                    // must reset the interpreter so the faulted call chain does
-                    // not corrupt the next spawn.
-                    report.spawn_errors += 1;
-                    self.vm.reset_execution();
-                }
-            }
+            // A spawn function's error is Host_Error: the load ends there.
+            self.vm.execute(func)?;
+            report.spawned += 1;
         }
 
         // Worldspawn (and any other spawn function) may have called lightstyle();
@@ -333,10 +326,10 @@ impl Server {
         // host_frametime = 0.1. The first frame fires each entity's spawn-set
         // `nextthink` (e.g. monsters droptofloor / set their first animation
         // frame, items settle onto the floor) so the world is in its resting
-        // initial state before play begins. A per-entity think fault is isolated
-        // by run_frame (it never aborts the load).
-        let _ = self.run_frame_f64(SETTLE_FRAMETIME);
-        let _ = self.run_frame_f64(SETTLE_FRAMETIME);
+        // initial state before play begins. A program error there ends the load,
+        // as it ended id's.
+        self.run_frame_f64(SETTLE_FRAMETIME)?;
+        self.run_frame_f64(SETTLE_FRAMETIME)?;
 
         // classnames sorted by count desc, then name asc for determinism.
         classname_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
