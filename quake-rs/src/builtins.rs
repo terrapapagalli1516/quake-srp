@@ -56,7 +56,7 @@ fn pf_debug_noop(_vm: &mut Vm) -> Result<()> {
 /// `pr_argc`. The C version uses a fixed 256-byte buffer; we build a `String`.
 pub(crate) fn var_string(vm: &Vm, first: usize) -> String {
     let mut out = String::new();
-    for i in first..vm.argc {
+    for i in first..vm.argc() {
         out.push_str(&vm.arg_string(i));
     }
     out
@@ -78,10 +78,10 @@ fn pf_makevectors(vm: &mut Vm) -> Result<()> {
     let (forward, right, up) = crate::math::angle_vectors(angles);
 
     // Resolve each destination global by name; copy out the offset before the
-    // mutable borrow so we don't hold an immutable borrow of `vm.progs`.
-    let of_forward = vm.progs.find_global("v_forward").map(|d| d.ofs as usize);
-    let of_right = vm.progs.find_global("v_right").map(|d| d.ofs as usize);
-    let of_up = vm.progs.find_global("v_up").map(|d| d.ofs as usize);
+    // mutable borrow so we don't hold an immutable borrow of `vm.progs()`.
+    let of_forward = vm.progs().find_global("v_forward").map(|d| d.ofs as usize);
+    let of_right = vm.progs().find_global("v_right").map(|d| d.ofs as usize);
+    let of_up = vm.progs().find_global("v_up").map(|d| d.ofs as usize);
 
     if let Some(o) = of_forward {
         vm.set_gv(o, forward);
@@ -138,20 +138,20 @@ fn pf_error(vm: &mut Vm) -> Result<()> {
 /// `self` is freed (`ED_Free`) after its dump, before `Host_Error`.
 fn pf_objerror(vm: &mut Vm) -> Result<()> {
     let report = error_report(vm, "OBJECT ERROR");
-    let ent = vm.glob_int(vm.go.self_);
+    let ent = vm.glob_int(vm.go().self_);
     vm.free_edict(ent);
     Err(report.into())
 }
 
 /// What `PF_error`/`PF_objerror` print on the way to `Host_Error`:
 /// `======<kind> in <function>:`, the message, and `ED_Print (self)`. The
-/// text also goes to the dev log (`vm.output`), like `dprint`'s.
+/// text also goes to the output log ([`Vm::print`]), like `dprint`'s.
 fn error_report(vm: &mut Vm, kind: &str) -> ProgramError {
     let message = var_string(vm, 0);
     let function = vm.running_function().to_string();
-    let dump = vm.ed_print(vm.glob_int(vm.go.self_));
+    let dump = vm.ed_print(vm.glob_int(vm.go().self_));
     let console = format!("======{kind} in {function}:\n{message}\n{dump}");
-    vm.output.push_str(&console);
+    vm.print(&console);
     ProgramError { function, message, console }
 }
 
@@ -248,7 +248,7 @@ fn pf_remove(vm: &mut Vm) -> Result<()> {
 /// concatenated string args to the captured `output`.
 fn pf_bprint(vm: &mut Vm) -> Result<()> {
     let s = var_string(vm, 0);
-    vm.output.push_str(&s);
+    vm.print(&s);
     Ok(())
 }
 
@@ -258,7 +258,7 @@ fn pf_bprint(vm: &mut Vm) -> Result<()> {
 /// to `output`.
 fn pf_sprint(vm: &mut Vm) -> Result<()> {
     let s = var_string(vm, 1);
-    vm.output.push_str(&s);
+    vm.print(&s);
     Ok(())
 }
 
@@ -266,7 +266,7 @@ fn pf_sprint(vm: &mut Vm) -> Result<()> {
 /// `output`.
 fn pf_dprint(vm: &mut Vm) -> Result<()> {
     let s = var_string(vm, 0);
-    vm.output.push_str(&s);
+    vm.print(&s);
     Ok(())
 }
 
@@ -274,7 +274,7 @@ fn pf_dprint(vm: &mut Vm) -> Result<()> {
 /// 1) is appended to `output`; the client routing is ignored.
 fn pf_centerprint(vm: &mut Vm) -> Result<()> {
     let s = var_string(vm, 1);
-    vm.output.push_str(&s);
+    vm.print(&s);
     Ok(())
 }
 
@@ -380,10 +380,10 @@ fn pf_find(vm: &mut Vm) -> Result<()> {
     // Begin at start+1 (the C `for (e++ ; ...)`), guarding against overflow.
     let mut e = start.saturating_add(1);
     while e >= 0 && (e as usize) < vm.num_edicts() {
-        let free = vm.edict_free.get(e as usize).copied().unwrap_or(true);
+        let free = vm.is_free_edict(e);
         if !free {
             let s_t = vm.ei(e, field);
-            let s = crate::progs::string_in(&vm.strings, s_t);
+            let s = vm.string(s_t);
             // Match by contents, borrowed (no String per edict). In the C,
             // `t = E_STRING(ed,f)` is the empty string "" (string offset 0),
             // not NULL, so `strcmp(t, s)` matches an empty stored field against
@@ -405,7 +405,7 @@ fn pf_find(vm: &mut Vm) -> Result<()> {
 fn pf_nextent(vm: &mut Vm) -> Result<()> {
     let mut e = vm.arg_entity(0).saturating_add(1);
     while e >= 0 && (e as usize) < vm.num_edicts() {
-        let free = vm.edict_free.get(e as usize).copied().unwrap_or(true);
+        let free = vm.is_free_edict(e);
         if !free {
             vm.ret_entity(e);
             return Ok(());
@@ -652,7 +652,7 @@ mod tests {
         vm.set_gi(OFS_PARM0, s);
         vm.set_gi(60, bi_idx as i32);
         vm.call_by_name("main").expect("run");
-        assert_eq!(vm.output, "hello world");
+        assert_eq!(vm.output(), "hello world");
     }
 
     #[test]
@@ -725,7 +725,7 @@ mod tests {
         pf_spawn(&mut vm).expect("spawn");
         let e1 = vm.gi(OFS_RETURN);
         assert_eq!(e1, 1, "first spawn is edict 1");
-        assert!(!vm.edict_free[1]);
+        assert!(!vm.is_free_edict(1));
 
         pf_spawn(&mut vm).expect("spawn");
         let e2 = vm.gi(OFS_RETURN);
@@ -734,7 +734,7 @@ mod tests {
         // remove(e1): mark it free.
         vm.set_gi(OFS_PARM0, e1);
         pf_remove(&mut vm).expect("remove");
-        assert!(vm.edict_free[1]);
+        assert!(vm.is_free_edict(1));
 
         // The next spawn reuses the freed slot.
         pf_spawn(&mut vm).expect("spawn");
@@ -744,11 +744,10 @@ mod tests {
     #[test]
     fn dprint_appends_direct() {
         let mut vm = bare_vm();
-        vm.argc = 1;
         let s = vm.intern("xyzzy");
         vm.set_gi(OFS_PARM0, s);
-        pf_dprint(&mut vm).expect("dprint");
-        assert_eq!(vm.output, "xyzzy");
+        vm.call_builtin(25, 1).expect("dprint");
+        assert_eq!(vm.output(), "xyzzy");
     }
 
     #[test]
@@ -952,20 +951,18 @@ mod tests {
     #[test]
     fn error_and_objerror_fault() {
         let mut vm = bare_vm();
-        vm.argc = 1;
         let s = vm.intern("boom");
         vm.set_gi(OFS_PARM0, s);
         // PF_error's banner and ED_Print (self): here the world, all zeros.
         let banner = "======SERVER ERROR in :\nboom\n\nEDICT 0:\n";
-        let Err(crate::QError::Program(e)) = pf_error(&mut vm) else { panic!("error() must fault") };
+        let Err(crate::QError::Program(e)) = vm.call_builtin(10, 1) else { panic!("error() must fault") };
         assert_eq!((e.message.as_str(), e.console.as_str()), ("boom", banner));
-        assert!(vm.output.contains(banner));
+        assert!(vm.output().contains(banner));
 
         let mut vm = bare_vm();
-        vm.argc = 1;
         let s = vm.intern("kaboom");
         vm.set_gi(OFS_PARM0, s);
-        let Err(crate::QError::Program(e)) = pf_objerror(&mut vm) else { panic!("objerror() must fault") };
+        let Err(crate::QError::Program(e)) = vm.call_builtin(11, 1) else { panic!("objerror() must fault") };
         assert!(e.console.starts_with("======OBJECT ERROR in :\nkaboom\n"), "{e:?}");
     }
 
@@ -991,19 +988,17 @@ mod tests {
         // FIX-2: coredump(#28)/traceon(#29)/traceoff(#30)/eprint(#31) and
         // localcmd(#46) are diagnostic/host-side builtins. The C runs them and
         // continues; here they must be benign no-ops, NOT faults like pf_fixme.
-        let table = default_builtins();
         let mut vm = bare_vm();
-        vm.argc = 1; // give them an arg slot to consume
         for n in [28usize, 29, 30, 31, 46] {
             assert!(
-                (table[n])(&mut vm).is_ok(),
+                vm.call_builtin(n, 1).is_ok(), // with an arg slot to consume
                 "debug builtin #{n} must be an inert no-op, not a fault"
             );
         }
         // Sanity: a true engine-world stub (#16 traceline) is still a fixme fault
         // in the bare default table (only the engine server installs the real one).
         assert!(
-            (table[16])(&mut vm).is_err(),
+            vm.call_builtin(16, 4).is_err(),
             "#16 traceline stays a fault in the default table"
         );
     }
@@ -1039,12 +1034,11 @@ mod tests {
         // #73 must be centerprint (the bug was the table being off-by-7 here).
         // It concatenates args from index 1 (arg 0 is the client entity it
         // ignores), per pr_argc, so put the message at parm 1 and set argc.
-        vm.argc = 2;
         let s = vm.intern("hello");
         vm.set_gi(OFS_PARM0 + 3, s); // parameter index 1
-        let out_before = vm.output.len();
-        (table[73])(&mut vm).expect("centerprint via table #73");
-        assert!(vm.output.len() > out_before, "centerprint should write output");
+        let out_before = vm.output().len();
+        vm.call_builtin(73, 2).expect("centerprint via table #73");
+        assert!(vm.output().len() > out_before, "centerprint should write output");
         // #72 (cvar_set) is an inert fixme and must fault, not print.
         assert!((table[72])(&mut vm).is_err(), "#72 should be an inert fixme");
     }

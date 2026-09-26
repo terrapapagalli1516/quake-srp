@@ -70,7 +70,7 @@ impl Server {
     /// This server's [`Outbox`]. Its world model always has one; `None` only
     /// if the VM's host were taken away.
     pub(super) fn outbox(&mut self) -> Option<&mut Outbox> {
-        self.vm.host.as_deref_mut().map(|h| h.outbox())
+        self.vm.host_mut().map(|h| h.outbox())
     }
 
     /// Take one of the outbox's queues, leaving it empty.
@@ -232,7 +232,7 @@ impl Outbox {
 /// the message is args from index 1. Also mirrored into the dev `output` log.
 pub(super) fn bi_centerprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 1);
-    vm.output.push_str(&s);
+    vm.print(&s);
     send(vm, |o| o.print(true, s));
     Ok(())
 }
@@ -240,7 +240,7 @@ pub(super) fn bi_centerprint(vm: &mut Vm) -> Result<()> {
 /// `PF_bprint` (#23): broadcast print — shown as a notify line.
 pub(super) fn bi_bprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 0);
-    vm.output.push_str(&s);
+    vm.print(&s);
     send(vm, |o| o.print(false, s));
     Ok(())
 }
@@ -249,7 +249,7 @@ pub(super) fn bi_bprint(vm: &mut Vm) -> Result<()> {
 /// ignored; message is args from index 1).
 pub(super) fn bi_sprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 1);
-    vm.output.push_str(&s);
+    vm.print(&s);
     send(vm, |o| o.print(false, s));
     Ok(())
 }
@@ -831,9 +831,9 @@ pub(super) fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
 
     // "check to see if samp was properly precached" (pr_cmds.c:519-528).
     let Some(sound_index) = vm.with_host(|_vm, h| h.find_sound(&sample)).flatten() else {
-        vm.output.push_str("no precache: ");
-        vm.output.push_str(&sample);
-        vm.output.push('\n');
+        vm.print("no precache: ");
+        vm.print(&sample);
+        vm.print("\n");
         return Ok(());
     };
 
@@ -1113,9 +1113,9 @@ mod tests {
             "un-precached ambientsound registers nothing"
         );
         assert!(
-            server.vm.output.contains("no precache: ambience/notthere.wav\n"),
+            server.vm.output().contains("no precache: ambience/notthere.wav\n"),
             "the C's console message, routed to vm.output: {:?}",
-            server.vm.output
+            server.vm.output()
         );
         assert_eq!(
             server.vm.with_host(|_vm, h| h.find_sound("ambience/notthere.wav")),

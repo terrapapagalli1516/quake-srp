@@ -31,7 +31,7 @@
 //! sample exists in the pak / was precached), every print, every MSG_ALL
 //! command and temp entity, and which MOVETYPE_PUSH brush models never moved.
 //!
-//! The wrappers are installed over `vm.builtins` (the table the engine
+//! The wrappers are installed over `vm.builtins()` (the table the engine
 //! dispatches through) — no engine code is changed. The report is text; it is
 //! the evidence behind `CENSUS.md`.
 
@@ -129,11 +129,9 @@ fn install_wrappers(vm: &mut Vm) {
         30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59
         60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79
     );
-    ORIG.with(|o| *o.borrow_mut() = vm.builtins.clone());
-    for (i, slot) in vm.builtins.iter_mut().enumerate() {
-        if i < table.len() {
-            *slot = table[i];
-        }
+    ORIG.with(|o| *o.borrow_mut() = vm.builtins().to_vec());
+    for (i, &f) in table.iter().enumerate() {
+        vm.set_builtin(i, f);
     }
 }
 
@@ -148,7 +146,7 @@ fn reset_logs() {
 /// parm slots, `self`/`other` set, and `time` = sv.time (what SV_Impact /
 /// SV_TouchLinks / the spawn loop set before calling into QC).
 fn call_qc(server: &mut Server, name: &str, self_e: i32, other: i32, args: &[Arg]) -> Result<(), String> {
-    let f = server.vm.progs.find_function(name).ok_or_else(|| format!("no function {name}"))?;
+    let f = server.vm.progs().find_function(name).ok_or_else(|| format!("no function {name}"))?;
     call_fnum(server, f, self_e, other, args)
 }
 
@@ -171,7 +169,6 @@ fn call_fnum(server: &mut Server, f: usize, self_e: i32, other: i32, args: &[Arg
             Arg::F(x) => vm.set_gf(ofs, x),
         }
     }
-    vm.argc = args.len();
     let r = vm.execute(f).map_err(|e| e.to_string());
     if r.is_err() {
         vm.reset_execution();
@@ -180,7 +177,7 @@ fn call_fnum(server: &mut Server, f: usize, self_e: i32, other: i32, args: &[Arg
 }
 
 fn live(server: &Server, e: usize) -> bool {
-    !server.vm.edict_free.get(e).copied().unwrap_or(true)
+    !server.vm.is_free_edict(e as i32)
 }
 
 fn center(server: &Server, e: i32) -> [f32; 3] {
@@ -280,9 +277,7 @@ fn drain(server: &mut Server, pak: &Pak, run: &mut Run) {
     }
     run.particles += server.drain_particles().len();
     let _ = server.drain_static_sounds();
-    if !server.vm.output.is_empty() {
-        run.output.push_str(&std::mem::take(&mut server.vm.output));
-    }
+    run.output.push_str(&server.vm.take_output());
 }
 
 fn idle(server: &mut Server, pak: &Pak, run: &mut Run, secs: f32, buttons: i32) {
@@ -300,18 +295,14 @@ fn set_origin(server: &mut Server, e: i32, org: [f32; 3]) {
     let vm = &mut server.vm;
     vm.set_gi(OFS_PARM0, e);
     vm.set_gv(OFS_PARM0 + 3, org);
-    vm.argc = 2;
-    let f = vm.builtins[2];
-    let _ = f(vm);
+    let _ = vm.call_builtin(2, 2);
 }
 
 
 fn point_contents(server: &mut Server, p: [f32; 3]) -> f32 {
     let vm = &mut server.vm;
     vm.set_gv(OFS_PARM0, p);
-    vm.argc = 1;
-    let f = vm.builtins[41];
-    let _ = f(vm);
+    let _ = vm.call_builtin(41, 1);
     vm.gf(quake_rs::progs::OFS_RETURN)
 }
 
@@ -323,9 +314,7 @@ fn trace_clear(server: &mut Server, a: [f32; 3], b: [f32; 3], ignore: i32) -> bo
     vm.set_gv(OFS_PARM0 + 3, b);
     vm.set_gf(OFS_PARM0 + 6, 1.0);
     vm.set_gi(OFS_PARM0 + 9, ignore);
-    vm.argc = 4;
-    let f = vm.builtins[16];
-    let _ = f(vm);
+    let _ = vm.call_builtin(16, 4);
     vm.gget_float("trace_fraction") >= 1.0
 }
 
@@ -333,9 +322,7 @@ fn trace_clear(server: &mut Server, a: [f32; 3], b: [f32; 3], ignore: i32) -> bo
 fn drop_to_floor(server: &mut Server, e: i32) -> bool {
     let vm = &mut server.vm;
     vm.gset_int("self", e);
-    vm.argc = 0;
-    let f = vm.builtins[34];
-    let _ = f(vm);
+    let _ = vm.call_builtin(34, 0);
     vm.gf(quake_rs::progs::OFS_RETURN) != 0.0
 }
 
@@ -492,7 +479,7 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             frame(&mut server, pak, &mut run, &cmd);
             if std::env::var("CENSUS_DUEL").as_deref() == Ok(kind.as_str()) {
                 let th = server.vm.ent_get_int(m, "think");
-                let fname = server.vm.progs.functions.get(th as usize).map(|f| server.vm.progs.string(f.s_name).to_string());
+                let fname = server.vm.progs().functions.get(th as usize).map(|f| server.vm.progs().string(f.s_name).to_string());
                 eprintln!("{_i} {:?} org {:?} enemy {} health {} player {:?} psolid {} pmove {} p {:?}", fname, server.vm.ent_get_vector(m, "origin"), server.vm.ent_get_int(m, "enemy"), server.vm.ent_get_float(m, "health"), server.vm.ent_get_vector(player, "origin"), server.vm.ent_get_float(player, "solid"), server.vm.ent_get_float(player, "movetype"), p);
             }
         }

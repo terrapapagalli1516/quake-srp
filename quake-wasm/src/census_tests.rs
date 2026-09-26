@@ -18,13 +18,11 @@ fn set_origin(w: &mut Walk, e: i32, org: [f32; 3]) {
     let vm = &mut w.server.vm;
     vm.set_gi(OFS_PARM0, e);
     vm.set_gv(OFS_PARM0 + 3, org);
-    vm.argc = 2;
-    let f = vm.builtins[2];
-    f(vm).expect("setorigin");
+    vm.call_builtin(2, 2).expect("setorigin");
 }
 
 fn live(w: &Walk, e: i32) -> bool {
-    !w.server.vm.edict_free.get(e as usize).copied().unwrap_or(true)
+    !w.server.vm.is_free_edict(e)
 }
 
 fn find(w: &Walk, pred: impl Fn(&Walk, i32) -> bool) -> Option<i32> {

@@ -224,7 +224,7 @@ fn bi_droptofloor(vm: &mut Vm) -> Result<()> {
 /// defaults; everything else is 0 (the C looked these up in the cvar registry).
 fn bi_cvar(vm: &mut Vm) -> Result<()> {
     let name = vm.arg_string(0);
-    let cvars = vm.host.as_deref().map(|h| *h.cvars()).unwrap_or_default();
+    let cvars = vm.host().map(|h| *h.cvars()).unwrap_or_default();
     vm.ret_float(cvar_value(&cvars, &name));
     Ok(())
 }
@@ -344,7 +344,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
     // arg 1 (speed) is read but unused by PF_aim — the QC applies it to the shot.
 
     let v_forward = vm.gget_vector("v_forward");
-    let origin = vm.ent_vec(ent, vm.fo.origin);
+    let origin = vm.ent_vec(ent, vm.fo().origin);
     let mut start = origin;
     start[2] += 20.0;
 
@@ -355,7 +355,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
         start[2] + 2048.0 * v_forward[2],
     ];
     let tr = sv_move(vm, start, end, [0.0; 3], [0.0; 3], ent, false, false);
-    if tr.ent > 0 && vm.ent_float(tr.ent, vm.fo.takedamage) == DAMAGE_AIM {
+    if tr.ent > 0 && vm.ent_float(tr.ent, vm.fo().takedamage) == DAMAGE_AIM {
         vm.ret_vector(v_forward);
         return Ok(());
     }
@@ -370,12 +370,12 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
         if check == ent {
             continue;
         }
-        if vm.ent_float(check, vm.fo.takedamage) != DAMAGE_AIM {
+        if vm.ent_float(check, vm.fo().takedamage) != DAMAGE_AIM {
             continue;
         }
-        let c_org = vm.ent_vec(check, vm.fo.origin);
-        let c_min = vm.ent_vec(check, vm.fo.mins);
-        let c_max = vm.ent_vec(check, vm.fo.maxs);
+        let c_org = vm.ent_vec(check, vm.fo().origin);
+        let c_min = vm.ent_vec(check, vm.fo().mins);
+        let c_max = vm.ent_vec(check, vm.fo().maxs);
         // Aim at the centre of the target's bounding box.
         let target = [
             c_org[0] + 0.5 * (c_min[0] + c_max[0]),
@@ -397,7 +397,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
     }
 
     if bestent >= 0 {
-        let b_org = vm.ent_vec(bestent, vm.fo.origin);
+        let b_org = vm.ent_vec(bestent, vm.fo().origin);
         let dir = [b_org[0] - origin[0], b_org[1] - origin[1], b_org[2] - origin[2]];
         let dist = dir[0] * v_forward[0] + dir[1] * v_forward[1] + dir[2] * v_forward[2];
         // Snap horizontally to v_forward*dist but keep the true vertical (dir.z).
@@ -423,7 +423,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
 /// The per-frame caching is dropped (it was a CPU optimization, not a behaviour
 /// change); the visibility result is identical for one client.
 fn bi_checkclient(vm: &mut Vm) -> Result<()> {
-    let self_e = vm.glob_int(vm.go.self_);
+    let self_e = vm.glob_int(vm.go().self_);
 
     // Find a live client edict by its FL_CLIENT flag (the C scanned svs.clients;
     // real progs.dat has no `viewentity` global, so we can't rely on that). A
@@ -431,11 +431,11 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
     let mut player = 0i32;
     for e in 1..vm.num_edicts() {
         let ent = e as i32;
-        if vm.edict_free.get(e).copied().unwrap_or(true) {
+        if vm.is_free_edict(e as i32) {
             continue;
         }
-        if (vm.ent_float(ent, vm.fo.flags) as i32) & FL_CLIENT != 0
-            && vm.ent_float(ent, vm.fo.health) > 0.0
+        if (vm.ent_float(ent, vm.fo().flags) as i32) & FL_CLIENT != 0
+            && vm.ent_float(ent, vm.fo().health) > 0.0
         {
             player = ent;
             break;
@@ -447,12 +447,12 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
     }
 
     // Eyes: origin + view_ofs for both ends of the sight line.
-    let self_org = vm.ent_vec(self_e, vm.fo.origin);
-    let self_ofs = vm.ent_vec(self_e, vm.fo.view_ofs);
+    let self_org = vm.ent_vec(self_e, vm.fo().origin);
+    let self_ofs = vm.ent_vec(self_e, vm.fo().view_ofs);
     let view = v_add(self_org, self_ofs);
 
-    let pl_org = vm.ent_vec(player, vm.fo.origin);
-    let pl_ofs = vm.ent_vec(player, vm.fo.view_ofs);
+    let pl_org = vm.ent_vec(player, vm.fo().origin);
+    let pl_ofs = vm.ent_vec(player, vm.fo().view_ofs);
     let target = v_add(pl_org, pl_ofs);
 
     // World-only line of sight (MOVE_NOMONSTERS, matching C PF_checkclient):
@@ -485,15 +485,15 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
     // Scan edicts 1..num_edicts (the C started at NEXT_EDICT(sv.edicts)).
     for e in 1..n {
         let ei = e as i32;
-        if vm.edict_free.get(e).copied().unwrap_or(true) {
+        if vm.is_free_edict(e as i32) {
             continue;
         }
-        if vm.ent_float(ei, vm.fo.solid) as i32 == SOLID_NOT {
+        if vm.ent_float(ei, vm.fo().solid) as i32 == SOLID_NOT {
             continue;
         }
-        let origin = vm.ent_vec(ei, vm.fo.origin);
-        let mins = vm.ent_vec(ei, vm.fo.mins);
-        let maxs = vm.ent_vec(ei, vm.fo.maxs);
+        let origin = vm.ent_vec(ei, vm.fo().origin);
+        let mins = vm.ent_vec(ei, vm.fo().mins);
+        let maxs = vm.ent_vec(ei, vm.fo().maxs);
         // eorg = org - (origin + (mins+maxs)/2): distance from the box centre.
         let eorg: Vec3 = [
             org[0] - (origin[0] + (mins[0] + maxs[0]) * 0.5),
@@ -504,7 +504,7 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
             continue;
         }
         // Link: this edict's chain points at the previous head; it becomes head.
-        vm.set_ent_int(ei, vm.fo.chain, chain);
+        vm.set_ent_int(ei, vm.fo().chain, chain);
         chain = ei;
     }
 
@@ -520,61 +520,54 @@ fn bi_findradius(vm: &mut Vm) -> Result<()> {
 ///
 /// Numbers are the `pr_builtin[]` indices from `pr_cmds.c` (non-`QUAKE2` build).
 pub fn install_engine_builtins(vm: &mut Vm) {
-    // A small helper that only writes if the index is in range, so a short
-    // table can never panic here.
-    fn put(table: &mut [Builtin], n: usize, f: Builtin) {
-        if let Some(slot) = table.get_mut(n) {
-            *slot = f;
-        }
-    }
-    let t = &mut vm.builtins;
+    let mut put = |n: usize, f: Builtin| vm.set_builtin(n, f);
 
-    put(t, 1, bi_makevectors); // makevectors
-    put(t, 2, bi_setorigin); // setorigin
-    put(t, 3, bi_setmodel); // setmodel
-    put(t, 4, bi_setsize); // setsize
-    put(t, 8, bi_sound); // sound (queues a SoundEvent)
-    put(t, 16, bi_traceline); // traceline
-    put(t, 17, bi_checkclient); // checkclient (line-of-sight to the player)
-    put(t, 19, bi_precache_sound); // precache_sound
-    put(t, 20, bi_precache_model); // precache_model
-    put(t, 21, bi_stuffcmd); // stuffcmd -> svc_stufftext queue
-    put(t, 22, bi_findradius); // findradius (chain of edicts within rad)
-    put(t, 23, bi_bprint); // bprint -> on-screen notify line
-    put(t, 24, bi_sprint); // sprint -> on-screen notify line
-    put(t, 73, bi_centerprint); // centerprint -> centered transient message
-    put(t, 32, bi_walkmove); // walkmove (SV_movestep)
-    put(t, 34, bi_droptofloor); // droptofloor
-    put(t, 35, bi_lightstyle); // lightstyle (stores sv.lightstyles[style])
-    put(t, 40, bi_checkbottom); // checkbottom (SV_CheckBottom)
-    put(t, 41, bi_pointcontents); // pointcontents
-    put(t, 44, bi_aim); // aim
-    put(t, 45, bi_cvar); // cvar
-    put(t, 48, bi_particle); // particle (queues a ParticleBurst)
-    put(t, 49, bi_changeyaw); // changeyaw
+    put(1, bi_makevectors); // makevectors
+    put(2, bi_setorigin); // setorigin
+    put(3, bi_setmodel); // setmodel
+    put(4, bi_setsize); // setsize
+    put(8, bi_sound); // sound (queues a SoundEvent)
+    put(16, bi_traceline); // traceline
+    put(17, bi_checkclient); // checkclient (line-of-sight to the player)
+    put(19, bi_precache_sound); // precache_sound
+    put(20, bi_precache_model); // precache_model
+    put(21, bi_stuffcmd); // stuffcmd -> svc_stufftext queue
+    put(22, bi_findradius); // findradius (chain of edicts within rad)
+    put(23, bi_bprint); // bprint -> on-screen notify line
+    put(24, bi_sprint); // sprint -> on-screen notify line
+    put(73, bi_centerprint); // centerprint -> centered transient message
+    put(32, bi_walkmove); // walkmove (SV_movestep)
+    put(34, bi_droptofloor); // droptofloor
+    put(35, bi_lightstyle); // lightstyle (stores sv.lightstyles[style])
+    put(40, bi_checkbottom); // checkbottom (SV_CheckBottom)
+    put(41, bi_pointcontents); // pointcontents
+    put(44, bi_aim); // aim
+    put(45, bi_cvar); // cvar
+    put(48, bi_particle); // particle (queues a ParticleBurst)
+    put(49, bi_changeyaw); // changeyaw
 
     // #52..#59: the network Write* family. These feed one svc parser per message
     // buffer (MSG_BROADCAST, MSG_ALL) -> TempEntityEvents + SvcEvents; see msg.rs.
-    put(t, 52, bi_writebyte); // WriteByte
-    put(t, 53, bi_writechar); // WriteChar
-    put(t, 54, bi_writeshort); // WriteShort
-    put(t, 55, bi_writelong); // WriteLong
-    put(t, 56, bi_writecoord); // WriteCoord
-    put(t, 57, bi_writeangle); // WriteAngle
-    put(t, 58, bi_writestring); // WriteString
-    put(t, 59, bi_writeentity); // WriteEntity
+    put(52, bi_writebyte); // WriteByte
+    put(53, bi_writechar); // WriteChar
+    put(54, bi_writeshort); // WriteShort
+    put(55, bi_writelong); // WriteLong
+    put(56, bi_writecoord); // WriteCoord
+    put(57, bi_writeangle); // WriteAngle
+    put(58, bi_writestring); // WriteString
+    put(59, bi_writeentity); // WriteEntity
 
-    put(t, 46, bi_localcmd); // localcmd (honours restart / changelevel / map; else no-op)
-    put(t, 67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
-    put(t, 68, bi_precache_file); // precache_file
-    put(t, 69, bi_makestatic); // makestatic (marks a client static)
-    put(t, 70, bi_changelevel); // changelevel (records the deferred map swap)
-    put(t, 72, bi_cvar_set); // cvar_set (honours "skill"; else benign no-op)
-    put(t, 74, bi_ambientsound); // ambientsound (records a StaticSound loop)
-    put(t, 75, bi_precache_model); // precache_model (alias)
-    put(t, 76, bi_precache_sound); // precache_sound (alias)
-    put(t, 77, bi_precache_file); // precache_file (alias)
-    put(t, 78, bi_noop); // setspawnparms
+    put(46, bi_localcmd); // localcmd (honours restart / changelevel / map; else no-op)
+    put(67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
+    put(68, bi_precache_file); // precache_file
+    put(69, bi_makestatic); // makestatic (marks a client static)
+    put(70, bi_changelevel); // changelevel (records the deferred map swap)
+    put(72, bi_cvar_set); // cvar_set (honours "skill"; else benign no-op)
+    put(74, bi_ambientsound); // ambientsound (records a StaticSound loop)
+    put(75, bi_precache_model); // precache_model (alias)
+    put(76, bi_precache_sound); // precache_sound (alias)
+    put(77, bi_precache_file); // precache_file (alias)
+    put(78, bi_noop); // setspawnparms
 }
 
 #[cfg(test)]
@@ -601,9 +594,8 @@ mod tests {
         server.vm.ent_set_vector(e, "origin", [10.0, -20.5, 0.0]);
         server.vm.gset_int("self", e);
         let text = server.vm.intern("couldn't find target");
-        server.vm.argc = 1;
         server.vm.set_gi(crate::progs::OFS_PARM0, text);
-        let Err(crate::QError::Program(err)) = (server.vm.builtins[11])(&mut server.vm) else {
+        let Err(crate::QError::Program(err)) = server.vm.call_builtin(11, 1) else {
             panic!("objerror is Host_Error")
         };
         assert_eq!(
@@ -633,17 +625,15 @@ mod tests {
         // Drive the engine cvar_set builtin directly (#72): cvar_set("skill","2").
         let name = server.vm.intern("skill");
         let val = server.vm.intern("2");
-        server.vm.argc = 2;
         server.vm.set_gi(crate::progs::OFS_PARM0, name);
         server.vm.set_gi(crate::progs::OFS_PARM1, val);
-        bi_cvar_set(&mut server.vm).expect("cvar_set");
+        server.vm.call_builtin(72, 2).expect("cvar_set");
         assert_eq!(server.skill(), 2, "cvar_set('skill','2') stored 2");
 
         // cvar("skill") reads the live value back.
-        server.vm.argc = 1;
         let name = server.vm.intern("skill");
         server.vm.set_gi(crate::progs::OFS_PARM0, name);
-        bi_cvar(&mut server.vm).expect("cvar");
+        server.vm.call_builtin(45, 1).expect("cvar");
         assert_eq!(
             server.vm.gf(crate::progs::OFS_RETURN),
             2.0,
@@ -667,10 +657,9 @@ mod tests {
     fn bi_cvar_set_via(server: &mut Server, var: &str, val: &str) {
         let n = server.vm.intern(var);
         let v = server.vm.intern(val);
-        server.vm.argc = 2;
         server.vm.set_gi(crate::progs::OFS_PARM0, n);
         server.vm.set_gi(crate::progs::OFS_PARM1, v);
-        bi_cvar_set(&mut server.vm).expect("cvar_set");
+        server.vm.call_builtin(72, 2).expect("cvar_set");
     }
 
     #[test]
@@ -688,15 +677,15 @@ mod tests {
         );
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
-        let len_before = vm.builtins.len();
+        let len_before = vm.builtins().len();
         install_engine_builtins(&mut vm);
         // Table length is unchanged (we only overwrite slots).
-        assert_eq!(vm.builtins.len(), len_before);
+        assert_eq!(vm.builtins().len(), len_before);
         // #45 (cvar) now returns sv_gravity default for "sv_gravity".
         vm.set_host(Box::new(WorldModel::new(empty_bsp())));
         let s = vm.intern("sv_gravity");
         vm.set_gi(crate::progs::OFS_PARM0, s);
-        (vm.builtins[45])(&mut vm).expect("cvar");
+        vm.call_builtin(45, 1).expect("cvar");
         assert_eq!(vm.gf(OFS_RETURN), 800.0);
     }
 
@@ -723,7 +712,7 @@ mod tests {
         vm.set_host(Box::new(WorldModel::new(empty_bsp())));
         vm.set_gv(crate::progs::OFS_PARM0, [0.0, 0.0, 0.0]);
         vm.set_gv(crate::progs::OFS_PARM0 + 3, [100.0, 0.0, 0.0]);
-        (vm.builtins[16])(&mut vm).expect("traceline");
+        vm.call_builtin(16, 4).expect("traceline");
         // fraction in [0,1].
         let frac = vm.gget_float("trace_fraction");
         assert!((0.0..=1.0).contains(&frac));

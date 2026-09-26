@@ -295,12 +295,12 @@ impl Server {
     /// This server's [`ServerCvars`] (the defaults if its world model were
     /// taken away).
     pub(super) fn cvars(&self) -> ServerCvars {
-        self.vm.host.as_deref().map(|h| *h.cvars()).unwrap_or_default()
+        self.vm.host().map(|h| *h.cvars()).unwrap_or_default()
     }
 
     /// This server's [`ServerCvars`], to set.
     fn cvars_mut(&mut self) -> Option<&mut ServerCvars> {
-        self.vm.host.as_deref_mut().map(|h| h.cvars_mut())
+        self.vm.host_mut().map(|h| h.cvars_mut())
     }
 
     /// Take (and clear) the deferred level-change request a `changelevel()`

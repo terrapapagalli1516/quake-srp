@@ -484,28 +484,24 @@ impl Server {
     /// QuakeC and `svc_time`'s `MSG_WriteFloat(sv.time)` sends the client (so a
     /// local client's `cl.time`). The clock itself is [`Server::sv_time`].
     pub fn time(&self) -> f32 {
-        self.vm.sv_time as f32
+        self.vm.sv_time() as f32
     }
 
     /// `sv.time`, the server clock (a `double` in id's `server_t`).
     pub fn sv_time(&self) -> f64 {
-        self.vm.sv_time
+        self.vm.sv_time()
     }
 
     /// Set `sv.time` (and, as the C's next `pr_global_struct->time = sv.time`
     /// would, the QuakeC `time` global to its float).
     pub fn set_sv_time(&mut self, t: f64) {
-        self.vm.sv_time = t;
+        self.vm.set_sv_time(t);
         self.vm.gset_float("time", t as f32);
     }
 
     /// The number of live (not-free) edicts, including the world (edict 0).
     pub fn live_entities(&self) -> usize {
-        self.vm
-            .edict_free
-            .iter()
-            .filter(|&&free| !free)
-            .count()
+        self.vm.live_edicts().count()
     }
 
     /// The local player's edict index, or `-1` if no client has connected.
@@ -546,10 +542,10 @@ impl Server {
     /// `None` when the program defines neither.
     fn sys_function(&self, name: &str) -> Option<usize> {
         let g = self.vm.gget_int(name);
-        if g > 0 && (g as usize) < self.vm.progs.functions.len() {
+        if g > 0 && (g as usize) < self.vm.progs().functions.len() {
             return Some(g as usize);
         }
-        self.vm.progs.find_function(name)
+        self.vm.progs().find_function(name)
     }
 
     /// Execute a system QuakeC function with `self = self_e`, `other = other_e`.
@@ -591,7 +587,7 @@ impl Server {
         if e < 0 {
             return true;
         }
-        self.vm.edict_free.get(e as usize).copied().unwrap_or(true)
+        self.vm.is_free_edict(e)
     }
 }
 

@@ -39,7 +39,7 @@
 //!   front-end keeps the running game and prints the message. Recoverable
 //!   per-pair problems (an unknown global/field name, a missing function)
 //!   degrade exactly like the C's `Con_Printf` cases: a console warning
-//!   (appended to `vm.output`) and the pair is skipped.
+//!   (printed to the VM's output log, [`Vm::print`]) and the pair is skipped.
 //! * Strings containing a literal `"` cannot round-trip (the C's
 //!   `PR_UglyValueString` writes them raw inside quotes and `COM_Parse`
 //!   truncates at the quote — same lossy behaviour as WinQuake).
@@ -113,21 +113,21 @@ fn ugly_value_string(vm: &Vm, etype: EType, c: [u32; 3]) -> String {
         EType::String => vm.get_string(c[0] as i32),
         EType::Entity => format!("{}", c[0] as i32),
         EType::Function => vm
-            .progs
+            .progs()
             .functions
             .get(c[0] as usize)
-            .map(|f| vm.progs.string(f.s_name).to_string())
+            .map(|f| vm.progs().string(f.s_name).to_string())
             // The C indexes pr_functions unchecked (UB on a bad value); an
             // out-of-range function serializes as "" here (parse skips it).
             .unwrap_or_default(),
         EType::Field => {
             // ED_FieldAtOfs: the def whose ofs equals the stored value.
             let ofs = c[0] as i32;
-            vm.progs
+            vm.progs()
                 .fielddefs
                 .iter()
                 .find(|d| d.ofs as i32 == ofs)
-                .map(|d| vm.progs.string(d.s_name).to_string())
+                .map(|d| vm.progs().string(d.s_name).to_string())
                 .unwrap_or_default()
         }
         EType::Void => "void".to_string(),
@@ -148,7 +148,7 @@ fn ugly_value_string(vm: &Vm, etype: EType, c: [u32; 3]) -> String {
 /// (No zero-skip here — that is an edict-field rule only.)
 fn write_globals(vm: &Vm, out: &mut String) {
     out.push_str("{\n");
-    for def in &vm.progs.globaldefs {
+    for def in &vm.progs().globaldefs {
         if !def.save_global() {
             continue;
         }
@@ -156,9 +156,9 @@ fn write_globals(vm: &Vm, out: &mut String) {
         if !matches!(etype, EType::String | EType::Float | EType::Entity) {
             continue;
         }
-        let name = vm.progs.string(def.s_name);
+        let name = vm.progs().string(def.s_name);
         let ofs = def.ofs as usize;
-        let cell = vm.globals.get(ofs).copied().unwrap_or(0);
+        let cell = vm.gi(ofs) as u32;
         out.push_str(&format!(
             "\"{}\" \"{}\"\n",
             name,
@@ -179,9 +179,9 @@ fn write_edict(vm: &Vm, e: i32, out: &mut String) {
         out.push_str("}\n");
         return;
     }
-    for i in 1..vm.progs.fielddefs.len() {
-        let d = vm.progs.fielddefs[i];
-        let name = vm.progs.string(d.s_name);
+    for i in 1..vm.progs().fielddefs.len() {
+        let d = vm.progs().fielddefs[i];
+        let name = vm.progs().string(d.s_name);
         let nb = name.as_bytes();
         // if (name[strlen(name)-2] == '_') continue; // skip _x, _y, _z vars
         // (guarded for len<2 — the C would read out of bounds there).
@@ -317,11 +317,7 @@ fn parse_epair(vm: &mut Vm, base: &EpairBase, ofs: usize, etype: EType, s: &str)
     // One raw-cell writer for both bases.
     fn put(vm: &mut Vm, base: &EpairBase, ofs: usize, cell: u32) {
         match base {
-            EpairBase::Globals => {
-                if let Some(c) = vm.globals.get_mut(ofs) {
-                    *c = cell;
-                }
-            }
+            EpairBase::Globals => vm.set_gi(ofs, cell as i32),
             EpairBase::Edict(e) => vm.set_ei(*e, ofs, cell as i32),
         }
     }
@@ -344,15 +340,15 @@ fn parse_epair(vm: &mut Vm, base: &EpairBase, ofs: usize, etype: EType, s: &str)
             put(vm, base, ofs, parse_int(s) as u32);
         }
         EType::Field => {
-            let Some(target) = vm.progs.field_offset(s) else {
-                vm.output.push_str(&format!("Can't find field {s}\n"));
+            let Some(target) = vm.progs().field_offset(s) else {
+                vm.print(&format!("Can't find field {s}\n"));
                 return false;
             };
             put(vm, base, ofs, target as u32);
         }
         EType::Function => {
-            let Some(fnum) = vm.progs.find_function(s) else {
-                vm.output.push_str(&format!("Can't find function {s}\n"));
+            let Some(fnum) = vm.progs().find_function(s) else {
+                vm.print(&format!("Can't find function {s}\n"));
                 return false;
             };
             put(vm, base, ofs, fnum as u32);
@@ -384,9 +380,9 @@ fn parse_globals_block(vm: &mut Vm, tok: &mut Tokenizer) -> Result<()> {
             return Err(QError::invalid("ED_ParseEntity: closing brace without data"));
         }
         // ED_FindGlobal; copy the def out so the progs borrow ends.
-        let Some((ofs, etype)) = vm.progs.find_global(&key).map(|d| (d.ofs as usize, d.etype()))
+        let Some((ofs, etype)) = vm.progs().find_global(&key).map(|d| (d.ofs as usize, d.etype()))
         else {
-            vm.output.push_str(&format!("'{key}' is not a global\n"));
+            vm.print(&format!("'{key}' is not a global\n"));
             continue;
         };
         // The C Host_Errors on a false return; we degrade (warning already
@@ -441,11 +437,11 @@ fn parse_edict_block(vm: &mut Vm, tok: &mut Tokenizer, ent: i32) -> Result<bool>
         }
 
         let Some((ofs, etype)) = vm
-            .progs
+            .progs()
             .find_field(&keyname)
             .map(|d| (d.ofs as usize, d.etype()))
         else {
-            vm.output.push_str(&format!("'{keyname}' is not a field\n"));
+            vm.print(&format!("'{keyname}' is not a field\n"));
             continue;
         };
 
@@ -594,25 +590,13 @@ impl Server {
                         "savegame has too many edicts (EDICT_NUM: bad number {e})"
                     )));
                 }
-                let ef = server.vm.entityfields();
-                while server.vm.edict_free.len() <= e {
-                    let len = server.vm.edict_fields.len();
-                    server.vm.edict_fields.resize(len + ef, 0);
-                    server.vm.edict_free.push(true);
-                }
                 // memset (&ent->v, 0, progs->entityfields * 4); ent->free = false;
-                let base = e * ef;
-                if let Some(slot) = server.vm.edict_fields.get_mut(base..base + ef) {
-                    for c in slot {
-                        *c = 0;
-                    }
-                }
-                server.vm.edict_free[e] = false;
+                server.vm.load_edict(e);
 
                 let init = parse_edict_block(&mut server.vm, &mut tok, e as i32)?;
                 if !init {
                     // ED_ParseEdict: a pairless block leaves the slot free.
-                    server.vm.edict_free[e] = true;
+                    server.vm.mark_edict_free(e);
                 } else if e != 0 {
                     // link it into the bsp tree (SV_LinkEdict early-returns
                     // for the world edict, so skip slot 0 like the C).
@@ -629,11 +613,7 @@ impl Server {
             return Err(QError::invalid("savegame contains no edicts"));
         }
         let n = entnum as usize;
-        if server.vm.edict_free.len() > n {
-            let ef = server.vm.entityfields();
-            server.vm.edict_free.truncate(n);
-            server.vm.edict_fields.truncate(n * ef);
-        }
+        server.vm.truncate_edicts(n);
 
         // sv.time = time; (`float time`, read by fscanf "%f": the double
         // clock restarts from that float. The globals block may have set the
@@ -945,11 +925,11 @@ mod tests {
         s.vm.ent_set_vector(e1, "origin", [12.5, -7.0, 0.25]);
         s.vm.ent_set_float(e1, "health", 30.0);
         s.vm.ent_set_int(e1, "enemy", 3);
-        let think = s.vm.progs.find_function("monster_think").unwrap() as i32;
+        let think = s.vm.progs().find_function("monster_think").unwrap() as i32;
         s.vm.ent_set_int(e1, "think", think);
         s.vm.ent_set_float(e1, "nextthink", 13.0625);
         s.vm.ent_set_string(e1, "message", "you got the\\nthing"); // raw backslash-n
-        let fofs = s.vm.progs.field_offset("health").unwrap() as i32;
+        let fofs = s.vm.progs().field_offset("health").unwrap() as i32;
         s.vm.ent_set_int(e1, "dmg_inflictor", fofs); // ev_field by ofs
 
         // Edict 2: a slot that will be FREED (after e3 exists, so ED_Alloc's
@@ -984,7 +964,7 @@ mod tests {
         assert_eq!(s2.vm.ent_get_int(e1, "enemy"), 3, "entity ref by index");
         let think2 = s2.vm.ent_get_int(e1, "think");
         assert_eq!(
-            s2.vm.progs.string(s2.vm.progs.functions[think2 as usize].s_name),
+            s2.vm.progs().string(s2.vm.progs().functions[think2 as usize].s_name),
             "monster_think",
             "function re-bound by name"
         );
@@ -994,7 +974,7 @@ mod tests {
         assert_eq!(s2.vm.ent_get_string(e1, "message"), "you got the\nthing");
         assert_eq!(
             s2.vm.ent_get_int(e1, "dmg_inflictor"),
-            s2.vm.progs.field_offset("health").unwrap() as i32,
+            s2.vm.progs().field_offset("health").unwrap() as i32,
             "ev_field re-bound by name"
         );
         assert!(s2.vm.is_free_edict(e2), "the freed slot stays free");
@@ -1132,8 +1112,8 @@ mod tests {
         let doctored = format!("{}{}", &good[..sg.blocks_ofs], blocks);
         let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &doctored)
             .expect("unknown names degrade, not abort");
-        assert!(s2.vm.output.contains("'bogus_global' is not a global"));
-        assert!(s2.vm.output.contains("'bogus_field' is not a field"));
+        assert!(s2.vm.output().contains("'bogus_global' is not a global"));
+        assert!(s2.vm.output().contains("'bogus_field' is not a field"));
         assert_eq!(s2.vm.ent_get_string(p, "classname"), "player");
     }
 
@@ -1143,13 +1123,13 @@ mod tests {
         s.set_map_name("e1m1");
         let p = s.vm.spawn();
         s.vm.ent_set_string(p, "classname", "player");
-        let think = s.vm.progs.find_function("monster_think").unwrap() as i32;
+        let think = s.vm.progs().find_function("monster_think").unwrap() as i32;
         s.vm.ent_set_int(p, "think", think);
         let good = s.write_savegame();
         let doctored = good.replace("monster_think", "no_such_function");
         let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &doctored)
             .expect("missing function degrades (C Host_Errors)");
-        assert!(s2.vm.output.contains("Can't find function no_such_function"));
+        assert!(s2.vm.output().contains("Can't find function no_such_function"));
         assert_eq!(s2.vm.ent_get_int(p, "think"), 0, "pair skipped, field stays 0");
     }
 

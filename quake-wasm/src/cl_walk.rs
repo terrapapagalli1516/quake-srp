@@ -68,7 +68,7 @@ mod tests {
         set_resolution(320, 200);
         assert_eq!(boot(), 1);
         close_menu();
-        walk_mut(|w| w.server.vm.builtins[1] = |vm| Err(vm.run_error("test fault")));
+        walk_mut(|w| w.server.vm.set_builtin(1, |vm| Err(vm.run_error("test fault"))));
         step(0.05);
         assert_eq!(game_state(), (false, true, -1), "CL_Disconnect, cls.demonum = -1");
         let lines = console_lines();
@@ -83,7 +83,7 @@ mod tests {
         set_resolution(320, 200);
         assert_eq!(boot(), 1);
         close_menu();
-        walk_mut(|w| w.server.vm.builtins[23] = |vm| Err(vm.run_error("test fault")));
+        walk_mut(|w| w.server.vm.set_builtin(23, |vm| Err(vm.run_error("test fault"))));
         console_toggle();
         run_console_line("kill");
         assert_eq!(game_state(), (false, true, -1), "CL_Disconnect, cls.demonum = -1");
@@ -288,7 +288,7 @@ mod tests {
         walk_mut(|w| {
             for e in 0..w.server.vm.num_edicts() {
                 let ent = e as i32;
-                if w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+                if w.server.vm.is_free_edict(e as i32) {
                     continue;
                 }
                 if w.server.vm.ent_get_string(ent, "classname") == "trigger_changelevel" {
@@ -343,7 +343,7 @@ mod tests {
     /// Run QC `T_Damage(targ, inflictor, attacker, damage)` on the live server.
     fn qc_damage(w: &mut Walk, targ: i32, inflictor: i32, damage: f32) {
         use quake_rs::progs::OFS_PARM0;
-        let f = w.server.vm.progs.find_function("T_Damage").expect("progs has T_Damage");
+        let f = w.server.vm.progs().find_function("T_Damage").expect("progs has T_Damage");
         let vm = &mut w.server.vm;
         vm.set_gi(OFS_PARM0, targ);
         vm.set_gi(OFS_PARM0 + 3, inflictor);
@@ -703,9 +703,7 @@ mod tests {
             let vm = &mut w.server.vm;
             vm.set_gi(OFS_PARM0, p);
             vm.set_gv(OFS_PARM0 + 3, org);
-            vm.argc = 2;
-            let setorigin = vm.builtins[2];
-            setorigin(vm).expect("setorigin");
+            vm.call_builtin(2, 2).expect("setorigin");
             vm.ent_set_vector(p, "velocity", [0.0; 3]);
             w.renderer.stats_begin();
             let (img, _) = step_walk(w, 0.0, false, &crate::vid::mode_vid(rw, rh));
@@ -788,9 +786,7 @@ mod tests {
         let vm = &mut w.server.vm;
         vm.set_gi(quake_rs::progs::OFS_PARM0, e);
         vm.set_gv(quake_rs::progs::OFS_PARM1, org);
-        vm.argc = 2;
-        let f = vm.builtins[2];
-        f(vm).expect("setorigin");
+        vm.call_builtin(2, 2).expect("setorigin");
     }
 
     /// Render the current state again without advancing anything (paused,

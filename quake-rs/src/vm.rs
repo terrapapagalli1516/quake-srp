@@ -272,33 +272,39 @@ struct Frame {
 
 /// The QuakeC virtual machine: the loaded program plus all mutable runtime
 /// state (globals, edicts, the string heap, builtins and console output).
+///
+/// Its state is private: the engine reads and writes QuakeC values through
+/// the typed accessors (entity fields by [`Fld`] handle from [`Vm::fo`],
+/// globals by [`Glb`] from [`Vm::go`], builtin arguments with `arg_*` /
+/// `ret_*`), and the few engine paths that need more (the savegame loader,
+/// a tool calling one builtin) have a method each.
 pub struct Vm {
-    pub progs: Progs,
+    progs: Progs,
     /// The mutable global block, one cell per `u32`.
-    pub globals: Vec<u32>,
+    globals: Vec<u32>,
     /// Flat edict field storage: `num_edicts * entityfields` cells.
-    pub edict_fields: Vec<u32>,
+    edict_fields: Vec<u32>,
     /// Free flag per edict (parallel to the edict array).
-    pub edict_free: Vec<bool>,
+    edict_free: Vec<bool>,
     /// The string heap (`pr_strings`), initialised from `progs.strings`.
-    pub strings: Vec<u8>,
+    strings: Vec<u8>,
     /// Native builtin table; index 0 is reserved (`PF_Fixme`).
-    pub builtins: Vec<Builtin>,
-    /// Captured console output (`print`/`dprint`/`bprint` append here).
-    pub output: String,
+    builtins: Vec<Builtin>,
+    /// What the QuakeC printed ([`Vm::print`]), until the host takes it
+    /// ([`Vm::take_output`]).
+    output: String,
     /// `pr_argc` — number of arguments to the builtin currently running.
-    pub argc: usize,
+    argc: usize,
     /// When set, the interpreter records a per-statement trace into `output`.
-    pub trace: bool,
-    /// The entity fields (`entvars_t`) resolved by name at load; read and write
-    /// them with [`Vm::ent_float`] and friends.
-    pub fo: FieldOfs,
-    /// The per-frame globals resolved by name at load ([`Vm::glob_float`] ...).
-    pub go: GlobalOfs,
+    trace: bool,
+    /// The entity fields (`entvars_t`) resolved by name at load ([`Vm::fo`]).
+    fo: FieldOfs,
+    /// The per-frame globals resolved by name at load ([`Vm::go`]).
+    go: GlobalOfs,
     /// Optional engine host providing world services to the engine builtins.
     /// Taken out and restored around each use via [`Vm::with_host`] so a builtin
     /// can mutate both the host and the rest of the VM without a borrow clash.
-    pub host: Option<Box<dyn Host>>,
+    host: Option<Box<dyn Host>>,
     /// `sv.time`, the server clock: a `double` in id's `server_t` (server.h),
     /// advanced by `SV_Physics`' `sv.time += host_frametime` at the end of each
     /// frame (1.0 at spawn, the save's time after a load). QuakeC sees it
@@ -308,16 +314,16 @@ pub struct Vm {
     /// (`walkmove`/`movetogoal`'s relink touches: world.c SV_TouchLinks sets
     /// `time = sv.time`, not the clamped thinktime the global holds during a
     /// monster think) read it. [`crate::server::Server::time`] is its float.
-    pub sv_time: f64,
+    sv_time: f64,
     /// `host_frametime` (host.c, a `double`) of the server frame running: the
     /// think-due and pusher tests compare floats against `sv.time +
     /// host_frametime` in double.
-    pub host_frametime: f64,
+    host_frametime: f64,
 
     /// Monotonic count of QuakeC statements executed across this VM's lifetime
     /// (one per `execute` loop iteration). A free running total used by the sim
     /// benchmark to report VM workload per frame; not gameplay state.
-    pub stmt_count: u64,
+    stmt_count: u64,
 
     /// `edict_t.freetime` per edict: the `sv_time` of its last `ED_Free`
     /// (missing entries read as 0). `ED_Alloc` leaves a slot alone for 0.5 s
@@ -429,6 +435,117 @@ impl Vm {
     /// Install the engine host (world services for the engine builtins).
     pub fn set_host(&mut self, host: Box<dyn Host>) {
         self.host = Some(host);
+    }
+
+    /// The engine host, if one is installed.
+    pub fn host(&self) -> Option<&dyn Host> {
+        self.host.as_deref()
+    }
+
+    /// The engine host, to change (its outbox, its cvars).
+    pub fn host_mut(&mut self) -> Option<&mut (dyn Host + 'static)> {
+        self.host.as_deref_mut()
+    }
+
+    /// The loaded program (read-only: the VM's copy of the globals and the
+    /// string heap are the live ones).
+    pub fn progs(&self) -> &Progs {
+        &self.progs
+    }
+
+    /// The entity fields (`entvars_t`) resolved at load: read and write them
+    /// with [`Vm::ent_float`] and friends.
+    pub fn fo(&self) -> &FieldOfs {
+        &self.fo
+    }
+
+    /// The per-frame globals resolved at load ([`Vm::glob_float`] ...).
+    pub fn go(&self) -> &GlobalOfs {
+        &self.go
+    }
+
+    /// `sv.time`, the server clock (see the field).
+    pub fn sv_time(&self) -> f64 {
+        self.sv_time
+    }
+
+    /// Set `sv.time` (the clock only; the QuakeC `time` global is the
+    /// server's to set).
+    pub fn set_sv_time(&mut self, t: f64) {
+        self.sv_time = t;
+    }
+
+    /// `host_frametime` of the server frame running.
+    pub fn host_frametime(&self) -> f64 {
+        self.host_frametime
+    }
+
+    /// Set `host_frametime` for the server frame about to run.
+    pub fn set_host_frametime(&mut self, t: f64) {
+        self.host_frametime = t;
+    }
+
+    /// QuakeC statements executed over this VM's life (the sim benchmark's
+    /// workload count; not gameplay state).
+    pub fn stmt_count(&self) -> u64 {
+        self.stmt_count
+    }
+
+    /// Record a per-statement trace into the output log (a debugging aid;
+    /// id's `pr_trace`, which `traceon` sets there).
+    pub fn set_trace(&mut self, on: bool) {
+        self.trace = on;
+    }
+
+    // --- builtins ---------------------------------------------------------------
+
+    /// The builtin table (`pr_builtins`), by QuakeC builtin number.
+    pub fn builtins(&self) -> &[Builtin] {
+        &self.builtins
+    }
+
+    /// Install `f` as builtin number `n` (a number past the table's end is
+    /// ignored: the table is id's `pr_builtin[]`, whose size is fixed).
+    pub fn set_builtin(&mut self, n: usize, f: Builtin) {
+        if let Some(slot) = self.builtins.get_mut(n) {
+            *slot = f;
+        }
+    }
+
+    /// Call builtin `n` as an `OP_CALLn` with `argc` arguments would (`pr_argc
+    /// = argc`, then `pr_builtins[n]()`), its arguments already in the parm
+    /// globals: for a tool or a test that pokes one builtin, since a builtin
+    /// cannot be an entry function ([`Vm::execute`]).
+    pub fn call_builtin(&mut self, n: usize, argc: usize) -> Result<()> {
+        let Some(&f) = self.builtins.get(n).filter(|_| n != 0) else {
+            return Err(self.run_error(format!("bad builtin call number {n}")));
+        };
+        self.argc = argc;
+        f(self)
+    }
+
+    /// `pr_argc`: how many arguments the running builtin was called with.
+    pub fn argc(&self) -> usize {
+        self.argc
+    }
+
+    // --- the output log -------------------------------------------------------
+
+    /// Print `text` to the VM's output log: what QuakeC printed (`dprint`,
+    /// `bprint`, `sprint`, `centerprint`, the `error`/`objerror` reports)
+    /// and the console lines id's server printed while running it.
+    pub fn print(&mut self, text: &str) {
+        self.output.push_str(text);
+    }
+
+    /// The output log since it was last taken.
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+
+    /// Take the output log, leaving it empty.
+    pub fn take_output(&mut self) -> String {
+        std::mem::take(&mut self.output)
     }
 
     /// The random streams this VM draws from ([`QRand`]).
@@ -710,7 +827,13 @@ impl Vm {
     /// Resolve a `string_t` (byte offset) to an owned, NUL-terminated `String`.
     /// Out-of-range offsets yield `""`.
     pub fn get_string(&self, s: i32) -> String {
-        string_in(&self.strings, s).to_string()
+        self.string(s).to_string()
+    }
+
+    /// Borrow the string a `string_t` names (`pr_strings + s`, up to its
+    /// NUL; `""` out of range).
+    pub fn string(&self, s: i32) -> &str {
+        string_in(&self.strings, s)
     }
 
     // ----------------------------------------------------------------- edicts
@@ -728,6 +851,11 @@ impl Vm {
             return true;
         }
         self.edict_free.get(e as usize).copied().unwrap_or(true)
+    }
+
+    /// The edicts in use (not free), the world first, in index order.
+    pub fn live_edicts(&self) -> impl Iterator<Item = i32> + '_ {
+        self.edict_free.iter().enumerate().filter(|&(_, &free)| !free).map(|(e, _)| e as i32)
     }
 
     /// Zero every field of edict `e` and mark it not-free (`ED_ClearEdict`).
@@ -845,6 +973,39 @@ impl Vm {
             self.edict_leafs.resize(e + 1, EdictLeafs::default());
         }
         self.edict_leafs[e] = leafs;
+    }
+
+    /// `EDICT_NUM(e)` as `Host_Loadgame_f` takes a savegame's slot `e`: the
+    /// array grows to hold it (the new slots free), then `memset (&ent->v, 0,
+    /// …); ent->free = false`. Its other state (leaves, static mark) is left
+    /// as the loader found it.
+    pub(crate) fn load_edict(&mut self, e: usize) {
+        let ef = self.entityfields();
+        while self.edict_free.len() <= e {
+            self.edict_fields.resize(self.edict_fields.len() + ef, 0);
+            self.edict_free.push(true);
+        }
+        if let Some(slot) = self.edict_fields.get_mut(e * ef..(e + 1) * ef) {
+            slot.fill(0);
+        }
+        self.edict_free[e] = false;
+    }
+
+    /// `ent->free = true` and nothing else: what `ED_ParseEdict` does with a
+    /// savegame block that has no pairs (its fields are already zero).
+    pub(crate) fn mark_edict_free(&mut self, e: usize) {
+        if let Some(free) = self.edict_free.get_mut(e) {
+            *free = true;
+        }
+    }
+
+    /// `sv.num_edicts = n`: drop every edict slot from `n` on (a loaded game
+    /// has exactly the savegame's slots).
+    pub(crate) fn truncate_edicts(&mut self, n: usize) {
+        if self.edict_free.len() > n {
+            self.edict_free.truncate(n);
+            self.edict_fields.truncate(n * self.entityfields());
+        }
     }
 
     /// Whether `makestatic` turned edict `e` into a client static.

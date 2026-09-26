@@ -95,7 +95,7 @@ impl Server {
 
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.
-        vm.sv_time = 1.0;
+        vm.set_sv_time(1.0);
         vm.gset_float("time", 1.0);
         // mapname / world entity defaults are best-effort: only set if present.
         vm.gset_int("world", 0);
@@ -273,14 +273,14 @@ impl Server {
     pub(super) fn cleanup_ents(&mut self) {
         let n = self.vm.num_edicts();
         for e in 1..n {
-            if self.vm.edict_free.get(e).copied().unwrap_or(true) {
+            if self.vm.is_free_edict(e as i32) {
                 continue;
             }
             let ei = e as i32;
-            let eff = self.vm.ent_float(ei, self.vm.fo.effects) as i32;
+            let eff = self.vm.ent_float(ei, self.vm.fo().effects) as i32;
             if eff & EF_MUZZLEFLASH != 0 {
                 self.vm
-                    .set_ent_float(ei, self.vm.fo.effects, (eff & !EF_MUZZLEFLASH) as f32);
+                    .set_ent_float(ei, self.vm.fo().effects, (eff & !EF_MUZZLEFLASH) as f32);
             }
         }
     }
@@ -290,7 +290,7 @@ impl Server {
     /// closer than 8; a solid leaf adds nothing), indexed by leaf number. `None`
     /// without a host.
     pub fn fat_pvs(&self, org: Vec3) -> Option<Vec<bool>> {
-        let bsp = self.vm.host.as_deref()?.bsp();
+        let bsp = self.vm.host()?.bsp();
         let mut fat = vec![false; bsp.leafs.len()];
         if !bsp.nodes.is_empty() {
             let mut budget = bsp.nodes.len() + bsp.leafs.len();
@@ -317,8 +317,8 @@ impl Server {
         let mut sent = vec![false; n];
         let clent = self.player;
         let pvs = if clent > 0 {
-            let org = vm.ent_vec(clent, vm.fo.origin);
-            let ofs = vm.ent_vec(clent, vm.fo.view_ofs);
+            let org = vm.ent_vec(clent, vm.fo().origin);
+            let ofs = vm.ent_vec(clent, vm.fo().view_ofs);
             self.fat_pvs([org[0] + ofs[0], org[1] + ofs[1], org[2] + ofs[2]])
         } else {
             None
@@ -333,7 +333,7 @@ impl Server {
                 continue;
             }
             // "ignore ents without visible models"
-            if vm.ent_float(ent, vm.fo.modelindex) == 0.0 || vm.ent_str(ent, vm.fo.model).is_empty() {
+            if vm.ent_float(ent, vm.fo().modelindex) == 0.0 || vm.ent_str(ent, vm.fo().model).is_empty() {
                 continue;
             }
             *slot = match &pvs {
@@ -376,16 +376,16 @@ impl Server {
         let n = self.vm.num_edicts();
         for e in 1..n {
             // edict 0 is the world; skip free edicts.
-            if self.vm.edict_free.get(e).copied().unwrap_or(true) {
+            if self.vm.is_free_edict(e as i32) {
                 continue;
             }
             let ent = e as i32;
-            let effects = self.vm.ent_float(ent, self.vm.fo.effects) as i32;
+            let effects = self.vm.ent_float(ent, self.vm.fo().effects) as i32;
             if effects == 0 {
                 continue;
             }
-            let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
-            let angles = self.vm.ent_vec(ent, self.vm.fo.angles);
+            let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+            let angles = self.vm.ent_vec(ent, self.vm.fo().angles);
 
             if effects & EF_MUZZLEFLASH != 0 {
                 let (forward, _r, _u) = angle_vectors(angles);

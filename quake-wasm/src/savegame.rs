@@ -235,10 +235,10 @@ mod tests {
                 }
                 let think = vm.ent_get_int(ent, "think");
                 let think_name = vm
-                    .progs
+                    .progs()
                     .functions
                     .get(think as usize)
-                    .map(|f| vm.progs.string(f.s_name).to_string())
+                    .map(|f| vm.progs().string(f.s_name).to_string())
                     .unwrap_or_default();
                 let _ = writeln!(
                     d,

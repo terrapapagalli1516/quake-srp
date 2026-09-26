@@ -55,9 +55,9 @@ const DI_NODIR: f32 = -1.0;
 /// `vec3_origin` mins/maxs, i.e. a point move), and rejects if the midpoint
 /// found no floor or any corner is more than `STEPSIZE` below the midpoint.
 pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
-    let origin = vm.ent_vec(ent, vm.fo.origin);
-    let ent_mins = vm.ent_vec(ent, vm.fo.mins);
-    let ent_maxs = vm.ent_vec(ent, vm.fo.maxs);
+    let origin = vm.ent_vec(ent, vm.fo().origin);
+    let ent_mins = vm.ent_vec(ent, vm.fo().mins);
+    let ent_maxs = vm.ent_vec(ent, vm.fo().maxs);
     let mins = v_add(origin, ent_mins);
     let maxs = v_add(origin, ent_maxs);
 
@@ -129,19 +129,19 @@ pub fn sv_check_bottom(vm: &mut Vm, ent: i32) -> bool {
 /// box is re-linked and its triggers fired, exactly as the C `SV_LinkEdict(ent,
 /// true)`.
 pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
-    let oldorg = vm.ent_vec(ent, vm.fo.origin);
-    let ent_mins = vm.ent_vec(ent, vm.fo.mins);
-    let ent_maxs = vm.ent_vec(ent, vm.fo.maxs);
-    let flags = vm.ent_float(ent, vm.fo.flags) as i32;
+    let oldorg = vm.ent_vec(ent, vm.fo().origin);
+    let ent_mins = vm.ent_vec(ent, vm.fo().mins);
+    let ent_maxs = vm.ent_vec(ent, vm.fo().maxs);
+    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
 
     // Flying / swimming monsters don't step up.
     if flags & (FL_SWIM | FL_FLY) != 0 {
-        let enemy = vm.ent_int(ent, vm.fo.enemy);
+        let enemy = vm.ent_int(ent, vm.fo().enemy);
         // Try one move with vertical motion, then one without.
         for i in 0..2 {
             let mut neworg = v_add(oldorg, mov);
             if i == 0 && enemy > 0 {
-                let enemy_org = vm.ent_vec(enemy, vm.fo.origin);
+                let enemy_org = vm.ent_vec(enemy, vm.fo().origin);
                 let dz = oldorg[2] - enemy_org[2];
                 if dz > 40.0 {
                     neworg[2] -= 8.0;
@@ -161,7 +161,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                         return false; // swim monster left water
                     }
                 }
-                vm.set_ent_vec(ent, vm.fo.origin, tr.endpos);
+                vm.set_ent_vec(ent, vm.fo().origin, tr.endpos);
                 if relink {
                     link_edict(vm, ent);
                     // Reached through movetogoal/walkmove DURING a monster's
@@ -169,7 +169,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
                     // pre-fix behaviour (the prior NO-OP set `time` to its own
                     // current value). See FIX-1 notes: the physics paths get the
                     // true start-of-frame time; this monster path keeps `time`.
-                    let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
+                    let time = vm.sv_time() as f32; // SV_TouchLinks uses sv.time, not the per-think time global
                     touch_triggers(vm, ent, time);
                 }
                 return true;
@@ -204,15 +204,15 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
         // No floor in the step envelope.
         if flags & FL_PARTIALGROUND != 0 {
             // The monster had the ground pulled out; let it fall.
-            vm.set_ent_vec(ent, vm.fo.origin, v_add(oldorg, mov));
+            vm.set_ent_vec(ent, vm.fo().origin, v_add(oldorg, mov));
             if relink {
                 link_edict(vm, ent);
                 // Monster think path: keep the live `time` global (see FIX-1).
-                let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
+                let time = vm.sv_time() as f32; // SV_TouchLinks uses sv.time, not the per-think time global
                 touch_triggers(vm, ent, time);
             }
-            let flags = vm.ent_float(ent, vm.fo.flags) as i32;
-            vm.set_ent_float(ent, vm.fo.flags, (flags & !FL_ONGROUND) as f32);
+            let flags = vm.ent_float(ent, vm.fo().flags) as i32;
+            vm.set_ent_float(ent, vm.fo().flags, (flags & !FL_ONGROUND) as f32);
             return true;
         }
         return false; // walked off an edge
@@ -220,7 +220,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
 
     // Landed on something: provisionally take the new origin, then verify the
     // whole box has floor under it (dangling-corner check).
-    vm.set_ent_vec(ent, vm.fo.origin, tr.endpos);
+    vm.set_ent_vec(ent, vm.fo().origin, tr.endpos);
 
     if !sv_check_bottom(vm, ent) {
         if flags & FL_PARTIALGROUND != 0 {
@@ -228,30 +228,30 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             if relink {
                 link_edict(vm, ent);
                 // Monster think path: keep the live `time` global (see FIX-1).
-                let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
+                let time = vm.sv_time() as f32; // SV_TouchLinks uses sv.time, not the per-think time global
                 touch_triggers(vm, ent, time);
             }
             return true;
         }
         // Revert: no clean standing position.
-        vm.set_ent_vec(ent, vm.fo.origin, oldorg);
+        vm.set_ent_vec(ent, vm.fo().origin, oldorg);
         return false;
     }
 
     if flags & FL_PARTIALGROUND != 0 {
         // Back on solid ground: clear the partial-ground flag.
-        let flags = vm.ent_float(ent, vm.fo.flags) as i32;
-        vm.set_ent_float(ent, vm.fo.flags, (flags & !FL_PARTIALGROUND) as f32);
+        let flags = vm.ent_float(ent, vm.fo().flags) as i32;
+        vm.set_ent_float(ent, vm.fo().flags, (flags & !FL_PARTIALGROUND) as f32);
     }
     // groundentity = the edict we landed on (world = 0, an entity = its index;
     // a clear-but-landed trace resolves ent to 0/the world via MoveTrace).
     let ground = if tr.ent < 0 { 0 } else { tr.ent };
-    vm.set_ent_int(ent, vm.fo.groundentity, ground);
+    vm.set_ent_int(ent, vm.fo().groundentity, ground);
 
     if relink {
         link_edict(vm, ent);
         // Monster think path: keep the live `time` global (see FIX-1).
-        let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
+        let time = vm.sv_time() as f32; // SV_TouchLinks uses sv.time, not the per-think time global
         touch_triggers(vm, ent, time);
     }
     true
@@ -266,36 +266,36 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
 /// the origin (it still counts as a successful "step" so the caller stops
 /// hunting for a direction — matching the C). Always relinks at the end.
 pub fn sv_step_direction(vm: &mut Vm, ent: i32, yaw: f32, dist: f32) -> bool {
-    vm.set_ent_float(ent, vm.fo.ideal_yaw, yaw);
+    vm.set_ent_float(ent, vm.fo().ideal_yaw, yaw);
     // PF_changeyaw() turns angles[1] toward ideal_yaw by at most yaw_speed. It
     // reads `self` (as the C does), so point `self` at `ent` for the turn and
     // restore it afterwards (the C's chase chain runs with self == the monster,
     // but restoring keeps us robust if a caller drives a non-self actor).
-    let oldself = vm.glob_int(vm.go.self_);
-    vm.set_glob_int(vm.go.self_, ent);
+    let oldself = vm.glob_int(vm.go().self_);
+    vm.set_glob_int(vm.go().self_, ent);
     let _ = bi_changeyaw(vm);
-    vm.set_glob_int(vm.go.self_, oldself);
+    vm.set_glob_int(vm.go().self_, oldself);
 
     let rad = yaw * std::f32::consts::PI / 180.0;
     let mov: Vec3 = [rad.cos() * dist, rad.sin() * dist, 0.0];
 
-    let oldorigin = vm.ent_vec(ent, vm.fo.origin);
+    let oldorigin = vm.ent_vec(ent, vm.fo().origin);
     if sv_movestep(vm, ent, mov, false) {
-        let angles = vm.ent_vec(ent, vm.fo.angles);
-        let delta = angles[1] - vm.ent_float(ent, vm.fo.ideal_yaw);
+        let angles = vm.ent_vec(ent, vm.fo().angles);
+        let delta = angles[1] - vm.ent_float(ent, vm.fo().ideal_yaw);
         if delta > 45.0 && delta < 315.0 {
             // Not turned far enough: don't take the step (but report success).
-            vm.set_ent_vec(ent, vm.fo.origin, oldorigin);
+            vm.set_ent_vec(ent, vm.fo().origin, oldorigin);
         }
         link_edict(vm, ent);
         // Monster think path: keep the live `time` global (see FIX-1).
-        let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
+        let time = vm.sv_time() as f32; // SV_TouchLinks uses sv.time, not the per-think time global
         touch_triggers(vm, ent, time);
         return true;
     }
     link_edict(vm, ent);
     // Monster think path: keep the live `time` global (see FIX-1).
-    let time = vm.sv_time as f32; // SV_TouchLinks uses sv.time, not the per-think time global
+    let time = vm.sv_time() as f32; // SV_TouchLinks uses sv.time, not the per-think time global
     touch_triggers(vm, ent, time);
     false
 }
@@ -303,8 +303,8 @@ pub fn sv_step_direction(vm: &mut Vm, ent: i32, yaw: f32, dist: f32) -> bool {
 /// `SV_FixCheckBottom` (sv_move.c ~267): mark `ent` `FL_PARTIALGROUND` so the
 /// next [`sv_movestep`] tolerates a missing standing position.
 fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
-    let flags = vm.ent_float(ent, vm.fo.flags) as i32;
-    vm.set_ent_float(ent, vm.fo.flags, (flags | FL_PARTIALGROUND) as f32);
+    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
+    vm.set_ent_float(ent, vm.fo().flags, (flags | FL_PARTIALGROUND) as f32);
 }
 
 
@@ -320,12 +320,12 @@ fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
 /// when it has no floor (via `sv_fix_check_bottom`). `rand()&n` is the VM's
 /// deterministic LCG so tests are reproducible.
 pub fn sv_new_chase_dir(vm: &mut Vm, actor: i32, enemy: i32, dist: f32) {
-    let ideal_yaw = vm.ent_float(actor, vm.fo.ideal_yaw);
+    let ideal_yaw = vm.ent_float(actor, vm.fo().ideal_yaw);
     let olddir = crate::math::anglemod(((ideal_yaw / 45.0) as i32 as f32) * 45.0);
     let turnaround = crate::math::anglemod(olddir - 180.0);
 
-    let actor_org = vm.ent_vec(actor, vm.fo.origin);
-    let enemy_org = vm.ent_vec(enemy, vm.fo.origin);
+    let actor_org = vm.ent_vec(actor, vm.fo().origin);
+    let enemy_org = vm.ent_vec(enemy, vm.fo().origin);
     let deltax = enemy_org[0] - actor_org[0];
     let deltay = enemy_org[1] - actor_org[1];
 
@@ -400,7 +400,7 @@ pub fn sv_new_chase_dir(vm: &mut Vm, actor: i32, enemy: i32, dist: f32) {
     }
 
     // Can't move: keep the old yaw and, if no floor, mark partial ground.
-    vm.set_ent_float(actor, vm.fo.ideal_yaw, olddir);
+    vm.set_ent_float(actor, vm.fo().ideal_yaw, olddir);
     if !sv_check_bottom(vm, actor) {
         sv_fix_check_bottom(vm, actor);
     }
@@ -409,10 +409,10 @@ pub fn sv_new_chase_dir(vm: &mut Vm, actor: i32, enemy: i32, dist: f32) {
 /// `SV_CloseEnough` (sv_move.c ~371): is `goal`'s box within `dist` of `ent`'s
 /// box on every axis? (Used by [`sv_move_to_goal`] to stop when adjacent.)
 fn sv_close_enough(vm: &mut Vm, ent: i32, goal: i32, dist: f32) -> bool {
-    let ent_absmin = vm.ent_vec(ent, vm.fo.absmin);
-    let ent_absmax = vm.ent_vec(ent, vm.fo.absmax);
-    let goal_absmin = vm.ent_vec(goal, vm.fo.absmin);
-    let goal_absmax = vm.ent_vec(goal, vm.fo.absmax);
+    let ent_absmin = vm.ent_vec(ent, vm.fo().absmin);
+    let ent_absmax = vm.ent_vec(ent, vm.fo().absmax);
+    let goal_absmin = vm.ent_vec(goal, vm.fo().absmin);
+    let goal_absmax = vm.ent_vec(goal, vm.fo().absmax);
     for i in 0..3 {
         if goal_absmin[i] > ent_absmax[i] + dist {
             return false;
@@ -431,23 +431,23 @@ fn sv_close_enough(vm: &mut Vm, ent: i32, goal: i32, dist: f32) -> bool {
 /// Otherwise step toward `ideal_yaw` (occasionally bumping to a fresh direction
 /// at random), and on failure pick a [`sv_new_chase_dir`] toward the goal.
 pub fn sv_move_to_goal(vm: &mut Vm, dist: f32) {
-    let ent = vm.glob_int(vm.go.self_);
-    let goal = vm.ent_int(ent, vm.fo.goalentity);
+    let ent = vm.glob_int(vm.go().self_);
+    let goal = vm.ent_int(ent, vm.fo().goalentity);
 
-    let flags = vm.ent_float(ent, vm.fo.flags) as i32;
+    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
     if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
         vm.ret_float(0.0);
         return;
     }
 
     // If the next step would reach the enemy goal, stop here.
-    let enemy = vm.ent_int(ent, vm.fo.enemy);
+    let enemy = vm.ent_int(ent, vm.fo().enemy);
     if enemy > 0 && sv_close_enough(vm, ent, goal, dist) {
         return;
     }
 
     // Bump around: occasionally force a fresh chase direction.
-    let ideal_yaw = vm.ent_float(ent, vm.fo.ideal_yaw);
+    let ideal_yaw = vm.ent_float(ent, vm.fo().ideal_yaw);
     if (vm.rand().chase() & 3) == 1 || !sv_step_direction(vm, ent, ideal_yaw, dist) {
         sv_new_chase_dir(vm, ent, goal, dist);
     }
@@ -463,11 +463,11 @@ pub fn sv_move_to_goal(vm: &mut Vm, dist: f32) {
 /// on ground / flying / swimming and saves/restores `self` around the step
 /// (`sv_movestep` may run touch progs that change `self`).
 pub(super) fn bi_walkmove(vm: &mut Vm) -> Result<()> {
-    let ent = vm.glob_int(vm.go.self_);
+    let ent = vm.glob_int(vm.go().self_);
     let yaw = vm.arg_float(0);
     let dist = vm.arg_float(1);
 
-    let flags = vm.ent_float(ent, vm.fo.flags) as i32;
+    let flags = vm.ent_float(ent, vm.fo().flags) as i32;
     if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
         vm.ret_float(0.0);
         return Ok(());
@@ -477,9 +477,9 @@ pub(super) fn bi_walkmove(vm: &mut Vm) -> Result<()> {
     let mov: Vec3 = [rad.cos() * dist, rad.sin() * dist, 0.0];
 
     // Save program state (self), because sv_movestep may run other progs.
-    let oldself = vm.glob_int(vm.go.self_);
+    let oldself = vm.glob_int(vm.go().self_);
     let ok = sv_movestep(vm, ent, mov, true);
-    vm.set_glob_int(vm.go.self_, oldself);
+    vm.set_glob_int(vm.go().self_, oldself);
 
     vm.ret_float(if ok { 1.0 } else { 0.0 });
     Ok(())

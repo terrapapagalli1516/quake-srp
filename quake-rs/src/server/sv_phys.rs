@@ -40,11 +40,11 @@ impl Server {
     /// (a double) advances by exactly it, as `SV_Physics` does.
     pub fn run_frame_f64(&mut self, host_frametime: f64) -> Result<FrameReport> {
         let dt = host_frametime as f32;
-        self.vm.host_frametime = host_frametime;
+        self.vm.set_host_frametime(host_frametime);
         // host_frametime = dt; sv.time advances at the END in the C, but the
         // think-time test compares against sv.time + host_frametime, so we set
         // frametime now and bump time after the loop.
-        self.vm.set_glob_float(self.vm.go.frametime, dt);
+        self.vm.set_glob_float(self.vm.go().frametime, dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
         if let Some(o) = self.outbox() {
@@ -60,7 +60,7 @@ impl Server {
         // sv.time) — the spawn settle frames included, so QC's `skill`,
         // `teamplay` and `framecount` globals are set from the first frame.
         // A program error anywhere in the frame ends it (id's Host_Error).
-        self.vm.set_glob_float(self.vm.go.time, start_time);
+        self.vm.set_glob_float(self.vm.go().time, start_time);
         self.run_sys("StartFrame", 0, 0)?;
         // `for (i=0 ; i<sv.num_edicts ; i++)`: the bound is re-read every
         // iteration, so an edict spawned by an earlier think this frame (a
@@ -71,7 +71,7 @@ impl Server {
             let e = next;
             next += 1;
             // edict 0 is the world; process every non-free edict, as the C does.
-            let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
+            let free = self.vm.is_free_edict(e as i32);
             if free {
                 continue;
             }
@@ -79,7 +79,7 @@ impl Server {
             if !self.force_retouch_edict(ent, start_time) {
                 continue; // a retouch freed it
             }
-            let movetype = self.vm.ent_float(ent, self.vm.fo.movetype) as i32;
+            let movetype = self.vm.ent_float(ent, self.vm.fo().movetype) as i32;
             thinks_fired += self.process_entity(ent, movetype, start_time, dt)? as usize;
         }
         self.check_halted()?;
@@ -102,9 +102,9 @@ impl Server {
     /// frames; in the C it keeps the frame's last value, but every C path that
     /// runs QuakeC outside `SV_Physics` sets it to `sv.time` first.)
     fn end_physics_frame(&mut self, host_frametime: f64) {
-        self.vm.sv_time += host_frametime;
+        self.vm.set_sv_time(self.vm.sv_time() + host_frametime);
         let t = self.time();
-        self.vm.set_glob_float(self.vm.go.time, t);
+        self.vm.set_glob_float(self.vm.go().time, t);
     }
 
     /// Process one live edict for a frame: per-movetype physics plus
@@ -135,7 +135,7 @@ impl Server {
                 // splashes when pushed into liquid.
                 self.physics_step(ent, start_time, dt);
                 let (fired, _alive) = self.run_think(ent)?;
-                if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+                if !self.vm.is_free_edict(ent) {
                     self.check_water_transition(ent);
                 }
                 Ok(fired)
@@ -167,11 +167,11 @@ impl Server {
     /// and the think runs with `self = ent`, `other = world`. Returns whether
     /// the think fired, or its program error.
     fn physics_pusher(&mut self, ent: i32, start_time: f32, dt: f32) -> Result<bool> {
-        let oldltime = self.vm.ent_float(ent, self.vm.fo.ltime);
-        let thinktime = self.vm.ent_float(ent, self.vm.fo.nextthink);
+        let oldltime = self.vm.ent_float(ent, self.vm.fo().ltime);
+        let thinktime = self.vm.ent_float(ent, self.vm.fo().nextthink);
 
         // thinktime < ent->v.ltime + host_frametime: float + double.
-        let movetime = if f64::from(thinktime) < f64::from(oldltime) + self.vm.host_frametime {
+        let movetime = if f64::from(thinktime) < f64::from(oldltime) + self.vm.host_frametime() {
             let m = thinktime - oldltime;
             if m < 0.0 {
                 0.0
@@ -187,14 +187,14 @@ impl Server {
             self.push_move(ent, movetime, start_time)?;
         }
 
-        let ltime = self.vm.ent_float(ent, self.vm.fo.ltime);
+        let ltime = self.vm.ent_float(ent, self.vm.fo().ltime);
         let mut fired = false;
         if thinktime > oldltime && thinktime <= ltime {
-            self.vm.set_ent_float(ent, self.vm.fo.nextthink, 0.0);
-            self.vm.set_glob_float(self.vm.go.time, start_time);
-            self.vm.set_glob_int(self.vm.go.self_, ent);
-            self.vm.set_glob_int(self.vm.go.other, 0); // world
-            let think = self.vm.ent_int(ent, self.vm.fo.think);
+            self.vm.set_ent_float(ent, self.vm.fo().nextthink, 0.0);
+            self.vm.set_glob_float(self.vm.go().time, start_time);
+            self.vm.set_glob_int(self.vm.go().self_, ent);
+            self.vm.set_glob_int(self.vm.go().other, 0); // world
+            let think = self.vm.ent_int(ent, self.vm.fo().think);
             if think > 0 {
                 fired = true;
                 self.vm.execute(think as usize)?;
@@ -212,7 +212,7 @@ impl Server {
     /// entity are restored to their saved origins — and the pusher's `blocked`
     /// function is invoked. Otherwise the move stands and `ltime` is advanced.
     fn push_move(&mut self, pusher: i32, movetime: f32, sv_time: f32) -> Result<()> {
-        let velocity = self.vm.ent_vec(pusher, self.vm.fo.velocity);
+        let velocity = self.vm.ent_vec(pusher, self.vm.fo().velocity);
         if velocity[0] == 0.0 && velocity[1] == 0.0 && velocity[2] == 0.0 {
             self.advance_ltime(pusher, movetime);
             return Ok(());
@@ -225,8 +225,8 @@ impl Server {
 
         // Swept AABB of the pusher's move: start from absmin/absmax, then for each
         // axis extend the leading edge in the direction of travel.
-        let absmin = self.vm.ent_vec(pusher, self.vm.fo.absmin);
-        let absmax = self.vm.ent_vec(pusher, self.vm.fo.absmax);
+        let absmin = self.vm.ent_vec(pusher, self.vm.fo().absmin);
+        let absmax = self.vm.ent_vec(pusher, self.vm.fo().absmax);
         let mut mins = absmin;
         let mut maxs = absmax;
         for i in 0..3 {
@@ -238,9 +238,9 @@ impl Server {
         }
 
         // Save and apply the pusher move.
-        let pushorig = self.vm.ent_vec(pusher, self.vm.fo.origin);
+        let pushorig = self.vm.ent_vec(pusher, self.vm.fo().origin);
         self.vm
-            .set_ent_vec(pusher, self.vm.fo.origin, v_add(pushorig, mov));
+            .set_ent_vec(pusher, self.vm.fo().origin, v_add(pushorig, mov));
         self.advance_ltime(pusher, movetime);
         link_edict(&mut self.vm, pusher);
 
@@ -251,7 +251,7 @@ impl Server {
 
         let mut check: i32 = 1;
         while check < num {
-            if self.vm.edict_free.get(check as usize).copied().unwrap_or(true) {
+            if self.vm.is_free_edict(check) {
                 check += 1;
                 continue;
             }
@@ -259,7 +259,7 @@ impl Server {
                 check += 1;
                 continue;
             }
-            let ck_movetype = self.vm.ent_float(check, self.vm.fo.movetype) as i32;
+            let ck_movetype = self.vm.ent_float(check, self.vm.fo().movetype) as i32;
             // SV_PushMove skips PUSH, NONE, and NOCLIP entities (sv_phys.c:478).
             if ck_movetype == MOVETYPE_PUSH
                 || ck_movetype == MOVETYPE_NONE
@@ -271,12 +271,12 @@ impl Server {
 
             // The check entity must be standing on the pusher, or its box must
             // intersect the pusher's swept box; otherwise it is unaffected.
-            let flags = self.vm.ent_float(check, self.vm.fo.flags) as i32;
-            let ground = self.vm.ent_int(check, self.vm.fo.groundentity);
+            let flags = self.vm.ent_float(check, self.vm.fo().flags) as i32;
+            let ground = self.vm.ent_int(check, self.vm.fo().groundentity);
             let riding = (flags & FL_ONGROUND) != 0 && ground == pusher;
             if !riding {
-                let ck_absmin = self.vm.ent_vec(check, self.vm.fo.absmin);
-                let ck_absmax = self.vm.ent_vec(check, self.vm.fo.absmax);
+                let ck_absmin = self.vm.ent_vec(check, self.vm.fo().absmin);
+                let ck_absmax = self.vm.ent_vec(check, self.vm.fo().absmax);
                 if ck_absmin[0] >= maxs[0]
                     || ck_absmin[1] >= maxs[1]
                     || ck_absmin[2] >= maxs[2]
@@ -302,9 +302,9 @@ impl Server {
 
             // Remove the onground flag for non-players (it is re-derived below).
             if ck_movetype != MOVETYPE_WALK {
-                let f = self.vm.ent_float(check, self.vm.fo.flags) as i32;
+                let f = self.vm.ent_float(check, self.vm.fo().flags) as i32;
                 self.vm
-                    .set_ent_float(check, self.vm.fo.flags, (f & !FL_ONGROUND) as f32);
+                    .set_ent_float(check, self.vm.fo().flags, (f & !FL_ONGROUND) as f32);
             }
 
             // Drag the check along with the pusher and record it for rollback.
@@ -314,32 +314,32 @@ impl Server {
             // restoring it. A clipped push lets a door push a rider against a
             // wall (so the door later blocks/crushes) instead of teleporting the
             // rider through solid geometry by an unclipped origin += mov.
-            let entorig = self.vm.ent_vec(check, self.vm.fo.origin);
+            let entorig = self.vm.ent_vec(check, self.vm.fo().origin);
             moved.push((check, entorig));
 
-            let pusher_solid = self.vm.ent_float(pusher, self.vm.fo.solid);
-            self.vm.set_ent_float(pusher, self.vm.fo.solid, SOLID_NOT as f32);
+            let pusher_solid = self.vm.ent_float(pusher, self.vm.fo().solid);
+            self.vm.set_ent_float(pusher, self.vm.fo().solid, SOLID_NOT as f32);
             self.push_entity(check, mov, sv_time);
-            self.vm.set_ent_float(pusher, self.vm.fo.solid, pusher_solid);
+            self.vm.set_ent_float(pusher, self.vm.fo().solid, pusher_solid);
             // push_entity already linked `check` (SV_PushEntity -> SV_LinkEdict).
 
             // If the check is now stuck in solid geometry, the move is blocked.
             if self.push_test_position(check) {
                 // A zero-thickness box (e.g. a flattened corpse) cannot block.
-                let cmins = self.vm.ent_vec(check, self.vm.fo.mins);
-                let cmaxs = self.vm.ent_vec(check, self.vm.fo.maxs);
+                let cmins = self.vm.ent_vec(check, self.vm.fo().mins);
+                let cmaxs = self.vm.ent_vec(check, self.vm.fo().maxs);
                 if cmins[0] == cmaxs[0] {
                     check += 1;
                     continue;
                 }
-                let csolid = self.vm.ent_float(check, self.vm.fo.solid) as i32;
+                let csolid = self.vm.ent_float(check, self.vm.fo().solid) as i32;
                 if csolid == SOLID_NOT || csolid == SOLID_TRIGGER {
                     // Corpse: squish its box flat so it stops blocking.
-                    let mut m = self.vm.ent_vec(check, self.vm.fo.mins);
+                    let mut m = self.vm.ent_vec(check, self.vm.fo().mins);
                     m[0] = 0.0;
                     m[1] = 0.0;
-                    self.vm.set_ent_vec(check, self.vm.fo.mins, m);
-                    self.vm.set_ent_vec(check, self.vm.fo.maxs, m);
+                    self.vm.set_ent_vec(check, self.vm.fo().mins, m);
+                    self.vm.set_ent_vec(check, self.vm.fo().maxs, m);
                     check += 1;
                     continue;
                 }
@@ -370,28 +370,28 @@ impl Server {
                 .find(|&&(e, _)| e == block)
                 .map(|&(_, saved)| saved);
             if let Some(saved) = block_saved {
-                self.vm.set_ent_vec(block, self.vm.fo.origin, saved);
+                self.vm.set_ent_vec(block, self.vm.fo().origin, saved);
                 link_edict(&mut self.vm, block);
             }
 
             // 2. Restore the pusher (origin, relink, roll back ltime).
-            self.vm.set_ent_vec(pusher, self.vm.fo.origin, pushorig);
+            self.vm.set_ent_vec(pusher, self.vm.fo().origin, pushorig);
             link_edict(&mut self.vm, pusher);
             self.advance_ltime(pusher, -movetime);
 
             // 3. If the pusher has a "blocked" function, call it (self=pusher,
             //    other=blocker).
-            let blocked = self.vm.ent_int(pusher, self.vm.fo.blocked);
+            let blocked = self.vm.ent_int(pusher, self.vm.fo().blocked);
             if blocked > 0 {
-                self.vm.set_glob_int(self.vm.go.self_, pusher);
-                self.vm.set_glob_int(self.vm.go.other, block);
+                self.vm.set_glob_int(self.vm.go().self_, pusher);
+                self.vm.set_glob_int(self.vm.go().other, block);
                 self.vm.execute(blocked as usize)?;
             }
 
             // 4. Move back every entity we already dragged (including the blocker
             //    again — harmless, matches the C loop).
             for &(e, saved) in &moved {
-                self.vm.set_ent_vec(e, self.vm.fo.origin, saved);
+                self.vm.set_ent_vec(e, self.vm.fo().origin, saved);
                 link_edict(&mut self.vm, e);
             }
         }
@@ -404,19 +404,19 @@ impl Server {
     /// in f32 at 480 Hz it would be 5.5% fast an hour in, its moves ending
     /// early and snapping onto their marks.
     fn advance_ltime(&mut self, pusher: i32, by: f32) {
-        let mut ltime = self.vm.ent_float(pusher, self.vm.fo.ltime);
+        let mut ltime = self.vm.ent_float(pusher, self.vm.fo().ltime);
         let exact = self.ltime_exact.entry(pusher).or_insert(0.0);
         advance_clock(self.stepping, &mut ltime, exact, by);
-        self.vm.set_ent_float(pusher, self.vm.fo.ltime, ltime);
+        self.vm.set_ent_float(pusher, self.vm.fo().ltime, ltime);
     }
 
     /// `SV_TestEntityPosition` (sv_phys.c): true when `ent`'s box overlaps solid
     /// geometry at its current origin. Implemented, as in the C, by tracing the
     /// entity's own box from its origin to its origin and reporting `startsolid`.
     fn push_test_position(&mut self, ent: i32) -> bool {
-        let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
-        let mins = self.vm.ent_vec(ent, self.vm.fo.mins);
-        let maxs = self.vm.ent_vec(ent, self.vm.fo.maxs);
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let mins = self.vm.ent_vec(ent, self.vm.fo().mins);
+        let maxs = self.vm.ent_vec(ent, self.vm.fo().maxs);
         let trace = sv_move(&mut self.vm, origin, origin, mins, maxs, ent, false, false);
         trace.startsolid
     }
@@ -432,14 +432,14 @@ impl Server {
     fn check_stuck(&mut self, ent: i32) {
         if !self.push_test_position(ent) {
             // not stuck: remember this good spot.
-            let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
-            self.vm.set_ent_vec(ent, self.vm.fo.oldorigin, origin);
+            let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+            self.vm.set_ent_vec(ent, self.vm.fo().oldorigin, origin);
             return;
         }
 
-        let org = self.vm.ent_vec(ent, self.vm.fo.origin);
-        let oldorigin = self.vm.ent_vec(ent, self.vm.fo.oldorigin);
-        self.vm.set_ent_vec(ent, self.vm.fo.origin, oldorigin);
+        let org = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let oldorigin = self.vm.ent_vec(ent, self.vm.fo().oldorigin);
+        self.vm.set_ent_vec(ent, self.vm.fo().origin, oldorigin);
         if !self.push_test_position(ent) {
             link_edict(&mut self.vm, ent);
             return;
@@ -449,7 +449,7 @@ impl Server {
             for i in -1..=1 {
                 for j in -1..=1 {
                     let cand = [org[0] + i as f32, org[1] + j as f32, org[2] + z as f32];
-                    self.vm.set_ent_vec(ent, self.vm.fo.origin, cand);
+                    self.vm.set_ent_vec(ent, self.vm.fo().origin, cand);
                     if !self.push_test_position(ent) {
                         link_edict(&mut self.vm, ent);
                         return;
@@ -459,7 +459,7 @@ impl Server {
         }
 
         // still stuck: restore the original origin.
-        self.vm.set_ent_vec(ent, self.vm.fo.origin, org);
+        self.vm.set_ent_vec(ent, self.vm.fo().origin, org);
     }
 
     /// `SV_RunThink` (sv_phys.c): if the edict's `nextthink` is in `(0, time+dt]`,
@@ -470,25 +470,25 @@ impl Server {
     /// the caller still runs per-movetype physics. Errors from the think
     /// propagate (the caller decides whether to abort the frame).
     fn run_think(&mut self, ent: i32) -> Result<(bool, bool)> {
-        let thinktime = self.vm.ent_float(ent, self.vm.fo.nextthink);
+        let thinktime = self.vm.ent_float(ent, self.vm.fo().nextthink);
         // `thinktime > sv.time + host_frametime`: the float promoted, the sum
         // in double (sv.time a double since server.h).
-        let sv_time = self.vm.sv_time;
-        if thinktime <= 0.0 || f64::from(thinktime) > sv_time + self.vm.host_frametime {
+        let sv_time = self.vm.sv_time();
+        if thinktime <= 0.0 || f64::from(thinktime) > sv_time + self.vm.host_frametime() {
             // Not due: SV_RunThink returns true (alive); nothing fired.
             return Ok((false, true));
         }
         // Don't let things stay in the past (thinktime = sv.time: a float).
         let thinktime = if f64::from(thinktime) < sv_time { sv_time as f32 } else { thinktime };
 
-        self.vm.set_ent_float(ent, self.vm.fo.nextthink, 0.0);
-        self.vm.set_glob_float(self.vm.go.time, thinktime);
-        self.vm.set_glob_int(self.vm.go.self_, ent);
-        self.vm.set_glob_int(self.vm.go.other, 0);
+        self.vm.set_ent_float(ent, self.vm.fo().nextthink, 0.0);
+        self.vm.set_glob_float(self.vm.go().time, thinktime);
+        self.vm.set_glob_int(self.vm.go().self_, ent);
+        self.vm.set_glob_int(self.vm.go().other, 0);
 
-        let think = self.vm.ent_int(ent, self.vm.fo.think);
+        let think = self.vm.ent_int(ent, self.vm.fo().think);
         let fnum = think as usize;
-        if think <= 0 || fnum >= self.vm.progs.functions.len() {
+        if think <= 0 || fnum >= self.vm.progs().functions.len() {
             // nextthink consumed (as the C did), but no valid think to run;
             // the entity is still alive.
             return Ok((false, true));
@@ -497,22 +497,22 @@ impl Server {
         self.vm.execute(fnum)?;
 
         // alive = !ent->free.
-        let free = self.vm.edict_free.get(ent as usize).copied().unwrap_or(true);
+        let free = self.vm.is_free_edict(ent);
         Ok((true, !free))
     }
 
     /// `SV_Physics_Noclip` integration: `angles += dt*avelocity`,
     /// `origin += dt*velocity` (no clipping), then relink bounds.
     fn integrate_noclip(&mut self, ent: i32, dt: f32) {
-        let angles = self.vm.ent_vec(ent, self.vm.fo.angles);
-        let avel = self.vm.ent_vec(ent, self.vm.fo.avelocity);
+        let angles = self.vm.ent_vec(ent, self.vm.fo().angles);
+        let avel = self.vm.ent_vec(ent, self.vm.fo().avelocity);
         self.vm
-            .set_ent_vec(ent, self.vm.fo.angles, crate::math::mul_add(angles, dt, avel));
+            .set_ent_vec(ent, self.vm.fo().angles, crate::math::mul_add(angles, dt, avel));
 
-        let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
-        let vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         self.vm
-            .set_ent_vec(ent, self.vm.fo.origin, crate::math::mul_add(origin, dt, vel));
+            .set_ent_vec(ent, self.vm.fo().origin, crate::math::mul_add(origin, dt, vel));
 
         link_edict(&mut self.vm, ent);
     }
@@ -533,10 +533,10 @@ impl Server {
     /// order, so even a step entity resting on the floor maintains
     /// `watertype`/`waterlevel` and splashes when pushed into liquid.
     fn physics_step(&mut self, ent: i32, sv_time: f32, dt: f32) {
-        let flags = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
+        let flags = self.vm.ent_float(ent, self.vm.fo().flags) as i32;
         if flags & (FL_ONGROUND | FL_FLY | FL_SWIM) == 0 {
             // hitsound = velocity[2] < sv_gravity * -0.1, sampled BEFORE gravity.
-            let vel_z = self.vm.ent_vec(ent, self.vm.fo.velocity)[2];
+            let vel_z = self.vm.ent_vec(ent, self.vm.fo().velocity)[2];
             let hitsound = vel_z < self.sv_gravity() * -0.1;
 
             // SV_Physics_Step freefall: AddGravity; CheckVelocity; SV_FlyMove;
@@ -558,7 +558,7 @@ impl Server {
             // flying / swimming path returns before it), so an entity that skipped
             // the move does not re-link here. Skip if a touch impact during the move
             // already removed the entity.
-            if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+            if !self.vm.is_free_edict(ent) {
                 // Recompute absmin/absmax FIRST (C SV_LinkEdict order), so the
                 // trigger overlap test — and, crucially, the sv_move abs-box
                 // broadphase on later moves — see the fresh box. Without this a
@@ -570,7 +570,7 @@ impl Server {
                 // "just hit ground": FL_ONGROUND newly latched by the slide move
                 // -> the landing thud, gated on the pre-gravity downward speed.
                 let now_on_ground =
-                    (self.vm.ent_float(ent, self.vm.fo.flags) as i32) & FL_ONGROUND != 0;
+                    (self.vm.ent_float(ent, self.vm.fo().flags) as i32) & FL_ONGROUND != 0;
                 if now_on_ground && hitsound {
                     self.start_sound(ent, 0, "demon/dland2.wav", 255, 1.0);
                 }
@@ -585,7 +585,7 @@ impl Server {
     /// origin via a clipped `PushEntity`. The bounce/stop fixups after an impact
     /// are applied via [`Self::clip_velocity`].
     fn physics_toss(&mut self, ent: i32, movetype: i32, sv_time: f32, dt: f32) {
-        let flags = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
+        let flags = self.vm.ent_float(ent, self.vm.fo().flags) as i32;
         if flags & FL_ONGROUND != 0 {
             return; // resting on the ground (C returns before CheckWaterTransition)
         }
@@ -598,13 +598,13 @@ impl Server {
         }
 
         // move angles
-        let angles = self.vm.ent_vec(ent, self.vm.fo.angles);
-        let avel = self.vm.ent_vec(ent, self.vm.fo.avelocity);
+        let angles = self.vm.ent_vec(ent, self.vm.fo().angles);
+        let avel = self.vm.ent_vec(ent, self.vm.fo().avelocity);
         self.vm
-            .set_ent_vec(ent, self.vm.fo.angles, crate::math::mul_add(angles, dt, avel));
+            .set_ent_vec(ent, self.vm.fo().angles, crate::math::mul_add(angles, dt, avel));
 
         // move origin (the uncapped step leads the fall: `gravity_lead`)
-        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         let lead = if falls { self.gravity_lead(ent, dt) } else { 0.0 };
         if lead != 0.0 {
             vel[2] += lead;
@@ -614,14 +614,14 @@ impl Server {
 
         // SV_PushEntity ends with SV_LinkEdict(ent, true): trip triggers/pickups
         // for the moved entity (unless a touch impact already removed it).
-        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+        if !self.vm.is_free_edict(ent) {
             touch_triggers(&mut self.vm, ent, sv_time);
         }
 
         if tr.fraction == 1.0 {
             return; // clear move
         }
-        let free = self.vm.edict_free.get(ent as usize).copied().unwrap_or(true);
+        let free = self.vm.is_free_edict(ent);
         if free {
             return;
         }
@@ -630,33 +630,33 @@ impl Server {
         // The bounce takes the velocity the move was made with, lead and all,
         // as the walk and step moves clip theirs: a 72 Hz frame that hits
         // the floor mid-frame bounces with the speed of its end.
-        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         if lead != 0.0 {
             vel[2] += lead;
         }
         let new_vel = clip_velocity(vel, tr.plane_normal, backoff);
-        self.vm.set_ent_vec(ent, self.vm.fo.velocity, new_vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, new_vel);
 
         // stop if on ground (nested ifs in the C, collapsed here — no elses)
         if tr.plane_normal[2] > 0.7 && (new_vel[2] < 60.0 || movetype != MOVETYPE_BOUNCE) {
-            let flags = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
+            let flags = self.vm.ent_float(ent, self.vm.fo().flags) as i32;
             self.vm
-                .set_ent_float(ent, self.vm.fo.flags, (flags | FL_ONGROUND) as f32);
+                .set_ent_float(ent, self.vm.fo().flags, (flags | FL_ONGROUND) as f32);
             // groundentity = EDICT_TO_PROG(trace.ent): the edict actually
             // landed on (0 = world, >0 = a plat/door/other solid), not a
             // hardcoded world. `tr.ent` is `-1` only when nothing was hit,
             // but this branch runs only when fraction < 1 (something WAS hit),
             // so clamp the "nothing" sentinel to the world (0) defensively.
-            self.vm.set_ent_int(ent, self.vm.fo.groundentity, tr.ent.max(0));
-            self.vm.set_ent_vec(ent, self.vm.fo.velocity, [0.0; 3]);
-            self.vm.set_ent_vec(ent, self.vm.fo.avelocity, [0.0; 3]);
+            self.vm.set_ent_int(ent, self.vm.fo().groundentity, tr.ent.max(0));
+            self.vm.set_ent_vec(ent, self.vm.fo().velocity, [0.0; 3]);
+            self.vm.set_ent_vec(ent, self.vm.fo().avelocity, [0.0; 3]);
         }
 
         // check for in water (SV_CheckWaterTransition). The C reaches this only
         // when the move was NOT clear (the `fraction == 1` / freed early returns
         // above skip it), so a grenade/gib that just struck something updates its
         // watertype here and splashes on an air/liquid crossing.
-        if !self.vm.edict_free.get(ent as usize).copied().unwrap_or(true) {
+        if !self.vm.is_free_edict(ent) {
             self.check_water_transition(ent);
         }
     }
@@ -670,10 +670,10 @@ impl Server {
     /// `<= CONTENTS_WATER` (-3) is liquid (LAVA -5 < SLIME -4 < WATER -3).
     fn check_water(&mut self, ent: i32) -> bool {
         const CONTENTS_WATER: i32 = -3;
-        let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
-        let mins = self.vm.ent_vec(ent, self.vm.fo.mins);
-        let maxs = self.vm.ent_vec(ent, self.vm.fo.maxs);
-        let view_ofs = self.vm.ent_vec(ent, self.vm.fo.view_ofs);
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let mins = self.vm.ent_vec(ent, self.vm.fo().mins);
+        let maxs = self.vm.ent_vec(ent, self.vm.fo().maxs);
+        let view_ofs = self.vm.ent_vec(ent, self.vm.fo().view_ofs);
         let contents_at = |s: &mut Self, z: f32| -> i32 {
             let p = [origin[0], origin[1], z];
             s.vm.with_host(|_vm, h| h.point_contents(p)).unwrap_or(CONTENTS_SOLID)
@@ -694,8 +694,8 @@ impl Server {
                 }
             }
         }
-        self.vm.set_ent_float(ent, self.vm.fo.waterlevel, waterlevel as f32);
-        self.vm.set_ent_float(ent, self.vm.fo.watertype, watertype as f32);
+        self.vm.set_ent_float(ent, self.vm.fo().waterlevel, waterlevel as f32);
+        self.vm.set_ent_float(ent, self.vm.fo().watertype, watertype as f32);
         waterlevel > 1
     }
 
@@ -719,17 +719,17 @@ impl Server {
     /// emit no entry splash.
     fn check_water_transition(&mut self, ent: i32) {
         const CONTENTS_WATER: i32 = -3;
-        let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
         let cont = self
             .vm
             .with_host(|_vm, h| h.point_contents(origin))
             .unwrap_or(CONTENTS_SOLID);
 
-        let watertype = self.vm.ent_float(ent, self.vm.fo.watertype) as i32;
+        let watertype = self.vm.ent_float(ent, self.vm.fo().watertype) as i32;
         if watertype == 0 {
             // just spawned here
-            self.vm.set_ent_float(ent, self.vm.fo.watertype, cont as f32);
-            self.vm.set_ent_float(ent, self.vm.fo.waterlevel, 1.0);
+            self.vm.set_ent_float(ent, self.vm.fo().watertype, cont as f32);
+            self.vm.set_ent_float(ent, self.vm.fo().waterlevel, 1.0);
             return;
         }
 
@@ -738,15 +738,15 @@ impl Server {
                 // just crossed into water
                 self.start_sound(ent, 0, "misc/h2ohit1.wav", 255, 1.0);
             }
-            self.vm.set_ent_float(ent, self.vm.fo.watertype, cont as f32);
-            self.vm.set_ent_float(ent, self.vm.fo.waterlevel, 1.0);
+            self.vm.set_ent_float(ent, self.vm.fo().watertype, cont as f32);
+            self.vm.set_ent_float(ent, self.vm.fo().waterlevel, 1.0);
         } else {
             if watertype != CONTENTS_EMPTY {
                 // just crossed out of water
                 self.start_sound(ent, 0, "misc/h2ohit1.wav", 255, 1.0);
             }
-            self.vm.set_ent_float(ent, self.vm.fo.watertype, CONTENTS_EMPTY as f32);
-            self.vm.set_ent_float(ent, self.vm.fo.waterlevel, cont as f32);
+            self.vm.set_ent_float(ent, self.vm.fo().watertype, CONTENTS_EMPTY as f32);
+            self.vm.set_ent_float(ent, self.vm.fo().waterlevel, cont as f32);
         }
     }
 
@@ -761,11 +761,11 @@ impl Server {
     /// the world, and a SOLID_NOT edict is relinked but touches nothing.
     /// Returns whether `ent` is still live (a touch may free it).
     fn force_retouch_edict(&mut self, ent: i32, sv_time: f32) -> bool {
-        if ent == 0 || self.vm.glob_float(self.vm.go.force_retouch) == 0.0 {
+        if ent == 0 || self.vm.glob_float(self.vm.go().force_retouch) == 0.0 {
             return true;
         }
         link_edict(&mut self.vm, ent);
-        if self.vm.ent_float(ent, self.vm.fo.solid) as i32 != SOLID_NOT {
+        if self.vm.ent_float(ent, self.vm.fo().solid) as i32 != SOLID_NOT {
             touch_triggers(&mut self.vm, ent, sv_time);
         }
         !self.is_free(ent)
@@ -774,24 +774,24 @@ impl Server {
     /// The end of `SV_Physics`: `if (pr_global_struct->force_retouch)
     /// pr_global_struct->force_retouch--;`.
     fn decrement_force_retouch(&mut self) {
-        let n = self.vm.glob_float(self.vm.go.force_retouch);
+        let n = self.vm.glob_float(self.vm.go().force_retouch);
         if n != 0.0 {
-            self.vm.set_glob_float(self.vm.go.force_retouch, n - 1.0);
+            self.vm.set_glob_float(self.vm.go().force_retouch, n - 1.0);
         }
     }
 
     /// `SV_AddGravity` (sv_phys.c): `velocity[2] -= gravity * sv_gravity * dt`,
     /// where the per-entity `gravity` field defaults to 1.0 when unset/zero.
     fn add_gravity(&mut self, ent: i32, dt: f32) {
-        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         vel[2] -= self.gravity_of(ent) * dt;
-        self.vm.set_ent_vec(ent, self.vm.fo.velocity, vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
     }
 
     /// The pull `SV_AddGravity` applies to `ent`: `ent.gravity` (1 when unset)
     /// times `sv_gravity`, in units/s².
     fn gravity_of(&self, ent: i32) -> f32 {
-        let g = self.vm.ent_float(ent, self.vm.fo.gravity);
+        let g = self.vm.ent_float(ent, self.vm.fo().gravity);
         let ent_gravity = if g != 0.0 { g } else { 1.0 };
         ent_gravity * self.sv_gravity()
     }
@@ -811,16 +811,16 @@ impl Server {
         if lead == 0.0 {
             return mv(self);
         }
-        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         vel[2] += lead;
         let led = vel[2];
-        self.vm.set_ent_vec(ent, self.vm.fo.velocity, vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
         mv(self);
         if !self.is_free(ent) {
-            let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+            let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
             if vel[2] == led {
                 vel[2] -= lead;
-                self.vm.set_ent_vec(ent, self.vm.fo.velocity, vel);
+                self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
             }
         }
     }
@@ -828,8 +828,8 @@ impl Server {
     /// `SV_CheckVelocity` (sv_phys.c): clamp each velocity component to
     /// `±sv_maxvelocity` and scrub NaNs from velocity/origin.
     fn check_velocity(&mut self, ent: i32) {
-        let mut vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
-        let mut origin = self.vm.ent_vec(ent, self.vm.fo.origin);
+        let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
+        let mut origin = self.vm.ent_vec(ent, self.vm.fo().origin);
         for i in 0..3 {
             if vel[i].is_nan() {
                 vel[i] = 0.0;
@@ -840,8 +840,8 @@ impl Server {
             // vel[i] is NaN-scrubbed above, so .clamp matches the C's if/else if.
             vel[i] = vel[i].clamp(-SV_MAXVELOCITY, SV_MAXVELOCITY);
         }
-        self.vm.set_ent_vec(ent, self.vm.fo.velocity, vel);
-        self.vm.set_ent_vec(ent, self.vm.fo.origin, origin);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().origin, origin);
     }
 
     /// `SV_PushEntity` (sv_phys.c ~408): move `ent` by `push` via the
@@ -856,9 +856,9 @@ impl Server {
     /// `sv_move` borrows the host internally and `sv_impact` executes QuakeC, so
     /// neither is called while the host is held out.
     fn push_entity(&mut self, ent: i32, push: Vec3, sv_time: f32) -> MoveTrace {
-        let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
-        let mins = self.vm.ent_vec(ent, self.vm.fo.mins);
-        let maxs = self.vm.ent_vec(ent, self.vm.fo.maxs);
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let mins = self.vm.ent_vec(ent, self.vm.fo().mins);
+        let maxs = self.vm.ent_vec(ent, self.vm.fo().maxs);
         let end = v_add(origin, push);
 
         // SV_PushEntity (sv_phys.c:408-421) selects the move type from the
@@ -870,8 +870,8 @@ impl Server {
         //     gibs / corpses pass THROUGH monster+player boxes instead of
         //     hanging on them; only bmodels block).
         //   * otherwise -> MOVE_NORMAL.
-        let movetype = self.vm.ent_float(ent, self.vm.fo.movetype) as i32;
-        let solid = self.vm.ent_float(ent, self.vm.fo.solid) as i32;
+        let movetype = self.vm.ent_float(ent, self.vm.fo().movetype) as i32;
+        let solid = self.vm.ent_float(ent, self.vm.fo().solid) as i32;
         let missile = movetype == MOVETYPE_FLYMISSILE;
         let nomonsters = !missile && (solid == SOLID_TRIGGER || solid == SOLID_NOT);
 
@@ -879,7 +879,7 @@ impl Server {
         // itself (the C `passedict`).
         let mt = sv_move(&mut self.vm, origin, end, mins, maxs, ent, nomonsters, missile);
 
-        self.vm.set_ent_vec(ent, self.vm.fo.origin, mt.endpos);
+        self.vm.set_ent_vec(ent, self.vm.fo().origin, mt.endpos);
         link_edict(&mut self.vm, ent);
 
         // SV_Impact (sv_phys.c SV_PushEntity ~426): `if (trace.ent) SV_Impact(...)`.
@@ -933,11 +933,11 @@ impl Server {
 
     fn client_frame_inner(&mut self, cmd: &UserCmd, host_frametime: f64) -> Result<FrameReport> {
         let dt = host_frametime as f32;
-        self.vm.host_frametime = host_frametime;
+        self.vm.set_host_frametime(host_frametime);
         // host_frametime = dt; sv.time advances at the END of SV_Physics in the
         // C, but the think-due test compares against sv.time + host_frametime, so
         // (as run_frame does) we set frametime now and bump time after the loop.
-        self.vm.set_glob_float(self.vm.go.frametime, dt);
+        self.vm.set_glob_float(self.vm.go().frametime, dt);
         // Drop any half-collected temp-entity message from a prior (possibly
         // faulted) frame so this frame's Write* bursts parse cleanly.
         if let Some(o) = self.outbox() {
@@ -960,7 +960,7 @@ impl Server {
         // then does SV_Physics run StartFrame and every edict, the client's
         // PlayerPreThink (WaterMove's drag, PlayerJump) acting on the
         // ALREADY-accelerated velocity.
-        self.vm.set_glob_float(self.vm.go.time, start_time);
+        self.vm.set_glob_float(self.vm.go().time, start_time);
         if self.player >= 0 && !self.is_free(self.player) {
             self.apply_usercmd_to_edict(self.player, cmd);
             self.client_think(self.player, cmd, dt);
@@ -970,7 +970,7 @@ impl Server {
         // time = sv.time).
         // A program error anywhere in the frame ends it (id's Host_Error).
         let mut thinks_fired = 0usize;
-        self.vm.set_glob_float(self.vm.go.time, start_time);
+        self.vm.set_glob_float(self.vm.go().time, start_time);
         self.run_sys("StartFrame", 0, 0)?;
 
         // The bound is re-read every iteration, as in SV_Physics (see run_frame).
@@ -979,7 +979,7 @@ impl Server {
             self.check_halted()?;
             let e = next;
             next += 1;
-            let free = self.vm.edict_free.get(e).copied().unwrap_or(true);
+            let free = self.vm.is_free_edict(e as i32);
             if free {
                 continue;
             }
@@ -991,7 +991,7 @@ impl Server {
             let fired = if ent == self.player {
                 self.physics_client(ent, start_time, dt)?
             } else {
-                let movetype = self.vm.ent_float(ent, self.vm.fo.movetype) as i32;
+                let movetype = self.vm.ent_float(ent, self.vm.fo().movetype) as i32;
                 self.process_entity(ent, movetype, start_time, dt)?
             };
             thinks_fired += fired as usize;
@@ -1003,14 +1003,7 @@ impl Server {
         // SV_WriteClientdataToMessage (sv_main.c) runs SV_SetIdealPitch once per
         // client per frame, after physics: compute the slope-following auto-pitch
         // the QuakeC view code centres toward when you walk up/down stairs.
-        if self.player >= 0
-            && !self
-                .vm
-                .edict_free
-                .get(self.player as usize)
-                .copied()
-                .unwrap_or(true)
-        {
+        if self.player >= 0 && !self.vm.is_free_edict(self.player) {
             self.set_ideal_pitch(self.player);
         }
 
@@ -1038,7 +1031,7 @@ impl Server {
         // `pr_global_struct->time = sv.time` first: without it PreThink reads the
         // `time` a preceding think left (its clamped thinktime), so its timers
         // (air_finished, lava damage, IntermissionThink) could fire a frame early.
-        self.vm.set_glob_float(self.vm.go.time, start_time);
+        self.vm.set_glob_float(self.vm.go().time, start_time);
         self.run_sys("PlayerPreThink", ent, 0)?;
         if self.is_free(ent) {
             return Ok(false);
@@ -1048,7 +1041,7 @@ impl Server {
         // but mirror the NaN/maxvelocity scrub the C does first).
         self.check_velocity(ent);
 
-        let movetype = self.vm.ent_float(ent, self.vm.fo.movetype) as i32;
+        let movetype = self.vm.ent_float(ent, self.vm.fo().movetype) as i32;
         // Each arm assigns `fired`; the initial value is just to satisfy the
         // borrow checker on the early-return paths.
         #[allow(unused_assignments)]
@@ -1072,7 +1065,7 @@ impl Server {
                 // sets waterlevel/watertype so the QuakeC WaterMove (PlayerPreThink)
                 // can deal lava/slime damage.
                 let in_water = self.check_water(ent);
-                let flags = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
+                let flags = self.vm.ent_float(ent, self.vm.fo().flags) as i32;
                 let falls = !in_water && flags & FL_WATERJUMP == 0;
                 if falls {
                     self.add_gravity(ent, dt);
@@ -1099,10 +1092,10 @@ impl Server {
                     return Ok(fired);
                 }
                 // origin += frametime * velocity (no clipping).
-                let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
-                let vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+                let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+                let vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
                 self.vm
-                    .set_ent_vec(ent, self.vm.fo.origin, crate::math::mul_add(origin, dt, vel));
+                    .set_ent_vec(ent, self.vm.fo().origin, crate::math::mul_add(origin, dt, vel));
             }
             MOVETYPE_TOSS | MOVETYPE_BOUNCE => {
                 // SV_Physics_Client `case MOVETYPE_TOSS/BOUNCE: SV_Physics_Toss`:
@@ -1144,7 +1137,7 @@ impl Server {
         // touch time (or a think's clamped thinktime), so PostThink would read a
         // stale `time`. run_sys sets self/other but never time.
         link_edict(&mut self.vm, ent);
-        self.vm.set_glob_float(self.vm.go.time, start_time);
+        self.vm.set_glob_float(self.vm.go().time, start_time);
         self.run_sys("PlayerPostThink", ent, 0)?;
 
         // No engine clear of `impulse` (census F4): the C never clears it —
@@ -1169,7 +1162,7 @@ impl Server {
     ) -> i32 {
         let num_bumps = 4;
         let mut blocked = 0;
-        let original_velocity = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let original_velocity = self.vm.ent_vec(ent, self.vm.fo().velocity);
         let primal_velocity = original_velocity;
         let mut original = original_velocity;
         // Clip planes are capped at 5 (the `>= 5` guard below), so a fixed array
@@ -1179,30 +1172,30 @@ impl Server {
         let mut time_left = dt;
 
         for _bump in 0..num_bumps {
-            let velocity = self.vm.ent_vec(ent, self.vm.fo.velocity);
+            let velocity = self.vm.ent_vec(ent, self.vm.fo().velocity);
             if velocity == [0.0, 0.0, 0.0] {
                 break;
             }
-            let origin = self.vm.ent_vec(ent, self.vm.fo.origin);
+            let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
             let end = [
                 origin[0] + time_left * velocity[0],
                 origin[1] + time_left * velocity[1],
                 origin[2] + time_left * velocity[2],
             ];
-            let mins = self.vm.ent_vec(ent, self.vm.fo.mins);
-            let maxs = self.vm.ent_vec(ent, self.vm.fo.maxs);
+            let mins = self.vm.ent_vec(ent, self.vm.fo().mins);
+            let maxs = self.vm.ent_vec(ent, self.vm.fo().maxs);
             let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false, false);
 
             if trace.allsolid {
                 // entity is trapped in another solid: stop dead.
-                self.vm.set_ent_vec(ent, self.vm.fo.velocity, [0.0; 3]);
+                self.vm.set_ent_vec(ent, self.vm.fo().velocity, [0.0; 3]);
                 return 3;
             }
 
             if trace.fraction > 0.0 {
                 // actually covered some distance
-                self.vm.set_ent_vec(ent, self.vm.fo.origin, trace.endpos);
-                original = self.vm.ent_vec(ent, self.vm.fo.velocity);
+                self.vm.set_ent_vec(ent, self.vm.fo().origin, trace.endpos);
+                original = self.vm.ent_vec(ent, self.vm.fo().velocity);
                 nplanes = 0;
             }
 
@@ -1219,12 +1212,12 @@ impl Server {
                 // become "ground" even when its top faces up.
                 let on_bsp = trace.ent == 0
                     || (trace.ent > 0
-                        && self.vm.ent_float(trace.ent, self.vm.fo.solid) as i32 == SOLID_BSP);
+                        && self.vm.ent_float(trace.ent, self.vm.fo().solid) as i32 == SOLID_BSP);
                 if on_bsp {
-                    let flags = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
+                    let flags = self.vm.ent_float(ent, self.vm.fo().flags) as i32;
                     self.vm
-                        .set_ent_float(ent, self.vm.fo.flags, (flags | FL_ONGROUND) as f32);
-                    self.vm.set_ent_int(ent, self.vm.fo.groundentity, trace.ent.max(0));
+                        .set_ent_float(ent, self.vm.fo().flags, (flags | FL_ONGROUND) as f32);
+                    self.vm.set_ent_int(ent, self.vm.fo().groundentity, trace.ent.max(0));
                 }
             }
             if trace.plane_normal[2] == 0.0 {
@@ -1250,7 +1243,7 @@ impl Server {
             // clipped to another plane
             if nplanes >= 5 {
                 // this shouldn't really happen
-                self.vm.set_ent_vec(ent, self.vm.fo.velocity, [0.0; 3]);
+                self.vm.set_ent_vec(ent, self.vm.fo().velocity, [0.0; 3]);
                 return 3;
             }
             planes[nplanes] = trace.plane_normal;
@@ -1278,25 +1271,25 @@ impl Server {
 
             if i != nplanes {
                 // go along this plane
-                self.vm.set_ent_vec(ent, self.vm.fo.velocity, new_velocity);
+                self.vm.set_ent_vec(ent, self.vm.fo().velocity, new_velocity);
             } else {
                 // go along the crease (two planes)
                 if nplanes != 2 {
-                    self.vm.set_ent_vec(ent, self.vm.fo.velocity, [0.0; 3]);
+                    self.vm.set_ent_vec(ent, self.vm.fo().velocity, [0.0; 3]);
                     return 7;
                 }
                 let dir = crate::math::cross(planes[0], planes[1]);
-                let cur = self.vm.ent_vec(ent, self.vm.fo.velocity);
+                let cur = self.vm.ent_vec(ent, self.vm.fo().velocity);
                 let d = crate::math::dot(dir, cur);
                 self.vm
-                    .set_ent_vec(ent, self.vm.fo.velocity, crate::math::scale(dir, d));
+                    .set_ent_vec(ent, self.vm.fo().velocity, crate::math::scale(dir, d));
             }
 
             // if velocity is against the original velocity, stop dead to avoid
             // tiny oscillations in sloping corners.
-            let cur = self.vm.ent_vec(ent, self.vm.fo.velocity);
+            let cur = self.vm.ent_vec(ent, self.vm.fo().velocity);
             if crate::math::dot(cur, primal_velocity) <= 0.0 {
-                self.vm.set_ent_vec(ent, self.vm.fo.velocity, [0.0; 3]);
+                self.vm.set_ent_vec(ent, self.vm.fo().velocity, [0.0; 3]);
                 return blocked;
             }
         }
@@ -1318,14 +1311,14 @@ impl Server {
     /// relinks at the end.
     fn walk_move(&mut self, ent: i32, sv_time: f32, dt: f32) {
         // do a regular slide move unless it looks like you ran into a step.
-        let oldonground = (self.vm.ent_float(ent, self.vm.fo.flags) as i32) & FL_ONGROUND != 0;
+        let oldonground = (self.vm.ent_float(ent, self.vm.fo().flags) as i32) & FL_ONGROUND != 0;
         // Clear ONGROUND; fly_move / the down move below will re-set it.
-        let flags0 = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
+        let flags0 = self.vm.ent_float(ent, self.vm.fo().flags) as i32;
         self.vm
-            .set_ent_float(ent, self.vm.fo.flags, (flags0 & !FL_ONGROUND) as f32);
+            .set_ent_float(ent, self.vm.fo().flags, (flags0 & !FL_ONGROUND) as f32);
 
-        let oldorg = self.vm.ent_vec(ent, self.vm.fo.origin);
-        let oldvel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let oldorg = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let oldvel = self.vm.ent_vec(ent, self.vm.fo().velocity);
 
         let mut steptrace: Option<MoveTrace> = None;
         let clip = self.fly_move_core(ent, dt, sv_time, &mut steptrace);
@@ -1338,26 +1331,26 @@ impl Server {
         // don't stair up while jumping — UNLESS swimming. The C gate is
         // `if (!oldonground && ent->v.waterlevel == 0) return;`, so a player in
         // water (waterlevel > 0) can still step up onto a ledge even mid-air.
-        let waterlevel = self.vm.ent_float(ent, self.vm.fo.waterlevel) as i32;
+        let waterlevel = self.vm.ent_float(ent, self.vm.fo().waterlevel) as i32;
         if !oldonground && waterlevel == 0 {
             link_edict(&mut self.vm, ent);
             return;
         }
-        if self.vm.ent_float(ent, self.vm.fo.movetype) as i32 != MOVETYPE_WALK {
+        if self.vm.ent_float(ent, self.vm.fo().movetype) as i32 != MOVETYPE_WALK {
             link_edict(&mut self.vm, ent); // gibbed by a trigger
             return;
         }
-        if (self.vm.ent_float(ent, self.vm.fo.flags) as i32) & FL_WATERJUMP != 0 {
+        if (self.vm.ent_float(ent, self.vm.fo().flags) as i32) & FL_WATERJUMP != 0 {
             link_edict(&mut self.vm, ent);
             return;
         }
 
         // remember the no-step result.
-        let nosteporg = self.vm.ent_vec(ent, self.vm.fo.origin);
-        let nostepvel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let nosteporg = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let nostepvel = self.vm.ent_vec(ent, self.vm.fo().velocity);
 
         // try moving up and forward to go up a step.
-        self.vm.set_ent_vec(ent, self.vm.fo.origin, oldorg); // back to start pos
+        self.vm.set_ent_vec(ent, self.vm.fo().origin, oldorg); // back to start pos
 
         // move up
         let upmove = [0.0, 0.0, world::STEPSIZE];
@@ -1365,7 +1358,7 @@ impl Server {
 
         // move forward (no vertical wish in velocity).
         self.vm
-            .set_ent_vec(ent, self.vm.fo.velocity, [oldvel[0], oldvel[1], 0.0]);
+            .set_ent_vec(ent, self.vm.fo().velocity, [oldvel[0], oldvel[1], 0.0]);
         let mut steptrace2 = None;
         let mut clip2 = self.fly_move_core(ent, dt, sv_time, &mut steptrace2);
 
@@ -1374,7 +1367,7 @@ impl Server {
         // still blocked, the player is wedged at a BSP hull angle-join — try the
         // SV_TryUnstick nudge dance to free them, adopting its resulting clip.
         if clip2 != 0 {
-            let neworg = self.vm.ent_vec(ent, self.vm.fo.origin);
+            let neworg = self.vm.ent_vec(ent, self.vm.fo().origin);
             if (oldorg[0] - neworg[0]).abs() < 0.03125 && (oldorg[1] - neworg[1]).abs() < 0.03125 {
                 clip2 = self.sv_try_unstick(ent, oldvel, sv_time);
             }
@@ -1404,20 +1397,20 @@ impl Server {
             // (`fly_move_core` / SV_FlyMove, which gates on the contacted floor
             // being SOLID_BSP). Unconditionally setting it here let players latch
             // ground onto a step they only grazed; the gate restores the C.
-            if self.vm.ent_float(ent, self.vm.fo.solid) as i32 == SOLID_BSP {
-                let flags = self.vm.ent_float(ent, self.vm.fo.flags) as i32;
+            if self.vm.ent_float(ent, self.vm.fo().solid) as i32 == SOLID_BSP {
+                let flags = self.vm.ent_float(ent, self.vm.fo().flags) as i32;
                 self.vm
-                    .set_ent_float(ent, self.vm.fo.flags, (flags | FL_ONGROUND) as f32);
+                    .set_ent_float(ent, self.vm.fo().flags, (flags | FL_ONGROUND) as f32);
                 // groundentity = EDICT_TO_PROG(downtrace.ent): the edict we
                 // stepped down onto (0 = world, >0 = a plat/door). `downtrace.ent`
                 // is `-1` only when the down-push was clear, but plane_normal[2] >
                 // 0.7 implies a floor contact, so clamp the sentinel to world (0).
-                self.vm.set_ent_int(ent, self.vm.fo.groundentity, downtrace.ent.max(0));
+                self.vm.set_ent_int(ent, self.vm.fo().groundentity, downtrace.ent.max(0));
             }
         } else {
             // the push down didn't reach good ground: use the no-step move.
-            self.vm.set_ent_vec(ent, self.vm.fo.origin, nosteporg);
-            self.vm.set_ent_vec(ent, self.vm.fo.velocity, nostepvel);
+            self.vm.set_ent_vec(ent, self.vm.fo().origin, nosteporg);
+            self.vm.set_ent_vec(ent, self.vm.fo().velocity, nostepvel);
         }
 
         link_edict(&mut self.vm, ent);
@@ -1430,18 +1423,18 @@ impl Server {
     /// speed. Only X/Y are scaled (Z is left to gravity/step logic). Uses the
     /// player's VIEW angles (`v_angle`), not the body `angles`.
     fn sv_wall_friction(&mut self, ent: i32, normal: Vec3) {
-        let v_angle = self.vm.ent_vec(ent, self.vm.fo.v_angle);
+        let v_angle = self.vm.ent_vec(ent, self.vm.fo().v_angle);
         let (forward, _right, _up) = angle_vectors(v_angle);
         let d = crate::math::dot(normal, forward) + 0.5;
         if d >= 0.0 {
             return;
         }
-        let vel = self.vm.ent_vec(ent, self.vm.fo.velocity);
+        let vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
         let i = crate::math::dot(normal, vel);
         let into = [normal[0] * i, normal[1] * i, normal[2] * i];
         let side = [vel[0] - into[0], vel[1] - into[1], vel[2] - into[2]];
         let new_vel = [side[0] * (1.0 + d), side[1] * (1.0 + d), vel[2]];
-        self.vm.set_ent_vec(ent, self.vm.fo.velocity, new_vel);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, new_vel);
     }
 
     /// `SV_TryUnstick` (sv_phys.c ~901): the player is wedged at a BSP hull
@@ -1451,7 +1444,7 @@ impl Server {
     /// Y; otherwise restore the position and try the next. If none work, zero the
     /// velocity ("don't stick") and report a full block (7).
     fn sv_try_unstick(&mut self, ent: i32, oldvel: Vec3, sv_time: f32) -> i32 {
-        let oldorg = self.vm.ent_vec(ent, self.vm.fo.origin);
+        let oldorg = self.vm.ent_vec(ent, self.vm.fo().origin);
         const DIRS: [[f32; 3]; 8] = [
             [2.0, 0.0, 0.0],
             [0.0, 2.0, 0.0],
@@ -1467,17 +1460,17 @@ impl Server {
             self.push_entity(ent, dir, sv_time);
             // retry the original move (horizontal only).
             self.vm
-                .set_ent_vec(ent, self.vm.fo.velocity, [oldvel[0], oldvel[1], 0.0]);
+                .set_ent_vec(ent, self.vm.fo().velocity, [oldvel[0], oldvel[1], 0.0]);
             let mut steptrace = None;
             let clip = self.fly_move_core(ent, 0.1, sv_time, &mut steptrace);
-            let neworg = self.vm.ent_vec(ent, self.vm.fo.origin);
+            let neworg = self.vm.ent_vec(ent, self.vm.fo().origin);
             if (oldorg[1] - neworg[1]).abs() > 4.0 || (oldorg[0] - neworg[0]).abs() > 4.0 {
                 return clip; // freed
             }
             // go back to the original (stuck) pos and try the next direction.
-            self.vm.set_ent_vec(ent, self.vm.fo.origin, oldorg);
+            self.vm.set_ent_vec(ent, self.vm.fo().origin, oldorg);
         }
-        self.vm.set_ent_vec(ent, self.vm.fo.velocity, [0.0, 0.0, 0.0]); // don't stick
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, [0.0, 0.0, 0.0]); // don't stick
         7 // still not moving
     }
 }
@@ -1624,17 +1617,17 @@ mod tests {
         // the client never draws a trail from the old one to the new).
         let (img, _touch_fn, _g_one, _g_flag) = touch_progs();
         let mut server = Server::new(world_open_bsp(), Progs::parse(&img).expect("parse")).expect("server");
-        server.vm.sv_time = 1.5; // the relaxed first two seconds
+        server.vm.set_sv_time(1.5); // the relaxed first two seconds
         let a = server.vm.spawn();
         server.vm.free_edict(a);
         assert_eq!(server.vm.spawn(), a, "freed at t 1.5: reused at once");
-        server.vm.sv_time = 10.0;
+        server.vm.set_sv_time(10.0);
         server.vm.free_edict(a);
         let b = server.vm.spawn();
         assert_ne!(b, a, "freed this frame: not reused");
-        server.vm.sv_time = 10.4;
+        server.vm.set_sv_time(10.4);
         assert_ne!(server.vm.spawn(), a, "0.4 s later: still not");
-        server.vm.sv_time = 10.6;
+        server.vm.set_sv_time(10.6);
         assert_eq!(server.vm.spawn(), a, "0.6 s later: reused");
     }
 
@@ -1808,7 +1801,7 @@ mod tests {
         // raised to sv.time 7.3999999999999995). In f32 7.3f + 0.1f is 7.4f
         // itself and the think ran a frame early.
         let mut server = time_recording_server();
-        let record = server.vm.progs.find_function("record").expect("record") as i32;
+        let record = server.vm.progs().find_function("record").expect("record") as i32;
         server.set_sv_time(7.3);
         let thinker = server.vm.spawn();
         server.vm.ent_set_int(thinker, "think", record);
@@ -1835,7 +1828,7 @@ mod tests {
         let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
         prime_player_globals(&mut server, c100, org);
         let thinker = server.vm.spawn();
-        let noop = server.vm.progs.find_function("StartFrame").expect("a DONE-only function");
+        let noop = server.vm.progs().find_function("StartFrame").expect("a DONE-only function");
         server.vm.ent_set_int(thinker, "think", noop as i32);
         let t0 = server.time();
         server.vm.ent_set_float(thinker, "nextthink", t0 + 0.05);
@@ -1964,10 +1957,9 @@ mod tests {
         assert_eq!(next.sv_gravity(), 100.0, "the handed-over cvar");
         let name = next.vm.intern("sv_gravity");
         let val = next.vm.intern("800");
-        next.vm.argc = 2;
         next.vm.set_gi(crate::progs::OFS_PARM0, name);
         next.vm.set_gi(crate::progs::OFS_PARM1, val);
-        (next.vm.builtins[72])(&mut next.vm).expect("cvar_set"); // worldspawn's
+        next.vm.call_builtin(72, 2).expect("cvar_set"); // worldspawn's
         next.run_frame(0.1).expect("frame");
         let vz = next.vm.ent_get_vector(e2, "velocity")[2];
         assert!((vz + 80.0).abs() < 1e-3, "cvar_set(\"sv_gravity\", \"800\"): expected -80, got {vz}");

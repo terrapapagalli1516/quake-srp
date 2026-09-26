@@ -685,7 +685,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let mut doors: Vec<(i32, [f32; 3])> = Vec::new();
         for e in 0..server.vm.num_edicts() {
             let ent = e as i32;
-            if server.vm.edict_free.get(e).copied().unwrap_or(true) {
+            if server.vm.is_free_edict(e as i32) {
                 continue;
             }
             // func_door's spawn reassigns classname to "door"; movetype PUSH (7).
@@ -711,7 +711,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let mut moved = 0;
         let mut max_disp = 0.0f32;
         for &(d, o0) in &doors {
-            if server.vm.edict_free.get(d as usize).copied().unwrap_or(true) {
+            if server.vm.is_free_edict(d) {
                 continue;
             }
             let o1 = server.vm.ent_get_vector(d, "origin");
@@ -735,7 +735,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
     let mut nearest: Option<(i32, f32, [f32; 3])> = None;
     for e in 0..server.vm.num_edicts() {
         let ent = e as i32;
-        if server.vm.edict_free.get(e).copied().unwrap_or(true) {
+        if server.vm.is_free_edict(e as i32) {
             continue;
         }
         if !server.vm.ent_get_string(ent, "classname").starts_with("monster") {
@@ -796,7 +796,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             let _ = writeln!(o, "  AI probe (10 frames, player standing in view):");
             for f in 0..10 {
                 server.client_frame_f64(&still, 0.1).map_err(|e| format!("probe: {e}"))?;
-                if !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true) {
+                if !server.vm.is_free_edict(mon) {
                     let enemy = server.vm.ent_get_int(mon, "enemy");
                     let frame = server.vm.ent_get_float(mon, "frame");
                     let nextthink = server.vm.ent_get_float(mon, "nextthink");
@@ -895,7 +895,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
             "    dynamic lights: peak {max_active_dlights} active during combat (explosions + EF_* muzzle/bright/dim lights)"
         );
         let hp_after = server.vm.ent_get_float(mon, "health");
-        let alive = !server.vm.edict_free.get(mon as usize).copied().unwrap_or(true);
+        let alive = !server.vm.is_free_edict(mon);
         let (b0, weapon, shells) = server.player_attack_state();
         let _ = writeln!(
             o,
@@ -927,7 +927,7 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         let mut ext_cache: std::collections::HashMap<String, Option<Bsp>> = std::collections::HashMap::new();
         let mut ext_owned: Vec<(Bsp, [f32; 3])> = Vec::new();
         for e in 0..server.vm.num_edicts() {
-            if server.vm.edict_free.get(e).copied().unwrap_or(true) || e as i32 == player {
+            if server.vm.is_free_edict(e as i32) || e as i32 == player {
                 continue;
             }
             let ent = e as i32;
@@ -1142,7 +1142,7 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
     }
 
     // Timed window.
-    let stmt0 = server.vm.stmt_count;
+    let stmt0 = server.vm.stmt_count();
     quake_rs::world::reset_trace_count();
     let mut thinks = 0usize;
     let start = Instant::now();
@@ -1151,13 +1151,13 @@ fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> Result<Out, Stri
         thinks += fr.thinks_fired;
     }
     let elapsed = start.elapsed();
-    let stmts = server.vm.stmt_count.wrapping_sub(stmt0);
+    let stmts = server.vm.stmt_count().wrapping_sub(stmt0);
     let traces = quake_rs::world::trace_count();
 
     // Live (non-free) edicts as a load proxy.
     let mut alive = 0usize;
     for e in 0..server.vm.num_edicts() {
-        if !server.vm.edict_free.get(e).copied().unwrap_or(true) {
+        if !server.vm.is_free_edict(e as i32) {
             alive += 1;
         }
     }
@@ -1245,7 +1245,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
     let mut trigger: Option<(i32, [f32; 3])> = None;
     for e in 0..server.vm.num_edicts() {
         let ent = e as i32;
-        if server.vm.edict_free.get(e).copied().unwrap_or(true) {
+        if server.vm.is_free_edict(e as i32) {
             continue;
         }
         if server.vm.ent_get_string(ent, "classname") == "trigger_changelevel" {
@@ -1302,7 +1302,7 @@ fn cmd_changelevel(pak_path: &str, map_name: &str) -> Result<Out, String> {
         // intermission-exit function the same way a player button press would,
         // which calls the changelevel() builtin.
         if requested.is_none() && server.vm.gget_int("nextmap") != 0 {
-            if let Some(goto) = server.vm.progs.find_function("GotoNextMap") {
+            if let Some(goto) = server.vm.progs().find_function("GotoNextMap") {
                 server.vm.gset_int("self", player);
                 server.vm.gset_int("other", 0);
                 if server.vm.execute(goto).is_err() {
@@ -1447,9 +1447,9 @@ fn cmd_run(path: &str, func: &str) -> Result<Out, String> {
     let mut vm = Vm::load(&bytes).map_err(|e| e.to_string())?;
     vm.call_by_name(func).map_err(|e| e.to_string())?;
     let mut o = String::new();
-    if !vm.output.is_empty() {
+    if !vm.output().is_empty() {
         let _ = writeln!(o, "--- output ---");
-        o.push_str(vm.output.trim_end());
+        o.push_str(vm.output().trim_end());
         o.push('\n');
     }
     let _ = writeln!(
@@ -1743,7 +1743,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> Resu
     let n = server.vm.num_edicts();
     for e in 0..n {
         // Skip free edicts (and the implicit world at 0 has no .mdl model).
-        if server.vm.edict_free.get(e).copied().unwrap_or(true) {
+        if server.vm.is_free_edict(e as i32) {
             continue;
         }
         let ent = e as i32;
@@ -2425,7 +2425,7 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
         std::collections::HashMap::new();
     let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
     for e in 0..server.vm.num_edicts() {
-        if server.vm.edict_free.get(e).copied().unwrap_or(true) {
+        if server.vm.is_free_edict(e as i32) {
             continue;
         }
         let ent = e as i32;

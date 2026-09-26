@@ -518,9 +518,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     //    entities — gibs, projectiles — can appear after boot).
     // (The name is borrowed from the string heap; only a miss allocates.)
     let n = w.server.vm.num_edicts();
-    let f_model = w.server.vm.fo.model;
+    let f_model = w.server.vm.fo().model;
     for e in 0..n {
-        if w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+        if w.server.vm.is_free_edict(e as i32) {
             continue;
         }
         let m = w.server.vm.ent_str(e as i32, f_model);
@@ -576,7 +576,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     {
         let vm = &w.server.vm;
         w.trail_org
-            .retain(|&e, _| !vm.edict_free.get(e as usize).copied().unwrap_or(true));
+            .retain(|&e, _| !vm.is_free_edict(e));
     }
     // Static entities wait for the camera: R_StoreEfrags draws one when a leaf
     // it touches is in the view's PVS (after the camera, below).
@@ -584,7 +584,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let smooth = w.lerpmove == LerpMove::Smooth;
     for e in 0..n {
         let ent = e as i32;
-        if ent == w.player || w.server.vm.edict_free.get(e).copied().unwrap_or(true) {
+        if ent == w.player || w.server.vm.is_free_edict(e as i32) {
             continue;
         }
         // A makestatic entity is a client static, never relinked: no trail, no
@@ -604,18 +604,18 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // a modelindex, and Quake leaves it invisible. Without this guard those
         // gates draw as phantom walls the player walks through — and mask the real
         // slipgate behind them, so episode/level selection *looks* broken.
-        if w.server.vm.ent_float(ent, w.server.vm.fo.modelindex) == 0.0 {
+        if w.server.vm.ent_float(ent, w.server.vm.fo().modelindex) == 0.0 {
             continue;
         }
-        let m = w.server.vm.ent_str(ent, w.server.vm.fo.model).to_owned();
+        let m = w.server.vm.ent_str(ent, w.server.vm.fo().model).to_owned();
         // Brush submodels (doors, platforms, buttons) draw at the entity origin —
         // their origin tracks the door's open/close motion, so they animate live.
         if let Some(num) = m.strip_prefix('*') {
             if let Ok(idx) = num.parse::<usize>() {
-                let origin = w.server.vm.ent_vec(ent, w.server.vm.fo.origin);
+                let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
                 // The entity's `frame` selects the alternate (+a..+j) texture cycle
                 // for activated buttons/doors (a pressed button shows its lit face).
-                let frame = w.server.vm.ent_float(ent, w.server.vm.fo.frame) as i32;
+                let frame = w.server.vm.ent_float(ent, w.server.vm.fo().frame) as i32;
                 let inst = render::BModelInstance { model_index: idx, origin, frame };
                 if is_static {
                     // model->mins/maxs of "*N": the submodel's spread bounds.
@@ -633,7 +633,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // model (explosive box, ammo/health boxes). Not the world map itself.
         if m.ends_with(".bsp") {
             if m != w.map_name {
-                let origin = w.server.vm.ent_vec(ent, w.server.vm.fo.origin);
+                let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
                 if is_static {
                     // model->mins/maxs: the box's own model 0 bounds.
                     let bounds = w.bmodel_cache.get(&m).and_then(|b| b.as_ref()?.models.first());
@@ -651,8 +651,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // Sprite-model entities (s_explod.spr explosion flash, bubbles): a camera-
         // facing billboard at the entity origin, current `frame` for the animation.
         if m.ends_with(".spr") {
-            let origin = w.server.vm.ent_vec(ent, w.server.vm.fo.origin);
-            let frame = w.server.vm.ent_float(ent, w.server.vm.fo.frame).max(0.0) as usize;
+            let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
+            let frame = w.server.vm.ent_float(ent, w.server.vm.fo().frame).max(0.0) as usize;
             if is_static {
                 // Mod_LoadSpriteModel: ±maxwidth/2 across, ±maxheight/2 up
                 // (integer halves).
@@ -671,12 +671,12 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         if !m.ends_with(".mdl") {
             continue;
         }
-        let origin = w.server.vm.ent_vec(ent, w.server.vm.fo.origin);
-        let frame = w.server.vm.ent_float(ent, w.server.vm.fo.frame).max(0.0) as usize;
+        let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
+        let frame = w.server.vm.ent_float(ent, w.server.vm.fo().frame).max(0.0) as usize;
         let color = color_for_name(&m);
         if is_static {
-            let angles = w.server.vm.ent_vec(ent, w.server.vm.fo.angles);
-            let skin = w.server.vm.ent_float(ent, w.server.vm.fo.skin).max(0.0) as i32;
+            let angles = w.server.vm.ent_vec(ent, w.server.vm.fo().angles);
+            let skin = w.server.vm.ent_float(ent, w.server.vm.fo().skin).max(0.0) as i32;
             let h = ALIAS_MODEL_HALF;
             let (emins, emaxs) = offset_box(origin, [-h; 3], [h; 3]);
             statics.push(StaticDesc {
@@ -697,7 +697,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // pickups — ammo/health/armour boxes, weapons, keys, runes, powerups) has
         // its yaw overwritten with `anglemod(100*cl.time)` every frame so it spins.
         // Otherwise use the entity's own yaw. Without this every pickup sat frozen.
-        let ent_angles = w.server.vm.ent_vec(ent, w.server.vm.fo.angles);
+        let ent_angles = w.server.vm.ent_vec(ent, w.server.vm.fo().angles);
         let yaw = if mflags & crate::demo::EF_ROTATE != 0 {
             crate::demo::rotate_yaw(w.clock)
         } else {
@@ -709,7 +709,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         let angles = [ent_angles[0], yaw, ent_angles[2]];
         // Per-entity skin index (R_AliasSetupSkin: `skinnum = currententity->skinnum`).
         // Drives e.g. armor.mdl's 3 skins (green/yellow/red); was hardcoded to 0.
-        let skin = w.server.vm.ent_float(ent, w.server.vm.fo.skin).max(0.0) as i32;
+        let skin = w.server.vm.ent_float(ent, w.server.vm.fo().skin).max(0.0) as i32;
         // R_RocketTrail: a model with a rocket/grenade/gib/tracer header flag
         // trails particles from its previous origin to here (CL_RelinkEntities).
         if let Some(ttype) = rocket_trail_type(mflags) {
@@ -719,8 +719,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // r_lerpmove (the 2026 extra): a monster glides between its steps
         // where it is drawn; its trail and everything else keep the server's
         // origin.
-        let (origin, angles) = if smooth && w.server.vm.ent_float(ent, w.server.vm.fo.movetype) == MOVETYPE_STEP {
-            let model = w.server.vm.ent_float(ent, w.server.vm.fo.modelindex) as usize;
+        let (origin, angles) = if smooth && w.server.vm.ent_float(ent, w.server.vm.fo().movetype) == MOVETYPE_STEP {
+            let model = w.server.vm.ent_float(ent, w.server.vm.fo().modelindex) as usize;
             let drawn = w.glides.draw(ent, model, origin, angles, f64::from(w.clock));
             (drawn.origin, drawn.angles)
         } else {

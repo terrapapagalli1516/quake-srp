@@ -131,14 +131,12 @@ mod tests {
         walk_mut(|w| {
             let vm = &mut w.server.vm;
             let shells = (0..vm.num_edicts() as i32)
-                .find(|&e| !vm.edict_free[e as usize] && vm.ent_get_string(e, "classname") == "item_shells")
+                .find(|&e| !vm.is_free_edict(e) && vm.ent_get_string(e, "classname") == "item_shells")
                 .expect("e1m1 has shells");
             let o = vm.ent_get_vector(shells, "origin");
             vm.set_gi(OFS_PARM0, w.player);
             vm.set_gv(OFS_PARM0 + 3, [o[0] + 16.0, o[1] + 16.0, o[2] + 24.0]);
-            vm.argc = 2;
-            let setorigin = vm.builtins[2];
-            setorigin(vm).expect("setorigin");
+            vm.call_builtin(2, 2).expect("setorigin");
         });
         step(0.05);
         step(0.05);

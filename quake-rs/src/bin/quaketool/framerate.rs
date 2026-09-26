@@ -311,9 +311,7 @@ impl Sim {
 fn set_origin(vm: &mut Vm, e: i32, org: [f32; 3]) {
     vm.set_gi(OFS_PARM0, e);
     vm.set_gv(OFS_PARM0 + 3, org);
-    vm.argc = 2;
-    let f = vm.builtins[2];
-    let _ = f(vm);
+    let _ = vm.call_builtin(2, 2);
 }
 
 /// `PF_setmodel` through the engine's builtin.
@@ -321,9 +319,7 @@ fn set_model(vm: &mut Vm, e: i32, model: &str) {
     let s = vm.intern(model);
     vm.set_gi(OFS_PARM0, e);
     vm.set_gi(OFS_PARM0 + 3, s);
-    vm.argc = 2;
-    let f = vm.builtins[3];
-    let _ = f(vm);
+    let _ = vm.call_builtin(3, 2);
 }
 
 /// `PF_setsize` through the engine's builtin.
@@ -331,9 +327,7 @@ fn set_size(vm: &mut Vm, e: i32, mins: [f32; 3], maxs: [f32; 3]) {
     vm.set_gi(OFS_PARM0, e);
     vm.set_gv(OFS_PARM0 + 3, mins);
     vm.set_gv(OFS_PARM0 + 6, maxs);
-    vm.argc = 3;
-    let f = vm.builtins[4];
-    let _ = f(vm);
+    let _ = vm.call_builtin(4, 3);
 }
 
 /// `stuffcmd(e, text)` through the engine's builtin.
@@ -341,9 +335,7 @@ fn stuffcmd(vm: &mut Vm, e: i32, text: &str) {
     let s = vm.intern(text);
     vm.set_gi(OFS_PARM0, e);
     vm.set_gi(OFS_PARM0 + 3, s);
-    vm.argc = 2;
-    let f = vm.builtins[21];
-    let _ = f(vm);
+    let _ = vm.call_builtin(21, 2);
 }
 
 /// The trigger field a `func_door` spawned for itself (its `owner`).
@@ -356,9 +348,7 @@ fn door_trigger(s: &Sim, door: i32) -> i32 {
 
 /// Draw one `random()` through the engine's builtin.
 fn random(vm: &mut Vm) {
-    vm.argc = 0;
-    let f = vm.builtins[7];
-    let _ = f(vm);
+    let _ = vm.call_builtin(7, 0);
 }
 
 /// Call the QuakeC function `name` with `self = e`, `other = world`,
@@ -370,13 +360,12 @@ fn call_qc(vm: &mut Vm, name: &str, e: i32) {
 /// Call the QuakeC function `name` with `self`, `other` and `activator` set
 /// and `time = sv.time`, as the engine's callers set them.
 fn call_qc_with(vm: &mut Vm, name: &str, self_e: i32, other: i32, activator: i32) {
-    let Some(f) = vm.progs.find_function(name) else { panic!("progs.dat has no {name}") };
-    let t = vm.sv_time as f32;
+    let Some(f) = vm.progs().find_function(name) else { panic!("progs.dat has no {name}") };
+    let t = vm.sv_time() as f32;
     vm.gset_int("self", self_e);
     vm.gset_int("other", other);
     vm.gset_int("activator", activator);
     vm.gset_float("time", t);
-    vm.argc = 0;
     if vm.execute(f).is_err() {
         vm.reset_execution();
     }

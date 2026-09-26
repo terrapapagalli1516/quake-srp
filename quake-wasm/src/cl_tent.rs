@@ -19,7 +19,7 @@ mod tests {
     const STATE_BOTTOM: f32 = 1.0;
 
     fn live(w: &Walk, e: i32) -> bool {
-        !w.server.vm.edict_free.get(e as usize).copied().unwrap_or(true)
+        !w.server.vm.is_free_edict(e)
     }
 
     /// Every in-use edict whose string `field` is `value`, in edict order (the
@@ -45,9 +45,7 @@ mod tests {
         let vm = &mut w.server.vm;
         vm.set_gi(OFS_PARM0, p);
         vm.set_gv(OFS_PARM0 + 3, org);
-        vm.argc = 2;
-        let setorigin = vm.builtins[2];
-        setorigin(vm).expect("setorigin");
+        vm.call_builtin(2, 2).expect("setorigin");
         vm.ent_set_vector(p, "velocity", [0.0; 3]);
     }
 

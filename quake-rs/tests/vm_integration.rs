@@ -166,7 +166,7 @@ fn user_call_plus_builtins_end_to_end() {
     let mut vm = Vm::load(&img).expect("load progs");
     vm.call_by_name("main").expect("run main");
     assert_eq!(vm.gf(OFS_RETURN), 42.0, "double(21) should be 42");
-    assert_eq!(vm.output.trim(), "42", "dprint(ftos(42)) should output 42");
+    assert_eq!(vm.output().trim(), "42", "dprint(ftos(42)) should output 42");
 }
 
 #[test]

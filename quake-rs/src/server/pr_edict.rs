@@ -300,7 +300,7 @@ impl Server {
             }
             bump_classname(&mut classname_counts, &classname);
 
-            let func = self.vm.progs.find_function(&classname);
+            let func = self.vm.progs().find_function(&classname);
             let Some(func) = func else {
                 report.no_spawn_function += 1;
                 self.vm.free_edict(ent);
@@ -394,7 +394,7 @@ impl Server {
     fn set_field(&mut self, ent: i32, keyname: &str, value: &str) {
         // Copy the def's ofs/type out so the immutable `progs` borrow ends before
         // we mutate the VM (intern / set_e*). A missing field is skipped.
-        let (ofs, etype) = match self.vm.progs.find_field(keyname) {
+        let (ofs, etype) = match self.vm.progs().find_field(keyname) {
             Some(def) => (def.ofs as usize, def.etype()),
             None => return, // not a field — skip (C: "is not a field")
         };
@@ -418,14 +418,14 @@ impl Server {
             }
             EType::Field => {
                 // ev_field: store the ofs of the named field (G_INT(def->ofs)).
-                let target_ofs = self.vm.progs.find_field(value).map(|d| d.ofs as i32);
+                let target_ofs = self.vm.progs().find_field(value).map(|d| d.ofs as i32);
                 if let Some(target_ofs) = target_ofs {
                     self.vm.set_ei(ent, ofs, target_ofs);
                 }
             }
             EType::Function => {
                 // ev_function: store the function index found by name.
-                let fnum = self.vm.progs.find_function(value);
+                let fnum = self.vm.progs().find_function(value);
                 if let Some(fnum) = fnum {
                     self.vm.set_ei(ent, ofs, fnum as i32);
                 }
