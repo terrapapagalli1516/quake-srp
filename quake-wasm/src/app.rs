@@ -6,10 +6,12 @@
 //! `boot*` exports the page starts a mode with.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use quake_rs::client::cl_demo::{TimeDemoClock, MAX_DEMOS};
 use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
+use quake_rs::qrand::QRand;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
 use quake_rs::wad::Qpic;
 
@@ -337,6 +339,16 @@ impl App {
 
 thread_local! {
     pub(crate) static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    /// The page's random streams ([`QRand`]): one for the page's whole run,
+    /// as id's host has one libc `rand()`, handed to every server the page
+    /// starts (a walk's level changes pass it on themselves). Beside [`APP`],
+    /// not in it, because the walks are built outside its borrow.
+    static SESSION_RAND: Rc<QRand> = Rc::new(QRand::new());
+}
+
+/// The page's [`QRand`] (see `SESSION_RAND`), for a server it builds.
+pub(crate) fn session_rand() -> Rc<QRand> {
+    SESSION_RAND.with(Rc::clone)
 }
 
 #[cfg(test)]
@@ -445,7 +457,7 @@ pub(crate) fn build_walk() -> Option<Walk> {
 pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
     let mut sound = Vec::new();
-    let walk = host_cmd::build_walk_map(pak.clone(), map, &mut sound);
+    let walk = host_cmd::build_walk_map(pak.clone(), map, &session_rand(), &mut sound);
     snd_dma::play(&pak, sound);
     walk
 }

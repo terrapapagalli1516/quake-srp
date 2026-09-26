@@ -410,7 +410,8 @@ mod tests {
         assert!(unflashed(&w));
 
         let text = w.server.write_savegame();
-        let mut l = quake_rs::client::host_cmd::build_walk_savegame(w.pak.clone(), &text, &mut Vec::new())
+        let rand = std::rc::Rc::clone(w.server.rand());
+        let mut l = quake_rs::client::host_cmd::build_walk_savegame(w.pak.clone(), &text, &rand, &mut Vec::new())
             .expect("the save loads");
         assert!(unflashed(&l), "load");
         step_walk(&mut l, 0.05, false, 320, 200);
